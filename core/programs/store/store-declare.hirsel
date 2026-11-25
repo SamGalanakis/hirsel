@@ -21,7 +21,9 @@ pub opaque type Declare {
     // A verify declaration (`declare_verify`): an index whose code or codec
     // revision changed binds the release's extractor to the stored index
     // instead of refusing Changed, and its name is kept here.
-    verifying: Option[List[String]]
+    verifying: Option[List[String]],
+    // The projectors `projector` registered; `seal` hands them to the Db.
+    projectors: List[DeclaredProjector]
 }
 
 pub opaque type TableDecl[K, V] {
@@ -42,7 +44,7 @@ fn same_declaration_base(a: DeclarationBase, b: DeclarationBase) -> bool {
 }
 
 fn new_declaration(mode: Mode, base: DeclarationBase, take plan: SchemaPlan, versioned: bool) -> Declare {
-    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, conflict: None, versioned: versioned, verifying: None)
+    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, conflict: None, versioned: versioned, verifying: None, projectors: list.new())
 }
 
 /// An Open declaration for `hirsel store verify` (§1.2 "The index walker"):
@@ -147,8 +149,8 @@ pub fn finish_migration(db: Db, take d: Declare) -> Result[StagedMigration, Erro
         return Error(Foreign)
     }
     complete_declaration(d)?
-    let Declare(plan: take plan, ..) = take d
-    Ok(staged_migration(db, take plan, true))
+    let Declare(plan: take plan, projectors: take registered, ..) = take d
+    Ok(staged_migration(db, take plan, true, take registered))
 }
 
 // A Preparation is read from a disk store's export, and its catalog is
@@ -605,7 +607,7 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
         return Error(Foreign)
     }
     complete_declaration(d)?
-    let Declare(plan: take candidate, ..) = take d
+    let Declare(plan: take candidate, projectors: take registered, ..) = take d
     let mut proposal = take candidate
     let registry = declared_index_registry(replace(mut proposal.bindings, list.new()))
     let retained = replace(mut proposal.retention, list.new())
@@ -613,10 +615,12 @@ pub fn seal(mut db: Db, take d: Declare) -> Result[Ticket, Error] waits {
         let committed = publish_schema_plan(mut db, take proposal)?
         db.indexes = take registry
         bind_retention(mut db, take retained)
+        db.projectors = take registered
         return Ok(committed)
     }
     db.indexes = take registry
     bind_retention(mut db, take retained)
+    db.projectors = take registered
     Ok(Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, db.heads[0].head)))
 }
 

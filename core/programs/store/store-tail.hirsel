@@ -1,0 +1,135 @@
+// The tail (STORE-SPEC §1.14 "The tail", Store 2.3): the rows of a
+// projector's source that differ between the projector's published position
+// and a transaction's own view, the transaction's staged writes included.
+// It is the difference of two roots of the store's own tree, the projector's
+// pin and the Tx's, so nothing else records what changed (D9). A form B
+// reader reads the generations `live` names, masks the tail's keys out of
+// them and scores the tail's rows from the rows themselves.
+// A projector pin's root, as every Snapshot and Tx carries it. The store
+// rebuilds the list whenever a pin changes, so a Snapshot's list names the
+// pins of its own moment, and each pin's slot matches the projection row at
+// that Snapshot's roots (§1.14 "Why a crash cannot split a step").
+type TailBase: shareable + send {
+    name: String,
+    branch: u32,
+    version: u64,
+    roots: Roots
+}
+
+// None while no projector pin exists, so a store without projectors
+// allocates nothing for them (its genesis writer state is unchanged, §1.1).
+type TailBases = Option[Arc[List[TailBase]]]
+
+fn no_tail_bases() -> TailBases {
+    None
+}
+
+fn share_tail_bases(bases: TailBases) -> TailBases {
+    match bases {
+        Some(held) => Some(arc.share(held)),
+        None => None,
+    }
+}
+
+fn tail_bases(pins: List[Pin]) -> TailBases {
+    let mut out: List[TailBase] = list.new()
+    for held in pins {
+        if held.owner == ProjectorPin {
+            list.push(mut out, TailBase(name: clone(held.name), branch: held.branch, version: held.version, roots: share_roots(held.roots)))
+        }
+    }
+    if list.len(out) == 0 {
+        return None
+    }
+    Some(arc.new(take out))
+}
+
+// One page of the tail, in source key order: each changed key with its row
+// in the Tx's view, or None where the Tx's view has no row. `next` is the
+// first unreturned key, which the next page passes as `resume`.
+pub type Tail[K, V] {
+    rows: List[(K, Option[V])],
+    next: Option[Bytes]
+}
+
+fn tail_base(bases: List[TailBase], name: String, image: Image, on_branch: u32) -> Option[u64] {
+    let wanted = projector_pin_name(name, image.slot)
+    for k in 0u64 .. list.len(bases) {
+        let held = view bases[k]
+        if same_name(held.name, wanted) && held.branch == on_branch && held.version == image.position {
+            return Some(k)
+        }
+    }
+    None
+}
+
+fn tiered_source(roots: Roots, id: u32) -> Result[bool, Error] {
+    let Some(descriptor) = std.page.lookup(roots.collections.root, prefix(id)?) else {
+        return Ok(false)
+    }
+    Ok(descriptor[53u64] == 1)
+}
+
+// `read_tail`: the tail of `decl` over `source`, from `resume` (inclusive) or the source's
+// first key, within `l`. None when the projection has no published image of
+// `source` on the Tx's branch, or the Tx carries no pin at the image's
+// position (a Snapshot pinned by the application, or a follower's): the
+// caller then has no base and reads the source itself. It never waits. It
+// records the projection row's key and the source span it covered, so a
+// commit that changes either conflicts with a `run` that read it. A Tiered
+// source is refused: its staged rows are not in the Tx's tree.
+pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume: Option[Bytes], l: Limits) -> Result[Option[Tail[K, V]], Error] {
+    page_limits(l)?
+    check_table_read(tx, source)?
+    if tiered_source(tx.roots, source.id)? {
+        return Error(Tiered(Tail))
+    }
+    let row = projection_row(tx, decl)?
+    let wanted_binding = Binding(store: tx.store, branch: tx.info.id.branch, table: source.id)
+    if row.binding != Some(wanted_binding) {
+        return Ok(None)
+    }
+    let Some(image) = row.image else {
+        return Ok(None)
+    }
+    let Some(bases) = view tx.bases else {
+        return Ok(None)
+    }
+    let Some(slot) = tail_base(bases, decl.name, image, wanted_binding.branch) else {
+        return Ok(None)
+    }
+    let base = view bases[slot]
+    let low = match resume {
+        Some(key) => copied(key)?,
+        None => prefix(source.id)?,
+    }
+    let high = prefix(source.id + 1)?
+    let after = transaction_collection_pages(tx)?
+    let mut out = change_output(Some(l))
+    if low < high {
+        walk_page_changes(mut out, Some(view base.roots.collections), after, Some(clone(low)), Some(clone(high)))?
+    }
+    if let Some(_) = out.deferred {
+        return Error(Tiered(Tail))
+    }
+    if list.len(out.trimmed) > 0 || list.len(out.bounds) > 0 {
+        return Error(malformed(0))
+    }
+    let span_end = match out.next {
+        Some(key) => copied(key)?,
+        None => take high,
+    }
+    note_read(tx, Span(take low, take span_end))?
+    let ChangeOutput(rows: take found, next: take resume_at, ..) = take out
+    let mut rows: List[(K, Option[V])] = list.with_capacity(list.len(found))
+    for change in found {
+        let raw_key = list.slice(change.tree_key, 4, list.len(change.tree_key))
+        let key = decoded(std.codec.decode_key(source.key, raw_key))?
+        let value = match change.value {
+            Some(raw) => Some(row_value(source.readers, source.id, raw)?),
+            None => None,
+        }
+        list.push(mut rows, (take key, take value))
+    }
+    Ok(Some(Tail(rows: take rows, next: take resume_at)))
+}

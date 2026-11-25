@@ -590,3 +590,22 @@ pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K,
     }
     Ok(Some((take j, take k, take value)))
 }
+
+/// The main-branch snapshot recovered by a read-only open.
+pub opaque type ReadOnly: shareable + send {
+    snapshot: Snapshot
+}
+
+pub fn read_only_table[K, V](read_source: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
+    let s = view read_source.snapshot
+    let handle = catalog_handle(s.store, s.roots.catalog, take name, take key, take value)?
+    Ok(clone(handle))
+}
+
+pub fn read_only_get[K, V](read_source: ReadOnly, t: Table[K, V], key: K) -> Result[Option[V], Error] waits {
+    get(read_only_reader(read_source, 0)?, read_source.snapshot, t, key)
+}
+
+pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
+    Snapshot(store: read_source.snapshot.store, open: read_source.snapshot.open, branch: read_source.snapshot.branch, head: read_source.snapshot.head, roots: share_roots(read_source.snapshot.roots), watermark: read_source.snapshot.watermark, bases: share_tail_bases(read_source.snapshot.bases))
+}

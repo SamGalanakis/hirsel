@@ -103,6 +103,7 @@ std = { major = 1 }
 "store-declare.hirsel" = "store"
 "store-migration.hirsel" = "store"
 "store-projector.hirsel" = "store"
+"store-tail.hirsel" = "store"
 "store-read.hirsel" = "store"
 "store-read-pages.hirsel" = "store"
 "store-cell.hirsel" = "store"

@@ -90,6 +90,10 @@ pub opaque type Db {
     drift: List[IndexDrift],
     // `attention_mark`'s own part (store-attention.hirsel).
     attention_seq: u64,
+    // The projector pins' roots, rebuilt on each pin change; every Snapshot and
+    // Tx shares them as `read_tail`'s bases. Then the registered projectors (§1.14).
+    bases: TailBases,
+    projectors: List[DeclaredProjector],
 }
 
 pub type Branch {
@@ -258,15 +262,18 @@ fn install_holder_delta(mut db: Db, take delta: HolderDelta) {
                 slot += 1
             }
             list.insert(mut db.pins, slot, take added)
+            db.bases = tail_bases(db.pins)
         },
         RemovePin(slot) => {
             let removed = list.remove(mut db.pins, slot)
             db.record_bytes -= pin_root_bytes(removed.name, removed.roots)
+            db.bases = tail_bases(db.pins)
         },
         ReplacePin(slot, take replacement) => {
             db.record_bytes -= pin_root_bytes(db.pins[slot].name, db.pins[slot].roots)
             db.record_bytes += pin_root_bytes(replacement.name, replacement.roots)
             let _ = list.set(mut db.pins, slot, take replacement)
+            db.bases = tail_bases(db.pins)
         },
         ReplaceMain(take proposed, gone) => {
             let ProposedMain(roots: take roots, head: head, at: at, tables: tables, drop_pin: drop_pin, ..) = take proposed
@@ -340,7 +347,7 @@ fn head_snapshot(db: Db, i: u64) -> Snapshot {
 }
 
 fn snapshot_from(db: Db, i: u64, head: u64, roots: Roots, watermark: u64) -> Snapshot {
-    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots), watermark: watermark)
+    Snapshot(store: db.store, open: open_number(db), branch: db.heads[i].id, head: head, roots: share_roots(roots), watermark: watermark, bases: share_tail_bases(db.bases))
 }
 
 pub type CallId {
@@ -511,6 +518,7 @@ pub opaque scoped type Tx {
     store: StoreId,
     indexes: View[IndexRegistry],
     roots: Roots,
+    bases: TailBases,
     ids: u64,
     private_from: u64,
     resident: u64,
@@ -557,26 +565,8 @@ pub opaque type Snapshot: shareable + send {
     branch: u32,
     head: u64,
     roots: Roots,
-    watermark: u64
-}
-
-/// The main-branch snapshot recovered by a read-only open.
-pub opaque type ReadOnly: shareable + send {
-    snapshot: Snapshot
-}
-
-pub fn read_only_table[K, V](read_source: ReadOnly, take name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] {
-    let s = view read_source.snapshot
-    let handle = catalog_handle(s.store, s.roots.catalog, take name, take key, take value)?
-    Ok(clone(handle))
-}
-
-pub fn read_only_get[K, V](read_source: ReadOnly, t: Table[K, V], key: K) -> Result[Option[V], Error] waits {
-    get(read_only_reader(read_source, 0)?, read_source.snapshot, t, key)
-}
-
-pub fn read_only_snapshot(read_source: ReadOnly) -> Snapshot {
-    Snapshot(store: read_source.snapshot.store, open: read_source.snapshot.open, branch: read_source.snapshot.branch, head: read_source.snapshot.head, roots: share_roots(read_source.snapshot.roots), watermark: read_source.snapshot.watermark)
+    watermark: u64,
+    bases: TailBases
 }
 
 /// Mix a SplitMix64 seed after adding the generator stride with wrapping arithmetic.
@@ -616,7 +606,7 @@ fn memory_at(c: Clock, id: StoreId, o: Options) -> Db {
 }
 
 fn empty_db(c: Clock, id: StoreId, o: Options) -> Db {
-    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new(), attention_seq: 0)
+    Db(store: id, pager: None, pager_writer: None, park_notices: None, parked: empty_park_queue(), writer_pin_bytes: o.writer_pin_bytes, indexes: empty_index_registry(), fence: 0, disk: None, clock: c, heads: list.new(), branch_names: map.new(), pins: list.new(), record_bytes: branch_record_bytes("main"), next_pin: 0, next_branch: 1, next_node: 0, next_table: 1, file_seq: 1, file_end: 72, frame_seq: 0, resident: 0, tiered: 0, page_resident: 0, changes: 0, settled: 0, ceiling: o.resident_limit, keyed_credit: no_keyed_credit(), checkpointed: 0, admits: map.new(), stream_retention_ms: o.stream_retention_ms, streams_per_caller_max: o.streams_per_caller_max, streams_max: o.streams_max, stream_sweep_after: None, drift: list.new(), attention_seq: 0, bases: no_tail_bases(), projectors: list.new())
 }
 
 pub fn fence_level(db: Db) -> u32 {
@@ -1283,7 +1273,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -4018,6 +4008,7 @@ fn open_heads(mut db: Db, take state: State) -> Result[(), Error] {
     db.record_bytes = total
     db.next_pin = list.len(pins)
     db.pins = take pins
+    db.bases = tail_bases(db.pins)
     db.next_branch = next_branch
     Ok(())
 }
@@ -4095,7 +4086,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         let replay = capture_scan(id, take walk, take initial)?
         over_ceiling(journal_account(replay)?, options.resident_limit)?
         let main = view replay.state.tips[0u64]
-        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?)))
+        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?, bases: no_tail_bases())))
     }
 }
 

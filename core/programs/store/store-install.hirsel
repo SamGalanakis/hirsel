@@ -56,7 +56,7 @@ fn install_prepared[V](mut db: Db, request: Cutover, current_activation: u64, ol
     schema_change.next_table = staged.meta.next_table
     schema_change.live = install_account(db, schema_change.roots)?
     deploy_result(over_ceiling(schema_change.live, disk_limit))?
-    let mut installation = staged_migration(db, take schema_change, false)
+    let mut installation = staged_migration(db, take schema_change, false, list.new())
     let Some(release_at) = int.checked_add(base.head, 1u64) else {
         return Error(Store(Limit(Ids)))
     }

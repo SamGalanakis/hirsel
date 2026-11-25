@@ -2,6 +2,9 @@ pub opaque type StagedMigration {
     base: DeclarationBase,
     plan: SchemaPlan,
     declared: bool,
+    // The projectors the staged declaration registered, which activation
+    // hands to the Db with its indexes.
+    projectors: List[DeclaredProjector],
     first_table: u32,
     base_rows: PageTree,
     rewrites: Map[(u32, Bytes), ()]
@@ -13,8 +16,8 @@ type ActivationRewrite: codec + send {
     value: Bytes
 }
 
-fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool) -> StagedMigration {
-    StagedMigration(base: declaration_base(db), plan: take plan, declared, first_table: db.next_table, base_rows: share_page_tree(db.heads[0].roots.collections), rewrites: map.new())
+fn staged_migration(db: Db, take plan: SchemaPlan, declared: bool, take registered: List[DeclaredProjector]) -> StagedMigration {
+    StagedMigration(base: declaration_base(db), plan: take plan, declared, projectors: take registered, first_table: db.next_table, base_rows: share_page_tree(db.heads[0].roots.collections), rewrites: map.new())
 }
 
 /// The staged catalog and rows of a standalone install, read with `reader(db, _)`:
@@ -213,7 +216,7 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
     if !same_declaration_base(staged.base, declaration_base(db)) {
         return Error(Foreign)
     }
-    let StagedMigration(plan: take staged_plan, declared: declared, ..) = take staged
+    let StagedMigration(plan: take staged_plan, declared: declared, projectors: take registered, ..) = take staged
     let mut plan = take staged_plan
     let registration = if declared {
         Some((declared_index_registry(replace(mut plan.bindings, list.new())), replace(mut plan.retention, list.new())))
@@ -228,6 +231,7 @@ fn install_activation_layout(mut db: Db, take staged: StagedMigration, activatio
         Ok(_) => {
             if let Some((take registry, take retained)) = take registration {
                 db.indexes = take registry
+                db.projectors = take registered
                 bind_retention(mut db, take retained)
             }
             Ok(())

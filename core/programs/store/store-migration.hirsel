@@ -91,7 +91,7 @@ pub fn stage_migration(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migratio
     healthy(db)?
     require_memory_collections(store_has_tiered(db), Migrate)?
     let plan = stage_migration_plan(db, tasks, configure, schema_plan(db))?
-    Ok(staged_migration(db, take plan, false))
+    Ok(staged_migration(db, take plan, false, list.new()))
 }
 
 fn stage_migration_plan(db: Db, tasks: Tasks, configure: StaticFn[fn(mut Migration) -> Result[(), Error] waits], take plan: SchemaPlan) -> Result[SchemaPlan, Error] waits {

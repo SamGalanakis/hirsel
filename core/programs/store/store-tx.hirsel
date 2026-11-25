@@ -3,7 +3,7 @@
 pub fn rollback_writes_on_error[R, E](mut tx: Tx, body: scoped[view] fn(mut Tx) -> Result[R, E]) -> Result[R, E] {
     freeze(mut tx)
     let d = {
-        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+        let mut draft = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), bases: share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
         let result = body(mut draft)
         drafted_tx(take draft, take result)
     }
@@ -173,7 +173,7 @@ pub fn rollback_writes_on_overrun[R, E](mut tx: Tx, steps: u64, body: scoped[vie
     // The work's views anchor it to `tx`: its slot ends, and the bound returns
     // the work's owned parts, before `tx` is written.
     let ran = {
-        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
+        let work = Tx(store: tx.store, indexes: tx.indexes, roots: share_roots(tx.roots), bases: share_tail_bases(tx.bases), ids: tx.ids, private_from: tx.private_from, resident: tx.resident, retain_old: tx.retain_old, frame_tail: tx.frame_tail, reads: tx.reads, issued: tx.issued, attempt: tx.attempt, pins: tx.pins, refusal: tx.refusal, index_conflict: clone(tx.index_conflict), drift: None, frame_bytes: tx.frame_bytes, wrote: tx.wrote, ops: empty_ops(), info: tx.info, stream_ops: empty_ops(), keyed: None, extra_bytes: tx.extra_bytes, call: None, below: clone(tx.below), own: 0, rows: tx.rows, cell_rows: tx.cell_rows, trim_rows: tx.trim_rows, streams: tx.streams)
         bound steps steps {
             let mut draft = take work
             let result = body(mut draft)
@@ -239,7 +239,11 @@ fn put_charge(tx: Tx, key: Bytes) -> Result[(u64, u64), Error] {
             Some(value) => memory_data_charge(tx, key, value),
             None => 0,
         }
-        return Ok((if tx.retain_old { 0u64 } else { charge }, height))
+        return Ok((if tx.retain_old {
+            0u64
+        } else {
+            charge
+        }, height))
     }
     let Some(child) = std.page.collection_child(tx.roots.collections.root, list.slice(key, 0, 4)) else {
         return Error(Stale(list.word_be(key, 0)))
@@ -381,7 +385,6 @@ fn check_write_attempt(tx: Tx) -> Result[(), Error] {
     }
     Ok(())
 }
-
 
 fn memory_data_charge(tx: Tx, key: Bytes, raw: Bytes) -> u64 {
     if let Some(_) = tx.attempt {

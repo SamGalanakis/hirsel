@@ -1,4 +1,15 @@
-pub type TieredRefusal: send = Memory | Migrate | Export | Install | Authority
+pub type TieredRefusal: send = Memory | Migrate | Export | Install | Authority | Tail
+
+pub fn tiered_refusal_text(reason: TieredRefusal) -> String {
+    string.from(match reason {
+        Memory => "a memory store cannot use Tiered residency",
+        Migrate => "a store with Tiered collections cannot migrate",
+        Export => "a store with Tiered collections cannot export",
+        Install => "a store with Tiered collections cannot install a release",
+        Authority => "archival requires a bucket authority",
+        Tail => "a projector tail cannot read a Tiered source",
+    })
+}
 
 fn tiered_collections(root: Arc[std.page.Page]) -> bool {
     let image = std.page.image_of(root)

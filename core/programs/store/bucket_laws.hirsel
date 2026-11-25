@@ -1,5 +1,4 @@
 // Bucket authority laws on std.sim.s3, against the real store writer.
-
 type BucketSim {
     network: Net,
     endpoint: std.sim.s3.Endpoint,
@@ -377,8 +376,7 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
     let source = bucket_law_authority(s, tasks, "s3.test", 2)?
     let mut wrong_activation: Options = clone(options)
     wrong_activation.activation = Some(1u64)
-    let Error(Refusal(error: NotCurrent(0), authority: take returned)) =
-        open_authority(tasks, take source, s.time, r, wrong_activation) else {
+    let Error(Refusal(error: NotCurrent(0), authority: take returned)) = open_authority(tasks, take source, s.time, r, wrong_activation) else {
         fail("L61: the writer open did not refuse the wrong activation")
     }
     let mut process = followers()
@@ -457,10 +455,10 @@ fn bucket_test_m2_head_vectors() -> Result[(), Error] {
 
 fn history_check_malformed(encoded: String, expected_at: u64, take description: String) {
     let raw = option.unwrap(std.base64.decode(string.as_bytes(encoded)))
-    if let Error(Corrupt(Fault(file: bad_file, offset: at, why: Malformed))) = history_decode_head(raw) {
-        if bad_file == "head" && at == expected_at { return }
+    match history_decode_head(raw) {
+        Error(Corrupt(Fault(file: bad_file, offset: at, why: Malformed))) if bad_file == "head" && at == expected_at => (),
+        _ => fail(take description),
     }
-    fail(take description)
 }
 
 fn history_check_vector(raw: Bytes, expected: String) {
@@ -727,7 +725,7 @@ fn bucket_m2_read_packs(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(), Erro
     let id = head.store
     let replay = history_paged_capture(mut source, head, 1048576)?
     let root = view replay.state.tips[0]
-    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots), watermark: 1)
+    let snap = Snapshot(store: id, open: 0, branch: 0, head: root.head, roots: share_roots(root.roots), watermark: 1, bases: no_tail_bases())
     let rows = catalog_handle(id, root.roots.catalog, string.from("rows"), std.codec.key_u64(), std.codec.of_bytes())?
     if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
         fail("the object checkpoint did not reconstruct its row")
@@ -926,7 +924,9 @@ fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), E
         Ok(()) => (),
     }
     if let Error(Corrupt(Fault(file: gone, why: Absent, ..))) = fresh(mut followed, deadline) {
-        if gone != final_item { fail("witness named another object") }
+        if gone != final_item {
+            fail("witness named another object")
+        }
     } else {
         fail("a missing live entry was accepted or classified as reclaimed")
     }
@@ -945,7 +945,6 @@ fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -
     followed
 }
 
-
 @test
 fn bucket_test_m2_fresh_order(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 571)
@@ -957,12 +956,12 @@ fn bucket_test_m2_fresh_order(c: Clock, r: Random, tasks: Tasks, seed_grant: Env
 @test
 fn bucket_test_m2_ack_history(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     let seed = bucket_law_seed(seed_grant, 581)
-    for replaced in [false, true] {
+    for (replaced, acks) in[(false, 8u64), (true, 4u64)] {
         let sim = bucket_ack_fixture(tasks, c, seed)
         let tested = bucket_ack_commits(tasks, r, sim, replaced)
         let report = bucket_law_finish(take sim)
         tested?
-        bucket_ack_history(report, if replaced { 4 } else { 8 })?
+        bucket_ack_history(report, acks)?
     }
     Ok(())
 }
@@ -978,8 +977,8 @@ fn bucket_test_m2_claim_witness(c: Clock, r: Random, tasks: Tasks, seed_grant: E
 fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
     let seed = bucket_law_seed(seed_grant, 541)
     let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
-    let writes: Inline[Q5Operation, 3] = [GenesisWrite, ClaimWrite, ActivationWrite]
-    let schedules: Inline[Q5Fault, 6] = [AfterBody, BeforeBody, OvertakeDrop, OvertakeApply, Retry500, ExhaustBeforeBody]
+    let writes: Inline[Q5Operation, 3] =[GenesisWrite, ClaimWrite, ActivationWrite]
+    let schedules: Inline[Q5Fault, 6] =[AfterBody, BeforeBody, OvertakeDrop, OvertakeApply, Retry500, ExhaustBeforeBody]
     bucket_law_admitted(bound bytes bucket_law_fixture_bytes(plan, 1) {
         for operation in writes {
             let site = result.unwrap(q5_clean_site(d, c, r, tasks, seed, operation))

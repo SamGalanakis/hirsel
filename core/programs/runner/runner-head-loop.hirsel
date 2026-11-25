@@ -8,7 +8,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
     let mut idle = false
     // The forwarded request channel closed (InboxEnded); the head ends once idle.
     let mut ended = false
-    let mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64))] = None
+    let mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64, u64))] = None
     loop {
         check_store_health(head.db)?
         report_attention(head.db, head.upkeep, drain, mut reported)
@@ -292,16 +292,16 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
 // Sends the store's attention to Status when its mark moved since the last
 // report (RUNNER-SPEC CHANGES-v2.75). An answer that cannot be allocated keeps the last
 // one, and the next turn tries again.
-fn report_attention(db: store.Db, done: Upkeep, drain: Option[HeadDrain], mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64))]) {
+fn report_attention(db: store.Db, done: Upkeep, drain: Option[HeadDrain], mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64, u64))]) {
     let Some(control) = view drain else {
         return
     }
-    let mark = (store.attention_mark(db), (done.swept, done.tours, done.scrub_faults, done.walks, done.walk_findings))
+    let mark = (store.attention_mark(db), (done.swept, done.tours, done.scrub_faults, done.walks, done.walk_findings, done.projected))
     if reported == Some(mark) {
         return
     }
     if let Ok(take seen) = store.attention(db) {
-        let counts = UpkeepCounts(swept: done.swept, tours: done.tours, scrub_faults: done.scrub_faults, walks: done.walks, walk_findings: done.walk_findings)
+        let counts = UpkeepCounts(swept: done.swept, tours: done.tours, scrub_faults: done.scrub_faults, walks: done.walks, walk_findings: done.walk_findings, projected: done.projected)
         if let Ok(()) = channel.try_send(control.events, StoreAttention(take seen, counts)) {
             reported = Some(mark)
         }
@@ -341,12 +341,13 @@ fn head_is_idle[G: send, H: shareable + inert + send](head: Head[G, H], idle: u6
 }
 
 // What the head's idle upkeep has done since it started (RUNNER-SPEC §12.5):
-// expired rows swept, finished scrub tours and index walks, and the faults
-// and findings they reported.
+// expired rows swept, finished scrub tours and index walks, the faults and
+// findings they reported, and projector steps that had work.
 pub type UpkeepCounts: shareable + send {
     swept: u64,
     tours: u64,
     scrub_faults: u64,
     walks: u64,
-    walk_findings: u64
+    walk_findings: u64,
+    projected: u64
 }

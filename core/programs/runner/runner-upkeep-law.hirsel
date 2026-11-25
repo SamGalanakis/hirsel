@@ -128,3 +128,108 @@ fn test_head_sweeps_log_retention(random: Random, tasks: Tasks) -> Result[(), st
     }
     store.close(take swept)
 }
+
+// Serves `db` from a head until every task waits with no timer due; returns
+// the Db and the head's last released snapshot.
+fn upkeep_law_serve(take db: store.Db, take clock_handle: ClockHand, tasks: Tasks) -> Result[(store.Db, Option[store.Snapshot]), store.Error] waits {
+    let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
+    let Mailbox(to: take out, from: take published, ..) = result.unwrap(mailbox(8u64))
+    let entries: Registry[(), ()] = registry()
+    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take to_head), upkeep_law_finish)
+    let mut no_triggers: Option[triggers.Tables] = None
+    let _ = serve_head(mut hd, take from_head, None, mut no_triggers)?
+    let _ = task.join(take driving)
+    let Head(db: take kept, ..) = take hd
+    let mut last: Option[store.Snapshot] = None
+    while let Ok(PubIn(e: take event)) = channel.try_receive(published) {
+        if let Released(Release(snapshot: Some(take at), ..)) = take event {
+            last = Some(take at)
+        }
+    }
+    Ok((take kept, take last))
+}
+
+// The projector's fold: a generation's row per changed key, Some(value) for a
+// put and None for a delete. This law publishes one generation and never
+// merges or retires, so `merge` and `drop` refuse, which halts the projector.
+fn upkeep_law_apply(mut tx: store.Tx, images: store.Table[(u32, u64), Option[u64]], d: store.Delta[u64, u64]) -> Result[(), store.Error] {
+    store.put(mut tx, images, (d.generation, d.key), d.value)
+}
+
+fn upkeep_law_merge(mut _tx: store.Tx, _images: store.Table[(u32, u64), Option[u64]], _m: store.Merge, _l: store.Limits) -> Result[Option[Bytes], store.Error] {
+    Error(MigrationFault)
+}
+
+fn upkeep_law_drop(mut _tx: store.Tx, _images: store.Table[(u32, u64), Option[u64]], _g: u32, _l: store.Limits) -> Result[bool, store.Error] {
+    Error(MigrationFault)
+}
+
+fn upkeep_law_live(tx: store.Tx, env: (store.ProjectionDecl, store.Binding)) -> Option[store.Live] {
+    match store.projection_row(tx, env.0) {
+        Ok(row) => store.live(row, env.1),
+        Error(_) => None,
+    }
+}
+
+// The head steps a registered projector to a published image of the whole
+// source, and releases it. Oracle: rows k in 0..300 hold k % 7, so the one
+// generation holds (g, k) -> Some(k % 7) for each k and nothing else.
+@test
+fn test_head_steps_projector(random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let (time, take clock_handle) = provide.clock(0, 100)
+    let mut db = store.memory(time, random, result.unwrap(store.sized(Memory, 1073741824u64)))
+    let mut declarations = store.declare(db, Migrate)?
+    let decl = store.projection(mut declarations, "by_seven")?
+    let rows_def = store.declare_table(mut declarations, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let t = store.finish(mut declarations, take rows_def)?
+    let image_key: std.codec.Key[(u32, u64)] = std.codec.key_of()
+    let image_value: std.codec.Codec[Option[u64]] = std.codec.of()
+    let images_def = store.declare_table(mut declarations, "images", image_key, image_value)?
+    let images = store.finish(mut declarations, take images_def)?
+    let folds: store.Fold[store.Table[(u32, u64), Option[u64]], u64, u64, store.Error] = store.Fold(env: clone(images), apply: code.describe(upkeep_law_apply), merge: code.describe(upkeep_law_merge), drop: code.describe(upkeep_law_drop))
+    store.projector(mut declarations, decl, t, Local, folds, store.Cadence(tail: 1u64, ratio: 0u64), 16777216u64)?
+    let _ = store.seal(mut db, take declarations)?
+    let filled = store.run(mut db, None, t, fn(mut tx, rows) -> Result[(), store.Error] {
+        for k in 0u64 .. 300u64 {
+            store.put(mut tx, rows, k, k % 7u64)?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = filled {} else {
+        fail("fixture rows did not commit")
+    }
+    let filled_at = store.version(store.snapshot(db))
+    let source = store.binding(t, store.main_branch(db))
+    let (take stepped, take last) = upkeep_law_serve(take db, take clock_handle, tasks)?
+    let Some(take at) = take last else {
+        fail("the head released no projection")
+    }
+    let r = store.reader(stepped, 0u64)?
+    let wanted: store.ProjectionDecl = clone(decl)
+    let Seen(store.Seen(value: take shown, ..)) = store.look(r, at, None, (take wanted, source), upkeep_law_live)? else {
+        fail("look refused")
+    }
+    let Some(take image) = take shown else {
+        fail("the head's release holds no image of the source")
+    }
+    // The first step's rebind commits the projection row, so the pass's
+    // target, and the image's position, may follow the fill; no source row
+    // changed after it.
+    if image.position < filled_at || list.len(image.generations) != 1u64 {
+        fail("the image is not one generation of the fill")
+    }
+    let g = image.generations[0u64].id
+    let mut held = store.scan(r, at, images, Unbounded, Unbounded)?
+    let mut n = 0u64
+    while let Some(((generation, k), v)) = store.next(r, mut held)? {
+        if generation != g || k >= 300u64 || v != Some(k % 7u64) {
+            fail("the generation holds a row the source does not")
+        }
+        n += 1u64
+    }
+    if n != 300u64 {
+        fail("the generation misses source rows")
+    }
+    store.close(take stepped)
+}

@@ -171,7 +171,7 @@ fn launch_target(a: Args) -> String {
 
 pub fn status_root() -> Result[Latest[Status], Capacity] {
     let launch = launch_env()
-    let initial = Status(phase: Starting(Recovering), digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None, store: store.Attention(indexes: list.new(), drift: list.new(), reclaim_failures: 0u64, reclaim_pending: false), upkeep: UpkeepCounts(swept: 0u64, tours: 0u64, scrub_faults: 0u64, walks: 0u64, walk_findings: 0u64))
+    let initial = Status(phase: Starting(Recovering), digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, release: list.new(), activation: 0u64, store_id: (0u64, 0u64), retain_from: 0u64, addr: None, store: store.Attention(indexes: list.new(), drift: list.new(), reclaim_failures: 0u64, reclaim_pending: false), upkeep: UpkeepCounts(swept: 0u64, tours: 0u64, scrub_faults: 0u64, walks: 0u64, walk_findings: 0u64, projected: 0u64))
     let shared = arc.new(take initial)
     Ok(latest.new(take shared))
 }
@@ -1122,13 +1122,7 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Retired => string.push(mut line, "the Store follower worker has stopped"),
         Missed => string.push(mut line, "a read is waiting for a store frame"),
         Remote(_) => string.push(mut line, "a bucket operation failed"),
-        Tiered(reason) => string.push(mut line, match reason {
-            Memory => "a memory store cannot use Tiered residency",
-            Migrate => "a store with Tiered collections cannot migrate",
-            Export => "a store with Tiered collections cannot export",
-            Install => "a store with Tiered collections cannot install a release",
-            Authority => "archival requires a bucket authority",
-        }),
+        Tiered(reason) => string.push(mut line, store.tiered_refusal_text(reason)),
     }
 }
 

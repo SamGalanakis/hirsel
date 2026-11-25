@@ -1,9 +1,9 @@
 hirsel.laws 1
 jwtbind@1/jwtbind/jwt_caller_map src=a667c21f0e0ed022 sig=2f3ceea17ece47f2 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_config_refused src=478f328e964e2966 sig=39e69a7336654a23 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
-jwtbind@1/jwtbind/jwt_default_place src=a0a6b2ecb603c836 sig=e2e8d50c06e5934c run=607dcf6bff52df2b bug=- oracle=- rows=pending
+jwtbind@1/jwtbind/jwt_default_place src=a0a6b2ecb603c836 sig=ec44288539441d59 run=607dcf6bff52df2b bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_expiry_instant src=24d768ba23b51758 sig=4dcfa0c01839e423 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
-jwtbind@1/jwtbind/jwt_hmac_bind src=aaac9aaced05ab5b sig=e7c2eaf398a123f0 run=b068454df6ce3cee bug=- oracle=- rows=pending
+jwtbind@1/jwtbind/jwt_hmac_bind src=aaac9aaced05ab5b sig=463b83b44e9eaf4a run=b068454df6ce3cee bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_rotation src=48f1d5a97eb9d887 sig=70027458bcae7e25 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_unavailable_remote src=d904b143e9756029 sig=da164a9168c68b66 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 jwtbind@1/jwtbind/jwt_unavailable_seed src=a22e99ef0f2d21b5 sig=7ed0ebaf36f944fa run=a58227ecac7d1e85 bug=- oracle=- rows=pending

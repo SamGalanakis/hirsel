@@ -429,7 +429,7 @@ cross-place projection, current with a source table. It reads source changes thr
 the derived store. The derived state is a short list of immutable **generations**: a
 step folds the source's newest changes into a new small generation and merges older
 ones, and readers see the generations one commit names, never a half-built one
-(STORE-SPEC v2.113 §1.14).
+(STORE-SPEC v2.130 §1.14).
 
 ```hirsel
 pub type Binding: codec { store: StoreId, branch: u32, table: u32 }
@@ -444,38 +444,48 @@ pub type Cadence { tail: u64, ratio: u64 }
 pub fn cadence() -> Cadence                   // tail 1, ratio 1
 pub type Source = Local | Follower(Follower)
 pub opaque type ProjectionDecl: shareable + inert + send
-pub opaque type Projector[K, V]          // not send
 pub type Delta[K, V] { generation: u32, at: u64, key: K, value: Option[V] }
-pub type Fold[E: inert, K, V, A] { env: E,
-        apply: fn(mut Tx, E, Delta[K, V]) -> Result[(), A],
-        merge: fn(mut Tx, E, Merge, Limits) -> Result[Option[Bytes], A],
-        drop: fn(mut Tx, E, u32, Limits) -> Result[bool, A] }
+pub type Fold[E: inert + send, K, V, A]: send { env: E,
+        apply: StaticFn[fn(mut Tx, E, Delta[K, V]) -> Result[(), A]],
+        merge: StaticFn[fn(mut Tx, E, Merge, Limits) -> Result[Option[Bytes], A]],
+        drop: StaticFn[fn(mut Tx, E, u32, Limits) -> Result[bool, A]] }
 pub type Stepped = Folded(u64) | Paged(u64) | Published(u64) | Merging | Merged(u32) | Dropped(u32) | Reloaded | Idle
-pub type ProjectError[A] = Store(Error) | Apply(A)
+pub type ProjectError[A] = Store(Error) | Apply(A) | Stopped(OutOfTime)
 pub fn projection(mut d: Declare, name: String) -> Result[ProjectionDecl, Error]
-pub fn projector[K, V](decl: ProjectionDecl, source: Table[K, V], from: Source, r: Reader) -> Projector[K, V]
-pub fn tuned[K, V](p: Projector[K, V], c: Cadence) -> Projector[K, V]
-pub fn step[K, V, E: inert, A](mut p: Projector[K, V], mut db: Db, limits: Limits, fold: Fold[E, K, V, A]) -> Result[Stepped, ProjectError[A]] waits
-pub fn rebuild[K, V](mut p: Projector[K, V], mut db: Db) -> Result[Ticket, Error] waits
+pub fn projector[K, V, E: inert + send](mut d: Declare, decl: ProjectionDecl, source: Table[K, V], from: Source,
+        fold: Fold[E, K, V, Error], c: Cadence, steps: u64) -> Result[(), Error]
+pub fn projector_names(db: Db) -> List[String]
+pub fn project_step(mut db: Db, name: String, limits: Limits) -> Result[Stepped, ProjectError[Error]] waits
+pub fn rebuild(mut db: Db, name: String) -> Result[Ticket, Error] waits
+pub type Tail[K, V] { rows: List[(K, Option[V])], next: Option[Bytes] }
+pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume: Option[Bytes], l: Limits) -> Result[Option[Tail[K, V]], Error]
 pub fn binding[K, V](source: Table[K, V], b: Branch) -> Binding
 pub fn live(row: Projection, b: Binding) -> Option[Live]
 ```
 
-- **Declare, then make the handle.** `projection` declares the reserved table
+- **Declare and register.** `projection` declares the reserved table
   `hirsel.projections` in the derived store's `Declare` and returns a shareable, inert
-  declaration that can live in a place's H. `projector` makes the task-local handle from
-  it, the source Table (in `db` for `Local`, read through an M2 follower for `Follower`)
-  and a Reader, with `cadence()`; `tuned` sets another cadence.
+  declaration that can live in a place's H. `projector` registers the projector in the
+  same `Declare`: the source Table (in `db` for `Local`, read through an M2 follower for
+  `Follower`), the fold (`code.describe` of each callback), a cadence (`cadence()`) and
+  the step bound of every fold commit. `seal` hands it to the Db.
+- **The head steps it.** A runner's head runs `project_step` on its idle turns, so a
+  place needs no driver of its own (RUNNER-SPEC §12.5); without a runner, call
+  `project_step(mut db, name, limits)` yourself. A projector is not stepped anywhere else.
 - **The row binds its source.** The row records the source's StoreId, branch and table
-  id. A handle on another source retires every generation and rebuilds, and `live`
+  id. Registering it on another source retires every generation and rebuilds, and `live`
   returns None until then. Each commit re-reads the row and writes nothing if it changed
-  since the step loaded it (`Reloaded`), so two handles never overwrite each other.
+  since the step loaded it (`Reloaded`).
 - **Reading generations.** `live(row, binding(source, b))` returns the live generations,
   oldest first, and the source position they cover, or None before the first publish or
   when the row is bound to another source. For a key, read the newest generation that
   has it; a delete is a mask, which `apply` writes for a `Delta` with `value` None and
-  which reads as absent. Changes after the position are the tail; read them with
-  `changes_page` to see the head. A reader keeps the declaration and the source Table
+  which reads as absent. Changes after the position are the tail. `read_tail(tx, decl,
+  source, resume, limits)` reads it, without waiting, inside a `look` or `run`: each key
+  whose row differs from the published position, with its row in the Tx's own view
+  (the Tx's staged writes included), in pages. It is None when there is no base (no
+  image yet, another source, or a follower's projection), and then you read the source.
+  A Tiered source is refused. A reader keeps the declaration and the source Table
   in its inert env and reads the row and the derived rows in one snapshot.
 - **A step** does one thing, in this order: continues an open pass; folds a tail of at
   least `cadence.tail` changes into a new generation (`Folded`, or `Paged` per page
@@ -490,8 +500,8 @@ pub fn live(row: Projection, b: Binding) -> Option[Live]
   the newest input's row, and a mask only when `Merge.masks` (false when the run starts
   at the oldest generation, which has nothing older to hide). It returns where the next
   page resumes, or None when done.
-- **`apply`, `merge` and `drop`** are plain functions with an `inert` `env`, like every
-  `run` body, because the store may abort and rerun a body. Each must leave the derived
+- **`apply`, `merge` and `drop`** are top-level functions with an `inert`, `send`
+  `env`, like every `run` body, because the store may abort and rerun a body. Each must leave the derived
   state determined by its arguments.
 - **Rebuild.** `rebuild` records a request; requests made while a build is running
   give one more build after it publishes.
@@ -500,4 +510,5 @@ pub fn live(row: Projection, b: Binding) -> Option[Live]
   row once acknowledged: delivery is at least once, and the receiver deduplicates by
   that key. A projector delivers net changes; to see every event, tail an append-only
   table or Log keyed by sequence.
-- Laws: L72 `projector_converges`, L73 `projector_bounded` (STORE-SPEC v2.113 §1.14).
+- Laws: L72 `projector_converges`, L73 `projector_bounded`, L-TAIL `test_tail`
+  (STORE-SPEC v2.130 §1.14).

@@ -30,17 +30,23 @@ fn agg_row(id: u32, group: u64, members: u64, sum: u64) -> Result[(Bytes, Bytes)
 
 // The fold: rows k <= `upto` (every row when `upto` is None) of the model.
 fn agg_expected(id: u32, model: List[Option[u64]], upto: Option[u64]) -> Result[List[(Bytes, Bytes)], Error] {
-    let groups: Inline[u64, 7] = [0, 1, 2, 10, 11, 12, 13]
+    let groups: Inline[u64, 7] =[0, 1, 2, 10, 11, 12, 13]
     let mut out: List[(Bytes, Bytes)] = list.new()
     for group in groups {
         let mut members = 0u64
         let mut sum = 0u64
         for k in 0u64 .. list.len(model) {
             if let Some(upto_key) = upto {
-                if k > upto_key { break }
+                if k > upto_key {
+                    break
+                }
             }
-            let Some(v) = model[k] else { continue }
-            if v % 5 == 0 { continue }
+            let Some(v) = model[k] else {
+                continue
+            }
+            if v % 5 == 0 {
+                continue
+            }
             if group == v % 3 {
                 members += 1
                 sum += v + 1
@@ -137,8 +143,14 @@ fn agg_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
     let mut db = take opened
     let mut model: List[Option[u64]] = list.new()
     for k in 0u64 .. 40 {
-        let v: Option[u64] = if k < initial { Some(k * 3 + 1) } else { None }
-        if let Some(_) = v { agg_write(mut db, t, k, v)? }
+        let v: Option[u64] = if k < initial {
+            Some(k * 3 + 1)
+        } else {
+            None
+        }
+        if let Some(_) = v {
+            agg_write(mut db, t, k, v)?
+        }
         list.push(mut model, v)
     }
     agg_check(db, a, model, "L-AG: a Public aggregate's writes keep each group's fold")?
@@ -147,16 +159,25 @@ fn agg_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
     let mut state = seed
     let mut rounds = 0u64
     loop {
-        let public = match agg_claimed(db, a)? { None => true, Some(_) => false }
+        let public = match agg_claimed(db, a)? {
+            None => true,
+            Some(_) => false
+        }
         let refused = match agg_totals(mut db, a, 0)? {
             Ok(_) => false,
             Error(NotReady(_)) => true,
             Error(take problem) => return Error(take problem),
         }
-        if refused == public { fail("L-AG: an aggregate serves totals exactly when it is Public") }
-        if public { break }
+        if refused == public {
+            fail("L-AG: an aggregate serves totals exactly when it is Public")
+        }
+        if public {
+            break
+        }
         rounds += 1
-        if rounds > 2000 { fail("L-AG: the build made no progress") }
+        if rounds > 2000 {
+            fail("L-AG: the build made no progress")
+        }
         state = lix_next(state)
         let pick = state % 8
         state = lix_next(state)
@@ -164,11 +185,17 @@ fn agg_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
         state = lix_next(state)
         if pick < 3 {
             match index_build_step(mut db, 2 * pick + 1)? {
-                Some(name) => if name != "by_group" { fail("L-AG: the step built another index") },
+                Some(name) => if name != "by_group" {
+                    fail("L-AG: the step built another index")
+                },
                 None => fail("L-AG: the step found nothing building"),
             }
         } else {
-            let v: Option[u64] = if pick < 6 { Some(state % 1000) } else { None }
+            let v: Option[u64] = if pick < 6 {
+                Some(state % 1000)
+            } else {
+                None
+            }
             agg_write(mut db, t, k, v)?
             model[k] = v
         }
@@ -179,7 +206,11 @@ fn agg_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
         state = lix_next(state)
         let k = state % 40
         state = lix_next(state)
-        let v: Option[u64] = if state % 4 == 0 { None } else { Some(state % 1000) }
+        let v: Option[u64] = if state % 4 == 0 {
+            None
+        } else {
+            Some(state % 1000)
+        }
         agg_write(mut db, t, k, v)?
         model[k] = v
         if round % 10 == 9 {
@@ -192,7 +223,7 @@ fn agg_case(c: Clock, seed: u64, initial: u64) -> Result[(), Error] waits {
 
 @test
 fn test_aggregate_fold_law(c: Clock) -> Result[(), Error] waits {
-    let initials: Inline[u64, 4] = [0, 1, 17, 40]
+    let initials: Inline[u64, 4] =[0, 1, 17, 40]
     for initial in initials {
         for seed in 0u64 .. 8 {
             agg_case(c, seed * 7919 + initial, initial)?
@@ -220,15 +251,23 @@ fn test_aggregate_moves_and_empties_groups(c: Clock) -> Result[(), Error] waits 
     list.push(mut expected, agg_row(a.id, 2, 1, 3)?)
     list.push(mut expected, agg_row(a.id, 12, 1, 1)?)
     list.push(mut expected, agg_row(a.id, 13, 1, 3)?)
-    if agg_stored(db, a.id)? != expected { fail("L-AG: moved and emptied groups hold the hand totals") }
-    let hand: Inline[(u64, u64, u64), 7] = [(0, 0, 0), (1, 1, 8), (2, 1, 3), (10, 0, 0), (11, 0, 0), (12, 1, 1), (13, 1, 3)]
+    if agg_stored(db, a.id)? != expected {
+        fail("L-AG: moved and emptied groups hold the hand totals")
+    }
+    let hand: Inline[(u64, u64, u64), 7] =[(0, 0, 0), (1, 1, 8), (2, 1, 3), (10, 0, 0), (11, 0, 0), (12, 1, 1), (13, 1, 3)]
     for (g, members, sum) in hand {
-        let Ok(found) = agg_totals(mut db, a, g)? else { fail("L-AG: a Public aggregate serves totals") }
-        if found != Totals(count: members, sum: sum) { fail("L-AG: totals reads the group's count and sum") }
+        let Ok(found) = agg_totals(mut db, a, g)? else {
+            fail("L-AG: a Public aggregate serves totals")
+        }
+        if found != Totals(count: members, sum: sum) {
+            fail("L-AG: totals reads the group's count and sum")
+        }
     }
     agg_write(mut db, t, 1, None)?
     agg_write(mut db, t, 3, None)?
-    if list.len(agg_stored(db, a.id)?) != 0 { fail("L-AG: deleting every row leaves no group") }
+    if list.len(agg_stored(db, a.id)?) != 0 {
+        fail("L-AG: deleting every row leaves no group")
+    }
     Ok(())
 }
 
@@ -245,7 +284,9 @@ fn test_aggregate_write_at_cursor(c: Clock) -> Result[(), Error] waits {
     }
     rebuild_aggregate(mut db, a)?
     let _ = index_build_step(mut db, 3)?
-    if agg_claimed(db, a)? != Some(Some(2)) { fail("L-AG: three rows put the cursor at row 2") }
+    if agg_claimed(db, a)? != Some(Some(2)) {
+        fail("L-AG: three rows put the cursor at row 2")
+    }
     agg_write(mut db, t, 2, Some(22))?
     model[2] = Some(22)
     agg_write(mut db, t, 3, Some(23))?
@@ -275,7 +316,9 @@ fn test_aggregate_declared_over_chunks(c: Clock) -> Result[(), Error] waits {
         }
         Ok(())
     })?
-    if let Committed(_) = filled {} else { return Error(MigrationFault) }
+    if let Committed(_) = filled {} else {
+        return Error(MigrationFault)
+    }
     let mut model: List[Option[u64]] = list.new()
     for k in 0u64 .. rows {
         list.push(mut model, Some(k % 997))
@@ -285,7 +328,129 @@ fn test_aggregate_declared_over_chunks(c: Clock) -> Result[(), Error] waits {
     let a = aggregate(mut second, mut again, "by_group", code.describe(agg_parts), key)?
     let _ = finish(mut second, take again)?
     let _ = seal(mut db, take second)?
-    if agg_claimed(db, a)? != None { fail("L-AG: a declared aggregate publishes Public") }
+    if agg_claimed(db, a)? != None {
+        fail("L-AG: a declared aggregate publishes Public")
+    }
     agg_check(db, a, model, "L-AG: a declared aggregate equals the fold of every row")?
     Ok(())
+}
+
+// Spec-derived 101-byte COMMIT vectors from core/tools/store_reference.py and
+// external libxxhash, not encode_commit itself. Offsets72,73,1048576 plus
+// contrasting store/branch/version/time/segment values defeat constant fields.
+fn frame_boundary_points() -> bool {
+    let expected: Inline[Inline[u8, 101], 5] =[[17, 0, 1, 0, 85, 0, 0, 0, 224, 218, 201, 79, 101, 211, 225, 137, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],[17, 0, 1, 0, 85, 0, 0, 0, 234, 219, 139, 133, 186, 115, 232, 65, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],[17, 0, 1, 0, 85, 0, 0, 0, 125, 108, 137, 193, 75, 31, 101, 185, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 231, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],[17, 0, 1, 0, 85, 0, 0, 0, 164, 25, 64, 48, 189, 190, 101, 37, 7, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 233, 3, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],[17, 0, 1, 0, 85, 0, 0, 0, 130, 27, 203, 252, 129, 147, 18, 165, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 34, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]]
+    let stores: Inline[StoreId, 5] =[StoreId(hi: 1, lo: 2), StoreId(hi: 1, lo: 2), StoreId(hi: 1, lo: 2), StoreId(hi: 3, lo: 4), StoreId(hi: 1, lo: 9)]
+    let branches: Inline[u32, 5] =[0, 0, 0, 7, 1]
+    let versions: Inline[u64, 5] =[257, 257, 257, 258, 65536]
+    let times: Inline[u64, 5] =[999, 999, 999, 1001, 0]
+    let segments: Inline[u64, 5] =[9, 9, 9, 10, 256]
+    let offsets: Inline[u64, 5] =[72, 73, 1048576, 73, 1048576]
+    let mut ops: DataRows = new_data_rows()
+    let key = result.unwrap(logical_key(1, key_word(7)))
+    let mut value: Bytes = list.new()
+    list.push(mut value, 0u8)
+    list.push(mut value, 0u8)
+    for i in 0u64 .. 32 {
+        list.push(mut value, int.truncate(i))
+    }
+    push_data_row(mut ops, DataOp(key: take key, value: Some(PageValue(take value)), trim: None))
+    for i in 0u64 .. 5 {
+        let ci = CallInfo(id: CallId(store: stores[i], branch: branches[i], version: versions[i]), at: times[i], seed: 0)
+        let raw = result.unwrap(encode_commit(ci, mut ops, segments[i], offsets[i]))
+        if list.len(raw) != 101 {
+            return false
+        }
+        for at in 0u64 .. 101 {
+            if raw[at] != expected[i][at] {
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn seed_boundary_points() -> bool {
+    let versions: Inline[u64, 4] =[1, 256, 257, 258]
+    let expected: Inline[u64, 4] =[14418179372084732305u64, 5897679137105858605u64, 15310494363706394912u64, 17163838325734834816u64]
+    for i in 0u64 .. 4 {
+        let ci = call_info(StoreId(hi: 1, lo: 2), 0, versions[i], 8, 9)
+        if ci.seed != expected[i] || ci.id.version != versions[i] || ci.at != 9 {
+            return false
+        }
+    }
+    let stores: Inline[StoreId, 3] =[StoreId(hi: 9, lo: 2), StoreId(hi: 1, lo: 9), StoreId(hi: 1, lo: 2)]
+    let branches: Inline[u32, 3] =[0, 0, 1]
+    let other: Inline[u64, 3] =[15407299455215397367u64, 15770638267073898971u64, 7822107688032465790u64]
+    for i in 0u64 .. 3 {
+        if call_info(stores[i], branches[i], 1, 8, 9).seed != other[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn resident_rounding_points() -> bool {
+    let sizes: Inline[u64, 8] =[0, 1, 7, 8, 9, 15, 16, 17]
+    let rounded: Inline[u64, 8] =[0, 8, 8, 8, 16, 16, 16, 24]
+    for i in 0u64 .. 8 {
+        let mut key: Bytes = list.with_capacity(sizes[i])
+        list.fill(mut key, sizes[i], 0u8)
+        for j in 0u64 .. 8 {
+            let mut value: Bytes = list.with_capacity(sizes[j])
+            list.fill(mut value, sizes[j], 0u8)
+            if entry(key, value) != 62 + rounded[i] + rounded[j] {
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn same_value_pair(c: Clock) -> (Snapshot, Snapshot) {
+    let mut db = raw_test_db(c, 1073741824)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            fail("same-value fixture refused")
+        }
+    }
+    let a = snapshot(db)
+    for k in 0u64 .. 96 {
+        if !put_one(mut db, k, k + 1) {
+            fail("same-value rewrite refused")
+        }
+    }
+    (take a, snapshot(db))
+}
+
+// L23: k=96 writes, w=0 returned differences. Both full scans contain keys
+// 0..95 and values 1..96, whose hand-derived sum is 96*97/2 = 4656.
+pub fn law_changes_rewritten_equal(c: Clock) -> bool waits {
+    let pair = same_value_pair(c)
+    let (take a, take b) = take pair
+    let delta = result.unwrap(changes(law_reader(a), a, b)).rows
+    if list.len(delta) != 0 {
+        return false
+    }
+    let mut left = result.unwrap(scan_raw(a, 1, Unbounded, Unbounded))
+    let mut right = result.unwrap(scan_raw(b, 1, Unbounded, Unbounded))
+    let mut sum: u64 = 0
+    for k in 0u64 .. 96 {
+        let x = option.unwrap(result.unwrap(next_bytes(mut left)))
+        let y = option.unwrap(result.unwrap(next_bytes(mut right)))
+        if x.0 != result.unwrap(logical_key(1, key_word(k))) || list.len(x.1) != 8 || decode_word(x.1) != k + 1 || x != y {
+            return false
+        }
+        sum += decode_word(x.1)
+    }
+    sum == 4656 && result.unwrap(next_bytes(mut left)) == None && result.unwrap(next_bytes(mut right)) == None
+}
+
+@test
+fn test_changes_rewritten_equal(c: Clock) -> Result[(), ()] {
+    if law_changes_rewritten_equal(c) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }

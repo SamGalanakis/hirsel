@@ -288,6 +288,16 @@ fn tape_directory<'a>(
         .unwrap_or(Path::new("."));
     let name = path.file_name().ok_or("expected a tape file path")?;
     let handle = sink.grant(parent).map_err(|e| e.to_string())?;
+    // The tape is opened beneath its directory, as every Dir open is. A host
+    // or sandbox without openat2 refuses here, before the run, by name.
+    if let Err(e) = sink.probe_directory(handle)
+        && e.raw_os_error() == Some(libc::ENOSYS)
+    {
+        return Err(
+            "the tape directory requires openat2 (Linux 5.6 or later, permitted by the sandbox)"
+                .to_owned(),
+        );
+    }
     Ok((
         Inner {
             provider: sink.provider(),

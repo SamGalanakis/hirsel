@@ -125,13 +125,30 @@ fn startup_refusals(backend: Backend) {
     options.root_limit = 288;
     options.output = dir.path().join("no-dir");
     let built = product.build(&entry, &options).unwrap();
-    let output = Command::new(launcher)
+    let output = Command::new(&launcher)
         .arg(built.executable)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(output.stdout, b"entered\n");
     assert!(output.stderr.is_empty());
+    assert_eq!(std::fs::read_dir(&effects).unwrap().count(), 0);
+
+    // A recording opens its tape beneath the tape's directory, so the same
+    // host refuses it by name before main, and writes no tape.
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.output = dir.path().join("no-dir-recorded");
+    let built = product.build(&entry, &options).unwrap();
+    let tape = effects.join("run.tape");
+    assert_not_started(
+        &Command::new(&launcher)
+            .arg(built.executable)
+            .env("HIRSEL_RECORD", &tape)
+            .output()
+            .unwrap(),
+        "tape: the tape directory requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
+    );
     assert_eq!(std::fs::read_dir(effects).unwrap().count(), 0);
 }
 #[test]

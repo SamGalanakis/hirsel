@@ -40,6 +40,8 @@ pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
 #[test]
 #[ignore = "explicit native integration target"]
 fn rl7_helpers_record_their_own_streams() {
+    // The recorder opens its tape beneath the tape directory (openat2).
+    crate::openat2_required::require();
     use hirsel_tape_format::{Frame, Index, op};
     use std::os::unix::fs::FileExt;
 
@@ -201,6 +203,8 @@ pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
 #[test]
 #[ignore = "explicit native integration target"]
 fn rl9_sent_items_match_their_takes() {
+    // The recorder opens its tape beneath the tape directory (openat2).
+    crate::openat2_required::require();
     use hirsel_tape_format::{Args, Arrival, Frame, Index, op};
     use std::os::unix::fs::FileExt;
 

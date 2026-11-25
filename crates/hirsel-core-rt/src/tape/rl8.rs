@@ -323,7 +323,14 @@ fn rl8_one_receiver_at_kinds_0_and_1() {
     let (early, at_op) = record(1, &[Hook(true), TrySend(0, 9), Reach, TryReceive(0)]);
     let (late, at_pump) = record(
         1,
-        &[Hook(true), TrySend(0, 9), TryReceive(0), Reach, Pump, TryReceive(0)],
+        &[
+            Hook(true),
+            TrySend(0, 9),
+            TryReceive(0),
+            Reach,
+            Pump,
+            TryReceive(0),
+        ],
     );
     assert_eq!(early, [Some(9)]);
     assert_eq!(late, [None, Some(9)]);

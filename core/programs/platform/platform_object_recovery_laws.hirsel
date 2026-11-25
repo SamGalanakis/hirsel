@@ -94,7 +94,7 @@ fn read_bucket_activation(mut readers: store.Followers, tasks: Tasks, fixture: R
 
 fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucket) -> Result[(), store.Error] waits {
     let lanes = std.object.LaneConfig(requested_lanes: 1, lane_bytes: 1048576)
-    let mut options = result.unwrap(store.sized_with(Bucket(lanes), 67108864u64,
+    let mut options = result.unwrap(store.sized_with(Bucket(lanes), 134217728u64,
         store.Overrides(resident_limit: Some(1048576), journal_limit: None,
             checkpoint_bytes: Some(65536), pack_bytes: Some(65536),
             group_bytes: Some(65536), group_commits: None, lock_wait_ms: None,
@@ -163,7 +163,7 @@ fn witness_store_options() -> store.Options {
     let limits = store.Overrides(resident_limit: Some(1048576), journal_limit: None,
         checkpoint_bytes: Some(65536), pack_bytes: Some(65536), group_bytes: Some(65536), group_commits: Some(1),
         lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None)
-    let mut plan = result.unwrap(store.sized_with(Bucket(lanes), 67108864u64, limits))
+    let mut plan = result.unwrap(store.sized_with(Bucket(lanes), 134217728u64, limits))
     plan.head_poll_ms = 600000
     take plan
 }

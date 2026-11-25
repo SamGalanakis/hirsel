@@ -475,7 +475,7 @@ pub(crate) enum Arrival<'a> {
     HelperEnd {
         key: usize,
         outcome: &'a Result<(u8, Vec<u8>), &'static str>,
-        /// Kept connections by address, with their amounts.
+        /// Kept connections and `Shared` nodes by address, with their amounts.
         survivors: &'a [(usize, u64)],
         /// Why other survivors cannot be named, if there are any.
         unnamed: Option<&'static str>,
@@ -577,14 +577,23 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 put_varint(&mut body, ordinal);
                 body.push(*kind);
                 body.extend_from_slice(outcome);
-                put_varint(&mut body, survivors.len() as u64);
-                for &(conn, amount) in survivors {
-                    let Some((stream, ordinal)) =
-                        conns(|c| c.get(&conn).map(|e| (e.stream, e.ordinal)))
-                    else {
-                        return live.cut(UNNAMED_INBOX);
+                // Each survivor by its address: a `Shared` node (kind 1),
+                // whose entry ends at its release, else a connection (kind
+                // 0). Written in (kind, stream, ordinal) order, which no
+                // address decides.
+                let mut named = Vec::with_capacity(survivors.len());
+                for &(key, amount) in survivors {
+                    let node = nodes(|n| n.get(&key).map(|e| (1u8, e.stream, e.ordinal)));
+                    let conn = || conns(|c| c.get(&key).map(|e| (0u8, e.stream, e.ordinal)));
+                    let Some((kind, stream, ordinal)) = node.or_else(conn) else {
+                        return live.cut(UNNAMED_SURVIVOR);
                     };
-                    body.push(0);
+                    named.push((kind, stream, ordinal, amount));
+                }
+                named.sort_unstable();
+                put_varint(&mut body, named.len() as u64);
+                for (kind, stream, ordinal, amount) in named {
+                    body.push(kind);
                     body.extend_from_slice(&stream.to_le_bytes());
                     put_varint(&mut body, ordinal);
                     body.extend_from_slice(&amount.to_le_bytes());
@@ -623,3 +632,5 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
 }
 
 const UNNAMED_INBOX: &str = "a take for a connection the recording did not name";
+const UNNAMED_SURVIVOR: &str =
+    "a helper end keeps a connection or Shared node the recording did not name";

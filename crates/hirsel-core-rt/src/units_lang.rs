@@ -1037,9 +1037,6 @@ struct Ended {
     /// the kind and body, or why it has none.
     #[cfg(feature = "record")]
     tape_end: Option<Result<(u8, Vec<u8>), &'static str>>,
-    /// How many of `survivors`, at their end, are `Shared` nodes.
-    #[cfg(feature = "record")]
-    homed: usize,
 }
 
 /// A tagged task handle names a helper.
@@ -1288,8 +1285,6 @@ fn helper_main(
         // the owner holds its charge from the end take on. Its own copy here
         // goes back to this helper's limit, which ends with it.
         // So does each `Shared` node made here that another unit still holds.
-        #[cfg(feature = "record")]
-        let homed = lu.homed.len();
         let survivors = lu
             .retained
             .drain()
@@ -1314,8 +1309,6 @@ fn helper_main(
                 let causes: Vec<_> = context.causes.iter().collect();
                 tape.end(failed != 0, &causes, result.as_ptr(), rb, &ro)
             }),
-            #[cfg(feature = "record")]
-            homed,
         };
         let mut ret = Value::empty();
         if failed == 0 {

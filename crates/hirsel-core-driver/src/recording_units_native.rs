@@ -512,5 +512,141 @@ fn rl9_shared_crosses_into_a_helper() {
     }
 }
 
+/// Build `source` with the recording runtime on `backend`, run it recorded,
+/// and check it printed `printed` with no stream truncated: the tape's path.
+fn rl9_record(source: &str, dir: &Path, name: &str, backend: Backend, printed: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut request = source_request(source, dir);
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{name}: {:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(backend, dir);
+    options.runtime = env_record_runtime();
+    options.recording = true;
+    options.grant_mask = ["Tasks", "Stdout"]
+        .iter()
+        .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+    options.store = dir.join(format!("{name}-store-{backend:?}"));
+    options.output = dir.join(format!("{name}-{backend:?}"));
+    let program = product.build(&entry, &options).unwrap().executable;
+    let path = dir.join(format!("{name}-{backend:?}.tape"));
+    let (code, out, err) = tape_run(&program, &[], Some(&path));
+    assert_eq!((code, out.as_str()), (Some(0), printed), "{name}/{backend:?}: {err}");
+    assert!(!err.contains("truncated"), "{name}/{backend:?}: {err}");
+    path
+}
+
+/// A helper makes a node and sends its only holder to the root, then ends
+/// while the root holds it.
+const RL9_SURVIVOR: &str = r#"
+fn maker(take c: Client[Shared[u64]]) -> u64 {
+    let s: Shared[u64] = shared.new(42)
+    result.unwrap(conn.try_send(c, take s))
+    7
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (c, i): (Client[Shared[u64]], Inbox[Shared[u64]]) = result.unwrap(conn.new(4, bytes 0))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take c, maker))
+    let t = result.unwrap(conn.receive(i))
+    if result.unwrap(task.join(take h)) != 7 { return Error(Exit(status: 3)) }
+    {
+        let gone = take t
+    }
+    result.unwrap(stdout.write(out, "survivor"))
+    Ok(())
+}
+"#;
+
+/// A `Shared` node that survives its home helper (U3, CONC-15), hand-derived
+/// from docs/recording.md before its first run. The root numbers the
+/// connection g+1 and its client g+2 at `conn.new`, and the helper handle
+/// g+3 at the spawn. The helper (stream 1, no grants) numbers the arriving
+/// client 1 and its node 2 at `shared.new`. The root's takes before its
+/// write, in its port's order:
+/// - the item: inbox g+1; 8 plain bytes zeroed, one part, a handle (1), a
+///   `Shared` snapshot (1) whose arriving holder the root numbers g+4, home
+///   stream 1 and node 2, the payload 42 with no parts;
+/// - the close of inbox g+1: the helper cleaned the last client;
+/// - the helper end: ordinal g+3, the result 7 as 8 plain bytes and no
+///   parts, and one survivor: kind 1, stream 1, ordinal 2, amount 48, the
+///   node's charge round8(8 + 40) (budgets.md, `Shared` node);
+/// - the root's drop of `t`, the last holder: home has ended and forwards to
+///   the root, so the root takes `shared release` (7, stream 1, node 2), the
+///   survivor it kept, at that drop (kind 0).
+///
+/// The inbox's cleaning after the write is not this law's. The first three
+/// are taken in `conn.receive` and `task.join`, parked or
+/// not as the helper's timing has it, so their gaps and point kinds are not
+/// this law's. The helper's stream holds no take.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_shared_survives_its_helper() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Frame, TakePoint, op};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record(RL9_SURVIVOR, dir.path(), "survivor", backend, "survivor");
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        // The root's frames before its `stdout.write`, its first operation
+        // that is no unit operation.
+        let unit_ops = [op::UNIT_SPAWN, op::CONN_TRY_SEND, op::CONN_SEND, op::CLOSE];
+        let write = streams[0]
+            .1
+            .iter()
+            .position(|f| match f {
+                Frame::Op { op: o, .. } | Frame::Issue { op: o, .. } => !unit_ops.contains(o),
+                _ => false,
+            })
+            .expect("the stdout write");
+        let root = &streams[0].1[..write];
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let takes = |frames: &[Frame]| -> Vec<(TakePoint, Vec<u8>)> {
+            frames
+                .iter()
+                .filter_map(|f| match f {
+                    Frame::Take { point, body, .. } => Some((*point, body.bytes().to_vec())),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(takes(&streams[1].1), [], "{backend:?}: helper takes");
+        let item = [
+            vec![0, g + 1, 8],
+            vec![0; 8],
+            vec![1, 1, 1, g + 4, 1, 0, 0, 0, 2, 8, 42],
+            vec![0; 7],
+            vec![0],
+        ]
+        .concat();
+        let end = [
+            vec![4, g + 3, 0, 8, 7],
+            vec![0; 7],
+            vec![0, 1, 1, 1, 0, 0, 0, 2, 48],
+            vec![0; 7],
+        ]
+        .concat();
+        let bodies: Vec<_> = takes(root).into_iter().map(|(_, b)| b).collect();
+        assert_eq!(
+            bodies,
+            [item, vec![1, g + 1], end, vec![7, 1, 0, 0, 0, 2]],
+            "{backend:?}: root takes"
+        );
+        assert_eq!(
+            takes(root).last().map(|t| t.0),
+            Some(TakePoint::Operation),
+            "{backend:?}: the release is at the drop"
+        );
+    }
+}
+
 // RL8 natively, the ordering seam (feature `testing`).
 include!("recording_rl8_native.rs");

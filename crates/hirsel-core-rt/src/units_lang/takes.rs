@@ -184,19 +184,18 @@ impl SendNote {
 }
 
 /// The owner's helper-end `TAKE`, with the helper's outcome and the
-/// connections it paid for that survive it.
+/// connections and `Shared` nodes it paid for that survive it.
 #[cfg(feature = "record")]
 pub(super) unsafe fn end_take(u: &mut LangUnit, key: usize, ended: &Ended) {
     let Some(outcome) = &ended.tape_end else {
         return;
     };
-    let kept = ended.survivors.len() - ended.homed;
-    let unnamed = (ended.homed != 0 || !ended.charges.is_empty())
-        .then_some("a helper end keeps a Shared node or a Secret or UDP charge, which this build does not name");
+    let unnamed = (!ended.charges.is_empty())
+        .then_some("a helper end keeps a Secret or UDP charge, which this build does not name");
     let arrival = Arrival::HelperEnd {
         key,
         outcome,
-        survivors: &ended.survivors[..kept],
+        survivors: &ended.survivors,
         unnamed,
     };
     // SAFETY: an end take carries no item.

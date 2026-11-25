@@ -64,7 +64,9 @@ stops without a layers allocation, by sending nothing for two rate windows, is d
 one its allocation stops. Allocation steps over dropped encodings and never prices a step
 below 0, so a silent or cheaper stream can neither freeze a leg nor pay for another
 publication's step. A dropped encoding up to a target stays in the local mask so that the
-publisher can resume it.
+publisher can resume it. Within 5 s of a session's first cluster, a cluster that raised
+nothing is retried after 1 s rather than 5 s (the window and spacing of libwebrtc's
+repeated initial probing).
 
 This chapter specifies three layers, each sans-IO:
 
@@ -1024,9 +1026,18 @@ starts none when:
   agreed RTX or, without RTX, can take RTP-11's `pad` now;
 - `bwe.probe` answers none (a cluster outstanding, the loss estimate decreasing, or the
   want at or below the target);
-- a cluster started less than 5 s ago and the target has not risen since it started
-  (libwebrtc's `kAlrPeriodicProbingInterval`, so a link that cannot carry more is not
-  probed at every poll). A cluster that raised the target lets the next start at once.
+- the target has not risen since the last cluster started, and that was less than 5 s
+  ago (libwebrtc's `kAlrPeriodicProbingInterval`, so a link that cannot carry more is not
+  probed at every poll), or less than 1 s ago while within 5 s of the session's first
+  cluster, so a first cluster that got no result, with feedback not yet flowing, does
+  not hold the leg on its lowest layer for 5 s. The window and the spacing are those of
+  libwebrtc's repeated initial probing (`initial_probing` 5 s,
+  `kMaxWaitingTimeForProbingResult` 1 s). There it is opt-in, runs only while no
+  allocation is known and repeats at 3 times the estimate; here it always runs, a want
+  is always known, and each retry asks what any cluster asks. libwebrtc's paired start
+  clusters at 3 and 6 times the start rate are not adopted: `bwe` keeps one cluster
+  outstanding, and each round already doubles. A cluster that raised the target lets the
+  next start at once.
 
 Each `Probe(id, pad)` the pacer answers goes out on the first pad track: on an RTX track an
 RFC 4588 padding-only packet (`rtx.write_probe`) at the track's next RTX sequence number and
@@ -1738,8 +1749,10 @@ unless named otherwise.
   1.18 Mbps puts f within reach, so f arrives within 160 ms of subscribing and stays; on a
   router that does not probe the leg stays on q. Its companions: `probe_padding_stays_in_budget`
   (one cluster of 5 to 7 padding-only RTX packets with no payload, on consecutive RTX
-  numbers, and none more inside the 5 s retry gate; red on a pacer that pads at the target
-  rate), `probe_resumes_paused_leg` (without `pause` the base flows at once; with it the leg
+  numbers, and none more while it is outstanding; red on a pacer that pads at the target
+  rate), `initial_probes_retry_each_second` (with no feedback, clusters start at subscribe
+  and 1, 2, 3 and 4 s after, then none inside the 5 s gate; red on main, which waited 5 s
+  from the first), `probe_resumes_paused_leg` (without `pause` the base flows at once; with it the leg
   waits for one probe round) and `probe_pads_media_without_rtx` (padding on the media SSRC
   only after a frame end, its numbers gapless with the media's, no media frame lost).
   `start_estimate_is_the_sessions` covers the start estimate in W24's room with no

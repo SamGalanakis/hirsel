@@ -546,21 +546,31 @@ fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(),
 /// RTC-6 probing: ask the estimate for a cluster toward `want_bps` (rtp RTP-9 `probe`)
 /// and hand it to the pacer, which lets it out as padding on the pad track. A session
 /// with no pad track, a cluster outstanding, or a loss estimate decreasing starts none;
-/// after a cluster that left the target where it was, the next waits 5 s. It answers
-/// the pacer's next send, as `poll` would.
+/// after a cluster that left the target where it was, the next waits 5 s, or 1 s within
+/// 5 s of the session's first cluster. It answers the pacer's next send, as `poll` would.
 pub fn probe(mut p: PeerSession, want_bps: u64, now: u64, mut out: Outbox) -> Option[u64] {
     if p.closed || !connected(p) || list.len(pad_tracks(p)) == 0 {
         return None
     }
     let target = rtp.bwe.target(p.bwe)
-    if now < p.probe_next && target <= p.probe_from {
-        return None
+    if let Some(first) = p.probe_first {
+        let gap = if now - first < PROBE_INITIAL_NS {
+            PROBE_INITIAL_RETRY_NS
+        } else {
+            PROBE_RETRY_NS
+        }
+        if now - p.probe_last < gap && target <= p.probe_from {
+            return None
+        }
     }
     let Some(c) = rtp.bwe.probe(mut p.bwe, want_bps, now) else {
         return None
     }
+    if p.probe_first == None {
+        p.probe_first = Some(now)
+    }
     p.probe_from = target
-    p.probe_next = now + PROBE_RETRY_NS
+    p.probe_last = now
     rtp.pacer.probe(mut p.pacer, c, now)
     drain(mut p, now, mut out)
 }

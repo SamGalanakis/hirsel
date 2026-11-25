@@ -271,12 +271,12 @@ fn probe_ramps_to_top_layer() -> Result[(), router.RouterError] {
     Ok(())
 }
 
-/// bug: pad without limit (the pacer's padding rate left at the target), send padding on the media SSRC or payload type when the leg has RTX, carry a media payload in padding, skip or reuse RTX sequence numbers, or start a new cluster inside RTP-9's 5 s retry gate after one that raised nothing.
-/// oracle: RTP-9, RTP-10 and RFC 4588 by hand. With q at 120,000 and the 300,000 start estimate the down-track is short of f, so one cluster at 600,000 bit/s starts at subscribe. Its probes are max(200, 600,000 / 8,000) = 200 bytes, one per 200 x 8 / 600,000 = 2.67 ms; the cluster ends at the first probe that is at least the 5th and at least 15 ms after the first, the 7th at 16 ms, or sooner when q's media fills slots; so 5 to 7 padding packets. With no feedback the cluster gives no result, expires after 1 s, and the next waits until 5 s after the first: nothing more pads in the 4 s run. Each padding packet goes on the leg's RTX payload type 97 and its own SSRC (not the media SSRC), with the P bit set and no payload before the pad count, on consecutive RTX sequence numbers.
+/// bug: pad without limit (the pacer's padding rate left at the target), send padding on the media SSRC or payload type when the leg has RTX, carry a media payload in padding, skip or reuse RTX sequence numbers, or start a new cluster while the last is outstanding.
+/// oracle: RTP-9, RTP-10 and RFC 4588 by hand. With q at 120,000 and the 300,000 start estimate the down-track is short of f, so one cluster at 600,000 bit/s starts at subscribe. Its probes are max(200, 600,000 / 8,000) = 200 bytes, one per 200 x 8 / 600,000 = 2.67 ms; the cluster ends at the first probe that is at least the 5th and at least 15 ms after the first, the 7th at 16 ms, or sooner when q's media fills slots; so 5 to 7 padding packets. With no feedback the cluster gives no result and is outstanding for 1 s: nothing more pads in the run, which ends just before 1 s after subscribe. Each padding packet goes on the leg's RTX payload type 97 and its own SSRC (not the media SSRC), with the P bit set and no payload before the pad count, on consecutive RTX sequence numbers.
 @test
 fn probe_padding_stays_in_budget() -> Result[(), router.RouterError] {
     let mut w = probe_room(2700, room_limits(), b"97")
-    run(mut w, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 4000)
+    run(mut w, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 1000)
     let mut n = 0u64
     let mut last: Option[u16] = None
     for x in w.heard {
@@ -302,6 +302,41 @@ fn probe_padding_stays_in_budget() -> Result[(), router.RouterError] {
     }
     if w.media == 0 {
         fail("no media reached the subscriber")
+    }
+    Ok(())
+}
+
+/// bug: retry a cluster that raised nothing only after the 5 s gate from the session's start, so a first cluster that gets no result (feedback not yet flowing) leaves the leg on q for 5 s; or keep retrying every second for good, so a link that cannot carry more is probed at every chance.
+/// oracle: RTC-6 and libwebrtc's ProbeController (repeated initial probing: initial_probing 5 s, kMaxWaitingTimeForProbingResult 1 s; then kAlrPeriodicProbingInterval 5 s) by hand. With no feedback no cluster raises the 300,000 estimate, so the down-track stays short of f. The first cluster starts at subscribe, 1,100 ms. Within 5 s of it the next starts 1 s after the last: 2,100, 3,100, 4,100 and 5,100 ms (each expired at exactly 1 s, and the run polls every 10 ms on the publisher's packets). At 6,100 ms the window has closed, so the next waits 5 s from 5,100, to 10,100 ms, past the run's end at 8,100. So five clusters, each heard within 20 ms of its start (its 5 to 7 probes take at most 16 ms), and no padding after 5,120 ms.
+@test
+fn initial_probes_retry_each_second() -> Result[(), router.RouterError] {
+    let mut w = probe_room(2740, room_limits(), b"97")
+    run(mut w, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 7000)
+    let mut starts: List[u64] = list.new()
+    let mut last = 0u64
+    for x in w.heard {
+        if x.fill != 0 {
+            continue
+        }
+        if list.len(starts) == 0 || x.at > last + 100 * MS {
+            list.push(mut starts, x.at)
+        }
+        last = x.at
+    }
+    if list.len(starts) < 2 {
+        fail("a cluster that raised nothing was not retried within the initial 5 s")
+    }
+    if list.len(starts) != 5 {
+        fail("not five initial clusters: retried other than every second for 5 s")
+    }
+    for k in 0u64 .. 5u64 {
+        let at = (SUBSCRIBE_AT + 1000 * k) * MS
+        if starts[k] < at || starts[k] > at + 20 * MS {
+            fail("an initial cluster did not start 1 s after the last")
+        }
+    }
+    if last > (SUBSCRIBE_AT + 4020) * MS {
+        fail("padding went on past the initial clusters")
     }
     Ok(())
 }

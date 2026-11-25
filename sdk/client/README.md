@@ -88,6 +88,12 @@ end. Public reads still return `Pending` before each subscription completes.
 Reloading loses the functions and recovers only the durable call.
 [SDK optimistic write contract](../../docs/spec/sdk.md#optimistic-writes)
 
+Rooms (`api.room.<module>.<name>`) add the membership to a subscription:
+`self`, `peers()`, `set`, `send`, and the roster's `incarnation` and
+`revision`. A new incarnation replaces the roster; a reconnect on the same
+incarnation keeps the peers its new image shows.
+[SDK room contract](../../docs/spec/sdk.md#rooms)
+
 The scripted laws run as part of `runner.codec_frames:ts_frame_vectors` in
 `//:core-evaluator`. They use the generated Frame codec and independent
 STORE P1-P3 fixtures. Real `serve` crash/reconnect qualification is deferred to

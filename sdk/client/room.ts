@@ -10,9 +10,12 @@ export interface RoomCodec<S, M> {
   state: ValueCodec<S>; message: ValueCodec<M>; peers: number; stateMax: number; messageMax: number;
 }
 export interface RoomPeer<S> { readonly caller: Caller; readonly state: S | undefined }
-// `complete` replaces the roster: a new membership, or the end of one.
+// One change to peers(). `renewed` marks a new roster life (incarnation): every earlier
+// peer is in `left` and peer ids start again. `revision` is the room's after this change,
+// or undefined while the roster image is not yet complete.
 export interface RoomPeersChange {
-  readonly complete: boolean; readonly joined: readonly PeerId[]; readonly left: readonly PeerId[]; readonly set: readonly PeerId[];
+  readonly incarnation: string; readonly revision: bigint | undefined; readonly renewed: boolean;
+  readonly joined: readonly PeerId[]; readonly left: readonly PeerId[]; readonly set: readonly PeerId[];
 }
 export interface RoomHandlers<S, M, V, Slots extends object, Keys extends Record<keyof Slots, unknown>> {
   // The Grant (the room's value) and any declared slot rows, as a subscription's onChange.
@@ -29,6 +32,10 @@ export interface LiveRoom<S, M, V = Uint8Array, Slots extends object = Record<nu
   // This membership's peer id; undefined while waiting, full or reconnecting.
   readonly self: PeerId | undefined;
   readonly full: boolean;
+  // The roster's life, 32 hex digits of its 16 bytes; (incarnation, peer) names one admission.
+  readonly incarnation: string | undefined;
+  // The membership revision at which peers() is complete; undefined while an image is partial.
+  readonly revision: bigint | undefined;
   peers(): ReadonlyMap<PeerId, RoomPeer<S>>;
   set(state: S | undefined): void;
   send(message: M, to?: PeerId): void;
@@ -44,6 +51,13 @@ export interface LiveLink {
 }
 export type Decoded = [states: [number, unknown][], msgs: [number, unknown, boolean][]];
 
+// The 16 incarnation bytes, in order, from the two little-endian words that carry them.
+export function incarnationHex([low, high]: [bigint, bigint]): string {
+  let hex = '';
+  for (const word of [low, high]) for (let i = 0n; i < 64n; i += 8n) hex += ((word >> i) & 0xffn).toString(16).padStart(2, '0');
+  return hex;
+}
+
 // One Live frame (LIVE_MAX) and the relay's ring E: a Set waits and a Send drops above it.
 const liveBufferBytes = 65536;
 const recheckMs = 16;
@@ -51,7 +65,11 @@ const recheckMs = 16;
 export class RoomMember {
   self?: number;
   full = false;
+  incarnation?: string;
+  revision?: bigint;
   readonly peers = new Map<number, RoomPeer<unknown>>();
+  // Peers a new membership's image has not yet shown; absent at its snapshot means left.
+  private unconfirmed?: Set<number>;
   // The newest set() value, and whether this membership has not been sent it.
   private stored?: Option<Uint8Array>;
   private owed = false;
@@ -65,47 +83,68 @@ export class RoomMember {
     return [part.states.map(([peer, raw]) => [peer, raw.tag === 'Some' ? this.codec.state.decode(raw.value) : undefined]),
       part.msgs.map(([from, direct, raw]) => [from, this.codec.message.decode(raw), direct])];
   }
-  // Joined, then states, then messages, then left (one Part, in order).
+  // Joined, then states, then messages, then left (one Part, in order). A Part from
+  // another incarnation replaces the roster. A `complete` Part on the same incarnation
+  // starts a new membership's image: a peer it shows continues, and one it has not shown
+  // by the Part with `snapshot` set has left.
   apply(part: Part, [states, msgs]: Decoded): void {
-    const before = part.complete ? new Set(this.peers.keys()) : undefined;
-    if (part.complete) {
-      this.peers.clear();
-      this.self = undefined;
-      this.full = false;
+    const joined: number[] = [], set = new Set<number>(), left: number[] = [];
+    let renewed = false;
+    const before = this.revision;
+    if (part.complete) { this.self = undefined; this.full = false; }
+    if (!part.full) {
+      const incarnation = incarnationHex(part.incarnation);
+      if (incarnation !== this.incarnation) {
+        renewed = true;
+        left.push(...this.peers.keys());
+        this.peers.clear();
+        this.unconfirmed = undefined;
+        this.incarnation = incarnation;
+        this.revision = undefined;
+      } else if (part.complete) {
+        this.unconfirmed = new Set(this.peers.keys());
+        this.revision = undefined;
+      }
     }
     if (part.you.tag === 'Some') { this.self = part.you.value; this.full = false; this.owed = this.stored !== undefined; }
-    const joined: number[] = [], set: number[] = [], left: number[] = [];
-    for (const [peer, caller] of part.joined) { this.peers.set(peer, {caller, state: undefined}); joined.push(peer); }
+    for (const [peer, caller] of part.joined) {
+      // A continued peer is shown again with its current state, so the old one is dropped.
+      const known = this.peers.get(peer);
+      this.unconfirmed?.delete(peer);
+      this.peers.set(peer, {caller, state: undefined});
+      if (!known) joined.push(peer); else if (known.state !== undefined) set.add(peer);
+    }
     for (const [peer, state] of states) {
       const known = this.peers.get(peer);
-      if (known) { this.peers.set(peer, {caller: known.caller, state}); set.push(peer); }
+      if (known) { this.peers.set(peer, {caller: known.caller, state}); set.add(peer); }
     }
     for (const [from, message, direct] of msgs) {
       if (!this.sub.active) return;
       this.handlers.onMessage?.(from, message, direct);
     }
-    for (const peer of part.left) if (this.peers.delete(peer)) left.push(peer);
-    if (before) for (const peer of before) if (!this.peers.has(peer)) left.push(peer);
+    for (const peer of part.left) if (this.peers.delete(peer)) { left.push(peer); set.delete(peer); }
+    if (part.snapshot && !part.full) {
+      for (const peer of this.unconfirmed ?? []) { this.peers.delete(peer); left.push(peer); set.delete(peer); }
+      this.unconfirmed = undefined;
+      this.revision = part.revision;
+    }
     if (part.full) { this.full = true; this.self = undefined; }
     if (!this.sub.active) return;
-    if (part.complete || joined.length || set.length || left.length) {
-      this.handlers.onPeers?.(this.peers, {complete: part.complete, joined, left, set});
+    if (renewed || joined.length || set.size || left.length || this.revision !== before) {
+      this.handlers.onPeers?.(this.peers, {incarnation: this.incarnation!, revision: this.revision, renewed, joined, left, set: [...set]});
     }
     if (part.gap > 0) this.handlers.onGap?.(part.gap);
     if (part.lost > 0) this.handlers.onLost?.(part.lost);
     if (part.full) this.handlers.onFull?.();
     this.flush();
   }
-  // A membership ends with its session: the roster empties and the stored state is owed
-  // to the next one, which the client gets on resubscribe.
+  // A membership ends with its session. The roster stays as last told until the next
+  // membership's image continues or replaces it, and the stored state is owed to that
+  // membership, which the client gets on resubscribe.
   end(): void {
     this.self = undefined; this.full = false;
     this.owed = this.stored !== undefined;
     this.drop();
-    if (this.peers.size === 0) return;
-    const left = [...this.peers.keys()];
-    this.peers.clear();
-    this.handlers.onPeers?.(this.peers, {complete: true, joined: [], left, set: []});
   }
   drop(): void {
     if (this.timer !== undefined) { this.link.clock.clear(this.timer); this.timer = undefined; }
@@ -143,6 +182,8 @@ export class RoomMember {
     return Object.defineProperties(base, {
       self: {get: () => member.self},
       full: {get: () => member.full},
+      incarnation: {get: () => member.incarnation},
+      revision: {get: () => member.revision},
       peers: {value: () => member.peers},
       set: {value: (state: unknown) => member.set(state)},
       send: {value: (message: unknown, to?: PeerId) => member.send(message, to)},

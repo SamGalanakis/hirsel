@@ -158,7 +158,7 @@ try {
     [...peers].map(([id, p]) => `${id}:${p.state ? `${p.state.x},${p.state.y}` : '-'}`).join(' ');
   const room = api.room.packed_consumer.packed_room(undefined, {
     onLost: n => lost.push(n),
-    onPeers: (peers, change) => heard.push(`${change.complete ? 'roster' : 'peers'} ${roster(peers)}`),
+    onPeers: (peers, change) => heard.push(`${change.renewed ? 'roster' : 'peers'} ${roster(peers)}`),
     onMessage: (from, note, direct) => heard.push(`${from} ${direct ? 'direct' : 'room'} ${note.tag} ${roster(room.peers())}`),
   });
   const waitFor = async (done: () => boolean) => {
@@ -195,15 +195,66 @@ try {
   sockets.at(-1)!.onclose?.({code: 1006});
   await waitFor(() => sent.slice(before).some(f => f.tag === 'Subscribe'));
   assert.equal(room.self, undefined);
-  assert.equal(heard.at(-1), 'roster ');
+  assert.equal(heard.at(-1), 'peers 5:-', 'the roster stays as last told across a session end');
   const again = sent.slice(before).find(f => f.tag === 'Subscribe') as Extract<Sent, {tag: 'Subscribe'}>;
   assert(again.values[0] > first);
   await deliver(live({sub: again.values[0], complete: true, you: {tag: 'Some', value: 9}, joined: [[9, caller]]}));
   assert.equal(room.self, 9);
+  assert.deepEqual(heard.at(-1), 'peers 9:-', 'the same incarnation\'s image omits the old admission 5');
   assert.deepEqual(sent.at(-1), {tag: 'Set', values: [again.values[0], {tag: 'Some', value: codec.State2.encode({x: 6, y: 7})}]});
   room.leave();
   await waitFor(() => sent.at(-1)?.tag === 'Unsubscribe');
   assert.deepEqual(sent.at(-1), {tag: 'Unsubscribe', value: again.values[0]});
+
+  // Roster identity (webrtc RTC-8, RUNNER-SPEC Incarnation and revision), by hand: a roster
+  // starts at revision 1 and each admission or removal adds 1. The two little-endian words
+  // carry the 16 incarnation bytes in order.
+  const a: [bigint, bigint] = [0x0807060504030201n, 0x100f0e0d0c0b0a09n], aHex = '0102030405060708090a0b0c0d0e0f10';
+  const b: [bigint, bigint] = [0xf0n, 0x0fn << 56n], bHex = 'f000000000000000000000000000000f';
+  const other = {issuer: 2, subject: new Uint8Array(16).fill(3)};
+  const changes: string[] = [];
+  const life = api.room.packed_consumer.packed_room(undefined, {
+    onPeers: (peers, c) => changes.push(`${c.incarnation === aHex ? 'A' : c.incarnation === bHex ? 'B' : '?'}@${c.revision ?? '-'}`
+      + `${c.renewed ? ' renewed' : ''} +${c.joined} -${c.left} ~${c.set} [${roster(peers)}]`),
+  });
+  const subscribed = async (after: number) => {
+    await waitFor(() => sent.slice(after).some(f => f.tag === 'Subscribe'));
+    return (sent.slice(after).find(f => f.tag === 'Subscribe') as Extract<Sent, {tag: 'Subscribe'}>).values[0];
+  };
+  const reconnect = async () => { const at = sent.length; sockets.at(-1)!.onclose?.({code: 1006}); return subscribed(at); };
+  let id = await subscribed(sent.length - 1);
+  const s11 = {tag: 'Some' as const, value: codec.State2.encode({x: 1, y: 1})};
+  await deliver(live({sub: id, complete: true, you: {tag: 'Some', value: 1}, incarnation: a, revision: 2n, joined: [[1, caller]]}));
+  await deliver(live({sub: id, incarnation: a, revision: 3n, joined: [[2, other]], states: [[2, s11]]}));
+  await deliver(live({sub: id, incarnation: a, revision: 4n, joined: [[3, other]]}));
+  await deliver(live({sub: id, incarnation: a, revision: 5n, left: [3]}));
+  assert.deepEqual([life.incarnation, life.revision, life.self], [aHex, 5n, 1]);
+  assert.deepEqual(changes, ['A@2 renewed +1 - ~ [1:-]', 'A@3 +2 - ~2 [1:- 2:1,1]', 'A@4 +3 - ~ [1:- 2:1,1 3:-]', 'A@5 + -3 ~ [1:- 2:1,1]']);
+
+  // The same incarnation across a reconnect: during the gap the relay removed admission 1
+  // (6) and admitted this client as 4 (7). The image spans two Parts; peer 2 continues with
+  // its state, and peer 1, absent at the snapshot, leaves there.
+  changes.length = 0;
+  id = await reconnect();
+  assert.deepEqual([life.self, life.incarnation, life.revision, roster(life.peers())], [undefined, aHex, 5n, '1:- 2:1,1']);
+  await deliver(live({sub: id, complete: true, you: {tag: 'Some', value: 4}, incarnation: a, revision: 7n, snapshot: false,
+    joined: [[2, other], [4, caller]], states: [[2, s11]]}));
+  assert.equal(life.revision, undefined, 'an image is partial until its snapshot');
+  assert.deepEqual(roster(life.peers()), '1:- 2:1,1 4:-');
+  await deliver(live({sub: id, incarnation: a, revision: 7n}));
+  assert.deepEqual([life.self, life.incarnation, life.revision], [4, aHex, 7n]);
+  assert.deepEqual(life.peers().get(2)!.caller, other);
+  assert.deepEqual(changes, ['A@- +4 - ~2 [1:- 2:1,1 4:-]', 'A@7 + -1 ~ [2:1,1 4:-]']);
+
+  // A new incarnation: the room emptied during the gap and a different admission holds
+  // peer 2 again. The roster is replaced, never merged; revision 3 is two admissions.
+  changes.length = 0;
+  id = await reconnect();
+  await deliver(live({sub: id, complete: true, you: {tag: 'Some', value: 1}, incarnation: b, revision: 3n,
+    joined: [[1, caller], [2, caller]]}));
+  assert.deepEqual([life.self, life.incarnation, life.revision], [1, bHex, 3n]);
+  assert.deepEqual(changes, ['B@3 renewed +1,2 -2,4 ~ [1:- 2:-]']);
+  life.leave();
 } finally {
   await roomClient.close();
 }

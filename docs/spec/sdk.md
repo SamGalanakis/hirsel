@@ -114,7 +114,17 @@ the State and Message types the room registered. The room's live part adds:
 - `self`: this membership's peer id, set by the Part that carries `you`, and
   undefined with `Watch`, while waiting, when `full` or between sessions.
 - `peers()`: the roster, a map from peer id to `{caller, state}`, where `state`
-  is the peer's newest State or undefined.
+  is the peer's newest State or undefined. It holds one incarnation's peers
+  only, so a peer id names one admission, `(incarnation, peer)`.
+- `incarnation`: the roster's life, the 32 lowercase hex digits of the relay's
+  16 incarnation bytes in order, or undefined before the first Part. The relay
+  draws a new one when it creates the roster and when the roster empties, and
+  restarts peer ids at 1 there.
+- `revision`: the roster's membership revision at which `peers()` is complete
+  (the last Part with `snapshot` set). It starts at 1 for each incarnation and
+  rises by one at every admission and removal. It is undefined from a Part
+  that starts a new incarnation or a new membership's image until that
+  image's snapshot.
 - `set(state)`: the newest value wins. `undefined` clears. The SDK writes a
   `Set` only while the socket holds less than one Live frame (64 KiB) of
   unsent bytes, and otherwise checks again on the next `set`, the next frame
@@ -131,17 +141,29 @@ room's registered `state` or `message` bound, because the server closes the
 session with 1002 for such a frame.
 
 The handlers are `onPeers(peers, change)`, with `change` naming the `joined`,
-`left` and `set` peer ids and `complete` when the roster was replaced;
+`left` and `set` peer ids, the room's `incarnation` and `revision` after the
+change, and `renewed` when the Part began a new incarnation;
 `onMessage(from, message, direct)`; `onGap(n)` for messages to this client the
 server dropped; `onLost(n)` for messages from this client that were dropped;
 `onFull()` when the grant holds but the room has no place yet; and `onEnd` as
 for a subscription, once after the server's `Ended`. The SDK applies each
 Part's `joined`, then `states`, then `msgs`, then `left`, so a message's
 sender is in `peers()` when `onMessage` runs. There is no order between
-`Live` and `Batch`. When a session ends, every room's roster empties with a
-`complete` change, and the room resubscribes under a fresh sub id with the
-other subscriptions. Peer ids from an old membership are dead. Parts for a
-room this client left are ignored.
+`Live` and `Batch`.
+
+A Part whose incarnation differs from the room's replaces the roster, never
+merges with it: every earlier peer is in `left`, with `renewed` set, even
+without `complete`. A `complete` Part on the same incarnation starts a new
+membership's image, which may span several Parts. A peer it shows continues
+with its caller and the state the image carries, and is not reported as
+joined. A peer it has not shown by the Part with `snapshot` set has left, and
+is in that Part's `left`. A `full` Part's zero head changes neither the
+incarnation nor the revision. When a session ends, `self` clears, `peers()`,
+`incarnation` and `revision` stay as last told, and the room resubscribes
+under a fresh sub id with the other subscriptions. The next membership's
+first image then continues or replaces the roster. This client's own peer id
+from an old membership is dead. Parts for a room this client left are
+ignored.
 
 ### Optimistic writes
 

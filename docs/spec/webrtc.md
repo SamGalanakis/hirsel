@@ -73,7 +73,7 @@ where this package must use them in a particular way.
 | Synchronously stops ingress and egress, cancels queued RTX, invalidates DTLS and ICE | RTC-7 steps 1 to 5, by session-generation tags on every queue (W14, W15) |
 | Ack only once nothing more can be forwarded for the revoked epoch | RTC-7 acknowledgement: after every unit has applied the fence and every writer has handed off or cancelled its work, with both endpoints rechecked before any later send or retry (W14) |
 | TURN over TLS, or ICE-TCP, for strict firewalls | TURN over a stream with UDP relays, [turn.md](turn.md) TURN-2; ICE-TCP is withdrawn (S8, W17) |
-| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the roster incarnation, revision and snapshot (runner slice R1), the Hirsel room client (F1) and the incarnation and revision in the SDK's room API (F2) |
+| runner.room: unicast, membership revision, targeted kick, expiry, SDK exposure | RTC-8's table: on main except the Hirsel room client (F1). The roster incarnation, revision and snapshot (runner slice R1, 2ec0de5b) and the incarnation and revision in the SDK's room API (`LiveRoom.incarnation` and `revision`, F2) are on main |
 | Idle lease (contract §4) | not this package's: hirsel4-rooms-2301 reports it. The service holds a room membership for each room it routes, so it is affected only if that membership keeps a Place alive |
 
 ## Session shape
@@ -1033,7 +1033,7 @@ decides it from its own state (for example the peer's `S`), and the router never
 
   Revoking every pre-gap session on any loss would also be sound. It is not the end state:
   the relay change costs one 16-byte incarnation, one revision counter and one flag per Part,
-  F1 is unbuilt and the SDK does not yet expose the head (F2), so no consumer migrates, while a blanket revoke would force every
+  F1 is unbuilt and the SDK already exposes the head (F2), so no consumer migrates, while a blanket revoke would force every
   participant in the room through a new ICE and DTLS handshake on every reconnect of the
   service's room session. The proof keeps an unchanged member's media flowing across a gap
   and still fails closed whenever continuity is not proved.
@@ -1053,7 +1053,7 @@ items belongs to hirsel4-rooms-2301's report.
 | Targeted kick | The application withdraws the peer's `Grant` in its admission view, and the grant set's revocation path removes it | none |
 | Per-connection expiry | Built for WebSocket sessions by 7e01e2ee (rooms released at expiry, RUNNER-SPEC "Enforcement") | none |
 | A Hirsel-side room client | **Missing.** `std.websocket` has client framing but no `hirsel.4` session or room client | follow-up F1, which decodes the R1 Part head into `RoomIn.Part` |
-| Room calls in the generated JS SDK | **Built except roster identity.** `client.room` (sdk/client/room.ts) gives unicast and room `send`, the roster and state. sdk/client/wire.ts decodes R1's Part head, but `LiveRoom` exposes neither the incarnation nor the revision | follow-up F2, which exposes the incarnation and revision with the roster |
+| Room calls in the generated JS SDK | **Built.** `client.room` (sdk/client/room.ts) gives unicast and room `send`, the roster and state, and `LiveRoom.incarnation` and `revision` (F2): a new incarnation replaces the roster, and a same-incarnation image continues its peers ([sdk.md](sdk.md#rooms)) | none |
 
 **Runner slice R1 (the relay's roster identity).** In core/programs/runner:
 
@@ -1079,7 +1079,7 @@ The shipped JS SDK reads Live Parts (sdk/client/wire.ts), so R1's Part head chan
 field it reads: the SDK decoder, the frame schema and the frame vectors change with the relay
 in the same commit. No Hirsel-side client reads it yet (F1).
 Until F1 lands, the adapter is driven by a test harness that feeds `RoomIn` and reads
-`RoomOut`. Its laws run that way. The browser end-to-end case waits on F1 and F2.
+`RoomOut`. Its laws run that way. The browser end-to-end case waits on F1.
 
 **Strict firewalls.** Media units listen on UDP only. A browser that cannot reach them over
 UDP uses TURN over TCP or TLS on 443 with a UDP relay ([turn.md](turn.md) TURN-2). The relay is
@@ -1303,7 +1303,7 @@ a land.
   simulcast, and subscribe to each other through the service. This is the interop oracle for
   RTC-2 to RTC-4 against a real DTLS, SRTP and RTCP stack. It covers a layer switch, an
   `audio_forward` gate, a revoke whose subscriber stops receiving at once, and a relayed
-  session over TURN with UDP blocked (turn.md U8). It waits on F1 and F2.
+  session over TURN with UDP blocked (turn.md U8). It waits on F1.
 - **N2 `room_vopr`:** 100 participants over `sim.udp`, with Gilbert-Elliott loss, reordering,
   NAT rebinding, joins, leaves, revokes and target changes from a seed. The invariants are
   RTC-7's, the TLS-8 nonce rules (no `Reused`, `Issued` or `Range` from any sealer), RTC-4's
@@ -1342,7 +1342,7 @@ W19, blocks, because those are soundness reds.
 | **S6** Dynacast and speakers | RTC-6's cross-unit wanted mask and pause delay, the bandwidth-limited effective target with bandwidth pause, the Q16 active-speaker scores, `audio_forward` with per-leg `V` | S5 (remote units' masks) | W11, W12, W13 |
 | **S7** Signaling adapter | RTC-8's `Signal`, `Embed`, `RoomIn`/`RoomOut`, dense ids and epochs, suspend on loss, resume from a proven roster; driven by a harness until F1 | S5; R1 for the end-to-end path (the adapter fails closed without it) | W16 |
 | **S8** withdrawn | ICE-TCP is replaced by TURN over a stream (turn.md TURN-2, slice U8) | — | — |
-| **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1, F2 for N1 | the cost targets |
+| **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7; F1 for N1 | the cost targets |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 
 **S4 decisions.** Gaps the spec left open, decided while S4 was built:
@@ -1401,8 +1401,9 @@ W19, blocks, because those are soundness reds.
 
 - **F1** (runner): a Hirsel-side `hirsel.4` room client, so a Hirsel service can be a room peer
   and feed `RoomIn`, including R1's Part head.
-- **F2** (SDK): expose the roster's incarnation and revision through `LiveRoom`
-  (sdk/client/room.ts). Room calls, unicast `Message`, the roster and state are built.
+- **F2** (SDK): on main. `LiveRoom` exposes the roster's incarnation and revision
+  (sdk/client/room.ts, [sdk.md](sdk.md#rooms)), with room calls, unicast `Message`, the
+  roster and state.
 - **F3** is [turn.md](turn.md): TURN client and relay, long-term credentials, the stream fallback.
 - **Ownership:** the active-speaker detector is this package's (RTC-6), not the rtp lane's.
   The rtp lane parses the RFC 6464 extension.

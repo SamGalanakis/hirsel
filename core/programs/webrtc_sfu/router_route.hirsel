@@ -590,13 +590,16 @@ pub fn accept(mut r: Router, now: u64, take msg: Carried, mut out: peer.Outbox) 
                 return Ok(())
             }
             r.publications[pi].encodings[e].ssrc = m.ssrc
-            if r.publications[pi].encodings[e].rate != rate {
-                r.publications[pi].encodings[e].rate = rate
+            // The home unit's rate and dropped mask: either change reallocates, and a
+            // moved mask points again each down-track it moved (RTC-6).
+            let rated = r.publications[pi].encodings[e].rate != rate
+            r.publications[pi].encodings[e].rate = rate
+            let before = r.publications[pi].dropped
+            r.publications[pi].dropped = dropped
+            if rated || dropped != before {
                 reallocate(mut r, pi, now, mut out)?
             }
-            let before = r.publications[pi].dropped
             if dropped != before {
-                r.publications[pi].dropped = dropped
                 repoint(mut r, pi, before | dropped, now, mut out)?
             }
             spread(mut r, now, pi, m, handle, talking, packet, mut out)

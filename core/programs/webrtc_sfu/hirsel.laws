@@ -16,10 +16,10 @@ webrtc_sfu@1/laws/keyframe_request_coalesces_across_subscribers src=ea22cde041eb
 webrtc_sfu@1/laws/late_answer_goes_out_as_rtx src=d3bd4497e0afad0b sig=e0651aad6b7ce71d run=c2c0c6612d4cbb79 bug=cd27e975fb77fa48 oracle=970f7f7324457219 rows=pending
 webrtc_sfu@1/laws/late_joiner_learns_publications src=37fb089892ffc704 sig=b466809dc38c7d04 run=c7b2a52baff70a63 bug=bc7bd914a47c0f95 oracle=3f6aa183f6cebf51 rows=pending
 webrtc_sfu@1/laws/pacer_holds_back_a_burst src=98aca07b3f7d7b89 sig=41208610a578f2e1 run=c2c0c6612d4cbb79 bug=25b9e138c21ff7c3 oracle=69cb77b6b0d4040f rows=pending
-webrtc_sfu@1/laws/probe_padding_stays_in_budget src=bf27421fae9e6c00 sig=9fc6c122d940c018 run=c2c0c6612d4cbb79 bug=1e2fa0da2f19becd oracle=2c3cbcdc5af2b041 rows=pending
-webrtc_sfu@1/laws/probe_pads_media_without_rtx src=65aa22eab84d810a sig=9fc6c122d940c018 run=c2c0c6612d4cbb79 bug=7ee07bf080b3db94 oracle=b695048da4a0be3e rows=pending
-webrtc_sfu@1/laws/probe_ramps_to_top_layer src=8cdbd3c408dfda80 sig=37779fd9f152e078 run=c2c0c6612d4cbb79 bug=c6a97a5268015a26 oracle=261414b481a8de6d rows=pending
-webrtc_sfu@1/laws/probe_resumes_paused_leg src=c7032edb399cac52 sig=30e4fa09719ea44a run=c2c0c6612d4cbb79 bug=ff4c748775f4b754 oracle=37bb8fd6125eb11c rows=pending
+webrtc_sfu@1/laws/probe_padding_stays_in_budget src=03bb5d7004dc7934 sig=9fc6c122d940c018 run=c2c0c6612d4cbb79 bug=1e2fa0da2f19becd oracle=2c3cbcdc5af2b041 rows=pending
+webrtc_sfu@1/laws/probe_pads_media_without_rtx src=19350d8fe9bca809 sig=9fc6c122d940c018 run=c2c0c6612d4cbb79 bug=7ee07bf080b3db94 oracle=b695048da4a0be3e rows=pending
+webrtc_sfu@1/laws/probe_ramps_to_top_layer src=7df22a0929e7c800 sig=37779fd9f152e078 run=c2c0c6612d4cbb79 bug=c6a97a5268015a26 oracle=261414b481a8de6d rows=pending
+webrtc_sfu@1/laws/probe_resumes_paused_leg src=2c4489e0eb8b497d sig=30e4fa09719ea44a run=c2c0c6612d4cbb79 bug=ff4c748775f4b754 oracle=37bb8fd6125eb11c rows=pending
 webrtc_sfu@1/laws/red_recovers_bursty_loss_10 src=7a98e54f49171d9d sig=374bd3375527ad6e run=c7b2a52baff70a63 bug=513bd4978f532620 oracle=30a91c9f8d207370 rows=pending
 webrtc_sfu@1/laws/red_recovers_bursty_loss_20 src=e6906a4552818a31 sig=374bd3375527ad6e run=c7b2a52baff70a63 bug=e0eb19fd67a493c8 oracle=d8746b772842d1dc rows=pending
 webrtc_sfu@1/laws/red_steps_down_on_a_clean_leg src=7834afcc17a3f6a4 sig=86550b3b98e62c3a run=c2c0c6612d4cbb79 bug=ec31ef3d23898fc9 oracle=cdb21342e05c7c2f rows=pending
@@ -39,8 +39,11 @@ webrtc_sfu@1/laws/sdp_refusals src=3ddf011a8a38e14b sig=761d96d0c07b43f9 run=c2c
 webrtc_sfu@1/laws/sdp_rfc_examples src=81b5ac44fee02f57 sig=b2bbe468b11154ca run=c2c0c6612d4cbb79 bug=e7f7502401bccf8d oracle=86792fafb6d5c439 rows=pending
 webrtc_sfu@1/laws/service_answers_over_the_room src=febc0c50918a23ff sig=aeebcdb785eefbf1 run=0a8864e34a11a72f bug=5cd9251c1d61fe0c oracle=42b0def1a9812cc5 rows=pending
 webrtc_sfu@1/laws/signaling_loss_fails_closed src=8417fb3fa44314d8 sig=6e79e8a0da57dc41 run=c7b2a52baff70a63 bug=1d8c89257f64b087 oracle=1bc13dab3fdd6e00 rows=pending
+webrtc_sfu@1/laws/silent_stream_moves_its_viewers src=a281ebbda3087f63 sig=37779fd9f152e078 run=c2c0c6612d4cbb79 bug=8f8efcf4d03bed97 oracle=768b2f02a319b188 rows=pending
 webrtc_sfu@1/laws/ssrc_survives_switches src=2eaa9177499e2b4b sig=e0d1721ca53a1fac run=c2c0c6612d4cbb79 bug=f2295f10bf707b65 oracle=0c7ec1f582b2fa33 rows=pending
-webrtc_sfu@1/laws/start_estimate_is_the_sessions src=e098f8e7aa5a3bb5 sig=37779fd9f152e078 run=c2c0c6612d4cbb79 bug=777fd669e9ada7c4 oracle=9d96d0a75f019fe2 rows=pending
+webrtc_sfu@1/laws/start_estimate_is_the_sessions src=abc5f71c432ca971 sig=37779fd9f152e078 run=c2c0c6612d4cbb79 bug=777fd669e9ada7c4 oracle=9d96d0a75f019fe2 rows=pending
+webrtc_sfu@1/laws/step_cost_is_never_negative src=e12241099e672f6e sig=bb2b4b4ebaa59bb5 run=c2c0c6612d4cbb79 bug=33df041906d306b9 oracle=83c305567fd95efd rows=pending
+webrtc_sfu@1/laws/stopped_stream_is_not_priced src=499142ec5fe2f2d0 sig=bb2b4b4ebaa59bb5 run=c2c0c6612d4cbb79 bug=3eb234824b06a495 oracle=765e09432da7d9e7 rows=pending
 webrtc_sfu@1/laws/unauthenticated_changes_nothing src=10a3b73a68e37c4c sig=67b4e7ecb50d7e1a run=c2c0c6612d4cbb79 bug=6c3f1522e1c86436 oracle=5047e9c0d66829af rows=pending
 webrtc_sfu@1/laws/unit_certificates_differ_in_serial src=cef9317ad79e050c sig=f66461b6312874d7 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 webrtc_sfu@1/laws/units_on_loopback src=1d169c7aa0ee8727 sig=4b513a6f9742ecc6 run=862f819be0a1a67f bug=9a6be0cc5514abca oracle=0610fd3a587d9e38 rows=pending

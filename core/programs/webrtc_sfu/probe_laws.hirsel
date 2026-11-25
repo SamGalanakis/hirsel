@@ -78,18 +78,23 @@ fn probe_room_from(seed: u64, limits: router.RoomLimits, rtx: Bytes, start_bps: 
 // its payload's end (20 bytes of header with MID and RID), a keyframe filled with the
 // encoding's byte.
 fn publish_one(mut w: Probed, e: u64, size: u64, now: u64) {
-    let rids =[b"q", b"h", b"f"]
     let fills =[FILL_Q, FILL_H, FILL_F]
+    publish_from(mut w.r, mut w.p, mut w.seqs, e, size, fills[e], now, mut w.out)
+}
+
+// The same from publisher `p`, filled with `fill`.
+fn publish_from(mut r: router.Router, mut p: Client, mut seqs: List[u16], e: u64, size: u64, fill: u8, now: u64, mut out: peer.Outbox) {
+    let rids =[b"q", b"h", b"f"]
     let mut body = vp8_key()
     while list.len(body) + 20 < size {
-        list.push(mut body, fills[e])
+        list.push(mut body, fill)
     }
-    let seq = w.seqs[e]
-    w.seqs[e] = seq + 1
+    let seq = seqs[e]
+    seqs[e] = seq + 1
     let ssrc = E0 + int.narrow(e)
     let ts: u32 = int.truncate(now / MS * 90)
-    let packet = rid_media(mut w.p.cs, ssrc, seq, ts, rids[e], body)
-    feed(mut w.r, now, w.p.who, w.p.at, packet, mut w.out)
+    let packet = rid_media(mut p.cs, ssrc, seq, ts, rids[e], body)
+    feed(mut r, now, p.who, p.at, packet, mut out)
 }
 
 // Everything the router sent the subscriber since the last call arrives at `now`
@@ -161,6 +166,11 @@ fn feed_back(mut w: Probed, now: u64) {
 // Run from 0 to `until` ms: the publisher sends `shape`, the subscriber subscribes
 // to `target` at `SUBSCRIBE_AT` and, when `feedback`, answers every 50 ms after.
 fn run(mut w: Probed, shape: Shape, target: router.Target, feedback: bool, until: u64) {
+    run_gap(mut w, shape, target, feedback, until, 0, 0)
+}
+
+// The same, with f silent from `quiet` ms until `back` ms.
+fn run_gap(mut w: Probed, shape: Shape, target: router.Target, feedback: bool, until: u64, quiet: u64, back: u64) {
     let room = room_id()
     let pa = result.unwrap(router.publish(mut w.r, room, w.p.who, 0))
     let sub = SUBSCRIBE_AT * MS
@@ -179,7 +189,7 @@ fn run(mut w: Probed, shape: Shape, target: router.Target, feedback: bool, until
                     publish_one(mut w, 1, shape.h, now)
                 }
             }
-            if shape.f != 0 {
+            if shape.f != 0 && (now < quiet * MS || now >= back * MS) {
                 publish_one(mut w, 2, shape.f, now)
             }
             next_pub += 10 * MS
@@ -428,6 +438,167 @@ fn start_estimate_is_the_sessions() -> Result[(), router.RouterError] {
     run(mut middle, shape_ramp(), top_f(), false, SUBSCRIBE_AT + 500)
     if heard_mask(middle) != 2 {
         fail("from a 600,000 start the down-track did not hear h alone")
+    }
+    Ok(())
+}
+
+// A's fills in `two_publishers`.
+const FILL_AQ: u8 = 0x61
+
+const FILL_AH: u8 = 0x62
+
+const FILL_AF: u8 = 0x63
+
+// W24's room with two simulcast publishers, A (published first, so the lower id)
+// and B (`w.p`), and a subscriber with two receiving sections whose estimate starts
+// at `start_bps`. A sends q and h as `shape_ramp` and f in `a_f`-byte packets every
+// 10 ms (0 sends none); B sends all three as `shape_ramp`. The subscriber subscribes
+// to A on its first section and B on its second, both at f, at `SUBSCRIBE_AT`, and
+// gives no feedback. Returns what it heard.
+fn two_publishers(seed: u64, until: u64, a_f: u64, start_bps: u64) -> List[Heard] {
+    let room = room_id()
+    let mut r = router.router(provide.random(seed))
+    result.unwrap(router.open_room(mut r, room, room_limits()))
+    let out = result.unwrap(peer.outbox(262144, 256))
+    let mut a = admit(mut r, seed + 1, simulcast_offer(), 1)
+    let p = admit(mut r, seed + 3, simulcast_offer(), 3)
+    let mut offer = minimal_head(b" d e")
+    recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+    recv_section(mut offer, b"e", b"96", b"97", b"1", b"3")
+    let s = admit_limits(mut r, seed + 2, offer, 2, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: start_bps))
+    let mut a_seqs: List[u16] = list.new()
+    let mut seqs: List[u16] = list.new()
+    for k in 0u16 .. 3u16 {
+        list.push(mut a_seqs, 100 * k)
+        list.push(mut seqs, 100 * k)
+    }
+    let mut w = Probed(r: take r, out: take out, p: take p, s: take s, log: result.unwrap(rtp.twcc.recv_log(1024)), credit: POLICE_DEPTH * 8 * 1000000000, filled: 0, media: 0, seqs: take seqs, heard: list.new())
+    let pa = result.unwrap(router.publish(mut w.r, room, a.who, 0))
+    let pb = result.unwrap(router.publish(mut w.r, room, w.p.who, 0))
+    let sub = SUBSCRIBE_AT * MS
+    let mut now = 0u64
+    while now < until * MS {
+        if now % (20 * MS) == 0 {
+            publish_from(mut w.r, mut a, mut a_seqs, 0, 300, FILL_AQ, now, mut w.out)
+            publish_from(mut w.r, mut a, mut a_seqs, 1, 1250, FILL_AH, now, mut w.out)
+            publish_one(mut w, 0, 300, now)
+            publish_one(mut w, 1, 1250, now)
+        }
+        if a_f != 0 {
+            publish_from(mut w.r, mut a, mut a_seqs, 2, a_f, FILL_AF, now, mut w.out)
+        }
+        publish_one(mut w, 2, 1250, now)
+        if now == sub {
+            result.unwrap(router.subscribe(mut w.r, room, w.s.who, pa, 0, top_f(), now, mut w.out))
+            result.unwrap(router.subscribe(mut w.r, room, w.s.who, pb, 1, top_f(), now, mut w.out))
+        }
+        let mut wake = router.poll(mut w.r, now, mut w.out)
+        let mut again = 0u64
+        while wake == Some(now) && again < 64 {
+            wake = router.poll(mut w.r, now, mut w.out)
+            again += 1
+        }
+        arrive(mut w, now)
+        now += 10 * MS
+    }
+    replace(mut w.heard, list.new())
+}
+
+/// bug: price a step to an encoding the publisher never sent at its rate of 0, so the cost is negative (0 less the rate of the level it leaves): the down-track is given the silent encoding over the live one below it and freezes waiting for a keyframe that never comes, and the negative cost hands its budget to the next publication, which is raised past what the estimate carries.
+/// oracle: RTC-6's allocation by hand, with no feedback so the estimate stays at its 1,200,000 start. Rates from packet sizes: q 120,000, h 500,000 and B's f 1,000,000 bit/s; A's f sent nothing in the window that closed at 1,000 ms and was never measured, so it is stopped and the allocation passes over it. Ascending id, A first. Round 1: A's q 120,000 and B's q 120,000 leave 960,000. Round 2: A's h and B's h at 380,000 each leave 200,000. Round 3: A has no next step (its f is stopped) and B's f costs 500,000, over 200,000. So A forwards h and B forwards h, each heard from its first keyframe after subscribe (h every 20 ms), and the subscriber never hears q or B's f. Pricing A's f at 0 - 500,000 instead leaves A pending on f, heard never, and 700,000 for B's f, which it takes.
+@test
+fn stopped_stream_is_not_priced() -> Result[(), router.RouterError] {
+    let sub = SUBSCRIBE_AT * MS
+    let heard = two_publishers(2760, SUBSCRIBE_AT + 500, 0, 1200000)
+    let mut a_h = false
+    let mut b_h = false
+    for x in heard {
+        if x.fill == FILL_F {
+            fail("B's down-track was given f on a budget A's silent f made")
+        }
+        if x.fill == FILL_AH {
+            a_h = true
+        } else if x.fill == FILL_H {
+            b_h = true
+        } else if x.fill != 0 {
+            fail("a down-track forwarded another encoding than h")
+        }
+        if x.at > sub + 20 * MS && !(a_h && b_h) {
+            fail("A's or B's down-track heard no h by its first keyframe after subscribe")
+        }
+    }
+    if !(a_h && b_h) {
+        fail("A's down-track waited on its silent f instead of forwarding h")
+    }
+    Ok(())
+}
+
+/// bug: keep forwarding, or waiting on, a stream the publisher stopped without a layers allocation saying so (the freeze); treat one quiet window as a stop; or leave the subscriber on the lower stream once the publisher resumes the stopped one.
+/// oracle: RTC-6 by hand, with no feedback so the estimate stays at 1,200,000, and the rates of `shape_ramp` (q 120,000, h 500,000, f 1,000,000; the window closing at 2,000 ms measures f's last half second at 500,000). The down-track is given f at subscribe and hears only f until f's last packet at 1,490 ms. Rate windows close at 2,000, 3,000 and 4,000 ms; f had packets in the first, none in the next two, so it is stopped at the q packet of 4,000 ms. The allocation passes over f, gives h (budget 1,200,000 - 120,000 - 380,000), and h's keyframe at 4,000 ms switches the down-track: nothing is heard in [1,500, 4,000) and h from 4,000 ms. f's packet at 5,000 ms ends the stop; f at 500,000 costs 0 over h and is given again, and that packet, a keyframe, switches the down-track back: after 5,000 ms only f is heard.
+@test
+fn silent_stream_moves_its_viewers() -> Result[(), router.RouterError] {
+    let mut w = probe_room_from(2770, room_limits(), b"97", 1200000)
+    run_gap(mut w, shape_ramp(), top_f(), false, 5500, 1500, 5000)
+    let mut h_at: Option[u64] = None
+    let mut f_back = false
+    for x in w.heard {
+        if x.fill == 0 {
+            continue
+        }
+        let ms = x.at / MS
+        if ms < 1500 && x.fill != FILL_F {
+            fail("before f stopped the down-track heard another encoding than f")
+        }
+        if ms >= 1500 && ms < 4000 {
+            fail("the down-track heard media while f was quiet and not yet stopped")
+        }
+        if ms >= 4000 && ms < 5000 && x.fill != FILL_H {
+            fail("after f stopped the down-track heard another encoding than h")
+        }
+        if x.fill == FILL_H && h_at == None {
+            h_at = Some(ms)
+        }
+        if ms > 5000 && x.fill != FILL_F {
+            fail("after f resumed the down-track stayed off it")
+        }
+        if ms >= 5000 && x.fill == FILL_F {
+            f_back = true
+        }
+    }
+    if h_at != Some(4000) {
+        fail("the down-track did not move to h at the window that stopped f")
+    }
+    if !f_back {
+        fail("the down-track did not go back to f when the publisher resumed it")
+    }
+    Ok(())
+}
+
+/// bug: price a step to an encoding whose rate is below the level it leaves (a publisher whose top stream runs leaner than the one under it, or a remote unit still holding a stale rate) at that negative difference, so the step frees budget and the next publication is raised past what the estimate carries.
+/// oracle: RTC-6's allocation by hand, with no feedback so the estimate stays at its 1,300,000 start. A sends q 120,000, h 500,000 and f in 300-byte packets every 10 ms, 240,000 bit/s; B sends `shape_ramp`, f at 1,000,000. Ascending id, A first. Round 1: both q at 120,000 leave 1,060,000. Round 2: both h at 380,000 leave 300,000. Round 3: A's f costs max(240,000 - 500,000, 0) = 0 and is taken; B's f costs 500,000, over 300,000. So A forwards f and B h, each from its first keyframe after subscribe, and B's f is never heard. At the negative cost A's step frees 260,000, leaving 560,000, and B takes f.
+@test
+fn step_cost_is_never_negative() -> Result[(), router.RouterError] {
+    let sub = SUBSCRIBE_AT * MS
+    let heard = two_publishers(2780, SUBSCRIBE_AT + 500, 300, 1300000)
+    let mut a_f = false
+    let mut b_h = false
+    for x in heard {
+        if x.fill == FILL_F {
+            fail("B's down-track was given f on budget A's cheaper f freed")
+        }
+        if x.fill == FILL_AF {
+            a_f = true
+        } else if x.fill == FILL_H {
+            b_h = true
+        } else if x.fill != 0 {
+            fail("a down-track forwarded another encoding than A's f or B's h")
+        }
+        if x.at > sub + 20 * MS && !(a_f && b_h) {
+            fail("A's f or B's h was not heard by its first keyframe after subscribe")
+        }
+    }
+    if !(a_f && b_h) {
+        fail("A's down-track did not reach its f, or B's its h")
     }
     Ok(())
 }

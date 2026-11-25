@@ -2,7 +2,6 @@
 // A `Build` becomes a session on the unit the adapter named: the server's answer to the
 // offer, on fresh ICE credentials and this unit's address and certificate, and the
 // session parked there for its `Admit`.
-
 /// What one unit builds sessions with: its DTLS identity, shared into each session; the
 /// address its socket is bound to, which is each session's host candidate; and the SDP
 /// policy and per-session limits.

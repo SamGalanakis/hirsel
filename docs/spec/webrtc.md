@@ -56,6 +56,13 @@ video section the browser offered `recvonly`, so Firefox, which offers none, sta
 RTC-4 draws a FlexFEC SSRC per video down-track and re-offers its `FEC-FR` pair; RTC-5
 protects keyframes and base-layer frames per leg, paced behind the group. Law W30, N1
 `flexfec_per_leg`.
+Amended 2026-11-25 (webrtc-dynacast-rtx-polish-2717): RTC-3's `PeerLimits` gains
+`start_bps`, the estimate a session starts from. In RTC-6, an encoding the publisher
+stops without a layers allocation, by sending nothing for two rate windows, is dropped like
+one its allocation stops. Allocation steps over dropped encodings and never prices a step
+below 0, so a silent or cheaper stream can neither freeze a leg nor pay for another
+publication's step. A dropped encoding up to a target stays in the local mask so that the
+publisher can resume it.
 
 This chapter specifies three layers, each sans-IO:
 
@@ -981,11 +988,13 @@ for that subscriber:
    never lowered.
 3. Every other video down-track starts at `Off`.
 4. In ascending publication ID, round after round, each down-track is raised one step if
-   the step fits in the remaining budget. A step is the next encoding at or below its
-   target, lowest first, starting from `Off`, and costs that encoding's ingress rate (its
-   planned rate from the publisher's layers allocation where known, else its measured
-   rate) minus the rate of the level it leaves. The first step, from `Off` to the lowest
-   encoding, is always taken unless the room declares `pause`; when it does not fit, the
+   the step fits in the remaining budget. A step goes to the next encoding at or below its
+   target that is not dropped (below), lowest first, starting from `Off`; from `Off` with
+   none, to the lowest encoding. It costs that encoding's ingress rate (its planned rate
+   from the publisher's layers allocation where known, else its measured rate) minus the
+   rate of the level it leaves, and never less than 0, so no step pays for another. A
+   down-track with no next step stays where it is. The first step is always taken unless
+   the room declares `pause`; when it does not fit, the
    remaining budget becomes 0. With `pause`, a first step that does not fit is not taken,
    and the down-track stays `Off`. A
    down-track whose later step does not fit stays where it is for the rest of the
@@ -999,9 +1008,11 @@ that goes `Off` on a budget sends no media, so only a probe can raise its estima
 The result is deterministic and computable by hand.
 
 **Probing.** When the computation leaves any video down-track of the subscriber below its
-target's encoding (`Off` included), the subscriber's **want** is `needed + needed / 4`,
+target's reach (`Off` included), the subscriber's **want** is `needed + needed / 4`,
 where `needed` is the rate of every audio down-track plus, for each video down-track with a
-`Layer` target, the measured rate of its target's encoding; otherwise the want is 0. The
+`Layer` target, the rate of its target's **reach**, the highest encoding at or below the
+target that is not dropped (else the lowest); a down-track below its reach is short.
+Otherwise the want is 0. The
 quarter is headroom for the measurement (TWCC's 250 µs arrival quantum). Each poll, a
 subscriber whose want exceeds its estimate asks its session to probe. The session asks
 rtp's `bwe.probe(want, now)` (RTP-9) and hands any cluster to its pacer (RTP-10), and
@@ -1039,20 +1050,26 @@ selection below). A stream the
   publisher stops keeps its last planned rate, so un-pausing it is priced before any packet
   is measured. A changed planned rate reallocates the publication's down-tracks.
 - **Dropped streams.** An encoding is **dropped** when the publication's published mask
-  has it on and the newest allocation leaves it inactive: the publisher stopped it on its
-  own. An encoding the mask turned off is paused by the router, not dropped. Turning an
-  encoding on again clears its drop until the next allocation says otherwise.
+  has it on and the publisher stopped it on its own: the newest allocation leaves it
+  inactive, or it sent nothing in the last two closed rate windows (one, for an encoding
+  never measured) while the publication sent, as LiveKit's stream tracker marks a layer
+  stopped. Its next packet, or an allocation that makes it active, ends the drop. An
+  encoding the mask turned off is paused by the router, not dropped. Turning an encoding on
+  again clears its drop until its next allocation or rate windows say otherwise.
 - **Moving away.** A down-track whose effective encoding is dropped forwards the highest
   live encoding below it, else the lowest live one above it, at its own spatial and
   temporal layers; with none live it stays. When the dropped set changes, the home unit
-  points each affected local down-track again at once, which asks for the new encoding's
-  keyframe, so it switches at the next switch point with no freeze or pause-delay wait.
-  Each `Media` message carries the dropped set and the planned-or-measured rate to the
-  remote units, which repoint their own down-tracks when the set changes.
-- **Demand is unchanged.** The wanted mask and the budget still count the effective target,
-  not the encoding a dropped one forwards. So a stopped encoding stays wanted, and the
-  publisher can resume it, and while it is dropped the budget counts its last planned rate,
-  an overcount that lasts only until the publisher resumes it or the target changes.
+  reallocates its local subscribers of the publication and points each affected local
+  down-track again at once, which asks for the new encoding's keyframe, so it switches at
+  the next switch point with no freeze or pause-delay wait. Each `Media` message carries
+  the dropped set and the planned-or-measured rate to the remote units, which do the same
+  with their own down-tracks when the set changes.
+- **Demand stays on the target.** Allocation never gives a dropped encoding while a step to
+  a live one exists, and never prices one, so a stale or unmeasured rate can neither pay
+  for another down-track's step nor leave a leg waiting on a stream that is not coming. A
+  local mask still holds every dropped encoding at or below a down-track's target, so a
+  stopped encoding stays wanted and the publisher can resume it; on its resume the
+  allocation takes the step again at its known rate.
 
 `current` moves to the effective target only at a switch point, by the rules of the map
 above, and only through `Rewrite`. A simulcast change (another encoding) happens at the
@@ -1080,7 +1097,8 @@ at once cost one request. The router calls `keyframe_seen` at each keyframe it r
 
 **Publisher pause (dynacast).** For each publication, each unit computes its **local
 wanted mask**: bit `e` is set when one of its down-tracks of the publication has an
-effective target, a current layer or a pending layer on encoding `e`. An old encoding still
+effective target, a current layer or a pending layer on encoding `e`, or a target at or
+above a dropped encoding `e` (below), so the publisher can resume it. An old encoding still
 held during a pending switch keeps its bit, and an explicit `Off` sets none. A unit sends its
 local mask to the publication's home unit whenever the mask changes (`Wanted(P, unit,
 mask)`). The home unit keeps the latest mask from every unit, and the **wanted mask** is
@@ -1707,7 +1725,13 @@ unless named otherwise.
   `start_estimate_is_the_sessions` covers the start estimate in W24's room with no
   feedback: from a 1.2 Mbps `start_bps` the down-track hears f alone from its first
   keyframe, and from 600 kbps h alone. It was red on main, which started every session at
-  300 kbps.
+  300 kbps. `stopped_stream_is_not_priced` has two publishers, A whose f is never sent and
+  B, from a 1.2 Mbps start: both forward h, as RTC-6's rounds give by hand; on main A's
+  silent f cost 0 − 500 kbps, A waited on it forever and the freed budget gave B f.
+  `silent_stream_moves_its_viewers` stops f with no layers allocation at 1.5 s: the
+  down-track hears nothing until the rate window that closes at 4 s marks f stopped, h
+  from that window's h keyframe, and f again from f's first packet back at 5 s; on main it
+  froze on f until f returned.
 - **W25 `e2ee_routes_on_clear_bytes`.** *Harness:* `core/programs/webrtc_sfu/e2ee_laws.hirsel`,
   W9's VP8 three-encoding simulcast with temporal layers, H.264 simulcast, VP9 L3T3 and AV1
   L3T3 scenes with their target changes (AV1's at the 20th packet), and an Opus publication
@@ -1997,8 +2021,11 @@ W12 and W13 in `speaker_laws.hirsel`):
   packet (not repairs), times 8. A window that closes sets the rate of each encoding that had
   packets in it, so a paused encoding keeps its last rate. Each `Media` message carries its
   encoding's rate (planned where known, else measured) and the publication's dropped set
-  to the remote units; there is no separate rate or allocation message. An unmeasured
-  encoding costs 0, so a down-track is lowered only once its rates are known.
+  to the remote units; there is no separate rate or allocation message. A window that
+  closes also counts, for each published encoding that had no packets in it, a window
+  toward its stop (Dropped streams, above); its next packet resets the count. Before the
+  first window closes no encoding is measured and each costs 0, so a down-track is lowered
+  only once its rates are known.
 - **Effective target.** A lowered video target is `Layer(e', s, t)` with the target's own
   `s` and `t`. Audio's effective target is its target. A held audio down-track keeps its mask
   bit, so the gate never pauses a publisher's audio. Allocation runs on every poll for every

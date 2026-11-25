@@ -18,6 +18,10 @@ const TICK_NS: u64 = 400000000
 
 const RATE_NS: u64 = 1000000000
 
+// RTC-6: the closed rate windows in a row without a packet after which a measured
+// stream counts as stopped (a stream never measured: one).
+const STOP_WINDOWS: u8 = 2
+
 const TOP: u64 = 8
 
 const MS_NS: u64 = 1000000
@@ -69,8 +73,8 @@ pub fn speaker_score(r: Router, room: peer.RoomId, p: PublicationId) -> Option[i
 // ---- The wanted mask ----
 // This unit's local wanted mask of publication `pi`: bit `e` is set when one of its
 // down-tracks of the publication has an effective target, a current layer or a
-// pending layer on encoding `e`. A rebind's old publication keeps its bits until
-// the switch, through the current layer.
+// pending layer on encoding `e`, or a target at or above a dropped encoding `e`. A
+// rebind's old publication keeps its bits until the switch, through the current layer.
 fn local_mask(r: Router, pi: u64) -> u8 {
     let room = r.publications[pi].room
     let id = r.publications[pi].id
@@ -88,6 +92,13 @@ fn local_mask(r: Router, pi: u64) -> u8 {
             if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].effective {
                 let wide: u64 = int.widen(e)
                 mask = mask | (1u64 << wide)
+            }
+            // A stream the publisher stopped at or below the target stays wanted, so
+            // it can resume: the allocation passes over it while it is dropped.
+            if let Layer(encoding: t, spatial: _, temporal: _) = r.downs[d].target {
+                let top: u64 = int.widen(t)
+                let dropped: u64 = int.widen(r.publications[pi].dropped)
+                mask = mask | (dropped & ((2u64 << top) - 1))
             }
         }
         let Some(mi) = member_at(r, room, r.downs[d].sub) else {
@@ -166,8 +177,10 @@ fn published(mut r: Router, pi: u64, now: u64) -> Option[u64] {
             r.publications[pi].encodings[e].since = None
             if !r.publications[pi].encodings[e].on {
                 r.publications[pi].encodings[e].on = true
-                // The publisher's next allocation tells whether it resumed the stream.
+                // The publisher's next allocation and packets tell whether it resumed
+                // the stream.
                 r.publications[pi].encodings[e].idle = false
+                r.publications[pi].encodings[e].empty = 0
                 changed = true
             }
             continue
@@ -194,15 +207,8 @@ fn published(mut r: Router, pi: u64, now: u64) -> Option[u64] {
         layers(mut r, pi)
         // A stream the published mask turned off or on again is paused or resumed by
         // the router, not stopped by the publisher: it leaves the dropped mask, and
-        // no target was on it (its bit was unwanted), so none moves.
-        let mut on = 0u64
-        for e in 0u64 .. list.len(r.publications[pi].encodings) {
-            if r.publications[pi].encodings[e].on && r.publications[pi].encodings[e].idle {
-                on = on | (1u64 << e)
-            }
-        }
-        let wide: u64 = int.widen(r.publications[pi].dropped)
-        r.publications[pi].dropped = int.narrow(wide & on)
+        // no target was at or above it (its bit was unwanted), so none moves.
+        r.publications[pi].dropped = r.publications[pi].dropped & stopped(r, pi)
     }
     next
 }
@@ -237,6 +243,20 @@ fn rate_of(r: Router, pi: u64, e: u64) -> i64 {
     int.narrow(r.publications[pi].encodings[e].rate)
 }
 
+// The encoding a target on encoding `top` can reach: the highest at or below it that
+// the publisher has not stopped, else the lowest (RTC-6).
+fn reach(p: Publication, top: u64) -> u64 {
+    let mask: u64 = int.widen(p.dropped)
+    let mut e = top
+    while (mask >> e) & 1 == 1 {
+        if e == 0 {
+            return 0
+        }
+        e -= 1
+    }
+    e
+}
+
 fn id_of(p: PublicationId) -> u64 {
     let PublicationId(n) = p
     n
@@ -245,13 +265,15 @@ fn id_of(p: PublicationId) -> u64 {
 // RTC-6's allocation for local member `mi`: the budget is its estimate less the rate
 // of every audio down-track, which is never lowered; every other down-track with a
 // target starts at `Off` and, in ascending publication id, round after round, is
-// raised one encoding when the step's cost fits what is left. Unless the room declares
-// pause, the first step, to the lowest encoding, is taken whether it fits or not (what
-// is left is then 0), so the budget never pauses a down-track. A down-track whose
-// later step does not fit stays where it is. Each down-track whose result changed, and
-// `force`, is pointed at it. When one stays below its target's encoding, the member's
-// `want` is the rate that carries every target plus a quarter, for `dynamics` to probe
-// toward; otherwise it is 0.
+// raised one step when the step's cost fits what is left. A step goes to the next
+// encoding up to the target that the publisher has not stopped (from `Off` with none,
+// to the lowest), and costs its rate less the rate of the level it leaves, never less
+// than 0. Unless the room declares pause, the first step is taken whether it fits or
+// not (what is left is then 0), so the budget never pauses a down-track. A down-track
+// whose later step does not fit, or that has no next step, stays where it is. Each
+// down-track whose result changed, and `force`, is pointed at it. When one stays below
+// the encoding its target can reach, the member's `want` is the rate that carries
+// every target plus a quarter, for `dynamics` to probe toward; otherwise it is 0.
 fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     let room = r.members[mi].who.room
     let who = r.members[mi].who.gen
@@ -281,7 +303,7 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
             continue
         }
         if let Layer(encoding: e, spatial: _, temporal: _) = r.downs[d].target {
-            needed += rate_of(r, pi, int.widen(e))
+            needed += rate_of(r, pi, reach(r.publications[pi], int.widen(e)))
         }
         if n == 64 {
             continue
@@ -319,20 +341,34 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
                 stuck[k] = true
                 continue
             }
-            let cost = rate_of(r, pi, at) - if at == 0 {
+            // The next encoding the publisher has not stopped; a stopped one is never
+            // priced, so a stale or absent rate cannot pay for another step.
+            let dropped: u64 = int.widen(r.publications[pi].dropped)
+            let mut next = at
+            while next <= wide && (dropped >> next) & 1 == 1 {
+                next += 1
+            }
+            if next > wide {
+                if at != 0 {
+                    stuck[k] = true
+                    continue
+                }
+                next = 0
+            }
+            let from = if at == 0 {
                 0i64
             } else {
                 rate_of(r, pi, at - 1)
             }
-            // The first step, to the lowest encoding, is always taken unless the room
-            // declares pause.
+            let cost = order.max(rate_of(r, pi, next) - from, 0i64)
+            // The first step is always taken unless the room declares pause.
             if (at == 0 && !pause) || cost <= budget {
                 budget = if cost <= budget {
                     budget - cost
                 } else {
                     0
                 }
-                level[k] = at + 1
+                level[k] = next + 1
                 raised = true
             } else {
                 stuck[k] = true
@@ -344,8 +380,9 @@ fn allocate(mut r: Router, mi: u64, force: Option[u64], now: u64, mut out: peer.
     for k in 0u64 .. n {
         let d = video[k]
         if let Layer(encoding: top, spatial: _, temporal: _) = r.downs[d].target {
-            let wide: u64 = int.widen(top)
-            short = short || level[k] <= wide
+            if let Some(pi) = publication_at(r, room, r.downs[d].publication) {
+                short = short || level[k] <= reach(r.publications[pi], int.widen(top))
+            }
         }
         if level[k] != 0 {
             if let Layer(encoding: _, spatial: s, temporal: t) = r.downs[d].target {
@@ -445,7 +482,7 @@ fn forwardable(p: Publication, t: Target) -> Target {
 // the same allocation on every stream, each with that stream's index, so one whose
 // index is not the encoding it came on is not this section's stream order and is
 // left alone; the empty allocation names no stream. An active stream's planned rate
-// replaces its measured one; a published stream it leaves inactive is dropped.
+// replaces its measured one; a published stream it leaves inactive is stopped.
 fn planned(mut r: Router, pi: u64, encoding: u8, plan: peer.Plan, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     if plan.active != 0 && plan.stream != encoding {
         return Ok(())
@@ -464,19 +501,37 @@ fn planned(mut r: Router, pi: u64, encoding: u8, plan: peer.Plan, now: u64, mut 
             }
         }
     }
+    drops(mut r, pi, moved, now, mut out)
+}
+
+// RTC-6's stopped streams of publication `pi` on its home unit, one bit per
+// encoding: a published stream the publisher's last allocation left inactive, or that
+// sent nothing in the last `STOP_WINDOWS` closed rate windows (one, for a stream never
+// measured) while the publication sent.
+fn stopped(r: Router, pi: u64) -> u8 {
     let mut mask = 0u64
     for e in 0u64 .. list.len(r.publications[pi].encodings) {
-        if r.publications[pi].encodings[e].idle && r.publications[pi].encodings[e].on {
+        let empty = r.publications[pi].encodings[e].empty
+        let unmeasured = r.publications[pi].encodings[e].rate == 0 && r.publications[pi].encodings[e].planned == 0
+        let silent = empty >= STOP_WINDOWS || (empty > 0 && unmeasured)
+        if r.publications[pi].encodings[e].on && (r.publications[pi].encodings[e].idle || silent) {
             mask = mask | (1u64 << e)
         }
     }
+    int.narrow(mask)
+}
+
+// The home unit's dropped mask follows the stopped streams: a change reallocates
+// the local subscribers, as a changed rate (`moved`) does, and points again each
+// down-track the mask moved.
+fn drops(mut r: Router, pi: u64, moved: bool, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     let before = r.publications[pi].dropped
-    let after: u8 = int.narrow(mask)
-    if moved {
+    let after = stopped(r, pi)
+    r.publications[pi].dropped = after
+    if moved || after != before {
         reallocate(mut r, pi, now, mut out)?
     }
     if after != before {
-        r.publications[pi].dropped = after
         repoint(mut r, pi, before | after, now, mut out)?
     }
     Ok(())
@@ -538,7 +593,8 @@ fn rebalance(mut r: Router, now: u64, mut out: peer.Outbox) -> Result[(), Router
 // The home unit's ingress rate per encoding, in 1 s windows from the publication's
 // first packet: the bytes of each media packet up to its payload's end count in the
 // window it arrives in, and a closing window sets the rate of every encoding that
-// had packets in it. The others keep theirs.
+// had packets in it. The others keep theirs, and a published one counts the window
+// toward its stop; its next packet resumes it.
 fn measure(mut r: Router, pi: u64, e: u64, len: u64, now: u64, mut out: peer.Outbox) -> Result[(), RouterError] {
     let start = match r.publications[pi].window {
         Some(t) => t,
@@ -552,6 +608,9 @@ fn measure(mut r: Router, pi: u64, e: u64, len: u64, now: u64, mut out: peer.Out
         for k in 0u64 .. list.len(r.publications[pi].encodings) {
             let n = r.publications[pi].encodings[k].counted
             if n == 0 {
+                if r.publications[pi].encodings[k].on && r.publications[pi].encodings[k].empty < STOP_WINDOWS {
+                    r.publications[pi].encodings[k].empty += 1
+                }
                 continue
             }
             if n * 8 != r.publications[pi].encodings[k].rate {
@@ -561,12 +620,16 @@ fn measure(mut r: Router, pi: u64, e: u64, len: u64, now: u64, mut out: peer.Out
             r.publications[pi].encodings[k].counted = 0
         }
         r.publications[pi].window = Some(start + (now - start) / RATE_NS * RATE_NS)
-        if changed {
-            reallocate(mut r, pi, now, mut out)?
-        }
+        r.publications[pi].encodings[e].counted += len
+        r.publications[pi].encodings[e].empty = 0
+        return drops(mut r, pi, changed, now, mut out)
     }
     r.publications[pi].encodings[e].counted += len
-    Ok(())
+    if r.publications[pi].encodings[e].empty == 0 {
+        return Ok(())
+    }
+    r.publications[pi].encodings[e].empty = 0
+    drops(mut r, pi, false, now, mut out)
 }
 
 // ---- Scores ----

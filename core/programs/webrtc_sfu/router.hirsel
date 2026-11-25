@@ -67,6 +67,9 @@ type Encoding {
     planned: u64,
     // On the home unit, whether the last allocation left this stream inactive.
     idle: bool,
+    // On the home unit, the closed rate windows in a row, up to `STOP_WINDOWS`, in
+    // which the published stream sent nothing while the publication sent (RTC-6).
+    empty: u8,
     // On the home unit, the dynacast mask (RTC-6): the units whose local mask holds
     // this encoding, whether its bit is published, and since when the union is empty.
     wanting: u64,
@@ -119,8 +122,9 @@ type Publication {
     clock: u32,
     window: Option[u64],
     voice: Voice,
-    // RTC-6: the published encodings the publisher's allocation stopped, one bit per
-    // encoding. The home unit derives it; every other unit takes it from `Media`.
+    // RTC-6: the published encodings the publisher stopped (by its allocation, or by
+    // sending nothing for its rate windows), one bit per encoding. The home unit derives
+    // it; every other unit takes it from `Media`.
     dropped: u8,
     // RTC-5: the last CVO byte the publisher sent, on any of its encodings.
     orientation: Option[u8]
@@ -662,7 +666,7 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     for _ in 0u8 .. shape.encodings {
         // Every encoding starts published: the publisher sends all of them until a
         // mask says otherwise (RTC-6).
-        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, planned: 0, idle: false, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
+        list.push(mut encodings, Encoding(ssrc: 0, keyframes: rtp.loss.keyframes(shape.fir, MIN_INTERVAL_NS), interval: MIN_INTERVAL_NS, vp9: media_bits.unit.vp9_layers(), rate: 0, counted: 0, planned: 0, idle: false, empty: 0, wanting: 0, on: true, since: None, structure: media_bits.dependency.empty(), structure_frame: None, last: None, last_ts: 0, last_marker: false))
     }
     let depth = if shape.codec == Opus {
         rtp.red.MAX_DISTANCE

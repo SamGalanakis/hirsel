@@ -231,7 +231,7 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
         let store = Store::cas(local.path()).unwrap();
         let read = remote.object(&store, key).unwrap();
         let blobs = crate::store::collect::blobs(local.path()).len();
-        let records = std::fs::read_dir(local.path().join("r")).map_or(0, |d| d.count());
+        let records = std::fs::read_dir(local.path().join("signed")).map_or(0, |d| d.count());
         assert_eq!(records, kept_record as usize, "{name}: records kept");
         match hit {
             true => {

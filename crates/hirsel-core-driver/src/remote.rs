@@ -6,8 +6,8 @@
 //! A blob is used only when its bytes hash to the name it was fetched under;
 //! a record only when a listed builder key signed it (`store::signed`), and
 //! only for the kinds that travel: release std sides, object records
-//! (release parts and development unit objects) and development instances. A fetched record is never written to `k/`, so the
-//! launcher and runner host, which read only `k/` and open no session, reuse
+//! (release parts and development unit objects) and development instances. A fetched record is never written to `keys/`, so the
+//! launcher and runner host, which read only `keys/` and open no session, reuse
 //! nothing this host did not produce (launch.md, "a cached mapping"). A link
 //! over remote content is keyed apart ([`bind`]).
 //!

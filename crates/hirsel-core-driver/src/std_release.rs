@@ -49,6 +49,12 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 #[path = "std_release/held.rs"]
 mod held;
+#[path = "std_release/stored.rs"]
+mod stored;
+use stored::{
+    code_name, lent_name, load_record, part_name, read_compressed, read_prebuilt_object, whole,
+    write_compressed,
+};
 
 const STD_SCHEMA: u32 = 12;
 
@@ -524,13 +530,16 @@ fn lower(
     } else {
         cache.side(key)?
     };
-    if let Some(record) = load_record(&store, key, kin)? {
+    if let Some(record) = load_record(&store, key, kin)?
+        && whole(&store, key, &record)?
+    {
         remote.iter().for_each(|r| r.offer_side(&store, key));
         return Ok((store, key, record, 0));
     }
     let received = remote.as_deref().map(|r| r.std_side(cache, key));
     if let Some(store) = received.transpose()?.flatten()
         && let Some(record) = load_record(&store, key, kin)?
+        && whole(&store, key, &record)?
     {
         return Ok((store, key, record, 0));
     }
@@ -1090,79 +1099,4 @@ impl StdSide {
             })
             .collect()
     }
-}
-
-/// The installed store keeps the original byte length and one zlib frame.
-fn write_compressed(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<()> {
-    let compressed = hirsel_llvm_lazy::compress_std_record(bytes).map_err(io::Error::other)?;
-    let mut payload = Vec::with_capacity(8 + compressed.len());
-    payload.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    payload.extend_from_slice(&compressed);
-    store.put_keyed_blob(key, &payload).map(drop)
-}
-
-fn read_compressed(store: &Store, key: ContentHash) -> io::Result<Option<(Bare, Vec<u8>)>> {
-    let Some((blob, payload)) = store.get_keyed_blob(key)? else {
-        return Ok(None);
-    };
-    let (header, bytes) = payload
-        .split_first_chunk::<8>()
-        .ok_or_else(|| io::Error::other("a compressed release std record has no length"))?;
-    let size = usize::try_from(u64::from_le_bytes(*header))
-        .ok()
-        .and_then(std::num::NonZeroUsize::new)
-        .ok_or_else(|| io::Error::other("invalid release std record length"))?;
-    let decoded = hirsel_llvm_lazy::decompress_std_record(bytes, size).map_err(io::Error::other)?;
-    if decoded.len() != size.get() {
-        return Err(io::Error::other("invalid release std record length"));
-    }
-    Ok(Some((blob, decoded)))
-}
-
-/// A linker input only for a prebuilt part the program actually reaches,
-/// named by its compressed blob and checked as the bytes it links.
-fn read_prebuilt_object(
-    store: &Store,
-    key: ContentHash,
-) -> io::Result<Option<(Bare, NativeObject)>> {
-    let Some((blob, payload)) = read_compressed(store, key)? else {
-        return Ok(None);
-    };
-    let native: NativeObject =
-        decode(&payload).ok_or_else(|| io::Error::other("invalid prebuilt release std object"))?;
-    let check = crate::store::checksum(&native.bytes);
-    Ok(Some((Bare { check, ..blob }, native)))
-}
-
-/// The record stored under `key` when it decodes, is of `kin` and its own
-/// content derives `key`, and names its parts and lent bodies by the names
-/// `key` derives; anything else is a miss.
-fn load_record(store: &Store, key: ContentHash, kin: ContentHash) -> io::Result<Option<StdRecord>> {
-    let Some(record) = store
-        .get(key)?
-        .and_then(|bytes| decode::<StdRecord>(&bytes))
-    else {
-        return Ok(None);
-    };
-    let sound = record.schema == STD_SCHEMA
-        && !record.parts.is_empty()
-        && record
-            .parts
-            .iter()
-            .all(|part| part.module < record.exports.len())
-        && record.lent == lent_name(key)?
-        && side_key(kin, record.prebuilt, &record.requested, &record.units)? == key;
-    Ok(sound.then_some(record))
-}
-
-fn part_name(key: ContentHash, i: usize) -> io::Result<ContentHash> {
-    crate::native::key("hirsel.core-std-part.v1", &(key, i as u64))
-}
-
-fn code_name(key: ContentHash, i: usize) -> io::Result<ContentHash> {
-    crate::native::key("hirsel.core-std-code.v1", &(key, i as u64))
-}
-
-fn lent_name(key: ContentHash) -> io::Result<ContentHash> {
-    crate::native::key("hirsel.core-std-lent.v1", &key)
 }

@@ -669,11 +669,23 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     } else {
         0
     };
-    let mut sides = Vec::new();
-    // Two checks over separate image caches reach the same std roots: the
+    let mut sides: Vec<(hirsel_core_ids::ContentHash, Vec<Vec<u8>>, Vec<u8>)> = Vec::new();
+    // Three checks over separate image caches reach the same std roots: the
     // first build lowers their side into the shared parts cache, and the
-    // second takes it from there.
-    for cache in ["cache", "cache-b"] {
+    // second takes it from there. Before the third, every blob of the side,
+    // each part's object and bitcode and its lent bodies, is deleted by hand:
+    // that is a miss, so the third lowers the side again and runs as the
+    // others do (2834: it stopped with "a release std part's bitcode is
+    // missing").
+    for cache in ["cache", "cache-b", "cache-c"] {
+        if cache == "cache-c" {
+            let side = crate::store::Store::cas(&options.cas).unwrap().side(sides[0].0).unwrap();
+            let blobs = crate::store::collect::blobs(side.root());
+            assert!(!blobs.is_empty(), "the side holds its blobs");
+            for (path, _) in blobs {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
         let product = std_checked(dir.path(), name, &source, cache);
         let code =
             crate::code_store::CodeStore::new(dir.path().join(name).join(format!("code-{cache}")));
@@ -695,7 +707,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             !std.roots.contains(&first_lane),
             "the specialised probe keeps its plain helper"
         );
-        if cache == "cache" {
+        if cache != "cache-b" {
             assert!(std.lowered > 0, "a build that lowers the std counts what it lowered");
         } else {
             assert_eq!(std.lowered, 0, "a build over the stored side lowers none of it");
@@ -703,7 +715,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
         assert!(!std.lent.bytes.is_empty(), "the std lends bodies");
         assert!(std.roots.contains(&exp), "the std side optimises the scalar routine");
         sides.push((std.key, std.codes(), std.lent.bytes));
-        if cache == "cache-b" {
+        if cache == "cache-c" {
             // The recipe outlives its inputs: with the program's source and
             // image gone, it assembles over the side its build stored.
             let root = publication.root();
@@ -723,7 +735,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             assert!(std::fs::read(&again.executable).unwrap() == first, "the recipe's executable");
         }
     }
-    assert!(sides[0] == sides[1], "the std side");
+    assert!(sides[0] == sides[1] && sides[1] == sides[2], "the std side");
 
     // A std edit the program reaches only through other std roots misses:
     // with `list.find_byte` finding nothing, `string.split_once` finds no

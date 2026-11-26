@@ -66,6 +66,22 @@ impl Store {
         };
         Ok(self.get_blob(bare)?.map(|bytes| (bare, bytes)))
     }
+    /// Whether the record under `key` checks and names a blob present in
+    /// some layer, without reading the blob: a blob's bytes are checked when
+    /// they are read.
+    pub(crate) fn has_keyed_blob(&self, key: ContentHash) -> io::Result<bool> {
+        let Some(bare) = self.get(key)?.as_deref().and_then(decode_bare) else {
+            return Ok(false);
+        };
+        for (path, _) in self.layers(self.blob_path(bare.address)) {
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => return Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(false)
+    }
     /// The `N` blobs the record under `key` names, each read whole with the
     /// file it was read from, when the record and every blob check.
     pub(crate) fn get_keyed_blobs<const N: usize>(

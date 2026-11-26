@@ -150,7 +150,7 @@ mod build_identity {
             assert_eq!(status, Some(0), "{stdout}\n{stderr}");
             assert!(law.path("data/probe").is_file(), "the Dir slot is this place's");
             // Each binary, and the name of the executable record that holds it.
-            let records = law.path("cache/hirsel/cas/k");
+            let records = law.path("cache/hirsel/cas/keys");
             let run = tests.map(|test| {
                 let test = DefPath::from_full(&format!("app@1/main/{test}")).unwrap();
                 let name = crate::request::hex(ContentHash::of_bytes(test.to_string().as_bytes()));

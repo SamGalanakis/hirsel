@@ -1,4 +1,4 @@
-//! Signed mappings, kept in `r/<keyid>/` of the user's content store.
+//! Signed mappings, kept in `signed/<keyid>/` of the user's content store.
 //!
 //! A signed record is a mapping another builder published: a key, the kind
 //! of record it is, the record's payload and the blobs that payload names,
@@ -11,7 +11,7 @@
 //! as received and checked again on every read, so a listed key removed
 //! from the configuration withdraws every record it signed.
 //!
-//! `r/` is read only through a remote session (`crate::remote`), which only
+//! `signed/` is read only through a remote session (`crate::remote`), which only
 //! a build or test request opens. The launcher and runner host open none.
 use super::{Store, collect, wrote};
 use hirsel_core_ids::ContentHash;
@@ -144,7 +144,7 @@ pub(crate) fn verify(
 
 impl Store {
     /// Where the record `signer` signed under `key` is kept:
-    /// `r/<signer>/<shard>/<rest>` of this content store.
+    /// `signed/<signer>/<shard>/<rest>` of this content store.
     pub(crate) fn signed_path(&self, signer: ContentHash, key: ContentHash) -> std::path::PathBuf {
         let signer = crate::request::hex(signer);
         self.named(&format!("{}/{signer}", collect::REMOTE), key)

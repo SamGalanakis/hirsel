@@ -3,7 +3,7 @@
 //!
 //! A flat store (`Store::new`) keeps each file under its hex name in its
 //! root. A content store (`Store::cas`, the per-user compiler cache and an
-//! image's library objects) keeps records under `k/<key>` and blobs under
+//! image's library objects) keeps records under `keys/<key>` and blobs under
 //! `o/<sha256>`, each in a two-hex shard: a record maps a key its caller
 //! derives to the blobs it names, and a blob is named by the SHA-256 of its
 //! own bytes, so equal bytes are stored once whichever key made them.
@@ -514,7 +514,7 @@ impl Store {
     pub(crate) fn holds(&self, path: &Path) -> bool {
         path.starts_with(&self.root) || self.shipped.as_ref().is_some_and(|s| path.starts_with(s))
     }
-    /// The record under `key`: `k/<shard>/<rest>` in a content store, the
+    /// The record under `key`: `keys/<shard>/<rest>` in a content store, the
     /// hex name in a flat one.
     pub fn path(&self, key: ContentHash) -> PathBuf {
         self.named(collect::RECORDS, key)

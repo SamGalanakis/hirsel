@@ -45,7 +45,7 @@ store: `GET`, `HEAD` and `PUT` of `o/<sha256>` blobs and of
 - A record is used only when it is signed by a key in `trusted`, names the
   requested key and is of the requested kind. `trusted` is empty by default,
   so a remote with no listed key is never read. A received record is kept in
-  the local store's `r/<key id>/` and checked again on every read; removing a
+  the local store's `signed/<key id>/` and checked again on every read; removing a
   key from `trusted` withdraws every record it signed.
 - Only three kinds travel: release std sides (one manifest record and one
   pack of their blobs), object records (release program parts and the unit
@@ -56,7 +56,7 @@ store: `GET`, `HEAD` and `PUT` of `o/<sha256>` blobs and of
   what it built itself in the background (blobs first, then the record signed
   with that key) and waits for the uploads before it exits. A received record
   is never signed again.
-- Received records never enter `k/`. The launcher and the runner host open no
+- Received records never enter `keys/`. The launcher and the runner host open no
   remote, so they reuse only mappings this host produced, and an executable
   linked over received content is stored under a link key apart from one
   linked over none.

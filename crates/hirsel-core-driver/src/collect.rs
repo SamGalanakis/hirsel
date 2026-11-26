@@ -1,7 +1,8 @@
 //! The content stores' layout and their one collector.
 //!
-//! A content store (`Store::cas`) keeps records in `k/`, blobs in `o/` and
-//! the fallback std sides in `s/`, each under a two-hex shard. A std side is
+//! A content store (`Store::cas`) keeps records in `keys/`, blobs in `o/`,
+//! the fallback std sides in `sides/` and signed records in `signed/`, each
+//! under a two-hex shard. A std side is
 //! a content store of its own, holding a lowering's deferred bitcode and
 //! lent bodies together; it is pinned by a shared lock on its shard's
 //! `.std-lock` while a build uses it, and is collected whole.
@@ -22,10 +23,20 @@
 //! estimate is over the capacity. A short-lived process does not wait for
 //! it; a sweep it leaves unfinished is taken up by a later one.
 //!
-//! Opening a store whose layout stamp is not this format's deletes its old
-//! layout: a content store's records and sides, whose frames no reader of
-//! this format takes, and, for the per-user store, the named directories
-//! of older cache formats beside it.
+//! Toolchains of different store formats share one per-user store, and a
+//! build of one may run while another opens it. So an open deletes nothing
+//! another toolchain may be reading: every record and signed record carries
+//! its format's `VERSION`, so another format's is a miss, and a side's key
+//! names its compiler, so two toolchains never share a side. What another
+//! format wrote ages out through the collector like anything else. Before
+//! 2834 an open whose stamp was not its own format's retired every record
+//! and side, pinned or not, so two toolchains building at once took each
+//! other's std bitcode mid-build; toolchains of that layout still do that
+//! to `k/`, `s/` and `r/`, which is why this layout keeps none of its files
+//! there. The collector sweeps what such a toolchain leaves in them, and
+//! skips its pinned sides as it does this layout's. The first open of a
+//! store by this layout deletes the named directories of the cache formats
+//! older than the content store, beside the per-user store.
 use super::{Store, lock};
 use hirsel_core_ids::ContentHash;
 use std::fs::{self, File, FileTimes, Metadata};
@@ -38,15 +49,19 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
 /// Records: key to the blobs they name.
-pub(super) const RECORDS: &str = "k";
+pub(super) const RECORDS: &str = "keys";
 /// Blobs, named by the SHA-256 of their bytes.
 pub(super) const BLOBS: &str = "o";
 /// Fallback std sides, each a content store.
-const SIDES: &str = "s";
+const SIDES: &str = "sides";
 /// Signed records received from a remote cache, by signer (`signed`).
-pub(super) const REMOTE: &str = "r";
-/// The layout stamp: the format a store's files were written in.
-const LAYOUT: &str = "layout";
+pub(super) const REMOTE: &str = "signed";
+/// The records, sides and signed records of toolchains of the layout before
+/// this one, which the collector sweeps (module documentation).
+const EARLIER: [&str; 3] = ["k", "s", "r"];
+/// The layout stamp: the directory layout a store's files are kept in.
+/// Files carry their own format, so it does not name `VERSION`.
+const LAYOUT: &str = "format";
 /// The per-user store's directory name; the dead directories of older
 /// cache formats sit beside it.
 const USER: &str = "cas";
@@ -85,8 +100,8 @@ pub(crate) struct Cas {
 }
 
 impl Store {
-    /// The content store at `root`, its old layout deleted if its stamp is
-    /// not this format's.
+    /// The content store at `root`; its first open by this layout deletes
+    /// the dead cache directories beside the per-user store.
     pub(crate) fn cas(root: &Path) -> io::Result<Self> {
         Self::content_store(root, true)
     }
@@ -110,9 +125,6 @@ impl Store {
             _pin: None,
         });
         if !stamped(root)? {
-            for directory in [RECORDS, SIDES, REMOTE] {
-                store.retire(&root.join(directory))?;
-            }
             if root.file_name().is_some_and(|name| name == USER)
                 && let Some(parent) = root.parent()
             {
@@ -169,7 +181,7 @@ impl Store {
 }
 
 fn layout() -> Vec<u8> {
-    format!("hirsel store {}\n", super::VERSION).into_bytes()
+    b"hirsel content store 2\n".to_vec()
 }
 
 fn stamped(root: &Path) -> io::Result<bool> {
@@ -309,15 +321,22 @@ fn maintain(root: &Path, capacity: u64, written: u64) -> io::Result<()> {
 pub(crate) fn sweep(root: &Path, capacity: u64) -> io::Result<u64> {
     let mut entries = Vec::new();
     let mut size = 0;
-    let signers = present(fs::read_dir(root.join(REMOTE)))?
-        .into_iter()
-        .flatten();
-    let signers = signers.filter_map(Result::ok).filter(|e| hex_name(e, 64));
-    let directories = [RECORDS, BLOBS, SIDES].map(|d| (root.join(d), d == SIDES));
-    for (directory, sides) in directories
-        .into_iter()
-        .chain(signers.map(|e| (e.path(), false)))
-    {
+    let [earlier_records, earlier_sides, earlier_signed] = EARLIER;
+    let mut directories = vec![
+        (root.join(RECORDS), false),
+        (root.join(BLOBS), false),
+        (root.join(SIDES), true),
+        (root.join(earlier_records), false),
+        (root.join(earlier_sides), true),
+    ];
+    for signed in [REMOTE, earlier_signed] {
+        let signers = present(fs::read_dir(root.join(signed)))?
+            .into_iter()
+            .flatten();
+        let signers = signers.filter_map(Result::ok).filter(|e| hex_name(e, 64));
+        directories.extend(signers.map(|e| (e.path(), false)));
+    }
+    for (directory, sides) in directories {
         let Some(shards) = present(fs::read_dir(&directory))? else {
             continue;
         };
@@ -620,18 +639,65 @@ mod tests {
         assert!(sweep(root, CAP).unwrap() <= CAP);
     }
 
-    /// Law: opening a store written in an older format deletes that layout
-    /// and nothing else: a content store's records and sides, the named
-    /// dead directories beside the per-user store. Blobs, which are named by their bytes,
-    /// stay, and so do other tools' directories. Bug: a pattern sweep of
-    /// `*-v<N>` siblings would delete another tool's cache.
+    /// Law: two toolchains of different store formats share one content
+    /// store, and neither's open takes the other's records or pinned sides.
+    /// A build holds its side pinned and reads its bitcode at link time,
+    /// after another toolchain opened the store and wrote its own stamp, and
+    /// after a toolchain of an earlier layout opened it, which renames its
+    /// `k`, `s` and `r` away and stamps the store as its own. Bug (2834):
+    /// an open whose stamp differed retired every record and side, pinned or
+    /// not, so the running build failed with "a release std part's bitcode
+    /// is missing".
     #[test]
-    fn opening_an_old_layout_deletes_it_and_keeps_the_rest() {
+    fn another_formats_open_keeps_a_pinned_side_and_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let store = Store::cas(root).unwrap();
+        let key = ContentHash::of_bytes(b"a record of this format");
+        store.put_keyed_blob(key, b"object").unwrap();
+        let side = store.side(ContentHash::of_bytes(b"pinned std")).unwrap();
+        side.put_keyed_blob(key, b"bitcode").unwrap();
+        let read = |store: &Store| store.get_keyed_blob(key).unwrap().map(|(_, bytes)| bytes);
+        // Another format's toolchain opens the store and stamps it.
+        fs::write(root.join("layout"), b"hirsel store 44\n").unwrap();
+        drop(Store::cas(root).unwrap());
+        // A toolchain of the earlier layout opens it: its open renames its
+        // record, side and signed directories into scratch and stamps it.
+        let trash = root.join("tmp/earlier-layout");
+        fs::create_dir_all(&trash).unwrap();
+        for name in ["k", "s", "r"] {
+            let _ = fs::rename(root.join(name), trash.join(name));
+        }
+        fs::write(root.join("layout"), b"hirsel store 44\n").unwrap();
+        let again = Store::cas(root).unwrap();
+        assert_eq!(
+            read(&side).as_deref(),
+            Some(&b"bitcode"[..]),
+            "the pinned side's bitcode"
+        );
+        assert_eq!(
+            read(&again).as_deref(),
+            Some(&b"object"[..]),
+            "the store's record"
+        );
+    }
+
+    /// Law: the first open of a store by this layout deletes the named dead
+    /// directories beside the per-user store and nothing else: the store's
+    /// records, sides and blobs stay, and so do other tools' directories.
+    /// What a toolchain of the earlier layout left in `k/` and `s/` goes
+    /// through the collector, which keeps that toolchain's pinned side. Bugs:
+    /// a pattern sweep of `*-v<N>` siblings would delete another tool's
+    /// cache; an open that cleared the earlier layout's directories would take
+    /// a running older build's side; a sweep that skipped them would keep
+    /// their bytes forever.
+    #[test]
+    fn opening_deletes_dead_directories_and_the_collector_takes_the_earlier_layout() {
         let directory = tempfile::tempdir().unwrap();
         let cache = directory.path();
         let root = cache.join(USER);
         let store = Store::cas(&root).unwrap();
-        let key = ContentHash::of_bytes(b"old record");
+        let key = ContentHash::of_bytes(b"a record");
         let bare = store.put_keyed_blob(key, b"bytes").unwrap();
         drop(store.side(key).unwrap());
         for name in [
@@ -644,16 +710,44 @@ mod tests {
         ] {
             fs::create_dir_all(cache.join(name)).unwrap();
         }
-        fs::write(root.join(LAYOUT), b"hirsel store 1\n").unwrap();
+        // The earlier layout's record, unpinned side and pinned side.
+        let [records, sides, _] = EARLIER;
+        let hex = "ab".repeat(31);
+        let record = root.join(records).join("ab").join(&hex);
+        let shard = root.join(sides).join("ab");
+        let (unpinned, pinned) = (shard.join(&hex), shard.join("cd".repeat(31)));
+        fs::create_dir_all(record.parent().unwrap()).unwrap();
+        fs::write(&record, b"an earlier record").unwrap();
+        fs::create_dir_all(&unpinned).unwrap();
+        fs::create_dir_all(root.join(sides).join("cd")).unwrap();
+        let pin = lock_file(&root.join(sides).join("cd/.std-lock"), libc::LOCK_SH).unwrap();
+        let pinned = root
+            .join(sides)
+            .join("cd")
+            .join(pinned.file_name().unwrap());
+        fs::create_dir_all(&pinned).unwrap();
+        fs::remove_file(root.join(LAYOUT)).unwrap();
         let store = Store::cas(&root).unwrap();
-        assert_eq!(store.get_keyed_blob(key).unwrap(), None, "old records go");
-        assert!(!root.join(SIDES).exists(), "old sides go");
+        assert!(store.get_keyed_blob(key).unwrap().is_some(), "records stay");
+        assert!(
+            root.join(SIDES).read_dir().unwrap().next().is_some(),
+            "sides stay"
+        );
         assert!(store.get_blob(bare).unwrap().is_some(), "blobs stay");
+        assert!(
+            record.exists() && unpinned.exists(),
+            "the earlier layout's files stay"
+        );
         for gone in ["objects-v2", "results-v15", "core-packages/release-parts"] {
             assert!(!cache.join(gone).exists(), "{gone} is deleted");
         }
         for kept in ["lean", "cargo-units", "llvm-source-v2", "core-packages"] {
             assert!(cache.join(kept).exists(), "{kept} is kept");
         }
+        sweep(&root, 0).unwrap();
+        assert!(!record.exists(), "the earlier record is collected");
+        assert!(!unpinned.exists(), "the earlier unpinned side is collected");
+        assert!(pinned.exists(), "the earlier pinned side stays");
+        drop(pin);
     }
 }

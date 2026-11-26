@@ -7,7 +7,7 @@ use hirsel_core_net::{
     packet_epoch::{self, Epoch, IssueError},
     packet_nonce::{ReceiverNonce, SenderCounter},
     packet_protection::{self, Algorithm, Key},
-    packet_schedule::{self, ImportProfile},
+    packet_schedule::{self, ImportProfile, Space},
     packet_sframe::Sframe,
     secret_aead::AeadAlg,
     srtp_cipher::SrtpProfile,
@@ -120,7 +120,7 @@ impl Machine<'_> {
                     }));
                 }
                 let epoch = Epoch::quic_initial(side, self.carrier_bytes(a[1])).unwrap();
-                let state = packet_schedule::Schedule::single(0, epoch);
+                let state = packet_schedule::Schedule::single(Space::Initial, epoch);
                 Ok(self.media_hold(payer, Payload::Schedule(state)))
             }
             HostOp::ScheduleImportTraffic
@@ -135,8 +135,8 @@ impl Machine<'_> {
                 else {
                     unreachable!()
                 };
-                Ok(schedule
-                    .view_epoch(a[1])
+                Ok(Space::from_tag(a[1])
+                    .and_then(|space| schedule.view_epoch(space))
                     .and_then(Epoch::info)
                     .map_or_else(issue_error, |(cipher, directions)| {
                         vec![cipher, 0, 0, directions]
@@ -165,8 +165,8 @@ impl Machine<'_> {
                     unreachable!()
                 };
                 let child = match op {
-                    HostOp::ScheduleSealer => schedule
-                        .epoch(a[1])
+                    HostOp::ScheduleSealer => Space::from_tag(a[1])
+                        .and_then(|space| schedule.epoch(space))
                         .and_then(|epoch| {
                             epoch.sealer(a[2], a[3], |n| {
                                 self.admit(&payer, n)
@@ -180,8 +180,8 @@ impl Machine<'_> {
                                 Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
                             )
                         }),
-                    HostOp::ScheduleOpener => schedule
-                        .view_epoch(a[1])
+                    HostOp::ScheduleOpener => Space::from_tag(a[1])
+                        .and_then(|space| schedule.view_epoch(space))
                         .and_then(|epoch| {
                             epoch.opener(|n| self.admit(&payer, n).map(|()| payer.clone()))
                         })
@@ -190,8 +190,8 @@ impl Machine<'_> {
                         |n| self.admit(&payer, n).map(|()| payer.clone()),
                         opener_payload,
                     ),
-                    _ => schedule
-                        .view_epoch(a[1])
+                    _ => Space::from_tag(a[1])
+                        .and_then(|space| schedule.view_epoch(space))
                         .and_then(|epoch| {
                             epoch.header_mask(a[2] != 0, |n| {
                                 self.admit(&payer, n).map(|()| payer.clone())
@@ -231,6 +231,9 @@ impl Machine<'_> {
     }
 
     fn sealer_pair(&mut self, payer: Limit, a: &[u64]) -> Vec<u64> {
+        let (Ok(first), Ok(second)) = (Space::from_tag(a[1]), Space::from_tag(a[2])) else {
+            return issue_error(IssueError::Invalid);
+        };
         let slot = a[0] as usize;
         let mut held = self.host.world.media[slot].take().unwrap();
         let Payload::Schedule(schedule) = &mut held.payload else {
@@ -238,7 +241,7 @@ impl Machine<'_> {
         };
         let requested = 2 * (packet_epoch::CIPHER_CHARGE + packet_epoch::DOMAIN_CHARGE);
         let result = schedule
-            .check_sealer_pair(a[1], a[2], a[3])
+            .check_sealer_pair(first, second, a[3])
             .and_then(|pair| {
                 self.admit(&payer, requested)
                     .map_err(|available| IssueError::Capacity {
@@ -430,11 +433,13 @@ impl Machine<'_> {
                     }
                 })
             }
-            HostOp::ScheduleRetire => schedule.check_retire(a[1]).map(|()| {
-                for payer in schedule.retire() {
-                    self.refund(payer, packet_epoch::DOMAIN_CHARGE);
-                }
-            }),
+            HostOp::ScheduleRetire => Space::from_tag(a[1])
+                .and_then(|space| schedule.check_retire(space))
+                .map(|()| {
+                    for payer in schedule.retire() {
+                        self.refund(payer, packet_epoch::DOMAIN_CHARGE);
+                    }
+                }),
             HostOp::ScheduleSframeRatchet => schedule
                 .sframe_mut()
                 .and_then(|sframe| {

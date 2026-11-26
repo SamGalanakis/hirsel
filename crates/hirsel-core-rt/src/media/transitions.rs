@@ -9,7 +9,9 @@ use crate::{
     Context,
     provider::{Buffer, Outcome},
 };
-use hirsel_core_net::{packet_epoch::IssueError, packet_sframe::Sframe, tls_kdf::Side};
+use hirsel_core_net::{
+    packet_epoch::IssueError, packet_schedule::Space, packet_sframe::Sframe, tls_kdf::Side,
+};
 
 #[cfg(feature = "record")]
 const APPLICATION: u8 = 11;
@@ -160,7 +162,8 @@ pub unsafe extern "C" fn hirsel_core_schedule_retire(
 ) -> Outcome {
     // SAFETY: the caller holds the unique schedule loan.
     let schedule = unsafe { loan_mut::<Schedule>(handle) };
-    if let Err(error) = schedule.state.check_retire(space) {
+    if let Err(error) = Space::from_tag(space).and_then(|space| schedule.state.check_retire(space))
+    {
         return refusal(error);
     }
     #[cfg(feature = "record")]

@@ -9,11 +9,10 @@ use hirsel_core_net::{
     packet_epoch::{self, CIPHER_CHARGE, DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
     packet_nonce::{ReceiverNonce, SenderCounter},
     packet_protection::{self, Algorithm},
-    packet_schedule,
+    packet_schedule::{self, Space},
     tls_kdf::Side,
 };
 
-const INITIAL: usize = 0;
 pub(super) type Paid = media::Payment;
 type Cipher = packet_protection::Cipher<crate::os_tls::packet_cipher::PacketCipher>;
 
@@ -58,7 +57,7 @@ pub(super) struct Sealer {
     pub(super) cipher: Option<Cipher>,
     pub(super) origin: Origin,
     #[cfg(feature = "record")]
-    pub(super) space: u8,
+    pub(super) space: Space,
     #[cfg(feature = "record")]
     pub(super) profile: [u8; 2],
     #[cfg(feature = "record")]
@@ -69,7 +68,7 @@ pub(super) struct Sealer {
 pub(super) struct Opener {
     pub(super) nonce: ReceiverNonce,
     #[cfg(feature = "record")]
-    pub(super) space: u8,
+    pub(super) space: Space,
     #[cfg(feature = "record")]
     pub(super) profile: [u8; 2],
     pub(super) algorithm: Algorithm,
@@ -81,7 +80,7 @@ pub(super) struct Opener {
 pub(super) struct Mask {
     pub(super) key: Option<HeaderMask>,
     #[cfg(feature = "record")]
-    pub(super) space: u8,
+    pub(super) space: Space,
     #[cfg(feature = "record")]
     pub(super) profile: [u8; 2],
     #[cfg(feature = "record")]
@@ -173,7 +172,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_quic_initial(
         };
         let initial = Epoch::quic_initial(side, dcid).unwrap();
         owned(Schedule::new(
-            packet_schedule::Schedule::single(INITIAL, initial),
+            packet_schedule::Schedule::single(Space::Initial, initial),
             0,
             false,
             charge,
@@ -197,6 +196,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
     // SAFETY: the checked caller lends this schedule exclusively.
     let schedule = unsafe { media::loan_mut::<Schedule>(schedule) };
     let parent = schedule.origin;
+    let Ok(space) = Space::from_tag(space) else {
+        return refusal(IssueError::Invalid);
+    };
     let epoch = match schedule.state.epoch(space) {
         Ok(epoch) => epoch,
         Err(error) => return refusal(error),
@@ -210,7 +212,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
     match epoch.sealer(domain, floor, admit) {
         Ok(issued) => {
             let fields = [
-                space.to_le_bytes(),
+                u64::from(space.tag()).to_le_bytes(),
                 domain.to_le_bytes(),
                 floor.to_le_bytes(),
             ];
@@ -227,7 +229,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
                     .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
                 origin: Origin::new(origin, true, &issued.charge),
                 #[cfg(feature = "record")]
-                space: space as u8,
+                space,
                 #[cfg(feature = "record")]
                 profile: schedule.profile,
                 #[cfg(feature = "record")]
@@ -250,7 +252,10 @@ pub unsafe extern "C" fn hirsel_core_schedule_space_info(
 ) -> Outcome {
     // SAFETY: checked lowering supplies the borrowed schedule.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
-    match schedule.state.view_epoch(space).and_then(Epoch::info) {
+    match Space::from_tag(space)
+        .and_then(|space| schedule.state.view_epoch(space))
+        .and_then(Epoch::info)
+    {
         Ok((value, written)) => Outcome {
             value,
             written,
@@ -275,6 +280,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
 ) -> Outcome {
     // SAFETY: checked lowering supplies the mutable schedule and running context.
     let schedule = unsafe { media::loan_mut::<Schedule>(schedule) };
+    let (Ok(first), Ok(second)) = (Space::from_tag(first), Space::from_tag(second)) else {
+        return refusal(IssueError::Invalid);
+    };
     let pair = match schedule.state.check_sealer_pair(first, second, domain) {
         Ok(pair) => pair,
         Err(error) => return refusal(error),
@@ -289,7 +297,14 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
             });
         }
     };
-    let fields = [first, second, domain, first_floor, second_floor].map(u64::to_le_bytes);
+    let fields = [
+        u64::from(first.tag()),
+        u64::from(second.tag()),
+        domain,
+        first_floor,
+        second_floor,
+    ]
+    .map(u64::to_le_bytes);
     const SEALER_PAIR: u8 = 18;
     // SAFETY: the running context and pinned fields remain live through delivery.
     let origin =
@@ -306,7 +321,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
     });
     let [first_space, second_space] = [first, second];
     let [first, second] = pair.issue([first_floor, second_floor], charges);
-    let hold = |issued: hirsel_core_net::packet_epoch::Sealer<'_, Paid>, _space: u64, member| {
+    let hold = |issued: hirsel_core_net::packet_epoch::Sealer<'_, Paid>, _space: Space, member| {
         media::hold(Sealer {
             counter: issued.counter,
             algorithm: issued.algorithm,
@@ -315,7 +330,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
                 .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
             origin: Origin::new(origin, true, &issued.charge).member(member),
             #[cfg(feature = "record")]
-            space: _space as u8,
+            space: _space,
             #[cfg(feature = "record")]
             profile: schedule.profile,
             #[cfg(feature = "record")]
@@ -341,6 +356,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_opener(
 ) -> Outcome {
     // SAFETY: the checked caller lends this schedule in the running context.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
+    let Ok(space) = Space::from_tag(space) else {
+        return refusal(IssueError::Invalid);
+    };
     let epoch = match schedule.state.view_epoch(space) {
         Ok(epoch) => epoch,
         Err(error) => return refusal(error),
@@ -357,8 +375,8 @@ pub unsafe extern "C" fn hirsel_core_schedule_opener(
                 schedule,
                 issued,
                 4,
-                &[space.to_le_bytes()],
-                space as u8,
+                &[u64::from(space.tag()).to_le_bytes()],
+                space,
                 site,
             )
         },
@@ -375,7 +393,6 @@ pub unsafe extern "C" fn hirsel_core_schedule_next_opener(
     site: u64,
 ) -> Outcome {
     const NEXT_OPENER: u8 = 24;
-    const APPLICATION: u8 = 2;
     // SAFETY: the checked caller lends this schedule, and context remains running.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
     match schedule.state.next_opener(
@@ -393,7 +410,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_next_opener(
                     issued,
                     NEXT_OPENER,
                     &[],
-                    APPLICATION,
+                    Space::Application,
                     site,
                 )
             }
@@ -412,7 +429,7 @@ unsafe fn hold_opener(
     issued: packet_epoch::Opener<'_, Paid>,
     operation: u8,
     fields: &[[u8; 8]],
-    _space: u8,
+    _space: Space,
     site: u64,
 ) -> Outcome {
     // SAFETY: the parent, public operands and context remain live through issue.
@@ -449,6 +466,9 @@ pub unsafe extern "C" fn hirsel_core_schedule_header_mask(
     // SAFETY: the checked caller lends this schedule, and context remains running.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
     let parent = schedule.origin;
+    let Ok(space) = Space::from_tag(space) else {
+        return refusal(IssueError::Invalid);
+    };
     let epoch = match schedule.state.view_epoch(space) {
         Ok(epoch) => epoch,
         Err(error) => return refusal(error),
@@ -457,7 +477,10 @@ pub unsafe extern "C" fn hirsel_core_schedule_header_mask(
         admit(unsafe { &*context }, n).map(|charge| track(unsafe { &*context }, charge))
     }) {
         Ok((key, charge)) => {
-            let fields = [space.to_le_bytes(), u64::from(local).to_le_bytes()];
+            let fields = [
+                u64::from(space.tag()).to_le_bytes(),
+                u64::from(local).to_le_bytes(),
+            ];
             // SAFETY: the public operands remain pinned through the issue.
             let origin = match unsafe { media::issue_child(context, parent, 5, &fields, site) } {
                 Ok(origin) => origin,
@@ -467,7 +490,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_header_mask(
                 key,
                 origin: Origin::new(origin, true, &charge),
                 #[cfg(feature = "record")]
-                space: space as u8,
+                space,
                 #[cfg(feature = "record")]
                 profile: schedule.profile,
                 #[cfg(feature = "record")]

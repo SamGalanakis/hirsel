@@ -74,7 +74,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sframe_sealer(
         cipher: cipher(issued.keys),
         origin: Origin::new(origin, true, &issued.charge),
         #[cfg(feature = "record")]
-        space: 2,
+        space: hirsel_core_net::packet_schedule::Space::Application,
         #[cfg(feature = "record")]
         profile: schedule.profile,
         #[cfg(feature = "record")]
@@ -125,7 +125,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sframe_opener(
         cipher: cipher(issued.keys),
         origin: Origin::new(origin, true, &issued.charge),
         #[cfg(feature = "record")]
-        space: 2,
+        space: hirsel_core_net::packet_schedule::Space::Application,
         #[cfg(feature = "record")]
         profile: schedule.profile,
         _charge: issued.charge,

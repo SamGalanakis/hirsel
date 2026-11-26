@@ -449,7 +449,8 @@ fn snapshot(c: &mut Cursor<'_>, kind: u8) -> Result<bool, Corrupt> {
             tag(c, 31)?;
             tag(c, 1)?;
             for _ in 0..c.varint()? {
-                tag(c, 4)?;
+                hirsel_core_net::packet_schedule::Space::from_tag(u64::from(c.u8()?))
+                    .map_err(|_| Corrupt)?;
                 c.u64()?;
             }
             if family == 7 && side == 2 {
@@ -463,7 +464,8 @@ fn snapshot(c: &mut Cursor<'_>, kind: u8) -> Result<bool, Corrupt> {
         10..=12 => {
             media_origin(c)?;
             profile(c)?;
-            tag(c, 4)?;
+            hirsel_core_net::packet_schedule::Space::from_tag(u64::from(c.u8()?))
+                .map_err(|_| Corrupt)?;
             match kind {
                 10 => {
                     c.take(16)?;

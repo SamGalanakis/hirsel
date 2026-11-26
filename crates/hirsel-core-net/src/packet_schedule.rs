@@ -15,8 +15,41 @@ use crate::{
     },
 };
 
-const HANDSHAKE: usize = 1;
-const APPLICATION: usize = 2;
+/// Packet-number space in the order of `core.packet.Space` and tape tags.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Space {
+    Initial = 0,
+    Handshake = 1,
+    Application = 2,
+    Rtp = 3,
+    Rtcp = 4,
+}
+
+impl Space {
+    const ALL: [Self; 5] = [
+        Self::Initial,
+        Self::Handshake,
+        Self::Application,
+        Self::Rtp,
+        Self::Rtcp,
+    ];
+
+    pub fn from_tag(tag: u64) -> Result<Self, IssueError> {
+        usize::try_from(tag)
+            .ok()
+            .and_then(|index| Self::ALL.get(index).copied())
+            .ok_or(IssueError::Invalid)
+    }
+
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum ImportProfile {
@@ -61,16 +94,24 @@ impl ImportProfile {
 }
 
 pub struct Schedule<C> {
-    spaces: [Option<Box<Epoch<C>>>; 5],
+    spaces: [Option<Box<Epoch<C>>>; Space::ALL.len()],
     kind: Kind<C>,
 }
 
 /// Public protocol state for a schedule crossing units.
 pub struct Snapshot {
     pub application: bool,
-    pub retired: u8,
+    retired: [bool; Space::ALL.len()],
     pub exported: bool,
-    pub domains: Vec<(u8, u64)>,
+    pub domains: Vec<(Space, u64)>,
+}
+
+impl Snapshot {
+    pub fn retired_bits(&self) -> u8 {
+        Space::ALL.into_iter().fold(0, |bits, space| {
+            bits | (u8::from(self.retired[space.index()]) << space.tag())
+        })
+    }
 }
 
 enum Kind<C> {
@@ -112,9 +153,9 @@ impl<'a, C> SealerPair<'a, C> {
 }
 
 impl<C> Schedule<C> {
-    pub fn single(space: usize, epoch: Epoch<C>) -> Self {
+    pub fn single(space: Space, epoch: Epoch<C>) -> Self {
         let mut spaces = std::array::from_fn(|_| None);
-        spaces[space] = Some(Box::new(epoch));
+        spaces[space.index()] = Some(Box::new(epoch));
         Self {
             spaces,
             kind: Kind::Fixed,
@@ -133,7 +174,7 @@ impl<C> Schedule<C> {
             format
         };
         let mut schedule = Self::single(
-            HANDSHAKE,
+            Space::Handshake,
             Epoch::traffic(
                 handshake_format,
                 algorithm,
@@ -158,7 +199,7 @@ impl<C> Schedule<C> {
             })
         };
         let mut schedule = Self::single(
-            APPLICATION,
+            Space::Application,
             Epoch::new(
                 NonceFormat::Dtls12 { epoch },
                 algorithm,
@@ -247,10 +288,10 @@ impl<C> Schedule<C> {
         let [rtp_tx, rtcp_tx] = per_space(tx, permitted[0]);
         let [rtp_rx, rtcp_rx] = per_space(rx, permitted[1]);
         let mut schedule = Self::single(
-            3,
+            Space::Rtp,
             Epoch::srtp(NonceFormat::SrtpRtp, profile, rtp_tx, rtp_rx),
         );
-        schedule.spaces[4] = Some(Box::new(Epoch::srtp(
+        schedule.spaces[Space::Rtcp.index()] = Some(Box::new(Epoch::srtp(
             NonceFormat::SrtpRtcp,
             profile,
             rtcp_tx,
@@ -281,25 +322,27 @@ impl<C> Schedule<C> {
             }
             None => (Epoch::directional(format, algorithm, local, None), None),
         };
-        let mut schedule = Self::single(APPLICATION, epoch);
+        let mut schedule = Self::single(Space::Application, epoch);
         schedule.kind = Kind::TrafficImport { local, traffic };
         Ok(schedule)
     }
 
-    pub fn epoch(&mut self, space: u64) -> Result<&mut Epoch<C>, IssueError> {
-        self.space_error(space)?;
-        Ok(self.spaces[space as usize].as_deref_mut().unwrap())
+    pub fn epoch(&mut self, space: Space) -> Result<&mut Epoch<C>, IssueError> {
+        self.spaces[space.index()]
+            .as_deref_mut()
+            .ok_or(IssueError::Invalid)
     }
 
-    pub fn view_epoch(&self, space: u64) -> Result<&Epoch<C>, IssueError> {
-        self.space_error(space)?;
-        Ok(self.spaces[space as usize].as_deref().unwrap())
+    pub fn view_epoch(&self, space: Space) -> Result<&Epoch<C>, IssueError> {
+        self.spaces[space.index()]
+            .as_deref()
+            .ok_or(IssueError::Invalid)
     }
 
     pub fn check_sealer_pair(
         &mut self,
-        first: u64,
-        second: u64,
+        first: Space,
+        second: Space,
         domain: u64,
     ) -> Result<SealerPair<'_, C>, IssueError> {
         if first == second {
@@ -309,7 +352,7 @@ impl<C> Schedule<C> {
         self.view_epoch(second)?.check_sealer(domain)?;
         let [first, second] = self
             .spaces
-            .get_disjoint_mut([first as usize, second as usize])
+            .get_disjoint_mut([first.index(), second.index()])
             .unwrap();
         Ok(SealerPair {
             epochs: [
@@ -320,28 +363,22 @@ impl<C> Schedule<C> {
         })
     }
 
-    fn space_error(&self, space: u64) -> Result<(), IssueError> {
-        self.spaces
-            .get(space as usize)
-            .and_then(Option::as_ref)
-            .map(|_| ())
-            .ok_or(IssueError::Invalid)
-    }
-
     pub fn snapshot(&self) -> Snapshot {
-        let mut retired = 0;
+        let mut retired = [false; Space::ALL.len()];
         let mut domains = Vec::new();
-        for (space, epoch) in self.spaces.iter().enumerate() {
-            if let Some(epoch) = epoch {
-                retired |= u8::from(epoch.retired()) << space;
-                domains.extend(epoch.domains().map(|domain| (space as u8, domain)));
+        for space in Space::ALL {
+            if let Some(epoch) = &self.spaces[space.index()] {
+                retired[space.index()] = epoch.retired();
+                domains.extend(epoch.domains().map(|domain| (space, domain)));
             }
         }
         if let Kind::Sframe(sframe) = &self.kind {
-            domains.extend(sframe.domains().map(|kid| (APPLICATION as u8, kid)));
+            domains.extend(sframe.domains().map(|kid| (Space::Application, kid)));
         }
         Snapshot {
-            application: self.spaces[APPLICATION..].iter().any(Option::is_some)
+            application: [Space::Application, Space::Rtp, Space::Rtcp]
+                .into_iter()
+                .any(|space| self.spaces[space.index()].is_some())
                 || matches!(self.kind, Kind::Sframe(_)),
             retired,
             exported: matches!(
@@ -386,7 +423,7 @@ impl<C> Schedule<C> {
         let Kind::Tls13 { algorithm, .. } = self.kind else {
             return Err(IssueError::Invalid);
         };
-        if self.spaces[APPLICATION].is_some()
+        if self.spaces[Space::Application.index()].is_some()
             || hash.len() != TlsHash::for_aead(algorithm).output_len()
         {
             return Err(IssueError::Invalid);
@@ -408,7 +445,7 @@ impl<C> Schedule<C> {
         *application = handshake
             .as_mut()
             .map(|handshake| handshake.application(hash).unwrap());
-        self.spaces[APPLICATION] = Some(Box::new(Epoch::traffic(
+        self.spaces[Space::Application.index()] = Some(Box::new(Epoch::traffic(
             *format,
             *algorithm,
             *side,
@@ -421,7 +458,7 @@ impl<C> Schedule<C> {
             Kind::TrafficImport {
                 local: permitted, ..
             } if local == *permitted => Ok(()),
-            Kind::Tls13 { .. } if self.spaces[APPLICATION].is_some() => Ok(()),
+            Kind::Tls13 { .. } if self.spaces[Space::Application.index()].is_some() => Ok(()),
             _ => Err(IssueError::Invalid),
         }
     }
@@ -432,7 +469,7 @@ impl<C> Schedule<C> {
         issue: impl FnOnce(Opener<'_, C>) -> T,
     ) -> Result<T, IssueError> {
         self.check_update(false)?;
-        self.view_epoch(APPLICATION as u64)?.next_opener(
+        self.view_epoch(Space::Application)?.next_opener(
             admit,
             || match &self.kind {
                 Kind::Tls13 {
@@ -468,17 +505,21 @@ impl<C> Schedule<C> {
                 unreachable!("checked key update")
             }
         };
-        self.spaces[APPLICATION]
+        self.spaces[Space::Application.index()]
             .as_mut()
             .unwrap()
             .key_update(local, keys)
     }
 
-    pub fn check_retire(&self, space: u64) -> Result<(), IssueError> {
-        if space != HANDSHAKE as u64 || !matches!(self.kind, Kind::Tls13 { .. }) {
+    pub fn check_retire(&self, space: Space) -> Result<(), IssueError> {
+        if space != Space::Handshake || !matches!(self.kind, Kind::Tls13 { .. }) {
             return Err(IssueError::Invalid);
         }
-        if self.spaces[HANDSHAKE].as_ref().unwrap().retired() {
+        if self.spaces[Space::Handshake.index()]
+            .as_ref()
+            .unwrap()
+            .retired()
+        {
             return Err(IssueError::Spent);
         }
         Ok(())
@@ -492,7 +533,10 @@ impl<C> Schedule<C> {
         {
             handshake.retire();
         }
-        self.spaces[HANDSHAKE].as_mut().unwrap().retire_entries()
+        self.spaces[Space::Handshake.index()]
+            .as_mut()
+            .unwrap()
+            .retire_entries()
     }
 
     pub fn finished_size(&self, transcript_hash: &[u8]) -> Result<usize, IssueError> {
@@ -508,7 +552,7 @@ impl<C> Schedule<C> {
         if dtls12 {
             Ok(12)
         } else {
-            self.check_retire(HANDSHAKE as u64)?;
+            self.check_retire(Space::Handshake)?;
             Ok(size)
         }
     }

@@ -311,7 +311,12 @@ stall detection.
 - **Operator-only attestation.** An offline root key pinned at join signs rotating deploy
   keysets (with monotone epoch and durable node anti-rollback marks). Operators sign deploy
   approvals covering `(fleet, group, generation, release, predecessor, recipe_root,
-  assembly_target, grant_diff, held_fates)` verified with `ed25519` / `p256`. Hosts fetch
+  assembly_target, grant_diff, held_fates)` verified with `ed25519` / `p256`. Ed25519
+  verification follows [core.md](core.md#signature-verification)'s cofactorless RFC 8032
+  acceptance rule (`S < L`, `[S]B − [k]A = R` compared against `R`'s canonical 32-byte
+  encoding with raw `R` and `key` in `k`, rejecting cofactored-only and non-canonical-`R`
+  signatures while accepting non-canonical `key` encodings and small- or mixed-order keys
+  whenever the cofactorless equation holds). Hosts fetch
   missing objects by digest from the bucket and feed the launcher's existing
   `Admit -> Need -> AdmitData -> AdmitEnd` exchange.
 - **Revocation-ordered clearance.** Before starting any preview, prepare or serving child of a

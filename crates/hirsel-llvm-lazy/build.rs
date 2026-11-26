@@ -33,6 +33,19 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={}", source.display());
     }
+    // A metadata-only check of another target (tools/darwin_check.py) builds no
+    // engine: it needs the target's SDK and engine, which this host lacks. The
+    // library it would link names nothing, so a skipped build never links.
+    println!("cargo:rerun-if-env-changed=HIRSEL_METADATA_CHECK");
+    if env::var_os("HIRSEL_METADATA_CHECK").is_some() {
+        println!("cargo:rustc-link-lib=hirsel-metadata-check-builds-no-engine");
+        std::fs::write(
+            out.join("component.rs"),
+            "static COMPONENT: &[u8] = &[];\nconst CARGO_ENGINE: Option<(&str, &str)> = None;\nconst LLVM_BUILD_ID: &str = \"\";\nconst LLVM_LIBRARY: &str = \"\";\n",
+        )
+        .unwrap();
+        return;
+    }
     let host = Host::of(&prefix);
     println!(
         "cargo:rerun-if-changed={}",

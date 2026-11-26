@@ -51,6 +51,7 @@ class Law:
     # The law group, the normal build's site map and the hirsel that merges
     # the group's raw coverage files against its maps.
     coverage: tuple[str, Path, Path] | None = None
+    defer_probe_gate: bool = False
 
 
 def allocate(db, campaign, shards, count):
@@ -359,7 +360,7 @@ def record(db, campaign, ranges, output, results, executable, laws=None):
                         count = reach[shard].get(label)
                         db.execute("INSERT INTO law_reach VALUES (?, ?, ?, ?, ?)",
                                    (campaign, law.build, law.name, label, None if count is None else str(count)))
-                        if not count:
+                        if not count and not law.defer_probe_gate:
                             law_reds.append({"build": law.build, "law": law.name, "kind": "reach_red",
                                              "label": label, "true_calls": count})
                             print(f"{law.name}: witness {label!r} had "
@@ -520,8 +521,10 @@ def read_laws(path):
             raise ValueError(f"invalid trace diversity floor for {law}")
         build = entry.get("build")
         required = entry.get("required_witnesses", [])
+        defer_probe_gate = entry.get("defer_probe_gate", False)
         if (build is not None and (not isinstance(build, str) or not build)
                 or not isinstance(required, list)
+                or type(defer_probe_gate) is not bool
                 or any(not isinstance(label, str) for label in required)
                 or len(set(required)) != len(required) or (required and build is None)):
             raise ValueError(f"invalid reach witness declaration for {law}")
@@ -540,7 +543,7 @@ def read_laws(path):
             coverage = (coverage["group"], (path.parent / coverage["map"]).resolve(strict=True),
                         local_executable(path.parent / coverage["tool"]))
         laws.append(Law(law, binary, count, seed_zero, minimum, build, tuple(required), digest, recording,
-                        coverage))
+                        coverage, defer_probe_gate))
         names.add(law)
     return laws
 

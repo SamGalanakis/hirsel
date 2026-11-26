@@ -662,6 +662,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             model.head = admitted
             match serve(mut db, take first, plan, None, copy_env(env), l63_schedule_body) {
                 Ok(Parked(take p)) => {
+                    // vopr probe
                     let _ = std.prop.sometimes("park", true)
                     list.push(mut parked, (take p, take env))
                 },
@@ -669,6 +670,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
                     if step == 0 {
                         fail("L63 schedule: the first serve misses the Cold root and parks")
                     }
+                    // vopr probe
                     let _ = std.prop.sometimes("commit without parking", true)
                     schedule_commit(db, mut model, env, receipt.reply)
                 },
@@ -682,6 +684,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             })? else {
                 fail("L63 schedule: a Hot write commits")
             }
+            // vopr probe
             let _ = std.prop.sometimes("head move", true)
             map.insert(mut model.marks, key, value)
             schedule_moved(db, mut model)
@@ -703,6 +706,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             })? else {
                 fail("L63 schedule: an inline Cold write commits")
             }
+            // vopr probe
             let _ = std.prop.sometimes("held write", true)
             match value {
                 Some(v) => map.insert(mut model.rows, key, v),
@@ -719,11 +723,13 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             match resume_parked(mut db, take p, copy_env(env), l63_schedule_body) {
                 Ok(Parked(take again)) => {
                     if was_ready {
+                        // vopr probe
                         let _ = std.prop.sometimes("resume parks again", true)
                     }
                     list.push(mut parked, (take again, take env))
                 },
                 Ok(Committed(receipt)) => {
+                    // vopr probe
                     let _ = std.prop.sometimes("resume commits", true)
                     schedule_commit(db, mut model, env, receipt.reply)
                 },
@@ -735,12 +741,14 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), copy_env(env), l63_schedule_body) else {
                 fail("L63 schedule: a settled call commits")
             }
+            // vopr probe
             let _ = std.prop.sometimes("settle", true)
             schedule_commit(db, mut model, env, receipt.reply)
         } else if op == 5 && list.len(parked) != 0 {
             let at = std.rand.below(mut g, list.len(parked))
             let (take p, _) = list.remove(mut parked, at)
             let _ = cancel_parked(mut db, take p)
+            // vopr probe
             let _ = std.prop.sometimes("cancel", true)
             if version(snapshot(db)) != model.head {
                 fail("L63 schedule: a cancelled call commits nothing")

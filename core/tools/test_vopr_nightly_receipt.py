@@ -12,6 +12,35 @@ from sim_campaign import CANARY
 
 
 class NightlyReceipt(unittest.TestCase):
+    def test_frequency_gate_includes_a_never_visited_rare_probe(self):
+        from sim_campaign import selected_laws
+        from vopr_nightly_receipt import frequency_missed, summarize
+
+        declared = {}
+        selected_laws(probes=declared)
+        law = "store@1/store/test_l69_random_arm"
+        self.assertTrue(declared[law]["crash before the rename"])
+        self.assertFalse(declared[law]["fork"])
+        self.assertTrue(frequency_missed(1, 20_000))
+        self.assertFalse(frequency_missed(2, 20_000))
+        self.assertFalse(frequency_missed(1, 19_999))
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            manifest = run / "manifest.json"
+            manifest.write_text(json.dumps([{"build": "commit", "law": law}]))
+            (run / "probe-declarations.json").write_text(json.dumps({
+                law: {"crash before the rename": True, "fork": False},
+            }))
+            for batch, calls in enumerate((0, 10), 1):
+                with gzip.open(run / f"{batch}.jsonl.gz", "wt") as stream:
+                    print(json.dumps({"build": "commit", "law": law, "seed": batch,
+                                      "status": 0, "witnesses": {"fork": calls}}), file=stream)
+            summary = summarize(run, manifest, "commit")
+            self.assertEqual(summary["probes_missed"], [(law, "crash before the rename")])
+            rare, common = summary["probes"]
+            self.assertEqual((rare["runs"], rare["hits"], rare["severity"]), (2, 0, 30))
+            self.assertEqual((common["runs"], common["hits"], common["severity"]), (2, 1, None))
+
     def test_sometimes_counts_hits_per_seed_across_batches(self):
         from vopr_nightly_receipt import summarize
 

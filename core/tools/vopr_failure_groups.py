@@ -57,7 +57,7 @@ def expected_canary(row):
             and not any(key in row for key in ("recorded_run", "tape_divergence", "timed_out")))
 
 
-def publish(run, *, require_canary=False):
+def publish(run, *, require_canary=False, probe_reds=()):
     """Write all failure groups. Exit 2 for an unverified sweep, 3 for preparation reds."""
     previous = set()
     for report in run.parent.glob("*/failure-groups.jsonl"):
@@ -96,6 +96,12 @@ def publish(run, *, require_canary=False):
         key = CANARY, "canary_missing", None
         counts[key] = 1
         samples[key] = {"receipt": None, "build": None, "digest": None, "seed": None}
+    for row in probe_reds:
+        key = group(row)
+        counts[key] += 1
+        samples[key] = {"receipt": "receipts.ndjson", "build": row["build"],
+                        "seed": None, "hits": row["hits"], "runs": row["runs"],
+                        "severity": row["severity"]}
     output = run / "failure-groups.tmp"
     with output.open("w") as report:
         for key in counts:

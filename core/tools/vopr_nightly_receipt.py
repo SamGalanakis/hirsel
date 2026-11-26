@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from sim_campaign import CANARY
-from vopr_failure_groups import expected_canary, result_rows
+from vopr_failure_groups import expected_canary, publish, result_rows
 
 
 NOT_COVERED = (
@@ -18,6 +18,11 @@ NOT_COVERED = (
     "the W2 crash-cut and Lean suites",
     "laws, fault classes, and schedules outside this run's recorded evidence",
 )
+PROBE_DIVISOR = 20_000
+
+
+def frequency_missed(hits, runs):
+    return hits * PROBE_DIVISOR <= runs
 
 
 def code_revision(binary):
@@ -88,6 +93,11 @@ def summarize(run, manifest, commit):
     runs = Counter()
     observed_runs = Counter()
     probes = defaultdict(Counter)
+    declarations = run / "probe-declarations.json"
+    declared = json.loads(declarations.read_text()) if declarations.exists() else {}
+    for law, labels in declared.items():
+        for label in labels:
+            probes[law, label]
     for law, entry in prepared.items():
         for label in entry.get("required_witnesses", []):
             probes[law, label]
@@ -127,6 +137,17 @@ def summarize(run, manifest, commit):
                         faults.add(label.removeprefix("fault:"))
         good = sorted(canaries) == [(0, True), (1, True)]
         canary_red = good if canary_red is None else canary_red and good
+    frequencies = []
+    for (law, label), count in sorted(probes.items()):
+        row = {"law": law, "label": label, "runs": runs[law], "observed_runs": observed_runs[law],
+               "hits": count["hits"], "true_calls": count["true_calls"]}
+        if label in declared.get(law, {}):
+            rare = declared[law][label]
+            missed = frequency_missed(row["hits"], row["runs"])
+            row.update(rare=rare, divisor=PROBE_DIVISOR, severity=(30 if rare else 40) if missed else None)
+            if missed:
+                misses.add((law, label))
+        frequencies.append(row)
     return {
         "laws_prepared": sorted(prepared),
         "laws_unprepared": unprepared,
@@ -136,11 +157,7 @@ def summarize(run, manifest, commit):
         "deterministic_reds": sorted(failed_at_zero),
         "trace_diversity_reds": counts["trace_diversity_reds"],
         "replays_diverged": counts["replays_diverged"],
-        "probes": [
-            {"law": law, "label": label, "runs": runs[law], "observed_runs": observed_runs[law],
-             "hits": count["hits"], "true_calls": count["true_calls"]}
-            for (law, label), count in sorted(probes.items())
-        ],
+        "probes": frequencies,
         "probes_missed": sorted(misses),
         "fault_classes_sampled": sorted(faults),
         "canary_red": canary_red,
@@ -164,6 +181,17 @@ def append_once(path, receipt):
 
 def finish(run, manifest, commit, phase, status):
     evidence = summarize(run, manifest, commit)
+    if phase in ("finished", "sweep-failed"):
+        probe_reds = ({**probe, "kind": "reach_red", "build": commit} for probe in evidence["probes"]
+                      if probe.get("severity") is not None)
+        try:
+            group_status = publish(run, require_canary=True, probe_reds=probe_reds)
+            if phase == "finished" and group_status in (0, 3):
+                marker = "focused-complete" if (run / "focused").exists() else "complete"
+                (run / marker).touch()
+            status = group_status or status
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            evidence["evidence_errors"].append(f"failure groups: {error}")
     if evidence["evidence_errors"] or evidence["canary_red"] is not True:
         status = status or 2
     if any(evidence[field] for field in (

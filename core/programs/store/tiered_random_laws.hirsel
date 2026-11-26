@@ -593,10 +593,12 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             match edit {
                 Some(e) => {
                     map.insert(mut changed, at, e)
+                    // vopr probe
                     let _ = std.prop.sometimes("edit", true)
                 },
                 None => {
                     let _ = map.remove(mut changed, at)
+                    // vopr probe
                     let _ = std.prop.sometimes("delete a key", true)
                 },
             }
@@ -612,6 +614,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             }
             let (child, _) = fork(mut db, random_branch_name(model.forks), from)?
             model.forks += 1
+            // vopr probe
             let _ = std.prop.sometimes("fork", true)
             map.insert(mut model.heads, child.id, take snap_model)
         } else if op == 7 && map.len(model.pins) < 3 {
@@ -629,6 +632,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 let _ = pin(mut db, name, s)?
                 map.insert(mut model.pins, take key, take snap_model)
                 let _ = checkpoint(mut db)?
+                // vopr probe
                 let _ = std.prop.sometimes("pin a head", true)
             }
             model.pinned_count += 1
@@ -642,6 +646,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                         clone(main_model)
                     }
                     history = Some((snapshot(db), take snap_model))
+                    // vopr probe
                     let _ = std.prop.sometimes("capture history", true)
                 },
                 Some((take s, take snap_model)) => {
@@ -656,6 +661,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                             Ok(_) => {
                                 map.insert(mut model.pins, take key, take snap_model)
                                 let _ = checkpoint(mut db)?
+                                // vopr probe
                                 let _ = std.prop.sometimes("pin history", true)
                             },
                             Error(Reclaimed(_)) => (),
@@ -673,6 +679,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 let _ = unpin(mut db, name)?
                 let _ = map.remove(mut model.pins, name)
                 let _ = checkpoint(mut db)?
+                // vopr probe
                 let _ = std.prop.sometimes("unpin", true)
             }
         } else if op == 10 && list.len(db.heads) > 1 {
@@ -681,13 +688,16 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let gone = Branch(store: db.store, id)
             let _ = delete_branch(mut db, gone)?
             let _ = map.remove(mut model.heads, id)
+            // vopr probe
             let _ = std.prop.sometimes("delete a branch", true)
         } else if op == 11 {
             let _ = checkpoint(mut db)?
             random_check(d, db, rows, Some(clone(marks)), model)?
+            // vopr probe
             let _ = std.prop.sometimes("cut", true)
         } else if op == 14 {
             random_residency_round_trip(mut db, rows, model)?
+            // vopr probe
             let _ = std.prop.sometimes("residency round trip", true)
         } else if op == 15 {
             let slot = std.rand.below(mut g, list.len(db.heads))
@@ -736,6 +746,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             }, edits: take edits, expected: random_part(changed, on_marks), n, probes: take probes, lo, hi)
             random_tx_reads(mut db, id, take env)?
             map.insert(mut model.heads, id, take changed)
+            // vopr probe
             let _ = std.prop.sometimes("transaction reads its staged writes", true)
         } else if op == 16 {
             let sides = list.len(db.heads) + map.len(model.pins)
@@ -746,6 +757,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             drop(take a)
             drop(take b)
             drop(take read_handle)
+            // vopr probe
             let _ = std.prop.sometimes("diff two heads or pins", true)
         } else if op == 17 || op == 18 {
             let sides = list.len(db.heads) + map.len(model.pins)
@@ -772,6 +784,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                     (other_end, one_end)
                 }
                 random_span(read_handle, s, t, part, lo, hi)?
+                // vopr probe
                 let _ = std.prop.sometimes("span", true)
             } else {
                 let lo = random_bound(mut g, n)
@@ -780,6 +793,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 if count_at(read_handle, s, t, lo, hi)? != random_window(part, n, lo, hi) {
                     fail("L69 random: every head and pin counts the rows its commits wrote")
                 }
+                // vopr probe
                 let _ = std.prop.sometimes("bounded scan", true)
             }
             drop(take s)
@@ -804,7 +818,9 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             random_reads(read_handle, s, marks, random_part(expected, true), MARK_ROWS)?
             drop(take s)
             drop(take read_handle)
+            // vopr probe
             let _ = std.prop.sometimes("marks to Memory", to_memory)
+            // vopr probe
             let _ = std.prop.sometimes("marks to Tiered", !to_memory)
         } else if op >= 12 {
             if let Some((take s, _)) = take history {
@@ -815,7 +831,9 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let crashing = take db
             db = random_crash(d, c, r, tasks, take crashing, renamed, clone(options))?
             crashes += 1
+            // vopr probe rare
             let _ = std.prop.sometimes("crash before the rename", !renamed)
+            // vopr probe rare
             let _ = std.prop.sometimes("crash after the rename", renamed)
             let _ = checkpoint(mut db)?
             random_check(d, db, rows, Some(clone(marks)), model)?

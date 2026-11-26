@@ -98,20 +98,9 @@ for name in "${!groups[@]}"; do
   "${paths[0]}" coverage merge ${groups[$name]} -o "$run/coverage/$name" >/dev/null \
     || echo "coverage ${name%.json}: merge failed" >&2
 done
-group_status=0
-python3 "$checkout/core/tools/vopr_failure_groups.py" "$run" || group_status=$?
-if (( sweep_status == 0 && (group_status == 0 || group_status == 3) )); then
-  if (( ${#law_filter[@]} )); then
-    touch "$run/focused-complete"
-  else
-    touch "$run/complete"
-  fi
-fi
 if (( sweep_status != 0 )); then
   status=$sweep_status
-elif (( group_status != 0 )); then
-  status=$group_status
-  phase=failure-groups
+  phase=sweep-failed
 else
   phase=finished
 fi

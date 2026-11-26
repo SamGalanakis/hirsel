@@ -26,19 +26,8 @@ FLOOD_SEEDS = {
     'runner@1/runner_calls/law_calls_session_charge': 2,
 }
 TRACE_FLOORS = {'store@1/store/bucket_test_m2_register_fence': 2}
-REACH_WITNESSES = {
-    'store@1/store/test_model': ['64 or more commands'],
-    # One label per L69 op, counted where the op takes effect (a guarded draw can do nothing).
-    'store@1/store/test_l69_random_arm': [
-        'edit', 'delete a key', 'fork', 'pin a head', 'capture history', 'pin history', 'unpin',
-        'delete a branch', 'cut', 'crash before the rename', 'crash after the rename',
-    ],
-    # Each L63 schedule move, counted where it takes effect; seeds 0-23 reach all of them.
-    'store@1/store/test_l63_seeded_call_schedule': [
-        'park', 'commit without parking', 'head move', 'held write', 'resume parks again',
-        'resume commits', 'settle', 'cancel',
-    ],
-}
+PROBE_MARKER = re.compile(r'^\s*// vopr probe(?: (rare))?\s*$')
+PROBE_CALL = re.compile(r'^\s*let _ = std\.prop\.sometimes\(("(?:[^"\\]|\\.)+"),')
 POSTGRES = (
     'fragmented_startup_error', 'eof_in_error_response',
     'startup_ready_deadline', 'fatal_error_during_sync', 'comma_host_refused',
@@ -68,31 +57,55 @@ def unsupported_fixture(case):
     return None
 
 
-def seeded_package_laws(package):
+def source_probes(source, path, laws):
+    """Read the markers next to the branch observations in a seeded law file."""
+    probes = {}
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith('// vopr probe'):
+            continue
+        marker = PROBE_MARKER.fullmatch(line)
+        call = PROBE_CALL.match(lines[index + 1]) if index + 1 < len(lines) else None
+        if marker is None or call is None or len(laws) != 1:
+            raise ValueError(f'{path}:{index + 1}: expected a probe marker before a literal sometimes call in a one-law source')
+        label = json.loads(call[1])
+        if label in probes:
+            raise ValueError(f'{path}:{index + 1}: duplicate probe {label!r}')
+        probes[label] = marker[1] == 'rare'
+    return probes
+
+
+def seeded_package_laws(package, probes=None):
     """A package test opts in with its simulation-specific Env parameter."""
     directory = ROOT / 'core/programs' / package
     manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
     version = manifest['package']['major']
     laws = {}
     for file, module in manifest.get('tests', {}).get('sources', {}).items():
-        for name, parameters in SEEDED_TEST.findall((directory / file).read_text()):
+        path = directory / file
+        source = path.read_text()
+        definitions = []
+        for name, parameters in SEEDED_TEST.findall(source):
             if re.search(r'(^|,)\s*seed_grant\s*:\s*Env\s*(,|$)', parameters):
                 definition = f'{package}@{version}/{module.replace(".", "/")}/{name}'
                 laws[definition] = definition
+                definitions.append(definition)
+        if probes is not None and (declared := source_probes(source, path, definitions)):
+            probes[definitions[0]] = declared
     return laws
 
 
-def seeded_package_inventory():
+def seeded_package_inventory(probes=None):
     """Every workspace package with at least one seeded law."""
     workspace = tomllib.loads((ROOT / 'core/programs/hirsel.toml').read_text())
     inventory = {}
     for package in workspace['workspace']['members']:
-        if laws := seeded_package_laws(package):
+        if laws := seeded_package_laws(package, probes):
             inventory[package] = laws
     return inventory
 
 
-def selected_laws(skips=None):
+def selected_laws(skips=None, probes=None):
     laws = {'postgres': {f'postgres@1/sim_tests/{name}': name for name in POSTGRES}}
     direct = set()
     for case in std_native.discover(ROOT, []):
@@ -122,7 +135,7 @@ def selected_laws(skips=None):
         if 'Net' in types:
             runner[f'runner@1/runner_calls/law_{name}'] = types
     laws['runner-adapters'] = runner
-    for package, seeded in seeded_package_inventory().items():
+    for package, seeded in seeded_package_inventory(probes).items():
         if package in laws:
             raise ValueError(f'{package} needs one campaign preparation mode')
         laws[package] = seeded
@@ -297,7 +310,7 @@ def prepare_leg(command, scratch, report, leg, expected, errors):
 
 
 def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime,
-            nightly=None, attempt=0):
+            nightly=None, attempt=0, probes=None):
     """Build a covered normal leg and a recording leg for SEM-8 replay."""
     scratch = work / (kind if not attempt else f'{kind}-{attempt}')
     scratch.mkdir()
@@ -311,6 +324,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
     recording = ['--laws', *(['--runtime', str(recording_runtime)] if recording_runtime else [])]
     errors = {}
     rows = {}
+    probes = probes or {}
     if kind not in GENERATED_KINDS:
         # Package mode writes a workspace lock. Stage its sources away from the checkout.
         programs = work / 'programs'
@@ -320,7 +334,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         entries = group
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
         for index, definition in enumerate(entries.values()):
-            covered = recording if definition in REACH_WITNESSES else normal
+            covered = recording if definition in probes else normal
             for leg, launch in (('bin', covered), ('recording', recording)):
                 command = base + ['-o', str(scratch / leg)] + launch + libraries + [str(programs / kind)]
                 report = reports / f'prepare-{leg}-{index}.json'
@@ -363,7 +377,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
                     shutil.rmtree(scratch / 'objects')
                 remaining = {law: case for law, case in group.items() if law not in rejected}
                 return prepare(compiler, work, kind, remaining, jobs, seeds, build, runtime,
-                               recording_runtime, nightly, attempt + 1)
+                               recording_runtime, nightly, attempt + 1, probes)
             if leg == 'bin':
                 rows.update(prepared)
     laws = []
@@ -383,7 +397,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         laws.append({'build': build, 'law': law, 'executable': str(binary),
                      'recording': str(scratch / 'recording' / binary.name), 'seeds': count,
                      'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
-                     'required_witnesses': REACH_WITNESSES.get(law, []),
+                     'required_witnesses': list(probes.get(law, {})), 'defer_probe_gate': nightly is not None,
                      'coverage': {'group': kind, 'map': f'{binary}.covmap', 'tool': str(compiler)}})
     if (scratch / 'objects').exists():
         shutil.rmtree(scratch / 'objects')
@@ -412,7 +426,8 @@ def main():
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
     skips = {}
-    inventory = selected_laws(skips)
+    probes = {}
+    inventory = selected_laws(skips, probes)
     if args.package:
         packages = set(args.package)
         if 'runner' in packages:
@@ -428,6 +443,8 @@ def main():
         if args.nightly_results is not None:
             names.extend(name for name in skips if not requested or name in requested)
             names.append(CANARY)
+            (args.nightly_results / 'probe-declarations.json').write_text(
+                json.dumps({name: probes[name] for name in names if name in probes}) + '\n')
         print('\n'.join(names))
         return
     if not args.compiler or not args.work or (args.seeds is not None and args.seeds <= 0):
@@ -453,7 +470,7 @@ def main():
         group = {name: case for name, case in group.items() if not requested or name in requested}
         if group:
             laws.extend(prepare(args.compiler.resolve(), work, kind, group, args.jobs, args.seeds,
-                                build, runtime, recording_runtime, nightly))
+                                build, runtime, recording_runtime, nightly, probes=probes))
     if nightly is not None:
         laws.extend(prepare(args.compiler.resolve(), work, 'canary', {CANARY: None}, args.jobs,
                             args.seeds, build, runtime, recording_runtime, nightly))

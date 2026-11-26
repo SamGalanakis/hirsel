@@ -177,6 +177,7 @@ fn model_show_tape(tape: List[(u64, u64)], mut out: String) {
 // A closure cannot capture the test's Clock (LANG-14), so each run takes a
 // virtual one; the store reads no time beyond the wall each command passes.
 fn model_run(tape: List[(u64, u64)]) -> Result[(), String] {
+    // vopr probe
     let _ = std.prop.sometimes("64 or more commands", list.len(tape) >= 64)
     let (c, _hand) = provide.clock(0u64, 0u64)
     let mut db = raw_test_db(c, 1073741824)

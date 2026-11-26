@@ -1,0 +1,451 @@
+// Store crash simulation: the plan, the reference world and the reads
+// through the public API. The driver and the laws are in
+// store_crash_sim_laws.hirsel.
+type CsimWorld: send {
+    heads: Map[String, Map[u64, u8]],
+    pins: Map[String, Map[u64, u8]]
+}
+
+type CsimStep: send {
+    op: u64,
+    a: u64,
+    b: u64
+}
+
+type CsimPlan: send {
+    options: Options,
+    weights: Inline[u64, 16],
+    faults: std.sim.world.WriteFaults,
+    script_permille: u64,
+    steps: List[CsimStep]
+}
+
+type CsimHeld {
+    snap: Snapshot,
+    rows: Map[u64, u8]
+}
+
+// What a step asks the driver to do after.
+type CsimNext = Go | Crash | Power | Reopen
+
+type CsimRead = Unreadable(Error) | Wrong(u64)
+
+const CSIM_KEYS: u64 = 24
+
+const CSIM_STEPS: u64 = 64
+
+const CSIM_TX_STEPS: u64 = 10000000
+
+const CSIM_ROOM: u64 = 67108864
+
+const CS_PUT: u64 = 0
+
+const CS_DURABLE: u64 = 1
+
+const CS_DELETE: u64 = 2
+
+const CS_CUT: u64 = 3
+
+const CS_PIN: u64 = 4
+
+const CS_CAPTURE: u64 = 5
+
+const CS_RELEASE: u64 = 6
+
+const CS_PIN_HELD: u64 = 7
+
+const CS_UNPIN: u64 = 8
+
+const CS_FORK: u64 = 9
+
+const CS_DROP_BRANCH: u64 = 10
+
+const CS_RESIDENCY: u64 = 11
+
+const CS_BACKUP: u64 = 12
+
+const CS_CRASH: u64 = 13
+
+const CS_POWER: u64 = 14
+
+const CS_REOPEN: u64 = 15
+
+fn csim_op_name(op: u64) -> String {
+    let names: Inline[String, 16] =["put", "durable", "delete", "cut", "pin", "capture", "release", "pin_held", "unpin", "fork", "drop_branch", "residency", "backup", "crash", "power", "reopen"]
+    string.from(names[op])
+}
+
+// ---- values ----------------------------------------------------------------
+// Byte 0 is the edit; edits with edit % 4 == 3 are past the 1,024-byte inline
+// limit, so a quarter of the writes move a row between page values and BLOBs.
+fn csim_value(key: u64, edit: u8) -> Bytes {
+    let band: u64 = int.widen(edit % 4u8)
+    let e: u64 = int.widen(edit)
+    let width = 8u64 + band * 400u64
+    let mut out: Bytes = list.with_capacity(width)
+    list.push(mut out, edit)
+    for i in 1u64 .. width {
+        list.push(mut out, int.truncate((key * 31u64 + e * 7u64 + i) % 251u64))
+    }
+    take out
+}
+
+fn csim_fork_name(n: u64) -> String {
+    let names: Inline[String, 3] =["f0", "f1", "f2"]
+    string.from(names[n % 3])
+}
+
+fn csim_pin_name(n: u64) -> String {
+    let names: Inline[String, 3] =["p0", "p1", "p2"]
+    string.from(names[n % 3])
+}
+
+// ---- generator -------------------------------------------------------------
+fn csim_pick(weights: Inline[u64, 16], choice: u64) -> u64 {
+    let mut left = choice
+    for i in 0u64 .. 16 {
+        if left < weights[i] {
+            return i
+        }
+        left -= weights[i]
+    }
+    fail("crash sim: a weight was skipped")
+}
+
+fn csim_draw(mut src: std.prop.Source) -> CsimPlan {
+    let group_commits: Inline[u32, 3] =[1, 4, 64]
+    let pack_bytes: Inline[u64, 3] =[8192, 65536, 1048576]
+    let checkpoint_bytes: Inline[u64, 3] =[32768, 131072, 1048576]
+    let probes: Inline[u64, 4] =[65536, 1, 2, 4]
+    let permille: Inline[u64, 3] =[500, 1001, 0]
+    let mut overrides = derived_sizes()
+    overrides.group_commits = Some(group_commits[std.prop.below(mut src, 3)])
+    overrides.pack_bytes = Some(pack_bytes[std.prop.below(mut src, 3)])
+    overrides.checkpoint_bytes = Some(checkpoint_bytes[std.prop.below(mut src, 3)])
+    // The Tiered L70 floor.
+    overrides.resident_limit = Some(182375272)
+    overrides.writer_pin_bytes = Some(34471936)
+    overrides.cache_bytes = Some(52232192)
+    let mut options = result.unwrap(sized_with(Directory, 2147483648, overrides))
+    options.probe_budget = probes[std.prop.below(mut src, 4)]
+    options.compact_permille = permille[std.prop.below(mut src, 3)]
+    let mut weights: Inline[u64, 16] =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for op in 0u64 .. 16 {
+        let enabled = std.prop.weighted(mut src, 1, 2)
+        let weight = 1u64 << std.prop.below(mut src, 3)
+        if enabled {
+            weights[op] = weight
+        }
+    }
+    // A step list that shrinks to cuts still runs and checks every view.
+    weights[CS_CUT] += 1
+    let mode = std.prop.below(mut src, 4)
+    let faults = if mode == 2 {
+        std.sim.world.WriteFaults(corrupt: std.prop.below(mut src, 8), misdirect: std.prop.below(mut src, 8), lost_write: std.prop.below(mut src, 8))
+    } else {
+        std.sim.world.WriteFaults(corrupt: 0, misdirect: 0, lost_write: 0)
+    }
+    let script_permille = if mode == 1 {
+        250 + 250 * std.prop.below(mut src, 4)
+    } else {
+        0
+    }
+    let mut total = 0u64
+    for i in 0u64 .. 16 {
+        total += weights[i]
+    }
+    let mut steps: List[CsimStep] = list.new()
+    for i in 0u64 .. CSIM_STEPS {
+        let step = std.prop.span(mut src, 1, scoped fn(mut s: std.prop.Source) -> Option[CsimStep] {
+            if i >= 4 && !std.prop.weighted(mut s, 31, 32) {
+                return None
+            }
+            let op = csim_pick(weights, std.prop.below(mut s, total))
+            Some(CsimStep(op: op, a: std.prop.below(mut s, 64), b: std.prop.below(mut s, 64)))
+        })
+        match step {
+            Some(found) => list.push(mut steps, found),
+            None => break,
+        }
+    }
+    CsimPlan(options: take options, weights, faults, script_permille, steps: take steps)
+}
+
+fn csim_show(p: CsimPlan, mut out: String) {
+    let o = view p.options
+    let settings: Inline[(String, u64), 9] =[
+        ("group_commits", int.widen(o.group_commits)),
+        ("pack_bytes", o.pack_bytes),
+        ("checkpoint_bytes", o.checkpoint_bytes),
+        ("probe_budget", o.probe_budget),
+        ("compact_permille", o.compact_permille),
+        ("corrupt", p.faults.corrupt),
+        ("misdirect", p.faults.misdirect),
+        ("lost_write", p.faults.lost_write),
+        ("script_permille", p.script_permille),
+    ]
+    for (name, value) in settings {
+        string.push(mut out, name)
+        string.push(mut out, "=")
+        string.push_u64(mut out, value)
+        string.push(mut out, " ")
+    }
+    string.push(mut out, "steps[")
+    let mut first = true
+    for s in p.steps {
+        if !first {
+            string.push(mut out, " ")
+        }
+        first = false
+        string.push(mut out, csim_op_name(s.op))
+        string.push(mut out, "(")
+        string.push_u64(mut out, s.a)
+        string.push(mut out, ",")
+        string.push_u64(mut out, s.b)
+        string.push(mut out, ")")
+    }
+    string.push(mut out, "]")
+}
+
+// ---- reference world -------------------------------------------------------
+fn csim_empty() -> CsimWorld {
+    let mut heads: Map[String, Map[u64, u8]] = map.new()
+    map.insert(mut heads, string.from(""), map.new())
+    CsimWorld(heads: take heads, pins: map.new())
+}
+
+fn csim_rows_equal(x: Map[u64, u8], y: Map[u64, u8]) -> bool {
+    if map.len(x) != map.len(y) {
+        return false
+    }
+    for (k, e) in x {
+        match map.get(y, k) {
+            Some(other) if other == e => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn csim_named_equal(x: Map[String, Map[u64, u8]], y: Map[String, Map[u64, u8]]) -> bool {
+    if map.len(x) != map.len(y) {
+        return false
+    }
+    for (name, rows) in x {
+        match map.get(y, name) {
+            Some(other) if csim_rows_equal(rows, other) => (),
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn csim_world_equal(x: CsimWorld, y: CsimWorld) -> bool {
+    csim_named_equal(x.heads, y.heads) && csim_named_equal(x.pins, y.pins)
+}
+
+fn csim_show_rows(rows: Map[u64, u8], mut out: String) {
+    string.push(mut out, "{")
+    for k in 0u64 .. CSIM_KEYS {
+        if let Some(e) = map.get(rows, k) {
+            string.push_u64(mut out, k)
+            string.push(mut out, ":")
+            let edit: u64 = int.widen(e)
+            string.push_u64(mut out, edit)
+            string.push(mut out, " ")
+        }
+    }
+    string.push(mut out, "}")
+}
+
+fn csim_show_world(w: CsimWorld, mut out: String) {
+    let names: Inline[String, 7] =["", "f0", "f1", "f2", "p0", "p1", "p2"]
+    for i in 0u64 .. 7 {
+        let found = if i < 4 {
+            map.get(w.heads, names[i])
+        } else {
+            map.get(w.pins, names[i])
+        }
+        if let Some(rows) = found {
+            if i == 0 {
+                string.push(mut out, "main")
+            } else {
+                string.push(mut out, string.from(names[i]))
+            }
+            string.push(mut out, "=")
+            csim_show_rows(rows, mut out)
+            string.push(mut out, " ")
+        }
+    }
+}
+
+// The head names in a fixed order: main, then forks by name.
+fn csim_head_names(w: CsimWorld) -> List[String] {
+    let mut names: List[String] = list.new()
+    list.push(mut names, string.from(""))
+    for i in 0u64 .. 3 {
+        if map.contains(w.heads, csim_fork_name(i)) {
+            list.push(mut names, csim_fork_name(i))
+        }
+    }
+    take names
+}
+
+fn csim_last(history: List[CsimWorld]) -> CsimWorld {
+    clone(history[list.len(history) - 1])
+}
+
+// ---- reading the store through its public API ------------------------------
+fn csim_read(db: Db, rows: Table[u64, Bytes], s: Snapshot) -> Result[Map[u64, u8], CsimRead] waits {
+    let rd = reader(db, VALUE_LIMIT + 1048576) ?=> |e| Unreadable(e)
+    let mut found: Map[u64, u8] = map.new()
+    let mut scanned = scan(rd, s, rows, Unbounded, Unbounded) ?=> |e| Unreadable(e)
+    loop {
+        match next(rd, mut scanned) {
+            Ok(Some((k, v))) => {
+                if list.len(v) == 0 || v != csim_value(k, v[0]) || map.contains(found, k) || k >= CSIM_KEYS {
+                    return Error(Wrong(k))
+                }
+                map.insert(mut found, k, v[0])
+            },
+            Ok(None) => break,
+            Error(e) => return Error(Unreadable(e)),
+        }
+    }
+    // A point read must agree with the scan for every key.
+    for k in 0u64 .. CSIM_KEYS {
+        let point = get(rd, s, rows, k) ?=> |e| Unreadable(e)
+        let agrees = match (point, map.get(found, k)) {
+            (None, None) => true,
+            (Some(v), Some(e)) => list.len(v) > 0 && v[0] == e && v == csim_value(k, e),
+            _ => false,
+        }
+        if !agrees {
+            return Error(Wrong(k))
+        }
+    }
+    Ok(take found)
+}
+
+fn csim_branch(db: Db, name: String) -> Option[Branch] {
+    if name == "" {
+        Some(main_branch(db))
+    } else {
+        branch(db, name)
+    }
+}
+
+// The store's whole visible world: main, every fork name, every pin name.
+fn csim_observe(db: Db, rows: Table[u64, Bytes]) -> Result[CsimWorld, CsimRead] waits {
+    let mut w = CsimWorld(heads: map.new(), pins: map.new())
+    for i in 0u64 .. 4 {
+        let name = if i == 0 {
+            string.from("")
+        } else {
+            csim_fork_name(i - 1)
+        }
+        if let Some(b) = csim_branch(db, name) {
+            let s = snapshot_of(db, b) ?=> |e| Unreadable(e)
+            let got = csim_read(db, rows, s)?
+            map.insert(mut w.heads, take name, take got)
+        }
+    }
+    for i in 0u64 .. 3 {
+        let name = csim_pin_name(i)
+        if let Some(s) = pinned(db, name) {
+            let got = csim_read(db, rows, s)?
+            map.insert(mut w.pins, take name, take got)
+        }
+    }
+    Ok(take w)
+}
+
+// ---- errors ----------------------------------------------------------------
+fn csim_error_name(e: Error) -> String {
+    match e {
+        Corrupt(f) => {
+            let mut text = string.from("Corrupt(")
+            string.push(mut text, f.file)
+            string.push(mut text, ")")
+            take text
+        },
+        Unsupported(code) => {
+            let mut text = string.from("Unsupported(0x")
+            string.push_uint(mut text, code, 16, 4, '0')
+            string.push(mut text, ")")
+            take text
+        },
+        Io(io) => csim_io_name("Io", io),
+        Poisoned(io) => csim_io_name("Poisoned", io),
+        Full(_) => "Full",
+        Limit(_) => "Limit",
+        Exists(_) => "Exists",
+        Missing(_) => "Missing",
+        Reclaimed(floor) => {
+            let mut text = string.from("Reclaimed(")
+            string.push_u64(mut text, floor)
+            string.push(mut text, ")")
+            take text
+        },
+        Tiered(_) => "Tiered",
+        Held => "Held",
+        NotFound => "NotFound",
+        Stale(_) => "Stale",
+        Retired => "Retired",
+        Lost => "Lost",
+        _ => "other",
+    }
+}
+
+fn csim_io_name(outer: String, io: IoError) -> String {
+    let mut text = string.from(outer)
+    string.push(mut text, match io {
+        NotFound => "(NotFound)",
+        Denied => "(Denied)",
+        Exists => "(Exists)",
+        Closed => "(Closed)",
+        Other(_) => "(Other)",
+    })
+    take text
+}
+
+fn csim_deploy_name(e: DeployError) -> String {
+    match e {
+        Store(inner) => csim_error_name(inner),
+        Scratch(inner) => {
+            let mut text = string.from("Scratch/")
+            string.push(mut text, csim_error_name(inner))
+            take text
+        },
+        AttemptBusy => "AttemptBusy",
+        ExportMismatch => "ExportMismatch",
+        _ => "deploy-other",
+    }
+}
+
+fn csim_damage(e: Error) -> bool {
+    match e {
+        Corrupt(_) => true,
+        Unsupported(_) => true,
+        _ => false,
+    }
+}
+
+fn csim_io(e: Error) -> bool {
+    match e {
+        Io(_) => true,
+        Poisoned(_) => true,
+        _ => false,
+    }
+}
+
+fn map_copy(m: Map[u64, u8]) -> Map[u64, u8] {
+    clone(m)
+}
+
+fn csim_go(n: CsimNext) -> bool {
+    match n {
+        Go => true,
+        _ => false,
+    }
+}

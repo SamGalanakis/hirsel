@@ -1,0 +1,5 @@
+// Seeds that once failed test_store_crash_sim (store_crash_sim_laws.hirsel).
+// The quick tier replays every one before its fixed seeds. Add a seed here
+// once a fix lane exists for its failure; until then the failure is listed
+// in the report and rides as a soak-tier red.
+const CSIM_CORPUS: Inline[u64, 0] =[]

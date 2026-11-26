@@ -318,39 +318,83 @@ fn compact_probes(source: TieredPageSource, queued: List[DeferredFree], installe
 }
 
 // §13.6 selection: a listed Tiered pack below the ratio starts a probe. A
-// pack keeps at most one probe.
+// pack keeps at most one probe. Shared by reading and Tiered-idle cuts.
+fn pack_selected_for_compaction(seq: u64, pack: PagePack, running: Map[u64, TieredProbeCursor], permille: u64) -> bool {
+    if pack.class != 3 && pack.class != 4 {
+        return false
+    }
+    if map.contains(running, seq) {
+        return true
+    }
+    // `live` counts frame payloads, so the ratio is taken over
+    // the payload a fresh pack was emitted with: the data region
+    // less one envelope per frame. A fresh pack is fully live.
+    let frame_count: u64 = int.widen(pack.frames)
+    let envelopes = 16 * frame_count
+    if pack.index < 72 + envelopes {
+        return false
+    }
+    let emitted_bytes = pack.index - 72 - envelopes
+    let (Some(scaled), Some(threshold)) = (int.checked_mul(pack.live, 1000), int.checked_mul(emitted_bytes, permille)) else {
+        return false
+    }
+    scaled < threshold
+}
+
 fn select_compaction(installed: PageLocations, running: Map[u64, TieredProbeCursor], permille: u64) -> Result[Map[u64, TieredProbeCursor], Error] {
     let mut probes: Map[u64, TieredProbeCursor] = map.new()
     let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
     while let Some((seq, pack)) = std.omap.next(mut inventory) {
-        if pack.class != 3 && pack.class != 4 {
+        if !pack_selected_for_compaction(seq, pack, running, permille) {
             continue
         }
         let cursor: TieredProbeCursor = match map.get(running, seq) {
             Some(kept) => clone(kept),
-            None => {
-                // `live` counts frame payloads, so the ratio is taken over
-                // the payload a fresh pack was emitted with: the data region
-                // less one envelope per frame. A fresh pack is fully live.
-                let frame_count: u64 = int.widen(pack.frames)
-                let envelopes = 16 * frame_count
-                if pack.index < 72 + envelopes {
-                    continue
-                }
-                let emitted_bytes = pack.index - 72 - envelopes
-                let (Some(scaled), Some(threshold)) = (int.checked_mul(pack.live, 1000), int.checked_mul(emitted_bytes, permille)) else {
-                    continue
-                }
-                if scaled >= threshold {
-                    continue
-                }
-                start_tiered_probe(pack)
-            },
+            None => start_tiered_probe(pack),
         }
         capacity(map.try_reserve(mut probes, 1))?
         map.insert(mut probes, seq, take cursor)
     }
     Ok(take probes)
+}
+
+// §13.6 "Tiered-idle cuts" (v2.157, v2.161 D-TI-1): a candidate generation is
+// Tiered-idle when no holder root (branch head, pin, import pin) has a Tiered
+// collection descriptor, the candidate queue (installed and added rows) is
+// empty, and there is no anchor (anchors are empty until archival lands).
+fn cut_tiered_idle(roots: List[Roots], installed_queue: Arc[std.page.Page], queued: List[DeferredFree]) -> bool {
+    !holders_tiered(roots) && std.page.count(std.page.image_of(installed_queue)) == 0 && list.len(queued) == 0
+}
+
+// D-TI-1 + v2.162 F2: a Tiered-idle cut reads nothing and needs no pager. It
+// takes every listed class-3/4 pack in sequence order, retires each whole at
+// this cut (charging its rows left against `budget`, finishing the pack it
+// starts), removes the cursor of every pack it retires, and never installs or
+// moves a cursor.
+fn compact_idle_probes(installed: PageLocations, running: Map[u64, TieredProbeCursor], budget: u64) -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
+    let mut probes: Map[u64, TieredProbeCursor] = clone(running)
+    let mut retiring: List[u64] = list.new()
+    let mut left = budget
+    let mut inventory = std.omap.range(installed.packs.values, Unbounded, Unbounded)
+    while left > 0 {
+        let Some((seq, pack)) = std.omap.next(mut inventory) else {
+            break
+        }
+        if pack.class != 3 && pack.class != 4 {
+            continue
+        }
+        let done = match map.get(running, seq) {
+            Some(cursor) => cursor.rows,
+            None => 0u64,
+        }
+        let frame_count: u64 = int.widen(pack.frames)
+        let rows_left = int.saturating_sub(frame_count, done)
+        left = int.saturating_sub(left, rows_left)
+        capacity(list.try_reserve(mut retiring, 1))?
+        list.push(mut retiring, seq)
+        let _ = map.remove(mut probes, seq)
+    }
+    Ok((take probes, take retiring))
 }
 
 // AP16 item 3 for Tiered packs, after the fold and the candidate queue's
@@ -371,9 +415,19 @@ fn compact_cut(db: Db, pager: Option[View[Sender[TieredPagerMessage]]], mut root
     if budget == 0 {
         return Ok(take unchanged)
     }
+    if cut_tiered_idle(roots, installed.lists.deferred, queued) {
+        let idle = disk_allocation(scoped fn() -> Result[(Map[u64, TieredProbeCursor], List[u64]), Error] {
+            compact_idle_probes(installed.locations, running, budget)
+        })
+        return match take idle {
+            Ok((take probes, take retiring)) => Ok(TieredCompactStep(probes: take probes, retiring: take retiring, moved: list.new(), queue: map.new())),
+            Error(Full(Allocation(_))) => Ok(take unchanged),
+            Error(take problem) => Error(take problem),
+        }
+    }
+    let permille = disk_state(db).options.compact_permille
     // Selection, the probe inventory and the saved roots change nothing, so
     // a refusal among them skips the step like a refusal in the probes.
-    let permille = disk_state(db).options.compact_permille
     let selecting = disk_allocation(scoped fn() -> Result[Map[u64, TieredProbeCursor], Error] {
         select_compaction(installed.locations, running, permille)
     })

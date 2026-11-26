@@ -73,6 +73,10 @@ fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page
 }
 
 fn capture_read_page(mut file: HostFile, path: String, id: StoreId, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8]) -> Result[std.page.Image, Error] waits {
+    capture_read_page_mode(mut file, path, id, ptr, domain, expected_level, false)
+}
+
+fn capture_read_page_mode(mut file: HostFile, path: String, id: StoreId, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], allow_tiered: bool) -> Result[std.page.Image, Error] waits {
     let width: u64 = int.widen(ptr.len)
     if width > PAGE_LIMIT {
         return Error(disk_fault(path, ptr.offset, Malformed))
@@ -97,7 +101,7 @@ fn capture_read_page(mut file: HostFile, path: String, id: StoreId, ptr: std.pag
         let mut buffer = take raw
         list.copy_within(mut buffer, 16, 0, width)
         list.truncate(mut buffer, width)
-        decode_located_page(path, ptr.offset, take buffer, domain)?
+        decode_manifest_page(path, ptr.offset, take buffer, domain, allow_tiered)?
     }
     let height = std.page.level(image)
     if height >= 65 || (if let Some(wanted) = expected_level {

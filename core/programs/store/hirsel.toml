@@ -64,6 +64,7 @@ std = { major = 1 }
 "store-tiered-lineage.hirsel" = "store"
 "store-tiered-residency.hirsel" = "store"
 "store-manifest.hirsel" = "store"
+"store-cold-walk.hirsel" = "store"
 "store-list-read.hirsel" = "store"
 "store-manifest-wire.hirsel" = "store"
 "store-page-recovery.hirsel" = "store"
@@ -622,6 +623,24 @@ limit = 536870912
 limit = 536870912
 
 [tests.runs."store@1/store/test_l100_pin_after_idle_probe_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_zero_live_pin_survives_probe"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_zero_live_pin_survives_probe_memory_main"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_tiered_idle_retires_without_pager"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_tiered_idle_retires_without_pager_crash_after_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_idle_retires_whole_pack_over_budget_then_pin"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_idle_retire_lease_defers_remove_until_pin"]
 limit = 536870912
 
 [tests.runs."store@1/store/test_l88_pin_takes_the_moved_leaf"]

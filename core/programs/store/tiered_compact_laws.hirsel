@@ -705,3 +705,233 @@ fn test_l88_crash_after_publication_resumes_remove(d: Dir, c: Clock, r: Random, 
     compact_branch_rows(again, main_branch(again), rows, row_count, row_count, 0)?
     close(take again)
 }
+
+fn l100_one_row_tiered(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, v1: Bytes) -> Result[(Table[u64, Bytes], std.page.PagePtr), Error] waits {
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 0
+    options.compact_permille = 500
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let body: Bytes = clone(v1)
+    let Committed(_) = run(mut db, None, copy_env((fixture, body)), fn(mut tx: Tx, env: (Table[u64, Bytes], Bytes)) -> Result[(), Error] {
+        put(mut tx, env.0, 0u64, env.1)
+    })? else {
+        fail("L100: initial put did not commit")
+    }
+    set_residency(mut db, rows.id, Tiered)?
+    let leaf = compact_branch_root(db, 0, rows.id)?
+    close(take db)?
+    Ok((rows, leaf))
+}
+
+fn l100_pin_check_reads(db: Db, rows: Table[u64, Bytes], v_pin: Bytes, v_main: Bytes) -> Result[(), Error] waits {
+    let Some(held) = pinned(db, "s") else {
+        fail("L100 (a): pin s survives")
+    }
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    if get(read_handle, held, rows, 0u64)? != Some(clone(v_pin)) {
+        fail("L100 (a): pin reads v1")
+    }
+    let main_snap = snapshot(db)
+    if get(read_handle, main_snap, rows, 0u64)? != Some(clone(v_main)) {
+        fail("L100 (a): main reads v2")
+    }
+    drop(take main_snap)
+    drop(take held)
+    drop(take read_handle)
+    Ok(())
+}
+
+// L100 (a), STORE-SPEC v2.157 / v2.161: a zero-live listed class-3 pack P
+// reached by a promoted pin S survives reopening with a probe budget: the
+// probe copies leaf A to A' and retires P. Covers both Tiered main and
+// Memory-head + Tiered-pin (review 3157 F2 seed `idle_ignores_pins`), plus
+// the before-rename and after-rename crash rows.
+fn l100_a_run(d: Dir, c: Clock, r: Random, tasks: Tasks, demote_main: bool) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let v1 = compact_value(1, 0)
+    let v2 = compact_value(2, 1)
+    let (rows, leaf_a) = l100_one_row_tiered(d, c, r, tasks, floor, clone(v1))?
+    let pack_p = leaf_a.pack
+    let mut budget_zero = l70_open_options(floor)?
+    budget_zero.probe_budget = 0
+    budget_zero.compact_permille = 500
+    let mut db = open(tasks, d, c, r, clone(budget_zero))?
+    let s = snapshot(db)
+    let fixture: Table[u64, Bytes] = clone(rows)
+    let body2: Bytes = clone(v2)
+    let Committed(_) = run(mut db, Some(100000000), copy_env((fixture, body2)), fn(mut tx: Tx, env: (Table[u64, Bytes], Bytes)) -> Result[(), Error] {
+        put(mut tx, env.0, 0u64, env.1)
+    })? else {
+        fail("L100 (a): overwrite did not commit")
+    }
+    let _ = checkpoint(mut db)?
+    if !compact_listed(db, pack_p) || l69_pack_live(db, pack_p) != 0 {
+        fail("L100 (a): P stays listed with live == 0 after overwrite")
+    }
+    let _ = pin(mut db, "s", s)?
+    drop(take s)
+    if demote_main {
+        set_residency(mut db, rows.id, Memory)?
+        let mut drains = 0u64
+        while list.len(l87_queue(db)?) != 0 {
+            if drains == 8 {
+                fail("L100 (a): main's old Cold root drains")
+            }
+            let _ = checkpoint(mut db)?
+            drains += 1
+        }
+        if !compact_listed(db, pack_p) || l69_pack_live(db, pack_p) != 0 {
+            fail("L100 (a): P stays listed at live 0 with Memory main and Tiered pin")
+        }
+    }
+    close(take db)?
+    let mut active = l70_open_options(floor)?
+    active.probe_budget = 65536
+    active.compact_permille = 500
+    // Before-rename crash of the retiring cut recovers P listed and readable.
+    let mut crashing = open(tasks, d, c, r, clone(active))?
+    let sealed_before = compact_refused_retiring_cut(mut crashing)?
+    disk_write_synced(d, "MANIFEST.tmp", sealed_before)?
+    close(take crashing)?
+    let mut reopened = open(tasks, d, c, r, clone(active))?
+    if !compact_listed(reopened, pack_p) {
+        fail("L100 (a): before-rename crash keeps P listed")
+    }
+    l100_pin_check_reads(reopened, clone(rows), clone(v1), clone(v2))?
+    // After-rename crash of the retiring cut retires P and moves A to A'.
+    let sealed_after = compact_refused_retiring_cut(mut reopened)?
+    close(take reopened)?
+    disk_write_synced(d, "MANIFEST", sealed_after)?
+    let settled = open(tasks, d, c, r, clone(active))?
+    if compact_listed(settled, pack_p) {
+        fail("L100 (a): the probe retires P")
+    }
+    l100_pin_check_reads(settled, clone(rows), clone(v1), clone(v2))?
+    let pin_root = match std.page.collection_slot(settled.pins[0u64].roots.collections.root, prefix(rows.id)?) {
+        Some((ColdPage(located), _)) => located,
+        _ => fail("L100 (a): pin's collection root stays Cold"),
+    }
+    if pin_root.stamp != leaf_a.stamp || pin_root.pack == pack_p || !compact_listed(settled, pin_root.pack) {
+        fail("L100 (a): s_A moved to a listed copy A' outside P")
+    }
+    let walk = compact_walk_from(d, settled, pin_root)?
+    match map.get(walk.places, leaf_a.stamp) {
+        Some(found) if found == (pin_root.pack, pin_root.offset) => (),
+        _ => fail("L100 (a): s_A has one location at A'"),
+    }
+    close(take settled)?
+    let final_open = open(tasks, d, c, r, active)?
+    l100_pin_check_reads(final_open, rows, v1, v2)?
+    close(take final_open)
+}
+
+@test
+fn test_l100_zero_live_pin_survives_probe(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    l100_a_run(d, c, r, tasks, false)
+}
+
+@test
+fn test_l100_zero_live_pin_survives_probe_memory_main(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    l100_a_run(d, c, r, tasks, true)
+}
+
+// L100 (b), STORE-SPEC v2.157 / v2.161 (D-TI-1): a reopened Tiered-idle store
+// starts no pager and still retires its listed class-3 pack P whole on the
+// next cut without reading PACK_INDEX or failing Io(Closed).
+fn l100_b_setup(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, v1: Bytes) -> Result[(Table[u64, Bytes], u64), Error] waits {
+    let (rows, leaf_a) = l100_one_row_tiered(d, c, r, tasks, floor, clone(v1))?
+    let pack_p = leaf_a.pack
+    let mut budget_zero = l70_open_options(floor)?
+    budget_zero.probe_budget = 0
+    budget_zero.compact_permille = 500
+    let mut db = open(tasks, d, c, r, budget_zero)?
+    set_residency(mut db, rows.id, Memory)?
+    let mut drains = 0u64
+    while list.len(l87_queue(db)?) != 0 {
+        if drains == 8 {
+            fail("L100 (b): the converted table's Cold root drains")
+        }
+        let _ = checkpoint(mut db)?
+        drains += 1
+    }
+    if !compact_listed(db, pack_p) || l69_pack_live(db, pack_p) != 0 {
+        fail("L100 (b): P stays listed with live == 0 before reopen")
+    }
+    close(take db)?
+    Ok((rows, pack_p))
+}
+
+fn l100_b_check_row(db: Db, rows: Table[u64, Bytes], v1: Bytes) -> Result[(), Error] waits {
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    let s = snapshot(db)
+    if get(read_handle, s, rows, 0u64)? != Some(clone(v1)) {
+        fail("L100 (b): Memory table reads v1")
+    }
+    drop(take s)
+    drop(take read_handle)
+    Ok(())
+}
+
+@test
+fn test_l100_tiered_idle_retires_without_pager(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let v1 = compact_value(1, 0)
+    let (rows, pack_p) = l100_b_setup(d, c, r, tasks, floor, clone(v1))?
+    let mut active = l70_open_options(floor)?
+    active.probe_budget = 65536
+    active.compact_permille = 500
+    let mut db = open(tasks, d, c, r, clone(active))?
+    if let Some(_) = db.pager {
+        fail("L100 (b): a reopened Tiered-idle store starts no pager")
+    }
+    // Before-rename crash leaves P listed and on disk.
+    let sealed_before = compact_refused_retiring_cut(mut db)?
+    disk_write_synced(d, "MANIFEST.tmp", sealed_before)?
+    close(take db)?
+    let mut after_before = open(tasks, d, c, r, clone(active))?
+    if let Some(_) = after_before.pager {
+        fail("L100 (b): reopen after before-rename crash still starts no pager")
+    }
+    if !compact_listed(after_before, pack_p) || !disk_exists(d, paged_pack_path(pack_p)?)? {
+        fail("L100 (b): before-rename crash keeps P listed and on disk")
+    }
+    // No-crash cut retires P whole with no pager and removes its file.
+    let _ = checkpoint(mut after_before)?
+    if compact_listed(after_before, pack_p) || disk_exists(d, paged_pack_path(pack_p)?)? {
+        fail("L100 (b): Tiered-idle cut retires P whole and removes its file")
+    }
+    l100_b_check_row(after_before, clone(rows), clone(v1))?
+    close(take after_before)?
+    let reopened = open(tasks, d, c, r, active)?
+    if compact_listed(reopened, pack_p) {
+        fail("L100 (b): reopened store lists no P")
+    }
+    l100_b_check_row(reopened, rows, v1)?
+    close(take reopened)
+}
+
+@test
+fn test_l100_tiered_idle_retires_without_pager_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let v1 = compact_value(1, 0)
+    let (rows, pack_p) = l100_b_setup(d, c, r, tasks, floor, clone(v1))?
+    let mut active = l70_open_options(floor)?
+    active.probe_budget = 65536
+    active.compact_permille = 500
+    let mut db = open(tasks, d, c, r, clone(active))?
+    if let Some(_) = db.pager {
+        fail("L100 (b): a reopened Tiered-idle store starts no pager")
+    }
+    let sealed = compact_refused_retiring_cut(mut db)?
+    close(take db)?
+    disk_write_synced(d, "MANIFEST", sealed)?
+    let reopened = open(tasks, d, c, r, active)?
+    if compact_listed(reopened, pack_p) || disk_exists(d, paged_pack_path(pack_p)?)? {
+        fail("L100 (b): after-rename crash retires P and open removes its file")
+    }
+    l100_b_check_row(reopened, rows, v1)?
+    close(take reopened)
+}

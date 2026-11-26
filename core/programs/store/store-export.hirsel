@@ -629,7 +629,8 @@ fn open_copied(d: Dir, c: Clock, attempt: Bytes, options: Options, deploy: bool)
     if id.hi != stamp.store_hi || id.lo != stamp.store_lo || (deploy && manifest.fence != 1) || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
         return Error(ExportMismatch)
     }
-    let validated = deploy_result(validate_page_manifest(d, id, take manifest))?
+    deploy_result(require_memory_manifest(manifest))?
+    let validated = deploy_result(validate_export_manifest(d, id, take manifest, false, !deploy))?
     let mut decoded_packs = deploy_result(disk_loaded(id, take validated))?
     let initial = deploy_result(capacity(manifest_state(decoded_packs.manifest, decoded_packs.all)))?
     list.clear(mut decoded_packs.all)

@@ -593,3 +593,153 @@ fn test_l100_pin_after_idle_probe_crash_before_rename(d: Dir, c: Clock, r: Rando
 fn test_l100_pin_after_idle_probe_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     idle_l100_pin_after_idle(d, c, r, tasks, AfterRename)
 }
+
+fn idle_l100_five_leaf_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, row_count: u64) -> Result[(Table[u64, Bytes], u64, u64), Error] waits {
+    let floor = 182375272u64
+    let rows = compact_cold_table_of(d, c, r, tasks, floor, row_count, 48)?
+    let probing = open(tasks, d, c, r, l69_options(floor)?)?
+    let (root, leaves) = gate_leaves(d, probing, 0, rows.id)?
+    let pack = root.pack
+    if list.len(leaves) < 5 {
+        fail("L100 (d1)/(d2): fixture table must span at least five leaves")
+    }
+    for k in 0u64 .. list.len(leaves) {
+        if leaves[k].at.pack != pack {
+            fail("L100 (d1)/(d2): all five leaves live in class-3 pack P")
+        }
+    }
+    let frames: u64 = match disk_index_get(disk_state(probing).pages.locations.packs, pack) {
+        Some(listed) => int.widen(listed.frames),
+        None => fail("L100 (d1)/(d2): P is listed"),
+    }
+    close(take probing)?
+    Ok((rows, pack, frames))
+}
+
+fn idle_l100_check_pin_rows(db: Db, rows: Table[u64, Bytes], row_count: u64) -> Result[(), Error] waits {
+    let Some(held) = pinned(db, "s") else {
+        fail("L100 (d1)/(d2): pin s is present")
+    }
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    for key in 0u64 .. row_count {
+        if get(read_handle, held, rows, key)? != Some(compact_value_of(key, 0u8, 48)) {
+            fail("L100 (d1)/(d2): pin reads every row of all five leaves")
+        }
+    }
+    drop(take held)
+    drop(take read_handle)
+    Ok(())
+}
+
+// L100 (d1), STORE-SPEC v2.164 (review 3157 F2, 3177 F1): same open,
+// `probe_budget` 2, five leaves in P: capture S, convert to Memory and drain
+// (the drain's own cut is never idle); the first cut after the queue is empty
+// retires P whole even though its frames exceed budget 2; pin(S) copies
+// through S's locator; reopen reads all rows and every stamp lives in one
+// listed pack on disk.
+@test
+fn test_l100_idle_retires_whole_pack_over_budget_then_pin(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 320u64
+    let (rows, pack, frames) = idle_l100_five_leaf_fixture(d, c, r, tasks, row_count)?
+    if frames <= 2 {
+        fail("L100 (d1): P has more rows than probe_budget 2")
+    }
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 2
+    options.compact_permille = 500
+    let mut db = open(tasks, d, c, r, clone(options))?
+    let s = snapshot(db)
+    set_residency(mut db, rows.id, Memory)?
+    let mut drains = 0u64
+    while list.len(l87_queue(db)?) != 0 {
+        if drains == 8 {
+            fail("L100 (d1): the converted table's Cold tree drains")
+        }
+        let _ = checkpoint(mut db)?
+        drains += 1
+    }
+    if !compact_listed(db, pack) {
+        fail("L100 (d1): the drain's own cut is not Tiered-idle")
+    }
+    // The first cut after the queue is empty retires P whole despite frames > 2.
+    let _ = checkpoint(mut db)?
+    if compact_listed(db, pack) {
+        fail("L100 (d1): the first Tiered-idle cut retires P whole despite frames > budget")
+    }
+    let _ = pin(mut db, "s", s)?
+    drop(take s)
+    let _ = idle_walk_holders(d, db, rows.id)?
+    idle_l100_check_pin_rows(db, clone(rows), row_count)?
+    close(take db)?
+    let reopened = open(tasks, d, c, r, options)?
+    let _ = idle_walk_holders(d, reopened, rows.id)?
+    idle_l100_check_pin_rows(reopened, rows, row_count)?
+    close(take reopened)
+}
+
+fn idle_l100_has_tiered_pack(db: Db) -> bool {
+    let mut inventory = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((_, listed)) = std.omap.next(mut inventory) {
+        if listed.class == 3 || listed.class == 4 {
+            return true
+        }
+    }
+    false
+}
+
+// L100 (d2), STORE-SPEC v2.164 (review 3157 F2, 3177 F2 trace B):
+// `probe_budget` 65,536, five leaves in P: the idle cut retires P whole while
+// S's lease defers Remove of P's file; pin(S) copies the five leaves through
+// S's locator into a full-live pack P2; the first cut after S's lease ends
+// removes P's file; reopen reads all rows; after unpin("s") and one cut, no
+// class-3/4 pack is listed (catches `idle_selected_only`).
+@test
+fn test_l100_idle_retire_lease_defers_remove_until_pin(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let row_count = 320u64
+    let (rows, pack, _) = idle_l100_five_leaf_fixture(d, c, r, tasks, row_count)?
+    let mut options = l70_open_options(floor)?
+    options.probe_budget = 65536
+    options.compact_permille = 500
+    let mut db = open(tasks, d, c, r, clone(options))?
+    let s = snapshot(db)
+    set_residency(mut db, rows.id, Memory)?
+    let mut drains = 0u64
+    while list.len(l87_queue(db)?) != 0 {
+        if drains == 8 {
+            fail("L100 (d2): the converted table's Cold tree drains")
+        }
+        let _ = checkpoint(mut db)?
+        drains += 1
+    }
+    if compact_listed(db, pack) {
+        let _ = checkpoint(mut db)?
+    }
+    if compact_listed(db, pack) {
+        fail("L100 (d2): idle cut retires P whole")
+    }
+    if !disk_exists(d, paged_pack_path(pack)?)? {
+        fail("L100 (d2): S's lease defers Remove of P's file")
+    }
+    let _ = pin(mut db, "s", s)?
+    drop(take s)
+    let _ = checkpoint(mut db)?
+    if disk_exists(d, paged_pack_path(pack)?)? {
+        fail("L100 (d2): P's file is removed at the first cut after S's lease ends")
+    }
+    let _ = idle_walk_holders(d, db, rows.id)?
+    idle_l100_check_pin_rows(db, clone(rows), row_count)?
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, options)?
+    let _ = idle_walk_holders(d, reopened, rows.id)?
+    idle_l100_check_pin_rows(reopened, rows, row_count)?
+    // F2 trace B: unpin leaves the pin's copied pack P2 at full live; an idle
+    // cut takes every listed class-3/4 pack, so no class-3/4 pack stays listed.
+    let _ = unpin(mut reopened, "s")?
+    let _ = checkpoint(mut reopened)?
+    if idle_l100_has_tiered_pack(reopened) {
+        fail("L100 (d2): after unpin and one cut, no class-3/4 pack is listed")
+    }
+    close(take reopened)
+}

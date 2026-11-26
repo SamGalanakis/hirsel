@@ -14,6 +14,7 @@ const CHECK_RETIRED: u8 = 255
 type CheckPack {
     seq: u64,
     payload_bytes: u64,
+    index: u64,
     base: u64,
     size: u64,
     head: u64,
@@ -21,8 +22,8 @@ type CheckPack {
     class: u8
 }
 
-fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64) -> CheckPack {
-    CheckPack(seq: seq, payload_bytes: size, base: 0, size: 0, head: 72, frames: frames, class: class)
+fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64, index_at: u64) -> CheckPack {
+    CheckPack(seq: seq, payload_bytes: size, index: index_at, base: 0, size: 0, head: 72, frames: frames, class: class)
 }
 
 fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[List[CheckPack], Error] waits {
@@ -31,7 +32,7 @@ fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[L
     let mut pages = 0u64
     for (kind, root) in[(PackList, m.pack_root), (RetiredList, m.retirement_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
         capture_walk_list(mut packs, root, 2, None, mut inventory, mut pages, fn(mut rows: List[CheckPack], ptr: std.page.PagePtr) {
-            list.push(mut rows, check_pack_row(ptr.pack, 2, 0, 0))
+            list.push(mut rows, check_pack_row(ptr.pack, 2, 0, 0, 0))
         }, scoped fn(mut _packs: CapturePacks, mut rows: List[CheckPack], path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
             match kind {
                 PackList => {
@@ -40,9 +41,9 @@ fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[L
                         _ => return Error(disk_fault(path, at, Malformed)),
                     }
                     let pack = pack_record(path, at, raw)?
-                    list.push(mut rows, check_pack_row(list.word_be(key, 0), pack.class, pack.frames, pack.payload_bytes))
+                    list.push(mut rows, check_pack_row(list.word_be(key, 0), pack.class, pack.frames, pack.payload_bytes, pack.index))
                 },
-                RetiredList => list.push(mut rows, check_pack_row(list.word_be(key, 0), CHECK_RETIRED, 0, 0)),
+                RetiredList => list.push(mut rows, check_pack_row(list.word_be(key, 0), CHECK_RETIRED, 0, 0, 0)),
                 _ => (),
             }
             Ok(())
@@ -82,7 +83,7 @@ fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], 
         input.copy_to = Some(disk_io(host.open(to, path, Write))?)
     }
     let header = disk_read_header(path, scrub_prefix(mut input, path, 0, 72, mut spent)?, 3, Some(pack.seq), Some(p.id))?
-    let mut scanned = pack_scan(pack.class, p.manifest.next_stamp)
+    let mut scanned = pack_scan_indexed(pack.class, p.manifest.next_stamp, pack.index)
     let mut at = 72u64
     while at < input.size {
         let frame = match read_pack_frame(mut input, path, header.context, mut scanned, at, false, mut spent) {
@@ -92,7 +93,7 @@ fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], 
         }
         at += 16 + frame.size
     }
-    if (pack.class == 2 && scanned.frames > 4294967295) || (pack.class != 2 && (scanned.frames != int.widen(pack.frames) || scanned.payload_bytes != pack.payload_bytes)) {
+    if !pack_scan_finished(scanned, int.widen(pack.frames), pack.payload_bytes, at) {
         return Error(disk_fault(path, at, Malformed))
     }
     let JournalInput(copy_to: take copy_to, ..) = take input
@@ -220,18 +221,26 @@ fn check_arrive(mut walk: CheckWalk, path: String, ptr: std.page.PagePtr, locati
     Ok(!seen)
 }
 
-fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef) -> Result[(), Error] waits {
+fn check_blob(mut walk: CheckWalk, reference: std.page.BlobRef, class: u8) -> Result[(), Error] waits {
     let path = paged_pack_path(reference.pack)?
     if reference.len > BLOB_LIMIT - 8 {
         return Error(disk_fault(path, reference.offset, Malformed))
     }
     let ptr = std.page.PagePtr(pack: reference.pack, offset: reference.offset, len: int.truncate(8 + reference.len), checksum: reference.checksum, stamp: reference.stamp)
-    let slot = check_pack_slot(walk.packs, path, ptr, 1, walk.next_stamp)?
+    let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
+    if class == 4 {
+        let pack = walk.packs[slot]
+        let width: u64 = int.widen(ptr.len)
+        if ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
+            return Error(disk_fault(path, ptr.offset, Malformed))
+        }
+        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 4, pack.index, pack.size, walk.next_stamp, tiered_frame_id(TieredBlob(reference)))?
+    }
     let location = 4 * (walk.packs[slot].base + ptr.offset) + 3
     let opened = check_open_pack(walk.dir, path)?
     let mut input = journal_input(take opened, false)?
     check_at_head(mut input, mut walk.packs[slot], path, ptr)?
-    let mut scanned = pack_scan(1, walk.next_stamp)
+    let mut scanned = pack_scan_indexed(class, walk.next_stamp, walk.packs[slot].index)
     let mut spent = 0u64
     let ctx = DiskContext(store: walk.id, role: 3, seq: ptr.pack)
     let frame = read_pack_frame(mut input, path, ctx, mut scanned, ptr.offset, true, mut spent)?
@@ -248,36 +257,52 @@ fn check_page(mut walk: CheckWalk, ptr: std.page.PagePtr, class: u8, domain: std
     }
     let path = paged_pack_path(ptr.pack)?
     let slot = check_pack_slot(walk.packs, path, ptr, class, walk.next_stamp)?
+    if class == 3 {
+        let pack = walk.packs[slot]
+        let width: u64 = int.widen(ptr.len)
+        if ptr.offset >= pack.index || 16 + width > pack.index - ptr.offset {
+            return Error(disk_fault(path, ptr.offset, Malformed))
+        }
+        check_cold_pack_index_row(walk.dir, walk.id, path, ptr.pack, 3, pack.index, pack.size, walk.next_stamp, tiered_frame_id(TieredPage(ptr)))?
+    }
     let tag = match domain {
         Collection => 0u64,
         CollectionMap => 1u64,
         Unprefixed => 2u64
     }
     let location = 4 * (walk.packs[slot].base + ptr.offset) + tag
+    let allow_tiered = domain == CollectionMap
     let image = {
         let file = check_open_pack(walk.dir, path)?
         let mut input = journal_input(take file, false)?
         check_at_head(mut input, mut walk.packs[slot], path, ptr)?
-        capture_read_page(mut input.file, path, walk.id, ptr, domain, expected_level)?
+        capture_read_page_mode(mut input.file, path, walk.id, ptr, domain, expected_level, allow_tiered)?
     }
     if !check_arrive(mut walk, path, ptr, location)? {
         return Ok(())
     }
     walk.visits.pages += 1
     let height = std.page.level(image)
+    let blob_class = if class == 3 {
+        4u8
+    } else {
+        1u8
+    }
     for i in 0u64 .. std.page.count(image) {
         match std.page.owning_edge(image, i) {
             Some(PageEdge(child)) => {
                 if child.stamp != 0 {
                     page_edge_order(path, ptr, child)?
                 }
-                if height == 0 {
+                if let Some(_) = std.page.tiered_root_at(image, i) {
+                    check_page(mut walk, child, 3, Collection, None)?
+                } else if height == 0 {
                     check_page(mut walk, child, class, Collection, None)?
                 } else {
                     check_page(mut walk, child, class, domain, Some(height - 1))?
                 }
             },
-            Some(BlobEdge(value)) => check_blob(mut walk, value)?,
+            Some(BlobEdge(value)) => check_blob(mut walk, value, blob_class)?,
             None => (),
         }
     }
@@ -299,6 +324,20 @@ fn check_reachable(p: PreparedCapture, mut walk: CheckWalk) -> Result[(), Error]
     let m = view p.manifest
     for root in[m.pack_root, m.retirement_root, m.deferred_frees, m.lineage] {
         check_page(mut walk, root, 2, Unprefixed, None)?
+    }
+    if m.deferred_frees.stamp != 0 {
+        let mut packs = capture_packs(p.dir, p.id, p.manifest, false, 0)
+        let mut pages = 0u64
+        capture_walk_pages(mut packs, m.deferred_frees, 2, None, mut walk, mut pages, scoped fn(mut _packs: CapturePacks, mut current: CheckWalk, path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] waits {
+            let InlineValue(raw) = view cell_value else {
+                return Error(disk_fault(path, at, Malformed))
+            }
+            let (_, queued) = decode_deferred_free(path, at, key, raw, p.manifest)?
+            match queued.target {
+                TieredPage(ptr) => check_page(mut current, ptr, 3, Collection, None),
+                TieredBlob(body) => check_blob(mut current, body, 4),
+            }
+        })?
     }
     for holder in m.branches {
         check_roots(mut walk, holder.roots)?

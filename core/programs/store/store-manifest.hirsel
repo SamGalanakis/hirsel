@@ -325,26 +325,58 @@ fn disk_load_page_pack(d: Dir, id: StoreId, seq: u64, pack: PagePack, next_stamp
 }
 
 type PackScan {
+    class: u8,
     kind: u16,
     stamp_at: u64,
     next_stamp: u64,
+    index: u64,
+    data_end: u64,
+    index_frames: u64,
     frames: u64,
     payload_bytes: u64,
     unknown_bytes: u64,
 }
 
 fn pack_scan(class: u8, next_stamp: u64) -> PackScan {
-    let (kind, stamp_at) = if class == 1 {
+    pack_scan_indexed(class, next_stamp, 0)
+}
+
+fn pack_scan_indexed(class: u8, next_stamp: u64, index_at: u64) -> PackScan {
+    let (kind, stamp_at) = if class == 1 || class == 4 {
         (0x0022u16, 0u64)
     } else {
         (0x0021u16, 8u64)
     }
-    PackScan(kind, stamp_at, next_stamp, frames: 0, payload_bytes: 0, unknown_bytes: 0)
+    PackScan(class, kind, stamp_at, next_stamp, index: index_at, data_end: 72, index_frames: 0, frames: 0, payload_bytes: 0, unknown_bytes: 0)
+}
+
+fn pack_scan_finished(checked: PackScan, frames: u64, payload_bytes: u64, at: u64) -> bool {
+    if checked.class >= 3 {
+        return checked.frames == frames && checked.data_end == checked.index && checked.index_frames != 0 && at == payload_bytes
+    }
+    if checked.class == 2 {
+        return checked.frames <= 4294967295
+    }
+    checked.frames == frames && checked.payload_bytes == payload_bytes
 }
 
 fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16, flags: u16, size: u64, stamp_bytes: Bytes) -> Result[Option[u64], Error] {
+    if checked_pack.class >= 3 && at >= checked_pack.index {
+        if checked_pack.data_end != checked_pack.index {
+            return Error(disk_fault(path, at, Malformed))
+        }
+        disk_page_kind(path, at, kind, PACK_INDEX_KIND, flags)?
+        if kind != PACK_INDEX_KIND {
+            return Error(disk_fault(path, at, Malformed))
+        }
+        checked_pack.index_frames += 1
+        return Ok(None)
+    }
     disk_page_kind(path, at, kind, checked_pack.kind, flags)?
     if kind != checked_pack.kind {
+        if checked_pack.class >= 3 {
+            return Error(disk_fault(path, at, Malformed))
+        }
         checked_pack.unknown_bytes += 16 + size
         if checked_pack.unknown_bytes > UNKNOWN_ROOM {
             return Error(disk_fault(path, at, Malformed))
@@ -357,6 +389,12 @@ fn scan_pack_frame(mut checked_pack: PackScan, path: String, at: u64, kind: u16,
     disk_check_stamp(path, at, stamp_bytes, checked_pack.stamp_at, checked_pack.next_stamp)?
     checked_pack.frames += 1
     checked_pack.payload_bytes += size
+    if checked_pack.class >= 3 {
+        checked_pack.data_end = at + 16 + size
+        if checked_pack.data_end > checked_pack.index {
+            return Error(disk_fault(path, at, Malformed))
+        }
+    }
     Ok(Some(list.word_le(stamp_bytes, checked_pack.stamp_at)))
 }
 
@@ -529,7 +567,7 @@ fn validate_cold_root(inventory: RecoveryInventory, ptr: std.page.PagePtr) -> Re
     Ok(())
 }
 
-fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], mut graph: PageGraph) -> Result[(), Error] {
+fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, ptr: std.page.PagePtr, domain: std.page.Domain, expected_level: Option[u8], collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut graph: PageGraph) -> Result[(), Error] {
     if ptr.stamp == 0 {
         return Ok(())
     }
@@ -580,12 +618,16 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
                 }
                 if let Some(_) = std.page.tiered_root_at(image, slot) {
                     validate_cold_root(inventory, child)?
+                    if collect_cold && child.stamp != 0 {
+                        capacity(list.try_reserve(mut cold_roots, 1))?
+                        list.push(mut cold_roots, child)
+                    }
                     list.push(mut kids, 0u64)
                 } else {
                     if height == 0 {
-                        resolve_data_page(packs, inventory, settled, child, Collection, None, mut graph)?
+                        resolve_data_page(packs, inventory, settled, child, Collection, None, collect_cold, mut cold_roots, mut graph)?
                     } else {
-                        resolve_data_page(packs, inventory, settled, child, domain, Some(height - 1), mut graph)?
+                        resolve_data_page(packs, inventory, settled, child, domain, Some(height - 1), collect_cold, mut cold_roots, mut graph)?
                     }
                     list.push(mut kids, child.stamp)
                 }
@@ -600,12 +642,12 @@ fn resolve_data_page(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, 
     graph_add(mut graph, ptr.stamp, ReadPage(take image, take kids, take blobs))
 }
 
-fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, roots: LocatedRoots, mut graph: PageGraph) -> Result[(), Error] {
-    resolve_data_page(packs, inventory, settled, roots.collections, CollectionMap, None, mut graph)?
-    resolve_data_page(packs, inventory, settled, roots.streams, Unprefixed, None, mut graph)?
-    resolve_data_page(packs, inventory, settled, roots.catalog, Unprefixed, None, mut graph)?
+fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory, settled: SettledPacks, roots: LocatedRoots, collect_cold: bool, mut cold_roots: List[std.page.PagePtr], mut graph: PageGraph) -> Result[(), Error] {
+    resolve_data_page(packs, inventory, settled, roots.collections, CollectionMap, None, collect_cold, mut cold_roots, mut graph)?
+    resolve_data_page(packs, inventory, settled, roots.streams, Unprefixed, None, false, mut cold_roots, mut graph)?
+    resolve_data_page(packs, inventory, settled, roots.catalog, Unprefixed, None, false, mut cold_roots, mut graph)?
     for ptr in roots.keyed {
-        resolve_data_page(packs, inventory, settled, ptr, Unprefixed, None, mut graph)?
+        resolve_data_page(packs, inventory, settled, ptr, Unprefixed, None, false, mut cold_roots, mut graph)?
     }
     Ok(())
 }
@@ -626,10 +668,16 @@ fn validate_page_manifest(d: Dir, id: StoreId, take manifest: PageManifest) -> R
 
 fn validate_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_tiered: bool) -> Result[ValidatedPageManifest, Error] waits {
     let none = new_page_locations()
-    walk_directory_graph(d, id, take manifest, allow_tiered, SettledPacks(below: 0, locations: view none))
+    walk_directory_graph(d, id, take manifest, allow_tiered, false, SettledPacks(below: 0, locations: view none))
 }
 
-fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_tiered: bool, settled: SettledPacks) -> Result[ValidatedPageManifest, Error] waits {
+fn validate_export_manifest(d: Dir, id: StoreId, take manifest: PageManifest, allow_tiered: bool, walk_cold: bool) -> Result[ValidatedPageManifest, Error] waits {
+    require_unarchived_manifest(manifest)?
+    let none = new_page_locations()
+    walk_directory_graph(d, id, take manifest, allow_tiered, walk_cold, SettledPacks(below: 0, locations: view none))
+}
+
+fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_tiered: bool, walk_cold: bool, settled: SettledPacks) -> Result[ValidatedPageManifest, Error] waits {
     let graph = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = empty_listed_pages(allow_tiered, take graph)
     let mut final_item: Option[u64] = None
@@ -648,13 +696,13 @@ fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_
         }
     }
     let mut data: Map[u64, LoadedPack] = map.new()
-    for (seq, offsets) in lists.class_two {
-        let pack = check_list_pack(d, id, seq, manifest.next_stamp, offsets)?
+    for (seq, pack) in lists.class_two {
+        let checked = check_list_pack(d, id, seq, manifest.next_stamp, pack)?
         capacity(map.try_reserve(mut lists.packs, 1))?
-        map.insert(mut lists.packs, seq, pack)
+        map.insert(mut lists.packs, seq, checked)
     }
     for (seq, pack) in lists.packs {
-        if pack.class < 2 && seq < settled.below {
+        if pack.class != 2 && seq < settled.below {
             let Some(record) = disk_index_get(settled.locations.packs, seq) else {
                 return Error(disk_fault("MANIFEST", 72, Malformed))
             }
@@ -667,20 +715,28 @@ fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_
             map.insert(mut data, seq, take loaded)
         }
     }
+    if walk_cold && settled.below == 0 {
+        check_listed_tiered_present(d, lists.packs)?
+    }
     for queued in lists.deferred {
         validate_deferred_target(RecoveryInventory(packs: view lists.packs, next_stamp: manifest.next_stamp, allow_tiered: allow_tiered), queued.target)?
     }
-    let resolved = disk_allocation(scoped fn() -> Result[PageGraph, Error] {
+    let (take resolved_graph, take cold_roots) = disk_allocation(scoped fn() -> Result[(PageGraph, List[std.page.PagePtr]), Error] {
         let mut candidate: PageGraph = clone(lists.live_graph)
+        let mut collected: List[std.page.PagePtr] = list.new()
         let inventory = RecoveryInventory(packs: view lists.packs, next_stamp: manifest.next_stamp, allow_tiered: allow_tiered)
         for item in manifest.branches {
-            resolve_data_roots(data, inventory, settled, item.roots, mut candidate)?
+            resolve_data_roots(data, inventory, settled, item.roots, walk_cold, mut collected, mut candidate)?
         }
         for held in manifest.pins {
-            resolve_data_roots(data, inventory, settled, held.roots, mut candidate)?
+            resolve_data_roots(data, inventory, settled, held.roots, walk_cold, mut collected, mut candidate)?
         }
-        Ok(take candidate)
+        Ok((take candidate, take collected))
     })?
+    let mut resolved = take resolved_graph
+    if walk_cold {
+        walk_cold_reachable(d, id, lists.packs, manifest.next_stamp, settled.below, cold_roots, lists.deferred, mut resolved.stamps)?
+    }
     let ListedPages(packs: take inventory, retired: take retired, lineage: take lineage, ..) = take lists
     Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))
 }
@@ -835,7 +891,7 @@ fn validate_new_page_manifest(d: Dir, id: StoreId, raw: Bytes, target: TargetLim
     }
     let requested = manifest_account(manifest)
     require_unarchived_manifest(manifest)?
-    let _ = walk_directory_graph(d, id, take manifest, true, settled)?
+    let _ = walk_directory_graph(d, id, take manifest, true, true, settled)?
     over_ceiling(requested, target.resident)
 }
 
@@ -846,7 +902,8 @@ fn validate_leased_cut(d: Dir, id: StoreId, raw: Bytes, settled: SettledPacks) -
     let (_, take manifest) = disk_allocation(scoped fn() -> Result[(StoreId, PageManifest), Error] {
         disk_read_page_manifest("MANIFEST.tmp", raw)
     })?
-    let _ = walk_directory_graph(d, id, take manifest, true, settled)?
+    require_unarchived_manifest(manifest)?
+    let _ = walk_directory_graph(d, id, take manifest, true, true, settled)?
     Ok(())
 }
 

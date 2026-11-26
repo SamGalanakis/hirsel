@@ -196,10 +196,10 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
         Some(slot) => promote_cut_holder(db, pager, mut roots, slot, queued, mut next_stamp)?,
         None => (false, false),
     }
-    let folded = loaded || promoted || materialized
     let compacted = compact_cut(db, pager, mut roots, queued, mut next_stamp)?
     let leases = lease_cut_inventories(disk_state(db).pages.compaction, roots)?
     let TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved, queue: take moving) = take compacted
+    let folded = loaded || promoted || materialized || list.len(retiring) != 0
     let compaction = TieredCompaction(probes: take probes, held: take leases)
     let mut queue = drain_cut(db, pager, take queued, take replaced, moving, next_stamp)?
     queue.moved = take moved
@@ -365,7 +365,11 @@ fn prepare_tiered_install(mut cut_stage: TieredCutStage, installed: PageLocation
     }
     let paging = recovered_tiered_inventory(installed, None, generation, next_stamp)?
     for slot in 0u64 .. list.len(cut_stage.roots) {
-        if tiered_collections(cut_stage.roots[slot].collections.root) {
+        let had_paging = match view cut_stage.roots[slot].collections.paging {
+            Some(_) => true,
+            None => false,
+        }
+        if had_paging || tiered_collections(cut_stage.roots[slot].collections.root) {
             cut_stage.roots[slot].collections.paging = Some(arc.share(paging))
         }
     }

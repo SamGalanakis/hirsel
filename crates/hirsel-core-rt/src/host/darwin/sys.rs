@@ -523,6 +523,32 @@ pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
     Ok((image.st_dev as u64, image.st_ino) == (running.dev(), running.ino()))
 }
 
+/// Return the whole anonymous private writable pages of `[start, start + bytes)`
+/// to the host and keep the range mapped: its next reads are zero. Darwin's
+/// `MADV_DONTNEED` and `MADV_FREE` keep the pages resident and charged to the
+/// process, so the range gets a fresh mapping in place. A refused mapping can
+/// leave the range unmapped, so it stops the run.
+/// # Safety
+/// The caller owns the range, which holds no live data.
+#[inline]
+pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
+    // SAFETY: per the contract; the fixed mapping replaces only the caller's range.
+    let fresh = unsafe {
+        libc::mmap(
+            std::ptr::without_provenance_mut(start),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+            -1,
+            0,
+        )
+    };
+    if fresh == libc::MAP_FAILED {
+        crate::process::stop(b"HostMemory");
+    }
+    true
+}
+
 /// The path that opens the store directory a launcher passed on descriptor 5;
 /// Darwin's /dev/fd opens a duplicate of it.
 pub(crate) const INHERITED_STORE: &[u8] = b"/dev/fd/5";

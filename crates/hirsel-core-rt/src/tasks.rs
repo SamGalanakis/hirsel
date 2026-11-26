@@ -1220,7 +1220,6 @@ impl Scheduler {
     fn release_net_idle(&mut self) {
         release_idle(self);
         self.stacks.cool_kept();
-        #[cfg(target_os = "linux")]
         self.cool_warm();
     }
 
@@ -1233,7 +1232,7 @@ impl Scheduler {
     unsafe fn mark_warm(&mut self, task: *mut Task) {
         // SAFETY: per the contract; the warm list holds only live tasks.
         unsafe {
-            if !cfg!(target_os = "linux") || (*task).warm {
+            if (*task).warm {
                 return;
             }
             (*task).warm = true;
@@ -1269,7 +1268,6 @@ impl Scheduler {
 
     /// Release the pages below each parked frame of every task that ran since
     /// the last network idle, however deep it went while running.
-    #[cfg(target_os = "linux")]
     fn cool_warm(&mut self) {
         let mut task = std::mem::replace(&mut self.warm, ptr::null_mut());
         // SAFETY: the serial dispatcher has exclusive custody of these tasks.

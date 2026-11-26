@@ -44,7 +44,6 @@ HOST_FILES = {
     'crates/hirsel-core-rt/src/provider_tests.rs': 'S6',
     'crates/hirsel-core-rt/src/secret/key.rs': 'S6',
     'crates/hirsel-core-rt/src/task_heap.rs': 'S6',
-    'crates/hirsel-core-rt/src/tasks.rs': 'S6',
     'crates/hirsel-core-rt/src/openat2_required.rs': 'S7',
     'crates/hirsel-core-rt/src/test_process.rs': 'S7',
     'crates/hirsel-core-rt/src/tests.rs': 'S6',

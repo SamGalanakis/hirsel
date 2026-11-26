@@ -1568,16 +1568,9 @@ unsafe fn trim_page(page: PagePointer) {
 fn discard(start: usize, bytes: usize) {
     // SAFETY: whole anonymous native pages of a live slab mapping that hold
     // no live slot; the allocator rewrites a slot before handing it out.
-    #[cfg(target_os = "linux")]
     unsafe {
-        libc::madvise(
-            ptr::without_provenance_mut(start),
-            bytes,
-            libc::MADV_DONTNEED,
-        );
+        crate::host::sys::discard(start, bytes);
     }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (start, bytes);
 }
 
 /// The release that fills a full page's first hole, empties a page or
@@ -1839,21 +1832,7 @@ impl Mapping {
     /// The caller exclusively owns these whole anonymous pages, with no live data.
     unsafe fn discard(base: NonNull<u8>, bytes: usize) -> bool {
         // SAFETY: the caller owns the anonymous range, with no live data.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            libc::madvise(base.as_ptr().cast(), bytes, libc::MADV_DONTNEED) == 0
-        }
-        #[cfg(not(target_os = "linux"))]
-        unsafe {
-            libc::mmap(
-                base.as_ptr().cast(),
-                bytes,
-                Self::WRITABLE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED,
-                -1,
-                0,
-            ) != libc::MAP_FAILED
-        }
+        unsafe { crate::host::sys::discard(base.as_ptr().addr(), bytes) }
     }
 }
 impl Drop for Mapping {

@@ -338,5 +338,22 @@ pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
     Ok((image.dev(), image.ino()) == (running.dev(), running.ino()))
 }
 
+/// Return the whole anonymous private writable pages of `[start, start + bytes)`
+/// to the host and keep the range mapped: its next reads are zero. False if
+/// the host kept the pages as they were.
+/// # Safety
+/// The caller owns the range, which holds no live data.
+#[inline]
+pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
+    // SAFETY: per the contract.
+    unsafe {
+        libc::madvise(
+            std::ptr::without_provenance_mut(start),
+            bytes,
+            libc::MADV_DONTNEED,
+        ) == 0
+    }
+}
+
 /// The path that opens the store directory a launcher passed on descriptor 5.
 pub(crate) const INHERITED_STORE: &[u8] = b"/proc/self/fd/5";

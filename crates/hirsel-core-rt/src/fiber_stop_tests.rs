@@ -171,7 +171,6 @@ fn recycled_stacks_come_back_trimmed_whether_kept_or_surplus() {
     assert_eq!(budget.used(), 0);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn network_idle_returns_cached_stack_pages_and_keeps_the_reservations() {
     let page = super::page();
@@ -203,8 +202,8 @@ fn network_idle_returns_cached_stack_pages_and_keeps_the_reservations() {
     let stack = stock.take();
     assert_eq!(stack.top() - super::COMMIT, bottom.addr());
     assert_eq!(other.top() - super::COMMIT, other_bottom.addr());
-    // SAFETY: take retained the mappings. MADV_DONTNEED zeroes these private
-    // anonymous pages on their next access, leaving the header page intact.
+    // SAFETY: take retained the mappings. A discarded private anonymous page
+    // reads zero on its next access, and the header page is intact.
     unsafe {
         assert_eq!(bottom.read_volatile(), 0);
         assert_eq!(other_bottom.read_volatile(), 0);
@@ -220,7 +219,6 @@ fn network_idle_returns_cached_stack_pages_and_keeps_the_reservations() {
     assert_eq!(unsafe { bottom.read_volatile() }, 0);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn discarding_below_a_parked_stack_keeps_its_live_frames() {
     if super::page() == super::COMMIT {

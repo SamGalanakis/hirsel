@@ -859,7 +859,7 @@ fn trimmed_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
         }
     };
     let fill = |count: u64, base: u64| -> Vec<_> {
-        (0..count)
+        (0..count * (page / 4096) as u64)
             .map(|index| {
                 let block = Block::new(&context, Some(24), 40, 8).unwrap();
                 write(&block, base + 8 * index);
@@ -867,8 +867,8 @@ fn trimmed_slab_pages_keep_survivors_and_hand_each_slot_out_once() {
             })
             .collect()
     };
-    // Survivors straddle every third native-page boundary, so the pages
-    // between them hold no live slot.
+    // Survivors straddle every third native-page boundary, so the pages between
+    // them hold no live slot. `fill` counts in blocks per 4 KiB of a native page.
     let mut kept = Vec::new();
     for (index, block) in fill(6_000, 0).into_iter().enumerate() {
         let start = block.pointer().addr().get();

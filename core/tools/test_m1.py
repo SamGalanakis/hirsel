@@ -3,6 +3,8 @@
 import argparse
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -58,6 +60,40 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
     def rows(self):
         return run(self.compiler, self.root / 'runtime.a', ['cranelift'], self.path,
                    self.root, self.root / 'store')
+
+    def test_darwin_reports_links_and_keeps_going_after_a_failed_package(self):
+        for package in ('archive', 'image_core'):
+            directory = self.root / 'core/programs' / package
+            directory.mkdir(parents=True)
+            (directory / 'hirsel.toml').write_text('[tests]\nlimit = 1024\n')
+        self.compiler.write_text('''#!/usr/bin/env python3
+import json, pathlib, sys
+args = sys.argv[1:]
+assert args[0] == 'test'
+assert '--link-only' in args
+assert args[args.index('--target')+1] == 'aarch64-apple-darwin'
+package = pathlib.Path(args[1]).name
+linked = package == 'image_core'
+print(json.dumps({'linked': linked, 'tests': [
+    {'definition': f'{package}@1/tests/law', 'linked': linked,
+     'stopped': None if linked else 'undefined symbol _fixture'}
+]}))
+raise SystemExit(not linked)
+''')
+        artifact = self.root / 'links.json'
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name('m1.py')), '--compiler', str(self.compiler),
+             '--runtime', str(self.root / 'runtime.a'), '--root', str(self.root),
+             '--target', 'aarch64-apple-darwin', '--only', 'archive', 'image_core',
+             '--report', str(artifact)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(
+            [(row['program'], row['engine'], row['linked']) for row in json.loads(artifact.read_text())],
+            [('archive', 'cranelift', False), ('archive', 'llvm', False),
+             ('image_core', 'cranelift', True), ('image_core', 'llvm', True)],
+        )
+        self.assertIn('archive@1/tests/law: undefined symbol _fixture', result.stdout)
+        self.assertIn('| image_core | llvm | 1/1 |', result.stdout)
 
     def test_debug_lines_choice_reaches_the_build_request(self):
         original = self.compiler.read_text()

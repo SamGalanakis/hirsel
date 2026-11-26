@@ -10,7 +10,7 @@ use super::{LawReport, RunCoverage, Runner, SEED_ENV, Source, TestCache, TestLau
 use crate::meter::Meter;
 use crate::property_corpus::{self, Corpus, SavedEntry};
 use crate::{CheckProduct, NativeOptions, NativeStop};
-use hirsel_core_ids::{ContentHash, DefPath};
+use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::num::NonZeroUsize;
@@ -710,8 +710,30 @@ fn print_outcome(
     }
 }
 
+pub(crate) fn select_tests(
+    product: &CheckProduct,
+    runs: &crate::package_dir::TestRuns,
+    owner: Option<&PackageId>,
+    filter: Option<&str>,
+    exact: &[DefPath],
+) -> Result<Vec<DefPath>, String> {
+    let own_tests = || {
+        product
+            .tests()
+            .filter(|path| owner.is_none_or(|owner| &path.0.package == owner))
+    };
+    runs.check_names(&own_tests().collect())?;
+    Ok(own_tests()
+        .filter(|path| {
+            filter.is_none_or(|filter| path.to_string().contains(filter))
+                && (exact.is_empty() || exact.contains(path))
+        })
+        .cloned()
+        .collect())
+}
+
 /// Each test's own run configuration; one test's never changes another's.
-fn configure(
+pub(super) fn configure(
     product: &CheckProduct,
     runs: &crate::package_dir::TestRuns,
     options: &NativeOptions,

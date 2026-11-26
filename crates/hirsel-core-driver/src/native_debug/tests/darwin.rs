@@ -20,6 +20,8 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
     use hirsel_core_layout::{ObjectFormat, Target};
     use std::{path::PathBuf, process::Command};
 
+    rejects_bad_macho_structure();
+
     let target = Target::Aarch64Darwin.triple();
     let sqlite = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../core/programs/sqlite/libhirsel_sqlite-aarch64-apple-darwin.a");
@@ -127,4 +129,62 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
         .unwrap();
     let bytes = std::fs::read(&image).unwrap();
     super::macho_structure(&bytes);
+    crate::native_debug::macho_structure(&image).unwrap();
+}
+
+fn rejects_bad_macho_structure() {
+    // Offsets and field widths come from mach_header_64, segment_command_64
+    // and section_64 in mach-o/loader.h.
+    let words = |values: &[u32]| {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("image");
+    for (maxprot, rpath, section, size, flags, want) in [
+        (5, false, "__text", 8, 0, None),
+        (7, false, "__text", 8, 0, Some("maxprot")),
+        (5, true, "__text", 8, 0, Some("LC_RPATH")),
+        (5, false, "__mod_init_func", 8, 9, Some("__mod_init_func")),
+        (5, false, "__init_offsets", 4, 22, Some("__init_offsets")),
+        (5, false, "__init_offsets", 0, 22, None),
+        (5, false, "__renamed", 8, 9, Some("__renamed")),
+    ] {
+        let mut segment = vec![0; 152];
+        segment[..8].copy_from_slice(&words(&[0x19, 152]));
+        segment[8..14].copy_from_slice(b"__TEXT");
+        segment[56..68].copy_from_slice(&words(&[maxprot, 5, 1]));
+        segment[72..72 + section.len()].copy_from_slice(section.as_bytes());
+        segment[88..94].copy_from_slice(b"__TEXT");
+        segment[112..120].copy_from_slice(&words(&[size, 0]));
+        segment[136..140].copy_from_slice(&words(&[flags]));
+        let mut commands = words(&[0x32, 24, 1, 26 << 16, 26 << 16, 0]);
+        commands.extend(words(&[0x1b, 24, 1, 2, 3, 4]));
+        commands.extend(words(&[0x1d, 16, 0, 1]));
+        commands.extend(segment);
+        if rpath {
+            commands.extend(words(&[0x8000_001c, 16, 12]));
+            commands.extend(b"/x\0\0");
+        }
+        let mut bytes = words(&[
+            0xfeed_facf,
+            0x0100_000c,
+            0,
+            2,
+            4 + u32::from(rpath),
+            commands.len() as u32,
+            0,
+            0,
+        ]);
+        bytes.extend(commands);
+        std::fs::write(&path, bytes).unwrap();
+        let result = crate::native_debug::macho_structure(&path);
+        if let Some(want) = want {
+            assert!(result.unwrap_err().to_string().contains(want), "{want}");
+        } else {
+            result.unwrap();
+        }
+    }
 }

@@ -254,6 +254,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .then(|| crate::inspect::Inspection::read(&mut invocation))
         .transpose()?;
     let mut inspect_library = inspection.as_ref().and_then(|option| option.source_library);
+    let link_only = crate::test_run::link_only_requested(&invocation)?;
     let inspect_foreign = inspection
         .as_ref()
         .and_then(crate::inspect::Inspection::foreign_module);
@@ -359,6 +360,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::WriteLaws => test_write_laws = true,
             Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
             Opt::Rerun => test_rerun = true,
+            Opt::LinkOnly => {}
             Opt::TestCache => test_cache = PathBuf::from(value),
             Opt::Coverage => coverage.on = true,
             Opt::CoverageOut => coverage.out = Some(PathBuf::from(value)),
@@ -1418,23 +1420,19 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     };
     if test_command && accepted {
         let runs = test_runs.expect("a test request has its run configuration");
-        let own_tests = || {
-            product.tests().filter(|path| {
-                test_owner
-                    .as_ref()
-                    .is_none_or(|owner| &path.0.package == owner)
-            })
-        };
-        runs.check_names(&own_tests().collect())?;
-        let tests: Vec<_> = own_tests()
-            .filter(|path| {
-                test_filter
-                    .as_ref()
-                    .is_none_or(|filter: &String| path.to_string().contains(filter.as_str()))
-                    && (test_exact.is_empty() || test_exact.contains(path))
-            })
-            .cloned()
-            .collect();
+        let tests = crate::test_run::select_tests(
+            &product,
+            &runs,
+            test_owner.as_ref(),
+            test_filter.as_deref(),
+            &test_exact,
+        )?;
+        let options = native_options.expect("a test request has native options");
+        if link_only {
+            return conclude(Outcome::Exit(crate::test_run::link_only(
+                &product, &options, &runs, &tests, json,
+            )));
+        }
         let law_inventory = law_files
             .as_ref()
             .map(|files| crate::law_lock::Inventory::of(&product, &tests, files, &runs))
@@ -1444,7 +1442,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .map(crate::property_corpus::Corpus::open)
             .transpose()?;
         let session = crate::test_run::TestSession::prepare(crate::test_run::Prepare {
-            options: native_options.expect("a test request has native options"),
+            options,
             runs,
             tests,
             law_inventory,

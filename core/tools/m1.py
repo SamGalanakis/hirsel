@@ -9,11 +9,21 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 
 from case_progress import Case, run_case
 from std_native import library_sources
 
 ROOT = Path(__file__).resolve().parents[2]
+DARWIN_TARGET = 'aarch64-apple-darwin'
+# Packages collected for the Mac-day corpus, including the foreign link refusals.
+DARWIN_HARVEST = (
+    'archive', 'dtls', 'ffi_laws', 'h264', 'hybrid', 'image_core', 'image_pipeline',
+    'jwtbind', 'mcp', 'media_bits', 'media_container', 'media_record', 'platform',
+    'postgres', 'rtp', 'rtp_jitter', 'runner', 'search', 'sframe', 'spatial',
+    'sqlite', 'srtp', 'store', 'stun_ice', 'toml', 'turn', 'tz', 'vector',
+    'video_packager', 'webrtc_sfu', 'xml', 'yaml',
+)
 
 
 def inputs_for(manifest, entry, root):
@@ -403,6 +413,65 @@ def table(rows):
     return '\n'.join(lines)
 
 
+def darwin_links(compiler, runtime, engines, root, store, packages, cc=None, debug_lines=None):
+    rows = []
+    for package in packages:
+        directory = root / 'core/programs' / package
+        try:
+            tests = tomllib.loads((directory / 'hirsel.toml').read_text()).get('tests', {})
+        except (OSError, ValueError) as error:
+            rows.extend(dict(program=package, engine=engine, definition=None, linked=False,
+                             stopped=str(error)) for engine in engines)
+            continue
+        # Foreign grants select archives for the link. No executable is run.
+        grants = [flag for grant in tests.get('grants', []) if grant.startswith('Foreign=')
+                  for flag in ('--grant', grant)]
+        for engine in engines:
+            command = [str(compiler), 'test', str(directory), '--link-only', '--json',
+                       '--libraries', str(root / 'core'), '--target', DARWIN_TARGET,
+                       '--backend', engine, '--runtime', str(runtime),
+                       '--store', str(store / package / engine), *grants]
+            if cc:
+                command.extend(['--cc', str(cc)])
+            if debug_lines is not None:
+                command.extend(['--debug-lines', debug_lines])
+            result = run_case(f'{package}:link', engine, command, cwd=root, capture_output=True)
+            try:
+                product = json.loads(result.stdout)
+            except (ValueError, UnicodeDecodeError):
+                product = {}
+            if not product.get('tests'):
+                reason = result.stderr.decode(errors='replace').strip()
+                if not reason and product.get('diagnostics'):
+                    reason = first_stop(product, {'package': {'name': package, 'version': '1'}})
+                reason = reason or product.get('stopped') or 'no test links reported'
+                rows.append(dict(program=package, engine=engine, definition=None, linked=False,
+                                 stopped=f'exit {result.returncode}: {reason}'))
+                continue
+            rows.extend(dict(program=package, engine=engine, **row) for row in product['tests'])
+            if result.returncode and all(row['linked'] for row in product['tests']):
+                rows.append(dict(program=package, engine=engine, definition=None, linked=False,
+                                 stopped=f'test command exited {result.returncode} after linking'))
+    return rows
+
+
+def darwin_table(rows):
+    lines = ['| program | backend | linked / selected | definition / stop |',
+             '|---|---|---:|---|']
+    groups = {}
+    for row in rows:
+        groups.setdefault((row['program'], row['engine']), []).append(row)
+    for (program, engine), group in groups.items():
+        count = sum(row['linked'] for row in group)
+        selected = sum(row['definition'] is not None for row in group)
+        lines.append(f'| {program} | {engine} | {count}/{selected} | |')
+        for row in group:
+            if not row['linked']:
+                stop = row['stopped'].replace('|', r'\|').replace('\n', ' ')
+                lines.append(f"| | | | {row['definition'] or program}: {stop} |")
+    return '\n'.join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
@@ -411,8 +480,8 @@ def main():
     parser.add_argument('--manifest', type=Path, default=ROOT / 'core/programs/m1/manifest.json')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--store', type=Path)
-    parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang') if 'LLVM_SYS_231_PREFIX' in os.environ else None)
-    parser.add_argument('--target')
+    parser.add_argument('--cc', type=Path)
+    parser.add_argument('--target', help='aarch64-apple-darwin links the Mac-day harvest without executing it.')
     parser.add_argument('--emulator', type=Path)
     parser.add_argument('--sysroot', type=Path)
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
@@ -422,6 +491,15 @@ def main():
     parser.add_argument('--report', type=Path)
     parser.add_argument('--timeout-case', action='append', default=[], metavar='PROGRAM/CASE=SECONDS')
     args = parser.parse_args()
+    darwin = args.target == DARWIN_TARGET
+    if darwin and (args.emulator or args.sysroot or args.timeout_case):
+        parser.error('Darwin link-only mode does not accept execution options')
+    if darwin and args.manifest != ROOT / 'core/programs/m1/manifest.json':
+        parser.error('Darwin link-only mode selects packages from the Mac-day harvest')
+    if darwin and args.only and (unknown := set(args.only) - set(DARWIN_HARVEST)):
+        parser.error(f'not in the Darwin harvest: {", ".join(sorted(unknown))}')
+    if not darwin and args.cc is None and 'LLVM_SYS_231_PREFIX' in os.environ:
+        args.cc = Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang'
     if bool(args.emulator) != bool(args.sysroot):
         parser.error("--emulator and --sysroot must be supplied together")
     case_timeouts = {}
@@ -432,14 +510,24 @@ def main():
             parser.error('--timeout-case needs a positive duration')
     engines = ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
     with tempfile.TemporaryDirectory(prefix='hirsel-m1-store-') as store:
-        rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
-                   args.root.resolve(), args.store.resolve() if args.store else Path(store),
-                   args.cc.resolve() if args.cc else None, args.only, case_timeouts, not args.programs_only,
-                   args.target, args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None, args.debug_lines)
-    print(report(rows))
+        store = args.store.resolve() if args.store else Path(store)
+        cc = args.cc.resolve() if args.cc else None
+        if darwin:
+            packages = [p for p in DARWIN_HARVEST if not args.only or p in args.only]
+            rows = darwin_links(args.compiler.resolve(), args.runtime.resolve(), engines,
+                                args.root.resolve(), store, packages, cc, args.debug_lines)
+        else:
+            rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
+                       args.root.resolve(), store, cc, args.only, case_timeouts, not args.programs_only,
+                       args.target, args.emulator.resolve() if args.emulator else None,
+                       args.sysroot.resolve() if args.sysroot else None, args.debug_lines)
+    rendered = darwin_table(rows) if darwin else report(rows)
+    print(rendered)
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
-        args.report.with_suffix('.md').write_text(report(rows) + '\n')
+        args.report.with_suffix('.md').write_text(rendered + '\n')
+    if darwin:
+        return int(any(not row['linked'] for row in rows))
     return int(any(not r['built'] or r['passed'] != r['cases'] for r in rows))
 
 

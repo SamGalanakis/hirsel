@@ -6,10 +6,12 @@ use object::{Object as _, ObjectSection as _};
 mod detached;
 mod dsym;
 mod elf;
+mod macho;
 mod side;
 pub(crate) use detached::{ImageDigest, NativeImage, add_source_note, format as object_format};
 pub use detached::{SymbolSource, resolve_symbols};
 use elf::error;
+pub use macho::macho_structure;
 pub(crate) use side::bind as bind_side_products;
 pub(crate) use side::{Locations, bind_linked as bind_detached};
 #[cfg(test)]

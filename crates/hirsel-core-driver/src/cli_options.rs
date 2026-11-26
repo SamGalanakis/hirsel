@@ -600,6 +600,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Run up to N isolated test children at once. Defaults to the number of CPUs in the process affinity mask."
     ),
     option!(
+        LinkOnly,
+        ["--link-only"],
+        None,
+        ["test"],
+        "Link each selected test without running it. Check Mach-O structure for Darwin."
+    ),
+    option!(
         TestTimeout,
         ["--test-timeout"],
         Some("SECONDS"),

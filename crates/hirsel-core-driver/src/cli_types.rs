@@ -41,6 +41,7 @@ pub enum OptionId {
     Filter,
     TestExact,
     TestJobs,
+    LinkOnly,
     Interface,
     ForeignHeader,
     Dependents,

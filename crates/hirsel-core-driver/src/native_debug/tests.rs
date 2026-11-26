@@ -926,50 +926,10 @@ fn link_macho(
     .unwrap();
 }
 
-/// The §8.1 structure laws of a Mach-O arm64 executable, from Apple's
-/// <mach-o/loader.h>: a 64-bit arm64 MH_EXECUTE header, a macOS
-/// LC_BUILD_VERSION whose minimum is the 26.0 floor, an LC_UUID (dyld's
-/// "missing LC_UUID load command" otherwise), an ad hoc LC_CODE_SIGNATURE, and no library but the system's; and its dSYM ([`super::dsym`]) is an MH_DSYM of the
-/// same arm64 CPU carrying the image's UUID.
+/// The linked image and its dSYM retain the same arm64 CPU and UUID.
 fn macho_structure(bytes: &[u8]) {
     use object::{Object as _, ObjectSection as _};
-    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-    // MH_MAGIC_64, CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64_ALL, MH_EXECUTE.
-    assert_eq!(
-        [word(0), word(4), word(8), word(12)],
-        [0xfeed_facf, 0x0100_000c, 0, 2]
-    );
-    let (mut build, mut uuid, mut signed) = (None, None, false);
-    let mut at = 32;
-    for _ in 0..word(16) {
-        match word(at) {
-            // LC_BUILD_VERSION: platform, minos.
-            0x32 => build = Some((word(at + 8), word(at + 12))),
-            0x1b => uuid = Some(<[u8; 16]>::try_from(&bytes[at + 8..at + 24]).unwrap()),
-            // LC_CODE_SIGNATURE: dataoff, datasize.
-            0x1d => signed = word(at + 12) > 0,
-            // LC_LOAD_DYLIB, _WEAK_DYLIB, _REEXPORT_DYLIB: only the system's.
-            0xc | 0x8000_0018 | 0x8000_001f => {
-                let name = &bytes[at + word(at + 8) as usize..at + word(at + 4) as usize];
-                let name = std::str::from_utf8(name).unwrap().trim_end_matches('\0');
-                assert!(
-                    [
-                        "/usr/lib/libSystem.B.dylib",
-                        "/System/Library/Frameworks/Security.framework/Versions/A/Security",
-                        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
-                    ]
-                    .contains(&name),
-                    "{name}"
-                );
-            }
-            _ => {}
-        }
-        at += word(at + 4) as usize;
-    }
-    // PLATFORM_MACOS; 26.0 as xxxx.yy.zz nibbles.
-    assert_eq!(build, Some((1, 26 << 16)));
-    assert!(signed, "no LC_CODE_SIGNATURE");
-    let uuid = uuid.expect("no LC_UUID");
+    let uuid = super::macho::executable_uuid(bytes).unwrap();
     let dsym = super::dsym::file(bytes, &elf_debug_object()).unwrap();
     let dword = |at: usize| u32::from_le_bytes(dsym[at..at + 4].try_into().unwrap());
     // MH_DSYM of the image's CPU.

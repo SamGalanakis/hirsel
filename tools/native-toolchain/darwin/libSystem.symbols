@@ -86,6 +86,8 @@ _getpeereid
 _getpeername
 _getpid
 _getppid
+# Untied startup reads the process's resource limits to size the scheduler.
+_getrlimit
 _getsockname
 _getsockopt
 _gettimeofday
@@ -159,6 +161,8 @@ _pthread_cond_destroy
 _pthread_cond_init
 _pthread_cond_signal
 _pthread_cond_timedwait
+# Rust's Condvar uses this relative wait to retire idle untied host threads.
+_pthread_cond_timedwait_relative_np
 _pthread_cond_wait
 _pthread_create
 _pthread_detach

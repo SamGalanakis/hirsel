@@ -69,8 +69,7 @@ fn advance_tls(mut c: Connection, now: u64, random: Random, mtu: u16, level: pac
             let Some(take application_schedule) = handshake.take_keys(mut h) else {
                 return Error(LocalFailure)
             }
-            let mut keys = take application_schedule
-            if !install_keys(mut c.application, mut keys, Application) {
+            if !install_application(mut c, take application_schedule) {
                 return Error(LocalFailure)
             }
             recovery.set_max_ack_delay(mut c.recovery, now, int.saturating_mul(params.max_ack_delay_ms, 1000000))

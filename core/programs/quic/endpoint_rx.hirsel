@@ -74,7 +74,14 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
     if h.kind != OneRtt && c.authenticated && list.slice(wire, h.source.at, h.source.at + h.source.len) != c.peer_id {
         return Error(UnknownConnection)
     }
+    if now >= c.keys.previous_until {
+        c.keys.previous = None
+    }
+    refresh_next(mut c.keys)
     let opened = open_for_connection(c, h, mut wire, mut plain)?
+    if let Next = opened.phase {
+        commit_receive_update(mut c, now, opened.number)
+    }
     accept_packet(mut c, now, h, opened, wire, plain, random, mtu, ecn, mut events)
 }
 
@@ -99,6 +106,9 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
             }
         }
         if let Error(reason) = outcome {
+            if reason == PacketProtection {
+                note_failed_open(mut c, now, mut events)
+            }
             failed = Some(reason)
         }
     }

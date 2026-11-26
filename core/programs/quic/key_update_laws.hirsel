@@ -1,0 +1,270 @@
+// QS6 law Q13: key update in both directions and the AEAD limits (RFC 9001 §6 and §6.6).
+// The limits are scaled down through quic.set_aead_limits; the real ones are 2^22 seals
+// to an update and 2^23 to AEAD_LIMIT_REACHED for AES-GCM (§6.6: confidentiality limit
+// 2^23 packets), with 2^52 failed opens for AES-GCM and 2^36 for ChaCha20-Poly1305.
+const NEVER: u64 = 0xffffffffffffffff
+
+/// 30 KiB is 26 or more 1-RTT packets at a 1200-byte MTU, well past an update every 8.
+const ROUND: u64 = 30 * KIB
+
+fn closes(events: List[quic.Event]) -> bool {
+    for event in events {
+        if let Closed(..) = event {
+            return true
+        }
+    }
+    false
+}
+
+fn key_transport() -> quic.TransportConfig {
+    stream_transport(4096 * KIB, 1024 * KIB, 1024 * KIB)
+}
+
+fn key_pair() -> (quic.Endpoint, quic.Endpoint, quic.ConnectionHandle, quic.ConnectionHandle) {
+    let mut server = stream_server(key_transport())
+    let mut client = qs3_client()
+    let (c, s) = handshake_pair(mut client, mut server, key_transport())
+    (take client, take server, c, s)
+}
+
+/// Write ROUND bytes on `id` from one side and run both ends, a millisecond a step so the
+/// pacer and timers move, until the other side has read exactly them. Returns the time.
+fn carry(mut client: quic.Endpoint, mut server: quic.Endpoint, c: quic.ConnectionHandle, s: quic.ConnectionHandle, id: quic.StreamId, client_sends: bool, seed: u64, now: u64, mut at_server: List[quic.Event], mut at_client: List[quic.Event]) -> u64 {
+    let data = pattern(ROUND, seed)
+    let written = if client_sends {
+        result.unwrap(quic.write(mut client, c, id, data, false))
+    } else {
+        result.unwrap(quic.write(mut server, s, id, data, false))
+    }
+    if written != ROUND {
+        fail("a write within credit came back short")
+    }
+    let mut into: Bytes = list.with_capacity(ROUND)
+    let mut t = now
+    for _ in 0u64 .. 2000 {
+        run_at(mut client, mut server, t, mut at_server, mut at_client)
+        let _ = if client_sends {
+            result.unwrap(quic.read(mut server, s, id, mut into))
+        } else {
+            result.unwrap(quic.read(mut client, c, id, mut into))
+        }
+        if list.len(into) == ROUND {
+            break
+        }
+        t += MS
+    }
+    if into != data {
+        fail("bytes across a key update did not arrive exactly")
+    }
+    t
+}
+
+fn run_at(mut client: quic.Endpoint, mut server: quic.Endpoint, t: u64, mut at_server: List[quic.Event], mut at_client: List[quic.Event]) {
+    quic.timeout(mut client, t, mut at_client)
+    quic.timeout(mut server, t, mut at_server)
+    settle(mut client, mut server, t, mut at_server, mut at_client)
+}
+
+/// Four rounds of one bidirectional stream, the sending side's update threshold at 8 seals
+/// and the other's off: each round its sender initiates at least one update (§6.1 also
+/// needs an acknowledged packet of the current phase) and the receiver answers it (§6.2).
+fn updates_both_ways() {
+    let (client0, server0, c, s) = key_pair()
+    let mut client = client0
+    let mut server = server0
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let id = result.unwrap(quic.open(mut client, c, true))
+    let mut t = 2 * MS
+    for round in 0u64 .. 4 {
+        let client_sends = round % 2 == 0
+        let (client_at, server_at) = if client_sends {
+            (8u64, NEVER)
+        } else {
+            (NEVER, 8u64)
+        }
+        quic.set_aead_limits(mut client, c, client_at, NEVER, false)
+        quic.set_aead_limits(mut server, s, server_at, NEVER, false)
+        let (ci, ca) = quic.key_updates(client, c)
+        let (si, sa) = quic.key_updates(server, s)
+        t = carry(mut client, mut server, c, s, id, client_sends, round, t, mut at_server, mut at_client) + MS
+        let (ci2, ca2) = quic.key_updates(client, c)
+        let (si2, sa2) = quic.key_updates(server, s)
+        let initiated = if client_sends {
+            ci2 > ci && sa2 > sa && si2 == si
+        } else {
+            si2 > si && ca2 > ca && ci2 == ci
+        }
+        if !initiated {
+            fail("the sending side did not initiate a key update the peer answered")
+        }
+    }
+    let (ci, _) = quic.key_updates(client, c)
+    let (si, _) = quic.key_updates(server, s)
+    if ci < 2 || si < 2 || closes(at_server) || closes(at_client) {
+        fail("each side did not initiate two key updates on a live connection")
+    }
+    if quic.drop_count(server, PacketProtection) != 0 || quic.drop_count(client, PacketProtection) != 0 {
+        fail("a packet sealed across a key update failed to open")
+    }
+}
+
+/// Poll `sender` once, commit everything, and hand back each datagram's bytes undelivered.
+fn capture(mut sender: quic.Endpoint, now: u64) -> List[Bytes] {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let _ = quic.poll(mut sender, now, mut wire, mut packets)
+    let mut out: List[Bytes] = list.new()
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            list.push(mut out, clone(list.slice(wire, at, at + len)))
+        }
+    }
+    quic.committed(mut sender, now, list.len(out))
+    take out
+}
+
+fn hand(mut to: quic.Endpoint, now: u64, from: Addr, d: Bytes, mut events: List[quic.Event]) {
+    let mut buf: Bytes = clone(d)
+    let n = list.len(buf)
+    quic.receive_datagram(mut to, now, from, 0, mut buf, 0, n, mut events)
+}
+
+/// §6.5: two datagrams sealed under the old key are held while the client updates and the
+/// server commits the new receive key. The first, handed over at once, opens under the
+/// kept previous key; the second, handed over after three PTOs, no longer has a key and
+/// is dropped as PacketProtection.
+fn in_flight_across_update() {
+    let (client0, server0, c, s) = key_pair()
+    let mut client = client0
+    let mut server = server0
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let id = result.unwrap(quic.open(mut client, c, true))
+    quic.set_aead_limits(mut client, c, NEVER, NEVER, false)
+    quic.set_aead_limits(mut server, s, NEVER, NEVER, false)
+    let _ = result.unwrap(quic.write(mut client, c, id, pattern(4 * 1200, 1), false))
+    let old = capture(mut client, 2 * MS)
+    if list.len(old) < 4 {
+        fail("four old-phase datagrams were not sent")
+    }
+    for i in 2u64 .. list.len(old) {
+        hand(mut server, 2 * MS, CLIENT_ADDR, old[i], mut at_server)
+    }
+    run_at(mut client, mut server, 3 * MS, mut at_server, mut at_client)
+    quic.set_aead_limits(mut client, c, 0, NEVER, false)
+    let fresh = result.unwrap(quic.open(mut client, c, true))
+    let _ = result.unwrap(quic.write(mut client, c, fresh, pattern(100, 9), false))
+    let t = 4 * MS
+    run_at(mut client, mut server, t, mut at_server, mut at_client)
+    let (ci, _) = quic.key_updates(client, c)
+    let (_, sa) = quic.key_updates(server, s)
+    if ci == 0 || sa == 0 {
+        fail("the server never committed the client's new key")
+    }
+    hand(mut server, t, CLIENT_ADDR, old[0], mut at_server)
+    if quic.drop_count(server, PacketProtection) != 0 {
+        fail("a packet sealed before the update did not open within three PTOs")
+    }
+    let later = t + 3 * quic.pto_ns(server, s) + 1
+    hand(mut server, later, CLIENT_ADDR, old[1], mut at_server)
+    if quic.drop_count(server, PacketProtection) != 1 {
+        fail("the previous key was kept past three PTOs")
+    }
+}
+
+/// §6.3 and §9.5: a short-header packet with its phase bit flipped and its tag broken
+/// fails under the next key and changes nothing; the genuine packet then opens under the
+/// current key. The header-protection mask is XORed, so flipping 0x04 of the protected
+/// first byte flips the unprotected key-phase bit.
+fn forged_phase_changes_nothing() {
+    let (client0, server0, c, s) = key_pair()
+    let mut client = client0
+    let mut server = server0
+    let mut events: List[quic.Event] = list.new()
+    quic.set_aead_limits(mut client, c, NEVER, NEVER, false)
+    quic.set_aead_limits(mut server, s, NEVER, NEVER, false)
+    let id = result.unwrap(quic.open(mut client, c, true))
+    let sent = pattern(100, 3)
+    let _ = result.unwrap(quic.write(mut client, c, id, sent, false))
+    let genuine = capture(mut client, 2)
+    if list.len(genuine) != 1 {
+        fail("100 bytes did not go in one datagram")
+    }
+    let mut forged: Bytes = clone(genuine[0])
+    let last = list.len(forged) - 1
+    let first = forged[0] ^ 0x04u8
+    let tag = forged[last] ^ 0x01u8
+    let _ = list.set(mut forged, 0, first)
+    let _ = list.set(mut forged, last, tag)
+    hand(mut server, 2, CLIENT_ADDR, forged, mut events)
+    if quic.drop_count(server, PacketProtection) != 1 || quic.key_updates(server, s) != (0, 0) {
+        fail("a forged phase flip was not dropped, or it moved the key")
+    }
+    hand(mut server, 2, CLIENT_ADDR, genuine[0], mut events)
+    let mut into: Bytes = list.with_capacity(100)
+    let (n, _) = result.unwrap(quic.read(mut server, s, id, mut into))
+    if n != 100 || into != sent || quic.drop_count(server, PacketProtection) != 1 || closes(events) {
+        fail("the genuine packet did not open after a forged phase flip")
+    }
+}
+
+/// §6.6: with an update every 8 seals and the limit at 16, a sender of many times 16
+/// packets updates and never closes; with updates blocked it stops at the limit, and both
+/// sides see AEAD_LIMIT_REACHED (0x0f) with frame type 0.
+fn aead_limits() {
+    let (client0, server0, c, s) = key_pair()
+    let mut client = client0
+    let mut server = server0
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let id = result.unwrap(quic.open(mut client, c, true))
+    quic.set_aead_limits(mut client, c, 8, 16, false)
+    quic.set_aead_limits(mut server, s, NEVER, NEVER, false)
+    let mut t = 2 * MS
+    for round in 0u64 .. 3 {
+        t = carry(mut client, mut server, c, s, id, true, round, t, mut at_server, mut at_client) + MS
+    }
+    quic.timeout(mut client, t, mut at_client)
+    let (ci, _) = quic.key_updates(client, c)
+    if ci < 3 || closes(at_server) || closes(at_client) {
+        fail("a sender under the scaled limit did not update its key before it")
+    }
+}
+
+fn aead_limit_blocked() {
+    let (client0, server0, c, s) = key_pair()
+    let mut client = client0
+    let mut server = server0
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let id = result.unwrap(quic.open(mut client, c, true))
+    quic.set_aead_limits(mut client, c, 8, 16, true)
+    quic.set_aead_limits(mut server, s, NEVER, NEVER, false)
+    let _ = result.unwrap(quic.write(mut client, c, id, pattern(ROUND, 4), false))
+    let mut t = 2 * MS
+    while !transport_close(at_server, 0x0f, 0) && t < 2000 * MS {
+        run_at(mut client, mut server, t, mut at_server, mut at_client)
+        t += MS
+    }
+    quic.timeout(mut client, t, mut at_client)
+    if quic.key_updates(client, c) != (0, 0) {
+        fail("a sender with updates blocked updated its key")
+    }
+    if !transport_close(at_server, 0x0f, 0) {
+        fail("the peer did not see AEAD_LIMIT_REACHED")
+    }
+    if !transport_close(at_client, 0x0f, 0) {
+        fail("the sender did not report AEAD_LIMIT_REACHED")
+    }
+}
+
+@test
+fn key_update_both_directions() -> Result[(), ()] {
+    updates_both_ways()
+    in_flight_across_update()
+    forged_phase_changes_nothing()
+    aead_limits()
+    aead_limit_blocked()
+    Ok(())
+}

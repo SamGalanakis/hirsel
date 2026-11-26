@@ -1,0 +1,190 @@
+/// Which receive key opened a 1-RTT packet (RFC 9001 §6.3 and §6.5).
+type KeyPhase = Same | Next | Previous
+
+/// RFC 9001 §6: the application schedule kept for updates, the next and one previous
+/// receive key, and the §6.6 counts. `update_at` and `limit` are seals under one send
+/// key; `integrity` is failed opens over the connection, across all keys.
+type KeyUpdate {
+    schedule: Option[schedule.Schedule],
+    next: Option[packet.Opener],
+    previous: Option[packet.Opener],
+    previous_until: u64,
+    rx_phase: bool,
+    rx_start: u64,
+    tx_start: u64,
+    tx_acked: bool,
+    sealed: u64,
+    failed: u64,
+    update_at: u64,
+    limit: u64,
+    integrity: u64,
+    blocked: bool,
+    limit_hit: bool,
+    initiated: u64,
+    answered: u64
+}
+
+const NO_LIMIT: u64 = 0xffffffffffffffff
+
+fn no_key_update() -> KeyUpdate {
+    KeyUpdate(schedule: None, next: None, previous: None, previous_until: 0, rx_phase: false, rx_start: 0, tx_start: 0, tx_acked: false, sealed: 0, failed: 0, update_at: NO_LIMIT, limit: NO_LIMIT, integrity: NO_LIMIT, blocked: false, limit_hit: false, initiated: 0, answered: 0)
+}
+
+/// Install the application keys and keep the schedule for key updates. RFC 9001 §6.6:
+/// AES-GCM keys seal at most 2^23 packets, so a key is updated at 2^22, and fail at
+/// most 2^52 opens; ChaCha20-Poly1305 has no practical seal limit and fails 2^36.
+fn install_application(mut c: Connection, take keys: schedule.Schedule) -> bool {
+    let mut s = take keys
+    if !install_keys(mut c.application, mut s, Application) {
+        return false
+    }
+    let Ok(info) = schedule.inspect(s, Application) else {
+        return false
+    }
+    match info.cipher {
+        ChaCha20Poly1305 => {
+            c.keys.integrity = 1u64 << 36
+        },
+        _ => {
+            c.keys.update_at = 1u64 << 22
+            c.keys.limit = 1u64 << 23
+            c.keys.integrity = 1u64 << 52
+        },
+    }
+    c.keys.schedule = Some(take s)
+    refresh_next(mut c.keys)
+    true
+}
+
+/// The candidate next receive key. A server's schedule yields it only once the
+/// handshake completes, so it is fetched again until it is there.
+fn refresh_next(mut k: KeyUpdate) {
+    if let Some(_) = k.next {
+        return
+    }
+    if let Some(s) = k.schedule {
+        k.next = match schedule.next_opener(s) {
+            Ok(take o) => Some(take o),
+            Error(_) => None,
+        }
+    }
+}
+
+/// The key a 1-RTT packet with this first byte and number opens with: the current one
+/// when its phase bit matches; otherwise the previous one for a packet older than the
+/// current phase, or the next one (§6.3, §6.5).
+fn phase_of(k: KeyUpdate, h: codec.Header, first: u8, number: u64) -> KeyPhase {
+    if h.kind != OneRtt || ((first & 0x04) != 0) == k.rx_phase {
+        return Same
+    }
+    if number < k.rx_start {
+        if let Some(_) = k.previous {
+            return Previous
+        }
+    }
+    Next
+}
+
+/// Commit the next receive key after a packet under it authenticated (§6.3), keep the
+/// superseded one for three PTOs (§6.5), and answer with our own update (§6.2).
+fn commit_receive_update(mut c: Connection, now: u64, number: u64) {
+    let until = deadline_after(now, three_pto(c))
+    if let Some(mut s) = c.keys.schedule {
+        if let Error(_) = schedule.key_update(mut s, false) {
+            return
+        }
+        let Some(take next) = replace(mut c.keys.next, None) else {
+            return
+        }
+        if let Some(mut r) = c.application.receive {
+            let old = replace(mut r.opener, take next)
+            c.keys.previous = Some(take old)
+        }
+        c.keys.previous_until = until
+        c.keys.next = match schedule.next_opener(s) {
+            Ok(take o) => Some(take o),
+            Error(_) => None,
+        }
+    }
+    c.keys.rx_phase = !c.keys.rx_phase
+    c.keys.rx_start = number
+    if c.application.key_phase != c.keys.rx_phase {
+        if update_send(mut c) {
+            c.keys.answered += 1
+        }
+    }
+}
+
+/// Move the send side to the next key phase; packet numbers go on where they were.
+fn update_send(mut c: Connection) -> bool {
+    let next = c.application.next
+    if let Some(mut s) = c.keys.schedule {
+        if let Error(_) = schedule.key_update(mut s, true) {
+            return false
+        }
+        let Ok(take sealer) = schedule.sealer(mut s, Application, 0, next) else {
+            return false
+        }
+        if let Some(mut k) = c.application.send {
+            k.sealer = take sealer
+        }
+    } else {
+        return false
+    }
+    c.application.key_phase = !c.application.key_phase
+    c.keys.tx_start = next
+    c.keys.tx_acked = false
+    c.keys.sealed = 0
+    true
+}
+
+/// §6.1: an endpoint may initiate only once the handshake is confirmed and a packet of
+/// its current phase is acknowledged.
+fn note_phase_ack(mut k: KeyUpdate, ranges: List[codec.AckRange]) {
+    for r in ranges {
+        if r.largest >= k.tx_start {
+            k.tx_acked = true
+        }
+    }
+}
+
+fn confirmed(c: Connection) -> bool {
+    let handshake_gone = match c.encrypted.send {
+        None => true,
+        Some(_) => false,
+    }
+    established(c) && handshake_gone
+}
+
+/// Before 1-RTT packets are staged: update the send key at `update_at` when allowed, and
+/// at `limit` stop with AEAD_LIMIT_REACHED (0x0f) if no update was made (§6.6).
+fn key_maintenance(mut c: Connection, now: u64) {
+    if !open_life(c) {
+        return
+    }
+    if c.keys.sealed >= c.keys.update_at && !c.keys.blocked && c.keys.tx_acked && confirmed(c) {
+        if update_send(mut c) {
+            c.keys.initiated += 1
+        }
+    }
+    if c.keys.sealed >= c.keys.limit {
+        start_closing(mut c, now, transport_close(0x0f, 0))
+        c.keys.limit_hit = true
+    }
+}
+
+/// The application hears of an AEAD-limit close at its next `timeout`.
+fn report_limit(mut c: Connection, mut events: List[Event]) {
+    if c.keys.limit_hit {
+        c.keys.limit_hit = false
+        list.push(mut events, Closed(c.handle, Transport(code: 0x0f, frame: 0)))
+    }
+}
+
+/// §6.6: count a packet that failed to open; past the integrity limit, close.
+fn note_failed_open(mut c: Connection, now: u64, mut events: List[Event]) {
+    c.keys.failed = int.saturating_add(c.keys.failed, 1)
+    if c.keys.failed > c.keys.integrity && open_life(c) {
+        refuse(mut c, now, 0x0f, 0, Transport(code: 0x0f, frame: 0), mut events)
+    }
+}

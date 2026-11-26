@@ -44,3 +44,27 @@ pub fn set_initial_token(mut e: Endpoint, c: ConnectionHandle, take token: Bytes
 pub fn mint_address_token(e: Endpoint, peer: Addr, now: u64) -> Bytes {
     seal_token(e.random, e.config.token_key, TOKEN_ADDRESS, peer, b"", b"", now)
 }
+
+/// Q13 seam: scale the §6.6 confidentiality limits down (update at `update_at` seals
+/// under one key, close at `limit`) and block or allow key updates.
+pub fn set_aead_limits(mut e: Endpoint, c: ConnectionHandle, update_at: u64, limit: u64, blocked: bool) {
+    let Some(i) = slot_at(e, c) else {
+        return
+    }
+    if let Some(mut conn) = e.connections[i] {
+        conn.keys.update_at = update_at
+        conn.keys.limit = limit
+        conn.keys.blocked = blocked
+    }
+}
+
+/// Q13 seam: the key updates a connection initiated and the ones it made in answer.
+pub fn key_updates(e: Endpoint, c: ConnectionHandle) -> (u64, u64) {
+    let Some(i) = slot_at(e, c) else {
+        return (0, 0)
+    }
+    if let Some(conn) = e.connections[i] {
+        return (conn.keys.initiated, conn.keys.answered)
+    }
+    (0, 0)
+}

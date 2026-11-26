@@ -1,4 +1,5 @@
 fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
+    key_maintenance(mut c, now)
     let mut limit = order.min(mtu, MSS)
     if let Some(p) = c.params {
         limit = order.min(limit, p.max_udp_payload)
@@ -161,6 +162,7 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
         Handshake => commit_space(mut c.encrypted, p),
         _ => {
             commit_space(mut c.application, p)
+            c.keys.sealed = int.saturating_add(c.keys.sealed, 1)
             if list.len(p.frames) > 0 {
                 list.push(mut c.streams.inflight, SentPacket(number: p.number, frames: clone(p.frames)))
             }

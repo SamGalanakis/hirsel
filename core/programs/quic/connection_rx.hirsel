@@ -88,6 +88,9 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
                 return Error(Wire(0x0a, frame))
             }
             let index = space_index(level)
+            if let Application = level {
+                note_phase_ack(mut c.keys, a.ranges)
+            }
             let verdict = recovery.on_ack(mut c.recovery, now, index, a.ranges, ack_delay_ns(c, a.delay), a.ecn)
             settle(mut c, index, verdict.acked, verdict.lost, mut events)
             Ok(Quiet)
@@ -180,9 +183,9 @@ fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Byte
 
 fn open_for_connection(c: Connection, h: codec.Header, mut wire: Bytes, mut plain: Bytes) -> Result[OpenedPacket, DropReason] {
     match h.kind {
-        Initial => open_packet(c.initial, h, mut wire, mut plain),
-        Handshake => open_packet(c.encrypted, h, mut wire, mut plain),
-        OneRtt => open_packet(c.application, h, mut wire, mut plain),
+        Initial => open_packet(c.initial, c.keys, h, mut wire, mut plain),
+        Handshake => open_packet(c.encrypted, c.keys, h, mut wire, mut plain),
+        OneRtt => open_packet(c.application, c.keys, h, mut wire, mut plain),
         _ => Error(KeysUnavailable),
     }
 }

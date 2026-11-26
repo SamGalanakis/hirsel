@@ -199,6 +199,7 @@ pub fn timeout(mut e: Endpoint, now: u64, mut events: List[Event]) {
     for i in 0u64 .. list.len(e.connections) {
         if let Some(mut c) = e.connections[i] {
             recovery_due(mut c, now, mut events)
+            report_limit(mut c, mut events)
         }
         if expired(e.connections[i], now) {
             if let Some(take gone) = replace(mut e.connections[i], None) {

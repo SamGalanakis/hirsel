@@ -1,6 +1,7 @@
 type OpenedPacket {
     number: u64,
-    first: u8
+    first: u8,
+    phase: KeyPhase
 }
 
 fn packet_level(kind: codec.PacketKind) -> packet.Space {
@@ -27,12 +28,12 @@ fn unprotect(mask: packet.HeaderMask, h: codec.Header, sample: codec.Span, mut b
     first
 }
 
-fn open_packet(s: Space, h: codec.Header, mut buf: Bytes, mut plain: Bytes) -> Result[OpenedPacket, DropReason] {
+fn open_packet(s: Space, k: KeyUpdate, h: codec.Header, mut buf: Bytes, mut plain: Bytes) -> Result[OpenedPacket, DropReason] {
     let Ok(sample) = codec.sample(h) else {
         return Error(SampleTooShort)
     }
     let keys = match s.receive {
-        Some(k) => k,
+        Some(r) => r,
         None => return Error(KeysUnavailable),
     }
     let first = unprotect(keys.mask, h, sample, mut buf)
@@ -45,16 +46,38 @@ fn open_packet(s: Space, h: codec.Header, mut buf: Bytes, mut plain: Bytes) -> R
     let start = h.packet.at
     let sealed = list.slice(buf, start, start + h.packet.len)
     list.truncate(mut plain, 0)
-    if let Error(_) = packet.open_into(keys.opener, 0, number, sealed, 0, opened.aad.len, b"", mut plain) {
+    let phase = phase_of(k, h, first, number)
+    let ok = match phase {
+        Same => match packet.open_into(keys.opener, 0, number, sealed, 0, opened.aad.len, b"", mut plain) {
+            Ok(_) => true,
+            Error(_) => false,
+        },
+        Next => match k.next {
+            Some(o) => open_with(o, number, sealed, opened.aad.len, mut plain),
+            None => false,
+        },
+        Previous => match k.previous {
+            Some(o) => open_with(o, number, sealed, opened.aad.len, mut plain),
+            None => false,
+        },
+    }
+    if !ok {
         return Error(PacketProtection)
     }
-    Ok(OpenedPacket(number: number, first: first))
+    Ok(OpenedPacket(number: number, first: first, phase: phase))
 }
 
-fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
+fn open_with(opener: packet.Opener, number: u64, sealed: Bytes, aad_len: u64, mut plain: Bytes) -> bool {
+    match packet.open_into(opener, 0, number, sealed, 0, aad_len, b"", mut plain) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}
+
+fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, phase: bool, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
     let n = codec.Number(truncated: number & 0xffffffff, size: 4)
     if kind == OneRtt {
-        codec.write_short_header(dest, false, false, n, mut out)?
+        codec.write_short_header(dest, false, phase, n, mut out)?
     } else {
         codec.write_long_header(kind, dest, source, token, n, payload_len + 16, mut out)?
     }
@@ -68,7 +91,7 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
     if let Some(mut keys) = s.send {
         let start = list.len(out)
         let number = s.next
-        let Ok(body0) = begin_packet(kind, dest, source, s.token, number, list.len(payload), mut out) else {
+        let Ok(body0) = begin_packet(kind, dest, source, s.token, s.key_phase, number, list.len(payload), mut out) else {
             return None
         }
         let mut body = body0
@@ -77,7 +100,7 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
             // Rewriting Length can add one byte when a short payload is padded to 1200.
             zeros = min_size - (body - start + list.len(payload) + 16)
             list.truncate(mut out, start)
-            let Ok(at) = begin_packet(kind, dest, source, s.token, number, list.len(payload) + zeros, mut out) else {
+            let Ok(at) = begin_packet(kind, dest, source, s.token, s.key_phase, number, list.len(payload) + zeros, mut out) else {
                 return None
             }
             let growth = at - body
@@ -85,7 +108,7 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
             if growth != 0 {
                 zeros -= growth
                 list.truncate(mut out, start)
-                let Ok(rewritten) = begin_packet(kind, dest, source, s.token, number, list.len(payload) + zeros, mut out) else {
+                let Ok(rewritten) = begin_packet(kind, dest, source, s.token, s.key_phase, number, list.len(payload) + zeros, mut out) else {
                     return None
                 }
                 body = rewritten

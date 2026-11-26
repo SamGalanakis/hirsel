@@ -1,0 +1,377 @@
+// Independent concurrent register model of the objects@1 head (K8).
+// Written directly from docs/spec/fleet.md (FLT-2, O1-O4, F1), without importing move_kernel.
+// Checked exhaustively via `std.model.explore` and used as an independent conformance oracle
+// via `std.model.conforms_check`.
+pub const CLASS_PERMIT: u8 = 0
+
+pub const CLASS_CONTINUE: u8 = 1
+
+pub const CLASS_ADOPT: u8 = 2
+
+pub type RegHead: key + send {
+    epoch: u64,
+    holder: u64,
+    origin_epoch: u64,
+    origin_attempt: u64,
+    origin_class: u8,
+    permit_epoch: u64,
+    permit_attempt: u64
+}
+
+pub type OpenPermit: key + send {
+    attempt: u64,
+    expect_epoch: u64,
+    expect_holder: u64,
+    target_node: u64
+}
+
+pub type InFlight: key + send {
+    attempt: u64,
+    expect_epoch: u64,
+    expect_holder: u64,
+    class: u8,
+    holder: u64,
+    target_node: u64
+}
+
+pub type RegState: key + send {
+    head: RegHead,
+    incumbent_node: u64,
+    next_holder: u64,
+    next_permit_attempt: u64,
+    next_continue_attempt: u64,
+    open_permits: List[OpenPermit],
+    inflight: List[InFlight],
+    epoch_winners: List[(u64, u64)],
+    authorized: List[(u64, u64, u64)],
+    max_epoch: u64,
+    max_nodes: u64
+}
+
+pub type RegAction: key + send = Init | AuthPermit(u64) | SpawnContinue(u64) | ExecCas(u64) | ReadSettle
+
+pub type RegLabel: key + send = LAuth | LCasWon | LCasSuperseded | LSettleWon | LSettleDead
+
+pub type RegObs: key + send {
+    epoch: u64,
+    attempt: u64,
+    permit_attempt: u64,
+    class: u8
+}
+
+pub fn initial_state(max_epoch: u64, max_nodes: u64) -> RegState {
+    let genesis = RegHead(
+        epoch: 1,
+        holder: 1,
+        origin_epoch: 1,
+        origin_attempt: 0,
+        origin_class: CLASS_ADOPT,
+        permit_epoch: 0,
+        permit_attempt: 0,
+    )
+    let mut winners: List[(u64, u64)] = list.new()
+    list.push(mut winners, (1u64, 1u64))
+    RegState(
+        head: genesis,
+        incumbent_node: 1,
+        next_holder: 2,
+        next_permit_attempt: 1,
+        next_continue_attempt: 1001,
+        open_permits: list.new(),
+        inflight: list.new(),
+        epoch_winners: take winners,
+        authorized: list.new(),
+        max_epoch: max_epoch,
+        max_nodes: max_nodes,
+    )
+}
+
+fn has_inflight_continue(inflight: List[InFlight]) -> bool {
+    for op in inflight {
+        if op.class == CLASS_CONTINUE {
+            return true
+        }
+    }
+    false
+}
+
+fn reg_actions(s: RegState, mut out: List[RegAction]) {
+    if s.head.epoch < s.max_epoch && list.len(s.inflight) < 3 {
+        if list.len(s.open_permits) == 0 {
+            for node in 1u64 .. (s.max_nodes + 1) {
+                if node != s.incumbent_node {
+                    list.push(mut out, AuthPermit(node))
+                }
+            }
+        } else if list.len(s.open_permits) == 1 {
+            let primary = s.open_permits[0]
+            for node in 1u64 .. (s.max_nodes + 1) {
+                if node != primary.target_node && node != s.incumbent_node {
+                    list.push(mut out, AuthPermit(node))
+                }
+            }
+        }
+    }
+    if s.head.epoch < s.max_epoch && !has_inflight_continue(s.inflight) && list.len(s.inflight) < 3 {
+        list.push(mut out, SpawnContinue(s.incumbent_node))
+    }
+    for i in 0u64 .. list.len(s.inflight) {
+        list.push(mut out, ExecCas(i))
+    }
+    if list.len(s.open_permits) > 0 && s.head.epoch > s.open_permits[0].expect_epoch {
+        list.push(mut out, ReadSettle)
+    }
+}
+
+fn reg_step(s: RegState, act: RegAction) -> RegState {
+    let mut next: RegState = clone(s)
+    match act {
+        Init => {},
+        AuthPermit(target_node) => {
+            let attempt = next.next_permit_attempt
+            next.next_permit_attempt += 1
+            let holder = next.next_holder
+            next.next_holder += 1
+            let expect_epoch = if list.len(next.open_permits) == 0 {
+                next.head.epoch
+            } else {
+                next.open_permits[0].expect_epoch
+            }
+            let expect_holder = if list.len(next.open_permits) == 0 {
+                next.head.holder
+            } else {
+                next.open_permits[0].expect_holder
+            }
+            list.push(mut next.open_permits, OpenPermit(attempt: attempt, expect_epoch: expect_epoch, expect_holder: expect_holder, target_node: target_node))
+            list.push(mut next.authorized, (attempt, expect_epoch, expect_holder))
+            list.push(mut next.inflight, InFlight(attempt: attempt, expect_epoch: expect_epoch, expect_holder: expect_holder, class: CLASS_PERMIT, holder: holder, target_node: target_node))
+        },
+        SpawnContinue(node) => {
+            let attempt = next.next_continue_attempt
+            next.next_continue_attempt += 1
+            let holder = next.next_holder
+            next.next_holder += 1
+            list.push(mut next.inflight, InFlight(attempt: attempt, expect_epoch: next.head.epoch, expect_holder: next.head.holder, class: CLASS_CONTINUE, holder: holder, target_node: node))
+        },
+        ExecCas(idx) => {
+            let op = list.remove(mut next.inflight, idx)
+            if op.expect_epoch == next.head.epoch && op.expect_holder == next.head.holder {
+                let new_epoch = next.head.epoch + 1
+                let permit_epoch = if op.class == CLASS_PERMIT {
+                    new_epoch
+                } else {
+                    next.head.permit_epoch
+                }
+                let permit_attempt = if op.class == CLASS_PERMIT {
+                    op.attempt
+                } else {
+                    next.head.permit_attempt
+                }
+                next.head = RegHead(
+                    epoch: new_epoch,
+                    holder: op.holder,
+                    origin_epoch: new_epoch,
+                    origin_attempt: op.attempt,
+                    origin_class: op.class,
+                    permit_epoch: permit_epoch,
+                    permit_attempt: permit_attempt,
+                )
+                list.push(mut next.epoch_winners, (new_epoch, op.holder))
+            }
+        },
+        ReadSettle => {
+            let mut winner_node: Option[u64] = None
+            for p in next.open_permits {
+                if next.head.epoch > p.expect_epoch && next.head.permit_attempt == p.attempt && next.head.permit_epoch >= p.expect_epoch + 1 {
+                    winner_node = Some(p.target_node)
+                }
+            }
+            if let Some(node) = winner_node {
+                next.incumbent_node = node
+            }
+            list.clear(mut next.open_permits)
+        },
+    }
+    take next
+}
+
+fn inv_origin_epoch_matches_head(_prev: RegState, _act: RegAction, s: RegState) -> bool {
+    s.head.origin_epoch == s.head.epoch
+}
+
+fn inv_unique_holder_per_epoch(_prev: RegState, _act: RegAction, s: RegState) -> bool {
+    let n = list.len(s.epoch_winners)
+    for i in 0u64 .. n {
+        let (e_i, h_i) = s.epoch_winners[i]
+        for j in (i + 1) .. n {
+            let (e_j, h_j) = s.epoch_winners[j]
+            if e_i == e_j || h_i == h_j {
+                return false
+            }
+        }
+    }
+    true
+}
+
+fn inv_rule_f1_shared_expect(_prev: RegState, _act: RegAction, s: RegState) -> bool {
+    if list.len(s.open_permits) <= 1 {
+        return true
+    }
+    let e0 = s.open_permits[0].expect_epoch
+    let h0 = s.open_permits[0].expect_holder
+    for p in s.open_permits {
+        if p.expect_epoch != e0 || p.expect_holder != h0 {
+            return false
+        }
+    }
+    true
+}
+
+fn inv_permit_winner_authorized(_prev: RegState, _act: RegAction, s: RegState) -> bool {
+    if s.head.origin_class != CLASS_PERMIT {
+        return true
+    }
+    for (att, exp_e, _) in s.authorized {
+        if att == s.head.origin_attempt && exp_e + 1 == s.head.epoch {
+            return true
+        }
+    }
+    false
+}
+
+fn show_reg_action(a: RegAction, mut out: String) {
+    match a {
+        Init => string.push(mut out, "Init"),
+        AuthPermit(node) => {
+            string.push(mut out, "AuthPermit(")
+            string.push_u64(mut out, node)
+            string.push(mut out, ")")
+        },
+        SpawnContinue(node) => {
+            string.push(mut out, "SpawnContinue(")
+            string.push_u64(mut out, node)
+            string.push(mut out, ")")
+        },
+        ExecCas(idx) => {
+            string.push(mut out, "ExecCas(")
+            string.push_u64(mut out, idx)
+            string.push(mut out, ")")
+        },
+        ReadSettle => string.push(mut out, "ReadSettle"),
+    }
+}
+
+fn reg_always() -> List[std.model.Always[RegState, RegAction]] {
+    let mut laws: List[std.model.Always[RegState, RegAction]] = list.new()
+    list.push(mut laws, std.model.Always(label: string.from("O4 origin_epoch == head.epoch"), holds: inv_origin_epoch_matches_head))
+    list.push(mut laws, std.model.Always(label: string.from("unique holder per epoch"), holds: inv_unique_holder_per_epoch))
+    list.push(mut laws, std.model.Always(label: string.from("Rule F1 shared expect"), holds: inv_rule_f1_shared_expect))
+    list.push(mut laws, std.model.Always(label: string.from("Permit winner was authorized"), holds: inv_permit_winner_authorized))
+    take laws
+}
+
+fn reg_sometimes() -> List[std.model.Sometimes[RegState]] {
+    let mut w: List[std.model.Sometimes[RegState]] = list.new()
+    list.push(mut w, std.model.Sometimes(label: string.from("reached moved epoch"), holds: fn(s: RegState) -> bool {
+        s.head.epoch >= 2 && s.head.permit_attempt > 0
+    }))
+    list.push(mut w, std.model.Sometimes(label: string.from("continue preserved permit_attempt"), holds: fn(s: RegState) -> bool {
+        s.head.origin_class == CLASS_CONTINUE && s.head.permit_attempt > 0 && s.head.epoch > s.head.permit_epoch
+    }))
+    take w
+}
+
+pub fn register_model(max_epoch: u64, max_nodes: u64) -> std.model.Model[RegState, RegAction] {
+    let mut init: List[RegState] = list.new()
+    list.push(mut init, initial_state(max_epoch, max_nodes))
+    std.model.Model(
+        init: take init,
+        start: Init,
+        actions: reg_actions,
+        step: reg_step,
+        done: fn(s: RegState) -> bool {
+            s.head.epoch == s.max_epoch && list.len(s.open_permits) == 0 && list.len(s.inflight) == 0
+        },
+        always: reg_always(),
+        sometimes: reg_sometimes(),
+        show: show_reg_action,
+    )
+}
+
+fn label_action(act: RegAction) -> RegLabel {
+    match act {
+        Init => LAuth,
+        AuthPermit(_) => LAuth,
+        SpawnContinue(_) => LAuth,
+        ExecCas(_) => LCasWon,
+        ReadSettle => LSettleWon,
+    }
+}
+
+fn observe_transition(prev: RegState, act: RegAction, next: RegState) -> Option[RegObs] {
+    match act {
+        Init => None,
+        AuthPermit(_) => {
+            let p = next.open_permits[list.len(next.open_permits) - 1]
+            Some(RegObs(epoch: p.expect_epoch, attempt: p.attempt, permit_attempt: prev.head.permit_attempt, class: CLASS_PERMIT))
+        },
+        SpawnContinue(_) => None,
+        ExecCas(_) => {
+            if next.head.epoch > prev.head.epoch {
+                Some(RegObs(epoch: next.head.epoch, attempt: next.head.origin_attempt, permit_attempt: next.head.permit_attempt, class: next.head.origin_class))
+            } else {
+                None
+            }
+        },
+        ReadSettle => {
+            let mut won = false
+            for p in prev.open_permits {
+                if prev.head.permit_attempt == p.attempt {
+                    won = true
+                }
+            }
+            let cls = if won {
+                CLASS_PERMIT
+            } else {
+                CLASS_CONTINUE
+            }
+            Some(RegObs(epoch: next.head.epoch, attempt: next.head.origin_attempt, permit_attempt: next.head.permit_attempt, class: cls))
+        },
+    }
+}
+
+fn show_obs(l: RegLabel, o: RegObs, mut out: String) {
+    string.push(mut out, match l {
+        LAuth => "Auth",
+        LCasWon => "CasWon",
+        LCasSuperseded => "CasSuperseded",
+        LSettleWon => "SettleWon",
+        LSettleDead => "SettleDead",
+    })
+    string.push(mut out, "(epoch=")
+    string.push_u64(mut out, o.epoch)
+    string.push(mut out, ", att=")
+    string.push_u64(mut out, o.attempt)
+    string.push(mut out, ", perm=")
+    string.push_u64(mut out, o.permit_attempt)
+    string.push(mut out, ")")
+}
+
+pub fn reg_boundary() -> std.model.Boundary[RegState, RegAction, RegLabel, RegObs] {
+    std.model.Boundary(label: label_action, observe: observe_transition, show: show_obs)
+}
+
+pub fn check_model_bfs(max_epoch: u64, max_nodes: u64) -> Result[(), ()] {
+    let bounds = std.model.Bounds(depth: 16, states: 4000, step_steps: 200000, step_bytes: 16777216)
+    let outcome = std.model.explore(register_model(max_epoch, max_nodes), bounds)
+    match outcome {
+        Closed(_) => Ok(()),
+        ToDepth(_, _) => Ok(()),
+        Failed(_) => Error(()),
+    }
+}
+
+pub fn check_trace_conforms(max_epoch: u64, max_nodes: u64, trace: List[std.model.Seen[RegLabel, RegObs]]) -> Result[(), ()] {
+    let bounds = std.model.Bounds(depth: 12, states: 4000, step_steps: 200000, step_bytes: 16777216)
+    std.model.conforms_check(register_model(max_epoch, max_nodes), bounds, reg_boundary(), trace)
+}

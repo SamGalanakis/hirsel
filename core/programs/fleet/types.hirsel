@@ -1,0 +1,119 @@
+// Per-Place move-authorization kernel types (docs/spec/fleet.md FLT-2, FLT-7).
+// All types are `codec` (K4) and carry declared collection bounds (K3).
+pub const MAX_OPEN_PERMITS: u64 = 2
+
+pub const MAX_OUTBOX: u64 = 8
+
+pub const MAX_HISTORY: u64 = 16
+
+pub const MAX_KEYS: u64 = 8
+
+pub const BARRIER_WINDOW_MS: u64 = 6000
+
+pub const ORIGIN_WIRE_BYTES: u64 = 49
+
+/// 128-bit identifier for holders and attempt IDs (16 wire bytes, little-endian).
+pub type Id16: codec + key + send {
+    lo: u64,
+    hi: u64
+}
+
+pub fn id16_zero() -> Id16 {
+    Id16(lo: 0, hi: 0)
+}
+
+pub fn id16_from_u64(n: u64) -> Id16 {
+    Id16(lo: n, hi: 0)
+}
+
+/// The `(epoch, holder)` identity of an objects@1 head.
+pub type HeadPair: codec + key + send {
+    epoch: u64,
+    holder: Id16
+}
+
+/// Classification of a claim recorded in `ORIGIN` (FLT-2).
+pub type ClaimClass: codec + key + send = Permit | Continue | Adopt
+
+/// Precondition checked before any write on every non-genesis writer open.
+pub type ClaimAuth: codec + key + send {
+    expect: Option[HeadPair],
+    attempt: Id16,
+    class: ClaimClass
+}
+
+/// 49-byte `ORIGIN` head frame (`MUST = 1`), installed atomically with `H`.
+pub type OriginFrame: codec + key + send {
+    epoch: u64,
+    attempt: Id16,
+    class: ClaimClass,
+    permit_epoch: u64,
+    permit_attempt: Id16
+}
+
+/// Read-only view of an objects@1 head for settlement (no writer open, no tail read).
+pub type HeadView: codec + key + send {
+    pair: HeadPair,
+    origin: Option[OriginFrame]
+}
+
+/// Read-only settlement verdict for an open permit row (FLT-2).
+pub type Settlement: codec + key + send = SettledOpen | SettledWon(u64) | SettledDead(HeadPair)
+
+/// Durable write-ahead permit row persisted before sending a move command (K11).
+pub type PermitRow: codec + key + send {
+    attempt: Id16,
+    expect: HeadPair,
+    target_node: u64,
+    target_incarnation: u64,
+    generation: u64,
+    is_recovery: bool
+}
+
+/// Scoped takeover barrier for this Place (FLT-4).
+pub type BarrierState: codec + key + send = BarrierClear | BarrierPending(u64, u64)
+
+/// Outbox commands released only after atomic commit of state + outbox (K11).
+pub type OutboxCmd: codec + key + send = IssueClaim(u64, u64, u64, ClaimAuth) | ProbeIncumbent(u64, u64) | ReadHead(u64) | ParkDeposed(u64, HeadPair)
+
+pub type OutboxEntry: codec + key + send {
+    id: u64,
+    cmd: OutboxCmd
+}
+
+/// Typed logical timers; timeouts arrive only as Events (K5).
+pub type TimerId: codec + key + send = BarrierWindow(u64) | ClaimSettlement(Id16)
+
+/// All sink outcomes returned to the kernel as typed events (K13).
+pub type SinkOutcome: codec + key + send = ClaimWon(HeadView) | ClaimLost | ClaimSuperseded(HeadPair) | ClaimHeld | ClaimRefused | ClaimUndecided | ClaimDeposed(HeadPair)
+
+/// Entity/budget read-set keys selected by pure `keys(Event)` (K12).
+pub type Key: codec + key + send = PlaceKey(u64) | PermitKey(u64, Id16) | NodeKey(u64) | BudgetKey(u64)
+
+/// Ghost / refinement observation channel (K6).
+pub type Obs: codec + key + send = ObsMoveAuthorized(Id16, HeadPair, u64) | ObsRecoveryAuthorized(Id16, HeadPair, u64) | ObsMoveRefused(u64) | ObsSettledWon(Id16, u64, HeadPair) | ObsSettledDead(Id16, HeadPair) | ObsSettledOpen(Id16, HeadPair) | ObsBarrierEntered(u64, u64) | ObsBarrierCleared(u64) | ObsFreezeChanged(bool) | ObsDesiredUpdated(u64, u64) | ObsDeposed(u64, HeadPair) | ObsOutcomeIgnored(Id16) | ObsCrashRecovered(u64) | ObsBoundExhausted | ObsLocalRestart(u64, HeadPair)
+
+/// Actions emitted by `step`; the shell owns all I/O and step budgets (K1, K3, K11).
+pub type Action: codec + key + send = PersistState | EmitOutbox(OutboxEntry) | ArmTimer(TimerId, u64) | Observe(Obs)
+
+/// Total input events covering requests, desired-state edits, takeover, outcomes, timers and faults (K5, K13).
+pub type Event: codec + key + send = RequestMove(u64, u64, u64, u64) | RequestRecovery(u64, u64, u64, u64) | DesiredEdit(u64, u64) | ControllerTakeover(u64, u64, HeadView) | IncumbentProbeOk(u64, u64, HeadView, u64) | DisruptionFreeze(bool) | HeadRead(HeadView) | ClaimOutcome(Id16, SinkOutcome) | LocalRestartObserved(u64, u64, HeadView) | Tick(u64) | Timeout(TimerId) | Duplicate(u64) | WrongIncarnation(u64, u64, u64) | LateUnknownId(Id16) | Crash | Restart | BoundExhausted
+
+/// Bounded per-Place move-authorization state (K3, K4).
+pub type State: codec + key + send {
+    place_id: u64,
+    controller_epoch: u64,
+    incumbent_node: u64,
+    incumbent_incarnation: u64,
+    desired_node: u64,
+    desired_generation: u64,
+    known_head: HeadView,
+    barrier: BarrierState,
+    frozen: bool,
+    next_attempt_seq: u64,
+    next_outbox_id: u64,
+    open_permits: List[PermitRow],
+    outbox: List[OutboxEntry],
+    settled_attempts: List[Id16],
+    crashed: bool
+}

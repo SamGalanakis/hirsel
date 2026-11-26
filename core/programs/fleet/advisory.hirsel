@@ -1,0 +1,106 @@
+// K10 CALM advisory state kernel: monotone join-semilattice for volatile heartbeats
+// and per-key range route generations. Strictly separated from fenced move authority.
+pub const MAX_ADVISORY_ENTRIES: u64 = 64
+
+pub type RouteEntry: codec + key + send {
+    range_id: u64,
+    generation: u64,
+    owner_node: u64
+}
+
+pub type AdvisoryState: codec + send {
+    issuer_epoch: u64,
+    seq: u64,
+    heartbeats: Map[u64, u64],
+    routes: Map[u64, RouteEntry]
+}
+
+pub fn empty_advisory() -> AdvisoryState {
+    AdvisoryState(issuer_epoch: 0, seq: 0, heartbeats: map.new(), routes: map.new())
+}
+
+/// Monotone range-merge generation rule (FLT-4): max(parent_a, parent_b) + 1.
+pub fn merged_range_generation(parent_a: u64, parent_b: u64) -> u64 {
+    order.max(parent_a, parent_b) + 1
+}
+
+fn route_join(a: RouteEntry, b: RouteEntry) -> RouteEntry {
+    if b.generation > a.generation {
+        b
+    } else if a.generation > b.generation {
+        a
+    } else if b.owner_node > a.owner_node {
+        b
+    } else {
+        a
+    }
+}
+
+/// Join-semilattice merge: associative, commutative and idempotent.
+pub fn merge(a: AdvisoryState, b: AdvisoryState) -> AdvisoryState {
+    let issuer_epoch = order.max(a.issuer_epoch, b.issuer_epoch)
+    let seq = if a.issuer_epoch > b.issuer_epoch {
+        a.seq
+    } else if b.issuer_epoch > a.issuer_epoch {
+        b.seq
+    } else {
+        order.max(a.seq, b.seq)
+    }
+    let mut heartbeats: Map[u64, u64] = clone(a.heartbeats)
+    for (node, beat) in b.heartbeats {
+        let existing: Option[u64] = match map.get(heartbeats, node) {
+            Some(v) => Some(v),
+            None => None,
+        }
+        match existing {
+            Some(prev) => {
+                if beat > prev {
+                    map.insert(mut heartbeats, node, beat)
+                }
+            },
+            None => {
+                if map.len(heartbeats) < MAX_ADVISORY_ENTRIES {
+                    map.insert(mut heartbeats, node, beat)
+                }
+            },
+        }
+    }
+    let mut routes: Map[u64, RouteEntry] = clone(a.routes)
+    for (range_id, entry) in b.routes {
+        let existing: Option[RouteEntry] = match map.get(routes, range_id) {
+            Some(v) => Some(v),
+            None => None,
+        }
+        match existing {
+            Some(prev) => map.insert(mut routes, range_id, route_join(prev, entry)),
+            None => {
+                if map.len(routes) < MAX_ADVISORY_ENTRIES {
+                    map.insert(mut routes, range_id, entry)
+                }
+            },
+        }
+    }
+    AdvisoryState(issuer_epoch: issuer_epoch, seq: seq, heartbeats: take heartbeats, routes: take routes)
+}
+
+pub fn equal(a: AdvisoryState, b: AdvisoryState) -> bool {
+    if a.issuer_epoch != b.issuer_epoch || a.seq != b.seq {
+        return false
+    }
+    if map.len(a.heartbeats) != map.len(b.heartbeats) || map.len(a.routes) != map.len(b.routes) {
+        return false
+    }
+    for (k, v) in a.heartbeats {
+        match map.get(b.heartbeats, k) {
+            Some(bv) if bv == v => {},
+            _ => return false,
+        }
+    }
+    for (k, v) in a.routes {
+        match map.get(b.routes, k) {
+            Some(bv) if bv == v => {},
+            _ => return false,
+        }
+    }
+    true
+}

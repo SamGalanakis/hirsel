@@ -1,0 +1,21 @@
+[package]
+name = "fleet"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"types.hirsel" = "move_kernel"
+"origin_wire.hirsel" = "move_kernel"
+"move_kernel.hirsel" = "move_kernel"
+"advisory.hirsel" = "advisory"
+
+[tests]
+limit = 67108864
+grants = ["Tasks"]
+
+[tests.sources]
+"register_model.hirsel" = "register_model"
+"laws.hirsel" = "laws"

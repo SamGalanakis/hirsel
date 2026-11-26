@@ -1,0 +1,274 @@
+// Laws for fleet@1 move_kernel, advisory lattice (K10), and independent concurrent register model (K8).
+type MockRegister {
+    head: move_kernel.HeadView,
+    next_holder: u64,
+    epoch_holders: Map[u64, move_kernel.Id16]
+}
+
+fn mock_register_genesis() -> MockRegister {
+    let h1 = move_kernel.id16_from_u64(1)
+    let orig = move_kernel.OriginFrame(epoch: 1, attempt: move_kernel.id16_zero(), class: Adopt, permit_epoch: 0, permit_attempt: move_kernel.id16_zero())
+    let head = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch: 1, holder: h1), origin: Some(orig))
+    let mut holders: Map[u64, move_kernel.Id16] = map.new()
+    map.insert(mut holders, 1u64, h1)
+    MockRegister(head: head, next_holder: 2, epoch_holders: take holders)
+}
+
+// Simulates an objects@1 head CAS with ClaimAuth precondition checked before any write.
+// Always draws a fresh unique holder per physical open (FLT-2).
+fn mock_cas(mut reg: MockRegister, auth: move_kernel.ClaimAuth) -> Result[move_kernel.HeadView, move_kernel.HeadPair] {
+    let Some(expected) = auth.expect else {
+        fail("fleet law: non-genesis automatic open must carry expect pair")
+    }
+    if expected != reg.head.pair {
+        return Error(reg.head.pair)
+    }
+    let fresh_holder = move_kernel.id16_from_u64(reg.next_holder)
+    reg.next_holder += 1
+    let new_epoch = reg.head.pair.epoch + 1
+    let next_orig = move_kernel.next_origin(reg.head.origin, new_epoch, auth.attempt, auth.class)
+    let next_head = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch: new_epoch, holder: fresh_holder), origin: Some(next_orig))
+    if map.contains(reg.epoch_holders, new_epoch) {
+        fail("fleet law: duplicate holder installed at same epoch")
+    }
+    map.insert(mut reg.epoch_holders, new_epoch, fresh_holder)
+    reg.head = next_head
+    Ok(next_head)
+}
+
+fn find_issued_claim(actions: List[move_kernel.Action]) -> Option[move_kernel.ClaimAuth] {
+    for act in actions {
+        if let EmitOutbox(entry) = act {
+            if let IssueClaim(_, _, _, auth) = entry.cmd {
+                return Some(auth)
+            }
+        }
+    }
+    None
+}
+
+/// bug: Encode or decode ORIGIN with wrong byte count, class tag, or O4 epoch mismatch acceptance.
+/// oracle: docs/spec/fleet.md FLT-2 49-byte wire layout and rules O3/O4.
+@test
+fn origin_wire_49_bytes_and_o3_o4() -> Result[(), ()] {
+    let permit_att = move_kernel.Id16(lo: 42, hi: 7)
+    let p_orig = move_kernel.next_origin(None, 2, permit_att, Permit)
+    let raw = move_kernel.encode_origin_wire(p_orig)
+    if list.len(raw) != 49 {
+        fail("ORIGIN wire frame must be exactly 49 bytes")
+    }
+    let decoded = result.unwrap(move_kernel.decode_origin_wire(raw, 2))
+    if decoded != p_orig || decoded.permit_epoch != 2 || decoded.permit_attempt != permit_att {
+        fail("ORIGIN Permit decode mismatch")
+    }
+    if let Error(EpochMismatch(2, 3)) = move_kernel.decode_origin_wire(raw, 3) {} else {
+        fail("O4: decode_origin_wire accepted epoch mismatch")
+    }
+    let cont_att = move_kernel.Id16(lo: 99, hi: 1)
+    let c_orig = move_kernel.next_origin(Some(p_orig), 3, cont_att, Continue)
+    if c_orig.epoch != 3 || c_orig.attempt != cont_att || c_orig.permit_epoch != 2 || c_orig.permit_attempt != permit_att {
+        fail("O3: Continue must copy permit_epoch and permit_attempt")
+    }
+    let raw_c = move_kernel.encode_origin_wire(c_orig)
+    if list.len(raw_c) != 49 || result.unwrap(move_kernel.decode_origin_wire(raw_c, 3)) != c_orig {
+        fail("ORIGIN Continue wire round-trip failed")
+    }
+    Ok(())
+}
+
+/// bug: Allow a stale A->B move, a deposed local retry, or a janitor Continue to steal a newer epoch, or fail to settle a lost H reply before CLAIM.
+/// oracle: docs/spec/fleet.md FLT-2 three stale-open races and lost-H settlement.
+@test
+fn move_kernel_closes_three_stale_races_and_lost_h() -> Result[(), ()] {
+    let mut reg = mock_register_genesis()
+    let mut st = move_kernel.init_state(10, 1, 1, 1, reg.head)
+    let (st1, acts1) = move_kernel.step(take st, RequestMove(2, 1, 1, 1))
+    st = take st1
+    let Some(auth_b) = find_issued_claim(acts1) else {
+        fail("expected primary ClaimAuth for B")
+    }
+    let (st2, acts2) = move_kernel.step(take st, RequestRecovery(3, 1, 1, 1))
+    st = take st2
+    let Some(auth_c) = find_issued_claim(acts2) else {
+        fail("expected recovery ClaimAuth for C")
+    }
+    if auth_b.expect != auth_c.expect {
+        fail("Rule F1 violated: recovery contender has different expect")
+    }
+    // Race 1 (delayed A->B after C wins): C executes CAS first; B's delayed CAS MUST be Superseded.
+    let head_c = result.unwrap(mock_cas(mut reg, auth_c))
+    if let Error(actual) = mock_cas(mut reg, auth_b) {
+        if actual != head_c.pair {
+            fail("delayed B must observe C's head pair on Superseded")
+        }
+    } else {
+        fail("delayed A->B stole epoch from C")
+    }
+    // Lost H reply before CLAIM: C reports ClaimUndecided; single read-only HeadRead settles C Won and B Dead.
+    let (st3, _) = move_kernel.step(take st, ClaimOutcome(auth_c.attempt, ClaimUndecided))
+    st = take st3
+    if list.len(st.open_permits) != 2 {
+        fail("ClaimUndecided must keep permits open until HeadRead settles")
+    }
+    let (st4, _) = move_kernel.step(take st, HeadRead(reg.head))
+    st = take st4
+    if list.len(st.open_permits) != 0 || st.incumbent_node != 3 || st.known_head.pair != head_c.pair {
+        fail("read-only HeadRead failed to settle lost-H move to C")
+    }
+    // Race 2 (deposed local retry duel): deposed A(1) retries Continue naming epoch 1 -> Superseded.
+    let deposed_retry = move_kernel.ClaimAuth(expect: Some(move_kernel.HeadPair(epoch: 1, holder: move_kernel.id16_from_u64(1))), attempt: move_kernel.id16_from_u64(77), class: Continue)
+    if let Error(_) = mock_cas(mut reg, deposed_retry) {} else {
+        fail("deposed local retry succeeded against newer epoch")
+    }
+    // Race 3 (janitor claiming back moved Place): A's in-flight janitor names epoch 1 Continue -> Superseded.
+    let janitor_claim = move_kernel.ClaimAuth(expect: Some(move_kernel.HeadPair(epoch: 1, holder: move_kernel.id16_from_u64(1))), attempt: move_kernel.id16_from_u64(88), class: Continue)
+    if let Error(_) = mock_cas(mut reg, janitor_claim) {} else {
+        fail("in-flight janitor claimed back moved Place")
+    }
+    // C's own local Continue restart copies permit_attempt (O3) and preserves settlement lineage.
+    let c_restart = move_kernel.ClaimAuth(expect: Some(reg.head.pair), attempt: move_kernel.id16_from_u64(99), class: Continue)
+    let head_c2 = result.unwrap(mock_cas(mut reg, c_restart))
+    let Some(orig_c2) = head_c2.origin else {
+        fail("missing ORIGIN after C Continue")
+    }
+    if orig_c2.permit_attempt != auth_c.attempt || orig_c2.permit_epoch != 2 || head_c2.pair.epoch != 3 {
+        fail("O3 violated on C Continue restart")
+    }
+    Ok(())
+}
+
+/// bug: Authorize a move during scoped takeover barrier, during disruption freeze, or release actions on BoundExhausted.
+/// oracle: docs/spec/fleet.md FLT-4 scoped barrier, disruption breaker, and K11-K13 total outcomes.
+@test
+fn barrier_freeze_codec_keys_and_k13_outcomes() -> Result[(), ()] {
+    let reg = mock_register_genesis()
+    let mut st = move_kernel.init_state(42, 1, 1, 1, reg.head)
+    let ks = move_kernel.keys(42, RequestMove(2, 1, 1, 9))
+    if list.len(ks) != 3 || list.len(ks) > move_kernel.MAX_KEYS {
+        fail("K12 keys(RequestMove) count wrong")
+    }
+    let c_state: std.codec.Codec[move_kernel.State] = std.codec.of()
+    let mut buf: Bytes = list.new()
+    result.unwrap(std.codec.encode(c_state, st, mut buf))
+    let decoded_state = result.unwrap(std.codec.decode(c_state, buf))
+    if decoded_state != st {
+        fail("K4 State codec round-trip failed")
+    }
+    let (st1, _) = move_kernel.step(take st, ControllerTakeover(2, 1, reg.head))
+    st = take st1
+    let (st2, acts2) = move_kernel.step(take st, RequestMove(2, 1, 1, 1))
+    st = take st2
+    if list.len(st.open_permits) != 0 || find_issued_claim(acts2) != None {
+        fail("move authorized while scoped takeover barrier pending")
+    }
+    let (st3, _) = move_kernel.step(take st, IncumbentProbeOk(1, 1, reg.head, 1))
+    st = take st3
+    if st.barrier == BarrierClear {
+        fail("stale controller cleared barrier")
+    }
+    let (st4, _) = move_kernel.step(take st, IncumbentProbeOk(1, 1, reg.head, 2))
+    st = take st4
+    let (st5, _) = move_kernel.step(take st, DisruptionFreeze(true))
+    st = take st5
+    let (st6, acts6) = move_kernel.step(take st, RequestMove(2, 1, 1, 1))
+    st = take st6
+    if list.len(st.open_permits) != 0 || find_issued_claim(acts6) != None {
+        fail("move authorized while disruption circuit breaker frozen")
+    }
+    let before: move_kernel.State = clone(st)
+    let (st7, acts7) = move_kernel.step(take st, BoundExhausted)
+    if st7 != before || list.len(acts7) != 1 {
+        fail("K13 BoundExhausted mutated state or emitted actions")
+    }
+    if let Observe(ObsBoundExhausted) = acts7[0] {} else {
+        fail("K13 BoundExhausted must emit only Observe(ObsBoundExhausted)")
+    }
+    let (st8, _) = move_kernel.step(take st7, DisruptionFreeze(false))
+    let (st9, _) = move_kernel.step(take st8, RequestMove(2, 1, 1, 1))
+    let (st10, _) = move_kernel.step(take st9, Crash)
+    let (st11, acts11) = move_kernel.step(take st10, Restart)
+    if st11.crashed || find_issued_claim(acts11) == None {
+        fail("K11 Restart did not replay durable outbox")
+    }
+    Ok(())
+}
+
+/// bug: Violate join-semilattice commutativity, associativity or idempotence in K10 advisory state.
+/// oracle: docs/spec/fleet.md FLT-4 range generation merge and K10 CALM lattice laws.
+@test
+fn advisory_k10_lattice_laws() -> Result[(), ()] {
+    let mut a = advisory.empty_advisory()
+    a.issuer_epoch = 2
+    a.seq = 5
+    map.insert(mut a.heartbeats, 1u64, 100u64)
+    map.insert(mut a.routes, 10u64, advisory.RouteEntry(range_id: 10, generation: 3, owner_node: 1))
+    let mut b = advisory.empty_advisory()
+    b.issuer_epoch = 2
+    b.seq = 9
+    map.insert(mut b.heartbeats, 1u64, 80u64)
+    map.insert(mut b.heartbeats, 2u64, 200u64)
+    map.insert(mut b.routes, 10u64, advisory.RouteEntry(range_id: 10, generation: 4, owner_node: 2))
+    let mut c = advisory.empty_advisory()
+    c.issuer_epoch = 3
+    c.seq = 1
+    map.insert(mut c.heartbeats, 2u64, 250u64)
+    map.insert(mut c.routes, 10u64, advisory.RouteEntry(range_id: 10, generation: 2, owner_node: 3))
+    if !advisory.equal(advisory.merge(a, a), a) {
+        fail("K10 merge not idempotent")
+    }
+    if !advisory.equal(advisory.merge(a, b), advisory.merge(b, a)) {
+        fail("K10 merge not commutative")
+    }
+    if !advisory.equal(advisory.merge(advisory.merge(a, b), c), advisory.merge(a, advisory.merge(b, c))) {
+        fail("K10 merge not associative")
+    }
+    if advisory.merged_range_generation(4, 7) != 8 || advisory.merged_range_generation(7, 4) != 8 {
+        fail("FLT-4 range merge generation rule wrong")
+    }
+    Ok(())
+}
+
+/// bug: Diverge between move_kernel execution and the independent concurrent register model (K8).
+/// oracle: Exhaustive BFS of register_model plus std.model.conforms_check over real move_kernel traces.
+@test
+fn register_model_bfs_and_kernel_conforms() -> Result[(), ()] {
+    // 1. Exhaustive BFS check of independent concurrent register model (3 nodes, epochs 1..4).
+    result.unwrap(register_model.check_model_bfs(4, 3))
+    // 2. Drive real move_kernel.step against MockRegister and verify trace conformance against the independent model.
+    let mut reg = mock_register_genesis()
+    let mut st = move_kernel.init_state(1, 1, 1, 1, reg.head)
+    let mut trace: List[std.model.Seen[register_model.RegLabel, register_model.RegObs]] = list.new()
+    // Step A: Authorize move 1 -> 2 at epoch 1 (attempt 1).
+    let (st1, acts1) = move_kernel.step(take st, RequestMove(2, 1, 1, 1))
+    st = take st1
+    let Some(auth1) = find_issued_claim(acts1) else {
+        fail("missing ClaimAuth 1")
+    }
+    list.push(mut trace, std.model.Seen(hint: LAuth, seen: register_model.RegObs(epoch: 1, attempt: auth1.attempt.lo, permit_attempt: 0, class: register_model.CLASS_PERMIT)))
+    // Step B: Execute CAS on MockRegister -> installs epoch 2.
+    let h2 = result.unwrap(mock_cas(mut reg, auth1))
+    list.push(mut trace, std.model.Seen(hint: LCasWon, seen: register_model.RegObs(epoch: h2.pair.epoch, attempt: auth1.attempt.lo, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_PERMIT)))
+    // Step C: Read-only settlement via HeadRead -> settles Won.
+    let (st2, _) = move_kernel.step(take st, HeadRead(h2))
+    st = take st2
+    list.push(mut trace, std.model.Seen(hint: LSettleWon, seen: register_model.RegObs(epoch: h2.pair.epoch, attempt: auth1.attempt.lo, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_PERMIT)))
+    // Step D: Incumbent 2 performs a Continue restart (attempt 1001) -> epoch 3 preserving permit_attempt=1.
+    let cont_auth = move_kernel.ClaimAuth(expect: Some(h2.pair), attempt: move_kernel.id16_from_u64(1001), class: Continue)
+    let h3 = result.unwrap(mock_cas(mut reg, cont_auth))
+    let (st3, _) = move_kernel.step(take st, LocalRestartObserved(2, 2, h3))
+    st = take st3
+    list.push(mut trace, std.model.Seen(hint: LCasWon, seen: register_model.RegObs(epoch: h3.pair.epoch, attempt: 1001, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_CONTINUE)))
+    // Step E: Authorize move 2 -> 3 at epoch 3 (attempt 2), execute CAS -> epoch 4, settle Won.
+    let (st4, acts4) = move_kernel.step(take st, RequestMove(3, 1, 2, 1))
+    st = take st4
+    let Some(auth2) = find_issued_claim(acts4) else {
+        fail("missing ClaimAuth 2")
+    }
+    list.push(mut trace, std.model.Seen(hint: LAuth, seen: register_model.RegObs(epoch: 3, attempt: auth2.attempt.lo, permit_attempt: auth1.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let h4 = result.unwrap(mock_cas(mut reg, auth2))
+    list.push(mut trace, std.model.Seen(hint: LCasWon, seen: register_model.RegObs(epoch: h4.pair.epoch, attempt: auth2.attempt.lo, permit_attempt: auth2.attempt.lo, class: register_model.CLASS_PERMIT)))
+    let _ = move_kernel.step(take st, HeadRead(h4))
+    list.push(mut trace, std.model.Seen(hint: LSettleWon, seen: register_model.RegObs(epoch: h4.pair.epoch, attempt: auth2.attempt.lo, permit_attempt: auth2.attempt.lo, class: register_model.CLASS_PERMIT)))
+    result.unwrap(register_model.check_trace_conforms(4, 3, trace))
+    Ok(())
+}

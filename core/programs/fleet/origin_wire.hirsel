@@ -1,0 +1,98 @@
+// Exact 49-byte wire encoding/decoding for the `ORIGIN` head frame (`MUST = 1`, FLT-2).
+// Layout (little-endian):
+//   epoch          u64   (8 bytes)
+//   attempt        Id16  (16 bytes: lo u64, hi u64)
+//   class          u8    (1 byte: 0 = Permit, 1 = Continue, 2 = Adopt)
+//   permit_epoch   u64   (8 bytes)
+//   permit_attempt Id16  (16 bytes: lo u64, hi u64)
+pub type OriginWireError: codec + key + send = BadLength(u64) | BadClass(u8) | EpochMismatch(u64, u64)
+
+fn push_u64_le(mut out: Bytes, v: u64) {
+    list.push(mut out, int.truncate(v & 0xff))
+    list.push(mut out, int.truncate((v >> 8) & 0xff))
+    list.push(mut out, int.truncate((v >> 16) & 0xff))
+    list.push(mut out, int.truncate((v >> 24) & 0xff))
+    list.push(mut out, int.truncate((v >> 32) & 0xff))
+    list.push(mut out, int.truncate((v >> 40) & 0xff))
+    list.push(mut out, int.truncate((v >> 48) & 0xff))
+    list.push(mut out, int.truncate((v >> 56) & 0xff))
+}
+
+fn read_u64_le(b: Bytes, at: u64) -> u64 {
+    let b0: u64 = int.widen(b[at])
+    let b1: u64 = int.widen(b[at + 1])
+    let b2: u64 = int.widen(b[at + 2])
+    let b3: u64 = int.widen(b[at + 3])
+    let b4: u64 = int.widen(b[at + 4])
+    let b5: u64 = int.widen(b[at + 5])
+    let b6: u64 = int.widen(b[at + 6])
+    let b7: u64 = int.widen(b[at + 7])
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) | (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+}
+
+pub fn class_to_byte(c: ClaimClass) -> u8 {
+    match c {
+        Permit => 0u8,
+        Continue => 1u8,
+        Adopt => 2u8,
+    }
+}
+
+pub fn byte_to_class(tag: u8) -> Result[ClaimClass, OriginWireError] {
+    match tag {
+        0 => Ok(Permit),
+        1 => Ok(Continue),
+        2 => Ok(Adopt),
+        _ => Error(BadClass(tag)),
+    }
+}
+
+pub fn encode_origin_wire(frame: OriginFrame) -> Bytes {
+    let mut out: Bytes = list.with_capacity(ORIGIN_WIRE_BYTES)
+    push_u64_le(mut out, frame.epoch)
+    push_u64_le(mut out, frame.attempt.lo)
+    push_u64_le(mut out, frame.attempt.hi)
+    list.push(mut out, class_to_byte(frame.class))
+    push_u64_le(mut out, frame.permit_epoch)
+    push_u64_le(mut out, frame.permit_attempt.lo)
+    push_u64_le(mut out, frame.permit_attempt.hi)
+    take out
+}
+
+pub fn decode_origin_wire(raw: Bytes, head_epoch: u64) -> Result[OriginFrame, OriginWireError] {
+    if list.len(raw) != ORIGIN_WIRE_BYTES {
+        return Error(BadLength(list.len(raw)))
+    }
+    let epoch = read_u64_le(raw, 0)
+    if epoch != head_epoch {
+        return Error(EpochMismatch(epoch, head_epoch))
+    }
+    let attempt = Id16(lo: read_u64_le(raw, 8), hi: read_u64_le(raw, 16))
+    let class = byte_to_class(raw[24])?
+    let permit_epoch = read_u64_le(raw, 25)
+    let permit_attempt = Id16(lo: read_u64_le(raw, 33), hi: read_u64_le(raw, 41))
+    Ok(OriginFrame(epoch: epoch, attempt: attempt, class: class, permit_epoch: permit_epoch, permit_attempt: permit_attempt))
+}
+
+/// Rule O4: any head carrying ORIGIN must satisfy ORIGIN.epoch == HEAD.epoch.
+pub fn valid_head_view(head: HeadView) -> bool {
+    match head.origin {
+        None => true,
+        Some(orig) => orig.epoch == head.pair.epoch,
+    }
+}
+
+/// Rule O3: compute the next ORIGIN frame for a successful claim over `prev`.
+pub fn next_origin(prev: Option[OriginFrame], new_epoch: u64, attempt: Id16, class: ClaimClass) -> OriginFrame {
+    match class {
+        Permit => OriginFrame(epoch: new_epoch, attempt: attempt, class: Permit, permit_epoch: new_epoch, permit_attempt: attempt),
+        Continue => match prev {
+            Some(old) => OriginFrame(epoch: new_epoch, attempt: attempt, class: Continue, permit_epoch: old.permit_epoch, permit_attempt: old.permit_attempt),
+            None => OriginFrame(epoch: new_epoch, attempt: attempt, class: Continue, permit_epoch: 0, permit_attempt: id16_zero()),
+        },
+        Adopt => match prev {
+            Some(old) => OriginFrame(epoch: new_epoch, attempt: attempt, class: Adopt, permit_epoch: old.permit_epoch, permit_attempt: old.permit_attempt),
+            None => OriginFrame(epoch: new_epoch, attempt: attempt, class: Adopt, permit_epoch: 0, permit_attempt: id16_zero()),
+        },
+    }
+}

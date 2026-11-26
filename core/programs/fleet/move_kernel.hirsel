@@ -1,0 +1,462 @@
+// Pure per-Place move-authorization kernel (docs/spec/fleet.md FLT-2, FLT-3, FLT-4, FLT-7).
+// Strictly adheres to K1-K13:
+//   K1: no capability parameters, not `waits`, no tasks/channels/finalizers.
+//   K2: no indirect calls; enum dispatch only.
+//   K3: bounded collections in State; shell owns `bound steps` scopes.
+//   K4: all State/Event/Action/Key/Obs types are `codec`.
+//   K5: time enters only as `Tick` / `Timeout` events.
+//   K6: ghost state leaves via `Observe(Obs)`.
+//   K7: clock-free durable safety (`ClaimAuth` + `ORIGIN` + Rule F1).
+//   K11: state + outbox emitted for atomic persistence before release.
+//   K12: pure `keys(Event)` bounded read-set selector.
+//   K13: total outcome handling including exhaustion, duplicates and unknown IDs.
+/// Initial state for a tracked Place on `objects@1` after genesis.
+pub fn init_state(place_id: u64, controller_epoch: u64, incumbent_node: u64, incumbent_incarnation: u64, genesis_head: HeadView) -> State {
+    State(
+        place_id: place_id,
+        controller_epoch: controller_epoch,
+        incumbent_node: incumbent_node,
+        incumbent_incarnation: incumbent_incarnation,
+        desired_node: incumbent_node,
+        desired_generation: 0,
+        known_head: genesis_head,
+        barrier: BarrierClear,
+        frozen: false,
+        next_attempt_seq: 1,
+        next_outbox_id: 1,
+        open_permits: list.new(),
+        outbox: list.new(),
+        settled_attempts: list.new(),
+        crashed: false,
+    )
+}
+
+/// Read-only settlement of one permit against a fresh `HeadView` (FLT-2).
+pub fn settle_permit(permit: PermitRow, head: HeadView) -> Settlement {
+    if !valid_head_view(head) {
+        return SettledOpen
+    }
+    if head.pair == permit.expect {
+        return SettledOpen
+    }
+    if head.pair.epoch <= permit.expect.epoch {
+        return SettledOpen
+    }
+    match head.origin {
+        Some(orig) => {
+            if orig.permit_attempt == permit.attempt && orig.permit_epoch >= permit.expect.epoch + 1 {
+                SettledWon(orig.permit_epoch)
+            } else {
+                SettledDead(head.pair)
+            }
+        },
+        None => SettledDead(head.pair),
+    }
+}
+
+/// Pure K12 bounded read-set selector for an incoming Event.
+pub fn keys(place_id: u64, ev: Event) -> List[Key] {
+    let mut out: List[Key] = list.new()
+    list.push(mut out, PlaceKey(place_id))
+    match ev {
+        RequestMove(target_node, _, _, domain_id) => {
+            list.push(mut out, NodeKey(target_node))
+            list.push(mut out, BudgetKey(domain_id))
+        },
+        RequestRecovery(target_node, _, _, domain_id) => {
+            list.push(mut out, NodeKey(target_node))
+            list.push(mut out, BudgetKey(domain_id))
+        },
+        DesiredEdit(desired_node, _) => {
+            list.push(mut out, NodeKey(desired_node))
+        },
+        ControllerTakeover(_, incumbent_node, _) => {
+            list.push(mut out, NodeKey(incumbent_node))
+        },
+        IncumbentProbeOk(node, _, _, _) => {
+            list.push(mut out, NodeKey(node))
+        },
+        ClaimOutcome(attempt, _) => {
+            list.push(mut out, PermitKey(place_id, attempt))
+        },
+        LocalRestartObserved(node, _, _) => {
+            list.push(mut out, NodeKey(node))
+        },
+        WrongIncarnation(node, _, _) => {
+            list.push(mut out, NodeKey(node))
+        },
+        LateUnknownId(attempt) => {
+            list.push(mut out, PermitKey(place_id, attempt))
+        },
+        DisruptionFreeze(_) => {},
+        HeadRead(_) => {},
+        Tick(_) => {},
+        Timeout(_) => {},
+        Duplicate(_) => {},
+        Crash => {},
+        Restart => {},
+        BoundExhausted => {},
+    }
+    take out
+}
+
+fn push_settled_bounded(mut hist: List[Id16], attempt: Id16) {
+    if list.len(hist) >= MAX_HISTORY {
+        let _ = list.remove(mut hist, 0)
+    }
+    list.push(mut hist, attempt)
+}
+
+fn push_outbox_bounded(mut s: State, cmd: OutboxCmd, mut actions: List[Action]) -> bool {
+    if list.len(s.outbox) >= MAX_OUTBOX {
+        return false
+    }
+    let id = s.next_outbox_id
+    s.next_outbox_id += 1
+    let entry = OutboxEntry(id: id, cmd: cmd)
+    list.push(mut s.outbox, entry)
+    list.push(mut actions, EmitOutbox(entry))
+    true
+}
+
+fn clear_claim_outbox(mut outbox: List[OutboxEntry]) {
+    let mut kept: List[OutboxEntry] = list.new()
+    for entry in outbox {
+        match entry.cmd {
+            IssueClaim(_, _, _, _) => {},
+            _ => list.push(mut kept, entry),
+        }
+    }
+    outbox = take kept
+}
+
+fn clear_probe_outbox(mut outbox: List[OutboxEntry], ctrl_epoch: u64) {
+    let mut kept: List[OutboxEntry] = list.new()
+    for entry in outbox {
+        match entry.cmd {
+            ProbeIncumbent(_, ep) if ep == ctrl_epoch => {},
+            _ => list.push(mut kept, entry),
+        }
+    }
+    outbox = take kept
+}
+
+fn has_open_attempt(permits: List[PermitRow], attempt: Id16) -> Option[u64] {
+    for i in 0u64 .. list.len(permits) {
+        if permits[i].attempt == attempt {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn all_share_expect(permits: List[PermitRow], expect: HeadPair) -> bool {
+    for p in permits {
+        if p.expect != expect {
+            return false
+        }
+    }
+    true
+}
+
+fn next_attempt_id(mut s: State) -> Id16 {
+    let seq = s.next_attempt_seq
+    s.next_attempt_seq += 1
+    Id16(lo: seq, hi: s.place_id)
+}
+
+fn apply_head_read(mut s: State, head: HeadView, mut actions: List[Action]) {
+    if !valid_head_view(head) {
+        return
+    }
+    if head.pair.epoch < s.known_head.pair.epoch {
+        return
+    }
+    if head.pair.epoch > s.known_head.pair.epoch {
+        s.known_head = head
+    }
+    if list.len(s.open_permits) == 0 {
+        return
+    }
+    let mut won_idx: Option[u64] = None
+    let mut won_epoch: u64 = 0
+    let mut any_open = false
+    for i in 0u64 .. list.len(s.open_permits) {
+        let verdict = settle_permit(s.open_permits[i], head)
+        match verdict {
+            SettledWon(pe) => {
+                won_idx = Some(i)
+                won_epoch = pe
+            },
+            SettledOpen => {
+                any_open = true
+            },
+            SettledDead(_) => {},
+        }
+    }
+    match won_idx {
+        Some(winner_i) => {
+            let winner = s.open_permits[winner_i]
+            s.incumbent_node = winner.target_node
+            s.incumbent_incarnation = winner.target_incarnation
+            for i in 0u64 .. list.len(s.open_permits) {
+                let row = s.open_permits[i]
+                push_settled_bounded(mut s.settled_attempts, row.attempt)
+                if i == winner_i {
+                    list.push(mut actions, Observe(ObsSettledWon(row.attempt, won_epoch, head.pair)))
+                } else {
+                    list.push(mut actions, Observe(ObsSettledDead(row.attempt, head.pair)))
+                }
+            }
+            list.clear(mut s.open_permits)
+            clear_claim_outbox(mut s.outbox)
+            list.push(mut actions, PersistState)
+        },
+        None => {
+            if any_open {
+                for row in s.open_permits {
+                    list.push(mut actions, Observe(ObsSettledOpen(row.attempt, head.pair)))
+                }
+            } else {
+                for row in s.open_permits {
+                    push_settled_bounded(mut s.settled_attempts, row.attempt)
+                    list.push(mut actions, Observe(ObsSettledDead(row.attempt, head.pair)))
+                }
+                list.clear(mut s.open_permits)
+                clear_claim_outbox(mut s.outbox)
+                list.push(mut actions, PersistState)
+            }
+        },
+    }
+}
+
+fn handle_request_move(mut s: State, target_node: u64, target_incarnation: u64, generation: u64, mut actions: List[Action]) {
+    let barrier_ok = match s.barrier {
+        BarrierClear => true,
+        BarrierPending(_, _) => false,
+    }
+    if !barrier_ok || s.frozen || list.len(s.open_permits) != 0 || list.len(s.outbox) >= MAX_OUTBOX {
+        list.push(mut actions, Observe(ObsMoveRefused(target_node)))
+        return
+    }
+    if target_node == s.incumbent_node && target_incarnation == s.incumbent_incarnation {
+        list.push(mut actions, Observe(ObsMoveRefused(target_node)))
+        return
+    }
+    let expect = s.known_head.pair
+    let attempt = next_attempt_id(mut s)
+    let row = PermitRow(
+        attempt: attempt,
+        expect: expect,
+        target_node: target_node,
+        target_incarnation: target_incarnation,
+        generation: generation,
+        is_recovery: false,
+    )
+    list.push(mut s.open_permits, row)
+    let auth = ClaimAuth(expect: Some(expect), attempt: attempt, class: Permit)
+    let _ = push_outbox_bounded(mut s, IssueClaim(target_node, target_incarnation, generation, auth), mut actions)
+    list.push(mut actions, ArmTimer(ClaimSettlement(attempt), BARRIER_WINDOW_MS))
+    list.push(mut actions, Observe(ObsMoveAuthorized(attempt, expect, target_node)))
+    list.push(mut actions, PersistState)
+}
+
+fn handle_request_recovery(mut s: State, target_node: u64, target_incarnation: u64, generation: u64, mut actions: List[Action]) {
+    let barrier_ok = match s.barrier {
+        BarrierClear => true,
+        BarrierPending(_, _) => false,
+    }
+    if !barrier_ok || list.len(s.open_permits) != 1 || list.len(s.open_permits) >= MAX_OPEN_PERMITS || list.len(s.outbox) >= MAX_OUTBOX {
+        list.push(mut actions, Observe(ObsMoveRefused(target_node)))
+        return
+    }
+    let primary = s.open_permits[0]
+    if target_node == primary.target_node || !all_share_expect(s.open_permits, primary.expect) {
+        list.push(mut actions, Observe(ObsMoveRefused(target_node)))
+        return
+    }
+    // Rule F1: recovery contender shares the exact same `expect` pair.
+    let expect = primary.expect
+    let attempt = next_attempt_id(mut s)
+    let row = PermitRow(
+        attempt: attempt,
+        expect: expect,
+        target_node: target_node,
+        target_incarnation: target_incarnation,
+        generation: generation,
+        is_recovery: true,
+    )
+    list.push(mut s.open_permits, row)
+    let auth = ClaimAuth(expect: Some(expect), attempt: attempt, class: Permit)
+    let _ = push_outbox_bounded(mut s, IssueClaim(target_node, target_incarnation, generation, auth), mut actions)
+    list.push(mut actions, ArmTimer(ClaimSettlement(attempt), BARRIER_WINDOW_MS))
+    list.push(mut actions, Observe(ObsRecoveryAuthorized(attempt, expect, target_node)))
+    list.push(mut actions, PersistState)
+}
+
+fn handle_claim_outcome(mut s: State, attempt: Id16, outcome: SinkOutcome, mut actions: List[Action]) {
+    let Some(idx) = has_open_attempt(s.open_permits, attempt) else {
+        list.push(mut actions, Observe(ObsOutcomeIgnored(attempt)))
+        return
+    }
+    let target = s.open_permits[idx].target_node
+    let place_id = s.place_id
+    match outcome {
+        ClaimWon(head) => {
+            apply_head_read(mut s, head, mut actions)
+        },
+        ClaimSuperseded(actual) => {
+            let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+            list.push(mut actions, Observe(ObsDeposed(target, actual)))
+            list.push(mut actions, PersistState)
+        },
+        ClaimDeposed(actual) => {
+            let _ = push_outbox_bounded(mut s, ParkDeposed(target, actual), mut actions)
+            let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+            list.push(mut actions, Observe(ObsDeposed(target, actual)))
+            list.push(mut actions, PersistState)
+        },
+        ClaimUndecided => {
+            // Lost H reply before CLAIM: never cancel; settle via read-only HeadView GET.
+            let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+            list.push(mut actions, PersistState)
+        },
+        ClaimLost => {
+            let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+            list.push(mut actions, PersistState)
+        },
+        ClaimHeld => {
+            let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+            list.push(mut actions, PersistState)
+        },
+        ClaimRefused => {
+            let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+            list.push(mut actions, PersistState)
+        },
+    }
+}
+
+/// Pure per-Place move-authorization reducer `step(State, Event) -> (State, List[Action])`.
+pub fn step(state: State, ev: Event) -> (State, List[Action]) {
+    let mut actions: List[Action] = list.new()
+    if let BoundExhausted = ev {
+        // K3/K13: exhaustion before commit releases no state change and no outbox actions.
+        list.push(mut actions, Observe(ObsBoundExhausted))
+        return (clone(state), take actions)
+    }
+    let mut s: State = clone(state)
+    if s.crashed {
+        if let Restart = ev {
+            s.crashed = false
+            for entry in s.outbox {
+                list.push(mut actions, EmitOutbox(entry))
+            }
+            list.push(mut actions, Observe(ObsCrashRecovered(list.len(s.outbox))))
+            return (take s, take actions)
+        }
+        return (take s, take actions)
+    }
+    match ev {
+        RequestMove(target_node, target_incarnation, generation, _) => {
+            handle_request_move(mut s, target_node, target_incarnation, generation, mut actions)
+        },
+        RequestRecovery(target_node, target_incarnation, generation, _) => {
+            handle_request_recovery(mut s, target_node, target_incarnation, generation, mut actions)
+        },
+        DesiredEdit(desired_node, desired_generation) => {
+            if desired_generation > s.desired_generation {
+                s.desired_node = desired_node
+                s.desired_generation = desired_generation
+                list.push(mut actions, PersistState)
+                list.push(mut actions, Observe(ObsDesiredUpdated(desired_node, desired_generation)))
+            }
+        },
+        ControllerTakeover(new_epoch, incumbent_node, observed_head) => {
+            if new_epoch > s.controller_epoch {
+                s.controller_epoch = new_epoch
+                s.barrier = BarrierPending(new_epoch, incumbent_node)
+                apply_head_read(mut s, observed_head, mut actions)
+                let _ = push_outbox_bounded(mut s, ProbeIncumbent(incumbent_node, new_epoch), mut actions)
+                list.push(mut actions, ArmTimer(BarrierWindow(new_epoch), BARRIER_WINDOW_MS))
+                list.push(mut actions, Observe(ObsBarrierEntered(new_epoch, incumbent_node)))
+                list.push(mut actions, PersistState)
+            }
+        },
+        IncumbentProbeOk(node, incarnation, head, ctrl_epoch) => {
+            if ctrl_epoch == s.controller_epoch {
+                match s.barrier {
+                    BarrierPending(ep, expected_node) if ep == ctrl_epoch && expected_node == node => {
+                        s.barrier = BarrierClear
+                        s.incumbent_node = node
+                        s.incumbent_incarnation = incarnation
+                        clear_probe_outbox(mut s.outbox, ctrl_epoch)
+                        apply_head_read(mut s, head, mut actions)
+                        list.push(mut actions, Observe(ObsBarrierCleared(ctrl_epoch)))
+                        list.push(mut actions, PersistState)
+                    },
+                    _ => {},
+                }
+            }
+        },
+        DisruptionFreeze(freeze) => {
+            if s.frozen != freeze {
+                s.frozen = freeze
+                list.push(mut actions, PersistState)
+                list.push(mut actions, Observe(ObsFreezeChanged(freeze)))
+            }
+        },
+        HeadRead(head) => {
+            apply_head_read(mut s, head, mut actions)
+        },
+        ClaimOutcome(attempt, outcome) => {
+            handle_claim_outcome(mut s, attempt, outcome, mut actions)
+        },
+        LocalRestartObserved(node, incarnation, head) => {
+            if valid_head_view(head) && head.pair.epoch > s.known_head.pair.epoch && node == s.incumbent_node {
+                s.incumbent_incarnation = incarnation
+                apply_head_read(mut s, head, mut actions)
+                list.push(mut actions, Observe(ObsLocalRestart(node, head.pair)))
+                list.push(mut actions, PersistState)
+            }
+        },
+        Tick(_) => {},
+        Timeout(timer) => {
+            match timer {
+                BarrierWindow(ctrl_epoch) => {
+                    match s.barrier {
+                        BarrierPending(ep, _) if ep == ctrl_epoch => {
+                            s.barrier = BarrierClear
+                            clear_probe_outbox(mut s.outbox, ctrl_epoch)
+                            list.push(mut actions, Observe(ObsBarrierCleared(ctrl_epoch)))
+                            list.push(mut actions, PersistState)
+                        },
+                        _ => {},
+                    }
+                },
+                ClaimSettlement(attempt) => {
+                    if let Some(_) = has_open_attempt(s.open_permits, attempt) {
+                        let place_id = s.place_id
+                        let _ = push_outbox_bounded(mut s, ReadHead(place_id), mut actions)
+                        list.push(mut actions, PersistState)
+                    }
+                },
+            }
+        },
+        Duplicate(_) => {},
+        WrongIncarnation(_, _, _) => {},
+        LateUnknownId(attempt) => {
+            list.push(mut actions, Observe(ObsOutcomeIgnored(attempt)))
+        },
+        Crash => {
+            s.crashed = true
+        },
+        Restart => {
+            for entry in s.outbox {
+                list.push(mut actions, EmitOutbox(entry))
+            }
+            list.push(mut actions, Observe(ObsCrashRecovered(list.len(s.outbox))))
+        },
+        BoundExhausted => {},
+    }
+    (take s, take actions)
+}

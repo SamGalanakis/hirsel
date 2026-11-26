@@ -190,6 +190,8 @@ dirs = ["."]
 "store_journal_laws_4.hirsel" = "store"
 "store_journal_laws_5.hirsel" = "store"
 "store_backup_laws.hirsel" = "store"
+"store_corpus_laws.hirsel" = "store"
+"store_corpus_format10.hirsel" = "store"
 "store_journal_laws_6.hirsel" = "store"
 "store_journal_laws_7.hirsel" = "store"
 "store_pages_paged_laws.hirsel" = "store"
@@ -679,3 +681,6 @@ limit = 536870912
 
 [tests.runs."store@1/store/read_only_replay_step_budget"]
 limit = 134217728
+
+[tests.runs."store@1/store/test_frozen_format_corpus"]
+limit = 268435456

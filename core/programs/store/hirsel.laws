@@ -240,6 +240,7 @@ store@1/store/test_fork_settle src=bfacba733f2069a6 sig=2f1600bca9b98340 run=aff
 store@1/store/test_fork_shared_head src=6ec999ebf833b1e2 sig=48ce9ab4469ea46a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frame_size src=c1f0a0bca8082281 sig=f74e93ff3407678a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_frames src=8a04faa55f3928b8 sig=2acb7fec5b69e831 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_frozen_format_corpus src=d08528cef1de7125 sig=67106fa3154e702d run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_index_build_law src=8e5a5ca8791ed210 sig=3f5e8543d0dfab7c run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_index_catch_up_law src=48568b2b8789029c sig=3cf61110435242d6 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_index_declaration_laws src=446400563bdcd5c1 sig=a70c0d4fc7c2b840 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

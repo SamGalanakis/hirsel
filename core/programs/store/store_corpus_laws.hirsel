@@ -1,0 +1,408 @@
+// T7 frozen-format corpus: freezes one Format-10 Directory store and one
+// Bucket prefix with a canonical logical dump, and verifies that the current
+// build opens both cleanly (walker + verify + exact dump match + post-open
+// write and checkpoint).
+type CorpusSchema {
+    items: Table[u64, Bytes],
+    by_tag: Index[u64, u64, Bytes, ()],
+    by_code: Index[u64, u64, Bytes, ()],
+    by_bucket: Aggregate[u64],
+    counter: Cell[u64],
+    banner: Cell[Bytes],
+    events: Log[u64],
+}
+
+fn corpus_tag_keys(k: u64, v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(2)
+    list.push(mut keys, k % 3u64)
+    list.push(mut keys, 10u64 + (list.len(v) % 5u64))
+    Ok(take keys)
+}
+
+fn corpus_code_keys(k: u64, v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, k * 100u64 + (list.len(v) % 17u64))
+    Ok(take keys)
+}
+
+fn corpus_bucket_parts(k: u64, v: Bytes) -> Result[List[(u64, u64)], Capacity] {
+    let mut parts: List[(u64, u64)] = list.with_capacity(1)
+    list.push(mut parts, (k % 2u64, list.len(v)))
+    Ok(take parts)
+}
+
+fn corpus_schema(mut db: Db, mode: Mode) -> Result[CorpusSchema, Error] waits {
+    let mut d = declare(db, mode)?
+    let mut items_decl = declare_table(mut d, "items", std.codec.key_u64(), std.codec.of_bytes())?
+    let by_tag = index(mut d, mut items_decl, "by_tag", Many, code.describe(corpus_tag_keys), std.codec.key_u64())?
+    let by_code = index(mut d, mut items_decl, "by_code", Unique, code.describe(corpus_code_keys), std.codec.key_u64())?
+    let by_bucket = aggregate(mut d, mut items_decl, "by_bucket", code.describe(corpus_bucket_parts), std.codec.key_u64())?
+    let items = finish(mut d, take items_decl)?
+    let counter = declare_cell(mut d, "counter", std.codec.of_u64())?
+    let banner = declare_cell(mut d, "banner", std.codec.of_bytes())?
+    let events = declare_log(mut d, "events", std.codec.of_u64(), Forever)?
+    let _ = seal(mut db, take d)?
+    Ok(CorpusSchema(items, by_tag: take by_tag, by_code: take by_code, by_bucket, counter, banner, events))
+}
+
+fn corpus_pattern(len: u64, seed: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(len)
+    let base: u64 = int.widen(seed)
+    for i in 0u64 .. len {
+        let byte: u8 = int.truncate((base + i * 13u64) % 251u64)
+        list.push(mut out, byte)
+    }
+    take out
+}
+
+fn corpus_dir_options(create: bool) -> Options {
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.pack_bytes = 4096u64
+    options.create = create
+    options
+}
+
+fn corpus_populate(mut db: Db) -> Result[CorpusSchema, Error] waits {
+    let schema = corpus_schema(mut db, Migrate)?
+    let big_blob = corpus_pattern(1500u64, 17u8)
+    let big_cell = corpus_pattern(300u64, 41u8)
+    let first_tx = run(mut db, None, (copy_env(schema.items), copy_env(schema.counter), copy_env(schema.banner), copy_env(schema.events), copy_env(big_blob), copy_env(big_cell)), fn(mut tx, env) -> Result[(), Error] {
+        put(mut tx, env.0, 0u64, b"alpha")?
+        put(mut tx, env.0, 1u64, env.4)?
+        put(mut tx, env.0, 2u64, b"gamma")?
+        put(mut tx, env.0, 3u64, b"delta")?
+        put(mut tx, env.0, 4u64, b"epsilon")?
+        cell_set(mut tx, env.1, 42u64)?
+        cell_set(mut tx, env.2, env.5)?
+        let _ = append(mut tx, env.3, 100u64)?
+        let _ = append(mut tx, env.3, 200u64)?
+        let _ = append(mut tx, env.3, 300u64)?
+        let _ = append(mut tx, env.3, 400u64)?
+        trim_before(mut tx, env.3, 1u64)
+    })?
+    let Committed(done1) = take first_tx else {
+        return Error(MigrationFault)
+    }
+    durable(mut db, done1.ticket)?
+    let snap1 = snapshot(db)
+    let pin_ticket = pin(mut db, "v_early", snap1)?
+    durable(mut db, pin_ticket)?
+    let snap2 = snapshot(db)
+    let (alt_branch, fork_ticket) = fork(mut db, "alt", snap2)?
+    durable(mut db, fork_ticket)?
+    let alt_tx = run_on(mut db, alt_branch, None, copy_env(schema.items), fn(mut tx, items) -> Result[(), Error] {
+        put(mut tx, items, 0u64, b"alt-zero")
+    })?
+    let Committed(done_alt) = take alt_tx else {
+        return Error(MigrationFault)
+    }
+    durable(mut db, done_alt.ticket)?
+    let cut_ticket = checkpoint(mut db)?
+    durable(mut db, cut_ticket)?
+    // Follow the checkpoint with a durable journal commit so reopen exercises
+    // both pack/MANIFEST decoding and live journal replay.
+    let tail_tx = run(mut db, None, (copy_env(schema.items), copy_env(schema.counter), copy_env(schema.events)), fn(mut tx, env) -> Result[(), Error] {
+        put(mut tx, env.0, 3u64, b"delta-2")?
+        let _ = delete(mut tx, env.0, 4u64)?
+        put(mut tx, env.0, 5u64, b"zeta")?
+        cell_set(mut tx, env.1, 99u64)?
+        let _ = append(mut tx, env.2, 500u64)?
+        Ok(())
+    })?
+    let Committed(done_tail) = take tail_tx else {
+        return Error(MigrationFault)
+    }
+    durable(mut db, done_tail.ticket)?
+    Ok(take schema)
+}
+
+fn corpus_push_bytes(mut out: String, raw: Bytes) {
+    string.push_u64(mut out, list.len(raw))
+    string.push(mut out, ":")
+    string.push(mut out, std.hex.encode(raw))
+}
+
+fn corpus_canonical_dump(mut db: Db, schema: CorpusSchema) -> Result[String, Error] waits {
+    let mut out = string.from("format ")
+    string.push_u64(mut out, DISK_FORMAT)
+    string.push(mut out, "\nhead ")
+    let main_snap = snapshot(db)
+    string.push_u64(mut out, version(main_snap))
+    string.push(mut out, "\n")
+    let rd = result.unwrap(reader(db, 0u64))
+    if let Some(p) = pinned(db, "v_early") {
+        string.push(mut out, "pin v_early ")
+        string.push_u64(mut out, version(p))
+        string.push(mut out, " row0=")
+        if let Some(v) = get(law_reader(p), p, schema.items, 0u64)? {
+            corpus_push_bytes(mut out, v)
+        } else {
+            string.push(mut out, "none")
+        }
+        string.push(mut out, "\n")
+    }
+    if let Some(b) = branch(db, "alt") {
+        let b_snap = snapshot_of(db, b)?
+        string.push(mut out, "branch alt ")
+        string.push_u64(mut out, version(b_snap))
+        string.push(mut out, " row0=")
+        if let Some(v) = get(rd, b_snap, schema.items, 0u64)? {
+            corpus_push_bytes(mut out, v)
+        } else {
+            string.push(mut out, "none")
+        }
+        string.push(mut out, "\n")
+    }
+    string.push(mut out, "table items\n")
+    let mut rows = scan(rd, main_snap, schema.items, Unbounded, Unbounded)?
+    while let Some((k, v)) = next(rd, mut rows)? {
+        string.push(mut out, "  ")
+        string.push_u64(mut out, k)
+        string.push(mut out, "=")
+        corpus_push_bytes(mut out, v)
+        string.push(mut out, "\n")
+    }
+    string.push(mut out, "index by_tag\n")
+    let mut tag_rows = find(rd, main_snap, schema.by_tag, Unbounded, Unbounded)?
+    while let Some((k, v)) = next(law_reader(tag_rows.capture), mut tag_rows)? {
+        string.push(mut out, "  ")
+        string.push_u64(mut out, k)
+        string.push(mut out, "=")
+        corpus_push_bytes(mut out, v)
+        string.push(mut out, "\n")
+    }
+    string.push(mut out, "index by_code\n")
+    let mut code_rows = find(rd, main_snap, schema.by_code, Unbounded, Unbounded)?
+    while let Some((k, v)) = next(law_reader(code_rows.capture), mut code_rows)? {
+        string.push(mut out, "  ")
+        string.push_u64(mut out, k)
+        string.push(mut out, "=")
+        corpus_push_bytes(mut out, v)
+        string.push(mut out, "\n")
+    }
+    string.push(mut out, "aggregate by_bucket\n")
+    for g in 0u64 .. 2u64 {
+        let Seen(Seen(value: take res, ..)) = look(rd, main_snap, None, (copy_env(schema.by_bucket), g), fn(tx, env) -> Result[Totals, Error] {
+            totals(tx, env.0, env.1)
+        })? else {
+            return Error(MigrationFault)
+        }
+        let got = res?
+        string.push(mut out, "  ")
+        string.push_u64(mut out, g)
+        string.push(mut out, " count=")
+        string.push_u64(mut out, got.count)
+        string.push(mut out, " sum=")
+        string.push_u64(mut out, got.sum)
+        string.push(mut out, "\n")
+    }
+    string.push(mut out, "cell counter=")
+    if let Some(v) = cell_get(rd, main_snap, schema.counter)? {
+        string.push_u64(mut out, v)
+    } else {
+        string.push(mut out, "none")
+    }
+    string.push(mut out, "\ncell banner=")
+    if let Some(v) = cell_get(rd, main_snap, schema.banner)? {
+        corpus_push_bytes(mut out, v)
+    } else {
+        string.push(mut out, "none")
+    }
+    string.push(mut out, "\n")
+    let b = log_bounds(rd, main_snap, schema.events)?
+    string.push(mut out, "log events ")
+    string.push_u64(mut out, b.first)
+    string.push(mut out, "..")
+    string.push_u64(mut out, b.next)
+    string.push(mut out, "\n")
+    let mut log_rows = log_scan(rd, main_snap, schema.events, Unbounded, Unbounded)?
+    while let Some((seq, v)) = next(rd, mut log_rows)? {
+        string.push(mut out, "  ")
+        string.push_u64(mut out, seq)
+        string.push(mut out, "=")
+        string.push_u64(mut out, v)
+        string.push(mut out, "\n")
+    }
+    Ok(take out)
+}
+
+fn corpus_sort_strings(mut items: List[String]) {
+    let n = list.len(items)
+    let mut i = 1u64
+    while i < n {
+        let mut j = i
+        while j > 0u64 && items[j] < items[j - 1u64] {
+            let tmp = string.from(items[j])
+            items[j] = string.from(items[j - 1u64])
+            items[j - 1u64] = take tmp
+            j -= 1u64
+        }
+        i += 1u64
+    }
+}
+
+fn corpus_freeze_directory(dir_out: Dir, meta_out: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, dir_out, c, r, corpus_dir_options(true))?
+    let schema = corpus_populate(mut db)?
+    trust_store(mut db)?
+    let dump = corpus_canonical_dump(mut db, schema)?
+    close(take db)?
+    disk_write_synced(meta_out, "directory.dump", string.into_bytes(take dump))?
+    disk_io(host.sync_dir(meta_out))
+}
+
+fn corpus_freeze_bucket(bucket_out: Dir, meta_out: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 10u64, None, list.new())
+    let authority = bucket_law_authority(sim, tasks, "s3.test", 1u64)?
+    let mut db = match open_authority(tasks, take authority, sim.time, r, bucket_law_options(true)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let schema = corpus_populate(mut db)?
+    trust_store(mut db)?
+    let dump = corpus_canonical_dump(mut db, schema)?
+    close(take db)?
+    let report = bucket_law_report(take sim)
+    disk_write_synced(meta_out, "bucket.dump", string.into_bytes(take dump))?
+    let mut keys: List[String] = list.new()
+    for (k, _) in report.objects {
+        list.push(mut keys, string.from(k))
+    }
+    corpus_sort_strings(mut keys)
+    let mut manifest = string.from("")
+    let mut idx = 0u64
+    for key in keys {
+        let obj = option.unwrap(map.get(report.objects, key))
+        let mut fname = string.from("obj-")
+        string.push_u64(mut fname, idx)
+        string.push(mut fname, ".bin")
+        disk_write_synced(bucket_out, fname, obj.data)?
+        string.push(mut manifest, fname)
+        string.push(mut manifest, "\t")
+        string.push(mut manifest, key)
+        string.push(mut manifest, "\n")
+        idx += 1u64
+    }
+    disk_io(host.sync_dir(bucket_out))?
+    disk_write_synced(meta_out, "bucket.manifest", string.into_bytes(take manifest))?
+    disk_io(host.sync_dir(meta_out))
+}
+
+// Entry run by core/tools/store_freeze_corpus.py to freeze the current format.
+pub fn corpus_freeze_main(dir_out: Dir, bucket_out: Dir, meta_out: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    corpus_freeze_directory(dir_out, meta_out, c, r, tasks) ?=> |_| Exit(status: 41u8)
+    corpus_freeze_bucket(bucket_out, meta_out, c, r, tasks) ?=> |_| Exit(status: 42u8)
+    let mut msg = string.from("frozen format ")
+    string.push_u64(mut msg, DISK_FORMAT)
+    string.push(mut msg, "\n")
+    let _ = stdout.write(out, msg)
+    Ok(())
+}
+
+fn corpus_decode_b64(encoded: Bytes) -> Bytes {
+    let Some(take data) = std.base64.decode(encoded) else {
+        fail("invalid frozen corpus base64")
+    }
+    take data
+}
+
+fn corpus_advance_and_recheck(mut db: Db, schema: CorpusSchema) -> Result[(), Error] waits {
+    let added = run(mut db, None, copy_env(schema.items), fn(mut tx, items) -> Result[(), Error] {
+        put(mut tx, items, 99u64, b"post-freeze")
+    })?
+    let Committed(done) = take added else {
+        return Error(MigrationFault)
+    }
+    durable(mut db, done.ticket)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    trust_store(mut db)?;
+    let rd = result.unwrap(reader(db, 0u64))
+    let s = snapshot(db)
+    if get(rd, s, schema.items, 1u64)? != Some(corpus_pattern(1500u64, 17u8)) {
+        fail("frozen corpus lost BlobRef row after post-open checkpoint")
+    }
+    if get(rd, s, schema.items, 99u64)? != Some(b"post-freeze") {
+        fail("frozen corpus lost post-open write after checkpoint")
+    }
+    Ok(())
+}
+
+fn corpus_verify_bucket(sim: BucketSim, r: Random, tasks: Tasks, bucket_objects: List[(String, Bytes)]) -> Result[(), Error] waits {
+    let mut loader = bucket_law_client_with(sim, tasks, "s3.test", 1u64, true)?
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS)
+    for (key, body) in bucket_objects {
+        let mut owned: Bytes = list.with_capacity(list.len(body))
+        list.append(mut owned, body)
+        let (put_res, _) = std.object.store(mut loader, key, take owned, deadline)
+        let Ok(_) = take put_res else {
+            fail("could not seed frozen bucket object")
+        }
+    }
+    let authority = bucket_law_authority(sim, tasks, "s3.test", 2u64)?
+    let mut bucket_db = match open_authority(tasks, take authority, sim.time, r, bucket_law_options(false)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let bucket_schema = corpus_schema(mut bucket_db, Open)?
+    trust_store(mut bucket_db)?
+    let bucket_dump = corpus_canonical_dump(mut bucket_db, bucket_schema)?
+    if bucket_dump != corpus_bucket_dump() {
+        fail("frozen Bucket corpus logical dump mismatch")
+    }
+    corpus_advance_and_recheck(mut bucket_db, bucket_schema)?
+    close(take bucket_db)?
+    let authority2 = bucket_law_authority(sim, tasks, "s3.test", 3u64)?
+    let mut bucket_reopened = match open_authority(tasks, take authority2, sim.time, r, bucket_law_options(false)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take e, ..)) => return Error(take e),
+    }
+    let bucket_re_schema = corpus_schema(mut bucket_reopened, Open)?
+    trust_store(mut bucket_reopened)?
+    if get(result.unwrap(reader(bucket_reopened, 0u64)), snapshot(bucket_reopened), bucket_re_schema.items, 99u64)? != Some(b"post-freeze") {
+        fail("frozen Bucket corpus lost post-open write across reopen")
+    }
+    close(take bucket_reopened)
+}
+
+@test
+fn test_frozen_format_corpus(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    if corpus_format_version() != DISK_FORMAT {
+        fail("frozen corpus format does not match DISK_FORMAT; refreeze via core/tools/store_freeze_corpus.py")
+    }
+    let dir_files = corpus_directory_files()
+    let bucket_objects = corpus_bucket_objects()
+    if list.len(dir_files) == 0 || list.len(bucket_objects) == 0 {
+        fail("frozen corpus is empty; freeze via core/tools/store_freeze_corpus.py")
+    }
+    // 1. Open frozen Directory store in a fresh scratch dir, verify walker +
+    // indexes + exact canonical logical dump, then write, checkpoint, reopen.
+    let dir_copy = disk_test_directory(d)
+    for (name, raw) in dir_files {
+        disk_write_synced(dir_copy, name, raw)?
+    }
+    disk_io(host.sync_dir(dir_copy))?
+    let mut dir_db = open(tasks, dir_copy, c, r, corpus_dir_options(false))?
+    let dir_schema = corpus_schema(mut dir_db, Open)?
+    trust_store(mut dir_db)?
+    let dir_dump = corpus_canonical_dump(mut dir_db, dir_schema)?
+    if dir_dump != corpus_directory_dump() {
+        fail("frozen Directory corpus logical dump mismatch")
+    }
+    corpus_advance_and_recheck(mut dir_db, dir_schema)?
+    close(take dir_db)?
+    let mut dir_reopened = open(tasks, dir_copy, c, r, corpus_dir_options(false))?
+    let dir_re_schema = corpus_schema(mut dir_reopened, Open)?
+    trust_store(mut dir_reopened)?
+    if get(result.unwrap(reader(dir_reopened, 0u64)), snapshot(dir_reopened), dir_re_schema.items, 99u64)? != Some(b"post-freeze") {
+        fail("frozen Directory corpus lost post-open write across reopen")
+    }
+    close(take dir_reopened)?
+    // 2. Load frozen Bucket prefix objects into a fresh simulated S3 bucket,
+    // open, verify walker + indexes + exact canonical dump, then write,
+    // checkpoint, reopen.
+    let sim = bucket_law_sim(tasks, c, 20u64, None, list.new())
+    let verified = corpus_verify_bucket(sim, r, tasks, bucket_objects)
+    let _ = bucket_law_report(take sim)
+    verified
+}

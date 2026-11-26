@@ -5,11 +5,12 @@ on:
   workflow_run:
     workflows: [Release]
     types: [completed]
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   linux:
-    if: github.event_name == 'schedule' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.latest.outputs.version }}

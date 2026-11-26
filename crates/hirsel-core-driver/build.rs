@@ -3,7 +3,9 @@
 mod compiler_source;
 use sha2::{Digest, Sha256};
 use std::{
-    env, fs,
+    env,
+    fmt::Write as _,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -47,6 +49,52 @@ fn package(root: &Path, symbol: &str, generated: &mut String) -> [u8; 32] {
     generated.push_str("];\n");
     hash.finalize().into()
 }
+
+fn manifest(path: &Path) -> toml::Table {
+    println!("cargo:rerun-if-changed={}", path.display());
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .parse()
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+fn toolchain_packages(programs: &Path, generated: &mut String) {
+    let inventory = manifest(&programs.join("toolchain-packages.toml"));
+    generated.push_str(
+        "type ToolchainId = (&'static str, u32);\n\
+         pub(crate) const TOOLCHAIN: &[(ToolchainId, &[ToolchainId])] = &[\n    ((\"std\", 1), &[]),\n",
+    );
+    for name in inventory["packages"].as_array().unwrap() {
+        let name = name.as_str().unwrap();
+        let path = programs.join(name).join("hirsel.toml");
+        let document = manifest(&path);
+        let package = document["package"].as_table().unwrap();
+        assert_eq!(
+            package["name"].as_str().unwrap(),
+            name,
+            "{}",
+            path.display()
+        );
+        let major = u32::try_from(package["major"].as_integer().unwrap()).unwrap();
+        let mut bindings = Vec::new();
+        if let Some(dependencies) = document.get("dependencies") {
+            for (dependency, binding) in dependencies.as_table().unwrap() {
+                let major = binding
+                    .get("major")
+                    .and_then(toml::Value::as_integer)
+                    .and_then(|major| u32::try_from(major).ok())
+                    .unwrap_or_else(|| {
+                        panic!("{}: {dependency} must declare a major", path.display())
+                    });
+                bindings.push((dependency, major));
+            }
+        }
+        bindings.sort_unstable();
+        writeln!(generated, "    (({name:?}, {major}), &{bindings:?}),").unwrap();
+    }
+    generated.push_str("];\n");
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=HIRSEL_RELEASE_VERSION");
     if let Some(version) = env::var("HIRSEL_RELEASE_VERSION")
@@ -62,9 +110,7 @@ fn main() {
     let std = package(&root.join("std"), "STD_SOURCES", &mut generated);
     for (name, symbol) in [("store", "STORE_SOURCES"), ("runner", "RUNNER_SOURCES")] {
         let directory = root.join("programs").join(name);
-        let manifest = directory.join("hirsel.toml");
-        println!("cargo:rerun-if-changed={}", manifest.display());
-        let manifest: toml::Table = fs::read_to_string(manifest).unwrap().parse().unwrap();
+        let manifest = manifest(&directory.join("hirsel.toml"));
         generated.push_str(&format!("pub const {symbol}: &[(&str, &str, &str)] = &[\n"));
         for (file, module) in manifest["sources"].as_table().unwrap() {
             let path = directory.join(file);
@@ -87,8 +133,10 @@ fn main() {
         "pub const DIGEST: [u8;32] = {core:?};\npub const STD_DIGEST: [u8;32] = {:?};\n",
         <[u8; 32]>::from(combined.finalize())
     ));
+    toolchain_packages(&root.join("programs"), &mut generated);
     // The compiler identity (docs/building.md, "Compiler identity"): the
-    // compiler's source closure and pins, and the library sources it bundles.
+    // compiler's source closure and pins, the library sources it bundles, and
+    // the toolchain package bindings it supplies.
     let repository = root.parent().unwrap();
     let (source, watched) =
         compiler_source::digest(repository, "crates/hirsel-core-driver").unwrap();

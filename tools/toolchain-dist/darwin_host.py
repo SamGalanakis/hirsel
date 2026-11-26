@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -345,8 +346,9 @@ def build(output, work):
          *[option for slot, archive in archives.items() for option in (f'--{slot}', archive)],
          '--target', TARGET, '--link-kit', kit], env=install, stdout=subprocess.DEVNULL)
     programs = ROOT / 'tools/toolchain-dist/toolchain-programs.sh'
+    packages = tomllib.loads((ROOT / 'core/programs/toolchain-packages.toml').read_text())['packages']
     run(['/bin/sh', programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',
-         *bzl_list(ROOT / 'tools/buck2/defs.bzl', 'TOOLCHAIN_PACKAGES')], env=install)
+         *packages], env=install)
     run(['/bin/sh', programs, 'helpers', output, ROOT / 'core/programs/platform', scratch], env=install)
     return llvm
 

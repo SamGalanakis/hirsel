@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
+    parser.add_argument('--case', help='Run one LibraryModes test method')
     args = parser.parse_args()
     compiler = args.compiler.resolve()
 
@@ -312,6 +313,24 @@ def main():
                 linker.unlink()
                 refused = invoke('build', str(app), '--release', '-o', str(work / 'gone'), expected=2)
                 self.assertIn(str(linker), refused.stderr)
+
+        def test_installed_srtp_checks_in_an_external_consumer(self):
+            bundle = Path(os.environ['HIRSEL_TOOLCHAIN_BUNDLE']).resolve()
+            with tempfile.TemporaryDirectory(prefix='hirsel-srtp-consumer-') as temporary:
+                app = Path(temporary)
+                (app / 'hirsel.toml').write_text(
+                    '[package]\nname = "srtp_consumer"\nmajor = 1\ncharge = "charge-v1"\n\n'
+                    '[dependencies]\nstd = { major = 1 }\nsrtp = { major = 1 }\n\n'
+                    '[sources]\n"main.hirsel" = "main"\n')
+                (app / 'main.hirsel').write_text(
+                    'pub fn main() -> Result[(), Exit] {\n'
+                    '    let _ = srtp.tag_room(AeadAes128Gcm)\n'
+                    '    Ok(())\n'
+                    '}\n')
+                env = {'HOME': temporary, 'XDG_CACHE_HOME': str(app / 'cache')}
+                checked = self.progress.run([str(bundle / 'hirsel'), 'check', str(app)],
+                                            cwd=app, env=env, capture_output=True, text=True)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
 
         def test_a_copied_bundle_supplies_the_toolchain_packages_to_a_program_outside_the_repo(self):
             # The shipped toolchain supplies webrtc_sfu@1, turn@1, sframe@1, media_record@1,
@@ -654,12 +673,15 @@ def main():
                 self.assertTrue(any(d['rule'] == 'LANG-11' and d['primary']['module'] == 'std@1/user_refused'
                                     for d in product['diagnostics']), product)
 
+    loader = unittest.defaultTestLoader
+    suite = loader.loadTestsFromName(args.case, LibraryModes) if args.case else loader.loadTestsFromTestCase(LibraryModes)
+
     # The gate runs on the host (openat2), so without this every case would
     # share the user's real default store and host-tool records with every
     # other process on the machine. Each run gets its own.
     with tempfile.TemporaryDirectory(prefix='hirsel-library-modes-cache-') as cache:
         os.environ['XDG_CACHE_HOME'] = cache
-        result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(LibraryModes))
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
     return int(not result.wasSuccessful())
 
 

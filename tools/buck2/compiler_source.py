@@ -10,12 +10,18 @@ from __future__ import annotations
 
 import pathlib
 import re
+import tomllib
 
 SOURCE = "crates/hirsel-core-driver/src/compiler_source.rs"
 # The build script's own sources, and the library sources it bundles.
 SOURCES = ["crates/hirsel-core-driver/build.rs", SOURCE]
+TOOLCHAIN_MANIFEST = "core/programs/toolchain-packages.toml"
 BUNDLED = ["core/core/**", "core/std/**/*.hirsel", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel",
-           "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/runner/frame-schema.bin"]
+           TOOLCHAIN_MANIFEST, "core/programs/runner/frame-schema.bin"]
+
+
+def toolchain_packages(reads, root: pathlib.Path) -> list[str]:
+    return tomllib.loads(reads.text(root / TOOLCHAIN_MANIFEST))["packages"]
 
 
 def lists(reads, root: pathlib.Path) -> tuple[list[str], list[str], list[str]]:
@@ -49,7 +55,8 @@ def build_script(reads, root: pathlib.Path, start: str, nodes: dict, packages: d
     its files as `compiler-source`."""
     pins, extra, skipped = lists(reads, root)
     roots = closure(root, start, nodes, packages, members) + extra
-    globs = BUNDLED + pins + [f"{r}/**" for r in roots]
+    manifests = [f"core/programs/{name}/hirsel.toml" for name in toolchain_packages(reads, root)]
+    globs = BUNDLED + manifests + pins + [f"{r}/**" for r in roots]
     exclude = ["core/std/tests/**"] + [f"{r}/{skip}/**" for r in roots for skip in skipped]
     paths = {}
     for r in roots:

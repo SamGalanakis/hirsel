@@ -541,7 +541,7 @@ def _program_sources(ctx, name, sources):
     })
 
 def _toolchain_packages_impl(ctx):
-    # The toolchain packages other than std (package_content::TOOLCHAIN in the driver), each
+    # The toolchain packages other than std, each
     # packed alone from core/programs/<name> as <name>-<major>.hpkg with its dependencies bound
     # from the toolchain, by tools/toolchain-dist/toolchain-programs.sh.
     sources = _program_sources(ctx, "package-sources", ctx.attrs.sources)
@@ -567,15 +567,11 @@ _toolchain_packages = rule(
     },
 )
 
-# The toolchain packages other than std, in core-packages/: the names
-# package_content::TOOLCHAIN in hirsel-core-driver lists, with their bindings.
-TOOLCHAIN_PACKAGES = ["store", "runner", "media_bits", "sframe", "media_container", "rtp", "srtp", "dtls", "stun_ice", "turn", "webrtc_sfu", "rtp_jitter", "media_record", "platform", "search", "mcp", "cli"]
-
-def hirsel_toolchain_packages(name, hirsel):
+def hirsel_toolchain_packages(name, hirsel, packages):
     sources = []
-    for package in TOOLCHAIN_PACKAGES:
+    for package in packages:
         sources += native.glob(["core/programs/{}/**/*.hirsel".format(package)]) + ["core/programs/{}/hirsel.toml".format(package)]
-    _toolchain_packages(name = name, hirsel = hirsel, packages = TOOLCHAIN_PACKAGES, sources = sources)
+    _toolchain_packages(name = name, hirsel = hirsel, packages = packages, sources = sources)
 
 def _dev_fixture_cache_impl(ctx):
     # The content store ($XDG_CACHE_HOME/hirsel/cas) after the dev_laws

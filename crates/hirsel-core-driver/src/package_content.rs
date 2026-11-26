@@ -1,4 +1,5 @@
 use crate::package_dir::{module_path, package_name, path_rule};
+use crate::product::bundled::TOOLCHAIN;
 use bytes::Bytes;
 use hirsel_core_ids::{ContentHash, PackageId};
 use sha2::{Digest, Sha256};
@@ -13,77 +14,27 @@ const PACKAGE_LIMIT: usize = 4096;
 const ARCHIVE_TAG: &str = "hirsel.package-archive.v1";
 const CHARGE: &str = "charge-v1";
 
-/// The packages the installed toolchain supplies, each with the toolchain packages it binds.
-/// `std@1` is the toolchain's std image; the others are package archives in
-/// `core-packages/<name>-<major>.hpkg`, packed from `core/programs/<name>` (the
-/// `toolchain-packages` rule in tools/buck2/defs.bzl lists the same names).
-const TOOLCHAIN: &[(&str, u32, &[&str])] = &[
-    ("std", 1, &[]),
-    ("store", 1, &["std"]),
-    ("runner", 1, &["std", "store"]),
-    ("media_bits", 1, &["std"]),
-    ("sframe", 1, &["std", "media_bits"]),
-    ("media_container", 1, &["std", "media_bits"]),
-    ("rtp", 1, &["std"]),
-    ("srtp", 1, &["std"]),
-    ("dtls", 1, &["std"]),
-    ("stun_ice", 1, &["std"]),
-    ("turn", 1, &["std", "stun_ice"]),
-    (
-        "webrtc_sfu",
-        1,
-        &[
-            "std",
-            "dtls",
-            "media_bits",
-            "rtp",
-            "srtp",
-            "stun_ice",
-            "turn",
-            "runner",
-            "store",
-        ],
-    ),
-    ("rtp_jitter", 1, &["std", "media_bits", "rtp"]),
-    (
-        "media_record",
-        1,
-        &[
-            "std",
-            "media_bits",
-            "media_container",
-            "rtp",
-            "rtp_jitter",
-            "webrtc_sfu",
-        ],
-    ),
-    ("platform", 1, &["std", "store", "runner"]),
-    ("search", 1, &["std", "store"]),
-    ("mcp", 1, &["std"]),
-    ("cli", 1, &["std"]),
-];
-
 pub(crate) fn toolchain_major(name: &str) -> Option<u32> {
     TOOLCHAIN
         .iter()
-        .find(|(supplied, _, _)| *supplied == name)
-        .map(|(_, major, _)| *major)
+        .find(|((supplied, _), _)| *supplied == name)
+        .map(|((_, major), _)| *major)
 }
 
 /// The bindings of a toolchain package: each to another toolchain package. None for an
 /// identity the toolchain does not supply.
 pub(crate) fn toolchain_bindings(id: &Id) -> Option<BTreeMap<Id, Option<Root>>> {
-    let (_, _, bound) = TOOLCHAIN
+    let (_, bound) = TOOLCHAIN
         .iter()
-        .find(|(name, major, _)| *name == id.name && *major == id.major)?;
+        .find(|(package, _)| *package == (id.name.as_str(), id.major))?;
     Some(
         bound
             .iter()
-            .map(|name| {
+            .map(|&(name, major)| {
                 (
                     Id {
-                        name: (*name).into(),
-                        major: toolchain_major(name).expect("a toolchain binding is supplied"),
+                        name: name.into(),
+                        major,
                     },
                     None,
                 )

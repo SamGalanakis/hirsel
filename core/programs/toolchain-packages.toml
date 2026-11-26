@@ -1,0 +1,20 @@
+# Packages shipped as archives alongside the built-in std image.
+packages = [
+    "store",
+    "runner",
+    "media_bits",
+    "sframe",
+    "media_container",
+    "rtp",
+    "srtp",
+    "dtls",
+    "stun_ice",
+    "turn",
+    "webrtc_sfu",
+    "rtp_jitter",
+    "media_record",
+    "platform",
+    "search",
+    "mcp",
+    "cli",
+]

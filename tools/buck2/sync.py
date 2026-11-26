@@ -690,18 +690,8 @@ def first_party(meta: dict) -> str:
                             crate_root="tools/tests/test_tool_profile.rs", srcs=["tools/tests/test_tool_profile.rs"],
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
                             version="0.1.0", edition="2024"))
-    out.append("\n" + call("hirsel_toolchain_packages", name="toolchain-packages", hirsel="//:hirsel-core-driver-bin-hirsel") + "\n" + call("hirsel_dev_fixture_cache", name="dev-fixture-cache", hirsel="//:hirsel-core-driver-bin-hirsel", runtime="//:core-driver-runtime-pic"))
-    out.append("\n" + call("hirsel_toolchain_bundle", name="hirsel-toolchain", hirsel="//:hirsel-core-driver-bin-hirsel",
-                            runtimes="//:hirsel-core-rt-archives",
-                            recording_runtimes="//:hirsel-core-rt-record-archives",
-                            prof_runtimes="//:hirsel-core-rt-prof-archives",
-                            prof_recording_runtimes="//:hirsel-core-rt-prof-record-archives",
-                            observed_runtimes="//:hirsel-core-rt-observed-archives",
-                            observed_recording_runtimes="//:hirsel-core-rt-observed-record-archives",
-                            toolchain_packages="//:toolchain-packages",
-                            platform_sources=Raw('glob(["core/programs/platform/*.hirsel"]) + ["core/programs/platform/hirsel.toml"]'),
-                            visibility=["PUBLIC"]))
-    distribution_gates(out, call, READS)
+    out.append("\n" + call("hirsel_dev_fixture_cache", name="dev-fixture-cache", hirsel="//:hirsel-core-driver-bin-hirsel", runtime="//:core-driver-runtime-pic"))
+    distribution_gates(out, call, Raw, READS)
     out.append("\n" + call("hirsel_script_test", name="core-evaluator", script="core/tools/gate_evaluator.py",
                             production=True, native_tools=True,
                             bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval",

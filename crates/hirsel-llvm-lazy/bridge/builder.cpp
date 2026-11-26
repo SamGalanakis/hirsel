@@ -123,6 +123,7 @@ static LLVMValueRef constant_cast(unsigned op, LLVMValueRef v, LLVMTypeRef t) {
     }
 }
 static LLVMValueRef constant_add(LLVMValueRef a, LLVMValueRef b) { return wrap(ConstantExpr::getAdd(cast<Constant>(unwrap(a)), cast<Constant>(unwrap(b)))); }
+static LLVMValueRef constant_sub(LLVMValueRef a, LLVMValueRef b) { return wrap(ConstantExpr::getSub(cast<Constant>(unwrap(a)), cast<Constant>(unwrap(b)))); }
 static LLVMValueRef constant_struct(HirselLlvmBuilder *u, LLVMValueRef const *values, size_t n, uint8_t packed) {
     SmallVector<Constant *, 8> fields; for (size_t i = 0; i < n; ++i) fields.push_back(cast<Constant>(unwrap(values[i])));
     return wrap(ConstantStruct::getAnon(u->context, fields, packed));
@@ -384,7 +385,7 @@ extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
     static const HirselLlvmBuilderApi api = {
         context_new, context_drop, unit_new, unit_drop, unit_take, module_drop, module_key, print, print_text,
         integer_type, float_type, pointer_type, void_type, metadata_type, array_type, vector_type, struct_type,
-        integer, poison, zero, constant_cast, constant_add, constant_struct, constant_bytes,
+        integer, poison, zero, constant_cast, constant_add, constant_sub, constant_struct, constant_bytes,
         global_ref, global, function, attribute, string_attribute, finish_declaration, subprogram,
         begin_body, parameter, set_name, block, begin_block, block_placed, placeholder, replace, alloca_value,
         binary, cast_value, compare, select, fneg, load, store, gep, extract, insert, phi, call,

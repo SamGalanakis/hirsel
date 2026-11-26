@@ -540,11 +540,17 @@ fn emit(
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
     task_entries.emit(&mut object, &tables, observer, &mut scratch)?;
     let _write = observer.enter("object_write");
-    tables.site_constants.borrow().define(&mut object)?;
-    let mut product = object.finish();
     let format = hirsel_core_layout::Target::from_triple(options.target)
         .ok_or_else(|| refuse("not a Hirsel target".into()))?
         .object_format();
+    let origin = tables.site_constants.borrow().define(&mut object, format)?;
+    let mut product = object.finish();
+    if let Some(origin) = origin {
+        tables
+            .site_constants
+            .borrow()
+            .measure(&mut product, origin)?;
+    }
     tables.unwind.into_inner().write(&mut product, format)?;
     let debug = options
         .debug_lines

@@ -68,62 +68,10 @@ impl fmt::Display for Type {
     }
 }
 
+mod label;
 mod local;
+pub(super) use label::Label;
 pub(super) use local::Local;
-
-/// A basic block label: a prefix, an optional number and an optional edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Label {
-    pub name: &'static str,
-    pub n: u32,
-    pub edge: u32,
-}
-impl Label {
-    const NONE: u32 = u32::MAX;
-    pub const fn plain(name: &'static str) -> Self {
-        Self {
-            name,
-            n: Self::NONE,
-            edge: Self::NONE,
-        }
-    }
-    pub fn new(name: &'static str, n: usize) -> Self {
-        Self {
-            name,
-            n: n as u32,
-            edge: Self::NONE,
-        }
-    }
-    pub fn edge(n: usize, edge: u32) -> Self {
-        Self {
-            name: "e",
-            n: n as u32,
-            edge,
-        }
-    }
-    pub fn block(i: impl TryInto<u32>) -> Self {
-        Self {
-            name: "b",
-            n: i.try_into().ok().unwrap(),
-            edge: Self::NONE,
-        }
-    }
-    pub fn write_name(self, out: &mut impl Write) -> fmt::Result {
-        out.write_str(self.name)?;
-        if self.n != Self::NONE {
-            write!(out, "{}", self.n)?;
-        }
-        if self.edge != Self::NONE {
-            write!(out, "_{}", self.edge)?;
-        }
-        Ok(())
-    }
-}
-impl fmt::Display for Label {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write_name(f)
-    }
-}
 
 pub(super) type Name = Cow<'static, str>;
 
@@ -169,6 +117,9 @@ pub(super) enum Value {
     },
     IntToPtr(u64),
     PtrToInt(Name),
+    /// `sub (i64 ptrtoint (left), i64 ptrtoint (right))`: how far one symbol
+    /// lies past another, which a linker resolves and a loader never slides.
+    Difference(Name, Name),
     /// `add (i64 left, i64 right)` over a constant expression.
     Add(Box<Value>, i64),
     Struct {
@@ -215,6 +166,13 @@ impl fmt::Display for Value {
                 f.write_str("ptrtoint (ptr ")?;
                 write_global(f, name)?;
                 f.write_str(" to i64)")
+            }
+            Self::Difference(left, right) => {
+                f.write_str("sub (i64 ptrtoint (ptr ")?;
+                write_global(f, left)?;
+                f.write_str(" to i64), i64 ptrtoint (ptr ")?;
+                write_global(f, right)?;
+                f.write_str(" to i64))")
             }
             Self::Add(left, right) => write!(f, "add (i64 {left}, i64 {right})"),
             Self::Struct { packed, fields } => {

@@ -34,6 +34,7 @@ typedef struct {
     LLVMValueRef (*zero)(LLVMTypeRef);
     LLVMValueRef (*constant_cast)(unsigned, LLVMValueRef, LLVMTypeRef);
     LLVMValueRef (*constant_add)(LLVMValueRef, LLVMValueRef);
+    LLVMValueRef (*constant_sub)(LLVMValueRef, LLVMValueRef);
     LLVMValueRef (*constant_struct)(HirselLlvmBuilder *, LLVMValueRef const *, size_t, uint8_t);
     LLVMValueRef (*constant_bytes)(HirselLlvmBuilder *, const uint8_t *, size_t);
     LLVMValueRef (*global_ref)(HirselLlvmBuilder *, const char *, size_t);

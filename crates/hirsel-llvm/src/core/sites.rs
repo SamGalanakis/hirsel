@@ -101,16 +101,30 @@ impl FunctionEmitter<'_> {
                 })
                 .clone();
             self.absolute_symbol(name.clone());
-            return Some(Value::PtrToInt(name.into()));
+            return Some(self.linked_site(name));
         }
         // Module-assembly aliases would leave undefined site symbols behind
         // even if LLVM emits no relocation against them.
         let symbol = hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
         self.absolute_symbol(symbol.clone());
         Some(Value::Add(
-            Box::new(Value::PtrToInt(symbol.into())),
+            Box::new(self.linked_site(symbol)),
             i64::from(anchor.start),
         ))
+    }
+
+    /// The linked value of the absolute site symbol `name`. A Mach-O unit
+    /// measures it from the sites origin
+    /// ([`hirsel_core_ir::source::SITES_ORIGIN_SYMBOL`]).
+    fn linked_site(&mut self, name: String) -> Value {
+        match self.abi.target.object_format() {
+            hirsel_core_layout::ObjectFormat::Elf => Value::PtrToInt(name.into()),
+            hirsel_core_layout::ObjectFormat::MachO => {
+                let origin = hirsel_core_ir::source::SITES_ORIGIN_SYMBOL;
+                self.absolute_symbol(origin.into());
+                Value::Difference(name.into(), origin.into())
+            }
+        }
     }
 }
 

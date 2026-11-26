@@ -298,6 +298,14 @@ impl NativeSink {
                     let global = self.global_ref(name);
                     (api.constant_cast)(Cast::PtrToInt as u32, global, self.ty(&Type::I64))
                 }
+                Value::Difference(left, right) => {
+                    let word = self.ty(&Type::I64);
+                    let left = self.global_ref(left);
+                    let left = (api.constant_cast)(Cast::PtrToInt as u32, left, word);
+                    let right = self.global_ref(right);
+                    let right = (api.constant_cast)(Cast::PtrToInt as u32, right, word);
+                    (api.constant_sub)(left, right)
+                }
                 Value::Add(left, right) => {
                     let left = self.value(left, &Type::I64);
                     let right = self.integer(&Type::I64, i128::from(*right));

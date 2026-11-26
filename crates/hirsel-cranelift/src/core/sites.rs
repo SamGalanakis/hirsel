@@ -40,16 +40,80 @@ impl Constants {
         };
         Ok((data, offset))
     }
-    pub fn define(&self, object: &mut ObjectModule) -> Result<()> {
-        let Some(data) = self.data else { return Ok(()) };
+    /// Defines the pool. An ELF word is one absolute relocation against its
+    /// site symbol. A Mach-O word is measured from the sites origin
+    /// ([`c::source::SITES_ORIGIN_SYMBOL`]): `cranelift-module` has no
+    /// relocation of two symbols, so the pool is defined without relocations
+    /// here and [`Self::measure`] adds the pairs to the finished object. Gives
+    /// the origin when the words still need it.
+    pub fn define(
+        &self,
+        object: &mut ObjectModule,
+        format: hirsel_core_layout::ObjectFormat,
+    ) -> Result<Option<cranelift_module::DataId>> {
+        let Some(data) = self.data else {
+            return Ok(None);
+        };
         let mut description = DataDescription::new();
         description.define(vec![0; self.words.len() * 8].into_boxed_slice());
         description.set_align(8);
+        let origin = match format {
+            hirsel_core_layout::ObjectFormat::Elf => {
+                for (i, &(symbol, start)) in self.words.iter().enumerate() {
+                    let reference = object.declare_data_in_data(symbol, &mut description);
+                    description.write_data_addr((i * 8) as u32, reference, i64::from(start));
+                }
+                None
+            }
+            hirsel_core_layout::ObjectFormat::MachO => Some(
+                object
+                    .declare_data(
+                        c::source::SITES_ORIGIN_SYMBOL,
+                        Linkage::Import,
+                        false,
+                        false,
+                    )
+                    .map_err(error)?,
+            ),
+        };
+        object.define_data(data, &description).map_err(error)?;
+        Ok(origin)
+    }
+
+    /// Writes each Mach-O pool word as `site symbol - origin + start`.
+    pub fn measure(
+        &self,
+        product: &mut cranelift_object::ObjectProduct,
+        origin: cranelift_module::DataId,
+    ) -> Result<()> {
+        use cranelift_object::object;
+        let pool = product
+            .object
+            .symbol(product.data_symbol(self.data.unwrap()));
+        let (Some(section), base) = (pool.section.id(), pool.value) else {
+            return Err(error("the site pool has no section"));
+        };
+        let origin = product.data_symbol(origin);
         for (i, &(symbol, start)) in self.words.iter().enumerate() {
-            let reference = object.declare_data_in_data(symbol, &mut description);
-            description.write_data_addr((i * 8) as u32, reference, i64::from(start));
+            product
+                .object
+                .add_relocation_with_subtractor(
+                    section,
+                    object::write::Relocation {
+                        offset: base + (i * 8) as u64,
+                        symbol: product.data_symbol(symbol),
+                        addend: i64::from(start),
+                        flags: object::RelocationFlags::Generic {
+                            kind: object::RelocationKind::Absolute,
+                            encoding: object::RelocationEncoding::Generic,
+                            size: 64,
+                        },
+                    },
+                    Some(origin),
+                )
+                .map_err(error)?;
         }
-        object.define_data(data, &description).map_err(error)
+        Ok(())
     }
 }
 

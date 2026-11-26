@@ -239,6 +239,15 @@ pub fn site_symbol(item: &DefPath) -> String {
 
 const SITE_SYMBOL_PREFIX: &str = "hirsel_core_site_";
 
+/// The absolute symbol of value zero that a Mach-O site word is measured
+/// from. A Mach-O word that names one symbol is an address to the linker: lld
+/// records a rebase for it even when the symbol is absolute, and dyld then
+/// adds the image's slide to the site. So a Mach-O unit writes each site word
+/// as the difference `site symbol - origin + start`, which the linker resolves
+/// and nothing slides. The fresh entry unit defines the origin. An ELF site
+/// word names the site symbol alone.
+pub const SITES_ORIGIN_SYMBOL: &str = "hirsel_core_sites_origin";
+
 pub fn site_item_symbol(name: &[u8]) -> Option<&[u8]> {
     let suffix = name.strip_prefix(SITE_SYMBOL_PREFIX.as_bytes())?;
     Some(match suffix.iter().position(|&byte| byte == b'_') {

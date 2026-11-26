@@ -375,8 +375,16 @@ pub(crate) fn live_site_words(bytes: &[u8]) -> Result<BTreeSet<u64>> {
 }
 
 /// Each item's symbol is its first site word: its file's first site plus the
-/// item's offset in that file.
+/// item's offset in that file. A Mach-O entry also defines the origin its
+/// units measure their site words from.
 pub(super) fn define(object: &mut object::write::Object<'_>, sources: &SourceMap) -> Result<()> {
+    if object.format() == object::BinaryFormat::MachO {
+        absolute(
+            object,
+            hirsel_core_ir::source::SITES_ORIGIN_SYMBOL.into(),
+            0,
+        );
+    }
     let starts = sources.site_starts()?;
     for (path, binding) in &sources.items {
         let site = starts[binding.file as usize] + u64::from(binding.file_offset);

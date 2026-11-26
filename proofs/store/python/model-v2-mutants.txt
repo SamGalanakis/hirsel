@@ -1,0 +1,4 @@
+M1 ack before sync: TOTAL_CUTS=122 FAILED=2 DAMAGE_CASES=13 FAILED=0 
+M2 manifest renamed before pack dir sync: TOTAL_CUTS=122 FAILED=5 DAMAGE_CASES=13 FAILED=0 
+M3 v1 rule: no END, last-segment bad frame is torn: TOTAL_CUTS=122 FAILED=0 DAMAGE_CASES=13 FAILED=3 
+M4 retired files removed (and dir synced) before the manifest rename: TOTAL_CUTS=127 FAILED=5 DAMAGE_CASES=13 FAILED=0 

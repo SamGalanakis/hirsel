@@ -1,0 +1,107 @@
+# StoreCatchUp Rules=v2157 bounds=catchup: BackfillNoneEmpty
+Error: Invariant BackfillNoneEmpty is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<>>
+/\ writes = 0
+/\ n = 0
+/\ v = "a"
+/\ x = {"a"}
+/\ ovl = FALSE
+/\ demotes = 0
+/\ synced = 0
+/\ lease = FALSE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 0]
+/\ acked = 0
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = <<>>
+
+State 2: <Write("c") line 113, col 5 to line 124, col 95 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<>>
+/\ writes = 1
+/\ n = 1
+/\ v = "c"
+/\ x = {"c"}
+/\ ovl = FALSE
+/\ demotes = 0
+/\ synced = 0
+/\ lease = FALSE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 0]
+/\ acked = 0
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "c", op |-> "ins"]>>,
+     v |-> "c",
+     t |-> "frame" ] >>
+
+State 3: <BeginExport line 201, col 5 to line 206, col 94 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<>>
+/\ writes = 1
+/\ n = 1
+/\ v = "c"
+/\ x = {"c"}
+/\ ovl = FALSE
+/\ demotes = 0
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 0]
+/\ acked = 0
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {"c"}, dels |-> {"a"}], v |-> "c", xs |-> "P"]
+/\ jn = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "c", op |-> "ins"]>>,
+     v |-> "c",
+     t |-> "frame" ] >>
+
+State 4: <Demote line 155, col 5 to line 166, col 71 of module StoreCatchUp>
+/\ xs = "B"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<[root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>]>>
+/\ writes = 1
+/\ n = 1
+/\ v = "c"
+/\ x = {}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {}, v |-> "c", xs |-> "B", n |-> 1]
+/\ acked = 1
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {"c"}, dels |-> {"a"}], v |-> "c", xs |-> "P"]
+/\ jn = <<>>
+
+State 5: <Round line 231, col 5 to line 240, col 106 of module StoreCatchUp>
+/\ xs = "B"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<[root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>]>>
+/\ writes = 1
+/\ n = 1
+/\ v = "c"
+/\ x = {}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 1
+/\ crashes = 0
+/\ base = [x |-> {}, v |-> "c", xs |-> "B", n |-> 1]
+/\ acked = 1
+/\ child = [root |-> {}, ov |-> [puts |-> {"c"}, dels |-> {"a"}], v |-> "c", xs |-> "B"]
+/\ jn = <<>>
+

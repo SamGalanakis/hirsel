@@ -1,0 +1,19 @@
+# Seeded one-rule mutants. check_proofs.py runs every line and fails unless TLC
+# reports the named invariant violated. Columns: module, rules, mutant, bounds
+# (a name in check_proofs.py BOUNDS), expected invariant, then the broken rule.
+# Each mutant is a `Mutant = "<name>"` branch in the module; the correct rule is
+# the branch's other arm.
+
+StoreRetention v2161 zero_live_retires     retention        RetainReachable    a pack with no live frame retires without a finished probe (live is advisory, D-ZL-1)
+StoreRetention v2161 inplace_behind_cursor retention        RetainReachable    promotion keeps a frame in place behind an unfinished probe's cursor (§13.5 step 3)
+StoreRetention v2161 idle_ignores_pins     retention        RetainReachable    an idle cut that ignores pins retires a pinned pack whole (§13.6 "Tiered-idle cuts", D-TI-1)
+StoreRetention v2161 probe_ignores_queue   retention        ProbeClaim         the probe matches heads and pins but not queue rows (§13.6 "The probe")
+StoreRetention v2161 remove_ignores_lease  retention        SnapReadable       AP16 Remove deletes a delisted pack a Snapshot's lease names (§13.5 holder leases)
+StoreRetention v2161 ack_before_publish    retention        AckedDurable       `pin` answers before its cut publishes (§1.9)
+StoreRetention v2161 positive_live_lease   retention_export ImageComplete      the export lease names only packs with positive live (D-ZL-2)
+StoreCatchUp   v2161 fold_superseded       catchup          HolderNoCorrupt    a demotion folds the reopened overlay into its empty root (§13.7 D-D7-5)
+StoreCatchUp   v2161 steps_after_tail      catchup          NoFalseCorrupt     catch-up applies a round's steps after its frames, not at their versions (§3.5a "Replay")
+StoreCatchUp   v2161 lease_drops_segments  catchup          InstallExact       the export lease keeps no segment a cut covered (§3.5a "Copy the tail")
+StoreCatchUp   v2161 ack_before_sync       catchup          RecoveredPrefix    a durable ticket resolves before its frame is synced (§1.9)
+StoreJanitor   -     release_ignores_sealed janitor         HeadBatchesKept    the release rule reads `live` and not the `sealed` entries (§12.11.8)
+StoreJanitor   -     stale_summary         janitor          HeadBatchesKept    the release rule uses a head observed before the INDEX row was written (§12.11.8)

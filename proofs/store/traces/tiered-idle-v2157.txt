@@ -1,0 +1,331 @@
+# StoreRetention Rules=v2157 bounds=retention: RetainReachable
+Error: Invariant RetainReachable is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ snap = [ on |-> FALSE,
+  refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  leased |-> {} ]
+/\ nextPack = 1
+/\ fault = FALSE
+/\ nextStamp = 3
+/\ pending = FALSE
+/\ files = {}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {}
+/\ packRows = <<<<>>, <<>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  pin |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "T",
+  listed |-> {},
+  live |-> <<{}, {}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 0, i |-> 0, s |-> 1, k |-> "H"],
+         [p |-> 0, i |-> 0, s |-> 2, k |-> "H"] >>,
+  res |-> "T" ]
+
+State 2: <Cut("plain",0) line 152, col 5 to line 282, col 46 of module StoreRetention>
+/\ snap = [ on |-> FALSE,
+  refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  leased |-> {} ]
+/\ nextPack = 2
+/\ fault = FALSE
+/\ nextStamp = 3
+/\ pending = FALSE
+/\ files = {1}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {}
+/\ packRows = <<<<1, 2>>, <<>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 1, i |-> 2, s |-> 2, k |-> "C"] >>,
+  pin |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "T",
+  listed |-> {1},
+  live |-> <<{1, 2}, {}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 1, i |-> 2, s |-> 2, k |-> "C"] >>,
+  res |-> "T" ]
+
+State 3: <Write(2) line 112, col 5 to line 117, col 105 of module StoreRetention>
+/\ snap = [ on |-> FALSE,
+  refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  leased |-> {} ]
+/\ nextPack = 2
+/\ fault = FALSE
+/\ nextStamp = 4
+/\ pending = FALSE
+/\ files = {1}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {}
+/\ packRows = <<<<1, 2>>, <<>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 1, i |-> 2, s |-> 2, k |-> "C"] >>,
+  pin |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "T",
+  listed |-> {1},
+  live |-> <<{1, 2}, {}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  res |-> "T" ]
+
+State 4: <Capture line 122, col 5 to line 126, col 116 of module StoreRetention>
+/\ snap = [ on |-> TRUE,
+  refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  leased |-> {1} ]
+/\ nextPack = 2
+/\ fault = FALSE
+/\ nextStamp = 4
+/\ pending = FALSE
+/\ files = {1}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {}
+/\ packRows = <<<<1, 2>>, <<>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 1, i |-> 2, s |-> 2, k |-> "C"] >>,
+  pin |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "T",
+  listed |-> {1},
+  live |-> <<{1, 2}, {}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  res |-> "T" ]
+
+State 5: <Cut("toMemory",0) line 152, col 5 to line 282, col 46 of module StoreRetention>
+/\ snap = [ on |-> TRUE,
+  refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  leased |-> {1} ]
+/\ nextPack = 2
+/\ fault = FALSE
+/\ nextStamp = 4
+/\ pending = FALSE
+/\ files = {1}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {}
+/\ packRows = <<<<1, 2>>, <<>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  pin |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {[p |-> 1, i |-> 1, s |-> 1, k |-> "C"]},
+  hres |-> "M",
+  listed |-> {1},
+  live |-> <<{1}, {}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  res |-> "M" ]
+
+State 6: <Cut("pin",0) line 152, col 5 to line 282, col 46 of module StoreRetention>
+/\ snap = [ on |-> TRUE,
+  refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  leased |-> {1} ]
+/\ nextPack = 3
+/\ fault = FALSE
+/\ nextStamp = 4
+/\ pending = FALSE
+/\ files = {1, 2}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {"s"}
+/\ packRows = <<<<1, 2>>, <<3>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  pin |->
+      [ on |-> TRUE,
+        refs |->
+            << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+               [p |-> 2, i |-> 1, s |-> 3, k |-> "C"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "M",
+  listed |-> {1, 2},
+  live |-> <<{1}, {3}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  res |-> "M" ]
+
+State 7: <Cut("unpin",1) line 152, col 5 to line 282, col 46 of module StoreRetention>
+/\ snap = [ on |-> TRUE,
+  refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  leased |-> {1} ]
+/\ nextPack = 3
+/\ fault = FALSE
+/\ nextStamp = 4
+/\ pending = FALSE
+/\ files = {1, 2}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> TRUE, rows |-> 1, known |-> 0, idle |-> TRUE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {}
+/\ packRows = <<<<1, 2>>, <<3>>, <<>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  pin |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "M",
+  listed |-> {1, 2},
+  live |-> <<{1}, {3}, {}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  res |-> "M" ]
+
+State 8: <Cut("pin",0) line 152, col 5 to line 282, col 46 of module StoreRetention>
+/\ snap = [ on |-> TRUE,
+  refs |->
+      << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+         [p |-> 0, i |-> 0, s |-> 3, k |-> "H"] >>,
+  leased |-> {1} ]
+/\ nextPack = 4
+/\ fault = FALSE
+/\ nextStamp = 4
+/\ pending = FALSE
+/\ files = {1, 2, 3}
+/\ export = [on |-> FALSE, listed |-> {}, lease |-> {}, copied |-> FALSE, image |-> {}]
+/\ cursor = << [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE],
+   [on |-> FALSE, rows |-> 0, known |-> 0, idle |-> FALSE] >>
+/\ crashes = 0
+/\ acked = {"s"}
+/\ packRows = <<<<1, 2>>, <<3>>, <<3>>>>
+/\ gen = [ hrefs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  pin |->
+      [ on |-> TRUE,
+        refs |->
+            << [p |-> 1, i |-> 1, s |-> 1, k |-> "C"],
+               [p |-> 3, i |-> 1, s |-> 3, k |-> "C"] >> ],
+  anchor |->
+      [ on |-> FALSE,
+        refs |->
+            << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+               [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >> ],
+  queue |-> {},
+  hres |-> "M",
+  listed |-> {2, 3},
+  live |-> <<{1}, {3}, {3}>> ]
+/\ rewind = "none"
+/\ head = [ refs |->
+      << [p |-> 0, i |-> 0, s |-> 0, k |-> "M"],
+         [p |-> 0, i |-> 0, s |-> 0, k |-> "M"] >>,
+  res |-> "M" ]
+

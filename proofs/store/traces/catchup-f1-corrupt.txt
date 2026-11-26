@@ -1,0 +1,211 @@
+# StoreCatchUp Rules=v2157 bounds=catchup: NoFalseCorrupt
+Error: Invariant NoFalseCorrupt is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<>>
+/\ writes = 0
+/\ n = 0
+/\ v = "a"
+/\ x = {"a"}
+/\ ovl = FALSE
+/\ demotes = 0
+/\ synced = 0
+/\ lease = FALSE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 0]
+/\ acked = 0
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = <<>>
+
+State 2: <BeginExport line 201, col 5 to line 206, col 94 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = <<>>
+/\ writes = 0
+/\ n = 0
+/\ v = "a"
+/\ x = {"a"}
+/\ ovl = FALSE
+/\ demotes = 0
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 0]
+/\ acked = 0
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = <<>>
+
+State 3: <Write("b") line 113, col 5 to line 124, col 95 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ] >>
+/\ writes = 1
+/\ n = 1
+/\ v = "b"
+/\ x = {"b"}
+/\ ovl = FALSE
+/\ demotes = 0
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 0]
+/\ acked = 0
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ] >>
+
+State 4: <Demote line 155, col 5 to line 166, col 71 of module StoreCatchUp>
+/\ xs = "B"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ],
+   [root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>] >>
+/\ writes = 1
+/\ n = 1
+/\ v = "b"
+/\ x = {}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {}, v |-> "b", xs |-> "B", n |-> 1]
+/\ acked = 1
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = <<>>
+
+State 5: <Write("a") line 113, col 5 to line 124, col 95 of module StoreCatchUp>
+/\ xs = "B"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ],
+   [root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>],
+   [ops |-> <<>>, v |-> "a", t |-> "frame"] >>
+/\ writes = 2
+/\ n = 2
+/\ v = "a"
+/\ x = {}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {}, v |-> "b", xs |-> "B", n |-> 1]
+/\ acked = 1
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = <<[ops |-> <<>>, v |-> "a", t |-> "frame"]>>
+
+State 6: <Build line 171, col 5 to line 177, col 86 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ],
+   [root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>],
+   [ops |-> <<>>, v |-> "a", t |-> "frame"],
+   [ root |-> {"a"},
+     t |-> "step",
+     k |-> "P",
+     mode |-> "root",
+     rows |-> <<[e |-> "a", op |-> "ins"]>> ] >>
+/\ writes = 2
+/\ n = 2
+/\ v = "a"
+/\ x = {"a"}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 2]
+/\ acked = 2
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = <<>>
+
+State 7: <Write("b") line 113, col 5 to line 124, col 95 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = FALSE
+/\ log = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ],
+   [root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>],
+   [ops |-> <<>>, v |-> "a", t |-> "frame"],
+   [ root |-> {"a"},
+     t |-> "step",
+     k |-> "P",
+     mode |-> "root",
+     rows |-> <<[e |-> "a", op |-> "ins"]>> ],
+   [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ] >>
+/\ writes = 3
+/\ n = 3
+/\ v = "b"
+/\ x = {"b"}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 0
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 2]
+/\ acked = 2
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {}, dels |-> {}], v |-> "a", xs |-> "P"]
+/\ jn = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ] >>
+
+State 8: <Round line 231, col 5 to line 240, col 106 of module StoreCatchUp>
+/\ xs = "P"
+/\ hErr = FALSE
+/\ cErr = TRUE
+/\ log = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ],
+   [root |-> {}, t |-> "step", k |-> "B", mode |-> "root", rows |-> <<>>],
+   [ops |-> <<>>, v |-> "a", t |-> "frame"],
+   [ root |-> {"a"},
+     t |-> "step",
+     k |-> "P",
+     mode |-> "root",
+     rows |-> <<[e |-> "a", op |-> "ins"]>> ],
+   [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ] >>
+/\ writes = 3
+/\ n = 3
+/\ v = "b"
+/\ x = {"b"}
+/\ ovl = FALSE
+/\ demotes = 1
+/\ synced = 0
+/\ lease = TRUE
+/\ shipped = 5
+/\ crashes = 0
+/\ base = [x |-> {"a"}, v |-> "a", xs |-> "P", n |-> 2]
+/\ acked = 2
+/\ child = [root |-> {"a"}, ov |-> [puts |-> {"b"}, dels |-> {"a"}], v |-> "b", xs |-> "P"]
+/\ jn = << [ ops |-> <<[e |-> "a", op |-> "del"], [e |-> "b", op |-> "ins"]>>,
+     v |-> "b",
+     t |-> "frame" ] >>
+

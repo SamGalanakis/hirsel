@@ -37,11 +37,11 @@ fn push_option(mut out: String, x: Option[View[String]]) {
 
 fn problem_text(mut out: String, p: Problem) {
     match p {
-        Unknown(t, hint) => {
+        Unknown(t, suggested) => {
             string.push(mut out, "Unknown(")
             string.push(mut out, t)
             string.push(mut out, ",")
-            match hint {
+            match suggested {
                 Some(h) => string.push(mut out, h),
                 None => string.push(mut out, "-"),
             }

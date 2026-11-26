@@ -1,0 +1,62 @@
+/// Input for ordinary terminal prompts, with room for one line up to max_bytes.
+pub opaque type PromptInput {
+    input: Stdin,
+    lines: std.io.Lines
+}
+
+pub type PromptError = PromptUnavailable | PromptRead(std.io.Error) | PromptWrite(WriteError)
+
+/// Prepare a reader to reuse for successive prompts. Buffered input stays in the reader.
+pub fn prompt_input(i: Stdin, max_bytes: u64) -> PromptInput {
+    let source: std.io.Input = Stdin(i)
+    let lines = std.io.lines(take source, max_bytes)
+    PromptInput(input: i, lines: take lines)
+}
+
+fn can_prompt(i: Stdin, no_input: bool) -> bool {
+    !no_input && stdin.is_terminal(i)
+}
+
+fn prompt_text(err: Stderr, message: String) -> Result[(), PromptError] waits {
+    match stderr.write(err, sanitize(message)) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(PromptWrite(e)),
+    }
+}
+
+/// Write a sanitized prompt on stderr and read one UTF-8 line without its ending.
+/// Returns None at EOF and PromptUnavailable when input is disabled or stdin is a pipe.
+pub fn prompt_line(mut reader: PromptInput, err: Stderr, message: String, no_input: bool) -> Result[Option[String], PromptError] waits {
+    if !can_prompt(reader.input, no_input) {
+        return Error(PromptUnavailable)
+    }
+    prompt_text(err, message)?
+    let mut line = string.new()
+    match std.io.read_line(mut reader.lines, mut line) {
+        Ok(true) => Ok(Some(take line)),
+        Ok(false) => Ok(None),
+        Error(e) => Error(PromptRead(e)),
+    }
+}
+
+/// With --yes, return true without prompting. Without a terminal or with --no-input,
+/// return false. Read y/yes case-insensitively. Any other answer or EOF counts as no.
+pub fn confirm(mut reader: PromptInput, err: Stderr, question: String, assume_yes: bool, no_input: bool) -> Result[bool, PromptError] waits {
+    if assume_yes {
+        return Ok(true)
+    }
+    if !can_prompt(reader.input, no_input) {
+        return Ok(false)
+    }
+    let mut message = string.from(question)
+    string.push(mut message, " [y/N] ")
+    match prompt_line(mut reader, err, message, no_input)? {
+        Some(take line) => {
+            let mut answer = take line
+            string.make_ascii_lower(mut answer)
+            let word = std.string.trim_ascii(answer)
+            Ok(word == "y" || word == "yes")
+        },
+        None => Ok(false),
+    }
+}

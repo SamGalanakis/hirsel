@@ -1,0 +1,115 @@
+fn tty_table(take out: Stdout) -> Result[(), WriteError] waits {
+    let mut head: List[TableCell] = list.new()
+    list.push(mut head, table_cell("ID"))
+    list.push(mut head, table_cell("Value"))
+    let mut first_fields: List[TableCell] = list.new()
+    list.push(mut first_fields, table_cell("界"))
+    let red = Style(fg: Some(Red), bold: false, dim: false, underline: false)
+    list.push(mut first_fields, TableCell(text: string.from("abcdefgh"), fixed: false, style: Some(red)))
+    let mut second: List[TableCell] = list.new()
+    list.push(mut second, table_cell("x"))
+    list.push(mut second, table_cell("ok"))
+    let mut rows: List[List[TableCell]] = list.new()
+    list.push(mut rows, take first_fields)
+    list.push(mut rows, take second)
+    table(out, head, rows, false, true)
+}
+
+fn served_text(mut served: Served[StreamOp], want: String) waits {
+    let Some(take call) = provide.next(mut served) else {
+        fail("missing stream write")
+    }
+    let Write(len) = provide.stream_op(call)
+    let mut payload: Bytes = list.with_capacity(len)
+    provide.payload(call, 0, mut payload)
+    if payload != string.as_bytes(want) {
+        fail("stream write contained different bytes")
+    }
+    let _ = result.unwrap(provide.reply(mut served, take call, provide.stream_reply(Done)))
+}
+
+fn no_more_writes(mut served: Served[StreamOp]) waits {
+    if let Some(take extra) = provide.next(mut served) {
+        let _ = take extra
+        fail("extra stream write")
+    }
+}
+
+/// bug: a table writes piece by piece, ignores the terminal width, or measures its SGR bytes.
+/// oracle: 10 columns minus the two-space delimiter leave 8. ID and 界 take 2 each, so Value
+/// gets 6 and abcdefgh becomes abc plus three dots. x takes one pad. Only the long cell is red.
+@test
+fn one_write_per_tty_table(tasks: Tasks) -> Result[(), ()] waits {
+    let (out, port) = provide.stdout(bytes 256, Some(TermSize(cols: 10, rows: 24)))
+    let mut served = take port
+    let child = task.spawn(tasks, bytes 65536, out, tty_table)
+    served_text(mut served, "ID  Value\n界  \u{1b}[31mabc...\u{1b}[0m\nx   ok\n")
+    no_more_writes(mut served)
+    result.unwrap(result.unwrap(task.join(take child)))
+    Ok(())
+}
+
+fn pipe_table(take out: Stdout) -> Result[(), WriteError] waits {
+    let mut head: List[TableCell] = list.new()
+    list.push(mut head, table_cell("name"))
+    list.push(mut head, table_cell("value"))
+    let mut row_fields: List[TableCell] = list.new()
+    list.push(mut row_fields, table_cell("a\tb"))
+    let red = Style(fg: Some(Red), bold: false, dim: false, underline: false)
+    list.push(mut row_fields, TableCell(text: string.from("x\ny\\z\r"), fixed: true, style: Some(red)))
+    let mut rows: List[List[TableCell]] = list.new()
+    list.push(mut rows, take row_fields)
+    table(out, head, rows, true, true)
+}
+
+/// bug: field tabs or newlines become TSV separators, a backslash is ambiguous, or a pipe
+/// gets SGR bytes or drops a requested header.
+/// oracle: write one literal tab between fields, one LF after each row, and spell field
+/// tab, LF and backslash as backslash-t, backslash-n and double backslash. CR is caret-M.
+@test
+fn escaped_tsv_on_a_pipe(tasks: Tasks) -> Result[(), ()] waits {
+    let (out, port) = provide.stdout(bytes 256, None)
+    let mut served = take port
+    let child = task.spawn(tasks, bytes 65536, out, pipe_table)
+    served_text(mut served, "name\tvalue\na\\tb\tx\\ny\\\\z^M\n")
+    no_more_writes(mut served)
+    result.unwrap(result.unwrap(task.join(take child)))
+    Ok(())
+}
+
+fn write_until_closed(take out: Stdout) -> u64 waits {
+    for sent in 0u64 .. 3u64 {
+        match write_out(out, "line\n") {
+            Ok(()) => {},
+            Error(e) => match e.error {
+                Closed => return sent,
+                _ => fail("unexpected write error"),
+            },
+        }
+    }
+    fail("writer kept going after Closed")
+}
+
+fn seal_stream(take served: Served[StreamOp]) {
+    let _ = take served
+}
+
+/// bug: write_out swallows Closed and a caller keeps writing after the consumer has gone.
+/// oracle: the first write is acknowledged. The provider withdraws the second call by
+/// closing the served port. The writer must report exactly one successful write.
+@test
+fn writer_stops_when_stdout_closes(tasks: Tasks) -> Result[(), ()] waits {
+    let (out, port) = provide.stdout(bytes 64, None)
+    let mut served = take port
+    let child = task.spawn(tasks, bytes 65536, out, write_until_closed)
+    served_text(mut served, "line\n")
+    let Some(take pending) = provide.next(mut served) else {
+        fail("missing second call before the port closed")
+    }
+    seal_stream(take served)
+    if result.unwrap(task.join(take child)) != 1 {
+        fail("writer did not propagate Closed on the second call")
+    }
+    let _ = take pending
+    Ok(())
+}

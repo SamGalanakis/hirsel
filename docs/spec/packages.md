@@ -247,6 +247,11 @@ the last.
   Binding a package brings in the toolchain packages it binds. A workspace using a toolchain package cannot also bind that
   package as a member or published library. `core` is bound in every package and
   may not be declared.
+
+  [`cli@1`](../../core/programs/cli/README.md) takes explicit `Stdout`, `Stderr` and
+  `Stdin` capabilities for terminal output and prompts. Tables use the width of
+  stdout on terminals and escaped TSV on pipes. Writers receive `Closed` when
+  the stdout consumer goes away.
 - `{ major, path }` binds a member of the same workspace (section 4). The path is relative to
   this manifest's directory and must resolve to a member's directory, whose `[package]` has
   this name and major.

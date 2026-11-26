@@ -1,0 +1,58 @@
+/// Write to stdout, preserving the byte count and error, including Closed.
+pub fn write_out(out: Stdout, text: String) -> Result[(), WriteError] waits {
+    stdout.write(out, text)
+}
+
+fn diagnostic(err: Stderr, prefix: String, message: String, ink: Color, color_on: bool) -> Result[(), WriteError] waits {
+    let st = Style(fg: Some(ink), bold: true, dim: false, underline: false)
+    let mut line = paint(prefix, st, color_on)
+    string.push(mut line, " ")
+    string.push(mut line, sanitize(message))
+    string.push(mut line, "\n")
+    stderr.write(err, line)
+}
+
+/// Report an error and return the selected exit status, even if stderr has closed.
+pub fn error(err: Stderr, message: String, status: u8, color_on: bool) -> Result[(), Exit] waits {
+    let _ = diagnostic(err, "error:", message, Red, color_on)
+    Error(Exit(status))
+}
+
+/// Write a sanitized warning to stderr.
+pub fn warning(err: Stderr, message: String, color_on: bool) -> Result[(), WriteError] waits {
+    diagnostic(err, "warning:", message, Yellow, color_on)
+}
+
+/// Write a sanitized hint to stderr.
+pub fn hint(err: Stderr, message: String, color_on: bool) -> Result[(), WriteError] waits {
+    diagnostic(err, "hint:", message, Cyan, color_on)
+}
+
+/// Check the spelling of a path relative to a granted Dir. The error is a diagnostic
+/// message. The Dir still checks access and confinement when it opens the path.
+pub fn check_path(filename: String) -> Result[(), String] {
+    match std.path.check(filename) {
+        Ok(()) => Ok(()),
+        Error(Invalid(offset)) => {
+            let mut message = string.from("path '")
+            string.push(mut message, sanitize(filename))
+            string.push(mut message, "' ")
+            if std.string.starts_with(filename, "/") {
+                string.push(mut message, "is absolute; use a path relative to the granted directory")
+            } else {
+                let parent_component = match string.next_split(filename, offset, "/") {
+                    Some((part, _)) => part == "..",
+                    None => false,
+                }
+                if parent_component {
+                    string.push(mut message, "contains '..'; use a path within the granted directory")
+                } else {
+                    string.push(mut message, "is invalid at byte ")
+                    string.push_u64(mut message, offset)
+                    string.push(mut message, "; expected a relative path without empty, '.' or NUL components")
+                }
+            }
+            Error(take message)
+        },
+    }
+}

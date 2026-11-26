@@ -1,0 +1,213 @@
+/// A table field. A fixed cell keeps its full width. Styling applies on terminals.
+pub type TableCell {
+    text: String,
+    fixed: bool,
+    style: Option[Style]
+}
+
+/// An unstyled field that can be truncated on a terminal.
+pub fn table_cell(text: String) -> TableCell {
+    TableCell(text: string.from(text), fixed: false, style: None)
+}
+
+type DisplayCell {
+    text: String,
+    columns: u64,
+    fixed: bool,
+    style: Option[Style]
+}
+
+type Column {
+    natural: u64,
+    assigned: u64
+}
+
+fn append_field(mut dest: String, text: String, pipe: bool) {
+    let safe = sanitize(text)
+    let mut at = 0u64
+    while let Some((c, next)) = string.next_scalar(safe, at) {
+        match c {
+            '\t' => string.push(mut dest, "\\t"),
+            '\n' => string.push(mut dest, "\\n"),
+            '\\' => if pipe {
+                string.push(mut dest, "\\\\")
+            } else {
+                string.push_char(mut dest, c)
+            },
+            _ => string.push_char(mut dest, c),
+        }
+        at = next
+    }
+}
+
+fn tsv_row(mut dest: String, fields: List[TableCell]) {
+    for i in 0 .. list.len(fields) {
+        if i > 0 {
+            string.push(mut dest, "\t")
+        }
+        append_field(mut dest, fields[i].text, true)
+    }
+    string.push(mut dest, "\n")
+}
+
+fn prepare_row(mut layout: List[Column], fields: List[TableCell]) -> List[DisplayCell] {
+    let mut cells: List[DisplayCell] = list.with_capacity(list.len(fields))
+    for i in 0 .. list.len(fields) {
+        let field = fields[i]
+        let mut text = string.with_capacity(string.byte_len(field.text))
+        append_field(mut text, field.text, false)
+        let columns = width(text)
+        if i == list.len(layout) {
+            list.push(mut layout, Column(natural: 0, assigned: 0))
+        }
+        if columns > layout[i].natural {
+            layout[i].natural = columns
+        }
+        if field.fixed && columns > layout[i].assigned {
+            layout[i].assigned = columns
+        }
+        list.push(mut cells, DisplayCell(text: take text, columns, fixed: field.fixed, style: field.style))
+    }
+    cells
+}
+
+fn space_left(layout: List[Column], terminal_width: u64) -> (u64, u64) {
+    let mut spare = int.saturating_sub(terminal_width, 2 * int.saturating_sub(list.len(layout), 1u64))
+    let mut flexible = 0u64
+    for column in layout {
+        spare = int.saturating_sub(spare, column.assigned)
+        if column.assigned == 0 {
+            flexible += 1
+        }
+    }
+    (spare, flexible)
+}
+
+fn assign_columns(mut layout: List[Column], terminal_width: u64) {
+    // go-gh settles short columns at their natural width, then splits the remaining space.
+    let (before, unassigned) = space_left(layout, terminal_width)
+    if unassigned > 0 {
+        let share = before / unassigned
+        for i in 0 .. list.len(layout) {
+            if layout[i].natural < share {
+                layout[i].assigned = layout[i].natural
+            }
+        }
+    }
+    let (after, flexible) = space_left(layout, terminal_width)
+    if flexible > 0 {
+        let share = after / flexible
+        for i in 0 .. list.len(layout) {
+            if layout[i].assigned == 0 {
+                let natural = layout[i].natural
+                layout[i].assigned = if natural < share {
+                    natural
+                } else {
+                    share
+                }
+            }
+        }
+    }
+    let (remainder, _) = space_left(layout, terminal_width)
+    let mut spare = remainder
+    for i in 0 .. list.len(layout) {
+        let missing = layout[i].natural - layout[i].assigned
+        let extra = if missing < spare {
+            missing
+        } else {
+            spare
+        }
+        layout[i].assigned += extra
+        spare -= extra
+        if spare == 0 {
+            break
+        }
+    }
+}
+
+fn fit_cell(cell: DisplayCell, columns: u64, padded: bool) -> String {
+    let mut used = cell.columns
+    let mut end = string.byte_len(cell.text)
+    let mut dots = false
+    if !cell.fixed && used > columns {
+        dots = columns >= 5
+        let budget = if dots {
+            columns - 3
+        } else {
+            columns
+        }
+        end = 0
+        used = 0
+        while let Some((c, next)) = string.next_scalar(cell.text, end) {
+            let advance = char_width(c)
+            if advance > budget - used {
+                break
+            }
+            used += advance
+            end = next
+        }
+    }
+    let mut val = string.from(string.slice(cell.text, 0, end))
+    if dots {
+        string.push(mut val, "...")
+        used += 3
+    }
+    if padded {
+        for _ in used .. columns {
+            string.push(mut val, " ")
+        }
+    } else if !cell.fixed && cell.columns > columns && used < columns {
+        // A double-width scalar can leave one unused column at the truncation boundary.
+        string.push(mut val, " ")
+    }
+    val
+}
+
+fn tty_table_text(head: List[TableCell], rows: List[List[TableCell]], terminal_width: u64, color_on: bool) -> String {
+    let mut layout: List[Column] = list.new()
+    let mut display: List[List[DisplayCell]] = list.new()
+    if list.len(head) > 0 {
+        list.push(mut display, prepare_row(mut layout, head))
+    }
+    for fields in rows {
+        list.push(mut display, prepare_row(mut layout, fields))
+    }
+    assign_columns(mut layout, terminal_width)
+    let mut dest = string.new()
+    for fields in display {
+        for i in 0 .. list.len(fields) {
+            if i > 0 {
+                string.push(mut dest, "  ")
+            }
+            let cell = fields[i]
+            let val = fit_cell(cell, layout[i].assigned, i + 1 < list.len(fields))
+            match cell.style {
+                Some(st) => string.push(mut dest, paint(val, st, color_on)),
+                None => string.push(mut dest, val),
+            }
+        }
+        string.push(mut dest, "\n")
+    }
+    dest
+}
+
+/// Buffer the table and write it in one call. A nonempty header is used on terminals and
+/// on pipes with pipe_header. Terminals use two-space columns and stdout's width (80 when
+/// unavailable). Pipes get unstyled escaped TSV. Both forms sanitize the fields.
+pub fn table(out: Stdout, head: List[TableCell], rows: List[List[TableCell]], pipe_header: bool, color_on: bool) -> Result[(), WriteError] waits {
+    if stdout.is_terminal(out) {
+        let columns: u64 = match stdout.size(out) {
+            Some(size) => int.widen(size.cols),
+            None => 80,
+        }
+        return write_out(out, tty_table_text(head, rows, columns, color_on))
+    }
+    let mut dest = string.new()
+    if pipe_header && list.len(head) > 0 {
+        tsv_row(mut dest, head)
+    }
+    for fields in rows {
+        tsv_row(mut dest, fields)
+    }
+    write_out(out, dest)
+}

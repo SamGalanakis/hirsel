@@ -160,13 +160,13 @@ fn flag_name(shown_flag: String) -> View[String] in shown_flag {
     }
 }
 
-fn message(mut out: String, s: Spec, cmd: u64, p: Problem) {
+fn report_problem(mut out: String, s: Spec, cmd: u64, p: Problem) {
     match p {
-        Unknown(t, hint) => {
+        Unknown(t, suggested) => {
             string.push(mut out, "unexpected argument ")
             quoted(mut out, t)
             string.push(mut out, " found")
-            match hint {
+            match suggested {
                 Some(h) => {
                     tip(mut out)
                     string.push(mut out, "a similar argument exists: ")
@@ -226,7 +226,7 @@ fn message(mut out: String, s: Spec, cmd: u64, p: Problem) {
             string.push(mut out, ": ")
             string.push(mut out, why)
         }
-        NotChoice(f, v, choices, hint) => {
+        NotChoice(f, v, choices, suggested) => {
             string.push(mut out, "invalid value ")
             quoted(mut out, v)
             string.push(mut out, " for ")
@@ -234,7 +234,7 @@ fn message(mut out: String, s: Spec, cmd: u64, p: Problem) {
             string.push(mut out, "\n  [possible values: ")
             string.push(mut out, string.join(choices, ", "))
             string.push(mut out, "]")
-            if let Some(h) = hint {
+            if let Some(h) = suggested {
                 tip(mut out)
                 string.push(mut out, "a similar value exists: ")
                 quoted(mut out, h)
@@ -291,7 +291,7 @@ pub fn report(s: Spec, f: Failure) -> String {
                         string.push(mut out, "\n")
                     }
                     string.push(mut out, "error: ")
-                    message(mut out, s, f.at.at, p)
+                    report_problem(mut out, s, f.at.at, p)
                     listed_missing = true
                 }
             }
@@ -300,7 +300,7 @@ pub fn report(s: Spec, f: Failure) -> String {
                     string.push(mut out, "\n")
                 }
                 string.push(mut out, "error: ")
-                message(mut out, s, f.at.at, p)
+                report_problem(mut out, s, f.at.at, p)
                 listed_missing = false
             }
         }

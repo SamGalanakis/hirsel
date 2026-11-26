@@ -15,10 +15,15 @@ std = { major = 1 }
 "style.hirsel" = "cli"
 "width.hirsel" = "cli"
 "complete.hirsel" = "cli"
+"table.hirsel" = "cli"
+"diagnostics.hirsel" = "cli"
+"prompt.hirsel" = "cli"
 
 [tests]
 limit = 67108864
+grants = ["Tasks"]
 
 [tests.sources]
 "tests/parse.hirsel" = "cli"
 "tests/output.hirsel" = "cli"
+"tests/terminal.hirsel" = "cli"

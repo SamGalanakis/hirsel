@@ -267,8 +267,8 @@ fn read_long(mut sc: Scan, s: Spec, words: List[String], i: u64, t: String) -> u
         return i
     }
     let Some((slot, negated)) = find_long(s, sc.cmd, name) else {
-        let hint = best(name, long_names(s, sc.cmd))
-        note(mut sc, Unknown(joined("--", name), hint))
+        let suggested = best(name, long_names(s, sc.cmd))
+        note(mut sc, Unknown(joined("--", name), suggested))
         return i
     }
     let kind = s.slots[slot].kind
@@ -410,8 +410,8 @@ fn store(mut sc: Scan, s: Spec, slot: u64, text: String, as_given: String) {
         for c in s.slots[slot].choices {
             list.push(mut choices, string.from(c))
         }
-        let hint = best(text, choices)
-        note(mut sc, NotChoice(shown(s, slot), string.from(as_given), take choices, take hint))
+        let suggested = best(text, choices)
+        note(mut sc, NotChoice(shown(s, slot), string.from(as_given), take choices, take suggested))
         return
     }
     list.push(mut sc.texts[slot], string.from(text))

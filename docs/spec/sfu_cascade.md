@@ -1,8 +1,11 @@
 # SFU cascade
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 4 of 4); design
-review applied the same day (media-w2-spec-fix-2918). Not built. Rules CAS-1 to CAS-8, laws K1
-to K10, slices KS1 to KS5. The review's rulings are at the end.*
+review media-w2-spec-fix-2918. KS1 to KS4 implement links, forwarding, repair, and
+fences and leases against `sim_directory`. KS5 adds the three-node Boat harness for
+K10. The built directory and K10 harness use monotonic time. Fleet's
+suspend-inclusive lease profile is specified in [FLT-5](fleet.md#flt-5-dedicated-directoryk-places-archetype-b).
+Rules CAS-1 to CAS-8 and laws K1 to K10 apply.*
 
 `sfu_cascade` lets one room span several SFU nodes. Participants join the node nearest
 them; the nodes relay each published layer between them over [QUIC](quic.md). It lives in
@@ -10,10 +13,9 @@ them; the nodes relay each published layer between them over [QUIC](quic.md). It
 its state is the router's: down-tracks, layers, fences. It extends [RTC-10](webrtc.md)'s
 pooled service; a node that cascades no room behaves exactly as RTC-10 says.
 
-The room directory it depends on is specified here as a contract, `RoomDirectory` (CAS-1),
-with an in-memory fake that slices KS1 to KS5 build and test against. The production
-directory is an adapter of the same contract over a linearizable Hirsel Store cell with
-compare-and-set on `term`.
+The room directory it depends on is `RoomDirectory` (CAS-1). The cascade implements
+an in-memory directory for the laws and K10 harness. A production adapter over a
+linearizable Hirsel Store cell with compare-and-set on `term` remains planned.
 
 ## CAS-1: Topology and the directory contract
 
@@ -33,10 +35,17 @@ compare-and-set on `term`.
   carries the room's term; an edge refuses any message with a term lower than the highest it
   has seen for that room. So two homes in different terms cannot both drive an edge.
 
-```hirsel unbuilt
+```hirsel signatures webrtc_sfu/cascade
 pub opaque type RoomDirectory
-pub type DirEntry { home: NodeId, term: u64, fences: List[(u64, u64)] }
-pub type NodeEntry { addr: Addr, pins: List[quic.Pin] }
+pub type DirEntry {
+    home: NodeId,
+    term: u64,
+    fences: List[(u64, u64)]
+}
+pub type NodeEntry {
+    addr: Addr,
+    pins: List[quic.handshake.Pin]
+}
 pub type DirError = Stale(term: u64) | Held(until_ms: u64) | Unknown | Unavailable
 
 pub fn sim_directory(clock: Clock, drift_ppm: u32) -> RoomDirectory
@@ -56,8 +65,8 @@ pub fn commit_fence(mut d: RoomDirectory, room: Bytes, term: u64, participant: u
     `Stale` if the home has lost the term. A committed fence is never removed while the room
     exists.
   - `sim_directory` is the in-memory fake: one linearizable map under the simulator's clock,
-    with injectable unavailability and delay, which every K law uses. The Store adapter
-    implements the same six operations and is checked by the same laws.
+    with injectable unavailability and delay. The planned Store adapter uses the
+    same directory operations and laws.
 
 - **The home's term lease.** A home holds its term only under a lease from the directory,
   counted as CAS-5 counts an edge's lease: from the moment the home sent its `renew`, for the
@@ -72,13 +81,24 @@ pub fn commit_fence(mut d: RoomDirectory, room: Bytes, term: u64, participant: u
 
 ## CAS-2: Links
 
-```hirsel unbuilt
-pub type NodeId = NodeId(Inline[u8, 16])
-pub type LinkLimits { rooms: u32, layers: u32, link_bytes: u64, lease_ms: u32, drift_ppm: u32, guard_ms: u32 }
-pub type Cascade { node: NodeId, identity: quic.Identity, directory: RoomDirectory, limits: LinkLimits }
-pub type CascadeError = Term(u64) | Router(RouterError)
+```hirsel signatures webrtc_sfu/cascade
+pub type NodeId: key = NodeId(Inline[u8, 16])
+pub type LinkLimits {
+    rooms: u32,
+    layers: u32,
+    link_bytes: u64,
+    lease_ms: u32,
+    drift_ppm: u32,
+    guard_ms: u32
+}
+pub opaque type LinkHub
+pub opaque type CascadeRouter
+pub type CascadeError = Term(u64) | Router(router.RouterError)
 
-pub fn revoke(mut c: Cascade, mut r: Router, room: RoomId, participant: u64, epoch: u64) -> Result[(), CascadeError] waits
+pub fn link_hub(local_node: NodeId, r: Random, limits: LinkLimits, take identity: quic.handshake.Identity, take client_pins: List[quic.handshake.Pin], max_connections: u32) -> Result[LinkHub, LinkError]
+pub fn cascade_router(local_node: NodeId, limits: LinkLimits) -> CascadeRouter
+pub fn begin_revoke(mut cr: CascadeRouter, mut hub: LinkHub, mut dir: RoomDirectory, room_name: Bytes, participant: u64, epoch: u64, now_ms: u64) -> Result[u64, CascadeError] waits
+pub fn poll_revoke(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Bytes, fence_seq: u64, now_ms: u64) -> bool
 ```
 
 A link is mutually authenticated: each side presents its node certificate and pins the
@@ -86,7 +106,7 @@ other's from the directory's `NodeEntry.pins`, through `quic`'s `client_pins` on
 accepting side and the pin list on the dialing side (QUIC-3). An unknown peer is refused at
 the handshake, before any stream opens. A link uses ALPN `hirsel-cascade-1`.
 
-**Attachment to the pool.** A `Cascade` is part of RTC-10's `Pool` (`Pool.cascade`). Link
+**Planned attachment to the pool.** The cascade integration adds `Pool.cascade` to RTC-10. Link
 control runs on the pool's control unit (Unit 0) beside the room clients; each link's QUIC
 endpoint lives on one media unit, and media to and from other units reaches it as inter-unit
 messages, as RTC-5's fan-out already moves them.
@@ -126,7 +146,7 @@ Each link carries:
   one term is detached and reattached under a new room number. A datagram whose layer is not
   announced is dropped and counted.
 - **Canonical RTP metadata.** On a link, packets use one cascade table of header-extension
-  ids and payload types, fixed in the package (`cascade/canon.hirsel` <!-- doc-ref: planned -->): extension ids are
+  ids and payload types, fixed in `core/programs/webrtc_sfu/cascade/canon.hirsel`: extension ids are
   the order of RTC-1's `Ext` variants from 1, and payload types are RTC-2's codec formats in
   order from 96. The sending node rewrites each packet into the table as RTC-5 rewrites for a
   subscriber, and the receiving node treats a link layer as a publication whose agreed
@@ -195,15 +215,17 @@ RTC-10) over `webrtc_sfu.router`:
 
 ## CAS-4: The cross-node fence
 
-`revoke(room, participant, epoch)` is called on the home. It returns `Ok(())` only when no
-node of the room will route that participant's media at a fenced epoch, the same guarantee
-as RTC-7 but across nodes, and only once the fence is durable:
+The home calls `begin_revoke` to commit the fence and obtain the fence sequence.
+Completion comes from `poll_revoke` once no node of the room will route that
+participant's media at a fenced epoch, the same guarantee as RTC-7 across nodes.
 
 0. The home commits the fence to the directory with `commit_fence(room, term, participant,
    epoch)`, a compare-and-set on its term. If it fails with `Stale(t)` the node is no longer
-   home and `revoke` returns `Err(Term(t))` at once; the caller revokes at the new home,
-   which already has the fence table. While the directory is unavailable the step waits. So
-   a home that fails after `Ok` cannot take the fence with it: the next home reads it with
+   home and `begin_revoke` returns `Error(Term(t))`; the caller revokes at the new home,
+   which already has the fence table. The built directory reports unavailability as
+   `Error(Router(Suspended))` from `begin_revoke`. The production directory must
+   establish the commit before the operation can complete. So
+   a home that fails after completion cannot take the fence with it: the next home reads it with
    its term (CAS-7).
 1. The home applies RTC-7 on its own units.
 2. It sends `Fence(participant, epoch, seq)` on the link control stream of every link in the
@@ -212,7 +234,7 @@ as RTC-7 but across nodes, and only once the fence is durable:
 3. An edge applies RTC-7 locally, with one addition: datagrams from the link whose layer
    belongs to the participant at a fenced epoch are dropped when taken, like an inter-unit
    message in RTC-7 step 4. It then acknowledges `seq`.
-4. The home returns `Ok(())` when every edge in the ledger has acknowledged, or when CAS-5
+4. `poll_revoke` returns `true` when every edge in the ledger has acknowledged, or when CAS-5
    makes an unacknowledged edge safe.
 
 Both ends of a link drop a fenced participant's media at ingress: the edge as step 3 says,

@@ -1,10 +1,11 @@
 # QUIC
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 2, Media Wave 2 package 1
-of 4); design review applied the same day (media-w2-spec-fix-2918). Not built. Rules QUIC-1 to
-QUIC-10, laws Q1 to Q18, slices QS0 to QS8. The review's rulings are at the end.*
+of 4), with design review media-w2-spec-fix-2918. QS0 to QS7 implement the endpoint
+and UDP driver. QS8 adds the interop runner and cost benchmark. Rules QUIC-1 to QUIC-10
+and laws Q1 to Q18 apply.*
 
-`quic` is a sans-IO QUIC version 1 endpoint, written in Hirsel under `core/programs/quic` <!-- doc-ref: planned -->.
+`quic` is a sans-IO QUIC version 1 endpoint, written in Hirsel under `core/programs/quic`.
 It is the transport under [WebTransport](webtransport.md), [MoQ](moq.md) and
 [sfu_cascade](sfu_cascade.md). It covers:
 
@@ -75,49 +76,90 @@ linked into the package.
 
 ## QUIC-1: Shape
 
-```hirsel unbuilt
+```hirsel signatures quic/quic
 pub opaque type Endpoint
 pub opaque type Connection
-pub type ConnectionHandle = ConnectionHandle(u32)
-pub type StreamId = StreamId(u64)
-pub type Side = Client | Server
-pub type EndpointConfig { member: u16, members: u16, cid_len: u8, max_mtu: u16, retry: RetryPolicy, reset_key: Secret, token_key: Secret, limits: EndpointLimits }
-pub type EndpointLimits { connections: u32, unvalidated: u32, datagram_bytes: u32 }
-pub type TransportConfig { max_idle_ms: u32, initial_max_data: u64, initial_max_stream_data: u64, max_streams_bidi: u64, max_streams_uni: u64, max_datagram_frame: u16, send_bytes: u64, max_gaps: u16, cc: Controller, alpn: List[String], client_pins: Option[List[Pin]] }
+pub type ConnectionHandle: key = ConnectionHandle(u32)
+pub type StreamId: key = StreamId(u64)
+pub type EndpointConfig {
+    member: u16,
+    members: u16,
+    cid_len: u8,
+    max_mtu: u16,
+    retry: RetryPolicy,
+    reset_key: Secret,
+    token_key: Secret,
+    limits: EndpointLimits
+}
+pub type EndpointLimits {
+    connections: u32,
+    unvalidated: u32,
+    datagram_bytes: u32
+}
+pub type TransportConfig {
+    max_idle_ms: u32,
+    initial_max_data: u64,
+    initial_max_stream_data: u64,
+    max_streams_bidi: u64,
+    max_streams_uni: u64,
+    max_datagram_frame: u16,
+    send_bytes: u64,
+    max_gaps: u16,
+    cc: Controller,
+    alpn: List[String],
+    client_pins: Option[List[handshake.Pin]]
+}
 pub type Controller = NewReno | Cubic
 pub type RetryPolicy = Never | Always | Above(u32)
-pub type Identity = Identity(chain: List[Bytes], key: Secret, alg: SignAlg)
-pub type Pin = Spki(Inline[u8, 32]) | Cert(Inline[u8, 32])
-pub type Priority { urgency: u8, order: u64, then: u64 }
-pub type PeerParams { max_idle_ms: u64, max_udp_payload: u64, max_ack_delay_ms: u64, max_datagram_frame: u64, reset_stream_at: bool, active_cid_limit: u64 }
+pub type Priority: key {
+    urgency: u8,
+    order: u64,
+    then: u64
+}
+pub type PeerParams {
+    max_idle_ms: u64,
+    max_udp_payload: u64,
+    max_ack_delay_ms: u64,
+    max_datagram_frame: u64,
+    reset_stream_at: bool,
+    active_cid_limit: u64
+}
 
 pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
 pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
+pub type QuicError = Config | Limit | Handshake(handshake.Error) | UnknownConnection | UnknownStream | StreamState | StreamReset(u64) | TooLarge(u64) | Unsupported
 
-pub fn endpoint(r: Random, c: EndpointConfig, server: Option[(Identity, TransportConfig)]) -> Result[Endpoint, QuicError]
-pub fn connect(mut e: Endpoint, now: u64, to: Addr, name: String, pins: List[Pin], client: Option[Identity], t: TransportConfig) -> Result[ConnectionHandle, QuicError]
-pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, buf: Bytes, at: u64, len: u64, mut events: List[Event])
+pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshake.Identity, TransportConfig)]) -> Result[Endpoint, QuicError]
+pub fn connect(mut e: Endpoint, now: u64, to: Addr, take name: String, take pins: List[handshake.Pin], take identity: Option[handshake.Identity], take t: TransportConfig) -> Result[ConnectionHandle, QuicError]
+pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf: Bytes, at: u64, len: u64, mut events: List[Event])
 pub fn timeout(mut e: Endpoint, now: u64, mut events: List[Event])
 pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> Option[u64]
 pub fn committed(mut e: Endpoint, now: u64, k: u64)
 pub fn open(mut e: Endpoint, c: ConnectionHandle, bidi: bool) -> Result[StreamId, QuicError]
 pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError]
-pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Shared[Bytes], fin: bool) -> Result[bool, QuicError]
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError]
 pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError]
 pub fn received(e: Endpoint, c: ConnectionHandle, s: StreamId) -> u64
 pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError]
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError]
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, data: Shared[Bytes], p: Priority, tag: u64) -> Result[(), QuicError]
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: Shared[Bytes], p: Priority, tag: u64) -> Result[(), QuicError]
 pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64
 pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError]
-pub fn close(mut e: Endpoint, c: ConnectionHandle, code: u64, reason: Bytes)
-pub fn set_identity(mut e: Endpoint, id: Identity)
-pub fn set_client_pins(mut e: Endpoint, pins: Option[List[Pin]])
-pub fn peer_pin(e: Endpoint, c: ConnectionHandle) -> Option[Pin]
-pub fn peer_params(e: Endpoint, c: ConnectionHandle) -> Option[PeerParams]
-pub fn pto_ns(e: Endpoint, c: ConnectionHandle) -> u64
+pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Bytes)
+pub fn set_identity(mut e: Endpoint, take id: handshake.Identity)
+pub fn set_client_pins(mut e: Endpoint, take pins: Option[List[handshake.Pin]])
+pub fn peer_pin(e: Endpoint, id: ConnectionHandle) -> Option[handshake.Pin]
+pub fn peer_params(e: Endpoint, id: ConnectionHandle) -> Option[PeerParams]
+pub fn pto_ns(e: Endpoint, id: ConnectionHandle) -> u64
+```
+
+TLS identities and pins are declared in `quic.handshake`.
+
+```hirsel signatures quic/handshake
+pub type Identity = Identity(chain: List[Bytes], key: Secret, alg: SignAlg)
+pub type Pin = Spki(Inline[u8, 32]) | Cert(Inline[u8, 32])
 ```
 
 One `Endpoint` per socket or per group member, as quinn-proto's `Endpoint` is "the protocol
@@ -563,7 +605,7 @@ Per endpoint, received datagrams are bounded by `EndpointLimits.datagram_bytes`.
 
 `quic.drive` is the thin IO loop for the common case, so consumers do not each write one:
 
-```hirsel unbuilt
+```hirsel signatures quic/quic
 pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut events: List[Event]) -> Result[(), NetError] waits
 ```
 
@@ -587,7 +629,7 @@ shows as `Truncated` drops.
 
 ## Laws
 
-Each is red first in `core/programs/quic/laws.hirsel` <!-- doc-ref: planned --> unless named, with its oracle outside
+Laws live in `core/programs/quic/laws.hirsel` and the adjacent `*_laws.hirsel` files, with each oracle outside
 the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated here.
 
 - **Q1 `varint_and_packet_number_vectors`.** RFC 9000 Appendix A.1's varints

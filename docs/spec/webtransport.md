@@ -1,8 +1,10 @@
 # WebTransport over HTTP/3
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 2 of 4); design
-review applied the same day (media-w2-spec-fix-2918). TS1 to TS3 built (wt-ts1-ts3-2992); TS4 and
-TS5 not built. Rules WT-1 to WT-7, laws T1 to T10, slices TS1 to TS5. The review's rulings are at the end.*
+review media-w2-spec-fix-2918. TS1 to TS5 implement static QPACK, HTTP/3 CONNECT,
+sessions, flow control across pooled sessions and browser certificate rotation.
+T4 peer interoperability and T5 browser qualification have their own gates.
+Rules WT-1 to WT-7 and laws T1 to T10 apply.*
 
 `webtransport` is a sans-IO HTTP/3 server and client with only what WebTransport needs. It is
 written in Hirsel under `core/programs/webtransport` and runs over
@@ -80,39 +82,59 @@ codepoint is one table edit and one law update.
 
 ## WT-2: Shape
 
-```hirsel unbuilt
+```hirsel signatures webtransport/webtransport
 pub opaque type Endpoint
-pub type SessionHandle = SessionHandle(conn: quic.ConnectionHandle, id: quic.StreamId)
-pub type Limits { authorities: List[String], origins: List[String], require_origin: bool, sessions: u16, sessions_per_connection: u16, pending_connects: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, buffered_datagrams: u16, header_bytes: u32 }
-pub type Request { authority: String, path: String, origin: Option[String], protocols: List[String], headers: List[(String, String)] }
+pub type SessionHandle: key = SessionHandle(conn: quic.ConnectionHandle, id: quic.StreamId)
+pub type Limits {
+    authorities: List[String],
+    origins: List[String],
+    require_origin: bool,
+    sessions: u16,
+    sessions_per_connection: u16,
+    pending_connects: u16,
+    streams_bidi: u64,
+    streams_uni: u64,
+    data: u64,
+    buffered: u16,
+    buffered_datagrams: u16,
+    header_bytes: u32
+}
+pub type Request {
+    authority: String,
+    path: String,
+    origin: Option[String],
+    protocols: List[String],
+    headers: List[(String, String)]
+}
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
 pub type Refusal = Status(u16) | Pin
 pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, reason: Refusal) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
-
-pub type WtError = UnknownSession | State | Url | Quic(quic.QuicError)
+pub type WtError = UnknownSession | State | Url | Blocked | Quic(quic.QuicError)
 
 pub fn endpoint(take limits: Limits) -> Endpoint
 pub fn transport(limits: Limits) -> quic.TransportConfig
 pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[quic.Event], mut out: List[Event])
 pub fn poll(mut w: Endpoint, mut e: quic.Endpoint, now: u64, mut out: List[Event]) -> Option[u64]
 pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: Verdict) -> Result[(), WtError]
-pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, take pins: List[quic.Pin], take protocols: List[String]) -> Result[SessionHandle, WtError]
+pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, take pins: List[quic.handshake.Pin], take protocols: List[String]) -> Result[SessionHandle, WtError]
 pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool) -> Result[quic.StreamId, WtError]
 pub fn read(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, mut into: Bytes) -> Result[(u64, bool), WtError]
 pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Bytes, fin: bool) -> Result[u64, WtError]
-pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Shared[Bytes], fin: bool) -> Result[bool, WtError]
+pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, WtError]
 pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError]
 pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError]
 pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError]
 pub fn drain(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle)
 pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32, reason: Bytes)
+pub fn dropped_datagrams(w: Endpoint) -> u64
+
 pub opaque type BrowserIdentity
+pub type CertificateError = Lifetime | Key(KeyError) | Certificate(std.x509_build.BuildError) | State | Quic(quic.QuicError)
 pub fn browser_identity(r: Random, serial: u64, name: String, not_before: std.time.Timestamp, not_after: std.time.Timestamp) -> Result[BrowserIdentity, CertificateError]
 pub fn browser_server(mut w: Endpoint, r: Random, take config: quic.EndpointConfig, take current: BrowserIdentity, take next: BrowserIdentity) -> Result[quic.Endpoint, CertificateError]
 pub fn rotate(mut w: Endpoint, mut e: quic.Endpoint, take next: BrowserIdentity) -> Result[(), CertificateError]
 pub fn certificate_rotation_at(w: Endpoint) -> Option[i64]
-pub fn certificate_hashes(w: Endpoint) -> List[quic.Pin]
-pub fn dropped_datagrams(w: Endpoint) -> u64
+pub fn certificate_hashes(w: Endpoint) -> List[quic.handshake.Pin]
 ```
 
 One `Endpoint` serves both roles over one `quic.Endpoint`, as `quic` does: a server's
@@ -321,7 +343,7 @@ A browser reaches a server that has no Web PKI certificate through
 `serverCertificateHashes`: SHA-256 of the DER certificate, and the certificate must be ECDSA
 P-256 and valid for at most 14 days (W3C WebTransport,
 [§ 6.4 serverCertificateHashes](https://w3c.github.io/webtransport/#dom-webtransportoptions-servercertificatehashes)).
-That hash is exactly `quic.Pin.Cert` (QUIC-3).
+That hash is exactly `quic.handshake.Pin.Cert` (QUIC-3).
 
 `browser_identity` rejects validity intervals outside (0, 14 days] before minting with
 a key from `secret.p256_key`. It signs a P-256 server leaf with its own key and

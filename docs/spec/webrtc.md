@@ -516,8 +516,16 @@ pub type Participant {
     gen: Gen,
     room: RoomId
 }
-pub type PeerLimits { sections: u8, down_tracks: u16, rtx_bytes: u64, pacer_packets: u32, start_bps: u64 }
-pub type PeerError = Sdp(sdp.SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(dtls.DtlsError) | Srtp(srtp.SrtpError) | Rtp(rtp.header.WriteError) | Capacity(Capacity)
+pub type PeerLimits {
+    sections: u8,
+    down_tracks: u16,
+    rtx_bytes: u64,
+    pacer_packets: u32,
+    start_bps: u64,
+    dtls_transport: dtls.Transport,
+    repair_profile: RepairProfile
+}
+pub type PeerError = Sdp(sdp.SdpError) | Fenced | Closed | Ice(stun_ice.IceError) | Dtls(dtls.DtlsError) | Srtp(srtp.SrtpError) | Rtp(rtp.header.WriteError) | Capacity(Capacity) | RepairConfig
 pub type Class: key = Stun | Dtls | Rtp | Rtcp | Drop
 pub type Input = Nothing | Replied | Media(MediaIn) | Repair(MediaIn) | Control(ControlIn)
 pub type Poll = Transmit | WakeAt(u64) | Idle
@@ -769,7 +777,7 @@ pub fn resume(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outb
 
 ```hirsel signatures webrtc_sfu/units
 pub opaque type Unit
-pub type Event = Fenced(peer.Participant) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
+pub type Event = Fenced(peer.Participant) | Fault(room: peer.RoomId, error: router.RouterError) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
 pub type Plane: key { inflight: u16, rooms: u32, media_take: u32 }
 pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError]
 pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64, plane: Plane) -> Result[Unit, router.RouterError]
@@ -1365,11 +1373,11 @@ per peer plus addressed `Message M`. The room's types are the application's, so 
 generic over them:
 
 ```hirsel signatures webrtc_sfu/signal
-pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
+pub type Signal: codec + send = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
 pub type PeerRights: key + send { publish: bool }
 pub type PeerMember: key + send { peer: u32, caller: store.Caller, rights: PeerRights }
 pub type PeerJoin: send { peer: u32, caller: store.Caller, roster: List[PeerMember] }
-pub type Embed[M] { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], admit: own[send] fn(PeerJoin) -> PeerRights }
+pub type Embed[M]: send { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], admit: own[send] fn(PeerJoin) -> PeerRights }
 pub type Build: cross { who: peer.Participant, home: u16, peer: u32, version: u64, offer: Bytes, publish: bool, ice_ufrag: Bytes, ice_pwd: Bytes }
 pub type Built: cross { answer: Bytes, recvs: List[u8], sends: List[(u8, sdp.Media)] }
 
@@ -1385,8 +1393,8 @@ pub fn rights[M](a: Adapter[M], number: u32) -> Option[PeerRights]
 
 ```hirsel signatures runner/room_client
 pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
-pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32, store.Caller) | Left(u32) | Message(u32, M) | Lost
-pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
+pub type RoomIn[M]: send = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32, store.Caller) | Left(u32) | Message(u32, M) | Lost
+pub type RoomOut[M]: send = ToPeer(u32, M) | ToRoom(M)
 ```
 
 The service itself is one room peer, admitted by the application's room admission like any

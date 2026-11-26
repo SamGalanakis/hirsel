@@ -1,9 +1,9 @@
 # Media over QUIC
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 3 of 4); design
-review applied the same day (media-w2-spec-fix-2918). Slice MS1, the codec, built
-(moq-ms1-codec-2993); MS2 to MS6 not built. Rules MOQ-1 to MOQ-9, laws M1 to M12, slices MS1
-to MS6. The review's rulings are at the end.*
+review media-w2-spec-fix-2918. MS1 to MS6 implement the codec, sessions, scheduling
+and timeouts, relay, per-object SFrame and the SFU bridge. The bridge lives in
+`core/programs/webrtc_sfu/moq_bridge.hirsel`. Rules MOQ-1 to MOQ-9 and laws M1 to M12 apply.*
 
 `moq` is a sans-IO MoQ Transport endpoint and relay, written in Hirsel under
 `core/programs/moq`. It follows
@@ -35,44 +35,82 @@ replace them), so a multi-draft codec would be a compatibility layer with no end
 
 ## MOQ-1: Shape
 
-```hirsel unbuilt
+```hirsel signatures moq/moq
 pub opaque type Session
 pub opaque type Relay
-pub type Io = Io(q: quic.Endpoint, w: Option[webtransport.Endpoint])
-pub type Transport = Native(c: quic.ConnectionHandle) | Web(s: webtransport.SessionHandle)
+pub type Io {
+    q: quic.Endpoint,
+    w: Option[webtransport.Endpoint]
+}
+pub type Transport: key = Native(c: quic.ConnectionHandle) | Web(s: webtransport.SessionHandle)
 pub type TransportEvent = Quic(quic.Event) | Web(webtransport.Event)
-pub type Role = Publisher | Subscriber | Both
-pub type RequestId = RequestId(u64)
-pub type Scope = Scope(Bytes)
-pub type Namespace = Namespace(List[Bytes])
-pub type TrackName = TrackName(ns: Namespace, name: Bytes)
-pub type Location = Location(group: u64, object: u64)
-pub type Filter = NoFilter | RelativeStart(groups: u64) | AbsoluteStart(start: Location) | GroupEnd(start: Location, end_group: u64) | AbsoluteRange(start: Location, end: Location) | NextObject
-pub type Mode = Subgroup | Datagram
-pub type Object = Object(track: TrackName, group: u64, subgroup: u64, id: u64, mode: Mode, publisher_priority: u8, status: ObjectStatus, properties: Bytes, payload: Shared[Bytes])
-pub type ObjectStatus = Normal | EndOfGroup | EndOfTrack
-pub type Limits { requests: u32, tracks: u32, control_bytes: u32, filter_ranges: u16, max_early_streams: u16, max_timeout_ms: u64 }
-pub type RelayLimits { cache_groups: u32, cache_bytes: u64, per_track_cache_bytes: u64, max_objects_per_group: u32, max_object_bytes: u64 }
-pub type Event = Setup(authority: Bytes, path: Bytes, token: Option[Bytes]) | Subscribe(id: RequestId, track: TrackName, filter: Filter, priority: u8, token: Option[Bytes]) | Publish(id: RequestId, track: TrackName, token: Option[Bytes]) | Fetch(id: RequestId, track: TrackName, from: Location, to: Location, token: Option[Bytes]) | Received(Object) | Unknown(track: TrackName, from: Location, to: Location) | Malformed(track: TrackName) | Done(id: RequestId, code: u64) | Goaway(uri: Bytes) | Closed(code: u64)
-pub type RelayEvent = Authorize(session: u32, id: RequestId, scope: Scope, track: TrackName, token: Option[Bytes]) | Evicted(scope: Scope, track: TrackName, groups: u32, size: u64) | Ended(session: u32, code: u64)
+pub type Role: key = Publisher | Subscriber | Both
+pub type RequestId: key = RequestId(u64)
+pub type Scope: key = Scope(Bytes)
+pub type Mode: key = Subgroup | Datagram
+pub type Object {
+    track: codec.TrackName,
+    group: u64,
+    subgroup: u64,
+    id: u64,
+    mode: Mode,
+    publisher_priority: u8,
+    status: codec.ObjectStatus,
+    properties: Bytes,
+    payload: Shared[Bytes]
+}
+pub type Limits: key {
+    requests: u32,
+    tracks: u32,
+    control_bytes: u32,
+    filter_ranges: u16,
+    max_early_streams: u16,
+    max_timeout_ms: u64
+}
+pub type RelayLimits: key {
+    cache_groups: u32,
+    cache_bytes: u64,
+    per_track_cache_bytes: u64,
+    max_objects_per_group: u32,
+    max_object_bytes: u64
+}
+pub type Event = Setup(authority: Bytes, path: Bytes, token: Option[Bytes]) | Subscribe(id: RequestId, track: codec.TrackName, filter: codec.Filter, priority: u8, token: Option[Bytes]) | Publish(id: RequestId, track: codec.TrackName, token: Option[Bytes]) | Fetch(id: RequestId, track: codec.TrackName, from: codec.Location, to: codec.Location, token: Option[Bytes]) | Received(Object) | Unknown(track: codec.TrackName, from: codec.Location, to: codec.Location) | Malformed(track: codec.TrackName) | Done(id: RequestId, code: u64) | Goaway(uri: Bytes) | Closed(code: u64)
+pub type RelayEvent = Authorize(session: u32, id: RequestId, scope: Scope, track: codec.TrackName, token: Option[Bytes]) | Evicted(scope: Scope, track: codec.TrackName, groups: u32, size: u64) | Ended(session: u32, code: u64)
+pub type MoqError = Closed | Role | State | Limit | Track | InvalidParam | Wire(codec.WireError) | Quic(quic.QuicError) | Web(webtransport.WtError)
 
-pub fn session(side: quic.Side, role: Role, t: Transport, limits: Limits) -> Session
+pub fn session(side: schedule.Side, role: Role, t: Transport, limits: Limits) -> Session
 pub fn receive(mut s: Session, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[Event])
 pub fn poll(mut s: Session, mut io: Io, now: u64) -> Option[u64]
-pub fn accept_setup(mut s: Session, mut io: Io, ok: Result[Scope, u64])
+pub fn accept_setup(mut s: Session, mut io: Io, take ok: Result[Scope, u64])
 pub fn accept(mut s: Session, mut io: Io, id: RequestId, ok: Result[(), u64])
-pub fn subscribe(mut s: Session, mut io: Io, now: u64, track: TrackName, f: Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError]
+pub fn subscribe(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError]
 pub fn publish(mut s: Session, mut io: Io, now: u64, o: Object) -> Result[(), MoqError]
-pub fn end_track(mut s: Session, mut io: Io, track: TrackName, code: u64)
+pub fn end_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64)
 pub fn cancel(mut s: Session, mut io: Io, id: RequestId, code: u64)
 pub fn close(mut s: Session, mut io: Io, code: u64, reason: Bytes)
 pub fn default_scope(authority: Bytes, path: Bytes) -> Scope
 
 pub fn relay(limits: RelayLimits) -> Relay
-pub fn relay_add(mut r: Relay, take s: Session, scope: Scope) -> u32
+pub fn relay_add(mut r: Relay, take s: Session, take scope: Scope) -> u32
 pub fn relay_receive(mut r: Relay, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[RelayEvent])
-pub fn relay_authorize(mut r: Relay, mut io: Io, now: u64, session: u32, id: RequestId, ok: Result[(), u64])
+pub fn relay_authorize(mut r: Relay, mut io: Io, now: u64, sid_in: u32, id: RequestId, ok: Result[(), u64])
 pub fn relay_poll(mut r: Relay, mut io: Io, now: u64) -> Option[u64]
+```
+
+Track names, filters and object status are declared in `moq.codec`.
+
+```hirsel signatures moq/codec
+pub type Namespace: key = Namespace(List[Bytes])
+pub type TrackName: key {
+    ns: Namespace,
+    name: Bytes
+}
+pub type Location: key {
+    group: u64,
+    object: u64
+}
+pub type Filter: key = NoFilter | RelativeStart(groups: u64) | AbsoluteStart(start: Location) | GroupEnd(start: Location, end_group: u64) | AbsoluteRange(start: Location, end: Location) | NextObject
+pub type ObjectStatus: key = Normal | EndOfGroup | EndOfTrack
 ```
 
 A `Session` is one MoQ session on one native QUIC connection or one WebTransport session,

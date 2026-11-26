@@ -874,26 +874,24 @@ def hirsel_core_runtime_archives(name, library, archive_name, shipped = True):
                            visibility = ["PUBLIC"])
     darwin = [triple for triple in RUNTIME_TARGETS if triple.endswith("-apple-darwin")]
     if darwin:
+        darwin_archives = [":" + name + "[" + runtime_target_key(triple) + "]" for triple in darwin]
         _darwin_sync_ban(
-            name = name + "-darwin-sync-ban", archives = ":" + name,
-            paths = [triple + "/" + archive_name for triple in darwin],
+            name = name + "-darwin-sync-ban", archives = darwin_archives,
             request = [str(value) for value in test_request("darwin-sync-ban")],
             exec_compatible_with = [budget_constraint(test_budget_name("darwin-sync-ban"))],
         )
-    if darwin and shipped:
-        _darwin_import_law(
-            name = name + "-darwin-import-law", archives = ":" + name,
-            paths = [triple + "/" + archive_name for triple in darwin],
-            request = [str(value) for value in test_request("darwin-import-law")],
-            exec_compatible_with = [budget_constraint(test_budget_name("darwin-import-law"))],
-        )
+        if shipped:
+            _darwin_import_law(
+                name = name + "-darwin-import-law", archives = darwin_archives,
+                request = [str(value) for value in test_request("darwin-import-law")],
+                exec_compatible_with = [budget_constraint(test_budget_name("darwin-import-law"))],
+            )
 
 def _darwin_law(ctx, kit):
     # A law over the Darwin archives: `<law> KIT LLVM ARCHIVE...`.
-    tree = ctx.attrs.archives[DefaultInfo].default_outputs[0]
     command = cmd_args(
         "python3", ctx.attrs._law, kit, ctx.attrs._llvm[DefaultInfo].default_outputs[0],
-        [cmd_args(tree, "/", path, delimiter = "") for path in ctx.attrs.paths],
+        [archive[DefaultInfo].default_outputs[0] for archive in ctx.attrs.archives],
     )
     return [DefaultInfo(), ExternalRunnerTestInfo(
         type = "custom", command = [command], labels = ["gate"],
@@ -908,8 +906,7 @@ def _darwin_law(ctx, kit):
 _darwin_sync_ban = rule(
     impl = lambda ctx: _darwin_law(ctx, ctx.attrs._kit),
     attrs = {
-        "archives": attrs.dep(),
-        "paths": attrs.list(attrs.string()),
+        "archives": attrs.list(attrs.dep()),
         "request": attrs.list(attrs.string()),
         "_law": attrs.source(default = "//tools/buck2/native-toolchain:darwin_sync_ban.py"),
         # The law reads its banned names from the link kit's script.
@@ -925,8 +922,7 @@ _darwin_sync_ban = rule(
 _darwin_import_law = rule(
     impl = lambda ctx: _darwin_law(ctx, ctx.attrs._kit[DefaultInfo].default_outputs[0]),
     attrs = {
-        "archives": attrs.dep(),
-        "paths": attrs.list(attrs.string()),
+        "archives": attrs.list(attrs.dep()),
         "request": attrs.list(attrs.string()),
         "_law": attrs.source(default = "//tools/buck2/native-toolchain:darwin_import_law.py"),
         "_kit": attrs.dep(default = "//tools/buck2/native-toolchain:kit"),

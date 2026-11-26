@@ -10,8 +10,9 @@ each lock package a change since origin/main can move (core/tools/law_board.py).
 Changed source files must fit
 their line limits, production sources must keep test code out, and platform decisions
 must be exhaustive on the target with host `cfg`s only in host seams. A Rust change
-must pass the Apple target checks (tools/apple_check.py). The editor
-parser checks the core and spec corpus. Explicit
+must pass the Apple target checks (tools/apple_check.py). The Darwin runtime
+must link against the shipped link kit. The editor parser checks the core and
+spec corpus. Explicit
 expectation comments exclude refusal/gap fixtures to preserve diagnostic coordinates.
 """
 
@@ -144,6 +145,10 @@ def main():
         return 1
     if apple_check.rust_changed() and apple_check.check():
         return 1
+    imports = subprocess.run(
+        [str(BUCK2), 'test', '//:hirsel-core-rt-archives-darwin-import-law'], cwd=ROOT)
+    if imports.returncode:
+        return imports.returncode
     rustfmt_flags = sys.argv[1:]
     query = 'kind("^rust_(library|binary)$", root//:)'
     attributes = json.loads(subprocess.run(

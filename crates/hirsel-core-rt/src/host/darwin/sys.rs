@@ -408,6 +408,31 @@ pub(crate) fn background_thread() {
     unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) };
 }
 
+/// The bytes a new UDP socket's two kernel queues start with, or `None` when
+/// either cannot be read. Darwin sizes a UDP socket's receive queue from
+/// `net.inet.udp.recvspace` and its send queue from `net.inet.udp.maxdgram`.
+pub(crate) fn udp_queue_bytes() -> Option<u64> {
+    let size = |name: &std::ffi::CStr| {
+        let mut value: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>();
+        // SAFETY: the name is NUL-terminated and the kernel writes at most `len` bytes.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                name.as_ptr(),
+                (&raw mut value).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || len != size_of::<libc::c_int>() {
+            return None;
+        }
+        u64::try_from(value).ok()
+    };
+    size(c"net.inet.udp.recvspace")?.checked_add(size(c"net.inet.udp.maxdgram")?)
+}
+
 /// The CPU this thread is running on, for the unit observer's trace lines:
 /// `u32::MAX`, the observer's "not recorded", until pthread_cpu_number_np is on
 /// the libSystem allowlist.

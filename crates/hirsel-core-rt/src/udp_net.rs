@@ -82,17 +82,9 @@ impl Default for Allowance {
             Err(std::env::VarError::NotPresent) => 64 * 1024 * 1024,
             Err(std::env::VarError::NotUnicode(_)) => crate::process::stop(b"UdpAllowance"),
         };
-        let sysctl = |name| {
-            std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
-                .ok()
-                .and_then(|n| n.trim().parse::<u64>().ok())
-        };
         Self {
             left: AtomicU64::new(bytes),
-            per_socket: sysctl("rmem_default")
-                .zip(sysctl("wmem_default"))
-                .and_then(|(r, w)| r.checked_add(w))
-                .unwrap_or(u64::MAX),
+            per_socket: crate::host::sys::udp_queue_bytes().unwrap_or(u64::MAX),
             next: AtomicU64::new(1),
             charges: Mutex::default(),
         }

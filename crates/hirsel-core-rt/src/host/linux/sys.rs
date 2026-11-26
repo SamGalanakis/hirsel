@@ -258,6 +258,17 @@ pub(crate) fn background_thread() {
     unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &idle) };
 }
 
+/// The bytes a new UDP socket's two kernel queues start with: the host's
+/// default receive and send sizes, or `None` when either cannot be read.
+pub(crate) fn udp_queue_bytes() -> Option<u64> {
+    let size = |name| {
+        std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
+            .ok()
+            .and_then(|n| n.trim().parse::<u64>().ok())
+    };
+    size("rmem_default")?.checked_add(size("wmem_default")?)
+}
+
 /// The CPU this thread is running on, for the unit observer's trace lines.
 #[cfg(feature = "testing")]
 pub(crate) fn cpu() -> u32 {

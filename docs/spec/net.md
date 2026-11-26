@@ -1357,11 +1357,12 @@ therefore never funds a new pool while the old one's storage is still live.
 A run that ends first discards its retirement events with the rest of its state.
 
 **Host allowance.** The kernel's socket queues use host memory up to the host's defaults
-(`net.core.rmem_default` and `wmem_default`), which no program limit pays for. The host
+(`net.core.rmem_default` and `wmem_default` on Linux, `net.inet.udp.recvspace` and
+`net.inet.udp.maxdgram` on macOS), which no program limit pays for. The host
 therefore keeps one **UDP host allowance** per run, read once, when the run first uses UDP,
 from the host setting `HIRSEL_UDP_KERNEL_BYTES`. The default is 64 MiB. A value that fails to parse as a
 byte count stops the run with `UdpAllowance`. `HIRSEL_NET_REACTOR` chooses the backend. A socket reserves
-`rmem_default + wmem_default`, read at the same time, from the allowance from its creation
+the sum of those two defaults, read at the same time, from the allowance from its creation
 until its retirement. A group reserves that amount once, for its one kernel socket. A
 reservation the allowance cannot meet, or a descriptor or socket the kernel refuses, returns
 `Exhausted` after issue with nothing created, and the refusal is recorded. This is host

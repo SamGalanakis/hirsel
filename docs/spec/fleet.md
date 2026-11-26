@@ -1,11 +1,13 @@
 # Fleet
 
 *Specified 2026-11-26 (converged Hirsel Fleet blueprint, DECISIONS.md). Rules FLT-1 to FLT-8,
-kernel rules K1 to K13, directory rules D1 to D6, verification tiers T0 to T3. Phase 1 builds
-the move-authorization kernel, independent register model, simulation laws and formal proofs;
-Phase 3a adds the dedicated `Directory[K]` Place library and `hirsel fleet sim` at 50 and 1,000
-simulated hosts. Real-cluster orchestration verbs, Store `ClaimAuth`/`ORIGIN`, Runner `Deposed`,
-and platform seams remain unbuilt and are marked with `unbuilt` fences.*
+kernel rules K1 to K13, directory rules D1 to D6, and verification tiers T0 to T3.
+Phase 1 builds the move-authorization kernel, independent register model, simulation laws
+and formal proofs. Phase 3a adds the dedicated `Directory[K]` Place library and
+`hirsel fleet sim` at 50 and 1,000 simulated hosts. The [launcher](launch.md#the-launcher)
+carries opaque move envelopes and the release embeds `platform_main`. Real-cluster
+orchestration verbs, Store `ClaimAuth`/`ORIGIN`, Runner `Deposed` and the platform move
+integration remain planned.*
 
 Hirsel Fleet runs multi-machine workloads with the existing `hirsel` launcher and `platform`
 host packaged as one single-binary distribution, with no Kubernetes, no second host daemon,

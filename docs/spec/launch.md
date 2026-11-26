@@ -1177,14 +1177,15 @@ starts the platform host as its first and only
 bootstrap child. `--admission` and `--max-places` are required whenever the launcher starts
 the platform host. Passing either option or `--idle-ms` without `--operator-listen` is a
 usage error. Linux requires `--lifecycle` ("Child lifecycle" below).
-N and M are positive decimals. `--idle-ms` defaults to 30000. The launcher binds both sockets
+N and M are positive decimals. `--max-places` has no default and limits the live groups.
+`--idle-ms` defaults to 30000. The launcher binds both sockets
 mode 0600 and creates `S/catalog`. The released `hirsel` executable embeds the native
 `platform_main` image in an ELF section on Linux and a signed Mach-O section on macOS.
 The launcher stages that image in a private temporary directory for its lifetime and
 starts it with working directory S and the program-visible argv
 `platform_main ctl launcher.sock N M operator.sock`. Direct launcher invocations can
 select an external host with `--platform-host FILE`. The host's grants are compiled into the image.
-its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
+Its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
 is `/proc/self/cwd` on Linux and `.` on macOS, with `UnixConnect ctl launcher.sock` and
 `UnixListen ctl operator.sock`, beside Clock, Random and Tasks. The offline pin reader
 uses the same `Dir` path. The store backup and restore helper's two `Dir` grants are
@@ -2005,6 +2006,8 @@ bytes. The decoder refuses a larger length as `MoveEnvelopeTooLarge`. An empty e
 is a zero length. The launcher carries the bytes to the child in its private
 `--hirsel-move-envelope=HEX`<!-- doc-ref: external --> prefix. The runtime offers the length at launch word 25
 and the bytes at word 26. The fake launcher retains the same bytes for each start.
+Ordinary platform starts send an empty envelope. Fleet's claim protocol and the
+platform's handling of Fleet moves are specified in [Fleet](fleet.md).
 
 - **Publish and assemble.** It admits recipes (steps 1-8 above) and assembles images. It
   writes objects with the "Durable publication" order above, steps 1-3. Step 4, the pending

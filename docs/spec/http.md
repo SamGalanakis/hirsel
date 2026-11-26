@@ -170,7 +170,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 | `ip_sockets_max` | Sockets per source IP (W-D5 source key) | 32 |
 | `refuse_max`, `refuse_ms` | Pre-admitted refusal tasks, and each one's total deadline | 16, 1000 |
 | `inbox_cap` | The supervisor's inbox | 64 |
-| `head_max`, `fields_max` | One head with its trailers, and its fields. `head_max` may only lower `http1.HEAD_MAX` (32768 B), the one HTTP/1 head bound that clients, WebSocket upgrades and the chunked decoder also use; `fields_max` may only lower the 64 fields of `http1.Head`'s inline storage | 32768 B, 64 |
+| `head_max`, `fields_max` | One head with its trailers, and its fields. `head_max` may only lower `http1.HEAD_MAX`, the shared 32 KiB ceiling for the parser, server, client and WebSocket upgrade. On the server, the chunked decoder uses the configured `head_max` for trailer accounting. `fields_max` may only lower the 64 fields of `http1.Head`'s inline storage. | 32 KiB, 64 |
 | `pipeline_max` | Unread bytes kept after the current request | 8192 B |
 | `body_inline` | Largest body held in the read buffer | 16384 B |
 | `body_max` | Largest body for any route; a route may set less | 1 MiB |
@@ -1699,7 +1699,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 | H11 | Replay matrix (Part A) | H4; H7; H8; H10 | — | **L23** same-build record and replay through the test runner ([recording](../recording.md#testing-with-recordings)), with a clock provider that fails on any read at a point §5 does not name, over a scripted client covering fragmentation at every byte, `Capacity` at each HTTP-15 admission, partial writes, heartbeat and lease timers, disconnect after commit, an upgrade with a tail, and a partial 101. The recording is repeated with varied clock values and event orders, and each replay's sends, charges and step trace equal its recording's on both engines. Separately, for a hand-scripted session per named point, the trace's clock reads equal a hand-derived sequence of labelled reads (point, and set or check), the check reads between operations included and no read at a stream's or an upgrade's hand-over (the pre-head deadline equals the handler's `Request.deadline`), so wrong sampling that recording and replay share is caught (`unrecorded_date_read`, `reading_reused_across_operations`, `ambient_clock_read`, `set_read_as_check`) |
 | B1 | `bench/micro/http/instructions`, http1-plaintext-keepalive | H2 | — | Server instructions per request (Callgrind) against Tokio+httparse (`bench/micro/http/tokio`) and hyper/axum (added in this slice), on CPUs 0-11 and 16-27. Report the ratios. The regression gate is set from the first measurement. **Measure next:** a SIMD byte-class head scanner with scalar parity (L1 extended) |
 
-### Part B: keyed operations (unbuilt)
+### Part B: keyed operations
 
 | # | Slice | Starts | Lands after | Acceptance laws (mutant each catches) |
 |---|---|---|---|---|---|
@@ -1760,7 +1760,7 @@ Run the keyed replay cases with `python3 core/tools/runner_http_delivery_test.py
 | 13 | Map form | a JSON object, sorted or in insertion order | an array of `[key, value]` pairs, in the value's order, for every key type | the same: one form that every JSON library keeps in order |
 | 14 | Granted entries over HTTP | allowed without identity | refused at bind | the same until a granted-entry identity exists |
 
-**Retry identity and keyed operations** (rows 16-19 are Part B, unbuilt)
+**Retry identity and keyed operations** (rows 16-19 are Part B)
 
 | # | Question | Alternatives | Adopted | End state |
 |---|---|---|---|---|
@@ -1781,7 +1781,7 @@ Run the keyed replay cases with `python3 core/tools/runner_http_delivery_test.py
 | 25 | What identifies a durable binding | its route | a stable `op` as its address, with `POST /.hirsel/op/{op}`; a send's identity is the stream identity, with no `op` in it; a removed `Stream` op whose entry is gone served from `previous`, rendered from `previous`'s describe, and one whose entry is live unrouted (404) (decisions 47, 48; keyed retention is Part B) | the same |
 | 26 | SSE event size | an `event_max` buffer per event | piecewise encoding from the frame; no `event_max` for subscriptions | the same |
 | 27 | One-shot reads of a query | encode `Cover` as a value | a transient subscription on its own session, under a `reads_max` slot, returning the batch envelope, retired as row 36 | the same |
-| 28 | Keyed time unit (Part B, unbuilt) | ns (B9) | ms of `host.wall_ms`, read through the commit's nondecreasing `at` (K-4), with `retention_ms` ≤ 2^53 | the same |
+| 28 | Keyed time unit (Part B) | ns (B9) | ms of `host.wall_ms`, read through the commit's nondecreasing `at` (K-4), with `retention_ms` ≤ 2^53 | the same |
 | 29 | GitHub webhooks (Part B, unbuilt) | refuse them; treat the delivery id as authenticated; a built-in verifier with the weaker guarantee in OpenAPI (earlier draft) | nothing built in: a worked example of a claim function (K-2), with its weaker guarantee stated there | the same; GitHub signs no key or time, and R6 keeps credential checks in application code |
 | 30 | Who holds an HTTP send | the connection task | the runner's relay, with its own units and limit (row 37) | the same |
 | 31 | An oversized initial subscription result | a stream that ends at once | 503 with the budget body and no `Retry-After` | the same: retrying cannot help |

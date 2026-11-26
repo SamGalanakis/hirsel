@@ -46,15 +46,16 @@ environmental termination. Unsafe/foreign operations require explicit authority 
 outside replay unless an explicit model/provider contract admits them." *v1:* FFI-1 to FFI-9
 ([foreign](foreign.md)): audited archives pinned per target, entry-granted `Foreign[I]`,
 call-scoped loans, checked handles, and no recording, replay or reused pass for a program that
-reaches foreign code; FAIL-15 makes Hirsel stack exhaustion a run stop. *Written, not built:* FFI-10 to FFI-16, the
-**Wasm boundary**: a foreign module marked `containment = "wasm"` ships one pinned core
-WebAssembly module, runs in an embedded Wasmtime (48 LTS) with no OS access, maps linear memory
-to `bound bytes` and fuel to `bound steps`, maps traps to failures, and stays inside replay
-([contained foreign code](foreign.md#contained-foreign-code)); its key refuses until slice W1
-is green. *Later:* callbacks into Hirsel; a restricted worker process per interface or package
+reaches native foreign code. FAIL-15 makes Hirsel stack exhaustion a run stop. On Linux
+targets, a module marked `containment = "wasm"` may ship one pinned core WebAssembly
+module. Embedded Wasmtime (48 LTS) runs it with no OS access. The runtime charges linear
+memory to the byte limit and fuel to the step bound, maps traps to failures, and supports
+recording and replay for contained-only reach. The test configuration supplies the
+contained grant without a separate command-line grant. See the
+[contained foreign code status](foreign.md#contained-foreign-code) for remaining W1 work.
+*Later:* callbacks into Hirsel and a restricted worker process per interface or package
 for native code that cannot be compiled to Wasm. A contained boundary is required before Hirsel
-admits any foreign package that has not been audited under FFI-1; until W1, v1 admits audited,
-pinned packages only, and runs them in process with no containment. Moving only the `waits` calls out of
+admits any foreign package that has not been audited under FFI-1. Moving only the `waits` calls out of
 process is not such a boundary, because one package may use a handle from both kinds of
 call, and neither process could use the other's C pointers or byte loans; a provider contract that records a foreign call so that replay admits it; native time
 and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a typed reading

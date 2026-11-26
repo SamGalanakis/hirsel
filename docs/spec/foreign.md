@@ -10,11 +10,11 @@ either runs on the host stack or, when declared `waits`, on a helper thread whil
 is parked. A program that can reach native code has no recording, no replay and no reused
 test pass.
 
-The rules are FFI-1 to FFI-9. The [`sqlite` package](#the-sqlite-package) is the acceptance
-consumer. FFI-10 to FFI-16 ([contained foreign code](#contained-foreign-code), written but not
-built) add a second kind of foreign module: one compiled to WebAssembly, which runs in an
-embedded Wasmtime with no OS access and stays inside replay. The fences remain marked `` ```hirsel unbuilt `` because they cannot carry a foreign
-manifest. The laws' refusal cases check the examples.
+FFI-1 to FFI-9 govern native archives. The [`sqlite` package](#the-sqlite-package) is the
+acceptance consumer. FFI-10 to FFI-16 govern [contained foreign code](#contained-foreign-code).
+The contained module runs as WebAssembly in the embedded Wasmtime and stays inside replay.
+The foreign examples keep the `` ```hirsel unbuilt `` marker because the fence checker
+cannot supply their manifest. The foreign laws check the examples' refusal cases.
 
 ## Trust
 
@@ -1125,10 +1125,11 @@ never reuses its pass (FFI-14).
 that reaches a contained module admits it (FFI-11) and compiles it for Linux targets, and its
 calls run in the calling task's own instance with loans, handles and traps (FFI-12, FFI-14,
 FFI-15), metered by fuel into steps, slice ends and byte charges (FFI-13). A program that
-reaches only contained code is recorded and replayed (FFI-14), and a test's configuration
-grants its interface without `--grant`. A build keeps each artifact in its part cache (FFI-15
-Caching), and a recipe pins the module and rebuilds it from the code store (FFI-16). Darwin
-images (W2) do not carry contained code yet.
+reaches only contained code is recorded and replayed (FFI-14). A test can take its
+contained `Foreign[I]` grant from its test configuration alone. Deploy accepts the
+contained binding, and the driver emits no `foreign:` line for it (FFI-14). A build
+keeps each artifact in its part cache (FFI-15 Caching), and a recipe pins the module
+and rebuilds it from the code store (FFI-16). Darwin images remain planned for W2.
 
 Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
 contained-foreign-review-2903: the artifact is loaded in place from the image's executable

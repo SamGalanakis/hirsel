@@ -28,8 +28,6 @@ jobs:
       fdata: ${{ steps.profiles.outputs.fdata }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - name: Choose the version
         id: version
         shell: bash
@@ -155,7 +153,81 @@ jobs:
       - uses: actions/checkout@v4
       - id: host
         run: echo "target=$(python3 tools/toolchain-dist/product.py target)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ steps.host.outputs.target }}
+          path: ${{ runner.temp }}/release
+      - name: Exercise the installer on ${{ matrix.image }}
+        env:
+          HIRSEL_VERSION: ${{ needs.train.outputs.version }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          mkdir "$RUNNER_TEMP/witness"
+          asset=$(python3 tools/toolchain-dist/product.py asset "$HIRSEL_VERSION")
+          (cd "$RUNNER_TEMP/release" && sha256sum "$asset" > SHA256SUMS)
+          export SMOKE_MODE=native
+          if [[ "$IMAGE" == ubuntu:22.04 ]]; then
+            SMOKE_MODE=cross
+          fi
+          # The executable writer uses unshare(CLONE_FILES), which Docker's default filter denies.
+          docker run --rm --cpus 4 --memory 8g --memory-swap 8g \
+            --security-opt seccomp=unconfined \
+            -v "$RUNNER_TEMP/release:/release:ro" -v "$RUNNER_TEMP/witness:/witness" \
+            -v "$GITHUB_WORKSPACE/tools/toolchain-dist/smoke:/smoke:ro" \
+            -e HIRSEL_VERSION -e SMOKE_MODE -e HIRSEL_DOWNLOAD_BASE=file:///release "$IMAGE" dash -ec '
+              packages=$(dpkg-query -W -f="\${Package} \${Status}\n")
+              if printf "%s\n" "$packages" | grep -E "^(libc6-dev|libgcc-[0-9]+-dev) install ok installed$"; then
+                exit 1
+              fi
+              dash /release/install.sh --no-modify-path
+              cd /tmp
+              dash /smoke "$HIRSEL_VERSION" "$SMOKE_MODE" /witness
+            '
+      - uses: actions/upload-artifact@v4
+        if: matrix.image == 'ubuntu:22.04'
+        with:
+          name: linux-cross-witness
+          path: |
+            ${{ runner.temp }}/witness/app-mac
+            ${{ runner.temp }}/witness/libhirsel_core_rt.a
+          if-no-files-found: error
+
+  smoke-darwin:
+    needs: [train, build, smoke]
+    runs-on: macos-26
+    steps:
       - uses: actions/checkout@v4
+      - id: host
+        run: echo "target=$(python3 tools/toolchain-dist/product.py target)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ steps.host.outputs.target }}
+          path: ${{ runner.temp }}/release
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-cross-witness
+          path: ${{ runner.temp }}/witness
+      - name: Exercise the installer and compare the native and cross-built programs
+        env:
+          HIRSEL_VERSION: ${{ needs.train.outputs.version }}
+        run: |
+          python3 tools/toolchain-dist/product.py installer > "$RUNNER_TEMP/release/install.sh"
+          asset=$(python3 tools/toolchain-dist/product.py asset "$HIRSEL_VERSION")
+          (cd "$RUNNER_TEMP/release" && shasum -a 256 "$asset" install.sh > SHA256SUMS)
+          chmod +x "$RUNNER_TEMP/witness/app-mac"
+          tools/toolchain-dist/smoke-darwin "$HIRSEL_VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/witness"
+
+  publish:
+    needs: [train, build, smoke, smoke-darwin]
+    # A dispatch publishes only when asked, and never from a branch.
+    if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*

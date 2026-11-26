@@ -448,9 +448,6 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     let exe = prefix.join("hirsel");
     let compiler: super::Compiler = Arc::new(move |args: &[String]| {
         let mut args = args.to_vec();
-        if args[0] == "test" {
-            args.extend(["--target", target].map(String::from));
-        }
         if args[0] != "lock" {
             args.extend(["--libraries".into(), core.to_string_lossy().into_owned()]);
         }

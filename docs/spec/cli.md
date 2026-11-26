@@ -70,6 +70,9 @@ information. Native builds write detached DWARF alongside the executable.
 either mode.
 The native unwind records mark where a stack walk ends at a fiber boundary.
 
+Native commands default to the compiler host's target. Use `--target` for a
+different target.
+
 Register the host runtime with `core-product --install` or
 `std-product --install` by passing `--link-kit DIRECTORY` alongside
 `--runtime ARCHIVE`. The installed compiler links user programs with the

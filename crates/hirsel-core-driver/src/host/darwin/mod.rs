@@ -23,7 +23,6 @@ pub(crate) use install::{
     INSTALLED_LINKER_LIBRARY, installation_linker, installed_executable, loaded_libraries,
 };
 
-#[cfg(test)]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64Darwin;
 

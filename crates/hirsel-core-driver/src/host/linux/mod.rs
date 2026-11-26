@@ -19,7 +19,6 @@ pub(crate) mod spawn;
 
 pub(crate) use install::{installed_executable, loaded_libraries};
 
-#[cfg(test)]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::X86_64Linux;
 
 /// The kit's Linux linker has both the ELF and Mach-O ports.

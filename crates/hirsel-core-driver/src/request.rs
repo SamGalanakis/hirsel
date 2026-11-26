@@ -303,7 +303,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut root_limit = 64 * 1024 * 1024;
     let mut emulator = None;
     let mut sysroot = None;
-    let mut target = "x86_64-unknown-linux-gnu".to_owned();
+    let mut target = crate::host::HOST_TARGET.triple().to_owned();
     // How a native request links: --cc, else the recipe the installation
     // captured, else (uninstalled) the pinned LLVM's clang. Never a `cc`
     // found on PATH.

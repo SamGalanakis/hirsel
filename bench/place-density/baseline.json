@@ -1,5 +1,5 @@
 {
-  "source_commit": "b74afa15c83f9c4dc2369308036ff59afb30603f",
+  "source_commit": "3f5e5e9c4d067d446f3036a0cb6f4dac5dc04336",
   "places": 64,
   "cpu_model": "AMD Ryzen 9 5950X 16-Core Processor",
   "cpus": [
@@ -11,17 +11,17 @@
   "settle_seconds": 5,
   "quiet_seconds": 20,
   "metrics": {
-    "dirty_swap_kib": 790.625,
+    "dirty_swap_kib": 650.75,
     "fds": 17,
     "idle_instructions_per_second": 0.0,
-    "private_dirty_kib": 790.625,
-    "pss_kib": 915.828125,
-    "rss_kib": 8691.375,
-    "shared_clean_kib": 1583.6875,
+    "private_dirty_kib": 650.75,
+    "pss_kib": 777.15625,
+    "rss_kib": 8659.4375,
+    "shared_clean_kib": 1583.75,
     "swap_kib": 0,
     "threads": 2,
-    "wake_p10_ms": 2.952098,
-    "wake_p50_ms": 3.1575195000000003,
-    "wake_p90_ms": 3.352411
+    "wake_p10_ms": 2.806603,
+    "wake_p50_ms": 3.0692625,
+    "wake_p90_ms": 3.346749
   }
 }

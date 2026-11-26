@@ -392,17 +392,6 @@ impl Metadata {
     }
 }
 
-/// Open the file this process runs. Linux names the running image itself,
-/// whatever became of its path. Darwin has only the path the image was started
-/// from, so the launcher opens that path and hashes the file at once.
-fn running_image() -> io::Result<File> {
-    #[cfg(target_os = "linux")]
-    let image = File::open("/proc/self/exe");
-    #[cfg(target_os = "macos")]
-    let image = std::env::current_exe().and_then(File::open);
-    image
-}
-
 #[cold]
 /// The running executable's file. Linux opens the mapped inode itself; Darwin
 /// has no /proc and opens the path dyld recorded at exec (`_NSGetExecutablePath`),

@@ -68,9 +68,6 @@ the static-library slices land. Once the simulator gate (EMB-9) is green, iOS is
 supported **simulator only**; it leaves this list when a signed device run passes its device
 gate (EMB-9).
 
-iOS targets are named and every build request for them is refused until the static-library
-slices land. iOS leaves this list when its device gate passes.
-
 **R6.** `String`/`List` and `Text`/`FixedSpan` are distinct types; compact fields declare
 inline or linked storage and links stay in one blob; wire formats are separate;
 optimisation keeps declared shapes. *v1:* MEM-9 to MEM-12, MEM-28; `SeqSpan` and

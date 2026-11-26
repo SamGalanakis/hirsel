@@ -56,12 +56,16 @@ pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[St
   trailing dot is removed. An IP literal is verified against the certificate's IP
   subject alternative names and is not sent as SNI (RFC 6066 §3). The certificate must
   be valid for `name`. A certificate valid only for the socket's address is not enough.
-- **Trust.** `System` uses the host's root store. The OS provider loads it once per run,
-  at the first `System` handshake. `Roots(b)` trusts exactly the certificates in the PEM
-  bundle `b`, and the host store is not used. On iOS `System` is Apple's platform
-  verifier (SecTrust), which decides the chain to a root
+- **Trust.** `System` uses the host's root store. On Linux and macOS the OS provider
+  loads it once per run, at the first `System` handshake. `Roots(b)` trusts exactly the
+  certificates in the PEM bundle `b`, and the host store is not used. On iOS `System` is
+  Apple's platform verifier (SecTrust), evaluated at each handshake against the device's
+  current trust settings, after the provider's own leaf checks
   ([EMB-7](embed.md#emb-7-capabilities-on-ios)). Verification uses the provider's own wall
-  clock. It cannot be turned off. Revocation is not checked.
+  clock. It cannot be turned off. Hirsel checks no revocation; on iOS the system evaluator
+  still applies its own local trust policy (revocation and distrust data it already holds,
+  certificate transparency), with network fetch off, and a chain it rejects is a mapped
+  certificate failure.
 - **ALPN.** `alpn` lists the protocols to offer, in order of preference. An empty list
   offers none. Each entry is 1 to 255 bytes, no entry appears twice, and there are at
   most 16 entries. If the server chose a protocol, `Handshake.protocol` is its zero-based

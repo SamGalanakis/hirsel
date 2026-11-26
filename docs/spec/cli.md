@@ -12,7 +12,10 @@ path for `build` and `pack`, and a directory for `sdk ts`.
 
 A native build emits an executable or a static library, chosen by `--emit exe` <!-- doc-ref: planned -->
 or `--emit staticlib` <!-- doc-ref: planned --> ([EMB-1](embed.md#emb-1-output-kinds)). Each target
-admits the kinds its row in EMB-1's table names; any other pair is refused before work.
+admits the kinds its row in EMB-1's table names. `hirsel build` takes either kind; a
+command that runs what it builds (`run`, `test`, `sdk ts`, `sdk json`) takes only `exe`;
+`sdk swift` <!-- doc-ref: planned --> builds static libraries itself and refuses `--emit` <!-- doc-ref: planned -->.
+Any other pair is refused at request validation, before installation lookup or work.
 
 ## Checking packages
 

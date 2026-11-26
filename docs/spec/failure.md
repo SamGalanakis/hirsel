@@ -236,7 +236,9 @@ reported as the run's outcome and is not a failure: no cause chain is formed, no
 finalizer runs, and no joiner observes it. In a process it exits with status 102 and
 writes one line to stderr, `run stop: ` and the stop's name
 ([PROG-3](programs.md#prog-3-entry)), except termination by the host, whose status and output
-are the host's, PROG-3's exception, a native abort's included:
+are the host's, PROG-3's exception, a native abort's included. An embedded runtime
+([EMB-3](embed.md#emb-3-embedded-launch)) never exits and writes no stderr line: a run stop
+ends its runtime generation, and the stop's name is reported to the embedder:
 
 | stop | name |
 |---|---|

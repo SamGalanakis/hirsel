@@ -67,10 +67,11 @@ require or extract a constant argument.
 - An evaluator launching a built artifact hashes the artifact it loaded, and
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.
-- An embedded runtime receives the digest, target and `n_place` explicitly from
-  its embedder before entry ([EMB-3](embed.md#emb-3-embedded-launch)); on iOS this is
-  the only source, and the runtime never reads its own image. It copies or pins the supplied value for the whole
-  launch; later mutation of the embedder's input cannot change it.
+- An embedded runtime receives the digest and `n_place` explicitly from its embedder
+  before entry ([EMB-3](embed.md#emb-3-embedded-launch)), and the runtime never reads its
+  own image. Its target is the immutable record of the slice the library was compiled
+  for, never an embedder value. It copies or pins the supplied values for the whole
+  launch; later mutation of the embedder's input cannot change them.
 - For a platform launch, the launcher supplies the digest through
   the embedded identity path. It checks the SHA-256 of the opened, read-only
   content-addressed image and executes that same file by descriptor. Replacing
@@ -125,7 +126,10 @@ Each is an end-state grant source, as `env:` is for a `Secret`.
   When neither variable gives a base the run does not start (status 103), with the
   line `not started: directory grant `<form>:<app>` needs $<VAR> or $HOME set to an
   absolute path`. The program sees neither value unless it also holds an `Env` that
-  covers it. Darwin uses the same rule; there is no `~/Library` form.
+  covers it. Darwin uses the same rule; there is no `~/Library` form. An embedded
+  launch reads no environment: each form's base comes from the embedder's `dir_bases`
+  ([EMB-3](embed.md#emb-3-embedded-launch)), and a form whose base is not given refuses
+  `start`.
 - **Symlinks.** Each component is followed, as a path grant's open is. Every existing
   component must be a directory once followed: a symlink to a directory is that
   directory, and a dangling symlink or a file is refused (status 103, the `directory

@@ -1,5 +1,40 @@
 use super::*;
 
+impl UnitModule {
+    pub(super) fn into_bound(self, annex: &Annex, identity: &Identity) -> Module {
+        match self {
+            Self::Decoded(module) => *module,
+            Self::Encoded(bytes, values) => {
+                let mut module = normal::assembly_module(&bytes);
+                crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
+                let symbol = hirsel_core_ir::symbol(identity.digest());
+                bind_module(&mut module, annex, Some(&symbol));
+                module
+            }
+        }
+    }
+
+    /// Decode an encoded unit in place. Units hold most of their rows in
+    /// common: each decoded row equal to one in `rows` is that one, and each
+    /// other is added to `rows`.
+    pub(super) fn decode(&mut self, rows: &mut std::collections::HashSet<hirsel_core_layout::Row>) {
+        let Self::Encoded(bytes, values) = self else {
+            return;
+        };
+        let mut module = normal::assembly_module(bytes);
+        crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
+        for row in &mut module.types {
+            match rows.get(row) {
+                Some(held) => *row = held.clone(),
+                None => {
+                    rows.insert(row.clone());
+                }
+            }
+        }
+        *self = Self::Decoded(Box::new(module));
+    }
+}
+
 impl Unit {
     /// The owner of the unit's private callable variants, including the values
     /// bound to its body's computed constant slots.

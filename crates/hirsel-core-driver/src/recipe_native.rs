@@ -76,21 +76,6 @@ enum UnitModule {
     Encoded(Arc<[u8]>, crate::instances::Bindings),
 }
 
-impl UnitModule {
-    fn into_bound(self, annex: &Annex, identity: &Identity) -> Module {
-        match self {
-            Self::Decoded(module) => *module,
-            Self::Encoded(bytes, values) => {
-                let mut module = normal::assembly_module(&bytes);
-                crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
-                let symbol = hirsel_core_ir::symbol(identity.digest());
-                bind_module(&mut module, annex, Some(&symbol));
-                module
-            }
-        }
-    }
-}
-
 /// What an earlier publication into the same stores made of a unit, under
 /// the unit's memo key ([`CheckProduct::memo_key`]): its stored body and
 /// annex, its builtins, the sites its binding reads and the items it adds,
@@ -1423,13 +1408,11 @@ impl Publication {
         if !options.llvm_release() {
             return Ok(None);
         }
+        let mut rows = std::collections::HashSet::new();
         for unit in self.units.values_mut() {
-            if let UnitModule::Encoded(bytes, values) = &unit.module {
-                let mut module = normal::assembly_module(bytes);
-                crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
-                unit.module = UnitModule::Decoded(Box::new(module));
-            }
+            unit.module.decode(&mut rows);
         }
+        drop(rows);
         std_side(&self.units, &self.recipe.entry, library, &options).map(Some)
     }
 

@@ -86,12 +86,17 @@ A delete is a mask. A merge writes each key's newest mention among its
 inputs and encodes the row again under the output's centroids. It writes a
 mask only when the merge may not drop masks.
 
-Centroids are trained once, by 8 rounds of k-means over the first
-`32 · clusters` source rows in key order. Training runs at a generation's
-first write, when no live generation has trained centroids and the source
-has at least `4 · clusters` rows. Until then, a generation uses one zero
-centroid. A newer generation takes the newest trained centroids. The index
-does not retrain as the data drifts.
+Centroids are trained once, by 8 rounds of k-means on a reservoir of up to
+`32 · clusters` rows sampled across the whole source. The projection name
+seeds the sampler, so rebuilding the same source under the same name uses
+the same sample. Training starts with the first sampled row as a centroid,
+then takes the sampled row farthest from its nearest chosen centroid until
+it has `clusters` seeds. Training runs at a generation's first write, when
+no live generation has trained centroids and the source has at least
+`4 · clusters` rows. The training commit's step budget covers the scan
+and clustering. Until training, a generation uses one zero centroid.
+A newer generation takes the newest trained centroids. The index does
+not retrain as the data drifts.
 
 ### Querying
 
@@ -180,7 +185,9 @@ query does not fall with the filter's selectivity.
   each state, a run and a look give one list. Every hit is a present row
   at its exact score, in rank order. Recall@10 against form A's k-th score
   is at least 0.95. Before publication, the list is form A's exactly. In
-  the tail state, the moved row is first under L2.
+  the tail state, the moved row is first under L2. The law also imports two
+  populations in key order and checks that a single probe returns the
+  brute-force nearest row for a held-out query from the later population.
 - `prefilter` puts both forms on a 512-row table with the non-identity
   ordinal `3 · key + 1` and a 1,000-bit filter that allows 26 rows (keys
   that would match past the bitset's end are not allowed). Every query

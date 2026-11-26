@@ -329,17 +329,20 @@ type Far = vector.Ivf[u64, List[i8]]
 
 type Model = List[Option[List[i8]]]
 
-fn open_far(clock: Clock, random: Random, metric: vector.Metric, ordinal: StaticFn[fn(u64) -> u64]) -> (store.Db, Points, Near, Far) waits {
+fn open_far(clock: Clock, random: Random, metric: vector.Metric, ordinal: StaticFn[fn(u64) -> u64], shape: vector.Shape) -> (store.Db, Points, Near, Far) waits {
     let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
     let mut d = result.unwrap(store.declare(db, Migrate))
     let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
     let mut decl = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
     let near = result.unwrap(vector.declare(mut d, mut decl, "near", metric, code.describe(row_code), ordinal))
     let points = result.unwrap(store.finish(mut d, take decl))
-    let shape = vector.Shape(dims: IVF_DIMS, clusters: 16, steps: 1099511627776u64)
     let far = result.unwrap(vector.declare_ivf(mut d, points, "far", metric, code.describe(row_code), ordinal, shape))
     let _ = result.unwrap(store.seal(mut db, take d))
     (take db, points, take near, take far)
+}
+
+fn recall_shape() -> vector.Shape {
+    vector.Shape(dims: IVF_DIMS, clusters: 16, steps: 1099511627776u64)
 }
 
 fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q: List[i8], k: u64) -> Found waits {
@@ -360,10 +363,10 @@ fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q
     }
 }
 
-fn far_look(db: store.Db, far: Far, q: List[i8], k: u64) -> Found waits {
+fn far_look(db: store.Db, far: Far, q: List[i8], k: u64, probes: u32) -> Found waits {
     let read_handle = result.unwrap(store.reader(db, 0u64))
-    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(far), store.copy_env(q), k), fn(tx, input) -> Found {
-        vector.query_ivf(tx, input.0, input.1, input.2, IVF_PROBES, Every)
+    let looked = result.unwrap(store.look(read_handle, store.snapshot(db), None, (store.copy_env(far), store.copy_env(q), k, probes), fn(tx, input) -> Found {
+        vector.query_ivf(tx, input.0, input.1, input.2, input.3, Every)
     }))
     match take looked {
         Seen(take seen) => clone(seen.value),
@@ -447,7 +450,7 @@ fn far_state(mut db: store.Db, points: Points, near: Near, far: Far, metric: vec
         let Ok(b) = far_run(mut db, points, far, take empty, q, IVF_K) else {
             fail("ivf law: form B refused a query in a run")
         }
-        let Ok(seen) = far_look(db, far, q, IVF_K) else {
+        let Ok(seen) = far_look(db, far, q, IVF_K, IVF_PROBES) else {
             fail("ivf law: form B refused a query in a look")
         }
         if !same_hits(b, seen) {
@@ -502,16 +505,55 @@ fn recall_line(found: u64) {
     }
 }
 
+fn ordered_import(clock: Clock, random: Random) waits {
+    let shape = vector.Shape(dims: 4, clusters: 2, steps: 1099511627776u64)
+    let (take opened, points, _, far) = open_far(clock, random, L2, code.describe(row_ordinal), shape)
+    let mut db = take opened
+    let mut model: Model = list.new()
+    let mut steps: List[Step] = list.new()
+    for key in 0u64 .. 256 {
+        let raw = if key < 128 {
+            // The old prefix trains exactly on (-1, -100) and (1, -100).
+            let x = if key % 2 == 0 {
+                -1i8
+            } else {
+                1i8
+            }
+            four(x, -100, 0, 0)
+        } else if key == 128 {
+            four(-1, 100, 0, 0)
+        } else {
+            four(-1, 90, 0, 0)
+        }
+        list.push(mut steps, Put(key, clone(raw)))
+        list.push(mut model, Some(take raw))
+    }
+    write_rows(mut db, points, far, take steps)
+    let _ = settle(mut db, far)
+    // A held-out query from B probes x = +1 with the old centroids,
+    // while every row of B was assigned to x = -1.
+    let q = four(1, 100, 0, 0)
+    let Ok(hits) = far_look(db, far, q, 1, 1) else {
+        fail("ivf law: the ordered import query failed")
+    }
+    if !exact(hits, model_ranking(L2, model, q), 1) {
+        fail("ivf law: one probe missed the ordered import's exact nearest neighbour")
+    }
+    result.unwrap(store.close(take db))
+}
+
 /// bug: a form B query that misses a row's newest generation mention, reads
 /// a masked or tail-changed key from an old generation, mis-scores a
 /// candidate, or prunes with a wrong 1-bit bound loses recall against form
 /// A, returns an absent row, or answers a run and a look differently.
-/// oracle: the form A exhaustive scan and form B index model over the same model rows.
+/// Training on a key prefix can omit a population and miss its nearest row at one probe.
+/// oracle: the form A exhaustive scan and brute-force model scores over the same rows.
 @test
 fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
+    ordered_import(clock, random)
     let metrics: Inline[vector.Metric, 2] =[L2, Dot]
     for metric in metrics {
-        let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(row_ordinal))
+        let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(row_ordinal), recall_shape())
         let mut db = take opened
         let mut model: Model = list.new()
         for _ in 0u64 .. IVF_ROWS + 64 {
@@ -545,7 +587,7 @@ fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
         write_rows(mut db, points, far, take steps)
         recall_line(far_state(mut db, points, near, far, metric, model, false))
         if let L2 = metric {
-            let Ok(hits) = far_look(db, far, q, IVF_K) else {
+            let Ok(hits) = far_look(db, far, q, IVF_K, IVF_PROBES) else {
                 fail("ivf law: form B refused a query")
             }
             if hits[0].key != moved || hits[0].score != 0 {
@@ -725,7 +767,7 @@ fn prefilter(clock: Clock, random: Random) -> Result[(), ()] waits {
     let metrics: Inline[vector.Metric, 2] =[L2, Dot]
     let mut outside = 0u64
     for metric in metrics {
-        let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(spread))
+        let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(spread), recall_shape())
         let mut db = take opened
         let mut steps: List[Step] = list.new()
         for r in 0u64 .. PF_ROWS {

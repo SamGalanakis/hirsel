@@ -13,8 +13,7 @@ const RERANK: u64 = 10
 // The u16 accumulators hold (padded / 4) groups of at most 60 each.
 const MAX_PADDED: u64 = 4096
 
-// Training reads at most this many rows per cluster, and runs this many
-// Lloyd rounds.
+// Maximum training sample size per cluster.
 const TRAIN_ROWS: u64 = 32
 
 const TRAIN_ROUNDS: u64 = 8
@@ -368,32 +367,82 @@ fn encode(t: Trained, metric: Metric, dims: u64, padded: u64, rotation: List[i64
     Encoded(cluster: int.narrow(cluster), signs: take signs, pop: pop, base: base, f: f, g: g, ex: take ex, h: r2f / to_f64(best_y))
 }
 
-// ---- Training: Lloyd's k-means over the first rows of the source in key
-// order, from the first `clusters` of them.
-fn train[K, V](tx: store.Tx, v: Ivf[K, V]) -> Result[Option[Lineage], store.Error] {
-    let clusters: u64 = int.widen(v.clusters)
-    let wanted = TRAIN_ROWS * clusters
-    let mut sample: List[List[i8]] = list.new()
-    {
-        let mut rows = store.range(tx, v.source, Unbounded, Unbounded)?
-        while list.len(sample) < wanted {
-            let Some((take key, take value)) = store.next_in(tx, mut rows)? else {
-                break
-            }
-            let raw = ivf_code(v, key, value)?
-            list.push(mut sample, take raw)
+// SplitMix64 with rejection of the short residue range for a uniform draw.
+fn sample_slot(mut state: u64, seen: u64) -> u64 {
+    let threshold = int.wrapping_sub(0u64, seen) % seen
+    loop {
+        let draw = store.splitmix64(state)
+        state = int.wrapping_add(state, 0x9E3779B97F4A7C15u64)
+        if draw >= threshold {
+            return draw % seen
         }
     }
+}
+
+fn training_sample[K, V](tx: store.Tx, v: Ivf[K, V], wanted: u64) -> Result[List[List[i8]], store.Error] {
+    let mut state = 0u64
+    for byte in string.as_bytes(v.name) {
+        let wide: u64 = int.widen(byte)
+        state = store.splitmix64(state ^ wide)
+    }
+    let mut sample: List[List[i8]] = list.new()
+    let mut rows = store.range(tx, v.source, Unbounded, Unbounded)?
+    let mut seen = 0u64
+    // Algorithm R: after the reservoir fills, replace a slot only when a
+    // uniform draw over all rows seen so far lands inside the reservoir.
+    while let Some((take key, take value)) = store.next_in(tx, mut rows)? {
+        seen += 1
+        if seen <= wanted {
+            list.push(mut sample, ivf_code(v, key, value)?)
+        } else {
+            let slot = sample_slot(mut state, seen)
+            if slot < wanted {
+                sample[slot] = ivf_code(v, key, value)?
+            }
+        }
+    }
+    Ok(take sample)
+}
+
+// Start at the first sampled row, then take the row farthest from its
+// nearest chosen seed. Adjacent slots can hold rows from one population.
+fn seed_centroids(sample: List[List[i8]], clusters: u64, dims: u64) -> List[i8] {
+    let mut centroids: List[i8] = list.with_capacity(clusters * dims)
+    let mut distances: List[i64] = list.with_capacity(list.len(sample))
+    for _ in 0u64 .. list.len(sample) {
+        list.push(mut distances, 0i64)
+    }
+    let mut pick = 0u64
+    for c in 0u64 .. clusters {
+        for j in 0u64 .. dims {
+            list.push(mut centroids, sample[pick][j])
+        }
+        if c + 1 == clusters {
+            break
+        }
+        let mut farthest = -1i64
+        for i in 0u64 .. list.len(sample) {
+            let here = distance2(centroids, c * dims, sample[i], dims)
+            if c == 0 || here < distances[i] {
+                distances[i] = here
+            }
+            if distances[i] > farthest {
+                pick = i
+                farthest = distances[i]
+            }
+        }
+    }
+    take centroids
+}
+
+fn train[K, V](tx: store.Tx, v: Ivf[K, V]) -> Result[Option[Lineage], store.Error] {
+    let clusters: u64 = int.widen(v.clusters)
+    let sample = training_sample(tx, v, TRAIN_ROWS * clusters)?
     if list.len(sample) < 4 * clusters {
         return Ok(None)
     }
     let dims = v.dims
-    let mut centroids: List[i8] = list.with_capacity(clusters * dims)
-    for c in 0u64 .. clusters {
-        for j in 0u64 .. dims {
-            list.push(mut centroids, sample[c][j])
-        }
-    }
+    let centroids = seed_centroids(sample, clusters, dims)
     let mut t = Trained(id: None, clusters: clusters, centroids: take centroids)
     for _ in 0u64 .. TRAIN_ROUNDS {
         let mut sums: List[i64] = list.with_capacity(clusters * dims)

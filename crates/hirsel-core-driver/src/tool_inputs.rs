@@ -162,8 +162,7 @@ pub fn link_driver(program: &Path) -> io::Result<PathBuf> {
 /// Link recipes, the link editor a driver names, and toolchain manifests are
 /// records in the user's content store under keys of what selects them; an
 /// object a capture compiles is a blob there, which the recipe names by path.
-/// No toolchain tree is written, so a read-only one (a system `/usr/bin/cc`)
-/// captures as any other.
+/// No toolchain tree is written, so a read-only one (a system `/usr/bin/cc`) captures as any other.
 fn recipes() -> io::Result<Store> {
     Store::cas(&crate::store::collect::user())
 }
@@ -745,8 +744,9 @@ const CAPTURE_VARIABLES: [&str; 2] = ["PATH", "LD_LIBRARY_PATH"];
 /// `HOME` and the default C driver's `LLVM_SYS_231_PREFIX` choose a place,
 /// whose bytes key what is read there; `HIRSEL_LLVM_PRINTED_ORACLE` writes a
 /// side report, as does `HIRSEL_RETURNABLE_REPORT`.
-const COMPILER_VARIABLES: [&str; 2] = [
+const COMPILER_VARIABLES: [&str; 3] = [
     hirsel_llvm_lazy::core::NO_FACTS_VARIABLE,
+    hirsel_llvm_lazy::core::PARTITION_VARIABLE,
     hirsel_core_ir::returnable::DISABLE,
 ];
 

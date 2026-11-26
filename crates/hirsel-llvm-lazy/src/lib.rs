@@ -204,37 +204,50 @@ impl Held for Unheld {
     fn keep_tail(&mut self, _: &[u8], _: &[u8; 32], _: &[u8], _: &[u8]) {}
 }
 
-pub struct ReleaseUnit {
-    module: construction::NativeModule,
+/// A release unit's sites, numbered over its partitions in order.
+pub struct ReleaseSites {
     pub sites: Vec<hirsel_core_ir::source::ReleaseSite>,
     pub debug_sites: Vec<hirsel_core_ir::source::ReleaseSite>,
 }
 
-impl ReleaseUnit {
-    /// Lower the joined release `module`, which lowering consumes: its
-    /// transforms change it in place and it is dropped once lowered.
-    pub fn lower(
-        module: hirsel_core_ir::Module,
-        facts: &hirsel_core_ir::roles::Facts,
-        observe_charge: bool,
-    ) -> Result<Self, String> {
-        let context = std::rc::Rc::new(construction::Context::with_anonymous_locals(true)?);
-        let neutral = core::step_neutral_program(&[&module]);
-        let (module, sites, debug_sites) =
-            core::emit_release_unit(module, context, facts, observe_charge, &neutral)
-                .map_err(|error| error.to_string())?;
-        Ok(Self {
-            module,
-            sites,
-            debug_sites,
-        })
-    }
+/// Lower the joined release `module`, which lowering consumes: its transforms
+/// change it in place and it is dropped once lowered. A unit over `bound`
+/// Core instructions ([`core::partition_instructions`]) lowers in partitions
+/// that keep the calls between them; `each` takes each partition as soon as
+/// it is lowered, in order, and the next is lowered once it returns. A unit
+/// within the bound is one partition.
+pub fn lower_release(
+    module: hirsel_core_ir::Module,
+    facts: &hirsel_core_ir::roles::Facts,
+    observe_charge: bool,
+    bound: usize,
+    each: &mut dyn FnMut(ReleasePartition) -> Result<(), String>,
+) -> Result<ReleaseSites, String> {
+    let neutral = core::step_neutral_program(&[&module]);
+    let (sites, debug_sites) = core::emit_release_unit(
+        module,
+        facts,
+        observe_charge,
+        &neutral,
+        bound,
+        &mut |module| each(ReleasePartition { module }),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(ReleaseSites { sites, debug_sites })
+}
 
-    /// What the unit's module records before whole-program optimisation.
+/// One partition of a release unit, lowered and not yet optimised.
+pub struct ReleasePartition {
+    module: construction::NativeModule,
+}
+
+impl ReleasePartition {
+    /// What the partition's module records before optimisation.
     pub fn ir_key(&self) -> hirsel_core_ids::ContentHash {
         self.module.ir_key()
     }
 
+    /// Optimise the partition and generate it in parts ([`emit_program_parts`]).
     pub fn emit(
         self,
         exports: &[String],

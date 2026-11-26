@@ -523,12 +523,12 @@ pub(super) enum Linkage {
     External,
     Internal,
     Private,
-    /// A body every unit that carries it defines by its code identity; the linker
-    /// keeps one.
+    /// A body every unit that carries it defines by its code identity; the linker keeps one.
     WeakOdr,
-    /// A placeholder another object may define over: its contents are never
-    /// folded into a use.
+    /// A placeholder another object may define over: its contents are never folded into a use.
     Weak,
+    /// A release partition's own body: global for the unit's other partitions, never exported.
+    Hidden,
 }
 impl Linkage {
     fn text(self) -> &'static str {
@@ -538,6 +538,7 @@ impl Linkage {
             Self::Private => "private ",
             Self::WeakOdr => "weak_odr ",
             Self::Weak => "weak ",
+            Self::Hidden => "hidden ",
         }
     }
 }
@@ -810,8 +811,7 @@ fn memory(out: &mut String, m: &Memory) {
     scopes(out, &m.scopes);
 }
 /// `code` with every `%name` bound to another local spelled as that local.
-/// Bound names are value and address locals; labels and quoted text never
-/// spell one.
+/// Bound names are value and address locals; labels and quoted text never spell one.
 fn rebind(code: &str, bound: &std::collections::HashMap<String, String>) -> String {
     fn resolve<'a>(
         bound: &'a std::collections::HashMap<String, String>,

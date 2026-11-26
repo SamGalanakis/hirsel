@@ -43,6 +43,7 @@ enum Glue {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn emit(
     module: &Module,
+    members: Option<&[bool]>,
     target: Target,
     recipes: &[hirsel_core_layout::RecipeRow],
     call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
@@ -53,11 +54,8 @@ pub(super) fn emit(
 ) -> Result<()> {
     // A spawned task's code takes an environment first; a root a transfer
     // enters (`RtOp::Transfer`) is a function's own, with none.
-    let pairs = module
-        .functions
-        .iter()
-        .filter_map(|f| f.body.as_ref())
-        .flat_map(|b| b.calls.iter())
+    let pairs = super::bodies(module, members)
+        .flat_map(|(_, b)| b.calls.iter())
         .filter_map(|c| match c.callee {
             Callee::Runtime(RtOp::Spawn { x, r } | RtOp::SpawnUnit { x, r }) => {
                 Some(vec![(x, r, Glue::Task)])

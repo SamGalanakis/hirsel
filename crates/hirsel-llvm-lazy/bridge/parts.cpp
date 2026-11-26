@@ -492,7 +492,11 @@ void with_part(Module &m, Function &f, const StringMap<std::string> &sets, std::
                                      f.getName(), p.get());
     own->copyAttributesFrom(&f);
     if (f.hasLocalLinkage()) {
-        own->setLinkage(GlobalValue::ExternalLinkage);
+        // A release partition's local definitions are named by their content
+        // (`name_from_content`), and another partition may define the same:
+        // the link keeps one.
+        own->setLinkage(m.getNamedMetadata("hirsel.partition") ? GlobalValue::WeakODRLinkage
+                                                                : GlobalValue::ExternalLinkage);
         own->setVisibility(GlobalValue::HiddenVisibility);
     }
     map[&f] = own;
@@ -634,7 +638,8 @@ std::string unsplittable_content(const Module &m, bool shared) {
         }
     }
     for (const NamedMDNode &n : m.named_metadata())
-        if (n.getName() != "llvm.module.flags" && n.getName() != "llvm.dbg.cu")
+        if (n.getName() != "llvm.module.flags" && n.getName() != "llvm.dbg.cu" &&
+            n.getName() != "hirsel.partition")
             return "named metadata " + n.getName().str();
     return "";
 }
@@ -1068,10 +1073,12 @@ extern "C" int hirsel_llvm_emit_parts(LLVMModuleRef module, LLVMTargetMachineRef
             return 0;
         }
         // Every local definition is a hidden global: a part's references to
-        // another part's definitions resolve at link time.
+        // another part's definitions resolve at link time (weak in a release
+        // partition, as `with_part` makes them).
+        bool partition = m.getNamedMetadata("hirsel.partition");
         for (GlobalObject &g : m.global_objects())
             if (!g.isDeclaration() && g.hasLocalLinkage()) {
-                g.setLinkage(GlobalValue::ExternalLinkage);
+                g.setLinkage(partition ? GlobalValue::WeakODRLinkage : GlobalValue::ExternalLinkage);
                 g.setVisibility(GlobalValue::HiddenVisibility);
             }
         for (Function *f : held) f->deleteBody();

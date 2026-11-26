@@ -60,13 +60,14 @@ const IDLE_EXIT: Duration = Duration::from_secs(600);
 const COLLECT_AFTER: Duration = Duration::from_secs(1);
 /// The variables a compiler reads once, when it starts, so that a server
 /// keeps its own: the memory limit and the guard's oracle switch (read at the
-/// first allocation), and the LLVM engine's facts switch and expected build
-/// id (read at its first use). Every other variable a request reads is its
-/// client's.
-const STARTUP_VARIABLES: [&str; 4] = [
+/// first allocation), and the LLVM engine's facts switch, partition bound and
+/// expected build id (read at their first use). Every other variable a
+/// request reads is its client's.
+const STARTUP_VARIABLES: [&str; 5] = [
     "HIRSEL_MEMORY_LIMIT",
     "HIRSEL_GUARD_ORACLE",
     hirsel_llvm_lazy::core::NO_FACTS_VARIABLE,
+    hirsel_llvm_lazy::core::PARTITION_VARIABLE,
     "HIRSEL_LLVM_EXPERIMENT_BUILD_ID",
 ];
 

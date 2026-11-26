@@ -39,8 +39,11 @@ enum TempSlot {
     Defined(Raw),
 }
 
+/// A release unit's debug lines: each source position's ordinal among its
+/// owner's, numbered in the order the unit's bodies first use them. A
+/// partitioned unit passes it from each partition's sink to the next.
 #[derive(Default)]
-struct ReleaseDebug {
+pub(crate) struct ReleaseDebug {
     items: Vec<DefPath>,
     pending: HashMap<usize, (u32, u32, usize)>,
     ordinals: HashMap<(u32, u32), u32>,
@@ -49,6 +52,15 @@ struct ReleaseDebug {
 }
 
 impl ReleaseDebug {
+    pub fn new(items: Vec<DefPath>) -> Self {
+        Self {
+            items,
+            ..Self::default()
+        }
+    }
+    pub fn sites(self) -> Vec<ReleaseSite> {
+        self.sites
+    }
     fn line(&mut self, item: u32, start: u32) -> u64 {
         let ordinal = self.ordinals.entry((item, start)).or_insert_with(|| {
             let item = &self.items[item as usize];
@@ -106,36 +118,30 @@ impl NativeSink {
         }
     }
 
-    /// A release unit's sink. Once the unit is large it simplifies each body as it
-    /// finishes, for the release machine of x86-64 Linux, the only target release
-    /// units lower for (the builder's `unit_stream`).
-    pub fn release(context: Rc<llvm::Context>, items: Vec<DefPath>) -> super::super::Result<Self> {
+    /// A release unit's (or partition's) sink, numbering debug lines on from
+    /// `debug`.
+    pub fn release(context: Rc<llvm::Context>, debug: ReleaseDebug) -> Self {
         let mut sink = Self::new(context);
-        sink.release_debug = Some(ReleaseDebug {
-            items,
-            ..ReleaseDebug::default()
-        });
-        let target = hirsel_core_layout::Target::X86_64Linux;
-        let triple = std::ffi::CString::new(target.triple()).unwrap();
-        let cpu = std::ffi::CString::new(target.cpu()).unwrap();
-        let features = std::ffi::CString::new(target.llvm_features()).unwrap();
-        let mut out = Output::default();
-        // SAFETY: the strings outlive the synchronous call on the live unit.
-        unsafe {
-            (sink.api.unit_stream)(
-                sink.unit,
-                triple.as_ptr(),
-                cpu.as_ptr(),
-                features.as_ptr(),
-                &mut out,
-            );
-        }
-        llvm::output(out).map_err(super::super::Error::Llvm)?;
-        Ok(sink)
+        sink.release_debug = Some(debug);
+        sink
     }
 
-    pub fn take_debug_sites(&mut self) -> Vec<ReleaseSite> {
-        self.release_debug.take().unwrap().sites
+    /// The unit's debug lines so far; positions this sink's metadata held
+    /// unresolved belong to it alone.
+    pub fn take_release_debug(&mut self) -> ReleaseDebug {
+        let mut debug = self.release_debug.take().unwrap();
+        debug.pending.clear();
+        debug
+    }
+
+    /// Each global the unit references and has not yet defined or declared,
+    /// by name in byte order.
+    pub fn unresolved(&mut self) -> std::result::Result<Vec<String>, String> {
+        let mut out = Output::default();
+        // SAFETY: the live unit is read through the synchronous call.
+        unsafe { (self.api.unit_forward)(self.unit, &mut out) };
+        let text = llvm::output(out)?;
+        Ok(text.split_terminator('\0').map(str::to_owned).collect())
     }
 
     fn debug_location(&mut self, id: usize) -> Raw {

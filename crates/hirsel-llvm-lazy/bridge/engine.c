@@ -32,6 +32,7 @@ typedef void (*HirselLlvmSourceRemark)(void *, unsigned, const char *, size_t, c
 extern void hirsel_llvm_share_cold_step_sync(void *module, void *machine,
     HirselLlvmSourceRemark source, void *receiver);
 extern LLVMBool hirsel_llvm_large_release(LLVMModuleRef module);
+extern LLVMBool hirsel_llvm_release_partition(LLVMModuleRef module);
 extern LLVMErrorRef hirsel_llvm_optimize_large_release(LLVMModuleRef module, LLVMTargetMachineRef machine);
 extern LLVMErrorRef hirsel_llvm_optimize_release(LLVMModuleRef module, LLVMTargetMachineRef machine,
     LLVMBool prune, LLVMBool prepay_steps, HirselLlvmCounterRangeReport report, HirselLlvmSourceRemark source, void *receiver,
@@ -299,7 +300,7 @@ static LLVMValueRef call_twin(LLVMBuilderRef builder, LLVMContextRef context,
 // returns up to four words, in registers on AArch64; on x86-64 three come back
 // in registers and four come back through a caller slot.
 static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
-                              LLVMCallConv convention, unsigned registers) {
+                              LLVMCallConv convention, unsigned registers, int partition) {
     LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
     LLVMDIBuilderRef debug = NULL;
     LLVMTypeRef i64 = LLVMInt64TypeInContext(context), i8 = LLVMInt8TypeInContext(context);
@@ -315,8 +316,14 @@ static void register_carriers(LLVMModuleRef module, LLVMContextRef context,
         LLVMLinkage linkage = LLVMGetLinkage(f);
         unsigned count = LLVMCountParams(f);
         set_carriers(context, f, cs, 0);
-        if (!n || !LLVMCountBasicBlocks(f) || count > 64 ||
-            (linkage != LLVMInternalLinkage && linkage != LLVMPrivateLinkage)) { f = next; continue; }
+        // In a release partition, a hidden function is the program's own
+        // body, this partition's or another's (declared here).
+        int own = linkage == LLVMInternalLinkage || linkage == LLVMPrivateLinkage;
+        int shared = partition && LLVMGetVisibility(f) == LLVMHiddenVisibility;
+        if (!n || count > 64 || !(own || shared) || (!shared && !LLVMCountBasicBlocks(f))) {
+            f = next;
+            continue;
+        }
         LLVMTypeRef old_ty = LLVMGlobalGetValueType(f), old_ret = LLVMGetReturnType(old_ty);
         // A `mut` header comes back only within the return registers, and
         // never from a function whose result already travels by `sret`.
@@ -494,13 +501,6 @@ static LLVMTargetMachineRef target_machine(const char *triple, const char *cpu, 
     return machine;
 }
 
-// The optimizing machine a release unit's builder simplifies its bodies for
-// (hirsel_llvm_large_stream), the one emit_program optimizes it with.
-LLVMTargetMachineRef hirsel_llvm_release_machine(const char *triple, const char *cpu, const char *features,
-                                                 HirselLlvmOutput *out) {
-    return target_machine(triple, cpu, features, 1, out);
-}
-
 static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
                           uint8_t speed, const char *triple, const char *cpu,
@@ -549,15 +549,29 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // optimizer and code generator stop naming the values they create.
     discard_names = !standalone && !LLVMContextShouldDiscardValueNames(context);
     if (discard_names) LLVMContextSetDiscardValueNames(context, 1);
+    // A release partition's bodies are the program's alone, as a whole
+    // unit's are once internal, but its other partitions call them by name:
+    // they stay global and hidden.
+    int partition = hirsel_llvm_release_partition(module);
+    int large = hirsel_llvm_large_release(module);
     if (export_count) {
         for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
-            if (!public_body(f)) continue;
+            // A partition declares the bodies it calls in the others hidden;
+            // an exported one keeps the default visibility it is defined with.
+            int declared = partition && LLVMIsDeclaration(f) &&
+                LLVMGetVisibility(f) == LLVMHiddenVisibility;
+            if (!declared && !public_body(f)) continue;
             size_t len;
             const char *name = LLVMGetValueName2(f, &len);
             int exported = 0;
             for (size_t i = 0; i < export_count; ++i)
                 if (strlen(exports[i]) == len && !memcmp(name, exports[i], len)) exported = 1;
-            if (!exported) LLVMSetLinkage(f, LLVMInternalLinkage);
+            if (declared) {
+                if (exported) LLVMSetVisibility(f, LLVMDefaultVisibility);
+            } else if (!exported) {
+                if (partition) LLVMSetVisibility(f, LLVMHiddenVisibility);
+                else LLVMSetLinkage(f, LLVMInternalLinkage);
+            }
         }
     }
     if (speed && export_count) {
@@ -565,7 +579,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         int x86 = !strncmp(triple, "x86_64", 6), arm = !strncmp(triple, "aarch64", 7) ||
             !strncmp(triple, "arm64", 5);
         register_carriers(module, context, x86 || arm ? LLVMPreserveMostCallConv : LLVMFastCallConv,
-            x86 || arm ? 4 : 2);
+            x86 || arm ? 4 : 2, partition);
     }
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);
@@ -573,7 +587,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     LLVMErrorRef e = LLVMErrorSuccess;
     // A library (`lend`) is optimised whole however large: every program
     // runs its code and inlines its lent bodies, and it is lowered once.
-    if (speed && !lend && hirsel_llvm_large_release(module)) {
+    if (speed && !lend && (partition || large)) {
         e = hirsel_llvm_optimize_large_release(module, machine);
     } else if (speed) {
         unsigned hint = LLVMGetEnumAttributeKindForName("inlinehint", 10);

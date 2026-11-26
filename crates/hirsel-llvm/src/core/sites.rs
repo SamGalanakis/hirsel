@@ -153,6 +153,7 @@ pub(super) fn debug_plan(
     failures: &failure::Failures,
     call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
     release: bool,
+    members: Option<&[bool]>,
     next: &mut usize,
     sink: &mut dyn Sink,
 ) -> DebugPlan {
@@ -164,7 +165,7 @@ pub(super) fn debug_plan(
     };
     let mut files = std::collections::BTreeMap::new();
     let mut owners = std::collections::BTreeMap::new();
-    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+    for (_, body) in super::bodies(module, members) {
         for anchor in body
             .inst_anchors
             .iter()
@@ -218,6 +219,9 @@ pub(super) fn debug_plan(
     });
     let signature = node(Metadata::SubroutineType { types });
     let mut make = |i: usize, base: &str| {
+        if members.is_some_and(|members| !members[i]) {
+            return None;
+        }
         let function = &module.functions[i];
         let body = function.body.as_ref()?;
         let first = body

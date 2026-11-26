@@ -21,7 +21,9 @@ mod step_free;
 pub use split::{rewrite_std_symbols, split_native_object, strong_definitions, undefined_symbols};
 mod empty;
 mod engine;
-pub use engine::{NO_FACTS_VARIABLE, facts_enabled, supports_target};
+pub use engine::{
+    NO_FACTS_VARIABLE, PARTITION_VARIABLE, facts_enabled, partition_instructions, supports_target,
+};
 mod expose;
 mod fast;
 mod flow;
@@ -31,7 +33,15 @@ mod growth;
 mod inlining;
 mod law;
 mod optimized_ir;
+#[cfg(hirsel_lazy_core)]
+mod oracle;
+mod partition;
 pub use optimized_ir::*;
+#[cfg(hirsel_lazy_core)]
+use oracle::printed_oracle;
+#[cfg(hirsel_lazy_core)]
+pub(crate) use partition::emit_release_unit;
+use partition::{Analyses, Foreign, ForeignBody, bodies, define_static, foreign_symbols, prepare};
 mod scalar;
 mod simd;
 mod sink;
@@ -351,7 +361,8 @@ impl Items {
         });
         lasts
     }
-    fn emit(self, sink: &mut dyn Sink) -> Vec<source::ReleaseSite> {
+    /// Emit the pending items; the release sites go on to a next partition.
+    fn emit(self, sink: &mut dyn Sink) -> Option<ReleaseSites> {
         for item in self.pending.into_values() {
             match item {
                 Item::Global(global) => sink.global(&global),
@@ -361,7 +372,6 @@ impl Items {
             }
         }
         self.release_sites
-            .map_or_else(Vec::new, |sites| sites.bindings)
     }
 }
 
@@ -401,11 +411,61 @@ fn emit_module(
     sink: &mut dyn Sink,
 ) -> Result<Vec<source::ReleaseSite>> {
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
-    let mut module = hirsel_core_ir::native_layout::resolve(module, &recipes);
-    if source.batch_steps {
-        module = expose::module(module, provided.prepay_step_trees);
+    let module = prepare(module, &recipes, source, provided);
+    let mut sites = provided.release_sites.then(ReleaseSites::default);
+    let analyses = Analyses::new(&module, &recipes, source, provided, facts);
+    emit_prepared(
+        &module,
+        &recipes,
+        &analyses,
+        target,
+        observe_charge,
+        facts,
+        source,
+        provided,
+        None,
+        &mut sites,
+        sink,
+    )?;
+    // A unit over the partition bound that a target lowers whole (only x86-64
+    // Linux lowers release units in partitions) keeps its call boundaries as
+    // a partition does (`hirsel_llvm_large_release`).
+    if bodies(&module, None)
+        .map(|(_, body)| body.insts.len())
+        .sum::<usize>()
+        > partition_instructions()
+    {
+        sink.named_metadata("hirsel.large-release", &[]);
     }
-    let module = module.as_ref();
+    Ok(sites.map_or_else(Vec::new, |sites| sites.bindings))
+}
+
+/// Lower the prepared `module` into `sink`: every body, or with `members`
+/// only the members' (a release partition). A partition's bodies are hidden
+/// globals, and it returns how each other body is declared ([`Foreign`]).
+/// `release_sites` numbers release sites on from earlier partitions.
+#[allow(clippy::too_many_arguments)]
+fn emit_prepared(
+    module: &Module,
+    recipes: &[hirsel_core_layout::RecipeRow],
+    analyses: &Analyses,
+    target: Target,
+    observe_charge: bool,
+    facts: bool,
+    source: SourceEmission,
+    provided: EmissionFacts<'_>,
+    members: Option<&[bool]>,
+    release_sites: &mut Option<ReleaseSites>,
+    sink: &mut dyn Sink,
+) -> Result<Foreign> {
+    let member = |i: usize| members.is_none_or(|members| members[i]);
+    // A partition's own bodies stay global for the others, never exported.
+    let own = if members.is_some() {
+        Linkage::Hidden
+    } else {
+        Linkage::Internal
+    };
+    let mut foreign = Foreign::new();
     let own_sites;
     let fixed_sites = if source.relocatable_sites || !source.fixed_sites.is_empty() {
         source.fixed_sites
@@ -413,18 +473,8 @@ fn emit_module(
         own_sites = hirsel_core_ir::source::module_sites(module);
         &own_sites
     };
-    let mut items = Items::new(module);
-    if let Some(known) = provided.versions.filter(|known| !known.is_empty()) {
-        items.versioned = Some(
-            module
-                .functions
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    f.versioned || known.contains(&module.code_identity(FuncId(i as u32)))
-                })
-                .collect(),
-        );
+    let mut items = analyses.items();
+    if items.versioned.is_some() {
         sink.global(&Global {
             name: "hirsel_core_isa_level".into(),
             linkage: Linkage::External,
@@ -437,16 +487,9 @@ fn emit_module(
             section: None,
         });
     }
-    items.release_sites = provided.release_sites.then(ReleaseSites::default);
-    for (&f, free) in &module.step_free {
-        if free.dispatch && !items.is_versioned(f) {
-            items.step_dispatch[f.index()] = Some(free.body);
-        }
-    }
-    let step_variants = hirsel_core_ir::step_contexts::variants(module);
+    items.release_sites = release_sites.take();
+    let step_variants = &analyses.step_variants;
     let batch_steps = source.batch_steps;
-    items.callback_sites =
-        batch_steps.then(|| inlining::CallbackSites::new(module, &step_variants));
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
         0,
@@ -466,19 +509,12 @@ fn emit_module(
             items: vec![],
         },
     );
-    for (i, data) in module.statics.iter().enumerate() {
-        let (align, bytes) = data.native(&module.types, &recipes);
-        sink.global(&Global {
-            name: format!("s{i}").into(),
-            linkage: Linkage::Private,
-            constant: true,
-            externally_initialized: false,
-            ty: Type::bytes(bytes.len() as u64),
-            init: Some(Value::Bytes(bytes.into_owned())),
-            align,
-            absolute_symbol: false,
-            section: None,
-        });
+    // A partition defines the statics its bodies read once they are lowered
+    // (`define_static`).
+    if members.is_none() {
+        for i in 0..module.statics.len() {
+            define_static(module, recipes, i, sink);
+        }
     }
     let records = coverage::records(module, target, sink)?;
     // Each function a body of this unit describes, its descriptor `{code,
@@ -491,7 +527,7 @@ fn emit_module(
     // declares it); an intrinsic's holds its revision, weak_odr.
     let mut described = BTreeSet::new();
     let mut revisions = BTreeSet::new();
-    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+    for (_, body) in bodies(module, members) {
         for inst in &body.insts {
             let Inst::DescriptorRef {
                 function, identity, ..
@@ -574,33 +610,34 @@ fn emit_module(
         }
     }
     let mut next_scope = alias::private_steps(sink);
-    let failures = failure::Failures::new(module);
-    let called_in_loop = empty::called_in_loop(module);
-    let step_neutral = steps::neutral_functions(module, provided.neutral);
-    let neutral_functions = step_neutral.as_slice();
-    let call_layouts = hirsel_core_ir::native_layout::CallLayouts::new(&module.types, &recipes);
+    let failures = &analyses.failures;
+    let called_in_loop = &analyses.called_in_loop;
+    let neutral_functions = analyses.step_neutral.as_slice();
+    let call_layouts = &analyses.call_layouts;
     let debug = if source.debug_lines {
         sites::debug_plan(
             module,
             &items.function_symbols,
             items.versioned.as_deref(),
             &items.step_dispatch,
-            &failures,
-            &call_layouts,
+            failures,
+            call_layouts,
             provided.release_sites,
+            members,
             &mut next_scope,
             sink,
         )
     } else {
         sites::DebugPlan::default()
     };
-    let local_roles =
-        (facts && provided.roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
-    let role_facts = provided.roles.or(local_roles.as_ref()).filter(|_| facts);
+    let role_facts = provided
+        .roles
+        .or(analyses.local_roles.as_ref())
+        .filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
-        let abi = abi::Return::private(target, sig, &call_layouts, has_status, f.body.is_some());
+        let abi = abi::Return::private(target, sig, call_layouts, has_status, f.body.is_some());
         // A body whose convention differs from the public one keeps it under a
         // suffixed private symbol, behind a public wrapper of the same name.
         let ok = abi.ok.is_some();
@@ -608,21 +645,45 @@ fn emit_module(
         let suffix = abi::private_suffix(has_status, ok);
         let mut name = items.function_symbols[i].clone();
         let versioned = items.is_versioned(FuncId(i as u32));
-        let (mut params, locals) = abi.parameters(sig, &call_layouts, facts, |place| match place {
-            PlaceTy::Value(t) => size(t),
-            PlaceTy::Declared(t)
-                if matches!(
-                    module.types[t.index()].repr,
-                    hirsel_core_layout::Repr::Resource | hirsel_core_layout::Repr::Region
-                ) =>
-            {
-                8
-            }
-            PlaceTy::Declared(t) => match &recipes[t.index()].layout {
-                hirsel_core_layout::Layout::Fixed(layout) => layout.size,
-                _ => unreachable!("address parameter has a fixed native place"),
-            },
+        let (mut params, locals) = abi.parameters(sig, call_layouts, facts, |place| {
+            place_size(module, recipes, place)
         });
+        // Every partition declares the unit's external functions.
+        if f.body.is_some() && !member(i) {
+            foreign_symbols(
+                &mut foreign,
+                ForeignBody {
+                    name: &name,
+                    free: items.step_dispatch[i].is_some(),
+                    versioned,
+                    stubs: versioned && !sig.has_vectors(),
+                    suffix,
+                    private,
+                    body: abi.signature(params),
+                    public: || {
+                        let public = abi::Return::for_signature(target, sig, call_layouts, true);
+                        let (params, _) = public.parameters(sig, call_layouts, facts, |place| {
+                            place_size(module, recipes, place)
+                        });
+                        public.signature(params)
+                    },
+                    attrs: FnAttrs {
+                        linkage: Linkage::Hidden,
+                        cold: f.cold,
+                        carriers: carriers(
+                            module,
+                            recipes,
+                            role_facts,
+                            FuncId(i as u32),
+                            sig,
+                            &locals,
+                        ),
+                        ..FnAttrs::default()
+                    },
+                },
+            );
+            continue;
+        }
         let Some(body) = &f.body else {
             let signature = abi.signature(params);
             if !versioned || !sig.has_vectors() {
@@ -646,12 +707,12 @@ fn emit_module(
                     &name,
                     &abi.signature(params.clone()),
                     &locals,
-                    Linkage::Internal,
+                    own,
                     suffix,
                 );
             }
-            let public = abi::Return::for_signature(target, sig, &call_layouts, true);
-            let (params, locals) = public.parameters(sig, &call_layouts, false, |_| 0);
+            let public = abi::Return::for_signature(target, sig, call_layouts, true);
+            let (params, locals) = public.parameters(sig, call_layouts, false, |_| 0);
             versions::stub(
                 sink,
                 &name,
@@ -690,7 +751,7 @@ fn emit_module(
                 (abi.take().unwrap(), std::mem::take(&mut params))
             } else {
                 (
-                    abi::Return::private(target, sig, &call_layouts, has_status, true),
+                    abi::Return::private(target, sig, call_layouts, has_status, true),
                     params.clone(),
                 )
             };
@@ -710,7 +771,7 @@ fn emit_module(
             let mut e = FunctionEmitter {
                 function: Some(FuncId(i as u32)),
                 level,
-                call_layouts: Some(&call_layouts),
+                call_layouts: Some(call_layouts),
                 append_fast,
                 shadow_callee,
                 caller_site: Value::Local(Local::CALLER_SITE),
@@ -749,7 +810,7 @@ fn emit_module(
                 recipes: &recipes,
                 abi: signature_abi,
                 has_status,
-                failures: &failures,
+                failures: failures,
                 constants: &failures.constants[i],
                 observe_charge,
                 law: hirsel_core_ir::law::Hooks::pick(module, f, body, &recipes),
@@ -775,11 +836,7 @@ fn emit_module(
             };
             let body_name = format!("{body_base}{suffix}");
             let attrs = FnAttrs {
-                linkage: if private {
-                    Linkage::Internal
-                } else {
-                    Linkage::WeakOdr
-                },
+                linkage: if private { own } else { Linkage::WeakOdr },
                 inline: inlining::definition(
                     &definition,
                     module,
@@ -787,7 +844,7 @@ fn emit_module(
                     body,
                     batch_steps,
                     called_in_loop[i],
-                    inlining::specialized(module, &step_variants, FuncId(i as u32)),
+                    inlining::specialized(module, step_variants, FuncId(i as u32)),
                 ),
                 cold: f.cold,
                 map_probe: definition == "core@1/map/probe",
@@ -899,7 +956,7 @@ fn emit_module(
             if let Some(scopes) = e.aliases.as_ref().map(|a| a.declared().to_vec()) {
                 e.declare_scopes(&scopes);
             }
-            let mut forwarding = forward::Forwarding::native(body, sig, &call_layouts);
+            let mut forwarding = forward::Forwarding::native(body, sig, call_layouts);
             // A view freezes the carrier header throughout the activation, even
             // across calls through an opaque capture. End the invariant before
             // returning, and keep frame-safe tail calls in tail position.
@@ -987,7 +1044,7 @@ fn emit_module(
                         && offset == ending.prefix
                         && {
                             e.anchor = body.inst_anchors[b.insts.start as usize + offset];
-                            e.return_call(&body.calls[ending.call.index()], ending, &call_layouts)
+                            e.return_call(&body.calls[ending.call.index()], ending, call_layouts)
                         }
                     {
                         returned = true;
@@ -1042,7 +1099,7 @@ fn emit_module(
                 e.public_wrapper(
                     &name,
                     sig,
-                    &call_layouts,
+                    call_layouts,
                     facts,
                     function_debug.and_then(|d| d.wrapper),
                     has_status,
@@ -1052,9 +1109,10 @@ fn emit_module(
     }
     cleanup::drop_glue(
         module,
+        members,
         target,
         &recipes,
-        &failures,
+        failures,
         facts,
         source.test_hooks,
         sink,
@@ -1062,21 +1120,41 @@ fn emit_module(
     )?;
     task_entry::emit(
         module,
+        members,
         target,
         &recipes,
-        &call_layouts,
-        &failures,
+        call_layouts,
+        failures,
         facts,
         sink,
         &mut items,
     )?;
     let lasts = items.take_release_lasts();
     cleanup::release_lasts(
-        module, target, &recipes, &failures, facts, &lasts, sink, &mut items,
+        module, target, &recipes, failures, facts, &lasts, sink, &mut items,
     )?;
-    let sites = items.emit(sink);
+    *release_sites = items.emit(sink);
     coverage::retain(&records, sink);
-    Ok(sites)
+    Ok(foreign)
+}
+
+/// The native size of a parameter's place.
+fn place_size(module: &Module, recipes: &[hirsel_core_layout::RecipeRow], place: PlaceTy) -> u64 {
+    match place {
+        PlaceTy::Value(t) => size(t),
+        PlaceTy::Declared(t)
+            if matches!(
+                module.types[t.index()].repr,
+                hirsel_core_layout::Repr::Resource | hirsel_core_layout::Repr::Region
+            ) =>
+        {
+            8
+        }
+        PlaceTy::Declared(t) => match &recipes[t.index()].layout {
+            hirsel_core_layout::Layout::Fixed(layout) => layout.size,
+            _ => unreachable!("address parameter has a fixed native place"),
+        },
+    }
 }
 
 /// Lower one owned unit directly into a native module of `context`.
@@ -1111,45 +1189,6 @@ pub(crate) fn emit_native_module_in_context(
             versions,
         },
     )
-}
-
-#[cfg(hirsel_lazy_core)]
-pub(crate) fn emit_release_unit(
-    module: Module,
-    context: std::rc::Rc<crate::construction::Context>,
-    roles: &hirsel_core_ir::roles::Facts,
-    observe_charge: bool,
-    neutral: &BTreeSet<hirsel_core_ids::ContentHash>,
-) -> Result<(
-    crate::construction::NativeModule,
-    Vec<source::ReleaseSite>,
-    Vec<source::ReleaseSite>,
-)> {
-    let mut native = sink::native::NativeSink::release(context, module.items.clone())?;
-    let versions = versions::program(&[&module]);
-    let sites = emit_module(
-        Cow::Owned(module),
-        Target::X86_64Linux,
-        observe_charge,
-        facts_enabled(),
-        SourceEmission {
-            batch_steps: true,
-            test_hooks: cfg!(test),
-            relocatable_sites: true,
-            debug_lines: true,
-            fixed_sites: &[],
-        },
-        EmissionFacts {
-            roles: Some(roles),
-            neutral: Some(neutral),
-            prepay_step_trees: true,
-            release_sites: true,
-            versions: Some(&versions),
-        },
-        &mut native,
-    )?;
-    let debug_sites = native.take_debug_sites();
-    Ok((native.finish().map_err(Error::Llvm)?, sites, debug_sites))
 }
 
 #[cfg(hirsel_lazy_core)]
@@ -1192,68 +1231,6 @@ fn native_module(
         )?;
     }
     native.finish().map_err(Error::Llvm)
-}
-
-/// The printed-module oracle (ORACLE.md), a check that never changes emission:
-/// the raw native module must print exactly as the text producer's module
-/// parsed in a fresh context. Each compared unit appends a row to `units.tsv`;
-/// a mismatch keeps its text, both prints and the first differing line, and
-/// fails this unit's compilation so no later object equality can hide it.
-#[cfg(hirsel_lazy_core)]
-fn printed_oracle(
-    dir: &std::path::Path,
-    module: &Module,
-    native: &str,
-    produce: impl FnOnce(&mut sink::TextSink) -> Result<()>,
-) -> Result<()> {
-    use std::io::Write as _;
-    let mut text = sink::TextSink::default();
-    produce(&mut text)?;
-    let text = text.finish();
-    let parsed = crate::construction::print_text(&text).map_err(Error::Llvm)?;
-    let identity = module
-        .instances
-        .first()
-        .map_or_else(String::new, |i| i.definition.to_string());
-    let digest = hirsel_core_ids::ContentHash::of_bytes(text.as_bytes()).0[..8]
-        .iter()
-        .fold(String::new(), |mut s, b| {
-            write!(s, "{b:02x}").unwrap();
-            s
-        });
-    let difference = native
-        .lines()
-        .zip(parsed.lines())
-        .position(|(a, b)| a != b)
-        .or_else(|| (native.lines().count() != parsed.lines().count()).then_some(0));
-    let io = |e: std::io::Error| Error::Llvm(format!("printed oracle {}: {e}", dir.display()));
-    std::fs::create_dir_all(dir).map_err(io)?;
-    let row = format!(
-        "{}\t{digest}\t{identity}\t{}\t{}\n",
-        if difference.is_some() { "DIFF" } else { "SAME" },
-        native.lines().count(),
-        difference.map_or(String::from("-"), |l| (l + 1).to_string()),
-    );
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("units.tsv"))
-        .and_then(|mut f| f.write_all(row.as_bytes()))
-        .map_err(io)?;
-    let Some(line) = difference else {
-        return Ok(());
-    };
-    for (suffix, body) in [
-        ("ll", &text),
-        ("native.ll", &native.to_owned()),
-        ("parsed.ll", &parsed),
-    ] {
-        std::fs::write(dir.join(format!("{digest}.{suffix}")), body).map_err(io)?;
-    }
-    Err(Error::Llvm(format!(
-        "printed oracle: unit {identity} ({digest}) differs at printed line {}",
-        line + 1
-    )))
 }
 
 /// Emit source-independent IR whose failure sites bind to the fresh link table.

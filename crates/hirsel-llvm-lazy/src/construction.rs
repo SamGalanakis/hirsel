@@ -118,8 +118,7 @@ pub(crate) struct Api {
     pub shuffle: unsafe extern "C" fn(Raw, Raw, Raw, *const i32, usize) -> Raw,
     pub extract_element: unsafe extern "C" fn(Raw, Raw, u32) -> Raw,
     pub insert_element: unsafe extern "C" fn(Raw, Raw, Raw, u32) -> Raw,
-    pub unit_stream:
-        unsafe extern "C" fn(Raw, *const c_char, *const c_char, *const c_char, *mut Output),
+    pub unit_forward: unsafe extern "C" fn(Raw, *mut Output),
     pub end_body: unsafe extern "C" fn(Raw),
     pub used: unsafe extern "C" fn(Raw, *const Raw, usize),
 }

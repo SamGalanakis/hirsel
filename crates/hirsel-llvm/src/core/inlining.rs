@@ -5,12 +5,14 @@ use std::collections::BTreeMap;
 use super::{empty, sink::Inline};
 use hirsel_core_ir::*;
 
+#[derive(Clone)]
 struct CallbackRole {
     caller: bool,
     output_loop: bool,
 }
 
 /// Inline eligible output loops at calls from small closure-specialized bodies.
+#[derive(Clone)]
 pub(super) struct CallbackSites(Vec<CallbackRole>);
 
 impl CallbackSites {

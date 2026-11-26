@@ -250,9 +250,9 @@ pub(super) const STEP_PARAMS: [Local; 4] = [
 ];
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn drop_glue(
     module: &Module,
+    members: Option<&[bool]>,
     target: Target,
     recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
@@ -273,7 +273,7 @@ pub(super) fn drop_glue(
     // (`core_resource_T`) over its storage (LANG-19).
     let mut resources = BTreeSet::new();
     let mut pending = Vec::new();
-    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+    for (_, body) in super::bodies(module, members) {
         for inst in &body.insts {
             match inst {
                 Inst::Alloc {

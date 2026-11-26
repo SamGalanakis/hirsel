@@ -14,8 +14,9 @@ pub(crate) struct Message {
 }
 /// Control messages align to 32 bits (`__DARWIN_ALIGN32`).
 pub(crate) const CMSG_ALIGN: usize = 4;
-/// The send-side IPv4 TOS control carries one byte.
-pub(crate) type Tos = u8;
+/// The send-side IPv4 TOS control carries an int: macOS 26 accepts a
+/// one-byte IP_TOS control and sends the datagram unmarked.
+pub(crate) type Tos = i32;
 /// The control message type that reports a received IPv4 TOS byte.
 pub(crate) const TOS_RECEIVED: i32 = libc::IP_RECVTOS;
 pub(crate) const SEGMENT: Option<(i32, i32)> = None;

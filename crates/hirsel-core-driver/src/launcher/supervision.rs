@@ -474,6 +474,7 @@ impl ChildSupervisor {
         }
         if let Some(conn) = &mut prepared.endpoint {
             if let Err(error) = conn.watch() {
+                self.tokens.remove(&watch.token());
                 drop(watch);
                 if running.signal(libc::SIGKILL).is_ok() {
                     let _ = running.wait();

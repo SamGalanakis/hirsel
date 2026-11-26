@@ -8,7 +8,6 @@ use super::{Image, Images, Launcher, Lifecycle::*, bootstrap::Bootstrap, hex};
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::TcpStream;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -654,7 +653,7 @@ fn child_mode_authority() {
     rig.launcher
         .listen(UnixListener::bind(work.join("control")).unwrap())
         .unwrap();
-    let control = crate::host::fd_report(rig.launcher.control.as_ref().unwrap().as_raw_fd());
+    let control = crate::host::fd_report(rig.launcher.control_fd().unwrap());
     let held = |name: &str| -> Vec<String> {
         fs::read_to_string(work.join(format!("fds-{name}")))
             .unwrap()
@@ -1075,7 +1074,7 @@ fn control_peer_is_the_host() {
     let _foreign = UnixStream::connect(&socket).unwrap();
     rig.idle(Duration::from_millis(50));
     assert!(
-        rig.launcher.session.is_none(),
+        !rig.launcher.has_session(),
         "a process that is not the host was admitted to the control session"
     );
 }

@@ -11,6 +11,7 @@ pub(crate) mod admit;
 mod bootstrap;
 mod cgroup;
 mod cli;
+mod control_session;
 pub(crate) mod dev;
 mod embedded_host;
 mod grants;
@@ -34,10 +35,11 @@ pub(crate) use cgroup::Lifecycle;
 use cli::bind_control;
 pub(crate) use cli::{parse_lifecycle, resolve_lifecycle, run};
 
+use control_session::{Conn, ControlSession, PeerPolicy};
 #[cfg(test)]
 use hirsel_core_ids::hex;
 use lifecycle::StoreClaims;
-use ready::{NONE, READ, Readiness, ReadyEvent, WRITE, Watch};
+use ready::{READ, Readiness, ReadyEvent, Watch};
 use session::{
     Approvals, Attempt, Child, Event, Failure, Group, HostCommand, HostReply, Input, Launch,
     Refusal, Request, Role, Status, Wire,
@@ -45,7 +47,7 @@ use session::{
 use spawn::RunningChild;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::net::TcpListener;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -113,84 +115,6 @@ pub(crate) trait Images {
     ) -> io::Result<u64>;
 }
 
-/// A nonblocking framed stream: the control session, or a serving child's endpoint.
-struct Conn {
-    watch: Watch,
-    stream: UnixStream,
-    input: Vec<u8>,
-    output: Vec<u8>,
-    closed: bool,
-    /// Reading is held back while an admission's input waits for its worker.
-    paused: bool,
-}
-
-impl Conn {
-    fn new(poll: &Readiness, stream: UnixStream) -> io::Result<Self> {
-        stream.set_nonblocking(true)?;
-        Ok(Self {
-            watch: poll.watch(stream.as_raw_fd()),
-            stream,
-            input: Vec::new(),
-            output: Vec::new(),
-            closed: false,
-            paused: false,
-        })
-    }
-
-    fn watch(&mut self) -> io::Result<()> {
-        let read = if self.paused { NONE } else { READ };
-        let interest = if self.closed {
-            NONE
-        } else if self.output.is_empty() {
-            read
-        } else {
-            read | WRITE
-        };
-        self.watch.set(interest)
-    }
-
-    /// Read what is ready. A peer that closed or failed ends the stream.
-    fn fill(&mut self) {
-        let mut buffer = [0; 1 << 16];
-        loop {
-            match self.stream.read(&mut buffer) {
-                Ok(0) => return self.closed = true,
-                Ok(n) => self.input.extend_from_slice(&buffer[..n]),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => return self.closed = true,
-            }
-        }
-    }
-
-    fn frame(&mut self) -> Option<Vec<u8>> {
-        let size = u32::from_le_bytes(self.input.get(..4)?.try_into().unwrap()) as usize;
-        if size > session::MAX_FRAME {
-            self.closed = true;
-            return None;
-        }
-        let body = self.input.get(4..4 + size)?.to_vec();
-        self.input.drain(..4 + size);
-        Some(body)
-    }
-
-    fn queue(&mut self, value: &impl Wire) {
-        self.closed |= session::write_frame(&mut self.output, value).is_err();
-    }
-
-    /// Write what the peer takes now; a stalled peer never blocks the loop.
-    fn flush(&mut self) {
-        while !self.output.is_empty() && !self.closed {
-            match self.stream.write(&self.output) {
-                Ok(n) => drop(self.output.drain(..n)),
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => self.closed = true,
-            }
-        }
-    }
-}
-
 pub(crate) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
     let mut status = 0;
     loop {
@@ -228,15 +152,12 @@ pub(crate) struct Launcher<I> {
     poll: Readiness,
     supervisor: ChildSupervisor,
     store_claims: StoreClaims,
-    out: Vec<Event>,
+    session: ControlSession,
     fenced: bool,
     reservations: BTreeMap<Attempt, BTreeSet<[u8; 32]>>,
     deferred: Vec<Attempt>,
     admitting: Option<Admitting>,
     cutovers: BTreeMap<(Child, Attempt), Forwarded>,
-    control_watch: Option<Watch>,
-    control: Option<UnixListener>,
-    session: Option<Conn>,
     /// The platform host, when this launcher starts it; then only its process may hold the
     /// control session.
     pub(super) bootstrap: Option<bootstrap::Bootstrap>,
@@ -338,15 +259,12 @@ impl<I: Images> Launcher<I> {
             poll,
             supervisor: ChildSupervisor::new(cgroup_root, scratch),
             store_claims: StoreClaims::default(),
-            out: Vec::new(),
+            session: ControlSession::default(),
             fenced: false,
             reservations: BTreeMap::new(),
             deferred: Vec::new(),
             admitting: None,
             cutovers: BTreeMap::new(),
-            control_watch: None,
-            control: None,
-            session: None,
             bootstrap: None,
             _lock: lock,
         })
@@ -354,12 +272,7 @@ impl<I: Images> Launcher<I> {
 
     /// Serve the control session on `listener`; the socket's permission is the host's.
     pub(crate) fn listen(&mut self, listener: UnixListener) -> io::Result<()> {
-        listener.set_nonblocking(true)?;
-        let mut watch = self.poll.watch(listener.as_raw_fd());
-        watch.set(READ)?;
-        self.control_watch = Some(watch);
-        self.control = Some(listener);
-        Ok(())
+        self.session.listen(&self.poll, listener)
     }
 
     /// Admit releases with `admission`'s stores; without it every `Admit` fails.
@@ -393,7 +306,7 @@ impl<I: Images> Launcher<I> {
     /// The events not yet sent, for a caller that drives the launcher without a session.
     #[cfg(test)]
     pub(crate) fn take_events(&mut self) -> Vec<Event> {
-        std::mem::take(&mut self.out)
+        self.session.take_events()
     }
 
     /// Handle `request` and wait for any pending start reply (used by `laws.rs` `Rig::ask`).
@@ -416,10 +329,8 @@ impl<I: Images> Launcher<I> {
     pub(super) fn wait_start_reply(&mut self, child: &Child) -> Event {
         let end = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(pos) = self.out.iter().position(
-                |ev| matches!(ev, Event::Launched(c, _) | Event::Refused(c, _) if c == child),
-            ) {
-                return self.out.remove(pos);
+            if let Some(ev) = self.session.take_start_reply(child) {
+                return ev;
             }
             assert!(
                 std::time::Instant::now() < end,
@@ -455,14 +366,24 @@ impl<I: Images> Launcher<I> {
         self.supervisor.is_child_live(child)
     }
 
+    #[cfg(test)]
+    pub(super) fn has_session(&self) -> bool {
+        self.session.has_session()
+    }
+
+    #[cfg(test)]
+    pub(super) fn control_fd(&self) -> Option<RawFd> {
+        self.session.control_fd()
+    }
+
     fn emit(&mut self, event: Event) {
-        self.out.push(event);
+        self.session.emit(event);
     }
 
     fn apply_notices(&mut self, notices: Vec<ChildNotice>) {
         for notice in notices {
             match notice {
-                ChildNotice::Event(event) => self.out.push(event),
+                ChildNotice::Event(event) => self.session.emit(event),
                 ChildNotice::ClaimReleased(child) => self.store_claims.release(&child),
                 ChildNotice::Reply(child, reply) => {
                     // OLD's next answer after a forwarded cutover is that cutover's; a held-write
@@ -478,7 +399,8 @@ impl<I: Images> Launcher<I> {
                         .find(|((c, _), f)| *c == child && f.reply.is_none())
                     {
                         forwarded.reply = Some(reply.clone());
-                        self.out.push(Event::CutoverResult(c.clone(), *a, reply));
+                        self.session
+                            .emit(Event::CutoverResult(c.clone(), *a, reply));
                     } else {
                         if matches!(
                             reply,
@@ -488,7 +410,7 @@ impl<I: Images> Launcher<I> {
                         ) {
                             self.supervisor.record_answer(&child, &reply);
                         }
-                        self.out.push(Event::Placed(child, reply));
+                        self.session.emit(Event::Placed(child, reply));
                     }
                 }
                 ChildNotice::Exited(child) => {
@@ -497,7 +419,7 @@ impl<I: Images> Launcher<I> {
                     for ((c, a), forwarded) in &mut self.cutovers {
                         if *c == child && forwarded.reply.is_none() {
                             forwarded.reply = Some(HostReply::Uncertain);
-                            self.out.push(Event::CutoverResult(
+                            self.session.emit(Event::CutoverResult(
                                 c.clone(),
                                 *a,
                                 HostReply::Uncertain,
@@ -747,7 +669,7 @@ impl<I: Images> Launcher<I> {
         for (attempt, key) in reserved {
             self.reserve(attempt, BTreeSet::from([key]));
         }
-        self.out.extend(events);
+        self.session.extend(events);
     }
 
     /// Move each attested worker's input and Need.
@@ -761,7 +683,7 @@ impl<I: Images> Launcher<I> {
                 events.push(Event::Need(attempt, keys, last));
             }
         }
-        self.out.extend(events);
+        self.session.extend(events);
     }
 
     /// Whether some attested input waits on its worker past the window, so the session is
@@ -787,7 +709,7 @@ impl<I: Images> Launcher<I> {
     fn hello(&mut self) {
         // Hello ends the old session: its unsent events are dropped, and its fence ends
         // without removing anything.
-        self.out.clear();
+        self.session.clear_out();
         self.unfence();
         // A new session ends every reservation and admission of the old one (§14.5).
         self.reservations.clear();
@@ -798,7 +720,7 @@ impl<I: Images> Launcher<I> {
         let cutovers = self.cutovers.keys().cloned().collect();
         self.emit(Event::Inventory(children, cold, cutovers));
         for (child, reply) in replayed {
-            self.out.push(Event::Placed(child, reply));
+            self.session.emit(Event::Placed(child, reply));
         }
     }
 
@@ -917,10 +839,7 @@ impl<I: Images> Launcher<I> {
     /// One wait for the host session, child lifecycle, endpoints and cold listeners.
     pub(super) fn wait_turn(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         let backlogged = self.backlogged();
-        if let Some(conn) = &mut self.session {
-            conn.paused = backlogged;
-            conn.watch()?;
-        }
+        self.session.prepare_watch(backlogged)?;
         if let Some(admitting) = &mut self.admitting {
             for worker in admitting.workers.values_mut() {
                 if let Some(conn) = &mut worker.conn {
@@ -941,12 +860,12 @@ impl<I: Images> Launcher<I> {
         let mut notices = Vec::new();
         self.supervisor.step(&self.poll, events, &mut notices)?;
         self.apply_notices(notices);
-        if self
-            .control_watch
+        let policy = self
+            .bootstrap
             .as_ref()
-            .is_some_and(|watch| watch.fired(events))
-        {
-            self.accept();
+            .map_or(PeerPolicy::Any, |b| PeerPolicy::Only(b.pid()));
+        if self.session.accept_if_ready(&self.poll, events, policy) {
+            self.unfence();
         }
         self.pump();
         self.notes();
@@ -954,57 +873,21 @@ impl<I: Images> Launcher<I> {
         Ok(())
     }
 
-    /// A new connection replaces the session; it speaks once it has sent `Hello`.
-    fn accept(&mut self) {
-        let mut accepted = None;
-        if let Some(control) = &self.control {
-            while let Ok((stream, _)) = control.accept() {
-                // With a bootstrap host, a connection from any other process is closed
-                // before it can replace the session (launch.md "The operator socket").
-                if let Some(bootstrap) = &self.bootstrap
-                    && (bootstrap.pid().is_none()
-                        || bootstrap::peer_pid(&stream) != bootstrap.pid())
-                {
-                    continue;
-                }
-                accepted = Conn::new(&self.poll, stream).ok().or(accepted);
-            }
-        }
-        if let Some(conn) = accepted {
-            self.session = Some(conn);
-            self.out.clear();
-            self.unfence();
-        }
-    }
-
     fn serve_session(&mut self) {
         let backlogged = self.backlogged();
-        if let Some(conn) = &mut self.session
-            && !backlogged
-        {
-            conn.fill();
-        }
+        self.session.fill(backlogged);
         // One request at a time: admission input past the window holds the rest back.
         while !self.backlogged() {
-            let Some(conn) = &mut self.session else { break };
-            let Some(frame) = conn.frame() else { break };
-            match Request::decode(&frame) {
-                Ok(request) => self.handle(request),
-                Err(_) => conn.closed = true,
-            }
+            let Some(request) = self.session.next_request() else {
+                break;
+            };
+            self.handle(request);
             self.pump();
         }
-        if let Some(conn) = &mut self.session {
-            for event in self.out.drain(..) {
-                conn.queue(&event);
-            }
-            conn.flush();
-            if conn.closed {
-                // The session is lost: the children keep running, the fence ends without
-                // removing anything, and the next host learns the rest from Hello.
-                self.session = None;
-                self.unfence();
-            }
+        if self.session.flush() {
+            // The session is lost: the children keep running, the fence ends without
+            // removing anything, and the next host learns the rest from Hello.
+            self.unfence();
         }
     }
 }

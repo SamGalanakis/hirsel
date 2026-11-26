@@ -442,12 +442,14 @@ fn absolute(object: &mut object::write::Object<'_>, name: String, value: u64) {
 
 pub(crate) fn check_linked_sites(bytes: &[u8]) -> Result<()> {
     let file = object::File::parse(bytes).map_err(error)?;
+    let format = crate::native_debug::object_format(file.format()).map_err(error)?;
+    let is_site = |name: &str| link_name(format, name.as_bytes()).starts_with(b"hirsel_core_site_");
     let sites: std::collections::HashMap<_, _> = file
         .dynamic_symbols()
         .filter_map(|s| {
             s.name()
                 .ok()
-                .filter(|n| n.starts_with("hirsel_core_site_"))
+                .filter(|n| is_site(n))
                 .map(|name| (s.index(), name))
         })
         .collect();
@@ -464,10 +466,54 @@ pub(crate) fn check_linked_sites(bytes: &[u8]) -> Result<()> {
     // catches a section-relative definition reduced to a nameless RELATIVE.
     for symbol in file.symbols() {
         if let Ok(name) = symbol.name()
-            && name.starts_with("hirsel_core_site_")
+            && is_site(name)
             && symbol.section() != object::SymbolSection::Absolute
         {
             return Err(format!("linked site symbol {name} is not absolute"));
+        }
+    }
+    if let object::File::MachO64(file) = file {
+        check_chained_rebases(&file, bytes)?;
+    }
+    Ok(())
+}
+
+fn check_chained_rebases(file: &object::read::macho::MachOFile64<'_>, bytes: &[u8]) -> Result<()> {
+    use object::ObjectSegment as _;
+    use object::read::macho::Fixup;
+
+    let endian = file.endian();
+    let mut commands = file.macho_load_commands().map_err(error)?;
+    while let Some(command) = commands.next().map_err(error)? {
+        let Some(command) = command.dyld_chained_fixups().map_err(error)? else {
+            continue;
+        };
+        let segments: Vec<_> = file.segments().collect();
+        let base = segments
+            .iter()
+            .find(|segment| segment.name_bytes() == Ok(Some(b"__TEXT")))
+            .ok_or("Mach-O chained fixups have no __TEXT image base")?
+            .address();
+        let fixups = command.chained_fixups(endian, bytes).map_err(error)?;
+        for chain in fixups.segments(endian).map_err(error)? {
+            let chain = chain.map_err(error)?;
+            let segment = segments
+                .get(chain.index() as usize)
+                .ok_or("Mach-O chained fixups name a missing segment")?;
+            for entry in chain.fixups(endian, base, segment.data().map_err(error)?) {
+                let (offset, fixup) = entry.map_err(error)?;
+                // Absolute targets below the base wrap when object converts
+                // them to image offsets. Dyld would slide the site's value.
+                if let Fixup::Rebase(rebase) = fixup
+                    && base.checked_add(rebase.target_offset).is_none()
+                {
+                    let address = segment.address().saturating_add(offset);
+                    let target = base.wrapping_add(rebase.target_offset);
+                    return Err(format!(
+                        "Mach-O chained rebase at {address:#x} targets {target:#x} below image base {base:#x}"
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -574,6 +620,29 @@ mod tests {
             symbol.map(|s| s.section()),
             Some(object::SymbolSection::Absolute),
             "{name}"
+        );
+        check_linked_sites(&bytes).unwrap();
+
+        let section = object.add_section(
+            b"__DATA".to_vec(),
+            b"__data".to_vec(),
+            object::SectionKind::Data,
+        );
+        object.section_mut(section).set_data(vec![0; 8], 8);
+        let relative = "_hirsel_core_site_relative";
+        object.add_symbol(object::write::Symbol {
+            name: relative.as_bytes().to_vec(),
+            value: 0,
+            size: 8,
+            kind: object::SymbolKind::Unknown,
+            scope: object::SymbolScope::Linkage,
+            weak: false,
+            section: object::write::SymbolSection::Section(section),
+            flags: object::SymbolFlags::None,
+        });
+        assert_eq!(
+            check_linked_sites(&object.write().unwrap()).unwrap_err(),
+            format!("linked site symbol {relative} is not absolute")
         );
     }
 }

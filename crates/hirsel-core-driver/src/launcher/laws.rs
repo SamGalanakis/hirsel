@@ -4,7 +4,7 @@
 //! halves (a NEW head opening the store only after OLD closed it) are the platform host's.
 use super::session::tests::serve_fixture as serve;
 use super::session::*;
-use super::{Image, Images, Launcher, Lifecycle::*, hex};
+use super::{Image, Images, Launcher, Lifecycle::*, bootstrap::Bootstrap, hex};
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::TcpStream;
@@ -79,8 +79,7 @@ pub(super) struct Rig<I = Scripts> {
 /// A rig whose image `i` is the shell script body `scripts[i]`.
 fn rig(scripts: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
-    let state = dir.path().join("state");
-    fs::create_dir_all(&state).unwrap();
+    let state = super::private_dir(dir.path().join("state")).unwrap();
     let launcher = Launcher::new(&state, Leader, || Ok(images(dir.path(), scripts))).unwrap();
     Rig { dir, launcher }
 }
@@ -1052,20 +1051,17 @@ fn cutover_reply_retained() {
     assert_eq!(rig.ask(send(&silent_old, 4, 0xbb)), [uncertain]);
 }
 
-/// A launcher that starts the platform host (launch.md "Starting the host") runs `script`
-/// as that host, with the operator listener at `operator`.
+/// Run `script` as the platform host with an operator listener and published bounds.
 fn hosted(rig: &mut Rig, script: &str) -> PathBuf {
-    let program = rig.work().join("host");
+    let work = rig.work();
+    let program = work.join("host");
     fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-    let operator = super::bind_control(&rig.work().join("operator.sock")).unwrap();
-    rig.launcher.bootstrap = Some(super::bootstrap::Bootstrap::new(
-        program,
-        vec![],
-        rig.work().join("state"),
-        operator,
-    ));
-    rig.work()
+    let state = work.join("state");
+    super::admit::write_envelope(&state, &super::limits()).unwrap();
+    let operator = super::bind_control(&work.join("operator.sock")).unwrap();
+    rig.launcher.bootstrap = Some(Bootstrap::new(program, vec![], state, operator));
+    work
 }
 
 /// Only the host's own process holds the control session: another process of the same

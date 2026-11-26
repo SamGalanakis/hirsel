@@ -1294,7 +1294,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         Some(_) => true,
         None => false
     }
-    let mut admits_rows = data_row_count(stream_edits) != 0 || keyed_writes
+    let mut admits_rows = stream_edits.count_word != 0 || keyed_writes
     if !admits_rows {
         for slot in 0u64 .. data_row_count(operations) {
             let edit = data_row(operations, slot)
@@ -4605,15 +4605,15 @@ pub fn law_call_reserve(c: Clock) -> bool waits {
         return false
     }
     let small = Plan(n_e: 1024, s_e: plan.s_e, reply_max: plan.reply_max)
-    // The read log's node (24 bytes), the issued cell's node (8, MEM-29) and
-    // a 944-byte reply fit in 1024. The reply row's stored copy, 41 + 944 =
-    // 985 bytes rounded up to 992, does not fit in the 48 left.
+    // MEM-24: log 24, issued cell 8, info flag 8 and view cell 136.
+    // Option[TxView] is 8 + PageTree 64 + four u64s 32 + two options 32.
+    // An 800-byte reply leaves 48 of 1024. Its stored row needs round8(41 + 800) = 848.
     let kept_inside = match serve(mut db, take complete, small, None, (), fn(mut tx, unused_env) -> Result[Bytes, Bytes] {
-        let mut output: Bytes = list.with_capacity(944)
-        list.fill(mut output, 944, 7u8)
+        let mut output: Bytes = list.with_capacity(800)
+        list.fill(mut output, 800, 7u8)
         Ok(take output)
     }) {
-        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 992 && problem.available == 48,
+        Ok(Failed(_, OutOfBytes(problem))) => problem.requested == 848 && problem.available == 48,
         _ => false,
     }
     kept_inside && reserve_settles_pin(c, 10, plan) && reserve_settles_pin(c, 100000, plan)

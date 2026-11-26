@@ -137,7 +137,7 @@ type RecoverClaims {
 }
 
 fn recovery_registered[G: send, H: shareable + inert + send](reg: Registry[G, H], op: Bytes) -> bool {
-    map.contains(reg.keyed, op)
+    map.contains(reg.t.keyed, op)
 }
 
 fn startup_claims[G: send, H: shareable + inert + send](mut db: store.Db, reg: Registry[G, H]) -> Result[Option[Box[RecoverClaims]], OpenError] waits {
@@ -153,7 +153,7 @@ fn startup_claims[G: send, H: shareable + inert + send](mut db: store.Db, reg: R
     while let Some(take claim) = store.next_open_claim(mut scan) {
         enqueue_recovery(mut queue, claim)
     }
-    if map.len(reg.keyed) == 0 && !store.has_keyed_ops(db) {
+    if map.len(reg.t.keyed) == 0 && !store.has_keyed_ops(db) {
         return Ok(None)
     }
     Ok(Some(box.new(RecoverClaims(queue: take queue, parked: list.new(), sweep: store.claim_sweep_start()))))
@@ -242,7 +242,7 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
     } else { initial }
     let run = ClaimRun(claim: take named, entry: clone(activation.entry), caller: take caller, arguments: take arguments,
         deadline: deadline, waiters: take waiters, background: background)
-    let live = match map.get(hd.r.keyed, op) {
+    let live = match map.get(hd.r.t.keyed, op) {
         Some(KeyedRegistration(policy: Some(_), ..)) => true,
         _ => false,
     }
@@ -306,7 +306,7 @@ fn start_keyed_request[G: send, H: shareable + inert + send](mut hd: Head[G, H],
         let Some(raw_key) = view request.claim else { fail("runner: keyed request has no claim key") }
         store.ClaimKey(op: clone(request.key), caller: clone(request.caller), key: clone(raw_key))
     }
-    let policies: Option[Option[store.KeyedPolicy]] = match map.get(hd.r.keyed, name.op) {
+    let policies: Option[Option[store.KeyedPolicy]] = match map.get(hd.r.t.keyed, name.op) {
         Some(registration) => Some(clone(registration.policy)),
         None => None,
     }

@@ -18,7 +18,7 @@ pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) |
 
 pub type Outcome: codec + send = Returned(Bytes) | Failed(Fault) | Refused(Refusal) | Abandoned | InDoubt
 
-pub type Described: codec + send {
+pub type Described: codec + shareable + send {
     kind: Kind,
     identity: Bytes,
     args: Bytes,
@@ -304,14 +304,26 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
 }
 
 pub fn operate[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    operate_with_report(take p, take stop, status, take watching, None)
+    let made = placing_of(p)
+    operate_with_report(take made, take p, take stop, status, take watching, None)
 }
 
 pub fn operate_report[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
-    operate_with_report(take p, take stop, status, take watching, Some(errors))
+    let made = placing_of(p)
+    operate_with_report(take made, take p, take stop, status, take watching, Some(errors))
 }
 
-fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
+// operate with the place's registration already made: a host that launches one Place many
+// times passes the one shared Placing (`placing_for`) and registers nothing per launch.
+pub fn operate_placed[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
+    operate_with_report(take made, take p, take stop, status, take watching, None)
+}
+
+pub fn operate_placed_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
+    operate_with_report(take made, take p, take stop, status, take watching, Some(errors))
+}
+
+fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], report: Option[Stderr]) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -326,9 +338,9 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
             None => None
         },
     }
-    let mut refusal = check_keyed_grants(p.place, n_place, p.grants)
+    let mut refusal = check_keyed_grants(made, p.grants)
     if none(refusal) {
-        refusal = check_grant_lists(p.place, n_place, p.grants, p.triggers, !none(p.wire))
+        refusal = check_grant_lists(made, p.grants, p.triggers, !none(p.wire))
     }
     if let Some(take problem) = take refusal {
         if let Some(_) = install {
@@ -337,7 +349,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
         return Error(Open(take problem))
     }
     store_op_header(launch.store_op)?
-    let sized_store = place_store(p, report)
+    let sized_store = place_store(made, p, report)
     let (take options, _, store_bytes, take follower_plan, (claims, rooms)) = match take sized_store {
         Ok(take sized) => take sized,
         Error(take e) => {
@@ -356,7 +368,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     if let Some(selection) = install {
         // A hosted `InstallAt` has no fates, so a held run refuses it `Unsettled`
         // (RUNNER-SPEC CHANGES-v2.72); dev's `InstallFrom` releases.
-        return finish_install(operate_install(take p, take options, selection, n_place))
+        return finish_install(operate_install(made, take p, take options, selection, n_place))
     }
     let installing = match p.selection {
         Install(_) => true,
@@ -365,7 +377,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     }
     if installing {
         let selection: Selection = clone(p.selection)
-        let _ = operate_install(take p, take options, selection, n_place)?
+        let _ = operate_install(made, take p, take options, selection, n_place)?
         return Ok(Unstarted)
     }
     if p.idle == Some(0u64) {
@@ -374,7 +386,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     if p.stop.grace_ms == 0u64 {
         return Error(Missing("grace_ms"))
     }
-    let PlaceConfig(backing: take backing, selection: selection, place: place, on_migrate: on_migrate, schema: schema, n_publisher: n_publisher, session: wire_config, max_sessions: limit, proxies: take proxies, listen: take listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, grants: take place_grants, triggers: take trigger_config, idle: configured_idle, ..) = take p
+    let PlaceConfig(backing: take backing, selection: selection, on_migrate: on_migrate, schema: schema, n_publisher: n_publisher, session: wire_config, max_sessions: limit, proxies: take proxies, listen: take listen, net: net, tasks: tasks, clock: clock, random: random, stop: stop_config, wire: take supplied_wire, grants: take place_grants, triggers: take trigger_config, idle: configured_idle, ..) = take p
     let idle = match launch.idle {
         Some(ms) => Some(ms),
         None => configured_idle
@@ -419,7 +431,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     let allowance = add_place_bytes(funded_head, store_bytes) ?=> Full
     let activity = cut_activity()?
     let cut = latest.handle(activity.root)
-    let head_job = ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain), head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, granting: take granting, idle: idle, expected_store: launch.store_id)
+    let head_job = ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, placing: share_placing(made), on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox_head, finish_from: take finish_from, to: channel.sender(to), drain: latest.handle(drain), head_to: channel.sender(head_to), cut: take activity, triggering: take trigger_config, granting: take granting, idle: idle, expected_store: launch.store_id)
     let head_run: fn(take ManagedHead[G, H, S]) -> () waits = head_ended
     // The head is the place's largest task; a root limit too small for it is a resource
     // failure that names the bytes, not a fault at this line.
@@ -510,7 +522,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
                 if let Some((take listener, take pub_to)) = replace(mut ready, None) {
                     let (take addresses, take session_wire, take serve_grants, take from_serve) = option.unwrap(replace(mut unused_listener_inputs, None))
                     let target = string.from(current.target)
-                    let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire, grants: take serve_grants, max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain), status: latest.handle(status), idle: idle, first_write: match hosting {
+                    let serving_config = ServePlace(listener: take listener, config: wire_config, tasks: tasks, clock: clock, random: random, wire: take session_wire, grants: take serve_grants, max_sessions: limit, proxies: take addresses, target: take target, publisher: take pub_to, placing: share_placing(made), n_place: n_place, rooms, head: channel.sender(head_to), inbox: take from_serve, to: channel.sender(serve_to), events: channel.sender(to), drain: latest.handle(drain), status: latest.handle(status), idle: idle, first_write: match hosting {
                         Some(host) => Some(channel.sender(host.ack)),
                         None => None
                     }, report: report)
@@ -783,34 +795,6 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take p: Pl
     }
 }
 
-// One erased adapter per kind, holding the entry's byte bound n from registration
-// (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
-// starts a task under `bytes n` that holds the grant. A transact slot has two: the
-// session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
-// entry's step bound and its code.revision, which each call record carries (R5, §7).
-type Slot[G: send, H: shareable + inert + send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn() -> GrantedLaunch[G]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], TransactAdapters[H]) | Query(u64, u64, QueryEntry[H]) | Fenced(u64, u64, own[send] fn(mut store.Db, H, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits)
-
-// One granted call's launcher, made from its slot where the Registry is and called by the
-// task that holds the grant (§3 "One Registry").
-type GrantedLaunch[G: send]: send {
-    go: own[send] fn(Tasks, take JobGrant[G], take Caller, take Bytes, take Option[JobReport]) -> Result[Task[Outcome], Capacity]
-}
-
-pub opaque type Registry[G: send, H: shareable + inert + send]: send {
-    slots: Map[Bytes, Slot[G, H]],
-    bound_slots: Map[Bytes, List[BoundSlot]],
-    exported: List[Exported],
-    checks: Map[Bytes, CheckedArgument],
-    bindings: List[HttpDescribe],
-    keyed: Map[Bytes, KeyedRegistration[G]],
-    gone: Map[Bytes, ()],
-    trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
-}
-
-pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
-    Registry(slots: map.new(), bound_slots: map.new(), exported: list.new(), checks: map.new(), bindings: list.new(), keyed: map.new(), gone: map.new(), trigger_tables: None)
-}
-
 fn check_call_reserve(n_e: u64, s_e: u64) -> Result[(), RegisterError] {
     let plan = store.Plan(n_e: n_e, s_e: s_e, reply_max: MAX_RETURNED_BYTES + 8u64)
     match store.call_reserves(plan) {
@@ -932,38 +916,60 @@ fn described_result[A](identity: View[Bytes], revision: Option[View[Bytes]], kin
     Ok((take key, Exported(described: take d, args_fp: args_fp, result_fp: result_fp, revision: take rev, slots: list.new(), value: list.new())))
 }
 
-// The one insertion: a key already present is refused and the registry is unchanged.
-fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, take d: Exported, take s: Slot[G, H]) -> Result[(), RegisterError] {
+// The one insertion: a key already present is refused and the registry is unchanged. A
+// replay inserts the adapter under the key the build checked. `d` is None for a slot that
+// exports nothing (an attempt).
+fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, take d: Option[Exported], take s: Slot[G, H]) -> Result[(), RegisterError] {
+    if r.replay {
+        map.insert(mut r.slots, take key, take s)
+        r.at += 1u64
+        return Ok(())
+    }
     if map.contains(r.slots, key) {
         return Error(AlreadyRegistered(take key))
     }
-    list.reserve(mut r.exported, 1u64)
+    let mut carried = take d
+    let copied: Bytes = clone(key)
+    let mut kept_key: Option[Bytes] = Some(take copied)
+    edit_template(mut r, scoped fn(mut t: Template[G]) {
+        if let Some(take e) = replace(mut carried, None) {
+            list.push(mut t.exported, take e)
+        }
+        if let Some(take k) = replace(mut kept_key, None) {
+            list.push(mut t.slot_keys, take k)
+        }
+    })
     map.insert(mut r.slots, take key, take s)
-    list.push(mut r.exported, take d)
     Ok(())
+}
+
+// An exported entry's slot: in a replay it also counts the entry as passed.
+fn insert_exported[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, take d: Option[Exported], take s: Slot[G, H]) -> Result[(), RegisterError] {
+    if r.replay {
+        r.seen += 1u64
+    }
+    insert(mut r, take key, take d, take s)
 }
 
 pub fn compute[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), code.revision(f), Compute, ca, cr) {
-        Ok(take kd) => take kd,
-        Error(_) => return Error(Bounds),
-    }
+    let (take key, take d) = entry_described(r, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+        Ok(described(code.identity(f), code.revision(f), Compute, ca, cr) ?=> |_| Bounds)
+    })?
     register_check(mut r, key, ca, n, s)?
     let made = fn(arg: Bytes) -> Outcome {
         adapt_compute(f, ca, cr, arg, n, s)
     }
-    insert(mut r, take key, take d, Compute(made))
+    insert_exported(mut r, take key, take d, Compute(made))
 }
 
 pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), code.revision(f), Granted, ca, cr) {
-        Ok(take kd) => take kd,
-        Error(_) => return Error(Bounds),
-    }
+    let (take key, take d) = entry_described(r, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+        Ok(described(code.identity(f), code.revision(f), Granted, ca, cr) ?=> |_| Bounds)
+    })?
     register_check(mut r, key, ca, n, s)?
     let made = fn() -> GrantedLaunch[G] {
         GrantedLaunch(go: fn(tasks: Tasks, take g: JobGrant[G], take caller: Caller, take arg: Bytes, take notice: Option[JobReport]) -> Result[Task[Outcome], Capacity] {
@@ -975,7 +981,7 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
             Ok(task.spawn(tasks, bytes n, take j, adapt_granted))
         })
     }
-    insert(mut r, take key, take d, Granted(made))
+    insert_exported(mut r, take key, take d, Granted(made))
 }
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
@@ -1145,24 +1151,6 @@ pub fn finish(take t: Task[Outcome]) -> Outcome waits {
 }
 
 // ---- R1 (RUNNER-SPEC v2.4 §2, §3): transact, the head, sessions and the publisher.
-// Rule 10: the head, the publisher and the serving task each run the place's one `place`
-// function under `bytes n_place`, so their lists are the same list; the serving task's
-// Registry is built once and every session plans against it.
-fn placed[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[Registry[G, H], RegisterError] {
-    let go = code.callable(place)
-    let built: Result[Result[Registry[G, H], RegisterError], Capacity] = bound bytes n_place {
-        let mut r: Registry[G, H] = registry()
-        match go(mut r) {
-            Ok(()) => Ok(take r),
-            Error(take e) => Error(take e),
-        }
-    }
-    match take built {
-        Ok(take x) => take x,
-        Error(c) => Error(Full(c)),
-    }
-}
-
 // The stream's reply at p is the Outcome's codec bytes (STORE-SPEC §1.8 reply).
 fn encode_runner_reply(o: Outcome) -> Result[Bytes, store.Error] {
     let co: std.codec.Codec[Outcome] = std.codec.of()
@@ -1494,7 +1482,7 @@ type Head[G: send, H: shareable + inert + send] {
 }
 
 type Publish[G: send, H: shareable + inert + send]: send {
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    placing: Placing[G, H],
     n_place: u64,
     staging: u64,
     h: Arc[H],
@@ -1505,10 +1493,11 @@ type Publish[G: send, H: shareable + inert + send]: send {
     ready: Sender[Option[RegisterError]]
 }
 
-// The publisher task runs `place` itself and tells the head whether it could.
+// The publisher task replays `place` against the shared Template and tells the head
+// whether it could.
 fn publish[G: send, H: shareable + inert + send](take p: Publish[G, H]) -> () waits {
-    let Publish(place: place, n_place: n_place, staging: staging, h: take h, read_handle: take read_handle, base: take base, from: take from, rounds: take rounds, ready: take ready) = take p
-    let mut r = match placed(place, n_place) {
+    let Publish(placing: take placing, staging: staging, h: take h, read_handle: take read_handle, base: take base, from: take from, rounds: take rounds, ready: take ready, ..) = take p
+    let mut r = match instantiate(placing) {
         Ok(take x) => take x,
         Error(take e) => {
             let _ = channel.send(ready, Some(take e))
@@ -1533,7 +1522,8 @@ pub fn place_head[G: send, H: shareable + inert + send](take db: store.Db, place
 pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.Db, selection: Selection, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(), OpenError] waits {
     let mut owned = take db
     let persistent = store.is_disk(owned)
-    let prepared = head_prepare(mut owned, selection, persistent, place, on_migrate, schema, n_place, tasks)
+    let made = placing_at(place, n_place)
+    let prepared = head_prepare(mut owned, selection, persistent, made, on_migrate, schema, n_place, tasks)
     let (r, h, _, replay_identity) = match take prepared {
         Ok(take ready) => take ready,
         Error(take problem) => {
@@ -1541,11 +1531,11 @@ pub fn place_head_selected[G: send, H: shareable + inert + send](take db: store.
             return Error(take problem)
         },
     }
-    let _ = run_head(take owned, take r, take replay_identity, take h, place, n_place, take inbox, take mail, tasks, n_publisher, None, None)?
+    let _ = run_head(take owned, take r, take replay_identity, take h, made, n_place, take inbox, take mail, tasks, n_publisher, None, None)?
     Ok(())
 }
 
-fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
+fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Registry[G, H], take replay_identity: Bytes, take h: H, placing: Placing[G, H], n_place: u64, take inbox: Receiver[HeadInput], take mail: Mailbox, tasks: Tasks, n_publisher: u64, take drain: Option[HeadDrain], take trigger_drive: Option[Box[TriggerDrive[G]]]) -> Result[Option[u64], OpenError] waits {
     let mut owned = take db
     let recovery = match startup_claims(mut owned, r) {
         Ok(take prepared) => take prepared,
@@ -1555,7 +1545,7 @@ fn run_head[G: send, H: shareable + inert + send](take db: store.Db, take r: Reg
         },
     }
     let shared = arc.new(take h)
-    let publishing = start_publisher(owned, place, n_place, arc.share(shared), take mail, tasks, n_publisher)
+    let publishing = start_publisher(owned, placing, n_place, arc.share(shared), take mail, tasks, n_publisher)
     let (out, publisher_task) = match take publishing {
         Ok(take started) => take started,
         Error(take problem) => {
@@ -1626,10 +1616,10 @@ fn next_trigger_due(db: store.Db, tables: triggers.Tables) -> Result[Option[u64]
     })
 }
 
-fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, take shared: Arc[H], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
+fn start_publisher[G: send, H: shareable + inert + send](owned: store.Db, placing: Placing[G, H], n_place: u64, take shared: Arc[H], take mail: Mailbox, tasks: Tasks, n_publisher: u64) -> Result[(Sender[PubIn], Task[()]), OpenError] waits {
     let Mailbox(to: take out, from: take from, rounds: take rounds) = take mail
     let (ready, readied): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let p = Publish(place: place, n_place: n_place, staging: n_publisher / 2u64, h: take shared, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
+    let p = Publish(placing: share_placing(placing), n_place: n_place, staging: n_publisher / 2u64, h: take shared, read_handle: (store.reader(owned, store.VALUE_LIMIT + 1048576u64) ?=> Store), base: store.snapshot(owned), from: take from, rounds: take rounds, ready: take ready)
     let funded = publisher_bytes(n_place, n_publisher) ?=> |e| Place(Full(e))
     let publishing = task.spawn(tasks, bytes funded, take p, publish)
     match channel.receive(readied) {
@@ -2643,7 +2633,7 @@ fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, 
             let Some(take opened_tables) = take tables else {
                 return Error(Missing("trigger table selector"))
             }
-            return Ok(Some(make_trigger_drive(take opened_tables, clock, tasks, take to, trigger_stamp(reg.exported, reg.bindings, n_place)?, take configured, take grants)?))
+            return Ok(Some(make_trigger_drive(take opened_tables, clock, tasks, take to, trigger_stamp(reg.t.exported, reg.t.bindings, n_place)?, take configured, take grants)?))
         }
     }
     let Some(take opened_tables) = take tables else {
@@ -2654,7 +2644,7 @@ fn open_trigger_drive[G: send, H: shareable + inert + send](db: store.Db, h: H, 
     if let None = triggers.next_scanned(read_handle, mut remaining)? {
         return Ok(None)
     }
-    let drive: TriggerDrive[G] = TriggerDrive(tables: take opened_tables, revision: trigger_stamp(reg.exported, reg.bindings, n_place)?, clock: clock, tasks: tasks, to: take to, entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
+    let drive: TriggerDrive[G] = TriggerDrive(tables: take opened_tables, revision: trigger_stamp(reg.t.exported, reg.t.bindings, n_place)?, clock: clock, tasks: tasks, to: take to, entries: triggers.empty_entries(), author: store.Caller(issuer: 0u8, subject: list.new()), grants: None, active: map.new(), timer: None)
     Ok(Some(box.new(take drive)))
 }
 
@@ -2720,8 +2710,8 @@ fn trigger_key[G: send, H: shareable + inert + send](r: Registry[G, H], p: trigg
     if !triggers.is_allowed(p, choices) {
         return Ok(None)
     }
-    for index in 0u64 .. list.len(r.exported) {
-        let entry = view r.exported[index]
+    for index in 0u64 .. list.len(r.t.exported) {
+        let entry = view r.t.exported[index]
         if trigger_matches(p, entry.described) {
             return Ok(Some((entry_key(view entry.described.identity, entry.args_fp, entry.result_fp), index)))
         }

@@ -33,7 +33,7 @@ fn budget_board(db: store.Db, h: Qh, base: store.Snapshot, bytes_limit: u64, ste
     result.unwrap(query(mut registered, code.describe(budget_view), take declaration, bytes_limit, steps))
     result.unwrap(bind_query_slots(mut registered, h))
     let key = {
-        let entry = view registered.exported[0u64]
+        let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
     let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),

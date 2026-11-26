@@ -120,15 +120,20 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
     let cr: std.codec.Codec[R] = std.codec.of()
     let ce: std.codec.Codec[E] = std.codec.of()
     let carried: std.codec.Codec[Result[R, E]] = std.codec.of()
-    let (take key, take d) = match described(code.identity(f), code.revision(f), Transact, ca, carried) {
-        Ok(take kd) => take kd,
-        Error(_) => return Error(Bounds),
-    }
-    let revision: Option[Bytes] = if list.len(d.revision) == 0u64 {
-        None
-    } else {
-        let copied: Bytes = clone(d.revision)
-        Some(take copied)
+    let (take key, take d) = entry_described(r, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+        Ok(described(code.identity(f), code.revision(f), Transact, ca, carried) ?=> |_| Bounds)
+    })?
+    let revision: Option[Bytes] = match code.revision(f) {
+        Some(digest) => {
+            let mut copied: Bytes = list.new()
+            list.append(mut copied, digest)
+            if list.len(copied) == 0u64 {
+                None
+            } else {
+                Some(take copied)
+            }
+        },
+        None => None,
     }
     register_check(mut r, key, ca, n, s)?
     let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
@@ -154,7 +159,7 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
         store.reexecute_with(db, source, take declaration, plan, replay_fault, env, transact_replay)
     }
     let adapters = TransactAdapters(serve: take serve_entry, resume: take resume_entry, trigger: take trigger, attempt: take attempt, replay: take replay)
-    insert(mut r, take key, take d, Transact(n, s, take revision, check, take adapters))
+    insert_exported(mut r, take key, take d, Transact(n, s, take revision, check, take adapters))
 }
 
 pub fn attempt_key[F, A, R](definition: StaticFn[F], arg: std.codec.Codec[A], reply: std.codec.Codec[R]) -> Result[Bytes, std.codec.EncodeError] {
@@ -195,8 +200,12 @@ pub fn register_attempt[G: send, H: shareable + inert + send, F, Env: inert + se
     check_call_reserve(n, steps)?
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let key = attempt_key(definition, ca, cr) ?=> |_| Bounds
-    if map.contains(registered.slots, key) { return Error(AlreadyRegistered(take key)) }
+    let key = if registered.replay {
+        let replayed: Bytes = clone(registered.t.slot_keys[registered.at])
+        take replayed
+    } else {
+        attempt_key(definition, ca, cr) ?=> |_| Bounds
+    }
     let entry = FencedEntry(body: run, env: store.copy_env(env), args: ca, reply: cr)
     let adapter = fn(mut db: store.Db, h: H, tables: triggers.Tables, active: triggers.Attempt, arg: Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits {
         let raw: Bytes = clone(arg)
@@ -204,6 +213,5 @@ pub fn register_attempt[G: send, H: shareable + inert + send, F, Env: inert + se
         store.run(mut db, Some(steps), body_env, run_fenced_entry)
     }
     let ready: own[send] fn(mut store.Db, H, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits = take adapter
-    map.insert(mut registered.slots, take key, Fenced(n, steps, take ready))
-    Ok(())
+    insert(mut registered, take key, None, Fenced(n, steps, take ready))
 }

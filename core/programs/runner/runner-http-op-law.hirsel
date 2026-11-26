@@ -15,7 +15,7 @@ fn http_op_increment(mut tx: store.Tx, h: HttpLawHandles, _caller: Caller, take 
 }
 
 fn http_op_binding(r: Registry[(), HttpLawHandles], op: String, path: String, status: u16) -> HttpBinding {
-    let key = http_law_key(r.exported[0u64])
+    let key = http_law_key(r.t.exported[0u64])
     let mut fields: List[FieldSource] = list.with_capacity(1u64)
     list.push(mut fields, FieldSource(field: "name", source: Body))
     HttpBinding(op: string.from(op), method: Post, path: string.from(path), entry: take key, fields: take fields, mode: Stream, ok_status: status, error_status: 422u16, body_max: 1024u64, arg_max: 65536u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS)
@@ -27,7 +27,7 @@ fn http_op_model(_tx: store.Tx, _h: HttpLawHandles, take _input: ()) -> Result[A
 
 fn http_op_read(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
     query(mut r, code.describe(http_op_model), slots(), 65536u64, DEFAULT_STEPS)?
-    let key = http_law_key(r.exported[1u64])
+    let key = http_law_key(r.t.exported[1u64])
     bind(mut r, HttpBinding(op: "read", method: Get, path: "/read", entry: take key, fields: list.new(), mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
 }
 
@@ -221,7 +221,7 @@ fn http_op_drive(take d: HttpOpDrive) waits {
 fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, place: HttpOpPlace, stage: u8, birth: u64) waits {
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, directory, c, r, options))
-    let prepared = head_prepare(mut db, Install(fate.none()), false, place, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks)
+    let prepared = head_prepare(mut db, Install(fate.none()), false, placing_at(place, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks)
     let (take registered, take handles, _, take identity) = match take prepared {
         Ok(take ready) => take ready,
         Error(take issue) => fail(start_text(Open(take issue))),
@@ -235,7 +235,7 @@ fn http_op_cycle(directory: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, plac
     let mail = result.unwrap(mailbox(16u64))
     let drive = HttpOpDrive(actions: take to, publisher: post(mail), net: n, clock: c, random: r, tasks: tasks, place: place, previous: take previous, stage: stage, birth: birth)
     let work = task.spawn(tasks, bytes 16777216u64, take drive, http_op_drive)
-    result.unwrap(run_head(take db, take registry_copy, take identity, take handles, place, HTTP_LAW_PLACE_BYTES, take inbox, take mail, tasks, 1048576u64, None, None))
+    result.unwrap(run_head(take db, take registry_copy, take identity, take handles, placing_at(place, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take inbox, take mail, tasks, 1048576u64, None, None))
     match task.join(take work) {
         Ok(()) => (),
         Error(Failed(causes)) => fail(http_law_cause(causes)),
@@ -255,7 +255,7 @@ fn test_l_op(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(
     let mut with_query = result.unwrap(placed(code.describe(http_op_moved), HTTP_LAW_PLACE_BYTES))
     let subscribe_mode: Mode = Subscribe
     for mode in[Read, subscribe_mode] {
-        let mut invalid: HttpBinding = clone(with_query.bindings[1u64].binding)
+        let mut invalid: HttpBinding = clone(with_query.t.bindings[1u64].binding)
         invalid.op = "created-query"
         invalid.path = "/created-query"
         invalid.mode = mode

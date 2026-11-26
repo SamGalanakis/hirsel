@@ -12,8 +12,8 @@ fn open_place_schema[H: shareable + inert + send](mut db: store.Db, schema: Stat
     Ok(take h)
 }
 
-fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
-    head_prepare_registered(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks, None)
+fn head_prepare[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, placing: Placing[G, H], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
+    head_prepare_registered(mut db, selection, persistent, placing, on_migrate, schema, n_place, tasks, None)
 }
 
 type HeadRegistration[G: send, H: shareable + inert + send] {
@@ -22,13 +22,13 @@ type HeadRegistration[G: send, H: shareable + inert + send] {
     record: ReleaseRecord
 }
 
-fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks, take pre_registered: Option[HeadRegistration[G, H]]) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
+fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.Db, selection: Selection, persistent: bool, placing: Placing[G, H], on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]], n_place: u64, tasks: Tasks, take pre_registered: Option[HeadRegistration[G, H]]) -> Result[(Registry[G, H], H, Bytes, Bytes), OpenError] waits {
     if !store.is_disk(db) {
-        let mut local_registry = match placed(place, n_place) {
+        let mut local_registry = match instantiate(placing) {
             Ok(take registered) => take registered,
             Error(take problem) => return Error(Place(take problem))
         }
-        let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
+        let identity = activation_identity(code.identity(placing.place), on_migrate, code.identity(schema))?
         let installing = match selection {
             Install(_) => true,
             InstallAt(_, _) => true,
@@ -43,7 +43,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         } else {
             open_place_schema(mut db, schema) ?=> Store
         }
-        let release = http_release_digest(local_registry.exported, local_registry.bindings) ?=> |_| Place(Bounds)
+        let release = http_release_digest(local_registry.t.exported, local_registry.t.bindings) ?=> |_| Place(Bounds)
         return Ok((take local_registry, take h, take release, take identity))
     }
     let explicit_install = match selection {
@@ -119,7 +119,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
     let (take reg, take description, take record) = match take pre_registered {
         Some(HeadRegistration(registry: take reg, description: take description, record: take record)) => (take reg, take description, take record),
         None => {
-            let reg = placed(place, n_place) ?=> Place
+            let reg = instantiate(placing) ?=> Place
             let (take description, take record) = prepare_activation(reg, n_place, list.new()) ?=> Place
             (take reg, take description, take record)
         },
@@ -134,7 +134,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         if !matches {
             return Error(not_current_activation(db, version, take old))
         }
-        let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
+        let identity = activation_identity(code.identity(placing.place), on_migrate, code.identity(schema))?
         let h = open_place_schema(mut db, schema) ?=> Store
         let ReleaseRecord(release: take release, ..) = take record
         return Ok((take reg, take h, take release, take identity))
@@ -142,7 +142,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
     if !explicit_install {
         activation_result(store.activation_install_allowed(db))?
     }
-    let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
+    let identity = activation_identity(code.identity(placing.place), on_migrate, code.identity(schema))?
     let mut declaration = migration_declaration(db, tasks, on_migrate) ?=> Migrate
     let h = (code.callable(schema))(mut declaration) ?=> Migrate
     let mut stage = store.finish_migration(db, take declaration) ?=> Migrate
@@ -226,9 +226,9 @@ fn settle_held[G: send, H: shareable + inert + send](db: store.Db, mut stage: st
     let Some(tables) = (declared_triggers(reg, h, store.snapshot(db)) ?=> Store) else {
         return Ok(())
     }
-    let image = trigger_stamp(reg.exported, reg.bindings, n_place) ?=> Store
+    let image = trigger_stamp(reg.t.exported, reg.t.bindings, n_place) ?=> Store
     let mut registered: List[Bytes] = list.new()
-    for entry in reg.exported {
+    for entry in reg.t.exported {
         list.push(mut registered, triggers.identity_path(entry.described.identity))
     }
     if let Some(prior) = current {
@@ -300,8 +300,8 @@ pub fn launch_selection(a: Args) -> Result[Selection, Exit] {
 
 // Installation shares the serving head's open and activation, then closes the store
 // before it sends proof. No publisher, triggers, or listener start for this launch.
-fn operate_install[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
-    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, ..) = take p
+fn operate_install[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], take p: PlaceConfig[G, H, S], take options: store.Options, selection: Selection, n_place: u64) -> Result[u64, StartError] waits {
+    let PlaceConfig(backing: take backing, tasks: tasks, clock: clock, random: random, on_migrate: on_migrate, schema: schema, ..) = take p
     let persistent = persistent_backing(backing)
     let typed = match selection {
         InstallAt(_, _) => true,
@@ -325,7 +325,7 @@ fn operate_install[G: send, H: shareable + inert + send, S: send](take p: PlaceC
             return Error(Open(StoreMismatch(id, actual)))
         }
     }
-    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, place, on_migrate, schema, n_place, tasks) {
+    let installed: Result[u64, StartError] = match head_prepare(mut opened, selection, persistent, placing, on_migrate, schema, n_place, tasks) {
         Ok(_) => if persistent {
             match activation_version(opened) {
                 Ok(version) => Ok(version),

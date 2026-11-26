@@ -51,8 +51,8 @@ type RelayStart: send {
 fn relay_key_max[G: send, H: shareable + inert + send](reg: Registry[G, H]) -> u64 {
     let mut maximum = 0u64
     for (key, _) in reg.slots { maximum = order.max(maximum, list.len(key)) }
-    for (key, _) in reg.gone { maximum = order.max(maximum, list.len(key)) }
-    for (key, _) in reg.keyed { maximum = order.max(maximum, list.len(key)) }
+    for (key, _) in reg.t.gone { maximum = order.max(maximum, list.len(key)) }
+    for (key, _) in reg.t.keyed { maximum = order.max(maximum, list.len(key)) }
     maximum
 }
 
@@ -92,7 +92,7 @@ fn relay_child_bytes(c: RelayConfig, key_max: u64, with_claims: bool) -> Option[
 }
 
 pub fn relay_bytes[G: send, H: shareable + inert + send](r: Registry[G, H], c: RelayConfig) -> Option[u64] {
-    relay_start_bytes(c, relay_child_bytes(c, relay_key_max(r), map.len(r.keyed) != 0)?)
+    relay_start_bytes(c, relay_child_bytes(c, relay_key_max(r), map.len(r.t.keyed) != 0)?)
 }
 
 fn relay_start_bytes(c: RelayConfig, child: u64) -> Option[u64] {
@@ -108,7 +108,7 @@ pub fn start_relay[G: send, H: shareable + inert + send](r: Registry[G, H], head
     clock: Clock, tasks: Tasks, c: RelayConfig) -> Result[(Relay, Task[()]), Refusal] waits {
     if c.http_max == 0u64 || c.positions_max == 0u64 || c.sends_max == 0u64 { return Error(Overloaded) }
     let key_max = relay_key_max(r)
-    let Some(child_bytes) = relay_child_bytes(c, key_max, map.len(r.keyed) != 0) else { return Error(Overloaded) }
+    let Some(child_bytes) = relay_child_bytes(c, key_max, map.len(r.t.keyed) != 0) else { return Error(Overloaded) }
     let Some(inbox_size) = relay_inbox_size(c) else { return Error(Overloaded) }
     let Some(total) = relay_start_bytes(c, child_bytes) else { return Error(Overloaded) }
     let started: Result[Result[(Relay, Task[()]), Refusal], Capacity] = bound bytes total {

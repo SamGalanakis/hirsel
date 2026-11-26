@@ -1,14 +1,14 @@
 // The export list in registration order: the codec of List[Described].
 pub fn describe[G: send, H: shareable + inert + send](r: Registry[G, H], mut out: Bytes) -> Result[(), std.codec.EncodeError] {
     let c: std.codec.Codec[Described] = std.codec.of()
-    let count = list.len(r.exported)
+    let count = list.len(r.t.exported)
     if count > 0xffffffffu64 { return Error(CountOverflow(count)) }
     std.codec.put_u32(int.truncate(count), mut out)
-    for entry in r.exported { std.codec.put_with(entry.described, c, mut out)? }
+    for entry in r.t.exported { std.codec.put_with(entry.described, c, mut out)? }
     Ok(())
 }
 
-pub type Exported: codec + send {
+pub type Exported: codec + shareable + send {
     described: Described, args_fp: u64, result_fp: u64, revision: Bytes,
     slots: List[SlotSchema], value: Bytes
 }
@@ -107,8 +107,7 @@ fn encode_describe(description: Describe) -> Result[Bytes, std.codec.EncodeError
 
 fn describe_registered[G: send, H: shareable + inert + send](launch: LaunchEnv, take r: Registry[G, H], take tables: List[store.DeclaredCollection]) -> Result[Bytes, RegisterError] {
     let preview = match launch.preview { Some(old) => Some(preview_answers(r, old)?), None => None }
-    let Registry(exported: take exported, bindings: take bindings, ..) = take r
-    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: take exported, tables: take tables, bindings: take bindings)
+    let description = Describe(digest: launch_bytes(launch.digest), target: owned_launch_target(launch.target), n_place: launch.n_place, revision: launch_bytes(launch.revision), exported: clone(r.t.exported), tables: take tables, bindings: clone(r.t.bindings))
     if let Some(take answers) = take preview { return encode_preview(take description, take answers) }
     Ok(encode_describe(description) ?=> |_| Bounds)
 }

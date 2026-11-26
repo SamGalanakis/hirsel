@@ -192,7 +192,7 @@ fn keyed_http_law_cycle(dir: Dir, clock: Clock, random: Random, tasks: Tasks, ne
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
     options.create = stage == 0u8 || stage == 3u8
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let retired = if stage == 1u8 || stage == 2u8 {
         Some(result.unwrap(http_retirements(db, reg)))
     } else {
@@ -202,7 +202,7 @@ fn keyed_http_law_cycle(dir: Dir, clock: Clock, random: Random, tasks: Tasks, ne
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHttpLawDrive(head: take head, publisher: post(mail), clock, random, tasks, net, place: definition, retired: take retired, stage)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_http_law_drive)
-    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
         fail(start_text(Open(take problem)))
     }
@@ -220,10 +220,10 @@ fn keyed_http_dropped_open(dir: Dir, clock: Clock, random: Random, tasks: Tasks)
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let definition: HttpOpPlace = code.describe(http_op_gone)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
-    match run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
+    match run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
         Error(KeyedOpDropped(store.DroppedClaimOp(op: dropped, last_expiry: Finite(10100u64)))) if dropped == b"increment" => (),
         _ => fail("dropping a keyed op with a live claim did not refuse the open with KeyedOpDropped"),
     }
@@ -233,11 +233,11 @@ fn keyed_http_dropped_open(dir: Dir, clock: Clock, random: Random, tasks: Tasks)
 // An Admitted claim that no worker ran, as a crash after its admit leaves it.
 fn keyed_http_seed_admitted(dir: Dir, clock: Clock, random: Random, tasks: Tasks) waits {
     let reg = result.unwrap(placed(code.describe(keyed_http_place), HTTP_LAW_PLACE_BYTES))
-    let entry = http_law_key(reg.exported[0u64])
+    let entry = http_law_key(reg.t.exported[0u64])
     let codec: std.codec.Codec[HttpOpInput] = std.codec.of()
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, HttpOpInput(name: "saved"), mut raw))
-    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(reg.keyed, b"increment") else {
+    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(reg.t.keyed, b"increment") else {
         fail("the keyed op has no policy")
     }
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
@@ -351,12 +351,12 @@ fn keyed_http_horizon_at_deciding_admission(d: Dir, random: Random, tasks: Tasks
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let definition: HttpOpPlace = code.describe(keyed_http_place)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_horizon_drive)
-    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
         fail(start_text(Open(take problem)))
     }
@@ -432,12 +432,12 @@ fn keyed_http_held_reply_across_expiry(d: Dir, random: Random, tasks: Tasks, net
     let options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let definition: HttpOpPlace = code.describe(keyed_http_place)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_held_drive)
-    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
         fail(start_text(Open(take problem)))
     }
@@ -559,7 +559,7 @@ fn keyed_http_join_on_cold_read(d: Dir, random: Random, tasks: Tasks, net: Net) 
     sizes.resident_limit = Some(182375272u64)
     let mut options = result.unwrap(store.sized_with(Directory, 2147483648u64, sizes))
     let mut seeding = result.unwrap(store.open(tasks, dir, clock, random, options))
-    let (_, take seeded, _, _) = result.unwrap(head_prepare(mut seeding, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (_, take seeded, _, _) = result.unwrap(head_prepare(mut seeding, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let put = store.run(mut seeding, None, store.copy_env(seeded.counter), fn(mut tx: store.Tx, counter: store.Table[u64, u64]) -> Result[(), store.Error] {
         store.put(mut tx, counter, 0u64, 41u64)
     })
@@ -572,12 +572,12 @@ fn keyed_http_join_on_cold_read(d: Dir, random: Random, tasks: Tasks, net: Net) 
     result.unwrap(store.close(take seeding))
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Reopen, false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Reopen, false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock, hand: take wall, random, tasks, net)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, keyed_cold_join_drive)
-    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
         fail(start_text(Open(take problem)))
     }
@@ -588,4 +588,18 @@ fn keyed_http_join_on_cold_read(d: Dir, random: Random, tasks: Tasks, net: Net) 
     }
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
+}
+
+// The keyed half of placing_law (runner_owner_laws): a keyed op, its claim recovery and a
+// query binding, launched from one Placing.
+fn placing_keyed_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    keyed_http_place(mut r)?
+    http_op_read(mut r)?
+    bind_retired(mut r, "increment-text", Post, "/new", Retirement(claim: keyed_http_law_claim(), keys_max: 4))
+}
+
+@test
+fn placing_keyed_registers_once_across_launches(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] {
+    let settings: PlaceConfig[(), HttpLawHandles, ()] = PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(placing_keyed_place), n_place: HTTP_LAW_PLACE_BYTES, on_migrate: None, schema: code.describe(http_law_schema), session: wire_defaults(262144u64), max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net, tasks, clock: c, random, stop: Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+    placing_law(settings, 3u64)
 }

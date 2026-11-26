@@ -71,7 +71,7 @@ pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](
     }
     let state_schema = std.codec.schema(state) ?=> |_| Bounds
     let message_schema = std.codec.schema(message) ?=> |_| Bounds
-    let index: u32 = int.narrow(list.len(r.exported))
+    let index: u32 = int.narrow(exported_count(r))
     let make = fn() -> RoomCodecs {
         let check_s = fn(raw: Bytes) -> RoomCodecCheck {
             decode_room_value(state, raw)
@@ -150,7 +150,8 @@ fn no_rooms() -> RoomPlan {
     RoomPlan(owner_bytes: 0u64, relay_bytes: 0u64, live_limit: 0u64, min_frame: 0u64, message: 0u64, roster: 0u64, per_sub: 0u64, decode: 0u64, hooks: None)
 }
 
-fn plan_rooms[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireConfig) -> RoomPlan {
+// The room sizes a registry's entries fold to; `close_rooms` finishes them for a WireConfig.
+fn fold_rooms[G: send, H: shareable + inert + send](r: Registry[G, H]) -> RoomPlan {
     let mut plan = no_rooms()
     for (_, entry) in r.slots {
         if let Query(_, _, query_entry) = entry {
@@ -161,12 +162,21 @@ fn plan_rooms[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireCo
             }
         }
     }
+    plan
+}
+
+fn close_rooms(folded: RoomPlan, c: WireConfig) -> RoomPlan {
+    let mut plan = folded
     let hooks = match plan.hooks {
         Some(make) => make(),
         None => return plan
     }
     (hooks.close)(mut plan, c)
     plan
+}
+
+fn plan_rooms[G: send, H: shareable + inert + send](r: Registry[G, H], c: WireConfig) -> RoomPlan {
+    close_rooms(fold_rooms(r), c)
 }
 
 fn fold_room_plan(mut plan: RoomPlan, registered: RoomEntry) {

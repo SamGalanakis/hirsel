@@ -292,7 +292,7 @@ fn call_listed[G: send](grant: CallGrant[G], identity: Bytes, schema: Bytes) -> 
 // The registry key of a call is the entry's identity and two fingerprints.
 fn call_grant_allows[G: send, H: shareable + inert + send](grant: CallGrant[G], r: Registry[G, H], key: Bytes) -> bool {
     let n = list.len(key)
-    for entry in r.exported {
+    for entry in r.t.exported {
         let identity = view entry.described.identity
         let size = list.len(identity)
         if size + 16u64 == n && list.slice(key, 0u64, size) == identity {
@@ -347,7 +347,7 @@ fn place_grant_bytes[G: send, H: shareable + inert + send, S: send](config: Opti
 // RUNNER-SPEC v2.69 and v2.70: a wire needs a bind mint, a trigger config that
 // lists a granted entry needs an attempt mint, and every call-list element names
 // a registered granted entry.
-fn check_grant_lists[G: send, H: shareable + inert + send, S: send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, given: Option[Grants[G, H, S]], configured: Option[TriggerConfig], wired: bool) -> Option[OpenError] {
+fn check_grant_lists[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], given: Option[Grants[G, H, S]], configured: Option[TriggerConfig], wired: bool) -> Option[OpenError] {
     let has_bind = match given {
         Some(Grants(bind: Some(_), ..)) => true,
         _ => false
@@ -374,20 +374,20 @@ fn check_grant_lists[G: send, H: shareable + inert + send, S: send](place: Stati
     let Some(cm) = view g.call else {
         return None
     }
-    let reg = match placed(place, n_place) {
-        Ok(take reg) => take reg,
-        Error(take problem) => return Some(Place(take problem)),
+    let t = match placing.made {
+        Ok(made) => arc.share(made.0),
+        Error(problem) => return Some(Place(clone(problem))),
     }
     if let Some(take path) = triggers.first_unlisted(cm.entries, scoped fn(path: Bytes, schema: Bytes, is_granted: bool) -> bool {
-        is_granted && registers_granted(reg, path, schema)
+        is_granted && registers_granted(t, path, schema)
     }) {
         return Some(CallNotGranted(take path))
     }
     None
 }
 
-fn registers_granted[G: send, H: shareable + inert + send](reg: Registry[G, H], path: Bytes, schema: Bytes) -> bool {
-    for entry in reg.exported {
+fn registers_granted[G: send](t: Template[G], path: Bytes, schema: Bytes) -> bool {
+    for entry in t.exported {
         let is_granted = match entry.described.kind {
             Granted => true,
             _ => false,

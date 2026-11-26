@@ -112,17 +112,21 @@ fn operation_path(op: String) -> String {
 }
 
 pub fn bind[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding) -> Result[(), RegisterError] {
+    if reg.replay { return Ok(()) }
     if binding.mode == Keyed { return Error(keyed_registration_error(binding.op, Mode)) }
     let details = check_http_binding(reg, binding) ?=> |take check| InvalidBinding(BindError(op: string.from(binding.op), check: take check))
-    list.push(mut reg.bindings, HttpDescribe(binding: take binding, defaults: take details))
+    let mut carried: Option[HttpDescribe] = Some(HttpDescribe(binding: take binding, defaults: take details))
+    edit_template(mut reg, scoped fn(mut t: Template[G]) {
+        if let Some(take d) = replace(mut carried, None) { list.push(mut t.bindings, take d) }
+    })
     Ok(())
 }
 
 fn check_http_binding[G: send, H: shareable + inert + send](reg: Registry[G, H], binding: HttpBinding) -> Result[List[HttpDefault], BindCheck] {
     let Some(validator) = map.get(reg.checks, binding.entry) else { return Error(NoEntry) }
-    let entry_index = find_binding_entry(reg.exported, binding.entry) ?=> |_| NoEntry
-    let entry = view reg.exported[entry_index]
-    validate_http_address(reg.bindings, binding, entry.described.kind)?
+    let entry_index = find_binding_entry(reg.t.exported, binding.entry) ?=> |_| NoEntry
+    let entry = view reg.t.exported[entry_index]
+    validate_http_address(reg.t.bindings, binding, entry.described.kind)?
     let description = (validator.description)() ?=> |_| Shape(0u8, 0u8)
     let mut defaults: List[HttpDefault] = list.new()
     for saved in std.codec.schema_defaults(description) {

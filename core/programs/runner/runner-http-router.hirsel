@@ -160,7 +160,7 @@ pub opaque type HttpRetirements: send {
 pub fn http_retirements[G: send, H: shareable + inert + send](db: store.Db, registered: Registry[G, H]) -> Result[HttpRetirements, OpenError] {
     check_keyed_registrations(db, registered)?
     let mut policies: Map[Bytes, store.KeyedPolicy] = map.new()
-    for (name, keyed) in registered.keyed {
+    for (name, keyed) in registered.t.keyed {
         if none(keyed.policy) {
             if let Some(take saved) = store.keyed_policy(db, name) ?=> Store {
                 map.insert(mut policies, clone(name), take saved)
@@ -174,15 +174,15 @@ pub fn http_router_with_retirements[G: send, H: shareable + inert + send](regist
     let mut builder = take routes
     std.router.clear_tags(mut builder)
     let mut plan = HttpRoutes(operations: list.new(), openapi: arc.new(list.new()), gone: list.new())
-    for saved in registered.bindings {
-        let index = find_binding_entry(registered.exported, saved.binding.entry) ?=> |_| BindError(op: string.from(saved.binding.op), check: NoEntry)
-        let entry = view registered.exported[index]
+    for saved in registered.t.bindings {
+        let index = find_binding_entry(registered.t.exported, saved.binding.entry) ?=> |_| BindError(op: string.from(saved.binding.op), check: NoEntry)
+        let entry = view registered.t.exported[index]
         add_http_operation(mut builder, mut plan, entry, saved, false)?
         if saved.binding.mode == Stream {
             add_http_operation(mut builder, mut plan, entry, saved, true)?
         }
     }
-    for (name, keyed) in registered.keyed {
+    for (name, keyed) in registered.t.keyed {
         let policy = match view keyed.policy {
             Some(saved) => Some(saved),
             None => map.get(retired.policies, name),
@@ -200,7 +200,7 @@ pub fn http_router_with_retirements[G: send, H: shareable + inert + send](regist
         plan.gone = previous_http_keys(registered, prior)
         for saved in prior.bindings {
             let key = view saved.binding.entry
-            if saved.binding.mode != Stream || http_has_op(registered.bindings, saved.binding.op) || map.contains(registered.keyed, string.as_bytes(saved.binding.op)) || map.contains(registered.slots, key) {
+            if saved.binding.mode != Stream || http_has_op(registered.t.bindings, saved.binding.op) || map.contains(registered.t.keyed, string.as_bytes(saved.binding.op)) || map.contains(registered.slots, key) {
                 continue
             }
             let index = find_binding_entry(prior.exported, key) ?=> |_| BindError(op: string.from(saved.binding.op), check: NoEntry)
@@ -497,7 +497,7 @@ fn http_keyed_handler[G: send, H: shareable + inert + send](req: std.http.Reques
     let binding = view operation.binding
     let horizon = std.order.min(std.http.handler_deadline(req), std.clock.deadline_after_ms(arrived, binding.deadline_ms))
     let name = string.as_bytes(binding.op)
-    let Some(registered) = map.get(state.registered.keyed, name) else {
+    let Some(registered) = map.get(state.registered.t.keyed, name) else {
         return Ok(Reply(http_refusal(NoEntry)?))
     }
     let Some(mint) = view state.grants else {

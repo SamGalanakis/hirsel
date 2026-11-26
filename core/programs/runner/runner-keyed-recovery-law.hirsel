@@ -189,12 +189,12 @@ fn quiet_reopen_recovers_bound_claims_once(d: Dir, random: Random, tasks: Tasks)
     let definition: HttpOpPlace = code.describe(keyed_http_place)
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
     let mut seeded = result.unwrap(store.open(tasks, dir, time, random, options))
-    let (take seed_reg, _, _, _) = result.unwrap(head_prepare(mut seeded, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
-    let entry = http_law_key(seed_reg.exported[0u64])
+    let (take seed_reg, _, _, _) = result.unwrap(head_prepare(mut seeded, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let entry = http_law_key(seed_reg.t.exported[0u64])
     let inputs: std.codec.Codec[HttpOpInput] = std.codec.of()
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(inputs, HttpOpInput(name: "saved"), mut raw))
-    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(seed_reg.keyed, b"increment") else {
+    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(seed_reg.t.keyed, b"increment") else {
         fail("the keyed op has no policy")
     }
     for key in[b"held", b"other"] {
@@ -206,11 +206,11 @@ fn quiet_reopen_recovers_bound_claims_once(d: Dir, random: Random, tasks: Tasks)
     result.unwrap(store.close(take seeded))
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let driving = task.spawn(tasks, bytes 65536u64, (take clock_handle, take head, 2000000000u64), recovery_law_ticks)
-    if let Error(take problem) = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
+    if let Error(take problem) = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
         fail(start_text(Open(take problem)))
     }
     let _ = task.join(take driving)
@@ -359,9 +359,9 @@ fn refused_front_fails_after_recover_max(d: Dir, random: Random, tasks: Tasks, n
     let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
     options.resident_limit = FRONT_LIMIT
     let mut seeded = result.unwrap(store.open(tasks, dir, time, random, options))
-    let (take seed_reg, _, _, _) = result.unwrap(head_prepare(mut seeded, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
-    let entry = http_law_key(seed_reg.exported[0u64])
-    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(seed_reg.keyed, b"increment") else {
+    let (take seed_reg, _, _, _) = result.unwrap(head_prepare(mut seeded, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let entry = http_law_key(seed_reg.t.exported[0u64])
+    let Some(KeyedRegistration(policy: Some(policy), ..)) = map.get(seed_reg.t.keyed, b"increment") else {
         fail("the keyed op has no policy")
     }
     front_admit(mut seeded, entry, clone(policy), b"one", "big")
@@ -369,12 +369,12 @@ fn refused_front_fails_after_recover_max(d: Dir, random: Random, tasks: Tasks, n
     result.unwrap(store.close(take seeded))
     options.create = false
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock: time, hand: take clock_handle, random, tasks, net)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, front_drive)
-    if let Error(take problem) = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
+    if let Error(take problem) = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None) {
         fail(start_text(Open(take problem)))
     }
     match task.join(take work) {

@@ -40,8 +40,8 @@ type HttpStatusListener: send {
 fn http_status_serve(take seed: HttpStatusListener) waits {
     let HttpStatusListener(listener: take listener, clock, tasks) = take seed
     let registered = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
-    let binding: HttpBinding = clone(registered.bindings[0u64].binding)
-    let reply_plan = result.unwrap(bind_shape(registered.exported[0u64].described.result))
+    let binding: HttpBinding = clone(registered.t.bindings[0u64].binding)
+    let reply_plan = result.unwrap(bind_shape(registered.t.exported[0u64].described.result))
     let mut builder: std.router.Builder[HttpStatusScript] = std.router.builder()
     result.unwrap(std.router.add_tagged(mut builder, "POST", "/status", 1u64, std.router.raw(http_status_script)))
     let mut listeners: List[Listener] = list.with_capacity(1u64)

@@ -9,12 +9,12 @@ fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let n_place = 1048576u64
     let options = triggers.law_options()
     let mut db = result.unwrap(store.open(tasks, dir, c, r, clone(options)))
-    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, code.describe(fate_law_r1), None, code.describe(trigger_law_schema), n_place, tasks))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(code.describe(fate_law_r1), n_place), None, code.describe(trigger_law_schema), n_place, tasks))
     let t: triggers.Tables = clone(h.triggers)
-    let r1 = result.unwrap(trigger_stamp(reg1.exported, reg1.bindings, n_place))
+    let r1 = result.unwrap(trigger_stamp(reg1.t.exported, reg1.t.bindings, n_place))
     let r2 = {
         let reg2 = result.unwrap(placed(code.describe(fate_law_r2), n_place))
-        result.unwrap(trigger_stamp(reg2.exported, reg2.bindings, n_place))
+        result.unwrap(trigger_stamp(reg2.t.exported, reg2.t.bindings, n_place))
     }
     let (rows, _) = fate_law_setup(mut db, t, h, reg1, r1)
     let before = fate_law_bytes(db, t, rows)

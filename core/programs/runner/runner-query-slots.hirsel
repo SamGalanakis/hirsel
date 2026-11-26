@@ -1,6 +1,6 @@
 pub type SlotKind: codec + send = Table() | Cell() | Log()
 
-pub type SlotSchema: codec + send {
+pub type SlotSchema: codec + shareable + send {
     name: String,
     kind: SlotKind,
     key: Bytes,

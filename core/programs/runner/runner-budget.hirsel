@@ -69,19 +69,20 @@ fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan,
 }
 
 pub fn operate_bytes[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S]) -> Result[u64, Capacity] {
-    let launch = launch_env()
-    let n_place = if launch.n_place_explicit {
-        launch.n_place
-    } else {
-        p.n_place
-    }
-    let (claims, rooms) = place_reservations(p.place, n_place, p.session)?
+    placed_bytes(placing_of(p), p)
+}
+
+// operate_bytes for a place whose registration is already made: a host that launches one
+// Place many times computes the charge from the one shared Placing.
+pub fn placed_bytes[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], p: PlaceConfig[G, H, S]) -> Result[u64, Capacity] {
+    let n_place = launch_n_place(p)
+    let (claims, rooms) = place_reservations(placing, n_place, p.session)?
     operate_reservation(p, n_place, claims, rooms)
 }
 
-fn place_reservations[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, c: WireConfig) -> Result[(u64, RoomPlan), Capacity] {
-    let (count, rooms) = match placed(place, n_place) {
-        Ok(reg) => (keyed_registry_count(reg), plan_rooms(reg, c)),
+fn place_reservations[G: send, H: shareable + inert + send](placing: Placing[G, H], n_place: u64, c: WireConfig) -> Result[(u64, RoomPlan), Capacity] {
+    let (count, rooms) = match placing.made {
+        Ok(made) => (keyed_template_count(made.0), close_rooms(made.1, c)),
         Error(_) => (Some(0u64), no_rooms()),
     }
     let capacity: Capacity = Capacity(requested: 18446744073709551615u64, available: n_place)
@@ -112,14 +113,9 @@ fn host_control_bytes(n_place: u64) -> Result[u64, Capacity] {
     add_place_bytes(pair, n_place)
 }
 
-fn place_store[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
-    let launch = launch_env()
-    let n_place = if launch.n_place_explicit {
-        launch.n_place
-    } else {
-        p.n_place
-    }
-    let (claims, rooms) = place_reservations(p.place, n_place, p.session) ?=> Full
+fn place_store[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], p: PlaceConfig[G, H, S], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
+    let n_place = launch_n_place(p)
+    let (claims, rooms) = place_reservations(placing, n_place, p.session) ?=> Full
     let overhead = operate_reservation(p, n_place, claims, rooms) ?=> Full
     let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
     let limit = runtime.root_limit()

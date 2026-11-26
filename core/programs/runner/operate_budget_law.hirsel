@@ -76,7 +76,7 @@ fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: St
 }
 
 fn bucket_budget_at_limit(take config: PlaceConfig[(), (), ()]) -> Result[(u64, u64), StartError] waits {
-    let (_, share, total, _, _) = place_store(config, None)?
+    let (_, share, total, _, _) = place_store(placing_of(config), config, None)?
     Ok((share, total))
 }
 
@@ -128,7 +128,7 @@ fn budget_bucket_server(take input: (Listener, std.sim.s3.Loopback, Clock)) wait
 }
 
 fn seed_budget_bucket(take config: PlaceConfig[(), (), ()]) -> Result[store.StoreId, String] waits {
-    let (take options, _, _, _, _) = place_store(config, None) ?=> |problem| start_text(problem)
+    let (take options, _, _, _, _) = place_store(placing_of(config), config, None) ?=> |problem| start_text(problem)
     let PlaceConfig(backing: take backing, clock: clock, random: random, tasks: tasks, ..) = take config
     let (take opened, _) = open_backing(take backing, options, tasks, clock, random) ?=> |problem| start_text(backing_start_error(take problem))
     let mut db = take opened
@@ -199,13 +199,13 @@ fn exercise_local_budgets(take grants: (Dir, Clock, Random, Tasks, Net)) -> Resu
     }
     let expected_share = runtime.root_limit() - keyed_budget_runner_bytes()
     let memory = budget_config(Memory, c, r, tasks, n)
-    let (_, share, memory_total, _, _) = place_store(memory, None) ?=> |problem| start_text(problem)
+    let (_, share, memory_total, _, _) = place_store(placing_of(memory), memory, None) ?=> |problem| start_text(problem)
     if share != expected_share || memory_total != expected_share {
         return Error("L60: Memory share")
     }
     open_sized_place(take memory)?
     let disk = budget_config(Temp(d), c, r, tasks, n)
-    let (disk_sizes, disk_share, disk_total, _, _) = place_store(disk, None) ?=> |problem| start_text(problem)
+    let (disk_sizes, disk_share, disk_total, _, _) = place_store(placing_of(disk), disk, None) ?=> |problem| start_text(problem)
     let disk_plan = result.unwrap(store.planned(Directory, expected_share, disk.sizes))
     let planned = store.planned_options(disk_plan)
     if disk_share != expected_share || disk_total != store.planned_bytes(disk_plan) || disk_sizes.pack_bytes != planned.pack_bytes || disk_sizes.checkpoint_bytes != planned.checkpoint_bytes || disk_sizes.resident_limit != planned.resident_limit {

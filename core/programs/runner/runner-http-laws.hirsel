@@ -87,7 +87,7 @@ fn http_law_place(mut reg: Registry[(), HttpLawHandles]) -> Result[(), RegisterE
     query(mut reg, code.describe(http_law_query), slots(), 65536u64, DEFAULT_STEPS)?
     let mut fields: List[FieldSource] = list.with_capacity(1u64)
     list.push(mut fields, FieldSource(field: "request", source: Body))
-    let entry = http_law_key(reg.exported[0u64])
+    let entry = http_law_key(reg.t.exported[0u64])
     bind(mut reg, HttpBinding(op: "increment", method: Post, path: "/generated", entry: take entry, fields: take fields, mode: Stream, ok_status: 200u16, error_status: 422u16, body_max: HTTP_LAW_ARG_MAX, arg_max: 65536u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))
 }
 
@@ -123,7 +123,7 @@ type HttpLawRoute: send {
 
 fn http_law_route(clock: Clock, random: Random, tasks: Tasks, relay: Relay) -> HttpLawRoute {
     let reg = result.unwrap(placed(code.describe(http_law_place), HTTP_LAW_PLACE_BYTES))
-    HttpLawRoute(clock: clock, random: random, tasks: tasks, relay: relay_endpoint(relay), writes: http_law_key(reg.exported[0u64]), reads: http_law_key(reg.exported[1u64]), reg: take reg)
+    HttpLawRoute(clock: clock, random: random, tasks: tasks, relay: relay_endpoint(relay), writes: http_law_key(reg.t.exported[0u64]), reads: http_law_key(reg.t.exported[1u64]), reg: take reg)
 }
 
 fn http_law_config() -> std.http.Config {
@@ -418,7 +418,7 @@ fn http_law_drive(take d: HttpLawDrive) waits {
 
 fn http_law_keys(reg: Registry[(), HttpLawHandles]) -> List[Bytes] {
     let mut keys: List[Bytes] = list.with_capacity(2u64)
-    for export in reg.exported {
+    for export in reg.t.exported {
         list.push(mut keys, http_law_key(export))
     }
     take keys

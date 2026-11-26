@@ -1,0 +1,163 @@
+// A place's registration (RUNNER-SPEC §3 "One Registry"): the shared Template it derives
+// once, the per-task Registry that replays against it, and the Placing that carries both.
+
+// One erased adapter per kind, holding the entry's byte bound n from registration
+// (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
+// starts a task under `bytes n` that holds the grant. A transact slot has two: the
+// session's check (rule 5: decode the argument, keep nothing) and the head's run, with the
+// entry's step bound and its code.revision, which each call record carries (R5, §7).
+type Slot[G: send, H: shareable + inert + send]: send = Compute(own[send] fn(Bytes) -> Outcome) | Granted(own[send] fn() -> GrantedLaunch[G]) | Transact(u64, u64, Option[Bytes], own[send] fn(Bytes) -> Option[Refusal], TransactAdapters[H]) | Query(u64, u64, QueryEntry[H]) | Fenced(u64, u64, own[send] fn(mut store.Db, H, triggers.Tables, triggers.Attempt, Bytes) -> Result[store.Outcome[Outcome, FencedRefusal], store.Error] waits)
+
+// One granted call's launcher, made from its slot where the Registry is and called by the
+// task that holds the grant (§3 "One Registry").
+type GrantedLaunch[G: send]: send {
+    go: own[send] fn(Tasks, take JobGrant[G], take Caller, take Bytes, take Option[JobReport]) -> Result[Task[Outcome], Capacity]
+}
+
+// What registration derives from a place's `place` fn under `bytes n_place`: plain data,
+// built once and shared by every Registry made from it. `slot_keys` are the entry keys in
+// the order `place` registers its slots, so a replay pairs each adapter with its key.
+type Template[G: send]: shareable + send {
+    exported: List[Exported],
+    slot_keys: List[Bytes],
+    bindings: List[HttpDescribe],
+    keyed: Map[Bytes, KeyedRegistration[G]],
+    gone: Map[Bytes, ()],
+}
+
+// A Registry is a shared Template and the adapters one task calls. Adapters are owning
+// closures over an entry's typed body StaticFn and codecs; no owning closure is shareable
+// (OWN-4), so each task that dispatches makes its own by replaying `place` against the
+// Template (`replay`). A replay derives no key or schema: the n-th slot it makes takes the
+// Template's n-th key (`at`), and `seen` counts the exported entries it has passed.
+pub opaque type Registry[G: send, H: shareable + inert + send]: send {
+    t: Arc[Template[G]],
+    replay: bool,
+    at: u64,
+    seen: u64,
+    slots: Map[Bytes, Slot[G, H]],
+    bound_slots: Map[Bytes, List[BoundSlot]],
+    checks: Map[Bytes, CheckedArgument],
+    trigger_tables: Option[own[send] fn(H) -> triggers.Tables],
+}
+
+pub fn registry[G: send, H: shareable + inert + send]() -> Registry[G, H] {
+    let empty: Template[G] = Template(exported: list.new(), slot_keys: list.new(), bindings: list.new(), keyed: map.new(), gone: map.new())
+    Registry(t: arc.new(take empty), replay: false, at: 0u64, seen: 0u64, slots: map.new(), bound_slots: map.new(), checks: map.new(), trigger_tables: None)
+}
+
+// A fresh Registry that makes adapters against `t`.
+fn replaying[G: send, H: shareable + inert + send](t: Arc[Template[G]]) -> Registry[G, H] {
+    Registry(t: arc.share(t), replay: true, at: 0u64, seen: 0u64, slots: map.new(), bound_slots: map.new(), checks: map.new(), trigger_tables: None)
+}
+
+// Changes the Template; a shared one is copied first (arc.update), so no other Registry
+// sees the change.
+fn edit_template[G: send, H: shareable + inert + send](mut r: Registry[G, H], f: scoped fn(mut Template[G])) {
+    arc.update(mut r.t, f)
+}
+
+// The entries exported before the next one: the Template's count while building, the
+// replay's own while replaying.
+fn exported_count[G: send, H: shareable + inert + send](r: Registry[G, H]) -> u64 {
+    if r.replay {
+        r.seen
+    } else {
+        list.len(r.t.exported)
+    }
+}
+
+// The next slot's key and, while building, its description; `derive` runs only then.
+fn entry_described[G: send, H: shareable + inert + send](r: Registry[G, H], derive: scoped fn() -> Result[(Bytes, Exported), RegisterError]) -> Result[(Bytes, Option[Exported]), RegisterError] {
+    if r.replay {
+        let key: Bytes = clone(r.t.slot_keys[r.at])
+        return Ok((take key, None))
+    }
+    let (take key, take d) = derive()?
+    Ok((take key, Some(take d)))
+}
+
+// Rule 10: `placed` registers the place once (`placing_at`): it derives every entry key,
+// schema and binding into the shared Template. The head, the publisher and the serving task
+// each replay the place's one `place` function against that Template under `bytes n_place`
+// (`instantiate`), so their lists are the same list; the serving task's Registry is built
+// once and every session plans against it.
+fn placed[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Result[Registry[G, H], RegisterError] {
+    let go = code.callable(place)
+    let built: Result[Result[Registry[G, H], RegisterError], Capacity] = bound bytes n_place {
+        let mut r: Registry[G, H] = registry()
+        match go(mut r) {
+            Ok(()) => Ok(take r),
+            Error(take e) => Error(take e),
+        }
+    }
+    match take built {
+        Ok(take x) => take x,
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// A place's registration, made once per (place, n_place) by `placing` and shared: the
+// Template, the room sizes its entries fold to before any WireConfig, or the refusal
+// registration met, which every task that registers reports as `placed` would have.
+pub opaque type Placing[G: send, H: shareable + inert + send]: send {
+    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    n_place: u64,
+    made: Result[(Arc[Template[G]], RoomPlan), RegisterError],
+}
+
+// The n_place a launch runs `p` under: the launch's explicit one, else p's.
+fn launch_n_place[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S]) -> u64 {
+    let launch = launch_env()
+    if launch.n_place_explicit {
+        launch.n_place
+    } else {
+        p.n_place
+    }
+}
+
+pub fn placing_of[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S]) -> Placing[G, H] {
+    placing_at(p.place, launch_n_place(p))
+}
+
+fn placing_at[G: send, H: shareable + inert + send](place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64) -> Placing[G, H] {
+    let made: Result[(Arc[Template[G]], RoomPlan), RegisterError] = match placed(place, n_place) {
+        Ok(r) => Ok((arc.share(r.t), fold_rooms(r))),
+        Error(take e) => Error(take e),
+    }
+    Placing(place: place, n_place: n_place, made: take made)
+}
+
+// Whether `held` was made for p's place under the n_place p launches with, so p may run on it.
+pub fn placing_fits[G: send, H: shareable + inert + send, S: send](held: Placing[G, H], p: PlaceConfig[G, H, S]) -> bool {
+    held.place == p.place && held.n_place == launch_n_place(p)
+}
+
+pub fn share_placing[G: send, H: shareable + inert + send](p: Placing[G, H]) -> Placing[G, H] {
+    let made: Result[(Arc[Template[G]], RoomPlan), RegisterError] = match p.made {
+        Ok(kept) => Ok((arc.share(kept.0), kept.1)),
+        Error(e) => Error(clone(e)),
+    }
+    Placing(place: p.place, n_place: p.n_place, made: take made)
+}
+
+// A Registry whose adapters this task calls: `place` replayed against the shared Template
+// under `bytes n_place`, deriving no key or schema.
+fn instantiate[G: send, H: shareable + inert + send](p: Placing[G, H]) -> Result[Registry[G, H], RegisterError] {
+    let t = match p.made {
+        Ok(kept) => arc.share(kept.0),
+        Error(e) => return Error(clone(e)),
+    }
+    let go = code.callable(p.place)
+    let built: Result[Result[Registry[G, H], RegisterError], Capacity] = bound bytes p.n_place {
+        let mut r: Registry[G, H] = replaying(t)
+        match go(mut r) {
+            Ok(()) => Ok(take r),
+            Error(take e) => Error(take e),
+        }
+    }
+    match take built {
+        Ok(take x) => take x,
+        Error(c) => Error(Full(c)),
+    }
+}

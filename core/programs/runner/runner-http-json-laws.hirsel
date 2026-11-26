@@ -90,7 +90,7 @@ fn http_law_unit[A: codec](take _arg: A) -> Result[(), Capacity] { Ok(()) }
 fn http_law_check_shape[A: codec](definition: StaticFn[fn(take A) -> Result[(), Capacity]], field: String, expected: u8) {
     let mut r: Registry[(), ()] = registry()
     result.unwrap(compute(mut r, definition, 65536u64, DEFAULT_STEPS))
-    let k = http_law_key(r.exported[0u64])
+    let k = http_law_key(r.t.exported[0u64])
     let mut inputs: List[FieldSource] = list.with_capacity(1u64)
     list.push(mut inputs, FieldSource(field: string.from(field), source: Body))
     let binding = HttpBinding(op: "check", method: Post, path: "/check", entry: take k, fields: take inputs,
@@ -123,7 +123,7 @@ fn test_l13(c: Clock) -> Result[(), ()] waits {
 
     let mut registered: Registry[(), HttpLawHandles] = registry()
     result.unwrap(http_law_place(mut registered))
-    let mut broken: HttpBinding = clone(registered.bindings[0u64].binding)
+    let mut broken: HttpBinding = clone(registered.t.bindings[0u64].binding)
     broken.op = "duplicate"
     broken.path = "/duplicate"
     list.push(mut broken.fields, FieldSource(field: "request", source: Query))

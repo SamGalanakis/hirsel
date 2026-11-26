@@ -42,7 +42,7 @@ fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
     if let Ok(Committed(_)) = committed {} else { return Error("fixture write refused") }
     let mut r = result.unwrap(placed(code.describe(slot_law_place), 1048576u64))
     result.unwrap(bind_query_slots(mut r, h))
-    let entry = view r.exported[0u64]
+    let entry = view r.t.exported[0u64]
     let key = entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     let base = store.snapshot(db)
     let read_handle = result.unwrap(store.reader(db, 0u64))

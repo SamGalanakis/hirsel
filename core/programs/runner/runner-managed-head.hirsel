@@ -33,7 +33,7 @@ type ManagedHead[G: send, H: shareable + inert + send, S: send]: send {
     tasks: Tasks,
     clock: Clock,
     random: Random,
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    placing: Placing[G, H],
     on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]],
     schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]],
     n_place: u64,
@@ -116,7 +116,7 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
 }
 
 fn managed_head[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
-    let ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, place: place, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: take head_to, cut: take cut, triggering: take triggering, granting: take granting, idle: idle, expected_store: expected_store) = take job
+    let ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, placing: take placing, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: take head_to, cut: take cut, triggering: take triggering, granting: take granting, idle: idle, expected_store: expected_store) = take job
     let persistent = persistent_backing(backing)
     let mut opening = take options
     let mut registration: Option[HeadRegistration[G, H]] = None
@@ -135,7 +135,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         if launch_env().revision.size == 0u64 {
             return Error(Open(IdentityUnknown))
         }
-        let reg = placed(place, n_place) ?=> |problem| Open(Place(take problem))
+        let reg = instantiate(placing) ?=> |problem| Open(Place(take problem))
         let (take description, take record) = prepare_activation(reg, n_place, list.new()) ?=> |problem| Open(Place(take problem))
         opening.binding = Some(clone(record.binding))
         registration = Some(HeadRegistration(registry: take reg, description: take description, record: take record))
@@ -163,7 +163,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
     if !head_advance(to, inbox, Recovered) {
         return head_closed(take db)
     }
-    let prepared = head_prepare_registered(mut db, selection, persistent, place, on_migrate, schema, n_place, tasks, take registration)
+    let prepared = head_prepare_registered(mut db, selection, persistent, placing, on_migrate, schema, n_place, tasks, take registration)
     let (reg, local, release, replay_identity) = match take prepared {
         Ok(take values) => take values,
         Error(take problem) => {
@@ -222,7 +222,7 @@ fn managed_head[G: send, H: shareable + inert + send, S: send](take job: Managed
         },
     }
     let closing = HeadDrain(finish: take finish_from, events: take to, window: take drain, clock: clock, tasks: tasks, head_to: take head_to, n_place: n_place, cut: take cut, idle: idle)
-    let ended = run_head(take db, take reg, take replay_identity, take local, place, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
+    let ended = run_head(take db, take reg, take replay_identity, take local, placing, n_place, take inbox, take mail, tasks, n_publisher, Some(take closing), take trigger_drive)
     stop_grants(take running_grants)
     let _ = take temporary
     match take ended {

@@ -25,9 +25,14 @@ pub type Supplied: send {
 }
 
 // A start sees a view of the host's seed: the services a place's grants are made from.
+// A start that registered its place returns the Factory that holds that registration, and
+// the host starts its later groups with it (RUNNER-SPEC §14.9: one registration per host and
+// factory while the place and n_place stay the same).
 pub opaque type Factory[T: send]: send {
-    start: own[send] fn(take Launch[T], T) -> Result[Started, Refused]
+    start: own[send] fn(take Launch[T], T) -> (Result[Started, Refused], Option[Factory[T]])
 }
+
+type Make[T: send, G: send, H: shareable + inert + send, S: send]: send = Plain(fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) | Seeded(fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity])
 
 pub type Unloaded: send {
     name: String,
@@ -162,6 +167,7 @@ type Downs = Sender[Result[u64, Refused]]
 type In: send = Host(platform.Input) | Up(String, u64, std.wsock.Dialer) | Down(String, u64, Result[runner.Ended, runner.StartError]) | Create(Bytes, Seed, Sender[Result[u64, Refused]]) | Delete(u64, Sender[Result[(), Refused]]) | Listing(Sender[List[u64]]) | Route(u64, AccessReply) | Access(u64, ColdCheck, bool, AccessReply) | Peek(u64, Sender[Result[Lease, Refused]]) | Unload(u64, Sender[Result[Unloaded, Refused]]) | Nudge(u64) | Marked(u64, Sender[Marks]) | WatchMarks(u64, Sender[()], Sender[u64]) | UnwatchMarks(u64, u64) | AwaitDown(u64, u64, Downs) | Read(u64, ColdRead, ReadReply) | Halt(Sender[List[Unloaded]])
 
 type PlaceJob[G: send, H: shareable + inert + send, S: send]: send {
+    placing: runner.Placing[G, H],
     config: runner.PlaceConfig[G, H, S],
     dialer: std.wsock.Dialer,
     stop: Receiver[()],
@@ -173,6 +179,7 @@ type PlaceJob[G: send, H: shareable + inert + send, S: send]: send {
 }
 
 type Operated[G: send, H: shareable + inert + send, S: send]: send {
+    placing: runner.Placing[G, H],
     config: runner.PlaceConfig[G, H, S],
     stop: Receiver[()],
     status: Latest[runner.Status],
@@ -274,29 +281,47 @@ type Forward: send {
 
 // ---- factories ----
 pub fn factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[T] {
-    let made = fn(take request: Launch[T], seed: T) -> Result[Started, Refused] {
-        let config = make(clone(request.supplied))
-        start_made(take request, take config)
-    }
-    Factory(start: take made)
+    held_factory(Plain(make), None)
 }
 
 // A factory whose `make` also sees the host's seed. `make` is still a plain fn, so only
 // linked code runs as a group.
 pub fn seeded_factory[T: send, G: send, H: shareable + inert + send, S: send](make: fn(take Supplied, T) -> Result[runner.PlaceConfig[G, H, S], Capacity]) -> Factory[T] {
-    let made = fn(take request: Launch[T], seed: T) -> Result[Started, Refused] {
-        let config = make(clone(request.supplied), seed)
-        start_made(take request, take config)
+    held_factory(Seeded(make), None)
+}
+
+fn held_factory[T: send, G: send, H: shareable + inert + send, S: send](make: Make[T, G, H, S], take held: Option[runner.Placing[G, H]]) -> Factory[T] {
+    let made = fn(take request: Launch[T], seed: T) -> (Result[Started, Refused], Option[Factory[T]]) {
+        let config = match make {
+            Plain(f) => f(clone(request.supplied)),
+            Seeded(f) => f(clone(request.supplied), seed),
+        }
+        let Ok(take settings) = take config else {
+            return (Error(Full), None)
+        }
+        // The held registration when it fits this config, else a new one the next
+        // Factory holds.
+        let (take placing, fresh) = match held {
+            Some(kept) => if runner.placing_fits(kept, settings) {
+                (runner.share_placing(kept), false)
+            } else {
+                (runner.placing_of(settings), true)
+            },
+            None => (runner.placing_of(settings), true),
+        }
+        let next = if fresh {
+            Some(held_factory(make, Some(runner.share_placing(placing))))
+        } else {
+            None
+        }
+        (start_made(take request, take placing, take settings), take next)
     }
     Factory(start: take made)
 }
 
-fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take request: Launch[T], take made: Result[runner.PlaceConfig[G, H, S], Capacity]) -> Result[Started, Refused] {
+fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take request: Launch[T], take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S]) -> Result[Started, Refused] {
     let Launch(supplied: supplied, backing: take backing, sizing, selection: selection, idle: idle, sessions: sessions, available: available, stop: take halt, status: take root, to: take to, name: take name, gen: gen) = take request
-    let mut config = match take made {
-        Ok(take m) => take m,
-        Error(_) => return Error(Full)
-    }
+    let mut config = take made
     config.backing = take backing
     config.sizes = sizing.sizes
     config.selection = selection
@@ -308,7 +333,7 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
         Error(_) => return Error(Full)
     }
     config.listen = InProcess(take dials)
-    let overhead = match runner.operate_bytes(config) {
+    let overhead = match runner.placed_bytes(placing, config) {
         Ok(total) => total,
         Error(_) => return Error(Full)
     }
@@ -317,7 +342,7 @@ fn start_made[T: send, G: send, H: shareable + inert + send, S: send](take reque
     if charge > available {
         return Error(Full)
     }
-    let job = PlaceJob(config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
+    let job = PlaceJob(placing: take placing, config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need)
     let run: fn(take PlaceJob[G, H, S]) -> () waits = run_place
     let running = task.spawn(supplied.tasks, bytes charge, take job, run)
     Ok(Started(task: take running, charge: charge))
@@ -334,10 +359,10 @@ fn run_place[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G
 }
 
 fn operated[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
-    let PlaceJob(config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
+    let PlaceJob(placing: take placing, config: take config, dialer: take dialing, stop: take halt, status: take root, to: take to, name: take name, gen: gen, need: need) = take job
     let tasks = config.tasks
     let (handoff, phases_from): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
-    let request = Operated(config: take config, stop: take halt, status: take root, watch: take handoff)
+    let request = Operated(placing: take placing, config: take config, stop: take halt, status: take root, watch: take handoff)
     let run: fn(take Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits = run_operate
     let running = task.spawn(tasks, bytes need, take request, run)
     if let Ok(take phases) = channel.receive(phases_from) {
@@ -354,8 +379,8 @@ fn operated[G: send, H: shareable + inert + send, S: send](take job: PlaceJob[G,
 }
 
 fn run_operate[G: send, H: shareable + inert + send, S: send](take request: Operated[G, H, S]) -> Result[runner.Ended, runner.StartError] waits {
-    let Operated(config: take config, stop: take halt, status: take root, watch: take phases) = take request
-    runner.operate(take config, take halt, root, Some(take phases))
+    let Operated(placing: take placing, config: take config, stop: take halt, status: take root, watch: take phases) = take request
+    runner.operate_placed(take placing, take config, take halt, root, Some(take phases))
 }
 
 // ---- the launcher side ----
@@ -442,7 +467,11 @@ fn start[T: send](mut a: Actor[T], take l: launcher.Launch, mut events: List[lau
     }
     let supplied = Supplied(name: string.from(group.name), tasks: a.tasks, clock: a.clock, random: a.random, net: a.net)
     let launched: Launch[T] = Launch(supplied: take supplied, backing: Disk(dir), sizing: a.sizing, selection: selection_of(serve.activation), idle: serve.idle, sessions: a.sessions, available: a.place_bytes - a.used, stop: take stop_from, status: latest.handle(root), to: channel.sender(a.me), name: string.from(group.name), gen: gen)
-    match (a.factory.start)(take launched, a.seed) {
+    let (take outcome, take next) = (a.factory.start)(take launched, a.seed)
+    if let Some(take holding) = take next {
+        a.factory = take holding
+    }
+    match take outcome {
         Ok(take begun) => {
             let Started(task: take running, charge: charged) = take begun
             a.used += charged

@@ -217,7 +217,7 @@ type ServePlace[G: send, H: shareable + inert + send]: send {
     proxies: List[std.ingress_policy.Prefix],
     target: String,
     publisher: Sender[PubIn],
-    place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]],
+    placing: Placing[G, H],
     n_place: u64,
     rooms: RoomPlan,
     head: Sender[HeadInput],
@@ -238,8 +238,8 @@ fn run_serve_place[G: send, H: shareable + inert + send](take seed: ServePlace[G
 }
 
 fn supervise_serve[G: send, H: shareable + inert + send](take seed: ServePlace[G, H]) -> Result[u64, StartError] waits {
-    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire, grants: take session_grants, max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, place: place, n_place: n_place, rooms, head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
-    let registered = match placed(place, n_place) {
+    let ServePlace(listener: take listener, config: config, tasks: tasks, clock: clock, random: random, wire: take session_wire, grants: take session_grants, max_sessions: limit, proxies: take proxies, target: take target, publisher: take pub_to, placing: take placing, n_place: n_place, rooms, head: take head_to, inbox: take inbox, to: take to, events: take events, drain: take drain, status: take status, idle: idle, first_write: take first_write, report: report) = take seed
+    let registered = match instantiate(placing) {
         Ok(take r) => take r,
         Error(take problem) => return Error(Open(Place(take problem)))
     }

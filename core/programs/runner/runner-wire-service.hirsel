@@ -528,7 +528,7 @@ fn wire_service_allocate[G: send, H: shareable + inert + send](mut s: WireSessio
 fn wire_know[G: send, H: shareable + inert + send](mut s: WireSession[G], r: Registry[G, H], take key: Bytes) {
     list.push(mut s.known, if map.contains(r.slots, key) {
         1u8
-    } else if map.contains(r.gone, key) {
+    } else if map.contains(r.t.gone, key) {
         2u8
     } else {
         0u8

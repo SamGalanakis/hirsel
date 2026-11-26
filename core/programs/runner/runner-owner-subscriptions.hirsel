@@ -65,7 +65,7 @@ fn wire_plan_subscribe[G: send, H: shareable + inert + send](mut s: WireSession[
     let cloned: Bytes = clone(s.entries[index])
     let key = take cloned
     if !map.contains(r.slots, key) {
-        let outcome: Outcome = if map.contains(r.gone, key) {
+        let outcome: Outcome = if map.contains(r.t.gone, key) {
             Failed(Gone)
         } else {
             Refused(NoEntry)

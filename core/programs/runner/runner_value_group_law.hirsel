@@ -139,7 +139,7 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     let mut registered = result.unwrap(placed(code.describe(value_group_place), 1048576u64))
     result.unwrap(bind_query_slots(mut registered, h))
     let key = {
-        let entry = view registered.exported[0u64]
+        let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
     let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),

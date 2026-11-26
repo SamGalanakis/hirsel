@@ -399,7 +399,11 @@ fn register_check[G: send, H: shareable + inert + send, A](mut r: Registry[G, H]
 // The composition root supplies previous/current activation keys. A current key
 // always wins; retaining a gone key never substitutes a newly registered entry.
 pub fn retain_gone[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes) -> Result[(), RegisterError] {
-    map.insert(mut r.gone, take key, ())
+    if r.replay { return Ok(()) }
+    let mut carried: Option[Bytes] = Some(take key)
+    edit_template(mut r, scoped fn(mut t: Template[G]) {
+        if let Some(take k) = replace(mut carried, None) { map.insert(mut t.gone, take k, ()) }
+    })
     Ok(())
 }
 
@@ -446,7 +450,7 @@ pub fn prepare[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admit
 
 fn prepare_call[G: send, H: shareable + inert + send](r: Registry[G, H], a: Admitted, take key: Bytes, stream_id: StreamId, p: u64, take arg: Bytes, relative: u64) -> Result[Send, Refusal] {
     let known = map.contains(r.slots, key)
-    if !known && !map.contains(r.gone, key) {
+    if !known && !map.contains(r.t.gone, key) {
         return Error(NoEntry)
     }
     let mut allowed = false

@@ -118,7 +118,7 @@ fn image_law_board(db: store.Db, h: ImageLawHandles) -> (Board[(), ImageLawHandl
     let mut registered = result.unwrap(placed(code.describe(image_law_place), 1048576u64))
     result.unwrap(bind_query_slots(mut registered, h))
     let key = {
-        let entry = view registered.exported[0u64]
+        let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
     let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())

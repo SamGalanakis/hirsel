@@ -4,7 +4,7 @@ fn l15_timers(tasks: Tasks) waits {
     let (take world, time) = std.sim.world.new(15u64, 0u64, 0u64)
     let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
     let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
-    let key = http_law_key(reg.exported[0u64])
+    let key = http_law_key(reg.t.exported[0u64])
     let cfg = RelayConfig(http_max: 2u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
     let reserve = option.unwrap(relay_bytes(reg, cfg))
     // Twelve RelayEvents cost 64 + 12 * 225. The widest is RelayAsk: an
@@ -20,7 +20,7 @@ fn l15_timers(tasks: Tasks) waits {
     // 64 + 96 for its ready channel and round8(6 * 81) = 488 for pending tells.
     // The optional reply expiry adds 8 bytes for the value and 8 for the tag.
     let mut longest = 0u64
-    for entry in reg.exported {
+    for entry in reg.t.exported {
         // Each key is the exported identity followed by two eight-byte codec fingerprints.
         let length = list.len(entry.described.identity) + 16u64
         longest = order.max(longest, length)
@@ -192,7 +192,7 @@ fn http_caller_cap_structured(tasks: Tasks) -> Result[(), ()] waits {
     let (take world, time) = std.sim.world.new(15u64, 0u64, 0u64)
     let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
     let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
-    let key = http_law_key(reg.exported[0u64])
+    let key = http_law_key(reg.t.exported[0u64])
     let cfg = RelayConfig(http_max: 1u64, sends_max: 2u64, positions_max: 6u64, arg_max: 1024u64)
     let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(6u64)
     let (to, from): (Sender[RelayEvent], Receiver[RelayEvent]) = channel.new(option.unwrap(relay_inbox_size(cfg)))
@@ -231,7 +231,7 @@ fn relay_handler_expiry_leaves_ask_queued(tasks: Tasks) -> Result[(), ()] waits 
     let (take world, time) = std.sim.world.new(15u64, 0u64, 0u64)
     let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
     let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
-    let key = http_law_key(reg.exported[0u64])
+    let key = http_law_key(reg.t.exported[0u64])
     let cfg = RelayConfig(http_max: 1u64, sends_max: 1u64, positions_max: 1u64, arg_max: 1024u64)
     let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
     let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
@@ -270,7 +270,7 @@ fn http_retire_end_credit_survives_owner_failure(tasks: Tasks) -> Result[(), ()]
     let (take world, time) = std.sim.world.new(16u64, 0u64, 0u64)
     let clock_task = task.spawn(tasks, bytes 65536u64, take world, sse_law_sim_clock)
     let reg = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
-    let key = http_law_key(reg.exported[0u64])
+    let key = http_law_key(reg.t.exported[0u64])
     let cfg = RelayConfig(http_max: 1u64, sends_max: 1u64, positions_max: 1u64, arg_max: 1024u64)
     let (head, forwarded): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(2u64)
     let (to, from): (Sender[Relay], Receiver[Relay]) = channel.new(1u64)
@@ -820,12 +820,12 @@ fn delivery_carry_cycle(dir: Dir, time: Clock, random: Random, tasks: Tasks, net
     options.stream_retention_ms = retention_ms
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
     let definition: HttpOpPlace = code.describe(http_op_original)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = DeliveryCarryDrive(head: take head, publisher: post(mail), clock: time, random, tasks, net, stage, birth)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, delivery_carry_drive)
-    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
         fail(start_text(Open(take problem)))
     }
@@ -974,12 +974,12 @@ fn http_invisible_retry_keeps_one_effect(d: Dir, random: Random, tasks: Tasks, n
     options.streams_per_caller_max = 1u64
     let mut db = result.unwrap(store.open(tasks, dir, time, random, options))
     let definition: HttpOpPlace = code.describe(http_op_original)
-    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, definition, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
     let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
     let mail = result.unwrap(mailbox(16u64))
     let seed = KeyedHorizonDrive(head: take head, publisher: post(mail), clock: time, hand: take wall, random, tasks, net)
     let work = task.spawn(tasks, bytes 16777216u64, take seed, invisible_retry_drive)
-    let started = run_head(take db, take reg, take identity, take handles, definition, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    let started = run_head(take db, take reg, take identity, take handles, placing_at(definition, HTTP_LAW_PLACE_BYTES), HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
     if let Error(take problem) = started {
         fail(start_text(Open(take problem)))
     }

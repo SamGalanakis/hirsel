@@ -129,7 +129,9 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
     // The import accepts only the preview's exact Describe (launch.md "Hot
     // deploy"), whose tables come from describe mode's Migrate run of `schema`.
     let launch = launch_env()
-    let Registry(exported: take shown, bindings: take shown_bindings, ..) = result.unwrap(placed(code.describe(trigger_scan_law_empty), n_place))
+    let shown_reg = result.unwrap(placed(code.describe(trigger_scan_law_empty), n_place))
+    let shown: List[Exported] = clone(shown_reg.t.exported)
+    let shown_bindings: List[HttpDescribe] = clone(shown_reg.t.bindings)
     let shown_release = result.unwrap(http_release_digest(shown, shown_bindings))
     let shown_tables = result.unwrap(store.describe_declarations(c, code.describe(trigger_law_schema)))
     if list.len(shown_tables) == 0u64 {
@@ -154,7 +156,7 @@ fn trigger_scan_last_entry(d: Dir, c: Clock, r: Random, tasks: Tasks, options: s
         None
     }
     let granting: Option[GrantStart[TriggerContext, TriggerLawTables, ()]] = None
-    let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r, place: code.describe(trigger_scan_law_empty), on_migrate: None, schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to), cut: result.unwrap(cut_activity()), triggering: take triggering, granting: take granting, idle: None, expected_store: None)
+    let job = ManagedHead(backing: Disk(dir), options: clone(options), follower_plan: None, selection: selection, tasks: tasks, clock: c, random: r, placing: placing_at(code.describe(trigger_scan_law_empty), n_place), on_migrate: None, schema: code.describe(trigger_law_schema), n_place: n_place, n_publisher: 1048576u64, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: channel.sender(head_to), cut: result.unwrap(cut_activity()), triggering: take triggering, granting: take granting, idle: None, expected_store: None)
     let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, options)))
     let allowance = writer + job.n_place + job.n_publisher
     let server = task.spawn(tasks, bytes allowance, take job, head_ended)

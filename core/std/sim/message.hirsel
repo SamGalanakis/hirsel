@@ -1,0 +1,79 @@
+/// A protocol message sent from one simulated node to another.
+pub type Message[T] {
+    from: u64,
+    to: u64,
+    name: String,
+    value: T
+}
+
+type Hold {
+    from: u64,
+    to: u64,
+    name: String,
+    until: String
+}
+
+/// A queue owned by the protocol simulator. Names classify whole messages.
+pub opaque type Queue[T] {
+    pending: List[Message[T]],
+    holds: List[Hold],
+    fired: set.Set[String]
+}
+
+/// Starts a queue for one run.
+pub fn new[T]() -> Queue[T] {
+    Queue(pending: list.new(), holds: list.new(), fired: set.new())
+}
+
+/// Gates messages matching the direction and name until the event fires.
+/// Several matching holds require all of their events to fire.
+pub fn hold_until[T](mut q: Queue[T], from: u64, to: u64, take name: String, take event: String) {
+    list.push(mut q.holds, Hold(from, to, name, until: event))
+}
+
+/// Latches an event for the rest of the run. Firing it again has no effect.
+pub fn fire[T](mut q: Queue[T], take event: String) {
+    let _ = set.insert(mut q.fired, take event)
+}
+
+/// Enqueues one whole message in send order.
+pub fn send[T](mut q: Queue[T], take message: Message[T]) {
+    list.push(mut q.pending, take message)
+}
+
+fn held[T](q: Queue[T], m: Message[T]) -> bool {
+    for h in q.holds {
+        if h.from == m.from && h.to == m.to && h.name == m.name && !set.contains(q.fired, h.until) {
+            return true
+        }
+    }
+    false
+}
+
+/// Takes the first eligible message for `to`. Held messages keep their place
+/// and do not prevent later eligible messages from passing them.
+pub fn receive[T](mut q: Queue[T], to: u64) -> Option[Message[T]] {
+    for i in 0u64 .. list.len(q.pending) {
+        let eligible = q.pending[i].to == to && !held(q, q.pending[i])
+        if eligible {
+            return Some(list.remove(mut q.pending, i))
+        }
+    }
+    None
+}
+
+/// The seed, clock pauses and named message holds on one line.
+pub fn repro[T](q: Queue[T], clocks: sim.world.Clocks) -> String {
+    let mut out = sim.world.repro(clocks)
+    for h in q.holds {
+        string.push(mut out, "; hold ")
+        json.push_quoted(mut out, h.name)
+        string.push(mut out, " ")
+        string.push_u64(mut out, h.from)
+        string.push(mut out, "->")
+        string.push_u64(mut out, h.to)
+        string.push(mut out, " until ")
+        json.push_quoted(mut out, h.until)
+    }
+    take out
+}

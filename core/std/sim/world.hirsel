@@ -223,6 +223,7 @@ const ppm: u64 = 1000000
 
 /// Several clocks advanced by one owner along the world clock's timeline.
 pub opaque type Clocks: send {
+    seed: u64,
     hands: List[Hand],
     steps: List[Jump],
     // Nanoseconds of the world clock since `clocks` took it.
@@ -232,7 +233,13 @@ pub opaque type Clocks: send {
 type Hand: send {
     hand: Option[ClockHand],
     start: u64,
-    rate_ppm: i64
+    rate_ppm: i64,
+    pauses: List[Pause]
+}
+
+type Pause: send {
+    start: u64,
+    end: u64
 }
 
 type Jump: send {
@@ -248,8 +255,8 @@ pub fn clocks(mut w: World) -> Clocks {
         fail("sim.world: this world's clock is already driven")
     }
     let mut hands: List[Hand] = list.with_capacity(1)
-    list.push(mut hands, Hand(hand: Some(take hand), start: w.now, rate_ppm: 0))
-    Clocks(hands: take hands, steps: list.new(), base: 0)
+    list.push(mut hands, Hand(hand: Some(take hand), start: w.now, rate_ppm: 0, pauses: list.new()))
+    Clocks(seed: w.seed, hands: take hands, steps: list.new(), base: 0)
 }
 
 /// Adds a clock that reads `start_mono_ns` at the start of the timeline and
@@ -260,7 +267,7 @@ pub fn drifting(mut c: Clocks, start_mono_ns: u64, start_wall_ms: u64, rate_ppm:
         fail("sim.world: a clock rate must lie strictly between -1000000 and 1000000 ppm")
     }
     let (clock, take hand) = provide.clock(start_mono_ns, start_wall_ms)
-    list.push(mut c.hands, Hand(hand: Some(take hand), start: start_mono_ns, rate_ppm))
+    list.push(mut c.hands, Hand(hand: Some(take hand), start: start_mono_ns, rate_ppm, pauses: list.new()))
     (list.len(c.hands) - 1, clock)
 }
 
@@ -273,18 +280,75 @@ pub fn step_at(mut c: Clocks, index: u64, at_ns: u64, by_ns: u64) {
     list.push(mut c.steps, Jump(index, at: at_ns, by_ns))
 }
 
-// floor(t * |rate| / 10^6) added to or taken from t, then the start and steps.
+/// Freezes clock `index` over the base timeline interval [start_ns, end_ns).
+/// Pauses on the same clock must be nonempty and disjoint. Clock 0 can pause
+/// too: the driver's timeline continues independently of its reading.
+pub fn pause_at(mut c: Clocks, index: u64, start_ns: u64, end_ns: u64) {
+    if index >= list.len(c.hands) || start_ns >= end_ns {
+        fail("sim.world: a pause needs a clock index and a nonempty interval")
+    }
+    let mut i: u64 = 0
+    for p in c.hands[index].pauses {
+        if p.start >= end_ns {
+            break
+        }
+        if p.end > start_ns {
+            fail("sim.world: pauses on a clock must be disjoint")
+        }
+        i += 1
+    }
+    list.insert(mut c.hands[index].pauses, i, Pause(start: start_ns, end: end_ns))
+}
+
+/// Describes the run seed and the clock pauses in timeline order per clock.
+pub fn repro(c: Clocks) -> String {
+    let mut out: String = "sim seed "
+    string.push_u64(mut out, c.seed)
+    for index in 0u64 .. list.len(c.hands) {
+        for p in c.hands[index].pauses {
+            string.push(mut out, "; pause clock ")
+            string.push_u64(mut out, index)
+            string.push(mut out, " [")
+            string.push_u64(mut out, p.start)
+            string.push(mut out, ", ")
+            string.push_u64(mut out, p.end)
+            string.push(mut out, ")")
+        }
+    }
+    take out
+}
+
+// A jump due while paused happens at the first instant outside the pause.
+fn jump_time(h: Hand, when: u64) -> u64 {
+    let mut at = when
+    for p in h.pauses {
+        if at < p.start {
+            break
+        }
+        at = order.max(at, p.end)
+    }
+    at
+}
+
+// Drift uses only unpaused elapsed time.
 fn reading(c: Clocks, index: u64, t: u64) -> u64 {
     let h = c.hands[index]
+    let mut elapsed = t
+    for p in h.pauses {
+        if t <= p.start {
+            break
+        }
+        elapsed -= order.min(t, p.end) - p.start
+    }
     let rate: u64 = int.truncate(int.abs(h.rate_ppm))
-    let drift = int.saturating_add(int.saturating_mul(t / ppm, rate), (t % ppm) * rate / ppm)
+    let drift = int.saturating_add(int.saturating_mul(elapsed / ppm, rate), (elapsed % ppm) * rate / ppm)
     let mut at = if h.rate_ppm >= 0 {
-        int.saturating_add(h.start, int.saturating_add(t, drift))
+        int.saturating_add(h.start, int.saturating_add(elapsed, drift))
     } else {
-        int.saturating_add(h.start, t - drift)
+        int.saturating_add(h.start, elapsed - drift)
     }
     for j in c.steps {
-        if j.index == index && j.at <= t {
+        if j.index == index && jump_time(h, j.at) <= t {
             at = int.saturating_add(at, j.by_ns)
         }
     }
@@ -389,8 +453,9 @@ pub fn drive(take c: Clocks, tasks: Tasks) waits {
             }
         }
         for j in owned.steps {
-            if j.at > owned.base {
-                next = earlier(next, j.at)
+            let at = jump_time(owned.hands[j.index], j.at)
+            if at > owned.base {
+                next = earlier(next, at)
             }
         }
         let Some(t) = next else {

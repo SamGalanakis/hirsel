@@ -1,0 +1,58 @@
+type Driver: send {
+    clocks: sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn drive(take input: Driver) waits {
+    let Driver(clocks: take clocks, tasks) = take input
+    sim.world.drive(take clocks, tasks)
+}
+
+fn move_command() -> sim.message.Message[u64] {
+    sim.message.Message(from: 1, to: 0, name: "move", value: 8)
+}
+
+// B accepts a move only when the command carries its current epoch. The
+// immediate A->B command would be accepted at epoch 8. A new epoch overtakes
+// the held command, so the same command is refused when finally delivered.
+// expect: run message_hold_and_clock_pause(tasks) = true
+fn message_hold_and_clock_pause(tasks: Tasks) -> bool waits {
+    let (take made, node) = sim.world.new(34, 1000, 0)
+    let mut world = take made
+    let mut clocks = sim.world.clocks(mut world)
+    let b = 0u64
+    let (a, peer) = sim.world.drifting(mut clocks, 100, 0, 0)
+    sim.world.pause_at(mut clocks, b, 10, 30)
+    sim.world.step_at(mut clocks, b, 20, 7)
+    let mut free: sim.message.Queue[u64] = sim.message.new()
+    sim.message.send(mut free, move_command())
+    let immediate = option.unwrap(sim.message.receive(mut free, b))
+    let mut queue: sim.message.Queue[u64] = sim.message.new()
+    sim.message.hold_until(mut queue, a, b, "move", "takeover")
+    let repro = sim.message.repro(queue, clocks)
+    sim.message.send(mut queue, move_command())
+    let blocked = match sim.message.receive(mut queue, b) {
+        None => true,
+        Some(_) => false
+    }
+    sim.message.send(mut queue, sim.message.Message(from: a, to: b, name: "new epoch", value: 9))
+    let Some(epoch) = sim.message.receive(mut queue, b) else {
+        fail(take repro)
+    }
+    sim.message.fire(mut queue, "takeover")
+    let Some(delayed) = sim.message.receive(mut queue, b) else {
+        fail(take repro)
+    }
+    let driver = task.spawn(tasks, bytes 65536, Driver(clocks: take clocks, tasks), drive)
+    host.sleep_until(peer, 120)
+    let paused = host.mono_ns(node)
+    host.sleep_until(peer, 129)
+    let still_paused = host.mono_ns(node)
+    host.sleep_until(peer, 135)
+    let resumed = host.mono_ns(node)
+    result.unwrap(task.join(take driver))
+    if immediate.value != 8 || !blocked || epoch.name != "new epoch" || epoch.value != 9 || delayed.name != "move" || delayed.value != 8 || paused != 1010 || still_paused != 1010 || resumed != 1022 {
+        fail(take repro)
+    }
+    repro == "sim seed 34; pause clock 0 [10, 30); hold \"move\" 1->0 until \"takeover\""
+}

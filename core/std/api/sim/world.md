@@ -17,6 +17,8 @@ pub opaque type Clocks: send
 pub fn clocks(mut w: World) -> Clocks
 pub fn drifting(mut c: Clocks, start_mono_ns: u64, start_wall_ms: u64, rate_ppm: i64) -> (u64, Clock)
 pub fn step_at(mut c: Clocks, index: u64, at_ns: u64, by_ns: u64)
+pub fn pause_at(mut c: Clocks, index: u64, start_ns: u64, end_ns: u64)
+pub fn repro(c: Clocks) -> String
 pub fn driven(w: World) -> bool
 pub fn drive(take c: Clocks, tasks: Tasks) waits
 ```
@@ -29,6 +31,13 @@ returns the clock's index. The rate lies strictly between -1000000 and
 1000000, so every clock moves forward. `step_at` jumps a clock forward by
 `by_ns` when the base timeline reaches `at_ns`, so its reading from then on
 is `by_ns` higher. Wall time stays at its start reading.
+
+`pause_at` freezes one clock during `[start_ns, end_ns)` on the driver's
+timeline. That clock resumes without counting the suspended time, including
+for drift. A step due during a pause takes effect when the clock resumes.
+Pauses on the same clock must be disjoint and nonempty. The driver's
+timeline keeps advancing even when clock 0 pauses. `repro` returns the seed
+and pauses on one line before `drive` takes the clocks.
 
 Start `drive` in its own task. It is then the only thing that advances any
 of these clocks. Each round waits until every task waits. It finds the first

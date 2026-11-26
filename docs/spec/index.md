@@ -125,6 +125,8 @@ The [Unicode text specification](unicode.md) defines std's Unicode character cla
 general category and case conversion in `char` and `string`, pinned to Unicode 18.0.0.
 The standard library contracts define [scripted simulation plans](../../core/std/api/sim/world.md#scripted-plans)
 and [shrinking and replaying them with `std.prop`](../../core/std/api/prop.md#scripted-simulation).
+The `std.sim` contracts also define [named protocol message holds](../../core/std/api/sim/message.md)
+and [per-node clock pauses](../../core/std/api/sim/world.md#several-clocks).
 
 The [process creation specification](exec.md) defines the `Exec` capability over
 operator-approved launch profiles, spawning, waiting, signalling, killing a dropped child,

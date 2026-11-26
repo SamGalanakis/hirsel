@@ -442,16 +442,20 @@ enum Damage {
     /// The second half removed.
     Truncate,
 }
-/// The objects a content store holds: its relocatable ELF blobs with code,
-/// not the linked executables and detached debug files beside them.
+/// Whether a section of a relocatable object holds code: ELF names it
+/// `.text` or `.text.<function>`, Mach-O `__text`.
+fn code_section(name: &str) -> bool {
+    name.starts_with(".text") || name == "__text"
+}
+/// The objects a content store holds: its relocatable blobs with code, not
+/// the linked executables and detached debug files beside them.
 fn stored_objects(root: &Path) -> Vec<PathBuf> {
     use object::{Object, ObjectKind, ObjectSection};
     let code = |bytes: &[u8]| {
         object::File::parse(bytes).is_ok_and(|file| {
             file.kind() == ObjectKind::Relocatable
                 && file.sections().any(|s| {
-                    s.name().is_ok_and(|n| n.starts_with(".text"))
-                        && s.file_range().is_some_and(|(_, size)| size > 0)
+                    s.name().is_ok_and(code_section) && s.file_range().is_some_and(|(_, size)| size > 0)
                 })
         })
     };
@@ -469,7 +473,7 @@ fn damage(path: &Path, how: Damage) {
             let at = object::File::parse(&*bytes)
                 .unwrap()
                 .sections()
-                .filter(|s| s.name().is_ok_and(|n| n.starts_with(".text")))
+                .filter(|s| s.name().is_ok_and(code_section))
                 .filter_map(|s| s.file_range())
                 .find(|&(_, size)| size > 0)
                 .map(|(start, size)| (start + size / 2) as usize);

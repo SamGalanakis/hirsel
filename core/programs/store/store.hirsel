@@ -1430,7 +1430,7 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
     if object_writer_open(db) && covered(db, t.mark) {
         return Ok(true)
     }
-    let _ = drained?
+    let _ = drained ?=> durable_latch_error
     if covered(db, t.mark) {
         return Ok(true)
     }
@@ -1439,7 +1439,7 @@ pub fn durable_now(mut db: Db, t: Ticket) -> Result[bool, Error] {
         None => return Ok(true)
     }
     match take pending {
-        Ok(take ack) => journal_ack(mut db, take ack)?,
+        Ok(take ack) => journal_ack(mut db, take ack) ?=> durable_latch_error,
         Error(Empty) => {},
         Error(Closed) => journal_ack(mut db, Broken(Closed))?,
     }
@@ -1470,11 +1470,11 @@ fn durable_groups(mut db: Db, t: Ticket) -> Result[u64, Error] waits {
             Error(_) => 0u64
         })
     }
-    let mut groups = drained?
+    let mut groups = drained ?=> durable_latch_error
     if is_disk(db) {
         while !covered(db, t.mark) {
             let ack = journal_receive(db)
-            journal_ack(mut db, take ack)?
+            journal_ack(mut db, take ack) ?=> durable_latch_error
             groups += 1
         }
     }

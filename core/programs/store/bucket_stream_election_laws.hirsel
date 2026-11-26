@@ -1,0 +1,245 @@
+// L90-T and L90-Z laws for re-election, the terminal fence, the no-hold rule
+// and zombie latch / ticket outcomes (STORE-SPEC §12.11.7, §12.11.10, §12.11.15).
+const ELECT_OP_MS: u64 = 2000
+
+const ELECT_HOLD_MS: u64 = 8000
+
+const ELECT_IDLE_MS: u64 = 5000
+
+fn stream_elect_plan(max_slots: u32) -> StreamPlan {
+    let mut limits = stream_limits()
+    limits.max_slots = max_slots
+    limits.hold_ms = ELECT_HOLD_MS
+    limits.idle_poll_ms = ELECT_IDLE_MS
+    StreamPlan(sid: stream_law_sid(), prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms: 0, max_batch_bytes: FRAME_LIMIT + 4096), limits: take limits)
+}
+
+fn stream_elect_service(s: BucketSim, tasks: Tasks, r: Random, seed: u64, max_slots: u32) -> Result[JournalService, Error] waits {
+    let plan = stream_elect_plan(max_slots)
+    let client = stream_service_client(s, tasks, seed, "", "us-east-1")?
+    let authority = object_authority(take client, "bucket", ELECT_OP_MS)
+    Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn stream_elect_decode_head_attach(report: std.sim.s3.Report, key: String) -> Result[Attach, Error] {
+    let Some(obj) = map.get(report.objects, key) else {
+        fail("head object is missing")
+    }
+    let (_, take attached) = history_decode_head_attach(obj.data)?
+    let Some(take attach) = take attached else {
+        fail("head object is missing ATTACH")
+    }
+    Ok(take attach)
+}
+
+fn stream_elect_batch_body(report: std.sim.s3.Report, key: String, inc: u64, seq: u64) -> Result[BatchBody, Error] {
+    let Some(obj) = map.get(report.objects, key) else {
+        fail("expected batch/TERM object is missing")
+    }
+    stream_batch_head(key, obj.data, stream_law_sid(), inc, seq)
+}
+
+// L90-T (§12.11.7, §12.11.15): an old-incarnation batch m with X frames is
+// held across the election, in two orders:
+// Order 1: fencer's probe meets m absent, m lands, TERM at m gets 412 showing
+// a batch, fence lands at m + 1, and no-hold claimant's cutoff includes m.
+// Order 2: TERM lands at m first, m gets 412 with TERM bytes, zombie latches
+// Superseded (not Batch), and no-hold claimant's cutoff ends at m - 1.
+@test
+fn bucket_stream_terminal_fence(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    stream_terminal_fence_order1(c, r, tasks)?
+    stream_terminal_fence_order2(c, r, tasks)
+}
+
+fn stream_terminal_fence_order1(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let b3 = stream_service_key(string.from("b-00000000000000000001-00000000000000000003"))
+    let b4 = stream_service_key(string.from("b-00000000000000000001-00000000000000000004"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    // A's batch 3 PUT (#1) is held until A' probes b-1-3 (404) and requests TERM (#2);
+    // A''s TERM PUT (#2) waits for #1 to apply, so #1 lands and #2 gets 412 -> TERM at b-1-4.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(b3), from: 1, count: 1, until: Requested("PUT", clone(b3), 2), then: Apply))
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(b3), from: 2, count: 1, until: Applied("PUT", clone(b3), 1), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 121, None, list.new(), take holds, std.sim.world.plan(121))
+    let outcome = stream_terminal_fence_order1_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let Rows(_) = stream_elect_batch_body(report, clone(b3), 1, 3)? else {
+        fail("L90-T order 1: expected late batch Rows at b-1-3")
+    }
+    let Term(1, 4) = stream_elect_batch_body(report, clone(b4), 1, 4)? else {
+        fail("L90-T order 1: expected TERM(1, 4) at b-1-4")
+    }
+    let attach = stream_elect_decode_head_attach(report, string.from("p1/head"))?
+    if list.len(attach.sealed) != 1 || attach.sealed[0].cutoff != 3 || attach.sealed[0].tail.inc != 1 {
+        fail("L90-T order 1: no-hold claimant's cutoff did not include late batch m = 3")
+    }
+    let (reg_puts, reg_applied) = stream_law_puts(report, reg)
+    if reg_puts != 3 || reg_applied != 3 {
+        fail("L90-T order 1: expected 3 applied reg PUTs (create, inc 1, inc 2) and no hold")
+    }
+    Ok(())
+}
+
+fn stream_terminal_fence_order1_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_elect_service(s, tasks, r, 81, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut svc_a, 85)?
+    bucket_law_commit(mut a, 1)?
+    // Commit row 2 -> batch 3 PUT is held until A' sends TERM at b-1-3.
+    let t2 = stream_unhold_commit_ticket(mut a, 2)?
+    std.clock.sleep_ns(s.time, 100 * 1000000)
+    // A' elects inc = 2 and fences inc = 1.
+    let mut svc_a2 = stream_elect_service(s, tasks, r, 82, 4)?
+    match durable(mut a, t2) {
+        Error(Undecided) => (),
+        other => fail("L90-T order 1: zombie's unacked ticket did not end Undecided"),
+    }
+    match health(a) {
+        Latched(Superseded) => (),
+        _ => fail("L90-T order 1: zombie health is not Latched(Superseded)"),
+    }
+    // No-hold claimant B opens X through A' (inc = 2) and must see both rows (1 and 2).
+    let mut b = stream_unhold_open_attached(s, tasks, r, mut svc_a2, 86)?
+    if bucket_law_rows(mut b)? != 2 {
+        let _ = close(take b)
+        let _ = close(take a)
+        let _ = close_journal_service(take svc_a)
+        let _ = close_journal_service(take svc_a2)
+        fail("L90-T order 1: no-hold claimant missed late batch m = 3")
+    }
+    let _ = take b
+    let _ = close(take a)
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_a2)
+}
+
+fn stream_terminal_fence_order2(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let b3 = stream_service_key(string.from("b-00000000000000000001-00000000000000000003"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // A's batch 3 PUT (#1) waits until A''s TERM PUT (#2) at b-1-3 has applied.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(b3), from: 1, count: 1, until: Applied("PUT", clone(b3), 2), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 122, None, list.new(), take holds, std.sim.world.plan(122))
+    let outcome = stream_terminal_fence_order2_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let Term(1, 3) = stream_elect_batch_body(report, clone(b3), 1, 3)? else {
+        fail("L90-T order 2: expected TERM(1, 3) at b-1-3")
+    }
+    let attach = stream_elect_decode_head_attach(report, string.from("p1/head"))?
+    if list.len(attach.sealed) != 1 || attach.sealed[0].cutoff != 2 || attach.sealed[0].tail.inc != 1 {
+        fail("L90-T order 2: no-hold claimant's cutoff did not end at m - 1 = 2")
+    }
+    let (reg_puts, reg_applied) = stream_law_puts(report, reg)
+    if reg_puts != 3 || reg_applied != 3 {
+        fail("L90-T order 2: expected 3 applied reg PUTs and no hold")
+    }
+    Ok(())
+}
+
+fn stream_terminal_fence_order2_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_elect_service(s, tasks, r, 81, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut svc_a, 85)?
+    bucket_law_commit(mut a, 1)?
+    let t2 = stream_unhold_commit_ticket(mut a, 2)?
+    std.clock.sleep_ns(s.time, 100 * 1000000)
+    // A' elects inc = 2 and places TERM at b-1-3 before A's batch 3 applies.
+    let mut svc_a2 = stream_elect_service(s, tasks, r, 82, 4)?
+    match durable(mut a, t2) {
+        Error(Undecided) => (),
+        _ => fail("L90-T order 2: zombie's ticket did not end Undecided"),
+    }
+    match health(a) {
+        Latched(Superseded) => (),
+        _ => fail("L90-T order 2: zombie latched wrong cause (must be Superseded, not Batch)"),
+    }
+    let mut b = stream_unhold_open_attached(s, tasks, r, mut svc_a2, 86)?
+    if bucket_law_rows(mut b)? != 1 {
+        let _ = close(take b)
+        let _ = close(take a)
+        let _ = close_journal_service(take svc_a)
+        let _ = close_journal_service(take svc_a2)
+        fail("L90-T order 2: no-hold claimant expected only acked row 1 (batch 2)")
+    }
+    let _ = take b
+    let _ = close(take a)
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_a2)
+}
+
+// L90-Z (§12.11.7, §12.11.10, §12.11.15): A's GET reg after creating batch m
+// is held across A''s election. A latches Superseded, m is never acked, A's
+// acked ticket stays Ok, A's outstanding ticket ends Undecided (never Fenced),
+// health(a) == Latched(Superseded), on_unhealthy fires, later commits return
+// Latched(Superseded), and the no-hold claim's history holds every acked frame.
+@test
+fn bucket_stream_zombie_election(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // GET reg #1: A's start; #2: CLAIM batch 1; #3: row 1 batch 2; #4: row 2 batch 3.
+    // Hold #4 until A''s election (PUT reg #3) has applied.
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(reg), from: 4, count: 1, until: Applied("PUT", clone(reg), 3), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 123, None, list.new(), take holds, std.sim.world.plan(123))
+    let outcome = stream_zombie_election_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let (reg_puts, reg_applied) = stream_law_puts(report, reg)
+    if reg_puts != 3 || reg_applied != 3 {
+        fail("L90-Z: expected 3 applied reg PUTs (create, inc 1, inc 2) and no hold")
+    }
+    Ok(())
+}
+
+fn stream_zombie_election_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_elect_service(s, tasks, r, 81, 4)?
+    stream_unhold_make_place(s, tasks, r)?
+    let mut a = stream_unhold_open_attached(s, tasks, r, mut svc_a, 85)?
+    let t1 = stream_unhold_commit_ticket(mut a, 1)?
+    durable(mut a, t1)?
+    let (unhealthy_tx, unhealthy_rx): (Sender[u64], Receiver[u64]) = channel.new(1)
+    on_unhealthy(mut a, take unhealthy_tx, 77u64)?
+    // Commit row 2 -> batch 3 is created, and A's GET reg #4 is held across A''s election.
+    let t2 = stream_unhold_commit_ticket(mut a, 2)?
+    std.clock.sleep_ns(s.time, 200 * 1000000)
+    // A' elects inc = 2 and fences inc = 1 at b-1-4.
+    let mut svc_a2 = stream_elect_service(s, tasks, r, 82, 4)?
+    // Acked ticket t1 stays Ok.
+    durable(mut a, t1)?
+    // Outstanding ticket t2 ends Undecided (never Fenced, never Ok).
+    match durable(mut a, t2) {
+        Error(Undecided) => (),
+        _ => fail("L90-Z: outstanding ticket t2 did not end Undecided"),
+    }
+    match durable_now(mut a, t2) {
+        Error(Undecided) => (),
+        _ => fail("L90-Z: durable_now on outstanding ticket t2 did not return Undecided"),
+    }
+    match health(a) {
+        Latched(Superseded) => (),
+        _ => fail("L90-Z: health(a) is not Latched(Superseded)"),
+    }
+    match channel.receive(unhealthy_rx) {
+        Ok(77) => (),
+        _ => fail("L90-Z: on_unhealthy did not fire"),
+    }
+    // Every later commit on a returns Latched(Superseded).
+    match stream_unhold_commit_ticket(mut a, 3) {
+        Error(Latched(Superseded)) => (),
+        _ => fail("L90-Z: commit after latch did not return Latched(Superseded)"),
+    }
+    // No-hold claim through A' sees every frame A acked (and batch 3 before TERM).
+    let mut b = stream_unhold_open_attached(s, tasks, r, mut svc_a2, 86)?
+    if bucket_law_rows(mut b)? != 2 {
+        let _ = close(take b)
+        let _ = close(take a)
+        let _ = close_journal_service(take svc_a)
+        let _ = close_journal_service(take svc_a2)
+        fail("L90-Z: no-hold claimant missed acked frame")
+    }
+    close(take b)?
+    let _ = close(take a)
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_a2)
+}

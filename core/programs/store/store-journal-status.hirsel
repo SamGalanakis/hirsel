@@ -1,3 +1,12 @@
+// Under §12.11.10 ("Tickets at the latch"), every outstanding ticket of an
+// attached Db ends `Undecided` when its stream latches (even under Superseded).
+fn durable_latch_error(take e: Error) -> Error {
+    match take e {
+        Latched(_) => Undecided,
+        other => other,
+    }
+}
+
 // A writer that ended without its ack (cancelled before it could send
 // Broken) is a terminal failure: the place stops, unacked sequences unanswered.
 fn journal_receive(db: Db) -> Ack waits {

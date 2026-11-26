@@ -150,6 +150,7 @@ dirs = ["."]
 "bucket_stream_service_laws.hirsel" = "store"
 "bucket_stream_claim_laws.hirsel" = "store"
 "bucket_stream_unhold_laws.hirsel" = "store"
+"bucket_stream_election_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "store_reclaim_laws.hirsel" = "store"
@@ -265,6 +266,12 @@ limit = 402653184
 limit = 402653184
 
 [tests.runs."store@1/store/bucket_stream_crash_steps"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_stream_terminal_fence"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_stream_zombie_election"]
 limit = 402653184
 
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,

@@ -543,10 +543,18 @@ fn stream_service_unstall(mut s: StreamService, store: StoreId, epoch: u64) {
     }
 }
 
-// The incarnation latched (§12.11.10): every attached Place's outstanding
-// tickets end `Undecided` at its next answer.
-fn stream_service_latched(mut s: StreamService, cause: StreamLatch) {
+// The incarnation latched (§12.11.10): stop its alarm and wake every attached
+// Place so outstanding tickets end `Undecided` and health becomes `Latched`.
+fn stream_service_latched(mut s: StreamService, cause: StreamLatch) waits {
+    if let Some(take running) = replace(mut s.timer, None) {
+        let mut t = take running
+        task.cancel(mut t)
+        let _ = task.join(take t)
+    }
     list.clear(mut s.waiting)
+    list.clear(mut s.tickets)
+    list.clear(mut s.active_settles)
+    list.clear(mut s.stall_polls)
     for i in 0u64 .. list.len(s.slots) {
         stream_answer(mut s.slots[i], SlotLatched(cause))
     }

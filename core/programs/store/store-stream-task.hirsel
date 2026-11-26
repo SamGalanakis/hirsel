@@ -140,7 +140,7 @@ fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits
         },
     }
     lane.dir = stream_key(dir, stream_dir(plan.sid))
-    let started = stream_start_fresh(mut lane, mut client, std.object.deadline_after_ms(client, op_ms))
+    let started = stream_elect(mut lane, mut client, false, std.object.deadline_after_ms(client, op_ms))
     if let Error(problem) = started {
         let _ = channel.send(ready, Error(clone(problem)))
         let (take returned, _) = std.object.split(take client)
@@ -325,7 +325,7 @@ fn stream_entry_of(batch: List[BatchEntry], slot: u64) -> Option[u64] {
 fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[(), Error] waits {
     for i in 0u64 .. list.len(s.slots) {
         if let Some(place) = s.slots[i].place {
-            if place.fenced || stream_stalled(s.lane, place.store, place.epoch) {
+            if stream_is_latched(s.lane) || place.fenced || stream_stalled(s.lane, place.store, place.epoch) {
                 continue
             }
         }

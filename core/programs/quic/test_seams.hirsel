@@ -23,6 +23,12 @@ pub fn live_connections(e: Endpoint) -> u64 {
     e.live
 }
 
+/// P1-5 seam: set the handle counter near the 2^32 wrap boundary so a law can exercise
+/// handle reuse and wraparound without 2^32 real Initials.
+pub fn set_next_handle(mut e: Endpoint, next: u64) {
+    e.next_handle = next
+}
+
 /// Q7 seam: the token a client's Initials carry (a Retry's, once one is accepted).
 pub fn initial_token(e: Endpoint, c: ConnectionHandle) -> Bytes {
     let Some(i) = slot_at(e, c) else {

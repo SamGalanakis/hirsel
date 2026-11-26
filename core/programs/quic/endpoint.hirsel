@@ -366,10 +366,14 @@ fn draw_local_id(e: Endpoint) -> Bytes {
 }
 
 fn reserve_handle(e: Endpoint) -> Result[ConnectionHandle, QuicError] {
-    if e.live >= int.widen(e.config.limits.connections) || e.next_handle > 0xffffffff {
+    if e.live >= int.widen(e.config.limits.connections) {
         return Error(Limit)
     }
-    Ok(ConnectionHandle(int.narrow(e.next_handle)))
+    let mut candidate: u32 = int.narrow(e.next_handle & 0xffffffff)
+    while map.contains(e.handle_slots, ConnectionHandle(candidate)) {
+        candidate = int.wrapping_add(candidate, 1u32)
+    }
+    Ok(ConnectionHandle(candidate))
 }
 
 fn add_connection(mut e: Endpoint, take c: Connection) {
@@ -400,7 +404,8 @@ fn add_connection(mut e: Endpoint, take c: Connection) {
         e.connections[slot] = Some(take c)
     }
     map.insert(mut e.handle_slots, handle, slot)
-    e.next_handle += 1
+    let ConnectionHandle(raw) = handle
+    e.next_handle = int.widen(int.wrapping_add(raw, 1u32))
     e.live += 1
     sync_deadlines(mut e, slot)
     enqueue_ready(mut e, slot)

@@ -388,3 +388,125 @@ fn header_refusals() {
         fail("authenticated short-header reserved bits")
     }
 }
+
+fn wrap_handshake(mut client: quic.Endpoint, mut server: quic.Endpoint, from: Addr, start: u64) -> (Option[quic.ConnectionHandle], Option[quic.CloseReason]) {
+    let mut now = start
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let mut server_handle: Option[quic.ConnectionHandle] = None
+    let mut client_closed: Option[quic.CloseReason] = None
+    for _ in 0u64 .. 16 {
+        pipe(mut client, mut server, from, now, mut at_server)
+        for ev in at_server {
+            if let Connected(c: h, ..) = ev {
+                server_handle = Some(h)
+            }
+        }
+        list.clear(mut at_server)
+        now += 1000000
+        pipe(mut server, mut client, SERVER_ADDR, now, mut at_client)
+        for ev in at_client {
+            if let Closed(_, reason) = ev {
+                client_closed = Some(reason)
+            }
+        }
+        list.clear(mut at_client)
+        now += 1000000
+        let done_closed = match client_closed {
+            Some(_) => true,
+            None => false,
+        }
+        if server_handle != None || done_closed {
+            break
+        }
+    }
+    (server_handle, client_closed)
+}
+
+/// bug: connection handles are monotonically allocated up to 2^32 and never reused, so
+/// after 2^32 accepted Initials the endpoint permanently answers every new Initial with
+/// CONNECTION_REFUSED (0x02) even while live connections are below EndpointLimits.connections.
+/// oracle: EndpointLimits (docs/spec/quic.md): the only connection-admission bound is the
+/// number of live connections; handles wrap past 2^32 without colliding with still-live
+/// handles, and connections are refused only when live == limits.connections.
+@test
+fn connection_handles_wrap_past_u32_limit() -> Result[(), ()] {
+    let mut server = qs3_server(None)
+    // Keep a long-lived connection on ConnectionHandle(0) while advancing next_handle
+    // to 0xfffffffe (two below 2^32).
+    let mut c0 = qs3_client()
+    let _ = result.unwrap(quic.connect(mut c0, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let (h0_opt, _) = wrap_handshake(mut c0, mut server, CLIENT_ADDR, 1000000)
+    let Some(h0) = h0_opt else {
+        fail("initial live connection did not establish")
+    }
+    if h0 != ConnectionHandle(0) || quic.live_connections(server) != 1 {
+        fail("first server connection did not take handle 0")
+    }
+    quic.set_next_handle(mut server, 0xfffffffe)
+    // Accept three more Initials crossing 2^32: 0xfffffffe, 0xffffffff, then wrapping
+    // past 2^32 while skipping still-live ConnectionHandle(0) to assign ConnectionHandle(1).
+    let mut c1 = qs3_client()
+    let _ = result.unwrap(quic.connect(mut c1, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let (h1_opt, _) = wrap_handshake(mut c1, mut server, CLIENT_ADDR, 50000000)
+    let Some(h1) = h1_opt else {
+        fail("connection at 0xfffffffe did not establish")
+    }
+    let mut c2 = qs3_client()
+    let _ = result.unwrap(quic.connect(mut c2, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let (h2_opt, _) = wrap_handshake(mut c2, mut server, CLIENT_ADDR, 100000000)
+    let Some(h2) = h2_opt else {
+        fail("connection at 0xffffffff did not establish")
+    }
+    let mut c3 = qs3_client()
+    let _ = result.unwrap(quic.connect(mut c3, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let (h3_opt, _) = wrap_handshake(mut c3, mut server, CLIENT_ADDR, 150000000)
+    let Some(h3) = h3_opt else {
+        fail("endpoint refused an Initial after 2^32 handles while live < limits.connections")
+    }
+    if h1 != ConnectionHandle(0xfffffffe) || h2 != ConnectionHandle(0xffffffff) || h3 != ConnectionHandle(1) {
+        fail("wrapped handle collided with still-live handle 0 or chose wrong wrapped id")
+    }
+    if quic.live_connections(server) != 4 {
+        fail("server does not hold all 4 live connections across handle wrap")
+    }
+    if let None = quic.peer_params(server, h0) {
+        fail("live connection handle 0 lost after wraparound")
+    }
+    if let None = quic.peer_params(server, h3) {
+        fail("wrapped connection handle lost after wraparound")
+    }
+    // At live == limits.connections (4), a 5th Initial must still be refused with
+    // CONNECTION_REFUSED (0x02).
+    let mut c4 = qs3_client()
+    let _ = result.unwrap(quic.connect(mut c4, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let (h4_opt, c4_closed) = wrap_handshake(mut c4, mut server, CLIENT_ADDR, 200000000)
+    if h4_opt != None || quic.live_connections(server) != 4 {
+        fail("server admitted past EndpointLimits.connections")
+    }
+    match c4_closed {
+        Some(Transport(code: 0x02, ..)) => (),
+        _ => fail("server did not answer limit exhaustion with CONNECTION_REFUSED (0x02)"),
+    }
+    // Once h0 idles out (live drops to 3), another post-wrap Initial is admitted cleanly.
+    let mut at_server: List[quic.Event] = list.new()
+    quic.timeout(mut server, 5040000000, mut at_server)
+    if quic.live_connections(server) != 3 {
+        fail("idle connection did not release its slot")
+    }
+    let mut c5 = qs3_client()
+    let _ = result.unwrap(quic.connect(mut c5, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let (h5_opt, _) = wrap_handshake(mut c5, mut server, CLIENT_ADDR, 5040000000)
+    if h5_opt == None || quic.live_connections(server) != 4 {
+        fail("server did not admit a new Initial after releasing a slot past 2^32 handles")
+    }
+    // Client-side connect() also wraps past 2^32 without returning Limit.
+    let mut wrap_client = qs3_client()
+    quic.set_next_handle(mut wrap_client, 0xffffffff)
+    let a = result.unwrap(quic.connect(mut wrap_client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let b = result.unwrap(quic.connect(mut wrap_client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    if a != ConnectionHandle(0xffffffff) || b != ConnectionHandle(0) {
+        fail("client connect() did not wrap connection handle across 2^32")
+    }
+    Ok(())
+}

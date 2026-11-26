@@ -3,6 +3,7 @@ quic@1/laws/amplification_never_exceeds_three src=64878974fbdf58e3 sig=6332676ee
 quic@1/laws/application_pto_retransmits_stream_and_confirms_on_1rtt_ack src=f0075ef4a1eb845a sig=7de33ae30d7a3e52 run=c2c0c6612d4cbb79 bug=6907a70eb405e599 oracle=a3342439f5b62f98 rows=pending
 quic@1/laws/connection_client_pins src=c1f979ed53041658 sig=3c0aadca0b240e1b run=c2c0c6612d4cbb79 bug=c5ab912d061d2917 oracle=ebce2c1335795da0 rows=pending
 quic@1/laws/connection_frame_refusals src=99f7bee4cc5c2340 sig=c27a1dc0e237c52b run=c2c0c6612d4cbb79 bug=b52ee359eed25e6d oracle=d76a40ec22bcb4ed rows=pending
+quic@1/laws/connection_handles_wrap_past_u32_limit src=b7936734590ed522 sig=8acbf26137ea3f6d run=c2c0c6612d4cbb79 bug=e2b5c9ddfdfbf380 oracle=af6e7e45e90bae3d rows=pending
 quic@1/laws/cubic_matches_rfc9438 src=62e62764f2d88914 sig=2f6d7cbb63d479e1 run=c2c0c6612d4cbb79 bug=86d6bdc6262f6766 oracle=c0bd99f7203ff300 rows=pending
 quic@1/laws/datagram_never_retransmitted src=1e237667718b7fed sig=d17ec0b7d5056936 run=c7b2a52baff70a63 bug=6a7fe5746f036e77 oracle=4f71f0100b6645f0 rows=pending
 quic@1/laws/flow_control_bounds_memory src=351eebbbf6c2c4be sig=0c00035600cb21d1 run=c2c0c6612d4cbb79 bug=4e72203ad9685cd8 oracle=062e3b2784acbb2a rows=pending

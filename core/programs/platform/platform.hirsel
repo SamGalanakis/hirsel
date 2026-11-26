@@ -201,25 +201,6 @@ pub type Status: send {
     failing: List[Failing],
 }
 
-pub opaque type Tables {
-    groups: store.Table[String, GroupRow],
-    activations: store.Table[(u64, u64), Bytes],
-    wake: store.Table[String, WakeRow],
-    dirty: store.Table[String, u64],
-    due: store.Table[DueKey, u8],
-    deploys: store.Table[String, DeployRow],
-    requests: store.Table[Bytes, RequestRow],
-    active: store.Table[String, Bytes],
-    pins: store.Table[Bytes, Pin],
-    quotas: store.Table[String, Quota],
-    usage: store.Table[String, Usage],
-    config: store.Table[u64, Config],
-    meta: store.Table[u64, Meta],
-    retired: store.Table[String, Retired],
-    // Source blobs by group incarnation and SHA-256 (launch.md "Source by content").
-    blobs: store.Table[Bytes, Bytes],
-}
-
 type Phase = Requested | Started | Ready(u64)
 
 type Run {
@@ -362,6 +343,8 @@ pub opaque type Host {
     unsynced: Option[store.Ticket],
     failed: bool,
     next_backup: u64,
+    // This open's node row: its incarnation is fixed for the life of the process.
+    node: NodeRow,
 }
 
 const READY_RESET_NS: u64 = 300000000000u64
@@ -394,33 +377,8 @@ fn due_key() -> std.codec.Key[DueKey] {
     std.codec.key_make(code.describe(put_due), code.describe(take_due), code.describe(due_schema))
 }
 
-fn declared[K, V](mut d: store.Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
-    let table = store.declare_table(mut d, name, take key, take value)?
-    store.finish(mut d, take table)
-}
-
 // The host's tables, declared into the caller's declaration: one store may hold the host
 // beside the caller's own tables, and the caller seals once before `open`.
-pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
-    Ok(Tables(
-        groups: declared(mut d, "platform.groups", std.codec.key_string(), std.codec.of())?,
-        activations: declared(mut d, "platform.activations", activation_key(), std.codec.of_bytes())?,
-        wake: declared(mut d, "platform.wake", std.codec.key_string(), std.codec.of())?,
-        dirty: declared(mut d, "platform.dirty", std.codec.key_string(), std.codec.of_u64())?,
-        due: declared(mut d, "platform.due", due_key(), std.codec.of_u8())?,
-        deploys: declared(mut d, "platform.deploys", std.codec.key_string(), std.codec.of())?,
-        requests: declared(mut d, "platform.requests", std.codec.key_bytes(), std.codec.of())?,
-        active: declared(mut d, "platform.active", std.codec.key_string(), std.codec.of_bytes())?,
-        pins: declared(mut d, "platform.pins", std.codec.key_bytes(), std.codec.of())?,
-        quotas: declared(mut d, "platform.quotas", std.codec.key_string(), std.codec.of())?,
-        usage: declared(mut d, "platform.usage", std.codec.key_string(), std.codec.of())?,
-        config: declared(mut d, "platform.config", std.codec.key_u64(), std.codec.of())?,
-        meta: declared(mut d, "platform.meta", std.codec.key_u64(), std.codec.of())?,
-        retired: declared(mut d, "platform.retired", std.codec.key_string(), std.codec.of())?,
-        blobs: declared(mut d, "platform.blobs", std.codec.key_bytes(), std.codec.of_bytes())?,
-    ))
-}
-
 // A store holding only the host: declares its tables, seals, and opens.
 pub fn open(take opened: store.Db, first: Config) -> Result[(Host, List[launcher.Request]), Refused] waits {
     let mut db = take opened
@@ -478,17 +436,18 @@ pub fn open_declared(take opened: store.Db, take t: Tables, first: Config) -> Re
         return Error(Missing("idle_ms"))
     }
     let mut db = take opened
-    let made = store.run(mut db, None, (store.copy_env(first), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+    let made = store.run(mut db, None, (store.copy_env(first), store.copy_env(t)), fn(mut tx, call_env) -> Result[NodeRow, Refused] {
         if let None = st(store.fetch(tx, call_env.1 .config, 0u64))? {
             st(store.put(mut tx, call_env.1 .config, 0u64, call_env.0))?
         }
         if let None = st(store.fetch(tx, call_env.1 .meta, 0u64))? {
             st(store.put(mut tx, call_env.1 .meta, 0u64, Meta(dirty: 0u64, next_incarnation: 1u64, next_attempt: 1u64)))?
         }
-        Ok(())
+        Ok(next_node(mut tx, call_env.1)?)
     })
-    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false, next_backup: 1u64)
-    decided(mut h, take made)?
+    let mut h = Host(db: take db, t: take t, vol: map.new(), queue: list.new(), probes: 0u64, due_wakes: 0u64, arrival_wakes: 0u64, binds_sent: false, clock_s: 0u64, collecting: Unfenced, owners: map.new(), shown: map.new(), outbox: list.new(), later: list.new(), unsynced: None, failed: false, next_backup: 1u64, node: NodeRow(enrolled: None, incarnation: 0u64))
+    let node = decided(mut h, take made)?
+    h.node = node
     synced(mut h)?
     let mut out: List[launcher.Request] = list.new()
     list.push(mut out, Hello)

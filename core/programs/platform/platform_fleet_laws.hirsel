@@ -1,0 +1,24 @@
+// Laws of the platform host's fleet seams (RUNNER-SPEC §14.12, §14.7), with their signed
+// vectors: Ed25519 over RFC 8032 test 1's key, signed offline with the RFC's reference code.
+// §14.12.1 `node_incarnation`: every open of the catalog is a new incarnation, durable before
+// the host answers, and the enrollment outlives restarts. Catches an incarnation kept only in
+// memory, or raised but not committed, under which a host restarted after a crash takes back
+// its old incarnation and accepts what was signed for the process that crashed.
+@test
+fn node_incarnation(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 2u64)
+    expect(host_incarnation(r.h) == 1u64 && enrolled(r.h) == None, "node: a new catalog is not unenrolled at incarnation 1")
+    must(enroll(mut r.h, 7u64), "enroll")
+    let r2 = restart(take r, 2u64)
+    expect(host_incarnation(r2.h) == 2u64, "node: a restart did not raise the incarnation to 2")
+    expect(enrolled(r2.h) == Some(7u64), "node: the enrollment did not outlive a restart")
+    let mut r3 = restart(take r2, 2u64)
+    expect(host_incarnation(r3.h) == 3u64, "node: a second restart did not raise the incarnation to 3")
+    let other = match enroll(mut r3.h, 8u64) {
+        Error(Denied(_)) => true,
+        _ => false
+    }
+    expect(other && enrolled(r3.h) == Some(7u64), "node: an enrolled host took a second NodeId")
+    must(enroll(mut r3.h, 7u64), "enroll again")
+    Ok(())
+}

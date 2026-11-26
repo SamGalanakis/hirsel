@@ -1,0 +1,59 @@
+// Fleet seams on the platform host (RUNNER-SPEC §14.12): what fleet@1 tells this node, checked
+// against the node's own durable identity and capacity.
+// The node this host runs as (RUNNER-SPEC §14.12.1): the `NodeId` fleet@1 enrolled it
+// as, and its incarnation, one more on every open of the catalog. A host that lost its
+// catalog has no enrollment and starts again at incarnation 1, so fleet@1 must enroll it
+// under a fresh `NodeId`: the pair (node, incarnation) never repeats.
+type NodeRow: codec + send {
+    enrolled: Option[u64],
+    incarnation: u64
+}
+
+// Opens this process's incarnation of the node (§14.12.1) inside the open's own transaction,
+// so it is durable before the host answers anything.
+fn next_node(mut tx: store.Tx, t: Tables) -> Result[NodeRow, Refused] {
+    let node = match st(store.fetch(tx, t.node, 0u64))? {
+        Some(n) => NodeRow(enrolled: n.enrolled, incarnation: n.incarnation + 1u64),
+        None => NodeRow(enrolled: None, incarnation: 1u64),
+    }
+    st(store.put(mut tx, t.node, 0u64, node))?
+    Ok(node)
+}
+
+// This process's node incarnation (§14.12.1): one more than the last open's.
+pub fn host_incarnation(h: Host) -> u64 {
+    h.node.incarnation
+}
+
+// The `NodeId` fleet@1 enrolled this host as, or None before enrollment.
+pub fn enrolled(h: Host) -> Option[u64] {
+    h.node.enrolled
+}
+
+// Records the `NodeId` fleet@1 enrolled this host as. An enrollment is for the life of the
+// catalog: the same id again is a no-op, a different one is `Denied`, and id 0 is no id.
+pub fn enroll(mut h: Host, node: u64) -> Result[(), Refused] waits {
+    if node == 0u64 {
+        return Error(Missing("node"))
+    }
+    if let Some(n) = h.node.enrolled {
+        return if n == node {
+            Ok(())
+        } else {
+            Error(Denied("enrolled as another node"))
+        }
+    }
+    let row = NodeRow(enrolled: Some(node), incarnation: h.node.incarnation)
+    let r = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(row), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+            st(store.put(mut tx, call_env.1 .node, 0u64, call_env.0))?
+            Ok(())
+        })
+    }
+    let done = decided(mut h, take r)
+    if let Ok(()) = done {
+        h.node = row
+    }
+    turned_result(mut h, take done)
+}

@@ -161,6 +161,11 @@ window:
   and revocations, root-signed deploy keysets, operator-signed deploy approvals, desired
   workloads and registered cold Places, rollout wave state, drain intent and disruption limits,
   and one write-ahead permit row per outstanding Place move.
+  A host mints its own incarnation: each open of its catalog commits one more (RUNNER-SPEC
+  §14.12.1), and fleet@1 records the value the host reports under the `NodeId` it enrolled.
+  There is exactly one incarnation per node. A host that lost its disk opens at incarnation 1
+  with no enrollment, and fleet@1 enrolls it under a fresh `NodeId`, so `(node, incarnation)`
+  never repeats.
 - **Derived state (volatile RAM, zero bucket commits):** heartbeats, capacity scores, route hints
   and load rankings (`fleet@1` never holds Archetype C compute placement; see [compute.md](compute.md)).
 - **Controller takeover rule:** Only members of the restricted standby roster hold write

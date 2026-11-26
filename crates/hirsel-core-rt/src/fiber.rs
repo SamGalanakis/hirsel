@@ -35,7 +35,7 @@ crate::units::moved_tls! { static STOP_FD: i32 = 2; }
 /// protection fault on a mapped `PROT_NONE` page as SIGBUS, Linux as SIGSEGV.
 #[cfg(target_os = "linux")]
 const FAULTS: [libc::c_int; 1] = [libc::SIGSEGV];
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 const FAULTS: [libc::c_int; 2] = [libc::SIGSEGV, libc::SIGBUS];
 /// Each of `FAULTS`' handlers from before `arm`, in the same order.
 static PREVIOUS: OnceLock<[libc::sigaction; FAULTS.len()]> = OnceLock::new();

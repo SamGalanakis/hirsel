@@ -45,7 +45,8 @@ import link_kit  # noqa: E402
 TARGET = link_kit.DARWIN
 FLOOR = link_kit.DARWIN_FLOOR
 PRODUCT = tomllib.loads(Path(__file__).with_name('product.toml').read_text())
-RUNTIMES = {slot: config['features'] for slot, config in PRODUCT['runtime_slots'].items()}
+RUNTIMES = {slot: config['features'] for slot, config in PRODUCT['runtime_slots'].items()
+            if 'buck_suffix' in config}
 SYSTEM = {name: path for name, path in link_kit.DARWIN_LIBRARIES.items()}
 LIBSYSTEM = SYSTEM['libSystem']
 LIBCXX = '/usr/lib/libc++.1.dylib'

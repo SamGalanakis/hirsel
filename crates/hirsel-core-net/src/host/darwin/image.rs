@@ -186,7 +186,7 @@ impl Seal {
         // SAFETY: open returned an owned descriptor.
         let mut file = unsafe { File::from_raw_fd(fd) };
         let _ = Stamp::of_fd(file.as_raw_fd())?;
-        if crate::exec::sha256(&mut file)? != self.pin {
+        if crate::host::exec_image::sha256(&mut file)? != self.pin {
             return Err(io::Error::from_raw_os_error(libc::EACCES));
         }
         Ok(())

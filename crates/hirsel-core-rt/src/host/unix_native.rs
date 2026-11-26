@@ -20,13 +20,6 @@ use std::{
 
 type Result<T> = std::result::Result<T, i32>;
 
-pub(crate) struct Operations {
-    pub step: unsafe fn(&OsProvider, &mut Request, u64, bool) -> Step,
-    pub abort: unsafe fn(&OsProvider, &mut Request, u64, u8) -> Outcome,
-}
-
-pub(crate) static OPERATIONS: Operations = Operations { step, abort };
-
 #[cfg(test)]
 thread_local! {
     pub(crate) static AFTER_RESOLVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
@@ -446,7 +439,7 @@ fn finish(n: &mut UnixRequest, outcome: Outcome) -> Step {
 }
 
 /// SAFETY: the adapter pins the request extension, buffer and registry.
-pub(crate) unsafe fn step(os: &OsProvider, request: &mut Request, token: u64, first: bool) -> Step {
+pub(super) unsafe fn step(os: &OsProvider, request: &mut Request, token: u64, first: bool) -> Step {
     let n = unsafe { &mut *request.path.cast_mut().cast::<UnixRequest>() };
     let sockets = unsafe { &mut *n.sockets };
     let op = request.operation;
@@ -542,7 +535,7 @@ pub(crate) unsafe fn step(os: &OsProvider, request: &mut Request, token: u64, fi
 }
 
 /// SAFETY: the adapter pins the request extension and the operation is pending.
-pub(crate) unsafe fn abort(
+pub(super) unsafe fn abort(
     os: &OsProvider,
     request: &mut Request,
     token: u64,

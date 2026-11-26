@@ -521,7 +521,6 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
         .as_ref()
         .is_some_and(crate::prof_command::Run::observes);
     let charge_observation = logical_charge_report.is_some();
-    let combined_observation = observe && charge_observation;
     let flavour = Flavour {
         observation: if observe {
             Observation::Prof
@@ -531,6 +530,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             Observation::None
         },
         record: needs_recording,
+        embedded: false,
     };
     let env_recording_runtime = installed
         .as_ref()
@@ -542,7 +542,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
             core_product = Some(installed.cache());
         }
         // A combined archive can only be supplied explicitly.
-        if runtime.is_none() && !combined_observation {
+        if runtime.is_none() && !(observe && charge_observation) {
             runtime = installed.runtime(&target, flavour);
         }
     }
@@ -627,7 +627,7 @@ fn run_compiler(mut invocation: Request<Opt>) -> Result<Outcome, Box<dyn std::er
     };
     let select_runtime = || -> Result<PathBuf, Box<dyn std::error::Error>> {
         let archive = runtime.as_deref().ok_or_else(|| {
-            if combined_observation {
+            if observe && charge_observation {
                 format!("no combined profiling and charge observation runtime archive for {target}; pass --runtime with a combined archive")
             } else if charge_observation {
                 let mode = if needs_recording { " with recording" } else { "" };

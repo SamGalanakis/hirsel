@@ -1,12 +1,13 @@
 //! Probe the same descriptor-relative operations required by NET-12 and NET-13.
-use crate::host::unix as host;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::host::native_unix as host;
 use std::ffi::CStr;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::fs::File;
 use std::io;
-use std::os::{
-    fd::{AsRawFd, BorrowedFd, OwnedFd},
-    unix::net::UnixListener,
-};
+use std::os::fd::{BorrowedFd, OwnedFd};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::{fd::AsRawFd, unix::net::UnixListener};
 
 /// A pathname address leaves one byte for the terminator.
 pub const MAX_PATH_BYTES: usize =
@@ -19,19 +20,26 @@ pub fn open_beneath(
     path: &std::ffi::CStr,
     flags: i32,
 ) -> io::Result<OwnedFd> {
-    host::open_beneath(root, path, flags)
+    super::open_beneath(root, path, flags)
 }
 
 /// Bind `socket` at the empty slot `leaf` of the pinned directory `dir`. A
 /// slot that holds any node, a symbolic link included, gives `EADDRINUSE`, and
 /// no link is followed. The calling thread's working directory becomes `dir`,
 /// so the call runs on a thread made for it.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn bind_in(socket: BorrowedFd<'_>, dir: BorrowedFd<'_>, leaf: &CStr) -> io::Result<()> {
     host::bind_in(socket, dir, leaf)
 }
 
+#[cfg(target_os = "ios")]
+pub fn bind_in(_: BorrowedFd<'_>, _: BorrowedFd<'_>, _: &CStr) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+}
+
 /// `bind` of `socket` at `name`, a path relative to this thread's working
 /// directory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn bind_named(socket: BorrowedFd<'_>, name: &CStr) -> io::Result<()> {
     let bytes = name.to_bytes();
     if bytes.len() > MAX_PATH_BYTES {
@@ -63,6 +71,7 @@ pub(crate) fn bind_named(socket: BorrowedFd<'_>, name: &CStr) -> io::Result<()> 
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn probe() -> io::Result<()> {
     use std::os::fd::AsFd;
 
@@ -93,8 +102,10 @@ pub fn probe() -> io::Result<()> {
 
 /// A fresh mode-0700 directory under the temporary directory, removed with
 /// its contents when dropped.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct PrivateDir(std::path::PathBuf);
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl PrivateDir {
     fn new() -> io::Result<Self> {
         use std::os::unix::ffi::OsStringExt;
@@ -112,8 +123,14 @@ impl PrivateDir {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for PrivateDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[cfg(target_os = "ios")]
+pub fn probe() -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
 }

@@ -1,12 +1,6 @@
-//! Confined opens and Unix socket naming on Darwin: `openat` with
-//! `O_RESOLVE_BENEATH | O_NOFOLLOW_ANY` (a refused escape is ENOTCAPABLE,
-//! reported as EXDEV, the error Linux's `RESOLVE_BENEATH` gives), and
-//! a bind or connect by leaf name from a thread whose working directory is
-//! the pinned parent (`pthread_fchdir_np`). Darwin cannot open a socket file,
-//! and its bind, connect and sendto follow a link at the final component. So a
-//! bind runs at a private name and an exclusive rename moves the node into its
-//! slot, and a connect or send-to reaches the socket through a hard link in a
-//! private directory nobody can change (`freeze`).
+//! Unix socket naming on macOS. A thread with a pinned working directory
+//! names the leaf via `pthread_fchdir_np`. Binds use an exclusive rename,
+//! and connects and sends name a pinned hard link.
 use std::{
     ffi::{CStr, CString},
     io,
@@ -16,28 +10,10 @@ use std::{
     },
 };
 
-/// Resolve every component beneath the starting directory (xnu `fcntl.h`).
-pub(crate) const O_RESOLVE_BENEATH: i32 = 0x1000;
-/// A directory handle that grants lookups but no reads.
-pub(crate) const DIRECTORY: i32 = libc::O_SEARCH | libc::O_DIRECTORY;
+pub(crate) use super::path::DIRECTORY;
 
 unsafe extern "C" {
     fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
-}
-
-pub(crate) fn open_beneath(root: BorrowedFd<'_>, path: &CStr, flags: i32) -> io::Result<OwnedFd> {
-    let flags = flags | libc::O_CLOEXEC | O_RESOLVE_BENEATH | libc::O_NOFOLLOW_ANY;
-    // SAFETY: the C path is live for the call; a success transfers a descriptor.
-    let fd = unsafe { libc::openat(root.as_raw_fd(), path.as_ptr(), flags, 0) };
-    if fd < 0 {
-        let error = io::Error::last_os_error();
-        return Err(match error.raw_os_error() {
-            Some(libc::ENOTCAPABLE) => io::Error::from_raw_os_error(libc::EXDEV),
-            _ => error,
-        });
-    }
-    // SAFETY: openat returned an owned descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Give this thread its own working directory, `dir`.

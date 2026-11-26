@@ -4,7 +4,15 @@
 //! `CLOCK_REALTIME`.
 use std::{io, sync::OnceLock};
 
+// <mach/mach_time.h>. libc declares this interface only for macOS.
+#[repr(C)]
+struct TimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
 unsafe extern "C" {
+    fn mach_timebase_info(info: *mut TimebaseInfo) -> libc::c_int;
     fn mach_continuous_time() -> u64;
 }
 
@@ -40,11 +48,11 @@ pub(crate) fn wall_ms() -> Option<u64> {
 /// Nanoseconds on the suspend-inclusive boot clock.
 #[inline(always)]
 pub(crate) fn boot_ns() -> io::Result<u64> {
-    static TIMEBASE: OnceLock<libc::mach_timebase_info> = OnceLock::new();
+    static TIMEBASE: OnceLock<TimebaseInfo> = OnceLock::new();
     let base = TIMEBASE.get_or_init(|| {
-        let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+        let mut info = TimebaseInfo { numer: 0, denom: 0 };
         // SAFETY: `info` is a valid writable timebase structure.
-        unsafe { libc::mach_timebase_info(&mut info) };
+        unsafe { mach_timebase_info(&mut info) };
         info
     });
     if base.denom == 0 {

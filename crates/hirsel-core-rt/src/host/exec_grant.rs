@@ -1,16 +1,24 @@
 //! Exec startup checks and run-owned grants.
-use hirsel_core_net::exec::{ExecRules, PinnedProfile, Policy, Request};
+use hirsel_core_net::exec::ExecRules;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use hirsel_core_net::exec::{PinnedProfile, Policy, Request};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::collections::BTreeMap;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 
+#[path = "exec_launch.rs"]
 mod launch;
+#[path = "../exec/narrow.rs"]
 mod narrow;
 pub(crate) use launch::Launch;
 pub use launch::{Binding, Operations};
 pub(crate) use narrow::NarrowedGrant;
 
 pub(crate) enum Grant {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Native {
         supervisor: Arc<crate::host::exec::Supervisor>,
         profiles: Arc<BTreeMap<String, PinnedProfile>>,
@@ -24,12 +32,15 @@ pub(crate) enum Grant {
 impl Grant {
     pub(crate) fn rules(&self) -> &ExecRules {
         match self {
-            Self::Native { rules, .. } | Self::Served { rules } => rules,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            Self::Native { rules, .. } => rules,
+            Self::Served { rules } => rules,
         }
     }
 
     fn with_rules(&self, rules: ExecRules) -> Self {
         match self {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             Self::Native {
                 supervisor,
                 profiles,
@@ -43,6 +54,7 @@ impl Grant {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn check(
         request: &Request,
         policy: Result<Policy, String>,
@@ -58,6 +70,7 @@ impl Grant {
         Ok(policy)
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn prepare(
         policy: Policy,
         supervisor: Arc<crate::host::exec::Supervisor>,
@@ -75,6 +88,7 @@ impl Grant {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn unprivileged(
     uids: [libc::uid_t; 3],
     effective: [u32; 2],
@@ -85,6 +99,7 @@ pub(crate) fn unprivileged(
 
 /// Exec's startup checks: an unprivileged run on a host that can confine
 /// opens, start children and pin their images.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn probe() -> io::Result<()> {
     crate::host::exec::probe()
 }

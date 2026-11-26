@@ -28,7 +28,9 @@ pub mod cred;
 mod destination;
 pub mod entry;
 mod env;
+#[path = "host/exec_grant.rs"]
 mod exec;
+#[path = "host/exec_runtime.rs"]
 mod exec_runtime;
 mod fiber;
 pub mod flow;
@@ -54,8 +56,8 @@ pub mod os;
 mod os_net;
 mod os_resolve;
 mod os_tls;
+use host::unix_api as os_unix;
 pub use os_tls::packet_cipher::PacketCipher;
-mod os_unix;
 #[cfg(any(test, feature = "charge-observation"))]
 pub mod peak;
 pub mod process;

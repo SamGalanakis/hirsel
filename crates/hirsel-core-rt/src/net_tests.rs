@@ -384,8 +384,8 @@ fn inherited_child(listener: &std::net::TcpListener, law: &str) -> std::process:
     // only its duplicate at fd 3 and uses async-signal-safe descriptor calls.
     unsafe {
         child.pre_exec(move || {
-            if libc::dup2(fd, crate::os_net::LISTEN_FD) < 0
-                || libc::fcntl(crate::os_net::LISTEN_FD, libc::F_SETFD, 0) < 0
+            if libc::dup2(fd, crate::host::inherited::LISTEN_FD) < 0
+                || libc::fcntl(crate::host::inherited::LISTEN_FD, libc::F_SETFD, 0) < 0
             {
                 return Err(std::io::Error::last_os_error());
             }

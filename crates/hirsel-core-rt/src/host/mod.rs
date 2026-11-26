@@ -2,22 +2,44 @@
 //! sync, file status, clocks, confined paths, child processes), with one provider per host
 //! OS chosen at compile time. Readiness lives in `hirsel_core_net::ready`. No
 //! runtime site waits on an address yet, so the seam has no address wait.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod darwin;
 pub(crate) mod envelope;
+pub(crate) mod inherited;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
+pub(crate) mod trust;
+#[cfg(target_vendor = "apple")]
 use darwin as provider;
 #[cfg(target_os = "linux")]
 use linux as provider;
 
 #[cfg(test)]
 pub(crate) use provider::HOST_TARGET;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use provider::exec;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use provider::unix;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use provider::unix::Endpoint as UnixEndpoint;
+#[cfg(target_os = "ios")]
+pub(crate) type UnixEndpoint = std::convert::Infallible;
+use hirsel_core_ids::launch::Metadata;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn native_metadata(target: &str, n_place: u64, describe: bool) -> Metadata {
+    Metadata::native(target, n_place, describe)
+}
+#[cfg(target_os = "ios")]
+pub(crate) fn native_metadata(target: &str, n_place: u64, describe: bool) -> Metadata {
+    Metadata::source(target, n_place, describe)
+}
+
+pub(crate) mod unix_api;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix_native;
 #[cfg(feature = "prof")]
 pub(crate) use provider::prof_sampler;
-pub(crate) use provider::{clock, contained, file, path, stat::stat, sync, sys, unix};
+pub(crate) use provider::{clock, contained, file, path, stat::stat, sync, sys};
 
 /// A terminal's size as `cols | rows << 16` from `TIOCGWINSZ`, zero when the
 /// descriptor answers no size or either dimension is zero. Linux and Darwin

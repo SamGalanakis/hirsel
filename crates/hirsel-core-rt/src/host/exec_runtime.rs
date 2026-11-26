@@ -1,19 +1,24 @@
 //! Native Exec provider adapters. The logical launch is checked before issue;
 //! opening the working directory and creating the child are delivered effects.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::host::exec::{Process, Signal, SpawnInput, Termination};
 use crate::{
     Context,
     entry::{hirsel_core_capability_handle, hirsel_core_capability_provider},
     exec::Grant,
-    host::exec::{Process, Signal, SpawnInput, Termination},
     provider::*,
 };
 use hirsel_core_layout::charge::EXEC_HANDLE;
 pub(crate) use hirsel_core_net::exec::LogicalLaunch;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     ffi::CString,
     io,
     os::fd::{AsFd, FromRawFd, OwnedFd},
 };
+
+#[cfg(target_os = "ios")]
+type Process = std::convert::Infallible;
 
 const PROC_BIT: u64 = 1 << 63;
 pub(crate) const PROC_CLOSE: u8 = 0x80;
@@ -31,6 +36,7 @@ pub(crate) const fn failure(tag: u8, code: u32) -> Outcome {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn other(error: io::Error) -> Outcome {
     failure(4, error.raw_os_error().unwrap_or(libc::EIO) as u32)
 }
@@ -88,6 +94,7 @@ pub(crate) unsafe fn operations(r: *const Request) -> &'static Operations {
     unsafe { (*(*r).path.cast::<Call<()>>()).ops }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cwd(base: &str, path: &str) -> io::Result<OwnedFd> {
     let base = CString::new(base).unwrap();
     // SAFETY: the configured label is a validated absolute host path.
@@ -109,6 +116,7 @@ fn cwd(base: &str, path: &str) -> io::Result<OwnedFd> {
     hirsel_core_net::unix::open_beneath(root.as_fd(), &path, crate::host::path::DIRECTORY_HANDLE)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a native capability pins Grant. Its adapter pins SpawnCall.
     unsafe {
@@ -185,6 +193,7 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn termination(termination: Termination) -> u64 {
     match termination {
         Termination::Exited(code) => u64::from(code),
@@ -192,6 +201,7 @@ fn termination(termination: Termination) -> u64 {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe fn process_native(r: &mut Request, token: u64) -> Step {
     // SAFETY: the typed, exclusively borrowed Proc pins this call, and only
     // the native provider can reach this function.
@@ -249,6 +259,7 @@ unsafe fn process_native(r: &mut Request, token: u64) -> Step {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe fn abort_native(r: &mut Request, why: u8) -> Outcome {
     // SAFETY: the pending wait owns its mutable borrow through abort.
     let call = unsafe { &mut (*r.path.cast_mut().cast::<Call<ProcCall>>()).data };
@@ -510,4 +521,25 @@ pub unsafe extern "C" fn hirsel_core_exec_signal(
         }
         proc_op(context, proc, EXEC_SIGNAL, signal, None, site)
     }
+}
+
+#[cfg(target_os = "ios")]
+const UNSUPPORTED: Outcome = failure(4, libc::ENOTSUP as u32);
+
+#[cfg(target_os = "ios")]
+unsafe extern "C" fn spawn_native(_: *mut u8, _: *mut Request) -> Outcome {
+    UNSUPPORTED
+}
+
+#[cfg(target_os = "ios")]
+unsafe fn process_native(_: &mut Request, _: u64) -> Step {
+    Step {
+        outcome: UNSUPPORTED,
+        ..Step::default()
+    }
+}
+
+#[cfg(target_os = "ios")]
+unsafe fn abort_native(_: &mut Request, _: u8) -> Outcome {
+    UNSUPPORTED
 }

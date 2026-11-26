@@ -174,6 +174,7 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn native(target: &str, n_place: u64, describe: bool) -> Self {
         let file = running_image();
         #[cfg(target_os = "linux")]
@@ -415,16 +416,17 @@ impl Metadata {
 }
 
 #[cold]
-/// The running executable's file. Linux opens the mapped inode itself. Darwin
+/// The running executable's file. Linux opens the mapped inode itself. macOS
 /// has no /proc and opens the path dyld recorded at exec (`_NSGetExecutablePath`),
 /// then checks that the opened file is the vnode the running text was mapped
 /// from: a file renamed over that path since exec is refused, and the digest
 /// is unavailable. A launched process does not read it: the launcher passes
 /// the checked image's descriptor and digest (`LAUNCH_IMAGE_ENV`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn running_image() -> io::Result<File> {
     #[cfg(target_os = "linux")]
     return File::open("/proc/self/exe");
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
         use std::os::unix::fs::MetadataExt;
         let file = std::env::current_exe().and_then(File::open)?;
@@ -440,7 +442,7 @@ pub fn running_image() -> io::Result<File> {
 
 /// The device and inode of the file the region holding this function's code
 /// was mapped from: the running image, since the runtime links into it.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn darwin_text_vnode() -> io::Result<(u32, u64)> {
     /// `struct proc_regionwithpathinfo` (`<sys/proc_info.h>`).
     #[repr(C)]

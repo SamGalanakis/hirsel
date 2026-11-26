@@ -1,14 +1,23 @@
-use super::{Grant, probe};
+use super::Grant;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::probe;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::host::exec::Supervisor;
 use crate::{
     entry::{OsConfig, StartupError},
     process::View,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use hirsel_core_ids::launch::{FIRST_INHERITED_FD, INHERITED_SLOT};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use hirsel_core_net::exec::Request;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::Path;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Arc;
 
 #[repr(C)]
@@ -40,6 +49,7 @@ impl Launch {
 
 /// The bindings `input` seals. A binding's inherited workdir is at its slot's
 /// descriptor, numbered after every directory slot.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 unsafe fn load(
     input: &OsConfig,
     approvals: &[&[u8]],
@@ -112,6 +122,7 @@ unsafe fn load(
 
 /// The policy file `file` names under the inherited workdir `dir`, as a path
 /// under that workdir would name it: an absolute `file` names itself.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn read_beneath(dir: &OwnedFd, file: &str) -> std::io::Result<String> {
     use std::io::Read;
     let name = std::ffi::CString::new(file)
@@ -134,7 +145,13 @@ fn read_beneath(dir: &OwnedFd, file: &str) -> std::io::Result<String> {
     Ok(source)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn probe_with_unix() -> std::io::Result<()> {
     probe()?;
     hirsel_core_net::unix::probe()
+}
+
+#[cfg(target_os = "ios")]
+unsafe fn load(_: &OsConfig, _: &[&[u8]], _: bool, _: bool) -> Result<Launch, StartupError> {
+    Err(std::io::Error::from_raw_os_error(libc::ENOTSUP).into())
 }

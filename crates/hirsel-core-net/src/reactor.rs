@@ -16,13 +16,13 @@ use std::{
 };
 #[cfg(target_os = "linux")]
 pub(crate) mod epoll;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub(crate) mod kqueue;
 #[cfg(target_os = "linux")]
 mod sendzc;
 #[cfg(target_os = "linux")]
 pub(crate) use epoll as sys;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub(crate) use kqueue as sys;
 mod plan;
 pub use plan::ReactorPlan;
@@ -32,7 +32,7 @@ mod uring;
 use crate::ready::{Event, Handle, Waker};
 #[cfg(target_os = "linux")]
 pub use sendzc::TxSlot;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub use sys::{FileEntry, TxSlot};
 pub use udp_group::UdpMember;
 #[cfg(target_os = "linux")]
@@ -71,7 +71,7 @@ pub enum Reactor {
     Epoll,
     #[cfg(target_os = "linux")]
     IoUring,
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     Kqueue,
 }
 impl Reactor {
@@ -81,7 +81,7 @@ impl Reactor {
             Reactor::Epoll => "epoll",
             #[cfg(target_os = "linux")]
             Reactor::IoUring => "io_uring",
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Reactor::Kqueue => "kqueue",
         }
     }
@@ -93,7 +93,7 @@ impl Reactor {
             Reactor::Epoll => false,
             #[cfg(target_os = "linux")]
             Reactor::IoUring => true,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Reactor::Kqueue => false,
         }
     }
@@ -219,7 +219,7 @@ fn reactor_with(plan: ReactorPlan) -> io::Result<Reactor> {
 }
 
 /// Darwin has one reactor; `auto` and `kqueue` name it.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn choose(_plan: ReactorPlan) -> Result<Reactor, String> {
     match std::env::var_os(REACTOR_ENV) {
         Some(v) if v != "auto" && v != "kqueue" => Err(format!(
@@ -295,7 +295,7 @@ enum Backend {
     #[cfg(target_os = "linux")]
     Uring(ManuallyDrop<Box<Uring>>),
     /// The kqueue, whose wake is a user event in it.
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     Kqueue { kq: OwnedFd },
 }
 
@@ -339,7 +339,7 @@ impl Poller {
             Reactor::Epoll => Self::new_readiness(),
             #[cfg(target_os = "linux")]
             Reactor::IoUring => Self::new_uring(),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Reactor::Kqueue => Self::new_readiness(),
         }
     }
@@ -386,7 +386,7 @@ impl Poller {
             Backend::Epoll { .. } => Reactor::Epoll,
             #[cfg(target_os = "linux")]
             Backend::Uring(_) => Reactor::IoUring,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Backend::Kqueue { .. } => Reactor::Kqueue,
         }
     }
@@ -474,7 +474,7 @@ impl Poller {
             Backend::Epoll { epoll, .. } => Handle(epoll.as_raw_fd()),
             #[cfg(target_os = "linux")]
             Backend::Uring(ring) => Handle(ring.ring.as_raw_fd()),
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Backend::Kqueue { kq } => Handle(kq.as_raw_fd()),
         }
     }
@@ -486,7 +486,7 @@ impl Poller {
             Backend::Epoll { .. } => Some(Waker(self.wake_fd())),
             #[cfg(target_os = "linux")]
             Backend::Uring(_) => None,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             Backend::Kqueue { .. } => Some(Waker(self.waker_id())),
         }
     }

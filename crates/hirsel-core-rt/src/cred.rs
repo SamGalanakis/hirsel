@@ -545,7 +545,8 @@ fn form(out: &mut Vec<u8>, value: &[u8]) {
 fn assume_role(source: &StsSource, deadline: Option<u64>) -> Answer {
     let identity = identity_token(&source.token_path)?;
     let roots = match &source.roots {
-        None => crate::os_tls::system_roots(),
+        None => crate::host::trust::system_roots()
+            .map_err(|code| io_failure(&std::io::Error::from_raw_os_error(code)))?,
         Some(path) => {
             let roots_error = || tls_net(crate::net::tls_failure(3, 0));
             let mut pem = Vec::new();

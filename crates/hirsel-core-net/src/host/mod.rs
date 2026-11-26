@@ -1,16 +1,38 @@
 //! Net's host seam: the socket, confined-path and executable-image mechanisms
 //! that differ between host kernels, with one provider per host OS chosen at
 //! compile time. Readiness has its own seam in `reactor`.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 use darwin as provider;
 #[cfg(target_os = "linux")]
 use linux as provider;
 
-pub(crate) use provider::{image, udp, unix};
+pub(crate) use provider::udp;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use provider::{image, unix as native_unix};
+
+#[cfg(target_vendor = "apple")]
+use darwin::path::open_beneath;
+#[cfg(target_os = "linux")]
+use linux::unix::open_beneath;
+
+#[path = "unix_api.rs"]
+pub mod unix;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod exec_image;
+pub mod exec_api {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub use super::exec_image::{ImageSeal, PinnedImage, PinnedProfile, probe_seals};
+
+    #[cfg(target_os = "ios")]
+    pub fn probe_seals() -> std::io::Result<()> {
+        Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
+    }
+}
 
 /// The macOS provider's pinned Unix connect (`freeze`), which the runtime's
 /// Darwin provider also uses for send-to; empty on Linux, whose runtime

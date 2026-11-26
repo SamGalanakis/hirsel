@@ -1,5 +1,5 @@
 //! Native Exec admission. This module acquires the pinned resources before main.
-use super::{Policy, Profile};
+use crate::exec::{Policy, Profile};
 use crate::host::image as host;
 pub use crate::host::image::Seal as ImageSeal;
 use ring::digest::{Context, SHA256};

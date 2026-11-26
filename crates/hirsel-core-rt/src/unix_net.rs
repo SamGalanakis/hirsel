@@ -18,7 +18,7 @@ pub(crate) struct UnixRequest<'a> {
     pub until: Option<(Provider, u64, u64)>,
     pub sockets: *mut Sockets,
     pub connecting: Option<u64>,
-    pub target: Option<crate::host::unix::Endpoint>,
+    pub target: Option<crate::host::UnixEndpoint>,
     pub retry: Option<u64>,
 }
 

@@ -8,19 +8,18 @@ pub(crate) use tls_server::{ACCEPT_OPERATIONS, HELLO_OPERATIONS};
 
 use crate::{
     entry::SocketActivation,
+    host::inherited::{adopt_listener, receive_listener, receive_operator},
+    host::trust::system_roots,
     net::{Address, NetworkRequest, RulesStorage},
-    os_tls::system_roots,
     provider::*,
     tls::{HandshakeState, TlsRequest},
     units::{HostCall, off_slot},
 };
 use std::{
-    env, io,
+    io,
     mem::{size_of, zeroed},
-    net::{SocketAddr, TcpListener},
-    os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     ptr,
-    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// Installed by the native Net adapters on their pinned request. The common
@@ -49,57 +48,8 @@ pub static hirsel_core_os_socket_activation: SocketActivation = SocketActivation
     rules: RulesStorage::from_views,
     unix_probe: hirsel_core_net::unix::probe,
     unix_roots: crate::os_unix::configure_roots,
-    operator: crate::os_unix::receive_operator,
+    operator: receive_operator,
 };
-
-pub(crate) const LISTEN_FD: i32 = 3;
-static LISTENER_RECEIVED: AtomicBool = AtomicBool::new(false);
-
-/// Take custody of the single socket passed to this process by its launcher.
-/// # Safety
-/// Matching activation metadata must designate a descriptor this process
-/// inherited at exec and has not otherwise taken into ownership. Receive
-/// before any other thread can access the process environment.
-unsafe fn receive_listener() -> io::Result<Option<OwnedFd>> {
-    let Some(pid) = env::var_os("LISTEN_PID") else {
-        return Ok(None);
-    };
-    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
-    let pid: u32 = pid
-        .to_str()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(invalid)?;
-    if pid != crate::host::sys::activation_pid() {
-        return Ok(None);
-    }
-    let count = env::var_os("LISTEN_FDS")
-        .and_then(|n| n.to_str()?.parse::<u32>().ok())
-        .ok_or_else(invalid)?;
-    if count != 1 {
-        return Err(invalid());
-    }
-    if LISTENER_RECEIVED.swap(true, Ordering::AcqRel) {
-        return Ok(None);
-    }
-    // SAFETY: the launcher assigned this fd to this PID. Verify it exists
-    // before construction, and stop it from passing through any child exec.
-    unsafe {
-        retry(|| libc::fcntl(LISTEN_FD, libc::F_SETFD, libc::FD_CLOEXEC) as isize)
-            .map_err(io::Error::from_raw_os_error)?;
-        let listener = OwnedFd::from_raw_fd(LISTEN_FD);
-        // SAFETY: the launch receives the socket before any other thread can
-        // access the environment. Leave no activation metadata for children.
-        for name in [
-            "LISTEN_PID",
-            "LISTEN_PIDFDID",
-            "LISTEN_FDS",
-            "LISTEN_FDNAMES",
-        ] {
-            env::remove_var(name);
-        }
-        Ok(Some(listener))
-    }
-}
 
 fn errno() -> i32 {
     io::Error::last_os_error()
@@ -139,101 +89,8 @@ pub(crate) fn signal(tag: u8) -> Outcome {
         ..Outcome::default()
     }
 }
-fn socket_option(fd: BorrowedFd<'_>, level: i32, name: i32) -> Result<i32, i32> {
-    let mut value: i32 = 0;
-    let mut len = size_of::<i32>() as libc::socklen_t;
-    // SAFETY: fd is borrowed and both option outputs are writable.
-    retry(|| unsafe {
-        libc::getsockopt(
-            fd.as_raw_fd(),
-            level,
-            name,
-            (&raw mut value).cast(),
-            &mut len,
-        ) as isize
-    })?;
-    Ok(value)
-}
 
-fn inherited_address(listener: &TcpListener) -> Result<Address, i32> {
-    let fd = listener.as_fd();
-    if socket_option(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
-        || !crate::host::sys::listening(fd.as_raw_fd())
-            .map_err(|e| e.raw_os_error().unwrap_or(libc::EINVAL))?
-        || match crate::host::sys::PROTOCOL {
-            Some(name) => socket_option(fd, libc::SOL_SOCKET, name)? != libc::IPPROTO_TCP,
-            None => false,
-        }
-    {
-        return Err(libc::EINVAL);
-    }
-
-    match listener
-        .local_addr()
-        .map_err(|e| e.raw_os_error().unwrap_or(libc::EINVAL))?
-    {
-        SocketAddr::V4(a) => Ok(Address {
-            family: 0,
-            hi: 0,
-            lo: u64::from(u32::from(*a.ip())),
-            port: a.port(),
-        }),
-        SocketAddr::V6(a) => {
-            // A dual-stack wildcard also listens on IPv4, outside a V6 rule.
-            if a.scope_id() != 0
-                || (a.ip().is_unspecified()
-                    && socket_option(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY)? == 0)
-            {
-                return Err(libc::EACCES);
-            }
-            let ip = u128::from(*a.ip());
-            Ok(Address {
-                family: 1,
-                hi: (ip >> 64) as u64,
-                lo: ip as u64,
-                port: a.port(),
-            })
-        }
-    }
-}
-
-unsafe fn adopt_listener(request: *mut Request, fd: OwnedFd) -> Step {
-    // SAFETY: only the OS LISTEN issue callback supplies a live request here.
-    let request = unsafe { &mut *request };
-    let n = unsafe { &mut *request.path.cast_mut().cast::<NetworkRequest>() };
-    let listener = TcpListener::from(fd);
-    let adopted = (|| {
-        let address = inherited_address(&listener)?;
-        if !unsafe {
-            crate::net::permits_address(
-                request.handle,
-                &address,
-                hirsel_core_net::AddressDirection::Listen,
-            )
-        } {
-            return Err(libc::EACCES);
-        }
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))?;
-        let value = unsafe { register_socket(n, listener.into()) }?;
-        n.address = address;
-        Ok(value)
-    })();
-    let outcome = match adopted {
-        Ok(value) => Outcome {
-            value,
-            ..Outcome::default()
-        },
-        Err(code) => error(code),
-    };
-    Step {
-        outcome,
-        ..Step::default()
-    }
-}
-
-unsafe fn register_socket(n: &mut NetworkRequest, owned: OwnedFd) -> Result<u64, i32> {
+pub(crate) unsafe fn register_socket(n: &mut NetworkRequest, owned: OwnedFd) -> Result<u64, i32> {
     // SAFETY: the request pins the registry through issue.
     unsafe { adopt_socket(n.sockets, owned) }.map_err(|e| e.raw_os_error().unwrap_or(libc::EIO))
 }
@@ -901,15 +758,20 @@ unsafe fn tls_step(request: *mut Request, token: u64, first: bool) -> Step {
                 return tls_finish(tls, key, outcome);
             }
             let cache = (*s.cache).get();
-            let roots = s.roots.take().unwrap_or_else(|| {
-                if let Some(roots) = cache.system.get() {
-                    return roots.clone();
+            let roots = match s.roots.take() {
+                Some(roots) => roots,
+                None => {
+                    if cache.system.get().is_none() {
+                        // Loaded off the slot, outside the cell: no unit waits
+                        // in `get_or_init` for another's load.
+                        let _ = cache.system.set(off_slot(HostCall::Bounded, system_roots));
+                    }
+                    match cache.system.get().unwrap() {
+                        Ok(roots) => roots.clone(),
+                        Err(code) => return tls_finish(tls, key, error(*code)),
+                    }
                 }
-                // Loaded off the slot, outside the cell: no unit waits in
-                // `get_or_init` for another's load.
-                let _ = cache.system.set(off_slot(HostCall::Bounded, system_roots));
-                cache.system.get().unwrap().clone()
-            });
+            };
             // Building a client configuration can take milliseconds of CPU.
             let (alpn, cacheable, name) = (std::mem::take(&mut s.alpn), s.cacheable, s.name.take());
             let stream = off_slot(HostCall::Bounded, || {

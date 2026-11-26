@@ -55,7 +55,7 @@ import prepare
 import rust_environment
 import supply_chain
 from cargo_units import Resolution, configured, relocate
-from distribution_gates import distribution_gates
+from distribution_gates import archive_slots, distribution_gates, runtime_product_bzl
 from runner_gates import runner_gates
 from python_gates import python_gates
 from test_inputs import RUNTIME_DATA, TEST_DATA, TEST_FILES_ENV
@@ -412,10 +412,6 @@ def declared_deps(package: dict, packages: dict) -> list[str]:
                   if d["kind"] is None and not d["optional"])
 
 
-def release_product(reads):
-    return tomllib.loads(reads.text(ROOT / "tools/toolchain-dist/product.toml"))
-
-
 def static_archive_rule(package: dict, packages: dict, attrs: dict, slots=None) -> str:
     name = package['name']
     archive = f"lib{attrs['crate']}.a"
@@ -424,7 +420,7 @@ def static_archive_rule(package: dict, packages: dict, attrs: dict, slots=None) 
                     library=f'//:{name}', archive_name=archive)
     # A language executable owns its process allocator. The ordinary
     # rlib remains embeddable beside a host's allocator or hirsel_guard.
-    slots = release_product(READS)["runtime_slots"] if slots is None else slots
+    slots = archive_slots(READS) if slots is None else slots
     deps = declared_deps(package, packages)
     rules = []
     for slot in [*slots.values(), {"buck_suffix": "-allocation-count",
@@ -442,7 +438,7 @@ def first_party(meta: dict) -> str:
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     members = set(meta["workspace_members"])
-    slots = release_product(READS)["runtime_slots"]
+    slots = archive_slots(READS)
     unguarded = []
     out = [
         HEADER,
@@ -844,7 +840,7 @@ def generate(out_root: pathlib.Path, parts=tuple(generated.PARTS)) -> dict[str, 
     bytes change; returns what each part read."""
     found = {}
     product_inputs = generated.Reads(ROOT)
-    slots = release_product(product_inputs)["runtime_slots"]
+    slots = archive_slots(product_inputs)
     runtime_features = [slot["features"] for slot in slots.values()]
     env = rust_environment.environment(ROOT)
     cargo_home = rust_environment.cargo_home(ROOT, env)
@@ -874,7 +870,6 @@ def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution
     READS = generated.Reads(ROOT)
     READS.text(out_root / "third-party/units.json")
     cargo_reads(READS, meta, layout=True)
-    product = release_product(READS)
     workspace = {p["id"] for p in meta["packages"] if p["id"] in meta["workspace_members"]}
     packages = [{"name": p["name"], "dependencies": [
         {key: (str(pathlib.Path(value).relative_to(ROOT)) if key == "path" and value else value)
@@ -886,8 +881,7 @@ def write_first_party(meta: dict, out_root: pathlib.Path, resolution: Resolution
         "tools/buck2/exec_sizes.bzl": execution_sizes(),
         "tools/buck2/test_sizes.bzl": requests_bzl(json.loads(READS.text(HERE / "test-sizes.json"))),
         "tools/native-toolchain/pins.bzl": native_toolchain_pins(),
-        "tools/toolchain-dist/product.bzl": HEADER + "".join(
-            f"{name.upper()} = {starlark(product[name], 0)}\n" for name in ("runtime_targets", "hosts")),
+        "tools/toolchain-dist/product.bzl": runtime_product_bzl(READS, starlark, HEADER),
     }
     assert set(contents) == set(generated.PARTS["first-party"])
     for path, content in contents.items():

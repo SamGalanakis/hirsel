@@ -14,8 +14,8 @@ pub mod exec;
 mod host;
 pub mod own_address;
 pub mod udp;
-pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
+pub use host::unix;
 
 /// The public grant spelling, also used in configuration diagnostics.
 pub const RULE_SYNTAX: &str = "Net=<Connect|Listen|UdpBind|UdpSend> <prefix>/<len> <lo>-<hi>[ public][;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path|.>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";

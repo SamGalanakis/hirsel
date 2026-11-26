@@ -142,9 +142,11 @@ pub(crate) unsafe fn accept(
 
 /// Darwin has no socket option naming a protocol; a stream socket of an
 /// Internet family is TCP.
+#[cfg(target_os = "macos")]
 pub(crate) const PROTOCOL: Option<libc::c_int> = None;
 
 /// The address family of the socket `fd`.
+#[cfg(target_os = "macos")]
 pub(crate) fn socket_domain(fd: RawFd) -> io::Result<libc::c_int> {
     // SAFETY: integer-only address storage, sized by len.
     let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -160,6 +162,7 @@ pub(crate) fn socket_domain(fd: RawFd) -> io::Result<libc::c_int> {
 /// `SO_ACCEPTCONN` with ENOPROTOOPT, so the flag is read from the socket's
 /// `so_options` in `proc_pidfdinfo`'s `socket_fdinfo` (792 bytes, options
 /// at byte 188 in the macOS 26 SDK).
+#[cfg(target_os = "macos")]
 pub(crate) fn listening(fd: RawFd) -> io::Result<bool> {
     const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
     const SOCKET_FDINFO: usize = 792;
@@ -322,6 +325,7 @@ pub(crate) fn tick(fd: RawFd) -> isize {
 /// Die with the parent `expected`. Darwin has no parent-death signal, so a
 /// thread waits on the parent's exit and kills this process. Fails with ESRCH
 /// when the parent is already gone.
+#[cfg(target_os = "macos")]
 pub(crate) fn exit_with_parent(expected: libc::pid_t) -> io::Result<()> {
     // SAFETY: success returns one fresh descriptor.
     let kq = owned(unsafe { libc::kqueue() })?;
@@ -470,11 +474,11 @@ pub(crate) fn thread_minor_faults() -> i64 {
 
 /// `<sys/proc_info.h>`'s flavor that lists a process's thread handles; the
 /// libc crate does not export it.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 const PROC_PIDLISTTHREADS: libc::c_int = 6;
 
 /// The names of this process's live threads.
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) fn thread_names() -> Vec<String> {
     let pid = std::process::id() as libc::c_int;
     let mut handles = vec![0u64; 4096];
@@ -530,6 +534,7 @@ pub(crate) const FD_DIR: &str = "/dev/fd";
 /// The PID an inherited listener's `LISTEN_PID` names: the launcher, this
 /// process's parent, since posix_spawn fixes the environment before the child
 /// has a PID (launch.md, "macOS").
+#[cfg(target_os = "macos")]
 pub(crate) fn activation_pid() -> u32 {
     // SAFETY: getppid takes no arguments.
     unsafe { libc::getppid() as u32 }
@@ -540,6 +545,7 @@ pub(crate) fn activation_pid() -> u32 {
 pub(crate) const ACTIVATION_PID_SHELL: &str = "$PPID";
 
 /// Whether the open descriptor `fd` is the running executable's file.
+#[cfg(target_os = "macos")]
 pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     // SAFETY: an all-zero stat is a valid output record; fstat writes one.
@@ -684,4 +690,9 @@ pub(crate) fn mappings() -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) fn exit_with_parent(_: libc::pid_t) -> io::Result<()> {
+    Err(io::Error::from_raw_os_error(libc::ENOTSUP))
 }

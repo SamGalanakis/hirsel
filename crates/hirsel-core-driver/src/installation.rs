@@ -25,6 +25,7 @@
 //! (glibc, libstdc++, libgcc_s) stay the system's.
 use crate::{CoreImage, Meter, PackageProduct};
 use hirsel_core_ids::ContentHash;
+use hirsel_core_layout::Target;
 pub(crate) use hirsel_llvm_lazy::compiler_executable;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -32,7 +33,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "hirsel-core-toolchain.json";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 /// The installed compiler's name in its prefix.
 const EXECUTABLE: &str = "hirsel";
 
@@ -48,12 +49,19 @@ pub enum Observation {
 pub struct Flavour {
     pub observation: Observation,
     pub record: bool,
+    pub embedded: bool,
 }
 
 impl Flavour {
     pub const PLAIN: Self = Self {
         observation: Observation::None,
         record: false,
+        embedded: false,
+    };
+
+    pub const EMBEDDED: Self = Self {
+        embedded: true,
+        ..Self::PLAIN
     };
 
     pub const RECORDING: Self = Self {
@@ -64,6 +72,7 @@ impl Flavour {
     pub const PROF: Self = Self {
         observation: Observation::Prof,
         record: false,
+        embedded: false,
     };
 
     pub const PROF_RECORDING: Self = Self {
@@ -74,6 +83,7 @@ impl Flavour {
     pub const OBSERVED: Self = Self {
         observation: Observation::Observed,
         record: false,
+        embedded: false,
     };
 
     pub const OBSERVED_RECORDING: Self = Self {
@@ -82,6 +92,9 @@ impl Flavour {
     };
 
     fn label(self) -> &'static str {
+        if self.embedded {
+            return "embed runtime";
+        }
         match (self.observation, self.record) {
             (Observation::None, false) => "runtime",
             (Observation::None, true) => "recording runtime",
@@ -140,6 +153,7 @@ impl Registration {
         let file: RegistrationFile = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         let mut runtimes = BTreeMap::new();
         for row in file.runtimes {
+            check_runtime_slot(&row.target, row.flavour)?;
             if runtimes
                 .insert((row.flavour, row.target), row.path)
                 .is_some()
@@ -603,16 +617,28 @@ pub(crate) fn archive_defines_symbol(bytes: &[u8], symbol: &[u8]) -> bool {
     false
 }
 
-fn read_runtime(path: &Path, target: &str, flavour: Flavour) -> io::Result<Vec<u8>> {
-    if ![
-        "x86_64-unknown-linux-gnu",
-        "aarch64-unknown-linux-gnu",
-        "aarch64-apple-darwin",
-    ]
-    .contains(&target)
-    {
-        return Err(io::Error::other("unsupported installed runtime target"));
+fn check_runtime_slot(target: &str, flavour: Flavour) -> io::Result<()> {
+    let target = Target::from_triple(target)
+        .ok_or_else(|| io::Error::other("unsupported installed runtime target"))?;
+    let embed_only = match target {
+        Target::X86_64Linux | Target::Aarch64Linux | Target::Aarch64Darwin => false,
+        Target::Aarch64Ios | Target::Aarch64IosSim => true,
+    };
+    if embed_only && !flavour.embedded {
+        return Err(io::Error::other(
+            "iOS targets have only an embed runtime slot",
+        ));
     }
+    if flavour.embedded && flavour != Flavour::EMBEDDED {
+        return Err(io::Error::other(
+            "the embed runtime slot has no recording or observation flavour",
+        ));
+    }
+    Ok(())
+}
+
+fn read_runtime(path: &Path, target: &str, flavour: Flavour) -> io::Result<Vec<u8>> {
+    check_runtime_slot(target, flavour)?;
     let bytes = std::fs::read(path)?;
     check_runtime(path, &bytes, flavour.record)?;
     let prof = flavour.observation == Observation::Prof;
@@ -870,4 +896,32 @@ pub(crate) fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<(
         .ok_or_else(|| io::Error::other(format!("{} has no directory", path.display())))?;
     std::fs::create_dir_all(parent)?;
     crate::executable::write(path, bytes, mode)
+}
+
+#[cfg(test)]
+#[test]
+fn ios_installation_has_only_embed_runtime_slots() {
+    let prefix = tempfile::tempdir().unwrap();
+    let archive = PathBuf::from("embed/libhirsel_core_rt.a");
+    let mut registration = Registration::default();
+    for target in ["aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+        registration
+            .runtimes
+            .insert((Flavour::EMBEDDED, target.to_string()), archive.clone());
+    }
+    registration.write(prefix.path()).unwrap();
+
+    let installed = Installed::at(prefix.path()).unwrap().unwrap();
+    for target in ["aarch64-apple-ios", "aarch64-apple-ios-sim"] {
+        assert_eq!(
+            installed.runtime(target, Flavour::EMBEDDED),
+            Some(prefix.path().join(&archive))
+        );
+        assert!(installed.runtime(target, Flavour::PLAIN).is_none());
+        let error = read_runtime(&archive, target, Flavour::PLAIN).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "iOS targets have only an embed runtime slot"
+        );
+    }
 }

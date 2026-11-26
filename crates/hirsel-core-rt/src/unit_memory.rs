@@ -868,7 +868,7 @@ impl SharedMemory for Memory {
             let launch = unsafe { &*cell.0 };
             launch
                 .get_or_init(|| {
-                    let launch = Metadata::native(&target, n_place, describe);
+                    let launch = crate::host::native_metadata(&target, n_place, describe);
                     let _ = launch.digest();
                     launch
                 })

@@ -180,7 +180,13 @@ unsafe fn connect(
             let cache = { (*state.cache).get().system.clone() };
             // The first System call can read files. Load them on the caller's
             // stack, outside the scheduler's socket callback and registry lock.
-            state.roots = Some(cache.get_or_init(crate::os_tls::system_roots).clone());
+            match cache.get_or_init(crate::host::trust::system_roots) {
+                Ok(roots) => state.roots = Some(roots.clone()),
+                Err(code) => {
+                    net::hirsel_core_socket_drop(context, key);
+                    return crate::os_net::error(*code);
+                }
+            }
         }
         let verified = state.name.as_ref().unwrap().clone();
         let canonical = match &verified {

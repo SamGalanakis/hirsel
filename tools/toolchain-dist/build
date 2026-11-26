@@ -197,7 +197,7 @@ def witness(output):
 
 def fresh_witness(prefix):
     """Run the installed CLI in an empty root with a read-only prefix."""
-    targets = PRODUCT['runtime_targets']
+    targets = [triple for triple, row in PRODUCT['runtime_targets'].items() if 'platform' in row]
 
     relocated = '/opt/relocated-hirsel'
     sandbox = ['bwrap', '--unshare-all', '--die-with-parent',
@@ -255,14 +255,16 @@ def accept_fresh(passed, prefix, targets):
     observation_labels = {'none': '', 'prof': 'profiling ', 'observed': 'charge observation '}
     slots = {}
     for slot, config in PRODUCT['runtime_slots'].items():
+        if 'buck_suffix' not in config:
+            continue
         observation = config['observation']
         record = 'record' in config['features']
         if other := slots.get((observation, record)):
             raise ValueError(f'{slot} and {other} declare the same runtime flavour {(observation, record)}')
         slots[observation, record] = slot
     rows = registration['runtimes']
-    expected = {(target, observation, record) for target in targets for observation, record in slots}
-    registered = {(row['target'], row['observation'], row['record']) for row in rows}
+    expected = {(target, observation, record, False) for target in targets for observation, record in slots}
+    registered = {(row['target'], row['observation'], row['record'], row['embedded']) for row in rows}
     if registered != expected:
         raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '
                          f'extra {sorted(registered - expected)}')

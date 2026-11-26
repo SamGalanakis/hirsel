@@ -400,7 +400,7 @@ impl OsProcess {
             } else {
                 None
             };
-            let digest = launch_options::receive_launch_image()?;
+            let digest = crate::host::inherited::receive_launch_image()?;
             // Fd 3 is the inherited listener and fd 4 is the control socket.
             // Take the launcher's dedicated report descriptor before opening grants.
             let wake_report = if wake {
@@ -865,7 +865,7 @@ pub unsafe extern "C" fn hirsel_core_os_process_new(config: *const OsConfig) -> 
         OsProcess::new(
             &(*config).with_default_operations(),
             OsProvider::probe_directory,
-            Metadata::native,
+            crate::host::native_metadata,
         )
     } {
         Ok(process) => OpenProcess {
@@ -1056,7 +1056,7 @@ pub(crate) fn native_metadata(target: &str, n_place: u64, describe: bool) -> Met
     if let Some(memory) = crate::units::memory() {
         memory.native_metadata(target, n_place, describe)
     } else {
-        Metadata::native(target, n_place, describe)
+        crate::host::native_metadata(target, n_place, describe)
     }
 }
 
@@ -1159,7 +1159,7 @@ unsafe fn run_with_probe(
             std::ptr::null(),
             entry,
             probe,
-            Metadata::native,
+            crate::host::native_metadata,
             |config, entry| crate::process::launch(config, entry),
         )
     }

@@ -1,0 +1,82 @@
+use super::{Key, errno};
+use std::collections::BTreeSet;
+
+/// Every IPv4 and IPv6 address assigned now, from `getifaddrs`.
+pub(super) fn snapshot() -> Result<BTreeSet<Key>, i32> {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: `list` receives a list this function frees below.
+    if unsafe { libc::getifaddrs(&mut list) } < 0 {
+        return Err(errno());
+    }
+    let mut held = BTreeSet::new();
+    let mut entry = list;
+    while !entry.is_null() {
+        // SAFETY: `entry` is a node of the list `getifaddrs` returned.
+        let ifa = unsafe { &*entry };
+        entry = ifa.ifa_next;
+        // SAFETY: a non-null `ifa_addr` and `ifa_netmask` point at sockaddrs
+        // of `sa_len` bytes; `ifa_name` is a C string.
+        let Some((family, ip)) = (unsafe { address(ifa.ifa_addr) }) else {
+            continue;
+        };
+        // A netmask may be shortened to its nonzero bytes and carry no
+        // family; it is read in the address's family, and a missing one is
+        // a host route.
+        let mask = unsafe { bytes(ifa.ifa_netmask) };
+        let prefix = match family {
+            0 => mask.map_or(32, |m| {
+                u32::from_ne_bytes(m[4..8].try_into().unwrap()).count_ones()
+            }),
+            _ => mask.map_or(128, |m| {
+                u128::from_ne_bytes(m[8..24].try_into().unwrap()).count_ones()
+            }),
+        } as u8;
+        let index = unsafe { libc::if_nametoindex(ifa.ifa_name) };
+        held.insert((family, ip, index, prefix));
+    }
+    // SAFETY: `list` came from `getifaddrs` and is freed once.
+    unsafe { libc::freeifaddrs(list) };
+    Ok(held)
+}
+
+/// The bytes of a sockaddr, at most `sa_len` of them read and the rest zero.
+///
+/// # Safety
+/// `addr` is null or points at `sa_len` readable bytes.
+unsafe fn bytes(addr: *const libc::sockaddr) -> Option<[u8; size_of::<libc::sockaddr_in6>()]> {
+    if addr.is_null() {
+        return None;
+    }
+    let mut out = [0u8; size_of::<libc::sockaddr_in6>()];
+    // SAFETY: the caller's contract; at most `sa_len` bytes are read.
+    let len = usize::from(unsafe { (*addr).sa_len }).min(out.len());
+    unsafe { std::ptr::copy_nonoverlapping(addr.cast::<u8>(), out.as_mut_ptr(), len) };
+    Some(out)
+}
+
+/// An IPv4 or IPv6 sockaddr as (family as in `Key`, its bits). A link-local
+/// IPv6 address has its scope written into bits 16 to 31 by the kernel, which
+/// is cleared so the key is the address.
+///
+/// # Safety
+/// `addr` is null or points at `sa_len` readable bytes.
+unsafe fn address(addr: *const libc::sockaddr) -> Option<(u8, u128)> {
+    // SAFETY: the caller's contract.
+    let raw = unsafe { bytes(addr) }?;
+    // `sin_len`, `sin_family`, the port, then `sin_addr`; `sin6_addr` follows
+    // `sin6_flowinfo`.
+    match i32::from(raw[1]) {
+        libc::AF_INET => Some((
+            0,
+            u128::from(u32::from_be_bytes(raw[4..8].try_into().unwrap())),
+        )),
+        libc::AF_INET6 => {
+            let mut ip = u128::from_be_bytes(raw[8..24].try_into().unwrap());
+            if ip >> 118 == 0x3fa {
+                ip &= !(0xffff << 96);
+            }
+            Some((1, ip))
+        }
+        _ => None,
+    }
+}

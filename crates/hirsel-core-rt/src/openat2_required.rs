@@ -40,7 +40,7 @@ fn open_beneath(directory: c_int) -> c_int {
 }
 
 /// A confined read-only open of `.` beneath `directory`, or -1 with errno.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn open_beneath(directory: c_int) -> c_int {
     /// `O_RESOLVE_BENEATH` in the macOS SDK's `fcntl.h`; `O_RDONLY` is zero.
     const O_RESOLVE_BENEATH: c_int = 0x1000;

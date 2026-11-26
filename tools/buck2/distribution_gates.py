@@ -2,8 +2,26 @@
 
 import importlib.util
 import json
+import tomllib
 
 from compiler_source import toolchain_packages
+
+
+def release_product(reads):
+    return tomllib.loads(reads.text(reads.root / "tools/toolchain-dist/product.toml"))
+
+
+def archive_slots(reads):
+    return {name: slot for name, slot in release_product(reads)["runtime_slots"].items()
+            if "buck_suffix" in slot}
+
+
+def runtime_product_bzl(reads, starlark, header):
+    product = release_product(reads)
+    platforms = {triple: row["platform"] for triple, row in product["runtime_targets"].items()
+                 if "platform" in row}
+    return (header + f"RUNTIME_TARGETS = {starlark(platforms, 0)}\n"
+            + f"HOSTS = {starlark(product['hosts'], 0)}\n")
 
 
 def adapted_citations_present(reads):

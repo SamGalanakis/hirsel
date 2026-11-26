@@ -73,7 +73,7 @@ impl LazyCache {
 
 #[derive(Default)]
 pub(crate) struct Cache {
-    pub system: Arc<OnceLock<Arc<RootCertStore>>>,
+    pub system: Arc<OnceLock<Result<Arc<RootCertStore>, i32>>>,
     custom_roots: VecDeque<TrustedRoots>,
     clients: VecDeque<(Arc<RootCertStore>, Arc<ClientConfig>)>,
 }
@@ -318,12 +318,6 @@ impl Drop for Slot {
 
 fn payload_len(header: &[u8]) -> usize {
     usize::from(u16::from_be_bytes([header[3], header[4]]))
-}
-
-pub(crate) fn system_roots() -> Arc<RootCertStore> {
-    let mut store = RootCertStore::empty();
-    store.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-    Arc::new(store)
 }
 
 pub(crate) fn sha256(bytes: &[u8]) -> ring::digest::Digest {

@@ -154,11 +154,15 @@ pub fn peer_params(e: Endpoint, id: ConnectionHandle) -> Option[PeerParams] {
     Some(PeerParams(max_idle_ms: p.max_idle_ms, max_udp_payload: p.max_udp_payload, max_ack_delay_ms: p.max_ack_delay_ms, max_datagram_frame: p.max_datagram_frame, reset_stream_at: p.reset_stream_at, active_cid_limit: p.active_cid_limit))
 }
 
+/// RFC 9002 §6.2.1's PTO, max_ack_delay included and without backoff.
 pub fn pto_ns(e: Endpoint, id: ConnectionHandle) -> u64 {
-    if let None = slot_at(e, id) {
+    let Some(i) = slot_at(e, id) else {
         return 0
     }
-    INITIAL_PTO_NS
+    let Some(c) = e.connections[i] else {
+        return 0
+    }
+    recovery.pto(c.recovery)
 }
 
 pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Bytes) {
@@ -187,6 +191,9 @@ fn release_connection(mut e: Endpoint, take c: Connection) {
 
 pub fn timeout(mut e: Endpoint, now: u64, mut events: List[Event]) {
     for i in 0u64 .. list.len(e.connections) {
+        if let Some(mut c) = e.connections[i] {
+            recovery_due(mut c, now)
+        }
         if expired(e.connections[i], now) {
             if let Some(take gone) = replace(mut e.connections[i], None) {
                 if open_life(gone) {

@@ -8,7 +8,7 @@ fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot
         Closing(f) if !f.pending => return,
         Closing(f) => {
             if let None = c.deadline {
-                c.deadline = Some(deadline_after(now, 3 * INITIAL_PTO_NS))
+                c.deadline = Some(deadline_after(now, three_pto(c)))
             }
             limit = order.min(limit, f.max_bytes)
             Some(clone(f.wire))
@@ -17,28 +17,64 @@ fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot
     }
     let handle = c.handle
     let peer = c.peer
+    let ecn = recovery.ecn_mark(c.recovery)
+    c.wake = None
     if let None = closing {
-        stage_level(mut staged, mut c.initial, Initial, c.peer_id, c.local_id, false, None, now, slot, handle, peer, limit, mut out, mut tx)
-        stage_level(mut staged, mut c.encrypted, Handshake, c.peer_id, c.local_id, false, None, now, slot, handle, peer, limit, mut out, mut tx)
-        stage_level(mut staged, mut c.application, OneRtt, c.peer_id, c.local_id, c.handshake_done, None, now, slot, handle, peer, limit, mut out, mut tx)
+        // RFC 9002 §7 and §7.7: new ack-eliciting data waits for congestion window
+        // and pacer room for a whole packet; acknowledgments and probes do not.
+        let mut pending = 0u64
+        let mut limited = true
+        for level in 0u64 .. 3 {
+            let mut send = recovery.window_allows(c.recovery, pending, limit)
+            if send {
+                if let Some(at) = recovery.pacing_delay(c.recovery, now, pending, limit) {
+                    send = false
+                    c.wake = Some(at)
+                }
+            }
+            limited = limited && send
+            pending += match level {
+                0 => stage_level(mut staged, mut c.initial, Initial, c.peer_id, c.local_id, false, None, now, send, ecn, slot, handle, peer, limit, mut out, mut tx),
+                1 => stage_level(mut staged, mut c.encrypted, Handshake, c.peer_id, c.local_id, false, None, now, send, ecn, slot, handle, peer, limit, mut out, mut tx),
+                _ => stage_level(mut staged, mut c.application, OneRtt, c.peer_id, c.local_id, c.handshake_done, None, now, send, ecn, slot, handle, peer, limit, mut out, mut tx),
+            }
+        }
+        // B.5: a sender held back by nothing it controls is application limited.
+        recovery.set_app_limited(mut c.recovery, limited)
     } else if let Some(_) = c.application.send {
-        stage_level(mut staged, mut c.application, OneRtt, c.peer_id, c.local_id, false, closing, now, slot, handle, peer, limit, mut out, mut tx)
+        let _ = stage_level(mut staged, mut c.application, OneRtt, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut out, mut tx)
     } else if let Some(_) = c.encrypted.send {
-        stage_level(mut staged, mut c.encrypted, Handshake, c.peer_id, c.local_id, false, closing, now, slot, handle, peer, limit, mut out, mut tx)
+        let _ = stage_level(mut staged, mut c.encrypted, Handshake, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut out, mut tx)
     } else {
-        stage_level(mut staged, mut c.initial, Initial, c.peer_id, c.local_id, false, closing, now, slot, handle, peer, limit, mut out, mut tx)
+        let _ = stage_level(mut staged, mut c.initial, Initial, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut out, mut tx)
     }
 }
 
-fn stage_level(mut staged: List[Staged], mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], now: u64, slot: u64, handle: ConnectionHandle, peer: Addr, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
+/// The in-flight bytes staged, or 0.
+fn stage_level(mut staged: List[Staged], mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], now: u64, send: bool, ecn: u8, slot: u64, handle: ConnectionHandle, peer: Addr, mtu: u64, mut out: Bytes, mut tx: List[Output]) -> u64 {
     let start = list.len(out)
     let limit = order.min(mtu, list.capacity(out) - start)
     if list.len(tx) == list.capacity(tx) {
-        return
+        return 0
     }
-    if let Some(p) = tx_space(mut s, kind, dest, source, done, closing, limit, mut out) {
-        list.push(mut staged, Packet(slot: slot, handle: handle, kind: kind, packet: p))
-        list.push(mut tx, Transmit(to: peer, at: start, len: list.len(out) - start, ecn: 0, send_at: now))
+    let Some(p) = tx_space(mut s, kind, dest, source, done, closing, limit, now, send, mut out) else {
+        return 0
+    }
+    let size = if p.eliciting || kind == Initial {
+        p.size
+    } else {
+        0u64
+    }
+    list.push(mut staged, Packet(slot: slot, handle: handle, kind: kind, packet: p))
+    list.push(mut tx, Transmit(to: peer, at: start, len: list.len(out) - start, ecn: ecn, send_at: now))
+    size
+}
+
+fn earliest(a: Option[u64], b: Option[u64]) -> Option[u64] {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(order.min(x, y)),
+        (Some(x), None) => Some(x),
+        _ => b,
     }
 }
 
@@ -46,11 +82,10 @@ fn next_deadline(e: Endpoint) -> Option[u64] {
     let mut first: Option[u64] = None
     for connection in e.connections {
         if let Some(c) = connection {
-            if let Some(deadline) = c.deadline {
-                first = Some(match first {
-                    None => deadline,
-                    Some(previous) => order.min(previous, deadline),
-                })
+            first = earliest(first, c.deadline)
+            if open_life(c) {
+                first = earliest(first, recovery.timer(c.recovery))
+                first = earliest(first, c.wake)
             }
         }
     }
@@ -87,13 +122,20 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
 fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedPacket) {
     match kind {
         Initial => commit_space(mut c.initial, p),
-        Handshake => {
-            commit_space(mut c.encrypted, p)
-            if let Client = c.side {
-                discard(mut c.initial)
-            }
-        },
+        Handshake => commit_space(mut c.encrypted, p),
         _ => commit_space(mut c.application, p),
+    }
+    if open_life(c) {
+        // B.4: a padded Initial counts in flight even when it only acknowledges.
+        let ect = recovery.ecn_mark(c.recovery) != 0
+        recovery.on_sent(mut c.recovery, now, space_index(packet_level(kind)), p.number, p.size, p.eliciting, p.eliciting || kind == Initial, ect)
+    }
+    if kind == Handshake {
+        if let Client = c.side {
+            // RFC 9001 §4.9.1: a client discards Initial keys when it first sends a
+            // Handshake packet.
+            drop_space(mut c, recovery.INITIAL, now)
+        }
     }
     if p.done {
         c.handshake_done = false

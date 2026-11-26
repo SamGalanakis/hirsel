@@ -260,3 +260,292 @@ fn cubic_matches_rfc9438() -> Result[(), ()] {
     }
     Ok(())
 }
+
+const SIM_NONE: u64 = 0xffffffffffffffff
+
+const SIM_END: u64 = 12000 * MS
+
+const SIM_CLIENT: Addr = Addr(ip: V4(0x0a000001), port: 4433)
+
+const SIM_SERVER: Addr = Addr(ip: V4(0x0a000002), port: 4433)
+
+const SIM_SOCKET: UdpOptions = UdpOptions(slots: 64, slot_bytes: 1536)
+
+pub type SimEnd: send {
+    client: bool,
+    clock: Clock,
+    socket: UdpSocket
+}
+
+pub type SimTrace: send {
+    sends: List[u64],
+    connected: u64,
+    closed: bool
+}
+
+fn long_idle() -> quic.TransportConfig {
+    let mut t = transport_config(None)
+    t.max_idle_ms = 30000
+    take t
+}
+
+fn sim_endpoint(client: bool) -> quic.Endpoint {
+    if client {
+        let mut e = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+        let _ = result.unwrap(quic.connect(mut e, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, long_idle()))
+        take e
+    } else {
+        result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), long_idle()))))
+    }
+}
+
+/// One end over sim.udp: run due timers, send until poll has nothing, then wait for a
+/// datagram or the endpoint's next deadline.
+fn sim_end(take plan: SimEnd) -> SimTrace waits {
+    let SimEnd(client, clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = sim_endpoint(client)
+    let mut trace = SimTrace(sends: list.new(), connected: SIM_NONE, closed: false)
+    let mut events: List[quic.Event] = list.new()
+    let mut data: Bytes = list.with_capacity(64 * 1536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= SIM_END {
+            break
+        }
+        quic.timeout(mut e, now, mut events)
+        let mut wake = SIM_END
+        for _ in 0u64 .. 64 {
+            let mut out: Bytes = list.with_capacity(16 * 1500)
+            let mut outputs: List[quic.Output] = list.with_capacity(16)
+            let next = quic.poll(mut e, now, mut out, mut outputs)
+            wake = match next {
+                Some(t) => order.min(t, SIM_END),
+                None => SIM_END,
+            }
+            let mut tx: List[UdpTx] = list.with_capacity(16)
+            for o in outputs {
+                if let Transmit(to: to, at: at, len: len, ecn: ecn, ..) = o {
+                    list.push(mut tx, UdpTx(to, at: at, len: len, ecn: ecn))
+                    list.push(mut trace.sends, now)
+                }
+            }
+            if list.len(tx) == 0 {
+                quic.committed(mut e, now, 0)
+                break
+            }
+            let k = result.unwrap(host.udp_send(mut socket, out, tx, Never))
+            quic.committed(mut e, now, k)
+        }
+        for event in events {
+            match event {
+                Connected(..) => {
+                    if trace.connected == SIM_NONE {
+                        trace.connected = now
+                    }
+                },
+                Closed(..) => {
+                    trace.closed = true
+                },
+            }
+        }
+        list.clear(mut events)
+        list.clear(mut data)
+        list.clear(mut packets)
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, order.max(wake, now + 1))) {
+            Ok(_) => (),
+            Error(TimedOut) => (),
+            Error(_) => fail("sim.udp receive failed"),
+        }
+        let at = host.mono_ns(clock)
+        for p in packets {
+            let UdpPacket(peer, at: start, len, truncated, ecn) = p
+            if !truncated {
+                quic.receive_datagram(mut e, at, peer, ecn, mut data, start, len, mut events)
+            }
+        }
+    }
+    take trace
+}
+
+/// bug: the client's Initial is not probed at RFC 9002's PTO with exponential backoff, a
+/// lost first flight strands the handshake, or a completed handshake keeps resending.
+/// oracle: RFC 9002 A.4 and A.8: kInitialRtt 333 ms gives PTO = 333 + 4 * 166.5 = 999 ms
+/// with no max_ack_delay before the handshake, doubled per consecutive PTO.
+@test
+fn loss_recovery_under_sim_udp(tasks: Tasks) -> Result[(), ()] waits {
+    // sim.udp draws one word for its ephemeral port, then one loss draw per datagram in
+    // send order (no jitter, reorder, duplication or rebinding). At 50% loss, word 0
+    // drops and the largest word keeps: the client's first three Initials are dropped.
+    let mut words: List[u64] = list.with_capacity(1004)
+    list.push(mut words, 0)
+    for _ in 0u64 .. 3 {
+        list.push(mut words, 0)
+    }
+    for _ in 0u64 .. 1000 {
+        list.push(mut words, 0xffffffffffffffff)
+    }
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take words)
+    let script = std.sim.world.Script(tail_seed: 1, streams: take streams)
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 50 * MS
+    config.loss = std.sim.udp.Loss(good_to_bad: 0, bad_to_good: 0, good_loss: 500000, bad_loss: 0)
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let (take client_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_CLIENT, SIM_SOCKET))
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_SERVER, SIM_SOCKET))
+    let client_task = task.spawn(tasks, bytes 16777216, SimEnd(client: true, clock, socket: take client_socket), sim_end)
+    let server_task = task.spawn(tasks, bytes 16777216, SimEnd(client: false, clock, socket: take server_socket), sim_end)
+    let c = result.unwrap(task.join(take client_task))
+    let s = result.unwrap(task.join(take server_task))
+    result.unwrap(task.join(take served))
+    // Sends at 0, then PTOs at 999, 999 + 1998 = 2997 and 2997 + 3996 = 6993 ms.
+    let expected =[0u64, 999 * MS, 2997 * MS, 6993 * MS]
+    if list.len(c.sends) < 4 {
+        fail("the client did not probe its lost Initial three times")
+    }
+    for i in 0u64 .. 4 {
+        eq("client Initial and probe times", c.sends[i], expected[i])
+    }
+    if c.connected == SIM_NONE || s.connected == SIM_NONE || c.closed || s.closed {
+        fail("the handshake did not complete after the fourth Initial")
+    }
+    // The fourth Initial crosses at 7043 ms; the handshake and HANDSHAKE_DONE take two
+    // more round trips of 100 ms. Nothing is in flight after that, so nothing is sent.
+    let quiet = 7500 * MS
+    for t in c.sends {
+        if t >= quiet {
+            fail("the client kept sending after the handshake")
+        }
+    }
+    for t in s.sends {
+        if t >= quiet {
+            fail("the server kept sending after the handshake")
+        }
+    }
+    Ok(())
+}
+
+type Datagram {
+    at: u64,
+    to_server: bool,
+    data: Bytes
+}
+
+type Sent {
+    at: u64,
+    server: bool,
+    first: u8
+}
+
+/// Send everything one end has at `now` onto a 10 ms path. The server's first datagram
+/// that starts with a short header is lost when `drop_done` is set.
+fn send_all(mut e: quic.Endpoint, now: u64, server: bool, drop_done: bool, mut dropped: bool, mut path: List[Datagram], mut log: List[Sent]) -> u64 {
+    let mut wake = SIM_NONE
+    for _ in 0u64 .. 64 {
+        let mut out: Bytes = list.with_capacity(16 * 1500)
+        let mut outputs: List[quic.Output] = list.with_capacity(16)
+        wake = match quic.poll(mut e, now, mut out, mut outputs) {
+            Some(t) => t,
+            None => SIM_NONE,
+        }
+        let mut count = 0u64
+        for o in outputs {
+            if let Transmit(at: at, len: len, ..) = o {
+                count += 1
+                let first = out[at]
+                list.push(mut log, Sent(at: now, server: server, first: first))
+                if server && drop_done && !dropped && first & 0x80 == 0 {
+                    dropped = true
+                } else {
+                    list.push(mut path, Datagram(at: now + 10 * MS, to_server: !server, data: clone(list.slice(out, at, at + len))))
+                }
+            }
+        }
+        quic.committed(mut e, now, count)
+        if count == 0 {
+            break
+        }
+    }
+    wake
+}
+
+fn connected(events: List[quic.Event]) -> bool {
+    for event in events {
+        if let Connected(..) = event {
+            return true
+        }
+    }
+    false
+}
+
+/// bug: a lost HANDSHAKE_DONE is never sent again, so the client never confirms the
+/// handshake or discards its Handshake keys and probes its Finished forever (QS3's known
+/// limit); or the server's Handshake keys outlive confirmation.
+/// oracle: RFC 9001 §4.1.2 and §4.9.2 (the server is confirmed at completion and sends
+/// HANDSHAKE_DONE; the client confirms on receiving it and discards Handshake keys) and
+/// RFC 9000 §13.3 (HANDSHAKE_DONE is sent again until acknowledged).
+@test
+fn handshake_done_is_retransmitted() -> Result[(), ()] {
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), long_idle()))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, long_idle()))
+    let mut path: List[Datagram] = list.new()
+    let mut log: List[Sent] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let mut at_server: List[quic.Event] = list.new()
+    let mut dropped = false
+    let horizon = 20000 * MS
+    let mut now = 0u64
+    while now < horizon {
+        let client_wake = send_all(mut client, now, false, true, mut dropped, mut path, mut log)
+        let server_wake = send_all(mut server, now, true, true, mut dropped, mut path, mut log)
+        let mut next = order.min(horizon, order.min(client_wake, server_wake))
+        for d in path {
+            next = order.min(next, d.at)
+        }
+        now = order.max(next, now + 1)
+        let mut later: List[Datagram] = list.with_capacity(list.len(path))
+        for d in path {
+            if d.at <= now {
+                let mut wire: Bytes = clone(d.data)
+                let len = list.len(wire)
+                if d.to_server {
+                    quic.receive_datagram(mut server, now, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+                } else {
+                    quic.receive_datagram(mut client, now, SERVER_ADDR, 0, mut wire, 0, len, mut at_client)
+                }
+            } else {
+                list.push(mut later, clone(d))
+            }
+        }
+        path = take later
+        quic.timeout(mut client, now, mut at_client)
+        quic.timeout(mut server, now, mut at_server)
+    }
+    if !dropped || !connected(at_client) || !connected(at_server) || list.len(at_client) != 1 || list.len(at_server) != 1 {
+        fail("both ends connect, with the first HANDSHAKE_DONE lost and no close")
+    }
+    let mut short = 0u64
+    let mut last = 0u64
+    for s in log {
+        if s.server && s.first & 0x80 == 0 {
+            short += 1
+        }
+        last = s.at
+    }
+    // The server sends HANDSHAKE_DONE again at its PTO; the client confirms, drops its
+    // Handshake keys and acknowledges, and then neither end has anything in flight. A
+    // client still probing its Finished at doubling PTOs would send past 5 s.
+    if short < 2 {
+        fail("the server did not send HANDSHAKE_DONE again")
+    }
+    if last >= 5000 * MS {
+        fail("an end kept retransmitting after the handshake")
+    }
+    Ok(())
+}

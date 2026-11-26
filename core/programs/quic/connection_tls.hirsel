@@ -42,7 +42,7 @@ fn accept_tls(mut c: Connection, random: Random, mtu: u16, ids: handshake.PeerCo
     Ok(())
 }
 
-fn advance_tls(mut c: Connection, random: Random, mtu: u16, level: packet.Space, wire: Bytes, mut events: List[Event]) -> Result[(), handshake.Error] {
+fn advance_tls(mut c: Connection, now: u64, random: Random, mtu: u16, level: packet.Space, wire: Bytes, mut events: List[Event]) -> Result[(), handshake.Error] {
     let original: Option[Bytes] = match c.side {
         Client => Some(clone(c.original_id)),
         Server => None,
@@ -69,11 +69,14 @@ fn advance_tls(mut c: Connection, random: Random, mtu: u16, level: packet.Space,
             if !install_keys(mut c.application, mut keys, Application) {
                 return Error(LocalFailure)
             }
+            recovery.set_max_ack_delay(mut c.recovery, now, int.saturating_mul(params.max_ack_delay_ms, 1000000))
             c.params = Some(take params)
             c.peer_pin = handshake.peer_pin(h)
             if let Server = c.side {
+                // RFC 9001 §4.1.2: the server's handshake is confirmed when it
+                // completes; HANDSHAKE_DONE is sent until acknowledged.
                 c.handshake_done = true
-                discard(mut c.encrypted)
+                confirm(mut c, now)
             }
             list.push(mut events, Connected(c: c.handle, alpn: take alpn))
         }
@@ -91,13 +94,13 @@ fn next_tls(mut c: Connection, level: packet.Space) -> Result[Option[Bytes], u64
     }
 }
 
-fn drain_tls(mut c: Connection, random: Random, mtu: u16, level: packet.Space, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+fn drain_tls(mut c: Connection, now: u64, random: Random, mtu: u16, level: packet.Space, mut events: List[Event]) -> Result[(), ConnectionFailure] {
     while true {
         match next_tls(mut c, level) {
             Error(code) => return Error(Wire(code, 0x06)),
             Ok(None) => return Ok(()),
             Ok(Some(wire)) => {
-                if let Error(e) = advance_tls(mut c, random, mtu, level, wire, mut events) {
+                if let Error(e) = advance_tls(mut c, now, random, mtu, level, wire, mut events) {
                     return Error(Tls(e))
                 }
             },

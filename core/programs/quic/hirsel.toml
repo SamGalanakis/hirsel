@@ -30,6 +30,7 @@ std = { major = 1 }
 
 [tests]
 limit = 67108864
+grants = ["Tasks"]
 
 [tests.sources]
 "laws.hirsel" = "laws"

@@ -133,6 +133,9 @@ pub fn set_max_ack_delay(mut r: Recovery, now: u64, ns: u64) {
 }
 
 pub fn set_handshake_keys(mut r: Recovery, now: u64) {
+    if r.handshake_keys {
+        return
+    }
     r.handshake_keys = true
     set_timer(mut r, now)
 }

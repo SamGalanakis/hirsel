@@ -1,16 +1,25 @@
 type StagedPacket {
     number: u64,
+    size: u64,
+    crypto_at: u64,
     crypto_end: u64,
+    resent: bool,
     ack: bool,
     done: bool,
     close: bool,
     eliciting: bool
 }
 
-fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, mut out: Bytes) -> Option[StagedPacket] {
+/// The ack_delay_exponent this endpoint advertises (RFC 9000 §18.2 default).
+const ACK_DELAY_EXPONENT: u64 = 3
+
+/// Stage one packet of `kind`. Without `send`, the congestion controller or pacer holds
+/// new ack-eliciting frames back; an owed probe is sent regardless (RFC 9002 §7.5).
+fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, mut out: Bytes) -> Option[StagedPacket] {
     if let None = s.send {
         return None
     }
+    let start = list.len(out)
     let padding = if kind == Initial {
         1200u64
     } else {
@@ -22,10 +31,13 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
     }
     let cap = limit - header_bound - 16
     let mut payload: Bytes = list.with_capacity(cap)
+    let mut crypto_at = s.crypto_committed
     let mut crypto_end = s.crypto_committed
+    let mut resent = false
     let mut ack = false
     let mut done_sent = false
     let mut closed = false
+    let mut eliciting = false
     if let Some(f) = closing {
         let len = order.min(list.len(f.reason), cap - order.min(cap, 27))
         let reason = codec.Span(at: 0, len: len)
@@ -42,10 +54,24 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
         closed = true
     } else {
         if s.ack_pending {
+            // RFC 9000 §13.2.5: the delay since the largest packet arrived, in units of
+            // 2^ack_delay_exponent microseconds. RFC 9002 §5.3 lets Initial and
+            // Handshake delays be ignored, so those report 0.
+            let delay = if kind == OneRtt && now > s.largest_at {
+                ((now - s.largest_at) / 1000) >> ACK_DELAY_EXPONENT
+            } else {
+                0u64
+            }
+            let counts = s.ecn_in
+            let ecn: Option[codec.EcnCounts] = if counts.ect0 + counts.ect1 + counts.ce == 0 {
+                None
+            } else {
+                Some(counts)
+            }
             let mut count = list.len(s.received)
             while count > 0 {
                 let ranges: List[codec.AckRange] = clone(list.slice(s.received, 0, count))
-                let f: codec.Frame = Ack(codec.AckFields(delay: 0, ranges: take ranges, ecn: None))
+                let f: codec.Frame = Ack(codec.AckFields(delay: delay, ranges: take ranges, ecn: ecn))
                 if let Ok(()) = codec.write_frame(f, b"", mut payload) {
                     ack = true
                     break
@@ -53,16 +79,37 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
                 count -= 1
             }
         }
-        if done && list.len(payload) < cap {
-            if let Ok(()) = codec.write_frame(HandshakeDone, b"", mut payload) {
-                done_sent = true
+        let probe = s.probes > 0
+        if send || probe {
+            if done && list.len(payload) < cap {
+                if let Ok(()) = codec.write_frame(HandshakeDone, b"", mut payload) {
+                    done_sent = true
+                    eliciting = true
+                }
             }
-        }
-        if list.len(s.crypto_out) > s.crypto_committed && cap - list.len(payload) > 17 {
-            let len = order.min(list.len(s.crypto_out) - s.crypto_committed, cap - list.len(payload) - 17)
-            let frame: codec.Frame = Crypto(offset: s.crypto_committed, data: codec.Span(at: s.crypto_committed, len: len))
-            if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut payload) {
-                crypto_end += len
+            let room = cap - order.min(cap, list.len(payload) + 17)
+            if list.len(s.resend) != 0 && room > 0 {
+                let r = s.resend[0]
+                let len = order.min(r.end - r.at, room)
+                let frame: codec.Frame = Crypto(offset: r.at, data: codec.Span(at: r.at, len: len))
+                if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut payload) {
+                    crypto_at = r.at
+                    crypto_end = r.at + len
+                    resent = true
+                    eliciting = true
+                }
+            } else if list.len(s.crypto_out) > s.crypto_committed && room > 0 {
+                let len = order.min(list.len(s.crypto_out) - s.crypto_committed, room)
+                let frame: codec.Frame = Crypto(offset: s.crypto_committed, data: codec.Span(at: s.crypto_committed, len: len))
+                if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut payload) {
+                    crypto_end += len
+                    eliciting = true
+                }
+            }
+            if probe && !eliciting && list.len(payload) < cap {
+                if let Ok(()) = codec.write_frame(Ping, b"", mut payload) {
+                    eliciting = true
+                }
             }
         }
     }
@@ -72,11 +119,21 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
     let Some(number) = seal_packet(mut s, kind, dest, source, payload, padding, mut out) else {
         return None
     }
-    Some(StagedPacket(number: number, crypto_end: crypto_end, ack: ack, done: done_sent, close: closed, eliciting: done_sent || crypto_end > s.crypto_committed))
+    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting))
 }
 
 fn commit_space(mut s: Space, p: StagedPacket) {
     record_sent(mut s, p.number)
-    s.crypto_committed = p.crypto_end
+    if p.resent {
+        remove_range(mut s.resend, p.crypto_at, p.crypto_end)
+    } else {
+        s.crypto_committed = p.crypto_end
+    }
     s.ack_pending = s.ack_pending && !p.ack
+    if p.eliciting {
+        list.push(mut s.flights, Flight(number: p.number, crypto_at: p.crypto_at, crypto_end: p.crypto_end, done: p.done))
+        if s.probes > 0 {
+            s.probes -= 1
+        }
+    }
 }

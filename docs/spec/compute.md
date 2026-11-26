@@ -585,14 +585,13 @@ in observable results, step counts, failure order, or replay tapes:
   pinned Wasmtime engine.
 - **Fresh `Store` per task.** Every task receives a fresh `Store` and fresh handles as its
   isolation boundary; globals, tables, handles, and fuel never survive across tasks.
-- **Vacant slot pooling and full reservation.** Pooled vacant backing slots retain the **full
-  memory reservation** (4 GiB address space plus 32 MiB guard per linear memory on the pinned
-  engine). A release's declared memory limit is never shrunk silently
-  ([FFI-13](foreign.md#ffi-13-instances-bounds-and-steps),
-  [FFI-14](foreign.md#ffi-14-determinism-traps-and-replay)); pool classes are keyed so every
-  module runs in a class covering its declared limit. **Reusing pooled slots across tasks is held
-  pending the security and isolation audit** proving zero stale memory, table, global, or handle
-  observations.
+- **Slot reuse.** A discarded instance's linear-memory slot and fiber stack are reused by the
+  next instance, because laws FW30 and FW31 hold
+  ([FFI-13 Slot reuse](foreign.md#ffi-13-instances-bounds-and-steps)). A slot keeps the full
+  reservation (4 GiB of address space plus a 32 MiB guard on each side on the pinned engine) and
+  is reset before reuse by mapping fresh anonymous `PROT_NONE` pages over every page it opened,
+  so the next instance starts with zero bytes at its own initial size and is charged from its own
+  grant. If those laws stop holding, every instance gets fresh backing.
 - **Reference-entry `inst_steps` pricing (no closed-form price).** Instantiation and optional
   guest `_initialize` are priced strictly by the **pinned reference entry point** (CoW off),
   preserving exact first-call failure and slice order:

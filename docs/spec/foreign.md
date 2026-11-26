@@ -1385,6 +1385,19 @@ process holds about 30,000 live instances in a 47-bit user address space; the ne
 instantiation's reservation is refused by the host and stops the run with `HostMemory`. A
 program that needs more live instances spawns fewer tasks that call contained code.
 
+**Slot reuse.** A discarded instance's linear-memory reservation and its fiber stack go back to
+a per-process idle cache, and the next instantiation or call takes one before it maps a new
+one. A returned linear-memory slot is reset by mapping fresh anonymous `PROT_NONE` pages over
+the whole range it opened (`mmap` with `MAP_FIXED`), so the next instance sees zero bytes, its
+own initial size and nothing accessible past it; its grows are charged from its own grant, as a
+fresh reservation's are. Tables, globals and the instance's context are never cached: Wasmtime
+makes them new for every instance. A returned fiber stack keeps its bytes, as Wasmtime's own
+stack pool does without `async_stack_zeroing`: guest code cannot address the native stack. Each cache holds at
+most `min(root limit / 2 MiB, 1024)` idle slots; a slot past that is unmapped. The cache never
+holds a live instance's slot, so the live-instance ceiling above is unchanged. A refused
+reservation, page grant or grow on a cached slot stops the run with `HostMemory`, as on a fresh
+one.
+
 **Steps.** A contained call takes one step, as every foreign call does (FFI-2). Before anything
 is copied in, it takes one step for each 16 KiB, or part, of each loan it copies in, and one
 more for each 16 KiB, or part, of each exclusive loan it will copy back, as `crc32c.update`
@@ -1806,7 +1819,8 @@ manifests.
 | **FW27** a guest overflow replays | a stack overflow point that depends on the run, not the build | `hirsel test --replay` of a test that runs `isolate { recurse(f, 10⁷) }` under `bound steps 10⁹`, beside a task that prints a line, on a 2-thread scheduler, replays `Sealed`: the steps at the overflow, and so the slice ends around it, are those of the recording. |
 | **FW28** Wasmtime's signal handlers beside the runtime's | a guest fault taken as a host crash, or a Hirsel stack overflow taken as a guest trap | On a 2-thread scheduler, task A runs `isolate { trap(f, 2) }` 1,000 times and prints each primary cause, while task B recurses in Hirsel with no bound. Every line A prints is `contained trap: memory out of bounds`, and the run ends with status 102 and `run stop: Stack` (FAIL-15), not a signal. |
 | **FW29** fuel exhaustion without a bound | a guest fuel trap that aborts the process | On the slow tier, with no bound current, `isolate { tgrow(f, 2^33) }` exhausts Wasmtime's `2^64 − 1` fuel in about ten minutes (each refused `table.grow` is charged `2^32 − 1`). Its isolate returns the primary cause `Fail("contained trap: out of fuel")` and the program prints a line after it. |
-| **FW30** host memory refusal in contained code | an instantiation `mmap`/`mprotect` `ENOMEM` or `OutOfMemory` error that aborts in `trap_text` instead of stopping as `HostMemory` | Under `RLIMIT_AS` = 2 GiB (below Wasmtime's 4 GiB + 64 MiB linear memory reservation), a program prints a line and calls `count(f)`. It stops with status 102 and `run stop: HostMemory` (FFI-13 Bytes, FAIL-15), not `SIGABRT`. |
+| **FW30** host memory refusal in contained code | an instantiation `mmap`/`mprotect` `ENOMEM` or `OutOfMemory` error that aborts in `trap_text` instead of stopping as `HostMemory` | Under `RLIMIT_AS` = 2 GiB (below Wasmtime's 4 GiB + 64 MiB linear memory reservation), a program prints a line and calls `count(f)`. Under `RLIMIT_DATA` = 96 MiB, it runs one task that calls `count(f)`, so its slot is cached, and then a task under a 192 MiB grant whose instance takes that slot and calls `grow(f, 2048)`. Each stops with status 102 and `run stop: HostMemory` (FFI-13 Bytes, FAIL-15), not `SIGABRT`. |
+| **FW31** a reused linear-memory slot | a cached slot that keeps the previous instance's bytes, its size or its open pages, or that charges a grow against the previous grant | A task under 4 MiB calls `count(f)`, `grow(f, 16)` and `fill_mem(f, 1114112)`, which reads back `0xAB` at page 1. The next task, under `bound bytes 196640` (its initial 131,104 bytes plus one page), takes that slot and reads `count(f)` = 1, `fill_mem(f, 0)` = 0 and `grow(f, 0)` = 2 pages, then `grow(f, 1)` = 2 and `grow(f, 1)` = −1. |
 
 ### Contained build slices
 
@@ -1853,7 +1867,8 @@ contained-foreign-review-2903. Where this text differs from the review, it says 
 - **O6. Does a contained interface need a grant?** Yes (FFI-14 Grants).
 - **O7. Address space per instance.** Per-task instances and the 4 GiB reservation stay for
   W1. The ceiling, about 30,000 live instances and then `HostMemory`, is stated in FFI-13
-  Bytes. A per-unit lease would add CONC-10 events.
+  Bytes. Discarded instances' slots are reused (FFI-13 Slot reuse). A per-unit lease would
+  add CONC-10 events.
 - **O8. Per-task instances cost the shared-handle model.** Accepted. The target libraries
   hold no state across tasks, and the other design adds to the total-order promise, which is
   not allowed.

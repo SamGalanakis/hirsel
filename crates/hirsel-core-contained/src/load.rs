@@ -1,5 +1,7 @@
 use std::{ptr::NonNull, sync::Arc};
-use wasmtime::{CustomCodeMemory, Engine, Error, Module, OutOfMemory, Result};
+use wasmtime::{
+    CustomCodeMemory, Engine, Error, MemoryCreator, Module, OutOfMemory, Result, StackCreator,
+};
 
 /// Whether `error` is a host memory refusal from Wasmtime: a fallible
 /// allocation [`OutOfMemory`] or a Unix `ENOMEM` from `mmap`/`mprotect` on a
@@ -29,9 +31,15 @@ pub struct ImageEngine(Engine);
 
 impl ImageEngine {
     /// Create a runtime engine after the host has installed its signal handlers.
-    pub fn new() -> Result<Self> {
+    /// Its instances' linear memories and fiber stacks come from `memory` and
+    /// `stack`, which must lay them out with the reservation, guards and guard
+    /// page they are asked for; compiled code relies on those.
+    pub fn new(memory: Arc<dyn MemoryCreator>, stack: Arc<dyn StackCreator>) -> Result<Self> {
         let mut config = super::engine_config();
-        config.with_custom_code_memory(Some(Arc::new(ImageCode)));
+        config
+            .with_custom_code_memory(Some(Arc::new(ImageCode)))
+            .with_host_memory(memory)
+            .with_host_stack(stack);
         Engine::new(&config).map(Self)
     }
 

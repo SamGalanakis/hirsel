@@ -11,8 +11,10 @@ use hirsel_core_contained::wasmtime::{
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
+
+mod slots;
 
 /// The calling task's live instances, one per contained module.
 #[derive(Default)]
@@ -145,11 +147,18 @@ impl Drop for State {
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
+/// The engine's slot caches, sized from the root limit of the run that
+/// makes the first instance.
+static SLOTS: OnceLock<slots::Slots> = OnceLock::new();
+
 fn engine() -> &'static ImageEngine {
     static ENGINE: OnceLock<ImageEngine> = OnceLock::new();
     // The runtime's own signal handlers are installed before any task
     // runs, so Wasmtime's chain to them (FFI-15 Signals).
-    ENGINE.get_or_init(|| unwrap_host(ImageEngine::new()))
+    ENGINE.get_or_init(|| {
+        let creator = slots::Creator(SLOTS.get().expect("an instantiation sizes the slots"));
+        unwrap_host(ImageEngine::new(Arc::new(creator), Arc::new(creator)))
+    })
 }
 
 const WASI: &str = "wasi_snapshot_preview1";
@@ -367,6 +376,17 @@ unsafe fn instantiate(
     module: &'static Module,
     site: u64,
 ) -> Result<Box<Live>, Stop> {
+    // SAFETY: as above; a task's `run` is the process's configuration,
+    // live for the run, and its root limit is the program's, where the
+    // context's own is the first calling task's grant.
+    SLOTS.get_or_init(|| unsafe {
+        let run = (*context).run;
+        slots::Slots::new(if run.is_null() {
+            (*context).root_limit
+        } else {
+            (*run).root_limit
+        })
+    });
     let mut store = Store::new(engine().engine(), State::default());
     store.limiter(|state| state as &mut dyn ResourceLimiter);
     store

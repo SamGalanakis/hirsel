@@ -220,6 +220,31 @@ fn make_free(take f: Foreign[laws.Box]) -> u64 {
     word(native.free(f, p))
 }
 
+// FW31: an instance that leaves its slot dirty: its counter at 1 and 0xAB
+// in pages 1 to 17 after growing 16 pages.
+fn dirty(take f: Foreign[laws.Box]) -> u64 {
+    let _ = native.count(f)
+    let _ = native.grow(f, 16)
+    int.widen(native.fill_mem(f, 1114112))
+}
+
+// FW31: the next instance, made in the slot `dirty` left, under its own
+// grant: a fresh counter, zero bytes, its initial 2 pages, and room for one
+// page more under the bound of its initial 131,104 bytes plus one page.
+fn clean(take f: Foreign[laws.Box]) -> u64 {
+    match (bound bytes 196640 {
+        let entries = native.count(f)
+        let byte: u64 = int.widen(native.fill_mem(f, 0))
+        let pages = word(native.grow(f, 0))
+        let one = word(native.grow(f, 1))
+        let two = word(native.grow(f, 1) + 1)
+        ((entries * 10 + byte) * 10 + pages) * 100 + one * 10 + two
+    }) {
+        Ok(n) => n,
+        Error(_) => 1,
+    }
+}
+
 fn per_task(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
     let one = task.spawn(tasks, bytes 1048576, f, counter)
     let two = task.spawn(tasks, bytes 1048576, f, counter)
@@ -229,6 +254,10 @@ fn per_task(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
     let four = task.spawn(tasks, bytes 1048576, f, make_free)
     number(out, "FW25 one", result.unwrap(task.join(take three)))
     number(out, "FW25 two", result.unwrap(task.join(take four)))
+    let five = task.spawn(tasks, bytes 4194304, f, dirty)
+    number(out, "FW31 dirty", result.unwrap(task.join(take five)))
+    let six = task.spawn(tasks, bytes 1048576, f, clean)
+    number(out, "FW31 clean", result.unwrap(task.join(take six)))
 }
 
 fn boxes(f: Foreign[laws.Box], out: Stdout) waits {

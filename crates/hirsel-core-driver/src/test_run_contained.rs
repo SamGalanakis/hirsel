@@ -235,7 +235,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     refused(ContainedExecution::engines()[0], &|line: &str| line.ends_with("hirsel.toml: foreign.native: containment: expected \"wasm\""), "FW20");
 }
 
-/// FW3, FW5 to FW16, FW21 to FW26 and FW28 on `box.wasm`, each observation
+/// FW3, FW5 to FW16, FW21 to FW26, FW28 and FW31 on `box.wasm`, each observation
 /// printed by `run.hirsel` and compared with the spec's value. The step
 /// counts are hand-derived from `box.wasm`'s operators and the pinned cost
 /// table: `spin(f, 10⁴)` is 7 + 9 × 10⁴ + 5 = 90,012 fuel, 5,626 steps, plus
@@ -273,7 +273,8 @@ fn contained_calls_run_in_the_tasks_own_instance() {
             "foreign instance discarded".into(), "FW13 count 1".into(),
             "foreign instance discarded".into(), "FW26 live 1".into(),
         ]),
-        ("tasks", ["FW14 one 123", "FW14 two 123", "FW25 one 0", "FW25 two 0"].map(str::to_owned).to_vec()),
+        // FW31: dirty reads back 0xAB; clean sees count 1, byte 0, 2 pages, one page at 2, then −1.
+        ("tasks", ["FW14 one 123", "FW14 two 123", "FW25 one 0", "FW25 two 0", "FW31 dirty 171", "FW31 clean 10220"].map(str::to_owned).to_vec()),
         ("boxes", [
             "FW15 two 2", "FW15 dropped 1", "FW15 freed 0", "x", "FW15 released 0",
         ].map(str::to_owned).to_vec()),
@@ -338,10 +339,12 @@ fn contained_calls_run_in_the_tasks_own_instance() {
     }
 }
 
-/// FW30: a host memory refusal during contained instantiation (here `RLIMIT_AS`
-/// set to 2 GiB, below Wasmtime's 4 GiB + 64 MiB linear memory reservation)
-/// stops the run with `HostMemory` (status 102, FFI-13 Bytes / FAIL-15) instead
-/// of falling into `trap_text`'s abort arm.
+/// FW30: a host memory refusal in contained code stops the run with
+/// `HostMemory` (status 102, FFI-13 Bytes / FAIL-15) instead of falling into
+/// `trap_text`'s abort arm: the reservation of a fresh slot under `RLIMIT_AS`
+/// = 2 GiB (below the 4 GiB + 64 MiB reservation), and a granted grow on a
+/// reused slot under `RLIMIT_DATA` = 96 MiB, whose 128 MiB `mprotect` the host
+/// refuses.
 #[test]
 fn contained_host_memory_refusal_stops_with_host_memory() {
     use std::fs;
@@ -355,9 +358,30 @@ fn contained_host_memory_refusal_stops_with_host_memory() {
     }
     law.write(
         "wasm_laws/main.hirsel",
-        r#"pub fn main(f: Foreign[laws.Box], out: Stdout) -> Result[(), Exit] waits {
-    result.unwrap(stdout.write(out, "FW30 before\n"))
+        r#"fn first(take f: Foreign[laws.Box]) -> u64 {
+    native.count(f)
+}
+
+fn grows(take parts: (Foreign[laws.Box], Stdout)) -> i32 waits {
+    let (f, out) = take parts
     let _ = native.count(f)
+    result.unwrap(stdout.write(out, "FW30 grow\n"))
+    native.grow(f, 2048)
+}
+
+pub fn main(f: Foreign[laws.Box], tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    result.unwrap(stdout.write(out, "FW30 before\n"))
+    let Some(mode) = args.get(argv, 0) else {
+        return Error(Exit(status: 3))
+    }
+    if mode == "reserve" {
+        let _ = native.count(f)
+        return Ok(())
+    }
+    let one = task.spawn(tasks, bytes 1048576, f, first)
+    let _ = task.join(take one)
+    let two = task.spawn(tasks, bytes 201326592, (f, out), grows)
+    let _ = task.join(take two)
     Ok(())
 }
 "#,
@@ -371,34 +395,37 @@ fn contained_host_memory_refusal_stops_with_host_memory() {
             "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
             "--store", law.path("build").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(), "-o", image.to_str().unwrap(),
-            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout",
+            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout", "--grant", "Tasks",
             "--limit", "268435456",
         ].map(str::to_owned);
         let (status, output, error) = process::tape_request(&request, law.dir.path());
         assert_eq!(status, Some(0), "{engine}: build\n{output}\n{error}");
-        let mut command = Command::new(&image);
-        command.env("HIRSEL_UNTIED", "1").current_dir(law.dir.path());
-        // SAFETY: `setrlimit` is async-signal-safe and caps only this child's
-        // address space below Wasmtime's 4 GiB + 64 MiB linear memory reservation.
-        unsafe {
-            command.pre_exec(|| {
-                let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-                let two_gib = libc::rlimit { rlim_cur: 2 << 30, rlim_max: 2 << 30 };
-                if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::setrlimit(libc::RLIMIT_AS, &two_gib) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
+        for (mode, resource, bytes, lines) in [
+            ("reserve", libc::RLIMIT_AS, 2u64 << 30, "FW30 before\n"),
+            ("grow", libc::RLIMIT_DATA, 96 << 20, "FW30 before\nFW30 grow\n"),
+        ] {
+            let mut command = Command::new(&image);
+            command.arg(mode).env("HIRSEL_UNTIED", "1").current_dir(law.dir.path());
+            // SAFETY: `setrlimit` is async-signal-safe and caps only this child.
+            unsafe {
+                command.pre_exec(move || {
+                    let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                    let cap = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+                    if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0
+                        || libc::setrlimit(resource, &cap) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let out = command.output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(stdout, lines, "{engine} {mode}: {out:?}\n{stderr}");
+            assert_eq!(out.status.code(), Some(102), "{engine} {mode}: {out:?}\n{stderr}");
+            assert_eq!(stderr, "run stop: HostMemory\n", "{engine} {mode}: {out:?}");
         }
-        let out = command.output().unwrap();
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert_eq!(stdout, "FW30 before\n", "{engine}: {out:?}\n{stderr}");
-        assert_eq!(out.status.code(), Some(102), "{engine}: {out:?}\n{stderr}");
-        assert_eq!(stderr, "run stop: HostMemory\n", "{engine}: {out:?}");
     }
 }
 

@@ -9,6 +9,15 @@ def rules(source, path='crates/hirsel-llvm/src/core/x.rs'):
     return sorted(check_target.source_violations(path, source))
 
 
+def floor_texts(link='26.0', buck='26.0', driver='26 << 16', installer='26.0'):
+    return {
+        check_target.LINK_KIT: f'DARWIN_FLOOR = "{link}"\n',
+        check_target.TOOLCHAIN_BUCK: f'DARWIN_FLOOR = "{buck}"\n',
+        check_target.DRIVER_MACHO: f'const MACOS_FLOOR: u32 = {driver};\n',
+        check_target.INSTALL_SH: f'macos_floor={installer}\n',
+    }
+
+
 class TargetDecisions(unittest.TestCase):
     def test_hidden_target_decisions_are_red(self):
         red = {
@@ -44,6 +53,28 @@ class TargetDecisions(unittest.TestCase):
         for source in green:
             with self.subTest(source):
                 self.assertEqual(rules(source), [])
+
+    def test_darwin_floor_copies_track_the_link_kit(self):
+        self.assertEqual(check_target.darwin_floor_errors(floor_texts()), [])
+        self.assertEqual(check_target.darwin_floor_errors(floor_texts(
+            link='26.1', buck='26.1', driver='(26 << 16) | (1 << 8)', installer='26.1')), [])
+
+        buck = floor_texts(buck='27.0')
+        self.assertEqual([path for path, _, _ in check_target.darwin_floor_errors(buck)],
+                         [check_target.TOOLCHAIN_BUCK])
+        driver = floor_texts(driver='27 << 16')
+        self.assertEqual([path for path, _, _ in check_target.darwin_floor_errors(driver)],
+                         [check_target.DRIVER_MACHO])
+        installer = floor_texts(installer='27.0')
+        self.assertEqual([path for path, _, _ in check_target.darwin_floor_errors(installer)],
+                         [check_target.INSTALL_SH])
+        source = floor_texts(link='27.0')
+        self.assertEqual({path for path, _, _ in check_target.darwin_floor_errors(source)},
+                         {check_target.TOOLCHAIN_BUCK, check_target.DRIVER_MACHO, check_target.INSTALL_SH})
+
+    def test_darwin_floor_minor_versions_are_compared(self):
+        errors = check_target.darwin_floor_errors(floor_texts(link='26.1', buck='26.1', installer='26.1'))
+        self.assertEqual([path for path, _, _ in errors], [check_target.DRIVER_MACHO])
 
     def test_host_cfg_outside_a_seam_is_red(self):
         red = [

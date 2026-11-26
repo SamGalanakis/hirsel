@@ -3,7 +3,7 @@ set -u
 
 # tools/toolchain-dist/build reads this assignment for the release gate.
 glibc_floor=2.28
-# TODO(darwin-floor-source-2900): derive this from the shared Darwin floor.
+# tools/check_target.py keeps this equal to link_kit.DARWIN_FLOOR.
 macos_floor=26.0
 release_url=https://github.com/SamGalanakis/hirsel/releases
 release_api=https://api.github.com/repos/SamGalanakis/hirsel/releases

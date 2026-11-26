@@ -1,10 +1,10 @@
 hirsel.laws 1
-postgres@1/sim_tests/comma_host_refused src=2d94abbefeb64976 sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/eof_in_error_response src=7cba0c78770363a7 sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/exchange_deadline src=2a499fbd4a7d8d8f sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/fatal_error_during_sync src=18f216146ae4d3e0 sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/fragmented_startup_error src=06bd9dbf7d4b8f12 sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/fused_flights src=88d27d58393a0dea sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/parameters_and_diagnostics src=8688f3503112fa50 sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/select_answer src=5710e94347f0b65f sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
-postgres@1/sim_tests/startup_ready_deadline src=688649bd26b5c7cc sig=e7a56a98f0cb8bf9 run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/comma_host_refused src=2d94abbefeb64976 sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/eof_in_error_response src=7cba0c78770363a7 sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/exchange_deadline src=2a499fbd4a7d8d8f sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/fatal_error_during_sync src=18f216146ae4d3e0 sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/fragmented_startup_error src=06bd9dbf7d4b8f12 sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/fused_flights src=88d27d58393a0dea sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/parameters_and_diagnostics src=8688f3503112fa50 sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/select_answer src=5710e94347f0b65f sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending
+postgres@1/sim_tests/startup_ready_deadline src=688649bd26b5c7cc sig=94f4b3dd8675df9c run=4400fcc0f0345701 bug=- oracle=- rows=pending

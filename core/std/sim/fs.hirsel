@@ -16,6 +16,7 @@ type Version: send {
     sequence: u64,
     modified: i64,
     data: Bytes,
+    overlay: Option[Bytes],
     names: Map[String, u64]
 }
 
@@ -44,7 +45,7 @@ type Session {
 }
 
 fn empty() -> Version {
-    Version(sequence: 0, modified: 0, data: list.new(), names: map.new())
+    Version(sequence: 0, modified: 0, data: list.new(), overlay: None, names: map.new())
 }
 
 fn inode(directory: bool) -> Inode {
@@ -62,6 +63,13 @@ pub fn new() -> Fs {
 
 fn current(node: Inode) -> View[Version] in node {
     node.history[list.len(node.history) - 1]
+}
+
+fn visible(v: Version) -> View[Bytes] in v {
+    match v.overlay {
+        Some(data) => view data,
+        None => view v.data,
+    }
 }
 
 fn retain(mut node: Inode, at: u64) {
@@ -158,7 +166,7 @@ fn stat(node: Inode) -> DirReply {
         Directory
     } else {
         File
-    }, size: list.len(v.data), modified_ns: v.modified))
+    }, size: list.len(visible(v)), modified_ns: v.modified))
 }
 
 fn close(mut fs: Fs, mut session: Session, id: u64) {
@@ -173,7 +181,7 @@ fn edit(mut fs: Fs, id: u64, take v: Version) {
 }
 
 fn revised(v: Version, seq: u64, modified: i64) -> Version {
-    Version(sequence: seq, modified: modified, data: clone(v.data), names: clone(v.names))
+    Version(sequence: seq, modified: modified, data: clone(v.data), overlay: clone(v.overlay), names: clone(v.names))
 }
 
 fn insert_node(mut fs: Fs, dir: u64, take v: Version, take node: Inode) {
@@ -279,7 +287,7 @@ fn open(mut fs: Fs, mut session: Session, dir: u64, p: String, mode: OpenMode, s
         insert_node(mut fs, base, take entry, take created)
     } else if truncate {
         list.reserve(mut fs.nodes[node].history, 1)
-        let v = Version(sequence: seq, modified: modified, data: list.new(), names: map.new())
+        let v = Version(sequence: seq, modified: modified, data: list.new(), overlay: None, names: map.new())
         if !answer(mut s, take c, File(id)) {
             return
         }
@@ -334,7 +342,7 @@ fn read(fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u64, m
         let _ = answer(mut s, take c, Failed(Denied))
         return
     }
-    let data = current(fs.nodes[f.node]).data
+    let data = visible(current(fs.nodes[f.node]))
     let at = match offset {
         Some(at) => at,
         None => f.cursor
@@ -353,7 +361,52 @@ fn read(fs: Fs, mut session: Session, id: u64, offset: Option[u64], room: u64, m
     }
 }
 
-fn write(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], take data: Bytes, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
+fn place_bytes(mut dst: Bytes, at: u64, data: Bytes) {
+    let end = at + list.len(data)
+    list.fill(mut dst, int.saturating_sub(end, list.len(dst)), 0u8)
+    list.copy_from_slice(mut dst, at, data)
+}
+
+fn write_overlay(mut v: Version, at: u64, data: Bytes, fault: Option[sim.world.Fault], mut plan: sim.world.Plan) {
+    if let Some(_) = fault {
+        if let None = v.overlay {
+            v.overlay = Some(clone(v.data))
+        }
+    }
+    if let Some(mut disk) = v.overlay {
+        let n = list.len(data)
+        match fault {
+            Some(Corrupt) => {
+                place_bytes(mut disk, at, data)
+                let byte = at + sim.world.pick(mut plan, n)
+                let bit: u8 = int.truncate(sim.world.pick(mut plan, 8))
+                disk[byte] = disk[byte] ^ (1u8 << bit)
+            },
+            Some(Misdirect) => {
+                // One adjacent, disjoint range in the same file. Moving by
+                // exactly the write length preserves direct I/O alignment.
+                let after = int.checked_add(at + n, n)
+                if at >= n && (after == None || sim.world.pick(mut plan, 2) == 0) {
+                    place_bytes(mut disk, at - n, data)
+                } else if after != None {
+                    place_bytes(mut disk, at + n, data)
+                }
+            },
+            Some(LostWrite) => (),
+            _ => place_bytes(mut disk, at, data),
+        }
+    }
+    place_bytes(mut v.data, at, data)
+    let repaired = match v.overlay {
+        Some(disk) => disk == v.data,
+        None => false,
+    }
+    if repaired {
+        v.overlay = None
+    }
+}
+
+fn write(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, fault: Option[sim.world.Fault], id: u64, offset: Option[u64], take data: Bytes, modified: i64, mut s: Served[DirOp], take c: Call[DirOp]) {
     let f = file_handle(session, id)
     if !f.writable || (f.append && offset != None) {
         let _ = answer(mut s, take c, written_error(Denied))
@@ -375,7 +428,7 @@ fn write(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], take da
     let seq = fs.sequence + 1
     let mut v = revised(current(fs.nodes[f.node]), seq, modified)
     let at = if f.append {
-        list.len(v.data)
+        list.len(visible(v))
     } else {
         match offset {
             Some(at) => at,
@@ -389,9 +442,11 @@ fn write(mut fs: Fs, mut session: Session, id: u64, offset: Option[u64], take da
             return
         }
     }
-    let extra = int.saturating_sub(end, list.len(v.data))
-    list.fill(mut v.data, extra, 0)
-    list.copy_from_slice(mut v.data, at, data)
+    let effect = match fault {
+        Some(scripted) => Some(scripted),
+        None => sim.world.write_fault(mut plan),
+    }
+    write_overlay(mut v, at, data, effect, mut plan)
     list.reserve(mut fs.nodes[f.node].history, 1)
     if answer(mut s, take c, Done) {
         edit(mut fs, f.node, take v)
@@ -605,18 +660,19 @@ fn sync(mut fs: Fs, node: u64, error: bool, advanced: bool, mut s: Served[DirOp]
     }
 }
 
-fn fault_present(fault: Option[sim.world.Fault]) -> bool {
+fn io_fault(fault: Option[sim.world.Fault]) -> bool {
     match fault {
-        Some(_) => true,
-        None => false
+        Some(Eio) => true,
+        Some(SyncUnknown) => true,
+        _ => false,
     }
 }
 
 fn sync_commits(mut plan: sim.world.Plan, fault: Option[sim.world.Fault]) -> bool {
     match fault {
-        None => true,
         Some(SyncUnknown) => sim.world.pick(mut plan, 2) == 1,
-        Some(Eio) => false
+        Some(Eio) => false,
+        _ => true,
     }
 }
 
@@ -634,7 +690,7 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         SyncDir(..) => true,
         _ => false
     }
-    if fault_present(fault) && !barrier {
+    if io_fault(fault) && !barrier {
         let r: DirReply = match op {
             Write(..) => written_error(Other(5)),
             WriteAt(..) => written_error(Other(5)),
@@ -741,11 +797,11 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         },
         SyncDir(dir: dir) => {
             let advanced = sync_commits(mut plan, fault)
-            sync(mut fs, dir_handle(session, dir), fault_present(fault), advanced, mut s, take c)
+            sync(mut fs, dir_handle(session, dir), io_fault(fault), advanced, mut s, take c)
         },
         Sync(file: id) => {
             let advanced = sync_commits(mut plan, fault)
-            sync(mut fs, file_handle(session, id).node, fault_present(fault), advanced, mut s, take c)
+            sync(mut fs, file_handle(session, id).node, io_fault(fault), advanced, mut s, take c)
         },
         Entries(dir: dir, path: n) => {
             let base = dir_handle(session, dir)
@@ -783,7 +839,7 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         },
         Write(file: id, len: len) => {
             match payload(c, 1, len) {
-                Ok(take data) => write(mut fs, mut session, id, None, take data, modified, mut s, take c),
+                Ok(take data) => write(mut fs, mut session, mut plan, fault, id, None, take data, modified, mut s, take c),
                 Error(e) => {
                     let _ = answer(mut s, take c, written_error(e))
                 }
@@ -791,7 +847,7 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
         },
         WriteAt(file: id, at: at, len: len) => {
             match payload(c, 2, len) {
-                Ok(take data) => write(mut fs, mut session, id, Some(at), take data, modified, mut s, take c),
+                Ok(take data) => write(mut fs, mut session, mut plan, fault, id, Some(at), take data, modified, mut s, take c),
                 Error(e) => {
                     let _ = answer(mut s, take c, written_error(e))
                 }
@@ -821,7 +877,7 @@ fn request(mut fs: Fs, mut session: Session, mut plan: sim.world.Plan, modified:
             } else {
                 let mut zeros: Bytes = list.with_capacity(len)
                 list.fill(mut zeros, len, 0u8)
-                write(mut fs, mut session, id, Some(at), take zeros, modified, mut s, take c)
+                write(mut fs, mut session, mut plan, fault, id, Some(at), take zeros, modified, mut s, take c)
             }
         },
         Close(file: id) => {

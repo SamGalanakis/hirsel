@@ -20,5 +20,5 @@ dtls@1/laws/possession_before_keys src=430368b2eaffb83a sig=ca087300f953ac4e run
 dtls@1/laws/record_replay_and_discards src=053768a3ed0fdf5d sig=1f9d7d155b77f194 run=c2c0c6612d4cbb79 bug=607aaff82d41c798 oracle=bfa2c25b3df5cada rows=pending
 dtls@1/laws/refusals src=eeb8a84a3b0d3095 sig=085924cac046ecd5 run=c2c0c6612d4cbb79 bug=af06dd6b7710fec1 oracle=7fd526a5d29273c3 rows=pending
 dtls@1/laws/setup_roles src=7de8597eb9c2b5cf sig=7f6d442a35d4fd01 run=c2c0c6612d4cbb79 bug=6fea91f438e18822 oracle=c4f02c85cf20cb2e rows=pending
-dtls@1/laws/vopr_attacker_never_interferes src=d0cb23e98db0ffb8 sig=bdbc0d2142e7bf88 run=4e2c39d888a20f27 bug=48d1899beff9707a oracle=5f4b645284408f47 rows=pending
-dtls@1/laws/vopr_handshake_under_loss src=84d7536b7c498b90 sig=d64ca28c0871b572 run=4e2c39d888a20f27 bug=ac51100699e780b5 oracle=16b46a876b74bcef rows=pending
+dtls@1/laws/vopr_attacker_never_interferes src=d0cb23e98db0ffb8 sig=5f83dca9f152f4a5 run=4e2c39d888a20f27 bug=48d1899beff9707a oracle=5f4b645284408f47 rows=pending
+dtls@1/laws/vopr_handshake_under_loss src=84d7536b7c498b90 sig=74a48f4dc13b62fe run=4e2c39d888a20f27 bug=ac51100699e780b5 oracle=16b46a876b74bcef rows=pending

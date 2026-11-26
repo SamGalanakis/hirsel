@@ -13,6 +13,7 @@ pub opaque type World: send {
 pub opaque type Plan: send {
     state: u64,
     faults: Map[u64, Fault],
+    writes: WriteFaults,
     scripted: Option[Draws]
 }
 
@@ -27,8 +28,20 @@ pub type Script: send {
     streams: List[List[u64]]
 }
 
-/// A scripted I/O failure. SyncUnknown may commit a barrier before reporting EIO.
-pub type Fault = Eio | SyncUnknown
+/// SyncUnknown may commit a barrier before reporting EIO. The three storage
+/// faults acknowledge the write while changing the bytes the disk presents.
+pub type Fault = Eio | SyncUnknown | Corrupt | Misdirect | LostWrite
+
+/// Mutually exclusive chances per 10,000 nonempty filesystem writes.
+pub type WriteFaults: send {
+    corrupt: u64,
+    misdirect: u64,
+    lost_write: u64
+}
+
+fn no_write_faults() -> WriteFaults {
+    WriteFaults(corrupt: 0, misdirect: 0, lost_write: 0)
+}
 
 /// Starts a virtual clock and seeds the decision stream.
 pub fn new(seed: u64, start_mono_ns: u64, start_wall_ms: u64) -> (World, Clock) {
@@ -42,7 +55,7 @@ pub fn initial_seed(w: World) -> u64 {
 
 /// An independent decision stream beginning at seed.
 pub fn plan(seed: u64) -> Plan {
-    Plan(state: seed, faults: map.new(), scripted: None)
+    Plan(state: seed, faults: map.new(), writes: no_write_faults(), scripted: None)
 }
 
 fn mix(state: u64) -> u64 {
@@ -64,7 +77,7 @@ pub fn plan_from(s: Script, provider: u64) -> Plan {
     } else {
         list.new()
     }
-    Plan(state: mix(s.tail_seed ^ provider), faults: map.new(), scripted: Some(Draws(words: take words, next: 0)))
+    Plan(state: mix(s.tail_seed ^ provider), faults: map.new(), writes: no_write_faults(), scripted: Some(Draws(words: take words, next: 0)))
 }
 
 fn show_word(word: u64, mut out: String) {
@@ -141,6 +154,33 @@ pub fn fault(mut w: World, site: u64, f: Fault) {
 
 pub fn take_fault(mut p: Plan, site: u64) -> Option[Fault] {
     map.remove(mut p.faults, site)
+}
+
+pub fn set_write_faults(mut p: Plan, rates: WriteFaults) {
+    if rates.corrupt > 10000 || rates.misdirect > 10000 - rates.corrupt || rates.lost_write > 10000 - rates.corrupt - rates.misdirect {
+        fail("sim.world: write fault chances must sum to at most 10000")
+    }
+    p.writes = rates
+}
+
+/// Draws the next filesystem write fault. A disabled distribution consumes no
+/// draws, preserving scripts and crash cuts that predate write faults.
+pub fn write_fault(mut p: Plan) -> Option[Fault] {
+    let misdirect = p.writes.corrupt + p.writes.misdirect
+    let lost = misdirect + p.writes.lost_write
+    if lost == 0 {
+        return None
+    }
+    let roll = pick(mut p, 10000)
+    if roll < p.writes.corrupt {
+        Some(Corrupt)
+    } else if roll < misdirect {
+        Some(Misdirect)
+    } else if roll < lost {
+        Some(LostWrite)
+    } else {
+        None
+    }
 }
 
 /// Moves the decision stream and its faults to a server. Future world draws

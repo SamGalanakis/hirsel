@@ -14,7 +14,7 @@ turn@1/laws/quota_and_capacity src=e98cc7f4b9ec006a sig=53c702478fad4972 run=c2c
 turn@1/laws/retransmit_schedule src=68b7ed256c9b9203 sig=cf99a4861c8bb657 run=c2c0c6612d4cbb79 bug=137bc2662447c1a7 oracle=ad78e61507804df8 rows=pending
 turn@1/laws/revoke_drops_paths src=7014122fe7140836 sig=361b7ee6e99f58c9 run=c2c0c6612d4cbb79 bug=2f79ff85d4769471 oracle=0ea7df8f89c46f29 rows=pending
 turn@1/laws/sim_relay_loss src=c6e2fb3e1b293732 sig=f35443733b57d2b3 run=c7b2a52baff70a63 bug=0320b41a3ba9ecce oracle=d59f09d88c2e6420 rows=pending
-turn@1/laws/stream_framing src=4a6db571f1488607 sig=904a6ca520939574 run=c7b2a52baff70a63 bug=dc6a646e111cb8a4 oracle=335f0991f5c8f163 rows=pending
+turn@1/laws/stream_framing src=4a6db571f1488607 sig=3c615bc4356fc641 run=c7b2a52baff70a63 bug=dc6a646e111cb8a4 oracle=335f0991f5c8f163 rows=pending
 turn@1/laws/unsupported_answers src=c7e126c47db34285 sig=41152a3ffb1b6353 run=c2c0c6612d4cbb79 bug=d6737bfeb078ac88 oracle=74fe3c35bad9f67a rows=pending
 turn@1/laws/userhash_vector src=a490089ca9be6563 sig=8b53d202423f641d run=c2c0c6612d4cbb79 bug=3242c69d6fc5b466 oracle=1c949b07f68d020c rows=pending
 turn@1/laws/vopr_allocations_keep_their_tuple src=982fb0943225a89c sig=e164ecf220d1c756 run=579dcac8588fe904 bug=6788082c0a2f2e1c oracle=9ca7108d7db21e5b rows=pending

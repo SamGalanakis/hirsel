@@ -70,6 +70,12 @@ Each plan starts with no faults. Use `script(mut plan, site, fault)` to set a
 one-shot fault for a provider's operation site. Draws leave the fault map
 untouched. See [property tests with scripted plans](../prop.md#scripted-simulation).
 
+`set_write_faults(mut plan, rates)` sets the chances of `Corrupt`,
+`Misdirect` and `LostWrite` on a simulated filesystem. The three chances
+are mutually exclusive and measured per 10,000 nonempty writes. Their sum
+must be at most 10,000. With all three chances zero, writes consume no draws.
+A one-shot fault takes precedence over the distribution at its site.
+
 ## Script campaigns
 
 `campaign` accepts a seed-to-`Script` function and a law that consumes a

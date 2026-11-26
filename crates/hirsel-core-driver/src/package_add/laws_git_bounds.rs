@@ -338,7 +338,7 @@ fn peak_rss(mut command: Command) -> (Option<i32>, String, i64) {
     std::mem::forget(child);
     let code = libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
     // SAFETY: wait4 succeeded, so the rusage is filled.
-    let peak = unsafe { usage.assume_init() }.ru_maxrss;
+    let peak = peak_kib(&unsafe { usage.assume_init() });
     (code, reader.join().unwrap(), peak)
 }
 

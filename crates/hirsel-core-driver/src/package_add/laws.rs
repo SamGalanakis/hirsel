@@ -437,6 +437,14 @@ fn s6_add_interrupted_child() {
     panic!("the test child did not reach the manifest publication point");
 }
 
+/// A resident peak in KiB: `ru_maxrss` is KiB on Linux and bytes on macOS.
+fn peak_kib(usage: &libc::rusage) -> i64 {
+    match crate::host::HOST_TARGET.os() {
+        hirsel_core_layout::Os::Linux => usage.ru_maxrss,
+        hirsel_core_layout::Os::Macos => usage.ru_maxrss >> 10,
+    }
+}
+
 #[test]
 fn s6_add_memory_child() {
     let Ok(source) = std::env::var(RSS_SELECT) else {
@@ -462,7 +470,7 @@ fn s6_add_memory_child() {
         unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
         0
     );
-    let peak_kib = unsafe { usage.assume_init() }.ru_maxrss;
+    let peak_kib = peak_kib(&unsafe { usage.assume_init() });
     eprintln!("peak RSS {peak_kib} KiB");
     assert!(peak_kib < 2 * 1024 * 1024, "peak RSS {peak_kib} KiB");
 }

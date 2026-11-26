@@ -136,6 +136,46 @@ pub fn quic_drop_count(hub: LinkHub, reason: quic.DropReason) -> u64 {
     quic.drop_count(hub.ep, reason)
 }
 
+/// Cumulative QUIC-6 congestion drops (`DatagramLate`) on link `h`.
+pub fn link_datagrams_late(hub: LinkHub, h: quic.ConnectionHandle) -> u64 {
+    quic.connection_datagrams_late(hub.ep, h)
+}
+
+/// Find the live connection handle for `peer`, if any.
+pub fn find_link(hub: LinkHub, peer: NodeId) -> Option[quic.ConnectionHandle] {
+    for l in hub.links {
+        if l.connected && l.peer == Some(peer) {
+            return Some(l.handle)
+        }
+    }
+    None
+}
+
+/// Peer `NodeId` of link `h`, once `Hello` has arrived.
+pub fn link_peer(hub: LinkHub, h: quic.ConnectionHandle) -> Option[NodeId] {
+    let i = link_at(hub, h)?
+    hub.links[i].peer
+}
+
+/// All currently connected link handles.
+pub fn peer_handles(hub: LinkHub) -> List[quic.ConnectionHandle] {
+    let mut out: List[quic.ConnectionHandle] = list.new()
+    for l in hub.links {
+        if l.connected {
+            list.push(mut out, l.handle)
+        }
+    }
+    take out
+}
+
+/// Number of rooms currently attached on link `h`.
+pub fn link_room_count(hub: LinkHub, h: quic.ConnectionHandle) -> u64 {
+    match link_at(hub, h) {
+        Some(i) => list.len(hub.links[i].rooms),
+        None => 0,
+    }
+}
+
 /// Dial a peer node whose address and pins come from `RoomDirectory` (CAS-1, CAS-2).
 pub fn dial_peer(mut hub: LinkHub, d: RoomDirectory, peer: NodeId, now: u64, take identity: quic.handshake.Identity) -> Result[quic.ConnectionHandle, LinkError] waits {
     let NodeEntry(addr: addr, pins: take pins) = node(d, peer) ?=> |e| Dir(e)

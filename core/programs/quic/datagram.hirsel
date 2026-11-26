@@ -98,6 +98,7 @@ fn expire_datagrams(mut st: Streams, now: u64, rtt: u64) {
         if late {
             st.held -= list.len(st.datagrams[i].data) + DATAGRAM_COST
             st.datagrams_late += 1
+            st.datagrams_late_total += 1
             let last = list.len(st.datagrams) - 1
             list.swap(mut st.datagrams, i, last)
             let _ = list.pop(mut st.datagrams)
@@ -190,6 +191,17 @@ pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64 {
         let (staged, staged_freed) = remove_tagged(mut conn.streams.staged_datagrams, tag)
         conn.streams.held -= freed + staged_freed
         return queued + staged
+    }
+    0
+}
+
+/// Cumulative datagrams dropped for congestion (QUIC-6 `DatagramLate`) on connection `c`.
+pub fn connection_datagrams_late(e: Endpoint, c: ConnectionHandle) -> u64 {
+    let Some(i) = slot_at(e, c) else {
+        return 0
+    }
+    if let Some(conn) = e.connections[i] {
+        return conn.streams.datagrams_late_total
     }
     0
 }

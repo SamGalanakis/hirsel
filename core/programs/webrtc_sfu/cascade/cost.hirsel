@@ -1,0 +1,101 @@
+// CAS-6: Exact memory cost of attaching a room to a cascade link.
+// Covers the room's layer table, sequence windows, room stream buffers, RTP-12
+// histories for the layers it may receive, and the home's grant ledger entry.
+pub const ROOM_STREAM_BUF_BYTES: u64 = 16384
+
+pub const LAYER_HISTORY_SLOTS: u32 = 256
+
+pub const LAYER_HISTORY_AGE_NS: u64 = 1000000000
+
+pub const ENCODINGS_PER_PUB: u64 = 4
+
+/// One home grant ledger entry (CAS-5): edge node id and last grant time in ms.
+pub type GrantEntry: key {
+    peer: NodeId,
+    room_num: u32,
+    last_grant_ms: u64,
+    pending_fence_seq: Option[u64]
+}
+
+/// Fixed-capacity allocations owned by one attached room on a cascade link (CAS-6).
+/// Allocated upfront by `alloc_room_budget` so its exact heap charge is bounded by
+/// `cascade_room_cost` (K8).
+pub opaque type AttachedRoomBudget {
+    tx_layers: List[LayerInfo],
+    rx_layers: List[LayerInfo],
+    seq_windows: List[u64],
+    stream_rx: Bytes,
+    stream_tx: Bytes,
+    histories: List[rtp.history.History[Bytes]],
+    grant_ledger: List[GrantEntry]
+}
+
+/// Bound on the layers one attached room may carry on a link: at most
+/// `min(link_limits.layers, participants * publications * ENCODINGS_PER_PUB)`, floored at 1.
+pub fn room_layer_cap(limits: router.RoomLimits, link_limits: LinkLimits) -> u64 {
+    let p: u64 = int.widen(limits.participants)
+    let pubs: u64 = int.widen(limits.publications)
+    let by_room = int.saturating_mul(int.saturating_mul(p, pubs), ENCODINGS_PER_PUB)
+    let by_link: u64 = int.widen(link_limits.layers)
+    let cap = order.min(by_room, by_link)
+    if cap < 4 {
+        4u64
+    } else {
+        cap
+    }
+}
+
+fn seq_cost(element: u64, cap: u64) -> u64 {
+    match charge.seq(element, cap) {
+        Some(v) => v,
+        None => 0xffffffffffffffff,
+    }
+}
+
+/// CAS-6: Exact heap bytes of attaching one room of `limits` on a cascade link of
+/// `link_limits`: its layer tables, sequence windows, room stream rx/tx buffers,
+/// RTP-12 histories for the layers it may receive, and one grant ledger entry.
+pub fn cascade_room_cost(limits: router.RoomLimits, link_limits: LinkLimits) -> u64 {
+    let layers = room_layer_cap(limits, link_limits)
+    let layer_tables = int.saturating_mul(2, seq_cost(bytes[LayerInfo], layers))
+    let seq_windows = seq_cost(bytes[u64], layers)
+    let stream_bufs = int.saturating_mul(2, seq_cost(1, ROOM_STREAM_BUF_BYTES))
+    let none_bytes: Option[Bytes] = None
+    let one_history = rtp.history.history_heap(LAYER_HISTORY_SLOTS, none_bytes)
+    let histories_list = seq_cost(bytes[rtp.history.History[Bytes]], layers)
+    let histories_data = int.saturating_mul(layers, one_history)
+    // `try_reserve(_, 1)` on an empty list allocates the minimum growth capacity (4).
+    let ledger_entry = seq_cost(bytes[GrantEntry], 4)
+    let a = int.saturating_add(layer_tables, seq_windows)
+    let b = int.saturating_add(stream_bufs, int.saturating_add(histories_list, histories_data))
+    int.saturating_add(int.saturating_add(a, b), ledger_entry)
+}
+
+/// Allocate the bounded per-room cascade state charged by `cascade_room_cost` (K8).
+pub fn alloc_room_budget(limits: router.RoomLimits, link_limits: LinkLimits) -> Result[AttachedRoomBudget, Capacity] {
+    let layers = room_layer_cap(limits, link_limits)
+    let mut tx_layers: List[LayerInfo] = list.new()
+    list.try_reserve(mut tx_layers, layers)?
+    let mut rx_layers: List[LayerInfo] = list.new()
+    list.try_reserve(mut rx_layers, layers)?
+    let mut seq_windows: List[u64] = list.new()
+    list.try_reserve(mut seq_windows, layers)?
+    let mut stream_rx: Bytes = list.new()
+    list.try_reserve(mut stream_rx, ROOM_STREAM_BUF_BYTES)?
+    let mut stream_tx: Bytes = list.new()
+    list.try_reserve(mut stream_tx, ROOM_STREAM_BUF_BYTES)?
+    let mut histories: List[rtp.history.History[Bytes]] = list.new()
+    list.try_reserve(mut histories, layers)?
+    for _ in 0u64 .. layers {
+        let h: rtp.history.History[Bytes] = rtp.history.history(LAYER_HISTORY_SLOTS, LAYER_HISTORY_AGE_NS)?
+        list.push(mut histories, take h)
+    }
+    let mut grant_ledger: List[GrantEntry] = list.new()
+    list.try_reserve(mut grant_ledger, 1)?
+    Ok(AttachedRoomBudget(tx_layers: take tx_layers, rx_layers: take rx_layers, seq_windows: take seq_windows, stream_rx: take stream_rx, stream_tx: take stream_tx, histories: take histories, grant_ledger: take grant_ledger))
+}
+
+/// Number of preallocated RTP-12 histories held in `b`.
+pub fn budget_histories(b: AttachedRoomBudget) -> u64 {
+    list.len(b.histories)
+}

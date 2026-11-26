@@ -29,7 +29,7 @@ type Held {
     what: Hold
 }
 
-type Hold = Whole | Session(peer.Gen) | Remote(sub: peer.Gen, owner: peer.Gen, publication: u64)
+type Hold = Whole | Session(peer.Gen) | Remote(sub: peer.Gen, owner: peer.Gen, publication: u64) | Cascade(link: u64)
 
 /// The ledgers of a pool whose unit `k` has `free[k]` bytes once its fixed cost is
 /// paid, each unit homing at most `sessions` sessions of `session`'s size.
@@ -203,6 +203,7 @@ pub fn release_session(mut l: Ledger, room: peer.RoomId, g: peer.Gen) {
             Session(x) => x == g,
             Remote(sub: s, owner: o, publication: _) => s == g || o == g,
             Whole => false,
+            Cascade(link: _) => false,
         }
         if mine {
             refund(mut l, i)
@@ -225,4 +226,30 @@ pub fn release_room(mut l: Ledger, room: peer.RoomId) {
     list.retain(mut l.rooms, scoped fn(p: Priced) -> bool {
         p.room != room
     })
+}
+
+/// Reserve a cascade link attachment's exact `cost.cascade` term on unit 0 (CAS-6, K8).
+pub fn reserve_cascade(mut l: Ledger, room: peer.RoomId, link: u64, amount: u64) -> Result[(), PoolRefusal] {
+    let free = l.free[0]
+    if free < amount {
+        return Error(Bytes(unit: 0, need: amount, free: free))
+    }
+    hold(mut l, room, 0, amount, Cascade(link: link))
+    Ok(())
+}
+
+/// Refund a detached cascade link's reservation on unit 0 (CAS-6, K8).
+pub fn release_cascade(mut l: Ledger, room: peer.RoomId, link: u64) {
+    let mut i = 0u64
+    while i < list.len(l.held) {
+        let mine = l.held[i].room == room && match l.held[i].what {
+            Cascade(link: k) => k == link,
+            _ => false,
+        }
+        if mine {
+            refund(mut l, i)
+        } else {
+            i += 1
+        }
+    }
 }

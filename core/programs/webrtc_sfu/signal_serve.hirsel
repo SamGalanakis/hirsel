@@ -619,6 +619,13 @@ pub fn room_cost(limits: router.RoomLimits, session: peer.PeerLimits) -> RoomCos
     RoomCost(replicated: router.room_replicated(limits), per_session: per_session, per_remote: router.remote_bytes(session), control: control_bytes(limits), bridge: 0, cascade: 0)
 }
 
+/// Price a room including its per-link cascade attach cost (CAS-6, K8).
+pub fn room_cost_cascade(limits: router.RoomLimits, session: peer.PeerLimits, link_limits: cascade.LinkLimits) -> RoomCost {
+    let mut c = room_cost(limits, session)
+    c.cascade = cascade.cascade_room_cost(limits, link_limits)
+    c
+}
+
 /// Fixed grant a media unit needs before it opens any room.
 pub fn pool_unit_bytes(index: u16, limits: PoolLimits, session: peer.PeerLimits) -> u64 {
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)

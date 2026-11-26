@@ -166,3 +166,96 @@ fn conc8_abandon_shields_parent_waits_for_end_and_drops_result_before_return_wit
     assert_eq!(record.events, replay.events);
     assert_eq!(record.choices, replay.choices);
 }
+
+#[test]
+fn conc8_aligned_result_survives_another_spawn_during_cleanup() {
+    #[repr(C, align(32))]
+    struct Input {
+        value: u64,
+        witness: *mut u64,
+    }
+
+    #[repr(C, align(64))]
+    struct Output(Input);
+
+    unsafe extern "C" fn body(_: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        assert!(input.cast::<Input>().is_aligned());
+        assert!(out.cast::<Output>().is_aligned());
+        // SAFETY: these are the input and output slots of this task's layout.
+        unsafe {
+            out.cast::<Output>()
+                .write(Output(input.cast::<Input>().read()))
+        };
+        0
+    }
+
+    fn spawn(context: *mut Context, mut input: Input) -> *mut Task {
+        let layout = TaskLayout {
+            input: value::<Input>(0),
+            result: ValueLayout {
+                clean: Some(clean),
+                ..value::<Output>(64)
+            },
+        };
+        // SAFETY: the task moves the local input on success.
+        let task =
+            unsafe { hirsel_core_spawn(context, 0, 0, (&raw mut input).cast(), body, layout, 0) };
+        assert_eq!(task.status, 0);
+        assert!(!task.task.is_null());
+        task.task
+    }
+
+    fn spawn_join(context: *mut Context, value: u64) {
+        let task = spawn(
+            context,
+            Input {
+                value,
+                witness: ptr::null_mut(),
+            },
+        );
+        let mut out = std::mem::MaybeUninit::<Output>::uninit();
+        // SAFETY: this task and the aligned destination belong to the joiner.
+        unsafe {
+            let joined = hirsel_core_join(context, task, out.as_mut_ptr().cast(), 1);
+            assert_eq!((joined.kind, joined.status), (0, 0));
+            assert!(joined.causes.is_null());
+            assert_eq!(out.assume_init().0.value, value);
+        }
+    }
+
+    unsafe extern "C" fn clean(
+        context: *mut Context,
+        result: *mut u8,
+        _: *mut u64,
+        _: *mut crate::counted::Worklist,
+    ) -> bool {
+        spawn_join(context, 73);
+        // SAFETY: the abandoning task owns this result until cleanup completes.
+        unsafe {
+            let Output(input) = result.cast::<Output>().read();
+            assert!(!input.witness.is_null());
+            *input.witness = input.value;
+        }
+        true
+    }
+
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        spawn_join(context, 15);
+        let mut witness = 0;
+        let task = spawn(
+            context,
+            Input {
+                value: 41,
+                witness: &raw mut witness,
+            },
+        );
+        // SAFETY: abandonment consumes the handle before the witness leaves scope.
+        assert_eq!(unsafe { hirsel_core_task_drop(context, task) }, 0);
+        spawn_join(context, 105);
+        // SAFETY: the fixture supplies a writable u64 destination.
+        unsafe { out.cast::<u64>().write(witness) };
+        0
+    }
+
+    assert_eq!(recorded(root, None).0, 41);
+}

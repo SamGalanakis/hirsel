@@ -12,7 +12,7 @@ use hirsel_core_layout::charge;
 #[cfg(test)]
 use std::cell::Cell as Local;
 use std::{
-    alloc::{Layout, alloc, dealloc},
+    alloc::Layout,
     ptr::{self, NonNull},
     sync::{
         Arc, Mutex,
@@ -23,12 +23,15 @@ use std::{
 
 mod frame;
 mod quiet;
+mod storage;
 mod transfer;
 use frame::FrameRecord;
 pub(crate) use frame::held_wait;
 #[cfg(test)]
 pub(crate) use frame::{FRAME_HEADER, hirsel_core_frame_record};
 pub(crate) use quiet::{Member, RunView, run_tag};
+use storage::MAX_SPARE_TASK_BYTES;
+pub(crate) use storage::Storage;
 pub use transfer::hirsel_core_transfer;
 use transfer::{Moved, ZeroBlock};
 
@@ -51,49 +54,6 @@ pub type Body = unsafe extern "C" fn(*mut Context, *mut u8, *mut u8) -> u8;
 pub struct TaskLayout {
     pub input: ValueLayout,
     pub result: ValueLayout,
-}
-
-/// Host bookkeeping storage, whose logical charge was already admitted whole.
-pub(crate) struct Storage {
-    pointer: NonNull<u8>,
-    layout: Layout,
-}
-impl Storage {
-    pub(crate) fn new(bytes: usize, align: usize) -> Self {
-        let layout = Layout::from_size_align(bytes, align)
-            .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
-        // SAFETY: nonzero compiler-produced layout, uniquely owned until Drop.
-        let pointer = unsafe {
-            if bytes == 0 {
-                NonNull::new_unchecked(align as *mut u8)
-            } else {
-                NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
-            }
-        };
-        #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
-        if bytes != 0 {
-            crate::backing_observation::observe!(allocate, pointer.as_ptr(), bytes, TaskStorage);
-        }
-        Self { pointer, layout }
-    }
-    pub(crate) fn as_ptr(&self) -> *mut u8 {
-        self.pointer.as_ptr()
-    }
-}
-impl Drop for Storage {
-    fn drop(&mut self) {
-        // SAFETY: sole owner of this host storage; payload is already moved/cleaned.
-        unsafe {
-            if self.layout.size() != 0 {
-                crate::backing_observation::observe!(
-                    free,
-                    self.pointer.as_ptr(),
-                    self.layout.size(),
-                );
-                dealloc(self.pointer.as_ptr(), self.layout);
-            }
-        }
-    }
 }
 
 pub use hirsel_core_layout::event::{
@@ -197,8 +157,9 @@ pub struct Task {
     stack: Option<Stack>,
     sp: *mut u8,
     body: Body,
-    input: Storage,
-    result: Storage,
+    input: *mut u8,
+    result: *mut u8,
+    storage_layout: Layout,
     layout: TaskLayout,
     failed: u8,
     record: Option<Block>,
@@ -662,6 +623,7 @@ struct Scheduler {
     deferred: *mut Task,
     deferred_tail: *mut Task,
     stacks: Stock,
+    spare_task: Option<Storage>,
     idle: *mut u8,
     head: *mut Task,
     tail: *mut Task,
@@ -3526,11 +3488,11 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     unsafe {
         loop {
             let input = match &mut (*task).moved {
-                Moved::Spawned => (*task).input.as_ptr(),
+                Moved::Spawned => (*task).input,
                 Moved::Block { block, .. } => block.base.as_ptr(),
                 Moved::Consumed { code } => (&raw mut *code).cast(),
             };
-            (*task).failed = ((*task).body)((*task).context, (*task).result.as_ptr(), input);
+            (*task).failed = ((*task).body)((*task).context, (*task).result, input);
             if (*task).stackless {
                 // The body returned through its represented frames from a park
                 // (`park_returnable`); the dispatcher takes this stack back.
@@ -3667,6 +3629,7 @@ pub(crate) unsafe fn run_root_with_unit(
         deferred: ptr::null_mut(),
         deferred_tail: ptr::null_mut(),
         stacks: Stock::default(),
+        spare_task: None,
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
         tail: ptr::null_mut(),
@@ -3719,6 +3682,8 @@ pub(crate) unsafe fn run_root_with_unit(
         logical: 0,
         clean: None,
     };
+    let input_storage = Storage::new(input_bytes, 16);
+    let result_storage = Storage::new(result_bytes, 16);
     let mut root = Box::new(Task {
         arc_runtime: false,
         arc_hooks: true,
@@ -3749,8 +3714,9 @@ pub(crate) unsafe fn run_root_with_unit(
         stack: Some(run.stacks.take()),
         sp: ptr::null_mut(),
         body,
-        input: Storage::new(input_bytes, 16),
-        result: Storage::new(result_bytes, 16),
+        input: input_storage.as_ptr(),
+        result: result_storage.as_ptr(),
+        storage_layout: Layout::new::<Task>(),
         layout: TaskLayout {
             input: descriptor,
             result: ValueLayout {
@@ -3780,7 +3746,7 @@ pub(crate) unsafe fn run_root_with_unit(
     );
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
-        ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
+        ptr::copy_nonoverlapping(argument, root.input, input_bytes);
         let root_pointer: *mut Task = &mut *root;
         if !run.lang.is_null() {
             (*run.lang).root = root_pointer;
@@ -3798,14 +3764,19 @@ pub(crate) unsafe fn run_root_with_unit(
         run.ready(root_pointer);
         RunPtr(&mut run).dispatch_serial(root_pointer);
         if root.failed == 0 {
-            ptr::copy_nonoverlapping(root.result.as_ptr(), destination, result_bytes);
+            ptr::copy_nonoverlapping(root.result, destination, result_bytes);
         }
         (*context).events = 0;
         if run.lang_owned {
             crate::units_lang::LangUnit::end_root(run.lang);
         }
         drop(registered);
-        root.failed
+        let failed = root.failed;
+        crate::backing_observation::observe!(free, root_pointer.cast(), size_of::<Task>());
+        drop(root);
+        drop(input_storage);
+        drop(result_storage);
+        failed
     }
 }
 
@@ -3953,7 +3924,9 @@ unsafe fn spawn_in(
         let run = (*parent).run;
         let id = (*run).id();
         let child_context = abi::task_child(context, &mut record, bytes, id, (*run).share_heap);
-        let task = Box::new(Task {
+        let (storage, input_slot, result_slot) = Storage::for_task(&mut (*run).spare_task, layout);
+        let task = storage.as_ptr().cast::<Task>();
+        task.write(Task {
             arc_runtime: false,
             arc_hooks: true,
             #[cfg(feature = "record")]
@@ -3983,8 +3956,9 @@ unsafe fn spawn_in(
             stack: stack.take(),
             sp: ptr::null_mut(),
             body,
-            input: Storage::new(layout.input.bytes, layout.input.align),
-            result: Storage::new(layout.result.bytes, layout.result.align),
+            input: input_slot,
+            result: result_slot,
+            storage_layout: storage.layout,
             layout,
             failed: 0,
             record: Some(record),
@@ -3995,13 +3969,8 @@ unsafe fn spawn_in(
             holder: std::mem::MaybeUninit::uninit(),
             cursor: 0,
         });
-        crate::backing_observation::observe!(
-            allocate,
-            (&*task as *const Task).cast(),
-            size_of::<Task>(),
-            TaskStorage,
-        );
-        let task = Box::into_raw(task);
+        // The scheduler's published task now owns the allocation until retire.
+        std::mem::forget(storage);
         #[cfg(feature = "record")]
         if let Some(group) = (*task).group {
             (*task).replay = group.replaying();
@@ -4017,7 +3986,7 @@ unsafe fn spawn_in(
         } else {
             0
         };
-        ptr::copy_nonoverlapping(input, (*task).input.as_ptr(), layout.input.bytes);
+        ptr::copy_nonoverlapping(input, input_slot, layout.input.bytes);
         (*task).sp = (*task)
             .stack
             .as_ref()
@@ -4146,11 +4115,17 @@ unsafe fn retire(task: *mut Task) {
         if !next.is_null() {
             (*next).all_previous = previous;
         }
-        let mut owner = Box::from_raw(task);
+        let backing = Storage {
+            pointer: NonNull::new_unchecked(task.cast()),
+            layout: (*task).storage_layout,
+        };
         // Ended context returns unused primary before record/result refunds.
-        drop(owner.owned_context.take());
-        drop(owner.record.take());
-        drop(owner);
+        drop((*task).owned_context.take());
+        drop((*task).record.take());
+        ptr::drop_in_place(task);
+        if backing.layout.size() <= MAX_SPARE_TASK_BYTES {
+            (*run).spare_task = Some(backing);
+        }
     }
 }
 #[repr(C)]
@@ -4246,7 +4221,7 @@ unsafe fn join<const REC: bool>(
             .next()
             .is_some_and(|cause| cause.kind() == causes::CANCELLED);
         if !failed {
-            ptr::copy_nonoverlapping((*task).result.as_ptr(), result, (*task).layout.result.bytes);
+            ptr::copy_nonoverlapping((*task).result, result, (*task).layout.result.bytes);
         }
         event(JOIN, (*task).id, u64::from(failed));
         retire(task);
@@ -4294,7 +4269,7 @@ unsafe fn abandon_step(
             .cast::<Task>();
         if (*task).failed == 0
             && let Some(clean) = (*task).layout.result.clean
-            && !clean(context, (*task).result.as_ptr(), &mut (*task).cursor, list)
+            && !clean(context, (*task).result, &mut (*task).cursor, list)
         {
             return false;
         }
@@ -4409,13 +4384,6 @@ pub(crate) unsafe fn on_host_stack<T>(
         drop(interval);
         (*stock).recycle(host);
         result
-    }
-}
-
-#[cfg(any(test, feature = "charge-observation", feature = "prof"))]
-impl Drop for Task {
-    fn drop(&mut self) {
-        crate::backing_observation::observe!(free, (self as *const Self).cast(), size_of::<Self>());
     }
 }
 

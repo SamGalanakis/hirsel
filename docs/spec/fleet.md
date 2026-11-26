@@ -369,7 +369,8 @@ stall detection.
   `k`, rejecting cofactored-only and non-canonical-`R` signatures while accepting non-canonical
   `key` encodings and small- or mixed-order keys whenever the cofactorless equation holds).
   Hosts fetch missing objects by digest from the bucket and feed the launcher's existing
-  `Admit -> Need -> AdmitData -> AdmitEnd` exchange.
+  `Admit -> Need -> AdmitData -> AdmitEnd` exchange (RUNNER-SPEC §14.12.4: `objects/<kind>/<hash hex>` under the
+  code prefix; the launcher hashes every object it receives).
 - **Revocation-ordered clearance and anti-rollback mark bootstrap.** Before starting any preview,
   prepare or serving child of a new assembly, a host executes `fleet.clear(...)` in one `fleet@1`
   `transact` ordered with `fleet.install_keyset(...)`. The clearance response is authenticated

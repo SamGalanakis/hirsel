@@ -210,3 +210,100 @@ fn test_local_bucket_standalone(parent: Dir, clock: Clock, random: Random, tasks
 fn test_local_bucket_streamed(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
     run_local_bucket_law(parent, clock, random, tasks, net, true)
 }
+
+fn fill(n: u64, v: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    for _ in 0u64 .. n {
+        list.push(mut b, v)
+    }
+    b
+}
+
+fn data_of(reqs: List[launcher.Request], i: u64) -> Option[Bytes] {
+    if i >= list.len(reqs) {
+        return None
+    }
+    match reqs[i] {
+        AdmitData(_, b) => Some(clone(b)),
+        _ => None,
+    }
+}
+
+fn ends(reqs: List[launcher.Request], i: u64) -> bool {
+    if i >= list.len(reqs) {
+        return false
+    }
+    match reqs[i] {
+        AdmitEnd(_) => true,
+        _ => false,
+    }
+}
+
+// §14.12.4 `bucket_fetch_need`: a code object stored under `code/objects/<kind>/<hex>` answers
+// the launcher's `Need` with the frame an operator upload sends. Catches a zero tag or
+// `AdmitEnd` sent before the last `Need` part (the launcher then reads trailing input or
+// refuses the rest), a missing end, a wrong key layout, a length that is not u64
+// little-endian, and a missing object answered with anything but a refusal.
+@test
+fn test_bucket_fetch_need(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    let _ = parent
+    let (take listener, at) = result.unwrap(host.listen(net, Addr(ip: V4(0x7f000001u32), port: 0u16), 64u16))
+    let secret_raw = string.into_bytes(string.from("local-s1-bucket-secret-key-000000"))
+    let key = result.unwrap(secret.seal(take secret_raw, "kdf"))
+    let service = std.sim.s3.Loopback(bucket: "local-s1", access_key: "AKIALOCALS1", aws_region: "us-east-1", root: secret.share(key), exists_status: 412u16, max_body: 16777216u64)
+    let s3_task = task.spawn(tasks, bytes 16777216u64, LocalS3Loopback(listener: take listener, service: take service, clock: clock), serve_local_s3)
+    let spot = std.object.Bucket(endpoint: loopback_endpoint(at.port), aws_region: "us-east-1", bucket: "local-s1", prefix: "code/", style: Path)
+    let creds = std.cred.from_secret("AKIALOCALS1", secret.share(key), "")
+    let lanes = std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)
+    let due = std.clock.deadline_after_ms(host.mono_ns(clock), 15000u64)
+    let mut c = result.unwrap(std.object.start(net, tasks, take spot, take creds, None, System, clock, random, lanes, due))
+    let (put1, _) = std.object.store(mut c, "objects/body/1111111111111111111111111111111111111111111111111111111111111111", string.into_bytes(string.from("body-one")), due)
+    let (put2, _) = std.object.store(mut c, "objects/group/2222222222222222222222222222222222222222222222222222222222222222", string.into_bytes(string.from("g")), due)
+    let seeded = match (put1, put2) {
+        (Ok(_), Ok(_)) => true,
+        _ => false,
+    }
+    if !seeded {
+        let _ = task.cancel_join(take s3_task)
+        return Error("fetch: seeding the bucket failed")
+    }
+    let a = launcher.Attempt(hi: 0u64, lo: 9u64)
+    let mut first_keys: List[launcher.Wanted] = list.new()
+    list.push(mut first_keys, BodyKey(fill(32u64, 17u8)))
+    let first = platform.fetch_need(mut c, a, first_keys, false, 1024u64, due)
+    let mut last_keys: List[launcher.Wanted] = list.new()
+    list.push(mut last_keys, GroupKey(fill(32u64, 34u8)))
+    let last = platform.fetch_need(mut c, a, last_keys, true, 1024u64, due)
+    let mut missing_keys: List[launcher.Wanted] = list.new()
+    list.push(mut missing_keys, ValueKey(fill(32u64, 51u8)))
+    let missing = platform.fetch_need(mut c, a, missing_keys, true, 1024u64, due)
+    let mut blob_keys: List[launcher.Wanted] = list.new()
+    list.push(mut blob_keys, BlobKey(fill(32u64, 17u8)))
+    let blob = platform.fetch_need(mut c, a, blob_keys, true, 1024u64, due)
+    let _ = take c
+    let _ = task.cancel_join(take s3_task)
+    let Ok(one) = first else {
+        return Error("fetch: a stored body was not fetched")
+    }
+    if list.len(one) != 1u64 || data_of(one, 0u64) != Some(b"\x02\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x11\x08\x00\x00\x00\x00\x00\x00\x00\x62\x6f\x64\x79\x2d\x6f\x6e\x65") {
+        return Error("fetch: the first Need part is not exactly the body's frame, with no end")
+    }
+    let Ok(two) = last else {
+        return Error("fetch: a stored group was not fetched")
+    }
+    if list.len(two) != 2u64 || data_of(two, 0u64) != Some(b"\x01\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x22\x01\x00\x00\x00\x00\x00\x00\x00\x67\x00") || !ends(two, 1u64) {
+        return Error("fetch: the last Need part is not the group's frame, the zero tag and AdmitEnd")
+    }
+    let gone = match missing {
+        Error(Bucket(_, NotFound)) => true,
+        _ => false,
+    }
+    let unfetchable = match blob {
+        Error(Unfetchable(_)) => true,
+        _ => false,
+    }
+    if !gone || !unfetchable {
+        return Error("fetch: a missing object or a source blob was not refused")
+    }
+    Ok(())
+}

@@ -23,6 +23,7 @@ runner = { major = 1, path = "../runner" }
 "platform-tables.hirsel" = "platform"
 "platform-fleet.hirsel" = "platform"
 "platform-refusals.hirsel" = "platform"
+"platform-fetch.hirsel" = "platform"
 "launcher.hirsel" = "launcher"
 "operator.hirsel" = "operator"
 "platform_main.hirsel" = "platform_main"
@@ -118,6 +119,10 @@ grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 
 
 [tests.runs."platform@1/local_laws/test_local_bucket_streamed"]
 limit = 268435456
+grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+
+[tests.runs."platform@1/local_laws/test_bucket_fetch_need"]
+limit = 134217728
 grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
 
 [tests.runs."platform@1/store_tool/describe_matches_open"]

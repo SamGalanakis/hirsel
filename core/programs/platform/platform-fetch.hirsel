@@ -1,0 +1,88 @@
+// Code objects fetched by hash from a fleet's bucket (RUNNER-SPEC §14.12.4): the host answers
+// the launcher's `Need` itself, with the same object frames an operator upload sends, through
+// the launcher's existing `AdmitData` and `AdmitEnd`. The launcher hashes every object and
+// refuses one whose bytes do not match its key, so a wrong or tampered bucket object fails
+// admission there; the host checks nothing it would only check again.
+// Why a `Need` could not be answered from the bucket. `Unfetchable` is a key with no code
+// object (a source blob, or a hash that is not 32 bytes); `Bucket` is the GET's error for
+// the key, `NotFound` included.
+pub type FetchFailed: send = Unfetchable(launcher.Wanted) | Bucket(launcher.Wanted, std.object.Error)
+
+// The object frame tag the launcher reads for each kind (launch.md "Admission").
+fn frame_tag(w: launcher.Wanted) -> Option[(u8, String, Bytes)] {
+    match w {
+        GroupKey(h) => Some((1u8, "group", clone(h))),
+        BodyKey(h) => Some((2u8, "body", clone(h))),
+        AnnexKey(h) => Some((3u8, "annex", clone(h))),
+        ArchiveKey(h) => Some((4u8, "archive", clone(h))),
+        ValueKey(h) => Some((5u8, "value", clone(h))),
+        BlobKey(_) => None,
+    }
+}
+
+fn push_hex(mut s: String, b: Bytes) {
+    let digits = "0123456789abcdef"
+    let d = string.as_bytes(digits)
+    let mut raw: Bytes = list.with_capacity(2u64 * list.len(b))
+    for x in b {
+        let v: u64 = int.widen(x)
+        list.push(mut raw, d[v >> 4u64])
+        list.push(mut raw, d[v & 15u64])
+    }
+    string.push(mut s, result.unwrap(string.from_utf8(take raw)))
+}
+
+// The bucket key of a code object under the client's prefix: `objects/<kind>/<hash>`, the
+// hash in lowercase hex. Only the operator or publisher writes this prefix (fleet.md FLT-6).
+pub fn code_object_key(w: launcher.Wanted) -> Option[String] {
+    let Some((_, kind, hash)) = frame_tag(w) else {
+        return None
+    }
+    if list.len(hash) != 32u64 {
+        return None
+    }
+    let mut k = string.with_capacity(80u64)
+    string.push(mut k, "objects/")
+    string.push(mut k, kind)
+    string.push(mut k, "/")
+    push_hex(mut k, hash)
+    Some(k)
+}
+
+// One `Need` part answered from the bucket: the frames of every key, `tag ‖ hash ‖ length
+// (u64 little-endian) ‖ bytes`, in one `AdmitData`; and after the last part, the zero tag that
+// ends the frames and `AdmitEnd`. An object over `max_object` bytes is the GET's `TooLarge`. A
+// key that cannot be fetched answers nothing: the caller releases the attempt.
+pub fn fetch_need(mut c: std.object.Client, a: launcher.Attempt, keys: List[launcher.Wanted], final_part: bool, max_object: u64, deadline_ns: u64) -> Result[List[launcher.Request], FetchFailed] waits {
+    let mut frames: Bytes = list.new()
+    for w in keys {
+        let Some((tag, _, hash)) = frame_tag(w) else {
+            return Error(Unfetchable(clone(w)))
+        }
+        let Some(key) = code_object_key(w) else {
+            return Error(Unfetchable(clone(w)))
+        }
+        let (got, body) = std.object.fetch(mut c, key, list.with_capacity(max_object), deadline_ns)
+        if let Error(e) = got {
+            return Error(Bucket(clone(w), clone(e)))
+        }
+        list.push(mut frames, tag)
+        list.append(mut frames, hash)
+        let n = list.len(body)
+        for i in 0u64 .. 8u64 {
+            list.push(mut frames, int.narrow((n >> (8u64 * i)) & 255u64))
+        }
+        list.append(mut frames, body)
+    }
+    let mut out: List[launcher.Request] = list.new()
+    if final_part {
+        list.push(mut frames, 0u8)
+    }
+    if list.len(frames) > 0u64 {
+        list.push(mut out, AdmitData(a, take frames))
+    }
+    if final_part {
+        list.push(mut out, AdmitEnd(a))
+    }
+    Ok(take out)
+}

@@ -8,7 +8,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::os::darwin::fs::MetadataExt;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, OnceLock};
@@ -94,6 +94,103 @@ pub(crate) fn pin(source: &mut File) -> Result<File, String> {
         }
     }
     Ok(image)
+}
+
+/// Metadata snapshot of a pinned copy on Darwin. Because `UF_IMMUTABLE` is a
+/// user flag that a same-user process can clear, each spawn compares the
+/// current stat at the copy's path against this snapshot and re-hashes the
+/// file whenever any field changed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Stamp {
+    dev: libc::dev_t,
+    ino: libc::ino_t,
+    flags: u32,
+    size: libc::off_t,
+    mtime_sec: libc::time_t,
+    mtime_nsec: libc::c_long,
+    ctime_sec: libc::time_t,
+    ctime_nsec: libc::c_long,
+}
+
+impl Stamp {
+    fn from_stat(st: &libc::stat) -> io::Result<Self> {
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
+        Ok(Self {
+            dev: st.st_dev,
+            ino: st.st_ino,
+            flags: st.st_flags,
+            size: st.st_size,
+            mtime_sec: st.st_mtime,
+            mtime_nsec: st.st_mtime_nsec,
+            ctime_sec: st.st_ctime,
+            ctime_nsec: st.st_ctime_nsec,
+        })
+    }
+
+    fn of_fd(fd: RawFd) -> io::Result<Self> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: fd is live and fstat writes st on success.
+        if unsafe { libc::fstat(fd, st.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fstat succeeded.
+        Self::from_stat(&unsafe { st.assume_init() })
+    }
+
+    fn of_path(path: &CStr) -> io::Result<Self> {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: path is a live NUL-terminated path and lstat writes st on success.
+        if unsafe { libc::lstat(path.as_ptr(), st.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: lstat succeeded.
+        Self::from_stat(&unsafe { st.assume_init() })
+    }
+}
+
+/// Pinned-image verifier carried to each Darwin spawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Seal {
+    stamp: Stamp,
+    pin: [u8; 32],
+}
+
+impl Seal {
+    pub(crate) fn capture(file: &File, pin: [u8; 32]) -> io::Result<Self> {
+        let stamp = Stamp::of_fd(file.as_raw_fd())?;
+        if stamp.flags & libc::UF_IMMUTABLE == 0 {
+            return Err(io::Error::other("image immutable flag does not hold"));
+        }
+        Ok(Self { stamp, pin })
+    }
+
+    pub(crate) fn still_matches(&self, file: &File) -> io::Result<bool> {
+        Ok(Stamp::of_fd(file.as_raw_fd())? == self.stamp)
+    }
+
+    /// Re-check `(dev, ino, flags, size, mtime, ctime)` at `path`. When any
+    /// field changed, re-hash the regular file at `path` (without following
+    /// links) and refuse if its digest differs from the pin.
+    pub fn verify_path(&self, path: &CStr) -> io::Result<()> {
+        if Stamp::of_path(path)? == self.stamp {
+            return Ok(());
+        }
+        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+        // SAFETY: path is a live NUL-terminated path; a success transfers a descriptor.
+        let fd = unsafe { libc::open(path.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: open returned an owned descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let _ = Stamp::of_fd(file.as_raw_fd())?;
+        if crate::exec::sha256(&mut file)? != self.pin {
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
+        Ok(())
+    }
 }
 
 /// Whether this host can pin an image.

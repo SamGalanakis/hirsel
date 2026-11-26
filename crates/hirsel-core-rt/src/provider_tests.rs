@@ -1181,27 +1181,26 @@ fn exec_supervisor_law(image: &std::path::Path) {
     }
 
     let system = image.parent().unwrap();
-    let make = |argument: &str, piped| SpawnInput {
-        image: Arc::new(File::open(image).unwrap().into()),
-        interpreter: None,
-        cwd: File::open(system).unwrap().into(),
-        argv: if argument == "literal *" {
-            vec![
-                CString::new("probe argv0").unwrap(),
-                CString::new(argument).unwrap(),
-                CString::new(system.as_os_str().as_encoded_bytes()).unwrap(),
-            ]
-        } else {
-            vec![
-                CString::new("probe argv0").unwrap(),
-                CString::new(argument).unwrap(),
-            ]
-        },
-        envp: vec![
-            CString::new("A=fixed").unwrap(),
-            CString::new("Z=caller").unwrap(),
-        ],
-        piped,
+    let make = |argument: &str, piped| {
+        let mut argv = vec![
+            CString::new("probe argv0").unwrap(),
+            CString::new(argument).unwrap(),
+        ];
+        if argument == "literal *" {
+            argv.push(CString::new(system.as_os_str().as_encoded_bytes()).unwrap());
+        }
+        SpawnInput {
+            image: Arc::new(File::open(image).unwrap().into()),
+            seal: None,
+            interpreter: None,
+            cwd: File::open(system).unwrap().into(),
+            argv,
+            envp: vec![
+                CString::new("A=fixed").unwrap(),
+                CString::new("Z=caller").unwrap(),
+            ],
+            piped,
+        }
     };
 
     // SAFETY: this isolated run owns its dispositions and current mask.

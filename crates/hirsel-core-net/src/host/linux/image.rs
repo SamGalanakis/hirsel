@@ -55,6 +55,24 @@ pub(crate) fn pin(source: &mut File) -> Result<File, String> {
         .map_err(|e| step("open sealed image read-only", e))
 }
 
+/// Linux seals the memfd in the kernel, so spawn needs no path re-check.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Seal;
+
+impl Seal {
+    pub(crate) fn capture(_file: &File, _pin: [u8; 32]) -> io::Result<Self> {
+        Ok(Self)
+    }
+
+    pub(crate) fn still_matches(&self, _file: &File) -> io::Result<bool> {
+        Ok(true)
+    }
+
+    pub fn verify_path(&self, _path: &CStr) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Whether this host can pin an image.
 pub(crate) fn probe() -> io::Result<()> {
     memfd().and_then(|image| seal(&image))

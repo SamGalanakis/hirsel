@@ -14,6 +14,7 @@ use std::{
 /// read-only description of the sealed and checked copy.
 pub struct SpawnInput {
     pub image: Arc<OwnedFd>,
+    pub seal: Option<hirsel_core_net::exec::ImageSeal>,
     pub interpreter: Option<Arc<CStr>>,
     pub cwd: OwnedFd,
     pub argv: Vec<CString>,

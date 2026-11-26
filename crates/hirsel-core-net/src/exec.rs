@@ -5,7 +5,8 @@ use std::sync::Arc;
 mod image;
 mod policy;
 pub mod served;
-pub use image::{PinnedImage, PinnedProfile, probe_seals};
+pub(crate) use image::sha256;
+pub use image::{ImageSeal, PinnedImage, PinnedProfile, probe_seals};
 pub use policy::{GRANT_SYNTAX, Policy, Profile, Request};
 
 #[derive(Clone, Debug, Eq, PartialEq)]

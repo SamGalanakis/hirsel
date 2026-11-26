@@ -384,3 +384,214 @@ fn exec_provider_law(image: &std::path::Path) {
         assert!(files.sockets.is_empty());
     }
 }
+
+/// EXEC-4 on macOS: after the pin, a same-user writer clears `UF_IMMUTABLE` and
+/// rewrites or replaces the pinned copy; the next spawn fails instead of running
+/// the altered bytes.
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_provider_refuses_a_same_user_rewrite_of_the_pinned_copy() {
+    use crate::{
+        entry::{self, Grant as EntryGrant},
+        exec::Grant,
+        exec_runtime::{hirsel_core_exec_spawn, hirsel_core_exec_wait},
+        host::exec::Supervisor,
+    };
+    use hirsel_core_net::exec::Request as PolicyRequest;
+    use ring::digest::{SHA256, digest};
+    use std::{
+        ffi::{CStr, OsStr},
+        os::{darwin::fs::MetadataExt, fd::AsRawFd, unix::ffi::OsStrExt},
+        path::Path,
+        process::Command,
+        ptr,
+        sync::Arc,
+    };
+
+    if crate::test_process::run_isolated(
+        "provider_tests::exec_provider_tests::exec_provider_refuses_a_same_user_rewrite_of_the_pinned_copy",
+    ) {
+        return;
+    }
+
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    let compile = |name: &str, code: u8| {
+        let source = root.join(format!("{name}.c"));
+        let binary = root.join(name);
+        std::fs::write(&source, format!("int main(void) {{ return {code}; }}\n")).unwrap();
+        let output = Command::new("cc")
+            .arg(&source)
+            .args(["-o"])
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        binary
+    };
+    let pinned = compile("pinned", 41);
+    let altered = compile("altered", 99);
+    let altered_bytes = std::fs::read(&altered).unwrap();
+
+    let hash: [u8; 32] = digest(&SHA256, &std::fs::read(&pinned).unwrap())
+        .as_ref()
+        .try_into()
+        .unwrap();
+    let wanted = hirsel_core_ids::hex::encode(&hash);
+    let profile = root.join("policy.toml");
+    std::fs::write(
+        &profile,
+        format!(
+            "[pinned]\nimage = {:?}\nsha256 = {:?}\nargv0 = \"pinned\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            pinned, wanted, root
+        ),
+    )
+    .unwrap();
+
+    let supervisor = Arc::new(Supervisor::start(crate::exec::probe).unwrap());
+    let policy = PolicyRequest::parse(&format!("{} pinned", profile.display()))
+        .unwrap()
+        .load()
+        .unwrap();
+    let rules = policy.rules();
+    let (profiles, _) = policy.pin_images().unwrap();
+
+    let mut path_buf = [0u8; libc::MAXPATHLEN as usize];
+    // SAFETY: F_GETPATH writes a NUL-terminated path of at most MAXPATHLEN bytes.
+    assert_eq!(
+        unsafe {
+            libc::fcntl(
+                profiles["pinned"].image.file.as_raw_fd(),
+                libc::F_GETPATH,
+                path_buf.as_mut_ptr(),
+            )
+        },
+        0
+    );
+    let copy_path = CStr::from_bytes_until_nul(&path_buf).unwrap().to_owned();
+    let copy_os = Path::new(OsStr::from_bytes(copy_path.to_bytes()));
+    let original_flags = std::fs::metadata(copy_os).unwrap().st_flags();
+    assert_ne!(original_flags & libc::UF_IMMUTABLE, 0);
+
+    let grant = Grant::Native {
+        supervisor,
+        profiles: Arc::new(profiles),
+        rules,
+    };
+    let mut os = OsProvider::from_streams(None, None);
+    let provider = os.provider();
+    let grants = [
+        EntryGrant {
+            kind: entry::EXEC,
+            provider: &provider,
+            handle: std::ptr::from_ref(&grant) as u64,
+            terminal: false,
+        },
+        EntryGrant {
+            kind: entry::CLOCK,
+            provider: &provider,
+            handle: 0,
+            terminal: false,
+        },
+    ];
+    unsafe extern "C" fn ignore_diagnostic(_: *mut u8, _: *const u8, _: usize) {}
+    let config = Config {
+        root_limit: 1 << 20,
+        args: ptr::null(),
+        args_len: 0,
+        grants: ptr::null(),
+        grants_len: 0,
+        provider: &provider,
+        state: ptr::null_mut(),
+        diagnostic: ignore_diagnostic,
+        describe: None,
+        scheduler: crate::tasks::SchedulerProvider::default(),
+        stop_fd: -1,
+        capabilities: grants.as_ptr(),
+        capabilities_len: grants.len(),
+        close_grants: None,
+        launch: ptr::null(),
+        describe_output: None,
+    };
+
+    fn bytes(prefix: &[u8]) -> Buffer {
+        Buffer {
+            data: prefix.as_ptr().cast_mut(),
+            len: prefix.len(),
+            capacity: 0,
+        }
+    }
+
+    let mut files = crate::host_file::Files::default();
+    let mut context = crate::Context::new(1 << 20);
+    context.host_files = &mut files;
+    context.run = &config;
+    // SAFETY: all grants, buffers and the context pin their extents through delivery.
+    unsafe {
+        let spawn = |context: &mut crate::Context, site| {
+            hirsel_core_exec_spawn(
+                context,
+                1,
+                &bytes(b"pinned"),
+                &bytes(b""),
+                &bytes(b""),
+                &bytes(b"work"),
+                &bytes(b""),
+                0,
+                0,
+                0,
+                site,
+            )
+        };
+
+        // Untampered copy runs on the fast path.
+        let started = spawn(&mut context, 701);
+        assert_eq!(started.outcome.error, IoError::OK);
+        let waited = hirsel_core_exec_wait(&mut context, started.outcome.value, 0, 0, 0, 702);
+        assert_eq!((waited.error, waited.value), (IoError::OK, 41));
+        crate::net::hirsel_core_socket_drop(&mut context, started.outcome.value);
+
+        // Clearing UF_IMMUTABLE without changing bytes triggers a re-hash and still runs the pin.
+        assert_eq!(
+            libc::chflags(copy_path.as_ptr(), original_flags & !libc::UF_IMMUTABLE),
+            0
+        );
+        let cleared = spawn(&mut context, 703);
+        assert_eq!(cleared.outcome.error, IoError::OK);
+        let waited = hirsel_core_exec_wait(&mut context, cleared.outcome.value, 0, 0, 0, 704);
+        assert_eq!((waited.error, waited.value), (IoError::OK, 41));
+        crate::net::hirsel_core_socket_drop(&mut context, cleared.outcome.value);
+
+        // Rewriting the copy in place with altered bytes must be refused.
+        assert_eq!(libc::chmod(copy_path.as_ptr(), 0o700), 0);
+        std::fs::write(copy_os, &altered_bytes).unwrap();
+        let rewritten = spawn(&mut context, 705);
+        assert_eq!(rewritten.outcome.error.tag, 4);
+        assert_eq!(rewritten.pipes, [0; 3]);
+
+        // Re-applying mode 0500 and UF_IMMUTABLE on the altered copy must still be refused.
+        assert_eq!(libc::chmod(copy_path.as_ptr(), 0o500), 0);
+        assert_eq!(libc::chflags(copy_path.as_ptr(), original_flags), 0);
+        let relocked = spawn(&mut context, 706);
+        assert_eq!(relocked.outcome.error.tag, 4);
+        assert_eq!(relocked.pipes, [0; 3]);
+
+        // Unlinking and replacing the copy with a fresh inode must also be refused.
+        assert_eq!(
+            libc::chflags(copy_path.as_ptr(), original_flags & !libc::UF_IMMUTABLE),
+            0
+        );
+        std::fs::remove_file(copy_os).unwrap();
+        std::fs::write(copy_os, &altered_bytes).unwrap();
+        assert_eq!(libc::chmod(copy_path.as_ptr(), 0o500), 0);
+        let replaced = spawn(&mut context, 707);
+        assert_eq!(replaced.outcome.error.tag, 4);
+        assert_eq!(replaced.pipes, [0; 3]);
+
+        assert!(files.sockets.is_empty());
+    }
+}

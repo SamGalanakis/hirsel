@@ -27,6 +27,7 @@ const EXEC_HOST: &str =
 /// read-only description of the immutable private copy.
 pub struct SpawnInput {
     pub image: Arc<OwnedFd>,
+    pub seal: Option<hirsel_core_net::exec::ImageSeal>,
     pub interpreter: Option<Arc<CStr>>,
     pub cwd: OwnedFd,
     pub argv: Vec<CString>,
@@ -447,6 +448,12 @@ impl Shared {
             .map_err(|_| io::Error::from_raw_os_error(libc::ENOMEM))?;
         let mut streams = Streams::new(input.piped)?;
         let path = image_path(input.image.as_raw_fd())?;
+        if let Some(seal) = input.seal {
+            seal.verify_path(&path).map_err(|error| SpawnError {
+                error,
+                step: Some(SetupStep::Exec),
+            })?;
+        }
         let argv = pointers(&input.argv)?;
         let envp = pointers(&input.envp)?;
         let [stdin, stdout, stderr] = &streams.child;
@@ -573,8 +580,9 @@ fn owned(fd: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// The path of the pinned image: the immutable copy in the run's private
-/// directory, which nothing else can rename or replace.
+/// The path of the pinned image in the run's private directory. When a
+/// [`SpawnInput::seal`] is present, `spawn_child` verifies the file at this
+/// path before `posix_spawn`.
 fn image_path(image: RawFd) -> io::Result<CString> {
     let mut buffer = [0u8; libc::MAXPATHLEN as usize];
     // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes, NUL included.

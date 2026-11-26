@@ -31,6 +31,7 @@ fn exec_starts_a_child_while_the_program_holds_more_than_open_max_descriptors() 
     let mut started = supervisor
         .spawn(SpawnInput {
             image: Arc::new(File::open("/bin/sh").unwrap().into()),
+            seal: None,
             interpreter: None,
             cwd: File::open("/").unwrap().into(),
             argv: ["sh", "-c", "pwd"]

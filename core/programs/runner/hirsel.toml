@@ -142,6 +142,7 @@ dirs = ["."]
 "runner-staged-round-law.hirsel" = "runner"
 "runner-sim-release-law.hirsel" = "runner"
 "runner_owner_laws.hirsel" = "runner"
+"runner_placing_laws.hirsel" = "runner"
 "runner_room_client_law.hirsel" = "runner"
 "triggers_journal_laws.hirsel" = "triggers"
 "grant_mint_model_laws.hirsel" = "grant_mint_model"

@@ -1,0 +1,106 @@
+// Laws for one registration per host and factory (runner-template.hirsel).
+
+// Bug law (RUNNER-SPEC §14.9, one registration per host and factory): a Place launched
+// n times from one Placing registers once, and every launch's Registry has the slot and check
+// keys, and the place's charge, that a fresh `placed` gives. The charge oracle is the
+// reservation over a fresh Registry's keyed claims and rooms; a launch that registered again
+// would hold its own Template, which `arc.with_unique` finds unshared.
+fn placing_law[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], n: u64) -> Result[(), u64] {
+    let fresh = placed(p.place, p.n_place) ?=> |_| 1u64
+    let Some(claims) = claim_recovery_bytes(option.unwrap(keyed_template_count(fresh.t))) else {
+        return Error(2u64)
+    }
+    let fresh_charge = operate_reservation(p, p.n_place, claims, plan_rooms(fresh, p.session)) ?=> |_| 3u64
+    let made = placing_of(p)
+    if (placed_bytes(made, p) ?=> |_| 4u64) != fresh_charge {
+        return Error(5u64)
+    }
+    let mut launches: List[Registry[G, H]] = list.new()
+    for _ in 0u64 .. n {
+        let mut r = instantiate(share_placing(made)) ?=> |_| 6u64
+        if placing_law_slots(r) != placing_law_slots(fresh) {
+            return Error(7u64)
+        }
+        if placing_law_checks(r) != placing_law_checks(fresh) {
+            return Error(8u64)
+        }
+        if (operate_reservation(p, p.n_place, claims, plan_rooms(r, p.session)) ?=> |_| 9u64) != fresh_charge {
+            return Error(10u64)
+        }
+        if let Some(_) = arc.with_unique(mut r.t, scoped fn(mut _shown: Template[G]) {}) {
+            return Error(11u64)
+        }
+        list.push(mut launches, take r)
+    }
+    Ok(())
+}
+
+fn placing_law_slots[G: send, H: shareable + inert + send](r: Registry[G, H]) -> List[Bytes] {
+    let mut keys: List[Bytes] = list.new()
+    for (key, _) in r.slots {
+        list.push(mut keys, clone(key))
+    }
+    take keys
+}
+
+fn placing_law_checks[G: send, H: shareable + inert + send](r: Registry[G, H]) -> List[Bytes] {
+    let mut keys: List[Bytes] = list.new()
+    for (key, _) in r.checks {
+        list.push(mut keys, clone(key))
+    }
+    take keys
+}
+
+fn placing_law_entries(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
+    room_law_entries(mut reg)?
+    retain_gone(mut reg, b"placing-law-gone")?
+    compute(mut reg, code.describe(placing_law_double), 4096u64, DEFAULT_STEPS)
+}
+
+fn placing_law_double(take v: u64) -> Result[u64, Capacity] {
+    Ok(v + v)
+}
+
+@test
+fn placing_registers_once_across_launches(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] {
+    let mut settings = room_law_settings(c, random, tasks, net, false)
+    settings.place = code.describe(placing_law_entries)
+    placing_law(settings, 3u64)
+}
+
+// A replay that registers another StaticFn at an ordinal, or fewer or more slots than the
+// build, is refused (Diverged at that ordinal), never bound to the build's key there.
+@test
+fn placing_refuses_a_diverging_replay() -> Result[(), u64] {
+    let built = placing_at(code.describe(placing_law_pair), 1u64 << 20)
+    let _ = instantiate(share_placing(built)) ?=> |_| 1u64
+    if !placing_law_diverges(built, code.describe(placing_law_swapped), 0u64) { return Error(2u64) }
+    if !placing_law_diverges(built, code.describe(placing_law_entries), 0u64) { return Error(3u64) }
+    if !placing_law_diverges(built, code.describe(placing_law_single), 1u64) { return Error(4u64) }
+    if !placing_law_diverges(built, code.describe(placing_law_more), 2u64) { return Error(5u64) }
+    Ok(())
+}
+
+fn placing_law_diverges(built: Placing[(), ()], place: StaticFn[fn(mut Registry[(), ()]) -> Result[(), RegisterError]], at: u64) -> bool {
+    let mut p = share_placing(built)
+    p.place = place
+    match instantiate(p) {
+        Error(Diverged(i)) => i == at,
+        _ => false,
+    }
+}
+
+fn placing_law_same(take v: u64) -> Result[u64, Capacity] { Ok(v) }
+fn placing_law_single(mut reg: Registry[(), ()]) -> Result[(), RegisterError] { compute(mut reg, code.describe(placing_law_double), 4096u64, DEFAULT_STEPS) }
+fn placing_law_pair(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
+    placing_law_single(mut reg)?
+    compute(mut reg, code.describe(placing_law_same), 4096u64, DEFAULT_STEPS)
+}
+fn placing_law_swapped(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
+    compute(mut reg, code.describe(placing_law_same), 4096u64, DEFAULT_STEPS)?
+    placing_law_single(mut reg)
+}
+fn placing_law_more(mut reg: Registry[(), ()]) -> Result[(), RegisterError] {
+    placing_law_pair(mut reg)?
+    placing_law_single(mut reg)
+}

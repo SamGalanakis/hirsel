@@ -54,7 +54,7 @@ pub type Group: codec + send {
     rows: List[Row]
 }
 
-pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds | InvalidBinding(BindError)
+pub type RegisterError: send = Full(Capacity) | AlreadyRegistered(Bytes) | Bounds | RoomBounds | InvalidBinding(BindError) | Diverged(u64)
 
 pub const DEFAULT_STEPS: u64 = 1 << 30
 
@@ -916,58 +916,23 @@ fn described_result[A](identity: View[Bytes], revision: Option[View[Bytes]], kin
     Ok((take key, Exported(described: take d, args_fp: args_fp, result_fp: result_fp, revision: take rev, slots: list.new(), value: list.new())))
 }
 
-// The one insertion: a key already present is refused and the registry is unchanged. A
-// replay inserts the adapter under the key the build checked. `d` is None for a slot that
-// exports nothing (an attempt).
-fn insert[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, take d: Option[Exported], take s: Slot[G, H]) -> Result[(), RegisterError] {
-    if r.replay {
-        map.insert(mut r.slots, take key, take s)
-        r.at += 1u64
-        return Ok(())
-    }
-    if map.contains(r.slots, key) {
-        return Error(AlreadyRegistered(take key))
-    }
-    let mut carried = take d
-    let copied: Bytes = clone(key)
-    let mut kept_key: Option[Bytes] = Some(take copied)
-    edit_template(mut r, scoped fn(mut t: Template[G]) {
-        if let Some(take e) = replace(mut carried, None) {
-            list.push(mut t.exported, take e)
-        }
-        if let Some(take k) = replace(mut kept_key, None) {
-            list.push(mut t.slot_keys, take k)
-        }
-    })
-    map.insert(mut r.slots, take key, take s)
-    Ok(())
-}
-
-// An exported entry's slot: in a replay it also counts the entry as passed.
-fn insert_exported[G: send, H: shareable + inert + send](mut r: Registry[G, H], take key: Bytes, take d: Option[Exported], take s: Slot[G, H]) -> Result[(), RegisterError] {
-    if r.replay {
-        r.seen += 1u64
-    }
-    insert(mut r, take key, take d, take s)
-}
-
 pub fn compute[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(take A) -> Result[R, Capacity]], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = entry_described(r, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+    let (take key, take d) = entry_described(r, code.identity(f), scoped fn() -> Result[(Bytes, Exported), RegisterError] {
         Ok(described(code.identity(f), code.revision(f), Compute, ca, cr) ?=> |_| Bounds)
     })?
     register_check(mut r, key, ca, n, s)?
     let made = fn(arg: Bytes) -> Outcome {
         adapt_compute(f, ca, cr, arg, n, s)
     }
-    insert_exported(mut r, take key, take d, Compute(made))
+    insert_exported(mut r, take key, code.identity(f), take d, Compute(made))
 }
 
 pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, H], f: StaticFn[fn(G, Caller, take A) -> Result[R, Capacity] waits], n: u64, s: u64) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = entry_described(r, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+    let (take key, take d) = entry_described(r, code.identity(f), scoped fn() -> Result[(Bytes, Exported), RegisterError] {
         Ok(described(code.identity(f), code.revision(f), Granted, ca, cr) ?=> |_| Bounds)
     })?
     register_check(mut r, key, ca, n, s)?
@@ -981,7 +946,7 @@ pub fn granted[G: send, H: shareable + inert + send, A: codec, R: codec](mut r: 
             Ok(task.spawn(tasks, bytes n, take j, adapt_granted))
         })
     }
-    insert_exported(mut r, take key, take d, Granted(made))
+    insert_exported(mut r, take key, code.identity(f), take d, Granted(made))
 }
 
 fn current_description(db: store.Db) -> Result[Option[Bytes], store.Error] waits {
@@ -1107,6 +1072,7 @@ fn launch_with[G: send, H: shareable + inert + send](launch: LaunchEnv, place: S
                 InvalidBinding(take problem) => BadHttpBinding(take problem),
                 Bounds => Bounds,
                 RoomBounds => Bounds,
+                Diverged(_) => Bounds,
             }
             let codec: std.codec.Codec[DescribeError] = std.codec.of()
             let mut out: Bytes = list.new()

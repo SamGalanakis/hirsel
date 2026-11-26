@@ -151,7 +151,11 @@ pub fn query_as_with[G: send, Outer: shareable + inert + send, H: shareable + in
 fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert + send, A: codec, R: codec](mut r: Registry[G, Outer], body: QueryBody[H, A, R], take registered_slots: Slots[Outer], select: fn(Outer) -> H, n: u64, s: u64, take ephemeral: Option[RoomEntry]) -> Result[(), RegisterError] {
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()
-    let (take key, take d) = entry_described(r, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
+    let mark: Bytes = match body {
+        Plain(f) => clone(code.identity(f)),
+        As(f) => clone(code.identity(f)),
+    }
+    let (take key, take d) = entry_described(r, mark, scoped fn() -> Result[(Bytes, Exported), RegisterError] {
         let value = std.codec.schema(cr) ?=> |_| Bounds
         let schemas = slot_descriptions(registered_slots)
         let (kind, take result): (Kind, Bytes) = match ephemeral {
@@ -175,7 +179,7 @@ fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert
         As(_) => true,
         Plain(_) => false
     }
-    insert_exported(mut r, take key, take d, Query(n, s, QueryEntry(by_caller: by_caller, ephemeral: take ephemeral, slots: take registered_slots, run: take go)))
+    insert_exported(mut r, take key, mark, take d, Query(n, s, QueryEntry(by_caller: by_caller, ephemeral: take ephemeral, slots: take registered_slots, run: take go)))
 }
 
 fn bind_query_slots[G: send, H: shareable + inert + send](mut r: Registry[G, H], h: H) -> Result[(), RegisterError] {

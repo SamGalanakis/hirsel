@@ -3,6 +3,7 @@ store@1/store/anonymous_startup_scan_keeps_current_open_caller src=d6cb5276a0e41
 store@1/store/backup_offline_routes_and_packs src=1d8f9b0b08bfa098 sig=93c0a7fa9893b30f run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/bucket_fetch_parts_uses_spare_capacity src=51d096d5e01c2170 sig=3bcb8ed997e70720 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/bucket_place_plan_at_floor src=a9ace12b32519ff5 sig=5f7270f47b007816 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
+store@1/store/bucket_request_counts src=25d72ef93ca6193d sig=0ed6be5e51b5e4d9 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_404_cases src=28ef4188c7332b66 sig=dd4bc5ae80235131 run=ba1e44b0eba78f87 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_ack_after_create src=dbcf1521b26c9be9 sig=ab60886a3cbf2c80 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_ack_after_lost_read src=26092976457e0e76 sig=ab05df89cb711aa3 run=2f2681ca48ebe043 bug=- oracle=- rows=pending

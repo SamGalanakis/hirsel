@@ -712,6 +712,66 @@ fn bucket_test_m2_retry_budget(c: Clock, tasks: Tasks, seed_grant: Env) -> Resul
     trust_seed_gate("bucket_test_m2_retry_budget", bucket_m2_retry_budget_run(c, tasks, seed_grant))
 }
 
+// The startup GET receives 503 then 200. The conditional create is applied
+// but loses its reply, so one HEAD reconciles it without a second PUT.
+@test
+fn bucket_request_counts(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    let mut faults: List[std.sim.s3.Fault] = list.new()
+    list.push(mut faults, SlowDown)
+    list.push(mut faults, Clean)
+    let mut words: List[u64] = list.new()
+    // The simulator draws a fault and a stream seed at each connect.
+    list.fill(mut words, 16, 1u64 << 63)
+    words[0] = 0
+    let mut streams: List[List[u64]] = list.new()
+    list.push(mut streams, take words)
+    let plan = std.sim.world.plan_from(std.sim.world.Script(tail_seed: 1, streams: take streams), 0)
+    let mut holds: List[std.sim.s3.Hold] = list.new()
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "counts", from: 1, count: 1, until: At(1), then: ApplyLoseReply))
+    let sim = bucket_law_sim_holds(tasks, c, 1, None, take faults, take holds, take plan)
+    let mut client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
+    let monitor = std.object.request_monitor(client)
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let _ = std.object.bucket_location(mut client, deadline) ?=> |problem| Remote(take problem)
+    let (created, _) = std.object.store_no_clobber(mut client, "counts", bucket_law_value(1), deadline)
+    let Created(_) = created ?=> |problem| Remote(take problem) else {
+        fail("conditional create did not reconcile")
+    }
+    let startup = std.object.request_counts(monitor, ObjectRequest(S3GetBucketLocation))
+    if startup.jobs != 1 || startup.attempts != 2 || startup.retries != 1 || startup.starts != 2 || startup.responses != 2 || startup.successes != 1 || startup.attempts != startup.successes + startup.retries {
+        fail("startup GET must count one 503 and one successful retry")
+    }
+    let write_counts = std.object.request_counts(monitor, ObjectRequest(S3PutConditional))
+    if write_counts.jobs != 1 || write_counts.attempts != 1 || write_counts.retries != 0 || write_counts.starts != 1 || write_counts.responses != 0 || write_counts.successes != 0 {
+        fail("the lost PUT reply must count a start without a response")
+    }
+    let probe = std.object.request_counts(monitor, ReconcileWrite)
+    if probe.jobs != 0 || probe.attempts != 1 || probe.retries != 0 || probe.starts != 1 || probe.responses != 1 || probe.successes != 1 {
+        fail("the reconciliation HEAD must count separately from the PUT")
+    }
+    let head = std.object.request_counts(monitor, ObjectRequest(S3Head))
+    if head.attempts != 0 {
+        fail("the reconciliation HEAD must not count as a regular HEAD")
+    }
+    let _ = take client
+    // The spare address refuses connects in this fixture. One millisecond
+    // leaves time for one attempt and expires before the 10 ms retry backoff.
+    let mut unreachable = bucket_law_client_lanes(sim, tasks, "spare.test", 2, true, 1)?
+    let refused_monitor = std.object.request_monitor(unreachable)
+    let short_deadline = std.object.deadline_after_ms(unreachable, 1)
+    let (missing, _) = std.object.fetch(mut unreachable, "counts", list.with_capacity(8), short_deadline)
+    if let Ok(_) = missing {
+        fail("the unreachable endpoint answered")
+    }
+    let refused = std.object.request_counts(refused_monitor, ObjectRequest(S3Fetch))
+    if refused.jobs != 1 || refused.attempts != 1 || refused.retries != 0 || refused.starts != 0 || refused.responses != 0 || refused.successes != 0 {
+        fail("a connect refusal must count an attempt without a start")
+    }
+    let _ = take unreachable
+    let _ = bucket_law_finish(take sim)
+    Ok(())
+}
+
 fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let mut old = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
     let mut new_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?

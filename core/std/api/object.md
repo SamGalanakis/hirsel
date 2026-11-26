@@ -64,6 +64,24 @@ the operation uses a no-clobber precondition.
 | `pending_uploads(prefix, mut into, deadline_ns)` | Appends handles for up to 16 multipart uploads still pending under the prefix and returns true when more remain. Abort them and list again. |
 | `pending_uploads_page(prefix, after, mut into, deadline_ns)` | Lists pending upload handles with their relative object keys. Pass the returned cursor to continue. `None` marks the final page. |
 
+## Request counters
+
+Use `request_monitor(client)` to hold a read handle while the client runs in
+another task. `request_counts(monitor, kind)` sums the per-lane totals published
+when jobs finish, plus any completed background credential checks. The counters
+start at zero for each client and follow it through `split` and `attach`.
+
+`ObjectRequest(op)` includes the startup location GET as `S3GetBucketLocation`.
+`ReconcileWrite` counts HEAD probes separately from the job that issued them.
+`ValidateCredentials` counts the signed bucket HEAD for a credential check.
+Jobs count operations handed to a lane, or credential checks. Attempts count
+each exchange, including failures before sending. Retries count additional
+attempts for the same job and kind. Starts count requests that may have sent
+bytes. Responses count accepted response heads, including error statuses.
+Successes count usable exchange results. For a streamed object, that means
+the head and handoff succeeded. The counters measure client activity and
+cannot establish what the provider received or billed.
+
 ## Opening an object for a relay
 
 See [HTTP response outcomes](../../../docs/spec/http.md#http-10-outcomes) for the object

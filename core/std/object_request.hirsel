@@ -1,0 +1,114 @@
+/// The S3 operation of an object-client job.
+pub type Operation: key = S3Open | S3Fetch | S3FetchRange | S3FetchChanged | S3Put | S3PutConditional | S3PutIf | S3ListObjects | S3Erase | S3Upload | S3Part | S3Complete | S3CompleteConditional | S3Abort | S3Head | S3ListUploads | S3GetBucketLocation
+
+/// The wire operation or purpose of a Bucket request.
+pub type RequestKind: key = ObjectRequest(Operation) | ReconcileWrite | ValidateCredentials
+
+/// Lifetime totals for one client and request kind. Attempts include local
+/// failures before any bytes could be sent. Starts may have sent request bytes.
+/// Responses count accepted response heads, including unsuccessful statuses.
+/// Successes count exchanges that returned a usable result.
+pub type RequestCounts: shareable + send {
+    jobs: u64,
+    attempts: u64,
+    retries: u64,
+    starts: u64,
+    responses: u64,
+    successes: u64
+}
+
+pub type AttemptObservation {
+    started: bool,
+    answered: bool
+}
+
+pub const EMPTY_REQUEST_COUNTS: RequestCounts = RequestCounts(jobs: 0, attempts: 0, retries: 0, starts: 0, responses: 0, successes: 0)
+
+pub type LaneCounts: shareable + send {
+    rows: Inline[RequestCounts, 19]
+}
+
+pub fn request_index(kind: RequestKind) -> u64 {
+    match kind {
+        ObjectRequest(S3Open) => 0,
+        ObjectRequest(S3Fetch) => 1,
+        ObjectRequest(S3FetchRange) => 2,
+        ObjectRequest(S3FetchChanged) => 3,
+        ObjectRequest(S3Put) => 4,
+        ObjectRequest(S3PutConditional) => 5,
+        ObjectRequest(S3PutIf) => 6,
+        ObjectRequest(S3ListObjects) => 7,
+        ObjectRequest(S3Erase) => 8,
+        ObjectRequest(S3Upload) => 9,
+        ObjectRequest(S3Part) => 10,
+        ObjectRequest(S3Complete) => 11,
+        ObjectRequest(S3CompleteConditional) => 12,
+        ObjectRequest(S3Abort) => 13,
+        ObjectRequest(S3Head) => 14,
+        ObjectRequest(S3ListUploads) => 15,
+        ObjectRequest(S3GetBucketLocation) => 16,
+        ReconcileWrite => 17,
+        ValidateCredentials => 18,
+    }
+}
+
+pub fn count_attempt(mut counts: RequestCounts, seen: AttemptObservation, retrying: bool, successful: bool) {
+    counts.attempts = int.saturating_add(counts.attempts, 1)
+    if retrying {
+        counts.retries = int.saturating_add(counts.retries, 1)
+    }
+    if seen.started {
+        counts.starts = int.saturating_add(counts.starts, 1)
+    }
+    if seen.answered {
+        counts.responses = int.saturating_add(counts.responses, 1)
+    }
+    if successful {
+        counts.successes = int.saturating_add(counts.successes, 1)
+    }
+}
+
+pub fn add_counts(mut total: RequestCounts, counts: RequestCounts) {
+    total.jobs = int.saturating_add(total.jobs, counts.jobs)
+    total.attempts = int.saturating_add(total.attempts, counts.attempts)
+    total.retries = int.saturating_add(total.retries, counts.retries)
+    total.starts = int.saturating_add(total.starts, counts.starts)
+    total.responses = int.saturating_add(total.responses, counts.responses)
+    total.successes = int.saturating_add(total.successes, counts.successes)
+}
+
+pub fn method(op: Operation) -> String {
+    match op {
+        S3Open => "GET",
+        S3Fetch => "GET",
+        S3FetchRange => "GET",
+        S3FetchChanged => "GET",
+        S3GetBucketLocation => "GET",
+        S3ListObjects => "GET",
+        S3ListUploads => "GET",
+        S3Head => "HEAD",
+        S3Put => "PUT",
+        S3PutConditional => "PUT",
+        S3PutIf => "PUT",
+        S3Part => "PUT",
+        S3Erase => "DELETE",
+        S3Abort => "DELETE",
+        S3Upload => "POST",
+        S3Complete => "POST",
+        S3CompleteConditional => "POST",
+    }
+}
+
+pub fn uploads_body(op: Operation) -> bool {
+    op == S3Put || op == S3PutConditional || op == S3PutIf || op == S3Part || op == S3Complete || op == S3CompleteConditional
+}
+
+pub fn payload_read(op: Operation) -> bool {
+    op == S3Fetch || op == S3FetchRange || op == S3FetchChanged
+}
+
+pub fn start_request(mut c: http_client.Connection, wire: http_client.Request, deadline: u64, mut seen: AttemptObservation) -> Result[(), http_client.Error] waits {
+    let started = http_client.start(mut c, wire, deadline)
+    seen.started = http_client.request_started(c)
+    started
+}

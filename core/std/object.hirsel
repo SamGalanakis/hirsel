@@ -84,14 +84,22 @@ pub fn key_text(key: Key) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-type Operation: key = Open | Fetch | FetchRange | FetchChanged | Put | PutConditional | PutIf | ListObjects | Erase | Upload | Part | Complete | CompleteConditional | Abort | Head | ListUploads | GetBucketLocation
+pub type Operation = object_request.Operation
+
+pub type RequestKind = object_request.RequestKind
+
+pub type RequestCounts = object_request.RequestCounts
+
+type AttemptObservation = object_request.AttemptObservation
+
+type LaneCounts = object_request.LaneCounts
 
 type Phase: key = BeforeRequest | RequestSent | ResponseHead | ResponseBody
 
 type Decision: key = Accept | Retry | Throttle | Resolve | AlreadyExists | Missing | Changed | Refresh | CorrectSkew | Reject
 
 fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bool, pinned: bool) -> Decision {
-    if op == PutIf {
+    if op == S3PutIf {
         if phase == BeforeRequest || status == 409 || (status == 400 && code == string.as_bytes("RequestTimeout")) {
             return Retry
         }
@@ -103,8 +111,8 @@ fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bo
         }
         return Reject
     }
-    let conditional = op == PutConditional || op == CompleteConditional
-    let uncertain = conditional || op == Complete
+    let conditional = op == S3PutConditional || op == S3CompleteConditional
+    let uncertain = conditional || op == S3Complete
     if phase == BeforeRequest {
         return Retry
     }
@@ -134,13 +142,13 @@ fn classify(op: Operation, phase: Phase, status: u16, code: Bytes, resolving: bo
         return Changed
     }
     if status == 404 {
-        return if op == Erase || op == Abort {
+        return if op == S3Erase || op == S3Abort {
             Accept
         } else {
             Missing
         }
     }
-    if status == 409 && pinned && payload_read(op) {
+    if status == 409 && pinned && object_request.payload_read(op) {
         return Retry
     }
     if status == 429 || status == 503 || code == string.as_bytes("SlowDown") {
@@ -508,36 +516,6 @@ type Reply: send {
     entries: List[Entry]
 }
 
-fn method(op: Operation) -> String {
-    match op {
-        Open => "GET",
-        Fetch => "GET",
-        FetchRange => "GET",
-        FetchChanged => "GET",
-        GetBucketLocation => "GET",
-        ListObjects => "GET",
-        ListUploads => "GET",
-        Head => "HEAD",
-        Put => "PUT",
-        PutConditional => "PUT",
-        PutIf => "PUT",
-        Part => "PUT",
-        Erase => "DELETE",
-        Abort => "DELETE",
-        Upload => "POST",
-        Complete => "POST",
-        CompleteConditional => "POST",
-    }
-}
-
-fn uploads_body(op: Operation) -> bool {
-    op == Put || op == PutConditional || op == PutIf || op == Part || op == Complete || op == CompleteConditional
-}
-
-fn payload_read(op: Operation) -> bool {
-    op == Fetch || op == FetchRange || op == FetchChanged
-}
-
 const HOST_FIELD: u64 = 0
 
 const MATCH_FIELD: u64 = 1
@@ -658,20 +636,20 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
         return Error(Fatal(Malformed))
     }
     copy_header(mut headers, mut w.values, HOST_FIELD, string.as_bytes(server.authority))
-    if (payload_read(op) || op == PutIf) && tag.len != 0 {
+    if (object_request.payload_read(op) || op == S3PutIf) && tag.len != 0 {
         let mut field = value_buffer(mut w.values, MATCH_FIELD)
         let _ = bytebuf.append_inline(mut field, tag.octets, 0, tag.len)
         set_header(mut headers, MATCH_FIELD, take field)
     }
-    if op == PutConditional || op == CompleteConditional || (op == PutIf && tag.len == 0) {
+    if op == S3PutConditional || op == S3CompleteConditional || (op == S3PutIf && tag.len == 0) {
         copy_header(mut headers, mut w.values, NO_CLOBBER_FIELD, string.as_bytes("*"))
     }
-    if op == FetchChanged {
+    if op == S3FetchChanged {
         let mut field = value_buffer(mut w.values, NO_CLOBBER_FIELD)
         let _ = bytebuf.append_inline(mut field, job.tag.octets, 0, job.tag.len)
         set_header(mut headers, NO_CLOBBER_FIELD, take field)
     }
-    if payload_read(op) && (op == FetchRange || from != 0) {
+    if object_request.payload_read(op) && (op == S3FetchRange || from != 0) {
         string.clear(mut w.range_text)
         string.push(mut w.range_text, "bytes=")
         string.push_u64(mut w.range_text, from)
@@ -680,7 +658,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
             string.push_u64(mut w.range_text, to - 1)
         }
         copy_header(mut headers, mut w.values, RANGE_FIELD, string.as_bytes(w.range_text))
-    } else if op == Open && job.want != Whole {
+    } else if op == S3Open && job.want != Whole {
         string.clear(mut w.range_text)
         string.push(mut w.range_text, "bytes=")
         match job.want {
@@ -701,7 +679,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
         }
         copy_header(mut headers, mut w.values, RANGE_FIELD, string.as_bytes(w.range_text))
     }
-    let valid_crc = uploads_body(op) && crc != None
+    let valid_crc = object_request.uploads_body(op) && crc != None
     if valid_crc {
         let mut field = value_buffer(mut w.values, CHECKSUM_FIELD)
         encode_checksum(mut field, option.unwrap(crc))
@@ -709,7 +687,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
     }
     copy_header(mut headers, mut w.values, PAYLOAD_FIELD, string.as_bytes("UNSIGNED-PAYLOAD"))
     set_header(mut headers, DATE_FIELD, take date)
-    if op == Upload || op == Put || op == PutConditional {
+    if op == S3Upload || op == S3Put || op == S3PutConditional {
         if let Some(id) = job.id {
             let mut field = value_buffer(mut w.values, ID_FIELD)
             hex.append_from(mut field, 16, scoped fn(i: u64) -> u8 {
@@ -722,12 +700,12 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
         copy_header(mut headers, mut w.values, TOKEN_FIELD, string.as_bytes(token))
     }
     let uri_path = replace(mut job.path, string.new())
-    let query = if op == Head {
+    let query = if op == S3Head {
         string.new()
     } else {
         replace(mut job.query, string.new())
     }
-    let signed = sigv4.Request(method: method(op), uri: take uri_path, query: take query, headers: take headers, payload: if !server.secure && valid_crc {
+    let signed = sigv4.Request(method: object_request.method(op), uri: take uri_path, query: take query, headers: take headers, payload: if !server.secure && valid_crc {
         Plaintext
     } else {
         Tls
@@ -736,7 +714,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
     let authorized = sigv4.authorize(keys, now, timestamp, access_key, signed, mut w.signing, mut authorization)
     let sigv4.Request(headers: take signed_fields, uri: take restored_path, query: take restored_query, ..) = take signed
     job.path = take restored_path
-    if op != Head {
+    if op != S3Head {
         job.query = take restored_query
     }
     if let Error(_) = authorized {
@@ -747,7 +725,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
     let mut target = replace(mut w.target, string.new())
     string.clear(mut target)
     string.push(mut target, job.path)
-    if op != Head && job.query != "" {
+    if op != S3Head && job.query != "" {
         string.push_char(mut target, '?')
         string.push(mut target, job.query)
     }
@@ -755,7 +733,7 @@ fn signed_request(mut job: Job, op: Operation, server: Endpoint, keys: sigv4.Sig
     let host = list.remove(mut actual_fields, 0)
     reclaim_header(mut w.values, take host)
     set_header(mut actual_fields, AUTH_FIELD, take authorization)
-    Ok(http_client.Request(method: method(op), target: take target, headers: take actual_fields, body: Fixed(if uploads_body(op) {
+    Ok(http_client.Request(method: object_request.method(op), target: take target, headers: take actual_fields, body: Fixed(if object_request.uploads_body(op) {
         list.len(job.data)
     } else {
         0
@@ -788,98 +766,6 @@ fn failure(phase: Phase, e: http_client.Error) -> Exchange {
     }
 }
 
-fn xml_field(data: String, tag: String) -> Option[View[String]] in data {
-    let mut opening = string.from("<")
-    string.push(mut opening, tag)
-    string.push_char(mut opening, '>')
-    let mut closing = string.from("</")
-    string.push(mut closing, tag)
-    string.push_char(mut closing, '>')
-    xml_content(data, opening, closing)
-}
-
-fn xml_content(data: String, opening: String, closing: String) -> Option[View[String]] in data {
-    let Some(first) = string.find(data, 0, opening) else {
-        return None
-    }
-    let begin_at = first + string.byte_len(opening)
-    let Some(end) = string.find(data, begin_at, closing) else {
-        return None
-    }
-    Some(string.slice(data, begin_at, end))
-}
-
-fn xml_decoded(data: String) -> Result[String, Error] {
-    let mut out = string.with_capacity(string.byte_len(data))
-    decode_xml(mut out, data)?
-    Ok(take out)
-}
-
-fn decode_xml(mut out: String, data: String) -> Result[(), Error] {
-    string.clear(mut out)
-    let mut at = 0u64
-    loop {
-        let Some(amp) = string.find(data, at, "&") else {
-            string.push(mut out, string.slice(data, at, string.byte_len(data)))
-            return Ok(())
-        }
-        string.push(mut out, string.slice(data, at, amp))
-        let Some(end) = string.find(data, amp + 1, ";") else {
-            return Error(Fatal(Malformed))
-        }
-        let name = string.slice(data, amp + 1, end)
-        let c = if name == "amp" {
-            '&'
-        } else if name == "lt" {
-            '<'
-        } else if name == "gt" {
-            '>'
-        } else if name == "quot" {
-            '"'
-        } else if name == "apos" {
-            '\''
-        } else {
-            let octets = string.as_bytes(name)
-            let (begin_at, radix) = if string.starts_with(name, "#x") {
-                (2u64, 16u32)
-            } else if string.starts_with(name, "#") {
-                (1u64, 10u32)
-            } else {
-                return Error(Fatal(Malformed))
-            }
-            if begin_at >= list.len(octets) {
-                return Error(Fatal(Malformed))
-            }
-            let scalar = match int.parse_uint(string.slice(name, begin_at, list.len(octets)), radix) {
-                Ok(n) => n,
-                Error(_) => return Error(Fatal(Malformed)),
-            }
-            if scalar > 0x10ffff {
-                return Error(Fatal(Malformed))
-            }
-            let Some(ch) = char.from_u32(int.narrow(scalar)) else {
-                return Error(Fatal(Malformed))
-            }
-            ch
-        }
-        string.push_char(mut out, c)
-        at = end + 1
-    }
-}
-
-fn fragment(b: Bytes, begin_at: u64, needle: Bytes) -> Option[u64] {
-    if list.len(needle) > list.len(b) {
-        return None
-    }
-    let end = list.len(b) - list.len(needle)
-    for i in begin_at .. end + 1 {
-        if list.slice(b, i, i + list.len(needle)) == needle {
-            return Some(i)
-        }
-    }
-    None
-}
-
 fn xml_text(b: Bytes) -> Result[String, Error] {
     match string.from_utf8(copy_bytes(b)) {
         Ok(take s) => Ok(take s),
@@ -892,10 +778,10 @@ fn empty_key() -> Key {
 }
 
 fn parse_listing_fields(body: String, prefix: String, mut decoded: String) -> Result[Entry, Error] {
-    let Some(raw_key) = xml_content(body, "<Key>", "</Key>") else {
+    let Some(raw_key) = object_xml.xml_content(body, "<Key>", "</Key>") else {
         return Error(Fatal(Malformed))
     }
-    decode_xml(mut decoded, raw_key)?
+    object_xml.decode_xml(mut decoded, raw_key)?
     if !string.starts_with(decoded, prefix) || string.byte_len(decoded) > 1024 {
         return Error(Fatal(Malformed))
     }
@@ -905,13 +791,13 @@ fn parse_listing_fields(body: String, prefix: String, mut decoded: String) -> Re
     for i in 0u64 .. name.len {
         name.octets[i] = string.as_bytes(decoded)[offset + i]
     }
-    let Some(raw_size) = xml_content(body, "<Size>", "</Size>") else {
+    let Some(raw_size) = object_xml.xml_content(body, "<Size>", "</Size>") else {
         return Error(Fatal(Malformed))
     }
-    let Some(raw_etag) = xml_content(body, "<ETag>", "</ETag>") else {
+    let Some(raw_etag) = object_xml.xml_content(body, "<ETag>", "</ETag>") else {
         return Error(Fatal(Malformed))
     }
-    decode_xml(mut decoded, raw_etag)?
+    object_xml.decode_xml(mut decoded, raw_etag)?
     let size = decimal(string.as_bytes(raw_size), 0, string.byte_len(raw_size))?
     Ok(Entry(key: name, size, etag: etag(string.as_bytes(decoded))?))
 }
@@ -1004,7 +890,7 @@ fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entr
             if let Error(e) = collect(mut c, mut buffer, mut probe) {
                 return receive_failure(e)
             }
-            return interpret_error(ListObjects, 200, buffer)
+            return interpret_error(S3ListObjects, 200, buffer)
         }
         if final_tag {
             closed = true
@@ -1015,7 +901,7 @@ fn listing(mut c: http_client.Connection, prefix: String, mut entries: List[Entr
             } else {
                 string.as_bytes("</IsTruncated>")
             }
-            let Some(end_at) = fragment(buffer, stop + 1, end) else {
+            let Some(end_at) = object_xml.fragment(buffer, stop + 1, end) else {
                 consume(mut buffer, begin_at)
                 at = 0
                 if list.len(buffer) == list.capacity(buffer) {
@@ -1072,7 +958,7 @@ fn parse_pending(body: Bytes, prefix: String) -> Exchange {
     if string.find(text, 0, "</ListMultipartUploadsResult>") == None {
         return Invalid(Fatal(Malformed))
     }
-    let more = match xml_field(text, "IsTruncated") {
+    let more = match object_xml.xml_field(text, "IsTruncated") {
         Some(flag) => {
             if flag == "true" {
                 true
@@ -1092,10 +978,10 @@ fn parse_pending(body: Bytes, prefix: String) -> Exchange {
             return Invalid(Fatal(Malformed))
         }
         let entry = string.slice(text, first, last)
-        let (Some(raw_key), Some(raw_id)) = (xml_field(entry, "Key"), xml_field(entry, "UploadId")) else {
+        let (Some(raw_key), Some(raw_id)) = (object_xml.xml_field(entry, "Key"), object_xml.xml_field(entry, "UploadId")) else {
             return Invalid(Fatal(Malformed))
         }
-        let key = match xml_decoded(raw_key) {
+        let key = match object_xml.xml_decoded(raw_key) {
             Ok(take value) => take value,
             Error(take e) => return Invalid(take e),
         }
@@ -1103,15 +989,15 @@ fn parse_pending(body: Bytes, prefix: String) -> Exchange {
             return Invalid(Fatal(Malformed))
         }
         list.push(mut keys, string.from(string.slice(key, string.byte_len(prefix), string.byte_len(key))))
-        match xml_decoded(raw_id) {
+        match object_xml.xml_decoded(raw_id) {
             Ok(take value) => list.push(mut ids, take value),
             Error(take e) => return Invalid(take e),
         }
         at = last
     }
-    let cursor: Option[UploadCursor] = match (xml_field(text, "NextKeyMarker"), xml_field(text, "NextUploadIdMarker")) {
+    let cursor: Option[UploadCursor] = match (object_xml.xml_field(text, "NextKeyMarker"), object_xml.xml_field(text, "NextUploadIdMarker")) {
         (Some(raw_key), Some(raw_id)) if more => {
-            let (Ok(take key), Ok(take id)) = (xml_decoded(raw_key), xml_decoded(raw_id)) else {
+            let (Ok(take key), Ok(take id)) = (object_xml.xml_decoded(raw_key), object_xml.xml_decoded(raw_id)) else {
                 return Invalid(Fatal(Malformed))
             }
             if !string.starts_with(key, prefix) || id == "" {
@@ -1128,10 +1014,10 @@ fn status_failure(status: u16, body: Bytes) -> Failure {
     let mut code: Bytes = list.new()
     let mut server_time: Option[u64] = None
     if let Ok(text) = xml_text(body) {
-        if let Some(tag) = xml_field(text, "Code") {
+        if let Some(tag) = object_xml.xml_field(text, "Code") {
             code = copy_bytes(string.as_bytes(tag))
         }
-        if let Some(value) = xml_field(text, "ServerTime") {
+        if let Some(value) = object_xml.xml_field(text, "ServerTime") {
             if let Ok((stamp, _)) = time.parse_rfc3339(value) {
                 let seconds = time.unix_secs(stamp)
                 if seconds >= 0 {
@@ -1145,7 +1031,7 @@ fn status_failure(status: u16, body: Bytes) -> Failure {
 }
 
 fn bad_success(op: Operation) -> Exchange {
-    if op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional {
+    if op == S3PutConditional || op == S3PutIf || op == S3Complete || op == S3CompleteConditional {
         return Refused(Failure(phase: ResponseBody, reason: Malformed, status: 0, code: list.new(), server_time: None))
     }
     Invalid(Fatal(Malformed))
@@ -1285,24 +1171,24 @@ fn location_setting(text: String) -> Result[String, Error] {
     let Some(end) = string.find(text, close + 1, "</LocationConstraint>") else {
         return Error(Fatal(Malformed))
     }
-    xml_decoded(string.slice(text, close + 1, end))
+    object_xml.xml_decoded(string.slice(text, close + 1, end))
 }
 
 fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inline[u8, 16]], op: Operation, status: u16, prefix: String, mut entries: List[Entry], mut buffer: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
-    if op == ListObjects && status == 200 {
+    if op == S3ListObjects && status == 200 {
         return listing(mut c, prefix, mut entries, mut buffer, mut probe, mut scratch)
     }
     list.clear(mut buffer)
     if let Error(e) = collect(mut c, mut buffer, mut probe) {
         return receive_failure(e)
     }
-    if op == FetchChanged && status == 304 {
+    if op == S3FetchChanged && status == 304 {
         return Received(NotModified)
     }
-    if status < 200 || status >= 300 || fragment(buffer, 0, string.as_bytes("<Error")) != None {
+    if status < 200 || status >= 300 || object_xml.fragment(buffer, 0, string.as_bytes("<Error")) != None {
         return interpret_error(op, status, buffer)
     }
-    if op == GetBucketLocation {
+    if op == S3GetBucketLocation {
         let Ok(take text) = xml_text(buffer) else {
             return Invalid(Fatal(Malformed))
         }
@@ -1311,46 +1197,46 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
             Error(take problem) => Invalid(take problem),
         }
     }
-    if op == ListUploads {
+    if op == S3ListUploads {
         return parse_pending(buffer, prefix)
     }
-    if op == Upload {
+    if op == S3Upload {
         let Ok(text) = xml_text(buffer) else {
             return Invalid(Fatal(Malformed))
         }
-        let Some(id) = xml_field(text, "UploadId") else {
+        let Some(id) = object_xml.xml_field(text, "UploadId") else {
             return Invalid(Fatal(Malformed))
         }
-        return match xml_decoded(id) {
+        return match object_xml.xml_decoded(id) {
             Ok(take value) => Received(Initiated(take value)),
             Error(take e) => Invalid(take e),
         }
     }
     let head = http_client.head(c)
-    let mut info = match read_meta(head, if op == Head {
+    let mut info = match read_meta(head, if op == S3Head {
         size_or(content_length(head), 0)
     } else {
         octets
     }) {
         Ok(take value) => take value,
         Error(take e) => {
-            if op == PutIf {
+            if op == S3PutIf {
                 return bad_success(op)
             }
             return Invalid(take e)
         },
     }
-    if op == PutIf && !strong_tag(info.etag) {
+    if op == S3PutIf && !strong_tag(info.etag) {
         return bad_success(op)
     }
-    if op == Complete || op == CompleteConditional {
+    if op == S3Complete || op == S3CompleteConditional {
         let Ok(text) = xml_text(buffer) else {
             return bad_success(op)
         }
-        let Some(tag) = xml_field(text, "ETag") else {
+        let Some(tag) = object_xml.xml_field(text, "ETag") else {
             return bad_success(op)
         }
-        let Ok(decoded) = xml_decoded(tag) else {
+        let Ok(decoded) = object_xml.xml_decoded(tag) else {
             return bad_success(op)
         }
         info.etag = match etag(string.as_bytes(decoded)) {
@@ -1358,7 +1244,7 @@ fn receive_control(mut c: http_client.Connection, octets: u64, put: Option[Inlin
             Error(_) => return bad_success(op),
         }
     }
-    if (op == Put || op == PutConditional || op == Complete || op == CompleteConditional) {
+    if (op == S3Put || op == S3PutConditional || op == S3Complete || op == S3CompleteConditional) {
         info.put_id = put
     }
     Received(Object(take info))
@@ -1702,39 +1588,50 @@ type Restore: send {
     lease: Receiver[PoolReply],
     index: u64,
     config: Bucket,
-    wire: WireBuffers
+    wire: WireBuffers,
+    counts: RequestCounts,
+    report: Latest[RequestCounts]
 }
 
-fn validate_credentials(n: Net, server: Endpoint, c: Clock, pool: Sender[PoolMessage], lease: Receiver[PoolReply], index: u64, bucket_path: String, proposed: AuthState, deadline: u64, mut wire: WireBuffers) -> bool waits {
+fn validate_credentials(n: Net, server: Endpoint, c: Clock, pool: Sender[PoolMessage], lease: Receiver[PoolReply], index: u64, bucket_path: String, proposed: AuthState, deadline: u64, mut wire: WireBuffers, mut counts: RequestCounts) -> bool waits {
+    counts.jobs = int.saturating_add(counts.jobs, 1)
     if host.mono_ns(c) >= deadline {
         return false
     }
-    let mut probe = new_job(Head, string.from(bucket_path), list.new(), deadline)
+    let mut probe = new_job(S3Head, string.from(bucket_path), list.new(), deadline)
     let keys = sigv4.share_keys(proposed.signer)
-    let request = match signed_request(mut probe, Head, server, keys, proposed.credentials.access_key_id, proposed.credentials.session_token, c, 0, None, 0, MAX_U64, empty_tag(), mut wire) {
+    let request = match signed_request(mut probe, S3Head, server, keys, proposed.credentials.access_key_id, proposed.credentials.session_token, c, 0, None, 0, MAX_U64, empty_tag(), mut wire) {
         Ok(take req) => take req,
         Error(_) => return false,
     }
     let connection = connect_pool(n, server, c, pool, lease, index, deadline)
     let mut accepted = false
+    let mut successful = false
+    let mut seen = object_request.AttemptObservation(started: false, answered: false)
     if let Ok(take held) = take connection {
         let Held(connection: take stream, address, ..) = take held
         let mut conn = take stream
-        if let Ok(()) = http_client.start(mut conn, request, deadline) {
+        if let Ok(()) = object_request.start_request(mut conn, request, deadline, mut seen) {
             if let Ok(()) = http_client.finish_request(mut conn, MAX_U64) {
-                accepted = http_client.status(http_client.head(conn)) != 403
+                seen.answered = true
+                let status = http_client.status(http_client.head(conn))
+                accepted = status != 403
+                successful = status >= 200 && status < 300
             }
         }
         http_client.close(take conn)
         let _ = channel.send(pool, Release(address, false))
     }
+    object_request.count_attempt(mut counts, seen, false, successful)
     reclaim_request(mut wire, take request)
     accepted
 }
 
 fn validate(mut checker: Restore, proposed: AuthState, deadline: u64) -> bool waits {
     let path = request_path(checker.config, "", true)
-    validate_credentials(checker.network, checker.server, checker.clock, checker.pool, checker.lease, checker.index, path, proposed, deadline, mut checker.wire)
+    let valid = validate_credentials(checker.network, checker.server, checker.clock, checker.pool, checker.lease, checker.index, path, proposed, deadline, mut checker.wire, mut checker.counts)
+    latest.publish(checker.report, arc.new(checker.counts))
+    valid
 }
 
 fn adopt(mut checker: Restore, mut active: AuthState, take offered: cred.Credentials, deadline: u64) -> bool waits {
@@ -1812,7 +1709,8 @@ fn renew_lane(mut lane: Lane, deadline: u64) -> bool waits {
         Ok(take new_state) => take new_state,
         Error(_) => return false,
     }
-    if validate_credentials(lane.network, lane.server, lane.clock, lane.pool, lane.lease, lane.index, lane.bucket_path, candidate, deadline, mut lane.wire) {
+    let i = object_request.request_index(ValidateCredentials)
+    if validate_credentials(lane.network, lane.server, lane.clock, lane.pool, lane.lease, lane.index, lane.bucket_path, candidate, deadline, mut lane.wire, mut lane.counts.rows[i]) {
         lane.auth = take candidate
         return true
     }
@@ -1862,7 +1760,9 @@ type Lane: send {
     list_parsing: ListScratch,
     probe: Bytes,
     jitter: Bytes,
-    skew: i64
+    skew: i64,
+    counts: LaneCounts,
+    report: Latest[LaneCounts]
 }
 
 fn connect_to(n: Net, server: Endpoint, address: Addr, clock: Clock, end: u64) -> Result[http_client.Connection, http_client.Error] waits {
@@ -1922,9 +1822,20 @@ fn release(mut lane: Lane) waits {
     }
 }
 
-fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgress, crc: Option[u32]) -> Exchange waits {
+fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgress, crc: Option[u32], kind: RequestKind, retrying: bool) -> Exchange waits {
+    let mut seen = object_request.AttemptObservation(started: false, answered: false)
+    let result = exchange_once(mut lane, mut job, op, mut progress, crc, mut seen)
+    let successful = match result {
+        Received(_) => true,
+        _ => false,
+    }
+    object_request.count_attempt(mut lane.counts.rows[object_request.request_index(kind)], seen, retrying, successful)
+    take result
+}
+
+fn exchange_once(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgress, crc: Option[u32], mut seen: AttemptObservation) -> Exchange waits {
     let at = host.mono_ns(lane.clock)
-    let idle_limit = if op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional {
+    let idle_limit = if op == S3PutConditional || op == S3PutIf || op == S3Complete || op == S3CompleteConditional {
         CONDITIONAL_IDLE_NS
     } else {
         IDLE_NS
@@ -1946,7 +1857,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
             }
         },
     }
-    let (from, to) = if payload_read(op) {
+    let (from, to) = if object_request.payload_read(op) {
         (job.lo + (list.len(job.data) - progress.initial), job.hi)
     } else {
         (0u64, MAX_U64)
@@ -1958,7 +1869,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let result = match take req {
         Error(take e) => Invalid(take e),
         Ok(take wire) => {
-            let response = transact(mut h.connection, wire, lane.proof, lane.server.secure, mut job, op, mut progress, from, to, mut lane.control, mut lane.probe, mut lane.list_parsing)
+            let response = transact(mut h.connection, wire, lane.proof, lane.server.secure, mut job, op, mut progress, from, to, mut lane.control, mut lane.probe, mut lane.list_parsing, mut seen)
             reclaim_request(mut lane.wire, take wire)
             take response
         },
@@ -1972,9 +1883,9 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let elapsed = host.mono_ns(lane.clock) - at
     let throughput: u64 = match result {
         Received(_) if elapsed != 0 => {
-            let n = if payload_read(op) {
+            let n = if object_request.payload_read(op) {
                 list.len(job.data) - sent_size
-            } else if uploads_body(op) {
+            } else if object_request.uploads_body(op) {
                 sent_size
             } else {
                 0
@@ -2035,17 +1946,17 @@ fn proven_answer(head: http_client.ResponseHead, wire: http_client.Request, key:
     false
 }
 
-fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], secure: bool, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
-    if let Error(e) = http_client.start(mut c, wire, job.deadline) {
-        return failure(if http_client.request_started(c) {
+fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], secure: bool, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch, mut seen: AttemptObservation) -> Exchange waits {
+    if let Error(e) = object_request.start_request(mut c, wire, job.deadline, mut seen) {
+        return failure(if seen.started {
             RequestSent
         } else {
             BeforeRequest
         }, e)
     }
-    if uploads_body(op) {
+    if object_request.uploads_body(op) {
         match http_client.write(mut c, job.data) {
-            Error(Write(Reset)) if !secure && op == PutIf => return failure(BeforeRequest, Write(Reset)),
+            Error(Write(Reset)) if !secure && op == S3PutIf => return failure(BeforeRequest, Write(Reset)),
             Error(e) => return failure(RequestSent, e),
             Ok(()) => (),
         }
@@ -2058,11 +1969,12 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Opt
             return Invalid(Fatal(Malformed))
         }
     }
+    seen.answered = true
     let status = http_client.status(http_client.head(c))
-    if op == Open && status >= 200 && status < 300 {
+    if op == S3Open && status >= 200 && status < 300 {
         return open_part(http_client.head(c), job.want, status)
     }
-    if payload_read(op) && status >= 200 && status < 300 {
+    if object_request.payload_read(op) && status >= 200 && status < 300 {
         return receive_object(mut c, mut job.data, mut progress, status, from, to, mut probe)
     }
     receive_control(mut c, list.len(job.data), job.id, op, status, job.prefix, mut job.entries, mut control, mut probe, mut scratch)
@@ -2087,11 +1999,11 @@ fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits
 
 type Resolution: send = Committed(Value) | Reissue | Doubtful | Undecided
 
-fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolution waits {
+fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress, retrying: bool) -> Resolution waits {
     if host.mono_ns(lane.clock) >= job.deadline {
         return Undecided
     }
-    match exchange(mut lane, mut job, Head, mut read, None) {
+    match exchange(mut lane, mut job, S3Head, mut read, None, ReconcileWrite, retrying) {
         Received(Object(m)) => {
             if m.put_id == job.id {
                 Committed(Object(m))
@@ -2100,7 +2012,7 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolu
             }
         },
         Refused(f) => {
-            match classify(Head, f.phase, f.status, f.code, false, false) {
+            match classify(S3Head, f.phase, f.status, f.code, false, false) {
                 Missing => Reissue,
                 Retry => Undecided,
                 Throttle => Undecided,
@@ -2112,8 +2024,11 @@ fn resolve_write(mut lane: Lane, mut job: Job, mut read: ReadProgress) -> Resolu
 }
 
 fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
+    let i = object_request.request_index(ObjectRequest(job.op))
+    lane.counts.rows[i].jobs = int.saturating_add(lane.counts.rows[i].jobs, 1)
     let mut uncertain: Option[Reason] = None
     let result = retry_job(mut lane, mut job, mut uncertain)
+    latest.publish(lane.report, arc.new(lane.counts))
     match (take result, take uncertain) {
         (Error(_), Some(take reason)) => Error(Uncertain(take reason)),
         (other, _) => take other,
@@ -2122,18 +2037,19 @@ fn retry(mut lane: Lane, mut job: Job) -> Result[Value, Error] waits {
 
 fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Result[Value, Error] waits {
     let original_entries = list.len(job.entries)
-    let initial_tag = if job.op == FetchChanged {
+    let initial_tag = if job.op == S3FetchChanged {
         empty_tag()
     } else {
         job.tag
     }
     let mut progress = ReadProgress(initial: list.len(job.data), size: None, tag: initial_tag)
-    let crc = if job.op == Put || job.op == PutConditional || job.op == PutIf || job.op == Part {
+    let crc = if job.op == S3Put || job.op == S3PutConditional || job.op == S3PutIf || job.op == S3Part {
         Some(crc32c.update(0, job.data))
     } else {
         None
     }
     let mut pending = false
+    let mut probed = false
     let mut ambiguous = false
     let mut skewed = false
     let mut refreshed = false
@@ -2158,7 +2074,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
         attempt += 1
         let mut throttle = false
         if !pending {
-            let outcome = exchange(mut lane, mut job, op, mut progress, crc)
+            let outcome = exchange(mut lane, mut job, op, mut progress, crc, ObjectRequest(op), attempt > 1)
             match take outcome {
                 Received(take value) => return Ok(take value),
                 Invalid(take e) => {
@@ -2169,7 +2085,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
                     let Failure(phase, reason: take reason, status, code: take code, server_time) = take response
                     if let Cancelled = reason {
                         list.truncate(mut job.entries, original_entries)
-                        return if phase != BeforeRequest && (op == PutConditional || op == PutIf || op == Complete || op == CompleteConditional) {
+                        return if phase != BeforeRequest && (op == S3PutConditional || op == S3PutIf || op == S3Complete || op == S3CompleteConditional) {
                             Error(Uncertain(take reason))
                         } else {
                             Error(Retriable(take reason))
@@ -2182,7 +2098,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
                         AlreadyExists => return Ok(Existing),
                         Changed => return Error(Precondition),
                         Missing => {
-                            if ambiguous && (op == Complete || op == CompleteConditional) {
+                            if ambiguous && (op == S3Complete || op == S3CompleteConditional) {
                                 pending = true
                             } else {
                                 return Error(NotFound)
@@ -2199,7 +2115,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
                         Resolve => {
                             if !job.resolve_complete {
                                 return Error(Uncertain(take last))
-                            } else if op == PutIf {
+                            } else if op == S3PutIf {
                                 if !job.retry_uncertain {
                                     return Error(Uncertain(take last))
                                 }
@@ -2232,7 +2148,9 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
             }
         }
         if pending {
-            match resolve_write(mut lane, mut job, mut progress) {
+            let resolution = resolve_write(mut lane, mut job, mut progress, probed)
+            probed = true
+            match take resolution {
                 Committed(take value) => return Ok(take value),
                 Reissue => {
                     pending = false
@@ -2242,7 +2160,7 @@ fn retry_job(mut lane: Lane, mut job: Job, mut uncertain: Option[Reason]) -> Res
             }
         }
         list.truncate(mut job.entries, original_entries)
-        if payload_read(op) && list.len(job.data) > progress.initial && progress.tag.len == 0 {
+        if object_request.payload_read(op) && list.len(job.data) > progress.initial && progress.tag.len == 0 {
             return Error(Retriable(take last))
         }
         if attempt < MAX_ATTEMPTS && host.mono_ns(lane.clock) < job.deadline {
@@ -2341,7 +2259,8 @@ pub opaque type Requests: send {
     random: Random,
     entropy: Bytes,
     path: String,
-    clock: Clock
+    clock: Clock,
+    monitor: RequestMonitor
 }
 
 pub opaque type Workers {
@@ -2353,6 +2272,43 @@ pub opaque type Workers {
 pub opaque type Client {
     requests: Requests,
     workers: Option[Workers]
+}
+
+/// Observes the client after its request endpoint has moved to another task.
+pub opaque type RequestMonitor: send {
+    lanes: List[Latest[LaneCounts]],
+    renewal: Option[Latest[RequestCounts]]
+}
+
+pub fn request_monitor(c: Client) -> RequestMonitor {
+    let mut lanes: List[Latest[LaneCounts]] = list.with_capacity(list.len(c.requests.monitor.lanes))
+    for lane in c.requests.monitor.lanes {
+        list.push(mut lanes, latest.handle(lane))
+    }
+    let renewal = match c.requests.monitor.renewal {
+        Some(report) => Some(latest.handle(report)),
+        None => None,
+    }
+    RequestMonitor(lanes: take lanes, renewal: take renewal)
+}
+
+/// Sums each lane's last completed job and the last credential check. Retries
+/// are additional attempts for the same job and kind. A reconciliation HEAD
+/// is counted separately from the write whose outcome it checks.
+pub fn request_counts(m: RequestMonitor, kind: RequestKind) -> RequestCounts {
+    let mut total = object_request.EMPTY_REQUEST_COUNTS
+    let i = object_request.request_index(kind)
+    for lane in m.lanes {
+        let published = latest.read(lane)
+        object_request.add_counts(mut total, published.rows[i])
+    }
+    if kind == ValidateCredentials {
+        if let Some(report) = m.renewal {
+            let published = latest.read(report)
+            object_request.add_counts(mut total, published)
+        }
+    }
+    total
 }
 
 /// Opens objects from any task through the client's lanes (std.http_object).
@@ -2412,7 +2368,7 @@ pub fn open(o: Opener, key: String, want: Want, deadline_ns: u64) -> Result[Open
             return Error(Fatal(Malformed))
         }
     }
-    let mut job = new_job(Open, request_path(o.bucket, key, false), list.new(), deadline_ns)
+    let mut job = new_job(S3Open, request_path(o.bucket, key, false), list.new(), deadline_ns)
     job.want = want
     match ask(o, take job) {
         Ok(Handed(part, take upstream)) => Ok(Ready(part, take upstream)),
@@ -2424,7 +2380,7 @@ pub fn open(o: Opener, key: String, want: Want, deadline_ns: u64) -> Result[Open
 
 /// The object's metadata from a HEAD, through the opener's lanes.
 pub fn stat(o: Opener, key: String, deadline_ns: u64) -> Result[Meta, Error] waits {
-    as_meta(ask(o, new_job(Head, request_path(o.bucket, key, false), list.new(), deadline_ns)))
+    as_meta(ask(o, new_job(S3Head, request_path(o.bucket, key, false), list.new(), deadline_ns)))
 }
 
 pub fn split(take c: Client) -> (Requests, Option[Workers]) {
@@ -2492,6 +2448,8 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let mut inputs: List[Sender[LaneMessage]] = list.with_capacity(lanes)
     let mut workers: List[Task[()]] = list.with_capacity(lanes)
+    let mut reports: List[Latest[LaneCounts]] = list.with_capacity(lanes)
+    let initial = object_request.LaneCounts(rows:[object_request.EMPTY_REQUEST_COUNTS; 19])
     let mut replies: List[Sender[PoolReply]] = list.with_capacity(lanes + 1)
     let mut send_credentials: List[Sender[cred.Credentials]] = list.new()
     if has_source(source) {
@@ -2523,18 +2481,23 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
             Ok(take output_handle) => take output_handle,
             Error(_) => return Error(TooLarge),
         }
+        let report = latest.new(arc.new(initial))
+        list.push(mut reports, latest.handle(report))
         let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), auth: take auth, proof: match proof {
             Some(key) => Some(secret.share(key)),
             None => None,
-        }, source, refresh: take refresh, region_name: clone(bucket.aws_region), bucket_path: clone(bucket_path), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
+        }, source, refresh: take refresh, region_name: clone(bucket.aws_region), bucket_path: clone(bucket_path), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0, counts: initial, report: take report)
         let worker = task.spawn(tasks, bytes lane_bytes, take setup, lane_loop)
         list.push(mut workers, take worker)
         list.push(mut inputs, take input)
     }
+    let mut renewal_report: Option[Latest[RequestCounts]] = None
     let renewal: Option[Task[()]] = if let Some(grant) = source {
         let (lease_tx, lease): (Sender[PoolReply], Receiver[PoolReply]) = channel.new(1)
         list.push(mut replies, take lease_tx)
-        let validator = Restore(clock: c, network: n, server: clone(server), pool: channel.sender(pool_tx), lease: take lease, index: lanes, config: clone(bucket), wire: wire_buffers())
+        let report = latest.new(arc.new(object_request.EMPTY_REQUEST_COUNTS))
+        renewal_report = Some(latest.handle(report))
+        let validator = Restore(clock: c, network: n, server: clone(server), pool: channel.sender(pool_tx), lease: take lease, index: lanes, config: clone(bucket), wire: wire_buffers(), counts: object_request.EMPTY_REQUEST_COUNTS, report: take report)
         let input = Renewal(source: grant, validator: take validator, current: take active, updates: take send_credentials)
         Some(task.spawn(tasks, bytes lane_bytes, take input, renewal_loop))
     } else {
@@ -2542,7 +2505,8 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
     }
     let pool = Pool(network: n, clock: c, tasks, server: take server, input: take pool_rx, timer_tx: take pool_tx, replies: take replies, peers: take peers)
     let resolver = task.spawn(tasks, bytes lane_bytes, take pool, pool_loop)
-    let requests = Requests(bucket: take bucket, simulated: false, proven: verified_loopback, lanes: take inputs, lane_bytes, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c)
+    let monitor = RequestMonitor(lanes: take reports, renewal: take renewal_report)
+    let requests = Requests(bucket: take bucket, simulated: false, proven: verified_loopback, lanes: take inputs, lane_bytes, output: take output, next: 0, random, entropy: list.with_capacity(16), path: string.with_capacity(4096), clock: c, monitor: take monitor)
     let lifetime = Workers(lanes: take workers, resolver: take resolver, renewal: take renewal)
     Ok(Client(requests: take requests, workers: Some(take lifetime)))
 }
@@ -2643,7 +2607,7 @@ pub fn deadline_after_ms(c: Client, ms: u64) -> u64 {
 }
 
 pub fn fetch(mut c: Client, key: String, take into: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
-    let request = object_job(mut c, Fetch, key, take into, deadline_ns)
+    let request = object_job(mut c, S3Fetch, key, take into, deadline_ns)
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_meta(take result), take data)
 }
@@ -2671,7 +2635,7 @@ pub fn fetch_if_changed(mut c: Client, key: String, unchanged: ETag, take into: 
     if !strong_tag(unchanged) {
         return (Error(Precondition), take into)
     }
-    let mut request = object_job(mut c, FetchChanged, key, take into, deadline_ns)
+    let mut request = object_job(mut c, S3FetchChanged, key, take into, deadline_ns)
     request.tag = unchanged
     let Reply(result: take received, data: take data, ..) = run(mut c, take request)
     let extracted: Result[Option[Meta], Error] = match take received {
@@ -2697,7 +2661,7 @@ fn read_bucket_setting(mut c: Client, op: Operation, query: String, deadline_ns:
 }
 
 pub fn bucket_location(mut c: Client, deadline_ns: u64) -> Result[String, Error] waits {
-    read_bucket_setting(mut c, GetBucketLocation, "location=", deadline_ns)
+    read_bucket_setting(mut c, S3GetBucketLocation, "location=", deadline_ns)
 }
 
 /// A nonempty byte interval, inclusive at lo and exclusive at hi.
@@ -2705,7 +2669,7 @@ pub fn fetch_range(mut c: Client, key: String, lo: u64, hi: u64, take into: Byte
     if lo >= hi {
         return (Error(Precondition), take into)
     }
-    let mut request = object_job(mut c, FetchRange, key, take into, deadline_ns)
+    let mut request = object_job(mut c, S3FetchRange, key, take into, deadline_ns)
     request.lo = lo
     request.hi = hi
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
@@ -2733,7 +2697,7 @@ pub fn fetch_ranges(mut c: Client, take ranges: List[GetRange], streams: u64) ->
             list.push(mut results, Some((Error(Precondition), take into)))
             continue
         }
-        let mut request = object_job(mut c, FetchRange, name, take into, until)
+        let mut request = object_job(mut c, S3FetchRange, name, take into, until)
         request.lo = lo
         request.hi = hi
         list.push(mut slots, list.len(results))
@@ -2755,14 +2719,14 @@ pub fn fetch_ranges(mut c: Client, take ranges: List[GetRange], streams: u64) ->
 }
 
 pub fn store(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
-    let mut request = object_job(mut c, Put, key, take body, deadline_ns)
+    let mut request = object_job(mut c, S3Put, key, take body, deadline_ns)
     request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_meta(take result), take data)
 }
 
 pub fn store_no_clobber(mut c: Client, key: String, take body: Bytes, deadline_ns: u64) -> (Result[Created, Error], Bytes) waits {
-    let mut request = object_job(mut c, PutConditional, key, take body, deadline_ns)
+    let mut request = object_job(mut c, S3PutConditional, key, take body, deadline_ns)
     request.id = Some(fresh_id(c.requests.random, mut c.requests.entropy))
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
     (as_created(take result), take data)
@@ -2787,7 +2751,7 @@ fn store_conditional(mut c: Client, key: String, pre: Precondition, take body: B
         Match(_) => return (Error(Precondition), take body),
         Absent => empty_tag(),
     }
-    let mut request = object_job(mut c, PutIf, key, take body, deadline_ns)
+    let mut request = object_job(mut c, S3PutIf, key, take body, deadline_ns)
     request.tag = tag
     request.retry_uncertain = retry_uncertain
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
@@ -2801,7 +2765,7 @@ fn store_conditional(mut c: Client, key: String, pre: Precondition, take body: B
 }
 
 pub fn erase(mut c: Client, key: String, deadline_ns: u64) -> Result[(), Error] waits {
-    let request = object_job(mut c, Erase, key, list.new(), deadline_ns)
+    let request = object_job(mut c, S3Erase, key, list.new(), deadline_ns)
     let Reply(result: take result, ..) = run(mut c, take request)
     as_unit(take result)
 }
@@ -2814,7 +2778,7 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
         return Error(TooLarge)
     }
     let path = request_path(c.requests.bucket, "", true)
-    let mut request = new_job(ListObjects, take path, list.new(), deadline_ns)
+    let mut request = new_job(S3ListObjects, take path, list.new(), deadline_ns)
     request.prefix = clone(c.requests.bucket.prefix)
     let mut query = string.from("list-type=2&max-keys=")
     string.push_u64(mut query, room)
@@ -2839,7 +2803,7 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
 
 pub fn upload(mut c: Client, key: String, mode: Mode, deadline_ns: u64) -> Result[Upload, Error] waits {
     let path = request_path(c.requests.bucket, key, false)
-    let mut request = new_job(Upload, clone(path), list.new(), deadline_ns)
+    let mut request = new_job(S3Upload, clone(path), list.new(), deadline_ns)
     let id = fresh_id(c.requests.random, mut c.requests.entropy)
     request.id = Some(id)
     request.query = string.from("uploads=")
@@ -2865,7 +2829,7 @@ pub type PendingUpload: send {
 
 fn upload_listing(mut c: Client, prefix: String, after: Option[UploadCursor], deadline_ns: u64) -> Result[Value, Error] waits {
     let path = request_path(c.requests.bucket, "", true)
-    let mut request = new_job(ListUploads, take path, list.new(), deadline_ns)
+    let mut request = new_job(S3ListUploads, take path, list.new(), deadline_ns)
     request.prefix = clone(c.requests.bucket.prefix)
     let mut query = string.new()
     if let Some(marker) = after {
@@ -3008,7 +2972,7 @@ pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns
     let mut queued: List[Option[Job]] = list.with_capacity(count)
     for i in 0u64 .. count {
         let data = list.set(mut returned, i, list.new())
-        let mut request = new_job(Part, clone(u.path), take data, deadline_ns)
+        let mut request = new_job(S3Part, clone(u.path), take data, deadline_ns)
         request.query = upload_query(u, existing + i + 1)
         list.push(mut queued, Some(take request))
     }
@@ -3076,9 +3040,9 @@ fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, d
     }
     string.push(mut xml, "</CompleteMultipartUpload>")
     let operation: Operation = if u.mode == NoClobber {
-        CompleteConditional
+        S3CompleteConditional
     } else {
-        Complete
+        S3Complete
     }
     let query = upload_query(u, 0)
     let mut request = new_job(operation, take path, string.into_bytes(take xml), deadline_ns)
@@ -3099,7 +3063,7 @@ fn complete_upload(mut c: Client, u: Upload, take path: String, resolve: bool, d
 pub fn abort(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[(), Error] waits {
     let query = upload_query(u, 0)
     let Upload(path: take path, ..) = take u
-    let mut request = new_job(Abort, take path, list.new(), deadline_ns)
+    let mut request = new_job(S3Abort, take path, list.new(), deadline_ns)
     request.query = take query
     let Reply(result: take result, ..) = run(mut c, take request)
     as_unit(take result)
@@ -3108,7 +3072,7 @@ pub fn abort(mut c: Client, take u: Upload, deadline_ns: u64) -> Result[(), Erro
 pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], deadline_ns: u64) -> (Result[Meta, Error], List[Bytes]) waits {
     let mut buffers = take buffers_in
     let path = request_path(c.requests.bucket, key, false)
-    let Reply(result: take result, ..) = run(mut c, new_job(Head, clone(path), list.new(), deadline_ns))
+    let Reply(result: take result, ..) = run(mut c, new_job(S3Head, clone(path), list.new(), deadline_ns))
     let info = match as_meta(take result) {
         Ok(take meta) => take meta,
         Error(take e) => return (Error(take e), take buffers),
@@ -3139,7 +3103,7 @@ pub fn fetch_parts(mut c: Client, key: String, take buffers_in: List[Bytes], dea
             continue
         }
         let data = list.set(mut buffers, i, list.new())
-        let mut request = new_job(FetchRange, clone(path), take data, deadline_ns)
+        let mut request = new_job(S3FetchRange, clone(path), take data, deadline_ns)
         request.lo = offset
         offset += order.min(spare, info.size - offset)
         request.hi = offset

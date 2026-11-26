@@ -1,0 +1,93 @@
+type Error = object.Error
+
+pub fn xml_field(data: String, tag: String) -> Option[View[String]] in data {
+    let mut opening = string.from("<")
+    string.push(mut opening, tag)
+    string.push_char(mut opening, '>')
+    let mut closing = string.from("</")
+    string.push(mut closing, tag)
+    string.push_char(mut closing, '>')
+    xml_content(data, opening, closing)
+}
+
+pub fn xml_content(data: String, opening: String, closing: String) -> Option[View[String]] in data {
+    let Some(first) = string.find(data, 0, opening) else {
+        return None
+    }
+    let begin_at = first + string.byte_len(opening)
+    let Some(end) = string.find(data, begin_at, closing) else {
+        return None
+    }
+    Some(string.slice(data, begin_at, end))
+}
+
+pub fn xml_decoded(data: String) -> Result[String, Error] {
+    let mut out = string.with_capacity(string.byte_len(data))
+    decode_xml(mut out, data)?
+    Ok(take out)
+}
+
+pub fn decode_xml(mut out: String, data: String) -> Result[(), Error] {
+    string.clear(mut out)
+    let mut at = 0u64
+    loop {
+        let Some(amp) = string.find(data, at, "&") else {
+            string.push(mut out, string.slice(data, at, string.byte_len(data)))
+            return Ok(())
+        }
+        string.push(mut out, string.slice(data, at, amp))
+        let Some(end) = string.find(data, amp + 1, ";") else {
+            return Error(Fatal(Malformed))
+        }
+        let name = string.slice(data, amp + 1, end)
+        let c = if name == "amp" {
+            '&'
+        } else if name == "lt" {
+            '<'
+        } else if name == "gt" {
+            '>'
+        } else if name == "quot" {
+            '"'
+        } else if name == "apos" {
+            '\''
+        } else {
+            let octets = string.as_bytes(name)
+            let (begin_at, radix) = if string.starts_with(name, "#x") {
+                (2u64, 16u32)
+            } else if string.starts_with(name, "#") {
+                (1u64, 10u32)
+            } else {
+                return Error(Fatal(Malformed))
+            }
+            if begin_at >= list.len(octets) {
+                return Error(Fatal(Malformed))
+            }
+            let scalar = match int.parse_uint(string.slice(name, begin_at, list.len(octets)), radix) {
+                Ok(n) => n,
+                Error(_) => return Error(Fatal(Malformed)),
+            }
+            if scalar > 0x10ffff {
+                return Error(Fatal(Malformed))
+            }
+            let Some(ch) = char.from_u32(int.narrow(scalar)) else {
+                return Error(Fatal(Malformed))
+            }
+            ch
+        }
+        string.push_char(mut out, c)
+        at = end + 1
+    }
+}
+
+pub fn fragment(b: Bytes, begin_at: u64, needle: Bytes) -> Option[u64] {
+    if list.len(needle) > list.len(b) {
+        return None
+    }
+    let end = list.len(b) - list.len(needle)
+    for i in begin_at .. end + 1 {
+        if list.slice(b, i, i + list.len(needle)) == needle {
+            return Some(i)
+        }
+    }
+    None
+}

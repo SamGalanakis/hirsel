@@ -45,7 +45,8 @@ export interface Draft {
   value<V, Slots extends object, Keys extends Record<keyof Slots, unknown>>(
     sub: Subscription<V, Slots, Keys>, value: NoInfer<V>): void;
 }
-export interface CallOptions { optimistic?: (draft: Draft) => void }
+// `deadlineMs` bounds this call alone, from submission; `signal` cancels this call alone.
+export interface CallOptions { optimistic?: (draft: Draft) => void; deadlineMs?: number; signal?: AbortSignal }
 export interface Sub extends ImageState {
   want: Want; args: Uint8Array; id?: number; active: boolean;
   codec: SubscriptionCodec<unknown, ImageSlots, ImageSlots>;

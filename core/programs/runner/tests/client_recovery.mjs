@@ -206,7 +206,7 @@ export async function realRecoveryLaws(runtime, compiler, executable, sdk) {
       const later = BigInt(Date.now()) + 60000n;
       assert.deepEqual(await h.cli(22, word(later) + word(0n)), returned(22));
       assert.deepEqual(await a.bump(23), historyUnavailable);
-      assert.equal(a.client.state, 'Retired');
+      assert.equal(a.client.state, 'Ready', 'a retired stream ends only its own call');
       assert.equal(calls.length, 3);
       assert.deepEqual(calls[1], [original, 1n]);
       const [replacement, remintedPosition] = calls[2];
@@ -230,7 +230,7 @@ export async function realRecoveryLaws(runtime, compiler, executable, sdk) {
       const replayed = Promise.withResolvers();
       const reopened = await h.client('http', {fetch: fault.fetch, onRecovered: replayed.resolve, ready: false});
       assert.deepEqual(await replayed.promise, unknown);
-      assert.equal(reopened.client.state, 'Retired');
+      assert.equal(reopened.client.state, 'Ready');
       assertMarkedRetry(fault, key);
       const fresh = await h.client('http', {fetch: fault.fetch});
       assert.deepEqual(await fresh.client.callHttp(want[0], bump(23)), {
@@ -272,7 +272,7 @@ export async function realRecoveryLaws(runtime, compiler, executable, sdk) {
       await h.evict(key);
       a.client.reconnect();
       assert.deepEqual(await answer, unknown);
-      assert.equal(a.client.state, 'Retired');
+      assert.equal(a.client.state, 'Ready');
       assertMarkedRetry(fault, key);
       await h.checkEffects([1, 1, 0]);
     },

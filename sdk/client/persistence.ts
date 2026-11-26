@@ -123,22 +123,82 @@ export const decimalU64 = (value: string | null): bigint | undefined => {
   return u64(parsed) ? parsed : undefined;
 };
 
-export async function replaceStream(storage: Storage, state: Installation, previous: string,
+// Leases `stream` and moves `record` there in memory; the caller writes the installation once.
+export async function claimStream(storage: Storage, state: Installation, previous: string | undefined,
   stream: string, record: StreamRecord, keepOld: boolean): Promise<Lease> {
   if (Object.hasOwn(state.streams, stream)) throw new Error('stream id collision');
   const lease = await storage.lock(streamLock(state, stream), false);
   if (!lease) throw new Error('stream lease unavailable');
-  try {
-    if (keepOld) state.directory.push(stream);
-    else {
-      state.directory[state.directory.indexOf(previous)] = stream;
-      delete state.streams[previous];
-    }
-    state.streams[stream] = record;
-    await storage.write(state);
-  } catch (error) {
+  if (keepOld || previous === undefined) state.directory.push(stream);
+  else {
+    state.directory[state.directory.indexOf(previous)] = stream;
+    delete state.streams[previous];
+  }
+  state.streams[stream] = record;
+  return lease;
+}
+export async function replaceStream(storage: Storage, state: Installation, previous: string,
+  stream: string, record: StreamRecord, keepOld: boolean): Promise<Lease> {
+  const lease = await claimStream(storage, state, previous, stream, record, keepOld);
+  try { await storage.write(state); }
+  catch (error) {
     await lease.release();
     throw error;
   }
   return lease;
+}
+
+export const sameCaller = (a: Caller | null, b: Caller | null) =>
+  a === null || b === null ? a === b : a.issuer === b.issuer && a.subject.length === b.subject.length
+    && a.subject.every((byte, i) => byte === b.subject[i]);
+// Leases the first free stream, and every other free stream of its Caller that still holds a
+// call, so each recovered call resumes on its own lane; else a new empty stream. Empty when
+// none can be leased.
+export async function leaseStreams(storage: Storage, state: Installation): Promise<Array<[string, Lease]>> {
+  const leased: Array<[string, Lease]> = [];
+  try {
+    let caller: Caller | null = null;
+    for (const n of state.directory) {
+      const record = state.streams[n];
+      if (record.retired || (leased.length > 0 && !(record.pending && sameCaller(record.caller, caller)))) continue;
+      const lease = await storage.lock(streamLock(state, n), false);
+      if (!lease) continue;
+      if (leased.length === 0) caller = record.caller;
+      leased.push([n, lease]);
+    }
+    if (leased.length === 0) {
+      let stream: string;
+      do { stream = 'pending-' + hex(randomGeneration(), 32); } while (Object.hasOwn(state.streams, stream));
+      const lease = await storage.lock(streamLock(state, stream), false);
+      if (!lease) return leased;
+      leased.push([stream, lease]);
+      state.directory.push(stream);
+      state.streams[stream] = emptyStream();
+      await storage.write(state);
+    }
+    return leased;
+  } catch (error) {
+    for (const [, lease] of leased) await lease.release();
+    throw error;
+  }
+}
+// Rewrites a stream this process has just leased. A granted body runs once per delivery and
+// nothing is stored for it, so an attempt that may have been delivered is reported LocallyUnknown
+// (`onLost`) and never re-sent; any other such attempt is resent
+// under its key but is no longer untouched. A stream minted by another installation is imported.
+export function recover(state: Installation, record: StreamRecord, granted: (want: Want) => boolean, onLost: () => void): boolean {
+  const imported = record.id !== undefined && record.minter !== state.installation;
+  if (!record.pending?.inflight && !imported) return false;
+  if (record.pending?.inflight && !record.pending.http && granted(record.pending.want)) {
+    delete record.pending;
+    onLost();
+  } else if (record.pending) {
+    record.pending.inflight = false;
+    record.pending.untouched = false;
+  }
+  if (imported) {
+    record.minter = null;
+    record.sent = true;
+  }
+  return true;
 }

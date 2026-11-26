@@ -179,7 +179,7 @@ export async function converge(origin, generated, {
       url: url.href, frame: Frame, wants: want, kinds: kind, identity, storage, credential: crypto.getRandomValues(new Uint8Array(16)), socket: wire.connect,
       onBatch: version => { board.version = version; wire.onBatch(); },
       onState: state => {
-        if (['StorageUnavailable', 'Retired', 'Incompatible', 'Fenced'].includes(state)) {
+        if (['StorageUnavailable', 'Incompatible', 'Fenced'].includes(state)) {
           failure.error ??= new Error(`client ${id}: ${state}`);
         }
       },

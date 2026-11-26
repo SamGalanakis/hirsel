@@ -7,13 +7,18 @@ type Credential = {bytes: Uint8Array; source: 'initial' | 'refreshed'};
 interface Epoch { readonly epoch: number }
 interface Dormant extends Epoch { backoff: number; credential?: Credential }
 type Attempt = {tag: 'Idle' | 'Preparing' | 'WebSocket' | 'Retry'} | {tag: 'Http'; p: bigint};
-type Stopped = 'Fenced' | 'Retired' | 'StorageUnavailable' | 'Closed';
+// One lane per leased stream. A lane carries at most one call (STORE §1.8 S7: a stream passes a
+// position only after its reply), so calls multiplex over the connection as lanes, at most
+// `width` = 1+q of them owing the place an Outcome at once (RUNNER-SPEC §2 V1).
+interface Lane { readonly attempt: Attempt; readonly backoff: number }
+type Lanes = Readonly<Record<number, Lane>>;
+type Stopped = 'Fenced' | 'StorageUnavailable' | 'Closed';
 type Reconnectable = (Dormant & {tag: 'Backoff' | 'Incompatible'}) | (Epoch & {tag: 'Unbound'; backoff: number});
 type LostCall = 'LocallyUnknown' | 'RequestMismatch';
 type Connection =
   | (Dormant & {tag: 'Opening' | 'AwaitWelcome' | 'Binding'})
-  | (Dormant & {tag: 'Placing'; remaining: number; welcomedAt: number})
-  | (Dormant & {tag: 'Ready'; welcomedAt: number; version: bigint; attempt: Attempt});
+  | (Dormant & {tag: 'Placing'; remaining: number; welcomedAt: number; width: number})
+  | (Dormant & {tag: 'Ready'; welcomedAt: number; version: bigint; width: number; lanes: Lanes});
 type Loss = {tag: 'Transient'} | {tag: 'Incompatible'; code: number} | {tag: 'CredentialLost'; cause: string};
 
 export type Phase =
@@ -29,16 +34,17 @@ type Resume = () => void | Promise<void>;
 
 export type Event =
   | {tag: 'Start' | 'Reconnect'}
-  | (Epoch & {tag: 'Begin' | 'SocketOpen' | 'LossRecorded' | 'BackoffElapsed' | 'RetryElapsed' | 'CallFinished' | 'RetryCall'})
+  | (Epoch & {tag: 'Begin' | 'SocketOpen' | 'LossRecorded' | 'BackoffElapsed'})
+  | (Epoch & {tag: 'RetryElapsed' | 'CallFinished' | 'RetryCall'; lane: number})
   | (Epoch & {tag: 'StableElapsed'; at: number})
   | (Epoch & {tag: 'CredentialResult'; bytes?: Uint8Array})
   | (Epoch & {tag: 'SocketLost'; code?: number})
   | (Epoch & {tag: 'Frame'; frame: Frame})
-  | (Epoch & {tag: 'WelcomeBound'; at: number})
+  | (Epoch & {tag: 'WelcomeBound'; at: number; width: number})
   | (Epoch & {tag: 'AdvanceVersion'; version: bigint; apply: Resume})
-  | (Epoch & {tag: 'PrepareCall'; prepare: Resume})
-  | (Epoch & {tag: 'SendCall'; delivery: {tag: 'WebSocket'} | {tag: 'Http'; p: bigint}; send: Resume})
-  | (Epoch & {tag: 'HttpComplete'; p: bigint; complete: Resume})
+  | (Epoch & {tag: 'PrepareCall'; lane: number; prepare: Resume})
+  | (Epoch & {tag: 'SendCall'; lane: number; delivery: {tag: 'WebSocket'} | {tag: 'Http'; p: bigint}; send: Resume})
+  | (Epoch & {tag: 'HttpComplete'; lane: number; p: bigint; complete: Resume})
   | (Epoch & {tag: 'Transient'})
   | (Epoch & {tag: 'Incompatible'; code: number})
   | {tag: 'CredentialLost'; cause: string}
@@ -54,11 +60,12 @@ export type Action =
   | {tag: 'Diagnostic'; message: string}
   | {tag: 'BindWelcome'; frame: Welcome}
   | {tag: 'Update'; frame: Update}
-  | {tag: 'ArmBackoff' | 'ArmRetry'; maxMs: number}
+  | {tag: 'ArmBackoff'; maxMs: number}
+  | {tag: 'ArmRetry'; lane: number; maxMs: number}
   | {tag: 'BecomeReady'; welcomedAt: number}
   | {tag: 'Finish'; outcome: LostCall}
   | {tag: 'RejectReady'; code: string}
-  | {tag: 'RejectCall'; code: string}
+  | {tag: 'RejectCalls'; code: string}
   | {tag: 'ClearOverlays'}
   | {tag: 'Run'; run: Resume};
 
@@ -113,7 +120,7 @@ function lose(phase: Dormant, loss: Loss, ctx: StepContext): Transition {
         : `Incompatible (${code}); reload bindings or reconnect explicitly`;
       return change({tag: 'Incompatible', epoch, backoff, credential}, ...teardown,
         {tag: 'State', state: 'Incompatible'}, {tag: 'Diagnostic', message},
-        ...(code === 1009 ? [{tag: 'RejectCall', code: 'ReplyTooLarge'} as const] : []),
+        ...(code === 1009 ? [{tag: 'RejectCalls', code: 'ReplyTooLarge'} as const] : []),
         {tag: 'RejectReady', code: code === 1009 ? 'ReplyTooLarge' : 'Incompatible'});
     }
     case 'CredentialLost':
@@ -137,11 +144,22 @@ const connected = (phase: Phase): phase is Connection =>
   phase.tag === 'Opening' || phase.tag === 'AwaitWelcome' || phase.tag === 'Binding' ||
   phase.tag === 'Placing' || phase.tag === 'Ready';
 
-function ready(phase: Dormant, welcomedAt: number): Transition {
+function ready(phase: Dormant, welcomedAt: number, width: number): Transition {
   const {epoch, backoff, credential} = phase;
-  return change({tag: 'Ready', epoch, backoff, credential, welcomedAt, version: 0n, attempt: {tag: 'Idle'}},
+  return change({tag: 'Ready', epoch, backoff, credential, welcomedAt, version: 0n, width, lanes: {}},
     {tag: 'State', state: 'Ready'}, {tag: 'BecomeReady', welcomedAt}, {tag: 'ContinueFrame'});
 }
+
+const idleLane: Lane = {attempt: {tag: 'Idle'}, backoff: initialBackoff};
+const lane = (phase: Extract<Phase, {tag: 'Ready'}>, id: number): Lane => phase.lanes[id] ?? idleLane;
+const withLane = (phase: Extract<Phase, {tag: 'Ready'}>, id: number, attempt: Attempt): Phase =>
+  ({...phase, lanes: {...phase.lanes, [id]: {attempt, backoff: lane(phase, id).backoff}}});
+// Sends the place still owes an Outcome row: each holds one of the session's 1+q units.
+const owed = (phase: Extract<Phase, {tag: 'Ready'}>): number =>
+  Object.values(phase.lanes).filter(({attempt}) => owes(attempt)).length;
+const owes = (attempt: Attempt) => attempt.tag === 'Preparing' || attempt.tag === 'WebSocket' || attempt.tag === 'Http';
+// Whether the place owes this lane's send an Outcome, so its answer comes by the deadline it was sent.
+export const laneOwed = (phase: Phase, id: number): boolean => phase.tag === 'Ready' && owes(lane(phase, id).attempt);
 
 export function step(phase: Phase, event: Event, ctx: StepContext): Transition {
   if ('epoch' in event && !current(phase, event)) return change(phase);
@@ -210,7 +228,7 @@ export function step(phase: Phase, event: Event, ctx: StepContext): Transition {
       if (phase.tag === 'AwaitWelcome' && frame.tag === 'Welcome')
         return change({...phase, tag: 'Binding'}, {tag: 'BindWelcome', frame});
       if (phase.tag === 'Placing' && frame.tag === 'Placed' && frame.value.tag !== 'Gone')
-        return phase.remaining === 1 ? ready(phase, phase.welcomedAt)
+        return phase.remaining === 1 ? ready(phase, phase.welcomedAt, phase.width)
           : change({...phase, remaining: phase.remaining - 1});
       if (phase.tag === 'Ready') {
         switch (frame.tag) {
@@ -228,36 +246,43 @@ export function step(phase: Phase, event: Event, ctx: StepContext): Transition {
     case 'WelcomeBound':
       if (phase.tag === 'Binding') {
         const accepted = {...phase, credential: phase.credential && {bytes: phase.credential.bytes, source: 'initial' as const}};
-        return ctx.wants === 0 ? ready(accepted, event.at)
-          : change({...accepted, tag: 'Placing', remaining: ctx.wants, welcomedAt: event.at});
+        return ctx.wants === 0 ? ready(accepted, event.at, event.width)
+          : change({...accepted, tag: 'Placing', remaining: ctx.wants, welcomedAt: event.at, width: event.width});
       }
       break;
     case 'AdvanceVersion':
       if (phase.tag === 'Ready') return change({...phase, version: event.version}, {tag: 'Run', run: event.apply});
       break;
     case 'PrepareCall':
-      if (phase.tag === 'Ready' && phase.attempt.tag === 'Idle')
-        return change({...phase, attempt: {tag: 'Preparing'}}, {tag: 'Run', run: event.prepare});
+      if (phase.tag === 'Ready' && lane(phase, event.lane).attempt.tag === 'Idle' && owed(phase) < phase.width)
+        return change(withLane(phase, event.lane, {tag: 'Preparing'}), {tag: 'Run', run: event.prepare});
       break;
     case 'SendCall':
-      if (phase.tag === 'Ready' && phase.attempt.tag === 'Preparing')
-        return change({...phase, attempt: event.delivery}, {tag: 'Run', run: event.send});
+      if (phase.tag === 'Ready' && lane(phase, event.lane).attempt.tag === 'Preparing')
+        return change(withLane(phase, event.lane, event.delivery), {tag: 'Run', run: event.send});
       break;
-    case 'HttpComplete':
-      if (phase.tag === 'Ready' && phase.attempt.tag === 'Http' && phase.attempt.p === event.p)
-        return change(phase, {tag: 'Run', run: event.complete});
+    case 'HttpComplete': {
+      if (phase.tag !== 'Ready') break;
+      const {attempt} = lane(phase, event.lane);
+      if (attempt.tag === 'Http' && attempt.p === event.p) return change(phase, {tag: 'Run', run: event.complete});
       break;
+    }
     case 'CallFinished':
-      if (phase.tag === 'Ready') return change({...phase, attempt: {tag: 'Idle'}});
+      if (phase.tag === 'Ready') {
+        const {[event.lane]: _, ...lanes} = phase.lanes;
+        return change({...phase, lanes}, {tag: 'SendPending'});
+      }
       break;
     case 'RetryCall':
-      if (phase.tag === 'Ready')
-        return change({...phase, backoff: nextBackoff(phase.backoff), attempt: {tag: 'Retry'}},
-          {tag: 'ArmRetry', maxMs: phase.backoff});
+      if (phase.tag === 'Ready') {
+        const {backoff} = lane(phase, event.lane);
+        return change({...phase, lanes: {...phase.lanes, [event.lane]: {attempt: {tag: 'Retry'}, backoff: nextBackoff(backoff)}}},
+          {tag: 'ArmRetry', lane: event.lane, maxMs: backoff}, {tag: 'SendPending'});
+      }
       break;
     case 'RetryElapsed':
-      if (phase.tag === 'Ready' && phase.attempt.tag === 'Retry')
-        return change({...phase, attempt: {tag: 'Idle'}}, {tag: 'SendPending'});
+      if (phase.tag === 'Ready' && lane(phase, event.lane).attempt.tag === 'Retry')
+        return change(withLane(phase, event.lane, {tag: 'Idle'}), {tag: 'SendPending'});
       break;
     case 'Stop':
       if (phase.tag !== 'Closed' || event.state === 'Closed')

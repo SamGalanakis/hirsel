@@ -583,8 +583,16 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             include_str!("../../../sdk/client/client.ts").into(),
         ),
         (
+            "delivery.ts".into(),
+            include_str!("../../../sdk/client/delivery.ts").into(),
+        ),
+        (
             "image.ts".into(),
             include_str!("../../../sdk/client/image.ts").into(),
+        ),
+        (
+            "lanes.ts".into(),
+            include_str!("../../../sdk/client/lanes.ts").into(),
         ),
         (
             "browser.ts".into(),

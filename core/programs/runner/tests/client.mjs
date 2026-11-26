@@ -62,7 +62,7 @@ class Memory {
   }
 }
 class Server {
-  sockets=[];calls=[];sent=[];errors=[];onCall;onHello;placed=true;anonymous=1;
+  sockets=[];calls=[];sent=[];errors=[];onCall;onHello;placed=true;anonymous=1;q=4;
   constructor(codec,storage){this.codec=codec;this.storage=storage;}
   socket=()=>{
     const s={onopen:null,onmessage:null,onclose:null,onerror:null,binaryType:'',closed:false,
@@ -71,7 +71,7 @@ class Server {
         if(f.tag==='Hello') {
           if(this.welcome===false)return;
           const identity=f.values[0].tag==='Some'?caller:{issuer:1,subject:bytes(...Array(16).fill(++this.anonymous))};
-          this.emit(s,{tag:'Welcome',values:[identity,4,262144n,bytes(3),'test',1024n,birth,retention]});
+          this.emit(s,{tag:'Welcome',values:[identity,this.q,262144n,bytes(3),'test',1024n,birth,retention]});
           s.principal=identity.subject;this.onHello?.(s,f);
           if(this.placed)for(const _ of f.values[1])this.emit(s,{tag:'Placed',value:{tag:'Ready',value:0}});
         } else if(f.tag==='Call') {
@@ -118,7 +118,7 @@ export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
   try {
     await writeFile(join(dir,'package.json'),'{"type":"module"}');
-    for(const name of ['client','image','persistence','browser','node','room','state']) {
+    for(const name of ['client','delivery','image','lanes','persistence','browser','node','room','state']) {
       let text=await readFile(new URL(name+'.ts',source),'utf8');
       if(mutant)text=mutant(name,text);
       await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
@@ -212,7 +212,8 @@ export async function laws(codec, only, mutant, entries, http) {
     await ready(restored);await settle();await restored.time.advance(1000);
     assert.equal(restored.server.calls.length,1);
     assert.deepEqual(restored.server.calls[0].frame.values[0],original);
-    assert.equal(restored.client.state,'Retired');
+    // Retiring ends that stream's call alone; the client stays Ready.
+    assert.equal(restored.client.state,'Ready');assert(savedStream(restored.storage.raw).retired);
   };
   async function subscribed(decode) {
     const h=await setup();await ready(h);
@@ -280,29 +281,78 @@ export async function laws(codec, only, mutant, entries, http) {
     const c=await setup(h.storage);await ready(c);assert.equal(h.storage.raw.directory.length,2);
     const next=c.client.call(want,bytes(8),x=>x);await settle();
     assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
-    assert.deepEqual(c.server.calls.map(x=>x.frame),[call(savedStream(h.storage.raw).id,0n,7)]);
-    c.server.answer(c.server.sockets[0],0,0n,returned(7));await settle();
-    assert.deepEqual(c.server.calls[1].frame,call(savedStream(h.storage.raw).id,1n,8));
-    c.server.answer(c.server.sockets[0],0,1n,returned(8));await settle();await next;c.server.check();
+    // The recovered call resends under its key; the new call goes alongside it on a third stream.
+    const recoveredId=savedStream(h.storage.raw).id,newId=savedStream(h.storage.raw,2).id;
+    assert.deepEqual(c.server.calls.map(x=>x.frame),[call(recoveredId,0n,7),call(newId,0n,8)]);
+    c.server.answer(c.server.sockets[0],newId,0n,returned(8));c.server.answer(c.server.sockets[0],recoveredId,0n,returned(7));await settle();
+    assert.deepEqual(await next,returned(8));assert.deepEqual(c.events,[returned(7)]);c.server.check();
   };
-  tests.calls_wait_in_order=async()=>{
-    const h=await setup();await ready(h);
-    const first=h.client.call(want,bytes(7),x=>x);
-    const args=bytes(8), second=h.client.call(want,args,x=>x);
-    args[0]=0;
-    const third=h.client.call(want,bytes(9),x=>x);
-    const closed=assert.rejects(third,{code:'Closed'});
+  // Calls multiplex as lanes, one store stream each, at most 1+q owed at once (q from Welcome).
+  tests.calls_multiplex_within_width=async()=>{
+    const h=await setup(new Memory(),{prepare:server=>{server.q=1;}});await ready(h);
+    const args=bytes(7),a=h.client.call(want,args,x=>x);args[0]=0;
+    const b=h.client.call(want,bytes(8),x=>x),c=h.client.call(want,bytes(9),x=>x);
     await settle();
-    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(savedStream(h.storage.raw).id,0n,7)]);
-    assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
-    h.server.answer(h.server.sockets[0],0,0n,returned(7));await settle();
-    assert.deepEqual(await first,returned(7));
-    assert.deepEqual(h.server.calls.map(x=>x.frame),[call(savedStream(h.storage.raw).id,0n,7),call(savedStream(h.storage.raw).id,1n,8)]);
+    const sent=()=>h.server.calls.map(({frame:{values:[id,p,,,arg]}})=>[streamKey(id),p,arg[0]]);
+    const [ka,kb]=sent().map(([k])=>k);
+    assert.notEqual(ka,kb);
+    assert.deepEqual(sent(),[[ka,0n,7],[kb,0n,8]],'the third call waits for a unit');
+    // b's answer arrives first and reaches b alone; its unit sends c on b's stream at its next position.
+    h.server.answer(h.server.sockets[0],h.server.calls[1].frame.values[0],0n,returned(80));await settle();
+    assert.deepEqual(await b,returned(80));
+    assert.deepEqual(sent(),[[ka,0n,7],[kb,0n,8],[kb,1n,9]]);
+    const d=h.client.call(want,bytes(10),x=>x);const closed=assert.rejects(d,{code:'Closed'});await settle();
+    assert.equal(h.server.calls.length,3);
     await h.client.close();
-    assert.equal((await second).tag,'LocallyUnknown');
-    await closed;
-    assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(8));
-    assert.equal(h.server.calls.length,2);h.server.check();
+    assert.deepEqual([await a,await c],[{tag:'LocallyUnknown'},{tag:'LocallyUnknown'}]);
+    await closed;h.server.check();
+  };
+  tests.deadline_and_cancel_end_one_call=async()=>{
+    const h=await setup();await ready(h);
+    const a=h.client.call(want,bytes(7),x=>x),b=h.client.call(want,bytes(8),x=>x,{deadlineMs:1000});
+    const stop=new AbortController(),c=h.client.call(want,bytes(9),x=>x,{signal:stop.signal});
+    await settle();
+    const [ia,ib,ic]=h.server.calls.map(({frame})=>frame.values[0]);
+    assert.deepEqual(h.server.calls.map(({frame})=>frame),[call(ia,0n,7),call(ib,0n,8,0,1000),call(ic,0n,9)]);
+    // The place refuses b's send at b's own deadline: b is refused, its position stays free,
+    // and nothing is resent for it.
+    await h.time.advance(1000);
+    h.server.answer(h.server.sockets[0],ib,0n,refused('Deadline'));await settle();
+    assert.deepEqual(await b,refused('Deadline'));
+    const stored=h.storage.raw.streams[streamKey(ib)];assert.equal(stored.pending,undefined);assert.equal(stored.next,0n);
+    // Cancelling c ends c's caller only; its lane still learns the answer and reports it as recovered.
+    stop.abort(new Error('cancelled'));
+    await assert.rejects(c,/cancelled/);
+    h.server.answer(h.server.sockets[0],ic,0n,returned(9));h.server.answer(h.server.sockets[0],ia,0n,returned(7));await settle();
+    assert.deepEqual(await a,returned(7));assert.deepEqual(h.events,[returned(9)]);
+    await h.time.advance(60000);assert.equal(h.server.calls.length,3);h.server.check();
+  };
+  tests.reconnect_replays_every_lane_once=async()=>{
+    const h=await setup();await ready(h);
+    const calls=[7,8,9].map(n=>h.client.call(want,bytes(n),x=>x));await settle();
+    const before=h.server.calls.map(({frame})=>frame);
+    h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);await settle();
+    const replayed=h.server.calls.slice(3);
+    assert(replayed.every(({socket})=>socket===h.server.sockets[1]));
+    assert.deepEqual(replayed.map(({frame})=>frame).sort((x,y)=>x.values[4][0]-y.values[4][0]),before,'each key once, same stream and position');
+    for(const {frame:{values:[id,p,,,arg]}} of replayed.reverse())h.server.answer(h.server.sockets[1],id,p,returned(arg[0]+10));
+    await settle();
+    assert.deepEqual(await Promise.all(calls),[returned(17),returned(18),returned(19)]);
+    await h.time.advance(60000);assert.equal(h.server.calls.length,6);h.server.check();
+  };
+  tests.no_stale_lane_completion_after_reconnect=async()=>{
+    const h=await setup();await ready(h);
+    let settled=0;const calls=[7,8].map(n=>h.client.call(want,bytes(n),x=>x).then(o=>{settled++;return o;}));await settle();
+    const rows=h.server.calls.map(({frame:{values:[stream,p]}})=>({stream,p,outcome:returned(99)}));
+    const previous=h.server.sockets[0];
+    h.server.close(previous,1001);await settle();await h.time.advance(50);await settle();
+    assert.equal(h.server.calls.length,4);
+    const stored=structuredClone(h.storage.raw);
+    previous.onmessage({data:codec.encode(batch(5n,[],[],rows))});await settle();
+    assert.equal(settled,0);assert.deepEqual(h.storage.raw,stored);
+    for(const i of [1,0])h.server.answer(h.server.sockets[1],rows[i].stream,rows[i].p,returned(i+1));
+    await settle();
+    assert.deepEqual(await Promise.all(calls),[returned(1),returned(2)]);h.server.check();
   };
   tests.incompatible_is_terminal=async()=>{
     const h=await setup();await ready(h);
@@ -634,10 +684,13 @@ export async function laws(codec, only, mutant, entries, http) {
     a=h.client.call(want,bytes(8),x=>x);await settle();
     h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
     h.server.answer(h.server.sockets[1],0,1n,refused('HistoryUnavailable'),'Reset');await settle();
-    assert.equal(h.client.state,'Retired');assert(savedStream(h.storage.raw).retired);assert.deepEqual(await a,{tag:'LocallyUnknown'});
-    await assert.rejects(h.client.call(want,bytes(9),x=>x),e=>e.code==='Retired');
+    assert.equal(h.client.state,'Ready');assert(savedStream(h.storage.raw).retired);assert.deepEqual(await a,{tag:'LocallyUnknown'});
+    // The retired stream's lane is gone; the next call starts a fresh stream at position 0.
+    const c=h.client.call(want,bytes(9),x=>x);await settle();
+    assert.deepEqual(h.server.calls[3].frame,call(savedStream(h.storage.raw,1).id,0n,9));
+    h.server.answer(h.server.sockets[1],0,0n,returned(9));assert.deepEqual(await c,returned(9));
     const b=await setup(h.storage);await ready(b);assert.notEqual(h.storage.raw.directory[0],h.storage.raw.directory[1]);assert.equal(b.server.calls.length,0);
-    assert.equal(h.server.calls.length,3);h.server.check();
+    assert.equal(h.server.calls.length,4);h.server.check();
   };
   tests.request_mismatch_fences=async()=>{
     const store=new Ledger(),storage=new Memory();
@@ -689,7 +742,7 @@ export async function laws(codec, only, mutant, entries, http) {
     const h=await setup();await ready(h);const a=h.client.call(want,bytes(7),x=>x);await settle();
     h.server.close(h.server.sockets[0],1001);await settle();await h.time.advance(50);
     h.server.answer(h.server.sockets[1],0,0n,refused('NoEntry'));await settle();
-    assert.deepEqual(await a,{tag:'LocallyUnknown'});assert.equal(h.client.state,'Retired');
+    assert.deepEqual(await a,{tag:'LocallyUnknown'});assert.equal(h.client.state,'Ready');assert(savedStream(h.storage.raw).retired);
     assert.equal(savedStream(h.storage.raw).next,0n);assert.deepEqual(savedStream(h.storage.raw).pending.args,bytes(7));
   };
   tests.batch_complete=async()=>{

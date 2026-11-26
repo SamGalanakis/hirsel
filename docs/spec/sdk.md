@@ -340,7 +340,7 @@ codec, `wants` and their `kinds`, and a `storage` adapter. Pass the generated `i
 check the launch digest, target and `n_place`. The optional `credential` is an
 async source, `() => Promise<Uint8Array | undefined>`, whose bytes go in Hello.
 The client calls it before its first Hello and once per credential recovery
-(below), never inside its serialized work or the storage lock. `deadlineMs` sets the server's call deadline and defaults to 30,000.
+(below), never inside its serialized work or the storage lock. `deadlineMs` sets the server's call deadline and defaults to 30,000. A call's own `deadlineMs` and `signal` options (below) bound it alone.
 The optional `socket` factory and `clock` override the platform WebSocket and
 time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
 state changes, diagnostics, recovered call outcomes and applied Batch versions.
@@ -356,9 +356,27 @@ Recovery format 4 stores a random installation ID and random fencing generation.
 Generation validation and each work send share the installation lock. Missing
 stream records fence the generation. Pending requests keep their original Caller.
 
-The client keeps one call in flight per stream. Calls submitted while ready
-wait in memory in submission order, including behind a recovered call. The
-first call mints a stream ID from the keyed time in Welcome and a cryptographic
+A stream passes a position only after its reply is stored (STORE-SPEC §1.8
+S7), so a stream carries one call at a time and the client multiplexes calls
+as lanes: each in-flight call holds its own leased stream of the session's
+Caller. At most 1+q lanes hold a call, where q comes from Welcome; this matches
+the place's session limit of 1+q owed units, so the client never earns an
+Overloaded refusal by itself. Calls past that width wait in memory in
+submission order. Opening the client leases every free stream of one Caller
+that still holds a call, so each recovered call resumes on its own lane next to
+new work. Completions settle their own lane in any order; Returned and Failed
+answers that arrive together commit in one storage write, and calls that start
+together are marked in flight in one write. Each Call frame carries
+`min(deadlineMs, the call's remaining time)`. When a call's own deadline passes
+or its `signal` aborts before any delivery, its pending record is deleted, the
+position stays free, and the call is refused with Deadline (or rejected with
+the signal's reason). Once a delivery may have happened, the caller is answered
+LocallyUnknown and the lane keeps recovering under the same idempotency key,
+reporting the outcome to `onRecovered`; a deadline does not end a call the
+place still owes, since the place answers by the deadline it was sent. A
+reconnect aborts the old connection and replays every lane's pending call once
+under its unchanged key; answers from the old connection are dropped. Each
+lane's first call mints a stream ID from the keyed time in Welcome and a cryptographic
 64-bit nonce. The client persists the stream ID, position, argument bytes and
 in-flight flag before sending. A stream position belongs to a stored call: a
 call to a transact entry. Returned and Failed outcomes of a stored call commit
@@ -373,11 +391,13 @@ a no-commit answer.
 
 On WebSocket, HistoryUnavailable allows one remint when the installation
 minted the stream and every attempt received a no-commit answer. If prior
-delivery is uncertain, the client retires the stream and reports LocallyUnknown.
+delivery is uncertain, the client retires that stream alone and reports
+LocallyUnknown for its call; other lanes and the client continue.
 On HTTP a matching 410 marker applies to its own delivery. An earlier request
 could have reached the place through a proxy retry, so the client reports
 LocallyUnknown and retires the stream. Every POST comes from an explicit
-recovery transition. RequestMismatch fences the generation.
+recovery transition. RequestMismatch fences the generation: the call that
+sent it learns RequestMismatch and every other in-flight call LocallyUnknown.
 
 Incompatible closes remain terminal until an explicit reconnect or bindings
 reload. Reconnection waits for all Placed frames, recovers pending calls, and

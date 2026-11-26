@@ -40,16 +40,24 @@ directory holds pending arguments and replies.
 When upgrading from the `flock` adapter, stop all old clients before opening
 the same directory with the new SDK. The new adapter reads the existing state.
 
-Each client leases one stream and sends one call at a time. Calls made while
-ready wait in memory in submission order, including behind a recovered call.
-A queued call becomes durable when it reaches the front. Closing the client
+Each client keeps up to 1+q calls in flight, where q is the extra units the
+place's Welcome allows (the runner's default q is 4). Each in-flight call holds
+its own leased stream, because a stream carries one stored call at a time.
+Calls past that width wait in memory in submission order and become durable
+when a lane frees up; completions may arrive in any order. Pass
+`{deadlineMs, signal}` as call options to bound or cancel one call alone: a
+call not yet sent is refused with `Deadline` (or rejected with the signal's
+reason), and a call already sent resolves `LocallyUnknown` while its lane keeps
+recovering and reports the real outcome to `onRecovered`. Closing the client
 rejects calls still in the queue. `onRecovered`
 receives the outcome of a recovered request whose original promise no longer
 exists. Call arguments and Want bytes are copied before asynchronous work.
 `LocallyUnknown` means the original effect cannot be determined locally.
 `RequestMismatch` fences the installation generation. Neither result causes
-replacement work. Retired streams retain their historical record and are never
-leased again. A later explicit client can allocate another stream.
+replacement work. A stream whose history is gone retires alone: its call
+resolves `LocallyUnknown`, and the client and its other calls go on. Retired
+streams retain their historical record and are never leased again. A later
+explicit client can allocate another stream.
 
 `Incompatible` is terminal until `reconnect()` or a bindings reload. `Unbound`
 means the place closed the Hello with 1008 before Welcome: its `PlaceConfig.wire`

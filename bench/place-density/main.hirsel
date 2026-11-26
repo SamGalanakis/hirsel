@@ -10,7 +10,7 @@ fn place(mut r: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
 
 pub fn main(d: Dir, c: Clock, r: Random, tasks: Tasks, a: Args, n: Net, process: Process, errors: Stderr) -> Result[(), Exit] waits {
     runner.main(a, process, errors, tasks, c, code.describe(place), code.describe(schema), scoped fn(take stop: Receiver[()]) -> Result[runner.Ended, runner.MainError] waits {
-        let config: runner.PlaceConfig[(), (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: (runner.launch_selection(a) ?=> Usage), place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: runner.wire_defaults(65536u64), max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+        let config: runner.PlaceConfig[(), (), ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: (runner.launch_selection(a) ?=> Usage), place: code.describe(place), n_place: N_PLACE, on_migrate: None, schema: code.describe(schema), session: runner.wire_defaults(65536u64), max_sessions: 4u64, proxies: list.new(), n_publisher: 3145728u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
         let ended = runner.operate_report(take config, take stop, result.unwrap(runner.status_root()), None, errors) ?=> Start
         Ok(ended)
     })

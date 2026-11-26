@@ -1,7 +1,18 @@
 // T2 fixture. Its argument identifies the client request without a product tap.
-pub type Request: codec + send { stream: Bytes, p: u64, arg: Bytes }
-pub type Handles: shareable + send { ran: store.Table[Bytes, Request] }
-pub type Recorded: codec + send { request: Request, version: u64 }
+pub type Request: codec + send {
+    stream: Bytes,
+    p: u64,
+    arg: Bytes
+}
+
+pub type Handles: shareable + send {
+    ran: store.Table[Bytes, Request]
+}
+
+pub type Recorded: codec + send {
+    request: Request,
+    version: u64
+}
 
 pub fn entry() -> Bytes {
     let ca: std.codec.Codec[Request] = std.codec.of()
@@ -22,7 +33,9 @@ pub fn digest(key: Bytes, args: Bytes) -> Bytes {
     result.unwrap(std.codec.put_list(args, std.codec.of_u8(), mut input))
     let sum = std.sha256.hash(input)
     let mut out_digest: Bytes = list.new()
-    for byte in sum { list.push(mut out_digest, byte) }
+    for byte in sum {
+        list.push(mut out_digest, byte)
+    }
     out_digest
 }
 
@@ -38,8 +51,14 @@ pub fn law_digest() -> bool {
     let expected: Inline[u8, 32] =[13, 143, 47, 79, 130, 12, 211, 105, 198, 35, 67, 133, 75, 7, 71, 44, 193, 167, 249, 81, 17, 172, 68, 71, 127, 198, 76, 73, 98, 178, 180, 227]
     let empty: Bytes = list.new()
     let got = digest(empty, empty)
-    if list.len(got) != 32u64 { return false }
-    for i in 0u64 .. 32u64 { if got[i] != expected[i] { return false } }
+    if list.len(got) != 32u64 {
+        return false
+    }
+    for i in 0u64 .. 32u64 {
+        if got[i] != expected[i] {
+            return false
+        }
+    }
     let mut other: Bytes = list.new()
     list.push(mut other, 1u8)
     got != digest(empty, other)
@@ -59,7 +78,6 @@ pub fn schema(mut d: store.Declare) -> Result[Handles, store.Error] {
     Ok(Handles(ran: t))
 }
 
-
 pub fn k_record(mut tx: store.Tx, h: Handles, take a: Request) -> Result[u64, store.Error] {
     let k = observe.key(0u64, a.stream, a.p)
     store.put(mut tx, h.ran, take k, observe.own(a))?
@@ -75,7 +93,10 @@ pub fn law_record(out: Stdout, c: Clock, r: Random) -> bool waits {
     let ran = store.run(mut db, None, (store.copy_env(h), store.copy_env(a)), fn(mut tx, call_env) -> Result[u64, store.Error] {
         k_record(mut tx, call_env.0, observe.own(call_env.1))
     })
-    match ran { Ok(Committed(_)) => (), _ => return false }
+    match ran {
+        Ok(Committed(_)) => (),
+        _ => return false
+    }
     let held = store.snapshot(db)
     match store.get(result.unwrap(store.reader(db, 0u64)), held, h.ran, observe.key(0u64, a.stream, a.p)) {
         Ok(Some(saved)) => {

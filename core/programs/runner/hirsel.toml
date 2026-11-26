@@ -150,6 +150,12 @@ dirs = ["."]
 "runner_room_client_law.hirsel" = "runner"
 "triggers_journal_laws.hirsel" = "triggers"
 "grant_mint_model_laws.hirsel" = "grant_mint_model"
+"observe/observe.hirsel" = "observe"
+"observe/fixture.hirsel" = "observe_fixture"
+"observe/positions.hirsel" = "positions"
+"observe/session.hirsel" = "observe_session"
+"observe/versions.hirsel" = "versions"
+"observe/observe_drive.hirsel" = "observe_drive"
 
 [tests.runs."runner@1/runner_calls/test_fixture_granted"]
 limit = 1342177280

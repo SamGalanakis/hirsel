@@ -10,7 +10,10 @@ from tempfile import TemporaryDirectory
 from run import PROGRAM, ROOT, build, command, prepare_web, wait_for_listener
 
 sys.path.insert(0, str(ROOT / "tools/tests"))
+from library_root import library_root
 from wire_process import stop_process
+
+PROGRAMS = ROOT / "core/programs"
 
 BROWSER = {"canvas_click", "browser_ticks"}
 WIRE = {
@@ -55,12 +58,9 @@ def replace(text, before, after):
     return text.replace(before, after)
 
 
-def scratch_sources(work, case, mutant):
-    paths = {
-        "main": PROGRAM / "main.hirsel",
-        "runner": PROGRAM.parent / "runner/runner.hirsel",
-        "ingress": PROGRAM.parent / "runner/ingress.hirsel",
-    }
+def scratch_libraries(work, case, mutant):
+    """The checkout's core, or a scratch library root carrying the case's and mutant's edits."""
+    paths = {"main": "checkbox/main.hirsel", "runner": "runner/runner.hirsel"}
     changed = {}
     if case == "toggle_no_rerun":
         # Wire-only witness in the scratch server. An empty key cannot be a
@@ -73,17 +73,14 @@ def scratch_sources(work, case, mutant):
             }
             take answer
         },"""
-        changed["runner"] = replace(paths["runner"].read_text(), original, marker)
+        changed["runner"] = replace((PROGRAMS / paths["runner"]).read_text(), original, marker)
     if mutant in SERVER_EDITS:
         module, before, after = SERVER_EDITS[mutant]
-        changed[module] = replace(changed.get(module, paths[module].read_text()), before, after)
-    overrides = {}
-    for module, text in changed.items():
-        replacement = work / (module + ".hirsel")
-        replacement.write_text(text)
-        overrides[paths[module]] = replacement
-    main = paths["main"]
-    return overrides.pop(main, main), overrides or None
+        changed[module] = replace(changed.get(module, (PROGRAMS / paths[module]).read_text()), before, after)
+    if not changed:
+        return ROOT / "core"
+    return library_root(work / "libraries", ("store", "runner", "checkbox"),
+                        {paths[module]: text for module, text in changed.items()})
 
 
 def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
@@ -94,8 +91,7 @@ def qualify(compiler, work, case, mutant, clients, toggles, pace, seed):
     origin = f"http://{listen}/"
     web = work / "web"
     web.mkdir()
-    source, overrides = scratch_sources(work, case, mutant)
-    executable = build(compiler, work, web, listen, source, overrides)
+    executable = build(compiler, work, web, listen, scratch_libraries(work, case, mutant))
     prepare_web(compiler, executable, web)
     if case in BROWSER:
         law = ["browser-laws.mjs", case, origin]

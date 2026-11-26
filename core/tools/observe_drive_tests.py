@@ -22,10 +22,7 @@ def seeded_inputs(root, work, seeds, mix=None):
         f'pub fn seed_{seed}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {{\n'
         f'    observe_drive.run(out, err, clock, random, tasks, net, {seed}u64, {mix or MIXES[seed % len(MIXES)]})\n}}\n'
         for seed in seeds))
-    modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
-    return manifest(root, work, 'drive', extra=[
-        *((root / f'core/programs/observe/{module}.hirsel', 'observe_fixture' if module == 'fixture' else module)
-          for module in modules), (source, 'observe_seeds')])
+    return manifest(root, work, 'drive', extra=[(source, 'observe_seeds')])
 
 
 def main():
@@ -38,7 +35,7 @@ def main():
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     root, evaluator = args.root.resolve(), args.evaluator.resolve()
-    sys.path.insert(0, str(root / 'core/programs/observe/models'))
+    sys.path.insert(0, str(root / 'core/programs/runner/observe/models'))
     import handoffs
     seeds = args.seed if args.seed is not None else list(range(64))
     if any(seed < 0 or seed >= 64 for seed in seeds) or len(seeds) != len(set(seeds)):

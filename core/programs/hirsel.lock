@@ -12,6 +12,11 @@ source = "member:av1"
 edges = []
 
 [[package]]
+id = "checkbox@1"
+source = "member:checkbox"
+edges = ["runner@1", "std@1", "store@1"]
+
+[[package]]
 id = "cli@1"
 source = "member:cli"
 edges = ["std@1"]

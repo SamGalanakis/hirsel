@@ -19,7 +19,7 @@ def main():
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     root, evaluator = args.root.resolve(), args.evaluator.resolve()
-    sys.path.insert(0, str(root / 'core/programs/observe/models'))
+    sys.path.insert(0, str(root / 'core/programs/runner/observe/models'))
     import export
     import handoffs
     modules = dict(calls=export.calls, store=export.store, subs=export.subs)

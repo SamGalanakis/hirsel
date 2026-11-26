@@ -1,26 +1,36 @@
 // Pure model and test observer. Production drivers are added only after store S5.
 pub type State {
-    latest: Map[Bytes, u64], store_latest: Map[Bytes, u64], requests: Map[Bytes, Bytes], bindings: Map[Bytes, Bytes],
-    runs: observe.Runs, retired: Map[Bytes, u64], accepted: List[observe.Identity], mismatches: List[observe.Identity],
-    h: observe.Count, identity: observe.Count, mismatch: observe.Count,
-    history: observe.Count, ah2: observe.Count, index: u64
+    latest: Map[Bytes, u64],
+    store_latest: Map[Bytes, u64],
+    requests: Map[Bytes, Bytes],
+    bindings: Map[Bytes, Bytes],
+    runs: observe.Runs,
+    retired: Map[Bytes, u64],
+    accepted: List[observe.Identity],
+    mismatches: List[observe.Identity],
+    h: observe.Count,
+    identity: observe.Count,
+    mismatch: observe.Count,
+    history: observe.Count,
+    ah2: observe.Count,
+    index: u64
 }
 
 pub fn state() -> State {
-    State(latest: map.new(), store_latest: map.new(), requests: map.new(), bindings: map.new(), runs: map.new(), retired: map.new(), accepted: list.new(), mismatches: list.new(),
-        h: observe.count("H", Safety, false, false, false),
-        identity: observe.count("I", Safety, false, true, true),
-        mismatch: observe.count("M", Safety, false, true, true),
-        history: observe.count("HU", Safety, false, false, false),
-        ah2: observe.count("AH2", Safety, false, false, false), index: 0u64)
+    State(latest: map.new(), store_latest: map.new(), requests: map.new(), bindings: map.new(), runs: map.new(), retired: map.new(), accepted: list.new(), mismatches: list.new(), h: observe.count("H", Safety, false, false, false), identity: observe.count("I", Safety, false, true, true), mismatch: observe.count("M", Safety, false, true, true), history: observe.count("HU", Safety, false, false, false), ah2: observe.count("AH2", Safety, false, false, false), index: 0u64)
 }
 
 pub fn step(mut s: State, e: observe.Obs) {
     match e {
         Sent(a) => {
-            let next = match map.get(s.latest, a.stream) { Some(p) => p + 1u64, None => 0u64 }
+            let next = match map.get(s.latest, a.stream) {
+                Some(p) => p + 1u64,
+                None => 0u64
+            }
             s.h.hits += 1u64
-            if a.p > next { observe.failed(mut s.h, observe.key(a.conn, a.stream, a.p), s.index, s.index) }
+            if a.p > next {
+                observe.failed(mut s.h, observe.key(a.conn, a.stream, a.p), s.index, s.index)
+            }
             if let Some(at) = map.get(s.retired, observe.key(0u64, a.stream, a.p)) {
                 observe.failed(mut s.ah2, observe.key(a.conn, a.stream, a.p), at, s.index)
             }
@@ -35,10 +45,19 @@ pub fn step(mut s: State, e: observe.Obs) {
         },
         Ran(r) => {
             observe.remember(mut s.runs, r)
-            let previous: u64 = match map.get(s.store_latest, r.stream) { Some(p) => p, None => 0u64 }
-            map.insert(mut s.store_latest, observe.own(r.stream), if r.p > previous { r.p } else { previous })
+            let previous: u64 = match map.get(s.store_latest, r.stream) {
+                Some(p) => p,
+                None => 0u64
+            }
+            map.insert(mut s.store_latest, observe.own(r.stream), if r.p > previous {
+                r.p
+            } else {
+                previous
+            })
             let k = observe.key(0u64, r.stream, r.p)
-            if !map.contains(s.bindings, k) { map.insert(mut s.bindings, take k, observe.own(r.digest)) }
+            if !map.contains(s.bindings, k) {
+                map.insert(mut s.bindings, take k, observe.own(r.digest))
+            }
         },
         Got(a) => {
             let k = observe.key(a.conn, a.stream, a.p)
@@ -54,8 +73,13 @@ pub fn step(mut s: State, e: observe.Obs) {
                 },
                 ObsRefused(ObsHistoryUnavailable) => {
                     s.history.hits += 1u64
-                    let justified = match map.get(s.store_latest, a.stream) { Some(p) => a.p < p, None => false }
-                    if !justified { observe.failed(mut s.history, observe.own(k), s.index, s.index) }
+                    let justified = match map.get(s.store_latest, a.stream) {
+                        Some(p) => a.p < p,
+                        None => false
+                    }
+                    if !justified {
+                        observe.failed(mut s.history, observe.own(k), s.index, s.index)
+                    }
                     s.ah2.hits += 1u64
                     map.insert(mut s.retired, observe.key(0u64, a.stream, a.p), s.index)
                 },
@@ -84,6 +108,13 @@ fn accept(mut s: State, a: observe.Reply) {
         Some(d) => list.push(mut s.accepted, observe.Identity(slot: observe.key(0u64, a.stream, a.p), key: observe.key(a.conn, a.stream, a.p), digest: observe.own(d), version: a.version, from: s.index, to: s.index)),
         None => observe.failed(mut s.identity, observe.key(a.conn, a.stream, a.p), s.index, s.index),
     }
-    let previous: u64 = match map.get(s.latest, a.stream) { Some(p) => p, None => 0u64 }
-    map.insert(mut s.latest, observe.own(a.stream), if a.p > previous { a.p } else { previous })
+    let previous: u64 = match map.get(s.latest, a.stream) {
+        Some(p) => p,
+        None => 0u64
+    }
+    map.insert(mut s.latest, observe.own(a.stream), if a.p > previous {
+        a.p
+    } else {
+        previous
+    })
 }

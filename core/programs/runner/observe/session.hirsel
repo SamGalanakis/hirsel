@@ -1,23 +1,30 @@
 // W3-W5 on the WIRE v2 codec. Live wire drivers and W1-W2 wait for W3c/W3d.
 pub type State {
-    versions: Map[u64, u64], live: Map[Bytes, bool], complete: Map[Bytes, bool],
-    retired: Map[Bytes, bool], issued: Map[u64, List[u64]],
-    w3: observe.Count, w4: observe.Count, w5: observe.Count, index: u64
+    versions: Map[u64, u64],
+    live: Map[Bytes, bool],
+    complete: Map[Bytes, bool],
+    retired: Map[Bytes, bool],
+    issued: Map[u64, List[u64]],
+    w3: observe.Count,
+    w4: observe.Count,
+    w5: observe.Count,
+    index: u64
 }
 
 pub fn state() -> State {
-    State(versions: map.new(), live: map.new(), complete: map.new(), retired: map.new(), issued: map.new(),
-        w3: observe.count("W3", Safety, false, false, false),
-        w4: observe.count("W4", Safety, false, false, false),
-        w5: observe.count("W5", Safety, false, false, false), index: 0u64)
+    State(versions: map.new(), live: map.new(), complete: map.new(), retired: map.new(), issued: map.new(), w3: observe.count("W3", Safety, false, false, false), w4: observe.count("W4", Safety, false, false, false), w5: observe.count("W5", Safety, false, false, false), index: 0u64)
 }
 
-fn sub_key(conn: u64, id: u64) -> Bytes { observe.key(conn, list.new(), id) }
+fn sub_key(conn: u64, id: u64) -> Bytes {
+    observe.key(conn, list.new(), id)
+}
 
 fn version(mut s: State, conn: u64, v: u64) {
     s.w3.hits += 1u64
     if let Some(previous) = map.get(s.versions, conn) {
-        if v < previous { observe.failed(mut s.w3, sub_key(conn, 0u64), s.index, s.index) }
+        if v < previous {
+            observe.failed(mut s.w3, sub_key(conn, 0u64), s.index, s.index)
+        }
     }
     map.insert(mut s.versions, conn, v)
 }
@@ -31,7 +38,10 @@ pub fn step(mut s: State, e: observe.Obs) {
                 let id: u64 = int.widen(result.unwrap(std.codec.take_u32(w.frame, mut at)))
                 let k = sub_key(w.conn, id)
                 map.insert(mut s.live, take k, true)
-                let mut ids = match map.remove(mut s.issued, w.conn) { Some(take old) => take old, None => list.new() }
+                let mut ids = match map.remove(mut s.issued, w.conn) {
+                    Some(take old) => take old,
+                    None => list.new()
+                }
                 list.push(mut ids, id)
                 map.insert(mut s.issued, w.conn, take ids)
             }
@@ -51,12 +61,16 @@ pub fn step(mut s: State, e: observe.Obs) {
                     let k = sub_key(w.conn, id)
                     let _ = result.unwrap(std.codec.take_list(w.frame, mut at, std.codec.of_u8()))
                     let has_value = result.unwrap(std.codec.take_tag(w.frame, mut at, 2u32))
-                    if has_value == 1u32 { let _ = result.unwrap(std.codec.take_list(w.frame, mut at, std.codec.of_u8())) }
+                    if has_value == 1u32 {
+                        let _ = result.unwrap(std.codec.take_list(w.frame, mut at, std.codec.of_u8()))
+                    }
                     s.w4.hits += 1u64
                     if map.contains(s.live, k) && !map.contains(s.complete, k) {
                         observe.failed(mut s.w4, observe.own(k), s.index, s.index)
                     }
-                    if map.contains(s.retired, k) { observe.failed(mut s.w5, observe.own(k), s.index, s.index) }
+                    if map.contains(s.retired, k) {
+                        observe.failed(mut s.w5, observe.own(k), s.index, s.index)
+                    }
                 }
             } else {
                 if tag == 8u32 {

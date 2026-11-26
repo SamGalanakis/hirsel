@@ -1,18 +1,44 @@
 // The bounded seeded client driver. The target lands after S5b and uses the
 // runner's wire client; it adds no observer hooks to the runner or store.
 pub type Mix: codec + send = Correct | ReuseWhileLive | RecoverNewBytes | NoDirectory | AdvanceOnRefusal
+
 type Reg = runner.Registry[(), observe_fixture.Handles]
-type Drive: send { head: Sender[runner.HeadInput], post: Sender[runner.PubIn], clock: Clock, tasks: Tasks, net: Net, random: Random, token: Bytes, out: Stdout, err: Stderr, seed: u64, mix: Mix }
-type Conn { id: u64, clock: Clock, out: Stdout, wire: wire_client.Conn, task: Task[Result[(), std.wsock.Error]] }
+
+type Drive: send {
+    head: Sender[runner.HeadInput],
+    post: Sender[runner.PubIn],
+    clock: Clock,
+    tasks: Tasks,
+    net: Net,
+    random: Random,
+    token: Bytes,
+    out: Stdout,
+    err: Stderr,
+    seed: u64,
+    mix: Mix
+}
+
+type Conn {
+    id: u64,
+    clock: Clock,
+    out: Stdout,
+    wire: wire_client.Conn,
+    task: Task[Result[(), std.wsock.Error]]
+}
+
 const NEVER: u64 = 18446744073709551615u64
+
 const LATER: u64 = 10000000000u64
+
 const N_PLACE: u64 = 1048576u64
 
 fn place(mut r: Reg) -> Result[(), runner.RegisterError] {
     runner.transact(mut r, code.describe(observe_fixture.record), 65536u64, runner.DEFAULT_STEPS)
 }
 
-fn entry() -> Bytes { observe_fixture.entry() }
+fn entry() -> Bytes {
+    observe_fixture.entry()
+}
 
 fn stream(id: u64) -> Bytes {
     let mut b: Bytes = list.new()
@@ -44,9 +70,7 @@ fn emit(out: Stdout, trace: Log[observe.Obs], take e: observe.Obs) -> () waits {
 }
 
 fn drive_input(take head: Sender[runner.HeadInput], take post: Sender[runner.PubIn], clock: Clock, random: Random, tasks: Tasks, net: Net, out: Stdout, err: Stderr, seed: u64, mix: Mix) -> Drive {
-    let d = Drive(head: take head, post: take post, clock: clock, tasks: tasks, net: net, random: random,
-        token: ingress.credential(random),
-        out: out, err: err, seed: seed, mix: mix)
+    let d = Drive(head: take head, post: take post, clock: clock, tasks: tasks, net: net, random: random, token: ingress.credential(random), out: out, err: err, seed: seed, mix: mix)
     take d
 }
 
@@ -63,8 +87,7 @@ fn connect(d: Drive, id: u64) -> Conn waits {
 }
 
 fn connect_in(d: Drive, id: u64, q: u64) -> Conn waits {
-    let (take wire, take session) = result.unwrap(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random,
-        d.head, d.post, code.describe(place), keys(), Some(clone(d.token)), q, 2097152u64))
+    let (take wire, take session) = result.unwrap(wire_client.pair_ingress(d.tasks, d.net, d.clock, d.random, d.head, d.post, code.describe(place), keys(), Some(clone(d.token)), q, 2097152u64))
     Conn(id: id, clock: d.clock, out: d.out, wire: take wire, task: take session)
 }
 
@@ -74,21 +97,27 @@ fn ask(c: Conn, trace: Log[observe.Obs], a: observe_fixture.Request, key: Bytes,
     let ms: u32 = int.narrow((after + 999999u64) / 1000000u64)
     let duration: u64 = int.widen(ms)
     let deadline = at + duration * 1000000u64
-    emit(c.out, trace, Sent(observe.Send(conn: c.id, stream: observe.own(a.stream), p: a.p,
-        digest: observe_fixture.digest(key, raw), deadline: deadline, at: at)))
+    emit(c.out, trace, Sent(observe.Send(conn: c.id, stream: observe.own(a.stream), p: a.p, digest: observe_fixture.digest(key, raw), deadline: deadline, at: at)))
     let mut offset = 0u64
     let stream_number: u32 = int.narrow(result.unwrap(std.codec.take_u64(a.stream, mut offset)))
     wire_client.send_frame(c.wire, Call(store.StreamId(t: 0u64, n: int.widen(stream_number)), a.p, wire_client.slot(keys(), key), ms, take raw))
 }
 
-type Got { version: u64, stream: Bytes, p: u64, outcome: runner.Outcome }
+type Got {
+    version: u64,
+    stream: Bytes,
+    p: u64,
+    outcome: runner.Outcome
+}
 
 // Decode the same runner.Frame as the calls fixture; the request's stream
 // number remains the observer's logical key across its shared-principal sockets.
 fn received(take incoming: runner.Frame) -> Got {
     match take incoming {
         Batch(v, _, take rows, take outcomes) => {
-            if list.len(rows) != 0u64 || list.len(outcomes) != 1u64 { fail("observe drive: one outcome per Batch") }
+            if list.len(rows) != 0u64 || list.len(outcomes) != 1u64 {
+                fail("observe drive: one outcome per Batch")
+            }
             for take outcome in take outcomes {
                 let runner.Done(stream: id, p: p, outcome: take o) = take outcome
                 return Got(version: v, stream: stream(id.n), p: p, outcome: take o)
@@ -118,12 +147,10 @@ fn record_reply(c: Conn, trace: Log[observe.Obs], take f: Got) -> Got waits {
         let mut at = 0u64
         if let Ok(Ok(r)) = std.codec.take_result(b, mut at, cr, std.codec.of_u32()) {
             let raw = observe_fixture.encoded(r.request)
-            emit(c.out, trace, Ran(observe.Run(stream: observe.own(r.request.stream), p: r.request.p,
-                digest: observe_fixture.digest(entry(), raw), version: r.version)))
+            emit(c.out, trace, Ran(observe.Run(stream: observe.own(r.request.stream), p: r.request.p, digest: observe_fixture.digest(entry(), raw), version: r.version)))
         }
     }
-    emit(c.out, trace, Got(observe.Reply(conn: c.id, stream: observe.own(f.stream), p: f.p,
-        version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(c.clock))))
+    emit(c.out, trace, Got(observe.Reply(conn: c.id, stream: observe.own(f.stream), p: f.p, version: f.version, outcome: observe.from_runner(f.outcome), at: host.mono_ns(c.clock))))
     f
 }
 
@@ -137,17 +164,17 @@ fn close(take c: Conn, trace: Log[observe.Obs]) -> () waits {
 fn publish(err: Stderr, take events: List[observe.Obs]) -> () waits {
     let mut p = positions.state()
     let mut j = observe.state()
-    let mut w = session.state()
+    let mut w = observe_session.state()
     for e in events {
         positions.step(mut p, e)
         observe.step(mut j, e)
-        session.step(mut w, e)
+        observe_session.step(mut w, e)
     }
     let h = observe.Header(has_clock: true, has_digest: true, has_ran: true, complete: true)
     let cp: std.codec.Codec[List[observe.Verdict]] = std.codec.of()
     let pv = positions.finish(p, h)
     let jv = observe.finish(j, h)
-    let wv = session.finish(w, h)
+    let wv = observe_session.finish(w, h)
     let mut b: Bytes = list.new()
     result.unwrap(std.codec.encode(cp, pv, mut b))
     result.unwrap(std.codec.encode(cp, jv, mut b))
@@ -216,13 +243,22 @@ pub fn run(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks,
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(observe_fixture.schema), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
-    match opened { Ok(()) => (), Error(_) => return false }
-    match driven { Ok(()) => true, Error(_) => false }
+    match opened {
+        Ok(()) => (),
+        Error(_) => return false
+    }
+    match driven {
+        Ok(()) => true,
+        Error(_) => false
+    }
 }
 
-
 pub type JoinCase: codec + send = CrossSession | AfterAbandoned | AfterAbandonedSame
-type JoinDrive: send { drive: Drive, scenario: JoinCase }
+
+type JoinDrive: send {
+    drive: Drive,
+    scenario: JoinCase
+}
 
 // The original early-then-late observer case retains its 1000 ns timing oracle
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
@@ -244,7 +280,9 @@ pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tas
 
 fn join_verdicts(err: Stderr, take events: List[observe.Obs]) -> () waits {
     let mut state = observe.state()
-    for e in events { observe.step(mut state, e) }
+    for e in events {
+        observe.step(mut state, e)
+    }
     let h = observe.Header(has_clock: true, has_digest: true, has_ran: true, complete: true)
     let c: std.codec.Codec[List[observe.Verdict]] = std.codec.of()
     let mut b: Bytes = list.new()
@@ -263,7 +301,10 @@ fn mismatch_result(take c: Conn, trace: Log[observe.Obs]) -> () waits {
         Error(_) => {
             let Conn(id: id, clock: clock, out: out, wire: take wire, task: take session) = take c
             let _ = wire_client.close(take wire)
-            match task.join(take session) { Ok(Ok(())) => (), _ => fail("observe join: session did not end cleanly") }
+            match task.join(take session) {
+                Ok(Ok(())) => (),
+                _ => fail("observe join: session did not end cleanly")
+            }
             emit(out, trace, Closed(observe.Close(conn: id, code: 1008u64, at: host.mono_ns(clock))))
         },
     }
@@ -320,6 +361,12 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(observe_fixture.schema), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
-    match opened { Ok(()) => (), Error(_) => return false }
-    match driven { Ok(()) => true, Error(_) => false }
+    match opened {
+        Ok(()) => (),
+        Error(_) => return false
+    }
+    match driven {
+        Ok(()) => true,
+        Error(_) => false
+    }
 }

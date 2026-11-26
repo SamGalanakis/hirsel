@@ -364,9 +364,7 @@ def live_evidence(case, t, verdicts):
 
 
 def observed_manifest(root, work):
-    path = manifest(root, work, 'observe-inputs', extra=[
-        (root / 'core/programs/observe/observe.hirsel', 'observe'),
-        (root / 'core/programs/observe/fixture.hirsel', 'observe_fixture')])
+    path = manifest(root, work, 'observe-inputs')
     m = json.loads(path.read_text())
     sources = m['packages'][-1]['sources']
     calls = [s for s in sources if s['modules'] == ['runner_calls']]
@@ -385,11 +383,7 @@ def join_manifest(root, work, name):
         f'pub fn law_{case}(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {{\n'
         f'    observe_drive.run_join(out, err, clock, random, tasks, net, {case})\n}}\n'
         for case in JOIN_CASES))
-    modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
-    return manifest(root, work, name, extra=[
-        *((root / f'core/programs/observe/{module}.hirsel',
-           'observe_fixture' if module == 'fixture' else module) for module in modules),
-        (source, 'observe_joins')])
+    return manifest(root, work, name, extra=[(source, 'observe_joins')])
 
 
 def identity_cases(root, evaluator, work, artifacts, coverage, unavailable):
@@ -425,11 +419,7 @@ def deadline_timing(root, evaluator, work, artifacts, coverage):
     source = work / 'deadline-timing.hirsel'
     source.write_text('pub fn law_timing(out: Stdout, err: Stderr, c: Clock, r: Random, tasks: Tasks, net: Net) -> bool waits {\n'
                       '    observe_drive.deadline_join(out, err, c, r, tasks, net)\n}\n')
-    modules = ('observe', 'fixture', 'positions', 'session', 'observe_drive')
-    selected = manifest(root, work, source.stem, extra=[
-        *((root / f'core/programs/observe/{module}.hirsel',
-           'observe_fixture' if module == 'fixture' else module) for module in modules),
-        (source, 'observe_timing')])
+    selected = manifest(root, work, source.stem, extra=[(source, 'observe_timing')])
     value, report = evaluate(evaluator, selected, 'runner@1/observe_timing/law_timing')
     verdicts = Codec(report.get('stderr', [])).verdicts() if value == 1 else []
     good = value == 1 and any(v['clause'] == 'J5' and v['status'] == 'Held' for v in verdicts)
@@ -444,7 +434,7 @@ def deadline_timing(root, evaluator, work, artifacts, coverage):
 
 def trace_source(t, name, observer):
     """Construct a test entry from live observations, never a .obs artifact."""
-    observer_module = 'observe' if observer in ('joins', 'wire_joins') else observer
+    observer_module = {'joins': 'observe', 'wire_joins': 'observe', 'session': 'observe_session'}.get(observer, observer)
     clauses = (CLAUSES if observer in ('joins', 'wire_joins') else ('V',) if observer == 'versions'
                else ('W3', 'W4', 'W5') if observer == 'session' else ('H', 'I', 'M', 'HU', 'AH2'))
     blobs = {}
@@ -520,10 +510,7 @@ def check_traces(evaluator, root, work, plans, name):
     main += ['    true', '}']
     source = work / (name + '.hirsel')
     source.write_text('\n'.join(sources + main) + '\n')
-    modules = ('observe', 'positions', 'versions', 'session')
-    m = manifest(root, work, name, extra=[
-        *((root / f'core/programs/observe/{module}.hirsel', module) for module in modules),
-        (source, 'observe_input')])
+    m = manifest(root, work, name, extra=[(source, 'observe_input')])
     value, report = evaluate(evaluator, m, 'runner@1/observe_input/check')
     if value != 1:
         (work / (name + '-error.json')).write_text(json.dumps(report, indent=2) + '\n')
@@ -552,7 +539,7 @@ def main():
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
     root, evaluator = args.root.resolve(), args.evaluator.resolve()
-    sys.path.insert(0, str(root / 'core/programs/observe/models'))
+    sys.path.insert(0, str(root / 'core/programs/runner/observe/models'))
     import handoffs
     args.artifacts.mkdir(parents=True, exist_ok=True)
     rows = []

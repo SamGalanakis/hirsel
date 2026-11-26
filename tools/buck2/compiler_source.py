@@ -14,7 +14,7 @@ import re
 SOURCE = "crates/hirsel-core-driver/src/compiler_source.rs"
 # The build script's own sources, and the library sources it bundles.
 SOURCES = ["crates/hirsel-core-driver/build.rs", SOURCE]
-BUNDLED = ["core/core/**", "core/std/**/*.hirsel", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel",
+BUNDLED = ["core/core/**", "core/std/**/*.hirsel", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel",
            "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/runner/frame-schema.bin"]
 
 

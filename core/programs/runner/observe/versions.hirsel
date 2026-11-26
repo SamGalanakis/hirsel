@@ -1,5 +1,11 @@
 // The client-visible version half of calls25 C5 and subs25 K2.
-pub type State { last: Map[u64, u64], ran: Map[Bytes, u64], frames: List[observe.Reply], v: observe.Count, index: u64 }
+pub type State {
+    last: Map[u64, u64],
+    ran: Map[Bytes, u64],
+    frames: List[observe.Reply],
+    v: observe.Count,
+    index: u64
+}
 
 pub fn state() -> State {
     State(last: map.new(), ran: map.new(), frames: list.new(), v: observe.count("V", Safety, false, false, false), index: 0u64)
@@ -8,7 +14,9 @@ pub fn state() -> State {
 fn version(mut s: State, conn: u64, value: u64) {
     s.v.hits += 1u64
     if let Some(previous) = map.get(s.last, conn) {
-        if value < previous { observe.failed(mut s.v, observe.key(conn, list.new(), 0u64), s.index, s.index) }
+        if value < previous {
+            observe.failed(mut s.v, observe.key(conn, list.new(), 0u64), s.index, s.index)
+        }
     }
     map.insert(mut s.last, conn, value)
 }
@@ -39,7 +47,10 @@ pub fn finish(s: State, h: observe.Header) -> List[observe.Verdict] {
     let mut v = observe.verdict(s.v, h)
     if h.has_ran {
         for a in s.frames {
-            let replied = match a.outcome { ObsReturned(_) => true, _ => false }
+            let replied = match a.outcome {
+                ObsReturned(_) => true,
+                _ => false
+            }
             if replied {
                 if let Some(ran_at) = map.get(s.ran, observe.key(0u64, a.stream, a.p)) {
                     if a.version < ran_at {

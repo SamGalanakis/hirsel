@@ -55,8 +55,8 @@ pub(crate) fn decoded_closure_hash(
 pub const VERSION: u16 = 5;
 const BODY_MAGIC: &[u8] = b"HIRBODY\0\x05\x00";
 pub const BODY_HASH_DOMAIN: &str = "hirsel.code-body.v5";
-pub const ANNEX_HASH_DOMAIN: &str = "hirsel.code-annex.v3";
-const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x03\x00";
+pub const ANNEX_HASH_DOMAIN: &str = "hirsel.code-annex.v4";
+const ANNEX_MAGIC: &[u8] = b"HIRANNEX\0\x04\x00";
 const SIGNATURE_DOMAIN: &str = "hirsel.code-signature.v2";
 
 mod results;
@@ -68,6 +68,7 @@ pub use retained::{assembly_module, prepare_retained_assembly, retain, retained_
 mod annex;
 pub(crate) mod wire;
 use annex::annex_in_order;
+pub use annex::{Annex, EntryParameter};
 use charge::{PlanMeter, reserve};
 pub(crate) use charge::{charge_identity, charge_shape};
 use wire::{Read, Tagged, Wire, Write};
@@ -517,16 +518,6 @@ pub struct FunctionAnnex {
     pub cold_edges: Vec<bool>,
     pub callable_parameters: Vec<u32>,
 }
-
-/// A body's source positions and hints, indexed by canonical function number.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Annex(
-    pub Vec<Option<FunctionAnnex>>,
-    /// The entry's parameter names, used in startup diagnostics.
-    pub Option<Vec<String>>,
-    /// A program entry's error description (PROG-3), opaque to the IR.
-    pub Option<Vec<u8>>,
-);
 
 /// Encode an instance's checked IR, keeping source and optimisation data out.
 pub fn encode(module: &Module, root: FuncId) -> EncodedBody {

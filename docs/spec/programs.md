@@ -496,11 +496,12 @@ end. Decoding and re-encoding a body gives the same bytes. Its
 whose entries do not match its body's instructions, terminators and calls in number and kind is
 malformed. Each terminator's entry also says whether it is a source decision (a coverage site,
 [docs/coverage.md](../coverage.md)); only an anchored branch or switch can be one. A program
-entry's annex in a recipe also carries the entry's parameter names, for startup diagnostics, and,
+entry's annex in a recipe also carries the entry's checked parameter types and their names for
+startup diagnostics, and,
 when its error type is not `Exit`, the description of that type its PROG-3 line is written from;
 no other annex carries either. The annex
-starts with `HIRANNEX`, a zero byte and its version 3 as a 16-bit little-endian number, is
-hashed under `hirsel.code-annex.v3` and never enters an address.
+starts with `HIRANNEX`, a zero byte and its version 4 as a 16-bit little-endian number, is
+hashed under `hirsel.code-annex.v4` and never enters an address.
 
 **Groups.** Addresses are computed for each build from the whole reach of its program, after
 the reach walk, from each instance's body hash and the ordered identities of its slots. They are
@@ -614,6 +615,8 @@ version (coverage-gen-anchors-2579) retires `hirsel.code-annex.v1`, and `hirsel.
 (cli-s1a-launch-2709, the entry's error description) retires `hirsel.code-annex.v2`. The 2026-11-26
 version (comptime-phase2b-2715) adds `hirsel.code-value.v1`, and `hirsel.code-body.v5` and
 `hirsel.code-group.v2`, which retire `hirsel.code-body.v4` and `hirsel.code-group.v1`.
+`hirsel.code-annex.v4` adds the checked entry parameter types and retires
+`hirsel.code-annex.v3`.
 
 Version note (2026-11-21, code-address attacks): the traversal now follows every instruction's
 failure target; slots are the functions retained code can run, and type hooks are metadata;

@@ -1,6 +1,45 @@
 //! A body's annex: its positions and hints, in the body's row orders.
 use super::*;
 
+/// A parameter of the checked entry declaration, before lowering to a word.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EntryParameter {
+    pub ty: String,
+    pub name: String,
+}
+
+impl EntryParameter {
+    pub fn foreign_interface(&self) -> Option<&str> {
+        self.ty
+            .strip_prefix("core@1/core/Foreign[")
+            .and_then(|ty| ty.strip_suffix(']'))
+    }
+}
+
+/// A body's source positions and hints, indexed by canonical function number.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Annex(
+    pub Vec<Option<FunctionAnnex>>,
+    /// The entry's ordered parameter types and startup diagnostic names.
+    pub Option<Vec<EntryParameter>>,
+    /// A program entry's error description (PROG-3), opaque to the IR.
+    pub Option<Vec<u8>>,
+);
+
+impl Wire for EntryParameter {
+    fn write(&self, out: &mut Write<'_, '_, '_>) {
+        self.ty.write(out);
+        self.name.write(out);
+    }
+
+    fn read(input: &mut Read<'_, '_>) -> DecodeResult<Self> {
+        Ok(Self {
+            ty: Wire::read(input)?,
+            name: Wire::read(input)?,
+        })
+    }
+}
+
 impl Annex {
     pub fn encode(&self) -> Vec<u8> {
         let empty = Module::default();
@@ -61,7 +100,7 @@ impl Annex {
             let len = input.count()?;
             function.callable_parameters = input.read_vec(len, Read::index)?;
         }
-        let names: Option<Vec<String>> = Wire::read(&mut input)?;
+        let parameters: Option<Vec<EntryParameter>> = Wire::read(&mut input)?;
         let error = bool::read(&mut input)?
             .then(|| {
                 let n = input.count()?;
@@ -70,13 +109,13 @@ impl Annex {
             })
             .transpose()?;
         input.end()?;
-        let names_match = (error.is_none() || names.is_some())
-            && names.as_ref().is_none_or(|names| {
+        let parameters_match = (error.is_none() || parameters.is_some())
+            && parameters.as_ref().is_none_or(|parameters| {
                 body.functions.first().is_some_and(|entry| {
-                    names.len() == body.signatures[entry.signature.index()].params.len()
+                    parameters.len() == body.signatures[entry.signature.index()].params.len()
                 })
             });
-        let matches = names_match
+        let matches = parameters_match
             && functions.len() == body.functions.len()
             && functions
                 .iter()
@@ -120,7 +159,7 @@ impl Annex {
         if !matches {
             return Err(DecodeError::Malformed("annex does not match body"));
         }
-        Ok(Self(functions, names, error))
+        Ok(Self(functions, parameters, error))
     }
 
     pub fn hash(&self) -> ContentHash {

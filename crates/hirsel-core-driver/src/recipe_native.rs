@@ -117,7 +117,7 @@ struct UnitIndex {
     schema: u32,
     units: BTreeMap<ContentHash, Arc<Memo>>,
 }
-const UNIT_INDEX_SCHEMA: u32 = 2;
+const UNIT_INDEX_SCHEMA: u32 = 3;
 
 /// Where a publication's unit memos come from and go: its index's key, the
 /// index as read, and the code store its bodies are in.
@@ -207,7 +207,6 @@ impl CheckProduct {
         let decl = self.entry_decl(entry)?;
         let foreign = self.release_foreign(entry, reached, options, decl, store)?;
         let entry = Identity::plain(entry.clone());
-        let names = decl.parameters.iter().map(|p| p.name.clone()).collect();
         let error = decl
             .error
             .as_ref()
@@ -225,7 +224,7 @@ impl CheckProduct {
             &entry,
             reached,
             store,
-            Some((names, error)),
+            Some((&decl.parameters, error)),
             index.as_ref(),
             defer_modules,
             options.coverage.as_ref(),
@@ -310,7 +309,7 @@ impl CheckProduct {
 
     /// The units of `entry`'s reached closure, each body and annex put in
     /// `store`, with its groups and each unit's address; `launch` is a program
-    /// entry's startup parameter names and error description. A unit
+    /// entry's checked parameters and error description. A unit
     /// other than the entry whose memo `index` holds, with its body and annex
     /// still in `store`, is taken from it and not prepared.
     pub(super) fn release_units(
@@ -318,7 +317,7 @@ impl CheckProduct {
         entry: &Identity,
         reached: &Reachable<'_>,
         store: &CodeStore,
-        launch: Option<(Vec<String>, Option<Vec<u8>>)>,
+        launch: Option<(&[EntryParameter], Option<Vec<u8>>)>,
         index: Option<&Memos>,
         defer_modules: bool,
         coverage: Option<&hirsel_core_ir::coverage::Scope>,
@@ -376,9 +375,9 @@ impl CheckProduct {
                 (annex, UnitModule::Decoded(Box::new(module)))
             };
             if identity == entry
-                && let Some((names, error)) = &launch
+                && let Some((parameters, error)) = &launch
             {
-                annex.1 = Some(names.clone());
+                annex.1 = Some(parameters.to_vec());
                 annex.2.clone_from(error);
             }
             let code = BodyRef {
@@ -970,7 +969,7 @@ pub(crate) fn foreign_grant_lines(
 
 fn launch_options(
     recipe: &Recipe,
-    names: &[String],
+    parameters: &[EntryParameter],
     error: Option<crate::entry_show::ErrorShown>,
     options: &NativeOptions,
 ) -> Result<(NativeOptions, EntryDecl), NativeStop> {
@@ -998,14 +997,14 @@ fn launch_options(
     options.foreign_grants.clear();
     let configured_exec = std::mem::take(&mut options.exec_grants);
     options.env_patterns = None;
-    if names.len() != recipe.launch.grants.len() {
+    if parameters.len() != recipe.launch.grants.len() {
         return Err(NativeStop::Entry(
             "grant bindings do not match main parameters".into(),
         ));
     }
-    let mut params = Vec::new();
     let mut next = [0usize; GRANT_NAMES.len()];
-    for (i, (binding, name)) in recipe.launch.grants.iter().zip(names).enumerate() {
+    for (i, (binding, parameter)) in recipe.launch.grants.iter().zip(parameters).enumerate() {
+        let name = &parameter.name;
         let kind = binding.kind;
         let index = next[kind as usize];
         next[kind as usize] += 1;
@@ -1019,10 +1018,6 @@ fn launch_options(
                 return Err(invalid());
             };
             options.foreign_grants.insert(interface.clone());
-            params.push(EntryParameter {
-                ty: format!("core@1/core/Foreign[{interface}]"),
-                name: name.clone(),
-            });
             continue;
         }
         match kind {
@@ -1092,16 +1087,12 @@ fn launch_options(
             }
             _ => return Err(invalid()),
         }
-        params.push(EntryParameter {
-            ty: format!("core@1/core/{}", grant_name(kind)),
-            name: name.clone(),
-        });
     }
     Ok((
         options,
         EntryDecl {
             exit: recipe.launch.exit_status,
-            parameters: params,
+            parameters: parameters.to_vec(),
             error,
         },
     ))
@@ -1390,16 +1381,17 @@ impl Publication {
     /// declaration.
     fn launch(&self, options: &NativeOptions) -> Result<(NativeOptions, EntryDecl), NativeStop> {
         let annex = &self.units[&self.recipe.entry].annex;
-        let names = annex.1.as_deref().ok_or_else(|| {
-            NativeStop::Entry("recipe entry has no startup parameter names".into())
-        })?;
+        let parameters = annex
+            .1
+            .as_deref()
+            .ok_or_else(|| NativeStop::Entry("recipe entry has no startup parameters".into()))?;
         let error = annex
             .2
             .as_deref()
             .map(crate::entry_show::ErrorShown::decode)
             .transpose()
             .map_err(|e| NativeStop::Entry(e.into()))?;
-        launch_options(&self.recipe, names, error, options)
+        launch_options(&self.recipe, parameters, error, options)
     }
 
     /// Assemble the program; an optimised LLVM build over `std`, the

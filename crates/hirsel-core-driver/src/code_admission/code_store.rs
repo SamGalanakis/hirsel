@@ -13,6 +13,7 @@ use std::path::Path;
 use std::thread;
 use tempfile::TempDir;
 
+mod fixture_body;
 mod foreign;
 
 const TARGET: &str = "x86_64-unknown-linux-gnu";
@@ -104,8 +105,6 @@ pub(crate) struct Fixture {
     objects: BTreeMap<ObjectKey, Vec<u8>>,
 }
 
-const U8_ERROR_DESCRIPTION: &[u8] = &[0, 0, 0, 0, 1, 6];
-
 impl Fixture {
     fn new(entry: &str) -> Self {
         Self {
@@ -143,27 +142,6 @@ impl Fixture {
         let len = bytes.len() as u64;
         self.objects.insert(ObjectKey { kind, hash }, bytes);
         ObjectRef { hash, len }
-    }
-
-    fn body(&mut self, name: &str, params: &str, externs: &str, code: &str) -> BodyRef {
-        let block_params = if params == "(u64)" { "(v0: u64)" } else { "" };
-        let module = hirsel_core_ir::text::parse(&format!(
-            "core v1\nsig g0 = {params} -> ()\ninst n0 = app@1/main/{name} [] []\n             fn f0 = n0 g0 {{\nb0{block_params}:\n{code}\n}}\n{externs}"
-        ))
-        .unwrap();
-        let sources = hirsel_core_ir::source::SourceMap::default();
-        let (body, mut annex) = normal::encode_with_annex(&module, FuncId(0), &sources.positions());
-        if identity(name) == self.recipe.entry {
-            annex.1 = Some(vec!["f".into(); usize::from(params == "(u64)")]);
-            annex.2 = Some(U8_ERROR_DESCRIPTION.to_vec());
-        }
-        let row = BodyRef {
-            body: self.object(ObjectKind::Body, body.bytes),
-            annex: self.object(ObjectKind::Annex, annex.encode()),
-        };
-        self.recipe.bodies.push(row);
-        self.recipe.bodies.sort_by_key(|row| row.body.hash);
-        row
     }
 
     fn group(&mut self, rows: &[(BodyRef, Vec<Binding>)], ordinal: u32) -> ContentHash {

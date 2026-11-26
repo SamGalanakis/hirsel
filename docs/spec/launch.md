@@ -485,7 +485,11 @@ objects it lacks.
    index is in range, each group's members form one strongly connected component, the entry's
    identity matches, and the closure has one address per identity with every slot's signature
    equal to its target's (PROG-10), a foreign function's signature being the one its header
-   text states (`Binding`, `Conflict(identity)`). No two leaves have one prefix
+   text states (`Binding`, `Conflict(identity)`). The entry annex carries the checked
+   parameter types in declaration order. Each entry parameter is a 64-bit word in
+   CoreIR and has exactly one grant binding at its ordinal. The binding's kind must
+   match the parameter type. For `Foreign[D]` the binding must also name the same
+   interface definition identity D. A mismatch is `Binding`. No two leaves have one prefix
    (`Conflict(identity)`, the second leaf's). Before anything is linked, each foreign archive
    passes FFI-3's format and symbol checks for the leaves that select it.
 8. Every `Builtin(n)` and every engine-operation tag is one the recipe's backend implements at

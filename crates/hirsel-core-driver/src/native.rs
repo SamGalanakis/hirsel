@@ -2,6 +2,7 @@
 use super::*;
 use crate::store::Bare;
 use hirsel_core_ir::Identity;
+use hirsel_core_ir::normal::EntryParameter;
 use hirsel_core_layout::{Layout, Recipe};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1281,18 +1282,6 @@ pub(crate) struct EntryDecl {
     /// `E` described from its declarations, unless it is `Exit`.
     pub(super) error: Option<crate::entry_show::ErrorShown>,
     pub(super) parameters: Vec<EntryParameter>,
-}
-#[derive(Clone, Serialize, Deserialize)]
-pub(super) struct EntryParameter {
-    pub(super) ty: String,
-    pub(super) name: String,
-}
-impl EntryParameter {
-    pub(super) fn foreign_interface(&self) -> Option<&str> {
-        self.ty
-            .strip_prefix("core@1/core/Foreign[")
-            .and_then(|ty| ty.strip_suffix(']'))
-    }
 }
 pub(crate) type EntryBinding = (DefPath, Result<EntryDecl, String>);
 /// A Cranelift development entry record (`hirsel.core-entry.v1`): the ABI

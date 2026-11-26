@@ -1,10 +1,69 @@
 //! Admission of foreign archives: their inventory, pins and decoded contents.
 use super::*;
+use hirsel_core_ir::normal::EntryParameter;
+use hirsel_core_ir::release_recipe::{GrantBinding, GrantKind};
+
+impl Fixture {
+    fn foreign_entry(&mut self, interface: &str, externs: &str, code: &str) -> BodyRef {
+        self.body_with_entry_parameters(
+            "entry",
+            "(u64)",
+            externs,
+            code,
+            vec![EntryParameter {
+                ty: format!("core@1/core/Foreign[{interface}]"),
+                name: "f".into(),
+            }],
+        )
+    }
+}
+
+// launch.md, Admission step 7: the grant must match the checked parameter
+// kind and, for Foreign, its interface.
+#[test]
+fn launch_grants_match_entry_capability_types() {
+    let harness = Harness::new(LARGE);
+    let mut fixture = Fixture::new("entry");
+    let interface = "app@1/main/B";
+    let body = fixture.foreign_entry(interface, "", "return");
+    fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
+
+    fixture.recipe.launch.grants = vec![GrantBinding {
+        ordinal: 0,
+        kind: GrantKind::Clock,
+        values: vec!["Clock".into()],
+        archive: None,
+        policy: None,
+    }];
+    let mismatch = |fixture: &Fixture| {
+        assert!(matches!(
+            harness.admit(fixture),
+            Err(AdmissionError::Binding(
+                "launch grant type differs from entry parameter"
+            ))
+        ));
+    };
+    mismatch(&fixture);
+
+    let pin = fixture.object(ObjectKind::ForeignArchive, b"\0asm\x01\0\0\0".to_vec());
+    fixture.recipe.foreign_archives = vec![pin];
+    fixture.recipe.launch.grants[0] = GrantBinding {
+        ordinal: 0,
+        kind: GrantKind::Foreign,
+        values: vec!["app@1/main/A".into()],
+        archive: Some(pin),
+        policy: None,
+    };
+    mismatch(&fixture);
+
+    fixture.recipe.launch.grants[0].values = vec![interface.into()];
+    assert!(harness.admit(&fixture).is_ok());
+}
 
 #[test]
 fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     use hirsel_core_ir::release_recipe::{
-        ForeignCode, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
+        ForeignCode, ForeignFunction, ForeignLeaf, ForeignTarget,
     };
     use sha2::{Digest, Sha256};
 
@@ -17,7 +76,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
     let mut fixture = Fixture::new("entry");
-    let body = fixture.body("entry", "(u64)", "", "return");
+    let body = fixture.foreign_entry("ffi_laws@1/laws/Laws", "", "return");
     fixture.recipe.address = fixture.group(&[(body, vec![])], 0);
     fixture.recipe.launch.grants.push(GrantBinding {
         ordinal: 0,
@@ -93,7 +152,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     fixture.recipe.foreign_modules.push(leaf.clone());
     fixture.recipe.foreign_archives.push(archive);
     let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
-    let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
+    let body = fixture.foreign_entry("app@1/main/I", externs, "call f1 g0 (v0)\nreturn");
     fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
     let error = failure(admit(&fixture, b"abc")).to_string();
     assert!(error.ends_with("is not an indexed ar archive"), "{error}");
@@ -105,9 +164,8 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     wrong_abi.recipe.launch.grants = fixture.recipe.launch.grants.clone();
     wrong_abi.recipe.foreign_modules.push(leaf);
     wrong_abi.recipe.foreign_archives.push(archive);
-    let body = wrong_abi.body(
-        "entry",
-        "(u64)",
+    let body = wrong_abi.foreign_entry(
+        "app@1/main/I",
         "sig g1 = (u64) -> (f64)\ninst n1 = app@1/native/f [] []\nfn f1 = n1 g1 extern\n",
         "v1: f64 = call f1 g1 (v0)\nreturn",
     );
@@ -143,7 +201,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
 fn foreign_archive_contents_count_against_decoded_bytes() {
     use hirsel_core_ir::address::foreign_address;
     use hirsel_core_ir::release_recipe::{
-        ForeignCode, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
+        ForeignCode, ForeignFunction, ForeignLeaf, ForeignTarget,
     };
     use object::write::{Object, StandardSection, Symbol, SymbolSection};
     use object::{
@@ -221,7 +279,7 @@ fn foreign_archive_contents_count_against_decoded_bytes() {
     fixture.recipe.foreign_modules.push(leaf);
     fixture.recipe.foreign_archives.push(archive);
     let externs = "inst n1 = app@1/native/f [] []\nfn f1 = n1 g0 extern\n";
-    let body = fixture.body("entry", "(u64)", externs, "call f1 g0 (v0)\nreturn");
+    let body = fixture.foreign_entry("app@1/main/I", externs, "call f1 g0 (v0)\nreturn");
     fixture.recipe.address = fixture.group(&[(body, vec![Binding::External(address)])], 0);
 
     let harness = Harness::new(LARGE);

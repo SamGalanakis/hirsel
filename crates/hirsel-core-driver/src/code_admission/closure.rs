@@ -1,11 +1,12 @@
 use super::{AdmissionError, BackendSemantics, Body, EngineTag, Limit, SlotContract, charge_rows};
 use crate::foreign_header::Abi;
 use hirsel_core_ids::ContentHash;
-use hirsel_core_ir::Identity;
 use hirsel_core_ir::address::{Binding, Group, contained_address, foreign_address};
 use hirsel_core_ir::decode::Debit;
 use hirsel_core_ir::normal::{DecodedBody, Slot};
-use hirsel_core_ir::release_recipe::{Backend, ForeignFunction, ObjectRef, Recipe};
+use hirsel_core_ir::release_recipe::{Backend, ForeignFunction, GrantKind, ObjectRef, Recipe};
+use hirsel_core_ir::{Identity, Param};
+use hirsel_core_layout::{Scalar, Ty};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -438,7 +439,7 @@ fn check_launch(
         budget.check()?;
         if body.annex.1.is_some() != (i == entry) {
             return Err(AdmissionError::Binding(
-                "startup parameter names belong to the entry annex",
+                "startup parameters belong to the entry annex",
             ));
         }
         if body.annex.2.is_some() && i != entry {
@@ -461,6 +462,30 @@ fn check_launch(
         return Err(AdmissionError::Binding(
             "launch grant ordinals differ from entry parameters",
         ));
+    }
+    let parameters = body.annex.1.as_deref().expect("checked entry annex");
+    for ((parameter, abi), grant) in parameters
+        .iter()
+        .zip(&signature.params)
+        .zip(&recipe.launch.grants)
+    {
+        budget.check()?;
+        let matches = if grant.kind == GrantKind::Foreign {
+            parameter
+                .foreign_interface()
+                .is_some_and(|interface| grant.values.as_slice() == [interface])
+        } else {
+            parameter
+                .ty
+                .strip_prefix("core@1/core/")
+                .and_then(crate::grant_kind)
+                == Some(grant.kind as u8)
+        };
+        if !matches || *abi != Param::Value(Ty::Scalar(Scalar::U64)) {
+            return Err(AdmissionError::Binding(
+                "launch grant type differs from entry parameter",
+            ));
+        }
     }
     let exit = signature.dest.is_some_and(|dest| {
         use hirsel_core_layout::{Body, FieldTy};

@@ -163,11 +163,11 @@ pub opaque type Placing[G: send, H: shareable + inert + send]: send {
     made: Result[(Arc[Template[G]], RoomPlan), RegisterError],
 }
 
-// The n_place a launch runs `p` under: the launch's explicit one, else p's.
+// The n_place a launch runs `p` under: the launch's explicit one (launch words 16 and 0, as
+// launch_env reads them), else p's. It reads only those words, not the whole launch_env.
 fn launch_n_place[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S]) -> u64 {
-    let launch = launch_env()
-    if launch.n_place_explicit {
-        launch.n_place
+    if launch_word(16u64, 0u64) != 0u64 {
+        launch_word(0u64, 0u64)
     } else {
         p.n_place
     }

@@ -78,7 +78,6 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
     if now >= c.keys.previous_until {
         c.keys.previous = None
     }
-    refresh_next(mut c.keys)
     let largest = c.application.largest
     let opened = open_for_connection(c, h, mut wire, mut plain)?
     if let Next = opened.phase {

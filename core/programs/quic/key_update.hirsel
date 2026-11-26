@@ -51,23 +51,13 @@ fn install_application(mut c: Connection, take keys: schedule.Schedule) -> bool 
             c.keys.integrity = 1u64 << 52
         },
     }
+    // The candidate next receive key, so a flipped phase can be tried (§6.3).
+    c.keys.next = match schedule.next_opener(s) {
+        Ok(take o) => Some(take o),
+        Error(_) => return false,
+    }
     c.keys.schedule = Some(take s)
-    refresh_next(mut c.keys)
     true
-}
-
-/// The candidate next receive key. A server's schedule yields it only once the
-/// handshake completes, so it is fetched again until it is there.
-fn refresh_next(mut k: KeyUpdate) {
-    if let Some(_) = k.next {
-        return
-    }
-    if let Some(s) = k.schedule {
-        k.next = match schedule.next_opener(s) {
-            Ok(take o) => Some(take o),
-            Error(_) => None,
-        }
-    }
 }
 
 /// The key a 1-RTT packet with this first byte and number opens with: the current one

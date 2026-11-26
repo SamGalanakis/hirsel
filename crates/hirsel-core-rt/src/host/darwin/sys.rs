@@ -153,6 +153,32 @@ pub(crate) fn socket_domain(fd: RawFd) -> io::Result<libc::c_int> {
     Ok(libc::c_int::from(address.ss_family))
 }
 
+/// Whether the socket `fd` is listening. Darwin's `getsockopt` refuses
+/// `SO_ACCEPTCONN` with ENOPROTOOPT, so the flag is read from the socket's
+/// `so_options` in `proc_pidfdinfo`'s `socket_fdinfo` (792 bytes, options
+/// at byte 188 in the macOS 26 SDK).
+pub(crate) fn listening(fd: RawFd) -> io::Result<bool> {
+    const PROC_PIDFDSOCKETINFO: libc::c_int = 3;
+    const SOCKET_FDINFO: usize = 792;
+    const SOI_OPTIONS: usize = 188;
+    let mut info = [0u8; SOCKET_FDINFO];
+    // SAFETY: info is live and writable for its length.
+    let got = unsafe {
+        libc::proc_pidfdinfo(
+            libc::getpid(),
+            fd,
+            PROC_PIDFDSOCKETINFO,
+            info.as_mut_ptr().cast(),
+            SOCKET_FDINFO as libc::c_int,
+        )
+    };
+    if got < 0 || got as usize != SOCKET_FDINFO {
+        return Err(io::Error::last_os_error());
+    }
+    let options = i16::from_ne_bytes([info[SOI_OPTIONS], info[SOI_OPTIONS + 1]]);
+    Ok(options as libc::c_int & libc::SO_ACCEPTCONN != 0)
+}
+
 /// The UID of the process at the other end of a connected Unix stream.
 pub(crate) fn peer_uid(fd: RawFd) -> Option<u32> {
     let (mut uid, mut gid) = (0, 0);

@@ -126,7 +126,7 @@ pub(crate) unsafe fn receive_operator() -> io::Result<Option<(OwnedFd, u32)>> {
     };
     if crate::host::sys::socket_domain(OPERATOR_FD)? != libc::AF_UNIX
         || option(libc::SO_TYPE)? != libc::SOCK_STREAM
-        || option(libc::SO_ACCEPTCONN)? != 1
+        || !crate::host::sys::listening(OPERATOR_FD)?
     {
         return Err(invalid());
     }

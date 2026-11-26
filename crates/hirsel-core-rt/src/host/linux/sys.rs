@@ -74,6 +74,27 @@ pub(crate) unsafe fn accept(
 /// The socket option naming a socket's protocol, where the host has one.
 pub(crate) const PROTOCOL: Option<libc::c_int> = Some(libc::SO_PROTOCOL);
 
+/// Whether the socket `fd` is listening.
+pub(crate) fn listening(fd: RawFd) -> io::Result<bool> {
+    let mut value: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: value and len are live and sized for the option.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_ACCEPTCONN,
+            (&raw mut value).cast(),
+            &mut len,
+        )
+    };
+    if rc < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(value == 1)
+    }
+}
+
 /// The address family of the socket `fd`.
 pub(crate) fn socket_domain(fd: RawFd) -> io::Result<libc::c_int> {
     let mut value: libc::c_int = 0;

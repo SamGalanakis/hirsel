@@ -157,7 +157,8 @@ fn socket_option(fd: BorrowedFd<'_>, level: i32, name: i32) -> Result<i32, i32> 
 fn inherited_address(listener: &TcpListener) -> Result<Address, i32> {
     let fd = listener.as_fd();
     if socket_option(fd, libc::SOL_SOCKET, libc::SO_TYPE)? != libc::SOCK_STREAM
-        || socket_option(fd, libc::SOL_SOCKET, libc::SO_ACCEPTCONN)? != 1
+        || !crate::host::sys::listening(fd.as_raw_fd())
+            .map_err(|e| e.raw_os_error().unwrap_or(libc::EINVAL))?
         || match crate::host::sys::PROTOCOL {
             Some(name) => socket_option(fd, libc::SOL_SOCKET, name)? != libc::IPPROTO_TCP,
             None => false,

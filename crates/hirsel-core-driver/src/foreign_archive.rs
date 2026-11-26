@@ -29,6 +29,22 @@ pub(crate) fn archive_ref(row: &ForeignArchiveCapture) -> ObjectRef {
     }
 }
 
+/// The recipe's `Foreign` bindings that carry FFI-1's launch rules: a
+/// binding whose pin is a contained module's gives no process authority, so
+/// it needs no `--grant` approval and writes no `foreign:` line (FFI-14).
+pub(crate) fn native_bindings(
+    recipe: &hirsel_core_ir::release_recipe::Recipe,
+) -> impl Iterator<Item = &hirsel_core_ir::release_recipe::GrantBinding> {
+    let contained = |pin: ObjectRef| {
+        let code = ForeignCode::Wasm(pin);
+        recipe.foreign_modules.iter().any(|leaf| leaf.code == code)
+    };
+    recipe.launch.grants.iter().filter(move |grant| {
+        grant.kind == hirsel_core_ir::release_recipe::GrantKind::Foreign
+            && !grant.archive.is_some_and(contained)
+    })
+}
+
 /// A module's code as the release recipe records it: its archives by target,
 /// or its one contained module (FFI-10).
 pub(crate) fn recipe_code(capture: &ForeignModuleCapture) -> ForeignCode {

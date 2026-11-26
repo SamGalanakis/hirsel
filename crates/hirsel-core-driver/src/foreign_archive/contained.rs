@@ -31,6 +31,12 @@ pub(crate) fn addresses<'a>(
     }
 }
 
+/// An interface that a contained module names (FFI-14 Grants).
+pub(crate) fn names(product: &crate::CheckProduct, interface: &str) -> bool {
+    let mut headers = product.foreign_headers.iter();
+    headers.any(|(f, (i, _))| i.definition_identity() == interface && product.is_contained(f))
+}
+
 /// Recipes, replay and Darwin images do not yet carry contained code (W1
 /// sub-slice d, and W2).
 pub(crate) fn not_built() -> AdmissionError {

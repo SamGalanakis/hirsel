@@ -781,8 +781,10 @@ pub(super) fn configure(
                 let refusal = format!(
                     "not granted: Foreign[{interface}]: pass --grant Foreign={interface} to hirsel test"
                 );
-                if (!test_options.foreign_grants.contains(interface)
-                    || !options.foreign_grants.contains(interface))
+                // A contained interface needs no command-line approval (FFI-14).
+                let approved = options.foreign_grants.contains(interface)
+                    || crate::foreign_archive::contained::names(product, interface);
+                if (!test_options.foreign_grants.contains(interface) || !approved)
                     && !refusals.contains(&refusal)
                 {
                     refusals.push(refusal);

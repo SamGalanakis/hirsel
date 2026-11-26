@@ -306,6 +306,9 @@ fn contained_calls_run_in_the_tasks_own_instance() {
 /// 2 workers, so its slice ends must be the recording's. A contained test
 /// takes `Foreign[Box]`, so a second run with the same cache runs it again
 /// (PROG-4). A test that also reaches a native module is refused as FL7 is.
+/// The package's test configuration grants `Foreign=…Box` and the command
+/// line does not: a contained interface needs no `--grant` and writes no
+/// `foreign:` line (FFI-14 Grants).
 #[test]
 #[ignore = "explicit native integration target"]
 fn contained_tests_record_and_replay() {
@@ -316,8 +319,9 @@ fn contained_tests_record_and_replay() {
     }
     let manifest = std::fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
     law.write("wasm_laws/hirsel.toml", format!(
-        "{}\n[foreign.other]\nsymbols = \"hwo_\"\narchives = []\n",
+        "{}\n[foreign.other]\nsymbols = \"hwo_\"\narchives = []\n\n[tests]\nlimit = 268435456\n{}\n",
         manifest.replace("\"main.hirsel\" = \"main\"", "\"main.hirsel\" = \"main\"\n\"other.hirsel\" = \"other\""),
+        r#"grants = ["Foreign=wasm_laws@1/laws/Box", "Foreign=wasm_laws@1/laws/Other", "Tasks", "Stdout"]"#,
     ));
     law.write("wasm_laws/other.hirsel", "pub fn poke(f: Foreign[laws.Other]) -> i32\n");
     law.write("wasm_laws/laws.hirsel", format!(
@@ -325,31 +329,35 @@ fn contained_tests_record_and_replay() {
         std::fs::read_to_string(fixture.join("laws.hirsel")).unwrap(),
     ));
     law.write("wasm_laws/main.hirsel", CONTAINED_REPLAY);
-    let runtime = env_record_runtime();
+    let record = env_record_runtime();
+    let plain = native_options(Backend::Cranelift, law.dir.path()).runtime.canonicalize().unwrap();
     let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let test = |args: &[&str]| {
+        let runtime = if args.contains(&"--replay") { &record } else { &plain };
         let mut argv = [
-            "test", "wasm_laws", "--replay", "--expect-verdict", "Sealed", "--json",
-            "--limit", "268435456", "--runtime", runtime.to_str().unwrap(),
+            "test", "wasm_laws", "--json", "--runtime", runtime.to_str().unwrap(),
             "--cc", llvm.join("bin/clang").to_str().unwrap(),
             "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("store").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(),
-            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Foreign=wasm_laws@1/laws/Other",
-            "--grant", "Tasks", "--grant", "Stdout",
+            "--grant", "Foreign=wasm_laws@1/laws/Other",
         ].map(str::to_owned).to_vec();
         argv.extend(args.iter().map(|s| (*s).to_owned()));
         let mut command = process::tape_request_command(&argv, law.dir.path());
         command.env("HIRSEL_UNTIED", "2");
         process::tape_request_output(command)
     };
+    let replay = ["--replay", "--expect-verdict", "Sealed"];
+    let (code, out, err) = test(&["--exact", "wasm_laws@1/main/fw17_contained_replays"]);
+    assert_eq!(code, Some(0), "unreplayed: {out}\n{err}");
+    assert!(!err.lines().any(|line| line.starts_with("foreign: ")), "{err}");
     for (engine, name) in ["cranelift", "llvm"]
         .into_iter()
         .flat_map(|e| ["fw17_contained_replays", "fw27_overflow_replays"].map(|n| (e, n)))
     {
         for _ in 0..2 {
             let exact = format!("wasm_laws@1/main/{name}");
-            let (code, out, err) = test(&["--backend", engine, "--exact", &exact]);
+            let (code, out, err) = test(&[&replay[..], &["--backend", engine, "--exact", &exact]].concat());
             assert_eq!(code, Some(0), "{engine} {name}: {out}\n{err}");
             let report: serde_json::Value = serde_json::from_str(&out).unwrap();
             let tests = report["tests"].as_array().unwrap();
@@ -357,7 +365,7 @@ fn contained_tests_record_and_replay() {
             assert_eq!((&tests[0]["source"], &tests[0]["passed"]), (&"executed".into(), &true.into()), "{report}");
         }
     }
-    let (code, out, err) = test(&["--exact", "wasm_laws@1/main/fl7_both"]);
+    let (code, out, err) = test(&[&replay[..], &["--exact", "wasm_laws@1/main/fl7_both"]].concat());
     assert_eq!(code, Some(1), "{out}\n{err}");
     assert!(out.contains("refused: FFI-8: a recording build cannot reach foreign code: wasm_laws@1/main/fl7_both reaches wasm_laws@1/other/poke"), "{out}\n{err}");
 }

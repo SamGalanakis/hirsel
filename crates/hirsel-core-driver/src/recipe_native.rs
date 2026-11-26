@@ -947,11 +947,7 @@ pub(crate) fn foreign_grant_refusal(
     recipe: &Recipe,
     approved: &BTreeSet<String>,
 ) -> Option<String> {
-    let interface = recipe
-        .launch
-        .grants
-        .iter()
-        .filter(|grant| grant.kind == GrantKind::Foreign)
+    let interface = crate::foreign_archive::native_bindings(recipe)
         .filter_map(|grant| grant.values.first())
         .find(|interface| !approved.contains(*interface))?;
     Some(format!(
@@ -963,7 +959,7 @@ pub(crate) fn foreign_grant_lines(
     recipe: &Recipe,
     root: ContentHash,
 ) -> impl Iterator<Item = String> + '_ {
-    recipe.launch.grants.iter().filter_map(move |grant| {
+    crate::foreign_archive::native_bindings(recipe).filter_map(move |grant| {
         let archive = grant.archive?;
         let interface = grant.values.first()?;
         Some(format!(

@@ -164,7 +164,6 @@ pub unsafe extern "C" fn hirsel_core_shared_release(context: *mut Context, node:
         #[cfg(feature = "record")]
         (*tasks::lang_unit()).reach();
         if last(node) {
-            tasks::before_commit();
             release_last(&mut *tasks::lang_unit(), context, node);
         }
     }

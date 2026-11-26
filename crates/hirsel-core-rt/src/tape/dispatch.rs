@@ -19,6 +19,7 @@ pub(super) trait Hooks: Sync {
     fn replaying(&self, group: Group) -> bool;
     fn fail(&self, group: Group, ready: Option<usize>);
     fn wake(&self, group: Group, request: *mut Request);
+    fn wake_deadline(&self, group: Group);
     fn cancel(&self, group: Group, source: Option<Group>) -> bool;
     fn consume_input(&self, group: Group);
     fn record_retirement(&self, group: Group, stream: u32, pool: u64);
@@ -97,6 +98,9 @@ impl Group {
     }
     pub fn wake(self, request: *mut Request) {
         self.cell.hooks.wake(self, request);
+    }
+    pub fn wake_deadline(self) {
+        self.cell.hooks.wake_deadline(self);
     }
     pub fn cancel(self, source: Option<Self>) -> bool {
         self.cell.hooks.cancel(self, source)

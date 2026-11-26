@@ -80,7 +80,6 @@ pub(crate) unsafe fn abandon(context: *mut Context, task: *mut tasks::Task) -> u
     unsafe {
         request_cancel(task);
         wait_end::<false>(context, helper_of(task), 0, true, false);
-        tasks::before_commit();
         consume(context, helper_of(task), None);
         0
     }

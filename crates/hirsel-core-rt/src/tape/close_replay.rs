@@ -87,12 +87,16 @@ impl Closes {
         }
     }
 
-    /// A `CLOSE` of one of `objects`, read before position `at`, that no
-    /// drop has matched yet: a unit's drops keep their order against its
-    /// takes.
-    pub(super) fn unmatched_before(&self, at: u64, objects: &[u64]) -> bool {
+    /// A `CLOSE` of an uncreated object or one of `objects`, read before
+    /// position `at`, that no drop has matched yet: a unit's drops keep their
+    /// order against its takes, including drops of objects not yet created at
+    /// this point in the replay.
+    pub(super) fn unmatched_before(&self, at: u64, created: u64, objects: &[u64]) -> bool {
         self.entries.iter().any(|(key, entry)| {
-            !entry.used && entry.at < at && key.op == CLOSE && objects.contains(&key.object)
+            !entry.used
+                && entry.at < at
+                && key.op == CLOSE
+                && (key.object > created || objects.contains(&key.object))
         })
     }
 

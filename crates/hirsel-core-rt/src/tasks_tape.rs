@@ -37,6 +37,71 @@ pub(crate) fn group_index() -> u64 {
 }
 
 #[cfg(feature = "record")]
+#[inline(never)]
+pub(super) fn replay_boundary(provider_entry: bool) {
+    replay_boundary_for(CURRENT.get(), provider_entry);
+}
+
+#[cfg(feature = "record")]
+#[inline(never)]
+pub(super) fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
+    // SAFETY: called with the active task. No scheduler reference survives a switch.
+    unsafe {
+        if task.is_null() || !(*task).replay {
+            return;
+        }
+        let group = (*task).group.unwrap();
+        use crate::tape::schedule::Turn;
+        if (*task).latest_pair {
+            if !matches!(group.turn(), Turn::Fifo | Turn::Event(Some(_))) {
+                group.fail();
+            }
+            return;
+        }
+        loop {
+            match group.turn() {
+                Turn::Fifo | Turn::Deadlock | Turn::Take => return,
+                Turn::Event(Some(id)) | Turn::Retired(id) if id == group.task => return,
+                Turn::Wait(id) if id == group.task && provider_entry => return,
+                Turn::Wait(id) if id == group.task => {
+                    group.fail();
+                    return;
+                }
+                Turn::Grant | Turn::Finish if group.task == 0 => {
+                    if provider_entry {
+                        return;
+                    }
+                    group.fail();
+                    return;
+                }
+                Turn::Event(Some(id))
+                    if (*(*task).run)
+                        .group_task(group, id)
+                        .as_ref()
+                        .is_none_or(|wanted| wanted.state != State::Ready) =>
+                {
+                    group.fail();
+                    return;
+                }
+                Turn::Event(None) => {
+                    group.fail();
+                    return;
+                }
+                // A FIFO record takes an input only where its task leaves the
+                // processor by itself (poll_event), so this task runs on to that
+                // point; an event first passes the input's position and diverges.
+                Turn::Wake(_) | Turn::Cancel(_) | Turn::Done(_) | Turn::Retired(_)
+                    if group.fifo() =>
+                {
+                    return;
+                }
+                _ => checkpoint(),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "record")]
 pub(crate) fn before_tape_frame(group: Group, ending: bool) {
     tape_boundary(group, ending);
 }
@@ -174,6 +239,18 @@ impl Scheduler {
                                 Wake::Ready,
                             );
                         }
+                        // A host-clock deadline on a virtual provider fires in
+                        // `take_timers`, after this turn's readies run.
+                        Turn::Wake(_)
+                            if (*target).state == State::Provider
+                                && crate::provide::owns(&(*(*target).operation).provider)
+                                && matches!(
+                                    (*(*target).operation).state,
+                                    OperationState::Issued { .. }
+                                ) =>
+                        {
+                            break;
+                        }
                         Turn::Done(_)
                             if (*target).state == State::Provider
                                 && matches!(
@@ -188,6 +265,37 @@ impl Scheduler {
                             break;
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Fire any recorded host-clock deadline on a virtual provider once this
+    /// turn's readies have been applied and (under FIFO) no task is runnable.
+    pub(super) unsafe fn take_tape_deadlines(&mut self, readied: bool) {
+        // SAFETY: idle owns tasks and pinned provider operation frames.
+        unsafe {
+            let idle = self.head.is_null() && self.deferred.is_null();
+            for index in 0..self.tapes.live.len() {
+                let group = self.tapes.live[index].group;
+                if group.fifo() {
+                    if !idle {
+                        continue;
+                    }
+                } else if readied {
+                    continue;
+                }
+                while let crate::tape::schedule::Turn::Wake(id) = group.turn() {
+                    let target = self.group_task(group, id);
+                    if target.is_null()
+                        || (*target).state != State::Provider
+                        || !crate::provide::owns(&(*(*target).operation).provider)
+                        || !matches!((*(*target).operation).state, OperationState::Issued { .. })
+                    {
+                        break;
+                    }
+                    group.consume_input();
+                    self.wake_operation(target, Wake::Timer);
                 }
             }
         }

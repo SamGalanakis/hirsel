@@ -1115,6 +1115,7 @@ impl Scheduler {
         unsafe {
             let mut captured = std::mem::take(&mut self.ready_arms);
             self.capture_wakes(&mut captured, net_timeout);
+            let readied = !captured.is_empty();
             for ready in captured.drain(..) {
                 #[cfg(any(test, feature = "testing"))]
                 if let Some(script) = &self.script {
@@ -1128,6 +1129,12 @@ impl Scheduler {
                 self.ready_arms = captured;
             }
             self.take_timers();
+            #[cfg(feature = "record")]
+            if !self.tapes.live.is_empty() {
+                self.take_tape_deadlines(readied);
+            }
+            #[cfg(not(feature = "record"))]
+            let _ = readied;
         }
     }
 
@@ -1479,6 +1486,13 @@ impl Scheduler {
                             } else {
                                 ABORT_DEADLINE
                             };
+                            #[cfg(feature = "record")]
+                            if wake == Wake::Timer
+                                && crate::provide::owns(&p)
+                                && let Some(group) = (*task).group
+                            {
+                                group.wake_deadline();
+                            }
                             let outcome = provider_callback!(
                                 token,
                                 Abort,
@@ -2691,77 +2705,12 @@ pub(crate) fn before_provider_entry() {
 }
 
 #[cfg(feature = "record")]
-#[inline(never)]
-fn replay_boundary(provider_entry: bool) {
-    replay_boundary_for(CURRENT.get(), provider_entry);
-}
-
-#[cfg(feature = "record")]
-#[inline(never)]
-fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
-    // SAFETY: called with the active task. No scheduler reference survives a switch.
-    unsafe {
-        if task.is_null() || !(*task).replay {
-            return;
-        }
-        let group = (*task).group.unwrap();
-        use crate::tape::schedule::Turn;
-        if (*task).latest_pair {
-            if !matches!(group.turn(), Turn::Fifo | Turn::Event(Some(_))) {
-                group.fail();
-            }
-            return;
-        }
-        loop {
-            match group.turn() {
-                Turn::Fifo | Turn::Deadlock | Turn::Take => return,
-                Turn::Event(Some(id)) | Turn::Retired(id) if id == group.task => return,
-                Turn::Wait(id) if id == group.task && provider_entry => return,
-                Turn::Wait(id) if id == group.task => {
-                    group.fail();
-                    return;
-                }
-                Turn::Grant | Turn::Finish if group.task == 0 => {
-                    if provider_entry {
-                        return;
-                    }
-                    group.fail();
-                    return;
-                }
-                Turn::Event(Some(id))
-                    if (*(*task).run)
-                        .group_task(group, id)
-                        .as_ref()
-                        .is_none_or(|wanted| wanted.state != State::Ready) =>
-                {
-                    group.fail();
-                    return;
-                }
-                Turn::Event(None) => {
-                    group.fail();
-                    return;
-                }
-                // A FIFO record takes an input only where its task leaves the
-                // processor by itself (poll_event), so this task runs on to that
-                // point; an event first passes the input's position and diverges.
-                Turn::Wake(_) | Turn::Cancel(_) | Turn::Done(_) | Turn::Retired(_)
-                    if group.fifo() =>
-                {
-                    return;
-                }
-                _ => checkpoint(),
-            }
-        }
-    }
-}
-
-#[cfg(feature = "record")]
 #[path = "tasks_tape.rs"]
 mod tape_tasks;
 #[cfg(feature = "record")]
-use tape_tasks::live_index;
-#[cfg(feature = "record")]
 pub(crate) use tape_tasks::{attach_tape, before_tape_frame, detach_tape, group_index};
+#[cfg(feature = "record")]
+use tape_tasks::{live_index, replay_boundary, replay_boundary_for};
 
 /// `event` for a caller already inside its commit.
 #[inline(always)]

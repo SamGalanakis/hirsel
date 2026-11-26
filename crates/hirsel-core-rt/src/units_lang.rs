@@ -369,7 +369,6 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
             Ok(held) => held,
             Err(e) => return refused(e.available),
         };
-        tasks::before_commit();
         let u = unit();
         let owners = (*item).owners();
         let (inbox, client) = u
@@ -419,7 +418,6 @@ pub unsafe extern "C" fn hirsel_core_client_drop(_context: *mut Context, client:
     // SAFETY: the caller transfers the handle.
     unsafe {
         let h = Box::from_raw(client);
-        tasks::before_commit();
         #[cfg(feature = "record")]
         takes::client_drop(unit(), client);
         unit().drop_client(h.client);
@@ -641,7 +639,6 @@ unsafe fn conn_send<const REC: bool>(
                     .port
                     .spin_before_park(Some(client.receiver_port()))
             }) {
-                tasks::before_commit_for(task);
                 spun = true;
                 continue;
             }
@@ -737,9 +734,6 @@ unsafe fn conn_receive<const REC: bool>(
         let c = &input.0;
         let task = tasks::current_task();
         let waited_before = REC && resumed;
-        if !waited_before {
-            tasks::before_commit_for(task);
-        }
         let unit = tasks::lang_unit_for(task);
         let mut waited = waited_before;
         // A retry after spinning is the same take-point position.
@@ -821,7 +815,6 @@ unsafe fn conn_receive<const REC: bool>(
                 u.waits += 1;
             }
             if tasks::park_unit_alone(task, || (*unit).ctx.port.spin_before_park(None)) {
-                tasks::before_commit_for(task);
                 spun = true;
                 continue;
             }
@@ -1240,13 +1233,10 @@ unsafe fn wait_end<const REC: bool>(
     h: *mut HelperH,
     site: u64,
     shielded: bool,
-    resumed: bool,
+    _resumed: bool,
 ) -> Option<bool> {
     // SAFETY: the handle is pinned by its owner through the wait.
     unsafe {
-        if !(REC && resumed) {
-            tasks::before_commit();
-        }
         loop {
             if !shielded && tasks::check_cancel(context, site) != 0 {
                 return Some(false);
@@ -1353,7 +1343,6 @@ pub(crate) unsafe fn join<const REC: bool>(
                 status: 1,
             });
         }
-        tasks::before_commit();
         let (failed, chain) = consume(context, h, Some(result));
         let cancelled = chain
             .iter()

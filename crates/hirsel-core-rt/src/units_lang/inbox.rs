@@ -11,7 +11,6 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
     // SAFETY: the caller transfers the handle; it stays pinned while it waits.
     unsafe {
         let h = &mut *inbox;
-        tasks::before_commit();
         (*context).cancel_shield += 1;
         let u = unit();
         #[cfg(feature = "record")]
@@ -28,7 +27,6 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
                 break;
             }
             if tasks::park_unit_alone(tasks::current_task(), || false) {
-                tasks::before_commit();
                 spun = true;
                 continue;
             }

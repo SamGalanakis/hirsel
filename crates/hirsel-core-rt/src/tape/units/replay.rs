@@ -290,6 +290,7 @@ pub(crate) fn due(
                 .collect()
         });
         objects.extend(live.takes.clients.values().copied());
+        let created = live.objects.len() as u64;
         let rep = live.replayer.as_mut().unwrap();
         let Ok(&Frame::Take {
             gap,
@@ -301,7 +302,10 @@ pub(crate) fn due(
             return None;
         };
         // A drop's `CLOSE` recorded before the take comes first.
-        if rep.closes.unmatched_before(rep.taken + 1, &objects) {
+        if rep
+            .closes
+            .unmatched_before(rep.taken + 1, created, &objects)
+        {
             return None;
         }
         let position = last.checked_add(gap)?;

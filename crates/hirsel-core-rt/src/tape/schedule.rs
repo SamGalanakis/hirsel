@@ -104,6 +104,17 @@ impl Hooks for TapeHooks {
             }
         });
     }
+    /// A host-clock deadline expired on an issued virtual-provider call.
+    fn wake_deadline(&self, group: Group) {
+        group.with(|live| {
+            if live.mode == Mode::Record {
+                live.write_input(Frame::Wake {
+                    gap: 0,
+                    task: group.task,
+                });
+            }
+        });
+    }
     /// An external request is an input. Replay obtains it from CANCEL instead.
     fn cancel(&self, group: Group, source: Option<Group>) -> bool {
         if source.is_some_and(|s| s.same(group)) {

@@ -413,9 +413,9 @@
     "reason": "tls-accept-build-2679"
   },
   "crates/hirsel-core-rt/src/net_tests.rs": {
-    "lines": 1527,
-    "raise_revision": 3,
-    "reason": "cli-s1a-launch-2709"
+    "lines": 1536,
+    "raise_revision": 4,
+    "reason": "macos-mac-day-2809"
   },
   "crates/hirsel-core-rt/src/os.rs": {
     "lines": 1253

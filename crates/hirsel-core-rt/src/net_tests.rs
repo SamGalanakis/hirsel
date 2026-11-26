@@ -453,7 +453,11 @@ fn net_inherited_listener_keeps_queued_connection() {
 
 #[test]
 fn net_inherited_listener_checks_bound_address() {
-    let listener = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+    // The Darwin loopback interface carries 127.0.0.1 alone; the wildcard is
+    // not the granted address either.
+    let listener = std::net::TcpListener::bind("127.0.0.2:0")
+        .or_else(|_| std::net::TcpListener::bind("0.0.0.0:0"))
+        .unwrap();
     let output = inherited_child(&listener, "inherited_denied")
         .output()
         .unwrap();
@@ -642,6 +646,11 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 );
                 let mut bytes = [0; 6];
                 let mut input = carrier(&mut bytes, 0);
+                // Darwin hands loopback bytes to the peer after the send returns.
+                assert_eq!(
+                    hirsel_core_host_recv_ready(context, s.value, 0, 0, 0, 6).error,
+                    IoError::OK
+                );
                 // The bounded receive appends only the requested prefix even
                 // when the whole payload is ready at an expired deadline.
                 let got =
@@ -991,6 +1000,10 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                     [101, 102],
                     "both directions parked on one socket wake"
                 );
+                // Take the byte first: Darwin resets the peer of a socket closed
+                // with unread bytes, and the law below is the end of stream.
+                let mut taken = [0u8];
+                assert_eq!(libc::read(sockets.fd(key), taken.as_mut_ptr().cast(), 1), 1);
                 let split = hirsel_core_net_split(context, key, 1);
                 hirsel_core_socket_drop(context, split.value);
                 hirsel_core_socket_drop(context, split.written);

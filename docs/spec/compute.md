@@ -3,8 +3,8 @@
 *Specified 2026-11-26 (Fleet Hyperscale Summit verdict, spec-only cutover, plus lane 3087
 placement simulation gate `GATE=desk`; re-scoped 2026-11-26 as a reusable core scheduler;
 amended 2026-11-26 by lane 3123 to close astra attack 3119). Rules
-COMP-1 to COMP-9. Not built; all Hirsel type
-sketches carry `unbuilt` fences. Archetype C compute placement lives exclusively in this
+COMP-1 to COMP-9. The Hirsel fences check standalone protocol type declarations.
+Archetype C compute placement lives exclusively in this
 specification and never inside `fleet@1`
 ([FLT-1](fleet.md#flt-1-three-workload-archetypes),
 [FLT-3](fleet.md#flt-3-control-place-fleet1-and-controller-takeover)).*
@@ -240,7 +240,7 @@ Three soft-state roles run inside the single `hirsel` binary:
   desk holds no matching-class offer, and `PlaceNoRight` when it holds matching-class offers but
   none carries a right for the create's principal.
 
-```hirsel unbuilt
+```hirsel
 pub type CreditId: codec + key + send {
     worker_run: u64,
     ordinal: u64
@@ -374,7 +374,7 @@ Every create belongs to one of three retry classes, derived from the admitted re
 transitive grant subset, and the actual contracts of every reachable sink — **never asserted by
 the caller**:
 
-```hirsel unbuilt
+```hirsel
 pub type RetryClass: codec + key + send = RetryPure | RetryKeyed | RetryEffectful
 
 pub type AttemptId: codec + key + send {
@@ -544,7 +544,7 @@ guarantees it is no longer running once the successor opens.
 
 Every running compute execution is addressed by an **opaque, versioned handle**:
 
-```hirsel unbuilt
+```hirsel
 pub type ComputeHandle: codec + key + send {
     version: u8,
     cell: u16,

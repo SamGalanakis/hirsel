@@ -463,8 +463,8 @@ judges its policy on IP and port (TURN-7), and the permission it installs covers
 ### TURN-7: The relay server
 
 ```hirsel signatures turn/turn
-pub type Prefix { ip: Ip, bits: u8 }
-pub type Allow { prefix: Prefix, ports_lo: u16, ports_hi: u16 }
+pub type Prefix: send { ip: Ip, bits: u8 }
+pub type Allow: send { prefix: Prefix, ports_lo: u16, ports_hi: u16 }
 pub type PeerPolicy { deny: List[Prefix], allow: List[Allow], local: List[Ip] }
 
 pub type RelayConfig {

@@ -2,7 +2,14 @@
 //! owns the entries its last two requests used: after a request its older
 //! entries are released (an edit's stale derivations), and under memory
 //! pressure whole sets are released, least recently used first, except the
-//! set just served. An entry stays while any set owns it.
+//! set being served. An entry stays while any set owns it.
+//!
+//! The memory a server keeps is a share of the process's memory limit
+//! ([`Budget`]): before a request it evicts the sets beside the request's
+//! own down to the retained share, so the set served before it is no longer
+//! spared, and during a request it evicts them whenever its resident memory
+//! passes the pressure share, so a request never builds its working set on
+//! top of another's.
 
 use super::serving;
 use hirsel_core_ids::ContentHash;
@@ -11,8 +18,8 @@ use hirsel_core_syntax::{Derive, ParseMode, ParseOutput, Symbol, Symbols};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct SetId(usize);
@@ -67,7 +74,80 @@ pub(super) struct WorkingSets {
     requests: u64,
 }
 
+/// The server's working sets, which a request's pressure checks also evict.
+static SETS: Mutex<WorkingSets> = Mutex::new(WorkingSets::new());
+
+/// The server's working sets, between requests.
+pub(super) fn sets() -> MutexGuard<'static, WorkingSets> {
+    SETS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How much of the process's memory limit a server keeps, in resident bytes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Budget {
+    /// What the sets beside the one being served may bring the server to,
+    /// before a request and after it.
+    pub(super) retain: u64,
+    /// Past this during a request, the sets beside the request's are evicted.
+    pub(super) pressure: u64,
+}
+
+impl Budget {
+    /// The budget under the memory `limit`, retaining `retain` bytes when
+    /// given (`serve --max-memory`), else a quarter of the limit. Half the
+    /// limit is the pressure line: a request's own working set may take the
+    /// rest, and the limit counts what the allocator has ever committed, not
+    /// what is resident now. A retained share above the limit is refused.
+    pub(super) fn of(limit: u64, retain: Option<u64>) -> Result<Self, String> {
+        let pressure = limit / 2;
+        match retain {
+            Some(retain) if retain > limit => Err(format!(
+                "--max-memory {retain} exceeds the memory limit of {limit} bytes (HIRSEL_MEMORY_LIMIT)"
+            )),
+            retain => Ok(Self {
+                retain: retain.unwrap_or(limit / 4),
+                pressure,
+            }),
+        }
+    }
+}
+
+/// The pressure line of the requests being served; none outside a server.
+static PRESSURE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Serve requests under `pressure` ([`Budget::pressure`]).
+pub(super) fn serve_under(pressure: u64) {
+    PRESSURE.store(pressure, Ordering::Relaxed);
+}
+
+/// During a request: evict the sets beside the request's once resident
+/// memory passes the pressure line. Every 64th new entry looks, holding no
+/// memo's lock; a look that finds the sets busy (another worker evicting)
+/// leaves them to it.
+fn relieve() {
+    static NEW: AtomicU32 = AtomicU32::new(0);
+    if NEW.fetch_add(1, Ordering::Relaxed) % 64 != 0 {
+        return;
+    }
+    let pressure = PRESSURE.load(Ordering::Relaxed);
+    if pressure == u64::MAX {
+        return;
+    }
+    let Ok(mut sets) = SETS.try_lock() else {
+        return;
+    };
+    sets.fit(pressure);
+}
+
 impl WorkingSets {
+    const fn new() -> Self {
+        Self {
+            age: VecDeque::new(),
+            next: 0,
+            requests: 0,
+        }
+    }
+
     fn touch(&mut self, input: Input) -> SetId {
         self.requests += 1;
         let mut set = match self.age.iter().position(|set| set.input == input) {
@@ -112,8 +192,8 @@ impl WorkingSets {
     }
 
     /// Evict the least recently used sets while over budget, but never the
-    /// set just served: its next request is the likeliest, and the cap bounds
-    /// the sets kept beside it, not the one in use.
+    /// set being served or just served: its next request is the likeliest,
+    /// and the budget bounds the sets kept beside it, not the one in use.
     fn trim(&mut self, mut over_budget: impl FnMut() -> bool, mut evict: impl FnMut(SetId)) {
         while self.age.len() > 1 && over_budget() {
             evict(self.age.pop_front().unwrap().id);
@@ -122,7 +202,7 @@ impl WorkingSets {
 
     /// Evict other sets until the resident memory fits `max_memory`.
     pub(super) fn fit(&mut self, max_memory: u64) {
-        if crate::host::resident_bytes() <= max_memory {
+        if self.age.len() <= 1 || crate::host::resident_bytes() <= max_memory {
             return;
         }
         release_unused_pages();
@@ -208,6 +288,7 @@ impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
         }
         let value = make()?;
         self.remember(key, value.clone(), owner);
+        relieve();
         Ok(value)
     }
 
@@ -224,6 +305,7 @@ impl<K: std::hash::Hash + Eq, V: Clone> Memo<K, V> {
     pub(crate) fn insert(&self, key: K, value: V) {
         if serving() {
             self.remember(key, value, current());
+            relieve();
         }
     }
 
@@ -447,6 +529,7 @@ fn release(drop: &dyn Fn(SetId, u64) -> bool) {
     RECIPE_REACH.0.release(drop);
     RECIPE_GROUPS.0.release(drop);
     REFERENCED.release(drop);
+    CONSTANTS.release(drop);
     OBJECT_RECORDS.release(drop);
     DEBUG_POSITIONS.release(drop);
     RUNTIME_SOURCES.release(drop);

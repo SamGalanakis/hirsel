@@ -152,11 +152,17 @@ A request that panics fails alone: its client is answered with status 101,
 and the server drops every remembered derivation, since the request may
 have left one half made, and serves the next request. After each request,
 the server releases the derivations its working set last used before its
-previous request, then evicts least recently used working sets until its
-resident memory fits `--max-memory BYTES` (default 1.75 GiB). It never
-evicts the working set it just served: the limit bounds the sets kept
-beside the one in use, so an edit loop on a working set larger than the
-limit keeps its derivations and its remembered link. An exact memo entry
+previous request. Its memory budget derives from the memory limit
+(`HIRSEL_MEMORY_LIMIT`, or the lower limit the server inherited): before and
+after each request it evicts least recently used working sets until its
+resident memory fits the retained budget, `--max-memory BYTES` or by default
+a quarter of the limit, sparing only the working set being served or just
+served; during a request it evicts the others whenever its resident memory
+passes half the limit. A server refuses to start with `--max-memory` above
+the limit. The set served before a request is not spared through it, so
+distinct packages built in turn peak at the largest alone; an edit loop on a
+working set larger than the budget keeps its derivations and its remembered
+link. An exact memo entry
 shared by several working sets stays cached while any of those sets uses
 it. The working sets' remembered development links together hold at most
 256 MiB; past that, the sets that linked least recently forget theirs and

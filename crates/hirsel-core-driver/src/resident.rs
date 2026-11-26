@@ -18,12 +18,14 @@
 //! while it runs. It re-reads its executable's identity on each request and
 //! exits once that changed. A request that panics fails alone: its client is
 //! answered 101, and the server forgets every working set, since what the
-//! request was deriving may be half made. After each request the server
-//! evicts least recently used working sets until it fits `--max-memory`,
-//! never the set just served, so an edit loop on a working set larger than
-//! the cap still finds its previous request's derivations and link. The
-//! server returns its free pages to the system after a second without
-//! requests and exits after [`IDLE_EXIT`] without any.
+//! request was deriving may be half made. The server keeps a share of its
+//! memory limit ([`memo::Budget`]): before and after each request it evicts
+//! least recently used working sets until it fits the retained share
+//! (`--max-memory`), and during a request whenever it passes the pressure
+//! share, never the request's own set, so an edit loop on a working set
+//! larger than the share still finds its previous request's derivations and
+//! link. The server returns its free pages to the system after a second
+//! without requests and exits after [`IDLE_EXIT`] without any.
 //!
 //! A `run` request's program runs in the client, under the client's
 //! terminal and signals; the server keeps the program's scratch directory
@@ -54,10 +56,6 @@ pub(crate) use memo::{
 };
 
 const PROTOCOL: u32 = 2;
-/// What the working sets beside the one just served may bring the server to:
-/// cold Place builds peaked at 1,168 MiB; add 512 MiB for retained sets and
-/// round up to a 256 MiB boundary.
-pub(crate) const DEFAULT_MAX_MEMORY: u64 = 1792 << 20;
 /// How long a server without requests or launched clients stays: sccache's.
 const IDLE_EXIT: Duration = Duration::from_secs(600);
 /// How long a server waits without requests before returning free pages.
@@ -610,7 +608,7 @@ pub(crate) fn answer(outcome: &Outcome) {
 
 /// Options of `hirsel serve`.
 pub(crate) struct Serve {
-    max_memory: u64,
+    max_memory: Option<u64>,
     stop: bool,
 }
 impl Serve {
@@ -621,15 +619,17 @@ impl Serve {
         if invocation.positional.is_some() {
             return Err("serve takes no package: one server serves every directory".into());
         }
-        let mut max_memory = DEFAULT_MAX_MEMORY;
+        let mut max_memory = None;
         let mut stop = false;
         for (option, value) in invocation.options {
             match option {
                 Opt::MaxMemory => {
-                    max_memory = value
-                        .unwrap_or_default()
-                        .parse()
-                        .map_err(|_| "--max-memory expects a byte count")?
+                    max_memory = Some(
+                        value
+                            .unwrap_or_default()
+                            .parse()
+                            .map_err(|_| "--max-memory expects a byte count")?,
+                    )
                 }
                 Opt::Stop => stop = true,
                 _ => unreachable!("serve takes --max-memory and --stop"),
@@ -661,6 +661,8 @@ pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
         wait_gone(toolchain);
         return Ok(0);
     }
+    let limit = hirsel_guard::limit().unwrap_or(hirsel_guard::DEFAULT_LIMIT);
+    let budget = memo::Budget::of(limit, serve.max_memory)?;
     let Some(_lock) = lock(toolchain)? else {
         // Another server serves the toolchain.
         return Ok(0);
@@ -672,7 +674,7 @@ pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
     }
     let listener = UnixListener::bind(&socket)?;
     SERVING.store(true, Ordering::Relaxed);
-    let served = serve_requests(&listener, toolchain, serve.max_memory);
+    let served = serve_requests(&listener, toolchain, budget);
     SERVING.store(false, Ordering::Relaxed);
     let _ = std::fs::remove_file(&socket);
     served
@@ -752,7 +754,7 @@ fn set_environment(env: &[(Vec<u8>, Vec<u8>)]) {
 fn serve_requests(
     listener: &UnixListener,
     toolchain: Toolchain,
-    max_memory: u64,
+    budget: memo::Budget,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let startup = startup_digest(&environment());
     // A client that hangs up mid-answer is an error on the write, not a signal.
@@ -761,7 +763,7 @@ fn serve_requests(
     let own = Own::save()?;
     // Launched programs' scratch directories, until their clients hang up.
     let mut launched: Vec<(UnixStream, Option<crate::store::Scratch>)> = Vec::new();
-    let mut sets = memo::WorkingSets::default();
+    memo::serve_under(budget.pressure);
     while let Some(mut stream) = accept(listener, &mut launched)? {
         let Ok((bytes, fds)) = read_message(&mut stream) else {
             continue;
@@ -799,7 +801,12 @@ fn serve_requests(
             crate::meter::trace::begin();
         }
         let outcome = if std::env::set_current_dir(&cwd).is_ok() {
-            sets.begin(route.input.absolute(&cwd));
+            {
+                let mut sets = memo::sets();
+                sets.begin(route.input.absolute(&cwd));
+                // The set served before this request is spared no longer.
+                sets.fit(budget.retain);
+            }
             crate::meter::trace::mark("working set ready");
             let args = request.args;
             std::panic::catch_unwind(move || {
@@ -825,13 +832,14 @@ fn serve_requests(
         if let Some(Outcome::Launch(launch)) = outcome {
             launched.push((stream, launch.keep));
         }
+        let mut sets = memo::sets();
         if panicked {
             // The request fails alone; what it was deriving is dropped.
             sets.forget();
         } else {
             sets.settle();
         }
-        sets.fit(max_memory);
+        sets.fit(budget.retain);
     }
     Ok(0)
 }

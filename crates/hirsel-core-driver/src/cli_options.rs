@@ -378,7 +378,7 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         ["--max-memory"],
         Some("BYTES"),
         ["serve"],
-        "After a request, evict least recently used working sets other than its own above BYTES (default 1.75 GiB)."
+        "Keep other working sets before and after a request only while resident memory fits BYTES (default a quarter of the memory limit, at most the limit)."
     ),
     option!(
         Stop,

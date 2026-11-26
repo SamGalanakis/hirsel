@@ -306,6 +306,13 @@ fn set_limit() {
     STATE.store(SET, Ordering::Release);
 }
 
+/// The memory limit in force: `HIRSEL_MEMORY_LIMIT` (else [`DEFAULT_LIMIT`]),
+/// or the lower limit the process inherited. None where the host holds none.
+pub fn limit() -> Option<u64> {
+    limit_once();
+    host::limit()
+}
+
 /// `HIRSEL_MEMORY_LIMIT`'s bytes: positive decimal digits with an optional
 /// binary `K`, `M`, `G` or `T`, the syntax systemd's `MemoryMax` and
 /// `tools/capped` read too.

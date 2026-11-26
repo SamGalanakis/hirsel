@@ -671,6 +671,112 @@ fn resident_server_keeps_the_served_set_over_its_memory_cap() {
     assert_eq!(served.pop().unwrap(), program, "the patched program is not the one-shot build's");
 }
 
+/// Bug law: a server that keeps no working set beside the one it serves
+/// (`--max-memory 1`) builds distinct packages in turn at the peak of the
+/// largest alone. The oracle is each package's peak on a fresh server: three
+/// generated packages of 4,000 functions are each built on a server of their
+/// own, then all on one server, every build reading the same warm caches. The
+/// one server's peak (its `ru_maxrss` when it exits) stays within the largest
+/// fresh peak plus a quarter (allocator noise). Red where the set served
+/// before a request is kept through it, so the next package's set lands on
+/// top of it (half a working set more at this size): the server that fitted
+/// its memory only after each request, which a deploy's five packages took
+/// past its memory limit.
+#[test]
+fn resident_server_peak_over_distinct_packages_is_the_largest_alone() {
+    use std::fmt::Write;
+    const PACKAGES: usize = 3;
+    const FUNCTIONS: usize = 4000;
+    let law = PackageLaw::new();
+    for k in 0..PACKAGES {
+        let name = format!("p{k}");
+        law.manifest(&name, &name, 1, "[sources]\n\"main.hirsel\" = \"main\"\n\n[program]\ngrants = [\"Stdout\"]\n");
+        let mut source = String::new();
+        for i in 0..FUNCTIONS {
+            writeln!(source, "fn f{i}(x: u64) -> u64 {{\n    x * {}u64 + {k}u64\n}}", i + k * 100_000).unwrap();
+        }
+        source.push_str("pub fn main(out: Stdout) -> Result[(), Exit] waits {\n");
+        for i in 0..FUNCTIONS {
+            writeln!(source, "    let _ = f{i}({i}u64)").unwrap();
+        }
+        source.push_str("    result.unwrap(stdout.write(out, \"p\\n\"))\n    Ok(())\n}\n");
+        law.write(&format!("{name}/main.hirsel"), source);
+    }
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let path = |path: PathBuf| path.canonicalize().unwrap().to_str().unwrap().to_owned();
+    let (runtime_archive, cc) = (path(options.runtime), path(cc));
+    let directory = law.dir.path().to_owned();
+    let runtime = law.path("runtime");
+    let shared = |command: &mut std::process::Command| {
+        command.env("XDG_CACHE_HOME", law.path("cache")).env("XDG_RUNTIME_DIR", &runtime);
+    };
+    // Build package `k`, served when `served` (a server listens under
+    // `runtime`), else one-shot under a runtime directory no server uses.
+    let build = |k: usize, served: bool| {
+        let args: Vec<String> = vec![
+            "build".into(),
+            format!("p{k}"),
+            "--output".into(),
+            format!("program{k}"),
+            "--libraries".into(),
+            law.libraries.to_str().unwrap().into(),
+            "--runtime".into(),
+            runtime_archive.clone(),
+            "--cc".into(),
+            cc.clone(),
+        ];
+        let mut request = process::tape_request_command(&args, &directory);
+        shared(&mut request);
+        if !served {
+            request.env("XDG_RUNTIME_DIR", law.path("one-shot"));
+        }
+        request.env("PWD", &directory).env("HIRSEL_TRACE_REQUEST_PHASES", "1");
+        let (status, stdout, stderr) = process::tape_request_output(request);
+        assert_eq!(status, Some(0), "p{k}: {stdout}\n{stderr}");
+        assert_eq!(stderr.contains("hirsel-request-phases"), served, "p{k}: {stderr}");
+    };
+    // Stop the server and read its peak resident size from wait4.
+    let peak = |server: std::process::Child| -> i64 {
+        let mut stop = process::tape_request_command(&["serve".into(), "--stop".into()], &directory);
+        stop.env("XDG_RUNTIME_DIR", &runtime);
+        let (stopped, stdout, stderr) = process::tape_request_output(stop);
+        assert_eq!(stopped, Some(0), "{stdout}\n{stderr}");
+        let pid = server.id() as libc::pid_t;
+        let (mut status, mut usage) = (0, std::mem::MaybeUninit::<libc::rusage>::uninit());
+        // SAFETY: the pid is this test's own unreaped child; wait4 fills the rusage it is given.
+        assert_eq!(unsafe { libc::wait4(pid, &mut status, 0, usage.as_mut_ptr()) }, pid);
+        std::mem::forget(server);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the server ended with {status}");
+        // SAFETY: wait4 succeeded, so the rusage is filled.
+        unsafe { usage.assume_init() }.ru_maxrss
+    };
+    let serve = ["--max-memory", "1"];
+    for k in 0..PACKAGES {
+        build(k, false);
+    }
+    // Each package's peak on a fresh server.
+    let fresh: Vec<i64> = (0..PACKAGES)
+        .map(|k| {
+            let server = start_resident_serving(&runtime, &directory, &serve, shared);
+            build(k, true);
+            peak(server)
+        })
+        .collect();
+    let server = start_resident_serving(&runtime, &directory, &serve, shared);
+    for k in 0..PACKAGES {
+        build(k, true);
+    }
+    let together = peak(server);
+    let largest = fresh.iter().copied().max().unwrap();
+    assert!(
+        together <= largest + largest / 4,
+        "one server peaked at {together} over {PACKAGES} packages; alone each peaked at {fresh:?}"
+    );
+}
+
 #[test]
 fn test_reports_check_diagnostic_for_unparseable_test_source() {
     let law = PackageLaw::new();

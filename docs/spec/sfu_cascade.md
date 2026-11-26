@@ -1,7 +1,7 @@
 # SFU cascade
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 4 of 4). Not built.
-Rules CAS-1 to CAS-8, laws K1 to K10, slices K1 to K5. Goes to design review (astra) before
+Rules CAS-1 to CAS-8, laws K1 to K10, slices KS1 to KS5. Goes to design review (astra) before
 any build; CAS-5's partition rule is the first item of that review.*
 
 `sfu_cascade` lets one room span several SFU nodes. Participants join the node nearest
@@ -12,7 +12,7 @@ pooled service; a node that cascades no room behaves exactly as RTC-10 says.
 
 **Dependency: the room directory.** Which node is a room's home, and which nodes it spans, is
 decided by a multi-node room directory that does not exist yet. This chapter fixes only the
-contract it needs (CAS-1) and is not buildable past slice K1 until the directory is
+contract it needs (CAS-1) and is not buildable past slice KS1 until the directory is
 specified. The directory is open item O2.
 
 ## CAS-1: Topology and the directory contract
@@ -32,6 +32,14 @@ specified. The directory is open item O2.
   lower than the highest it has seen for that room. So two homes in different terms cannot
   both drive an edge. The directory must be linearizable per room; how it gets there
   (Raft, a single coordinator, a store `Cell`) is the directory's spec.
+- **The home's term lease.** A home holds its term only under a lease from the directory, counted
+  as CAS-5 counts an edge's lease: from the moment the home sent its request, for `lease_ms`.
+  A home routes media of the room, and grants edges leases, only while its term lease holds,
+  and never grants an edge a lease that could outlast its own (the grant carries the
+  remaining time, and the edge takes the smaller). The directory gives the room a new term only
+  after the old term's lease has provably ended by CAS-5's rule. So a home cut off from the
+  directory stops forwarding, and so do its edges, before a new home can act. A new home's
+  `revoke` therefore never races an old home that still forwards.
 
 ## CAS-2: Links
 
@@ -126,20 +134,25 @@ edge might still be forwarding. Leases resolve both.
   room on its own units. It forwards nothing of the room, in either direction, until a new
   lease. Local ICE and DTLS stay up, as suspend keeps them, so recovery needs no new
   handshakes.
-- **The fence across a partition.** If an edge has not acknowledged a fence within `lease_ms`,
-  the home stops renewing its lease for that room and closes the room on that link. The home
-  then waits until `lease_ms × (1 + 2·drift_ppm/10⁶)` has passed since the last grant it
-  sent that edge, and returns `Ok(())`. Each request precedes its grant in real time. So the
-  edge's lease, counted from its request, ends no later than the home's count from its grant,
-  even when the two clocks run at different rates within `drift_ppm`. By the time the home
-  returns, the edge has suspended the room or is unable to receive any more media for it.
+- **No renewal across a pending fence.** From the moment the home sends a fence to an edge, it
+  grants that edge no lease renewal for the room until the edge acknowledges the fence.
+- **The fence across a partition.** The home returns `Ok(())` when the edge acknowledges, or
+  when `lease_ms × (10⁶ + drift_ppm) / (10⁶ − drift_ppm)` of the home's clock has passed since
+  the last grant it sent that edge before the fence, whichever comes first. In the second
+  case it closes the room on that link. The edge counts its lease from its request, which in
+  real time precedes the grant. Its lease therefore ends within `lease_ms / (1 − d)` of real
+  time from the grant, where `d` is `drift_ppm / 10⁶`. Even with the home's clock fast by `d`, its wait lasts at least
+  `lease_ms / (1 − d)` of real time, which covers the lease of an edge whose clock is slow by
+  `d`. By the time the home returns, the edge has
+  suspended the room.
 - **What the caller sees.** `revoke` returns `Ok(())` in both cases, because both are the
   guarantee. The router also emits `Event.Severed(room, node)` for each edge it dropped, and
   RTC-8's adapter turns that into a room message, so the application can move those
   participants.
 - **Bound.** A fence's latency across nodes is at most the slowest edge's RTC-7 bound plus
-  one link round trip when every edge answers, and at most `lease_ms` × (1 + 2·drift) plus
-  RTC-7's local bound when one cannot. The default `lease_ms` is 2,000 ms.
+  one link round trip when every edge answers. When one cannot, it is at most
+  `lease_ms × (1 + d) / (1 − d)` after the fence is sent, since the last grant came before the
+  fence. The default `lease_ms` is 2,000 ms.
 - **Clock assumption.** The only assumption is that every node's monotonic clock rate stays
   within `drift_ppm` (default 200 ppm) of real time. There is no assumption about wall-clock
   agreement. A node whose clock runs faster than that breaks the guarantee. This is the same
@@ -187,8 +200,11 @@ under `sim.udp` with three simulated nodes unless named.
   then `revoke` is called for a participant on edge B who is sending to subscribers on B. The
   trace must show two things: `revoke` returns within CAS-5's bound, and from the moment it
   returns, B's units send no datagram carrying that participant's media to anyone. Repeat
-  with B's clock running fast and slow at `drift_ppm`. *Oracle:* CAS-5's inequality, checked
-  over the trace's real time.
+  with B's clock running fast and slow at `drift_ppm`, and the home's the other way. Then cut
+  the home from the directory and from both edges. A new home in the next term revokes a
+  participant whose subscribers sit on the old home. From the new home's return onward, the
+  old home sends no media of the room. *Oracle:* CAS-5's inequality and the term lease of
+  CAS-1, checked over the trace's real time.
 - **K2 `fence_reaches_every_node`.** With all links up, a revoke returns after both edges
   acknowledge. After it returns, no node sends the participant's media, and a rejoin at the
   same epoch on any node is `Fenced`. *Oracle:* RTC-7 applied across nodes.
@@ -223,13 +239,13 @@ under `sim.udp` with three simulated nodes unless named.
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **K1** Link | ALPN, mutual pins, control stream codec, media datagram header, MTU check | quic Q7 | K9 |
-| **K2** Forwarding | attach, subscriptions, masks, one copy per layer, SR forwarding, link congestion | K1, RTC-10 P3, the room directory | K3, K7, K8 |
-| **K3** Repair | edge-local histories and upstream asks | K2 | K4 |
-| **K4** Fences and leases | CAS-4, CAS-5, terms, fault recovery | K2 | K1, K2, K5, K6 |
-| **K5** Real hosts | K10 on Boat | K4, quic Q8 | K10 |
+| **KS1** Link | ALPN, mutual pins, control stream codec, media datagram header, MTU check | quic QS7 | K9 |
+| **KS2** Forwarding | attach, subscriptions, masks, one copy per layer, SR forwarding, link congestion | KS1, RTC-10 P3, the room directory | K3, K7, K8 |
+| **KS3** Repair | edge-local histories and upstream asks | KS2 | K4 |
+| **KS4** Fences and leases | CAS-4, CAS-5, terms, fault recovery | KS2 | K1, K2, K5, K6 |
+| **KS5** Real hosts | K10 on Boat | KS4, quic QS8 | K10 |
 
-No reds ride in K4: K1, K2 and K5 are the fence's soundness. K10 may ride.
+No reds ride in slice KS4: laws K1, K2 and K5 are the fence's soundness. Law K10 may ride.
 
 ## Prior art
 
@@ -239,9 +255,9 @@ cited as such.
 
 | Source | Mechanism | Verdict |
 | --- | --- | --- |
-| LiveKit distributed rooms ([docs.livekit.io, "Distributed multi-region"](https://docs.livekit.io/home/self-hosting/distributed/)) | a room spans nodes, each participant on its nearest node, media relayed between nodes | **ADOPTED** as the shape |
+| LiveKit self-hosted distributed mode ([docs.livekit.io, "Distributed multi-region"](https://docs.livekit.io/home/self-hosting/distributed/)) | "a room must fit on a single node"; other nodes only proxy signaling to the room's node | **NOT TAKEN**: here a room spans nodes. LiveKit's single-node rooms are the simpler alternative if O3 or O1 go against cascading |
 | LiveKit | a shared Redis as the room directory | **REPLACED**: the directory must be linearizable per room and carry fences (CAS-1, O2), which a best-effort cache does not give |
-| mediasoup `PipeTransport` ([mediasoup.org documentation](https://mediasoup.org/documentation/v3/mediasoup/api/#PipeTransport)) | plain RTP between routers, one pipe per pair, consumers piped one by one | **ADAPTED**: one QUIC link per pair, with layers multiplexed in datagrams; QUIC replaces bare RTP so links are authenticated and congestion-controlled |
+| mediasoup `PipeTransport` and `pipeToRouter` ([mediasoup.org documentation](https://mediasoup.org/documentation/v3/mediasoup/api/#PipeTransport)) | plain RTP between routers, one pipe per pair, consumers piped one by one | **ADAPTED**: one QUIC link per pair, with layers multiplexed in datagrams; QUIC replaces bare RTP so links are authenticated and congestion-controlled |
 | moq-rs cluster (/tmp/ref-moq at `d791d54`, rs/moq-relay/src/cluster.rs, drafts/draft-lcurley-moq-cluster.md) | relay mesh with HOP_PATH loop detection and ROUTE_COST | **NOT TAKEN** in Wave 2: a star per room has no loops to detect (O3) |
 | Chubby and etcd leader leases | a lease is counted from the moment of the request by the holder and from the grant by the grantor, with a bound on clock drift | **ADOPTED** in CAS-5 |
 | research-1124 PLAN row C7 | inter-SFU relay over QUIC, datagrams for media, a reliable stream for control, one copy per layer per node, edge-local RTX, a cross-node fence | **ADOPTED**; this chapter gives the fence its partition rule |
@@ -254,7 +270,8 @@ cited as such.
   caller holding a participant who may still be heard. Does `Ok` plus `Severed` mislead
   callers? Is a 200 ppm bound safe on the VMs we run? Should `lease_ms` be per room?
 - **O2** The room directory. Who specifies and builds it, and is a store `Cell` with
-  linearizable compare-and-set enough? It must also hand the fence table to a new home.
+  linearizable compare-and-set enough? It must grant term leases (CAS-1), wait out an old
+  term before a new one, and hand the fence table to a new home.
 - **O3** Star or tree. A star gives each edge one hop to the home and back, two hops between
   edges. A large cross-region room may want region hubs (a tree), and that brings back loops
   and multi-hop fences.
@@ -264,3 +281,6 @@ cited as such.
   node re-key? Re-keying costs a decrypt per node.
 - **O5** The MTU floor of 1,400 bytes on links. It is fine inside clouds. Is it fine on every
   path we expect between regions?
+- **O6** Admission on an edge. Who admits a participant who joins at an edge: the edge's own
+  RTC-8 adapter and room client, or the home's, by proxy? And how does `Cascade` attach to
+  RTC-10's `Pool`: as a `PoolOrder` variant, or as a second service sharing the pool's units?

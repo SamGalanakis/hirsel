@@ -1,7 +1,7 @@
 # WebTransport over HTTP/3
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 2 of 4). Not built.
-Rules WT-1 to WT-7, laws T1 to T10, slices T1 to T5. Goes to design review (astra) before
+Rules WT-1 to WT-7, laws T1 to T10, slices TS1 to TS5. Goes to design review (astra) before
 any build.*
 
 `webtransport` is a sans-IO HTTP/3 server and client with only what WebTransport needs. It is
@@ -56,7 +56,7 @@ From draft-17 §9 and the RFCs above. These are the only values the package writ
 | `WT_STREAMS_BLOCKED` | `0x190B4D43` bidi, `0x190B4D44` uni | capsule |
 | `WT_BUFFERED_STREAM_REJECTED` | `0x3994bd84` | stream error |
 | `WT_SESSION_GONE` | `0x170d7b68` | stream error |
-| `WT_FLOW_CONTROL_ERROR` | `0x045d4487` | connection error |
+| `WT_FLOW_CONTROL_ERROR` | `0x045d4487` | session close |
 | `WT_ALPN_ERROR` | `0x0817b3dd` | session close |
 | `WT_REQUIREMENTS_NOT_MET` | `0x212c0d48` | connection error |
 | application errors | `0x52e4a40fa8db` to `0x52e5ac983162`, a 32-bit code `n` maps to `0x52e4a40fa8db + n + n / 0x1e` (draft-17 §4.4), which skips the reserved values `0x1f·N + 0x21` | RESET_STREAM, STOP_SENDING |
@@ -75,7 +75,7 @@ codepoint is one table edit and one law update.
 pub opaque type Server
 pub opaque type Client
 pub type SessionId = SessionId(u64)
-pub type Limits { sessions: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, header_bytes: u32 }
+pub type Limits { origins: List[String], sessions: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, header_bytes: u32 }
 pub type Request { authority: String, path: String, origin: Option[String], protocols: List[String], headers: List[(String, String)] }
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
 pub type Event = Requested(SessionId, Request) | Ready(id: SessionId, protocol: Option[String]) | Stream(id: SessionId, stream: quic.StreamId, bidi: bool) | Datagram(SessionId, Bytes) | Draining(SessionId) | Closed(id: SessionId, code: u32, reason: Bytes)
@@ -109,9 +109,9 @@ it picked from the client's `WT-Available-Protocols` (draft-17 §3.3) in
    https`, `:authority`, `:path`, and `Origin` from a browser. The CONNECT stream's id is the
    session id.
 3. The server checks that each pseudo-header is present once (RFC 9114 §4.3.1), that
-   `:authority` matches a configured authority, and emits `Requested`. Origin checking is the
-   application's (draft-17 §6 requires the server to check it; the request carries it, and
-   law T8 requires a refusal when the application rejects it).
+   `:authority` matches a configured authority, and emits `Requested`. When the request carries `Origin`, the package checks it against
+   `Limits.origins` and answers `403` on a mismatch, as draft-17 §3.2 requires of the server;
+   the application never sees such a request.
 4. On `Accept`, the server sends `200` and the session is live; the CONNECT stream then
    carries only capsules (RFC 9297 §3) in both directions.
 5. A session ends with a WT_CLOSE_SESSION capsule (a 32-bit code and a reason of at most
@@ -141,7 +141,7 @@ draft-17 §5's session-level limits are enforced at both ends: `data` bounds the
 session's streams together, `streams_bidi` and `streams_uni` bound the streams it may open.
 They are sent as SETTINGS initial values and raised with WT_MAX_DATA and WT_MAX_STREAMS
 capsules as the application reads, at half the window as `quic` does (QUIC-5). Exceeding a
-limit closes the connection with `WT_FLOW_CONTROL_ERROR`. A client that sent no
+limit closes that session (not the connection) with `WT_FLOW_CONTROL_ERROR` (draft-17 §5.6). A client that sent no
 WT flow-control SETTINGS can hold one session only (draft-17 §5.1), so the server refuses its second CONNECT with
 `429`; the status is this package's choice, the refusal is the draft's.
 
@@ -197,8 +197,8 @@ Red first in `core/programs/webtransport/laws.hirsel` <!-- doc-ref: planned --> 
   resets each of its streams with `WT_SESSION_GONE` and drops its datagrams while the
   other's streams complete. *Oracle:* draft-17 §6.
 - **T8 `refusals`.** A CONNECT with `:protocol` other than `webtransport-h3` (`501`), a
-  missing `:authority` (stream error `H3_MESSAGE_ERROR`), an Origin the application rejects
-  (the status it chose, and no session), a second session without flow-control SETTINGS
+  missing `:authority` (stream error `H3_MESSAGE_ERROR`), an Origin outside `origins` (`403`, and no
+  session), a second session without flow-control SETTINGS
   (`429`), a peer without `H3_DATAGRAM` (`WT_REQUIREMENTS_NOT_MET`). *Oracle:* the
   sections cited in WT-3 and WT-5.
 - **T9 `session_flow_control`.** A peer that writes past `data`, or opens past
@@ -212,27 +212,27 @@ Red first in `core/programs/webtransport/laws.hirsel` <!-- doc-ref: planned --> 
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **T1** QPACK and frames | HTTP/3 frames, stream types, static QPACK, Huffman | — | T1, T2, T3 |
-| **T2** HTTP/3 connection | control streams, SETTINGS, GOAWAY, the CONNECT exchange, 404 for others | quic Q4 | T8 (H3 rows) |
-| **T3** Sessions | WT streams and datagrams, buffering, capsules, close and drain | T2, quic Q7 | T4, T6, T7 |
-| **T4** Flow control and limits | WT-5 | T3 | T8, T9 |
-| **T5** Browsers | WT-7 rotation; browser laws on Boat | T3, quic Q8 | T5, T10 |
+| **TS1** QPACK and frames | HTTP/3 frames, stream types, static QPACK, Huffman | — | T1, T2, T3 |
+| **TS2** HTTP/3 connection | control streams, SETTINGS, GOAWAY, the CONNECT exchange, 404 for others | quic QS4 | T8 (H3 rows) |
+| **TS3** Sessions | WT streams and datagrams, buffering, capsules, close and drain | TS2, quic QS7 | T4, T6, T7 |
+| **TS4** Flow control and limits | WT-5 | TS3 | T8, T9 |
+| **TS5** Browsers | WT-7 rotation; browser laws on Boat | TS3, quic QS8 | T5, T10 |
 
-Reds that may ride: T4 and T5 (interop and browsers, nightly). T6, T8 and T9 bound memory
-and block.
+Reds that may ride: laws T4 and T5 (interop and browsers, nightly). Laws T6, T8 and T9 bound
+memory and block.
 
 ## Prior art
 
 Goose (/tmp/ref-goose at `d5ae5bb`) has no HTTP/3. References: quiche (/tmp/ref-quiche at
-`ac43c0d`, quiche/src/h3), moq-rs (/tmp/ref-moq at `d791d54`, its `web-transport` use in
-rs/moq-native), quinn (/tmp/ref-quinn at `75d08d9`, no HTTP/3 of its own).
+`ac43c0d`, quiche/src/h3), moq-rs (/tmp/ref-moq at `d791d54`, its `web-transport` dependency in
+rs/moq-relay and rs/moq-tokio), quinn (/tmp/ref-quinn at `75d08d9`, no HTTP/3 of its own).
 
 | Source | Mechanism | Verdict |
 | --- | --- | --- |
 | quiche h3 | HTTP/3 as a layer over the transport's stream API, polled for events (quiche/src/h3/mod.rs `Connection::poll`) | **ADOPTED** as `receive` over `quic.Event`s |
 | quiche h3 | full QPACK with dynamic table (quiche/src/h3/qpack) | **NOT TAKEN**: static only (WT-6, O3) |
 | quiche h3 | generic request/response HTTP/3 server | **NOT TAKEN**: `std.http` is the HTTP server; this package refuses non-WebTransport requests |
-| moq-rs | WebTransport as one of two transports under MoQ, native QUIC the other (rs/moq-native) | **ADOPTED** in [MoQ](moq.md) MOQ-1 |
+| moq-rs | WebTransport as one of two transports under MoQ, native QUIC the other (rs/moq-relay, rs/moq-tokio) | **ADOPTED** in [MoQ](moq.md) MOQ-1 |
 | Goose | one obvious path per capability | **ADOPTED**: one WebTransport draft, one QPACK mode |
 
 ## Open for design review

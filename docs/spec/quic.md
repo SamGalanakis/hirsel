@@ -1,7 +1,7 @@
 # QUIC
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 2, Media Wave 2 package 1
-of 4). Not built. Rules QUIC-1 to QUIC-10, laws Q1 to Q16, slices Q0 to Q8. Goes to design
+of 4). Not built. Rules QUIC-1 to QUIC-10, laws Q1 to Q16, slices QS0 to QS8. Goes to design
 review (astra) before any build; the open items are at the end.*
 
 `quic` is a sans-IO QUIC version 1 endpoint, written in Hirsel under `core/programs/quic` <!-- doc-ref: planned -->.
@@ -59,7 +59,7 @@ linked into the package.
 | --- | --- | --- |
 | Versions | QUIC v1 (`0x00000001`); Version Negotiation packets for any other version | v2 ([RFC 9369](https://www.rfc-editor.org/rfc/rfc9369)): no browser needs it; adding it later is a label and a version number |
 | Roles | server and client | — |
-| Handshake | TLS 1.3 in Hirsel over TLS-8 (QUIC-3); X25519 and P-256; the three TLS-8 suites; server signature P-256 ECDSA or Ed25519 | 0-RTT and resumption: TLS-8 has no PSK schedule, WebTransport forbids CONNECT in 0-RTT (webtrans-http3-17 §3.2), and 0-RTT replay is a cost every consumer here would refuse; RSA server keys: `secret.sign`'s `rs256` is PKCS#1 v1.5, which TLS 1.3 forbids for CertificateVerify |
+| Handshake | TLS 1.3 in Hirsel over TLS-8 (QUIC-3); X25519 and P-256; the three TLS-8 suites; server signature P-256 ECDSA or Ed25519 | 0-RTT and resumption: TLS-8 has no PSK schedule, 0-RTT replay is a cost every consumer here would refuse; RSA server keys: `secret.sign`'s `rs256` is PKCS#1 v1.5, which TLS 1.3 forbids for CertificateVerify |
 | Peer authentication | server pinned by SPKI digest (client role); client certificates pinned by SPKI digest (mutual, for cascade) | Web PKI chain verification in the client role: no Hirsel chain verifier outside `tls.connect`'s provider; open item O4 |
 | Address validation | Retry (RFC 9000 §8.1.2) with the RFC 9001 §5.8 integrity tag; NEW_TOKEN tokens; the 3× anti-amplification limit | — |
 | Connection IDs | NET-16 `Steer.Quic` format, so a `udp_bind_group` steers to the owning member; NEW_CONNECTION_ID, RETIRE_CONNECTION_ID; stateless reset | QUIC-LB encrypted CIDs ([draft-ietf-quic-load-balancers](https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/)): one host, no external load balancer |
@@ -200,7 +200,7 @@ framing, so a DTLS 1.3 record layer could drive it. That is not a Wave 2 deliver
 - **Stateless reset.** The token of CID `c` is the first 16 bytes of
   `HMAC-SHA256(reset_key, c)` (RFC 9000 §10.3.2's recommended construction), through
   `secret.hmac_sha256` with a `mac` use. A datagram that matches no connection and is at least
-  41 bytes (§10.3) gets a stateless reset of a random length no longer than it, at most one
+  41 bytes (§10.3) gets a stateless reset of a random length shorter than it, at most one
   per received datagram. A reset is never sent for a datagram that is itself 41 bytes or
   shorter, so two endpoints cannot loop.
 - **Anti-amplification.** Before a path is validated the server sends at most three times the
@@ -211,7 +211,7 @@ framing, so a DTLS 1.3 record layer could drive it. That is not a Wave 2 deliver
   sealed with `secret.aead_seal` (TLS-5, `aead(chacha20-poly1305)`, under `token_key`) over
   the client address, the original DCID and the issue time, and is valid for 10 s. The
   Retry Integrity Tag (RFC 9001 §5.8) is AES-128-GCM under the fixed key the RFC publishes;
-  TLS-8 gains one operation for it (slice Q0).
+  TLS-8 gains one operation for it (slice QS0).
 - **NEW_TOKEN.** A validated server connection may send one token for future connections,
   of the same construction with a lifetime of 24 hours. Since there is no 0-RTT, a token only
   saves the Retry round trip.
@@ -250,7 +250,8 @@ RFC 9002 as written, with its Appendix A and B pseudocode as the oracle:
 - persistent congestion (§7.6) resets the window to the minimum;
 - the controller is `NewReno` (RFC 9002 §7) or `Cubic` (RFC 9438 with HyStart++, RFC 9406),
   `Cubic` by default, as quinn (quinn-proto/src/congestion/cubic.rs) and quiche
-  (quiche/src/recovery/congestion/cubic.rs, hystart.rs) default to it;
+  (quiche/src/recovery/congestion/cubic.rs) default to CUBIC; HyStart++ follows quiche
+  (quiche/src/recovery/congestion/hystart.rs), since quinn has none;
 - a pacer spreads each congestion window over the smoothed RTT with a burst of 10 packets, as
   RFC 9002 §7.7 recommends; `poll` returns the next send time as `Wake` when paced;
 - DATAGRAM frames are ack-eliciting and congestion-controlled but never retransmitted (RFC
@@ -290,7 +291,7 @@ charged then, so a connection's cost is exact like RTC-10's room cost:
 
 ## QUIC-10: The driver
 
-`quic.serve` is the thin IO loop for the common case, so consumers do not each write one:
+`quic.drive` is the thin IO loop for the common case, so consumers do not each write one:
 
 ```hirsel unbuilt
 pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut events: List[Event]) -> Result[(), NetError] waits
@@ -380,17 +381,17 @@ comparison.
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **Q0** TLS-8 Retry tag | `schedule.retry_tag(odcid, packet, mut out)`: AES-128-GCM under RFC 9001 §5.8's published key and nonce, no `Secret` (the key is public) | — | Q2's A.4 rows, in TLS-8's PC1 |
-| **Q1** Codec | varints, headers, every frame, coalescing, packet-number decoding | — | Q1, Q3 (codec rows) |
-| **Q2** Handshake | `quic.handshake`: TLS 1.3 messages and extensions, transport parameters, pins, signing and verifying | Q1, Q0 | Q2, Q16 |
-| **Q3** Connection core | Initial, Handshake and 1-RTT spaces, CIDs, ACKs, CONNECTION_CLOSE, idle, the `Endpoint` | Q2 | Q3, Q4 (handshake only) |
-| **Q4** Streams | stream states, flow control, RESET_STREAM_AT, priority | Q3 | Q4, Q11 |
-| **Q5** Recovery | RFC 9002, NewReno, CUBIC with HyStart++, pacing, ECN | Q3 | Q9, Q10 |
-| **Q6** Validation and resets | anti-amplification, Retry, NEW_TOKEN, stateless reset, path validation, key update | Q3, Q5 | Q6, Q7, Q8, Q12, Q13 |
-| **Q7** Datagrams, driver, steering | RFC 9221, `drive`, GSO trains, `Steer.Quic` CIDs | Q4 | Q14, Q15 |
-| **Q8** Interop and cost | the interop runner on Boat; the cost bench | Q6, Q7 | Q5, cost target |
+| **QS0** TLS-8 Retry tag | `schedule.retry_tag(odcid, packet, mut out)`: AES-128-GCM under RFC 9001 §5.8's published key and nonce, no `Secret` (the key is public) | — | Q2's A.4 rows, in TLS-8's PC1 |
+| **QS1** Codec | varints, headers, every frame, coalescing, packet-number decoding | — | Q1, Q3 (codec rows) |
+| **QS2** Handshake | `quic.handshake`: TLS 1.3 messages and extensions, transport parameters, pins, signing and verifying | QS1, QS0 | Q2, Q16 |
+| **QS3** Connection core | Initial, Handshake and 1-RTT spaces, CIDs, ACKs, CONNECTION_CLOSE, idle, the `Endpoint` | QS2 | Q3, Q4 (handshake only) |
+| **QS4** Streams | stream states, flow control, RESET_STREAM_AT, priority | QS3 | Q4, Q11 |
+| **QS5** Recovery | RFC 9002, NewReno, CUBIC with HyStart++, pacing, ECN | QS3 | Q9, Q10 |
+| **QS6** Validation and resets | anti-amplification, Retry, NEW_TOKEN, stateless reset, path validation, key update | QS3, QS5 | Q6, Q7, Q8, Q12, Q13 |
+| **QS7** Datagrams, driver, steering | RFC 9221, `drive`, GSO trains, `Steer.Quic` CIDs | QS4 | Q14, Q15 |
+| **QS8** Interop and cost | the interop runner on Boat; the cost bench | QS6, QS7 | Q5, cost target |
 
-Reds that may ride: Q5 and the cost target. Q6, Q7, Q8, Q11 and Q16 are soundness laws and
+Reds that may ride: law Q5 and the cost target. Laws Q6, Q7, Q8, Q11 and Q16 are soundness laws and
 block their slices.
 
 ## Prior art
@@ -405,7 +406,8 @@ Goose (/tmp/ref-goose at `d5ae5bb`) has no UDP or QUIC code. References: quinn
 | Goose | networking as library code over explicit costs | **ADOPTED**, as for every media package |
 | quinn-proto | sans-IO `Endpoint` per socket dispatching to `Connection`s; `poll_transmit`, `handle_event`, `handle_timeout` (quinn-proto/src/endpoint.rs:102, connection/mod.rs:466, 1154, 1226) | **ADAPTED** as `receive` and `poll`; the endpoint also returns events in one list, as RTC-5's `turn` does |
 | quinn-proto | pluggable crypto session over rustls (quinn-proto/src/crypto/rustls.rs) | **REPLACED** by `quic.handshake` over TLS-8: keys never leave a schedule |
-| quinn-proto, quiche | CUBIC default with HyStart++ (quinn-proto/src/congestion/cubic.rs; quiche/src/recovery/congestion/cubic.rs, hystart.rs) | **ADOPTED** |
+| quinn-proto, quiche | CUBIC as the default controller (quinn-proto/src/congestion/cubic.rs; quiche/src/recovery/congestion/cubic.rs) | **ADOPTED** |
+| quiche | HyStart++ slow-start exit (quiche/src/recovery/congestion/hystart.rs; quinn has none) | **ADOPTED** |
 | quiche | BBR variants (quiche/src/recovery/gcongestion) | **NOT TAKEN** in Wave 2 (O2) |
 | msquic | per-core partitions owning connections, with the RSS hash or CID picking the partition (src/core/partition.c, binding.c) | **ADOPTED** as NET-16's `Steer.Quic` CIDs and one endpoint per unit |
 | msquic | Retry when handshake memory passes a fraction (`RetryMemoryLimit`, src/core/binding.c:1285, settings.c:45) | **ADAPTED** to `RetryPolicy.Above(n)`, a count of unvalidated connections, which is exact rather than a memory fraction |

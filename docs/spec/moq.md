@@ -1,7 +1,7 @@
 # Media over QUIC
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 3 of 4). Not built.
-Rules MOQ-1 to MOQ-9, laws M1 to M12, slices M1 to M6. Goes to design review (astra) before
+Rules MOQ-1 to MOQ-9, laws M1 to M12, slices MS1 to MS6. Goes to design review (astra) before
 any build.*
 
 `moq` is a sans-IO MoQ Transport endpoint and relay, written in Hirsel under
@@ -24,7 +24,7 @@ replace them), so a multi-draft codec would be a compatibility layer with no end
 | Area | In Wave 2 | Not in Wave 2 (and why) |
 | --- | --- | --- |
 | Roles | publisher, subscriber, and relay (moqt-23 §7) in one endpoint | — |
-| Transport | native QUIC (ALPN `moqt-23`, URI scheme `moqt`), WebTransport; QUIC DATAGRAM required for Datagram delivery (moqt-23 §3) | WebSocket fallback (moq-rs's `qmux`): not in the draft |
+| Transport | native QUIC (ALPN `moqt-23`, URI scheme `moqt`), WebTransport; the QUIC DATAGRAM extension required on every MoQ connection (moqt-23 §6.2) | WebSocket fallback (moq-rs's `qmux`): not in the draft |
 | Setup | one SETUP each way (moqt-23 §9.1) with AUTHORITY, PATH, AUTHORIZATION TOKEN, MAX_AUTH_TOKEN_CACHE_SIZE (0: no cache), MOQT IMPLEMENTATION, MAX FILTER RANGES, MAX_REQUEST_UPDATES, MAX_CONTROL_MESSAGE_SIZE | — |
 | Requests | SUBSCRIBE, PUBLISH, FETCH, TRACK_STATUS, PUBLISH_NAMESPACE, SUBSCRIBE_NAMESPACE, SUBSCRIBE_TRACKS, each on its own bidirectional stream; REQUEST_UPDATE; cancellation by STOP_SENDING or RESET_STREAM | — |
 | Data | OBJECT_DATAGRAM (§11.2.1), SUBGROUP_HEADER streams (§11.3.1), FETCH_HEADER streams (§11.4.1) | — |
@@ -56,14 +56,14 @@ pub fn cancel(mut s: Session, mut e: quic.Endpoint, id: RequestId, code: u64)
 ```
 
 A `Session` is one MoQ session on one QUIC connection or WebTransport session. Request ids
-are even for the client and odd for the server (moqt-23 §9), counted per session. Object
+are even for the client and odd for the server (moqt-23 §6.4.2.1), counted per session. Object
 payloads are `Shared[Bytes]`: a relay forwards the same buffer to every subscriber with
 `quic.write_shared` or `quic.send_datagram`, never copying a payload (MOQ-6).
 
 ## MOQ-2: Control
 
 The control channel is a pair of unidirectional streams, one each way, which carry SETUP and
-then GOAWAY only (moqt-23 §3, §9.1, §9.2). Every request opens its own bidirectional stream,
+then only the session-level messages the draft allows there (moqt-23 §6.3, §6.4.1, §9.1, §9.2). Every request opens its own bidirectional stream,
 first message on it naming the request, and only TRACK_STATUS, SUBSCRIBE, PUBLISH, FETCH,
 PUBLISH_NAMESPACE, SUBSCRIBE_NAMESPACE and SUBSCRIBE_TRACKS may open one. REQUEST_OK,
 REQUEST_ERROR, REQUEST_UPDATE and the responses travel on the request's stream. Closing the
@@ -101,9 +101,15 @@ a receiver always learns which subscription a reset stream belonged to.
 
 Between objects competing for one connection, the order is moqt-23 §5.1.2's: subscriber
 priority first, then publisher priority, then group order (ascending or descending as the
-subscription asked), then subgroup. This maps onto `quic.priority`: urgency from the two
-priorities folded into 0 to 7 by their high bits, and order from the group, so a newer group
-of a live track preempts an older one in QUIC's own scheduler with no second queue.
+subscription asked), then subgroup. This maps onto `quic.priority` exactly: every MoQ data stream gets one urgency, and its
+`order` key (a `u64`, lower first) packs, from the high bits down, the subscriber priority (8
+bits), the publisher priority (8 bits), the group's rank in the subscription's group order (32
+bits, counted from the oldest group still in flight on that subscription) and the subgroup id
+(16 bits). Comparing keys is then §5.1.2's comparison, so QUIC's own scheduler sends in the
+draft's order with no second queue. A subscription with more than 2³² groups in flight, or a
+subgroup id past 2¹⁶, is refused at the stream's open; neither occurs within the cache bounds of
+MOQ-7. Datagrams are sent ahead of streams at equal priorities, as §5.1.2 says; fill-delivered
+objects are outside Wave 2 (FETCH serves from cache only).
 
 Delivery timeouts (moqt-23 §5.2): an object or subgroup past the smaller non-zero of
 SUBGROUP_DELIVERY_TIMEOUT and OBJECT_DELIVERY_TIMEOUT is abandoned: its stream reset, its
@@ -120,7 +126,7 @@ The relay half follows moqt-23 §7 and keeps every byte it holds counted.
   goes first across tracks; eviction is counted, never silent. Payloads are the received
   `Shared[Bytes]`, so caching costs a reference, not a copy.
 - **Fan-out.** One upstream subscription per track no matter how many downstream
-  subscribers (moqt-23 §7.2). Each received object is offered to each downstream session
+  subscribers: subscription aggregation (moqt-23 §7.5). Each received object is offered to each downstream session
   under its own scheduling (MOQ-5) and timeouts; a slow subscriber loses its own objects to
   timeouts and never slows another.
 - **Order on a stream.** A relay never reorders or drops objects within one multi-object
@@ -156,7 +162,7 @@ slice M6; its track naming is open item O4.
 | Case | Result |
 | --- | --- |
 | ALPN or `WT-Protocol` not `moqt-23` | connection refused (`no_application_protocol` / `WT_ALPN_ERROR`) |
-| Datagram delivery without the QUIC DATAGRAM extension | `PROTOCOL_VIOLATION` at the first such SUBSCRIBE |
+| A connection without the QUIC DATAGRAM extension | refused at setup (moqt-23 §6.2) |
 | Namespace of more than 32 fields | `PROTOCOL_VIOLATION` |
 | Request past `limits.requests` | QUIC `STREAM_LIMIT_ERROR` (the credit was never given) |
 | Control message past MAX_CONTROL_MESSAGE_SIZE | `PROTOCOL_VIOLATION` |
@@ -181,7 +187,7 @@ Red first in `core/programs/moq/laws.hirsel` <!-- doc-ref: planned --> unless na
   where the stream ends in a reset. *Oracle:* moqt-23 §7.5, checked over the trace.
 - **M4 `one_upstream_per_track`.** 1,000 subscribers to one track through a relay cause one
   upstream SUBSCRIBE and one copy of each payload in memory (a seam count of `Shared`
-  references against allocations). *Oracle:* moqt-23 §7.2 and MOQ-6.
+  references against allocations). *Oracle:* moqt-23 §7.5 and MOQ-6.
 - **M5 `slow_subscriber_costs_only_itself`.** One subscriber capped at 10 % of the track's
   rate and nine uncapped: the nine receive every object within the delivery timeout; the slow
   one's lost objects are counted as timed out. *Oracle:* MOQ-6, checked by each
@@ -204,7 +210,7 @@ Red first in `core/programs/moq/laws.hirsel` <!-- doc-ref: planned --> unless na
   own vectors.
 - **M11 `cancel_frees_state`.** A subscriber that sends STOP_SENDING on its request stream
   frees the relay's per-subscription state; when the last subscriber of a track leaves,
-  the upstream request ends. *Oracle:* moqt-23 §9 and the seam's table counts.
+  the upstream request ends. *Oracle:* moqt-23 §6.4.2 and the seam's table counts.
 - **M12 `bridge_ends_on_revoke`** (in
   `core/programs/webrtc_sfu/pool_laws.hirsel` <!-- doc-ref: planned -->). A revoked participant's MoQ tracks end before the RTC-7 fence
   acknowledges, and no object of theirs is sent after it. *Oracle:* RTC-7.
@@ -213,15 +219,15 @@ Red first in `core/programs/moq/laws.hirsel` <!-- doc-ref: planned --> unless na
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **M1** Codec | control messages, data formats, namespace and track names | — | M1 |
-| **M2** Session | SETUP, request streams, publisher and subscriber roles, cancellation | M1, quic Q7, webtransport T3 | M2 (peer rows), M11 |
-| **M3** Scheduling | MOQ-5 over `quic.priority`; delivery timeouts | M2 | M6, M7 |
-| **M4** Relay | cache, fan-out, order, dedup and switchover | M3 | M3, M4, M5, M8, M9 |
-| **M5** SFrame | per-object SFrame for publishers and subscribers; relay opacity | M4 | M10 |
-| **M6** SFU bridge | MOQ-8 | M4, RTC-10 P3 | M12 |
+| **MS1** Codec | control messages, data formats, namespace and track names | — | M1 |
+| **MS2** Session | SETUP, request streams, publisher and subscriber roles, cancellation | MS1, quic QS7, webtransport TS3 | M2 (peer rows), M11 |
+| **MS3** Scheduling | MOQ-5 over `quic.priority`; delivery timeouts | MS2 | M6, M7 |
+| **MS4** Relay | cache, fan-out, order, dedup and switchover | MS3 | M3, M4, M5, M8, M9 |
+| **MS5** SFrame | per-object SFrame for publishers and subscribers; relay opacity | MS4 | M10 |
+| **MS6** SFU bridge | MOQ-8 | MS4, RTC-10 P3 | M12 |
 
-Reds that may ride: M2 (external peer). M4, M5, M9 and M12 bound memory or revocation and
-block.
+Reds that may ride: law M2 (external peer). Laws M4, M5, M9 and M12 bound memory or
+revocation and block.
 
 ## Prior art
 

@@ -192,7 +192,9 @@ window:
   discretionary moves and thaws only after two consecutive healthy windows.
 - **Destination reservation and phased drain.** Destinations independently enforce
   `(incarnation, generation, capacity)` reservations and cordon checks before consuming a
-  permit. Drain proceeds in phases (close admission, warm/transfer, collect settled receipts)
+  permit. On a host, reservations hold place slots in the host's own capacity ledger, one row
+  per Place replaced by a higher generation, and end at the Place's assignment or at the end
+  of the incarnation that made them (RUNNER-SPEC §14.12.3). Drain proceeds in phases (close admission, warm/transfer, collect settled receipts)
   against declared disruption budgets.
 - **Routing.** Durable intent travels over scoped `CoverSet` subscriptions; volatile placement
   snapshots and deltas carry `(issuer_epoch, seq)` plus per-key monotone range generations

@@ -18,6 +18,7 @@ pub opaque type Tables {
     blobs: store.Table[Bytes, Bytes],
     node: store.Table[u64, NodeRow],
     assignments: store.Table[String, AssignmentRow],
+    reservations: store.Table[String, ReservationRow],
 }
 
 fn declared[K, V](mut d: store.Declare, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[store.Table[K, V], store.Error] {
@@ -44,5 +45,6 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
         blobs: declared(mut d, "platform.blobs", std.codec.key_bytes(), std.codec.of_bytes())?,
         node: declared(mut d, "platform.node", std.codec.key_u64(), std.codec.of())?,
         assignments: declared(mut d, "platform.assignments", std.codec.key_string(), std.codec.of())?,
+        reservations: declared(mut d, "platform.reservations", std.codec.key_string(), std.codec.of())?,
     ))
 }

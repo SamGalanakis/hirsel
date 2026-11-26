@@ -16,6 +16,23 @@ type AssignmentRow: codec + send {
     generation: u64
 }
 
+// Place slots fleet@1 holds on this node for a move of `group` (§14.12.3), until the
+// group's assignment at that generation consumes them or this incarnation ends.
+type ReservationRow: codec + send {
+    incarnation: u64,
+    generation: u64,
+    capacity: u64
+}
+
+// A reservation as fleet@1 signs it (§14.12.3). Capacity counts §14.2's place slots.
+pub type Reservation: send {
+    group: String,
+    node: u64,
+    incarnation: u64,
+    generation: u64,
+    capacity: u64
+}
+
 // An assignment of `group` to this node, as fleet@1 signs it (§14.12.2).
 pub type Assignment: send {
     group: String,
@@ -32,6 +49,8 @@ fn next_node(mut tx: store.Tx, t: Tables) -> Result[NodeRow, Refused] {
         None => NodeRow(enrolled: None, incarnation: 1u64),
     }
     st(store.put(mut tx, t.node, 0u64, node))?
+    // A reservation is held for one process: a restart releases every earlier one.
+    drop_reservations(mut tx, t)?
     Ok(node)
 }
 
@@ -139,6 +158,12 @@ fn assign_turn(mut h: Host, a: Assignment, sig: Bytes, key: Bytes) -> Result[Lis
                 }
             }
             st(store.put(mut tx, call_env.3 .assignments, call_env.0, call_env.1))?
+            // The move this generation completes no longer needs its reservation.
+            if let Some(held) = st(store.fetch(tx, call_env.3 .reservations, call_env.0))? {
+                if held.generation <= call_env.1 .generation {
+                    let _ = st(store.delete(mut tx, call_env.3 .reservations, call_env.0))?
+                }
+            }
             let Some(w) = st(store.fetch(tx, call_env.3 .wake, call_env.0))? else {
                 return Error(Unknown)
             }
@@ -158,4 +183,98 @@ fn assign_turn(mut h: Host, a: Assignment, sig: Bytes, key: Bytes) -> Result[Lis
     set_run(mut h, a.group, Some(Run(gen: gen, phase: Requested, selected: launcher.Selection(activation: g.activation, assembly: clone(g.assembly)))))
     dequeue(mut h, a.group)
     Ok(take out)
+}
+
+// The slots every reservation but `name`'s holds (§14.12.3). Reservations are the few moves
+// in flight to this node, so the sum is read, never stored beside the rows it sums.
+fn reserved_except(tx: store.Tx, t: Tables, name: String) -> Result[u64, Refused] {
+    let mut sum = 0u64
+    let mut rows = store.range(tx, t.reservations, Unbounded, Unbounded) ?=> |e| Store(take e)
+    while let Some((k, r)) = st(store.next_in(tx, mut rows))? {
+        if k != name {
+            sum = int.saturating_add(sum, r.capacity)
+        }
+    }
+    Ok(sum)
+}
+
+fn drop_reservations(mut tx: store.Tx, t: Tables) -> Result[(), Refused] {
+    let mut gone: List[String] = list.new()
+    {
+        let mut rows = store.range(tx, t.reservations, Unbounded, Unbounded) ?=> |e| Store(take e)
+        while let Some((k, _)) = st(store.next_in(tx, mut rows))? {
+            list.push(mut gone, clone(k))
+        }
+    }
+    for k in gone {
+        let _ = st(store.delete(mut tx, t.reservations, k))?
+    }
+    Ok(())
+}
+
+const RESERVATION_CONTEXT: String = "hirsel platform reservation v1"
+
+// The bytes fleet@1 signs for a reservation (§14.12.3): as `assignment_message`, under its
+// own context, with `capacity` as u64 little-endian after `generation`.
+pub fn reservation_message(r: Reservation) -> Bytes {
+    let name = string.as_bytes(r.group)
+    let mut b: Bytes = list.with_capacity(72u64 + list.len(name))
+    list.append(mut b, string.as_bytes(RESERVATION_CONTEXT))
+    list.push(mut b, 0u8)
+    push_u64_le(mut b, r.node)
+    push_u64_le(mut b, r.incarnation)
+    push_u64_le(mut b, r.generation)
+    push_u64_le(mut b, r.capacity)
+    push_u64_le(mut b, list.len(name))
+    list.append(mut b, name)
+    b
+}
+
+// A destination reservation from fleet@1 (§14.12.3, fleet.md FLT-4): `capacity` place slots
+// held for the move of `group` at `generation`, by this incarnation, before the move's
+// assignment consumes them. A later generation for the same group replaces the earlier one,
+// so a move retried under a new generation never holds its slots twice.
+pub fn reserve(mut h: Host, r: Reservation, sig: Bytes, key: Bytes) -> Result[(), Refused] waits {
+    let done = reserve_turn(mut h, r, sig, key)
+    turned_result(mut h, take done)
+}
+
+fn reserve_turn(mut h: Host, r: Reservation, sig: Bytes, key: Bytes) -> Result[(), Refused] waits {
+    if list.len(key) != 32u64 || list.len(sig) != 64u64 || !ed25519.verify(key, reservation_message(r), sig) {
+        return Error(Denied("reservation signature"))
+    }
+    if h.node.enrolled != Some(r.node) {
+        return Error(Denied("reservation for another node"))
+    }
+    if r.incarnation != h.node.incarnation {
+        return Error(WrongIncarnation(h.node.incarnation))
+    }
+    let row = ReservationRow(incarnation: r.incarnation, generation: r.generation, capacity: r.capacity)
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(r.group), store.copy_env(row), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+            if let Some(done) = st(store.fetch(tx, call_env.2 .assignments, call_env.0))? {
+                if done.generation >= call_env.1 .generation {
+                    return Error(Stale(done.generation))
+                }
+            }
+            if let Some(held) = st(store.fetch(tx, call_env.2 .reservations, call_env.0))? {
+                if held.generation > call_env.1 .generation {
+                    return Error(Stale(held.generation))
+                }
+                if held.generation == call_env.1 .generation {
+                    return Ok(())
+                }
+            }
+            let meta = meta_of(tx, call_env.2)?
+            let c = config_of(tx, call_env.2)?
+            let others = reserved_except(tx, call_env.2, call_env.0)?
+            if int.saturating_add(meta.dirty + others, call_env.1 .capacity) > c.max_places {
+                return Error(Full(Count(c.max_places)))
+            }
+            st(store.put(mut tx, call_env.2 .reservations, call_env.0, call_env.1))?
+            Ok(())
+        })
+    }
+    decided(mut h, take made)
 }

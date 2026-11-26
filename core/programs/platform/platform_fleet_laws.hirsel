@@ -92,3 +92,95 @@ fn assignment_wake(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(below, "assignment: a generation below the recorded one was not Stale after a restart")
     Ok(())
 }
+
+// Reserve 2 slots for "m" on node 7, incarnation 1, generation 1.
+fn reserve_m_1_2() -> Bytes {
+    b"\xda\x09\x54\x6d\xaa\x40\x4e\xed\xb4\x92\xe8\x35\x86\xee\x20\x38\xd2\xd9\x09\x06\x94\x1c\x7f\x68\x51\x3d\x15\xf6\x38\xf4\xdd\xca\x86\x28\x34\xc5\x5f\x09\xdd\x94\x26\x83\xdf\x09\xe8\xd0\xf7\xef\x5b\xaf\x76\x45\x5f\xd2\xa6\x35\xb8\xa8\xa6\x46\x6e\x59\xf1\x05"
+}
+
+// Reserve 2 slots for "m" on node 7, incarnation 1, generation 2.
+fn reserve_m_2_2() -> Bytes {
+    b"\x1c\x21\xf9\x6f\xb8\xc9\xc3\xf8\xa5\x69\xe6\x63\x92\x57\xaf\xce\xa8\x50\x38\x87\xb8\x23\x66\x31\xbd\x71\x2c\xe2\x44\x15\xd6\xf6\x9c\xde\x8a\xff\xc7\x5e\xd8\x21\xe3\x55\xf6\x5f\xb3\x9a\x33\x37\xb6\xf6\x6a\xc4\x08\xbe\x6b\x30\x78\x6c\xab\x6a\x0f\xf6\xce\x09"
+}
+
+// Reserve 2 slots for "n" on node 7, incarnation 1, generation 1.
+fn reserve_n_1_2() -> Bytes {
+    b"\xab\xe6\x5e\x70\x6d\x69\x78\xf5\x72\xd3\x54\x9a\x1c\x45\x76\x33\xdf\xe5\x1f\x9c\x1e\xfa\x63\x5f\x13\x07\x13\x11\xf9\x84\x25\x00\xe6\x8d\x38\x0f\xd2\x0e\x4c\xc1\x5c\xbc\xd8\x47\x21\xf0\xc3\x88\x28\xf6\x4f\x64\x9a\x4c\x6d\xb8\x00\x8b\x2d\x1f\xab\xb8\x69\x0d"
+}
+
+// Reserve 1 slot for "n" on node 7, incarnation 1, generation 1.
+fn reserve_n_1_1() -> Bytes {
+    b"\x9f\x76\xda\x6b\xf1\x3c\xec\x7c\x51\x1c\x6c\x93\x36\x0d\x60\x8d\x46\xb4\x29\x52\xc3\xd5\xee\x4d\x59\x38\x44\x63\x91\x50\x7d\x86\x98\xf8\x08\x1b\x26\x14\xfa\x02\xdf\xf6\x5e\x50\x46\xcb\xfa\x3f\xc9\xa3\x15\x21\x0f\x2c\x88\xa1\x43\x27\x13\x7c\x26\xec\xa1\x0a"
+}
+
+// Assign "m" to node 7 at incarnation 1, generation 2.
+fn assign_m_2() -> Bytes {
+    b"\xcc\xfb\x85\x6c\xe6\x7e\x10\xed\x21\x78\x70\x66\xd7\x66\x34\x0a\xd7\x02\xe1\xc9\xf0\xe7\xc3\x91\x6e\x2b\x07\xe1\xa2\xc4\x25\xd5\x8c\x10\x47\x5b\xc5\x29\x98\x37\x5b\xe5\xc2\x85\xb2\xb7\x78\xd9\xac\x00\x92\xc5\x2f\x46\xd9\x98\x13\x57\xd0\x6f\x6f\x34\xa5\x0c"
+}
+
+fn reserved(r: Result[(), Refused]) -> Option[Refused] {
+    match r {
+        Ok(()) => None,
+        Error(e) => Some(clone(e)),
+    }
+}
+
+fn accepted(r: Option[Refused]) -> bool {
+    match r {
+        None => true,
+        _ => false,
+    }
+}
+
+fn woken(r: Result[List[launcher.Request], Refused]) -> Option[Refused] {
+    match r {
+        Ok(_) => None,
+        Error(e) => Some(clone(e)),
+    }
+}
+
+fn reservation_slot(g: u64, c: u64) -> Reservation {
+    Reservation(group: "m", node: 7u64, incarnation: 1u64, generation: g, capacity: c)
+}
+
+// §14.12.3 `reservation_generations`: with `max_places` 3, reservations and running places
+// share §14.2's slots. Catches a reservation double-booked across generations (a retried move
+// holding its slots twice), reservations the capacity check ignores, a reservation its
+// assignment does not release, and a reservation that outlives the incarnation it was made by.
+@test
+fn reservation_generations(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 3u64)
+    must(enroll(mut r.h, 7u64), "enroll")
+    let wide = Reservation(group: "n", node: 7u64, incarnation: 1u64, generation: 1u64, capacity: 2u64)
+    expect(accepted(reserved(reserve(mut r.h, reservation_slot(1u64, 2u64), reserve_m_1_2(), fleet_key()))), "reservation: m gen 1 refused")
+    expect(accepted(reserved(reserve(mut r.h, reservation_slot(2u64, 2u64), reserve_m_2_2(), fleet_key()))), "reservation: m gen 2 refused: its gen 1 slots were counted twice")
+    let full = match reserved(reserve(mut r.h, wide, reserve_n_1_2(), fleet_key())) {
+        Some(Full(Count(k))) => k == 3u64,
+        _ => false
+    }
+    expect(full, "reservation: n's 2 slots fit beside m's 2 under max_places 3")
+    let stale = match reserved(reserve(mut r.h, reservation_slot(1u64, 2u64), reserve_m_1_2(), fleet_key())) {
+        Some(Stale(k)) => k == 2u64,
+        _ => false
+    }
+    expect(stale, "reservation: m gen 1 after gen 2 was not Stale(2)")
+    // m's assignment consumes its reservation: m takes 1 slot, 2 are free.
+    add(mut r, "m", "t")
+    add(mut r, "a", "t")
+    let reqs = must(assign(mut r.h, Assignment(group: "m", node: 7u64, incarnation: 1u64, generation: 2u64), assign_m_2(), fleet_key()), "assign m")
+    pump(mut r, take reqs)
+    op_wake(mut r, "a")
+    let n1 = Reservation(group: "n", node: 7u64, incarnation: 1u64, generation: 1u64, capacity: 1u64)
+    expect(accepted(reserved(reserve(mut r.h, n1, reserve_n_1_1(), fleet_key()))), "reservation: m's assignment did not release its reservation")
+    // Two live places and n's slot fill the host: an ordinary wake is refused.
+    add(mut r, "b", "t")
+    let held = match woken(wake(mut r.h, "b", r.now)) {
+        Some(Full(Count(k))) => k == 3u64,
+        _ => false
+    }
+    expect(held, "reservation: a wake took a slot n holds")
+    // A restart ends incarnation 1 and every reservation it made.
+    let mut r2 = restart(take r, 3u64)
+    expect(accepted(woken(wake(mut r2.h, "b", r2.now))), "reservation: a reservation outlived its incarnation")
+    Ok(())
+}

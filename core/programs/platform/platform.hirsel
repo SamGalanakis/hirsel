@@ -649,7 +649,7 @@ fn mark_dirty(mut tx: store.Tx, t: Tables, name: String) -> Result[(GroupRow, u6
     }
     let mut meta = meta_of(tx, t)?
     let c = config_of(tx, t)?
-    if meta.dirty >= c.max_places {
+    if meta.dirty + reserved_except(tx, t, name)? >= c.max_places {
         return Error(Full(Count(c.max_places)))
     }
     let mut u = usage_of(tx, t, g.tenant)?
@@ -1765,9 +1765,9 @@ fn set_max_places_turn(mut h: Host, n: u64, now: Now) -> Result[List[launcher.Re
     let made = {
         let t = view h.t
         store.run(mut h.db, None, (store.copy_env(n), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
-            let meta = meta_of(tx, call_env.1)?
-            if call_env.0 < meta.dirty {
-                return Error(Busy(meta.dirty))
+            let held = meta_of(tx, call_env.1)?.dirty + reserved_except(tx, call_env.1, "")?
+            if call_env.0 < held {
+                return Error(Busy(held))
             }
             let mut c = config_of(tx, call_env.1)?
             c.max_places = call_env.0

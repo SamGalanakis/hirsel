@@ -8,6 +8,9 @@ pub struct PureRun {
     pub outcome: Outcome,
     /// The destination's bytes, when the result is an aggregate.
     pub destination: Option<Vec<u8>>,
+    /// The bytes a returned `String` or `FrozenBytes` holds (LANG-20's static
+    /// computed constants), read through its carrier before the run's storage ends.
+    pub held_bytes: Option<Vec<u8>>,
     /// The bytes charged to the run's limit when it ended.
     pub used: u64,
     pub peak_reserved: u64,
@@ -200,10 +203,15 @@ fn pure_root(
     };
     #[cfg(feature = "host-instructions")]
     let host = counter.read().unwrap() - before;
+    let held_bytes = match (&outcome, destination) {
+        (Outcome::Returned(_), Some(at)) => mach.held_bytes(f, at),
+        _ => None,
+    };
     PureRun {
         #[cfg(feature = "host-instructions")]
         host,
         outcome,
+        held_bytes,
         destination: destination.map(|at| mach.mem[split(at).0].bytes.clone()),
         used: mach.root().used(),
         peak_reserved: mach.peak_reserved,
@@ -220,6 +228,37 @@ fn pure_root(
             .map(|i| hirsel_core_ir::CLOSED[usize::from(i)]),
         foreign: mach.host.foreign,
         calls,
+    }
+}
+
+impl<'m, H: Host<'m>> Machine<'m, H> {
+    /// The bytes the carrier at `at`, `f`'s result, holds when that result is a
+    /// `String` (`{data, length, capacity}`) or a `FrozenBytes` (`{data,
+    /// metadata, capacity}`, its length in the capacity word when the metadata's
+    /// low bit marks static storage, else the metadata halved).
+    fn held_bytes(&self, f: FuncId, at: u64) -> Option<Vec<u8>> {
+        let signature = &self.m.signatures[self.m.functions[f.index()].signature.index()];
+        let ty = signature.dest?;
+        let frozen = match &self.m.types[ty.index()].held {
+            Some(FieldTy::Seq(item))
+                if **item == FieldTy::Scalar(hirsel_core_layout::Scalar::U8) =>
+            {
+                false
+            }
+            Some(FieldTy::FrozenBytes) => true,
+            _ => return None,
+        };
+        let data = self.load(at, 8);
+        let word = self.load(at + 8, 8);
+        let len = match frozen {
+            false => word,
+            true if word & 1 != 0 => self.load(at + 16, 8),
+            true => word >> 1,
+        };
+        if len == 0 {
+            return Some(Vec::new());
+        }
+        Some(self.get(data, len as usize).to_vec())
     }
 }
 

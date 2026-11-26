@@ -185,7 +185,7 @@ fn run(units: &Units, root: &Identity) -> Result<Arc<Value>, Arc<str>> {
     let (module, entry) = hirsel_core_materialize::join(&modules, root)?;
     let pure = hirsel_core_eval::PureModule::new(&module);
     crate::meter::count(crate::meter::Count::ConstantRuns, 1);
-    let run =
+    let mut run =
         hirsel_core_eval::run_pure(&pure, entry, &[], hirsel_core_eval::PureInput::constant());
     let signature = &module.signatures[module.functions[entry.index()].signature.index()];
     let ty = match (signature.dest, signature.results.first()) {
@@ -204,6 +204,10 @@ fn run(units: &Units, root: &Identity) -> Result<Arc<Value>, Arc<str>> {
             let recipes =
                 hirsel_core_layout::compute(&module.types).map_err(|e| format!("{e:?}"))?;
             let value = match (&ty, &run.destination) {
+                // A String or FrozenBytes: its bytes, stored static (LANG-20).
+                (Some(FieldTy::Inline(_)), Some(_)) if run.held_bytes.is_some() => {
+                    StaticValue::Bytes(run.held_bytes.take().unwrap_or_default())
+                }
                 (Some(ty @ FieldTy::Inline(_)), Some(bytes)) => {
                     hirsel_core_ir::static_data::read_value(ty, bytes, &module.types, &recipes)
                 }

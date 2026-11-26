@@ -618,4 +618,5 @@ tags!(Loan {
 tags!(StaticValue {
     0 => Bits(part0),
     1 => Fields { case @ optional_index, fields },
+    2 => Bytes(part0),
 });

@@ -1565,7 +1565,7 @@ fn ordered_stable_llvm() {
 /// The case's run lines (and `// native: run` lines, for what the evaluator does not
 /// run) on a native engine: the returning ones in one program, and each
 /// failure in its own, which must stop with exit 101 and that cause on stderr.
-fn run_lines_native(backend: Backend, case: &str) {
+pub(crate) fn run_lines_native(backend: Backend, case: &str) {
     let mut main = String::from("pub fn main() -> Result[(), Exit] {\n");
     let runs = case.lines().filter_map(|l| {
         l.strip_prefix("// expect: run ")

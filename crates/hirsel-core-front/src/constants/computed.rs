@@ -64,9 +64,35 @@ impl Program<'_> {
         false
     }
 
+    /// The role of `ty`'s declaration, when it is a declared type.
+    pub(crate) fn role_of(&self, ty: TyId) -> Option<Role> {
+        match self.types.kind(ty) {
+            TyKind::Adt(d, _) => self.decls[d.index()].role,
+            _ => None,
+        }
+    }
+
+    /// Why a constant may not have type `ty`: it is neither plain, `string` nor
+    /// FrozenBytes. Bytes is a List, and no List is static.
+    pub(crate) fn constant_type_refusal(
+        &self,
+        ty: TyId,
+        string: Option<TyId>,
+    ) -> Option<&'static str> {
+        let role = self.role_of(ty);
+        if string == Some(ty) || role == Some(Role::FrozenBytes) || self.kind(ty) == Kind::Plain {
+            return None;
+        }
+        Some(if role == Some(Role::List) {
+            "a Bytes or other List is never static: static bytes are FrozenBytes"
+        } else {
+            "a constant type must be plain, String or FrozenBytes"
+        })
+    }
+
     /// Declare constant `i` computed: refuse a type that holds a function, and
     /// declare its initialiser as a function under the constant's path. A String
-    /// constant is never computed: the static-string rule refuses its call.
+    /// or FrozenBytes constant is static: its value is the returned bytes.
     pub(super) fn declare_computed(&mut self, i: usize) {
         let c = &self.constants[i];
         let (at, ty, expr) = (c.at, c.ty, c.expr);

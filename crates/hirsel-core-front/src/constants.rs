@@ -105,14 +105,10 @@ impl Program<'_> {
             if ty == ERROR {
                 continue;
             }
-            if Some(ty) != string && self.kind(ty) != Kind::Plain {
+            if let Some(why) = self.constant_type_refusal(ty, string) {
                 let item = self.item(at);
                 let kids = item.tree.children(item.root);
-                self.const_refuse(
-                    at,
-                    kids[kids.len() - 2],
-                    "a constant type must be plain or String",
-                );
+                self.const_refuse(at, kids[kids.len() - 2], why);
                 self.constants[i].ty = ERROR;
                 continue;
             }
@@ -138,8 +134,9 @@ impl Program<'_> {
         while let Some(i) = ready.pop_front() {
             let c = &self.constants[i];
             if c.targets.is_none() && c.ty != ERROR {
-                // A String is a static string, whose rule refuses a call at it.
-                if Some(c.ty) != string && self.calls_in_initialiser(i) {
+                // A FrozenBytes constant is always computed; a String one is when
+                // its initialiser calls, and is a static string otherwise.
+                if self.role_of(c.ty) == Some(Role::FrozenBytes) || self.calls_in_initialiser(i) {
                     self.declare_computed(i);
                 } else {
                     self.evaluate_constant(i, string);

@@ -1,23 +1,24 @@
 // LANG-20: a computed constant whose run fails, reaches the closed list, needs its
 // own value or exceeds its budget is refused at the constant, with the cause and
 // the calls from the initialiser innermost first, and the target that failed when its
-// value depends on the target; a String's call is refused as a
-// static string's.
-// expect: refuse LANG-20 at 25:1
-// expect: refuse LANG-20 at 27:1
-// expect: refuse LANG-20 at 29:1
-// expect: refuse LANG-20 at 31:1
-// expect: refuse LANG-20 at 33:1
-// expect: refuse LANG-20 at 35:22
-// expect: refuse LANG-20 at 40:1
-// expect: refuse LANG-20 at 43:1
-// expect: message LANG-20 at 43:1 | it exceeds its budget (Activations, MEM-34), in app@1/main/deep (4095 calls) from app@1/main/DEEP
-// expect: message LANG-20 at 40:1 | it fails with Division, in app@1/main/per_os from app@1/main/PER_OS, for target aarch64-apple-darwin
-// expect: message LANG-20 at 25:1 | constant app@1/main/BIG is refused: it fails with Overflow, in app@1/main/grow from app@1/main/BIG
-// expect: message LANG-20 at 27:1 | it reaches unique.new, on the closed list, in app@1/main/fresh from app@1/main/ID
-// expect: message LANG-20 at 29:1 | it exceeds its budget (OutOfTime, MEM-34), in app@1/main/spin from app@1/main/SLOW
-// expect: message LANG-20 at 31:1 | its value depends on itself: app@1/main/LOOP reads app@1/main/LOOP, in app@1/main/other
-// expect: message LANG-20 at 33:1 | it fails with Fail, in app@1/main/_$0
+// value depends on the target; a Bytes constant is refused at its type, since no
+// List is static.
+// expect: refuse LANG-20 at 26:1
+// expect: refuse LANG-20 at 28:1
+// expect: refuse LANG-20 at 30:1
+// expect: refuse LANG-20 at 32:1
+// expect: refuse LANG-20 at 34:1
+// expect: refuse LANG-20 at 36:12
+// expect: refuse LANG-20 at 41:1
+// expect: refuse LANG-20 at 44:1
+// expect: message LANG-20 at 44:1 | it exceeds its budget (Activations, MEM-34), in app@1/main/deep (4095 calls) from app@1/main/DEEP
+// expect: message LANG-20 at 41:1 | it fails with Division, in app@1/main/per_os from app@1/main/PER_OS, for target aarch64-apple-darwin
+// expect: message LANG-20 at 26:1 | constant app@1/main/BIG is refused: it fails with Overflow, in app@1/main/grow from app@1/main/BIG
+// expect: message LANG-20 at 28:1 | it reaches unique.new, on the closed list, in app@1/main/fresh from app@1/main/ID
+// expect: message LANG-20 at 30:1 | it exceeds its budget (OutOfTime, MEM-34), in app@1/main/spin from app@1/main/SLOW
+// expect: message LANG-20 at 32:1 | its value depends on itself: app@1/main/LOOP reads app@1/main/LOOP, in app@1/main/other
+// expect: message LANG-20 at 34:1 | it fails with Fail, in app@1/main/_$0
+// expect: message LANG-20 at 36:12 | a Bytes or other List is never static: static bytes are FrozenBytes
 fn grow(n: u8) -> u8 { n + 200 }
 fn fresh() -> u64 { let _ = unique.new(); 1 }
 fn spin() -> u64 { let mut i: u64 = 0; while i < 100000000 { i += 1 }; i }
@@ -32,8 +33,8 @@ const LOOP: u64 = other()
 
 const _: () = core.fail("never")
 
-const NAME: String = name()
-fn name() -> String { "a" }
+const RAW: Bytes = raw()
+fn raw() -> Bytes { list.new() }
 
 fn zero() -> u8 { 0 }
 fn per_os() -> u8 { if target.os == (Macos : target.Os) { 1u8 / zero() } else { 1u8 } }

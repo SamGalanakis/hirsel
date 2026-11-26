@@ -1,6 +1,21 @@
-use crate::{Static, StaticValue};
+use crate::Static;
 use hirsel_core_layout::{FieldTy, Layout, RecipeRow, Row, TypeRef, case_word, field_size};
 use std::borrow::Cow;
+
+/// A plain constant in declaration order. The enclosing type supplies each
+/// field's type, and the engine supplies its native layout.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum StaticValue {
+    Bits(u64),
+    Fields {
+        case: Option<u32>,
+        fields: Vec<StaticValue>,
+    },
+    /// A static computed constant's value (LANG-20): the bytes of a `String` or
+    /// `FrozenBytes`. Its slot binds it as [`Static::Bytes`] holding the length,
+    /// 64-bit little-endian, then the bytes; no aggregate holds one.
+    Bytes(Vec<u8>),
+}
 
 impl Static {
     /// Bytes interpreted as literal data, including function descriptor identities.
@@ -40,6 +55,10 @@ impl Static {
 /// reader's [`Static::Computed`] of type `ty` becomes.
 pub fn bound_static(ty: &FieldTy, value: StaticValue) -> Static {
     match (ty, value) {
+        (_, StaticValue::Bytes(bytes)) => Static::Bytes {
+            align: 8,
+            bytes: static_bytes(&bytes),
+        },
         (FieldTy::Inline(t), value) => Static::Aggregate {
             ty: crate::TypeId(t.0),
             value,
@@ -130,6 +149,15 @@ pub fn read_value(
     }
 }
 
+/// A static computed constant's value bytes (PROG-10), which are also its slot's
+/// bytes: the length, 64-bit little-endian, then the bytes.
+pub fn static_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + bytes.len());
+    out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
+
 /// PROG-10 value bytes: each scalar little-endian at its width, fields in
 /// declaration order, an array element by element, and a value with cases as
 /// its case index (32-bit little-endian) followed by that case's fields.
@@ -141,6 +169,7 @@ pub fn value_bytes(
     out: &mut Vec<u8>,
 ) {
     match (ty, value) {
+        (_, StaticValue::Bytes(bytes)) => out.extend_from_slice(&static_bytes(bytes)),
         (FieldTy::Inline(t), _) if matches!(&shapes[t.index()].held, Some(FieldTy::Array(..))) => {
             let array = shapes[t.index()].held.as_ref().unwrap();
             value_bytes(array, value, shapes, recipes, out);

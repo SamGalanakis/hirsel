@@ -60,6 +60,7 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
         constant: u32,
         u: &hirsel_core_resolve::ResolvedUse,
+        want: Option<Want>,
     ) -> (TyId, Option<ValueId>) {
         let p = self.p;
         let c = &p.constants[constant as usize];
@@ -69,6 +70,26 @@ impl Cx<'_, '_, '_> {
             return (ERROR, None);
         }
         let mut value = self.computed_slot(constant, n);
+        let role = match self.t.kind(ty) {
+            TyKind::Adt(d, _) => p.decls[d.index()].role,
+            _ => None,
+        };
+        if let Some(frozen) = match role {
+            Some(Role::String) => Some(false),
+            Some(Role::FrozenBytes) => Some(true),
+            _ => None,
+        } {
+            // A static value reads as its literal does: a String literal is the
+            // view of its slot where a view is expected.
+            let v = value.and_then(|slot| self.computed_bytes(slot, ty, frozen, n));
+            let viewed = !frozen
+                && want.is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::View(x) if *x == ty));
+            if viewed {
+                return (self.t.mk(TyKind::View(ty)), v);
+            }
+            self.temp(ty, v);
+            return (ty, v);
+        }
         for token_id in u.projections.start..u.projections.end {
             let token_id = hirsel_core_syntax::TokenId(token_id);
             let token = &self.item.tree.tokens[token_id.0 as usize];
@@ -213,7 +234,7 @@ impl Cx<'_, '_, '_> {
         let p = self.p;
         let c = &p.constants[constant as usize];
         if c.computed {
-            return self.computed_path(n, constant, u);
+            return self.computed_path(n, constant, u, want);
         }
         let mut values = match (c.targets, c.value) {
             (Some(values), _) => values,

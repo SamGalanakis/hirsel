@@ -4,6 +4,7 @@ use super::*;
 pub(super) fn static_value(value: &StaticValue) -> String {
     match value {
         StaticValue::Bits(bits) => bits.to_string(),
+        StaticValue::Bytes(_) => unreachable!("static bytes are bound as a bytes static"),
         StaticValue::Fields { case, fields } => {
             let fields = fields
                 .iter()

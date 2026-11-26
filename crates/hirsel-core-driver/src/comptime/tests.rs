@@ -107,3 +107,13 @@ fn closed_kernel_called_through_a_value_refuses_the_constant() {
         "{messages:?}"
     );
 }
+
+/// LANG-20: a computed String or FrozenBytes reads as its literal on both native engines.
+#[test]
+#[ignore = "explicit native integration target"]
+fn computed_static_bytes_on_both_native_engines() {
+    let case = include_str!("../../../../core/front/cases/body/constant-computed-static.hirsel");
+    for engine in [crate::Backend::Cranelift, crate::Backend::Llvm] {
+        crate::native::tests::run_lines_native(engine, case);
+    }
+}

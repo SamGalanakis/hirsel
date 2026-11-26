@@ -1,0 +1,141 @@
+// LANG-20: a computed String or FrozenBytes is its literal: the same bytes, the
+// same length and the literal's static carrier. A static String's bytes have
+// capacity 0 and a static FrozenBytes' view has capacity equal to its length, as
+// the literal's do; empty, each is the empty literal. Under a 15-byte bound the
+// computed nine bytes are refused as the literal's are, for the logical 16 (MEM-24),
+// with the same 1615 as MEM-28-static-bytes. Values by hand: "page-64" is 7 bytes.
+// expect: accept
+// expect: run string_same() = true
+// expect: run string_len() = 7
+// expect: run string_capacity() = 0
+// expect: run string_empty() = true
+// expect: run frozen_same() = true
+// expect: run frozen_len() = 9
+// expect: run frozen_capacity() = 9
+// expect: run frozen_empty() = 0
+// expect: reference run frozen_refusal() = 1615 used 32
+fn label() -> String {
+    let mut s = string.new()
+    string.push(mut s, "page-")
+    string.push_u64(mut s, 64)
+    s
+}
+
+fn nothing() -> String {
+    string.new()
+}
+
+fn letters() -> FrozenBytes {
+    let mut b: Bytes = list.new()
+    let mut c: u8 = 97
+    while c < 106 {
+        list.push(mut b, c)
+        c += 1
+    }
+    bytebuf.freeze(take b)
+}
+
+fn none() -> FrozenBytes {
+    let b: Bytes = list.new()
+    bytebuf.freeze(take b)
+}
+
+const LABEL: String = label()
+
+const EMPTY: String = nothing()
+
+const LETTERS: FrozenBytes = letters()
+
+const NONE: FrozenBytes = none()
+
+fn same(a: View[Bytes], b: View[Bytes]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    let mut i: u64 = 0
+    while i < list.len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+        i += 1
+    }
+    true
+}
+
+fn string_same() -> bool {
+    LABEL == "page-64" && same(string.as_bytes(LABEL), string.as_bytes("page-64"))
+}
+
+fn string_len() -> u64 {
+    string.byte_len(LABEL)
+}
+
+fn string_capacity() -> u64 {
+    list.capacity(string.as_bytes(LABEL)) + list.capacity(string.as_bytes(EMPTY))
+}
+
+fn string_empty() -> bool {
+    EMPTY == "" && string.byte_len(EMPTY) == 0
+}
+
+fn literal() -> FrozenBytes {
+    b"abcdefghi"
+}
+
+fn frozen_same() -> bool {
+    let computed = LETTERS
+    let written = literal()
+    same(bytebuf.as_bytes(computed), bytebuf.as_bytes(written))
+}
+
+fn frozen_len() -> u64 {
+    let computed = LETTERS
+    list.len(bytebuf.as_bytes(computed))
+}
+
+fn frozen_capacity() -> u64 {
+    let computed = LETTERS
+    let written = literal()
+    let c = list.capacity(bytebuf.as_bytes(computed))
+    if c == list.capacity(bytebuf.as_bytes(written)) {
+        c
+    } else {
+        0
+    }
+}
+
+fn frozen_empty() -> u64 {
+    let computed = NONE
+    let written: FrozenBytes = b""
+    list.len(bytebuf.as_bytes(computed)) + list.capacity(bytebuf.as_bytes(computed)) + list.capacity(bytebuf.as_bytes(written))
+}
+
+fn frozen_refusal() -> u64 {
+    let outer = isolate(fn() -> Result[u64, Capacity] {
+        bound bytes 15 {
+            let b = LETTERS
+            let one = b"x"
+            list.len(bytebuf.as_bytes(b)) + list.len(one)
+        }
+    })
+    match caught(take outer) {
+        Some(c) => c.requested * 100 + c.available,
+        None => 0,
+    }
+}
+
+// The primary cause of a caught failure, when it is a refused admission.
+fn caught[R](r: Result[Result[R, Causes], Capacity]) -> Option[Capacity] {
+    match r {
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(k) => Some(k),
+                    _ => None,
+                }
+            }
+            None
+        },
+        _ => None,
+    }
+}

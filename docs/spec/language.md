@@ -897,7 +897,7 @@ fn width() -> u64 { 4 }
 fn pick(n: u64) -> u64 { if WIDE { n } else { 0 } }       // both arms retained: WIDE is computed
 const WIDE: bool = width() > 2
 ```
-```hirsel unbuilt
+```hirsel
 fn label() -> String { let mut s = string.new(); string.push(mut s, "page-"); string.push_u64(mut s, 64); s }
 const LABEL: String = label()                             // static computed: reads as "page-64"
 fn ramp() -> FrozenBytes {
@@ -934,7 +934,7 @@ function is refused as a static string, at the initialiser, as before this chang
 had also said "at the type". Reversible: the spec and the driver.
 
 Version note (2026-11-26, comptime-phase4-bytes-2836; COMPTIME-DIRECTION C4 and decision 7,
-ruled A; not yet built): a computed constant may have type `String` or `FrozenBytes`, stored
+ruled A; built, and its examples above are checked): a computed constant may have type `String` or `FrozenBytes`, stored
 in the literal's static carrier and read as the literal with the same bytes. A `String`
 constant whose initialiser calls a function was refused as a static string; it is now
 computed. A `FrozenBytes` constant was refused at its type; it is now always computed. The

@@ -14,6 +14,98 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.address(base, &[Step::Byte(offset)], PlaceTy::Value(ty), n))
     }
 
+    /// A static computed constant's value (LANG-20, PROG-10), read from `slot`,
+    /// which holds the length, 64-bit little-endian, then the bytes: the carrier
+    /// the literal of those bytes has. A String's is `{data, length, 0}`; a
+    /// FrozenBytes' is the byte-string literal's `{data, payer, length}`, charged
+    /// as the literal is. Empty, either is the empty literal's, with null data.
+    pub(super) fn computed_bytes(
+        &mut self,
+        slot: ValueId,
+        ty: TyId,
+        frozen: bool,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = self.runtime_type(ty, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let (uint, u) = (scalar(Scalar::U64), Ty::Scalar(Scalar::U64));
+        let base = AddressBase::Value(slot);
+        let at = self.byte_word(base, 0, u, n)?;
+        let length = self.read_bits(at, u, n);
+        let (zero, null) = (self.konst(u, 0, n)?, self.konst(Ty::Ptr, 0, n)?);
+        let some = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: some,
+                op: CompareOp::Ne,
+                left: length,
+                right: zero,
+            },
+            n,
+        );
+        let (full, empty) = (self.new_block(&[]), self.new_block(&[]));
+        let join = self.new_block(&[Ty::Ptr, Ty::Ptr]);
+        self.runtime_branch(some, full, empty, n);
+        self.start(empty);
+        self.jump(join, &[null, null], n);
+        self.start(full);
+        let data = self.byte_word(base, 1, Ty::Scalar(Scalar::U8), n)?;
+        let data = self.pointer(data, n);
+        let payer = if frozen {
+            // MEM-24's reference charge, as the literal's.
+            let (seven, mask) = (self.konst(u, 7, n)?, self.konst(u, !7, n)?);
+            let up = self.arith("+", uint, Some(length), Some(seven), n)?;
+            let charge = self.arith("&", uint, Some(up), Some(mask), n)?;
+            let (block, available) = (self.value(Ty::Ptr), self.value(u));
+            self.inst(
+                Inst::Alloc {
+                    result: block,
+                    available,
+                    region_entry: None,
+                    kind: AllocKind::Own {
+                        edge: FieldTy::FrozenBytes,
+                    },
+                    place: AllocPlace::Current,
+                    charge,
+                    overflow: None,
+                    size: zero,
+                    align: 8,
+                },
+                n,
+            );
+            let admitted = self.value(Ty::Scalar(Scalar::Bool));
+            self.inst(
+                Inst::Compare {
+                    result: admitted,
+                    op: CompareOp::Ne,
+                    left: block,
+                    right: null,
+                },
+                n,
+            );
+            self.raise_unless(admitted, charge, available, n);
+            block
+        } else {
+            null
+        };
+        self.jump(join, &[data, payer], n);
+        self.start(join);
+        let params = self.b.blocks[join.index()]
+            .params
+            .get(&self.b.pools.values)?;
+        let (data, payer) = (*params.first()?, *params.get(1)?);
+        let words = if frozen {
+            [(data, Ty::Ptr), (payer, Ty::Ptr), (length, u)]
+        } else {
+            [(data, Ty::Ptr), (length, u), (zero, u)]
+        };
+        for (index, (value, ty)) in words.into_iter().enumerate() {
+            let at = self.byte_word(AddressBase::Address(to), index as u64, ty, n)?;
+            self.inst(Inst::Store { address: at, value }, n);
+        }
+        Some(self.pointer(to, n))
+    }
+
     pub(super) fn freeze_bytes(
         &mut self,
         from: ValueId,

@@ -9,6 +9,7 @@
 //! slots or prove liveness before emitting.
 
 mod flow;
+pub use crate::static_data::StaticValue;
 pub(crate) use flow::for_each_successor;
 #[cfg(any(test, feature = "wf"))]
 pub(crate) use flow::successors;
@@ -1623,17 +1624,6 @@ pub enum Static {
     Computed {
         ty: FieldTy,
         constant: DefPath,
-    },
-}
-
-/// A plain constant in declaration order. The enclosing type supplies each
-/// field's type, and the engine supplies its native layout.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum StaticValue {
-    Bits(u64),
-    Fields {
-        case: Option<u32>,
-        fields: Vec<StaticValue>,
     },
 }
 

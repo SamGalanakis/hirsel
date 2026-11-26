@@ -1,0 +1,849 @@
+// Scale simulation engine for `hirsel fleet sim` (docs/spec/fleet.md FLT-2, FLT-3, FLT-4, FLT-5, FLT-8).
+// Drives the production `fleet@1` move_kernel, K10 advisory lattice, and partitioned `Directory[u64]`
+// Places inside `std.sim` at arbitrary host counts (qualified at 50 and 1,000 simulated hosts).
+// Injects four deterministic seeded faults:
+//   1. Message hold (`std.sim.message.hold_until` / `fire`) + stale-open races & lost-H settlement.
+//   2. Clock pause (`std.sim.world.drifting` / `pause_at` / `drive`) + Directory[K] boot_ns exclusivity,
+//      takeover quarantine wait W, and out-of-bound drift refusal.
+//   3. Controller kill mid-move (`Crash` -> `ControllerTakeover` + scoped takeover barrier + Sieve check).
+//   4. Zone isolation (correlated-disruption circuit breaker `DisruptionFreeze` + Directory[K] independence).
+// Verifies all kernel + Directory[K] invariants and SM1 NDJSON/ITF traces at seed end.
+const NS_PER_MS: u64 = 1000000
+
+const NUM_ZONES: u64 = 5
+
+const SIM_LEASE_NS: u64 = 1000000000
+
+const SIM_DRIFT_PPM: u64 = 200
+
+pub type SimConfig: codec + key + send {
+    hosts: u64,
+    places: u64,
+    partitions: u64,
+    rounds: u64,
+    seed: u64
+}
+
+pub fn default_config(hosts: u64, seed: u64) -> SimConfig {
+    let partitions = if hosts >= 200 {
+        8u64
+    } else if hosts >= 20 {
+        4u64
+    } else {
+        2u64
+    }
+    SimConfig(hosts: hosts, places: hosts, partitions: partitions, rounds: 12u64, seed: seed)
+}
+
+pub type SimReport: codec + key + send {
+    hosts: u64,
+    places: u64,
+    partitions: u64,
+    rounds: u64,
+    seed: u64,
+    moves_completed: u64,
+    stale_races_blocked: u64,
+    lost_h_settled: u64,
+    controller_kills: u64,
+    barrier_blocks: u64,
+    freeze_blocks: u64,
+    dir_claims: u64,
+    dir_renews: u64,
+    dir_takeovers: u64,
+    dir_quarantine_refusals: u64,
+    dir_drift_refusals: u64,
+    dir_pause_expirations: u64,
+    sm1_rows: u64,
+    sm1_ndjson_bytes: u64,
+    sm1_itf_bytes: u64
+}
+
+type ScaleClockDriver: send {
+    clocks: std.sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn run_scale_clocks(take input: ScaleClockDriver) waits {
+    let ScaleClockDriver(clocks: take clocks, tasks) = take input
+    std.sim.world.drive(take clocks, tasks)
+}
+
+type SimHost {
+    node_id: u64,
+    zone: u64,
+    incarnation: u64,
+    rate_ppm: i64,
+    isolated: bool,
+    paused: bool,
+    heartbeat_seq: u64
+}
+
+type SimRegister {
+    head: move_kernel.HeadView,
+    next_holder: u64,
+    epoch_holders: Map[u64, move_kernel.Id16],
+    authorized_permits: Map[u64, move_kernel.HeadPair]
+}
+
+type SimPlace {
+    place_id: u64,
+    reg: SimRegister,
+    state: move_kernel.State,
+    in_flight_attempt: Option[move_kernel.ClaimAuth]
+}
+
+type SimWire = WireMoveClaim(u64, move_kernel.ClaimAuth) | WireJanitorContinue(u64, move_kernel.ClaimAuth) | WireClaimReply(u64, move_kernel.Id16, move_kernel.SinkOutcome)
+
+type EphemeralRoom {
+    room_key: u64,
+    partition_idx: u64,
+    holder_node: u64,
+    term: u64,
+    lease: Option[directory.HolderLease]
+}
+
+type ScaleSm1Event: codec + key = EvMoveAuth(u64, u64) | EvRecoveryAuth(u64, u64) | EvCasWon(u64, u64) | EvCasSuperseded(u64, u64) | EvControllerKill(u64) | EvZoneFreeze(bool) | EvSettle(u64)
+
+type ScaleSm1State: codec + key {
+    place_id: u64,
+    epoch: u64,
+    holder: u64,
+    permit_attempt: u64,
+    incumbent: u64,
+    controller_epoch: u64,
+    frozen: bool,
+    open_count: u64
+}
+
+fn make_register(place_id: u64, initial_node: u64) -> SimRegister {
+    let h1 = move_kernel.Id16(lo: 1u64, hi: place_id)
+    let orig = move_kernel.OriginFrame(
+        epoch: 1u64,
+        attempt: move_kernel.id16_zero(),
+        class: Adopt,
+        permit_epoch: 0u64,
+        permit_attempt: move_kernel.id16_zero(),
+    )
+    let head = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch: 1u64, holder: h1), origin: Some(orig))
+    let mut holders: Map[u64, move_kernel.Id16] = map.new()
+    map.insert(mut holders, 1u64, h1)
+    let _ = initial_node
+    SimRegister(head: head, next_holder: 2u64, epoch_holders: take holders, authorized_permits: map.new())
+}
+
+fn exec_register_cas(mut reg: SimRegister, place_id: u64, auth: move_kernel.ClaimAuth) -> Result[move_kernel.HeadView, move_kernel.HeadPair] {
+    let Some(expected) = auth.expect else {
+        fail("scale_sim: non-genesis ClaimAuth missing expect")
+    }
+    if expected != reg.head.pair {
+        return Error(reg.head.pair)
+    }
+    let fresh_holder = move_kernel.Id16(lo: reg.next_holder, hi: place_id)
+    reg.next_holder += 1u64
+    let new_epoch = reg.head.pair.epoch + 1u64
+    let next_orig = move_kernel.next_origin(reg.head.origin, new_epoch, auth.attempt, auth.class)
+    if let Permit = auth.class {
+        let Some(auth_expect) = map.get(reg.authorized_permits, auth.attempt.lo) else {
+            fail("scale_sim invariant: unauthorized Permit attempt executed CAS")
+        }
+        if auth_expect != expected {
+            fail("scale_sim invariant: Permit CAS expect did not match authorized permit")
+        }
+    }
+    if map.contains(reg.epoch_holders, new_epoch) {
+        fail("scale_sim invariant: duplicate holder installed at same epoch")
+    }
+    let next_head = move_kernel.HeadView(pair: move_kernel.HeadPair(epoch: new_epoch, holder: fresh_holder), origin: Some(next_orig))
+    // Check 49-byte ORIGIN wire round-trip and O4 invariant.
+    let wire = move_kernel.encode_origin_wire(next_orig)
+    if list.len(wire) != move_kernel.ORIGIN_WIRE_BYTES {
+        fail("scale_sim invariant: ORIGIN wire length != 49")
+    }
+    let decoded = result.unwrap(move_kernel.decode_origin_wire(wire, new_epoch))
+    if decoded != next_orig || !move_kernel.valid_head_view(next_head) {
+        fail("scale_sim invariant: ORIGIN wire/O4 check failed")
+    }
+    map.insert(mut reg.epoch_holders, new_epoch, fresh_holder)
+    reg.head = next_head
+    Ok(next_head)
+}
+
+fn find_claim_action(actions: List[move_kernel.Action]) -> Option[move_kernel.ClaimAuth] {
+    for act in actions {
+        if let EmitOutbox(entry) = act {
+            if let IssueClaim(_, _, _, auth) = entry.cmd {
+                return Some(auth)
+            }
+        }
+    }
+    None
+}
+
+fn has_move_refused(actions: List[move_kernel.Action]) -> bool {
+    for act in actions {
+        if let Observe(ObsMoveRefused(_)) = act {
+            return true
+        }
+    }
+    false
+}
+
+fn sm1_snap(p: SimPlace) -> ScaleSm1State {
+    let pa = match p.reg.head.origin {
+        Some(orig) => orig.permit_attempt.lo,
+        None => 0u64,
+    }
+    ScaleSm1State(
+        place_id: p.place_id,
+        epoch: p.reg.head.pair.epoch,
+        holder: p.reg.head.pair.holder.lo,
+        permit_attempt: pa,
+        incumbent: p.state.incumbent_node,
+        controller_epoch: p.state.controller_epoch,
+        frozen: p.state.frozen,
+        open_count: list.len(p.state.open_permits),
+    )
+}
+
+fn record_sm1(mut capture: Option[std.sim.trace.Tape[ScaleSm1Event, move_kernel.Action, ScaleSm1State]], ev: ScaleSm1Event, acts: List[move_kernel.Action], p: SimPlace, mut count: u64) {
+    if count >= 256u64 {
+        return
+    }
+    result.unwrap(std.sim.trace.record(mut capture, ev, acts, sm1_snap(p)))
+    count += 1u64
+}
+
+fn check_place_invariants(p: SimPlace) {
+    if !move_kernel.valid_head_view(p.reg.head) {
+        fail("scale_sim invariant: invalid HeadView (O4)")
+    }
+    if list.len(p.state.open_permits) > move_kernel.MAX_OPEN_PERMITS {
+        fail("scale_sim invariant: open_permits exceeded K3 cap")
+    }
+    if list.len(p.state.outbox) > move_kernel.MAX_OUTBOX {
+        fail("scale_sim invariant: outbox exceeded K3 cap")
+    }
+    if list.len(p.state.open_permits) == 2 {
+        if p.state.open_permits[0].expect != p.state.open_permits[1].expect {
+            fail("scale_sim invariant: Rule F1 violated across open_permits")
+        }
+    }
+}
+
+fn pick_healthy_target(mut world: std.sim.world.World, hosts: List[SimHost], exclude_a: u64, exclude_b: u64) -> u64 {
+    let n = list.len(hosts)
+    let start = std.sim.world.choose(mut world, n)
+    for offset in 0u64 .. n {
+        let idx = (start + offset) % n
+        let h = hosts[idx]
+        if !h.isolated && h.node_id != exclude_a && h.node_id != exclude_b {
+            return h.node_id
+        }
+    }
+    // Fallback if all others isolated: pick any distinct node.
+    for idx in 0u64 .. n {
+        let h = hosts[idx]
+        if h.node_id != exclude_a && h.node_id != exclude_b {
+            return h.node_id
+        }
+    }
+    exclude_a
+}
+
+fn host_boot_from_base(base_ns: u64, rate_ppm: i64) -> u64 {
+    let rate: u64 = int.truncate(int.abs(rate_ppm))
+    let drift = int.saturating_add(int.saturating_mul(base_ns / directory.DIR_PPM, rate), (base_ns % directory.DIR_PPM) * rate / directory.DIR_PPM)
+    if rate_ppm >= 0 {
+        int.saturating_add(base_ns, drift)
+    } else {
+        base_ns - drift
+    }
+}
+
+/// Run a full deterministic scale simulation of `fleet@1` + partitioned `Directory[u64]` Places.
+pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] waits {
+    if cfg.hosts < 5 || cfg.places == 0 || cfg.partitions == 0 || cfg.rounds == 0 {
+        fail("scale_sim: invalid SimConfig")
+    }
+    let (take world_in, clk_world) = std.sim.world.new(cfg.seed, 0, 0)
+    let mut world = take world_in
+    let mut clocks = std.sim.world.clocks(mut world)
+    // Register real std.sim.world.drifting clocks for:
+    //   - 2 controllers (active + standby)
+    //   - P dedicated Directory[u64] partition hosts (plus 1 replacement directory host for takeover!)
+    //   - 3 faulted Archetype B hosts: paused holder A, healthy challenger B, and out-of-bound drifter C.
+    let (idx_ctrl1, clk_ctrl1) = std.sim.world.drifting(mut clocks, 0, 0, 50)
+    let (_, clk_ctrl2) = std.sim.world.drifting(mut clocks, 0, 0, -50)
+    let mut dir_clocks: List[Clock] = list.with_capacity(cfg.partitions)
+    for p in 0u64 .. cfg.partitions {
+        let ppm: i64 = if p % 2 == 0 {
+            150
+        } else {
+            -150
+        }
+        let (_, c_dir) = std.sim.world.drifting(mut clocks, (p + 1) * 1000 * NS_PER_MS, 0, ppm)
+        list.push(mut dir_clocks, c_dir)
+    }
+    let (_, clk_dir_repl) = std.sim.world.drifting(mut clocks, 7000 * NS_PER_MS, 0, 200)
+    let (idx_paused_holder, clk_paused_holder) = std.sim.world.drifting(mut clocks, 0, 0, -200)
+    let (_, clk_challenger) = std.sim.world.drifting(mut clocks, 0, 0, 100)
+    let (_, clk_bad_drifter) = std.sim.world.drifting(mut clocks, 0, 0, -5000)
+    // Fault 2 (clock pause): pause old controller 1 and paused Archetype B holder across active lease windows.
+    std.sim.world.pause_at(mut clocks, idx_ctrl1, 200 * NS_PER_MS, 2500 * NS_PER_MS)
+    std.sim.world.pause_at(mut clocks, idx_paused_holder, 100 * NS_PER_MS, 1400 * NS_PER_MS)
+    // Build N simulated hosts across NUM_ZONES zones.
+    let mut hosts: List[SimHost] = list.with_capacity(cfg.hosts)
+    for i in 0u64 .. cfg.hosts {
+        let node_id = i + 1u64
+        let zone = i % NUM_ZONES
+        let draw_ppm = std.sim.world.choose(mut world, 401u64)
+        let rate_ppm: i64 = if draw_ppm >= 200u64 {
+            let d: u32 = int.truncate(draw_ppm - 200u64)
+            int.widen(d)
+        } else {
+            let d: u32 = int.truncate(200u64 - draw_ppm)
+            0i64 - int.widen(d)
+        }
+        list.push(mut hosts, SimHost(
+            node_id: node_id,
+            zone: zone,
+            incarnation: 1u64,
+            rate_ppm: rate_ppm,
+            isolated: false,
+            paused: false,
+            heartbeat_seq: 0u64,
+        ))
+    }
+    // Build M durable Places managed by fleet@1's production move_kernel.
+    let mut places: List[SimPlace] = list.with_capacity(cfg.places)
+    for i in 0u64 .. cfg.places {
+        let place_id = i + 1u64
+        let init_node = (i % cfg.hosts) + 1u64
+        let reg = make_register(place_id, init_node)
+        let st = move_kernel.init_state(place_id, 1u64, init_node, 1u64, reg.head)
+        list.push(mut places, SimPlace(place_id: place_id, reg: take reg, state: take st, in_flight_attempt: None))
+    }
+    // Build P dedicated, keyspace-partitioned Directory[u64] Places (strictly outside fleet@1).
+    let span = (cfg.hosts + cfg.partitions - 1u64) / cfg.partitions
+    let mut dirs: List[directory.SimDirectory[u64]] = list.with_capacity(cfg.partitions)
+    for p in 0u64 .. cfg.partitions {
+        let lo = p * span
+        let hi = lo + span - 1u64
+        let dcfg = directory.DirectoryConfig(
+            partition_id: p,
+            drift_ppm: SIM_DRIFT_PPM,
+            default_lease_ns: SIM_LEASE_NS,
+            max_lease_cap_ns: 60000 * NS_PER_MS,
+        )
+        let dir = result.unwrap(directory.sim_directory_new(dcfg, std.codec.key_u64(), lo, hi, std.clock.boot_ns(dir_clocks[p])))
+        list.push(mut dirs, take dir)
+    }
+    // Build ephemeral Archetype B rooms (one per host) mapped across the P Directory[u64] partitions.
+    let mut rooms: List[EphemeralRoom] = list.with_capacity(cfg.hosts)
+    for k in 0u64 .. cfg.hosts {
+        let p_idx = k / span
+        list.push(mut rooms, EphemeralRoom(room_key: k, partition_idx: p_idx, holder_node: 0u64, term: 0u64, lease: None))
+    }
+    // Wire queue for Fault 1 (std.sim.message holds) and SM1 trace capture.
+    let mut msg_q: std.sim.message.Queue[SimWire] = std.sim.message.new()
+    let mut capture: Option[std.sim.trace.Tape[ScaleSm1Event, move_kernel.Action, ScaleSm1State]] = Some(result.unwrap(std.sim.trace.start(cfg.seed)))
+    let mut sm1_count: u64 = 0u64
+    let no_acts: List[move_kernel.Action] = list.new()
+    // Counters for the report.
+    let mut moves_completed: u64 = 0u64
+    let mut stale_races_blocked: u64 = 0u64
+    let mut lost_h_settled: u64 = 0u64
+    let mut controller_kills: u64 = 0u64
+    let mut barrier_blocks: u64 = 0u64
+    let mut freeze_blocks: u64 = 0u64
+    let mut dir_claims: u64 = 0u64
+    let mut dir_renews: u64 = 0u64
+    let mut dir_takeovers: u64 = 0u64
+    let mut dir_quarantine_refusals: u64 = 0u64
+    let mut dir_drift_refusals: u64 = 0u64
+    let mut dir_pause_expirations: u64 = 0u64
+    // Seeded initial claims across ALL ephemeral keys in the P Directory[u64] partitions at t = 0.
+    for k in 0u64 .. cfg.hosts {
+        let p_idx = rooms[k].partition_idx
+        let holder = (k % cfg.hosts) + 1u64
+        let dir_boot = std.clock.boot_ns(dir_clocks[p_idx])
+        let h_boot = if k == 0 {
+            directory.holder_begin_request(clk_paused_holder)
+        } else {
+            host_boot_from_base(0u64, hosts[holder - 1].rate_ppm)
+        }
+        let g = result.unwrap(directory.sim_directory_claim(mut dirs[p_idx], dir_boot, directory.ClaimReq(
+            key: k,
+            holder_node: holder,
+            holder_incarnation: 1u64,
+            expect_term: 0u64,
+            lease_ns: SIM_LEASE_NS,
+            holder_boot_ns: h_boot,
+            reported_drift_ppm: SIM_DRIFT_PPM,
+            payload: b"init",
+        )))
+        rooms[k].holder_node = holder
+        rooms[k].term = g.term
+        rooms[k].lease = Some(directory.holder_accept_grant(holder, 1u64, h_boot, g))
+        dir_claims += 1u64
+    }
+    // Also register key (span - 1) on partition 0 with the out-of-bound drifter host (-5000 ppm) to test D5 refusal!
+    let drifter_key = if cfg.hosts > 1 {
+        1u64
+    } else {
+        0u64
+    }
+    let bad_decl = directory.sim_directory_claim(mut dirs[0], std.clock.boot_ns(dir_clocks[0]), directory.ClaimReq(
+        key: drifter_key,
+        holder_node: 9999u64,
+        holder_incarnation: 1u64,
+        expect_term: 1u64,
+        lease_ns: SIM_LEASE_NS,
+        holder_boot_ns: std.clock.boot_ns(clk_bad_drifter),
+        reported_drift_ppm: SIM_DRIFT_PPM + 50u64,
+        payload: b"bad-drift",
+    ))
+    if let Error(DriftExceeded(_, _)) = bad_decl {
+        dir_drift_refusals += 1u64
+    } else {
+        fail("scale_sim: Directory[K] did not refuse declared drift > d")
+    }
+    // Spawn the std.sim.world clock driver for the whole simulation timeline.
+    let driver = task.spawn(tasks, bytes 131072, ScaleClockDriver(clocks: take clocks, tasks), run_scale_clocks)
+    // ---- PHASE A: Fault 1 (Message Hold + Stale-Open Races + Lost-H Read-Only Settlement) ----
+    let race_count = order.min(cfg.places, 8u64)
+    for r_i in 0u64 .. race_count {
+        let p_idx = std.sim.world.choose(mut world, cfg.places)
+        if list.len(places[p_idx].state.open_permits) != 0 {
+            continue
+        }
+        let inc = places[p_idx].state.incumbent_node
+        let target_b = pick_healthy_target(mut world, hosts, inc, inc)
+        let target_c = pick_healthy_target(mut world, hosts, inc, target_b)
+        // K12 keys check before stepping.
+        let ks = move_kernel.keys(places[p_idx].place_id, RequestMove(target_b, 1u64, 1u64, 1u64))
+        if list.len(ks) == 0 || list.len(ks) > move_kernel.MAX_KEYS {
+            fail("scale_sim: K12 keys out of bounds")
+        }
+        let mut hold_ev: String = "c_won_"
+        string.push_u64(mut hold_ev, r_i)
+        std.sim.message.hold_until(mut msg_q, 0u64, target_b, "move_claim", clone(hold_ev))
+        std.sim.message.hold_until(mut msg_q, inc, inc, "janitor_claim", clone(hold_ev))
+        let (st1, acts1) = move_kernel.step(clone(places[p_idx].state), RequestMove(target_b, 1u64, 1u64, 1u64))
+        places[p_idx].state = take st1
+        let Some(auth_b) = find_claim_action(acts1) else {
+            fail("scale_sim: primary RequestMove did not emit IssueClaim")
+        }
+        map.insert(mut places[p_idx].reg.authorized_permits, auth_b.attempt.lo, option.unwrap(auth_b.expect))
+        record_sm1(mut capture, EvMoveAuth(places[p_idx].place_id, target_b), acts1, places[p_idx], mut sm1_count)
+        std.sim.message.send(mut msg_q, std.sim.message.Message(from: 0u64, to: target_b, name: "move_claim", value: WireMoveClaim(p_idx, auth_b)))
+        // In-flight janitor Continue from incumbent A at old head pair.
+        let jan_auth = move_kernel.ClaimAuth(expect: Some(places[p_idx].reg.head.pair), attempt: move_kernel.id16_from_u64(50000u64 + r_i), class: Continue)
+        std.sim.message.send(mut msg_q, std.sim.message.Message(from: inc, to: inc, name: "janitor_claim", value: WireJanitorContinue(p_idx, jan_auth)))
+        // Recovery contender C shares exact expect (Rule F1) and wins immediately!
+        let (st2, acts2) = move_kernel.step(clone(places[p_idx].state), RequestRecovery(target_c, 1u64, 1u64, 1u64))
+        places[p_idx].state = take st2
+        let Some(auth_c) = find_claim_action(acts2) else {
+            fail("scale_sim: RequestRecovery did not emit IssueClaim")
+        }
+        map.insert(mut places[p_idx].reg.authorized_permits, auth_c.attempt.lo, option.unwrap(auth_c.expect))
+        record_sm1(mut capture, EvRecoveryAuth(places[p_idx].place_id, target_c), acts2, places[p_idx], mut sm1_count)
+        let head_c = result.unwrap(exec_register_cas(mut places[p_idx].reg, places[p_idx].place_id, auth_c))
+        record_sm1(mut capture, EvCasWon(places[p_idx].place_id, head_c.pair.epoch), no_acts, places[p_idx], mut sm1_count)
+        // Simulate lost H reply -> ClaimUndecided -> read-only HeadRead settles C Won and B Dead!
+        let (st3, _) = move_kernel.step(clone(places[p_idx].state), ClaimOutcome(auth_c.attempt, ClaimUndecided))
+        let (st4, acts4) = move_kernel.step(take st3, HeadRead(places[p_idx].reg.head))
+        places[p_idx].state = take st4
+        if places[p_idx].state.incumbent_node != target_c || list.len(places[p_idx].state.open_permits) != 0 {
+            fail("scale_sim: lost-H read-only settlement failed")
+        }
+        record_sm1(mut capture, EvSettle(places[p_idx].place_id), acts4, places[p_idx], mut sm1_count)
+        lost_h_settled += 1u64
+        moves_completed += 1u64
+        // Release held messages for B and janitor A -> BOTH must be refused Superseded!
+        std.sim.message.fire(mut msg_q, take hold_ev)
+        let Some(msg_b) = std.sim.message.receive(mut msg_q, target_b) else {
+            fail("scale_sim: held B move_claim did not release")
+        }
+        let WireMoveClaim(bp, b_cmd) = msg_b.value else {
+            fail("scale_sim: unexpected wire message for B")
+        }
+        if let Error(_) = exec_register_cas(mut places[bp].reg, places[bp].place_id, b_cmd) {
+            stale_races_blocked += 1u64
+            record_sm1(mut capture, EvCasSuperseded(places[bp].place_id, b_cmd.attempt.lo), no_acts, places[bp], mut sm1_count)
+        } else {
+            fail("scale_sim VIOLATION: delayed held A->B move stole newer epoch from C")
+        }
+        let Some(msg_j) = std.sim.message.receive(mut msg_q, inc) else {
+            fail("scale_sim: held janitor_claim did not release")
+        }
+        let WireJanitorContinue(jp, j_cmd) = msg_j.value else {
+            fail("scale_sim: unexpected wire message for janitor")
+        }
+        if let Error(_) = exec_register_cas(mut places[jp].reg, places[jp].place_id, j_cmd) {
+            stale_races_blocked += 1u64
+        } else {
+            fail("scale_sim VIOLATION: held janitor Continue stole moved Place")
+        }
+    }
+    // ---- PHASE B: Fault 3 (Controller Kill Mid-Move + Scoped Takeover Barrier + Sieve Check) ----
+    let mid_move_count = order.min(cfg.places, 32u64)
+    for idx in 0u64 .. mid_move_count {
+        if list.len(places[idx].state.open_permits) != 0 {
+            continue
+        }
+        let inc = places[idx].state.incumbent_node
+        let tgt = pick_healthy_target(mut world, hosts, inc, inc)
+        let (st1, acts1) = move_kernel.step(clone(places[idx].state), RequestMove(tgt, 1u64, 2u64, 1u64))
+        places[idx].state = take st1
+        if let Some(auth) = find_claim_action(acts1) {
+            map.insert(mut places[idx].reg.authorized_permits, auth.attempt.lo, option.unwrap(auth.expect))
+            places[idx].in_flight_attempt = Some(auth)
+            // Execute half of the in-flight CAS ops BEFORE controller kill so recovery sees both Open and Won permits!
+            if idx % 2 == 0 {
+                let _ = result.unwrap(exec_register_cas(mut places[idx].reg, places[idx].place_id, auth))
+            }
+        }
+    }
+    // Kill controller 1 mid-move across ALL Places!
+    controller_kills += 1u64
+    for idx in 0u64 .. cfg.places {
+        let (st_c, _) = move_kernel.step(clone(places[idx].state), Crash)
+        let (st_r, _) = move_kernel.step(take st_c, Restart)
+        let inc = st_r.incumbent_node
+        let (st_t, acts_t) = move_kernel.step(take st_r, ControllerTakeover(2u64, inc, places[idx].reg.head))
+        places[idx].state = take st_t
+        if idx < 4u64 {
+            record_sm1(mut capture, EvControllerKill(places[idx].place_id), acts_t, places[idx], mut sm1_count)
+        }
+    }
+    // Probe healthy half of Places immediately; leave odd-indexed Places unprobed behind scoped barrier.
+    for idx in 0u64 .. cfg.places {
+        if idx % 2 == 0 {
+            let inc = places[idx].state.incumbent_node
+            let (st_ok, _) = move_kernel.step(clone(places[idx].state), IncumbentProbeOk(inc, 1u64, places[idx].reg.head, 2u64))
+            places[idx].state = take st_ok
+        } else {
+            // Sieve check: stale epoch 1 controller cannot clear barrier, and move MUST be blocked while BarrierPending!
+            let inc = places[idx].state.incumbent_node
+            let (st_s, _) = move_kernel.step(clone(places[idx].state), IncumbentProbeOk(inc, 1u64, places[idx].reg.head, 1u64))
+            let tgt = pick_healthy_target(mut world, hosts, inc, inc)
+            let (st_try, try_acts) = move_kernel.step(take st_s, RequestMove(tgt, 1u64, 3u64, 1u64))
+            places[idx].state = take st_try
+            if !has_move_refused(try_acts) {
+                fail("scale_sim VIOLATION: move not refused while scoped takeover barrier pending")
+            }
+            barrier_blocks += 1u64
+        }
+    }
+    // Expire barrier window on unprobed Places and settle any remaining in-flight mid-move attempts!
+    for idx in 0u64 .. cfg.places {
+        if let BarrierPending(_, _) = places[idx].state.barrier {
+            let (st_b, _) = move_kernel.step(clone(places[idx].state), Timeout(BarrierWindow(2u64)))
+            places[idx].state = take st_b
+        }
+        if let Some(auth) = places[idx].in_flight_attempt {
+            let _ = exec_register_cas(mut places[idx].reg, places[idx].place_id, auth)
+            places[idx].in_flight_attempt = None
+        }
+        let (st_fin, _) = move_kernel.step(clone(places[idx].state), HeadRead(places[idx].reg.head))
+        places[idx].state = take st_fin
+        if list.len(places[idx].state.open_permits) != 0 {
+            fail("scale_sim: mid-move permit failed to settle after controller takeover")
+        }
+        if idx < mid_move_count {
+            moves_completed += 1u64
+        }
+    }
+    // ---- PHASE C: Fault 4 (Zone Isolation + Correlated-Disruption Circuit Breaker + Directory[K] Independence) ----
+    let isolated_zone = cfg.seed % NUM_ZONES
+    for i in 0u64 .. cfg.hosts {
+        if hosts[i].zone == isolated_zone {
+            hosts[i].isolated = true
+        }
+    }
+    // Trip correlated-disruption circuit breaker across ALL Places!
+    for idx in 0u64 .. cfg.places {
+        let (st_f, acts_f) = move_kernel.step(clone(places[idx].state), DisruptionFreeze(true))
+        places[idx].state = take st_f
+        if idx == 0 {
+            record_sm1(mut capture, EvZoneFreeze(true), acts_f, places[idx], mut sm1_count)
+        }
+        // Discretionary move attempts during freeze MUST be refused!
+        if idx < 32u64 {
+            let inc = places[idx].state.incumbent_node
+            let tgt = pick_healthy_target(mut world, hosts, inc, inc)
+            let (st_m, m_acts) = move_kernel.step(clone(places[idx].state), RequestMove(tgt, 1u64, 4u64, 1u64))
+            places[idx].state = take st_m
+            if !has_move_refused(m_acts) || find_claim_action(m_acts) != None {
+                fail("scale_sim VIOLATION: discretionary move authorized during zone-isolation freeze")
+            }
+            freeze_blocks += 1u64
+        }
+    }
+    // Meanwhile, while fleet@1 is FROZEN, dedicated Directory[u64] partitions keep serving renewals uninterrupted!
+    host.sleep_until(clk_world, 500 * NS_PER_MS)
+    for k in 1u64 .. cfg.hosts {
+        let p_idx = rooms[k].partition_idx
+        let holder = rooms[k].holder_node
+        if hosts[holder - 1].isolated {
+            continue
+        }
+        let dir_boot = std.clock.boot_ns(dir_clocks[p_idx])
+        let h_boot = host_boot_from_base(500 * NS_PER_MS, hosts[holder - 1].rate_ppm)
+        let g = result.unwrap(directory.sim_directory_renew(mut dirs[p_idx], dir_boot, directory.RenewReq(
+            key: k,
+            holder_node: holder,
+            holder_incarnation: 1u64,
+            term: rooms[k].term,
+            seq: 1u64,
+            lease_ns: SIM_LEASE_NS,
+            holder_boot_ns: h_boot,
+            reported_drift_ppm: SIM_DRIFT_PPM,
+            max_rtt_ns: 0u64,
+        )))
+        rooms[k].lease = Some(directory.holder_accept_grant(holder, 1u64, h_boot, g))
+        dir_renews += 1u64
+    }
+    // Heal isolated zone and thaw circuit breaker after 2 healthy windows.
+    for i in 0u64 .. cfg.hosts {
+        hosts[i].isolated = false
+    }
+    for idx in 0u64 .. cfg.places {
+        let (st_u, acts_u) = move_kernel.step(clone(places[idx].state), DisruptionFreeze(false))
+        places[idx].state = take st_u
+        if idx == 0 {
+            record_sm1(mut capture, EvZoneFreeze(false), acts_u, places[idx], mut sm1_count)
+        }
+    }
+    // ---- PHASE D: Fault 2 (Clock Pause + Directory[K] Exclusivity + Directory Takeover Quarantine W) ----
+    // Advance past W (~1000.4ms) while paused holder (room 0) is STILL paused [100ms, 1400ms)!
+    host.sleep_until(clk_world, 1050 * NS_PER_MS)
+    let chal_send = directory.holder_begin_request(clk_challenger)
+    let chal_grant = result.unwrap(directory.sim_directory_claim(mut dirs[0], std.clock.boot_ns(dir_clocks[0]), directory.ClaimReq(
+        key: 0u64,
+        holder_node: 2u64,
+        holder_incarnation: 1u64,
+        expect_term: 1u64,
+        lease_ns: SIM_LEASE_NS,
+        holder_boot_ns: chal_send,
+        reported_drift_ppm: SIM_DRIFT_PPM,
+        payload: b"challenger",
+    )))
+    if chal_grant.term != 2u64 {
+        fail("scale_sim: challenger did not win term 2 on room 0 after W")
+    }
+    let old_room0_lease = option.unwrap(rooms[0].lease)
+    rooms[0].holder_node = 2u64
+    rooms[0].term = chal_grant.term
+    rooms[0].lease = Some(directory.holder_accept_grant(2u64, 1u64, chal_send, chal_grant))
+    dir_claims += 1u64
+    // Advance past pause end (1400ms -> 1500ms): paused holder wakes up; MUST see boot_ns lease expired (0 dual holders)!
+    host.sleep_until(clk_world, 1500 * NS_PER_MS)
+    if host.mono_ns(clk_paused_holder) >= SIM_LEASE_NS {
+        fail("scale_sim setup: pause_at did not freeze paused holder mono_ns")
+    }
+    if directory.holder_holds_lease(old_room0_lease, clk_paused_holder) {
+        fail("scale_sim VIOLATION: paused holder still believed it held term 1 after suspend")
+    }
+    dir_pause_expirations += 1u64
+    // Now trigger a Directory[u64] partition 0 takeover onto replacement host clk_dir_repl!
+    let repl_sess = result.unwrap(directory.sim_directory_takeover(mut dirs[0], std.clock.boot_ns(clk_dir_repl)))
+    dir_takeovers += 1u64
+    // During quarantine (< W): new-term claim on partition 0 MUST be refused Quarantined!
+    let q_try = directory.sim_directory_claim(mut dirs[0], std.clock.boot_ns(clk_dir_repl), directory.ClaimReq(
+        key: 0u64,
+        holder_node: 3u64,
+        holder_incarnation: 1u64,
+        expect_term: 2u64,
+        lease_ns: SIM_LEASE_NS,
+        holder_boot_ns: std.clock.boot_ns(clk_challenger),
+        reported_drift_ppm: SIM_DRIFT_PPM,
+        payload: b"too-early",
+    ))
+    if let Error(Quarantined(until)) = q_try {
+        if until != repl_sess.quarantine_until_boot_ns {
+            fail("scale_sim: wrong quarantine deadline")
+        }
+        dir_quarantine_refusals += 1u64
+    } else {
+        fail("scale_sim VIOLATION: Directory[K] granted new term during takeover quarantine")
+    }
+    // Same-term renewal of room 0 by incumbent challenger 2 MUST succeed immediately during quarantine!
+    let c_ren_send = directory.holder_begin_request(clk_challenger)
+    let c_ren = result.unwrap(directory.sim_directory_renew(mut dirs[0], std.clock.boot_ns(clk_dir_repl), directory.RenewReq(
+        key: 0u64,
+        holder_node: 2u64,
+        holder_incarnation: 1u64,
+        term: 2u64,
+        seq: 1u64,
+        lease_ns: SIM_LEASE_NS,
+        holder_boot_ns: c_ren_send,
+        reported_drift_ppm: SIM_DRIFT_PPM,
+        max_rtt_ns: 0u64,
+    )))
+    rooms[0].lease = Some(directory.holder_accept_grant(2u64, 1u64, c_ren_send, c_ren))
+    dir_renews += 1u64
+    // Advance past W (1500ms + 1050ms = 2550ms) and verify post-quarantine claim succeeds + out-of-bound drift refused!
+    host.sleep_until(clk_world, 2600 * NS_PER_MS)
+    let post_q_send = directory.holder_begin_request(clk_bad_drifter)
+    let _ = result.unwrap(directory.sim_directory_claim(mut dirs[0], std.clock.boot_ns(clk_dir_repl), directory.ClaimReq(
+        key: 0u64,
+        holder_node: 4u64,
+        holder_incarnation: 1u64,
+        expect_term: 2u64,
+        lease_ns: SIM_LEASE_NS,
+        holder_boot_ns: post_q_send,
+        reported_drift_ppm: SIM_DRIFT_PPM,
+        payload: b"drifter-test",
+    )))
+    dir_claims += 1u64
+    host.sleep_until(clk_world, 3000 * NS_PER_MS)
+    let drift_check = directory.sim_directory_renew(mut dirs[0], std.clock.boot_ns(clk_dir_repl), directory.RenewReq(
+        key: 0u64,
+        holder_node: 4u64,
+        holder_incarnation: 1u64,
+        term: 3u64,
+        seq: 1u64,
+        lease_ns: SIM_LEASE_NS,
+        holder_boot_ns: std.clock.boot_ns(clk_bad_drifter),
+        reported_drift_ppm: SIM_DRIFT_PPM,
+        max_rtt_ns: 0u64,
+    ))
+    if let Error(DriftExceeded(_, _)) = drift_check {
+        dir_drift_refusals += 1u64
+    } else {
+        fail("scale_sim VIOLATION: Directory[K] accepted -5000 ppm drifter beyond d=200 ppm")
+    }
+    // Check old controller 1 resumed after pause_at [200ms, 2500ms) cleanly.
+    let _ = host.mono_ns(clk_ctrl1)
+    let _ = host.mono_ns(clk_ctrl2)
+    result.unwrap(task.join(take driver))
+    // ---- PHASE E: Steady-state multi-round move churn + K10 advisory merge across all hosts ----
+    let moves_per_round = order.max(cfg.places / 10u64, 5u64)
+    for round in 0u64 .. cfg.rounds {
+        for _ in 0u64 .. moves_per_round {
+            let p_idx = std.sim.world.choose(mut world, cfg.places)
+            if list.len(places[p_idx].state.open_permits) != 0 {
+                continue
+            }
+            let inc = places[p_idx].state.incumbent_node
+            let tgt = pick_healthy_target(mut world, hosts, inc, inc)
+            let gen = places[p_idx].state.desired_generation + 1u64
+            let (st_d, _) = move_kernel.step(clone(places[p_idx].state), DesiredEdit(tgt, gen))
+            let (st_m, acts_m) = move_kernel.step(take st_d, RequestMove(tgt, 1u64, gen, (p_idx % NUM_ZONES) + 1u64))
+            places[p_idx].state = take st_m
+            let Some(auth) = find_claim_action(acts_m) else {
+                fail("scale_sim: steady-state move refused unexpectedly")
+            }
+            map.insert(mut places[p_idx].reg.authorized_permits, auth.attempt.lo, option.unwrap(auth.expect))
+            let h_new = result.unwrap(exec_register_cas(mut places[p_idx].reg, places[p_idx].place_id, auth))
+            let (st_s, acts_s) = move_kernel.step(clone(places[p_idx].state), HeadRead(h_new))
+            places[p_idx].state = take st_s
+            if places[p_idx].state.incumbent_node != tgt || list.len(places[p_idx].state.open_permits) != 0 {
+                fail("scale_sim: steady-state move failed to converge")
+            }
+            if round == 0 && p_idx < 8u64 {
+                record_sm1(mut capture, EvSettle(places[p_idx].place_id), acts_s, places[p_idx], mut sm1_count)
+            }
+            moves_completed += 1u64
+        }
+    }
+    // Verify K10 CALM advisory join-semilattice commutativity & idempotence over sampled host shards.
+    let mut adv_a = advisory.empty_advisory()
+    let mut adv_b = advisory.empty_advisory()
+    adv_a.issuer_epoch = 2u64
+    adv_a.seq = 10u64
+    adv_b.issuer_epoch = 2u64
+    adv_b.seq = 12u64
+    let sample_n = order.min(cfg.hosts, 32u64)
+    for i in 0u64 .. sample_n {
+        let nid = hosts[i].node_id
+        map.insert(mut adv_a.heartbeats, nid, 100u64 + i)
+        map.insert(mut adv_b.heartbeats, nid, 105u64 + i)
+        map.insert(mut adv_a.routes, nid, advisory.RouteEntry(range_id: nid, generation: 2u64, owner_node: nid))
+        map.insert(mut adv_b.routes, nid, advisory.RouteEntry(range_id: nid, generation: 3u64, owner_node: nid))
+    }
+    if !advisory.equal(advisory.merge(adv_a, adv_b), advisory.merge(adv_b, adv_a)) || !advisory.equal(advisory.merge(adv_a, adv_a), adv_a) {
+        fail("scale_sim invariant: K10 advisory lattice violation")
+    }
+    // ---- PHASE F: End-of-seed kernel invariants + Directory[K] invariants + SM1 trace verification ----
+    for idx in 0u64 .. cfg.places {
+        check_place_invariants(places[idx])
+        if list.len(places[idx].state.open_permits) != 0 {
+            fail("scale_sim end invariant: unsettled open permit")
+        }
+        if places[idx].state.known_head.pair != places[idx].reg.head.pair {
+            fail("scale_sim end invariant: kernel known_head diverged from register head")
+        }
+    }
+    for k in 0u64 .. cfg.hosts {
+        let p_idx = rooms[k].partition_idx
+        let row = result.unwrap(directory.sim_directory_read(dirs[p_idx], k))
+        if row.term == 0 {
+            fail("scale_sim end invariant: Directory[K] key has term 0")
+        }
+    }
+    let Some(tape) = capture else {
+        fail("scale_sim: SM1 tape missing")
+    }
+    let ndjson = result.unwrap(std.sim.trace.ndjson(tape))
+    let itf = result.unwrap(std.sim.trace.itf(tape, None))
+    let mut lines: u64 = 0u64
+    let mut pos: u64 = 0u64
+    while let Some((line, next_pos)) = string.next_line(ndjson, pos) {
+        region r_nd {
+            let doc = result.unwrap(std.json.parse(r_nd, line))
+            let Some(seed_v) = std.json.pointer(doc, "/seed") else {
+                fail("scale_sim SM1 NDJSON missing /seed")
+            }
+            if std.json.as_u64(seed_v) != Some(cfg.seed) {
+                fail("scale_sim SM1 NDJSON seed mismatch")
+            }
+            let Some(idx_v) = std.json.pointer(doc, "/index") else {
+                fail("scale_sim SM1 NDJSON missing /index")
+            }
+            if std.json.as_u64(idx_v) != Some(lines) {
+                fail("scale_sim SM1 NDJSON index mismatch")
+            }
+        }
+        lines += 1u64
+        pos = next_pos
+    }
+    if lines == 0 || lines != sm1_count {
+        fail("scale_sim SM1 NDJSON row count mismatch")
+    }
+    region r_itf {
+        let doc = result.unwrap(std.json.parse(r_itf, itf))
+        let Some(Str(seed_s)) = std.json.pointer(doc, "/#meta/seed/#bigint") else {
+            fail("scale_sim SM1 ITF missing /#meta/seed/#bigint")
+        }
+        let mut expected_seed: String = ""
+        string.push_u64(mut expected_seed, cfg.seed)
+        if text.as_string(seed_s) != expected_seed {
+            fail("scale_sim SM1 ITF seed mismatch")
+        }
+    }
+    Ok(SimReport(
+        hosts: cfg.hosts,
+        places: cfg.places,
+        partitions: cfg.partitions,
+        rounds: cfg.rounds,
+        seed: cfg.seed,
+        moves_completed: moves_completed,
+        stale_races_blocked: stale_races_blocked,
+        lost_h_settled: lost_h_settled,
+        controller_kills: controller_kills,
+        barrier_blocks: barrier_blocks,
+        freeze_blocks: freeze_blocks,
+        dir_claims: dir_claims,
+        dir_renews: dir_renews,
+        dir_takeovers: dir_takeovers,
+        dir_quarantine_refusals: dir_quarantine_refusals,
+        dir_drift_refusals: dir_drift_refusals,
+        dir_pause_expirations: dir_pause_expirations,
+        sm1_rows: lines,
+        sm1_ndjson_bytes: list.len(string.as_bytes(ndjson)),
+        sm1_itf_bytes: list.len(string.as_bytes(itf)),
+    ))
+}

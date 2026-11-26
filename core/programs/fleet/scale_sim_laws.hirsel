@@ -1,0 +1,27 @@
+// Scale fleet simulation laws at 50 and 1,000 simulated hosts (docs/spec/fleet.md FLT-8).
+// Exercises fleet@1 move_kernel, K10 advisory lattice, and partitioned Directory[u64] Places
+// under message hold, clock pause, controller kill mid-move, and zone isolation, checking
+// kernel invariants, Directory[K] invariants, and SM1 NDJSON/ITF traces at seed end.
+/// bug: Violate move_kernel safety, Directory[K] lease exclusivity/quarantine/drift bounds, or SM1 trace integrity at 50 simulated hosts under combined faults.
+/// oracle: docs/spec/fleet.md FLT-2..FLT-8 end-of-seed invariants and SM1 NDJSON/ITF traces at 50 hosts.
+@test
+fn sim_fleet_scale_50_hosts(tasks: Tasks) -> Result[(), ()] waits {
+    let cfg = scale_sim.default_config(50u64, 3056050u64)
+    let rep = result.unwrap(scale_sim.run_scale_sim(cfg, tasks))
+    if rep.hosts != 50 || rep.moves_completed == 0 || rep.stale_races_blocked == 0 || rep.controller_kills == 0 || rep.freeze_blocks == 0 || rep.dir_quarantine_refusals == 0 || rep.dir_drift_refusals == 0 || rep.sm1_rows == 0 {
+        fail("50-host fleet sim did not exercise all fault classes and SM1 trace checks")
+    }
+    Ok(())
+}
+
+/// bug: Violate move_kernel safety, Directory[K] lease exclusivity/quarantine/drift bounds, or SM1 trace integrity at 1,000 simulated hosts under combined faults.
+/// oracle: docs/spec/fleet.md FLT-2..FLT-8 end-of-seed invariants and SM1 NDJSON/ITF traces at 1,000 hosts.
+@test
+fn sim_fleet_scale_1000_hosts(tasks: Tasks) -> Result[(), ()] waits {
+    let cfg = scale_sim.default_config(1000u64, 30561000u64)
+    let rep = result.unwrap(scale_sim.run_scale_sim(cfg, tasks))
+    if rep.hosts != 1000 || rep.moves_completed == 0 || rep.stale_races_blocked == 0 || rep.controller_kills == 0 || rep.freeze_blocks == 0 || rep.dir_quarantine_refusals == 0 || rep.dir_drift_refusals == 0 || rep.sm1_rows == 0 {
+        fail("1,000-host fleet sim did not exercise all fault classes and SM1 trace checks")
+    }
+    Ok(())
+}

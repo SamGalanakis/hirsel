@@ -56,7 +56,7 @@ pub fn help(command: Option<&CommandSpec>) -> String {
             "Usage: hirsel {}\n\n{}\n\nOptions:\n",
             command.usage, command.description
         );
-        if matches!(command.name, "prof" | "lean" | "sdk") {
+        if matches!(command.name, "prof" | "lean" | "sdk" | "fleet") {
             let prefix = format!("{} ", command.name);
             for subcommand in COMMANDS.iter().filter(|c| c.name.starts_with(&prefix)) {
                 result.push_str(&format!(

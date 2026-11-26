@@ -48,6 +48,8 @@ commands! {
     "store repair", "store repair DIR --release EXE", "With the store stopped, demote each index the release proves wrong and rebuild every unbuilt index.";
     "store backup", "store backup DIR TARGET | store backup --state DIR --group NAME TARGET", "Copy a stopped store at DIR, or a served group's store through its running host, into the empty or new directory TARGET.";
     "store restore", "store restore BACKUP DIR", "Restore a backup into the empty or new directory DIR, keeping the store's identity.";
+    "fleet", "fleet <sim>", "Run deterministic Fleet and Directory[K] simulations.";
+    "fleet sim", "fleet sim [package-dir] [--hosts N] [--seed S] [--rounds R] [--places P] [--partitions K] [--json] [options]", "Drive the fleet@1 move kernel and Directory[K] in std.sim with seeded faults and check invariants and SM1 traces.";
     "run", "run [package-dir] [options] [-- arguments...]", "Build and run a native executable.";
     "serve", "serve [--max-memory BYTES] [--stop]", "Serve this toolchain's build, run and test requests from every directory.";
     "prof", "prof <command>", "Capture or inspect a CPU profile.";

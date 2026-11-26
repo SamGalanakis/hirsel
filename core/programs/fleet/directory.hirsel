@@ -1,0 +1,514 @@
+// Dedicated `Directory[K]` Place library for Archetype B ephemeral stateful units
+// (docs/spec/fleet.md FLT-5, rules D1-D6).
+// Partitioned by keyspace and never placed inside `fleet@1`, so controller takeovers
+// and Fleet freezes never stall ephemeral room/cache failovers.
+// Measures all lease windows strictly on the suspend-inclusive elapsed clock (`std.clock.boot_ns`).
+pub const DIR_PPM: u64 = 1000000
+
+/// Fleet default clock drift bound: 200 ppm (0.02%).
+pub const DEFAULT_DRIFT_PPM: u64 = 200
+
+/// Hard safety ceiling on accepted fleet drift bound: 10,000 ppm (1%).
+pub const MAX_DRIFT_PPM: u64 = 10000
+
+/// Qualification profile lease (`sfu_cascade`, FLT-5): 24 s in nanoseconds.
+pub const SFU_LEASE_NS: u64 = 24000000000
+
+/// Qualification profile renewal interval: 8 s in nanoseconds.
+pub const SFU_RENEW_NS: u64 = 8000000000
+
+/// Configuration for one keyspace-partitioned `Directory[K]` Place.
+pub type DirectoryConfig: codec + key + send {
+    partition_id: u64,
+    drift_ppm: u64,
+    default_lease_ns: u64,
+    max_lease_cap_ns: u64
+}
+
+/// Durable metadata stored in `<name>.meta` (`store.Cell[PartitionMeta]`).
+/// `max_lease_ns` (`L_max`) bounds takeover quarantine wait `W = ceil(L_max * (1+d)/(1-d))`.
+pub type PartitionMeta: codec + key + send {
+    partition_id: u64,
+    min_key_bytes: Bytes,
+    max_key_bytes: Bytes,
+    drift_ppm: u64,
+    default_lease_ns: u64,
+    max_lease_cap_ns: u64,
+    max_lease_ns: u64,
+    dir_epoch: u64
+}
+
+/// Volatile per-directory-host session established on Place open/takeover (D4).
+/// `takeover_boot_ns` and `quarantine_until_boot_ns` are measured on the host's own `clock.boot_ns`.
+pub type DirSession: codec + key + send {
+    dir_epoch: u64,
+    takeover_boot_ns: u64,
+    quarantine_until_boot_ns: u64
+}
+
+/// Durable per-key term CAS + lease row stored in `<name>.leases` (`store.Table[K, LeaseRow]`).
+pub type LeaseRow: codec + key + send {
+    holder_node: u64,
+    holder_incarnation: u64,
+    term: u64,
+    lease_ns: u64,
+    dir_epoch: u64,
+    last_dir_boot_ns: u64,
+    lease_end_boot_ns: u64,
+    last_holder_boot_ns: u64,
+    seq: u64,
+    payload: Bytes
+}
+
+/// Request to claim a new term (`expect_term + 1`) by compare-and-set on `term` (D6).
+pub type ClaimReq[K]: codec + key + send {
+    key: K,
+    holder_node: u64,
+    holder_incarnation: u64,
+    expect_term: u64,
+    lease_ns: u64,
+    holder_boot_ns: u64,
+    reported_drift_ppm: u64,
+    payload: Bytes
+}
+
+/// Request to renew an incumbent's active term lease (D1, D5).
+pub type RenewReq[K]: codec + key + send {
+    key: K,
+    holder_node: u64,
+    holder_incarnation: u64,
+    term: u64,
+    seq: u64,
+    lease_ns: u64,
+    holder_boot_ns: u64,
+    reported_drift_ppm: u64,
+    max_rtt_ns: u64
+}
+
+/// Voluntary release of an incumbent's active term lease.
+pub type ReleaseReq[K]: codec + key + send {
+    key: K,
+    holder_node: u64,
+    holder_incarnation: u64,
+    term: u64
+}
+
+/// Lease grant returned only after durable commit (D1).
+pub type LeaseGrant: codec + key + send {
+    term: u64,
+    lease_ns: u64,
+    wait_ns: u64,
+    dir_boot_ns: u64,
+    dir_epoch: u64,
+    seq: u64
+}
+
+/// Holder-side lease token checked strictly against `std.clock.boot_ns` (D2, D6).
+pub type HolderLease: codec + key + send {
+    holder_node: u64,
+    holder_incarnation: u64,
+    term: u64,
+    send_boot_ns: u64,
+    lease_ns: u64,
+    expires_boot_ns: u64
+}
+
+/// Typed directory refusals (FLT-5).
+pub type DirError: codec + key + send = Stale(u64) | Held(u64) | Quarantined(u64) | DriftExceeded(u64, u64) | OutOfPartition | InvalidConfig | Unknown | StoreErr
+
+/// Exact 128-bit comparison: `a * b > c * d`.
+fn mul_gt(a: u64, b: u64, c: u64, d: u64) -> bool {
+    let (hi1, lo1) = int.mul_wide(a, b)
+    let (hi2, lo2) = int.mul_wide(c, d)
+    hi1 > hi2 || (hi1 == hi2 && lo1 > lo2)
+}
+
+/// Validate a `DirectoryConfig` against D3/D5 bounds.
+pub fn validate_config(cfg: DirectoryConfig) -> Result[(), DirError] {
+    if cfg.drift_ppm >= DIR_PPM || cfg.drift_ppm > MAX_DRIFT_PPM {
+        return Error(DriftExceeded(cfg.drift_ppm, MAX_DRIFT_PPM))
+    }
+    if cfg.default_lease_ns == 0 || cfg.max_lease_cap_ns < cfg.default_lease_ns {
+        return Error(InvalidConfig)
+    }
+    Ok(())
+}
+
+/// D3: exact integer ceiling `W = ceil(lease_ns * (1 + d) / (1 - d))` where `d = drift_ppm / 10^6`.
+/// Decomposes `lease_ns = q * (PPM - d) + r` so `r * 2d` never overflows `u64`.
+pub fn lease_wait_ns(lease_ns: u64, drift_ppm: u64) -> Result[u64, DirError] {
+    if drift_ppm >= DIR_PPM || drift_ppm > MAX_DRIFT_PPM {
+        return Error(DriftExceeded(drift_ppm, MAX_DRIFT_PPM))
+    }
+    if lease_ns == 0 || drift_ppm == 0 {
+        return Ok(lease_ns)
+    }
+    let den = DIR_PPM - drift_ppm
+    let two_d = 2u64 * drift_ppm
+    let q = lease_ns / den
+    let r = lease_ns % den
+    let extra_whole = int.saturating_mul(q, two_d)
+    let rem_num = r * two_d
+    let extra_rem = (rem_num + den - 1u64) / den
+    Ok(int.saturating_add(lease_ns, int.saturating_add(extra_whole, extra_rem)))
+}
+
+/// Estimate observed drift in ppm between `dir_delta_ns` and `holder_delta_ns` for diagnostics.
+fn estimate_observed_ppm(dir_delta_ns: u64, holder_delta_ns: u64) -> u64 {
+    if dir_delta_ns == 0 {
+        return DIR_PPM
+    }
+    let diff = if holder_delta_ns >= dir_delta_ns {
+        holder_delta_ns - dir_delta_ns
+    } else {
+        dir_delta_ns - holder_delta_ns
+    }
+    let q = diff / dir_delta_ns
+    let r = diff % dir_delta_ns
+    let scaled_q = int.saturating_mul(q, DIR_PPM)
+    let scaled_r = int.saturating_mul(r, DIR_PPM) / dir_delta_ns
+    int.saturating_add(scaled_q, scaled_r)
+}
+
+/// D5: verify that a holder's declared drift and observed `boot_ns` progression lie within `±d`.
+pub fn validate_drift(reported_drift_ppm: u64, drift_ppm: u64, prev_dir_boot_ns: Option[u64], cur_dir_boot_ns: u64, prev_holder_boot_ns: Option[u64], cur_holder_boot_ns: u64, max_rtt_ns: u64) -> Result[(), DirError] {
+    if drift_ppm >= DIR_PPM || drift_ppm > MAX_DRIFT_PPM {
+        return Error(DriftExceeded(drift_ppm, MAX_DRIFT_PPM))
+    }
+    if reported_drift_ppm > drift_ppm {
+        return Error(DriftExceeded(reported_drift_ppm, drift_ppm))
+    }
+    let Some(prev_d) = prev_dir_boot_ns else {
+        return Ok(())
+    }
+    let Some(prev_h) = prev_holder_boot_ns else {
+        return Ok(())
+    }
+    if cur_holder_boot_ns < prev_h {
+        // Non-monotonic / regressed holder boot clock violates D2/D5.
+        return Error(DriftExceeded(DIR_PPM, drift_ppm))
+    }
+    if cur_dir_boot_ns <= prev_d {
+        return Ok(())
+    }
+    let dir_delta = cur_dir_boot_ns - prev_d
+    let holder_delta = cur_holder_boot_ns - prev_h
+    let ppm_minus = DIR_PPM - drift_ppm
+    let ppm_plus = DIR_PPM + drift_ppm
+    // Slow-clock check (safety-critical): holder_delta * (PPM + d) >= (dir_delta - max_rtt_ns) * (PPM - d).
+    if dir_delta > max_rtt_ns {
+        let min_dir = dir_delta - max_rtt_ns
+        if mul_gt(min_dir, ppm_minus, holder_delta, ppm_plus) {
+            return Error(DriftExceeded(estimate_observed_ppm(dir_delta, holder_delta), drift_ppm))
+        }
+    }
+    // Fast-clock check: holder_delta * (PPM - d) <= (dir_delta + max_rtt_ns) * (PPM + d).
+    let max_dir = int.saturating_add(dir_delta, max_rtt_ns)
+    if mul_gt(holder_delta, ppm_minus, max_dir, ppm_plus) {
+        return Error(DriftExceeded(estimate_observed_ppm(dir_delta, holder_delta), drift_ppm))
+    }
+    Ok(())
+}
+
+/// Encode a generic key `K` with its canonical order-preserving `std.codec.Key[K]`.
+pub fn encode_partition_key[K](key_codec: std.codec.Key[K], k: K) -> Bytes {
+    let mut out: Bytes = list.new()
+    std.codec.encode_key(key_codec, k, mut out)
+    take out
+}
+
+/// True iff `key_bytes` lies in `[meta.min_key_bytes, meta.max_key_bytes]`.
+pub fn key_bytes_in_partition(meta: PartitionMeta, key_bytes: Bytes) -> bool {
+    let lo_ok = list.compare_bytes(key_bytes, meta.min_key_bytes) != Less
+    let hi_ok = list.compare_bytes(key_bytes, meta.max_key_bytes) != Greater
+    lo_ok && hi_ok
+}
+
+/// Check that a generic key `K` belongs to this `Directory[K]` partition.
+pub fn check_key_in_partition[K](meta: PartitionMeta, key_codec: std.codec.Key[K], k: K) -> Result[(), DirError] {
+    let encoded = encode_partition_key(key_codec, k)
+    if !key_bytes_in_partition(meta, encoded) {
+        return Error(OutOfPartition)
+    }
+    Ok(())
+}
+
+/// D4: construct a replacement host's takeover session from durable `PartitionMeta` and local `clock.boot_ns`.
+/// For `dir_epoch == 1` with `max_lease_ns == 0` (fresh genesis), quarantine is empty (`W = 0`).
+/// For any takeover where `max_lease_ns > 0`, new-term grants must wait `W(L_max, d)` on the new host's `boot_ns`.
+pub fn start_takeover_session(meta: PartitionMeta, takeover_boot_ns: u64) -> Result[(PartitionMeta, DirSession), DirError] {
+    if meta.drift_ppm >= DIR_PPM || meta.drift_ppm > MAX_DRIFT_PPM {
+        return Error(DriftExceeded(meta.drift_ppm, MAX_DRIFT_PPM))
+    }
+    let next_epoch = meta.dir_epoch + 1u64
+    let wait = if meta.max_lease_ns > 0 {
+        lease_wait_ns(meta.max_lease_ns, meta.drift_ppm)?
+    } else {
+        0u64
+    }
+    let until = int.saturating_add(takeover_boot_ns, wait)
+    let mut next_meta: PartitionMeta = clone(meta)
+    next_meta.dir_epoch = next_epoch
+    let session = DirSession(dir_epoch: next_epoch, takeover_boot_ns: takeover_boot_ns, quarantine_until_boot_ns: until)
+    Ok((take next_meta, session))
+}
+
+fn resolve_lease_ns(meta: PartitionMeta, requested: u64) -> Result[u64, DirError] {
+    let chosen = if requested == 0 {
+        meta.default_lease_ns
+    } else {
+        requested
+    }
+    if chosen == 0 || chosen > meta.max_lease_cap_ns {
+        return Error(InvalidConfig)
+    }
+    Ok(chosen)
+}
+
+/// Pure core transition for `claim` (shared by both durable Place transactions and `SimDirectory[K]`).
+/// Enforces D2 (boot_ns), D3 (W), D4 (takeover quarantine), D5 (drift), and D6 (term CAS).
+pub fn eval_claim[K](meta: PartitionMeta, session: DirSession, existing: Option[LeaseRow], dir_boot_ns: u64, req: ClaimReq[K]) -> Result[(PartitionMeta, LeaseRow, LeaseGrant), DirError] {
+    if session.dir_epoch != meta.dir_epoch {
+        return Error(Stale(meta.dir_epoch))
+    }
+    validate_drift(req.reported_drift_ppm, meta.drift_ppm, None, dir_boot_ns, None, req.holder_boot_ns, 0u64)?
+    let lease_ns = resolve_lease_ns(meta, req.lease_ns)?
+    let wait_ns = lease_wait_ns(lease_ns, meta.drift_ppm)?
+    // D4: during directory takeover quarantine, all conflicting new-term claims wait W(L_max, d).
+    if dir_boot_ns < session.quarantine_until_boot_ns {
+        return Error(Quarantined(session.quarantine_until_boot_ns))
+    }
+    match existing {
+        None => {
+            if req.expect_term != 0 {
+                return Error(Stale(0u64))
+            }
+        },
+        Some(row) => {
+            if row.term != req.expect_term {
+                return Error(Stale(row.term))
+            }
+            // Same directory epoch: existing term's lease must have expired past W on boot_ns.
+            if row.dir_epoch == session.dir_epoch && dir_boot_ns < row.lease_end_boot_ns {
+                return Error(Held(row.lease_end_boot_ns))
+            }
+        },
+    }
+    let next_term = req.expect_term + 1u64
+    let lease_end = int.saturating_add(dir_boot_ns, wait_ns)
+    let mut next_meta: PartitionMeta = clone(meta)
+    if lease_ns > next_meta.max_lease_ns {
+        next_meta.max_lease_ns = lease_ns
+    }
+    let next_row = LeaseRow(
+        holder_node: req.holder_node,
+        holder_incarnation: req.holder_incarnation,
+        term: next_term,
+        lease_ns: lease_ns,
+        dir_epoch: session.dir_epoch,
+        last_dir_boot_ns: dir_boot_ns,
+        lease_end_boot_ns: lease_end,
+        last_holder_boot_ns: req.holder_boot_ns,
+        seq: 0u64,
+        payload: clone(req.payload),
+    )
+    let grant = LeaseGrant(
+        term: next_term,
+        lease_ns: lease_ns,
+        wait_ns: wait_ns,
+        dir_boot_ns: dir_boot_ns,
+        dir_epoch: session.dir_epoch,
+        seq: 0u64,
+    )
+    Ok((take next_meta, take next_row, grant))
+}
+
+/// Pure core transition for `renew` (shared by durable Place transactions and `SimDirectory[K]`).
+/// D4: same-term renewals of an existing incumbent resume IMMEDIATELY during takeover quarantine.
+/// D5: checks both declared drift and observed `holder_boot_ns` vs `dir_boot_ns` rate within `±d`.
+pub fn eval_renew[K](meta: PartitionMeta, session: DirSession, take existing: Option[LeaseRow], dir_boot_ns: u64, req: RenewReq[K]) -> Result[(PartitionMeta, LeaseRow, LeaseGrant), DirError] {
+    if session.dir_epoch != meta.dir_epoch {
+        return Error(Stale(meta.dir_epoch))
+    }
+    let Some(row) = existing else {
+        return Error(Unknown)
+    }
+    if row.term != req.term || row.holder_node != req.holder_node || row.holder_incarnation != req.holder_incarnation {
+        return Error(Stale(row.term))
+    }
+    // Check drift only against a previous reading from the SAME directory host epoch (boot clocks are host-local).
+    let (prev_d, prev_h): (Option[u64], Option[u64]) = if row.dir_epoch == session.dir_epoch {
+        (Some(row.last_dir_boot_ns), Some(row.last_holder_boot_ns))
+    } else {
+        (None, None)
+    }
+    validate_drift(req.reported_drift_ppm, meta.drift_ppm, prev_d, dir_boot_ns, prev_h, req.holder_boot_ns, req.max_rtt_ns)?
+    let lease_ns = resolve_lease_ns(meta, req.lease_ns)?
+    let wait_ns = lease_wait_ns(lease_ns, meta.drift_ppm)?
+    let mut next_meta: PartitionMeta = clone(meta)
+    if lease_ns > next_meta.max_lease_ns {
+        next_meta.max_lease_ns = lease_ns
+    }
+    let new_end = int.saturating_add(dir_boot_ns, wait_ns)
+    let lease_end = if row.dir_epoch == session.dir_epoch {
+        order.max(row.lease_end_boot_ns, new_end)
+    } else {
+        new_end
+    }
+    let next_seq = order.max(row.seq, req.seq)
+    let next_row = LeaseRow(
+        holder_node: row.holder_node,
+        holder_incarnation: row.holder_incarnation,
+        term: row.term,
+        lease_ns: lease_ns,
+        dir_epoch: session.dir_epoch,
+        last_dir_boot_ns: dir_boot_ns,
+        lease_end_boot_ns: lease_end,
+        last_holder_boot_ns: req.holder_boot_ns,
+        seq: next_seq,
+        payload: clone(row.payload),
+    )
+    let grant = LeaseGrant(
+        term: row.term,
+        lease_ns: lease_ns,
+        wait_ns: wait_ns,
+        dir_boot_ns: dir_boot_ns,
+        dir_epoch: session.dir_epoch,
+        seq: next_seq,
+    )
+    Ok((take next_meta, take next_row, grant))
+}
+
+/// Pure core transition for voluntary `release`. Clears active lease deadline while keeping term monotone.
+pub fn eval_release[K](meta: PartitionMeta, session: DirSession, take existing: Option[LeaseRow], dir_boot_ns: u64, req: ReleaseReq[K]) -> Result[LeaseRow, DirError] {
+    if session.dir_epoch != meta.dir_epoch {
+        return Error(Stale(meta.dir_epoch))
+    }
+    let Some(row) = existing else {
+        return Error(Unknown)
+    }
+    if row.term != req.term || row.holder_node != req.holder_node || row.holder_incarnation != req.holder_incarnation {
+        return Error(Stale(row.term))
+    }
+    let mut next_row: LeaseRow = clone(row)
+    next_row.dir_epoch = session.dir_epoch
+    next_row.last_dir_boot_ns = dir_boot_ns
+    next_row.lease_end_boot_ns = dir_boot_ns
+    Ok(take next_row)
+}
+
+// ---- Holder-side suspend-inclusive lease guard (D2, D6) ----
+/// Capture the holder's suspend-inclusive `clock.boot_ns` right before sending `claim` or `renew`.
+pub fn holder_begin_request(holder_clock: Clock) -> u64 {
+    std.clock.boot_ns(holder_clock)
+}
+
+/// Construct a holder-side lease token anchored at request send time (`send_boot_ns`).
+pub fn holder_accept_grant(holder_node: u64, holder_incarnation: u64, send_boot_ns: u64, grant: LeaseGrant) -> HolderLease {
+    HolderLease(
+        holder_node: holder_node,
+        holder_incarnation: holder_incarnation,
+        term: grant.term,
+        send_boot_ns: send_boot_ns,
+        lease_ns: grant.lease_ns,
+        expires_boot_ns: int.saturating_add(send_boot_ns, grant.lease_ns),
+    )
+}
+
+/// True iff the holder's suspend-inclusive `clock.boot_ns` is still strictly before `expires_boot_ns`.
+/// Because `boot_ns` keeps advancing across OS suspend / VM pause / `sim.world.pause_at`,
+/// a paused holder immediately sees `false` upon waking after `>= L`.
+pub fn holder_holds_lease(lease: HolderLease, holder_clock: Clock) -> bool {
+    std.clock.boot_ns(holder_clock) < lease.expires_boot_ns
+}
+
+/// Remaining nanoseconds on the holder's suspend-inclusive clock (0 if expired).
+pub fn holder_remaining_ns(lease: HolderLease, holder_clock: Clock) -> u64 {
+    int.saturating_sub(lease.expires_boot_ns, std.clock.boot_ns(holder_clock))
+}
+
+// ---- Lightweight in-memory partition wrapper for scale simulation (shares eval_claim/eval_renew) ----
+pub opaque type SimDirectory[K: key]: send {
+    meta: PartitionMeta,
+    session: DirSession,
+    key_codec: std.codec.Key[K],
+    rows: Map[K, LeaseRow],
+    commits: u64
+}
+
+pub fn sim_directory_new[K: key](cfg: DirectoryConfig, take key_codec: std.codec.Key[K], min_key: K, max_key: K, init_boot_ns: u64) -> Result[SimDirectory[K], DirError] {
+    validate_config(cfg)?
+    let min_b = encode_partition_key(key_codec, min_key)
+    let max_b = encode_partition_key(key_codec, max_key)
+    if list.compare_bytes(min_b, max_b) == Greater {
+        return Error(InvalidConfig)
+    }
+    let meta = PartitionMeta(
+        partition_id: cfg.partition_id,
+        min_key_bytes: take min_b,
+        max_key_bytes: take max_b,
+        drift_ppm: cfg.drift_ppm,
+        default_lease_ns: cfg.default_lease_ns,
+        max_lease_cap_ns: cfg.max_lease_cap_ns,
+        max_lease_ns: 0u64,
+        dir_epoch: 1u64,
+    )
+    let session = DirSession(dir_epoch: 1u64, takeover_boot_ns: init_boot_ns, quarantine_until_boot_ns: init_boot_ns)
+    Ok(SimDirectory(meta: take meta, session: session, key_codec: take key_codec, rows: map.new(), commits: 1u64))
+}
+
+pub fn sim_directory_takeover[K: key](mut d: SimDirectory[K], new_host_boot_ns: u64) -> Result[DirSession, DirError] {
+    let (take next_meta, session) = start_takeover_session(d.meta, new_host_boot_ns)?
+    d.meta = take next_meta
+    d.session = session
+    d.commits += 1u64
+    Ok(session)
+}
+
+pub fn sim_directory_claim[K: key](mut d: SimDirectory[K], dir_boot_ns: u64, take req: ClaimReq[K]) -> Result[LeaseGrant, DirError] {
+    check_key_in_partition(d.meta, d.key_codec, req.key)?
+    let existing: Option[LeaseRow] = match map.get(d.rows, req.key) {
+        Some(v) => Some(clone(v)),
+        None => None,
+    }
+    let (take next_meta, take next_row, grant) = eval_claim(d.meta, d.session, existing, dir_boot_ns, req)?
+    d.meta = take next_meta
+    let ClaimReq(key: take row_key, holder_node: _, holder_incarnation: _, expect_term: _, lease_ns: _, holder_boot_ns: _, reported_drift_ppm: _, payload: _) = take req
+    map.insert(mut d.rows, take row_key, take next_row)
+    d.commits += 1u64
+    Ok(grant)
+}
+
+pub fn sim_directory_renew[K: key](mut d: SimDirectory[K], dir_boot_ns: u64, take req: RenewReq[K]) -> Result[LeaseGrant, DirError] {
+    check_key_in_partition(d.meta, d.key_codec, req.key)?
+    let existing: Option[LeaseRow] = match map.get(d.rows, req.key) {
+        Some(v) => Some(clone(v)),
+        None => None,
+    }
+    let (take next_meta, take next_row, grant) = eval_renew(d.meta, d.session, take existing, dir_boot_ns, req)?
+    d.meta = take next_meta
+    let RenewReq(key: take row_key, holder_node: _, holder_incarnation: _, term: _, seq: _, lease_ns: _, holder_boot_ns: _, reported_drift_ppm: _, max_rtt_ns: _) = take req
+    map.insert(mut d.rows, take row_key, take next_row)
+    d.commits += 1u64
+    Ok(grant)
+}
+
+pub fn sim_directory_read[K: key](d: SimDirectory[K], key: K) -> Result[LeaseRow, DirError] {
+    check_key_in_partition(d.meta, d.key_codec, key)?
+    match map.get(d.rows, key) {
+        Some(v) => Ok(clone(v)),
+        None => Error(Unknown),
+    }
+}
+
+pub fn sim_directory_meta[K: key](d: SimDirectory[K]) -> PartitionMeta {
+    clone(d.meta)
+}
+
+pub fn sim_directory_session[K: key](d: SimDirectory[K]) -> DirSession {
+    d.session
+}
+
+pub fn sim_directory_commits[K: key](d: SimDirectory[K]) -> u64 {
+    d.commits
+}

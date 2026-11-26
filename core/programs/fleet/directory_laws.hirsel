@@ -1,0 +1,469 @@
+// Laws for the dedicated `Directory[K]` Place library (docs/spec/fleet.md FLT-5, rules D1-D6).
+// Covers:
+//   1. Two holders never both believe they hold term t (or overlapping authority) across a suspend / clock pause.
+//   2. A directory takeover waits W = ceil(L_max * (1+d)/(1-d)) on the replacement's boot_ns before granting a new term,
+//      while same-term renewals resume immediately and durable Place state survives takeover (D1, D4).
+//   3. A drift beyond d (config, declared, or observed via std.sim.world.drifting) is refused with DriftExceeded (D5).
+/// bug: Use monotonic mono_ns instead of suspend-inclusive boot_ns for leases, letting a paused old holder and a new holder both believe they hold authority after suspend.
+/// oracle: docs/spec/fleet.md FLT-5 D2/D3/D6 across std.sim.world.pause_at and opposite-sign drift bounds ±d.
+@test
+fn sim_directory_no_dual_holders_across_suspend(tasks: Tasks, random: Random) -> Result[(), ()] waits {
+    let ms: u64 = 1000000
+    let lease_ns: u64 = 1000 * ms
+    let drift_ppm: u64 = 200
+    // Exact W = ceil(1_000_000_000 * 1_000_200 / 999_800) = 1_000_400_081 ns.
+    let expected_w: u64 = 1000400081
+    let w = result.unwrap(directory.lease_wait_ns(lease_ns, drift_ppm))
+    if w != expected_w {
+        fail("FLT-5 D3: lease_wait_ns did not match exact ceil(L*(1+d)/(1-d))")
+    }
+    let (take world_in, clk_world) = std.sim.world.new(30561, 0, 0)
+    let mut world = take world_in
+    let mut clocks = std.sim.world.clocks(mut world)
+    // Worst-case opposite-sign drift within ±d: Directory runs fast (+200 ppm), Holder A runs slow (-200 ppm).
+    let (_, clk_dir) = std.sim.world.drifting(mut clocks, 0, 0, 200)
+    let (idx_a, clk_a) = std.sim.world.drifting(mut clocks, 0, 0, -200)
+    let (_, clk_b) = std.sim.world.drifting(mut clocks, 0, 0, 0)
+    // Suspend Holder A for 1,200 ms across [100ms, 1300ms): its mono_ns freezes, while its boot_ns keeps advancing!
+    std.sim.world.pause_at(mut clocks, idx_a, 100 * ms, 1300 * ms)
+    // Open a real durable Directory[u64] Place backed by store.Db.
+    let mut db = store.memory(clk_dir, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let mut decl = result.unwrap(store.declare(db, Migrate))
+    let handles = result.unwrap(directory.declare_directory(mut decl, "rooms_p0", std.codec.key_u64()))
+    let _ = result.unwrap(store.seal(mut db, take decl))
+    let cfg = directory.DirectoryConfig(partition_id: 0, drift_ppm: drift_ppm, default_lease_ns: lease_ns, max_lease_cap_ns: 60000 * ms)
+    let init_ran = result.unwrap(store.run(mut db, None, (store.copy_env(handles), cfg), fn(mut tx, input) -> Result[Result[directory.PartitionMeta, directory.DirError], store.Error] {
+        Ok(directory.init_partition_tx(mut tx, input.0, input.1, 0u64, 999u64))
+    }))
+    let Committed(take init_done) = take init_ran else {
+        fail("directory partition init did not commit")
+    }
+    let _ = result.unwrap(store.durable(mut db, init_done.ticket))
+    let init_res: Result[directory.PartitionMeta, directory.DirError] = clone(init_done.value)
+    let _ = result.unwrap(take init_res)
+    let session = directory.DirSession(dir_epoch: 1, takeover_boot_ns: std.clock.boot_ns(clk_dir), quarantine_until_boot_ns: std.clock.boot_ns(clk_dir))
+    // Verify dedicated Directory[u64] Place schema and runner registration descriptors compile cleanly.
+    let _ = code.describe(directory.directory_u64_schema)
+    let _ = code.describe(directory.register_u64_directory_place)
+    // Partition isolation check: key 1000 is outside [0, 999] -> OutOfPartition.
+    let oop = directory.durable_claim(mut db, handles, session, clk_dir, directory.ClaimReq(
+        key: 1000u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_a),
+        reported_drift_ppm: 200,
+        payload: b"oob",
+    ))
+    if let Error(OutOfPartition) = oop {} else {
+        fail("Directory[K] accepted key outside its keyspace partition")
+    }
+    // At t=0: Holder A claims room 42 -> term 1.
+    let a_send = directory.holder_begin_request(clk_a)
+    let a_mono_start = host.mono_ns(clk_a)
+    let grant_a = result.unwrap(directory.durable_claim(mut db, handles, session, clk_dir, directory.ClaimReq(
+        key: 42u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: lease_ns,
+        holder_boot_ns: a_send,
+        reported_drift_ppm: 200,
+        payload: b"home-a",
+    )))
+    if grant_a.term != 1 || grant_a.wait_ns != expected_w {
+        fail("Holder A did not receive term 1 with exact W")
+    }
+    let lease_a = directory.holder_accept_grant(1, 1, a_send, grant_a)
+    if !directory.holder_holds_lease(lease_a, clk_a) {
+        fail("Holder A should hold term 1 at t=0")
+    }
+    // Drive clocks in a background driver task across Holder A's suspend window.
+    let driver = task.spawn(tasks, bytes 65536, SimClockDriver(clocks: take clocks, tasks), run_sim_clocks)
+    // At t = 900ms (Holder A is suspended, directory boot_ns ~ 900.18ms < W):
+    // Holder B tries to claim room 42 -> MUST be refused Held!
+    host.sleep_until(clk_world, 900 * ms)
+    let early_b = directory.durable_claim(mut db, handles, session, clk_dir, directory.ClaimReq(
+        key: 42u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 1,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_b),
+        reported_drift_ppm: 200,
+        payload: b"home-b",
+    ))
+    if let Error(Held(_)) = early_b {} else {
+        fail("Directory granted term 2 before W elapsed")
+    }
+    // At t = 1,001ms: Directory boot_ns (~1,001.2ms) >= W, so Directory grants term 2 to Holder B.
+    // Meanwhile Holder A's boot_ns (~1,000.8ms) >= 1,000ms -> Holder A MUST ALREADY consider its lease expired!
+    host.sleep_until(clk_world, 1001 * ms)
+    let b_send = directory.holder_begin_request(clk_b)
+    let grant_b = result.unwrap(directory.durable_claim(mut db, handles, session, clk_dir, directory.ClaimReq(
+        key: 42u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 1,
+        lease_ns: lease_ns,
+        holder_boot_ns: b_send,
+        reported_drift_ppm: 200,
+        payload: b"home-b",
+    )))
+    if grant_b.term != 2 {
+        fail("Holder B did not receive term 2 after W")
+    }
+    let lease_b = directory.holder_accept_grant(2, 1, b_send, grant_b)
+    if !directory.holder_holds_lease(lease_b, clk_b) {
+        fail("Holder B should hold term 2")
+    }
+    // Advance past Holder A's suspend [100ms, 1300ms) -> t = 1,350ms: Holder A wakes up!
+    host.sleep_until(clk_world, 1350 * ms)
+    let a_mono_after = host.mono_ns(clk_a)
+    let a_boot_after = std.clock.boot_ns(clk_a)
+    // Confirm the suspend actually froze mono_ns (< lease_ns) while boot_ns kept counting (>= lease_ns)!
+    // A plausible bad implementation using mono_ns would see (a_mono_after - a_mono_start) < lease_ns
+    // and wrongly believe Holder A still holds term 1 concurrently with Holder B's term 2!
+    if a_mono_after - a_mono_start >= lease_ns {
+        fail("test setup: pause_at did not freeze Holder A mono_ns below lease_ns")
+    }
+    if a_boot_after < lease_a.expires_boot_ns {
+        fail("boot_ns did not advance across pause_at")
+    }
+    if directory.holder_holds_lease(lease_a, clk_a) {
+        fail("DUAL HOLDER BUG: paused Holder A still believes it holds term 1 while Holder B holds term 2")
+    }
+    // Also check Holder A's stale renewal of term 1 is refused Stale(2).
+    let stale_renew = directory.durable_renew(mut db, handles, session, clk_dir, directory.RenewReq(
+        key: 42u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        term: 1,
+        seq: 1,
+        lease_ns: lease_ns,
+        holder_boot_ns: a_boot_after,
+        reported_drift_ppm: 200,
+        max_rtt_ns: 0,
+    ))
+    if let Error(Stale(2)) = stale_renew {} else {
+        fail("Directory did not refuse stale term 1 renewal with Stale(2)")
+    }
+    result.unwrap(task.join(take driver))
+    Ok(())
+}
+
+/// bug: Grant a new term immediately after a Directory[K] Place takeover without waiting W = ceil(L_max*(1+d)/(1-d)) on the replacement host's boot_ns, or stall same-term incumbent renewals during quarantine.
+/// oracle: docs/spec/fleet.md FLT-5 D1/D3/D4 durable takeover quarantine with SFU profile (L = 24s, d = 200 ppm, W = 24_009_601_921 ns).
+@test
+fn sim_directory_takeover_waits_w(tasks: Tasks, random: Random) -> Result[(), ()] waits {
+    let ms: u64 = 1000000
+    let sfu_l: u64 = directory.SFU_LEASE_NS
+    let drift_ppm: u64 = directory.DEFAULT_DRIFT_PPM
+    // Exact W for SFU profile: ceil(24_000_000_000 * 1_000_200 / 999_800) = 24_009_601_921 ns.
+    let expected_w: u64 = 24009601921
+    let w = result.unwrap(directory.lease_wait_ns(sfu_l, drift_ppm))
+    if w != expected_w {
+        fail("FLT-5 SFU W mismatch")
+    }
+    let (take world_in, clk_world) = std.sim.world.new(30562, 0, 0)
+    let mut world = take world_in
+    let mut clocks = std.sim.world.clocks(mut world)
+    // Old directory host D1 starts at boot_ns = 500s; replacement host D2 starts at unrelated boot_ns = 5s!
+    let (_, clk_d1) = std.sim.world.drifting(mut clocks, 500000 * ms, 0, 0)
+    let (idx_d2, clk_d2) = std.sim.world.drifting(mut clocks, 5000 * ms, 0, 200)
+    let (_, clk_a) = std.sim.world.drifting(mut clocks, 10000 * ms, 0, -200)
+    let (_, clk_b) = std.sim.world.drifting(mut clocks, 20000 * ms, 0, 0)
+    // Even if replacement D2 pauses briefly during quarantine, D2's boot_ns still advances accurately.
+    std.sim.world.pause_at(mut clocks, idx_d2, 2000 * ms, 4000 * ms)
+    let mut db = store.memory(clk_d1, random, result.unwrap(store.sized(Memory, 16777216u64)))
+    let mut decl = result.unwrap(store.declare(db, Migrate))
+    let handles = result.unwrap(directory.declare_directory(mut decl, "sfu_p1", std.codec.key_u64()))
+    let _ = result.unwrap(store.seal(mut db, take decl))
+    let cfg = directory.DirectoryConfig(partition_id: 1, drift_ppm: drift_ppm, default_lease_ns: sfu_l, max_lease_cap_ns: 60000 * ms)
+    let init_ran = result.unwrap(store.run(mut db, None, (store.copy_env(handles), cfg), fn(mut tx, input) -> Result[Result[directory.PartitionMeta, directory.DirError], store.Error] {
+        Ok(directory.init_partition_tx(mut tx, input.0, input.1, 0u64, 10000u64))
+    }))
+    let Committed(take init_done) = take init_ran else {
+        fail("init failed")
+    }
+    let _ = result.unwrap(store.durable(mut db, init_done.ticket))
+    let init_res: Result[directory.PartitionMeta, directory.DirError] = clone(init_done.value)
+    let _ = result.unwrap(take init_res)
+    let sess1 = directory.DirSession(dir_epoch: 1, takeover_boot_ns: std.clock.boot_ns(clk_d1), quarantine_until_boot_ns: std.clock.boot_ns(clk_d1))
+    // D1 grants room 7 to Holder A (term 1, L = 24s) -> durable L_max becomes 24s.
+    let a_send1 = directory.holder_begin_request(clk_a)
+    let grant_a1 = result.unwrap(directory.durable_claim(mut db, handles, sess1, clk_d1, directory.ClaimReq(
+        key: 7u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: sfu_l,
+        holder_boot_ns: a_send1,
+        reported_drift_ppm: drift_ppm,
+        payload: b"room-7-a",
+    )))
+    let mut lease_a = directory.holder_accept_grant(1, 1, a_send1, grant_a1)
+    let driver = task.spawn(tasks, bytes 65536, SimClockDriver(clocks: take clocks, tasks), run_sim_clocks)
+    // At t = 1s: D1 crashes; replacement host D2 takes over the durable Directory[u64] Place!
+    host.sleep_until(clk_world, 1000 * ms)
+    let d2_takeover_boot = std.clock.boot_ns(clk_d2)
+    let sess2 = result.unwrap(directory.durable_takeover(mut db, handles, clk_d2))
+    if sess2.dir_epoch != 2 || sess2.quarantine_until_boot_ns != d2_takeover_boot + expected_w {
+        fail("D4: takeover session did not set dir_epoch=2 and quarantine_until = takeover_boot + W(L_max, d)")
+    }
+    // D4 Rule: During quarantine (at t = 5s, only 4s after takeover):
+    //   (a) Same-term renewal by existing incumbent A resumes IMMEDIATELY!
+    host.sleep_until(clk_world, 5000 * ms)
+    let a_send2 = directory.holder_begin_request(clk_a)
+    let renew_a = result.unwrap(directory.durable_renew(mut db, handles, sess2, clk_d2, directory.RenewReq(
+        key: 7u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        term: 1,
+        seq: 1,
+        lease_ns: sfu_l,
+        holder_boot_ns: a_send2,
+        reported_drift_ppm: drift_ppm,
+        max_rtt_ns: 0,
+    )))
+    if renew_a.term != 1 || renew_a.dir_epoch != 2 || renew_a.seq != 1 {
+        fail("D4: same-term renewal failed during takeover quarantine")
+    }
+    lease_a = directory.holder_accept_grant(1, 1, a_send2, renew_a)
+    //   (b) Conflicting new-term claim on room 8 (or room 7) MUST be refused Quarantined!
+    let q_res = directory.durable_claim(mut db, handles, sess2, clk_d2, directory.ClaimReq(
+        key: 8u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: sfu_l,
+        holder_boot_ns: std.clock.boot_ns(clk_b),
+        reported_drift_ppm: drift_ppm,
+        payload: b"room-8-b",
+    ))
+    if let Error(Quarantined(until)) = q_res {
+        if until != sess2.quarantine_until_boot_ns {
+            fail("D4: Quarantined reported wrong deadline")
+        }
+    } else {
+        fail("D4 VIOLATION: new term granted during takeover quarantine")
+    }
+    // Just BEFORE W elapses on D2 (takeover was at t=1s; D2 runs +200ppm so W = 24.0096s takes ~24.0048s real time -> t=25.0048s).
+    // At t = 25,000ms (24.000s after takeover, D2 elapsed ~24.0048s < 24.0096s): STILL Quarantined!
+    host.sleep_until(clk_world, 25000 * ms)
+    let still_q = directory.durable_claim(mut db, handles, sess2, clk_d2, directory.ClaimReq(
+        key: 8u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: sfu_l,
+        holder_boot_ns: std.clock.boot_ns(clk_b),
+        reported_drift_ppm: drift_ppm,
+        payload: b"room-8-b",
+    ))
+    if let Error(Quarantined(_)) = still_q {} else {
+        fail("D4 VIOLATION: new term granted before full W elapsed (missing drift factor)")
+    }
+    // At t = 25,020ms: D2 elapsed ~24.0248s > W -> quarantine lifted! Room 8 claim succeeds cleanly!
+    host.sleep_until(clk_world, 25020 * ms)
+    let ok_8 = result.unwrap(directory.durable_claim(mut db, handles, sess2, clk_d2, directory.ClaimReq(
+        key: 8u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: sfu_l,
+        holder_boot_ns: std.clock.boot_ns(clk_b),
+        reported_drift_ppm: drift_ppm,
+        payload: b"room-8-b",
+    )))
+    if ok_8.term != 1 || ok_8.dir_epoch != 2 {
+        fail("new term claim on room 8 failed after quarantine wait W")
+    }
+    // Meanwhile room 7 was renewed by A at t=5s for 24s -> MUST still be Held at t=25.02s!
+    let held_7 = directory.durable_claim(mut db, handles, sess2, clk_d2, directory.ClaimReq(
+        key: 7u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 1,
+        lease_ns: sfu_l,
+        holder_boot_ns: std.clock.boot_ns(clk_b),
+        reported_drift_ppm: drift_ppm,
+        payload: b"room-7-b",
+    ))
+    if let Error(Held(_)) = held_7 {} else {
+        fail("room 7 renewed during quarantine was prematurely stolen before its new W elapsed")
+    }
+    // Advance past A's renewed lease (t=5s + 24.02s = t=29.05s): A's holder lease expired, B wins term 2!
+    host.sleep_until(clk_world, 29050 * ms)
+    if directory.holder_holds_lease(lease_a, clk_a) {
+        fail("Holder A still believed renewed lease was valid after W elapsed")
+    }
+    let won_7 = result.unwrap(directory.durable_claim(mut db, handles, sess2, clk_d2, directory.ClaimReq(
+        key: 7u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 1,
+        lease_ns: sfu_l,
+        holder_boot_ns: std.clock.boot_ns(clk_b),
+        reported_drift_ppm: drift_ppm,
+        payload: b"room-7-b",
+    )))
+    if won_7.term != 2 {
+        fail("Holder B failed to claim room 7 term 2 after A's lease expired")
+    }
+    result.unwrap(task.join(take driver))
+    Ok(())
+}
+
+/// bug: Accept a partition config or lease holder whose clock drift exceeds the fleet bound d, allowing unsafe lease overlap.
+/// oracle: docs/spec/fleet.md FLT-5 D5 drift refusal across config validation, declared drift, and observed std.sim.world.drifting clocks.
+@test
+fn sim_directory_refuses_drift_beyond_d(tasks: Tasks) -> Result[(), ()] waits {
+    let ms: u64 = 1000000
+    let lease_ns: u64 = 5000 * ms
+    let d_limit: u64 = 200
+    // 1. Config drift beyond MAX_DRIFT_PPM or >= PPM MUST be refused.
+    if let Error(DriftExceeded(_, _)) = directory.lease_wait_ns(lease_ns, directory.MAX_DRIFT_PPM + 1) {} else {
+        fail("lease_wait_ns accepted drift_ppm > MAX_DRIFT_PPM")
+    }
+    if let Error(DriftExceeded(_, _)) = directory.lease_wait_ns(lease_ns, directory.DIR_PPM) {} else {
+        fail("lease_wait_ns accepted drift_ppm == PPM")
+    }
+    let bad_cfg = directory.DirectoryConfig(partition_id: 0, drift_ppm: directory.MAX_DRIFT_PPM + 1, default_lease_ns: lease_ns, max_lease_cap_ns: 60000 * ms)
+    if let Error(DriftExceeded(_, _)) = directory.sim_directory_new(bad_cfg, std.codec.key_u64(), 0u64, 100u64, 0u64) {} else {
+        fail("sim_directory_new accepted excessive drift_ppm")
+    }
+    // 2. Valid partition with d = 200 ppm; test hosts with in-bound drift vs out-of-bound drift in std.sim.world.
+    let (take world_in, clk_world) = std.sim.world.new(30563, 0, 0)
+    let mut world = take world_in
+    let mut clocks = std.sim.world.clocks(mut world)
+    let (_, clk_dir) = std.sim.world.drifting(mut clocks, 0, 0, 100)
+    let (_, clk_good) = std.sim.world.drifting(mut clocks, 0, 0, -150)
+    let (_, clk_slow_bad) = std.sim.world.drifting(mut clocks, 0, 0, -5000)
+    let (_, clk_fast_bad) = std.sim.world.drifting(mut clocks, 0, 0, 5000)
+    let cfg = directory.DirectoryConfig(partition_id: 0, drift_ppm: d_limit, default_lease_ns: lease_ns, max_lease_cap_ns: 60000 * ms)
+    let mut dir = result.unwrap(directory.sim_directory_new(cfg, std.codec.key_u64(), 0u64, 100u64, std.clock.boot_ns(clk_dir)))
+    // 2a. Declared drift beyond d is refused immediately at claim.
+    let bad_decl = directory.sim_directory_claim(mut dir, std.clock.boot_ns(clk_dir), directory.ClaimReq(
+        key: 1u64,
+        holder_node: 99,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: lease_ns,
+        holder_boot_ns: 0,
+        reported_drift_ppm: d_limit + 1,
+        payload: b"bad-decl",
+    ))
+    if let Error(DriftExceeded(obs, lim)) = bad_decl {
+        if obs != d_limit + 1 || lim != d_limit {
+            fail("wrong DriftExceeded diagnostics for declared drift")
+        }
+    } else {
+        fail("D5: Directory accepted claim declaring drift beyond d")
+    }
+    // 2b. Three hosts claim keys at t=0 claiming drift <= d; two actually drift at ±5000 ppm (25x over d!).
+    let _ = result.unwrap(directory.sim_directory_claim(mut dir, std.clock.boot_ns(clk_dir), directory.ClaimReq(
+        key: 10u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_good),
+        reported_drift_ppm: d_limit,
+        payload: b"good",
+    )))
+    let _ = result.unwrap(directory.sim_directory_claim(mut dir, std.clock.boot_ns(clk_dir), directory.ClaimReq(
+        key: 11u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_slow_bad),
+        reported_drift_ppm: d_limit,
+        payload: b"slow",
+    )))
+    let _ = result.unwrap(directory.sim_directory_claim(mut dir, std.clock.boot_ns(clk_dir), directory.ClaimReq(
+        key: 12u64,
+        holder_node: 3,
+        holder_incarnation: 1,
+        expect_term: 0,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_fast_bad),
+        reported_drift_ppm: d_limit,
+        payload: b"fast",
+    )))
+    let driver = task.spawn(tasks, bytes 65536, SimClockDriver(clocks: take clocks, tasks), run_sim_clocks)
+    host.sleep_until(clk_world, 2000 * ms)
+    let dir_now = std.clock.boot_ns(clk_dir)
+    // Good host (-150 ppm vs dir +100 ppm: both within ±200 ppm) renews cleanly!
+    let ok_good = result.unwrap(directory.sim_directory_renew(mut dir, dir_now, directory.RenewReq(
+        key: 10u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        term: 1,
+        seq: 1,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_good),
+        reported_drift_ppm: d_limit,
+        max_rtt_ns: 0,
+    )))
+    if ok_good.term != 1 || ok_good.seq != 1 {
+        fail("in-bound drifting host failed to renew")
+    }
+    // Slow-drifting host (-5000 ppm, beyond d=200 ppm) MUST be refused DriftExceeded!
+    let ref_slow = directory.sim_directory_renew(mut dir, dir_now, directory.RenewReq(
+        key: 11u64,
+        holder_node: 2,
+        holder_incarnation: 1,
+        term: 1,
+        seq: 1,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_slow_bad),
+        reported_drift_ppm: d_limit,
+        max_rtt_ns: 0,
+    ))
+    if let Error(DriftExceeded(_, lim)) = ref_slow {
+        if lim != d_limit {
+            fail("slow host DriftExceeded had wrong limit")
+        }
+    } else {
+        fail("D5 VIOLATION: Directory accepted slow host drifting at -5000 ppm beyond d=200 ppm")
+    }
+    // Fast-drifting host (+5000 ppm, beyond d=200 ppm) MUST be refused DriftExceeded!
+    let ref_fast = directory.sim_directory_renew(mut dir, dir_now, directory.RenewReq(
+        key: 12u64,
+        holder_node: 3,
+        holder_incarnation: 1,
+        term: 1,
+        seq: 1,
+        lease_ns: lease_ns,
+        holder_boot_ns: std.clock.boot_ns(clk_fast_bad),
+        reported_drift_ppm: d_limit,
+        max_rtt_ns: 0,
+    ))
+    if let Error(DriftExceeded(_, lim)) = ref_fast {
+        if lim != d_limit {
+            fail("fast host DriftExceeded had wrong limit")
+        }
+    } else {
+        fail("D5 VIOLATION: Directory accepted fast host drifting at +5000 ppm beyond d=200 ppm")
+    }
+    // Regressed boot clock on good host MUST also be refused DriftExceeded!
+    let ref_regress = directory.sim_directory_renew(mut dir, dir_now + 1000 * ms, directory.RenewReq(
+        key: 10u64,
+        holder_node: 1,
+        holder_incarnation: 1,
+        term: 1,
+        seq: 2,
+        lease_ns: lease_ns,
+        holder_boot_ns: 0u64,
+        reported_drift_ppm: d_limit,
+        max_rtt_ns: 0,
+    ))
+    if let Error(DriftExceeded(_, _)) = ref_regress {} else {
+        fail("D5 VIOLATION: Directory accepted regressed holder boot_ns")
+    }
+    result.unwrap(task.join(take driver))
+    Ok(())
+}

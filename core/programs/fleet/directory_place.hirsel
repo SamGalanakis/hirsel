@@ -1,0 +1,215 @@
+// Ordinary durable Place layer for `Directory[K]` over `store` + `runner` (docs/spec/fleet.md FLT-5).
+// Each `Directory[K]` Place has its own independent `store.Declare` schema (`<name>.meta` + `<name>.leases`),
+// partitioned by keyspace and completely separate from `fleet@1`.
+// Rule D1 holds by construction: every `claim`, `renew`, `release` and `takeover` commits inside a `store.Tx`
+// and replies only after `store.durable` / `runner.transact` observes the commit Applied.
+pub type DirectoryHandles[K]: shareable + send {
+    meta: store.Cell[PartitionMeta],
+    leases: store.Table[K, LeaseRow],
+    key_codec: std.codec.Key[K]
+}
+
+fn dir_table_name(base: String, suffix: String) -> String {
+    let mut out: String = clone(base)
+    string.push(mut out, suffix)
+    take out
+}
+
+/// Declare a dedicated, standalone `Directory[K]` Place schema in `d`.
+pub fn declare_directory[K](mut d: store.Declare, name: String, take key_codec: std.codec.Key[K]) -> Result[DirectoryHandles[K], store.Error] {
+    let meta_codec: std.codec.Codec[PartitionMeta] = std.codec.of()
+    let row_codec: std.codec.Codec[LeaseRow] = std.codec.of()
+    let key_copy: std.codec.Key[K] = clone(key_codec)
+    let meta = store.declare_cell(mut d, dir_table_name(name, ".meta"), meta_codec)?
+    let decl = store.declare_table(mut d, dir_table_name(name, ".leases"), take key_copy, row_codec)?
+    let leases = store.finish(mut d, take decl)?
+    Ok(DirectoryHandles(meta: take meta, leases: take leases, key_codec: take key_codec))
+}
+
+/// Initialize the durable partition metadata cell on genesis (checked by D3/D5).
+pub fn init_partition_tx[K](mut tx: store.Tx, h: DirectoryHandles[K], cfg: DirectoryConfig, min_key: K, max_key: K) -> Result[PartitionMeta, DirError] {
+    validate_config(cfg)?
+    let min_b = encode_partition_key(h.key_codec, min_key)
+    let max_b = encode_partition_key(h.key_codec, max_key)
+    if list.compare_bytes(min_b, max_b) == Greater {
+        return Error(InvalidConfig)
+    }
+    let meta = PartitionMeta(
+        partition_id: cfg.partition_id,
+        min_key_bytes: take min_b,
+        max_key_bytes: take max_b,
+        drift_ppm: cfg.drift_ppm,
+        default_lease_ns: cfg.default_lease_ns,
+        max_lease_cap_ns: cfg.max_lease_cap_ns,
+        max_lease_ns: 0u64,
+        dir_epoch: 1u64,
+    )
+    let _ = store.cell_set(mut tx, h.meta, clone(meta)) ?=> |_| StoreErr
+    Ok(take meta)
+}
+
+/// D4: durable takeover transaction when a replacement host opens this `Directory[K]` Place.
+/// Increments durable `dir_epoch` and returns the replacement's volatile quarantine `DirSession`.
+pub fn takeover_partition_tx[K](mut tx: store.Tx, h: DirectoryHandles[K], takeover_boot_ns: u64) -> Result[DirSession, DirError] {
+    let current = store.cell_fetch(tx, h.meta) ?=> |_| StoreErr
+    let Some(meta) = current else {
+        return Error(Unknown)
+    }
+    let (take next_meta, session) = start_takeover_session(meta, takeover_boot_ns)?
+    let _ = store.cell_set(mut tx, h.meta, take next_meta) ?=> |_| StoreErr
+    Ok(session)
+}
+
+/// D1/D3/D4/D5/D6: durable `claim` inside a `store.Tx`.
+pub fn claim_tx[K](mut tx: store.Tx, h: DirectoryHandles[K], session: DirSession, dir_boot_ns: u64, req: ClaimReq[K]) -> Result[LeaseGrant, DirError] {
+    let current_meta = store.cell_fetch(tx, h.meta) ?=> |_| StoreErr
+    let Some(meta) = current_meta else {
+        return Error(Unknown)
+    }
+    check_key_in_partition(meta, h.key_codec, req.key)?
+    let existing = store.fetch(tx, h.leases, req.key) ?=> |_| StoreErr
+    let (take next_meta, take next_row, grant) = eval_claim(meta, session, existing, dir_boot_ns, req)?
+    if next_meta.max_lease_ns != meta.max_lease_ns {
+        let _ = store.cell_set(mut tx, h.meta, take next_meta) ?=> |_| StoreErr
+    }
+    let _ = store.put(mut tx, h.leases, req.key, take next_row) ?=> |_| StoreErr
+    Ok(grant)
+}
+
+/// D1/D4/D5: durable `renew` inside a `store.Tx` (resumes immediately during takeover quarantine).
+pub fn renew_tx[K](mut tx: store.Tx, h: DirectoryHandles[K], session: DirSession, dir_boot_ns: u64, req: RenewReq[K]) -> Result[LeaseGrant, DirError] {
+    let current_meta = store.cell_fetch(tx, h.meta) ?=> |_| StoreErr
+    let Some(meta) = current_meta else {
+        return Error(Unknown)
+    }
+    check_key_in_partition(meta, h.key_codec, req.key)?
+    let existing = store.fetch(tx, h.leases, req.key) ?=> |_| StoreErr
+    let (take next_meta, take next_row, grant) = eval_renew(meta, session, take existing, dir_boot_ns, req)?
+    if next_meta.max_lease_ns != meta.max_lease_ns {
+        let _ = store.cell_set(mut tx, h.meta, take next_meta) ?=> |_| StoreErr
+    }
+    let _ = store.put(mut tx, h.leases, req.key, take next_row) ?=> |_| StoreErr
+    Ok(grant)
+}
+
+/// Durable voluntary `release` inside a `store.Tx`.
+pub fn release_tx[K](mut tx: store.Tx, h: DirectoryHandles[K], session: DirSession, dir_boot_ns: u64, req: ReleaseReq[K]) -> Result[(), DirError] {
+    let current_meta = store.cell_fetch(tx, h.meta) ?=> |_| StoreErr
+    let Some(meta) = current_meta else {
+        return Error(Unknown)
+    }
+    check_key_in_partition(meta, h.key_codec, req.key)?
+    let existing = store.fetch(tx, h.leases, req.key) ?=> |_| StoreErr
+    let next_row = eval_release(meta, session, take existing, dir_boot_ns, req)?
+    let _ = store.put(mut tx, h.leases, req.key, take next_row) ?=> |_| StoreErr
+    Ok(())
+}
+
+/// Read-only linearizable lookup of one key's durable `LeaseRow`.
+pub fn read_tx[K](tx: store.Tx, h: DirectoryHandles[K], key: K) -> Result[LeaseRow, DirError] {
+    let current_meta = store.cell_fetch(tx, h.meta) ?=> |_| StoreErr
+    let Some(meta) = current_meta else {
+        return Error(Unknown)
+    }
+    check_key_in_partition(meta, h.key_codec, key)?
+    let existing = store.fetch(tx, h.leases, key) ?=> |_| StoreErr
+    match existing {
+        Some(row) => Ok(clone(row)),
+        None => Error(Unknown),
+    }
+}
+
+/// Run a durable `Directory[K]` claim against `db`, waiting on `store.durable` (Rule D1) before replying.
+pub fn durable_claim[K: inert + send](mut db: store.Db, h: DirectoryHandles[K], session: DirSession, dir_clock: Clock, req: ClaimReq[K]) -> Result[LeaseGrant, DirError] waits {
+    let dir_boot_ns = std.clock.boot_ns(dir_clock)
+    let ran = store.run(mut db, None, (store.copy_env(h), session, dir_boot_ns, store.copy_env(req)), fn(mut tx, input) -> Result[Result[LeaseGrant, DirError], store.Error] {
+        Ok(claim_tx(mut tx, input.0, input.1, input.2, input.3))
+    }) ?=> |_| StoreErr
+    match take ran {
+        Committed(take done) => {
+            let _ = store.durable(mut db, done.ticket) ?=> |_| StoreErr
+            done.value
+        },
+        _ => Error(StoreErr),
+    }
+}
+
+/// Run a durable `Directory[K]` renew against `db`, waiting on `store.durable` (Rule D1) before replying.
+pub fn durable_renew[K: inert + send](mut db: store.Db, h: DirectoryHandles[K], session: DirSession, dir_clock: Clock, req: RenewReq[K]) -> Result[LeaseGrant, DirError] waits {
+    let dir_boot_ns = std.clock.boot_ns(dir_clock)
+    let ran = store.run(mut db, None, (store.copy_env(h), session, dir_boot_ns, store.copy_env(req)), fn(mut tx, input) -> Result[Result[LeaseGrant, DirError], store.Error] {
+        Ok(renew_tx(mut tx, input.0, input.1, input.2, input.3))
+    }) ?=> |_| StoreErr
+    match take ran {
+        Committed(take done) => {
+            let _ = store.durable(mut db, done.ticket) ?=> |_| StoreErr
+            done.value
+        },
+        _ => Error(StoreErr),
+    }
+}
+
+/// Run a durable `Directory[K]` takeover against `db` on a replacement host's `dir_clock`, waiting on `store.durable`.
+pub fn durable_takeover[K: send](mut db: store.Db, h: DirectoryHandles[K], dir_clock: Clock) -> Result[DirSession, DirError] waits {
+    let takeover_boot_ns = std.clock.boot_ns(dir_clock)
+    let ran = store.run(mut db, None, (store.copy_env(h), takeover_boot_ns), fn(mut tx, input) -> Result[Result[DirSession, DirError], store.Error] {
+        Ok(takeover_partition_tx(mut tx, input.0, input.1))
+    }) ?=> |_| StoreErr
+    match take ran {
+        Committed(take done) => {
+            let _ = store.durable(mut db, done.ticket) ?=> |_| StoreErr
+            done.value
+        },
+        _ => Error(StoreErr),
+    }
+}
+
+// ---- Concrete `runner` Place registration for `Directory[u64]` (dedicated Place, outside fleet@1) ----
+pub type PlaceClaimArg: codec + key + send {
+    session: DirSession,
+    dir_boot_ns: u64,
+    req: ClaimReq[u64]
+}
+
+pub type PlaceRenewArg: codec + key + send {
+    session: DirSession,
+    dir_boot_ns: u64,
+    req: RenewReq[u64]
+}
+
+pub type PlaceTakeoverArg: codec + key + send {
+    takeover_boot_ns: u64
+}
+
+pub fn directory_u64_schema(mut d: store.Declare) -> Result[DirectoryHandles[u64], store.Error] {
+    declare_directory(mut d, "directory", std.codec.key_u64())
+}
+
+pub fn directory_u64_claim(mut tx: store.Tx, h: DirectoryHandles[u64], _caller: runner.Caller, take arg: PlaceClaimArg) -> Result[LeaseGrant, DirError] {
+    claim_tx(mut tx, h, arg.session, arg.dir_boot_ns, arg.req)
+}
+
+pub fn directory_u64_renew(mut tx: store.Tx, h: DirectoryHandles[u64], _caller: runner.Caller, take arg: PlaceRenewArg) -> Result[LeaseGrant, DirError] {
+    renew_tx(mut tx, h, arg.session, arg.dir_boot_ns, arg.req)
+}
+
+pub fn directory_u64_takeover(mut tx: store.Tx, h: DirectoryHandles[u64], _caller: runner.Caller, take arg: PlaceTakeoverArg) -> Result[DirSession, DirError] {
+    takeover_partition_tx(mut tx, h, arg.takeover_boot_ns)
+}
+
+fn directory_u64_leases_table(h: DirectoryHandles[u64]) -> store.Table[u64, LeaseRow] {
+    clone(h.leases)
+}
+
+pub fn directory_u64_read(_tx: store.Tx, h: DirectoryHandles[u64], take _arg: ()) -> Result[runner.Answer[()], Capacity] {
+    runner.table_answer("leases", h.leases, Unbounded, Unbounded)
+}
+
+/// Register the dedicated `Directory[u64]` Place entries on a `runner.Registry`.
+pub fn register_u64_directory_place(mut registry: runner.Registry[(), DirectoryHandles[u64]]) -> Result[(), runner.RegisterError] {
+    runner.transact(mut registry, code.describe(directory_u64_claim), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(directory_u64_renew), 65536u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut registry, code.describe(directory_u64_takeover), 65536u64, runner.DEFAULT_STEPS)?
+    let slots = runner.table_slot("leases", code.describe(directory_u64_leases_table))?
+    runner.query(mut registry, code.describe(directory_u64_read), take slots, 65536u64, runner.DEFAULT_STEPS)
+}

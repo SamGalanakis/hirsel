@@ -1,10 +1,11 @@
 # Fleet
 
 *Specified 2026-11-26 (converged Hirsel Fleet blueprint, DECISIONS.md). Rules FLT-1 to FLT-8,
-kernel rules K1 to K13, verification tiers T0 to T3. Phase 1 builds the move-authorization
-kernel, independent register model, simulation laws and formal proofs; orchestration, Store
-`ClaimAuth`/`ORIGIN`, Runner `Deposed`, launcher envelope and platform seams remain unbuilt
-and are marked with `unbuilt` fences.*
+kernel rules K1 to K13, directory rules D1 to D6, verification tiers T0 to T3. Phase 1 builds
+the move-authorization kernel, independent register model, simulation laws and formal proofs;
+Phase 3a adds the dedicated `Directory[K]` Place library and `hirsel fleet sim` at 50 and 1,000
+simulated hosts. Real-cluster orchestration verbs, Store `ClaimAuth`/`ORIGIN`, Runner `Deposed`,
+and platform seams remain unbuilt and are marked with `unbuilt` fences.*
 
 Hirsel Fleet runs multi-machine workloads with the existing `hirsel` launcher and `platform`
 host packaged as one single-binary distribution, with no Kubernetes, no second host daemon,
@@ -193,23 +194,115 @@ window:
 
 ## FLT-5: Dedicated `Directory[K]` Places (Archetype B)
 
-`Directory[K]` runs in dedicated ordinary durable Places partitioned by keyspace — never inside
-`fleet@1` — so controller takeovers and Fleet deploys never stall ephemeral room or cache
-failovers.
+`Directory[K]` (`core/programs/fleet/directory.hirsel`, `core/programs/fleet/directory_place.hirsel`)
+runs in dedicated, ordinary durable `Place`s partitioned by keyspace — never inside `fleet@1` —
+so controller takeovers, disruption freezes and Fleet deploys never stall ephemeral room, relay
+or cache failovers.
 
-- **Rule D1 (durable renewal barrier).** The directory releases a `renew` reply only after a
-  durable commit of its Place that started after the request arrived is observed `Applied`
-  (amortized across a batching interval).
-- **Quarantine wait on takeover.** After a directory takeover, same-term renewals of an
-  existing incumbent resume immediately. Any conflicting new-term grant waits
-  `W = ceil(L_max * (1 + d) / (1 - d))` on the replacement directory's own suspend-inclusive
-  elapsed clock (`CLOCK_BOOTTIME` / `mach_continuous_time`), where `L_max` is the largest still-
-  outstanding lease policy stored durably and `d` is the fleet drift bound.
-- **Initial qualification profile (`sfu_cascade`).** Maximum home lease `L = 24 s`, renew every
-  `8 s`, directory takeover budget `T = 8 s` (`L:T = 3:1`), giving `<= 25.01 s` home-loss
-  failover and `<= 32.76 s` simultaneous home+directory failover under qualified bounds. Senders
-  recheck the suspend-inclusive deadline at socket handoff and latch closed on post-send stall
-  detection.
+### Partitioning and durable Place schema
+
+Each `Directory[K]` Place owns one closed keyspace interval `[min_key, max_key]` compared over
+the canonical order-preserving `std.codec.Key[K]` byte encoding. A key outside the partition's
+bounds is refused with `OutOfPartition`.
+
+Each partition stores two durable collections inside its own `store.Declare` schema (never
+shared with `fleet@1`'s tables):
+
+- **`<name>.meta` (`store.Cell[PartitionMeta]`):** durable partition identity (`partition_id`),
+  keyspace bounds (`min_key_bytes`, `max_key_bytes`), fleet drift bound `drift_ppm` (`d`),
+  durable lease-duration high-water mark `max_lease_ns` (`L_max`), and monotone directory Place
+  epoch `dir_epoch`.
+- **`<name>.leases` (`store.Table[K, LeaseRow]`):** per-key term CAS state: `(holder_node,
+  holder_incarnation, term, lease_ns, dir_epoch, last_dir_boot_ns, lease_end_boot_ns,
+  last_holder_boot_ns, seq, payload)`.
+
+```hirsel
+pub type DirectoryConfig: codec + key + send {
+    partition_id: u64,
+    drift_ppm: u64,
+    default_lease_ns: u64,
+    max_lease_cap_ns: u64
+}
+
+pub type LeaseGrant: codec + key + send {
+    term: u64,
+    lease_ns: u64,
+    wait_ns: u64,
+    dir_boot_ns: u64,
+    dir_epoch: u64,
+    seq: u64
+}
+
+pub type HolderLease: codec + key + send {
+    holder_node: u64,
+    holder_incarnation: u64,
+    term: u64,
+    send_boot_ns: u64,
+    lease_ns: u64,
+    expires_boot_ns: u64
+}
+
+pub type DirError: codec + key + send = Stale(u64) | Held(u64) | Quarantined(u64) | DriftExceeded(u64, u64) | OutOfPartition | InvalidConfig | Unknown | StoreErr
+```
+
+### Normative rules `D1`–`D6`
+
+- **D1 (Durable renewal barrier).** The directory releases a `claim`, `renew` or `release`
+  reply only after the durable commit (`store.Tx` / `store.durable` or `runner.transact`) that
+  started after the request arrived is observed `Applied` (amortized across a batching
+  interval).
+- **D2 (Suspend-inclusive elapsed clock).** Both the directory and every lease holder measure
+  lease windows strictly with `std.clock.boot_ns(clock)` (`CLOCK_BOOTTIME` /
+  `mach_continuous_time`). A monotonic clock that freezes across OS suspend or VM pause
+  (`host.mono_ns`) is forbidden for lease deadlines: across a pause of duration `>= L`, a
+  paused holder's `boot_ns` advances past its deadline while `mono_ns` stays frozen.
+- **D3 (Drift-bounded lease wait `W`).** For lease duration `L` (nanoseconds) and fleet clock
+  drift bound `d = drift_ppm / 10^6` (`0 <= drift_ppm <= MAX_DRIFT_PPM < 10^6`), the directory
+  computes the exact integer ceiling:
+
+  `W(L, d) = ceil(L * (1 + d) / (1 - d)) = L + floor(L / (PPM - d)) * 2d + ceil((L mod (PPM - d)) * 2d / (PPM - d))`
+
+  with zero floating-point rounding and no `u64` overflow. A holder starting a request at
+  `send_boot_ns` stops believing it holds the lease at `send_boot_ns + L` (at most `L / (1 - d)`
+  true time), while the directory waits at least `W(L, d)` on its own `boot_ns` (at least
+  `W(L, d) / (1 + d) >= L / (1 - d)` true time) before granting any conflicting new term.
+- **D4 (Takeover quarantine wait `W`).** When a replacement host opens a `Directory[K]` Place
+  (`takeover_partition_tx`), it increments durable `dir_epoch`, captures its own local
+  `takeover_boot_ns = std.clock.boot_ns(clock)`, and establishes a volatile session quarantine
+  `quarantine_until_boot_ns = takeover_boot_ns + W(L_max, d)` from the durably stored
+  `L_max = meta.max_lease_ns` (for genesis with `L_max == 0`, `W = 0`). During quarantine:
+  - Same-term `renew` by an existing durably-recorded incumbent resumes immediately (updating
+    durable `seq`, `lease_ns`, `dir_epoch`, `last_dir_boot_ns` and `lease_end_boot_ns`).
+  - Any new-term `claim` is refused with `Quarantined(quarantine_until_boot_ns)` until
+    `now_boot_ns >= quarantine_until_boot_ns`.
+- **D5 (Drift bound enforcement and refusal).** A partition configuration with
+  `drift_ppm > MAX_DRIFT_PPM` (or `drift_ppm >= 1_000_000`) or `default_lease_ns == 0` is
+  refused with `InvalidConfig` / `DriftExceeded`. Every `claim` and `renew` carries the
+  caller's declared oscillator drift bound `reported_drift_ppm` and current `holder_boot_ns`
+  (plus bounded `max_rtt_ns`). The directory refuses with `DriftExceeded(observed_ppm, limit_ppm)`
+  whenever:
+  1. `reported_drift_ppm > config.drift_ppm`,
+  2. `holder_boot_ns < row.last_holder_boot_ns` (regressed clock), or
+  3. across a positive directory interval `dir_delta = now_boot_ns - row.last_dir_boot_ns`
+     exceeding `max_rtt_ns`, the holder's elapsed `holder_delta = holder_boot_ns - row.last_holder_boot_ns`
+     falls outside the drift envelope checked with exact 128-bit integer products:
+     `holder_delta * (PPM + d) < (dir_delta - max_rtt_ns) * (PPM - d)` (slow clock) or
+     `holder_delta * (PPM - d) > (dir_delta + max_rtt_ns) * (PPM + d)` (fast clock).
+- **D6 (Term CAS and holder exclusivity).** `claim(key, holder, expect_term, ...)` checks
+  partition bounds, drift, takeover quarantine, `expect_term == current_term` (`Stale(cur)` on
+  mismatch), and active lease expiration `now_boot_ns >= row.lease_end_boot_ns` (`Held(until)`
+  while active), then atomically increments `term = expect_term + 1`, updates
+  `max_lease_ns = max(max_lease_ns, lease_ns)`, commits durably (D1) and returns `LeaseGrant`.
+  Holders record `expires_boot_ns = send_boot_ns + grant.lease_ns` from request send time and
+  verify `std.clock.boot_ns(holder_clock) < expires_boot_ns` before acting.
+
+### Initial qualification profile (`sfu_cascade`)
+
+Maximum home lease `L = 24 s`, renew every `8 s`, directory takeover budget `T = 8 s`
+(`L:T = 3:1`), fleet drift bound `d = 200 ppm` (`W = 24,009,601,921 ns`), giving `<= 25.01 s`
+home-loss failover and `<= 32.76 s` simultaneous home+directory failover under qualified bounds.
+Senders recheck the suspend-inclusive deadline at socket handoff and latch closed on post-send
+stall detection.
 
 ## FLT-6: Code trust, revocation clearance, transport and bucket boundaries
 
@@ -272,10 +365,12 @@ The shell owns capabilities, storage, sockets, clocks and step budgets (`bound s
 Proof checks run as explicit targets or nightly campaigns and never gate ordinary pre-push
 commits.
 
-- **T0 (Deterministic simulation & controller laws).** `hirsel fleet sim` <!-- doc-ref: planned -->
-  drives the production per-Place move kernel and shell across simulated hosts with an
-  independent concurrent register, message hold/release, node crash/restart, clock pause,
-  Sieve stale-controller laws, Acto desired-state edit laws and a client-history checker.
+- **T0 (Deterministic simulation & controller laws).** `hirsel fleet sim`
+  drives the production per-Place move kernel, advisory lattice and partitioned `Directory[K]`
+  Places across simulated hosts (qualified at 50 and 1,000 hosts) with an independent concurrent
+  register, message hold/release, node crash/restart, clock pause, controller kill mid-move,
+  zone isolation, Sieve stale-controller laws, Acto desired-state edit laws and SM1 trace
+  verification.
 - **T1 (Trace conformance & `SM1`).** Traces from simulation are checked in-process with
   `std.model.conforms` against the independent concurrent register model, and exported in
   `SM1` canonical format (lossless integers `> 2^53`) as NDJSON for TLA+/TLC trace validation

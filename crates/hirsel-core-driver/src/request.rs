@@ -55,30 +55,26 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     };
     match invocation.command.name {
         "prof attach" => {
-            crate::prof_command::attach(invocation)?;
-            return conclude(Outcome::Exit(0));
+            return conclude(crate::prof_command::attach(invocation).map(|()| Outcome::Exit(0))?);
         }
         "prof export" => {
-            crate::prof_command::export(invocation)?;
-            return conclude(Outcome::Exit(0));
+            return conclude(crate::prof_command::export(invocation).map(|()| Outcome::Exit(0))?);
         }
         name if name.starts_with("prof ") && !matches!(name, "prof run" | "prof replay") => {
-            crate::prof_command::query(invocation)?;
-            return conclude(Outcome::Exit(0));
+            return conclude(crate::prof_command::query(invocation).map(|()| Outcome::Exit(0))?);
+        }
+        name if name.starts_with("coverage") => {
+            return conclude(crate::coverage::cli::run(invocation)?);
+        }
+        name if name.starts_with("lean ") => {
+            return conclude(lean::run(invocation).map(|()| Outcome::Exit(0))?);
         }
         _ => {}
-    }
-    if invocation.command.name.starts_with("coverage") {
-        return conclude(crate::coverage::cli::run(invocation)?);
-    }
-    if invocation.command.name.starts_with("lean ") {
-        lean::run(invocation)?;
-        return conclude(Outcome::Exit(0));
     }
     let profile = matches!(invocation.command.name, "prof run" | "prof replay")
         .then(|| crate::prof_command::Run::read(&mut invocation))
         .transpose()?;
-    let command = invocation.command.name;
+    let command = launch::fleet_cli::prepare(&mut invocation)?;
     match command {
         "add" => return conclude(Outcome::Exit(crate::package_add::run(invocation)?)),
         "launcher" => match crate::launcher::run(invocation)? {},
@@ -539,7 +535,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::ProfMinDeltaPct
             | Opt::ProfTimeout
             | Opt::ProfFormat
-            | Opt::CoverageMap => unreachable!("CLI early command option"),
+            | Opt::CoverageMap
+            | Opt::FleetHosts
+            | Opt::FleetRounds
+            | Opt::FleetPlaces
+            | Opt::FleetPartitions => unreachable!("CLI early command option"),
         }
     }
     if test_filter.is_some() && !test_exact.is_empty() {

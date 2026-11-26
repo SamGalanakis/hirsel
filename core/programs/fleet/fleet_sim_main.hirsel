@@ -1,0 +1,173 @@
+// CLI entry point for `hirsel fleet sim` (docs/spec/fleet.md FLT-8).
+// Parses `--hosts`, `--seed`, `--rounds`, `--places`, `--partitions`, `--json` (refusing unknown flags),
+// runs `scale_sim.run_scale_sim`, and reports wall time and verified invariant counts.
+type CliOpts {
+    hosts: u64,
+    places: Option[u64],
+    partitions: Option[u64],
+    rounds: Option[u64],
+    seed: u64,
+    json: bool
+}
+
+fn parse_u64_arg(name: String, raw: String) -> Result[u64, String] {
+    let parsed: Result[u64, ParseError] = int.parse(raw)
+    match parsed {
+        Ok(v) => Ok(v),
+        Error(_) => {
+            let mut msg: String = "invalid u64 for "
+            string.push(mut msg, name)
+            string.push(mut msg, ": ")
+            string.push(mut msg, raw)
+            Error(take msg)
+        },
+    }
+}
+
+fn parse_cli(a: Args) -> Result[CliOpts, String] {
+    let mut hosts: u64 = 50u64
+    let mut places: Option[u64] = None
+    let mut partitions: Option[u64] = None
+    let mut rounds: Option[u64] = None
+    let mut seed: u64 = 3056u64
+    let mut json = false
+    let mut i: u64 = 0u64
+    while i < args.len(a) {
+        let flag = option.unwrap(args.get(a, i))
+        if flag == "--json" {
+            json = true
+            i += 1u64
+            continue
+        }
+        if flag == "--hosts" || flag == "--seed" || flag == "--rounds" || flag == "--places" || flag == "--partitions" {
+            let Some(val) = args.get(a, i + 1u64) else {
+                let mut msg: String = clone(flag)
+                string.push(mut msg, " requires a value")
+                return Error(take msg)
+            }
+            let n = parse_u64_arg(flag, val)?
+            if flag == "--hosts" {
+                hosts = n
+            } else if flag == "--seed" {
+                seed = n
+            } else if flag == "--rounds" {
+                rounds = Some(n)
+            } else if flag == "--places" {
+                places = Some(n)
+            } else {
+                partitions = Some(n)
+            }
+            i += 2u64
+            continue
+        }
+        let mut msg: String = "unknown option for fleet sim: "
+        string.push(mut msg, flag)
+        return Error(take msg)
+    }
+    Ok(CliOpts(hosts: hosts, places: places, partitions: partitions, rounds: rounds, seed: seed, json: json))
+}
+
+fn push_kv(mut out: String, key: String, val: u64, comma: bool) {
+    string.push(mut out, "\"")
+    string.push(mut out, key)
+    string.push(mut out, "\":")
+    string.push_u64(mut out, val)
+    if comma {
+        string.push(mut out, ",")
+    }
+}
+
+fn format_report(rep: scale_sim.SimReport, wall_ms: u64, as_json: bool) -> String {
+    let mut out: String = ""
+    if as_json {
+        string.push(mut out, "{")
+        push_kv(mut out, "hosts", rep.hosts, true)
+        push_kv(mut out, "places", rep.places, true)
+        push_kv(mut out, "partitions", rep.partitions, true)
+        push_kv(mut out, "rounds", rep.rounds, true)
+        push_kv(mut out, "seed", rep.seed, true)
+        push_kv(mut out, "wall_ms", wall_ms, true)
+        push_kv(mut out, "moves_completed", rep.moves_completed, true)
+        push_kv(mut out, "stale_races_blocked", rep.stale_races_blocked, true)
+        push_kv(mut out, "lost_h_settled", rep.lost_h_settled, true)
+        push_kv(mut out, "controller_kills", rep.controller_kills, true)
+        push_kv(mut out, "barrier_blocks", rep.barrier_blocks, true)
+        push_kv(mut out, "freeze_blocks", rep.freeze_blocks, true)
+        push_kv(mut out, "dir_claims", rep.dir_claims, true)
+        push_kv(mut out, "dir_renews", rep.dir_renews, true)
+        push_kv(mut out, "dir_takeovers", rep.dir_takeovers, true)
+        push_kv(mut out, "dir_quarantine_refusals", rep.dir_quarantine_refusals, true)
+        push_kv(mut out, "dir_drift_refusals", rep.dir_drift_refusals, true)
+        push_kv(mut out, "dir_pause_expirations", rep.dir_pause_expirations, true)
+        push_kv(mut out, "sm1_rows", rep.sm1_rows, true)
+        push_kv(mut out, "sm1_ndjson_bytes", rep.sm1_ndjson_bytes, true)
+        push_kv(mut out, "sm1_itf_bytes", rep.sm1_itf_bytes, false)
+        string.push(mut out, "}\n")
+        return take out
+    }
+    string.push(mut out, "fleet sim OK hosts=")
+    string.push_u64(mut out, rep.hosts)
+    string.push(mut out, " places=")
+    string.push_u64(mut out, rep.places)
+    string.push(mut out, " partitions=")
+    string.push_u64(mut out, rep.partitions)
+    string.push(mut out, " seed=")
+    string.push_u64(mut out, rep.seed)
+    string.push(mut out, " wall_ms=")
+    string.push_u64(mut out, wall_ms)
+    string.push(mut out, " moves=")
+    string.push_u64(mut out, rep.moves_completed)
+    string.push(mut out, " stale_blocked=")
+    string.push_u64(mut out, rep.stale_races_blocked)
+    string.push(mut out, " lost_h=")
+    string.push_u64(mut out, rep.lost_h_settled)
+    string.push(mut out, " ctrl_kills=")
+    string.push_u64(mut out, rep.controller_kills)
+    string.push(mut out, " barrier_blocks=")
+    string.push_u64(mut out, rep.barrier_blocks)
+    string.push(mut out, " freeze_blocks=")
+    string.push_u64(mut out, rep.freeze_blocks)
+    string.push(mut out, " dir_claims=")
+    string.push_u64(mut out, rep.dir_claims)
+    string.push(mut out, " dir_renews=")
+    string.push_u64(mut out, rep.dir_renews)
+    string.push(mut out, " dir_takeovers=")
+    string.push_u64(mut out, rep.dir_takeovers)
+    string.push(mut out, " dir_q_refusals=")
+    string.push_u64(mut out, rep.dir_quarantine_refusals)
+    string.push(mut out, " dir_drift_refusals=")
+    string.push_u64(mut out, rep.dir_drift_refusals)
+    string.push(mut out, " sm1_rows=")
+    string.push_u64(mut out, rep.sm1_rows)
+    string.push(mut out, "\n")
+    take out
+}
+
+pub fn main(argv: Args, wall: Clock, tasks: Tasks, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    let opts = match parse_cli(argv) {
+        Ok(o) => o,
+        Error(msg) => {
+            let mut line: String = "hirsel fleet sim: "
+            string.push(mut line, msg)
+            string.push(mut line, "\n")
+            let _ = stderr.write(err, line)
+            return Error(Exit(status: 2u8))
+        },
+    }
+    let mut cfg = scale_sim.default_config(opts.hosts, opts.seed)
+    if let Some(p) = opts.places {
+        cfg.places = p
+    }
+    if let Some(k) = opts.partitions {
+        cfg.partitions = k
+    }
+    if let Some(r) = opts.rounds {
+        cfg.rounds = r
+    }
+    let t0 = host.mono_ns(wall)
+    let rep = result.unwrap(scale_sim.run_scale_sim(cfg, tasks))
+    let wall_ms = (host.mono_ns(wall) - t0) / 1000000u64
+    let text_out = format_report(rep, wall_ms, opts.json)
+    let _ = stdout.write(out, text_out)
+    Ok(())
+}

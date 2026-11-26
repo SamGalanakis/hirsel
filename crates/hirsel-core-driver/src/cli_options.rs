@@ -543,7 +543,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "add",
             "explain",
             "coverage merge",
-            "coverage diff"
+            "coverage diff",
+            "fleet sim"
         ],
         "Print structured JSON."
     ),
@@ -667,14 +668,50 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         SimSeed,
         ["--seed"],
         Some("S"),
-        ["test"],
+        ["test", "fleet sim"],
         "Run exactly simulation seed S."
+    ),
+    option!(
+        FleetHosts,
+        ["--hosts"],
+        Some("N"),
+        ["fleet sim"],
+        "Number of simulated hosts (e.g. 50 or 1000)."
+    ),
+    option!(
+        FleetRounds,
+        ["--rounds"],
+        Some("R"),
+        ["fleet sim"],
+        "Number of steady-state move churn rounds."
+    ),
+    option!(
+        FleetPlaces,
+        ["--places"],
+        Some("P"),
+        ["fleet sim"],
+        "Number of simulated durable Places."
+    ),
+    option!(
+        FleetPartitions,
+        ["--partitions"],
+        Some("K"),
+        ["fleet sim"],
+        "Number of keyspace-partitioned Directory[K] Places."
     ),
     option!(
         Release,
         ["--release"],
         None,
-        ["build", "publish", "run", "replay", "test", "sdk"],
+        [
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "sdk",
+            "fleet sim"
+        ],
         "Optimize native code; defaults to LLVM."
     ),
     option!(
@@ -688,7 +725,15 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         Backend,
         ["--backend"],
         Some("cranelift|llvm"),
-        ["build", "publish", "run", "replay", "test", "sdk"],
+        [
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "sdk",
+            "fleet sim"
+        ],
         "Select the native engine (dev defaults to Cranelift). Both include unwind tables with fiber boundaries."
     ),
     option!(
@@ -703,7 +748,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "env",
             "core-product",
             "std-product",
-            "sdk"
+            "sdk",
+            "fleet sim"
         ],
         "Select the core runtime archive for the requested recording mode."
     ),
@@ -764,7 +810,15 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         Limit,
         ["--limit"],
         Some("BYTES"),
-        ["build", "publish", "run", "replay", "test", "sdk"],
+        [
+            "build",
+            "publish",
+            "run",
+            "replay",
+            "test",
+            "sdk",
+            "fleet sim"
+        ],
         "Set the root limit; test requires it when the manifest does not declare one."
     ),
     option!(
@@ -806,7 +860,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "inspect",
             "sdk",
             "laws check",
-            "laws write"
+            "laws write",
+            "fleet sim"
         ],
         "Select a root containing core/ and std/."
     ),
@@ -839,7 +894,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
             "laws write",
             "lean extract",
             "lean status",
-            "lean probe"
+            "lean probe",
+            "fleet sim"
         ],
         "Select the database for dry-run, or the request or product store."
     ),

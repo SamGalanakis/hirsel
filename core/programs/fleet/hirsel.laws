@@ -1,11 +1,16 @@
 hirsel.laws 1
-fleet@1/laws/advisory_k10_lattice_laws src=e34e5f48e45940d2 sig=825a19f1678fe2c6 run=c2c0c6612d4cbb79 bug=f8deda6c938ddf1e oracle=0f9df8f336ea9270 rows=pending
-fleet@1/laws/barrier_freeze_codec_keys_and_k13_outcomes src=a2a9ec67df8eb774 sig=d7980f353b89a471 run=c2c0c6612d4cbb79 bug=9d01041b06ba1d00 oracle=c260ffd58c319cdc rows=pending
-fleet@1/laws/move_kernel_closes_three_stale_races_and_lost_h src=fc70245c7232bbdd sig=83e09e2f8fb89668 run=c2c0c6612d4cbb79 bug=6b0679117cf1e660 oracle=10ef25ab43d64531 rows=pending
-fleet@1/laws/origin_wire_49_bytes_and_o3_o4 src=2e268373cc6d1ee3 sig=9dc2478c5984d6cf run=c2c0c6612d4cbb79 bug=e470365b53736031 oracle=682b692ae1f95af1 rows=pending
-fleet@1/laws/register_model_bfs_and_kernel_conforms src=cc48f1666553a25c sig=41f2e2b8ae09f871 run=c2c0c6612d4cbb79 bug=437f0eef619520c3 oracle=39ab6b876450f5b2 rows=pending
-fleet@1/laws/sim_acto_desired_state_edits_and_conformance src=327be28711e307cd sig=a064fc78676cafbf run=c2c0c6612d4cbb79 bug=1f3cac38dff3d8a1 oracle=dd7554272bdaebb6 rows=pending
-fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=45e6ebd9852167b5 sig=e621a888280ada62 run=c7b2a52baff70a63 bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending
-fleet@1/laws/sim_sieve_stale_controller_and_scoped_barrier src=6310b3a16ea8393d sig=74da9c94018e5482 run=c7b2a52baff70a63 bug=8d6d415facd53ec1 oracle=c4d3051b3b030e54 rows=pending
-fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf src=a6e7bbe2e2f38d21 sig=26846274faa25e14 run=c2c0c6612d4cbb79 bug=29e74cfa2f7a46fd oracle=9fffe4b7fe3de7d9 rows=pending
-fleet@1/laws/sim_three_stale_open_races_with_message_hold src=3ee151ac517f3f3d sig=664ee0c54a763e8b run=c7b2a52baff70a63 bug=a4cdfb4659042089 oracle=0538449336f9c901 rows=pending
+fleet@1/laws/advisory_k10_lattice_laws src=e34e5f48e45940d2 sig=825a19f1678fe2c6 run=5ffc56bae06a36d7 bug=f8deda6c938ddf1e oracle=0f9df8f336ea9270 rows=pending
+fleet@1/laws/barrier_freeze_codec_keys_and_k13_outcomes src=a2a9ec67df8eb774 sig=d7980f353b89a471 run=5ffc56bae06a36d7 bug=9d01041b06ba1d00 oracle=c260ffd58c319cdc rows=pending
+fleet@1/laws/move_kernel_closes_three_stale_races_and_lost_h src=fc70245c7232bbdd sig=83e09e2f8fb89668 run=5ffc56bae06a36d7 bug=6b0679117cf1e660 oracle=10ef25ab43d64531 rows=pending
+fleet@1/laws/origin_wire_49_bytes_and_o3_o4 src=2e268373cc6d1ee3 sig=9dc2478c5984d6cf run=5ffc56bae06a36d7 bug=e470365b53736031 oracle=682b692ae1f95af1 rows=pending
+fleet@1/laws/register_model_bfs_and_kernel_conforms src=cc48f1666553a25c sig=41f2e2b8ae09f871 run=5ffc56bae06a36d7 bug=437f0eef619520c3 oracle=39ab6b876450f5b2 rows=pending
+fleet@1/laws/sim_acto_desired_state_edits_and_conformance src=327be28711e307cd sig=a064fc78676cafbf run=5ffc56bae06a36d7 bug=1f3cac38dff3d8a1 oracle=dd7554272bdaebb6 rows=pending
+fleet@1/laws/sim_directory_no_dual_holders_across_suspend src=10fca1f000ee4d63 sig=7d219a15a8fa2bd7 run=db4e4334fc7b99e2 bug=2020449b42ab7867 oracle=bef4a98d799d1e58 rows=pending
+fleet@1/laws/sim_directory_refuses_drift_beyond_d src=11f4a662a79b2138 sig=60f91f2477a7368f run=b8720e32dc0c26eb bug=5615f4e5c2d22a2a oracle=7a67544e27c1999a rows=pending
+fleet@1/laws/sim_directory_takeover_waits_w src=30c90e4d2153d053 sig=4a8fb38659b89e3d run=db4e4334fc7b99e2 bug=283bd9d374806333 oracle=ea5a863af05c097e rows=pending
+fleet@1/laws/sim_fleet_scale_1000_hosts src=f2f350de5e756c54 sig=fe4b30a8946a4d27 run=c8f37220d8cae014 bug=094b7f5603c11ac8 oracle=554bbdac09ba3b78 rows=pending
+fleet@1/laws/sim_fleet_scale_50_hosts src=9c9cff372284db34 sig=fe4b30a8946a4d27 run=b8720e32dc0c26eb bug=00026f91da7ce7d2 oracle=08f576a2f697148b rows=pending
+fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=45e6ebd9852167b5 sig=e621a888280ada62 run=b8720e32dc0c26eb bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending
+fleet@1/laws/sim_sieve_stale_controller_and_scoped_barrier src=6310b3a16ea8393d sig=74da9c94018e5482 run=b8720e32dc0c26eb bug=8d6d415facd53ec1 oracle=c4d3051b3b030e54 rows=pending
+fleet@1/laws/sim_sm1_trace_export_ndjson_and_itf src=a6e7bbe2e2f38d21 sig=26846274faa25e14 run=5ffc56bae06a36d7 bug=29e74cfa2f7a46fd oracle=9fffe4b7fe3de7d9 rows=pending
+fleet@1/laws/sim_three_stale_open_races_with_message_hold src=3ee151ac517f3f3d sig=664ee0c54a763e8b run=b8720e32dc0c26eb bug=a4cdfb4659042089 oracle=0538449336f9c901 rows=pending

@@ -33,6 +33,8 @@ impl Launch {
 pub(super) mod dev;
 #[path = "dry_run.rs"]
 pub(super) mod dry_run;
+#[path = "fleet_cli.rs"]
+pub(super) mod fleet_cli;
 #[path = "store_cli.rs"]
 pub(super) mod store_cli;
 

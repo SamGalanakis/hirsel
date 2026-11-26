@@ -34,7 +34,7 @@ edges = []
 [[package]]
 id = "fleet@1"
 source = "member:fleet"
-edges = ["std@1"]
+edges = ["runner@1", "std@1", "store@1"]
 
 [[package]]
 id = "h264@1"

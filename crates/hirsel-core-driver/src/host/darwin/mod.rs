@@ -350,6 +350,26 @@ pub(crate) const RUNTIME_LIBRARIES: &[&str] =
 #[cfg(test)]
 pub(crate) const FD_REPORT: &str = "[ -e /dev/fd/$n ] && stat -L -f '%HT %i' /dev/fd/$n | { read k i; k=$(echo \"$k\" | tr A-Z a-z); [ \"$k\" = fifo ] && k=pipe; echo \"$n $k:[$i]\" >> \"$out\"; }";
 
+/// Process `pid` as the launcher laws watch it: `None` once it no longer exists,
+/// `Some(true)` while it is a zombie its parent has not reaped, `Some(false)` while it runs.
+#[cfg(test)]
+pub(crate) fn zombie(pid: libc::pid_t) -> Option<bool> {
+    // kill(pid, 0) finds a zombie too; proc_pidinfo gives its BSD status (SZOMB 5),
+    // and refuses a zombie on some releases, which reads as a zombie here.
+    const SZOMB: u32 = 5;
+    let exists = unsafe { libc::kill(pid, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !exists {
+        return None;
+    }
+    // SAFETY: an all-zero proc_bsdinfo is a valid output record; proc_pidinfo fills it.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    Some(read != size || info.pbi_status == SZOMB)
+}
+
 /// `<kind>:[<inode>]` of this process's descriptor `fd`, as FD_REPORT writes it.
 #[cfg(test)]
 pub(crate) fn fd_report(fd: RawFd) -> String {

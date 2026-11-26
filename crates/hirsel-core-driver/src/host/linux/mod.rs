@@ -344,6 +344,17 @@ pub(crate) const RUNTIME_LIBRARIES: &[&str] =
 pub(crate) const FD_REPORT: &str =
     "[ -e /proc/$$/fd/$n ] && echo \"$n $(readlink /proc/$$/fd/$n)\" >> \"$out\"";
 
+/// Process `pid` as the launcher laws watch it: `None` once it no longer exists,
+/// `Some(true)` while it is a zombie its parent has not reaped, `Some(false)` while it runs.
+#[cfg(test)]
+pub(crate) fn zombie(pid: libc::pid_t) -> Option<bool> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    Some(
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, state)| state.starts_with('Z')),
+    )
+}
+
 /// `<kind>:[<id>]` of this process's descriptor `fd`, as FD_REPORT writes it.
 #[cfg(test)]
 pub(crate) fn fd_report(fd: RawFd) -> String {

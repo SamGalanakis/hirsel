@@ -254,26 +254,22 @@ fn source_publishes_with_the_normal_checker() {
         if let Ok(pids) = fs::read_to_string(&pids) {
             let (leader, descendant) = pids.trim().split_once(' ').unwrap();
             break (
-                format!("/proc/{leader}/stat"),
-                format!("/proc/{descendant}/stat"),
+                leader.parse::<libc::pid_t>().unwrap(),
+                descendant.parse::<libc::pid_t>().unwrap(),
             );
         }
         assert!(Instant::now() < end, "the held compile never started");
         rig.launcher.turn(Duration::from_millis(20)).unwrap();
         assert!(rig.launcher.take_events().is_empty());
     };
-    let desc_alive = || {
-        // A killed grandchild can remain a zombie until its new parent reaps it.
-        fs::read_to_string(&descendant).is_ok_and(|stat| {
-            stat.rsplit_once(") ")
-                .is_some_and(|(_, s)| !s.starts_with('Z'))
-        })
-    };
-    assert!(Path::new(&leader).exists() && desc_alive());
+    let leader_exists = || crate::host::zombie(leader).is_some();
+    // A killed grandchild can remain a zombie until its new parent reaps it.
+    let desc_alive = || crate::host::zombie(descendant) == Some(false);
+    assert!(leader_exists() && desc_alive());
     assert!(rig.ask(Request::Release(attempt(7))).is_empty());
     let source_clean = || fs::read_dir(state.join("source")).unwrap().next().is_none();
     let end = Instant::now() + Duration::from_secs(10);
-    while Path::new(&leader).exists() || desc_alive() || !source_clean() {
+    while leader_exists() || desc_alive() || !source_clean() {
         assert!(
             Instant::now() < end,
             "compile group was not cleaned up: {leader}, {descendant}"

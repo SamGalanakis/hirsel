@@ -35,9 +35,18 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 thread_local! {
     static MEMORY_CONTEXT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// Whether this thread has used MEMORY_CONTEXT. The refusal path runs with no memory
+    /// left, so it reads a context only if the context was used before: the first use of
+    /// MEMORY_CONTEXT registers its destructor, and on Darwin that registration allocates
+    /// (dyld's addTermFunc) and faults on a failed allocation. This flag has no destructor.
+    static MEMORY_CONTEXT_USED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 /// The work a thread without its own context does for the process.
 static PROCESS_CONTEXT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Whether PROCESS_CONTEXT has been locked. Its first lock allocates on Darwin (std boxes the
+/// pthread mutex), so the refusal path locks it only once this is set, as MEMORY_CONTEXT_USED.
+static PROCESS_CONTEXT_USED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Name the work under way on this thread, as `doing` ("instantiating
 /// function f"), if it reaches the memory limit. The label is diagnostic
@@ -52,6 +61,7 @@ pub fn with_memory_context<R>(doing: String, work: impl FnOnce() -> R) -> R {
         }
     }
     let _restore = Restore(MEMORY_CONTEXT.with(|context| context.replace(doing)));
+    MEMORY_CONTEXT_USED.set(true);
     work()
 }
 
@@ -72,6 +82,7 @@ fn swap_process_context(doing: String) -> String {
     let mut context = PROCESS_CONTEXT
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
+    PROCESS_CONTEXT_USED.store(true, Ordering::Release);
     std::mem::replace(&mut context, doing)
 }
 
@@ -560,15 +571,21 @@ fn limit_reached(failed: impl FnOnce(&mut Line)) -> ! {
             .text(b"M");
     }
     let mut named = false;
-    let _ = MEMORY_CONTEXT.try_with(|context| {
-        if let Ok(doing) = context.try_borrow()
-            && !doing.is_empty()
-        {
-            line.text(b" while ").text(doing.as_bytes());
-            named = true;
-        }
-    });
+    if MEMORY_CONTEXT_USED
+        .try_with(std::cell::Cell::get)
+        .unwrap_or(false)
+    {
+        let _ = MEMORY_CONTEXT.try_with(|context| {
+            if let Ok(doing) = context.try_borrow()
+                && !doing.is_empty()
+            {
+                line.text(b" while ").text(doing.as_bytes());
+                named = true;
+            }
+        });
+    }
     if !named
+        && PROCESS_CONTEXT_USED.load(Ordering::Acquire)
         && let Ok(doing) = PROCESS_CONTEXT.try_lock()
         && !doing.is_empty()
     {

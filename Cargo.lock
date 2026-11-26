@@ -1131,6 +1131,7 @@ dependencies = [
  "hirsel-core-layout",
  "hirsel-core-net",
  "hirsel-guard",
+ "hirsel-observation-format",
  "hirsel-stack",
  "hirsel-tape-format",
  "io-uring",
@@ -1223,13 +1224,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-observation-format"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
+]
+
+[[package]]
 name = "hirsel-prof"
 version = "0.1.0"
 dependencies = [
  "addr2line",
  "gimli",
  "hirsel-core-ids",
+ "hirsel-core-rt",
  "hirsel-guard",
+ "hirsel-observation-format",
  "libc",
  "object 0.40.0",
  "rusqlite",

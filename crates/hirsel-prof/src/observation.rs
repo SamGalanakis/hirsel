@@ -5,14 +5,12 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+use hirsel_observation_format::{END, HEADER_BYTES, LOSS, MAGIC, payload_bytes};
 use rusqlite::{Connection, params};
 
 use crate::memory::MemoryEvent;
 use crate::profile::{Result, Timestamp, Unsigned};
 
-const MAGIC: &[u8; 8] = b"HIRSOBS3";
-const END: u16 = u16::MAX - 1;
-const LOSS: u16 = u16::MAX;
 type Task = (u64, u64);
 
 pub(crate) enum RecordKind {
@@ -217,7 +215,7 @@ impl Observation {
         let mut file = BufReader::new(File::open(path)?);
         let mut magic = [0; 8];
         file.read_exact(&mut magic)?;
-        if &magic != MAGIC {
+        if magic != MAGIC {
             return Err("invalid runtime observation header".into());
         }
         let mut trace = Self {
@@ -226,7 +224,7 @@ impl Observation {
             memory_emitted: 0,
             complete: false,
         };
-        let mut header = [0u8; 20];
+        let mut header = [0u8; HEADER_BYTES];
         loop {
             if !read_record_part(&mut file, &mut header)? {
                 break;
@@ -240,10 +238,8 @@ impl Observation {
                 return Err("invalid runtime observation record length".into());
             }
             let word_bytes = words * 8;
-            let size = word_bytes
-                .checked_add(bytes)
-                .filter(|&size| size <= 64 * 1024 - header.len())
-                .ok_or("invalid runtime observation record length")?;
+            let size =
+                payload_bytes(words, bytes).ok_or("invalid runtime observation record length")?;
             let mut data = vec![0; size];
             if !read_record_part(&mut file, &mut data)? {
                 break;
@@ -568,5 +564,41 @@ impl<'a> Import<'a> {
             params![Unsigned(token),wait,issue,resume,deliver,abort,Unsigned(total),Unsigned(timing.pending)],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_observation_format::{PAYLOAD_BYTES, RECORD_BYTES};
+
+    #[test]
+    fn record_limit_round_trips_and_refuses_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let exact_payload = vec![0x5a; PAYLOAD_BYTES];
+        let exact_path = dir.path().join("exact.observations");
+        std::fs::write(
+            &exact_path,
+            hirsel_core_rt::prof_testing::mapping_stream(RECORD_BYTES * 2, &[&exact_payload]),
+        )
+        .unwrap();
+        let exact = Observation::read(&exact_path).unwrap();
+        assert!(exact.complete);
+        assert_eq!(exact.records.len(), 1);
+        match &exact.records[0].kind {
+            RecordKind::Mapping(bytes) => assert_eq!(bytes, &exact_payload),
+            _ => panic!("the exact record is its mapping payload"),
+        }
+
+        let over_payload = vec![0x5a; PAYLOAD_BYTES + 1];
+        let over_path = dir.path().join("over.observations");
+        std::fs::write(
+            &over_path,
+            hirsel_core_rt::prof_testing::mapping_stream(RECORD_BYTES * 2, &[&over_payload]),
+        )
+        .unwrap();
+        let over = Observation::read(&over_path).unwrap();
+        assert!(over.complete);
+        assert!(over.records.is_empty());
     }
 }

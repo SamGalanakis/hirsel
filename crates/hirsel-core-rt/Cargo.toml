@@ -17,7 +17,7 @@ required-features = ["record"]
 # Only a standalone program owns the process allocator. Rust embeddings keep theirs.
 standalone = []
 record = ["dep:hirsel-tape-format"]
-prof = []
+prof = ["dep:hirsel-observation-format"]
 testing = []
 memcheck = []
 charge-observation = []
@@ -39,6 +39,7 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 rustls-native-certs = "=0.8.5"
 zeroize = "=1.9.2"
 hirsel-core-layout = { path = "../hirsel-core-layout" }
+hirsel-observation-format = { path = "../hirsel-observation-format", optional = true }
 hirsel-tape-format = { path = "../hirsel-tape-format", optional = true }
 
 twox-hash = { version = "=2.1.5", default-features = false, features = ["std", "xxhash3_64"] }

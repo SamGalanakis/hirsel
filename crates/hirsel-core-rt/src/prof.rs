@@ -1,5 +1,6 @@
 //! Bounded per-thread chunks for passive runtime observation.
 use crate::tasks::State;
+use hirsel_observation_format::{END, HEADER_BYTES, LOSS, MAGIC, RECORD_BYTES, payload_bytes};
 use std::cell::{RefCell, UnsafeCell};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -9,15 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const MAGIC: &[u8; 8] = b"HIRSOBS3";
-const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
+const DEFAULT_CHUNK_BYTES: usize = RECORD_BYTES;
 const LIVE_MEMORY_CHUNK_BYTES: usize = 512 * 1024;
 const RSS_INTERVAL_NS: u64 = 10_000_000;
 const MAX_CHUNK_BYTES: usize = 64 * 1024 * 1024;
-const MAX_RECORD_BYTES: usize = DEFAULT_CHUNK_BYTES;
-const HEADER_BYTES: usize = 20;
-const LOSS: u16 = u16::MAX;
-const END: u16 = u16::MAX - 1;
 
 #[derive(Clone, Copy)]
 #[repr(u16)]
@@ -142,11 +138,13 @@ impl Writer {
 
     fn append(&mut self, kind: Kind, words: &[u64], bytes: &[u8]) {
         self.memory_emitted += u64::from(kind as u16 >= Kind::Alloc as u16);
-        if let (Ok(words_len), Ok(bytes_len)) =
-            (u16::try_from(words.len()), u32::try_from(bytes.len()))
-        {
-            let needed = HEADER_BYTES + words.len() * 8 + bytes.len();
-            if needed <= self.capacity.min(MAX_RECORD_BYTES) {
+        if let (Ok(words_len), Ok(bytes_len), Some(payload)) = (
+            u16::try_from(words.len()),
+            u32::try_from(bytes.len()),
+            payload_bytes(words.len(), bytes.len()),
+        ) {
+            let needed = HEADER_BYTES + payload;
+            if needed <= self.capacity.min(RECORD_BYTES) {
                 if needed > self.capacity - self.used {
                     self.seal();
                 }
@@ -376,11 +374,11 @@ impl Run {
                 .to_str()?
                 .parse::<usize>()
                 .ok()
-                .filter(|size| (DEFAULT_CHUNK_BYTES..=MAX_CHUNK_BYTES).contains(size))
+                .filter(|size| (RECORD_BYTES..=MAX_CHUNK_BYTES).contains(size))
         });
         let Some(size) = size else {
             eprintln!(
-                "hirsel: HIRSEL_PROFILE_CHUNK_BYTES requires {DEFAULT_CHUNK_BYTES} to {MAX_CHUNK_BYTES} bytes"
+                "hirsel: HIRSEL_PROFILE_CHUNK_BYTES requires {RECORD_BYTES} to {MAX_CHUNK_BYTES} bytes"
             );
             return None;
         };
@@ -418,7 +416,7 @@ impl Run {
         live_memory: bool,
     ) -> io::Result<Self> {
         let mut output = BufWriter::new(File::options().write(true).truncate(true).open(path)?);
-        output.write_all(MAGIC)?;
+        output.write_all(&MAGIC)?;
         if let Some(maps) = crate::host::sys::mappings() {
             let stamp = now_ns();
             let pid = std::process::id();
@@ -665,6 +663,29 @@ pub(crate) fn pending(token: u64, start: u64) {
             &[token, now_ns().saturating_sub(start)],
             &[],
         );
+    }
+}
+
+#[cfg(feature = "testing")]
+pub mod testing {
+    use super::*;
+
+    /// Write mapping records through the production chunk writer, then end the
+    /// stream cleanly. Cross-crate format tests use this to exercise the same
+    /// writer the runtime uses; a record the writer refuses is absent.
+    pub fn mapping_stream(chunk_bytes: usize, payloads: &[&[u8]]) -> Vec<u8> {
+        let thread = Arc::new(Thread::new(3, chunk_bytes).unwrap());
+        let mut writer = Writer::new(thread.clone(), chunk_bytes, true);
+        for payload in payloads {
+            writer.append(Kind::Mapping, &[], payload);
+        }
+        drop(writer);
+        let mut stream = MAGIC.to_vec();
+        for chunk in &thread.chunks {
+            chunk.drain(&mut stream).unwrap();
+        }
+        stream.extend_from_slice(&header(now_ns(), 0, END, 0, 0));
+        stream
     }
 }
 

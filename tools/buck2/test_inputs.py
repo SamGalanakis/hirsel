@@ -29,7 +29,9 @@ TEST_DATA = {
         "crates/hirsel-core-front/src/testdata/**", "crates/hirsel-core-rt/fixtures/order/step-bounds.hirsel",
         "README.md", "docs/COOKBOOK.md", "docs/PRIMER.md", "docs/spec/**",
         *[f"core/programs/{package}/{pattern}"
-          for package in ("dtls", "media_bits", "quic", "rtp", "runner", "sframe", "srtp", "store", "stun_ice", "turn", "webrtc_sfu")
+          for package in ("dtls", "media_bits", "moq", "quic", "rtp", "rtp_jitter",
+                          "runner", "sframe", "srtp", "store", "stun_ice", "turn",
+                          "webrtc_sfu", "webtransport")
           for pattern in ("*.hirsel", "hirsel.toml")],
         "core/programs/webrtc_sfu/cascade/*.hirsel",
     ],

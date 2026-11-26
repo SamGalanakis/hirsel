@@ -6,7 +6,7 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
 use crate::code_store::{CodeStore, ObjectKind};
-use crate::foreign_archive::{LinkArchives, archive_ref, contained, recipe_code};
+use crate::foreign_archive::{LinkArchives, archive_ref, contained, recipe_code, select};
 use hirsel_core_ir::{
     FuncId,
     address::{Binding, Group, builtin_semantics_number},
@@ -18,7 +18,8 @@ use hirsel_core_ir::{
     },
     source::{SourceMap, anchored_items},
 };
-use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
+use hirsel_core_resolve::{ForeignArchiveCapture, ForeignCode, ForeignModuleCapture};
+type Selected<'a> = BTreeMap<ContentHash, &'a ForeignArchiveCapture>;
 #[path = "recipe_binding.rs"]
 mod binding;
 pub(super) use binding::bind_annexes;
@@ -610,15 +611,14 @@ impl CheckProduct {
         let native_link = if modules.is_empty() || options.runtime.as_os_str().is_empty() {
             None
         } else {
-            Some(crate::tool_inputs::toolchain(&options.link, target, &options.runtime)?.1)
+            let (tools, link) =
+                crate::tool_inputs::toolchain(&options.link, target, &options.runtime)?;
+            Some((link, contained::PartCache::new(options, tools.image)?))
         };
-        let (reached_archives, link_archives) = self.check_foreign_archives(
-            &modules,
-            target,
-            native_link
-                .as_ref()
-                .map(|link| (options.runtime.as_path(), link)),
-        )?;
+        let link =
+            (native_link.as_ref()).map(|(link, cache)| (options.runtime.as_path(), link, cache));
+        let (reached_archives, link_archives) =
+            self.check_foreign_archives(&modules, target, link)?;
         selected.extend(reached_archives);
         let grants = bindings(entry, decl, options, |interface| {
             let mut functions = self
@@ -637,9 +637,9 @@ impl CheckProduct {
             }
             let (module, capture) = self.foreign_capture(function)?;
             // A contained grant binds its module's pin (FFI-16).
-            let row = match capture.wasm() {
-                Some(module) => module,
-                None => crate::foreign_archive::select(&module, capture, target)?,
+            let row = match &capture.code {
+                ForeignCode::Wasm(module) => module,
+                ForeignCode::Native(archives) => select(&module, archives, target)?,
             };
             let object = archive_ref(row);
             selected.insert(object.hash, row);
@@ -732,26 +732,22 @@ impl CheckProduct {
         &'a self,
         modules: &BTreeMap<String, ForeignLeaf>,
         target: &str,
-        link: Option<(&Path, &crate::tool_inputs::LinkRecipe)>,
-    ) -> Result<
-        (
-            BTreeMap<ContentHash, &'a ForeignArchiveCapture>,
-            LinkArchives,
-        ),
-        NativeStop,
-    > {
+        link: Option<contained::Link<'_>>,
+    ) -> Result<(Selected<'a>, LinkArchives), NativeStop> {
+        let cache = link.map(|(_, _, cache)| cache);
         let mut selected = BTreeMap::new();
         let mut sealed = LinkArchives::default();
         for leaf in modules.values() {
             let function = &leaf.functions[0].identity.definition;
-            let (_, capture) = self.foreign_capture(function)?;
-            if let Some(module) = capture.wasm() {
-                let artifact = contained::compile_module(leaf, module, target)?;
-                sealed.contain(ContentHash(module.pin), artifact);
-                selected.insert(ContentHash(module.pin), module);
-                continue;
-            }
-            let row = crate::foreign_archive::select(&leaf.module, capture, target)?;
+            let row = match &self.foreign_capture(function)?.1.code {
+                ForeignCode::Wasm(module) => {
+                    let artifact = contained::compile_module(leaf, module, target, cache)?;
+                    sealed.contain(ContentHash(module.pin), artifact);
+                    selected.insert(ContentHash(module.pin), module);
+                    continue;
+                }
+                ForeignCode::Native(archives) => select(&leaf.module, archives, target)?,
+            };
             let object = archive_ref(row);
             sealed.admit(
                 object,
@@ -764,7 +760,7 @@ impl CheckProduct {
             selected.insert(object.hash, row);
         }
         let mut symbols = sealed.definitions(&Debit::unlimited())?;
-        if let Some((runtime, link)) = link {
+        if let Some((runtime, link, _)) = link {
             symbols.check_tool_inputs(runtime, link)?;
         }
         Ok((selected, sealed))
@@ -774,7 +770,7 @@ impl CheckProduct {
         &self,
         reached: &Reachable<'_>,
         options: &NativeOptions,
-        link: &crate::tool_inputs::LinkRecipe,
+        inputs: &crate::native::NativeInputs,
     ) -> Result<LinkArchives, NativeStop> {
         // A recording build of native-reaching code is refused after this (FFI-8).
         if reached.materialized.foreign.is_empty()
@@ -783,10 +779,11 @@ impl CheckProduct {
             return Ok(LinkArchives::default());
         }
         reached.require()?;
+        let cache = contained::PartCache::new(options, inputs.toolchain.image)?;
         let (_, sealed) = self.check_foreign_archives(
             &self.reached_foreign_modules(reached)?,
             &options.target,
-            Some((&options.runtime, link)),
+            Some((&options.runtime, &inputs.recipe, &cache)),
         )?;
         Ok(sealed)
     }

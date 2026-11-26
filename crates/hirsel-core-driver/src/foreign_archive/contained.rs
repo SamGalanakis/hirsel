@@ -37,8 +37,7 @@ pub(crate) fn names(product: &crate::CheckProduct, interface: &str) -> bool {
     headers.any(|(f, (i, _))| i.definition_identity() == interface && product.is_contained(f))
 }
 
-/// Recipes, replay and Darwin images do not yet carry contained code (W1
-/// sub-slice d, and W2).
+/// Darwin images do not yet carry contained code (W2).
 pub(crate) fn not_built() -> AdmissionError {
     AdmissionError::Refused("FFI-10: containment = \"wasm\" is not built yet".into())
 }
@@ -57,6 +56,36 @@ fn engine(target: Target) -> Result<&'static Engine, AdmissionError> {
     Ok(engine)
 }
 
+/// A build's link inputs: its runtime, link recipe and part cache.
+pub(crate) type Link<'a> = (
+    &'a std::path::Path,
+    &'a crate::tool_inputs::LinkRecipe,
+    &'a PartCache,
+);
+
+/// FFI-15 Caching: the build user's own part cache, and the compiler and
+/// toolchain image identities (`k` and `i`) its keys hold.
+pub(crate) struct PartCache {
+    pub(crate) store: crate::store::Store,
+    pub(crate) image: [ContentHash; 2],
+}
+
+impl PartCache {
+    pub(crate) fn new(options: &crate::NativeOptions, image: ContentHash) -> std::io::Result<Self> {
+        let store = crate::store::Store::cas(&options.cas)?;
+        Ok(Self {
+            store,
+            image: [crate::reuse::compiler_identity(), image],
+        })
+    }
+
+    fn key(&self, pin: [u8; 32], target: Target) -> ContentHash {
+        let [compiler, image] = &self.image;
+        let parts = [&pin[..], target.triple().as_bytes(), &compiler.0, &image.0];
+        ContentHash::of_parts("hirsel.contained-object.v1", parts)
+    }
+}
+
 /// Admit a reached contained module (FFI-11) in its sealed copy, then
 /// precompile those sealed bytes, which are all the compiler is given, for
 /// `target` (FFI-15). The artifact is the image's one copy of its code.
@@ -64,20 +93,23 @@ pub(crate) fn compile_module(
     leaf: &ForeignLeaf,
     row: &ForeignArchiveCapture,
     target: &str,
+    cache: Option<&PartCache>,
 ) -> Result<Vec<u8>, AdmissionError> {
     let bytes = sealed_bytes(row)?;
-    compile_bytes(leaf, row.pin, &row.path, &bytes, target)
+    compile_bytes(leaf, row.pin, &row.path, &bytes, target, cache)
 }
 
 /// Admit and precompile a contained module's bytes, as a recipe's admission
 /// loads them from the code store, for `target`. `path` names the module
-/// in refusals.
+/// in refusals. The module is admitted on every build; only its artifact
+/// comes from `cache` when given (FFI-15 Caching).
 pub(crate) fn compile_bytes(
     leaf: &ForeignLeaf,
     pin: [u8; 32],
     path: &str,
     bytes: &[u8],
     target: &str,
+    cache: Option<&PartCache>,
 ) -> Result<Vec<u8>, AdmissionError> {
     let checked = admit_checked(leaf, pin, path, bytes)?;
     let target = Target::from_triple(target)
@@ -86,8 +118,18 @@ pub(crate) fn compile_bytes(
         Target::X86_64Linux | Target::Aarch64Linux => {}
         Target::Aarch64Darwin => return Err(not_built()),
     }
-    compile::precompile(engine(target)?, checked)
-        .map_err(|error| AdmissionError::Refused(format!("FFI-15: {error}")))
+    let key = cache.map(|cache| (cache, cache.key(pin, target)));
+    if let Some((cache, key)) = key
+        && let Some(artifact) = cache.store.get(key)?
+    {
+        return Ok(artifact);
+    }
+    let artifact = compile::precompile(engine(target)?, checked)
+        .map_err(|error| AdmissionError::Refused(format!("FFI-15: {error}")))?;
+    if let Some((cache, key)) = key {
+        cache.store.put_keyed(key, &artifact)?;
+    }
+    Ok(artifact)
 }
 
 fn sealed_bytes(row: &ForeignArchiveCapture) -> Result<Vec<u8>, AdmissionError> {

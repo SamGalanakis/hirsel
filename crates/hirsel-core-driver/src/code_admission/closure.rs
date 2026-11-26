@@ -2,7 +2,7 @@ use super::{AdmissionError, BackendSemantics, Body, EngineTag, Limit, SlotContra
 use crate::foreign_header::Abi;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::Identity;
-use hirsel_core_ir::address::{Binding, Group, foreign_address};
+use hirsel_core_ir::address::{Binding, Group, contained_address, foreign_address};
 use hirsel_core_ir::decode::Debit;
 use hirsel_core_ir::normal::{DecodedBody, Slot};
 use hirsel_core_ir::release_recipe::{Backend, ForeignFunction, ObjectRef, Recipe};
@@ -59,22 +59,34 @@ impl<'a> ForeignIndex<'a> {
                 )));
             }
             budget.check()?;
-            let encoded = budget.scratch();
-            let len = leaf.targets().iter().map(|row| row.target.len() + 43).sum();
-            charge_rows::<u8>(&encoded, len)?;
-            let mut rows = Vec::with_capacity(len);
-            leaf.encode_archive_rows(&mut rows);
-            let archives = ContentHash(Sha256::digest(&rows).into());
-            drop((rows, encoded));
-            let selected = leaf
-                .targets()
-                .binary_search_by(|row| row.target.cmp(&recipe.launch.target))
-                .expect("archive inventory selects a row for each reached module");
+            // FFI-16: a contained function is addressed by its module's pin,
+            // which is also what its grant binds; a linked one by its
+            // archive-set digest, with its target's archive.
+            let (code, archive) = match leaf.wasm() {
+                Some(module) => (Ok(module.hash.0), module),
+                None => {
+                    let encoded = budget.scratch();
+                    let len = leaf.targets().iter().map(|row| row.target.len() + 43).sum();
+                    charge_rows::<u8>(&encoded, len)?;
+                    let mut rows = Vec::with_capacity(len);
+                    leaf.encode_archive_rows(&mut rows);
+                    let archives = ContentHash(Sha256::digest(&rows).into());
+                    drop((rows, encoded));
+                    let selected = leaf
+                        .targets()
+                        .binary_search_by(|row| row.target.cmp(&recipe.launch.target))
+                        .expect("archive inventory selects a row for each reached module");
+                    (Err(archives), leaf.targets()[selected].archive)
+                }
+            };
             for function in &leaf.functions {
                 budget.charge_slots(1)?;
                 let abi = Abi::parse(&function.header)
                     .ok_or(AdmissionError::Binding("invalid foreign function header"))?;
-                let address = foreign_address(function, &leaf.symbols, archives);
+                let address = match code {
+                    Ok(pin) => contained_address(function, &leaf.symbols, pin),
+                    Err(archives) => foreign_address(function, &leaf.symbols, archives),
+                };
                 charge_map::<ContentHash, usize>(budget, 1)?;
                 if index
                     .addresses
@@ -88,7 +100,7 @@ impl<'a> ForeignIndex<'a> {
                     address,
                     function,
                     abi,
-                    archive: leaf.targets()[selected].archive,
+                    archive,
                     reached: false,
                 });
             }

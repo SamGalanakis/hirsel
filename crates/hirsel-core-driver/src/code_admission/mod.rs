@@ -476,6 +476,7 @@ fn verify_release(
                     &module.hash.to_string(),
                     &bytes,
                     target,
+                    None,
                 )?;
                 link_archives.contain(module.hash, artifact);
                 continue;

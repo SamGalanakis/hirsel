@@ -62,13 +62,12 @@ pub(crate) fn recipe_code(capture: &ForeignModuleCapture) -> ForeignCode {
     }
 }
 
-/// FFI-3: a linked module's archive for `target`.
+/// FFI-3: a linked module's archive for `target`, of its `archives`.
 pub(crate) fn select<'a>(
     module: &DefPath,
-    capture: &'a ForeignModuleCapture,
+    archives: &'a BTreeMap<String, ForeignArchiveCapture>,
     target: &str,
 ) -> Result<&'a ForeignArchiveCapture, AdmissionError> {
-    let archives = capture.archives().ok_or_else(contained::not_built)?;
     archives.get(target).ok_or_else(|| {
         let targets = if archives.is_empty() {
             "none".into()

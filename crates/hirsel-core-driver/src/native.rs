@@ -541,12 +541,12 @@ impl CheckProduct {
         if !options.llvm_release() {
             let reached = self.reachable_objects(entry, options)?;
             let inputs = reached.native.as_ref().expect("a build's reachable set");
-            self.preflight_foreign_link(&reached, options, &inputs.recipe)?;
+            self.preflight_foreign_link(&reached, options, inputs)?;
             return Ok(self.emit_reached(entry, &reached, options)?.0);
         }
         let reached = self.reachable_recipe(entry, options)?;
         let inputs = native_inputs(self, options)?;
-        self.preflight_foreign_link(&reached, options, &inputs.recipe)?;
+        self.preflight_foreign_link(&reached, options, &inputs)?;
         reached.require_native(self, entry, options)?;
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
@@ -889,7 +889,7 @@ impl CheckProduct {
             .native
             .as_ref()
             .expect("an object build's reachable set");
-        let link_archives = self.preflight_foreign_link(reached, options, &inputs.recipe)?;
+        let link_archives = self.preflight_foreign_link(reached, options, inputs)?;
         let instances = reached.require_native(self, entry, options)?;
         let foreign_modules = self.reached_foreign_modules(reached)?;
         let address = reached.address(entry)?;

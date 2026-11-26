@@ -436,3 +436,71 @@ fn fl7_both(f: Foreign[laws.Box], g: Foreign[laws.Other]) -> Result[(), ()] {
     Ok(())
 }
 "#;
+
+/// FW18: a contained function's address holds its module's pin (FFI-16), so
+/// one changed byte of `box.wasm` (a letter of its `name` section, which no
+/// export reads) and its pin change `caller`'s revision and leave `plain`'s,
+/// which reaches no foreign code. Each recipe builds and runs from the code
+/// store with the package deleted; `count` returns 1, the first entry of
+/// `box.c`'s counter. A recipe whose module object is gone is `Missing`.
+#[test]
+fn contained_recipes_pin_their_module() {
+    use crate::code_store::{CodeStore, ObjectKind};
+    use sha2::{Digest, Sha256};
+    use std::process::Command;
+
+    let fixture = |file: &str| std::fs::read(PackageLaw::new().libraries.join("programs/wasm_laws").join(file)).unwrap();
+    let original = fixture("box.wasm");
+    let at = original.windows(4).position(|w| w == b"bump").unwrap() + 3;
+    let mut changed = original.clone();
+    changed[at] = b'q';
+    let manifest = String::from_utf8(fixture("hirsel.toml")).unwrap();
+    let pin = |bytes: &[u8]| ContentHash(Sha256::digest(bytes).into());
+    for engine in ["cranelift", "llvm"] {
+        let law = PackageLaw::new();
+        let store = CodeStore::new(law.path("code-store"));
+        let mut runs = Vec::new();
+        for module in [&original, &changed] {
+            for file in ["laws.hirsel", "native.hirsel"] {
+                law.write(&format!("wasm_laws/{file}"), fixture(file));
+            }
+            law.write("wasm_laws/box.wasm", module);
+            law.write("wasm_laws/hirsel.toml", manifest.replace(&pin(&original).to_string(), &pin(module).to_string()));
+            law.write("wasm_laws/main.hirsel", CONTAINED_RECIPE);
+            let root = PackageLaw::pass(law.run(&[
+                "publish", "wasm_laws", "--backend", engine,
+                "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout",
+            ])).trim().to_owned();
+            std::fs::remove_dir_all(law.path("wasm_laws")).unwrap();
+            PackageLaw::pass(law.run(&["build", "--recipe", &root, "-o", "sealed-program"]));
+            let run = Command::new(law.path("sealed-program")).output().unwrap();
+            assert!(run.status.success(), "{engine}: {run:?}");
+            assert_eq!(run.stdout.len(), 64, "{engine}: two revisions");
+            runs.push((root, run.stdout));
+        }
+        let [(first, a), (_, b)] = &runs[..] else { unreachable!() };
+        assert_ne!(a[..32], b[..32], "{engine}: the pin is in caller's address");
+        assert_eq!(a[32..], b[32..], "{engine}: plain reaches no module");
+        std::fs::remove_file(store.path(ObjectKind::ForeignArchive, pin(&original))).unwrap();
+        let (status, _, error) = law.run(&["build", "--recipe", first, "-o", "sealed-program"]);
+        assert_eq!(status, Some(2), "{engine}: {error}");
+        assert!(error.contains(&format!("Missing({})", pin(&original))), "{engine}: {error}");
+    }
+}
+
+const CONTAINED_RECIPE: &str = "\
+fn caller(f: Foreign[laws.Box]) -> u64 { native.count(f) }
+fn plain() -> u64 { 9 }
+fn put[F](out: Stdout, s: StaticFn[F]) -> bool waits {
+    let Some(r) = code.revision(s) else { return false };
+    result.unwrap(stdout.write_bytes(out, r));
+    true
+}
+pub fn main(f: Foreign[laws.Box], out: Stdout) -> Result[(), Exit] waits {
+    if put(out, code.describe(caller)) && put(out, code.describe(plain)) && plain() == 9 && caller(f) == 1 {
+        Ok(())
+    } else {
+        Error(Exit(status: 2u8))
+    }
+}
+";

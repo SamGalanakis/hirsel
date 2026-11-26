@@ -1125,8 +1125,10 @@ never reuses its pass (FFI-14).
 that reaches a contained module admits it (FFI-11) and compiles it for Linux targets, and its
 calls run in the calling task's own instance with loans, handles and traps (FFI-12, FFI-14,
 FFI-15), metered by fuel into steps, slice ends and byte charges (FFI-13). A program that
-reaches only contained code is recorded and replayed (FFI-14). Launch grants without
-`--grant`, the object cache and recipes (FFI-16) are not built yet.
+reaches only contained code is recorded and replayed (FFI-14), and a test's configuration
+grants its interface without `--grant`. A build keeps each artifact in its part cache (FFI-15
+Caching), and a recipe pins the module and rebuilds it from the code store (FFI-16). Darwin
+images (W2) do not carry contained code yet.
 
 Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
 contained-foreign-review-2903: the artifact is loaded in place from the image's executable
@@ -1583,9 +1585,8 @@ the only call without a capability.
 **The pin.** Hirsel embeds the `wasmtime` crate at exactly `=48.0.10`, with default features
 off, in two builds. The driver builds it with `cranelift` and `std`, so it can validate and
 precompile. The runtime builds it with `runtime`, `async` and `std` only, so it can load,
-instantiate and call. `Engine::precompile_module` and `Engine::precompile_compatibility_hash`
-exist only with `cranelift` (or `winch`) on (`crates/wasmtime/src/engine.rs` <!-- doc-ref: external -->
-lines 675 and 867), so an image holds no code generator, and "the run never compiles" is a fact
+instantiate and call. `Engine::precompile_module` exists only with `cranelift` (or `winch`) on
+(`crates/wasmtime/src/engine.rs` <!-- doc-ref: external --> line 675), so an image holds no code generator, and "the run never compiles" is a fact
 of its link, not a promise. Wasmtime calls every release that is a multiple of 12 an LTS,
 "supported for 24 months", and security fixes are "guaranteed to be backported to all supported
 releases". A pin moves only to a later patch of 48, or to the next LTS. The pin is a toolchain
@@ -1669,15 +1670,14 @@ The image is the toolchain's own output, as its native code is. The run never de
 bytes from a cache, a package or the network.
 
 **Caching.** A compiled artifact is a build part. It is kept in the driver's part cache, under
-the key `H("hirsel.contained-object.v1", m ‖ t ‖ c ‖ i)`. `m` is the module's 32-byte pin. `t`
-is the target triple as a text. `c` is the SHA-256 of the bytes that
-`Engine::precompile_compatibility_hash` of the pinned configuration for `t` writes to a hasher
-(it hashes the triple, the Cranelift and ISA flags, the tunables, which hold the cost table,
-the features and the crate's version text: `HashedEngineCompileEnv`,
-`crates/wasmtime/src/compile/code_builder.rs` <!-- doc-ref: external --> lines 848-865).
-`i` is the toolchain image identity, the one the test pass key holds. `c` alone does not cover
-Wasmtime's or Cranelift's code: a toolchain rebuilt with a patched Cranelift, still at version
-48.0.10, keeps `c`, and only `i` makes its key miss. Since the pin is in the key, the cache
+the key `H("hirsel.contained-object.v1", m ‖ t ‖ k ‖ i)`. `m` is the module's 32-byte pin. `t`
+is the target triple as a text. `k` is the compiler identity (`docs/building.md`, "Compiler
+identity"): the driver's source closure and pins, which fix the engine configuration
+`compile::engine` builds for `t`, with its Cranelift and ISA flags, tunables, cost table and
+features. `i` is the toolchain image identity. The test pass key holds both. Wasmtime's own
+`Engine::precompile_compatibility_hash` is not used: it is built only with the `runtime`
+feature, which the driver leaves off. A toolchain rebuilt with a patched Cranelift, still at
+version 48.0.10, changes `k` or `i`, so its key misses. Since the pin is in the key, the cache
 follows the package identity: two packages with one module share an entry, and a changed
 module misses. The cache is trusted as every compiled part is. It is the build user's own
 output, and nothing guards it against that user ("trust our own implementation"). A contained

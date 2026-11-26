@@ -451,7 +451,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         let replay = take loaded_settled
         check_limits(options.limits, replay.limits)?
         if let None = side.granted {
-            let grant = slot_attach(mut link, store, epoch + 1, place_prefix)?
+            let grant = slot_attach(mut link, store, epoch + 1, place_prefix, replay.limits)?
             side.granted = Some(grant)
         }
         let Some((take admitted, tag)) = stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)? else {
@@ -534,7 +534,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     let (inc_b, next_b) = match side.granted {
         Some(grant) => grant,
         None => {
-            let grant = slot_attach(mut link, store, epoch + 1, place_prefix)?
+            let grant = slot_attach(mut link, store, epoch + 1, place_prefix, replay.limits)?
             side.granted = Some(grant)
             grant
         },

@@ -5,8 +5,6 @@ const ATTACH_LIMIT: u64 = 512
 
 const ATTACH_SEALED_MAX: u64 = 8
 
-const STREAM_INDEX_LIMIT: u64 = 727480
-
 const STREAM_TERM_BYTES: u64 = 32
 
 const REG_LIMIT: u64 = 1048576
@@ -15,16 +13,22 @@ const STREAM_XINDEX_LIMIT: u64 = 16777216
 
 const STREAM_FOOTER_BYTES: u64 = 32
 
-const STREAM_MAX_SLOTS: u64 = 10698
-
 const REG_FIXED_BYTES: u64 = 110
 
 const REG_ROW_BYTES: u64 = 49
 
+const STREAM_MAX_SLOTS: u64 = (REG_LIMIT - REG_FIXED_BYTES) / (2 * REG_ROW_BYTES)
+
+const STREAM_INDEX_BODY_HEAD: u64 = bytes[u32] + bytes[u64] + bytes[u32]
+
 const STREAM_INDEX_ROW_BYTES: u64 = 68
 
-// HEADER (72) and INDEX's frame head (16) and its own head (16).
-const STREAM_INDEX_PREFIX: u64 = 104
+// HEADER (72), INDEX's frame head (16) and its own head.
+const STREAM_INDEX_PREFIX: u64 = 72 + 16 + STREAM_INDEX_BODY_HEAD
+
+const STREAM_INDEX_LIMIT: u64 = STREAM_INDEX_BODY_HEAD + STREAM_INDEX_ROW_BYTES * STREAM_MAX_SLOTS
+
+const STREAM_FOOTER_WIRE_BYTES: u64 = 16 + STREAM_FOOTER_BYTES
 
 // A reader's first range GET of a batch: HEADER, INDEX's head and 58 rows.
 const STREAM_INDEX_PROBE: u64 = 4096
@@ -408,8 +412,12 @@ fn stream_batch_key(mut key: String, inc: u64, seq: u64) {
     history_number(mut key, seq)
 }
 
+fn stream_batch_overhead(rows: u64) -> u64 {
+    STREAM_INDEX_PREFIX + STREAM_INDEX_ROW_BYTES * rows + STREAM_FOOTER_WIRE_BYTES
+}
+
 fn stream_batch_size(slices: List[BatchSlice]) -> u64 {
-    let mut total = STREAM_INDEX_PREFIX + STREAM_INDEX_ROW_BYTES * list.len(slices) + 16 + STREAM_FOOTER_BYTES
+    let mut total = stream_batch_overhead(list.len(slices))
     for i in 0u64 .. list.len(slices) {
         total += list.len(slices[i].octets)
     }

@@ -21,7 +21,6 @@ fn df_plan(sid: HostStreamId, max_slots: u32, max_wait_ms: u64, op_ms: u64) -> S
     limits.hold_ms = order.max(DF_HOLD_MS, 4 * op_ms)
     limits.idle_poll_ms = DF_IDLE_MS
     limits.index_every = 512
-    limits.recover_parallel = 16
     StreamPlan(sid, prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms, max_batch_bytes: FRAME_LIMIT + 4096), limits)
 }
 

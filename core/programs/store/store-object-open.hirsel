@@ -132,7 +132,7 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
 // frame in the stream. Open returns once that frame is acked.
 fn history_stream_genesis(mut client: std.object.Client, mut link: SlotLink, id: StoreId, holder: StoreId, authority_kind: u8, authority: Bytes, mut workspace: HistoryBuffers, deadline: u64, limits: StoreLimits) -> Result[HistoryRegister, Error] waits {
     let place_prefix = std.object.bucket_config(client).prefix
-    let (inc, first_seq) = slot_attach(mut link, id, 1, place_prefix)?
+    let (inc, first_seq) = slot_attach(mut link, id, 1, place_prefix, limits)?
     let attach = Attach(settles: 0, live: Some(StreamRef(sid: link.sid, inc, from_seq: first_seq, from_frame: 0)), sealed: list.new())
     let created = history_publish_genesis(mut client, id, holder, authority_kind, authority, mut workspace, deadline, limits, Some(take attach))
     let register = match take created {
@@ -226,7 +226,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
                     },
                     None => {
                         let place_prefix = std.object.bucket_config(read_source.client).prefix
-                        let (inc, next_seq) = slot_attach(mut attaching, head.store, head.pair.epoch + 1, place_prefix)?
+                        let (inc, next_seq) = slot_attach(mut attaching, head.store, head.pair.epoch + 1, place_prefix, replay.limits)?
                         granted = Some((head.pair.epoch + 1, inc, next_seq))
                         (inc, next_seq)
                     },

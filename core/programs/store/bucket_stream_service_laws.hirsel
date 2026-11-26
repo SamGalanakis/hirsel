@@ -4,6 +4,10 @@
 // The stream root of these laws, under a service client with prefix "".
 const STREAM_SERVICE_ROOT: String = "streams"
 
+fn stream_limits() -> StreamLimits {
+    StreamLimits(max_slots: 512, max_pins: 4096, hold_ms: 2000, idle_poll_ms: 1000, index_every: 512, pin_ttl_s: 86400, slot_bytes: 65536)
+}
+
 fn stream_service_plan(max_slots: u32) -> StreamPlan {
     let mut limits = stream_limits()
     limits.max_slots = max_slots
@@ -121,7 +125,9 @@ fn stream_service_expected(commits: u64) -> List[ServiceStep] {
 @test
 fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let s = bucket_law_sim(tasks, c, 83, None, list.new())
-    let plan = stream_service_plan(4)
+    let mut plan = stream_service_plan(4)
+    // One row: 104 bytes for HEADER and INDEX, 68 for the row, 48 for FOOTER.
+    plan.batching.max_batch_bytes = small_place_limits().frame + 104 + 68 + 48
     let outcome = stream_service_genesis_run(s, tasks, c, r, plan, 2)
     let report = bucket_law_report(take s)
     outcome?
@@ -176,6 +182,7 @@ fn stream_service_genesis_run(s: BucketSim, tasks: Tasks, c: Clock, r: Random, p
     let attached = streamed(object_authority(take client, "bucket", BUCKET_LAW_OP_MS), take slot)?
     let mut options = bucket_order_options(true)
     options.head_poll_ms = 1000
+    options.limits = Some(small_place_limits())
     let mut db = open_authority(tasks, take attached, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     stream_service_marker(s, tasks, string.from("marker-1"))?
     for _ in 0u64 .. commits {
@@ -216,7 +223,6 @@ fn stream_field_code(f: StreamField) -> u64 {
         HoldMs => 4,
         IdlePollMs => 5,
         IndexEvery => 6,
-        RecoverParallel => 7,
         SlotBytes => 8,
     }
 }
@@ -231,7 +237,8 @@ fn bucket_stream_plan_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let fits = stream_service_budget(good)
     let mut cases: List[(StreamPlan, u64, Error)] = list.new()
     let mut low_batch: StreamPlan = clone(good)
-    low_batch.batching.max_batch_bytes = FRAME_LIMIT + 4095
+    // A minimum-sized Place has one 4,096-byte value and 65,616 bytes of frame room.
+    low_batch.batching.max_batch_bytes = 4096 + 65616 + 219
     list.push(mut cases, (take low_batch, fits, Stream(Bound(MaxBatchBytes))))
     let mut high_batch: StreamPlan = clone(good)
     high_batch.batching.max_batch_bytes = 4294967297
@@ -250,9 +257,6 @@ fn bucket_stream_plan_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), 
     let mut no_index: StreamPlan = clone(good)
     no_index.limits.index_every = 0
     list.push(mut cases, (take no_index, fits, Stream(Bound(IndexEvery))))
-    let mut recover: StreamPlan = clone(good)
-    recover.limits.recover_parallel = 0
-    list.push(mut cases, (take recover, fits, Stream(Bound(RecoverParallel))))
     let mut slot_room: StreamPlan = clone(good)
     slot_room.limits.slot_bytes = 4095
     list.push(mut cases, (take slot_room, fits, Stream(Bound(SlotBytes))))

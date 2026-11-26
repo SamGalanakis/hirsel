@@ -925,7 +925,8 @@ fn local_units_zero(parent: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> R
         Error(Configuration) => (),
         _ => return Error("local: zero units must be refused as Configuration"),
     }
-    let plan = store.StreamPlan(sid: store.HostStreamId(hi: 1, lo: 2), prefix: string.from("streams"), batching: store.Batching(max_wait_ms: 0, max_batch_bytes: 16781312), limits: store.stream_limits())
+    let limits = store.StreamLimits(max_slots: 512, max_pins: 4096, hold_ms: 2000, idle_poll_ms: 1000, index_every: 512, pin_ttl_s: 86400, slot_bytes: 65536)
+    let plan = store.StreamPlan(sid: store.HostStreamId(hi: 1, lo: 2), prefix: string.from("streams"), batching: store.Batching(max_wait_ms: 0, max_batch_bytes: 16781312), limits)
     let cfg_stream = local.Config(root: parent, options: disk_options(), factory: local.factory(quick_place), seed: (), max_places: 1u64, idle_ms: 60000u64, place_bytes: SHARD_SHARE, units: 1u64, sessions: 1u64, tasks: tasks, clock: c, random: r, net: n, watch: None, journal: Some(take plan))
     match local.local(local.doorway(), take cfg_stream) {
         Error(Configuration) => Ok(()),

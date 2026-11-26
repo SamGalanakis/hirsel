@@ -6,20 +6,13 @@ pub type Batching: cross {
 }
 
 pub type StreamLimits: cross {
-    max_frames: u32,
     max_slots: u32,
     max_pins: u32,
     hold_ms: u64,
     idle_poll_ms: u64,
-    prescan_batches: u64,
     index_every: u64,
     pin_ttl_s: u64,
-    recover_parallel: u32,
     slot_bytes: u64
-}
-
-pub fn stream_limits() -> StreamLimits {
-    StreamLimits(max_frames: 4096, max_slots: 512, max_pins: 4096, hold_ms: 2000, idle_poll_ms: 1000, prescan_batches: 4096, index_every: 512, pin_ttl_s: 86400, recover_parallel: 16, slot_bytes: 65536)
 }
 
 pub type StreamPlan: cross {
@@ -51,8 +44,19 @@ type SlotReport: cross = ReportSettled(u32, u64, bool, u64, u64, u32) | ReportFe
 // The doorbell item that wakes the service for its control channel.
 const STREAM_CONTROL_RING: u32 = 0xFFFFFFFF
 
-// Items one slot's data connection queues; its bytes are `slot_bytes`.
-const STREAM_SLOT_ITEMS: u64 = 64
+// Fund two full frame chunks in a slot. Round down so MEM-24's rounded
+// byte charges for both chunks fit even when slot_bytes is unaligned.
+const STREAM_SLOT_CHUNKS: u64 = 2
+
+const STREAM_SLOT_ACKS: u64 = 8
+
+const STREAM_CONNECTION_BASE: u64 = 64
+
+const STREAM_MIN_SLOT_BYTES: u64 = 4096
+
+fn stream_slot_chunk(room: u64) -> u64 {
+    room / STREAM_SLOT_CHUNKS / bytes[u64] * bytes[u64]
+}
 
 // The service's own ring when its stall poll is due (§12.11.13), and the
 // alarm task that rings it.
@@ -76,6 +80,7 @@ pub opaque type JournalSlot: cross {
     bucket: String,
     root: String,
     slot_bytes: u64,
+    max_batch_bytes: u64,
     max_rows: u64
 }
 
@@ -91,6 +96,7 @@ pub opaque type JournalService {
     bucket: String,
     root: String,
     slot_bytes: u64,
+    max_batch_bytes: u64,
     max_rows: u64
 }
 
@@ -99,11 +105,15 @@ pub opaque type JournalService {
 // buffers, the doorbell, the stall poll's alarm, and per slot its room and
 // ack item (§12.11.12).
 pub fn stream_service_bytes(plan: StreamPlan) -> u64 {
-    let batch = plan.batching.max_batch_bytes + BINDING_BYTES + 64
+    let batch = int.saturating_add(plan.batching.max_batch_bytes, BINDING_BYTES + 64)
     let reg = REG_LIMIT + 88 + BINDING_BYTES + 64
     let slots: u64 = int.widen(plan.limits.max_slots)
-    let per_slot = 64 + plan.limits.slot_bytes + 64 + 128
-    int.saturating_add(3 * order.max(batch, reg) + 64 + 4 * slots + STREAM_SERVICE_FIXED + STREAM_TIMER_BYTES, int.saturating_mul(slots, per_slot))
+    let room = plan.limits.slot_bytes
+    let slot_headers = STREAM_CONNECTION_BASE + STREAM_SLOT_CHUNKS * bytes[SlotMsg] + bytes[ServiceSlot]
+    let per_slot = int.saturating_add(room, slot_headers + stream_slot_chunk(room))
+    let fixed = STREAM_CONNECTION_BASE + (slots + 1) * bytes[u32] + STREAM_SERVICE_FIXED + STREAM_TIMER_BYTES
+    let buffers = int.saturating_mul(3, order.max(batch, reg))
+    int.saturating_add(int.saturating_add(buffers, fixed), int.saturating_mul(slots, per_slot))
 }
 
 const STREAM_SERVICE_FIXED: u64 = 262144
@@ -114,14 +124,14 @@ fn stream_plan_check(plan: StreamPlan, op_ms: u64) -> Result[(), Error] {
     }
     let limits = plan.limits
     let batch = plan.batching.max_batch_bytes
-    if batch < FRAME_LIMIT + 4096 || batch > 4294967296 {
+    if batch < LIMIT_VALUE_FLOOR + LIMIT_FRAME_ROOM + stream_batch_overhead(1) || batch > 4294967296 {
         return Error(Stream(Bound(MaxBatchBytes)))
     }
     let slots: u64 = int.widen(limits.max_slots)
     if slots == 0 || slots > STREAM_MAX_SLOTS {
         return Error(Stream(Bound(MaxSlots)))
     }
-    if limits.hold_ms < int.saturating_mul(4, op_ms) {
+    if limits.hold_ms / 4 < op_ms {
         return Error(Stream(Bound(HoldMs)))
     }
     if limits.idle_poll_ms == 0 || limits.idle_poll_ms > limits.hold_ms {
@@ -130,10 +140,7 @@ fn stream_plan_check(plan: StreamPlan, op_ms: u64) -> Result[(), Error] {
     if limits.index_every == 0 {
         return Error(Stream(Bound(IndexEvery)))
     }
-    if limits.recover_parallel == 0 {
-        return Error(Stream(Bound(RecoverParallel)))
-    }
-    if limits.slot_bytes < 4096 {
+    if limits.slot_bytes < STREAM_MIN_SLOT_BYTES {
         return Error(Stream(Bound(SlotBytes)))
     }
     if limits.max_pins < 2 {
@@ -240,7 +247,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
             Error(_) => fail("journal_service: the service task failed at its start"),
         }
     }
-    Ok(JournalService(task: take running, control: take control_send, bell: take bell, reports: take report_client, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes, max_rows: 2 * slots))
+    Ok(JournalService(task: take running, control: take control_send, bell: take bell, reports: take report_client, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes, max_batch_bytes: plan.batching.max_batch_bytes, max_rows: 2 * slots))
 }
 
 fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot], take stream_root: Option[String], cache: Option[ObjectsCache]) -> Authority {
@@ -277,7 +284,7 @@ fn journal_slot_kind(mut s: JournalService, reserved: bool) -> Result[JournalSlo
         Ok(Error(take e)) => return Error(take e),
         Error(_) => return Error(Io(Closed)),
     }
-    Ok(JournalSlot(data: take data, bell: conn.client(s.bell), reports: conn.client(s.reports), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes, max_rows: s.max_rows))
+    Ok(JournalSlot(data: take data, bell: conn.client(s.bell), reports: conn.client(s.reports), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes, max_batch_bytes: s.max_batch_bytes, max_rows: s.max_rows))
 }
 
 // Drains pending janitor asks from the service (orphan Held rows at `hold_ms`
@@ -372,6 +379,7 @@ type SlotLink: send {
     slot: u32,
     sid: HostStreamId,
     chunk: u64,
+    max_batch_bytes: u64,
     answers: Option[Inbox[SlotAck]],
     answer_client: Option[Client[SlotAck]],
     inc: u64,
@@ -382,9 +390,9 @@ type SlotLink: send {
 }
 
 fn slot_link(slot: JournalSlot) -> Result[SlotLink, Error] {
-    let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(8, bytes 0)
+    let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(STREAM_SLOT_ACKS, bytes 0)
     let (take answer_client, take answers) = capacity(take made)?
-    Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), reports: conn.client(slot.reports), slot: slot.slot, sid: slot.sid, chunk: slot.slot_bytes / 2, answers: Some(take answers), answer_client: Some(take answer_client), inc: 0, last_batch_seq: 0, commit_batches: list.new(), root: string.from(slot.root), max_rows: slot.max_rows))
+    Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), reports: conn.client(slot.reports), slot: slot.slot, sid: slot.sid, chunk: stream_slot_chunk(slot.slot_bytes), max_batch_bytes: slot.max_batch_bytes, answers: Some(take answers), answer_client: Some(take answer_client), inc: 0, last_batch_seq: 0, commit_batches: list.new(), root: string.from(slot.root), max_rows: slot.max_rows))
 }
 
 fn slot_ring(link: SlotLink) {
@@ -424,7 +432,10 @@ fn slot_relay(take input: SlotRelayInput) waits {
 
 // The grant (§12.11.5): the service registers (store, epoch, place_prefix) on
 // this slot and names its incarnation and the next_seq batch seq.
-fn slot_attach(mut link: SlotLink, store: StoreId, epoch: u64, place_prefix: String) -> Result[(u64, u64), Error] waits {
+fn slot_attach(mut link: SlotLink, store: StoreId, epoch: u64, place_prefix: String, limits: StoreLimits) -> Result[(u64, u64), Error] waits {
+    if limits.frame + stream_batch_overhead(1) > link.max_batch_bytes {
+        return Error(Stream(Bound(MaxBatchBytes)))
+    }
     // The service holds the only answer client, so a service that ends
     // closes the Place's answers.
     let Some(take answer_client) = replace(mut link.answer_client, None) else {
@@ -466,8 +477,15 @@ fn slot_send(link: SlotLink, raw: Bytes, sequence: u64) -> Result[(), Error] wai
         } else {
             SlotMore(take piece)
         }
-        if let Error(_) = conn.send(link.data, take message) {
-            return Error(Io(Closed))
+        match conn.try_send(link.data, take message) {
+            Ok(()) => (),
+            Error(Full(take queued)) => {
+                slot_ring(link)
+                if let Error(_) = conn.send(link.data, take queued) {
+                    return Error(Io(Closed))
+                }
+            },
+            Error(Closed(_)) => return Error(Io(Closed)),
         }
         at = end
         if at >= total {

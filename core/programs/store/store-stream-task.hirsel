@@ -254,12 +254,11 @@ fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotM
             return Error(Full(Pins(Capacity(requested: 1, available: 0))))
         }
     }
-    let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_ITEMS, bytes s.plan.limits.slot_bytes)
-    let (take data, take inbox) = capacity(take made)?
+    let mut free: Option[u64] = None
     for i in 0u64 .. list.len(s.slots) {
         if stream_slot_unused(s.slots[i]) {
-            let _ = replace(mut s.slots[i], ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
-            return Ok((take data, int.narrow(i)))
+            free = Some(i)
+            break
         }
     }
     let slot_count: u64 = int.widen(s.plan.limits.max_slots)
@@ -268,17 +267,26 @@ fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotM
     } else {
         slot_count - 1
     }
-    if list.len(s.slots) >= limit {
+    if free == None && list.len(s.slots) >= limit {
         for i in 0u64 .. list.len(s.slots) {
             if stream_slot_closed(mut s.slots[i]) {
-                let _ = replace(mut s.slots[i], ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
-                return Ok((take data, int.narrow(i)))
+                free = Some(i)
+                break
             }
         }
-        return Error(Full(Slots(Capacity(requested: 1, available: 0))))
+        if free == None {
+            return Error(Full(Slots(Capacity(requested: 1, available: 0))))
+        }
+    }
+    let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_CHUNKS, bytes s.plan.limits.slot_bytes)
+    let (take data, take inbox) = capacity(take made)?
+    let slot = ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None)
+    if let Some(i) = free {
+        let _ = replace(mut s.slots[i], take slot)
+        return Ok((take data, int.narrow(i)))
     }
     capacity(list.try_reserve(mut s.slots, 1))?
-    list.push(mut s.slots, ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
+    list.push(mut s.slots, take slot)
     Ok((take data, int.narrow(list.len(s.slots) - 1)))
 }
 
@@ -305,7 +313,10 @@ fn stream_slot_closed(mut slot: ServiceSlot) -> bool {
             slot.held = Some(take queued)
             false
         },
-        Error(Closed) => true,
+        Error(Closed) => {
+            slot.inbox = None
+            true
+        },
         Error(_) => false,
     }
 }
@@ -335,12 +346,11 @@ fn stream_flush_acks(mut s: StreamService) {
 // The bytes a batch of `batch` takes with one more frame of `width` for a
 // Place not yet in it (`added`).
 fn stream_batch_room(batch: List[BatchEntry], width: u64, added: bool) -> u64 {
-    let mut total = STREAM_INDEX_PREFIX + 16 + STREAM_FOOTER_BYTES + BINDING_BYTES + width + BINDING_BYTES
     let mut rows = list.len(batch)
     if added {
         rows += 1
     }
-    total += STREAM_INDEX_ROW_BYTES * rows
+    let mut total = stream_batch_overhead(rows) + width
     for e in batch {
         total += list.len(e.slice.octets)
     }
@@ -412,7 +422,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                         Some(_) => false,
                         None => true,
                     })
-                    if room > s.plan.batching.max_batch_bytes && list.len(batch) != 0 {
+                    if room > s.plan.batching.max_batch_bytes {
                         s.slots[i].held = Some(SlotFrame(width, sequence, take first))
                         break
                     }

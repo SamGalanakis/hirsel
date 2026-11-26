@@ -28,3 +28,4 @@ limit = 67108864
 "opus-laws.hirsel" = "opus_laws"
 "vp8-laws.hirsel" = "vp8_laws"
 "vp9-laws.hirsel" = "vp9_laws"
+"totality-laws.hirsel" = "totality_laws"

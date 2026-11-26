@@ -37,3 +37,4 @@ grants = ["Tasks"]
 "net_laws.hirsel" = "net"
 "rewrite_laws.hirsel" = "laws"
 "red_laws.hirsel" = "laws"
+"wire_laws.hirsel" = "laws"

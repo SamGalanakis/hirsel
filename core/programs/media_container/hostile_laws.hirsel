@@ -1,0 +1,124 @@
+fn hostile_probe_bytes(input: Bytes) waits {
+    let limits = probe.Limits(metadata_bytes: 8192, top_elements: 8, tracks: 4)
+    let _ = probe.video_probe(list.len(input), limits, scoped fn(at: u64, n: u64) -> Result[Bytes, probe.Error] {
+        if at > list.len(input) || n > list.len(input) - at {
+            return Error(ShortRead)
+        }
+        Ok(clone(list.slice(input, at, at + n)))
+    })
+    let mp4_limits = mp4.VodLimits(metadata_bytes: 8192, top_boxes: 8, tracks: 4)
+    let _ = mp4.video_probe(list.len(input), mp4_limits, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        if at > list.len(input) || n > list.len(input) - at {
+            return Error(ReadFailed)
+        }
+        Ok(clone(list.slice(input, at, at + n)))
+    })
+    let webm_limits = webm.ProbeLimits(metadata_bytes: 8192, top_elements: 8, tracks: 4)
+    let _ = webm.video_probe(list.len(input), webm_limits, scoped fn(at: u64, n: u64) -> Result[Bytes, webm.ProbeError] {
+        if at > list.len(input) || n > list.len(input) - at {
+            return Error(ProbeReadFailed)
+        }
+        Ok(clone(list.slice(input, at, at + n)))
+    })
+    let _ = ogg.read(input, 0)
+}
+
+fn hostile_input_sweep(input: Bytes) waits {
+    for end in 0u64 ..= list.len(input) {
+        hostile_probe_bytes(list.slice(input, 0, end))
+    }
+    // Bit 0, the top bit (an EBML vint's width marker) and every bit.
+    for mask in[1u8, 0x80u8, 0xffu8] {
+        for i in 0u64 .. list.len(input) {
+            let mut corrupt: Bytes = clone(input)
+            let old: u8 = corrupt[i]
+            corrupt[i] = old ^ mask
+            hostile_probe_bytes(corrupt)
+        }
+    }
+}
+
+/// bug: fault, over-allocate, or index outside input on a truncated or one-byte-corrupted media container.
+/// oracle: MP4, WebM and Ogg framing are total: every hostile input ends in Ok or the parser's typed error.
+@test
+fn media_container_hostile_inputs() -> Result[(), ()] waits {
+    hostile_input_sweep(vod_fixture())
+    hostile_input_sweep(avc_fixture())
+    hostile_input_sweep(sparse_webm_fixture())
+    hostile_input_sweep(webm_fixture())
+    let ogg_page = b"\x4f\x67\x67\x53\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x11\x00\x00\x00\x00\x00\x00\x00\x2a\x38\x74\x42\x01\x13\x4f\x70\x75\x73\x48\x65\x61\x64\x01\x01\x38\x01\x80\xbb\x00\x00\x00\x00\x00"
+    hostile_input_sweep(ogg_page)
+    Ok(())
+}
+
+/// bug: a hostile element or metadata budget is enforced by allocation rather than by a typed limit.
+/// oracle: WebM's ProbeLimit and MP4's ResourceLimit named refusals.
+@test
+fn media_container_probe_limits() -> Result[(), ()] waits {
+    let webm_input = sparse_webm_fixture()
+    let tight = webm.ProbeLimits(metadata_bytes: 1, top_elements: 8, tracks: 2)
+    if let Error(ProbeLimit) = webm.video_probe(list.len(webm_input), tight, scoped fn(at: u64, n: u64) -> Result[Bytes, webm.ProbeError] {
+        Ok(clone(list.slice(webm_input, at, at + n)))
+    }) {} else {
+        fail("top element budget did not raise ProbeLimit")
+    }
+    let movie = vod_fixture()
+    let mp4_tight = mp4.VodLimits(metadata_bytes: 1, top_boxes: 8, tracks: 4)
+    if let Error(ResourceLimit) = mp4.video_probe(list.len(movie), mp4_tight, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        Ok(clone(list.slice(movie, at, at + n)))
+    }) {} else {
+        fail("metadata budget did not raise ResourceLimit")
+    }
+    Ok(())
+}
+
+/// bug: trust an edit-list entry count whose entries do not fit in its box, or allocate for it.
+/// oracle: ISO/IEC 14496-12 elst entry_count and entry width; byte 232 is the first entry_count byte of the vector's first elst.
+@test
+fn media_container_bad_table() -> Result[(), ()] waits {
+    let mut corrupt: Bytes = clone(vod_fixture())
+    let old: u8 = corrupt[232]
+    corrupt[232] = old ^ 1u8
+    let limits = mp4.VodLimits(metadata_bytes: 8192, top_boxes: 8, tracks: 4)
+    if let Error(BadTable) = mp4.video_probe(list.len(corrupt), limits, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        Ok(clone(list.slice(corrupt, at, at + n)))
+    }) {} else {
+        fail("oversized edit-list table did not raise BadTable")
+    }
+    Ok(())
+}
+
+/// bug: read a moov whose corrupted size field claims more than the metadata budget, allocating for it, instead of refusing first.
+/// oracle: ISO/IEC 14496-12 box size: the vector's moov starts at byte 0, so bytes 0-3 are its size; 0x7fffffff fits the claimed file but not an 8192-byte budget.
+@test
+fn media_container_corrupt_box_size() -> Result[(), ()] waits {
+    let movie = vod_fixture()
+    let mut corrupt: Bytes = clone(movie)
+    list.set_word_be(mut corrupt, 0, 0x7fffffffu32)
+    let claimed = 0x7fffffffu64
+    let limits = mp4.VodLimits(metadata_bytes: 8192, top_boxes: 8, tracks: 4)
+    if let Error(ResourceLimit) = mp4.video_probe(claimed, limits, scoped fn(at: u64, n: u64) -> Result[Bytes, mp4.VodError] {
+        if at > list.len(corrupt) || n > list.len(corrupt) - at {
+            fail("probe read past the vector before refusing the moov size")
+        }
+        Ok(clone(list.slice(corrupt, at, at + n)))
+    }) {} else {
+        fail("oversized moov size did not raise ResourceLimit")
+    }
+    Ok(())
+}
+
+/// bug: accept a zero first byte as an EBML vint size, then trust or allocate from its width.
+/// oracle: EBML RFC 8794 section 4.2: the first byte of a vint is never zero; byte 4 starts the EBML header's size vint, after its 4-byte ID.
+@test
+fn media_container_invalid_vint() -> Result[(), ()] waits {
+    let mut corrupt: Bytes = clone(sparse_webm_fixture())
+    corrupt[4] = 0
+    let limits = webm.ProbeLimits(metadata_bytes: 4096, top_elements: 8, tracks: 2)
+    if let Error(ProbeFraming(InvalidVint)) = webm.video_probe(list.len(corrupt), limits, scoped fn(at: u64, n: u64) -> Result[Bytes, webm.ProbeError] {
+        Ok(clone(list.slice(corrupt, at, at + n)))
+    }) {} else {
+        fail("zero EBML size vint first byte did not raise InvalidVint")
+    }
+    Ok(())
+}

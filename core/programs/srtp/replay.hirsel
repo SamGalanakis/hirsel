@@ -1,24 +1,4 @@
-const RTP_LIMIT: u64 = 1 << 48
-
 const RTCP_LIMIT: u64 = 1 << 31
-
-// RFC 3711 Appendix A. Keep the next ROC unreduced so the caller can refuse
-// exhaustion. Switch to rtp.seq.estimate when RTP-2 lands.
-fn estimate(highest: u64, seq: u16) -> Option[u64] {
-    let low = highest & 65535
-    let roc = highest >> 16
-    let wire: u64 = int.widen(seq)
-    if low < 32768 && wire > low + 32768 {
-        if roc == 0 {
-            return None
-        }
-        return Some(((roc - 1) << 16) | wire)
-    }
-    if low >= 32768 && wire < low - 32768 {
-        return Some(((roc + 1) << 16) | wire)
-    }
-    Some((roc << 16) | wire)
-}
 
 type Floor {
     reference: Option[u64],

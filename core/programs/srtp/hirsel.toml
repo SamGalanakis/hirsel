@@ -5,6 +5,7 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+rtp = { major = 1, path = "../rtp" }
 
 [sources]
 "session.hirsel" = "srtp"

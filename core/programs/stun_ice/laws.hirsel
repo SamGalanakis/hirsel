@@ -630,3 +630,107 @@ fn kd4_digest_policy() -> Result[(), ()] {
     }
     Ok(())
 }
+
+type StunRoundDraw {
+    method: u16,
+    class: stun_ice.Class,
+    tx: stun_ice.Transaction,
+    addr: Addr,
+    nonce: Bytes
+}
+
+fn show_stun_round(d: StunRoundDraw, mut out: String) {
+    string.push(mut out, "StunRoundDraw(method: ")
+    string.push_u64(mut out, int.widen(d.method))
+    string.push(mut out, ")")
+}
+
+fn stun_round_gen() -> std.prop.Gen[StunRoundDraw] {
+    std.prop.make(fn(mut src: std.prop.Source) -> StunRoundDraw {
+        let class: stun_ice.Class = match std.prop.below(mut src, 4) {
+            0 => Request,
+            1 => Indication,
+            2 => Success,
+            _ => Failure,
+        }
+        let len = 1 + std.prop.below(mut src, 24)
+        let mut nonce: Bytes = list.with_capacity(len)
+        for _ in 0u64 .. len {
+            list.push(mut nonce, int.narrow(97 + std.prop.below(mut src, 26)))
+        }
+        StunRoundDraw(method: int.narrow(std.prop.below(mut src, 4096)), class, tx: stun_ice.Transaction(high: int.truncate(std.prop.word(mut src)), low: std.prop.word(mut src)), addr: Addr(ip: V4(int.truncate(std.prop.word(mut src))), port: int.truncate(std.prop.word(mut src))), nonce: take nonce)
+    }, show_stun_round)
+}
+
+fn stun_round_law(d: StunRoundDraw) -> Result[(), String] {
+    let mut out: Bytes = list.new()
+    list.fill(mut out, 512, 0u8)
+    let mut scratch: Bytes = list.new()
+    let mut b = match stun_ice.start(d.method, d.class, d.tx, mut out) {
+        Ok(b) => b,
+        Error(_) => return Error(string.from("writer refused generated method")),
+    }
+    if let Error(_) = stun_ice.add_xor_addr(mut b, stun_ice.XOR_RELAYED_ADDRESS, d.addr, mut out) {
+        return Error(string.from("writer refused XOR address"))
+    }
+    if let Error(_) = stun_ice.add(mut b, stun_ice.NONCE, d.nonce, mut out) {
+        return Error(string.from("writer refused nonce"))
+    }
+    let n = match stun_ice.finish(take b, NoIntegrity, Short(b""), false, mut out, mut scratch) {
+        Ok(n) => n,
+        Error(_) => return Error(string.from("writer could not finish")),
+    }
+    list.truncate(mut out, n)
+    if n != list.len(out) {
+        return Error(string.from("write length mismatch"))
+    }
+    let h = match stun_ice.header(out) {
+        Ok(h) => h,
+        Error(_) => return Error(string.from("written header did not parse")),
+    }
+    if h.method != d.method || h.class != d.class || h.transaction != d.tx {
+        return Error(string.from("fixed fields did not round trip"))
+    }
+    let mut attrs: List[stun_ice.Attr] = list.new()
+    let integrity = match stun_ice.attrs(out, mut attrs) {
+        Ok(i) => i,
+        Error(_) => return Error(string.from("written attributes did not scan")),
+    }
+    if integrity != NoIntegrity || list.len(attrs) != 2 {
+        return Error(string.from("attribute scan shape mismatch"))
+    }
+    let a = match stun_ice.xor_addr(out, attrs[0].value) {
+        Ok(a) => a,
+        Error(_) => return Error(string.from("written XOR address did not parse")),
+    }
+    if a != d.addr || list.compare_bytes(list.slice(out, attrs[1].value.lo, attrs[1].value.hi), d.nonce) != Equal {
+        return Error(string.from("attribute values did not round trip"))
+    }
+    Ok(())
+}
+
+fn stun_total_law(pkt: Bytes) -> Result[(), String] {
+    if let Ok(_) = stun_ice.header(pkt) {
+        let mut attrs: List[stun_ice.Attr] = list.new()
+        let _ = stun_ice.attrs(pkt, mut attrs)
+    }
+    Ok(())
+}
+
+/// bug: Write STUN fixed fields or attributes its own parser cannot read back.
+/// oracle: RFC 8489 section 5 fixed header, XOR address, and padded attribute wire formats.
+@test
+fn stun_write_parse_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 96
+    std.prop.check(c, stun_round_gen(), stun_round_law)
+}
+
+/// bug: Index outside arbitrary bytes while reading a STUN header or attribute framing.
+/// oracle: RFC 8489 sections 5 and 15 length and padding rules.
+@test
+fn stun_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 128
+    std.prop.check(c, std.prop.bytes_of(0, 256), stun_total_law)
+}

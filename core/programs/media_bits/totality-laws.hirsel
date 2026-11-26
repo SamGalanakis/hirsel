@@ -1,0 +1,29 @@
+fn media_bits_total(pkt: Bytes) -> Result[(), String] {
+    let _ = vp8.parse(pkt)
+    let _ = vp9.parse(pkt)
+    let _ = h264.nal(pkt)
+    let _ = h264.parse_rtp(pkt)
+    let _ = hevc.nal(pkt)
+    let _ = hevc.parse_vps(pkt)
+    let _ = hevc.parse_sps(pkt)
+    let _ = hevc.parse_pps(pkt)
+    let _ = av1.parse_obu(pkt, 0)
+    let _ = av1.parse_rtp(pkt)
+    let mut at = 0u64
+    let _ = av1.rtp_next(pkt, mut at, 0)
+    let _ = opus.parse(pkt)
+    let _ = aac.parse_adts(pkt)
+    let _ = aac.parse_asc(pkt)
+    let mut structure = dependency.empty()
+    let _ = dependency.parse(pkt, mut structure)
+    Ok(())
+}
+
+/// bug: Index outside arbitrary payload bytes in a codec bitstream or RTP payload parser.
+/// oracle: RFC 6386, RFC 7798, ITU-T H.264/H.265, AV1 section 5, RFC 6716 and AAC bitstream bounds.
+@test
+fn media_bits_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 128
+    std.prop.check(c, std.prop.bytes_of(0, 256), media_bits_total)
+}

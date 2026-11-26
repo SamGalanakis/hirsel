@@ -139,7 +139,7 @@ edges = []
 [[package]]
 id = "srtp@1"
 source = "member:srtp"
-edges = ["std@1"]
+edges = ["rtp@1", "std@1"]
 
 [[package]]
 id = "std@1"

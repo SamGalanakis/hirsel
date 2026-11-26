@@ -33,11 +33,10 @@ fn rtcp_ssrc(buf: Bytes, length: u64) -> Result[u32, SrtpError] {
 
 fn send_index(s: SendStream, seq: u16) -> Result[u64, SrtpError] {
     let reference = index_or(s.reference, int.widen(seq))
-    let Some(index) = estimate(reference, seq) else {
-        return Error(Reused)
-    }
-    if index >= RTP_LIMIT {
-        return Error(Exhausted)
+    let index = match rtp.seq.estimate(reference, seq) {
+        Index(index) => index,
+        Before => return Error(Reused),
+        Beyond => return Error(Exhausted),
     }
     if index < reference || (s.sent_rtp && index == reference) {
         return Error(Reused)
@@ -206,10 +205,7 @@ pub fn unprotect_rtp(mut s: Session, mut buf: Bytes) -> Result[Opened, SrtpError
     let (live, previous) = receive_stream(s, header.ssrc)
     let mut stream = previous
     let reference = index_or(stream.rtp.floor.reference, int.widen(header.seq))
-    let Some(index) = estimate(reference, header.seq) else {
-        return Error(Discarded(TooOld))
-    }
-    if index >= RTP_LIMIT {
+    let Index(index) = rtp.seq.estimate(reference, header.seq) else {
         return Error(Discarded(TooOld))
     }
     check_window(stream.rtp, index)?

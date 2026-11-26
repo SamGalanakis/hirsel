@@ -1,0 +1,145 @@
+fn relay_offer_swept(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, packet: Bytes, mut k: SweepCalls) -> Result[(turn.Out, Bytes), turn.TurnError] {
+    let mut p = copy_of(packet)
+    let mut out: Bytes = list.new()
+    let Some(b) = sweep_call(mut k) else {
+        let r = turn.from_client(mut rl, now, rnd, o, mut p, mut out)?
+        return Ok((r, take out))
+    }
+    match (bound bytes b {
+        turn.from_client(mut rl, now, rnd, o, mut p, mut out)
+    }) {
+        Ok(Error(Capacity(c))) => {
+            sweep_refused(mut k, b, c)
+            let mut again = copy_of(packet)
+            let mut fresh: Bytes = list.new()
+            let r = turn.from_client(mut rl, now, rnd, o, mut again, mut fresh)?
+            Ok((r, take fresh))
+        },
+        Ok(take r) => {
+            let done = (take r)?
+            Ok((done, take out))
+        },
+        Error(_) => fail("sweep: the relay bound was refused on entry"),
+    }
+}
+
+fn relay_exchange_swept(mut rl: turn.Relay, now: turn.Now, rnd: Random, o: turn.Origin, packet: Bytes, mut k: SweepCalls) -> Result[Bytes, turn.TurnError] {
+    let (r, out0) = relay_offer_swept(mut rl, now, rnd, o, packet, mut k)?
+    let mut out = out0
+    if let Reply(to, n) = r {
+        if to != o {
+            fail("relay response to another origin")
+        }
+        list.truncate(mut out, n)
+        return Ok(take out)
+    }
+    fail("relay request not answered")
+}
+
+fn relay_revoke_swept(mut rl: turn.Relay, now: turn.Now, mut k: SweepCalls) -> Result[u64, turn.TurnError] {
+    let Some(b) = sweep_call(mut k) else {
+        return turn.revoke(mut rl, b"alice", 1700000001, now)
+    }
+    match (bound bytes b {
+        turn.revoke(mut rl, b"alice", 1700000001, now)
+    }) {
+        Ok(Error(Capacity(c))) => {
+            sweep_refused(mut k, b, c)
+            turn.revoke(mut rl, b"alice", 1700000001, now)
+        },
+        Ok(take r) => take r,
+        Error(_) => fail("sweep: the revoke bound was refused on entry"),
+    }
+}
+
+fn relay_connected_swept(mut rl: turn.Relay, now: turn.Now, mut k: SweepCalls) -> Result[(), turn.TurnError] {
+    let Some(b) = sweep_call(mut k) else {
+        return turn.connected(mut rl, 7, SERVER, HOST_C, now)
+    }
+    match (bound bytes b {
+        turn.connected(mut rl, 7, SERVER, HOST_C, now)
+    }) {
+        Ok(Error(Capacity(c))) => {
+            sweep_refused(mut k, b, c)
+            turn.connected(mut rl, 7, SERVER, HOST_C, now)
+        },
+        Ok(take r) => take r,
+        Error(_) => fail("sweep: the connected bound was refused on entry"),
+    }
+}
+
+type RelaySweepEnd: key {
+    allocations: u64,
+    permissions: u64,
+    channels: u64,
+    pool_free: u64,
+    revoked: u64,
+    replies: u64
+}
+
+fn show_relay_sweep_end(e: RelaySweepEnd, mut out: String) {
+    string.push(mut out, "allocations ")
+    string.push_u64(mut out, e.allocations)
+    string.push(mut out, " permissions ")
+    string.push_u64(mut out, e.permissions)
+    string.push(mut out, " channels ")
+    string.push_u64(mut out, e.channels)
+    string.push(mut out, " pool_free ")
+    string.push_u64(mut out, e.pool_free)
+    string.push(mut out, " revoked ")
+    string.push_u64(mut out, e.revoked)
+    string.push(mut out, " replies ")
+    string.push_u64(mut out, e.replies)
+}
+
+fn swept_relay_flow(mut rl: turn.Relay, rnd: Random, now: turn.Now, o: turn.Origin, mut k: SweepCalls) -> Result[RelaySweepEnd, turn.TurnError] {
+    let challenge = relay_exchange_swept(mut rl, now, rnd, o, bare(7), mut k)?
+    let nonce = value_of(challenge, stun_ice.NONCE)
+    let allocate = relay_exchange_swept(mut rl, now, rnd, o, alice(stun_ice.ALLOCATE, 1, copy_of(nonce), list_of1(udp_transport())), mut k)?
+    if code_of(allocate) != 0 {
+        fail("allocate refused")
+    }
+    let permission = relay_exchange_swept(mut rl, now, rnd, o, alice(stun_ice.CREATE_PERMISSION, 2, copy_of(nonce), list_of1(Xor(stun_ice.XOR_PEER_ADDRESS, PEER_1))), mut k)?
+    if code_of(permission) != 0 {
+        fail("permission refused")
+    }
+    let bind_reply = relay_exchange_swept(mut rl, now, rnd, o, alice(stun_ice.CHANNEL_BIND, 3, copy_of(nonce), list_of2(channel_attr(0x4000), Xor(stun_ice.XOR_PEER_ADDRESS, PEER_2))), mut k)?
+    if code_of(bind_reply) != 0 {
+        fail("channel bind refused")
+    }
+    let (send_out, _) = relay_offer_swept(mut rl, now, rnd, o, send_indication(PEER_1, b"abc", 4), mut k)?
+    if let ToPeer(_, _, _) = send_out {} else {
+        fail("send indication not relayed")
+    }
+    let (channel_out, _) = relay_offer_swept(mut rl, now, rnd, o, channel_data(0x4000, b"abc"), mut k)?
+    if let ToPeer(_, _, _) = channel_out {} else {
+        fail("channel data not relayed")
+    }
+    relay_connected_swept(mut rl, now, mut k)?
+    let revoked = relay_revoke_swept(mut rl, now, mut k)?
+    let counts = turn.relay_counts(rl)
+    Ok(RelaySweepEnd(allocations: counts.allocations, permissions: counts.permissions, channels: counts.channels, pool_free: counts.pool_free, revoked: revoked, replies: 4))
+}
+
+fn swept_relay(seed: u64, index: u64, budget: Option[std.refuse.Budget]) -> std.refuse.Refusal[RelaySweepEnd] {
+    let mut k = SweepCalls(budget: budget, calls: 0, next: None, sent: 0, waits: 0)
+    let rnd = provide.random(seed + index)
+    let mut rl = new_relay(relay_config(), list_of2(POOL_1, POOL_2), seed + index)
+    let o = udp(HOST_A)
+    let end = match swept_relay_flow(mut rl, rnd, at(1000), o, mut k) {
+        Ok(take e) => take e,
+        Error(_) => RelaySweepEnd(allocations: 999, permissions: 999, channels: 999, pool_free: 999, revoked: 999, replies: 999),
+    }
+    std.refuse.Refusal(end: end, calls: k.calls, next: k.next)
+}
+
+/// bug: a relay call refused for Capacity loses a lease, permission, binding, stream or
+/// revocation it had admitted, or commits one it never completed.
+/// oracle: TURN-7 and MEM-21: the end equals the never-refused run's.
+@test
+fn capacity_sweep_relay() -> Result[(), turn.TurnError] {
+    if let Error(take text) = std.refuse.sweep(951000u64, swept_relay, show_relay_sweep_end) {
+        fail(take text)
+    }
+    Ok(())
+}

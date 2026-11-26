@@ -3,6 +3,7 @@ media_bits@1/av1_laws/av1_rtp_dependencies src=a5c48f44d97fbf97 sig=dd3f97e4980e
 media_bits@1/h264_laws/h264_rtp_parameter_sets src=25118a6f6160b957 sig=0a520bde1ff57420 run=c2c0c6612d4cbb79 bug=6498977a5015be0a oracle=fbf34d09c5c82e6f rows=pending
 media_bits@1/hevc_aac_laws/hevc_aac_headers src=7bd94c1ad06c9040 sig=f65c6951021fd02a run=c2c0c6612d4cbb79 bug=d18295b1cb2e5c17 oracle=3baf3aa97238bb70 rows=pending
 media_bits@1/opus_laws/opus_packet_framing src=3feeb9161d02fd97 sig=538c4c12d4d083f7 run=c2c0c6612d4cbb79 bug=07ca9c864a4fbb15 oracle=37def1176b4fd79f rows=pending
+media_bits@1/totality_laws/media_bits_totality_property src=4bfc075b61183003 sig=171310def8f7054d run=c2c0c6612d4cbb79 bug=2e11f7d18bfeb8ea oracle=c0530fbc53b4b67f rows=pending
 media_bits@1/vp8_laws/unit_adapter src=66a87057220e055f sig=80d37c25d1f0cea8 run=c2c0c6612d4cbb79 bug=7df93c131cb8d7e9 oracle=50bc59450fbd4fb7 rows=pending
 media_bits@1/vp8_laws/vp8_descriptor_and_av1_targets src=9904a3d083c9a449 sig=16f16cc7672da172 run=c2c0c6612d4cbb79 bug=9e6445b5eb9c2212 oracle=1a0bd8b50f1022d2 rows=pending
 media_bits@1/vp9_laws/vp9_descriptor_wire src=8357c3f641454b1e sig=25c250924ab7b5bd run=c2c0c6612d4cbb79 bug=a954139fcf214176 oracle=bad387b24610074b rows=pending

@@ -1,0 +1,95 @@
+type RtpRoundDraw {
+    fields: header.Fields,
+    mid: Bytes
+}
+
+fn show_rtp_round(d: RtpRoundDraw, mut out: String) {
+    string.push(mut out, "RtpRoundDraw(seq: ")
+    string.push_u64(mut out, int.widen(d.fields.seq))
+    string.push(mut out, ", mid_len: ")
+    string.push_u64(mut out, list.len(d.mid))
+    string.push(mut out, ")")
+}
+
+fn rtp_round_gen() -> std.prop.Gen[RtpRoundDraw] {
+    std.prop.make(fn(mut src: std.prop.Source) -> RtpRoundDraw {
+        let len = 1 + std.prop.below(mut src, 15)
+        let mut mid: Bytes = list.with_capacity(len)
+        for _ in 0u64 .. len {
+            list.push(mut mid, int.narrow(97 + std.prop.below(mut src, 26)))
+        }
+        RtpRoundDraw(fields: header.Fields(marker: std.prop.weighted(mut src, 1, 2), pt: int.narrow(std.prop.below(mut src, 128)), seq: int.truncate(std.prop.word(mut src)), ts: int.truncate(std.prop.word(mut src)), ssrc: int.truncate(std.prop.word(mut src))), mid: take mid)
+    }, show_rtp_round)
+}
+
+fn rtp_round_law(d: RtpRoundDraw) -> Result[(), String] {
+    let mut m = ext.map(OneOnly)
+    if let Error(_) = ext.bind(mut m, 1, Mid) {
+        return Error(string.from("extension map refused MID"))
+    }
+    let mut w = ext.writer()
+    if let Error(_) = ext.put(mut w, m, Mid, d.mid, 0, list.len(d.mid)) {
+        return Error(string.from("extension writer refused generated MID"))
+    }
+    let mut out: Bytes = list.with_capacity(300)
+    let n = match header.write(d.fields, view w, mut out) {
+        Ok(n) => n,
+        Error(_) => return Error(string.from("header writer refused generated fields")),
+    }
+    if n != list.len(out) {
+        return Error(string.from("header write length mismatch"))
+    }
+    let h = match header.parse(out) {
+        Ok(h) => h,
+        Error(_) => return Error(string.from("written header did not parse")),
+    }
+    if h.marker != d.fields.marker || h.pt != d.fields.pt || h.seq != d.fields.seq || h.ts != d.fields.ts || h.ssrc != d.fields.ssrc || h.csrcs != 0 || h.padded {
+        return Error(string.from("header fields did not round trip"))
+    }
+    let Some(e) = (match ext.find(m, out, h, Mid) {
+        Ok(v) => v,
+        Error(_) => return Error(string.from("written extension block did not scan")),
+    }) else {
+        return Error(string.from("written MID extension missing"))
+    }
+    if e.len != list.len(d.mid) || list.compare_bytes(list.slice(out, e.at, e.at + e.len), d.mid) != Equal {
+        return Error(string.from("MID extension did not round trip"))
+    }
+    Ok(())
+}
+
+fn rtp_total_law(pkt: Bytes) -> Result[(), String] {
+    match header.parse(pkt) {
+        Ok(h) => {
+            let _ = header.payload(h, pkt)
+            let mut at = 0u64
+            for _ in 0u64 .. 32 {
+                match ext.next(pkt, h, mut at) {
+                    Ok(None) => break,
+                    Ok(Some(_)) => (),
+                    Error(_) => break,
+                }
+            }
+        },
+        Error(_) => (),
+    }
+    Ok(())
+}
+
+/// bug: Write fixed RTP header or extension fields one parser cannot read back.
+/// oracle: RFC 3550 section 5.1 fixed fields and RFC 8285 one-byte extension elements.
+@test
+fn rtp_write_parse_properties() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 96
+    std.prop.check(c, rtp_round_gen(), rtp_round_law)
+}
+
+/// bug: Index outside an arbitrary packet while opening its fixed header, payload, or extension walk.
+/// oracle: RFC 3550 and RFC 8285 framing bounds.
+@test
+fn rtp_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 128
+    std.prop.check(c, std.prop.bytes_of(0, 256), rtp_total_law)
+}

@@ -28,3 +28,4 @@ grants = ["Env=HIRSEL_TEST_SIM_SEED", "Tasks"]
 "policy_laws.hirsel" = "laws"
 "vopr_laws.hirsel" = "laws"
 "stream_laws.hirsel" = "laws"
+"relay_sweep_laws.hirsel" = "laws"

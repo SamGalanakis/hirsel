@@ -212,6 +212,41 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     close(take reopened)
 }
 
+// §13.8 on an empty table: Memory -> Tiered emits zero Tiered frames because
+// the empty root carries stamp 0, yet the head still holds a Tiered collection
+// and must receive a pack inventory at Step 5. A subsequent Tiered -> Memory,
+// point read and reopen then succeed (store-cold-edge-panic-3181, R1).
+@test
+fn test_set_residency_empty_table_tiered_to_memory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let rows = residency_rows(mut db, 0)?
+    set_residency(mut db, rows.id, Tiered)?
+    if residency_mode(db, rows.id)? != (TableCollection, ResidentTiered) {
+        fail("residency: main's descriptor names the empty table Tiered")
+    }
+    set_residency(mut db, rows.id, Memory)?
+    if residency_mode(db, rows.id)? != (TableCollection, ResidentMemory) {
+        fail("residency: main's descriptor names the empty table Memory")
+    }
+    let read_handle = reader(db, VALUE_LIMIT + 1048576)?
+    if get(read_handle, snapshot(db), rows, 0u64)? != None {
+        fail("residency: point read on empty table after Tiered -> Memory is None")
+    }
+    drop(take read_handle)
+    close(take db)?
+    let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if residency_mode(reopened, rows.id)? != (TableCollection, ResidentMemory) {
+        fail("residency: empty table Memory residency survives reopen")
+    }
+    let reopened_reader = reader(reopened, VALUE_LIMIT + 1048576)?
+    if get(reopened_reader, snapshot(reopened), rows, 0u64)? != None {
+        fail("residency: point read after reopen is None")
+    }
+    drop(take reopened_reader)
+    close(take reopened)
+}
+
 // L88 (g), Hot half (§13.8 "Tiered -> Memory", §13.6a T2): a row written
 // after the last cut leaves Hot pages in the Tiered tree. A Snapshot taken
 // then keeps that Hot tree, and a pin of it after the change has T2 seal its

@@ -2,4 +2,6 @@
 // The quick tier replays every one before its fixed seeds. Add a seed here
 // once a fix lane exists for its failure; until then the failure is listed
 // in the report and rides as a soak-tier red.
-const CSIM_CORPUS: Inline[u64, 0] =[]
+// Seed 7: empty table Tiered -> Memory panicked "a Cold edge has no pack
+// inventory" (store-cold-edge-panic-3181, R1).
+const CSIM_CORPUS: Inline[u64, 1] =[7]

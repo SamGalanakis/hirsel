@@ -583,6 +583,9 @@ limit = 268435456
 [tests.runs."store@1/store/test_set_residency_moves_a_table_back_to_memory"]
 limit = 268435456
 
+[tests.runs."store@1/store/test_set_residency_empty_table_tiered_to_memory"]
+limit = 268435456
+
 [tests.runs."store@1/store/test_set_residency_restamps_hot_pages_back_to_memory"]
 limit = 268435456
 

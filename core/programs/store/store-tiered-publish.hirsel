@@ -33,6 +33,20 @@ fn tiered_cut_stage_empty(cut_stage: TieredCutStage) -> bool {
     list.len(cut_stage.packs) == 0 && !cut_stage.folded && list.len(cut_stage.queue.retiring) == 0
 }
 
+// A holder whose collection map holds a Tiered collection without a pack
+// inventory (for example an empty table moving Memory -> Tiered, whose
+// stamp-0 root emits no frames) still needs Step 5 to attach one.
+fn tiered_without_paging(roots: List[Roots]) -> bool {
+    for held in roots {
+        if let None = view held.collections.paging {
+            if tiered_collections(held.collections.root) {
+                return true
+            }
+        }
+    }
+    false
+}
+
 fn encode_tiered_run(id: StoreId, layout: TieredPackRun, mut emitted: Map[u64, std.page.PagePtr], mut packs: List[TieredCutPack]) -> Result[(), Error] {
     capacity(list.try_reserve(mut packs, list.len(layout.packs)))?
     for laid in layout.packs {
@@ -199,7 +213,7 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
     let compacted = compact_cut(db, pager, mut roots, queued, mut next_stamp)?
     let leases = lease_cut_inventories(disk_state(db).pages.compaction, roots)?
     let TieredCompactStep(probes: take probes, retiring: take retiring, moved: take moved, queue: take moving) = take compacted
-    let folded = loaded || promoted || materialized || list.len(retiring) != 0
+    let folded = loaded || promoted || materialized || list.len(retiring) != 0 || tiered_without_paging(roots)
     let compaction = TieredCompaction(probes: take probes, held: take leases)
     let mut queue = drain_cut(db, pager, take queued, take replaced, moving, next_stamp)?
     queue.moved = take moved

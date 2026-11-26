@@ -1,4 +1,4 @@
-//! Tests over the FORM v0 samples. Every expected value is the hand-derived `run:`
+//! Tests over the CoreIR samples. Every expected value is the hand-derived `run:`
 //! line in the sample file, not output of this crate.
 
 mod frame;
@@ -426,11 +426,6 @@ fn well_formedness_rejects_producer_mistakes() {
         let err = wf::module(&m).expect_err(why);
         assert!(err.contains(why), "expected `{why}`, got `{err}`");
     }
-    // v0 names a failure block on every fallible instruction: a v0 reader must not
-    // take a propagating `add` as one that cannot fail.
-    let v0 = format!("{head}b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1\n  return v2\n}}\n")
-        .replace("core v1", "core v0");
-    assert!(parse(&v0).unwrap_err().message.contains("under `core v0`"));
     let twice =
         "b0(v0: i32, v1: i32):\n  v1: i32 = add v0, v0 fail b1\n  return v1\nb1:\n  propagate\n}\n";
     assert!(
@@ -446,7 +441,7 @@ fn well_formedness_rejects_producer_mistakes() {
 fn constants_out_of_range_are_refused() {
     let m = |c: &str| {
         let t = format!(
-            "core v0\nsig g0 = () -> (u8)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {{\nb0:\n  v0: u8 = const {c}\n  return v0\n}}\n"
+            "core v1\nsig g0 = () -> (u8)\ninst n0 = p@0/m/f [] []\nfn f0 = n0 g0 {{\nb0:\n  v0: u8 = const {c}\n  return v0\n}}\n"
         );
         parse(&t)
     };

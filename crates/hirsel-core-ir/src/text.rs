@@ -4,7 +4,7 @@
 //! and parses to the same program with its tables in reading order.
 //!
 //! ```text
-//! core v0
+//! core v1
 //! item i0 = app@1/main/add                ; source items (debug identity)
 //! type t0 = "app@1/geo/Point"             ; declared types, canonical text
 //! static d0 = align 1 hex 6869            ; read-only data
@@ -72,62 +72,6 @@ impl ConvertMode {
 }
 
 names!(Counted { Rc = "rc", Arc = "arc" });
-
-/// Whether the module uses a FORM v1 construct; it then prints as `core v1`,
-/// and a `core v0` text that uses one is refused.
-pub fn uses_v1(m: &Module) -> bool {
-    !m.types.is_empty()
-        || m.signatures.iter().any(|s| s.never || s.has_vectors())
-        || m.functions.iter().any(|f| f.versioned)
-        || m.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
-            b.calls
-                .iter()
-                .any(|c| c.fail.is_some() || matches!(c.callee, Callee::Runtime(_)))
-                || b.terminators.iter().any(|t| {
-                    matches!(
-                        t,
-                        Terminator::Raise { .. } | Terminator::Propagate | Terminator::Unreachable
-                    )
-                })
-                || b.insts.iter().any(|i| {
-                    // v0 names a failure block on every fallible instruction.
-                    (i.can_fail(b) && i.fail(b).is_none() && !matches!(i, Inst::Call { .. }))
-                        || matches!(
-                            i,
-                            Inst::Alloc { .. }
-                                | Inst::Grow { .. }
-                                | Inst::Free { .. }
-                                | Inst::FrameAdmit { .. }
-                                | Inst::FrameActive { .. }
-                                | Inst::FrameRefund { .. }
-                                | Inst::PromoteFrame { .. }
-                                | Inst::Copy { .. }
-                                | Inst::Move { .. }
-                                | Inst::Prefetch { .. }
-                                | Inst::RegionOpen { .. }
-                                | Inst::RegionClose { .. }
-                                | Inst::Trim { .. }
-                                | Inst::LimitEnter { .. }
-                                | Inst::LimitExit
-                                | Inst::Drop { .. }
-                                | Inst::Share { .. }
-                                | Inst::Release { .. }
-                                | Inst::TryUnwrap { .. }
-                                | Inst::Mark { .. }
-                                | Inst::Unmark { .. }
-                                | Inst::Case { .. }
-                                | Inst::SetCase { .. }
-                                | Inst::Pointer { .. }
-                                | Inst::Simd { .. }
-                                | Inst::PutLanes { .. }
-                        )
-                })
-                || b.pools
-                    .steps
-                    .iter()
-                    .any(|s| matches!(s, Step::Byte(_) | Step::Seq(_)))
-        })
-}
 
 // ---------------------------------------------------------------- printing
 
@@ -288,7 +232,7 @@ impl Printer {
     }
 
     fn module(&mut self, m: &Module) {
-        self.line(if uses_v1(m) { "core v1" } else { "core v0" });
+        self.line("core v1");
         for (i, item) in m.items.iter().enumerate() {
             self.line(&format!("item i{i} = {item}"));
         }
@@ -2057,15 +2001,10 @@ impl Parser {
     }
 
     fn module(&mut self) -> R<()> {
-        let v1;
         {
             let mut l = self.line().ok_or("empty input")?;
             l.expect("core")?;
-            v1 = match l.next()? {
-                "v0" => false,
-                "v1" => true,
-                v => return Err(format!("unknown form `{v}`")),
-            };
+            l.expect("v1")?;
             l.end()?;
         }
         while let Some(word) = self.peek_word().map(str::to_owned) {
@@ -2201,9 +2140,6 @@ impl Parser {
                 "fn" => self.function()?,
                 w => return Err(format!("unexpected `{w}`")),
             }
-        }
-        if !v1 && uses_v1(&self.module) {
-            return Err("a FORM v1 construct under `core v0`".into());
         }
         Ok(())
     }

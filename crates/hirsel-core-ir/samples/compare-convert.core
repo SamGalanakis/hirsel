@@ -1,4 +1,4 @@
-; FORM v0 sample, family: comparison and conversion (Compare, Convert, Branch, Switch).
+; CoreIR sample, family: comparison and conversion (Compare, Convert, Branch, Switch).
 ;
 ; Source (package samples@0, module convert):
 ;   i0  fn to_u8(x: i64) -> u8 { match int.try_narrow(x) { Some(v) => v, None => 255 } }
@@ -44,7 +44,7 @@
 ; run: f7(66) -> 66
 ; run: f7(55296) -> 0                ; not a char: the value is 0, never the bits
 ; run: f7(4294967295) -> 0
-core v0
+core v1
 item i0 = samples@0/convert/to_u8
 item i1 = samples@0/convert/sign
 item i2 = samples@0/convert/bits

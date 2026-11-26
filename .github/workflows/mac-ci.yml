@@ -143,7 +143,6 @@ jobs:
           CC: ${{ runner.temp }}/fixture-cc
           LLVM_SYS_231_PREFIX: ${{ github.workspace }}/tools/buck2/toolchains/llvm-files
           HIRSEL_CORE_RT_ARCHIVE: ${{ runner.temp }}/mac-artifacts/libcore_cranelift_fixture.a
-          HIRSEL_CORE_RUNTIME_ARCHIVE: ${{ runner.temp }}/mac-artifacts/libcore_cranelift_fixture.a
         run: tools/ci/mac_scrub.sh python3 tools/ci/mac_native.py run "$RUNNER_TEMP/native-tests.json"
       - name: Remove temporary credentials and check tracked files
         id: hygiene

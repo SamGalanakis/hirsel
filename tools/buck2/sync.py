@@ -510,10 +510,10 @@ def first_party(meta: dict) -> str:
             program_llvm = binary == "hirsel-core-program-tests-test-llvm_source"
             arm = binary.endswith("cranelift_source_aarch64") or binary == "hirsel-cranelift-test-core_aarch64"
             core_native = program_cl or binary in ("hirsel-cranelift-test-core_native", "hirsel-cranelift-test-core_aarch64")
-            files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-cranelift-runtime-fixtures[aarch64]",
+            files_env = ({"HIRSEL_CORE_RT_ARCHIVE": "//:core-cranelift-runtime-fixtures[aarch64]",
                           "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                           "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if arm else
-                         {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
+                         {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
                           else {
                               "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                               "HIRSEL_DEV_TEST_DRIVER": "//:hirsel-core-driver-bin-hirsel", "HIRSEL_DEV_TEST_CACHE": "//:dev-fixture-cache",

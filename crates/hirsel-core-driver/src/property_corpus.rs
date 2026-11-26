@@ -139,10 +139,10 @@ impl Corpus {
         if entry.test != test.to_string() {
             return Err(invalid("invalid entry"));
         }
-        if entry.version < VERSION {
+        if entry.version != VERSION {
             return Ok(SavedEntry::Stale);
         }
-        if entry.version != VERSION || !valid_input(&entry.input, entry.site.is_some()) {
+        if !valid_input(&entry.input, entry.site.is_some()) {
             return Err(invalid("invalid entry"));
         }
         Ok(SavedEntry::Current(entry))

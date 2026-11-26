@@ -86,7 +86,7 @@ fn slots_loops_calls_and_c_struct_returns_match_evaluator() {
 
 #[test]
 fn integer_modes_and_float_conversion_boundaries_match_evaluator() {
-    let mut declarations = String::from("core v0\n");
+    let mut declarations = String::from("core v1\n");
     let mut bodies = String::new();
     let mut runs = Vec::new();
     let mut id = 0;

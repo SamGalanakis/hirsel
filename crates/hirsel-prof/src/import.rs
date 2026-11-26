@@ -689,7 +689,7 @@ mod tests {
     fn runtime_observation_refuses_unassigned_kind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runtime.observations");
-        let mut wire = b"HIRSOBS2".to_vec();
+        let mut wire = b"HIRSOBS3".to_vec();
         // Both frames have no words or bytes. Kind 24 is unassigned; 65,534 is END.
         for kind in [24u16, 65_534] {
             let mut header = [0; 20];
@@ -703,7 +703,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "unassigned runtime observation kind 24 in HIRSOBS2"
+            "unassigned runtime observation kind 24 in HIRSOBS3"
         );
     }
 }

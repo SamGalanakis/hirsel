@@ -51,17 +51,14 @@ struct ToolchainManifest {
 }
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct LinkRecipe {
-    #[serde(default)]
     pub(crate) schema: u32,
     pub(crate) target: String,
     pub(crate) linker: PathBuf,
     pub(crate) args: Vec<String>,
     pub(crate) files: Vec<RecipeFile>,
-    #[serde(default)]
     pub(crate) source_files: Vec<RecipeFile>,
     /// The paths the link's searches tried before each match
     /// ([`crate::link_closure`]): one that appears is read instead.
-    #[serde(default)]
     pub(crate) absent: Vec<PathBuf>,
     pub(crate) identity: ContentHash,
 }

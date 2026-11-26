@@ -502,7 +502,7 @@ fn infallible_arithmetic_sample_matches_evaluator() {
 /// integer differential.
 #[test]
 fn rotl_matches_evaluator_at_every_width() {
-    let mut text = String::from("core v0\n");
+    let mut text = String::from("core v1\n");
     let kinds = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"];
     for (id, kind) in kinds.iter().enumerate() {
         text += &format!(
@@ -532,7 +532,7 @@ fn rotl_matches_evaluator_at_every_width() {
 /// -128.5 as an i8 or accepts -2^31 - 1 as an i32 (f64), or misjudges an f32 bound.
 #[test]
 fn float_to_int_matches_evaluator_at_every_width() {
-    let mut text = String::from("core v0\n");
+    let mut text = String::from("core v1\n");
     let kinds = ["i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64"];
     let mut id = 0u32;
     let mut bodies = String::new();
@@ -580,7 +580,7 @@ fn float_to_int_matches_evaluator_at_every_width() {
 #[test]
 fn c_results_and_indirect_calls_match_evaluator() {
     let module = text::parse(
-        r#"core v0
+        r#"core v1
 sig g0 = (u32, u32) -> (u32, u32)
 sig g1 = (u32, u32) -> (u32)
 sig g2 = (u8, u8, u8) -> (u8, u8, u8)
@@ -776,7 +776,7 @@ b2():
 #[test]
 fn loop_edges_transfer_parameters_in_parallel() {
     let module = text::parse(
-        r#"core v0
+        r#"core v1
 sig g0 = (u32) -> (u32, u32)
 inst n0 = tests@0/loop/swap [] []
 fn f0 = n0 g0 {
@@ -819,7 +819,7 @@ b3:
 
 #[test]
 fn float_intrinsics_preserve_nan_and_signed_zero() {
-    let mut source = String::from("core v0\n");
+    let mut source = String::from("core v1\n");
     let mut cases = vec![];
     for kind in ["f32", "f64"] {
         let bits = |n: f64| {

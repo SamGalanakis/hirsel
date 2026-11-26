@@ -324,7 +324,7 @@ counts producer attempts, `mem_records` counts received records, and
 `mem_records_lost` is their difference. An incomplete stream may lack its
 final loss count. Observations take no scheduler turn and add no tape event.
 
-The runtime stream starts with the magic `HIRSOBS2`. Its assigned record
+The runtime stream starts with the magic `HIRSOBS3`. Its assigned record
 kinds are 1–12 for task, I/O and mapping observations, 16–23 for memory
 observations, 65 534 for END, and 65 535 for LOSS. Import refuses every
 unassigned kind. A new required record kind needs a new stream version.

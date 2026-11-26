@@ -602,7 +602,7 @@ fn link_program_checked(scratch: &NativeArtifacts, source: &str, memcheck: bool)
     use cranelift_object::object::Object as _;
     fs::write(scratch.path().join("caller.c"), source).unwrap();
     let archive = PathBuf::from(
-        std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE")
+        std::env::var_os("HIRSEL_CORE_RT_ARCHIVE")
             .expect("the core runtime archive is explicit test data"),
     );
     let archive = if archive.is_absolute() {

@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use crate::memory::MemoryEvent;
 use crate::profile::{Result, Timestamp, Unsigned};
 
-const MAGIC: &[u8; 8] = b"HIRSOBS2";
+const MAGIC: &[u8; 8] = b"HIRSOBS3";
 const END: u16 = u16::MAX - 1;
 const LOSS: u16 = u16::MAX;
 type Task = (u64, u64);
@@ -98,15 +98,13 @@ impl RecordKind {
                 parent: (parent_unit, parent_task),
             },
             (2, &[unit, task, state, reason, object], true) => {
-                const STATES: &[&str] =
-                    &["ready", "running", "waiting", "flow", "provider", "ended"];
+                const STATES: &[&str] = &["ready", "running", "waiting", "provider", "ended"];
                 const REASONS: &[Option<&str>] = &[
                     None,
                     Some("channel_recv"),
                     Some("channel_send"),
                     Some("join"),
                     Some("timer"),
-                    Some("latest"),
                     Some("provider_io"),
                     Some("step_slice"),
                 ];
@@ -193,7 +191,7 @@ impl RecordKind {
             }
             _ => {
                 return Err(
-                    format!("unassigned runtime observation kind {kind} in HIRSOBS2").into(),
+                    format!("unassigned runtime observation kind {kind} in HIRSOBS3").into(),
                 );
             }
         };

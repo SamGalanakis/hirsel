@@ -331,7 +331,6 @@ SELECT c.root_id, c.root_task_id, c.slice_id, c.depth, s.task_id, s.state,
            WHEN s.state IN ('waiting', 'provider') THEN coalesce(e.boundary,
                CASE WHEN sources.id IS NULL THEN 'missing_or_ambiguous_source_interval'
                     ELSE 'missing_predecessor' END)
-           WHEN s.state = 'flow' THEN 'flow'
        END AS boundary
 FROM cover c JOIN task_slice s ON s.id = c.slice_id
 LEFT JOIN episodes e ON e.id = c.slice_id

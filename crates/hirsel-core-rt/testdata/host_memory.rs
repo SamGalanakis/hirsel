@@ -100,9 +100,7 @@ fn check_abi(
     fs::write(directory.join("caller.c"), source).unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let archive = PathBuf::from(
-        std::env::var_os("HIRSEL_CORE_RT_ARCHIVE")
-            .or_else(|| std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE"))
-            .expect("native runtime test archive"),
+        std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime test archive"),
     );
     let archive = if archive.is_absolute() {
         archive

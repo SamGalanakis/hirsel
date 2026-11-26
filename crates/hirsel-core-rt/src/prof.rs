@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-const MAGIC: &[u8; 8] = b"HIRSOBS2";
+const MAGIC: &[u8; 8] = b"HIRSOBS3";
 const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
 const LIVE_MEMORY_CHUNK_BYTES: usize = 512 * 1024;
 const RSS_INTERVAL_NS: u64 = 10_000_000;
@@ -216,13 +216,12 @@ pub(crate) fn append(kind: Kind, words: &[u64], bytes: &[u8]) {
 }
 
 pub(super) fn task_state([unit, id]: [u64; 2], state: State, reason: Reason, object: u64) {
-    // HIRSOBS2 assigns tag 3 to the retired Flow state.
     let tag = match state {
         State::Ready => 0,
         State::Running => 1,
         State::Waiting => 2,
-        State::Provider => 4,
-        State::Ended => 5,
+        State::Provider => 3,
+        State::Ended => 4,
     };
     append(Kind::State, &[unit, id, tag, reason as u64, object], &[]);
 }
@@ -579,8 +578,8 @@ pub(crate) enum Reason {
     ChannelSend = 2,
     Join = 3,
     Timer = 4,
-    ProviderIo = 6,
-    StepSlice = 7,
+    ProviderIo = 5,
+    StepSlice = 6,
 }
 
 #[derive(Clone, Copy)]

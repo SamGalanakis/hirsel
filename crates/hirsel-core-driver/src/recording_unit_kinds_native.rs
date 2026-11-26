@@ -112,3 +112,83 @@ fn u5_items_with_sequences_replay_by_case() {
         );
     }
 }
+
+/// A granted capability replays where it arrives, in an item or a helper's
+/// result: its tag 5 snapshot takes the receiving unit's next ordinal, as
+/// the recorder numbered it, and a grant on that unit's own cell, so its
+/// draw is checked against that unit's stream. Before, any item or result
+/// holding a capability was refused. Three programs record and replay
+/// `Sealed`: a `Random` the root sends itself (RL9_CAPABILITY_HOME), one the
+/// root sends a helper (RL9_CAPABILITY_HELPER), replayed as that helper's
+/// unit alone, since its end hands the root a survivor, and one a helper's
+/// result returns (RL9_RESULT). The oracle is the snapshot's layout in
+/// recording.md: handle part (1), tag 5, the ordinal, kind 3 (`Random`), no
+/// stored bytes. Renaming the ordinal to one the unit never numbers ends
+/// the replay at that `TAKE`, in the unit that took it, with one line.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_capabilities_replay_where_they_arrive() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let dir = tempfile::tempdir().unwrap();
+    let grants = ["Tasks", "Random", "Stdout"];
+    let cases = [
+        (RL9_CAPABILITY_HOME, "u5c-home", "capability", 0u32, "root", None),
+        (RL9_CAPABILITY_HELPER, "u5c-helper", "capability", 1, "root.0", Some("root.0")),
+        (RL9_RESULT, "u5c-result", "result", 0, "root", None),
+    ];
+    // A capability's part where it arrives: handle (1), tag 5, its ordinal
+    // there (a send's canonical form has 0), `Random`, no stored bytes.
+    let part = |w: &[u8]| matches!(w, [1, 5, o, 3, 0] if *o != 0);
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        for (source, name, printed, stream, unit, only) in cases {
+            let path = rl9_record_with(source, dir.path(), name, backend, printed, &grants);
+            let program = dir.path().join(format!("{name}-{backend:?}"));
+            let at = format!("{backend:?} {name}");
+            let (code, out, err) = u4_replay(&program, &path, only);
+            assert_eq!((code, out.as_str(), err.as_str()), (Some(0), "", ""), "{at}");
+            let names: &[&str] = if name == "u5c-home" {
+                &["root"]
+            } else {
+                &["root", "root.0"]
+            };
+            let streams = unit_streams(&path, &at, names);
+            let frames = &streams[stream as usize].1;
+            let take = frames
+                .iter()
+                .position(|f| match f {
+                    Frame::Take { body, .. } => {
+                        matches!(body.arrival(), Arrival::Item(..) | Arrival::HelperEnd(..))
+                            && body.bytes().windows(5).any(part)
+                    }
+                    _ => false,
+                })
+                .unwrap_or_else(|| panic!("{at}: no take holds a capability: {frames:#?}"));
+            let tape = std::fs::read(&path).unwrap();
+            let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+                std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+            })
+            .unwrap()
+            .1
+            .tape_id;
+            let wrong = u4_patched(&tape, &tape_id, stream, |payload| {
+                let Some(i) = payload.windows(5).position(part) else {
+                    return false;
+                };
+                payload[i + 2] = 99;
+                true
+            });
+            let corrupt = dir.path().join(format!("{name}-{backend:?}-ordinal.tape"));
+            std::fs::write(&corrupt, wrong).unwrap();
+            let (code, out, err) = u4_replay(&program, &corrupt, only);
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+            let lines: Vec<_> = err.lines().collect();
+            let prefix = format!("replay: Diverged(Take) at {} in {unit} ", take + 1);
+            assert!(
+                matches!(&lines[..], [l] if l.starts_with(&prefix)),
+                "{at}: {err} {frames:#?}"
+            );
+        }
+    }
+}

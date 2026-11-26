@@ -8,7 +8,7 @@ use format::{Arrival, HelperOutcome};
 use hirsel_core_layout::cross::{CASE, ELEMENT, PADDING, SEQ, elements, live, sequences};
 
 mod arrive;
-pub(in crate::tape) use arrive::{set_across, word as arrived};
+pub(in crate::tape) use arrive::{Receiver, set_across, word as arrived};
 
 impl Live {
     pub(super) fn replaying(&self) -> bool {
@@ -271,9 +271,15 @@ pub(crate) fn due(
     group: Option<Group>,
     pump: bool,
     layout: impl Fn(usize) -> Option<(u64, Vec<[u64; 4]>)>,
-    grants: Option<&crate::host_file::RunGrants>,
+    registry: Option<&crate::host_file::Registry>,
 ) -> Option<Due> {
+    let into = group.map(|g| Receiver {
+        registry,
+        provider: g.cell.provider,
+        generation: g.generation,
+    });
     replaying(group, |live| {
+        let into = into.unwrap();
         live.fresh_takes();
         let (events, last, count) = (live.schedule.events, live.schedule.last, live.takes.count);
         let own = super::stream(live);
@@ -346,7 +352,7 @@ pub(crate) fn due(
                     let bytes = bytes as usize;
                     let flat = {
                         let held =
-                            &mut |kind, c: &mut format::Cursor<'_>| arrived(live, grants, kind, c);
+                            &mut |kind, c: &mut format::Cursor<'_>| arrived(live, into, kind, c);
                         packed(&value, vec![0; bytes], (0, bytes), &owners, held)
                     };
                     match flat {
@@ -403,8 +409,7 @@ pub(crate) fn due(
                 .and_then(&layout)
                 .ok_or(Unpacked::Layout)
                 .and_then(|(bytes, owners)| {
-                    let held =
-                        &mut |kind, c: &mut format::Cursor<'_>| arrived(live, grants, kind, c);
+                    let held = &mut |kind, c: &mut format::Cursor<'_>| arrived(live, into, kind, c);
                     let bytes = bytes as usize;
                     packed(&value, vec![0; bytes], (0, bytes), &owners, held)
                 })
@@ -580,7 +585,7 @@ pub(in crate::tape) fn packed(
     if !c.done() {
         return Err(Unpacked::Layout);
     }
-    for (row, _) in sequences(owners) {
+    for (row, _) in sequences(&rows) {
         if let Some(elements) = lists.get(&row[0]) {
             flat.extend_from_slice(elements);
         }

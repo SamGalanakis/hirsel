@@ -5,11 +5,11 @@
 //! is the entry's value. Its takes come only from its own `TAKE` frames, and
 //! its `END` is checked against the outcome it reaches.
 use super::schedule::Group;
-use super::units::replay::{Unpacked, arrived, packed};
+use super::units::replay::{Receiver, Unpacked, arrived, packed};
 use super::units::verdicts;
 use super::*;
 use crate::units_lang::SpawnEntry;
-use hirsel_core_layout::cross::{CAPABILITY, FUNCTION};
+use hirsel_core_layout::cross::FUNCTION;
 
 /// One helper stream of the tape, read through its own file.
 pub(super) struct Stream {
@@ -171,39 +171,12 @@ unsafe fn open(
     flat[f as usize..f as usize + 8].copy_from_slice(&code.to_le_bytes());
     // SAFETY: the root's host files are live for the run.
     let registry = unsafe { &(*(*context).host_files).registry };
-    let grants = registry.run_grants();
-    let mut word = |kind: u64, c: &mut format::Cursor<'_>| -> Result<u64, Unpacked> {
-        if kind != CAPABILITY {
-            return arrived(&mut live, Some(grants), kind, c);
-        }
-        match c.u8()? {
-            1 => {
-                if c.u8()? != 5 {
-                    return Err(Unpacked::Unsupported(ENTRY_HANDLE));
-                }
-                let ordinal = c.varint()?;
-                let grant = c.u8()?;
-                // Net, Env, Exec and Cred replay against the rules the
-                // root's startup installs, which a helper's cell lacks.
-                if matches!(grant, 1 | 7 | 13 | 14) {
-                    return Err(Unpacked::Unsupported(RULED_GRANT));
-                }
-                let stored = c.bytes()?.to_vec();
-                live.objects.push(Object {
-                    inner: None,
-                    open_resource: false,
-                });
-                let o = live.objects.len();
-                if ordinal != o as u64 {
-                    return Err(Unpacked::Layout);
-                }
-                let grant = super::units::item_grants::CrossGrant::granted(grant, stored);
-                live.grants.insert(o, grant);
-                Ok(registry.grant(cell.provider, handle(generation, o)))
-            }
-            _ => Err(Unpacked::Layout),
-        }
+    let at = Receiver {
+        registry: Some(registry),
+        provider: cell.provider,
+        generation,
     };
+    let mut word = |kind: u64, c: &mut format::Cursor<'_>| arrived(&mut live, at, kind, c);
     let span = (x.at as usize, x.len as usize);
     let data = match packed(body.value.bytes(), flat, span, &owners[1..], &mut word) {
         Ok(data) => data,
@@ -236,9 +209,6 @@ unsafe fn open(
         steps,
     })
 }
-
-const ENTRY_HANDLE: &str = "a helper entry holding a capability of virtual construction";
-const RULED_GRANT: &str = "a helper entry holding a Net, Env, Exec or Cred capability";
 
 /// A helper's `END`: the stream's next frame is `expected`, and nothing
 /// follows it.

@@ -242,10 +242,11 @@ class Resolution:
             modes = [(False, []), (True, [])]
             if name == 'hirsel-core-rt':
                 # The unit harness includes Openat2 recording cases. Keep the
-                # default archive separate and resolve record's optional deps.
+                # default archive separate and resolve the optional deps of
+                # record and prof, which the runtime's variants enable.
                 # The same harness exercises the runtime profiler's chunks.
-                record = ['--features', 'record']
-                modes = [(False, []), (True, ['--features', 'record,prof']), (False, record)]
+                optional = ['--features', 'record,prof']
+                modes = [(False, []), (True, optional), (False, optional)]
             for testing, feature_args in modes:
                 builds.append((member, testing, feature_args))
                 for config in self.platforms.values():
@@ -420,7 +421,7 @@ class Resolution:
                     key = self.preferred.get(package)
                     if (call.func.id == 'hirsel_library' and key is not None
                             and self.root / literal(call, 'crate_root') == Path(self.units[key]['target']['src_path'])):
-                        if package == 'hirsel-core-rt' and 'record' in ast.literal_eval(attrs['features']):
+                        if package == 'hirsel-core-rt' and {'record', 'prof'} & set(ast.literal_eval(attrs['features'])):
                             key = self.record_runtime
                         deps = self.values(key, lambda u: sorted(
                             self.label(dep) for _, dep in u['edges'] if dep in self.names

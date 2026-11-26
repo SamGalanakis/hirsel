@@ -699,7 +699,7 @@ unit's stream alone and leaves the other streams unread.
 **What this build replays.** Every stream replays as above, each helper as a unit of its
 own from its stream's entry, on the pool beside the root or else on a thread of its own, when its entry's value holds plain bytes, lists of plain bytes,
 functions, capabilities, `Secret`s and `KeyShare`s, and its helper ends return a value of
-plain bytes, lists of plain bytes, functions, `Secret`s and `KeyShare`s. A helper's entry capability becomes an object of the helper's stream, by the
+plain bytes, lists of plain bytes, functions, granted capabilities, `Secret`s and `KeyShare`s. A helper's entry capability becomes an object of the helper's stream, by the
 ordinal the entry gives it. When every started stream has its verdict, the replay writes the
 lines that are not `Sealed`, as below, and exits 1 if it wrote any, else 0. A helper end's `TAKE` that names
 no helper the unit spawned, or carries a value of another layout than the handle's result
@@ -711,10 +711,10 @@ are then not outside waits. What this build does not replay yet stops the replay
 end that hands its owner survivors; an entry, result or item holding a `Schedule`, a
 `Sealer`, an `Opener`, a `HeaderMask`, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit (its
 designation does not say whether the program held its parent's bytes) or a list whose
-elements hold handles or functions; a result or item holding a capability; a helper entry
-holding a capability of virtual construction or a `Net`, `Env`, `Exec` or `Cred`
-capability, whose rules the root's startup holds; a send that waits; a notice another unit
-sent; and every other take kind. An arriving `Secret` replays as its designation and
+elements hold handles or functions; an entry, result or item holding a capability of
+virtual construction or a `Net`, `Env`, `Exec` or `Cred` capability, whose rules the
+root's startup holds by its own ordinals; a send that waits; a notice another unit
+sent; and every other take kind. An arriving granted capability replays as its tag 5 snapshot, numbered where it arrives and granted on the receiving unit's own cell with the kind and stored bytes the snapshot carries, so its operations are checked against that unit's stream. An arriving `Secret` replays as its designation and
 policy with no bytes behind it, as one holder with no charge: its charges stay with the
 unit that paid them, and only that unit's refund takes return them. An arriving `KeyShare`
 replays as its snapshot, numbered where it arrives, with no key and no charge: its

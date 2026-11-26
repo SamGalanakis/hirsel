@@ -2,25 +2,37 @@
 //! its result or an item, made from its recorded part (docs/recording.md,
 //! "Handle snapshots"). It takes the receiving unit's next object ordinal, as
 //! the recorder numbered it there. A `Secret` or `KeyShare` arrives with no
-//! bytes and no charge: the stream that made it delivers its operations.
+//! bytes and no charge: the stream that made it delivers its operations. A
+//! granted capability arrives as a grant of the receiving unit's registry on
+//! its own cell, so its operations are that unit's.
 use super::super::super::*;
 use super::Unpacked;
-use crate::host_file::RunGrants;
+use crate::host_file::{Registry, RunGrants};
 use crate::secret::{Made, Origin};
 use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, MEDIA, SECRET, SHARED, SOCKET};
 use hirsel_core_net::{SecretPolicy, key_agreement::Group};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
+/// Where a value arrives: the receiving unit's registry, if it has host
+/// files, and the cell and generation of its tape.
+#[derive(Clone, Copy)]
+pub(in crate::tape) struct Receiver<'a> {
+    pub(in crate::tape) registry: Option<&'a Registry>,
+    pub(in crate::tape) provider: Provider,
+    pub(in crate::tape) generation: u32,
+}
+
 /// The word of one owner part of `kind`, read from `c`: a function's code
-/// word, a `Secret`'s new designation in the run's secrets, or a key share
-/// with no key, both with no bytes behind them. Each other handle is refused
-/// by name; a helper's entry makes its capabilities itself.
+/// word, a granted capability's new grant, a `Secret`'s new designation in
+/// the run's secrets, or a key share with no key, both with no bytes behind
+/// them. Each other handle is refused by name.
 pub(in crate::tape) fn word(
     live: &mut Live,
-    grants: Option<&RunGrants>,
+    at: Receiver<'_>,
     kind: u64,
     c: &mut format::Cursor<'_>,
 ) -> Result<u64, Unpacked> {
+    let grants = at.registry.map(Registry::run_grants);
     match (kind, c.u8()?) {
         (FUNCTION, 2) => {
             let identity = c.bytes()?;
@@ -55,7 +67,7 @@ pub(in crate::tape) fn word(
                 .unwrap()
                 .arrived(Origin { made, stream }, policy))
         }
-        (CAPABILITY, 1) => Err(Unpacked::Unsupported(CAPABILITY_HELD)),
+        (CAPABILITY, 1) => capability(live, at, c),
         (MEDIA, 1) => match c.u8()? {
             8 => key_share(live, grants, c),
             9..=12 => Err(Unpacked::Unsupported(KEY_OBJECT)),
@@ -65,6 +77,37 @@ pub(in crate::tape) fn word(
         (SHARED | SOCKET, 1) => Err(Unpacked::Unsupported(HANDLE)),
         _ => Err(Unpacked::Layout),
     }
+}
+
+/// A capability from its snapshot after the tag (recording.md, "Snapshots"):
+/// tag 5, its ordinal where it arrives, its kind and stored bytes. It is
+/// granted on the receiving unit's cell, which keeps its grant so a value
+/// that carries it on snapshots it again.
+fn capability(
+    live: &mut Live,
+    at: Receiver<'_>,
+    c: &mut format::Cursor<'_>,
+) -> Result<u64, Unpacked> {
+    match c.u8()? {
+        5 => {}
+        6 => return Err(Unpacked::Unsupported(VIRTUAL)),
+        _ => return Err(Unpacked::Layout),
+    }
+    let ordinal = c.varint()?;
+    let kind = c.u8()?;
+    // Net, Env, Exec and Cred replay against the rules the root's startup
+    // installs by its own ordinals, which an arriving grant's lacks.
+    if matches!(kind, 1 | 7 | 13 | 14) {
+        return Err(Unpacked::Unsupported(RULED_GRANT));
+    }
+    let stored = c.bytes()?.to_vec();
+    let registry = at.registry.ok_or(Unpacked::Unsupported(NO_FILES))?;
+    if ordinal != live.unit_object() {
+        return Err(Unpacked::Layout);
+    }
+    let grant = super::super::item_grants::CrossGrant::granted(kind, stored);
+    live.grants.insert(ordinal as usize, grant);
+    Ok(registry.grant(at.provider, handle(at.generation, ordinal as usize)))
 }
 
 /// Whether this replay reads a tape of another revision (`--diagnose`).
@@ -143,8 +186,10 @@ fn key_share(
 
 const NO_CODE: &str = "a value holding a function the replaying build does not have";
 const DERIVED: &str = "a value holding a Secret derived or unwrapped in another unit";
-const NO_FILES: &str = "a value holding a Secret or key share in a unit without host files";
-const CAPABILITY_HELD: &str = "a helper result or an item holding a capability";
+const NO_FILES: &str =
+    "a value holding a capability, a Secret or a key share in a unit without host files";
+const VIRTUAL: &str = "a value holding a capability of virtual construction";
+const RULED_GRANT: &str = "a value holding a Net, Env, Exec or Cred capability";
 const KEY_OBJECT: &str = "a value holding a schedule, a sealer, an opener or a header mask";
 const HANDLE: &str = "a value holding a Shared holder or a socket";
 const ACROSS_CLIENT: &str = "a client arriving in a replay of another revision";

@@ -1818,8 +1818,8 @@ fn unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet() {
     // The slot is swapped between the resolve and the connect. Linux holds the
     // resolved socket itself: the first connect reaches the old listener, and
     // the third finds its listener closed. Darwin holds the socket's device and
-    // inode, finds another socket under the name and denies both
-    // (docs/spec/net.md, the macOS provider's limit).
+    // inode, links another socket from the name and denies both
+    // (docs/spec/net.md, the macOS provider).
     #[cfg(target_os = "linux")]
     let (swapped, replaced) = (IoError::OK, error(2, 0));
     #[cfg(target_os = "macos")]

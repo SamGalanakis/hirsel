@@ -682,8 +682,8 @@ for a result that cannot be delivered. Everything that depends on host files is 
 replay supplies it without looking at a host path. A connect, bind or listen resolves `path`
 beneath its root as a `Dir` path is resolved, through no symbolic link and never out of the
 root, and acts on what that resolution found. There is no fallback that checks a path and then
-hands it to the kernel to resolve again, except the one stated limit of the macOS provider
-below.
+hands it to the kernel to resolve again; the macOS provider (below) names a node no one else
+can change.
 
 - Every operation first resolves the endpoint's parent components. A symbolic link, a
   non-directory or an escape among them gives `Denied`.
@@ -708,7 +708,7 @@ below.
 - Only `listen_unix` produces `BoundNotListening`. Any other Unix or IP operation that
   delivers it is `Corrupt` on a tape and fails a server with `Fail`.
 
-**The macOS provider's limit** (macOS slice S7). Darwin cannot bind or connect a Unix socket
+**The macOS provider** (macOS slice S7). Darwin cannot bind or connect a Unix socket
 through a descriptor, and a socket file cannot be opened there to pin it. So the macOS
 provider resolves and pins the parent as above, enters it with `pthread_fchdir_np`, and binds
 or connects by name. The parent components are still resolved through no symbolic link and
@@ -720,14 +720,19 @@ never out of the root.
   moves that node into the slot with an exclusive rename. A node of any kind in the slot gives
   `InUse`, and the private node is removed. A run that is killed between the bind and the
   rename leaves the private node behind. The socket's own address stays the private name.
-- A connect or send-to keeps a race. The provider checks that the final component is a socket
-  and records its device and inode, calls by name, and checks them again: a difference gives
-  `Denied`. A rename inside the pinned parent that puts another node under the name for the
-  call and the first socket back before the second check can win. The call then reaches
-  whatever holds the name at that moment, and Darwin's `connect` follows a symbolic link
-  there, so it can reach a socket outside the root. The race needs write access to the
-  confined directory and a symbolic link already inside it. Refusing Unix sockets on macOS
-  would cost more than this race, so it is a stated limit, not a refusal.
+- A connect or send-to has no race. Darwin's `connect` and `sendto` follow a symbolic link at
+  the final component, so the provider never calls by the slot's name. It checks that the
+  final component is a socket and records its device and inode, creates a private directory
+  in the pinned parent, `.hirsel-connect-` and 32 random hexadecimal digits, mode 0700, and
+  hard-links the final component into it (a hard link of a symbolic link is the link itself).
+  It then makes the directory search-only (0100), so neither another user nor the program,
+  which has no operation that changes a mode, can add, rename or remove an entry in it, and
+  checks that the link is a socket with the recorded device and inode. A difference, or a
+  directory the process does not own, gives `Denied`. The call names the link from that
+  directory, and the provider then removes the link and the directory. So a connect or
+  send-to on macOS also needs write access to the parent directory and a file system that
+  hard-links a socket. A parent it cannot write gives `Denied`. A run that is killed between
+  the link and its removal leaves the private directory behind.
 
 A pathname names a slot, not a peer. A later operation resolves the slot anew, so if a
 legitimate rebind replaces the node, a later connect reaches the new listener.

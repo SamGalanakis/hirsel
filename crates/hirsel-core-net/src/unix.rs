@@ -12,6 +12,8 @@ use std::os::{
 pub const MAX_PATH_BYTES: usize =
     size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path) - 1;
 
+pub use crate::host::pinned;
+
 pub fn open_beneath(
     root: BorrowedFd<'_>,
     path: &std::ffi::CStr,

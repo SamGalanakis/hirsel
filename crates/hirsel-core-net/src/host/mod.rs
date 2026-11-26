@@ -12,6 +12,14 @@ use linux as provider;
 
 pub(crate) use provider::{image, udp, unix};
 
+/// The macOS provider's pinned Unix connect (`freeze`), which the runtime's
+/// Darwin provider also uses for send-to; empty on Linux, whose runtime
+/// resolves to the socket itself.
+pub mod pinned {
+    #[cfg(target_os = "macos")]
+    pub use super::darwin::unix::{Frozen, freeze, socket_identity};
+}
+
 pub(crate) fn checked(result: i32) -> std::io::Result<i32> {
     if result < 0 {
         Err(std::io::Error::last_os_error())

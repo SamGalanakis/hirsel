@@ -353,6 +353,8 @@ mod provider_s0_tests;
 mod provider_tests;
 #[cfg(test)]
 mod unix_join_tests;
+#[cfg(test)]
+mod unix_race_tests;
 
 #[cfg(test)]
 mod tasks_tests;

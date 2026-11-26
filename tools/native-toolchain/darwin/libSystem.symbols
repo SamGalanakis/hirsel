@@ -93,6 +93,7 @@ _isatty
 _kevent
 _kill
 _kqueue
+_linkat
 _listen
 _log
 _log10

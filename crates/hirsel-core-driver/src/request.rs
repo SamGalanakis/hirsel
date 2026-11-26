@@ -1400,7 +1400,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         inspection.write(&product, selected_entry.as_ref(), json)?;
         return conclude(Outcome::Exit(0));
     }
-    let native_options = if native_command && (test_command || accepted) {
+    let native_options = if native_command && accepted {
         let mut options = prepared.expect("a native command prepares its options")?;
         if test_coverage {
             options.coverage = Some(crate::test_run::Session::scope(&product));
@@ -1414,7 +1414,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     } else {
         None
     };
-    if test_command {
+    if test_command && accepted {
         let runs = test_runs.expect("a test request has its run configuration");
         let own_tests = || {
             product.tests().filter(|path| {

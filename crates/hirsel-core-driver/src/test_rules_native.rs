@@ -576,3 +576,26 @@ fn resident_server_answers_every_directory_and_contains_a_panic() {
     assert_eq!(answer, one_shot[0].0, "{stderr}");
     stop_resident(&runtime, &elsewhere, server);
 }
+
+#[test]
+fn test_reports_check_diagnostic_for_unparseable_test_source() {
+    let law = PackageLaw::new();
+    law.app(
+        "app",
+        "[tests]\nlimit = 67108864\n[tests.sources]\n\"laws.hirsel\" = \"laws\"\n",
+    );
+    law.write(
+        "app/laws.hirsel",
+        "@test\nfn broken() -> Result[(), ()] { Ok(())\n",
+    );
+    PackageLaw::pass(law.run(&["lock", "app"]));
+
+    let check = law.run(&["check", "app"]);
+    assert_eq!(check.0, Some(1), "{}\n{}", check.1, check.2);
+    assert!(check.2.contains("LANG-5"), "{check:?}");
+
+    let tested = law.run(&["test", "app"]);
+    assert_eq!(tested.0, check.0, "{}\n{}", tested.1, tested.2);
+    assert_eq!(tested.2, check.2);
+    assert!(!tested.2.contains("no tests found"), "{tested:?}");
+}

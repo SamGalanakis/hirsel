@@ -194,7 +194,7 @@ fn staged_subscribe(to: Sender[PubIn], tasks: Tasks, clock: Clock, random: Rando
     Some(StagedOwner(owner: take owner, work: take work, inbox: take inbox, closing: take closing, unused_head: take unused_head, round: take register, fence: take fence))
 }
 
-fn staged_send(mut peer: StagedOwner, mut socket: WriteHalf, next: Sender[()], take notice: Notice) -> u64 waits {
+fn staged_packet(mut peer: StagedOwner, take notice: Notice) -> (u64, Bytes) {
     result.unwrap(wire_step(mut peer.owner, mut peer.work, WRunner(take notice)))
     let frame = option.unwrap(result.unwrap(wire_take_output(peer.owner, mut peer.work)))
     let version = match frame {
@@ -203,6 +203,11 @@ fn staged_send(mut peer: StagedOwner, mut socket: WriteHalf, next: Sender[()], t
     }
     let out = result.unwrap(std.wsock.outbound(Server, wire_defaults(0u64).socket, None))
     let packed = result.unwrap(encode_published_frame(out, frame, peer.work.packing))
+    (version, take packed)
+}
+
+fn staged_send(mut peer: StagedOwner, mut socket: WriteHalf, next: Sender[()], take notice: Notice) -> u64 waits {
+    let (version, take packed) = staged_packet(mut peer, take notice)
     result.unwrap(channel.send(next, ()))
     if result.unwrap(host.send_pair(mut socket, packed, b"", Never)) != list.len(packed) {
         fail("L61 partial socket write")

@@ -32,7 +32,7 @@ import time
 
 from case_progress import run_case
 from std_native import ROOT, simulation_support
-from runner_rest import no_jwt_at_rest, no_secret_at_rest
+from runner_rest import crash_part, no_jwt_at_rest, no_secret_at_rest
 from runner_host import BUCKET_HOST_LAWS, cold_wake_trigger, cutover_survives_host_loss, runner_idle_stop, unpinned, wait_ready
 from store_tests import crash_inputs, runner_inputs
 from store_crash_tests import checked, run_crashes
@@ -778,15 +778,8 @@ def crashes(args, root, work, engine, name):
     checked([str(build / (engine + '-crash') / 'store'), POISON, 'count'], env, engine=engine)
     return rows
 
-def drain_deadline(args, root, work, engine, name, runner=None, activation=False):
-    inputs_path = manifest(root, work, name, runner, crash=True)
-    build = work / name
-    build.mkdir()
-    stop_cases = (args.stop_case,) if args.stop_case else STOP_CASES
-    return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
-                       entry='store_crash@1/runner_crash/' + ('main' if activation else 'stop_main'), adapter='runner_crash.c',
-                       scenarios=('runner-activation', 'runner-activation-genesis') if activation else (),
-                       count_only=('runner-unavailable-genesis', 'runner-unavailable-install') if activation else stop_cases)
+def drain_deadline(args, root, work, engine, name, runner=None, part='deadline'):
+    return crash_part(args, root, work, engine, name, manifest(root, work, name, runner, crash=True), STOP_CASES, part)
 
 
 def manifest(root, work, name, runner=None, extra=(), crash=False):
@@ -1158,7 +1151,7 @@ def main():
     p.add_argument('--session-law', action='append', choices=SESSION_LAWS)
     p.add_argument('--admission-law', action='append', choices=['wire_replacement_generation', 'unread_client', 'hello_and_slots', 'join_cleanup',
                    'full_head_waits', 'gone_slot_v5', 'request_mismatch_wire', 'history_below_latest', 'reply_over_done_max', *SETTLEMENT_LAWS, *RELEASE_LAWS, *REPAIR_LAWS])
-    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'rc1', 'host', 'idle-stop', 'shared-views'])
+    p.add_argument('--part', choices=['r0', 'r1', 'wire', 'session', 'admission', 'socket', 'calls', 'deadline', 'activation', 'l61-crash', 'rc1', 'host', 'idle-stop', 'shared-views'])
     args = p.parse_args()
     if args.part == 'host':
         if not args.host_law or not args.compiler or len(args.backend or []) != 1 or args.backend == ['evaluator']:
@@ -1229,14 +1222,14 @@ def main():
                     if not r['passed']:
                         print('FAIL', json.dumps(r)[:4000])
                 return int(not rows or any(not result['passed'] for result in rows))
-        crash_laws = {'deadline': 'one_drain_deadline', 'activation': 'atomic_activation'}
+        crash_laws = {'deadline': 'one_drain_deadline', 'activation': 'atomic_activation', 'l61-crash': 'release_after_durable_sigkill'}
         for part, law in crash_laws.items():
             if args.part not in (None, 'r1', part):
                 continue
             for engine in (name for name in engines if name != 'evaluator'):
                 try:
                     row(engine=engine, law=law, passed=True,
-                        result=drain_deadline(args, root, work, engine, f'{law}-{engine}', activation=part == 'activation'))
+                        result=drain_deadline(args, root, work, engine, f'{law}-{engine}', part=part))
                 except RuntimeError as error:
                     row(engine=engine, law=law, passed=False, result=str(error))
         if args.part in crash_laws:

@@ -43,9 +43,12 @@ static void transfer(int fd,void *data,size_t len,int writing) {
         p+=n;len-=(size_t)n;
     }
 }
+static int is_frozen_op(uint8_t op) {
+    return (freeze_sync && op==16) || (freeze_sync==2 && (op==2 || op==38));
+}
 static HirselCoreWait ready(void *s,HirselCoreHostRequest *r,uint64_t token) {
     (void)s;(void)token;
-    if(freeze_sync && r->operation==16) {
+    if(is_frozen_op(r->operation)) {
         sync_parked=1;
         return (HirselCoreWait){.kind=2};
     }
@@ -54,6 +57,7 @@ static HirselCoreWait ready(void *s,HirselCoreHostRequest *r,uint64_t token) {
 static HirselCoreStep issue(void *s,HirselCoreHostRequest *r,uint64_t token) {
     (void)s;(void)token;
     if(r->operation==12 && r->buffer.len==6 && !memcmp(r->buffer.data,"FREEZE",6)) freeze_sync=1;
+    if(r->operation==12 && r->buffer.len==12 && !memcmp(r->buffer.data,"FREEZE WRITE",12)) freeze_sync=2;
     if(r->operation==12 && r->buffer.len==7 && !memcmp(r->buffer.data,"FROZEN?",7) && !sync_parked)
         return (HirselCoreStep){.outcome.error.tag=1};
     Request q={r->handle,r->path_len,r->buffer.len,r->buffer.capacity,r->operation,r->mode};
@@ -75,7 +79,7 @@ static HirselCoreStep resume(void *s,HirselCoreHostRequest *r,uint64_t token) {
 }
 static HirselCoreHostOutcome cancel(void *s,HirselCoreHostRequest *r,uint64_t token,uint8_t why) {
     (void)s;(void)token;(void)why;
-    if(freeze_sync && r->operation==16) return (HirselCoreHostOutcome){.error.tag=4};
+    if(is_frozen_op(r->operation)) return (HirselCoreHostOutcome){.error.tag=4};
     abort();
 }
 static HirselCoreHostOutcome deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome out) {
@@ -134,7 +138,7 @@ static void stop(Child *child) {
     } else if(ended!=child->pid) abort();
     child->finished=1;if(child->fd>=0) close(child->fd);child->fd=-1;
 }
-static void service(void *state,Child *child,int server,int phase,int stop_case,int peer_out) {
+static void service(void *state,Child *child,int server,int phase,int stop_case,int l61_case,int peer_out) {
     Request q;ssize_t first=read(child->fd,&q,sizeof q);
     if(first<0 && errno==EINTR) return;
     if(first==0 || (first<0 && errno==ECONNRESET)) { close(child->fd);child->fd=-1;return; }
@@ -144,6 +148,12 @@ static void service(void *state,Child *child,int server,int phase,int stop_case,
     uint8_t *path=malloc(q.path_len?q.path_len:1),*data=calloc(capacity?capacity:1,1);
     if(!path || !data) abort();
     transfer(child->fd,path,q.path_len,0);transfer(child->fd,data,q.len,0);
+    if(l61_case && server && phase==1 && q.op==12 && q.len==7 && !memcmp(data,"CUT L61",7)) {
+        signal_child(child,SIGKILL);
+        close(child->fd);child->fd=-1;
+        free(path);free(data);
+        return;
+    }
     int second=stop_case && server && phase==1 && q.op==12 && q.len==6 && !memcmp(data,"SECOND",6);
     if(q.op==12) {
         if(stop_case && server && phase==1 &&
@@ -184,6 +194,7 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
     int twice=!strcmp(scenario,"runner-stop-twice");
     int deadline_case=!strcmp(scenario,"runner-deadline");
     int stop_case=deadline_case || twice || !strcmp(scenario,"runner-stop-early");
+    int l61_case=!strcmp(scenario,"l61-before-release") || !strcmp(scenario,"l61-before-flush");
     int peers[2];
     if(socketpair(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0,peers)) abort();
     Child server=launch(input,sources,entry,server_args,stop_case?5:4,-1,peers[0],peers[1]);
@@ -220,11 +231,19 @@ static int phase(void *state,const HirselCoreOsConfig *input,const HirselCoreSou
         struct pollfd fds[2]={{server.fd,POLLIN,0},{client.fd,POLLIN,0}};
         if(server.finished && client.finished) break;
         int count=poll(fds,2,100);if(count<0 && errno==EINTR) continue;if(count<0) abort();
-        if(fds[0].revents) service(state,&server,1,number,stop_case,peers[1]);
-        if(fds[1].revents) service(state,&client,0,number,stop_case,peers[1]);
+        if(fds[0].revents) service(state,&server,1,number,stop_case,l61_case,peers[1]);
+        if(fds[1].revents) service(state,&client,0,number,stop_case,l61_case,peers[1]);
     }
     close(peers[1]);
     if(store_crash_crashed(state)) store_crash_process_exit(state);
+    if(l61_case && number==1) {
+        if(WIFSIGNALED(server.status) && WTERMSIG(server.status)==SIGKILL) {
+            store_crash_signal_exit(state);
+            return 0;
+        }
+        fprintf(stderr,"%s: SIGKILL did not crash the host: wait status %d\n",scenario,server.status);
+        return 120;
+    }
     if(twice && number==1) {
         if(WIFSIGNALED(server.status) && WTERMSIG(server.status)==SIGTERM) {
             store_crash_signal_exit(state);
@@ -253,11 +272,12 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,c
     void *state=store_crash_new(cut);store_crash_sync_failure(state,poison?7:0);
     uint8_t status=0;
     int early=!strcmp(scenario,"runner-stop-early"),twice=!strcmp(scenario,"runner-stop-twice");
+    int l61=!strcmp(scenario,"l61-before-release") || !strcmp(scenario,"l61-before-flush");
     for(int n=early?1:0;n<(early || twice?2:3);n++) {
         store_crash_phase(state,(uint64_t)n);
         if(phase(state,input,sources,entry,scenario,n)) {status=120;break;}
         if(n==1 && poison && store_crash_failed_syncs(state)!=1) {fprintf(stderr,"named sync failure was not reached\n");status=120;break;}
-        if(n==1 && uncut && !early && !twice && !store_crash_acked(state)) {fprintf(stderr,"uncut run did not acknowledge its checkpoint\n");status=120;break;}
+        if(n==1 && uncut && !early && !twice && !l61 && !store_crash_acked(state)) {fprintf(stderr,"uncut run did not acknowledge its checkpoint\n");status=120;break;}
     }
     if(!status) printf("cuts %llu\n",(unsigned long long)store_crash_events(state));
     store_crash_free(state);return status;

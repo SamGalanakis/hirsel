@@ -14,7 +14,7 @@ import subprocess
 import time
 
 from case_progress import run_case
-from store_crash_tests import checked
+from store_crash_tests import checked, run_crashes
 
 
 def b64(data):
@@ -109,3 +109,17 @@ def no_secret_at_rest(args, work, engine, selection, row):
     passed = ran.returncode == 0 and bool(files) and not found
     row(engine=engine, law='no_secret_at_rest', passed=passed,
         result={'exit': ran.returncode, 'files': len(files), 'matches': found, 'stderr': ran.stderr})
+
+
+def crash_part(args, root, work, engine, name, inputs_path, stop_cases, part):
+    build = work / name
+    build.mkdir()
+    cases = {
+        'deadline': ('store_crash@1/runner_crash/stop_main', (), (args.stop_case,) if args.stop_case else stop_cases),
+        'activation': ('store_crash@1/runner_crash/main', ('runner-activation', 'runner-activation-genesis'),
+                       ('runner-unavailable-genesis', 'runner-unavailable-install')),
+        'l61-crash': ('runner@1/runner/staged_crash_main', (), ('l61-before-release', 'l61-before-flush')),
+    }
+    entry, scenarios, count_only = cases[part]
+    return run_crashes(root, args.compiler, args.runtime, args.bridge, args.cc, inputs_path, build, engine,
+                       entry=entry, adapter='runner_crash.c', scenarios=scenarios, count_only=count_only)

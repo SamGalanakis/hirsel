@@ -1,0 +1,213 @@
+// T12 drives the existing Runner head, publisher and wire owner at two
+// boundaries. The W2 parent SIGKILLs this child on the synchronous cut request.
+fn staged_crash_cut(out: Stdout) waits {
+    result.unwrap(stdout.write(out, "CUT L61"))
+    fail("L61: host returned from the crash cut")
+}
+
+fn staged_crash_addr(port: u16) -> Addr {
+    Addr(ip: V4(2130706433u32), port: port)
+}
+
+fn staged_crash_accept(n: Net, out: Stdout) -> WriteHalf waits {
+    let (take bound_socket, at) = result.unwrap(host.listen(n, staged_crash_addr(0), 1u16))
+    let mut listener = take bound_socket
+    let mut port = string.from("PORT ")
+    string.push_u64(mut port, int.widen(at.port))
+    result.unwrap(stdout.write(out, port))
+    let (take socket, _) = result.unwrap(host.accept(mut listener, Never))
+    let (_, take write) = net.split(take socket)
+    take write
+}
+
+fn staged_crash_client(n: Net, argv: Args, staged: bool) waits {
+    let Some(port_text) = args.get(argv, 3u64) else {
+        fail("L61: missing port")
+    }
+    let Some(mode) = args.get(argv, 2u64) else {
+        fail("L61: missing mode")
+    }
+    let port = result.unwrap(std.int.parse_uint(port_text, 10u32))
+    let (take incoming, _) = net.split(result.unwrap(host.connect(n, staged_crash_addr(int.truncate(port)), Never)))
+    let mut read = take incoming
+    let mut decoder = std.websocket.decoder(Client, 65536)
+    let mut packet: Bytes = list.with_capacity(4096)
+    let mut cursor = 0u64
+    let codec: std.codec.Codec[Frame] = std.codec.of()
+    let frame = loop {
+        match std.websocket.next(mut decoder, packet, mut cursor) {
+            Message(take payload) => break result.unwrap(std.codec.decode(codec, payload)),
+            Need => (),
+            _ => fail("L61: expected a binary subscription frame"),
+        }
+        if cursor == list.len(packet) {
+            list.clear(mut packet)
+            cursor = 0
+        }
+        if result.unwrap(host.recv_bounded(mut read, mut packet, 4096 - list.len(packet), Never)) == 0 {
+            fail("L61: host closed before the first round")
+        }
+    }
+    let new = mode == "read" && !staged
+    let expected = if new {
+        5u64
+    } else {
+        4u64
+    }
+    let wanted = if new {
+        7u64
+    } else {
+        3u64
+    }
+    let Batch(at, complete, groups, replies) = view frame else {
+        fail("L61: first round is not a Batch")
+    }
+    if at != expected || list.len(complete) != 1 || complete[0u64] != 1 || list.len(groups) != 1 || groups[0u64].sub != 1 || list.len(replies) != 0 {
+        fail("L61: first round has the wrong version or subscription")
+    }
+    let rows = view groups[0u64].rows
+    let mut key1: Bytes = list.new()
+    std.codec.encode_key(std.codec.key_u32(), 1u32, mut key1)
+    std.codec.encode_key(std.codec.key_u64(), 1u64, mut key1)
+    let mut key2: Bytes = list.new()
+    std.codec.encode_key(std.codec.key_u32(), 1u32, mut key2)
+    std.codec.encode_key(std.codec.key_u64(), 2u64, mut key2)
+    if list.len(rows) != 2 || rows[0u64].slot != 0 || rows[1u64].slot != 0 || rows[0u64].key != key1 || rows[1u64].key != key2 {
+        fail("L61: first round has the wrong rows")
+    }
+    let Some(value1) = view rows[0u64].value else {
+        fail("L61: missing row 1 value")
+    }
+    let Some(value2) = view rows[1u64].value else {
+        fail("L61: missing row 2 value")
+    }
+    if result.unwrap(std.codec.decode(std.codec.of_u64(), value1)) != wanted || result.unwrap(std.codec.decode(std.codec.of_u64(), value2)) != 4 {
+        fail("L61: first round differs from the hand-derived recovered query")
+    }
+    if cursor != list.len(packet) {
+        fail("L61: client got part of a second round")
+    }
+    list.clear(mut packet)
+    if result.unwrap(host.recv_bounded(mut read, mut packet, 4096, Never)) != 0 {
+        fail("L61: client got bytes from the cut round")
+    }
+}
+
+pub fn staged_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout, n: Net) -> Result[(), Exit] waits {
+    let Some(phase) = args.get(argv, 0u64) else {
+        fail("L61: missing phase")
+    }
+    let Some(scenario) = args.get(argv, 1u64) else {
+        fail("L61: missing scenario")
+    }
+    let staged = scenario == "l61-before-release"
+    if phase == "client" {
+        staged_crash_client(n, argv, staged)
+        return Ok(())
+    }
+    let mut settings = result.unwrap(store.sized(Directory, 48 * 1048576u64))
+    settings.create = phase == "init"
+    settings.group_commits = 1
+    settings.group_bytes = 65536
+    let mut db = result.unwrap(store.open(tasks, d, c, r, take settings))
+    if phase == "init" {
+        let mut schema = result.unwrap(store.declare(db, Migrate))
+        let data = result.unwrap(staged_law_table(mut schema))
+        let schema_ticket = result.unwrap(store.seal(mut db, take schema))
+        result.unwrap(store.durable(mut db, schema_ticket))
+        set(mut db, data, 0u64, 1u64)
+        set(mut db, data, 1u64, 3u64)
+        set(mut db, data, 2u64, 4u64)
+        result.unwrap(store.close(take db))
+        return Ok(())
+    }
+    let data = result.unwrap(store.table(mut db, "data", std.codec.key_u64(), std.codec.of_u64()))
+    let base = result.unwrap(store.fresh_snapshot(mut db, clock.deadline_after_ms(host.mono_ns(c), 30000u64)))
+    let at = store.version(base)
+    if phase == "read" {
+        let handle = result.unwrap(store.reader(db, 0))
+        let expected = if staged {
+            (4u64, 3u64)
+        } else {
+            (5u64, 7u64)
+        }
+        if at != expected.0 || result.unwrap(store.get(handle, base, data, 1)) != Some(expected.1) || result.unwrap(store.get(handle, base, data, 2)) != Some(4u64) {
+            fail("L61: fresh query did not recover the expected durable image")
+        }
+    }
+    let Mailbox(to: take to, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
+    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take inbox, rounds: take rounds, ready: take ready_to)
+    let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
+    if let Ok(None) = channel.receive(ready_from) {} else {
+        fail("L61: publisher did not start")
+    }
+    let mut socket = staged_crash_accept(n, out)
+    let mut peer = option.unwrap(staged_subscribe(to, tasks, c, r))
+    let Ok(WireEvent(e: FromRunner(take initial))) = channel.receive(peer.inbox) else {
+        fail("L61: missing first round")
+    }
+    let (first, take initial_bytes) = staged_packet(mut peer, take initial)
+    if first != at || result.unwrap(host.send_pair(mut socket, initial_bytes, b"", Never)) != list.len(initial_bytes) {
+        fail("L61: first round did not reach the socket at the fresh version")
+    }
+    wire_sent(mut peer.owner, mut peer.work)
+    if phase == "read" {
+        result.unwrap(channel.send(to, PubIn(e: Halt)))
+        result.unwrap(task.join(take publishing))
+        result.unwrap(store.close(take db))
+        return Ok(())
+    }
+    if staged {
+        result.unwrap(stdout.write(out, "FREEZE WRITE"))
+    }
+    let Committed(store.Done(ticket: ticket, ..)) = result.unwrap(store.run(mut db, None, data, staged_law_write)) else {
+        fail("L61: effect did not commit")
+    }
+    let Mailbox(to: take held_to, from: take held, ..) = result.unwrap(mailbox(8u64))
+    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: registry(), replay_identity: list.new(), h: arc.new(()), out: take held_to, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    close_group(mut hd)
+    let Ok(PubIn(e: Staged(take next))) = channel.try_receive(held) else {
+        fail("L61: effect did not stage")
+    }
+    let version = store.version(next)
+    if version != at + 1 {
+        fail("L61: Staged does not name the effect")
+    }
+    result.unwrap(channel.send(to, PubIn(e: Staged(take next))))
+    if staged {
+        let watchdog = host.mono_ns(c) + 5000000000u64
+        while let Error(_) = stdout.write(out, "FROZEN?") {
+            let now = host.mono_ns(c)
+            if now >= watchdog {
+                fail("L61: journal write did not park at the durability gate")
+            }
+            host.sleep_until(c, now + 1000000u64)
+        }
+        host.sleep_until(c, host.mono_ns(c) + 5000000u64)
+        if let Ok(false) = store.durable_now(mut hd.db, ticket) {} else {
+            fail("L61: staged cut did not hold durability")
+        }
+        if let Error(Empty) = channel.try_receive(peer.inbox) {} else {
+            fail("L61: owner received a staged round before Release")
+        }
+        staged_crash_cut(out)
+    }
+    result.unwrap(release_held(mut hd, true))
+    let Ok(PubIn(e: Released(take released))) = channel.try_receive(held) else {
+        fail("L61: durable effect did not release")
+    }
+    if released.version != version {
+        fail("L61: Release changed the staged version")
+    }
+    result.unwrap(channel.send(to, PubIn(e: Released(take released))))
+    let Ok(WireEvent(e: FromRunner(take published))) = channel.receive(peer.inbox) else {
+        fail("L61: Release did not reach the owner")
+    }
+    let (effect, take packed) = staged_packet(mut peer, take published)
+    if effect != version || list.len(packed) == 0 {
+        fail("L61: Release did not prepare the effect for the socket")
+    }
+    staged_crash_cut(out)
+    fail("L61: host survived the pre-flush cut")
+}

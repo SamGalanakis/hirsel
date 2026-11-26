@@ -57,7 +57,7 @@ pub(crate) mod takes;
 pub(crate) use packing::CrossSend;
 use packing::{
     drop_packed_owners, free_owners, inbox_owners, item_charge, live_charge, live_rows, pack,
-    unpack, unpack_in_place, unpack_owners,
+    unpack, unpack_owners,
 };
 
 /// Keyed by addresses and slot ids; a fixed seed keeps lookups cheap.

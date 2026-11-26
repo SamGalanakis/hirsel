@@ -220,7 +220,7 @@ struct Live {
     clocks: BTreeMap<(u8, u64), u64>,
     /// Record: each grant's kind and stored snapshot by ordinal, which a
     /// helper's entry writes for a capability it holds.
-    grants: BTreeMap<usize, (u8, Vec<u8>)>,
+    grants: BTreeMap<usize, units::item_grants::CrossGrant>,
     recorder: Option<Recorder>,
     replayer: Option<Replayer>,
     /// Record: the unit's take-point count and unit-object ordinals.
@@ -1095,8 +1095,8 @@ impl Tape {
         });
         // A value that carries the grant to another unit snapshots it, on
         // replay as when recorded.
-        live.grants
-            .insert(live.objects.len(), (kind, stored.clone()));
+        let grant = units::item_grants::CrossGrant::granted(kind, stored.clone());
+        live.grants.insert(live.objects.len(), grant);
         let h = handle(generation, live.objects.len());
         Ok((self.cell.provider, h, stored))
     }

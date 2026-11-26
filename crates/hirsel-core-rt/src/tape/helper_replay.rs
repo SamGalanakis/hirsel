@@ -197,7 +197,8 @@ unsafe fn open(
                 if ordinal != o as u64 {
                     return Err(Unpacked::Layout);
                 }
-                live.grants.insert(o, (grant, stored));
+                let grant = super::units::item_grants::CrossGrant::granted(grant, stored);
+                live.grants.insert(o, grant);
                 Ok(registry.grant(cell.provider, handle(generation, o)))
             }
             _ => Err(Unpacked::Layout),

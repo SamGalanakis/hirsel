@@ -28,12 +28,29 @@ enum Held {
 }
 
 struct Grant {
-    kind: u8,
-    stored: Vec<u8>,
+    grant: CrossGrant,
     inner: Option<Inner>,
     exec: Option<Arc<ExecRules>>,
-    /// A `Cred`'s record, which the receiving unit binds to its own ordinal.
-    cred: Option<CredGrant>,
+}
+
+/// A capability's grant as a value that carries it to another unit
+/// snapshots it, and as the unit that holds it keeps it by ordinal.
+#[derive(Clone)]
+pub(in crate::tape) enum CrossGrant {
+    /// Tag 5: the grant snapshot's kind and its stored bytes.
+    Granted { kind: u8, stored: Vec<u8> },
+    /// Tag 5 for a `Cred`: its snapshot, and the record the receiving unit
+    /// binds to its own ordinal.
+    Cred { stored: Vec<u8>, record: CredGrant },
+    /// Tag 6: a narrowed `Exec`, of virtual construction, whose profile no
+    /// snapshot holds; it names the stream it was narrowed in.
+    Homed { stream: u32 },
+}
+
+impl CrossGrant {
+    pub(in crate::tape) fn granted(kind: u8, stored: Vec<u8>) -> Self {
+        Self::Granted { kind, stored }
+    }
 }
 
 /// An arrived word's designation in the receiving unit: its handle on the
@@ -68,9 +85,6 @@ impl Designation {
 const UNGRANTED: &str = "a value holds a capability not granted through the recording";
 const VIRTUAL: &str =
     "a value holds a capability of virtual construction, whose snapshot this build does not write";
-/// Marks a grant kind of virtual construction, a narrowed `Exec`, whose
-/// stored bytes are its home stream: its snapshot is tag 6.
-const HOMED: u8 = 0x80;
 const NARROWED: &str =
     "a value holds a narrowed capability whose grant this build does not snapshot";
 const HOST_SIZE: &str = "a value holds an Env or Cred capability whose snapshot a tape cannot hold";
@@ -135,30 +149,31 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
         .filter(|_| state.generation == generation_of(h))
         .ok_or(UNGRANTED)?;
     let o = ordinal_of(h);
-    let (kind, stored) = match live.grants.get(&o).cloned() {
-        Some(grant) => grant,
+    let inner = live.objects[o - 1].inner;
+    let grant = match live.grants.get(&o).cloned() {
+        Some(grant @ CrossGrant::Homed { .. }) => grant,
+        Some(CrossGrant::Granted { kind, stored }) => CrossGrant::Granted {
+            kind,
+            stored: match kind {
+                0 | 2..=6 | 8 | 9 | 13 => stored,
+                // A Net's rules, granted or narrowed, are its source's handle.
+                1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,
+                _ => return Err(UNGRANTED),
+            },
+        },
+        // A Cred that arrived here is read through its grant's word.
+        Some(CrossGrant::Cred { .. }) => return Err(UNGRANTED),
         // A narrowed Exec made here: its profile is no snapshot's, so it
         // crosses as a capability of virtual construction homed here.
-        None if live.exec_rules.contains_key(&o) => (
-            crate::entry::EXEC | HOMED,
-            super::stream(live).to_le_bytes().to_vec(),
-        ),
+        None if live.exec_rules.contains_key(&o) => CrossGrant::Homed {
+            stream: super::stream(live),
+        },
         None => return Err(NARROWED),
     };
-    let inner = live.objects[o - 1].inner;
-    let stored = match kind {
-        0 | 2..=6 | 8 | 9 | 13 => stored,
-        kind if kind & HOMED != 0 => stored,
-        // A Net's rules, granted or narrowed, are its source's handle.
-        1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,
-        _ => return Err(UNGRANTED),
-    };
     Ok(Grant {
-        kind,
-        stored,
+        grant,
         inner,
         exec: live.exec_rules.get(&o).cloned(),
-        cred: None,
     })
 }
 
@@ -170,11 +185,12 @@ fn host(provider: &Provider, h: u64, kind: u8) -> Result<Grant, &'static str> {
         // SAFETY: an Env word's handle is an Env the run pins.
         let env = unsafe { crate::env::from_handle(h) }.record();
         return Ok(Grant {
-            kind,
-            stored: format::env_snapshot(&env).map_err(|_| HOST_SIZE)?,
+            grant: CrossGrant::Granted {
+                kind,
+                stored: format::env_snapshot(&env).map_err(|_| HOST_SIZE)?,
+            },
             inner: None,
             exec: None,
-            cred: None,
         });
     }
     // SAFETY: a Cred word's handle is a `cred::Granted` the run pins.
@@ -186,11 +202,12 @@ fn host(provider: &Provider, h: u64, kind: u8) -> Result<Grant, &'static str> {
         .filter(|_| state.generation == generation_of(granted.handle))
         .ok_or(UNGRANTED)?;
     Ok(Grant {
-        kind,
-        stored: format::cred_snapshot(&granted.record).map_err(|_| HOST_SIZE)?,
+        grant: CrossGrant::Cred {
+            stored: format::cred_snapshot(&granted.record).map_err(|_| HOST_SIZE)?,
+            record: granted.record.clone(),
+        },
         inner: live.objects[ordinal_of(granted.handle) - 1].inner,
         exec: None,
-        cred: Some(granted.record.clone()),
     })
 }
 
@@ -216,20 +233,19 @@ fn net_rules(rules: u64) -> Result<Vec<u8>, &'static str> {
 fn snapshot(ordinal: u64, held: &Held) -> Vec<u8> {
     let mut out = vec![];
     match held {
-        Held::Capability(g) if g.kind & HOMED != 0 => {
-            // Tag 6: the kind and the home stream, no rules.
-            out.push(6);
-            put_varint(&mut out, ordinal);
-            out.push(g.kind & !HOMED);
-            out.extend_from_slice(&g.stored);
-        }
-        Held::Capability(g) => {
-            out.push(5);
-            put_varint(&mut out, ordinal);
-            out.push(g.kind);
-            put_varint(&mut out, g.stored.len() as u64);
-            out.extend_from_slice(&g.stored);
-        }
+        Held::Capability(g) => match &g.grant {
+            CrossGrant::Homed { stream } => {
+                // Tag 6: the kind and the home stream, no rules.
+                out.push(6);
+                put_varint(&mut out, ordinal);
+                out.push(crate::entry::EXEC);
+                out.extend_from_slice(&stream.to_le_bytes());
+            }
+            CrossGrant::Granted { kind, stored } => granted(&mut out, ordinal, *kind, stored),
+            CrossGrant::Cred { stored, .. } => {
+                granted(&mut out, ordinal, crate::entry::CRED, stored);
+            }
+        },
         Held::Secret(body) => {
             out.push(7);
             put_varint(&mut out, ordinal);
@@ -237,6 +253,16 @@ fn snapshot(ordinal: u64, held: &Held) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Tag 5: `ordinal`, then the kind and its stored bytes as the grant
+/// snapshot encodes them.
+fn granted(out: &mut Vec<u8>, ordinal: u64, kind: u8, stored: &[u8]) {
+    out.push(5);
+    put_varint(out, ordinal);
+    out.push(kind);
+    put_varint(out, stored.len() as u64);
+    out.extend_from_slice(stored);
 }
 
 fn find(grants: &[Granted], kind: u64, word: u64) -> Result<&Held, &'static str> {
@@ -282,14 +308,19 @@ pub(in crate::tape) fn arrived(
     if let Some(rules) = &g.exec {
         live.exec_rules.insert(ordinal, rules.clone());
     }
-    live.grants.insert(ordinal, (g.kind, g.stored.clone()));
+    live.grants.insert(ordinal, g.grant.clone());
     // An Env is read through the run's own grant wherever it is used, so its
     // word keeps the run's designation.
-    if g.kind != crate::entry::ENV {
+    let cred = match &g.grant {
+        CrossGrant::Granted { kind, .. } if *kind == crate::entry::ENV => None,
+        CrossGrant::Cred { record, .. } => Some(Some(record.clone())),
+        _ => Some(None),
+    };
+    if let Some(cred) = cred {
         designations.push(Designation {
             word,
             handle: handle(generation, ordinal),
-            cred: g.cred.clone(),
+            cred,
         });
     }
     Ok(snapshot(ordinal as u64, held))

@@ -91,7 +91,7 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
                 // put until the item is published.
                 let admitted = unsafe {
                     let c = &(*ih).inbox.0;
-                    let live = unpack_in_place(&mut flat, c.stride, &c.rows, c.guarded);
+                    let live = packing::unpack_in_place(&mut flat, c.stride, &c.rows, c.guarded);
                     let bytes = item_charge(flat.as_ptr(), live.as_deref().unwrap_or(&c.seqs));
                     let mut source = CrossSend::new(flat.as_ptr());
                     source.rows = live;

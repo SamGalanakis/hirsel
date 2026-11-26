@@ -169,6 +169,7 @@ unsafe fn content(value: *const u8, [offset, _, stride, _]: &[u64; 4]) -> (*cons
 /// # Safety
 /// `packed` holds a value laid out as `rows` describe, and each holding
 /// sequence's elements after its flat bytes.
+#[cfg(feature = "record")]
 pub(super) unsafe fn unpack_in_place(
     packed: &mut [u8],
     stride: usize,

@@ -9,30 +9,47 @@ use super::super::*;
 use crate::net::CrossingSockets;
 
 /// A TCP socket's (tag 2) or listener's (tag 3) snapshot, as its own stream
-/// proves it: the address the CONNECT named, the peer the ACCEPT delivered or
-/// the address the LISTEN bound, and the state its own receives showed.
+/// proves it.
 #[derive(Clone, Copy)]
-pub(crate) struct Snapshot {
-    kind: u8,
-    /// 0 CONNECT, 1 ACCEPT; 0 for a listener.
-    direction: u8,
-    address: [u8; 19],
-    /// Bit 0: a receive with room delivered no bytes. Bit 1: an operation
-    /// on it failed with a reset.
-    state: u8,
+pub(crate) enum Snapshot {
+    /// A socket: whether an ACCEPT delivered it (else a CONNECT made it),
+    /// the peer address that operation named, and the state its own
+    /// receives showed. Bit 0: a receive with room delivered no bytes.
+    /// Bit 1: an operation on it failed with a reset.
+    Stream {
+        accepted: bool,
+        address: [u8; 19],
+        state: u8,
+    },
+    /// A listener: the address its LISTEN bound.
+    Listener { address: [u8; 19] },
 }
 
 impl Snapshot {
     /// A handle part's snapshot after its part tag: kind, ordinal, body.
     fn part(&self, ordinal: u64) -> Vec<u8> {
-        let mut out = vec![self.kind];
-        put_varint(&mut out, ordinal);
-        out.push(self.direction);
-        out.extend_from_slice(&self.address);
-        if self.kind == 2 {
-            // No TLS: a socket with a TLS session never crosses.
-            out.push(0);
-            out.push(self.state);
+        let mut out = vec![];
+        match *self {
+            Self::Stream {
+                accepted,
+                address,
+                state,
+            } => {
+                out.push(2);
+                put_varint(&mut out, ordinal);
+                out.push(u8::from(accepted));
+                out.extend_from_slice(&address);
+                // No TLS: a socket with a TLS session never crosses.
+                out.push(0);
+                out.push(state);
+            }
+            Self::Listener { address } => {
+                out.push(3);
+                put_varint(&mut out, ordinal);
+                // A listener's direction byte is always 0.
+                out.push(0);
+                out.extend_from_slice(&address);
+            }
         }
         out
     }
@@ -51,29 +68,29 @@ pub(in crate::tape) fn delivered(
     if created && matches!(op, CONNECT | ACCEPT | LISTEN) {
         // SAFETY: an address operation pins its network operand.
         let network = unsafe { &*r.path.cast::<crate::net::NetworkRequest>() };
+        let address = address_bytes(network.address);
         live.sockets.insert(
             live.objects.len(),
-            Snapshot {
-                kind: if op == LISTEN { 3 } else { 2 },
-                direction: u8::from(op == ACCEPT),
-                address: address_bytes(network.address),
-                state: 0,
+            if op == LISTEN {
+                Snapshot::Listener { address }
+            } else {
+                Snapshot::Stream {
+                    accepted: op == ACCEPT,
+                    address,
+                    state: 0,
+                }
             },
         );
         return;
     }
-    let Some(s) = live
-        .sockets
-        .get_mut(&ordinal_of(r.handle))
-        .filter(|s| s.kind == 2)
-    else {
+    let Some(Snapshot::Stream { state, .. }) = live.sockets.get_mut(&ordinal_of(r.handle)) else {
         return;
     };
     if error == 0 && op == RECV_BOUNDED && r.buffer.len == before && r.buffer.capacity > before {
-        s.state |= 1;
+        *state |= 1;
     }
     if error == 5 {
-        s.state |= 2;
+        *state |= 2;
     }
 }
 

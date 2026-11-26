@@ -707,16 +707,26 @@ below.
 - Only `listen_unix` produces `BoundNotListening`. Any other Unix or IP operation that
   delivers it is `Corrupt` on a tape and fails a server with `Fail`.
 
-**The macOS provider's limit** (not yet built; macOS slice S7). Darwin cannot bind or
-connect a Unix socket through a descriptor. So the macOS provider resolves and pins the parent
-as above, checks the final component's device and inode (a socket for a connect, an empty
-slot for a bind), then enters the pinned parent with `pthread_fchdir_np` and binds or
-connects by the final component's name. A rename inside the pinned parent between that check
-and the call can win: the connect then reaches whatever socket holds the name at the call,
-and the bind creates its node in the same pinned parent. Neither can leave the root, and the
-race needs write access to the confined directory. Refusing Unix sockets on macOS would cost
-more than this race, so it is a stated limit, not a refusal. The parent components are still
-resolved through no symbolic link and never out of the root.
+**The macOS provider's limit** (macOS slice S7). Darwin cannot bind or connect a Unix socket
+through a descriptor, and a socket file cannot be opened there to pin it. So the macOS
+provider resolves and pins the parent as above, enters it with `pthread_fchdir_np`, and binds
+or connects by name. The parent components are still resolved through no symbolic link and
+never out of the root.
+
+- A bind has no race. Darwin's `bind` follows a symbolic link at the final component and
+  creates the node at the link's target, so the provider never binds the slot's name. It binds
+  a private name in the pinned parent, `.hirsel-bind-` and 32 random hexadecimal digits, and
+  moves that node into the slot with an exclusive rename. A node of any kind in the slot gives
+  `InUse`, and the private node is removed. A run that is killed between the bind and the
+  rename leaves the private node behind. The socket's own address stays the private name.
+- A connect or send-to keeps a race. The provider checks that the final component is a socket
+  and records its device and inode, calls by name, and checks them again: a difference gives
+  `Denied`. A rename inside the pinned parent that puts another node under the name for the
+  call and the first socket back before the second check can win. The call then reaches
+  whatever holds the name at that moment, and Darwin's `connect` follows a symbolic link
+  there, so it can reach a socket outside the root. The race needs write access to the
+  confined directory and a symbolic link already inside it. Refusing Unix sockets on macOS
+  would cost more than this race, so it is a stated limit, not a refusal.
 
 A pathname names a slot, not a peer. A later operation resolves the slot anew, so if a
 legitimate rebind replaces the node, a later connect reaches the new listener.

@@ -1,10 +1,13 @@
 //! Confined opens and Unix socket naming on Darwin: `openat` with
-//! `O_RESOLVE_BENEATH | O_NOFOLLOW_ANY` (a refused escape is ENOTCAPABLE), and
+//! `O_RESOLVE_BENEATH | O_NOFOLLOW_ANY` (a refused escape is ENOTCAPABLE,
+//! reported as EXDEV, the error Linux's `RESOLVE_BENEATH` gives), and
 //! a bind or connect by leaf name from a thread whose working directory is
 //! the pinned parent (`pthread_fchdir_np`). Darwin cannot open a socket file,
 //! so a connect checks the leaf's device and inode instead of pinning it.
+//! Its bind follows a link at the final component, so a bind runs at a private
+//! name and an exclusive rename moves the node into its slot.
 use std::{
-    ffi::CStr,
+    ffi::{CStr, CString},
     io,
     os::{
         fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
@@ -43,6 +46,45 @@ pub(crate) fn isolate_binding_thread(dir: BorrowedFd<'_>) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Bind `socket` at the empty slot `leaf` of `dir`, from a thread made for the
+/// call: its working directory becomes `dir`. Darwin's bind follows a link at
+/// the final component and creates the node at the link's target, so the bind
+/// runs at a private random name, where no link can be waiting, and an
+/// exclusive rename moves the node into the slot. A slot that holds any node, a
+/// link included, gives EADDRINUSE: the private node is removed and nothing is
+/// followed. The socket's own address stays the private name.
+pub(crate) fn bind_in(socket: BorrowedFd<'_>, dir: BorrowedFd<'_>, leaf: &CStr) -> io::Result<()> {
+    isolate_binding_thread(dir)?;
+    let mut random = [0u8; 16];
+    // SAFETY: getentropy fills the 16 live bytes.
+    if unsafe { libc::getentropy(random.as_mut_ptr().cast(), random.len()) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let private = format!(".hirsel-bind-{:032x}", u128::from_ne_bytes(random));
+    let private = CString::new(private).map_err(|_| io::ErrorKind::InvalidInput)?;
+    crate::unix::bind_named(socket, &private)?;
+    // SAFETY: both names are live C strings, each one component of `dir`.
+    let moved = unsafe {
+        libc::renameatx_np(
+            dir.as_raw_fd(),
+            private.as_ptr(),
+            dir.as_raw_fd(),
+            leaf.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if moved == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    // SAFETY: removes the node this call created; no link is followed.
+    unsafe { libc::unlinkat(dir.as_raw_fd(), private.as_ptr(), 0) };
+    Err(match error.raw_os_error() {
+        Some(libc::EEXIST) => io::Error::from_raw_os_error(libc::EADDRINUSE),
+        _ => error,
+    })
 }
 
 /// The device and inode of the socket named `leaf` in `dir`, not following a link.

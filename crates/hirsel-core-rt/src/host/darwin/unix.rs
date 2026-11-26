@@ -1,9 +1,11 @@
 //! Reaching a pinned AF_UNIX endpoint on Darwin. There is no path that names
-//! a descriptor, so the call runs with this thread's working directory set to
-//! the pinned parent (`pthread_fchdir_np`) and names the leaf; the leaf must
-//! be the pinned socket's device and inode before and after the call.
+//! a descriptor and a socket file cannot be opened (EOPNOTSUPP), so the pin is
+//! the leaf's device and inode. The call runs with this thread's working
+//! directory set to the pinned parent (`pthread_fchdir_np`) and names the
+//! leaf; the leaf must be the pinned socket before and after the call.
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
+    io,
     os::fd::{AsRawFd, OwnedFd},
 };
 
@@ -16,57 +18,57 @@ unsafe extern "C" {
 pub(crate) struct Endpoint {
     parent: OwnedFd,
     name: CString,
-    target: OwnedFd,
+    identity: (u64, u64),
+}
+
+/// The device and inode of the socket `name` in `parent`, not following a
+/// link. Any other node there is EACCES.
+fn socket_at(parent: &OwnedFd, name: &CStr) -> io::Result<(u64, u64)> {
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: a live directory, a C name and the result slot.
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            st.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fstatat succeeded.
+    let st = unsafe { st.assume_init() };
+    if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err(io::Error::from_raw_os_error(libc::EACCES));
+    }
+    Ok((st.st_dev as u64, st.st_ino))
 }
 
 impl Endpoint {
-    /// `target` is a leaf handle on the socket `name` in `parent`.
-    pub(crate) fn new(parent: OwnedFd, name: &str, target: OwnedFd) -> Self {
-        Self {
+    /// Pin the socket `name` in `parent` by its device and inode. A leaf that
+    /// is not a socket, a link included, is EACCES.
+    pub(crate) fn pin(parent: OwnedFd, name: &str) -> io::Result<Self> {
+        let name = CString::new(name)?;
+        let identity = socket_at(&parent, &name)?;
+        Ok(Self {
             parent,
-            // The name came from a C string open, so it has no NUL.
-            name: CString::new(name).unwrap_or_default(),
-            target,
-        }
+            name,
+            identity,
+        })
     }
 
     /// The socket's device and inode, as `std::fs::Metadata` reports them.
-    pub(crate) fn identity(&self) -> std::io::Result<(u64, u64)> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: a live leaf descriptor and its result slot.
-        if unsafe { libc::fstat(self.target.as_raw_fd(), st.as_mut_ptr()) } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: fstat succeeded.
-        let st = unsafe { st.assume_init() };
-        Ok((st.st_dev as u64, st.st_ino))
+    pub(crate) fn identity(&self) -> io::Result<(u64, u64)> {
+        Ok(self.identity)
     }
 
+    /// Whether the name still holds the pinned socket.
     fn holds(&self) -> Result<bool, i32> {
-        let stat = |fd, name: *const libc::c_char, flags| {
-            let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-            // SAFETY: live descriptor, C name and output slot.
-            let rc = unsafe {
-                if name.is_null() {
-                    libc::fstat(fd, st.as_mut_ptr())
-                } else {
-                    libc::fstatat(fd, name, st.as_mut_ptr(), flags)
-                }
-            };
-            if rc < 0 {
-                // SAFETY: this thread's errno.
-                return Err(unsafe { *libc::__error() });
-            }
-            // SAFETY: the call succeeded.
-            let st = unsafe { st.assume_init() };
-            Ok((st.st_dev, st.st_ino))
-        };
-        Ok(stat(self.target.as_raw_fd(), std::ptr::null(), 0)?
-            == stat(
-                self.parent.as_raw_fd(),
-                self.name.as_ptr(),
-                libc::AT_SYMLINK_NOFOLLOW,
-            )?)
+        match socket_at(&self.parent, &self.name) {
+            Ok(identity) => Ok(identity == self.identity),
+            Err(error) => Err(error.raw_os_error().unwrap_or(libc::EIO)),
+        }
     }
 }
 

@@ -432,7 +432,9 @@
     "lines": 2346
   },
   "crates/hirsel-core-rt/src/provider_tests.rs": {
-    "lines": 2210
+    "lines": 2215,
+    "raise_revision": 1,
+    "reason": "macos-mac-day-2809"
   },
   "crates/hirsel-core-rt/src/secret.rs": {
     "lines": 1018

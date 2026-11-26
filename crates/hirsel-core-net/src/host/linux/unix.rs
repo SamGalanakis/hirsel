@@ -56,6 +56,14 @@ pub(crate) fn isolate_binding_thread(dir: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
+/// Bind `socket` at the empty slot `leaf` of `dir`, from a thread made for the
+/// call: its working directory becomes `dir`. Linux's bind follows no link at
+/// the final component and refuses any node there with EADDRINUSE.
+pub(crate) fn bind_in(socket: BorrowedFd<'_>, dir: BorrowedFd<'_>, leaf: &CStr) -> io::Result<()> {
+    isolate_binding_thread(dir)?;
+    crate::unix::bind_named(socket, leaf)
+}
+
 /// Connect to the socket named `leaf` in `dir`, pinning the endpoint first so a
 /// renamed or replaced entry cannot redirect the connection.
 pub(crate) fn connect_pinned(dir: BorrowedFd<'_>, leaf: &CStr) -> io::Result<UnixStream> {

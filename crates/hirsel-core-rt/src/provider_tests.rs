@@ -1815,9 +1815,18 @@ fn unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet() {
     let connect = || unsafe {
         hirsel_core_host_connect_unix(f.context, n, &root, &carrier(b"slot"), 0, 0, 0, 2)
     };
+    // The slot is swapped between the resolve and the connect. Linux holds the
+    // resolved socket itself: the first connect reaches the old listener, and
+    // the third finds its listener closed. Darwin holds the socket's device and
+    // inode, finds another socket under the name and denies both
+    // (docs/spec/net.md, the macOS provider's limit).
+    #[cfg(target_os = "linux")]
+    let (swapped, replaced) = (IoError::OK, error(2, 0));
+    #[cfg(target_os = "macos")]
+    let (swapped, replaced) = (error(1, 0), error(1, 0));
     let first = connect();
-    assert_eq!(first.error, IoError::OK);
-    assert!(old.accept().is_ok());
+    assert_eq!(first.error, swapped);
+    assert_eq!(old.accept().is_ok(), swapped == IoError::OK);
     assert_eq!(
         next.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
@@ -1837,15 +1846,17 @@ fn unix_endpoints_retain_authority_and_datagrams_commit_exactly_one_packet() {
             fs::rename(replacement, old_path).unwrap();
         }));
     });
-    assert_eq!(connect().error, error(2, 0));
+    assert_eq!(connect().error, replaced);
     assert_eq!(
         new.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
     assert!(is_socket(&slot));
     unsafe {
-        for handle in [first.value, second.value] {
-            net::hirsel_core_socket_drop(f.context, handle);
+        for connected in [first, second] {
+            if connected.error == IoError::OK {
+                net::hirsel_core_socket_drop(f.context, connected.value);
+            }
         }
     }
 

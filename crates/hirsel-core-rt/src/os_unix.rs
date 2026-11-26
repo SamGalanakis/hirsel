@@ -1,8 +1,8 @@
-//! Linux AF_UNIX operations. Bind uses a private cwd. Connect and send-to
-//! retain an O_PATH descriptor to the endpoint until the operation settles.
+//! AF_UNIX operations. Bind runs on a thread with a private cwd. Connect and
+//! send-to keep the host's pin on the endpoint until the operation settles.
 use crate::{
     host::{
-        path::{DIRECTORY_HANDLE, LEAF_HANDLE, Refuse},
+        path::{DIRECTORY_HANDLE, Refuse},
         unix::{self, Endpoint},
     },
     net::DENIED,
@@ -246,24 +246,11 @@ fn pinned_parent<'p>(root: BorrowedFd<'_>, path: &'p str) -> io::Result<(OwnedFd
 pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<Endpoint> {
     let (parent, name) =
         pinned_parent(root, path).map_err(|_| io::Error::from_raw_os_error(libc::EACCES))?;
-    let target = open_beneath(
-        parent.as_raw_fd(),
-        name.as_bytes(),
-        LEAF_HANDLE,
-        Refuse::Symlinks,
-    )?;
-    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
-    // SAFETY: both the pinned O_PATH descriptor and the result slot are live.
-    retry(|| unsafe { libc::fstat(target.as_raw_fd(), stat.as_mut_ptr()) as isize })
-        .map_err(io::Error::from_raw_os_error)?;
-    if unsafe { stat.assume_init() }.st_mode & libc::S_IFMT != libc::S_IFSOCK {
-        return Err(io::Error::from_raw_os_error(libc::EACCES));
-    }
-    Ok(Endpoint::new(parent, name, target))
+    Endpoint::pin(parent, name)
 }
 
 pub(crate) fn private_bind(fd: BorrowedFd<'_>, parent: OwnedFd, name: &str) -> Result<()> {
-    let (addr, len) = address(name.as_bytes());
+    let leaf = std::ffi::CString::new(name).map_err(|_| libc::EINVAL)?;
     let fd = fd.as_raw_fd();
     // The bind runs on its own thread, which this unit waits for off the slot.
     crate::units::off_slot(move || {
@@ -272,11 +259,8 @@ pub(crate) fn private_bind(fd: BorrowedFd<'_>, parent: OwnedFd, name: &str) -> R
                 .spawn_scoped(scope, move || {
                     // SAFETY: fd remains borrowed until the join. Only this
                     // helper's cwd changes, and the parent entry stays pinned.
-                    hirsel_core_net::unix::isolate_binding_thread(parent.as_fd()).map_err(host)?;
-                    retry(|| unsafe {
-                        libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len) as isize
-                    })?;
-                    Ok(())
+                    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+                    hirsel_core_net::unix::bind_in(fd, parent.as_fd(), &leaf).map_err(host)
                 })
                 .map_err(host)?
                 .join()

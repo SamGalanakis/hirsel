@@ -77,24 +77,6 @@ pub fn score(metric: Metric, q: List[i8], code: List[i8]) -> i64 {
     total
 }
 
-fn score_bytes(metric: Metric, q: List[i8], code_bytes: Bytes) -> i64 {
-    let mut total = 0i64
-    for i in 0u64 .. list.len(q) {
-        let a: i64 = int.widen(q[i])
-        let signed: i8 = int.truncate(code_bytes[i])
-        let c: i64 = int.widen(signed)
-        match metric {
-            Dot => {
-                total += a * c
-            },
-            L2 => {
-                total -= (a - c) * (a - c)
-            },
-        }
-    }
-    total
-}
-
 // Keeps the k best hits in rank order: score descending, then scan order.
 // A later entry ranks after an earlier one with the same score, so a full
 // list admits only a strictly better hit.
@@ -120,66 +102,22 @@ fn keep[K](mut best: List[Hit[K]], k: u64, take hit: Hit[K]) {
 // row outside the filter is skipped before its code is checked or scored.
 pub fn query[K, V](tx: store.Tx, v: Vectors[K, V], q: List[i8], k: u64, filter: Filter) -> Result[List[Hit[K]], Error] {
     let mut best: List[Hit[K]] = list.new()
+    let mut entries = store.entries(tx, v.index, Unbounded, Unbounded) ?=> |e| Store(e)
     if k == 0 {
-        let _ = store.entries(tx, v.index, Unbounded, Unbounded) ?=> |e| Store(e)
         return Ok(take best)
     }
     let width = list.len(q)
-    let mut encoded = store.i8_entries(tx, v.index) ?=> |e| Store(e)
-    if let Some(mut borrowed) = encoded {
-        let primary = store.primary_key(v.index)
-        while let Some(take step) = (store.next_i8_entry(mut borrowed, scoped fn(take decoded: Option[K], key: Bytes, code_bytes: Bytes) -> Result[Option[Hit[K]], Error] {
-            let candidate = match take decoded {
-                Some(take found) => Some(take found),
-                None => if let Only(_) = filter {
-                    Some(load_key(primary, key)?)
-                } else {
-                    None
-                },
-            }
-            if let Some(found) = candidate {
-                if !allows(filter, v.ordinal, found) {
-                    return Ok(None)
-                }
-            }
-            let actual = list.len(code_bytes)
-            if actual != width {
-                return Error(Dimensions(width, actual))
-            }
-            let total = score_bytes(v.metric, q, code_bytes)
-            let count = list.len(best)
-            if count == k && best[count - 1].score >= total {
-                return Ok(None)
-            }
-            let found = match take candidate {
-                Some(take found) => take found,
-                None => load_key(primary, key)?,
-            }
-            Ok(Some(Hit(key: take found, score: total)))
-        }) ?=> |e| Store(e)) {
-            if let Some(take hit) = step? {
-                keep(mut best, k, take hit)
-            }
-        }
-        return Ok(take best)
-    }
-    let mut entries = store.entries(tx, v.index, Unbounded, Unbounded) ?=> |e| Store(e)
     while let Some((_, take key, take code)) = (store.next_entry(mut entries) ?=> |e| Store(e)) {
-        if !allows(filter, v.ordinal, key) {
-            continue
+        if let Only(_) = filter {
+            if !allows(filter, v.ordinal, key) {
+                continue
+            }
         }
-        if list.len(code) != width {
-            return Error(Dimensions(width, list.len(code)))
+        let actual = list.len(code)
+        if actual != width {
+            return Error(Dimensions(width, actual))
         }
         keep(mut best, k, Hit(key: take key, score: score(v.metric, q, code)))
     }
     Ok(take best)
-}
-
-fn load_key[K](primary: std.codec.Key[K], key: Bytes) -> Result[K, Error] {
-    let decoded: Result[K, std.codec.DecodeError] = std.codec.decode_key(primary, key)
-    match take decoded {
-        Ok(take found) => Ok(take found),
-        Error(problem) => Error(Store(Decode(problem))),
-    }
 }

@@ -15,13 +15,14 @@ use std::{
 };
 
 pub(crate) type RawEvent = libc::kevent;
-/// A wake is a user event: the queue that holds it and its identifier.
-pub(crate) type WakerId = (RawFd, usize);
+/// A wake is a user event: the queue that holds it and the token it reports
+/// under. User events have their own identifier space, and the token is the
+/// event's identifier there.
+pub(crate) type WakerId = (RawFd, u64);
 
 /// A selector's level-triggered user event.
 pub(crate) struct WakeSource {
     kq: RawFd,
-    ident: usize,
     token: u64,
 }
 
@@ -38,7 +39,7 @@ impl Child<'_> {
 }
 
 pub(crate) fn waker_id(source: &WakeSource) -> WakerId {
-    (source.kq, source.ident)
+    (source.kq, source.token)
 }
 
 // Hirsel's own condition bits. A kevent carries a filter and flags, so each
@@ -52,9 +53,6 @@ pub(crate) const ERROR: u32 = 16;
 pub(crate) const CHANGED: u32 = 32;
 /// A socket's persistent interest: every direction and the peer's shutdown.
 pub(super) const INTEREST: u32 = READABLE | WRITABLE | READ_CLOSED;
-/// The poller's own wake event.
-const POLLER_WAKE: usize = 0;
-
 const fn kevent(ident: usize, filter: i16, flags: u16, fflags: u32, token: u64) -> RawEvent {
     libc::kevent {
         ident,
@@ -149,9 +147,17 @@ fn apply(kq: RawFd, changes: &mut [RawEvent], ignore: &[i32]) -> io::Result<()> 
     Ok(())
 }
 
-/// Trigger a user event, waking its queue's waiter.
-pub(crate) fn wake((kq, ident): WakerId) {
-    let trigger = kevent(ident, libc::EVFILT_USER, 0, libc::NOTE_TRIGGER, 0);
+/// Trigger a user event, waking its queue's waiter. The trigger carries the
+/// token: a change to a registered event replaces its udata, so a trigger
+/// without it would be reported under token 0.
+pub(crate) fn wake((kq, token): WakerId) {
+    let trigger = kevent(
+        token as usize,
+        libc::EVFILT_USER,
+        0,
+        libc::NOTE_TRIGGER,
+        token,
+    );
     // SAFETY: one initialized change and no output; kevent does not block.
     unsafe { libc::kevent(kq, &trigger, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
 }
@@ -160,17 +166,23 @@ pub(crate) fn wake((kq, ident): WakerId) {
 /// after deleting it leaves it untriggered.
 pub(crate) fn reset(source: &WakeSource) {
     let mut changes = [
-        kevent(source.ident, libc::EVFILT_USER, libc::EV_DELETE, 0, 0),
-        user_event(source.ident, 0, source.token),
+        kevent(
+            source.token as usize,
+            libc::EVFILT_USER,
+            libc::EV_DELETE,
+            0,
+            0,
+        ),
+        user_event(0, source.token),
     ];
     let _ = apply(source.kq, &mut changes, &[libc::ENOENT]);
 }
 
 /// A user event reported as readable under `token`; `clear` resets it as
 /// it is reported (one report per trigger).
-const fn user_event(ident: usize, clear: u16, token: u64) -> RawEvent {
+const fn user_event(clear: u16, token: u64) -> RawEvent {
     kevent(
-        ident,
+        token as usize,
         libc::EVFILT_USER,
         libc::EV_ADD | clear,
         libc::NOTE_FFCOPY | READABLE,
@@ -246,10 +258,8 @@ pub(crate) fn add_exit(kq: RawFd, child: Child<'_>, token: u64) -> io::Result<()
 
 /// A level-triggered user event reported under `token`.
 pub(crate) fn wake_source(kq: RawFd, token: u64) -> io::Result<WakeSource> {
-    // User events have their own identifier space; the token names this one.
-    let ident = token as usize;
-    apply(kq, &mut [user_event(ident, 0, token)], &[])?;
-    Ok(WakeSource { kq, ident, token })
+    apply(kq, &mut [user_event(0, token)], &[])?;
+    Ok(WakeSource { kq, token })
 }
 
 /// Descriptor waits made by a kqueue poller; kqueue reports each direction as
@@ -257,11 +267,7 @@ pub(crate) fn wake_source(kq: RawFd, token: u64) -> io::Result<WakeSource> {
 impl Poller {
     pub(super) fn new_readiness() -> io::Result<Arc<Self>> {
         let kq = selector()?;
-        apply(
-            kq.as_raw_fd(),
-            &mut [user_event(POLLER_WAKE, libc::EV_CLEAR, WAKE)],
-            &[],
-        )?;
+        apply(kq.as_raw_fd(), &mut [user_event(libc::EV_CLEAR, WAKE)], &[])?;
         Ok(Arc::new(Self {
             backend: Backend::Kqueue { kq },
             udp_groups: ManuallyDrop::new(OnceLock::new()),
@@ -323,7 +329,7 @@ impl Poller {
 
     /// The poller's wake, reported as one `WAKE` event per trigger.
     pub(super) fn waker_id(&self) -> WakerId {
-        (self.kq(), POLLER_WAKE)
+        (self.kq(), WAKE)
     }
 
     fn wake_kqueue(&self) {

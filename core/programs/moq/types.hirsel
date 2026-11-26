@@ -32,6 +32,7 @@ pub type Limits: key {
     requests: u32,
     tracks: u32,
     control_bytes: u32,
+    object_bytes: u64,
     filter_ranges: u16,
     max_early_streams: u16,
     max_timeout_ms: u64

@@ -56,7 +56,7 @@ fn attach_or_park_subgroup(mut s: Session, mut io: Io, stream: quic.StreamId, sh
         let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
         let def_prio = s.requests[ri].default_pub_priority
         if let Some(take tr) = take tr_opt {
-            let cap: u64 = order.max(list.len(buf) + 256u64, 2048u64)
+            let cap: u64 = order.max(int.saturating_add(list.len(buf), 256u64), 2048u64)
             let mut full: Bytes = list.with_capacity(cap)
             let init_past = list.len(buf)
             list.append(mut full, buf)
@@ -88,7 +88,7 @@ fn attach_or_park_fetch(mut s: Session, mut io: Io, stream: quic.StreamId, req_i
             let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
             let go = s.requests[ri].group_order
             if let Some(take tr) = take tr_opt {
-                let cap: u64 = order.max(list.len(buf) + 256u64, 2048u64)
+                let cap: u64 = order.max(int.saturating_add(list.len(buf), 256u64), 2048u64)
                 let mut full: Bytes = list.with_capacity(cap)
                 list.append(mut full, buf)
                 let st = codec.fetch_state(go)
@@ -193,6 +193,10 @@ fn encode_props_bytes(kvs: List[codec.KeyValue]) -> Bytes {
     take b
 }
 
+fn rx_pending_cap(object_bytes: u64, length: u64) -> u64 {
+    order.min(int.saturating_add(length, 256u64), object_bytes)
+}
+
 fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
     let stream = s.rx_subgroups[idx].stream
     loop {
@@ -200,13 +204,15 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
             return
         }
         let mut reset_code: Option[u64] = None
+        let mut hit_cap = false
         if !s.rx_subgroups[cur].fin {
             let max_cap: u64 = match s.rx_subgroups[cur].pending_obj {
-                Some(p) => order.max(p.length + 256u64, 65536u64),
+                Some(p) => rx_pending_cap(s.limits.object_bytes, p.length),
                 None => 65536u64,
             }
             let before_len = list.len(s.rx_subgroups[cur].buf)
             let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_subgroups[cur].buf, max_cap)
+            hit_cap = list.len(s.rx_subgroups[cur].buf) >= max_cap
             let added = list.len(s.rx_subgroups[cur].buf) - before_len
             if added > 0 {
                 let tr_copy: codec.TrackName = clone(s.rx_subgroups[cur].track)
@@ -226,10 +232,6 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
             if let Some(pending) = pend_opt {
                 let need = pending.length
                 if list.len(s.rx_subgroups[i].buf) < need {
-                    if list.capacity(s.rx_subgroups[i].buf) < need {
-                        let extra: u64 = need - list.len(s.rx_subgroups[i].buf)
-                        let _ = list.try_reserve(mut s.rx_subgroups[i].buf, extra)
-                    }
                     break
                 }
                 let mut payload: Bytes = list.with_capacity(need)
@@ -260,7 +262,7 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
                 break
             }
             let mut at = 0u64
-            match codec.read_subgroup_object(s.rx_subgroups[i].buf, mut at, len, s.rx_subgroups[i].header, s.rx_subgroups[i].prev_id) {
+            match codec.read_subgroup_object(s.rx_subgroups[i].buf, mut at, len, s.rx_subgroups[i].header, s.rx_subgroups[i].prev_id, s.limits.object_bytes) {
                 Ok(take obj_hdr) => {
                     list.drop_prefix(mut s.rx_subgroups[i].buf, at)
                     s.rx_subgroups[i].prev_id = Some(obj_hdr.id)
@@ -306,7 +308,14 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
             let _ = list.remove(mut s.rx_subgroups, i2)
             return
         }
-        if list.len(s.rx_subgroups[i2].buf) < list.capacity(s.rx_subgroups[i2].buf) {
+        if !hit_cap {
+            return
+        }
+        let next_cap: u64 = match s.rx_subgroups[i2].pending_obj {
+            Some(p) => rx_pending_cap(s.limits.object_bytes, p.length),
+            None => 65536u64,
+        }
+        if list.len(s.rx_subgroups[i2].buf) >= next_cap {
             return
         }
     }
@@ -319,12 +328,14 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
             return
         }
         let mut reset_code: Option[u64] = None
+        let mut hit_cap = false
         if !s.rx_fetches[cur].fin {
             let max_cap: u64 = match s.rx_fetches[cur].pending_obj {
-                Some(p) => order.max(p.length + 256u64, 65536u64),
+                Some(p) => rx_pending_cap(s.limits.object_bytes, p.length),
                 None => 65536u64,
             }
             let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_fetches[cur].buf, max_cap)
+            hit_cap = list.len(s.rx_fetches[cur].buf) >= max_cap
             if fin {
                 s.rx_fetches[cur].fin = true
             }
@@ -338,10 +349,6 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
             if let Some(pending) = pend_opt {
                 let need = pending.length
                 if list.len(s.rx_fetches[i].buf) < need {
-                    if list.capacity(s.rx_fetches[i].buf) < need {
-                        let extra: u64 = need - list.len(s.rx_fetches[i].buf)
-                        let _ = list.try_reserve(mut s.rx_fetches[i].buf, extra)
-                    }
                     break
                 }
                 let mut payload: Bytes = list.with_capacity(need)
@@ -367,7 +374,7 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
             }
             let mut at = 0u64
             let mut st = s.rx_fetches[i].state
-            match codec.read_fetch_entry(s.rx_fetches[i].buf, mut at, len, mut st) {
+            match codec.read_fetch_entry(s.rx_fetches[i].buf, mut at, len, mut st, s.limits.object_bytes) {
                 Ok(take entry) => {
                     s.rx_fetches[i].state = st
                     list.drop_prefix(mut s.rx_fetches[i].buf, at)
@@ -383,7 +390,7 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
                                 if s.rx_fetches[i].last_group == end.group {
                                     codec.Location(group: end.group, object: int.saturating_add(s.rx_fetches[i].last_object, 1))
                                 } else {
-                                    codec.Location(group: s.rx_fetches[i].last_group + 1, object: 0)
+                                    codec.Location(group: int.saturating_add(s.rx_fetches[i].last_group, 1), object: 0)
                                 }
                             } else {
                                 codec.Location(group: 0, object: 0)
@@ -439,7 +446,14 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
             let _ = list.remove(mut s.rx_fetches, i2)
             return
         }
-        if list.len(s.rx_fetches[i2].buf) < list.capacity(s.rx_fetches[i2].buf) {
+        if !hit_cap {
+            return
+        }
+        let next_cap: u64 = match s.rx_fetches[i2].pending_obj {
+            Some(p) => rx_pending_cap(s.limits.object_bytes, p.length),
+            None => 65536u64,
+        }
+        if list.len(s.rx_fetches[i2].buf) >= next_cap {
             return
         }
     }
@@ -473,6 +487,10 @@ fn on_datagram(mut s: Session, mut io: Io, data: Bytes, mut out: List[Event]) {
     let status = match dg_status {
         Some(st) => st,
         None => Normal,
+    }
+    if end - at > s.limits.object_bytes {
+        fail_session(mut s, mut io, ERR_FIELD_LENGTH_EXCEEDED, b"datagram object exceeds object_bytes", mut out)
+        return
     }
     let mut payload: Bytes = list.with_capacity(end - at)
     list.append(mut payload, list.slice(data, at, end))

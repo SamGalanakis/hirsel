@@ -39,7 +39,7 @@ fn moq_endpoint_config() -> quic.EndpointConfig {
 }
 
 fn moq_limits() -> moq.Limits {
-    moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
 }
 
 fn wt_limits() -> webtransport.Limits {
@@ -219,6 +219,15 @@ fn first_subscribe_id(events: List[moq.Event]) -> moq.RequestId {
         }
     }
     fail("no Subscribe event received")
+}
+
+fn first_fetch_id(events: List[moq.Event]) -> moq.RequestId {
+    for ev in events {
+        if let Fetch(id: id, ..) = ev {
+            return id
+        }
+    }
+    fail("no Fetch event received")
 }
 
 /// bug: cancelling a subscription leaves per-subscription state alive on the publisher, or
@@ -498,6 +507,284 @@ fn session_native_webtransport_and_refusals() -> Result[(), ()] {
     settle_pair(mut oc, mut os, 5)
     if !has_closed(oc.events, moq.ERR_INVALID_PARAMETER) {
         fail("REQUEST_OK narrowing did not refuse LARGEST_OBJECT on PUBLISH_NAMESPACE")
+    }
+    Ok(())
+}
+
+/// bug: an object length of 2^64 - 1 on a subgroup or fetch stream overflows p.length + 256 and ends the relay task, or a Descending FETCH with EndOfRange at group 2^64 - 1 overflows last_group + 1.
+/// oracle: moqt-23 §11 and MOQ-7/MOQ-9: lengths past Limits.object_bytes end only the offending session with FIELD_LENGTH_EXCEEDED (0x401), a second session on the same relay still delivers objects, and extreme group ids do not overflow.
+@test
+fn session_object_limits_and_fetch_extremes() -> Result[(), ()] {
+    let lim = moq_limits()
+    // 1. Subgroup stream declaring length 2^64 - 1, then 1 byte: ends offending session, relay survives.
+    let rlim = moq.RelayLimits(cache_groups: 8, cache_bytes: 131072, per_track_cache_bytes: 131072, max_objects_per_group: 32, max_object_bytes: 16384)
+    let mut rig = new_relay_rig(2101, lim, rlim, 8)
+    let sc = moq.default_scope(b"sec.test", b"/p0-1")
+    let bad_pub = rig_add_peer(mut rig, 2102, Publisher, clone(sc), lim, 0)
+    let good_pub = rig_add_peer(mut rig, 2103, Publisher, clone(sc), lim, 10)
+    let sub_i = rig_add_peer(mut rig, 2104, Subscriber, clone(sc), lim, 20)
+    let tr = track(ns1(b"p01"), b"sg")
+    let _ = peer_subscribe(mut rig.peers[sub_i], 30, clone(tr), NoFilter, 10, None)
+    rig_settle(mut rig, 31, true)
+    let _ = peer_accept_subscribes(mut rig.peers[bad_pub])
+    let _ = peer_accept_subscribes(mut rig.peers[good_pub])
+    rig_settle(mut rig, 32, true)
+    let bad_cc = first_quic_conn(rig.peers[bad_pub].raw)
+    let bad_st = result.unwrap(quic.open(mut rig.peers[bad_pub].io.q, bad_cc, false))
+    let sh = codec.SubgroupHeader(alias: 0, group: 1, subgroup: ZeroSubgroup, priority: Some(10), properties: false, end_of_group: false, first_object: true)
+    let mut swire: Bytes = list.new()
+    result.unwrap(codec.write_subgroup_header(sh, mut swire))
+    result.unwrap(codec.write_subgroup_object(codec.SubgroupObject(id: 0, properties: list.new(), length: 0xffffffffffffffff, status: Normal), sh, None, mut swire))
+    let _ = result.unwrap(quic.write(mut rig.peers[bad_pub].io.q, bad_cc, bad_st, swire, false))
+    rig_settle(mut rig, 33, true)
+    let _ = quic.write(mut rig.peers[bad_pub].io.q, bad_cc, bad_st, b"\x00", false)
+    rig_settle(mut rig, 34, true)
+    let bad_rid = rig.peer_rids[bad_pub]
+    let mut bad_ended = false
+    for ev in rig.events {
+        if let Ended(session: sid, code: c) = ev {
+            if sid == bad_rid && c == moq.ERR_FIELD_LENGTH_EXCEEDED {
+                bad_ended = true
+            }
+        }
+    }
+    if !bad_ended {
+        fail("subgroup length 2^64 - 1 did not close offending session with FIELD_LENGTH_EXCEEDED")
+    }
+    peer_publish(mut rig.peers[good_pub], 35, make_obj(clone(tr), 2, 0, 0, Subgroup, 10, b"still-alive"), true)
+    rig_settle(mut rig, 36, true)
+    let got_good = received_objects(rig.peers[sub_i].events)
+    if list.len(got_good) != 1 || got_good[0].group != 2 {
+        fail("second session on relay could not deliver after offending session closed")
+    }
+    // 2. Fetch stream declaring length 2^64 - 1, then 1 byte: ends session with FIELD_LENGTH_EXCEEDED.
+    let mut fc = native_client(2201)
+    let mut fs = native_server(2202, lim)
+    establish_native(mut fc, mut fs, lim, b"sec.test", b"/fetch-len", None)
+    let ftr = track(ns1(b"p01"), b"fetch")
+    let freq = if let Some(mut cs) = fc.sess {
+        result.unwrap(moq.fetch(mut cs, mut fc.io, 10, clone(ftr), loc(0, 0), loc(10, 0), 10, Ascending, None))
+    } else {
+        fail("missing fc")
+    }
+    settle_pair(mut fc, mut fs, 11)
+    let fsid = first_fetch_id(fs.events)
+    if let Some(mut ss) = fs.sess {
+        moq.accept(mut ss, mut fs.io, fsid, Ok(()))
+    }
+    settle_pair(mut fc, mut fs, 12)
+    let moq.RequestId(raw_fid) = freq
+    let fsc = first_quic_conn(fs.raw)
+    let fst = result.unwrap(quic.open(mut fs.io.q, fsc, false))
+    let mut fwire: Bytes = list.new()
+    result.unwrap(codec.write_fetch_header(raw_fid, mut fwire))
+    let mut fwr = codec.fetch_state(Ascending)
+    result.unwrap(codec.write_fetch_entry(FetchedObject(codec.FetchObject(location: loc(1, 0), subgroup: Some(0), priority: 10, properties: list.new(), length: 0xffffffffffffffff)), mut fwr, mut fwire))
+    let _ = result.unwrap(quic.write(mut fs.io.q, fsc, fst, fwire, false))
+    settle_pair(mut fc, mut fs, 13)
+    let _ = quic.write(mut fs.io.q, fsc, fst, b"\x00", false)
+    settle_pair(mut fc, mut fs, 14)
+    if !has_closed(fc.events, moq.ERR_FIELD_LENGTH_EXCEEDED) {
+        fail("fetch length 2^64 - 1 did not close session with FIELD_LENGTH_EXCEEDED")
+    }
+    // 3. Descending FETCH answered with EndOfRange at 2^64 - 1 then 2^64 - 2: no overflow.
+    let mut dc = native_client(2301)
+    let mut ds = native_server(2302, lim)
+    establish_native(mut dc, mut ds, lim, b"sec.test", b"/fetch-desc", None)
+    let dtr = track(ns1(b"p01"), b"desc")
+    let dreq = if let Some(mut cs) = dc.sess {
+        result.unwrap(moq.fetch(mut cs, mut dc.io, 10, clone(dtr), loc(0, 0), loc(0xffffffffffffffff, 0xffffffffffffffff), 10, Descending, None))
+    } else {
+        fail("missing dc")
+    }
+    settle_pair(mut dc, mut ds, 11)
+    let dsid = first_fetch_id(ds.events)
+    if let Some(mut ss) = ds.sess {
+        moq.accept(mut ss, mut ds.io, dsid, Ok(()))
+    }
+    settle_pair(mut dc, mut ds, 12)
+    let moq.RequestId(raw_did) = dreq
+    let dsc = first_quic_conn(ds.raw)
+    let dst = result.unwrap(quic.open(mut ds.io.q, dsc, false))
+    let mut dwire: Bytes = list.new()
+    result.unwrap(codec.write_fetch_header(raw_did, mut dwire))
+    let mut dwr = codec.fetch_state(Descending)
+    result.unwrap(codec.write_fetch_entry(EndOfRange(kind: UnknownRange, end: loc(0xffffffffffffffff, 0)), mut dwr, mut dwire))
+    result.unwrap(codec.write_fetch_entry(EndOfRange(kind: UnknownRange, end: loc(0xfffffffffffffffe, 0)), mut dwr, mut dwire))
+    let _ = result.unwrap(quic.write(mut ds.io.q, dsc, dst, dwire, true))
+    settle_pair(mut dc, mut ds, 13)
+    if let Some(cs) = dc.sess {
+        if moq.is_closed(cs) {
+            fail("descending fetch at group 2^64 - 1 closed session")
+        }
+    }
+    let mut unknown_n = 0u64
+    for ev in dc.events {
+        if let Unknown(track: ut, ..) = ev {
+            if ut == dtr {
+                unknown_n += 1
+            }
+        }
+    }
+    if unknown_n != 2 {
+        fail("descending fetch did not deliver both EndOfRange Unknown events")
+    }
+    Ok(())
+}
+
+fn moq_room_left(most: u64) -> u64 {
+    let mut lo = 0u64
+    let mut hi = most
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2
+        let mut l: Bytes = list.new()
+        if let Ok(_) = list.try_reserve(mut l, mid) {
+            lo = mid
+        } else {
+            hi = mid - 1
+        }
+    }
+    lo
+}
+
+/// bug: a receiver accepts an object length past Limits.object_bytes or reserves the peer-declared
+/// payload length before any payload byte arrives, exhausting the relay task's memory budget, or
+/// fails to grow on demand to receive a legitimate object above 64 KiB within object_bytes.
+/// oracle: MOQ-7 and MOQ-9: a header declaring object_bytes + 1 closes the session with
+/// FIELD_LENGTH_EXCEEDED without rising reserved bytes; a header declaring object_bytes with zero
+/// payload bytes does not pre-reserve object_bytes; a 70 KiB object within object_bytes delivers.
+@test
+fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
+    // 1. Subgroup header declaring object_bytes + 1 is refused and reserved bytes do not rise.
+    let lim_a = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 262144, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let mut ca = native_client(2501)
+    let mut sa = native_server(2502, lim_a)
+    establish_native(mut ca, mut sa, lim_a, b"sec.test", b"/p1-1a", None)
+    let tr_a = track(ns1(b"p11"), b"over")
+    let _ = if let Some(mut cs) = ca.sess {
+        result.unwrap(moq.subscribe(mut cs, mut ca.io, 10, clone(tr_a), NoFilter, 10, None))
+    } else {
+        fail("missing ca")
+    }
+    settle_pair(mut ca, mut sa, 11)
+    let sub_a = first_subscribe_id(sa.events)
+    if let Some(mut ss) = sa.sess {
+        moq.accept(mut ss, mut sa.io, sub_a, Ok(()))
+    }
+    settle_pair(mut ca, mut sa, 12)
+    let sac = first_quic_conn(sa.raw)
+    let sast = result.unwrap(quic.open(mut sa.io.q, sac, false))
+    let sh_a = codec.SubgroupHeader(alias: 0, group: 1, subgroup: ZeroSubgroup, priority: Some(10), properties: false, end_of_group: false, first_object: true)
+    let mut wire_a: Bytes = list.new()
+    result.unwrap(codec.write_subgroup_header(sh_a, mut wire_a))
+    result.unwrap(codec.write_subgroup_object(codec.SubgroupObject(id: 0, properties: list.new(), length: lim_a.object_bytes + 1, status: Normal), sh_a, None, mut wire_a))
+    let most = 4194304u64
+    let Ok(drop_a) = (bound bytes most {
+        let before = moq_room_left(most)
+        let _ = result.unwrap(quic.write(mut sa.io.q, sac, sast, wire_a, false))
+        settle_pair(mut ca, mut sa, 13)
+        let after = moq_room_left(most)
+        int.saturating_sub(before, after)
+    }) else {
+        fail("bound scope failed during object_bytes + 1 refusal")
+    }
+    if !has_closed(ca.events, moq.ERR_FIELD_LENGTH_EXCEEDED) {
+        fail("header declaring object_bytes + 1 did not close session with FIELD_LENGTH_EXCEEDED")
+    }
+    if drop_a >= 65536 {
+        fail("refused object_bytes + 1 header raised reserved memory")
+    }
+    // 2. Subgroup and fetch headers declaring 1 MiB (<= object_bytes) with 0 payload bytes
+    //    do NOT pre-reserve 1 MiB before payload bytes arrive.
+    let lim_b = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 1048576, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let mut cb = native_client(2601)
+    let mut sb = native_server(2602, lim_b)
+    establish_native(mut cb, mut sb, lim_b, b"sec.test", b"/p1-1b", None)
+    let tr_b = track(ns1(b"p11"), b"nores")
+    let _ = if let Some(mut cs) = cb.sess {
+        result.unwrap(moq.subscribe(mut cs, mut cb.io, 10, clone(tr_b), NoFilter, 10, None))
+    } else {
+        fail("missing cb")
+    }
+    let freq_b = if let Some(mut cs) = cb.sess {
+        result.unwrap(moq.fetch(mut cs, mut cb.io, 10, clone(tr_b), loc(0, 0), loc(10, 0), 10, Ascending, None))
+    } else {
+        fail("missing cb fetch")
+    }
+    settle_pair(mut cb, mut sb, 11)
+    let sub_b = first_subscribe_id(sb.events)
+    let fid_b = first_fetch_id(sb.events)
+    if let Some(mut ss) = sb.sess {
+        moq.accept(mut ss, mut sb.io, sub_b, Ok(()))
+        moq.accept(mut ss, mut sb.io, fid_b, Ok(()))
+    }
+    settle_pair(mut cb, mut sb, 12)
+    let sbc = first_quic_conn(sb.raw)
+    let sg_st = result.unwrap(quic.open(mut sb.io.q, sbc, false))
+    let sh_b = codec.SubgroupHeader(alias: 0, group: 1, subgroup: ZeroSubgroup, priority: Some(10), properties: false, end_of_group: false, first_object: true)
+    let mut wire_sg: Bytes = list.new()
+    result.unwrap(codec.write_subgroup_header(sh_b, mut wire_sg))
+    result.unwrap(codec.write_subgroup_object(codec.SubgroupObject(id: 0, properties: list.new(), length: lim_b.object_bytes, status: Normal), sh_b, None, mut wire_sg))
+    let moq.RequestId(raw_fb) = freq_b
+    let ft_st = result.unwrap(quic.open(mut sb.io.q, sbc, false))
+    let mut wire_ft: Bytes = list.new()
+    result.unwrap(codec.write_fetch_header(raw_fb, mut wire_ft))
+    let mut wr_fb = codec.fetch_state(Ascending)
+    result.unwrap(codec.write_fetch_entry(FetchedObject(codec.FetchObject(location: loc(1, 0), subgroup: Some(0), priority: 10, properties: list.new(), length: lim_b.object_bytes)), mut wr_fb, mut wire_ft))
+    let Ok(drop_b) = (bound bytes most {
+        let before = moq_room_left(most)
+        let _ = result.unwrap(quic.write(mut sb.io.q, sbc, sg_st, wire_sg, false))
+        let _ = result.unwrap(quic.write(mut sb.io.q, sbc, ft_st, wire_ft, false))
+        settle_pair(mut cb, mut sb, 13)
+        let after = moq_room_left(most)
+        int.saturating_sub(before, after)
+    }) else {
+        fail("bound scope failed during 1 MiB header-only check")
+    }
+    if let Some(cs) = cb.sess {
+        if moq.is_closed(cs) {
+            fail("valid header within object_bytes closed session")
+        }
+    }
+    if drop_b >= 131072 {
+        fail("receiver pre-reserved peer-declared object length before payload bytes arrived")
+    }
+    // 3. A legitimate 70 KiB object within object_bytes grows on demand and delivers intact.
+    let lim_c = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 131072, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let mut cc = native_client(2701)
+    let mut sc = native_server(2702, lim_c)
+    establish_native(mut cc, mut sc, lim_c, b"sec.test", b"/p1-1c", None)
+    let tr_c = track(ns1(b"p11"), b"big")
+    let _ = if let Some(mut cs) = cc.sess {
+        result.unwrap(moq.subscribe(mut cs, mut cc.io, 10, clone(tr_c), NoFilter, 10, None))
+    } else {
+        fail("missing cc")
+    }
+    settle_pair(mut cc, mut sc, 11)
+    let sub_c = first_subscribe_id(sc.events)
+    if let Some(mut ss) = sc.sess {
+        moq.accept(mut ss, mut sc.io, sub_c, Ok(()))
+    }
+    settle_pair(mut cc, mut sc, 12)
+    let mut big: Bytes = list.with_capacity(70000)
+    list.fill(mut big, 70000, 0x5au8)
+    if let Some(mut ss) = sc.sess {
+        result.unwrap(moq.publish(mut ss, mut sc.io, 13, make_obj(clone(tr_c), 1, 0, 0, Subgroup, 10, take big)))
+    }
+    for step in 0u64 .. 40 {
+        let t = 14 + step * 10 * MS_NS
+        let mut qev_c: List[quic.Event] = list.new()
+        quic.timeout(mut cc.io.q, t, mut qev_c)
+        let mut qev_s: List[quic.Event] = list.new()
+        quic.timeout(mut sc.io.q, t, mut qev_s)
+        settle_pair(mut cc, mut sc, t)
+        if list.len(received_objects(cc.events)) >= 1 {
+            break
+        }
+    }
+    let got_c = received_objects(cc.events)
+    if list.len(got_c) != 1 || list.len(got_c[0].payload) != 70000 {
+        fail("70 KiB object within object_bytes did not deliver intact")
     }
     Ok(())
 }

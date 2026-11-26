@@ -335,8 +335,9 @@ fn put_subgroup_header(h: SubgroupHeader, flags: u64, mut out: Bytes) -> Result[
 }
 
 /// Reads one object's fields on a subgroup stream; `prev` is the previous object's id on this
-/// stream. On success `at` is the first of `length` payload bytes.
-pub fn read_subgroup_object(input: Bytes, mut at: u64, end: u64, header: SubgroupHeader, prev: Option[u64]) -> Result[SubgroupObject, WireError] {
+/// stream. A payload length past `max_object` is FIELD_LENGTH_EXCEEDED before payload bytes
+/// arrive. On success `at` is the first of `length` payload bytes.
+pub fn read_subgroup_object(input: Bytes, mut at: u64, end: u64, header: SubgroupHeader, prev: Option[u64], max_object: u64) -> Result[SubgroupObject, WireError] {
     let mut c = cursor(input, at, end)?
     let delta = vi(input, mut c)?
     let id = match prev {
@@ -352,6 +353,9 @@ pub fn read_subgroup_object(input: Bytes, mut at: u64, end: u64, header: Subgrou
         list.new()
     }
     let length = vi(input, mut c)?
+    if length > max_object {
+        return Error(FieldLengthExceeded)
+    }
     let status = if length == 0 {
         object_status(input, mut c)?
     } else {
@@ -439,15 +443,16 @@ fn plus(a: u64, b: u64) -> Result[u64, WireError] {
     }
 }
 
-/// Reads one fetch entry and, only on success, moves `st` past it. On an object `at` is the
-/// first of `length` payload bytes.
-pub fn read_fetch_entry(input: Bytes, mut at: u64, end: u64, mut st: FetchState) -> Result[FetchEntry, WireError] {
+/// Reads one fetch entry and, only on success, moves `st` past it. An object payload length
+/// past `max_object` is FIELD_LENGTH_EXCEEDED before payload bytes arrive. On an object `at`
+/// is the first of `length` payload bytes.
+pub fn read_fetch_entry(input: Bytes, mut at: u64, end: u64, mut st: FetchState, max_object: u64) -> Result[FetchEntry, WireError] {
     let mut c = cursor(input, at, end)?
     let flags = vi(input, mut c)?
     let e = if flags >= 0x80 {
         fetch_marker(input, mut c, flags, mut st)?
     } else {
-        fetch_object(input, mut c, flags, mut st)?
+        fetch_object(input, mut c, flags, mut st, max_object)?
     }
     at = c.at
     Ok(e)
@@ -486,7 +491,7 @@ fn fetch_marker(input: Bytes, mut c: Cursor, flags: u64, mut st: FetchState) -> 
     Ok(EndOfRange(kind: kind, end: Location(group: group, object: object)))
 }
 
-fn fetch_object(input: Bytes, mut c: Cursor, flags: u64, mut st: FetchState) -> Result[FetchEntry, WireError] {
+fn fetch_object(input: Bytes, mut c: Cursor, flags: u64, mut st: FetchState, max_object: u64) -> Result[FetchEntry, WireError] {
     let has_object = (flags & 0x04) != 0
     let has_group = (flags & 0x08) != 0
     if !st.started && !(has_object && has_group) {
@@ -543,6 +548,9 @@ fn fetch_object(input: Bytes, mut c: Cursor, flags: u64, mut st: FetchState) -> 
         list.new()
     }
     let length = vi(input, mut c)?
+    if length > max_object {
+        return Error(FieldLengthExceeded)
+    }
     st.started = true
     st.group = group
     st.object = object

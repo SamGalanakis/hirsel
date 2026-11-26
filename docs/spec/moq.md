@@ -63,6 +63,7 @@ pub type Limits: key {
     requests: u32,
     tracks: u32,
     control_bytes: u32,
+    object_bytes: u64,
     filter_ranges: u16,
     max_early_streams: u16,
     max_timeout_ms: u64
@@ -346,7 +347,11 @@ The relay half follows moqt-23 §7 and keeps every byte it holds counted.
 Every table has a bound from `Limits` or `RelayLimits`, charged when the session or track is
 created: request streams, tracks per session, filter ranges per subscription (MAX FILTER
 RANGES), request updates outstanding (MAX_REQUEST_UPDATES), the control message buffer,
-early streams, and the relay cache (MOQ-6). On the send side, a session's queued and
+per-object payload size (`object_bytes`), early streams, and the relay cache (MOQ-6). An
+object header whose declared payload length exceeds `limits.object_bytes` is refused at decode
+with `FIELD_LENGTH_EXCEEDED` before buffering, and data-stream receive buffers grow on demand
+as bytes arrive (capped at `limits.object_bytes`), never pre-reserving a peer-declared length.
+On the send side, a session's queued and
 unacknowledged bytes are bounded by its connection's `quic` `send_bytes` (QUIC-5), never by
 the peer's credit, and by `max_timeout_ms` in time. A peer can make the relay hold at most
 its QUIC receive credit, its early streams' headers, and the cache it is charged against.
@@ -425,6 +430,7 @@ media-seams-design-3072).** In the wired end state, the bridge attaches to `webr
 | Namespace of more than 32 fields, or an empty field | `INVALID_TRACK_NAMESPACE` |
 | Request past `limits.requests` | QUIC `STREAM_LIMIT_ERROR` (the credit was never given) |
 | Control message past MAX_CONTROL_MESSAGE_SIZE | `FIELD_LENGTH_EXCEEDED` |
+| Object payload length past `limits.object_bytes` | `FIELD_LENGTH_EXCEEDED` |
 | Object id delta past 2^64 − 1 on its subgroup or fetch stream | `DELTA_ENCODING_OVERFLOW` |
 | A track meeting a §12.1 condition | malformed track (MOQ-3) |
 | Request the application refuses, at a session or a relay | REQUEST_ERROR with its code |

@@ -314,7 +314,7 @@ fn m12_ep_cfg() -> quic.EndpointConfig {
 }
 
 fn m12_moq_limits() -> moq.Limits {
-    moq.Limits(requests: 32, tracks: 16, control_bytes: 65536, filter_ranges: 8, max_early_streams: 16, max_timeout_ms: 0)
+    moq.Limits(requests: 32, tracks: 16, control_bytes: 65536, object_bytes: 262144, filter_ranges: 8, max_early_streams: 16, max_timeout_ms: 0)
 }
 
 fn m12_vp8_frame(mark: u8, seq: u16, key: bool, body_len: u64) -> Bytes {

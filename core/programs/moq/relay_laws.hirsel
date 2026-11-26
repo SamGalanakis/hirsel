@@ -399,7 +399,7 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
 /// oracle: moqt-23 §7.3, §7.5, and MOQ-6 (M4 + M11 relay upstream teardown).
 @test
 fn one_upstream_per_track() -> Result[(), ()] {
-    let lim = moq.Limits(requests: 1200, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let lim = moq.Limits(requests: 1200, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
     let rlim = moq.RelayLimits(cache_groups: 8, cache_bytes: 262144, per_track_cache_bytes: 262144, max_objects_per_group: 64, max_object_bytes: 16384)
     let mut rig = new_relay_rig(1101, lim, rlim, 32)
     let sc_a = moq.default_scope(b"tenant-a", b"/live")
@@ -497,7 +497,7 @@ fn one_upstream_per_track() -> Result[(), ()] {
 /// the 1 slow subscriber's lost objects are counted as timed out.
 @test
 fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
-    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 80)
+    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 80)
     let rlim = moq.RelayLimits(cache_groups: 32, cache_bytes: 524288, per_track_cache_bytes: 524288, max_objects_per_group: 64, max_object_bytes: 16384)
     let mut rig = new_relay_rig(1201, lim, rlim, 16)
     let sc = moq.default_scope(b"fanout", b"/m5")
@@ -765,6 +765,33 @@ fn cache_bounded_and_fetch_served() -> Result[(), ()] {
     }
     if g5_count > 2 {
         fail("cache exceeded max_objects_per_group (2)")
+    }
+    Ok(())
+}
+
+/// bug: caching an object in group 2^64 - 1 and serving a FETCH covering it overflows g + 1 in cache_fetch_entries and ends the relay task.
+/// oracle: moqt-23 §11.4.2 and MOQ-6: group 2^64 - 1 is cached and served cleanly by FETCH without overflow.
+@test
+fn cache_fetch_max_group() -> Result[(), ()] {
+    let lim = moq_limits()
+    let rlim = moq.RelayLimits(cache_groups: 4, cache_bytes: 65536, per_track_cache_bytes: 65536, max_objects_per_group: 8, max_object_bytes: 4096)
+    let mut rig = new_relay_rig(2401, lim, rlim, 8)
+    let sc = moq.default_scope(b"maxg.test", b"/p0-1")
+    let pub_i = rig_add_peer(mut rig, 2402, Publisher, clone(sc), lim, 0)
+    let sub_i = rig_add_peer(mut rig, 2403, Subscriber, clone(sc), lim, 10)
+    let tr = track(ns1(b"p01"), b"maxg")
+    let _ = peer_subscribe(mut rig.peers[sub_i], 20, clone(tr), NoFilter, 10, None)
+    rig_settle(mut rig, 21, true)
+    let _ = peer_accept_subscribes(mut rig.peers[pub_i])
+    rig_settle(mut rig, 22, true)
+    peer_publish(mut rig.peers[pub_i], 30, make_obj(clone(tr), 0xffffffffffffffff, 0, 0, Subgroup, 10, b"max-group"), true)
+    rig_settle(mut rig, 35, true)
+    let fetch_sub = rig_add_peer(mut rig, 2404, Subscriber, clone(sc), lim, 40)
+    let _ = peer_fetch(mut rig.peers[fetch_sub], 50, clone(tr), loc(0, 0), loc(0xffffffffffffffff, 0xffffffffffffffff))
+    rig_settle(mut rig, 55, true)
+    let got = received_objects(rig.peers[fetch_sub].events)
+    if list.len(got) != 1 || got[0].group != 0xffffffffffffffff || got[0].id != 0 {
+        fail("FETCH covering group 2^64 - 1 did not return the cached object")
     }
     Ok(())
 }

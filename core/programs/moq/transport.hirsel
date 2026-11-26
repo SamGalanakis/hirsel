@@ -156,7 +156,7 @@ fn tx_read_more(t: Transport, mut io: Io, stream: quic.StreamId, mut buf: Bytes,
             if list.len(buf) >= max_cap {
                 return (false, None)
             }
-            let target = order.min(max_cap, order.max(list.capacity(buf) * 2, 1024))
+            let target = order.min(max_cap, order.max(int.saturating_mul(list.capacity(buf), 2), 1024))
             if target <= list.capacity(buf) {
                 return (false, None)
             }

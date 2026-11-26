@@ -185,7 +185,7 @@ fn priority_order() -> Result[(), ()] {
 fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     // 1. OBJECT 50 ms: header arrived 60 ms before handover -> reset with DELIVERY_TIMEOUT;
     //    handed over at 40 ms -> delivered even if ACK arrives 500 ms later.
-    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 500)
+    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 500)
     let mut c1 = native_client(901)
     let mut s1 = native_server(902, lim)
     establish_native(mut c1, mut s1, lim, b"to.test", b"/1", None)

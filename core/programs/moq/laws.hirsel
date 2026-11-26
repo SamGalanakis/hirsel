@@ -136,7 +136,7 @@ fn stream_refused(wire: Bytes, expected: codec.WireError) {
 /// `expected` through its own state into `out`, payload included, so the caller can hold the
 /// whole re-encoded stream against the canonical bytes.
 fn fetch_step(wire: Bytes, mut at: u64, mut rd: codec.FetchState, mut wr: codec.FetchState, mut out: Bytes, expected: codec.FetchEntry) {
-    match codec.read_fetch_entry(wire, mut at, list.len(wire), mut rd) {
+    match codec.read_fetch_entry(wire, mut at, list.len(wire), mut rd, 65536) {
         Ok(e) => {
             if e != expected {
                 fail("moqt-23 fetch entry decode")
@@ -158,7 +158,7 @@ fn fetch_step(wire: Bytes, mut at: u64, mut rd: codec.FetchState, mut wr: codec.
 fn fetch_refused(wire: Bytes, mut st: codec.FetchState, expected: codec.WireError) {
     let before = codec.FetchState(descending: st.descending, started: st.started, group: st.group, object: st.object, subgroup: st.subgroup, priority: st.priority)
     let mut at = 0u64
-    match codec.read_fetch_entry(wire, mut at, list.len(wire), mut st) {
+    match codec.read_fetch_entry(wire, mut at, list.len(wire), mut st, 65536) {
         Ok(_) => fail("moqt-23 fetch entry accepted against the draft"),
         Error(e) => {
             if !same(e, expected) || at != 0 || st != before {
@@ -356,11 +356,11 @@ fn wire_vectors_from_the_draft() -> Result[(), ()] {
     if result.unwrap(codec.read_stream_header(stream, mut sa, send)) != SubgroupStream(zero) {
         fail("moqt-23 subgroup header flags decode")
     }
-    if result.unwrap(codec.read_subgroup_object(stream, mut sa, send, zero, None)) != first || sa != 6 {
+    if result.unwrap(codec.read_subgroup_object(stream, mut sa, send, zero, None, 65536)) != first || sa != 6 {
         fail("moqt-23 first subgroup object decode")
     }
     sa += 3
-    if result.unwrap(codec.read_subgroup_object(stream, mut sa, send, zero, Some(0))) != second || sa != send {
+    if result.unwrap(codec.read_subgroup_object(stream, mut sa, send, zero, Some(0), 65536)) != second || sa != send {
         fail("moqt-23 subgroup object id delta decode")
     }
     let mut sw: Bytes = list.new()
@@ -374,7 +374,7 @@ fn wire_vectors_from_the_draft() -> Result[(), ()] {
         fail("moqt-23 subgroup stream encode")
     }
     let mut oa = 0u64
-    if let Error(e) = codec.read_subgroup_object(b"\x01\x00\x05", mut oa, 3, zero, Some(0xfffffffffffffffe)) {
+    if let Error(e) = codec.read_subgroup_object(b"\x01\x00\x05", mut oa, 3, zero, Some(0xfffffffffffffffe), 65536) {
         if !same(e, DeltaEncodingOverflow) || oa != 0 {
             fail("subgroup object id past 2^64 - 1 refused with the wrong error")
         }
@@ -382,12 +382,20 @@ fn wire_vectors_from_the_draft() -> Result[(), ()] {
         fail("subgroup object id past 2^64 - 1 accepted")
     }
     oa = 0
-    if let Error(e) = codec.read_subgroup_object(b"\x00\xc1\x00\x00", mut oa, 4, zero, None) {
+    if let Error(e) = codec.read_subgroup_object(b"\x00\xc1\x00\x00", mut oa, 4, zero, None, 65536) {
         if !same(e, FieldLengthExceeded) {
             fail("oversized subgroup object properties refused with the wrong error")
         }
     } else {
         fail("oversized subgroup object properties waited for")
+    }
+    oa = 0
+    if let Error(e) = codec.read_subgroup_object(b"\x00\x00\x05", mut oa, 3, zero, None, 4) {
+        if !same(e, FieldLengthExceeded) || oa != 0 {
+            fail("subgroup object length past max_object refused with the wrong error")
+        }
+    } else {
+        fail("subgroup object length past max_object accepted")
     }
     // Stream types (Table 2): FETCH_HEADER 0x05 Request ID 42; padding 0x132B3E28; SETUP.
     let mut ha = 0u64
@@ -430,7 +438,7 @@ fn wire_vectors_from_the_draft() -> Result[(), ()] {
     let mut fout: Bytes = list.new()
     for n in 0u64 .. 6 {
         let mut a = 0u64
-        if let Error(Truncated) = codec.read_fetch_entry(fetch, mut a, n, mut rd) {} else {
+        if let Error(Truncated) = codec.read_fetch_entry(fetch, mut a, n, mut rd, 65536) {} else {
             fail("a partial fetch object was not left for more bytes")
         }
         if a != 0 || rd != codec.fetch_state(Ascending) {

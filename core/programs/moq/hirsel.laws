@@ -1,13 +1,16 @@
 hirsel.laws 1
-moq@1/laws/cache_bounded_and_fetch_served src=0cd9280b033bdac0 sig=d282c6d930300fde run=c2c0c6612d4cbb79 bug=46515263443c75fc oracle=05e9ee19c30b43bf rows=pending
-moq@1/laws/cancel_frees_state src=deeeb83f3220050f sig=e38ec33e7ff3cab1 run=c2c0c6612d4cbb79 bug=64dfb31361819347 oracle=64fe02dfa54856f7 rows=pending
-moq@1/laws/dedup_and_switchover src=d725ecbba2352da2 sig=754759e6707c540d run=c2c0c6612d4cbb79 bug=fb4e86c0814f4b26 oracle=77b2aa96452d1a99 rows=pending
-moq@1/laws/delivery_timeouts_start_and_stop_apart src=b7df3177d27325d5 sig=551c7c4d08f4f994 run=c2c0c6612d4cbb79 bug=794668d87f32bfd5 oracle=b9aed96b9dc5e124 rows=pending
-moq@1/laws/one_upstream_per_track src=dfa00e1a0e939c4b sig=046ea03799c06ce3 run=c2c0c6612d4cbb79 bug=2b6f0ea71843f863 oracle=1dbbbef1c5feaf12 rows=pending
-moq@1/laws/priority_order src=ff34a8858c54f420 sig=cff7430ee6a8564f run=c2c0c6612d4cbb79 bug=075d69650f947f6f oracle=6749c8065d032e08 rows=pending
-moq@1/laws/relay_never_sees_plaintext src=34b57e9bd1ebb14b sig=42f8683d2ceba5dc run=c2c0c6612d4cbb79 bug=f04ae2e1650b024e oracle=451446b511c5db7b rows=pending
-moq@1/laws/relay_preserves_stream_order src=a1314bd08ca45036 sig=a509da5d66758365 run=c2c0c6612d4cbb79 bug=db6460d6d5956891 oracle=c3b7cbd2d7659e67 rows=pending
-moq@1/laws/session_native_webtransport_and_refusals src=895535ca724b2add sig=4497602823096f20 run=c2c0c6612d4cbb79 bug=c1e7ce9d9d177de4 oracle=201cc178352a46c6 rows=pending
-moq@1/laws/slow_subscriber_costs_only_itself src=bc0fcd2ec3a13815 sig=69559ca42b211db3 run=c2c0c6612d4cbb79 bug=929f78b21e03ec6f oracle=78e8c0181ce2eff1 rows=pending
+moq@1/laws/cache_bounded_and_fetch_served src=b3b51b31e354a3a1 sig=3be28711db710b2c run=c2c0c6612d4cbb79 bug=46515263443c75fc oracle=05e9ee19c30b43bf rows=pending
+moq@1/laws/cache_fetch_max_group src=94a73cbf7135ccf5 sig=b5a05dcb029a8a1e run=c2c0c6612d4cbb79 bug=d630adda5d03630f oracle=f3caa05380acf1f4 rows=pending
+moq@1/laws/cancel_frees_state src=d6606b679873928b sig=ad53b6be1e15a195 run=c2c0c6612d4cbb79 bug=64dfb31361819347 oracle=64fe02dfa54856f7 rows=pending
+moq@1/laws/dedup_and_switchover src=c546ae44e8673653 sig=2e806b66a7f5ac30 run=c2c0c6612d4cbb79 bug=fb4e86c0814f4b26 oracle=77b2aa96452d1a99 rows=pending
+moq@1/laws/delivery_timeouts_start_and_stop_apart src=1e80c59dffd24ef0 sig=5221685762777c0f run=c2c0c6612d4cbb79 bug=794668d87f32bfd5 oracle=b9aed96b9dc5e124 rows=pending
+moq@1/laws/object_bytes_and_no_preread_reserve src=52d95564e9988307 sig=a6fef08905519050 run=c2c0c6612d4cbb79 bug=eeace234acba2054 oracle=527f2251e28c1027 rows=pending
+moq@1/laws/one_upstream_per_track src=51269391543c17cf sig=c4b88f58df505f63 run=c2c0c6612d4cbb79 bug=2b6f0ea71843f863 oracle=1dbbbef1c5feaf12 rows=pending
+moq@1/laws/priority_order src=62878c3f47cfdcc9 sig=de083e4130c02a66 run=c2c0c6612d4cbb79 bug=075d69650f947f6f oracle=6749c8065d032e08 rows=pending
+moq@1/laws/relay_never_sees_plaintext src=281eaaaf49d7517d sig=3e988c30dd4c4b22 run=c2c0c6612d4cbb79 bug=f04ae2e1650b024e oracle=451446b511c5db7b rows=pending
+moq@1/laws/relay_preserves_stream_order src=777ce1b9be7e76cb sig=b02696a322536490 run=c2c0c6612d4cbb79 bug=db6460d6d5956891 oracle=c3b7cbd2d7659e67 rows=pending
+moq@1/laws/session_native_webtransport_and_refusals src=f39e55e099b2b791 sig=a52d989cb3cb6ed5 run=c2c0c6612d4cbb79 bug=c1e7ce9d9d177de4 oracle=201cc178352a46c6 rows=pending
+moq@1/laws/session_object_limits_and_fetch_extremes src=708ef5e1e2dc01fb sig=92da1d4114feb821 run=c2c0c6612d4cbb79 bug=0d21f9985910c79d oracle=12909ab862c1c3a3 rows=pending
+moq@1/laws/slow_subscriber_costs_only_itself src=39af5e79d6d8b636 sig=c2ceff98d4738de0 run=c2c0c6612d4cbb79 bug=929f78b21e03ec6f oracle=78e8c0181ce2eff1 rows=pending
 moq@1/laws/vi64_vectors_from_the_draft src=65ef5cd5324fe09a sig=fb1da6e672e109f5 run=c2c0c6612d4cbb79 bug=7403f3886ddc8b7c oracle=38b3eccfa6649417 rows=pending
-moq@1/laws/wire_vectors_from_the_draft src=500b26ee72cd5a64 sig=abc17a7e9949e408 run=c2c0c6612d4cbb79 bug=010f8b2b7dcb1555 oracle=e94c1249d6213585 rows=pending
+moq@1/laws/wire_vectors_from_the_draft src=c64be3cb98f1ebd1 sig=8faedd9a379dc397 run=c2c0c6612d4cbb79 bug=010f8b2b7dcb1555 oracle=e94c1249d6213585 rows=pending

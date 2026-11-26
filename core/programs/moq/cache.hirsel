@@ -307,7 +307,10 @@ fn cache_fetch_entries(c: Cache, scope: Scope, tr: codec.TrackName, from: codec.
             cursor_o = int.saturating_add(obj.id, 1)
         }
         if cursor_g == g {
-            cursor_g = g + 1
+            if g == 0xffffffffffffffff {
+                break
+            }
+            cursor_g = int.saturating_add(g, 1)
             cursor_o = 0
         }
     }

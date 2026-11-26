@@ -68,6 +68,7 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
                 return;
             };
             let (flat, content) = (inbox.flat_ptr(t), t.value().cross_parts().1);
+            let sockets = t.value().item_sockets();
             // SAFETY: the inbox belongs to this unit, whose thread this is;
             // the item is its newest, still in its connection.
             let files = unsafe { (*h).files };
@@ -96,6 +97,7 @@ pub(super) unsafe fn take(u: &mut LangUnit, took: &Took, id: usize) {
                 content,
                 grants: &grants,
                 registry,
+                sockets,
             }
         }
         Took::Close => Arrival::Close(id),
@@ -180,6 +182,7 @@ impl SendNote {
         client: *mut ClientH,
         value: *const u8,
         wait: bool,
+        sockets: Option<&crate::net::CrossingSockets>,
     ) -> Self {
         let group = tasks::current_group();
         // SAFETY: by the contract; the sender's handle pins the client, and
@@ -195,7 +198,7 @@ impl SendNote {
             } else {
                 crate::tape::units::item_grants::resolve(context, &(*files).registry, &words)
             };
-            tape::send_item(group, client as usize, conn, value, &grants)
+            tape::send_item(group, client as usize, conn, value, &grants, sockets)
         };
         let op = if wait {
             hirsel_tape_format::op::CONN_SEND
@@ -224,6 +227,7 @@ impl SendNote {
         _: *mut super::ClientH,
         _: *const u8,
         _: bool,
+        _: Option<&crate::net::CrossingSockets>,
     ) -> Self {
         Self
     }

@@ -468,16 +468,56 @@ The runtime already lets these capabilities cross: the cell sits behind the run'
 registry (`Registry::for_unit` shares `run`), and only virtual `Net` sockets are stopped at
 the crossing (`UnitSocket`).
 
-**Recorded sockets do not cross yet.** In a recording, a TCP `Socket` or `Listener` the run's
-tape made stops the run at the crossing (`UnitRecording`); its ownership does not move to the
-receiving unit, and no tag 2 or tag 3 snapshot is written. Moving it needs three things this
-build lacks: a departure record in the sender's stream, which the format above does not
-define; a source for the tag 2 fields, since the tape's resource record holds only the
-socket's kind and open parts while the peer address and the `ended` and `reset` flags live in
-the host reactor's record (and an accepted socket's peer is kept nowhere the tape reads); and
-one carrier form, since the root names its taped sockets by `ordinal << 2` through its socket
-tape while a helper names them by tape handle through their routes. A `UdpSocket` already
-crosses under recording, and a value holding one is cut (`HANDLE`) rather than written.
+**Sockets that cross.** A TCP `Socket` or `Listener` that a recording unit's tape made
+crosses to another unit, in an item, an entry or a helper's result. The rules, and why:
+
+- **One naming.** Every recording unit, root or helper, names its taped TCP sockets and
+  listeners as `ordinal << 2` carriers of its own stream's objects, and the two low bits are
+  the half. A helper whose stream is recorded gets the same socket tape the root gets from
+  its `Net` grant, so a helper's `CONNECT`, `LISTEN` and `ACCEPT` make carriers as the
+  root's do. An earlier build named a helper's sockets by tape handle through their routes.
+  That second scheme is gone: one form lets the crossing code name a socket the same way in
+  every unit, and a replay of any stream reads the same carriers. A unit whose stream is cut
+  at its entry has no socket tape and keeps raw reactor keys, as it does without a recording.
+- **No departure frame.** The unit operation that carries the value (`UNIT_SPAWN`,
+  `CONN_SEND`, `CONN_TRY_SEND`, or the helper's `END`) is the departure, and its value holds
+  the socket's snapshot. When the socket leaves, its object in the sender's stream no longer
+  reaches a source. No other frame is needed, because the operation is already at the
+  position the departure happens. A socket that comes back without a take (a send refused
+  `Full`, `Closed` or `Bounds`, a waiting send withdrawn or settled `Closed`) keeps the
+  sender's own ordinal, which again reaches the socket's reactor key in that unit. That is
+  why a `Closed` settlement's value names the sender's ordinals. A socket dropped in transit
+  closes with no frame, as a TCP socket's drop has none.
+- **Arrival.** The receiving unit's take, or the helper's entry, or the owner's helper-end
+  take, gives the socket a new object ordinal in the receiving stream, and its later
+  operations there name that ordinal; its halves after a split share it, as in the sender.
+  A self-send takes a new ordinal too, as a client sent to itself does. A socket
+  arriving where nothing named it (from a unit whose stream is cut) cuts the receiving
+  stream.
+- **Snapshot source.** The tag 2 and tag 3 bodies come from the sending unit's own stream,
+  not from the host reactor. The direction and address come from the `CONNECT` that made
+  the socket (the address it named), the `ACCEPT` (the peer address it delivered) or the
+  `LISTEN` (the bound address). The state's bit 0 is set once a `RECV_BOUNDED` with room
+  delivered no bytes, and bit 1 once an operation on it failed with a reset (error tag 5).
+  So a replay of the sender recomputes the snapshot from frames it already checks, and the
+  reactor's flags, which the tape never reads, need no new path. TLS is always 0, because a
+  socket with a TLS session or half, or one a served `Net` owns, never crosses
+  (`UnitSocket`).
+- **No survivor kind.** A TCP socket holds no charge: its kernel queues and the reactor
+  record are host memory behind provider operations, which charges do not cover
+  ([budgets](spec/budgets.md)). Only a `UdpSocket`'s pool is charged, and it already
+  survives as kind 5. So a helper's result that holds a TCP socket adds no survivor, and the
+  helper-end take keeps the survivor list as it is.
+- **Format tag unchanged.** The format tag stays `0x000e`. Tags 2 and 3 already had their
+  bodies, and the decoder already read them. No frame was added. The rules above change only
+  what a recording that crosses a socket holds, and a build with the earlier rules stopped
+  such a run instead of writing it. A tape replays only on the build that wrote it, so no
+  older tape is read under the new rules.
+
+A `UdpSocket` crosses under recording too, and a value holding one is cut (`HANDLE`) rather
+than written. Unit replay is not built ([Replay of a run with helpers](#replay-of-a-run-with-helpers)),
+so the receiving unit's reads are checked from its stream: the arrival's snapshot, and the
+deliveries on its new ordinal.
 
 **Takes.** A unit **takes** an arrival when it applies it: when the arrival leaves the
 unit's queue of arrivals that have reached it and changes the unit's state. That happens in
@@ -778,7 +818,7 @@ receiving stream as a `varint`, then:
 |---|---|
 | 0 `Client` | inbox stream `u32`; connection ordinal `varint`; `cap` `u64`; room `b` `u64` |
 | 1 `Shared` | home stream `u32`; node ordinal `varint`; the payload as a value |
-| 2 `Socket` | direction `u8` (0 made by `CONNECT`, 1 by `ACCEPT`); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received and bit 1 reset received (the reactor record's `ended` and `reset`), other bits `Corrupt` |
+| 2 `Socket` | direction `u8` (0 made by `CONNECT`, 1 by `ACCEPT`); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received and bit 1 reset received, as the sending unit's stream showed them (sockets that cross, above), other bits `Corrupt`; peer address for `CONNECT` the address it named |
 | 3 `Listener` | direction `u8`, always 0, any other value is `Corrupt`; bound address, 19 bytes |
 | 4 `UdpSocket` | direction `u8`, always 0, any other value is `Corrupt`; bound address, 19 bytes; peer `u8` 0, or 1 followed by the connected address, 19 bytes |
 | 5 capability | grant kind `u8` in `GrantKind`'s numbering (`Dir` 0, `Net` 1, `Clock` 2, `Random` 3, `Stdout` 4, `Stderr` 5, `Stdin` 6, `Env` 7, `Process` 8, `Exec` 13, `Cred` 14; a `random_tape` cell is `Random`), as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |

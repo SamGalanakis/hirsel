@@ -902,4 +902,5 @@ fn rl9_helper_secret_charges_survive_by_designation() {
     }
 }
 
+include!("recording_sockets_native.rs");
 include!("recording_variants_native.rs");

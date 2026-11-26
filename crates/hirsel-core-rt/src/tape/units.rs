@@ -3,12 +3,14 @@
 //! and `Shared` nodes (docs/recording.md, "Unit recordings").
 use super::schedule::Group;
 use super::*;
+use crate::net::CrossingSockets;
 use crate::units_lang::Cross;
 use format::{TakeBody, TakePoint};
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, SECRET, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, SECRET, SHARED, SOCKET};
 use item_grants::Granted;
 use std::collections::HashMap;
 
+pub(crate) mod crossing;
 pub(crate) mod item_grants;
 
 /// One unit's take-point count and the ordinals of its unit objects.
@@ -402,6 +404,7 @@ pub(crate) unsafe fn send_item(
     conn: usize,
     item: *const u8,
     grants: &[Granted],
+    sockets: Option<&CrossingSockets>,
 ) -> Option<Result<(u64, Vec<u8>), &'static str>> {
     recording(group, |live| {
         let Some(&ordinal) = live.takes.clients.get(&client) else {
@@ -424,6 +427,7 @@ pub(crate) unsafe fn send_item(
                 live.takes.nodes.get(&(word as usize)).copied().unwrap_or(0),
             ),
             CAPABILITY | SECRET => item_grants::sent(grants, kind, word),
+            SOCKET => crossing::sent(sockets, word, None),
             _ => Err(CAPABILITY_ITEM),
         };
         // SAFETY: by the contract.
@@ -479,12 +483,16 @@ const CAPABILITY_ITEM: &str = "an item holds a handle whose snapshot this build 
 /// as the receiving unit's snapshot: a client or `Shared` holder takes a new
 /// ordinal at its take, a capability its grant's, designated in
 /// `designations` once the value is written, and a `Secret` a new ordinal
-/// with its designation unchanged.
+/// with its designation unchanged, a TCP socket or listener a new ordinal,
+/// which its attach in the unit at cell `at` names (`sockets` carries it).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn arrive(
     live: &mut Live,
+    at: usize,
     generation: u32,
     grants: &[Granted],
     designations: &mut Vec<item_grants::Designation>,
+    sockets: Option<&CrossingSockets>,
     kind: u64,
     word: u64,
 ) -> Result<Vec<u8>, &'static str> {
@@ -502,6 +510,7 @@ pub(super) fn arrive(
         CAPABILITY | SECRET => {
             item_grants::arrived(live, generation, grants, kind, word, designations)
         }
+        SOCKET => crossing::arrived(live, at, generation, sockets, word),
         _ => Err(CAPABILITY_ITEM),
     }
 }
@@ -578,6 +587,8 @@ pub(crate) enum Arrival<'a> {
         /// which designates each on this unit's cell.
         grants: &'a [Granted],
         registry: *mut crate::host_file::Registry,
+        /// The item's sockets in transit.
+        sockets: Option<&'a CrossingSockets>,
     },
     Close(usize),
     SealAnswer(usize),
@@ -605,6 +616,11 @@ pub(crate) enum Arrival<'a> {
     Unrecorded(&'static str),
 }
 
+/// A unit's cell as a socket's arrival names it.
+fn cell_at(group: Option<Group>) -> usize {
+    group.map_or(0, |g| g.cell.provider.state as usize)
+}
+
 /// One `TAKE`, at a scheduler pump or the in-operation point last reached.
 /// # Safety
 /// An item's `flat` and `content` are its connection's live packed item, and
@@ -622,12 +638,23 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                 content,
                 grants,
                 registry,
+                sockets,
             } => {
                 let generation = group.map_or(0, |g| g.generation);
+                let at = cell_at(group);
                 let mut designations = Vec::new();
                 let value = ordinal(conn).zip(layout(conn)).map(|(ordinal, layout)| {
                     let mut handle = |kind, word: u64| {
-                        arrive(live, generation, grants, &mut designations, kind, word)
+                        arrive(
+                            live,
+                            at,
+                            generation,
+                            grants,
+                            &mut designations,
+                            sockets,
+                            kind,
+                            word,
+                        )
                     };
                     // SAFETY: by the contract.
                     (ordinal, unsafe {
@@ -700,10 +727,18 @@ pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>
                     let generation = group.map_or(0, |g| g.generation);
                     let mut designations = Vec::new();
                     let mut ordinals = Vec::with_capacity(end.handles.len());
+                    let at = cell_at(group);
                     for &(kind, word) in &end.handles {
-                        if let Err(why) =
-                            arrive(live, generation, &end.grants, &mut designations, kind, word)
-                        {
+                        if let Err(why) = arrive(
+                            live,
+                            at,
+                            generation,
+                            &end.grants,
+                            &mut designations,
+                            end.sockets.as_ref(),
+                            kind,
+                            word,
+                        ) {
                             return live.cut(why);
                         }
                         ordinals.push(live.objects.len() as u64);

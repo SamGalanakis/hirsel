@@ -82,6 +82,7 @@ pub(super) unsafe fn record_out(
                 .insert(live.objects.len(), Resource::new(kind, 0));
         }
     }
+    super::units::crossing::delivered(live, r, before, created.is_some(), o.error.tag);
     if ok && r.operation == EXEC_SPAWN {
         live.typed_resources
             .insert(live.objects.len(), Resource::new(ResourceKind::Proc, 0));

@@ -46,6 +46,8 @@ pub use crossing::Cross;
 use crossing::{TapeHelper, tape_group};
 use ending::end_take;
 pub(crate) mod packing;
+mod sockets;
+use sockets::{attach_sockets, detach_sockets, socket_offsets, take_sockets};
 pub(crate) mod takes;
 pub(crate) use packing::CrossSend;
 use packing::{drop_packed_owners, free_owners, pack, unpack, unpack_owners};
@@ -85,70 +87,6 @@ unsafe fn item_charge(value: *const u8, owners: &[[u64; 4]]) -> u64 {
         }
     }
     total
-}
-
-fn socket_offsets(owners: &[[u64; 4]]) -> impl Iterator<Item = u64> + Clone {
-    owners.iter().filter(|o| o[1] == SOCKET).map(|o| o[0])
-}
-
-unsafe fn detach_sockets(
-    context: *mut Context,
-    value: *const u8,
-    offsets: impl Iterator<Item = u64> + Clone,
-) -> Option<CrossingSockets> {
-    for offset in offsets.clone() {
-        // SAFETY: the initialized item pins each socket word during the preflight.
-        unsafe {
-            let key = word(value.add(offset as usize));
-            CrossedSocket::check(&*(*context).host_files, key);
-        }
-    }
-    let sockets: Vec<_> = offsets
-        .map(|offset| {
-            // SAFETY: the item exclusively owns each socket in this unit.
-            unsafe {
-                let key = word(value.add(offset as usize));
-                CrossedSocket::detach(&mut *(*context).host_files, key)
-            }
-        })
-        .collect();
-    (!sockets.is_empty()).then(|| Arc::new(Mutex::new(SocketCrossing::InTransit(sockets))))
-}
-
-/// Install the socket keys in a received value or give a refused send its
-/// sockets back.
-#[inline(always)]
-unsafe fn attach_sockets(
-    context: *mut Context,
-    value: *mut u8,
-    offsets: impl Iterator<Item = u64>,
-    sockets: Option<&CrossingSockets>,
-) {
-    if let Some(sockets) = sockets {
-        // SAFETY: forwarded.
-        unsafe { attach_crossing(context, value, offsets, sockets) }
-    }
-}
-#[inline(never)]
-unsafe fn attach_crossing(
-    context: *mut Context,
-    value: *mut u8,
-    offsets: impl Iterator<Item = u64>,
-    sockets: &CrossingSockets,
-) {
-    // SAFETY: the caller owns the destination and runs in its registry's unit.
-    unsafe {
-        let files = &mut *(*context).host_files;
-        let keys = sockets.lock().unwrap().keys(files);
-        for (offset, key) in offsets.zip(keys) {
-            set_word(value.add(offset as usize), key);
-        }
-        if tasks::in_task()
-            && let Some(poller) = files.sockets.active_poller()
-        {
-            tasks::attach_net(&raw mut files.sockets, poller);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,34 +310,6 @@ unsafe fn on_take(u: &mut LangUnit, took: Took, id: usize, wake_inboxes: bool) {
                     tasks::hirsel_core_cancel(ptr::null_mut(), u.root);
                 }
             }
-        }
-    }
-}
-
-/// Register sockets when the receiving unit takes an arrival.
-#[inline(always)]
-unsafe fn take_sockets(u: &mut LangUnit, h: &InboxH) {
-    // Only an item type with socket fields carries sockets.
-    if !h.inbox.0.socket_offsets.is_empty() {
-        // SAFETY: forwarded.
-        unsafe { take_crossing(u, h) }
-    }
-}
-#[inline(never)]
-unsafe fn take_crossing(u: &mut LangUnit, h: &InboxH) {
-    if let Some(sockets) = h
-        .inbox
-        .0
-        .side()
-        .taken
-        .back()
-        .and_then(|item| item.value().item_sockets())
-    {
-        // SAFETY: the inbox belongs to this unit, which owns its host files.
-        let files = unsafe { &mut *h.files };
-        sockets.lock().unwrap().take(files);
-        if files.sockets.active_poller().is_some() {
-            u.socket_registry = &raw mut files.sockets;
         }
     }
 }
@@ -642,7 +552,7 @@ unsafe fn conn_send<const REC: bool>(
                 detach_sockets(context, value, offsets())
             };
             // The item as a value, read before the send moves it.
-            let mut send = takes::SendNote::new(context, handle, value, wait);
+            let mut send = takes::SendNote::new(context, handle, value, wait, sockets.as_ref());
             let mut source = CrossSend::new(value);
             source.sockets = sockets.clone();
             let id = match UnitCtx::send_cross(client, source, charge, wait, || {
@@ -1114,12 +1024,13 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let u = unit();
         let (k, hctx) = u.ctx.spawn_unit();
         let steps = crate::steps::remaining(&*context);
+        // The entry writes each socket as it leaves: detached first.
+        let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
         #[cfg(feature = "record")]
-        let tape = crate::tape::helper::spawn(context, n, steps, input, x);
+        let tape = crate::tape::helper::spawn(context, n, steps, input, x, sockets.as_ref());
         #[cfg(not(feature = "record"))]
         let tape = ();
         let data = pack(input, x.bytes, x.owners());
-        let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
         free_owners(None, input, x.owners());
         let shared = Arc::new(HelperShared {});
         let h = Box::into_raw(Box::new(HelperH {
@@ -1247,6 +1158,10 @@ fn helper_main(
             tape.designate(&mut registry);
         }
         let mut files = crate::host_file::Files::with_registry(registry);
+        #[cfg(feature = "record")]
+        {
+            files.net_tape = tape.as_ref().and_then(|tape| tape.net_tape());
+        }
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {
             crate::process::stop(b"UnitLedger");
@@ -1300,6 +1215,12 @@ fn helper_main(
             .chain(lu.homed.drain())
             .collect();
         let charges = files.registry.run_grants().hand_over(context.payer());
+        // The END writes each socket in the result as it leaves: detached first.
+        let sockets = if failed == 0 {
+            detach_sockets(&mut context, result.as_ptr(), socket_offsets(&ro))
+        } else {
+            None
+        };
         let ended = Ended {
             failed: failed != 0,
             causes: context.causes.iter().map(CrossedCause::pack).collect(),
@@ -1322,13 +1243,13 @@ fn helper_main(
                     rb,
                     &ro,
                     &raw const context,
+                    sockets.as_ref(),
                 )
             }),
         };
         let mut ret = Value::empty();
         if failed == 0 {
             let data = pack(result.as_ptr(), rb, &ro);
-            let sockets = detach_sockets(&mut context, result.as_ptr(), socket_offsets(&ro));
             ret.set_item(data, sockets);
             free_owners(None, result.as_ptr(), &ro);
         }

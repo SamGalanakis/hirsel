@@ -12,10 +12,11 @@
 use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
+use crate::net::CrossingSockets;
 use crate::units_lang::Cross;
 use crate::units_lang::packing::{append, copy_elements, copy_flat};
 use hirsel_core_layout::cross::{
-    CAPABILITY, CLIENT, ELEMENT, FUNCTION, PADDING, SECRET, SEQ, SHARED, elements, live,
+    CAPABILITY, CLIENT, ELEMENT, FUNCTION, PADDING, SECRET, SEQ, SHARED, SOCKET, elements, live,
 };
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -50,6 +51,13 @@ impl Helper {
         self.spawn_args.as_deref()
     }
 
+    /// The helper's taped sockets: carriers of its own stream's objects, as
+    /// the root's are of its stream's. None when its stream is cut.
+    pub(crate) fn net_tape(&self) -> Option<crate::net::SocketTape> {
+        self.group
+            .map(|g| crate::net::SocketTape::new(g.cell.provider, handle(g.generation, 0)))
+    }
+
     /// Designate the entry's capabilities in the helper's registry: on its
     /// cell, or on their sources when its stream is cut.
     pub(crate) fn designate(&self, registry: &mut crate::host_file::Registry) {
@@ -79,6 +87,7 @@ impl Helper {
         bytes: u64,
         owners: &[[u64; 4]],
         context: *const crate::Context,
+        sockets: Option<&CrossingSockets>,
     ) -> Result<EndTake, &'static str> {
         let mut handles = Vec::new();
         let mut grants = Vec::new();
@@ -112,6 +121,7 @@ impl Helper {
                 match kind {
                     CLIENT => units::client_snapshot(word, 0),
                     SHARED => units::shared_snapshot(word, 0),
+                    SOCKET => units::crossing::sent(sockets, word, Some(0)),
                     _ => units::item_grants::sent(&grants, kind, word),
                 }
             };
@@ -136,6 +146,7 @@ impl Helper {
             body,
             handles,
             grants,
+            sockets: sockets.cloned(),
         };
         let Some(group) = self.group else {
             return body.map(|(kind, body, _)| take(kind, body));
@@ -176,6 +187,8 @@ pub(crate) struct EndTake {
     pub(super) body: Vec<u8>,
     pub(super) handles: Vec<(u64, u64)>,
     pub(super) grants: Vec<units::item_grants::Granted>,
+    /// The result's sockets in transit, which the owner's take names.
+    pub(super) sockets: Option<CrossingSockets>,
 }
 
 /// The `END` a helper's stream ends with when its unit deadlocks.
@@ -216,6 +229,7 @@ pub(crate) unsafe fn spawn(
     steps: Option<u64>,
     input: *const u8,
     x: &Cross,
+    sockets: Option<&CrossingSockets>,
 ) -> Option<Helper> {
     let spawner = crate::tasks::current_group()?;
     // Resolve each capability word before any cell is locked: the registry's
@@ -296,6 +310,7 @@ pub(crate) unsafe fn spawn(
         udp_retirements: BTreeMap::new(),
         clocks: BTreeMap::new(),
         grants: BTreeMap::new(),
+        sockets: BTreeMap::new(),
         recorder: None,
         replayer: None,
     };
@@ -303,7 +318,16 @@ pub(crate) unsafe fn spawn(
     // SAFETY: forwarded; each capability word designates a grant of the run.
     let body = unsafe {
         entry(context, n, steps, input, x, &mut |kind, word| {
-            units::arrive(&mut live, generation, &granted, &mut grants, kind, word)
+            units::arrive(
+                &mut live,
+                cell.provider.state as usize,
+                generation,
+                &granted,
+                &mut grants,
+                sockets,
+                kind,
+                word,
+            )
         })
     };
     drop(state);
@@ -430,7 +454,7 @@ unsafe fn entry(
     Ok(body)
 }
 
-const HANDLE: &str = "the value holds a socket handle, whose snapshot this build does not write";
+const HANDLE: &str = "the value holds a handle whose snapshot this build does not write";
 
 /// The capability and `Secret` words of a value by row kind, in the order it
 /// holds them, nested ones included: what `item_grants::resolve` reads
@@ -607,7 +631,7 @@ fn word_part(
     handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
 ) -> Result<(), &'static str> {
     match kind {
-        CAPABILITY | CLIENT | SECRET => {
+        CAPABILITY | CLIENT | SECRET | SOCKET => {
             parts.push(1);
             parts.extend(handle(kind, word)?);
         }

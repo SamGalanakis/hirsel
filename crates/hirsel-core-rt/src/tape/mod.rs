@@ -31,6 +31,8 @@ pub mod run;
 pub(crate) mod schedule;
 mod secret;
 mod tls;
+mod typed;
+pub(crate) use typed::{socket_parts, typed_socket};
 pub(crate) mod units;
 mod unix;
 pub(crate) mod writer;
@@ -214,6 +216,9 @@ struct Live {
     replayer: Option<Replayer>,
     /// Record: the unit's take-point count and unit-object ordinals.
     takes: units::Takes,
+    /// Record: each TCP socket's and listener's snapshot by ordinal, as a
+    /// unit operation that carries it to another unit writes it.
+    sockets: BTreeMap<usize, units::crossing::Snapshot>,
 }
 
 /// A Record operation between issue and deliver: deliver runs the inner
@@ -962,6 +967,7 @@ impl Tape {
                     udp_retirements: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     grants: BTreeMap::new(),
+                    sockets: BTreeMap::new(),
                     recorder: Some(recorder),
                     replayer: None,
                 };
@@ -1012,6 +1018,7 @@ impl Tape {
                     udp_retirements: BTreeMap::new(),
                     clocks: BTreeMap::new(),
                     grants: BTreeMap::new(),
+                    sockets: BTreeMap::new(),
                     recorder: None,
                     replayer: Some(Replayer {
                         reader: FrameReader::new(source, blocks),
@@ -1379,30 +1386,6 @@ fn cell_of(state: *mut u8) -> &'static Cell {
     // SAFETY: a tape provider's state is its leaked cell.
     unsafe { &*state.cast::<Cell>() }
 }
-/// The typed resources added by Exec and Unix carry CLOSE at release.
-pub(crate) fn typed_socket(provider: &Provider, key: u64) -> bool {
-    let state = cell_of(provider.state).state.lock().unwrap();
-    state.generation == generation_of(key)
-        && state
-            .live
-            .as_ref()
-            .and_then(|live| live.typed_resources.get(&ordinal_of(key)))
-            .is_some_and(|resource| resource.kind != ResourceKind::Proc)
-}
-
-pub(crate) fn socket_parts(provider: &Provider, key: u64, parts: u8) {
-    let mut state = cell_of(provider.state).state.lock().unwrap();
-    if state.generation == generation_of(key)
-        && let Some(resource) = state
-            .live
-            .as_mut()
-            .and_then(|live| live.typed_resources.get_mut(&ordinal_of(key)))
-        && resource.kind == ResourceKind::UnixStream
-    {
-        resource.parts = parts;
-    }
-}
-
 fn generation_of(h: u64) -> u32 {
     (h >> 32) as u32
 }

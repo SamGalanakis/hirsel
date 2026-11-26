@@ -10,8 +10,7 @@ fn staged_law_write(mut tx: store.Tx, data: store.Table[u64, u64]) -> Result[(),
     store.put(mut tx, data, 1u64, 7u64)
 }
 
-@test
-fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
+fn staged_round_checks(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
     let mut name = string.with_capacity(64u64)
     let dir = result.unwrap(std.dir.create_temp(d, mut name))
     let opts = result.unwrap(store.sized(Directory, 134217728u64))
@@ -106,6 +105,381 @@ fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks
     }
     let Head(db: take completed, ..) = take hd
     result.unwrap(store.close(take completed))
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}
+
+type StagedSocket: send {
+    at: u64,
+    packet: Bytes
+}
+
+type StagedRecorder: send {
+    port: Served[NetOp],
+    next: Receiver[()],
+    clock: Clock,
+    writes: Sender[StagedSocket]
+}
+
+// Record actual bytes at the socket boundary, including the WebSocket header.
+fn staged_record(take input: StagedRecorder) waits {
+    let StagedRecorder(port: take incoming, next: take next, clock, writes: take writes) = take input
+    let mut provider = take incoming
+    let mut next_socket = 1u64
+    while let Ok(()) = channel.receive(next) {
+        let op = loop {
+            let pending = option.unwrap(provide.next(mut provider))
+            if let Released(..) = provide.net_op(pending) {
+                continue
+            }
+            break take pending
+        }
+        let reply: NetReply = match provide.net_op(op) {
+            Connect(addr: address, ..) => {
+                let socket = next_socket
+                next_socket += 1u64
+                Socket(socket, address)
+            },
+            Send(prefix: prefix, tail: tail, ..) => {
+                let mut packet: Bytes = list.with_capacity(prefix + tail)
+                provide.payload(op, 1u64, mut packet)
+                provide.payload(op, 2u64, mut packet)
+                if list.len(packet) != prefix + tail {
+                    fail("L61 socket recorder lost payload bytes")
+                }
+                result.unwrap(channel.send(writes, StagedSocket(at: host.mono_ns(clock), packet: take packet)))
+                Count(prefix + tail)
+            },
+            _ => fail("L61 unexpected socket operation"),
+        }
+        result.unwrap(provide.reply(mut provider, take op, provide.net_reply(reply)))
+    }
+}
+
+type StagedOwner {
+    owner: WireSession[()],
+    work: WireWork,
+    inbox: Receiver[WireEvent],
+    closing: Sender[()],
+    unused_head: Receiver[HeadInput],
+    round: Latest[RoundAt],
+    fence: Latest[Fence]
+}
+
+fn staged_subscribe(to: Sender[PubIn], tasks: Tasks, clock: Clock, random: Random) -> Option[StagedOwner] waits {
+    let (head, unused_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(1u64)
+    let service: Service[WireSession[()]] = wire_service_seed(random, no_wire(), head, clock, tasks, wire_defaults(1048576u64), string.new())
+    let Service(context: take fresh, ..) = take service
+    let mut owner = take fresh
+    owner.handshake = Open(caller: law_caller(1u64), entries: list.new())
+    let mut work = wire_work()
+    work.splice = true
+    let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
+    let (told, admission): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
+    let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
+    let join = Join(to: take events, told: take told, mark: None, closed: Some(take closed), identity: None, fence: Some(latest.handle(fence)), progress: None, taken: None, first: None, http_credit: None)
+    if let Error(_) = channel.send(to, PubIn(e: Joined(take join))) {
+        return None
+    }
+    let Ok(Admit(who: who, round: take register)) = channel.receive(admission) else {
+        return None
+    }
+    if let Ok(WireEvent(e: JoinReady)) = channel.receive(inbox) {} else {
+        fail("L61 subscriber did not become ready")
+    }
+    owner.joined = Some(who)
+    owner.publisher = Some(channel.sender(to))
+    wire_subscribed(mut owner, mut work, 1u32, failed_read_sub())
+    Some(StagedOwner(owner: take owner, work: take work, inbox: take inbox, closing: take closing, unused_head: take unused_head, round: take register, fence: take fence))
+}
+
+fn staged_send(mut peer: StagedOwner, mut socket: WriteHalf, next: Sender[()], take notice: Notice) -> u64 waits {
+    result.unwrap(wire_step(mut peer.owner, mut peer.work, WRunner(take notice)))
+    let frame = option.unwrap(result.unwrap(wire_take_output(peer.owner, mut peer.work)))
+    let version = match frame {
+        Batch(at, _, _, _) => at,
+        _ => fail("L61 expected a subscription Batch"),
+    }
+    let out = result.unwrap(std.wsock.outbound(Server, wire_defaults(0u64).socket, None))
+    let packed = result.unwrap(encode_published_frame(out, frame, peer.work.packing))
+    result.unwrap(channel.send(next, ()))
+    if result.unwrap(host.send_pair(mut socket, packed, b"", Never)) != list.len(packed) {
+        fail("L61 partial socket write")
+    }
+    wire_sent(mut peer.owner, mut peer.work)
+    version
+}
+
+fn staged_receive(mut peer: StagedOwner, mut socket: WriteHalf, next: Sender[()]) -> u64 waits {
+    let Ok(WireEvent(e: FromRunner(take notice))) = channel.receive(peer.inbox) else {
+        fail("L61 subscription Batch missing")
+    }
+    staged_send(mut peer, mut socket, next, take notice)
+}
+
+fn staged_open_socket(network: Net, next: Sender[()]) -> WriteHalf waits {
+    result.unwrap(channel.send(next, ()))
+    let (_, take writer) = net.split(result.unwrap(host.connect(network, Addr(ip: V4(2130706433u32), port: 1u16), Never)))
+    take writer
+}
+
+type StagedClockCommand: send = Pause(Sender[()]) | Resume | Stop
+
+type StagedClock: send {
+    world: std.sim.world.World,
+    commands: Receiver[StagedClockCommand],
+    real: Clock
+}
+
+fn staged_clock(take input: StagedClock) waits {
+    let StagedClock(world: take initial, commands: take commands, real) = take input
+    let mut virtual = take initial
+    loop {
+        match channel.try_receive(commands) {
+            Ok(Pause(take ready)) => {
+                result.unwrap(channel.send(ready, ()))
+                if let Ok(Resume) = channel.receive(commands) {} else {
+                    return
+                }
+            },
+            Ok(Stop) => return,
+            Error(Closed) => return,
+            _ => (),
+        }
+        if !std.sim.world.step(mut virtual) {
+            host.sleep_until(real, clock.deadline_after_ms(host.mono_ns(real), 1u64))
+        }
+    }
+}
+
+type StagedBucket {
+    endpoint: std.sim.s3.Endpoint,
+    commands: Sender[StagedClockCommand]
+}
+
+type StagedTrial = Pipeline(StagedBucket) | Serial(StagedBucket) | Poison
+
+fn staged_socket_trial(take opened: store.Db, random: Random, tasks: Tasks, trial: StagedTrial) -> Result[Bytes, String] waits {
+    let mut db = take opened
+    let mut schema = result.unwrap(store.declare(db, Migrate))
+    let data = result.unwrap(staged_law_table(mut schema))
+    let schema_ticket = result.unwrap(store.seal(mut db, take schema))
+    result.unwrap(store.durable(mut db, schema_ticket))
+    set(mut db, data, 0u64, 1u64)
+    set(mut db, data, 1u64, 3u64)
+    let base_write: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut db, None, data, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        store.put(mut tx, bound_data, 2u64, 4u64)
+    })
+    let Committed(store.Done(ticket: base_ticket, ..)) = result.unwrap(take base_write) else {
+        return Error("L61 base did not commit")
+    }
+    result.unwrap(store.durable(mut db, base_ticket))
+    let base = store.snapshot(db)
+    let a = store.version(base)
+    let Mailbox(to: take out, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let to = channel.sender(out)
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
+    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take inbox, rounds: take rounds, ready: take ready_to)
+    let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
+    if let Ok(None) = channel.receive(ready_from) {} else {
+        return Error("L61 publisher did not start")
+    }
+    let (time, take stopped_clock) = provide.clock(0u64, 0u64)
+    let mut ticks = take stopped_clock
+    let (network, take port) = provide.net(bytes 4096u64)
+    let (write_to, writes): (Sender[StagedSocket], Receiver[StagedSocket]) = channel.new(4u64)
+    let (commands, resume_recording): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let recorder = task.spawn(tasks, bytes 65536u64, StagedRecorder(port: take port, next: take resume_recording, clock: time, writes: take write_to), staged_record)
+    let mut socket = staged_open_socket(network, commands)
+    let mut peer = option.unwrap(staged_subscribe(to, tasks, time, random))
+    if staged_receive(mut peer, mut socket, commands) != a {
+        return Error("L61 initial Batch has the wrong version")
+    }
+    let _ = result.unwrap(channel.receive(writes))
+    let before = latest.read(peer.fence).latest
+    let bucket = match trial {
+        Pipeline(selected) => Some(selected),
+        Serial(selected) => Some(selected),
+        Poison => None,
+    }
+    // Keep the object request from reaching its deadline during the held observation.
+    if let Some(selected) = bucket {
+        let (ready, paused): (Sender[()], Receiver[()]) = channel.new(1u64)
+        result.unwrap(channel.send(selected.commands, Pause(take ready)))
+        result.unwrap(channel.receive(paused))
+    }
+    let written: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut db, None, data, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        staged_law_write(mut tx, bound_data)
+    })
+    let Committed(store.Done(ticket: ticket, ..)) = result.unwrap(take written) else {
+        return Error("L61 group did not commit")
+    }
+    let empty_registry: Registry[(), ()] = registry()
+    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let next = store.snapshot(hd.db)
+    let v = store.version(next)
+    if let Serial(_) = trial {
+        hd.last = None
+        list.push(mut hd.held, Sealed(ticket, v, take next, list.new()))
+    } else {
+        close_group(mut hd)
+    }
+    if let Some(selected) = bucket {
+        // Bootstrap writes two heads, then the schema and each of three base
+        // writes take one each. The latch holds the effect's seventh PUT.
+        result.unwrap(std.sim.s3.requested(selected.endpoint, "PUT", "head", 7u64))
+        if let Ok(false) = store.durable_now(mut hd.db, ticket) {} else {
+            return Error("L61 the latch did not hold durable")
+        }
+    }
+    // Run the publisher to its next receive while the head is held at the gate.
+    // An inbox probe would itself discard the pending staged plan.
+    let released_at = 1u64
+    let release_tick = task.spawn(tasks, bytes 0u64, (time, released_at), fn(take timer: (Clock, u64)) waits {
+        host.sleep_until(timer.0, timer.1)
+    })
+    if clock.idle(mut ticks) != Some(released_at) {
+        return Error("L61 the release timer was not pending")
+    }
+    if latest.read(peer.round).at != a || latest.read(peer.fence).latest != before {
+        fail("L61 staging advanced the fence or round before durable")
+    }
+    if let Ok(WireEvent(e: FromRunner(take early))) = channel.try_receive(peer.inbox) {
+        let _ = staged_send(mut peer, mut socket, commands, take early)
+    }
+    clock.advance_to(mut ticks, released_at)
+    if let Ok(write) = channel.try_receive(writes) {
+        if write.at < released_at {
+            fail("L61 staged Batch wrote to the socket before durable")
+        }
+        return Error("L61 unexpected write at the durability gate")
+    }
+    if let Some(selected) = bucket {
+        // Requested is a transport latch. The marker needs no object access.
+        let marker = b"GET /release-l61 HTTP/1.1\r\nHost: bucket.s3.test:8080\r\nConnection: close\r\n\r\n"
+        let bucket_net = std.sim.s3.endpoint_network(selected.endpoint)
+        let (_, take output) = net.split(result.unwrap(host.connect(bucket_net, Addr(ip: V4(2130706433u32), port: 8080u16), Never)))
+        let mut marker_socket = take output
+        let mut sent = 0u64
+        while sent < list.len(marker) {
+            let count = result.unwrap(host.send_pair(mut marker_socket, list.slice(marker, sent, list.len(marker)), b"", Never))
+            if count == 0u64 {
+                return Error("L61 latch release marker was incomplete")
+            }
+            sent += count
+        }
+        result.unwrap(std.sim.s3.requested(selected.endpoint, "GET", "release-l61", 1u64))
+        result.unwrap(channel.send(selected.commands, Resume))
+    }
+    result.unwrap(task.join(take release_tick))
+    let frame: Bytes = if let Poison = trial {
+        store.fixture_broken_handoff(mut hd.db)
+        let failed: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut hd.db, None, data, fn(mut tx, bound_data) -> Result[(), store.Error] {
+            store.put(mut tx, bound_data, 3u64, 9u64)
+        })
+        if let Error(Poisoned(Closed)) = failed {} else {
+            return Error("L61 journal fixture did not poison the store")
+        }
+        if let Error(Poisoned(Closed)) = release_held(mut hd, true) {} else {
+            return Error("L61 durable did not report poison")
+        }
+        let _ = clock.idle(mut ticks)
+        if let Ok(WireEvent(e: FromRunner(take leaked))) = channel.try_receive(peer.inbox) {
+            let _ = staged_send(mut peer, mut socket, commands, take leaked)
+            return Error("L61 failed durable wrote to the previous socket")
+        }
+        result.unwrap(channel.send(to, PubIn(e: Halt)))
+        let _ = take peer
+        let _ = take socket
+        let mut retry_socket = staged_open_socket(network, commands)
+        if let Some(take reconnected) = staged_subscribe(to, tasks, time, random) {
+            let mut retry = take reconnected
+            if staged_receive(mut retry, mut retry_socket, commands) >= v {
+                let _ = result.unwrap(channel.receive(writes))
+                fail("L61 failed durable wrote staged data after reconnect")
+            }
+        }
+        list.new()
+    } else {
+        if let Error(_) = release_held(mut hd, true) {
+            return Error("L61 durable failed after the latch opened")
+        }
+        if staged_receive(mut peer, mut socket, commands) != v || latest.read(peer.round).at != v || latest.read(peer.fence).latest != v {
+            return Error("L61 durable Release omitted the version or fence")
+        }
+        let StagedSocket(at, packet: take packed) = result.unwrap(channel.receive(writes))
+        if at < released_at {
+            fail("L61 staged Batch wrote to the socket before durable")
+        }
+        take packed
+    }
+    let _ = channel.send(to, PubIn(e: Halt))
+    result.unwrap(task.join(take publishing))
+    let _ = take commands
+    result.unwrap(task.join(take recorder))
+    let Head(db: take completed, ..) = take hd
+    match store.close(take completed) {
+        Ok(()) => (),
+        Error(Poisoned(Closed)) => if let Poison = trial {} else {
+            return Error("L61 close unexpectedly reported poison")
+        },
+        _ => return Error("L61 could not close the store"),
+    }
+    Ok(take frame)
+}
+
+fn staged_latched_trial(real: Clock, random: Random, tasks: Tasks, staged: bool) -> Result[Bytes, String] waits {
+    let seed = 61u64
+    let address = Addr(ip: V4(2130706433u32), port: 8080u16)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut peers: List[Ip] = list.with_capacity(1u64)
+    list.push(mut peers, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take peers)
+    let key_bytes: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing: Bytes = list.with_capacity(32u64)
+    let _ = bytebuf.append_inline(mut signing, key_bytes, 0u64, 32u64)
+    let verify = result.unwrap(secret.seal(take signing, "verify"))
+    let mut head_holds: List[std.sim.s3.Hold] = list.with_capacity(1u64)
+    list.push(mut head_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 7u64, count: 1u64, until: Requested("GET", "release-l61", 1u64), then: Apply))
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take verify, faults: list.new(), holds: take head_holds, exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    let (take virtual, time) = std.sim.world.new(seed, 0u64, 1369353600000u64)
+    let (control, commands): (Sender[StagedClockCommand], Receiver[StagedClockCommand]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536u64, StagedClock(world: take virtual, commands: take commands, real), staged_clock)
+    let (endpoint, take sim) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), time, 1048576u64, 16777216u64)
+    let mut world = result.unwrap(store.level_world(tasks, time, list.new(), 1048576u64))
+    let authority = store.sim_authority(sim_release_client(endpoint, time, tasks, random), sim_release_levels(), result.unwrap(store.level_sync(mut world)), 30000u64)
+    let db = match store.open_authority(tasks, take authority, time, random, sim_release_options()) {
+        Ok(take value) => take value,
+        Error(_) => return Error("L61 could not open simulated bucket"),
+    }
+    let bucket = StagedBucket(endpoint, commands: channel.sender(control))
+    let trial = if staged {
+        Pipeline(take bucket)
+    } else {
+        Serial(take bucket)
+    }
+    let tested = staged_socket_trial(take db, random, tasks, trial)
+    let _ = result.unwrap(store.level_log(take world))
+    let _ = channel.send(control, Stop)
+    let _ = result.unwrap(task.join(take sim))
+    result.unwrap(task.join(take driver))
+    take tested
+}
+
+@test
+fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
+    staged_round_checks(d, clock, random, tasks)?
+    let staged = staged_latched_trial(clock, random, tasks, true)?
+    let unstaged = staged_latched_trial(clock, random, tasks, false)?
+    if staged != unstaged {
+        return Error("L61 staged and unstaged socket frames differ byte for byte")
+    }
+    let mut name = string.with_capacity(64u64)
+    let dir = result.unwrap(std.dir.create_temp(d, mut name))
+    let opts = result.unwrap(store.sized(Directory, 134217728u64))
+    let db = result.unwrap(store.open(tasks, dir, clock, random, opts))
+    let _ = staged_socket_trial(take db, random, tasks, Poison)?
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }

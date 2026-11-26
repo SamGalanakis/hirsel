@@ -76,7 +76,7 @@ runner@1/runner/test_named_slots src=4450b3a392e0843e sig=34dc655da3794c8d run=b
 runner@1/runner/test_pool_releases_cancelled_reader src=c48fd3c3a8c41e03 sig=3d7be7f6a1694703 run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
 runner@1/runner/test_projection_isolated src=06df390b3f8de1c7 sig=e90ed61910c0eece run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_range_reruns src=ed3cc3d53892bb15 sig=c27099232144edd8 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-runner@1/runner/test_release_after_durable src=3df39daa778c745a sig=d81424f4e8ca662b run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/test_release_after_durable src=1f7c17ae4a276e83 sig=5b1d8f98ac29fa62 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_removal_waits_for_writer src=5e2d15ce2d45dc5d sig=d6d85e5f24818029 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_coalesced src=9a31daf7e4c0819a sig=8a6dd3a2879e1dbe run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_one_unsent src=81c27d53893b1966 sig=cea84de7943b46d0 run=dbf6722727633166 bug=- oracle=- rows=pending

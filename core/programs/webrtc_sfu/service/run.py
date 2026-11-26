@@ -2,7 +2,8 @@
 """Build and run the SFU deployment (webrtc.md N1): the room place, signal.serve and the
 TURN relay in one Hirsel process on 127.0.0.1, serving the call page at http://<listen>/.
 
-    python3 core/programs/webrtc_sfu/service/run.py --hirsel <hirsel> --work /tmp/sfu
+    python3 core/programs/webrtc_sfu/service/run.py --hirsel <hirsel> --work /tmp/sfu -- \\
+        --rooms 1 --participants 17 --unit-bytes 268435456 --down-tracks 12
 """
 import argparse
 import json
@@ -114,7 +115,7 @@ def main():
     parser.add_argument("--listen", default="127.0.0.1:7800")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("service_args", nargs=argparse.REMAINDER,
-                        help="after --: --media PORT --units N --turn PORT --audio-forward N --seconds N")
+                        help="after --: --rooms N --participants N --unit-bytes N --down-tracks N, then optional service flags")
     args = parser.parse_args()
     compiler, work = args.hirsel.resolve(), args.work.resolve()
     web = work / "web"

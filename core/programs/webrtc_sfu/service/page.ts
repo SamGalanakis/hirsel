@@ -164,7 +164,9 @@ async function start(o: Start) {
   });
   await client.whenReady();
   const api: any = bind(client);
-  room = api.room.main.admit(undefined, {
+  const roomNumber = Number(new URLSearchParams(location.search).get('room') ?? '0');
+  if (!Number.isInteger(roomNumber) || roomNumber < 0 || roomNumber > 0xffffffff) throw new Error('invalid room number');
+  room = api.room.main.admit(roomNumber, {
     onMessage: (from: number, message: Signal, direct: boolean) => { void onSignal(from, message, direct); },
     onPeers: () => wake(),
     onEnd: (reason: unknown) => note(`room ended ${JSON.stringify(reason, (_, v) => typeof v === 'bigint' ? String(v) : v)}`),

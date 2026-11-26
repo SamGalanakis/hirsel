@@ -1,6 +1,6 @@
 // The SFU deployment on one host (webrtc.md S7 and N1; turn.md U8 and TURN-8): one process
 // runs three places side by side.
-// - The room place: a runner place with one room whose message is `webrtc_sfu.signal.Signal`. It
+// - The room place: a runner place with numbered rooms whose message is `webrtc_sfu.signal.Signal`. It
 //   serves the browser page and the WebSocket wire on `--listen`.
 // - The SFU (`webrtc_sfu.signal.serve`): `--units` media units on consecutive UDP ports from
 //   `--media`, joined to the room through `room_client`.
@@ -8,7 +8,8 @@
 //   relayed addresses. Its policy is the relay-only one (TURN-7): it relays only to the
 //   media units' ports. Signaling mints each admission's TURN credentials from the master
 //   the relay shares, and forwards each ended admission's revoke to it (TURN-9).
-// Usage: service [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT]
+// Usage: service --rooms N --participants N --unit-bytes N --down-tracks N
+//                [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT]
 //                [--audio-forward N] [--seconds N]
 // Stdout, one event per line: `listening <port>`, `turn <udp|tcp> <conn> <hex>` for each
 // STUN request a TURN client sends (the browsers' requests, for N1's captures),
@@ -24,15 +25,20 @@ const POOL_SIZE: u64 = 16
 // Each credential's lifetime, from its mint (turn.md U8: the relay's credential_max_s).
 const LIFETIME_S: u32 = 3600
 
-fn admit(tx: store.Tx, unused: (), author: runner.Caller, take argument: ()) -> Result[runner.Answer[runner.Grant], Capacity] {
+fn admit(tx: store.Tx, unused: (), author: runner.Caller, take argument: u32) -> Result[runner.Answer[runner.Grant], Capacity] {
     Ok(runner.Answer(value: Join, covers: runner.covers()))
 }
 
-/// The room: up to 16 browsers and the service, each message a `webrtc_sfu.signal.Signal`.
+// The exported entry has a static schema. The service sizes the listener's live
+// connections and the SFU's media admissions from its launch plan.
+const WIRE_PEERS: u32 = int.narrow(runner.WIRE_OWNER_LIMIT)
+
+const ROOM_ARG_BYTES: u64 = 4u64
+
 fn room(mut reg: runner.Registry[(), ()]) -> Result[(), runner.RegisterError] {
     let state: std.codec.Codec[List[Bytes]] = std.codec.of()
     let message: std.codec.Codec[webrtc_sfu.signal.Signal] = std.codec.of()
-    runner.room(mut reg, code.describe(admit), runner.slots(), state, message, runner.RoomBounds(peers: 17u32, state: runner.STATE_MAX, message: runner.MESSAGE_MAX), 4096u64, 1024u64, runner.DEFAULT_STEPS)
+    runner.room(mut reg, code.describe(admit), runner.slots(), state, message, runner.RoomBounds(peers: WIRE_PEERS, state: runner.STATE_MAX, message: runner.MESSAGE_MAX), 4096u64, ROOM_ARG_BYTES, runner.DEFAULT_STEPS)
 }
 
 fn schema(mut d: store.Declare) -> Result[(), store.Error] {
@@ -61,6 +67,10 @@ type Settings {
     media: Addr,
     units: u16,
     turn: Addr,
+    rooms: u32,
+    participants: u16,
+    unit_bytes: u64,
+    down_tracks: u16,
     audio_forward: u8,
     seconds: u64
 }
@@ -79,7 +89,7 @@ fn address(value: String) -> Option[Addr] {
 }
 
 fn settings(a: Args) -> Option[Settings] {
-    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), audio_forward: 0u8, seconds: 0u64)
+    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, audio_forward: 0u8, seconds: 0u64)
     let mut i = 0u64
     while i < args.len(a) {
         let name = option.unwrap(args.get(a, i))
@@ -90,6 +100,26 @@ fn settings(a: Args) -> Option[Settings] {
             s.media = address(value)?
         } else if name == "--turn" {
             s.turn = address(value)?
+        } else if name == "--rooms" {
+            let Ok(n) = (int.parse(value) : Result[u32, ParseError]) else {
+                return None
+            }
+            s.rooms = n
+        } else if name == "--participants" {
+            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
+                return None
+            }
+            s.participants = n
+        } else if name == "--unit-bytes" {
+            let Ok(n) = (int.parse(value) : Result[u64, ParseError]) else {
+                return None
+            }
+            s.unit_bytes = n
+        } else if name == "--down-tracks" {
+            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
+                return None
+            }
+            s.down_tracks = n
         } else if name == "--units" {
             let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
                 return None
@@ -110,7 +140,7 @@ fn settings(a: Args) -> Option[Settings] {
         }
         i += 2
     }
-    if s.units == 0 {
+    if s.units == 0 || s.units > 64 || s.rooms == 0 || s.participants == 0 || s.unit_bytes == 0 || s.down_tracks == 0 {
         return None
     }
     Some(s)
@@ -153,12 +183,12 @@ fn run_place(take o: Operated) -> Result[runner.Ended, runner.StartError] waits 
     runner.operate(take config, take stop, status, None)
 }
 
-fn place_config(n: Net, web: Dir, c: Clock, random: Random, tasks: Tasks, listen: Addr) -> runner.PlaceConfig[(), (), ()] {
+fn place_config(n: Net, web: Dir, c: Clock, random: Random, tasks: Tasks, listen: Addr, owners: u64, relay_bytes: u64) -> runner.PlaceConfig[(), (), ()] {
     let mut session = runner.wire_defaults(262144u64)
     session.n_pool = 33554432u64
-    session.n_relay = 4194304u64
+    session.n_relay = relay_bytes
     session.site = Some(std.wsock.Site(dir: web, find: asset))
-    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(room), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: 32u64, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(listen), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+    runner.PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(room), n_place: 1048576u64, on_migrate: None, schema: code.describe(schema), session: session, max_sessions: owners, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(listen), net: n, tasks: tasks, clock: c, random: random, stop: runner.Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
 }
 
 // ---- The TURN relay place (TURN-11) ----
@@ -424,6 +454,50 @@ fn sealed(b: Bytes, uses: String) -> Option[Secret] {
     }
 }
 
+fn media_plan(s: Settings) -> (webrtc_sfu.router.RoomLimits, webrtc_sfu.peer.PeerLimits, webrtc_sfu.signal.PoolLimits) {
+    let tracks: u32 = int.widen(s.down_tracks)
+    let ids = int.saturating_mul(s.participants, 4u16)
+    let limits = webrtc_sfu.router.RoomLimits(participants: s.participants, ids: ids, publications: 8, down_tracks: tracks, audio_forward: s.audio_forward, pause_delay_ms: 1000, pause: false)
+    let session = webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: s.down_tracks, rtx_bytes: 1048576, pacer_packets: 256, start_bps: 300000)
+    let units: u32 = int.widen(s.units)
+    let participants: u32 = int.widen(s.participants)
+    let sessions = (s.rooms * participants + units - 1) / units
+    let pool = webrtc_sfu.signal.PoolLimits(units: s.units, unit_bytes: s.unit_bytes, rooms: s.rooms, sessions: sessions, inflight: webrtc_sfu.signal.INFLIGHT, media_take: 1024, room_pps: 100000, open_pps: None)
+    (limits, session, pool)
+}
+
+fn media_fits(s: Settings, limits: webrtc_sfu.router.RoomLimits, session: webrtc_sfu.peer.PeerLimits, pool: webrtc_sfu.signal.PoolLimits, out: Stdout) -> bool waits {
+    let cost = webrtc_sfu.signal.room_cost(limits, session)
+    let sessions = int.saturating_mul(cost.per_session, int.widen(pool.sessions))
+    let mut per_session = sessions
+    if s.units > 1 {
+        let count: u64 = int.widen(pool.sessions)
+        let remote_tracks = count * int.widen(s.down_tracks)
+        per_session = int.saturating_add(per_session, int.saturating_mul(cost.per_remote, remote_tracks))
+    }
+    for k in 0u16 .. s.units {
+        let share = if k == 0 {
+            cost.replicated + cost.control
+        } else {
+            cost.replicated
+        }
+        let rooms = int.saturating_mul(share, int.widen(s.rooms))
+        let fixed = webrtc_sfu.signal.pool_unit_bytes(k, pool, session)
+        let need = int.saturating_add(fixed, int.saturating_add(rooms, per_session))
+        if need > s.unit_bytes {
+            let mut line = string.from("media unit ")
+            string.push_u64(mut line, int.widen(k))
+            string.push(mut line, " needs ")
+            string.push_u64(mut line, need)
+            string.push(mut line, " bytes for the room plan, --unit-bytes provides ")
+            string.push_u64(mut line, s.unit_bytes)
+            say(out, line)
+            return false
+        }
+    }
+    true
+}
+
 // `hirsel sdk ts` runs the program to describe its place: launch_server answers that
 // before any capability use.
 pub fn main(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
@@ -434,18 +508,40 @@ pub fn main(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Task
 
 fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let Some(s) = settings(a) else {
-        say(out, "usage: service [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--audio-forward N] [--seconds N]")
+        say(out, "usage: service --rooms N --participants N --unit-bytes N --down-tracks N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--audio-forward N] [--seconds N]")
+        return Error(Exit(status: 2u8))
+    }
+    // Each room has one SFU connection. Leave a second transport slot per browser
+    // for the page or a connection that is still closing.
+    let rooms: u64 = int.widen(s.rooms)
+    let participants: u64 = int.widen(s.participants)
+    let owners = rooms * (2u64 * participants + 1u64)
+    let Some(relay_bytes) = runner.room_relay_bytes(owners, int.widen(s.rooms), WIRE_PEERS, ROOM_ARG_BYTES) else {
+        say_number(out, "room plan exceeds the signaling owner limit", runner.WIRE_OWNER_LIMIT)
+        return Error(Exit(status: 2u8))
+    }
+    let Some(last) = int.checked_add(s.media.port, s.units - 1u16) else {
+        say(out, "media ports exceed the UDP port range")
+        return Error(Exit(status: 2u8))
+    }
+    let V4(media_ip) = s.media.ip else {
+        say(out, "media requires an IPv4 address")
+        return Error(Exit(status: 2u8))
+    }
+    let (limits, session, pool_limits) = media_plan(s)
+    if !media_fits(s, limits, session, pool_limits, out) {
         return Error(Exit(status: 2u8))
     }
     let start = host.mono_ns(clock)
     let until = if s.seconds == 0 {
         0xffffffffffffffffu64
     } else {
-        start + s.seconds * SECOND
+        int.saturating_add(start, int.saturating_mul(s.seconds, SECOND))
     }
     // The room place.
-    let config = place_config(n, web, clock, random, tasks, s.listen)
+    let config = place_config(n, web, clock, random, tasks, s.listen, owners, relay_bytes)
     let Ok(overhead) = runner.operate_bytes(config) else {
+        say(out, "the signaling room plan does not fit")
         return Error(Exit(status: 3u8))
     }
     let Ok(root) = runner.status_root() else {
@@ -459,10 +555,6 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         return Error(Exit(status: 3u8))
     }
     // The relay place, configured from the plan signaling mints by.
-    let last: u16 = s.media.port + s.units - 1
-    let V4(media_ip) = s.media.ip else {
-        return Error(Exit(status: 2u8))
-    }
     let plan = plan_of(media_ip, s.media.port, last, s.turn.ip)
     let mut master_bytes = zeros(32)
     host.random(random, mut master_bytes)
@@ -487,24 +579,27 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     // A quiet room sends nothing for as long as nobody signals; the client pings after
     // `idle_ms` with nothing read and calls the link lost only when that ping goes unanswered
     // for another `idle_ms`.
-    let dial = runner.room_client.Dial(tasks, net: n, address: s.listen, clock: clock, random, keys, token: None, socket: runner.wire_defaults(262144u64).socket, entry: 0u32, arg: list.new(), within_ms: 5000u64, idle_ms: 10000u64)
-    let embed = webrtc_sfu.signal.Embed(wrap: fn(take m: webrtc_sfu.signal.Signal) -> webrtc_sfu.signal.Signal {
-        take m
-    }, unwrap: fn(take m: webrtc_sfu.signal.Signal) -> Option[webrtc_sfu.signal.Signal] {
-        Some(take m)
-    }, publish: fn(p: u32) -> bool {
-        true
-    })
     let mut binds: List[Addr] = list.new()
     for k in 0u16 .. s.units {
         list.push(mut binds, Addr(ip: s.media.ip, port: s.media.port + k))
     }
-    let limits = webrtc_sfu.router.RoomLimits(participants: 16, ids: 64, publications: 8, down_tracks: 64, audio_forward: s.audio_forward, pause_delay_ms: 1000, pause: false)
-    let (order_to, orders): (Sender[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]], Receiver[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]]) = channel.new(1u64)
-    let (reports, _reported): (Sender[webrtc_sfu.signal.PoolReport], Receiver[webrtc_sfu.signal.PoolReport]) = channel.new(16u64)
-    let _ = channel.send(order_to, Open(name: webrtc_sfu.signal.room_name(b"room"), dial: take dial, limits: limits, embed: take embed))
-    let pool_limits = webrtc_sfu.signal.PoolLimits(units: s.units, unit_bytes: 67108864, rooms: 1, sessions: 16, inflight: webrtc_sfu.signal.INFLIGHT, media_take: 1024, room_pps: 100000, open_pps: None)
-    let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: 12, rtx_bytes: 1048576, pacer_packets: 256, start_bps: 300000), limits: pool_limits, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
+    let (order_to, orders): (Sender[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]], Receiver[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]]) = channel.new(int.widen(s.rooms))
+    let (reports, _reported): (Sender[webrtc_sfu.signal.PoolReport], Receiver[webrtc_sfu.signal.PoolReport]) = channel.new(int.widen(s.rooms))
+    for i in 0u32 .. s.rooms {
+        let mut arg: Bytes = list.with_capacity(ROOM_ARG_BYTES)
+        std.codec.put_u32(i, mut arg)
+        let name = webrtc_sfu.signal.room_name(arg)
+        let dial = runner.room_client.Dial(tasks, net: n, address: s.listen, clock: clock, random, keys: clone(keys), token: None, socket: runner.wire_defaults(262144u64).socket, entry: 0u32, arg: take arg, within_ms: 5000u64, idle_ms: 10000u64)
+        let embed = webrtc_sfu.signal.Embed(wrap: fn(take m: webrtc_sfu.signal.Signal) -> webrtc_sfu.signal.Signal {
+            take m
+        }, unwrap: fn(take m: webrtc_sfu.signal.Signal) -> Option[webrtc_sfu.signal.Signal] {
+            Some(take m)
+        }, publish: fn(p: u32) -> bool {
+            true
+        })
+        let _ = channel.send(order_to, Open(name: name, dial: take dial, limits: limits, embed: take embed))
+    }
+    let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: session, limits: pool_limits, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
     match webrtc_sfu.signal.serve_pool(take pool) {
         Ok(_) => (),
         Error(e) => {

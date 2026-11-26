@@ -371,7 +371,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
     let bounds = router.pool_bounds(int.widen(n), int.widen(limits.rooms), int.widen(limits.sessions), session)
     for k in 0u16 .. n {
-        let fixed = units.fixed_bytes(k, n, plane, OUT_BYTES, OUT_PACKETS, SOCKET, bounds) + serve_bytes(k, limits.rooms)
+        let fixed = pool_unit_bytes(k, limits, session)
         if fixed > limits.unit_bytes {
             return Error(Router(Capacity(Capacity(requested: fixed, available: limits.unit_bytes))))
         }
@@ -432,7 +432,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
     let mut free: List[u64] = list.new()
     for k in 0u16 .. n {
-        list.push(mut free, limits.unit_bytes - units.fixed_bytes(k, n, plane, OUT_BYTES, OUT_PACKETS, SOCKET, bounds) - serve_bytes(k, limits.rooms))
+        list.push(mut free, limits.unit_bytes - pool_unit_bytes(k, limits, session))
     }
     let mut pool: Rooms[M] = rooms(limits.rooms, ledger(take free, limits.sessions, session))
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
@@ -594,6 +594,14 @@ pub type RoomCost {
 pub fn room_cost(limits: router.RoomLimits, session: peer.PeerLimits) -> RoomCost {
     let per_session = int.saturating_add(router.member_bytes(limits, session), peer.session_heap(session))
     RoomCost(replicated: router.room_replicated(limits), per_session: per_session, per_remote: router.remote_bytes(session), control: control_bytes(limits), bridge: 0, cascade: 0)
+}
+
+/// Fixed grant a media unit needs before it opens any room.
+pub fn pool_unit_bytes(index: u16, limits: PoolLimits, session: peer.PeerLimits) -> u64 {
+    let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
+    let bounds = router.pool_bounds(int.widen(limits.units), int.widen(limits.rooms), int.widen(limits.sessions), session)
+    let unit = units.fixed_bytes(index, limits.units, plane, OUT_BYTES, OUT_PACKETS, SOCKET, bounds)
+    int.saturating_add(unit, serve_bytes(index, limits.rooms))
 }
 
 // The adapter and its tables at the room's bounds: a seat and a fence entry per id,

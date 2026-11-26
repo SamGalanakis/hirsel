@@ -253,8 +253,7 @@ fn spawn_room_relay(plan: RoomPlan, c: WireConfig, limit: u64, pub_to: Sender[Pu
     if peak > WIRE_SESSION_CEILING {
         return Error(Exceeds(Bound(name: "session peak", value: peak, limit: WIRE_SESSION_CEILING)))
     }
-    let channel_bytes = room_relay_charge(limit)
-    let relay_fixed = channel_bytes + option.unwrap(charge.seq(bytes[RoomSession], limit)) + option.unwrap(charge.map(bytes[RoomSession], bytes[Box[RoomDesk]], limit)) + 4096u64
+    let relay_fixed = room_relay_fixed_bytes(limit)
     let relay_min = relay_fixed + plan.roster
     if plan.relay_bytes < relay_min {
         return Error(Exceeds(Bound(name: "n_relay", value: relay_min, limit: plan.relay_bytes)))
@@ -269,7 +268,20 @@ fn spawn_room_relay(plan: RoomPlan, c: WireConfig, limit: u64, pub_to: Sender[Pu
     let (to, inbox): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS * limit)
     let link = RoomLink(relay: take to, round_read: latest.handle(rounds), max_message: plan.message, live_limit: plan.live_limit, hooks: room_hooks)
     let seed = RoomRelaySeed(inbox: take inbox, rounds: take rounds, random, room_bytes: plan.relay_bytes - relay_fixed, max_sessions: limit)
-    let task_bytes = plan.relay_bytes - channel_bytes
+    let task_bytes = plan.relay_bytes - room_relay_charge(limit)
     let spawned = task.try_spawn(tasks, bytes task_bytes, take seed, room_relay_run) ?=> |(cap, _)| Full(cap)
     Ok(Some((take link, take spawned)))
+}
+
+fn room_relay_fixed_bytes(owners: u64) -> u64 {
+    room_relay_charge(owners) + option.unwrap(charge.seq(bytes[RoomSession], owners)) + option.unwrap(charge.map(bytes[RoomSession], bytes[Box[RoomDesk]], owners)) + 4096u64
+}
+
+/// Relay grant for `rooms` rosters with the same registered peer and argument bounds.
+pub fn room_relay_bytes(owners: u64, rooms: u64, peers: u32, args: u64) -> Option[u64] {
+    if owners > WIRE_OWNER_LIMIT || args > ROOM_ARGS_MAX {
+        return None
+    }
+    let rosters = int.checked_mul(rooms, room_roster_bytes(args, int.widen(peers)))?
+    int.checked_add(room_relay_fixed_bytes(owners), rosters)
 }

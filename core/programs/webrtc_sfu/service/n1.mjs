@@ -50,7 +50,8 @@ function log(...a) {
 // One service run: its stdout lines, and a waiter on them.
 async function service(extra = []) {
   const args = [`--hirsel-n-place=1048576`, '--listen', `127.0.0.1:${listenPort}`, '--media', `127.0.0.1:${mediaPort}`,
-    '--turn', `127.0.0.1:${turnPort}`, ...extra];
+    '--turn', `127.0.0.1:${turnPort}`, '--rooms', '1', '--participants', '17',
+    '--unit-bytes', '268435456', '--down-tracks', '12', ...extra];
   const child = spawn(sfu, args, {stdio: ['ignore', 'pipe', 'pipe']});
   const lines = [];
   let partial = '';

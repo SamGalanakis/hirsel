@@ -707,7 +707,7 @@ fn established_limits(seed: u64, offer_bytes: Bytes, who: peer.Participant, clie
     }
     let profile = option.unwrap(dtls.srtp_profile(c))
     let keys = result.unwrap(dtls.take_srtp(mut c))
-    let cs = result.unwrap(srtp.session(take keys, profile, srtp.Limits(send_streams: 8, receive_streams: 8, ended_streams: 8)))
+    let cs = result.unwrap(srtp.session(take keys, profile, srtp.Limits(send_streams: 32, receive_streams: 32, ended_streams: 32)))
     Rig(p: take p, c: take c, cs: take cs, out: take out)
 }
 

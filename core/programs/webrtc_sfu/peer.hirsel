@@ -854,7 +854,8 @@ fn start_srtp(mut p: PeerSession) -> Result[(), PeerError] {
     let k = keys ?=> |take x| Dtls(x)
     let tracks: u32 = int.widen(p.limits.down_tracks)
     let sections: u32 = int.widen(p.limits.sections)
-    let streams: u32 = 2 * tracks + 2
+    // Media, RTX and FlexFEC for each down-track, the control SSRC and one spare.
+    let streams: u32 = 3 * tracks + 2
     let inbound: u32 = 8 * sections
     let l = srtp.Limits(send_streams: streams, receive_streams: inbound, ended_streams: streams)
     let s = srtp.session(take k, profile, l) ?=> |take x| Srtp(x)

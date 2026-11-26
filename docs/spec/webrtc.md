@@ -1389,7 +1389,10 @@ head when that Part reports a gap (messages the relay dropped for this member), 
   every unit, and it runs before any later `Subscribe` in the control order, so a freed
   section is never shared by two tracks. `PeerLimits.down_tracks` bounds a session's live
   down-tracks, not the tracks it has ever held: an ended track's slot is taken by the next
-  one, and a re-offer names no SSRC for a section whose track ended. An `Unsubscribe` of a
+  one, and a re-offer names no SSRC for a section whose track ended. Ending a track ends
+  its media, RTX and FlexFEC SRTP send streams (`end_send`, SRTP-3) and its sender
+  reports, so the session's SRTP bound of three streams per down-track plus two counts
+  live tracks too. Law W33. An `Unsubscribe` of a
   publication the peer does not hold, because it was never subscribed or its owner left,
   is already done and changes nothing; it is not refused, since a client that hears
   `Unpublished` and unsubscribes is racing nothing. mediasoup closes each consumer when its
@@ -1860,6 +1863,14 @@ unless named otherwise.
   the mono and stereo parameters each on their own section. *Oracle:* RTC-2 and RTC-4 by
   hand. Red on 4c187144, where the unchanged `fmtp` raised no re-offer and the browser kept
   A's `a=ssrc`, so Chromium stopped playing C after 4,050 bytes.
+- **W33 `flexfec_churn_keeps_legs_sending`.** *Harness:* `fec_laws.hirsel`. A FlexFEC
+  subscriber with `down_tracks: 4` subscribes to and unsubscribes from one VP8 publication
+  ten times. Each round's re-offer names a fresh media and FEC SSRC, and the round's
+  two-packet keyframe must reach the subscriber on that media SSRC with one repair on
+  PT 49 on the paired FEC SSRC. *Oracle:* RTC-4 and RTC-7 by hand: one live track needs 3
+  of the 14 send streams, and RTP-14 F4 closes a keyframe group at its marker. Red on
+  5a334a9c, where an ended track kept its send streams and the sixth round's leg could
+  not seal.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.
@@ -1916,7 +1927,7 @@ W19, blocks, because those are soundness reds.
 | **S9** Costs and nightly | `bench/media/sfu_fanout` and the voice-capacity run; N1 and N2 on Boat | S5, S6, S7 | the cost targets |
 | **C1** Opus RED | RTP-13 and its use here: RTC-2's `Red` answer, RTC-5's ring, policy and RED legs | S6 | W21, W22, W23 |
 | **C4** Header-extension pack | RTP-3's VLA, playout-delay, CVO and abs-capture-time; RTC-1's answers, RTC-5's egress extensions and `set_playout`, RTC-6's planned rates and dropped streams | S6 | W11b, W26 |
-| **C14** FlexFEC-03 | RTP-14 and its use here: RTC-1's `FEC-FR`, RTC-2's `Flexfec` answer and re-offer lines, RTC-4's FEC SSRC, RTC-5's groups and paced repairs | S6, C1 | W30; N1 `flexfec_per_leg` |
+| **C14** FlexFEC-03 | RTP-14 and its use here: RTC-1's `FEC-FR`, RTC-2's `Flexfec` answer and re-offer lines, RTC-4's FEC SSRC, RTC-5's groups and paced repairs | S6, C1 | W30, W33; N1 `flexfec_per_leg` |
 | **C9b** E2EE routing | RTC-6's clear ranges; VP9's keyframe from the descriptor alone | S6, C1 | W25 |
 | **R1** Room roster identity (runner) | RTC-8's relay change: incarnation and revision on `RoomRoster`, no `next_peer` reset within an incarnation, the Part head and `snapshot` flag | nothing | `room_roster_identity` in runner_owner_laws.hirsel |
 

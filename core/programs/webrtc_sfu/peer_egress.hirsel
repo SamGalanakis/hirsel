@@ -632,6 +632,18 @@ pub fn end_track(mut p: PeerSession, track: u16) {
         let _ = rtp.history.clear(mut p.tracks[t].history)
         rtp.fec.clear(mut p.tracks[t].fec)
         p.tracks[t].ended = true
+        // The track's SRTP send streams end with it, so the session's stream bound counts
+        // live down-tracks, not every one it has held (RTC-7).
+        let ssrc = p.tracks[t].ssrc
+        let rtx = p.tracks[t].rtx_ssrc
+        let fec = p.tracks[t].fec_ssrc
+        end_send(mut p, ssrc)
+        if rtx != 0 {
+            end_send(mut p, rtx)
+        }
+        if fec != 0 {
+            end_send(mut p, fec)
+        }
     }
     unpace(mut p, track)
 }
@@ -828,7 +840,7 @@ fn ntp(now: u64) -> u64 {
 fn reports(mut p: PeerSession, now: u64, mut out: Outbox) -> Result[(), PeerError] {
     // One SR per down-track, under that track's SSRC and its own counts.
     for t in 0u64 .. list.len(p.tracks) {
-        if p.tracks[t].highest == EMPTY {
+        if p.tracks[t].highest == EMPTY || p.tracks[t].ended {
             continue
         }
         let Some(ts) = rtp.rewrite.sr_timestamp(mut p.tracks[t].rewrite, now) else {

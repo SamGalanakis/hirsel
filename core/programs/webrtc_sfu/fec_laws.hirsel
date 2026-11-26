@@ -343,3 +343,75 @@ fn flexfec_recovers_drops_without_nack() -> Result[(), router.RouterError] {
     }
     Ok(())
 }
+
+/// bug: keep an ended down-track's SRTP send streams counted, so a FlexFEC subscriber that churns legs runs out of sealers and every later leg sends nothing, or send an SR for an ended track whose streams are gone.
+/// oracle: RTC-4 and RTC-7 by hand: the session bounds live down-tracks, and an unsubscribe ends the track. With `down_tracks: 4` the session holds at most 3 * 4 + 2 = 14 send streams (media, RTX and FlexFEC per track, control and a spare); each round here seals a fresh media SSRC and a fresh FlexFEC SSRC, so ten rounds seal 20 while one track is live. Every round's keyframe of two packets must reach the subscriber on the media SSRC its re-offer names and close one FlexFEC group (RTP-14 F4: a keyframe group closes at its marker), so one repair on PT 49 follows on the paired FEC SSRC.
+@test
+fn flexfec_churn_keeps_legs_sending() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(180))
+    result.unwrap(router.open_room(mut r, room_id(), room_limits()))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut pub_ = admit(mut r, 181, session_offer(), 1)
+    let mut offer = minimal_head(b" d")
+    fec_section(mut offer, b"recvonly")
+    let mut s = admit(mut r, 183, offer, 2)
+    let room = room_id()
+    let pa = result.unwrap(router.publish(mut r, room, pub_.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mut now = 10 * MS
+    let mut seq: u16 = 700
+    for round in 0u64 .. 10 {
+        result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, now, mut out))
+        let mut reoffer: Option[(u64, Bytes)] = None
+        for take n in router.take_notices(mut r) {
+            if let Offer(who: w, version: v, text: take t) = take n {
+                if w == s.who {
+                    reoffer = Some((v, take t))
+                }
+            }
+        }
+        let Some((version, text)) = reoffer else {
+            fail("a subscription on a flexfec-03 section raised no re-offer")
+        }
+        let mut d = sdp.description()
+        result.unwrap(sdp.parse(text, mut d))
+        if list.len(d.sections[0].fec_pairs) != 1 {
+            fail("the re-offer does not pair the leg with one FlexFEC SSRC")
+        }
+        let (m, f) = d.sections[0].fec_pairs[0]
+        result.unwrap(router.answer_reoffer(mut r, room, s.who, version, fec_answer(184)))
+        peer.clear_outbox(mut out)
+        let mut wire: List[Got] = list.new()
+        let ts: u32 = int.truncate(90000 * (round + 1))
+        for k in 0u64 .. 2 {
+            let packet = frame_packet(mut pub_.cs, seq, ts, k == 1, frame_body(true, k, k))
+            seq = int.wrapping_add(seq, 1u16)
+            peer.clear_outbox(mut out)
+            feed(mut r, now, pub_.who, pub_.at, packet, mut out)
+            for g in received(mut s, out) {
+                list.push(mut wire, clone(g))
+            }
+            fec_drain(mut r, now + MS, now + 4 * MS, mut s, mut out, mut wire)
+            now += 5 * MS
+        }
+        fec_drain(mut r, now, now + 20 * MS, mut s, mut out, mut wire)
+        now += 21 * MS
+        let mut sent = 0u64
+        let mut repairs = 0u64
+        for g in wire {
+            if g.h.ssrc == m {
+                sent += 1
+            } else if g.h.ssrc == f && g.h.pt == 49 {
+                repairs += 1
+            }
+        }
+        if sent != 2 || repairs != 1 {
+            fail("a churned FlexFEC leg stopped sending its keyframe or its repair")
+        }
+        result.unwrap(router.unsubscribe(mut r, room, s.who, pa))
+        for take _ in router.take_notices(mut r) {}
+        fec_drain(mut r, now, now + 5 * MS, mut s, mut out, mut wire)
+        now += 6 * MS
+    }
+    Ok(())
+}

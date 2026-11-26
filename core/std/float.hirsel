@@ -450,7 +450,17 @@ type Decimal {
 }
 
 /// The binary shift that moves the decimal point by at most n places, 60 past 18.
-const SHIFTS: Inline[u64, 19] =[0, 3, 6, 9, 13, 16, 19, 23, 26, 29, 33, 36, 39, 43, 46, 49, 53, 56, 59]
+const SHIFTS: Inline[u64, 19] = decimal_shifts()
+
+fn decimal_shifts() -> Inline[u64, 19] {
+    let mut shifts: Inline[u64, 19] =[0; 19]
+    let mut ten_to_i: u64 = 1
+    for i in 1u64 .. 19 {
+        ten_to_i *= 10
+        shifts[i] = 63 - leading_zeros(ten_to_i)
+    }
+    shifts
+}
 
 fn shift_for(n: i64) -> u64 {
     if n < 19 {
@@ -767,9 +777,29 @@ fn new_digits(d: Decimal, k: u64) -> u64 {
 }
 
 /// Exact powers of ten for the fast path.
-const POW10_64: Inline[f64, 23] =[1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22]
+const POW10_64: Inline[f64, 23] = exact_powers10_64()
 
-const POW10_32: Inline[f32, 11] =[1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10]
+fn exact_powers10_64() -> Inline[f64, 23] {
+    let mut powers: Inline[f64, 23] =[1.0; 23]
+    let mut value: f64 = 1.0
+    for i in 1u64 .. 23 {
+        value *= 10.0
+        powers[i] = value
+    }
+    powers
+}
+
+const POW10_32: Inline[f32, 11] = exact_powers10_32()
+
+fn exact_powers10_32() -> Inline[f32, 11] {
+    let mut powers: Inline[f32, 11] =[1.0; 11]
+    let mut value: f32 = 1.0
+    for i in 1u64 .. 11 {
+        value *= 10.0
+        powers[i] = value
+    }
+    powers
+}
 
 /// 5^q for q in -342..=308, normalized to 128 bits and truncated, (high, low): POW5[q + 342].
 /// Generated as fast_float's table_generation.py defines it: for q < 0, 2^b / 5^-q + 1
@@ -1967,10 +1997,30 @@ fn digits_of(v: u64, mut t: Inline[u8, 20]) -> u64 {
 }
 
 // 5^k for k in 0..=27, the powers below 2^64.
-const POW5_U64: Inline[u64, 28] =[1, 5, 25, 125, 625, 3125, 15625, 78125, 390625, 1953125, 9765625, 48828125, 244140625, 1220703125, 6103515625, 30517578125, 152587890625, 762939453125, 3814697265625, 19073486328125, 95367431640625, 476837158203125, 2384185791015625, 11920928955078125, 59604644775390625, 298023223876953125, 1490116119384765625, 7450580596923828125]
+const POW5_U64: Inline[u64, 28] = integer_powers5()
+
+fn integer_powers5() -> Inline[u64, 28] {
+    let mut powers: Inline[u64, 28] =[1; 28]
+    let mut value: u64 = 1
+    for i in 1u64 .. 28 {
+        value *= 5
+        powers[i] = value
+    }
+    powers
+}
 
 // 10^k for k in 0..=19, the powers below 2^64.
-const POW10_U64: Inline[u64, 20] =[1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000, 10000000000, 100000000000, 1000000000000, 10000000000000, 100000000000000, 1000000000000000, 10000000000000000, 100000000000000000, 1000000000000000000, 10000000000000000000]
+const POW10_U64: Inline[u64, 20] = integer_powers10()
+
+fn integer_powers10() -> Inline[u64, 20] {
+    let mut powers: Inline[u64, 20] =[1; 20]
+    let mut value: u64 = 1
+    for i in 1u64 .. 20 {
+        value *= 10
+        powers[i] = value
+    }
+    powers
+}
 
 // Binary64 interval scaling and digit removal adapted from Ryū d2s.rs and
 // d2s_intrinsics.rs. Copyright 2018 Ulf Adams, Apache-2.0. See third-party/NOTICES.md.

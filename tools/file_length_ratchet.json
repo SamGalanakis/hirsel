@@ -47,9 +47,9 @@
     "reason": "w3a-b-codec-changes-2008"
   },
   "core/std/float.hirsel": {
-    "lines": 3391,
-    "raise_revision": 2,
-    "reason": "profilesmash-json-outliers-2389"
+    "lines": 3441,
+    "raise_revision": 3,
+    "reason": "comptime-phase3-std-2830: keep float table initializers private"
   },
   "core/std/http.hirsel": {
     "lines": 3295,

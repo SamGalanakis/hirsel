@@ -55,6 +55,7 @@ pub(crate) struct Materialised {
     pub(super) signatures: CodeSignatures,
     pub(super) adapters: Vec<Adapter>,
     pub(super) described: Vec<Identity>,
+    pub(super) selected_target: bool,
     /// The reason of a `target.unsupported` call the retained code makes (PROG-6).
     pub(super) unsupported: Option<String>,
     pub(super) values: Bindings,
@@ -190,6 +191,7 @@ pub(super) fn materialise(
         signatures,
         adapters,
         described,
+        selected_target: built.selected_target,
         unsupported,
         values: bindings,
     })

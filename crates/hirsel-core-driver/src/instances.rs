@@ -115,6 +115,8 @@ pub(crate) struct InstanceSet {
     summarize_foreign: bool,
     compact_recipe: bool,
     target: Option<hirsel_core_layout::Target>,
+    /// A reached module reads the target or binds a computed constant's value.
+    target_inputs: bool,
     pub(crate) foreign: BTreeSet<Identity>,
     pub(crate) foreign_addresses: BTreeMap<Identity, ContentHash>,
 }
@@ -317,6 +319,11 @@ impl InstanceSet {
     pub(crate) fn for_target(mut self, target: Option<hirsel_core_layout::Target>) -> Self {
         self.target = target;
         self
+    }
+    /// After a complete records-free walk, whether all inputs to the reached
+    /// code are shared across targets.
+    pub(crate) fn is_target_independent(&self) -> bool {
+        !self.target_inputs && self.foreign.is_empty()
     }
     /// Each of `instances`' index in the reach record's table, if expanded,
     /// by one walk of both: `instances` is in identity order, as the table is.
@@ -803,6 +810,7 @@ impl CheckProduct {
                 signatures,
                 adapters,
                 described,
+                selected_target,
                 unsupported,
                 values,
             } = made;
@@ -814,6 +822,7 @@ impl CheckProduct {
                 };
                 return Err(InstanceStop::Unsupported(Box::new(stop)));
             }
+            instances.target_inputs |= selected_target || values.is_some();
             resolver.add(&children);
             if records.is_some() {
                 let mut closures = std::collections::BTreeMap::new();

@@ -36,6 +36,8 @@ pub struct Materialized {
     pub function: FuncId,
     pub children: Vec<Child>,
     pub code: hirsel_core_ir::normal::EncodedBody,
+    /// Whether retention specialized any part of the module for this target.
+    pub selected_target: bool,
 }
 
 /// An instance a body calls, with its arguments' closures in parameter order.
@@ -111,6 +113,7 @@ pub fn materialize_glue(
 /// The retained code of `function` for `target` (PROG-10).
 fn retained(module: &Module, function: FuncId, target: Target) -> Materialized {
     let module = hirsel_core_ir::select_target(module, target);
+    let selected_target = matches!(module, std::borrow::Cow::Owned(_));
     let (code, module) = hirsel_core_ir::normal::retain(&module, function);
     let children = children_for_slots(&module, &code.slots);
     Materialized {
@@ -118,6 +121,7 @@ fn retained(module: &Module, function: FuncId, target: Target) -> Materialized {
         code,
         module: Some(module),
         function: FuncId(0),
+        selected_target,
     }
 }
 

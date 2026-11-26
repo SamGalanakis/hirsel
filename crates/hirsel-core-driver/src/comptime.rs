@@ -29,6 +29,8 @@ pub(crate) struct Evaluation {
     /// The initialiser reaches a body refused or not built already, or reads
     /// a constant that does: that report stands for the constant's.
     pub refused_elsewhere: bool,
+    /// The complete initializer closure takes the same inputs on every target.
+    target_independent: bool,
 }
 
 /// Each constant's evaluation for one product, by path and target, and each
@@ -79,18 +81,21 @@ impl CheckProduct {
                 address: None,
                 value: Err(format!("its value depends on itself: {cycle}").into()),
                 refused_elsewhere: false,
+                target_independent: false,
             };
         }
         ACTIVE.with_borrow_mut(|active| active.push(key.clone()));
         let done = self.evaluate(path, target);
         ACTIVE.with_borrow_mut(|active| active.pop());
-        self.constant_values
-            .evaluations
-            .lock()
-            .unwrap()
-            .entry(key)
-            .or_insert(done)
-            .clone()
+        let mut evaluations = self.constant_values.evaluations.lock().unwrap();
+        if done.target_independent {
+            for other in Target::ALL.into_iter().filter(|&other| other != target) {
+                evaluations
+                    .entry((path.clone(), other))
+                    .or_insert_with(|| done.clone());
+            }
+        }
+        evaluations.entry(key).or_insert(done).clone()
     }
 
     fn evaluate(&self, path: &DefPath, target: Target) -> Evaluation {
@@ -130,6 +135,7 @@ impl CheckProduct {
                     address: None,
                     value: Err(cause.into()),
                     refused_elsewhere,
+                    target_independent: false,
                 };
             }
         };
@@ -139,6 +145,7 @@ impl CheckProduct {
         let address = set
             .addresses(&reached, None)
             .and_then(|addresses| addresses.get(&root).copied());
+        let target_independent = address.is_some() && set.is_target_independent();
         // The run reads only the code its address names: a target whose code
         // agrees with one run already takes its result.
         let known = address.and_then(|a| {
@@ -167,6 +174,7 @@ impl CheckProduct {
             address,
             value,
             refused_elsewhere: false,
+            target_independent,
         }
     }
 }

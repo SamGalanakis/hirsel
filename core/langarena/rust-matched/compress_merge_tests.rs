@@ -52,7 +52,13 @@ fn boxed_stable_reuses_original_buffer_and_capacity() {
         let mut xs = items(n, &drops);
         let old_ptr = xs.as_ptr();
         let old_cap = xs.capacity();
-        let mut expected: Vec<_> = xs.iter().map(|x| { let x = x.as_ref().unwrap(); (x.key, x.id) }).collect();
+        let mut expected: Vec<_> = xs
+            .iter()
+            .map(|x| {
+                let x = x.as_ref().unwrap();
+                (x.key, x.id)
+            })
+            .collect();
         expected.sort_by_key(|x| x.0);
         compress_merge::boxes(
             &mut xs,
@@ -65,7 +71,12 @@ fn boxed_stable_reuses_original_buffer_and_capacity() {
         assert_eq!(xs.as_ptr(), old_ptr);
         assert_eq!(xs.capacity(), old_cap);
         assert_eq!(
-            xs.iter().map(|x| { let x = x.as_ref().unwrap(); (x.key, x.id) }).collect::<Vec<_>>(),
+            xs.iter()
+                .map(|x| {
+                    let x = x.as_ref().unwrap();
+                    (x.key, x.id)
+                })
+                .collect::<Vec<_>>(),
             expected
         );
         assert_eq!(drops.get(), 0);

@@ -1,3 +1,4 @@
+// test-runner: core/programs/media_record/test-vectors.sh
 // Records each video codec with Opus, the video starting 300 ms after the
 // audio on another RTP base with its first sender report ten frames late,
 // and writes each file and the frames' true times for validate.py: per

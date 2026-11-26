@@ -106,10 +106,22 @@ mod tests {
         assert_eq!(float_i32(-2147483648.9), i32::MIN);
         assert_eq!(float_u64(-0.9), 0);
         assert_eq!(float_u64(18446744073709549568.0), u64::MAX - 2047);
-        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 2147483648.0, -2147483649.0] {
+        for x in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            2147483648.0,
+            -2147483649.0,
+        ] {
             assert!(std::panic::catch_unwind(|| float_i32(x)).is_err());
         }
-        for x in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 18446744073709551616.0] {
+        for x in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -1.0,
+            18446744073709551616.0,
+        ] {
             assert!(std::panic::catch_unwind(|| float_u64(x)).is_err());
         }
     }

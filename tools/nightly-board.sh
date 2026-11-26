@@ -72,6 +72,9 @@ if [[ -n "$checkout_status" ]]; then
   printf '%s\n' "$checkout_status" | tee -a "$run/run.log" >&2
   exit 2
 fi
+step="Fresh worktree bootstrap"
+record
+python3 tools/tests/fresh_worktree.py >>"$run/run.log" 2>&1
 checkout=$PWD
 boat_status=0
 step="Boat screen"
@@ -167,6 +170,13 @@ run_vopr() (
 
 toolchain_status=0
 compiler=$(build_toolchain 2>>"$run/run.log") || toolchain_status=$?
+cgroup_status=0
+if (( toolchain_status == 0 )); then
+  .buck2/bin/buck2 test -j4 //:core-driver-cgroup >>"$run/run.log" 2>&1 || cgroup_status=$?
+fi
+if (( cgroup_status != 0 )); then
+  printf 'Launcher cgroup law exited %s. See %s/run.log.\n' "$cgroup_status" "$run" >>"$run/run.log"
+fi
 if [[ -z "$law_status" ]]; then
   law_status=$toolchain_status
   # Build stores and caches go to disk under the run; each law's working files stay on

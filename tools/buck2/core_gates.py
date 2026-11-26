@@ -56,3 +56,17 @@ def core_gates(out, call, Raw):
                             files_env={"SQLITE_HEADER": "//tools/buck2:sqlite-header[sqlite3/sqlite3.h]"},
                             extra_env={"HIRSEL_TEST_SMALL_TMPFS": "65536"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/sqlite/**"])')))
+    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-comptime-native", case_filter="comptime::tests::computed_static_bytes_on_both_native_engines",
+                           data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**"]) + ["core/front/cases/body/constant-computed-static.hirsel"]')))
+    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-cgroup", delegated_cgroup=True, case_filter="launcher::laws::cgroup_lifecycle", data=[]))
+    matched = "core/langarena/rust-matched"
+    for suite, sources in [
+        ("json_tests", ["json.rs", "text_support.rs"]),
+        ("compress_merge_tests", ["compress_merge.rs"]),
+        ("support", []),
+    ]:
+        entry = f"{matched}/{suite}.rs"
+        out.append("\n" + call("hirsel_test", name="langarena-rust-" + suite.replace("_", "-"),
+                                crate=suite, crate_root=entry, srcs=[entry, *[f"{matched}/{path}" for path in sources]],
+                                features=[], deps=[], manifest_dir=".", package_name="langarena-rust",
+                                version="0.0.0", edition="2024"))

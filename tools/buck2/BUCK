@@ -205,6 +205,7 @@ export_file(name = "runtime_parts.py", src = "runtime_parts.py", visibility = ["
 export_file(name = "runner_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "test_inputs.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "core_gates.py", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "python_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "distribution_gates.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "sync.py", src = "sync.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "prepare.py", mode = "reference", visibility = ["PUBLIC"])
@@ -224,6 +225,7 @@ host_transition(
 )
 
 export_file(name = "workspace-metadata.json", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "defs.bzl", mode = "reference", visibility = ["PUBLIC"])
 
 # Python sources shared by tool tests.
 [export_file(name = tool, src = tool, mode = "reference", visibility = ["PUBLIC"]) for tool in [
@@ -233,6 +235,8 @@ export_file(name = "workspace-metadata.json", mode = "reference", visibility = [
     "fmt.py",
     "rust_environment.py",
     "supply_chain.py",
+    "pool_usage.py",
+    "prelude_overlay.py",
 ]]
 
 # Production request functions exercised by the launcher tool test.

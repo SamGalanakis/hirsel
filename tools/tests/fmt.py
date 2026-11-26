@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Changed corpus cases share the formatter gate without sweeping old debt."""
+import ast
 import contextlib
 import importlib.util
 import io
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +37,21 @@ class ChangedCases(unittest.TestCase):
         self.git('commit', '-qm', 'base')
         self.base = self.git('rev-parse', 'HEAD').strip()
         self.git('update-ref', 'refs/remotes/origin/main', self.base)
-        formatter = str(Path(os.environ.get('HIRSEL_TEST_CASE_FORMATTER', '/formatter-not-built')).resolve())
+        fake = self.write('.buck2/bin/fake-case-formatter', '''#!/usr/bin/env python3
+# The fixture's formatter oracle: canonical hirsel ends in a newline and carries no
+# compact `){` or mid-line doubled spaces. Selection logic is what these tests check.
+import re
+import sys
+status = 0
+for path in [arg for arg in sys.argv[1:] if not arg.startswith('--')]:
+    text = open(path).read()
+    if not text.endswith('\\n') or re.search(r'\\S  ', text) or '){' in text:
+        print(path)
+        status = 1
+sys.exit(status)
+''')
+        fake.chmod(0o755)
+        formatter = str(Path(os.environ.get('HIRSEL_TEST_CASE_FORMATTER', str(fake))).resolve())
         self.formatter_log = self.root / 'formatter-invocations.jsonl'
         wrapper = self.write('.buck2/bin/case-formatter', f'''#!/usr/bin/env python3
 import json, os, sys
@@ -73,10 +89,11 @@ sys.exit(index.read_text() != 'current')
         rustfmt = self.write('.buck2/bin/rustfmt', '#!/bin/sh\nexit 0\n')
         buck.chmod(0o755)
         rustfmt.chmod(0o755)
-        for active in [patch.object(fmt, 'ROOT', self.root), patch.object(fmt, 'BUCK2', buck),
-                       patch.object(fmt, 'RUSTFMT', rustfmt),
-                       patch.object(fmt, 'check_file_lengths', lambda root: True),
-                       patch.object(fmt, 'check_boundaries', lambda root: True)]:
+        self.preflights = dict(check_file_lengths=lambda root: True, check_boundaries=lambda root: True,
+                               check_target=lambda root: True, check_runners=lambda root: True,
+                               darwin_check=SimpleNamespace(rust_changed=lambda: True, check=lambda: 0))
+        for active in [patch.multiple(fmt, **self.preflights),
+                       patch.multiple(fmt, ROOT=self.root, BUCK2=buck, RUSTFMT=rustfmt)]:
             active.start()
             self.addCleanup(active.stop)
 
@@ -118,6 +135,26 @@ sys.exit(index.read_text() != 'current')
     def formatter_invocations_with(self, path):
         return [args for args in self.formatter_invocations() if path in args]
 
+
+    def test_fixture_patches_every_main_preflight(self):
+        source = (ROOT / 'tools/buck2/fmt.py').read_text()
+        tree = ast.parse(source)
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        preflights = set()
+        for statement in main.body:
+            if isinstance(statement, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == 'rustfmt_flags' for target in statement.targets):
+                break
+            for call in ast.walk(statement):
+                if not isinstance(call, ast.Call):
+                    continue
+                function = call.func
+                if isinstance(function, ast.Name):
+                    preflights.add(function.id)
+                elif isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
+                    preflights.add(function.value.id)
+        self.assertEqual(preflights - self.preflights.keys(), set())
+
     def test_noncanonical_changed_case_fails_with_and_without_check(self):
         case = self.write('core/front/cases/case.hirsel', 'fn f(){1}')
         before = case.read_bytes()
@@ -129,6 +166,7 @@ sys.exit(index.read_text() != 'current')
     def test_changed_canonical_case_does_not_check_unchanged_noncanonical_neighbor(self):
         self.write('core/front/cases/case.hirsel', 'fn g() -> u64 {\n    1\n}\n')
         self.assertEqual(self.run_fmt('--check'), 0)
+        self.assertEqual(self.formatter_invocations(), [['--check', 'core/front/cases/case.hirsel']])
         self.assertEqual((self.root / 'core/front/cases/legacy.hirsel').read_text(), 'fn old(){1}')
 
     def test_selection_includes_branch_index_worktree_and_untracked_cases_only(self):
@@ -152,6 +190,7 @@ sys.exit(index.read_text() != 'current')
 
     def test_no_changed_cases_do_not_build_a_formatter(self):
         self.assertEqual(self.run_fmt('--check'), 0)
+        self.assertEqual(self.formatter_invocations(), [])
 
     def test_stale_std_index_fails_without_changing_it(self):
         index = self.write('core/std/API-INDEX.md', 'stale')

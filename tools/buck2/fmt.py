@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / 'tools'))
 from check_boundaries import check as check_boundaries
 from check_file_lengths import check_changed as check_file_lengths
 from check_target import check as check_target
+from check_test_runners import check as check_runners
 import darwin_check
 
 BUCK2 = ROOT / '.buck2/bin/buck2'
@@ -179,7 +180,7 @@ def main():
         return synced.returncode
     try:
         docs = subprocess.run([sys.executable, str(ROOT / 'tools/check_doc_refs.py')], cwd=ROOT)
-        return docs.returncode or check_compiler_metadata() or check_cases(changed_cases())
+        return docs.returncode or not check_runners(ROOT) or check_compiler_metadata() or check_cases(changed_cases())
     except subprocess.CalledProcessError as error:
         return error.returncode
 

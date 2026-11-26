@@ -979,7 +979,7 @@ _core_runtime_archives = rule(
     },
 )
 
-def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
+def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::", delegated_cgroup = False):
     files_env = {
         "HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
         "HIRSEL_CORE_RT_RECORD_ARCHIVE": "//:core-driver-record-runtime-pic",
@@ -1001,13 +1001,24 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
     common = dict(
         harness = "//:hirsel-core-driver-unittest-harness",
         data = data,
-        files_env = files_env,
+        files_env = {} if delegated_cgroup else files_env,
         cwd = "crates/hirsel-core-driver",
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
         request = _request("hirsel-core-driver-unittest"),
         visibility = ["PUBLIC"],
     )
+    if delegated_cgroup:
+        _rust_test(
+            name = name,
+            args = [case_filter, "--ignored", "--exact"],
+            labels = ["local-execution", "requires-cgroup"],
+            exec_compatible_with = [budget_constraint("host")],
+            pool = False,
+            test_binary = name,
+            **common
+        )
+        return
     # The shape of hirsel_test's host-routed suites, so tools/test-filter and
     # tools/consumers find this suite's shards and inventory by name.
     _rust_test(

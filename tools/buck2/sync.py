@@ -57,6 +57,7 @@ import supply_chain
 from cargo_units import Resolution, configured, relocate
 from distribution_gates import distribution_gates
 from runner_gates import runner_gates
+from python_gates import python_gates
 from test_inputs import RUNTIME_DATA, TEST_DATA
 from build_script_inputs import BUILD_SCRIPT_INPUTS
 from core_gates import core_gates
@@ -85,7 +86,7 @@ BUILD_SCRIPT_SOURCES = {"hirsel-core-diag": ["crates/hirsel-core-diag/build.rs",
 
 
 # Their tests live in integration/proof targets, not these empty entry points.
-EMPTY_UNIT_HARNESSES = {'hirsel-intern-unittest', 'hirsel-core-driver-bin-hirsel-unittest',
+EMPTY_UNIT_HARNESSES = {'hirsel-core-driver-bin-hirsel-unittest',
  'hirsel-core-driver-bin-hirsel-core-request-cost-unittest',
  'hirsel-core-syntax-bin-hirsel-core-syntax-unittest'}
 
@@ -467,29 +468,23 @@ def first_party(meta: dict) -> str:
     ]
 
     out.append("\n" + "\n".join(call("export_file", name=f"darwin-{library.lower()}-symbols", src=f"tools/native-toolchain/darwin/{library}.symbols", visibility=["PUBLIC"]) for library in ("libSystem", "CoreFoundation", "Security")) + "\n" + call("hirsel_core_image", name="hirsel-core-image", srcs=Raw('glob(["core/core/*.hirsel", "core/std/**/*.hirsel"], exclude = ["core/std/tests/**"])')))
-    out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", host=True,
-                           data=["//tools/buck2:fmt.py"],
-                           files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
-    out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py",
-                           data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
-                                 "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
-                                 "//tools/buck2:llvm-cxx-headers-lock.json",
-                                 "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py",
                            args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration"],
                            data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py",
                                  "//tools/buck2:supply_chain.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:runner_gates.py",
-                                 "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py"]))
+                                 "//tools/buck2:test_inputs.py", "//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", "//tools/buck2:python_gates.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py",
                            data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-consumers", script="tools/tests/consumers.py",
                            args=["-v"],
                            data=Raw('["tools/consumers", "tools/capped", '
                                     '"//tools/buck2:sync.py", "//tools/buck2:runner_gates.py", "//tools/buck2:test_inputs.py", '
-                                    '"//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", '
+                                    '"//tools/buck2:core_gates.py", "//tools/buck2:distribution_gates.py", "//tools/buck2:python_gates.py", '
                                     '"//tools/buck2:generated.py", "//tools/buck2:action_sizes_from_log.py", '
                                     '"//tools/buck2:test_sizes_from_usage.py", "//tools/buck2:test_requirements.bzl"]')))
+
+    python_gates(out, call, Raw)
 
     def label(package_id: str) -> str:
         package = packages[package_id]
@@ -571,9 +566,10 @@ def first_party(meta: dict) -> str:
             if "staticlib" in lib["crate_types"]:
                 out.append("\n" + static_archive_rule(package, packages, attrs))
             if lib.get("test", True) and f"{name}-unittest" not in EMPTY_UNIT_HARNESSES:
-                binary = f"{name}-unittest"
+                binary = "hirsel-intern-id-salt" if name == "hirsel-intern" else f"{name}-unittest"
+                test_attrs_for_lib = attrs | {"features": sorted(set(features) | {"id-salt"})} if name == "hirsel-intern" else attrs
                 out.append("\n" + call("hirsel_test", name=binary, deps=test_deps,
-                                        **test_attrs(binary, src), **attrs))
+                                        **test_attrs(binary, src), **test_attrs_for_lib))
         own = [f"//:{name}"] if lib else []
         if lib and lib.get("test", True) and not guarded(pathlib.Path(lib["src_path"])):
             unguarded.append(relative(pathlib.Path(lib["src_path"])))

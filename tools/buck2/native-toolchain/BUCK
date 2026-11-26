@@ -35,6 +35,7 @@ unpack_toolchain(
 )
 
 export_file(name = "unpack.py")
+export_file(name = "unpack-source", src = "unpack.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "link_kit.py", visibility = ["PUBLIC"])
 export_file(name = "darwin_sync_ban.py", visibility = ["PUBLIC"])
 export_file(name = "darwin_import_law.py", visibility = ["PUBLIC"])

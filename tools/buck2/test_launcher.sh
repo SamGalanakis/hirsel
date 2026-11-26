@@ -268,6 +268,9 @@ report_empty_partition() {
 # Only Rust harness runs use the libtest event protocol. Discovery and help
 # retain their own formats, and scripts keep their original argument surface.
 run_harness() (
+  case "$harness" in
+    *.py) exec python3 "$harness" "$@" ;;
+  esac
   if [ -n "$test_binary" ] && [ -n "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
     for argument in "$@"; do
       case "$argument" in --list | --help | -h) "$harness" "$@"; exit $? ;; esac

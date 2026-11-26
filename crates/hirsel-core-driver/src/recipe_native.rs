@@ -7,15 +7,15 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
 use crate::code_store::{CodeStore, ObjectKind};
-use crate::foreign_archive::{LinkArchives, contained};
+use crate::foreign_archive::{LinkArchives, archive_ref, contained, recipe_code};
 use hirsel_core_ir::{
     FuncId,
     address::{Binding, Group, builtin_semantics_number},
     decode::Debit,
     normal::{self, Annex, Slot},
     release_recipe::{
-        self as wire, BodyRef, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding,
-        GrantKind, Launch, ObjectRef, Recipe,
+        self as wire, BodyRef, ForeignFunction, ForeignLeaf, GrantBinding, GrantKind, Launch,
+        ObjectRef, Recipe,
     },
     source::{SourceMap, anchored_items},
 };
@@ -586,13 +586,6 @@ struct ForeignRelease {
     link_archives: LinkArchives,
 }
 
-fn archive_ref(row: &ForeignArchiveCapture) -> ObjectRef {
-    ObjectRef {
-        hash: ContentHash(row.pin),
-        len: row.bytes.len() as u64,
-    }
-}
-
 impl CheckProduct {
     fn release_foreign(
         &self,
@@ -645,7 +638,11 @@ impl CheckProduct {
                 )));
             }
             let (module, capture) = self.foreign_capture(function)?;
-            let row = crate::foreign_archive::select(&module, capture, target)?;
+            // A contained grant binds its module's pin (FFI-16).
+            let row = match capture.wasm() {
+                Some(module) => module,
+                None => crate::foreign_archive::select(&module, capture, target)?,
+            };
             let object = archive_ref(row);
             selected.insert(object.hash, row);
             Ok(object)
@@ -701,15 +698,7 @@ impl CheckProduct {
                 .or_insert_with(|| ForeignLeaf {
                     module,
                     symbols: capture.symbols.clone(),
-                    targets: capture
-                        .archives()
-                        .into_iter()
-                        .flatten()
-                        .map(|(target, row)| ForeignTarget {
-                            target: target.clone(),
-                            archive: archive_ref(row),
-                        })
-                        .collect(),
+                    code: recipe_code(capture),
                     functions: Vec::new(),
                 });
             leaf.functions.push(ForeignFunction {
@@ -759,8 +748,10 @@ impl CheckProduct {
             let function = &leaf.functions[0].identity.definition;
             let (_, capture) = self.foreign_capture(function)?;
             if let Some(module) = capture.wasm() {
-                contained::admit_module(leaf, module)?;
-                return Err(contained::not_built().into());
+                let artifact = contained::compile_module(leaf, module, target)?;
+                sealed.contain(ContentHash(module.pin), artifact);
+                selected.insert(ContentHash(module.pin), module);
+                continue;
             }
             let row = crate::foreign_archive::select(&leaf.module, capture, target)?;
             let object = archive_ref(row);
@@ -1660,7 +1651,7 @@ impl Publication {
             |package| self.recipe.toolchain.contains(package),
         ))
         .with_release_sites(&release_sites, &release_debug_sites, &remarks)
-        .with_foreign(&self.recipe.foreign_modules);
+        .with_foreign(&self.recipe.foreign_modules, Some(&self.link_archives));
         let result = link_objects(
             &plan,
             &objects,

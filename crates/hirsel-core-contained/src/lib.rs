@@ -11,6 +11,7 @@ hirsel_guard::install!();
 pub mod compile;
 #[cfg(feature = "load")]
 pub mod load;
+pub use wasmtime;
 
 pub const ADMITTED_FEATURES: WasmFeatures = WasmFeatures::WASM2
     .union(WasmFeatures::TAIL_CALL)

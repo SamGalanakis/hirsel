@@ -2745,7 +2745,7 @@ fn foreign_deploy_and_recording_registration_refuse_before_payloads() {
     const REFUSAL: &str = "FFI-8: a recording build cannot reach foreign code: ffi_laws@1/main/main reaches ffi_laws@1/native/touch";
 
     let law = PackageLaw::new();
-    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "tests.hirsel", "libffi_laws.a"] {
+    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "tests.hirsel", "libffi_laws.a", "libffi_laws-aarch64-apple-darwin.a"] {
         let contents = fs::read(law.libraries.join("programs/ffi_laws").join(file)).unwrap();
         law.write(&format!("ffi_laws/{file}"), contents);
     }

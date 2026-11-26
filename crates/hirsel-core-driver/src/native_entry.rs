@@ -95,6 +95,10 @@ pub(crate) struct Plan<'a> {
     place: bool,
     replay: Option<&'a crate::native::ReplayPlan>,
     foreign: Vec<foreign::Function<'a>>,
+    /// The contained modules the foreign functions call into (FFI-15).
+    /// Absent from a plan with none, which keeps every native link key.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contained: Vec<foreign::Contained<'a>>,
     exec: Vec<(String, Vec<u8>, [u8; 32])>,
 }
 /// Every link-plan input the environment does not cover, canonically: the
@@ -277,6 +281,7 @@ impl<'a> Plan<'a> {
             place: false,
             replay: options.replay.as_ref(),
             foreign: vec![],
+            contained: vec![],
             exec,
             charge_report: options
                 .logical_charge_report
@@ -288,8 +293,9 @@ impl<'a> Plan<'a> {
     pub(crate) fn with_foreign(
         mut self,
         leaves: impl IntoIterator<Item = &'a hirsel_core_ir::release_recipe::ForeignLeaf>,
+        archives: Option<&'a crate::foreign_archive::LinkArchives>,
     ) -> Self {
-        self.foreign = foreign::Function::collect(leaves);
+        (self.foreign, self.contained) = foreign::Function::collect(leaves, archives);
         self
     }
 
@@ -333,7 +339,7 @@ impl<'a> Plan<'a> {
     ) -> Result<Vec<u8>> {
         let mut object = object(target)?;
         let mut unwind = Unwind::new(object.isa()).map_err(error)?;
-        let waits = foreign::emit(&mut object, &mut unwind, &self.foreign)?;
+        let waits = foreign::emit(&mut object, &mut unwind, &self.foreign, &self.contained)?;
         let data = data::write(&mut object, self, sources, live_sites)?;
         data::bytes(
             &mut object,

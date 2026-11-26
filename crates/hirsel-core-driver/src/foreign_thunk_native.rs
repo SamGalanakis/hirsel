@@ -111,7 +111,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
     let leaf = ForeignLeaf {
         module: DefPath::from_full("ffi_laws@1/native").unwrap(),
         symbols: "hfl_".into(),
-        targets: vec![],
+        code: hirsel_core_ir::release_recipe::ForeignCode::Native(vec![]),
         functions: [
             ("measure", measure),
             ("make", "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->core@1/core/Option[core@1/foreign/Ptr[ffi_laws@1/laws/Obj]]"),
@@ -265,7 +265,7 @@ fn f5 = n5 g5 extern
             &options,
         )
         .unwrap()
-        .with_foreign([&leaf]);
+        .with_foreign([&leaf], None);
         let startup = plan
             .emit(
                 target,

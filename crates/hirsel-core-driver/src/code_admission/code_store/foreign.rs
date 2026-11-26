@@ -4,7 +4,7 @@ use super::*;
 #[test]
 fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     use hirsel_core_ir::release_recipe::{
-        ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
+        ForeignCode, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
     };
     use sha2::{Digest, Sha256};
 
@@ -67,10 +67,10 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     let leaf = ForeignLeaf {
         module: DefPath::from_full("app@1/native").unwrap(),
         symbols: "hfl_".into(),
-        targets: vec![ForeignTarget {
+        code: ForeignCode::Native(vec![ForeignTarget {
             target: TARGET.into(),
             archive,
-        }],
+        }]),
         functions: vec![ForeignFunction {
             identity: Identity::plain(definition),
             header: header.into(),
@@ -119,7 +119,10 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
         ))
     ));
 
-    fixture.recipe.foreign_modules[0].targets.insert(
+    let ForeignCode::Native(targets) = &mut fixture.recipe.foreign_modules[0].code else {
+        unreachable!()
+    };
+    targets.insert(
         0,
         ForeignTarget {
             target: "aarch64-unknown-linux-gnu".into(),
@@ -140,7 +143,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
 fn foreign_archive_contents_count_against_decoded_bytes() {
     use hirsel_core_ir::address::foreign_address;
     use hirsel_core_ir::release_recipe::{
-        ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
+        ForeignCode, ForeignFunction, ForeignLeaf, ForeignTarget, GrantBinding, GrantKind,
     };
     use object::write::{Object, StandardSection, Symbol, SymbolSection};
     use object::{
@@ -192,10 +195,10 @@ fn foreign_archive_contents_count_against_decoded_bytes() {
     let leaf = ForeignLeaf {
         module: DefPath::from_full("app@1/native").unwrap(),
         symbols: "hfl_".into(),
-        targets: vec![ForeignTarget {
+        code: ForeignCode::Native(vec![ForeignTarget {
             target: TARGET.into(),
             archive,
-        }],
+        }]),
         functions: vec![ForeignFunction {
             identity: Identity::plain(DefPath::from_full("app@1/native/f").unwrap()),
             header: "(core@1/core/Foreign[app@1/main/I])->()".into(),

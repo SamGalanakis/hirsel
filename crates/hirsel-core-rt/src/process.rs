@@ -351,7 +351,10 @@ unsafe fn with_foreign(
     context.foreign = &raw const state;
     let result = main(context);
     // SAFETY: the main runner has joined the tasks and delivered their calls.
-    unsafe { state.finish(context) };
+    unsafe {
+        crate::foreign::contained::end_task(context);
+        state.finish(context);
+    }
     context.foreign = std::ptr::null();
     Ok(result)
 }

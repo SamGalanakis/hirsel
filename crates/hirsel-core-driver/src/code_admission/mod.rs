@@ -458,11 +458,23 @@ fn verify_release(
         )?;
         for leaf in &recipe.foreign_modules {
             let target = &recipe.launch.target;
+            if let Some(module) = leaf.wasm() {
+                let bytes = load(ObjectKind::ForeignArchive, &module, budget)?;
+                let artifact = crate::foreign_archive::contained::compile_bytes(
+                    leaf,
+                    module.hash.0,
+                    &module.hash.to_string(),
+                    &bytes,
+                    target,
+                )?;
+                link_archives.contain(module.hash, artifact);
+                continue;
+            }
             let row = leaf
-                .targets
+                .targets()
                 .binary_search_by(|row| row.target.cmp(target))
                 .expect("the checked archive inventory selects a row for each leaf");
-            let archive = leaf.targets[row].archive;
+            let archive = leaf.targets()[row].archive;
             link_archives.admit(archive, leaf, target, None, budget, || {
                 load(ObjectKind::ForeignArchive, &archive, budget)
             })?;
@@ -584,14 +596,18 @@ fn check_foreign_archive_inventory(
         Ok(())
     };
     for leaf in &recipe.foreign_modules {
+        if let Some(module) = leaf.wasm() {
+            visit(module)?;
+            continue;
+        }
         let target = &recipe.launch.target;
         let i = leaf
-            .targets
+            .targets()
             .binary_search_by(|row| row.target.cmp(target))
             .map_err(|_| {
                 AdmissionError::Refused(format!("Missing(archive of {} for {target})", leaf.module))
             })?;
-        visit(leaf.targets[i].archive)?;
+        visit(leaf.targets()[i].archive)?;
     }
     for grant in &recipe.launch.grants {
         if let Some(archive) = grant.archive {

@@ -18,6 +18,19 @@ use std::{
 pub struct Kind {
     pub release: Thunk,
     pub waits: bool,
+    /// A contained kind's release call (FFI-12). Its `release` thunk is
+    /// never entered, and the run's end releases none of its handles.
+    pub contained: *const super::contained::Call,
+}
+
+// SAFETY: a kind is an immutable link-time descriptor, and its contained
+// call descriptor is too.
+unsafe impl Sync for Kind {}
+
+impl Kind {
+    pub(crate) fn is_contained(&self) -> bool {
+        !self.contained.is_null()
+    }
 }
 
 /// A slot in the checked foreign signature. A Dir is independent of handle kinds.
@@ -42,6 +55,8 @@ pub const IN_USE: u8 = 3;
 pub const WRONG_KIND: u8 = 4;
 pub const ALREADY_HELD: u8 = 5;
 pub const NEEDS_HOST_DIR: u8 = 6;
+/// FFI-13: the handle's instance was discarded.
+pub const DISCARDED: u8 = 7;
 pub(crate) const RELEASE_WAIT_OP: u8 = u8::MAX - 1;
 
 #[derive(Default)]
@@ -50,7 +65,8 @@ pub(crate) struct Handles(Mutex<Table>);
 #[derive(Default)]
 struct Table {
     entries: HashMap<u64, Handle>,
-    pointers: HashSet<u64>,
+    /// Pointers held, by instance generation (FFI-12); a native one is 0.
+    pointers: HashSet<(u64, u64)>,
     last_ordinal: u64,
     newest: u64,
     reserved: usize,
@@ -59,6 +75,10 @@ struct Table {
 struct Handle {
     pointer: u64,
     kind: &'static Kind,
+    /// The contained instance generation that made it; 0 for native.
+    instance: u64,
+    /// Its instance was discarded (FFI-13): every use refuses.
+    orphaned: bool,
     in_flight: bool,
     older: u64,
     newer: u64,
@@ -73,6 +93,8 @@ pub(crate) struct Operands {
     pub count: usize,
     pub result: Option<&'static Kind>,
     pub release: bool,
+    /// The contained instance the call enters; 0 for native.
+    pub instance: u64,
 }
 
 impl Operands {
@@ -136,7 +158,9 @@ impl Operands {
             // SAFETY: release preflight marked the single handle in flight.
             unsafe {
                 let mut state = (*self.table).0.lock().unwrap();
-                state.pointers.remove(&(*self.arguments)[1]);
+                state
+                    .pointers
+                    .remove(&(self.instance, (*self.arguments)[1]));
             }
         }
         for i in 0..self.count {
@@ -179,14 +203,14 @@ impl Operands {
             if bits == 0 {
                 return Outcome::default();
             }
-            if !state.pointers.insert(bits) {
+            if !state.pointers.insert((self.instance, bits)) {
                 return Outcome {
                     status: ALREADY_HELD,
                     ..Outcome::default()
                 };
             }
             Outcome {
-                value: state.insert(bits, kind),
+                value: state.insert(bits, kind, self.instance),
                 ..Outcome::default()
             }
         }
@@ -246,6 +270,13 @@ impl Table {
                 let Some(handle) = self.entries.get(&ordinal) else {
                     return Preflight::Refused(RELEASED);
                 };
+                if handle.orphaned {
+                    // FFI-13: a release passing an orphaned handle consumes it.
+                    if call.release && i == 0 {
+                        self.remove(ordinal);
+                    }
+                    return Preflight::Refused(DISCARDED);
+                }
                 let duplicate = (0..i).any(|prior| {
                     !params[prior].kind.is_null() && (*call.arguments.add(prior))[0] == ordinal
                 });
@@ -283,7 +314,7 @@ impl Table {
         self.reserved = needed;
     }
 
-    fn insert(&mut self, pointer: u64, kind: &'static Kind) -> u64 {
+    fn insert(&mut self, pointer: u64, kind: &'static Kind, instance: u64) -> u64 {
         self.last_ordinal += 1;
         let ordinal = self.last_ordinal;
         if let Some(newest) = self.entries.get_mut(&self.newest) {
@@ -294,6 +325,8 @@ impl Table {
             Handle {
                 pointer,
                 kind,
+                instance,
+                orphaned: false,
                 in_flight: false,
                 older: self.newest,
                 newer: 0,
@@ -328,6 +361,50 @@ impl Handles {
             .map(|handle| handle.kind)
     }
 
+    /// FFI-13: a mechanical release skips an orphaned handle and consumes it.
+    /// Whether it did.
+    pub(crate) fn consume_orphan(&self, ordinal: u64) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if !state.entries.get(&ordinal).is_some_and(|h| h.orphaned) {
+            return false;
+        }
+        state.remove(ordinal);
+        true
+    }
+
+    /// FFI-13: a discarded instance's live and in-flight handles are
+    /// orphaned, and a call that made none returns its reservation.
+    pub(crate) fn orphan(&self, instance: u64, reserved: bool) {
+        let mut state = self.0.lock().unwrap();
+        if reserved {
+            state.reserved -= 1;
+        }
+        let Table {
+            entries, pointers, ..
+        } = &mut *state;
+        for handle in entries.values_mut().filter(|h| h.instance == instance) {
+            handle.orphaned = true;
+            handle.in_flight = false;
+            pointers.remove(&(instance, handle.pointer));
+        }
+    }
+
+    /// FFI-13: at its task's end an instance is dropped, and its handles are
+    /// consumed with no release.
+    pub(crate) fn consume(&self, instance: u64) {
+        let mut state = self.0.lock().unwrap();
+        let ordinals: Vec<u64> = state
+            .entries
+            .iter()
+            .filter(|(_, h)| h.instance == instance)
+            .map(|(&ordinal, _)| ordinal)
+            .collect();
+        for ordinal in ordinals {
+            let handle = state.remove(ordinal);
+            state.pointers.remove(&(instance, handle.pointer));
+        }
+    }
+
     /// Take the most recently made remaining obligation after the last task.
     pub(crate) fn pop(&self) -> Option<(&'static Kind, Argument)> {
         let mut state = self.0.lock().unwrap();
@@ -335,7 +412,8 @@ impl Handles {
         let handle = state.entries.get(&ordinal)?;
         let pointer = handle.pointer;
         let kind = handle.kind;
-        state.pointers.remove(&pointer);
+        let instance = handle.instance;
+        state.pointers.remove(&(instance, pointer));
         state.remove(ordinal);
         Some((kind, [ordinal, pointer]))
     }

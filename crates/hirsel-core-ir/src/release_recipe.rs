@@ -8,9 +8,9 @@ use crate::normal::{
 };
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 
-const MAGIC: &[u8] = b"HIRRECIP\0\x04\x00";
+const MAGIC: &[u8] = b"HIRRECIP\0\x05\x00";
 const NORMAL_FORM: u16 = crate::normal::VERSION;
-pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v4";
+pub const HASH_DOMAIN: &str = "hirsel.release-recipe.v5";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ObjectRef {
@@ -41,8 +41,15 @@ pub struct ForeignLeaf {
     /// The module's definition path, ending with its last module component.
     pub module: DefPath,
     pub symbols: String,
-    pub targets: Vec<ForeignTarget>,
+    pub code: ForeignCode,
     pub functions: Vec<ForeignFunction>,
+}
+
+/// FFI-16: a native module's archive table, or a contained module's one row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ForeignCode {
+    Native(Vec<ForeignTarget>),
+    Wasm(ObjectRef),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -174,17 +181,42 @@ fn ordered<T: Ord + Copy>(
 impl ForeignLeaf {
     /// FFI-9 hashes these rows without their count or the selected target.
     pub fn encode_archive_rows(&self, bytes: &mut Vec<u8>) {
-        for row in &self.targets {
+        for row in self.targets() {
             text(bytes, &row.target);
             row.archive.encode(bytes);
+        }
+    }
+
+    /// A native module's archive rows; a contained module has none.
+    pub fn targets(&self) -> &[ForeignTarget] {
+        match &self.code {
+            ForeignCode::Native(targets) => targets,
+            ForeignCode::Wasm(_) => &[],
+        }
+    }
+
+    /// A contained module's pinned bytes.
+    pub fn wasm(&self) -> Option<ObjectRef> {
+        match self.code {
+            ForeignCode::Native(_) => None,
+            ForeignCode::Wasm(module) => Some(module),
         }
     }
 
     fn encode(&self, bytes: &mut Vec<u8>) {
         text(bytes, &self.module.definition_identity());
         text(bytes, &self.symbols);
-        uleb(bytes, self.targets.len() as u64);
-        self.encode_archive_rows(bytes);
+        match &self.code {
+            ForeignCode::Native(targets) => {
+                bytes.push(0);
+                uleb(bytes, targets.len() as u64);
+                self.encode_archive_rows(bytes);
+            }
+            ForeignCode::Wasm(module) => {
+                bytes.push(1);
+                module.encode(bytes);
+            }
+        }
         uleb(bytes, self.functions.len() as u64);
         for function in &self.functions {
             bytes.extend_from_slice(&encode_identity(&function.identity));
@@ -207,29 +239,11 @@ impl ForeignLeaf {
             return Err(invalid("invalid foreign symbol prefix"));
         }
 
-        let mut prev_target = None;
-        let count = input.count()?;
-        let targets = input.read_vec(count, |input| {
-            let start = input.remaining();
-            let target: String = Wire::read(input)?;
-            if target.is_empty()
-                || target.len() > 64
-                || !target
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
-            {
-                return Err(invalid("invalid foreign target"));
-            }
-            // Target rows are ordered by the text's bytes, without the length.
-            let text_end = start.len() - input.remaining().len();
-            ordered(
-                &mut prev_target,
-                &start[text_end - target.len()..text_end],
-                "unordered foreign targets",
-            )?;
-            let archive = ObjectRef::decode(input)?;
-            Ok(ForeignTarget { target, archive })
-        })?;
+        let code = match input.take(1)?[0] {
+            0 => ForeignCode::Native(Self::decode_targets(input)?),
+            1 => ForeignCode::Wasm(ObjectRef::decode(input)?),
+            _ => return Err(invalid("invalid foreign containment")),
+        };
 
         let mut prev_function = None;
         let count = input.count()?;
@@ -254,8 +268,34 @@ impl ForeignLeaf {
         Ok(Self {
             module,
             symbols,
-            targets,
+            code,
             functions,
+        })
+    }
+
+    fn decode_targets(input: &mut Read<'_, '_>) -> DecodeResult<Vec<ForeignTarget>> {
+        let mut prev_target = None;
+        let count = input.count()?;
+        input.read_vec(count, |input| {
+            let start = input.remaining();
+            let target: String = Wire::read(input)?;
+            if target.is_empty()
+                || target.len() > 64
+                || !target
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+            {
+                return Err(invalid("invalid foreign target"));
+            }
+            // Target rows are ordered by the text's bytes, without the length.
+            let text_end = start.len() - input.remaining().len();
+            ordered(
+                &mut prev_target,
+                &start[text_end - target.len()..text_end],
+                "unordered foreign targets",
+            )?;
+            let archive = ObjectRef::decode(input)?;
+            Ok(ForeignTarget { target, archive })
         })
     }
 }
@@ -533,13 +573,13 @@ mod tests {
             foreign_modules: vec![ForeignLeaf {
                 module: DefPath::from_full("lib@1/native").unwrap(),
                 symbols: "hfl_".into(),
-                targets: vec![ForeignTarget {
+                code: ForeignCode::Native(vec![ForeignTarget {
                     target: "target".into(),
                     archive: ObjectRef {
                         hash: ContentHash([7; 32]),
                         len: 11,
                     },
-                }],
+                }]),
                 functions: vec![ForeignFunction {
                     identity: Identity::plain(DefPath::from_full("lib@1/native/open").unwrap()),
                     header: "fn()".into(),
@@ -593,7 +633,7 @@ mod tests {
             },
         };
         // Independent frame, including two-byte ULEB for the group's length.
-        let mut bytes = b"HIRRECIP\0\x04\0\x05\0\x0fapp@1/main/main\0\0".to_vec();
+        let mut bytes = b"HIRRECIP\0\x05\0\x05\0\x0fapp@1/main/main\0\0".to_vec();
         bytes.extend_from_slice(&[1; 32]);
         bytes.push(1);
         bytes.extend_from_slice(&[2; 32]);
@@ -606,7 +646,7 @@ mod tests {
         bytes.push(1);
         bytes.extend_from_slice(&[9; 32]);
         bytes.push(13);
-        bytes.extend_from_slice(b"\x01\x0clib@1/native\x04hfl_\x01\x06target");
+        bytes.extend_from_slice(b"\x01\x0clib@1/native\x04hfl_\0\x01\x06target");
         bytes.extend_from_slice(&[7; 32]);
         bytes.extend_from_slice(b"\x0b\x01\x11lib@1/native/open\0\0\x04fn()");
         bytes.push(2);
@@ -625,10 +665,25 @@ mod tests {
         assert_eq!(recipe.encode(), bytes);
         assert_eq!(decode(&bytes), Ok(recipe.clone()));
 
-        let mut version_three = bytes.clone();
-        version_three[9] = 3;
+        // FFI-16: a contained leaf holds its module row in place of the table.
+        let mut contained = recipe.clone();
+        contained.foreign_modules[0].code = ForeignCode::Wasm(ObjectRef {
+            hash: ContentHash([7; 32]),
+            len: 11,
+        });
+        let table = b"hfl_\0\x01\x06target";
+        let at = bytes.windows(table.len()).position(|w| w == table).unwrap() + 4;
+        let mut wasm = bytes.clone();
+        wasm.splice(at..at + 9, [1]);
+        assert_eq!(contained.encode(), wasm);
+        assert_eq!(decode(&wasm), Ok(contained));
+        wasm[at] = 2;
+        assert_eq!(decode(&wasm), Err(invalid("invalid foreign containment")));
+
+        let mut version_four = bytes.clone();
+        version_four[9] = 4;
         assert_eq!(
-            decode(&version_three),
+            decode(&version_four),
             Err(DecodeError::Unsupported("code frame version"))
         );
         let mut extra_archive = recipe.clone();

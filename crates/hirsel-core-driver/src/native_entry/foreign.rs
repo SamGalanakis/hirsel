@@ -1,6 +1,7 @@
 //! One shared pair of Abi adapters: Hirsel slot -> runtime -> System V C.
 //! Each C thunk sees real typed parameters while the runtime only handles words.
 use super::*;
+use crate::foreign_archive::LinkArchives;
 use crate::foreign_header::{Abi, Argument, Return};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Value};
 use hirsel_core_ir::release_recipe::ForeignLeaf;
@@ -14,34 +15,86 @@ pub(super) struct Function<'a> {
     hirsel_symbol: String,
     c_symbol: String,
     header: &'a str,
+    /// The contained module (FFI-12) whose export `c_symbol` this calls.
+    /// Absent from a native function's encoding, which keeps its link key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contained: Option<usize>,
+}
+
+/// A contained module the entry object holds: its pin and loan-area export
+/// name enter the plan, its artifact (FFI-15) follows from the pin.
+#[derive(Serialize)]
+pub(super) struct Contained<'a> {
+    pin: String,
+    loan_area: String,
+    #[serde(skip)]
+    artifact: Option<&'a [u8]>,
 }
 
 impl<'a> Function<'a> {
-    pub(super) fn collect(leaves: impl IntoIterator<Item = &'a ForeignLeaf>) -> Vec<Self> {
-        leaves
-            .into_iter()
-            .flat_map(|leaf| {
-                leaf.functions.iter().map(|function| Self {
-                    hirsel_symbol: function.identity.symbol(),
-                    c_symbol: format!("{}{}", leaf.symbols, function.identity.definition.0.name),
-                    header: &function.header,
-                })
-            })
-            .collect()
+    pub(super) fn collect(
+        leaves: impl IntoIterator<Item = &'a ForeignLeaf>,
+        archives: Option<&'a LinkArchives>,
+    ) -> (Vec<Self>, Vec<Contained<'a>>) {
+        let mut modules = Vec::new();
+        let mut functions = Vec::new();
+        for leaf in leaves {
+            let contained = leaf.wasm().map(|module| {
+                modules.push(Contained {
+                    pin: module.hash.to_string(),
+                    loan_area: format!("{}loan_area", leaf.symbols),
+                    artifact: archives.and_then(|archives| archives.artifact(module.hash)),
+                });
+                modules.len() - 1
+            });
+            functions.extend(leaf.functions.iter().map(|function| Self {
+                hirsel_symbol: function.identity.symbol(),
+                c_symbol: format!("{}{}", leaf.symbols, function.identity.definition.0.name),
+                header: &function.header,
+                contained,
+            }));
+        }
+        (functions, modules)
     }
+}
+
+/// How a function is entered: through its native C thunk, or through the
+/// runtime's contained call into a module.
+#[derive(Clone, Copy)]
+enum Route {
+    Native(FuncId),
+    Contained(DataId),
 }
 
 pub(super) fn emit(
     object: &mut ObjectModule,
     unwind: &mut Unwind,
     functions: &[Function<'_>],
+    modules: &[Contained<'_>],
 ) -> Result<bool> {
+    let modules = modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| module_data(object, index, module))
+        .collect::<Result<Vec<_>>>()?;
     let mut entries = Vec::with_capacity(functions.len());
     let mut kinds = BTreeMap::new();
+    let mut pending = Vec::new();
     let mut waits = false;
     for (index, function) in functions.iter().enumerate() {
         let parsed = Abi::parse(function.header).ok_or("invalid checked foreign header")?;
-        let thunk = thunk(object, unwind, &function.c_symbol, index, &parsed)?;
+        let route = match function.contained {
+            None => Route::Native(thunk(object, unwind, &function.c_symbol, index, &parsed)?),
+            Some(module) => {
+                if parsed.waits {
+                    return Err("FFI-12: a contained function is never waits".into());
+                }
+                if parsed.arguments().any(|a| matches!(a, Argument::Dir)) {
+                    return Err("FFI-12: a contained function takes no Dir".into());
+                }
+                Route::Contained(modules[module])
+            }
+        };
         let mut release = false;
         for argument in parsed.arguments() {
             if let Argument::Handle {
@@ -49,23 +102,181 @@ pub(super) fn emit(
                 release: true,
             } = argument
             {
-                if kinds
-                    .insert(kind, kind_data(object, index, thunk, parsed.waits)?)
-                    .is_some()
-                {
+                let id = match route {
+                    Route::Native(thunk) => kind_data(object, index, thunk, parsed.waits)?,
+                    Route::Contained(_) => {
+                        let id = object
+                            .declare_data(
+                                &format!("hirsel.foreign.kind.{index}"),
+                                Linkage::Local,
+                                false,
+                                false,
+                            )
+                            .map_err(error)?;
+                        pending.push((id, index));
+                        id
+                    }
+                };
+                if kinds.insert(kind, id).is_some() {
                     return Err(format!("FFI-5: two releases for {kind}"));
                 }
                 release = true;
             }
         }
         waits |= parsed.waits;
-        entries.push((function, parsed, thunk, release));
+        entries.push((function, parsed, route, release));
     }
-    for (index, (function, parsed, thunk, release)) in entries.into_iter().enumerate() {
-        let descriptor = descriptor(object, index, &parsed, thunk, release, &kinds)?;
-        slot(object, unwind, &function.hirsel_symbol, &parsed, descriptor)?;
+    let mut calls = Vec::with_capacity(entries.len());
+    for (index, (function, parsed, route, release)) in entries.into_iter().enumerate() {
+        let (descriptor, runtime) = match route {
+            Route::Native(thunk) => (
+                descriptor(object, index, &parsed, thunk, release, &kinds)?,
+                "hirsel_core_foreign_call",
+            ),
+            Route::Contained(module) => (
+                contained_call(object, index, function, &parsed, module, release, &kinds)?,
+                "hirsel_core_contained_call",
+            ),
+        };
+        calls.push(descriptor);
+        slot(
+            object,
+            unwind,
+            &function.hirsel_symbol,
+            &parsed,
+            descriptor,
+            runtime,
+        )?;
+    }
+    for (id, index) in pending {
+        contained_kind(object, id, calls[index])?;
     }
     Ok(waits)
+}
+
+/// FFI-15: the module's artifact, in the read-execute segment at 64 KiB,
+/// and its descriptor.
+fn module_data(object: &mut ObjectModule, index: usize, module: &Contained<'_>) -> Result<DataId> {
+    let artifact = module
+        .artifact
+        .ok_or_else(|| format!("contained module {} was not compiled", module.pin))?;
+    let signature = object.make_signature();
+    let code = object
+        .declare_function(
+            &format!("hirsel.contained.artifact.{index}"),
+            Linkage::Local,
+            &signature,
+        )
+        .map_err(error)?;
+    object
+        .define_function_bytes(code, 1 << 16, artifact, &[])
+        .map_err(error)?;
+    let name = data::bytes(object, None, module.loan_area.as_bytes().to_vec(), 1)?;
+    let mut bytes = vec![0; abi::CONTAINED_MODULE_BYTES];
+    bytes[abi::CONTAINED_MODULE_LEN..abi::CONTAINED_MODULE_LEN + 8]
+        .copy_from_slice(&(artifact.len() as u64).to_le_bytes());
+    bytes[abi::CONTAINED_MODULE_LOAN_AREA_LEN..abi::CONTAINED_MODULE_LOAN_AREA_LEN + 8]
+        .copy_from_slice(&(module.loan_area.len() as u64).to_le_bytes());
+    let mut data = DataDescription::new();
+    data.define(bytes.into_boxed_slice());
+    data.set_align(8);
+    let code = object.declare_func_in_data(code, &mut data);
+    data.write_function_addr(abi::CONTAINED_MODULE_ARTIFACT, code);
+    let name = object.declare_data_in_data(name, &mut data);
+    data.write_data_addr(abi::CONTAINED_MODULE_LOAN_AREA, name, 0);
+    define(object, &format!("hirsel.contained.module.{index}"), &data)
+}
+
+/// A contained kind: never entered through its thunk, released by the
+/// runtime through `release`, its module's release call.
+fn contained_kind(object: &mut ObjectModule, id: DataId, release: DataId) -> Result<()> {
+    let mut data = DataDescription::new();
+    data.define(vec![0; abi::FOREIGN_KIND_BYTES].into_boxed_slice());
+    data.set_align(8);
+    let signature = signature(object, &[I64], Some(I64));
+    let thunk = object
+        .declare_function("hirsel_core_contained_thunk", Linkage::Import, &signature)
+        .map_err(error)?;
+    let thunk = object.declare_func_in_data(thunk, &mut data);
+    data.write_function_addr(abi::FOREIGN_KIND_RELEASE, thunk);
+    let release = object.declare_data_in_data(release, &mut data);
+    data.write_data_addr(abi::FOREIGN_KIND_CONTAINED, release, 0);
+    object.define_data(id, &data).map_err(error)
+}
+
+/// FFI-12's argument type for one packed argument.
+fn argument_type(argument: Argument<'_>) -> u8 {
+    match argument {
+        Argument::Scalar(Scalar::Bool | Scalar::U8) => abi::CONTAINED_ARG_U8,
+        Argument::Scalar(Scalar::U16) => abi::CONTAINED_ARG_U16,
+        Argument::Scalar(Scalar::Char | Scalar::U32) => abi::CONTAINED_ARG_U32,
+        Argument::Scalar(Scalar::I8) => abi::CONTAINED_ARG_I8,
+        Argument::Scalar(Scalar::I16) => abi::CONTAINED_ARG_I16,
+        Argument::Scalar(Scalar::I32) => abi::CONTAINED_ARG_I32,
+        Argument::Scalar(Scalar::I64 | Scalar::U64) => abi::CONTAINED_ARG_I64,
+        Argument::Scalar(Scalar::F32) => abi::CONTAINED_ARG_F32,
+        Argument::Scalar(Scalar::F64) => abi::CONTAINED_ARG_F64,
+        Argument::Bytes { mutable: false } => abi::CONTAINED_ARG_VIEW,
+        Argument::Bytes { mutable: true } => abi::CONTAINED_ARG_MUT,
+        Argument::Handle { .. } => abi::CONTAINED_ARG_HANDLE,
+        Argument::Dir => unreachable!("refused before"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contained_call(
+    object: &mut ObjectModule,
+    index: usize,
+    function: &Function<'_>,
+    parsed: &Abi<'_>,
+    module: DataId,
+    release: bool,
+    kinds: &BTreeMap<&str, DataId>,
+) -> Result<DataId> {
+    let count = parsed.arguments().count();
+    let params = parameters(object, index, parsed, kinds)?;
+    let types: Vec<u8> = parsed.arguments().map(argument_type).collect();
+    let types = data::bytes(
+        object,
+        None,
+        if types.is_empty() { vec![0] } else { types },
+        1,
+    )?;
+    let name = data::bytes(object, None, function.c_symbol.as_bytes().to_vec(), 1)?;
+    let mut bytes = vec![0; abi::CONTAINED_CALL_BYTES];
+    bytes[abi::CONTAINED_CALL_NAME_LEN..abi::CONTAINED_CALL_NAME_LEN + 8]
+        .copy_from_slice(&(function.c_symbol.len() as u64).to_le_bytes());
+    bytes[abi::CONTAINED_CALL_COUNT..abi::CONTAINED_CALL_COUNT + 8]
+        .copy_from_slice(&(count as u64).to_le_bytes());
+    bytes[abi::CONTAINED_CALL_RESULT] = match parsed.result {
+        Return::Unit => abi::CONTAINED_RESULT_UNIT,
+        Return::Scalar(Scalar::I64 | Scalar::U64) => abi::CONTAINED_RESULT_I64,
+        Return::Scalar(Scalar::F32) => abi::CONTAINED_RESULT_F32,
+        Return::Scalar(Scalar::F64) => abi::CONTAINED_RESULT_F64,
+        Return::Scalar(_) => abi::CONTAINED_RESULT_I32,
+        Return::New(_) => abi::CONTAINED_RESULT_NEW,
+    };
+    bytes[abi::CONTAINED_CALL_RELEASE] = u8::from(release);
+    let mut data = DataDescription::new();
+    data.define(bytes.into_boxed_slice());
+    data.set_align(8);
+    for (offset, id) in [
+        (abi::CONTAINED_CALL_MODULE, module),
+        (abi::CONTAINED_CALL_NAME, name),
+        (abi::CONTAINED_CALL_PARAMETERS, params),
+        (abi::CONTAINED_CALL_TYPES, types),
+    ] {
+        let global = object.declare_data_in_data(id, &mut data);
+        data.write_data_addr(offset, global, 0);
+    }
+    if let Return::New(kind) = parsed.result {
+        let id = *kinds
+            .get(kind)
+            .ok_or_else(|| format!("FFI-5: no reached release for {kind}"))?;
+        let global = object.declare_data_in_data(id, &mut data);
+        data.write_data_addr(abi::CONTAINED_CALL_NEW, global, 0);
+    }
+    define(object, &format!("hirsel.contained.call.{index}"), &data)
 }
 
 fn kind_data(
@@ -93,24 +304,7 @@ fn descriptor(
     kinds: &BTreeMap<&str, DataId>,
 ) -> Result<DataId> {
     let count = parsed.arguments().count();
-    let mut parameters = vec![0; count.max(1) * abi::FOREIGN_PARAMETER_BYTES];
-    for (index, argument) in parsed.arguments().enumerate() {
-        parameters[index * abi::FOREIGN_PARAMETER_BYTES + abi::FOREIGN_PARAMETER_DIR] =
-            u8::from(matches!(argument, Argument::Dir));
-    }
-    let mut data = DataDescription::new();
-    data.define(parameters.into_boxed_slice());
-    data.set_align(8);
-    for (word, argument) in parsed.arguments().enumerate() {
-        if let Argument::Handle { kind, .. } = argument {
-            let id = *kinds
-                .get(kind)
-                .ok_or_else(|| format!("FFI-5: no reached release for {kind}"))?;
-            let global = object.declare_data_in_data(id, &mut data);
-            data.write_data_addr((word * abi::FOREIGN_PARAMETER_BYTES) as u32, global, 0);
-        }
-    }
-    let params = define(object, &format!("hirsel.foreign.parameters.{index}"), &data)?;
+    let params = parameters(object, index, parsed, kinds)?;
     let mut bytes = vec![0; abi::FOREIGN_CALL_BYTES];
     bytes[abi::FOREIGN_CALL_COUNT..abi::FOREIGN_CALL_COUNT + 8]
         .copy_from_slice(&(count as u64).to_le_bytes());
@@ -136,6 +330,34 @@ fn descriptor(
         data.write_data_addr(abi::FOREIGN_CALL_NEW, global, 0);
     }
     define(object, &format!("hirsel.foreign.call.{index}"), &data)
+}
+
+/// FFI-6's parameter rows: each handle's kind and each `Dir` flag.
+fn parameters(
+    object: &mut ObjectModule,
+    index: usize,
+    parsed: &Abi<'_>,
+    kinds: &BTreeMap<&str, DataId>,
+) -> Result<DataId> {
+    let count = parsed.arguments().count();
+    let mut parameters = vec![0; count.max(1) * abi::FOREIGN_PARAMETER_BYTES];
+    for (index, argument) in parsed.arguments().enumerate() {
+        parameters[index * abi::FOREIGN_PARAMETER_BYTES + abi::FOREIGN_PARAMETER_DIR] =
+            u8::from(matches!(argument, Argument::Dir));
+    }
+    let mut data = DataDescription::new();
+    data.define(parameters.into_boxed_slice());
+    data.set_align(8);
+    for (word, argument) in parsed.arguments().enumerate() {
+        if let Argument::Handle { kind, .. } = argument {
+            let id = *kinds
+                .get(kind)
+                .ok_or_else(|| format!("FFI-5: no reached release for {kind}"))?;
+            let global = object.declare_data_in_data(id, &mut data);
+            data.write_data_addr((word * abi::FOREIGN_PARAMETER_BYTES) as u32, global, 0);
+        }
+    }
+    define(object, &format!("hirsel.foreign.parameters.{index}"), &data)
 }
 
 fn define(object: &mut ObjectModule, name: &str, data: &DataDescription) -> Result<DataId> {
@@ -230,6 +452,7 @@ fn slot(
     name: &str,
     parsed: &Abi<'_>,
     descriptor: DataId,
+    runtime: &str,
 ) -> Result<()> {
     let params = std::iter::once(Param::Value(Ty::Scalar(Scalar::U64)))
         .chain(parsed.arguments().map(|arg| match arg {
@@ -297,11 +520,7 @@ fn slot(
     let zero = f.constant(0);
     f.store(zero, result, 0);
     let descriptor = f.address(descriptor);
-    let status = f.value_call(
-        "hirsel_core_foreign_call",
-        I8,
-        &[ctx, descriptor, words, result, site],
-    )?;
+    let status = f.value_call(runtime, I8, &[ctx, descriptor, words, result, site])?;
     let bits = f.load(I64, result, 0);
     match parsed.result {
         Return::Unit => sig.return_(&mut f.b, &[status], None),

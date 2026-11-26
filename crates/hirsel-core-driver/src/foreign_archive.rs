@@ -3,7 +3,8 @@ use crate::code_admission::AdmissionError;
 use crate::code_store::ObjectKind;
 use hirsel_core_ids::{ContentHash, DefPath};
 use hirsel_core_ir::decode::{Debit, DecodeResult};
-use hirsel_core_ir::release_recipe::{ForeignLeaf, ObjectRef};
+use hirsel_core_ir::release_recipe::{ForeignCode, ForeignLeaf, ForeignTarget, ObjectRef};
+use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 use object::read::archive::{ArchiveFile, ArchiveKind};
 use object::read::elf::{ElfFile64, FileHeader, SectionHeader, Sym};
 use object::{LittleEndian, elf};
@@ -20,12 +21,37 @@ const TBD: &[u8] = b"--- !tapi-tbd";
 pub(crate) mod contained;
 mod macho;
 
+/// A sealed archive or module as the release recipe names it.
+pub(crate) fn archive_ref(row: &ForeignArchiveCapture) -> ObjectRef {
+    ObjectRef {
+        hash: ContentHash(row.pin),
+        len: row.bytes.len() as u64,
+    }
+}
+
+/// A module's code as the release recipe records it: its archives by target,
+/// or its one contained module (FFI-10).
+pub(crate) fn recipe_code(capture: &ForeignModuleCapture) -> ForeignCode {
+    match &capture.code {
+        hirsel_core_resolve::ForeignCode::Native(archives) => ForeignCode::Native(
+            archives
+                .iter()
+                .map(|(target, row)| ForeignTarget {
+                    target: target.clone(),
+                    archive: archive_ref(row),
+                })
+                .collect(),
+        ),
+        hirsel_core_resolve::ForeignCode::Wasm(row) => ForeignCode::Wasm(archive_ref(row)),
+    }
+}
+
 /// FFI-3: a linked module's archive for `target`.
 pub(crate) fn select<'a>(
     module: &DefPath,
-    capture: &'a hirsel_core_resolve::ForeignModuleCapture,
+    capture: &'a ForeignModuleCapture,
     target: &str,
-) -> Result<&'a hirsel_core_resolve::ForeignArchiveCapture, AdmissionError> {
+) -> Result<&'a ForeignArchiveCapture, AdmissionError> {
     let archives = capture.archives().ok_or_else(contained::not_built)?;
     archives.get(target).ok_or_else(|| {
         let targets = if archives.is_empty() {
@@ -54,8 +80,13 @@ pub(crate) struct SealedArchive {
 
 /// One sealed input per pin. The module and path are those of the first
 /// selecting row and name the archive in collision diagnostics.
+/// Beside them, each contained module's precompiled artifact by its pin
+/// (FFI-15), which the entry object holds and no linker input does.
 #[derive(Default)]
-pub(crate) struct LinkArchives(BTreeMap<ContentHash, StagedArchive>);
+pub(crate) struct LinkArchives(
+    BTreeMap<ContentHash, StagedArchive>,
+    BTreeMap<ContentHash, Vec<u8>>,
+);
 
 struct StagedArchive {
     archive: SealedArchive,
@@ -87,11 +118,20 @@ impl LinkArchives {
     }
 
     pub(crate) fn pins(&self) -> impl Iterator<Item = ContentHash> + '_ {
-        self.0.keys().copied()
+        self.0.keys().chain(self.1.keys()).copied()
+    }
+
+    pub(crate) fn contain(&mut self, pin: ContentHash, artifact: Vec<u8>) {
+        self.1.insert(pin, artifact);
+    }
+
+    /// The precompiled artifact of the contained module pinned `pin`.
+    pub(crate) fn artifact(&self, pin: ContentHash) -> Option<&[u8]> {
+        self.1.get(&pin).map(Vec::as_slice)
     }
 
     pub(crate) fn contains(&self, pin: ContentHash) -> bool {
-        self.0.contains_key(&pin)
+        self.0.contains_key(&pin) || self.1.contains_key(&pin)
     }
 
     pub(crate) fn definitions(

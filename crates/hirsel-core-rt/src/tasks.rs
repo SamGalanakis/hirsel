@@ -467,8 +467,7 @@ unsafe fn trim_run_heap(root: *mut Task) {
 }
 
 unsafe fn switch_to_idle(task: *mut Task) {
-    // SAFETY: the running task is pinned here, and only its run's dispatcher
-    // owns the idle stack.
+    // SAFETY: the running task is pinned here; only its run's dispatcher owns the idle stack.
     unsafe { hirsel_stack::switch(&raw mut (*task).sp, (*(*task).run).idle) }
 }
 
@@ -3700,6 +3699,7 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
         if let Moved::Block { block, .. } = std::mem::replace(&mut (*task).moved, Moved::Spawned) {
             block.release(&*(*task).context);
         }
+        crate::foreign::contained::end_task((*task).context);
         if (*task).record.is_some() {
             abi::task_handover((*task).context);
         }

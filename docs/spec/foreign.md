@@ -1121,9 +1121,11 @@ results are a function of its inputs, so a program that reaches only contained c
 SEM-8, recording and replay. A test that calls contained code takes `Foreign[I]`, so PROG-4
 never reuses its pass (FFI-14).
 
-**Status: slice W1 in progress.** A manifest's `containment` key is parsed (FFI-10), and a
-build that reaches a contained module admits it (FFI-11). Until W1's calls are built, that
-build is then refused with `FFI-10: containment = "wasm" is not built yet`.
+**Status: slice W1 in progress.** A manifest's `containment` key is parsed (FFI-10), a build
+that reaches a contained module admits it (FFI-11) and compiles it for Linux targets, and its
+calls run in the calling task's own instance with loans, handles and traps (FFI-12, FFI-14,
+FFI-15). Fuel, steps and slice ends (FFI-13), `[tests]` grants, the object cache and replay
+(FFI-16) are not built yet.
 
 Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
 contained-foreign-review-2903: the artifact is loaded in place from the image's executable

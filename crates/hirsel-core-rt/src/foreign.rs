@@ -1,6 +1,7 @@
 //! The common native boundary for the C thunks emitted by the linker.
 use crate::tasks;
 
+pub mod contained;
 pub(crate) mod handles;
 pub(crate) mod helpers;
 
@@ -100,6 +101,7 @@ const _: () = {
     assert!(size_of::<Kind>() == FOREIGN_KIND_BYTES);
     assert!(offset_of!(Kind, release) == FOREIGN_KIND_RELEASE as usize);
     assert!(offset_of!(Kind, waits) == FOREIGN_KIND_WAITS);
+    assert!(offset_of!(Kind, contained) == FOREIGN_KIND_CONTAINED as usize);
     assert!(size_of::<Call>() == FOREIGN_CALL_BYTES);
     assert!(offset_of!(Call, thunk) == FOREIGN_CALL_THUNK as usize);
     assert!(offset_of!(Call, parameters) == FOREIGN_CALL_PARAMETERS as usize);
@@ -111,7 +113,7 @@ const _: () = {
 };
 
 pub(crate) struct Run {
-    handles: handles::Handles,
+    pub(crate) handles: handles::Handles,
     helpers: Option<helpers::Helpers>,
 }
 
@@ -128,6 +130,10 @@ impl Run {
     /// and every issued call was delivered before this orderly exit.
     pub(crate) unsafe fn finish(&self, context: *mut Context) {
         while let Some((kind, mut argument)) = self.handles.pop() {
+            // FFI-13: a contained handle's instance has gone with its task.
+            if kind.is_contained() {
+                continue;
+            }
             let call = Invocation {
                 thunk: kind.release,
                 args: argument.as_mut_ptr(),
@@ -174,6 +180,13 @@ impl Run {
         let Some(kind) = self.handles.kind(ordinal) else {
             return;
         };
+        if kind.is_contained() {
+            if !self.handles.consume_orphan(ordinal) {
+                // SAFETY: as for this function; the release descriptor is static.
+                unsafe { contained::release(context, &*kind.contained, ordinal) };
+            }
+            return;
+        }
         let mut argument = [ordinal, 0];
         let parameters = [Parameter {
             kind: std::ptr::from_ref(kind),
@@ -186,6 +199,7 @@ impl Run {
             count: 1,
             result: None,
             release: true,
+            instance: 0,
         };
         // SAFETY: table preflight recognizes a racing use or explicit release.
         // Keep the sole argument and kind table pinned through the cleanup.
@@ -321,6 +335,7 @@ pub unsafe extern "C" fn hirsel_core_foreign_call(
             count: call.count,
             result: call.new_kind.as_ref(),
             release: call.release,
+            instance: 0,
         };
         let status = handles.prepare(context, site);
         if status != 0 {
@@ -344,15 +359,26 @@ pub unsafe extern "C" fn hirsel_core_foreign_call(
 
 /// # Safety
 /// The current task owns its prepaid cause cell.
-unsafe fn refuse(context: *mut Context, site: u64, status: u8) -> u8 {
+pub(crate) unsafe fn refuse(context: *mut Context, site: u64, status: u8) -> u8 {
     let text: &[u8] = match status {
         handles::RELEASED => b"foreign handle released",
         handles::IN_USE => b"foreign handle in use",
         handles::WRONG_KIND => b"foreign handle of another kind",
         handles::ALREADY_HELD => b"foreign pointer already held",
         handles::NEEDS_HOST_DIR => b"foreign call needs a host Dir",
+        handles::DISCARDED => b"foreign instance discarded",
         _ => unreachable!("foreign handle refusal"),
     };
+    // SAFETY: the literal is static.
+    unsafe { fail(context, site, text) };
+    1
+}
+
+/// Record `Fail(text)` at `site`.
+///
+/// # Safety
+/// The current task owns its prepaid cause cell.
+pub(crate) unsafe fn fail(context: *mut Context, site: u64, text: &'static [u8]) {
     // SAFETY: the literal lends a permanent String carrier to the cause.
     unsafe {
         crate::causes::record(
@@ -367,7 +393,6 @@ unsafe fn refuse(context: *mut Context, site: u64, status: u8) -> u8 {
             ),
         );
     }
-    1
 }
 
 /// The caller is already on a host or helper stack.

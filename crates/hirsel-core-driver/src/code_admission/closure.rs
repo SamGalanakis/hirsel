@@ -60,14 +60,14 @@ impl<'a> ForeignIndex<'a> {
             }
             budget.check()?;
             let encoded = budget.scratch();
-            let len = leaf.targets.iter().map(|row| row.target.len() + 43).sum();
+            let len = leaf.targets().iter().map(|row| row.target.len() + 43).sum();
             charge_rows::<u8>(&encoded, len)?;
             let mut rows = Vec::with_capacity(len);
             leaf.encode_archive_rows(&mut rows);
             let archives = ContentHash(Sha256::digest(&rows).into());
             drop((rows, encoded));
             let selected = leaf
-                .targets
+                .targets()
                 .binary_search_by(|row| row.target.cmp(&recipe.launch.target))
                 .expect("archive inventory selects a row for each reached module");
             for function in &leaf.functions {
@@ -88,7 +88,7 @@ impl<'a> ForeignIndex<'a> {
                     address,
                     function,
                     abi,
-                    archive: leaf.targets[selected].archive,
+                    archive: leaf.targets()[selected].archive,
                     reached: false,
                 });
             }

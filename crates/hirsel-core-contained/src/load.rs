@@ -12,6 +12,11 @@ impl ImageEngine {
         Engine::new(&config).map(Self)
     }
 
+    /// The engine that stores and linkers of loaded modules use.
+    pub fn engine(&self) -> &Engine {
+        &self.0
+    }
+
     /// Load an artifact emitted into the executable segment of this image.
     ///
     /// # Safety

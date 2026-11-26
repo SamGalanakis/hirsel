@@ -1014,7 +1014,7 @@ impl CheckProduct {
             instances.iter().map(|i| &i.definition),
             |package| self.index.supplied_by_toolchain(package),
         ))
-        .with_foreign(foreign_modules.values());
+        .with_foreign(foreign_modules.values(), Some(&link_archives));
         link_objects(
             &entry_plan,
             &objects,

@@ -1,5 +1,6 @@
 //! The Linux host provider.
 pub(crate) mod clock;
+pub(crate) mod contained;
 pub mod exec;
 pub(crate) mod file;
 pub(crate) mod path;

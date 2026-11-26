@@ -33,9 +33,11 @@ pub const OS_CONFIG_DIRECTORY_OPS: i32 = 104;
 pub const OS_CONFIG_PROCESS_OPS: i32 = 112;
 pub const OS_CONFIG_SOCKET_ACTIVATION: i32 = 120;
 pub const PROCESS_CONFIG_GRANTS: i32 = 24;
-pub const FOREIGN_KIND_BYTES: usize = 16;
+pub const FOREIGN_KIND_BYTES: usize = 24;
 pub const FOREIGN_KIND_RELEASE: u32 = 0;
 pub const FOREIGN_KIND_WAITS: usize = 8;
+/// A contained kind's release call (FFI-12); null for a native kind.
+pub const FOREIGN_KIND_CONTAINED: u32 = 16;
 pub const FOREIGN_CALL_BYTES: usize = 40;
 pub const FOREIGN_CALL_THUNK: u32 = 0;
 pub const FOREIGN_CALL_PARAMETERS: u32 = 8;
@@ -48,6 +50,43 @@ pub const FOREIGN_PARAMETER_BYTES: usize = 16;
 pub const FOREIGN_PARAMETER_DIR: usize = 8;
 pub const FOREIGN_RESULT_F32: u8 = 1;
 pub const FOREIGN_RESULT_F64: u8 = 2;
+/// FFI-15: one contained module's artifact in the image and its loan-area export.
+pub const CONTAINED_MODULE_BYTES: usize = 32;
+pub const CONTAINED_MODULE_ARTIFACT: u32 = 0;
+pub const CONTAINED_MODULE_LEN: usize = 8;
+pub const CONTAINED_MODULE_LOAN_AREA: u32 = 16;
+pub const CONTAINED_MODULE_LOAN_AREA_LEN: usize = 24;
+/// FFI-12: one contained function's call descriptor.
+pub const CONTAINED_CALL_BYTES: usize = 64;
+pub const CONTAINED_CALL_MODULE: u32 = 0;
+pub const CONTAINED_CALL_NAME: u32 = 8;
+pub const CONTAINED_CALL_NAME_LEN: usize = 16;
+pub const CONTAINED_CALL_PARAMETERS: u32 = 24;
+pub const CONTAINED_CALL_TYPES: u32 = 32;
+pub const CONTAINED_CALL_COUNT: usize = 40;
+pub const CONTAINED_CALL_NEW: u32 = 48;
+pub const CONTAINED_CALL_RESULT: usize = 56;
+pub const CONTAINED_CALL_RELEASE: usize = 57;
+/// Argument types: zero-extended, sign-extended, by value, loans, handle.
+pub const CONTAINED_ARG_U8: u8 = 1;
+pub const CONTAINED_ARG_U16: u8 = 2;
+pub const CONTAINED_ARG_U32: u8 = 3;
+pub const CONTAINED_ARG_I8: u8 = 4;
+pub const CONTAINED_ARG_I16: u8 = 5;
+pub const CONTAINED_ARG_I32: u8 = 6;
+pub const CONTAINED_ARG_I64: u8 = 7;
+pub const CONTAINED_ARG_F32: u8 = 8;
+pub const CONTAINED_ARG_F64: u8 = 9;
+pub const CONTAINED_ARG_VIEW: u8 = 10;
+pub const CONTAINED_ARG_MUT: u8 = 11;
+pub const CONTAINED_ARG_HANDLE: u8 = 12;
+/// Result types.
+pub const CONTAINED_RESULT_UNIT: u8 = 0;
+pub const CONTAINED_RESULT_I32: u8 = 1;
+pub const CONTAINED_RESULT_I64: u8 = 2;
+pub const CONTAINED_RESULT_F32: u8 = 3;
+pub const CONTAINED_RESULT_F64: u8 = 4;
+pub const CONTAINED_RESULT_NEW: u8 = 5;
 pub const MAIN_RESULT_KIND: i32 = 0;
 pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;

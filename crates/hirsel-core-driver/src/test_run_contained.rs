@@ -182,14 +182,88 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
         refused(engine, &line(format!("{MODULE} has no ABI text")), "FW4 ABI");
     }
 
-    // FW20: the fixture module is admitted, and the key is refused as unbuilt;
-    // `native` is not a containment.
+    // FW20: after W1 the fixture module builds; `native` is not a containment.
     law.write("wasm_laws/box.wasm", fs::read(fixture.join("box.wasm")).unwrap());
     law.write("wasm_laws/hirsel.toml", original.as_str());
     for engine in ["cranelift", "llvm"] {
-        refused(engine, &line("FFI-10: containment = \"wasm\" is not built yet".into()), "FW20 unbuilt");
+        let (status, output, error) = build(engine);
+        assert_eq!(status, Some(0), "FW20 builds\n{output}\n{error}");
+        assert!(law.path("image").exists(), "FW20: no image");
+        fs::remove_file(law.path("image")).unwrap();
     }
     law.write("wasm_laws/box.wasm", b"abc");
     manifest(&format!("containment = \"native\"\nmodule = {{ file = \"box.wasm\", sha256 = \"{ABC}\" }}"));
     refused("cranelift", &|line: &str| line.ends_with("hirsel.toml: foreign.native: containment: expected \"wasm\""), "FW20");
+}
+
+/// FW3, FW5, FW6, FW11 to FW16, FW25, FW26 and FW28 on `box.wasm`, each
+/// observation printed by `run.hirsel` and compared with the spec's value.
+#[test]
+fn contained_calls_run_in_the_tasks_own_instance() {
+    use std::fs;
+    use std::process::Command;
+
+    let law = PackageLaw::new();
+    let fixture = law.libraries.join("programs/wasm_laws");
+    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "box.wasm"] {
+        law.write(&format!("wasm_laws/{file}"), fs::read(fixture.join(file)).unwrap());
+    }
+    law.write("wasm_laws/main.hirsel", fs::read(fixture.join("run.hirsel")).unwrap());
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let runtime = options.runtime.canonicalize().unwrap();
+    let trap = |x: &str| format!("contained trap: {x}");
+    let expected: [(&str, Vec<String>); 6] = [
+        ("loans", [
+            "FW3 clock 52", "FW5 fill 4", "FW5 len 4", "FW5 marked 1", "FW5 sum 22", "FW5 empty 0",
+            &trap("unreachable"), "FW5 kept",
+            // SEM-2's NaN, and f64.div's canonical NaN 0x7ff8000000000000.
+            "FW11 nan32 2143289344", "FW11 div 9221120237041090560",
+        ].map(str::to_owned).to_vec()),
+        ("area", vec!["contained loan area out of bounds".into(), "FW6 count 2".into()]),
+        ("traps", [
+            "unreachable", "memory out of bounds", "table out of bounds", "indirect call to null",
+            "bad signature", "integer overflow", "integer division by zero",
+            "bad conversion to integer", "stack overflow", "exit 7",
+        ].into_iter().flat_map(|x| [trap(x), "FW12 count 1".into()])
+            .chain([trap("stack overflow"), "FW16 after".into()]).collect()),
+        ("handles", vec![
+            trap("unreachable"), "foreign instance discarded".into(), "foreign handle released".into(),
+            "foreign instance discarded".into(), "FW13 count 1".into(),
+            "foreign instance discarded".into(), "FW26 live 1".into(),
+        ]),
+        ("tasks", ["FW14 one 123", "FW14 two 123", "FW25 one 0", "FW25 two 0"].map(str::to_owned).to_vec()),
+        ("boxes", [
+            "FW15 two 2", "FW15 dropped 1", "FW15 freed 0", "x", "FW15 released 0",
+        ].map(str::to_owned).to_vec()),
+    ];
+    for engine in ["cranelift", "llvm"] {
+        let image = law.path(&format!("image-{engine}"));
+        let request = [
+            "build", "wasm_laws", "--backend", engine,
+            "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
+            "--store", law.path("build").to_str().unwrap(),
+            "--package-store", law.path("packages").to_str().unwrap(), "-o", image.to_str().unwrap(),
+            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Tasks", "--grant", "Stdout",
+            "--limit", "268435456",
+        ].map(str::to_owned);
+        let (status, output, error) = process::tape_request(&request, law.dir.path());
+        assert_eq!(status, Some(0), "{engine}: build\n{output}\n{error}");
+        let run = |mode: &str, threads: &str| {
+            Command::new("timeout").args(["120s", image.to_str().unwrap(), mode])
+                .env("HIRSEL_UNTIED", threads).current_dir(law.dir.path()).output().unwrap()
+        };
+        for (mode, lines) in &expected {
+            let out = run(mode, "1");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{engine} {mode}: {:?}\n{stdout}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+            assert_eq!(stdout.lines().collect::<Vec<_>>(), *lines, "{engine} {mode}");
+        }
+        // FW28: a guest fault on one thread beside a Hirsel overflow on another.
+        let out = run("signals", "2");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(102), "{engine} signals: {:?}\n{stderr}", out.status);
+        assert!(stderr.contains("run stop: Stack"), "{engine} signals: {stderr}");
+        assert!(stdout.lines().all(|line| line == trap("memory out of bounds")), "{engine} signals: {stdout}");
+    }
 }

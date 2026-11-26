@@ -33,7 +33,7 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
     let leaf = ForeignLeaf {
         module: DefPath::from_full("sqlite@1/native").unwrap(),
         symbols: "hsq_".into(),
-        targets: vec![],
+        code: hirsel_core_ir::release_recipe::ForeignCode::Native(vec![]),
         functions: vec![],
     };
     let mut staged = LinkArchives::default();

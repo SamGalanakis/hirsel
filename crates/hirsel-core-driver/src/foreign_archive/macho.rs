@@ -494,7 +494,7 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         let leaf = ForeignLeaf {
             module: module.clone(),
             symbols: "hfl_".into(),
-            targets: vec![],
+            code: hirsel_core_ir::release_recipe::ForeignCode::Native(vec![]),
             functions: vec![ForeignFunction {
                 identity: Identity::plain(DefPath::from_full("ffi_laws@1/native/touch").unwrap()),
                 header: "(core@1/core/Foreign[ffi_laws@1/laws/Laws])->i32".into(),

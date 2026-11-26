@@ -153,6 +153,8 @@ pub struct Context {
     pub(crate) frame_lists: frame_list::FrameLists,
     pub(crate) spare_isolate_cell: Option<Box<std::mem::MaybeUninit<causes::Cell>>>,
     pub(crate) foreign: *const foreign::Run,
+    /// The task's contained instances (FFI-13), dropped at its end.
+    pub(crate) contained: foreign::contained::Instances,
     pub(crate) root_limit: u64,
     /// The cause in `causes` that the root limit refused, if any (PROG-3).
     pub(crate) root_refusal: *const causes::Cause,
@@ -238,6 +240,7 @@ impl Context {
             frame_lists: frame_list::FrameLists::default(),
             spare_isolate_cell: None,
             foreign: std::ptr::null(),
+            contained: Default::default(),
             root_limit,
             root_refusal: std::ptr::null(),
         }

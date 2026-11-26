@@ -1,0 +1,305 @@
+// The contained run laws' program (docs/spec/foreign.md, "Contained laws").
+// Each mode prints one line per observation; the driver's law compares them
+// with the values the spec derives.
+fn say(out: Stdout, text: String) waits {
+    result.unwrap(stdout.write(out, text))
+    result.unwrap(stdout.write(out, "\n"))
+}
+
+fn number(out: Stdout, label: String, n: u64) waits {
+    let mut s = string.from(label)
+    string.push_char(mut s, ' ')
+    string.push_u64(mut s, n)
+    say(out, s)
+}
+
+fn word(n: i32) -> u64 {
+    let wide: i64 = int.widen(n)
+    int.truncate(wide)
+}
+
+// The primary cause of an isolated call, as one line: "ok", the Fail text, or "other".
+fn primary[R](take outcome: Result[Result[R, Causes], Capacity]) -> String {
+    match take outcome {
+        Ok(Ok(_)) => string.from("ok"),
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Fail(message) => string.from(message),
+                    _ => string.from("other"),
+                }
+            }
+            string.from("none")
+        },
+        Error(_) => string.from("capacity"),
+    }
+}
+
+fn all(b: Bytes, value: u8) -> bool {
+    for byte in b {
+        if byte != value {
+            return false
+        }
+    }
+    true
+}
+
+fn zeros(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    list.fill(mut b, n, 0)
+    b
+}
+
+fn make_cell(f: Foreign[laws.Box]) -> foreign.Ptr[laws.Cell] {
+    match native.make(f) {
+        Some(p) => p,
+        None => fail("wasm_laws: pool exhausted"),
+    }
+}
+
+resource type ObjBox {
+    f: Foreign[laws.Box],
+    p: foreign.Ptr[laws.Cell]
+} drop(o) {
+    let _ = native.free(o.f, o.p)
+}
+
+resource type FailBox {
+    f: Foreign[laws.Box],
+    p: foreign.Ptr[laws.Cell]
+} drop(o) {
+    fail("x")
+}
+
+// A handle held where an isolated body can reach it.
+resource type Held {
+    f: Foreign[laws.Box],
+    p: foreign.Ptr[laws.Cell]
+} drop(o) {}
+
+fn obj_box(f: Foreign[laws.Box]) -> ObjBox {
+    match ObjBox(f: f, p: make_cell(f)) {
+        Ok(take o) => take o,
+        Error(_) => fail("wasm_laws: no room for a box"),
+    }
+}
+
+fn held(f: Foreign[laws.Box]) -> Held {
+    match Held(f: f, p: make_cell(f)) {
+        Ok(take o) => take o,
+        Error(_) => fail("wasm_laws: no room for a holder"),
+    }
+}
+
+// A resource whose finalizer reports whether its loan kept four zeros.
+resource type Kept: send {
+    d: Bytes,
+    tx: Sender[bool]
+} drop(o) {
+    let _ = channel.try_send(o.tx, list.len(o.d) == 4 && all(o.d, 0))
+}
+
+fn fill_then_trap(take parts: (Foreign[laws.Box], Sender[bool])) -> u64 {
+    let (f, take tx) = take parts
+    let mut kept = match Kept(d: zeros(4), tx: take tx) {
+        Ok(take k) => take k,
+        Error(_) => fail("wasm_laws: no room for a loan"),
+    }
+    native.fill_trap(f, mut kept.d)
+}
+
+fn loans(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
+    number(out, "FW3 clock", word(native.clock(f)))
+    let mut b: Bytes = list.with_capacity(16)
+    list.fill(mut b, 4, 0)
+    let filled = native.fill(f, mut b)
+    number(out, "FW5 fill", filled)
+    number(out, "FW5 len", list.len(b))
+    number(out, "FW5 marked", if all(b, 0xABu8) {
+        1
+    } else {
+        0
+    })
+    let mut c: Bytes = list.with_capacity(12)
+    for i in 0u64 .. 12u64 {
+        let byte: u8 = int.narrow(i)
+        list.push(mut c, byte)
+    }
+    number(out, "FW5 sum", native.sum(f, list.slice(c, 4, 8)))
+    let mut empty: Bytes = list.new()
+    number(out, "FW5 empty", native.fill(f, mut empty))
+    let (tx, rx): (Sender[bool], Receiver[bool]) = channel.new(1)
+    let child = task.spawn(tasks, bytes 65536, (f, take tx), fill_then_trap)
+    match task.join(take child) {
+        Error(Failed(causes)) => {
+            for cause in causes {
+                match cause.kind {
+                    Fail(message) => say(out, message),
+                    _ => say(out, "other"),
+                }
+                break
+            }
+        },
+        _ => say(out, "not failed"),
+    }
+    match channel.receive(rx) {
+        Ok(true) => say(out, "FW5 kept"),
+        _ => say(out, "FW5 copied back"),
+    }
+    let nan = float.to_bits32(native.nan32(f))
+    number(out, "FW11 nan32", int.widen(nan))
+    number(out, "FW11 div", native.div_bits(f, 0.0, 0.0))
+}
+
+fn area(f: Foreign[laws.Box], out: Stdout) waits {
+    let _ = native.set_area(f, 1)
+    let b = zeros(16)
+    say(out, primary(isolate(fn() -> u64 {
+        native.sum(f, b)
+    })))
+    number(out, "FW6 count", native.count(f))
+}
+
+fn traps(f: Foreign[laws.Box], out: Stdout) waits {
+    for k in 1u32 .. 11u32 {
+        say(out, primary(isolate(fn() -> i32 {
+            native.trap(f, k)
+        })))
+        number(out, "FW12 count", native.count(f))
+    }
+    say(out, primary(isolate(fn() -> u32 {
+        native.recurse(f, 10000000)
+    })))
+    say(out, "FW16 after")
+}
+
+fn handles(f: Foreign[laws.Box], out: Stdout) waits {
+    // FW13: a handle of a discarded instance, used twice.
+    let h = held(f)
+    say(out, primary(isolate(fn() -> i32 {
+        native.trap(f, 1)
+    })))
+    say(out, primary(isolate(fn() -> i32 {
+        native.free(h.f, h.p)
+    })))
+    say(out, primary(isolate(fn() -> i32 {
+        native.free(h.f, h.p)
+    })))
+    // A box made before a trap and dropped after it.
+    say(out, primary(isolate(fn() -> u64 {
+        let boxed = obj_box(f)
+        let _ = isolate(fn() -> i32 {
+            native.trap(f, 1)
+        })
+        let _ = take boxed
+        0
+    })))
+    number(out, "FW13 count", native.count(f))
+    // FW26: a handle of the old generation beside a live one at its address.
+    let old = held(f)
+    let _ = isolate(fn() -> i32 {
+        native.trap(f, 1)
+    })
+    let q = make_cell(f)
+    say(out, primary(isolate(fn() -> i32 {
+        native.free(old.f, old.p)
+    })))
+    number(out, "FW26 live", native.live(f))
+    let _ = native.free(f, q)
+}
+
+fn counter(take f: Foreign[laws.Box]) -> u64 {
+    let a = native.count(f)
+    let b = native.count(f)
+    let c = native.count(f)
+    a * 100 + b * 10 + c
+}
+
+fn make_free(take f: Foreign[laws.Box]) -> u64 {
+    let p = make_cell(f)
+    word(native.free(f, p))
+}
+
+fn per_task(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
+    let one = task.spawn(tasks, bytes 1048576, f, counter)
+    let two = task.spawn(tasks, bytes 1048576, f, counter)
+    number(out, "FW14 one", result.unwrap(task.join(take one)))
+    number(out, "FW14 two", result.unwrap(task.join(take two)))
+    let three = task.spawn(tasks, bytes 1048576, f, make_free)
+    let four = task.spawn(tasks, bytes 1048576, f, make_free)
+    number(out, "FW25 one", result.unwrap(task.join(take three)))
+    number(out, "FW25 two", result.unwrap(task.join(take four)))
+}
+
+fn boxes(f: Foreign[laws.Box], out: Stdout) waits {
+    let one = obj_box(f)
+    let two = obj_box(f)
+    number(out, "FW15 two", native.live(f))
+    let _ = take one
+    number(out, "FW15 dropped", native.live(f))
+    let ObjBox(f: g, p: p) = take two
+    let _ = native.free(g, p)
+    number(out, "FW15 freed", native.live(f))
+    say(out, primary(isolate(fn() -> u64 {
+        let failing = match FailBox(f: f, p: make_cell(f)) {
+            Ok(take o) => take o,
+            Error(_) => fail("wasm_laws: no room for a box"),
+        }
+        let _ = take failing
+        0
+    })))
+    number(out, "FW15 released", native.live(f))
+}
+
+fn faults(take parts: (Foreign[laws.Box], Stdout)) -> u64 waits {
+    let (f, out) = take parts
+    for _ in 0u64 .. 1000u64 {
+        say(out, primary(isolate(fn() -> i32 {
+            native.trap(f, 2)
+        })))
+    }
+    0
+}
+
+fn deep(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        deep(n + 1) + 1
+    }
+}
+
+fn dive(take n: u64) -> u64 {
+    deep(n)
+}
+
+fn signals(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
+    let a = task.spawn(tasks, bytes 1048576, (f, out), faults)
+    let b = task.spawn(tasks, bytes 1048576, 1u64, dive)
+    let _ = task.join(take a)
+    let _ = task.join(take b)
+}
+
+pub fn main(f: Foreign[laws.Box], tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let Some(mode) = args.get(argv, 0) else {
+        return Error(Exit(status: 3))
+    }
+    if mode == "loans" {
+        loans(f, tasks, out)
+    } else if mode == "area" {
+        area(f, out)
+    } else if mode == "traps" {
+        traps(f, out)
+    } else if mode == "handles" {
+        handles(f, out)
+    } else if mode == "tasks" {
+        per_task(f, tasks, out)
+    } else if mode == "boxes" {
+        boxes(f, out)
+    } else if mode == "signals" {
+        signals(f, tasks, out)
+    } else {
+        return Error(Exit(status: 3))
+    }
+    Ok(())
+}

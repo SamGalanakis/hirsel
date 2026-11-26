@@ -78,11 +78,12 @@ It leaves out:
 The LLVM engine library and each target's runtime archive are keyed by their own
 identities, beside this one. The engine library's key is the content of its file, which
 differs by host, so what LLVM lowers (the release std, LLVM units and objects) is cached
-per host. A Mach-O takes no byte of that key: a program's source bindings hash the
-std's points, which are all the source note takes from it, not the std's key, and its
+per host. A linked program takes no byte of that key: a program's source bindings hash the
+std's points, which are all the source note takes from it, not the std's key. A Mach-O's
 debug rows name each function. An ELF's debug rows name a part by an alias symbol,
-`__hirsel_debug_<key>_<section>`, whose key is the part's cache key, so a Linux
-executable's symbol table still differs by the engine file. A resident compiler (`hirsel serve`) is still named by its
+`__hirsel_debug_<key>_<section>`, whose key derives from content the engine file never
+enters (what a part's bitcode records, or the instance an object is emitted for), so no
+executable differs by the engine file. A resident compiler (`hirsel serve`) is still named by its
 executable's link ID, because a client must talk to the same file it would run.
 
 A Mach-O's `LC_UUID` is ld64.lld's digest of the linked image and the ad-hoc code

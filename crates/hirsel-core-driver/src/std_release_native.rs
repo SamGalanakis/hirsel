@@ -772,17 +772,15 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     assert_eq!(run("after"), (Some(2), Vec::new()), "over the edited std");
 }
 
-/// Law: the libLLVM file a release std was lowered with keys the side, but no
-/// byte of the executable over it but an ELF debug alias. Linux and macOS load
-/// different files of one pinned LLVM, so a cross and a native compiler stored
-/// the side under different keys, and the source note took that key
-/// (docs/building.md, "Compiler identity"). An ELF part's debug alias is named
-/// by its cache key, so its 64 hex digits are masked; a Mach-O's rows name the
-/// function instead. Two stand-ins one byte apart play the two files, each over
-/// fresh stores; the real library emits under both.
+/// Law: the libLLVM file a release std was lowered with keys the side, but no byte of the
+/// executable over it: Linux and macOS load different files of one pinned LLVM, and an ELF
+/// part's debug alias is named by the part's key with the engine file left out, so it is
+/// stable across them (a Mach-O's rows name the function). Two stand-ins one byte apart
+/// play the two files, each over fresh stores; the real library emits under both.
 #[test]
 #[ignore = "explicit native integration target"]
-fn the_engine_file_keys_the_std_side_and_only_elf_debug_aliases() {
+fn the_engine_file_keys_the_std_side_but_not_elf_debug_aliases() {
+    use object::{Object as _, ObjectSymbol as _};
     let dir = tempfile::tempdir().unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let (name, source) = UNIT_PROGRAMS[2];
@@ -808,17 +806,19 @@ fn the_engine_file_keys_the_std_side_and_only_elf_debug_aliases() {
         crate::tool_inputs::LLVM_LIBRARY.set(None);
         let run = Command::new(&built.executable).output().unwrap();
         assert_eq!((run.status.code(), run.stdout), (Some(0), b"right".to_vec()), "{stand_in}");
-        let mut bytes = std::fs::read(&built.executable).unwrap();
-        let (mut at, alias) = (0, b"__hirsel_debug_");
-        while let Some(found) = bytes[at..].windows(alias.len()).position(|w| w == alias) {
-            at += found + alias.len();
-            bytes[at..at + 64].fill(b'0');
-        }
+        let bytes = std::fs::read(&built.executable).unwrap();
+        let image = object::File::parse(&bytes[..]).unwrap();
+        let aliases: Vec<_> = image
+            .symbols()
+            .filter_map(|s| s.name().ok().filter(|n| n.starts_with("__hirsel_debug_")))
+            .collect();
+        let unique: BTreeSet<_> = aliases.iter().collect();
+        assert!(!aliases.is_empty() && unique.len() == aliases.len(), "ELF debug aliases");
         (key, bytes)
     };
     let (first, second) = (build(0), build(1));
     assert_ne!(first.0, second.0, "the engine file keys the std side");
-    assert!(first.1 == second.1, "the executables differ by the engine file");
+    assert_eq!(first.1, second.1, "the executables do not differ by the engine file");
 }
 
 /// Each corpus program, built for development and over the separate std, under each

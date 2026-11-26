@@ -149,6 +149,10 @@ pub const LENT_NAMESPACE: &str = "$std";
 pub struct Part {
     pub name: String,
     pub reused: bool,
+    /// The part's key at the cut: what its bitcode records, as the engine
+    /// walked it in memory. It reads no file of the engine, so a part's
+    /// object aliases derive from it.
+    pub ir: [u8; 32],
 }
 
 /// A library part not generated: its definition's symbol (empty for a whole

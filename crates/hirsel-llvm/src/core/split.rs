@@ -82,8 +82,9 @@ fn error(e: impl std::fmt::Display) -> String {
 
 /// Cut `object`, the one object generated for a program's unreused parts, into
 /// one finished object per part, in `parts` order. Each part is its
-/// definition's symbol and its key; the empty symbol is a whole module, its
-/// object not cut.
+/// definition's symbol and the key its ELF debug alias takes (engine-free
+/// content, never the object's cache key); the empty symbol is a whole
+/// module, its object not cut.
 pub fn split_native_object(
     object: &[u8],
     parts: &[(&str, ContentHash)],

@@ -180,9 +180,9 @@
     "reason": "cli-s4-secret-2713"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2756,
-    "raise_revision": 12,
-    "reason": "runner-place-provenance-2819"
+    "lines": 2768,
+    "raise_revision": 13,
+    "reason": "elf-debug-alias-key-2870"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1132,
@@ -221,9 +221,9 @@
     "reason": "runner-place-provenance-2819"
   },
   "crates/hirsel-core-driver/src/std_release.rs": {
-    "lines": 1168,
-    "raise_revision": 7,
-    "reason": "cas-s5-remote-2798"
+    "lines": 1100,
+    "raise_revision": 8,
+    "reason": "elf-debug-alias-key-2870"
   },
   "crates/hirsel-core-driver/src/test_run.rs": {
     "lines": 1004
@@ -546,9 +546,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-llvm/src/core/split.rs": {
-    "lines": 1129,
-    "raise_revision": 3,
-    "reason": "coverage-c3-2578"
+    "lines": 1048,
+    "raise_revision": 4,
+    "reason": "elf-debug-alias-key-2870"
   },
   "crates/hirsel-llvm/src/core/steps.rs": {
     "lines": 1706,

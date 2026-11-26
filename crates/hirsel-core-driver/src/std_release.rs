@@ -748,7 +748,7 @@ fn lower_module(
                 let i = offset + batch * 256 + j;
                 let part_key = part_name(key, i)?;
                 let object = finish(
-                    part_key,
+                    crate::native::debug_alias(codes[j]),
                     &record.parts[i],
                     object,
                     &record.exports[index],
@@ -891,16 +891,18 @@ fn private_names<'a>(
 
 /// Cut the object, detach its debug rows and put its private definitions and
 /// references under its module's namespace. A named part defines only its
-/// own symbol, when its record marks it strong, and its debug symbol.
+/// own symbol, when its record marks it strong, and its debug symbol. `alias`
+/// keys the part's ELF debug alias: content the libLLVM file never enters,
+/// unlike the cache key the part's object is stored under.
 fn finish(
-    key: ContentHash,
+    alias: ContentHash,
     part: &StdPart,
     object: &[u8],
     exports: &BTreeSet<String>,
     private_names: &BTreeSet<&[u8]>,
 ) -> Result<hirsel_core_ir::source::NativeObject, String> {
     let mut cut =
-        hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, key)], true, None)?;
+        hirsel_llvm_lazy::core::split_native_object(object, &[(&part.name, alias)], true, None)?;
     let mut object = cut.pop().ok_or("a release std part cuts to no object")?;
     let strong = hirsel_llvm_lazy::core::strong_definitions(&object.bytes)?;
     let own: BTreeSet<Vec<u8>> = strong
@@ -1050,10 +1052,10 @@ impl StdSide {
                 .map_err(emit)?;
                 let private_names = private_names
                     .get_or_insert_with(|| self::private_names(&parts.parts, &parts.exports));
-                for (&i, object) in missed.iter().zip(&generated) {
+                for ((&i, object), code) in missed.iter().zip(&generated).zip(&bitcode) {
                     let part = &parts.parts[i];
                     let object = finish(
-                        part_name(self.key, i)?,
+                        crate::native::debug_alias(code),
                         part,
                         object,
                         &parts.exports[part.module],

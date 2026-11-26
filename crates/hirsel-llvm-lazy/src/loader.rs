@@ -408,12 +408,12 @@ unsafe extern "C" fn reuse_part(
         let receiver = &mut *(receiver as *mut Receiver<'_>);
         let text = |p, n| std::str::from_utf8(std::slice::from_raw_parts(p, n)).unwrap_or("");
         let name = text(name, name_len);
-        let reused = receiver
-            .held
-            .part(name, text(machine, machine_len), &ir_key(ir, len));
+        let ir = ir_key(ir, len);
+        let reused = receiver.held.part(name, text(machine, machine_len), &ir);
         receiver.program.parts.push(crate::Part {
             name: name.to_owned(),
             reused,
+            ir,
         });
         i32::from(reused)
     }

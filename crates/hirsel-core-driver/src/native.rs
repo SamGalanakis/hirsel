@@ -276,6 +276,15 @@ fn engine_library(backend: Backend) -> io::Result<Option<ContentHash>> {
 pub(crate) fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(domain, [&encode(value)?[..]]))
 }
+/// An ELF debug alias's key (`__hirsel_debug_<key>_<section>`). The object and
+/// part cache keys name the libLLVM file, as they must: what the engine emits
+/// is a function of it. The alias is only a name the link keeps for the debug
+/// rows, so it derives from content that file never enters — what the part's
+/// bitcode records or the instance the object is emitted for — and a Linux
+/// executable does not differ by the engine file.
+pub(crate) fn debug_alias(content: &[u8]) -> ContentHash {
+    ContentHash::of_parts("hirsel.core-debug-alias.v1", [content])
+}
 pub(super) fn selection(hash: ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -346,7 +355,10 @@ fn emit_unit(
         .map_err(|e| e.to_string())
         .and_then(|bytes| {
             let coverage = hirsel_core_ir::coverage::fragment(module).map_err(|m| m.to_string())?;
-            hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, true, coverage)
+            // The object key names the libLLVM file; the alias a link keeps
+            // for the rows derives from the instance instead.
+            let alias = debug_alias(&encode(instance).map_err(|e| e.to_string())?);
+            hirsel_llvm_lazy::core::finish_native_object(bytes, alias, true, coverage)
         }),
     }
 }

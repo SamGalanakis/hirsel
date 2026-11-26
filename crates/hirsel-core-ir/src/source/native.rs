@@ -96,8 +96,9 @@ pub struct DebugScope {
     pub ranges: Vec<CodeRange>,
 }
 
-/// The driver supplies its existing unit key; aliases do not hash the emitted
-/// object or depend on any absolute source coordinate.
+/// The driver supplies an engine-free unit key (never the cache key, which
+/// names the libLLVM file); aliases do not hash the emitted object or depend
+/// on any absolute source coordinate.
 pub fn debug_symbol(unit: ContentHash, section: u32) -> String {
     let mut name = String::from("__hirsel_debug_");
     for byte in unit.0 {

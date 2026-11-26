@@ -236,13 +236,14 @@ impl<G: serde::Serialize> Generation<'_, G> {
         }
         // Each missed part's object, or the one object of a module
         // generated whole, is cut to the part's finished object; those
-        // parts join the hits in part order.
+        // parts join the hits in part order. The cut names a part's debug
+        // alias by what its bitcode records, never the cache key: that key
+        // names the libLLVM file, and the alias must not.
         let missed = program
             .parts
             .iter()
-            .zip(&parts)
-            .filter(|(part, _)| !part.reused)
-            .map(|(part, &key)| (part.name.as_str(), key))
+            .filter(|part| !part.reused)
+            .map(|part| (part.name.as_str(), crate::native::debug_alias(&part.ir)))
             .collect::<Vec<_>>();
         let cut = |object: &[u8], parts: &[(&str, ContentHash)]| {
             hirsel_llvm_lazy::core::split_native_object(object, parts, true, self.fragment.clone())

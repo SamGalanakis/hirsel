@@ -742,8 +742,9 @@ literals, operators, tuple, plain and `Inline` array constructions, manifest con
 toolchain constants below and `bytes[T]` ([MEM-33](budgets.md#mem-33-reading-a-logical-charge));
 it calls no function. A constant whose initialiser is one is a **manifest constant**. A
 **computed constant** is one whose initialiser calls a function or names a computed
-constant. Which kind a constant is follows from its initialiser and the constants it names,
-without running anything.
+constant, and every constant of type `FrozenBytes`, since no manifest constant expression
+has that type. Which kind a constant is follows from its type, its initialiser and the
+constants it names, without running anything.
 
 - **Manifest constants** are evaluated once, before any body is checked, in dependency
   order, by the rules of [semantics](semantics.md). They belong to the declarations: types,
@@ -791,12 +792,29 @@ except these:
   core function means in an initialiser what it means at run time.
 
 **The value.** A computed constant's type is plain
-([OWN-1](ownership.md#own-1-representation-is-declared-once)) and holds no function value:
-no `fn` type and no `StaticFn`. Any other type is refused here, at the type. The initialiser
-may build `List`, `Map` and `String` values while it runs. None of them survives, because a
-plain value holds no owned storage, so no check at run time is needed. A computed `String`
-or `Bytes` constant is not in v1 ([reserved](reserved.md#not-in-v1)): a `String` constant is
-a static string, below, so a call in its initialiser is refused there, at the initialiser.
+([OWN-1](ownership.md#own-1-representation-is-declared-once)) and holds no function value
+(no `fn` type and no `StaticFn`), or it is `String` or `FrozenBytes`. Any other type is
+refused here, at the type, `Bytes` included: a `Bytes` is a `List[u8]`, and no `List` is
+static ([core](core.md)), so the static byte type is `FrozenBytes`. The initialiser may
+build `List`, `Map` and `String` values while it runs. None of them survives, because a
+plain value holds no owned storage, so no check at run time is needed.
+
+**Static values.** A `String` or `FrozenBytes` constant is a **static computed constant**.
+Only the bytes its initialiser returns survive the run: the toolchain stores them once, in
+read-only static storage, the carrier a literal of that type uses ([core](core.md)), and the
+run's own storage ends with the run. Each read of the constant is the literal with the same
+bytes:
+- a `String` constant reads as the string literal: static, capacity 0, allocating nothing
+  and never charged, and `""` when it is empty;
+- a `FrozenBytes` constant reads as the byte-string literal where `FrozenBytes` is expected:
+  read-only static storage, with the literal's reference charge, which an engine can omit
+  ([MEM-28](budgets.md#mem-28-charges-are-an-upper-bound)).
+
+There is no second representation: no program can tell a static computed constant from the
+literal with the same bytes, by content, length, capacity or charge. Its size is bounded by
+the run that made it: the returned bytes were admitted under the constant's root limit
+([MEM-34](budgets.md#mem-34-constant-budgets)), so a value is at most 64 MiB, and no other
+limit applies. A `String`'s bytes are UTF-8 because the run built a `String`.
 
 **Refusal.** A computed constant is refused when its run fails
 ([FAIL-2](failure.md#fail-2-causes)), reaches a function on the closed list or a foreign
@@ -818,8 +836,10 @@ assertions, none of them can be read, and a `pub` assertion is refused. An asser
 run fails refuses the build, as any constant's failure does.
 
 A **static string** is a constant of type `String` whose
-`e` is a string literal or another static string, `const NAME: String = "hirsel"`, and
-nothing else: never a concatenation, a call or a byte string. Each use of it is its literal,
+`e` is a string literal or another static string, `const NAME: String = "hirsel"`. A
+`String` constant whose `e` calls a function or names a computed constant is a static
+computed constant, above. Any other `e` is refused: never a concatenation or a byte
+string. Each use of a static string is its literal,
 under the literal's contract ([core](core.md)): static, allocating nothing and never
 charged. A `String` appears in no other constant's type, so `(String, u64)` and a record
 with a `String` field are refused here, at the type, and so is every other non-plain type.
@@ -877,6 +897,21 @@ fn width() -> u64 { 4 }
 fn pick(n: u64) -> u64 { if WIDE { n } else { 0 } }       // both arms retained: WIDE is computed
 const WIDE: bool = width() > 2
 ```
+```hirsel unbuilt
+fn label() -> String { let mut s = string.new(); string.push(mut s, "page-"); string.push_u64(mut s, 64); s }
+const LABEL: String = label()                             // static computed: reads as "page-64"
+fn ramp() -> FrozenBytes {
+    let mut b: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < 4 { list.push(mut b, 1u8); i += 1 }
+    bytebuf.freeze(take b)
+}
+const RAMP: FrozenBytes = ramp()                          // static computed: reads as b"\x01\x01\x01\x01"
+```
+```hirsel
+fn raw() -> Bytes { list.new() }
+const RAW: Bytes = raw()                                  // refused: LANG-20, a Bytes constant is never static
+```
 
 Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION decisions 1, 2, 3a, 6
 and 11, ruled A; not yet built): a constant's initialiser may call functions. It was "calls no
@@ -897,6 +932,16 @@ run, so a constant reports no second refusal for a body refused already; this ad
 refusal and removes none of the program's. A `String` constant whose initialiser calls a
 function is refused as a static string, at the initialiser, as before this change; the text
 had also said "at the type". Reversible: the spec and the driver.
+
+Version note (2026-11-26, comptime-phase4-bytes-2836; COMPTIME-DIRECTION C4 and decision 7,
+ruled A; not yet built): a computed constant may have type `String` or `FrozenBytes`, stored
+in the literal's static carrier and read as the literal with the same bytes. A `String`
+constant whose initialiser calls a function was refused as a static string; it is now
+computed. A `FrozenBytes` constant was refused at its type; it is now always computed. The
+direction says "`Bytes` or `String`", but `Bytes` is `List[u8]` and no `List` is static
+(core, "Literals"), so the static byte type is `FrozenBytes`, the type a byte-string literal
+already takes in static storage, and `Bytes` stays refused. Every program accepted before is
+accepted with the same values. Reversible before 1.0: the spec, the front and the driver.
 
 ### LANG-21: Operators
 

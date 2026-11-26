@@ -544,6 +544,12 @@ program builds once in its initialiser, such as CRC tables, a compiled regular e
 or a lookup array of 64 KiB, fits with room to spare. Work that is too much for these
 numbers belongs at run time, under the run's own bounds.
 
+**The size of a static value.** A static computed constant (a `String` or `FrozenBytes`,
+LANG-20) returns bytes that its run admitted under the root limit, so its value is at most
+67,108,864 bytes less what else the run holds when it returns. That is its only size limit.
+Once stored, the value is static: a read admits only what the literal with the same bytes
+admits ([core](core.md)), and the run's charge for building it ends with the run.
+
 ```hirsel
 fn count(n: u64) -> u64 { let mut i: u64 = 0; while i < n { i += 1 }; i }
 const SMALL: u64 = count(1000)            // 1000, in 1,002 steps: the entry, the call and 1,000 back edges

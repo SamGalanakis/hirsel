@@ -553,7 +553,9 @@ as tags, and a change in the meaning of one gets a new tag, under the same rule.
   bytes; `()` as nothing; a float as its IEEE 754 bit pattern; a tuple or record field by
   field, in declaration order; an `Inline` array element by element; and a value of a type
   with cases as its case index, a 32-bit little-endian number, followed by that case's
-  fields. Its **value hash** is `H("hirsel.code-value.v1", c ‖ v)`, where `c` is the
+  fields; a static computed constant's value, a `String` or a
+  `FrozenBytes`, as its byte length, a 64-bit little-endian number, followed by its bytes.
+  The type's closure hash tells a `String` from a `FrozenBytes` of the same bytes. Its **value hash** is `H("hirsel.code-value.v1", c ‖ v)`, where `c` is the
   constant type's closure hash and `v` the value bytes. A scalar type and `()` reach no row,
   so for them `c` is `H("hirsel.core-closure.v1", n)`, with `n` the type's name in ASCII
   (`u8`, `bool`, `()`).
@@ -570,6 +572,11 @@ as tags, and a change in the meaning of one gets a new tag, under the same rule.
 - **The values table.** A library image stores the value of each computed constant it
   evaluated, by its initialiser's address, and a program that imports the library reads it
   there and runs nothing.
+- **A static value enters the image as its bytes.** A static computed constant's slot is
+  bound to one read-only static holding its value bytes, as above; every reader in a build
+  shares it. The reader takes the length and the data from that static at run time and
+  builds the literal's carrier from them, so its body is the same for every value, and only
+  its address, through the value hash, says which bytes it reads.
 - **What an evaluation is a function of.** A computed constant's outcome, its value or its
   refusal, is a function of its initialiser's address, and for a constant that depends on
   `target`, of the target. An implementation may reuse an outcome under that key, and under

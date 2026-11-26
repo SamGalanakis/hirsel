@@ -306,9 +306,10 @@ languages run at compile time stays out:
   evaluation; every declaration is in a source file of its package ([PROG-1](programs.md#prog-1-packages)).
 - **Compile-time parameters.** No parameter is evaluated at compile time, so a function has
   one meaning, not one per argument.
-- **Computed `String`, `Bytes` and function values.** A computed constant's type has no
-  `String`, `Bytes`, `fn` or `StaticFn` until the image format can store them; a manifest
-  `String` or `Bytes` constant is unaffected.
+- **Computed `Bytes` and function values.** A computed constant's type has no `Bytes`, `fn`
+  or `StaticFn`: a `List` is never static, and a function value is code, not data. Static
+  bytes are `FrozenBytes`, and computed `String` and `FrozenBytes` constants are LANG-20's
+  static computed constants.
 
 Version note (2026-11-25, comptime-phase1-spec-2686; COMPTIME-DIRECTION §0 and §5; not yet
 built): "compile-time evaluation beyond `const`" became LANG-20's computed constants plus this

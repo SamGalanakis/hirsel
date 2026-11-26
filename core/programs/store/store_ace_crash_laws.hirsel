@@ -1,0 +1,491 @@
+// M #4 ACE/B3 bounded-exhaustive crash workload harness (<= 3 ops) running
+// through the existing W2 cut and sector-damage machinery.
+type AceSchema {
+    rows: Table[u64, Bytes],
+    by_len: Index[u64, u64, Bytes, ()],
+    by_parity: Aggregate[u64],
+    counter: Cell[u64],
+    events: Log[u64],
+}
+
+type AceState {
+    row_a: Option[Bytes],
+    row_b: Option[Bytes],
+    counter: Option[u64],
+    log_first: u64,
+    log_next: u64,
+    log_vals: List[u64],
+    has_pin: bool,
+    pin_row_a: Option[Bytes],
+    has_branch: bool,
+    branch_row_a: Option[Bytes],
+    has_extra: bool,
+}
+
+fn ace_len_keys(_k: u64, v: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, list.len(v))
+    Ok(take keys)
+}
+
+fn ace_parity_parts(k: u64, v: Bytes) -> Result[List[(u64, u64)], Capacity] {
+    let mut parts: List[(u64, u64)] = list.with_capacity(1)
+    list.push(mut parts, (k % 2u64, list.len(v)))
+    Ok(take parts)
+}
+
+fn ace_options(create: bool) -> Options {
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.resident_limit = 2097152u64
+    options.pack_bytes = 512u64
+    options.group_commits = 1u32
+    options.create = create
+    options
+}
+
+fn ace_declare(mut db: Db, mode: Mode, with_extra: bool) -> Result[(AceSchema, Ticket), Error] waits {
+    let mut d = declare(db, mode)?
+    let mut rows_decl = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let by_len = index(mut d, mut rows_decl, "by_len", Many, code.describe(ace_len_keys), std.codec.key_u64())?
+    let by_parity = aggregate(mut d, mut rows_decl, "by_parity", code.describe(ace_parity_parts), std.codec.key_u64())?
+    let rows = finish(mut d, take rows_decl)?
+    let counter = declare_cell(mut d, "counter", std.codec.of_u64())?
+    let events = declare_log(mut d, "events", std.codec.of_u64(), Forever)?
+    if with_extra {
+        let extra = declare_table(mut d, "extra", std.codec.key_u64(), std.codec.of_u64())?
+        let _ = finish(mut d, take extra)?
+    }
+    let tk = seal(mut db, take d)?
+    Ok((AceSchema(rows, by_len: take by_len, by_parity, counter, events), tk))
+}
+
+fn ace_inline_val(step: u64, tag: u8) -> Bytes {
+    let len = 8u64 + step * 3u64
+    let mut out: Bytes = list.with_capacity(len)
+    let base: u64 = int.widen(tag)
+    for i in 0u64 .. len {
+        let byte: u8 = int.truncate((base * 31u64 + step * 17u64 + i) % 251u64)
+        list.push(mut out, byte)
+    }
+    take out
+}
+
+fn ace_blob_val(step: u64) -> Bytes {
+    let len = 1500u64 + step * 16u64
+    let mut out: Bytes = list.with_capacity(len)
+    for i in 0u64 .. len {
+        let byte: u8 = int.truncate((step * 43u64 + i * 7u64) % 251u64)
+        list.push(mut out, byte)
+    }
+    take out
+}
+
+fn ace_empty_state() -> AceState {
+    AceState(row_a: None, row_b: None, counter: None, log_first: 0u64, log_next: 0u64, log_vals: list.new(), has_pin: false, pin_row_a: None, has_branch: false, branch_row_a: None, has_extra: false)
+}
+
+fn ace_copy_opt_bytes(value: Option[Bytes]) -> Option[Bytes] {
+    match value {
+        Some(raw) => {
+            let mut out: Bytes = list.with_capacity(list.len(raw))
+            list.append(mut out, raw)
+            Some(take out)
+        },
+        None => None,
+    }
+}
+
+fn ace_model_step(mut state: AceState, op: String, step: u64) -> Result[(), Exit] {
+    if op == "put_a" {
+        state.row_a = Some(ace_inline_val(step, 1u8))
+    } else if op == "put_b" {
+        state.row_b = Some(ace_inline_val(step, 2u8))
+    } else if op == "del_a" {
+        state.row_a = None
+    } else if op == "blob" {
+        state.row_a = Some(ace_blob_val(step))
+    } else if op == "cut" || op == "sync" {
+        ()
+    } else if op == "pin" {
+        state.has_pin = true
+        state.pin_row_a = ace_copy_opt_bytes(state.row_a)
+    } else if op == "unpin" {
+        state.has_pin = false
+        state.pin_row_a = None
+    } else if op == "fork" {
+        state.has_branch = true
+        state.branch_row_a = ace_copy_opt_bytes(state.row_a)
+    } else if op == "put_branch" {
+        state.branch_row_a = Some(ace_inline_val(step, 3u8))
+    } else if op == "del_branch" {
+        state.has_branch = false
+        state.branch_row_a = None
+    } else if op == "cell" {
+        state.counter = Some(step * 10u64)
+    } else if op == "log" {
+        list.push(mut state.log_vals, step * 100u64)
+        state.log_next += 1u64
+    } else if op == "trim" {
+        state.log_first = state.log_next
+        state.log_vals = list.new()
+    } else if op == "schema" {
+        state.has_extra = true
+    } else {
+        return Error(Exit(status: 51u8))
+    }
+    Ok(())
+}
+
+fn ace_states_equal(left: AceState, right: AceState) -> bool {
+    left.row_a == right.row_a && left.row_b == right.row_b && left.counter == right.counter && left.log_first == right.log_first && left.log_next == right.log_next && left.log_vals == right.log_vals && left.has_pin == right.has_pin && left.pin_row_a == right.pin_row_a && left.has_branch == right.has_branch && left.branch_row_a == right.branch_row_a && left.has_extra == right.has_extra
+}
+
+fn ace_parse_ops(scenario: String) -> Result[List[String], Exit] {
+    if !string.starts_with(scenario, "ace:") {
+        return Error(Exit(status: 51u8))
+    }
+    let raw = string.as_bytes(scenario)
+    let mut ops: List[String] = list.new()
+    let mut start = 4u64
+    let n = list.len(raw)
+    let mut i = start
+    while i <= n {
+        if i == n || raw[i] == b',' {
+            if i > start {
+                let mut part: Bytes = list.with_capacity(i - start)
+                for j in start .. i {
+                    list.push(mut part, raw[j])
+                }
+                let word = result.unwrap(string.from_utf8(take part))
+                list.push(mut ops, take word)
+            }
+            start = i + 1u64
+        }
+        i += 1u64
+    }
+    if list.len(ops) == 0u64 {
+        return Error(Exit(status: 51u8))
+    }
+    Ok(take ops)
+}
+
+fn ace_parse_u64(text: String) -> u64 {
+    let mut value = 0u64
+    for digit in string.as_bytes(text) {
+        let d: u64 = int.widen(digit - b'0')
+        value = value * 10u64 + d
+    }
+    value
+}
+
+fn ace_ack(out: Stdout, step: u64) waits {
+    let mut line = string.from("ACK ")
+    string.push_u64(mut line, step)
+    let _ = stdout.write(out, line)
+}
+
+fn ace_init(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, ace_options(true))?
+    let _ = ace_declare(mut db, Migrate, false)?
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    close(take db)
+}
+
+fn ace_write(d: Dir, c: Clock, r: Random, tasks: Tasks, ops: List[String], out: Stdout) -> Result[(), Error] waits {
+    let mut db = open(tasks, d, c, r, ace_options(false))?
+    let (take schema, _) = ace_declare(mut db, Open, false)?
+    let mut last_ticket: Option[Ticket] = None
+    let n = list.len(ops)
+    for idx in 0u64 .. n {
+        let step = idx + 1u64
+        let op = string.from(ops[idx])
+        if op == "put_a" {
+            let val = ace_inline_val(step, 1u8)
+            let res = run(mut db, None, (copy_env(schema.rows), copy_env(val)), fn(mut tx, env) -> Result[(), Error] {
+                put(mut tx, env.0, 0u64, env.1)
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "put_b" {
+            let val = ace_inline_val(step, 2u8)
+            let res = run(mut db, None, (copy_env(schema.rows), copy_env(val)), fn(mut tx, env) -> Result[(), Error] {
+                put(mut tx, env.0, 1u64, env.1)
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "del_a" {
+            let res = run(mut db, None, copy_env(schema.rows), fn(mut tx, rows) -> Result[(), Error] {
+                let _ = delete(mut tx, rows, 0u64)?
+                Ok(())
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "blob" {
+            let val = ace_blob_val(step)
+            let res = run(mut db, None, (copy_env(schema.rows), copy_env(val)), fn(mut tx, env) -> Result[(), Error] {
+                put(mut tx, env.0, 0u64, env.1)
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "cut" {
+            let tk = checkpoint(mut db)?
+            durable(mut db, tk)?
+            last_ticket = Some(tk)
+            ace_ack(out, step)
+        } else if op == "pin" {
+            let s = snapshot(db)
+            let tk = pin(mut db, "p", s)?
+            durable(mut db, tk)?
+            last_ticket = Some(tk)
+            ace_ack(out, step)
+        } else if op == "unpin" {
+            let tk = unpin(mut db, "p")?
+            durable(mut db, tk)?
+            last_ticket = Some(tk)
+            ace_ack(out, step)
+        } else if op == "fork" {
+            let s = snapshot(db)
+            let (_, tk) = fork(mut db, "b", s)?
+            durable(mut db, tk)?
+            last_ticket = Some(tk)
+            ace_ack(out, step)
+        } else if op == "put_branch" {
+            let b = option.unwrap(branch(db, "b"))
+            let val = ace_inline_val(step, 3u8)
+            let res = run_on(mut db, b, None, (copy_env(schema.rows), copy_env(val)), fn(mut tx, env) -> Result[(), Error] {
+                put(mut tx, env.0, 0u64, env.1)
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "del_branch" {
+            let b = option.unwrap(branch(db, "b"))
+            let tk = delete_branch(mut db, b)?
+            durable(mut db, tk)?
+            last_ticket = Some(tk)
+            ace_ack(out, step)
+        } else if op == "cell" {
+            let val = step * 10u64
+            let res = run(mut db, None, (copy_env(schema.counter), val), fn(mut tx, env) -> Result[(), Error] {
+                cell_set(mut tx, env.0, env.1)
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "log" {
+            let val = step * 100u64
+            let res = run(mut db, None, (copy_env(schema.events), val), fn(mut tx, env) -> Result[(), Error] {
+                let _ = append(mut tx, env.0, env.1)?
+                Ok(())
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "trim" {
+            let res = run(mut db, None, copy_env(schema.events), fn(mut tx, events) -> Result[(), Error] {
+                let b = bounds(tx, events)?
+                trim_before(mut tx, events, b.next)
+            })?
+            let Committed(done) = take res else {
+                return Error(MigrationFault)
+            }
+            last_ticket = Some(done.ticket)
+        } else if op == "schema" {
+            let (_, tk) = ace_declare(mut db, Migrate, true)?
+            durable(mut db, tk)?
+            last_ticket = Some(tk)
+            ace_ack(out, step)
+        } else if op == "sync" {
+            if let Some(tk) = last_ticket {
+                durable(mut db, tk)?
+            }
+            ace_ack(out, step)
+        } else {
+            return Error(MigrationFault)
+        }
+    }
+    close(take db)
+}
+
+fn ace_observe(mut db: Db) -> Result[AceState, Error] waits {
+    let has_extra = match table(mut db, "extra", std.codec.key_u64(), std.codec.of_u64()) {
+        Ok(_) => true,
+        Error(Missing(_)) => false,
+        Error(take e) => return Error(take e),
+    }
+    let (take schema, _) = ace_declare(mut db, Open, has_extra)?
+    trust_store(mut db)?
+    let rd = result.unwrap(reader(db, 0u64))
+    let main_snap = snapshot(db)
+    let row_a = get(rd, main_snap, schema.rows, 0u64)?
+    let row_b = get(rd, main_snap, schema.rows, 1u64)?
+    // Check Many index by_len and Sums aggregate by_parity against primary rows.
+    let mut expected_rows = 0u64
+    let mut sum0 = 0u64
+    let mut cnt0 = 0u64
+    let mut sum1 = 0u64
+    let mut cnt1 = 0u64
+    if let Some(v) = view row_a {
+        expected_rows += 1u64
+        cnt0 = 1u64
+        sum0 = list.len(v)
+    }
+    if let Some(v) = view row_b {
+        expected_rows += 1u64
+        cnt1 = 1u64
+        sum1 = list.len(v)
+    }
+    let mut ix_rows = find(rd, main_snap, schema.by_len, Unbounded, Unbounded)?
+    let mut ix_count = 0u64
+    while let Some((k, v)) = next(law_reader(ix_rows.capture), mut ix_rows)? {
+        if k == 0u64 {
+            if Some(v) != row_a {
+                fail("ACE index by_len row 0 mismatch")
+            }
+        } else if k == 1u64 {
+            if Some(v) != row_b {
+                fail("ACE index by_len row 1 mismatch")
+            }
+        }
+        ix_count += 1u64
+    }
+    if ix_count != expected_rows {
+        fail("ACE index by_len count mismatch")
+    }
+    let Seen(Seen(value: take t0_res, ..)) = look(rd, main_snap, None, copy_env(schema.by_parity), fn(tx, agg) -> Result[Totals, Error] {
+        totals(tx, agg, 0u64)
+    })? else {
+        return Error(MigrationFault)
+    }
+    let t0 = t0_res?
+    let Seen(Seen(value: take t1_res, ..)) = look(rd, main_snap, None, copy_env(schema.by_parity), fn(tx, agg) -> Result[Totals, Error] {
+        totals(tx, agg, 1u64)
+    })? else {
+        return Error(MigrationFault)
+    }
+    let t1 = t1_res?
+    if t0.count != cnt0 || t0.sum != sum0 || t1.count != cnt1 || t1.sum != sum1 {
+        fail("ACE aggregate by_parity mismatch")
+    }
+    let counter = cell_get(rd, main_snap, schema.counter)?
+    let lb = log_bounds(rd, main_snap, schema.events)?
+    let mut log_vals: List[u64] = list.new()
+    let mut log_cur = log_scan(rd, main_snap, schema.events, Unbounded, Unbounded)?
+    while let Some((_, v)) = next(rd, mut log_cur)? {
+        list.push(mut log_vals, v)
+    }
+    let (has_pin, pin_row_a) = match pinned(db, "p") {
+        Some(p) => (true, get(law_reader(p), p, schema.rows, 0u64)?),
+        None => (false, None),
+    }
+    let (has_branch, branch_row_a) = match branch(db, "b") {
+        Some(b) => {
+            let bs = snapshot_of(db, b)?
+            (true, get(rd, bs, schema.rows, 0u64)?)
+        },
+        None => (false, None),
+    }
+    Ok(AceState(row_a: take row_a, row_b: take row_b, counter, log_first: lb.first, log_next: lb.next, log_vals: take log_vals, has_pin, pin_row_a: take pin_row_a, has_branch, branch_row_a: take branch_row_a, has_extra))
+}
+
+fn ace_check_prefix(actual: AceState, ops: List[String], min_k: u64) -> Result[bool, Exit] {
+    let mut model = ace_empty_state()
+    if min_k == 0u64 && ace_states_equal(actual, model) {
+        return Ok(true)
+    }
+    let n = list.len(ops)
+    for idx in 0u64 .. n {
+        let step = idx + 1u64
+        ace_model_step(mut model, string.from(ops[idx]), step)?
+        if step >= min_k && ace_states_equal(actual, model) {
+            return Ok(true)
+        }
+    }
+    Ok(false)
+}
+
+pub fn ace_crash_main(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0u64))
+    let scenario = option.unwrap(args.get(argv, 1u64))
+    let ops = ace_parse_ops(scenario)?
+    if phase == "init" {
+        ace_init(d, c, r, tasks) ?=> |_| Exit(status: 51u8)
+        return Ok(())
+    }
+    if phase == "write" {
+        return match ace_write(d, c, r, tasks, ops, out) {
+            Ok(()) => {
+                let _ = stdout.write(out, "DONE")
+                Ok(())
+            },
+            Error(Io(_)) => Ok(()),
+            Error(Poisoned(_)) => Ok(()),
+            Error(_) => Error(Exit(status: 52u8)),
+        }
+    }
+    let required_new = option.unwrap(args.get(argv, 2u64)) == "new"
+    let floor_text = option.unwrap(args.get(argv, 3u64))
+    let floor = ace_parse_u64(floor_text)
+    let min_k = if required_new {
+        list.len(ops)
+    } else {
+        floor
+    }
+    let mut db = open(tasks, d, c, r, ace_options(false)) ?=> |_| Exit(status: 53u8)
+    let observed = ace_observe(mut db) ?=> |_| Exit(status: 53u8)
+    close(take db) ?=> |_| Exit(status: 53u8)
+    if ace_check_prefix(observed, ops, min_k)? {
+        Ok(())
+    } else {
+        Error(Exit(status: 54u8))
+    }
+}
+
+@test
+fn test_ace_model_oracle_smoke(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    ace_init(dir, c, r, tasks)?
+    let mut db = open(tasks, dir, c, r, ace_options(false))?
+    let (take schema, _) = ace_declare(mut db, Open, false)?
+    let val = ace_inline_val(1u64, 1u8)
+    let res = run(mut db, None, (copy_env(schema.rows), copy_env(val)), fn(mut tx, env) -> Result[(), Error] {
+        put(mut tx, env.0, 0u64, env.1)
+    })?
+    let Committed(done) = take res else {
+        return Error(MigrationFault)
+    }
+    durable(mut db, done.ticket)?
+    let s = snapshot(db)
+    let (_, ft) = fork(mut db, "b", s)?
+    durable(mut db, ft)?
+    let ct = checkpoint(mut db)?
+    durable(mut db, ct)?
+    let observed = ace_observe(mut db)?
+    close(take db)?
+    let mut ops: List[String] = list.new()
+    list.push(mut ops, string.from("put_a"))
+    list.push(mut ops, string.from("fork"))
+    list.push(mut ops, string.from("cut"))
+    if !result.unwrap(ace_check_prefix(observed, ops, 3u64)) {
+        fail("ACE model oracle rejected valid 3-op state")
+    }
+    let mut wrong: List[String] = list.new()
+    list.push(mut wrong, string.from("put_a"))
+    list.push(mut wrong, string.from("del_a"))
+    if result.unwrap(ace_check_prefix(observed, wrong, 2u64)) {
+        fail("ACE model oracle accepted mismatched state")
+    }
+    Ok(())
+}

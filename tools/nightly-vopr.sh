@@ -119,6 +119,10 @@ if (( ${#law_filter[@]} == 0 )); then
         --bridge "${crash[0]}" --commit "$commit" \
         --stage "$scratch/cross-build-stage" || status=$?
     fi
+    phase=ace
+    python3 core/tools/store_ace_tests.py \
+      --compiler "${paths[0]}" --runtime "${crash[1]}" --bridge "${crash[0]}" \
+      --max-len 3 --workers 4 --report "$run/ace.json" || status=$?
   fi
 fi
 

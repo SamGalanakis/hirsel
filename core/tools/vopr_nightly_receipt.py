@@ -169,6 +169,20 @@ def summarize(run, manifest, commit):
                 for field in ("status", "saved_commit", "saved_format", "current_format", "checked", "failed")
                 if field in row
             }
+    ace = None
+    ace_path = run / "ace.json"
+    if ace_path.is_file():
+        try:
+            raw_ace = json.loads(ace_path.read_text())
+            ace = {
+                field: raw_ace[field]
+                for field in ("alphabet_size", "max_len", "total_workloads",
+                              "clean_cuts_run", "sector_cuts_run", "total_cuts_run",
+                              "failed", "wall_seconds")
+                if field in raw_ace
+            }
+        except (OSError, ValueError) as error:
+            errors.append(f"{ace_path.name}: {error}")
     return {
         "laws_prepared": sorted(prepared),
         "laws_unprepared": unprepared,
@@ -187,6 +201,7 @@ def summarize(run, manifest, commit):
             for row in read_evidence(run / "negative.jsonl", errors)
         ],
         "cross_build_reopen": cross_build,
+        "ace_enumeration": ace,
         "evidence_errors": errors,
     }
 
@@ -231,6 +246,8 @@ def finish(run, manifest, commit, phase, status):
     if negatives_missing:
         status = status or 1
     if evidence.get("cross_build_reopen") and evidence["cross_build_reopen"].get("failed", 0) > 0:
+        status = status or 1
+    if evidence.get("ace_enumeration") and evidence["ace_enumeration"].get("failed", 0) > 0:
         status = status or 1
     receipt = {
         "night": run.name,

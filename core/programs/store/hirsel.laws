@@ -206,6 +206,7 @@ store@1/store/stream_age_refusal_survives_longer_retention src=4ee426e54737f6bf 
 store@1/store/stream_quota_preserves_eviction_floor src=36d83b090a60b66e sig=7ab35b0b35ae3428 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/stream_quota_reopen_lost_response src=1f014df411b28ed3 sig=61493ae7ba858250 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_abort_budget src=2b31ad4ef0faf5bd sig=1c499c904c5becc0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_ace_model_oracle_smoke src=4f49d10209d0888d sig=db8a08722881bde1 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/test_aggregate_declared_over_chunks src=f84b08d0c8c7f6e6 sig=8ef25c6470dbb421 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_aggregate_fold_law src=b6997a30fd3ec6d8 sig=eeac1c2a408f2e52 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_aggregate_moves_and_empties_groups src=9c205a02e47768cb sig=ef133b381f3e19f8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending

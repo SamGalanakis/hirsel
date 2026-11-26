@@ -20,15 +20,7 @@ fn stream_service_reports(mut s: StreamService) -> Result[(), Error] waits {
         let deadline = std.object.deadline_after_ms(s.client, s.op_ms)
         match take report {
             ReportSettled(slot_u32, settle_id, was_applied, _, new_from_seq, _) => {
-                let mut found: Option[ActiveSettle] = None
-                let mut idx = 0u64
-                while idx < list.len(s.active_settles) {
-                    if s.active_settles[idx].id == settle_id {
-                        found = Some(list.remove(mut s.active_settles, idx))
-                        break
-                    }
-                    idx += 1
-                }
+                let found = stream_take_active_settle(mut s, settle_id)
                 if was_applied {
                     let slot: u64 = int.widen(slot_u32)
                     if slot < list.len(s.slots) {
@@ -95,7 +87,7 @@ fn stream_service_reports(mut s: StreamService) -> Result[(), Error] waits {
                     Some(_) => false,
                     None => has_unsettled,
                 }
-                stream_answer(mut s.slots[slot], SlotFenced(old_epoch, ok_through, missing))
+                stream_answer(mut s, slot, SlotFenced(old_epoch, ok_through, missing))
                 if !stream_is_latched(s.lane) {
                     match stream_reg_write(mut s.lane, mut s.client, ClearEpoch(store, moved_epoch), deadline) {
                         Ok(Written) => {
@@ -224,6 +216,15 @@ fn stream_has_active_settle(s: StreamService, store: StoreId, epoch: u64) -> boo
     false
 }
 
+fn stream_take_active_settle(mut s: StreamService, id: u64) -> Option[ActiveSettle] {
+    for i in 0u64 .. list.len(s.active_settles) {
+        if s.active_settles[i].id == id {
+            return Some(list.remove(mut s.active_settles, i))
+        }
+    }
+    None
+}
+
 fn stream_has_stall_poll(s: StreamService, store: StoreId, epoch: u64) -> bool {
     for sp in s.stall_polls {
         if same(sp.store, store) && sp.epoch == epoch {
@@ -248,9 +249,7 @@ fn stream_reap_closed_slots(mut s: StreamService) {
             None => false,
         }
         if has_inbox && stream_slot_closed(mut s.slots[i]) {
-            s.slots[i].inbox = None
-            s.slots[i].place = None
-            s.slots[i].unsent = None
+            stream_reap_slot(mut s, i)
         }
     }
 }
@@ -343,7 +342,7 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
         if let Some(slot_i) = stream_serving_slot(s, store, epoch) {
             stream_mark_stalled(mut s, store, epoch)
             if !stream_has_stall_poll(s, store, epoch) {
-                stream_answer(mut s.slots[slot_i], SlotPollHead)
+                stream_answer(mut s, slot_i, SlotPollHead)
                 if let Ok(()) = list.try_reserve(mut s.stall_polls, 1) {
                     list.push(mut s.stall_polls, StallPoll(slot: slot_i, store, epoch, next_poll_ns: int.saturating_add(now, stall_poll_ns)))
                 }
@@ -360,7 +359,8 @@ fn stream_process_reg(mut s: StreamService, deadline: u64) -> Result[(), Error] 
                 } else {
                     0
                 }
-                stream_answer(mut s.slots[slot_i], SlotSettle(sid_num, through_seq, s.lane.seq))
+                let next_seq = s.lane.seq
+                stream_answer(mut s, slot_i, SlotSettle(sid_num, through_seq, next_seq))
             }
         } else {
             // Orphan-row head poll (§12.11.6 A2, A4): apply rule (c) or (f),
@@ -555,7 +555,7 @@ fn stream_service_poll(mut s: StreamService) -> Result[(), Error] waits {
         if now >= s.stall_polls[i].next_poll_ns {
             let slot_i = s.stall_polls[i].slot
             if slot_i < list.len(s.slots) {
-                stream_answer(mut s.slots[slot_i], SlotPollHead)
+                stream_answer(mut s, slot_i, SlotPollHead)
             }
             s.stall_polls[i].next_poll_ns = int.saturating_add(now, stall_poll_ns)
         }
@@ -586,14 +586,14 @@ fn stream_service_unstall(mut s: StreamService, store: StoreId, epoch: u64) {
         }
     }
     if let Some((slot_i, through, batch_seq)) = acked_slot {
-        stream_answer(mut s.slots[slot_i], SlotAcked(through, batch_seq))
+        stream_answer(mut s, slot_i, SlotAcked(through, batch_seq))
     } else if let Some(slot_i) = stream_serving_slot(s, store, epoch) {
         let last_seq = if s.lane.seq > 1 {
             s.lane.seq - 1
         } else {
             0
         }
-        stream_answer(mut s.slots[slot_i], SlotAcked(0, last_seq))
+        stream_answer(mut s, slot_i, SlotAcked(0, last_seq))
     }
 }
 
@@ -610,6 +610,6 @@ fn stream_service_latched(mut s: StreamService, cause: StreamLatch) waits {
     list.clear(mut s.active_settles)
     list.clear(mut s.stall_polls)
     for i in 0u64 .. list.len(s.slots) {
-        stream_answer(mut s.slots[i], SlotLatched(cause))
+        stream_answer(mut s, i, SlotLatched(cause))
     }
 }

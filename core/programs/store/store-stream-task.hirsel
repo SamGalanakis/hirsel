@@ -270,6 +270,7 @@ fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotM
     if free == None && list.len(s.slots) >= limit {
         for i in 0u64 .. list.len(s.slots) {
             if stream_slot_closed(mut s.slots[i]) {
+                stream_reap_slot(mut s, i)
                 free = Some(i)
                 break
             }
@@ -282,6 +283,7 @@ fn stream_new_slot(mut s: StreamService, reserved: bool) -> Result[(Client[SlotM
     let (take data, take inbox) = capacity(take made)?
     let slot = ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None)
     if let Some(i) = free {
+        stream_retire_slot_settles(mut s, i)
         let _ = replace(mut s.slots[i], take slot)
         return Ok((take data, int.narrow(i)))
     }
@@ -313,32 +315,59 @@ fn stream_slot_closed(mut slot: ServiceSlot) -> bool {
             slot.held = Some(take queued)
             false
         },
-        Error(Closed) => {
-            slot.inbox = None
-            true
-        },
+        Error(Closed) => true,
         Error(_) => false,
     }
 }
 
-// Acks never wait on a Place (§12.11.12): a full answer connection keeps
-// the newest answer for the next wake.
-fn stream_answer(mut slot: ServiceSlot, take answer: SlotAck) {
-    let sent = match slot.place {
-        Some(place) => conn.try_send(place.answers, take answer),
-        None => return,
+fn stream_retire_slot_settles(mut s: StreamService, slot: u64) {
+    let mut i = 0u64
+    while i < list.len(s.active_settles) {
+        if s.active_settles[i].slot == slot {
+            let _ = list.remove(mut s.active_settles, i)
+        } else {
+            i += 1
+        }
     }
-    slot.unsent = match take sent {
-        Ok(()) => None,
-        Error(Full(take kept)) => Some(take kept),
-        Error(Closed(_)) => None,
+}
+
+fn stream_reap_slot(mut s: StreamService, slot: u64) {
+    stream_retire_slot_settles(mut s, slot)
+    s.slots[slot].inbox = None
+    s.slots[slot].place = None
+    s.slots[slot].unsent = None
+}
+
+fn stream_discard_answer(mut s: StreamService, answer: SlotAck) {
+    if let SlotSettle(id, _, _) = answer {
+        let _ = stream_take_active_settle(mut s, id)
+    }
+}
+
+// Acks never wait on a Place (§12.11.12): a full answer connection keeps
+// the newest answer for the next wake. Only a discarded settle loses its id.
+fn stream_answer(mut s: StreamService, slot: u64, take answer: SlotAck) {
+    if let Some(old) = replace(mut s.slots[slot].unsent, None) {
+        stream_discard_answer(mut s, old)
+    }
+    let sent = if let Some(place) = s.slots[slot].place {
+        conn.try_send(place.answers, take answer)
+    } else {
+        Error(Closed(take answer))
+    }
+    match take sent {
+        Ok(()) => (),
+        Error(Full(take kept)) => {
+            s.slots[slot].unsent = Some(take kept)
+        },
+        Error(Closed(discarded)) => stream_discard_answer(mut s, discarded),
     }
 }
 
 fn stream_flush_acks(mut s: StreamService) {
     for i in 0u64 .. list.len(s.slots) {
         if let Some(take answer) = replace(mut s.slots[i].unsent, None) {
-            stream_answer(mut s.slots[i], take answer)
+            stream_answer(mut s, i, take answer)
         }
     }
 }
@@ -389,8 +418,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                         Error(Empty) => break,
                         Error(Capacity(_)) => break,
                         Error(Closed) => {
-                            s.slots[i].inbox = None
-                            s.slots[i].place = None
+                            stream_reap_slot(mut s, i)
                             break
                         },
                     }
@@ -406,7 +434,7 @@ fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[()
                         Some(cause) => SlotLatched(cause),
                         None => SlotGranted(s.lane.inc, s.lane.seq),
                     }
-                    stream_answer(mut s.slots[i], take answer)
+                    stream_answer(mut s, i, take answer)
                 },
                 SlotFrame(width, sequence, take first) => {
                     let (owner, fence) = match s.slots[i].place {
@@ -468,7 +496,7 @@ fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, widt
             Ok(_) => fail("stream service: a frame cut short"),
             Error(_) => {
                 list.truncate(mut filling.slice.octets, at)
-                s.slots[i].inbox = None
+                stream_reap_slot(mut s, i)
                 return Ok(())
             },
         }
@@ -538,7 +566,7 @@ fn stream_service_decided(mut s: StreamService, decided: List[SliceDecision]) {
         }
         let (slot, through) = waiting[i]
         if decided[i].acked {
-            stream_answer(mut s.slots[slot], SlotAcked(through, decided[i].seq))
+            stream_answer(mut s, slot, SlotAcked(through, decided[i].seq))
         } else {
             stream_ticket_stall(mut s, slot, decided[i].store, decided[i].epoch, decided[i].seq, through)
         }

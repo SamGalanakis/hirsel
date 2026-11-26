@@ -26,6 +26,7 @@ store@1/store/bucket_stream_pin_limit src=bc48ed1f7f5a487e sig=3f8b2b02e9fae398 
 store@1/store/bucket_stream_plan_refusals src=a893289800cfd3fe sig=3b87c4f11d1bfadb run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_register_q5 src=d702e53c2c716da7 sig=2467e5b729b16adc run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_register_rules src=dc01824edafa24e6 sig=792ee30c7ab82bf2 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/bucket_stream_reissues_overwritten_settle src=2ec639b5b7fa1cbd sig=2f024dde81bdcaff run=3df318621522d07b bug=- oracle=- rows=pending
 store@1/store/bucket_stream_set_prefix_listing src=67c9d8c2b23da32f sig=61d3d3da90ef4da4 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_slot_refusals src=9df7749c4c01f891 sig=65a3f14bea770eb9 run=3df318621522d07b bug=- oracle=- rows=pending
 store@1/store/bucket_stream_streamed_genesis src=bfb977de7e74f6c2 sig=51b36a1916d14079 run=3df318621522d07b bug=- oracle=- rows=pending

@@ -271,6 +271,9 @@ limit = 268435456
 [tests.runs."store@1/store/bucket_stream_slot_refusals"]
 limit = 268435456
 
+[tests.runs."store@1/store/bucket_stream_reissues_overwritten_settle"]
+limit = 268435456
+
 # As the genesis law, with B's 32 MiB task and C's Place.
 [tests.runs."store@1/store/bucket_stream_claim_admission"]
 limit = 402653184

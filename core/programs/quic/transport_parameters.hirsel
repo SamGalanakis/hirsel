@@ -1,0 +1,268 @@
+/// The connection IDs observed in the peer's Initial and any Retry.
+pub type PeerConnectionIds {
+    initial_source: Bytes,
+    original_destination: Option[Bytes],
+    retry_source: Option[Bytes]
+}
+
+pub type TransportParameters {
+    initial_source: Bytes,
+    original_destination: Option[Bytes],
+    retry_source: Option[Bytes],
+    stateless_reset_token: Option[Bytes],
+    preferred_address: Option[Bytes],
+    max_idle_ms: u64,
+    max_udp_payload: u64,
+    initial_max_data: u64,
+    initial_max_stream_data_bidi_local: u64,
+    initial_max_stream_data_bidi_remote: u64,
+    initial_max_stream_data_uni: u64,
+    initial_max_streams_bidi: u64,
+    initial_max_streams_uni: u64,
+    ack_delay_exponent: u64,
+    max_ack_delay_ms: u64,
+    disable_active_migration: bool,
+    active_cid_limit: u64,
+    max_datagram_frame: u64,
+    reset_stream_at: bool
+}
+
+/// RFC 9000 §18.2 receive defaults. Set advertised limits before writing.
+pub fn default_parameters(take initial_source: Bytes) -> TransportParameters {
+    TransportParameters(initial_source: take initial_source, original_destination: None, retry_source: None, stateless_reset_token: None, preferred_address: None, max_idle_ms: 0, max_udp_payload: 65527, initial_max_data: 0, initial_max_stream_data_bidi_local: 0, initial_max_stream_data_bidi_remote: 0, initial_max_stream_data_uni: 0, initial_max_streams_bidi: 0, initial_max_streams_uni: 0, ack_delay_exponent: 3, max_ack_delay_ms: 25, disable_active_migration: false, active_cid_limit: 2, max_datagram_frame: 0, reset_stream_at: false)
+}
+
+fn parameter_varint(data: Bytes, mut at: u64, end: u64) -> Result[u64, Error] {
+    match codec.read_varint(data, mut at, end) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(TransportParameterError),
+    }
+}
+
+fn numeric_parameter(data: Bytes, value: Reader) -> Result[u64, Error] {
+    let mut value_cursor = value
+    let n = parameter_varint(data, mut value_cursor.at, value_cursor.end)?
+    if remaining(value_cursor) != 0 {
+        return Error(TransportParameterError)
+    }
+    Ok(n)
+}
+
+fn valid_preferred_address(data: Bytes) -> bool {
+    let n = list.len(data)
+    if n < 42 {
+        return false
+    }
+    let cid: u64 = int.widen(data[24])
+    cid > 0 && cid <= 20 && n == 41 + cid
+}
+
+fn read_parameter(mut p: TransportParameters, kind: u64, data: Bytes, value: Reader) -> Result[(), Error] {
+    let len = remaining(value)
+    match kind {
+        _ if kind == 0x00 || kind == 0x0f || kind == 0x10 => {
+            if len > 20 {
+                return Error(TransportParameterError)
+            }
+            let cid = bytes_at(data, value)
+            match kind {
+                0x00 => {
+                    p.original_destination = Some(cid)
+                },
+                0x0f => {
+                    p.initial_source = cid
+                },
+                _ => {
+                    p.retry_source = Some(cid)
+                },
+            }
+        },
+        0x02 => {
+            if len != 16 {
+                return Error(TransportParameterError)
+            }
+            p.stateless_reset_token = Some(bytes_at(data, value))
+        },
+        0x0d => {
+            let address = bytes_at(data, value)
+            if !valid_preferred_address(address) {
+                return Error(TransportParameterError)
+            }
+            p.preferred_address = Some(address)
+        },
+        _ if kind == 0x0c || kind == 0x1d => {
+            if len != 0 {
+                return Error(TransportParameterError)
+            }
+            if kind == 0x0c {
+                p.disable_active_migration = true
+            } else {
+                p.reset_stream_at = true
+            }
+        },
+        _ if kind == 0x01 || (kind >= 0x03 && kind <= 0x0b) || kind == 0x0e || kind == 0x20 => {
+            let n = numeric_parameter(data, value)?
+            match kind {
+                0x01 => {
+                    p.max_idle_ms = n
+                },
+                0x03 => {
+                    p.max_udp_payload = n
+                },
+                0x04 => {
+                    p.initial_max_data = n
+                },
+                0x05 => {
+                    p.initial_max_stream_data_bidi_local = n
+                },
+                0x06 => {
+                    p.initial_max_stream_data_bidi_remote = n
+                },
+                0x07 => {
+                    p.initial_max_stream_data_uni = n
+                },
+                0x08 => {
+                    p.initial_max_streams_bidi = n
+                },
+                0x09 => {
+                    p.initial_max_streams_uni = n
+                },
+                0x0a => {
+                    p.ack_delay_exponent = n
+                },
+                0x0b => {
+                    p.max_ack_delay_ms = n
+                },
+                0x0e => {
+                    p.active_cid_limit = n
+                },
+                _ => {
+                    p.max_datagram_frame = n
+                },
+            }
+        },
+        _ => (),
+    }
+    Ok(())
+}
+
+fn valid_limits(p: TransportParameters) -> bool {
+    p.max_udp_payload >= 1200 && p.initial_max_streams_bidi <= (1u64 << 60) && p.initial_max_streams_uni <= (1u64 << 60) && p.ack_delay_exponent <= 20 && p.max_ack_delay_ms < (1u64 << 14) && p.active_cid_limit >= 2
+}
+
+/// Parse RFC 9000 §7.3 and §18.2 parameters, rejecting duplicates including unknown IDs.
+pub fn read_parameters(data: Bytes, of: schedule.Side, ids: PeerConnectionIds) -> Result[TransportParameters, Error] {
+    let mut p = default_parameters(b"")
+    let mut seen: Map[u64, bool] = map.new()
+    let mut r = reader(data)
+    while remaining(r) > 0 {
+        let kind = parameter_varint(data, mut r.at, r.end)?
+        if let Some(_) = map.get(seen, kind) {
+            return Error(TransportParameterError)
+        }
+        if let Client = of {
+            if kind == 0x00 || kind == 0x02 || kind == 0x0d || kind == 0x10 {
+                return Error(TransportParameterError)
+            }
+        }
+        map.insert(mut seen, kind, true)
+        let len = parameter_varint(data, mut r.at, r.end)?
+        if len > remaining(r) {
+            return Error(TransportParameterError)
+        }
+        let value = read_range(mut r, len)?
+        read_parameter(mut p, kind, data, value)?
+    }
+    if !valid_limits(p) || map.get(seen, 0x0fu64) == None || p.initial_source != ids.initial_source || p.original_destination != ids.original_destination || p.retry_source != ids.retry_source {
+        return Error(TransportParameterError)
+    }
+    if let Server = of {
+        if let None = p.original_destination {
+            return Error(TransportParameterError)
+        }
+    }
+    Ok(take p)
+}
+
+fn put_parameter_varint(mut out: Bytes, n: u64) -> Result[(), Error] {
+    match codec.write_varint(n, mut out) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(LocalFailure),
+    }
+}
+
+fn parameter(mut out: Bytes, kind: u64, data: Bytes) -> Result[(), Error] {
+    put_parameter_varint(mut out, kind)?
+    put_parameter_varint(mut out, list.len(data))?
+    list.append(mut out, data)
+    Ok(())
+}
+
+fn put_numeric_parameter(mut out: Bytes, kind: u64, n: u64) -> Result[(), Error] {
+    let mut data: Bytes = list.with_capacity(8)
+    put_parameter_varint(mut data, n)?
+    parameter(mut out, kind, data)
+}
+
+/// Advertise the local MTU and reliable stream reset support. Zero DATAGRAM credit omits it.
+pub fn write_parameters(p: TransportParameters, side: schedule.Side) -> Result[Bytes, Error] {
+    if !valid_limits(p) || list.len(p.initial_source) > 20 {
+        return Error(LocalFailure)
+    }
+    let mut out: Bytes = list.new()
+    match side {
+        Client => {
+            if p.original_destination != None || p.retry_source != None || p.stateless_reset_token != None || p.preferred_address != None {
+                return Error(LocalFailure)
+            }
+        },
+        Server => {
+            let original = match p.original_destination {
+                Some(value) => value,
+                None => return Error(LocalFailure),
+            }
+            if list.len(original) > 20 {
+                return Error(LocalFailure)
+            }
+            parameter(mut out, 0x00, original)?
+            if let Some(token) = p.stateless_reset_token {
+                if list.len(token) != 16 {
+                    return Error(LocalFailure)
+                }
+                parameter(mut out, 0x02, token)?
+            }
+            if let Some(address) = p.preferred_address {
+                if !valid_preferred_address(address) {
+                    return Error(LocalFailure)
+                }
+                parameter(mut out, 0x0d, address)?
+            }
+            if let Some(retry) = p.retry_source {
+                if list.len(retry) > 20 {
+                    return Error(LocalFailure)
+                }
+                parameter(mut out, 0x10, retry)?
+            }
+        },
+    }
+    put_numeric_parameter(mut out, 0x01, p.max_idle_ms)?
+    put_numeric_parameter(mut out, 0x03, p.max_udp_payload)?
+    put_numeric_parameter(mut out, 0x04, p.initial_max_data)?
+    put_numeric_parameter(mut out, 0x05, p.initial_max_stream_data_bidi_local)?
+    put_numeric_parameter(mut out, 0x06, p.initial_max_stream_data_bidi_remote)?
+    put_numeric_parameter(mut out, 0x07, p.initial_max_stream_data_uni)?
+    put_numeric_parameter(mut out, 0x08, p.initial_max_streams_bidi)?
+    put_numeric_parameter(mut out, 0x09, p.initial_max_streams_uni)?
+    put_numeric_parameter(mut out, 0x0a, p.ack_delay_exponent)?
+    put_numeric_parameter(mut out, 0x0b, p.max_ack_delay_ms)?
+    if p.disable_active_migration {
+        parameter(mut out, 0x0c, b"")?
+    }
+    put_numeric_parameter(mut out, 0x0e, p.active_cid_limit)?
+    parameter(mut out, 0x0f, p.initial_source)?
+    parameter(mut out, 0x1d, b"")?
+    if p.max_datagram_frame != 0 {
+        put_numeric_parameter(mut out, 0x20, p.max_datagram_frame)?
+    }
+    Ok(take out)
+}

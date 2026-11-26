@@ -10,6 +10,9 @@ with whole seconds. `Sign` carries a refusal from `secret.sign`. `Invalid`
 covers invalid arguments or a signature that fails verification with the
 supplied point.
 
+`p256_signature_der(raw)` encodes a 64-byte fixed-width P-256 signature as an
+ASN.1 DER sequence of two minimal integers. It returns `None` for other lengths.
+
 An `Issuer` holds a signing key, its 65-byte point and its common name.
 `ca_p256(issuer, random, serial, not_before, not_after)` returns the issuer's
 self-signed CA certificate: basicConstraints with cA set and keyUsage

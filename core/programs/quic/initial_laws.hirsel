@@ -1,0 +1,167 @@
+fn client_initial() -> Bytes {
+    option.unwrap(std.hex.decode(b"c000000001088394c8f03e5157080000449e7b9aec34d1b1c98dd7689fb8ec11d242b123dc9bd8bab936b47d92ec356c0bab7df5976d27cd449f63300099f3991c260ec4c60d17b31f8429157bb35a1282a643a8d2262cad67500cadb8e7378c8eb7539ec4d4905fed1bee1fc8aafba17c750e2c7ace01e6005f80fcb7df621230c83711b39343fa028cea7f7fb5ff89eac2308249a02252155e2347b63d58c5457afd84d05dfffdb20392844ae812154682e9cf012f9021a6f0be17ddd0c2084dce25ff9b06cde535d0f920a2db1bf362c23e596d11a4f5a6cf3948838a3aec4e15daf8500a6ef69ec4e3feb6b1d98e610ac8b7ec3faf6ad760b7bad1db4ba3485e8a94dc250ae3fdb41ed15fb6a8e5eba0fc3dd60bc8e30c5c4287e53805db059ae0648db2f64264ed5e39be2e20d82df566da8dd5998ccabdae053060ae6c7b4378e846d29f37ed7b4ea9ec5d82e7961b7f25a9323851f681d582363aa5f89937f5a67258bf63ad6f1a0b1d96dbd4faddfcefc5266ba6611722395c906556be52afe3f565636ad1b17d508b73d8743eeb524be22b3dcbc2c7468d54119c7468449a13d8e3b95811a198f3491de3e7fe942b330407abf82a4ed7c1b311663ac69890f4157015853d91e923037c227a33cdd5ec281ca3f79c44546b9d90ca00f064c99e3dd97911d39fe9c5d0b23a229a234cb36186c4819e8b9c5927726632291d6a418211cc2962e20fe47feb3edf330f2c603a9d48c0fcb5699dbfe5896425c5bac4aee82e57a85aaf4e2513e4f05796b07ba2ee47d80506f8d2c25e50fd14de71e6c418559302f939b0e1abd576f279c4b2e0feb85c1f28ff18f58891ffef132eef2fa09346aee33c28eb130ff28f5b766953334113211996d20011a198e3fc433f9f2541010ae17c1bf202580f6047472fb36857fe843b19f5984009ddc324044e847a4f4a0ab34f719595de37252d6235365e9b84392b061085349d73203a4a13e96f5432ec0fd4a1ee65accdd5e3904df54c1da510b0ff20dcc0c77fcb2c0e0eb605cb0504db87632cf3d8b4dae6e705769d1de354270123cb11450efc60ac47683d7b8d0f811365565fd98c4c8eb936bcab8d069fc33bd801b03adea2e1fbc5aa463d08ca19896d2bf59a071b851e6c239052172f296bfb5e72404790a2181014f3b94a4e97d117b438130368cc39dbb2d198065ae3986547926cd2162f40a29f0c3c8745c0f50fba3852e566d44575c29d39a03f0cda721984b6f440591f355e12d439ff150aab7613499dbd49adabc8676eef023b15b65bfc5ca06948109f23f350db82123535eb8a7433bdabcb909271a6ecbcb58b936a88cd4e8f2e6ff5800175f113253d8fa9ca8885c2f552e657dc603f252e1a8e308f76f0be79e2fb8f5d5fbbe2e30ecadd220723c8c0aea8078cdfcb3868263ff8f0940054da48781893a7e49ad5aff4af300cd804a6b6279ab3ff3afb64491c85194aab760d58a606654f9f4400e8b38591356fbf6425aca26dc85244259ff2b19c41b9f96f3ca9ec1dde434da7d2d392b905ddf3d1f9af93d1af5950bd493f5aa731b4056df31bd267b6b90a079831aaf579be0a39013137aac6d404f518cfd46840647e78bfe706ca4cf5e9c5453e9f7cfd2b8b4c8d169a44e55c88d4a9a7f9474241e221af44860018ab0856972e194cd934"))
+}
+
+fn server_initial() -> Bytes {
+    option.unwrap(std.hex.decode(b"cf000000010008f067a5502a4262b5004075c0d95a482cd0991cd25b0aac406a5816b6394100f37a1c69797554780bb38cc5a99f5ede4cf73c3ec2493a1839b3dbcba3f6ea46c5b7684df3548e7ddeb9c3bf9c73cc3f3bded74b562bfb19fb84022f8ef4cdd93795d77d06edbb7aaf2f58891850abbdca3d20398c276456cbc42158407dd074ee"))
+}
+
+fn open_initial(mut wire: Bytes, receiver: schedule.Side, number: u64) -> (codec.Header, codec.Span) {
+    let mut at = 0u64
+    let end = list.len(wire)
+    let h = result.unwrap(codec.read_header(wire, mut at, end, 0))
+    if at != end || h.kind != Initial {
+        fail("RFC 9001 Initial header")
+    }
+    let keys = result.unwrap(schedule.quic_initial(receiver, b"\x83\x94\xc8\xf0\x3e\x51\x57\x08"))
+    let mask = result.unwrap(schedule.header_mask(keys, Initial, false))
+    let sample = result.unwrap(codec.sample(h))
+    let mask_bytes = packet.mask(mask, wire, sample.at)
+    wire[0] = wire[0] ^ (mask_bytes[0] & 0x0f)
+    let pn_len: u64 = int.widen((wire[0] & 3) + 1)
+    for i in 0u64 .. pn_len {
+        let j = h.body.at + i
+        wire[j] = wire[j] ^ mask_bytes[i + 1]
+    }
+    let opened = result.unwrap(codec.read_open_header(wire, h))
+    if opened.number.truncated != number {
+        fail("RFC 9001 Initial packet number")
+    }
+    let opener = result.unwrap(schedule.opener(keys, Initial))
+    let len = result.unwrap(packet.open(opener, 0, number, mut wire, opened.aad.at, opened.payload.at, b""))
+    (take h, codec.Span(at: opened.payload.at, len: len))
+}
+
+fn crypto_message(wire: Bytes, mut frames: codec.FrameReader, expected: u64) -> handshake.Message {
+    let Some(Crypto(offset: offset, data: range)) = result.unwrap(codec.next_frame(wire, mut frames)) else {
+        fail("expected a CRYPTO frame")
+    }
+    if offset != 0 || range.len != expected {
+        fail("RFC 9001 Initial CRYPTO range")
+    }
+    let mut at = 0u64
+    let message = result.unwrap(handshake.read_message(list.slice(wire, range.at, range.at + range.len), mut at))
+    if at != expected {
+        fail("whole TLS handshake message")
+    }
+    take message
+}
+
+fn client_vector() {
+    let mut wire = client_initial()
+    let (h, body) = open_initial(mut wire, Server, 2)
+    let mut frames = result.unwrap(codec.frames(wire, body, Initial, 0))
+    let message = crypto_message(wire, mut frames, 241)
+    if message.kind != handshake.CLIENT_HELLO || body.len != 1162 || h.source.len != 0 {
+        fail("RFC 9001 A.2 ClientHello envelope")
+    }
+    if result.unwrap(codec.next_frame(wire, mut frames)) != Some(Padding(917)) || result.unwrap(codec.next_frame(wire, mut frames)) != None {
+        fail("RFC 9001 A.2 padding")
+    }
+    let offer = result.unwrap(handshake.read_client_hello(message.body))
+    let public = option.unwrap(std.hex.decode(b"9370b2c9caa47fbabaf4559fedba753de171fa71f50f1ce15d43e994ec74d748"))
+    let random_bytes = option.unwrap(std.hex.decode(b"ebf8fa56f12939b9584a3896472ec40bb863cfd3e86804fe3a47f06a2b69484c"))
+    if offer.random != random_bytes || offer.name != Some(b"example.com") || list.len(offer.alpn) != 1 || offer.alpn[0] != b"alpn" || list.len(offer.suites) != 2 || offer.suites[0] != 0x1301 || offer.suites[1] != 0x1302 {
+        fail("RFC 9001 A.2 ClientHello fields")
+    }
+    if let Some(point) = map.get(offer.shares, 29u16) {
+        if point != public {
+            fail("RFC 9001 A.2 X25519 share")
+        }
+    } else {
+        fail("missing X25519 share")
+    }
+    let ids = handshake.PeerConnectionIds(initial_source: b"\x83\x94\xc8\xf0\x3e\x51\x57\x08", original_destination: None, retry_source: None)
+    let p = result.unwrap(handshake.read_parameters(offer.parameters, Client, ids))
+    if p.initial_max_data != 0x3fffffffffffffff || p.initial_max_stream_data_bidi_local != 65535 || p.initial_max_stream_data_bidi_remote != 65535 || p.initial_max_stream_data_uni != 65535 || p.initial_max_streams_bidi != 16 || p.initial_max_streams_uni != 16 || p.max_idle_ms != 30000 || p.max_udp_payload != 65527 {
+        fail("RFC 9001 A.2 transport parameters")
+    }
+    // The appendix advertises the DCID as initial_source_connection_id, despite an empty SCID.
+    let observed = handshake.PeerConnectionIds(initial_source: b"", original_destination: None, retry_source: None)
+    if let Error(TransportParameterError) = handshake.read_parameters(offer.parameters, Client, observed) {} else {
+        fail("RFC 9000 §7.3 SCID mismatch")
+    }
+}
+
+fn server_vector() {
+    let mut wire = server_initial()
+    let (h, body) = open_initial(mut wire, Client, 1)
+    let source = list.slice(wire, h.source.at, h.source.at + h.source.len)
+    if list.compare_bytes(source, b"\xf0\x67\xa5\x50\x2a\x42\x62\xb5") != Equal {
+        fail("RFC 9001 A.3 SCID")
+    }
+    let mut frames = result.unwrap(codec.frames(wire, body, Initial, 0))
+    let Some(Ack(a)) = result.unwrap(codec.next_frame(wire, mut frames)) else {
+        fail("RFC 9001 A.3 ACK")
+    }
+    if a.delay != 0 || list.len(a.ranges) != 1 || a.ranges[0].smallest != 0 || a.ranges[0].largest != 0 || a.ecn != None {
+        fail("RFC 9001 A.3 ACK fields")
+    }
+    let message = crypto_message(wire, mut frames, 90)
+    let hello = result.unwrap(handshake.read_server_hello(message.body))
+    let public = option.unwrap(std.hex.decode(b"9d3c940d89690b84d08a60993c144eca684d1081287c834d5311bcf32bb9da1a"))
+    if message.kind != handshake.SERVER_HELLO || hello.retry || hello.public != public || result.unwrap(codec.next_frame(wire, mut frames)) != None {
+        fail("RFC 9001 A.3 ServerHello")
+    }
+    match (hello.suite, hello.group) {
+        (Aes128GcmSha256, Some(X25519)) => (),
+        _ => fail("RFC 9001 A.3 suite and key share"),
+    }
+}
+
+fn retry_vector() {
+    let wire = option.unwrap(std.hex.decode(b"ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba"))
+    let end = list.len(wire)
+    let mut at = 0u64
+    let h = result.unwrap(codec.read_header(wire, mut at, end, 0))
+    if h.kind != Retry || at != end || list.compare_bytes(list.slice(wire, h.token.at, h.token.at + h.token.len), b"token") != Equal {
+        fail("RFC 9001 A.4 Retry header and token")
+    }
+    let key_bytes = option.unwrap(std.hex.decode(b"be0c690b9f66575a1d766b54e368c84e"))
+    let key = result.unwrap(secret.seal(take key_bytes, "aead(aes128-gcm)"))
+    let nonce = option.unwrap(std.hex.decode(b"461599d35d632bf2239825bb"))
+    let mut aad = b"\x08\x83\x94\xc8\xf0\x3e\x51\x57\x08"
+    list.append(mut aad, list.slice(wire, 0, end - 16))
+    let mut tag: Bytes = list.with_capacity(16)
+    list.append(mut tag, list.slice(wire, end - 16, end))
+    let mut empty: Bytes = list.new()
+    if result.unwrap(secret.aead_open(key, Aes128Gcm, nonce, aad, tag, mut empty)) != 0 {
+        fail("RFC 9001 A.4 Retry integrity")
+    }
+    tag[0] = tag[0] ^ 1
+    if let Error(Tampered) = secret.aead_open(key, Aes128Gcm, nonce, aad, tag, mut empty) {} else {
+        fail("changed Retry tag was accepted")
+    }
+}
+
+fn invalid_parameter_vectors() {
+    let empty_ids = handshake.PeerConnectionIds(initial_source: b"", original_destination: None, retry_source: None)
+    let values: Inline[Bytes, 8] =[b"\x0f\x00\x0f\x00", b"\x0f\x00\x21\x00\x40\x21\x00", b"\x0f\x00\x00\x00", b"\x0f\x00\x03\x02\x44\xaf", b"\x0f\x00\x1d\x01\x00", b"\x0f\x00\x0e\x01\x01", b"\x0f\x00\x0a\x01\x15", b"\x0f\x00\x04\x02\x01\x00"]
+    for bad in values {
+        if let Error(TransportParameterError) = handshake.read_parameters(bad, Client, empty_ids) {} else {
+            fail("invalid or duplicate transport parameter")
+        }
+    }
+    let retry_ids = handshake.PeerConnectionIds(initial_source: b"\xa1", original_destination: Some(b"\xa2"), retry_source: Some(b"\xa3"))
+    let vectors: Inline[Bytes, 4] =[b"\x0f\x01\xa1\x00\x01\xa4\x10\x01\xa3", b"\x0f\x01\xa1\x10\x01\xa3", b"\x0f\x01\xa1\x00\x01\xa2\x10\x01\xa4", b"\x0f\x01\xa1\x00\x01\xa2"]
+    for bad in vectors {
+        if let Error(TransportParameterError) = handshake.read_parameters(bad, Server, retry_ids) {} else {
+            fail("incorrect original or Retry connection ID")
+        }
+    }
+    let p = result.unwrap(handshake.read_parameters(b"\x0f\x01\xa1\x00\x01\xa2\x10\x01\xa3\x1d\x00\x20\x02\x44\xb0", Server, retry_ids))
+    if !p.reset_stream_at || p.max_datagram_frame != 1200 {
+        fail("negotiated reset and DATAGRAM capability")
+    }
+}
+
+/// bug: Misparse either published Initial or accept an invalid QUIC transport parameter.
+/// oracle: RFC 9001 A.2–A.4, RFC 9000 §7.3 and §18.2, RFC 9221 §3.
+@test
+fn rfc9001_client_initial_parses() -> Result[(), ()] {
+    client_vector()
+    server_vector()
+    retry_vector()
+    invalid_parameter_vectors()
+    Ok(())
+}

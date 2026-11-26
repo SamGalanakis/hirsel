@@ -1,0 +1,71 @@
+type Transcript {
+    sha256: std.sha256.Sha256,
+    sha384: std.sha384.Sha384
+}
+
+fn transcript() -> Transcript {
+    Transcript(sha256: std.sha256.start(), sha384: std.sha384.start())
+}
+
+fn record(mut log: Transcript, message: Bytes) {
+    let end = list.len(message)
+    std.sha256.add(mut log.sha256, message, 0, end)
+    std.sha384.add(mut log.sha384, message, 0, end)
+}
+
+fn transcript_hash(log: Transcript, suite: schedule.Suite13) -> Bytes {
+    let mut out: Bytes = list.with_capacity(48)
+    if let Aes256GcmSha384 = suite {
+        for byte in std.sha384.finish(log.sha384) {
+            list.push(mut out, byte)
+        }
+    } else {
+        for byte in std.sha256.finish(log.sha256) {
+            list.push(mut out, byte)
+        }
+    }
+    take out
+}
+
+fn retry_transcript(mut log: Transcript, suite: schedule.Suite13, message: Bytes) -> Result[(), Error] {
+    // RFC 8446 §4.4.1 replaces ClientHello1 with synthetic message_hash.
+    let first = encode_message(MESSAGE_HASH, transcript_hash(log, suite))?
+    log = transcript()
+    record(mut log, first)
+    record(mut log, message)
+    Ok(())
+}
+
+fn derive_keys(suite: schedule.Suite13, side: schedule.Side, take key: secret.KeyShare, public: Bytes, log: Transcript) -> Result[schedule.Schedule, Error] {
+    match schedule.tls13(Quic(suite), side, take key, public, transcript_hash(log, suite)) {
+        Ok(take s) => Ok(take s),
+        Error((error, take returned)) => {
+            drop(take returned)
+            match error {
+                Invalid => Error(IllegalParameter),
+                _ => Error(LocalFailure),
+            }
+        },
+    }
+}
+
+fn finished(s: schedule.Schedule, of: schedule.Side, log: Transcript, suite: schedule.Suite13) -> Result[Bytes, Error] {
+    let hash = transcript_hash(log, suite)
+    let mut proof: Bytes = list.with_capacity(list.len(hash))
+    if let Error(_) = schedule.finished(s, of, hash, mut proof) {
+        return Error(LocalFailure)
+    }
+    encode_message(FINISHED, proof)
+}
+
+fn verify_finished(s: schedule.Schedule, of: schedule.Side, log: Transcript, suite: schedule.Suite13, proof: Bytes) -> Result[(), Error] {
+    let hash = transcript_hash(log, suite)
+    if list.len(proof) != list.len(hash) {
+        return Error(DecodeError)
+    }
+    match schedule.verify_finished(s, of, hash, proof) {
+        Ok(true) => Ok(()),
+        Ok(false) => Error(DecryptError),
+        Error(_) => Error(LocalFailure),
+    }
+}

@@ -1,0 +1,383 @@
+const SERVER_NAME: u16 = 0
+
+const SUPPORTED_GROUPS: u16 = 10
+
+const SIGNATURE_ALGORITHMS: u16 = 13
+
+const ALPN: u16 = 16
+
+const SUPPORTED_VERSIONS: u16 = 43
+
+const COOKIE: u16 = 44
+
+const KEY_SHARE: u16 = 51
+
+const TRANSPORT_PARAMETERS: u16 = 57
+
+const X25519_CODE: u16 = 29
+
+const P256_CODE: u16 = 23
+
+const ECDSA_P256_CODE: u16 = 0x0403
+
+const ED25519_CODE: u16 = 0x0807
+
+fn group_code(group: secret.Group) -> u16 {
+    match group {
+        X25519 => X25519_CODE,
+        P256 => P256_CODE,
+    }
+}
+
+fn signature_code(alg: SignAlg) -> Result[u16, Error] {
+    match alg {
+        P256 => Ok(ECDSA_P256_CODE),
+        Ed25519 => Ok(ED25519_CODE),
+        Rs256 => Error(LocalFailure),
+    }
+}
+
+fn suite_code(suite: schedule.Suite13) -> u16 {
+    match suite {
+        Aes128GcmSha256 => 0x1301,
+        Aes256GcmSha384 => 0x1302,
+        ChaCha20Poly1305Sha256 => 0x1303,
+    }
+}
+
+fn suite_from(code: u16) -> Result[schedule.Suite13, Error] {
+    match code {
+        0x1301 => Ok(Aes128GcmSha256),
+        0x1302 => Ok(Aes256GcmSha384),
+        0x1303 => Ok(ChaCha20Poly1305Sha256),
+        _ => Error(IllegalParameter),
+    }
+}
+
+fn has_code(values: List[u16], code: u16) -> bool {
+    for v in values {
+        if v == code {
+            return true
+        }
+    }
+    false
+}
+
+fn codes(data: Bytes, r: Reader, width: u64) -> Result[List[u16], Error] {
+    let mut cursor = r
+    let mut payload = read_vector(data, mut cursor, width)?
+    exact(cursor)?
+    if remaining(payload) == 0 || remaining(payload) % 2 != 0 {
+        return Error(DecodeError)
+    }
+    let mut out: List[u16] = list.with_capacity(remaining(payload) / 2)
+    while remaining(payload) > 0 {
+        list.push(mut out, int.narrow(read_uint(data, mut payload, 2)?))
+    }
+    Ok(take out)
+}
+
+fn read_alpn(data: Bytes, r: Reader) -> Result[List[Bytes], Error] {
+    let mut cursor = r
+    let mut protocols = read_vector(data, mut cursor, 2)?
+    exact(cursor)?
+    if remaining(protocols) == 0 {
+        return Error(DecodeError)
+    }
+    let mut out: List[Bytes] = list.new()
+    while remaining(protocols) > 0 {
+        let name = read_vector(data, mut protocols, 1)?
+        if remaining(name) == 0 {
+            return Error(DecodeError)
+        }
+        list.push(mut out, bytes_at(data, name))
+    }
+    Ok(take out)
+}
+
+fn alpn_bytes(protocols: List[Bytes]) -> Result[Bytes, Error] {
+    let mut names: Bytes = list.new()
+    for name in protocols {
+        if list.len(name) == 0 {
+            return Error(LocalFailure)
+        }
+        push_vector(mut names, name, 1)?
+    }
+    if list.len(names) == 0 {
+        return Error(LocalFailure)
+    }
+    let mut out: Bytes = list.with_capacity(2 + list.len(names))
+    push_vector(mut out, names, 2)?
+    Ok(take out)
+}
+
+fn choose_alpn(preferences: List[Bytes], offered: List[Bytes]) -> Result[Bytes, Error] {
+    for name in preferences {
+        for peer in offered {
+            if name == peer {
+                let mut chosen: Bytes = list.with_capacity(list.len(name))
+                list.append(mut chosen, name)
+                return Ok(take chosen)
+            }
+        }
+    }
+    Error(NoApplicationProtocol)
+}
+
+fn server_name(data: Bytes, r: Reader) -> Result[Bytes, Error] {
+    let mut cursor = r
+    let mut names = read_vector(data, mut cursor, 2)?
+    exact(cursor)?
+    let kind = read_uint(data, mut names, 1)?
+    let name = read_vector(data, mut names, 2)?
+    exact(names)?
+    if kind != 0 || remaining(name) == 0 {
+        return Error(IllegalParameter)
+    }
+    Ok(bytes_at(data, name))
+}
+
+fn name_bytes(name: Bytes) -> Result[Bytes, Error] {
+    let mut entry: Bytes = list.with_capacity(3 + list.len(name))
+    list.push(mut entry, 0)
+    push_vector(mut entry, name, 2)?
+    let mut out: Bytes = list.with_capacity(2 + list.len(entry))
+    push_vector(mut out, entry, 2)?
+    Ok(take out)
+}
+
+pub type ClientOffer {
+    random: Bytes,
+    suites: List[u16],
+    groups: List[u16],
+    signatures: List[u16],
+    shares: Map[u16, Bytes],
+    name: Option[Bytes],
+    alpn: List[Bytes],
+    parameters: Bytes
+}
+
+fn read_shares(data: Bytes, r: Reader, groups: List[u16]) -> Result[Map[u16, Bytes], Error] {
+    let mut cursor = r
+    let mut entries = read_vector(data, mut cursor, 2)?
+    exact(cursor)?
+    let mut shares: Map[u16, Bytes] = map.new()
+    let mut next_group = 0u64
+    while remaining(entries) > 0 {
+        let group: u16 = int.narrow(read_uint(data, mut entries, 2)?)
+        let key = read_vector(data, mut entries, 2)?
+        while next_group < list.len(groups) && groups[next_group] != group {
+            next_group += 1
+        }
+        if next_group == list.len(groups) || remaining(key) == 0 {
+            return Error(IllegalParameter)
+        }
+        if let Some(_) = map.get(shares, group) {
+            return Error(IllegalParameter)
+        }
+        next_group += 1
+        map.insert(mut shares, group, bytes_at(data, key))
+    }
+    Ok(take shares)
+}
+
+/// Parse a ClientHello body. Unrecognized ClientHello extensions do not affect negotiation.
+pub fn read_client_hello(data: Bytes) -> Result[ClientOffer, Error] {
+    let mut r = reader(data)
+    let legacy = read_uint(data, mut r, 2)?
+    if legacy != 0x0303 {
+        return Error(ProtocolVersion)
+    }
+    let random = bytes_at(data, read_range(mut r, 32)?)
+    if remaining(read_vector(data, mut r, 1)?) != 0 {
+        return Error(ProtocolViolation)
+    }
+    let suites_start = r.at
+    let _ = read_vector(data, mut r, 2)?
+    let suites = codes(data, Reader(at: suites_start, end: r.at), 2)?
+    let compression = read_vector(data, mut r, 1)?
+    if remaining(compression) != 1 || data[compression.at] != 0 {
+        return Error(IllegalParameter)
+    }
+    let ext = extensions(data, mut r)?
+    exact(r)?
+    let versions = codes(data, required(ext, SUPPORTED_VERSIONS)?, 1)?
+    if !has_code(versions, 0x0304) {
+        return Error(ProtocolVersion)
+    }
+    let groups = codes(data, required(ext, SUPPORTED_GROUPS)?, 2)?
+    let signatures = codes(data, required(ext, SIGNATURE_ALGORITHMS)?, 2)?
+    let shares = read_shares(data, required(ext, KEY_SHARE)?, groups)?
+    let name = match map.get(ext, SERVER_NAME) {
+        Some(value) => Some(server_name(data, value)?),
+        None => None,
+    }
+    let alpn = match map.get(ext, ALPN) {
+        Some(value) => read_alpn(data, value)?,
+        None => return Error(NoApplicationProtocol),
+    }
+    let parameters = bytes_at(data, required(ext, TRANSPORT_PARAMETERS)?)
+    Ok(ClientOffer(random: take random, suites: take suites, groups: take groups, signatures: take signatures, shares: take shares, name: take name, alpn: take alpn, parameters: take parameters))
+}
+
+fn hello_prefix(mut out: Bytes, random: Bytes) {
+    list.append(mut out, b"\x03\x03")
+    list.append(mut out, random)
+    list.push(mut out, 0)
+}
+
+fn share_entry(group: secret.Group, public: Bytes) -> Result[Bytes, Error] {
+    let mut share: Bytes = list.with_capacity(4 + list.len(public))
+    list.put_word_be(mut share, group_code(group))
+    push_vector(mut share, public, 2)?
+    Ok(take share)
+}
+
+fn client_hello(random: Bytes, group: secret.Group, public: Bytes, name: Bytes, protocols: List[Bytes], parameters: Bytes, cookie: Option[Bytes]) -> Result[Bytes, Error] {
+    let mut body: Bytes = list.new()
+    hello_prefix(mut body, random)
+    list.append(mut body, b"\x00\x06\x13\x01\x13\x02\x13\x03\x01\x00")
+    let mut ext: Bytes = list.new()
+    extension(mut ext, SUPPORTED_VERSIONS, b"\x02\x03\x04")?
+    extension(mut ext, SUPPORTED_GROUPS, b"\x00\x04\x00\x1d\x00\x17")?
+    extension(mut ext, SIGNATURE_ALGORITHMS, b"\x00\x04\x04\x03\x08\x07")?
+    if list.len(name) > 0 {
+        extension(mut ext, SERVER_NAME, name_bytes(name)?)?
+    }
+    extension(mut ext, ALPN, alpn_bytes(protocols)?)?
+    extension(mut ext, TRANSPORT_PARAMETERS, parameters)?
+    let entry = share_entry(group, public)?
+    let mut shares: Bytes = list.with_capacity(2 + list.len(entry))
+    push_vector(mut shares, entry, 2)?
+    extension(mut ext, KEY_SHARE, shares)?
+    if let Some(c) = cookie {
+        extension(mut ext, COOKIE, c)?
+    }
+    push_vector(mut body, ext, 2)?
+    encode_message(CLIENT_HELLO, body)
+}
+
+pub type ServerHello {
+    suite: schedule.Suite13,
+    group: Option[secret.Group],
+    public: Bytes,
+    retry: bool,
+    cookie: Option[Bytes]
+}
+
+/// The client offers all three suites, and only X25519 and P-256 groups.
+pub fn read_server_hello(data: Bytes) -> Result[ServerHello, Error] {
+    let mut r = reader(data)
+    let version = read_uint(data, mut r, 2)?
+    let random = read_range(mut r, 32)?
+    let retry_random = b"\xcf\x21\xad\x74\xe5\x9a\x61\x11\xbe\x1d\x8c\x02\x1e\x65\xb8\x91\xc2\xa2\x11\x16\x7a\xbb\x8c\x5e\x07\x9e\x09\xe2\xc8\xa8\x33\x9c"
+    let retry = list.compare_bytes(list.slice(data, random.at, random.end), retry_random) == Equal
+    let session = read_vector(data, mut r, 1)?
+    let suite = suite_from(int.narrow(read_uint(data, mut r, 2)?))?
+    let compression = read_uint(data, mut r, 1)?
+    if version != 0x0303 || remaining(session) != 0 || compression != 0 {
+        return Error(IllegalParameter)
+    }
+    let ext = extensions(data, mut r)?
+    exact(r)?
+    for (kind, _) in ext {
+        if kind != SUPPORTED_VERSIONS && kind != KEY_SHARE && !(retry && kind == COOKIE) {
+            return Error(UnsupportedExtension)
+        }
+    }
+    let mut selected = required(ext, SUPPORTED_VERSIONS)?
+    if read_uint(data, mut selected, 2)? != 0x0304 {
+        return Error(ProtocolVersion)
+    }
+    exact(selected)?
+    let cookie = match map.get(ext, COOKIE) {
+        Some(value) => {
+            let mut field = value
+            let token = read_vector(data, mut field, 2)?
+            exact(field)?
+            if remaining(token) == 0 {
+                return Error(DecodeError)
+            }
+            Some(bytes_at(data, value))
+        },
+        None => None,
+    }
+    let (group, public) = match map.get(ext, KEY_SHARE) {
+        Some(value) => {
+            let mut share = value
+            let group: secret.Group = match read_uint(data, mut share, 2)? {
+                29 => X25519,
+                23 => P256,
+                _ => return Error(IllegalParameter),
+            }
+            let key = if retry {
+                b""
+            } else {
+                let point = read_vector(data, mut share, 2)?
+                let size: u64 = if group_code(group) == X25519_CODE {
+                    32
+                } else {
+                    65
+                }
+                if remaining(point) != size || (group_code(group) == P256_CODE && data[point.at] != 4) {
+                    return Error(IllegalParameter)
+                }
+                bytes_at(data, point)
+            }
+            exact(share)?
+            (Some(group), take key)
+        },
+        None if retry && cookie != None => (None, b""),
+        None => return Error(MissingExtension),
+    }
+    Ok(ServerHello(suite: suite, group: group, public: take public, retry: retry, cookie: take cookie))
+}
+
+fn server_hello(random: Bytes, suite: schedule.Suite13, group: secret.Group, public: Bytes) -> Result[Bytes, Error] {
+    let mut body: Bytes = list.new()
+    hello_prefix(mut body, random)
+    list.put_word_be(mut body, suite_code(suite))
+    list.push(mut body, 0)
+    let mut ext: Bytes = list.new()
+    extension(mut ext, SUPPORTED_VERSIONS, b"\x03\x04")?
+    extension(mut ext, KEY_SHARE, share_entry(group, public)?)?
+    push_vector(mut body, ext, 2)?
+    encode_message(SERVER_HELLO, body)
+}
+
+fn read_encrypted_extensions(data: Bytes, offered: List[Bytes], named: bool, ids: PeerConnectionIds) -> Result[(Bytes, TransportParameters), Error] {
+    let mut r = reader(data)
+    let ext = extensions(data, mut r)?
+    exact(r)?
+    for (kind, value) in ext {
+        match kind {
+            _ if kind == ALPN || kind == TRANSPORT_PARAMETERS || kind == SUPPORTED_GROUPS => (),
+            _ if kind == SERVER_NAME && named => exact(value)?,
+            _ => return Error(UnsupportedExtension),
+        }
+    }
+    if let Some(groups) = map.get(ext, SUPPORTED_GROUPS) {
+        let _ = codes(data, groups, 2)?
+    }
+    let Some(value) = map.get(ext, ALPN) else {
+        return Error(NoApplicationProtocol)
+    }
+    let names = read_alpn(data, value)?
+    if list.len(names) != 1 {
+        return Error(IllegalParameter)
+    }
+    let alpn = choose_alpn(offered, names)?
+    let p = read_parameters(bytes_at(data, required(ext, TRANSPORT_PARAMETERS)?), Server, ids)?
+    Ok((take alpn, take p))
+}
+
+fn encrypted_extensions(alpn: Bytes, parameters: Bytes) -> Result[Bytes, Error] {
+    let mut ext: Bytes = list.new()
+    let mut selected: List[Bytes] = list.with_capacity(1)
+    list.push(mut selected, clone(alpn))
+    extension(mut ext, ALPN, alpn_bytes(selected)?)?
+    extension(mut ext, TRANSPORT_PARAMETERS, parameters)?
+    let mut body: Bytes = list.new()
+    push_vector(mut body, ext, 2)?
+    encode_message(ENCRYPTED_EXTENSIONS, body)
+}

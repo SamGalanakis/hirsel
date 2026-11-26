@@ -1,0 +1,383 @@
+pub type ClientConfig {
+    name: Bytes,
+    protocols: List[Bytes],
+    pins: List[Pin],
+    identity: Option[Identity],
+    group: secret.Group,
+    parameters: TransportParameters
+}
+
+pub type ServerConfig {
+    protocols: List[Bytes],
+    suites: List[schedule.Suite13],
+    identity: Identity,
+    client_pins: Option[List[Pin]],
+    parameters: TransportParameters
+}
+
+/// TLS messages grouped by QUIC CRYPTO encryption level.
+pub type Flight {
+    initial: Bytes,
+    encrypted: Bytes
+}
+
+type Stage: key = AwaitServerHello | AwaitExtensions | AwaitRequestOrCertificate | AwaitCertificate | AwaitVerify | AwaitFinished | Complete | Failed
+
+pub opaque type Handshake {
+    stage: Stage,
+    side: schedule.Side,
+    suite: schedule.Suite13,
+    group: secret.Group,
+    client: Option[ClientConfig],
+    client_signatures: Option[List[u16]],
+    pins: List[Pin],
+    random: Random,
+    client_random: Bytes,
+    retried: bool,
+    share: Option[secret.KeyShare],
+    public: Bytes,
+    keys: Option[schedule.Schedule],
+    log: Transcript,
+    peer_key: std.x509_key.PublicKey,
+    alpn: Bytes,
+    peer_parameters: Option[TransportParameters]
+}
+
+fn draw_random(r: Random) -> Bytes {
+    let mut out: Bytes = list.with_capacity(32)
+    host.random(r, mut out)
+    take out
+}
+
+fn key_share(r: Random, group: secret.Group, mut public: Bytes) -> Result[secret.KeyShare, Error] {
+    match secret.key_share(r, group, mut public) {
+        Ok(take share) => Ok(take share),
+        Error(_) => Error(LocalFailure),
+    }
+}
+
+pub fn start_client(random: Random, take config: ClientConfig) -> Result[(Handshake, Flight), Error] {
+    let client_random = draw_random(random)
+    let parameters = write_parameters(config.parameters, Client)?
+    let group = config.group
+    let mut public: Bytes = list.with_capacity(65)
+    let share = key_share(random, group, mut public)?
+    let initial = client_hello(client_random, group, public, config.name, config.protocols, parameters, None)?
+    let mut log = transcript()
+    record(mut log, initial)
+    let h = Handshake(stage: AwaitServerHello, side: Client, suite: Aes128GcmSha256, group: group, client: Some(take config), client_signatures: None, pins: list.new(), random: random, client_random: take client_random, retried: false, share: Some(take share), public: take public, keys: None, log: take log, peer_key: Invalid, alpn: b"", peer_parameters: None)
+    Ok((take h, Flight(initial: take initial, encrypted: b"")))
+}
+
+fn choose_suite(preferences: List[schedule.Suite13], offered: List[u16]) -> Result[schedule.Suite13, Error] {
+    for suite in preferences {
+        if has_code(offered, suite_code(suite)) {
+            return Ok(suite)
+        }
+    }
+    Error(HandshakeFailure)
+}
+
+fn choose_share(offer: ClientOffer) -> Result[(secret.Group, Bytes), Error] {
+    let groups: Inline[secret.Group, 2] =[X25519, P256]
+    for group in groups {
+        if let Some(point) = map.get(offer.shares, group_code(group)) {
+            let n = list.len(point)
+            if (group_code(group) == X25519_CODE && n == 32) || (group_code(group) == P256_CODE && n == 65 && point[0] == 4) {
+                let mut peer: Bytes = list.with_capacity(n)
+                list.append(mut peer, point)
+                return Ok((group, take peer))
+            }
+        }
+    }
+    Error(HandshakeFailure)
+}
+
+fn only_message(wire: Bytes) -> Result[Message, Error] {
+    let mut at = 0u64
+    let message = read_message(wire, mut at)?
+    if at != list.len(wire) {
+        return Error(DecodeError)
+    }
+    Ok(take message)
+}
+
+fn send(mut log: Transcript, mut out: Bytes, wire: Bytes) {
+    record(mut log, wire)
+    list.append(mut out, wire)
+}
+
+/// Start a server from a complete Initial ClientHello. The server uses an offered share.
+pub fn accept_client(random: Random, config: ServerConfig, ids: PeerConnectionIds, wire: Bytes) -> Result[(Handshake, Flight), Error] {
+    let message = only_message(wire)?
+    if message.kind != CLIENT_HELLO {
+        return Error(UnexpectedMessage)
+    }
+    let offer = read_client_hello(message.body)?
+    let peer_parameters = read_parameters(offer.parameters, Client, ids)?
+    let alpn = choose_alpn(config.protocols, offer.alpn)?
+    let suite = choose_suite(config.suites, offer.suites)?
+    let (group, peer) = choose_share(offer)?
+    let (chain, alg) = match config.identity {
+        Identity(chain: chain, alg: alg, ..) => (chain, alg),
+    }
+    if list.len(chain) == 0 {
+        return Error(LocalFailure)
+    }
+    if !has_code(offer.signatures, signature_code(alg)?) {
+        return Error(HandshakeFailure)
+    }
+    let mut public: Bytes = list.with_capacity(65)
+    let share = key_share(random, group, mut public)?
+    let initial = server_hello(draw_random(random), suite, group, public)?
+    let mut log = transcript()
+    record(mut log, wire)
+    record(mut log, initial)
+    let mut keys = derive_keys(suite, Server, take share, peer, log)?
+    let mut encrypted: Bytes = list.new()
+    send(mut log, mut encrypted, encrypted_extensions(alpn, write_parameters(config.parameters, Server)?)?)
+    let (stage, pins) = match config.client_pins {
+        Some(pins) => {
+            send(mut log, mut encrypted, certificate_request()?)
+            let mut saved: List[Pin] = list.with_capacity(list.len(pins))
+            list.append(mut saved, pins)
+            (AwaitCertificate, take saved)
+        },
+        None => (AwaitFinished, list.new()),
+    }
+    send(mut log, mut encrypted, certificate_message(chain)?)
+    let verify = certificate_verify(config.identity, random, Server, transcript_hash(log, suite))?
+    send(mut log, mut encrypted, verify)
+    let proof = finished(keys, Server, log, suite)?
+    send(mut log, mut encrypted, proof)
+    if let Error(_) = schedule.application(mut keys, transcript_hash(log, suite)) {
+        return Error(LocalFailure)
+    }
+    let h = Handshake(stage: stage, side: Server, suite: suite, group: group, client: None, client_signatures: None, pins: take pins, random: random, client_random: b"", retried: false, share: None, public: b"", keys: Some(take keys), log: take log, peer_key: Invalid, alpn: take alpn, peer_parameters: Some(take peer_parameters))
+    Ok((take h, Flight(initial: take initial, encrypted: take encrypted)))
+}
+
+fn receive_hello(mut h: Handshake, message: Message, wire: Bytes, mut flight: Flight) -> Result[(), Error] {
+    let hello = read_server_hello(message.body)?
+    if h.retried && (hello.retry || suite_code(hello.suite) != suite_code(h.suite)) {
+        return Error(IllegalParameter)
+    }
+    h.suite = hello.suite
+    if hello.retry {
+        if let Some(group) = hello.group {
+            if group_code(group) == group_code(h.group) {
+                return Error(IllegalParameter)
+            }
+            h.group = group
+            let mut public: Bytes = list.with_capacity(65)
+            let share = key_share(h.random, group, mut public)?
+            let _ = replace(mut h.share, Some(take share))
+            h.public = take public
+        }
+        let c = match h.client {
+            Some(config) => config,
+            None => return Error(LocalFailure),
+        }
+        retry_transcript(mut h.log, h.suite, wire)?
+        let parameters = write_parameters(c.parameters, Client)?
+        let initial = client_hello(h.client_random, h.group, h.public, c.name, c.protocols, parameters, hello.cookie)?
+        record(mut h.log, initial)
+        flight.initial = take initial
+        h.retried = true
+        return Ok(())
+    }
+    match hello.group {
+        Some(group) if group_code(group) == group_code(h.group) => (),
+        _ => return Error(IllegalParameter),
+    }
+    let Some(take share) = replace(mut h.share, None) else {
+        return Error(LocalFailure)
+    }
+    record(mut h.log, wire)
+    let keys = derive_keys(h.suite, Client, take share, hello.public, h.log)?
+    h.keys = Some(take keys)
+    h.stage = AwaitExtensions
+    Ok(())
+}
+
+fn receive_extensions(mut h: Handshake, message: Message, wire: Bytes, ids: PeerConnectionIds) -> Result[(), Error] {
+    let c = match h.client {
+        Some(config) => config,
+        None => return Error(LocalFailure),
+    }
+    let (alpn, params) = read_encrypted_extensions(message.body, c.protocols, list.len(c.name) != 0, ids)?
+    h.alpn = take alpn
+    h.peer_parameters = Some(take params)
+    record(mut h.log, wire)
+    h.stage = AwaitRequestOrCertificate
+    Ok(())
+}
+
+fn receive_certificate(mut h: Handshake, message: Message, wire: Bytes) -> Result[(), Error] {
+    let leaf = read_certificate(message.body)?
+    let key = match h.side {
+        Client => {
+            let c = match h.client {
+                Some(config) => config,
+                None => return Error(LocalFailure),
+            }
+            authenticate_leaf(leaf, c.pins, Server)?
+        },
+        Server => authenticate_leaf(leaf, h.pins, Client)?,
+    }
+    h.peer_key = take key
+    record(mut h.log, wire)
+    h.stage = AwaitVerify
+    Ok(())
+}
+
+fn client_authentication(mut h: Handshake, mut out: Bytes, signatures: List[u16]) -> Result[(), Error] {
+    let config = match h.client {
+        Some(config) => config,
+        None => return Error(LocalFailure),
+    }
+    if let Some(id) = config.identity {
+        let (chain, alg) = match id {
+            Identity(chain: chain, alg: alg, ..) => (chain, alg),
+        }
+        if list.len(chain) > 0 && has_code(signatures, signature_code(alg)?) {
+            send(mut h.log, mut out, certificate_message(chain)?)
+            let verify = certificate_verify(id, h.random, Client, transcript_hash(h.log, h.suite))?
+            send(mut h.log, mut out, verify)
+            return Ok(())
+        }
+    }
+    send(mut h.log, mut out, certificate_message(list.new())?)
+    Ok(())
+}
+
+fn receive_finished(mut h: Handshake, message: Message, wire: Bytes, mut flight: Flight) -> Result[(), Error] {
+    let of: schedule.Side = match h.side {
+        Client => Server,
+        Server => Client,
+    }
+    let Some(take ready) = replace(mut h.keys, None) else {
+        return Error(LocalFailure)
+    }
+    let mut keys = take ready
+    verify_finished(keys, of, h.log, h.suite, message.body)?
+    record(mut h.log, wire)
+    if let Client = h.side {
+        if let Error(_) = schedule.application(mut keys, transcript_hash(h.log, h.suite)) {
+            return Error(LocalFailure)
+        }
+        let requests = replace(mut h.client_signatures, None)
+        if let Some(signatures) = requests {
+            client_authentication(mut h, mut flight.encrypted, signatures)?
+        }
+        let proof = finished(keys, Client, h.log, h.suite)?
+        send(mut h.log, mut flight.encrypted, proof)
+    }
+    h.keys = Some(take keys)
+    h.stage = Complete
+    Ok(())
+}
+
+fn advance(mut h: Handshake, space: packet.Space, ids: PeerConnectionIds, wire: Bytes, mut flight: Flight) -> Result[(), Error] {
+    let message = only_message(wire)?
+    let expected: packet.Space = match h.stage {
+        AwaitServerHello => Initial,
+        Complete => Application,
+        _ => Handshake,
+    }
+    match (space, expected) {
+        (Initial, Initial) => (),
+        (Handshake, Handshake) => (),
+        (Application, Application) => (),
+        _ => return Error(UnexpectedMessage),
+    }
+    match h.stage {
+        AwaitServerHello if message.kind == SERVER_HELLO => receive_hello(mut h, message, wire, mut flight),
+        AwaitExtensions if message.kind == ENCRYPTED_EXTENSIONS => receive_extensions(mut h, message, wire, ids),
+        AwaitRequestOrCertificate if message.kind == CERTIFICATE_REQUEST => {
+            let signatures = read_certificate_request(message.body)?
+            h.client_signatures = Some(take signatures)
+            record(mut h.log, wire)
+            h.stage = AwaitCertificate
+            Ok(())
+        },
+        _ if (h.stage == AwaitRequestOrCertificate || h.stage == AwaitCertificate) && message.kind == CERTIFICATE => receive_certificate(mut h, message, wire),
+        AwaitVerify if message.kind == CERTIFICATE_VERIFY => {
+            let of: schedule.Side = match h.side {
+                Client => Server,
+                Server => Client,
+            }
+            read_certificate_verify(h.peer_key, of, transcript_hash(h.log, h.suite), message.body)?
+            record(mut h.log, wire)
+            h.stage = AwaitFinished
+            Ok(())
+        },
+        AwaitFinished if message.kind == FINISHED => receive_finished(mut h, message, wire, mut flight),
+        Complete if message.kind == NEW_SESSION_TICKET => {
+            match h.side {
+                Client => Ok(()),
+                Server => Error(UnexpectedMessage),
+            }
+        },
+        _ => Error(UnexpectedMessage),
+    }
+}
+
+/// Feed one complete message in order. A refusal permanently ends the handshake.
+pub fn receive(mut h: Handshake, space: packet.Space, ids: PeerConnectionIds, wire: Bytes) -> Result[Flight, Error] {
+    let mut flight = Flight(initial: b"", encrypted: b"")
+    match advance(mut h, space, ids, wire, mut flight) {
+        Ok(()) => Ok(take flight),
+        Error(e) => {
+            h.stage = Failed
+            let _ = replace(mut h.keys, None)
+            let _ = replace(mut h.share, None)
+            Error(e)
+        },
+    }
+}
+
+pub fn connected(h: Handshake) -> bool {
+    match h.stage {
+        Complete => true,
+        _ => false,
+    }
+}
+
+pub fn negotiated(h: Handshake) -> Option[(Bytes, TransportParameters)] {
+    if !connected(h) {
+        return None
+    }
+    match h.peer_parameters {
+        Some(p) => Some((clone(h.alpn), clone(p))),
+        None => None,
+    }
+}
+
+pub fn handshake_opener(h: Handshake) -> Result[packet.Opener, schedule.ScheduleError] {
+    match h.keys {
+        Some(k) => schedule.opener(k, Handshake),
+        None => Error(Invalid),
+    }
+}
+
+pub fn handshake_sealer(mut h: Handshake, domain: u64, floor: u64) -> Result[packet.Sealer, schedule.ScheduleError] {
+    match h.keys {
+        Some(mut k) => schedule.sealer(mut k, Handshake, domain, floor),
+        None => Error(Invalid),
+    }
+}
+
+pub fn handshake_mask(h: Handshake, local: bool) -> Result[packet.HeaderMask, schedule.ScheduleError] {
+    match h.keys {
+        Some(k) => schedule.header_mask(k, Handshake, local),
+        None => Error(Invalid),
+    }
+}
+
+pub fn take_keys(mut h: Handshake) -> Option[schedule.Schedule] {
+    if !connected(h) {
+        return None
+    }
+    replace(mut h.keys, None)
+}

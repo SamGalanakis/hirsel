@@ -1,0 +1,158 @@
+pub type Error: key = DecodeError | UnexpectedMessage | IllegalParameter | MissingExtension | UnsupportedExtension | ProtocolVersion | HandshakeFailure | NoApplicationProtocol | PinMismatch | BadCertificate | CertificateRequired | DecryptError | TransportParameterError | ProtocolViolation | LocalFailure
+
+/// QUIC's CRYPTO_ERROR for TLS refusals, or a transport error for transport parameters.
+pub fn error_code(error: Error) -> u64 {
+    match error {
+        TransportParameterError => 0x08,
+        ProtocolViolation => 0x0a,
+        LocalFailure => 0x01,
+        UnexpectedMessage => 0x10a,
+        HandshakeFailure => 0x128,
+        PinMismatch => 0x12a,
+        BadCertificate => 0x12a,
+        IllegalParameter => 0x12f,
+        DecodeError => 0x132,
+        DecryptError => 0x133,
+        ProtocolVersion => 0x146,
+        MissingExtension => 0x16d,
+        UnsupportedExtension => 0x16e,
+        CertificateRequired => 0x174,
+        NoApplicationProtocol => 0x178,
+    }
+}
+
+type Reader {
+    at: u64,
+    end: u64
+}
+
+fn reader(data: Bytes) -> Reader {
+    Reader(at: 0, end: list.len(data))
+}
+
+fn remaining(r: Reader) -> u64 {
+    r.end - r.at
+}
+
+fn read_range(mut r: Reader, len: u64) -> Result[Reader, Error] {
+    if len > remaining(r) {
+        return Error(DecodeError)
+    }
+    let start = r.at
+    r.at += len
+    Ok(Reader(at: start, end: r.at))
+}
+
+fn read_uint(data: Bytes, mut r: Reader, width: u64) -> Result[u64, Error] {
+    let range = read_range(mut r, width)?
+    let mut n = 0u64
+    for i in range.at .. range.end {
+        n = n << 8 | int.widen(data[i])
+    }
+    Ok(n)
+}
+
+fn read_vector(data: Bytes, mut r: Reader, width: u64) -> Result[Reader, Error] {
+    let len = read_uint(data, mut r, width)?
+    read_range(mut r, len)
+}
+
+fn exact(r: Reader) -> Result[(), Error] {
+    if r.at != r.end {
+        return Error(DecodeError)
+    }
+    Ok(())
+}
+
+fn bytes_at(data: Bytes, r: Reader) -> Bytes {
+    let mut out: Bytes = list.with_capacity(remaining(r))
+    list.append(mut out, list.slice(data, r.at, r.end))
+    take out
+}
+
+fn push_uint(mut out: Bytes, n: u64, width: u64) {
+    for i in 0u64 .. width {
+        list.push(mut out, int.truncate(n >> (8 * (width - i - 1))))
+    }
+}
+
+fn push_vector(mut out: Bytes, data: Bytes, width: u64) -> Result[(), Error] {
+    let len = list.len(data)
+    if len >= (1u64 << (width * 8)) {
+        return Error(LocalFailure)
+    }
+    push_uint(mut out, len, width)
+    list.append(mut out, data)
+    Ok(())
+}
+
+pub const CLIENT_HELLO: u8 = 1
+
+pub const SERVER_HELLO: u8 = 2
+
+const NEW_SESSION_TICKET: u8 = 4
+
+const ENCRYPTED_EXTENSIONS: u8 = 8
+
+const CERTIFICATE: u8 = 11
+
+const CERTIFICATE_REQUEST: u8 = 13
+
+const CERTIFICATE_VERIFY: u8 = 15
+
+const FINISHED: u8 = 20
+
+const MESSAGE_HASH: u8 = 254
+
+pub type Message {
+    kind: u8,
+    body: Bytes
+}
+
+/// Read one complete TLS handshake message from reassembled CRYPTO bytes.
+/// The caller retains incomplete data until the four-byte header and body arrive.
+pub fn read_message(data: Bytes, mut at: u64) -> Result[Message, Error] {
+    let mut r = Reader(at: at, end: list.len(data))
+    if at > r.end {
+        return Error(DecodeError)
+    }
+    let kind: u8 = int.narrow(read_uint(data, mut r, 1)?)
+    let body = read_vector(data, mut r, 3)?
+    at = r.at
+    Ok(Message(kind: kind, body: bytes_at(data, body)))
+}
+
+fn encode_message(kind: u8, body: Bytes) -> Result[Bytes, Error] {
+    let mut out: Bytes = list.with_capacity(4 + list.len(body))
+    list.push(mut out, kind)
+    push_vector(mut out, body, 3)?
+    Ok(take out)
+}
+
+type Extensions = Map[u16, Reader]
+
+fn extensions(data: Bytes, mut r: Reader) -> Result[Extensions, Error] {
+    let mut entries = read_vector(data, mut r, 2)?
+    let mut out: Extensions = map.new()
+    while remaining(entries) > 0 {
+        let kind: u16 = int.narrow(read_uint(data, mut entries, 2)?)
+        let value = read_vector(data, mut entries, 2)?
+        if let Some(_) = map.get(out, kind) {
+            return Error(IllegalParameter)
+        }
+        map.insert(mut out, kind, value)
+    }
+    Ok(take out)
+}
+
+fn required(ext: Extensions, kind: u16) -> Result[Reader, Error] {
+    match map.get(ext, kind) {
+        Some(r) => Ok(r),
+        None => Error(MissingExtension),
+    }
+}
+
+fn extension(mut out: Bytes, kind: u16, data: Bytes) -> Result[(), Error] {
+    list.put_word_be(mut out, kind)
+    push_vector(mut out, data, 2)
+}

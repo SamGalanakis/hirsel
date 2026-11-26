@@ -1,0 +1,170 @@
+pub type Pin = Spki(Inline[u8, 32]) | Cert(Inline[u8, 32])
+
+pub type Identity = Identity(chain: List[Bytes], key: Secret, alg: SignAlg)
+
+fn check_pins(certificate: Bytes, pins: List[Pin]) -> Result[(), Error] {
+    let mut cert: Option[Inline[u8, 32]] = None
+    let mut spki: Option[Inline[u8, 32]] = None
+    for pin in pins {
+        match pin {
+            Cert(digest) => {
+                if let None = cert {
+                    cert = Some(std.sha256.hash(certificate))
+                }
+                if cert == Some(digest) {
+                    return Ok(())
+                }
+            },
+            Spki(digest) => {
+                if let None = spki {
+                    let Some(range) = std.x509_key.spki_range(certificate) else {
+                        return Error(BadCertificate)
+                    }
+                    let mut hash = std.sha256.start()
+                    std.sha256.add(mut hash, certificate, range.start, range.end)
+                    spki = Some(std.sha256.finish(hash))
+                }
+                if spki == Some(digest) {
+                    return Ok(())
+                }
+            },
+        }
+    }
+    Error(PinMismatch)
+}
+
+fn authenticate_leaf(leaf: Option[Bytes], pins: List[Pin], of: schedule.Side) -> Result[std.x509_key.PublicKey, Error] {
+    let certificate = match leaf {
+        Some(der) => der,
+        None => {
+            if let Client = of {
+                return Error(CertificateRequired)
+            }
+            return Error(BadCertificate)
+        },
+    }
+    check_pins(certificate, pins)?
+    match std.x509_key.read(certificate) {
+        P256(take point) => Ok(P256(take point)),
+        Ed25519(take key) => Ok(Ed25519(take key)),
+        _ => Error(BadCertificate),
+    }
+}
+
+fn certificate_message(chain: List[Bytes]) -> Result[Bytes, Error] {
+    let mut entries: Bytes = list.new()
+    for certificate in chain {
+        if list.len(certificate) == 0 {
+            return Error(LocalFailure)
+        }
+        push_vector(mut entries, certificate, 3)?
+        list.append(mut entries, b"\x00\x00")
+    }
+    let mut body: Bytes = list.with_capacity(4 + list.len(entries))
+    list.push(mut body, 0)
+    push_vector(mut body, entries, 3)?
+    encode_message(CERTIFICATE, body)
+}
+
+fn read_certificate(data: Bytes) -> Result[Option[Bytes], Error] {
+    let mut r = reader(data)
+    let context = read_vector(data, mut r, 1)?
+    if remaining(context) != 0 {
+        return Error(IllegalParameter)
+    }
+    let mut entries = read_vector(data, mut r, 3)?
+    exact(r)?
+    let mut leaf: Option[Bytes] = None
+    while remaining(entries) > 0 {
+        let certificate = read_vector(data, mut entries, 3)?
+        if remaining(certificate) == 0 {
+            return Error(DecodeError)
+        }
+        let ext = extensions(data, mut entries)?
+        if map.len(ext) != 0 {
+            return Error(UnsupportedExtension)
+        }
+        if let None = leaf {
+            leaf = Some(bytes_at(data, certificate))
+        }
+    }
+    Ok(take leaf)
+}
+
+fn certificate_request() -> Result[Bytes, Error] {
+    // Empty context, one signature_algorithms extension, P-256 and Ed25519.
+    encode_message(CERTIFICATE_REQUEST, b"\x00\x00\x0a\x00\x0d\x00\x06\x00\x04\x04\x03\x08\x07")
+}
+
+fn read_certificate_request(data: Bytes) -> Result[List[u16], Error] {
+    let mut r = reader(data)
+    if remaining(read_vector(data, mut r, 1)?) != 0 {
+        return Error(IllegalParameter)
+    }
+    let ext = extensions(data, mut r)?
+    exact(r)?
+    codes(data, required(ext, SIGNATURE_ALGORITHMS)?, 2)
+}
+
+fn verify_content(of: schedule.Side, digest: Bytes) -> Bytes {
+    let context = match of {
+        Server => b"TLS 1.3, server CertificateVerify",
+        Client => b"TLS 1.3, client CertificateVerify",
+    }
+    let mut msg: Bytes = list.with_capacity(65 + list.len(context) + list.len(digest))
+    for _ in 0u64 .. 64 {
+        list.push(mut msg, 0x20)
+    }
+    list.append(mut msg, context)
+    list.push(mut msg, 0)
+    list.append(mut msg, digest)
+    take msg
+}
+
+fn certificate_verify(id: Identity, random: Random, of: schedule.Side, hash: Bytes) -> Result[Bytes, Error] {
+    let (key, alg) = match id {
+        Identity(key: key, alg: alg, ..) => (key, alg),
+    }
+    let scheme = signature_code(alg)?
+    let message = verify_content(of, hash)
+    let mut raw: Bytes = list.with_capacity(64)
+    if let Error(_) = secret.sign(key, alg, random, message, mut raw) {
+        return Error(LocalFailure)
+    }
+    let signature = match alg {
+        P256 => {
+            let Some(der) = std.x509_build.p256_signature_der(raw) else {
+                return Error(LocalFailure)
+            }
+            take der
+        },
+        _ => take raw,
+    }
+    let mut body: Bytes = list.with_capacity(4 + list.len(signature))
+    list.put_word_be(mut body, scheme)
+    push_vector(mut body, signature, 2)?
+    encode_message(CERTIFICATE_VERIFY, body)
+}
+
+fn verify_signature(key: std.x509_key.PublicKey, scheme: u16, message: Bytes, signature: Bytes) -> Result[(), Error] {
+    let valid = match key {
+        P256(point) if scheme == ECDSA_P256_CODE => p256.verify_der(point, message, signature),
+        Ed25519(point) if scheme == ED25519_CODE => ed25519.verify(point, message, signature),
+        _ => false,
+    }
+    if !valid {
+        return Error(DecryptError)
+    }
+    Ok(())
+}
+
+fn read_certificate_verify(key: std.x509_key.PublicKey, of: schedule.Side, hash: Bytes, data: Bytes) -> Result[(), Error] {
+    let mut r = reader(data)
+    let scheme: u16 = int.narrow(read_uint(data, mut r, 2)?)
+    let signature = read_vector(data, mut r, 2)?
+    exact(r)?
+    if scheme != ECDSA_P256_CODE && scheme != ED25519_CODE {
+        return Error(IllegalParameter)
+    }
+    verify_signature(key, scheme, verify_content(of, hash), bytes_at(data, signature))
+}

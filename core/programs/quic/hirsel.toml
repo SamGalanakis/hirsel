@@ -11,9 +11,18 @@ std = { major = 1 }
 "header.hirsel" = "codec"
 "frame.hirsel" = "codec"
 "frame_write.hirsel" = "codec"
+"tls_wire.hirsel" = "handshake"
+"hello.hirsel" = "handshake"
+"certificate.hirsel" = "handshake"
+"transcript.hirsel" = "handshake"
+"handshake.hirsel" = "handshake"
+"transport_parameters.hirsel" = "handshake"
 
 [tests]
 limit = 67108864
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"initial_laws.hirsel" = "laws"
+"authentication_laws.hirsel" = "laws"
+"authentication_vectors.hirsel" = "laws"

@@ -366,7 +366,7 @@ fn certificate_message(mut e: Endpoint, m: HandshakeMessage, next: Want) -> Resu
             e.peer_key = point
             e.peer_p384 = true
         },
-        Invalid => {
+        _ => {
             return Error(refuse(BAD_CERTIFICATE))
         },
     }

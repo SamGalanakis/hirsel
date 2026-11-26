@@ -175,8 +175,10 @@ fn matches_fingerprint_hash(certificate: Bytes, fingerprints: List[Fingerprint],
 
 /// Check the presented certificate against the pins supplied by signalling.
 pub fn matches_peer_fingerprint(certificate: Bytes, fingerprints: List[Fingerprint]) -> bool {
-    if let Invalid = std.x509_key.read(certificate) {
-        return false
+    match std.x509_key.read(certificate) {
+        P256(_) => (),
+        P384(_) => (),
+        _ => return false,
     }
     matches_fingerprint_hash(certificate, fingerprints, Sha256) || matches_fingerprint_hash(certificate, fingerprints, Sha384) || matches_fingerprint_hash(certificate, fingerprints, Sha512)
 }

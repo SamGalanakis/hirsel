@@ -1,0 +1,289 @@
+fn client_ids() -> handshake.PeerConnectionIds {
+    handshake.PeerConnectionIds(initial_source: b"\xc1", original_destination: None, retry_source: None)
+}
+
+fn server_ids() -> handshake.PeerConnectionIds {
+    handshake.PeerConnectionIds(initial_source: b"\xa1", original_destination: Some(b"\xab"), retry_source: None)
+}
+
+fn client_random_tape() -> Random {
+    let mut tape: Bytes = list.with_capacity(96)
+    for _ in 0u64 .. 32 {
+        list.push(mut tape, 0x11)
+    }
+    for _ in 0u64 .. 32 {
+        list.push(mut tape, 0x22)
+    }
+    for _ in 0u64 .. 31 {
+        list.push(mut tape, 0)
+    }
+    list.push(mut tape, 5)
+    provide.random_tape(take tape)
+}
+
+fn server_random_tape() -> Random {
+    let mut tape: Bytes = list.with_capacity(64)
+    for _ in 0u64 .. 32 {
+        list.push(mut tape, 0x33)
+    }
+    for _ in 0u64 .. 32 {
+        list.push(mut tape, 0x44)
+    }
+    provide.random_tape(take tape)
+}
+
+fn p256_identity(rotated: bool) -> handshake.Identity {
+    let mut scalar: Bytes = list.with_capacity(32)
+    for _ in 0u64 .. 31 {
+        list.push(mut scalar, 0)
+    }
+    list.push(mut scalar, if rotated {
+        4
+    } else {
+        3
+    })
+    let random = provide.random_tape(take scalar)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(random, "sign(p256)", mut point))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, if rotated {
+        cert_rotated()
+    } else {
+        cert_old()
+    })
+    let id: handshake.Identity = Identity(chain: take chain, key: take key, alg: P256)
+    take id
+}
+
+fn config_client(take pins: List[handshake.Pin], take identity: Option[handshake.Identity]) -> handshake.ClientConfig {
+    let mut protocols: List[Bytes] = list.with_capacity(1)
+    list.push(mut protocols, b"h3")
+    let mut p = handshake.default_parameters(b"\xc1")
+    p.max_udp_payload = 1200
+    handshake.ClientConfig(name: b"q", protocols: take protocols, pins: take pins, identity: take identity, group: X25519, parameters: take p)
+}
+
+fn config_server(rotated: bool, take pins: Option[List[handshake.Pin]]) -> handshake.ServerConfig {
+    let mut protocols: List[Bytes] = list.with_capacity(1)
+    list.push(mut protocols, b"h3")
+    let mut suites: List[schedule.Suite13] = list.with_capacity(1)
+    list.push(mut suites, Aes128GcmSha256)
+    let mut p = handshake.default_parameters(b"\xa1")
+    p.original_destination = Some(b"\xab")
+    p.max_udp_payload = 1200
+    handshake.ServerConfig(protocols: take protocols, suites: take suites, identity: p256_identity(rotated), client_pins: take pins, parameters: take p)
+}
+
+fn cert_pin(digest: Inline[u8, 32]) -> List[handshake.Pin] {
+    let mut pins: List[handshake.Pin] = list.with_capacity(1)
+    list.push(mut pins, Cert(digest))
+    take pins
+}
+
+fn dual_pin() -> List[handshake.Pin] {
+    let mut pins = cert_pin(old_digest())
+    list.push(mut pins, Cert(rotated_digest()))
+    take pins
+}
+
+fn spki_pin() -> List[handshake.Pin] {
+    let mut pins: List[handshake.Pin] = list.with_capacity(1)
+    list.push(mut pins, Spki(old_spki_digest()))
+    take pins
+}
+
+fn wrong_pins() -> List[handshake.Pin] {
+    let mut cert = old_digest()
+    let mut spki = old_spki_digest()
+    cert[0] = cert[0] ^ 1
+    spki[0] = spki[0] ^ 1
+    let mut pins = cert_pin(cert)
+    list.push(mut pins, Spki(spki))
+    take pins
+}
+
+fn feed_flight(mut peer: handshake.Handshake, ids: handshake.PeerConnectionIds, wire: Bytes) -> Result[Bytes, handshake.Error] {
+    let mut at = 0u64
+    let mut returned: Bytes = list.new()
+    while at < list.len(wire) {
+        let start = at
+        let _ = handshake.read_message(wire, mut at)?
+        let flight = handshake.receive(mut peer, Handshake, ids, list.slice(wire, start, at))?
+        list.append(mut returned, flight.encrypted)
+    }
+    Ok(take returned)
+}
+
+fn assert_refused(peer: handshake.Handshake, error: handshake.Error, expected: handshake.Error, code: u64) {
+    if error != expected || handshake.error_code(error) != code || handshake.connected(peer) {
+        fail("incorrect TLS refusal or connected state")
+    }
+}
+
+fn check_server_pin_refusal() {
+    let cfg = config_client(wrong_pins(), None)
+    let (take pending, take first) = result.unwrap(handshake.start_client(client_random_tape(), take cfg))
+    let mut peer = take pending
+    let ids = server_ids()
+    let _ = result.unwrap(handshake.receive(mut peer, Initial, ids, reference_server_hello()))
+    match feed_flight(mut peer, ids, reference_p256_flight()) {
+        Error(e) => assert_refused(peer, e, PinMismatch, 0x012a),
+        Ok(_) => fail("wrong Cert and Spki pins were accepted"),
+    }
+    if let Some(_) = handshake.take_keys(mut peer) {
+        fail("refused peer acquired Application keys")
+    }
+}
+
+fn check_external_flight(take pins: List[handshake.Pin], wire: Bytes, expected: Bytes, tamper: bool) {
+    let cfg = config_client(take pins, None)
+    let (take pending, take first) = result.unwrap(handshake.start_client(client_random_tape(), take cfg))
+    if first.initial != reference_client_hello() {
+        fail("ClientHello differs from the independent TLS encoding")
+    }
+    let mut peer = take pending
+    let ids = server_ids()
+    let _ = result.unwrap(handshake.receive(mut peer, Initial, ids, reference_server_hello()))
+    let mut encrypted: Bytes = clone(wire)
+    if tamper {
+        let mut at = 0u64
+        while at < list.len(encrypted) {
+            let message = result.unwrap(handshake.read_message(encrypted, mut at))
+            if message.kind == 15 {
+                encrypted[at - 1] = encrypted[at - 1] ^ 1
+                break
+            }
+        }
+    }
+    match feed_flight(mut peer, ids, encrypted) {
+        Error(e) if tamper => assert_refused(peer, e, DecryptError, 0x0133),
+        Ok(reply) if !tamper => {
+            if reply != expected || !handshake.connected(peer) {
+                fail("Finished or authenticated TLS state differs from the independent oracle")
+            }
+        },
+        _ => fail("signature verdict differs from the independent oracle"),
+    }
+}
+
+fn check_rotation(rotated: bool) {
+    let cfg = config_client(dual_pin(), None)
+    let (take pending, take first) = result.unwrap(handshake.start_client(client_random_tape(), take cfg))
+    let mut client = take pending
+    let server_config = config_server(rotated, None)
+    let (take server_pending, take server_flight) = result.unwrap(handshake.accept_client(server_random_tape(), server_config, client_ids(), first.initial))
+    let mut server = take server_pending
+    if !rotated {
+        // The deterministic signature agrees with RFC 6979 and OpenSSL's strict DER verifier.
+        if server_flight.initial != reference_server_hello() || server_flight.encrypted != reference_p256_flight() {
+            fail("locally signed server flight differs from the independent TLS encoding")
+        }
+    }
+    if handshake.connected(server) {
+        fail("server completed before client Finished")
+    }
+    let ids = server_ids()
+    let _ = result.unwrap(handshake.receive(mut client, Initial, ids, server_flight.initial))
+    let response = result.unwrap(feed_flight(mut client, ids, server_flight.encrypted))
+    let _ = result.unwrap(feed_flight(mut server, client_ids(), response))
+    if !handshake.connected(client) || !handshake.connected(server) {
+        fail("dual pins did not accept one of the rotated certificates")
+    }
+}
+
+fn check_ed_signing() {
+    // RFC 8410 §7 wraps the RFC 8032 §7.1 TEST 1 seed in PKCS #8.
+    let seed = option.unwrap(std.hex.decode(b"302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"))
+    let key = result.unwrap(secret.seal(take seed, "sign(ed25519)"))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, cert_ed25519())
+    let id: handshake.Identity = Identity(chain: take chain, key: take key, alg: Ed25519)
+    let mut config = config_server(false, None)
+    config.identity = take id
+    let (_, take flight) = result.unwrap(handshake.accept_client(server_random_tape(), config, client_ids(), reference_client_hello()))
+    if flight.initial != reference_server_hello() || flight.encrypted != reference_ed_flight() {
+        fail("locally signed Ed25519 flight differs from the independent TLS encoding")
+    }
+}
+
+fn check_client_pins(take identity: Option[handshake.Identity], expectation: Option[handshake.Error]) {
+    let cfg = config_client(cert_pin(old_digest()), take identity)
+    let (take pending, take first) = result.unwrap(handshake.start_client(client_random_tape(), take cfg))
+    let mut client = take pending
+    let cfg_server = config_server(false, Some(cert_pin(rotated_digest())))
+    let (take waiting_server, take server_flight) = result.unwrap(handshake.accept_client(server_random_tape(), cfg_server, client_ids(), first.initial))
+    let mut server = take waiting_server
+    if let Some(_) = handshake.take_keys(mut server) {
+        fail("server exposed Application keys before client authentication")
+    }
+    let ids = server_ids()
+    let _ = result.unwrap(handshake.receive(mut client, Initial, ids, server_flight.initial))
+    let reply = result.unwrap(feed_flight(mut client, ids, server_flight.encrypted))
+    match (feed_flight(mut server, client_ids(), reply), expectation) {
+        (Error(e), Some(expected)) => {
+            let code: u64 = if expected == CertificateRequired {
+                0x0174
+            } else {
+                0x012a
+            }
+            assert_refused(server, e, expected, code)
+        },
+        (Ok(_), None) => {
+            if !handshake.connected(server) {
+                fail("server stalled after client authentication")
+            }
+        },
+        _ => fail("client authentication verdict"),
+    }
+}
+
+fn check_hello_retry() {
+    let cfg = config_client(cert_pin(ed_digest()), None)
+    let (take pending, _) = result.unwrap(handshake.start_client(client_random_tape(), take cfg))
+    let mut peer = take pending
+    let ids = server_ids()
+    let retry = result.unwrap(handshake.receive(mut peer, Initial, ids, reference_retry()))
+    if retry.initial != reference_second_client_hello() || list.len(retry.encrypted) != 0 {
+        fail("RFC 8446 retry ClientHello, selected group and cookie")
+    }
+    let _ = result.unwrap(handshake.receive(mut peer, Initial, ids, reference_retry_server_hello()))
+    let response = result.unwrap(feed_flight(mut peer, ids, reference_retry_flight()))
+    if response != reference_retry_finished() || !handshake.connected(peer) {
+        fail("RFC 8446 HRR message_hash and SHA-384 Finished")
+    }
+}
+
+fn minimal_der_vector() {
+    let mut raw: Bytes = list.with_capacity(64)
+    for i in 0u64 .. 64 {
+        list.push(mut raw, if i == 31 {
+            0x80
+        } else {
+            0
+        })
+    }
+    // r=128 needs a sign octet; s=0 needs exactly one zero octet.
+    if std.x509_build.p256_signature_der(raw) != Some(b"\x30\x07\x02\x02\x00\x80\x02\x01\x00") {
+        fail("ASN.1 DER requires minimal signed INTEGER encodings")
+    }
+}
+
+/// bug: Admit an unpinned certificate, expose unconfirmed Application keys, accept a forged CertificateVerify, or encode a raw P-256 signature on the wire.
+/// oracle: RFC 8446 §4.4 and §7.1, RFC 6979, RFC 8032 §7.1, OpenSSL, and hand-derived DER.
+@test
+fn pin_mismatch_refuses() -> Result[(), ()] {
+    minimal_der_vector()
+    check_server_pin_refusal()
+    check_external_flight(spki_pin(), reference_p256_flight(), reference_p256_finished(), false)
+    check_external_flight(spki_pin(), reference_p256_flight(), reference_p256_finished(), true)
+    check_external_flight(cert_pin(ed_digest()), reference_ed_flight(), reference_ed_finished(), false)
+    check_external_flight(cert_pin(ed_digest()), reference_ed_flight(), reference_ed_finished(), true)
+    check_ed_signing()
+    check_rotation(false)
+    check_rotation(true)
+    check_client_pins(None, Some(CertificateRequired))
+    check_client_pins(Some(p256_identity(false)), Some(PinMismatch))
+    check_client_pins(Some(p256_identity(true)), None)
+    check_hello_retry()
+    Ok(())
+}

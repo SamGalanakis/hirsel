@@ -46,3 +46,25 @@ fn openssl_certificate_keys() -> bool {
     list.push(mut p256, 0u8)
     rejects(p256)
 }
+
+// RFC 8410 §10.1 SPKI inside a structurally framed certificate. The
+// surrounding fields are opaque to this reader. The SEQUENCE starts at 15.
+// expect: run rfc8410_ed25519_spki_range() = true
+fn rfc8410_ed25519_spki_range() -> bool {
+    let mut cert = option.unwrap(hex.decode(b"303e30370201013000300030003000302a300506032b657003210019bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e13000030100"))
+    let point = option.unwrap(hex.decode(b"19bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1"))
+    let spki = option.unwrap(hex.decode(b"302a300506032b657003210019bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e1"))
+    let Some(range) = x509_key.spki_range(cert) else {
+        return false
+    }
+    if range.start != 15 || range.end != 59 || list.compare_bytes(list.slice(cert, range.start, range.end), spki) != Equal {
+        return false
+    }
+    match x509_key.read(cert) {
+        Ed25519(key) if key == point => (),
+        _ => return false,
+    }
+    let null_parameters = option.unwrap(hex.decode(b"304030390201013000300030003000302c300706032b6570050003210019bf44096984cdfe8541bac167dc3b96c85086aa30b6b6cb0c5c38ad703166e13000030100"))
+    cert[26] = 1
+    rejects(cert) && rejects(null_parameters)
+}

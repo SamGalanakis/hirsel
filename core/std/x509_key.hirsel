@@ -1,4 +1,9 @@
-pub type PublicKey = P256(Bytes) | P384(Bytes) | Invalid
+pub type PublicKey = P256(Bytes) | P384(Bytes) | Invalid | Ed25519(Bytes)
+
+pub type SpkiRange {
+    start: u64,
+    end: u64
+}
 
 type Body {
     start: u64,
@@ -40,7 +45,7 @@ fn optional_field(data: Bytes, mut at: u64, end: u64, tag: u8) -> Result[(), ()]
     Ok(())
 }
 
-fn subject_public_key_info(data: Bytes) -> Result[Body, ()] {
+fn subject_public_key_info(data: Bytes) -> Result[(Body, SpkiRange), ()] {
     let end = list.len(data)
     let mut at = 0u64
     let cert = field(data, mut at, end, 0x30)?
@@ -61,18 +66,20 @@ fn subject_public_key_info(data: Bytes) -> Result[Body, ()] {
     let _ = field(data, mut at, tbs.end, 0x30)? // issuer
     let _ = field(data, mut at, tbs.end, 0x30)? // validity
     let _ = field(data, mut at, tbs.end, 0x30)? // subject
+    let start = at
     let spki = field(data, mut at, tbs.end, 0x30)?
+    let range = SpkiRange(start: start, end: at)
     optional_field(data, mut at, tbs.end, 0x81)? // issuerUniqueID
     optional_field(data, mut at, tbs.end, 0x82)? // subjectUniqueID
     optional_field(data, mut at, tbs.end, 0xa3)? // extensions
     if at != tbs.end {
         return Error(())
     }
-    Ok(take spki)
+    Ok((take spki, range))
 }
 
 fn read_spki(data: Bytes) -> Result[PublicKey, ()] {
-    let spki = subject_public_key_info(data)?
+    let (spki, _) = subject_public_key_info(data)?
     let mut at = spki.start
     let algorithm = field(data, mut at, spki.end, 0x30)?
     let bits = field(data, mut at, spki.end, 0x03)?
@@ -81,6 +88,15 @@ fn read_spki(data: Bytes) -> Result[PublicKey, ()] {
     }
     // DER for id-ecPublicKey followed by a namedCurve OID.
     let identifiers = list.slice(data, algorithm.start, algorithm.end)
+    // RFC 8410 §4. Parameters must be absent.
+    if identifiers == b"\x06\x03\x2b\x65\x70" {
+        if bits.end - bits.start != 33 || data[bits.start] != 0 {
+            return Error(())
+        }
+        let mut key: Bytes = list.with_capacity(32)
+        list.append(mut key, list.slice(data, bits.start + 1, bits.end))
+        return Ok(Ed25519(take key))
+    }
     let size = if list.compare_bytes(identifiers, b"\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07") == Equal {
         65u64
     } else if list.compare_bytes(identifiers, b"\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x05\x2b\x81\x04\x00\x22") == Equal {
@@ -100,11 +116,19 @@ fn read_spki(data: Bytes) -> Result[PublicKey, ()] {
     }
 }
 
-/// Extract an uncompressed P-256 or P-384 public point from a DER certificate.
+/// Extract an uncompressed P-256 or P-384 point or a raw Ed25519 key.
 /// Fields outside subjectPublicKeyInfo are opaque beyond their DER framing.
 pub fn read(der: Bytes) -> PublicKey {
     match read_spki(der) {
         Ok(take key) => take key,
         Error(_) => Invalid,
+    }
+}
+
+/// Locate the complete DER SubjectPublicKeyInfo, including its tag and length.
+pub fn spki_range(der: Bytes) -> Option[SpkiRange] {
+    match subject_public_key_info(der) {
+        Ok((_, range)) => Some(range),
+        Error(_) => None,
     }
 }

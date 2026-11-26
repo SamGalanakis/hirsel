@@ -41,6 +41,19 @@ fn unsigned(mut out: Bytes, data: Bytes) {
     list.append(mut out, list.slice(data, at, end))
 }
 
+/// Encode the two 32-byte unsigned integers in a fixed-width P-256 signature.
+pub fn p256_signature_der(raw: Bytes) -> Option[Bytes] {
+    if list.len(raw) != 64 {
+        return None
+    }
+    let mut integers: Bytes = list.with_capacity(70)
+    unsigned(mut integers, list.slice(raw, 0, 32))
+    unsigned(mut integers, list.slice(raw, 32, 64))
+    let mut der: Bytes = list.with_capacity(72)
+    field(mut der, 0x30, integers)
+    Some(take der)
+}
+
 fn digits(mut out: Bytes, value: u16) {
     list.push(mut out, b'0' + int.truncate(value / 10))
     list.push(mut out, b'0' + int.truncate(value % 10))
@@ -154,12 +167,12 @@ fn signed_der(key: Secret, r: Random, signer: Bytes, body: Bytes) -> Result[Byte
     if !p256.verify(signer, body, raw) {
         return Error(Invalid)
     }
-    let mut integers: Bytes = list.with_capacity(70)
-    unsigned(mut integers, list.slice(raw, 0, 32))
-    unsigned(mut integers, list.slice(raw, 32, 64))
+    let Some(der) = p256_signature_der(raw) else {
+        return Error(Invalid)
+    }
     let mut bit_string: Bytes = list.with_capacity(73)
     list.push(mut bit_string, 0u8)
-    field(mut bit_string, 0x30, integers)
+    list.append(mut bit_string, der)
     let mut signed: Bytes = list.with_capacity(list.len(body) + 87)
     list.append(mut signed, body)
     list.append(mut signed, signature_algorithm())

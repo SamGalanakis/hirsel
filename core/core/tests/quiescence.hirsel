@@ -59,3 +59,31 @@ fn independent_quiescence(tasks: Tasks) -> bool waits {
     let ended_b = result.unwrap(task.join(take server_b))
     ended_a && ended_b
 }
+
+fn conn_waiter(take i: Inbox[u32]) -> u32 waits {
+    match conn.receive(i) {
+        Ok(n) => n,
+        Error(_) => 0,
+    }
+}
+
+// FAIL-15 and Cells: clock.idle waits until every other task waits. A task
+// waiting in conn.receive on a connection whose every client is in this unit
+// waits like a channel receive: with no other unit, nothing but this unit's
+// tasks can settle it, so the sleeper's deadline is answered and the sleep
+// returns. The waiter is then sent 7 and returns it.
+// expect: run idle_past_a_local_connection_wait(tasks) = 7
+fn idle_past_a_local_connection_wait(tasks: Tasks) -> u32 waits {
+    let (c, h) = provide.clock(0, 0)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536, IdleDriver(hand: take h, stop: take stopping), idle_driver)
+    let made: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(1, bytes 0)
+    let (client, take inbox) = result.unwrap(take made)
+    let waiter = task.spawn(tasks, bytes 65536, take inbox, conn_waiter)
+    host.sleep_until(c, 1000000)
+    result.unwrap(conn.send(client, 7u32))
+    let got = result.unwrap(task.join(take waiter))
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take driver))
+    got
+}

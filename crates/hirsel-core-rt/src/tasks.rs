@@ -1130,12 +1130,12 @@ impl Scheduler {
         }
     }
 
-    fn has_outside_wait(&self) -> bool {
+    fn has_outside_wait(&self, alone: bool) -> bool {
         // A queued or running sync's ready is still to come.
         #[cfg(feature = "record")]
         {
             self.readies.outside()
-                || self.lang_waits()
+                || self.lang_waits(alone)
                 // SAFETY: each entry points to its pinned provider operation.
                 || self.parked.live.values().any(|arm| unsafe {
                     let task = arm.task;
@@ -1153,15 +1153,15 @@ impl Scheduler {
                 || self.parked.live.values().any(|arm| unsafe {
                     !crate::provide::owns(&(*(*arm.task).operation).provider)
                 })
-                || self.lang_waits()
+                || self.lang_waits(alone)
         }
     }
 
-    /// A task waits on something another unit settles (units_lang). Such a
-    /// wait is never called a deadlock here: a unit cannot see the others.
-    fn lang_waits(&self) -> bool {
-        // SAFETY: the run pins its unit.
-        !self.lang.is_null() && unsafe { (*self.lang).waits > 0 && !(*self.lang).take_due() }
+    /// A connection wait (never a deadlock here); without `alone`, only one a peer unit settles.
+    fn lang_waits(&self, alone: bool) -> bool {
+        // SAFETY: the run pins its unit; its own waits alone do not hold clock.idle (core.md Cells).
+        unsafe { self.lang.as_ref() }
+            .is_some_and(|u| u.waits > 0 && !u.take_due() && (alone || u.has_peer()))
     }
 
     /// Quiescence first wakes the run's own `clock.idle` waits (FAIL-15);
@@ -1292,7 +1292,7 @@ impl Scheduler {
         }
         let deadline = self.timers.deadline();
         if crate::units::untied() {
-            if deadline.is_none() && !self.has_outside_wait() {
+            if deadline.is_none() && !self.has_outside_wait(true) {
                 self.stop_quiescent();
             }
             crate::units::park(deadline);
@@ -1318,10 +1318,10 @@ impl Scheduler {
                 }
             }
             None => {
-                if !self.has_outside_wait() {
-                    if self.quiesce() {
-                        return;
-                    }
+                if !self.has_outside_wait(false) && self.quiesce() {
+                    return;
+                }
+                if !self.has_outside_wait(true) {
                     self.stop_quiescent();
                 }
                 if !self.net.is_null() {
@@ -3952,7 +3952,7 @@ impl RunPtr {
                         && no_live_tapes
                         && run.cancels.is_empty()
                         && !run.readies.has_pending()
-                        && run.has_outside_wait();
+                        && run.has_outside_wait(true);
                     let untied = crate::units::untied();
                     if wait_for_net {
                         trim_run_heap(root);

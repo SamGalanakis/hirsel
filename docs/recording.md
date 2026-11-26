@@ -706,7 +706,8 @@ are then not outside waits. What this build does not replay yet stops the replay
 `replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: a helper
 end that failed, was cancelled or hands its owner survivors; a result holding a handle or a
 function; a helper entry holding a handle other than a capability (a `Secret`, a key object,
-a connection, a socket); and every other take kind. `UNIT_CANCEL`, connections and the drops of clients and
+a connection, a socket) or holding a `Net`, `Env`, `Exec` or `Cred` capability, whose rules
+the root's startup holds; and every other take kind. `UNIT_CANCEL`, connections and the drops of clients and
 inboxes reach replay as frames it does not expect and end it `Diverged`. A package replay
 (`hirsel replay PACKAGE`) refuses `--unit`: only the operator replay of a pinned image
 replays one unit. These limits close as the helper streams' replay lands.

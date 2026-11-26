@@ -504,8 +504,8 @@ action in one unit becomes visible in another.
 - Boards, which would publish the latest version of a `Shared` payload to many units; no
   program can name them.
 - The replay of a helper stream that takes items, ends failed or cancelled, hands its owner
-  survivors, or crosses a `Secret`, a key object, a connection or a socket in its entry or
-  result: such a replay is refused, so no equality of recordings made at different worker
+  survivors, or crosses a `Secret`, a key object, a connection, a socket or a `Net`,
+  `Env`, `Exec` or `Cred` capability in its entry or result: such a replay is refused, so no equality of recordings made at different worker
   counts is promised for such a program. What does replay is listed in
   [What this build replays](../recording.md#replay-of-a-run-with-helpers).
 - A test configuration that fixes every input of a unit, including how many of the inputs

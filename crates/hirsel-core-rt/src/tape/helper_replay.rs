@@ -179,6 +179,11 @@ unsafe fn open(
                 }
                 let ordinal = c.varint()?;
                 let grant = c.u8()?;
+                // Net, Env, Exec and Cred replay against the rules the
+                // root's startup installs, which a helper's cell lacks.
+                if matches!(grant, 1 | 7 | 13 | 14) {
+                    return Err(Unpacked::Unsupported(RULED_GRANT));
+                }
                 let stored = c.bytes()?.to_vec();
                 live.objects.push(Object {
                     inner: None,
@@ -233,6 +238,7 @@ unsafe fn open(
 }
 
 const ENTRY_HANDLE: &str = "a helper entry holding a handle other than a capability";
+const RULED_GRANT: &str = "a helper entry holding a Net, Env, Exec or Cred capability";
 const NO_CODE: &str = "a helper entry holding a function the replaying build does not have";
 
 /// A helper's `END`: the stream's next frame is `expected`, and nothing

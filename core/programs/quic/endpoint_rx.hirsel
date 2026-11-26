@@ -302,6 +302,13 @@ fn dispatch(mut e: Endpoint, now: u64, from: Addr, ecn: u8, datagram_len: u64, m
 /// The caller lends a receive buffer. Header protection is removed only in the
 /// addressed packet, and AEAD reads exactly that packet even in a coalesced datagram.
 pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf: Bytes, at: u64, len: u64, mut events: List[Event]) {
+    e.datagram_room = datagram_room(e, events)
+    receive_in(mut e, now, from, ecn, mut buf, at, len, mut events)
+}
+
+/// receive_datagram with `e.datagram_room` already the room `events` leaves: each
+/// admitted datagram takes its length from it, so a batch scans `events` once.
+fn receive_in(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf: Bytes, at: u64, len: u64, mut events: List[Event]) {
     if at > list.len(buf) || len > list.len(buf) - at {
         dropped(mut e.drops, MalformedHeader)
         return
@@ -309,7 +316,6 @@ pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf:
     let end = at + len
     let mut next = at
     let mut credit = len
-    e.datagram_room = datagram_room(e, events)
     let server = match e.server {
         Some(_) => true,
         None => false

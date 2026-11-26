@@ -6,13 +6,15 @@
 fn reset_send(mut s: Send, code: u64, reliable: u64) -> u64 {
     let final_size = order.max(s.next, reliable)
     let keep = order.max(reliable, s.floor)
-    let mut freed = 0u64
     if s.written > keep {
-        freed = s.written - keep
         s.written = keep
     }
+    // QUIC-9: a piece is refunded when it is dropped; one that straddles keep stays
+    // charged whole until it is freed.
+    let mut freed = 0u64
     let mut n = list.len(s.pieces)
     while n > s.head && s.pieces[n - 1].offset >= keep {
+        freed += s.pieces[n - 1].charge
         n -= 1
     }
     list.truncate(mut s.pieces, n)
@@ -102,7 +104,7 @@ fn varint_width(n: u64) -> u64 {
 fn copy_chunk(c: Chunk, lo: u64, hi: u64, mut out: Bytes) {
     match c {
         Owned(b) => list.append(mut out, list.slice(b, lo, hi)),
-        Held(h) => list.append(mut out, list.slice(h, lo, hi)),
+        Held(h) => list.append(mut out, list.slice(payload_bytes(h), lo, hi)),
     }
 }
 
@@ -137,6 +139,9 @@ fn write_stream_frame(mut st: Streams, i: u64, cap: u64, mut payload: Bytes, mut
     if wrote {
         st.turn += 1
         st.sent_data += fresh
+        if let Data(len: n, ..) = frames[list.len(frames) - 1] {
+            st.payload_copied += n
+        }
     }
     wrote
 }
@@ -326,11 +331,31 @@ fn compact_pieces(mut s: Send) {
     s.head = 0
 }
 
-/// Free queued pieces wholly below the acknowledged floor.
-fn free_pieces(mut s: Send) {
-    while s.head < list.len(s.pieces) && s.pieces[s.head].offset + s.pieces[s.head].len <= s.floor {
+/// Settle the pieces the acknowledged floor moved over, from `from` to `s.floor`: an owned
+/// piece returns its charge as its bytes are acknowledged (the remainder of its rounded
+/// charge when it is freed); a held slice keeps its backing alive, so it returns its whole
+/// charge only when it is freed. A piece wholly below the floor is freed, and so is every
+/// piece once nothing past the floor is left to send (a reset can leave one straddling
+/// it). Returns the charge settled.
+fn free_pieces(mut s: Send, from: u64) -> u64 {
+    let mut freed = 0u64
+    while s.head < list.len(s.pieces) && (s.pieces[s.head].offset + s.pieces[s.head].len <= s.floor || s.floor >= s.written) {
         s.pieces[s.head].data = Owned(b"")
+        freed += s.pieces[s.head].charge
+        s.pieces[s.head].charge = 0
         s.head += 1
+    }
+    if s.head < list.len(s.pieces) && s.pieces[s.head].offset < s.floor {
+        let owned = match s.pieces[s.head].data {
+            Owned(_) => true,
+            Held(_) => false,
+        }
+        if owned {
+            let acked = s.floor - order.max(s.pieces[s.head].offset, from)
+            let part = order.min(acked, s.pieces[s.head].charge)
+            s.pieces[s.head].charge -= part
+            freed += part
+        }
     }
     if s.head == list.len(s.pieces) {
         list.clear(mut s.pieces)
@@ -338,6 +363,16 @@ fn free_pieces(mut s: Send) {
     } else if s.head >= 32 && 2 * s.head >= list.len(s.pieces) {
         compact_pieces(mut s)
     }
+    freed
+}
+
+/// The charges of every piece a stream still holds.
+fn pieces_charge(s: Send) -> u64 {
+    let mut total = 0u64
+    for k in s.head .. list.len(s.pieces) {
+        total += s.pieces[k].charge
+    }
+    total
 }
 
 /// One acknowledged frame. Returns the send memory it freed.
@@ -378,9 +413,9 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
                 if list.len(s.resend) > 0 && s.resend[0].start < floor {
                     trim_runs_below(mut s.resend, floor)
                 }
-                freed = floor - s.floor
+                let from = s.floor
                 s.floor = floor
-                free_pieces(mut s)
+                freed = free_pieces(mut s, from)
                 if fin {
                     s.fin_acked = true
                     s.fin_pending = false
@@ -657,6 +692,9 @@ fn retire(mut st: Streams) {
             let id = st.list[i].id
             if let Some(mut r) = st.list[i].recv {
                 release_all(mut st.pool, mut r)
+            }
+            if let Some(s) = st.list[i].send {
+                st.held -= pieces_charge(s)
             }
             if !local_stream(st, id) {
                 if uni(id) {

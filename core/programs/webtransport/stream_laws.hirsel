@@ -193,7 +193,7 @@ fn session_close_resets_its_streams_only() -> Result[(), ()] {
         let mut d: Bytes = list.new()
         list.push(mut d, quarter)
         list.append(mut d, b"dg")
-        result.unwrap(quic.send_datagram(mut client.q, c, shared.new(take d), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+        result.unwrap(quic.send_datagram(mut client.q, c, quic.framed_from(quic.payload_whole(shared.new(take d))), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
     }
     let written = result.unwrap(webtransport.write(mut server.wt, mut server.q, b, sb, b"done", true))
     expect(written, 4, "session b's stream takes the write")

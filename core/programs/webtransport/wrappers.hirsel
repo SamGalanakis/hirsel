@@ -135,7 +135,7 @@ pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, str
         block_data(mut w, mut e, i, k, j, n)
         return Ok(false)
     }
-    let taken = match quic.write_shared(mut e, w.conns[i].handle, stream, take data, fin) {
+    let taken = match quic.write_shared(mut e, w.conns[i].handle, stream, quic.payload_whole(take data), fin) {
         Ok(taken) => taken,
         Error(err) => return Error(Quic(err)),
     }
@@ -192,8 +192,8 @@ pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qui
 }
 
 /// Send a datagram on session s: its CONNECT stream's quarter id, then data (RFC 9297 §2.1).
-/// A DATAGRAM frame's payload is one run of bytes, so the payload is copied once behind its
-/// prefix; p and tag go to quic.send_datagram (QUIC-7).
+/// The quarter id is written into the FramedSlice prefix in front of a shared view of
+/// data, so the payload is not copied here; p and tag go to quic.send_datagram (QUIC-7).
 pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError] {
     let (i, k) = find(w, s)?
     if !usable(w.conns[i], k) {
@@ -201,10 +201,13 @@ pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, da
     }
     let quic.StreamId(sid) = w.conns[i].sessions[k].id
     let quarter = sid / 4
-    let mut payload: Bytes = list.with_capacity(h3_wire.varint_len(quarter) + list.len(data))
-    h3_wire.write_varint(quarter, mut payload)
-    list.append(mut payload, data)
-    match quic.send_datagram(mut e, w.conns[i].handle, shared.new(take payload), p, tag) {
+    let mut prefix: Bytes = list.with_capacity(h3_wire.varint_len(quarter))
+    h3_wire.write_varint(quarter, mut prefix)
+    let mut framed = quic.framed_from(quic.payload_whole(shared.share(data)))
+    if !quic.framed_prepend(mut framed, prefix) {
+        return Error(State)
+    }
+    match quic.send_datagram(mut e, w.conns[i].handle, take framed, p, quic.DatagramTag(owner: 0, tag: tag)) {
         Ok(()) => Ok(()),
         Error(err) => Error(Quic(err)),
     }

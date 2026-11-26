@@ -1,15 +1,11 @@
 // QUIC-7 datagrams (RFC 9221). A queued datagram competes with the streams in one
 // schedule, is written into one packet at most once and is never retransmitted: an
 // abandoned packet puts it back, a lost one does not (§5.2).
-/// One QueuedDatagram record, a word for each field at the widest MEM-13 allows: the
-/// Shared handle 1, Priority 3, tag, seq and turn 3, and born (an Option[u64]) 2.
-const DATAGRAM_RECORD: u64 = 8 * (1 + 3 + 3 + 2)
-
-/// What a queued datagram is charged against send_bytes beyond its payload, so a flood of
-/// empty datagrams is bounded too: its record in each of the two lists it passes through
-/// (datagrams, then staged_datagrams), each grown to at most twice its peak length
-/// (budgets.md's growth rule, max(needed, 4, 2 × old)).
-const DATAGRAM_COST: u64 = 2 * 2 * DATAGRAM_RECORD
+/// What a queued datagram is charged against send_bytes beyond its backing, so a flood of
+/// empty datagrams is bounded too: its record (inline prefix included) in each of the two
+/// lists it passes through (datagrams, then staged_datagrams), each grown to at most twice
+/// its peak length (budgets.md's growth rule, max(needed, 4, 2 × old)).
+const DATAGRAM_COST: u64 = 2 * 2 * bytes[QueuedDatagram]
 
 /// Whether a DATAGRAM frame of type 0x31 with a `len`-byte payload fits in `room` bytes.
 fn datagram_fits(room: u64, len: u64) -> bool {
@@ -43,13 +39,13 @@ fn move_datagram(mut from: List[QueuedDatagram], i: u64, mut to: List[QueuedData
 /// Write queued datagram `k` as one DATAGRAM frame if it fits; it then waits in
 /// staged_datagrams until its packet is committed or abandoned.
 fn write_datagram(mut st: Streams, k: u64, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
-    let len = list.len(st.datagrams[k].data)
+    let len = framed_len(st.datagrams[k].data)
     if !datagram_fits(cap - list.len(payload), len) {
         return false
     }
     let _ = codec.write_varint(0x31, mut payload)
     let _ = codec.write_varint(len, mut payload)
-    list.append(mut payload, list.slice(st.datagrams[k].data, 0, len))
+    st.payload_copied += framed_append(st.datagrams[k].data, mut payload)
     list.push(mut frames, DatagramSent(st.datagrams[k].seq))
     move_datagram(mut st.datagrams, k, mut st.staged_datagrams)
     st.turn += 1
@@ -76,7 +72,7 @@ fn unstage_datagram(mut st: Streams, seq: u64) {
 fn sent_datagram(mut st: Streams, seq: u64) {
     st.datagrams_sent += 1
     if let Some(i) = staged_at(st, seq) {
-        st.held -= list.len(st.staged_datagrams[i].data) + DATAGRAM_COST
+        st.held -= st.staged_datagrams[i].charge
         let last = list.len(st.staged_datagrams) - 1
         list.swap(mut st.staged_datagrams, i, last)
         let _ = list.pop(mut st.staged_datagrams)
@@ -96,7 +92,7 @@ fn expire_datagrams(mut st: Streams, now: u64, rtt: u64) {
             None => false,
         }
         if late {
-            st.held -= list.len(st.datagrams[i].data) + DATAGRAM_COST
+            st.held -= st.datagrams[i].charge
             st.datagrams_late += 1
             st.datagrams_late_total += 1
             let last = list.len(st.datagrams) - 1
@@ -109,14 +105,14 @@ fn expire_datagrams(mut st: Streams, now: u64, rtt: u64) {
 }
 
 /// Remove every datagram tagged `tag` from `l`; returns how many and the memory freed.
-fn remove_tagged(mut l: List[QueuedDatagram], tag: u64) -> (u64, u64) {
+fn remove_tagged(mut l: List[QueuedDatagram], tag: DatagramTag) -> (u64, u64) {
     let mut count = 0u64
     let mut freed = 0u64
     let mut i = 0u64
     while i < list.len(l) {
         if l[i].tag == tag {
             count += 1
-            freed += list.len(l[i].data) + DATAGRAM_COST
+            freed += l[i].charge
             let last = list.len(l) - 1
             list.swap(mut l, i, last)
             let _ = list.pop(mut l)
@@ -133,7 +129,7 @@ fn datagram_room(e: Endpoint, events: List[Event]) -> u64 {
     let mut held = 0u64
     for event in events {
         if let Datagram(_, data) = event {
-            held += list.len(data)
+            held += payload_len(data)
         }
     }
     let limit: u64 = int.widen(e.config.limits.datagram_bytes)
@@ -146,28 +142,31 @@ fn empty_packet_room(c: Connection, mtu: u64) -> u64 {
     payload_room(OneRtt, c.peer_id, c.local_id, b"", packet_limit(c, mtu))
 }
 
-fn queue_datagram(mut st: Streams, take data: Shared[Bytes], p: Priority, tag: u64, room: u64) -> Result[(), QuicError] {
+fn queue_datagram(mut st: Streams, take data: FramedSlice, p: Priority, tag: DatagramTag, room: u64) -> Result[(), QuicError] {
     if st.peer_datagram == 0 {
         return Error(Unsupported)
     }
-    let len = list.len(data)
+    let len = framed_len(data)
     if !datagram_fits(order.min(st.peer_datagram, room), len) {
         return Error(TooLarge(len))
     }
-    if len + DATAGRAM_COST > headroom(st.send_bytes, st.held) {
+    // QUIC-9: the backing the slice keeps alive, not its length, plus the record.
+    let charge = framed_retained_bytes(data) + DATAGRAM_COST
+    if charge > headroom(st.send_bytes, st.held) {
         return Error(Limit)
     }
-    list.push(mut st.datagrams, QueuedDatagram(data: take data, priority: p, tag: tag, seq: st.datagram_seq, turn: st.turn, born: None))
+    list.push(mut st.datagrams, QueuedDatagram(data: take data, priority: p, tag: tag, seq: st.datagram_seq, turn: st.turn, born: None, charge: charge))
     st.datagram_seq += 1
     st.turn += 1
-    st.held += len + DATAGRAM_COST
+    st.held += charge
     Ok(())
 }
 
-/// Queue one datagram (QUIC-7). Its DATAGRAM frame must fit the peer's
+/// Queue one datagram (QUIC-7): the frame carries the slice's prefix, then its payload
+/// range, both copied once, into the sealed packet. Its DATAGRAM frame must fit the peer's
 /// max_datagram_frame_size and one packet, or it is TooLarge; a peer that advertised none
 /// makes it Unsupported; past send_bytes it is Limit. Nothing is queued on an error.
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: Shared[Bytes], p: Priority, tag: u64) -> Result[(), QuicError] {
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: DatagramTag) -> Result[(), QuicError] {
     if p.urgency > 7 {
         return Error(Config)
     }
@@ -184,9 +183,10 @@ pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: Shared[Byt
     out
 }
 
-/// Remove every queued datagram tagged `tag`, those in a polled but uncommitted suffix
-/// included, and return how many. A datagram already committed is not recalled.
-pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64 {
+/// Remove every queued datagram tagged `tag` (owner and tag both), those in a polled but
+/// uncommitted suffix included, and return how many. A datagram already committed is not
+/// recalled.
+pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: DatagramTag) -> u64 {
     let Some(i) = slot_at_mut(mut e, c) else {
         return 0
     }
@@ -195,6 +195,20 @@ pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64 {
         let (staged, staged_freed) = remove_tagged(mut conn.streams.staged_datagrams, tag)
         conn.streams.held -= freed + staged_freed
         return queued + staged
+    }
+    0
+}
+
+/// Application payload bytes connection `c` has copied while assembling packets: stream
+/// data and datagram payloads, counted at each copy, so a byte staged in scratch and then
+/// sealed into the slot counts twice. Frame and slice headers are not payload. The QUIC
+/// cost bench reads it.
+pub fn payload_bytes_copied(e: Endpoint, c: ConnectionHandle) -> u64 {
+    let Some(i) = slot_at(e, c) else {
+        return 0
+    }
+    if let Some(conn) = e.connections[i] {
+        return conn.streams.payload_copied
     }
     0
 }

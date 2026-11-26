@@ -77,9 +77,12 @@ fn headroom(limit: u64, used: u64) -> u64 {
 /// (QUIC-5); the count says how much. A short write asks for Writable.
 fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, QuicError] {
     let i = writable_send(st, id)?
-    let memory = headroom(st.send_bytes, st.held)
+    // The copy's storage is n bytes rounded up to 8 (MEM-24), so at most the headroom
+    // rounded down to 8 is taken.
+    let memory = headroom(st.send_bytes, st.held) / 8 * 8
     let connection = headroom(st.peer_max_data, st.written_data)
     let mut n = 0u64
+    let mut charge = 0u64
     if let Some(mut s) = st.list[i].send {
         n = order.min(order.min(list.len(data), memory), order.min(headroom(s.credit, s.written), connection))
         if n > 0 {
@@ -88,7 +91,8 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
             }
             let mut owned: Bytes = list.with_capacity(n)
             list.append(mut owned, list.slice(data, 0, n))
-            list.push(mut s.pieces, Piece(offset: s.written, len: n, data: Owned(take owned)))
+            charge = round8(n)
+            list.push(mut s.pieces, Piece(offset: s.written, len: n, data: Owned(take owned), charge: charge))
             s.written += n
         }
         if n < list.len(data) {
@@ -98,7 +102,7 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
             s.fin_pending = true
         }
     }
-    st.held += n
+    st.held += charge
     st.written_data += n
     Ok(n)
 }
@@ -116,11 +120,17 @@ pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin
     out
 }
 
-/// All or nothing against send_bytes; Ok(false) asks for Writable (QUIC-5).
-fn write_shared_in(mut st: Streams, id: u64, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError] {
+/// All or nothing against send_bytes; Ok(false) asks for Writable (QUIC-5). The charge
+/// is what the slice keeps alive (QUIC-9), not its length.
+fn write_shared_in(mut st: Streams, id: u64, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError] {
     let i = writable_send(st, id)?
-    let len = list.len(data)
-    let fits = len <= headroom(st.send_bytes, st.held)
+    let len = payload_len(data)
+    let charge = if len > 0 {
+        payload_retained_bytes(data)
+    } else {
+        0u64
+    }
+    let fits = charge <= headroom(st.send_bytes, st.held)
     if let Some(mut s) = st.list[i].send {
         if !fits {
             s.want_writable = true
@@ -130,7 +140,7 @@ fn write_shared_in(mut st: Streams, id: u64, take data: Shared[Bytes], fin: bool
             if list.len(s.pieces) == list.capacity(s.pieces) && s.head > 0 {
                 compact_pieces(mut s)
             }
-            list.push(mut s.pieces, Piece(offset: s.written, len: len, data: Held(take data)))
+            list.push(mut s.pieces, Piece(offset: s.written, len: len, data: Held(take data), charge: charge))
             s.written += len
         }
         if fin {
@@ -138,12 +148,14 @@ fn write_shared_in(mut st: Streams, id: u64, take data: Shared[Bytes], fin: bool
             s.fin_pending = true
         }
     }
-    st.held += len
+    st.held += charge
     st.written_data += len
     Ok(true)
 }
 
-pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError] {
+/// Queue a payload slice on a stream without copying it; the slice's bytes are copied
+/// once, into the sealed packet.
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError] {
     let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     let mut out: Result[bool, QuicError] = Error(UnknownConnection)

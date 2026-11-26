@@ -4,6 +4,7 @@
 // PIN is the SHA-256 of the receiver's leaf. BYTES is a multiple of CHUNK. The sender
 // prints READY once connected and DONE once the receiver has acknowledged the last byte
 // and FIN; bench/srtp/phase.c gates both lines, so allocations are counted between them.
+// After DONE it prints COPIED, the payload bytes the connection copied into packets.
 const SECOND: u64 = 1000000000
 
 const LOOPBACK: u32 = 0x7f000001
@@ -100,7 +101,7 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         if let Some(s) = stream {
             while written < total {
                 let last = written + CHUNK == total
-                if !result.unwrap(quic.write_shared(mut e, c, s, shared.share(chunk), last)) {
+                if !result.unwrap(quic.write_shared(mut e, c, s, quic.payload_whole(shared.share(chunk)), last)) {
                     break
                 }
                 written += CHUNK
@@ -108,6 +109,10 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         }
     }
     result.unwrap(stdout.write(out, done_line))
+    let mut copied = string.from("COPIED ")
+    string.push_u64(mut copied, quic.payload_bytes_copied(e, c))
+    string.push(mut copied, "\n")
+    result.unwrap(stdout.write(out, copied))
     quic.close(mut e, c, 0, b"")
     result.unwrap(quic.drive(mut e, clock, mut socket, host.mono_ns(clock) + SECOND / 10, mut events))
     Ok(())

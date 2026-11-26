@@ -252,10 +252,10 @@ fn sched_transport(idle_ms: u32) -> quic.TransportConfig {
     take t
 }
 
-fn sched_payload(tag: u8, len: u64) -> Shared[Bytes] {
+fn sched_payload(tag: u8, len: u64) -> quic.FramedSlice {
     let mut b: Bytes = list.with_capacity(len)
     list.fill(mut b, len, tag)
-    shared.new(take b)
+    quic.framed_from(quic.payload_whole(shared.new(take b)))
 }
 
 fn sched_step(mut from: quic.Endpoint, mut to: quic.Endpoint, src: Addr, now: u64, batch: u64, commit_cap: u64, mut events: List[quic.Event]) -> u64 {
@@ -323,10 +323,10 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     // fills a 1-RTT packet) and queue 1 datagram on each of ch[1..8]. After ch[0] fills batch
     // 1, ch[1..8] must be served before ch[0] finishes all 8 datagrams, and all 15 must arrive.
     for _ in 0u64 .. 8 {
-        result.unwrap(quic.send_datagram(mut client, ch[0], sched_payload(0x10, 900), prio, 0))
+        result.unwrap(quic.send_datagram(mut client, ch[0], sched_payload(0x10, 900), prio, quic.DatagramTag(owner: 0, tag: 0)))
     }
     for i in 1u64 .. 8 {
-        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x20 + i), 900), prio, 0))
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x20 + i), 900), prio, quic.DatagramTag(owner: 0, tag: 0)))
     }
     let mut from_zero_before_others = 0u64
     let mut others_seen = 0u64
@@ -336,7 +336,7 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
         for ev in at_server {
             if let Datagram(_, data) = ev {
                 total_rx += 1
-                if data[0] == 0x10 {
+                if quic.payload_bytes(data)[0] == 0x10 {
                     if others_seen < 7 {
                         from_zero_before_others += 1
                     }
@@ -362,7 +362,7 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     // 2. Partial commit: queue 1 datagram on ch[0..4], commit only 1 of 4 staged packets;
     // the 3 abandoned links must stay runnable and deliver all 4 datagrams.
     for i in 0u64 .. 4 {
-        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x40 + i), 200), prio, 0))
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x40 + i), 200), prio, quic.DatagramTag(owner: 0, tag: 0)))
     }
     let mut partial_rx = 0u64
     let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 1, mut at_server)
@@ -389,7 +389,7 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     }
     // 3. O(active) slot visits: with 8 live links and only ch[7] active, one timeout + poll
     // on server must not scan all 8 slots.
-    result.unwrap(quic.send_datagram(mut client, ch[7], sched_payload(0x77, 100), prio, 0))
+    result.unwrap(quic.send_datagram(mut client, ch[7], sched_payload(0x77, 100), prio, quic.DatagramTag(owner: 0, tag: 0)))
     now += 1000000
     let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 8, mut at_server)
     list.clear(mut at_server)
@@ -405,7 +405,7 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
     // keep ch[4..8] alive at now + 3s, then expire ch[0..4] past their 5s idle deadline.
     let keepalive_at = now + 3000000000
     for i in 4u64 .. 8 {
-        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(0x55, 64), prio, 0))
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(0x55, 64), prio, quic.DatagramTag(owner: 0, tag: 0)))
     }
     let _ = sched_step(mut client, mut server, CLIENT_ADDR, keepalive_at, 8, 8, mut at_server)
     list.clear(mut at_server)
@@ -424,7 +424,7 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
         fail("indexed idle timeout did not retire exactly the 4 idle connections")
     }
     for i in 0u64 .. 4 {
-        if let Error(UnknownConnection) = quic.send_datagram(mut server, sh[i], sched_payload(0x99, 32), prio, 0) {} else {
+        if let Error(UnknownConnection) = quic.send_datagram(mut server, sh[i], sched_payload(0x99, 32), prio, quic.DatagramTag(owner: 0, tag: 0)) {} else {
             fail("expired handle still resolved after release")
         }
     }
@@ -453,7 +453,7 @@ fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
         fail("replacement connections did not reuse freed slots cleanly")
     }
     // Send from server to a reused-slot handle and verify PTO fires if its packet is dropped.
-    result.unwrap(quic.send_datagram(mut server, new_sh[3], sched_payload(0xaa, 64), prio, 0))
+    result.unwrap(quic.send_datagram(mut server, new_sh[3], sched_payload(0xaa, 64), prio, quic.DatagramTag(owner: 0, tag: 0)))
     let mut drop_wire: Bytes = list.with_capacity(2400)
     let mut drop_tx: List[quic.Output] = list.with_capacity(4)
     let pto_wake = quic.poll(mut server, t_new, mut drop_wire, mut drop_tx)

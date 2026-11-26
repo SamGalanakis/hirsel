@@ -303,7 +303,10 @@ fn stream_frame(mut st: Streams, handle: ConnectionHandle, f: codec.Frame, input
             // datagram is dropped and counted, and its packet is still acknowledged.
             if data.len <= st.datagram_room {
                 st.datagram_room -= data.len
-                list.push(mut events, Datagram(handle, clone(list.slice(input, data.at, data.at + data.len))))
+                // One tight copy out of the receive slab, so the slab is free for the next
+                // batch while the application holds the payload.
+                let held: Bytes = clone(list.slice(input, data.at, data.at + data.len))
+                list.push(mut events, Datagram(handle, payload_whole(shared.new(take held))))
             } else {
                 st.datagrams_refused += 1
             }

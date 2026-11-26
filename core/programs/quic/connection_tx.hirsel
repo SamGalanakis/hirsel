@@ -17,13 +17,85 @@ type StagedPacket {
 /// The ack_delay_exponent this endpoint advertises (RFC 9000 §18.2 default).
 const ACK_DELAY_EXPONENT: u64 = 3
 
+/// What filling one packet's frames decided, for its StagedPacket.
+type Filled {
+    crypto_at: u64,
+    crypto_end: u64,
+    resent: bool,
+    ack: bool,
+    done: bool,
+    close: bool,
+    eliciting: bool,
+    path: bool,
+    padding: u64
+}
+
 /// Stage one packet of `kind`. Without `send`, the congestion controller or pacer holds
 /// new ack-eliciting frames back; an owed probe is sent regardless (RFC 9002 §7.5).
+/// A 1-RTT packet is assembled in place in `out`: its short header has a fixed size, so
+/// the header goes first and every frame is written straight after it, then sealed where
+/// it lies. A long-header packet's Length depends on its payload, so its frames are
+/// staged in `payload` first. On any failure `out` and `staged_frames` are as they were
+/// and the packet's frames are back on their queues.
 fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, server: bool, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, probe: bool, mut payload: Bytes, mut staged_frames: List[SentFrame], mut out: Bytes) -> Option[StagedPacket] {
     if let None = s.send {
         return None
     }
     let start = list.len(out)
+    let cap = payload_room(kind, dest, source, s.token, limit)
+    if cap == 0 {
+        return None
+    }
+    let frame_start = list.len(staged_frames)
+    let mut number: Option[u64] = None
+    let mut filled: Option[Filled] = None
+    if kind == OneRtt {
+        if s.next > MAX_NUMBER || list.capacity(out) - start < limit {
+            return None
+        }
+        let Ok(body) = begin_packet(kind, dest, source, s.token, s.key_phase, s.next, 0, mut out) else {
+            list.truncate(mut out, start)
+            return None
+        }
+        filled = fill_packet(mut s, mut st, fill, is_confirmed, server, kind, done, closing, limit, now, send, probe, cap, body, mut out, mut staged_frames)
+        if let Some(f) = filled {
+            number = seal_in_place(mut s, kind, start, body, f.padding, mut out)
+        } else {
+            list.truncate(mut out, start)
+        }
+    } else {
+        list.clear(mut payload)
+        if list.capacity(payload) < cap {
+            list.reserve(mut payload, cap)
+        }
+        let staged_from = st.payload_copied
+        filled = fill_packet(mut s, mut st, fill, is_confirmed, server, kind, done, closing, limit, now, send, probe, cap, 0, mut payload, mut staged_frames)
+        if let Some(f) = filled {
+            number = seal_packet(mut s, kind, dest, source, payload, f.padding, mut out)
+            if let Some(_) = number {
+                // Sealing copies the scratch payload into the slot: a second copy of each
+                // payload byte the fill staged.
+                st.payload_copied += st.payload_copied - staged_from
+            }
+        }
+    }
+    let frame_len = list.len(staged_frames) - frame_start
+    let Some(f) = filled else {
+        list.truncate(mut staged_frames, frame_start)
+        return None
+    }
+    let Some(n) = number else {
+        requeue_range(mut st, staged_frames, frame_start, frame_len, true)
+        list.truncate(mut staged_frames, frame_start)
+        return None
+    }
+    s.ack_staged = s.ack_staged || f.ack
+    Some(StagedPacket(number: n, size: list.len(out) - start, crypto_at: f.crypto_at, crypto_end: f.crypto_end, resent: f.resent, ack: f.ack, done: f.done, close: f.close, eliciting: f.eliciting, path: f.path, mtu_probe: false, frame_start: frame_start, frame_len: frame_len))
+}
+
+/// Write one packet's frames into `buf` after `base`, within `cap` bytes; None when the
+/// packet should not be sent (no frames, or only a piggybacked ACK).
+fn fill_packet(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, server: bool, kind: codec.PacketKind, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, probe: bool, cap: u64, base: u64, mut buf: Bytes, mut staged_frames: List[SentFrame]) -> Option[Filled] {
     // RFC 9000 §14.1: clients pad every Initial datagram to 1200 bytes; servers pad only
     // ack-eliciting Initial datagrams. RFC 9000 §8.2.1: PATH_CHALLENGE/PATH_RESPONSE
     // datagrams are expanded to 1200 bytes when the anti-amplification limit allows.
@@ -33,15 +105,11 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, serve
     } else {
         0u64
     }
-    let cap = payload_room(kind, dest, source, s.token, limit)
-    if limit < padding || cap == 0 {
+    if limit < padding {
         return None
     }
+    let end = base + cap
     let can_elicit = !(server && kind == Initial && limit < 1200)
-    list.clear(mut payload)
-    if list.capacity(payload) < cap {
-        list.reserve(mut payload, cap)
-    }
     let mut crypto_at = s.crypto_committed
     let mut crypto_end = s.crypto_committed
     let mut resent = false
@@ -61,7 +129,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, serve
         } else {
             TransportClose(code: f.code, frame_type: f.frame, reason: reason)
         }
-        if let Error(_) = codec.write_frame(frame, f.reason, mut payload) {
+        if let Error(_) = codec.write_frame(frame, f.reason, mut buf) {
             return None
         }
         closed = true
@@ -85,31 +153,31 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, serve
             }
             let mut count = list.len(s.received)
             while count > 0 {
-                if let Ok(()) = codec.write_ack_ranges(delay, list.slice(s.received, 0, count), ecn, cap - list.len(payload), mut payload) {
+                if let Ok(()) = codec.write_ack_ranges(delay, list.slice(s.received, 0, count), ecn, end - list.len(buf), mut buf) {
                     ack = true
                     break
                 }
                 count -= 1
             }
         }
-        if path_frames && list.len(payload) + list.len(s.path_out) <= cap {
-            list.append(mut payload, s.path_out)
+        if path_frames && list.len(buf) + list.len(s.path_out) <= end {
+            list.append(mut buf, s.path_out)
             path = true
             eliciting = true
         }
         if (send || probe) && can_elicit {
-            if done && list.len(payload) < cap {
-                if let Ok(()) = codec.write_frame(HandshakeDone, b"", mut payload) {
+            if done && list.len(buf) < end {
+                if let Ok(()) = codec.write_frame(HandshakeDone, b"", mut buf) {
                     done_sent = true
                     eliciting = true
                 }
             }
-            let room = cap - order.min(cap, list.len(payload) + 17)
+            let room = end - order.min(end, list.len(buf) + 17)
             if list.len(s.resend) != 0 && room > 0 {
                 let r = s.resend[0]
                 let len = order.min(r.end - r.at, room)
                 let frame: codec.Frame = Crypto(offset: r.at, data: codec.Span(at: r.at, len: len))
-                if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut payload) {
+                if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut buf) {
                     crypto_at = r.at
                     crypto_end = r.at + len
                     resent = true
@@ -118,7 +186,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, serve
             } else if list.len(s.crypto_out) > s.crypto_committed && room > 0 {
                 let len = order.min(list.len(s.crypto_out) - s.crypto_committed, room)
                 let frame: codec.Frame = Crypto(offset: s.crypto_committed, data: codec.Span(at: s.crypto_committed, len: len))
-                if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut payload) {
+                if let Ok(()) = codec.write_frame(frame, s.crypto_out, mut buf) {
                     crypto_end += len
                     eliciting = true
                 }
@@ -126,13 +194,13 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, serve
             if fill && kind == OneRtt && !s.hold_data {
                 // A packet filled to the brim is padded to the limit, so the packets
                 // before the last of a batch have one length: a NET-16 GSO train.
-                if fill_streams(mut st, is_confirmed, cap, mut payload, mut staged_frames) {
+                if fill_streams(mut st, is_confirmed, end, mut buf, mut staged_frames) {
                     padding = limit
                 }
                 eliciting = eliciting || list.len(staged_frames) > frame_start
             }
-            if probe && !eliciting && list.len(payload) < cap {
-                if let Ok(()) = codec.write_frame(Ping, b"", mut payload) {
+            if probe && !eliciting && list.len(buf) < end {
+                if let Ok(()) = codec.write_frame(Ping, b"", mut buf) {
                     eliciting = true
                 }
             }
@@ -144,18 +212,10 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, serve
             padding = 1200u64
         }
     }
-    let frame_len = list.len(staged_frames) - frame_start
-    if list.len(payload) == 0 {
-        list.truncate(mut staged_frames, frame_start)
+    if list.len(buf) == base {
         return None
     }
-    let Some(number) = seal_packet(mut s, kind, dest, source, payload, padding, mut out) else {
-        requeue_range(mut st, staged_frames, frame_start, frame_len, true)
-        list.truncate(mut staged_frames, frame_start)
-        return None
-    }
-    s.ack_staged = s.ack_staged || ack
-    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, mtu_probe: false, frame_start: frame_start, frame_len: frame_len))
+    Some(Filled(crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, padding: padding))
 }
 
 fn commit_space(mut s: Space, p: StagedPacket) {

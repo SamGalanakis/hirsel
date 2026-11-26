@@ -74,7 +74,7 @@ fn datagram_client(take plan: DatagramEnd) -> DatagramSender waits {
             let (_, queued, _, _) = quic.datagram_counts(e, c)
             let mut room = DATAGRAM_QUEUE - order.min(DATAGRAM_QUEUE, queued)
             while room > 0 && trace.offered < DATAGRAMS {
-                result.unwrap(quic.send_datagram(mut e, c, shared.new(numbered(trace.offered)), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+                result.unwrap(quic.send_datagram(mut e, c, quic.framed_from(quic.payload_whole(shared.new(numbered(trace.offered)))), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
                 trace.offered += 1
                 room -= 1
             }
@@ -130,8 +130,8 @@ fn datagram_server(take plan: DatagramEnd) -> DatagramReceiver waits {
         for event in events {
             match event {
                 Datagram(_, data) => {
-                    let id: u64 = if list.len(data) == DATAGRAM_LEN {
-                        list.word_be(data, 0)
+                    let id: u64 = if quic.payload_len(data) == DATAGRAM_LEN {
+                        list.word_be(quic.payload_bytes(data), 0)
                     } else {
                         DATAGRAMS
                     }
@@ -226,10 +226,10 @@ fn mtu_transport() -> quic.TransportConfig {
     take t
 }
 
-fn filled(len: u64) -> Shared[Bytes] {
+fn filled(len: u64) -> quic.FramedSlice {
     let mut d: Bytes = list.with_capacity(len)
     list.fill(mut d, len, 0x5a)
-    shared.new(take d)
+    quic.framed_from(quic.payload_whole(shared.new(take d)))
 }
 
 /// The client offers one byte over MTU_PAYLOAD, then MTU_PAYLOAD, each round until the
@@ -245,12 +245,12 @@ fn mtu_client(take plan: DatagramEnd) -> MtuSender waits {
     while host.mono_ns(clock) < MTU_END {
         if let Some(c) = conn {
             if !trace.admitted {
-                if let Error(err) = quic.send_datagram(mut e, c, filled(MTU_PAYLOAD + 1), quic.Priority(urgency: 3, order: 0, then: 0), 0) {
+                if let Error(err) = quic.send_datagram(mut e, c, filled(MTU_PAYLOAD + 1), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)) {
                     trace.over = Some(err)
                 } else {
                     trace.over = None
                 }
-                if let Ok(()) = quic.send_datagram(mut e, c, filled(MTU_PAYLOAD), quic.Priority(urgency: 3, order: 0, then: 0), 0) {
+                if let Ok(()) = quic.send_datagram(mut e, c, filled(MTU_PAYLOAD), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)) {
                     trace.admitted = true
                 }
             }
@@ -277,7 +277,7 @@ fn mtu_server(take plan: DatagramEnd) -> u64 waits {
         result.unwrap(quic.drive(mut e, clock, mut socket, MTU_END, mut events))
         for event in events {
             if let Datagram(_, data) = event {
-                if list.len(data) == MTU_PAYLOAD {
+                if quic.payload_len(data) == MTU_PAYLOAD {
                     whole += 1
                 }
             }
@@ -416,7 +416,7 @@ fn raise_run(mut client: quic.Endpoint, mut server: quic.Endpoint, mut now: u64,
         for event in at_server {
             match event {
                 Datagram(_, data) => {
-                    if expect_len > 0 && list.len(data) == expect_len {
+                    if expect_len > 0 && quic.payload_len(data) == expect_len {
                         matched += 1
                     }
                 },
@@ -436,7 +436,7 @@ fn raise_run(mut client: quic.Endpoint, mut server: quic.Endpoint, mut now: u64,
 }
 
 fn check_too_large(mut e: quic.Endpoint, c: quic.ConnectionHandle, len: u64, take msg: String) {
-    match quic.send_datagram(mut e, c, filled(len), quic.Priority(urgency: 3, order: 0, then: 0), 0) {
+    match quic.send_datagram(mut e, c, filled(len), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)) {
         Error(TooLarge(n)) if n == len => (),
         _ => fail(take msg),
     }
@@ -467,7 +467,7 @@ fn path_mtu_reprobes_after_raise_timer() -> Result[(), ()] {
         fail("PMTU_RAISE_TIMER deadline is outside [600 s, 610 s] after convergence")
     }
     check_too_large(mut client, handle, RAISE_PAYLOAD_LOW + 1, "1,351-byte packet was not TooLarge on a 1,350-byte path")
-    result.unwrap(quic.send_datagram(mut client, handle, filled(RAISE_PAYLOAD_LOW), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+    result.unwrap(quic.send_datagram(mut client, handle, filled(RAISE_PAYLOAD_LOW), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
     let (_, _, got_low) = raise_run(mut client, mut server, mut now, 11000 * MS, RAISE_MTU_LOW, RAISE_PAYLOAD_LOW, mut path, mut at_client, mut at_server)
     if got_low != 1 {
         fail("1,350-byte datagram did not arrive whole before path MTU rose")
@@ -484,7 +484,7 @@ fn path_mtu_reprobes_after_raise_timer() -> Result[(), ()] {
         fail("second PMTU_RAISE_TIMER deadline is not 600 s after the second convergence")
     }
     check_too_large(mut client, handle, RAISE_PAYLOAD_HIGH + 1, "1,497-byte packet was not TooLarge on a 1,496-byte path")
-    result.unwrap(quic.send_datagram(mut client, handle, filled(RAISE_PAYLOAD_HIGH), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+    result.unwrap(quic.send_datagram(mut client, handle, filled(RAISE_PAYLOAD_HIGH), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
     let (_, _, got_high) = raise_run(mut client, mut server, mut now, now + 1000 * MS, RAISE_MTU_HIGH, RAISE_PAYLOAD_HIGH, mut path, mut at_client, mut at_server)
     if got_high != 1 {
         fail("1,496-byte datagram did not arrive whole after PMTU_RAISE_TIMER fired")
@@ -496,10 +496,390 @@ fn path_mtu_reprobes_after_raise_timer() -> Result[(), ()] {
         fail("PMTU_RAISE_TIMER stayed armed after reaching the configured ceiling")
     }
     check_too_large(mut client, handle, RAISE_PAYLOAD_CEILING + 1, "1,601-byte packet was not TooLarge at a 1,600 ceiling")
-    result.unwrap(quic.send_datagram(mut client, handle, filled(RAISE_PAYLOAD_CEILING), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+    result.unwrap(quic.send_datagram(mut client, handle, filled(RAISE_PAYLOAD_CEILING), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
     let (_, _, got_ceil) = raise_run(mut client, mut server, mut now, now + 1000 * MS, RAISE_MTU_CEILING, RAISE_PAYLOAD_CEILING, mut path, mut at_client, mut at_server)
     if got_ceil != 1 {
         fail("1,600-byte datagram did not arrive whole after the second PMTU_RAISE_TIMER")
+    }
+    Ok(())
+}
+
+/// Sentinel bytes on each side of a padded slice's payload.
+const SLICE_PAD: u64 = 3
+
+/// A backing of SLICE_PAD 0xee sentinels, `len` bytes of `fill`, then SLICE_PAD sentinels,
+/// sliced to its middle.
+fn padded_slice(fill: u8, len: u64) -> quic.PayloadSlice {
+    let mut b: Bytes = list.with_capacity(len + 2 * SLICE_PAD)
+    list.fill(mut b, SLICE_PAD, 0xee)
+    list.fill(mut b, len, fill)
+    list.fill(mut b, SLICE_PAD, 0xee)
+    let Some(s) = quic.payload_slice(shared.new(take b), SLICE_PAD, len) else {
+        fail("an in-range slice was refused")
+    }
+    take s
+}
+
+/// `len` bytes of `fill` in a backing of capacity `capacity`, sliced whole-length from 0.
+fn backed_slice(fill: u8, len: u64, capacity: u64) -> quic.PayloadSlice {
+    let mut b: Bytes = list.with_capacity(capacity)
+    list.fill(mut b, len, fill)
+    let Some(s) = quic.payload_slice(shared.new(take b), 0, len) else {
+        fail("an in-range slice was refused")
+    }
+    take s
+}
+
+fn slice_text(s: quic.PayloadSlice) -> Bytes {
+    clone(quic.payload_bytes(s))
+}
+
+fn dg_transport(send_bytes: u64) -> quic.TransportConfig {
+    let mut t = stream_transport(1024 * KIB, 1024 * KIB, send_bytes)
+    t.max_datagram_frame = 1200
+    take t
+}
+
+fn dg_server(datagram_bytes: u32) -> quic.Endpoint {
+    let mut c = endpoint_config()
+    c.limits.datagram_bytes = datagram_bytes
+    result.unwrap(quic.endpoint(provide.random(53), take c, Some((p256_identity(false), dg_transport(1024 * KIB)))))
+}
+
+fn dg_tag(owner: u64, tag: u64) -> quic.DatagramTag {
+    quic.DatagramTag(owner: owner, tag: tag)
+}
+
+fn dg_priority() -> quic.Priority {
+    quic.Priority(urgency: 3, order: 0, then: 0)
+}
+
+/// bug: a range check that forms at + len wraps past 2^64 and admits a range outside the
+/// backing; a trim measured from the backing instead of the current slice reads the
+/// sentinels; a prefix write past the 64-byte room half-writes or changes the slice.
+/// oracle: hand-built backings with 0xee sentinels around the payload, QUIC-1's range rule
+/// (at <= size && len <= size - at, trims relative to the slice), and MEM-24 by hand: a
+/// 13-byte-capacity backing keeps 16 (storage rounded to 8) + 64 (Shared node,
+/// round8(24 + 40)) = 80 bytes alive whatever range is held.
+@test
+fn payload_slices_hold_exact_ranges() -> Result[(), ()] {
+    let mut b: Bytes = list.with_capacity(13)
+    list.fill(mut b, 3, 0xee)
+    list.append(mut b, b"payload")
+    list.fill(mut b, 3, 0xee)
+    let backing = shared.new(take b)
+    let Some(s) = quic.payload_slice(shared.share(backing), 3, 7) else {
+        fail("a nonzero-offset range was refused")
+    }
+    if slice_text(s) != b"payload" || quic.payload_len(s) != 7 {
+        fail("a nonzero-offset slice does not read exactly its range")
+    }
+    if quic.payload_retained_bytes(s) != 80 {
+        fail("a slice is not charged its whole backing and Shared node")
+    }
+    let Some(front) = quic.payload_trim_front(quic.payload_share(s), 1) else {
+        fail("trim_front within the slice was refused")
+    }
+    if slice_text(front) != b"ayload" {
+        fail("trim_front did not drop exactly one byte")
+    }
+    let Some(inner) = quic.payload_trim_range(quic.payload_share(front), 1, 3) else {
+        fail("a nested trim within the slice was refused")
+    }
+    if slice_text(inner) != b"ylo" {
+        fail("a nested trim is not relative to the current slice")
+    }
+    let Some(empty) = quic.payload_trim_range(quic.payload_share(s), 7, 0) else {
+        fail("a zero-length trim at the end was refused")
+    }
+    if quic.payload_len(empty) != 0 || list.len(quic.payload_bytes(empty)) != 0 {
+        fail("a zero-length trim is not empty")
+    }
+    if let Some(_) = quic.payload_trim_range(quic.payload_share(s), 0, 8) {
+        fail("a trim one byte past the end was accepted")
+    }
+    if let Some(_) = quic.payload_trim_range(quic.payload_share(s), 8, 0) {
+        fail("a trim starting past the end was accepted")
+    }
+    if let Some(_) = quic.payload_trim_range(quic.payload_share(s), 1, 0xffffffffffffffff) {
+        fail("a trim whose end overflows was accepted")
+    }
+    if let Some(_) = quic.payload_trim_front(quic.payload_share(s), 8) {
+        fail("trim_front past the end was accepted")
+    }
+    if let Some(_) = quic.payload_slice(shared.share(backing), 0xffffffffffffffff, 2) {
+        fail("a range whose end overflows was accepted")
+    }
+    if let Some(_) = quic.payload_slice(shared.share(backing), 14, 0) {
+        fail("a range starting past the backing was accepted")
+    }
+    let Some(at_end) = quic.payload_slice(shared.share(backing), 13, 0) else {
+        fail("an empty range at the backing's end was refused")
+    }
+    if quic.payload_len(at_end) != 0 {
+        fail("an empty range at the end is not empty")
+    }
+    // The prefix holds exactly 64 bytes: a 64-byte header fits and leaves no room.
+    let mut full = quic.framed_from(quic.payload_share(s))
+    let mut header: Bytes = list.with_capacity(64)
+    list.fill(mut header, 64, 0x01)
+    if !quic.framed_prepend(mut full, header) || quic.framed_room(full) != 0 || quic.framed_len(full) != 71 {
+        fail("a 64-byte header did not fill the prefix exactly")
+    }
+    if quic.framed_prepend(mut full, b"x") || quic.framed_len(full) != 71 {
+        fail("a byte past a full prefix was written")
+    }
+    let mut over = quic.framed_from(quic.payload_share(s))
+    let mut long: Bytes = list.with_capacity(65)
+    list.fill(mut long, 65, 0x02)
+    if quic.framed_prepend(mut over, long) || quic.framed_room(over) != 64 || quic.framed_len(over) != 7 {
+        fail("a 65-byte header changed the prefix")
+    }
+    if slice_text(s) != b"payload" {
+        fail("prefix writes changed the shared payload")
+    }
+    Ok(())
+}
+
+const DG_LEN: u64 = 900
+
+/// Queue datagram k: prefix [0xd0, k] (written as two layers) in front of DG_LEN bytes of
+/// k inside sentinels.
+fn queue_numbered(mut client: quic.Endpoint, c: quic.ConnectionHandle, k: u64, tag: quic.DatagramTag) {
+    let mut f = quic.framed_from(padded_slice(int.narrow(k), DG_LEN))
+    let mut inner: Bytes = list.with_capacity(1)
+    list.push(mut inner, int.narrow(k))
+    if !quic.framed_prepend(mut f, inner) || !quic.framed_prepend(mut f, b"\xd0") {
+        fail("a two-byte prefix did not fit")
+    }
+    result.unwrap(quic.send_datagram(mut client, c, take f, dg_priority(), tag))
+}
+
+/// Poll `e` once and commit the first `commit` packets; returns the transmits polled.
+fn poll_commit(mut e: quic.Endpoint, now: u64, commit: u64, mut wire: Bytes, mut packets: List[quic.Output]) -> u64 {
+    list.clear(mut wire)
+    list.clear(mut packets)
+    let _ = quic.poll(mut e, now, mut wire, mut packets)
+    let mut count = 0u64
+    for output in packets {
+        if let Transmit(..) = output {
+            count += 1
+        }
+    }
+    quic.committed(mut e, now, order.min(commit, count))
+    count
+}
+
+/// Count each numbered datagram in `events`, failing on any whose bytes are not exactly
+/// [0xd0, k] then DG_LEN bytes of k.
+fn numbered_seen(events: List[quic.Event]) -> List[u64] {
+    let mut seen: List[u64] = list.with_capacity(5)
+    list.fill(mut seen, 5, 0)
+    for event in events {
+        if let Datagram(_, data) = event {
+            let b = quic.payload_bytes(data)
+            if list.len(b) != DG_LEN + 2 || b[0] != 0xd0 || b[1] >= 5 {
+                fail("a datagram arrived with the wrong length or prefix")
+            }
+            for i in 2u64 .. DG_LEN + 2 {
+                if b[i] != b[1] {
+                    fail("a datagram's payload is not exactly its slice")
+                }
+            }
+            let k: u64 = int.widen(b[1])
+            seen[k] += 1
+        }
+    }
+    take seen
+}
+
+/// bug: an abandoned or partly committed batch loses, duplicates or reorders a datagram's
+/// prefix and slice bytes when it is assembled straight into the output slot; a tag drop
+/// removes another owner's datagrams or a committed one; an RX event aliases the receive
+/// slab, so reusing the slab, closing the connection or reusing the endpoint changes it.
+/// oracle: hand-built bytes ([0xd0, k] then 900 bytes of k), QUIC-7's drop contract
+/// (owner and tag both match; committed datagrams are not recalled, so each even datagram
+/// is either delivered or counted by drop_datagrams, never both), and the 3,000-byte
+/// higher-priority stream arriving whole.
+@test
+fn datagram_bytes_exact_through_commit_abandon_drop_and_retry() -> Result[(), ()] {
+    let mut server = dg_server(1048576)
+    let mut client = qs3_client()
+    let (c, s) = handshake_pair(mut client, mut server, dg_transport(1024 * KIB))
+    let id = result.unwrap(quic.open(mut client, c, true))
+    result.unwrap(quic.priority(mut client, c, id, quic.Priority(urgency: 0, order: 0, then: 0)))
+    let body = pattern(3000, 5)
+    if result.unwrap(quic.write(mut client, c, id, body, true)) != 3000 {
+        fail("the stream write was short")
+    }
+    for k in 0u64 .. 4 {
+        queue_numbered(mut client, c, k, dg_tag(7, 1 + k % 2))
+    }
+    // The dropped tag under another owner.
+    queue_numbered(mut client, c, 4, dg_tag(8, 1))
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    // Abandon: nothing of the first batch leaves.
+    if poll_commit(mut client, 2, 0, mut wire, mut packets) == 0 {
+        fail("the first poll staged nothing")
+    }
+    // Partial commit: two packets leave and arrive.
+    if poll_commit(mut client, 2, 2, mut wire, mut packets) < 3 {
+        fail("the retried batch is shorter than three packets")
+    }
+    let mut delivered = 0u64
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            if delivered < 2 {
+                quic.receive_datagram(mut server, 2, CLIENT_ADDR, 0, mut wire, at, len, mut at_server)
+                delivered += 1
+            }
+        }
+    }
+    let dropped = quic.drop_datagrams(mut client, c, dg_tag(7, 1))
+    // The same instant: the handshake's round trip is near zero, and a datagram older than
+    // one smoothed RTT is dropped as late (QUIC-7).
+    settle(mut client, mut server, 2, mut at_server, mut at_client)
+    let mut got: Bytes = list.with_capacity(4096)
+    let (_, fin) = result.unwrap(quic.read(mut server, s, id, mut got))
+    if got != body || !fin {
+        fail("the higher-priority stream did not arrive whole")
+    }
+    let seen = numbered_seen(at_server)
+    if seen[1] != 1 || seen[3] != 1 || seen[4] != 1 {
+        fail("an undropped datagram was lost or duplicated")
+    }
+    if seen[0] > 1 || seen[2] > 1 || seen[0] + seen[2] + dropped != 2 {
+        fail("drop_datagrams recalled a committed datagram or missed a queued one")
+    }
+    // Reuse the receive slab at once, close the connection and reuse the endpoint: the
+    // delivered events keep their bytes.
+    list.clear(mut wire)
+    list.fill(mut wire, 64 * 1200, 0xaa)
+    quic.close(mut server, s, 0, b"")
+    settle(mut client, mut server, 4, mut at_server, mut at_client)
+    let (_, _) = handshake_pair(mut client, mut server, dg_transport(1024 * KIB))
+    let again = numbered_seen(at_server)
+    for k in 0u64 .. 5 {
+        if again[k] != seen[k] {
+            fail("a received datagram changed after slab reuse, close and endpoint reuse")
+        }
+    }
+    Ok(())
+}
+
+const DG_SEND: u64 = 4096
+
+/// bug: a queued datagram is charged its slice length, so a short slice hides its whole
+/// backing, or its record is priced at the old 72 bytes; or a datagram's prefix bytes are
+/// counted as payload copies.
+/// oracle: MEM-24 by hand. A queued datagram keeps alive its backing (capacity rounded up
+/// to 8), the backing's Shared node (round8(24 + 40) = 64) and its record in the queue and
+/// staged lists, each grown to twice its peak: 4 × 162 = 648, where the record is the
+/// FramedSlice (64-byte prefix + 1-byte start + 24-byte slice = 89), Priority 17,
+/// DatagramTag 16, seq 8, turn 8, born 16 and charge 8. A 3,384-byte backing costs
+/// 3,384 + 64 + 648 = 4,096 = send_bytes; a 3,385-byte one rounds to 3,392 and costs 4,104.
+@test
+fn datagram_charge_prices_backing_record_and_prefix() -> Result[(), ()] {
+    let mut server = dg_server(1048576)
+    let mut client = qs3_client()
+    let (c, _) = handshake_pair(mut client, mut server, dg_transport(DG_SEND))
+    let mut f = quic.framed_from(backed_slice(0x31, 100, 3384))
+    if !quic.framed_prepend(mut f, b"\x07\x08") {
+        fail("a two-byte prefix did not fit")
+    }
+    result.unwrap(quic.send_datagram(mut client, c, take f, dg_priority(), dg_tag(1, 1)))
+    match quic.send_datagram(mut client, c, quic.framed_from(backed_slice(0x32, 8, 8)), dg_priority(), dg_tag(1, 2)) {
+        Error(Limit) => (),
+        _ => fail("a datagram past send_bytes was not Limit"),
+    }
+    match quic.send_datagram(mut client, c, quic.framed_from(backed_slice(0x33, 100, 3385)), dg_priority(), dg_tag(1, 2)) {
+        Error(Limit) => (),
+        _ => fail("a datagram past send_bytes was not Limit"),
+    }
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut at_server: List[quic.Event] = list.new()
+    if pump(mut client, mut server, CLIENT_ADDR, 2, mut wire, mut packets, mut at_server) != 1 {
+        fail("the queued datagram did not leave in one packet")
+    }
+    if quic.payload_bytes_copied(client, c) != 100 {
+        fail("assembly did not copy exactly the 100 payload bytes")
+    }
+    let mut arrived = false
+    for event in at_server {
+        if let Datagram(_, data) = event {
+            let b = quic.payload_bytes(data)
+            arrived = list.len(b) == 102 && b[0] == 0x07 && b[1] == 0x08 && b[2] == 0x31 && b[101] == 0x31
+        }
+    }
+    if !arrived {
+        fail("the datagram did not arrive as its prefix and slice")
+    }
+    // Committed, its charge is back: drop the 3,385 one again; a 3,384 one fits once more,
+    // and dropping it refunds it in full.
+    match quic.send_datagram(mut client, c, quic.framed_from(backed_slice(0x33, 100, 3385)), dg_priority(), dg_tag(1, 2)) {
+        Error(Limit) => (),
+        _ => fail("a 4,104-byte datagram charge fit 4,096 bytes"),
+    }
+    result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(backed_slice(0x34, 100, 3384)), dg_priority(), dg_tag(1, 3)))
+    if quic.drop_datagrams(mut client, c, dg_tag(1, 3)) != 1 {
+        fail("drop_datagrams did not remove the queued datagram")
+    }
+    result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(backed_slice(0x35, 100, 3384)), dg_priority(), dg_tag(1, 4)))
+    Ok(())
+}
+
+const BATCH_LEN: u64 = 100
+
+/// bug: receiving a udp_recv batch with the datagram room scanned once lets the batch pass
+/// datagram_bytes, or refuses earlier than a per-datagram scan would.
+/// oracle: datagram_bytes = 64 × 100 − 50 = 6,350 with one 100-byte datagram already held:
+/// the room is 6,250, so of 64 one-datagram packets the first 62 (6,200 bytes) are
+/// delivered in order and the last two are dropped as DatagramBuffer (QUIC-4).
+@test
+fn datagram_batch_refuses_at_the_byte_limit() -> Result[(), ()] {
+    let mut server = dg_server(int.narrow(64 * BATCH_LEN - 50))
+    let mut client = qs3_client()
+    let (c, _) = handshake_pair(mut client, mut server, dg_transport(1024 * KIB))
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut at_server: List[quic.Event] = list.new()
+    result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(backed_slice(0, BATCH_LEN, BATCH_LEN)), dg_priority(), dg_tag(0, 0)))
+    if pump(mut client, mut server, CLIENT_ADDR, 2, mut wire, mut packets, mut at_server) != 1 {
+        fail("the held datagram did not leave")
+    }
+    let mut batch: Bytes = list.with_capacity(64 * 1200)
+    let mut udp: List[UdpPacket] = list.with_capacity(64)
+    for k in 1u64 .. 65 {
+        result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(backed_slice(int.narrow(k), BATCH_LEN, BATCH_LEN)), dg_priority(), dg_tag(0, 0)))
+        let now = 2 + k * MS
+        if poll_commit(mut client, now, 64, mut wire, mut packets) != 1 {
+            fail("one datagram did not make one packet")
+        }
+        for output in packets {
+            if let Transmit(at: at, len: len, ..) = output {
+                list.push(mut udp, UdpPacket(peer: CLIENT_ADDR, at: list.len(batch), len: len, truncated: false, ecn: 0))
+                list.append(mut batch, list.slice(wire, at, at + len))
+            }
+        }
+    }
+    quic.receive_packets(mut server, 66 * MS, udp, mut batch, mut at_server)
+    let mut next = 0u64
+    for event in at_server {
+        if let Datagram(_, data) = event {
+            let b = quic.payload_bytes(data)
+            let k: u64 = int.widen(b[0])
+            if list.len(b) != BATCH_LEN || k != next {
+                fail("the batch did not deliver its first datagrams in order")
+            }
+            next += 1
+        }
+    }
+    if next != 63 || quic.drop_count(server, DatagramBuffer) != 2 {
+        fail("the batch's refusal point moved")
     }
     Ok(())
 }

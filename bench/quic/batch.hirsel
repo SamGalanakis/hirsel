@@ -1,0 +1,177 @@
+// The receive side of the QUIC cost bench (docs/spec/quic.md, cost target): the time one
+// full 64-packet udp_recv batch of DATAGRAM-byte datagrams takes to pass through the
+// endpoint, in process and without a socket, as quic.drive hands it over. A client and a
+// server endpoint run back to back; each round the client queues BATCH datagrams, polls
+// them into one batch, and the server receives the batch while the clock is read around
+// that call alone. The clock steps while the batch is collected, so the pacer lets it
+// out, and RTT passes before the acknowledgements return. Rounds whose congestion window
+// does not yet admit a whole batch warm up untimed. Usage: batch ROUNDS. Prints one `BATCH <ns>` line per timed round.
+const BATCH: u64 = 64
+
+const DATAGRAM: u64 = 1100
+
+const SERVER: Addr = Addr(ip: V4(0x7f000001u32), port: 4433)
+
+const CLIENT: Addr = Addr(ip: V4(0x7f000001u32), port: 4434)
+
+const MS: u64 = 1000000
+
+/// The round trip the bench plays: long enough that the pacer lets a whole window out well
+/// within one smoothed RTT, so no queued datagram expires as late.
+const RTT: u64 = 20 * MS
+
+/// The pacer's clock step while a batch is collected.
+const PACE_STEP: u64 = 50000
+
+fn argument(a: Args, i: u64) -> String {
+    let Some(v) = args.get(a, i) else {
+        fail("missing argument")
+    }
+    string.from(v)
+}
+
+fn config(r: Random) -> quic.EndpointConfig {
+    let mut reset: Bytes = list.with_capacity(32)
+    host.random(r, mut reset)
+    let mut token: Bytes = list.with_capacity(32)
+    host.random(r, mut token)
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 1, unvalidated: 1, datagram_bytes: 1048576))
+}
+
+fn transport() -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, "hq-interop")
+    quic.TransportConfig(max_idle_ms: 30000, initial_max_data: 65536, initial_max_stream_data: 65536, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 1200, send_bytes: 4194304, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: None)
+}
+
+fn identity(r: Random) -> (quic.handshake.Identity, Bytes) {
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+    let start = option.unwrap(std.time.from_unix(1704067200, 0))
+    let end = option.unwrap(std.time.from_unix(2524608000, 0))
+    let der = result.unwrap(std.x509_build.self_signed_p256(key, r, point, 1, "localhost", start, end))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, clone(der))
+    (Identity(chain: take chain, key: take key, alg: P256), take der)
+}
+
+/// Poll `from` and commit every packet; returns how many there were.
+fn poll_all(mut from: quic.Endpoint, now: u64, mut wire: Bytes, mut tx: List[quic.Output]) -> u64 {
+    list.clear(mut wire)
+    list.clear(mut tx)
+    let _ = quic.poll(mut from, now, mut wire, mut tx)
+    let mut count = 0u64
+    for o in tx {
+        if let Transmit(..) = o {
+            count += 1
+        }
+    }
+    quic.committed(mut from, now, count)
+    count
+}
+
+/// Hand everything `from` sends now to `to`, one packet at a time.
+fn flush(mut from: quic.Endpoint, mut to: quic.Endpoint, addr: Addr, now: u64, mut wire: Bytes, mut tx: List[quic.Output], mut events: List[quic.Event]) -> u64 {
+    let count = poll_all(mut from, now, mut wire, mut tx)
+    for o in tx {
+        if let Transmit(at: at, len: len, ..) = o {
+            quic.receive_datagram(mut to, now, addr, 0, mut wire, at, len, mut events)
+        }
+    }
+    count
+}
+
+pub fn main(a: Args, clock: Clock, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let rounds: u64 = result.unwrap(int.parse(argument(a, 0)))
+    let (id, der) = identity(r)
+    let mut server = result.unwrap(quic.endpoint(r, config(r), Some((take id, transport()))))
+    let mut client = result.unwrap(quic.endpoint(r, config(r), None))
+    let mut pins: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut pins, Cert(std.sha256.hash(der)))
+    let c = result.unwrap(quic.connect(mut client, 0, SERVER, "localhost", take pins, None, transport()))
+    let mut wire: Bytes = list.with_capacity(BATCH * 1200 + 4096)
+    let mut tx: List[quic.Output] = list.with_capacity(BATCH + 1)
+    let mut at_server: List[quic.Event] = list.with_capacity(2 * BATCH)
+    let mut at_client: List[quic.Event] = list.with_capacity(2 * BATCH)
+    let mut now = 1u64
+    for _ in 0u64 .. 64 {
+        let sent = flush(mut client, mut server, CLIENT, now, mut wire, mut tx, mut at_server) + flush(mut server, mut client, SERVER, now, mut wire, mut tx, mut at_client)
+        if sent == 0 {
+            break
+        }
+        now += MS
+    }
+    let mut connected = false
+    for event in at_client {
+        if let Connected(..) = event {
+            connected = true
+        }
+    }
+    if !connected {
+        fail("the bench endpoints did not connect")
+    }
+    list.clear(mut at_server)
+    list.clear(mut at_client)
+    let mut data: Bytes = list.with_capacity(DATAGRAM)
+    list.fill(mut data, DATAGRAM, 0x5a)
+    let chunk = shared.new(take data)
+    let mut batch: Bytes = list.with_capacity(BATCH * 1200)
+    let mut udp: List[UdpPacket] = list.with_capacity(BATCH)
+    let mut timed = 0u64
+    let mut warm = 0u64
+    while timed < rounds {
+        for _ in 0u64 .. BATCH {
+            result.unwrap(quic.send_datagram(mut client, c, quic.framed_from(quic.payload_whole(shared.share(chunk))), quic.Priority(urgency: 3, order: 0, then: 0), quic.DatagramTag(owner: 0, tag: 0)))
+        }
+        list.clear(mut batch)
+        list.clear(mut udp)
+        let mut idle = 0u64
+        while list.len(udp) < BATCH && idle < RTT / PACE_STEP {
+            if poll_all(mut client, now, mut wire, mut tx) == 0 {
+                now += PACE_STEP
+                idle += 1
+                continue
+            }
+            for o in tx {
+                if let Transmit(at: at, len: len, ..) = o {
+                    list.push(mut udp, UdpPacket(peer: CLIENT, at: list.len(batch), len: len, truncated: false, ecn: 0))
+                    list.append(mut batch, list.slice(wire, at, at + len))
+                }
+            }
+        }
+        now += MS
+        let full = list.len(udp) == BATCH
+        let t0 = host.mono_ns(clock)
+        quic.receive_packets(mut server, now, udp, mut batch, mut at_server)
+        let t1 = host.mono_ns(clock)
+        let mut got = 0u64
+        for event in at_server {
+            if let Datagram(..) = event {
+                got += 1
+            }
+        }
+        list.clear(mut at_server)
+        if full {
+            if got != BATCH {
+                fail("a full batch did not deliver every datagram")
+            }
+            let mut line = string.from("BATCH ")
+            string.push_u64(mut line, t1 - t0)
+            string.push(mut line, "\n")
+            result.unwrap(stdout.write(out, line))
+            timed += 1
+        } else {
+            warm += 1
+            if warm > 1000 {
+                fail("the congestion window never admitted a whole batch")
+            }
+        }
+        // Drop anything the client still holds, then let the acknowledgements return.
+        let _ = quic.drop_datagrams(mut client, c, quic.DatagramTag(owner: 0, tag: 0))
+        now += RTT
+        let _ = flush(mut server, mut client, SERVER, now, mut wire, mut tx, mut at_client)
+        list.clear(mut at_client)
+        now += MS
+    }
+    Ok(())
+}

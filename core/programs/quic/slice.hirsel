@@ -1,0 +1,134 @@
+// QUIC-1 payload slices: owned ranges of a shared backing, handed between the media
+// packages without copying. Both types are opaque, so a range or prefix state that the
+// constructors did not validate cannot exist outside this module.
+/// The inline header room of a FramedSlice.
+pub const FRAMED_PREFIX_MAX: u64 = 64
+
+/// `len` bytes at `at` of `backing`, with `at <= size && len <= size - at`.
+pub opaque type PayloadSlice: send + cross {
+    backing: Shared[Bytes],
+    at: u64,
+    len: u64
+}
+
+/// A payload plus the framing headers written in front of it: the active prefix is
+/// `prefix[start .. 64]`, right-aligned so each layer prepends without a shift.
+pub opaque type FramedSlice: send + cross {
+    prefix: Inline[u8, 64],
+    start: u8,
+    payload: PayloadSlice
+}
+
+/// Whether [at, at + len) lies within `size` bytes; `at + len` is never formed.
+fn range_ok(size: u64, at: u64, len: u64) -> bool {
+    at <= size && len <= size - at
+}
+
+/// The whole of `backing`.
+pub fn payload_whole(take backing: Shared[Bytes]) -> PayloadSlice {
+    let len = list.len(backing)
+    PayloadSlice(backing: take backing, at: 0, len: len)
+}
+
+/// Bytes [at, at + len) of `backing`, or None when the range does not lie within it.
+pub fn payload_slice(take backing: Shared[Bytes], at: u64, len: u64) -> Option[PayloadSlice] {
+    if !range_ok(list.len(backing), at, len) {
+        return None
+    }
+    Some(PayloadSlice(backing: take backing, at: at, len: len))
+}
+
+/// Another holder of the same range; nothing is copied.
+pub fn payload_share(s: PayloadSlice) -> PayloadSlice {
+    PayloadSlice(backing: shared.share(s.backing), at: s.at, len: s.len)
+}
+
+/// The slice without its first `n` bytes, or None when it is shorter than `n`.
+pub fn payload_trim_front(take s: PayloadSlice, n: u64) -> Option[PayloadSlice] {
+    if n > s.len {
+        return None
+    }
+    let PayloadSlice(backing: take backing, at: at, len: len) = take s
+    Some(PayloadSlice(backing: take backing, at: at + n, len: len - n))
+}
+
+/// Bytes [offset, offset + len) of the slice, relative to its current start, or None when
+/// the range does not lie within it.
+pub fn payload_trim_range(take s: PayloadSlice, offset: u64, len: u64) -> Option[PayloadSlice] {
+    if !range_ok(s.len, offset, len) {
+        return None
+    }
+    let PayloadSlice(backing: take backing, at: at, ..) = take s
+    Some(PayloadSlice(backing: take backing, at: at + offset, len: len))
+}
+
+pub fn payload_len(s: PayloadSlice) -> u64 {
+    s.len
+}
+
+/// The slice's bytes, readable while `s` is held.
+pub fn payload_bytes(s: PayloadSlice) -> View[Bytes] in s {
+    list.slice(s.backing, s.at, s.at + s.len)
+}
+
+/// What a holder of `s` keeps alive (MEM-24): the backing's storage at its capacity and
+/// its Shared node, whatever the range's length. Aliases are not netted: each holder in a
+/// budget is charged the whole backing.
+pub fn payload_retained_bytes(s: PayloadSlice) -> u64 {
+    retained(s.backing)
+}
+
+fn retained(b: Shared[Bytes]) -> u64 {
+    round8(list.capacity(b)) + round8(bytes[Bytes] + 40)
+}
+
+fn round8(n: u64) -> u64 {
+    (n + 7) / 8 * 8
+}
+
+/// A payload with no header yet.
+pub fn framed_from(take payload: PayloadSlice) -> FramedSlice {
+    FramedSlice(prefix:[0; 64], start: 64, payload: take payload)
+}
+
+/// Write `header` in front of the active prefix. False, with nothing changed, when the
+/// inline room left is shorter than `header`.
+pub fn framed_prepend(mut f: FramedSlice, header: Bytes) -> bool {
+    let n = list.len(header)
+    let start: u64 = int.widen(f.start)
+    if n > start {
+        return false
+    }
+    let at = start - n
+    for i in 0u64 .. n {
+        f.prefix[at + i] = header[i]
+    }
+    f.start = int.narrow(at)
+    true
+}
+
+/// The inline header room left.
+pub fn framed_room(f: FramedSlice) -> u64 {
+    int.widen(f.start)
+}
+
+/// The wire length: active prefix plus payload.
+pub fn framed_len(f: FramedSlice) -> u64 {
+    FRAMED_PREFIX_MAX - int.widen(f.start) + f.payload.len
+}
+
+/// What a holder of `f` keeps alive beyond its own record: the payload's backing.
+pub fn framed_retained_bytes(f: FramedSlice) -> u64 {
+    retained(f.payload.backing)
+}
+
+/// Append the active prefix, then the payload range, to `out`. Returns the payload bytes
+/// copied (prefix bytes are header writes, not payload copies).
+fn framed_append(f: FramedSlice, mut out: Bytes) -> u64 {
+    let start: u64 = int.widen(f.start)
+    for i in start .. FRAMED_PREFIX_MAX {
+        list.push(mut out, f.prefix[i])
+    }
+    list.append(mut out, list.slice(f.payload.backing, f.payload.at, f.payload.at + f.payload.len))
+    f.payload.len
+}

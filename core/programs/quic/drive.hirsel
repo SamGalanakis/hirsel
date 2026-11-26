@@ -10,7 +10,7 @@ const DRIVE_SLOT: u64 = 1280
 
 /// One round: run due timers, poll and hand the whole batch to one udp_send (waiting for
 /// the first send_at still ahead), commit what it took, then one udp_recv batch until the
-/// endpoint's next deadline or `until`, each datagram to receive_datagram. A truncated
+/// endpoint's next deadline or `until`, the batch to receive_batch. A truncated
 /// UdpPacket is dropped and counted. Polling first means data written between calls
 /// leaves on the next call, not after a receive wait.
 pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut events: List[Event]) -> Result[(), NetError] waits {
@@ -92,18 +92,26 @@ pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut
         },
     }
     let at = host.mono_ns(clock)
-    for p in packets {
-        let UdpPacket(peer, at: start, len, truncated, ecn) = p
-        if truncated {
-            dropped(mut e.drops, Truncated)
-        } else {
-            receive_datagram(mut e, at, peer, ecn, mut buf, start, len, mut events)
-        }
-    }
+    receive_batch(mut e, at, packets, mut buf, mut events)
     e.drive_in = take buf
     e.drive_packets = take packets
     if let Some(err) = failed {
         return Error(err)
     }
     Ok(())
+}
+
+/// Receive one udp_recv batch at `at`. The datagram room `events` leaves is scanned once;
+/// each admitted datagram then takes its length from it, so the refusal point is the one
+/// a per-datagram scan would give.
+fn receive_batch(mut e: Endpoint, at: u64, packets: List[UdpPacket], mut buf: Bytes, mut events: List[Event]) {
+    e.datagram_room = datagram_room(e, events)
+    for p in packets {
+        let UdpPacket(peer, at: start, len, truncated, ecn) = p
+        if truncated {
+            dropped(mut e.drops, Truncated)
+        } else {
+            receive_in(mut e, at, peer, ecn, mut buf, start, len, mut events)
+        }
+    }
 }

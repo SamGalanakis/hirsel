@@ -46,7 +46,7 @@ pub type PeerParams {
 
 pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
 
-pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, PayloadSlice) | Closed(ConnectionHandle, CloseReason)
 
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 

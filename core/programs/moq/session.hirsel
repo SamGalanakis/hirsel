@@ -309,7 +309,7 @@ fn on_quic_event(mut s: Session, mut io: Io, ours: quic.ConnectionHandle, ev: qu
             if c == ours {
                 let _ = ensure_transport_ready(mut s, mut io, mut out)
                 if s.phase != Ended {
-                    on_datagram(mut s, mut io, data, mut out)
+                    on_datagram(mut s, mut io, quic.payload_bytes(data), mut out)
                 }
             }
         },

@@ -68,7 +68,7 @@ fn tx_write(t: Transport, mut io: Io, stream: quic.StreamId, data: Bytes, fin: b
 
 fn tx_write_shared(t: Transport, mut io: Io, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, MoqError] {
     match t {
-        Native(c: c) => match quic.write_shared(mut io.q, c, stream, take data, fin) {
+        Native(c: c) => match quic.write_shared(mut io.q, c, stream, quic.payload_whole(take data), fin) {
             Ok(b) => Ok(b),
             Error(e) => Error(Quic(e)),
         },
@@ -118,7 +118,7 @@ fn tx_priority(t: Transport, mut io: Io, stream: quic.StreamId, p: quic.Priority
 
 fn tx_send_datagram(t: Transport, mut io: Io, take data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), MoqError] {
     match t {
-        Native(c: c) => match quic.send_datagram(mut io.q, c, take data, p, tag) {
+        Native(c: c) => match quic.send_datagram(mut io.q, c, quic.framed_from(quic.payload_whole(take data)), p, quic.DatagramTag(owner: 0, tag: tag)) {
             Ok(()) => Ok(()),
             Error(e) => Error(Quic(e)),
         },
@@ -133,7 +133,7 @@ fn tx_send_datagram(t: Transport, mut io: Io, take data: Shared[Bytes], p: quic.
 }
 
 fn tx_drop_datagrams(t: Transport, mut io: Io, tag: u64) -> u64 {
-    quic.drop_datagrams(mut io.q, tx_conn(t), tag)
+    quic.drop_datagrams(mut io.q, tx_conn(t), quic.DatagramTag(owner: 0, tag: tag))
 }
 
 fn tx_close(t: Transport, mut io: Io, code: u64, reason: Bytes) {

@@ -388,7 +388,7 @@ fn send_until_refused(mut client: quic.Endpoint, c: quic.ConnectionHandle, id: q
         }
     }
     quic.committed(mut client, 3, sent)
-    let shared_taken = result.unwrap(quic.write_shared(mut client, c, id, shared.new(b"x"), false))
+    let shared_taken = result.unwrap(quic.write_shared(mut client, c, id, quic.payload_whole(shared.new(b"x")), false))
     let later = result.unwrap(quic.write(mut client, c, id, chunk, false))
     (accepted, shared_taken, later)
 }
@@ -443,5 +443,118 @@ fn flow_control_bounds_memory() -> Result[(), ()] {
     receive_bound(256 * KIB)
     receive_bound(1024 * KIB)
     send_bound()
+    Ok(())
+}
+
+const SLICE_SEND: u64 = 4096
+
+/// A fresh pair whose client may hold SLICE_SEND bytes, with one open stream; the server
+/// grants 256 KiB of credit, so only send_bytes limits a write.
+fn slice_case(mut client: quic.Endpoint, mut server: quic.Endpoint) -> (quic.ConnectionHandle, quic.ConnectionHandle, quic.StreamId) {
+    let (c, s) = handshake_pair(mut client, mut server, stream_transport(0, 0, SLICE_SEND))
+    let id = result.unwrap(quic.open(mut client, c, true))
+    (c, s, id)
+}
+
+/// What one more write may take: the headroom under send_bytes rounded down to 8, so it
+/// reads back the charge the connection holds.
+fn room_left(mut client: quic.Endpoint, c: quic.ConnectionHandle, id: quic.StreamId) -> u64 {
+    result.unwrap(quic.write(mut client, c, id, pattern(SLICE_SEND, 3), false))
+}
+
+// Admission at the declared capacity: 4,032 + 64 = 4,096 is taken; 4,033 rounds to
+// 4,040 and costs 4,104.
+fn slice_admits_at_capacity() {
+    let mut server = stream_server(stream_transport(256 * KIB, 256 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, _, id) = slice_case(mut client, mut server)
+    if result.unwrap(quic.write_shared(mut client, c, id, backed_slice(1, 10, 4033), false)) {
+        fail("a 4,104-byte shared charge fit 4,096 bytes")
+    }
+    if !result.unwrap(quic.write_shared(mut client, c, id, backed_slice(1, 10, 4032), false)) {
+        fail("a shared charge of exactly send_bytes was refused")
+    }
+    if room_left(mut client, c, id) != 0 {
+        fail("a full charge left room")
+    }
+}
+
+// Two ranges of one 3,000-byte backing: each holder is charged 3,000 + 64.
+fn slice_charges_each_range() {
+    let mut server = stream_server(stream_transport(256 * KIB, 256 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, _, id) = slice_case(mut client, mut server)
+    let mut b: Bytes = list.with_capacity(3000)
+    list.fill(mut b, 3000, 7)
+    let backing = shared.new(take b)
+    let Some(first) = quic.payload_slice(shared.share(backing), 0, 1000) else {
+        fail("a range was refused")
+    }
+    let Some(second) = quic.payload_slice(shared.share(backing), 1000, 1000) else {
+        fail("a range was refused")
+    }
+    if !result.unwrap(quic.write_shared(mut client, c, id, take first, false)) {
+        fail("one range of the backing was refused")
+    }
+    if result.unwrap(quic.write_shared(mut client, c, id, take second, false)) {
+        fail("a second range hid the backing it keeps alive")
+    }
+    if room_left(mut client, c, id) != SLICE_SEND - 3064 {
+        fail("a range was not charged its whole backing")
+    }
+}
+
+// An owned 1,001-byte write is stored in 1,008 bytes.
+fn slice_rounds_owned_storage() {
+    let mut server = stream_server(stream_transport(256 * KIB, 256 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, _, id) = slice_case(mut client, mut server)
+    if result.unwrap(quic.write(mut client, c, id, pattern(1001, 1), false)) != 1001 {
+        fail("an owned write under send_bytes was short")
+    }
+    if room_left(mut client, c, id) != SLICE_SEND - 1008 {
+        fail("an owned write was not charged its rounded storage")
+    }
+}
+
+// Reset at reliable size 500 over [owned 0..1000][shared 1000..2000 of a 2,000-byte
+// backing]: the shared piece is dropped and refunded (2,064); the owned piece straddles
+// 500 and stays charged (1,000) until its delivered bytes are acknowledged.
+fn slice_refunds_what_reset_drops() {
+    let mut server = stream_server(stream_transport(256 * KIB, 256 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, _, id) = slice_case(mut client, mut server)
+    if result.unwrap(quic.write(mut client, c, id, pattern(1000, 2), false)) != 1000 {
+        fail("an owned write under send_bytes was short")
+    }
+    if !result.unwrap(quic.write_shared(mut client, c, id, backed_slice(9, 1000, 2000), false)) {
+        fail("a shared write under send_bytes was refused")
+    }
+    result.unwrap(quic.reset(mut client, c, id, 5, 500))
+    let other = result.unwrap(quic.open(mut client, c, true))
+    if room_left(mut client, c, other) != SLICE_SEND - 1000 {
+        fail("a reset did not refund exactly the pieces it dropped")
+    }
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    settle(mut client, mut server, 2, mut at_server, mut at_client)
+    if room_left(mut client, c, other) != SLICE_SEND {
+        fail("acknowledging the reliable bytes did not refund the straddling piece")
+    }
+}
+
+/// bug: write_shared charges a slice's length rather than the backing it keeps alive, so
+/// two short ranges of one large backing pass send_bytes while holding it twice; an owned
+/// write is charged its length rather than its storage; a reset refunds a piece that
+/// straddles the reliable size while it is still held, or never refunds it.
+/// oracle: MEM-24 by hand with send_bytes 4,096. A shared backing of capacity C costs
+/// round8(C) + 64 (its Shared node, round8(24 + 40)); an owned copy of n bytes costs
+/// round8(n). A later write takes the headroom rounded down to 8, which reads the charge.
+@test
+fn shared_slices_charge_their_backing() -> Result[(), ()] {
+    slice_admits_at_capacity()
+    slice_charges_each_range()
+    slice_rounds_owned_storage()
+    slice_refunds_what_reset_drops()
     Ok(())
 }

@@ -97,12 +97,12 @@ fn payload_room(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes
     limit - order.min(limit, overhead)
 }
 
-fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, phase: bool, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
+fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, phase: bool, number: u64, body_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
     let n = codec.Number(truncated: number & 0xffffffff, size: 4)
     if kind == OneRtt {
         codec.write_short_header(dest, false, phase, n, mut out)?
     } else {
-        codec.write_long_header(kind, dest, source, token, n, payload_len + 16, mut out)?
+        codec.write_long_header(kind, dest, source, token, n, body_len + 16, mut out)?
     }
     Ok(list.len(out))
 }
@@ -150,17 +150,54 @@ fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes,
             return None
         }
         s.next += 1
-        let m = packet.mask(keys.mask, out, body)
-        let bits = if kind == OneRtt {
-            0x1fu8
-        } else {
-            0x0fu8
-        }
-        out[start] = out[start] ^ (m[0] & bits)
-        for i in 0u64 .. 4 {
-            out[body - 4 + i] = out[body - 4 + i] ^ m[i + 1]
-        }
+        protect_header(keys.mask, kind, start, body, mut out)
         return Some(number)
     }
     None
+}
+
+/// Seal a packet already assembled in `out` from `start`, whose header begin_packet wrote
+/// with the space's next packet number and whose frames end `out`: pad it with PADDING to
+/// `min_size`, seal in place and protect the header. On failure `out` is cut back to
+/// `start`.
+fn seal_in_place(mut s: Space, kind: codec.PacketKind, start: u64, body: u64, min_size: u64, mut out: Bytes) -> Option[u64] {
+    if let Some(mut keys) = s.send {
+        let number = s.next
+        let used = list.len(out) - start + 16
+        let zeros = if used < min_size {
+            min_size - used
+        } else {
+            0u64
+        }
+        if list.capacity(out) - list.len(out) < zeros + 16 {
+            list.truncate(mut out, start)
+            return None
+        }
+        if zeros != 0 {
+            list.fill(mut out, zeros, 0)
+        }
+        if let Error(_) = packet.seal(mut keys.sealer, number, mut out, start, body, b"") {
+            list.truncate(mut out, start)
+            return None
+        }
+        s.next += 1
+        protect_header(keys.mask, kind, start, body, mut out)
+        return Some(number)
+    }
+    list.truncate(mut out, start)
+    None
+}
+
+/// RFC 9001 §5.4: mask the first byte's low bits and the 4-byte packet number.
+fn protect_header(mask: packet.HeaderMask, kind: codec.PacketKind, start: u64, body: u64, mut out: Bytes) {
+    let m = packet.mask(mask, out, body)
+    let bits = if kind == OneRtt {
+        0x1fu8
+    } else {
+        0x0fu8
+    }
+    out[start] = out[start] ^ (m[0] & bits)
+    for i in 0u64 .. 4 {
+        out[body - 4 + i] = out[body - 4 + i] ^ m[i + 1]
+    }
 }

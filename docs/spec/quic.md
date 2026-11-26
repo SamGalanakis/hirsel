@@ -116,6 +116,13 @@ pub type Priority: key {
     order: u64,
     then: u64
 }
+pub type DatagramTag: key {
+    owner: u64,
+    tag: u64
+}
+pub opaque type PayloadSlice: send + cross
+pub opaque type FramedSlice: send + cross
+pub const FRAMED_PREFIX_MAX: u64 = 64
 pub type PeerParams {
     max_idle_ms: u64,
     max_udp_payload: u64,
@@ -126,7 +133,7 @@ pub type PeerParams {
 }
 
 pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
-pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, PayloadSlice) | Closed(ConnectionHandle, CloseReason)
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
 pub type QuicError = Config | Limit | Handshake(handshake.Error) | UnknownConnection | UnknownStream | StreamState | StreamReset(u64) | TooLarge(u64) | Unsupported
@@ -139,13 +146,14 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
 pub fn committed(mut e: Endpoint, now: u64, k: u64)
 pub fn open(mut e: Endpoint, c: ConnectionHandle, bidi: bool) -> Result[StreamId, QuicError]
 pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError]
-pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError]
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError]
 pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError]
 pub fn received(e: Endpoint, c: ConnectionHandle, s: StreamId) -> u64
 pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError]
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError]
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: Shared[Bytes], p: Priority, tag: u64) -> Result[(), QuicError]
-pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: DatagramTag) -> Result[(), QuicError]
+pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: DatagramTag) -> u64
+pub fn payload_bytes_copied(e: Endpoint, c: ConnectionHandle) -> u64
 pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError]
 pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Bytes)
 pub fn set_identity(mut e: Endpoint, take id: handshake.Identity)
@@ -206,63 +214,54 @@ state for a single socket". It is sans-IO and the package never calls the host:
 A `Connection` is reached only through its handle, which the endpoint looks up from a
 datagram's destination CID.
 
-`write_shared` queues a `Shared[Bytes]` on a stream without copying it, and
-`send_datagram` takes one too: a relay that fans one object out to many connections (MoQ,
-cascade) holds one copy, and each connection copies only into its own sealed packet, which
-TLS-8 `seal_into` does in the cipher. A packet is assembled contiguously in `out` and sealed
-in place; there is no scatter-input seal.
+**Payload slices.** Payloads cross between `quic`, `webtransport`, `moq` and
+`webrtc_sfu/cascade` as two opaque owned types (media-seams-design-3072, Performancesmash
+#6), so a relay that fans one object out to many connections holds one copy and no layer
+copies to add or strip a header:
 
-**Zero-copy payload-slice handoff (text only, not yet built — media-seams-design-3072).** To
-eliminate intermediate framing and demux copies across `quic`, `webtransport`, `moq`, and
-`webrtc_sfu/cascade` (Performancesmash #6), `quic` exports two owned slice types shared by all
-upper media packages:
-
-```hirsel unbuilt
-pub const FRAMED_PREFIX_MAX: u64 = 64
-
-pub type PayloadSlice: send {
-    backing: Shared[Bytes],
-    at: u64,
-    len: u64
-}
-
-pub type FramedSlice: send {
-    prefix: Inline[u8, 64],
-    prefix_start: u8,
-    payload: PayloadSlice
-}
-
+```hirsel signatures quic/quic
 pub fn payload_whole(take backing: Shared[Bytes]) -> PayloadSlice
 pub fn payload_slice(take backing: Shared[Bytes], at: u64, len: u64) -> Option[PayloadSlice]
 pub fn payload_share(s: PayloadSlice) -> PayloadSlice
 pub fn payload_trim_front(take s: PayloadSlice, n: u64) -> Option[PayloadSlice]
 pub fn payload_trim_range(take s: PayloadSlice, offset: u64, len: u64) -> Option[PayloadSlice]
+pub fn payload_len(s: PayloadSlice) -> u64
+pub fn payload_bytes(s: PayloadSlice) -> View[Bytes] in s
 pub fn payload_retained_bytes(s: PayloadSlice) -> u64
-
 pub fn framed_from(take payload: PayloadSlice) -> FramedSlice
 pub fn framed_prepend(mut f: FramedSlice, header: Bytes) -> bool
+pub fn framed_room(f: FramedSlice) -> u64
 pub fn framed_len(f: FramedSlice) -> u64
 pub fn framed_retained_bytes(f: FramedSlice) -> u64
-
-pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: PayloadSlice, fin: bool) -> Result[bool, QuicError]
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: u64) -> Result[(), QuicError]
 ```
 
-- **Bounds:** `at + len <= list.len(backing)` and `prefix_start <= 64`, enforced at construction.
-- **Right-aligned inline prefix:** `FramedSlice` stores active TX framing headers in
-  `prefix[prefix_start .. 64]` (empty at `prefix_start = 64`). Each protocol layer (`cascade`,
-  `moq`, `webtransport`) prepends its header in O(header_len) with zero shifts and zero payload
-  copies. If an abnormally large header (e.g. long MoQ properties) exceeds `prefix_start`,
-  `framed_prepend` returns `false` and the caller explicitly coalesces into one `Shared[Bytes]`.
-- **Direct-to-slot TX assembly:** `poll` writes the 1-RTT short header, the `DATAGRAM` frame
-  header, `prefix[prefix_start .. 64]`, and `payload.backing[at .. at + len]` directly into `out`
-  and seals in place via `packet.seal`, removing both intermediate scratch staging (`tx_payload`)
-  and secondary packet copies.
-- **Tight packet-sized RX `PayloadSlice`:** `receive_datagram` opens 1-RTT packets in place and
-  copies each received `DATAGRAM` frame once into an exact-length `Shared[Bytes]` (`len ==
-  frame.len <= max_mtu`, never retaining the caller's `UDP_GRO` receive slab), emitting
-  `Event.Datagram(c, PayloadSlice)`. Upper layers strip their headers via `payload_trim_front`
-  with zero copies.
+- **Ranges.** A `PayloadSlice` is `len` bytes at `at` of a `Shared[Bytes]` backing. Every
+  range is checked as `at <= size && len <= size - at`, never by forming `at + len`, and
+  refused with `None`. `payload_trim_front` and `payload_trim_range` measure from the
+  slice's current start, not the backing's. Both types are opaque, so no range or prefix
+  state the constructors did not check exists, and both are `send + cross`.
+- **Inline prefix.** A `FramedSlice` holds a payload and the framing headers written in
+  front of it in a right-aligned 64-byte inline prefix, so each layer (`cascade`, `moq`,
+  `webtransport`) prepends its header in O(header length) without shifting or copying the
+  payload. `framed_prepend` writes the whole header or, when it is longer than the room left
+  (`framed_room`), returns `false` and changes nothing; the caller then coalesces into one
+  `Shared[Bytes]`. `framed_len` is the wire length, prefix plus payload.
+- **Direct-to-slot TX.** `poll` writes a 1-RTT packet's short header into `out`, then its
+  frames straight after it: a STREAM frame's data and a DATAGRAM frame's prefix and payload
+  are read from the backing into the slot, and the packet is sealed in place (TLS-8
+  `seal_into`). A packet that fails to seal is truncated off `out` and its frames requeued.
+  Initial and Handshake packets and the MTU probe still assemble their frames in scratch and
+  copy them into the slot when sealed; they carry no application payload.
+  `payload_bytes_copied` counts the application payload bytes a connection copied while
+  assembling packets, one count per copy, so a byte staged in scratch and then sealed
+  counts twice; the cost bench reads it.
+- **RX.** `receive_datagram` opens a 1-RTT packet in place and copies each DATAGRAM frame's
+  payload once into an exact-length `Shared[Bytes]`, never retaining the caller's receive
+  slab, and emits `Event.Datagram(c, PayloadSlice)` over the whole of it. Upper layers strip
+  their headers with `payload_trim_front`.
+
+The queues hold only owned handles: a slice's backing lives as long as some queue, packet
+record or application value still holds it, and each holder is charged as QUIC-9 says.
 
 `priority` sets a stream's `Priority`: its urgency (0 to 7), then its `order` within that
 urgency, then `then` within equal orders, each lower first; among equal priorities streams
@@ -483,9 +482,12 @@ cost one range record per byte.
 be up to 2^62). `send_bytes` bounds the bytes a connection holds queued and unacknowledged
 across all its streams. `write` takes at most what fits under the smaller of the stream's
 credit and `send_bytes`, and returns the count (no hidden cap: the count says so).
-`write_shared` takes the whole buffer or none of it: it returns `Ok(true)` when queued and
-`Ok(false)` when the buffer would pass `send_bytes`, and the connection later emits
-`Writable` for that stream once acknowledgements free room.
+`write_shared` takes the whole slice or none of it: it returns `Ok(true)` when queued and
+`Ok(false)` when its charge would pass `send_bytes`, and the connection later emits
+`Writable` for that stream once acknowledgements free room. The charges are QUIC-9's
+retained-memory charges, not the payload length: `write` charges the bytes it copies
+rounded up to 8 (the bytes it takes are capped so the rounded charge fits), and
+`write_shared` charges `payload_retained_bytes` of the slice.
 
 **Resets.** `reset(e, c, s, code, reliable)` sends RESET_STREAM (`reliable` 0) or
 RESET_STREAM_AT, and at once discards every queued, sent-unacknowledged and retransmittable
@@ -551,28 +553,30 @@ payload whose DATAGRAM frame fits both the peer's limit and one packet. RFC 9221
 the limit over the whole frame, so the payload bound is the peer's limit less the frame type
 (one byte) and the length varint (1 to 8 bytes); a payload whose frame does not fit one
 empty 1-RTT packet at the validated path MTU (QUIC-1, **Path MTU**) is `TooLarge(n)` too,
-and nothing is sent. A queued datagram is charged its length plus 288 bytes against
-`send_bytes` (QUIC-5): its 72-byte record (nine words) in each of the two lists it passes
-through, queued then staged, each grown to at most twice its peak length (budgets.md's
-growth rule). The charge is taken once and released once, when its packet is committed or
+and nothing is sent. The size checks use `framed_len`. A queued datagram is charged
+`framed_retained_bytes(f)` (its backing's storage at its capacity rounded up to 8, plus
+64 bytes for its `Shared` node) plus `4 × bytes[QueuedDatagram]` (648 bytes): its record
+in each of the two lists it passes through, queued then staged, each grown to at most twice
+its peak length (budgets.md's growth rule). The record stores the charge it was admitted
+with; the charge moves with it from queued to staged and back when an uncommitted suffix is
+requeued, and the stored amount is released exactly once, when its packet is committed or
 it is dropped or expires. Past `send_bytes`, `send_datagram` is `Limit`. A datagram the window has not let out within one
 smoothed RTT of the first `poll` that saw it is dropped and counted as `DatagramLate`.
 
 Each queued datagram carries a `Priority`, which schedules it among the streams (QUIC-1),
-and a caller-chosen `tag`. `drop_datagrams(e, c, tag)` removes every queued
-datagram with that tag, including those in a polled but uncommitted suffix, and returns how
+and a `DatagramTag`: a structured `owner` (the caller's session generation, so one
+session's purge never reaches another's datagrams) and the caller's `tag`.
+`drop_datagrams(e, c, tag)` removes every queued datagram whose `DatagramTag` equals
+`tag`, including those in a polled but uncommitted suffix, and returns how
 many it removed; a datagram already committed to the socket is not recalled. MoQ tags
 datagrams by track so a revocation fence can purge them (MOQ-8).
 
 Received datagrams are delivered in arrival order as `Event.Datagram`, never reassembled and
 never acknowledged to the application, within `EndpointLimits.datagram_bytes` (QUIC-4); one
-that would pass it is dropped and counted as `DatagramBuffer`.
-
-**Retained-backing budget rule (text only, not yet built — media-seams-design-3072).** Under the
-`PayloadSlice` / `FramedSlice` contract (QUIC-1), wire MTU and `max_datagram_frame_size` checks
-use `framed_len(f)` / `s.len`, while memory caps (`send_bytes`, `datagram_bytes`) charge
-`framed_retained_bytes(f)` / `payload_retained_bytes(s)` — the full `list.len(backing)` plus
-queue record overhead — so a short slice can never hide an uncharged backing allocation.
+that would pass it is dropped and counted as `DatagramBuffer`. A received datagram is
+charged its payload length against `datagram_bytes`. `drive` takes the room the held
+`Event.Datagram`s leave once per `udp_recv` batch, and each admitted datagram then takes its
+length from it, so the refusal point is the one a scan per datagram would give.
 
 ## QUIC-8: Timers, closing and idling
 
@@ -592,7 +596,7 @@ charged then, so a connection's cost is exact like RTC-10's room cost:
 - receive buffers: at most the credit given, `initial_max_data` per connection, in at most
   `max_gaps` ranges per stream;
 - send buffers: at most `send_bytes` per connection, queued and unacknowledged together
-  (QUIC-5);
+  (QUIC-5), charged by what they keep alive (below);
 - sent-packet records: at most the window in packets plus PTO probes;
 - received ranges: 64 per space (QUIC-6);
 - CIDs: `active_connection_id_limit` each way;
@@ -602,6 +606,25 @@ charged then, so a connection's cost is exact like RTC-10's room cost:
   the bytes ahead of the read position and one reassembled handshake message.
 
 Per endpoint, received datagrams are bounded by `EndpointLimits.datagram_bytes`.
+
+**Retained memory.** Wire checks (path MTU, `max_datagram_frame_size`) use a slice's
+length; memory caps charge what a holder keeps alive, by budgets.md's MEM-24 recipes, so a
+short slice never hides an uncharged backing. A held slice is charged
+`payload_retained_bytes`: its backing's storage at its capacity rounded up to 8, plus its
+`Shared[Bytes]` node, round8(`bytes[Bytes]` + 40) = 64, whatever range it covers; aliases
+are not netted, so each holder in a budget pays for the whole backing. A copied `write` is
+charged its length rounded up to 8. Each queued piece and datagram stores the charge it was
+admitted with, and each way it leaves settles exactly that charge:
+
+- **ACK.** A copied piece is released as its bytes are acknowledged, and its rounding
+  remainder when the whole piece is freed. A held slice is released whole only when the
+  acknowledged floor passes its last byte, since its backing lives until then.
+- **Reset and cancel.** `reset` and `drop_datagrams` release the stored charges of the
+  pieces and datagrams they discard; a piece that straddles `reliable` is kept, and stays
+  charged.
+- **Commit, expiry and close.** A datagram's charge is released when its packet is
+  committed, it expires or the connection closes. Closing a connection retires everything
+  it holds.
 
 ## QUIC-10: The driver
 
@@ -616,8 +639,8 @@ It calls `timeout`, then `poll`s and hands the whole batch to one `udp_send` wit
 future. It passes the committed count `udp_send` returns to `committed`; the uncommitted
 suffix is abandoned as QUIC-1 says and is rebuilt by the next `poll`. Then it does one
 `udp_recv` batch until the endpoint's next deadline (taken after `committed`, which arms the
-loss timers) or `until`, and passes each datagram to `receive_datagram` as a slice of the
-receive buffer, dropping and counting any `UdpPacket` with `truncated` set as `Truncated`.
+loss timers) or `until`, and passes the batch to the receive path, each datagram as a
+slice of the receive buffer (the datagram room is scanned once per batch, QUIC-7), dropping and counting any `UdpPacket` with `truncated` set as `Truncated`.
 Sending first means data written between calls leaves on the next call, not after a
 receive wait. Packets that fill to the limit are padded to it, so a run of full packets
 reaches the host as equal lengths and leaves as one GSO train on Linux; on Darwin the host

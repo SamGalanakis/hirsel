@@ -4,7 +4,7 @@ webrtc_sfu@1/laws/allocation_drops_a_stream src=7d13dafed7536fe6 sig=dd5e61cd482
 webrtc_sfu@1/laws/attach_cost_is_exact src=3be9d38f96aa1c81 sig=a1ae4b06c096da5b run=c2c0c6612d4cbb79 bug=7ab1dbe42ba0516e oracle=a9299f6c5b2f6764 rows=pending
 webrtc_sfu@1/laws/audio_forward_gate src=ebd84a9269307295 sig=1bf7243c2ecff73b run=c2c0c6612d4cbb79 bug=868ec304fb3f43c2 oracle=bca71a86f27b3815 rows=pending
 webrtc_sfu@1/laws/av1_across_units src=5127603a9d1e4c8b sig=989890dab5c800a1 run=c7b2a52baff70a63 bug=cce8d5f2c7f0c976 oracle=3e2b42bf26a8c63f rows=pending
-webrtc_sfu@1/laws/bridge_ends_on_revoke src=20aea2265b54cbd9 sig=d633055a4b861c5c run=c7b2a52baff70a63 bug=2f1aa3741cf767b4 oracle=8aedbbfebe2f48cc rows=pending
+webrtc_sfu@1/laws/bridge_ends_on_revoke src=20aea2265b54cbd9 sig=6f0971dfe4821724 run=c7b2a52baff70a63 bug=2f1aa3741cf767b4 oracle=8aedbbfebe2f48cc rows=pending
 webrtc_sfu@1/laws/browser_feedback_reaches_bwe src=340cff2ab764e50a sig=4335efa189fcb1c3 run=c2c0c6612d4cbb79 bug=1f3cc0edfb8f41ce oracle=c749db7ddbeb5971 rows=pending
 webrtc_sfu@1/laws/cascade_wire_totality_property src=be124d27fd2a6123 sig=071b6ac49fab4ce5 run=c2c0c6612d4cbb79 bug=2ffd742ce79021ec oracle=3438b976adbd5910 rows=pending
 webrtc_sfu@1/laws/congested_link_costs_its_rooms src=5ae066c8aacc3dcc sig=31f4572b41cdc3ae run=c7b2a52baff70a63 bug=9719e0a2d91ac37f oracle=3ec15b6f76f1aec4 rows=pending
@@ -26,7 +26,7 @@ webrtc_sfu@1/laws/keyframe_request_coalesces_across_subscribers src=4586b48e6b8e
 webrtc_sfu@1/laws/late_answer_goes_out_as_rtx src=73a7b8ed44b66763 sig=ea813180489d68e6 run=c2c0c6612d4cbb79 bug=cd27e975fb77fa48 oracle=970f7f7324457219 rows=pending
 webrtc_sfu@1/laws/late_joiner_learns_publications src=e70716a212c32b28 sig=5e2d4df9f95e807c run=c7b2a52baff70a63 bug=bc7bd914a47c0f95 oracle=3f6aa183f6cebf51 rows=pending
 webrtc_sfu@1/laws/link_loss_recovers src=448d5b3b8ce7fffc sig=fcd19c3b1f4f8e04 run=c7b2a52baff70a63 bug=6fbd5988188c6083 oracle=785a5e8b8816197c rows=pending
-webrtc_sfu@1/laws/listed_node_hello_bound_to_pin src=ce63ba8c7e4d76ed sig=69a111b834e4f49d run=c7b2a52baff70a63 bug=9e085fc81a5e3e2d oracle=83de8311235f867c rows=pending
+webrtc_sfu@1/laws/listed_node_hello_bound_to_pin src=ce63ba8c7e4d76ed sig=84174692a05f89b5 run=c7b2a52baff70a63 bug=9e085fc81a5e3e2d oracle=83de8311235f867c rows=pending
 webrtc_sfu@1/laws/media_queue_holds_the_unit_burst src=7b2eba19a56f0f87 sig=75c12a454e9474da run=862f819be0a1a67f bug=8f445abbe4e39344 oracle=5db2a67a6a16dd55 rows=pending
 webrtc_sfu@1/laws/one_copy_per_layer_per_node src=7fda54ecfd1c6f38 sig=5f9b836551b023e9 run=c7b2a52baff70a63 bug=7cab4c8fab5df326 oracle=ff6d814a88c825b1 rows=pending
 webrtc_sfu@1/laws/pacer_holds_back_a_burst src=b9a0ebe3027404de sig=b84ddbf6fc6c5174 run=c2c0c6612d4cbb79 bug=25b9e138c21ff7c3 oracle=69cb77b6b0d4040f rows=pending

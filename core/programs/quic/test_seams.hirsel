@@ -134,3 +134,9 @@ pub fn rotate_peer_cid(mut e: Endpoint, c: ConnectionHandle) -> bool {
     }
     moved
 }
+
+/// QUIC-7 seam: hand `packets` (ranges of `buf`) to the endpoint as drive hands one
+/// udp_recv batch, without a socket.
+pub fn receive_packets(mut e: Endpoint, at: u64, packets: List[UdpPacket], mut buf: Bytes, mut events: List[Event]) {
+    receive_batch(mut e, at, packets, mut buf, mut events)
+}

@@ -277,7 +277,8 @@ fn earliest(a: Option[u64], b: u64) -> u64 {
 
 /// A QUIC datagram: the quarter stream id of its session's CONNECT stream, then the payload
 /// (RFC 9297 §2.1, draft-17 §4.5).
-fn on_datagram(mut w: Endpoint, mut e: quic.Endpoint, i: u64, data: Bytes, mut out: List[Event]) {
+fn on_datagram(mut w: Endpoint, mut e: quic.Endpoint, i: u64, slice: quic.PayloadSlice, mut out: List[Event]) {
+    let data = quic.payload_bytes(slice)
     let mut at = 0u64
     let Some(quarter) = h3_wire.read_varint(data, mut at, list.len(data)) else {
         fail_conn(mut w, mut e, i, h3_wire.H3_DATAGRAM_ERROR, mut out)

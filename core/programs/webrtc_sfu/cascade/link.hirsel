@@ -410,9 +410,9 @@ pub fn mtu_ready(mut hub: LinkHub, h: quic.ConnectionHandle) -> bool {
     }
     let probe = shared.share(hub.mtu_probe)
     let p = quic.Priority(urgency: 7, order: 0, then: 0)
-    match quic.send_datagram(mut hub.ep, h, take probe, p, MTU_PROBE_TAG) {
+    match quic.send_datagram(mut hub.ep, h, quic.framed_from(quic.payload_whole(take probe)), p, quic.DatagramTag(owner: 0, tag: MTU_PROBE_TAG)) {
         Ok(()) => {
-            let _ = quic.drop_datagrams(mut hub.ep, h, MTU_PROBE_TAG)
+            let _ = quic.drop_datagrams(mut hub.ep, h, quic.DatagramTag(owner: 0, tag: MTU_PROBE_TAG))
             hub.links[i].mtu_ready = true
             true
         },
@@ -430,7 +430,7 @@ pub fn send_media(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, lay
     let mut wire: Bytes = list.with_capacity(MEDIA_HEADER_LEN + list.len(rtp_pkt))
     write_media_datagram(room_num, layer_num, rtp_pkt, mut wire)
     let p = quic.Priority(urgency: 3, order: int.widen(room_num), then: int.widen(layer_num))
-    match quic.send_datagram(mut hub.ep, h, shared.new(take wire), p, int.widen(room_num)) {
+    match quic.send_datagram(mut hub.ep, h, quic.framed_from(quic.payload_whole(shared.new(take wire))), p, quic.DatagramTag(owner: 0, tag: int.widen(room_num))) {
         Ok(()) => {
             hub.counts.datagrams_sent += 1
             Ok(())
@@ -461,7 +461,7 @@ pub fn send_room_raw(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, 
 
 /// Drop every queued QUIC datagram for `room_num` on link `h` (CAS-5, QUIC-7).
 pub fn drop_room_datagrams(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32) -> u64 {
-    quic.drop_datagrams(mut hub.ep, h, int.widen(room_num))
+    quic.drop_datagrams(mut hub.ep, h, quic.DatagramTag(owner: 0, tag: int.widen(room_num)))
 }
 
 /// Detach a room locally from link `h`, resetting its room stream and dropping queued datagrams.
@@ -477,7 +477,7 @@ pub fn detach_room(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32) {
 fn detach_room_internal(mut hub: LinkHub, i: u64, ri: u64) {
     let h = hub.links[i].handle
     let room_num = hub.links[i].rooms[ri].room_num
-    let _ = quic.drop_datagrams(mut hub.ep, h, int.widen(room_num))
+    let _ = quic.drop_datagrams(mut hub.ep, h, quic.DatagramTag(owner: 0, tag: int.widen(room_num)))
     if let Some(s) = hub.links[i].rooms[ri].stream {
         let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
         let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
@@ -934,9 +934,10 @@ fn serve_unbound(mut hub: LinkHub, i: u64, ui: u64, mut out: List[LinkEvent]) {
     serve_room(mut hub, i, ri, mut out)
 }
 
-fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take data: Bytes, mut out: List[LinkEvent]) {
+fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take slice: quic.PayloadSlice, mut out: List[LinkEvent]) {
     // Media datagrams sit outside `MAX_EVENTS_PER_DRAIN`: each is one QUIC event already
     // bounded by QUIC-7's datagram buffer, and one not routed at once is dropped, never queued.
+    let data = quic.payload_bytes(slice)
     let Some((room_num, layer_num)) = read_media_datagram(data) else {
         hub.counts.malformed_datagram += 1
         return

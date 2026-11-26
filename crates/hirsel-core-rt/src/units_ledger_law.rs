@@ -10,7 +10,8 @@
 //!
 //! The trace is regenerated with `export.py` in the model directory.
 use super::conn::{Client, Inbox, Received, Sent};
-use super::{BoardCore, Fin, NAMING, Released, Shared, TakeInfo, Took, UnitCtx, Value};
+use super::model::BoardCore;
+use super::{Fin, NAMING, Released, Shared, TakeInfo, Took, UnitCtx, Value};
 use std::{
     collections::{HashMap, HashSet},
     panic::{AssertUnwindSafe, catch_unwind},

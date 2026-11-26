@@ -338,10 +338,6 @@ impl ConnCore {
     pub(crate) fn room_used(&self) -> u64 {
         self.hot.word.load(Ordering::Acquire) & BYTES
     }
-    pub(crate) fn room_add(&self, n: u64) {
-        let w = self.hot.word.fetch_add(n, Ordering::AcqRel);
-        assert!((w & BYTES) + n <= self.b, "room over its limit");
-    }
     pub(crate) fn room_sub(&self, n: u64) {
         let w = self.hot.word.fetch_sub(n, Ordering::AcqRel);
         assert!(w & BYTES >= n, "a negative room balance");

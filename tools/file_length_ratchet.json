@@ -446,7 +446,7 @@
     "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
   },
   "crates/hirsel-core-rt/src/units_ledger.rs": {
-    "lines": 1960,
+    "lines": 1655,
     "raise_revision": 1,
     "reason": "unit-tapes-u3b-2616: RL8 take points and the hold hook"
   },

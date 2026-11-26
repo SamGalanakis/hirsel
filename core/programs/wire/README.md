@@ -1,8 +1,11 @@
 # WebSocket protocol fixtures
 
-Build the current checkout's core/std sources with the existing compiler and
-runtime Buck targets. The fixture builder creates the explicit compiler inputs
-and grants, with a 256 MiB logical root within the 2 GiB process ceiling.
+The fixtures are the `core/programs` workspace member `wire` (`hirsel.toml`).
+`wire_build.py` builds its entries with `hirsel build core/programs/wire
+--libraries core` from the current checkout's core/std sources and the existing
+compiler and runtime Buck targets, adding each entry's grants and a 256 MiB
+logical root within the 2 GiB process ceiling. `//:core-wire-fixtures` builds
+the echo, finish, session and migration fixtures and runs the checks below.
 Replace the three tool paths below with the outputs of the corresponding Buck
 targets and pinned linker. Use a fresh output directory for another compiler.
 

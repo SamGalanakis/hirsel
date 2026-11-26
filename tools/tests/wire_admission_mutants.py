@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,10 +25,29 @@ CONTROLS = {
 }
 
 
-def build(args, source, output):
+def library_root(work, runner_text):
+    """A library root over the checkout whose runner.hirsel is `runner_text`: core and std
+    are links, and store, runner, platform and wire are copied members (a package's
+    files must lie inside it)."""
+    libraries = work / 'core'
+    programs = libraries / 'programs'
+    programs.mkdir(parents=True)
+    for name in ('core', 'std'):
+        (libraries / name).symlink_to(ROOT / 'core' / name)
+    members = ('store', 'runner', 'platform', 'wire')
+    (programs / 'hirsel.toml').write_text('[workspace]\nmembers = [' + ', '.join(f'"{m}"' for m in members) + ']\n')
+    for member in members:
+        shutil.copytree(ROOT / 'core/programs' / member, programs / member,
+                        ignore=shutil.ignore_patterns('.hirsel-*'))
+    (programs / 'runner/runner.hirsel').write_text(runner_text)
+    return libraries
+
+
+def build(args, runner_text, work):
     command = [sys.executable, str(ROOT / 'tools/tests/wire_build.py'),
                '--compiler', str(args.compiler.resolve()), '--runtime', str(args.runtime.resolve()),
-               '--runner', str(source), '--admission-only', '--backend', 'cranelift', '--output', str(output)]
+               '--libraries', str(library_root(work, runner_text)), '--admission-only',
+               '--backend', 'cranelift', '--output', str(work / 'build')]
     if args.cc:
         command += ['--cc', str(args.cc.resolve())]
     return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
@@ -51,11 +71,9 @@ def main():
     if args.syntax_control:
         with tempfile.TemporaryDirectory(prefix='wire-w3c-syntax-') as directory:
             work = Path(directory)
-            source = work / 'runner.hirsel'
             marker = 'fn wire_can_read[G: send, H: send, B: send](s: WireSession[G, H, B]) -> bool {'
             assert text.count(marker) == 1
-            source.write_text(text.replace(marker, marker[:-1] + '??? {'))
-            result = build(args, source, work / 'build')
+            result = build(args, text.replace(marker, marker[:-1] + '??? {'), work)
             refused = result.returncode != 0 and '"accepted":false' in result.stdout
             rows.append(dict(control='syntax', passed=refused, result=(result.stdout + result.stderr)[-4000:]))
             print('syntax:', 'REFUSED' if refused else 'NOT REFUSED', flush=True)
@@ -67,9 +85,7 @@ def main():
             changed = changed.replace(old, new)
         with tempfile.TemporaryDirectory(prefix='wire-w3c-' + name + '-') as directory:
             work = Path(directory)
-            source = work / 'runner.hirsel'
-            source.write_text(changed)
-            built = build(args, source, work / 'build')
+            built = build(args, changed, work)
             if built.returncode:
                 rows.append(dict(mutant=name, law=law, passed=False, result='control did not build: ' + (built.stdout + built.stderr)[-4000:]))
                 print(name + ': BUILD FAILED', flush=True)

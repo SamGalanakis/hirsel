@@ -1,0 +1,18 @@
+[package]
+name = "wire"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+store = { major = 1, path = "../store" }
+runner = { major = 1, path = "../runner" }
+platform = { major = 1, path = "../platform" }
+
+[sources]
+"echo.hirsel" = "echo"
+"finish.hirsel" = "finish"
+"session.hirsel" = "session"
+"admission.hirsel" = "admission"
+"migration.hirsel" = "migration"
+"front.hirsel" = "front"

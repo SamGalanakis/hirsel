@@ -8,23 +8,18 @@ and the address the kernel gave its socket, never Hirsel's decoder.
 """
 import argparse
 import http.server
-import json
 import os
 from pathlib import Path
 import queue
 import socket
 import subprocess
-import sys
 import tempfile
 import threading
 import time
-import tomllib
 
 from wire_process import stop_process
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / 'core/tools'))
-from std_native import library_sources
 
 INGRESS = ROOT / 'deploy/ingress'
 HAPROXY = 'haproxy:3.2.27-alpine'
@@ -37,31 +32,11 @@ CC = ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang'
 
 
 def build(compiler, runtime, work):
-    core, std = {'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}
-    packages = [{
-        'package': package, 'dependencies': dependencies,
-        'sources': library_sources(ROOT / 'core' / package['name'], package is core),
-    } for package, dependencies in [(core, []), (std, [core])]]
-    for name in ('store', 'runner', 'platform'):
-        directory = ROOT / 'core/programs' / name
-        manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
-        packages.append({
-            'package': {'name': name, 'version': str(manifest['package']['major'])},
-            'dependencies': [core] + [{'name': dep, 'version': str(spec['major'])} for dep, spec in manifest['dependencies'].items()],
-            'sources': [{'file': str(directory / file), 'modules': module.split('.'), 'signatures': False}
-                        for file, module in manifest['sources'].items()],
-        })
-    packages.append({
-        'package': {'name': 'wire', 'version': '1'},
-        'dependencies': [core, std, {'name': 'platform', 'version': '1'}],
-        'sources': [{'file': str(ROOT / 'core/programs/wire/front.hirsel'), 'modules': ['front'], 'signatures': False}],
-    })
-    inputs = work / 'inputs.json'
-    inputs.write_text(json.dumps({'core': core, 'packages': packages}) + '\n')
     built = {}
     for entry, grants in [('haproxy', ['Stdout']),
                           ('listener', ['Stdout', 'Clock', 'Net=Listen 127.0.0.0/8 18202-18202'])]:
-        command = [str(compiler), 'build', '--source-core', '--inputs', str(inputs), '--store', str(work / 'store'),
+        command = [str(compiler), 'build', str(ROOT / 'core/programs/wire'), '--libraries', str(ROOT / 'core'),
+                   '--source-core', '--store', str(work / 'store'),
                    '--entry', 'wire@1/front/' + entry, '--backend', 'cranelift', '--runtime', str(runtime),
                    '--limit', '268435456', '--cc', str(CC), '-o', str(work / entry)]
         for grant in grants:

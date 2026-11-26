@@ -1,6 +1,11 @@
 """Build targets for the Runner contract and wire checks."""
 
 
+# A build of a core/programs member resolves the whole workspace: every member's
+# manifest and listed sources, and the lock.
+WORKSPACE = '"core/programs/hirsel.toml", "core/programs/hirsel.lock", "core/programs/*/hirsel.toml", "core/programs/**/*.hirsel"'
+
+
 def runner_gates(out, call, Raw):
     out.append("\n" + call("hirsel_script_test", name="core-sdk-recovery", script="core/tools/sdk_recovery.py",
                             host=True, native_tools=True,
@@ -46,4 +51,11 @@ def runner_gates(out, call, Raw):
                             bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel",
                                       "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/platform/*.hirsel", "core/programs/store-crash/*.hirsel", "core/programs/jwtbind/*.hirsel", "core/programs/wire/*.hirsel", "crates/hirsel-core-rt/include/**"]) + ["core/tools/runner_host.py", "core/tools/runner_rest.py", "core/programs/hirsel.toml", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/programs/platform/hirsel.toml", "core/programs/store-crash/hirsel.toml", "core/programs/jwtbind/hirsel.toml", "core/programs/runner/frame-vectors.json", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/std_socket.c", "tools/tests/wire_build.py", "tools/tests/wire_admission.py", "tools/tests/wire_wsock.py", "tools/tests/wire_process.py"] + ["core/tools/case_progress.py"]')))
+                            data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**", ' + WORKSPACE + ']) + ["core/tools/runner_host.py", "core/tools/runner_rest.py", "core/programs/runner/frame-vectors.json", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/store_tests.py", "core/tools/store_crash_tests.py", "core/tools/std_socket.c", "tools/tests/wire_build.py", "tools/tests/wire_admission.py", "tools/tests/wire_wsock.py", "tools/tests/wire_process.py"] + ["core/tools/case_progress.py"]')))
+    # The wire fixtures (core/programs/wire) and their loopback checks.
+    out.append("\n" + call("hirsel_script_test", name="core-wire-fixtures", script="tools/tests/wire_gate.py",
+                            host=True,
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-wire-fixtures/hirsel"],
+                            bin_exes={"hirsel": "//:hirsel-core-driver-bin-hirsel"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            data=Raw('glob(["core/core/**", "core/std/**", ' + WORKSPACE + ']) + ["tools/tests/wire_gate.py", "tools/tests/wire_build.py", "tools/tests/wire_wsock.py", "tools/tests/wire_finish.py", "tools/tests/wire_admission.py", "tools/tests/wire_process.py", "tools/loopback_peer.py", "core/tools/std_socket.c"]')))

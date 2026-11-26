@@ -207,6 +207,11 @@ source = "member:webrtc_sfu"
 edges = ["dtls@1", "media_bits@1", "rtp@1", "runner@1", "srtp@1", "std@1", "store@1", "stun_ice@1", "turn@1"]
 
 [[package]]
+id = "wire@1"
+source = "member:wire"
+edges = ["platform@1", "runner@1", "std@1", "store@1"]
+
+[[package]]
 id = "xml@1"
 source = "member:xml"
 edges = []

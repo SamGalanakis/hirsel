@@ -12,6 +12,9 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+mod begin;
+pub(crate) use begin::{BeginInput, Verdict};
+
 /// The largest frame either side accepts.
 pub(crate) const MAX_FRAME: usize = 16 << 20;
 /// The largest logical reply the CLI reassembles from `Part`s.
@@ -51,7 +54,7 @@ pub(crate) struct Registration {
     pub(crate) packages: Vec<[u8; 32]>,
 }
 
-/// What a Begin or Register deploys (`operator.Input`): an attested recipe R, a publication
+/// What a Register deploys, and a State reports (`operator.Input`): an attested recipe R, a publication
 /// R in the launcher's code store, or a source's `launcher.Manifest` codec bytes, whose
 /// blobs the host asks for by digest (launch.md "Source by content").
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,8 +86,7 @@ impl Wire for Input {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Ask {
-    /// The trailing flag asks for the law gate, which only a source input can run.
-    Begin(Vec<u8>, Group, Input, Vec<String>, Vec<String>, Fates, bool),
+    Begin(Vec<u8>, Group, BeginInput, Vec<String>, Vec<String>, Fates),
     Data(Vec<u8>, Attempt, Vec<u8>),
     End(Vec<u8>, Attempt),
     Confirm(Vec<u8>, Attempt, Vec<u8>),
@@ -92,9 +94,8 @@ pub(crate) enum Ask {
     Resolve(Vec<u8>),
     Lookup(String),
     Register(Vec<u8>, Box<Registration>, Input, Vec<String>, Vec<String>),
-    /// The operator's decision on a request that awaits exactly this decision, with the fates
-    /// it gives when the decision shows a held group or an unmatched path.
-    Decide(Vec<u8>, Box<Decision>, Fates, bool),
+    /// The operator's verdict on a request that awaits exactly this decision.
+    Decide(Vec<u8>, Box<Decision>, Verdict),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -377,8 +378,8 @@ impl Migration {
 /// What a held request awaits the operator's decision on (`operator.Decision`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Decision {
-    pub(crate) tree: Vec<u8>,
-    pub(crate) root: Vec<u8>,
+    pub(crate) tree: Option<Vec<u8>>,
+    pub(crate) root: Option<Vec<u8>>,
     pub(crate) stage: DecisionStage,
     pub(crate) grants: Grants,
     pub(crate) approvals: Option<Approvals>,
@@ -395,8 +396,8 @@ impl Decision {
 
 impl Wire for Decision {
     fn put(&self, w: &mut Writer) {
-        w.bytes(&self.tree);
-        w.bytes(&self.root);
+        w.option(&self.tree, |w, t| w.bytes(t));
+        w.option(&self.root, |w, h| w.bytes(h));
         w.u32(match self.stage {
             DecisionStage::Admission => 0,
             DecisionStage::Prepared => 1,
@@ -413,8 +414,8 @@ impl Wire for Decision {
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(Self {
-            tree: r.bytes()?,
-            root: r.bytes()?,
+            tree: r.option(|r| r.bytes())?,
+            root: r.option(|r| r.bytes())?,
             stage: match r.u32()? {
                 0 => DecisionStage::Admission,
                 1 => DecisionStage::Prepared,
@@ -587,7 +588,7 @@ impl Wire for Registration {
 impl Wire for Ask {
     fn put(&self, w: &mut Writer) {
         match self {
-            Self::Begin(d, g, input, foreign, exec, held, gate) => {
+            Self::Begin(d, g, input, foreign, exec, held) => {
                 w.u32(0);
                 w.bytes(d);
                 g.put(w);
@@ -595,7 +596,6 @@ impl Wire for Ask {
                 w.strings(foreign);
                 w.strings(exec);
                 held.put(w);
-                w.bool(*gate);
             }
             Self::Data(d, a, bytes) => {
                 w.u32(1);
@@ -625,12 +625,11 @@ impl Wire for Ask {
                 w.strings(foreign);
                 w.strings(exec);
             }
-            Self::Decide(d, decision, fates, approve) => {
+            Self::Decide(d, decision, verdict) => {
                 w.u32(8);
                 w.bytes(d);
                 decision.put(w);
-                fates.put(w);
-                w.bool(*approve);
+                verdict.put(w);
             }
         }
     }
@@ -639,11 +638,10 @@ impl Wire for Ask {
             0 => Self::Begin(
                 r.bytes()?,
                 Group::get(r)?,
-                Input::get(r)?,
+                BeginInput::get(r)?,
                 r.strings()?,
                 r.strings()?,
                 Fates::get(r)?,
-                r.bool()?,
             ),
             1 => Self::Data(r.bytes()?, Attempt::get(r)?, r.bytes()?),
             2 => Self::End(r.bytes()?, Attempt::get(r)?),
@@ -658,12 +656,7 @@ impl Wire for Ask {
                 r.strings()?,
                 r.strings()?,
             ),
-            8 => Self::Decide(
-                r.bytes()?,
-                Box::new(Decision::get(r)?),
-                Fates::get(r)?,
-                r.bool()?,
-            ),
+            8 => Self::Decide(r.bytes()?, Box::new(Decision::get(r)?), Verdict::get(r)?),
             _ => return Err(malformed("operator ask tag")),
         })
     }

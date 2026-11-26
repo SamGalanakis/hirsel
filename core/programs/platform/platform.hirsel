@@ -2228,15 +2228,12 @@ fn active_holds(mut h: Host, name: String, d: Bytes, now: Now) -> bool waits {
 // A Begin (launch.md "The operator socket"): a known D with the same bytes attaches to its
 // request, with other bytes is a Conflict; a new D is recorded durably, then the group is
 // woken if cold and its admission opened.
-fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group, requested: operator.Input, foreign: List[String], exec: List[String], held: runner.fate.Fates, gate: bool, now: Now, mut out: List[launcher.Request]) waits {
+fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group, input: operator.BeginInput, foreign: List[String], exec: List[String], held: runner.fate.Fates, now: Now, mut out: List[launcher.Request]) waits {
     if list.len(d) != 16u64 {
         refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
         return
     }
-    if !gate_fits(requested, gate) {
-        refuse(mut h, conn, InvalidClass, "the law gate runs only for a source input")
-        return
-    }
+    let (requested, gate) = operator.begin_parts(input)
     if !runner.fate.well_formed(held) {
         refuse(mut h, conn, InvalidClass, "held entries are not sorted by path or repeat a path")
         return
@@ -2437,10 +2434,10 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
     match ask {
         // A deploy waits for the session's inventory to be reconciled, so it can neither
         // race the adoption of a pending deploy nor bind a group twice.
-        BeginAsk(_, _, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
-        BeginAsk(d, g, input, foreign, exec, held, gate) => begin(mut h, conn, ask, d, g, input, foreign, exec, held, gate, now, mut out),
-        DecideAsk(_, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
-        DecideAsk(d, decision, fates, approve) => decide(mut h, conn, d, decision, fates, approve, now, mut out),
+        BeginAsk(_, _, _, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        BeginAsk(d, g, input, foreign, exec, held) => begin(mut h, conn, ask, d, g, input, foreign, exec, held, now, mut out),
+        DecideAsk(_, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
+        DecideAsk(d, decision, verdict) => decide(mut h, conn, d, decision, verdict, now, mut out),
         DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
             Some(name) if list.len(chunk) > 0u64 && receiving(h, name) => received(mut h, name, d, chunk),
             Some(_) if list.len(chunk) > 0u64 => list.push(mut out, AdmitData(a, clone(chunk))),

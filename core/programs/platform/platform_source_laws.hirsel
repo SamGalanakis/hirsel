@@ -32,16 +32,17 @@ fn untrusted_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     Ok(())
 }
 
-// `gated_source_admission` (launch.md "The law gate"): Begin's `gate` asks the launcher to run
-// the tree's tests before it admits. Only a source input can be gated: a gated attested
-// input is Invalid before any Admit. A gated source goes to Admit with the gate set, and a
-// Red verdict fails the request with class Red and the failing tests and assembles nothing.
+// `gated_source_admission` (launch.md "The law gate"): a Begin source's gate asks the
+// launcher to run the tree's tests before it admits. A gated source goes to Admit with the
+// gate set, and a Red verdict fails the request with class Red and the failing tests and
+// assembles nothing.
 @test
 fn gated_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut r = admission_case(c, rnd, None, Trusted)
-    let attested = begin_held(mut r, request_id(46u64), AttestedInput(image_two()), runner.fate.none(), true)
-    expect(errored(r, attested, InvalidClass) && admits(r) == 0u64, "gate: a gated attested input was not Invalid")
-    let _ = begin_held(mut r, request_id(47u64), source_of("Stderr"), runner.fate.none(), true)
+    let SourceInput(m) = source_of("Stderr") else {
+        return Error(())
+    }
+    let _ = begin_held(mut r, request_id(47u64), SourceBegin(take m, true), runner.fate.none())
     let mut gated = false
     for q in r.asked {
         if let Admit(_, _, Source(_, true), _) = q {

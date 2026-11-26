@@ -67,14 +67,6 @@ fn relayed_input(input: operator.Input) -> Option[launcher.Input] {
     }
 }
 
-// Whether a Begin's `gate` fits its input: only a source can be gated.
-fn gate_fits(input: operator.Input, gate: bool) -> bool {
-    match input {
-        SourceInput(_) => true,
-        _ => !gate,
-    }
-}
-
 // The files of manifest m whose bytes the group's blob set lacks, one per digest, in
 // manifest order. An empty file is never needed: its bytes are known.
 fn lacking(h: Host, incarnation: u64, m: launcher.Manifest) -> Result[List[launcher.ManifestFile], Refused] waits {
@@ -381,12 +373,15 @@ fn blob_keys(h: Host, incarnation: u64) -> List[Bytes] waits {
     out
 }
 
-// The input and approvals a recorded Begin or Register admits: the operator input, a Begin's
-// law gate, and the Foreign and Exec lines. Every repeated admission reads them here, so it
-// is gated exactly as the first.
+// The input and approvals a recorded Begin or Register admits: the operator input, whether a
+// Begin's source asks for the law gate, and the Foreign and Exec lines. Every repeated
+// admission reads them here, so it is gated exactly as the first.
 fn admission_ask(body: Bytes) -> Option[(operator.Input, bool, List[String], List[String])] {
     match operator.decode_ask(body) {
-        Some(BeginAsk(_, _, input, foreign, exec, _, gate)) if gate_fits(input, gate) => Some((clone(input), gate, clone(foreign), clone(exec))),
+        Some(BeginAsk(_, _, input, foreign, exec, _)) => {
+            let (requested, gate) = operator.begin_parts(input)
+            Some((requested, gate, clone(foreign), clone(exec)))
+        },
         Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), false, clone(foreign), clone(exec))),
         _ => None,
     }

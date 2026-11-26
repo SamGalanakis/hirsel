@@ -6,24 +6,17 @@ fn same_grants(a: launcher.Grants, b: launcher.Grants) -> bool {
     a.added == b.added && a.dropped == b.dropped
 }
 
-// The decision a request awaits: its source tree's digest (empty for an attested or
-// publication input), the H its law gate ran against (empty when ungated), and the facts
+// The decision a request awaits: its source tree's digest (None for an attested or
+// publication input), the H its law gate ran against (None when ungated), and the facts
 // computed so far.
 fn decision_of(input: operator.Input, gate: Option[launcher.Green], stage: operator.DecisionStage, grants: launcher.Grants, triggers: runner.TriggerReport) -> operator.Decision {
-    let root: Bytes = match gate {
-        Some(green) => clone(green.root),
-        None => list.new(),
+    let root: Option[Bytes] = match gate {
+        Some(green) => Some(clone(green.root)),
+        None => None,
     }
-    let tree: Bytes = match input {
-        SourceInput(b) => {
-            let digest = sha256.hash(b)
-            let mut out: Bytes = list.with_capacity(32u64)
-            for i in 0u64 .. 32u64 {
-                list.push(mut out, digest[i])
-            }
-            out
-        },
-        _ => list.new(),
+    let tree: Option[Bytes] = match input {
+        SourceInput(b) => Some(digest_of(b)),
+        _ => None,
     }
     operator.Decision(tree: tree, root: root, stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
 }
@@ -102,11 +95,11 @@ fn needs_decision(h: Host, name: String, report: runner.TriggerReport) -> bool w
 
 // A Decide (launch.md "Self-editing" "Holds and decisions"): request d must await exactly
 // `decision`. A refusal fails it Denied. An approval records the decision's grant diff, and
-// when the decision shows a held group or an unmatched path its `fates` replace d's (and
-// otherwise `fates` must be `fate.none()`), then repeats d's admission under them, with a
+// when the decision shows a held group or an unmatched path its fates replace d's (and
+// otherwise they must be `fate.none()`), then repeats d's admission under them, with a
 // fresh attempt and deadline and `conn` as its owner; an admission or prepare that then
 // needs another decision waits again.
-fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: runner.fate.Fates, approve: bool, now: Now, mut out: List[launcher.Request]) waits {
+fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, verdict: operator.Verdict, now: Now, mut out: List[launcher.Request]) waits {
     let r = match request_row(h, d) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -126,6 +119,15 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: 
         refuse(mut h, conn, DeniedClass, "the request awaits no decision on exactly these facts")
         return
     }
+    let fates: runner.fate.Fates = match verdict {
+        Approve(f) => clone(f),
+        Refuse => {
+            let _ = map.remove(mut h.shown, d)
+            map.insert(mut h.owners, clone(d), conn)
+            fail_request(mut h, d, DeniedClass, "the operator refused the decision")
+            return
+        },
+    }
     let fated = operator.shows_held(decision)
     if !fated && (!is_none(fates.all) || list.len(fates.entries) > 0u64) {
         refuse(mut h, conn, InvalidClass, "the decision shows no held run, so it takes no fates")
@@ -133,10 +135,6 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: 
     }
     let _ = map.remove(mut h.shown, d)
     map.insert(mut h.owners, clone(d), conn)
-    if !approve {
-        fail_request(mut h, d, DeniedClass, "the operator refused the decision")
-        return
-    }
     let name = string.from(r.group.name)
     let g = match group_row(h, name) {
         Ok(Some(g)) if g.incarnation == r.group.incarnation => g,
@@ -306,7 +304,7 @@ fn deploy_held(h: Host, d: Bytes) -> Result[runner.fate.Fates, Refused] waits {
     if let Some(f) = row.fates {
         return Ok(clone(f))
     }
-    let Some(BeginAsk(_, _, _, _, _, held, _)) = operator.decode_ask(row.begin) else {
+    let Some(BeginAsk(_, _, _, _, _, held)) = operator.decode_ask(row.begin) else {
         return Error(Missing("deploy Begin"))
     }
     Ok(clone(held))

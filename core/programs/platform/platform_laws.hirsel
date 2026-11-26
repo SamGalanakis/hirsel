@@ -189,18 +189,18 @@ fn error_on(r: Rig, conn: u64) -> Option[operator.Class] {
 // Begins request `d` deploying `input` to group g on a new connection; the rig's attempt
 // becomes the one the host assigned. Gives the connection.
 fn begin_with(mut r: Rig, d: Bytes, input: operator.Input) -> u64 waits {
-    begin_held(mut r, d, input, runner.fate.none(), false)
+    begin_held(mut r, d, ungated(input), runner.fate.none())
 }
 
-// begin_with under the deploy fates `held`, asking for the law gate when `gate` is set.
-fn begin_held(mut r: Rig, d: Bytes, input: operator.Input, take held: runner.fate.Fates, gate: bool) -> u64 waits {
+// begin_with of a Begin input, under the deploy fates `held`.
+fn begin_held(mut r: Rig, d: Bytes, input: operator.BeginInput, take held: runner.fate.Fates) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
     let incarnation = match group_row(r.h, "g") {
         Ok(Some(g)) => g.incarnation,
         _ => 0u64,
     }
-    send(mut r, conn, BeginAsk(clone(d), group_of("g", incarnation), clone(input), list.new(), list.new(), take held, gate))
+    send(mut r, conn, BeginAsk(clone(d), group_of("g", incarnation), clone(input), list.new(), list.new(), take held))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -1502,9 +1502,9 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(awaits(phase_on(r2, owner), "Net=tcp:example.org:443", ""), "grant: the owner was not shown the diff it awaits a decision on")
     hang_up(mut r2, owner)
     expect(awaits(status_of(mut r2, held_d), "Net=tcp:example.org:443", ""), "grant: the hold did not outlive its owner")
-    let wrong = decide_on(mut r2, held_d, grants_of("Net=tcp:example.org:443", "Dir=a"), true)
+    let wrong = decide_on(mut r2, held_d, grants_of("Net=tcp:example.org:443", "Dir=a"), Approve(runner.fate.none()))
     expect(errored(r2, wrong, DeniedClass) && admits(r2) == 1u64, "grant: a decision on another diff was taken")
-    let _ = decide_on(mut r2, held_d, clone(net), true)
+    let _ = decide_on(mut r2, held_d, clone(net), Approve(runner.fate.none()))
     expect(admits(r2) == 2u64 && !same_attempt(held_a, r2.a), "grant: the approval did not repeat the admission under a fresh attempt")
     let mut second2: List[launcher.Event] = list.new()
     list.push(mut second2, Admitted(r2.a, image_two(), summary_of(1u64, 1u64, clone(net)), ""))
@@ -1517,7 +1517,7 @@ fn deploy_admission_policy(c: Clock, rnd: Random) -> Result[(), ()] waits {
     let mut lost: List[launcher.Event] = list.new()
     list.push(mut lost, Admitted(r7.a, image_two(), summary_of(1u64, 1u64, grants_of("", "Dir=a")), ""))
     feed(mut r7, take lost)
-    let _ = decide_on(mut r7, no_d, grants_of("", "Dir=a"), false)
+    let _ = decide_on(mut r7, no_d, grants_of("", "Dir=a"), Refuse)
     expect(is_failed(status_of(mut r7, no_d), DeniedClass) && asked_of(r7, 4u64) == 0u64, "grant: a refused diff did not fail the request")
     let _ = begin_new(mut r7)
     let sup_d: Bytes = clone(r7.req)

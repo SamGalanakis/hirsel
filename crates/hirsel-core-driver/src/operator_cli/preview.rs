@@ -9,7 +9,7 @@ use crate::cli::{Invocation, OptionId as Opt};
 use crate::launcher::session::Grants;
 use crate::operator::{
     Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Migration, Phase,
-    Preview,
+    Preview, Verdict,
 };
 use hirsel_core_ids::hex;
 use std::path::PathBuf;
@@ -122,7 +122,7 @@ fn decide_on(invocation: Invocation) -> Result<i32, Error> {
         exec: Vec::new(),
     };
     if refuse {
-        let ask = Ask::Decide(d.clone(), held, Fates::default(), false);
+        let ask = Ask::Decide(d.clone(), held, Verdict::Refuse);
         return Exchange::new(&state, d, "decide", None, none).run(ask);
     }
     let refusal = if approved != held.grants {
@@ -139,7 +139,7 @@ fn decide_on(invocation: Invocation) -> Result<i32, Error> {
         println!("{}", decision_json(&held));
         return Ok(2);
     }
-    let ask = Ask::Decide(d.clone(), held, fates, true);
+    let ask = Ask::Decide(d.clone(), held, Verdict::Approve(fates));
     Exchange::new(&state, d, "decide", None, none).run(ask)
 }
 
@@ -159,8 +159,8 @@ pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
     })["triggers"]
         .clone();
     serde_json::json!({
-        "tree": hex::encode(&decision.tree),
-        "root": hex::encode(&decision.root),
+        "tree": decision.tree.as_deref().map(hex::encode),
+        "root": decision.root.as_deref().map(hex::encode),
         "stage": stage,
         "grants": grants_json(&decision.grants),
         "approvals": approvals,

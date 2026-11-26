@@ -23,13 +23,13 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
     // (v2.71) The fates are part of Begin's canonical bytes.
     let mut release_all = runner.fate.none()
     release_all.all = Some(Release)
-    let refated = begin_held(mut b, first, AttestedInput(image_two()), take release_all, false)
+    let refated = begin_held(mut b, first, AttestedBegin(image_two()), take release_all)
     expect(errored(b, refated, ConflictClass) && admits(b) == 0u64, "L49: the same request ID and content with another held value was not a Conflict")
     // Entries out of path order are Invalid before any row is written.
     let mut unsorted = runner.fate.none()
     list.push(mut unsorted.entries, runner.fate.EntryFate(path: bytes_of(1u64, 98u8), fate: Release))
     list.push(mut unsorted.entries, runner.fate.EntryFate(path: bytes_of(1u64, 97u8), fate: Cancel))
-    let disordered = begin_held(mut b, request_id(90u64), AttestedInput(image_two()), take unsorted, false)
+    let disordered = begin_held(mut b, request_id(90u64), AttestedBegin(image_two()), take unsorted)
     expect(errored(b, disordered, InvalidClass) && admits(b) == 0u64, "L49: unsorted held entries were not Invalid")
     let cut = begin_new(mut b)
     let a1 = b.a
@@ -48,4 +48,13 @@ fn operator_request_identity(c: Clock, rnd: Random) -> Result[(), ()] waits {
     expect(is_installed(status_of(mut b, first)), "L49: Status lost the installed request after a later deploy")
     unplug(mut b)
     Ok(())
+}
+
+// The Begin input that deploys `input` without the law gate.
+fn ungated(input: operator.Input) -> operator.BeginInput {
+    match input {
+        AttestedInput(b) => AttestedBegin(clone(b)),
+        PublicationInput(b) => PublicationBegin(clone(b)),
+        SourceInput(b) => SourceBegin(clone(b), false),
+    }
 }

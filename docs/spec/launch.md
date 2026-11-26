@@ -1236,20 +1236,20 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, foreign, exec, held, gate) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest), a `launcher.Manifest`'s codec bytes: a source named by content, whose blobs follow as Data ("Source by content" below). A manifest over 1 MiB, or one that breaks its rules, is `Invalid`. `gate` asks for the law gate ("Self-editing"); `true` with any input but a source is `Invalid`. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 0 Begin(D, G, input, foreign, exec, held) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest, gate), with `manifest` a `launcher.Manifest`'s codec bytes: a source named by content, whose blobs follow as Data ("Source by content" below). A manifest over 1 MiB, or one that breaks its rules, is `Invalid`. `gate`, a bool, asks for the law gate ("Self-editing"); only a source carries one. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. For a source it is the needed blobs' bytes ("Self-editing"). |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
-| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record, front, packages), with `memory` an `Option[u64]` in bytes, `record` an `Option` of (dir, retentionSeconds) and `packages` the group's package roots, each 32 bytes ("Package roots per group" below). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
-| 8 Decide(D, decision, fates, approve) | The operator's decision on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. `fates` settles the held runs the decision shows and is `Fates(all: None, entries: [])` when it shows none. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
+| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record, front, packages), with `memory` an `Option[u64]` in bytes, `record` an `Option` of (dir, retentionSeconds) and `packages` the group's package roots, each 32 bytes ("Package roots per group" below). Registers a new group and deploys its first release, below. `foreign` and `exec` are Begin's. `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest), Begin's input without the gate: a Register is never gated. |
+| 8 Decide(D, decision, verdict) | The operator's verdict on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. `verdict` is 0 Approve(fates) or 1 Refuse. An approval's `fates` settle the held runs the decision shows and are `Fates(all: None, entries: [])` when it shows none; it repeats D's admission under a fresh A, this connection owning it. A refusal fails D `Denied`. |
 | 9 SetEditor(G, editor) | Planned ("Self-editing"). `editor` is `Option[EditorGrant]`, with `EditorGrant { uid: u32, named: List[String] }`: the editor's UID and the sorted, duplicate-free `Secret`, `Cred` and `Env` binding lines of G's approved recipe that the operator lets an editor's code use. It sets or clears G's editor in one transaction and answers `GroupInfo(G)`. It is refused `Denied` unless G passes "What editing delegates"; a UID equal to the operator's or the launcher's is `Invalid`; the platform host's group is `Denied`. Only this socket accepts it. |
 
 | Host → operator | Payload and rule |
 |---|---|
-| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
+| 0 State(D, G, input, phase) | A committed snapshot. `input` is Register's input type: a Begin's source appears as Source(manifest), without its gate. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 5 BlobKey(H), after the four object kinds' tags 0 to 4). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
@@ -1353,8 +1353,8 @@ activation, assembly and report.
   `--approve-display SHA256`<!-- doc-ref: planned --> (planned), `--held release|cancel`, `--held-entry PATH=release|cancel`
   and `--refuse`, decides a held request of either
   principal. It sends Status and prints the whole `Decision` ("Self-editing"), with its
-  tree, H and trigger report. With `--refuse` it sends `Decide(D, decision, Fates(all: None,
-  entries: []), false)`. Otherwise it sends Decide approving that exact decision only when
+  tree, H and trigger report. With `--refuse` it sends `Decide(D, decision, Refuse)`. Otherwise
+  it sends Decide approving that exact decision only when
   its options name every part the decision holds and nothing else: the grant diff line by
   line, the migration digest, the SHA-256 of the approval text, and fates for the held
   groups (`--held`, `--held-entry`, as for deploy); any other set of options prints the
@@ -1427,7 +1427,7 @@ is separate from publishing.
 after review self-edit-gate-review-2801 (self-edit-build-1c-2808, RUNNER-SPEC v2.82). Not built:
 every socket, ask field, phase, class and law in this section is planned. Only the building
 blocks are to be built now (Sam, 2026-11-26: "not building self editing into lash, just the
-building blocks"): the law gate (built: Begin's `gate`, self-edit-begin-source-2849), operator-decided holds with `hirsel decide`, the migration
+building blocks"): the law gate (built: a Begin source's `gate`, self-edit-begin-source-2849), operator-decided holds with `hirsel decide`, the migration
 and runs facts from OLD's report of the bound PREPARED with its settlement check, and source
 by content with per-group package roots. The editor principal (its UID, socket, SetEditor and
 revocation), automatic cutover and the editor allow list stay unbuilt.*
@@ -1516,10 +1516,9 @@ needs a privileged launcher and is its own lane.
 Status and LookupGroup. It answers Confirm, Decide, Register and ResolvePin with
 `Error(Denied)`. An editor Begin must carry:
 
-- a `Source` input;
+- a `Source(manifest, gate)` input whose `gate` is `true`;
 - empty `foreign` and `exec`;
-- `held` equal to `Fates(all: None, entries: [])`;
-- `gate` equal to `true`.
+- `held` equal to `Fates(all: None, entries: [])`.
 
 Anything else is `Error(Denied)` before anything compiles. So the editor never approves an
 authority, never confirms an approval text, never chooses a run's fate, and never skips the
@@ -1553,8 +1552,9 @@ the detail `editor revoked`. The transaction that clears an editor request for i
 checks that the group's `editor` is still that UID, and otherwise fails it `Denied`, so a
 request already preparing under a revoked editor never cuts over.
 
-**The law gate.** Begin's `gate: bool` asks for it. It is valid only with a source input
-(otherwise `Invalid`). The operator may set it, and the editor must. A gated source is
+**The law gate.** A Begin's source input `Source(manifest, gate)` asks for it when `gate` is
+`true`. Only a Begin source carries a gate, and a Register is never gated. The operator may
+set it, and the editor must. A gated source is
 admitted as `Source(tree, gate: true)`. The launcher's step 1 ("Publish and assemble")
 runs these steps after `hirsel publish PACKAGE --frozen` gives H in its scratch, and before
 it records H's recipe or admits `Publication(H)`; only the authority check, which reads
@@ -1658,14 +1658,15 @@ it needs no person. Each fact is read from bytes that the cutover names or is bo
 fact. Its phase is `AwaitDecision(decision)`, with
 
 ```text
-Decision { tree: H, root: H, stage: Stage, grants: Grants, approvals: Option[Approvals], migration: Option[Migration], triggers: TriggerReport }
+Decision { tree: Option[H], root: Option[H], stage: Stage, grants: Grants, approvals: Option[Approvals], migration: Option[Migration], triggers: TriggerReport }
 Stage = Admission | Prepared
 Approvals { r: H, foreign: List[String], exec: List[String], text: String }
 Migration { digest: H, changes: List[String] }
 ```
 
 `tree` and `root` are the source tree's digest and its H, so the operator sees which source
-they approve (both are zero for an attested or publication input). `stage` says which facts
+they approve (`tree` is `None` for an attested or publication input, and `root` is `None`
+when the source is ungated). `stage` says which facts
 are computed. At `Admission`, `migration` is `None` and `triggers`
 is empty because prepare has not run. At `Prepared`, every fact is computed, and an empty
 part means that fact is clear. `approvals` holds R's Foreign and Exec lines and the exact
@@ -1691,10 +1692,11 @@ rebuilds, migrates, renames or drops, for display.
   until a fact changes under it. The approval given at the `Admission` stage stays in the
   approved set, so the second hold's decision shows only the prepare facts as undecided. No hold keeps an attempt, an export lease, a write pause or an assembly
   reservation. A hold has no deadline and survives its connection and the host's restart.
-- **Decide(D, decision, fates, approve).** The operator sends it, only on `operator.sock`.
-  Its `decision` must equal the held one byte for byte, or the Decide is `Error(Denied)`.
-  When the decision shows a held group or an unmatched path, `fates` replaces D's recorded
-  fates. Otherwise it must be `Fates(all: None, entries: [])`. An approval adds the decision
+- **Decide(D, decision, verdict).** The operator sends it, only on `operator.sock`, with
+  `verdict` `Approve(fates)` or `Refuse`. Its `decision` must equal the held one byte for
+  byte, or the Decide is `Error(Denied)`. When the decision shows a held group or an
+  unmatched path, an approval's `fates` replace D's recorded fates. Otherwise they must be
+  `Fates(all: None, entries: [])`. An approval adds the decision
   to D's **approved set**, which holds the approved grant diff, display, migration digest
   and fates, and then repeats the admission under a fresh attempt and deadline, owned by the
   deciding connection. The repeated `Admit` carries the approved `foreign` and `exec` lines
@@ -1848,7 +1850,7 @@ What the host does where the rules above leave a choice, and why:
 **Laws** (planned, platform host suite unless noted). Each names the bug it catches:
 
 - `editor_cannot_decide`. On the editor socket, Decide, Confirm and Register are `Denied`.
-  So is a Begin with Foreign or Exec lines, with a fate, or with `gate: false`. A host
+  So is a Begin with Foreign or Exec lines, with a fate, or with an ungated source. A host
   set to the operator UID is `Invalid`, and an editor's Begin for a group whose `editor` is
   another UID is `Denied`. Bug: an agent approves its own grant diff or fates, or edits a
   group it was not given.

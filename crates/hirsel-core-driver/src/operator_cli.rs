@@ -9,7 +9,7 @@ use crate::launcher::session::{Attempt, Grants, Group};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{
     self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Needed, Pause, Phase, Record,
-    Registration, Report,
+    Registration, Report, Verdict,
 };
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::hex;
@@ -366,11 +366,10 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let ask = Ask::Begin(
         d.clone(),
         group,
-        input,
+        input.into(),
         approvals.foreign.clone(),
         approvals.exec.clone(),
         held,
-        false,
     );
     let mut exchange = Exchange::new(&state, d, "deploy", upload, approvals);
     exchange.decision = Some(decision);
@@ -698,8 +697,11 @@ impl<'a> Exchange<'a> {
                             && self.decision.as_ref() == Some(&held.grants);
                         if grant_only && !decided {
                             decided = true;
-                            let ask =
-                                Ask::Decide(self.d.clone(), held.clone(), Fates::default(), true);
+                            let ask = Ask::Decide(
+                                self.d.clone(),
+                                held.clone(),
+                                Verdict::Approve(Fates::default()),
+                            );
                             if out.lock().unwrap().send(&ask).is_err() {
                                 break lost(self.command, &self.d);
                             }

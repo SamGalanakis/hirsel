@@ -23,22 +23,22 @@ fn awaits(p: Option[operator.Phase], added: String, removed: String) -> bool {
 
 // The operator decides request d's grant diff on a new connection: the decision the host
 // shows (an empty Admission-stage one when it shows none) with its grants replaced by `diff`,
-// and no fates. Gives the connection.
-fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, approve: bool) -> u64 waits {
+// under `verdict`. Gives the connection.
+fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, take verdict: operator.Verdict) -> u64 waits {
     let mut shown = match status_of(mut r, d) {
         Some(AwaitDecision(x)) => x,
-        _ => operator.Decision(tree: list.new(), root: list.new(), stage: AdmissionStage, grants: launcher.no_grants(), approvals: None, migration: None, triggers: operator.no_triggers()),
+        _ => operator.Decision(tree: None, root: None, stage: AdmissionStage, grants: launcher.no_grants(), approvals: None, migration: None, triggers: operator.no_triggers()),
     }
     shown.grants = take diff
-    decide_with(mut r, d, take shown, runner.fate.none(), approve)
+    decide_with(mut r, d, take shown, take verdict)
 }
 
-// The operator sends Decide(d, decision, fates, approve) on a new connection; the rig's
+// The operator sends Decide(d, decision, verdict) on a new connection; the rig's
 // attempt becomes any the host assigned. Gives the connection.
-fn decide_with(mut r: Rig, d: Bytes, take decision: operator.Decision, take fates: runner.fate.Fates, approve: bool) -> u64 waits {
+fn decide_with(mut r: Rig, d: Bytes, take decision: operator.Decision, take verdict: operator.Verdict) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
-    send(mut r, conn, DecideAsk(clone(d), take decision, take fates, approve))
+    send(mut r, conn, DecideAsk(clone(d), take decision, take verdict))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -120,7 +120,7 @@ fn unsettled_deploy(c: Clock, rnd: Random) waits {
     expect(report_ok && asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && old_serves(u), "L54: the held decision does not carry the trigger report, or OLD stopped serving")
     let mut release_all = runner.fate.none()
     release_all.all = Some(Release)
-    let _ = decide_with(mut u, held_d, clone(shown), take release_all, true)
+    let _ = decide_with(mut u, held_d, clone(shown), Approve(take release_all))
     let mut events: List[launcher.Event] = list.new()
     list.push(mut events, Admitted(u.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), ""))
     feed(mut u, take events)
@@ -282,7 +282,7 @@ fn source_refusals(c: Clock, rnd: Random) waits {
     let _ = begin_with(mut r, granted, release_source("Clock", 2u8))
     source_admitted(mut r, grants_of("Clock", ""))
     expect(awaits(status_of(mut r, granted), "Clock", "") && asked_of(r, 4u64) == 0u64 && old_serves(r), "L54: the grant widening neither held before assembly nor left OLD serving")
-    let _ = decide_on(mut r, granted, grants_of("Clock", ""), false)
+    let _ = decide_on(mut r, granted, grants_of("Clock", ""), Refuse)
     expect(phase_failed(status_of(mut r, granted), DeniedClass, "the operator refused the decision") && old_serves(r), "L54: refused grant diff did not end against OLD")
     let ill_typed = request_id(53u64)
     let _ = begin_with(mut r, ill_typed, release_source("", 2u8))

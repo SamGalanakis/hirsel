@@ -400,7 +400,7 @@
     "lines": 2206
   },
   "crates/hirsel-core-rt/src/provider_tests.rs": {
-    "lines": 2237,
+    "lines": 1952,
     "raise_revision": 2,
     "reason": "macos-mac-day-2809"
   },

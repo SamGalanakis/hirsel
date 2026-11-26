@@ -16,7 +16,7 @@ PERF_TEST_CASES = {
 # bwrap profile used for loopback isolation denies execveat on a memfd.
 NATIVE_EXEC_TEST_CASES = [
     "provider_tests::exec_supervisor_preserves_inputs_and_only_reaps_its_children",
-    "provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
+    "provider_tests::exec_provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
     "native::tests::exec_unix_recording_replays_without_host_resources",
 ]
 

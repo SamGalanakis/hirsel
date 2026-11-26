@@ -427,3 +427,23 @@ fn journal_tail_read(db: Db, t: Table[u64, u64], minimum: u64) -> Result[bool, E
     }
     Ok(true)
 }
+
+type ForkCrash = ForkCuts | ForkLostAck | ForkComplete | ForkTorn | ForkBadEnd | ForkUnwrittenChild
+
+fn journal_fork_case(scenario: String) -> Option[ForkCrash] {
+    if scenario == "journal-fork" {
+        Some(ForkCuts)
+    } else if scenario == "journal-fork-ack-cut" {
+        Some(ForkLostAck)
+    } else if scenario == "journal-fork-complete" {
+        Some(ForkComplete)
+    } else if scenario == "journal-fork-torn" {
+        Some(ForkTorn)
+    } else if scenario == "journal-fork-bad-end" {
+        Some(ForkBadEnd)
+    } else if scenario == "journal-fork-child-unwritten" {
+        Some(ForkUnwrittenChild)
+    } else {
+        None
+    }
+}

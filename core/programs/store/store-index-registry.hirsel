@@ -622,6 +622,22 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     Ok(())
 }
 
+fn index_catalog_in(catalog: PageTree, id: u32) -> Result[List[Catalog], Error] {
+    let low = index_prefix(id)?
+    let high = index_prefix(id + 1)?
+    // The catalog is resident and flat, so its ranks count the table's index
+    // records without a cursor; a table with none, the common case, opens none.
+    if std.page.rank(catalog.root, high, false) == std.page.rank(catalog.root, low, false) {
+        return Ok(list.new())
+    }
+    let mut cursor = byte_cursor(catalog, Included(take low), high)?
+    let mut out: List[Catalog] = list.new()
+    while let Some((_, raw)) = next_bytes(mut cursor)? {
+        list.push(mut out, decode_catalog(raw)?)
+    }
+    Ok(take out)
+}
+
 // Every index on table `table_id`, with the extractors bound for value
 // schema `schema`, in declaration order.
 fn bound_indexes(tx: Tx, table_id: u32, schema: u16) -> Result[List[(u64, Catalog)], Error] {

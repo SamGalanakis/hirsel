@@ -561,9 +561,16 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
         }
         return Ok(())
     }
+    // journal-group is a serving writer's shape (§3.3): each commit writes two
+    // rows, and three commits share one durable before any is acknowledged.
+    let pair = scenario == "journal-group"
     for k in 0u64 .. 6 {
-        let committed = run(mut db, None, (copy_env(t), copy_env(k)), fn(mut tx, call_env) -> Result[(), Error] {
-            put(mut tx, call_env.0, call_env.1, call_env.1 + 10)
+        let committed = run(mut db, None, (copy_env(t), copy_env(k), pair), fn(mut tx, call_env) -> Result[(), Error] {
+            put(mut tx, call_env.0, call_env.1, call_env.1 + 10)?
+            if call_env.2 {
+                put(mut tx, call_env.0, call_env.1 + 100, call_env.1 + 110)?
+            }
+            Ok(())
         })?
         let commit_ticket = match take committed {
             Committed(done) => done.ticket,
@@ -591,26 +598,6 @@ fn journal_crash_write(d: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, s
         journal_note(out, db.heads[0].head)
     }
     close(take db)
-}
-
-type ForkCrash = ForkCuts | ForkLostAck | ForkComplete | ForkTorn | ForkBadEnd | ForkUnwrittenChild
-
-fn journal_fork_case(scenario: String) -> Option[ForkCrash] {
-    if scenario == "journal-fork" {
-        Some(ForkCuts)
-    } else if scenario == "journal-fork-ack-cut" {
-        Some(ForkLostAck)
-    } else if scenario == "journal-fork-complete" {
-        Some(ForkComplete)
-    } else if scenario == "journal-fork-torn" {
-        Some(ForkTorn)
-    } else if scenario == "journal-fork-bad-end" {
-        Some(ForkBadEnd)
-    } else if scenario == "journal-fork-child-unwritten" {
-        Some(ForkUnwrittenChild)
-    } else {
-        None
-    }
 }
 
 fn journal_crash_fork_write(take writer: Db, rows: Table[u64, u64], out: Stdout, fork_case: ForkCrash) -> Result[(), Error] waits {
@@ -829,6 +816,15 @@ fn journal_crash_read(d: Dir, c: Clock, r: Random, tasks: Tasks, minimum: u64, s
             None
         }
         if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k)? != expected {
+            return Ok(false)
+        }
+        // A commit is whole or absent: its second row follows its first.
+        let paired = if scenario == "journal-group" && k + 1 < head {
+            Some(k + 110)
+        } else {
+            None
+        }
+        if get(result.unwrap(reader(db, 0u64)), snapshot(db), sh, k + 100)? != paired {
             return Ok(false)
         }
     }

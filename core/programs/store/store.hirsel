@@ -2245,17 +2245,6 @@ fn readers[V](value: std.codec.Codec[V], c: Catalog, current: u16, schema: Bytes
     Ok(arc.new(Readers(codec: value, current: current, older: take older, schemas: take schemas)))
 }
 
-fn index_catalog_in(catalog: PageTree, id: u32) -> Result[List[Catalog], Error] {
-    let low = index_prefix(id)?
-    let high = index_prefix(id + 1)?
-    let mut cursor = byte_cursor(catalog, Included(take low), high)?
-    let mut out: List[Catalog] = list.new()
-    while let Some((_, raw)) = next_bytes(mut cursor)? {
-        list.push(mut out, decode_catalog(raw)?)
-    }
-    Ok(take out)
-}
-
 pub fn table[K, V](mut db: Db, name: String, take key: std.codec.Key[K], take value: std.codec.Codec[V]) -> Result[Table[K, V], Error] waits {
     healthy(db)?
     let mut plan = schema_plan(db)

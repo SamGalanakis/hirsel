@@ -339,6 +339,12 @@ pub(crate) fn reopen(parent: &File, name: &CStr, _opened: &File) -> io::Result<F
     })
 }
 
+/// What a C driver links after the runtime archive for a program the launcher
+/// laws build by hand: the frameworks besides libSystem that the runtime imports.
+#[cfg(test)]
+pub(crate) const RUNTIME_LIBRARIES: &[&str] =
+    &["-framework", "Security", "-framework", "CoreFoundation"];
+
 /// A shell fragment that appends `<n> <kind>:[<inode>]` to `$out` for each
 /// open descriptor `$n` (launcher laws); a pipe is a FIFO here.
 #[cfg(test)]

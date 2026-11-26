@@ -260,15 +260,8 @@ int main(int argc, char **argv) {
             .arg(include)
             .arg(source)
             .arg(&options.runtime)
-            .args([
-                "-lgcc_s",
-                "-lpthread",
-                "-ldl",
-                "-lm",
-                "-lrt",
-                "-lutil",
-                "-o",
-            ])
+            .args(crate::host::RUNTIME_LIBRARIES)
+            .arg("-o")
             .arg(&options.output),
     )
     .unwrap();

@@ -404,6 +404,18 @@ fn running_image() -> io::Result<File> {
 }
 
 #[cold]
+/// The running executable's file. Linux opens the mapped inode itself; Darwin
+/// has no /proc and opens the path dyld recorded at exec (`_NSGetExecutablePath`),
+/// so a file renamed over that path since exec is the one read. A launched
+/// process does not read it: the launcher passes the checked image's
+/// descriptor and digest (`LAUNCH_IMAGE_ENV`).
+fn running_image() -> io::Result<File> {
+    #[cfg(target_os = "linux")]
+    return File::open("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    return std::env::current_exe().and_then(File::open);
+}
+
 fn read_digest(image: io::Result<File>) -> Executable {
     match image.and_then(hash) {
         Ok(digest) => Executable::Digest(digest),

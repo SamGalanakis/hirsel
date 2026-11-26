@@ -332,6 +332,12 @@ pub(crate) fn reopen(_parent: &File, _name: &CStr, opened: &File) -> io::Result<
     })
 }
 
+/// What a C driver links after the runtime archive for a program the launcher
+/// laws build by hand: the C library's split-out parts.
+#[cfg(test)]
+pub(crate) const RUNTIME_LIBRARIES: &[&str] =
+    &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
+
 /// A shell fragment that appends `<n> <kind>:[<id>]` to `$out` for each open
 /// descriptor `$n` (launcher laws).
 #[cfg(test)]

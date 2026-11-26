@@ -498,6 +498,8 @@ and refunded to the limit that paid for it ([MEM-20](budgets.md#mem-20-limit-rec
 where an engine places that storage, and whether a waiting task keeps its stack, are not
 observable.
 
+The untied engine uses `k + root_limit/288`, with `k` initial units, as a sizing hint for its lazy directory. Only the physical and 24-bit ID ceilings bound engine admission, including replay.
+
 This clause fixes no order between the actions of different units, and does not say when an
 action in one unit becomes visible in another.
 

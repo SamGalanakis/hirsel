@@ -36,6 +36,7 @@ pub(super) struct UntiedPlan {
     pub(super) memory_stack_bytes: usize,
     pub(super) unit_stack_bytes: usize,
     pub(super) task_stack_reserve: usize,
+    pub(super) logical_units_hint: u64,
     pub(super) max_units: u32,
     pub(super) physical_unit_limit: bool,
     pub(super) host_thread_capacity: usize,
@@ -178,9 +179,15 @@ impl UntiedPlan {
             address_left.map(|a| a / (unit_stack + task_reserve + 2 * page)),
         )
         .unwrap_or(usize::MAX);
-        // The language charge bounds active language jobs, but a replay starts
-        // historical streams together and a flow can use extra engine units.
-        let max_units = physical_units.min(RESERVED_UNIT as usize).max(k) as u32;
+        if physical_units < k {
+            return Err(format!(
+                "untied plan for {k} roots fits only {physical_units} units in the host memory envelope"
+            ));
+        }
+        // Replay starts historical streams together and flow can use extra
+        // engine units, so the per-helper charge only sizes the directory.
+        let logical_units_hint = (k as u64).saturating_add(root_limit / 288);
+        let max_units = physical_units.min(RESERVED_UNIT as usize) as u32;
         let physical_unit_limit = physical_units < RESERVED_UNIT as usize;
 
         let scale = host.memory_limit.map_or(root_limit, |m| root_limit.min(m));
@@ -211,6 +218,7 @@ impl UntiedPlan {
             memory_stack_bytes: memory_stack,
             unit_stack_bytes: unit_stack,
             task_stack_reserve: task_reserve,
+            logical_units_hint,
             max_units,
             physical_unit_limit,
             host_thread_capacity,

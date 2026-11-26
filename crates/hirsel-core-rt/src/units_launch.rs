@@ -118,7 +118,7 @@ pub(super) fn new_pool(
             .collect(),
         lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
         plan,
-        units: UnitDirectory::new(plan.initial_units, plan.max_units),
+        units: UnitDirectory::new(plan.initial_units, plan.max_units, plan.logical_units_hint),
         helpers: Helpers::default(),
         injector: Mutex::new(VecDeque::new()),
         memory: Memory::new(plan),

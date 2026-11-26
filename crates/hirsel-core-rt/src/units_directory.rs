@@ -7,7 +7,9 @@ type Chunk = [AtomicPtr<Unit>; CHUNK];
 type Group = [OnceLock<Box<Chunk>>; CHUNKS_PER_GROUP];
 
 pub(super) struct UnitDirectory {
-    groups: Box<[OnceLock<Box<Group>>]>,
+    first_group: OnceLock<Box<[OnceLock<Box<Chunk>>]>>,
+    first_group_len: usize,
+    overflow: Box<[OnceLock<Box<Group>>]>,
     capacity: u32,
     // Serialize ID reuse and the live count with retirement so a concurrent
     // spawner never sees a full directory while a slot is being returned.
@@ -25,10 +27,15 @@ enum Claim {
 }
 
 impl UnitDirectory {
-    pub(super) fn new(initial: usize, capacity: u32) -> Self {
-        let groups = (capacity as usize).div_ceil(CHUNK * CHUNKS_PER_GROUP);
+    pub(super) fn new(initial: usize, capacity: u32, logical_units_hint: u64) -> Self {
+        let hinted_units = logical_units_hint.min(u64::from(capacity)) as usize;
+        let first_group_len = hinted_units.div_ceil(CHUNK).min(CHUNKS_PER_GROUP);
+        let remaining_chunks = (capacity as usize).div_ceil(CHUNK) - first_group_len;
+        let groups = remaining_chunks.div_ceil(CHUNKS_PER_GROUP);
         Self {
-            groups: (0..groups).map(|_| OnceLock::new()).collect(),
+            first_group: OnceLock::new(),
+            first_group_len,
+            overflow: (0..groups).map(|_| OnceLock::new()).collect(),
             capacity,
             claims: Mutex::new(Claims {
                 next: initial as u32,
@@ -37,17 +44,25 @@ impl UnitDirectory {
         }
     }
 
-    fn cell(&self, id: u32) -> Option<&OnceLock<Box<Chunk>>> {
+    fn chunk_position(&self, id: u32) -> (usize, usize) {
         let chunk = id as usize / CHUNK;
-        let group = self.groups.get(chunk / CHUNKS_PER_GROUP)?.get()?;
-        Some(&group[chunk % CHUNKS_PER_GROUP])
+        match chunk.checked_sub(self.first_group_len) {
+            Some(overflow) => (1 + overflow / CHUNKS_PER_GROUP, overflow % CHUNKS_PER_GROUP),
+            None => (0, chunk),
+        }
     }
 
     pub(super) fn slot(&self, id: u32) -> Option<&AtomicPtr<Unit>> {
         if id >= self.capacity {
             return None;
         }
-        Some(&self.cell(id)?.get()?[id as usize % CHUNK])
+        let (group, chunk) = self.chunk_position(id);
+        let pointers: &[OnceLock<Box<Chunk>>] = if group == 0 {
+            self.first_group.get()?
+        } else {
+            self.overflow[group - 1].get()?.as_ref()
+        };
+        Some(&pointers[chunk].get()?[id as usize % CHUNK])
     }
 
     pub(super) fn get(&self, id: u32) -> Option<&Unit> {
@@ -58,10 +73,16 @@ impl UnitDirectory {
 
     fn install(&self, unit: &'static Unit) {
         let index = unit.id as usize;
-        let chunk = index / CHUNK;
-        let group = self.groups[chunk / CHUNKS_PER_GROUP]
-            .get_or_init(|| Box::new([const { OnceLock::new() }; CHUNKS_PER_GROUP]));
-        let slots = group[chunk % CHUNKS_PER_GROUP]
+        let (group, chunk) = self.chunk_position(unit.id);
+        let pointers: &[OnceLock<Box<Chunk>>] = if group == 0 {
+            self.first_group
+                .get_or_init(|| (0..self.first_group_len).map(|_| OnceLock::new()).collect())
+        } else {
+            self.overflow[group - 1]
+                .get_or_init(|| Box::new([const { OnceLock::new() }; CHUNKS_PER_GROUP]))
+                .as_ref()
+        };
+        let slots = pointers[chunk]
             .get_or_init(|| Box::new([const { AtomicPtr::new(ptr::null_mut()) }; CHUNK]));
         if slots[index % CHUNK]
             .compare_exchange(

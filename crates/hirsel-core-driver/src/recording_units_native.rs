@@ -952,6 +952,7 @@ include!("recording_handles_native.rs");
 include!("recording_spawn_entries_native.rs");
 // Replay of a run with helpers.
 include!("recording_unit_replay_native.rs");
+include!("recording_replay_capacity_native.rs");
 // Replay of clients that cross between units.
 include!("recording_unit_clients_native.rs");
 // Replay of items whose content lies past their flat bytes.

@@ -6,6 +6,7 @@ fn plan_derivation_and_envelope_refusal() {
     let derive = |host, choice| UntiedPlan::derive(1, 4, 64 * MIB as u64, host, choice);
     let plan = derive(unbounded, ReactorChoice::IoUring).unwrap();
     assert_eq!(plan.max_units, 0xff_ffff);
+    assert_eq!(plan.logical_units_hint, 233_017);
     assert_eq!(plan.fixed_threads, 17);
     assert_eq!(plan.max_host_threads, 32);
     assert_eq!(plan.pinned_ring_bytes, 96 * KIB);

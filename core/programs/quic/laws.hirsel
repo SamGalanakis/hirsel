@@ -327,6 +327,264 @@ fn frame_refusals() -> Result[(), ()] {
     Ok(())
 }
 
+fn quic_push_boundary_varint(mut src: std.prop.Source, rem: u64, mut out: Bytes) {
+    match std.prop.below(mut src, 8) {
+        0 => list.push(mut out, 0u8),
+        1 => list.append(mut out, b"\xff\xff\xff\xff\xff\xff\xff\xff"),
+        2 => {
+            let v = order.min(rem + 1, codec.MAX_VARINT)
+            let _ = codec.write_varint(v, mut out)
+        },
+        3 => {
+            let v = order.min(rem, codec.MAX_VARINT)
+            let _ = codec.write_varint(v, mut out)
+        },
+        4 => list.append(mut out, b"\x40\x00"),
+        5 => list.append(mut out, b"\x80\x00\x00\x01"),
+        _ => {
+            let _ = codec.write_varint(std.prop.below(mut src, 64), mut out)
+        },
+    }
+}
+
+fn quic_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 256))
+    // Biased QUIC frame payloads: valid frame type + boundary varints / lengths one past buffer.
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let ftype: u64 = match std.prop.below(mut src, 12) {
+            0 => 0x00u64,
+            1 => 0x01u64,
+            2 => 0x02u64,
+            3 => 0x06u64,
+            4 => 0x08u64 + std.prop.below(mut src, 8),
+            5 => 0x10u64 + std.prop.below(mut src, 10),
+            6 => 0x1au64 + std.prop.below(mut src, 5),
+            7 => 0x24u64,
+            8 => 0x30u64 + std.prop.below(mut src, 2),
+            _ => std.prop.below(mut src, 64),
+        }
+        let _ = codec.write_varint(ftype, mut out)
+        let body_tail = std.prop.draw(mut src, std.prop.bytes_of(0, 48))
+        let n_fields = std.prop.below(mut src, 4)
+        for _ in 0u64 .. n_fields {
+            quic_push_boundary_varint(mut src, list.len(body_tail), mut out)
+        }
+        list.append(mut out, body_tail)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "quic_frame_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    // Biased QUIC packet headers (long, short, Retry, Version Negotiation).
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let first: u8 = match std.prop.below(mut src, 6) {
+            0 => 0xc0u8 | int.narrow(std.prop.below(mut src, 4)),
+            1 => 0xd0u8 | int.narrow(std.prop.below(mut src, 4)),
+            2 => 0xe0u8 | int.narrow(std.prop.below(mut src, 4)),
+            3 => 0xf0u8,
+            4 => 0x40u8 | int.narrow(std.prop.below(mut src, 4)),
+            _ => int.narrow(std.prop.below(mut src, 256)),
+        }
+        list.push(mut out, first)
+        let body_tail = std.prop.draw(mut src, std.prop.bytes_of(0, 64))
+        if (first & 0x80u8) != 0 {
+            let ver: u32 = match std.prop.below(mut src, 4) {
+                0 => 0u32,
+                1 => 1u32,
+                2 => 2u32,
+                _ => 1u32,
+            }
+            list.put_word_be(mut out, ver)
+            let dlen: u8 = int.narrow(std.prop.below(mut src, 9))
+            list.push(mut out, dlen)
+            for _ in 0u64 .. int.widen(dlen) {
+                list.push(mut out, 0x41u8)
+            }
+            let slen: u8 = int.narrow(std.prop.below(mut src, 9))
+            list.push(mut out, slen)
+            for _ in 0u64 .. int.widen(slen) {
+                list.push(mut out, 0x42u8)
+            }
+            if ver == 1 && ((first >> 4) & 3) == 0 {
+                quic_push_boundary_varint(mut src, 0, mut out)
+            }
+            if ver == 1 && ((first >> 4) & 3) != 3 {
+                quic_push_boundary_varint(mut src, list.len(body_tail), mut out)
+            }
+        }
+        list.append(mut out, body_tail)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "quic_header_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+fn quic_check_frame_reencode(wire: Bytes, start: u64, end: u64, kind: codec.PacketKind, max_dg: u64, f: codec.Frame) -> Result[(), String] {
+    let consumed = list.slice(wire, start, end)
+    let mut re: Bytes = list.with_capacity(list.len(consumed) + 16)
+    if let Error(_) = codec.write_frame(f, wire, mut re) {
+        return Error(string.from("write_frame refused decoded frame"))
+    }
+    if re == consumed {
+        return Ok(())
+    }
+    // QUIC permits non-minimal scalar varints and STREAM with OFF=1, offset=0;
+    // canonical re-encoding can only be strictly shorter, and must re-decode identically.
+    if list.len(re) >= list.len(consumed) {
+        return Error(string.from("re-encoded frame differed without shrinking non-minimal form"))
+    }
+    let mut r2 = match codec.frames(re, span(0, list.len(re)), kind, max_dg) {
+        Ok(fr) => fr,
+        Error(_) => return Error(string.from("re-encoded frame refused by frames()")),
+    }
+    let Ok(Some(f2)) = codec.next_frame(re, mut r2) else {
+        return Error(string.from("re-encoded frame did not re-decode"))
+    }
+    if let Ok(None) = codec.next_frame(re, mut r2) {} else {
+        return Error(string.from("re-encoded frame left trailing bytes"))
+    }
+    let mut re2: Bytes = list.with_capacity(list.len(re))
+    if let Error(_) = codec.write_frame(f2, re, mut re2) {
+        return Error(string.from("second write_frame failed"))
+    }
+    if re2 != re {
+        return Error(string.from("canonical frame did not stabilize on re-encode"))
+    }
+    Ok(())
+}
+
+fn quic_total_law(pkt: Bytes) -> Result[(), String] {
+    let len = list.len(pkt)
+    // 1. Varint decode + canonical re-encode.
+    let mut vat = 0u64
+    if let Ok(v) = codec.read_varint(pkt, mut vat, len) {
+        let mut vre: Bytes = list.with_capacity(8)
+        let Ok(()) = codec.write_varint(v, mut vre) else {
+            return Error(string.from("write_varint failed on decoded varint"))
+        }
+        if vat == codec.varint_len(v) && vre != list.slice(pkt, 0, vat) {
+            return Error(string.from("minimal varint did not re-encode to consumed prefix"))
+        }
+    }
+    // 2. Packet header decode + open header + re-encode.
+    for short_len in[0u8, 4u8, 8u8, 20u8] {
+        let mut at = 0u64
+        let _ = codec.read_first_header(pkt, mut at, len, short_len, true)
+        at = 0
+        let _ = codec.read_first_header(pkt, mut at, len, short_len, false)
+        at = 0
+        if let Ok(h) = codec.read_header(pkt, mut at, len, short_len) {
+            if h.packet.at != 0 || h.packet.len != at || at > len {
+                return Error(string.from("read_header produced out-of-bounds packet span"))
+            }
+            let _ = codec.sample(h)
+            let _ = codec.check_reserved_bits(h.kind, h.first)
+            if at < len {
+                let mut at2 = at
+                let _ = codec.read_coalesced_header(pkt, mut at2, len, short_len, h.destination)
+            }
+            let dst = list.slice(pkt, h.destination.at, h.destination.at + h.destination.len)
+            let src_id = list.slice(pkt, h.source.at, h.source.at + h.source.len)
+            let tok = list.slice(pkt, h.token.at, h.token.at + h.token.len)
+            let consumed = list.slice(pkt, 0, at)
+            if let Ok(oh) = codec.read_open_header(pkt, h) {
+                let mut re: Bytes = list.with_capacity(at + 16)
+                let payload = list.slice(pkt, oh.payload.at, oh.payload.at + oh.payload.len)
+                if h.kind == Initial || h.kind == ZeroRtt || h.kind == Handshake {
+                    let Ok(()) = codec.write_long_header(h.kind, dst, src_id, tok, oh.number, oh.payload.len, mut re) else {
+                        return Error(string.from("write_long_header failed on decoded header"))
+                    }
+                    list.append(mut re, payload)
+                    if (h.first & 0x0cu8) == 0 && list.len(re) == at && re != consumed {
+                        return Error(string.from("long header did not re-encode to consumed prefix"))
+                    }
+                } else if h.kind == OneRtt {
+                    let Ok(()) = codec.write_short_header(dst, oh.spin, oh.key_phase, oh.number, mut re) else {
+                        return Error(string.from("write_short_header failed on decoded header"))
+                    }
+                    list.append(mut re, payload)
+                    if (h.first & 0x18u8) == 0 && re != consumed {
+                        return Error(string.from("short header did not re-encode to consumed prefix"))
+                    }
+                }
+            } else if h.kind == Retry {
+                let mut re: Bytes = list.with_capacity(at)
+                let Ok(()) = codec.write_retry_prefix(dst, src_id, tok, mut re) else {
+                    return Error(string.from("write_retry_prefix failed on decoded Retry"))
+                }
+                list.append(mut re, list.slice(pkt, h.body.at, h.body.at + h.body.len))
+                if (h.first & 0x0fu8) == 0 && re != consumed {
+                    return Error(string.from("Retry header did not re-encode to consumed prefix"))
+                }
+            }
+        }
+    }
+    // 3. Frame stream decode + re-encode across all numbered packet kinds.
+    for kk in 0u64 .. 4 {
+        let kind = total_kind(kk)
+        let mut opened = codec.frames(pkt, span(0, len), kind, 1200)
+        if let Ok(mut r) = opened {
+            for _ in 0u64 .. 64 {
+                match codec.next_frame(pkt, mut r) {
+                    Ok(None) => break,
+                    Ok(Some(f)) => {
+                        // A decoded frame re-encodes to a canonical frame that decodes back and is stable.
+                        let mut re: Bytes = list.with_capacity(len + 16)
+                        if let Error(_) = codec.write_frame(f, pkt, mut re) {
+                            return Error(string.from("write_frame refused decoded frame"))
+                        }
+                        let mut r2 = match codec.frames(re, span(0, list.len(re)), kind, 1200) {
+                            Ok(fr) => fr,
+                            Error(_) => return Error(string.from("re-encoded frame refused by frames()")),
+                        }
+                        let Ok(Some(f2)) = codec.next_frame(re, mut r2) else {
+                            return Error(string.from("re-encoded frame did not re-decode"))
+                        }
+                        if let Ok(None) = codec.next_frame(re, mut r2) {} else {
+                            return Error(string.from("re-encoded frame left trailing bytes"))
+                        }
+                        let mut re2: Bytes = list.with_capacity(list.len(re))
+                        if let Error(_) = codec.write_frame(f2, re, mut re2) {
+                            return Error(string.from("second write_frame failed"))
+                        }
+                        if re2 != re {
+                            return Error(string.from("canonical frame did not stabilize on re-encode"))
+                        }
+                    },
+                    Error(_) => break,
+                }
+            }
+        }
+    }
+    // Single-frame exact prefix check from offset 0: if next_frame succeeds and then finishes at end,
+    // verify re-encode against pkt[0..len].
+    let mut opened0 = codec.frames(pkt, span(0, len), OneRtt, 1200)
+    if let Ok(mut r0) = opened0 {
+        if let Ok(Some(f0)) = codec.next_frame(pkt, mut r0) {
+            if let Ok(None) = codec.next_frame(pkt, mut r0) {
+                quic_check_frame_reencode(pkt, 0, len, OneRtt, 1200, f0)?
+            }
+        }
+    }
+    Ok(())
+}
+
+/// bug: Trap, overflow, slice past the packet end, or accept a QUIC header or frame that does not re-encode to the consumed wire prefix.
+/// oracle: RFC 9000 §§16, 17, 19 and RFC 9221 wire encoders (independent of the decoders).
+@test
+fn quic_header_and_frame_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 160
+    std.prop.check(c, quic_wire_gen(), quic_total_law)
+}
+
 fn header_refusals() {
     let mut initial = b"\xc0\x00\x00\x00\x01\x08abcdefgh\x00\x00\x44\x9d"
     for _ in 0u64 .. 1181u64 {
@@ -509,4 +767,13 @@ fn connection_handles_wrap_past_u32_limit() -> Result[(), ()] {
         fail("client connect() did not wrap connection handle across 2^32")
     }
     Ok(())
+}
+
+fn total_kind(k: u64) -> codec.PacketKind {
+    match k {
+        0 => OneRtt,
+        1 => Initial,
+        2 => Handshake,
+        _ => ZeroRtt,
+    }
 }

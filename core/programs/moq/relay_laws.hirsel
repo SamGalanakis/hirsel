@@ -48,6 +48,20 @@ fn peer_publish(mut p: Peer, now: u64, o: moq.Object, fin_sg: bool) {
     }
 }
 
+/// Publishes without asserting the local verdict: totality laws drive edge inputs the session may refuse.
+fn peer_try_publish(mut p: Peer, now: u64, o: moq.Object) {
+    if let Some(mut s) = p.sess {
+        let _ = moq.publish_at(mut s, mut p.io, now, now, o, true)
+    }
+}
+
+/// FETCHes without asserting the local verdict: an edge range may be refused before it reaches the wire.
+fn peer_try_fetch(mut p: Peer, now: u64, tr: codec.TrackName, from: codec.Location, to: codec.Location) {
+    if let Some(mut s) = p.sess {
+        let _ = moq.fetch(mut s, mut p.io, now, tr, from, to, 10, Ascending, None)
+    }
+}
+
 fn peer_cancel(mut p: Peer, id: moq.RequestId, code: u64) {
     if let Some(mut s) = p.sess {
         moq.cancel(mut s, mut p.io, id, code)
@@ -794,4 +808,112 @@ fn cache_fetch_max_group() -> Result[(), ()] {
         fail("FETCH covering group 2^64 - 1 did not return the cached object")
     }
     Ok(())
+}
+
+type CacheDraw {
+    objects: List[(u64, u64)],
+    from: codec.Location,
+    to: codec.Location
+}
+
+fn cache_edge(mut src: std.prop.Source) -> u64 {
+    match std.prop.below(mut src, 7) {
+        0 => 0u64,
+        1 => 1u64,
+        2 => 0x3fffffffffffffffu64,
+        3 => 0xfffffffffffffffeu64,
+        4 => 0xffffffffffffffffu64,
+        _ => std.prop.below(mut src, 8),
+    }
+}
+
+fn cache_draw_gen() -> std.prop.Gen[CacheDraw] {
+    std.prop.make(fn(mut src: std.prop.Source) -> CacheDraw {
+        let n = 1 + std.prop.below(mut src, 4)
+        let mut objects: List[(u64, u64)] = list.with_capacity(n)
+        for _ in 0u64 .. n {
+            let g = cache_edge(mut src)
+            let o = std.prop.below(mut src, 3)
+            list.push(mut objects, (g, o))
+        }
+        let from = codec.Location(group: cache_edge(mut src), object: cache_edge(mut src))
+        let to = codec.Location(group: cache_edge(mut src), object: cache_edge(mut src))
+        CacheDraw(objects: take objects, from, to)
+    }, fn(d: CacheDraw, mut out: String) {
+        string.push(mut out, "CacheDraw(objects=")
+        for (g, o) in d.objects {
+            string.push_u64(mut out, g)
+            string.push(mut out, "/")
+            string.push_u64(mut out, o)
+            string.push(mut out, " ")
+        }
+        string.push(mut out, "from=")
+        string.push_u64(mut out, d.from.group)
+        string.push(mut out, "/")
+        string.push_u64(mut out, d.from.object)
+        string.push(mut out, " to=")
+        string.push_u64(mut out, d.to.group)
+        string.push(mut out, "/")
+        string.push_u64(mut out, d.to.object)
+        string.push(mut out, ")")
+    })
+}
+
+fn in_range(g: u64, o: u64, from: codec.Location, to: codec.Location) -> bool {
+    let after_from = g > from.group || (g == from.group && o >= from.object)
+    let before_to = g < to.group || (g == to.group && o <= to.object)
+    after_from && before_to
+}
+
+// The relay caches objects at arbitrary group ids, then serves a FETCH over an arbitrary
+// range from cache_fetch_entries. It returns, and serves only cached objects inside the range.
+fn cache_fetch_total_law(d: CacheDraw) -> Result[(), String] {
+    let lim = moq_limits()
+    let rlim = moq.RelayLimits(cache_groups: 8, cache_bytes: 65536, per_track_cache_bytes: 65536, max_objects_per_group: 8, max_object_bytes: 4096)
+    let mut rig = new_relay_rig(3201, lim, rlim, 8)
+    let sc = moq.default_scope(b"total.test", b"/cache")
+    let pub_i = rig_add_peer(mut rig, 3202, Publisher, clone(sc), lim, 0)
+    let sub_i = rig_add_peer(mut rig, 3203, Subscriber, clone(sc), lim, 10)
+    let tr = track(ns1(b"tot"), b"cache")
+    let _ = peer_subscribe(mut rig.peers[sub_i], 20, clone(tr), NoFilter, 10, None)
+    rig_settle(mut rig, 21, true)
+    let _ = peer_accept_subscribes(mut rig.peers[pub_i])
+    rig_settle(mut rig, 22, true)
+    let mut now = 30u64
+    for (g, o) in d.objects {
+        peer_try_publish(mut rig.peers[pub_i], now, make_obj(clone(tr), g, 0, o, Subgroup, 10, b"x"))
+        rig_settle(mut rig, now + 1, true)
+        now += 2
+    }
+    let fetch_i = rig_add_peer(mut rig, 3204, Subscriber, clone(sc), lim, now)
+    peer_try_fetch(mut rig.peers[fetch_i], now + 1, clone(tr), d.from, d.to)
+    rig_settle(mut rig, now + 2, true)
+    for got in received_objects(rig.peers[fetch_i].events) {
+        if !in_range(got.group, got.id, d.from, d.to) {
+            return Error(string.from("FETCH served an object outside its range"))
+        }
+        let mut published = false
+        for (g, o) in d.objects {
+            if g == got.group && o == got.id {
+                published = true
+            }
+        }
+        if !published {
+            return Error(string.from("FETCH served an object nobody published"))
+        }
+    }
+    Ok(())
+}
+
+/// bug: cache_insert or cache_fetch_entries overflows on a group or object id at 2^64 - 1 (P0-1 d)
+/// or on a range edge, ending the relay task, or serves an object outside the FETCH range.
+/// oracle: moqt-23 §9.16 FETCH semantics: a reply carries only objects in [from, to] that the
+/// relay holds; the relay returns for every peer-chosen location.
+@test
+fn cache_fetch_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 24
+    // Each case runs a relay and three QUIC peers; the default 256 KiB case budget is smaller than that.
+    c.case_bytes = 33554432
+    std.prop.check(c, cache_draw_gen(), cache_fetch_total_law)
 }

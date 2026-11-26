@@ -8,4 +8,5 @@ srtp@1/laws/rtp_header_boundary src=bc79edde6e963fe1 sig=8cbb8a4c36e11ac1 run=ac
 srtp@1/laws/rtx_protected src=d7e5c6ca64d772bb sig=887d04f77f178e40 run=acdd7fe37d41c86f bug=99c9d3c9a8213a8a oracle=37ba626de94d5a83 rows=pending
 srtp@1/laws/sender_index_monotone src=c6591842c370d9cb sig=359b4786c6b818f3 run=acdd7fe37d41c86f bug=019765b78d98d1e6 oracle=1a19edd511be9cbf rows=pending
 srtp@1/laws/srtcp_trailer_order src=ed69fb887656064e sig=bee9a48f60b31f1e run=acdd7fe37d41c86f bug=f9bab803932ce08c oracle=a1cde9656737ffa3 rows=pending
+srtp@1/laws/srtp_record_totality_property src=3dc3ee46c10ef897 sig=44718f305d88c92b run=acdd7fe37d41c86f bug=6bad3456dce96a1f oracle=ea20fec0c5c79ec1 rows=pending
 srtp@1/laws/streams_after_auth src=89a9095f7098617f sig=9a53a1e155e1dfc6 run=acdd7fe37d41c86f bug=07577f770bf02c81 oracle=3e4f336beb60424b rows=pending

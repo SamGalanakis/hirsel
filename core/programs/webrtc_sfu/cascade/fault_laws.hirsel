@@ -496,3 +496,162 @@ fn room_stream_drain_linear(tasks: Tasks) -> Result[(), ()] waits {
     }
     Ok(())
 }
+
+fn cascade_push_v(mut src: std.prop.Source, rem: u64, mut out: Bytes) {
+    match std.prop.below(mut src, 7) {
+        0 => list.push(mut out, 0u8),
+        1 => list.append(mut out, b"\xff\xff\xff\xff\xff\xff\xff\xff"),
+        2 => {
+            let _ = quic.codec.write_varint(order.min(rem + 1, quic.codec.MAX_VARINT), mut out)
+        },
+        3 => {
+            let _ = quic.codec.write_varint(order.min(rem, quic.codec.MAX_VARINT), mut out)
+        },
+        4 => list.append(mut out, b"\x40\x01"),
+        _ => {
+            let _ = quic.codec.write_varint(std.prop.below(mut src, 64), mut out)
+        },
+    }
+}
+
+fn cascade_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut wire_arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut wire_arms, std.prop.bytes_of(0, 256))
+    // Biased Cascade control/room frames: [tag: 1..11][len][body] with boundary varints and len+1.
+    list.push(mut wire_arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let frames = 1 + std.prop.below(mut src, 4)
+        for _ in 0u64 .. frames {
+            let tag = 1 + std.prop.below(mut src, 12)
+            let mut body: Bytes = list.new()
+            let fields = std.prop.below(mut src, 8)
+            for _ in 0u64 .. fields {
+                cascade_push_v(mut src, 8, mut body)
+            }
+            let extra = std.prop.draw(mut src, std.prop.bytes_of(0, 24))
+            list.append(mut body, extra)
+            let _ = quic.codec.write_varint(tag, mut out)
+            let blen = list.len(body)
+            let wire_len = match std.prop.below(mut src, 5) {
+                0 => blen + 1,
+                1 => quic.codec.MAX_VARINT,
+                2 => cascade.MAX_FRAME_LEN + 1,
+                _ => blen,
+            }
+            let _ = quic.codec.write_varint(wire_len, mut out)
+            list.append(mut out, body)
+        }
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "cascade_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    // Burst of tiny frames to exercise take_raw_frame's framing loop (P2-4).
+    list.push(mut wire_arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let count = 1 + std.prop.below(mut src, 32)
+        let mut out: Bytes = list.with_capacity(count * 5)
+        for _ in 0u64 .. count {
+            list.append(mut out, b"\x05\x03\x01\x00\x00")
+        }
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "cascade_burst(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take wire_arms)
+}
+
+fn cascade_total_law(pkt: Bytes) -> Result[(), String] {
+    let len = list.len(pkt)
+    // 1. Media datagram header decode + exact byte-for-byte re-encode.
+    if let Some((room_num, layer_num)) = cascade.read_media_datagram(pkt) {
+        let mut re_dg: Bytes = list.with_capacity(len)
+        cascade.write_media_datagram(room_num, layer_num, list.slice(pkt, 8, len), mut re_dg)
+        if re_dg != pkt {
+            return Error(string.from("media datagram did not re-encode to consumed bytes"))
+        }
+    }
+    // 2. take_raw_frame + decode_link_msg / decode_room_msg + re-encode.
+    let mut at = 0u64
+    for _ in 0u64 .. 64 {
+        let before = at
+        match cascade.take_raw_frame(pkt, mut at) {
+            Ok(None) => break,
+            Ok(Some((tag, start, end))) => {
+                if at <= before || start < before || start > end || end != at || at > len {
+                    return Error(string.from("take_raw_frame returned bounds outside the consumed frame"))
+                }
+                let prefix = list.slice(pkt, before, at)
+                if let Ok(lmsg) = cascade.decode_link_msg(tag, pkt, start, end) {
+                    let mut re: Bytes = list.with_capacity(at - before)
+                    if let Error(_) = cascade.encode_link_msg(lmsg, mut re) {
+                        return Error(string.from("encode_link_msg failed on decoded LinkMsg"))
+                    }
+                    if re != prefix {
+                        if list.len(re) >= list.len(prefix) {
+                            return Error(string.from("re-encoded LinkMsg differed without shrinking non-minimal varints"))
+                        }
+                        let mut rat = 0u64
+                        let Ok(Some((t2, s2, e2))) = cascade.take_raw_frame(re, mut rat) else {
+                            return Error(string.from("re-encoded LinkMsg not framed"))
+                        }
+                        if rat != list.len(re) {
+                            return Error(string.from("re-encoded LinkMsg left trailing bytes"))
+                        }
+                        let Ok(m2) = cascade.decode_link_msg(t2, re, s2, e2) else {
+                            return Error(string.from("re-encoded LinkMsg did not re-decode"))
+                        }
+                        let mut re2: Bytes = list.with_capacity(list.len(re))
+                        if let Error(_) = cascade.encode_link_msg(m2, mut re2) {
+                            return Error(string.from("second encode_link_msg failed"))
+                        }
+                        if re2 != re {
+                            return Error(string.from("canonical LinkMsg did not stabilize"))
+                        }
+                    }
+                }
+                if let Ok(rmsg) = cascade.decode_room_msg(tag, pkt, start, end) {
+                    let mut re: Bytes = list.with_capacity(at - before)
+                    if let Error(_) = cascade.encode_room_msg(rmsg, mut re) {
+                        return Error(string.from("encode_room_msg failed on decoded RoomMsg"))
+                    }
+                    if re != prefix {
+                        if list.len(re) >= list.len(prefix) {
+                            return Error(string.from("re-encoded RoomMsg differed without shrinking non-minimal varints"))
+                        }
+                        let mut rat = 0u64
+                        let Ok(Some((t2, s2, e2))) = cascade.take_raw_frame(re, mut rat) else {
+                            return Error(string.from("re-encoded RoomMsg not framed"))
+                        }
+                        if rat != list.len(re) {
+                            return Error(string.from("re-encoded RoomMsg left trailing bytes"))
+                        }
+                        let Ok(m2) = cascade.decode_room_msg(t2, re, s2, e2) else {
+                            return Error(string.from("re-encoded RoomMsg did not re-decode"))
+                        }
+                        let mut re2: Bytes = list.with_capacity(list.len(re))
+                        if let Error(_) = cascade.encode_room_msg(m2, mut re2) {
+                            return Error(string.from("second encode_room_msg failed"))
+                        }
+                        if re2 != re {
+                            return Error(string.from("canonical RoomMsg did not stabilize"))
+                        }
+                    }
+                }
+            },
+            Error(_) => break,
+        }
+    }
+    Ok(())
+}
+
+/// bug: Trap, overflow, slice past the buffer, or accept a Cascade frame or control/room message that does not re-encode to the consumed wire prefix.
+/// oracle: CAS-2 wire encoders (`write_media_datagram`, `encode_link_msg`, `encode_room_msg`), independent of the decoders.
+@test
+fn cascade_wire_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 160
+    std.prop.check(c, cascade_wire_gen(), cascade_total_law)
+}

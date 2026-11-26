@@ -18,11 +18,13 @@ rtp@1/laws/pacer_spacing src=05e9443f4729c100 sig=df09cfa6d197b94b run=c2c0c6612
 rtp@1/laws/padding_counts src=aff74e460b677878 sig=211d7b25d8275457 run=c2c0c6612d4cbb79 bug=458edda0f4aac832 oracle=cb09ac157a61d470 rows=pending
 rtp@1/laws/reception_report src=f130202e7ddd997b sig=f378f2467c633ec9 run=c2c0c6612d4cbb79 bug=a6d44245ff175dd3 oracle=3c98d995e956e2ea rows=pending
 rtp@1/laws/red_parse src=3f81f170ce1a550e sig=02f2aa461904d780 run=c2c0c6612d4cbb79 bug=8d3e30c4f2e238b7 oracle=2bf3ad1065d46628 rows=pending
+rtp@1/laws/red_totality_and_reencode_property src=7114ee4edbeb242d sig=178a7d45d35d4c92 run=c2c0c6612d4cbb79 bug=cad1cb0a935abdf7 oracle=253986c546112aab rows=pending
 rtp@1/laws/red_write_round_trip src=1890aadcf4a9b93e sig=aaad738e52e8886e run=c2c0c6612d4cbb79 bug=07709fe9a95c21e0 oracle=779faa8147984bb2 rows=pending
 rtp@1/laws/rewrite_continuity src=e817bcb2dd152592 sig=ffbbfbbf6b785f3a run=c2c0c6612d4cbb79 bug=8d869c7b1aefb9a1 oracle=8b56d2e87b2e8985 rows=pending
 rtp@1/laws/rewrite_late src=a53146a0d26f02f5 sig=ffbbfbbf6b785f3a run=c2c0c6612d4cbb79 bug=f8ab8ace159c530d oracle=8be6e36587738581 rows=pending
 rtp@1/laws/rewrite_pad src=d14f3a4a1e4a02b7 sig=6dc38fd7df41f262 run=c2c0c6612d4cbb79 bug=e06853a4c04f4dd1 oracle=0e512fa588cc47d4 rows=pending
 rtp@1/laws/rtcp_compound_rules src=17c17b57da171e7e sig=abd8379397a7a31c run=c2c0c6612d4cbb79 bug=6a02d1b8e07f938f oracle=0771bc557e68b3f5 rows=pending
+rtp@1/laws/rtcp_twcc_loss_totality_property src=355df90afd223136 sig=92a0cbc66e1381c4 run=c2c0c6612d4cbb79 bug=845311ea3aa8c6be oracle=fb50639adf746ac7 rows=pending
 rtp@1/laws/rtp_totality_property src=0b816bef6dca9811 sig=5b1b21d2f38b99ac run=c2c0c6612d4cbb79 bug=f7bb26115cb5fbad oracle=56cc7c89dbf92b41 rows=pending
 rtp@1/laws/rtp_write_parse_properties src=9eced930bac0d072 sig=3c6983adcdf8d1a1 run=c2c0c6612d4cbb79 bug=d8429c2c7c8392b7 oracle=dd0197833445d9c6 rows=pending
 rtp@1/laws/rtt_example src=7c736fe2ecae2633 sig=62a199229be78269 run=c2c0c6612d4cbb79 bug=6ea8d3b3d7c8f0fa oracle=87e941816295de87 rows=pending

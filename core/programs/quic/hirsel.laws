@@ -16,6 +16,7 @@ quic@1/laws/padded_initial_datagram_credits_full_udp_length src=724f3f4d781cd7f0
 quic@1/laws/path_mtu_fills_admitted_size src=b878b0613d249f0d sig=0847a46253350ddf run=c7b2a52baff70a63 bug=8ad61b6ed69c2954 oracle=43841f1218cffb08 rows=pending
 quic@1/laws/path_mtu_reprobes_after_raise_timer src=137391dd47a3dbc2 sig=ca02be9ad680ea1a run=c2c0c6612d4cbb79 bug=4551dbc71ee114eb oracle=17874b1299dc006d rows=pending
 quic@1/laws/pin_mismatch_refuses src=e4c5548ecfad1ccd sig=a21bd538296413f2 run=c2c0c6612d4cbb79 bug=2b3d7be80422aa87 oracle=3baad9c32a6fe19a rows=pending
+quic@1/laws/quic_header_and_frame_totality_property src=46eebee6d5be9456 sig=cc84bc2838b56c4b run=c2c0c6612d4cbb79 bug=fe036d73f55fa3b2 oracle=d33932a6aa4ebb1f rows=pending
 quic@1/laws/rebind_validates_new_path src=467466103ef42875 sig=1cd7fc1836054db1 run=c7b2a52baff70a63 bug=a9c666b4b57229dd oracle=d647bd5b40d8b85f rows=pending
 quic@1/laws/retry_validates_address src=d259a39bae5be419 sig=11d44d4e408b7687 run=c2c0c6612d4cbb79 bug=64d6f3081a145d18 oracle=05cf59ba42461ee5 rows=pending
 quic@1/laws/rfc9001_client_initial_parses src=f5c1078900cb58d0 sig=ea8646914cb42ab8 run=c2c0c6612d4cbb79 bug=2b6627b21f13d095 oracle=765a5db8a2b054c1 rows=pending

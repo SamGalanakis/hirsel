@@ -1,0 +1,99 @@
+// SFRAME-14 decode totality: arbitrary peer bytes through the header, layout and frame decoders.
+fn sframe_push_value(mut src: std.prop.Source, mut out: Bytes) {
+    let n = std.prop.below(mut src, 9)
+    for _ in 0u64 .. n {
+        let b: u8 = match std.prop.below(mut src, 4) {
+            0 => 0u8,
+            1 => 0xffu8,
+            _ => int.truncate(std.prop.word(mut src)),
+        }
+        list.push(mut out, b)
+    }
+}
+
+fn sframe_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 256))
+    // A config byte with every K/C form, then boundary value bytes (0, 2^64-1, a leading
+    // zero, one byte short), then arbitrary ciphertext or layout bytes.
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        list.push(mut out, int.truncate(std.prop.word(mut src)))
+        sframe_push_value(mut src, mut out)
+        sframe_push_value(mut src, mut out)
+        if std.prop.weighted(mut src, 1, 2) {
+            // A ULEB128 layout with counts and gaps at the 2^32 limb edge.
+            let count = std.prop.below(mut src, 4)
+            list.push(mut out, int.narrow(count))
+            for _ in 0u64 .. 2 * count {
+                match std.prop.below(mut src, 4) {
+                    0 => list.append(mut out, b"\xff\xff\xff\xff\x0f"),
+                    1 => list.append(mut out, b"\x80\x00"),
+                    _ => list.push(mut out, int.narrow(std.prop.below(mut src, 128))),
+                }
+            }
+        }
+        let tail = std.prop.draw(mut src, std.prop.bytes_of(0, 48))
+        list.append(mut out, tail)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "sframe_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+fn sframe_total_law(wire: Bytes) -> Result[(), String] {
+    let len = list.len(wire)
+    // 1. Header decode at every offset; an Ok header re-encodes to exactly its prefix.
+    for at in 0u64 .. order.min(len, 4) {
+        if let Ok((h, n)) = sframe.decode_header(wire, at) {
+            if n > len - at || n != sframe.header_len(h) {
+                return Error(string.from("decode_header consumed past the input or not its own length"))
+            }
+            let mut re = room(17)
+            let _ = result.unwrap(sframe.encode_header(h, mut re))
+            if re != list.slice(wire, at, at + n) {
+                return Error(string.from("SFrame header did not re-encode to the consumed prefix"))
+            }
+        }
+    }
+    // 2. Layout decode over every [lo, hi) window; an Ok layout re-encodes to exactly [lo, hi).
+    for lo in 0u64 .. order.min(len, 3) {
+        for hi in lo .. order.min(len, lo + 24) + 1 {
+            for n in[0u64, 16u64, 1u64 << 40] {
+                if let Some(layout) = ranges.decode_layout(wire, lo, hi, n, 4) {
+                    let mut re = room(hi - lo)
+                    ranges.encode_layout(layout, mut re)
+                    if re != list.slice(wire, lo, hi) || ranges.layout_len(layout) != hi - lo {
+                        return Error(string.from("layout did not re-encode to the consumed window"))
+                    }
+                }
+            }
+        }
+    }
+    // 3. The receivers return for every frame, under fixed and ratcheted key ids.
+    let l = sframe.limits()
+    for k in 0u64 .. 3 {
+        let framing = framing_of(k)
+        let mut r = receiver_for(framing, 300, base_of(1), 0, l)
+        let mut out = room(len + 16)
+        let _ = open_any(mut r, framing, unhex("0a0b"), wire, mut out)
+    }
+    let mut f = follower(sframe.Follow(generation: 1, bits: 2, step: 3, at: 0, forward: 1, keep: 1, floor: 0), counting(), l)
+    let mut out = room(len + 16)
+    let _ = sframe.open(mut f, unhex("0a0b"), wire, mut out)
+    let _ = ranges.unwire(wire)
+    let _ = ranges.working(wire)
+    Ok(())
+}
+
+/// bug: a header, layout or frame decoder that traps, overflows or reads past the input on peer bytes, or accepts a non-minimal header or layout form (one that does not re-encode to the bytes it consumed).
+/// oracle: RFC 9605 §4.3 header encoding and the SFRAME-9 layout encoding, written by encode_header and encode_layout, independent of the decoders.
+@test
+fn sframe_decode_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 160
+    std.prop.check(c, sframe_wire_gen(), sframe_total_law)
+}

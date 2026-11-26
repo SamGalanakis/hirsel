@@ -364,3 +364,171 @@ fn fragments_reassemble() -> Result[(), ()] {
     check_fragment_refusals(body)
     Ok(())
 }
+
+fn dtls_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 256))
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let count = 1 + std.prop.below(mut src, 3)
+        for _ in 0u64 .. count {
+            let kind: u8 = match std.prop.below(mut src, 6) {
+                0 => 20u8,
+                1 => 21u8,
+                2 => 22u8,
+                3 => 23u8,
+                _ => int.narrow(std.prop.below(mut src, 256)),
+            }
+            let ver: u16 = match std.prop.below(mut src, 4) {
+                0 => 0xfefdu16,
+                1 => 0xfeffu16,
+                2 => 0u16,
+                _ => int.truncate(std.prop.word(mut src)),
+            }
+            let epoch: u16 = match std.prop.below(mut src, 5) {
+                0 => 0u16,
+                1 => 1u16,
+                2 => 0xffffu16,
+                _ => int.truncate(std.prop.word(mut src)),
+            }
+            let seq: u64 = match std.prop.below(mut src, 5) {
+                0 => 0u64,
+                1 => 1u64,
+                2 => 0xffffffffffffu64,
+                _ => std.prop.word(mut src) & 0xffffffffffffu64,
+            }
+            let body = std.prop.draw(mut src, std.prop.bytes_of(0, 48))
+            let blen = list.len(body)
+            let wire_len: u16 = match std.prop.below(mut src, 5) {
+                0 => int.narrow(blen),
+                1 => int.narrow(blen + 1),
+                2 => 0u16,
+                3 => 0xffffu16,
+                _ => int.narrow(blen),
+            }
+            list.push(mut out, kind)
+            list.put_word_be(mut out, ver)
+            let e64: u64 = int.widen(epoch)
+            let num: u64 = (e64 << 48) | seq
+            list.put_word_be(mut out, num)
+            list.put_word_be(mut out, wire_len)
+            list.append(mut out, body)
+        }
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "dtls_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+fn dtls_reencode_record(pkt: Bytes, h: dtls.RecordHeader) -> Bytes {
+    let body_len = h.end - h.start
+    let mut re: Bytes = list.with_capacity(13 + body_len)
+    list.push(mut re, h.kind)
+    list.put_word_be(mut re, 0xfefdu16)
+    let e64: u64 = int.widen(h.epoch)
+    let num: u64 = (e64 << 48) | h.sequence
+    list.put_word_be(mut re, num)
+    let wlen: u16 = int.narrow(body_len)
+    list.put_word_be(mut re, wlen)
+    list.append(mut re, list.slice(pkt, h.start, h.end))
+    take re
+}
+
+fn dtls_record_total_law(pkt: Bytes) -> Result[(), String] {
+    let len = list.len(pkt)
+    // 1. Stateless record header decode + exact re-encode on Fixed version mode.
+    for mk in 0u64 .. 3 {
+        let mode = total_mode(mk)
+        let mut at = 0u64
+        let mut steps = 0u64
+        while at < len && steps < 32 {
+            match dtls.record_header(pkt, at, mode) {
+                Some(h) => {
+                    if h.start != at + 13 || h.end < h.start || h.end > len || h.sequence > 0xffffffffffff {
+                        return Error(string.from("record_header returned invalid bounds or sequence"))
+                    }
+                    if let Fixed = mode {
+                        let re = dtls_reencode_record(pkt, h)
+                        if re != list.slice(pkt, at, h.end) {
+                            return Error(string.from("DTLS Fixed record did not re-encode to consumed prefix"))
+                        }
+                    }
+                    at = h.end
+                },
+                None => break,
+            }
+            steps += 1
+        }
+    }
+    // 2. Stateful epoch-0 record decode + handshake fragment reassembly totality.
+    let mut r0 = dtls.records(0)
+    let mut a0 = dtls.ahead(4)
+    let mut hs = dtls.reassembly(0, 4096)
+    let mut at0 = 0u64
+    for _ in 0u64 .. 32 {
+        match dtls.next_record(mut r0, mut a0, BeforeServerHello, pkt, mut at0) {
+            Ok(End) => break,
+            Ok(HandshakeRecord(h, body)) => {
+                let mut fat = 0u64
+                for _ in 0u64 .. 16 {
+                    if fat >= list.len(body) {
+                        break
+                    }
+                    match dtls.receive_fragment(mut hs, mut r0, mut a0, h.epoch, body, mut fat) {
+                        Ok(_) => (),
+                        Error(_) => break,
+                    }
+                }
+            },
+            Ok(_) => (),
+            Error(_) => break,
+        }
+    }
+    // 3. Stateful epoch-1 protected record decode totality (AES-128-GCM and ChaCha20-Poly1305).
+    for sk in 0u64 .. 2 {
+        let suite = total_suite(sk)
+        let (_, server) = schedules(suite)
+        let mut r1 = dtls.records(0)
+        let mut a1 = dtls.ahead(4)
+        let Ok(()) = dtls.start_receiving_protected(mut r1, server, suite) else {
+            return Error(string.from("start_receiving_protected failed"))
+        }
+        dtls.records_connected(mut r1)
+        let mut at1 = 0u64
+        for _ in 0u64 .. 32 {
+            match dtls.next_record(mut r1, mut a1, Fixed, pkt, mut at1) {
+                Ok(End) => break,
+                Ok(_) => (),
+                Error(_) => break,
+            }
+        }
+    }
+    Ok(())
+}
+
+/// bug: Trap, overflow, or slice past the datagram end while decoding DTLS records or handshake fragments, or accept a Fixed DTLS 1.2 record that does not re-encode to the exact consumed prefix.
+/// oracle: RFC 6347 §4.1 record framing (independent of the decoder) and DTLS-8 totality.
+@test
+fn dtls_record_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 128
+    std.prop.check(c, dtls_wire_gen(), dtls_record_total_law)
+}
+
+fn total_mode(k: u64) -> dtls.RecordVersion {
+    match k {
+        0 => Fixed,
+        1 => BeforeServerHello,
+        _ => ClientHelloOnly,
+    }
+}
+
+fn total_suite(k: u64) -> schedule.Suite12 {
+    match k {
+        0 => Aes128GcmSha256,
+        _ => ChaCha20Poly1305Sha256,
+    }
+}

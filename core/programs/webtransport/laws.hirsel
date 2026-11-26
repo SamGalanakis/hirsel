@@ -300,3 +300,141 @@ fn huffman_round_trip_and_vectors() -> Result[(), ()] {
     same(list.len(short), 14, "the decode stopped at its limit")
     Ok(())
 }
+
+fn wt_push_varint(mut src: std.prop.Source, rem: u64, mut out: Bytes) {
+    match std.prop.below(mut src, 7) {
+        0 => list.push(mut out, 0u8),
+        1 => list.append(mut out, b"\xff\xff\xff\xff\xff\xff\xff\xff"),
+        2 => h3_wire.write_varint(rem + 1, mut out),
+        3 => h3_wire.write_varint(rem, mut out),
+        4 => list.append(mut out, b"\x40\x01"),
+        _ => h3_wire.write_varint(std.prop.below(mut src, 64), mut out),
+    }
+}
+
+fn wt_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 256))
+    // Varint pairs (frame and capsule heads, SETTINGS pairs) at 0, 2^62-1 and one past the rest.
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let tail = std.prop.draw(mut src, std.prop.bytes_of(0, 32))
+        for _ in 0u64 .. 2 * std.prop.below(mut src, 4) {
+            wt_push_varint(mut src, list.len(tail), mut out)
+        }
+        list.append(mut out, tail)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "wt_varints(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    // QPACK sections: prefix 00 00, then field lines with prefixed integers at their
+    // continuation edge and string lengths one past the rest.
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        list.push(mut out, 0u8)
+        list.push(mut out, 0u8)
+        for _ in 0u64 .. std.prop.below(mut src, 4) {
+            match std.prop.below(mut src, 4) {
+                0 => list.push(mut out, 0xc0u8 | int.narrow(std.prop.below(mut src, 64))),
+                1 => list.append(mut out, b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\x7f"),
+                2 => {
+                    list.push(mut out, 0x50u8 | int.narrow(std.prop.below(mut src, 16)))
+                    let n = std.prop.below(mut src, 8)
+                    list.push(mut out, int.narrow(std.prop.below(mut src, 2) * 0x80 + n + std.prop.below(mut src, 2)))
+                    for _ in 0u64 .. n {
+                        list.push(mut out, int.truncate(std.prop.word(mut src)))
+                    }
+                },
+                _ => {
+                    list.push(mut out, 0x20u8 | int.narrow(std.prop.below(mut src, 16)))
+                    let tail = std.prop.draw(mut src, std.prop.bytes_of(0, 12))
+                    list.append(mut out, tail)
+                },
+            }
+        }
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "qpack_section(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+fn wt_total_law(wire: Bytes) -> Result[(), String] {
+    let len = list.len(wire)
+    // 1. Frame/capsule head: minimal varints re-encode to exactly the consumed prefix.
+    if let Some(h) = h3_wire.read_head(wire, 0, len) {
+        if h.head > len {
+            return Error(string.from("read_head consumed past the input"))
+        }
+        let mut re: Bytes = list.new()
+        h3_wire.write_head(h.kind, h.len, mut re)
+        if list.len(re) == h.head && re != list.slice(wire, 0, h.head) {
+            return Error(string.from("frame head did not re-encode to the consumed prefix"))
+        }
+    }
+    // 2. SETTINGS payload: a minimal payload re-encodes to exactly its bytes.
+    if let Ok(s) = h3_wire.read_settings(wire, 0, len) {
+        let mut re: Bytes = list.new()
+        h3_wire.write_settings(s.pairs, mut re)
+        let mut at = 0u64
+        let Some(h) = h3_wire.read_head(re, at, list.len(re)) else {
+            return Error(string.from("write_settings head unreadable"))
+        }
+        at = h.head
+        if h.len == len && list.slice(re, at, list.len(re)) != wire {
+            return Error(string.from("SETTINGS payload did not re-encode to the consumed bytes"))
+        }
+    }
+    // 3. QPACK field section: whatever decodes re-encodes and decodes to the same fields.
+    for max in[0u64, 64u64, 1u64 << 20] {
+        let mut fields: List[qpack.Field] = list.new()
+        if let Ok(()) = qpack.decode_section(wire, 0, len, max, mut fields) {
+            let mut re: Bytes = list.new()
+            qpack.encode_section(fields, mut re)
+            let mut back: List[qpack.Field] = list.new()
+            if let Error(_) = qpack.decode_section(re, 0, list.len(re), 1u64 << 40, mut back) {
+                return Error(string.from("encode_section output refused by decode_section"))
+            }
+            if back != fields {
+                return Error(string.from("QPACK section did not round-trip"))
+            }
+        }
+    }
+    // 4. Huffman: an accepted string re-encodes to exactly the consumed bytes (RFC 7541 §5.2 padding).
+    let mut plain: Bytes = list.new()
+    if let Ok(()) = qpack.huffman_decode(wire, 0, len, 1u64 << 20, mut plain) {
+        let mut re: Bytes = list.new()
+        qpack.huffman_encode(plain, mut re)
+        if re != wire {
+            return Error(string.from("Huffman string did not re-encode to the consumed bytes"))
+        }
+    }
+    // 5. QPACK encoder and decoder streams consume at most their input.
+    if let Ok(n) = qpack.read_encoder_stream(wire, 0, len) {
+        if n > len {
+            return Error(string.from("encoder stream consumed past the input"))
+        }
+    }
+    if let Ok(n) = qpack.read_decoder_stream(wire, 0, len) {
+        if n > len {
+            return Error(string.from("decoder stream consumed past the input"))
+        }
+    }
+    Ok(())
+}
+
+/// bug: a frame head, SETTINGS, QPACK or Huffman decoder that traps, overflows or reads past
+/// the input on peer bytes, or accepts a form that does not re-encode to the bytes it consumed.
+/// oracle: RFC 9000 §16 varints, RFC 9114 §7.2.4 SETTINGS, RFC 9204 §4.5 sections and
+/// RFC 7541 §5.2 Huffman, written by write_head, write_settings, encode_section and
+/// huffman_encode, independent of the decoders.
+@test
+fn wire_decode_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 160
+    std.prop.check(c, wt_wire_gen(), wt_total_law)
+}

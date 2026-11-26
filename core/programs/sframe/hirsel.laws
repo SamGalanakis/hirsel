@@ -14,4 +14,5 @@ sframe@1/laws/replay_window src=33a52975753508e9 sig=22bfe07a4b00906e run=c2c0c6
 sframe@1/laws/rfc_c3 src=00b68246bda2933e sig=d56bc419dcb29e05 run=c2c0c6612d4cbb79 bug=ab62d442a3e3392e oracle=38c01c7580e6479f rows=pending
 sframe@1/laws/round_trip src=ed6d0a28056c895f sig=12cf40e17ba746c2 run=c2c0c6612d4cbb79 bug=a7c3f085a796200c oracle=1ec086d3d033ef4b rows=pending
 sframe@1/laws/sender_counters src=0628e64c7bfdd0df sig=3dc8357def7b84aa run=c2c0c6612d4cbb79 bug=75d7a288cff0b178 oracle=c03276b07f878200 rows=pending
+sframe@1/laws/sframe_decode_totality_property src=75984b4766f013f4 sig=776ae5319ddd2351 run=c2c0c6612d4cbb79 bug=4be1d30a23579f7d oracle=c58c81cf94297937 rows=pending
 sframe@1/laws/tamper_rejection src=aeedf261cbc3e3ee sig=ee7b0a9ca88b235f run=c2c0c6612d4cbb79 bug=d8e5537ec67d9a13 oracle=50a0276b1e032c31 rows=pending

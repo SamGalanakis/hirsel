@@ -1,7 +1,9 @@
 hirsel.laws 1
 moq@1/laws/cache_bounded_and_fetch_served src=b3b51b31e354a3a1 sig=3be28711db710b2c run=c2c0c6612d4cbb79 bug=46515263443c75fc oracle=05e9ee19c30b43bf rows=pending
 moq@1/laws/cache_fetch_max_group src=94a73cbf7135ccf5 sig=b5a05dcb029a8a1e run=c2c0c6612d4cbb79 bug=d630adda5d03630f oracle=f3caa05380acf1f4 rows=pending
+moq@1/laws/cache_fetch_totality_property src=d2321e088b8ec101 sig=c93a463850da32cc run=c2c0c6612d4cbb79 bug=77451c988fb45843 oracle=f82144354db9b967 rows=pending
 moq@1/laws/cancel_frees_state src=d6606b679873928b sig=ad53b6be1e15a195 run=c2c0c6612d4cbb79 bug=64dfb31361819347 oracle=64fe02dfa54856f7 rows=pending
+moq@1/laws/data_stream_totality_property src=30d006d8b10a1259 sig=f330f168ecd0c4a1 run=c2c0c6612d4cbb79 bug=699f54fe597a2977 oracle=26852c0b91f7e640 rows=pending
 moq@1/laws/dedup_and_switchover src=c546ae44e8673653 sig=2e806b66a7f5ac30 run=c2c0c6612d4cbb79 bug=fb4e86c0814f4b26 oracle=77b2aa96452d1a99 rows=pending
 moq@1/laws/delivery_timeouts_start_and_stop_apart src=1e80c59dffd24ef0 sig=5221685762777c0f run=c2c0c6612d4cbb79 bug=794668d87f32bfd5 oracle=b9aed96b9dc5e124 rows=pending
 moq@1/laws/object_bytes_and_no_preread_reserve src=52d95564e9988307 sig=a6fef08905519050 run=c2c0c6612d4cbb79 bug=eeace234acba2054 oracle=527f2251e28c1027 rows=pending

@@ -34,3 +34,4 @@ grants = ["Tasks"]
 "schedule_laws.hirsel" = "laws"
 "relay_laws.hirsel" = "laws"
 "e2ee_laws.hirsel" = "laws"
+"totality_laws.hirsel" = "laws"

@@ -1,0 +1,219 @@
+// MOQ data-stream totality: arbitrary peer bytes through the subgroup and fetch readers and the session receiver.
+fn moq_boundary_vi(mut src: std.prop.Source, rem: u64) -> u64 {
+    match std.prop.below(mut src, 9) {
+        0 => 0u64,
+        1 => 0x3fffffffffffffffu64,
+        2 => 0xfffffffffffffffeu64,
+        3 => 0xffffffffffffffffu64,
+        4 => rem + 1,
+        5 => rem,
+        _ => std.prop.below(mut src, 16),
+    }
+}
+
+fn moq_push_vi(mut src: std.prop.Source, rem: u64, mut out: Bytes) {
+    let _ = codec.write_vi64(moq_boundary_vi(mut src, rem), mut out)
+}
+
+// A data stream as a peer may write it: a subgroup or fetch header with boundary fields, then
+// entries whose varints sit at 0, 2^62-1, 2^64-2, 2^64-1 and one past the bytes that follow.
+fn moq_stream_gen(fetch_id: u64) -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 128))
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let tail = std.prop.draw(mut src, std.prop.bytes_of(0, 24))
+        let rem = list.len(tail)
+        if std.prop.weighted(mut src, 1, 2) {
+            let flags: u64 = 0x10u64 | std.prop.below(mut src, 0x70)
+            let _ = codec.write_vi64(flags, mut out)
+            let alias = if std.prop.weighted(mut src, 3, 4) {
+                0u64
+            } else {
+                moq_boundary_vi(mut src, rem)
+            }
+            let _ = codec.write_vi64(alias, mut out)
+            moq_push_vi(mut src, rem, mut out)
+            if (flags & 0x06) == 0x04 {
+                moq_push_vi(mut src, rem, mut out)
+            }
+            if (flags & 0x20) == 0 {
+                list.push(mut out, 10u8)
+            }
+            for _ in 0u64 .. std.prop.below(mut src, 4) {
+                moq_push_vi(mut src, rem, mut out)
+                if (flags & 0x01) != 0 {
+                    moq_push_vi(mut src, rem, mut out)
+                }
+                moq_push_vi(mut src, rem, mut out)
+            }
+        } else {
+            let _ = codec.write_fetch_header(fetch_id, mut out)
+            for _ in 0u64 .. 1 + std.prop.below(mut src, 4) {
+                let flags: u64 = match std.prop.below(mut src, 4) {
+                    0 => 0x0cu64 | std.prop.below(mut src, 4),
+                    1 => 0x80u64 + std.prop.below(mut src, 16),
+                    2 => std.prop.below(mut src, 0x80),
+                    _ => moq_boundary_vi(mut src, rem),
+                }
+                let _ = codec.write_vi64(flags, mut out)
+                for _ in 0u64 .. std.prop.below(mut src, 6) {
+                    moq_push_vi(mut src, rem, mut out)
+                }
+            }
+        }
+        list.append(mut out, tail)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "moq_stream(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+// The stateless stream decoders: whatever reads Ok re-encodes, through the writers, to the
+// consumed prefix (subgroup) or to an entry that decodes back to the same value (fetch, whose
+// writer picks its own presence flags).
+fn moq_codec_total_law(wire: Bytes) -> Result[(), String] {
+    let end = list.len(wire)
+    let max_object = 1u64 << 20
+    let mut at = 0u64
+    let Ok(h) = codec.read_stream_header(wire, mut at, end) else {
+        return Ok(())
+    }
+    match h {
+        SubgroupStream(sh) => {
+            let mut re: Bytes = list.new()
+            if let Error(_) = codec.write_subgroup_header(sh, mut re) {
+                return Error(string.from("write_subgroup_header refused a decoded header"))
+            }
+            if list.len(re) == at && re != list.slice(wire, 0, at) {
+                return Error(string.from("subgroup header did not re-encode to the consumed prefix"))
+            }
+            let mut prev: Option[u64] = None
+            for _ in 0u64 .. 8 {
+                let start = at
+                let Ok(o) = codec.read_subgroup_object(wire, mut at, end, sh, prev, max_object) else {
+                    break
+                }
+                if at > end || o.length > max_object {
+                    return Error(string.from("subgroup object read past the input or above max_object"))
+                }
+                let mut ro: Bytes = list.new()
+                if let Error(_) = codec.write_subgroup_object(o, sh, prev, mut ro) {
+                    return Error(string.from("write_subgroup_object refused a decoded object"))
+                }
+                if list.len(ro) == at - start && ro != list.slice(wire, start, at) {
+                    return Error(string.from("subgroup object did not re-encode to the consumed bytes"))
+                }
+                prev = Some(o.id)
+                if o.length > end - at {
+                    break
+                }
+                at += o.length
+            }
+        },
+        FetchStream(..) => {
+            for ok in 0u64 .. 2 {
+                let order = total_order(ok)
+                let mut st = codec.fetch_state(order)
+                let mut wst = codec.fetch_state(order)
+                let mut c = at
+                for _ in 0u64 .. 8 {
+                    let Ok(e) = codec.read_fetch_entry(wire, mut c, end, mut st, max_object) else {
+                        break
+                    }
+                    if c > end {
+                        return Error(string.from("fetch entry read past the input"))
+                    }
+                    let mut re: Bytes = list.new()
+                    let mut rst: codec.FetchState = clone(wst)
+                    if let Error(_) = codec.write_fetch_entry(e, mut wst, mut re) {
+                        return Error(string.from("write_fetch_entry refused a decoded entry"))
+                    }
+                    let mut rc = 0u64
+                    let Ok(back) = codec.read_fetch_entry(re, mut rc, list.len(re), mut rst, max_object) else {
+                        return Error(string.from("re-encoded fetch entry did not decode"))
+                    }
+                    if back != e || rc != list.len(re) {
+                        return Error(string.from("fetch entry did not round-trip through write_fetch_entry"))
+                    }
+                    if let FetchedObject(o) = e {
+                        if o.length > end - c {
+                            break
+                        }
+                        c += o.length
+                    }
+                }
+            }
+        },
+        _ => (),
+    }
+    Ok(())
+}
+
+// The receiver: a session that subscribed and fetched gets one peer data stream with these
+// bytes. It returns for every input, either delivering or closing the session with a code.
+fn moq_receiver_total_law(wire: Bytes) -> Result[(), String] {
+    let lim = moq_limits()
+    let mut c = native_client(3101)
+    let mut s = native_server(3102, lim)
+    establish_native(mut c, mut s, lim, b"sec.test", b"/total", None)
+    let tr = track(ns1(b"tot"), b"t")
+    let freq = if let Some(mut cs) = c.sess {
+        let _ = result.unwrap(moq.subscribe(mut cs, mut c.io, 10, clone(tr), NoFilter, 10, None))
+        result.unwrap(moq.fetch(mut cs, mut c.io, 10, clone(tr), loc(0, 0), loc(0xffffffffffffffff, 0xffffffffffffffff), 10, Descending, None))
+    } else {
+        fail("missing client session")
+    }
+    // A fetch stream names this session's own FETCH, so the stream reaches the entry reader.
+    let mut data: Bytes = list.new()
+    let mut hat = 0u64
+    if let Ok(FetchStream(..)) = codec.read_stream_header(wire, mut hat, list.len(wire)) {
+        let moq.RequestId(raw) = freq
+        let _ = codec.write_fetch_header(raw, mut data)
+        list.append(mut data, list.slice(wire, hat, list.len(wire)))
+    } else {
+        list.append(mut data, wire)
+    }
+    settle_pair(mut c, mut s, 11)
+    let sid = first_subscribe_id(s.events)
+    let fid = first_fetch_id(s.events)
+    if let Some(mut ss) = s.sess {
+        moq.accept(mut ss, mut s.io, sid, Ok(()))
+        moq.accept(mut ss, mut s.io, fid, Ok(()))
+    }
+    settle_pair(mut c, mut s, 12)
+    let sc = first_quic_conn(s.raw)
+    let st = result.unwrap(quic.open(mut s.io.q, sc, false))
+    let _ = quic.write(mut s.io.q, sc, st, data, false)
+    settle_pair(mut c, mut s, 13)
+    let _ = quic.write(mut s.io.q, sc, st, b"\x00\x00", true)
+    settle_pair(mut c, mut s, 14)
+    Ok(())
+}
+
+/// bug: a subgroup or fetch stream decoder, rx_subgroup_readable or the fetch-entry reader
+/// traps or overflows on a peer value (a plain `+` on a vi64, P0-1), reads past the stream,
+/// or accepts a form that does not re-encode to the bytes it consumed.
+/// oracle: moqt-23 §11.3-§11.4 written by write_subgroup_header, write_subgroup_object and
+/// write_fetch_entry, independent of the readers; a receiver returns for every input.
+@test
+fn data_stream_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 256
+    std.prop.check(c, moq_stream_gen(1), moq_codec_total_law)?
+    let mut r = std.prop.config()
+    r.cases = 24
+    // Each case runs two QUIC endpoints; the default 256 KiB case budget is smaller than that.
+    r.case_bytes = 16777216
+    std.prop.check(r, moq_stream_gen(1), moq_receiver_total_law)
+}
+
+fn total_order(k: u64) -> codec.Direction {
+    match k {
+        0 => Ascending,
+        _ => Descending,
+    }
+}

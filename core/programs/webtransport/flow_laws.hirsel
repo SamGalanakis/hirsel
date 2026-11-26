@@ -223,3 +223,82 @@ fn session_flow_control() -> Result[(), ()] {
     distinct_clients()
     Ok(())
 }
+
+fn capsule_gen() -> std.prop.Gen[Bytes] {
+    std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut caps: Bytes = list.new()
+        for _ in 0u64 .. 1 + std.prop.below(mut src, 3) {
+            let kind: u64 = match std.prop.below(mut src, 9) {
+                0 => h3_wire.CAPSULE_WT_CLOSE_SESSION,
+                1 => h3_wire.CAPSULE_WT_DRAIN_SESSION,
+                2 => h3_wire.CAPSULE_WT_MAX_DATA,
+                3 => h3_wire.CAPSULE_WT_MAX_STREAMS_BIDI,
+                4 => h3_wire.CAPSULE_WT_MAX_STREAMS_UNI,
+                5 => h3_wire.CAPSULE_WT_DATA_BLOCKED,
+                6 => h3_wire.CAPSULE_DATAGRAM,
+                7 => 0x3fffffffffffffffu64,
+                _ => std.prop.below(mut src, 64),
+            }
+            let value = std.prop.draw(mut src, std.prop.bytes_of(0, 12))
+            let n = list.len(value)
+            let len: u64 = match std.prop.below(mut src, 6) {
+                0 => 0u64,
+                1 => n + 1,
+                2 => 0x3fffffffffffffffu64,
+                3 => 1028u64,
+                _ => n,
+            }
+            h3_wire.write_head(kind, len, mut caps)
+            list.append(mut caps, value)
+        }
+        let mut frame: Bytes = list.new()
+        h3_wire.write_head(h3_wire.FRAME_DATA, list.len(caps), mut frame)
+        list.append(mut frame, caps)
+        take frame
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "capsules(")
+        string.push(mut out, std.hex.encode(b))
+        string.push(mut out, ")")
+    })
+}
+
+// The server receives peer capsule bytes on a live session's CONNECT stream. It returns for
+// every input, and a session it ends is only the one that sent them.
+fn capsule_total_law(frame: Bytes) -> Result[(), String] {
+    let l = small_windows()
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(clone(l), false)
+    let c = raw_client(mut client, mut server, l)
+    let _ = raw_streams(mut client, c, hex_text(CLIENT_CONTROL_FLOW), false)
+    let first = send_request(mut client, c, connect_good())
+    let second = send_request(mut client, c, connect_good())
+    settle(mut client, mut server, 2)
+    let hs = requested_handles(server.app)
+    accept_session(mut server, hs[0])
+    accept_session(mut server, hs[1])
+    settle(mut client, mut server, 3)
+    let _ = second
+    write_all(mut client, c, first, frame, false)
+    settle(mut client, mut server, 4)
+    for event in server.app {
+        if let Closed(s: s, ..) = event {
+            if s != hs[0] {
+                return Error(string.from("capsules on one CONNECT stream ended another session"))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// bug: the capsule reader traps, overflows or slices past the CONNECT stream buffer on a peer
+/// capsule (a close reason, a flow-control varint, a length at 2^62 - 1 or one past the bytes).
+/// oracle: RFC 9297 §3.2 capsule framing and draft-17 §5.6, §6: a malformed capsule ends at most
+/// its own session; the receiver returns for every input.
+@test
+fn capsule_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 24
+    // Each case runs two QUIC endpoints; the default 256 KiB case budget is smaller than that.
+    c.case_bytes = 16777216
+    std.prop.check(c, capsule_gen(), capsule_total_law)
+}

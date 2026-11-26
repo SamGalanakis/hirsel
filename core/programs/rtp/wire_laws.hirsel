@@ -93,3 +93,426 @@ fn rtp_totality_property() -> Result[(), ()] {
     c.cases = 128
     std.prop.check(c, std.prop.bytes_of(0, 256), rtp_total_law)
 }
+
+fn rtcp_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 256))
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let count_or_fmt: u8 = match std.prop.below(mut src, 6) {
+            0 => 0u8,
+            1 => 1u8,
+            2 => 4u8,
+            3 => 15u8,
+            4 => 31u8,
+            _ => int.narrow(std.prop.below(mut src, 32)),
+        }
+        let pad_bit: u8 = if std.prop.weighted(mut src, 1, 4) {
+            0x20u8
+        } else {
+            0u8
+        }
+        let pt: u8 = match std.prop.below(mut src, 7) {
+            0 => 200u8,
+            1 => 201u8,
+            2 => 202u8,
+            3 => 203u8,
+            4 => 205u8,
+            5 => 206u8,
+            _ => int.narrow(std.prop.below(mut src, 256)),
+        }
+        let body = std.prop.draw(mut src, std.prop.bytes_of(0, 96))
+        let aligned = (list.len(body) + 3) / 4 * 4
+        let words: u16 = match std.prop.below(mut src, 6) {
+            0 => 0u16,
+            1 => 0xffffu16,
+            2 => int.narrow(aligned / 4 + 1),
+            _ => int.narrow(aligned / 4),
+        }
+        list.push(mut out, 0x80u8 | pad_bit | count_or_fmt)
+        list.push(mut out, pt)
+        list.put_word_be(mut out, words)
+        list.append(mut out, body)
+        let pad_extra = aligned - list.len(body)
+        for _ in 0u64 .. pad_extra {
+            list.push(mut out, 0u8)
+        }
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "rtcp_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+fn rtcp_total_law(pkt: Bytes) -> Result[(), String] {
+    let _ = rtcp.is_rtcp(pkt)
+    let _ = rtcp.check(pkt, Compound)
+    let _ = rtcp.check(pkt, Reduced)
+    let len = list.len(pkt)
+    let mut at = 0u64
+    let mut guard = 0u64
+    while guard < 64 {
+        let before = at
+        match rtcp.next(pkt, mut at) {
+            Ok(None) => break,
+            Ok(Some(p)) => {
+                if p.at != before || at <= before || at > len || p.body != p.at + 4 || p.end > at {
+                    return Error(string.from("rtcp.next produced invalid packet bounds"))
+                }
+                let unpadded = (pkt[p.at] & 0x20u8) == 0
+                let consumed = list.slice(pkt, p.at, at)
+                let mut re: Bytes = list.with_capacity(list.len(consumed) + 32)
+                match p.item {
+                    Sr(info, rc) => {
+                        let mut blocks: List[rtcp.Block] = list.new()
+                        for i in 0u64 .. int.widen(rc) {
+                            let b = match rtcp.block(pkt, p, int.narrow(i)) {
+                                Ok(b) => b,
+                                Error(_) => return Error(string.from("rtcp.block failed on valid SR")),
+                            }
+                            list.push(mut blocks, b)
+                        }
+                        let _ = rtcp.block(pkt, p, rc)
+                        let _ = rtcp.block(pkt, p, 255)
+                        let rc64: u64 = int.widen(rc)
+                        if unpadded && p.end - p.body == 24 + 24 * rc64 {
+                            let Ok(_) = rtcp.write_sr(info, view blocks, mut re) else {
+                                return Error(string.from("write_sr failed on decoded SR"))
+                            }
+                            if re != consumed {
+                                return Error(string.from("write_sr did not re-encode consumed SR"))
+                            }
+                        }
+                    },
+                    Rr(ssrc, rc) => {
+                        let mut blocks: List[rtcp.Block] = list.new()
+                        for i in 0u64 .. int.widen(rc) {
+                            let b = match rtcp.block(pkt, p, int.narrow(i)) {
+                                Ok(b) => b,
+                                Error(_) => return Error(string.from("rtcp.block failed on valid RR")),
+                            }
+                            list.push(mut blocks, b)
+                        }
+                        let _ = rtcp.block(pkt, p, rc)
+                        let rc64: u64 = int.widen(rc)
+                        if unpadded && p.end - p.body == 4 + 24 * rc64 {
+                            let Ok(_) = rtcp.write_rr(ssrc, view blocks, mut re) else {
+                                return Error(string.from("write_rr failed on decoded RR"))
+                            }
+                            if re != consumed {
+                                return Error(string.from("write_rr did not re-encode consumed RR"))
+                            }
+                        }
+                    },
+                    Sdes(_) => {
+                        let _ = rtcp.cname(pkt, p, 0)
+                        let _ = rtcp.cname(pkt, p, 0xffffffff)
+                    },
+                    Bye(cnt, reason) => {
+                        if unpadded && cnt == 1 && reason == None && p.end - p.body == 4 {
+                            let ssrc: u32 = list.word_be(pkt, p.body)
+                            let Ok(_) = rtcp.write_bye(ssrc, mut re) else {
+                                return Error(string.from("write_bye failed on decoded BYE"))
+                            }
+                            if re != consumed {
+                                return Error(string.from("write_bye did not re-encode consumed BYE"))
+                            }
+                        }
+                    },
+                    Nack(fb_sender, media) => {
+                        let mut pairs: List[(u16, u16)] = list.new()
+                        let mut cur = 0u64
+                        for _ in 0u64 .. 128 {
+                            match rtcp.nack_next(pkt, p, mut cur) {
+                                Ok(None) => break,
+                                Ok(Some(pair)) => list.push(mut pairs, pair),
+                                Error(_) => return Error(string.from("nack_next failed on valid NACK")),
+                            }
+                        }
+                        if unpadded && list.len(pairs) > 0 && p.end - p.body == 8 + 4 * list.len(pairs) {
+                            let Ok(_) = rtcp.write_nack(fb_sender, media, view pairs, mut re) else {
+                                return Error(string.from("write_nack failed on decoded NACK"))
+                            }
+                            if re != consumed {
+                                return Error(string.from("write_nack did not re-encode consumed NACK"))
+                            }
+                        }
+                    },
+                    Pli(fb_sender, media) => {
+                        if unpadded {
+                            let Ok(_) = rtcp.write_pli(fb_sender, media, mut re) else {
+                                return Error(string.from("write_pli failed on decoded PLI"))
+                            }
+                            if re != consumed {
+                                return Error(string.from("write_pli did not re-encode consumed PLI"))
+                            }
+                        }
+                    },
+                    Fir(fb_sender) => {
+                        let mut entries: List[(u32, u8)] = list.new()
+                        let mut cur = 0u64
+                        for _ in 0u64 .. 64 {
+                            match rtcp.fir_next(pkt, p, mut cur) {
+                                Ok(None) => break,
+                                Ok(Some(e)) => list.push(mut entries, e),
+                                Error(_) => return Error(string.from("fir_next failed on valid FIR")),
+                            }
+                        }
+                        if unpadded && list.len(entries) == 1 && p.end - p.body == 16 {
+                            let media: u32 = list.word_be(pkt, p.body + 4)
+                            let (target, seq_n) = entries[0]
+                            if media == 0 && pkt[p.body + 13] == 0 && pkt[p.body + 14] == 0 && pkt[p.body + 15] == 0 {
+                                let Ok(_) = rtcp.write_fir(fb_sender, target, seq_n, mut re) else {
+                                    return Error(string.from("write_fir failed on decoded FIR"))
+                                }
+                                if re != consumed {
+                                    return Error(string.from("write_fir did not re-encode consumed FIR"))
+                                }
+                            }
+                        }
+                    },
+                    Twcc(_, _) => {
+                        let _ = twcc.parse(pkt, p)
+                    },
+                    Other(_, _) => (),
+                }
+            },
+            Error(_) => {
+                if at != before {
+                    return Error(string.from("rtcp.next moved cursor on refusal"))
+                }
+                break
+            },
+        }
+        guard += 1
+    }
+    Ok(())
+}
+
+type TwccDraw {
+    fci: Bytes,
+    raw: Bytes,
+    times: List[(u16, u64)]
+}
+
+fn twcc_draw_gen() -> std.prop.Gen[TwccDraw] {
+    std.prop.make(fn(mut src: std.prop.Source) -> TwccDraw {
+        let fci = std.prop.draw(mut src, std.prop.bytes_of(0, 96))
+        let raw = std.prop.draw(mut src, rtcp_wire_gen())
+        // Sequence numbers are the peer's; arrival times are this host's monotonic clock.
+        let n = std.prop.below(mut src, 8)
+        let mut times: List[(u16, u64)] = list.with_capacity(n)
+        let mut clock = std.prop.below(mut src, 1u64 << 62)
+        for _ in 0u64 .. n {
+            let num: u16 = match std.prop.below(mut src, 5) {
+                0 => 0u16,
+                1 => 1u16,
+                2 => 0xffffu16,
+                _ => int.truncate(std.prop.word(mut src)),
+            }
+            clock += std.prop.below(mut src, 4000000000)
+            list.push(mut times, (num, clock))
+        }
+        TwccDraw(fci: take fci, raw: take raw, times: take times)
+    }, fn(d: TwccDraw, mut out: String) {
+        string.push(mut out, "TwccDraw(fci=")
+        string.push_u64(mut out, list.len(d.fci))
+        string.push(mut out, ", pkts=")
+        for (num, at_ns) in d.times {
+            string.push_u64(mut out, int.widen(num))
+            string.push(mut out, "@")
+            string.push_u64(mut out, at_ns)
+            string.push(mut out, " ")
+        }
+        string.push(mut out, ")")
+    })
+}
+
+fn twcc_total_law(d: TwccDraw) -> Result[(), String] {
+    // 1. TWCC sender side: feed arbitrary RTCP RTPFB FMT=15 wrapping arbitrary FCI bytes.
+    let mut s = result.unwrap(twcc.send_log(32))
+    for k in 0u64 .. 16 {
+        let _ = twcc.assign(mut s, k * 1000000, 1200)
+    }
+    let aligned = (list.len(d.fci) + 3) / 4 * 4
+    let mut pkt: Bytes = list.with_capacity(12 + aligned)
+    list.push(mut pkt, 0x8fu8)
+    list.push(mut pkt, 205u8)
+    let words: u16 = int.narrow((12 + aligned) / 4 - 1)
+    list.put_word_be(mut pkt, words)
+    list.put_word_be(mut pkt, 0x11111111u32)
+    list.put_word_be(mut pkt, 0x22222222u32)
+    list.append(mut pkt, d.fci)
+    for _ in list.len(d.fci) .. aligned {
+        list.push(mut pkt, 0u8)
+    }
+    let mut at = 0u64
+    let mut acked: List[twcc.Acked] = list.with_capacity(64)
+    if let Ok(Some(p)) = rtcp.next(pkt, mut at) {
+        let _ = twcc.parse(pkt, p)
+        let _ = twcc.on_feedback(mut s, pkt, p, 64, mut acked)
+    }
+    // Also feed completely arbitrary RTCP bytes.
+    at = 0
+    if let Ok(Some(p2)) = rtcp.next(d.raw, mut at) {
+        let _ = twcc.parse(d.raw, p2)
+        list.clear(mut acked)
+        let _ = twcc.on_feedback(mut s, d.raw, p2, 64, mut acked)
+    }
+    // 2. TWCC receiver side -> write -> parse -> sender on_feedback round-trip.
+    let mut r = result.unwrap(twcc.recv_log(32))
+    for (num, at_ns) in d.times {
+        twcc.on_packet(mut r, num, at_ns)
+    }
+    let mut out: Bytes = list.with_capacity(512)
+    if let Ok(n) = twcc.write(mut r, 1, 2, 512, mut out) {
+        if n != list.len(out) {
+            return Error(string.from("twcc.write returned mismatched length"))
+        }
+        if n > 0 {
+            if let Error(_) = rtcp.check(out, Reduced) {
+                return Error(string.from("rtcp.check refused twcc.write output"))
+            }
+            let mut c = 0u64
+            let Ok(Some(wp)) = rtcp.next(out, mut c) else {
+                return Error(string.from("rtcp.next refused twcc.write output"))
+            }
+            if c != n {
+                return Error(string.from("rtcp.next did not consume all of twcc.write output"))
+            }
+            if let Error(_) = twcc.parse(out, wp) {
+                return Error(string.from("twcc.parse refused twcc.write output"))
+            }
+            list.clear(mut acked)
+            let _ = twcc.on_feedback(mut s, out, wp, 64, mut acked)
+        }
+    }
+    Ok(())
+}
+
+type LossStep {
+    index: u64,
+    at_ns: u64,
+    now_ns: u64,
+    rtt_ns: Option[u64],
+    max_pairs: u32
+}
+
+type LossDraw {
+    window: u32,
+    retry_ns: u64,
+    tries: u8,
+    max_age_ns: u64,
+    first: u64,
+    first_at: u64,
+    steps: List[LossStep]
+}
+
+fn loss_draw_gen() -> std.prop.Gen[LossDraw] {
+    // The peer picks the sequence numbers, so the extended index may jump by up to 2^15 per
+    // packet, forwards or back; the configuration, clock and RTT estimate are this host's.
+    std.prop.make(fn(mut src: std.prop.Source) -> LossDraw {
+        let window: u32 = match std.prop.below(mut src, 4) {
+            0 => 1u32,
+            1 => 16u32,
+            2 => 64u32,
+            _ => int.narrow(1 + std.prop.below(mut src, 128)),
+        }
+        let retry_ns = 1 + std.prop.below(mut src, 10000000000)
+        let tries: u8 = match std.prop.below(mut src, 4) {
+            0 => 0u8,
+            1 => 1u8,
+            2 => 255u8,
+            _ => int.narrow(std.prop.below(mut src, 8)),
+        }
+        let max_age_ns = 1 + std.prop.below(mut src, 10000000000)
+        let first = match std.prop.below(mut src, 3) {
+            0 => 0u64,
+            1 => 0xffffu64,
+            _ => std.prop.below(mut src, 1u64 << 40),
+        }
+        let first_at = std.prop.below(mut src, 1u64 << 62)
+        let n = std.prop.below(mut src, 12)
+        let mut steps: List[LossStep] = list.with_capacity(n)
+        let mut idx = first
+        let mut clock = first_at
+        for _ in 0u64 .. n {
+            let w: u64 = int.widen(window)
+            idx = match std.prop.below(mut src, 5) {
+                0 => idx + std.prop.below(mut src, 40),
+                1 => idx + w + 1,
+                2 => idx + 32768,
+                3 => int.saturating_sub(idx, std.prop.below(mut src, 32768)),
+                _ => idx + 1,
+            }
+            let at_ns = clock + std.prop.below(mut src, 100000000)
+            clock = at_ns
+            let now_ns = clock + std.prop.below(mut src, 100000000)
+            let rtt_ns: Option[u64] = if std.prop.weighted(mut src, 1, 2) {
+                None
+            } else {
+                Some(std.prop.below(mut src, 70000000000000))
+            }
+            let max_pairs: u32 = int.narrow(std.prop.below(mut src, 16))
+            list.push(mut steps, LossStep(index: idx, at_ns, now_ns, rtt_ns, max_pairs))
+        }
+        LossDraw(window, retry_ns, tries, max_age_ns, first, first_at, steps: take steps)
+    }, fn(d: LossDraw, mut out: String) {
+        string.push(mut out, "LossDraw(w=")
+        string.push_u64(mut out, int.widen(d.window))
+        string.push(mut out, ", first=")
+        string.push_u64(mut out, d.first)
+        string.push(mut out, ", steps=")
+        string.push_u64(mut out, list.len(d.steps))
+        string.push(mut out, ")")
+    })
+}
+
+fn loss_total_law(d: LossDraw) -> Result[(), String] {
+    let cfg = loss.NackConfig(window: d.window, retry_ns: d.retry_ns, tries: d.tries, max_age_ns: d.max_age_ns)
+    let mut l = result.unwrap(loss.losses(cfg, d.first, d.first_at))
+    let mut kf = loss.keyframes(true, d.retry_ns)
+    let mut pairs: List[(u16, u16)] = list.with_capacity(32)
+    for st in d.steps {
+        let _ = loss.on_packet(mut l, st.index, st.at_ns)
+        list.clear(mut pairs)
+        let _ = loss.due(mut l, st.now_ns, st.rtt_ns, st.max_pairs, mut pairs)
+        if list.len(pairs) > 0 {
+            let mut nack_wire: Bytes = list.with_capacity(12 + 4 * list.len(pairs))
+            let Ok(n) = rtcp.write_nack(1, 2, view pairs, mut nack_wire) else {
+                return Error(string.from("write_nack failed on loss.due pairs"))
+            }
+            let mut at = 0u64
+            let Ok(Some(p)) = rtcp.next(nack_wire, mut at) else {
+                return Error(string.from("rtcp.next failed on written NACK"))
+            }
+            if at != n {
+                return Error(string.from("rtcp.next did not consume NACK"))
+            }
+            let mut cur = 0u64
+            let mut back: List[(u16, u16)] = list.new()
+            while let Ok(Some(pair)) = rtcp.nack_next(nack_wire, p, mut cur) {
+                list.push(mut back, pair)
+            }
+            if back != pairs {
+                return Error(string.from("NACK pairs did not round-trip"))
+            }
+        }
+        let _ = loss.want(mut kf, Switch, st.now_ns)
+        loss.keyframe_seen(mut kf)
+    }
+    Ok(())
+}
+
+/// bug: Trap, overflow on peer RTCP/TWCC/NACK arithmetic, or accept an RTCP packet whose fields do not re-encode to the exact consumed prefix.
+/// oracle: RFC 3550, RFC 4585, RFC 5104, and draft-holmer-rmcat-transport-wide-cc-extensions-01 wire encoders (independent of decoders).
+@test
+fn rtcp_twcc_loss_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 128
+    std.prop.check(c, rtcp_wire_gen(), rtcp_total_law)?
+    std.prop.check(c, twcc_draw_gen(), twcc_total_law)?
+    std.prop.check(c, loss_draw_gen(), loss_total_law)
+}

@@ -6,6 +6,7 @@ webrtc_sfu@1/laws/audio_forward_gate src=ebd84a9269307295 sig=1bf7243c2ecff73b r
 webrtc_sfu@1/laws/av1_across_units src=5127603a9d1e4c8b sig=989890dab5c800a1 run=c7b2a52baff70a63 bug=cce8d5f2c7f0c976 oracle=3e2b42bf26a8c63f rows=pending
 webrtc_sfu@1/laws/bridge_ends_on_revoke src=20aea2265b54cbd9 sig=d633055a4b861c5c run=c7b2a52baff70a63 bug=2f1aa3741cf767b4 oracle=8aedbbfebe2f48cc rows=pending
 webrtc_sfu@1/laws/browser_feedback_reaches_bwe src=340cff2ab764e50a sig=4335efa189fcb1c3 run=c2c0c6612d4cbb79 bug=1f3cc0edfb8f41ce oracle=c749db7ddbeb5971 rows=pending
+webrtc_sfu@1/laws/cascade_wire_totality_property src=be124d27fd2a6123 sig=071b6ac49fab4ce5 run=c2c0c6612d4cbb79 bug=2ffd742ce79021ec oracle=3438b976adbd5910 rows=pending
 webrtc_sfu@1/laws/congested_link_costs_its_rooms src=5ae066c8aacc3dcc sig=31f4572b41cdc3ae run=c7b2a52baff70a63 bug=9719e0a2d91ac37f oracle=3ec15b6f76f1aec4 rows=pending
 webrtc_sfu@1/laws/demux_prefix src=46024baf70cc4358 sig=c9e46270739ff3af run=c2c0c6612d4cbb79 bug=274d143e0a1ab832 oracle=5aa9732b60953b5a rows=pending
 webrtc_sfu@1/laws/departures_free_subscriber_sections src=542e6e9147019e6e sig=42c6e7ad4fbf844c run=c7b2a52baff70a63 bug=33980c3bda3501cd oracle=cf57f0c089c2776e rows=pending

@@ -641,3 +641,127 @@ fn capacity_sweep_session() -> Result[(), ()] {
     }
     Ok(())
 }
+
+fn srtp_wire_gen() -> std.prop.Gen[Bytes] {
+    let mut arms: List[std.prop.Gen[Bytes]] = list.new()
+    list.push(mut arms, std.prop.bytes_of(0, 256))
+    // RTP-v2 prefixed packets with boundary CSRC counts and extension lengths.
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        let cc: u8 = int.narrow(std.prop.below(mut src, 16))
+        let x: u8 = if std.prop.weighted(mut src, 1, 2) {
+            0x10u8
+        } else {
+            0u8
+        }
+        list.push(mut out, 0x80u8 | x | cc)
+        list.push(mut out, int.narrow(std.prop.below(mut src, 256)))
+        let seq: u16 = match std.prop.below(mut src, 4) {
+            0 => 0u16,
+            1 => 0xffffu16,
+            _ => int.truncate(std.prop.word(mut src)),
+        }
+        list.put_word_be(mut out, seq)
+        let w: u32 = int.truncate(std.prop.word(mut src))
+        list.put_word_be(mut out, w)
+        let w2: u32 = int.truncate(std.prop.word(mut src))
+        list.put_word_be(mut out, w2)
+        for _ in 0u64 .. int.widen(cc) {
+            list.put_word_be(mut out, 0u32)
+        }
+        if x != 0 {
+            list.put_word_be(mut out, 0xbedeu16)
+            let ext_words: u16 = match std.prop.below(mut src, 5) {
+                0 => 0u16,
+                1 => 1u16,
+                2 => 0xffffu16,
+                _ => int.narrow(std.prop.below(mut src, 16)),
+            }
+            list.put_word_be(mut out, ext_words)
+        }
+        let tail = std.prop.draw(mut src, std.prop.bytes_of(0, 64))
+        list.append(mut out, tail)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "srtp_rtp_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    // SRTCP-v2 prefixed packets with boundary trailer flags and lengths.
+    list.push(mut arms, std.prop.make(fn(mut src: std.prop.Source) -> Bytes {
+        let mut out: Bytes = list.new()
+        list.push(mut out, 0x80u8 | int.narrow(std.prop.below(mut src, 32)))
+        list.push(mut out, 200u8)
+        list.put_word_be(mut out, 0u16)
+        let w: u32 = int.truncate(std.prop.word(mut src))
+        list.put_word_be(mut out, w)
+        let tail = std.prop.draw(mut src, std.prop.bytes_of(0, 64))
+        list.append(mut out, tail)
+        let idx: u32 = match std.prop.below(mut src, 5) {
+            0 => 0u32,
+            1 => 0x7fffffffu32,
+            2 => 0x80000000u32,
+            3 => 0xffffffffu32,
+            _ => int.truncate(std.prop.word(mut src)),
+        }
+        list.put_word_be(mut out, idx)
+        take out
+    }, fn(b: Bytes, mut out: String) {
+        string.push(mut out, "srtp_rtcp_wire(len=")
+        string.push_u64(mut out, list.len(b))
+        string.push(mut out, ")")
+    }))
+    std.prop.one_of(take arms)
+}
+
+fn srtp_total_law(pkt: Bytes) -> Result[(), String] {
+    for k in 0u64 .. 3 {
+        let p = total_profile(k)
+        let mut rx = receiver(p, LIMITS)
+        let mut rtp_buf = copy_packet(pkt, 0)
+        match srtp.unprotect_rtp(mut rx, mut rtp_buf) {
+            Ok(_) => {
+                // If an input ever authenticated, re-protecting with the sender must match.
+                let mut tx = sender(p)
+                let mut re = copy_packet(rtp_buf, srtp.tag_room(p))
+                if let Ok(_) = srtp.protect_rtp(mut tx, mut re) {
+                    if re != pkt {
+                        return Error(string.from("opened SRTP packet did not re-encode to consumed wire"))
+                    }
+                }
+            },
+            Error(_) => (),
+        }
+        let mut rtcp_buf = copy_packet(pkt, 0)
+        match srtp.unprotect_rtcp(mut rx, mut rtcp_buf) {
+            Ok(_) => {
+                let mut tx = sender(p)
+                let mut re = copy_packet(rtcp_buf, srtp.tag_room(p) + 4)
+                if let Ok(_) = srtp.protect_rtcp(mut tx, mut re) {
+                    if re != pkt {
+                        return Error(string.from("opened SRTCP packet did not re-encode to consumed wire"))
+                    }
+                }
+            },
+            Error(_) => (),
+        }
+    }
+    Ok(())
+}
+
+/// bug: unprotect_rtp or unprotect_rtcp traps, overflows or slices out of bounds on arbitrary peer SRTP or SRTCP bytes, under any cipher profile.
+/// oracle: RFC 3711 §3.3-§3.4 and RFC 7714 framing; a receiver returns for every input, and a packet that opens re-protects to the same wire bytes.
+@test
+fn srtp_record_totality_property() -> Result[(), ()] {
+    let mut c = std.prop.config()
+    c.cases = 96
+    std.prop.check(c, srtp_wire_gen(), srtp_total_law)
+}
+
+fn total_profile(k: u64) -> schedule.SrtpProfile {
+    match k {
+        0 => Aes128CmHmacSha1_80,
+        1 => AeadAes128Gcm,
+        _ => AeadAes256Gcm,
+    }
+}

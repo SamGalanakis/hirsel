@@ -9,6 +9,7 @@ dtls@1/laws/capacity_refusal_keeps_message src=184392a91579e3a0 sig=303b9229a287
 dtls@1/laws/capacity_refusal_opening_record src=328d89a0e6b653ab sig=32e1af712a4d5f42 run=c2c0c6612d4cbb79 bug=3584751e21ac9a60 oracle=1d06ba2fd5334ab6 rows=pending
 dtls@1/laws/capacity_sweep_handshake src=2a87abbd60a2d5fe sig=116a8dfa37dd208d run=c2c0c6612d4cbb79 bug=0b2552e49fb3bd04 oracle=e1904c5fe3e42d06 rows=pending
 dtls@1/laws/cookie_bounds_unproven_address src=51ceae2b3b51c9b5 sig=2b585196e0145c03 run=c2c0c6612d4cbb79 bug=3e3c7318814f7f0c oracle=b7ac6ae0a6ce1f16 rows=pending
+dtls@1/laws/dtls_record_totality_property src=930703555adc3451 sig=ad3d3737b159ca05 run=c2c0c6612d4cbb79 bug=c1e1256a631e53d9 oracle=3864bc41f36d38ce rows=pending
 dtls@1/laws/exporter_once_after_pin src=17e845a9650f6781 sig=33eb0fa5cebde72b run=c2c0c6612d4cbb79 bug=b6dbf9ebd8fa593e oracle=5c6f98cb2e8e661d rows=pending
 dtls@1/laws/final_flight_resent src=930ae83c17ecd920 sig=4ffd27b019303b2c run=c2c0c6612d4cbb79 bug=21fd642e34638984 oracle=d0a4ca114be92218 rows=pending
 dtls@1/laws/fingerprint_pins_peer src=7cacb77782a11d66 sig=c00b1de8a796b41d run=c2c0c6612d4cbb79 bug=e7dc8368c7338530 oracle=2ee23cd4144fb16b rows=pending

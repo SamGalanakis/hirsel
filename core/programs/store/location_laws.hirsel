@@ -909,9 +909,10 @@ fn test_index_walker_corruptions(c: Clock, d: Dir, r: Random, tasks: Tasks) -> R
 // The oracle is AP3's order itself, checked by the independent parse.
 @test
 fn disk_test_location_separator_bounds(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut db = open(tasks, disk_test_directory(d), c, r, result.unwrap(sized(Directory, 2147483648u64)))?
-    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
-    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let folder = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, folder, c, r, options)?
+    let (rows, _, _) = location_index_schema(mut db, Migrate)?
     let mut value: Bytes = list.with_capacity(200)
     list.fill(mut value, 200, 7u8)
     for batch in 0u64 .. 8 {
@@ -924,15 +925,28 @@ fn disk_test_location_separator_bounds(d: Dir, c: Clock, r: Random, tasks: Tasks
             Ok(())
         })?)?
     }
-    law_location_commit(run(mut db, None, rows, fn(mut tx, t) -> Result[(), Error] {
+    value[0u64] = 8
+    law_location_commit(run(mut db, None, (rows, take value), fn(mut tx, input) -> Result[(), Error] {
         for n in 0u64 .. 4000 {
             if n % 3 == 0 {
-                let _ = delete(mut tx, t, n)?
+                let _ = delete(mut tx, input.0, n)?
+            } else if n % 3 == 1 {
+                put(mut tx, input.0, n, input.1)?
             }
         }
         Ok(())
     })?)?
     let _ = checkpoint(mut db)?
     let _ = law_compare_locations(db)?
-    close(take db)
+    close(take db)?
+    options.create = false
+    let mut reopened = open(tasks, folder, c, r, options)?
+    let indexed = location_index_schema(mut reopened, Open)?
+    let Seen(Seen(value: take agrees, ..)) = look(reader(reopened, 0)?, snapshot(reopened), None, indexed, location_indexes_match)? else {
+        fail("location law: the recovered index scan was refused")
+    }
+    if !agrees? {
+        fail("location law: the recovered Many or Unique index differs from the table")
+    }
+    close(take reopened)
 }

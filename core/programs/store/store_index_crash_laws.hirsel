@@ -4,6 +4,68 @@ type IndexBuildSchema {
     by_sum: Aggregate[u64]
 }
 
+fn location_group(k: u64, value: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    let tag: u64 = int.widen(value[0u64])
+    list.push(mut keys, tag * 4 + k % 4)
+    Ok(take keys)
+}
+
+fn location_owner(k: u64, _value: Bytes) -> Result[List[u64], Capacity] {
+    let mut keys: List[u64] = list.with_capacity(1)
+    list.push(mut keys, 0xffffffffffffffffu64 - k)
+    Ok(take keys)
+}
+
+fn location_index_schema(mut db: Db, mode: Mode) -> Result[(Table[u64, Bytes], Index[u64, u64, Bytes, ()], Index[u64, u64, Bytes, ()]), Error] waits {
+    let mut d = declare(db, mode)?
+    let key = std.codec.key_u64()
+    let mut declared = declare_table(mut d, "rows", key, std.codec.of_bytes())?
+    let grouped = index(mut d, mut declared, "by_group", Many, code.describe(location_group), key)?
+    let owners = index(mut d, mut declared, "by_owner", Unique, code.describe(location_owner), key)?
+    let rows = finish(mut d, take declared)?
+    let _ = seal(mut db, take d)?
+    Ok((rows, take grouped, take owners))
+}
+
+// Compare the complete index against the ordered (index key, primary key)
+// pairs from a table scan of the same recovered snapshot.
+fn exact_index_entries[V](tx: Tx, ix: Index[u64, u64, V, ()], take expected: List[(u64, u64)]) -> Result[bool, Error] {
+    let mut keys = take expected
+    list.sort(mut keys, order.compare)
+    let mut actual = entries(tx, ix, Unbounded, Unbounded)?
+    for (key, primary) in keys {
+        if next_entry(mut actual)? != Some((key, primary, ())) {
+            return Ok(false)
+        }
+    }
+    Ok(next_entry(mut actual)? == None)
+}
+
+fn location_indexes_match(tx: Tx, input: (Table[u64, Bytes], Index[u64, u64, Bytes, ()], Index[u64, u64, Bytes, ()])) -> Result[bool, Error] {
+    let mut rows = range(tx, input.0, Unbounded, Unbounded)?
+    let mut grouped: List[(u64, u64)] = list.new()
+    let mut owners: List[(u64, u64)] = list.new()
+    while let Some((key, value)) = next_in(tx, mut rows)? {
+        let groups = capacity(location_group(key, value))?
+        for group in groups {
+            list.push(mut grouped, (group, key))
+        }
+        let unique = capacity(location_owner(key, value))?
+        list.push(mut owners, (unique[0u64], key))
+    }
+    Ok(list.len(owners) == 6666 && exact_index_entries(tx, input.1, take grouped)? && exact_index_entries(tx, input.2, take owners)?)
+}
+
+fn index_build_entries_match(tx: Tx, input: (Table[u64, u64], Index[u64, u64, u64, ()])) -> Result[bool, Error] {
+    let mut rows = range(tx, input.0, Unbounded, Unbounded)?
+    let mut expected: List[(u64, u64)] = list.new()
+    while let Some((key, value)) = next_in(tx, mut rows)? {
+        list.push(mut expected, (value, key))
+    }
+    Ok(list.len(expected) == 96 && exact_index_entries(tx, input.1, take expected)?)
+}
+
 fn index_build_parts(k: u64, v: u64) -> Result[List[(u64, u64)], Capacity] {
     let mut parts: List[(u64, u64)] = list.with_capacity(3)
     list.push(mut parts, (k % 5, v))
@@ -98,7 +160,14 @@ fn index_build_read(d: Dir, c: Clock, r: Random, tasks: Tasks, required_new: boo
     let (take opened, schema) = index_build_open(d, c, r, tasks, false)?
     let mut db = take opened
     trust_store(mut db)?
-    let mut good = lix_serves(db, schema.by_v, "by_v")? || !required_new
+    let mut good = !required_new
+    if lix_serves(db, schema.by_v, "by_v")? {
+        let handles: (Table[u64, u64], Index[u64, u64, u64, ()]) = (clone(schema.rows), clone(schema.by_v))
+        let Seen(Seen(value: take matches, ..)) = look(reader(db, 0)?, snapshot(db), None, handles, index_build_entries_match)? else {
+            return Ok(false)
+        }
+        good = matches?
+    }
     if let Public = lix_state(db, "by_sum")? {
         good = good && index_build_sums_match(db, schema)?
     } else {

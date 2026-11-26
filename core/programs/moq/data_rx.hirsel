@@ -1,0 +1,748 @@
+// MOQ-3 & MOQ-4: Unidirectional data streams (subgroup, fetch, padding), early stream
+// buffering, datagrams, and moqt-23 §12.1 malformed-track / deduplication checks.
+fn uni_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+    let stream = s.uni_heads[idx].stream
+    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.uni_heads[idx].buf)
+    if reset != None {
+        let _ = list.remove(mut s.uni_heads, idx)
+        return
+    }
+    let mut at = 0u64
+    let len = list.len(s.uni_heads[idx].buf)
+    let hdr = match codec.read_stream_header(s.uni_heads[idx].buf, mut at, len) {
+        Ok(take h) => take h,
+        Error(Truncated) => {
+            if fin {
+                let _ = list.remove(mut s.uni_heads, idx)
+                fail_session(mut s, mut io, ERR_INVALID_STREAM_HEADER, b"truncated stream header", mut out)
+            }
+            return
+        },
+        Error(e) => {
+            let _ = list.remove(mut s.uni_heads, idx)
+            fail_session(mut s, mut io, refusal_code(e), b"invalid stream header", mut out)
+            return
+        },
+    }
+    let UniHead(stream: _, buf: take hbuf, fin: _) = list.remove(mut s.uni_heads, idx)
+    let mut rest = take hbuf
+    list.drop_prefix(mut rest, at)
+    match take hdr {
+        ControlStream => {
+            if s.peer_control != None {
+                fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"second control stream", mut out)
+                return
+            }
+            s.peer_control = Some(stream)
+            list.append(mut s.peer_control_buf, rest)
+            control_readable(mut s, mut io, mut out)
+        },
+        PaddingStream => {
+            if !fin {
+                list.push(mut s.padding_streams, stream)
+            }
+        },
+        SubgroupStream(sh) => {
+            attach_or_park_subgroup(mut s, mut io, stream, sh, take rest, fin, mut out)
+        },
+        FetchStream(request: req_id) => {
+            attach_or_park_fetch(mut s, mut io, stream, req_id, take rest, fin, mut out)
+        },
+    }
+}
+
+fn attach_or_park_subgroup(mut s: Session, mut io: Io, stream: quic.StreamId, sh: codec.SubgroupHeader, take buf: Bytes, fin: bool, mut out: List[Event]) {
+    if let Some(ri) = req_by_alias(s, sh.alias, true) {
+        let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
+        let def_prio = s.requests[ri].default_pub_priority
+        if let Some(take tr) = take tr_opt {
+            let cap: u64 = order.max(list.len(buf) + 4096u64, 65536u64)
+            let mut full: Bytes = list.with_capacity(cap)
+            list.append(mut full, buf)
+            let sg_id = match sh.subgroup {
+                ZeroSubgroup => Some(0u64),
+                ExplicitSubgroup(v) => Some(v),
+                FirstObjectSubgroup => None,
+            }
+            list.push(mut s.rx_subgroups, RxSubgroup(stream: stream, header: sh, track: take tr, default_priority: def_prio, prev_id: None, subgroup_id: sg_id, buf: take full, fin: fin, pending_obj: None))
+            rx_subgroup_readable(mut s, mut io, list.len(s.rx_subgroups) - 1, mut out)
+            return
+        }
+    }
+    let cap: u64 = int.widen(s.limits.max_early_streams)
+    if list.len(s.early_streams) >= cap {
+        tx_stop(s.transport, mut io, stream, RESET_CANCELLED)
+        return
+    }
+    list.push(mut s.early_streams, EarlyStream(stream: stream, header: SubgroupStream(sh), buf: take buf, fin: fin))
+}
+
+fn attach_or_park_fetch(mut s: Session, mut io: Io, stream: quic.StreamId, req_id: u64, take buf: Bytes, fin: bool, mut out: List[Event]) {
+    if let Some(ri) = req_by_id(s, req_id) {
+        if s.requests[ri].kind == ReqFetch && s.requests[ri].local {
+            let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
+            let go = s.requests[ri].group_order
+            if let Some(take tr) = take tr_opt {
+                let cap: u64 = order.max(list.len(buf) + 4096u64, 65536u64)
+                let mut full: Bytes = list.with_capacity(cap)
+                list.append(mut full, buf)
+                let st = codec.fetch_state(go)
+                list.push(mut s.rx_fetches, RxFetch(stream: stream, request_id: req_id, track: take tr, state: st, buf: take full, fin: fin, pending_obj: None, last_group: 0, last_object: 0, has_last: false))
+                rx_fetch_readable(mut s, mut io, list.len(s.rx_fetches) - 1, mut out)
+                return
+            }
+        }
+    }
+    let cap: u64 = int.widen(s.limits.max_early_streams)
+    if list.len(s.early_streams) >= cap {
+        tx_stop(s.transport, mut io, stream, RESET_CANCELLED)
+        return
+    }
+    list.push(mut s.early_streams, EarlyStream(stream: stream, header: FetchStream(request: req_id), buf: take buf, fin: fin))
+}
+
+fn resolve_early_streams(mut s: Session, mut io: Io, mut out: List[Event]) {
+    let mut i = 0u64
+    while i < list.len(s.early_streams) {
+        let ready = match s.early_streams[i].header {
+            SubgroupStream(sh) => req_by_alias(s, sh.alias, true) != None,
+            FetchStream(request: req_id) => req_by_id(s, req_id) != None,
+            _ => false,
+        }
+        if ready {
+            let EarlyStream(stream: st, header: take h, buf: take buf, fin: fin) = list.remove(mut s.early_streams, i)
+            match take h {
+                SubgroupStream(sh) => attach_or_park_subgroup(mut s, mut io, st, sh, take buf, fin, mut out),
+                FetchStream(request: req_id) => attach_or_park_fetch(mut s, mut io, st, req_id, take buf, fin, mut out),
+                _ => {},
+            }
+            if s.phase == Ended {
+                return
+            }
+        } else {
+            i += 1
+        }
+    }
+}
+
+fn remove_padding(mut s: Session, stream: quic.StreamId) {
+    for i in 0u64 .. list.len(s.padding_streams) {
+        if s.padding_streams[i] == stream {
+            let _ = list.remove(mut s.padding_streams, i)
+            return
+        }
+    }
+}
+
+fn remove_rx_stream(mut s: Session, stream: quic.StreamId) {
+    for i in 0u64 .. list.len(s.uni_heads) {
+        if s.uni_heads[i].stream == stream {
+            let _ = list.remove(mut s.uni_heads, i)
+            return
+        }
+    }
+    for i in 0u64 .. list.len(s.early_streams) {
+        if s.early_streams[i].stream == stream {
+            let _ = list.remove(mut s.early_streams, i)
+            return
+        }
+    }
+    for i in 0u64 .. list.len(s.rx_subgroups) {
+        if s.rx_subgroups[i].stream == stream {
+            let _ = list.remove(mut s.rx_subgroups, i)
+            return
+        }
+    }
+    for i in 0u64 .. list.len(s.rx_fetches) {
+        if s.rx_fetches[i].stream == stream {
+            let _ = list.remove(mut s.rx_fetches, i)
+            return
+        }
+    }
+    remove_padding(mut s, stream)
+}
+
+fn rx_sg_index(s: Session, stream: quic.StreamId) -> Option[u64] {
+    for i in 0u64 .. list.len(s.rx_subgroups) {
+        if s.rx_subgroups[i].stream == stream {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn rx_fetch_index(s: Session, stream: quic.StreamId) -> Option[u64] {
+    for i in 0u64 .. list.len(s.rx_fetches) {
+        if s.rx_fetches[i].stream == stream {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn encode_props_bytes(kvs: List[codec.KeyValue]) -> Bytes {
+    let mut b: Bytes = list.new()
+    if list.len(kvs) > 0 {
+        let _ = codec.write_key_values(kvs, mut b)
+    }
+    take b
+}
+
+fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+    let stream = s.rx_subgroups[idx].stream
+    loop {
+        let Some(cur) = rx_sg_index(s, stream) else {
+            return
+        }
+        let mut reset_code: Option[u64] = None
+        if !s.rx_subgroups[cur].fin {
+            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_subgroups[cur].buf)
+            if fin {
+                s.rx_subgroups[cur].fin = true
+            }
+            reset_code = rc
+        }
+        loop {
+            let Some(i) = rx_sg_index(s, stream) else {
+                return
+            }
+            let pend_opt: Option[codec.SubgroupObject] = clone(s.rx_subgroups[i].pending_obj)
+            if let Some(pending) = pend_opt {
+                let need = pending.length
+                if list.len(s.rx_subgroups[i].buf) < need {
+                    if list.capacity(s.rx_subgroups[i].buf) < need {
+                        let extra: u64 = need - list.len(s.rx_subgroups[i].buf)
+                        let _ = list.try_reserve(mut s.rx_subgroups[i].buf, extra)
+                    }
+                    break
+                }
+                let mut payload: Bytes = list.with_capacity(need)
+                list.append(mut payload, list.slice(s.rx_subgroups[i].buf, 0, need))
+                list.drop_prefix(mut s.rx_subgroups[i].buf, need)
+                s.rx_subgroups[i].pending_obj = None
+                let sg = match s.rx_subgroups[i].subgroup_id {
+                    Some(v) => v,
+                    None => pending.id,
+                }
+                s.rx_subgroups[i].subgroup_id = Some(sg)
+                let prio = match s.rx_subgroups[i].header.priority {
+                    Some(p) => p,
+                    None => s.rx_subgroups[i].default_priority,
+                }
+                let tr: codec.TrackName = clone(s.rx_subgroups[i].track)
+                let group = s.rx_subgroups[i].header.group
+                let props_kvs = pending.properties
+                let obj = Object(track: tr, group: group, subgroup: sg, id: pending.id, mode: Subgroup, publisher_priority: prio, status: pending.status, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
+                deliver_object(mut s, mut io, take obj, props_kvs, false, mut out)
+                if s.phase == Ended {
+                    return
+                }
+                continue
+            }
+            let len = list.len(s.rx_subgroups[i].buf)
+            if len == 0 {
+                break
+            }
+            let mut at = 0u64
+            match codec.read_subgroup_object(s.rx_subgroups[i].buf, mut at, len, s.rx_subgroups[i].header, s.rx_subgroups[i].prev_id) {
+                Ok(take obj_hdr) => {
+                    list.drop_prefix(mut s.rx_subgroups[i].buf, at)
+                    s.rx_subgroups[i].prev_id = Some(obj_hdr.id)
+                    if s.rx_subgroups[i].subgroup_id == None {
+                        s.rx_subgroups[i].subgroup_id = Some(obj_hdr.id)
+                    }
+                    s.rx_subgroups[i].pending_obj = Some(take obj_hdr)
+                },
+                Error(Truncated) => break,
+                Error(e) => {
+                    fail_session(mut s, mut io, refusal_code(e), b"bad subgroup object", mut out)
+                    return
+                },
+            }
+        }
+        let Some(i2) = rx_sg_index(s, stream) else {
+            return
+        }
+        if s.rx_subgroups[i2].fin {
+            let truncated = s.rx_subgroups[i2].pending_obj != None || list.len(s.rx_subgroups[i2].buf) > 0
+            if reset_code == None && truncated {
+                fail_session(mut s, mut io, ERR_TRUNCATED_OBJECT, b"truncated subgroup object", mut out)
+                return
+            }
+            if reset_code == None {
+                if let Some(last_id) = s.rx_subgroups[i2].prev_id {
+                    let sg = match s.rx_subgroups[i2].subgroup_id {
+                        Some(v) => v,
+                        None => 0,
+                    }
+                    let tr: codec.TrackName = clone(s.rx_subgroups[i2].track)
+                    let group = s.rx_subgroups[i2].header.group
+                    let eog = s.rx_subgroups[i2].header.end_of_group
+                    let _ = list.remove(mut s.rx_subgroups, i2)
+                    if !record_subgroup_fin(mut s, clone(tr), group, sg, last_id, eog) {
+                        mark_malformed(mut s, mut io, take tr, mut out)
+                    }
+                    return
+                }
+            }
+            let _ = list.remove(mut s.rx_subgroups, i2)
+            return
+        }
+        if list.len(s.rx_subgroups[i2].buf) < list.capacity(s.rx_subgroups[i2].buf) {
+            return
+        }
+    }
+}
+
+fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+    let stream = s.rx_fetches[idx].stream
+    loop {
+        let Some(cur) = rx_fetch_index(s, stream) else {
+            return
+        }
+        let mut reset_code: Option[u64] = None
+        if !s.rx_fetches[cur].fin {
+            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_fetches[cur].buf)
+            if fin {
+                s.rx_fetches[cur].fin = true
+            }
+            reset_code = rc
+        }
+        loop {
+            let Some(i) = rx_fetch_index(s, stream) else {
+                return
+            }
+            let pend_opt: Option[codec.FetchObject] = clone(s.rx_fetches[i].pending_obj)
+            if let Some(pending) = pend_opt {
+                let need = pending.length
+                if list.len(s.rx_fetches[i].buf) < need {
+                    if list.capacity(s.rx_fetches[i].buf) < need {
+                        let extra: u64 = need - list.len(s.rx_fetches[i].buf)
+                        let _ = list.try_reserve(mut s.rx_fetches[i].buf, extra)
+                    }
+                    break
+                }
+                let mut payload: Bytes = list.with_capacity(need)
+                list.append(mut payload, list.slice(s.rx_fetches[i].buf, 0, need))
+                list.drop_prefix(mut s.rx_fetches[i].buf, need)
+                s.rx_fetches[i].pending_obj = None
+                let (mode, sg) = match pending.subgroup {
+                    Some(v) => (Subgroup, v),
+                    None => (Datagram, 0u64),
+                }
+                let tr: codec.TrackName = clone(s.rx_fetches[i].track)
+                let props_kvs = pending.properties
+                let obj = Object(track: tr, group: pending.location.group, subgroup: sg, id: pending.location.object, mode: mode, publisher_priority: pending.priority, status: Normal, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
+                deliver_object(mut s, mut io, take obj, props_kvs, false, mut out)
+                if s.phase == Ended {
+                    return
+                }
+                continue
+            }
+            let len = list.len(s.rx_fetches[i].buf)
+            if len == 0 {
+                break
+            }
+            let mut at = 0u64
+            let mut st = s.rx_fetches[i].state
+            match codec.read_fetch_entry(s.rx_fetches[i].buf, mut at, len, mut st) {
+                Ok(take entry) => {
+                    s.rx_fetches[i].state = st
+                    list.drop_prefix(mut s.rx_fetches[i].buf, at)
+                    match take entry {
+                        FetchedObject(fo) => {
+                            s.rx_fetches[i].last_group = fo.location.group
+                            s.rx_fetches[i].last_object = fo.location.object
+                            s.rx_fetches[i].has_last = true
+                            s.rx_fetches[i].pending_obj = Some(fo)
+                        },
+                        EndOfRange(kind: kind, end: end) => {
+                            let from = if s.rx_fetches[i].has_last {
+                                if s.rx_fetches[i].last_group == end.group {
+                                    codec.Location(group: end.group, object: int.saturating_add(s.rx_fetches[i].last_object, 1))
+                                } else {
+                                    codec.Location(group: s.rx_fetches[i].last_group + 1, object: 0)
+                                }
+                            } else {
+                                codec.Location(group: 0, object: 0)
+                            }
+                            s.rx_fetches[i].last_group = end.group
+                            s.rx_fetches[i].last_object = end.object
+                            s.rx_fetches[i].has_last = true
+                            let tr: codec.TrackName = clone(s.rx_fetches[i].track)
+                            if kind == UnknownRange {
+                                list.push(mut out, Unknown(track: tr, from: from, to: end))
+                            } else if kind == NonExistentRange {
+                                if !record_non_existent(mut s, clone(tr), from, end) {
+                                    mark_malformed(mut s, mut io, take tr, mut out)
+                                    return
+                                }
+                            }
+                        },
+                        FetchGroupEnd => {
+                            let tr: codec.TrackName = clone(s.rx_fetches[i].track)
+                            let g = s.rx_fetches[i].last_group
+                            let o = s.rx_fetches[i].last_object
+                            if !record_group_end(mut s, clone(tr), g, o) {
+                                mark_malformed(mut s, mut io, take tr, mut out)
+                                return
+                            }
+                        },
+                        FetchTrackEnd => {
+                            let tr: codec.TrackName = clone(s.rx_fetches[i].track)
+                            let loc = codec.Location(group: s.rx_fetches[i].last_group, object: s.rx_fetches[i].last_object)
+                            if !record_track_end(mut s, clone(tr), loc) {
+                                mark_malformed(mut s, mut io, take tr, mut out)
+                                return
+                            }
+                        },
+                    }
+                },
+                Error(Truncated) => break,
+                Error(e) => {
+                    fail_session(mut s, mut io, refusal_code(e), b"bad fetch entry", mut out)
+                    return
+                },
+            }
+        }
+        let Some(i2) = rx_fetch_index(s, stream) else {
+            return
+        }
+        if s.rx_fetches[i2].fin {
+            let truncated = s.rx_fetches[i2].pending_obj != None || list.len(s.rx_fetches[i2].buf) > 0
+            if reset_code == None && truncated {
+                fail_session(mut s, mut io, ERR_TRUNCATED_OBJECT, b"truncated fetch object", mut out)
+                return
+            }
+            let _ = list.remove(mut s.rx_fetches, i2)
+            return
+        }
+        if list.len(s.rx_fetches[i2].buf) < list.capacity(s.rx_fetches[i2].buf) {
+            return
+        }
+    }
+}
+
+fn on_datagram(mut s: Session, mut io: Io, data: Bytes, mut out: List[Event]) {
+    let mut at = 0u64
+    let end = list.len(data)
+    let dg = match codec.read_datagram(data, mut at, end) {
+        Ok(DatagramPadding) => return,
+        Ok(DatagramObject(d)) => d,
+        Error(e) => {
+            fail_session(mut s, mut io, refusal_code(e), b"bad datagram", mut out)
+            return
+        },
+    }
+    let Some(ri) = req_by_alias(s, dg.alias, true) else {
+        s.dropped_early_datagrams += 1
+        return
+    }
+    let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
+    let def_prio = s.requests[ri].default_pub_priority
+    let Some(take tr) = take tr_opt else {
+        return
+    }
+    let codec.Datagram(alias: _, group: dg_group, object: dg_obj, priority: dg_prio, properties: take props_kvs, end_of_group: dg_eog, status: dg_status) = take dg
+    let prio = match dg_prio {
+        Some(p) => p,
+        None => def_prio,
+    }
+    let status = match dg_status {
+        Some(st) => st,
+        None => Normal,
+    }
+    let mut payload: Bytes = list.with_capacity(end - at)
+    list.append(mut payload, list.slice(data, at, end))
+    let obj = Object(track: take tr, group: dg_group, subgroup: 0, id: dg_obj, mode: Datagram, publisher_priority: prio, status: status, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
+    deliver_object(mut s, mut io, take obj, props_kvs, dg_eog, mut out)
+}
+
+// ---- Malformed track validation & deduplication (MOQ-3 / moqt-23 §12.1) ----
+fn guard_index(s: Session, track: codec.TrackName) -> Option[u64] {
+    for i in 0u64 .. list.len(s.guards) {
+        if s.guards[i].track == track {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn ensure_guard(mut s: Session, take track: codec.TrackName) -> u64 {
+    if let Some(i) = guard_index(s, track) {
+        return i
+    }
+    list.push(mut s.guards, TrackGuard(track: take track, malformed: false, track_end: None, group_ends: list.new(), subgroups: list.new(), seen: list.new(), non_existent: list.new()))
+    list.len(s.guards) - 1
+}
+
+fn loc_gt(a: codec.Location, b: codec.Location) -> bool {
+    a.group > b.group || (a.group == b.group && a.object > b.object)
+}
+
+fn loc_in(x: codec.Location, from: codec.Location, to: codec.Location) -> bool {
+    !loc_gt(from, x) && !loc_gt(x, to)
+}
+
+/// Check object properties against §12.1 #8, #9 and §10.7 (no track-only properties, no
+/// duplicate single-instance properties, no nested Immutable Properties).
+fn check_object_properties(kvs: List[codec.KeyValue], in_immutable: bool) -> bool {
+    let mut seen_obj_to = false
+    let mut seen_sg_to = false
+    for kv in kvs {
+        match kv {
+            Number(kind: kind, ..) => {
+                if kind == PROP_MAX_CACHE_DURATION || kind == PROP_DEFAULT_PUBLISHER_PRIORITY || kind == PROP_DEFAULT_GROUP_ORDER || kind == PROP_DYNAMIC_GROUPS {
+                    return false
+                }
+                if kind == PROP_OBJECT_DELIVERY_TIMEOUT {
+                    if seen_obj_to {
+                        return false
+                    }
+                    seen_obj_to = true
+                } else if kind == PROP_SUBGROUP_DELIVERY_TIMEOUT {
+                    if seen_sg_to {
+                        return false
+                    }
+                    seen_sg_to = true
+                }
+            },
+            Data(kind: kind, value: val) => {
+                if kind == PROP_IMMUTABLE {
+                    if in_immutable {
+                        return false
+                    }
+                    let mut at = 0u64
+                    let Ok(inner) = codec.read_key_values(val, mut at, list.len(val)) else {
+                        return false
+                    }
+                    if !check_object_properties(inner, true) {
+                        return false
+                    }
+                }
+            },
+        }
+    }
+    true
+}
+
+fn shared_bytes_eq(a: Shared[Bytes], b: Shared[Bytes]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for i in 0u64 .. list.len(a) {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn deliver_object(mut s: Session, mut io: Io, take obj: Object, props_kvs: List[codec.KeyValue], end_of_group: bool, mut out: List[Event]) {
+    let gi = ensure_guard(mut s, clone(obj.track))
+    if s.guards[gi].malformed {
+        return
+    }
+    if !check_object_properties(props_kvs, false) {
+        mark_malformed(mut s, mut io, clone(obj.track), mut out)
+        return
+    }
+    let loc = codec.Location(group: obj.group, object: obj.id)
+    if let Some(te) = s.guards[gi].track_end {
+        if loc_gt(loc, te) {
+            mark_malformed(mut s, mut io, clone(obj.track), mut out)
+            return
+        }
+    }
+    let mut past_group_end = false
+    for ge in s.guards[gi].group_ends {
+        let (g, last_o) = ge
+        if g == obj.group && obj.id > last_o {
+            past_group_end = true
+            break
+        }
+    }
+    if past_group_end {
+        mark_malformed(mut s, mut io, clone(obj.track), mut out)
+        return
+    }
+    let mut in_non_existent = false
+    for nr in s.guards[gi].non_existent {
+        let (from, to) = nr
+        if loc_in(loc, from, to) {
+            in_non_existent = true
+            break
+        }
+    }
+    if in_non_existent {
+        mark_malformed(mut s, mut io, clone(obj.track), mut out)
+        return
+    }
+    if obj.mode == Subgroup {
+        let mut found_sg = false
+        let mut sg_bad = false
+        for si in 0u64 .. list.len(s.guards[gi].subgroups) {
+            let sm = s.guards[gi].subgroups[si]
+            if sm.group == obj.group && sm.subgroup == obj.subgroup {
+                found_sg = true
+                if sm.priority != obj.publisher_priority {
+                    sg_bad = true
+                }
+                if let Some(fo) = sm.final_obj {
+                    if obj.id > fo {
+                        sg_bad = true
+                    }
+                }
+            }
+        }
+        if sg_bad {
+            mark_malformed(mut s, mut io, clone(obj.track), mut out)
+            return
+        }
+        if !found_sg {
+            list.push(mut s.guards[gi].subgroups, SubgroupMeta(group: obj.group, subgroup: obj.subgroup, priority: obj.publisher_priority, final_obj: None))
+        }
+    }
+    // §12.1 #6 & #7: duplicate check (agree -> drop silently; disagree -> malformed!).
+    let mut dup_state = 0u8
+    for prev in s.guards[gi].seen {
+        if prev.group == obj.group && prev.id == obj.id {
+            let same = prev.mode == obj.mode && prev.subgroup == obj.subgroup && prev.priority == obj.publisher_priority && prev.status == obj.status && prev.properties == obj.properties && shared_bytes_eq(prev.payload, obj.payload)
+            dup_state = if same {
+                1u8
+            } else {
+                2u8
+            }
+            break
+        }
+    }
+    if dup_state == 1 {
+        return
+    }
+    if dup_state == 2 {
+        mark_malformed(mut s, mut io, clone(obj.track), mut out)
+        return
+    }
+    if obj.status == EndOfGroup || end_of_group {
+        if !record_group_end(mut s, clone(obj.track), obj.group, obj.id) {
+            mark_malformed(mut s, mut io, clone(obj.track), mut out)
+            return
+        }
+    }
+    if obj.status == EndOfTrack {
+        if !record_track_end(mut s, clone(obj.track), loc) {
+            mark_malformed(mut s, mut io, clone(obj.track), mut out)
+            return
+        }
+    }
+    if list.len(s.guards[gi].seen) >= 1024 {
+        let _ = list.remove(mut s.guards[gi].seen, 0)
+    }
+    list.push(mut s.guards[gi].seen, SeenObj(group: obj.group, id: obj.id, mode: obj.mode, subgroup: obj.subgroup, priority: obj.publisher_priority, status: obj.status, properties: clone(obj.properties), payload: clone(obj.payload)))
+    list.push(mut out, Received(take obj))
+}
+
+fn record_group_end(mut s: Session, take track: codec.TrackName, group: u64, last_obj: u64) -> bool {
+    let gi = ensure_guard(mut s, take track)
+    for seen in s.guards[gi].seen {
+        if seen.group == group && seen.id > last_obj {
+            return false
+        }
+    }
+    for ge in s.guards[gi].group_ends {
+        let (g, prev) = ge
+        if g == group {
+            return prev == last_obj
+        }
+    }
+    list.push(mut s.guards[gi].group_ends, (group, last_obj))
+    true
+}
+
+fn record_track_end(mut s: Session, take track: codec.TrackName, loc: codec.Location) -> bool {
+    let gi = ensure_guard(mut s, take track)
+    for seen in s.guards[gi].seen {
+        if loc_gt(codec.Location(group: seen.group, object: seen.id), loc) {
+            return false
+        }
+    }
+    if let Some(prev) = s.guards[gi].track_end {
+        return prev == loc
+    }
+    s.guards[gi].track_end = Some(loc)
+    true
+}
+
+fn record_subgroup_fin(mut s: Session, take track: codec.TrackName, group: u64, sg: u64, last_obj: u64, end_of_group: bool) -> bool {
+    let gi = ensure_guard(mut s, clone(track))
+    for si in 0u64 .. list.len(s.guards[gi].subgroups) {
+        if s.guards[gi].subgroups[si].group == group && s.guards[gi].subgroups[si].subgroup == sg {
+            if let Some(prev) = s.guards[gi].subgroups[si].final_obj {
+                if prev != last_obj {
+                    return false
+                }
+            } else {
+                s.guards[gi].subgroups[si].final_obj = Some(last_obj)
+            }
+        }
+    }
+    if end_of_group {
+        return record_group_end(mut s, take track, group, last_obj)
+    }
+    true
+}
+
+fn record_non_existent(mut s: Session, take track: codec.TrackName, from: codec.Location, to: codec.Location) -> bool {
+    let gi = ensure_guard(mut s, take track)
+    for seen in s.guards[gi].seen {
+        if loc_in(codec.Location(group: seen.group, object: seen.id), from, to) {
+            return false
+        }
+    }
+    list.push(mut s.guards[gi].non_existent, (from, to))
+    true
+}
+
+/// MOQ-3: cancel every subscription/fetch for `track` on this session and emit Malformed(track).
+fn mark_malformed(mut s: Session, mut io: Io, take track: codec.TrackName, mut out: List[Event]) {
+    let gi = ensure_guard(mut s, clone(track))
+    if s.guards[gi].malformed {
+        return
+    }
+    s.guards[gi].malformed = true
+    let mut i = 0u64
+    while i < list.len(s.requests) {
+        if s.requests[i].track == Some(clone(track)) {
+            let stream = s.requests[i].stream
+            if !s.requests[i].tx_fin {
+                tx_reset(s.transport, mut io, stream, RESET_MALFORMED_TRACK, 0)
+            }
+            if !s.requests[i].rx_fin {
+                tx_stop(s.transport, mut io, stream, RESET_MALFORMED_TRACK)
+            }
+            drop_outgoing(mut s, stream)
+            remove_request(mut s, mut io, i)
+        } else {
+            i += 1
+        }
+    }
+    let mut j = 0u64
+    while j < list.len(s.rx_subgroups) {
+        if s.rx_subgroups[j].track == track {
+            tx_stop(s.transport, mut io, s.rx_subgroups[j].stream, RESET_MALFORMED_TRACK)
+            let _ = list.remove(mut s.rx_subgroups, j)
+        } else {
+            j += 1
+        }
+    }
+    let mut k = 0u64
+    while k < list.len(s.rx_fetches) {
+        if s.rx_fetches[k].track == track {
+            tx_stop(s.transport, mut io, s.rx_fetches[k].stream, RESET_MALFORMED_TRACK)
+            let _ = list.remove(mut s.rx_fetches, k)
+        } else {
+            k += 1
+        }
+    }
+    list.push(mut out, Malformed(track: take track))
+}

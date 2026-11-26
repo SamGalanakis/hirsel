@@ -122,7 +122,7 @@ fn range_kind(code: u64) -> RangeKind {
     }
 }
 
-fn param_code(p: Param) -> u64 {
+pub fn param_code(p: Param) -> u64 {
     match p {
         ObjectDeliveryTimeout(_) => OBJECT_DELIVERY_TIMEOUT,
         AuthorizationToken(_) => AUTHORIZATION_TOKEN,

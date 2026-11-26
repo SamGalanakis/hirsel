@@ -1,0 +1,649 @@
+// MOQ-1 & MOQ-2: Session lifecycle, SETUP, control stream, and transport event dispatch.
+pub fn session(side: schedule.Side, role: Role, t: Transport, limits: Limits) -> Session {
+    let (next_req, peer_water) = match side {
+        Client => (0u64, 1u64),
+        Server => (1u64, 0u64),
+    }
+    let ctrl_lim: u64 = int.widen(limits.control_bytes)
+    let ctrl_cap = order.max(ctrl_lim, codec.DEFAULT_MAX_CONTROL) + 32
+    Session(side: side, role: role, transport: t, limits: limits, phase: Connecting, scope: None, setup_authority: b"", setup_path: b"", setup_token: None, setup_sent: false, setup_received: false, goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL, peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None, peer_control: None, peer_control_buf: list.with_capacity(ctrl_cap), next_req_id: next_req, next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(), peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(), early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(), rx_subgroups: list.new(), rx_fetches: list.new(), tx_subgroups: list.new(), pub_tracks: list.new(), guards: list.new(), outgoing: list.new(), timed_out_objects: 0, timed_out_subgroups: 0, now: 0)
+}
+
+/// Optional client SETUP options (AUTHORITY, PATH, AUTHORIZATION TOKEN) before SETUP is sent.
+pub fn configure_setup(mut s: Session, take authority: Bytes, take path: Bytes, take token: Option[Bytes]) {
+    s.setup_authority = take authority
+    s.setup_path = take path
+    s.setup_token = take token
+}
+
+pub fn active_requests(s: Session) -> u64 {
+    list.len(s.requests)
+}
+
+pub fn active_subscriptions(s: Session) -> u64 {
+    let mut n = 0u64
+    for r in s.requests {
+        if r.kind == ReqSubscribe || r.kind == ReqPublish {
+            n += 1
+        }
+    }
+    n
+}
+
+pub fn early_stream_count(s: Session) -> u64 {
+    list.len(s.early_streams)
+}
+
+pub fn dropped_early_datagrams(s: Session) -> u64 {
+    s.dropped_early_datagrams
+}
+
+pub fn timed_out_objects(s: Session) -> u64 {
+    s.timed_out_objects
+}
+
+pub fn timed_out_subgroups(s: Session) -> u64 {
+    s.timed_out_subgroups
+}
+
+pub fn is_closed(s: Session) -> bool {
+    s.phase == Ended
+}
+
+pub fn is_established(s: Session) -> bool {
+    s.phase == Established
+}
+
+pub fn session_scope(s: Session) -> Option[Scope] {
+    clone(s.scope)
+}
+
+fn local_max_control(s: Session) -> u64 {
+    let lim: u64 = int.widen(s.limits.control_bytes)
+    order.max(lim, codec.DEFAULT_MAX_CONTROL)
+}
+
+fn is_client(s: Session) -> bool {
+    match s.side {
+        Client => true,
+        Server => false,
+    }
+}
+
+fn is_bidi_stream(id: quic.StreamId) -> bool {
+    let quic.StreamId(n) = id
+    (n & 2) == 0
+}
+
+fn fail_session(mut s: Session, mut io: Io, code: u64, reason: Bytes, mut out: List[Event]) {
+    if s.phase == Ended {
+        return
+    }
+    s.phase = Ended
+    tx_close(s.transport, mut io, code, reason)
+    clear_session_state(mut s)
+    list.push(mut out, Closed(code: code))
+}
+
+fn clear_session_state(mut s: Session) {
+    list.clear(mut s.requests)
+    list.clear(mut s.peer_bidi_heads)
+    list.clear(mut s.uni_heads)
+    list.clear(mut s.early_streams)
+    list.clear(mut s.padding_streams)
+    list.clear(mut s.rx_subgroups)
+    list.clear(mut s.rx_fetches)
+    list.clear(mut s.tx_subgroups)
+    list.clear(mut s.outgoing)
+}
+
+pub fn close(mut s: Session, mut io: Io, code: u64, reason: Bytes) {
+    if s.phase == Ended {
+        return
+    }
+    s.phase = Ended
+    tx_close(s.transport, mut io, code, reason)
+    clear_session_state(mut s)
+}
+
+/// Check QUIC DATAGRAM extension (moqt-23 §6.2) and kick off client SETUP once transport is ready.
+fn ensure_transport_ready(mut s: Session, mut io: Io, mut out: List[Event]) -> bool {
+    if s.phase == Ended {
+        return false
+    }
+    if s.phase != Connecting {
+        return true
+    }
+    let Some(params) = quic.peer_params(io.q, tx_conn(s.transport)) else {
+        return false
+    }
+    if params.max_datagram_frame == 0 {
+        fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"datagram extension required", mut out)
+        return false
+    }
+    s.phase = AwaitingSetup
+    if is_client(s) && !s.setup_sent {
+        send_setup(mut s, mut io, mut out)
+    }
+    s.phase != Ended
+}
+
+fn send_setup(mut s: Session, mut io: Io, mut out: List[Event]) {
+    if s.setup_sent || s.phase == Ended {
+        return
+    }
+    let id = match tx_open(s.transport, mut io, false) {
+        Ok(id) => id,
+        Error(_) => {
+            fail_session(mut s, mut io, ERR_INTERNAL_ERROR, b"open control stream failed", mut out)
+            return
+        },
+    }
+    tx_priority(s.transport, mut io, id, quic.Priority(urgency: URGENCY_CONTROL, order: 0, then: 0))
+    s.local_control = Some(id)
+    let mut opts: List[codec.KeyValue] = list.new()
+    let web = tx_is_web(s.transport)
+    // Options MUST be in ascending kind order (0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09).
+    if is_client(s) && !web && list.len(s.setup_path) > 0 {
+        list.push(mut opts, Data(kind: OPT_PATH, value: clone(s.setup_path)))
+    }
+    if let Some(tok) = s.setup_token {
+        let mut tbytes: Bytes = list.new()
+        if let Ok(()) = codec.write_token(UseValue(kind: 0, value: clone(tok)), mut tbytes) {
+            list.push(mut opts, Data(kind: OPT_AUTHORIZATION_TOKEN, value: take tbytes))
+        }
+    }
+    list.push(mut opts, Number(kind: OPT_MAX_AUTH_TOKEN_CACHE_SIZE, value: 0))
+    if is_client(s) && !web && list.len(s.setup_authority) > 0 {
+        list.push(mut opts, Data(kind: OPT_AUTHORITY, value: clone(s.setup_authority)))
+    }
+    if s.limits.filter_ranges > 0 {
+        list.push(mut opts, Number(kind: OPT_MAX_FILTER_RANGES, value: int.widen(s.limits.filter_ranges)))
+    }
+    list.push(mut opts, Data(kind: OPT_MOQT_IMPLEMENTATION, value: b"hirsel-moq/23"))
+    list.push(mut opts, Number(kind: OPT_MAX_REQUEST_UPDATES, value: DEFAULT_MAX_REQUEST_UPDATES))
+    let max_ctrl = local_max_control(s)
+    if max_ctrl > codec.DEFAULT_MAX_CONTROL {
+        let mut mc: Bytes = list.new()
+        let _ = codec.write_vi64(max_ctrl, mut mc)
+        list.push(mut opts, Data(kind: OPT_MAX_CONTROL_MESSAGE_SIZE, value: take mc))
+    }
+    let mut wire: Bytes = list.new()
+    if let Error(_) = codec.write_message(Setup(options: take opts), codec.DEFAULT_MAX_CONTROL, mut wire) {
+        fail_session(mut s, mut io, ERR_INTERNAL_ERROR, b"setup encode failed", mut out)
+        return
+    }
+    s.setup_sent = true
+    enqueue_raw(mut s, mut io, id, take wire, false)
+}
+
+pub fn accept_setup(mut s: Session, mut io: Io, take ok: Result[Scope, u64]) {
+    if s.phase == Ended {
+        return
+    }
+    match take ok {
+        Ok(take sc) => {
+            s.scope = Some(take sc)
+            if !is_client(s) && s.phase == AwaitingAccept {
+                let mut ignored: List[Event] = list.new()
+                send_setup(mut s, mut io, mut ignored)
+                if s.phase != Ended {
+                    s.phase = Established
+                }
+            }
+        },
+        Error(code) => {
+            close(mut s, mut io, code, b"setup refused")
+        },
+    }
+}
+
+pub fn send_goaway(mut s: Session, mut io: Io, uri: Bytes, timeout: u64) -> Result[(), MoqError] {
+    if s.phase == Ended || s.goaway_sent {
+        return Error(State)
+    }
+    let Some(ctrl) = s.local_control else {
+        return Error(State)
+    }
+    if is_client(s) && list.len(uri) > 0 {
+        return Error(InvalidParam)
+    }
+    let mut wire: Bytes = list.new()
+    if let Error(e) = codec.write_message(Goaway(uri: clone(uri), timeout: timeout), s.peer_max_control, mut wire) {
+        return Error(Wire(e))
+    }
+    s.goaway_sent = true
+    enqueue_raw(mut s, mut io, ctrl, take wire, false)
+    Ok(())
+}
+
+// ---- Main event loop (MOQ-1) ----
+pub fn receive(mut s: Session, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[Event]) {
+    s.now = now
+    if s.phase == Ended {
+        return
+    }
+    let _ = ensure_transport_ready(mut s, mut io, mut out)
+    for ev in events {
+        if s.phase == Ended {
+            return
+        }
+        match ev {
+            Quic(qev) => {
+                if let Native(c: c) = s.transport {
+                    on_quic_event(mut s, mut io, c, qev, mut out)
+                }
+            },
+            Web(wev) => {
+                if let Web(s: sh) = s.transport {
+                    on_web_event(mut s, mut io, sh, wev, mut out)
+                }
+            },
+        }
+    }
+}
+
+pub fn poll(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
+    s.now = now
+    if s.phase == Ended {
+        return None
+    }
+    let mut ignored: List[Event] = list.new()
+    let _ = ensure_transport_ready(mut s, mut io, mut ignored)
+    poll_subgroup_timeouts(mut s, mut io, now)
+}
+
+fn on_quic_event(mut s: Session, mut io: Io, ours: quic.ConnectionHandle, ev: quic.Event, mut out: List[Event]) {
+    match ev {
+        Connected(c: c, alpn: alpn) => {
+            if c != ours {
+                return
+            }
+            if alpn != ALPN {
+                fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"wrong alpn", mut out)
+                return
+            }
+            let _ = ensure_transport_ready(mut s, mut io, mut out)
+        },
+        Opened(c, stream) => {
+            if c != ours {
+                return
+            }
+            let _ = ensure_transport_ready(mut s, mut io, mut out)
+            if s.phase != Ended {
+                on_stream_opened(mut s, mut io, stream, is_bidi_stream(stream), mut out)
+            }
+        },
+        Readable(c, stream) => {
+            if c != ours {
+                return
+            }
+            let _ = ensure_transport_ready(mut s, mut io, mut out)
+            if s.phase != Ended {
+                on_stream_readable(mut s, mut io, stream, mut out)
+            }
+        },
+        Writable(c, stream) => {
+            if c == ours {
+                flush_outgoing(mut s, mut io, stream)
+            }
+        },
+        Acked(c, stream) => {
+            if c == ours {
+                on_stream_acked(mut s, stream)
+            }
+        },
+        Reset(c: c, s: stream, code: code, ..) => {
+            if c == ours {
+                on_stream_reset(mut s, mut io, stream, code, mut out)
+            }
+        },
+        Stopped(c, stream, code) => {
+            if c == ours {
+                on_stream_stopped(mut s, mut io, stream, code, mut out)
+            }
+        },
+        Datagram(c, data) => {
+            if c == ours {
+                let _ = ensure_transport_ready(mut s, mut io, mut out)
+                if s.phase != Ended {
+                    on_datagram(mut s, mut io, data, mut out)
+                }
+            }
+        },
+        Closed(c, reason) => {
+            if c == ours {
+                let code = match reason {
+                    Application(code: code) => code,
+                    Transport(code: code, ..) => code,
+                    _ => ERR_NO_ERROR,
+                }
+                s.phase = Ended
+                clear_session_state(mut s)
+                list.push(mut out, Closed(code: code))
+            }
+        },
+    }
+}
+
+fn on_web_event(mut s: Session, mut io: Io, ours: webtransport.SessionHandle, ev: webtransport.Event, mut out: List[Event]) {
+    match ev {
+        Ready(s: sh, protocol: proto) => {
+            if sh != ours {
+                return
+            }
+            if proto != Some(ALPN) {
+                fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"wrong wt protocol", mut out)
+                return
+            }
+            let _ = ensure_transport_ready(mut s, mut io, mut out)
+        },
+        Stream(s: sh, stream: stream, bidi: bidi) => {
+            if sh != ours {
+                return
+            }
+            let _ = ensure_transport_ready(mut s, mut io, mut out)
+            if s.phase != Ended {
+                on_stream_opened(mut s, mut io, stream, bidi, mut out)
+            }
+        },
+        Readable(sh, stream) => {
+            if sh != ours {
+                return
+            }
+            let _ = ensure_transport_ready(mut s, mut io, mut out)
+            if s.phase != Ended {
+                on_stream_readable(mut s, mut io, stream, mut out)
+            }
+        },
+        Writable(sh, stream) => {
+            if sh == ours {
+                flush_outgoing(mut s, mut io, stream)
+            }
+        },
+        Reset(s: sh, stream: stream, code: code, ..) => {
+            if sh == ours {
+                let c64: u64 = match code {
+                    Some(v) => int.widen(v),
+                    None => 0,
+                }
+                on_stream_reset(mut s, mut io, stream, c64, mut out)
+            }
+        },
+        Stopped(s: sh, stream: stream, code: code) => {
+            if sh == ours {
+                let c64: u64 = match code {
+                    Some(v) => int.widen(v),
+                    None => 0,
+                }
+                on_stream_stopped(mut s, mut io, stream, c64, mut out)
+            }
+        },
+        Datagram(sh, data) => {
+            if sh == ours {
+                let _ = ensure_transport_ready(mut s, mut io, mut out)
+                if s.phase != Ended {
+                    on_datagram(mut s, mut io, data, mut out)
+                }
+            }
+        },
+        Closed(s: sh, code: code, ..) => {
+            if sh == ours {
+                s.phase = Ended
+                clear_session_state(mut s)
+                list.push(mut out, Closed(code: int.widen(code)))
+            }
+        },
+        _ => {},
+    }
+}
+
+fn on_stream_opened(mut s: Session, mut io: Io, stream: quic.StreamId, bidi: bool, mut out: List[Event]) {
+    if bidi {
+        let cap = local_max_control(s) + 32
+        list.push(mut s.peer_bidi_heads, UniHead(stream: stream, buf: list.with_capacity(cap), fin: false))
+        bidi_head_readable(mut s, mut io, list.len(s.peer_bidi_heads) - 1, mut out)
+    } else {
+        list.push(mut s.uni_heads, UniHead(stream: stream, buf: list.with_capacity(256), fin: false))
+        uni_head_readable(mut s, mut io, list.len(s.uni_heads) - 1, mut out)
+    }
+}
+
+fn on_stream_readable(mut s: Session, mut io: Io, stream: quic.StreamId, mut out: List[Event]) {
+    if s.peer_control == Some(stream) {
+        control_readable(mut s, mut io, mut out)
+        return
+    }
+    if let Some(i) = req_by_stream(s, stream) {
+        request_readable(mut s, mut io, i, mut out)
+        return
+    }
+    for i in 0u64 .. list.len(s.peer_bidi_heads) {
+        if s.peer_bidi_heads[i].stream == stream {
+            bidi_head_readable(mut s, mut io, i, mut out)
+            return
+        }
+    }
+    for i in 0u64 .. list.len(s.uni_heads) {
+        if s.uni_heads[i].stream == stream {
+            uni_head_readable(mut s, mut io, i, mut out)
+            return
+        }
+    }
+    for i in 0u64 .. list.len(s.rx_subgroups) {
+        if s.rx_subgroups[i].stream == stream {
+            rx_subgroup_readable(mut s, mut io, i, mut out)
+            return
+        }
+    }
+    for i in 0u64 .. list.len(s.rx_fetches) {
+        if s.rx_fetches[i].stream == stream {
+            rx_fetch_readable(mut s, mut io, i, mut out)
+            return
+        }
+    }
+    if list.contains(s.padding_streams, stream) {
+        let mut sink: Bytes = list.with_capacity(1024)
+        let (fin, _) = tx_read_more(s.transport, mut io, stream, mut sink)
+        if fin {
+            remove_padding(mut s, stream)
+        }
+    }
+}
+
+fn on_stream_reset(mut s: Session, mut io: Io, stream: quic.StreamId, code: u64, mut out: List[Event]) {
+    if s.peer_control == Some(stream) {
+        fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream reset", mut out)
+        return
+    }
+    if let Some(i) = req_by_stream(s, stream) {
+        let id = s.requests[i].id
+        if !s.requests[i].tx_fin {
+            tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
+        }
+        drop_outgoing(mut s, stream)
+        remove_request(mut s, mut io, i)
+        list.push(mut out, Done(id: RequestId(id), code: code))
+        return
+    }
+    on_stream_readable(mut s, mut io, stream, mut out)
+    if s.phase == Ended {
+        return
+    }
+    remove_rx_stream(mut s, stream)
+}
+
+fn on_stream_stopped(mut s: Session, mut io: Io, stream: quic.StreamId, code: u64, mut out: List[Event]) {
+    if s.local_control == Some(stream) {
+        fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream stopped", mut out)
+        return
+    }
+    if let Some(i) = req_by_stream(s, stream) {
+        // M11: peer sent STOP_SENDING on a request stream -> free per-subscription state immediately.
+        let id = s.requests[i].id
+        if !s.requests[i].rx_fin {
+            tx_stop(s.transport, mut io, stream, code)
+        }
+        drop_outgoing(mut s, stream)
+        remove_request(mut s, mut io, i)
+        list.push(mut out, Done(id: RequestId(id), code: code))
+        return
+    }
+    drop_outgoing(mut s, stream)
+    remove_tx_subgroup(mut s, stream)
+}
+
+// ---- Control stream (SETUP and GOAWAY) ----
+fn control_readable(mut s: Session, mut io: Io, mut out: List[Event]) {
+    let Some(stream) = s.peer_control else {
+        return
+    }
+    loop {
+        let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.peer_control_buf)
+        let max = if s.setup_received {
+            local_max_control(s)
+        } else {
+            codec.DEFAULT_MAX_CONTROL
+        }
+        loop {
+            let mut at = 0u64
+            let len = list.len(s.peer_control_buf)
+            if len == 0 {
+                break
+            }
+            match codec.read_message(s.peer_control_buf, mut at, len, max) {
+                Ok(take msg) => {
+                    list.drop_prefix(mut s.peer_control_buf, at)
+                    on_control_message(mut s, mut io, take msg, mut out)
+                    if s.phase == Ended {
+                        return
+                    }
+                },
+                Error(Truncated) => break,
+                Error(e) => {
+                    let code = refusal_code(e)
+                    fail_session(mut s, mut io, code, b"malformed control message", mut out)
+                    return
+                },
+            }
+        }
+        if fin || reset != None {
+            fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream closed", mut out)
+            return
+        }
+        if list.len(s.peer_control_buf) < list.capacity(s.peer_control_buf) {
+            return
+        }
+    }
+}
+
+fn refusal_code(e: codec.WireError) -> u64 {
+    match codec.refusal(e) {
+        CloseSession(c) => c,
+        RejectRequest(c) => c,
+        NeedMore => ERR_INTERNAL_ERROR,
+    }
+}
+
+fn on_control_message(mut s: Session, mut io: Io, take msg: codec.Message, mut out: List[Event]) {
+    match take msg {
+        Setup(options: options) => {
+            if s.setup_received {
+                // MOQ-2: a second SETUP is PROTOCOL_VIOLATION.
+                fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"duplicate setup", mut out)
+                return
+            }
+            handle_setup(mut s, mut io, options, mut out)
+        },
+        Goaway(uri: uri, ..) => {
+            if !s.setup_received {
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"goaway before setup", mut out)
+                return
+            }
+            if s.goaway_received {
+                fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"duplicate goaway", mut out)
+                return
+            }
+            if !is_client(s) && list.len(uri) > 0 {
+                fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"server got goaway uri", mut out)
+                return
+            }
+            s.goaway_received = true
+            list.push(mut out, Goaway(uri: uri))
+        },
+        _ => {
+            fail_session(mut s, mut io, ERR_UNEXPECTED_MESSAGE, b"unexpected control message", mut out)
+        },
+    }
+}
+
+fn handle_setup(mut s: Session, mut io: Io, options: List[codec.KeyValue], mut out: List[Event]) {
+    let mut authority: Bytes = b""
+    let mut path: Bytes = b""
+    let mut tok: Option[Bytes] = None
+    let web = tx_is_web(s.transport)
+    match codec.max_control_message_size(options) {
+        Ok(mc) => {
+            s.peer_max_control = mc
+        },
+        Error(e) => {
+            fail_session(mut s, mut io, refusal_code(e), b"bad max control size", mut out)
+            return
+        },
+    }
+    for o in options {
+        match o {
+            Data(kind: kind, value: value) => {
+                if kind == OPT_PATH {
+                    if is_client(s) || web {
+                        fail_session(mut s, mut io, ERR_INVALID_PATH, b"path disallowed", mut out)
+                        return
+                    }
+                    path = clone(value)
+                } else if kind == OPT_AUTHORITY {
+                    if is_client(s) || web {
+                        fail_session(mut s, mut io, ERR_INVALID_AUTHORITY, b"authority disallowed", mut out)
+                        return
+                    }
+                    authority = clone(value)
+                } else if kind == OPT_AUTHORIZATION_TOKEN {
+                    let mut at = 0u64
+                    match codec.read_token(value, mut at, list.len(value)) {
+                        Ok(Delete(..)) => {
+                            fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"delete in setup", mut out)
+                            return
+                        },
+                        Ok(UseAlias(..)) => {
+                            fail_session(mut s, mut io, ERR_ROLE_VIOLATION, b"alias in setup", mut out)
+                            return
+                        },
+                        Ok(Register(value: v, ..)) => {
+                            tok = Some(v)
+                        },
+                        Ok(UseValue(value: v, ..)) => {
+                            tok = Some(v)
+                        },
+                        Error(e) => {
+                            fail_session(mut s, mut io, refusal_code(e), b"bad setup token", mut out)
+                            return
+                        },
+                    }
+                }
+            },
+            Number(kind: kind, value: value) => {
+                if kind == OPT_MAX_FILTER_RANGES {
+                    s.peer_max_filter_ranges = value
+                } else if kind == OPT_MAX_REQUEST_UPDATES {
+                    s.peer_max_request_updates = value
+                }
+            },
+        }
+    }
+    s.setup_received = true
+    if is_client(s) {
+        s.phase = Established
+    } else {
+        s.phase = AwaitingAccept
+    }
+    list.push(mut out, Setup(authority: take authority, path: take path, token: take tok))
+}

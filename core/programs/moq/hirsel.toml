@@ -5,15 +5,25 @@ charge = "charge-v1"
 
 [dependencies]
 std = { major = 1 }
+quic = { major = 1, path = "../quic" }
+webtransport = { major = 1, path = "../webtransport" }
 
 [sources]
 "wire.hirsel" = "codec"
 "params.hirsel" = "codec"
 "control.hirsel" = "codec"
 "data.hirsel" = "codec"
+"types.hirsel" = "moq"
+"transport.hirsel" = "moq"
+"session.hirsel" = "moq"
+"requests.hirsel" = "moq"
+"data_rx.hirsel" = "moq"
+"data_tx.hirsel" = "moq"
 
 [tests]
 limit = 67108864
+grants = ["Tasks"]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"session_laws.hirsel" = "laws"

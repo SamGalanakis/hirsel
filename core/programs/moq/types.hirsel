@@ -1,0 +1,407 @@
+// MOQ-1 types, moqt-23 §12 error codes, and Session state records.
+pub type Io {
+    q: quic.Endpoint,
+    w: Option[webtransport.Endpoint]
+}
+
+pub type Transport: key = Native(c: quic.ConnectionHandle) | Web(s: webtransport.SessionHandle)
+
+pub type TransportEvent = Quic(quic.Event) | Web(webtransport.Event)
+
+pub type Role: key = Publisher | Subscriber | Both
+
+pub type RequestId: key = RequestId(u64)
+
+pub type Scope: key = Scope(Bytes)
+
+pub type Mode: key = Subgroup | Datagram
+
+pub type Object {
+    track: codec.TrackName,
+    group: u64,
+    subgroup: u64,
+    id: u64,
+    mode: Mode,
+    publisher_priority: u8,
+    status: codec.ObjectStatus,
+    properties: Bytes,
+    payload: Shared[Bytes]
+}
+
+pub type Limits: key {
+    requests: u32,
+    tracks: u32,
+    control_bytes: u32,
+    filter_ranges: u16,
+    max_early_streams: u16,
+    max_timeout_ms: u64
+}
+
+pub type MoqError = Closed | Role | State | Limit | Track | InvalidParam | Wire(codec.WireError) | Quic(quic.QuicError) | Web(webtransport.WtError)
+
+pub type Event = Setup(authority: Bytes, path: Bytes, token: Option[Bytes]) | Subscribe(id: RequestId, track: codec.TrackName, filter: codec.Filter, priority: u8, token: Option[Bytes]) | Publish(id: RequestId, track: codec.TrackName, token: Option[Bytes]) | Fetch(id: RequestId, track: codec.TrackName, from: codec.Location, to: codec.Location, token: Option[Bytes]) | Received(Object) | Unknown(track: codec.TrackName, from: codec.Location, to: codec.Location) | Malformed(track: codec.TrackName) | Done(id: RequestId, code: u64) | Goaway(uri: Bytes) | Closed(code: u64)
+
+pub const ALPN: String = "moqt-23"
+
+// moqt-23 §12.2 Session Termination Codes.
+pub const ERR_NO_ERROR: u64 = 0x0
+
+pub const ERR_INTERNAL_ERROR: u64 = 0x1
+
+pub const ERR_UNAUTHORIZED: u64 = 0x2
+
+pub const ERR_PROTOCOL_VIOLATION: u64 = 0x3
+
+pub const ERR_INVALID_REQUEST_ID: u64 = 0x4
+
+pub const ERR_DUPLICATE_TRACK_ALIAS: u64 = 0x5
+
+pub const ERR_MALFORMED_KEY_VALUE: u64 = 0x6
+
+pub const ERR_INVALID_PATH: u64 = 0x8
+
+pub const ERR_MALFORMED_PATH: u64 = 0x9
+
+pub const ERR_GOAWAY_TIMEOUT: u64 = 0x10
+
+pub const ERR_CONTROL_MESSAGE_TIMEOUT: u64 = 0x11
+
+pub const ERR_DATA_STREAM_TIMEOUT: u64 = 0x12
+
+pub const ERR_AUTH_TOKEN_CACHE_OVERFLOW: u64 = 0x13
+
+pub const ERR_DUPLICATE_AUTH_TOKEN_ALIAS: u64 = 0x14
+
+pub const ERR_MALFORMED_AUTH_TOKEN: u64 = 0x16
+
+pub const ERR_UNKNOWN_AUTH_TOKEN_ALIAS: u64 = 0x17
+
+pub const ERR_EXPIRED_AUTH_TOKEN: u64 = 0x18
+
+pub const ERR_INVALID_AUTHORITY: u64 = 0x19
+
+pub const ERR_MALFORMED_AUTHORITY: u64 = 0x1a
+
+pub const ERR_TOO_MANY_REQUEST_UPDATES: u64 = 0x1b
+
+pub const ERR_INVALID_STREAM_HEADER: u64 = 0x200
+
+pub const ERR_MALFORMED_OBJECT: u64 = 0x201
+
+pub const ERR_INVALID_OBJECT_STATUS: u64 = 0x202
+
+pub const ERR_TRUNCATED_OBJECT: u64 = 0x203
+
+pub const ERR_MALFORMED_MESSAGE: u64 = 0x300
+
+pub const ERR_INVALID_FIELD: u64 = 0x301
+
+pub const ERR_INVALID_TRACK_NAMESPACE: u64 = 0x302
+
+pub const ERR_UNEXPECTED_MESSAGE: u64 = 0x303
+
+pub const ERR_ROLE_VIOLATION: u64 = 0x304
+
+pub const ERR_INVALID_PARAMETER: u64 = 0x305
+
+pub const ERR_CLOSED_CONTROL_STREAM: u64 = 0x306
+
+pub const ERR_DELTA_ENCODING_OVERFLOW: u64 = 0x400
+
+pub const ERR_FIELD_LENGTH_EXCEEDED: u64 = 0x401
+
+// moqt-23 §12.3 Request Error Codes.
+pub const REQ_INTERNAL_ERROR: u64 = 0x0
+
+pub const REQ_UNAUTHORIZED: u64 = 0x1
+
+pub const REQ_TIMEOUT: u64 = 0x2
+
+pub const REQ_NOT_SUPPORTED: u64 = 0x3
+
+pub const REQ_GOING_AWAY: u64 = 0x6
+
+pub const REQ_EXCESSIVE_LOAD: u64 = 0x9
+
+pub const REQ_UNAVAILABLE: u64 = 0xa
+
+pub const REQ_DOES_NOT_EXIST: u64 = 0x10
+
+pub const REQ_INVALID_RANGE: u64 = 0x11
+
+pub const REQ_MALFORMED_TRACK: u64 = 0x12
+
+pub const REQ_UNINTERESTED: u64 = 0x20
+
+pub const REQ_INVALID_FILTER: u64 = 0x36
+
+// moqt-23 §12.4 Publish Done & §12.5 Stream Reset Codes.
+pub const DONE_TRACK_ENDED: u64 = 0x2
+
+pub const DONE_TOO_FAR_BEHIND: u64 = 0x5
+
+pub const DONE_MALFORMED_TRACK: u64 = 0x12
+
+pub const RESET_CANCELLED: u64 = 0x1
+
+pub const RESET_DELIVERY_TIMEOUT: u64 = 0x2
+
+pub const RESET_SESSION_CLOSED: u64 = 0x3
+
+pub const RESET_MALFORMED_TRACK: u64 = 0x12
+
+// moqt-23 §9.1 Setup Options.
+const OPT_PATH: u64 = 0x01
+
+const OPT_AUTHORIZATION_TOKEN: u64 = 0x03
+
+const OPT_MAX_AUTH_TOKEN_CACHE_SIZE: u64 = 0x04
+
+const OPT_AUTHORITY: u64 = 0x05
+
+const OPT_MAX_FILTER_RANGES: u64 = 0x06
+
+const OPT_MOQT_IMPLEMENTATION: u64 = 0x07
+
+const OPT_MAX_REQUEST_UPDATES: u64 = 0x08
+
+const OPT_MAX_CONTROL_MESSAGE_SIZE: u64 = 0x09
+
+// moqt-23 §10 Properties.
+pub const PROP_OBJECT_DELIVERY_TIMEOUT: u64 = 0x02
+
+pub const PROP_MAX_CACHE_DURATION: u64 = 0x04
+
+pub const PROP_SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06
+
+pub const PROP_IMMUTABLE: u64 = 0x0b
+
+pub const PROP_DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e
+
+pub const PROP_DEFAULT_GROUP_ORDER: u64 = 0x22
+
+pub const PROP_DYNAMIC_GROUPS: u64 = 0x30
+
+// Default MAX_REQUEST_UPDATES advertised in SETUP.
+const DEFAULT_MAX_REQUEST_UPDATES: u64 = 16
+
+// MOQ-5 urgencies.
+pub const URGENCY_CONTROL: u8 = 0
+
+pub const URGENCY_REQUEST: u8 = 1
+
+pub const URGENCY_OBJECT: u8 = 2
+
+// MOQ-1: scope from SETUP's AUTHORITY and the path-abempty of its PATH (before any '?').
+pub fn default_scope(authority: Bytes, path: Bytes) -> Scope {
+    let mut path_end = list.len(path)
+    for i in 0u64 .. list.len(path) {
+        if path[i] == 0x3f {
+            path_end = i
+            break
+        }
+    }
+    let mut out: Bytes = list.with_capacity(list.len(authority) + path_end + 9)
+    let _ = codec.write_vi64(list.len(authority), mut out)
+    list.append(mut out, authority)
+    list.append(mut out, list.slice(path, 0, path_end))
+    Scope(take out)
+}
+
+/// Native QUIC TransportConfig for MoQ: ALPN `moqt-23`, QUIC DATAGRAM extension required
+/// (moqt-23 §6.2), RESET_STREAM_AT enabled by quic, and bidirectional credit matching
+/// `limits.requests` (MOQ-2).
+pub fn transport_config(limits: Limits) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, ALPN)
+    let reqs: u64 = order.max(int.widen(limits.requests), 1)
+    let ctrl: u64 = order.max(int.widen(limits.control_bytes), codec.DEFAULT_MAX_CONTROL)
+    let tracks: u64 = order.max(int.widen(limits.tracks), 1)
+    let early: u64 = int.widen(limits.max_early_streams)
+    let uni: u64 = 1 + tracks * 8 + early + 16
+    let window: u64 = order.max(ctrl * 4, 262144)
+    quic.TransportConfig(max_idle_ms: 30000, initial_max_data: window, initial_max_stream_data: order.max(ctrl * 2, 65536), max_streams_bidi: reqs, max_streams_uni: uni, max_datagram_frame: 65535, send_bytes: window, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: None)
+}
+
+type SessionPhase: key = Connecting | AwaitingSetup | AwaitingAccept | Established | Ended
+
+type ReqKind: key = ReqSubscribe | ReqPublish | ReqFetch | ReqTrackStatus | ReqPublishNamespace | ReqSubscribeNamespace | ReqSubscribeTracks
+
+type ReqState: key = Pending | Active | Closing
+
+/// One bidirectional request stream (MOQ-2).
+type ReqStream {
+    stream: quic.StreamId,
+    id: u64,
+    kind: ReqKind,
+    local: bool,
+    state: ReqState,
+    track: Option[codec.TrackName],
+    prefix: Option[codec.Namespace],
+    alias: Option[u64],
+    filter: codec.Filter,
+    priority: u8,
+    group_order: codec.Direction,
+    paused: bool,
+    sub_obj_timeout_ms: u64,
+    sub_sg_timeout_ms: u64,
+    pub_obj_timeout_ms: u64,
+    pub_sg_timeout_ms: u64,
+    default_pub_priority: u8,
+    base_group: Option[u64],
+    streams_sent: u64,
+    pending_updates: u64,
+    rx_buf: Bytes,
+    rx_fin: bool,
+    tx_fin: bool
+}
+
+/// Buffered bytes waiting for QUIC/WT stream credit.
+type OutChunk = Raw(Bytes) | SharedChunk(Shared[Bytes])
+
+type Outgoing {
+    stream: quic.StreamId,
+    chunks: List[OutChunk],
+    offset: u64,
+    fin: bool
+}
+
+/// An incoming unidirectional stream whose StreamHeader has not yet arrived whole.
+type UniHead {
+    stream: quic.StreamId,
+    buf: Bytes,
+    fin: bool
+}
+
+/// An incoming data stream parked before its subscription/fetch is known (MOQ-4).
+type EarlyStream {
+    stream: quic.StreamId,
+    header: codec.StreamHeader,
+    buf: Bytes,
+    fin: bool
+}
+
+/// An active incoming subgroup data stream.
+type RxSubgroup {
+    stream: quic.StreamId,
+    header: codec.SubgroupHeader,
+    track: codec.TrackName,
+    default_priority: u8,
+    prev_id: Option[u64],
+    subgroup_id: Option[u64],
+    buf: Bytes,
+    fin: bool,
+    pending_obj: Option[codec.SubgroupObject]
+}
+
+/// An active incoming fetch data stream.
+type RxFetch {
+    stream: quic.StreamId,
+    request_id: u64,
+    track: codec.TrackName,
+    state: codec.FetchState,
+    buf: Bytes,
+    fin: bool,
+    pending_obj: Option[codec.FetchObject],
+    last_group: u64,
+    last_object: u64,
+    has_last: bool
+}
+
+/// An active outgoing subgroup stream on a publishing subscription.
+type TxSubgroup {
+    stream: quic.StreamId,
+    req_id: u64,
+    track: codec.TrackName,
+    group: u64,
+    subgroup: u64,
+    header: codec.SubgroupHeader,
+    header_len: u64,
+    prev_id: Option[u64],
+    fin_sent: bool,
+    acked: bool,
+    sg_timeout_ms: u64,
+    sg_deadline: Option[u64]
+}
+
+/// One seen object cached for MOQ-3 §12.1 malformed-track and duplicate checks.
+type SeenObj {
+    group: u64,
+    id: u64,
+    mode: Mode,
+    subgroup: u64,
+    priority: u8,
+    status: codec.ObjectStatus,
+    properties: Bytes,
+    payload: Shared[Bytes]
+}
+
+/// Subgroup metadata observed on a track for §12.1 #1, #2, #3.
+type SubgroupMeta {
+    group: u64,
+    subgroup: u64,
+    priority: u8,
+    final_obj: Option[u64]
+}
+
+/// Per-track malformed-track state (MOQ-3 / moqt-23 §12.1).
+type TrackGuard {
+    track: codec.TrackName,
+    malformed: bool,
+    track_end: Option[codec.Location],
+    group_ends: List[(u64, u64)],
+    subgroups: List[SubgroupMeta],
+    seen: List[SeenObj],
+    non_existent: List[(codec.Location, codec.Location)]
+}
+
+/// Track-level publisher metadata (largest object, datagram tag, delivery timeouts).
+type PubTrack {
+    track: codec.TrackName,
+    tag: u64,
+    largest: Option[codec.Location],
+    obj_timeout_ms: u64,
+    sg_timeout_ms: u64
+}
+
+pub opaque type Session {
+    side: schedule.Side,
+    role: Role,
+    transport: Transport,
+    limits: Limits,
+    phase: SessionPhase,
+    scope: Option[Scope],
+    setup_authority: Bytes,
+    setup_path: Bytes,
+    setup_token: Option[Bytes],
+    setup_sent: bool,
+    setup_received: bool,
+    goaway_received: bool,
+    goaway_sent: bool,
+    peer_max_control: u64,
+    peer_max_filter_ranges: u64,
+    peer_max_request_updates: u64,
+    local_control: Option[quic.StreamId],
+    peer_control: Option[quic.StreamId],
+    peer_control_buf: Bytes,
+    next_req_id: u64,
+    next_alias: u64,
+    next_tag: u64,
+    peer_watermark: u64,
+    peer_seen_ids: std.set.Set[u64],
+    peer_bidi_heads: List[UniHead],
+    requests: List[ReqStream],
+    uni_heads: List[UniHead],
+    early_streams: List[EarlyStream],
+    dropped_early_datagrams: u64,
+    padding_streams: List[quic.StreamId],
+    rx_subgroups: List[RxSubgroup],
+    rx_fetches: List[RxFetch],
+    tx_subgroups: List[TxSubgroup],
+    pub_tracks: List[PubTrack],
+    guards: List[TrackGuard],
+    outgoing: List[Outgoing],
+    timed_out_objects: u64,
+    timed_out_subgroups: u64,
+    now: u64
+}

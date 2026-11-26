@@ -1,0 +1,503 @@
+// MS2 Session laws: M11 (cancel_frees_state) and session behavior over Native QUIC and
+// WebTransport (SETUP, tokens, narrowed REQUEST_OK/REQUEST_UPDATE, malformed tracks,
+// early stream bounds, datagram requirement).
+const MOQ_CLIENT_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 25101)
+
+const MOQ_SERVER_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 25102)
+
+fn moq_cert() -> Bytes {
+    option.unwrap(std.hex.decode(b"308201043081aba003020102020101300a06082a8648ce3d040302300c310a300806035504030c0171301e170d3236313132363030303030305a170d3236313132373030303030305a300c310a300806035504030c01713059301306072a8648ce3d020106082a8648ce3d030107034200045ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c8734640c4998ff7e374b06ce1a64a2ecd82ab036384fb83d9a79b127a27d5032300a06082a8648ce3d040302034800304502203ae1fbb72d234a6ce188c8693380ed8526f5b7fc48e3a19f12b3eefc486199a50221009a76d6d74202fdfd262bc39acea04d8d6a9924558f8e0672fbdf1e7bcfc0a537"))
+}
+
+fn moq_digest() -> Inline[u8, 32] {
+    [22, 152, 95, 217, 108, 32, 99, 25, 28, 177, 201, 36, 198, 124, 23, 187, 129, 43, 78, 68, 81, 35, 158, 172, 159, 56, 49, 60, 242, 53, 214, 166]
+}
+
+fn moq_identity() -> quic.handshake.Identity {
+    let mut scalar: Bytes = list.with_capacity(32)
+    for _ in 0u64 .. 31 {
+        list.push(mut scalar, 0)
+    }
+    list.push(mut scalar, 3)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(provide.random_tape(take scalar), "sign(p256)", mut point))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, moq_cert())
+    Identity(chain: take chain, key: take key, alg: P256)
+}
+
+fn moq_pins() -> List[quic.handshake.Pin] {
+    let mut p: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut p, Cert(moq_digest()))
+    take p
+}
+
+fn moq_endpoint_config() -> quic.EndpointConfig {
+    let reset = result.unwrap(secret.seal(b"MOQ reset key", "mac"))
+    let token = result.unwrap(secret.seal(b"MOQ token key", "kdf"))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: 16, unvalidated: 16, datagram_bytes: 131072))
+}
+
+fn moq_limits() -> moq.Limits {
+    moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+}
+
+fn wt_limits() -> webtransport.Limits {
+    let mut auths: List[String] = list.new()
+    list.push(mut auths, "server")
+    let mut origins: List[String] = list.new()
+    list.push(mut origins, "https://good.example")
+    webtransport.Limits(authorities: take auths, origins: take origins, require_origin: false, sessions: 8, sessions_per_connection: 4, pending_connects: 4, streams_bidi: 16, streams_uni: 32, data: 131072, buffered: 8, buffered_datagrams: 8, header_bytes: 4096)
+}
+
+type Peer {
+    io: moq.Io,
+    sess: Option[moq.Session],
+    events: List[moq.Event],
+    raw: List[quic.Event],
+    wt_events: List[webtransport.Event]
+}
+
+fn native_server(seed: u64, limits: moq.Limits) -> Peer {
+    let t = moq.transport_config(limits)
+    let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), Some((moq_identity(), take t))))
+    Peer(io: moq.Io(q: take q, w: None), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+}
+
+fn native_client(seed: u64) -> Peer {
+    let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), None))
+    Peer(io: moq.Io(q: take q, w: None), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+}
+
+fn wt_server(seed: u64) -> Peer {
+    let l = wt_limits()
+    let t = webtransport.transport(l)
+    let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), Some((moq_identity(), take t))))
+    Peer(io: moq.Io(q: take q, w: Some(webtransport.endpoint(take l))), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+}
+
+fn wt_client(seed: u64) -> Peer {
+    let l = wt_limits()
+    let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), None))
+    Peer(io: moq.Io(q: take q, w: Some(webtransport.endpoint(take l))), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+}
+
+fn deliver_peer(mut from: Peer, mut to: Peer, from_addr: Addr, now: u64, mut wire: Bytes, mut packets: List[quic.Output]) -> u64 {
+    list.clear(mut wire)
+    list.clear(mut packets)
+    let _ = quic.poll(mut from.io.q, now, mut wire, mut packets)
+    let mut count = 0u64
+    for output in packets {
+        if let Transmit(..) = output {
+            count += 1
+        }
+    }
+    quic.committed(mut from.io.q, now, count)
+    let mut qevents: List[quic.Event] = list.new()
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            quic.receive_datagram(mut to.io.q, now, from_addr, 0, mut wire, at, len, mut qevents)
+        }
+    }
+    let has_wt = match to.io.w {
+        Some(_) => true,
+        None => false,
+    }
+    if has_wt {
+        let mut wevs: List[webtransport.Event] = list.new()
+        if let Some(mut w) = to.io.w {
+            webtransport.receive(mut w, mut to.io.q, now, qevents, mut wevs)
+        }
+        for ev in wevs {
+            list.push(mut to.wt_events, clone(ev))
+        }
+        if let Some(mut s) = to.sess {
+            let mut tevs: List[moq.TransportEvent] = list.new()
+            for ev in wevs {
+                list.push(mut tevs, Web(clone(ev)))
+            }
+            moq.receive(mut s, mut to.io, now, tevs, mut to.events)
+        }
+    } else {
+        for ev in qevents {
+            list.push(mut to.raw, clone(ev))
+        }
+        if let Some(mut s) = to.sess {
+            let mut tevs: List[moq.TransportEvent] = list.new()
+            for ev in qevents {
+                list.push(mut tevs, Quic(clone(ev)))
+            }
+            moq.receive(mut s, mut to.io, now, tevs, mut to.events)
+        }
+    }
+    count
+}
+
+fn settle_pair(mut client: Peer, mut server: Peer, now: u64) {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    for _ in 0u64 .. 4000 {
+        let a = deliver_peer(mut client, mut server, MOQ_CLIENT_ADDR, now, mut wire, mut packets)
+        let b = deliver_peer(mut server, mut client, MOQ_SERVER_ADDR, now, mut wire, mut packets)
+        if a == 0 && b == 0 {
+            return
+        }
+    }
+    fail("moq peers never settled")
+}
+
+fn first_quic_conn(events: List[quic.Event]) -> quic.ConnectionHandle {
+    for ev in events {
+        if let Connected(c: c, ..) = ev {
+            return c
+        }
+    }
+    fail("no QUIC connection")
+}
+
+fn establish_native(mut client: Peer, mut server: Peer, limits: moq.Limits, auth: Bytes, path: Bytes, tok: Option[Bytes]) {
+    let cc = result.unwrap(quic.connect(mut client.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(limits)))
+    let mut cs = moq.session(Client, Both, Native(c: cc), limits)
+    moq.configure_setup(mut cs, clone(auth), clone(path), clone(tok))
+    client.sess = Some(take cs)
+    settle_pair(mut client, mut server, 1)
+    let sc = first_quic_conn(server.raw)
+    let mut ss = moq.session(Server, Both, Native(c: sc), limits)
+    let mut tevs: List[moq.TransportEvent] = list.new()
+    for ev in server.raw {
+        list.push(mut tevs, Quic(clone(ev)))
+    }
+    moq.receive(mut ss, mut server.io, 2, tevs, mut server.events)
+    server.sess = Some(take ss)
+    settle_pair(mut client, mut server, 3)
+    if let Some(mut s) = server.sess {
+        moq.accept_setup(mut s, mut server.io, Ok(moq.default_scope(auth, path)))
+    }
+    settle_pair(mut client, mut server, 4)
+}
+
+fn make_obj(take tr: codec.TrackName, group: u64, sg: u64, id: u64, mode: moq.Mode, prio: u8, take payload: Bytes) -> moq.Object {
+    moq.Object(track: take tr, group: group, subgroup: sg, id: id, mode: mode, publisher_priority: prio, status: Normal, properties: b"", payload: shared.new(take payload))
+}
+
+fn received_objects(events: List[moq.Event]) -> List[moq.Object] {
+    let mut out: List[moq.Object] = list.new()
+    for ev in events {
+        if let Received(o) = ev {
+            list.push(mut out, clone(o))
+        }
+    }
+    take out
+}
+
+fn has_malformed(events: List[moq.Event], tr: codec.TrackName) -> bool {
+    for ev in events {
+        if let Malformed(track: t) = ev {
+            if t == tr {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn has_closed(events: List[moq.Event], code: u64) -> bool {
+    for ev in events {
+        if let Closed(code: c) = ev {
+            if c == code {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn first_subscribe_id(events: List[moq.Event]) -> moq.RequestId {
+    for ev in events {
+        if let Subscribe(id: id, ..) = ev {
+            return id
+        }
+    }
+    fail("no Subscribe event received")
+}
+
+/// bug: cancelling a subscription leaves per-subscription state alive on the publisher, or
+/// STOP_SENDING on a request stream does not free its subscription entry.
+/// oracle: moqt-23 §6.4.2.3 and M11 (cancel_frees_state): after STOP_SENDING / cancel on a
+/// request stream, active_requests and active_subscriptions drop to 0 on both peers and
+/// Event.Done fires on the publisher.
+@test
+fn cancel_frees_state() -> Result[(), ()] {
+    let lim = moq_limits()
+    let mut client = native_client(101)
+    let mut server = native_server(102, lim)
+    establish_native(mut client, mut server, lim, b"example.com", b"/live", Some(b"tok-1"))
+    let tr = track(ns1(b"room"), b"video")
+    let req_id = if let Some(mut cs) = client.sess {
+        result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 10, Some(b"sub-tok")))
+    } else {
+        fail("missing client session")
+    }
+    settle_pair(mut client, mut server, 11)
+    let sub_id = first_subscribe_id(server.events)
+    if let Some(mut ss) = server.sess {
+        moq.accept(mut ss, mut server.io, sub_id, Ok(()))
+    }
+    settle_pair(mut client, mut server, 12)
+    if let Some(ss) = server.sess {
+        if moq.active_subscriptions(ss) != 1 || moq.active_requests(ss) != 1 {
+            fail("publisher did not record active subscription")
+        }
+    }
+    if let Some(mut ss) = server.sess {
+        result.unwrap(moq.publish(mut ss, mut server.io, 13, make_obj(clone(tr), 1, 0, 0, Subgroup, 64, b"frame-0")))
+    }
+    settle_pair(mut client, mut server, 14)
+    let got = received_objects(client.events)
+    if list.len(got) != 1 || got[0].group != 1 || got[0].id != 0 {
+        fail("subscriber did not receive object before cancel")
+    }
+    list.clear(mut server.events)
+    if let Some(mut cs) = client.sess {
+        moq.cancel(mut cs, mut client.io, req_id, moq.RESET_CANCELLED)
+        if moq.active_requests(cs) != 0 || moq.active_subscriptions(cs) != 0 {
+            fail("subscriber did not free state on cancel")
+        }
+    }
+    settle_pair(mut client, mut server, 15)
+    if let Some(ss) = server.sess {
+        if moq.active_requests(ss) != 0 || moq.active_subscriptions(ss) != 0 {
+            fail("publisher did not free subscription state after STOP_SENDING")
+        }
+    }
+    let mut saw_done = false
+    for ev in server.events {
+        if let Done(id: id, ..) = ev {
+            if id == sub_id {
+                saw_done = true
+            }
+        }
+    }
+    if !saw_done {
+        fail("publisher did not emit Event.Done when subscriber cancelled")
+    }
+    Ok(())
+}
+
+/// bug: MoQ fails to run over WebTransport, accepts SETUP without DATAGRAM extension, fails to
+/// narrow REQUEST_OK/REQUEST_UPDATE per request kind (moq.md:337), or accepts malformed tracks.
+/// oracle: docs/spec/moq.md MOQ-1..MOQ-4, MOQ-9, and moqt-23 §6.2, §9.1, §9.3, §9.5, §12.1.
+@test
+fn session_native_webtransport_and_refusals() -> Result[(), ()] {
+    // 1. default_scope strips '?query' and separates authority from path.
+    let s1 = moq.default_scope(b"a.example", b"/room/1?token=abc")
+    let s2 = moq.default_scope(b"a.example", b"/room/1?token=xyz")
+    let s3 = moq.default_scope(b"a.example/room", b"/1")
+    if s1 != s2 || s1 == s3 {
+        fail("default_scope did not strip query or collided authority/path")
+    }
+    // 2. Native QUIC: Subgroup + Datagram delivery + tokens + Malformed track detection.
+    let lim = moq_limits()
+    let mut client = native_client(201)
+    let mut server = native_server(202, lim)
+    establish_native(mut client, mut server, lim, b"moq.test", b"/app?q=1", Some(b"setup-secret"))
+    let mut saw_setup = false
+    for ev in server.events {
+        if let Setup(authority: authority, path: path, token: token) = ev {
+            if authority == b"moq.test" && path == b"/app?q=1" && token == Some(b"setup-secret") {
+                saw_setup = true
+            }
+        }
+    }
+    if !saw_setup {
+        fail("server did not surface SETUP authority, path and token")
+    }
+    let tr = track(ns2(b"ns", b"live"), b"audio")
+    let _ = if let Some(mut cs) = client.sess {
+        result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 32, Some(b"req-secret")))
+    } else {
+        fail("missing client")
+    }
+    settle_pair(mut client, mut server, 11)
+    let mut sub_id: moq.RequestId = RequestId(0)
+    let mut got_sub_tok = false
+    for ev in server.events {
+        if let Subscribe(id: id, track: t, token: token, ..) = ev {
+            if t == tr && token == Some(b"req-secret") {
+                sub_id = id
+                got_sub_tok = true
+            }
+        }
+    }
+    if !got_sub_tok {
+        fail("server did not surface per-request token")
+    }
+    if let Some(mut ss) = server.sess {
+        moq.accept(mut ss, mut server.io, sub_id, Ok(()))
+    }
+    settle_pair(mut client, mut server, 12)
+    if let Some(mut ss) = server.sess {
+        result.unwrap(moq.publish(mut ss, mut server.io, 13, make_obj(clone(tr), 2, 0, 0, Datagram, 40, b"dg-0")))
+        result.unwrap(moq.publish(mut ss, mut server.io, 14, make_obj(clone(tr), 2, 0, 0, Datagram, 40, b"dg-0")))
+    }
+    settle_pair(mut client, mut server, 15)
+    let got_dg = received_objects(client.events)
+    if list.len(got_dg) != 1 || got_dg[0].mode != Datagram {
+        fail("datagram object not delivered or duplicate not deduplicated")
+    }
+    if let Some(mut ss) = server.sess {
+        result.unwrap(moq.publish(mut ss, mut server.io, 16, make_obj(clone(tr), 2, 0, 0, Datagram, 40, b"evil")))
+    }
+    settle_pair(mut client, mut server, 17)
+    if !has_malformed(client.events, clone(tr)) {
+        fail("conflicting duplicate object did not mark track malformed")
+    }
+    if let Some(cs) = client.sess {
+        if moq.active_subscriptions(cs) != 0 {
+            fail("malformed track did not cancel subscriber's requests")
+        }
+    }
+    // 3. WebTransport session with moqt-23 protocol negotiation + object delivery.
+    let mut wc = wt_client(301)
+    let mut ws = wt_server(302)
+    let mut protos: List[String] = list.new()
+    list.push(mut protos, moq.ALPN)
+    let csh = if let Some(mut w) = wc.io.w {
+        result.unwrap(webtransport.connect(mut w, mut wc.io.q, 0, MOQ_SERVER_ADDR, "https://server/moq", moq_pins(), take protos))
+    } else {
+        fail("missing wt client")
+    }
+    settle_pair(mut wc, mut ws, 1)
+    let mut ssh_opt: Option[webtransport.SessionHandle] = None
+    for ev in ws.wt_events {
+        if let Requested(sh, req) = ev {
+            if list.contains(req.protocols, moq.ALPN) {
+                ssh_opt = Some(sh)
+            }
+        }
+    }
+    let ssh = option.unwrap(ssh_opt)
+    if let Some(mut w) = ws.io.w {
+        result.unwrap(webtransport.answer(mut w, mut ws.io.q, ssh, Accept(protocol: Some(moq.ALPN), headers: list.new())))
+    }
+    ws.sess = Some(moq.session(Server, Both, Web(s: ssh), lim))
+    wc.sess = Some(moq.session(Client, Both, Web(s: csh), lim))
+    settle_pair(mut wc, mut ws, 2)
+    if let Some(mut ss) = ws.sess {
+        moq.accept_setup(mut ss, mut ws.io, Ok(moq.default_scope(b"server", b"/moq")))
+    }
+    settle_pair(mut wc, mut ws, 3)
+    let wt_tr = track(ns1(b"wt"), b"stream")
+    let _ = if let Some(mut cs) = wc.sess {
+        result.unwrap(moq.subscribe(mut cs, mut wc.io, 4, clone(wt_tr), NoFilter, 16, None))
+    } else {
+        fail("missing wt client moq session")
+    }
+    settle_pair(mut wc, mut ws, 5)
+    let wt_sub_id = first_subscribe_id(ws.events)
+    if let Some(mut ss) = ws.sess {
+        moq.accept(mut ss, mut ws.io, wt_sub_id, Ok(()))
+    }
+    settle_pair(mut wc, mut ws, 6)
+    if let Some(mut ss) = ws.sess {
+        result.unwrap(moq.publish(mut ss, mut ws.io, 7, make_obj(clone(wt_tr), 0, 0, 0, Subgroup, 20, b"wt-hello")))
+    }
+    settle_pair(mut wc, mut ws, 8)
+    let wt_got = received_objects(wc.events)
+    if list.len(wt_got) != 1 || wt_got[0].track != wt_tr {
+        fail("WebTransport MoQ session did not deliver object")
+    }
+    // 4. Refusals: second SETUP -> PROTOCOL_VIOLATION; narrowed REQUEST_UPDATE -> INVALID_PARAMETER.
+    let mut rc = native_client(401)
+    let mut rs = native_server(402, lim)
+    let rcc = result.unwrap(quic.connect(mut rc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
+    settle_pair(mut rc, mut rs, 1)
+    let rsc = first_quic_conn(rs.raw)
+    rs.sess = Some(moq.session(Server, Both, Native(c: rsc), lim))
+    let ctrl = result.unwrap(quic.open(mut rc.io.q, rcc, false))
+    let mut two_setups: Bytes = list.new()
+    result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut two_setups))
+    result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut two_setups))
+    let _ = result.unwrap(quic.write(mut rc.io.q, rcc, ctrl, two_setups, false))
+    settle_pair(mut rc, mut rs, 2)
+    if !has_closed(rs.events, moq.ERR_PROTOCOL_VIOLATION) {
+        fail("second SETUP did not close with PROTOCOL_VIOLATION")
+    }
+    let mut nc = native_client(501)
+    let mut ns_srv = native_server(502, lim)
+    let ncc = result.unwrap(quic.connect(mut nc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
+    settle_pair(mut nc, mut ns_srv, 1)
+    let nsc = first_quic_conn(ns_srv.raw)
+    ns_srv.sess = Some(moq.session(Server, Both, Native(c: nsc), lim))
+    let nctrl = result.unwrap(quic.open(mut nc.io.q, ncc, false))
+    let mut one_setup: Bytes = list.new()
+    result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut one_setup))
+    let _ = result.unwrap(quic.write(mut nc.io.q, ncc, nctrl, one_setup, false))
+    settle_pair(mut nc, mut ns_srv, 2)
+    if let Some(mut ss) = ns_srv.sess {
+        moq.accept_setup(mut ss, mut ns_srv.io, Ok(moq.default_scope(b"", b"")))
+    }
+    settle_pair(mut nc, mut ns_srv, 3)
+    let bidi = result.unwrap(quic.open(mut nc.io.q, ncc, true))
+    let mut fetch_and_bad_upd: Bytes = list.new()
+    result.unwrap(codec.write_message(Fetch(id: 0, track: track(ns1(b"a"), b"b"), params: list.new()), codec.DEFAULT_MAX_CONTROL, mut fetch_and_bad_upd))
+    let mut bad_ps: List[codec.Param] = list.new()
+    list.push(mut bad_ps, TrackNamespacePrefix(ns1(b"x")))
+    result.unwrap(codec.write_message(RequestUpdate(id: 2, params: take bad_ps), codec.DEFAULT_MAX_CONTROL, mut fetch_and_bad_upd))
+    let _ = result.unwrap(quic.write(mut nc.io.q, ncc, bidi, fetch_and_bad_upd, false))
+    settle_pair(mut nc, mut ns_srv, 4)
+    if !has_closed(ns_srv.events, moq.ERR_INVALID_PARAMETER) {
+        fail("REQUEST_UPDATE narrowing did not refuse TRACK_NAMESPACE_PREFIX on FETCH")
+    }
+    // 5. Connection without QUIC DATAGRAM extension refused at setup (moqt-23 §6.2).
+    let mut dc = native_client(601)
+    let mut ds = native_server(602, lim)
+    let mut no_dg = moq.transport_config(lim)
+    no_dg.max_datagram_frame = 0
+    let _ = result.unwrap(quic.connect(mut dc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, take no_dg))
+    settle_pair(mut dc, mut ds, 1)
+    let dsc = first_quic_conn(ds.raw)
+    let mut dss = moq.session(Server, Both, Native(c: dsc), lim)
+    moq.receive(mut dss, mut ds.io, 2, list.new(), mut ds.events)
+    if !has_closed(ds.events, moq.ERR_PROTOCOL_VIOLATION) {
+        fail("missing QUIC DATAGRAM extension was not refused at setup")
+    }
+    // 6. Narrowing REQUEST_OK (moq.md:337): PUBLISH_NAMESPACE_OK carrying LARGEST_OBJECT is INVALID_PARAMETER.
+    let mut oc = native_client(701)
+    let mut os = native_server(702, lim)
+    let occ = result.unwrap(quic.connect(mut oc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
+    oc.sess = Some(moq.session(Client, Both, Native(c: occ), lim))
+    settle_pair(mut oc, mut os, 1)
+    let osc = first_quic_conn(os.raw)
+    let sctrl = result.unwrap(quic.open(mut os.io.q, osc, false))
+    let mut srv_setup: Bytes = list.new()
+    result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut srv_setup))
+    let _ = result.unwrap(quic.write(mut os.io.q, osc, sctrl, srv_setup, false))
+    settle_pair(mut oc, mut os, 2)
+    let _ = if let Some(mut cs) = oc.sess {
+        result.unwrap(moq.publish_namespace(mut cs, mut oc.io, 3, ns1(b"pub"), None))
+    } else {
+        fail("missing oc client")
+    }
+    settle_pair(mut oc, mut os, 4)
+    let mut peer_bidi: Option[quic.StreamId] = None
+    for ev in os.raw {
+        if let Opened(_, sid) = ev {
+            let quic.StreamId(n) = sid
+            if (n & 2) == 0 {
+                peer_bidi = Some(sid)
+            }
+        }
+    }
+    let bad_ok_stream = option.unwrap(peer_bidi)
+    let mut bad_ok_ps: List[codec.Param] = list.new()
+    list.push(mut bad_ok_ps, LargestObject(loc(1, 0)))
+    let mut bad_ok_wire: Bytes = list.new()
+    result.unwrap(codec.write_message(RequestOk(params: take bad_ok_ps, properties: list.new()), codec.DEFAULT_MAX_CONTROL, mut bad_ok_wire))
+    let _ = result.unwrap(quic.write(mut os.io.q, osc, bad_ok_stream, bad_ok_wire, false))
+    settle_pair(mut oc, mut os, 5)
+    if !has_closed(oc.events, moq.ERR_INVALID_PARAMETER) {
+        fail("REQUEST_OK narrowing did not refuse LARGEST_OBJECT on PUBLISH_NAMESPACE")
+    }
+    Ok(())
+}

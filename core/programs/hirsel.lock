@@ -89,7 +89,7 @@ edges = ["media_bits@1", "media_container@1", "rtp@1", "rtp_jitter@1", "std@1", 
 [[package]]
 id = "moq@1"
 source = "member:moq"
-edges = ["std@1"]
+edges = ["quic@1", "std@1", "webtransport@1"]
 
 [[package]]
 id = "opus@1"

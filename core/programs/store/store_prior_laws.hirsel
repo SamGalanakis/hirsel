@@ -460,8 +460,156 @@ fn batch_law_compare(candidate: PageTree, oracle: PageTree) -> Result[(), Error]
     Ok(())
 }
 
+fn source_layout_key(slot: u64) -> Bytes {
+    let mut key: Bytes = list.with_capacity(4001)
+    if slot < 2 {
+        list.fill(mut key, 4000, 97u8)
+        list.push(mut key, int.truncate(120u64 + slot))
+    } else {
+        list.fill(mut key, 500, 98u8)
+        list.push(mut key, int.truncate(118u64 + slot))
+        list.fill(mut key, 3500, 97u8)
+    }
+    take key
+}
+
+fn source_layout_equal(a: Arc[std.page.Page], b: Arc[std.page.Page]) -> bool {
+    let expected = std.page.image_of(a)
+    let found = std.page.image_of(b)
+    if std.page.payload(expected) != std.page.payload(found) || std.page.totals(a) != std.page.totals(b) {
+        return false
+    }
+    if std.page.level(expected) == 0 {
+        return true
+    }
+    for i in 0u64 .. std.page.count(expected) {
+        let left = option.unwrap(std.page.child(a, i))
+        let right = option.unwrap(std.page.child(b, i))
+        if !source_layout_equal(left, right) {
+            return false
+        }
+    }
+    true
+}
+
+fn source_layout_witness(outlined: bool) -> Result[(), Error] {
+    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut ids = 1u64
+    define_store_collection(mut base, 1, 1, mut ids)?
+    let first = ids + 1
+    let id_key = prefix(1)?
+    let mut staged = new_data_rows()
+    let mut journal: List[JournalOp] = list.new()
+    let mut edits: List[std.page.BatchEdit] = list.new()
+    for i in 0u64 .. 5 {
+        let key = source_layout_key(i)
+        let logical = logical_key(1, key)?
+        let width = if outlined {
+            1023 + (i % 3)
+        } else {
+            1024u64
+        }
+        let mut raw = prior_fixture_value(width)
+        list.set_word_le(mut raw, 0, i)
+        let value = stage_value(clone(raw), 1024)
+        let expected_value: std.page.BatchValue = match value {
+            BlobBody(shared) => BatchShared(arc.share(shared)),
+            PageValue(inline_value) => BatchBytes(clone(inline_value)),
+        }
+        list.push(mut edits, std.page.BatchEdit(key: take key, value: Some(take expected_value), prior: None))
+        push_data_row(mut staged, DataOp(key: clone(logical), value: Some(take value), trim: None, prior: None))
+        list.push(mut journal, JournalOp(key: take logical, value: Some(take raw), prior: 0, trim: None))
+    }
+    let mut expected_tree = share_page_tree(base)
+    let mut expected_next = first
+    page_result(std.page.edit_collection(mut expected_tree.root, id_key, first, mut expected_next, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.apply_sorted_batch(mut root, edits, 1024, mut stamps)
+    }))?
+    let expected = option.unwrap(std.page.collection_child(expected_tree.root, id_key))
+    let mut live_tree = share_page_tree(base)
+    let mut live_next = first
+    materialize_ordered_rows(mut live_tree, staged, InOrder, false, first, mut live_next)?
+    canonical_tree(mut live_tree)?
+    let materialized = option.unwrap(std.page.collection_child(live_tree.root, id_key))
+    if live_next != expected_next || !source_layout_equal(expected, materialized) || !page_result(std.page.canonical(materialized))? {
+        return Error(Missing("local source layout or stamps"))
+    }
+    for immutable in[true, false] {
+        let mut replay = share_page_tree(base)
+        let mut replay_ids = ids
+        let mut account = ReplayTieredAccount(total: 0, exact: true)
+        journal_apply_ops("source layout", mut replay_ids, mut replay, journal, mut account, immutable)?
+        let actual = option.unwrap(std.page.collection_child(replay.root, id_key))
+        if !page_result(std.page.canonical(actual))? || !source_layout_equal(expected, actual) || replay_ids + 1 != expected_next {
+            return Error(Missing("replay source layout or stamps"))
+        }
+        if !outlined {
+            let left = option.unwrap(std.page.child(actual, 0))
+            let right = option.unwrap(std.page.child(actual, 1))
+            if std.page.count(std.page.image_of(left)) != 3 || std.page.count(std.page.image_of(right)) != 2 {
+                return Error(Missing("five-row source separator layout"))
+            }
+        }
+        for op in journal {
+            let Some(stored) = get_page_row(replay, op.key) else {
+                return Error(Missing("source layout lost a row"))
+            }
+            let Some(wanted) = view op.value else {
+                return Error(Missing("source layout fixture deleted a row"))
+            }
+            if stored != wanted {
+                return Error(Missing("source layout changed a value"))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn source_rightmost_witness() -> Result[(), Error] {
+    let mut base = std.page.empty(0, 0, Collection)
+    let mut first_edits: List[std.page.BatchEdit] = list.new()
+    for i in 0u64 .. 5 {
+        let width = if i < 4 {
+            1000u64
+        } else {
+            200u64
+        }
+        list.push(mut first_edits, std.page.BatchEdit(key: key_word(i), value: Some(BatchBytes(prior_fixture_value(width))), prior: None))
+    }
+    let mut stamps = 1u64
+    page_result(std.page.apply_sorted_batch(mut base, first_edits, 1024, mut stamps))?
+    {
+        let Some(tail) = std.page.child(base, 1) else {
+            return Error(Missing("rightmost source fixture needs two leaves"))
+        }
+        if std.page.count(std.page.image_of(tail)) != 1 {
+            return Error(Missing("rightmost source fixture needs a sparse tail"))
+        }
+    }
+    let mut reference = arc.share(base)
+    let mut actual = arc.share(base)
+    let mut reference_stamps = stamps
+    let mut right_edits: List[std.page.BatchEdit] = list.new()
+    let mut journal: List[JournalOp] = list.new()
+    for i in 5u64 .. 7 {
+        let key = key_word(i)
+        let raw = prior_fixture_value(32)
+        list.push(mut journal, JournalOp(key: logical_key(1, key)?, value: Some(clone(raw)), prior: 0, trim: None))
+        list.push(mut right_edits, std.page.BatchEdit(key: take key, value: Some(BatchBytes(take raw)), prior: Some(0u32)))
+    }
+    page_result(std.page.apply_sorted_batch(mut reference, right_edits, 1024, mut reference_stamps))?
+    page_result(std.page.apply_sorted_source(mut actual, journal, visit_journal_edit, 0, 2, 1024, mut stamps))?
+    if reference_stamps != stamps || !source_layout_equal(reference, actual) || !page_result(std.page.canonical(actual))? {
+        return Error(Missing("rightmost source changed layout or stamps"))
+    }
+    Ok(())
+}
+
 @test
 fn sorted_batch_equivalence() -> Result[(), Error] {
+    source_layout_witness(false)?
+    source_layout_witness(true)?
+    source_rightmost_witness()?
     let mut empty = std.page.empty(0, 0, Collection)
     let mut invalid: List[std.page.BatchEdit] = list.new()
     list.push(mut invalid, std.page.BatchEdit(key: key_word(0), value: Some(BatchBytes(key_word(70))), prior: Some(0u32)))

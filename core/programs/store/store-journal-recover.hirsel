@@ -424,7 +424,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 processed = journal_sorted_run(ops, slot)
                 if processed > slot + 1 {
                     if immutable && row_count == 0 {
-                        journal_collection_bulk(file, mut tree, kind, ops, slot, processed, mut next_stamp)?
+                        journal_collection_empty(file, mut tree, ops, slot, processed, mut next_stamp)?
                         continue
                     }
                     journal_collection_batch(file, mut tree, ops, slot, processed, mut next_stamp)?
@@ -484,19 +484,8 @@ fn journal_sorted_run(ops: List[JournalOp], start: u64) -> u64 {
 }
 
 fn journal_collection_batch(file: String, mut tree: PageTree, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
-    let Some(empty_root) = view tree.empty_collection else {
-        fail("store: missing empty collection page")
-    }
-    let inline = tree.inline
     let collection = list.slice(ops[start].key, 0, 4)
-    let replayed = std.page.edit_collection(mut tree.root, collection, 0, mut draw, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-        std.page.apply_sorted_source(mut root, ops, visit_journal_edit, start, end, inline, mut stamps)?
-        if std.page.count(std.page.image_of(root)) == 0 {
-            root = arc.share(empty_root)
-        }
-        Ok(())
-    })
-    match replayed {
+    match apply_collection_batch(mut tree, collection, ops, visit_journal_edit, start, end, 0, mut draw) {
         Ok(()) => Ok(()),
         Error(MalformedPage) => Error(disk_fault(file, 0, Malformed)),
         Error(problem) => Error(page_error(problem)),
@@ -512,7 +501,7 @@ fn visit_journal_edit(ops: List[JournalOp], slot: u64, visit: scoped fn(std.page
     visit(std.page.SourceEdit(key: list.slice(op.key, 4, list.len(op.key)), value: value, prior: Some(op.prior)))
 }
 
-fn journal_collection_bulk(file: String, mut tree: PageTree, kind: std.page_descriptor.CollectionKind, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
+fn journal_collection_empty(file: String, mut tree: PageTree, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
     let mut has_put = false
     for slot in start .. end {
         let op = view ops[slot]
@@ -526,14 +515,5 @@ fn journal_collection_bulk(file: String, mut tree: PageTree, kind: std.page_desc
     if !has_put {
         return Ok(())
     }
-    let bulk = page_result(std.page.bulk_source(ops, visit_journal_put, start, end, Collection, tree.inline, mut draw))?
-    put_collection(mut tree, list.slice(ops[start].key, 0, 4), bulk, descriptor_kind_byte(kind), 0, mut draw)
-}
-
-fn visit_journal_put(ops: List[JournalOp], slot: u64, visit: scoped fn(std.page.BulkRow) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
-    let op = view ops[slot]
-    if let Some(raw) = view op.value {
-        return visit(std.page.BulkRow(key: list.slice(op.key, 4, list.len(op.key)), value: raw, charge: entry(op.key, raw)))
-    }
-    Ok(())
+    journal_collection_batch(file, mut tree, ops, start, end, mut draw)
 }

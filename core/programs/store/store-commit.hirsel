@@ -561,28 +561,30 @@ fn materialize_row(mut tree: PageTree, op: DataOp, memory_only: bool, first: u64
 }
 
 fn materialize_collection_batch(mut tree: PageTree, operations: DataRows, order: DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
-    let mut edits: List[std.page.BatchEdit] = list.with_capacity(end - start)
-    for slot in start .. end {
-        let op = ordered_row(operations, order, slot)
-        let value: Option[std.page.BatchValue] = match view op.value {
-            Some(PageValue(raw)) => Some(BatchBytes(copied(raw)?)),
-            Some(BlobBody(raw)) => Some(BatchShared(arc.share(raw))),
-            None => None,
-        }
-        let key = copied(list.slice(op.key, 4, list.len(op.key)))?
-        list.push(mut edits, std.page.BatchEdit(key: take key, value: take value, prior: None))
-    }
     let collection = list.slice(ordered_row(operations, order, start).key, 0, 4)
-    page_result(apply_collection_batch(mut tree, collection, edits, first, mut draw))
+    let edit_at = scoped fn(_unused: (), slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+        visit_materialized_edit(operations, order, slot, visit)
+    }
+    page_result(apply_collection_batch(mut tree, collection, (), edit_at, start, end, first, mut draw))
 }
 
-fn apply_collection_batch(mut tree: PageTree, collection: Bytes, edits: List[std.page.BatchEdit], first: u64, mut draw: u64) -> Result[(), std.page.Error] {
+fn visit_materialized_edit(operations: DataRows, order: DataOrder, slot: u64, visit: scoped fn(std.page.SourceEdit) -> Result[(), std.page.Error]) -> Result[(), std.page.Error] {
+    let op = ordered_row(operations, order, slot)
+    let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view op.value {
+        Some(PageValue(raw)) => Some((raw, None)),
+        Some(BlobBody(raw)) => Some((view raw, Some(raw))),
+        None => None,
+    }
+    visit(std.page.SourceEdit(key: list.slice(op.key, 4, list.len(op.key)), value: value, prior: None))
+}
+
+fn apply_collection_batch[T](mut tree: PageTree, collection: Bytes, source: T, edit_at: std.page.EditSource[T], start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), std.page.Error] {
     let inline = tree.inline
     let Some(empty_root) = view tree.empty_collection else {
         fail("store: missing empty collection page")
     }
     std.page.edit_collection(mut tree.root, collection, first, mut draw, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
-        std.page.apply_sorted_batch(mut root, edits, inline, mut stamps)?
+        std.page.apply_sorted_source(mut root, source, edit_at, start, end, inline, mut stamps)?
         if std.page.count(std.page.image_of(root)) == 0 {
             root = arc.share(empty_root)
         }

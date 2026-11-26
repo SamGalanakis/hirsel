@@ -1,5 +1,9 @@
 // Keyed claims through the HTTP router: retired routes across a result-type
 // change, quota refusal and the expiry horizon (http.md H9, K decisions).
+fn keyed_http_other_token() -> Bytes {
+    b"other"
+}
+
 fn keyed_http_claim(_grant: (), request: ClaimRequest) -> Result[Claimed, ()] {
     if list.len(request.headers) != 1 || request.headers[0].0 != "authorization" {
         return Error(())
@@ -7,7 +11,7 @@ fn keyed_http_claim(_grant: (), request: ClaimRequest) -> Result[Claimed, ()] {
     let token = view request.headers[0].1
     let key = if token == b"token" {
         b"one"
-    } else if token == b"other" {
+    } else if token == keyed_http_other_token() {
         b"other"
     } else if token == b"held" {
         b"held"
@@ -24,10 +28,14 @@ fn keyed_http_law_claim() -> Claim[()] {
 }
 
 fn keyed_http_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    keyed_http_bind_increment(mut r, keyed_http_law_claim())
+}
+
+fn keyed_http_bind_increment(mut r: Registry[(), HttpLawHandles], take claim: Claim[()]) -> Result[(), RegisterError] {
     transact(mut r, code.describe(http_op_increment), 65536u64, DEFAULT_STEPS)?
     let mut binding = http_op_binding(r, "increment", "/old", 201u16)
     binding.mode = Keyed
-    bind_keyed(mut r, take binding, KeyedRule(claim: keyed_http_law_claim(), retention_ms: 10000, keys_max: 4, principal_keys_max: 4))
+    bind_keyed(mut r, take binding, KeyedRule(claim: take claim, retention_ms: 10000, keys_max: 4, principal_keys_max: 4))
 }
 
 fn keyed_http_retired(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
@@ -139,6 +147,10 @@ type KeyedHttpLawDrive: send {
     stage: u8
 }
 
+const KEYED_HTTP_REBUILT: u8 = 4u8
+
+const KEYED_HTTP_REBUILT_RETIRED: u8 = 5u8
+
 fn keyed_http_expect(reply: HttpLawReply, status: u16, replayed: bool, body: Bytes, until: Option[Bytes], why: String) {
     let reason = string.from(why)
     let committed = !none(until)
@@ -172,6 +184,15 @@ fn keyed_http_law_drive(take job: KeyedHttpLawDrive) waits {
         let op_full = http_law_post(net, clock, address, "/first", b"carol", http_law_stream(birth, 2u32), 0u64, b"{}", 1000u32)
         keyed_http_expect(op_full, 503u16, false, op_full.body, None, "a full op of live rows admitted a free principal")
         keyed_http_expect(http_law_post(net, clock, address, "/first", b"alice", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32), 201u16, true, b"\"1\"", until, "the 503s disturbed alice's live claim")
+    } else if stage == KEYED_HTTP_REBUILT || stage == KEYED_HTTP_REBUILT_RETIRED {
+        let replay = http_law_post(net, clock, address, "/.hirsel/op/increment", b"token", http_law_stream(birth, 0u32), 0u64, b"{}", 1000u32)
+        keyed_http_expect(replay, 201u16, true, b"\"1\"", until, "a rebuilt claim did not replay the original reply")
+        if stage == KEYED_HTTP_REBUILT {
+            let direct = http_law_post(net, clock, address, "/old", b"new-direct", http_law_stream(birth, 1u32), 0u64, b"{}", 1000u32)
+            keyed_http_expect(direct, 201u16, false, b"\"2\"", until, "the edited claim body did not run")
+            let reached = http_law_post(net, clock, address, "/old", b"new-helper", http_law_stream(birth, 2u32), 0u64, b"{}", 1000u32)
+            keyed_http_expect(reached, 201u16, false, b"\"3\"", until, "the edited helper did not run")
+        }
     } else if stage == 1u8 {
         // The first of two deploys: the result type changed under a new op,
         // and the old op answers through its Retired binding.
@@ -224,7 +245,7 @@ fn keyed_http_law_cycle(dir: Dir, clock: Clock, random: Random, tasks: Tasks, ne
     options.create = stage == 0u8 || stage == 3u8
     let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
     let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(definition, HTTP_LAW_PLACE_BYTES), None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
-    let retired = if stage == 1u8 || stage == 2u8 {
+    let retired = if stage == 1u8 || stage == 2u8 || stage == KEYED_HTTP_REBUILT_RETIRED {
         Some(result.unwrap(http_retirements(db, reg)))
     } else {
         None
@@ -629,8 +650,104 @@ fn placing_keyed_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), Regist
     bind_retired(mut r, "increment-text", Post, "/new", Retirement(claim: keyed_http_law_claim(), keys_max: 4))
 }
 
+fn keyed_http_settings(c: Clock, random: Random, tasks: Tasks, net: Net) -> PlaceConfig[(), HttpLawHandles, ()] {
+    PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(keyed_http_place), n_place: HTTP_LAW_PLACE_BYTES, on_migrate: None, schema: code.describe(http_law_schema), session: wire_defaults(262144u64), max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net, tasks, clock: c, random, stop: Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+}
+
 @test
 fn placing_keyed_registers_once_across_launches(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), u64] {
-    let settings: PlaceConfig[(), HttpLawHandles, ()] = PlaceConfig(backing: Memory, sizes: store.derived_sizes(), selection: Current(0u64), place: code.describe(placing_keyed_place), n_place: HTTP_LAW_PLACE_BYTES, on_migrate: None, schema: code.describe(http_law_schema), session: wire_defaults(262144u64), max_sessions: 4u64, proxies: list.new(), n_publisher: 4194304u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net, tasks, clock: c, random, stop: Stop(lag_ms: 1u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+    let mut settings = keyed_http_settings(c, random, tasks, net)
+    settings.place = code.describe(placing_keyed_place)
     placing_law(settings, 3u64)
+}
+
+@test
+fn keyed_http_open_requires_claim_mint(c: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    for supplied in[false, true] {
+        let mut settings = keyed_http_settings(c, random, tasks, net)
+        if supplied {
+            settings.grants = Some(Grants(attempt: None, call: None, claim: None, bind: None))
+        }
+        let (stop, requests): (Sender[()], Receiver[()]) = channel.new(1u64)
+        result.unwrap(channel.send(stop, ()))
+        let status = result.unwrap(status_root())
+        match operate(take settings, take requests, status, None) {
+            Error(Open(KeyedNoGrant(op))) if op == b"increment" => (),
+            Error(take problem) => fail(start_text(take problem)),
+            Ok(_) => fail("opening a keyed place with no claim mint must return KeyedNoGrant(increment)"),
+        }
+        let _ = take stop
+    }
+    Ok(())
+}
+
+fn keyed_http_different_claim(grant: (), request: ClaimRequest) -> Result[Claimed, ()] {
+    keyed_http_claim(grant, request)
+}
+
+fn keyed_http_changed_function() -> Claim[()] {
+    let mut claim = keyed_http_law_claim()
+    claim.f = code.describe(keyed_http_different_claim)
+    take claim
+}
+
+fn keyed_http_changed_headers() -> Claim[()] {
+    let mut claim = keyed_http_law_claim()
+    list.push(mut claim.headers, "x-extra-claim-input")
+    take claim
+}
+
+fn keyed_http_keyed_new_function(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    keyed_http_bind_increment(mut r, keyed_http_changed_function())
+}
+
+fn keyed_http_keyed_new_headers(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    keyed_http_bind_increment(mut r, keyed_http_changed_headers())
+}
+
+fn keyed_http_retired_new_function(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    bind_retired(mut r, "increment", Post, "/old", Retirement(claim: keyed_http_changed_function(), keys_max: 4))
+}
+
+fn keyed_http_retired_new_headers(mut r: Registry[(), HttpLawHandles]) -> Result[(), RegisterError] {
+    bind_retired(mut r, "increment", Post, "/old", Retirement(claim: keyed_http_changed_headers(), keys_max: 4))
+}
+
+fn keyed_http_refuse_changed_claim(dir: Dir, clock: Clock, random: Random, tasks: Tasks, definition: HttpOpPlace) waits {
+    let mut options = result.unwrap(store.sized(Directory, 2147483648u64))
+    options.create = false
+    let mut db = result.unwrap(store.open(tasks, dir, clock, random, options))
+    let placing = placing_at(definition, HTTP_LAW_PLACE_BYTES)
+    let (take reg, take handles, _, take identity) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing, None, code.describe(http_law_schema), HTTP_LAW_PLACE_BYTES, tasks))
+    let (head, requests): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(16u64)
+    let _ = take head
+    let mail = result.unwrap(mailbox(16u64))
+    let opened = run_head(take db, take reg, take identity, take handles, take placing, HTTP_LAW_PLACE_BYTES, take requests, take mail, tasks, 1048576u64, None, None)
+    match take opened {
+        Error(KeyedOpChanged(op, _)) if op == b"increment" => (),
+        Error(take problem) => fail(start_text(Open(take problem))),
+        Ok(_) => fail("changing the keyed claim function or header names must refuse the open"),
+    }
+}
+
+// The HTTP harness builds this entry twice from the same source package and
+// changes the claim body and its helper before the second build.
+pub fn keyed_http_claim_deploy(dir: Dir, random: Random, tasks: Tasks, net: Net, argv: Args) -> Result[(), Exit] waits {
+    let phase = option.unwrap(args.get(argv, 0u64))
+    let (clock, take wall) = provide.clock(0u64, 100u64)
+    if phase == "seed" {
+        keyed_http_law_cycle(dir, clock, random, tasks, net, code.describe(keyed_http_place), 0u8)
+    } else if phase == "replay" {
+        keyed_http_law_cycle(dir, clock, random, tasks, net, code.describe(keyed_http_place), KEYED_HTTP_REBUILT)
+        keyed_http_law_cycle(dir, clock, random, tasks, net, code.describe(keyed_http_retired), KEYED_HTTP_REBUILT_RETIRED)
+    } else if phase == "refuse" {
+        let changed: Inline[HttpOpPlace, 4] =[code.describe(keyed_http_keyed_new_function), code.describe(keyed_http_keyed_new_headers), code.describe(keyed_http_retired_new_function), code.describe(keyed_http_retired_new_headers)]
+        for i in 0u64 .. 4u64 {
+            keyed_http_refuse_changed_claim(dir, clock, random, tasks, changed[i])
+        }
+    } else {
+        return Error(Exit(status: 2u8))
+    }
+    let _ = take wall
+    Ok(())
 }

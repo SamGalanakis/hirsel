@@ -8,7 +8,7 @@ type WebhookMintMode: shareable + send {
     refuse: bool
 }
 
-type WebhookLawEvent: key + send = CalledWire | ClaimHeaders(u64) | FreshnessRead(u64) | VerifiedGithub
+type WebhookLawEvent: key + send = CalledWire | ClaimHeaders(u64) | FreshnessRead(u64) | VerifiedGithub | ClaimFault | ClaimStepping | ClaimFinished(u64)
 
 type WebhookLawGrant: send {
     secret: Secret,
@@ -82,6 +82,20 @@ fn webhook_law_wire(grant: WebhookLawGrant, _credential: Bytes) -> Result[BoundC
     Error(Rejected)
 }
 
+fn webhook_law_refusing_claim(grant: WebhookLawGrant, request: ClaimRequest) -> Result[Claimed, ()] {
+    if request.body == b"fault" {
+        let _ = channel.try_send(grant.seen, ClaimFault)
+        fail("claim fixture fault")
+    }
+    let _ = channel.try_send(grant.seen, ClaimStepping)
+    let mut sum = list.len(request.body)
+    for i in 0u64 .. 8192u64 {
+        sum += i
+    }
+    let _ = channel.try_send(grant.seen, ClaimFinished(sum))
+    Ok(Claimed(caller: store.Caller(issuer: 9u8, subject: b"hook"), key: b"bounded"))
+}
+
 fn github_law_claim(grant: WebhookLawGrant, request: ClaimRequest) -> Result[Claimed, ()] {
     let fields = view request.headers
     if list.len(fields) != 2 || fields[0].0 != "x-github-delivery" || fields[1].0 != "x-hub-signature-256" {
@@ -122,7 +136,7 @@ fn webhook_law_place(mut r: Registry[WebhookLawGrant, HttpLawHandles]) -> Result
     transact(mut r, code.describe(webhook_law_entry), 65536, DEFAULT_STEPS)?
     let mut fields: List[FieldSource] = list.new()
     list.push(mut fields, FieldSource(field: "test", source: Body))
-    for op in["hook", "tiny", "github"] {
+    for op in["hook", "tiny", "github", "fault", "steps"] {
         let mut route = string.from("/")
         string.push(mut route, op)
         let binding = HttpBinding(op: string.from(op), method: Post, path: take route, entry: http_law_key(r.t.exported[0u64]), fields: clone(fields), mode: Keyed, ok_status: 201u16, error_status: 422u16, body_max: 1024, arg_max: 65536, deadline_ms: 1000, steps: DEFAULT_STEPS)
@@ -130,12 +144,21 @@ fn webhook_law_place(mut r: Registry[WebhookLawGrant, HttpLawHandles]) -> Result
             github_law_rule()
         } else if op == "tiny" {
             webhook_law_rule(1)
+        } else if op == "fault" {
+            webhook_law_refusal_rule(DEFAULT_STEPS)
+        } else if op == "steps" {
+            webhook_law_refusal_rule(1024)
         } else {
             webhook_law_rule(8192)
         }
         bind_keyed(mut r, take binding, take rule)?
     }
     Ok(())
+}
+
+fn webhook_law_refusal_rule(steps: u64) -> KeyedRule[WebhookLawGrant] {
+    let claim = Claim(f: code.describe(webhook_law_refusing_claim), headers: list.new(), claim_bytes: 8192, claim_steps: steps)
+    KeyedRule(claim: take claim, retention_ms: 2000, keys_max: 1, principal_keys_max: 1)
 }
 
 fn webhook_law_rule(claim_bytes: u64) -> KeyedRule[WebhookLawGrant] {
@@ -303,13 +326,18 @@ fn webhook_law_history(take job: WebhookLawHistory) waits {
     if limited.status != 401u16 || limited.committed {
         fail("a request that exceeds the claim allowance should give 401")
     }
+    // Both bodies would fail JSON preparation if the router ran it first.
+    let fault = webhook_law_request(net, time, address, b"/fault", b"", b"fault")
+    keyed_http_expect(fault, 401u16, false, b"", None, "a claim function fault did not give an uncommitted 401")
+    let steps = webhook_law_request(net, time, address, b"/steps", b"", b"steps")
+    keyed_http_expect(steps, 401u16, false, b"", None, "an exhausted claim step bound did not give an uncommitted 401")
     latest.publish(mode, arc.new(WebhookMintMode(refuse: true)))
     let mint_failed = webhook_law_post(net, time, address, b"/tiny", first_key, string.as_bytes(WEBHOOK_SIGNATURE))
     if mint_failed.status != 503u16 || mint_failed.retry_after != Some(5u64) || mint_failed.committed {
         fail("a failed claim mint must take precedence over the claim-input bound")
     }
-    let reads: Inline[WebhookLawEvent, 27] =[ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(1614265630999), ClaimHeaders(3), FreshnessRead(1614265631000), ClaimHeaders(3), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(4), VerifiedGithub, VerifiedGithub, VerifiedGithub]
-    for i in 0u64 .. 27 {
+    let reads: Inline[WebhookLawEvent, 29] =[ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(1614265630999), ClaimHeaders(3), FreshnessRead(1614265631000), ClaimHeaders(3), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(3), FreshnessRead(WEBHOOK_TIME), ClaimHeaders(4), VerifiedGithub, VerifiedGithub, VerifiedGithub, ClaimFault, ClaimStepping]
+    for i in 0u64 .. 29 {
         match channel.try_receive(observed) {
             Ok(value) if value == reads[i] => (),
             _ => fail("claim start or freshness read differs from the delivery script"),
@@ -351,6 +379,13 @@ fn keyed_http_webhook_history(d: Dir, random: Random, tasks: Tasks, net: Net) ->
         Error(Failed(causes)) => fail(http_law_cause(causes)),
         Error(Cancelled(causes)) => fail(http_law_cause(causes)),
     }
+    let mut reopened = options
+    reopened.create = false
+    let stored = result.unwrap(store.open(tasks, dir, clock, random, reopened))
+    if !none(result.unwrap(store.keyed_policy(stored, b"fault"))) || !none(result.unwrap(store.keyed_policy(stored, b"steps"))) {
+        fail("a failed claim function left a keyed operation in the store")
+    }
+    result.unwrap(store.close(take stored))
     result.unwrap(std.dir.remove_all(d, name))
     Ok(())
 }

@@ -23,14 +23,16 @@ def run(command, *, expected=None, json_output=False):
     if expected is not None:
         env["HIRSEL_L15_BODY_RUNS"] = str(expected)
     result = subprocess.run(
-        command, cwd=ROOT, check=True, env=env, text=True, capture_output=True,
+        command, cwd=ROOT, env=env, text=True, capture_output=True,
     )
+    if result.returncode:
+        raise RuntimeError(f"{command!r} exited {result.returncode}\n{result.stdout}{result.stderr}")
     if json_output:
         return json.loads(result.stdout)
     return result.stderr
 
 
-def fixture(work, compiler, cc):
+def runner_fixture_sources(work):
     (work / "hirsel.toml").write_text('[workspace]\nmembers = ["runner", "store"]\n')
     source = work / "runner"
     manifest = (RUNNER / "hirsel.toml").read_text()
@@ -41,10 +43,16 @@ def fixture(work, compiler, cc):
     for path in ["hirsel.toml", *existing, *tests]:
         (source / path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(RUNNER / path, source / path)
-    shutil.copytree(RUNNER.parent / "store", work / "store")
+    shutil.copytree(RUNNER.parent / "store", work / "store",
+                    ignore=shutil.ignore_patterns(".hirsel-core"))
     manifest_file = source / "hirsel.toml"
     fixtures = [f'{json.dumps(path)} = {json.dumps(module)}' for path, module in tests.items() if path not in existing]
     manifest_file.write_text(manifest.split("[tests]\n", 1)[0] + "\n".join(fixtures) + "\n")
+    return source
+
+
+def fixture(work, compiler, cc):
+    source = runner_fixture_sources(work)
     directory = work / "disk"
     directory.mkdir()
     binary = work / "restart"
@@ -62,11 +70,46 @@ def fixture(work, compiler, cc):
         print(f"L15 {phase} | {expected} body runs")
 
 
+def keyed_claim_rebuild(work, compiler, runtime, engine, cc):
+    work.mkdir()
+    source = runner_fixture_sources(work)
+    directory = work / "disk"
+    directory.mkdir()
+    command = [
+        compiler, "build", source, "--entry", "runner@1/runner/keyed_http_claim_deploy",
+        "--backend", engine, "--libraries", ROOT / "core", "--recording",
+        "--cc", cc, "--limit", "67108864", "--dir", directory,
+        "--grant", "Random", "--grant", "Tasks", "--grant", NET,
+    ]
+    if runtime is not None:
+        command.extend(["--runtime", runtime])
+    before = work / "before"
+    run([*command, "-o", before])
+    run([before, "seed"])
+
+    claim = source / "runner-keyed-http-law.hirsel"
+    changed = claim.read_text()
+    for old, new in (
+        ('fn keyed_http_other_token() -> Bytes {\n    b"other"', 'fn keyed_http_other_token() -> Bytes {\n    b"new-helper"'),
+        ('token == b"held"', 'token == b"new-direct"'),
+    ):
+        if changed.count(old) != 1:
+            raise RuntimeError(f"expected one claim fixture edit for {old!r}")
+        changed = changed.replace(old, new)
+    claim.write_text(changed)
+    after = work / "after"
+    run([*command, "-o", after])
+    run([after, "replay"])
+    run([after, "refuse"])
+    print(f"{engine} runner | rebuilt claim replay and open refusals")
+
+
 KEYED_REPLAY_CASES = {
     "runner": (
         "keyed_http_webhook_history",
         "keyed_http_horizon_at_deciding_admission",
         "keyed_http_claim_route_and_alias",
+        "keyed_http_open_requires_claim_mint",
         "quiet_reopen_recovers_bound_claims_once",
         "test_upkeep_rest_at_max_store_time",
     ),
@@ -137,7 +180,7 @@ def check_keyed_clock(test):
         expected_freshness = [WEBHOOK_WALL_MS, WEBHOOK_WALL_MS, 1614265630999,
                               1614265631000, *([WEBHOOK_WALL_MS] * 7)]
         expect_wall_reads(name, (e for e in events if e[1] == 1),
-                          [("Date", 1, WEBHOOK_WALL_MS)] * 18)
+                          [("Date", 1, WEBHOOK_WALL_MS)] * 20)
         expect_wall_reads(name, (e for e in events if e[1] == 2),
                           [("freshness", 2, value) for value in expected_freshness])
     elif name == "quiet_reopen_recovers_bound_claims_once":
@@ -164,7 +207,7 @@ def keyed_clock_linker(work):
     return wrapper
 
 
-def keyed_replay(compiler, runtime, engine, cc):
+def keyed_replay(compiler, runtime, engine, cc, work):
     for package, cases in KEYED_REPLAY_CASES.items():
         command = [compiler, "test", RUNNER.parent / package, "--libraries", ROOT / "core",
                    "--backend", engine, "--replay", "--rerun", "--cc", cc, "-j", "1", "--json"]
@@ -180,6 +223,7 @@ def keyed_replay(compiler, runtime, engine, cc):
         for test in verdict["tests"]:
             check_keyed_clock(test)
         print(f"{engine} {package} | {len(passed)} keyed replay laws")
+    keyed_claim_rebuild(work, compiler, runtime, engine, cc)
 
 
 def main():
@@ -194,7 +238,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="hirsel-http-keyed-") as temp:
             cc = keyed_clock_linker(Path(temp))
             with ThreadPoolExecutor(max_workers=2) as pool:
-                jobs = [pool.submit(keyed_replay, compiler, runtime, engine, cc)
+                jobs = [pool.submit(keyed_replay, compiler, runtime, engine, cc, Path(temp) / engine)
                         for engine in ("cranelift", "llvm")]
                 for job in jobs:
                     job.result()

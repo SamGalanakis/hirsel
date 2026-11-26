@@ -915,5 +915,36 @@ fn u5_replays_at_another_worker_count() {
                 "{at}: {frames:#?}"
             );
         }
+        // A helper whose replay diverges ends there while the others run to
+        // their verdicts on the one worker: its entry's `Secret` designation
+        // moves to stream 99, so its send (its frame 1) is the one line.
+        let path = dir.path().join(format!("u5w-{backend:?}-1.tape"));
+        let tape = std::fs::read(&path).unwrap();
+        let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+            std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+        })
+        .unwrap()
+        .1
+        .tape_id;
+        let wrong = u4_patched(&tape, &tape_id, 1, |payload| {
+            let Some(i) = payload
+                .windows(8)
+                .position(|w| w[..2] == [1, 7] && w[3..] == [1, 0, 0, 0, 0])
+            else {
+                return false;
+            };
+            payload[i + 4] = 99;
+            true
+        });
+        let corrupt = dir.path().join(format!("u5w-{backend:?}-diverged.tape"));
+        std::fs::write(&corrupt, wrong).unwrap();
+        let argv = ["--hirsel-replay-recording", "same", corrupt.to_str().unwrap()];
+        let (code, out, err) = run(&program, &argv, None, "1");
+        assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} diverged: {err}");
+        let lines: Vec<_> = err.lines().collect();
+        assert!(
+            matches!(&lines[..], [l] if l.starts_with("replay: Diverged(Arg) at 1 in root.0 ")),
+            "{backend:?} diverged: {err}"
+        );
     }
 }

@@ -4,8 +4,8 @@
 [Outbound HTTP/1.1](http_client.md).
 
 `defaults()` sets ceilings of 512 sockets, HTTP connections, first-phase
-connections and sockets per source IP. It sets 8 KiB head and output buffers,
-64 fields, a 256 KiB handler budget, 16 refusal workers and a 64-event
+connections and sockets per source IP. It sets a `http1.HEAD_MAX` (32 KiB) head
+bound, an 8 KiB output buffer, 64 fields, a 256 KiB handler budget, 16 refusal workers and a 64-event
 supervisor inbox. Upgrades and event streams are disabled.
 
 `serve(take listeners, clock, tasks, take config, take routes, take state)`
@@ -105,7 +105,7 @@ unknown coding gives 501 and close when no earlier framing error applies
 (§6.1). A single `chunked` selects chunked framing. A valid length above the
 body cap gives 413 and close. The selector allocates nothing and performs no I/O.
 
-`decoder(frame, head, body_max)` starts fixed storage after successful framing.
+`decoder(frame, head, body_max, head_max)` starts fixed storage after successful framing.
 `decode(mut decoder, input)` consumes a fresh input fragment and returns one
 `Data(Span)` into it, `More`, `Done` or `Failed(BodyError)`. `decoder.used` is the
 consumed prefix of that call's input, including framing bytes. Pass the
@@ -122,7 +122,8 @@ directly into output. Call it only with a byte count within that window.
 Chunk lines include CRLF in their 1024-byte bound. Chunk extensions follow RFC
 9112 section 7.1.1's token and quoted-string syntax, then are discarded. Trailer
 fields follow strict head-field syntax with CRLF and share the original head's
-8192-byte and 64-field bounds. Excess trailers are 431 and close. The decoder
+`head_max` (the server's configured bound, `http1.HEAD_MAX` for clients) and
+64-field bounds. Excess trailers are 431 and close. The decoder
 retains counts, not the Head or trailer values. A failure remains sticky across
 further reads and EOF, so a handler catching it cannot restore reuse. All of
 these operations allocate nothing and perform no I/O.

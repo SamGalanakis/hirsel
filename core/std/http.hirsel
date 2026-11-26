@@ -672,7 +672,7 @@ pub type Config: shareable + send {
 
 /// Standalone server ceilings. A connection reserves its bytes at spawn.
 pub fn defaults() -> Config {
-    Config(ingress: list.new(), sockets_max: 512, http_max: 512, upgrades_max: 0, conns_max: 512, ip_sockets_max: 512, refuse_max: 16, refuse_ms: 1000, inbox_cap: 64, head_max: 8192, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 1048576, out_cap: 8192, handler_bytes: 262144, first_head_ms: 5000, idle_ms: 60000, head_ms: 10000, body_ms: 30000, handler_ms: 30000, write_ms: 30000, drain_ms: 2000, linger_ms: 2000, drain_max: 65536, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    Config(ingress: list.new(), sockets_max: 512, http_max: 512, upgrades_max: 0, conns_max: 512, ip_sockets_max: 512, refuse_max: 16, refuse_ms: 1000, inbox_cap: 64, head_max: http1.HEAD_MAX, fields_max: 64, pipeline_max: 8192, body_inline: 16384, body_max: 1048576, out_cap: 8192, handler_bytes: 262144, first_head_ms: 5000, idle_ms: 60000, head_ms: 10000, body_ms: 30000, handler_ms: 30000, write_ms: 30000, drain_ms: 2000, linger_ms: 2000, drain_max: 65536, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
 }
 
 pub opaque scoped type Request {
@@ -1005,7 +1005,6 @@ pub opaque scoped type Body {
     scratch: Bytes,
     scratch_at: u64,
     decoder: Decoder,
-    head_max: u64,
     fields_max: u64,
     clock: Clock,
     stop: Option[DrainSignal],
@@ -1108,7 +1107,7 @@ fn body_piece(mut b: Body, max: u64) -> BodyPiece {
     } else {
         b.scratch_at += b.decoder.used
     }
-    if b.decoder.trailer_bytes > b.head_max || b.decoder.trailer_fields > b.fields_max {
+    if b.decoder.trailer_fields > b.fields_max {
         return BodyFailed(body_fault(mut b, 431))
     }
     match result {
@@ -1912,7 +1911,7 @@ fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: C
         }
         list.clear(mut scratch)
         let (reuse, input_at, scratch_at, offer) = {
-            let initial = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max), head_max: cfg.head_max, fields_max: cfg.fields_max, clock: c, stop: share_signal(signal), body_deadline: clock.deadline_after_ms(completed, cfg.body_ms), handler_deadline: clock.deadline_after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, read_control: ReadControl(inbox: channel.sender(inbox), slot: slot), fault: None, output_failed: false)
+            let initial = Body(input: view input, input_at: head.end, reader: take reader, writer: take writer, scratch: take scratch, scratch_at: 0, decoder: decoder(frame, head, cfg.body_max, cfg.head_max), fields_max: cfg.fields_max, clock: c, stop: share_signal(signal), body_deadline: clock.deadline_after_ms(completed, cfg.body_ms), handler_deadline: clock.deadline_after_ms(completed, cfg.handler_ms), write_ms: cfg.write_ms, pipeline_max: cfg.pipeline_max, expect_continue: policy.expect_continue, read_control: ReadControl(inbox: channel.sender(inbox), slot: slot), fault: None, output_failed: false)
             let (step, remaining) = handle(input, parsed, policy, frame, take initial, mut out, cfg, routes, state, mut date)
             if let Some(finished_request) = request_done {
                 finished_request(state)
@@ -2119,10 +2118,10 @@ fn bytes_for_connection(cfg: Config) -> u64 {
 }
 
 fn valid_config(cfg: Config) -> bool {
-    let valid_head = cfg.head_max > 0 && cfg.head_max <= 8192 && cfg.fields_max <= 64 && cfg.inbox_cap > 0
+    let valid_head = cfg.head_max > 0 && cfg.head_max <= http1.HEAD_MAX && cfg.fields_max <= 64 && cfg.inbox_cap > 0
     let valid_stream = cfg.streams_max == 0 || cfg.heartbeat_ms > 0
     // Check arithmetic room here. Storage and tasks still use checked Capacity.
-    let input_size = int.saturating_add(cfg.pipeline_max, cfg.body_inline)
+    let input_size = int.saturating_add(cfg.head_max, int.saturating_add(cfg.pipeline_max, cfg.body_inline))
     let with_output = int.saturating_add(input_size, cfg.out_cap)
     let total = int.saturating_add(with_output, cfg.handler_bytes)
     valid_head && valid_stream && total <= 18446744073709551615 - 32768 && cfg.state_max <= 18446744073709551608
@@ -2955,17 +2954,18 @@ pub type Decoder {
     digits: u8,
     line_bytes: u64,
     trailer_bytes: u64,
+    head_max: u64,
     trailer_fields: u64,
     error: BodyError
 }
 
 pub type BodyProgress: key = More | Data(http1.Span) | Done | Failed(BodyError)
 
-/// Starts a fixed-storage body decoder after framing succeeds. Head is read
-/// only here; trailers can never change it. All errors permanently latch close.
-/// Ex: `let mut d = http.decoder(frame, h, body_max)`.
-pub fn decoder(frame: Framing, h: http1.Head, body_max: u64) -> Decoder {
-    let mut d = Decoder(state: Finished, used: 0, decoded: 0, remaining: 0, body_max, size: 0, digits: 0, line_bytes: 0, trailer_bytes: h.end, trailer_fields: h.count, error: failure(400))
+/// Starts a fixed-storage body decoder after framing succeeds. Head is read only here; trailers
+/// never change it and share head_max bytes with it (more is 431). All errors permanently latch
+/// close. Ex: `let mut d = http.decoder(frame, h, body_max, head_max)`.
+pub fn decoder(frame: Framing, h: http1.Head, body_max: u64, head_max: u64) -> Decoder {
+    let mut d = Decoder(state: Finished, used: 0, decoded: 0, remaining: 0, body_max, size: 0, digits: 0, line_bytes: 0, trailer_bytes: h.end, head_max, trailer_fields: h.count, error: failure(400))
     match frame {
         Empty => {},
         ContentLength(n) => {
@@ -3225,7 +3225,7 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
             return Failed(d.error)
         }
         if d.used == list.len(b) {
-            if in_trailers(d.state) && d.trailer_bytes == 8192 {
+            if in_trailers(d.state) && d.trailer_bytes >= d.head_max {
                 fail(mut d, 431)
                 continue
             }
@@ -3249,7 +3249,7 @@ pub fn decode(mut d: Decoder, b: Bytes) -> BodyProgress {
         let c = b[d.used]
         d.used += 1
         if in_trailers(d.state) {
-            if d.trailer_bytes == 8192 {
+            if d.trailer_bytes >= d.head_max {
                 fail(mut d, 431)
             } else {
                 d.trailer_bytes += 1

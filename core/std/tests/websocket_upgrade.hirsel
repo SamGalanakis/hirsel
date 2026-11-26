@@ -151,13 +151,13 @@ fn client_request_vector() -> bool {
 fn head_bounds() -> bool {
     let mut b: Bytes = list.new()
     list.append(mut b, b"GET /hirsel HTTP/1.1\r\nX: ")
-    let count = 8192 - list.len(b) - 4
+    let count = 32768 - list.len(b) - 4
     list.fill(mut b, count, b'a')
     list.append(mut b, b"\r\n\r\n")
     let mut h = http1.head()
-    let exact = http1.request(b, mut h) == Complete && h.end == 8192
+    let exact = http1.request(b, mut h) == Complete && h.end == 32768
     let mut over: Bytes = list.new()
-    list.append(mut over, list.slice(b, 0, 8188))
+    list.append(mut over, list.slice(b, 0, 32764))
     list.append(mut over, b"a\r\n\r\n")
     let long = http1.request(over, mut h) == TooLarge
     let mut fields = b"GET / HTTP/1.1\r\n"
@@ -252,6 +252,10 @@ fn answered(mut s: Served[NetOp], take c: Call[NetOp], r: NetReply) -> bool {
 // Answers the connect, the upgrade's receive with request_bytes() and its
 // send, which must be RFC 6455's 101 response.
 fn served_upgrade(mut s: Served[NetOp]) -> bool waits {
+    served_upgrade_of(mut s, request_bytes())
+}
+
+fn served_upgrade_of(mut s: Served[NetOp], head: Bytes) -> bool waits {
     let Some(take connect) = provide.next(mut s) else {
         return false
     }
@@ -266,8 +270,8 @@ fn served_upgrade(mut s: Served[NetOp]) -> bool waits {
         return false
     }
     let mut c = take request
-    let took = provide.fill(mut s, mut c, request_bytes())
-    let n = list.len(request_bytes())
+    let took = provide.fill(mut s, mut c, head)
+    let n = list.len(head)
     if took != n || !answered(mut s, take c, Count(n)) {
         return false
     }
@@ -344,6 +348,29 @@ fn split_frame_across_readiness(tasks: Tasks) -> bool waits {
     let read = result.unwrap(task.join(take child))
     let _ = take hand
     upgraded && first && second && drained && read
+}
+
+// HTTP-3 head bound: an upgrade request carrying a 20 KiB Cookie (real cookie
+// and JWT heads exceed 8 KiB) arrives in one receive within the 32 KiB head
+// bound, is answered 101, and the session then reads its first frame.
+// expect: run large_cookie_upgrade(tasks) = true
+fn large_cookie_upgrade(tasks: Tasks) -> bool waits {
+    let (c, hand) = provide.clock(0, 0)
+    let (n, served) = provide.net(bytes 32768)
+    let mut s = take served
+    let child = task.spawn(tasks, bytes 65536, ServedReader(n: n, c: c), served_reader)
+    let base = request_bytes()
+    let mut head: Bytes = list.new()
+    list.append(mut head, list.slice(base, 0, list.len(base) - 2))
+    list.append(mut head, b"Cookie: s=")
+    list.fill(mut head, 20480, b'a')
+    list.append(mut head, b"\r\n\r\n")
+    let upgraded = served_upgrade_of(mut s, head)
+    let framed = served_ready(mut s, Done) && served_recv(mut s, b"\x82\x82\x00\x00\x00\x00hi", Count(8))
+    let drained = served_drain(mut s)
+    let read = result.unwrap(task.join(take child))
+    let _ = take hand
+    upgraded && framed && drained && read
 }
 
 // Stale readiness: Ready answers Done but the receive then times out before

@@ -9,15 +9,17 @@ per request. It retains partial token, UTF-8 and CRLF state and never rereads a
 head byte. `cur.examined` counts actual byte reads. Complete, Bad and TooLarge
 are sticky until the caller initializes a new head and cursor. `cur.line_end`
 is zero until the request line ends, and `cur.line_start` excludes initial empty
-lines. TooLarge maps to 414 only when the request line alone fills 8192 bytes
-(`line_end == 0` and `offset - line_start == 8192`); every other head/field
+lines. TooLarge maps to 414 only when the request line alone fills `HEAD_MAX`
+bytes (`line_end == 0` and `offset - line_start == HEAD_MAX`); every other head/field
 overflow maps to 431.
 
 `request` and `response`
 reset that storage and parse one bounded head. `Complete` sets `end` to the
 first byte after the head; bytes beyond it remain available to the next
 protocol. `Partial` preserves initialized field offsets. `Bad` is malformed
-input; `TooLarge` means more than 8192 head bytes or 64 fields. Neither parser
+input; `TooLarge` means more than `HEAD_MAX` (32768) head bytes or 64 fields.
+`HEAD_MAX` is the one HTTP/1 head bound: servers may lower it with
+`http.Config.head_max`; clients and WebSocket upgrades use it as is. Neither parser
 allocates, decodes a body, interprets a URL, or gives a request authority.
 
 Strict httparse defaults are preserved: LF-only and CRLF lines, initial empty

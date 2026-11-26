@@ -616,7 +616,7 @@ fn receive_request(take socket: Socket, config: Config, clock: Clock, accepted_n
     let mut reader = take r
     let mut writer = take w
     let deadline = At(clock, after(accepted_ns, config.upgrade_ms))
-    let mut input = buffer(8192)?
+    let mut input = buffer(http1.HEAD_MAX)?
     let mut head = http1.head()
     let mut cursor = http1.cursor()
     loop {
@@ -744,7 +744,7 @@ pub fn client(take socket: Socket, host_name: Bytes, config: Config, clock: Cloc
     let mut key: Bytes = list.new()
     base64.encode(nonce, mut key)
     wsock_site.send_response(mut output_half, request, string.as_bytes(""), deadline)?
-    let mut input = buffer(8192)?
+    let mut input = buffer(http1.HEAD_MAX)?
     let mut attempted = false
     loop {
         if attempted && expired(deadline) {

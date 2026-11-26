@@ -1,0 +1,119 @@
+// http_client's response reader: fragment boundaries, framing refusals and the
+// head bound, with no socket.
+fn response_split(wire: Bytes, split: u64, head_only: bool, expected_status: u16, expected_body: String, next: bool) -> bool {
+    let mut r = result.unwrap(http_client.reader())
+    let mut body: Bytes = list.with_capacity(64)
+    let mut piece: Bytes = list.with_capacity(2)
+    let mut have_head = false
+    let mut ended = false
+    for (start, stop) in[(0u64, split), (split, list.len(wire))] {
+        if http_client.feed(mut r, list.slice(wire, start, stop)) != stop - start {
+            return false
+        }
+        if !have_head {
+            have_head = result.unwrap(http_client.parse_head(mut r, head_only, 64))
+        }
+        if have_head && !ended {
+            loop {
+                list.clear(mut piece)
+                match result.unwrap(http_client.read_buffered(mut r, mut piece)) {
+                    NeedInput => break,
+                    Data(n) => {
+                        if n != list.len(piece) {
+                            return false
+                        }
+                        list.append(mut body, piece)
+                    },
+                    End => {
+                        ended = true
+                        break
+                    },
+                }
+            }
+        }
+    }
+    http_client.end_input(mut r)
+    if !have_head || !ended && result.unwrap(http_client.read_buffered(mut r, mut piece)) != End {
+        return false
+    }
+    {
+        let response = http_client.response_head(r)
+        let Some((name, value)) = http_client.field_at(response, 0) else {
+            return false
+        }
+        if http_client.status(response) != expected_status || name != string.as_bytes("X-Test") || value != string.as_bytes("yes") || body != string.as_bytes(expected_body) {
+            return false
+        }
+    }
+    if next {
+        return result.unwrap(http_client.parse_head(mut r, false, 0)) && http_client.status(http_client.response_head(r)) == 202
+    }
+    true
+}
+
+fn invalid_response(wire: Bytes, over_head: bool) -> bool {
+    let mut r = result.unwrap(http_client.reader())
+    let _ = http_client.feed(mut r, wire)
+    if over_head {
+        return match http_client.parse_head(mut r, false, 0) {
+            Error(TooLarge) => true,
+            _ => false,
+        }
+    }
+    match http_client.parse_head(mut r, false, 64) {
+        Error(BodyFraming) => true,
+        Ok(true) => {
+            let mut out: Bytes = list.with_capacity(64)
+            match http_client.read_buffered(mut r, mut out) {
+                Error(BodyFraming) => true,
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+// RFC 9112 §6.3 and §7.1. Every boundary, including a split inside
+// interim and final heads, must preserve the decoded bytes and the next head.
+// expect: run http_client_response_fragments() = true
+fn http_client_response_fragments() -> bool {
+    let rows: Inline[(String, u16, String, bool, bool), 7] =[
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nTransfer-Encoding: chunked\r\n\r\n2;tag=\"a;b\"\r\nhi\r\n3\r\nbye\r\n0\r\nX-Trailer: end\r\n\r\n", 200, "hibye", false, true),
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 5\r\n\r\nhello", 200, "hello", false, true),
+        ("HTTP/1.0 200 OK\r\nX-Test: yes\r\n\r\nhello", 200, "hello", false, false),
+        ("HTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 200, "", true, true),
+        ("HTTP/1.1 204 No Content\r\nX-Test: yes\r\n\r\n", 204, "", false, true),
+        ("HTTP/1.1 304 Not Modified\r\nX-Test: yes\r\nContent-Length: 100\r\n\r\n", 304, "", false, true),
+        ("HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nX-Test: yes\r\nContent-Length: 3\r\n\r\nyes", 200, "yes", false, true),
+    ]
+    for (response, status, body, head_only, next) in rows {
+        let mut wire: Bytes = list.with_capacity(512)
+        list.append(mut wire, string.as_bytes(response))
+        if next {
+            list.append(mut wire, string.as_bytes("HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n"))
+        }
+        for i in 0u64 .. list.len(wire) + 1 {
+            if !response_split(wire, i, head_only, status, body, next) {
+                return false
+            }
+        }
+    }
+    // RFC 9112 §6.3 rejects ambiguous framing. §7.1 warns against overflow.
+    let both = string.as_bytes("HTTP/1.1 200 OK\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n")
+    let overflow = string.as_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n10000000000000000\r\n")
+    let mut long: Bytes = list.with_capacity(32768)
+    list.append(mut long, string.as_bytes("HTTP/1.1 200 OK\r\nX: "))
+    let room = 32768 - list.len(long)
+    list.fill(mut long, room, b'a')
+    invalid_response(both, false) && invalid_response(overflow, false) && invalid_response(long, true) && large_cookie_response()
+}
+
+// HTTP-3 head bound: a response carrying a 20 KiB Set-Cookie fits the reader's
+// 32 KiB head storage and its body follows.
+fn large_cookie_response() -> bool {
+    let mut wire: Bytes = list.new()
+    list.append(mut wire, string.as_bytes("HTTP/1.1 200 OK\r\nX-Test: yes\r\nSet-Cookie: s="))
+    list.fill(mut wire, 20480, b'a')
+    list.append(mut wire, string.as_bytes("\r\nContent-Length: 3\r\n\r\nyes"))
+    response_split(wire, list.len(wire) - 3, false, 200, "yes", false)
+}

@@ -129,14 +129,15 @@ pub opaque type Response: send {
     fault: Option[http_client.FetchError]
 }
 
-/// A dial task's own limit, beyond the trust roots it copies: its connection's three
-/// 8192-byte buffers and authority, at most ADDRESSES resolved addresses and the
-/// handshake's protocol list.
-const DIAL_BYTES: u64 = 40960
+/// A dial task's own limit, beyond the trust roots it copies: its connection's
+/// http1.HEAD_MAX wire buffer and final-head storage, its 8192-byte encoding buffer,
+/// and 16384 for the authority (at most 8192), at most ADDRESSES resolved addresses
+/// and the handshake's protocol list.
+const DIAL_BYTES: u64 = 2 * http1.HEAD_MAX + 8192 + 16384
 
-/// One slot's share of the reservation: a dial, then its task record, lease block,
-/// origin key and table entry.
-const SLOT_BYTES: u64 = 49152
+/// One slot's share of the reservation: a dial, then 8192 for its task record, lease
+/// block, origin key and table entry.
+const SLOT_BYTES: u64 = DIAL_BYTES + 8192
 
 /// The pool's fixed share: its one timer task.
 const POOL_BYTES: u64 = 8192

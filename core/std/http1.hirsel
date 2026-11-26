@@ -22,6 +22,11 @@ pub type Head {
     end: u64
 }
 
+/// The one HTTP/1 head bound, in bytes: the request or status line, every
+/// field and the blank line. Servers may lower it with `http.Config.head_max`;
+/// clients, WebSocket upgrades and chunked trailers use it as is.
+pub const HEAD_MAX: u64 = 32768
+
 pub type Progress: key = Partial | Complete | Bad | TooLarge
 
 // The caller retains the growing buffer, Head and Cursor until completion.
@@ -111,7 +116,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
     if cur.result != Partial {
         return cur.result
     }
-    let limit = order.min(8192, list.len(b))
+    let limit = order.min(HEAD_MAX, list.len(b))
     let mut next = cur.offset
     let mut state = cur.state
     let mut result: Progress = Partial
@@ -342,7 +347,7 @@ pub fn resume(b: Bytes, mut h: Head, mut cur: Cursor) -> Progress {
     cur.examined += next - cur.offset
     cur.offset = next
     cur.state = state
-    if result == Partial && next == 8192 {
+    if result == Partial && next == HEAD_MAX {
         result = TooLarge
     }
     cur.result = result
@@ -359,7 +364,7 @@ pub fn head() -> Head {
 }
 
 fn byte(b: Bytes, at: u64) -> Result[u8, Stop] {
-    if at >= 8192 {
+    if at >= HEAD_MAX {
         return Error(Limit)
     }
     if at >= list.len(b) {
@@ -480,7 +485,7 @@ fn status_line(b: Bytes, mut at: u64, mut h: Head) -> Result[(), Stop] {
     newline(b, mut at)
 }
 
-/// Parses one request head, capped at 8192 bytes and 64 fields. A complete
+/// Parses one request head, capped at HEAD_MAX bytes and 64 fields. A complete
 /// head sets h.end; any read-ahead remains in b[h.end..]. O(head), no allocation.
 /// Partial keeps initialized fields. Ex: `http1.request(b, mut h)`.
 pub fn request(b: Bytes, mut h: Head) -> Progress {

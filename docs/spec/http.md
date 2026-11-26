@@ -170,7 +170,7 @@ Module `std.http` of package `std`. It replaces every other HTTP/1.1 server path
 | `ip_sockets_max` | Sockets per source IP (W-D5 source key) | 32 |
 | `refuse_max`, `refuse_ms` | Pre-admitted refusal tasks, and each one's total deadline | 16, 1000 |
 | `inbox_cap` | The supervisor's inbox | 64 |
-| `head_max`, `fields_max` | One head, and its fields (`http1`'s fixed bounds) | 8192 B, 64 |
+| `head_max`, `fields_max` | One head with its trailers, and its fields. `head_max` may only lower `http1.HEAD_MAX` (32768 B), the one HTTP/1 head bound that clients, WebSocket upgrades and the chunked decoder also use; `fields_max` may only lower the 64 fields of `http1.Head`'s inline storage | 32768 B, 64 |
 | `pipeline_max` | Unread bytes kept after the current request | 8192 B |
 | `body_inline` | Largest body held in the read buffer | 16384 B |
 | `body_max` | Largest body for any route; a route may set less | 1 MiB |
@@ -557,7 +557,7 @@ Every byte the server keeps appears here, with its payer, admission and refund. 
 | 13a | Reader monitor and timer children | T(h) + 64 + T(0) + 4096 | |
 | 13b | Credits channel | ch(k, unit) | raw streams only |
 | 13c | The stream's hand-over block: encoded head and encoded P | W_s = `out_cap` + `state_max` | **not in S**: the supervisor's hand-over reserve (HTTP-1), from the connection's end until the writer has copied the head and the producer has decoded P |
-| 13d | A relay's upstream `Connection`: its staged input, decoder and request blocks (`http_client`) | about 3 × 8192, fixed at dial | **not in S**: born in the handler's scope (row 8), so charged to `handler_bytes`; it survives the connection as a hand-over (MEM-20), like row 13c, and is freed when the producer, or the owner for a HEAD or a refusal, drops it |
+| 13d | A relay's upstream `Connection`: its staged input, decoder and request blocks (`http_client`) | about 2 × `http1.HEAD_MAX` + 8192, fixed at dial | **not in S**: born in the handler's scope (row 8), so charged to `handler_bytes`; it survives the connection as a hand-over (MEM-20), like row 13c, and is freed when the producer, or the owner for a HEAD or a refusal, drops it |
 | 14 | Subscription state and held content (B-9) | the session `budget` per group | **not in S**: on the publisher's ledger for the group's session, as for a session; held until the publisher's sweep finds the group's retirement mark (§2 Publisher retirement), which happens at the latest after the next message the publisher takes, so the sessions it holds, live or ended but not yet swept, number at most `streams_max` + `reads_max` + 1 (§2 Publisher retirement; reads, row 14a) |
 | 14a | A one-shot read's subscription (B-11) | one frame's rows allowance | on the publisher's ledger; at most `reads_max` live or unswept (the read slot is held until its mark is set), retired as row 14 |
 | 14b | Release fences (RUNNER-SPEC §3 "The release check", v2.19.1): each group and one-shot read's fence root, its first `Arc[Fence]` and two handles; one share of the place's round register at its writer | one root and one `Arc[Fence]` per group; two more `Arc[Fence]` and one `Arc[u64]` reserved at `Joined` | the root, its first `Arc` and the handles: the group's scope (row 14's session); the reserved `Arc`s: the publisher's ledger for the group's session, as row 14 |
@@ -597,7 +597,7 @@ stay available for the next response.
 
 The caller's storage retains its existing payer and charge (MEM-19 and
 MEM-20). Body reads require no new admission or growth. The connection
-keeps its fixed 8192-byte wire buffer and 8192-byte final-head storage.
+keeps its fixed `http1.HEAD_MAX` wire buffer and `http1.HEAD_MAX` final-head storage.
 
 ### HTTP-17: Client request bodies
 
@@ -808,7 +808,7 @@ does its own socket I/O on a connection it holds.
   with `Gone`. Leased connections stay usable until their responses are dropped.
 
 **Charging.** `pool` admits, under the limit current at the call, the coordinator task
-with a reserved limit of `conns_max` × (49152 + r) + 8192 bytes, where r is the length
+with a reserved limit of `conns_max` × (D + 8192 + r) + 8192 bytes, where D = 2 × `http1.HEAD_MAX` + 8192 + 16384 is a dial's own limit (the wire buffer, final-head storage, request encoding buffer, authority, addresses and protocol list), r is the length
 of the trust value's roots rounded up to 8, plus its channels and tables: an ask channel
 of max(`waiters_max`, 1) items, a return channel of max(`conns_max`, 1) items, a waiter
 table of `waiters_max` entries and idle and dial tables of `conns_max` entries. A refusal

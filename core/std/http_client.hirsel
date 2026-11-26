@@ -156,8 +156,8 @@ pub type BodyRead: key = NeedInput | Data(u64) | End
 
 /// Allocates the bounded wire buffer and final-head storage.
 pub fn reader() -> Result[Reader, Error] {
-    let input: Bytes = list.with_capacity(8192)
-    let raw: Bytes = list.with_capacity(8192)
+    let input: Bytes = list.with_capacity(http1.HEAD_MAX)
+    let raw: Bytes = list.with_capacity(http1.HEAD_MAX)
     Ok(Reader(input: take input, at: 0, eof: false, head: ResponseHead(raw: take raw, parsed: http1.head(), persistent: false), body: None))
 }
 
@@ -172,7 +172,7 @@ pub fn feed(mut r: Reader, input: Bytes) -> u64 {
         return 0
     }
     compact(mut r)
-    let n = order.min(8192 - list.len(r.input), list.len(input))
+    let n = order.min(http1.HEAD_MAX - list.len(r.input), list.len(input))
     let _ = list.append(mut r.input, list.slice(input, 0, n))
     n
 }
@@ -244,7 +244,7 @@ pub fn parse_head(mut r: Reader, head_request: bool, body_max: u64) -> Result[bo
         list.clear(mut r.head.raw)
         let _ = list.append(mut r.head.raw, list.slice(wire, 0, h.end))
         r.at += h.end
-        r.body = Some(http.decoder(frame, h, body_max))
+        r.body = Some(http.decoder(frame, h, body_max, http1.HEAD_MAX))
         r.head.parsed = h
         return Ok(true)
     }
@@ -610,7 +610,7 @@ fn receive_into(mut input: ReadHalf, mut into: Bytes, max: u64, clock: Clock, de
 fn receive_staged(mut c: Connection, allowance: u64) -> Result[(), Error] waits {
     check_deadline(mut c)?
     compact(mut c.wire)
-    let max = order.min(allowance, 8192 - list.len(c.wire.input))
+    let max = order.min(allowance, http1.HEAD_MAX - list.len(c.wire.input))
     if receive_into(mut c.input, mut c.wire.input, max, c.clock, c.deadline)? == 0 {
         end_input(mut c.wire)
     } else {
@@ -642,7 +642,7 @@ pub fn finish_request(mut c: Connection, body_max: u64) -> Result[(), Error] wai
             c.response_fresh = true
             return Ok(())
         }
-        receive_staged(mut c, 8192)?
+        receive_staged(mut c, http1.HEAD_MAX)?
     }
 }
 
@@ -780,7 +780,7 @@ pub fn limit_response(mut c: Connection, max: u64) -> Result[http.Framing, Error
         Ok(value) => value,
         Error(e) => return Error(framing_error(e)),
     }
-    c.wire.body = Some(http.decoder(frame, h, max))
+    c.wire.body = Some(http.decoder(frame, h, max, http1.HEAD_MAX))
     Ok(frame)
 }
 

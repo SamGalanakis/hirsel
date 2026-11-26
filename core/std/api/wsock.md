@@ -13,7 +13,7 @@ and admitting Hello; `welcomed` clears the separate Hello deadline.
 and source, writes the 101 response and returns `Upgraded` with the
 read-ahead length. Its reader keeps
 only the request's frame read-ahead, copied into storage of exactly its length
-and charged to the connection; the 8192-byte request buffer is released. Its timers start Hello at the completed 101. `server_with` calls a
+and charged to the connection; the `http1.HEAD_MAX` request buffer is released. Its timers start Hello at the completed 101. `server_with` calls a
 source policy after sanitization and before 101, under the original accept
 deadline; refusal is 503. `hello_deadline` exposes the fixed Hello deadline to
 the runner owner. `refuse_socket` sends a bounded HTTP refusal while keeping

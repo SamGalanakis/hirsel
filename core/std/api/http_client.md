@@ -62,8 +62,8 @@ Pass a buffer with spare capacity on the call that checks for EOF.
 bodies. The connection copies payload already buffered during the head read
 once. It receives subsequent payload directly into the caller's buffer,
 limited by the current payload span and spare capacity. Body reads allocate
-no storage. The reader has 8192 bytes of wire storage and 8192 bytes of head
-storage, with up to 64 fields in one head. It consumes chunk extensions and
+no storage. The reader has `http1.HEAD_MAX` (32768) bytes of wire storage and as
+much head storage, with up to 64 fields in one head. It consumes chunk extensions and
 trailers without returning them as body data. Read to EOF before starting
 another request. The client keeps bytes read ahead for the next exchange and
 reports whether `reusable(connection)` permits it. Close-delimited bodies
@@ -241,11 +241,11 @@ and frees its slot at once, without waiting.
   `Capacity`. Cancellation and the deadline end the fetch as on a connection, and the
   response's connection is closed.
 - **Charging.** `pool` takes ownership of its trust value and admits, under the limit
-  current at the call, its coordinator task with a reservation of `conns_max` × (49152 +
-  r) + 8192 bytes, where r is the trust value's roots, plus its channels and tables
+  current at the call, its coordinator task with a reservation of `conns_max` × (2 ×
+  `http1.HEAD_MAX` + 32768 + r) + 8192 bytes, where r is the trust value's roots, plus its channels and tables
   (see the [fetch specification](../../../docs/spec/http.md#http-18-client-fetch-redirects-decoding-and-reuse) for the exact terms). `Error(c)` makes nothing. That reservation pays for
-  every connection: its three 8192-byte buffers for wire data, the response head and
-  request encoding, its TLS state on the host's side, its lease and its origin key. A
+  every connection: its two `http1.HEAD_MAX` buffers for wire data and the response
+  head, its 8192-byte request encoding buffer, its TLS state on the host's side, its lease and its origin key. A
   handler that exits while its connection is idle in the pool leaves no charge behind.
   A fetch admits under the caller's limit its URL, rebuilt headers, one reply channel,
   the copy of the head it keeps, and for a decoded response an 8192-byte encoded-input

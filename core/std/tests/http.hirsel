@@ -229,13 +229,17 @@ fn feed(mut d: http.Decoder, b: Bytes, mut out: Bytes, mut consumed: u64) -> Res
 }
 
 fn body_split(head: Bytes, wire: Bytes, limit: u64, expected_status: u16, expected_body: Bytes, expected_used: u64, split: u64, eof_only: bool) -> bool {
+    body_split_within(head, wire, limit, http1.HEAD_MAX, expected_status, expected_body, expected_used, split, eof_only)
+}
+
+fn body_split_within(head: Bytes, wire: Bytes, limit: u64, head_max: u64, expected_status: u16, expected_body: Bytes, expected_used: u64, split: u64, eof_only: bool) -> bool {
     let mut h = http1.head()
     if http1.request(head, mut h) != Complete {
         return false
     }
     let before = h
     let frame = result.unwrap(http.framing(head, view h, limit))
-    let mut d = http.decoder(frame, h, limit)
+    let mut d = http.decoder(frame, h, limit, head_max)
     let mut out: Bytes = list.new()
     let mut used: u64 = 0
     let first = feed(mut d, list.slice(wire, 0, split), mut out, mut used)
@@ -397,24 +401,30 @@ fn chunk_line_limit() -> bool {
     body_split(head, wire, 0, 400, b"", 0, 1000, false)
 }
 
-// HTTP-4(6): head + trailers share the 8192-byte cap, including both
-// terminators. A new head-sized allowance for trailers would accept the excess.
+// HTTP-4(6): head + trailers share the head bound, including both
+// terminators: 32768 bytes (HTTP-1's head_max default) and a server's lowered
+// head_max alike. A new head-sized allowance for trailers would accept the excess,
+// and a fixed decoder cap would accept trailers past a lowered head_max.
 // expect: run trailer_byte_limit() = true
 fn trailer_byte_limit() -> bool {
+    trailer_bound(32768) && trailer_bound(1024)
+}
+
+fn trailer_bound(head_max: u64) -> bool {
     let head = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
     let mut wire = b"0\r\nX:"
-    let n = 8192 - list.len(head) + 3
+    let n = head_max - list.len(head) + 3
     while list.len(wire) < n - 4 {
         list.push(mut wire, b'a')
     }
     list.append(mut wire, b"\r\n\r\n")
-    if !body_split(head, wire, 0, 0, b"", n, n - 1, false) {
+    if !body_split_within(head, wire, 0, head_max, 0, b"", n, n - 1, false) {
         return false
     }
     wire[n - 4] = b'a'
     wire[n - 3] = b'a'
     list.append(mut wire, b"\r\n\r\n")
-    body_split(head, wire, 0, 431, b"", 0, n - 1, false)
+    body_split_within(head, wire, 0, head_max, 431, b"", 0, n - 1, false)
 }
 
 // HTTP-4(6): the existing TE field consumes one of 64 field slots. Trailers
@@ -444,7 +454,7 @@ fn full_width_size() -> bool {
     if http1.request(raw, mut h) != Complete {
         return false
     }
-    let mut d = http.decoder(Chunked, h, 18446744073709551615)
+    let mut d = http.decoder(Chunked, h, 18446744073709551615, http1.HEAD_MAX)
     http.decode(mut d, b"FFFFFFFFFFFFFFFF\r\n") == More && d.remaining == 18446744073709551615 && chunk_case(b"1\r\na\r\nFFFFFFFFFFFFFFFF\r\n", 18446744073709551615, 413, b"a", 0, false)
 }
 
@@ -468,15 +478,15 @@ fn incomplete_metadata_at_limits() -> bool {
     if http1.request(head, mut h) != Complete {
         return false
     }
-    let mut d = http.decoder(Chunked, h, 0)
+    let mut d = http.decoder(Chunked, h, 0, http1.HEAD_MAX)
     if http.decode(mut d, line) != Failed(http.BodyError(status: 400, close: true)) {
         return false
     }
     let mut trailers = b"0\r\nX:"
-    while list.len(trailers) < 8192 - list.len(head) + 3 {
+    while list.len(trailers) < 32768 - list.len(head) + 3 {
         list.push(mut trailers, b'a')
     }
-    d = http.decoder(Chunked, h, 0)
+    d = http.decoder(Chunked, h, 0, http1.HEAD_MAX)
     http.decode(mut d, trailers) == Failed(http.BodyError(status: 431, close: true))
 }
 
@@ -484,7 +494,7 @@ fn incomplete_metadata_at_limits() -> bool {
 // expect: run http_server_defaults_contract() = true
 fn http_server_defaults_contract() -> bool {
     let cfg = http.defaults()
-    cfg.sockets_max == 512 && cfg.http_max == 512 && cfg.conns_max == 512 && cfg.ip_sockets_max == 512 && cfg.head_max == 8192 && cfg.out_cap == 8192 && cfg.fields_max == 64 && cfg.handler_bytes == 262144 && cfg.refuse_max == 16 && cfg.inbox_cap == 64 && cfg.upgrades_max == 0 && cfg.streams_max == 0
+    cfg.sockets_max == 512 && cfg.http_max == 512 && cfg.conns_max == 512 && cfg.ip_sockets_max == 512 && cfg.head_max == 32768 && cfg.out_cap == 8192 && cfg.fields_max == 64 && cfg.handler_bytes == 262144 && cfg.refuse_max == 16 && cfg.inbox_cap == 64 && cfg.upgrades_max == 0 && cfg.streams_max == 0
 }
 
 fn route_tag_at(routing: router.Router[()], verb: Bytes, raw_path: Bytes) -> Option[u64] {

@@ -117,7 +117,7 @@ fn route_checks(b: Bytes, h: http1.Head) -> Result[(), u16] {
 
 /// Server upgrade. Returns the consumed head offset and the 101 response;
 /// b[end..] is initial frame input. Refused(status) is terminal; 426 requires
-/// `Sec-WebSocket-Version: 13`. O(head), at most 8192 bytes and 64 fields.
+/// `Sec-WebSocket-Version: 13`. O(head), at most http1.HEAD_MAX bytes and 64 fields.
 /// Ex: `websocket.server(input)`.
 pub fn server(b: Bytes) -> Upgrade {
     let mut h = http1.head()
@@ -219,7 +219,7 @@ pub fn request(host: Bytes, nonce: Bytes, offer_protocol: bool) -> Result[Bytes,
         list.append(mut out, string.as_bytes("Sec-WebSocket-Protocol: hirsel.4\r\n"))
     }
     list.append(mut out, string.as_bytes("\r\n"))
-    if list.len(out) > 8192 {
+    if list.len(out) > http1.HEAD_MAX {
         return Error(431)
     }
     Ok(take out)

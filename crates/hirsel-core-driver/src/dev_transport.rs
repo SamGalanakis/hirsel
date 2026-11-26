@@ -1,3 +1,6 @@
+use crate::call::websocket::{
+    MESSAGE_LIMIT, MESSAGE_LIMIT_MIB, UPGRADE_HEAD_LIMIT, upgrade_head_end,
+};
 use crate::call::{base64, random, sha1};
 use std::{
     io::{self, Read, Write},
@@ -9,8 +12,6 @@ use std::{
 
 use super::{Error, STOP};
 
-const MAX_HEAD: usize = 8192;
-const MAX_MESSAGE: usize = 64 << 20;
 const PROTOCOL: &str = "hirsel.4";
 const HANDSHAKE: Duration = Duration::from_secs(5);
 
@@ -55,14 +56,13 @@ impl Reader {
 
     fn head(&mut self) -> Result<String, Error> {
         loop {
-            if let Some(end) = self.buffered.windows(4).position(|w| w == b"\r\n\r\n") {
-                if end + 4 > MAX_HEAD {
-                    return Err("WebSocket request head exceeds 8192 bytes".into());
-                }
-                return Ok(String::from_utf8(self.buffered.drain(..end + 4).collect())?);
+            if let Some(end) = upgrade_head_end(&self.buffered) {
+                return Ok(String::from_utf8(self.buffered.drain(..end).collect())?);
             }
-            if self.buffered.len() >= MAX_HEAD {
-                return Err("WebSocket request head exceeds 8192 bytes".into());
+            if self.buffered.len() >= UPGRADE_HEAD_LIMIT {
+                return Err(
+                    format!("WebSocket request head exceeds {UPGRADE_HEAD_LIMIT} bytes").into(),
+                );
             }
             self.fill()?;
         }
@@ -102,8 +102,8 @@ impl Reader {
                 }
                 size => (2, u64::from(size)),
             };
-            if size > (MAX_MESSAGE - partial.as_ref().map_or(0, Vec::len)) as u64 {
-                return Err("WebSocket message exceeds 64 MiB".into());
+            if size > (MESSAGE_LIMIT - partial.as_ref().map_or(0, Vec::len)) as u64 {
+                return Err(format!("WebSocket message exceeds {MESSAGE_LIMIT_MIB} MiB").into());
             }
             let size = size as usize;
             let mask = if len & 128 != 0 {

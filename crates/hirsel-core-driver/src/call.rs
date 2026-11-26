@@ -13,12 +13,11 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use websocket::{MESSAGE_LIMIT, MESSAGE_LIMIT_MIB, UPGRADE_HEAD_LIMIT, upgrade_head_end};
 
 type Error = Box<dyn std::error::Error>;
 
-/// A server's message is bounded well above the runner's 1 MiB reply budget.
-const MAX_MESSAGE: usize = 64 << 20;
-const MAX_HEAD: usize = 8192;
+pub(crate) mod websocket;
 const KINDS: [&str; 5] = ["compute", "transact", "query", "granted", "room"];
 
 pub struct Options {
@@ -988,10 +987,10 @@ impl Session {
         );
         session.stream.write_all(request.as_bytes())?;
         let end = loop {
-            if let Some(at) = session.input.windows(4).position(|w| w == b"\r\n\r\n") {
-                break at + 4;
+            if let Some(end) = upgrade_head_end(&session.input) {
+                break end;
             }
-            if session.input.len() > MAX_HEAD {
+            if session.input.len() >= UPGRADE_HEAD_LIMIT {
                 return Err("WebSocket upgrade response head is too large".into());
             }
             session.fill()?;
@@ -1094,8 +1093,8 @@ impl Session {
                 None => usize::try_from(u64::from_be_bytes(self.input[2..10].try_into().unwrap()))
                     .unwrap_or(usize::MAX),
             };
-            if length > MAX_MESSAGE || message.len() + length > MAX_MESSAGE {
-                return Err("server message exceeds 64 MiB".into());
+            if length > MESSAGE_LIMIT - message.len() {
+                return Err(format!("server message exceeds {MESSAGE_LIMIT_MIB} MiB").into());
             }
             while self.input.len() < header + length {
                 self.fill()?;

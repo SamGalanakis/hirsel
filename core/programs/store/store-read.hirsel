@@ -413,26 +413,6 @@ pub fn count[K, V](tx: Tx, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result
     Ok(n)
 }
 
-// Applies the rows in key order, the order their journal frame records and
-// replay applies them, so a commit splits and merges pages as recovery does.
-fn transaction_collection_pages(tx: Tx) -> Result[PageTree, Error] {
-    let mut tree = share_page_tree(tx.roots.collections)
-    let Some(first) = int.checked_add(tx.ids, 1) else {
-        return Error(Limit(Ids))
-    }
-    let mut draw = first
-    // Tiered rows are read through the attempt (store-tiered-tx-read).
-    let memory_only = match tx.attempt {
-        Some(_) => true,
-        None => false,
-    }
-    for layer in tx.below {
-        materialize_rows(mut tree, layer.ops.rows, memory_only, first, mut draw)?
-    }
-    materialize_rows(mut tree, tx.ops.rows, memory_only, first, mut draw)?
-    Ok(take tree)
-}
-
 fn open_range_bounds[K, V](tx: Tx, t: Table[K, V], take low: Bytes, take high: Bytes, reverse: bool) -> Result[TxRows[K, V], Error] in tx {
     let tree = transaction_collection_pages(tx)?
     let tiered = tx_tiered_rows(tx, t.id, low, high, true)?

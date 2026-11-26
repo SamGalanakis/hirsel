@@ -538,6 +538,7 @@ pub opaque scoped type Tx {
     limits: StoreLimits,
     wrote: bool,
     ops: DataOps,
+    view_tree: core.Cell[Option[TxView]],
     info: CallInfo,
     // The streams section's ops (§1.8). `extra_bytes` is that section with
     // its 5-byte head, when it has ops, plus the CALL section's bytes.
@@ -1275,7 +1276,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), base_collection: None, bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), base_collection: None, bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1606,52 +1607,6 @@ fn test_db(c: Clock, cap: u64) -> Db {
     let mut opts = result.unwrap(sized(Memory, 1074790400u64))
     opts.resident_limit = cap
     memory_at(c, StoreId(hi: 1, lo: 2), opts)
-}
-
-// Stages one row in `ops` and returns its slot: `next_slot`, the next one, for a
-// key new to the transaction, else OPEN_FRAME_TAIL. A key a layer beneath
-// staged keeps its slot there, so `ops` holds the replacement uncounted.
-fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut next_slot: u64, take key: Bytes, take value: Option[StagedValue], prior: Option[u32]) -> u64 {
-    if let Some(slot) = op_slot(ops, key) {
-        if slot < 2 {
-            ops.rows.first[slot].value = take value
-            ops.rows.first[slot].prior = prior
-        } else {
-            ops.rows.rest[slot - 2].value = take value
-            ops.rows.rest[slot - 2].prior = prior
-        }
-        return OPEN_FRAME_TAIL
-    }
-    let mut beneath = false
-    for layer in below {
-        let found = if streams {
-            op_slot(layer.stream_ops, key)
-        } else {
-            op_slot(layer.ops, key)
-        }
-        if let Some(_) = found {
-            beneath = true
-        }
-    }
-    let at = next_slot
-    if !beneath {
-        next_slot += 1
-    }
-    let slot_order = ops.rows.count
-    if slot_order == SCANNED_OPS {
-        for earlier in 0u64 .. slot_order {
-            map.insert(mut ops.slots, clone(data_row(ops.rows, earlier).key), earlier)
-        }
-    }
-    if slot_order >= SCANNED_OPS {
-        map.insert(mut ops.slots, clone(key), slot_order)
-    }
-    push_data_row(mut ops.rows, DataOp(key: take key, value: take value, trim: None, prior: prior))
-    if beneath {
-        OPEN_FRAME_TAIL
-    } else {
-        at
-    }
 }
 
 fn transaction_stream(tx: Tx, key: Bytes) -> Option[View[Bytes]] in tx {

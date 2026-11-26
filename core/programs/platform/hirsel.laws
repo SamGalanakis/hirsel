@@ -1,16 +1,16 @@
 hirsel.laws 1
 platform@1/launcher/session_vectors src=85d1a0139b66fbe1 sig=7c809e8c5b2ea292 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_creates_to_max_places src=fa37a6e40b218868 sig=0e9f61d4f286450a run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_genesis_recovers src=71765495301dc38a sig=06e1054b12523034 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_idle_unload src=a89bc96b4db41aea sig=2aefa7711ba18740 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_one_head src=2e7dff1153ce87fa sig=1be91a1d9e4ace06 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_reopen_keeps src=a288d7d43ad51eea sig=a6ad0b7d052e7703 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_route_during_unload src=9fa6e0f4e7d68669 sig=145023061abcff88 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_small_place_budget src=8c498a0bd0db8263 sig=f5adf0e059dba1d0 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_stale_dial src=76a2b26b5c099da0 sig=f46f80621d4b2efc run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_start_full src=dfada700a6f26115 sig=50a198c12f773452 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_units_run_together src=60d9409b9a163a17 sig=a3ae5ea9a9fbd7cb run=187babd0c26a7c43 bug=- oracle=- rows=pending
-platform@1/local_laws/test_local_workdir_held_once src=5c2cba48f703fa9c sig=06d20cc370b2eaf6 run=15d0e5c89dad2cca bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_creates_to_max_places src=fa37a6e40b218868 sig=f377071cd8643365 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_genesis_recovers src=71765495301dc38a sig=981a25cc39e7e1dd run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_idle_unload src=a89bc96b4db41aea sig=21eff62fb5b0b255 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_one_head src=2e7dff1153ce87fa sig=3875cac7e5ad6056 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_reopen_keeps src=a288d7d43ad51eea sig=bdb8e492107779f0 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_route_during_unload src=9fa6e0f4e7d68669 sig=1623bf92418f0cc0 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_small_place_budget src=8c498a0bd0db8263 sig=15ec6b76b1ab7df4 run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_stale_dial src=76a2b26b5c099da0 sig=c7219f9fc989595b run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_start_full src=dfada700a6f26115 sig=9f030f410298c2fc run=e81300d3a4e5f718 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_units_run_together src=60d9409b9a163a17 sig=aec2e61c2bf49607 run=187babd0c26a7c43 bug=- oracle=- rows=pending
+platform@1/local_laws/test_local_workdir_held_once src=5c2cba48f703fa9c sig=f9f12c27eb8063d2 run=15d0e5c89dad2cca bug=- oracle=- rows=pending
 platform@1/local_laws/test_platform_serve_budgets src=da043e7a4935a45c sig=496af17f07fb60eb run=b8c2d9d0b4181905 bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=8146785b722bb10b sig=b5ad592d6a5bcad4 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=d5952778d488ffdc sig=dcc44ba2f503d6ee run=b1818af2b24835d3 bug=- oracle=- rows=pending

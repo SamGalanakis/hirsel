@@ -1,0 +1,68 @@
+// Abort each probe so both lengths measure the same initial tree.
+fn tx_range_delete_probe(mut db: Db, t: Table[u64, u64], length: u64, steps: u64) -> bool waits {
+    let outcome = result.unwrap(run(mut db, None, (copy_env(t), copy_env(length), copy_env(steps)), fn(mut tx, env) -> Result[bool, Error] {
+        let ran = rollback_writes_on_overrun(mut tx, env.2, scoped fn(mut work) -> Result[(), Error] {
+            for i in 0u64 .. env.1 {
+                let first = i % 2 == 0
+                let row = if first {
+                    let mut rows = range(work, env.0, Unbounded, Unbounded)?
+                    next_in(work, mut rows)?
+                } else {
+                    let mut rows = range_reverse(work, env.0, Unbounded, Unbounded)?
+                    next_in(work, mut rows)?
+                }
+                let key = if first {
+                    i / 2
+                } else {
+                    2047 - i / 2
+                }
+                if row != Some((key, key * 2)) || !delete(mut work, env.0, key)? {
+                    fail("transaction range did not find the expected edge")
+                }
+            }
+            Error(Foreign)
+        })
+        match ran {
+            Ok(Error(Foreign)) => Ok(true),
+            Error(_) => Ok(false),
+            _ => fail("range/delete probe did not finish normally"),
+        }
+    }))
+    match outcome {
+        Committed(Done(value: complete, ..)) => complete,
+        _ => fail("range/delete probe did not settle"),
+    }
+}
+
+@test
+fn tx_pop_linear_steps(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    law_table(mut db, "range steps", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "range steps", std.codec.key_u64(), std.codec.of_u64())?
+    let seeded = run(mut db, None, copy_env(t), fn(mut tx, env) -> Result[(), Error] {
+        for key in 0u64 .. 2048 {
+            put(mut tx, env, key, key * 2)?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = seeded {} else {
+        return Error(Missing("range steps fixture"))
+    }
+    let mut low = 0u64
+    let mut high = 1u64
+    while !tx_range_delete_probe(mut db, t, 100, high) {
+        high *= 2
+    }
+    while low < high {
+        let mid = low + (high - low) / 2
+        if tx_range_delete_probe(mut db, t, 100, mid) {
+            high = mid
+        } else {
+            low = mid + 1
+        }
+    }
+    if !tx_range_delete_probe(mut db, t, 1000, high * 25) {
+        return Error(Missing("1,000 range/delete steps exceed 25 times 100"))
+    }
+    Ok(())
+}

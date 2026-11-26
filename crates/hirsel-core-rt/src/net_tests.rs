@@ -168,9 +168,7 @@ fn net_laws_child() {
 }
 #[test]
 fn net_narrow_retains_charge_until_run_end_and_refuses_invalid_or_capacity() {
-    let rule = hirsel_core_net::RuleView::address(
-        hirsel_core_net::Rule::parse("Connect 127.0.0.0/8 1-65535").unwrap(),
-    );
+    let rule = hirsel_core_net::GrantRule::parse("Connect 127.0.0.0/8 1-65535").unwrap();
     let mut os = crate::os::OsProvider::new(
         File::create("/dev/null").unwrap().into(),
         File::create("/dev/null").unwrap().into(),

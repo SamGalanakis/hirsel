@@ -203,7 +203,13 @@ unsafe fn adopt_listener(request: *mut Request, fd: OwnedFd) -> Step {
     let listener = TcpListener::from(fd);
     let adopted = (|| {
         let address = inherited_address(&listener)?;
-        if !unsafe { crate::net::permits_address(request.handle, &address, 1) } {
+        if !unsafe {
+            crate::net::permits_address(
+                request.handle,
+                &address,
+                hirsel_core_net::AddressDirection::Listen,
+            )
+        } {
             return Err(libc::EACCES);
         }
         listener

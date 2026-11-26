@@ -35,13 +35,13 @@ impl AddressDirection {
     pub const ALL: [Self; 4] = [Self::Connect, Self::Listen, Self::UdpBind, Self::UdpSend];
 
     pub fn from_tag(tag: u8) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|direction| *direction as u8 == tag)
-    }
-
-    pub fn from_variant(variant: u8) -> Option<Self> {
-        Self::ALL.get(usize::from(variant)).copied()
+        match tag {
+            0 => Some(Self::Connect),
+            1 => Some(Self::Listen),
+            6 => Some(Self::UdpBind),
+            7 => Some(Self::UdpSend),
+            _ => None,
+        }
     }
 
     pub fn word(self) -> &'static str {
@@ -58,56 +58,150 @@ impl AddressDirection {
     }
 }
 
-#[repr(C)]
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AddressFamily {
+    V4 = 0,
+    V6 = 1,
+}
+
+impl AddressFamily {
+    fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::V4),
+            1 => Some(Self::V6),
+            _ => None,
+        }
+    }
+
+    fn width(self) -> u8 {
+        match self {
+            Self::V4 => 32,
+            Self::V6 => 128,
+        }
+    }
+}
+
+/// A rule's reach (NET-18), in Core case order.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Reach {
+    Any = 0,
+    /// Only public addresses. Available on connect rules.
+    Public = 1,
+}
+
+impl Reach {
+    fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Any),
+            1 => Some(Self::Public),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(into = "RuleRow")]
 pub struct Rule {
+    dir: AddressDirection,
+    family: AddressFamily,
+    hi: u64,
+    lo: u64,
+    bits: u8,
+    reach: Reach,
+    first: u16,
+    last: u16,
+}
+
+/// Address fields of a launch row, also used by the tape codec.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+#[serde(rename = "Rule")]
+pub struct RuleRow {
     pub dir: u8,
     pub family: u8,
     pub hi: u64,
     pub lo: u64,
     pub bits: u8,
-    /// `Reach`: [`ANY`] or [`PUBLIC`] (NET-18).
     pub reach: u8,
     pub first: u16,
     pub last: u16,
 }
 
-/// A rule's reach (NET-18), in `core.Reach` case order: every covered address.
-pub const ANY: u8 = 0;
-/// Only covered addresses whose class is `Public`; valid only on `Connect`.
-pub const PUBLIC: u8 = 1;
+impl RuleRow {
+    pub fn decode(self) -> Option<Rule> {
+        Rule {
+            dir: AddressDirection::from_tag(self.dir)?,
+            family: AddressFamily::from_tag(self.family)?,
+            hi: self.hi,
+            lo: self.lo,
+            bits: self.bits,
+            reach: Reach::from_tag(self.reach)?,
+            first: self.first,
+            last: self.last,
+        }
+        .checked()
+    }
+}
+
+impl From<Rule> for RuleRow {
+    fn from(rule: Rule) -> Self {
+        Self {
+            dir: rule.dir as u8,
+            family: rule.family as u8,
+            hi: rule.hi,
+            lo: rule.lo,
+            bits: rule.bits,
+            reach: rule.reach as u8,
+            first: rule.first,
+            last: rule.last,
+        }
+    }
+}
 
 impl Rule {
+    /// Decode a Core rule, whose direction case order differs from the launch row tags.
+    pub fn from_core(mut row: RuleRow) -> Option<Self> {
+        row.dir = match row.dir {
+            0 | 1 => row.dir,
+            2 | 3 => row.dir + 4,
+            _ => return None,
+        };
+        row.decode()
+    }
+
+    pub fn direction(self) -> AddressDirection {
+        self.dir
+    }
+
     fn prefix(self) -> u128 {
         (u128::from(self.hi) << 64) | u128::from(self.lo)
-    }
-    fn width(self) -> u8 {
-        if self.family == 0 { 32 } else { 128 }
     }
     fn mask(self) -> u128 {
         if self.bits == 0 {
             0
         } else {
-            u128::MAX << (self.width() - self.bits)
+            u128::MAX << (self.family.width() - self.bits)
         }
     }
-    pub fn valid(self) -> bool {
-        AddressDirection::from_tag(self.dir).is_some()
-            && self.family <= 1
-            && self.bits <= self.width()
-            && (self.family != 0 || (self.hi == 0 && self.lo <= u64::from(u32::MAX)))
+
+    fn reaches_public(self) -> bool {
+        class::covers_public(self.family as u8, self.prefix(), self.bits)
+    }
+
+    fn checked(self) -> Option<Self> {
+        (self.bits <= self.family.width()
+            && (self.family != AddressFamily::V4
+                || (self.hi == 0 && self.lo <= u64::from(u32::MAX)))
             && self.prefix() & !self.mask() == 0
             && self.first <= self.last
-            && !(self.family == 1 && self.hi == 0 && self.lo >> 32 == 0xffff)
-            && match self.reach {
-                ANY => true,
-                PUBLIC => {
-                    self.dir == AddressDirection::Connect as u8
-                        && class::covers_public(self.family, self.prefix(), self.bits)
-                }
-                _ => false,
-            }
+            && !(self.family == AddressFamily::V6 && self.hi == 0 && self.lo >> 32 == 0xffff)
+            && (self.reach == Reach::Any
+                || (self.dir == AddressDirection::Connect && self.reaches_public())))
+        .then_some(self)
     }
+
     pub fn intersect(self, other: Self) -> Option<Self> {
         if self.dir != other.dir || self.family != other.family {
             return None;
@@ -129,37 +223,34 @@ impl Rule {
             ..long
         };
         // A public-only intersection that covers no public address reaches nothing.
-        (first <= last && rule.valid()).then_some(rule)
+        (first <= last && (rule.reach == Reach::Any || rule.reaches_public())).then_some(rule)
     }
-    pub fn permits(self, dir: u8, family: u8, hi: u64, lo: u64, port: u16) -> bool {
+    pub fn permits(self, dir: AddressDirection, family: u8, hi: u64, lo: u64, port: u16) -> bool {
         self.covers_address(dir, family, hi, lo)
-            && (self.reach == ANY || class::class_of(family, hi, lo) == AddressClass::Public)
-            && self.ports_permit(dir, port)
+            && (self.reach == Reach::Any || class::class_of(family, hi, lo) == AddressClass::Public)
+            && self.ports_permit(port)
     }
 
-    fn ports_permit(self, dir: u8, port: u16) -> bool {
-        if AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind) && port == 0 {
+    fn ports_permit(self, port: u16) -> bool {
+        if self.dir.is_bind() && port == 0 {
             self.first <= 1 && self.last == u16::MAX
         } else {
             (self.first..=self.last).contains(&port)
         }
     }
 
-    fn covers_address(self, dir: u8, family: u8, hi: u64, lo: u64) -> bool {
-        if family > 1 || self.dir != dir || self.family != family {
+    fn covers_address(self, dir: AddressDirection, family: u8, hi: u64, lo: u64) -> bool {
+        if self.dir != dir || self.family as u8 != family {
             return false;
         }
         let ip = (u128::from(hi) << 64) | u128::from(lo);
         if family == 1 && ((hi == 0 && lo >> 32 == 0xffff) || hi >> 54 == 0x3fa) {
             return false;
         }
-        let Some(direction) = AddressDirection::from_tag(dir) else {
-            return false;
-        };
-        if ip == 0 && (!direction.is_bind() || self.bits != 0) {
+        if ip == 0 && (!dir.is_bind() || self.bits != 0) {
             return false;
         }
-        if direction == AddressDirection::UdpSend && family == 0 && ip == u128::from(u32::MAX) {
+        if dir == AddressDirection::UdpSend && family == 0 && ip == u128::from(u32::MAX) {
             return false;
         }
         ip & self.mask() == self.prefix()
@@ -170,9 +261,9 @@ impl Rule {
         // NET-18: `public` is an optional last word, valid only on `Connect`.
         let reach = if parts.len() == 4 && parts[3] == "public" {
             parts.pop();
-            PUBLIC
+            Reach::Public
         } else {
-            ANY
+            Reach::Any
         };
         if parts.len() != 3 {
             return Err(error());
@@ -180,14 +271,14 @@ impl Rule {
         let dir = AddressDirection::ALL
             .into_iter()
             .find(|direction| direction.word() == parts[0])
-            .ok_or_else(error)? as u8;
+            .ok_or_else(error)?;
         let (prefix, bits) = parts[1].split_once('/').ok_or_else(error)?;
         let ip: IpAddr = prefix.parse().map_err(|_| error())?;
         let (family, hi, lo) = match ip {
-            IpAddr::V4(ip) => (0, 0, u64::from(u32::from(ip))),
+            IpAddr::V4(ip) => (AddressFamily::V4, 0, u64::from(u32::from(ip))),
             IpAddr::V6(ip) => {
                 let n = u128::from(ip);
-                (1, (n >> 64) as u64, n as u64)
+                (AddressFamily::V6, (n >> 64) as u64, n as u64)
             }
         };
         let (first, last) = parts[2].split_once('-').ok_or_else(error)?;
@@ -201,10 +292,7 @@ impl Rule {
             first: first.parse().map_err(|_| error())?,
             last: last.parse().map_err(|_| error())?,
         };
-        if !rule.valid() {
-            return Err(error());
-        }
-        Ok(rule)
+        rule.checked().ok_or_else(error)
     }
 }
 
@@ -214,7 +302,7 @@ impl Rule {
 /// unscoped `fe80::/10`, the unspecified address) are covered by no rule.
 pub fn not_public(
     rules: impl Iterator<Item = Rule>,
-    dir: u8,
+    dir: AddressDirection,
     family: u8,
     hi: u64,
     lo: u64,
@@ -223,7 +311,7 @@ pub fn not_public(
     class::class_of(family, hi, lo) != AddressClass::Public
         && rules
             .into_iter()
-            .any(|rule| rule.covers_address(dir, family, hi, lo) && rule.ports_permit(dir, port))
+            .any(|rule| rule.covers_address(dir, family, hi, lo) && rule.ports_permit(port))
 }
 
 /// NET-18 part 2's marking: a connect the preflight permitted is public-only
@@ -235,8 +323,8 @@ pub fn public_only(
     lo: u64,
     port: u16,
 ) -> bool {
-    let dir = AddressDirection::Connect as u8;
-    !rules.any(|rule| rule.reach == ANY && rule.permits(dir, family, hi, lo, port))
+    let dir = AddressDirection::Connect;
+    !rules.any(|rule| rule.reach == Reach::Any && rule.permits(dir, family, hi, lo, port))
 }
 
 /// The `IoError` code that marks a connect refused by NET-18's part 2 (an
@@ -252,16 +340,15 @@ pub const EPHEMERAL_OUTSIDE_NET_GRANT: u8 = 11;
 /// cover that interval before a port-zero bind can be issued.
 pub fn address_denial(
     mut rules: impl Iterator<Item = Rule> + Clone,
-    dir: u8,
+    dir: AddressDirection,
     family: u8,
     hi: u64,
     lo: u64,
     port: u16,
 ) -> Option<u8> {
-    if !AddressDirection::from_tag(dir).is_some_and(AddressDirection::is_bind) || port != 0 {
+    if !dir.is_bind() || port != 0 {
         return (!rules.any(|rule| rule.permits(dir, family, hi, lo, port))).then_some(1);
     }
-    // Bind rules never carry the `Public` reach (`Rule::valid`).
     let matching = rules.filter(|rule| rule.covers_address(dir, family, hi, lo));
     if matching.clone().next().is_none() {
         return Some(1);
@@ -345,24 +432,14 @@ mod tests {
     /// are the spec's table, not this crate's.
     #[test]
     fn public_reach_narrows() {
-        let public = |text: &str| Rule {
-            reach: PUBLIC,
-            ..Rule::parse(text).unwrap()
-        };
+        let public = |text: &str| Rule::parse(&format!("{text} public"));
         for bind in [
             "Listen 0.0.0.0/0 1-65535",
             "UdpBind 0.0.0.0/0 1-65535",
             "UdpSend 0.0.0.0/0 1-65535",
         ] {
-            assert!(!public(bind).valid(), "{bind}");
+            assert!(public(bind).is_err(), "{bind}");
         }
-        assert!(
-            !Rule {
-                reach: 2,
-                ..Rule::parse("Connect 0.0.0.0/0 1-65535").unwrap()
-            }
-            .valid()
-        );
         // Holes and embeddings: none of these holds a public address.
         for none in [
             "Connect 10.0.0.0/8 1-1",
@@ -373,7 +450,7 @@ mod tests {
             "Connect fc00::/7 1-65535",
             "Connect 2001:db8::/32 1-65535",
         ] {
-            assert!(!public(none).valid(), "{none}");
+            assert!(public(none).is_err(), "{none}");
         }
         for some in [
             "Connect 0.0.0.0/0 1-65535",
@@ -384,13 +461,13 @@ mod tests {
             "Connect 126.0.0.0/7 1-65535",
             "Connect 8.8.8.8/32 53-53",
         ] {
-            assert!(public(some).valid(), "{some}");
+            assert!(public(some).is_ok(), "{some}");
         }
         let any = Rule::parse("Connect 0.0.0.0/0 1-65535").unwrap();
-        let world = public("Connect 0.0.0.0/0 443-443");
-        assert_eq!(any.intersect(world).unwrap().reach, PUBLIC);
-        assert_eq!(world.intersect(any).unwrap().reach, PUBLIC);
-        assert_eq!(any.intersect(any).unwrap().reach, ANY);
+        let world = public("Connect 0.0.0.0/0 443-443").unwrap();
+        assert_eq!(any.intersect(world).unwrap().reach, Reach::Public);
+        assert_eq!(world.intersect(any).unwrap().reach, Reach::Public);
+        assert_eq!(any.intersect(any).unwrap().reach, Reach::Any);
         assert_eq!(
             world.intersect(Rule::parse("Connect 10.0.0.0/8 1-65535").unwrap()),
             None
@@ -456,6 +533,14 @@ mod tests {
             unsafe { RuleView::address(send).decode() },
             Some(GrantRule::Address(send))
         );
+        let row = RuleRow::from(send);
+        for invalid in [
+            RuleRow { dir: 5, ..row },
+            RuleRow { family: 2, ..row },
+            RuleRow { reach: 2, ..row },
+        ] {
+            assert!(invalid.decode().is_none());
+        }
     }
 
     #[test]
@@ -494,7 +579,7 @@ mod tests {
         let child = Rule::parse("Connect 127.0.0.0/16 80-100").unwrap();
         let narrowed = parent.intersect(child).unwrap();
         assert_eq!((narrowed.bits, narrowed.first, narrowed.last), (16, 80, 90));
-        assert!(narrowed.permits(0, 0, 0, 0x7f000001, 80));
+        assert!(narrowed.permits(AddressDirection::Connect, 0, 0, 0x7f000001, 80));
         for r in [
             "Connect 127.0.0.1/8 0-80",
             "Connect 0.0.0.0/33 0-80",
@@ -510,17 +595,25 @@ mod tests {
                 .is_none()
         );
         let v6 = Rule::parse("Connect ::/0 0-65535").unwrap();
-        assert!(!v6.permits(0, 1, 0, 0xffff7f000001, 80));
-        assert!(!v6.permits(0, 1, 0xfe80000000000000, 1, 80));
-        assert!(!v6.permits(0, 1, 0, 0, 80));
+        assert!(!v6.permits(AddressDirection::Connect, 1, 0, 0xffff7f000001, 80));
+        assert!(!v6.permits(AddressDirection::Connect, 1, 0xfe80000000000000, 1, 80));
+        assert!(!v6.permits(AddressDirection::Connect, 1, 0, 0, 80));
         let listen = Rule::parse("Listen 0.0.0.0/0 0-65535").unwrap();
-        assert!(listen.permits(1, 0, 0, 0, 0));
-        assert!(!Rule { last: 80, ..listen }.permits(1, 0, 0, 0x7f000001, 0));
-        assert!(
-            !Rule::parse("Listen 127.0.0.0/8 0-65535")
-                .unwrap()
-                .permits(1, 0, 0, 0, 80)
-        );
+        assert!(listen.permits(AddressDirection::Listen, 0, 0, 0, 0));
+        assert!(!Rule { last: 80, ..listen }.permits(
+            AddressDirection::Listen,
+            0,
+            0,
+            0x7f000001,
+            0
+        ));
+        assert!(!Rule::parse("Listen 127.0.0.0/8 0-65535").unwrap().permits(
+            AddressDirection::Listen,
+            0,
+            0,
+            0,
+            80
+        ));
     }
     #[test]
     fn exec_narrowing_matches_both_grants_and_charges_the_result() {

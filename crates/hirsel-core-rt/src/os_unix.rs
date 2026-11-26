@@ -49,7 +49,7 @@ pub(crate) unsafe fn configure_roots(
             return Err(StartupError::NetRules);
         }
     }
-    for row in rows.iter().filter(|row| row.address.dir == 4) {
+    for row in rows.iter().filter(|row| row.is_unix()) {
         let Some((label, _)) = (match unsafe { row.decode() } {
             Some(GrantRule::Unix(rule)) => rule
                 .endpoint()

@@ -1,5 +1,5 @@
 use super::*;
-use hirsel_core_net::{AddressDirection, Rule};
+use hirsel_core_net::{AddressDirection, Rule, RuleRow};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
@@ -60,7 +60,7 @@ unsafe fn mark_public(request: &Request, handle: u64, denial: Option<u8>) {
         let address = (*network).address;
         let rules = (&*(handle as *const Rules)).as_slice();
         (*network).public = hirsel_core_net::public_only(
-            rules.iter().map(|row| row.address),
+            rules.iter().filter_map(GrantRule::as_address),
             address.family,
             address.hi,
             address.lo,
@@ -109,8 +109,8 @@ unsafe fn count_not_public(
         let address = &(*request.path.cast::<NetworkRequest>()).address;
         let rules = (&*(handle as *const Rules)).as_slice();
         if hirsel_core_net::not_public(
-            rules.iter().map(|row| row.address),
-            0,
+            rules.iter().filter_map(GrantRule::as_address),
+            AddressDirection::Connect,
             address.family,
             address.hi,
             address.lo,
@@ -173,8 +173,12 @@ unsafe fn request_denial(request: &Request, handle: u64) -> Option<u8> {
         let address = &(*request.path.cast::<NetworkRequest>()).address;
         let rules = (&*(handle as *const Rules)).as_slice();
         hirsel_core_net::address_denial(
-            rules.iter().map(|row| row.address),
-            u8::from(request.operation == LISTEN),
+            rules.iter().filter_map(GrantRule::as_address),
+            if request.operation == LISTEN {
+                AddressDirection::Listen
+            } else {
+                AddressDirection::Connect
+            },
             address.family,
             address.hi,
             address.lo,
@@ -184,12 +188,17 @@ unsafe fn request_denial(request: &Request, handle: u64) -> Option<u8> {
 }
 
 /// SAFETY: handle is the live Net grant's immutable rule slice.
-pub(crate) unsafe fn permits_address(handle: u64, address: &Address, dir: u8) -> bool {
+pub(crate) unsafe fn permits_address(
+    handle: u64,
+    address: &Address,
+    dir: AddressDirection,
+) -> bool {
     unsafe {
         let rules = &*(handle as *const Rules);
         rules.permits(|r| {
-            r.address
-                .permits(dir, address.family, address.hi, address.lo, address.port)
+            r.as_address().is_some_and(|rule| {
+                rule.permits(dir, address.family, address.hi, address.lo, address.port)
+            })
         })
     }
 }
@@ -275,17 +284,15 @@ pub unsafe extern "C" fn hirsel_core_net_narrow(
     last: u16,
     _site: u64,
 ) -> Outcome {
-    let rule = AddressDirection::from_variant(dir)
-        .map(|dir| Rule {
-            dir: dir as u8,
-            family,
-            hi,
-            lo,
-            bits,
-            reach,
-            first,
-            last,
-        })
-        .filter(|rule| rule.valid());
+    let rule = Rule::from_core(RuleRow {
+        dir,
+        family,
+        hi,
+        lo,
+        bits,
+        reach,
+        first,
+        last,
+    });
     unsafe { narrow_add(builder, rule.map(GrantRule::Address)) }
 }

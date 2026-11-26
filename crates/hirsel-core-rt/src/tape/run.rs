@@ -338,12 +338,7 @@ unsafe fn record_header(
             let net = entry::hirsel_core_entry_grant(config, entry::NET, 0);
             if net != 0 {
                 let handle = entry::hirsel_core_capability_handle(context, net);
-                for rule in (*(handle as *const crate::net::Rules)).as_slice() {
-                    let Some(rule) = rule.decode() else {
-                        return Err(Fault::Corrupt);
-                    };
-                    net_rules.push(rule);
-                }
+                net_rules.extend_from_slice((*(handle as *const crate::net::Rules)).as_slice());
             }
         }
         let mut secret_grants = Vec::new();

@@ -113,10 +113,9 @@ unsafe fn str_operand<'a>(carrier: *const Buffer) -> Option<&'a str> {
 pub(crate) unsafe fn permits(rules: u64, direction: UnixDirection, root: &str, path: &str) -> bool {
     // SAFETY: the run pins the resolved Net grant and all its row text.
     unsafe {
-        (*(rules as *const Rules)).permits(|row| {
-            row.address.dir == 4
-                && matches!(row.decode(), Some(GrantRule::Unix(rule)) if rule.permits(direction, root, path))
-        })
+        (*(rules as *const Rules)).permits(
+            |row| matches!(row, GrantRule::Unix(rule) if rule.permits(direction, root, path)),
+        )
     }
 }
 

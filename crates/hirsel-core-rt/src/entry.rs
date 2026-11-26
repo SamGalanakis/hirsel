@@ -502,7 +502,7 @@ impl OsProcess {
                 && !installing
                 && isolated_store.is_none()
                 && input.grant_mask & (1 << NET) != 0
-                && rows.iter().any(|row| row.address.dir == 4);
+                && rows.iter().any(|row| row.is_unix());
             let exec = if input.exec_bindings_len != 0 {
                 let ops = input
                     .exec_ops

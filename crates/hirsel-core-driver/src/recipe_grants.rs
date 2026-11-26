@@ -186,18 +186,19 @@ fn refuse_ungranted_foreign(
 
 /// A launch grant rule as `hirsel` prints it.
 pub(super) fn net_rule(rule: &hirsel_core_net::GrantRule) -> String {
-    use hirsel_core_net::{AddressDirection, GrantRule, TlsTrust};
+    use hirsel_core_net::{AddressFamily, GrantRule, Reach, RuleRow, TlsTrust};
     match rule {
         GrantRule::Address(rule) => {
-            let direction = AddressDirection::from_tag(rule.dir).unwrap().word();
-            let ip = if rule.family == 0 {
+            let direction = rule.direction().word();
+            let rule = RuleRow::from(*rule);
+            let ip = if rule.family == AddressFamily::V4 as u8 {
                 std::net::IpAddr::V4(std::net::Ipv4Addr::from(rule.lo as u32))
             } else {
                 std::net::IpAddr::V6(std::net::Ipv6Addr::from(
                     (u128::from(rule.hi) << 64) | u128::from(rule.lo),
                 ))
             };
-            let reach = if rule.reach == hirsel_core_net::PUBLIC {
+            let reach = if rule.reach == Reach::Public as u8 {
                 " public"
             } else {
                 ""

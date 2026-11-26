@@ -18,19 +18,19 @@ use std::ptr;
 
 #[repr(C)]
 pub struct Rules {
-    pub data: *const RuleView,
+    pub data: *const GrantRule,
     pub len: usize,
 }
 impl Rules {
     /// # Safety
     /// The run pins this grant's immutable rows.
-    pub(crate) unsafe fn permits(&self, test: impl FnMut(&RuleView) -> bool) -> bool {
+    pub(crate) unsafe fn permits(&self, test: impl FnMut(&GrantRule) -> bool) -> bool {
         unsafe { self.as_slice() }.iter().any(test)
     }
 
     /// # Safety
     /// The run pins the configured or narrowed immutable rule list.
-    pub unsafe fn as_slice(&self) -> &[RuleView] {
+    pub unsafe fn as_slice(&self) -> &[GrantRule] {
         if self.len == 0 {
             &[]
         } else {
@@ -39,8 +39,7 @@ impl Rules {
     }
 }
 pub(crate) struct RulesStorage {
-    _rows: Box<[RuleView]>,
-    _patterns: Vec<String>,
+    _rows: Box<[GrantRule]>,
     view: Box<Rules>,
 }
 
@@ -48,7 +47,6 @@ impl RulesStorage {
     pub(crate) fn empty() -> Self {
         Self {
             _rows: Box::default(),
-            _patterns: Vec::new(),
             view: Box::new(Rules {
                 data: ptr::null(),
                 len: 0,
@@ -71,37 +69,12 @@ impl RulesStorage {
     }
 
     pub(crate) fn new(storage: impl IntoIterator<Item = GrantRule>) -> Self {
-        let mut patterns = Vec::new();
-        let rows: Box<[_]> = storage
-            .into_iter()
-            .map(|rule| match rule {
-                GrantRule::Address(address) => RuleView::address(address),
-                GrantRule::Tls(rule) => {
-                    patterns.push(rule.pattern_text());
-                    RuleView::tls(&rule, patterns.last().unwrap())
-                }
-                GrantRule::Resolve(rule) => {
-                    patterns.push(rule.pattern_text());
-                    RuleView::resolve(patterns.last().unwrap())
-                }
-                GrantRule::Unix(rule) => {
-                    let text = rule
-                        .endpoint()
-                        .map_or_else(String::new, |(label, path)| [label, path].concat());
-                    patterns.push(text);
-                    RuleView::unix(&rule, patterns.last().unwrap())
-                }
-            })
-            .collect();
+        let rows: Box<[_]> = storage.into_iter().collect();
         let view = Box::new(Rules {
             data: rows.as_ptr(),
             len: rows.len(),
         });
-        Self {
-            _rows: rows,
-            _patterns: patterns,
-            view,
-        }
+        Self { _rows: rows, view }
     }
 
     pub(crate) fn handle(&self) -> u64 {
@@ -1338,7 +1311,6 @@ pub(crate) unsafe fn narrow(context: *mut Context, n: u64, list: &[GrantRule]) -
         let rules = (*(rules_handle as *const Rules)).as_slice();
         let intersections: Vec<_> = rules
             .iter()
-            .filter_map(|r| r.decode())
             .flat_map(|r| list.iter().filter_map(move |rule| r.intersect(rule)))
             .collect();
         let charge = intersections

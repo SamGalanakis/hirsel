@@ -308,18 +308,16 @@ impl Machine<'_> {
                 )
             }
             HostOp::NetNarrow => {
-                let rule = hirsel_core_net::AddressDirection::from_variant(a[1] as u8)
-                    .map(|dir| hirsel_core_net::Rule {
-                        dir: dir as u8,
-                        family: a[2] as u8,
-                        hi: a[3],
-                        lo: a[4],
-                        bits: a[5] as u8,
-                        reach: a[6] as u8,
-                        first: a[7] as u16,
-                        last: a[8] as u16,
-                    })
-                    .filter(|r| r.valid());
+                let rule = hirsel_core_net::Rule::from_core(hirsel_core_net::RuleRow {
+                    dir: a[1] as u8,
+                    family: a[2] as u8,
+                    hi: a[3],
+                    lo: a[4],
+                    bits: a[5] as u8,
+                    reach: a[6] as u8,
+                    first: a[7] as u16,
+                    last: a[8] as u16,
+                });
                 self.narrow_add(a[0], rule.map(hirsel_core_net::GrantRule::Address))
             }
             HostOp::NetNarrowBegin => {

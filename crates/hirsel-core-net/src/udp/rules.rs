@@ -20,12 +20,12 @@ impl UdpRules {
     pub fn new(rules: impl IntoIterator<Item = Rule>) -> Self {
         let mut index = Self::default();
         for rule in rules {
-            let target = match AddressDirection::from_tag(rule.dir) {
-                Some(AddressDirection::UdpBind) => &mut index.bind,
-                Some(AddressDirection::UdpSend) => &mut index.send,
+            let target = match rule.dir {
+                AddressDirection::UdpBind => &mut index.bind,
+                AddressDirection::UdpSend => &mut index.send,
                 _ => continue,
             };
-            target[usize::from(rule.family)]
+            target[rule.family as usize]
                 .entry(rule.bits)
                 .or_default()
                 .entry(rule.prefix())

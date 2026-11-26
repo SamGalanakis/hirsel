@@ -330,9 +330,9 @@ unsafe fn prepare(
         #[cfg(not(feature = "record"))]
         let rules = grant;
         let rules = &*(rules as *const Rules);
-        if !rules.as_slice().iter().filter(|rule| rule.address.dir == 2).any(|rule| {
-            matches!(rule.decode(), Some(GrantRule::Tls(rule)) if rule.permits(&name, address.port, pin))
-        }) {
+        if !rules.permits(
+            |rule| matches!(rule, GrantRule::Tls(rule) if rule.permits(&name, address.port, pin)),
+        ) {
             return Err(DENIED);
         }
         if remember && let Some(store) = &store {

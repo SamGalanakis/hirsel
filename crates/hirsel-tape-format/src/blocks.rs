@@ -4,8 +4,8 @@ use super::{
     KIND_CALL, KIND_RUN, MAGIC, MAX_LEN, SECRET_KIND, TRUNCATED, put_bytes, put_varint, xxh3,
 };
 use hirsel_core_net::{
-    EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, TlsRule, TlsTrust, UnixDirection,
-    UnixRule,
+    EnvPatterns, EnvSnapshot, GrantRule, ResolveRule, Rule, RuleRow, TlsRule, TlsTrust,
+    UnixDirection, UnixRule,
 };
 
 #[cfg(test)]
@@ -44,17 +44,19 @@ const NET_RULE_LEN: usize = 23;
 /// this tag. An untagged row is an `Any` rule.
 const PUBLIC_RULE: u8 = 8;
 
-fn read_net_rule(bytes: &[u8]) -> Rule {
-    Rule {
+fn read_net_rule(bytes: &[u8], public: bool) -> Result<Rule, Corrupt> {
+    RuleRow {
         dir: bytes[0],
         family: bytes[1],
         hi: u64::from_le_bytes(bytes[2..10].try_into().unwrap()),
         lo: u64::from_le_bytes(bytes[10..18].try_into().unwrap()),
         bits: bytes[18],
-        reach: hirsel_core_net::ANY,
+        reach: u8::from(public),
         first: u16::from_le_bytes(bytes[19..21].try_into().unwrap()),
         last: u16::from_le_bytes(bytes[21..23].try_into().unwrap()),
     }
+    .decode()
+    .ok_or(Corrupt)
 }
 
 fn read_tls_rule(c: &mut Cursor<'_>) -> Result<TlsRule, Corrupt> {
@@ -117,13 +119,7 @@ fn read_net_rules(c: &mut Cursor<'_>) -> Result<Vec<GrantRule>, Corrupt> {
                 if public {
                     c.u8()?;
                 }
-                let mut rule = read_net_rule(c.take(NET_RULE_LEN)?);
-                if public {
-                    rule.reach = hirsel_core_net::PUBLIC;
-                }
-                if !rule.valid() {
-                    return Err(Corrupt);
-                }
+                let rule = read_net_rule(c.take(NET_RULE_LEN)?, public)?;
                 rules.push(GrantRule::Address(rule));
             }
         }
@@ -153,7 +149,8 @@ pub fn net_snapshot(rules: &[GrantRule]) -> Result<Vec<u8>, HeaderTooLarge> {
     for rule in rules {
         match rule {
             GrantRule::Address(rule) => {
-                if rule.reach == hirsel_core_net::PUBLIC {
+                let rule = RuleRow::from(*rule);
+                if rule.reach == hirsel_core_net::Reach::Public as u8 {
                     out.push(PUBLIC_RULE);
                 }
                 out.extend_from_slice(&[rule.dir, rule.family]);

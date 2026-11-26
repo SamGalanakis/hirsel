@@ -1,4 +1,7 @@
-use crate::{AddressDirection, Name, Pattern, RULE_SYNTAX, Rule, TlsRule, TlsTrust};
+use crate::{
+    AddressDirection, AddressFamily, Name, Pattern, RULE_SYNTAX, Reach, Rule, RuleRow, TlsRule,
+    TlsTrust,
+};
 use std::collections::BTreeMap;
 
 /// The path grammar shared by Dir and Unix endpoints.
@@ -175,19 +178,28 @@ impl GrantRule {
     /// Address authority at the root of a served Net.
     pub fn served_addresses() -> impl Iterator<Item = Self> {
         AddressDirection::ALL.into_iter().flat_map(|direction| {
-            (0..2).map(move |family| {
-                Self::Address(Rule {
-                    dir: direction as u8,
-                    family,
-                    hi: 0,
-                    lo: 0,
-                    bits: 0,
-                    reach: crate::ANY,
-                    first: 0,
-                    last: u16::MAX,
+            [AddressFamily::V4, AddressFamily::V6]
+                .into_iter()
+                .map(move |family| {
+                    Self::Address(Rule {
+                        dir: direction,
+                        family,
+                        hi: 0,
+                        lo: 0,
+                        bits: 0,
+                        reach: Reach::Any,
+                        first: 0,
+                        last: u16::MAX,
+                    })
                 })
-            })
         })
+    }
+
+    pub fn as_address(&self) -> Option<Rule> {
+        match self {
+            Self::Address(rule) => Some(*rule),
+            _ => None,
+        }
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -252,7 +264,7 @@ impl GrantRule {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RuleView {
-    pub address: Rule,
+    pub address: RuleRow,
     pub patterns: *const u8,
     pub patterns_len: usize,
     pub trust: u8,
@@ -262,13 +274,18 @@ pub struct RuleView {
 impl RuleView {
     pub fn address(address: Rule) -> Self {
         Self {
-            address,
+            address: address.into(),
             patterns: std::ptr::null(),
             patterns_len: 0,
             trust: 0,
             roots: [0; 32],
         }
     }
+
+    const TLS: u8 = 2;
+    const RESOLVE: u8 = 3;
+    const UNIX: u8 = 4;
+    const UNIX_ROOT: u8 = 5;
 
     pub fn tls(rule: &TlsRule, patterns: &str) -> Self {
         let (first, last) = rule.ports();
@@ -278,68 +295,67 @@ impl RuleView {
             TlsTrust::Any => (2, [0; 32]),
         };
         Self {
-            address: Rule {
-                dir: 2,
-                family: 0,
-                hi: 0,
-                lo: 0,
-                bits: 0,
-                reach: crate::ANY,
-                first,
-                last,
-            },
-            patterns: patterns.as_ptr(),
-            patterns_len: patterns.len(),
             trust,
             roots,
+            ..Self::text_row(
+                RuleRow {
+                    dir: Self::TLS,
+                    first,
+                    last,
+                    ..RuleRow::default()
+                },
+                patterns,
+            )
         }
     }
 
     pub fn resolve(patterns: &str) -> Self {
-        Self {
-            patterns: patterns.as_ptr(),
-            patterns_len: patterns.len(),
-            ..Self::address(Rule {
-                dir: 3,
-                family: 0,
-                hi: 0,
-                lo: 0,
-                bits: 0,
-                reach: crate::ANY,
-                first: 0,
-                last: 0,
-            })
-        }
+        Self::text_row(
+            RuleRow {
+                dir: Self::RESOLVE,
+                ..RuleRow::default()
+            },
+            patterns,
+        )
     }
 
     pub fn unix(rule: &UnixRule, text: &str) -> Self {
         let split = rule.endpoint().map_or(0, |(root, _)| root.len());
-        Self::unix_text(4, rule.direction as u8, split, text)
+        Self::unix_text(Self::UNIX, rule.direction as u8, split, text)
     }
 
     pub fn unix_root(label_len: usize, text: &str) -> Self {
-        Self::unix_text(5, 0, label_len, text)
+        Self::unix_text(Self::UNIX_ROOT, 0, label_len, text)
     }
 
     fn unix_text(dir: u8, family: u8, split: usize, text: &str) -> Self {
-        Self {
-            patterns: text.as_ptr(),
-            patterns_len: text.len(),
-            ..Self::address(Rule {
+        Self::text_row(
+            RuleRow {
                 dir,
                 family,
                 hi: split as u64,
-                lo: 0,
-                bits: 0,
-                reach: crate::ANY,
-                first: 0,
-                last: 0,
-            })
+                ..RuleRow::default()
+            },
+            text,
+        )
+    }
+
+    fn text_row(address: RuleRow, text: &str) -> Self {
+        Self {
+            address,
+            patterns: text.as_ptr(),
+            patterns_len: text.len(),
+            trust: 0,
+            roots: [0; 32],
         }
     }
 
+    pub fn is_unix(self) -> bool {
+        self.address.dir == Self::UNIX
+    }
+
     pub fn is_unix_root(self) -> bool {
-        self.address.dir == 5
+        self.address.dir == Self::UNIX_ROOT
     }
 
     /// # Safety
@@ -367,14 +383,11 @@ impl RuleView {
     /// # Safety
     /// A text row pins `patterns_len` readable bytes at `patterns`.
     pub unsafe fn decode(self) -> Option<GrantRule> {
-        if !matches!(self.address.dir, 2..=4) {
-            return self
-                .address
-                .valid()
-                .then_some(GrantRule::Address(self.address));
+        if !matches!(self.address.dir, Self::TLS | Self::RESOLVE | Self::UNIX) {
+            return self.address.decode().map(GrantRule::Address);
         }
         let patterns = unsafe { self.text()? };
-        if self.address.dir == 4 {
+        if self.is_unix() {
             let direction = UnixDirection::from_tag(self.address.family)?;
             let (root, path) = patterns.split_at_checked(self.address.hi as usize)?;
             return if patterns.is_empty() {
@@ -386,7 +399,7 @@ impl RuleView {
         if patterns.is_empty() {
             return None;
         }
-        if self.address.dir == 3 {
+        if self.address.dir == Self::RESOLVE {
             return ResolveRule::new(patterns).map(GrantRule::Resolve);
         }
         let trust = match self.trust {

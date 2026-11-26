@@ -39,10 +39,7 @@ pub(crate) unsafe fn authorize(provider: &Provider, request: &mut Request) -> bo
             return false;
         };
         let rules = &*(handle as *const Rules);
-        if !rules.permits(|rule| {
-            rule.address.dir == 3
-                && matches!(rule.decode(), Some(GrantRule::Resolve(rule)) if rule.permits(&name))
-        }) {
+        if !rules.permits(|rule| matches!(rule, GrantRule::Resolve(rule) if rule.permits(&name))) {
             return false;
         }
         resolve.name = Some(name);

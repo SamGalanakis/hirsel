@@ -809,7 +809,10 @@ unsafe fn create(
                 .entry(rules_id)
                 .or_insert_with(|| {
                     let rows = (*(rules_id as *const Rules)).as_slice();
-                    Arc::new(UdpRules::new(rows.iter().map(|row| row.address)))
+                    Arc::new(UdpRules::new(
+                        rows.iter()
+                            .filter_map(hirsel_core_net::GrantRule::as_address),
+                    ))
                 })
                 .clone()
         };

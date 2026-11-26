@@ -431,12 +431,7 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
                 NET => {
                     assert_ne!(handle, 0);
                     let rules = &*(handle as *const crate::net::Rules);
-                    let decoded = rules
-                        .as_slice()
-                        .iter()
-                        .map(|rule| rule.address)
-                        .collect::<Vec<_>>();
-                    assert_eq!(decoded, [net_rule.address]);
+                    assert_eq!(rules.as_slice(), [net_rule.decode().unwrap()]);
                 }
                 ENV => {
                     assert_ne!(handle, 0);

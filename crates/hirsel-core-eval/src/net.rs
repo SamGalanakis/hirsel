@@ -1,4 +1,5 @@
 use super::*;
+use hirsel_core_net::{AddressDirection, GrantRule};
 
 impl Machine<'_> {
     pub(super) fn network_host(&mut self, t: &Task, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
@@ -6,25 +7,23 @@ impl Machine<'_> {
             HostOp::Connect | HostOp::Listen => {
                 if let Some(rules) = self.host.world.network.grants.get(&a[0]) {
                     let denial = hirsel_core_net::address_denial(
-                        rules.iter().filter_map(|rule| match rule {
-                            hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
-                            _ => None,
-                        }),
-                        u8::from(op == HostOp::Listen),
+                        rules.iter().filter_map(GrantRule::as_address),
+                        if op == HostOp::Listen {
+                            AddressDirection::Listen
+                        } else {
+                            AddressDirection::Connect
+                        },
                         a[1] as u8,
                         a[2],
                         a[3],
                         a[4] as u16,
                     );
                     if let Some(tag) = denial {
-                        let rules = rules.iter().filter_map(|rule| match rule {
-                            hirsel_core_net::GrantRule::Address(rule) => Some(*rule),
-                            _ => None,
-                        });
+                        let rules = rules.iter().filter_map(GrantRule::as_address);
                         if op == HostOp::Connect
                             && hirsel_core_net::not_public(
                                 rules,
-                                0,
+                                AddressDirection::Connect,
                                 a[1] as u8,
                                 a[2],
                                 a[3],

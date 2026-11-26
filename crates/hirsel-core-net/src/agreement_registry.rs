@@ -32,7 +32,9 @@ struct Entry<Charge> {
 /// the ticket's registry protection.
 pub struct ShareTicket<Charge> {
     registry: Arc<AgreementRegistry<Charge>>,
-    ordinal: u64,
+    /// None for a share that arrived in a replaying unit: the sending unit's
+    /// ticket counted it, so it takes no ordinal and holds no entry back.
+    ordinal: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,14 +67,23 @@ impl<Charge> AgreementRegistry<Charge> {
         };
         Some(ShareTicket {
             registry: self.clone(),
-            ordinal,
+            ordinal: Some(ordinal),
         })
+    }
+
+    /// The ticket of a share that arrives in a replaying unit.
+    pub fn arrived_share(self: &Arc<Self>) -> ShareTicket<Charge> {
+        ShareTicket {
+            registry: self.clone(),
+            ordinal: None,
+        }
     }
 }
 
 impl<Charge> ShareTicket<Charge> {
+    /// The share's number in its run; an arrived share's is never read.
     pub fn ordinal(&self) -> u64 {
-        self.ordinal
+        self.ordinal.unwrap_or(u64::MAX)
     }
 
     pub fn resolve(self, side: Side, shared: &[u8; 32], charge: Charge) -> RegistryVerdict {
@@ -122,9 +133,10 @@ impl<Charge> ShareTicket<Charge> {
 
 impl<Charge> Drop for ShareTicket<Charge> {
     fn drop(&mut self) {
+        let Some(ordinal) = self.ordinal else { return };
         let retired = {
             let mut state = self.registry.state.lock().unwrap();
-            state.outstanding.remove(&self.ordinal);
+            state.outstanding.remove(&ordinal);
             let oldest = state.outstanding.first().copied();
             state
                 .entries

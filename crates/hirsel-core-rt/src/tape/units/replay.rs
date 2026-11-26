@@ -271,7 +271,7 @@ pub(crate) fn due(
     group: Option<Group>,
     pump: bool,
     layout: impl Fn(usize) -> Option<(u64, Vec<[u64; 4]>)>,
-    secrets: Option<&std::sync::Mutex<crate::secret::Secrets>>,
+    grants: Option<&crate::host_file::RunGrants>,
 ) -> Option<Due> {
     replaying(group, |live| {
         live.fresh_takes();
@@ -346,7 +346,7 @@ pub(crate) fn due(
                     let bytes = bytes as usize;
                     let flat = {
                         let held =
-                            &mut |kind, c: &mut format::Cursor<'_>| arrived(live, secrets, kind, c);
+                            &mut |kind, c: &mut format::Cursor<'_>| arrived(live, grants, kind, c);
                         packed(&value, vec![0; bytes], (0, bytes), &owners, held)
                     };
                     match flat {
@@ -404,7 +404,7 @@ pub(crate) fn due(
                 .ok_or(Unpacked::Layout)
                 .and_then(|(bytes, owners)| {
                     let held =
-                        &mut |kind, c: &mut format::Cursor<'_>| arrived(live, secrets, kind, c);
+                        &mut |kind, c: &mut format::Cursor<'_>| arrived(live, grants, kind, c);
                     let bytes = bytes as usize;
                     packed(&value, vec![0; bytes], (0, bytes), &owners, held)
                 })

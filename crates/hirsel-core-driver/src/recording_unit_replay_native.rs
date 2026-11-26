@@ -703,3 +703,113 @@ fn u5_secrets_cross_in_items_entries_and_results() {
         one_line("result", 0, 7, "replay: Diverged(Arg) at 7 in root ");
     }
 }
+
+/// A virtual `KeyShare` crosses in an item, a helper's entry and its result,
+/// comes back to the root that paid for it, and then agrees; a second share
+/// the root makes after the crossings agrees too.
+const U5_KEY_SHARES: &str = r#"
+fn bounce(take k: secret.KeyShare) -> secret.KeyShare waits {
+    let (c, i): (Client[secret.KeyShare], Inbox[secret.KeyShare]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take k))
+    result.unwrap(conn.receive(i))
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let mut point: Bytes = list.with_capacity(32)
+    let s = result.unwrap(secret.key_share(provide.random(11), X25519, mut point))
+    let (c, i): (Client[secret.KeyShare], Inbox[secret.KeyShare]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take s))
+    let k = result.unwrap(conn.receive(i))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take k, bounce))
+    let back = result.unwrap(task.join(take h))
+    result.unwrap(conn.send(c, take back))
+    let last = result.unwrap(conn.receive(i))
+    let mut again: Bytes = list.with_capacity(32)
+    let fresh = result.unwrap(secret.key_share(provide.random(12), X25519, mut again))
+    let profile: schedule.Profile13 = Quic(Aes128GcmSha256)
+    let hash = string.as_bytes("0123456789abcdef0123456789abcdef")
+    let crossed = result.unwrap(schedule.tls13(profile, Client, take last, hash, hash))
+    let made = result.unwrap(schedule.tls13(profile, Server, take fresh, hash, hash))
+    drop(take crossed)
+    drop(take made)
+    result.unwrap(stdout.write(out, "share"))
+    Ok(())
+}
+"#;
+
+/// An arriving `KeyShare` replays as its snapshot with no key and no charge,
+/// numbered where it arrives; its agreement takes the recorded verdict, and
+/// it takes no number among the run's shares, so the share the root makes
+/// after the crossings still agrees as its 1 (docs/recording.md,
+/// "Snapshots"). A virtual share's snapshot is a handle part (1), tag 8, the
+/// receiving ordinal, then its media origin: the root's stream `u32` 0,
+/// delivery 0 and its first tracked charge 0, then `X25519` (0). The
+/// ordinals and frames are those of `u5_secrets_cross_in_items_entries_and_results`:
+/// a virtual share writes no frame. Each case moves one origin's stream to
+/// 99, so the next frame that writes that snapshot is the one line.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_key_shares_cross_and_agree() {
+    crate::openat2_required::require();
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(U5_KEY_SHARES, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut options = native_options(backend, dir.path());
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.grant_mask = ["Tasks", "Stdout"]
+            .iter()
+            .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+        options.cas = dir.path().join(format!("u5k-store-{backend:?}"));
+        options.output = dir.path().join(format!("u5k-{backend:?}"));
+        let program = product.build(&entry, &options).unwrap().executable;
+        let path = dir.path().join(format!("u5k-{backend:?}.tape"));
+        let (code, out, err) = tape_run(&program, &[], Some(&path));
+        assert_eq!((code, out.as_str()), (Some(0), "share"), "{backend:?}: {err}");
+        let frames = unit_streams(&path, &format!("{backend:?}"), &["root", "root.0"]);
+        let (code, out, err) = u4_replay(&program, &path, None);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (Some(0), "", ""),
+            "{backend:?}: {frames:#?}"
+        );
+        let tape = std::fs::read(&path).unwrap();
+        let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+            std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+        })
+        .unwrap()
+        .1
+        .tape_id;
+        let one_line = |name: &str, stream: u32, ordinal: u8, expected: &str| {
+            let window = [1, 8, ordinal, 0, 0, 0, 0, 0, 0, 0];
+            let wrong = u4_patched(&tape, &tape_id, stream, |payload| {
+                let Some(i) = payload.windows(10).position(|w| w == window) else {
+                    return false;
+                };
+                payload[i + 3] = 99;
+                true
+            });
+            let corrupt = dir.path().join(format!("u5k-{backend:?}-{name}.tape"));
+            std::fs::write(&corrupt, wrong).unwrap();
+            let (code, out, err) = u4_replay(&program, &corrupt, None);
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} {name}: {err}");
+            let lines: Vec<_> = err.lines().collect();
+            assert!(
+                matches!(&lines[..], [l] if l.starts_with(expected)),
+                "{backend:?} {name}: {err}"
+            );
+        };
+        one_line("item", 0, 5, "replay: Diverged(Arg) at 5 in root ");
+        one_line("entry", 1, 1, "replay: Diverged(Arg) at 1 in root.0 ");
+        one_line("result", 0, 7, "replay: Diverged(Arg) at 7 in root ");
+    }
+}

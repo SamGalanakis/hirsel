@@ -171,6 +171,19 @@ impl Origin {
         }
     }
 
+    /// A key object that arrived in a replaying unit as its snapshot: its
+    /// birth as written, and its new ordinal there as its operand.
+    #[cfg(feature = "record")]
+    pub(crate) fn arrived(birth: (u32, u64, u64), ordinal: u64) -> Self {
+        let mut reference = [0; 9];
+        reference[..8].copy_from_slice(&ordinal.to_le_bytes());
+        reference[8] = Self::ARRIVAL;
+        Self {
+            birth: Some(birth),
+            reference,
+        }
+    }
+
     #[cfg(feature = "record")]
     fn captured(&self) -> bool {
         self.reference != [0; 9]

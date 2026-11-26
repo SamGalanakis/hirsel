@@ -65,8 +65,8 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
                 .map(|&h| unsafe { ((*h).result.bytes, (*h).result.owners.clone()) })
         };
         // SAFETY: the context that bound the recording pins its host files.
-        let secrets = unsafe { u.files.as_ref() }.map(|f| &f.registry.run_grants().secrets);
-        let (key, outcome) = match tape::due(Some(group), u.pumping, layout, secrets) {
+        let grants = unsafe { u.files.as_ref() }.map(|f| f.registry.run_grants());
+        let (key, outcome) = match tape::due(Some(group), u.pumping, layout, grants) {
             None => return,
             Some(tape::Due::Cancel) => {
                 if !u.root.is_null() {

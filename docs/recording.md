@@ -694,8 +694,8 @@ unit's stream alone and leaves the other streams unread.
 
 **What this build replays.** Every stream replays as above, each helper on a thread of its
 own from its stream's entry, when its entry's value holds plain bytes, lists of plain bytes,
-functions, capabilities and `Secret`s, and its helper ends return a value of plain bytes,
-lists of plain bytes, functions and `Secret`s. A helper's entry capability becomes an object of the helper's stream, by the
+functions, capabilities, `Secret`s and `KeyShare`s, and its helper ends return a value of
+plain bytes, lists of plain bytes, functions, `Secret`s and `KeyShare`s. A helper's entry capability becomes an object of the helper's stream, by the
 ordinal the entry gives it. When every started stream has its verdict, the replay writes the
 lines that are not `Sealed`, as below, and exits 1 if it wrote any, else 0. A helper end's `TAKE` that names
 no helper the unit spawned, or carries a value of another layout than the handle's result
@@ -704,15 +704,18 @@ next take point; a kind 1 take applies at the scheduler's pump, which pumps inst
 waiting while that `TAKE` is the unit's next frame, since the unit's waits for its helpers
 are then not outside waits. What this build does not replay yet stops the replay with
 `replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: a helper
-end that hands its owner survivors; an entry, result or item holding a key object, a
-client, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit (its
+end that hands its owner survivors; an entry, result or item holding a `Schedule`, a
+`Sealer`, an `Opener`, a `HeaderMask`, a client, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit (its
 designation does not say whether the program held its parent's bytes) or a list whose
 elements hold handles or functions; a result or item holding a capability; a helper entry
 holding a capability of virtual construction or a `Net`, `Env`, `Exec` or `Cred`
 capability, whose rules the root's startup holds; a send that waits; a notice another unit
 sent; and every other take kind. An arriving `Secret` replays as its designation and
 policy with no bytes behind it, as one holder with no charge: its charges stay with the
-unit that paid them, and only that unit's refund takes return them. A failed or cancelled helper end delivers its recorded causes to
+unit that paid them, and only that unit's refund takes return them. An arriving `KeyShare`
+replays as its snapshot, numbered where it arrives, with no key and no charge: its
+agreement takes the recorded verdict, and it takes no number among the run's shares, since
+the stream that made it counted it there. A failed or cancelled helper end delivers its recorded causes to
 the join, and `UNIT_CANCEL` is checked against the owner's stream. A unit's own connections
 replay: `CONN_SEND` and `CONN_TRY_SEND` are checked with the item at issue and deliver
 nothing, the item reaches the inbox at its `TAKE`, and the drops of clients and inboxes are

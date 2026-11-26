@@ -171,10 +171,10 @@ unsafe fn open(
     flat[f as usize..f as usize + 8].copy_from_slice(&code.to_le_bytes());
     // SAFETY: the root's host files are live for the run.
     let registry = unsafe { &(*(*context).host_files).registry };
-    let secrets = &registry.run_grants().secrets;
+    let grants = registry.run_grants();
     let mut word = |kind: u64, c: &mut format::Cursor<'_>| -> Result<u64, Unpacked> {
         if kind != CAPABILITY {
-            return arrived(&mut live, Some(secrets), kind, c);
+            return arrived(&mut live, Some(grants), kind, c);
         }
         match c.u8()? {
             1 => {

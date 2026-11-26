@@ -10,7 +10,8 @@ pub(crate) struct Share {
     pub(crate) key: Option<KeyShare>,
     pub(crate) ticket: ShareTicket<crate::media::Payment>,
     pub(crate) origin: (u8, u64),
-    pub(crate) charge: crate::media::Payment,
+    /// None for a share that arrived in a replaying unit.
+    pub(crate) charge: Option<crate::media::Payment>,
     pub(crate) tape: crate::media::Origin,
     #[cfg(feature = "record")]
     pub(crate) group: Group,
@@ -136,7 +137,7 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             key: call.key,
             ticket,
             origin,
-            charge,
+            charge: Some(charge),
             tape,
             #[cfg(feature = "record")]
             group,

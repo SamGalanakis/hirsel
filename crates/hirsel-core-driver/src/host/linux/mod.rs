@@ -13,6 +13,8 @@ use std::{
 };
 
 mod install;
+#[cfg(test)]
+mod report_laws;
 pub(crate) mod spawn;
 
 pub(crate) use install::{installed_executable, loaded_libraries};

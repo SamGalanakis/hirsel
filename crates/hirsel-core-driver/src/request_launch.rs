@@ -1,4 +1,5 @@
 use super::{Meter, Outcome, Output, PathBuf};
+use std::io::{self, Write};
 
 /// The program a `run` or `replay` request built: its argument vector (the
 /// runner's, then the executable's, then the request's), the variables it runs
@@ -41,10 +42,10 @@ pub(crate) fn report_request_error(error: &(dyn std::error::Error + 'static)) ->
         .and_then(std::io::Error::get_ref)
         .and_then(|inner| inner.downcast_ref::<crate::tape_cli::ReplayDamage>())
     {
-        eprintln!("{damage}");
+        let _ = writeln!(io::stderr().lock(), "{damage}");
         1
     } else {
-        eprintln!("hirsel: {error}");
+        let _ = writeln!(io::stderr().lock(), "hirsel: {error}");
         2
     }
 }

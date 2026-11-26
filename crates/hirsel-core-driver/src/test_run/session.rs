@@ -12,7 +12,7 @@ use crate::property_corpus::{self, Corpus, SavedEntry};
 use crate::{CheckProduct, NativeOptions, NativeStop};
 use hirsel_core_ids::{ContentHash, DefPath};
 use std::collections::BTreeMap;
-use std::io;
+use std::io::{self, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -539,7 +539,8 @@ impl TestSession {
             if let Some(regressions) = regressions {
                 report["law_regressions"] = serde_json::json!(regressions);
             }
-            println!("{report}");
+            writeln!(io::stdout().lock(), "{report}")
+                .map_err(|error| format!("write test report: {error}"))?;
         } else {
             for red in regressions.into_iter().flatten() {
                 println!("{red}");

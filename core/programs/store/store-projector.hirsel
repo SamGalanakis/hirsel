@@ -173,16 +173,17 @@ const PROJECTOR_READ_PINS: u64 = VALUE_LIMIT + 1048576
 // Registers `decl` as the projection of `source` by `fold`, at cadence `c`,
 // every commit that runs the fold bounded at `steps` (§1.14 "The bound").
 // The store's head steps it on idle turns; `project_step` runs the same step.
+// A read-only declaration binds Local projections without a runnable fold.
 // A second registration of one name in a declaration is Conflict.
 pub fn projector[K, V, E: inert + send](mut d: Declare, decl: ProjectionDecl, source: Table[K, V], take from: Source, fold: Fold[E, K, V, Error], c: Cadence, steps: u64) -> Result[(), Error] {
     if let Follower = d.mode {
-        return Error(Foreign)
-    }
-    for held in d.projectors {
-        if same_name(held.state.decl.name, decl.name) {
-            return Error(Conflict(clone(decl.name)))
+        let Local = from else {
+            return Error(Foreign)
         }
+        validate_local_projector(d, decl, source)?
+        return declare_projector_name(mut d, decl.name)
     }
+    declare_projector_name(mut d, decl.name)?
     let state = ProjectorState(decl: clone(decl), from: take from, cadence: c, steps: steps, base: None, target: None, observed: None)
     let captured: Table[K, V] = clone(source)
     let folding: Fold[E, K, V, Error] = clone(fold)

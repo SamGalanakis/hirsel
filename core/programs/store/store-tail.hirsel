@@ -44,6 +44,12 @@ fn tail_bases(pins: List[Pin]) -> TailBases {
     Some(arc.new(take out))
 }
 
+fn capture_tail_bases(pins: List[Pin]) -> Result[TailBases, Error] {
+    disk_allocation(scoped fn() -> Result[TailBases, Error] {
+        Ok(tail_bases(pins))
+    })
+}
+
 /// The key codec of the table. Rows rank in the order of the bytes it
 /// writes, which is the order a package breaks ties in.
 pub fn key_codec[K, V](t: Table[K, V]) -> std.codec.Key[K] {
@@ -79,7 +85,7 @@ fn tiered_source(roots: Roots, id: u32) -> Result[bool, Error] {
 // `read_tail`: the tail of `decl` over `source`, from `resume` (inclusive) or the source's
 // first key, within `l`. None when the projection has no published image of
 // `source` on the Tx's branch, or the Tx carries no pin at the image's
-// position (a Snapshot pinned by the application, or a follower's): the
+// position (for example, a Snapshot pinned by the application): the
 // caller then has no base and reads the source itself. It never waits. It
 // records the projection row's key and the source span it covered, so a
 // commit that changes either conflicts with a `run` that read it. A Tiered

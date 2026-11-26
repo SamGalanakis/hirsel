@@ -229,7 +229,7 @@ fn floor_follow_capture(mut source: FollowerSource, previous: FollowCapture, cei
         return Ok(None)
     }
     let tip = view capture.state.tips[0u64]
-    Ok(Some(Snapshot(store: capture.store, open: opened, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: capture.watermark, bases: no_tail_bases())))
+    Ok(Some(follower_snapshot(capture, tip, opened)))
 }
 
 fn follower_step(mut source: FollowerSource, mut progress: LogCaptureProgress, ceiling: u64, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
@@ -346,7 +346,7 @@ fn follower_tip(f: Follower, b: Branch) -> Result[View[Tip], Error] in f {
 }
 
 fn follower_snapshot(captured: FollowCapture, tip: Tip, opened: u64) -> Snapshot {
-    Snapshot(store: captured.store, open: opened, branch: tip.id, head: tip.head, roots: share_roots(tip.roots), watermark: captured.watermark, bases: no_tail_bases())
+    Snapshot(store: captured.store, open: opened, branch: tip.id, head: tip.head, roots: share_roots(tip.roots), watermark: captured.watermark, bases: tail_bases(captured.state.pins))
 }
 
 pub fn snapshot_follower(f: Follower, b: Branch) -> Result[Snapshot, Error] {

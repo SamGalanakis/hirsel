@@ -93,6 +93,131 @@ fn expect_found(take found: Found, count: u64, what: String) -> List[search.Hit[
     take hits
 }
 
+fn disk_search_schema(mut d: store.Declare) -> Result[(Docs, search.Text[u64, Doc], store.ProjectionDecl), store.Error] {
+    let codec: std.codec.Codec[Doc] = std.codec.of()
+    let mut decl = store.declare_table(mut d, "docs", std.codec.key_u64(), codec)?
+    let text = search.declare(mut d, mut decl, "body", stop_the(), code.describe(doc_terms))?
+    let docs = store.finish(mut d, take decl)?
+    let projection = store.projection(mut d, "body")?
+    Ok((take docs, take text, take projection))
+}
+
+const PROJECTED_DOCS: u64 = 1024
+
+const TAIL_DOCS: u64 = 50
+
+const FORM_B_STEPS: u64 = 1500000
+
+fn put_search_batch(mut db: store.Db, docs: Docs, low: u64, high: u64) -> Result[(), store.Error] waits {
+    let outcome = store.run(mut db, None, (store.copy_env(docs), low, high), fn(mut tx, input) -> Result[(), store.Error] {
+        for key in input.1 .. input.2 {
+            let body = if key < 10 {
+                "red blue"
+            } else if key < PROJECTED_DOCS {
+                "blue green yellow orange white black brown violet purple grey silver gold"
+            } else {
+                "red red red"
+            }
+            store.put(mut tx, input.0, key, doc(body, true))?
+        }
+        Ok(())
+    })?
+    if let Committed(_) = outcome {} else {
+        fail("search fixture write did not commit")
+    }
+    Ok(())
+}
+
+fn form_b_query(tx: store.Tx, text: search.Text[u64, Doc]) -> Found {
+    search.query(tx, text, "red", 10, search.defaults(), scoped fn(_key: u64) -> bool {
+        true
+    })
+}
+
+fn check_read_only_search(source: store.ReadOnly, expected: List[search.Hit[u64]], tail_count: u64) -> Result[(), store.Error] waits {
+    let (take docs, take text, take projection) = store.bind_read_only(source, disk_search_schema)?
+    let reads = store.read_only_reader(source, 0)?
+    let snap = store.read_only_snapshot(source)
+    let tail_look = store.look(reads, snap, None, (take docs, take projection), fn(tx, input) -> Result[Option[store.Tail[u64, Doc]], store.Error] {
+        store.read_tail(tx, input.1, input.0, None, store.Limits(rows: 64, byte_limit: 1048576))
+    })?
+    let Seen(take tail_seen) = take tail_look else {
+        fail("read-only tail look did not run")
+    }
+    let store.Seen(value: take tail_result, ..) = take tail_seen
+    let Some(tail) = (take tail_result)? else {
+        fail("read-only snapshot must carry the published projector's base")
+    }
+    if tail.next != None || list.len(tail.rows) != tail_count {
+        fail("read-only snapshot has the wrong tail size")
+    }
+    for i in 0u64 .. tail_count {
+        if tail.rows[i].0 != PROJECTED_DOCS + i {
+            fail("read-only snapshot has the wrong tail keys")
+        }
+    }
+    // A rare term needs one postings block and at most 50 tail rows.
+    // The budget admits that work and excludes tokenizing the full corpus.
+    let looked = store.look(reads, snap, Some(FORM_B_STEPS), take text, form_b_query)?
+    let Seen(take seen) = take looked else {
+        fail("read-only query exceeded the Form B step budget")
+    }
+    let store.Seen(value: take ranked, ..) = take seen
+    let hits = (take ranked)?
+    if list.len(hits) != 10 || list.len(expected) != 10 {
+        fail("read-only and writer queries must each return ten hits")
+    }
+    for i in 0u64 .. 10 {
+        let key = if tail_count == 0 {
+            i
+        } else {
+            PROJECTED_DOCS + i
+        }
+        if hits[i].key != key || hits[i].key != expected[i].key || float.to_bits64(hits[i].score) != float.to_bits64(expected[i].score) {
+            fail("read-only ranking or score differs from the writer")
+        }
+    }
+    Ok(())
+}
+
+/// bug: a read-only declaration refuses a local projector, or its snapshot
+/// loses the published base and search spends its step budget on a full scan.
+/// oracle: term frequencies and key order fix the winners in both fixture
+/// states. The writer query supplies the exact score bits for each state.
+@test
+fn read_only_search_form_b_law(d: Dir, clock: Clock, random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "search-read-only-")
+    let directory = result.unwrap(host.mkdtemp(d, mut name))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let mut db = store.open(tasks, directory, clock, random, options)?
+    let (docs, text, _) = store.bind_declaration(mut db, Migrate, disk_search_schema)?
+    for batch in 0u64 .. PROJECTED_DOCS / 128 {
+        put_search_batch(mut db, docs, batch * 128, (batch + 1) * 128)?
+    }
+    let unpublished = store.look(store.reader(db, 0)?, store.snapshot(db), Some(FORM_B_STEPS), store.copy_env(text), form_b_query)?
+    if let Stopped(_, _) = unpublished {} else {
+        fail("the Form B step budget must exclude the unpublished full scan")
+    }
+    loop {
+        match store.project_step(mut db, "body", store.Limits(rows: 128, byte_limit: 1048576)) {
+            Ok(Idle) => break,
+            Ok(_) => {},
+            Error(_) => fail("search fixture projector step failed"),
+        }
+    }
+    let _ = store.checkpoint(mut db)?
+    let published = look_query(db, store.snapshot(db), docs, text, "red", 10, search.defaults(), Anyone)?
+    store.close(take db)?
+    check_read_only_search(store.open_read_only(directory, clock, options)?, published, 0)?
+    let mut reopened = store.open(tasks, directory, clock, random, options)?
+    let (reopened_docs, reopened_text, _) = store.bind_declaration(mut reopened, Open, disk_search_schema)?
+    put_search_batch(mut reopened, reopened_docs, PROJECTED_DOCS, PROJECTED_DOCS + TAIL_DOCS)?
+    let with_tail = look_query(reopened, store.snapshot(reopened), reopened_docs, reopened_text, "red", 10, search.defaults(), Anyone)?
+    store.close(take reopened)?
+    check_read_only_search(store.open_read_only(directory, clock, options)?, with_tail, TAIL_DOCS)
+}
+
 @test
 fn snapshot_bm25(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut stop_words: List[String] = list.new()

@@ -3854,7 +3854,7 @@ pub fn open_read_only(d: Dir, c: Clock, options: Options) -> Result[ReadOnly, Er
         let replay = capture_scan(id, take walk, take initial)?
         over_ceiling(journal_account(replay)?, options.resident_limit)?
         let main = view replay.state.tips[0u64]
-        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?, bases: no_tail_bases())))
+        return Ok(ReadOnly(snapshot: Snapshot(store: id, open: 0, branch: 0, head: main.head, roots: share_roots(main.roots), watermark: stamp_after(replay.next_node)?, bases: capture_tail_bases(replay.state.pins)?)))
     }
 }
 

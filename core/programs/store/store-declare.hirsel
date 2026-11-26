@@ -22,6 +22,7 @@ pub opaque type Declare {
     // revision changed binds the release's extractor to the stored index
     // instead of refusing Changed, and its name is kept here.
     verifying: Option[List[String]],
+    projector_names: Map[String, ()],
     // The projectors `projector` registered; `seal` hands them to the Db.
     projectors: List[DeclaredProjector]
 }
@@ -50,7 +51,33 @@ fn same_declaration_base(a: DeclarationBase, b: DeclarationBase) -> bool {
 }
 
 fn new_declaration(mode: Mode, base: DeclarationBase, take plan: SchemaPlan, versioned: bool) -> Declare {
-    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, conflict: None, versioned: versioned, verifying: None, projectors: list.new())
+    Declare(mode: mode, base: base, plan: take plan, tables: map.new(), indexes: map.new(), failed: false, conflict: None, versioned: versioned, verifying: None, projector_names: map.new(), projectors: list.new())
+}
+
+fn declare_projector_name(mut d: Declare, name: String) -> Result[(), Error] {
+    if map.contains(d.projector_names, name) {
+        return Error(Conflict(clone(name)))
+    }
+    map.insert(mut d.projector_names, clone(name), ())
+    Ok(())
+}
+
+fn validate_local_projector[K, V](d: Declare, decl: ProjectionDecl, source: Table[K, V]) -> Result[(), Error] {
+    if d.failed {
+        return Error(MigrationFault)
+    }
+    if !same(d.plan.store, source.store) || !same(d.plan.store, decl.rows.store) || !map.contains(d.tables, source.id) {
+        return Error(Foreign)
+    }
+    readable(d.plan.roots, source.catalog_key, source.catalog_page, source.id)?
+    let Some(raw) = get_page_row(d.plan.roots.catalog, decl.rows.catalog_key) else {
+        return Error(Missing("hirsel.projections"))
+    }
+    let record = decode_catalog(raw)?
+    if record.id != decl.rows.id {
+        return Error(Foreign)
+    }
+    Ok(())
 }
 
 /// An Open declaration for `hirsel store verify` (§1.2 "The index walker"):
@@ -112,11 +139,32 @@ pub fn has_table(snap: Snapshot, name: String) -> Result[bool, Error] {
     })
 }
 
+fn read_only_base(source: ReadOnly) -> DeclarationBase {
+    let snap = view source.snapshot
+    DeclarationBase(store: snap.store, opened: snap.open, version: snap.head, stamp: snap.watermark, changes: 0u64, live: 0u64)
+}
+
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let base = DeclarationBase(store: snap.store, opened: snap.open, version: snap.head, stamp: snap.watermark, changes: 0u64, live: 0u64)
     let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
-    new_declaration(Follower, base, take plan, true)
+    new_declaration(Follower, read_only_base(source), take plan, true)
+}
+
+pub fn seal_read_only(source: ReadOnly, take d: Declare) -> Result[(), Error] {
+    let Follower = d.mode else {
+        return Error(Foreign)
+    }
+    if !same_declaration_base(d.base, read_only_base(source)) {
+        return Error(Foreign)
+    }
+    complete_declaration(d)
+}
+
+pub fn bind_read_only[H](source: ReadOnly, schema: fn(mut Declare) -> Result[H, Error]) -> Result[H, Error] {
+    let mut declaration = declare_read_only(source)
+    let handles = schema(mut declaration)?
+    seal_read_only(source, take declaration)?
+    Ok(take handles)
 }
 
 pub type DeclaredCollection: codec + send {

@@ -589,6 +589,93 @@ fn followed_rows(f: Follower) -> Result[Table[u64, u64], Error] {
     Ok(take rows)
 }
 
+fn declare_projector_source(mut d: Declare) -> Result[Table[u64, u64], Error] {
+    let declared = declare_table(mut d, "source", std.codec.key_u64(), std.codec.of_u64())?
+    finish(mut d, take declared)
+}
+
+/// bug: a read-only declaration refuses a local binding, accepts an invalid
+/// binding, or the follower snapshot misses an available projector base.
+/// oracle: the declaration contract and the single put after publication.
+@test
+fn read_only_projector_limits_law(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let mut sizing = derived_sizes()
+    sizing.limits = Some(small_place_limits())
+    sizing.resident_limit = Some(1048576u64)
+    sizing.pack_bytes = Some(65536u64)
+    sizing.group_bytes = Some(65536u64)
+    let options = result.unwrap(sized_with(Directory, 67108864u64, sizing))
+    let mut db = open(tasks, directory, c, r, options)?
+    let empty = open_read_only(directory, c, options)?
+    let mut absent = declare_read_only(empty)
+    match projection(mut absent, "fixture") {
+        Error(Missing(name)) if name == "hirsel.projections" => {},
+        _ => fail("read-only projection must refuse an absent projection table"),
+    }
+    let fixture = projector_fixture(mut db, Migrate, Own, cadence())?
+    bounded_put(mut db, fixture.source_table, 1, 10)?
+    let limits = Limits(rows: 8, byte_limit: 4096)
+    project_until_idle(mut db, limits)?
+    let _ = checkpoint(mut db)?
+    bounded_put(mut db, fixture.source_table, 2, 20)?
+    close(take db)?
+    let ro = open_read_only(directory, c, options)?
+    let mut schema = declare_read_only(ro)
+    let cursor = projection(mut schema, "fixture")?
+    let rows = declare_projector_source(mut schema)?
+    let fold: Fold[Table[(u32, u64), Slot], u64, u64, Error] = Fold(env: clone(fixture.image_table), apply: code.describe(projector_apply_law), merge: code.describe(projector_merge_law), drop: code.describe(projector_drop_law))
+    let mut foreign = test_db(c, 1073741824)
+    let other = projector_fixture(mut foreign, Migrate, Own, cadence())?
+    if let Error(Foreign) = projector(mut schema, cursor, other.source_table, Local, fold, cadence(), PROJECTOR_LAW_STEPS) {} else {
+        fail("read-only projection must refuse a foreign source")
+    }
+    if let Error(Foreign) = projector(mut schema, cursor, fixture.second_table, Local, fold, cadence(), PROJECTOR_LAW_STEPS) {} else {
+        fail("read-only projection must refuse an undeclared source")
+    }
+    let mut ids = followers()
+    let plan = follower_law_plan(Directory, options)
+    let service = follower_law_service(tasks, plan, 2)?
+    let owner = follower_owner(service)?
+    let upstream = follower(mut ids, follower_slot(owner, plan)?, log_authority(directory), c, options.expect)?
+    {
+        let rejected = follower(mut ids, follower_slot(owner, plan)?, log_authority(directory), c, options.expect)?
+        if let Error(Foreign) = projector(mut schema, cursor, rows, Follower(take rejected), fold, cadence(), PROJECTOR_LAW_STEPS) {} else {
+            fail("read-only projection must refuse a follower source")
+        }
+    }
+    projector(mut schema, cursor, rows, Local, fold, cadence(), PROJECTOR_LAW_STEPS)?
+    match projector(mut schema, cursor, rows, Local, fold, cadence(), PROJECTOR_LAW_STEPS) {
+        Error(Conflict(name)) if name == "fixture" => {},
+        _ => fail("read-only projection must refuse duplicate names"),
+    }
+    if let Error(Undeclared(_)) = seal_read_only(ro, take schema) {} else {
+        fail("read-only sealing must refuse undeclared tables")
+    }
+    let mut following = declare_follower(upstream)
+    let remote_cursor = projection(mut following, "fixture")?
+    let remote_rows = declare_projector_source(mut following)?
+    let snap = snapshot_follower(upstream, follower_main(upstream))?
+    let looked = look(follower_reader(upstream, 0)?, snap, None, (copy_env(remote_cursor), copy_env(remote_rows), limits), fn(tx, input) -> Result[Option[Tail[u64, u64]], Error] {
+        read_tail(tx, input.0, input.1, None, input.2)
+    })?
+    let Seen(take seen) = take looked else {
+        fail("follower tail read did not run")
+    }
+    let Seen(value: take tail_result, ..) = take seen
+    let Some(tail) = (take tail_result)? else {
+        fail("follower did not recover the projector's published base")
+    }
+    if tail.next != None || list.len(tail.rows) != 1 || tail.rows[0] != (2u64, Some(20u64)) {
+        fail("follower tail must contain the one unprojected put")
+    }
+    if let Error(Foreign) = projector(mut following, remote_cursor, remote_rows, Follower(take upstream), fold, cadence(), PROJECTOR_LAW_STEPS) {} else {
+        fail("a follower declaration must refuse a follower source")
+    }
+    projector(mut following, remote_cursor, remote_rows, Local, fold, cadence(), PROJECTOR_LAW_STEPS)?
+    close_follower_service(take service)
+}
+
 fn first_follower_versions(directory: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(u64, u64), Error] waits {
     let mut writer = open(tasks, directory, c, r, options)?
     let mut schema = declare(writer, Migrate)?

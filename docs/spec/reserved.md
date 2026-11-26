@@ -64,7 +64,9 @@ macOS. The macOS (`aarch64-apple-darwin`) rules are written but not built: FFI-3
 launch, profiling and the Store spec. macOS leaves this list when its native Mac gate is
 green. iOS (`aarch64-apple-ios`, `aarch64-apple-ios-sim`): the [embedding](embed.md) rules
 are written but not built. The targets are named, every request for them is refused until
-the static-library slices land, and iOS leaves this list when its device gate (EMB-9) passes.
+the static-library slices land. Once the simulator gate (EMB-9) is green, iOS is
+supported **simulator only**; it leaves this list when a signed device run passes its device
+gate (EMB-9).
 
 iOS targets are named and every build request for them is refused until the static-library
 slices land. iOS leaves this list when its device gate passes.

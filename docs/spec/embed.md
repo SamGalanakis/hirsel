@@ -218,6 +218,10 @@ and receives outcome bytes, subscription changes and room events through callbac
 generated binding (Swift in EMB-5, any later language the same way) is a codec and a set of
 typed stubs over these calls, with no protocol logic of its own.
 
+The runtime's client side is the same client kernel as the TypeScript client's, with many
+calls in flight on one stream; it carries no limit of one call in flight per stream, so
+concurrent `call`s from the host are pipelined, not serialized.
+
 The header is written by the toolchain (`hirsel_embed.h`), and is the same for every program
 and target at one ABI version:
 
@@ -586,7 +590,14 @@ hardware:
    same XCTest runs on the macOS slice without a simulator. Daytona macOS machines are for
    developing the Mac slices by hand; the standing gate is this job, because it runs on
    every change and does not expire.
-2. **Device gate** (not done; needs a physical iPhone and iPad at the floor). Its first law:
+   The job also records, as measurements and not pass or fail: the Swift-to-Hirsel call
+   round trip (p50 and p99 over 1,000 calls of a trivial compute entry), the time from
+   `start` to the first result, resident memory after `start`, and the time of a stop then
+   a start.
+2. **Device gate** (not done; needs a physical iPhone and iPad at the floor, and a signed
+   build). It runs on a contributor's own devices, not on Hirsel infrastructure, and its run
+   is reported with the device models, iOS versions and the build ID. Until a signed device
+   run passes it, iOS is labelled **simulator only** in reserved.md and in release notes. Its first law:
    a granted `Dir` refuses an escape by `..`, by a symlink pointing outside it and by an
    absolute path, each with the error that maps to the shared confinement result, exactly as
    on macOS. A device that behaves otherwise stops the iOS track: the floor's premise (kernel

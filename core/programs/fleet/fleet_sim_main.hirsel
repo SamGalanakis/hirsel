@@ -176,7 +176,7 @@ pub fn main(argv: Args, wall: Clock, tasks: Tasks, out: Stdout, err: Stderr) -> 
             let _ = stderr.write(err, "hirsel fleet sim: --placement takes --hosts and --seed, and always emits JSON\n")
             return Error(Exit(status: 2u8))
         }
-        let rep = scale_sim.run_placement(cfg)
+        let rep = placement_sim.run(cfg.hosts, cfg.seed)
         let format: std.json.Format[placement_sim.Gate] = result.unwrap(std.json.interop())
         let mut text_out = result.unwrap(std.json.to_string(format, rep))
         string.push(mut text_out, "\n")

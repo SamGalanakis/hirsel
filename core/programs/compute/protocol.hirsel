@@ -1,0 +1,37 @@
+pub type RetryClass: codec + key + send = Pure | Keyed | Effectful
+
+pub type Attempt: codec + key + send {
+    caller: u64,
+    principal: u64,
+    session: u64,
+    seq: u64,
+    digest: (u64, u64)
+}
+
+pub type Credit[H: key + shareable, R: key + shareable]: codec + key + send {
+    host: H,
+    run: R,
+    slot: u64,
+    serial: u64,
+    owner_epoch: u64,
+    desk_session: u64
+}
+
+pub type Offer[H: key + shareable, R: key + shareable]: codec + send {
+    credit: Credit[H, R],
+    class_id: u64,
+    principals: List[u64]
+}
+
+/// Identity covered by the shell's versioned handle and authenticated tag.
+pub type Checkout[H: key + shareable, R: key + shareable]: codec + key + send {
+    credit: Credit[H, R],
+    principal: u64,
+    generation: u64
+}
+
+pub type Authorization: codec + key + send = Unauthenticated | Authenticated(bool)
+
+pub type Refusal: codec + key + send = Capacity | Limit | UnknownCredit | SpentCredit | LateUnknownId | DigestConflict | Denied | BoundExhausted
+
+pub type Consumption[H: key + shareable, R: key + shareable]: codec + send = Admitted(Checkout[H, R], RetryClass) | Replayed(Checkout[H, R]) | Pending | EndedBeforeReply | Refused(Refusal)

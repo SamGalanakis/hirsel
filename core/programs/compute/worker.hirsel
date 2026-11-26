@@ -1,0 +1,866 @@
+pub type Class: codec + send {
+    shard: u64,
+    cost: resources.Vector,
+    warm_cost: resources.Vector,
+    window: u64
+}
+
+pub type Escrow: codec + send {
+    principal: u64,
+    rights: u64,
+    epoch: u64,
+    installed_transfer: Option[(u64, bool)]
+}
+
+type Freeze: codec {
+    transfer: u64,
+    epoch: u64,
+    amount: u64,
+    held: u64
+}
+
+type TransferProgress: codec = Idle | Frozen(Freeze) | Applied(u64, bool)
+
+type EscrowBalance: codec {
+    assigned: u64,
+    free: u64,
+    epoch: u64,
+    progress: TransferProgress
+}
+
+pub type DeskOwner[H: key + shareable]: codec + key + send {
+    member: H,
+    session: u64
+}
+
+pub type Config[H: key + shareable]: codec + send {
+    host: H,
+    pool: resources.Vector,
+    classes: List[Class],
+    slot_classes: List[u64],
+    owners: List[DeskOwner[H]],
+    escrows: List[Escrow],
+    max_sessions: u64,
+    max_attempts: u64
+}
+
+type Custody: codec = Closed | Fenced(u64) | Open
+
+type Execution: codec = Starting | Inert | Active | Retiring
+
+type Occupancy: codec {
+    attempt: protocol.Attempt,
+    retry: protocol.RetryClass,
+    phase: Execution
+}
+
+type SlotPhase: codec = Free | Offered | Busy(Occupancy)
+
+type Slot: codec {
+    serial: u64,
+    generation: u64,
+    owner_epoch: u64,
+    desk_session: u64,
+    warm: bool,
+    phase: SlotPhase
+}
+
+type Owner[H: key + shareable]: codec {
+    desk: DeskOwner[H],
+    epoch: u64
+}
+
+pub type Session: codec + key + send {
+    caller: u64,
+    principal: u64,
+    id: u64
+}
+
+type Cached[H: key + shareable, R: key + shareable]: codec {
+    digest: (u64, u64),
+    checkout: protocol.Checkout[H, R],
+    result: protocol.Consumption[H, R]
+}
+
+type Attempts[H: key + shareable, R: key + shareable]: codec {
+    floor: u64,
+    accepted: Map[u64, Cached[H, R]]
+}
+
+pub type State[H: key + shareable, R: key + shareable]: codec {
+    config: Config[H],
+    run: R,
+    custody: Custody,
+    serving: bool,
+    available: resources.Vector,
+    slots: List[Slot],
+    owners: List[Owner[H]],
+    windows: List[u64],
+    escrows: Map[u64, EscrowBalance],
+    sessions: Map[Session, Attempts[H, R]],
+    occupied: u64,
+    last_credit: u64
+}
+
+/// Launcher, rights-table, and authorization inputs are facts produced by
+/// the trusted shell. A handle input is permitted only after version, cell,
+/// secret, caller, and current grants have been checked at that operation.
+pub type Event[H: key + shareable, R: key + shareable]: codec + send = Restart(R, R) | LauncherFenced(R, u64) | CustodyEmpty(R, u64) | Serve(R, bool) | OpenSession(R, Session) | RetireAttempts(R, Session, u64) | FreezeDecrease(R, u64, u64, u64, u64) | DecreaseCommitted(R, u64, u64, u64) | IncreaseCommitted(R, u64, u64, u64, u64) | Warm(R, u64) | Evict(R, u64) | Mint(R, u64) | OfferExpired(protocol.Credit[H, R]) | Withdraw(protocol.Credit[H, R]) | Handoff(R, u64, DeskOwner[H], u64, DeskOwner[H]) | Redeem(protocol.Credit[H, R], protocol.Attempt, protocol.RetryClass, protocol.Authorization) | InertExpire(protocol.Checkout[H, R]) | Kill(protocol.Checkout[H, R], u64, bool) | StartFailed(protocol.Checkout[H, R]) | Started(protocol.Checkout[H, R]) | Retire(protocol.Checkout[H, R]) | CheckHandle(protocol.Checkout[H, R], u64, bool) | Activate(protocol.Checkout[H, R], u64, bool) | BoundExhausted
+
+pub type Action[H: key + shareable, R: key + shareable]: codec + send = AssumeOwner(DeskOwner[H], H, R, u64, u64) | Offer(H, protocol.Offer[H, R]) | DropOffer(H, protocol.Credit[H, R]) | Redeemed(protocol.Consumption[H, R]) | Launch(protocol.Checkout[H, R], bool) | ActivateUser(protocol.Checkout[H, R]) | Activated | Reap(protocol.Checkout[H, R]) | SessionOpened(Session) | DecreaseFrozen(u64, u64, u64) | DecreaseApplied(u64, u64, u64) | IncreaseApplied(u64, u64, u64) | WorkerRefused(protocol.Refusal) | HandleLive | Gone
+
+pub type Key: codec + send = Worker | Shard(u64) | SlotKey(u64) | SessionKey(Session) | Principal(u64)
+
+pub fn keys[H: key + shareable, R: key + shareable](ev: Event[H, R]) -> List[Key] {
+    let mut out: List[Key] = list.new()
+    list.push(mut out, Worker)
+    match ev {
+        FreezeDecrease(_, principal, _, _, _) => {
+            list.push(mut out, Principal(principal))
+        },
+        DecreaseCommitted(_, principal, _, _) => {
+            list.push(mut out, Principal(principal))
+        },
+        IncreaseCommitted(_, principal, _, _, _) => {
+            list.push(mut out, Principal(principal))
+        },
+        Warm(_, slot) => {
+            list.push(mut out, SlotKey(slot))
+        },
+        Evict(_, slot) => {
+            list.push(mut out, SlotKey(slot))
+        },
+        Mint(_, slot) => {
+            list.push(mut out, SlotKey(slot))
+        },
+        OfferExpired(credit) => {
+            list.push(mut out, SlotKey(credit.slot))
+        },
+        Withdraw(credit) => {
+            list.push(mut out, SlotKey(credit.slot))
+        },
+        Handoff(_, shard, _, _, _) => {
+            list.push(mut out, Shard(shard))
+        },
+        Redeem(credit, attempt, _, _) => {
+            list.push(mut out, SlotKey(credit.slot))
+            list.push(mut out, SessionKey(session_of(attempt)))
+            list.push(mut out, Principal(attempt.principal))
+        },
+        OpenSession(_, session) => {
+            list.push(mut out, SessionKey(session))
+        },
+        RetireAttempts(_, session, _) => {
+            list.push(mut out, SessionKey(session))
+        },
+        Started(checkout) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+            list.push(mut out, Principal(checkout.principal))
+        },
+        InertExpire(checkout) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+            list.push(mut out, Principal(checkout.principal))
+        },
+        StartFailed(checkout) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+            list.push(mut out, Principal(checkout.principal))
+        },
+        Kill(checkout, _, _) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+        },
+        Retire(checkout) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+            list.push(mut out, Principal(checkout.principal))
+        },
+        CheckHandle(checkout, _, _) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+            list.push(mut out, Principal(checkout.principal))
+        },
+        Activate(checkout, _, _) => {
+            list.push(mut out, SlotKey(checkout.credit.slot))
+            list.push(mut out, Principal(checkout.principal))
+        },
+        _ => (),
+    }
+    take out
+}
+
+pub fn init[H: key + shareable, R: key + shareable](take cfg: Config[H], take run: R) -> State[H, R] {
+    let mut slots: List[Slot] = list.with_capacity(list.len(cfg.slot_classes))
+    for class_id in cfg.slot_classes {
+        if class_id >= list.len(cfg.classes) {
+            fail("compute slot has no staged class")
+        }
+        list.push(mut slots, Slot(serial: 0, generation: 0, owner_epoch: 0, desk_session: 0, warm: false, phase: Free))
+    }
+    let mut owners: List[Owner[H]] = list.with_capacity(list.len(cfg.owners))
+    for desk in cfg.owners {
+        list.push(mut owners, Owner(desk: clone(desk), epoch: 1))
+    }
+    let mut windows: List[u64] = list.with_capacity(list.len(cfg.classes))
+    for profile in cfg.classes {
+        if profile.shard >= list.len(owners) || profile.cost.starts == 0 || profile.warm_cost.starts != 0 || resources.capacity(profile.cost, profile.warm_cost) == 0 {
+            fail("compute class needs a shard, positive start charge and a valid warm vector")
+        }
+        list.push(mut windows, 0)
+    }
+    let escrows = initial_escrows(cfg.escrows)
+    let pool = cfg.pool
+    State(config: take cfg, run: take run, custody: Closed, serving: false, available: pool, slots: take slots, owners: take owners, windows: take windows, escrows: take escrows, sessions: map.new(), occupied: 0, last_credit: 0)
+}
+
+fn initial_escrows(escrows: List[Escrow]) -> Map[u64, EscrowBalance] {
+    let mut balances: Map[u64, EscrowBalance] = map.new()
+    for escrow in escrows {
+        if map.contains(balances, escrow.principal) {
+            fail("duplicate compute principal escrow")
+        }
+        let progress = match escrow.installed_transfer {
+            Some((id, lowering)) => Applied(id, lowering),
+            None => Idle,
+        }
+        map.insert(mut balances, escrow.principal, EscrowBalance(assigned: escrow.rights, free: 0, epoch: escrow.epoch, progress: progress))
+    }
+    take balances
+}
+
+pub fn occupied[H: key + shareable, R: key + shareable](s: State[H, R]) -> u64 {
+    s.occupied
+}
+
+pub fn available[H: key + shareable, R: key + shareable](s: State[H, R]) -> resources.Vector {
+    s.available
+}
+
+pub fn class_capacity[H: key + shareable, R: key + shareable](s: State[H, R], class_id: u64) -> u64 {
+    if !s.serving || class_id >= list.len(s.config.classes) {
+        return 0
+    }
+    let profile = s.config.classes[class_id]
+    let mut warm = 0u64
+    let mut fresh = 0u64
+    for slot in 0u64 .. list.len(s.slots) {
+        if s.config.slot_classes[slot] == class_id {
+            if let Free = s.slots[slot].phase {
+                if s.slots[slot].generation < 18446744073709551615 {
+                    if s.slots[slot].warm {
+                        warm += 1
+                    } else {
+                        fresh += 1
+                    }
+                }
+            }
+        }
+    }
+    resources.stock_capacity(s.available, profile.cost, hold_cost(profile, true), warm, fresh)
+}
+
+fn session_of(attempt: protocol.Attempt) -> Session {
+    Session(caller: attempt.caller, principal: attempt.principal, id: attempt.session)
+}
+
+fn credit_at[H: key + shareable, R: key + shareable](s: State[H, R], slot: u64) -> protocol.Credit[H, R] {
+    let entry = s.slots[slot]
+    protocol.Credit(host: clone(s.config.host), run: clone(s.run), slot: slot, serial: entry.serial, owner_epoch: entry.owner_epoch, desk_session: entry.desk_session)
+}
+
+fn right(escrows: Map[u64, EscrowBalance], principal: u64) -> u64 {
+    match map.get(escrows, principal) {
+        Some(balance) => balance.free,
+        None => 0,
+    }
+}
+
+fn freeze_decrease[H: key + shareable, R: key + shareable](mut s: State[H, R], principal: u64, lower_epoch: u64, transfer: u64, amount: u64, mut out: List[Action[H, R]]) {
+    if let Some(old) = map.remove(mut s.escrows, principal) {
+        let mut balance = take old
+        if lower_epoch > balance.epoch && amount > 0 && amount <= balance.assigned {
+            match balance.progress {
+                Frozen(_) => (),
+                _ => {
+                    let held = order.min(balance.free, amount)
+                    balance.free -= held
+                    balance.progress = Frozen(Freeze(transfer: transfer, epoch: lower_epoch, amount: amount, held: held))
+                },
+            }
+            if let Frozen(frozen) = balance.progress {
+                if frozen.epoch == lower_epoch && frozen.transfer == transfer && frozen.amount == amount && frozen.held == amount {
+                    list.push(mut out, DecreaseFrozen(principal, transfer, lower_epoch))
+                }
+            }
+        }
+        map.insert(mut s.escrows, principal, take balance)
+    }
+}
+
+fn return_right(mut balance: EscrowBalance) -> Option[(u64, u64)] {
+    let pending: TransferProgress = balance.progress
+    if let Frozen(frozen) = pending {
+        if frozen.held < frozen.amount {
+            let mut updated = frozen
+            updated.held += 1
+            balance.progress = Frozen(updated)
+            if updated.held == updated.amount {
+                return Some((updated.transfer, updated.epoch))
+            }
+            return None
+        }
+    }
+    balance.free += 1
+    None
+}
+
+// The rights authority signs one successor per table. These events are the
+// worker's durable install receipts, delivered after signature and predecessor checks.
+fn assignment_receipt[H: key + shareable, R: key + shareable](principal: u64, epoch: u64, transfer: u64, lowering: bool, mut out: List[Action[H, R]]) {
+    if lowering {
+        list.push(mut out, DecreaseApplied(principal, transfer, epoch))
+    } else {
+        list.push(mut out, IncreaseApplied(principal, transfer, epoch))
+    }
+}
+
+fn commit_assignment[H: key + shareable, R: key + shareable](mut s: State[H, R], principal: u64, epoch: u64, transfer: u64, lowering: bool, amount: u64, mut out: List[Action[H, R]]) {
+    if let Some(old) = map.remove(mut s.escrows, principal) {
+        let mut balance = take old
+        if epoch == balance.epoch {
+            if let Applied(id, lowered) = balance.progress {
+                if id == transfer && lowered == lowering {
+                    assignment_receipt(principal, epoch, transfer, lowering, mut out)
+                }
+            }
+        } else if epoch > balance.epoch {
+            let install = if let Frozen(frozen) = balance.progress {
+                if lowering && transfer == frozen.transfer && epoch == frozen.epoch && frozen.held == frozen.amount {
+                    balance.assigned -= frozen.amount
+                    true
+                } else {
+                    false
+                }
+            } else if !lowering && amount <= 18446744073709551615 - balance.assigned {
+                balance.assigned += amount
+                balance.free += amount
+                true
+            } else {
+                false
+            }
+            if install {
+                balance.epoch = epoch
+                balance.progress = Applied(transfer, lowering)
+                assignment_receipt(principal, epoch, transfer, lowering, mut out)
+            }
+        }
+        map.insert(mut s.escrows, principal, take balance)
+    }
+}
+
+fn hold_cost(profile: Class, warm: bool) -> resources.Vector {
+    if warm {
+        resources.debit(profile.cost, profile.warm_cost)
+    } else {
+        profile.cost
+    }
+}
+
+fn stage_stock[H: key + shareable, R: key + shareable](mut s: State[H, R], slot: u64, warm: bool) {
+    if slot >= list.len(s.slots) {
+        return
+    }
+    if let Free = s.slots[slot].phase {
+        if s.slots[slot].warm == warm {
+            return
+        }
+        let cost = s.config.classes[s.config.slot_classes[slot]].warm_cost
+        if warm {
+            if !s.serving || resources.capacity(s.available, cost) == 0 {
+                return
+            }
+            s.available = resources.debit(s.available, cost)
+        } else {
+            s.available = resources.refund(s.available, cost)
+        }
+        s.slots[slot].warm = warm
+    }
+}
+
+fn mint[H: key + shareable, R: key + shareable](mut s: State[H, R], slot: u64, mut out: List[Action[H, R]]) {
+    if !s.serving || slot >= list.len(s.slots) {
+        return
+    }
+    if let Free = s.slots[slot].phase {} else {
+        return
+    }
+    let class_id = s.config.slot_classes[slot]
+    let profile = s.config.classes[class_id]
+    let warm = s.slots[slot].warm
+    let cost = hold_cost(profile, warm)
+    let generation = s.slots[slot].generation
+    if s.windows[class_id] >= profile.window || resources.capacity(s.available, cost) == 0 || s.last_credit == 18446744073709551615 || generation == 18446744073709551615 {
+        return
+    }
+    let mut principals: List[u64] = list.new()
+    for escrow in s.config.escrows {
+        if right(s.escrows, escrow.principal) > 0 {
+            list.push(mut principals, escrow.principal)
+        }
+    }
+    if list.len(principals) == 0 {
+        return
+    }
+    let owner = s.owners[profile.shard]
+    let member: H = clone(owner.desk.member)
+    let epoch = owner.epoch
+    s.available = resources.debit(s.available, cost)
+    s.windows[class_id] += 1
+    s.last_credit += 1
+    s.slots[slot] = Slot(serial: s.last_credit, generation: generation, owner_epoch: epoch, desk_session: owner.desk.session, warm: warm, phase: Offered)
+    let offer = protocol.Offer(credit: credit_at(s, slot), class_id: class_id, principals: take principals)
+    list.push(mut out, Offer(take member, take offer))
+}
+
+fn current[H: key + shareable, R: key + shareable](s: State[H, R], credit: protocol.Credit[H, R]) -> bool {
+    credit.host == s.config.host && credit.run == s.run && credit.slot < list.len(s.slots) && credit.serial == s.slots[credit.slot].serial && credit.owner_epoch == s.slots[credit.slot].owner_epoch && credit.desk_session == s.slots[credit.slot].desk_session
+}
+
+fn withdraw[H: key + shareable, R: key + shareable](mut s: State[H, R], slot: u64, mut out: List[Action[H, R]]) {
+    if let Offered = s.slots[slot].phase {
+        let class_id = s.config.slot_classes[slot]
+        let profile = s.config.classes[class_id]
+        let owner = s.owners[profile.shard]
+        list.push(mut out, DropOffer(clone(owner.desk.member), credit_at(s, slot)))
+        s.slots[slot].phase = Free
+        s.available = resources.refund(s.available, hold_cost(profile, s.slots[slot].warm))
+        s.windows[class_id] -= 1
+    }
+}
+
+fn prior_admission[H: key + shareable, R: key + shareable](s: State[H, R], session: Session, attempt: protocol.Attempt) -> Option[protocol.Consumption[H, R]] {
+    let Some(old) = map.get(s.sessions, session) else {
+        return Some(Refused(LateUnknownId))
+    }
+    if attempt.seq < old.floor {
+        return Some(Refused(LateUnknownId))
+    }
+    if let Some(cached) = map.get(old.accepted, attempt.seq) {
+        return if cached.digest == attempt.digest {
+            match cached.result {
+                Admitted(_, _) => Some(Replayed(clone(cached.checkout))),
+                _ => Some(clone(cached.result)),
+            }
+        } else {
+            Some(Refused(DigestConflict))
+        }
+    }
+    if map.len(old.accepted) >= s.config.max_attempts {
+        return Some(Refused(BoundExhausted))
+    }
+    None
+}
+
+fn admit[H: key + shareable, R: key + shareable](mut s: State[H, R], credit: protocol.Credit[H, R], attempt: protocol.Attempt, retry: protocol.RetryClass, auth: protocol.Authorization, mut out: List[Action[H, R]]) -> protocol.Consumption[H, R] {
+    let Authenticated(allowed) = auth else {
+        return Refused(Denied)
+    }
+    if credit.host != s.config.host || credit.run != s.run {
+        return Refused(LateUnknownId)
+    }
+    if !allowed {
+        if current(s, credit) {
+            withdraw(mut s, credit.slot, mut out)
+        }
+        return Refused(Denied)
+    }
+    let session = session_of(attempt)
+    let previous = prior_admission(s, session, attempt)
+    if let Some(take result) = take previous {
+        if current(s, credit) {
+            withdraw(mut s, credit.slot, mut out)
+        }
+        return take result
+    }
+    if !current(s, credit) {
+        return Refused(UnknownCredit)
+    }
+    let slot = credit.slot
+    let shard = s.config.classes[s.config.slot_classes[slot]].shard
+    if credit.owner_epoch != s.owners[shard].epoch {
+        return Refused(UnknownCredit)
+    }
+    match s.slots[slot].phase {
+        Busy(_) => return Refused(SpentCredit),
+        Free => return Refused(UnknownCredit),
+        Offered => (),
+    }
+    if !s.serving {
+        withdraw(mut s, slot, mut out)
+        return Refused(Capacity)
+    }
+    let unspent = right(s.escrows, attempt.principal)
+    if unspent == 0 {
+        withdraw(mut s, slot, mut out)
+        return Refused(Limit)
+    }
+    let mut balance = option.unwrap(map.remove(mut s.escrows, attempt.principal))
+    balance.free = unspent - 1
+    map.insert(mut s.escrows, attempt.principal, take balance)
+    let generation = s.slots[slot].generation + 1
+    let checkout: protocol.Checkout[H, R] = protocol.Checkout(credit: clone(credit), principal: attempt.principal, generation: generation)
+    let cached: Cached[H, R] = Cached(digest: attempt.digest, checkout: clone(checkout), result: Pending)
+    let mut row = option.unwrap(map.remove(mut s.sessions, session))
+    map.insert(mut row.accepted, attempt.seq, take cached)
+    map.insert(mut s.sessions, session, take row)
+    s.slots[slot].generation = generation
+    s.slots[slot].warm = false
+    s.slots[slot].phase = Busy(Occupancy(attempt: attempt, retry: retry, phase: Starting))
+    s.occupied += 1
+    list.push(mut out, DropOffer(clone(s.owners[shard].desk.member), clone(credit)))
+    list.push(mut out, Launch(take checkout, retry == (Effectful : protocol.RetryClass)))
+    Pending
+}
+
+fn settle_launch[H: key + shareable, R: key + shareable](mut s: State[H, R], attempt: protocol.Attempt, take result: protocol.Consumption[H, R], mut out: List[Action[H, R]]) {
+    let session = session_of(attempt)
+    if let Some(old) = map.remove(mut s.sessions, session) {
+        let mut row = take old
+        if let Some(previous) = map.remove(mut row.accepted, attempt.seq) {
+            let mut cached = take previous
+            cached.result = clone(result)
+            map.insert(mut row.accepted, attempt.seq, take cached)
+        }
+        map.insert(mut s.sessions, session, take row)
+    }
+    list.push(mut out, Redeemed(take result))
+}
+
+fn retire_attempts[H: key + shareable, R: key + shareable](mut s: State[H, R], session: Session, floor: u64) {
+    if let Some(old) = map.remove(mut s.sessions, session) {
+        let mut row = take old
+        if floor > row.floor {
+            let mut retained: Map[u64, Cached[H, R]] = map.new()
+            for (seq, cached) in row.accepted {
+                if seq >= floor {
+                    let prior: Cached[H, R] = clone(cached)
+                    let id: u64 = seq
+                    map.insert(mut retained, id, take prior)
+                }
+            }
+            row.floor = floor
+            row.accepted = take retained
+        }
+        map.insert(mut s.sessions, session, take row)
+    }
+}
+
+fn occupant[H: key + shareable, R: key + shareable](s: State[H, R], checkout: protocol.Checkout[H, R]) -> Option[Occupancy] {
+    if let Open = s.custody {} else {
+        return None
+    }
+    let slot = checkout.credit.slot
+    if !current(s, checkout.credit) || checkout.generation != s.slots[slot].generation {
+        return None
+    }
+    if let Busy(occupancy) = s.slots[slot].phase {
+        if occupancy.attempt.principal == checkout.principal {
+            return Some(clone(occupancy))
+        }
+    }
+    None
+}
+
+fn handle_fresh[H: key + shareable, R: key + shareable](s: State[H, R], checkout: protocol.Checkout[H, R], principal: u64, permitted: bool) -> bool {
+    if !permitted || checkout.principal != principal {
+        return false
+    }
+    match occupant(s, checkout) {
+        Some(occ) => match occ.phase {
+            Inert => true,
+            Active => true,
+            _ => false,
+        },
+        None => false,
+    }
+}
+
+fn return_slot[H: key + shareable, R: key + shareable](mut s: State[H, R], slot: u64, occ: Occupancy, mut out: List[Action[H, R]]) {
+    let class_id = s.config.slot_classes[slot]
+    let cost = s.config.classes[class_id].cost
+    if let Starting = occ.phase {
+        s.available = resources.refund(s.available, cost)
+        s.windows[class_id] -= 1
+    } else {
+        s.available = resources.refund(s.available, resources.occupied(cost))
+    }
+    let principal = occ.attempt.principal
+    let mut balance = option.unwrap(map.remove(mut s.escrows, principal))
+    if let Some((transfer, epoch)) = return_right(mut balance) {
+        list.push(mut out, DecreaseFrozen(principal, transfer, epoch))
+    }
+    map.insert(mut s.escrows, principal, take balance)
+    s.slots[slot].phase = Free
+    s.occupied -= 1
+}
+
+fn begin_retiring[H: key + shareable, R: key + shareable](mut s: State[H, R], take checkout: protocol.Checkout[H, R], mut occ: Occupancy, mut out: List[Action[H, R]]) {
+    occ.phase = Retiring
+    s.slots[checkout.credit.slot].phase = Busy(clone(occ))
+    list.push(mut out, Reap(take checkout))
+}
+
+fn handoff[H: key + shareable, R: key + shareable](mut s: State[H, R], shard: u64, from: DeskOwner[H], epoch: u64, take to: DeskOwner[H], mut out: List[Action[H, R]]) {
+    if shard >= list.len(s.owners) || from == to || epoch == 18446744073709551615 || s.owners[shard].epoch != epoch || s.owners[shard].desk != from {
+        return
+    }
+    let mut withdrawn: List[u64] = list.new()
+    for slot in 0u64 .. list.len(s.slots) {
+        if s.config.classes[s.config.slot_classes[slot]].shard == shard {
+            if let Offered = s.slots[slot].phase {
+                withdraw(mut s, slot, mut out)
+                list.push(mut withdrawn, slot)
+            }
+        }
+    }
+    list.push(mut out, AssumeOwner(clone(to), clone(s.config.host), clone(s.run), shard, epoch + 1))
+    s.owners[shard] = Owner(desk: take to, epoch: epoch + 1)
+    for slot in withdrawn {
+        let id: u64 = slot
+        mint(mut s, id, mut out)
+    }
+}
+
+fn reset_after_reap[H: key + shareable, R: key + shareable](mut s: State[H, R], mut out: List[Action[H, R]]) {
+    s.custody = Open
+    s.serving = true
+    s.available = s.config.pool
+    let mut next: Map[u64, EscrowBalance] = map.new()
+    for (principal, balance) in s.escrows {
+        let mut restored: EscrowBalance = clone(balance)
+        restored.free = restored.assigned
+        if let Frozen(_) = restored.progress {
+            restored.progress = Idle
+        }
+        let id: u64 = principal
+        map.insert(mut next, id, take restored)
+    }
+    s.escrows = take next
+    s.occupied = 0
+    s.last_credit = 0
+    for slot in 0u64 .. list.len(s.slots) {
+        s.slots[slot] = Slot(serial: 0, generation: 0, owner_epoch: 0, desk_session: 0, warm: false, phase: Free)
+    }
+    for class_id in 0u64 .. list.len(s.windows) {
+        s.windows[class_id] = 0
+    }
+    for shard in 0u64 .. list.len(s.owners) {
+        let desk: DeskOwner[H] = clone(s.config.owners[shard])
+        list.push(mut out, AssumeOwner(clone(desk), clone(s.config.host), clone(s.run), shard, 1))
+        s.owners[shard] = Owner(desk: take desk, epoch: 1)
+    }
+}
+
+pub fn step[H: key + shareable, R: key + shareable](take state: State[H, R], take ev: Event[H, R]) -> (State[H, R], List[Action[H, R]]) {
+    let mut s = take state
+    let mut out: List[Action[H, R]] = list.new()
+    match take ev {
+        Restart(prior, next) => {
+            if prior == s.run && next != s.run {
+                for slot in 0u64 .. list.len(s.slots) {
+                    withdraw(mut s, slot, mut out)
+                }
+                s.run = take next
+                s.custody = Closed
+                s.serving = false
+                s.sessions = map.new()
+            }
+        },
+        LauncherFenced(run, session) => {
+            if run == s.run && session != 0 {
+                if let Closed = s.custody {
+                    s.custody = Fenced(session)
+                }
+            }
+        },
+        CustodyEmpty(run, session) => {
+            if run == s.run {
+                if let Fenced(expected) = s.custody {
+                    if expected == session {
+                        reset_after_reap(mut s, mut out)
+                    }
+                }
+            }
+        },
+        Serve(run, enabled) => {
+            if run == s.run {
+                if let Open = s.custody {
+                    s.serving = enabled
+                    if !enabled {
+                        for slot in 0u64 .. list.len(s.slots) {
+                            withdraw(mut s, slot, mut out)
+                        }
+                    }
+                }
+            }
+        },
+        OpenSession(run, session) => {
+            if run != s.run || !s.serving {
+                list.push(mut out, WorkerRefused((LateUnknownId : protocol.Refusal)))
+            } else if map.contains(s.sessions, session) {
+                list.push(mut out, SessionOpened(session))
+            } else if map.len(s.sessions) >= s.config.max_sessions {
+                list.push(mut out, WorkerRefused((BoundExhausted : protocol.Refusal)))
+            } else {
+                map.insert(mut s.sessions, session, Attempts(floor: 0, accepted: map.new()))
+                list.push(mut out, SessionOpened(session))
+            }
+        },
+        RetireAttempts(run, session, floor) => {
+            if run == s.run {
+                retire_attempts(mut s, session, floor)
+            }
+        },
+        FreezeDecrease(run, principal, epoch, transfer, amount) => {
+            if run == s.run {
+                freeze_decrease(mut s, principal, epoch, transfer, amount, mut out)
+            }
+        },
+        DecreaseCommitted(run, principal, epoch, transfer) => {
+            if run == s.run {
+                commit_assignment(mut s, principal, epoch, transfer, true, 0, mut out)
+            }
+        },
+        IncreaseCommitted(run, principal, epoch, transfer, amount) => {
+            if run == s.run {
+                if let Open = s.custody {
+                    commit_assignment(mut s, principal, epoch, transfer, false, amount, mut out)
+                }
+            }
+        },
+        Warm(run, slot) => {
+            if run == s.run {
+                stage_stock(mut s, slot, true)
+            }
+        },
+        Evict(run, slot) => {
+            if run == s.run {
+                if let Open = s.custody {
+                    stage_stock(mut s, slot, false)
+                }
+            }
+        },
+        Mint(run, slot) => {
+            if run == s.run {
+                mint(mut s, slot, mut out)
+            }
+        },
+        Withdraw(credit) => {
+            if current(s, credit) {
+                let shard = s.config.classes[s.config.slot_classes[credit.slot]].shard
+                if credit.owner_epoch == s.owners[shard].epoch {
+                    withdraw(mut s, credit.slot, mut out)
+                }
+            }
+        },
+        Handoff(run, shard, from, epoch, to) => {
+            if run == s.run && s.serving {
+                handoff(mut s, shard, from, epoch, take to, mut out)
+            }
+        },
+        OfferExpired(credit) => {
+            if current(s, credit) {
+                if let Offered = s.slots[credit.slot].phase {
+                    withdraw(mut s, credit.slot, mut out)
+                    mint(mut s, credit.slot, mut out)
+                }
+            }
+        },
+        Redeem(credit, attempt, retry, auth) => {
+            let result = admit(mut s, credit, attempt, retry, auth, mut out)
+            // The original send settles at Started or StartFailed. A replay
+            // while that launch is outstanding receives a nonterminal reply.
+            if list.len(out) == 0 {
+                list.push(mut out, Redeemed(take result))
+            } else if let Pending = result {
+                ()
+            } else {
+                list.push(mut out, Redeemed(take result))
+            }
+        },
+        InertExpire(take checkout) => {
+            let entry = occupant(s, checkout)
+            if let Some(take found) = take entry {
+                let mut occ = take found
+                if let Inert = occ.phase {
+                    begin_retiring(mut s, take checkout, mut occ, mut out)
+                }
+            }
+        },
+        Kill(take checkout, principal, permitted) => {
+            if handle_fresh(s, checkout, principal, permitted) {
+                let mut occ = option.unwrap(occupant(s, checkout))
+                begin_retiring(mut s, take checkout, mut occ, mut out)
+            } else {
+                list.push(mut out, Gone)
+            }
+        },
+        Started(take checkout) => {
+            let slot = checkout.credit.slot
+            let entry = occupant(s, checkout)
+            if let Some(take found) = take entry {
+                let mut occ = take found
+                if let Starting = occ.phase {
+                    let class_id = s.config.slot_classes[slot]
+                    s.available.starts += s.config.classes[class_id].cost.starts
+                    s.windows[class_id] -= 1
+                    occ.phase = if occ.retry == (Effectful : protocol.RetryClass) {
+                        Inert
+                    } else {
+                        Active
+                    }
+                    let attempt = occ.attempt
+                    let retry = occ.retry
+                    s.slots[slot].phase = Busy(take occ)
+                    settle_launch(mut s, attempt, Admitted(take checkout, retry), mut out)
+                }
+            }
+        },
+        StartFailed(checkout) => {
+            if let Some(occ) = occupant(s, checkout) {
+                if let Starting = occ.phase {
+                    return_slot(mut s, checkout.credit.slot, occ, mut out)
+                    settle_launch(mut s, occ.attempt, Refused(Capacity), mut out)
+                }
+            }
+        },
+        Retire(checkout) => {
+            if let Some(occ) = occupant(s, checkout) {
+                return_slot(mut s, checkout.credit.slot, occ, mut out)
+                if let Starting = occ.phase {
+                    settle_launch(mut s, occ.attempt, EndedBeforeReply, mut out)
+                }
+            }
+        },
+        CheckHandle(checkout, principal, permitted) => {
+            if handle_fresh(s, checkout, principal, permitted) {
+                list.push(mut out, HandleLive)
+            } else {
+                list.push(mut out, Gone)
+            }
+        },
+        Activate(take checkout, principal, permitted) => {
+            if handle_fresh(s, checkout, principal, permitted) {
+                let slot = checkout.credit.slot
+                let mut occ = option.unwrap(occupant(s, checkout))
+                if let Inert = occ.phase {
+                    occ.phase = Active
+                    s.slots[slot].phase = Busy(take occ)
+                    list.push(mut out, ActivateUser(take checkout))
+                } else {
+                    list.push(mut out, Activated)
+                }
+            } else {
+                list.push(mut out, Gone)
+            }
+        },
+        BoundExhausted => list.push(mut out, WorkerRefused((BoundExhausted : protocol.Refusal))),
+    }
+    (take s, take out)
+}

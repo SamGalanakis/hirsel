@@ -22,6 +22,11 @@ source = "member:cli"
 edges = ["std@1"]
 
 [[package]]
+id = "compute@1"
+source = "member:compute"
+edges = ["std@1"]
+
+[[package]]
 id = "dtls@1"
 source = "member:dtls"
 edges = ["std@1"]
@@ -34,7 +39,7 @@ edges = []
 [[package]]
 id = "fleet@1"
 source = "member:fleet"
-edges = ["runner@1", "std@1", "store@1"]
+edges = ["compute@1", "runner@1", "std@1", "store@1"]
 
 [[package]]
 id = "h264@1"

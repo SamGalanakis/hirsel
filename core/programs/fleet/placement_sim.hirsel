@@ -3,83 +3,158 @@ const WORKER_RTT: u64 = 100
 
 const MEAN_LIFETIME: u64 = 1000000
 
-type Phase = Free | Offered | Busy
+const PRIMARY: u64 = 1
 
-type Slot {
-    incarnation: u64,
-    generation: u64,
-    phase: Phase
-}
+const STANDBY: u64 = 2
 
-type Grant: key {
-    slot: u64,
-    incarnation: u64,
-    generation: u64
-}
+const PRINCIPAL: u64 = 1
 
-type Ledger {
-    slots: List[Slot],
+const RUN: u64 = 1
+
+const SESSION: compute.worker.Session = compute.worker.Session(caller: 1, principal: PRINCIPAL, id: 1)
+
+type World {
+    workers: Map[u64, compute.worker.State[u64, u64]],
+    desks: Map[u64, compute.desk.State[u64, u64]],
     occupied: u64
 }
 
-fn new_ledger(workers: u64, per_worker: u64) -> Ledger {
-    let size = workers * per_worker
-    let mut slots: List[Slot] = list.with_capacity(size)
-    for _ in 0u64 .. size {
-        list.push(mut slots, Slot(incarnation: 1, generation: 0, phase: Free))
-    }
-    Ledger(slots: take slots, occupied: 0)
+fn worker_event(mut world: World, host: u64, take event: compute.worker.Event[u64, u64]) -> List[compute.worker.Action[u64, u64]] {
+    let worker = option.unwrap(map.remove(mut world.workers, host))
+    world.occupied -= compute.worker.occupied(worker)
+    let (next, actions) = compute.worker.step(take worker, take event)
+    world.occupied += compute.worker.occupied(next)
+    map.insert(mut world.workers, host, take next)
+    take actions
 }
 
-fn mint(mut ledger: Ledger, slot: u64) -> Grant {
-    if let Free = ledger.slots[slot].phase {
-        ledger.slots[slot].generation += 1
-        ledger.slots[slot].phase = Offered
-        return Grant(slot: slot, incarnation: ledger.slots[slot].incarnation, generation: ledger.slots[slot].generation)
-    }
-    fail("a live offer or busy slot cannot be reissued")
+fn desk_event(mut world: World, desk: u64, take event: compute.desk.Event[u64, u64]) -> List[compute.desk.Action[u64, u64]] {
+    let state = option.unwrap(map.remove(mut world.desks, desk))
+    let (next, actions) = compute.desk.step(take state, take event)
+    map.insert(mut world.desks, desk, take next)
+    take actions
 }
 
-fn withdraw(mut ledger: Ledger, grant: Grant) {
-    if let Offered = ledger.slots[grant.slot].phase {
-        if ledger.slots[grant.slot].incarnation == grant.incarnation && ledger.slots[grant.slot].generation == grant.generation {
-            ledger.slots[grant.slot].phase = Free
+fn deliver(mut world: World, actions: List[compute.worker.Action[u64, u64]]) {
+    for action in actions {
+        match action {
+            AssumeOwner(owner, host, worker_run, _, epoch) => {
+                let _ = desk_event(mut world, owner.member, Attach(host, worker_run, worker_run))
+                let _ = desk_event(mut world, owner.member, Assume(host, worker_run, worker_run, epoch))
+            },
+            Offer(desk, offer) => {
+                let _ = desk_event(mut world, desk, Offer(clone(offer), offer.credit.run))
+            },
+            DropOffer(desk, credit) => {
+                let _ = desk_event(mut world, desk, Withdraw(credit, credit.run))
+            },
+            _ => (),
         }
     }
 }
 
-fn start(mut ledger: Ledger, slot: u64) {
-    ledger.slots[slot].phase = Busy
-    ledger.occupied += 1
+fn one[T](take item: T) -> List[T] {
+    let mut out: List[T] = list.new()
+    list.push(mut out, take item)
+    take out
 }
 
-fn redeem(mut ledger: Ledger, grant: Grant) -> bool {
-    let slot = grant.slot
-    if let Offered = ledger.slots[slot].phase {
-        if ledger.slots[slot].incarnation == grant.incarnation && ledger.slots[slot].generation == grant.generation {
-            start(mut ledger, slot)
-            return true
+fn all_resources(n: u64) -> compute.resources.Vector {
+    compute.resources.Vector(memory_bytes: n, address_space: n, warm_stock: n, mappings: n, fds: n, connections: n, starts: n, stacks: n, cpu: n, disk_iops: n)
+}
+
+fn new_world(workers: u64, per_worker: u64, dispatchers: u64, standby: bool) -> World {
+    let mut world = World(workers: map.new(), desks: map.new(), occupied: 0)
+    let n: u64 = if standby {
+        2
+    } else {
+        1
+    }
+    for desk in 1u64 .. n + 1 {
+        let cfg = compute.desk.Config(session: 1, workers: workers, slots_per_worker: per_worker, classes: 1, connections: dispatchers, pending_per_connection: 1, pending_per_principal: 1024, grants_per_connection: workers * per_worker, grants_per_principal: workers * per_worker, shares: one(compute.desk.Share(principal: PRINCIPAL, weight: 1)))
+        map.insert(mut world.desks, desk, compute.desk.init(take cfg))
+        for conn in 1u64 .. dispatchers + 1 {
+            let _ = desk_event(mut world, desk, Connect(conn))
         }
     }
-    false
+    let rights = if standby {
+        per_worker + 1
+    } else {
+        per_worker
+    }
+    let attempts: u64 = if standby {
+        4
+    } else {
+        1
+    }
+    for host in 0u64 .. workers {
+        let mut slot_classes: List[u64] = list.new()
+        list.fill(mut slot_classes, per_worker, 0)
+        let worker = compute.worker.init(compute.worker.Config(host: host, pool: all_resources(per_worker), classes: one(compute.worker.Class(shard: 0, cost: all_resources(1), warm_cost: compute.resources.zero(), window: per_worker)), slot_classes: take slot_classes, owners: one(compute.worker.DeskOwner(member: PRIMARY, session: 1)), escrows: one(compute.worker.Escrow(principal: PRINCIPAL, rights: rights, epoch: 0, installed_transfer: None)), max_sessions: 1, max_attempts: attempts), RUN)
+        map.insert(mut world.workers, host, take worker)
+        open_worker(mut world, host, RUN)
+        for slot in 0u64 .. per_worker {
+            let actions = worker_event(mut world, host, Mint(RUN, slot))
+            deliver(mut world, actions)
+        }
+    }
+    take world
 }
 
-fn release(mut ledger: Ledger, slot: u64) {
-    if let Busy = ledger.slots[slot].phase {
-        ledger.slots[slot].phase = Free
-        ledger.occupied -= 1
-        return
+fn open_worker(mut world: World, host: u64, worker_run: u64) {
+    let _ = worker_event(mut world, host, LauncherFenced(worker_run, worker_run))
+    let actions = worker_event(mut world, host, CustodyEmpty(worker_run, worker_run))
+    deliver(mut world, actions)
+    let _ = worker_event(mut world, host, OpenSession(worker_run, SESSION))
+}
+
+fn pop(mut world: World, desk: u64, conn: u64, class_id: u64, version: u64) -> Option[compute.protocol.Credit[u64, u64]] {
+    let ask = compute.desk.Ask(connection: conn, class_id: class_id, principal: PRINCIPAL, version: version, count: 1)
+    let _ = desk_event(mut world, desk, Demand(ask))
+    let actions = desk_event(mut world, desk, Pop(class_id, PRINCIPAL))
+    for action in actions {
+        if let Grant(picked, credit) = action {
+            if picked != ask {
+                fail("immediate create received another invocation's grant")
+            }
+            return Some(credit)
+        }
     }
-    fail("retirement requires a busy slot")
+    let _ = desk_event(mut world, desk, Cancel(ask))
+    None
+}
+
+fn attempt(seq: u64) -> compute.protocol.Attempt {
+    compute.protocol.Attempt(caller: SESSION.caller, principal: SESSION.principal, session: SESSION.id, seq: seq, digest: (seq, 0))
+}
+
+fn redeem(mut world: World, credit: compute.protocol.Credit[u64, u64], req: compute.protocol.Attempt) -> compute.protocol.Consumption[u64, u64] {
+    let actions = worker_event(mut world, credit.host, Redeem(credit, req, Pure, Authenticated(true)))
+    deliver(mut world, actions)
+    for action in actions {
+        match action {
+            Launch(checkout, false) => {
+                let settled = worker_event(mut world, credit.host, Started(checkout))
+                let Redeemed(result) = settled[0] else {
+                    fail("launcher start did not settle create")
+                }
+                return clone(result)
+            },
+            Redeemed(result) => return clone(result),
+            _ => (),
+        }
+    }
+    fail("worker omitted launch and create result")
 }
 
 type Request {
     arrived: u64,
     lifetime: u64,
-    measured: bool
+    measured: bool,
+    seq: u64
 }
 
-type Event = Arrive(Request) | Ask(Request) | Redeem(Request, Grant) | Retire(u64)
+type Event = Ask(Request) | Redeem(Request, Box[compute.dispatcher.State[u64, u64, u64]], compute.protocol.Credit[u64, u64], u64) | Retire(compute.protocol.Checkout[u64, u64])
 
 type Queue[T] {
     times: Heap[(u64, u64)],
@@ -101,6 +176,7 @@ type Config {
     load: u64,
     samples: u64,
     desk_rtt: u64,
+    dispatchers: u64,
     workload: Workload
 }
 
@@ -147,18 +223,18 @@ fn burst_deadline(cfg: Config) -> u64 {
     cfg.desk_rtt + 3 * WORKER_RTT
 }
 
-fn overloaded(mut result: Trial, ledger: Ledger, req: Request) {
+fn overloaded(mut result: Trial, occupied: u64, capacity: u64, req: Request) {
     if !req.measured {
         return
     }
     result.overload += 1
-    if ledger.occupied < list.len(ledger.slots) {
+    if occupied < capacity {
         result.false_overload += 1
     }
 }
 
-fn started(mut q: Queue[Event], mut r: Trial, mut latency: List[u64], cfg: Config, req: Request, at: u64, slot: u64) {
-    enqueue(mut q, at + req.lifetime, Retire(slot))
+fn started(mut q: Queue[Event], mut r: Trial, mut latency: List[u64], cfg: Config, req: Request, at: u64, checkout: compute.protocol.Checkout[u64, u64]) {
+    enqueue(mut q, at + req.lifetime, Retire(checkout))
     if let Burst = cfg.workload {
         if at <= burst_deadline(cfg) {
             r.started_by_deadline += 1
@@ -170,19 +246,19 @@ fn started(mut q: Queue[Event], mut r: Trial, mut latency: List[u64], cfg: Confi
 }
 
 fn trial(cfg: Config, seed: u64) -> Trial {
-    let mut worker = new_ledger(cfg.workers, cfg.per_worker)
-    let capacity = list.len(worker.slots)
-    let mut credits: List[Grant] = list.with_capacity(capacity)
-    for slot in 0u64 .. capacity {
-        list.push(mut credits, mint(mut worker, slot))
-    }
+    let mut world = new_world(cfg.workers, cfg.per_worker, cfg.dispatchers, false)
+    let capacity = cfg.workers * cfg.per_worker
     let mut q: Queue[Event] = Queue(times: heap.new(), events: map.new(), sequence: 0)
+    if let Burst = cfg.workload {
+        map.reserve(mut q.events, cfg.samples)
+    }
     let mut latency: List[u64] = list.new()
     let mut r = Trial(offered: cfg.samples, overload: 0, false_overload: 0, started_by_deadline: 0, burst_bound: 0, p50_us: 0, erlang_ppb: 0)
     let load_percent: f64 = float.from_int(capacity * cfg.load)
     let traffic = load_percent / 100.0
     let mut arrivals = std.rand.new(seed, 1)
     let mut lifetimes = std.rand.new(seed, 2)
+    let mut caller_session = compute.dispatcher.open_session(SESSION.caller, SESSION.principal, SESSION.id)
     let mut at = 0u64
     let mut arrived = 0u64
     let warmup = match cfg.workload {
@@ -211,7 +287,7 @@ fn trial(cfg: Config, seed: u64) -> Trial {
                     Burst => MEAN_LIFETIME,
                     Sparse => WORKER_RTT,
                 }
-                enqueue(mut q, at, Arrive(Request(arrived: at, lifetime: lifetime, measured: arrived >= warmup)))
+                enqueue(mut q, at + cfg.desk_rtt / 2, Ask(Request(arrived: at, lifetime: lifetime, measured: arrived >= warmup, seq: arrived + 1)))
                 arrived += 1
                 match cfg.workload {
                     Poisson => {
@@ -228,23 +304,44 @@ fn trial(cfg: Config, seed: u64) -> Trial {
         let (now, seq) = option.unwrap(heap.pop(mut q.times))
         let event = option.unwrap(map.remove(mut q.events, seq))
         match take event {
-            Arrive(req) => enqueue(mut q, now + cfg.desk_rtt / 2, Ask(req)),
             Ask(req) => {
-                if let Some(grant) = list.pop(mut credits) {
-                    enqueue(mut q, now + cfg.desk_rtt - cfg.desk_rtt / 2 + WORKER_RTT, Redeem(req, grant))
+                let policy = compute.dispatcher.ReleasePolicy(no_grants: true, deterministic: true, tolerates_duplicates: true, sinks_deduplicate: false, single_handle: false, has_net: false)
+                let (next_session, session_actions) = compute.dispatcher.session_step(take caller_session, Request(attempt(req.seq)))
+                caller_session = take next_session
+                let Accepted(request) = session_actions[0] else {
+                    fail("coordinator refused a fresh caller sequence")
+                }
+                let created: compute.dispatcher.State[u64, u64, u64] = compute.dispatcher.init(1u64, 0, request, policy, false)
+                let (dispatch, _) = compute.dispatcher.step(take created, Begin)
+                let conn = (req.seq - 1) % cfg.dispatchers + 1
+                if let Some(credit) = pop(mut world, PRIMARY, conn, 0, req.seq) {
+                    let (waiting, actions) = compute.dispatcher.step(take dispatch, Placed(1, credit))
+                    let Send(exchange, target, _, _) = actions[0] else {
+                        fail("dispatcher did not send its granted create")
+                    }
+                    enqueue(mut q, now + cfg.desk_rtt - cfg.desk_rtt / 2 + WORKER_RTT, Redeem(req, box.new(take waiting), target, exchange))
                 } else {
-                    overloaded(mut r, worker, req)
+                    let (_, actions) = compute.dispatcher.step(take dispatch, PlacementMiss(1, NoCredit, None))
+                    let Finish(RefusedCapacity) = actions[0] else {
+                        fail("ungranted request did not resolve as capacity")
+                    }
+                    overloaded(mut r, world.occupied, capacity, req)
                 }
             },
-            Redeem(req, grant) => {
-                if !redeem(mut worker, grant) {
+            Redeem(req, take dispatch, grant, exchange) => {
+                let result = redeem(mut world, grant, attempt(req.seq))
+                let (_, actions) = compute.dispatcher.step(box.unbox(take dispatch), WorkerReply(exchange, Answer(take result)))
+                let Finish(Created(checkout)) = actions[0] else {
                     fail("a normally delivered exclusive grant did not redeem")
                 }
-                started(mut q, mut r, mut latency, cfg, req, now, grant.slot)
+                let _ = worker_event(mut world, grant.host, RetireAttempts(grant.run, SESSION, req.seq + 1))
+                started(mut q, mut r, mut latency, cfg, req, now, checkout)
             },
-            Retire(slot) => {
-                release(mut worker, slot)
-                list.push(mut credits, mint(mut worker, slot))
+            Retire(checkout) => {
+                let credit = checkout.credit
+                let _ = worker_event(mut world, credit.host, Retire(checkout))
+                let actions = worker_event(mut world, credit.host, Mint(credit.run, credit.slot))
+                deliver(mut world, actions)
             },
         }
     }
@@ -272,22 +369,21 @@ pub type Recovery: codec + key + send {
     double_redemptions: u64
 }
 
-fn replay(mut worker: Ledger, grant: Grant, mut r: Recovery) {
+fn replay(mut world: World, credit: compute.protocol.Credit[u64, u64], seq: u64, mut r: Recovery) {
     r.replay_attempts += 1
-    if redeem(mut worker, grant) {
+    if let Admitted(_, _) = redeem(mut world, credit, attempt(seq)) {
         r.double_redemptions += 1
     }
 }
 
 const HEAL_US: u64 = 10000
 
-type DeskFault = DemandAtB | DemandAtWorker | Rotate | OfferAtB(Grant) | CreateAtWorker(Grant) | AccountBeforeMint
+type DeskFault = DemandAtB | DemandAtWorker | Rotate | OfferAtB(List[compute.worker.Action[u64, u64]]) | CreateAtWorker(compute.protocol.Credit[u64, u64]) | AccountBeforeMint(compute.protocol.Checkout[u64, u64])
 
 fn recover_desk() -> Recovery {
-    let mut worker = new_ledger(1, 1)
-    let a_grant = mint(mut worker, 0)
-    let mut primary = 0u64
-    let mut wire: std.sim.message.Queue[Grant] = std.sim.message.new()
+    let mut world = new_world(1, 1, 1, true)
+    let a_grant = option.unwrap(pop(mut world, PRIMARY, 1, 0, 1))
+    let mut wire: std.sim.message.Queue[compute.protocol.Credit[u64, u64]] = std.sim.message.new()
     std.sim.message.hold_until(mut wire, 0, 1, "create", "rotate")
     std.sim.message.send(mut wire, std.sim.message.Message(from: 0, to: 1, name: "create", value: a_grant))
     if let Some(_) = std.sim.message.receive(mut wire, 1) {
@@ -295,57 +391,105 @@ fn recover_desk() -> Recovery {
     }
     let mut r = Recovery(reoffered_us: 0, bound_us: DETECT_US + 3 * LINK_US + HOLD_US, replay_attempts: 0, double_redemptions: 0)
     let mut faults: Queue[DeskFault] = Queue(times: heap.new(), events: map.new(), sequence: 0)
-    // Dispatcher D cannot reach A. Healing restores its route to B. A still
-    // has a healthy worker stream, so a worker reset cannot drive this case.
+    // A retains a healthy worker stream while demand moves to B.
     enqueue(mut faults, HEAL_US + DETECT_US + LINK_US, DemandAtB)
     while let Some((now, seq)) = heap.pop(mut faults.times) {
-        match option.unwrap(map.remove(mut faults.events, seq)) {
+        let event = option.unwrap(map.remove(mut faults.events, seq))
+        match take event {
             DemandAtB => enqueue(mut faults, now + LINK_US, DemandAtWorker),
             DemandAtWorker => enqueue(mut faults, now + HOLD_US, Rotate),
             Rotate => {
-                if primary != 0 {
-                    fail("the shard had more than one primary")
-                }
-                withdraw(mut worker, a_grant)
-                primary = 1
-                enqueue(mut faults, now + LINK_US, OfferAtB(mint(mut worker, 0)))
+                let actions = worker_event(mut world, 0, Handoff(RUN, 0, compute.worker.DeskOwner(member: PRIMARY, session: 1), 1, compute.worker.DeskOwner(member: STANDBY, session: 1)))
+                enqueue(mut faults, now + LINK_US, OfferAtB(take actions))
                 std.sim.message.fire(mut wire, "rotate")
                 let old = option.unwrap(std.sim.message.receive(mut wire, 1))
-                replay(mut worker, old.value, mut r)
+                replay(mut world, old.value, 1, mut r)
             },
-            OfferAtB(g) => {
-                if primary != 1 {
-                    fail("the standby received a live ordinal")
-                }
+            OfferAtB(take actions) => {
+                deliver(mut world, actions)
+                let fresh = option.unwrap(pop(mut world, STANDBY, 1, 0, 1))
                 r.reoffered_us = now - HEAL_US
-                enqueue(mut faults, now + 2 * LINK_US, CreateAtWorker(g))
+                enqueue(mut faults, now + 2 * LINK_US, CreateAtWorker(fresh))
             },
             CreateAtWorker(g) => {
-                if !redeem(mut worker, g) || worker.occupied != 1 {
+                let Admitted(checkout, _) = redeem(mut world, g, attempt(2)) else {
                     fail("B could not redeem the slot stranded at A")
                 }
-                replay(mut worker, g, mut r)
+                replay(mut world, g, 2, mut r)
                 // An abandon delayed past the start must not refund a child.
-                withdraw(mut worker, g)
-                replay(mut worker, a_grant, mut r)
-                replay(mut worker, g, mut r)
-                enqueue(mut faults, now + DETECT_US, AccountBeforeMint)
+                let _ = worker_event(mut world, 0, Withdraw(g))
+                replay(mut world, a_grant, 3, mut r)
+                replay(mut world, g, 3, mut r)
+                enqueue(mut faults, now + DETECT_US, AccountBeforeMint(checkout))
             },
-            AccountBeforeMint => {
-                // The successor has fenced the old execution before refund.
-                release(mut worker, 0)
-                worker.slots[0].incarnation += 1
-                worker.slots[0].generation = 0
-                let next = mint(mut worker, 0)
-                replay(mut worker, a_grant, mut r)
-                if !redeem(mut worker, next) || worker.occupied != 1 {
+            AccountBeforeMint(old) => {
+                let withdrawn = worker_event(mut world, 0, Restart(RUN, RUN + 1))
+                deliver(mut world, withdrawn)
+                let _ = worker_event(mut world, 0, Retire(old))
+                let early = worker_event(mut world, 0, Mint(RUN + 1, 0))
+                if list.len(early) != 0 || world.occupied != 1 {
+                    fail("worker advertised or refunded the old child before custody was empty")
+                }
+                open_worker(mut world, 0, RUN + 1)
+                let actions = worker_event(mut world, 0, Mint(RUN + 1, 0))
+                deliver(mut world, actions)
+                let next = option.unwrap(pop(mut world, PRIMARY, 1, 0, 2))
+                replay(mut world, a_grant, 1, mut r)
+                let Admitted(_, _) = redeem(mut world, next, attempt(1)) else {
                     fail("the successor could not redeem the accounted slot")
                 }
-                replay(mut worker, next, mut r)
+                replay(mut world, next, 1, mut r)
             },
         }
     }
     r
+}
+
+fn mixed_classes() -> Trial {
+    let mut world = World(workers: map.new(), desks: map.new(), occupied: 0)
+    let desk_cfg = compute.desk.Config(session: 1, workers: 3, slots_per_worker: 3, classes: 2, connections: 1, pending_per_connection: 1, pending_per_principal: 1024, grants_per_connection: 6, grants_per_principal: 6, shares: one(compute.desk.Share(principal: PRINCIPAL, weight: 1)))
+    map.insert(mut world.desks, PRIMARY, compute.desk.init(take desk_cfg))
+    let _ = desk_event(mut world, PRIMARY, Connect(1))
+    let a = compute.resources.Vector(memory_bytes: 3, address_space: 1, warm_stock: 2, mappings: 1, fds: 3, connections: 1, starts: 1, stacks: 2, cpu: 1, disk_iops: 3)
+    let b = compute.resources.Vector(memory_bytes: 1, address_space: 3, warm_stock: 2, mappings: 3, fds: 1, connections: 3, starts: 2, stacks: 2, cpu: 3, disk_iops: 1)
+    let mut pool = all_resources(4)
+    pool.starts = 3
+    for host in 0u64 .. 3 {
+        let mut classes = one(compute.worker.Class(shard: 0, cost: a, warm_cost: compute.resources.zero(), window: 3))
+        list.push(mut classes, compute.worker.Class(shard: 0, cost: b, warm_cost: compute.resources.zero(), window: 3))
+        let mut slot_classes = one(0u64)
+        list.push(mut slot_classes, 1)
+        list.push(mut slot_classes, 0)
+        let cfg = compute.worker.Config(host: host, pool: pool, classes: take classes, slot_classes: take slot_classes, owners: one(compute.worker.DeskOwner(member: PRIMARY, session: 1)), escrows: one(compute.worker.Escrow(principal: PRINCIPAL, rights: 3, epoch: 0, installed_transfer: None)), max_sessions: 1, max_attempts: 2)
+        map.insert(mut world.workers, host, compute.worker.init(take cfg, RUN))
+        open_worker(mut world, host, RUN)
+        for slot in 0u64 .. 2 {
+            let actions = worker_event(mut world, host, Mint(RUN, slot))
+            deliver(mut world, actions)
+        }
+        let extra = worker_event(mut world, host, Mint(RUN, 2))
+        if list.len(extra) != 0 || compute.worker.available(option.unwrap(map.get(world.workers, host))) != all_resources(0) {
+            fail("mixed classes did not reserve each shared resource exactly once")
+        }
+    }
+    for seq in 1u64 .. 7 {
+        let class_id = seq % 2
+        let grant = option.unwrap(pop(mut world, PRIMARY, 1, class_id, seq))
+        let Admitted(_, _) = redeem(mut world, grant, attempt(seq)) else {
+            fail("a funded mixed-class credit refused")
+        }
+    }
+    let mut after_start = all_resources(0)
+    after_start.starts = 3
+    for (_, worker) in world.workers {
+        if compute.worker.available(worker) != after_start {
+            fail("start completion returned a non-start resource")
+        }
+    }
+    if world.occupied != 6 || pop(mut world, PRIMARY, 1, 0, 7) != None {
+        fail("one shard and one desk must deliver exactly six mixed-class starts")
+    }
+    Trial(offered: 6, overload: 0, false_overload: 0, started_by_deadline: 6, burst_bound: 6, p50_us: 0, erlang_ppb: 0)
 }
 
 pub type Scenario: codec + key + send {
@@ -365,16 +509,21 @@ fn scenario(take name: String, cfg: Config, seed: u64) -> Scenario {
 }
 
 pub fn run(hosts: u64, seed: u64) -> Gate {
+    if hosts < 5 {
+        fail("fleet placement needs at least five logical workers")
+    }
     let scarce = order.max(5u64, hosts / 5)
     let mut cases: List[Scenario] = list.new()
-    list.push(mut cases, scenario("scarce_burst_05", Config(workers: scarce, per_worker: 1, load: 5, samples: order.max(1u64, scarce / 20), desk_rtt: 100, workload: Burst), seed))
-    list.push(mut cases, scenario("scarce_burst_50", Config(workers: scarce, per_worker: 1, load: 50, samples: scarce / 2, desk_rtt: 100, workload: Burst), seed))
-    list.push(mut cases, scenario("scarce_burst_100", Config(workers: scarce, per_worker: 1, load: 100, samples: scarce, desk_rtt: 100, workload: Burst), seed))
-    list.push(mut cases, scenario("common_burst_50", Config(workers: hosts, per_worker: 4, load: 50, samples: hosts * 2, desk_rtt: 100, workload: Burst), seed))
-    list.push(mut cases, scenario("scarce_poisson_50", Config(workers: scarce, per_worker: 1, load: 50, samples: 8192, desk_rtt: 100, workload: Poisson), seed))
-    list.push(mut cases, scenario("erlang_calibration_50", Config(workers: 4, per_worker: 1, load: 50, samples: 16384, desk_rtt: 100, workload: Poisson), seed))
-    list.push(mut cases, scenario("sparse_100us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 100, workload: Sparse), seed))
-    list.push(mut cases, scenario("sparse_200us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 200, workload: Sparse), seed))
-    list.push(mut cases, scenario("sparse_250us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 250, workload: Sparse), seed))
+    list.push(mut cases, scenario("scarce_burst_05", Config(workers: scarce, per_worker: 1, load: 5, samples: order.max(1u64, scarce / 20), desk_rtt: 100, dispatchers: 64, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_burst_50", Config(workers: scarce, per_worker: 1, load: 50, samples: scarce / 2, desk_rtt: 100, dispatchers: 64, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_burst_50_two_ingresses", Config(workers: scarce, per_worker: 1, load: 50, samples: scarce / 2, desk_rtt: 100, dispatchers: 2, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_burst_100", Config(workers: scarce, per_worker: 1, load: 100, samples: scarce, desk_rtt: 100, dispatchers: 64, workload: Burst), seed))
+    list.push(mut cases, scenario("common_burst_50", Config(workers: hosts, per_worker: 4, load: 50, samples: hosts * 2, desk_rtt: 100, dispatchers: 64, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_poisson_50", Config(workers: scarce, per_worker: 1, load: 50, samples: 8192, desk_rtt: 100, dispatchers: 1, workload: Poisson), seed))
+    list.push(mut cases, scenario("erlang_calibration_50", Config(workers: 4, per_worker: 1, load: 50, samples: 16384, desk_rtt: 100, dispatchers: 1, workload: Poisson), seed))
+    list.push(mut cases, scenario("sparse_100us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 100, dispatchers: 1, workload: Sparse), seed))
+    list.push(mut cases, scenario("sparse_200us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 200, dispatchers: 1, workload: Sparse), seed))
+    list.push(mut cases, scenario("sparse_250us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 250, dispatchers: 1, workload: Sparse), seed))
+    list.push(mut cases, Scenario(name: "mixed_classes_3_hosts", desk: mixed_classes()))
     Gate(hosts: hosts, seed: seed, cases: take cases, desk_recovery: recover_desk())
 }

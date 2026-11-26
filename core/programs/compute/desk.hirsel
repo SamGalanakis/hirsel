@@ -1,0 +1,573 @@
+pub type Share: codec + send {
+    principal: u64,
+    weight: u64
+}
+
+pub type Config: codec + send {
+    session: u64,
+    workers: u64,
+    slots_per_worker: u64,
+    classes: u64,
+    connections: u64,
+    pending_per_connection: u64,
+    pending_per_principal: u64,
+    grants_per_connection: u64,
+    grants_per_principal: u64,
+    shares: List[Share]
+}
+
+type Worker[R: key + shareable]: codec {
+    stream: u64,
+    first_slot: u64,
+    run: R,
+    epoch: u64,
+    live: bool
+}
+
+type Demand: codec {
+    version: u64,
+    count: u64
+}
+
+type Connection: codec {
+    asks: Map[(u64, u64), Demand],
+    grants: Map[u64, ()],
+    pending: u64
+}
+
+pub type Ask: codec + key + send {
+    connection: u64,
+    class_id: u64,
+    principal: u64,
+    version: u64,
+    count: u64
+}
+
+type Position: codec {
+    principal: u64,
+    index: u64
+}
+
+type GrantOwner: codec {
+    connection: u64,
+    principal: u64
+}
+
+type Entry[H: key + shareable, R: key + shareable]: codec {
+    credit: protocol.Credit[H, R],
+    stream: u64,
+    class_id: u64,
+    positions: List[Position],
+    available: bool,
+    granted: Option[GrantOwner]
+}
+
+pub type State[H: key + shareable, R: key + shareable]: codec {
+    config: Config,
+    workers: Map[H, Worker[R]],
+    entries: List[Option[Entry[H, R]]],
+    ready: Map[(u64, u64), List[u64]],
+    connections: Map[u64, Connection],
+    last_connection: u64,
+    outstanding: Map[u64, u64],
+    pending: Map[u64, u64],
+    waiting_count: u64,
+    ready_count: List[u64],
+    scale: u64,
+    head_tags: Map[u64, u64]
+}
+
+pub type Event[H: key + shareable, R: key + shareable]: codec + send = Attach(H, R, u64) | Assume(H, R, u64, u64) | WorkerDown(H, u64) | Offer(protocol.Offer[H, R], u64) | Withdraw(protocol.Credit[H, R], u64) | Connect(u64) | Demand(Ask) | Cancel(Ask) | Pop(u64, u64) | Settle(u64, protocol.Credit[H, R]) | Disconnect(u64) | BoundExhausted
+
+pub type Action[H: key + shareable, R: key + shareable]: codec + send = Grant(Ask, protocol.Credit[H, R]) | Abandon(protocol.Credit[H, R]) | NoCredit(u64) | NoRight(u64, u64) | Refused(protocol.Refusal)
+
+pub type Key[H: key + shareable]: codec + send = Desk | Host(H) | Slot(H, u64) | ConnectionKey(u64) | ClassKey(u64)
+
+pub fn keys[H: key + shareable, R: key + shareable](ev: Event[H, R]) -> List[Key[H]] {
+    let mut out: List[Key[H]] = list.new()
+    list.push(mut out, Desk)
+    match ev {
+        Attach(host, _, _) => {
+            list.push(mut out, Host(clone(host)))
+        },
+        Assume(host, _, _, _) => {
+            list.push(mut out, Host(clone(host)))
+        },
+        WorkerDown(host, _) => {
+            list.push(mut out, Host(clone(host)))
+        },
+        Offer(offer, _) => {
+            list.push(mut out, Slot(clone(offer.credit.host), offer.credit.slot))
+            list.push(mut out, ClassKey(offer.class_id))
+        },
+        Withdraw(credit, _) => {
+            list.push(mut out, Slot(clone(credit.host), credit.slot))
+        },
+        Settle(conn, credit) => {
+            list.push(mut out, ConnectionKey(conn))
+            list.push(mut out, Slot(clone(credit.host), credit.slot))
+        },
+        Connect(conn) => {
+            list.push(mut out, ConnectionKey(conn))
+        },
+        Disconnect(conn) => {
+            list.push(mut out, ConnectionKey(conn))
+        },
+        Demand(ask) => {
+            list.push(mut out, ConnectionKey(ask.connection))
+            list.push(mut out, ClassKey(ask.class_id))
+        },
+        Cancel(ask) => {
+            list.push(mut out, ConnectionKey(ask.connection))
+            list.push(mut out, ClassKey(ask.class_id))
+        },
+        Pop(class_id, _) => {
+            list.push(mut out, ClassKey(class_id))
+        },
+        BoundExhausted => (),
+    }
+    take out
+}
+
+pub fn init[H: key + shareable, R: key + shareable](take config: Config) -> State[H, R] {
+    let mut ready_count: List[u64] = list.new()
+    list.fill(mut ready_count, config.classes, 0)
+    let mut outstanding: Map[u64, u64] = map.new()
+    let mut scale = 1u64
+    for share in config.shares {
+        if share.weight == 0 || map.contains(outstanding, share.principal) {
+            fail("desk needs unique principals with positive shares")
+        }
+        let reduced = scale / gcd(scale, share.weight)
+        if reduced > 18446744073709551615 / share.weight {
+            fail("desk rational weight denominator exceeds u64")
+        }
+        scale = reduced * share.weight
+        map.insert(mut outstanding, share.principal, 0)
+    }
+    let slots = config.workers * config.slots_per_worker
+    let entries: List[Option[Entry[H, R]]] = list.with_capacity(slots)
+    State(config: take config, workers: map.new(), entries: take entries, ready: map.new(), connections: map.new(), last_connection: 0, outstanding: take outstanding, pending: map.new(), waiting_count: 0, ready_count: take ready_count, scale: scale, head_tags: map.new())
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    let mut x = a
+    let mut y = b
+    while y > 0 {
+        let remainder = x % y
+        x = y
+        y = remainder
+    }
+    x
+}
+
+fn grant_count(counts: Map[u64, u64], principal: u64) -> u64 {
+    match map.get(counts, principal) {
+        Some(n) => n,
+        None => 0,
+    }
+}
+
+fn retire[H: key + shareable, R: key + shareable](mut s: State[H, R], id: u64, mut entry: Entry[H, R]) {
+    for position in entry.positions {
+        let pid = position.principal
+        let pos = position.index
+        let bucket = (entry.class_id, pid)
+        let mut ready = option.unwrap(map.remove(mut s.ready, bucket))
+        let last = list.len(ready) - 1
+        if pos != last {
+            let moved_id = ready[last]
+            list.swap(mut ready, pos, last)
+            let mut moved = option.unwrap(list.set(mut s.entries, moved_id, None))
+            for i in 0u64 .. list.len(moved.positions) {
+                if moved.positions[i].principal == pid {
+                    moved.positions[i].index = pos
+                    break
+                }
+            }
+            s.entries[moved_id] = Some(take moved)
+        }
+        let _ = list.pop(mut ready)
+        if list.len(ready) > 0 {
+            map.insert(mut s.ready, bucket, take ready)
+        }
+    }
+    entry.positions = list.new()
+    if entry.available {
+        s.ready_count[entry.class_id] -= 1
+        entry.available = false
+    }
+    if let Some(ask) = entry.granted {
+        if let Some(row) = map.remove(mut s.connections, ask.connection) {
+            let mut conn = take row
+            let _ = map.remove(mut conn.grants, id)
+            map.insert(mut s.connections, ask.connection, take conn)
+        }
+        let count: u64 = grant_count(s.outstanding, ask.principal)
+        map.insert(mut s.outstanding, ask.principal, count - 1)
+        entry.granted = None
+    }
+}
+
+fn same_stream[H: key + shareable, R: key + shareable](s: State[H, R], credit: protocol.Credit[H, R], stream: u64) -> bool {
+    if let Some(worker) = map.get(s.workers, credit.host) {
+        return credit.desk_session == s.config.session && worker.live && worker.stream == stream && worker.run == credit.run && worker.epoch == credit.owner_epoch && worker.epoch != 0
+    }
+    false
+}
+
+fn includes_principal(positions: List[Position], principal: u64) -> bool {
+    for position in positions {
+        if position.principal == principal {
+            return true
+        }
+    }
+    false
+}
+
+fn entry_index[H: key + shareable, R: key + shareable](s: State[H, R], host: H, slot: u64) -> Option[u64] {
+    if slot < s.config.slots_per_worker {
+        if let Some(worker) = map.get(s.workers, host) {
+            return Some(worker.first_slot + slot)
+        }
+    }
+    None
+}
+
+fn update_offer[H: key + shareable, R: key + shareable](mut s: State[H, R], take credit: protocol.Credit[H, R], stream: u64, class_id: u64, principals: List[u64]) {
+    if !same_stream(s, credit, stream) || class_id >= s.config.classes {
+        return
+    }
+    let Some(id) = entry_index(s, credit.host, credit.slot) else {
+        return
+    }
+    if let Some(old) = s.entries[id] {
+        if old.credit.run == credit.run && old.credit.serial >= credit.serial {
+            return
+        }
+    }
+    if let Some(old) = list.set(mut s.entries, id, None) {
+        let mut entry = take old
+        retire(mut s, id, mut entry)
+    }
+    let mut positions: List[Position] = list.new()
+    for principal in principals {
+        if map.contains(s.outstanding, principal) && !includes_principal(positions, principal) {
+            let bucket = (class_id, principal)
+            let mut ready = match map.remove(mut s.ready, bucket) {
+                Some(old) => take old,
+                None => list.new(),
+            }
+            list.push(mut positions, Position(principal: principal, index: list.len(ready)))
+            list.push(mut ready, id)
+            map.insert(mut s.ready, bucket, take ready)
+        }
+    }
+    s.ready_count[class_id] += 1
+    s.entries[id] = Some(Entry(credit: take credit, stream: stream, class_id: class_id, positions: take positions, available: true, granted: None))
+}
+
+fn withdraw[H: key + shareable, R: key + shareable](mut s: State[H, R], credit: protocol.Credit[H, R], stream: u64) {
+    if !same_stream(s, credit, stream) {
+        return
+    }
+    let Some(id) = entry_index(s, credit.host, credit.slot) else {
+        return
+    }
+    if let Some(old) = list.set(mut s.entries, id, None) {
+        let mut entry = take old
+        if entry.credit.run == credit.run && entry.credit.serial > credit.serial {
+            s.entries[id] = Some(take entry)
+            return
+        }
+        retire(mut s, id, mut entry)
+    }
+    // Keep the ordinal even when withdrawal beat the offer to the desk.
+    s.entries[id] = Some(Entry(credit: clone(credit), stream: stream, class_id: 0, positions: list.new(), available: false, granted: None))
+}
+
+fn detach[H: key + shareable, R: key + shareable](mut s: State[H, R], first_slot: u64, mut out: List[Action[H, R]]) {
+    for id in first_slot .. first_slot + s.config.slots_per_worker {
+        if let Some(old) = list.set(mut s.entries, id, None) {
+            let mut entry = take old
+            if let Some(_) = entry.granted {
+                list.push(mut out, Abandon(clone(entry.credit)))
+            }
+            retire(mut s, id, mut entry)
+            s.entries[id] = Some(take entry)
+        }
+    }
+}
+
+fn set_demand[H: key + shareable, R: key + shareable](mut s: State[H, R], ask: Ask, cancel: bool, mut out: List[Action[H, R]]) {
+    if ask.class_id >= s.config.classes || !map.contains(s.outstanding, ask.principal) {
+        list.push(mut out, Refused(Denied))
+        return
+    }
+    if let Some(row) = map.remove(mut s.connections, ask.connection) {
+        let mut conn = take row
+        let key = (ask.class_id, ask.principal)
+        let old: Demand = match map.get(conn.asks, key) {
+            Some(seen) => clone(seen),
+            None => Demand(version: 0, count: 0),
+        }
+        let left = conn.pending - old.count
+        let pending_left = grant_count(s.pending, ask.principal) - old.count
+        if cancel {
+            if ask.version >= old.version {
+                conn.pending = left
+                s.waiting_count -= old.count
+                map.insert(mut s.pending, ask.principal, pending_left)
+                map.insert(mut conn.asks, key, Demand(version: ask.version, count: 0))
+            }
+        } else if ask.version > old.version {
+            let waiting_left = s.waiting_count - old.count
+            let refused = ask.count > s.config.pending_per_connection - left || ask.count > s.config.pending_per_principal - pending_left || ask.count > 18446744073709551615 - waiting_left
+            let count = if refused {
+                list.push(mut out, Refused((BoundExhausted : protocol.Refusal)))
+                0u64
+            } else {
+                ask.count
+            }
+            conn.pending = left + count
+            s.waiting_count = waiting_left + count
+            map.insert(mut s.pending, ask.principal, pending_left + count)
+            map.insert(mut conn.asks, key, Demand(version: ask.version, count: count))
+        }
+        map.insert(mut s.connections, ask.connection, take conn)
+    }
+}
+
+fn waiting[H: key + shareable, R: key + shareable](s: State[H, R], class_id: u64, principal: u64) -> Option[Ask] {
+    let bucket = (class_id, principal)
+    let granted: u64 = grant_count(s.outstanding, principal)
+    if !map.contains(s.ready, bucket) || granted >= s.config.grants_per_principal {
+        return None
+    }
+    let mut choice: Option[Ask] = None
+    for (id, conn) in s.connections {
+        if map.len(conn.grants) < s.config.grants_per_connection {
+            if let Some(demand) = map.get(conn.asks, bucket) {
+                if demand.count != 0 {
+                    let earlier = match choice {
+                        Some(old) => id < old.connection,
+                        None => true,
+                    }
+                    if earlier {
+                        choice = Some(Ask(connection: id, class_id: class_id, principal: principal, version: demand.version, count: 1))
+                    }
+                }
+            }
+        }
+    }
+    choice
+}
+
+fn grant[H: key + shareable, R: key + shareable](mut s: State[H, R], ask: Ask, mut out: List[Action[H, R]]) {
+    let bucket = (ask.class_id, ask.principal)
+    let id: u64 = {
+        let ready = option.unwrap(map.get(s.ready, bucket))
+        ready[list.len(ready) - 1]
+    }
+    let mut entry = option.unwrap(list.set(mut s.entries, id, None))
+    retire(mut s, id, mut entry)
+    let mut conn = option.unwrap(map.remove(mut s.connections, ask.connection))
+    let left = option.unwrap(map.get(conn.asks, bucket)).count - 1
+    map.insert(mut conn.asks, bucket, Demand(version: ask.version, count: left))
+    conn.pending -= 1
+    s.waiting_count -= 1
+    let pending = grant_count(s.pending, ask.principal)
+    map.insert(mut s.pending, ask.principal, pending - 1)
+    map.insert(mut conn.grants, id, ())
+    map.insert(mut s.connections, ask.connection, take conn)
+    let count: u64 = grant_count(s.outstanding, ask.principal)
+    map.insert(mut s.outstanding, ask.principal, count + 1)
+    entry.granted = Some(GrantOwner(connection: ask.connection, principal: ask.principal))
+    list.push(mut out, Grant(ask, clone(entry.credit)))
+    s.entries[id] = Some(take entry)
+}
+
+fn eligible[H: key + shareable, R: key + shareable](s: State[H, R], principal: u64) -> Option[Ask] {
+    if grant_count(s.pending, principal) == 0 {
+        return None
+    }
+    for class_id in 0u64 .. s.config.classes {
+        let ask = waiting(s, class_id, principal)
+        if let Some(_) = ask {
+            return ask
+        }
+    }
+    None
+}
+
+// A head tag is stored as an exact numerator over the common denominator,
+// relative to the shard's virtual time. Advancing V subtracts the winning
+// numerator from the other tags. A new head starts at V, regardless of idle time.
+fn refresh_tags[H: key + shareable, R: key + shareable](mut s: State[H, R]) {
+    if s.waiting_count == 0 {
+        return
+    }
+    for share in s.config.shares {
+        if let Some(_) = eligible(s, share.principal) {
+            if !map.contains(s.head_tags, share.principal) {
+                map.insert(mut s.head_tags, share.principal, s.scale / share.weight)
+            }
+        } else {
+            let _ = map.remove(mut s.head_tags, share.principal)
+        }
+    }
+}
+
+fn select_head[H: key + shareable, R: key + shareable](s: State[H, R]) -> Option[(Ask, u64)] {
+    let mut best: Option[(Ask, u64)] = None
+    for (principal, tag) in s.head_tags {
+        if let Some(ask) = eligible(s, principal) {
+            let earlier = match best {
+                Some((other, prior)) => tag < prior || (tag == prior && principal < other.principal),
+                None => true,
+            }
+            if earlier {
+                best = Some((ask, tag))
+            }
+        }
+    }
+    best
+}
+
+fn pop[H: key + shareable, R: key + shareable](mut s: State[H, R], class_id: u64, principal: u64, mut out: List[Action[H, R]]) {
+    if let Some((ask, tag)) = select_head(s) {
+        let _ = map.remove(mut s.head_tags, ask.principal)
+        if map.len(s.head_tags) != 0 {
+            let mut advanced: Map[u64, u64] = map.new()
+            for (pid, other) in s.head_tags {
+                map.insert(mut advanced, pid, other - tag)
+            }
+            s.head_tags = take advanced
+        }
+        grant(mut s, ask, mut out)
+    } else if class_id < list.len(s.ready_count) && s.ready_count[class_id] != 0 && !map.contains(s.ready, (class_id, principal)) {
+        list.push(mut out, NoRight(class_id, principal))
+    } else {
+        list.push(mut out, NoCredit(class_id))
+    }
+}
+
+pub fn step[H: key + shareable, R: key + shareable](take state: State[H, R], take ev: Event[H, R]) -> (State[H, R], List[Action[H, R]]) {
+    let mut s = take state
+    let mut out: List[Action[H, R]] = list.new()
+    match take ev {
+        Attach(host, run, stream) => {
+            let first: Option[u64] = match map.get(s.workers, host) {
+                Some(old) => if stream > old.stream {
+                    Some(old.first_slot)
+                } else {
+                    None
+                },
+                None => if map.len(s.workers) < s.config.workers {
+                    Some(list.len(s.entries))
+                } else {
+                    None
+                },
+            }
+            if stream != 0 {
+                if let Some(first_slot) = first {
+                    if first_slot == list.len(s.entries) {
+                        for _ in 0u64 .. s.config.slots_per_worker {
+                            list.push(mut s.entries, None)
+                        }
+                    } else {
+                        detach(mut s, first_slot, mut out)
+                    }
+                    map.insert(mut s.workers, take host, Worker(stream: stream, first_slot: first_slot, run: take run, epoch: 0, live: true))
+                }
+            }
+        },
+        Assume(host, run, stream, epoch) => {
+            let changed: Option[u64] = match map.get(s.workers, host) {
+                Some(old) => if old.live && old.run == run && old.stream == stream && epoch > old.epoch {
+                    Some(old.first_slot)
+                } else {
+                    None
+                },
+                None => None,
+            }
+            if let Some(first_slot) = changed {
+                detach(mut s, first_slot, mut out)
+                map.insert(mut s.workers, take host, Worker(stream: stream, first_slot: first_slot, run: take run, epoch: epoch, live: true))
+            }
+        },
+        WorkerDown(host, stream) => {
+            let retiring: Option[Worker[R]] = match map.get(s.workers, host) {
+                Some(old) => if old.live && old.stream == stream {
+                    Some(clone(old))
+                } else {
+                    None
+                },
+                None => None,
+            }
+            if let Some(take old) = take retiring {
+                let mut row = take old
+                row.live = false
+                detach(mut s, row.first_slot, mut out)
+                map.insert(mut s.workers, take host, take row)
+            }
+        },
+        Offer(offer, stream) => update_offer(mut s, clone(offer.credit), stream, offer.class_id, offer.principals),
+        Withdraw(credit, stream) => withdraw(mut s, credit, stream),
+        Connect(conn) => {
+            if conn > s.last_connection && map.len(s.connections) < s.config.connections {
+                map.insert(mut s.connections, conn, Connection(asks: map.new(), grants: map.new(), pending: 0))
+                s.last_connection = conn
+            } else {
+                list.push(mut out, Refused((BoundExhausted : protocol.Refusal)))
+            }
+        },
+        Demand(ask) => set_demand(mut s, ask, false, mut out),
+        Cancel(ask) => set_demand(mut s, ask, true, mut out),
+        Pop(class_id, principal) => pop(mut s, class_id, principal, mut out),
+        Settle(conn, credit) => {
+            if let Some(id) = entry_index(s, credit.host, credit.slot) {
+                let stream: Option[u64] = match s.entries[id] {
+                    Some(entry) => match entry.granted {
+                        Some(owner) => if owner.connection == conn && entry.credit == credit {
+                            Some(entry.stream)
+                        } else {
+                            None
+                        },
+                        None => None,
+                    },
+                    None => None,
+                }
+                if let Some(session) = stream {
+                    withdraw(mut s, credit, session)
+                }
+            }
+        },
+        Disconnect(conn) => {
+            if let Some(row) = map.remove(mut s.connections, conn) {
+                s.waiting_count -= row.pending
+                for (bucket, ask) in row.asks {
+                    let principal = bucket.1
+                    let pending = grant_count(s.pending, principal)
+                    map.insert(mut s.pending, principal, pending - ask.count)
+                }
+                for (index, _) in row.grants {
+                    let id: u64 = index
+                    let mut entry = option.unwrap(list.set(mut s.entries, id, None))
+                    list.push(mut out, Abandon(clone(entry.credit)))
+                    retire(mut s, id, mut entry)
+                    s.entries[id] = Some(take entry)
+                }
+            }
+        },
+        BoundExhausted => list.push(mut out, Refused((BoundExhausted : protocol.Refusal))),
+    }
+    if s.waiting_count == 0 {
+        if map.len(s.head_tags) != 0 {
+            s.head_tags = map.new()
+        }
+    } else {
+        refresh_tags(mut s)
+    }
+    (take s, take out)
+}

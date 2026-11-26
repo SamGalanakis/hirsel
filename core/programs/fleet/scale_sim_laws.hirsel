@@ -30,7 +30,13 @@ fn sim_fleet_scale_1000_hosts(tasks: Tasks) -> Result[(), ()] waits {
 /// oracle: Summit verdict items 3, 4 and 13. Exact burst bound and Erlang-B with four slots at two Erlangs.
 @test
 fn sim_fleet_credit_desk_gate() -> Result[(), ()] {
-    let gate = scale_sim.run_placement(scale_sim.default_config(1000u64, 3087u64))
+    no_over_admit()
+    warm_stock_and_failed_start()
+    no_over_limit_and_handle_fresh()
+    grant_exclusive_and_abandon()
+    weighted_desk()
+    total_outcome()
+    let gate = placement_sim.run(1000, 3087)
     for scenario in gate.cases {
         let trial = scenario.desk
         if trial.false_overload * 1000 > trial.offered {
@@ -57,4 +63,419 @@ fn sim_fleet_credit_desk_gate() -> Result[(), ()] {
         fail("the desk did not reject all held and duplicate credits")
     }
     Ok(())
+}
+
+fn single_fixture[T](take item: T) -> List[T] {
+    let mut out: List[T] = list.new()
+    list.push(mut out, take item)
+    take out
+}
+
+fn unit_vector() -> compute.resources.Vector {
+    compute.resources.Vector(memory_bytes: 1, address_space: 1, warm_stock: 1, mappings: 1, fds: 1, connections: 1, starts: 1, stacks: 1, cpu: 1, disk_iops: 1)
+}
+
+// An independently constrained dimension must veto the whole class.
+fn no_over_admit() {
+    let cost = unit_vector()
+    for dimension in 0u64 .. 10 {
+        let mut pool = cost
+        match dimension {
+            0 => {
+                pool.memory_bytes = 0
+            },
+            1 => {
+                pool.address_space = 0
+            },
+            2 => {
+                pool.warm_stock = 0
+            },
+            3 => {
+                pool.mappings = 0
+            },
+            4 => {
+                pool.fds = 0
+            },
+            5 => {
+                pool.connections = 0
+            },
+            6 => {
+                pool.starts = 0
+            },
+            7 => {
+                pool.stacks = 0
+            },
+            8 => {
+                pool.cpu = 0
+            },
+            _ => {
+                pool.disk_iops = 0
+            },
+        }
+        if compute.resources.capacity(pool, cost) != 0 {
+            fail("one unfunded resource did not veto the class")
+        }
+    }
+}
+
+fn warm_stock_and_failed_start() {
+    let mut job = unit_vector()
+    job.memory_bytes = 2
+    let mut stock = compute.resources.zero()
+    stock.memory_bytes = 1
+    let mut pool = compute.resources.refund(unit_vector(), unit_vector())
+    pool.memory_bytes = 3
+    let mut slots = single_fixture(0u64)
+    list.push(mut slots, 0)
+    let cfg = compute.worker.Config(host: 9u64, pool: pool, classes: single_fixture(compute.worker.Class(shard: 0, cost: job, warm_cost: stock, window: 2)), slot_classes: take slots, owners: single_fixture(compute.worker.DeskOwner(member: 1u64, session: 4)), escrows: single_fixture(compute.worker.Escrow(principal: 6, rights: 2, epoch: 1, installed_transfer: None)), max_sessions: 1, max_attempts: 1)
+    let cold = compute.worker.init(take cfg, 8u64)
+    let (fenced, _) = compute.worker.step(take cold, LauncherFenced(8, 101))
+    let (stale, _) = compute.worker.step(take fenced, CustodyEmpty(8, 100))
+    let (closed, none) = compute.worker.step(take stale, Mint(8, 0))
+    if list.len(none) != 0 {
+        fail("empty receipt from a predecessor session opened the worker")
+    }
+    let (opened, _) = compute.worker.step(take closed, CustodyEmpty(8, 101))
+    let (prewarmed, _) = compute.worker.step(take opened, Warm(8, 0))
+    if compute.worker.class_capacity(prewarmed, 0) != 1 || compute.worker.available(prewarmed).memory_bytes != 2 {
+        fail("warm stock was counted outside the shared residual")
+    }
+    let (held, actions) = compute.worker.step(take prewarmed, Mint(8, 0))
+    if compute.worker.available(held).memory_bytes != 1 {
+        fail("warm mint paid more than the incremental vector")
+    }
+    let credit = offered(actions).credit
+    let (released, _) = compute.worker.step(take held, Withdraw(credit))
+    if compute.worker.available(released).memory_bytes != 2 {
+        fail("withdrawal refunded the still-warm stock")
+    }
+    let (evicted, _) = compute.worker.step(take released, Evict(8, 0))
+    if compute.worker.available(evicted) != pool {
+        fail("eviction did not refund the idle stock")
+    }
+    let session = compute.worker.Session(caller: 5, principal: 6, id: 7)
+    let attempt = compute.protocol.Attempt(caller: 5, principal: 6, session: 7, seq: 1, digest: (15, 16))
+    let (ready, _) = compute.worker.step(take evicted, OpenSession(8, session))
+    let (new_hold, minted) = compute.worker.step(take ready, Mint(8, 0))
+    let fresh = offered(minted).credit
+    let (behind_fence, late_credit) = compute.worker.step(take new_hold, Redeem(credit, attempt, Pure, Authenticated(true)))
+    let Redeemed(Refused(UnknownCredit)) = late_credit[0] else {
+        fail("an earlier ordinal redeemed after same-owner reissue")
+    }
+    let (guarded, denied) = compute.worker.step(take behind_fence, Redeem(fresh, attempt, Pure, Unauthenticated))
+    let Redeemed(Refused(Denied)) = denied[0] else {
+        fail("an unauthenticated create consumed an offer")
+    }
+    let (launching, launched) = compute.worker.step(take guarded, Redeem(fresh, attempt, Pure, Authenticated(true)))
+    let Launch(checkout, false) = launched[1] else {
+        fail("unauthenticated create burned an authenticated caller's offer")
+    }
+    let (failed, outcome) = compute.worker.step(take launching, StartFailed(checkout))
+    let Redeemed(Refused(Capacity)) = outcome[0] else {
+        fail("a no-child receipt omitted its definitive refusal")
+    }
+    let (late_end, _) = compute.worker.step(take failed, Retire(checkout))
+    if compute.worker.occupied(late_end) != 0 || compute.worker.available(late_end) != pool {
+        fail("a no-child receipt failed to return its charges exactly once")
+    }
+}
+
+fn offered(actions: List[compute.worker.Action[u64, u64]]) -> compute.protocol.Offer[u64, u64] {
+    let Offer(_, offer) = actions[0] else {
+        fail("worker omitted offer")
+    }
+    clone(offer)
+}
+
+fn no_over_limit_and_handle_fresh() {
+    let cost = unit_vector()
+    let pool = compute.resources.refund(cost, cost)
+    let mut slots = single_fixture(0u64)
+    list.push(mut slots, 0)
+    let cfg = compute.worker.Config(host: 9u64, pool: pool, classes: single_fixture(compute.worker.Class(shard: 0, cost: cost, warm_cost: compute.resources.zero(), window: 2)), slot_classes: take slots, owners: single_fixture(compute.worker.DeskOwner(member: 1u64, session: 4)), escrows: single_fixture(compute.worker.Escrow(principal: 6, rights: 1, epoch: 1, installed_transfer: None)), max_sessions: 1, max_attempts: 3)
+    let session = compute.worker.Session(caller: 5, principal: 6, id: 7)
+    let attempt = compute.protocol.Attempt(caller: 5, principal: 6, session: 7, seq: 1, digest: (15, 16))
+    let mut next_attempt = attempt
+    next_attempt.seq = 2
+    let cold = compute.worker.init(take cfg, 8u64)
+    let (unfenced, _) = compute.worker.step(take cold, CustodyEmpty(8, 101))
+    let (closed, early) = compute.worker.step(take unfenced, Mint(8, 0))
+    if list.len(early) != 0 {
+        fail("empty custody without a current launcher fence opened the worker")
+    }
+    let (fenced, _) = compute.worker.step(take closed, LauncherFenced(8, 101))
+    let (open, _) = compute.worker.step(take fenced, CustodyEmpty(8, 101))
+    let (ready, _) = compute.worker.step(take open, OpenSession(8, session))
+    let (held_one, first) = compute.worker.step(take ready, Mint(8, 0))
+    let (same_hold, minted_twice) = compute.worker.step(take held_one, Mint(8, 0))
+    if list.len(minted_twice) != 0 {
+        fail("two live ordinals from one slot")
+    }
+    let (held_two, second) = compute.worker.step(take same_hold, Mint(8, 1))
+    let old = offered(first).credit
+    let stale_right = offered(second).credit
+    let (starting, launch) = compute.worker.step(take held_two, Redeem(old, attempt, Effectful, Authenticated(true)))
+    let Launch(checkout, true) = launch[1] else {
+        fail("a funded effectful create did not request an inert launch")
+    }
+    if list.len(launch) != 2 {
+        fail("an effectful create replied before the launcher started its child")
+    }
+    let (early_use, early_handle) = compute.worker.step(take starting, Activate(checkout, 6, true))
+    let Gone = early_handle[0] else {
+        fail("an unstarted checkout was activated")
+    }
+    let (admitted, settled) = compute.worker.step(take early_use, Started(checkout))
+    let Redeemed(Admitted(_, Effectful)) = settled[0] else {
+        fail("an inert launch did not return a checkout at start completion")
+    }
+    let (still_busy, limit) = compute.worker.step(take admitted, Redeem(stale_right, next_attempt, Effectful, Authenticated(true)))
+    let Redeemed(Refused(Limit)) = limit[list.len(limit) - 1] else {
+        fail("a stale offer bypassed the worker's principal escrow")
+    }
+    let (denied, wrong_principal) = compute.worker.step(take still_busy, Activate(checkout, 5, true))
+    let Gone = wrong_principal[0] else {
+        fail("another principal activated the checkout")
+    }
+    let (launching, start) = compute.worker.step(take denied, Activate(checkout, 6, true))
+    let ActivateUser(_) = start[0] else {
+        fail("the owner could not activate the checkout")
+    }
+    let (unchanged, repeat_activation) = compute.worker.step(take launching, Activate(checkout, 6, true))
+    let Activated = repeat_activation[0] else {
+        fail("duplicate activation started the same checkout twice")
+    }
+    let (free, _) = compute.worker.step(take unchanged, Retire(checkout))
+    let (held_again, reissued) = compute.worker.step(take free, Mint(8, 0))
+    let fresh = offered(reissued).credit
+    let (stale, withdrawn) = compute.worker.step(take held_again, Redeem(old, next_attempt, Effectful, Authenticated(true)))
+    let Redeemed(Refused(UnknownCredit)) = withdrawn[0] else {
+        fail("a previous ordinal redeemed after slot reuse")
+    }
+    let (renewed, renewed_actions) = compute.worker.step(take stale, Redeem(fresh, next_attempt, Effectful, Authenticated(true)))
+    let Launch(current, true) = renewed_actions[1] else {
+        fail("a matching retirement did not refund the principal right")
+    }
+    let (inert, _) = compute.worker.step(take renewed, Started(current))
+    let (after_late, _) = compute.worker.step(take inert, Retire(checkout))
+    let (check_old, late) = compute.worker.step(take after_late, CheckHandle(checkout, 6, true))
+    let Gone = late[0] else {
+        fail("old handle stayed fresh after reuse")
+    }
+    let (check_current, live) = compute.worker.step(take check_old, CheckHandle(current, 6, true))
+    let HandleLive = live[0] else {
+        fail("late retirement released the new checkout")
+    }
+    let (after_revocation, no_authority) = compute.worker.step(take check_current, CheckHandle(current, 6, false))
+    let Gone = no_authority[0] else {
+        fail("a live tuple bypassed revoked handle authority")
+    }
+    let (reaping, reap) = compute.worker.step(take after_revocation, InertExpire(current))
+    let Reap(_) = reap[0] else {
+        fail("an unclaimed inert checkout could not be reaped")
+    }
+    let (cannot_activate, late_activation) = compute.worker.step(take reaping, Activate(current, 6, true))
+    let Gone = late_activation[0] else {
+        fail("an expired checkout activated while waiting for its reap receipt")
+    }
+    let (freezing, pending) = compute.worker.step(take cannot_activate, FreezeDecrease(8, 6, 2, 77, 1))
+    if list.len(pending) != 0 {
+        fail("a charged right was surrendered before retirement")
+    }
+    let (wait_for_retire, premature) = compute.worker.step(take freezing, DecreaseCommitted(8, 6, 2, 77))
+    if list.len(premature) != 0 {
+        fail("decrease was acknowledged before the donor froze its right")
+    }
+    let (reaped, frozen) = compute.worker.step(take wait_for_retire, Retire(current))
+    let DecreaseFrozen(6, 77, 2) = frozen[0] else {
+        fail("the returning right did not fill the pending decrease")
+    }
+    if compute.worker.occupied(reaped) != 0 || compute.worker.available(reaped) != pool {
+        fail("the matching reap did not return the full vector")
+    }
+    let (decreased, applied) = compute.worker.step(take reaped, DecreaseCommitted(8, 6, 2, 77))
+    let DecreaseApplied(6, 77, 2) = applied[0] else {
+        fail("a complete, committed decrease omitted its receipt")
+    }
+    let (same, replayed) = compute.worker.step(take decreased, DecreaseCommitted(8, 6, 2, 77))
+    let DecreaseApplied(6, 77, 2) = replayed[0] else {
+        fail("retry lost the donor's durable receipt")
+    }
+    let (_, post_decrease) = compute.worker.step(take same, Mint(8, 0))
+    if list.len(post_decrease) != 0 {
+        fail("a surrendered right could still fund an offer")
+    }
+}
+
+fn grant_exclusive_and_abandon() {
+    let cfg = compute.desk.Config(session: 4, workers: 1, slots_per_worker: 2, classes: 1, connections: 2, pending_per_connection: 2, pending_per_principal: 1024, grants_per_connection: 1, grants_per_principal: 2, shares: single_fixture(compute.desk.Share(principal: 6, weight: 1)))
+    let credit = compute.protocol.Credit(host: 9u64, run: 8u64, slot: 0, serial: 1, owner_epoch: 1, desk_session: 4)
+    let mut second = credit
+    second.slot = 1
+    second.serial = 2
+    let ask = compute.desk.Ask(connection: 1, class_id: 0, principal: 6, version: 1, count: 2)
+    let desk: compute.desk.State[u64, u64] = compute.desk.init(take cfg)
+    let (attached, _) = compute.desk.step(take desk, Attach(9, 8, 1))
+    let (owner, _) = compute.desk.step(take attached, Assume(9, 8, 1, 1))
+    let (conn, _) = compute.desk.step(take owner, Connect(1))
+    let (demand, _) = compute.desk.step(take conn, Demand(ask))
+    let (ready, _) = compute.desk.step(take demand, Offer(compute.protocol.Offer(credit: credit, class_id: 0, principals: single_fixture(6u64)), 1))
+    let (popped, grants) = compute.desk.step(take ready, Pop(0, 6))
+    let Grant(_, held) = grants[0] else {
+        fail("desk failed to grant its ready credit")
+    }
+    let (replayed, _) = compute.desk.step(take popped, Offer(compute.protocol.Offer(credit: credit, class_id: 0, principals: single_fixture(6u64)), 1))
+    let (two_offers, _) = compute.desk.step(take replayed, Offer(compute.protocol.Offer(credit: second, class_id: 0, principals: single_fixture(6u64)), 1))
+    let (capped, second_pop) = compute.desk.step(take two_offers, Pop(0, 6))
+    let NoCredit(_) = second_pop[0] else {
+        fail("desk exceeded the outstanding-grant connection cap")
+    }
+    let (dead, abandoned) = compute.desk.step(take capped, Disconnect(1))
+    let Abandon(revoked) = abandoned[0] else {
+        fail("dead dispatcher left its credit stranded")
+    }
+    if revoked != held || list.len(abandoned) != 1 {
+        fail("disconnect did not abandon exactly the outstanding grant")
+    }
+    let (other, _) = compute.desk.step(take dead, Connect(2))
+    let mut other_ask = ask
+    other_ask.connection = 2
+    let (next_demand, _) = compute.desk.step(take other, Demand(other_ask))
+    let (second_granted, other_grant) = compute.desk.step(take next_demand, Pop(0, 6))
+    let Grant(_, picked) = other_grant[0] else {
+        fail("another dispatcher did not receive the other funded offer")
+    }
+    if picked != second {
+        fail("desk popped a replay of an already issued credit")
+    }
+    let (settled, _) = compute.desk.step(take second_granted, Settle(2, second))
+    let (_, duplicate) = compute.desk.step(take settled, Pop(0, 6))
+    let NoCredit(_) = duplicate[0] else {
+        fail("a settlement made the old grant available for another pop")
+    }
+}
+
+fn weighted_desk() {
+    let mut shares = single_fixture(compute.desk.Share(principal: 10, weight: 10))
+    list.push(mut shares, compute.desk.Share(principal: 30, weight: 30))
+    let cfg = compute.desk.Config(session: 4, workers: 1, slots_per_worker: 5, classes: 1, connections: 2, pending_per_connection: 4, pending_per_principal: 4, grants_per_connection: 4, grants_per_principal: 4, shares: take shares)
+    let desk: compute.desk.State[u64, u64] = compute.desk.init(take cfg)
+    let (attached, _) = compute.desk.step(take desk, Attach(9, 8, 1))
+    let (owner, _) = compute.desk.step(take attached, Assume(9, 8, 1, 1))
+    let (first, _) = compute.desk.step(take owner, Connect(1))
+    let (both, _) = compute.desk.step(take first, Connect(2))
+    let mut ready = take both
+    for slot in 0u64 .. 5 {
+        let credit = compute.protocol.Credit(host: 9u64, run: 8u64, slot: slot, serial: slot + 1, owner_epoch: 1, desk_session: 4)
+        let mut principals = single_fixture(30u64)
+        if slot < 4 {
+            list.push(mut principals, 10)
+        }
+        let (next, _) = compute.desk.step(take ready, Offer(compute.protocol.Offer(credit: credit, class_id: 0, principals: take principals), 1))
+        ready = take next
+    }
+    let (one_backlogged, _) = compute.desk.step(take ready, Demand(compute.desk.Ask(connection: 1, class_id: 0, principal: 10, version: 1, count: 4)))
+    let (two_backlogged, _) = compute.desk.step(take one_backlogged, Demand(compute.desk.Ask(connection: 2, class_id: 0, principal: 30, version: 1, count: 4)))
+    let mut contested = take two_backlogged
+    let expected: Inline[u64, 4] =[30, 30, 10, 30]
+    for index in 0u64 .. 4 {
+        let (next, grants) = compute.desk.step(take contested, Pop(0, 10))
+        contested = take next
+        let Grant(ask, _) = grants[0] else {
+            fail("a ready head did not receive a grant")
+        }
+        if ask.principal != expected[index] {
+            fail("10:30 weights did not grant in the exact SCFQ order")
+        }
+    }
+    let (blocked, _) = compute.desk.step(take contested, Disconnect(2))
+    let (idle, _) = compute.desk.step(take blocked, Disconnect(1))
+    let (_, terminal) = compute.desk.step(take idle, Pop(0, 99))
+    let NoRight(0, 99) = terminal[0] else {
+        fail("a ready class without a matching right was treated as empty")
+    }
+}
+
+fn total_outcome() {
+    let old_attempt = compute.protocol.Attempt(caller: 5, principal: 6, session: 7, seq: 9, digest: (15, 16))
+    let session = compute.dispatcher.open_session(5, 6, 7)
+    let (in_use, first_call) = compute.dispatcher.session_step(take session, Request(old_attempt))
+    let Accepted(_) = first_call[0] else {
+        fail("fresh session request was refused")
+    }
+    let (_, duplicate_call) = compute.dispatcher.session_step(take in_use, Request(old_attempt))
+    let SessionClosed = duplicate_call[0] else {
+        fail("same coordinator restarted an already accepted attempt")
+    }
+    let successor = compute.dispatcher.open_session(5, 6, 8)
+    let (_, old_call) = compute.dispatcher.session_step(take successor, Request(old_attempt))
+    let SessionClosed = old_call[0] else {
+        fail("successor coordinator inherited retry authority")
+    }
+    let release = compute.dispatcher.ReleasePolicy(no_grants: false, deterministic: false, tolerates_duplicates: false, sinks_deduplicate: false, single_handle: true, has_net: true)
+    let attempt = compute.protocol.Attempt(caller: 5, principal: 6, session: 7, seq: 1, digest: (15, 16))
+    let target = compute.protocol.Credit(host: 9u64, run: 8u64, slot: 0, serial: 1, owner_epoch: 1, desk_session: 4)
+    let state: compute.dispatcher.State[u64, u64, u64] = compute.dispatcher.init(1u64, 0, attempt, release, false)
+    let (placing, _) = compute.dispatcher.step(take state, Begin)
+    let (sent, begin_send) = compute.dispatcher.step(take placing, Placed(1, target))
+    let Send(exchange, _, _, _) = begin_send[0] else {
+        fail("bound effectful attempt failed to send")
+    }
+    if exchange != 1 {
+        fail("the first send did not spend one exchange")
+    }
+    let (recovering, recovery) = compute.dispatcher.step(take sent, ExchangeTimeout(1))
+    let Recover(second, pin, _) = recovery[0] else {
+        fail("ambiguous effectful create was re-placed")
+    }
+    if pin != target || second != 2 {
+        fail("recovery changed the target or exchange counter")
+    }
+    let (last, last_action) = compute.dispatcher.step(take recovering, WorkerReply(2, Answer(Refused(Limit))))
+    let Recover(third, same_pin, _) = last_action[0] else {
+        fail("a limit refusal erased an earlier ambiguous send")
+    }
+    if third != 3 || same_pin != target {
+        fail("pinned recovery did not spend its final exchange")
+    }
+    let (done, final_action) = compute.dispatcher.step(take last, ExchangeTimeout(3))
+    let Finish(Undecided) = final_action[0] else {
+        fail("retry budget exhaustion did not resolve the invocation")
+    }
+    let (_, late) = compute.dispatcher.step(take done, Deadline)
+    if list.len(late) != 0 {
+        fail("one invocation delivered two terminal outcomes")
+    }
+    let mut keyed = release
+    keyed.single_handle = false
+    keyed.has_net = false
+    keyed.sinks_deduplicate = true
+    let first: compute.dispatcher.State[u64, u64, u64] = compute.dispatcher.init(1u64, 0, attempt, keyed, false)
+    let (home, _) = compute.dispatcher.step(take first, Begin)
+    let (remote, spill) = compute.dispatcher.step(take home, PlacementMiss(1, NoCredit, Some(2u64)))
+    let Find(cell, probe, _, _, true) = spill[0] else {
+        fail("dispatcher omitted the only compatible spill")
+    }
+    if cell != 2 || probe != 2 {
+        fail("spill lost the selected cell or invocation version")
+    }
+    let (_, final_miss) = compute.dispatcher.step(take remote, PlacementMiss(2, NoRight, Some(3u64)))
+    let Finish(RefusedLimit) = final_miss[0] else {
+        fail("remote placement hid its last miss cause or forwarded a second spill")
+    }
+    let logical: compute.dispatcher.State[u64, u64, u64] = compute.dispatcher.init(1u64, 0, attempt, keyed, false)
+    let (selecting, _) = compute.dispatcher.step(take logical, Begin)
+    let (sent_first, _) = compute.dispatcher.step(take selecting, Placed(1, target))
+    let (new_placement, retry) = compute.dispatcher.step(take sent_first, ExchangeTimeout(1))
+    let Find(_, 2, _, _, false) = retry[0] else {
+        fail("a keyed attempt could not retry after ambiguity")
+    }
+    let mut another = target
+    another.host = 10
+    let (sent_second, _) = compute.dispatcher.step(take new_placement, Placed(2, another))
+    let (last_placement, _) = compute.dispatcher.step(take sent_second, WorkerReply(2, Answer(Refused(Limit))))
+    let (_, ambiguous) = compute.dispatcher.step(take last_placement, PlacementMiss(3, NoRight, None))
+    let Finish(Undecided) = ambiguous[0] else {
+        fail("a later limit refusal or placement miss erased an ambiguous keyed send")
+    }
 }

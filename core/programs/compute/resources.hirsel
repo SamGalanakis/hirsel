@@ -1,0 +1,97 @@
+pub type Vector: codec + key + send {
+    memory_bytes: u64,
+    address_space: u64,
+    warm_stock: u64,
+    mappings: u64,
+    fds: u64,
+    connections: u64,
+    starts: u64,
+    stacks: u64,
+    cpu: u64,
+    disk_iops: u64
+}
+
+fn ceiling(available: u64, cost: u64) -> u64 {
+    if cost == 0 {
+        18446744073709551615
+    } else {
+        available / cost
+    }
+}
+
+/// Exact class capacity before contention from other classes.
+pub fn capacity(available: Vector, cost: Vector) -> u64 {
+    let mut slots = ceiling(available.memory_bytes, cost.memory_bytes)
+    slots = order.min(slots, ceiling(available.address_space, cost.address_space))
+    slots = order.min(slots, ceiling(available.warm_stock, cost.warm_stock))
+    slots = order.min(slots, ceiling(available.mappings, cost.mappings))
+    slots = order.min(slots, ceiling(available.fds, cost.fds))
+    slots = order.min(slots, ceiling(available.connections, cost.connections))
+    slots = order.min(slots, ceiling(available.starts, cost.starts))
+    slots = order.min(slots, ceiling(available.stacks, cost.stacks))
+    slots = order.min(slots, ceiling(available.cpu, cost.cpu))
+    slots = order.min(slots, ceiling(available.disk_iops, cost.disk_iops))
+    slots
+}
+
+pub fn debit(available: Vector, cost: Vector) -> Vector {
+    Vector(
+        memory_bytes: available.memory_bytes - cost.memory_bytes,
+        address_space: available.address_space - cost.address_space,
+        warm_stock: available.warm_stock - cost.warm_stock,
+        mappings: available.mappings - cost.mappings,
+        fds: available.fds - cost.fds,
+        connections: available.connections - cost.connections,
+        starts: available.starts - cost.starts,
+        stacks: available.stacks - cost.stacks,
+        cpu: available.cpu - cost.cpu,
+        disk_iops: available.disk_iops - cost.disk_iops,
+    )
+}
+
+pub fn refund(available: Vector, cost: Vector) -> Vector {
+    Vector(
+        memory_bytes: available.memory_bytes + cost.memory_bytes,
+        address_space: available.address_space + cost.address_space,
+        warm_stock: available.warm_stock + cost.warm_stock,
+        mappings: available.mappings + cost.mappings,
+        fds: available.fds + cost.fds,
+        connections: available.connections + cost.connections,
+        starts: available.starts + cost.starts,
+        stacks: available.stacks + cost.stacks,
+        cpu: available.cpu + cost.cpu,
+        disk_iops: available.disk_iops + cost.disk_iops,
+    )
+}
+
+pub fn occupied(cost: Vector) -> Vector {
+    let mut out = cost
+    out.starts = 0
+    out
+}
+
+pub fn zero() -> Vector {
+    Vector(memory_bytes: 0, address_space: 0, warm_stock: 0, mappings: 0, fds: 0, connections: 0, starts: 0, stacks: 0, cpu: 0, disk_iops: 0)
+}
+
+fn multiply(cost: Vector, n: u64) -> Vector {
+    Vector(
+        memory_bytes: cost.memory_bytes * n,
+        address_space: cost.address_space * n,
+        warm_stock: cost.warm_stock * n,
+        mappings: cost.mappings * n,
+        fds: cost.fds * n,
+        connections: cost.connections * n,
+        starts: cost.starts * n,
+        stacks: cost.stacks * n,
+        cpu: cost.cpu * n,
+        disk_iops: cost.disk_iops * n,
+    )
+}
+
+/// The incremental warm cost is componentwise no larger than the fresh cost.
+pub fn stock_capacity(available: Vector, fresh: Vector, increment: Vector, warm_slots: u64, fresh_slots: u64) -> u64 {
+    let warm = order.min(warm_slots, capacity(available, increment))
+    let unreserved = debit(available, multiply(increment, warm))
+    warm + order.min(fresh_slots, capacity(unreserved, fresh))
+}

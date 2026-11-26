@@ -1,0 +1,303 @@
+pub type ReleasePolicy: codec + send {
+    no_grants: bool,
+    deterministic: bool,
+    tolerates_duplicates: bool,
+    sinks_deduplicate: bool,
+    single_handle: bool,
+    has_net: bool
+}
+
+/// Inputs come from release admission and the reachable sink contracts.
+pub fn classify(p: ReleasePolicy) -> protocol.RetryClass {
+    if p.single_handle || p.has_net {
+        (Effectful : protocol.RetryClass)
+    } else if p.no_grants && p.deterministic && p.tolerates_duplicates {
+        (Pure : protocol.RetryClass)
+    } else if p.sinks_deduplicate {
+        (Keyed : protocol.RetryClass)
+    } else {
+        (Effectful : protocol.RetryClass)
+    }
+}
+
+pub type Outcome[H: key + shareable, R: key + shareable]: codec + send = Created(protocol.Checkout[H, R]) | Duplicate(protocol.Checkout[H, R]) | RefusedCapacity | RefusedLimit | Undecided
+
+pub type Reply[H: key + shareable, R: key + shareable]: codec + send = Answer(protocol.Consumption[H, R]) | Unanswered | Gone(bool)
+
+type Phase[H: key + shareable, R: key + shareable]: codec = New | Placing | Waiting(protocol.Credit[H, R], bool) | Finished
+
+pub type State[H: key + shareable, R: key + shareable, C: key + shareable]: codec {
+    attempt: protocol.Attempt,
+    retry: protocol.RetryClass,
+    class_id: u64,
+    cell: C,
+    spilled: bool,
+    exchanges: u64,
+    probe: u64,
+    uncertain: bool,
+    limit_seen: bool,
+    phase: Phase[H, R]
+}
+
+pub type Miss: codec + key + send = NoCredit | NoRight
+
+pub type Event[H: key + shareable, R: key + shareable, C: key + shareable]: codec + send = Begin | Placed(u64, protocol.Credit[H, R]) | PlacementMiss(u64, Miss, Option[C]) | PlacementTimeout(u64, Option[C]) | WorkerReply(u64, Reply[H, R]) | WorkerRestarted(H, R) | ExchangeTimeout(u64) | Deadline | Crash | BoundExhausted
+
+pub type Action[H: key + shareable, R: key + shareable, C: key + shareable]: codec + send = Find(C, u64, u64, u64, bool) | Send(u64, protocol.Credit[H, R], protocol.Attempt, protocol.RetryClass) | Recover(u64, protocol.Credit[H, R], protocol.Attempt) | Finish(Outcome[H, R]) | Died(Outcome[H, R])
+
+pub type Key[H: key + shareable]: codec + send = Invocation | Target(H)
+
+pub fn keys[H: key + shareable, R: key + shareable, C: key + shareable](ev: Event[H, R, C]) -> List[Key[H]] {
+    let mut out: List[Key[H]] = list.new()
+    list.push(mut out, Invocation)
+    match ev {
+        Placed(_, credit) => {
+            list.push(mut out, Target(clone(credit.host)))
+        },
+        WorkerRestarted(host, _) => {
+            list.push(mut out, Target(clone(host)))
+        },
+        _ => (),
+    }
+    take out
+}
+
+/// The shell routes inbound spill to an invocation with spilled = true.
+pub fn init[H: key + shareable, R: key + shareable, C: key + shareable](take cell: C, class_id: u64, attempt: protocol.Attempt, policy: ReleasePolicy, spilled: bool) -> State[H, R, C] {
+    State(attempt: attempt, retry: classify(policy), class_id: class_id, cell: take cell, spilled: spilled, exchanges: 0, probe: 0, uncertain: false, limit_seen: false, phase: New)
+}
+
+fn finish[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], take outcome: Outcome[H, R], mut out: List[Action[H, R, C]]) {
+    s.phase = Finished
+    list.push(mut out, Finish(take outcome))
+}
+
+fn refusal[H: key + shareable, R: key + shareable, C: key + shareable](s: State[H, R, C]) -> Outcome[H, R] {
+    if s.uncertain {
+        Undecided
+    } else if s.limit_seen {
+        RefusedLimit
+    } else {
+        RefusedCapacity
+    }
+}
+
+fn place[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], mut out: List[Action[H, R, C]]) {
+    if s.probe == 5 {
+        let outcome = refusal(s)
+        finish(mut s, take outcome, mut out)
+        return
+    }
+    s.phase = Placing
+    s.probe += 1
+    list.push(mut out, Find(clone(s.cell), s.probe, s.class_id, s.attempt.principal, s.spilled))
+}
+
+fn retry_after_refusal[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], limit: bool, mut out: List[Action[H, R, C]]) {
+    s.limit_seen = limit
+    if s.exchanges < 3 {
+        place(mut s, mut out)
+    } else {
+        let outcome = refusal(s)
+        finish(mut s, take outcome, mut out)
+    }
+}
+
+fn send[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], take credit: protocol.Credit[H, R], mut out: List[Action[H, R, C]]) {
+    s.exchanges += 1
+    list.push(mut out, Send(s.exchanges, clone(credit), s.attempt, s.retry))
+    s.phase = Waiting(take credit, false)
+}
+
+fn unanswered[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], take target: protocol.Credit[H, R], mut out: List[Action[H, R, C]]) {
+    s.uncertain = true
+    if s.exchanges == 3 {
+        finish(mut s, Undecided, mut out)
+    } else if s.retry == (Effectful : protocol.RetryClass) {
+        s.exchanges += 1
+        list.push(mut out, Recover(s.exchanges, clone(target), s.attempt))
+        s.phase = Waiting(take target, true)
+    } else {
+        place(mut s, mut out)
+    }
+}
+
+fn reply[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], take target: protocol.Credit[H, R], pinned: bool, take answer: Reply[H, R], mut out: List[Action[H, R, C]]) {
+    match take answer {
+        Answer(Admitted(take checkout, _)) => {
+            if checkout.credit == target && checkout.principal == s.attempt.principal {
+                finish(mut s, Created(take checkout), mut out)
+            } else {
+                finish(mut s, Undecided, mut out)
+            }
+        },
+        Answer(Replayed(take checkout)) => {
+            if checkout.credit.host == target.host && checkout.credit.run == target.run && checkout.principal == s.attempt.principal {
+                finish(mut s, Duplicate(take checkout), mut out)
+            } else {
+                finish(mut s, Undecided, mut out)
+            }
+        },
+        Answer(Pending) => {
+            s.uncertain = true
+        },
+        Answer(EndedBeforeReply) => unanswered(mut s, take target, mut out),
+        Answer(Refused(reason)) => {
+            if pinned {
+                unanswered(mut s, take target, mut out)
+            } else {
+                match reason {
+                    Limit => retry_after_refusal(mut s, true, mut out),
+                    Capacity => retry_after_refusal(mut s, false, mut out),
+                    UnknownCredit => retry_after_refusal(mut s, false, mut out),
+                    SpentCredit => retry_after_refusal(mut s, false, mut out),
+                    BoundExhausted => retry_after_refusal(mut s, false, mut out),
+                    LateUnknownId => finish(mut s, Undecided, mut out),
+                    DigestConflict => finish(mut s, Undecided, mut out),
+                    Denied => finish(mut s, Undecided, mut out),
+                }
+            }
+        },
+        Unanswered => unanswered(mut s, take target, mut out),
+        Gone(may_have_run) => {
+            if pinned || (may_have_run && s.retry == (Effectful : protocol.RetryClass)) {
+                finish(mut s, Undecided, mut out)
+            } else if may_have_run {
+                unanswered(mut s, take target, mut out)
+            } else {
+                retry_after_refusal(mut s, false, mut out)
+            }
+        },
+    }
+}
+
+fn waiting[H: key + shareable, R: key + shareable, C: key + shareable](s: State[H, R, C]) -> Option[(protocol.Credit[H, R], bool)] {
+    match s.phase {
+        Waiting(target, pinned) => Some((clone(target), pinned)),
+        _ => None,
+    }
+}
+
+fn placement_finished[H: key + shareable, R: key + shareable, C: key + shareable](mut s: State[H, R, C], probe: u64, cause: Miss, take remote: Option[C], mut out: List[Action[H, R, C]]) {
+    if let Placing = s.phase {
+        if probe == s.probe {
+            s.limit_seen = cause == NoRight
+            if !s.spilled {
+                if let Some(take cell) = take remote {
+                    s.cell = take cell
+                    s.spilled = true
+                    place(mut s, mut out)
+                    return
+                }
+            }
+            let outcome = refusal(s)
+            finish(mut s, take outcome, mut out)
+        }
+    }
+}
+
+pub fn step[H: key + shareable, R: key + shareable, C: key + shareable](take state: State[H, R, C], take ev: Event[H, R, C]) -> (State[H, R, C], List[Action[H, R, C]]) {
+    let mut s = take state
+    let mut out: List[Action[H, R, C]] = list.new()
+    if let Finished = s.phase {
+        return (take s, take out)
+    }
+    match take ev {
+        Begin => {
+            if let New = s.phase {
+                place(mut s, mut out)
+            }
+        },
+        Placed(probe, credit) => {
+            if let Placing = s.phase {
+                if probe == s.probe && s.exchanges < 3 {
+                    send(mut s, take credit, mut out)
+                }
+            }
+        },
+        PlacementMiss(probe, cause, take remote) => placement_finished(mut s, probe, cause, take remote, mut out),
+        PlacementTimeout(probe, take remote) => placement_finished(mut s, probe, NoCredit, take remote, mut out),
+        WorkerReply(exchange, take answer) => {
+            let pending = waiting(s)
+            if let Some((take target, pinned)) = take pending {
+                if exchange == s.exchanges {
+                    reply(mut s, take target, pinned, take answer, mut out)
+                }
+            }
+        },
+        WorkerRestarted(host, run) => {
+            let pending = waiting(s)
+            if let Some((take target, _)) = take pending {
+                if host == target.host && run != target.run {
+                    if s.retry == (Effectful : protocol.RetryClass) {
+                        finish(mut s, Undecided, mut out)
+                    } else {
+                        unanswered(mut s, take target, mut out)
+                    }
+                }
+            }
+        },
+        ExchangeTimeout(exchange) => {
+            let pending = waiting(s)
+            if let Some((take target, _)) = take pending {
+                if exchange == s.exchanges {
+                    unanswered(mut s, take target, mut out)
+                }
+            }
+        },
+        Deadline => {
+            let outcome: Outcome[H, R] = match s.phase {
+                Waiting(_, _) => Undecided,
+                _ => refusal(s),
+            }
+            finish(mut s, take outcome, mut out)
+        },
+        Crash => {
+            s.phase = Finished
+            list.push(mut out, Died(Undecided))
+        },
+        BoundExhausted => finish(mut s, Undecided, mut out),
+    }
+    (take s, take out)
+}
+
+/// This state is scoped to one coordinator instance. Its shell draws the
+/// non-reusable session id when opening a caller connection.
+pub type Session: codec {
+    caller: u64,
+    principal: u64,
+    id: u64,
+    last_seq: Option[u64],
+    open: bool
+}
+
+pub type SessionEvent: codec + send = Request(protocol.Attempt) | Close
+
+pub type SessionAction: codec + send = Accepted(protocol.Attempt) | SessionClosed
+
+pub fn open_session(caller: u64, principal: u64, id: u64) -> Session {
+    Session(caller: caller, principal: principal, id: id, last_seq: None, open: true)
+}
+
+pub fn session_step(take state: Session, event: SessionEvent) -> (Session, List[SessionAction]) {
+    let mut current = take state
+    let mut out: List[SessionAction] = list.new()
+    match event {
+        Request(attempt) => {
+            let fresh = match current.last_seq {
+                Some(seq) => seq < attempt.seq,
+                None => true,
+            }
+            if current.open && fresh && attempt.caller == current.caller && attempt.principal == current.principal && attempt.session == current.id {
+                current.last_seq = Some(attempt.seq)
+                list.push(mut out, Accepted(attempt))
+            } else {
+                list.push(mut out, SessionClosed)
+            }
+        },
+        Close => {
+            current.open = false
+        },
+    }
+    (take current, take out)
+}

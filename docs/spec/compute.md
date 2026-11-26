@@ -224,14 +224,14 @@ Three soft-state roles run inside the single `hirsel` binary:
   offers, deduplicated by `(worker, ordinal)` within its session, and per-dispatcher,
   per-principal demand counts (`Ask(class, principal, n)`) — never payloads — and pops each offer
   to at most one dispatcher (`GrantExclusive`). It drops any offer whose `desk_session` is not
-  its current one. Among waiting principals it chooses by weighted fair queueing with weights
-  `allocation[p][cell]`: the shard keeps a virtual time `V` and each principal a finish tag. The
-  desk grants the waiting eligible principal with the smallest
-  `start[p] + 1 / allocation[p][cell]`, where `start[p] = max(finish[p], V)`, ties to the lowest
-  principal ID; the grant sets `finish[p]` to that value and `V` to it. `V` is the tag of the
-  last grant at the shard, so a principal returning from idle starts at `V` and gains no credit
-  for its idle time. Tags are exact rationals (pairs of integers, FLT-7 K4), never floats
-  (self-clocked fair queueing, Golestani 1994, which gives the bound in COMP-9). *(Team size, such
+  its current one. The shard uses self-clocked fair queueing with weights
+  `allocation[p][cell]` (Golestani 1994). When an eligible waiting principal's head becomes
+  ready, stamp it once with `max(F_prev[p], V) + 1 / allocation[p][cell]`, where `F_prev[p]` is
+  the last served tag for that principal and `V` is the last tag served at the shard. Keep the
+  tag while that head stays ready. Grant the head with the smallest stored tag, breaking ties
+  by lowest principal ID. Set `F_prev[p]` and `V` to its tag, then stamp the next head if ready.
+  A principal returning from idle starts at `V`. Tags are exact rationals (pairs of integers,
+  FLT-7 K4), never floats. *(Team size, such
   as 3 hosts per team, is a non-normative deployment configuration parameter.)*
 - **Dispatcher.** Runs in the trusted host process (never inside untrusted user code). Parks
   waiting creates within a bounded per-principal pending cap until a grant arrives or the caller's

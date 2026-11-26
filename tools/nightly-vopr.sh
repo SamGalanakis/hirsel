@@ -140,6 +140,10 @@ for name in "${!groups[@]}"; do
   "${paths[0]}" coverage merge ${groups[$name]} -o "$run/coverage/$name" >/dev/null \
     || echo "coverage ${name%.json}: merge failed" >&2
 done
+for tape in "$scratch"/*.tapes/*.tape; do
+  mkdir -p "$run/tapes"
+  cp -p -- "$tape" "$run/tapes/"
+done
 if (( sweep_status != 0 )); then
   status=$sweep_status
   phase=sweep-failed

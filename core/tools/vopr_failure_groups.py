@@ -83,8 +83,9 @@ def publish(run, *, require_canary=False, probe_reds=()):
                 counts[key] += 1
                 samples.setdefault(key, {"receipt": receipt.name, "build": row.get("build"),
                                          "digest": row.get("digest"), "seed": row.get("seed")})
-                if "reason" in row:
-                    samples[key].setdefault("reason", row["reason"])
+                for field in ("reason", "sem8_tape", "sem8_tape_error"):
+                    if field in row:
+                        samples[key].setdefault(field, row[field])
         if require_canary and receipt.suffix == ".gz":
             passed = (len(canary) == 2 and {row["seed"] % 2 for row in canary} == {0, 1}
                       and all(expected_canary(row) for row in canary))

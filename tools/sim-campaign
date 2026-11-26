@@ -26,6 +26,7 @@ import time
 
 TRACE = re.compile(r"^trace (\S+)$", re.MULTILINE)
 REPLAY_VERDICT = re.compile(r"^replay: (\S+)", re.MULTILINE)
+HISTORY_VIOLATION = b"sim.history violation seed="
 # A raw coverage file's header is finished once its end mark is written
 # (docs/coverage.md, "The raw file"); a run killed before then is unobserved.
 RAW_MAGIC, RAW_END_MARK = b"HIRSELCV", 0x45444F4E
@@ -134,7 +135,8 @@ def outcome(ran, observation):
 # A law's message names its class; the exit contract stays nonzero for any red.
 # "bounded progress:" is the VP2 post-heal convergence epilogue
 # (core/programs/store/follower_laws.hirsel).
-FAILURE_CLASSES = (("bounded progress:", "bounded_progress"),)
+FAILURE_CLASSES = (("bounded progress:", "bounded_progress"),
+                   (HISTORY_VIOLATION.decode(), "history_violation"))
 
 
 def failure_class(row):
@@ -186,7 +188,7 @@ def mark(row, kind, failure_class):
         row["status"], row["kind"], row["failure_class"] = 1, kind, failure_class
 
 
-def record_and_replay(row, recording, seed, root, directory, live, timeout):
+def record_and_replay(row, recording, seed, root, directory, live, timeout, tape_path):
     """The added leg: run the seed on the recording build with recording on,
     require the normal run's observations, then replay the tape (SEM-8)."""
     started = time.monotonic()
@@ -205,11 +207,19 @@ def record_and_replay(row, recording, seed, root, directory, live, timeout):
     if divergence is not None:
         row["tape_divergence"] = divergence
         mark(row, "replay_red", divergence)
+    if row["failure_class"] == "history_violation":
+        if HISTORY_VIOLATION in ran.stdout + ran.stderr and tape.is_file() and tape.stat().st_size:
+            tape_path.parent.mkdir(parents=True, exist_ok=True)
+            with tape.open("rb") as source, tape_path.open("wb") as target:
+                shutil.copyfileobj(source, target)
+            row["sem8_tape"] = tape_path.name
+        else:
+            row["sem8_tape_error"] = divergence or "recording did not reproduce the history violation"
     row["record_replay_seconds"] = time.monotonic() - started
 
 
 def run_seed(executable, seed, diagnose_red=False, recording=None, seed_timeout=SEED_TIMEOUT_SECONDS,
-             coverage=None):
+             coverage=None, tape_path=None):
     """`coverage` is the absolute raw file the seed's normal run writes; no
     other run of the seed names one, since the runtime opens it create_new."""
     with tempfile.TemporaryDirectory(prefix="hirsel-sim-") as root:
@@ -237,8 +247,12 @@ def run_seed(executable, seed, diagnose_red=False, recording=None, seed_timeout=
                 replay.returncode, replay.stdout, replay.stderr) or (
                 verdict["witnesses"] != row["diagnostic_replay"]["witnesses"])
         if recording is not None:
+            if tape_path is None:
+                tape_path = Path("tapes") / f"{Path(executable).name}-{seed}.tape"
             record_and_replay(row, recording, seed, root, directory, (ran.returncode, ran.stdout, ran.stderr),
-                              seed_timeout)
+                              seed_timeout, tape_path)
+        elif row["failure_class"] == "history_violation":
+            row["sem8_tape_error"] = "no recording executable supplied"
     return row
 
 
@@ -248,10 +262,12 @@ def raw_file(prefix, seed):
     return Path(f"{prefix}.{seed}.raw")
 
 
-def run_shard(executable, start, stop, diagnose_red=False, recording=None, coverage=None):
+def run_shard(executable, start, stop, diagnose_red=False, recording=None, coverage=None, tapes=None):
+    tapes_dir = Path("tapes") if tapes is None else Path(tapes)
     for seed in range(start, stop):
         row = run_seed(executable, seed, diagnose_red, recording,
-                       coverage=coverage and raw_file(coverage, seed).resolve())
+                       coverage=coverage and raw_file(coverage, seed).resolve(),
+                       tape_path=tapes_dir / f"{Path(executable).name}-{seed}.tape")
         command = [sys.argv[0], "run", str(executable), str(seed), str(seed + 1)]
         if recording is not None:
             command += ["--recording", str(recording)]
@@ -259,10 +275,17 @@ def run_shard(executable, start, stop, diagnose_red=False, recording=None, cover
         print(json.dumps(row), flush=True)
 
 
-def seed_zero_failed(db, campaign, law, results):
+def seed_zero_failed(db, campaign, law, results, tapes):
     verdict = law.seed_zero if law.seed_zero is not None else run_seed(law.binary, 0)
     if verdict["status"] == 0:
         return False
+    if failure_class(verdict) == "history_violation":
+        if law.recording is not None:
+            repro = run_seed(law.binary, 0, recording=law.recording,
+                             tape_path=tapes / f"{law.binary.name}-0.tape")
+            verdict = {**verdict, **{key: value for key, value in repro.items() if key.startswith("sem8_")}}
+        else:
+            verdict = {**verdict, "sem8_tape_error": "no recording executable supplied"}
     row = {**verdict, "law": law.name, "build": law.build, "digest": law.digest, "seed": 0,
            "kind": "deterministic_red",
            "failure_class": failure_class(verdict)}
@@ -438,11 +461,12 @@ def dispatch_campaign(args, executable=None, laws=None):
           tempfile.TemporaryDirectory(prefix="sim-campaign-", dir=Path.cwd()) as directory,
           args.results.open("x") as results):
         deterministic_red = False
+        tapes = args.results.with_suffix(".tapes")
         if laws is None:
-            if seed_zero_failed(db, args.campaign, Law(executable.name, executable, 0, None), results):
+            if seed_zero_failed(db, args.campaign, Law(executable.name, executable, 0, None), results, tapes):
                 return 1
         else:
-            passing = [law for law in laws if not seed_zero_failed(db, args.campaign, law, results)]
+            passing = [law for law in laws if not seed_zero_failed(db, args.campaign, law, results, tapes)]
             deterministic_red = len(passing) != len(laws)
             laws = passing
             if not laws:
@@ -473,8 +497,9 @@ def dispatch_campaign(args, executable=None, laws=None):
             (bundle / "ranges.json").write_text(json.dumps(remote))
             jobs = [{"lane": f"vopr-{args.campaign}", "bundle": "bundle", "seconds": 900,
                      "command": "./sim-campaign run-batch ranges.json"}]
+            jobs[0]["fetch"] = ["tapes:fetched"]
             if any(law.coverage for law in laws):
-                jobs[0]["fetch"] = ["coverage:fetched"]
+                jobs[0]["fetch"].append("coverage:fetched")
         manifest = root / "shards.json"
         manifest.write_text(json.dumps(jobs))
         command = [args.dispatcher, "--job-class", "vopr", "--log-dir",
@@ -483,6 +508,9 @@ def dispatch_campaign(args, executable=None, laws=None):
             complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable, laws)
             status = boat.wait()
         if laws is not None:
+            for tape in (root / "fetched/tapes").glob("*.tape"):
+                tapes.mkdir(exist_ok=True)
+                shutil.move(str(tape), str(tapes / tape.name))
             merge_coverage(laws, ranges, root / "fetched/coverage", args.results.with_suffix(".coverage"))
     if laws is not None and status == os.EX_TEMPFAIL:
         return status
@@ -592,8 +620,10 @@ def reds_first(manifest, run, dry_run, seed_timeout=SEED_TIMEOUT_SECONDS):
                 continue
             verdict = None
             if law is not None:
-                verdict = (run_seed(law.binary, seed, recording=law.recording, seed_timeout=seed_timeout)
-                           if seed or law.seed_zero is None else law.seed_zero)
+                needs_tape = law.seed_zero is not None and failure_class(law.seed_zero) == "history_violation"
+                verdict = (run_seed(law.binary, seed, recording=law.recording, seed_timeout=seed_timeout,
+                                    tape_path=run / "reds-first.tapes" / f"{law.binary.name}-{seed}.tape")
+                           if seed or law.seed_zero is None or needs_tape else law.seed_zero)
             row = {"replay_of": entry["group"], "night": entry["night"], "law": name, "seed": seed,
                    "stale": mark, "build": law and law.build, "digest": law and law.digest,
                    "still_red": None if verdict is None else verdict["status"] != 0, **(verdict or {})}
@@ -628,6 +658,8 @@ def main():
                      help="the law's recording build: also record each seed on it and replay the tape")
     run.add_argument("--coverage", type=Path, metavar="PREFIX",
                      help="each seed's normal run writes raw coverage to PREFIX.SEED.raw")
+    run.add_argument("--tapes", type=Path, metavar="DIR",
+                     help="retain SEM-8 tapes for history violations in DIR")
     remote = commands.add_parser("run-batch", help="run prepared ranges inside one VM")
     remote.add_argument("ranges", type=Path)
     campaign = commands.add_parser("dispatch", help="reserve ranges and dispatch a campaign")
@@ -651,15 +683,17 @@ def main():
             if not 0 <= args.start < args.stop <= 2**64:
                 parser.error("expected a nonempty u64 seed range")
             run_shard(args.executable.resolve(strict=True), args.start, args.stop, args.diagnose_red,
-                      args.recording and args.recording.resolve(strict=True), args.coverage)
+                      args.recording and args.recording.resolve(strict=True), args.coverage, args.tapes)
             return 0
         if args.command == "run-batch":
             # The directory exists before any seed runs, so it is there to fetch.
             (args.ranges.parent / "coverage").mkdir(exist_ok=True)
+            tapes_dir = args.ranges.parent / "tapes"
+            tapes_dir.mkdir(exist_ok=True)
             for executable, start, stop, recording, coverage in json.loads(args.ranges.read_text()):
                 run_shard(local_executable(args.ranges.parent / executable), start, stop, diagnose_red=True,
                           recording=recording and local_executable(args.ranges.parent / recording),
-                          coverage=coverage and args.ranges.parent / coverage)
+                          coverage=coverage and args.ranges.parent / coverage, tapes=tapes_dir)
             return 0
         if args.command == "batch":
             return dispatch_campaign(args, laws=read_laws(args.manifest))

@@ -468,3 +468,74 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
         witness_ceiling_check(report, manifest_key, 22, claimed_entry)
     }
 }
+
+fn bucket_m2_law_follow(tasks: Tasks, r: Random, sim: BucketSim, seed: u64) -> Result[(), Error] waits {
+    let mut history = std.sim.history.new(seed)
+    // The witness commits below carry no operations, so each model projection is empty.
+    std.sim.history.model(mut history, 0, b"")
+    std.sim.history.model(mut history, 1, b"")
+    let initial_client = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
+    let read_source = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
+    let mut writer = history_reader(take initial_client, 0)
+    let mut workspace = history_buffers(1024)?
+    let authority = history_config_bytes(object_history_config(std.object.bucket_config(writer.client), "bucket"))?
+    let (take opened, _) = history_open_register(mut writer, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let mut held = take opened
+    let mut source = followers()
+    let mut settings = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    settings.expect = Some(held.head.store)
+    // Writer selection never constrains a read-only follower.
+    settings.activation = Some(17)
+    settings.binding = Some(list.new())
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), settings)
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut followed = follower(mut source, follower_slot(follower_owner(service)?, plan)?, object_authority(take read_source, "reader", BUCKET_LAW_OP_MS), sim.time, settings.expect)?
+    let deadline = std.object.deadline_after_ms(writer.client, BUCKET_LAW_OP_MS)
+    let initial = std.sim.history.request(history, 1, Fresh)
+    let genesis = fresh(mut followed, deadline)?
+    std.sim.history.check(std.sim.history.read(mut history, initial, version(genesis), b""))
+    let genesis_head = follower_head(followed)?
+    if version(genesis) != 0 || genesis_head.claim.epoch != 1 || genesis_head.activation != 0 || list.len(genesis_head.binding) != 32 {
+        fail("fresh did not preserve the initial capture")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 1)?
+    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+        fail("the first group did not advance")
+    }
+    let requested = std.sim.history.request(history, 1, Follower(1))
+    let advanced = at_least(mut followed, Position(store: held.head.store, branch: 0, version: 1), deadline)?
+    std.sim.history.check(std.sim.history.read(mut history, requested, version(advanced), b""))
+    if version(advanced) != 1 || version(genesis) != 0 {
+        fail("catch-up did not publish its applied version privately")
+    }
+    bucket_m2_law_commit_packet(mut workspace.packet, held.head, 2)?
+    let HistoryApplied(_) = history_register_advance(mut writer.client, mut held, authority, mut workspace, deadline)? else {
+        fail("the second group did not advance")
+    }
+    let final_item = history_key("e-", held.head.entry)
+    match std.object.erase(mut writer.client, final_item, deadline) {
+        Error(take problem) => return Error(Remote(take problem)),
+        Ok(()) => (),
+    }
+    if let Error(Corrupt(Fault(file: gone, why: Absent, ..))) = fresh(mut followed, deadline) {
+        if gone != final_item {
+            fail("witness named another object")
+        }
+    } else {
+        fail("a missing live entry was accepted or classified as reclaimed")
+    }
+    let current = applied(followed, Branch(store: held.head.store, id: 0))?
+    if current.version != 1 {
+        fail("failed catch-up changed the published state")
+    }
+    Ok(())
+}
+
+@test
+fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+    let seed = bucket_law_seed(seed_grant, 773)
+    let sim = bucket_law_sim(tasks, c, seed, None, list.new())
+    let followed = bucket_m2_law_follow(tasks, r, sim, seed)
+    let _ = bucket_law_finish(take sim)
+    followed
+}

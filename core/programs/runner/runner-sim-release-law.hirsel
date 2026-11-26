@@ -48,7 +48,14 @@ fn sim_release_tx(mut tx: store.Tx, h: Qh, author: Caller, take value: u64) -> R
     Ok(value)
 }
 
-fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, rnd: Random, mut world: store.LevelWorld) -> Result[(), store.Error] waits {
+fn sim_release_bytes[T](codec: std.codec.Codec[T], value: T) -> Bytes {
+    let mut out: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, value, mut out))
+    take out
+}
+
+fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, rnd: Random, mut world: store.LevelWorld, seed: u64) -> Result[(), store.Error] waits {
+    let mut history = std.sim.history.new(seed)
     let client = sim_release_client(endpoint, time, tasks, rnd)
     let (take requests, take workers) = std.object.split(take client)
     let backing = SimBacking(requests: take requests, declaration: sim_release_levels(), sync: store.level_sync(mut world)?, op_ms: 30000)
@@ -89,6 +96,16 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     if list.len(owe_content_view(initial).complete) != 1 {
         fail("L56: the subscription did not start")
     }
+    let initial_group = option.unwrap(group_payload(initial))
+    if list.len(initial_group.rows) != 2u64 {
+        fail("L56: the initial subscription did not cover both rows")
+    }
+    std.sim.history.model(mut history, 5, sim_release_bytes(std.codec.of_u64(), 2u64))
+    let initial_req = std.sim.history.request(history, 1, Live)
+    let Some(initial_value) = view initial_group.rows[0u64].value else {
+        fail("L56: missing initial row value")
+    }
+    std.sim.history.check(std.sim.history.read(mut history, initial_req, initial.version, initial_value))
     let operation = code.describe(sim_release_tx)
     let codec: std.codec.Codec[Result[u64, u64]] = std.codec.of()
     let (take key, _) = result.unwrap(described(code.identity(operation), code.revision(operation), Transact, std.codec.of_u64(), codec))
@@ -147,13 +164,23 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     if got.version != 7 || list.len(owe_content_view(content).groups) != 1 || list.len(got.outcomes) != 1 || got.outcomes[0].p != 0 {
         fail("L56: the received batch or reply did not identify the release")
     }
-    if let Returned(data) = got.outcomes[0].outcome {
-        if let Ok(Ok(7u64)) = std.codec.decode(codec, data) {} else {
-            fail("L56: the reply changed")
-        }
-    } else {
-        fail("L56: the released call did not return")
+    let committed = sim_release_bytes(codec, Ok(7u64))
+    std.sim.history.check(std.sim.history.committed(mut history, b"L56/stream-1/0", published.version, take committed))
+    let replied: Option[Bytes] = match got.outcomes[0].outcome {
+        Returned(data) => Some(clone(data)),
+        _ => None,
     }
+    std.sim.history.check(std.sim.history.reply(mut history, 1, b"L56/stream-1/0", got.version, replied))
+    std.sim.history.model(mut history, 7, sim_release_bytes(std.codec.of_u64(), 7u64))
+    let update_req = std.sim.history.request(history, 1, Live)
+    let changed = option.unwrap(group_payload(content))
+    if list.len(changed.rows) != 1u64 {
+        fail("L56: the subscription update did not carry exactly one row")
+    }
+    let Some(updated_value) = view changed.rows[0u64].value else {
+        fail("L56: missing updated row value")
+    }
+    std.sim.history.check(std.sim.history.read(mut history, update_req, got.version, updated_value))
     host.sleep_until(time, host.mono_ns(time) + 1)
     store.level_mark(mut marks, 2)?
     let _ = take hd
@@ -165,9 +192,11 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let mut reopened = store.open_authority(tasks, take authority, time, rnd, reopened_options) ?=> |store.Refusal(error: take problem, ..)| take problem
     let saved = store.snapshot(reopened)
     let rows = store.table(mut reopened, "data", std.codec.key_u64(), std.codec.of_u64())?
-    if store.version(saved) != 7 || store.get(store.reader(reopened, 0)?, saved, rows, 1)? != Some(7) {
-        fail("L56: the successor did not recover the client-visible release")
-    }
+    std.sim.history.check(std.sim.history.recovered(history, store.version(saved)))
+    let reopened_req = std.sim.history.request(history, 1, Fresh)
+    let fresh = store.fresh_snapshot(mut reopened, due)?
+    let stored_value = option.unwrap(store.get(store.reader(reopened, 0)?, fresh, rows, 1)?)
+    std.sim.history.check(std.sim.history.read(mut history, reopened_req, store.version(fresh), sim_release_bytes(std.codec.of_u64(), stored_value)))
     let written = store.run(mut reopened, None, (), fn(mut tx, unused_env) -> Result[(), store.Error] {
         Ok(())
     })?
@@ -204,7 +233,7 @@ fn test_sim_release_uses_strongest(real: Clock, rnd: Random, tasks: Tasks, seed_
     let driver = task.spawn(tasks, bytes 65536, SimReleaseClock(world: take virtual, stop: take stopping, real), run_sim_release_clock)
     let (endpoint, take sim) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), time, 1048576, 33554432)
     let mut world = store.level_world(tasks, time, list.new(), 1048576)?
-    sim_release_round(endpoint, time, tasks, rnd, mut world)?
+    sim_release_round(endpoint, time, tasks, rnd, mut world, seed)?
     let events = store.level_log(take world)?
     result.unwrap(channel.send(stop, ()))
     let report = result.unwrap(task.join(take sim))

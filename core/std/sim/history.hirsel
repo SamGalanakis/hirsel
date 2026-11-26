@@ -1,0 +1,154 @@
+/// One Place's client observations and independently modelled commit results.
+pub opaque type History {
+    seed: u64,
+    values: Map[u64, Bytes],
+    commits: Map[Bytes, (u64, Bytes)],
+    writes: Map[u64, u64],
+    reads: Map[u64, u64],
+    acknowledged: u64,
+    visible: u64
+}
+
+/// A read's declared consistency. A follower read uses the last completed
+/// catch-up or explicit bound for the placement.
+pub type Mode = Live | Fresh | AtLeast(u64) | Follower(u64)
+
+pub opaque type Request {
+    session: u64,
+    mode: Mode,
+    written: u64,
+    fresh: u64
+}
+
+pub type Anomaly: key = NonMonotone | ReadYourWrites | Freshness | OutputGate | StaleFollower | RetryDuplicate | RetryLost | RetryResult | ModelMismatch
+
+pub type Violation {
+    seed: u64,
+    anomaly: Anomaly,
+    expected: u64,
+    observed: u64
+}
+
+pub fn new(seed: u64) -> History {
+    History(seed, values: map.new(), commits: map.new(), writes: map.new(), reads: map.new(), acknowledged: 0, visible: 0)
+}
+
+/// Index the law's projection of the committed state by its version.
+pub fn model(mut history: History, version: u64, take value: Bytes) {
+    map.insert(mut history.values, version, take value)
+}
+
+fn violation(history: History, anomaly: Anomaly, expected: u64, observed: u64) -> Result[(), Violation] {
+    Error(Violation(seed: history.seed, anomaly, expected, observed))
+}
+
+fn greater(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn known(versions: Map[u64, u64], session: u64) -> u64 {
+    match map.get(versions, session) {
+        Some(at) => at,
+        None => 0,
+    }
+}
+
+/// Record a committed operation from the commit witness. Key the whole
+/// idempotency identity, including stream and position for stream calls.
+pub fn committed(mut history: History, take key: Bytes, version: u64, take value: Bytes) -> Result[(), Violation] {
+    if let Some((old, _)) = map.get(history.commits, key) {
+        return violation(history, RetryDuplicate, old, version)
+    }
+    map.insert(mut history.commits, take key, (version, take value))
+    Ok(())
+}
+
+/// Observe a committed reply or a retry of one. Pass None when a retry for
+/// a committed key returns a missing result.
+pub fn reply(mut history: History, session: u64, key: Bytes, at: u64, value: Option[Bytes]) -> Result[(), Violation] {
+    let Some((version, wanted)) = map.get(history.commits, key) else {
+        return violation(history, RetryResult, 0, at)
+    }
+    let Some(seen) = view value else {
+        return violation(history, RetryLost, version, at)
+    }
+    if at < version || seen != wanted {
+        return violation(history, RetryResult, version, at)
+    }
+    let written = known(history.writes, session)
+    map.insert(mut history.writes, session, greater(written, version))
+    history.acknowledged = greater(history.acknowledged, version)
+    history.visible = greater(history.visible, at)
+    Ok(())
+}
+
+/// Capture the floors at invocation. Keep the same session across placements.
+pub fn request(history: History, session: u64, mode: Mode) -> Request {
+    let written = known(history.writes, session)
+    Request(session, mode, written, fresh: history.acknowledged)
+}
+
+/// Check a delivered read or subscription round. Typed refusals provide no
+/// observation and leave the client's floor in place for the next request.
+pub fn read(mut history: History, started: Request, at: u64, value: Bytes) -> Result[(), Violation] {
+    let previous = known(history.reads, started.session)
+    if at < previous {
+        return violation(history, NonMonotone, previous, at)
+    }
+    match started.mode {
+        Fresh if at < started.written => return violation(history, ReadYourWrites, started.written, at),
+        Fresh if at < started.fresh => return violation(history, Freshness, started.fresh, at),
+        AtLeast(floor) if at < floor => return violation(history, Freshness, floor, at),
+        Follower(floor) if at < floor => return violation(history, StaleFollower, floor, at),
+        _ => (),
+    }
+    if let Some(wanted) = map.get(history.values, at) {
+        if value != wanted {
+            return violation(history, ModelMismatch, at, at)
+        }
+    } else {
+        return violation(history, ModelMismatch, at, at)
+    }
+    map.insert(mut history.reads, started.session, at)
+    history.visible = greater(history.visible, at)
+    Ok(())
+}
+
+/// Check the position recovered after a crash against everything delivered
+/// to clients before the crash.
+pub fn recovered(history: History, at: u64) -> Result[(), Violation] {
+    if at < history.visible {
+        return violation(history, OutputGate, history.visible, at)
+    }
+    Ok(())
+}
+
+/// Report a violation to the law runner. The campaign retains its SEM-8 tape.
+pub fn check(verdict: Result[(), Violation]) {
+    let Error(bad) = verdict else {
+        return
+    }
+    let mut message = string.from("sim.history violation seed=")
+    string.push_u64(mut message, bad.seed)
+    string.push(mut message, " class=")
+    string.push(mut message, match bad.anomaly {
+        NonMonotone => "non-monotone",
+        ReadYourWrites => "read-your-writes",
+        Freshness => "freshness",
+        OutputGate => "output-gate",
+        StaleFollower => "stale-follower",
+        RetryDuplicate => "retry-duplicate",
+        RetryLost => "retry-lost",
+        RetryResult => "retry-result",
+        ModelMismatch => "model-mismatch",
+    })
+    string.push(mut message, " expected=")
+    string.push_u64(mut message, bad.expected)
+    string.push(mut message, " observed=")
+    string.push_u64(mut message, bad.observed)
+    fail(take message)
+}

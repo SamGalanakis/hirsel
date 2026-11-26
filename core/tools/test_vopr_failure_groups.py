@@ -186,6 +186,60 @@ class Coverage(unittest.TestCase):
             self.assertEqual(json.loads((profiles / "two.json").read_text()), [["c", "c", 6]])
             self.assertIn("coverage two: 1 unobserved runs: c seed 5", ran.stderr)
 
+    def test_history_violation_retains_sem8_tape(self):
+        python = sys.executable
+        law_script = f"""#!{python}
+import os, sys
+if len(sys.argv) >= 4 and sys.argv[1] == "--hirsel-replay-recording":
+    data = open(sys.argv[3], "rb").read()
+    sys.exit(0 if data.startswith(b"TAPE:") else 1)
+seed = int(os.environ["HIRSEL_TEST_SIM_SEED"])
+record = os.environ.get("HIRSEL_RECORD")
+if record:
+    with open(record, "wb") as out:
+        out.write(f"TAPE:{{seed}}".encode())
+if seed == 2:
+    sys.stderr.write(f'Fail("sim.history violation seed={{seed}} class=output-gate expected=7 observed=5") at std@1/sim/history.hirsel:153:5\\n')
+    sys.exit(101)
+"""
+        with tempfile.TemporaryDirectory() as held:
+            root = Path(held)
+            for name in ("law-bin", "law-rec"):
+                script = root / name
+                script.write_text(law_script)
+                script.chmod(0o755)
+            dispatcher = root / "dispatcher"
+            dispatcher.write_text(DISPATCHER.format(python=python))
+            dispatcher.chmod(0o755)
+            (root / "manifest.json").write_text(json.dumps([
+                {"law": "runner@1/runner/test_sim_release_uses_strongest",
+                 "executable": "law-bin", "recording": "law-rec", "seeds": 2},
+            ]))
+            ran = subprocess.run([str(SIM_CAMPAIGN_PATH), "batch", "night", str(root / "manifest.json"),
+                                  "--ledger", str(root / "seeds.sqlite"), "--results", str(root / "night.jsonl"),
+                                  "--dispatcher", str(dispatcher)],
+                                 cwd=root, capture_output=True, text=True)
+            self.assertEqual(ran.returncode, 1, ran.stderr)
+            rows = [json.loads(line) for line in (root / "night.jsonl").read_text().splitlines()]
+            self.assertEqual([(row["seed"], row["status"], row["failure_class"]) for row in rows],
+                             [(1, 0, None), (2, 101, "history_violation")])
+            self.assertNotIn("sem8_tape", rows[0])
+            tape_name = rows[1]["sem8_tape"]
+            tapes = root / "night.tapes"
+            self.assertEqual(sorted(p.name for p in tapes.iterdir()), [tape_name])
+            self.assertEqual((tapes / tape_name).read_bytes(), b"TAPE:2")
+            with gzip.open(root / "night.jsonl.gz", "wt") as stream:
+                for row in rows:
+                    print(json.dumps(row), file=stream)
+            self.assertEqual(publish(root), 0)
+            groups = [json.loads(line) for line in (root / "failure-groups.jsonl").read_text().splitlines()]
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0]["group"], [
+                "runner@1/runner/test_sim_release_uses_strongest", "seed_red", "history_violation"
+            ])
+            self.assertEqual(groups[0]["seed"], 2)
+            self.assertEqual(groups[0]["sem8_tape"], tape_name)
+
 
 class Preparation(unittest.TestCase):
     def test_nightly_keeps_good_laws_when_a_contract_is_refused_or_has_no_binary(self):

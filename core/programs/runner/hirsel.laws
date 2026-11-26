@@ -88,7 +88,7 @@ runner@1/runner/test_replay_caller src=fd7e0cd69cb21ee7 sig=9bdc6e2c26c0ef85 run
 runner@1/runner/test_retired_without_waiting src=4f510702dd18ff37 sig=f6fbb6b1042fc0b8 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_rows_normalized src=c71ea24f90afe9b3 sig=303d9d39af5bfb97 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_shared_view_once src=107c03a040010d0f sig=f8cceff60689179f run=b1818af2b24835d3 bug=- oracle=- rows=pending
-runner@1/runner/test_sim_release_uses_strongest src=1ee964fcca5bd031 sig=73707277cb12a8f2 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+runner@1/runner/test_sim_release_uses_strongest src=79c7bd3aab927ef2 sig=a654bd973893f30c run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 runner@1/runner/test_slot_images src=a4bc2f7839d9aea1 sig=8b834298e8d3a769 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_sse_expiry_terminal src=4e9868a466131370 sig=2ecd97c8fcb5c222 run=a58227ecac7d1e85 bug=- oracle=- rows=pending
 runner@1/runner/test_stale_never_released src=f27f776bb639bc84 sig=6b7649366539038b run=dbf6722727633166 bug=- oracle=- rows=pending

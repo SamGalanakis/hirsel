@@ -1,0 +1,83 @@
+// expect: run versioned_history_anomalies() = true
+fn versioned_history_case(seed: u64) -> Result[(), sim.history.Violation] {
+    let mut history = sim.history.new(seed)
+    let version = seed + 4
+    sim.history.model(mut history, version, b"before")
+    sim.history.model(mut history, version + 1, b"after")
+    match seed {
+        1 => {
+            let before_reconnect = sim.history.request(history, 1, Live)
+            sim.history.read(mut history, before_reconnect, version + 1, b"after")?
+            let reconnected = sim.history.request(history, 1, Follower(0))
+            sim.history.read(mut history, reconnected, version, b"before")
+        },
+        2 => {
+            sim.history.committed(mut history, b"key", version + 1, b"reply")?
+            sim.history.reply(mut history, 1, b"key", version + 1, Some(b"reply"))?
+            let fresh = sim.history.request(history, 1, Fresh)
+            sim.history.read(mut history, fresh, version, b"before")
+        },
+        3 => {
+            let live = sim.history.request(history, 1, Live)
+            sim.history.read(mut history, live, version + 1, b"after")?
+            sim.history.recovered(history, version)
+        },
+        4 => {
+            sim.history.committed(mut history, b"retry", version, b"reply")?
+            sim.history.committed(mut history, b"retry", version + 1, b"reply")
+        },
+        5 => {
+            let placed = sim.history.request(history, 1, Follower(version + 1))
+            sim.history.read(mut history, placed, version, b"before")
+        },
+        6 => {
+            sim.history.committed(mut history, b"retry", version, b"reply")?
+            sim.history.reply(mut history, 1, b"retry", version, None)
+        },
+        7 => {
+            sim.history.committed(mut history, b"retry", version, b"reply")?
+            sim.history.reply(mut history, 1, b"retry", version, Some(b"another reply"))
+        },
+        8 => {
+            let live = sim.history.request(history, 1, Live)
+            sim.history.read(mut history, live, version, b"discarded attempt")
+        },
+        9 => {
+            sim.history.committed(mut history, b"other", version + 1, b"reply")?
+            sim.history.reply(mut history, 2, b"other", version + 1, Some(b"reply"))?
+            let fresh = sim.history.request(history, 1, Fresh)
+            sim.history.read(mut history, fresh, version, b"before")
+        },
+        10 => {
+            let bounded = sim.history.request(history, 1, AtLeast(version + 1))
+            sim.history.read(mut history, bounded, version, b"before")
+        },
+        _ => {
+            let pending = sim.history.request(history, 1, Fresh)
+            sim.history.committed(mut history, b"retry", version + 1, b"reply")?
+            sim.history.reply(mut history, 2, b"retry", version + 1, Some(b"reply"))?
+            sim.history.read(mut history, pending, version, b"before")?
+            let caught_up = sim.history.request(history, 1, Follower(version + 1))
+            sim.history.read(mut history, caught_up, version + 1, b"after")?
+            sim.history.reply(mut history, 2, b"retry", version + 1, Some(b"reply"))?
+            sim.history.recovered(history, version + 1)
+        },
+    }
+}
+
+fn versioned_history_anomalies() -> bool {
+    let expected: Inline[sim.history.Anomaly, 10] =[NonMonotone, ReadYourWrites, OutputGate, RetryDuplicate, StaleFollower, RetryLost, RetryResult, ModelMismatch, Freshness, Freshness]
+    for i in 0u64 .. 10 {
+        let seed = i + 1
+        let Error(bad) = versioned_history_case(seed) else {
+            return false
+        }
+        if bad.seed != seed || bad.anomaly != expected[i] {
+            return false
+        }
+    }
+    if let Ok(()) = versioned_history_case(11) {
+        return true
+    }
+    false
+}

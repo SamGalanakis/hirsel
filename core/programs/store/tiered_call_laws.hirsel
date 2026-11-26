@@ -593,7 +593,7 @@ type ScheduleModel {
 
 // A call committed at the model's head: it read the model there (L62), so its
 // reply is the model's, its one write lands, and the head moves by one (L63).
-fn schedule_commit(db: Db, mut model: ScheduleModel, env: (Table[u64, u32], Table[u64, u32], u64, u64), answer: Bytes) {
+fn schedule_commit(mut db: Db, mut model: ScheduleModel, mut history: std.sim.history.History, stream: Bytes, env: (Table[u64, u32], Table[u64, u32], u64, u64), answer: Bytes) -> Result[(), Error] waits {
     let old = match option.copied(map.get(model.marks, env.3)) {
         Some(m) => m,
         None => 0u32
@@ -602,11 +602,20 @@ fn schedule_commit(db: Db, mut model: ScheduleModel, env: (Table[u64, u32], Tabl
         Some(v) => v,
         None => 0u32
     }
-    if answer != schedule_reply(old, add) {
-        fail("L63 schedule: a call's reply is the model's at the head it commits on")
-    }
+    let committed = version(snapshot(db))
+    std.sim.history.check(std.sim.history.committed(mut history, clone(stream), model.head + 1, schedule_reply(old, add)))
+    std.sim.history.check(std.sim.history.reply(mut history, 1, stream, committed, Some(clone(answer))))
     map.insert(mut model.marks, env.3, old + add + 1)
     schedule_moved(db, mut model)
+    let retried = match admit_law_stream(mut db, stream, 0, request_digest(stream, stream))? {
+        Duplicate(Stored(reply: take saved)) => Some(take saved),
+        _ => None,
+    }
+    std.sim.history.check(std.sim.history.reply(mut history, 1, stream, version(snapshot(db)), retried))
+    if version(snapshot(db)) != committed {
+        fail("L63 schedule: retry advanced the head")
+    }
+    Ok(())
 }
 
 fn schedule_moved(db: Db, mut model: ScheduleModel) {
@@ -633,7 +642,8 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
     map.insert(mut model.rows, 1u64, 10u32)
     map.insert(mut model.rows, 3u64, 30u32)
     map.insert(mut model.rows, 5u64, 50u32)
-    let mut parked: List[(Parked, (Table[u64, u32], Table[u64, u32], u64, u64))] = list.new()
+    let mut history = std.sim.history.new(seed)
+    let mut parked: List[(Parked, Bytes, (Table[u64, u32], Table[u64, u32], u64, u64))] = list.new()
     let mut streams = 0u64
     for step in 0u64 .. 40 {
         // The first move serves a call on the reopened Cold root, so every
@@ -664,7 +674,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
                 Ok(Parked(take p)) => {
                     // vopr probe
                     let _ = std.prop.sometimes("park", true)
-                    list.push(mut parked, (take p, take env))
+                    list.push(mut parked, (take p, take stream, take env))
                 },
                 Ok(Committed(receipt)) => {
                     if step == 0 {
@@ -672,7 +682,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
                     }
                     // vopr probe
                     let _ = std.prop.sometimes("commit without parking", true)
-                    schedule_commit(db, mut model, env, receipt.reply)
+                    schedule_commit(mut db, mut model, mut history, stream, env, receipt.reply)?
                 },
                 _ => fail("L63 schedule: a served call parks or commits"),
             }
@@ -718,7 +728,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
         } else if op == 3 && list.len(parked) != 0 {
             let ready = poll_parked(mut db)?
             let at = std.rand.below(mut g, list.len(parked))
-            let (take p, take env) = list.remove(mut parked, at)
+            let (take p, take stream, take env) = list.remove(mut parked, at)
             let was_ready = list.contains(ready, park_id(p))
             match resume_parked(mut db, take p, copy_env(env), l63_schedule_body) {
                 Ok(Parked(take again)) => {
@@ -726,27 +736,27 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
                         // vopr probe
                         let _ = std.prop.sometimes("resume parks again", true)
                     }
-                    list.push(mut parked, (take again, take env))
+                    list.push(mut parked, (take again, take stream, take env))
                 },
                 Ok(Committed(receipt)) => {
                     // vopr probe
                     let _ = std.prop.sometimes("resume commits", true)
-                    schedule_commit(db, mut model, env, receipt.reply)
+                    schedule_commit(mut db, mut model, mut history, stream, env, receipt.reply)?
                 },
                 _ => fail("L63 schedule: a resumed call parks or commits"),
             }
         } else if op == 4 && list.len(parked) != 0 {
             let at = std.rand.below(mut g, list.len(parked))
-            let (take p, take env) = list.remove(mut parked, at)
+            let (take p, take stream, take env) = list.remove(mut parked, at)
             let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), copy_env(env), l63_schedule_body) else {
                 fail("L63 schedule: a settled call commits")
             }
             // vopr probe
             let _ = std.prop.sometimes("settle", true)
-            schedule_commit(db, mut model, env, receipt.reply)
+            schedule_commit(mut db, mut model, mut history, stream, env, receipt.reply)?
         } else if op == 5 && list.len(parked) != 0 {
             let at = std.rand.below(mut g, list.len(parked))
-            let (take p, _) = list.remove(mut parked, at)
+            let (take p, _, _) = list.remove(mut parked, at)
             let _ = cancel_parked(mut db, take p)
             // vopr probe
             let _ = std.prop.sometimes("cancel", true)
@@ -756,11 +766,11 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
         }
     }
     while list.len(parked) != 0 {
-        let (take p, take env) = list.remove(mut parked, 0)
+        let (take p, take stream, take env) = list.remove(mut parked, 0)
         let Ok(Committed(receipt)) = l63_settle(mut db, Ok(Parked(take p)), copy_env(env), l63_schedule_body) else {
             fail("L63 schedule: every remaining call commits")
         }
-        schedule_commit(db, mut model, env, receipt.reply)
+        schedule_commit(mut db, mut model, mut history, stream, env, receipt.reply)?
     }
     if list.len(db.parked.entries) != 0 {
         fail("L63 schedule: no call stays queued, so every call's pins are released")

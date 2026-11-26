@@ -36,7 +36,7 @@ store@1/store/bucket_test_m2_branch_position src=63598c67595206be sig=145bfe3eda
 store@1/store/bucket_test_m2_checkpoint_advance src=02e417f70847fc86 sig=f5e666931f50159b run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_claim_witness src=81302288ee8e2fa9 sig=e6d201d9b007d2f7 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_export_replay src=32254b0caba5958e sig=1fa716aae56952c6 run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/bucket_test_m2_follower src=cf7d660f7ba17408 sig=a4710048547150c7 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
+store@1/store/bucket_test_m2_follower src=87fc39d97bbe01a2 sig=1f8f1ed88816db79 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower_overlap src=fd06ab72807b16c5 sig=c361b50cd57ee189 run=bc45ceb73933dadb bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower_read_admission src=83eca1c4cb8909b9 sig=a52455ebe86e5799 run=a4d53c8932c841f6 bug=- oracle=- rows=pending
 store@1/store/bucket_test_m2_follower_retry src=cf85d8241fd866d0 sig=36e8efb8a09c142d run=8190fe24427e0a0f bug=- oracle=- rows=pending
@@ -127,7 +127,7 @@ store@1/store/dropped_claim_time_survives_reopen_before_sweep src=af31e3df97b05f
 store@1/store/expired_cutover_keeps_old_serving src=235e69619d921896 sig=66c22a47043ebbd4 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/export_refuses_a_second_lease src=19344a9d5d817aa4 sig=6cbb98917dde6607 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/follow_schedules src=52a835df0ea4d419 sig=30a5cdb45988731a run=c9049a952ba23a49 bug=- oracle=- rows=pending
-store@1/store/follower_cancelled_publication src=500e7cad2250a94b sig=eaa29e0504192427 run=c9049a952ba23a49 bug=- oracle=- rows=pending
+store@1/store/follower_cancelled_publication src=500e7cad2250a94b sig=b6335dd4a674fb45 run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/follower_cancelled_slot src=6ee0d8e288b2ee5a sig=eb1f63d6d46cf30c run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/follower_retained_bytes src=9a12a728cc2efdac sig=15903bc83444f43e run=c7b2a52baff70a63 bug=- oracle=- rows=pending
 store@1/store/follower_slot_admission src=7515bc5c3ee4edd2 sig=c94ab93265dbf8be run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -280,7 +280,7 @@ store@1/store/test_l63_pinned_row_edit_discards_a_missed_candidate src=5cb648a38
 store@1/store/test_l63_plan_prior_uses_deciding_leaf src=cac5578583184837 sig=cf4596cf9a8dea0d run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_resolved_edits_follow_candidate_neighbors src=3e91181140f66da5 sig=23f1e0a7f3fe20c9 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l63_revocation_races_pager_wake src=8f9081ce05c8e202 sig=11b4b5ae9fee426c run=a6b003f729117be3 bug=- oracle=- rows=pending
-store@1/store/test_l63_seeded_call_schedule src=2efaa638a75e46d5 sig=1dd9e991183b5f45 run=8c5b8346c5814fa7 bug=- oracle=- rows=pending
+store@1/store/test_l63_seeded_call_schedule src=2320a8250a380a1b sig=df08a620c6855997 run=8c5b8346c5814fa7 bug=- oracle=- rows=pending
 store@1/store/test_l63_served_miss_reruns_and_commits_once src=15b444cd8357c3c7 sig=e3cf0306d62d47e5 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_l63_tiered_plan_writes_deciding_priors src=84c6b8f738f9395a sig=33906347d8663efa run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l65_pager_directory src=f9d6225cbf04e41f sig=d06731ab09c5c03a run=722e0e8306f441ca bug=- oracle=- rows=pending

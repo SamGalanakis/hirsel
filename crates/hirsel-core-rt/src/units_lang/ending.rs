@@ -1,7 +1,7 @@
 //! A helper's end, as its owner takes it.
-use super::{Context, Ended, HelperH, LangUnit, charge, consume, helper_of, tasks, wait_end};
 #[cfg(feature = "record")]
-use super::{takes, unit};
+use super::takes;
+use super::{Context, Ended, HelperH, LangUnit, charge, consume, helper_of, pump, tasks, unit};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -100,6 +100,48 @@ unsafe fn request_cancel(task: *mut tasks::Task) {
             (*h).port.publish(crate::units::ledger::ArrivalRef::boxed(
                 crate::units::ledger::Body::Cancel,
             ));
+        }
+    }
+}
+
+/// Wait for a helper's end take. Shielded waits ignore cancellation. `REC`
+/// parks with the stack given back (None); `resumed` continues that wait.
+#[inline(always)]
+pub(super) unsafe fn wait_end<const REC: bool>(
+    context: *mut Context,
+    h: *mut HelperH,
+    site: u64,
+    shielded: bool,
+    _resumed: bool,
+) -> Option<bool> {
+    // SAFETY: the handle is pinned by its owner through the wait.
+    unsafe {
+        loop {
+            if !shielded && tasks::check_cancel(context, site) != 0 {
+                return Some(false);
+            }
+            let u = unit();
+            if !(*h).ended {
+                u.reach();
+                pump(u);
+            }
+            if (*h).ended {
+                return Some(true);
+            }
+            if REC {
+                tasks::park_returning(
+                    tasks::current_task(),
+                    &raw mut (*h).waiters,
+                    #[cfg(feature = "prof")]
+                    (crate::prof::Reason::Join, 0),
+                );
+                return None;
+            }
+            tasks::park(
+                &raw mut (*h).waiters,
+                #[cfg(feature = "prof")]
+                (crate::prof::Reason::Join, 0),
+            );
         }
     }
 }

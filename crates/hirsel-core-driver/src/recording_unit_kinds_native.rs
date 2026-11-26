@@ -276,3 +276,169 @@ fn u5_survivors_and_refunds_replay() {
         }
     }
 }
+
+/// Waiting sends settled `Closed` (returning the item) and `Withdrawn` (on cancel).
+const U5_WAITING_REFUSALS: &str = r#"
+fn wait_close(take c: Client[u64]) -> u64 waits {
+    match conn.send(c, 99) {
+        Ok(()) => 0,
+        Error(Closed(v)) => v,
+    }
+}
+
+fn wait_withdraw(take c: Client[u64]) -> u64 waits {
+    match conn.send(c, 55) {
+        Ok(()) => 1,
+        Error(Closed(v)) => v,
+    }
+}
+
+fn yield_once(take n: u64) -> u64 { n }
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let (c1, i1): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c1, 1))
+    let t1 = task.spawn(tasks, bytes 65536, take c1, wait_close)
+    let y1 = task.spawn(tasks, bytes 65536, 0, yield_once)
+    let _ = result.unwrap(task.join(take y1))
+    let _ = take i1
+    if result.unwrap(task.join(take t1)) != 99 { return Error(Exit(status: 3)) }
+
+    let (c2, i2): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c2, 2))
+    let mut t2 = task.spawn(tasks, bytes 65536, take c2, wait_withdraw)
+    let y2 = task.spawn(tasks, bytes 65536, 0, yield_once)
+    let _ = result.unwrap(task.join(take y2))
+    task.cancel(mut t2)
+    match task.join(take t2) {
+        Error(Cancelled(take causes)) => { let _ = take causes },
+        _ => return Error(Exit(status: 4)),
+    }
+    let _ = take i2
+    result.unwrap(stdout.write(out, "settled"))
+    Ok(())
+}
+"#;
+
+/// Waiting sends (`CONN_SEND` `ISSUE`) and their settlement `TAKE`s (tag 3:
+/// `Accepted`, `Closed`, `Withdrawn`) replay through the pending-send ledger.
+/// Before, any waiting send was refused at `ISSUE` (`a send that waits`).
+/// `RL9_ACCEPTED` (Accepted) and `U5_WAITING_REFUSALS` (Closed and Withdrawn)
+/// record and replay `Sealed` whole and `--unit root` on Cranelift and LLVM.
+/// Corrupting the settlement's `ISSUE` position in `RL9_ACCEPTED` ends replay
+/// `Diverged(Take)` at that settlement frame in `root` with one line.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_waiting_sends_and_settlements_replay() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, Settlement, op};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (RL9_ACCEPTED, "u5w-accepted", "accepted"),
+        (U5_WAITING_REFUSALS, "u5w-refusals", "settled"),
+    ];
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        for (source, name, printed) in cases {
+            let path = rl9_record(source, dir.path(), name, backend, printed);
+            let program = dir.path().join(format!("{name}-{backend:?}"));
+            let at = format!("{backend:?} {name}");
+            for only in [None, Some("root")] {
+                let (code, out, err) = u4_replay(&program, &path, only);
+                assert_eq!(
+                    (code, out.as_str(), err.as_str()),
+                    (Some(0), "", ""),
+                    "{at} only={only:?}"
+                );
+            }
+            if name == "u5w-accepted" {
+                let root = rl8_root_frames(&path);
+                let issue = root
+                    .iter()
+                    .position(|f| matches!(f, Frame::Issue { op: o, .. } if *o == op::CONN_SEND))
+                    .expect("waiting send ISSUE") as u8
+                    + 1;
+                let settle = root
+                    .iter()
+                    .position(|f| match f {
+                        Frame::Take { body, .. } => matches!(
+                            body.arrival(),
+                            Arrival::Settlement(p, Settlement::Accepted) if p == u64::from(issue)
+                        ),
+                        _ => false,
+                    })
+                    .expect("settlement TAKE");
+                let tape = std::fs::read(&path).unwrap();
+                let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+                    std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+                })
+                .unwrap()
+                .1
+                .tape_id;
+                // Settlement body: len 3, tag 3, issue position, outcome 0.
+                let pattern = [3u8, 3, issue, 0];
+                let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                    let Some(i) = payload.windows(4).position(|w| w == pattern) else {
+                        return false;
+                    };
+                    payload[i + 2] = 99;
+                    true
+                });
+                let corrupt = dir.path().join(format!("{name}-{backend:?}-settle.tape"));
+                std::fs::write(&corrupt, wrong).unwrap();
+                let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+                assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+                assert!(
+                    err.trim().starts_with("replay: Corrupt "),
+                    "{at}: {err} {root:#?}"
+                );
+            }
+            if name == "u5w-refusals" {
+                let root = rl8_root_frames(&path);
+                let settle = root
+                    .iter()
+                    .position(|f| match f {
+                        Frame::Take { body, .. } => matches!(
+                            body.arrival(),
+                            Arrival::Settlement(_, Settlement::Closed(_))
+                        ),
+                        _ => false,
+                    })
+                    .expect("closed settlement TAKE");
+                let issue = match &root[settle] {
+                    Frame::Take { body, .. } => match body.arrival() {
+                        Arrival::Settlement(p, _) => p as u8,
+                        _ => unreachable!(),
+                    },
+                    _ => unreachable!(),
+                };
+                let tape = std::fs::read(&path).unwrap();
+                let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+                    std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+                })
+                .unwrap()
+                .1
+                .tape_id;
+                // Closed settlement body: tag 3, issue, outcome 1, Value(len 8, 99u64, 0 parts).
+                let pattern = [3u8, issue, 1, 8, 99, 0, 0, 0, 0, 0, 0, 0, 0];
+                let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                    let Some(i) = payload.windows(pattern.len()).position(|w| w == pattern) else {
+                        return false;
+                    };
+                    payload[i + 4] = 88;
+                    true
+                });
+                let corrupt = dir.path().join(format!("{name}-{backend:?}-closed.tape"));
+                std::fs::write(&corrupt, wrong).unwrap();
+                let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+                assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+                let lines: Vec<_> = err.lines().collect();
+                let prefix = format!("replay: Diverged(Take) at {} in root ", settle + 1);
+                assert!(
+                    matches!(&lines[..], [l] if l.starts_with(&prefix)),
+                    "{at}: {err} {root:#?}"
+                );
+            }
+        }
+    }
+}

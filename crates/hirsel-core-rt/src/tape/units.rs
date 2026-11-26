@@ -41,6 +41,11 @@ pub(super) struct Takes {
     /// Replay: helper-end survivors kept by this owner until their release
     /// take (`LastRelease`, `SharedRelease` or `RETIRED`).
     pub(in super::super) survivors: BTreeMap<format::SurvivorName, (crate::limit::Payer, u64)>,
+    /// Replay: waiting sends indexed by their `ISSUE` frame position, holding
+    /// `(synthetic_send_id, canonical_item)`.
+    pub(super) replay_sends: HashMap<u64, (u32, Vec<u8>)>,
+    /// Replay: next synthetic waiting-send id for `LangUnit::sends`.
+    pub(super) next_replay_send: u32,
 }
 
 /// What every unit of the run knows of a connection made while recording: the

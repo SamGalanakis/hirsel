@@ -116,6 +116,58 @@ impl Live {
         self.schedule.events += 1;
         Some(out.value)
     }
+
+    /// A replayed waiting send's `ISSUE`, checked as `checked` checks an `OP`:
+    /// consumes 1 event (the issue commit, matching recording) and returns the
+    /// `ISSUE`'s 1-based frame position, or None once the replay has ended.
+    fn checked_issue(&mut self, task: u64, op: u8, object: u64, args: &Args) -> Option<u64> {
+        self.unit_commit(task);
+        let rep = self.replayer.as_mut().unwrap();
+        let observed = IssueEvidence {
+            task,
+            op,
+            object,
+            args,
+        };
+        let frame = match rep.next() {
+            Ok(frame) => frame,
+            Err(fault) => {
+                if let Fault::Diverged(_) = fault {
+                    rep.note_next(format_args!("{observed}"));
+                }
+                self.stop_replay(fault);
+                return None;
+            }
+        };
+        let mismatch = match &frame {
+            Frame::Issue {
+                task: t,
+                op: o,
+                object: b,
+                args: stored,
+            } => {
+                if *t != task {
+                    Some(Mismatch::Schedule)
+                } else if *o != op {
+                    Some(Mismatch::Op)
+                } else if *b != object {
+                    Some(Mismatch::Object)
+                } else if stored.operands() != args.operands() {
+                    Some(Mismatch::Arg)
+                } else {
+                    None
+                }
+            }
+            Frame::End { .. } => Some(Mismatch::Missing),
+            _ => Some(Mismatch::Schedule),
+        };
+        if let Some(kind) = mismatch {
+            let fault = rep.compared(kind, &frame, format_args!("{observed}"));
+            self.stop_replay(fault);
+            return None;
+        }
+        Some(rep.taken)
+    }
 }
 
 /// A replayed `UNIT_SPAWN` with its arguments, or why this build does not
@@ -165,15 +217,33 @@ pub(crate) fn cancel(group: Option<Group>, key: usize) {
     });
 }
 
+/// Outcome of a replayed `CONN_SEND` or `CONN_TRY_SEND`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplayedSend {
+    /// Immediate outcome from an `OP` frame (0 Accepted, 1 Closed/Full, 2 Closed).
+    Immediate(u64),
+    /// Waiting send from a `CONN_SEND` `ISSUE` frame: its synthetic id in
+    /// `LangUnit::sends`, resolved later by its settlement `TAKE` (tag 3).
+    Waiting(u32),
+}
+
+/// Outcome of a recorded settlement `TAKE` (tag 3).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettlementOutcome {
+    Accepted,
+    Closed,
+    Withdrawn,
+}
+
 /// A replayed send's `CONN_SEND` or `CONN_TRY_SEND`, checked as an issue
-/// with the item its client sends: its recorded outcome, or None once the
-/// replay has ended. The send delivers nothing; the receiving unit takes
-/// the item from its own `TAKE`.
+/// with the item its client sends: its recorded outcome (`OP`) or waiting id
+/// (`ISSUE`), or None once the replay has ended. The send delivers nothing;
+/// the receiving unit takes the item from its own `TAKE`.
 pub(crate) fn send(
     group: Option<Group>,
     op: u8,
     item: Result<(u64, Vec<u8>), &'static str>,
-) -> Option<u64> {
+) -> Option<ReplayedSend> {
     replaying(group, |live| {
         let (object, value) = match item {
             Ok(item) => item,
@@ -182,15 +252,25 @@ pub(crate) fn send(
                 return None;
             }
         };
-        if let Ok(Frame::Issue { .. }) = live.replayer.as_mut().unwrap().peek() {
-            live.refuse_replay("a send that waits");
-            return None;
-        }
         let canonical = format::Value::decode(&value)
             .map(|v| v.canonical())
             .unwrap_or_default();
         let task = group.map_or(0, |g| g.task);
-        live.checked(task, op, object, &Args::of_parts(&[&canonical]))
+        let args = Args::of_parts(&[&canonical]);
+        if op == op::CONN_SEND
+            && matches!(
+                live.replayer.as_mut().unwrap().peek(),
+                Ok(Frame::Issue { .. })
+            )
+        {
+            let position = live.checked_issue(task, op, object, &args)?;
+            live.takes.next_replay_send = live.takes.next_replay_send.wrapping_add(1).max(1);
+            let id = live.takes.next_replay_send;
+            live.takes.replay_sends.insert(position, (id, canonical));
+            return Some(ReplayedSend::Waiting(id));
+        }
+        live.checked(task, op, object, &args)
+            .map(ReplayedSend::Immediate)
     })
     .flatten()
 }
@@ -242,6 +322,8 @@ pub(crate) enum Due {
         payer: crate::limit::Payer,
         bytes: u64,
     },
+    /// A waiting send's recorded settlement: its synthetic id and outcome.
+    Settlement { id: u32, outcome: SettlementOutcome },
 }
 
 fn due_causes(causes: &[format::Cause<'_>]) -> Vec<DueCause> {
@@ -356,6 +438,9 @@ pub(crate) fn due(
                 HelperOutcome::Failed(causes) | HelperOutcome::Cancelled(causes),
                 survivors,
             ) => (ordinal, Err(due_causes(&causes)), survivors),
+            Arrival::HelperEnd(_, HelperOutcome::Deadlock(_), _) => {
+                unreachable!("HelperEnd arrival rejects Deadlock")
+            }
             Arrival::Cancel => return Some(Due::Cancel),
             Arrival::Item(ordinal, value) => {
                 let value = value.bytes().to_vec();
@@ -464,10 +549,37 @@ pub(crate) fn due(
                 live.stop_replay(fault);
                 return None;
             }
-            other => {
-                live.refuse_replay(unsupported(&other));
-                return None;
+            Arrival::Settlement(position, settlement) => {
+                let Some((id, sent_canonical)) = live.takes.replay_sends.remove(&position) else {
+                    let rep = live.replayer.as_mut().unwrap();
+                    let fault = rep.compared(
+                        Mismatch::Take,
+                        &frame,
+                        format_args!("no waiting send at position {position}"),
+                    );
+                    live.stop_replay(fault);
+                    return None;
+                };
+                let outcome = match settlement {
+                    format::Settlement::Accepted => SettlementOutcome::Accepted,
+                    format::Settlement::Closed(returned) => {
+                        if returned.canonical() != sent_canonical {
+                            let rep = live.replayer.as_mut().unwrap();
+                            let fault = rep.compared(
+                                Mismatch::Take,
+                                &frame,
+                                format_args!("closed settlement item differs from sent item"),
+                            );
+                            live.stop_replay(fault);
+                            return None;
+                        }
+                        SettlementOutcome::Closed
+                    }
+                    format::Settlement::Withdrawn => SettlementOutcome::Withdrawn,
+                };
+                return Some(Due::Settlement { id, outcome });
             }
+            Arrival::Refund(_) => unreachable!("handled at drain"),
         };
         let mut seen = std::collections::BTreeSet::new();
         for s in &survivors {
@@ -609,6 +721,28 @@ pub(crate) fn drain_survivors(group: Option<Group>) {
     }
 }
 
+/// Whether a replaying waiting send `id` settled `Withdrawn` at the next frame,
+/// so the cancelled sender observes cancellation before taking the settlement.
+pub(crate) fn withdraw_wins(group: Option<Group>, id: u32) -> bool {
+    replaying(group, |live| {
+        let Some((&pos, _)) = live
+            .takes
+            .replay_sends
+            .iter()
+            .find(|(_, (sid, _))| *sid == id)
+        else {
+            return false;
+        };
+        let rep = live.replayer.as_mut().unwrap();
+        matches!(
+            rep.peek(),
+            Ok(Frame::Take { body, .. })
+                if matches!(body.arrival(), Arrival::Settlement(p, format::Settlement::Withdrawn) if p == pos)
+        )
+    })
+    .unwrap_or(false)
+}
+
 /// Whether the stream's next frame is an in-operation `LastRelease` take at
 /// count 1 (right after a stand-in client's `CLOSE`) when `(stream, ordinal)`
 /// is a kept surviving connection.
@@ -705,20 +839,6 @@ pub(crate) fn refund_mismatch(group: Group, frame: &Frame, why: &'static str) {
         let fault = rep.compared(Mismatch::Take, frame, format_args!("{why}"));
         live.stop_replay(fault);
     });
-}
-
-fn unsupported(arrival: &Arrival<'_>) -> &'static str {
-    match arrival {
-        Arrival::Item(..) => "an item take",
-        Arrival::Close(_) => "a close take",
-        Arrival::SealAnswer(_) => "a seal answer take",
-        Arrival::Settlement(..) => "a settlement take",
-        Arrival::LastRelease(..) => "a last release take",
-        Arrival::SharedRelease(..) => unreachable!("handled above"),
-        Arrival::Cancel => "a cancel take",
-        Arrival::Refund(_) => unreachable!("handled at drain"),
-        Arrival::HelperEnd(..) => "a helper end take",
-    }
 }
 
 pub(in crate::tape) enum Unpacked {

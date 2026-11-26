@@ -9,6 +9,16 @@ use crate::tape::units::{self as tape, Arrival};
 use std::sync::Arc;
 
 #[cfg(feature = "record")]
+pub(super) use crate::tape::units::replay::ReplayedSend;
+
+#[cfg(not(feature = "record"))]
+#[allow(dead_code)]
+pub(super) enum ReplayedSend {
+    Immediate(u64),
+    Waiting(u32),
+}
+
+#[cfg(feature = "record")]
 impl LangUnit {
     /// The unit's recording: its helper stream's, or that of the run whose
     /// task first reaches it.
@@ -244,18 +254,22 @@ impl SendNote {
     }
 
     /// A replaying sender's send, checked against its stream: the recorded
-    /// outcome, or None inside once the replay has ended. None when the
-    /// sender does not replay. An accepted send's item leaves: the clients
-    /// it holds are dropped here, before its buffers are freed.
+    /// immediate outcome or waiting id, or None inside once the replay has
+    /// ended. None when the sender does not replay. An accepted send's item
+    /// leaves: the clients it holds are dropped here, before its buffers are
+    /// freed.
     /// # Safety
     /// `task` is the sender's task; the item is unmoved since `new`.
-    pub(super) unsafe fn replayed(&mut self, task: *mut tasks::Task) -> Option<Option<u64>> {
+    pub(super) unsafe fn replayed(
+        &mut self,
+        task: *mut tasks::Task,
+    ) -> Option<Option<ReplayedSend>> {
         if !self.group.is_some_and(|group| group.replaying()) {
             return None;
         }
         let item = self.item.take()?;
         let outcome = crate::tape::units::replay::send(self.group, self.op, item);
-        if outcome == Some(0) {
+        if outcome == Some(ReplayedSend::Immediate(0)) {
             // SAFETY: by the contract; the sender's handle pins the client.
             unsafe {
                 let client = &*self.client;
@@ -292,7 +306,10 @@ impl SendNote {
     #[inline(always)]
     pub(super) fn note(&mut self, _: Option<u64>, _: Option<u32>) {}
     #[inline(always)]
-    pub(super) unsafe fn replayed(&mut self, _: *mut crate::tasks::Task) -> Option<Option<u64>> {
+    pub(super) unsafe fn replayed(
+        &mut self,
+        _: *mut crate::tasks::Task,
+    ) -> Option<Option<ReplayedSend>> {
         None
     }
 }

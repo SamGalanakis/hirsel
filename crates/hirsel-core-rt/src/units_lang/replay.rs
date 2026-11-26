@@ -142,6 +142,27 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
             payer.settle_at_unit(bytes);
             return true;
         }
+        Some(tape::Due::Settlement { id, outcome }) => {
+            let took = match outcome {
+                tape::SettlementOutcome::Accepted => Took::Accepted(id),
+                tape::SettlementOutcome::Closed => Took::Closed(id),
+                tape::SettlementOutcome::Withdrawn => Took::Withdrawn(id),
+            };
+            if let Some(w) = u.sends.remove(&id) {
+                // SAFETY: the waiting send pins its SendWait until settled.
+                unsafe {
+                    (*w).settled = Some(took);
+                    Waiters::wake_all(
+                        &raw mut (*w).waiters,
+                        #[cfg(feature = "prof")]
+                        (crate::prof::WakeSource::Unknown, ptr::null_mut(), 0),
+                    );
+                }
+                return true;
+            }
+            tape::diverged_take(Some(group), "no task waiting on settled send");
+            return false;
+        }
     };
     let h = u.helpers[&key];
     // SAFETY: `h` is a registered helper handle of this unit.

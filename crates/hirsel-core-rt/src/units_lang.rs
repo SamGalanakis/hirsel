@@ -46,7 +46,7 @@ mod crossing;
 mod ending;
 pub use crossing::{Cross, SpawnEntry};
 use crossing::{TapeHelper, tape_group};
-use ending::{RESULTS, ResultsExt, end_take};
+use ending::{RESULTS, ResultsExt, end_take, wait_end};
 pub(crate) use ending::{abandon, cancel};
 pub(crate) mod packing;
 #[cfg(feature = "record")]
@@ -538,49 +538,65 @@ unsafe fn conn_send<const REC: bool>(
             // The item as a value, read before the send moves it.
             let mut send = takes::SendNote::new(context, handle, value, wait, sockets.as_ref());
             // A replayed send delivers nothing: its outcome is the recorded one.
+            let mut replayed_wait = None;
             if charge <= client.0.room()
                 && let Some(outcome) = send.replayed(task)
             {
-                if outcome == Some(0) {
-                    free_owners(Some(&*context), value, owners);
-                    return out(0);
+                match outcome {
+                    Some(takes::ReplayedSend::Immediate(0)) => {
+                        free_owners(Some(&*context), value, owners);
+                        return out(0);
+                    }
+                    Some(takes::ReplayedSend::Waiting(id)) => {
+                        replayed_wait = Some(id);
+                    }
+                    Some(takes::ReplayedSend::Immediate(1)) if !wait => {
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        return out(2);
+                    }
+                    Some(takes::ReplayedSend::Immediate(_)) => {
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        return out(1);
+                    }
+                    None => {
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        return failed;
+                    }
                 }
-                attach_sockets(context, value, offsets(), sockets.as_ref());
-                return match outcome {
-                    Some(1) if !wait => out(2),
-                    Some(_) => out(1),
-                    None => failed,
-                };
             }
-            let mut source = CrossSend::new(value);
-            source.rows = live.clone();
-            source.sockets = sockets.clone();
-            let id = match UnitCtx::send_cross(client, source, charge, wait, || {
-                &mut (*tasks::lang_unit_for(task)).ctx
-            }) {
-                Sent::Accepted => {
-                    send.note(Some(0), None);
-                    free_owners(Some(&*context), value, owners);
-                    return out(0);
-                }
-                Sent::Bounds => {
-                    attach_sockets(context, value, offsets(), sockets.as_ref());
-                    causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
-                    return failed;
-                }
-                Sent::Closed(_) => {
-                    send.note(Some(if wait { 1 } else { 2 }), None);
-                    attach_sockets(context, value, offsets(), sockets.as_ref());
-                    return out(1);
-                }
-                Sent::Full(_) => {
-                    send.note(Some(1), None);
-                    attach_sockets(context, value, offsets(), sockets.as_ref());
-                    return out(2);
-                }
-                Sent::Waiting(id) => {
-                    send.note(None, Some(id));
-                    id
+            let id = if let Some(id) = replayed_wait {
+                id
+            } else {
+                let mut source = CrossSend::new(value);
+                source.rows = live.clone();
+                source.sockets = sockets.clone();
+                match UnitCtx::send_cross(client, source, charge, wait, || {
+                    &mut (*tasks::lang_unit_for(task)).ctx
+                }) {
+                    Sent::Accepted => {
+                        send.note(Some(0), None);
+                        free_owners(Some(&*context), value, owners);
+                        return out(0);
+                    }
+                    Sent::Bounds => {
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
+                        return failed;
+                    }
+                    Sent::Closed(_) => {
+                        send.note(Some(if wait { 1 } else { 2 }), None);
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        return out(1);
+                    }
+                    Sent::Full(_) => {
+                        send.note(Some(1), None);
+                        attach_sockets(context, value, offsets(), sockets.as_ref());
+                        return out(2);
+                    }
+                    Sent::Waiting(id) => {
+                        send.note(None, Some(id));
+                        id
+                    }
                 }
             };
             if REC {
@@ -615,8 +631,16 @@ unsafe fn conn_send<const REC: bool>(
             if settled.is_some() {
                 u.waits -= 1;
                 let sockets = ptr::read(&st.sockets);
+                #[cfg(feature = "record")]
+                let replaying = u.ctx.parking;
+                #[cfg(not(feature = "record"))]
+                let replaying = false;
                 return match settled {
                     Some(Took::Accepted(_)) => {
+                        #[cfg(feature = "record")]
+                        if replaying {
+                            replay::departed(u, value, &client.0.rows);
+                        }
                         free_owners(Some(&*context), value, owners);
                         out(0)
                     }
@@ -630,21 +654,35 @@ unsafe fn conn_send<const REC: bool>(
                     }
                 };
             }
+            #[cfg(feature = "record")]
+            let replaying = u.ctx.parking;
+            #[cfg(not(feature = "record"))]
+            let replaying = false;
             if !st.withdrawn && tasks::cancel_pending_for(context, task) {
                 // A withdrawal that wins settles Withdrawn; one that loses
                 // waits for the acceptance or close on its way.
                 st.withdrawn = true;
-                if u.ctx.withdraw(client, st.id) {
+                #[cfg(feature = "record")]
+                let won = if replaying {
+                    crate::tape::units::replay::withdraw_wins(u.tape(), st.id)
+                } else {
+                    u.ctx.withdraw(client, st.id)
+                };
+                #[cfg(not(feature = "record"))]
+                let won = u.ctx.withdraw(client, st.id);
+                if won {
                     tasks::check_cancel_for(context, site, task);
                 }
                 continue;
             }
-            if tasks::park_unit_alone(task, || {
-                (*unit)
-                    .ctx
-                    .port
-                    .spin_before_park(Some(client.receiver_port()))
-            }) {
+            if !replaying
+                && tasks::park_unit_alone(task, || {
+                    (*unit)
+                        .ctx
+                        .port
+                        .spin_before_park(Some(client.receiver_port()))
+                })
+            {
                 spun = true;
                 continue;
             }
@@ -1216,48 +1254,6 @@ fn helper_main(
         drop(context);
         let LangUnit { ctx, .. } = *lu; // its helper stays active to the end
         ctx.end_helper(Some(ret), false);
-    }
-}
-
-/// Wait for a helper's end take. Shielded waits ignore cancellation. `REC`
-/// parks with the stack given back (None); `resumed` continues that wait.
-#[inline(always)]
-unsafe fn wait_end<const REC: bool>(
-    context: *mut Context,
-    h: *mut HelperH,
-    site: u64,
-    shielded: bool,
-    _resumed: bool,
-) -> Option<bool> {
-    // SAFETY: the handle is pinned by its owner through the wait.
-    unsafe {
-        loop {
-            if !shielded && tasks::check_cancel(context, site) != 0 {
-                return Some(false);
-            }
-            let u = unit();
-            if !(*h).ended {
-                u.reach();
-                pump(u);
-            }
-            if (*h).ended {
-                return Some(true);
-            }
-            if REC {
-                tasks::park_returning(
-                    tasks::current_task(),
-                    &raw mut (*h).waiters,
-                    #[cfg(feature = "prof")]
-                    (crate::prof::Reason::Join, 0),
-                );
-                return None;
-            }
-            tasks::park(
-                &raw mut (*h).waiters,
-                #[cfg(feature = "prof")]
-                (crate::prof::Reason::Join, 0),
-            );
-        }
     }
 }
 

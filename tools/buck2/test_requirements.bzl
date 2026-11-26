@@ -121,6 +121,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::u5_items_with_sequences_replay_by_case",
         "native::tests::u5_capabilities_replay_where_they_arrive",
         "native::tests::u5_survivors_and_refunds_replay",
+        "native::tests::u5_waiting_sends_and_settlements_replay",
         "native::tests::u5_secrets_cross_in_items_entries_and_results",
         "native::tests::u5_key_shares_cross_and_agree",
         "native::tests::u5_replays_at_another_worker_count",

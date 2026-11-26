@@ -396,6 +396,8 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         row = rows[definition]
         seed_zero = {'status': 0 if row['passed'] else (row.get('status') or 1),
                      'stdout': row.get('stdout', ''), 'stderr': row.get('stderr', row.get('stopped', ''))}
+        if row.get('timed_out'):
+            seed_zero.update(status=124, timed_out=True)
         # Two consecutive allocated seeds always exercise both canary residues.
         count = 2 if law == CANARY else seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
         laws.append({'build': build, 'law': law, 'executable': str(binary),

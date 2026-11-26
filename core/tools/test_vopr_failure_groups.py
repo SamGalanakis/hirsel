@@ -242,7 +242,7 @@ if seed == 2:
 
 
 class Preparation(unittest.TestCase):
-    def test_board_keeps_good_laws_when_a_contract_is_refused_or_has_no_binary(self):
+    def test_board_keeps_prepared_laws_when_a_contract_is_refused_or_has_no_binary(self):
         names = ["std@1/tests/exec/run_until_escalates",
                  "std@1/tests/http_connection/http_request_scratch",
                  "std@1/tests/net/public_connect_preflight"]
@@ -269,7 +269,8 @@ for name in definitions:
     (out / stem).touch()
     if "--coverage" in args:
         (out / (stem + ".covmap")).touch()
-    rows.append({"definition": name, "source": "executed", "passed": True})
+    timed_out = "public_connect_preflight" in name and "--coverage" in args
+    rows.append({"definition": name, "source": "executed", "passed": not timed_out, "timed_out": timed_out})
 print(json.dumps({"tests": rows}))
 ''')
             compiler.chmod(0o755)
@@ -283,6 +284,7 @@ print(json.dumps({"tests": rows}))
             laws = json.loads((work / "manifest.json").read_text())
             self.assertEqual([law["law"] for law in laws], names[2:])
             self.assertFalse(laws[0]["defer_probe_gate"])
+            self.assertEqual(laws[0]["seed_zero"], {"status": 124, "timed_out": True, "stdout": "", "stderr": ""})
             self.assertEqual(publish(root), 3)
             failures = [json.loads(line) for line in (root / "failure-groups.jsonl").read_text().splitlines()]
             self.assertEqual([row["group"][:2] for row in failures], [[name, "prepare_red"] for name in names[:2]])

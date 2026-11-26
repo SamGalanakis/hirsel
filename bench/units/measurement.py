@@ -18,7 +18,7 @@ from bench.units.contract import (
 
 TRACE_IDS = count(1)
 SWITCH = re.compile(
-    r"^\s*(\d+)/(\d+)\s+\[(\d+)\]\s+(\d+)\.(\d+):\s+sched:sched_switch:\s+.*?:(\d+)\s+\[\d+\]\s+\S+"
+    r"^\s*(-?\d+)/(-?\d+)\s+\[(\d+)\]\s+(\d+)\.(\d+):\s+sched:sched_switch:\s+.*?:(\d+)\s+\[\d+\]\s+(\S+)"
     r"\s+==>\s+.*?:(\d+)\s+\[\d+\]"
 )
 
@@ -119,7 +119,7 @@ def classify_tasks(path, cpu_sets, windows, start, end, busy_ns):
             if "PERF_RECORD_LOST" in line or line.lstrip().startswith("LOST"):
                 lost += 1
             if matched := SWITCH.match(line):
-                tgid, tid, cpu, seconds, fraction, previous, following = matched.groups()
+                tgid, tid, cpu, seconds, fraction, previous, state, following = matched.groups()
                 tgid, tid, cpu, previous, following = map(int, (tgid, tid, cpu, previous, following))
                 if cpu not in cpus:
                     continue
@@ -128,8 +128,10 @@ def classify_tasks(path, cpu_sets, windows, start, end, busy_ns):
                 if expected != previous or (cpu in running and timestamp < last):
                     gaps.add(cpu)
                 # The event was emitted by the outgoing thread before the context switch.
+                # perf script can drop the TID on exit while keeping the sample's TGID.
+                has_owner = tgid > 0 and (tid == previous or (tid == -1 and state in ("X", "Z")))
                 if previous:
-                    account(cpu, tgid if tid == previous and tgid else None, last, timestamp)
+                    account(cpu, tgid if has_owner else None, last, timestamp)
                 running[cpu] = timestamp, following
             elif "sched:sched_switch:" in line:
                 lost += 1

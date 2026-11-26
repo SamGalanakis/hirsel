@@ -2,4 +2,4 @@
     900/909     [016] 11.003000000: sched:sched_switch: iou-wrk-900:909 [120] S ==> iou-wrk-700:707 [120]
     700/707     [016] 11.999000000: sched:sched_switch: iou-wrk-700:707 [120] S ==> unknown:914 [120]
       0/0       [017] 11.050000000: sched:sched_switch: swapper/17:0 [120] R ==> load:800 [120]
-    800/800     [017] 11.950000000: sched:sched_switch: load:800 [120] S ==> swapper/17:0 [120]
+    800/-1      [017] 11.950000000: sched:sched_switch: load:800 [120] X ==> swapper/17:0 [120]

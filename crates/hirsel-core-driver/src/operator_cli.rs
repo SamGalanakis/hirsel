@@ -648,7 +648,9 @@ impl<'a> Exchange<'a> {
                     if !last {
                         continue;
                     }
-                    let stream = match self.source.as_ref().unwrap().stream(&blobs) {
+                    // A Need's parts end with its last; a repeated admission asks afresh.
+                    let wanted = std::mem::take(&mut blobs);
+                    let stream = match self.source.as_ref().unwrap().stream(&wanted) {
                         Ok(stream) => stream,
                         Err(why) => break Err(why),
                     };

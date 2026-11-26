@@ -6,7 +6,7 @@ on:
     paths: ["core/**", ".github/workflows/core-twins.yml"]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

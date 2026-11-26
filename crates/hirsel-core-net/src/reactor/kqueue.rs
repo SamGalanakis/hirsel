@@ -285,11 +285,12 @@ impl Poller {
 
     /// Both directions edge-triggered (`EV_CLEAR`), as epoll's `EPOLLET`.
     fn add_kqueue(&self, fd: &Arc<OwnedFd>, tag: u64, _owner: bool) -> io::Result<()> {
-        // A pipe end refuses the filter of the direction it lacks (EPIPE).
+        // A pipe end refuses the filter of the direction it lacks (EPIPE), and
+        // the unasked vnode filter's delete fails ENOENT on a new watch.
         apply(
             self.kq(),
             &mut filters(fd.as_raw_fd(), tag, INTEREST, libc::EV_CLEAR),
-            &[libc::EPIPE],
+            &[libc::EPIPE, libc::ENOENT],
         )
     }
 

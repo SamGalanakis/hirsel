@@ -58,12 +58,14 @@ _expm1
 _fchflags
 _fchmod
 _fclonefileat
+_fclose
 _fcntl
 _fdopendir
 _fflush
 _flock
 _fmod
 _fmodf
+_fopen
 _fprintf
 _fputs
 _free
@@ -72,6 +74,7 @@ _freeifaddrs
 _fstat
 _fstatat
 _ftruncate
+_fwrite
 _gai_strerror
 _getaddrinfo
 _getcwd
@@ -124,6 +127,7 @@ _open
 _openat
 _opendir
 _pause
+_perror
 _pipe
 _poll
 _posix_memalign

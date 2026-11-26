@@ -31,6 +31,11 @@ pub(crate) fn test_link(_runtime: &Path) -> crate::native::Link {
     )
 }
 
+#[cfg(test)]
+pub(crate) fn test_compiler(_runtime: &Path) -> PathBuf {
+    std::env::current_exe().unwrap()
+}
+
 /// The kit's Linux linker has both the ELF and Mach-O ports.
 pub(crate) fn installation_linker(kit: &Path, _library: &Path) -> io::Result<PathBuf> {
     Ok(kit.join("ld.lld"))

@@ -63,14 +63,24 @@ pub(crate) fn loaded_libraries(
 
 #[cfg(test)]
 pub(crate) fn test_link(runtime: &Path) -> crate::native::Link {
+    let compiler = test_compiler(runtime);
+    let recipe = crate::installation::Installed::discover(&compiler)
+        .unwrap()
+        .unwrap()
+        .link(super::HOST_TARGET.triple())
+        .unwrap();
+    crate::native::Link::Installed(recipe)
+}
+
+#[cfg(test)]
+pub(crate) fn test_compiler(runtime: &Path) -> PathBuf {
     thread_local! {
-        // Keep the recipe for all builds of one law. Its prefix goes away with
-        // the test thread.
-        static INSTALLATION: std::cell::OnceCell<(tempfile::TempDir, PathBuf)> =
+        // The prefix is shared by a law's builds and request children.
+        static INSTALLATION: std::cell::OnceCell<tempfile::TempDir> =
             const { std::cell::OnceCell::new() };
     }
     INSTALLATION.with(|installation| {
-        let (_, recipe) = installation.get_or_init(|| {
+        let dir = installation.get_or_init(|| {
             let dir = tempfile::tempdir().unwrap();
             let target = super::HOST_TARGET.triple();
             let kit = PathBuf::from(std::env::var_os("HIRSEL_LINK_KIT").expect("link kit"));
@@ -82,13 +92,8 @@ pub(crate) fn test_link(runtime: &Path) -> crate::native::Link {
                 &mut crate::Meter::new(false),
             )
             .unwrap();
-            let recipe = crate::installation::Installed::discover(&dir.path().join("hirsel"))
-                .unwrap()
-                .unwrap()
-                .link(target)
-                .unwrap();
-            (dir, recipe)
+            dir
         });
-        crate::native::Link::Installed(recipe.clone())
+        dir.path().join("hirsel")
     })
 }

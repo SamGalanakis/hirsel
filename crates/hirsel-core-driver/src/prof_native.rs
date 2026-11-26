@@ -406,6 +406,15 @@ fn profiler_times_provider_callbacks_separately_from_pending() {
     assert_eq!(timer, 1);
 }
 
+fn profiler_request(args: &[String], directory: &Path) -> Command {
+    let compiler = crate::host::test_compiler(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").unwrap()),
+    );
+    process::request_command_at(&compiler, args, directory)
+}
+
 #[test]
 fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
     let dir = tempfile::tempdir().unwrap();
@@ -417,8 +426,6 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
     let manifest = dir.path().join("inputs.json");
     std::fs::write(&manifest, serde_json::to_vec(&request.inputs).unwrap()).unwrap();
     let tape = dir.path().join("run.tape");
-    let compiler =
-        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
     let store = dir.path().join("store");
     let args = |command: &[&str], runtime: &Path, entry: &str, options: &[&str]| {
         command
@@ -432,8 +439,6 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
                 "--backend",
                 "cranelift",
                 "--source-core",
-                "--cc",
-                compiler.to_str().unwrap(),
                 "--runtime",
                 runtime.to_str().unwrap(),
                 "--store",
@@ -444,7 +449,7 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
             .collect::<Vec<_>>()
     };
     let recorded = "app@1/main/recorded";
-    let (code, _, error) = process::tape_request(
+    let (code, _, error) = process::tape_request_output(profiler_request(
         &args(
             &["run"],
             &env_record_runtime(),
@@ -452,12 +457,12 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
             &["--record", tape.to_str().unwrap()],
         ),
         dir.path(),
-    );
+    ));
     assert_eq!(code, Some(0), "{error}");
     let original = std::fs::read(&tape).unwrap();
 
     let replay = |entry, output: &Path| {
-        process::tape_request(
+        process::tape_request_output(profiler_request(
             &args(
                 &["prof", "replay"],
                 &env_observe_runtime(),
@@ -471,7 +476,7 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
                 ],
             ),
             dir.path(),
-        )
+        ))
     };
     let profile = dir.path().join("replay.hprof");
     let (code, _, error) = replay(recorded, &profile);
@@ -619,7 +624,6 @@ pub fn main() -> Result[(), Exit] {
     )
     .unwrap();
 
-    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     let recording = root.join(std::env::var_os("HIRSEL_CORE_RT_RECORD_ARCHIVE").unwrap());
     let observed = root.join(std::env::var_os("HIRSEL_CORE_RT_OBSERVED_RECORD_ARCHIVE").unwrap());
     let profiling = root.join(std::env::var_os("HIRSEL_CORE_RT_PROF_RECORD_ARCHIVE").unwrap());
@@ -637,8 +641,6 @@ pub fn main() -> Result[(), Exit] {
                 "--source-core",
                 "--libraries",
                 root.join("core").to_str().unwrap(),
-                "--cc",
-                llvm.join("bin/clang").to_str().unwrap(),
                 "--runtime",
                 runtime.to_str().unwrap(),
                 "--store",
@@ -648,13 +650,13 @@ pub fn main() -> Result[(), Exit] {
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
-    let (code, _, err) = process::tape_request(
+    let (code, _, err) = process::tape_request_output(profiler_request(
         &args(&["run"], &recording, &["--record", tape.to_str().unwrap()]),
         dir.path(),
-    );
+    ));
     assert_eq!(code, Some(0), "record: {err}");
     let before = std::fs::read(&tape).unwrap();
-    let (code, _, err) = process::tape_request(
+    let (code, _, err) = process::tape_request_output(profiler_request(
         &args(
             &["replay"],
             &observed,
@@ -666,11 +668,11 @@ pub fn main() -> Result[(), Exit] {
             ],
         ),
         dir.path(),
-    );
+    ));
     assert_eq!(code, Some(0), "runtime metrics replay: {err}");
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(charges).unwrap()).unwrap();
-    let out = process::tape_request_command(
+    let out = profiler_request(
         &args(
             &["prof", "replay"],
             &profiling,

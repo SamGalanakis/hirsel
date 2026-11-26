@@ -18,7 +18,8 @@ json layout families and the M2b table and dispatch_cross_package workloads.
 Each guard program has its own XDG cache and three builds 3 s apart, each with a fresh
 store. Cold is build 1, which also compiles core and std into the cache. Warm is build 3:
 core and std cached, which is an installed compiler's ordinary build. One sample each:
-process-tree instructions:u on one CPU (HIRSEL_MEASURE_CPU, default 16).
+process-tree instructions:u on one CPU. Set HIRSEL_MEASURE_CPU to a CPU in the
+process's affinity mask before running this tool.
 With --resident-limit, run in a 2 GiB cgroup v2 with swap disabled and GNU time installed.
 The cgroup bounds resident memory while Hirsel's data limit leaves room for untouched
 virtual reservations. Each counted build records its peak RSS in KiB.
@@ -53,7 +54,6 @@ _spec.loader.exec_module(arena_run)
 
 PIN = ROOT / 'tools/buck2/toolchains/llvm-files/lib'
 CC = ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang'
-CPU = os.environ.get('HIRSEL_MEASURE_CPU', '16')
 
 
 def arena(out):
@@ -143,11 +143,12 @@ def shadow_environment(compiler):
     return dict(os.environ, LD_LIBRARY_PATH=str(PIN), HIRSEL_LLVM_EXPERIMENT_BUILD_ID=build_id)
 
 
-def build(compiler, runtime, args, out, xdg, sample, memory_limit='2G', capture_rss=False):
+def build(compiler, runtime, args, out, xdg, *, cpu=None, memory_limit='2G', capture_rss=False):
     out.mkdir(parents=True)
     env = shadow_environment(compiler) | dict(HIRSEL_MEMORY_LIMIT=memory_limit, HIRSEL_JOBS='1',
                             XDG_CACHE_HOME=str(xdg / 'cache'), XDG_DATA_HOME=str(xdg / 'data'))
-    pre = ['taskset', '-c', CPU, 'perf', 'stat', '-x', ';', '-e', 'instructions:u', '-o', str(out / 'perf'), '--'] if sample else []
+    pre = ['taskset', '-c', str(cpu), 'perf', 'stat', '-x', ';', '-e', 'instructions:u',
+           '-o', str(out / 'perf'), '--'] if cpu is not None else []
     executable = out / 'exe'
     command = pre + [str(compiler), 'build', *args, '--backend', 'llvm', '--release', '--runtime', str(runtime),
                      '--cc', str(CC), '--store', str(out / 'store'), '--json', '-o', str(executable)]
@@ -158,7 +159,7 @@ def build(compiler, runtime, args, out, xdg, sample, memory_limit='2G', capture_
     if result.returncode or not executable.is_file():
         peak = f' (peak RSS {rss.read_text().strip()} KiB)' if rss.is_file() else ''
         raise SystemExit(f'engine_llvm: {out.name} failed to build{peak}:\n{result.stdout[-1500:]!r}\n{result.stderr[-1500:]!r}')
-    if not sample:
+    if cpu is None:
         return None
     subprocess.run(['objcopy', '--dump-section', f".text={out / 'text'}", str(executable)], check=True)
     instructions = next(int(line.split(';')[0]) for line in (out / 'perf').read_text().splitlines() if 'instructions:u' in line)
@@ -168,16 +169,18 @@ def build(compiler, runtime, args, out, xdg, sample, memory_limit='2G', capture_
     return measured
 
 
-def measure(compiler, runtime, jobs, out, resident_limit):
+def measure(compiler, runtime, jobs, out, resident_limit, cpu):
     results = {}
     memory_limit = '8G' if resident_limit else '2G'
     for tag, args in jobs:
         xdg = out / 'xdg' / tag
-        cold = build(compiler, runtime, args, out / f'{tag}.1', xdg, True, memory_limit, resident_limit)
+        cold = build(compiler, runtime, args, out / f'{tag}.1', xdg,
+                     cpu=cpu, memory_limit=memory_limit, capture_rss=resident_limit)
         time.sleep(3)
-        build(compiler, runtime, args, out / f'{tag}.2', xdg, False, memory_limit)
+        build(compiler, runtime, args, out / f'{tag}.2', xdg, memory_limit=memory_limit)
         time.sleep(3)
-        warm = build(compiler, runtime, args, out / f'{tag}.3', xdg, True, memory_limit, resident_limit)
+        warm = build(compiler, runtime, args, out / f'{tag}.3', xdg,
+                     cpu=cpu, memory_limit=memory_limit, capture_rss=resident_limit)
         results[tag] = dict(warm=warm['build'], cold=cold['build'], text=warm['text'])
         if resident_limit:
             results[tag].update(cold_rss_kib=cold['rss_kib'], warm_rss_kib=warm['rss_kib'])
@@ -204,6 +207,13 @@ def main():
     for p in (t, g):
         p.add_argument('--artifacts', type=Path, required=True)
     args = parser.parse_args()
+    value = os.environ.get('HIRSEL_MEASURE_CPU', '')
+    try:
+        cpu = int(value, 10)
+    except ValueError:
+        parser.error('set HIRSEL_MEASURE_CPU to a CPU in the process affinity mask')
+    if cpu not in os.sched_getaffinity(0):
+        parser.error(f'HIRSEL_MEASURE_CPU={value!r} is outside the process affinity mask')
     if args.command == 'guard' and args.resident_limit:
         (group,) = (line[3:] for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::'))
         cgroup = Path('/sys/fs/cgroup') / group.lstrip('/')
@@ -219,13 +229,13 @@ def main():
         exe = shadow(args.library, compiler, args.out / 'shadow')
         memory_limit = os.environ.get('HIRSEL_MEMORY_LIMIT', '8G')
         for tag, build_args in training(inputs):
-            build(exe, runtime, build_args, args.out / tag, args.out / 'xdg', False, memory_limit)
+            build(exe, runtime, build_args, args.out / tag, args.out / 'xdg', memory_limit=memory_limit)
         return 0
     jobs = training(inputs) + held_out(inputs)
     sides = {}
     for side, library in (('stock', args.stock), ('candidate', args.candidate)):
         exe = shadow(library, compiler, args.out / side / 'shadow')
-        sides[side] = measure(exe, runtime, jobs, args.out / side, args.resident_limit)
+        sides[side] = measure(exe, runtime, jobs, args.out / side, args.resident_limit, cpu)
     stock, candidate = sides['stock'], sides['candidate']
     report = dict(programs=sides, differing=[t for t in stock if stock[t]['text'] != candidate[t]['text']],
                   warm=geomean([candidate[t]['warm'] / stock[t]['warm'] for t in stock]),

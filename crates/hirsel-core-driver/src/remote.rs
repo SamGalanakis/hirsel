@@ -32,11 +32,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How long a remote that failed a request is not asked again.
-const DOWN: Duration = Duration::from_secs(60);
+const DOWN: Duration = Duration::from_secs(15);
 /// How long a name the remote did not have is not asked for again.
-const MISSING: Duration = Duration::from_secs(10 * 60);
-const CONNECT: Duration = Duration::from_secs(2);
-const READ: Duration = Duration::from_secs(20);
+const MISSING: Duration = Duration::from_secs(30);
+const CONNECT: Duration = Duration::from_secs(5);
+const READ: Duration = Duration::from_secs(30);
 /// The largest signed record read.
 const RECORD_LIMIT: u64 = 256 << 20;
 const STD_MANIFEST_SCHEMA: u32 = 1;

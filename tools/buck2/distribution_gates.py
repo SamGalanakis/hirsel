@@ -39,7 +39,9 @@ def distribution_gates(out, call, Raw, reads):
                             data=["//tools/toolchain-dist:install.sh", ".github/workflows/release.yml"]))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py",
                             args=["--present", *adapted_citations_present(reads)],
-                            data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build", "//tools/toolchain-dist:install.sh", "NOTICES.md", "Cargo.lock",
+                            data=["tools/tests/distribution_notices.py", "//tools/toolchain-dist:build",
+                                  "//tools/toolchain-dist:darwin_host.py", "//tools/buck2/native-toolchain:link-kit-source",
+                                  "//tools/toolchain-dist:install.sh", "NOTICES.md", "Cargo.lock",
                                   *("tools/tests/fixtures/glibc-gate/" + name for name in ("strong-glibc239", "weak-dynsym", "weak-symtab")),
                                   "//third-party:NOTICES.md", "tools/native-toolchain/llvm-23.lock", "//tools/toolchain-dist:notice-sources.json",
                                   *("//tools/toolchain-dist:" + path.removeprefix("tools/toolchain-dist/") for path in distribution_license_paths(reads))],

@@ -11,8 +11,10 @@ reachable (a sandbox without its bus), it falls back to process limits: RLIMIT_D
 user's current process count, and CPU affinity to $HIRSEL_JOBS CPUs; the
 report names the mechanism that applied. The command sees the same
 HIRSEL_MEMORY_LIMIT and HIRSEL_JOBS, so a hirsel binary's own guard (crates/hirsel-guard) caps itself identically.
-Runs share numbered slots: MemAvailable / MemoryMax at startup, clamped to
-2..8, or HIRSEL_CAPPED_SLOTS. --long uses a separate single slot. Waiters are
+Runs share numbered slots: available memory divided by the command's cap at
+startup, clamped to 1..8, or HIRSEL_CAPPED_SLOTS. Available memory is the
+tightest visible cgroup memory.max minus memory.current, or MemAvailable when
+no finite cgroup limit is visible. --long uses a separate single slot. Waiters are
 served in arrival order, and a checkout holding 3 slots is passed over while
 another checkout waits. Queued runs report holders and their wait. At exit it prints the scope's peak memory, wall time and exit status to stderr. A run that reaches
 the memory cap is a finding: report the program and its peak, never
@@ -51,20 +53,33 @@ def mib(count: int) -> str:
     return f'{count / (1 << 20):.0f} MiB'
 
 
+def available_memory() -> int:
+    headroom = []
+    for group in cgroup_ancestors():
+        try:
+            maximum = (group / 'memory.max').read_text().strip()
+            if maximum != 'max':
+                headroom.append(int(maximum) - int((group / 'memory.current').read_text()))
+        except (OSError, ValueError):
+            continue
+    if headroom:
+        return min(headroom)
+    try:
+        return next(int(line.split()[1]) * 1024
+                    for line in Path('/proc/meminfo').read_text().splitlines()
+                    if line.startswith('MemAvailable:'))
+    except (OSError, ValueError, IndexError, StopIteration):
+        return 0
+
+
 def slot_count(limit: int, environ) -> int:
-    """Host-selected concurrency, or the available-memory default at startup."""
+    """Explicit concurrency, or the available-memory default at startup."""
     if 'HIRSEL_CAPPED_SLOTS' in environ:
         value = environ['HIRSEL_CAPPED_SLOTS']
         if not value.isascii() or not value.isdigit() or int(value) < 1:
             raise ValueError(f'HIRSEL_CAPPED_SLOTS={value!r}: expected a positive slot count')
         return int(value)
-    try:
-        available = next(int(line.split()[1]) * 1024
-                         for line in Path('/proc/meminfo').read_text().splitlines()
-                         if line.startswith('MemAvailable:'))
-    except (OSError, ValueError, IndexError, StopIteration):
-        return 2
-    return max(2, min(8, available // limit))
+    return max(1, min(8, available_memory() // limit))
 
 
 def holder(lock) -> str:
@@ -225,6 +240,16 @@ def own_cgroup() -> Path | None:
     return None
 
 
+def cgroup_ancestors():
+    root = Path('/sys/fs/cgroup')
+    group = own_cgroup()
+    while group is not None and group.is_relative_to(root):
+        yield group
+        if group == root:
+            break
+        group = group.parent
+
+
 def oom_kills(cgroup: Path | None) -> int:
     """The cgroup's count of OOM kills so far (0 when unreadable)."""
     try:
@@ -302,17 +327,13 @@ def requested_width(command: list[str], environ) -> int:
 def granted_cpus(jobs: int) -> float:
     """The wrapper quota, inherited affinity and all visible ancestor quotas."""
     grant = float(min(jobs, len(os.sched_getaffinity(0))))
-    group = own_cgroup()
-    while group is not None and group.is_relative_to('/sys/fs/cgroup'):
+    for group in cgroup_ancestors():
         try:
             quota, period = (group / 'cpu.max').read_text().split()
             if quota != 'max':
                 grant = min(grant, int(quota) / int(period))
         except (OSError, ValueError):
             pass
-        if group == Path('/sys/fs/cgroup'):
-            break
-        group = group.parent
     return grant
 
 

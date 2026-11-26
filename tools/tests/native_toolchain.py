@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Archive links must resolve within the pinned archive, including Debian usrmerge."""
+"""Check native archive links and engine measurement inputs."""
 import importlib.util
+import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import sys
 import unittest
@@ -42,6 +44,24 @@ class ArchiveLinks(unittest.TestCase):
             (root / 'escape').symlink_to('../../outside')
             with self.assertRaisesRegex(ValueError, 'escapes its root'):
                 unpack.normalize_links(root)
+
+
+class EngineMeasurement(unittest.TestCase):
+    def test_refuses_a_missing_or_unavailable_measurement_cpu(self):
+        script = Path(__file__).resolve().parents[1] / 'native-toolchain/engine_llvm.py'
+        env = os.environ.copy()
+        env.pop('HIRSEL_MEASURE_CPU', None)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for choice in ({}, {'HIRSEL_MEASURE_CPU': '9999'}):
+                with self.subTest(choice=choice):
+                    run = subprocess.run(
+                        [sys.executable, script, 'guard', root / 'stock', root / 'candidate',
+                         root / 'out', '--artifacts', root / 'artifacts.json'],
+                        env=env | choice, capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertIn('HIRSEL_MEASURE_CPU', run.stderr)
 
 
 if __name__ == '__main__':

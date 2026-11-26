@@ -13,7 +13,12 @@ def python_gates(out, call, Raw):
     std_inputs = ["core/tools/std_native.py", "core/tools/std_contracts.py", "core/tools/case_progress.py", "tools/loopback_peer.py"]
     python_units = [
         ("test-merging", "tools/tests/merging.py", ["//tools/buck2:merging.py"]),
-        ("test-native-toolchain", "tools/tests/native_toolchain.py", ["//tools/buck2/native-toolchain:unpack-source"]),
+        ("test-native-toolchain", "tools/tests/native_toolchain.py",
+         ["//tools/buck2/native-toolchain:unpack-source", "tools/native-toolchain/engine_llvm.py",
+          "core/tools/langarena.py", "core/tools/m1.py", "core/tools/m2b.py",
+          "core/tools/measure.py", "core/tools/measurement_artifacts.py",
+          "core/langarena/run.py", "core/langarena/layout/measure.py", "core/langarena/layout/run.py",
+          "core/langarena/layout/service.py", "core/langarena/layout/service_build.py"] + std_inputs),
         ("test-prelude-overlay", "tools/tests/prelude_overlay.py", ["//tools/buck2:prelude_overlay.py"]),
         ("test-bootstrap-llvm", "tools/tests/bootstrap_llvm.py", ["//tools/buck2:bootstrap_llvm.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:pins.json", "//tools/buck2:llvm-cxx-headers-lock.json", "tools/native-toolchain/llvm-23.lock"]),
         ("test-action-sizes", "tools/tests/action_sizes.py", ["//tools/buck2:action_sizes_from_log.py"]),

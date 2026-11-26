@@ -2,8 +2,8 @@
 # Run one libtest harness (or gate command) as `cargo test` would: from its
 # package directory (HIRSEL_TEST_CWD), with an existing CARGO_TARGET_TMPDIR,
 # the pinned LLVM as LLVM_SYS_231_PREFIX (its bin first on PATH, for tests that
-# run `clang` by name, and its lib on the loader path), and test threads and campaign workers bounded by the action's CPU share (at
-# most 4).
+# run `clang` by name, and its lib on the loader path), and test threads and
+# campaign workers bounded by the action's CPU share.
 set -eu
 if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
@@ -156,11 +156,11 @@ case "$jobs" in
       echo "test_launcher.sh: pool action requires HIRSEL_TEST_CPUS" >&2
       exit 2
     fi
-    jobs="$(nproc 2>/dev/null || echo 1)" ;;
+    jobs="$(nproc 2>/dev/null || echo 1)"
+    [ "$jobs" -le 4 ] || jobs=4 ;;
   *[!0-9]* | 0) echo "test_launcher.sh: invalid HIRSEL_TEST_CPUS=$jobs" >&2; exit 2 ;;
 esac
 # A visible, tighter cgroup quota and caller settings can only reduce it.
-[ "$jobs" -le 4 ] || jobs=4
 cgroup="$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)" || cgroup=""
 while :; do
   if read -r quota period 2>/dev/null < "/sys/fs/cgroup${cgroup%/}/cpu.max" && [ "$quota" != max ]; then

@@ -191,7 +191,7 @@ The allowlist and flags live in `profile.bzl`; generated programs keep the
 native compiler's speed optimization. Compiler dev/release/dist profiles and
 host build scripts are independent of this archive profile.
 
-`tools/toolchain-dist/build --pgo PROFILE --output /tmp/hirsel-dist` builds the shipped
+`RELEASE_TAG=v0.0.0-local tools/toolchain-dist/build --pgo PROFILE --output /tmp/hirsel-dist` builds the shipped
 compiler from a pinned profile (`build --train-profile DIR` writes one) with `//tools/buck2:dist`: fat LTO, one codegen unit and PGO trained on
 compiler-bench's examples and syn3k. The existing mimalloc dependency already
 builds v3. The distribution builder packages this profile.
@@ -352,8 +352,9 @@ Target names follow Cargo's targets, all in the root package:
   `LLVM_SYS_231_PREFIX` (its `bin/` first on `PATH`, its `lib/` on the loader
   path), insta's workspace root, and test threads and `HIRSEL_JOBS` set to the
   action's effective CPU reservation (`HIRSEL_TEST_CPUS`, passed from the same
-  request as the executor, including focus mode), at most 4. A visible cgroup
-  quota or a smaller caller setting can reduce it; command-line
+  request as the executor, including focus mode). Without an explicit
+  reservation, host runs use `nproc` capped at 4. A visible cgroup quota or a
+  smaller caller setting can reduce it. Command-line
   `--test-threads` cannot exceed it. Pool actions require the explicit
   reservation, since their sandbox need not expose `cpu.max`.
   It asks the compiled harness to apply caller filters.

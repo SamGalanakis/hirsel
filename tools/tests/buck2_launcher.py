@@ -599,8 +599,21 @@ class LauncherSelection(LauncherFixture):
         self.assertEqual(result['threads'], '2')
         self.assertEqual(result['jobs'], '2')
 
-
-
+    def test_only_the_host_cpu_fallback_is_capped_at_four(self):
+        launcher = self.launcher_with_quota('max')
+        nproc = self.root / 'llvm/bin/nproc'
+        nproc.write_text('#!/bin/sh\nprintf "64\\n"\n')
+        nproc.chmod(0o755)
+        env = self.env | {'HIRSEL_TEST_NATIVE_EXEC': '1'}
+        for key in ('RUST_TEST_THREADS', 'HIRSEL_JOBS'):
+            env.pop(key, None)
+        for reservation, expected in (({}, '4'), ({'HIRSEL_TEST_CPUS': '8'}, '8')):
+            with self.subTest(reservation=reservation):
+                run = subprocess.run(['sh', launcher, 'harness'], cwd=self.root,
+                                     env=env | reservation, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                observed = json.loads(self.observed.read_text())
+                self.assertEqual((observed['threads'], observed['jobs']), (expected, expected))
 
     def test_pool_without_a_reservation_fails_before_running_the_harness(self):
         run = subprocess.run(['sh', str(LAUNCHER), 'harness'], cwd=self.root,

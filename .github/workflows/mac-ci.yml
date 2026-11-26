@@ -163,6 +163,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Build the Linux toolchain
+        env:
+          RELEASE_TAG: v0.0.0-nightly
         run: |
           rustup toolchain install --no-self-update
           cargo fetch --locked
@@ -193,6 +195,8 @@ jobs:
           name: linux-nightly-corpus
           path: ${{ runner.temp }}/linux-corpus
       - name: Build the native toolchain
+        env:
+          RELEASE_TAG: v0.0.0-nightly
         run: tools/toolchain-dist/build --host aarch64-apple-darwin --output "$RUNNER_TEMP/prefix"
       - name: Compare cross-built and native Mach-O files
         run: |

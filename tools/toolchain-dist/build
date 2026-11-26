@@ -5,6 +5,9 @@
     tools/toolchain-dist/build --output /tmp/dist [--pgo DIR/<sha256>.profdata [--bolt DIR/<sha256>.fdata]]
     tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/dist [--work DIR]
 
+Both bundle builds and profile training require RELEASE_TAG. For an unpublished
+build, set RELEASE_TAG=v0.0.0-local.
+
 Training counts differ from run to run, so a release never trains: it takes a
 PGO profile and a BOLT profile, each trained once and named by its SHA-256, and
 refuses one whose bytes do not match its name. `--train-profile` writes both;
@@ -91,10 +94,8 @@ def check_glibc(prefix):
 
 
 def build_targets(mode, options, *targets, bolt='off'):
-    release_tag = os.environ.get('RELEASE_TAG', '').strip()
-    version_args = ['-c', 'hirsel.release_version=' + release_tag.removeprefix('v')] if release_tag else []
     done = subprocess.run([str(BUCK), 'build', '--target-platforms', '//tools/buck2:dist',
-                           *options, *version_args, '-c', 'hirsel.dist_pgo=' + mode, '-c', 'hirsel.dist_bolt=' + bolt,
+                           *options, '-c', 'hirsel.dist_pgo=' + mode, '-c', 'hirsel.dist_bolt=' + bolt,
                            *targets, '--show-json-output'],
                           cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True)
     outputs = json.loads(done.stdout)
@@ -394,6 +395,10 @@ def main():
         parser.error('--bolt requires --pgo: a BOLT profile is trained on the PGO-use compiler')
     if args.llvm_profdata and args.train_profile is None:
         parser.error('--llvm-profdata requires --train-profile')
+    if args.output is not None or args.train_profile is not None:
+        release_tag = os.environ.get('RELEASE_TAG', '').strip()
+        if not release_tag.removeprefix('v').strip():
+            parser.error('set RELEASE_TAG to the release tag or an explicit unpublished tag such as v0.0.0-local')
     if args.host is not None:
         if args.pgo or args.bolt or args.local or args.num_threads or args.train_profile or args.check_glibc:
             parser.error('--host takes only --output or --check-fresh, and --work')
@@ -406,7 +411,7 @@ def main():
         if output.exists() or output.is_relative_to(ROOT):
             parser.error('output must be a fresh directory outside the checkout')
         work = args.work.resolve() if args.work else output.with_name(output.name + '-work')
-        llvm = darwin_host.build(output, work)
+        llvm = darwin_host.build(output, work, release_tag)
         manifest(output, 'off', None, darwin_llvm=llvm)
         darwin_host.check(output, FRESH_SEQUENCE, accept, relocation_witness)
         return
@@ -426,7 +431,7 @@ def main():
         parser.error('output must be outside the checkout')
     work = args.work.resolve() if args.work else output.with_name(output.name + '-work')
     prepare = ['python3', 'tools/buck2/prepare.py']
-    options = []
+    options = ['-c', 'hirsel.release_version=' + release_tag.removeprefix('v')]
     if args.local:
         prepare.append('--local')
         options.append('--no-remote-cache')

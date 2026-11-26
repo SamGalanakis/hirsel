@@ -288,12 +288,13 @@ with slot(Path(sys.argv[2]), 1, ['crashed']):
                          [f'hirsel-capped-{os.getuid()}.long.lock'])
 
     def test_slot_count_uses_available_memory_at_start_and_clamps_default(self):
-        for available, expected in ((0, 2), (1, 2), (3.75, 3), (20, 8)):
-            with self.subTest(available=available), patch.object(Path, 'read_text') as read:
-                read.return_value = f'MemTotal: 999999999 kB\nMemAvailable: {int(available * 1024 * 1024)} kB\n'
-                self.assertEqual(capped.slot_count(1 << 30, {}), expected)
-        with patch.object(Path, 'read_text', side_effect=OSError):
-            self.assertEqual(capped.slot_count(1 << 30, {}), 2)
+        with patch.object(capped, 'own_cgroup', return_value=None):
+            for available, expected in ((0, 1), (1, 1), (3.75, 3), (20, 8)):
+                with self.subTest(available=available), patch.object(Path, 'read_text') as read:
+                    read.return_value = f'MemTotal: 999999999 kB\nMemAvailable: {int(available * 1024 * 1024)} kB\n'
+                    self.assertEqual(capped.slot_count(1 << 30, {}), expected)
+            with patch.object(Path, 'read_text', side_effect=OSError):
+                self.assertEqual(capped.slot_count(1 << 30, {}), 1)
 
     def test_slot_override_is_not_clamped_or_dependent_on_meminfo(self):
         with patch.object(Path, 'read_text', side_effect=AssertionError('must not read meminfo')):

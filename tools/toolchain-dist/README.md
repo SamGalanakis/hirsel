@@ -26,6 +26,9 @@ Training checks the retained native hello source and builds it with Cranelift an
 
 The PGO pipeline retains the existing tsrs training structure: instrument, run ordinary source commands, require nonempty profiles, merge, and rebuild with matching symbol metadata.
 
+Set `RELEASE_TAG` for bundle builds and profile training. Use an explicit
+unpublished tag, such as `v0.0.0-local`, for local builds.
+
 `tools/toolchain-dist/build --pgo DIR/<sha256>.profdata --bolt DIR/<sha256>.fdata`
 rewrites the PGO-use compiler with the same BOLT options and release workloads
 as the engine library, from a pinned BOLT profile. BOLT's training counts
@@ -134,7 +137,7 @@ Buck2 does not run on macOS. On an Apple Silicon Mac with rustup, from a checkou
 of the commit:
 
 ```sh
-tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/hirsel-darwin --work /tmp/hirsel-darwin-work
+RELEASE_TAG=v0.0.0-local tools/toolchain-dist/build --host aarch64-apple-darwin --output /tmp/hirsel-darwin --work /tmp/hirsel-darwin-work
 ```
 
 `darwin_host.py` builds with Cargo what Buck2 builds on Linux, from the same pins:
@@ -176,7 +179,7 @@ under `env -i` (PATH holding only the prefix, `/usr/bin` and `/bin`), then build
 the relocation program on both backends and checks every program it built.
 
 On Rust toolchain or LLVM bumps, run
-`tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit
+`RELEASE_TAG=v0.0.0-local tools/toolchain-dist/check-repro --output /tmp/hirsel-repro` from the commit
 to qualify. It builds that commit without PGO (or with `--pgo` and `--bolt`,
 as a release is built) in two fresh local checkouts at different paths, with
 separate Buck2 state, and keeps both bundles in the output directory.

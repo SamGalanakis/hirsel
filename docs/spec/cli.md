@@ -60,9 +60,9 @@ store: `GET`, `HEAD` and `PUT` of `o/<sha256>` blobs and of
   remote, so they reuse only mappings this host produced, and an executable
   linked over received content is stored under a link key apart from one
   linked over none.
-- A remote that fails a request is not asked again for 60 seconds, and a name
-  it lacks is not asked for again for 10 minutes, so a dead remote costs one
-  timeout (2 s to connect, 20 s per read), not one per object.
+- A failed request pauses requests to that remote for 15 seconds. A missing
+  name is cached for 30 seconds. Connecting times out after 5 seconds, and
+  each read times out after 30 seconds.
 
 Native binaries from both backends include `.eh_frame` unwind
 information. Native builds write detached DWARF alongside the executable.

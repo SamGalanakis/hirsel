@@ -69,6 +69,8 @@ the locked apt.llvm.org deb with the new engine through the same compiler. It re
 byte-identical executable `.text` for all cases and a warm instruction geomean at or
 below `engine_llvm_guard`. `engine_llvm_guard_source` pins the compiler and workloads
 that set this ratio. Changes in how Hirsel builds and caches std affect the ratio.
+Before training or running the guard, set `HIRSEL_MEASURE_CPU` to a CPU in
+the process's affinity mask.
 
 Use the manylinux_2_28 x86-64 image with its GCC Toolset to build the engine.
 `build-libllvm DIR ARTIFACTS bootstrap` builds the stock shared library, headers,

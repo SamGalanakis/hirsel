@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -250,6 +251,27 @@ class Notices(unittest.TestCase):
         record = self.generate()['components'][0]
         self.assertIn('gap', record)
         self.assertIn('no alternative license elected', record['selection'])
+
+
+class DistributionBuild(unittest.TestCase):
+    def test_requires_a_release_tag_before_preparing_buck(self):
+        env = os.environ.copy()
+        env.pop('RELEASE_TAG', None)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            prepare = root / 'python3'
+            prepare.write_text('#!/bin/sh\ntouch "$DIST_PREPARE_MARKER"\nexit 1\n')
+            prepare.chmod(0o755)
+            marker = root / 'prepared'
+            env.update(PATH=f'{root}{os.pathsep}{os.environ.get("PATH", os.defpath)}',
+                       DIST_PREPARE_MARKER=str(marker))
+            run = subprocess.run(
+                [sys.executable, ROOT / 'tools/toolchain-dist/build', '--output', root / 'dist'],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(run.returncode, 0)
+            self.assertFalse(marker.exists(), run.stderr)
+            self.assertIn('RELEASE_TAG', run.stderr)
 
 
 class GlibcBaseline(unittest.TestCase):

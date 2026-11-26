@@ -327,12 +327,12 @@ def link_kit_tree(work):
     return kit
 
 
-def build(output, work):
+def build(output, work, release_tag):
     require_host()
     work.mkdir(parents=True, exist_ok=True)
     llvm = work / 'llvm'
     run([sys.executable, ROOT / 'tools/buck2/bootstrap_llvm.py', '--output', llvm], cwd=ROOT)
-    env = cargo_env(work, llvm)
+    env = dict(cargo_env(work, llvm), HIRSEL_RELEASE_VERSION=release_tag)
     run(['cargo', 'build', '--locked', '--profile', 'dist', '-p', 'hirsel-core-driver', '--bin', 'hirsel'],
         cwd=ROOT, env=env)
     archives = runtimes(work, env)

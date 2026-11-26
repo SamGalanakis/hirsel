@@ -584,3 +584,119 @@ fn u5_shared_and_socket_arrivals_replay() {
         );
     }
 }
+
+/// A list of capabilities crosses into a helper entry and back in its result.
+const U5_HELPER_LIST: &str = r#"
+fn draw_and_return(take rs: List[Random]) -> List[Random] {
+    let mut xs = take rs
+    let last = option.unwrap(list.pop(mut xs))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(last, mut b)
+    take xs
+}
+
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let mut rs: List[Random] = list.with_capacity(2)
+    list.push(mut rs, r)
+    list.push(mut rs, r)
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take rs, draw_and_return))
+    let mut back = result.unwrap(task.join(take h))
+    let first = option.unwrap(list.pop(mut back))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(first, mut b)
+    result.unwrap(stdout.write(out, "hlist"))
+    Ok(())
+}
+"#;
+
+/// Lists whose elements hold handles (`RL9_LIST`, `RL9_VARIANT`'s
+/// `List[Option[Random]]`, and `U5_HELPER_LIST` across helper entry and
+/// result) replay per-element parts in items, entries and results, both whole
+/// and `--unit root` (and `--unit root.0` for `U5_HELPER_LIST`), on Cranelift
+/// and LLVM. Corrupting an arriving element's capability ordinal in `RL9_LIST`
+/// ends replay `Diverged(Take)` at that take frame in `root` with one line.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_held_lists_replay() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cases: &[(&str, &str, &str, &[&str], &[Option<&str>])] = &[
+        (
+            RL9_LIST,
+            "u5l-list",
+            "list",
+            &["Tasks", "Random", "Stdout"],
+            &[None, Some("root")],
+        ),
+        (
+            RL9_VARIANT,
+            "u5l-variant",
+            "variant",
+            &["Random", "Stdout"],
+            &[None, Some("root")],
+        ),
+        (
+            U5_HELPER_LIST,
+            "u5l-hlist",
+            "hlist",
+            &["Tasks", "Random", "Stdout"],
+            &[None, Some("root"), Some("root.0")],
+        ),
+    ];
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        for &(source, name, printed, grants, units) in cases {
+            let path = rl9_record_with(source, dir.path(), name, backend, printed, grants);
+            let program = dir.path().join(format!("{name}-{backend:?}"));
+            let at = format!("{backend:?} {name}");
+            for &only in units {
+                let (code, out, err) = u4_replay(&program, &path, only);
+                assert_eq!(
+                    (code, out.as_str(), err.as_str()),
+                    (Some(0), "", ""),
+                    "{at} only={only:?}"
+                );
+            }
+            if name == "u5l-list" {
+                let root = rl8_root_frames(&path);
+                let g = root
+                    .iter()
+                    .filter(|f| matches!(f, Frame::Grant { .. }))
+                    .count() as u8;
+                let item = root
+                    .iter()
+                    .position(|f| {
+                        matches!(f, Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)))
+                    })
+                    .expect("list item take");
+                let tape = std::fs::read(&path).unwrap();
+                let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+                    std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+                })
+                .unwrap()
+                .1
+                .tape_id;
+                // Second element capability snapshot: part tag 1, kind 5, ordinal g+4, grant kind 3 (Random), 0 stored.
+                let pattern = [1u8, 5, g + 3, 3, 0, 1, 5, g + 4, 3, 0];
+                let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                    let Some(i) = payload.windows(pattern.len()).position(|w| w == pattern) else {
+                        return false;
+                    };
+                    payload[i + 7] = 99;
+                    true
+                });
+                let corrupt = dir.path().join(format!("{name}-{backend:?}-ord.tape"));
+                std::fs::write(&corrupt, wrong).unwrap();
+                let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+                assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+                let lines: Vec<_> = err.lines().collect();
+                let prefix = format!("replay: Diverged(Take) at {} in root ", item + 1);
+                assert!(
+                    matches!(&lines[..], [l] if l.starts_with(&prefix)),
+                    "{at}: {err}"
+                );
+            }
+        }
+    }
+}

@@ -5,7 +5,7 @@
 use super::super::*;
 use super::{Group, point};
 use format::{Arrival, HelperOutcome};
-use hirsel_core_layout::cross::{CASE, ELEMENT, PADDING, SEQ, elements, live, sequences};
+use hirsel_core_layout::cross::{ELEMENT, PADDING, SEQ, elements, live, sequences};
 
 mod arrive;
 pub(in crate::tape) use arrive::{Receiver, set_across, word as arrived};
@@ -919,20 +919,10 @@ pub(in crate::tape) fn packed_body(
         i += 1 + inner.len();
     }
     held.sort_by_key(|o| o.0[0]);
-    // Only padding and case guards within a list's elements: no owner words,
-    // whose parts follow the list's and are not counted above.
-    let owner = |r: &[u64; 4]| r[1] & !ELEMENT != PADDING && r[1] & CASE == 0;
-    if held
-        .iter()
-        .any(|(row, inner)| row[1] == SEQ && inner.iter().any(owner))
-    {
-        return Err(Unpacked::Unsupported(HELD));
-    }
-    if held.len() as u64 != parts {
-        return Err(Unpacked::Layout);
-    }
+    let mut remaining = parts;
     let mut lists = BTreeMap::new();
-    for ([at, kind, element, _], _) in held {
+    for ([at, kind, element, _], inner) in held {
+        remaining = remaining.checked_sub(1).ok_or(Unpacked::Layout)?;
         if kind != SEQ {
             let w = word(kind, c)?;
             let at = at as usize;
@@ -944,16 +934,51 @@ pub(in crate::tape) fn packed_body(
         if c.u8() != Ok(0) {
             return Err(Unpacked::Layout);
         }
-        let elements = c.bytes().map_err(|_| Unpacked::Layout)?;
-        let len = (elements.len() as u64)
+        let raw_elements = c.bytes().map_err(|_| Unpacked::Layout)?;
+        let len = (raw_elements.len() as u64)
             .checked_div(element)
-            .filter(|len| len * element == elements.len() as u64)
+            .filter(|len| len * element == raw_elements.len() as u64)
             .ok_or(Unpacked::Layout)?;
         let at = at as usize;
         flat.get_mut(at + 8..at + 16)
             .ok_or(Unpacked::Layout)?
             .copy_from_slice(&len.to_le_bytes());
+        let mut elements = raw_elements.to_vec();
+        if len > 0 && !inner.is_empty() {
+            let stripped: Vec<_> = inner
+                .iter()
+                .map(|&[offset, kind, low, count]| [offset, kind & !ELEMENT, low, count])
+                .collect();
+            let stride = element as usize;
+            for e in 0..len as usize {
+                let base = e * stride;
+                let mut words = live(&stripped, &|at, width| {
+                    let at = base + at as usize;
+                    let mut word = [0u8; 8];
+                    if let Some(tag) = elements.get(at..at + width as usize) {
+                        word[..tag.len()].copy_from_slice(tag);
+                    }
+                    u64::from_le_bytes(word)
+                });
+                words.sort_by_key(|o| o[0]);
+                for [offset, kind, ..] in words {
+                    if kind == PADDING {
+                        continue;
+                    }
+                    remaining = remaining.checked_sub(1).ok_or(Unpacked::Layout)?;
+                    let w = word(kind, c)?;
+                    let slot = base + offset as usize;
+                    elements
+                        .get_mut(slot..slot + 8)
+                        .ok_or(Unpacked::Layout)?
+                        .copy_from_slice(&w.to_le_bytes());
+                }
+            }
+        }
         lists.insert(at as u64, elements);
+    }
+    if remaining != 0 {
+        return Err(Unpacked::Layout);
     }
     for (row, _) in sequences(&rows) {
         if let Some(elements) = lists.get(&row[0]) {
@@ -962,5 +987,3 @@ pub(in crate::tape) fn packed_body(
     }
     Ok(flat)
 }
-
-const HELD: &str = "a value holding a list whose elements hold handles or functions";

@@ -56,7 +56,7 @@ pub fn turn(mut u: Unit, clock: Clock, mut sock: UdpSocket, until: u64) -> Resul
     take_control(mut u, now)
     for i in 0u64 .. got {
         let UdpPacket(peer: from, at, len, truncated, ecn: _) = u.batch[i]
-        if truncated {
+        if truncated || len > u.datagram_bytes {
             u.counts.truncated += 1
             continue
         }

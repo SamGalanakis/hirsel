@@ -21,6 +21,7 @@ pub type Pool[M] {
     session: peer.PeerLimits,
     limits: PoolLimits,
     timing: ServiceTiming,
+    queues: units.MediaQueues,
     orders: Receiver[PoolOrder[M]],
     reports: Sender[PoolReport],
     until: u64,
@@ -35,7 +36,7 @@ pub type RelayLink {
     revokes: Sender[RelayRevoke]
 }
 
-pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers
+pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers | Queues
 
 /// The pool's unit deadlines, active polling interval and signaling retry policy.
 pub type ServiceTiming: key {
@@ -50,12 +51,6 @@ pub const DEFAULT_TIMING: ServiceTiming = ServiceTiming(udp: units.DEFAULT_TIMIN
 fn timing_valid(t: ServiceTiming) -> bool {
     t.udp.control_send_ns != 0 && t.udp.media_send_ns != 0 && t.active_tick_ns != 0 && t.active_tick_ns <= t.udp.idle_poll_ns && t.udp.idle_poll_ns <= units.DEFAULT_TIMING.idle_poll_ns && t.rejoin_initial_ns != 0 && t.rejoin_initial_ns <= t.rejoin_max_ns
 }
-
-const OUT_BYTES: u64 = 1048576
-
-const OUT_PACKETS: u64 = 1024
-
-const SOCKET: UdpOptions = UdpOptions(slots: 256, slot_bytes: 1536)
 
 // What the entry moves into unit `index`'s task.
 type Start: cross {
@@ -72,6 +67,7 @@ type Start: cross {
     rates: router.Rates,
     pool: router.PoolBounds,
     timing: ServiceTiming,
+    queues: units.MediaQueues,
     until: u64
 }
 
@@ -174,9 +170,12 @@ fn wait_until(wake: Option[u64], now: u64, tick_ns: u64, until: u64) -> u64 {
 // Unit `s.index` (not 0): bind, report, take the roster, then turn and build until
 // `s.until`.
 fn unit_task(take s: Start) -> Result[(), ServeError] waits {
-    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, until: until) = take s
-    let (take socket, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
-    let (doors, take control, take media) = units.inboxes(at, index, n, plane) ?=> |take e| Router(e)
+    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, queues: queues, until: until) = take s
+    let Some(options) = units.udp_options(queues.socket_slots, queues.datagram_bytes) else {
+        return Error(Queues)
+    }
+    let (take socket, at) = host.udp_bind(net, bind, options) ?=> |e| Bind(e)
+    let (doors, take control, take media) = units.inboxes_with(at, index, n, plane, queues) ?=> |take e| Router(e)
     let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes ROSTER_BYTES)
     let (roster, take siblings) = rc ?=> |c| Router(Capacity(c))
     let bc: Result[(Client[Build], Inbox[Build]), Capacity] = conn.new(64, bytes BUILDS_BYTES)
@@ -197,7 +196,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
     let Some(take report) = done else {
         return Error(Units)
     }
-    let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
+    let mut u = units.unit_with(random, index, all, take control, take media, queues, plane) ?=> |take e| Router(e)
     units.reserve_pool(mut u, bounds)
     units.set_timing(mut u, timing.udp)
     units.set_rates(mut u, rates)
@@ -377,7 +376,7 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
 /// order and hands each room client its messages without waiting. A one-room service is
 /// a pool with one `Open` queued.
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits {
-    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
+    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, queues: queues, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
     let n = limits.units
     if n == 0 || n > router.UNITS_MAX || list.len(binds) != int.widen(n) {
         return Error(Units)
@@ -388,17 +387,23 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     if !timing_valid(timing) {
         return Error(Timers)
     }
+    if !units.queues_valid(queues) || queues.datagram_bytes < session.dtls_transport.mtu {
+        return Error(Queues)
+    }
+    let Some(options) = units.udp_options(queues.socket_slots, queues.datagram_bytes) else {
+        return Error(Queues)
+    }
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
     let bounds = router.pool_bounds(int.widen(n), int.widen(limits.rooms), int.widen(limits.sessions), session)
     for k in 0u16 .. n {
-        let fixed = pool_unit_bytes(k, limits, session)
-        if fixed > limits.unit_bytes {
+        let fixed = pool_unit_bytes(k, limits, session, queues)
+        if fixed == 0xffffffffffffffff || fixed > limits.unit_bytes {
             return Error(Router(Capacity(Capacity(requested: fixed, available: limits.unit_bytes))))
         }
     }
-    let (take socket, at) = host.udp_bind(net, binds[0], SOCKET) ?=> |e| Bind(e)
-    let (doors0, take control, take media) = units.inboxes(at, 0, n, plane) ?=> |take e| Router(e)
+    let (take socket, at) = host.udp_bind(net, binds[0], options) ?=> |e| Bind(e)
+    let (doors0, take control, take media) = units.inboxes_with(at, 0, n, plane, queues) ?=> |take e| Router(e)
     let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes HELLO_BYTES)
     let (hello, take hellos) = hc ?=> |c| Router(Capacity(c))
     let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes FINISHED_BYTES)
@@ -406,7 +411,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let mut running: List[Task[Result[(), ServeError]]] = list.new()
     for k in 1u16 .. n {
         let terms: sdp.Policy = clone(policy)
-        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, until: until)
+        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, queues: queues, until: until)
         match task.spawn_unit(tasks, bytes limits.unit_bytes, take start, unit_task) {
             Ok(take t) => list.push(mut running, take t),
             Error(_) => return Error(Spawn),
@@ -447,14 +452,14 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
             }
         }
     }
-    let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
+    let mut u = units.unit_with(random, 0, all, take control, take media, queues, plane) ?=> |take e| Router(e)
     units.reserve_pool(mut u, bounds)
     units.set_timing(mut u, timing.udp)
     units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
     let mut free: List[u64] = list.new()
     for k in 0u16 .. n {
-        list.push(mut free, limits.unit_bytes - pool_unit_bytes(k, limits, session))
+        list.push(mut free, limits.unit_bytes - pool_unit_bytes(k, limits, session, queues))
     }
     let mut pool: Rooms[M] = rooms(limits.rooms, ledger(take free, limits.sessions, session))
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
@@ -627,10 +632,10 @@ pub fn room_cost_cascade(limits: router.RoomLimits, session: peer.PeerLimits, li
 }
 
 /// Fixed grant a media unit needs before it opens any room.
-pub fn pool_unit_bytes(index: u16, limits: PoolLimits, session: peer.PeerLimits) -> u64 {
+pub fn pool_unit_bytes(index: u16, limits: PoolLimits, session: peer.PeerLimits, queues: units.MediaQueues) -> u64 {
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
     let bounds = router.pool_bounds(int.widen(limits.units), int.widen(limits.rooms), int.widen(limits.sessions), session)
-    let unit = units.fixed_bytes(index, limits.units, plane, OUT_BYTES, OUT_PACKETS, SOCKET, bounds)
+    let unit = units.fixed_bytes(index, limits.units, plane, queues, bounds)
     int.saturating_add(unit, serve_bytes(index, limits.rooms))
 }
 

@@ -386,7 +386,7 @@ const COUNTER_SLOTS: u32 = 64
 
 const MAX_NACK_PAIRS: u32 = 16
 
-const SLOT: u64 = 1500
+pub const SLOT: u64 = 1500
 
 // A two-byte header element's longest value (RFC 8285 section 4.3).
 const DD_LIMIT: u64 = 255

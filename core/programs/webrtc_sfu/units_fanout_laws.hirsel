@@ -514,3 +514,48 @@ fn doorbell_retries_after_refusal(network: Net, clock: Clock) -> Result[(), rout
     let _ = take socket2
     Ok(())
 }
+
+/// bug: the service's fixed inbox drops a funded burst and its UDP slot truncates
+/// a legal 1,500-byte packet before the router receives it.
+/// oracle: 17 session batches of 64 fit together, and loopback preserves all 1,500 bytes.
+@test
+fn media_queue_holds_the_unit_burst(network: Net, clock: Clock) -> Result[(), router.RouterError] waits {
+    let queues = units.media_queues(17)
+    let opts = option.unwrap(units.udp_options(queues.socket_slots, queues.datagram_bytes))
+    let (take rx, destination) = result.unwrap(host.udp_bind(network, LOOPBACK, opts))
+    let (take tx, _) = result.unwrap(host.udp_bind(network, LOOPBACK, opts))
+    let mut from = take tx
+    let mut into = take rx
+    let (doors, take control, take media_in) = units.inboxes_with(destination, 0, 1, units.ONE_ROOM, queues)?
+    let opus = shared.new(copy_of(b"stereo=1"))
+    let control_message = units.ControlMessage(step: Order(room: room_id(), seq: 1, change: Open(room: room_id(), limits: room_limits())), opus_fmtp: Some(take opus))
+    let Ok(()) = conn.try_send(doors.control, take control_message) else {
+        fail("the control inbox refused an inline order with shared parameters")
+    }
+    let held = shared.new(copy_of(b""))
+    for _ in 0u64 .. 1088u64 {
+        let post = router.Carried(carry: Shut(room: room_id(), src: gen_of(1)), packet: shared.share(held))
+        let Ok(()) = conn.try_send(doors.media, take post) else {
+            fail("the media inbox refused a funded burst")
+        }
+    }
+    let mut data: Bytes = list.with_capacity(1500)
+    list.fill(mut data, 1500, 7)
+    let mut requests: List[UdpTx] = list.with_capacity(1)
+    list.push(mut requests, UdpTx(to: destination, at: 0, len: 1500, ecn: 0))
+    let until = host.mono_ns(clock) + 50000000u64
+    let Ok(1) = host.udp_send(mut from, data, requests, At(clock, until)) else {
+        fail("the loopback send failed")
+    }
+    let mut buffer: Bytes = list.with_capacity(1500)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    let Ok(1) = host.udp_recv(mut into, mut buffer, mut packets, At(clock, until)) else {
+        fail("the loopback receive failed")
+    }
+    let UdpPacket(peer: _, at: _, len, truncated, ecn: _) = packets[0]
+    if truncated || len != 1500 || !same(buffer, data) {
+        fail("the admitted UDP datagram was truncated")
+    }
+    let _ = (take control, take media_in)
+    Ok(())
+}

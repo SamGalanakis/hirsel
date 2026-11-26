@@ -1641,7 +1641,7 @@ pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomN
 pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
 pub type CloseWhy = Asked | Fault(RouterError)
 pub type RoomName = RoomName(Inline[u8, 32])
-pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
+pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, queues: units.MediaQueues, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
 
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits
 pub fn room_cost(limits: RoomLimits, session: peer.PeerLimits) -> RoomCost
@@ -1719,6 +1719,11 @@ Unit 0's ledger also carries each room's `control`, `bridge` and `cascade`.
 inboxes at their byte budgets, its outbox, its receive, batch and slot buffers, the socket's
 slots, and `router.pool_bytes`: the router's pool-wide row lists, which `router.reserve_pool`
 allocates at exactly their bounds (`list.with_capacity`) before the unit serves any room.
+`MediaQueues` sets the ingress and egress packet and byte limits and the socket's
+capture envelope. The deployment sizes a media queue for at least one receive batch
+per homed session. NET-16 slot metadata is added to the admitted datagram width.
+Control messages reserve a typed inline slot each. Shared Opus parameters keep the
+charge of the unit that allocated them.
 The bounds (`router.pool_bounds`) are `rooms` rooms, up to `units × sessions` seats
 subject to the `u16` participant field per room, and `sessions` members, parked sessions
 and 5-tuple rows on each unit. Unit 0 admits a participant once its session is reserved on

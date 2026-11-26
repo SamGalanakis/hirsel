@@ -94,6 +94,7 @@ pub opaque type Unit {
     rx: Bytes,
     batch: List[UdpPacket],
     slot: Bytes,
+    datagram_bytes: u64,
     // A bit per unit this unit posted to in this turn: their doorbells.
     rung: u64,
     // Acknowledgements the control unit's full inbox refused, in order.
@@ -117,27 +118,83 @@ pub opaque type Unit {
     events: List[Event]
 }
 
-const INBOX: u64 = 1024
+/// A unit's media queue and socket limits, funded by its unit grant.
+pub type MediaQueues: key {
+    ingress_packets: u64,
+    ingress_bytes: u64,
+    egress_packets: u64,
+    egress_bytes: u64,
+    socket_slots: u32,
+    datagram_bytes: u16
+}
 
-const CONTROL_BYTES: u64 = 1024
+const RECEIVE_BATCH: u64 = 64
 
-const MEDIA_BYTES: u64 = 4194304
+pub const DEFAULT_MEDIA_QUEUES: MediaQueues = MediaQueues(ingress_packets: 1024, ingress_bytes: 4194304, egress_packets: 1024, egress_bytes: 1048576, socket_slots: 256, datagram_bytes: int.narrow(peer.SLOT))
+
+/// Let each homed session contribute a batch to a burst. The baseline covers
+/// smaller units and retains the independently funded ingress and egress rooms.
+pub fn media_queues(sessions: u32) -> MediaQueues {
+    let seats: u64 = int.widen(sessions)
+    let mut q = DEFAULT_MEDIA_QUEUES
+    let burst = seats * RECEIVE_BATCH
+    if burst > q.ingress_packets {
+        let payload = burst * int.widen(q.datagram_bytes)
+        q.ingress_packets = burst
+        q.ingress_bytes = order.max(q.ingress_bytes, payload)
+        q.egress_packets = burst
+        q.egress_bytes = order.max(q.egress_bytes, payload)
+    }
+    q
+}
+
+/// NET-16 reserves 256 bytes in each receive slot for metadata. Slots are aligned
+/// to 8 bytes and have a minimum stride of 1,536 bytes.
+pub fn udp_options(slots: u32, datagram_bytes: u16) -> Option[UdpOptions] {
+    if slots == 0 || slots > 32768 || slots & (slots - 1) != 0 || datagram_bytes == 0 || datagram_bytes > 65507 {
+        return None
+    }
+    let width: u32 = int.widen(datagram_bytes)
+    let stride = order.max(1536u32, (width + 256u32 + 7u32) / 8u32 * 8u32)
+    Some(UdpOptions(slots: slots, slot_bytes: stride))
+}
+
+pub fn queues_valid(q: MediaQueues) -> bool {
+    let Some(_) = udp_options(q.socket_slots, q.datagram_bytes) else {
+        return false
+    }
+    q.ingress_packets != 0 && q.ingress_packets < 4194304 && q.ingress_bytes < 1099511627776 && q.egress_packets != 0 && q.egress_bytes >= int.widen(q.datagram_bytes)
+}
+
+// CONC-17 reserves the connection header, its inline slots and its content room.
+fn connection_bytes(element: u64, slots: u64, content: u64) -> u64 {
+    64u64 + slots * element + content
+}
 
 /// What unit `index` of `units` allocates before any room (RTC-10 Sizing): its control
 /// and media inboxes at their byte budgets, its outbox, its receive, batch and slot
 /// buffers, `socket`'s slots, and its router's row lists at `pool`
 /// (`router.reserve_pool`). Its ledger starts at its `unit_bytes` less this.
-pub fn fixed_bytes(index: u16, units: u16, plane: Plane, out_bytes: u64, out_packets: u64, socket: UdpOptions, pool: router.PoolBounds) -> u64 {
-    let boxes = control_slots(index, units, plane) * CONTROL_BYTES + MEDIA_BYTES
-    let out = priced(1, out_bytes) + priced(bytes[UdpTx], out_packets) + priced(bytes[peer.Tag], out_packets)
-    let buffers = priced(1, 65536) + priced(bytes[UdpPacket], 64) + priced(1, 1536)
+pub fn fixed_bytes(index: u16, units: u16, plane: Plane, q: MediaQueues, pool: router.PoolBounds) -> u64 {
+    if !queues_valid(q) {
+        return 0xffffffffffffffff
+    }
+    let Some(socket) = udp_options(q.socket_slots, q.datagram_bytes) else {
+        return 0xffffffffffffffff
+    }
+    let boxes = connection_bytes(bytes[ControlMessage], control_slots(index, units, plane), 0) + connection_bytes(bytes[router.Carried], q.ingress_packets, q.ingress_bytes)
+    let packet_bytes = int.saturating_add(priced(bytes[UdpTx], q.egress_packets), priced(bytes[peer.Tag], q.egress_packets))
+    let out = int.saturating_add(priced(1, q.egress_bytes), packet_bytes)
+    let width: u64 = int.widen(q.datagram_bytes)
+    let buffers = priced(1, RECEIVE_BATCH * width) + priced(bytes[UdpPacket], RECEIVE_BATCH) + priced(1, width)
     let UdpOptions(slots: n, slot_bytes: each) = socket
     let slots: u64 = int.widen(n)
     let rows = match router.pool_bytes(pool) {
         Some(b) => b,
         None => 0xffffffffffffffff,
     }
-    int.saturating_add(boxes + out + buffers + slots * priced(1, int.widen(each)), rows)
+    let fixed = boxes + buffers + slots * int.widen(each)
+    int.saturating_add(fixed, int.saturating_add(out, rows))
 }
 
 /// Reserve the unit's router row lists at `pool` before it serves any room (RTC-10
@@ -147,7 +204,10 @@ pub fn reserve_pool(mut u: Unit, pool: router.PoolBounds) {
 }
 
 fn priced(element: u64, capacity: u64) -> u64 {
-    option.unwrap(charge.seq(element, capacity))
+    match charge.seq(element, capacity) {
+        Some(n) => n,
+        None => 0xffffffffffffffff,
+    }
 }
 
 /// The control plane of a service of one room.
@@ -175,10 +235,15 @@ pub fn control_slots(index: u16, units: u16, plane: Plane) -> u64 {
 /// One unit's inboxes and doors. `addr` is the address of the socket it will run on;
 /// the control inbox is sized by `control_slots`.
 pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError] {
+    inboxes_with(addr, index, units, plane, DEFAULT_MEDIA_QUEUES)
+}
+
+pub fn inboxes_with(addr: Addr, index: u16, units: u16, plane: Plane, q: MediaQueues) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError] {
     let slots = control_slots(index, units, plane)
-    let c: Result[(Client[ControlMessage], Inbox[ControlMessage]), Capacity] = conn.new(slots, bytes slots * CONTROL_BYTES)
+    // Control payloads are inline. Shared Opus parameters keep their original charge.
+    let c: Result[(Client[ControlMessage], Inbox[ControlMessage]), Capacity] = conn.new(slots, bytes 0)
     let (control, take control_in) = c ?=> |x| Capacity(x)
-    let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(INBOX, bytes MEDIA_BYTES)
+    let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(q.ingress_packets, bytes q.ingress_bytes)
     let (media, take media_in) = m ?=> |x| Capacity(x)
     Ok((Doors(control: control, media: media, addr: addr), take control_in, take media_in))
 }
@@ -186,21 +251,29 @@ pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Door
 /// Unit `index` of `list.len(doors)` units, over its own inboxes. `doors` names every
 /// unit's doors in unit order, its own included.
 pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64, plane: Plane) -> Result[Unit, router.RouterError] {
+    let mut queues = DEFAULT_MEDIA_QUEUES
+    queues.egress_bytes = out_bytes
+    queues.egress_packets = out_packets
+    unit_with(r, index, doors, take control, take media, queues, plane)
+}
+
+pub fn unit_with(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], q: MediaQueues, plane: Plane) -> Result[Unit, router.RouterError] {
     if list.len(doors) > int.widen(router.UNITS_MAX) {
         return Error(Limit(int.widen(router.UNITS_MAX)))
     }
-    let out = peer.outbox(out_bytes, out_packets) ?=> |take e| Peer(e)
+    let out = peer.outbox(q.egress_bytes, q.egress_packets) ?=> |take e| Peer(e)
+    let width: u64 = int.widen(q.datagram_bytes)
     let mut rx: Bytes = list.new()
-    list.try_reserve(mut rx, 65536) ?=> |c| Capacity(c)
+    list.try_reserve(mut rx, RECEIVE_BATCH * width) ?=> |c| Capacity(c)
     let mut batch: List[UdpPacket] = list.new()
-    list.try_reserve(mut batch, 64) ?=> |c| Capacity(c)
+    list.try_reserve(mut batch, RECEIVE_BATCH) ?=> |c| Capacity(c)
     let mut slot: Bytes = list.new()
-    list.try_reserve(mut slot, 1536) ?=> |c| Capacity(c)
+    list.try_reserve(mut slot, width) ?=> |c| Capacity(c)
     let mut all: List[Doors] = list.new()
     for d in doors {
         list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
     }
-    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
+    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, datagram_bytes: width, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
 }
 
 pub fn router_of(u: Unit) -> View[router.Router] in u {

@@ -30,6 +30,7 @@ HOST_SEAMS = (
     'crates/hirsel-core-net/src/reactor/',
     'crates/hirsel-core-net/src/own_address/',
     'crates/hirsel-prof/src/linux/',
+    'crates/hirsel-llvm-lazy/src/host/',
 )
 # Host-OS code that predates its seam. Each entry names the slice of the macOS design
 # (research-1124/macos-arm64, §9) that moves it behind a seam; remove an entry when it

@@ -7,6 +7,7 @@ hirsel_guard::install!();
 mod construction;
 #[path = "../../hirsel-llvm/src/core/mod.rs"]
 pub mod core;
+mod host;
 mod loader;
 pub use loader::llvm_library;
 

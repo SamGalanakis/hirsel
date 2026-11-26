@@ -4,14 +4,11 @@
 //! process loads, so an LLVM product's key can name that file's content.
 use std::ffi::{CStr, CString};
 use std::fs::File;
-use std::io::Write;
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 include!(concat!(env!("OUT_DIR"), "/component.rs"));
-const LLVM_LIBRARY: &str = "libLLVM.so.23.1";
 const BUCK_ENGINE: &str = "../../../../../../tools/buck2/toolchains/llvm-files/engine";
 #[repr(C)]
 struct Output {
@@ -128,7 +125,7 @@ struct Backend {
     std_object_codec: StdObjectCodec,
     free: Free,
     construction: &'static crate::construction::Api,
-    _image: File,
+    _image: crate::host::Component,
 }
 fn dl_error() -> String {
     // SAFETY: dlerror's thread-local message is borrowed until the next dl call.
@@ -210,11 +207,16 @@ fn check_engine(path: &Path, expected: &str) -> Result<(), String> {
         |detail: &dyn std::fmt::Display| format!("LLVM engine {}: {detail}", path.display());
     let source = File::open(path).map_err(|cause| error(&cause))?;
     let cache = object::read::ReadCache::new(source);
-    let elf = object::File::parse(&cache).map_err(|cause| error(&cause))?;
-    let id = elf
-        .build_id()
-        .map_err(|cause| error(&cause))?
-        .ok_or_else(|| error(&"no build ID"))?;
+    let image = object::File::parse(&cache).map_err(|cause| error(&cause))?;
+    // The link-time identity the build script read: an ELF build ID or a Mach-O LC_UUID.
+    let uuid = image.mach_uuid().map_err(|cause| error(&cause))?;
+    let id = match image.build_id().map_err(|cause| error(&cause))? {
+        Some(id) => id,
+        None => uuid
+            .as_ref()
+            .map(<[u8; 16]>::as_slice)
+            .ok_or_else(|| error(&"no build ID"))?,
+    };
     let mut actual = String::with_capacity(id.len() * 2);
     for byte in id {
         write!(actual, "{byte:02x}").unwrap();
@@ -236,34 +238,7 @@ unsafe extern "C" fn llvm_out_of_memory(reason: *const libc::c_char) -> ! {
 fn load() -> Result<Backend, String> {
     let llvm = CString::new(llvm_library()?.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
     open(&llvm)?;
-    // SAFETY: memfd_create returns a new exclusively owned fd, not an existing
-    // process handle. The sealed file is the linked component's exact bytes.
-    let fd = unsafe {
-        libc::memfd_create(
-            c"hirsel-llvm".as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    // SAFETY: ownership of our newly created fd transfers exactly once.
-    let mut image = unsafe { File::from_raw_fd(fd) };
-    image.write_all(COMPONENT).map_err(|e| e.to_string())?;
-    // SAFETY: our own file has no writable mappings. Seal against replacement
-    // while dlopen reads it; no external file or backend path is accepted.
-    if unsafe {
-        libc::fcntl(
-            fd,
-            libc::F_ADD_SEALS,
-            libc::F_SEAL_WRITE | libc::F_SEAL_GROW | libc::F_SEAL_SHRINK | libc::F_SEAL_SEAL,
-        )
-    } < 0
-    {
-        return Err(std::io::Error::last_os_error().to_string());
-    }
-    let path = CString::new(format!("/proc/self/fd/{}", image.as_raw_fd())).unwrap();
-    let handle = open(&path)?;
+    let (handle, image) = crate::host::open_component(COMPONENT, open)?;
     // SAFETY: these two exports and C layouts are defined by the embedded
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v2".as_ptr()) };

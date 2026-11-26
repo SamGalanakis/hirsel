@@ -1,8 +1,10 @@
-#include <bits/c++config.h>
-#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 30)
+#include <version>
+#ifdef __GLIBC__
+#if !__GLIBC_PREREQ(2, 30)
 #undef _GLIBCXX_USE_PTHREAD_COND_CLOCKWAIT
 #undef _GLIBCXX_USE_PTHREAD_MUTEX_CLOCKLOCK
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
+#endif
 #endif
 
 #include "pass_cost.h"
@@ -14,8 +16,10 @@
 #include <string>
 #include <vector>
 
+#ifdef __linux__
 #include <linux/perf_event.h>
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <llvm/Analysis/LazyCallGraph.h>
@@ -45,6 +49,7 @@ struct Counter {
     uint64_t instructions, enabled, running;
 };
 
+#ifdef __linux__
 int openCounter() {
     perf_event_attr event{};
     event.size = sizeof(event);
@@ -59,6 +64,14 @@ int openCounter() {
         report_fatal_error(Twine("open LLVM pass instructions:u counter: ") + std::strerror(errno));
     return fd;
 }
+#else
+// Darwin has no per-thread user instruction counter a process may open on itself
+// (its counters are whole-process rusage), so HIRSEL_LLVM_PASS_COST refuses there.
+int openCounter() {
+    report_fatal_error("HIRSEL_LLVM_PASS_COST needs Linux perf events: this host has no "
+                       "per-thread instructions:u counter");
+}
+#endif
 
 Counter readCounter(int fd) {
     Counter count;

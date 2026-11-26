@@ -47,16 +47,6 @@ pub(super) fn delegated(state: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
-/// A launcher with cgroups owns the orphans it kills, so it can reap them before
-/// reporting Ended. The launcher runs in its own process.
-pub(super) fn own_orphans() -> io::Result<()> {
-    // SAFETY: this prctl only changes who adopts this process's descendants.
-    if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 pub(super) fn recover(root: &Path) -> io::Result<()> {
     for entry in fs::read_dir(root)? {
         let entry = entry?;

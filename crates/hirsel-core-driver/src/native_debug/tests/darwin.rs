@@ -117,7 +117,7 @@ fn sqlite_darwin_archive_admits_and_links_against_the_kit() {
         ObjectFormat::MachO,
     )
     .unwrap();
-    let bundle = held.path();
+    let bundle = held.path().unwrap();
     let mut inputs = vec![bundle.clone()];
     staged
         .append_link_inputs(&mut inputs, &[], &runtime, &recipe)

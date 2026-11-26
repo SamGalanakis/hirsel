@@ -41,29 +41,8 @@ struct Discovered {
 }
 
 fn parent(directory: &File) -> io::Result<File> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        // SAFETY: directory is live and ".." is a static C string. This
-        // ascent discovers workspace ownership; it is not a confined walk.
-        let fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                c"..".as_ptr(),
-                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: openat returned a new owned descriptor.
-        Ok(unsafe { File::from_raw_fd(fd) })
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = directory;
-        Err(io::ErrorKind::Unsupported.into())
-    }
+    // This ascent discovers workspace ownership; it is not a confined walk.
+    crate::host::open_parent(directory)
 }
 
 pub(crate) fn identity(directory: &File) -> io::Result<FileId> {

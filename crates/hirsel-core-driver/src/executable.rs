@@ -8,7 +8,6 @@
 //! descriptor table: no other thread's fork can copy its descriptor.
 use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -24,9 +23,7 @@ pub(crate) fn write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
 /// and otherwise one copy.
 pub(crate) fn fill(file: &mut File, bytes: &[u8], source: Option<&File>) -> io::Result<()> {
     if let Some(source) = source
-        // SAFETY: FICLONE reads two descriptors, both open for the call. A
-        // failed clone leaves the destination unchanged.
-        && unsafe { libc::ioctl(file.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) } == 0
+        && crate::host::reflink(file, source)
     {
         return Ok(());
     }
@@ -47,31 +44,7 @@ pub(crate) fn write_from(
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                // Docker's default seccomp profile blocks unshare. Use the
-                // close_range syscall directly for the glibc 2.28 ABI floor.
-                // SAFETY: close_range takes no pointers. The empty range keeps
-                // open descriptors while the kernel gives this thread a
-                // private descriptor table, released at thread exit.
-                if unsafe {
-                    libc::syscall(
-                        libc::SYS_close_range,
-                        u32::MAX,
-                        u32::MAX,
-                        libc::CLOSE_RANGE_UNSHARE,
-                    )
-                } != 0
-                {
-                    let error = io::Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::ENOSYS) {
-                        return Err(error);
-                    }
-                    // Kernels without close_range still support unshare.
-                    // SAFETY: CLONE_FILES takes no pointers and gives this
-                    // thread a private copy of the descriptor table.
-                    if unsafe { libc::unshare(libc::CLONE_FILES) } != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
+                crate::host::private_descriptors()?;
                 let mut file = tempfile::NamedTempFile::new_in(parent)?;
                 fill(file.as_file_mut(), bytes, source)?;
                 file.as_file()

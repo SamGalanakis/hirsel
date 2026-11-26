@@ -7,14 +7,14 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use super::ready::{READ, Readiness, Watch};
-use super::{above_launch_slots, send, spawn, wait_pid};
+use super::ready::{Readiness, Watch};
+use super::{above_launch_slots, spawn, wait_pid};
 use hirsel_core_net::ready::Event;
 
 /// The descriptor the host receives the operator listener on.
@@ -61,8 +61,7 @@ impl Schedule {
 }
 
 struct Running {
-    pid: libc::pid_t,
-    pidfd: OwnedFd,
+    process: spawn::Spawned,
     watch: Watch,
     since: Instant,
 }
@@ -106,7 +105,7 @@ impl Bootstrap {
 
     /// The live host's PID: the one peer the control socket admits.
     pub(super) fn pid(&self) -> Option<libc::pid_t> {
-        self.running.as_ref().map(|r| r.pid)
+        self.running.as_ref().map(|r| r.process.pid())
     }
 
     /// The status the launcher ends with, once the host may not be started again.
@@ -138,16 +137,17 @@ impl Bootstrap {
             (above_launch_slots(libc::STDERR_FILENO)?, 2),
             (above_launch_slots(self.operator.as_raw_fd())?, OPERATOR_FD),
         ];
-        let (pid, pidfd) = spawn::start(&command, &self.cwd, &slots, None, false)?;
-        let mut watch = poll.watch(pidfd.as_raw_fd());
-        if let Err(error) = watch.set(READ) {
-            let _ = send(pidfd.as_raw_fd(), libc::SIGKILL);
-            let _ = wait_pid(pid);
-            return Err(error);
-        }
+        let process = spawn::start(&command, &self.cwd, &slots, None, false)?;
+        let watch = match poll.watch_exit(&process) {
+            Ok(watch) => watch,
+            Err(error) => {
+                let _ = process.signal(libc::SIGKILL);
+                let _ = wait_pid(process.pid());
+                return Err(error);
+            }
+        };
         self.running = Some(Running {
-            pid,
-            pidfd,
+            process,
             watch,
             since: Instant::now(),
         });
@@ -160,8 +160,9 @@ impl Bootstrap {
             && running.watch.fired(events)
         {
             let running = self.running.take().expect("checked above");
-            let code = wait_pid(running.pid)?.code();
-            drop(running.pidfd);
+            drop(running.watch);
+            let code = wait_pid(running.process.pid())?.code();
+            drop(running.process);
             match self.schedule.ended(code, running.since.elapsed()) {
                 Next::After(delay) => self.due = Some(Instant::now() + delay),
                 Next::Stop(code) => {
@@ -191,32 +192,13 @@ impl Bootstrap {
 impl Drop for Bootstrap {
     fn drop(&mut self) {
         if let Some(running) = self.running.take() {
-            let _ = send(running.pidfd.as_raw_fd(), libc::SIGKILL);
-            let _ = wait_pid(running.pid);
+            let _ = running.process.signal(libc::SIGKILL);
+            let _ = wait_pid(running.process.pid());
         }
     }
 }
 
-/// The PID of the process at the other end of `stream`.
-pub(super) fn peer_pid(stream: &std::os::unix::net::UnixStream) -> Option<libc::pid_t> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: cred and len are live, sized for SO_PEERCRED.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    (rc == 0).then_some(cred.pid)
-}
+pub(super) use crate::host::peer_pid;
 
 #[cfg(test)]
 mod tests {

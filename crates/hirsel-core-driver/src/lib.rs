@@ -39,6 +39,8 @@ mod check_index;
 mod comptime;
 mod coverage;
 mod executable;
+mod host;
+pub use host::close_inherited_descriptors;
 mod flow;
 mod instance_walk;
 mod instances;
@@ -110,7 +112,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 pub use store::Store;
 pub use tool_inputs::link_driver;
-
 #[cfg(test)]
 hirsel_guard::install!();
 #[cfg(test)]
@@ -1218,7 +1219,6 @@ fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     encoding::write_fixed(&mut bytes, value)?;
     Ok(bytes)
 }
-
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
     encoding::read_fixed(bytes).ok()
 }

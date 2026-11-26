@@ -1726,7 +1726,7 @@ fn link_objects(
                     }
                 }
                 let _phase = crate::meter::trace::span("full link");
-                let bundle = members.bundle()?.path();
+                let bundle = members.bundle()?.path()?;
                 inputs.insert(1, bundle.clone());
                 direct_link(
                     recipe,

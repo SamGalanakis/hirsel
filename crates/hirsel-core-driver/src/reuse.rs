@@ -1295,13 +1295,7 @@ pub(crate) fn compiler_identity() -> io::Result<ContentHash> {
         hirsel_core_front::cost_scope!("non-check", "compiler executable identity");
         // The linker has already identified this executable. Read that immutable
         // note, rather than scanning and hashing the whole compiler on every launch.
-        // /proc/self/exe stays bound to the loaded inode across binary replacement.
-        let path = if cfg!(target_os = "linux") {
-            PathBuf::from("/proc/self/exe")
-        } else {
-            std::env::current_exe()?
-        };
-        executable_identity(&mut std::fs::File::open(path)?)
+        executable_identity(&mut std::fs::File::open(crate::host::current_image()?)?)
     });
     ID.as_ref()
         .copied()

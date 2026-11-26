@@ -13,7 +13,6 @@ use std::{
     fs,
     io::{self, Write},
     net::{SocketAddr, TcpListener},
-    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -55,20 +54,7 @@ struct ChildProcess(Child);
 
 impl ChildProcess {
     fn spawn(command: &mut Command) -> io::Result<Self> {
-        let parent = std::process::id();
-        // SAFETY: these syscalls only set this child's parent-death signal and
-        // inspect its parent, and run between fork and exec.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::getppid() as u32 != parent {
-                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
-                }
-                Ok(())
-            });
-        }
+        crate::host::die_with_parent(command, libc::SIGTERM);
         Ok(Self(command.spawn()?))
     }
 

@@ -2,9 +2,6 @@
 //! `hirsel store verify --release` on an isolated image of the store,
 //! `hirsel store repair --release` on the store itself (STORE-SPEC §15.6).
 
-#[path = "dry_run/host/mod.rs"]
-mod host;
-
 use crate::cli::{Invocation, OptionId};
 use std::{
     fs::{self, File, OpenOptions},
@@ -90,7 +87,7 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     };
 
     let mut report = tempfile::tempfile()?;
-    let status = host::release_command(&file, &executable)
+    let status = crate::host::release_command(&file, &executable)
         .arg(flag)
         .arg(target)
         .args(invocation.arguments)
@@ -147,7 +144,7 @@ pub(in crate::request) fn copy_store(source: &Path, image: &Path) -> Result<bool
             );
         }
         let mut from = open_file(&entry.path())?;
-        host::clone_file(&mut from, &image.join(entry.file_name()))?;
+        crate::host::clone_file(&mut from, &image.join(entry.file_name()))?;
     }
     Ok(true)
 }

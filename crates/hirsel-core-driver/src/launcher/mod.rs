@@ -20,7 +20,7 @@ mod ready;
 pub(crate) mod session;
 #[cfg(test)]
 mod source_laws;
-mod spawn;
+pub(crate) mod spawn;
 mod stores;
 
 use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
@@ -310,8 +310,7 @@ struct Process {
 }
 
 struct RunningChild {
-    pid: libc::pid_t,
-    pidfd: OwnedFd,
+    process: spawn::Spawned,
     group: Option<cgroup::Group>,
     status: Option<Status>,
 }
@@ -321,7 +320,7 @@ impl RunningChild {
         match (&self.group, signal, &self.status) {
             (Some(group), libc::SIGKILL, _) => group.kill(),
             (_, _, Some(_)) => Ok(()),
-            _ => send(self.pidfd.as_raw_fd(), signal),
+            _ => self.process.signal(signal),
         }
     }
 
@@ -335,7 +334,7 @@ impl RunningChild {
 
     fn reap_leader(&mut self) -> io::Result<()> {
         if self.status.is_none() {
-            self.status = Some(status_of(wait_pid(self.pid)?));
+            self.status = Some(status_of(wait_pid(self.process.pid())?));
             if let Some(group) = &self.group {
                 group.kill()?;
             }
@@ -376,7 +375,7 @@ fn status_of(status: ExitStatus) -> Status {
     }
 }
 
-pub(super) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
+pub(crate) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
     let mut status = 0;
     loop {
         // SAFETY: the caller owns this child and waitpid writes one status.
@@ -388,26 +387,6 @@ pub(super) fn wait_pid(pid: libc::pid_t) -> io::Result<ExitStatus> {
             return Err(error);
         }
     }
-}
-
-fn send(pidfd: RawFd, signal: i32) -> io::Result<()> {
-    // SAFETY: a pidfd signal reaches only the process it pins.
-    let rc = unsafe {
-        libc::syscall(
-            libc::SYS_pidfd_send_signal,
-            pidfd,
-            signal,
-            std::ptr::null::<libc::siginfo_t>(),
-            0,
-        )
-    };
-    if rc != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error);
-        }
-    }
-    Ok(())
 }
 
 struct Kept {
@@ -474,16 +453,6 @@ pub(crate) fn lock(state: &Path) -> io::Result<File> {
     Ok(file)
 }
 
-fn pidfd(pid: u32) -> io::Result<OwnedFd> {
-    // SAFETY: pidfd_open pins a kernel process identity, with no signal.
-    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as RawFd;
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: successful pidfd_open returns a fresh owned descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
-}
-
 /// Whether `fd` is readable now, without waiting.
 fn readable(fd: RawFd) -> bool {
     let mut record = libc::pollfd {
@@ -495,7 +464,7 @@ fn readable(fd: RawFd) -> bool {
     unsafe { libc::poll(&raw mut record, 1, 0) > 0 && record.revents & libc::POLLIN != 0 }
 }
 
-fn above_launch_slots(fd: RawFd) -> io::Result<OwnedFd> {
+pub(crate) fn above_launch_slots(fd: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: fcntl returns a fresh close-on-exec descriptor above every launch slot.
     let raw = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, spawn::IMAGE_FD + 1) };
     if raw < 0 {
@@ -506,17 +475,13 @@ fn above_launch_slots(fd: RawFd) -> io::Result<OwnedFd> {
 }
 
 fn pipe() -> io::Result<(File, OwnedFd)> {
-    let mut fds = [0; 2];
-    // SAFETY: pipe2 fills two fresh descriptors.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
+    let (read, write) = crate::host::pipe()?;
+    // The writer is the child's; only the reader is nonblocking.
+    // SAFETY: fcntl on an owned descriptor.
+    if unsafe { libc::fcntl(read.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: both descriptors are fresh and owned here.
-    let (read, write) = unsafe { (File::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    // The writer is the child's; only the reader stays nonblocking.
-    // SAFETY: fcntl on an owned descriptor.
-    unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, 0) };
-    Ok((read, write))
+    Ok((File::from(read), write))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -528,10 +493,14 @@ impl<I: Images> Launcher<I> {
     /// `state/scratch` holds each group's private scratch and export directories.
     pub(crate) fn new(state: &Path, open: impl FnOnce() -> io::Result<I>) -> io::Result<Self> {
         let lock = lock(state)?;
-        let cgroup_root = cgroup::delegated(state)?;
+        let cgroup_root = if crate::host::CGROUPS {
+            cgroup::delegated(state)?
+        } else {
+            None
+        };
         if let Some(root) = &cgroup_root {
             cgroup::recover(root)?;
-            cgroup::own_orphans()?;
+            crate::host::own_orphans()?;
         }
         let poll = Readiness::new()?;
         let images = open()?;
@@ -1207,7 +1176,7 @@ impl<I: Images> Launcher<I> {
             let directory = group.as_ref().map(cgroup::Group::directory).transpose()?;
             spawn::start(&command, workdir, &slots, directory.as_ref(), serving)
         })();
-        let (pid, pidfd) = match started {
+        let process = match started {
             Ok(started) => started,
             Err(error) => {
                 if let Some(group) = group {
@@ -1220,18 +1189,19 @@ impl<I: Images> Launcher<I> {
             }
         };
         let child = RunningChild {
-            pid,
-            pidfd,
+            process,
             group,
             status: None,
         };
-        let mut watch = self.poll.watch(child.pidfd.as_raw_fd());
-        if let Err(error) = watch.set(READ) {
-            if child.signal(libc::SIGKILL).is_ok() {
-                let _ = child.wait();
+        let watch = match self.poll.watch_exit(&child.process) {
+            Ok(watch) => watch,
+            Err(error) => {
+                if child.signal(libc::SIGKILL).is_ok() {
+                    let _ = child.wait();
+                }
+                return Err(error);
             }
-            return Err(error);
-        }
+        };
         Ok(Process {
             watch: Some(watch),
             child: Some(child),

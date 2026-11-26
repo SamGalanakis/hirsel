@@ -7,7 +7,6 @@ use crate::launcher::session::{
     Attempt, Grants, Group, Input, Reader, Wire, Writer, get_wanted, malformed, put_wanted,
 };
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -756,29 +755,7 @@ fn operator_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
-    let mut cred = libc::ucred {
-        pid: 0,
-        uid: 0,
-        gid: 0,
-    };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: cred and len are live, sized for SO_PEERCRED.
-    let rc = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    if rc == 0 {
-        Ok(cred.uid)
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
+use crate::host::peer_uid;
 
 /// Connect to `state/operator.sock`. The state directory must be the operator's own and
 /// private, and the listener must run as the operator.

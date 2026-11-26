@@ -25,7 +25,7 @@ CRATES = 'crates/'
 # Directories whose whole purpose is one host OS (one file or directory per host).
 HOST_SEAMS = (
     'crates/hirsel-core-rt/src/host/',
-    'crates/hirsel-core-driver/src/dry_run/host/',
+    'crates/hirsel-core-driver/src/host/',
     'crates/hirsel-core-net/src/host/',
     'crates/hirsel-core-net/src/reactor/',
     'crates/hirsel-core-net/src/own_address/',
@@ -48,11 +48,6 @@ HOST_FILES = {
     'crates/hirsel-core-rt/src/test_process.rs': 'S7',
     'crates/hirsel-core-rt/src/tests.rs': 'S6',
     # S12: the driver on a Mac host (sealed files, launcher, compiler identity).
-    'crates/hirsel-core-driver/src/foreign_archive.rs': 'S12',
-    'crates/hirsel-core-driver/src/link_input.rs': 'S12',
-    'crates/hirsel-core-driver/src/package_files.rs': 'S12',
-    'crates/hirsel-core-driver/src/package_workspace.rs': 'S12',
-    'crates/hirsel-core-driver/src/reuse.rs': 'S12',
     'crates/hirsel-core-driver/src/startup_native.rs': 'S12',
     'crates/hirsel-core-ids/src/launch.rs': 'S12',
     'crates/hirsel-intern/src/instructions.rs': 'S12',

@@ -86,8 +86,7 @@ impl PackageStore {
                 return Ok(false);
             }
         }
-        use std::os::fd::AsRawFd;
-        let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name);
+        let path = crate::host::fd_path(&directory)?.join(name);
         atomic_write(&path, encoded)?;
         Ok(true)
     }

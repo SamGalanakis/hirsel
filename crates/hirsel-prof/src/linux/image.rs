@@ -9,17 +9,10 @@ use sha2::{Digest, Sha256};
 
 use super::perf::Mapping;
 use super::unwind::UnwindInfo;
+pub(crate) use crate::capture::SymbolSource;
 use crate::profile::Result;
 
 type Reader = EndianArcSlice<LittleEndian>;
-
-/// The caller verifies detached DWARF against the executable before selecting it.
-pub enum SymbolSource {
-    EmbeddedDwarf,
-    DetachedDwarf(Vec<u8>),
-    SymtabOnly,
-    OffsetsOnly,
-}
 
 impl SymbolSource {
     pub(crate) fn tier(&self) -> &'static str {

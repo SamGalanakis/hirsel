@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// of the separate objects makes. Only checked bytes are written into it, and
 /// once sealed nothing changes them.
 pub(crate) struct Bundle {
-    file: File,
+    file: crate::host::SealedFile,
     /// Each member's bytes: offset and length.
     members: Vec<(u64, usize)>,
 }
@@ -32,12 +32,8 @@ const MAGIC: &[u8; 8] = b"!<arch>\n";
 
 impl Bundle {
     /// The path through which another process reads the bundle.
-    pub(crate) fn path(&self) -> PathBuf {
-        PathBuf::from(format!(
-            "/proc/{}/fd/{}",
-            std::process::id(),
-            std::os::fd::AsRawFd::as_raw_fd(&self.file)
-        ))
+    pub(crate) fn path(&self) -> io::Result<PathBuf> {
+        self.file.path()
     }
     /// The bundle of `members`, in order.
     pub(crate) fn of(members: &[Arc<[u8]>], format: ObjectFormat) -> io::Result<Self> {
@@ -51,7 +47,7 @@ impl Bundle {
     pub(crate) fn member(&self, n: usize) -> io::Result<Vec<u8>> {
         let (at, len) = self.members[n];
         let mut bytes = vec![0; len];
-        self.file.read_exact_at(&mut bytes, at)?;
+        self.file.file().read_exact_at(&mut bytes, at)?;
         Ok(bytes)
     }
 }
@@ -90,6 +86,8 @@ impl std::ops::Deref for Members {
 
 /// A [`Bundle`] being written.
 pub(crate) struct BundleWriter {
+    sealed: crate::host::SealedFile,
+    /// A buffered writer on a second descriptor of `sealed`.
     file: io::BufWriter<File>,
     at: u64,
     members: Vec<(u64, usize)>,
@@ -98,9 +96,11 @@ pub(crate) struct BundleWriter {
 
 impl BundleWriter {
     pub(crate) fn new(format: ObjectFormat) -> io::Result<Self> {
-        let mut file = io::BufWriter::with_capacity(1 << 20, memory_file()?);
+        let sealed = crate::host::SealedFile::new(c"hirsel-link")?;
+        let mut file = io::BufWriter::with_capacity(1 << 20, sealed.file().try_clone()?);
         file.write_all(MAGIC)?;
         Ok(Self {
+            sealed,
             file,
             at: MAGIC.len() as u64,
             members: Vec::new(),
@@ -147,58 +147,18 @@ impl BundleWriter {
         Ok(())
     }
     /// The bundle, sealed against every further write.
-    pub(crate) fn finish(self) -> io::Result<Bundle> {
-        let file = self
-            .file
-            .into_inner()
-            .map_err(io::IntoInnerError::into_error)?;
-        seal(&file)?;
+    pub(crate) fn finish(mut self) -> io::Result<Bundle> {
+        drop(
+            self.file
+                .into_inner()
+                .map_err(io::IntoInnerError::into_error)?,
+        );
+        self.sealed.seal()?;
         Ok(Bundle {
-            file,
+            file: self.sealed,
             members: self.members,
         })
     }
-}
-
-#[cfg(target_os = "linux")]
-fn memory_file() -> io::Result<File> {
-    use std::os::fd::FromRawFd;
-    // SAFETY: the name is NUL-terminated and these flags take no other arguments.
-    let fd = unsafe {
-        libc::memfd_create(
-            c"hirsel-link".as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: memfd_create returned a fresh owned descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-#[cfg(target_os = "linux")]
-fn seal(file: &File) -> io::Result<()> {
-    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
-    // SAFETY: the file is open and F_ADD_SEALS takes a single integer argument.
-    if unsafe {
-        libc::fcntl(
-            std::os::fd::AsRawFd::as_raw_fd(file),
-            libc::F_ADD_SEALS,
-            seals,
-        )
-    } < 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-#[cfg(not(target_os = "linux"))]
-fn memory_file() -> io::Result<File> {
-    Err(io::ErrorKind::Unsupported.into())
-}
-#[cfg(not(target_os = "linux"))]
-fn seal(_: &File) -> io::Result<()> {
-    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Each object's checked bytes, in order: the bytes an object this request

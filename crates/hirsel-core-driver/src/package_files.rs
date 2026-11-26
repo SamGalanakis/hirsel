@@ -1,8 +1,7 @@
 use std::ffi::{CString, OsString};
 use std::fs::{File, Metadata};
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -69,6 +68,9 @@ pub(crate) struct Captured {
 pub(crate) struct Walked {
     file: File,
     metadata: Metadata,
+    /// The directory the walk opened the file in, and its name there; none for
+    /// the walk's root.
+    parent: Option<(File, CString)>,
     pub(crate) path: PathBuf,
 }
 
@@ -85,16 +87,12 @@ impl Walked {
             return Err(WalkError::WrongType);
         }
         let identity = FileId::of(&self.metadata);
-        #[cfg(target_os = "linux")]
+        let (parent, name) = self.parent.as_ref().ok_or(WalkError::Unsupported)?;
         let file =
-            File::open(format!("/proc/self/fd/{}", self.file.as_raw_fd())).map_err(|error| {
-                match error.kind() {
-                    io::ErrorKind::NotFound => WalkError::Unsupported,
-                    _ => error.into(),
-                }
+            crate::host::reopen(parent, name, &self.file).map_err(|error| match error.kind() {
+                io::ErrorKind::Unsupported => WalkError::Unsupported,
+                _ => error.into(),
             })?;
-        #[cfg(not(target_os = "linux"))]
-        let file: File = return Err(WalkError::Unsupported);
         if FileId::of(&file.metadata()?) != identity {
             return Err(WalkError::Unsupported);
         }
@@ -122,56 +120,11 @@ impl Walked {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn child(parent: &File, name: &std::ffi::OsStr) -> Result<File, WalkError> {
+fn child(parent: &File, name: &std::ffi::OsStr) -> Result<(File, CString), WalkError> {
     let name = CString::new(name.as_bytes()).map_err(|_| WalkError::Missing)?;
-    // SAFETY: the descriptor and the NUL-terminated component live through openat.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    // SAFETY: openat returned a new owned descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    Ok((crate::host::open_child(parent, &name)?, name))
 }
 
-#[cfg(target_os = "linux")]
-fn link_target(link: &File) -> Result<PathBuf, WalkError> {
-    let mut bytes = vec![0u8; 256];
-    loop {
-        // SAFETY: an empty name reads the opened link itself. The output buffer
-        // is writable for the supplied length and the descriptor stays open.
-        let n = unsafe {
-            libc::readlinkat(
-                link.as_raw_fd(),
-                c"".as_ptr(),
-                bytes.as_mut_ptr().cast(),
-                bytes.len(),
-            )
-        };
-        if n < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let n = n as usize;
-        if n < bytes.len() {
-            bytes.truncate(n);
-            return Ok(OsString::from_vec(bytes).into());
-        }
-        bytes.resize(bytes.len() * 2, 0);
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub(crate) fn walk(_root: &File, _path: &Path) -> Result<Walked, WalkError> {
-    Err(WalkError::Unsupported)
-}
-
-#[cfg(target_os = "linux")]
 pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
     /// Section 1's bound: at most 40 links are followed on one path.
     const LINKS: usize = 40;
@@ -201,11 +154,11 @@ pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
 
     let mut pending = Vec::new();
     steps(path, &mut pending)?;
-    let mut open = vec![(root.try_clone()?, root.metadata()?)];
+    let mut open = vec![(root.try_clone()?, root.metadata()?, None)];
     let mut names = PathBuf::new();
     let mut links = 0;
     while let Some(step) = pending.pop() {
-        let (current, metadata) = open.last().unwrap();
+        let (current, metadata, _) = open.last().unwrap();
         if !metadata.is_dir() {
             return Err(WalkError::WrongType);
         }
@@ -219,25 +172,31 @@ pub(crate) fn walk(root: &File, path: &Path) -> Result<Walked, WalkError> {
                 names.pop();
             }
             Step::Name(name) => {
-                let file = child(current, &name)?;
+                let (file, component) = child(current, &name)?;
                 let candidate = file.metadata()?;
                 if candidate.is_symlink() {
                     links += 1;
                     if links > LINKS {
                         return Err(WalkError::LinkLoop);
                     }
-                    steps(&link_target(&file)?, &mut pending)?;
+                    let target = crate::host::link_target(current, &component, &file)?;
+                    steps(&target, &mut pending)?;
                 } else {
                     names.push(&name);
-                    open.push((file, candidate));
+                    open.push((file, candidate, Some(component)));
                 }
             }
         }
     }
-    let (file, metadata) = open.pop().unwrap();
+    let (file, metadata, name) = open.pop().unwrap();
+    let parent = match (name, open.last()) {
+        (Some(name), Some((directory, _, _))) => Some((directory.try_clone()?, name)),
+        _ => None,
+    };
     Ok(Walked {
         file,
         metadata,
+        parent,
         path: names,
     })
 }

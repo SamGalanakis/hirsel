@@ -254,7 +254,7 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> 
         header.msg_iovlen = 1;
         header.msg_control = control.as_mut_ptr().cast();
         header.msg_controllen = control.len() as _;
-        let got = libc::recvmsg(stream.as_raw_fd(), &mut header, libc::MSG_CMSG_CLOEXEC);
+        let got = crate::host::receive(stream.as_raw_fd(), &mut header);
         if got > 0 {
             let mut cmsg = libc::CMSG_FIRSTHDR(&header);
             while !cmsg.is_null() {
@@ -287,10 +287,7 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> 
 /// long the directory's own path is: through the descriptor `held` keeps open.
 fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::File)> {
     let held = std::fs::File::open(directory)?;
-    Ok((
-        PathBuf::from(format!("/proc/self/fd/{}/{name}", held.as_raw_fd())),
-        held,
-    ))
+    Ok((crate::host::fd_path(&held)?.join(name), held))
 }
 
 struct Route {

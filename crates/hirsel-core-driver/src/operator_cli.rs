@@ -17,7 +17,6 @@ use hirsel_core_ir::release_recipe::Recipe;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -944,7 +943,7 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
         Err(error) => return Err(error.into()),
     };
     // Keep the verified file open across exec, even if collection removes its name.
-    let status = Command::new(format!("/proc/self/fd/{}", image.as_raw_fd()))
+    let status = Command::new(crate::host::fd_path(&image)?)
         .arg("--hirsel-replay-recording")
         .arg(if diagnose { "diagnose" } else { "same" })
         .arg(tape)

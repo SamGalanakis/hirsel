@@ -11,16 +11,7 @@ fn main() {
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     // A descriptor this process inherited open across exec (a shell's `3>`)
     // would pass on to every tool it starts. Mark them all close-on-exec, so
-    // a child tool inherits stdin, stdout and stderr only. A kernel without
-    // close_range (before 5.11) leaves them as they are.
-    // SAFETY: close_range only changes descriptor flags; it touches no memory.
-    unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            3u32,
-            u32::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        )
-    };
+    // a child tool inherits stdin, stdout and stderr only.
+    hirsel_core_driver::close_inherited_descriptors();
     hirsel_core_driver::request::main(std::env::args().skip(1).collect())
 }

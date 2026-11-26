@@ -9,9 +9,7 @@ use object::read::elf::{ElfFile64, FileHeader, SectionHeader, Sym};
 use object::{LittleEndian, elf};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 const AR: &[u8] = b"!<arch>\n";
@@ -22,7 +20,7 @@ const TBD: &[u8] = b"--- !tapi-tbd";
 mod macho;
 
 pub(crate) struct SealedArchive {
-    file: File,
+    file: crate::host::SealedFile,
     /// Its members are Mach-O objects, whose symbols carry a leading `_`.
     macho: bool,
     indexed: BTreeMap<Vec<u8>, IndexedSymbol>,
@@ -116,12 +114,9 @@ impl LinkArchives {
             symbols.check_link_input(member, "the generated code")?;
         }
         symbols.check_imports(&recipe.target)?;
-        let pid = std::process::id();
-        inputs.extend(
-            self.0.values().map(|row| {
-                PathBuf::from(format!("/proc/{pid}/fd/{}", row.archive.file.as_raw_fd()))
-            }),
-        );
+        for row in self.0.values() {
+            inputs.push(row.archive.file.path()?);
+        }
         Ok(())
     }
 }
@@ -468,8 +463,9 @@ impl SealedArchive {
     ) -> Result<Self, AdmissionError> {
         let seal_error =
             || AdmissionError::Refused("FFI-3: this host cannot seal staged archives".into());
-        let mut file = seal(&bytes).map_err(|_| seal_error())?;
+        let mut sealed = seal(&bytes).map_err(|_| seal_error())?;
         let context = context(archive, module, target, path);
+        let file = sealed.file_mut();
         let length = file.metadata()?.len();
         file.seek(SeekFrom::Start(0))?;
         let observed = if length == bytes.len() as u64 {
@@ -477,7 +473,7 @@ impl SealedArchive {
             ObjectKind::ForeignArchive.hash(&bytes)
         } else {
             ObjectKind::ForeignArchive
-                .hash_stream(length, |hash| std::io::copy(&mut file, hash).map(|_| ()))?
+                .hash_stream(length, |hash| std::io::copy(file, hash).map(|_| ()))?
         };
         if observed != archive.hash {
             return Err(refuse(
@@ -591,7 +587,7 @@ impl SealedArchive {
             members.push(member);
         }
         Ok(Self {
-            file,
+            file: sealed,
             macho: is_macho(target),
             indexed: symbols,
             members,
@@ -685,33 +681,11 @@ impl SealedArchive {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn seal(bytes: &[u8]) -> std::io::Result<File> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    // SAFETY: the name is NUL-terminated and these open flags take no other arguments.
-    let fd = unsafe {
-        libc::memfd_create(
-            c"hirsel-foreign".as_ptr(),
-            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: memfd_create returned a fresh owned descriptor.
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    file.write_all(bytes)?;
-    let seals = libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
-    // SAFETY: the file is still open and F_ADD_SEALS takes a single integer argument.
-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(file)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn seal(_: &[u8]) -> std::io::Result<File> {
-    Err(std::io::ErrorKind::Unsupported.into())
+fn seal(bytes: &[u8]) -> std::io::Result<crate::host::SealedFile> {
+    let mut sealed = crate::host::SealedFile::new(c"hirsel-foreign")?;
+    sealed.file_mut().write_all(bytes)?;
+    sealed.seal()?;
+    Ok(sealed)
 }
 
 /// The member `bytes` holds, or `None` when it is not a relocatable object for

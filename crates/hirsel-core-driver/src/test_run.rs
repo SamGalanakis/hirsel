@@ -218,28 +218,7 @@ pub(crate) fn grant_parameters(decl: &EntryDecl, options: &mut NativeOptions) {
 }
 
 pub(crate) fn affinity_jobs() -> io::Result<NonZeroUsize> {
-    let mut mask = vec![0usize; 16];
-    loop {
-        // SAFETY: The kernel can write up to the allocated byte length to mask.
-        let status = unsafe {
-            libc::sched_getaffinity(
-                0,
-                std::mem::size_of_val(mask.as_slice()),
-                mask.as_mut_ptr().cast(),
-            )
-        };
-        if status == 0 {
-            let count = mask.iter().map(|word| word.count_ones() as usize).sum();
-            return NonZeroUsize::new(count)
-                .ok_or_else(|| io::Error::other("empty CPU affinity mask"));
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINVAL) {
-            return Err(error);
-        }
-        // A fixed cpu_set_t can be too small for the kernel's CPU mask.
-        mask.resize(mask.len() * 2, 0);
-    }
+    crate::host::available_cpus()
 }
 
 enum TestLaunch {

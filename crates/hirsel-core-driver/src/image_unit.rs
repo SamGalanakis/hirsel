@@ -59,7 +59,7 @@ pub(crate) fn prelink(
     process.args(FLAGS);
     process
         .args(["--push-state", "--whole-archive"])
-        .arg(objects.path())
+        .arg(objects.path()?)
         .arg("--pop-state");
     process.arg("-o").arg(&output);
     crate::native::command(&mut process)?;

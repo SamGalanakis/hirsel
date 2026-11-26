@@ -25,7 +25,7 @@ impl DevChild {
             endpoint.fill();
             while endpoint.frame().is_some() {}
         }
-        if self.child.status.is_none() && readable(self.child.pidfd.as_raw_fd()) {
+        if self.child.status.is_none() && self.child.process.exited() {
             self.child.reap_leader()?;
         }
         Ok(self.child.status)
@@ -84,11 +84,10 @@ fn spawn_child(
     } else {
         None
     };
-    let (pid, pidfd) = spawn::start(&command, workdir, &slots, None, listener.is_some())?;
+    let process = spawn::start(&command, workdir, &slots, None, listener.is_some())?;
     Ok(DevChild {
         child: RunningChild {
-            pid,
-            pidfd,
+            process,
             group: None,
             status: None,
         },

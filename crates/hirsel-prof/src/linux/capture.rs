@@ -1,77 +1,18 @@
-use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 use std::process::ExitStatus;
 use std::rc::Rc;
 
-use super::image::{Image, SymbolSource};
+use super::image::Image;
 use super::import::Import;
 use super::launch::SuspendedLaunchedProcess;
 use super::perf::{self, Event, PerfGroup, PerfSettings};
 use super::procfs::Identity;
+use crate::capture::SymbolSource;
+pub(crate) use crate::capture::{CaptureOptions, Launch, MemMode, ObservationOptions};
 use crate::observation::{Observation, RecordKind};
 use crate::profile::{ProfileWriter, Result, RunMeta};
-
-/// The settings common to launching or attaching to a native process.
-pub struct CaptureOptions<'a> {
-    pub out: &'a Path,
-    pub freq: u64,
-    pub pmu: Option<&'a str>,
-    pub stack_bytes: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MemMode {
-    Exact,
-    Sampled,
-}
-
-impl MemMode {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Exact => "exact",
-            Self::Sampled => "sampled",
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct ObservationOptions<'a> {
-    pub path: &'a Path,
-    pub tasks: bool,
-    pub mem: Option<MemMode>,
-}
-
-impl<'a> ObservationOptions<'a> {
-    pub(super) const KEYS: [&str; 3] = [
-        "HIRSEL_PROFILE",
-        "HIRSEL_PROFILE_TASKS",
-        "HIRSEL_PROFILE_MEM",
-    ];
-
-    pub(super) fn environment(self) -> [(&'static str, Option<&'a OsStr>); 3] {
-        [
-            (Self::KEYS[0], Some(self.path.as_os_str())),
-            (
-                Self::KEYS[1],
-                Some(OsStr::new(if self.tasks { "1" } else { "0" })),
-            ),
-            (
-                Self::KEYS[2],
-                self.mem.map(|mode| OsStr::new(mode.as_str())),
-            ),
-        ]
-    }
-}
-
-pub struct Launch<'a> {
-    pub executable: &'a Path,
-    pub arguments: &'a [String],
-    pub record: Option<&'a OsStr>,
-    pub observation: Option<ObservationOptions<'a>>,
-    pub source_root: &'a Path,
-}
 
 /// Profile a just-built executable, starting its counters at successful exec.
 pub fn run(

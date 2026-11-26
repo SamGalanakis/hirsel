@@ -120,12 +120,12 @@ impl Report {
     }
 }
 
-fn fd_path(directory: &File) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+fn fd_path(directory: &File) -> io::Result<PathBuf> {
+    crate::host::fd_path(directory)
 }
 
 fn lock_scope(cwd: &Path) -> Result<File, Failure> {
-    let scope = open_directory(&fd_path(&Workspace::scope(cwd)?))?;
+    let scope = open_directory(&fd_path(&Workspace::scope(cwd)?)?)?;
     loop {
         // SAFETY: scope is a live, readable descriptor for the workspace root.
         if unsafe { libc::flock(scope.as_raw_fd(), libc::LOCK_EX) } == 0 {
@@ -314,7 +314,7 @@ fn check_source(
 }
 
 fn stage(directory: &File, name: &str, contents: &[u8]) -> io::Result<tempfile::NamedTempFile> {
-    let parent = fd_path(directory);
+    let parent = fd_path(directory)?;
     let mut temp = tempfile::NamedTempFile::new_in(&parent)?;
     match fs::symlink_metadata(parent.join(name)) {
         Ok(metadata) if metadata.is_file() => {
@@ -342,7 +342,7 @@ fn publish(
     path: PathBuf,
     report: &mut Report,
 ) -> Result<File, Failure> {
-    let file = temp.persist(fd_path(directory).join(name))?;
+    let file = temp.persist(fd_path(directory)?.join(name))?;
     report.pending.retain(|pending| *pending != path);
     if !report.committed.contains(&path) {
         report.committed.push(path);
@@ -462,7 +462,7 @@ fn commit(
         let path = write.path();
         let staged = stage(write.directory, MANIFEST, &write.proposed.bytes)?;
         if !write.current(&workspace_path)
-            || !fs::symlink_metadata(fd_path(write.directory).join(MANIFEST))
+            || !fs::symlink_metadata(fd_path(write.directory)?.join(MANIFEST))
                 .is_ok_and(|metadata| metadata.is_file())
         {
             let written = if report.committed.is_empty() {
@@ -561,7 +561,7 @@ pub(crate) fn run_at(
                 &walk(&workspace.root, &member.directory)
                     .and_then(|file| file.directory())
                     .map_err(|error| error.explain("workspace", "a directory"))?,
-            ))?)
+            )?)?)
         })
         .transpose()?;
     let old_lock = Lock::capture(&workspace)?;

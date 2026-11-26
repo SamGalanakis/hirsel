@@ -898,7 +898,7 @@ fn link_macho(
 ) {
     use hirsel_core_layout::{ObjectFormat, Target};
     let held = crate::native::link_input::Bundle::of(&objects, ObjectFormat::MachO).unwrap();
-    let bundle = held.path();
+    let bundle = held.path().unwrap();
     let recipe = crate::tool_inputs::LinkRecipe {
         schema: 0,
         target: Target::Aarch64Darwin.triple().into(),

@@ -1,8 +1,8 @@
 # QUIC
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 2, Media Wave 2 package 1
-of 4). Not built. Rules QUIC-1 to QUIC-10, laws Q1 to Q16, slices QS0 to QS8. Goes to design
-review (astra) before any build; the open items are at the end.*
+of 4); design review applied the same day (media-w2-spec-fix-2918). Not built. Rules QUIC-1 to
+QUIC-10, laws Q1 to Q16, slices QS0 to QS8. The review's rulings are at the end.*
 
 `quic` is a sans-IO QUIC version 1 endpoint, written in Hirsel under `core/programs/quic` <!-- doc-ref: planned -->.
 It is the transport under [WebTransport](webtransport.md), [MoQ](moq.md) and
@@ -60,16 +60,16 @@ linked into the package.
 | Versions | QUIC v1 (`0x00000001`); Version Negotiation packets for any other version | v2 ([RFC 9369](https://www.rfc-editor.org/rfc/rfc9369)): no browser needs it; adding it later is a label and a version number |
 | Roles | server and client | — |
 | Handshake | TLS 1.3 in Hirsel over TLS-8 (QUIC-3); X25519 and P-256; the three TLS-8 suites; server signature P-256 ECDSA or Ed25519 | 0-RTT and resumption: TLS-8 has no PSK schedule, 0-RTT replay is a cost every consumer here would refuse; RSA server keys: `secret.sign`'s `rs256` is PKCS#1 v1.5, which TLS 1.3 forbids for CertificateVerify |
-| Peer authentication | server pinned by SPKI digest (client role); client certificates pinned by SPKI digest (mutual, for cascade) | Web PKI chain verification in the client role: no Hirsel chain verifier outside `tls.connect`'s provider; open item O4 |
+| Peer authentication | server pinned by certificate or SPKI digest, any of a list (client role); client certificates required and pinned the same way when the server sets `client_pins` (mutual, for cascade) | Web PKI chain verification in the client role: no Hirsel chain verifier outside `tls.connect`'s provider; ruled out for Wave 2 (Design review, O4) |
 | Address validation | Retry (RFC 9000 §8.1.2) with the RFC 9001 §5.8 integrity tag; NEW_TOKEN tokens; the 3× anti-amplification limit | — |
 | Connection IDs | NET-16 `Steer.Quic` format, so a `udp_bind_group` steers to the owning member; NEW_CONNECTION_ID, RETIRE_CONNECTION_ID; stateless reset | QUIC-LB encrypted CIDs ([draft-ietf-quic-load-balancers](https://datatracker.ietf.org/doc/draft-ietf-quic-load-balancers/)): one host, no external load balancer |
 | Migration | passive: path validation and NAT rebinding on the server; the client keeps its path | active client migration and `preferred_address`: no consumer needs them |
 | Streams | bidirectional and unidirectional, stream and connection flow control, RESET_STREAM, STOP_SENDING, RESET_STREAM_AT ([draft-ietf-quic-reliable-stream-reset](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/)) | — (WebTransport requires RESET_STREAM_AT, webtrans-http3-17 §3.1) |
 | Datagrams | RFC 9221 DATAGRAM frames, never retransmitted, counted for congestion control | — |
-| Recovery | RFC 9002 loss detection, PTO, ACK frequency of every second ack-eliciting packet, `max_ack_delay` 25 ms; NewReno and CUBIC with HyStart++ ([RFC 9406](https://www.rfc-editor.org/rfc/rfc9406)); pacing | BBRv3: still an Internet-Draft; open item O2 |
-| Path MTU | 1,200 bytes base; DPLPMTUD ([RFC 8899](https://www.rfc-editor.org/rfc/rfc8899)) probes up to the socket's `slot_bytes` | — |
+| Recovery | RFC 9002 loss detection, PTO, ACK frequency of every second ack-eliciting packet, `max_ack_delay` 25 ms; NewReno and CUBIC with HyStart++ ([RFC 9406](https://www.rfc-editor.org/rfc/rfc9406)) behind the `Controller` seam; pacing | BBRv3: still an Internet-Draft; later, behind the same seam (Design review, O2) |
+| Path MTU | 1,200 bytes base; DPLPMTUD ([RFC 8899](https://www.rfc-editor.org/rfc/rfc8899)) probes up to `EndpointConfig.max_mtu`, never the socket's `slot_bytes` (65,792 under `UDP_GRO`) | — |
 | ECN | RFC 9000 §13.4 validation from NET-16's `ecn` field; CE reaction as loss | L4S: deferred with SCReAM (C3) |
-| Key update | RFC 9001 §6 over TLS-8 `key_update` | — |
+| Key update | RFC 9001 §6 over TLS-8 `key_update`, with a non-consuming next-phase open (QS0) and the §6.6 AEAD limits | — |
 | Multipath | — | draft-ietf-quic-multipath: TLS-8 has the `QuicMultipath` profile, but no consumer needs it in Wave 2 |
 | Batching | NET-16 GSO trains: equal-length packets to one peer in one `udp_send` | — |
 
@@ -81,69 +81,131 @@ pub opaque type Connection
 pub type ConnectionHandle = ConnectionHandle(u32)
 pub type StreamId = StreamId(u64)
 pub type Side = Client | Server
-pub type EndpointConfig { member: u16, members: u16, cid_len: u8, retry: RetryPolicy, reset_key: Secret, token_key: Secret, limits: EndpointLimits }
+pub type EndpointConfig { member: u16, members: u16, cid_len: u8, max_mtu: u16, retry: RetryPolicy, reset_key: Secret, token_key: Secret, limits: EndpointLimits }
 pub type EndpointLimits { connections: u32, unvalidated: u32, datagram_bytes: u32 }
-pub type TransportConfig { max_idle_ms: u32, initial_max_data: u64, initial_max_stream_data: u64, max_streams_bidi: u64, max_streams_uni: u64, max_datagram_frame: u16, cc: Controller, alpn: List[String] }
+pub type TransportConfig { max_idle_ms: u32, initial_max_data: u64, initial_max_stream_data: u64, max_streams_bidi: u64, max_streams_uni: u64, max_datagram_frame: u16, send_bytes: u64, max_gaps: u16, cc: Controller, alpn: List[String], client_pins: Option[List[Pin]] }
 pub type Controller = NewReno | Cubic
 pub type RetryPolicy = Never | Always | Above(u32)
 pub type Identity = Identity(chain: List[Bytes], key: Secret, alg: SignAlg)
-pub type Pin = Pin(Inline[u8, 32])
+pub type Pin = Spki(Inline[u8, 32]) | Cert(Inline[u8, 32])
+pub type PeerParams { max_idle_ms: u64, max_udp_payload: u64, max_ack_delay_ms: u64, max_datagram_frame: u64, reset_stream_at: bool, active_cid_limit: u64 }
 
-pub type Input = Datagram(from: Addr, to: Addr, ecn: u8, data: Bytes) | Timeout(now: u64)
-pub type Output = Transmit(to: Addr, ecn: u8, segment: u16, at: u64, len: u64) | Wake(at: u64)
-pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Reset(ConnectionHandle, StreamId, u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
+pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
 
 pub fn endpoint(r: Random, c: EndpointConfig, server: Option[(Identity, TransportConfig)]) -> Result[Endpoint, QuicError]
-pub fn connect(mut e: Endpoint, now: u64, to: Addr, name: String, pin: Pin, client: Option[Identity], t: TransportConfig) -> Result[ConnectionHandle, QuicError]
-pub fn receive(mut e: Endpoint, now: u64, take i: Input, mut events: List[Event])
+pub fn connect(mut e: Endpoint, now: u64, to: Addr, name: String, pins: List[Pin], client: Option[Identity], t: TransportConfig) -> Result[ConnectionHandle, QuicError]
+pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, buf: Bytes, at: u64, len: u64, mut events: List[Event])
+pub fn timeout(mut e: Endpoint, now: u64, mut events: List[Event])
 pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> Option[u64]
+pub fn committed(mut e: Endpoint, now: u64, k: u64)
 pub fn open(mut e: Endpoint, c: ConnectionHandle, bidi: bool) -> Result[StreamId, QuicError]
 pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError]
-pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Shared[Bytes], fin: bool) -> Result[(), QuicError]
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Shared[Bytes], fin: bool) -> Result[bool, QuicError]
 pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError]
 pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError]
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError]
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, data: Shared[Bytes]) -> Result[(), QuicError]
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, data: Shared[Bytes], urgency: u8, order: u64, tag: u64) -> Result[(), QuicError]
+pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64
 pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, urgency: u8, order: u64) -> Result[(), QuicError]
 pub fn close(mut e: Endpoint, c: ConnectionHandle, code: u64, reason: Bytes)
+pub fn set_identity(mut e: Endpoint, id: Identity)
+pub fn set_client_pins(mut e: Endpoint, pins: Option[List[Pin]])
 pub fn peer_pin(e: Endpoint, c: ConnectionHandle) -> Option[Pin]
+pub fn peer_params(e: Endpoint, c: ConnectionHandle) -> Option[PeerParams]
+pub fn pto_ns(e: Endpoint, c: ConnectionHandle) -> u64
 ```
 
 One `Endpoint` per socket or per group member, as quinn-proto's `Endpoint` is "the protocol
-state for a single socket". It is sans-IO: the caller passes each received datagram and each
-timeout to `receive`, calls `poll` to get datagrams into `out` (a GSO train is one
-`Transmit` with `segment` set, NET-16) and the next deadline, and runs the socket. The
-package never calls the host. A `Connection` is reached only through its handle, which the
-endpoint looks up from a datagram's destination CID.
+state for a single socket". It is sans-IO and the package never calls the host:
+
+- **Receive.** The caller passes each received datagram to `receive_datagram` as a borrowed
+  slice `buf[at, at + len)` of its NET-16 receive buffer, with the `UdpPacket`'s `peer` and
+  `ecn`; nothing is copied before the packet is opened in place. NET-16 does not report a
+  datagram's local address, so none is asked for. A `UdpPacket` with `truncated` set is never
+  passed in: the driver drops and counts it (QUIC-10). `timeout` runs the timers due at
+  `now`.
+- **Transmit.** `poll` writes datagrams into `out` and appends one `Transmit` per datagram,
+  in order: `at` and `len` are the datagram's place in `out`, and `send_at` is the pacer's
+  earliest send time, in `host.mono_ns` nanoseconds (QUIC-6). Consecutive equal-length
+  `Transmit`s to one `to` are a NET-16 GSO train; the endpoint makes no other batching claim.
+  `poll` returns the next deadline.
+- **Commit.** `udp_send` may commit only a prefix of a batch (NET-16). The caller reports the
+  committed count with `committed(e, now, k)`, and only then does the endpoint record the
+  first `k` datagrams' packets as sent, start their loss timers and charge them to the
+  congestion window and the anti-amplification budget. The packets of the uncommitted suffix
+  are abandoned: their packet numbers are skipped (RFC 9000 §12.3 allows gaps), their
+  frames go back to their send queues as if never sent, with no congestion response, and a
+  frame whose stream was reset or whose datagram was dropped since (QUIC-5, QUIC-7) is not
+  requeued. A `poll` with no `committed` before the next `poll` abandons the whole batch.
+
+A `Connection` is reached only through its handle, which the endpoint looks up from a
+datagram's destination CID.
 
 `write_shared` queues a `Shared[Bytes]` on a stream without copying it, and
 `send_datagram` takes one too: a relay that fans one object out to many connections (MoQ,
 cascade) holds one copy, and each connection copies only into its own sealed packet, which
-TLS-8 `seal_into` does in the cipher.
+TLS-8 `seal_into` does in the cipher. A packet is assembled contiguously in `out` and sealed
+in place; there is no scatter-input seal.
 
 `priority` sets a stream's urgency (0 to 7, lower first) and its order within that urgency
 (lower first); among equal priorities streams take turns, as
-[RFC 9218](https://www.rfc-editor.org/rfc/rfc9218)'s `u` and `i` do. MoQ's scheduling
+[RFC 9218](https://www.rfc-editor.org/rfc/rfc9218)'s `u` and `i` do. A datagram carries the
+same `(urgency, order)` key and competes in the same schedule. MoQ's scheduling
 (moq-transport-23 §5.1.2) maps onto it (MOQ-5).
+
+`set_identity` replaces the server's certificate chain and key for connections that start
+after it; live connections keep the identity they were made with. It is how a
+WebTransport server rotates its 14-day certificate (WT-7). `set_client_pins` likewise
+replaces the pins new connections are checked against. `peer_params` gives the peer's
+transport parameters once the handshake has them, and `pto_ns` the connection's current
+probe timeout (RFC 9002 §6.2.1), which WebTransport's session drain uses.
 
 ## QUIC-2: Packets and frames
 
 The codec reads and writes RFC 9000 §17 long and short headers, §16 variable-length integers
 and every frame type of §19, plus DATAGRAM (RFC 9221 §4, types `0x30` and `0x31`) and
-RESET_STREAM_AT (type `0x24`). Reading rules:
+RESET_STREAM_AT (type `0x24`, [draft-ietf-quic-reliable-stream-reset-11](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/11/) §4). Reading rules:
 
 - A varint uses the shortest or any longer encoding on read (RFC 9000 §16) and the shortest
   on write. A frame type is read as a varint and must use its minimal encoding (§12.4).
 - A frame type not allowed in its packet type (RFC 9000 Table 3) is
-  `PROTOCOL_VIOLATION`. A frame of unknown type is `FRAME_ENCODING_ERROR`.
-- A packet whose header protection or AEAD fails to remove is dropped and counted, never
-  answered. Packet numbers are decoded by RFC 9000 Appendix A.3 against the space's largest
-  acknowledged-or-received number.
-- Coalesced packets (§12.2) in one datagram are each processed; a packet that cannot be
-  removed does not stop the next.
+  `PROTOCOL_VIOLATION`. A frame of unknown type is `FRAME_ENCODING_ERROR`. A DATAGRAM frame
+  received when the endpoint did not advertise `max_datagram_frame_size` is
+  `PROTOCOL_VIOLATION` (RFC 9221 §3).
+- Packet numbers are decoded by RFC 9000 Appendix A.3 against the largest packet number
+  received *and authenticated* in that space (§17.1), never against a sent or acknowledged
+  number.
 - The fixed bit must be 1 on receipt, and is always written 1 (no RFC 9287 greasing).
+
+**The receive classifier.** `receive_datagram` takes each datagram through one order of
+checks, and the first that applies decides. Every drop is counted by reason and never
+answered unless the step says so.
+
+1. Fewer than 21 bytes: dropped (§10.3: no valid packet is shorter).
+2. Long header with version 0: a Version Negotiation packet. A server drops it. A client
+   handles it only before any packet from the server was authenticated, and only if it does
+   not list the client's version (§6.2).
+3. Long header with an unsupported version: a server answers with one Version Negotiation
+   packet only if the datagram is at least 1,200 bytes (§6.1: "servers MUST drop smaller
+   packets that specify unsupported versions"), and otherwise drops it. A client drops it.
+4. Long header Initial in a datagram shorter than 1,200 bytes, at a server: dropped (§14.1).
+   The size is the datagram's, so coalesced packets count.
+5. Destination CID matches no connection: for an Initial at a server, the admission path of
+   QUIC-4 (limits, then Retry); for a short header, the stateless-reset path of QUIC-4;
+   anything else is dropped.
+6. Header protection: the 16-byte sample at packet-number offset + 4 (RFC 9001 §5.4.2) must
+   lie inside the packet; a packet too short for it is dropped *before* TLS-8 `packet.mask`
+   is called, since `mask` faults with `Bounds` on a short sample.
+7. Packet protection: a packet that fails to open is dropped and counted against the key's
+   integrity limit (QUIC-6), never answered.
+8. Frames, in order. A connection error closes the connection; a packet with an error is not
+   acknowledged.
+
+Coalesced packets (§12.2) in one datagram go through steps 5 to 8 each; a packet that is
+dropped does not stop the next.
 
 Header protection, packet protection, nonces and key phases are TLS-8's `Quic` profile,
 `quic_initial`, `header_mask` and `key_update`; this chapter never touches key bytes.
@@ -171,24 +233,49 @@ what QUIC needs:
   peer, hello_hash)` gives the Handshake space; `schedule.application(finished_hash)` the 1-RTT
   space; `schedule.finished` and `verify_finished` the Finished values. Initial keys are
   `schedule.quic_initial(side, dcid)`. The handshake never sees a key byte.
-- **Signing.** The server signs the CertificateVerify content (RFC 8446 §4.4.3) with
-  `secret.sign(key, alg)`, whose `key` is a `Secret` with a `sign(p256)` or `sign(ed25519)`
-  use: minted with `secret.p256_key`, or a file-sourced key granted those uses (TLS-5).
-- **Verifying.** The peer's CertificateVerify is checked with `std.p256.verify` or
-  `std.ed25519.verify` against the leaf's subject public key (the two functions `std.jwt`
-  already uses), and the leaf's SPKI digest (SHA-256 of the DER `SubjectPublicKeyInfo`) must
-  equal the `Pin` the caller gave. There is no chain verification and no name check: the pin
-  is the authentication, as WebRTC's DTLS fingerprint is (RFC 8827) and as WebTransport's
-  `serverCertificateHashes` is in browsers. For WebTransport the server's certificate must
-  then be ECDSA P-256 with a validity of at most 14 days, the W3C rule for hashed
-  certificates; `std.x509_build.self_signed_p256` makes one.
+- **Signing.** The CertificateVerify content (RFC 8446 §4.4.3) is signed with
+  `secret.sign(key, alg, r, msg, out)`, whose `key` is a `Secret` with a `sign(p256)` or
+  `sign(ed25519)` use (minted with `secret.p256_key`, or a file-sourced key granted those
+  uses, TLS-5) and whose `r` is the endpoint's `Random`. `secret.sign` gives a P-256
+  signature as 64 bytes `r ‖ s`; TLS 1.3's `ecdsa_secp256r1_sha256` carries an ASN.1 DER
+  `ECDSA-Sig-Value` (RFC 8446 §4.2.3), so the handshake DER-encodes it (minimal integers, a
+  leading zero only where the high bit is set) before writing it. Ed25519's 64 bytes go as
+  they are.
+- **Reading the peer's key.** `std.x509_key` (DTLS-7, slice S1 of the DTLS chapter) reads the
+  leaf's `subjectPublicKeyInfo`. QS2 adds two things to it: an `Ed25519(key)` answer for
+  `id-Ed25519` keys ([RFC 8410](https://www.rfc-editor.org/rfc/rfc8410) §4), and the byte
+  range of the whole DER `SubjectPublicKeyInfo`, which `Pin.Spki` digests.
+- **Verifying.** The peer's CertificateVerify is checked with core `p256.verify_der` (strict
+  DER, the wire form) or `ed25519.verify` against that key. A signature that does not verify
+  is `decrypt_error` (RFC 8446 §4.4.3).
+- **Pins.** A `Pin` is a SHA-256 digest: `Cert` of the leaf certificate's whole DER, as
+  WebRTC's DTLS fingerprint (RFC 8122) and the W3C `serverCertificateHashes` are; `Spki` of
+  its DER `SubjectPublicKeyInfo`, which survives re-issuing a certificate on the same key.
+  The leaf passes if it matches *any* pin in the list, so a client given `[old, new]` rides
+  across a server's certificate rotation. There is no chain verification and no name check:
+  the pin is the authentication. For browser WebTransport the server's certificate must be
+  ECDSA P-256 with a validity of at most 14 days, the W3C rule for hashed certificates;
+  `std.x509_build.self_signed_p256` makes one.
+- **Client authentication.** A server whose `TransportConfig.client_pins` is `Some(pins)`
+  sends CertificateRequest and requires a client certificate: an empty client Certificate is
+  `certificate_required` (RFC 8446 §4.4.2.4, QUIC error `0x0174`), and a leaf matching no pin
+  is `bad_certificate` (`0x012a`). The check is done when the client's CertificateVerify and
+  Finished arrive, before the server emits `Event.Connected`, accepts any 1-RTT frame or
+  sends HANDSHAKE_DONE. With `None` (WebTransport) no client certificate is asked for.
+  Cascade sets it (CAS-2).
 - **Transport parameters** (RFC 9000 §18) are written and checked in full: a duplicate, a
   server-only parameter from a client, a bad `initial_source_connection_id` or
   `original_destination_connection_id` (§7.3), or `max_udp_payload_size` below 1,200 is
-  `TRANSPORT_PARAMETER_ERROR`.
+  `TRANSPORT_PARAMETER_ERROR`. The endpoint sends `max_datagram_frame_size` (RFC 9221 §3)
+  only when `TransportConfig.max_datagram_frame` is nonzero, `reset_stream_at` (`0x1d`,
+  empty, reliable-stream-reset-11 §3) always, and `max_udp_payload_size` as `max_mtu`. A
+  `reset_stream_at` with a non-empty value is `TRANSPORT_PARAMETER_ERROR`. The endpoint
+  sends DATAGRAM frames only to a peer that advertised `max_datagram_frame_size`, and
+  RESET_STREAM_AT only to one that advertised `reset_stream_at`.
 
 This module could later serve DTLS 1.3; it is written over `Profile13`, not over QUIC
-framing, so a DTLS 1.3 record layer could drive it. That is not a Wave 2 deliverable.
+framing, so a DTLS 1.3 record layer could drive it. That is not a Wave 2 deliverable, and the
+module stays inside `quic` until one exists (Design review, O6).
 
 ## QUIC-4: Connections, CIDs and address validation
 
@@ -197,24 +284,46 @@ framing, so a DTLS 1.3 record layer could drive it. That is not a Wave 2 deliver
   So a group bound with `steer: Quic` hands each datagram to the member that owns its
   connection, and one connection's datagrams never cross units. A connection keeps at most
   `active_connection_id_limit` (8) CIDs issued, and retires as RFC 9000 §5.1.2 says.
+- **Group keys.** Every member of a `udp_bind_group` is given the same `reset_key` and
+  `token_key` (`secret.share`): a token or reset made by one member must be checked by
+  whichever member a later datagram reaches, and a restarted member must recognize its
+  predecessor's resets.
 - **Stateless reset.** The token of CID `c` is the first 16 bytes of
   `HMAC-SHA256(reset_key, c)` (RFC 9000 §10.3.2's recommended construction), through
-  `secret.hmac_sha256` with a `mac` use. A datagram that matches no connection and is at least
-  41 bytes (§10.3) gets a stateless reset of a random length shorter than it, at most one
-  per received datagram. A reset is never sent for a datagram that is itself 41 bytes or
-  shorter, so two endpoints cannot loop.
+  `secret.hmac_sha256` with a `mac` use. A reset is sent only in answer to a *short-header*
+  datagram that matches no connection and whose length `n` is greater than `21 + cid_len`
+  (anything shorter cannot be a packet to one of our CIDs, §10.3), at most one per received
+  datagram, and is itself a short-header packet (§10.3: "Endpoints MUST send Stateless Resets
+  formatted as a packet with a short header"). Its length is `n − 1` when `n` is 43 bytes or
+  less (§10.3's SHOULD), and otherwise uniformly random in `[43, n − 1]`, so it is always at
+  least 21 bytes and always shorter than its trigger (§10.3.3). Two endpoints that reset
+  each other therefore stop within `n − 21 − cid_len` exchanges. Long-header datagrams that
+  match no connection are never answered with a reset.
 - **Anti-amplification.** Before a path is validated the server sends at most three times the
-  bytes it received on it (§8.1), counted per path, including padding and coalesced packets.
-  Law Q6 checks this over every prefix of a simulated handshake.
+  bytes it received on it (§8.1), counted per path at `committed`, including padding and
+  coalesced packets. Law Q6 checks this over every prefix of a simulated handshake.
+- **Tokens.** Retry and NEW_TOKEN tokens share one construction and are kept apart by a type
+  octet. A token is `type ‖ salt ‖ sealed`:
+
+  | Type | Use | Binds (in AAD and plaintext) | Lifetime |
+  | --- | --- | --- | --- |
+  | `0x01` | Retry (RFC 9000 §8.1.2) | client IP and port, original DCID, the Retry's SCID | 10 s |
+  | `0x02` | NEW_TOKEN (§8.1.3) | client IP | 24 h |
+
+  `salt` is 16 fresh bytes from the endpoint's `Random`. The sealing key is
+  `secret.derive_hkdf_sha256(token_key, salt, "hirsel quic token" ‖ type, 32,
+  "aead(chacha20-poly1305)")`, and the nonce is zero: each key seals exactly one token, so
+  no nonce is ever reused across members, restarts or rotations, and no seal counter is
+  needed. The plaintext is the bound fields and the issue time; a token whose type does not
+  match where it arrived (a NEW_TOKEN token where a Retry token is expected, or the
+  reverse), whose fields differ, or that has expired is refused: a Retry token with
+  `INVALID_TOKEN` (§8.1.2), a NEW_TOKEN token by ignoring it and proceeding as if none was
+  sent (§8.1.3). Since there is no 0-RTT, a NEW_TOKEN token only saves the Retry round trip.
 - **Retry.** `RetryPolicy` decides when the server answers an Initial with Retry: never,
-  always, or above a count of unvalidated connections in progress. The Retry token is
-  sealed with `secret.aead_seal` (TLS-5, `aead(chacha20-poly1305)`, under `token_key`) over
-  the client address, the original DCID and the issue time, and is valid for 10 s. The
-  Retry Integrity Tag (RFC 9001 §5.8) is AES-128-GCM under the fixed key the RFC publishes;
-  TLS-8 gains one operation for it (slice QS0).
-- **NEW_TOKEN.** A validated server connection may send one token for future connections,
-  of the same construction with a lifetime of 24 hours. Since there is no 0-RTT, a token only
-  saves the Retry round trip.
+  always, or above a count of unvalidated connections in progress. The default is
+  `Above(unvalidated / 2)`; `endpoint` refuses `Above(n)` with `n ≥ unvalidated`, which
+  could never trigger before the hard limit. The Retry Integrity Tag (RFC 9001 §5.8) is
+  AES-128-GCM under the key and nonce the RFC publishes (slice QS0).
 - **Path validation and rebinding.** A non-probing packet from a new address on an
   established connection starts PATH_CHALLENGE on it (§9.3); data goes to the new path only
   after PATH_RESPONSE, and the congestion state is reset for it unless only the port
@@ -223,6 +332,9 @@ framing, so a DTLS 1.3 record layer could drive it. That is not a Wave 2 deliver
 - **Limits.** `connections` bounds live connections per endpoint, `unvalidated` bounds
   connections still in the handshake. A new Initial past either is answered with a
   CONNECTION_CLOSE of `CONNECTION_REFUSED` (§20.1) in an Initial packet and keeps no state.
+  `datagram_bytes` bounds the bytes of received DATAGRAM payloads held across all of the
+  endpoint's connections until the application takes their `Event.Datagram`; past it, new
+  datagrams are dropped and counted (RFC 9221 §5 lets a receiver drop them).
 
 ## QUIC-5: Streams and flow control
 
@@ -236,9 +348,32 @@ connection. Exceeding either is `FLOW_CONTROL_ERROR`; opening past MAX_STREAMS i
 quinn-proto does (`ReceiveWindow` updates in connection/streams), and never grows without a
 read.
 
-RESET_STREAM_AT sets a reliable size: bytes below it are still delivered and retransmitted;
-bytes past it are dropped. WebTransport resets its streams this way so the stream header is
-never lost (webtrans-http3-17 §4.4).
+**Gaps.** A stream's receive buffer holds at most `max_gaps` (default 32) disjoint
+out-of-order ranges. A STREAM frame that would make one more is dropped unacknowledged, as
+if lost; the peer retransmits it. Without the cap, a peer could make a credit-bounded buffer
+cost one range record per byte.
+
+**Send memory.** Local send memory is bounded locally, never by the peer's credit (which may
+be up to 2^62). `send_bytes` bounds the bytes a connection holds queued and unacknowledged
+across all its streams. `write` takes at most what fits under the smaller of the stream's
+credit and `send_bytes`, and returns the count (no hidden cap: the count says so).
+`write_shared` takes the whole buffer or none of it: it returns `Ok(true)` when queued and
+`Ok(false)` when the buffer would pass `send_bytes`, and the connection later emits
+`Writable` for that stream once acknowledgements free room.
+
+**Resets.** `reset(e, c, s, code, reliable)` sends RESET_STREAM (`reliable` 0) or
+RESET_STREAM_AT, and at once discards every queued, sent-unacknowledged and retransmittable
+byte of the stream at or past `reliable`, including bytes in a polled but not yet
+committed suffix; bytes below `reliable` are still delivered and retransmitted. Nothing past
+`reliable` is ever sent again. A peer's RESET_STREAM_AT sets a reliable size the same way on
+receipt, and `Event.Reset` carries the code and the stream's final size. WebTransport resets
+its streams this way so the stream header is never lost (webtrans-http3-17 §4.4), and MoQ's
+revocation fence relies on the discard (MOQ-8).
+
+RESET_STREAM_AT is advertised by the `reset_stream_at` transport parameter (`0x1d`) and uses
+frame type `0x24`, the codepoints of draft-ietf-quic-reliable-stream-reset-11; the build
+tracks that draft's codepoints until it is an RFC (Design review, O5). To a peer that did
+not advertise it, `reset` with `reliable > 0` is `Unsupported`, never a silent RESET_STREAM.
 
 ## QUIC-6: Loss detection and congestion control
 
@@ -251,43 +386,80 @@ RFC 9002 as written, with its Appendix A and B pseudocode as the oracle:
 - the controller is `NewReno` (RFC 9002 §7) or `Cubic` (RFC 9438 with HyStart++, RFC 9406),
   `Cubic` by default, as quinn (quinn-proto/src/congestion/cubic.rs) and quiche
   (quiche/src/recovery/congestion/cubic.rs) default to CUBIC; HyStart++ follows quiche
-  (quiche/src/recovery/congestion/hystart.rs), since quinn has none;
+  (quiche/src/recovery/congestion/hystart.rs), since quinn has none. `Controller` is the
+  seam a later BBRv3 or delay-based controller is added behind (Design review, O2);
 - a pacer spreads each congestion window over the smoothed RTT with a burst of 10 packets, as
-  RFC 9002 §7.7 recommends; `poll` returns the next send time as `Wake` when paced;
+  RFC 9002 §7.7 recommends; each `Transmit` carries its `send_at`, and `poll` returns the
+  next send time as `Wake` when paced;
+- an endpoint tracks at most 64 received packet-number ranges per space for its ACK frames;
+  past that the oldest range is forgotten (RFC 9000 §13.2.3 lets an endpoint limit the
+  ranges it reports), and an ACK frame is written with at most 64 ranges;
 - DATAGRAM frames are ack-eliciting and congestion-controlled but never retransmitted (RFC
   9221 §5.2); a datagram that cannot be sent within its connection's window is dropped and
   counted, not queued past one RTT;
 - ECN: counts from ACK_ECN validate the path (§13.4.2); a validated path that reports CE
   reacts once per round trip as a loss would.
 
+**Key update and AEAD limits** (RFC 9001 §6). The endpoint initiates a key update only once
+the handshake is confirmed and a packet of the current phase has been acknowledged (§6.1).
+A received packet with a flipped key phase is opened with the *next* receive key through
+QS0's non-consuming next-phase open; only if that packet authenticates does the endpoint
+commit `schedule.key_update(s, false)` and answer with its own update. A forged packet with
+a flipped phase bit therefore cannot advance or destroy the receive key. One previous
+receive key is kept for three PTOs (§6.5). Each key counts packets sealed and packets that
+failed to open:
+
+| Limit | AES-128-GCM, AES-256-GCM | ChaCha20-Poly1305 | Action |
+| --- | --- | --- | --- |
+| Confidentiality (seals per key) | 2^23 (§6.6) | — (§6.6: larger than the packet-number space) | key update well before the limit (at 2^22); if one cannot be made, close with `AEAD_LIMIT_REACHED` (`0x0f`) |
+| Integrity (failed opens per key) | 2^52 | 2^36 | close with `AEAD_LIMIT_REACHED` |
+
+Initial keys are discarded when the first Handshake packet is sent or received (§4.9.1),
+Handshake keys when the handshake is confirmed (§4.9.2), through `schedule.retire`. The
+server sends HANDSHAKE_DONE once its handshake is complete (§4.1.2).
+
 ## QUIC-7: Datagrams
 
 A connection that agreed `max_datagram_frame_size` (RFC 9221 §3) may `send_datagram` a
-payload no larger than the smaller of the peer's limit and what one packet holds after the
-headers; a larger payload is `TooLarge(n)` and nothing is sent. Received datagrams are
-delivered in arrival order as `Event.Datagram`, never reassembled and never acknowledged to
-the application.
+payload whose DATAGRAM frame fits both the peer's limit and one packet. RFC 9221 §3 counts
+the limit over the whole frame, so the payload bound is the peer's limit less the frame type
+(one byte) and the length varint (1 to 8 bytes); a larger payload is `TooLarge(n)` and
+nothing is sent.
+
+Each queued datagram carries `(urgency, order)`, which schedules it among the streams
+(QUIC-1), and a caller-chosen `tag`. `drop_datagrams(e, c, tag)` removes every queued
+datagram with that tag, including those in a polled but uncommitted suffix, and returns how
+many it removed; a datagram already committed to the socket is not recalled. MoQ tags
+datagrams by track so a revocation fence can purge them (MOQ-8).
+
+Received datagrams are delivered in arrival order as `Event.Datagram`, never reassembled and
+never acknowledged to the application, within `EndpointLimits.datagram_bytes` (QUIC-4).
 
 ## QUIC-8: Timers, closing and idling
 
-The idle timeout is the smaller of both endpoints' `max_idle_timeout` (§10.1), no shorter than
-three PTOs. `close` sends CONNECTION_CLOSE and enters the closing state for three PTOs (§10.2),
-answering any packet with at most one CONNECTION_CLOSE per received datagram and at no more
-than the received bytes. Draining discards everything. All timers are deadlines the caller
-learns from `poll`; nothing in the package waits.
+The idle timeout follows RFC 9000 §10.1: it is the smaller of the two endpoints'
+`max_idle_timeout` values when both are nonzero, the one nonzero value when only one is, and
+disabled when both are zero; when enabled it is never shorter than three PTOs. `close` sends
+CONNECTION_CLOSE and enters the closing state for three PTOs (§10.2), answering any packet
+with at most one CONNECTION_CLOSE per received datagram and at no more than the received
+bytes. Draining discards everything. All timers are deadlines the caller learns from `poll`;
+nothing in the package waits.
 
 ## QUIC-9: Memory and bounds
 
 Every per-connection table has a size fixed by `TransportConfig` at the connection's start,
 charged then, so a connection's cost is exact like RTC-10's room cost:
 
-- receive buffers: at most the credit given, `initial_max_data` per connection;
-- send buffers: what the application has written and not yet seen acknowledged, bounded by
-  the stream's credit plus the controller's window; `write` returns the bytes taken, and
-  less than asked when the bound is reached (no hidden cap: the count says so);
+- receive buffers: at most the credit given, `initial_max_data` per connection, in at most
+  `max_gaps` ranges per stream;
+- send buffers: at most `send_bytes` per connection, queued and unacknowledged together
+  (QUIC-5);
 - sent-packet records: at most the window in packets plus PTO probes;
+- received ranges: 64 per space (QUIC-6);
 - CIDs: `active_connection_id_limit` each way;
 - the CRYPTO stream: 16 KiB per space, past which the handshake is `CRYPTO_BUFFER_EXCEEDED`.
+
+Per endpoint, received datagrams are bounded by `EndpointLimits.datagram_bytes`.
 
 ## QUIC-10: The driver
 
@@ -297,10 +469,18 @@ charged then, so a connection's cost is exact like RTC-10's room cost:
 pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut events: List[Event]) -> Result[(), NetError] waits
 ```
 
-It does one `udp_recv` batch until the endpoint's next deadline or `until`, passes each datagram
-and the time to `receive`, then `poll`s and sends the whole batch with one `udp_send`. A
-service with many cores binds a group with `steer: Quic` and runs one endpoint per member,
-each in its own unit, which is how an SFU unit owns its connections (QUIC-4).
+It does one `udp_recv` batch until the endpoint's next deadline or `until`, passes each
+datagram to `receive_datagram` as a slice of the receive buffer (dropping and counting any
+`UdpPacket` with `truncated` set), then calls `timeout`, then `poll`s and hands the whole
+batch to one `udp_send` with `UdpTx(to, at, len, ecn)` per `Transmit`, waiting until the
+first `send_at` that is in the future. It passes the committed count `udp_send` returns to
+`committed`; the uncommitted suffix is abandoned as QUIC-1 says and is rebuilt by the next
+`poll`. A service with many cores binds a group with `steer: Quic` and runs one endpoint per
+member, each in its own unit, which is how an SFU unit owns its connections (QUIC-4).
+
+`endpoint` refuses a `max_mtu` below 1,200, and `drive` refuses a socket whose `slot_bytes`
+is less than `max_mtu` plus 256. Under `UDP_GRO` `slot_bytes` is the coalesced buffer (up to
+65,792), not a packet size, which is why the MTU is its own setting.
 
 ## Laws
 
@@ -318,8 +498,13 @@ the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated 
 - **Q3 `frame_refusals`.** One packet per refusal of QUIC-2 and QUIC-5: a frame type in the
   wrong packet type (each row of RFC 9000 Table 3 that forbids one), a non-minimal frame
   type, a STREAM frame past the stream's credit, an ACK of an unsent packet number, a
-  RESET_STREAM_AT with a reliable size past the final size. *Oracle:* the error code each RFC
-  section names.
+  RESET_STREAM_AT with a reliable size past the final size, a non-empty `reset_stream_at`
+  parameter, a DATAGRAM frame on a connection that did not advertise it. Cases for each
+  silent drop of the QUIC-2 classifier: a 1,199-byte datagram carrying a client Initial and
+  one carrying an unsupported version both get no reply and keep no state; a short header
+  too short for its header-protection sample is dropped without reaching `packet.mask`; a
+  33rd out-of-order gap on one stream is dropped unacknowledged and arrives on
+  retransmission. *Oracle:* the error code or drop each RFC section names.
 - **Q4 `handshake_against_quinn_and_quiche`.** Over loopback UDP, the Hirsel server accepts
   quinn's and quiche's example clients (quinn `examples/client.rs`, quiche
   `apps/src/bin/quiche-client.rs`) for each suite and group, and the Hirsel client connects
@@ -337,12 +522,18 @@ the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated 
   received from it. *Oracle:* RFC 9000 §8.1, as a check over the trace.
 - **Q7 `retry_validates_address`.** With `RetryPolicy.Always`, a spoofed Initial gets one
   Retry and no state is kept (a seam counter); the real client's second Initial is accepted;
-  a token replayed from a different address, or after 10 s, is refused with
-  `INVALID_TOKEN`. *Oracle:* RFC 9000 §8.1.2 and §17.2.5, by hand.
+  a Retry token replayed from a different address or port, with a different original DCID
+  or Retry SCID, or after 10 s, is refused with `INVALID_TOKEN`; a NEW_TOKEN token presented
+  as a Retry token, and the reverse, is refused; a token sealed by one member of a 4-member
+  group is accepted by another. *Oracle:* RFC 9000 §8.1.2, §8.1.3 and §17.2.5, by hand.
 - **Q8 `stateless_reset_closes_and_never_loops`.** A server restarted with the same
-  `reset_key` answers a short-header packet of a lost connection with a reset the client
-  recognizes; two endpoints that each reset the other stop after one exchange because each
-  reset is shorter than what provoked it. *Oracle:* RFC 9000 §10.3, by hand.
+  `reset_key` answers a short-header packet of a lost connection with a short-header reset
+  the client recognizes. For every trigger length `n` from 1 to 1,500 and `cid_len` 8: no
+  reset for `n ≤ 21 + cid_len` or for any long-header trigger; otherwise exactly one reset,
+  of length `n − 1` when `n ≤ 43` and in `[43, n − 1]` above, never below 21. Two endpoints
+  that reset each other, started from a 1,500-byte trigger, exchange a bounded number of
+  resets and stop, each one shorter than the last. *Oracle:* RFC 9000 §10.3 and §10.3.3, by
+  hand.
 - **Q9 `loss_recovery_matches_rfc9002`.** Scripted `sim.udp` traces (a single loss, a tail
   loss, three PTOs in a row, persistent congestion) against a hand trace of RFC 9002
   Appendix A and B's pseudocode: each packet's declared-lost time, each PTO time and the
@@ -353,23 +544,35 @@ the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated 
   §4's formulas, by hand.
 - **Q11 `flow_control_bounds_memory`.** A peer that sends at full credit and a reader that
   reads nothing: the receiver's charge never passes `initial_max_data` plus its fixed
-  connection cost, and a frame past credit is `FLOW_CONTROL_ERROR`. *Oracle:* QUIC-9.
+  connection cost, and a frame past credit is `FLOW_CONTROL_ERROR`. The send side: a peer
+  that grants 2^62 of credit and acknowledges nothing; the sender's charge never passes
+  `send_bytes` plus its fixed cost, `write` returns short and `write_shared` returns
+  `Ok(false)`, and a later acknowledgement brings `Writable`. *Oracle:* QUIC-9.
 - **Q12 `rebind_validates_new_path`.** Under `sim.udp`, the client's NAT rebinds its port
   and then its address mid-transfer. *Oracle:* RFC 9000 §9.3. No stream data goes to the
   new address before its PATH_RESPONSE, the transfer completes with the same hash, and the
   controller resets only on the address change.
 - **Q13 `key_update_both_directions`.** Each side initiates two key updates during a
   transfer; packets in flight across the update are still opened (one previous key kept for
-  3 PTOs). *Oracle:* RFC 9001 §6, and quinn as the peer.
+  3 PTOs). A forged short-header packet with the key phase flipped and a bad tag leaves the
+  receive key unchanged, and the next genuine packet opens. With the AES-GCM confidentiality
+  limit scaled down by a seam, the sender updates its key before the limit; with updates
+  blocked, it closes with `AEAD_LIMIT_REACHED`. *Oracle:* RFC 9001 §6 and §6.6, and quinn as
+  the peer.
 - **Q14 `steer_reaches_owner`.** A group of 4 members with `steer: Quic`: every packet of a
   connection, long and short header, after CID rotation and after rebinding, reaches the
   member that issued the CID. *Oracle:* NET-16's steering vectors and the CID format.
 - **Q15 `datagram_never_retransmitted`.** Under 5 % loss, 10,000 datagrams: every one that
   arrives arrives once, none is sent twice (a seam counter), and they consume congestion
   window. *Oracle:* RFC 9221 §5.2.
-- **Q16 `pin_mismatch_refuses`.** A server whose leaf SPKI differs from the pin by one bit is
-  refused before any stream opens, with `Refused(Pin)` and TLS alert `bad_certificate`
-  (QUIC error `0x012a`). *Oracle:* RFC 8446 §6.2 and RFC 9001 §4.8.
+- **Q16 `pin_mismatch_refuses`.** A server whose leaf matches no pin in the client's list
+  (`Cert` and `Spki` each off by one bit) is refused before any stream opens, with
+  `Refused(Pin)` and TLS alert `bad_certificate` (QUIC error `0x012a`); a list `[old, new]`
+  accepts a server on either certificate. A server with `client_pins` set refuses a client
+  that sends no certificate with `certificate_required` (`0x0174`) and one off its pins with
+  `bad_certificate`, in both cases before `Event.Connected` and before any 1-RTT stream frame
+  is delivered. The P-256 CertificateVerify is DER on the wire: quinn verifies ours, and ours
+  verifies quinn's. *Oracle:* RFC 8446 §4.4.2.4, §4.4.3 and §6.2, RFC 9001 §4.8.
 
 **Cost target** (S9-style, measured under host matched-comparison rules): bulk transfer of
 one stream on loopback at ≥ 50 % of quinn's throughput per core with the same cipher, GSO
@@ -381,14 +584,14 @@ comparison.
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **QS0** TLS-8 Retry tag | `schedule.retry_tag(odcid, packet, mut out)`: AES-128-GCM under RFC 9001 §5.8's published key and nonce, no `Secret` (the key is public) | — | Q2's A.4 rows, in TLS-8's PC1 |
+| **QS0** TLS-8 additions | the non-consuming next-phase open TLS-8 lacks: open one packet under the next receive key phase without retiring the current one, so `key_update(s, false)` commits only after it authenticates (QUIC-6). The Retry tag: if `secret.aead_seal(key, aes128-gcm, …)` over a `Secret` holding RFC 9001 §5.8's published key covers it, QS0 adds nothing for it; otherwise `schedule.retry_tag(odcid, packet, mut out)` | — | Q2's A.4 rows, in TLS-8's PC1; Q13's forged-phase case |
 | **QS1** Codec | varints, headers, every frame, coalescing, packet-number decoding | — | Q1, Q3 (codec rows) |
-| **QS2** Handshake | `quic.handshake`: TLS 1.3 messages and extensions, transport parameters, pins, signing and verifying | QS1, QS0 | Q2, Q16 |
-| **QS3** Connection core | Initial, Handshake and 1-RTT spaces, CIDs, ACKs, CONNECTION_CLOSE, idle, the `Endpoint` | QS2 | Q3, Q4 (handshake only) |
-| **QS4** Streams | stream states, flow control, RESET_STREAM_AT, priority | QS3 | Q4, Q11 |
+| **QS2** Handshake | `quic.handshake`: TLS 1.3 messages and extensions, transport parameters, `Pin.Cert` and `Pin.Spki` lists, DER ECDSA signing, `verify_der` and Ed25519 verifying, `std.x509_key`'s Ed25519 answer and SPKI range | QS1, QS0 | Q2, Q16 |
+| **QS3** Connection core | Initial, Handshake and 1-RTT spaces, the receive classifier, CIDs, ACKs, CONNECTION_CLOSE, idle, `client_pins` (mutual TLS), the `Endpoint`, `committed` | QS2 | Q3, Q4 (handshake only), Q16 (client pins) |
+| **QS4** Streams | stream states, flow control, `max_gaps`, `send_bytes` and `write_shared` backpressure, RESET_STREAM_AT and its discard, priority | QS3 | Q4, Q11 |
 | **QS5** Recovery | RFC 9002, NewReno, CUBIC with HyStart++, pacing, ECN | QS3 | Q9, Q10 |
-| **QS6** Validation and resets | anti-amplification, Retry, NEW_TOKEN, stateless reset, path validation, key update | QS3, QS5 | Q6, Q7, Q8, Q12, Q13 |
-| **QS7** Datagrams, driver, steering | RFC 9221, `drive`, GSO trains, `Steer.Quic` CIDs | QS4 | Q14, Q15 |
+| **QS6** Validation and resets | anti-amplification, Retry and NEW_TOKEN tokens, stateless reset, path validation, key update and AEAD limits | QS3, QS5 | Q6, Q7, Q8, Q12, Q13 |
+| **QS7** Datagrams, driver, steering | RFC 9221 with `(urgency, order, tag)` and `drop_datagrams`, `drive`, GSO trains, `Steer.Quic` CIDs | QS4, QS5, QS6 | Q14, Q15 |
 | **QS8** Interop and cost | the interop runner on Boat; the cost bench | QS6, QS7 | Q5, cost target |
 
 Reds that may ride: law Q5 and the cost target. Laws Q6, Q7, Q8, Q11 and Q16 are soundness laws and
@@ -410,24 +613,30 @@ Goose (/tmp/ref-goose at `d5ae5bb`) has no UDP or QUIC code. References: quinn
 | quiche | HyStart++ slow-start exit (quiche/src/recovery/congestion/hystart.rs; quinn has none) | **ADOPTED** |
 | quiche | BBR variants (quiche/src/recovery/gcongestion) | **NOT TAKEN** in Wave 2 (O2) |
 | msquic | per-core partitions owning connections, with the RSS hash or CID picking the partition (src/core/partition.c, binding.c) | **ADOPTED** as NET-16's `Steer.Quic` CIDs and one endpoint per unit |
-| msquic | Retry when handshake memory passes a fraction (`RetryMemoryLimit`, src/core/binding.c:1285, settings.c:45) | **ADAPTED** to `RetryPolicy.Above(n)`, a count of unvalidated connections, which is exact rather than a memory fraction |
+| msquic | Retry when handshake memory passes a fraction (`RetryMemoryLimit`, src/core/binding.c:1285, settings.c:45) | **ADAPTED** to `RetryPolicy.Above(n)`, a count of unvalidated connections, which is exact rather than a memory fraction; default `Above(unvalidated / 2)` |
 | moq-quic | quinn-proto fork with a deterministic simulator (rs/moq-quic/src/sim) | **ADOPTED** in spirit: `sim.udp` drives every loss and migration law |
 | quinn, quiche, msquic | 0-RTT and session tickets | **NOT TAKEN** (Scope) |
 | quiche | built-in HTTP/3 in the transport crate (quiche/src/h3) | **REPLACED** by a separate `webtransport` package over `quic`'s streams |
 
-## Open for design review
+## Design review
 
-- **O1** Pin-only authentication. Is SPKI pinning enough for every Wave 2 consumer (browser
-  WebTransport via `serverCertificateHashes`, cascade between our own nodes), or does a
-  consumer need Web PKI server certificates in the client role in Wave 2?
-- **O2** BBRv3 or CUBIC for media. CUBIC fills buffers; cascade and MoQ carry live media,
-  where BBR's lower queueing helps. Is CUBIC the right first controller, and should a
-  delay-based controller (GCC over QUIC, as moq-congestion's `gcc`) come before BBR?
-- **O3** No 0-RTT. Correct for WebTransport; is there any cascade or MoQ case where the
-  handshake round trip matters enough to add resumption and a PSK schedule to TLS-8?
-- **O4** A Hirsel X.509 chain verifier. Without one the client role cannot talk to public
-  QUIC servers. Is that a Wave 2 need, or deferred?
-- **O5** RESET_STREAM_AT is still a draft. Track its final codepoint in the build, or hold
-  WebTransport until it is an RFC?
-- **O6** The handshake module's home: inside `quic`, or its own `tls13` package that a later
-  DTLS 1.3 also uses?
+Rulings of the media Wave 2 design review (VERDICT-MEDIA-W2, 2026-11-26), applied above:
+
+- **O1, O4 (pin-only authentication, no X.509 chain verifier).** Pin-only is right for Wave 2:
+  `Pin.Cert` and `Pin.Spki`, a list per connection, and server `client_pins` (QUIC-3). The
+  client role does not talk to public QUIC servers in Wave 2.
+- **O2 (controller).** CUBIC with HyStart++ first, behind the `Controller` seam; BBRv3 later
+  (QUIC-6).
+- **O3 (0-RTT).** Omitted in Wave 2 (Scope).
+
+Not ruled by the review; the standing choice is kept as written:
+
+- **O5 (RESET_STREAM_AT is a draft).** Track draft-ietf-quic-reliable-stream-reset-11's
+  codepoints (`0x1d`, `0x24`) in the build; WebTransport requires the frame
+  (webtrans-http3-17 §4.4), so holding for the RFC would hold WebTransport (QUIC-5).
+- **O6 (the handshake module's home).** Inside `quic` until a DTLS 1.3 consumer exists
+  (QUIC-3).
+
+**Scaling note.** One cascade link per node pair is one QUIC connection, so one unit carries
+it. That is acceptable for the first cascade (KS1 to KS5); the scaling path is one link per
+`Steer.Quic` member pair (CAS-2).

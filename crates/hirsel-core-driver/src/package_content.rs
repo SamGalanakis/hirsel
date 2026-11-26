@@ -8,7 +8,8 @@ use std::fmt;
 use std::sync::Arc;
 
 pub(crate) const CONTENT_LIMIT: usize = 64 << 20;
-pub(crate) const ARCHIVE_LIMIT: usize = 512 << 20;
+pub(crate) const ARCHIVE_LIMIT_MIB: usize = 512;
+pub(crate) const ARCHIVE_LIMIT: usize = ARCHIVE_LIMIT_MIB << 20;
 const FILE_LIMIT: usize = 65_536;
 const PACKAGE_LIMIT: usize = 4096;
 const ARCHIVE_TAG: &str = "hirsel.package-archive.v1";

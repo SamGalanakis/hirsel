@@ -6,13 +6,14 @@
 
 use super::Failure;
 use super::hash::{Format, Hasher, Oid, object_id};
+use crate::package_content::{ARCHIVE_LIMIT, ARCHIVE_LIMIT_MIB};
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 pub(crate) const OBJECT_COUNT_LIMIT: u64 = 4_194_304;
-pub(crate) const OBJECT_LIMIT: u64 = 512 << 20;
+pub(crate) const OBJECT_LIMIT: u64 = ARCHIVE_LIMIT as u64;
 pub(crate) const TOTAL_LIMIT: u64 = 4 << 30;
 pub(crate) const DEPTH_LIMIT: u32 = 4095;
 
@@ -122,6 +123,10 @@ fn over(limit: &str) -> Failure {
     bad(format!("over the limit of {limit}"))
 }
 
+fn object_too_large() -> Failure {
+    over(&format!("{ARCHIVE_LIMIT_MIB} MiB object"))
+}
+
 struct Input<'a> {
     incoming: &'a mut dyn Incoming,
     bytes: Vec<u8>,
@@ -204,7 +209,7 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
     let mut out = vec![0u8; 1 << 16];
     let add_size = |total: &mut u64, size: u64| {
         if size > OBJECT_LIMIT {
-            return Err(over("512 MiB object"));
+            return Err(object_too_large());
         }
         *total += size;
         if *total > TOTAL_LIMIT {
@@ -221,7 +226,7 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
         while byte & 0x80 != 0 {
             byte = input.byte(&mut pos)?;
             if shift > 57 {
-                return Err(over("512 MiB object"));
+                return Err(object_too_large());
             }
             size |= u64::from(byte & 0x7f) << shift;
             shift += 7;
@@ -266,7 +271,7 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
         };
         let delta = !matches!(base, Base::Whole(_));
         if size > OBJECT_LIMIT {
-            return Err(over("512 MiB object"));
+            return Err(object_too_large());
         }
         let mut result = None;
         if !delta {
@@ -293,7 +298,7 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
             }
             written += step.bytes_written as u64;
             if written > OBJECT_LIMIT {
-                return Err(over("512 MiB object"));
+                return Err(object_too_large());
             }
             match step.status {
                 Ok(MZStatus::StreamEnd) => break,

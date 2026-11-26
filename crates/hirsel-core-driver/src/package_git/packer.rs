@@ -6,7 +6,8 @@ use super::snapshot::{Dir, Missed, Snapshot};
 use super::transport::{self, Remote};
 use super::{Budget, Failure, Session};
 use crate::package_content::{
-    ArchiveRow, Content, ForeignCode, ForeignModule, Id, PackageArchive, Root, Source,
+    ARCHIVE_LIMIT_MIB, ArchiveRow, Content, ForeignCode, ForeignModule, Id, PackageArchive, Root,
+    Source,
 };
 use crate::package_dir::MANIFEST;
 use crate::package_manifest::{Dependency, GitSource, Manifest, Package, SourceLocation};
@@ -143,7 +144,7 @@ pub(crate) fn pack_listed(
         pack_members(&members, store, BTreeMap::new(), &mut fetch, id).map_err(|error| {
             let text = error.to_string();
             if text.starts_with("over the limit of") && text.ends_with("bytes") {
-                format!("{id}: {spelling}: over the limit of 512 MiB")
+                format!("{id}: {spelling}: over the limit of {ARCHIVE_LIMIT_MIB} MiB")
             } else {
                 text
             }

@@ -6,11 +6,12 @@ use super::hash::{Format, Oid};
 use super::pack::{self, Incoming, Pack};
 use super::pkt::{self, Packet, Reader};
 use super::{Budget, Failure, quote_text};
+use crate::package_content::{ARCHIVE_LIMIT, ARCHIVE_LIMIT_MIB};
 use std::io::{self, Read};
 
 const ADVERTISEMENT_LIMIT: u64 = 64 << 10;
 const LISTING_LIMIT: u64 = 16 << 20;
-const PACK_LIMIT: u64 = 512 << 20;
+const PACK_LIMIT: u64 = ARCHIVE_LIMIT as u64;
 const REDIRECT_LIMIT: usize = 3;
 const QUERY: &str = "service=git-upload-pack";
 
@@ -394,9 +395,9 @@ pub(crate) fn fetch(remote: &Remote, rev: &str, budget: &mut Budget) -> Result<P
     pkt::flush(&mut body);
     let malformed = || cause("the server sent a malformed fetch response");
     let response = post(remote, body, budget, PACK_LIMIT, || {
-        cause(
-            "the response is over the limit of 512 MiB; hirsel fetches the whole commit, so a repository whose commit is larger cannot be a git source",
-        )
+        cause(format!(
+            "the response is over the limit of {ARCHIVE_LIMIT_MIB} MiB; hirsel fetches the whole commit, so a repository whose commit is larger cannot be a git source",
+        ))
     })?;
     let mut reader = Reader::new(response, malformed);
     let refused = |failure: Failure| match failure {

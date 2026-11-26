@@ -370,7 +370,7 @@ fn slot_kernels_match_evaluator_and_marks_emit_nothing() {
             .unwrap()
             .bytes
         };
-        let stripped = c::wf::without_marks(&module);
+        let stripped = c::wf::without_marks(std::borrow::Cow::Borrowed(&module)).into_owned();
         assert_ne!(stripped, module, "the sample has marks");
         assert!(
             emit(&module) == emit(&stripped),

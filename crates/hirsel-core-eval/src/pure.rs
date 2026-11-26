@@ -101,7 +101,8 @@ pub struct PureModule<'a> {
 impl<'a> PureModule<'a> {
     pub fn new(m: &'a Module) -> Self {
         let recipes = compute(&m.types).expect("layouts");
-        let module = hirsel_core_ir::native_layout::resolve(m, &recipes);
+        let module =
+            hirsel_core_ir::native_layout::resolve(std::borrow::Cow::Borrowed(m), &recipes);
         let sites = hirsel_core_ir::source::module_sites(&module);
         Self {
             module,

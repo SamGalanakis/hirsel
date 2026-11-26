@@ -159,7 +159,7 @@ fn exposed_helpers_keep_imported_carrier_facts() {
     let facts = hirsel_core_ir::roles::Facts::new(&module);
     let mut caller = module.clone();
     caller.functions[1].body = None;
-    assert!(expose::module(&caller, true).is_some());
+    assert_ne!(*expose::module(Cow::Borrowed(&caller), true), caller);
     assert!(facts.place_blind(FuncId(1), 0));
     assert!(!hirsel_core_ir::roles::Facts::new(&caller).place_blind(FuncId(1), 0));
     let ir = carrier_ir(&caller, &facts, Target::X86_64Linux, false);
@@ -229,7 +229,7 @@ b0(v0: u64):
     .unwrap();
     wf::module(&module).unwrap();
     let size = |m: &Module, f: usize| m.functions[f].body.as_ref().unwrap().insts.len();
-    let exposed = expose::module(&module, false).unwrap();
+    let exposed = expose::module(Cow::Borrowed(&module), false).into_owned();
     let copies = (size(&exposed, 1) - size(&module, 1)) / size(&module, 0);
     assert!(
         copies > 1,
@@ -1280,7 +1280,7 @@ fn every_whole_v1_memory_sample_matches_the_evaluator() {
 #[test]
 fn marks_emit_nothing() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/kernel.core")).unwrap();
-    let stripped = wf::without_marks(&module);
+    let stripped = wf::without_marks(Cow::Borrowed(&module)).into_owned();
     assert_ne!(stripped, module, "the sample has marks");
     for opt in [Optimization::None, Optimization::Speed] {
         assert!(
@@ -1298,7 +1298,7 @@ fn metered_kernel_marks_and_unmarks_do_not_change_exposure() {
         let source = source.replace("  mark ", &format!("  {marker} "));
         let module = text::parse(&source).unwrap();
         wf::module(&module).unwrap();
-        let stripped = wf::without_marks(&module);
+        let stripped = wf::without_marks(Cow::Borrowed(&module)).into_owned();
         assert_ne!(stripped, module);
         for opt in [Optimization::None, Optimization::Speed] {
             assert!(

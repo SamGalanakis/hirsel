@@ -210,13 +210,15 @@ pub struct ReleaseUnit {
 }
 
 impl ReleaseUnit {
+    /// Lower the joined release `module`, which lowering consumes: its
+    /// transforms change it in place and it is dropped once lowered.
     pub fn lower(
-        module: &hirsel_core_ir::Module,
+        module: hirsel_core_ir::Module,
         facts: &hirsel_core_ir::roles::Facts,
         observe_charge: bool,
     ) -> Result<Self, String> {
         let context = std::rc::Rc::new(construction::Context::with_anonymous_locals(true)?);
-        let neutral = core::step_neutral_program(&[module]);
+        let neutral = core::step_neutral_program(&[&module]);
         let (module, sites, debug_sites) =
             core::emit_release_unit(module, context, facts, observe_charge, &neutral)
                 .map_err(|error| error.to_string())?;

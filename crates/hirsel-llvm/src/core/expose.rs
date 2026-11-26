@@ -602,37 +602,33 @@ fn literal_calls(body: &Body) -> Vec<bool> {
         .collect()
 }
 
-pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Module> {
+/// Expose bounded helper bodies into their callers. An owned module is
+/// changed in place; a borrowed one is copied at its first change. Every
+/// exposure reads its callers' and callees' bodies as they were before any
+/// exposure, as each caller is exposed from the module it was given.
+pub(super) fn module(module: Cow<'_, Module>, preserve_step_trees: bool) -> Cow<'_, Module> {
     // Marks have no runtime meaning. Remove them before eligibility, budgets
     // or block merging can let one change the exposed program.
-    let unmarked = module
-        .functions
-        .iter()
-        .filter_map(|f| f.body.as_ref())
-        .any(|b| {
-            b.insts
-                .iter()
-                .any(|i| matches!(i, Inst::Mark { .. } | Inst::Unmark { .. }))
-        })
-        .then(|| hirsel_core_ir::without_marks(module));
-    let module = unmarked.as_ref().unwrap_or(module);
+    let mut module = hirsel_core_ir::without_marks(module);
     // Keep a literal entry to isolated recursion visible to the LLVM Step
     // proof, including the entry's private storage initialization. LLVM can
     // still inline the call after the proof has run.
-    let step_entries = preserve_step_trees.then(|| literal_recursive_entries(module));
+    let step_entries = preserve_step_trees.then(|| literal_recursive_entries(&module));
     let step_entry = |i: usize| step_entries.as_ref().is_some_and(|entries| entries[i]);
     // A coverage body keeps its own blocks, so its flags are the sites
     // `coverage::sites` reads from it: none is copied into a caller, and
     // none takes a callee's.
-    let covered = |i: usize| hirsel_core_ir::coverage::in_scope(module, FuncId(i as u32));
+    let covered = (0..module.functions.len())
+        .map(|i| hirsel_core_ir::coverage::in_scope(&module, FuncId(i as u32)))
+        .collect::<Vec<_>>();
     let eligible = module
         .functions
         .iter()
         .enumerate()
         .map(|(i, f)| {
-            f.body.as_ref().filter(|b| {
+            f.body.as_ref().is_some_and(|b| {
                 !step_entry(i)
-                    && !covered(i)
+                    && !covered[i]
                     && !(module.law_observation
                         && hirsel_core_ir::law::observes(
                             &module.instances[f.instance.index()].definition,
@@ -643,157 +639,206 @@ pub(super) fn module(module: &Module, preserve_step_trees: bool) -> Option<Modul
             })
         })
         .collect::<Vec<_>>();
-    let mut result = None;
-    let mut forwarding_facts = None;
-    for (i, f) in module.functions.iter().enumerate() {
-        let Some(original) = &f.body else {
+    // A caller that keeps an unmetered terminal call's forwarding ABI reads
+    // the failure facts of the unexposed module.
+    let forwarding_facts = module
+        .functions
+        .iter()
+        .enumerate()
+        .any(|(i, f)| {
+            f.body.as_ref().is_some_and(|b| {
+                !b.calls.is_empty()
+                    && !step_entry(i)
+                    && !covered[i]
+                    && !b.insts.iter().any(|i| matches!(i, Inst::Step { .. }))
+            })
+        })
+        .then(|| {
+            (
+                hirsel_core_layout::compute(&module.types).expect("producer layouts"),
+                failure::Failures::new(&module),
+            )
+        });
+    // The unexposed body of each eligible callee whose own body has been
+    // exposed already.
+    let mut unexposed: Vec<Option<Body>> = vec![None; module.functions.len()];
+    for i in 0..module.functions.len() {
+        let Some(body) = expose_caller(
+            &module,
+            i,
+            &eligible,
+            &unexposed,
+            forwarding_facts.as_ref(),
+            step_entry(i) || covered[i],
+        ) else {
             continue;
         };
-        if original.calls.is_empty() || step_entry(i) || covered(i) {
-            continue;
-        }
-        // An unmetered terminal call already has FORM's forwarding ABI. Keep
-        // that call boundary; exposing it cannot join any Step reservations.
-        let mut forwarded = BTreeSet::new();
-        if !original
-            .insts
-            .iter()
-            .any(|i| matches!(i, Inst::Step { .. }))
-        {
-            let (recipes, failures) = forwarding_facts.get_or_insert_with(|| {
-                (
-                    hirsel_core_layout::compute(&module.types).expect("producer layouts"),
-                    failure::Failures::new(module),
-                )
-            });
-            let mut plan = forward::Forwarding::new(original);
-            for block in 0..original.blocks.len() {
-                if let Some(ending) = plan.ending(
-                    module,
-                    recipes,
-                    &module.signatures[f.signature.index()],
-                    &failures.constants[i],
-                    block,
-                ) {
-                    forwarded.insert(ending.call);
-                }
-            }
-        }
-        // A small reader can be hot inside a recursive parser without living
-        // in a local loop. Use the same bounded exposure at those direct calls.
-        let caller_versioned = f.versioned;
-        let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
-        let mut body = original.clone();
-        let mut budget = EXPOSE_BUDGET;
-        let literal_calls = literal_calls(original);
-        // A recursive callee unrolls at most 8 copies deep along one chain of
-        // expansions (GCC's max-inline-recursive-depth-auto), as LLVM's loop
-        // helpers do after O3: unbounded, Havlak's loop nesting pass spent the
-        // budget on 15 nested copies, and SLP searched each loop's 15-wide
-        // PHI lists. Each expanded callee with the copy it was expanded into
-        // (None for the caller's own body), and each block's copy.
-        let mut copies: Vec<(usize, Option<usize>)> = Vec::new();
-        let mut chain: Vec<Option<usize>> = vec![None; body.blocks.len()];
-        // Copies of f on the chain that ends in this copy.
-        let depth = |copies: &[(usize, Option<usize>)], mut copy: Option<usize>, f: usize| {
-            let mut n = 0;
-            while let Some(c) = copy {
-                n += usize::from(copies[c].0 == f);
-                copy = copies[c].1;
-            }
-            n
-        };
-        // Depth alone does not bound a callee that recurses more than once:
-        // its copies grow with the fan-out to the depth, until the budget
-        // runs out. The copies a callee makes inside its own copies also
-        // share one size limit per caller (GCC's
-        // max-inline-insns-recursive-auto). Unbounded, the median-of-nine
-        // pivot sample, with three recursive calls, spent the budget on 55
-        // copies of itself, each with its comparator calls.
-        let mut recursive_growth = std::collections::BTreeMap::<usize, usize>::new();
-        loop {
-            let mut fallback = None;
-            let selected = hot.iter().find_map(|&b| {
-                body.blocks[b]
-                    .insts
-                    .get(&body.insts)
-                    .unwrap()
-                    .iter()
-                    .enumerate()
-                    .find_map(|(offset, inst)| {
-                        let Inst::Call { call } = *inst else {
-                            return None;
-                        };
-                        if forwarded.contains(&call) {
-                            return None;
-                        }
-                        let literal = literal_calls.get(call.index()).copied().unwrap_or(false);
-                        let call = &body.calls[call.index()];
-                        let Callee::Direct(f) = call.callee else {
-                            return None;
-                        };
-                        let callee = eligible[f.index()]?;
-                        if module.functions[f.index()].versioned && !caller_versioned {
-                            return None;
-                        }
-                        let size = price(callee).max(1);
-                        let within = depth(&copies, chain[b], f.index());
-                        let site = (!call.cold
-                            && f.index() != i
-                            && size <= budget
-                            && within < 8
-                            && (within == 0
-                                || recursive_growth.get(&f.index()).copied().unwrap_or(0) + size
-                                    <= 450))
-                            .then_some((b, offset, callee))?;
-                        if literal && size <= 64 {
-                            Some(site)
-                        } else {
-                            fallback.get_or_insert(site);
-                            None
-                        }
-                    })
-            });
-            let Some((b, offset, callee)) = selected.or(fallback) else {
-                break;
-            };
-            budget -= price(callee).max(1);
-            let Inst::Call { call } = body.insts[body.blocks[b].insts.start as usize + offset]
-            else {
-                unreachable!()
-            };
-            let Callee::Direct(f) = body.calls[call.index()].callee else {
-                unreachable!()
-            };
-            if depth(&copies, chain[b], f.index()) != 0 {
-                *recursive_growth.entry(f.index()).or_default() += price(callee).max(1);
-            }
-            let inherits = hirsel_core_ir::source::inherits_site(
-                &module.instances[module.functions[f.index()].instance.index()],
-            );
-            let added = expand(&mut body, b, offset, callee, module, inherits);
-            // The continuation stays in the caller's copy; the callee's blocks
-            // form the new one.
-            copies.push((f.index(), chain[b]));
-            chain.push(chain[b]);
-            chain.resize(body.blocks.len(), Some(copies.len() - 1));
-            hot.extend(added);
-        }
-        if budget != EXPOSE_BUDGET {
-            merge_blocks(&mut body);
-            let old = std::mem::take(&mut body.insts);
-            let anchors = std::mem::take(&mut body.inst_anchors);
-            for block in &mut body.blocks {
-                let range = block.insts;
-                let start = body.insts.len() as u32;
-                body.insts.extend_from_slice(range.get(&old).unwrap());
-                body.inst_anchors.extend_from_slice(
-                    &anchors[range.start as usize..(range.start + range.len) as usize],
-                );
-                block.insts = PoolRange::new(start, range.len);
-            }
-            result.get_or_insert_with(|| module.clone()).functions[i].body = Some(body);
+        let exposed = module.to_mut().functions[i].body.replace(body);
+        if eligible[i] {
+            unexposed[i] = exposed;
         }
     }
-    result.or(unmarked)
+    module
+}
+
+/// Function `i`'s body with its bounded helpers exposed, or `None` when it
+/// exposes none. `unexposed` holds the original of each eligible callee
+/// already exposed in `module`.
+fn expose_caller(
+    module: &Module,
+    i: usize,
+    eligible: &[bool],
+    unexposed: &[Option<Body>],
+    forwarding_facts: Option<&(Vec<hirsel_core_layout::RecipeRow>, failure::Failures)>,
+    kept: bool,
+) -> Option<Body> {
+    let f = &module.functions[i];
+    let original = f.body.as_ref()?;
+    if original.calls.is_empty() || kept {
+        return None;
+    }
+    let callee_body = |f: usize| {
+        eligible[f]
+            .then(|| unexposed[f].as_ref().or(module.functions[f].body.as_ref()))
+            .flatten()
+    };
+    // An unmetered terminal call already has FORM's forwarding ABI. Keep
+    // that call boundary; exposing it cannot join any Step reservations.
+    let mut forwarded = BTreeSet::new();
+    if !original
+        .insts
+        .iter()
+        .any(|i| matches!(i, Inst::Step { .. }))
+    {
+        let (recipes, failures) =
+            forwarding_facts.expect("forwarding facts for an unmetered caller");
+        let mut plan = forward::Forwarding::new(original);
+        for block in 0..original.blocks.len() {
+            if let Some(ending) = plan.ending(
+                module,
+                recipes,
+                &module.signatures[f.signature.index()],
+                &failures.constants[i],
+                block,
+            ) {
+                forwarded.insert(ending.call);
+            }
+        }
+    }
+    // A small reader can be hot inside a recursive parser without living
+    // in a local loop. Use the same bounded exposure at those direct calls.
+    let caller_versioned = f.versioned;
+    let mut hot = (0..original.blocks.len()).collect::<BTreeSet<_>>();
+    let mut body = original.clone();
+    let mut budget = EXPOSE_BUDGET;
+    let literal_calls = literal_calls(original);
+    // A recursive callee unrolls at most 8 copies deep along one chain of
+    // expansions (GCC's max-inline-recursive-depth-auto), as LLVM's loop
+    // helpers do after O3: unbounded, Havlak's loop nesting pass spent the
+    // budget on 15 nested copies, and SLP searched each loop's 15-wide
+    // PHI lists. Each expanded callee with the copy it was expanded into
+    // (None for the caller's own body), and each block's copy.
+    let mut copies: Vec<(usize, Option<usize>)> = Vec::new();
+    let mut chain: Vec<Option<usize>> = vec![None; body.blocks.len()];
+    // Copies of f on the chain that ends in this copy.
+    let depth = |copies: &[(usize, Option<usize>)], mut copy: Option<usize>, f: usize| {
+        let mut n = 0;
+        while let Some(c) = copy {
+            n += usize::from(copies[c].0 == f);
+            copy = copies[c].1;
+        }
+        n
+    };
+    // Depth alone does not bound a callee that recurses more than once:
+    // its copies grow with the fan-out to the depth, until the budget
+    // runs out. The copies a callee makes inside its own copies also
+    // share one size limit per caller (GCC's
+    // max-inline-insns-recursive-auto). Unbounded, the median-of-nine
+    // pivot sample, with three recursive calls, spent the budget on 55
+    // copies of itself, each with its comparator calls.
+    let mut recursive_growth = std::collections::BTreeMap::<usize, usize>::new();
+    loop {
+        let mut fallback = None;
+        let selected = hot.iter().find_map(|&b| {
+            body.blocks[b]
+                .insts
+                .get(&body.insts)
+                .unwrap()
+                .iter()
+                .enumerate()
+                .find_map(|(offset, inst)| {
+                    let Inst::Call { call } = *inst else {
+                        return None;
+                    };
+                    if forwarded.contains(&call) {
+                        return None;
+                    }
+                    let literal = literal_calls.get(call.index()).copied().unwrap_or(false);
+                    let call = &body.calls[call.index()];
+                    let Callee::Direct(f) = call.callee else {
+                        return None;
+                    };
+                    let callee = callee_body(f.index())?;
+                    if module.functions[f.index()].versioned && !caller_versioned {
+                        return None;
+                    }
+                    let size = price(callee).max(1);
+                    let within = depth(&copies, chain[b], f.index());
+                    let site = (!call.cold
+                        && f.index() != i
+                        && size <= budget
+                        && within < 8
+                        && (within == 0
+                            || recursive_growth.get(&f.index()).copied().unwrap_or(0) + size
+                                <= 450))
+                        .then_some((b, offset, callee))?;
+                    if literal && size <= 64 {
+                        Some(site)
+                    } else {
+                        fallback.get_or_insert(site);
+                        None
+                    }
+                })
+        });
+        let Some((b, offset, callee)) = selected.or(fallback) else {
+            break;
+        };
+        budget -= price(callee).max(1);
+        let Inst::Call { call } = body.insts[body.blocks[b].insts.start as usize + offset] else {
+            unreachable!()
+        };
+        let Callee::Direct(f) = body.calls[call.index()].callee else {
+            unreachable!()
+        };
+        if depth(&copies, chain[b], f.index()) != 0 {
+            *recursive_growth.entry(f.index()).or_default() += price(callee).max(1);
+        }
+        let inherits = hirsel_core_ir::source::inherits_site(
+            &module.instances[module.functions[f.index()].instance.index()],
+        );
+        let added = expand(&mut body, b, offset, callee, module, inherits);
+        // The continuation stays in the caller's copy; the callee's blocks
+        // form the new one.
+        copies.push((f.index(), chain[b]));
+        chain.push(chain[b]);
+        chain.resize(body.blocks.len(), Some(copies.len() - 1));
+        hot.extend(added);
+    }
+    if budget != EXPOSE_BUDGET {
+        merge_blocks(&mut body);
+        let old = std::mem::take(&mut body.insts);
+        let anchors = std::mem::take(&mut body.inst_anchors);
+        for block in &mut body.blocks {
+            let range = block.insts;
+            let start = body.insts.len() as u32;
+            body.insts.extend_from_slice(range.get(&old).unwrap());
+            body.inst_anchors.extend_from_slice(
+                &anchors[range.start as usize..(range.start + range.len) as usize],
+            );
+            block.insts = PoolRange::new(start, range.len);
+        }
+        Some(body)
+    } else {
+        None
+    }
 }

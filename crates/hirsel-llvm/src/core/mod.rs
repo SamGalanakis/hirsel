@@ -47,6 +47,7 @@ mod tests;
 mod values;
 mod versions;
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
 
@@ -247,7 +248,7 @@ fn emit_ir_target_with_role_facts(
 ) -> Result<String> {
     let mut text = sink::TextSink::default();
     emit_module(
-        module,
+        Cow::Borrowed(module),
         target,
         observe_charge,
         facts,
@@ -388,9 +389,10 @@ pub(crate) fn step_neutral_program(modules: &[&Module]) -> BTreeSet<hirsel_core_
     steps::program_neutral(modules)
 }
 
-/// Lower one CoreIR module, item by item in module order, into `sink`.
+/// Lower one CoreIR module, item by item in module order, into `sink`. Native
+/// layout and exposure change an owned module in place, a borrowed one's copy.
 fn emit_module(
-    module: &Module,
+    module: Cow<'_, Module>,
     target: Target,
     observe_charge: bool,
     facts: bool,
@@ -399,13 +401,11 @@ fn emit_module(
     sink: &mut dyn Sink,
 ) -> Result<Vec<source::ReleaseSite>> {
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
-    let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
-    let module = native.as_ref();
-    let exposed = source
-        .batch_steps
-        .then(|| expose::module(module, provided.prepay_step_trees))
-        .flatten();
-    let module = exposed.as_ref().unwrap_or(module);
+    let mut module = hirsel_core_ir::native_layout::resolve(module, &recipes);
+    if source.batch_steps {
+        module = expose::module(module, provided.prepay_step_trees);
+    }
+    let module = module.as_ref();
     let own_sites;
     let fixed_sites = if source.relocatable_sites || !source.fixed_sites.is_empty() {
         source.fixed_sites
@@ -1115,7 +1115,7 @@ pub(crate) fn emit_native_module_in_context(
 
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn emit_release_unit(
-    module: &Module,
+    module: Module,
     context: std::rc::Rc<crate::construction::Context>,
     roles: &hirsel_core_ir::roles::Facts,
     observe_charge: bool,
@@ -1125,10 +1125,10 @@ pub(crate) fn emit_release_unit(
     Vec<source::ReleaseSite>,
     Vec<source::ReleaseSite>,
 )> {
-    let mut native = sink::native::NativeSink::release(context, &module.items)?;
-    let versions = versions::program(&[module]);
+    let mut native = sink::native::NativeSink::release(context, module.items.clone())?;
+    let versions = versions::program(&[&module]);
     let sites = emit_module(
-        module,
+        Cow::Owned(module),
         Target::X86_64Linux,
         observe_charge,
         facts_enabled(),
@@ -1164,7 +1164,7 @@ fn native_module(
     let facts = facts_enabled();
     let mut native = sink::native::NativeSink::new(context);
     emit_module(
-        module,
+        Cow::Borrowed(module),
         target,
         observe_charge,
         facts,
@@ -1179,7 +1179,7 @@ fn native_module(
             &native.print().map_err(Error::Llvm)?,
             |text| {
                 emit_module(
-                    module,
+                    Cow::Borrowed(module),
                     target,
                     observe_charge,
                     facts,

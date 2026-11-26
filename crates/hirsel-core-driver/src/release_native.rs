@@ -412,14 +412,14 @@ pub(super) fn emit_release_image(
         && direct_release(target)
         && std::env::var_os("HIRSEL_LLVM_PRINTED_ORACLE").is_none()
     {
-        let (modules, facts) = core.as_ref().expect("the Core unit is not yet lowered");
+        let ([module], facts) = core.take().expect("the Core unit is not yet lowered");
         let mut release = hirsel_llvm_lazy::ReleaseUnit::lower(
-            &modules[0],
+            module,
             &facts[0],
             options.logical_charge_report.is_some(),
         )
         .map_err(emit)?;
-        core = None;
+        drop(facts);
         sites = std::mem::take(&mut release.sites);
         debug_sites = std::mem::take(&mut release.debug_sites);
         let key = crate::native::key(

@@ -387,7 +387,7 @@ fn emit(
     observer: &impl profile::Observer,
 ) -> Result<Object> {
     let setup = observer.enter("module_setup");
-    let native = c::native_layout::resolve(input, layouts);
+    let native = c::native_layout::resolve(std::borrow::Cow::Borrowed(input), layouts);
     let input = native.as_ref();
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !supports_target(options.target) {

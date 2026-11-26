@@ -1541,7 +1541,7 @@ fn run_world(
     mut input: WorldInput<'_>,
 ) -> (Report, Checked) {
     let recipes = compute(&m.types).expect("layouts");
-    let native = hirsel_core_ir::native_layout::resolve(m, &recipes);
+    let native = hirsel_core_ir::native_layout::resolve(std::borrow::Cow::Borrowed(m), &recipes);
     let m = native.as_ref();
     let mut mach = Machine::new(m, recipes, limit, &input);
     mach.install_statics();

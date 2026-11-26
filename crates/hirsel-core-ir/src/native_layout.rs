@@ -46,7 +46,7 @@ impl LayoutQuery {
 /// Resolve physical operands only after the checked module has been published
 /// and its revision computed. The existing constant-based optimizations then
 /// work with the same values as the evaluator.
-pub fn resolve<'a>(module: &'a Module, recipes: &[RecipeRow]) -> Cow<'a, Module> {
+pub fn resolve<'a>(mut module: Cow<'a, Module>, recipes: &[RecipeRow]) -> Cow<'a, Module> {
     if !module
         .functions
         .iter()
@@ -57,20 +57,20 @@ pub fn resolve<'a>(module: &'a Module, recipes: &[RecipeRow]) -> Cow<'a, Module>
                 .any(|i| matches!(i, Inst::LayoutConst { .. }))
         })
     {
-        return Cow::Borrowed(module);
+        return module;
     }
-    let mut native = module.clone();
+    let native = module.to_mut();
     for body in native.functions.iter_mut().filter_map(|f| f.body.as_mut()) {
         for inst in &mut body.insts {
             if let Inst::LayoutConst { result, query } = inst {
                 *inst = Inst::Const {
                     result: *result,
-                    bits: query.native(&module.types, recipes),
+                    bits: query.native(&native.types, recipes),
                 };
             }
         }
     }
-    Cow::Owned(native)
+    module
 }
 
 /// A fixed record carried in the internal native ABI by its scalar leaves.

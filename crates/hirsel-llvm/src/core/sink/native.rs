@@ -40,15 +40,15 @@ enum TempSlot {
 }
 
 #[derive(Default)]
-struct ReleaseDebug<'a> {
-    items: &'a [DefPath],
+struct ReleaseDebug {
+    items: Vec<DefPath>,
     pending: HashMap<usize, (u32, u32, usize)>,
     ordinals: HashMap<(u32, u32), u32>,
     next: HashMap<DefPath, u32>,
     sites: Vec<ReleaseSite>,
 }
 
-impl ReleaseDebug<'_> {
+impl ReleaseDebug {
     fn line(&mut self, item: u32, start: u32) -> u64 {
         let ordinal = self.ordinals.entry((item, start)).or_insert_with(|| {
             let item = &self.items[item as usize];
@@ -66,7 +66,7 @@ impl ReleaseDebug<'_> {
     }
 }
 
-pub(crate) struct NativeSink<'a> {
+pub(crate) struct NativeSink {
     context: Rc<llvm::Context>,
     api: &'static Api,
     unit: Raw,
@@ -78,9 +78,9 @@ pub(crate) struct NativeSink<'a> {
     bound: HashMap<Local, Local>,
     blocks: HashMap<Label, Raw>,
     name: String,
-    release_debug: Option<ReleaseDebug<'a>>,
+    release_debug: Option<ReleaseDebug>,
 }
-impl Drop for NativeSink<'_> {
+impl Drop for NativeSink {
     fn drop(&mut self) {
         if !self.unit.is_null() {
             // SAFETY: the sink exclusively owns its unit until `finish`.
@@ -88,7 +88,7 @@ impl Drop for NativeSink<'_> {
         }
     }
 }
-impl<'a> NativeSink<'a> {
+impl NativeSink {
     pub fn new(context: Rc<llvm::Context>) -> Self {
         Self {
             api: context.api,
@@ -109,7 +109,7 @@ impl<'a> NativeSink<'a> {
     /// A release unit's sink. Once the unit is large it simplifies each body as it
     /// finishes, for the release machine of x86-64 Linux, the only target release
     /// units lower for (the builder's `unit_stream`).
-    pub fn release(context: Rc<llvm::Context>, items: &'a [DefPath]) -> super::super::Result<Self> {
+    pub fn release(context: Rc<llvm::Context>, items: Vec<DefPath>) -> super::super::Result<Self> {
         let mut sink = Self::new(context);
         sink.release_debug = Some(ReleaseDebug {
             items,
@@ -471,7 +471,7 @@ impl<'a> NativeSink<'a> {
     }
 }
 
-impl Sink for NativeSink<'_> {
+impl Sink for NativeSink {
     fn global(&mut self, g: &Global) {
         let ty = self.ty(&g.ty);
         let init = g

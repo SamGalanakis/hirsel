@@ -8,8 +8,8 @@ use hirsel_core_ir::{FuncId, Identity, Module, Param, Ty, wf};
 use hirsel_core_resolve::{
     CorpusManifest, ModulePath, ModuleSource, NameIndex, PackageManifest, Site,
 };
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::{borrow::Cow, collections::HashMap};
 
 #[path = "../../../core/front/support/cases.rs"]
 mod case_source;
@@ -334,7 +334,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             // A block's size is a layout query until the checked module's
             // layouts resolve it, as each engine does before running it.
             let recipes = hirsel_core_layout::compute(&module.types).unwrap();
-            let native = hirsel_core_ir::native_layout::resolve(module, &recipes);
+            let native = hirsel_core_ir::native_layout::resolve(Cow::Borrowed(module), &recipes);
             let Some(b) = &native.functions[unit.function.index()].body else {
                 continue;
             };

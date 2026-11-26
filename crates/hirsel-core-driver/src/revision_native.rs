@@ -207,7 +207,7 @@ fn own_layout_is_resolved_after_the_body_hash() {
         layout.size = size_bytes;
         layout.offsets = vec![offsets];
         assert_eq!(data.native(&module.types, &layouts), (8, expected.into()));
-        let native = hirsel_core_ir::native_layout::resolve(module, &layouts);
+        let native = hirsel_core_ir::native_layout::resolve(std::borrow::Cow::Borrowed(module), &layouts);
         assert!(native.functions.iter().filter_map(|f| f.body.as_ref()).any(|b| {
             b.insts.contains(&Inst::Const { result: size, bits: size_bytes })
         }));

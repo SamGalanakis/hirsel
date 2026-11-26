@@ -208,7 +208,8 @@ pub fn ratchet_key(base: Bytes) -> Bytes {
 
 type Slot {
     opener: packet.Opener,
-    window: Window
+    floor: u64,
+    window: std.replay.Window
 }
 
 fn check_limits(l: Limits) -> Result[(), SframeError] {
@@ -422,90 +423,31 @@ pub fn seal(mut s: Sender, metadata: Bytes, plain: Bytes, mut out: Bytes) -> Res
 }
 
 // ---------------------------------------------------------------- replay window (SFRAME-7)
-type Window {
-    floor: u64,
-    top: Option[u64],
-    bits: List[u64]
+fn window(size: u64) -> Result[std.replay.Window, Capacity] {
+    match std.replay.window(size) {
+        Ok(take w) => Ok(take w),
+        Error(Capacity(c)) => Error(c),
+        Error(ZeroWidth) => fail("sframe: replay width was validated"),
+    }
 }
 
-fn window(size: u64, floor: u64) -> Result[Window, Capacity] {
-    let words = (size + 63) / 64
-    let mut bits: List[u64] = list.new()
-    list.try_reserve(mut bits, words)?
-    list.fill(mut bits, words, 0)
-    Ok(Window(floor, top: None, bits: take bits))
-}
-
-fn bit_set(w: Window, i: u64) -> bool {
-    (w.bits[i / 64] >> (i % 64)) & 1 != 0
-}
-
-fn check_window(w: Window, size: u64, jump: u64, ctr: u64) -> Result[(), Discard] {
-    if ctr < w.floor {
+fn check_window(slot: Slot, jump: u64, ctr: u64) -> Result[(), Discard] {
+    if ctr < slot.floor {
         return Error(TooOld)
     }
     // Before the first frame the floor is the anchor of the jump bound.
-    if w.top == None && jump != 0 && ctr - w.floor > jump {
+    let anchor = match std.replay.top(slot.window) {
+        Some(top) => top,
+        None => slot.floor,
+    }
+    if jump != 0 && ctr > anchor && ctr - anchor > jump {
         return Error(TooFar)
     }
-    if let Some(top) = w.top {
-        if ctr > top {
-            if jump != 0 && ctr - top > jump {
-                return Error(TooFar)
-            }
-            return Ok(())
-        }
-        let behind = top - ctr
-        if behind >= size {
-            return Error(TooOld)
-        }
-        if bit_set(w, behind) {
-            return Error(Replayed)
-        }
+    match std.replay.seen(slot.window, ctr) {
+        Fresh => Ok(()),
+        Duplicate => Error(Replayed),
+        TooOld => Error(TooOld),
     }
-    Ok(())
-}
-
-fn shift(mut bits: List[u64], d: u64) {
-    let words = list.len(bits)
-    if d >= words * 64 {
-        for i in 0u64 .. words {
-            bits[i] = 0
-        }
-        return
-    }
-    let whole = d / 64
-    let part = d % 64
-    let mut i = words
-    while i > 0 {
-        i -= 1
-        let mut v: u64 = 0
-        if i >= whole {
-            let src = i - whole
-            v = bits[src] << part
-            if part > 0 && src >= 1 {
-                v = v | (bits[src - 1] >> (64 - part))
-            }
-        }
-        bits[i] = v
-    }
-}
-
-fn mark(mut w: Window, ctr: u64) {
-    let behind: u64 = match w.top {
-        None => {
-            w.top = Some(ctr)
-            0
-        },
-        Some(top) => if ctr > top {
-            shift(mut w.bits, ctr - top)
-            w.top = Some(ctr)
-            0
-        } else {
-            top - ctr
-        },
-    }
-    w.bits[behind / 64] = w.bits[behind / 64] | (1u64 << (behind % 64))
 }
 
 // ---------------------------------------------------------------- receiver (SFRAME-6, SFRAME-8, SFRAME-14)
@@ -558,8 +500,8 @@ fn claimed(r: Receiver, id: u64) -> Option[Claim] {
 
 fn new_slot(keys: schedule.Schedule, ahead: u64, id: u64, size: u64, floor: u64) -> Result[Slot, SframeError] {
     let opener = schedule.sframe_opener(keys, ahead, id) ?=> |take e| Schedule(e)
-    let w = window(size, floor) ?=> |c| Capacity(c)
-    Ok(Slot(opener: take opener, window: take w))
+    let w = window(size) ?=> |c| Capacity(c)
+    Ok(Slot(opener: take opener, floor, window: take w))
 }
 
 fn put_slot(mut r: Receiver, id: u64, take slot: Slot) -> Result[(), SframeError] {
@@ -875,7 +817,7 @@ fn intermediates(mut r: Receiver, first: u64, d: u64) -> Result[(), OpenError] {
 
 // After the candidate authenticated and its intermediates are held: move the schedule `d` steps,
 // release the steps the new window drops, and make the candidate the step's opener.
-fn commit(mut r: Receiver, first: u64, d: u64, id: u64, take w: Window) {
+fn commit(mut r: Receiver, first: u64, d: u64, id: u64, take w: std.replay.Window) {
     let (bits, step, keep) = {
         let g = option.unwrap(map.get(r.generations, first))
         (g.bits, g.step, g.keep)
@@ -890,7 +832,7 @@ fn commit(mut r: Receiver, first: u64, d: u64, id: u64, take w: Window) {
         fail("sframe: a committed candidate is gone")
     }
     let Pending(d: _, opener: take opener) = take p
-    map.insert(mut r.slots, id, Slot(opener: take opener, window: take w))
+    map.insert(mut r.slots, id, Slot(opener: take opener, floor: 0, window: take w))
 }
 
 // The authenticated open shared by both framings: the window, capacity, AEAD and commit steps of
@@ -904,7 +846,7 @@ fn open_core(mut r: Receiver, h: Header, src: Bytes, aad_at: u64, at: u64, extra
         Held => {
             {
                 let slot = option.unwrap(map.get(r.slots, h.kid))
-                check_window(slot.window, size, jump, h.ctr) ?=> |d| Discarded(d)
+                check_window(slot, jump, h.ctr) ?=> |d| Discarded(d)
             }
             if room < need {
                 return Error(Capacity(Capacity(requested: need, available: room)))
@@ -915,7 +857,7 @@ fn open_core(mut r: Receiver, h: Header, src: Bytes, aad_at: u64, at: u64, extra
                 let _ = packet.open_into(slot.opener, 0, h.ctr, src, aad_at, at, extra, mut plain) ?=> |take e| opened(e)
             }
             let _ = map.update(mut r.slots, h.kid, scoped fn(mut slot: Slot) -> () {
-                mark(mut slot.window, h.ctr)
+                let _ = std.replay.mark(mut slot.window, h.ctr)
             })
             Ok(())
         },
@@ -934,8 +876,8 @@ fn open_core(mut r: Receiver, h: Header, src: Bytes, aad_at: u64, at: u64, extra
                 let p = option.unwrap(map.get(r.pending, first))
                 let _ = packet.open_into(p.opener, 0, h.ctr, src, aad_at, at, extra, mut plain) ?=> |take e| opened(e)
             }
-            let mut w = match window(size, 0) {
-                Ok(x) => x,
+            let mut w = match window(size) {
+                Ok(take x) => take x,
                 Error(c) => {
                     list.truncate(mut plain, before)
                     return Error(Capacity(c))
@@ -948,7 +890,7 @@ fn open_core(mut r: Receiver, h: Header, src: Bytes, aad_at: u64, at: u64, extra
                     return Error(e)
                 },
             }
-            mark(mut w, h.ctr)
+            let _ = std.replay.mark(mut w, h.ctr)
             commit(mut r, first, d, h.kid, take w)
             Ok(())
         },

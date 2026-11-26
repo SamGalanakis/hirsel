@@ -1,0 +1,152 @@
+// Module `replay`: a receive window over absolute indices (RFC 3711 §3.3.2, RFC 6347
+// §4.1.2.6, RFC 9605 §9.3). Field legend: API.md; design: api/replay.md.
+//
+// Representation: bit k of the window is the index `highest - k`. Words run in increasing
+// distance from highest. Widths through 128 keep their two words inline and `wide` empty;
+// a wider window reserves ceil(width / 64) words once, charged as charge.seq(8, words) to
+// the limit where it was made. Bits at offsets of width or more are always zero.
+/// Classification of an index against the committed receipts.
+pub type Receipt: key = Fresh | Duplicate | TooOld
+
+pub type WindowError = ZeroWidth | Capacity(Capacity)
+
+pub opaque type Window {
+    width: u64,
+    highest: Option[u64],
+    inline: Inline[u64, 2],
+    wide: List[u64]
+}
+
+const INLINE_BITS: u64 = 128
+
+/// An empty window of exactly n bits. Fails: n of zero is ZeroWidth; a refused wide
+/// reservation is Capacity. Alloc: none through 128 bits, else the word list, current limit.
+/// Cost: O(ceil(n / 64)). Ex: `let mut w = std.replay.window(64)?`
+pub fn window(n: u64) -> Result[Window, WindowError] {
+    if n == 0 {
+        return Error(ZeroWidth)
+    }
+    let mut wide: List[u64] = list.new()
+    if n > INLINE_BITS {
+        let count = n / 64 + if n % 64 == 0 {
+            0
+        } else {
+            1
+        }
+        list.try_reserve(mut wide, count) ?=> |c| Capacity(c)
+        list.fill(mut wide, count, 0u64)
+    }
+    Ok(Window(width: n, highest: None, inline:[0u64; 2], wide: take wide))
+}
+
+/// The highest committed index, or None before the first mark. Cost: O(1).
+/// Ex: `std.replay.top(w)`
+pub fn top(w: Window) -> Option[u64] {
+    w.highest
+}
+
+fn word(w: Window, i: u64) -> u64 {
+    if w.width > INLINE_BITS {
+        w.wide[i]
+    } else {
+        w.inline[i]
+    }
+}
+
+fn put_word(mut w: Window, i: u64, value: u64) {
+    if w.width > INLINE_BITS {
+        w.wide[i] = value
+    } else {
+        w.inline[i] = value
+    }
+}
+
+/// Classify idx without changing w: Fresh above highest, in an empty window, or at an
+/// unmarked offset below width; Duplicate at a marked offset; TooOld at width or more
+/// behind highest. Cost: O(1), no allocation. Ex: `std.replay.seen(w, 7) == Fresh`
+pub fn seen(w: Window, idx: u64) -> Receipt {
+    let Some(highest) = w.highest else {
+        return Fresh
+    }
+    if idx > highest {
+        return Fresh
+    }
+    let behind = highest - idx
+    if behind >= w.width {
+        return TooOld
+    }
+    if (word(w, behind / 64) >> (behind % 64)) & 1 != 0 {
+        Duplicate
+    } else {
+        Fresh
+    }
+}
+
+// Move every receipt `distance` offsets older. Words move high to low so each source word
+// is read before it is overwritten; bits pushed to offsets of width or more are cleared.
+fn advance(mut w: Window, distance: u64) {
+    let last = (w.width - 1) / 64
+    let whole = if distance >= w.width {
+        last + 1
+    } else {
+        distance / 64
+    }
+    let part = distance % 64
+    let tail = w.width % 64
+    let mut i = last + 1
+    while i > 0 {
+        i -= 1
+        let mut shifted = 0u64
+        if i >= whole {
+            let from = i - whole
+            shifted = word(w, from) << part
+            if part != 0 && from > 0 {
+                shifted |= word(w, from - 1) >> (64 - part)
+            }
+        }
+        if i == last && tail != 0 {
+            shifted &= (1u64 << tail) - 1
+        }
+        put_word(mut w, i, shifted)
+    }
+}
+
+/// Commit idx after the caller has authenticated and admitted it, returning its prior
+/// classification. Only Fresh changes w: above highest it moves the receipts older and
+/// makes idx highest, below it marks the hole. Cost: O(ceil(width / 64)), no allocation.
+/// Ex: `let _ = std.replay.mark(mut w, 7)`
+pub fn mark(mut w: Window, idx: u64) -> Receipt {
+    let before = seen(w, idx)
+    if before != Fresh {
+        return before
+    }
+    let behind = match w.highest {
+        Some(highest) => if idx > highest {
+            advance(mut w, idx - highest)
+            w.highest = Some(idx)
+            0u64
+        } else {
+            highest - idx
+        },
+        None => {
+            w.highest = Some(idx)
+            0u64
+        },
+    }
+    let at = behind / 64
+    put_word(mut w, at, word(w, at) | (1u64 << (behind % 64)))
+    Fresh
+}
+
+/// An independent window with w's width and receipts. Fails: a refused wide reservation is
+/// Capacity, with w unchanged. Alloc: the word list above 128 bits, current limit.
+/// Cost: O(ceil(width / 64)). Ex: `let snapshot = std.replay.try_copy(w)?`
+pub fn try_copy(w: Window) -> Result[Window, Capacity] {
+    let mut wide: List[u64] = list.new()
+    let count = list.len(w.wide)
+    if count != 0 {
+        list.try_reserve(mut wide, count)?
+        list.append(mut wide, w.wide)
+    }
+    Ok(Window(width: w.width, highest: w.highest, inline: w.inline, wide: take wide))
+}

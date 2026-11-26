@@ -1,0 +1,834 @@
+// RTP-2 indices end at 2^48 - 1, as do DTLS 1.2 record sequence numbers (RFC 6347 §4.1).
+const RTP_LIMIT: u64 = 1 << 48
+
+const RTCP_LIMIT: u64 = 1 << 31
+
+// Early application records DTLS holds before Connected; the next one overflows.
+const HELD: u64 = 2
+
+type EstimateDraw {
+    highest: u64,
+    seq: u16
+}
+
+/// One generated step. A context is DTLS epoch 1 at 0 and nowhere else; SRTP channel
+/// `context % 6`, RTP of SSRC `context / 2 + 1` when even and its SRTCP when odd; and
+/// SFrame KID 5 at even contexts and 6 at odd ones. `end` connects DTLS, ends that SRTP
+/// SSRC and leaves SFrame alone.
+type Offer {
+    context: u64,
+    index: u64,
+    authentic: bool,
+    end: bool
+}
+
+type ReplayCase {
+    estimates: List[EstimateDraw],
+    ops: List[Offer],
+    width: u64,
+    floor: u64,
+    jump: u64,
+    signal: Option[u64]
+}
+
+// ---------------------------------------------------------------- the model
+// One independent model for all three paths: per context, the set of committed absolute
+// indices and the highest of them. A context's generation keys its set, so ending an SRTP
+// stream empties both of its windows. Indices stay below 2^48 so (generation, context,
+// index) packs into one key.
+type Model {
+    width: u64,
+    seen: std.set.Set[u64],
+    tops: List[Option[u64]],
+    generations: List[u64]
+}
+
+fn model(width: u64, contexts: u64) -> Model {
+    let mut tops: List[Option[u64]] = list.new()
+    let mut generations: List[u64] = list.new()
+    for _ in 0u64 .. contexts {
+        list.push(mut tops, None)
+        list.push(mut generations, 0)
+    }
+    Model(width, seen: std.set.new(), tops: take tops, generations: take generations)
+}
+
+fn set_key(m: Model, c: u64, idx: u64) -> u64 {
+    if idx >= RTP_LIMIT {
+        fail("model index past 2^48")
+    }
+    ((m.generations[c] * 8 + c) << 48) | idx
+}
+
+/// RFC 3711 §3.3.2 over the set: above the highest committed index or with none committed
+/// is fresh; `width` or more behind it is too old; otherwise a member is a duplicate.
+fn receipt(m: Model, c: u64, idx: u64) -> std.replay.Receipt {
+    let Some(top) = m.tops[c] else {
+        return Fresh
+    }
+    if idx > top {
+        return Fresh
+    }
+    if top - idx >= m.width {
+        return TooOld
+    }
+    if std.set.contains(m.seen, set_key(m, c, idx)) {
+        Duplicate
+    } else {
+        Fresh
+    }
+}
+
+fn commit(mut m: Model, c: u64, idx: u64) {
+    let _ = std.set.insert(mut m.seen, set_key(m, c, idx))
+    let higher = match m.tops[c] {
+        Some(top) => idx > top,
+        None => true,
+    }
+    if higher {
+        m.tops[c] = Some(idx)
+    }
+}
+
+fn forget(mut m: Model, c: u64) {
+    m.generations[c] = m.generations[c] + 1
+    m.tops[c] = None
+}
+
+// ---------------------------------------------------------------- RTP index estimation
+fn interesting_low(mut src: std.prop.Source) -> u64 {
+    let center = std.prop.below(mut src, 6)
+    let delta = std.prop.below(mut src, 5)
+    if center == 0 {
+        delta
+    } else if center == 1 {
+        32767 - delta
+    } else if center == 2 {
+        32768 + delta
+    } else if center == 3 {
+        65535 - delta
+    } else if center == 4 {
+        32768 - delta
+    } else {
+        std.prop.below(mut src, 65536)
+    }
+}
+
+fn highest_draw(mut src: std.prop.Source) -> u64 {
+    let kind = std.prop.below(mut src, 7)
+    if kind == 0 {
+        interesting_low(mut src)
+    } else if kind == 1 {
+        ((1 + std.prop.below(mut src, 255)) << 16) | interesting_low(mut src)
+    } else if kind == 2 {
+        (std.prop.below(mut src, 0xfffffffe) << 16) | interesting_low(mut src)
+    } else if kind == 3 {
+        (0xfffffffe << 16) | interesting_low(mut src)
+    } else if kind == 4 {
+        (0xffffffff << 16) | interesting_low(mut src)
+    } else if kind == 5 {
+        RTP_LIMIT - 1 - std.prop.below(mut src, 2048)
+    } else {
+        std.prop.below(mut src, RTP_LIMIT)
+    }
+}
+
+// RFC 3711 Appendix A, written as a circular-distance choice. The strict comparisons in
+// Appendix A keep the current ROC when the distance is exactly half a sequence cycle. The
+// candidate is unreduced: a receiver refuses one past the 48-bit space.
+fn appendix_a_estimate(highest: u64, seq: u16) -> Option[u64] {
+    let low = highest & 65535
+    let roc = highest >> 16
+    let wire: u64 = int.widen(seq)
+    let ahead = (wire + 65536 - low) % 65536
+    let v = if wire > low && ahead > 32768 {
+        if roc == 0 {
+            return None
+        }
+        roc - 1
+    } else if wire < low && ahead < 32768 {
+        roc + 1
+    } else {
+        roc
+    }
+    Some((v << 16) | wire)
+}
+
+fn push_option_u64(mut out: String, value: Option[u64]) {
+    match value {
+        Some(n) => string.push_u64(mut out, n),
+        None => string.push(mut out, "None"),
+    }
+}
+
+fn estimate_miss(d: EstimateDraw, actual: Option[u64], wanted: Option[u64]) -> String {
+    let mut out = string.from("T1: estimate differs at highest ")
+    string.push_u64(mut out, d.highest)
+    string.push(mut out, ", seq ")
+    string.push_u64(mut out, int.widen(d.seq))
+    string.push(mut out, ": got ")
+    push_option_u64(mut out, actual)
+    string.push(mut out, ", RFC 3711 Appendix A gives ")
+    push_option_u64(mut out, wanted)
+    out
+}
+
+fn check_estimate(d: EstimateDraw) -> Result[(), String] {
+    let wanted = appendix_a_estimate(d.highest, d.seq)
+    // RTP-2 reports an index past 2^48 - 1 as Beyond; Appendix A leaves it unreduced.
+    let actual = match rtp.seq.estimate(d.highest, d.seq) {
+        Index(index) => Some(index),
+        Before => None,
+        Beyond => match wanted {
+            Some(index) => if index >= RTP_LIMIT {
+                wanted
+            } else {
+                None
+            },
+            None => Some(RTP_LIMIT),
+        },
+    }
+    if actual != wanted {
+        return Error(estimate_miss(d, actual, wanted))
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- generated steps
+fn offer(mut ops: List[Offer], context: u64, index: u64, authentic: bool) {
+    list.push(mut ops, Offer(context, index, authentic, end: false))
+}
+
+fn end_at(mut ops: List[Offer], context: u64) {
+    list.push(mut ops, Offer(context, index: 0, authentic: true, end: true))
+}
+
+// Each offset at which a mark changes words or falls off one of the three widths.
+fn probes(width: u64) -> List[u64] {
+    let mut out: List[u64] = list.new()
+    for d in[1u64, 63u64, 64u64, 65u64, 99u64, 100u64, 127u64, 128u64, 129u64] {
+        list.push(mut out, d)
+    }
+    list.push(mut out, width - 1)
+    list.push(mut out, width)
+    list.push(mut out, width + 1)
+    take out
+}
+
+/// From `top`, advance by each gap: a forged packet at the new index first, then a genuine
+/// packet at the old left edge, then the genuine retry, a repeat of the old top, and the
+/// holes and repeats behind the new top.
+fn walk(mut ops: List[Offer], context: u64, from: u64, gaps: List[u64], width: u64) {
+    let behind = probes(width)
+    let mut top = from
+    for gap in gaps {
+        let next = top + gap
+        offer(mut ops, context, next, false)
+        if top >= width - 1 {
+            offer(mut ops, context, top - (width - 1), true)
+        }
+        offer(mut ops, context, next, true)
+        offer(mut ops, context, top, true)
+        for _ in 0u64 .. 2 {
+            for d in behind {
+                if next >= d {
+                    offer(mut ops, context, next - d, true)
+                }
+            }
+        }
+        top = next
+    }
+}
+
+/// The steps every case runs. `floor` is KID 5's; KID 6 has floor 0.
+fn directed_ops(width: u64, floor: u64, jump: u64) -> List[Offer] {
+    let mut ops: List[Offer] = list.new()
+    let start = floor + if jump == 0 {
+        100u64
+    } else {
+        jump
+    }
+    // First packets. SFrame anchors its bound at the floor: start + 1 is TooFar there.
+    // DTLS holds two early records, overflows the third, and drops a forged one.
+    offer(mut ops, 0, start + 1, true)
+    offer(mut ops, 0, start, true)
+    offer(mut ops, 0, start + 3, true)
+    offer(mut ops, 0, start + 4, false)
+    offer(mut ops, 0, start + 3, true)
+    end_at(mut ops, 2)
+    offer(mut ops, 0, start + 3, true)
+    offer(mut ops, 0, start + 3, false)
+    offer(mut ops, 0, start + 2, false)
+    offer(mut ops, 0, start + 2, true)
+    let mut top = start + 3
+    if jump != 0 {
+        // From a committed top, exactly `jump` ahead is eligible and one more is TooFar.
+        offer(mut ops, 0, top + jump + 1, true)
+        offer(mut ops, 0, top + jump, true)
+        top += jump
+    }
+    // Interleave a walk on context 0 with one from index zero on context 1.
+    let mut long: List[Offer] = list.new()
+    let mut gaps: List[u64] = list.new()
+    for g in[0u64, 1u64, 63u64, 64u64, 65u64, 100u64, 127u64, 128u64, 129u64, width - 1u64, width, width + 1u64, 9000u64, 32000u64, 70000u64] {
+        list.push(mut gaps, g)
+    }
+    walk(mut long, 0, top, gaps, width)
+    let mut short: List[Offer] = list.new()
+    offer(mut short, 1, 0, true)
+    offer(mut short, 1, 0, true)
+    let mut small: List[u64] = list.new()
+    for g in[1u64, 64u64, 63u64, 128u64, 129u64, width] {
+        list.push(mut small, g)
+    }
+    walk(mut short, 1, 0, small, width)
+    let n = order.max(list.len(long), list.len(short))
+    for i in 0u64 .. n {
+        if i < list.len(long) {
+            list.push(mut ops, long[i])
+        }
+        if i < list.len(short) {
+            list.push(mut ops, short[i])
+        }
+    }
+    // SRTP admission with room for two streams: SSRC 2 opens, SSRC 3 authenticates but is
+    // refused, then opens once SSRC 2 ends. SSRC 3 ends with only RTP received, so its RTP
+    // floor moves past that packet and its SRTCP floor stays.
+    offer(mut ops, 2, 10, true)
+    offer(mut ops, 4, 7, false)
+    offer(mut ops, 4, 7, true)
+    end_at(mut ops, 2)
+    offer(mut ops, 4, 7, true)
+    end_at(mut ops, 4)
+    offer(mut ops, 5, 0, true)
+    offer(mut ops, 4, 7, true)
+    offer(mut ops, 4, 8, true)
+    offer(mut ops, 3, 0, true)
+    offer(mut ops, 2, 11, true)
+    take ops
+}
+
+fn show_replay_case(c: ReplayCase, mut out: String) {
+    string.push(mut out, "width ")
+    string.push_u64(mut out, c.width)
+    string.push(mut out, ", floor ")
+    string.push_u64(mut out, c.floor)
+    string.push(mut out, ", jump ")
+    string.push_u64(mut out, c.jump)
+    string.push(mut out, ", ops ")
+    string.push_u64(mut out, list.len(c.ops))
+}
+
+const WIDTHS: Inline[u64, 9] =[64, 65, 100, 128, 129, 191, 192, 4095, 4096]
+
+fn replay_case(width: u64, floor: u64, jump: u64, signal: Option[u64], take estimates: List[EstimateDraw]) -> ReplayCase {
+    ReplayCase(estimates: take estimates, ops: directed_ops(width, floor, jump), width, floor, jump, signal)
+}
+
+fn replay_case_gen() -> std.prop.Gen[ReplayCase] {
+    std.prop.make(fn(mut src: std.prop.Source) -> ReplayCase {
+        let width = WIDTHS[std.prop.below(mut src, 9)]
+        let floor = if std.prop.weighted(mut src, 1, 2) {
+            1024u64
+        } else {
+            0u64
+        }
+        let jump = if std.prop.weighted(mut src, 1, 2) {
+            width + std.prop.below(mut src, width + 1)
+        } else {
+            0u64
+        }
+        let signal = if std.prop.weighted(mut src, 1, 3) {
+            Some(std.prop.below(mut src, 200))
+        } else {
+            None
+        }
+        let mut estimates: List[EstimateDraw] = list.new()
+        for _ in 0u64 .. 8 {
+            let highest = highest_draw(mut src)
+            let seq: u16 = int.narrow(interesting_low(mut src))
+            list.push(mut estimates, EstimateDraw(highest, seq))
+        }
+        let mut c = replay_case(width, floor, jump, signal, take estimates)
+        // Reorder around indices already offered, with authentication drawn independently.
+        let offered = list.len(c.ops)
+        for _ in 0u64 .. 48 {
+            if std.prop.weighted(mut src, 1, 24) {
+                end_at(mut c.ops, std.prop.below(mut src, 6))
+                continue
+            }
+            let near = c.ops[std.prop.below(mut src, offered)]
+            let delta = std.prop.below(mut src, 2 * width + 1)
+            let index = if near.index + width >= delta {
+                near.index + width - delta
+            } else {
+                0
+            }
+            let context = if std.prop.weighted(mut src, 1, 2) {
+                near.context
+            } else {
+                std.prop.below(mut src, 6)
+            }
+            offer(mut c.ops, context, index, std.prop.weighted(mut src, 3, 4))
+        }
+        take c
+    }, show_replay_case)
+}
+
+fn sorted(take unsorted: List[u64]) -> List[u64] {
+    let mut xs = take unsorted
+    list.sort(mut xs, fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    list.dedup(mut xs)
+    take xs
+}
+
+fn miss(path: String, rule: String, at: u64, op: Offer) -> String {
+    let mut out = string.from(path)
+    string.push(mut out, ": ")
+    string.push(mut out, rule)
+    string.push(mut out, " at step ")
+    string.push_u64(mut out, at)
+    string.push(mut out, ", context ")
+    string.push_u64(mut out, op.context)
+    string.push(mut out, ", index ")
+    string.push_u64(mut out, op.index)
+    string.push(mut out, if op.authentic {
+        ""
+    } else {
+        " (forged)"
+    })
+    out
+}
+
+// ---------------------------------------------------------------- DTLS 1.2, epoch 1
+fn dtls_event(e: dtls.RecordEvent) -> u64 {
+    match e {
+        Discarded => 1,
+        Held => 2,
+        ApplicationData(_) => 3,
+        _ => 0,
+    }
+}
+
+/// RFC 6347 §4.1.2.6 at the 64-record window: check before opening, mark only an
+/// authenticated record, and before Connected only one that the early queue holds.
+fn dtls_trace(ops: List[Offer]) -> Result[(), String] {
+    let (take client, take server) = dtls_keys()
+    let mut sender = take client
+    let mut wires: Map[u64, Bytes] = map.new()
+    {
+        let mut indices: List[u64] = list.new()
+        for op in ops {
+            if !op.end && op.context == 0 && op.index < RTP_LIMIT {
+                list.push(mut indices, op.index)
+            }
+        }
+        let mut seal = result.unwrap(schedule.sealer(mut sender, Application, 0, 0))
+        for i in sorted(take indices) {
+            map.insert(mut wires, i, dtls_wire(mut seal, i))
+        }
+    }
+    let mut r = dtls.records(0)
+    let mut a = dtls.ahead(int.narrow(HELD))
+    result.unwrap(dtls.start_receiving_protected(mut r, server, Aes128GcmSha256))
+    let mut m = model(64, 1)
+    let mut connected = false
+    let mut held = 0u64
+    let mut replayed = 0u64
+    let mut tampered = 0u64
+    let mut overflow = 0u64
+    for at in 0u64 .. list.len(ops) {
+        let op = ops[at]
+        if op.end {
+            if !connected {
+                dtls.records_connected(mut r)
+                connected = true
+                while let Some(body) = dtls.next_held_application(r, mut a) {
+                    if body != string.as_bytes(PAYLOAD) || held == 0 {
+                        return Error(miss("DTLS", "held plaintext", at, op))
+                    }
+                    held -= 1
+                }
+                if held != 0 {
+                    return Error(miss("DTLS", "a held record was lost", at, op))
+                }
+            }
+            continue
+        }
+        if op.context != 0 || op.index >= RTP_LIMIT {
+            continue
+        }
+        let want = if receipt(m, 0, op.index) != Fresh {
+            replayed += 1
+            1u64
+        } else if !op.authentic {
+            tampered += 1
+            1u64
+        } else if !connected {
+            if held >= HELD {
+                overflow += 1
+                1u64
+            } else {
+                held += 1
+                commit(mut m, 0, op.index)
+                2u64
+            }
+        } else {
+            commit(mut m, 0, op.index)
+            3u64
+        }
+        let wire = match map.get(wires, op.index) {
+            Some(w) => as_received(w, op.authentic, 1),
+            None => fail("an unsealed DTLS index"),
+        }
+        let mut cursor = 0u64
+        let got = match dtls.next_record(mut r, mut a, Fixed, wire, mut cursor) {
+            Ok(take e) => dtls_event(e),
+            Error(_) => 0,
+        }
+        if got != want {
+            return Error(miss("DTLS", "record event differs from the model", at, op))
+        }
+        let d = dtls.record_discards(r)
+        if d.replayed != replayed || d.tampered != tampered || d.overflow != overflow || d.malformed != 0 {
+            return Error(miss("DTLS", "discard counts differ from the model", at, op))
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- SRTP, two windows per SSRC
+const SRTP_LIMITS: srtp.Limits = srtp.Limits(send_streams: 4, receive_streams: 2, ended_streams: 4)
+
+// What the model expects from one SRTP packet: an opened index, or a discard or error code.
+type SrtpWant: key = Opens(u64) | Refused(u64)
+
+fn srtp_code(e: srtp.SrtpError) -> u64 {
+    match e {
+        Discarded(Replayed) => 1,
+        Discarded(TooOld) => 2,
+        Discarded(Tampered) => 3,
+        Streams => 4,
+        _ => 0,
+    }
+}
+
+type Floors {
+    reference: List[Option[u64]],
+    minimum: List[u64],
+    live: List[bool]
+}
+
+fn ssrc_of(channel: u64) -> u32 {
+    int.narrow(channel / 2 + 1)
+}
+
+/// RFC 3711 §3.3.1 and §3.3.2 with SRTP-4's floors: estimate RTP from the highest committed
+/// index (else the signaled reference, else the wire SEQ under ROC 0), check the minimum
+/// and the 128-packet window, then the tag, then stream admission; commit only after all.
+fn srtp_trace(ops: List[Offer], signal: Option[u64]) -> Result[(), String] {
+    let mut wires: Map[u64, Bytes] = map.new()
+    {
+        let mut send = srtp_key("srtp_import(send)", false)
+        for s in 0u64 .. 3 {
+            let mut rtp_indices: List[u64] = list.new()
+            let mut rtcp_indices: List[u64] = list.new()
+            for op in ops {
+                if !op.end && op.context % 6 == 2 * s && op.index < RTP_LIMIT {
+                    list.push(mut rtp_indices, op.index)
+                }
+                if !op.end && op.context % 6 == 2 * s + 1 && op.index < RTCP_LIMIT {
+                    list.push(mut rtcp_indices, op.index)
+                }
+            }
+            let ssrc = ssrc_of(2 * s)
+            let (take rtp_seal, take rtcp_seal) = result.unwrap(schedule.sealer_pair(mut send, Rtp, Rtcp, int.widen(ssrc), 0, 0))
+            let mut rs = take rtp_seal
+            let mut cs = take rtcp_seal
+            for i in sorted(take rtp_indices) {
+                map.insert(mut wires, ((2 * s) << 48) | i, rtp_wire(mut rs, ssrc, i))
+            }
+            for i in sorted(take rtcp_indices) {
+                map.insert(mut wires, ((2 * s + 1) << 48) | i, rtcp_wire(mut cs, ssrc, i))
+            }
+        }
+    }
+    let other = srtp_key("srtp_import(send)", true)
+    let mut session = result.unwrap(srtp.session_pair(take other, srtp_key("srtp_import(receive)", false), AeadAes128Gcm, SRTP_LIMITS))
+    let mut m = model(128, 6)
+    let mut f = Floors(reference: list.new(), minimum: list.new(), live: list.new())
+    for _ in 0u64 .. 6 {
+        list.push(mut f.reference, None)
+        list.push(mut f.minimum, 0)
+    }
+    for _ in 0u64 .. 3 {
+        list.push(mut f.live, false)
+    }
+    let mut receivers = 0u64
+    if let Some(start) = signal {
+        let roc: u32 = int.narrow(start >> 16)
+        let seq: u16 = int.truncate(start)
+        let rtcp: u32 = int.narrow(start % RTCP_LIMIT)
+        result.unwrap(srtp.receive_from(mut session, 1, roc, seq, rtcp))
+        f.reference[0] = Some(start)
+        f.minimum[0] = start
+        f.reference[1] = Some(start % RTCP_LIMIT)
+        f.minimum[1] = start % RTCP_LIMIT
+        f.live[0] = true
+        receivers = 1
+    }
+    for at in 0u64 .. list.len(ops) {
+        let op = ops[at]
+        let c = op.context % 6
+        let s = c / 2
+        if op.end {
+            if f.live[s] {
+                for k in[2 * s, 2 * s + 1] {
+                    if let Some(top) = m.tops[k] {
+                        f.reference[k] = Some(top)
+                        f.minimum[k] = top + 1
+                    }
+                    forget(mut m, k)
+                }
+                f.live[s] = false
+                receivers -= 1
+            }
+            if let Error(_) = srtp.end_receive(mut session, ssrc_of(c)) {
+                return Error(miss("SRTP", "end_receive refused", at, op))
+            }
+            continue
+        }
+        let rtcp = c % 2 == 1
+        let limit = if rtcp {
+            RTCP_LIMIT
+        } else {
+            RTP_LIMIT
+        }
+        if op.index >= limit {
+            continue
+        }
+        // The model's own index: RTCP carries it; RTP's comes from Appendix A.
+        let estimated = if rtcp {
+            Some(op.index)
+        } else {
+            let seq: u16 = int.truncate(op.index)
+            let from = match m.tops[c] {
+                Some(top) => top,
+                None => match f.reference[c] {
+                    Some(r) => r,
+                    None => int.widen(seq),
+                },
+            }
+            match appendix_a_estimate(from, seq) {
+                Some(i) if i < RTP_LIMIT => Some(i),
+                _ => None,
+            }
+        }
+        let want = match estimated {
+            None => Refused(2),
+            Some(i) => if i < f.minimum[c] {
+                Refused(2)
+            } else {
+                match receipt(m, c, i) {
+                    Duplicate => Refused(1),
+                    TooOld => Refused(2),
+                    Fresh => if !op.authentic || i != op.index {
+                        Refused(3)
+                    } else if !f.live[s] && receivers >= int.widen(SRTP_LIMITS.receive_streams) {
+                        Refused(4)
+                    } else {
+                        commit(mut m, c, i)
+                        if !f.live[s] {
+                            f.live[s] = true
+                            receivers += 1
+                        }
+                        Opens(i)
+                    },
+                }
+            },
+        }
+        let from_end = if rtcp {
+            5u64
+        } else {
+            1u64
+        }
+        let mut wire = match map.get(wires, (c << 48) | op.index) {
+            Some(w) => as_received(w, op.authentic, from_end),
+            None => fail("an unsealed SRTP index"),
+        }
+        let got = if rtcp {
+            match srtp.unprotect_rtcp(mut session, mut wire) {
+                Ok(_) => Opens(op.index),
+                Error(e) => Refused(srtp_code(e)),
+            }
+        } else {
+            match srtp.unprotect_rtp(mut session, mut wire) {
+                Ok(o) => if o.ssrc == ssrc_of(c) {
+                    Opens(o.index)
+                } else {
+                    Refused(0)
+                },
+                Error(e) => Refused(srtp_code(e)),
+            }
+        }
+        if got != want {
+            return Error(miss(if rtcp {
+                "SRTCP"
+            } else {
+                "SRTP"
+            }, "receive result differs from the model", at, op))
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- SFrame, one window per KID
+fn sframe_code(r: Result[sframe.Opened, sframe.OpenError]) -> u64 {
+    match r {
+        Ok(_) => 0,
+        Error(Discarded(Replayed)) => 1,
+        Error(Discarded(TooOld)) => 2,
+        Error(Discarded(Tampered)) => 3,
+        Error(Discarded(TooFar)) => 5,
+        _ => 6,
+    }
+}
+
+/// SFRAME-7 under RFC 9605 §9.3: the inclusive floor, then the forward bound anchored at
+/// the floor before the first frame and at the highest CTR after, then the window, then
+/// the tag; commit only an authenticated frame.
+fn sframe_trace(ops: List[Offer], width: u64, floor: u64, jump: u64) -> Result[(), String] {
+    let l = sframe.Limits(frame: 4096, window: width, keys: 4, ranges: 4, jump)
+    let mut r = result.unwrap(sframe.receiver(Aes128GcmSha256_128(), Rfc, l))
+    result.unwrap(sframe.install(mut r, 5, sframe_receiving(), floor))
+    result.unwrap(sframe.install(mut r, 6, sframe_receiving(), 0))
+    let floors: Inline[u64, 2] =[floor, 0]
+    let mut m = model(width, 2)
+    for at in 0u64 .. list.len(ops) {
+        let op = ops[at]
+        if op.end {
+            continue
+        }
+        let c = op.context % 2
+        let ctr = op.index
+        let anchor = match m.tops[c] {
+            Some(top) => top,
+            None => floors[c],
+        }
+        let want = if ctr < floors[c] {
+            2u64
+        } else if jump != 0 && ctr > anchor && ctr - anchor > jump {
+            5u64
+        } else {
+            match receipt(m, c, ctr) {
+                Duplicate => 1u64,
+                TooOld => 2u64,
+                Fresh => if op.authentic {
+                    commit(mut m, c, ctr)
+                    0u64
+                } else {
+                    3u64
+                },
+            }
+        }
+        let frame = as_received(sframe_wire(5 + c, ctr), op.authentic, 1)
+        let mut out: Bytes = list.with_capacity(list.len(frame))
+        if sframe_code(sframe.open(mut r, b"", frame, mut out)) != want {
+            return Error(miss("SFrame", "open result differs from the model", at, op))
+        }
+    }
+    Ok(())
+}
+
+fn replay_reference_law(c: ReplayCase) -> Result[(), String] {
+    for d in c.estimates {
+        check_estimate(d)?
+    }
+    dtls_trace(c.ops)?
+    srtp_trace(c.ops, c.signal)?
+    sframe_trace(c.ops, c.width, c.floor, c.jump)
+}
+
+// ---------------------------------------------------------------- the shared type's boundary
+fn boundary() -> Result[(), String] {
+    if let Error(ZeroWidth) = std.replay.window(0) {} else {
+        return Error(string.from("width zero was accepted"))
+    }
+    let refused = result.unwrap(bound bytes 64 {
+        match std.replay.window(4096) {
+            Error(Capacity(_)) => true,
+            _ => false,
+        }
+    })
+    if !refused {
+        return Error(string.from("a 4096-bit window fit in 64 bytes"))
+    }
+    // Hand-derived receipts at the top of u64, width 4096.
+    let max = 0xffffffffffffffffu64
+    let mut w = result.unwrap(std.replay.window(4096))
+    let steps: Inline[(u64, std.replay.Receipt), 10] =[(max - 8192, Fresh), (max - 8191, Fresh), (max - 4096, Fresh), (max - 4097, Fresh), (max, Fresh), (max - 4095, Fresh), (max, Duplicate), (max - 4096, TooOld), (max - 4097, TooOld), (max - 4095, Duplicate)]
+    for (index, wanted) in steps {
+        if std.replay.seen(w, index) != wanted || std.replay.mark(mut w, index) != wanted {
+            return Error(string.from("a receipt near the top of u64"))
+        }
+    }
+    if std.replay.top(w) != Some(max) {
+        return Error(string.from("top near the top of u64"))
+    }
+    let copy_refused = result.unwrap(bound bytes 64 {
+        match std.replay.try_copy(w) {
+            Error(_) => true,
+            Ok(_) => false,
+        }
+    })
+    if !copy_refused || std.replay.seen(w, max - 4095) != Duplicate {
+        return Error(string.from("a refused copy changed its source"))
+    }
+    let mut snapshot = result.unwrap(std.replay.try_copy(w))
+    let _ = std.replay.mark(mut snapshot, max - 1)
+    if std.replay.seen(w, max - 1) != Fresh || std.replay.seen(snapshot, max - 1) != Duplicate {
+        return Error(string.from("a copy shares receipts with its source"))
+    }
+    Ok(())
+}
+
+/// bug: refuse a fresh reordered packet, accept a repeated index, shift by the physical
+/// rather than the logical width, mark before the tag check or before admission, choose
+/// the wrong ROC, or move a floor or bound wrongly, in any of DTLS, SRTP and SFrame.
+/// oracle: RFC 6347 §4.1.2.6, RFC 3711 §3.3.1, §3.3.2 and Appendix A, and RFC 9605 §9.3
+/// with SFRAME-7, applied to an independent set of committed absolute indices per context.
+@test
+fn replay_reference_model(seed_grant: Env) -> Result[(), ()] {
+    if let Error(take reason) = boundary() {
+        fail(take reason)
+    }
+    // Every width, with the bound off and on, from floor zero and a raised floor.
+    for i in 0u64 .. 9 {
+        let width = WIDTHS[i]
+        let floor = if i % 2 == 0 {
+            0u64
+        } else {
+            1024u64
+        }
+        for jump in[0u64, 2 * width] {
+            let c = replay_case(width, floor, jump, if i % 3 == 0 {
+                Some(int.widen(i))
+            } else {
+                None
+            }, list.new())
+            if let Error(take reason) = replay_reference_law(c) {
+                fail(take reason)
+            }
+        }
+    }
+    let seed = match std.sim.world.test_seed(seed_grant) {
+        Some(n) => n,
+        None => 0,
+    }
+    let mut config = std.prop.config()
+    config.seed = seed
+    config.cases = 16
+    std.prop.check(config, replay_case_gen(), replay_reference_law)
+}

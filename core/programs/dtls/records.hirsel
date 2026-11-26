@@ -30,8 +30,7 @@ pub opaque type Ahead {
 type ReceiveKeys {
     cipher: packet.Opener,
     explicit: u64,
-    newest: u64,
-    seen: u64
+    window: std.replay.Window
 }
 
 type SendKeys {
@@ -146,7 +145,7 @@ pub fn start_receiving_protected(mut r: Records, s: schedule.Schedule, suite: sc
     }
     match schedule.opener(s, Application) {
         Ok(take cipher) => {
-            r.read = Some(ReceiveKeys(cipher: take cipher, explicit: explicit_nonce(suite), newest: 0, seen: 0))
+            r.read = Some(ReceiveKeys(cipher: take cipher, explicit: explicit_nonce(suite), window: result.unwrap(std.replay.window(64))))
             Ok(())
         },
         Error(Capacity(c)) => Error(Capacity(c)),
@@ -154,46 +153,19 @@ pub fn start_receiving_protected(mut r: Records, s: schedule.Schedule, suite: sc
     }
 }
 
-fn replayed(k: ReceiveKeys, seq: u64) -> bool {
-    if seq > k.newest {
-        return false
-    }
-    let behind = k.newest - seq
-    behind >= 64 || (k.seen & (1u64 << behind)) != 0
-}
-
-fn mark_received(mut k: ReceiveKeys, seq: u64) {
-    if seq > k.newest {
-        let shift = seq - k.newest
-        k.seen = if shift >= 64 {
-            1
-        } else {
-            (k.seen << shift) | 1
-        }
-        k.newest = seq
-    } else {
-        k.seen |= 1u64 << (k.newest - seq)
-    }
-}
-
-/// The epoch-1 replay window, which the endpoint puts back when processing the record just
-/// opened is refused, so the same record is taken again (DTLS-8).
-type Window {
-    newest: u64,
-    seen: u64
-}
-
-fn read_window(r: Records) -> Window {
+/// The snapshot includes receipts that a provisional advance may evict (DTLS-8).
+fn read_window(r: Records) -> Option[std.replay.Window] {
     match r.read {
-        Some(k) => Window(newest: k.newest, seen: k.seen),
-        None => Window(newest: 0, seen: 0),
+        Some(k) => Some(result.unwrap(std.replay.try_copy(k.window))),
+        None => None,
     }
 }
 
-fn restore_window(mut r: Records, w: Window) {
-    if let Some(mut k) = r.read {
-        k.newest = w.newest
-        k.seen = w.seen
+fn restore_window(mut r: Records, take snapshot: Option[std.replay.Window]) {
+    if let Some(take window) = take snapshot {
+        if let Some(mut k) = r.read {
+            k.window = take window
+        }
     }
 }
 
@@ -309,7 +281,7 @@ fn receive_plain(mut r: Records, datagram: Bytes, h: RecordHeader) -> Result[Rec
 }
 
 fn receive_protected(mut k: ReceiveKeys, mut a: Ahead, connected: bool, mut dropped: Discards, mut closed: Option[Close], datagram: Bytes, h: RecordHeader) -> Result[RecordEvent, RecordError] {
-    if replayed(k, h.sequence) {
+    if std.replay.seen(k.window, h.sequence) != Fresh {
         dropped.replayed += 1
         return Ok(Discarded)
     }
@@ -358,10 +330,10 @@ fn receive_protected(mut k: ReceiveKeys, mut a: Ahead, connected: bool, mut drop
             return Ok(overflow(mut dropped))
         }
         enqueue(mut a.application, take body)?
-        mark_received(mut k, h.sequence)
+        let _ = std.replay.mark(mut k.window, h.sequence)
         return Ok(Held)
     }
-    mark_received(mut k, h.sequence)
+    let _ = std.replay.mark(mut k.window, h.sequence)
     match h.kind {
         kind if kind == HANDSHAKE => Ok(HandshakeRecord(h, take body)),
         kind if kind == APPLICATION => Ok(ApplicationData(take body)),

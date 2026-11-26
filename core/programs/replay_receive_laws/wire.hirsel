@@ -1,0 +1,157 @@
+// Wire inputs for the replay reference model, built as the DTLS, SRTP and SFrame package
+// law fixtures build theirs: hand-framed records and packets sealed under test keys, and
+// SFrame frames derived from RFC 9605 §4.4 without the code under test.
+const PAYLOAD: String = "replay"
+
+fn unhex(s: String) -> Bytes {
+    option.unwrap(std.hex.decode(string.as_bytes(s)))
+}
+
+fn copy_of(b: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(list.len(b))
+    list.append(mut out, b)
+    out
+}
+
+/// The wire as sent, or with one tag byte flipped `from_end` bytes before its end.
+fn as_received(wire: Bytes, authentic: bool, from_end: u64) -> Bytes {
+    let mut out = copy_of(wire)
+    if !authentic {
+        let at = list.len(out) - from_end
+        out[at] = out[at] ^ 0x80u8
+    }
+    out
+}
+
+// ---------------------------------------------------------------- DTLS 1.2 (dtls/laws.hirsel)
+fn dtls_keys() -> (schedule.Schedule, schedule.Schedule) {
+    let a = provide.random_tape(unhex("49af42ba7f7994852d713ef2784bcbcaa7911de26adc5642cb634540e7ea5005"))
+    let b = provide.random_tape(unhex("b1580eeadf6dd589b8ef4f2d5652578cc810e9980191ec8d058308cea216a21e"))
+    let mut cp: Bytes = list.with_capacity(32)
+    let mut sp: Bytes = list.with_capacity(32)
+    let local = result.unwrap(secret.key_share(a, X25519, mut cp))
+    let remote = result.unwrap(secret.key_share(b, X25519, mut sp))
+    let cr = unhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    let sr = unhex("a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf")
+    let mut hash: Bytes = list.with_capacity(32)
+    list.fill(mut hash, 32, 0x5e)
+    let session = Some(take hash)
+    let client = result.unwrap(schedule.dtls12(Aes128GcmSha256, Client, 1, take local, sp, cr, sr, session))
+    let server = result.unwrap(schedule.dtls12(Aes128GcmSha256, Server, 1, take remote, cp, cr, sr, session))
+    (take client, take server)
+}
+
+/// An epoch-1 application record at `sequence`, framed as RFC 6347 §4.1 and §4.1.2.1 give
+/// it for AES-128-GCM: header, the 8-byte explicit nonce, then ciphertext and tag.
+fn dtls_wire(mut seal: packet.Sealer, sequence: u64) -> Bytes {
+    let number = (1u64 << 48) | sequence
+    let size: u16 = int.narrow(list.len(string.as_bytes(PAYLOAD)))
+    let mut out: Bytes = list.with_capacity(64)
+    list.push(mut out, 23u8)
+    list.put_word_be(mut out, 0xfefdu16)
+    list.put_word_be(mut out, number)
+    list.put_word_be(mut out, size + 24)
+    list.put_word_be(mut out, number)
+    let mut aad: Bytes = list.with_capacity(13)
+    list.put_word_be(mut aad, number)
+    list.push(mut aad, 23u8)
+    list.put_word_be(mut aad, 0xfefdu16)
+    list.put_word_be(mut aad, size)
+    let at = list.len(out)
+    let _ = result.unwrap(packet.seal_into(mut seal, sequence, string.as_bytes(PAYLOAD), 0, mut out, at, aad))
+    take out
+}
+
+// ---------------------------------------------------------------- SRTP, AEAD_AES_128_GCM (RFC 7714)
+fn srtp_key(uses: String, alternate: bool) -> schedule.Schedule {
+    let mut key = unhex("000102030405060708090a0b0c0d0e0fa0a1a2a3a4a5a6a7a8a9aaab")
+    if alternate {
+        key[0] = key[0] ^ 1
+    }
+    let sealed = result.unwrap(secret.seal(take key, uses))
+    result.unwrap(schedule.import_srtp(AeadAes128Gcm, take sealed))
+}
+
+/// RTP at packet index `index` (RFC 3711 §3.3.1): only its low 16 bits go on the wire.
+fn rtp_wire(mut seal: packet.Sealer, ssrc: u32, index: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(48)
+    list.put_word_be(mut out, 0x8060u16)
+    let seq: u16 = int.truncate(index)
+    list.put_word_be(mut out, seq)
+    list.put_word_be(mut out, 1u32)
+    list.put_word_be(mut out, ssrc)
+    list.append(mut out, string.as_bytes(PAYLOAD))
+    let _ = result.unwrap(packet.seal(mut seal, index, mut out, 0, 12, b""))
+    take out
+}
+
+/// An encrypted SRTCP sender report at `index`, with the E flag and index trailer after the
+/// tag (RFC 7714 §9.1): the AAD is the 8-byte header followed by the trailer.
+fn rtcp_wire(mut seal: packet.Sealer, ssrc: u32, index: u64) -> Bytes {
+    let trailer: u32 = int.narrow(index | (1u64 << 31))
+    let mut out: Bytes = list.with_capacity(48)
+    list.put_word_be(mut out, 0x80c80002u32)
+    list.put_word_be(mut out, ssrc)
+    let mut aad = copy_of(out)
+    list.put_word_be(mut aad, trailer)
+    list.put_word_be(mut out, 0u32)
+    let _ = result.unwrap(packet.seal(mut seal, index, mut out, 8, 8, aad))
+    list.put_word_be(mut out, trailer)
+    take out
+}
+
+// ---------------------------------------------------------------- SFrame (sframe/laws.hirsel)
+fn sframe_base() -> Bytes {
+    let mut out: Bytes = list.with_capacity(16)
+    for i in 0u64 .. 16 {
+        let x: u8 = int.truncate(i)
+        list.push(mut out, x ^ 3u8)
+    }
+    out
+}
+
+fn sframe_receiving() -> schedule.Schedule {
+    let s = result.unwrap(secret.seal(sframe_base(), "sframe_import(receive)"))
+    match schedule.import_sframe(Aes128GcmSha256_128, take s) {
+        Ok(take keys) => take keys,
+        Error(_) => fail("import_sframe refused a test key"),
+    }
+}
+
+fn inline32(x: Inline[u8, 32], n: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(n)
+    let _ = bytebuf.append_inline(mut out, x, 0, n)
+    out
+}
+
+fn expand1(prk: Bytes, info: Bytes, n: u64) -> Bytes {
+    let mut h = std.hmac.start(prk)
+    std.hmac.add(mut h, info, 0, list.len(info))
+    std.hmac.add_byte(mut h, 1)
+    inline32(std.hmac.finish(h), n)
+}
+
+fn kid_label(prefix: String, kid: u64) -> Bytes {
+    let mut out: Bytes = list.with_capacity(40)
+    list.append(mut out, string.as_bytes(prefix))
+    list.put_word_be(mut out, kid)
+    list.put_word_be(mut out, 4u16)
+    out
+}
+
+/// RFC 9605 §4.4 and §4.3: the frame for `kid` at `ctr`, with empty metadata.
+fn sframe_wire(kid: u64, ctr: u64) -> Bytes {
+    let prk = inline32(std.hmac.sha256(b"", sframe_base()), 32)
+    let key = result.unwrap(secret.seal(expand1(prk, kid_label("SFrame 1.0 Secret key ", kid), 16), "aead(aes128-gcm)"))
+    let mut iv = expand1(prk, kid_label("SFrame 1.0 Secret salt ", kid), 12)
+    for i in 0u64 .. 8 {
+        let b: u8 = int.truncate(ctr >> (8 * (7 - i)))
+        iv[4 + i] = iv[4 + i] ^ b
+    }
+    let plain = string.as_bytes(PAYLOAD)
+    let mut out: Bytes = list.with_capacity(17 + list.len(plain) + 16)
+    let _ = result.unwrap(sframe.encode_header(sframe.Header(kid, ctr), mut out))
+    let aad = copy_of(out)
+    let _ = result.unwrap(secret.aead_seal(key, Aes128Gcm, iv, aad, plain, mut out))
+    out
+}

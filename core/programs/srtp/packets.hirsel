@@ -203,9 +203,9 @@ pub fn unprotect_rtp(mut s: Session, mut buf: Bytes) -> Result[Opened, SrtpError
     }
     let header = rtp_header(buf, length - s.tag)?
     let (live, previous) = receive_stream(s, header.ssrc)
-    let mut stream = previous
-    let reference = index_or(stream.rtp.floor.reference, int.widen(header.seq))
-    let Index(index) = rtp.seq.estimate(reference, header.seq) else {
+    let mut stream = take previous
+    let estimate_from = index_or(estimate_base(stream.rtp), int.widen(header.seq))
+    let Index(index) = rtp.seq.estimate(estimate_from, header.seq) else {
         return Error(Discarded(TooOld))
     }
     check_window(stream.rtp, index)?
@@ -222,8 +222,8 @@ pub fn unprotect_rtp(mut s: Session, mut buf: Bytes) -> Result[Opened, SrtpError
         })
         let _ = packet.open(s.rtp, int.widen(header.ssrc), index, mut buf, 0, header.end, extra) ?=> |take e| opened_error(e)
     }
-    mark(mut stream.rtp, index)
-    commit_receive(mut s, header.ssrc, live, stream)?
+    let _ = std.replay.mark(mut stream.rtp.receipts, index)
+    commit_receive(mut s, header.ssrc, live, take stream)?
     Ok(Opened(length: list.len(buf), ssrc: header.ssrc, index))
 }
 
@@ -242,7 +242,7 @@ pub fn unprotect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] 
     let trailer: u32 = list.word_be(buf, trailer_at)
     let index: u64 = int.widen(trailer & 0x7fffffff)
     let (live, previous) = receive_stream(s, ssrc)
-    let mut stream = previous
+    let mut stream = take previous
     check_window(stream.rtcp, index)?
     reserve_receiver(mut s, live)?
     let encrypted = trailer & 0x80000000 != 0
@@ -287,7 +287,7 @@ pub fn unprotect_rtcp(mut s: Session, mut buf: Bytes) -> Result[u64, SrtpError] 
     if clear_gcm {
         list.truncate(mut buf, plain_length)
     }
-    mark(mut stream.rtcp, index)
-    commit_receive(mut s, ssrc, live, stream)?
+    let _ = std.replay.mark(mut stream.rtcp.receipts, index)
+    commit_receive(mut s, ssrc, live, take stream)?
     Ok(plain_length)
 }

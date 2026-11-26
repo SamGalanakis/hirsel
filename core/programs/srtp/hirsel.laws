@@ -9,4 +9,3 @@ srtp@1/laws/rtx_protected src=d7e5c6ca64d772bb sig=887d04f77f178e40 run=acdd7fe3
 srtp@1/laws/sender_index_monotone src=c6591842c370d9cb sig=359b4786c6b818f3 run=acdd7fe37d41c86f bug=019765b78d98d1e6 oracle=1a19edd511be9cbf rows=pending
 srtp@1/laws/srtcp_trailer_order src=ed69fb887656064e sig=bee9a48f60b31f1e run=acdd7fe37d41c86f bug=f9bab803932ce08c oracle=a1cde9656737ffa3 rows=pending
 srtp@1/laws/streams_after_auth src=89a9095f7098617f sig=9a53a1e155e1dfc6 run=acdd7fe37d41c86f bug=07577f770bf02c81 oracle=3e4f336beb60424b rows=pending
-srtp@1/srtp/replay_reference_model src=7586fa7de6f98e36 sig=c6d252b747483c60 run=191764989c4e9e8f bug=cab5ef371896b166 oracle=4ecf97624f2b9e38 rows=pending

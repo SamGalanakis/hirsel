@@ -23,8 +23,8 @@ type SendStream {
 }
 
 type ReceiveStream {
-    rtp: Window,
-    rtcp: Window
+    rtp: ReceiveWindow,
+    rtcp: ReceiveWindow
 }
 
 type Kept {
@@ -201,18 +201,18 @@ pub fn end_receive(mut s: Session, ssrc: u32) -> Result[(), SrtpError] {
     Ok(())
 }
 
-fn insert_receiver(mut s: Session, ssrc: u32, stream: ReceiveStream) -> Result[(), SrtpError] {
+fn insert_receiver(mut s: Session, ssrc: u32, take stream: ReceiveStream) -> Result[(), SrtpError] {
     if map.len(s.receivers) >= int.widen(s.limits.receive_streams) {
         return Error(Streams)
     }
     map.try_reserve(mut s.receivers, 1) ?=> |c| Capacity(c)
-    map.insert(mut s.receivers, ssrc, stream)
+    map.insert(mut s.receivers, ssrc, take stream)
     Ok(())
 }
 
 fn receive_stream(s: Session, ssrc: u32) -> (bool, ReceiveStream) {
     if let Some(stream) = map.get(s.receivers, ssrc) {
-        return (true, ReceiveStream(rtp: stream.rtp, rtcp: stream.rtcp))
+        return (true, ReceiveStream(rtp: copy_window(stream.rtp), rtcp: copy_window(stream.rtcp)))
     }
     let kept = match map.get(s.ended, ssrc) {
         Some(k) => Kept(rtp: k.rtp, rtcp: k.rtcp),
@@ -232,10 +232,10 @@ fn reserve_receiver(mut s: Session, live: bool) -> Result[(), SrtpError] {
 }
 
 /// After `reserve_receiver`: a new stream's insert has its room.
-fn commit_receive(mut s: Session, ssrc: u32, live: bool, stream: ReceiveStream) -> Result[(), SrtpError] {
+fn commit_receive(mut s: Session, ssrc: u32, live: bool, take stream: ReceiveStream) -> Result[(), SrtpError] {
     if !live && map.len(s.receivers) >= int.widen(s.limits.receive_streams) {
         return Error(Streams)
     }
-    map.insert(mut s.receivers, ssrc, stream)
+    map.insert(mut s.receivers, ssrc, take stream)
     Ok(())
 }

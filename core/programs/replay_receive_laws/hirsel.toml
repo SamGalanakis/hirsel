@@ -1,0 +1,21 @@
+[package]
+name = "replay_receive_laws"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+dtls = { major = 1, path = "../dtls" }
+rtp = { major = 1, path = "../rtp" }
+srtp = { major = 1, path = "../srtp" }
+sframe = { major = 1, path = "../sframe" }
+
+[sources]
+"wire.hirsel" = "laws"
+
+[tests]
+limit = 67108864
+grants = ["Env=HIRSEL_TEST_SIM_SEED"]
+
+[tests.sources]
+"replay_prop_laws.hirsel" = "laws"

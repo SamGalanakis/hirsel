@@ -102,6 +102,11 @@ source = "member:quic"
 edges = ["std@1"]
 
 [[package]]
+id = "replay_receive_laws@1"
+source = "member:replay_receive_laws"
+edges = ["dtls@1", "rtp@1", "sframe@1", "srtp@1", "std@1"]
+
+[[package]]
 id = "rtp@1"
 source = "member:rtp"
 edges = ["std@1"]

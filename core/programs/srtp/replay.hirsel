@@ -5,74 +5,45 @@ type Floor {
     minimum: u64
 }
 
-type Window {
+type ReceiveWindow {
     floor: Floor,
-    recent: u64,
-    older: u64
+    receipts: std.replay.Window
 }
 
-fn window(floor: Floor) -> Window {
-    Window(floor, recent: 0, older: 0)
+fn window(floor: Floor) -> ReceiveWindow {
+    ReceiveWindow(floor, receipts: result.unwrap(std.replay.window(128)))
+}
+
+fn copy_window(w: ReceiveWindow) -> ReceiveWindow {
+    ReceiveWindow(floor: w.floor, receipts: result.unwrap(std.replay.try_copy(w.receipts)))
 }
 
 fn start_floor(index: Option[u64]) -> Floor {
     Floor(reference: index, minimum: index_or(index, 0))
 }
 
-fn kept_floor(w: Window) -> Floor {
-    if w.recent & 1 != 0 {
-        Floor(reference: w.floor.reference, minimum: option.unwrap(w.floor.reference) + 1)
-    } else {
-        w.floor
+fn estimate_base(w: ReceiveWindow) -> Option[u64] {
+    match std.replay.top(w.receipts) {
+        Some(top) => Some(top),
+        None => w.floor.reference,
     }
 }
 
-fn check_window(w: Window, index: u64) -> Result[(), SrtpError] {
+fn kept_floor(w: ReceiveWindow) -> Floor {
+    match std.replay.top(w.receipts) {
+        Some(top) => Floor(reference: Some(top), minimum: top + 1),
+        None => w.floor,
+    }
+}
+
+fn check_window(w: ReceiveWindow, index: u64) -> Result[(), SrtpError] {
     if index < w.floor.minimum {
         return Error(Discarded(TooOld))
     }
-    if let Some(top) = w.floor.reference {
-        if index <= top {
-            let behind = top - index
-            if behind >= 128 {
-                return Error(Discarded(TooOld))
-            }
-            let marked = if behind < 64 {
-                (w.recent >> behind) & 1
-            } else {
-                (w.older >> (behind - 64)) & 1
-            }
-            if marked != 0 {
-                return Error(Discarded(Replayed))
-            }
-        }
-    }
-    Ok(())
-}
-
-fn mark(mut w: Window, index: u64) {
-    let top = index_or(w.floor.reference, index)
-    if index > top {
-        let advance = index - top
-        if advance >= 128 {
-            w.older = 0
-            w.recent = 1
-        } else if advance >= 64 {
-            w.older = w.recent << (advance - 64)
-            w.recent = 1
-        } else {
-            w.older = (w.older << advance) | (w.recent >> (64 - advance))
-            w.recent = (w.recent << advance) | 1
-        }
-        w.floor.reference = Some(index)
-    } else {
-        let behind = top - index
-        if behind < 64 {
-            w.recent = w.recent | (1u64 << behind)
-        } else {
-            w.older = w.older | (1u64 << (behind - 64))
-        }
-        w.floor.reference = Some(top)
+    match std.replay.seen(w.receipts, index) {
+        Fresh => Ok(()),
+        Duplicate => Error(Discarded(Replayed)),
+        TooOld => Error(Discarded(TooOld)),
     }
 }
 

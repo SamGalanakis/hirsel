@@ -141,7 +141,7 @@ fn receive_records(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut da
             HandshakeRecord(h, take body) => {
                 if let Error(f) = on_handshake(mut e, now, r, h.epoch, body) {
                     if let Retry(_) = f {
-                        restore_window(mut e.layer, window)
+                        restore_window(mut e.layer, take window)
                         if draining {
                             undo_early_record(mut e.early)
                         }

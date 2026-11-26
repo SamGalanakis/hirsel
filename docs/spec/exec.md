@@ -398,6 +398,10 @@ entry, the image may change its own private pages, as any native program may.
 image (`fclonefileat`, else a copy) into a directory private to the run (mode 0700). Step 2
 makes the copy mode 0500 and immutable (`UF_IMMUTABLE`) and keeps the flags the copy has,
 so an image stored compressed keeps its bytes. Each spawn executes the copy by its path.
+Because `UF_IMMUTABLE` is a user flag, the copy's owning user can clear it, restore write
+permission, and rewrite the private copy in place after step 3's digest check; the law
+above therefore holds on macOS against other users (and against changes to the original
+image path), not against another process running as the same user.
 A native executable is a 64-bit Mach-O executable for the machine, or a universal file
 with at least one image for the machine's CPU type, where each such image is a 64-bit
 Mach-O executable that lies inside the file. The kernel chooses which of those images

@@ -511,7 +511,7 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
 
 fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir, Db, u64), Error] waits {
     let directory = disk_test_directory(d)
-    let mut db = open(tasks, directory, c, r, journal_crash_options())?
+    let mut db = open_directory(tasks, directory, c, r, journal_crash_options(), JournalCadence(group_delay_us: 0, end_groups: 1, end_interval_ms: 10))?
     let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
     let Committed(written) = run(mut db, None, copy_env(rows), fn(mut tx, target) -> Result[(), Error] {
@@ -524,22 +524,86 @@ fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir
         return Error(Missing("10,000-row journal commit"))
     }
     durable(mut db, written.ticket)?
+    // The live capture reads the named END. Its update follows the ack and
+    // precedes the worker's handling of the following barrier.
+    {
+        let journal = disk_state(db)
+        result.unwrap(channel.send(journal.journal, Barrier))
+        match result.unwrap(channel.receive(journal.written)) {
+            Written => (),
+            WriteFailed(problem) => return Error(Poisoned(problem)),
+        }
+    }
     Ok((directory, take db, option.unwrap(written.info).id.version))
+}
+
+fn replay_prior_grants() -> Result[(), Error] {
+    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut ids = 0u64
+    define_store_collection(mut base, 1, 1, mut ids)?
+    let seed = ids
+    let mut wrong: List[JournalOp] = list.new()
+    list.push(mut wrong, JournalOp(key: logical_key(1, key_word(0))?, value: Some(prior_fixture_value(65536)), prior: 0, trim: None))
+    list.push(mut wrong, JournalOp(key: logical_key(1, key_word(1))?, value: None, prior: 1, trim: None))
+    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    // 4 KiB covers the fault but cannot admit the first 64 KiB value copy.
+    let readonly_refusal = bound bytes 4096 {
+        journal_apply_ops("bulk prior", mut ids, mut base, wrong, mut account, true)
+    }
+    match readonly_refusal {
+        Ok(Error(Corrupt(Fault(why: Malformed, ..)))) => (),
+        _ => return Error(Missing("immutable prior must precede value admission")),
+    }
+    // 96 KiB covers the candidate blob and page work, but cannot hold the
+    // old BatchEdit's 64 KiB copy alongside a second 64 KiB blob.
+    let mutable_refusal = bound bytes 98304 {
+        journal_apply_ops("batch prior", mut ids, mut base, wrong, mut account, false)
+    }
+    match mutable_refusal {
+        Ok(Error(Corrupt(Fault(why: Malformed, ..)))) => (),
+        _ => return Error(Missing("mutable prior must precede a redundant value copy")),
+    }
+    if ids != seed || page_row_count(base) != 0 {
+        return Error(Missing("failed prior published a prefix"))
+    }
+    wrong[1].prior = 0
+    for immutable in[true, false] {
+        let mut candidate = share_page_tree(base)
+        let mut candidate_ids = seed
+        capacity(bound bytes 98304 {
+            journal_apply_ops("valid priors", mut candidate_ids, mut candidate, wrong, mut account, immutable)
+        })??
+        {
+            let Some(stored) = get_page_row(candidate, wrong[0].key) else {
+                return Error(Missing("zero-prior put is absent"))
+            }
+            if page_row_count(candidate) != 1 || list.len(stored) != 65536 || get_page_row(candidate, wrong[1].key) != None {
+                return Error(Missing("put with an absent zero-prior delete"))
+            }
+        }
+        let mut mismatch: List[JournalOp] = list.new()
+        list.push(mut mismatch, JournalOp(key: logical_key(1, key_word(0))?, value: None, prior: 65536, trim: None))
+        list.push(mut mismatch, JournalOp(key: logical_key(1, key_word(1))?, value: None, prior: 0, trim: None))
+        match journal_apply_ops("wrong existing prior", mut candidate_ids, mut candidate, mismatch, mut account, immutable) {
+            Error(Corrupt(Fault(why: Malformed, ..))) => (),
+            _ => return Error(Missing("existing row accepted a mismatched prior")),
+        }
+        mismatch[0].key = logical_key(1, key_word(1))?
+        mismatch[0].prior = 0
+        mismatch[1].key = logical_key(1, key_word(2))?
+        let mut empty = share_page_tree(base)
+        let mut empty_ids = seed
+        journal_apply_ops("zero-prior deletes", mut empty_ids, mut empty, mismatch, mut account, immutable)?
+        if page_row_count(empty) != 0 {
+            return Error(Missing("zero-prior deletes built rows"))
+        }
+    }
+    Ok(())
 }
 
 @test
 fn read_only_replay_step_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut base = new_page_tree(CollectionMap, 1024)
-    let mut ids = 0u64
-    define_store_collection(mut base, 1, 1, mut ids)?
-    let mut wrong: List[JournalOp] = list.new()
-    list.push(mut wrong, JournalOp(key: logical_key(1, key_word(0))?, value: Some(key_word(1)), prior: 0, trim: None))
-    list.push(mut wrong, JournalOp(key: logical_key(1, key_word(1))?, value: None, prior: 1, trim: None))
-    let mut account = ReplayTieredAccount(total: 0, exact: true)
-    match journal_apply_ops("bulk prior", mut ids, mut base, wrong, mut account, true) {
-        Error(Corrupt(Fault(why: Malformed, ..))) => (),
-        _ => return Error(Missing("empty collection accepted a prior")),
-    }
+    replay_prior_grants()?
     let (directory, take writer, version_wanted) = replay_budget_write(d, c, r, tasks)?
     let options = journal_crash_options()
     // One fifth of the 12,130,750 steps on 11bafba2 with this journal.

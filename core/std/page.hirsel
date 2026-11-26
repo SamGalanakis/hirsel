@@ -1805,64 +1805,82 @@ fn draw(mut next: u64) -> u64 {
     id
 }
 
-fn leaf_cell(row: Row, inline: u64, mut next: u64, mut blobs: List[BlobSlot]) -> Cell {
-    let n = list.len(row.value)
-    if n <= inline {
-        return InlineValue(clone(row.value))
-    }
-    let b: u16 = int.truncate(list.len(blobs))
-    let id = draw(mut next)
-    let checksum = check.xxh3(row.value, 0, n)
-    list.push(mut blobs, HotBlob(arc.new(clone(row.value))))
-    BlobValue(BlobRef(stamp: id, len: n, checksum: checksum, pack: 0, offset: 0, body: b))
+pub scoped type BulkRow {
+    key: View[Bytes],
+    value: View[Bytes],
+    charge: u64
 }
 
-fn leaf_end(rows: List[Row], start: u64, inline: u64) -> u64 {
+pub type BulkSource[T] = scoped fn(T, u64, scoped fn(BulkRow) -> Result[(), Error]) -> Result[(), Error]
+
+fn visit_bulk_row(rows: List[Row], at: u64, visit: scoped fn(BulkRow) -> Result[(), Error]) -> Result[(), Error] {
+    let row = view rows[at]
+    visit(BulkRow(key: view row.key, value: view row.value, charge: row.charge))
+}
+
+fn bulk_row_width(row: BulkRow, inline: u64) -> u64 {
+    let width = list.len(row.value)
+    4 + list.len(row.key) + (if width <= inline {
+        3 + width
+    } else {
+        1 + REF_BYTES
+    })
+}
+
+fn bulk_leaf_end[T](source: T, row_at: BulkSource[T], start: u64, end: u64, inline: u64) -> Result[(u64, u64, u64, u64, u64), Error] {
     let mut sum = 0u64
-    for i in start .. list.len(rows) {
-        let row = view rows[i]
-        let value = list.len(row.value)
-        sum += 4 + list.len(row.key) + (if value <= inline {
-            3 + value
-        } else {
-            1 + REF_BYTES
-        })
-        let p = common_prefix(rows[start].key, row.key)
-        if i > start && compressed(sum, i - start + 1, p) > TARGET {
-            return i
+    let mut count_rows = 0u64
+    let mut last = start
+    let mut prefix = 0u64
+    for i in start .. end {
+        let mut fits_leaf = true
+        row_at(source, i, scoped fn(row: BulkRow) -> Result[(), Error] {
+            let width = bulk_row_width(row, inline)
+            let mut common = list.len(row.key)
+            if i != start {
+                row_at(source, start, scoped fn(first: BulkRow) -> Result[(), Error] {
+                    common = common_prefix(first.key, row.key)
+                    Ok(())
+                })?
+            }
+            fits_leaf = i == start || compressed(sum + width, count_rows + 1, common) <= TARGET
+            if fits_leaf {
+                sum += width
+                count_rows += 1
+                last = i
+                prefix = common
+            }
+            Ok(())
+        })?
+        if !fits_leaf {
+            return Ok((i, last, count_rows, prefix, sum))
         }
     }
-    list.len(rows)
+    Ok((end, last, count_rows, prefix, sum))
 }
 
-fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut next: u64) -> Result[Built, Error] {
-    // The rows are written straight into the image with pack_entries' cell
-    // writers, so no row key or inline value is copied into an Entry first.
+fn bulk_leaf[T](source: T, row_at: BulkSource[T], lo: u64, hi: u64, n: u64, p: u64, sum: u64, inline: u64, domain: Domain, mut next: u64) -> Result[Built, Error] {
+    // The rows go directly into the image without a copy of their inline values.
     let mut refs: List[BlobRef] = list.new()
     let mut blobs: List[BlobSlot] = list.new()
     let mut charge = 0u64
-    let mut sum = 0u64
-    for i in lo .. hi {
-        let row = view rows[i]
-        let Some(total) = int.checked_add(charge, row.charge) else {
-            return Error(PageLimit)
-        }
-        charge = total
-        let value = list.len(row.value)
-        sum += 4 + list.len(row.key) + (if value <= inline {
-            3 + value
-        } else {
-            1 + REF_BYTES
-        })
-        if value > inline {
-            if let BlobValue(blob) = leaf_cell(row, inline, mut next, mut blobs) {
-                list.push(mut refs, blob)
+    for i in lo .. hi + 1 {
+        row_at(source, i, scoped fn(row: BulkRow) -> Result[(), Error] {
+            let Some(total) = int.checked_add(charge, row.charge) else {
+                return Error(PageLimit)
             }
-        }
+            charge = total
+            let width = list.len(row.value)
+            if width > inline {
+                let blob_ordinal: u16 = int.truncate(list.len(blobs))
+                let overflow = BlobRef(stamp: draw(mut next), len: width, checksum: check.xxh3(row.value, 0, width), pack: 0, offset: 0, body: blob_ordinal)
+                list.push(mut blobs, HotBlob(arc.new(clone(row.value))))
+                list.push(mut refs, overflow)
+            }
+            Ok(())
+        })?
     }
     let id = draw(mut next)
-    let n = hi - lo
-    let p = common_prefix(rows[lo].key, rows[hi - 1].key)
     let size = compressed(sum, n, p)
     if !legal(0, n, size) {
         return Error(PageLimit)
@@ -1871,25 +1889,37 @@ fn bulk_leaf(rows: List[Row], lo: u64, hi: u64, inline: u64, domain: Domain, mut
     let mut raw: Bytes = list.with_capacity(size)
     list.fill(mut raw, size, 0)
     header(mut raw, 0, 0, id, n, p, slot_start)
-    if p != 0 {
-        list.copy_from_slice(mut raw, HEADER, list.slice(rows[lo].key, 0, p))
-    }
     let mut at = HEADER + p
     let mut ordinal = 0u64
-    for i in lo .. hi {
-        let row = view rows[i]
-        put16(mut raw, slot_start + 2 * (i - lo), at)
-        let cell = write_key(mut raw, at, p, row.key)
-        if list.len(row.value) <= inline {
-            at = write_inline(mut raw, cell, row.value)
-        } else {
-            at = write_blob(mut raw, cell, refs[ordinal])
-            ordinal += 1
-        }
+    let mut slot = 0u64
+    let mut first: Bytes = list.new()
+    let mut last: Bytes = list.new()
+    for i in lo .. hi + 1 {
+        row_at(source, i, scoped fn(row: BulkRow) -> Result[(), Error] {
+            if i == lo {
+                if p != 0 {
+                    list.copy_from_slice(mut raw, HEADER, list.slice(row.key, 0, p))
+                }
+                first = clone(row.key)
+            }
+            if i == hi {
+                last = clone(row.key)
+            }
+            put16(mut raw, slot_start + 2 * slot, at)
+            let cell = write_key(mut raw, at, p, row.key)
+            if list.len(row.value) <= inline {
+                at = write_inline(mut raw, cell, row.value)
+            } else {
+                at = write_blob(mut raw, cell, refs[ordinal])
+                ordinal += 1
+            }
+            slot += 1
+            Ok(())
+        })?
     }
     let image = Image(raw: take raw, domain: domain)
     let root = arc.new(new_page(take image, list.new(), take blobs, false))
-    Ok(Built(root: take root, first: clone(rows[lo].key), last: clone(rows[hi - 1].key), rows: hi - lo, charge: charge))
+    Ok(Built(root: take root, first: take first, last: take last, rows: n, charge: charge))
 }
 
 fn branch_end(seps: List[Bytes], start: u64) -> u64 {
@@ -1982,34 +2012,51 @@ fn reserve_stamps(mut next: u64, rows: u64, blobs: u64) -> Result[u64, Error] {
 /// AP13 over sorted, distinct stored keys. The caller supplies each row's
 /// logical charge. The reserved stamp interval stays consumed after a refusal.
 pub fn bulk(rows: List[Row], domain: Domain, inline: u64, mut next: u64) -> Result[Option[Arc[Page]], Error] {
+    bulk_source(rows, visit_bulk_row, 0, list.len(rows), domain, inline, mut next)
+}
+
+/// AP13 over source rows. The source skips absent rows by omitting the visit.
+pub fn bulk_source[T](source: T, row_at: BulkSource[T], start: u64, end: u64, domain: Domain, inline: u64, mut next: u64) -> Result[Option[Arc[Page]], Error] {
     if inline > INLINE_MAX || domain == CollectionMap {
         return Error(MalformedPage)
     }
-    let n = list.len(rows)
     let mut blobs = 0u64
-    for i in 0u64 .. n {
-        let key = view rows[i].key
-        let value = list.len(rows[i].value)
-        if list.len(key) > key_limit(domain) || value > VALUE_MAX {
-            return Error(PageLimit)
-        }
-        if i > 0 && list.compare_bytes(rows[i - 1].key, key) != Less {
-            return Error(OutOfOrder)
-        }
-        if value > inline {
-            blobs += 1
-        }
+    let mut n = 0u64
+    let mut previous = start
+    let mut lo = end
+    for i in start .. end {
+        row_at(source, i, scoped fn(row: BulkRow) -> Result[(), Error] {
+            let width = list.len(row.value)
+            if list.len(row.key) > key_limit(domain) || width > VALUE_MAX {
+                return Error(PageLimit)
+            }
+            if n == 0 {
+                lo = i
+            } else {
+                row_at(source, previous, scoped fn(prior: BulkRow) -> Result[(), Error] {
+                    if list.compare_bytes(prior.key, row.key) != Less {
+                        return Error(OutOfOrder)
+                    }
+                    Ok(())
+                })?
+            }
+            previous = i
+            n += 1
+            if width > inline {
+                blobs += 1
+            }
+            Ok(())
+        })?
     }
     let mut cursor = reserve_stamps(mut next, n, blobs)?
+    let mut nodes: List[Built] = list.new()
+    while lo < end {
+        let (following, hi, rows, prefix, width) = bulk_leaf_end(source, row_at, lo, end, inline)?
+        list.push(mut nodes, bulk_leaf(source, row_at, lo, hi, rows, prefix, width, inline, domain, mut cursor)?)
+        lo = following
+    }
     if n == 0 {
         return Ok(None)
-    }
-    let mut nodes: List[Built] = list.new()
-    let mut lo = 0u64
-    while lo < n {
-        let hi = leaf_end(rows, lo, inline)
-        list.push(mut nodes, bulk_leaf(rows, lo, hi, inline, domain, mut cursor)?)
-        lo = hi
     }
     while list.len(nodes) > 1 {
         nodes = bulk_level(nodes, domain, mut cursor)?
@@ -2778,24 +2825,36 @@ pub type BatchEdit: shareable + send {
     prior: Option[u32]
 }
 
-fn batch_value_bytes(value: BatchValue) -> View[Bytes] in value {
-    match value {
-        BatchBytes(raw) => view raw,
-        BatchShared(contents) => view contents,
-    }
+/// An edit borrows its encoded key, value and optional overflow backing.
+pub scoped type SourceEdit {
+    key: View[Bytes],
+    value: Option[(View[Bytes], Option[View[Arc[Bytes]]])],
+    prior: Option[u32]
 }
 
-fn batch_value_slot(edit: BatchEdit, value: BatchValue, inline: u64, mut next: u64) -> Result[PageSlot, Error] {
-    let raw = batch_value_bytes(value)
+/// Visit one edit while the source lends its bytes.
+pub type EditSource[T] = scoped fn(T, u64, scoped fn(SourceEdit) -> Result[(), Error]) -> Result[(), Error]
+
+fn visit_batch_edit(ops: List[BatchEdit], at: u64, visit: scoped fn(SourceEdit) -> Result[(), Error]) -> Result[(), Error] {
+    let edit = view ops[at]
+    let value: Option[(View[Bytes], Option[View[Arc[Bytes]]])] = match view edit.value {
+        Some(BatchBytes(raw)) => Some((raw, None)),
+        Some(BatchShared(shared)) => Some((view shared, Some(shared))),
+        None => None,
+    }
+    visit(SourceEdit(key: view edit.key, value: value, prior: edit.prior))
+}
+
+fn batch_value_slot(key_bytes: Bytes, raw: Bytes, shared: Option[View[Arc[Bytes]]], inline: u64, mut next: u64) -> Result[PageSlot, Error] {
     let width = list.len(raw)
-    let key: Bytes = clone(edit.key)
+    let key: Bytes = clone(key_bytes)
     if width <= inline {
         return Ok(PageSlot(row: Entry(key: take key, cell: InlineValue(clone(raw))), kid: None, blob: None))
     }
     let overflow = BlobRef(stamp: take_stamp(mut next)?, len: width, checksum: check.xxh3(raw, 0, width), pack: 0, offset: 0, body: 0)
-    let contents: Arc[Bytes] = match value {
-        BatchBytes(data) => arc.new(clone(data)),
-        BatchShared(shared) => arc.share(shared),
+    let contents: Arc[Bytes] = match shared {
+        None => arc.new(clone(raw)),
+        Some(backing) => arc.share(backing),
     }
     Ok(PageSlot(row: Entry(key: take key, cell: BlobValue(overflow)), kid: None, blob: Some(HotBlob(take contents))))
 }
@@ -2808,36 +2867,38 @@ fn batch_prior(slot: PageSlot) -> u32 {
     }
 }
 
-fn merge_batch_leaf(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inline: u64, mut next: u64) -> Result[(List[PageSlot], bool), Error] {
+fn merge_batch_leaf[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, mut next: u64) -> Result[(List[PageSlot], bool), Error] {
     let rows = owned_slots(root)
     let mut merged: List[PageSlot] = list.with_capacity(list.len(rows) + end - start)
     let mut row = 0u64
     let mut changed = false
     for i in start .. end {
-        let edit = view ops[i]
-        while row < list.len(rows) && list.compare_bytes(rows[row].row.key, edit.key) == Less {
-            list.push(mut merged, clone(rows[row]))
-            row += 1
-        }
-        let hit = row < list.len(rows) && rows[row].row.key == edit.key
-        if let Some(expected) = edit.prior {
-            let prior = if hit {
-                batch_prior(rows[row])
-            } else {
-                0u32
+        edit_at(source, i, scoped fn(edit: SourceEdit) -> Result[(), Error] {
+            while row < list.len(rows) && list.compare_bytes(rows[row].row.key, edit.key) == Less {
+                list.push(mut merged, clone(rows[row]))
+                row += 1
             }
-            if expected != prior {
-                return Error(MalformedPage)
+            let hit = row < list.len(rows) && rows[row].row.key == edit.key
+            if let Some(expected) = edit.prior {
+                let prior = if hit {
+                    batch_prior(rows[row])
+                } else {
+                    0u32
+                }
+                if expected != prior {
+                    return Error(MalformedPage)
+                }
             }
-        }
-        if hit {
-            row += 1
-            changed = true
-        }
-        if let Some(value) = view edit.value {
-            list.push(mut merged, batch_value_slot(edit, value, inline, mut next)?)
-            changed = true
-        }
+            if hit {
+                row += 1
+                changed = true
+            }
+            if let Some((raw, shared)) = view edit.value {
+                list.push(mut merged, batch_value_slot(edit.key, raw, shared, inline, mut next)?)
+                changed = true
+            }
+            Ok(())
+        })?
     }
     while row < list.len(rows) {
         list.push(mut merged, clone(rows[row]))
@@ -2960,11 +3021,11 @@ fn batch_children(mut rows: List[PageSlot], domain: Domain, child_level: u8, fir
     Ok(())
 }
 
-fn batch_path(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inline: u64, first: u64, mut next: u64) -> Result[List[PagePiece], Error] {
+fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, first: u64, mut next: u64) -> Result[List[PagePiece], Error] {
     let lvl = level(root.image)
     let domain = root.image.domain
     if lvl == 0 {
-        let (take rows, changed) = merge_batch_leaf(root, ops, start, end, inline, mut next)?
+        let (take rows, changed) = merge_batch_leaf(root, source, edit_at, start, end, inline, mut next)?
         if !changed {
             return Ok(one_trim_piece(root))
         }
@@ -2981,7 +3042,15 @@ fn batch_path(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inlin
             at = end
         } else {
             let high = option.unwrap(key_at(root.image, slot + 1))
-            while at < end && list.compare_bytes(ops[at].key, high) == Less {
+            while at < end {
+                let mut before = false
+                edit_at(source, at, scoped fn(edit: SourceEdit) -> Result[(), Error] {
+                    before = list.compare_bytes(edit.key, high) == Less
+                    Ok(())
+                })?
+                if !before {
+                    break
+                }
                 at += 1
             }
         }
@@ -2991,7 +3060,7 @@ fn batch_path(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inlin
             continue
         }
         let base = edit_page(edge, lvl - 1, resident_edit_frame)?
-        let pieces = batch_path(base, ops, from, at, inline, first, mut next)?
+        let pieces = batch_path(base, source, edit_at, from, at, inline, first, mut next)?
         for part in 0u64 .. list.len(pieces) {
             let key: Bytes = if part == 0 {
                 clone(divider)
@@ -3008,30 +3077,41 @@ fn batch_path(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inlin
 /// Apply strictly increasing, distinct edits to a resident row tree.
 /// The root is replaced only after the candidate and prior checks succeed.
 pub fn apply_sorted_batch(mut root: Arc[Page], ops: List[BatchEdit], inline: u64, mut next: u64) -> Result[(), Error] {
+    apply_sorted_source(mut root, ops, visit_batch_edit, 0, list.len(ops), inline, mut next)
+}
+
+/// Apply strictly increasing edits without a separate copy of the source rows.
+pub fn apply_sorted_source[T](mut root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, mut next: u64) -> Result[(), Error] {
     let domain = root.image.domain
     if domain == CollectionMap || inline > INLINE_MAX {
         return Error(MalformedPage)
     }
-    let n = list.len(ops)
-    if n == 0 {
+    if start == end {
         return Ok(())
     }
-    for i in 0u64 .. n {
-        let op = view ops[i]
-        if list.len(op.key) > key_limit(domain) {
-            return Error(PageLimit)
-        }
-        if let Some(value) = view op.value {
-            if list.len(batch_value_bytes(value)) > VALUE_MAX {
+    for i in start .. end {
+        edit_at(source, i, scoped fn(op: SourceEdit) -> Result[(), Error] {
+            if list.len(op.key) > key_limit(domain) {
                 return Error(PageLimit)
             }
-        }
-        if i != 0 && list.compare_bytes(ops[i - 1].key, op.key) != Less {
-            return Error(OutOfOrder)
-        }
+            if let Some((raw, _)) = view op.value {
+                if list.len(raw) > VALUE_MAX {
+                    return Error(PageLimit)
+                }
+            }
+            if i == start {
+                return Ok(())
+            }
+            edit_at(source, i - 1, scoped fn(prior: SourceEdit) -> Result[(), Error] {
+                if list.compare_bytes(prior.key, op.key) != Less {
+                    return Error(OutOfOrder)
+                }
+                Ok(())
+            })
+        })?
     }
     let first = next
-    let mut parts = batch_path(root, ops, 0, n, inline, first, mut next)?
+    let mut parts = batch_path(root, source, edit_at, start, end, inline, first, mut next)?
     if list.len(parts) == 0 {
         root = empty(0, 0, domain)
         return Ok(())

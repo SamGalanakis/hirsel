@@ -215,7 +215,7 @@ store@1/store/need_covers src=cf45a91e7c665869 sig=f6d7c570bccd7d75 run=aa75ab27
 store@1/store/position_survives_three_cuts src=2a87bf8967dcb4ed sig=c5a6b8761a8f0e4e run=bc45ceb73933dadb bug=- oracle=- rows=pending
 store@1/store/projector_bounded src=cdb341fd95967f34 sig=573f659966011bed run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/read_only_projector_limits_law src=4166e91e9f2c41b5 sig=25fc7f8b498083a8 run=ea720f3846592392 bug=b51cb6ed6b6b88b1 oracle=3085c673bbc50423 rows=pending
-store@1/store/read_only_replay_step_budget src=134edc8fd273080f sig=31a779d149a1a8c1 run=ba799caff9b50348 bug=- oracle=- rows=pending
+store@1/store/read_only_replay_step_budget src=5ae2485962cb4f33 sig=f0287eb2dd36f991 run=ba799caff9b50348 bug=- oracle=- rows=pending
 store@1/store/read_tail_step_budget src=33660962a0c8bdd8 sig=363e18be52c92982 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/reexecute_zero_data_write_serve src=2724dd267e299e2a sig=8cc4843573a8deca run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/small_bucket_place_plan_at_floor src=dbe626e3f6dcceff sig=c7a68864aace086e run=dbf6722727633166 bug=- oracle=- rows=pending

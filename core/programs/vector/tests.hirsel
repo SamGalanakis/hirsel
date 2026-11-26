@@ -345,6 +345,34 @@ fn recall_shape() -> vector.Shape {
     vector.Shape(dims: IVF_DIMS, clusters: 16, steps: 1099511627776u64)
 }
 
+/// bug: declaration could expose a generic Store schema error for layout 1.
+/// oracle: layout 1's three-component block key refuses as layout 2 in both declaration modes.
+@test
+fn ivf_layout_version(clock: Clock, random: Random) -> Result[(), ()] waits {
+    let mut db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let mut legacy = result.unwrap(store.declare(db, Migrate))
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    let old_source = result.unwrap(store.declare_table(mut legacy, "points", std.codec.key_u64(), codes))
+    let _ = result.unwrap(store.finish(mut legacy, take old_source))
+    let _ = result.unwrap(store.projection(mut legacy, "far"))
+    let old_key: std.codec.Key[(u32, u32, u32)] = std.codec.key_of()
+    let blocks = result.unwrap(store.declare_table(mut legacy, "far.blocks", old_key, std.codec.of_unit()))
+    let _ = result.unwrap(store.finish(mut legacy, take blocks))
+    let _ = result.unwrap(store.seal(mut db, take legacy))
+    let modes: Inline[store.Mode, 2] =[Open, Migrate]
+    for mode in modes {
+        let mut d = result.unwrap(store.declare(db, mode))
+        let source = result.unwrap(store.declare_table(mut d, "points", std.codec.key_u64(), codes))
+        let points = result.unwrap(store.finish(mut d, take source))
+        match vector.declare_ivf(mut d, points, "far", L2, code.describe(row_code), code.describe(row_ordinal), recall_shape()) {
+            Error(IvfLayoutMismatch(2)) => (),
+            _ => fail("IVF layout 1 should refuse with expected layout 2"),
+        }
+    }
+    result.unwrap(store.close(take db))
+    Ok(())
+}
+
 fn far_run(mut db: store.Db, points: Points, far: Far, take steps: List[Step], q: List[i8], k: u64) -> Found waits {
     let ran = result.unwrap(store.run(mut db, None, (store.copy_env(points), store.copy_env(far), take steps, store.copy_env(q), k), fn(mut tx, input) -> Result[Found, store.Error] {
         for step in input.2 {

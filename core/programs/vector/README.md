@@ -84,9 +84,20 @@ The projector folds the source into immutable generations (STORE-SPEC
   into separately keyed sections beside the sign plane in the same table.
   A key's mention keeps its raw code for merges.
 
-The block table's key includes a section number. Stores with the previous
-three-component block key refuse declaration with `Store(Schema(0))`.
-The IVF image must be built in a fresh store.
+The IVF layout version is `2` (`vector.IVF_LAYOUT_VERSION`). The block
+table's key schema is the on-disk version discriminator. Layout 2 adds the
+section number to the layout 1 key `(generation, cluster, block)`.
+`declare_ivf` returns `IvfLayoutMismatch(2)` if the block table's schema is
+incompatible. The payload is the layout version the program
+expects.
+
+To rebuild a layout 1 index, open the old Store with `store.open_read_only`
+and bind the source vectors with `store.read_only_table`. Declare the source
+table and IVF index in a fresh Store with `Migrate`, seal the declaration,
+and copy the source rows into the new table. Drive the new projector with
+`store.project_step` until it returns `Idle`. After a layout 2 declaration
+succeeds, `store.rebuild(mut db, vector.ivf_name(v))` requests a fresh fold
+of that Store's source rows.
 
 A delete is a mask. A merge writes each key's newest mention among its
 inputs and encodes the row again under the output's centroids. It writes a

@@ -6,7 +6,7 @@ pub type Metric = Dot | L2
 
 // Shape is a form B shape that cannot be built: no dimensions, more than
 // 4096 once padded to a power of two, or no clusters.
-pub type Error = Store(store.Error) | Dimensions(u64, u64) | Shape(Shape)
+pub type Error = Store(store.Error) | Dimensions(u64, u64) | Shape(Shape) | IvfLayoutMismatch(u64)
 
 pub type Hit[K] {
     key: K,

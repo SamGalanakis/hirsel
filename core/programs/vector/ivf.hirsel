@@ -71,10 +71,14 @@ type BlockSection: codec = Scan(Block) | Refine(PackedCodes)
 // A generation mention retains the raw code for re-encoding during merges.
 type Mention: codec = At(List[i8]) | Masked
 
-type BlockKey = (u32, u32, u32, u32)
+// Layout 2 adds the section component to the stored block key. Store checks
+// that key's catalog schema before binding the table or opening any rows.
+pub const IVF_LAYOUT_VERSION: u64 = 2
+
+type BlockKeyV2 = (u32, u32, u32, u32)
 
 type IvfTables: shareable + send {
-    blocks: store.Table[BlockKey, BlockSection],
+    blocks: store.Table[BlockKeyV2, BlockSection],
     mentions: store.Table[(u32, Bytes), Mention],
     fill: store.Table[(u32, u32), u32],
     gens: store.Table[u32, GenMeta],
@@ -122,7 +126,10 @@ pub fn declare_ivf[K, V](mut d: store.Declare, source: store.Table[K, V], name: 
     }
     let padded = padded_dims(shape.dims)
     let decl = store.projection(mut d, name) ?=> |e| Store(e)
-    let blocks: store.Table[BlockKey, BlockSection] = sub_table(mut d, name, ".blocks", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
+    let blocks: store.Table[BlockKeyV2, BlockSection] = sub_table(mut d, name, ".blocks", std.codec.key_of(), std.codec.of()) ?=> |e| match e {
+        Schema(0) => IvfLayoutMismatch(IVF_LAYOUT_VERSION),
+        _ => Store(e),
+    }
     let mentions: store.Table[(u32, Bytes), Mention] = sub_table(mut d, name, ".mentions", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
     let fill: store.Table[(u32, u32), u32] = sub_table(mut d, name, ".fill", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
     let gens: store.Table[u32, GenMeta] = sub_table(mut d, name, ".gens", std.codec.key_u32(), std.codec.of()) ?=> |e| Store(e)
@@ -712,7 +719,7 @@ fn ivf_drop[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, limits: store
     if budget == 0 {
         return Ok(true)
     }
-    let mut blocks: List[BlockKey] = list.new()
+    let mut blocks: List[BlockKeyV2] = list.new()
     {
         let mut cursor = store.range(tx, v.tables.blocks, Included((generation, 0u32, 0u32, 0u32)), Excluded((generation + 1, 0u32, 0u32, 0u32)))?
         while list.len(blocks) < budget {

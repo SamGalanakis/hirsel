@@ -53,6 +53,7 @@ fn migrate(mut c: Connection, now: u64, from: Addr, arrived: u64, random: Random
         return
     }
     if from.ip != c.peer.ip {
+        reset_mtu(mut c)
         recovery.new_path(mut c.recovery)
     }
     c.peer = from

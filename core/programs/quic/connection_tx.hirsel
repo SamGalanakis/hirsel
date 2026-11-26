@@ -9,6 +9,7 @@ type StagedPacket {
     close: bool,
     eliciting: bool,
     path: bool,
+    mtu_probe: bool,
     frames: List[SentFrame]
 }
 
@@ -30,11 +31,10 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
     } else {
         0u64
     }
-    let header_bound = 14 + list.len(dest) + list.len(source) + list.len(s.token) + 8
-    if limit < padding || limit <= header_bound + 16 {
+    let cap = payload_room(kind, dest, source, s.token, limit)
+    if limit < padding || cap == 0 {
         return None
     }
-    let cap = limit - header_bound - 16
     let mut payload: Bytes = list.with_capacity(cap)
     let mut crypto_at = s.crypto_committed
     let mut crypto_end = s.crypto_committed
@@ -141,7 +141,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
         return None
     }
     s.ack_staged = s.ack_staged || ack
-    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, frames: take frames))
+    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, mtu_probe: false, frames: take frames))
 }
 
 fn commit_space(mut s: Space, p: StagedPacket) {

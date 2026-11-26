@@ -37,7 +37,7 @@ fn ack(mut r: recovery.Recovery, now: u64, smallest: u64, largest: u64, delay: u
 }
 
 fn send(mut r: recovery.Recovery, now: u64, number: u64, size: u64) {
-    recovery.on_sent(mut r, now, recovery.APPLICATION, number, size, true, true, false)
+    recovery.on_sent(mut r, now, recovery.APPLICATION, number, size, true, true, false, false)
 }
 
 /// bug: RTT estimation, packet- or time-threshold loss, PTO backoff or persistent
@@ -202,7 +202,7 @@ fn cubic_matches_rfc9438() -> Result[(), ()] {
     // = 30240 + 52.94, floor 30292. W_cubic(0.9 s) = 43200 - 0.4 * 2.1^3 * 1200 =
     // 38755.2 > W_est: the concave region (§4.4). target = W_cubic(t + RTT) = W_cubic(1 s)
     // = 39360, within [cwnd, 1.5 cwnd]; cwnd += (39360 - 30240) * 2520 / 30240 = 760.
-    recovery.on_sent(mut r, 1000 * MS, recovery.APPLICATION, 30, 2520, true, true, false)
+    recovery.on_sent(mut r, 1000 * MS, recovery.APPLICATION, 30, 2520, true, true, false, false)
     let _ = ack(mut r, 1100 * MS, 30, 30, 0)
     eq("cubic concave growth", recovery.window(r), 31000)
     // HyStart++ (RFC 9406). Round 1 sends only M1 at 0. Each later round r opens at the

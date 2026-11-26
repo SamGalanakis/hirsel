@@ -44,7 +44,7 @@ ALPN = 'hq-interop'
 # interop.hirsel's TransportConfig and EndpointConfig, as quinn must read them (RFC 9000 §18.2).
 HIRSEL_PARAMS = {
     'max_idle_timeout': 7000,
-    'max_udp_payload_size': 1200,
+    'max_udp_payload_size': 1452,
     'initial_max_data': 0,
     'initial_max_stream_data_bidi_local': 0,
     'initial_max_stream_data_bidi_remote': 0,

@@ -1,0 +1,136 @@
+// QUIC-1's Path MTU row: DPLPMTUD (RFC 8899 §5) with 1-RTT PING probes padded to the
+// size under test (RFC 9000 §14.3). Packets are built to the largest size the path has
+// carried, starting from the base every QUIC path carries.
+/// RFC 9000 §14 and RFC 8899 §5.1.2's BASE_PLPMTU: the 1,200-byte datagram every QUIC path
+/// carries, and RFC 9002 §7.2's max_datagram_size until a probe raises it.
+const BASE_MTU: u64 = 1200
+
+/// RFC 8899 §5.1.2's MAX_PROBES: losses of probes of one size before that size is taken
+/// as more than the path carries.
+const MAX_PROBES: u64 = 3
+
+/// The path's datagram size and the search above it. `size` is validated: packets are
+/// built to it. Sizes above `high` are refuted; `trying` is the size of the probe in
+/// flight (packet `probe`) or of the last one lost, `losses` its losses so far.
+type PathMtu {
+    size: u64,
+    high: u64,
+    trying: u64,
+    probe: Option[u64],
+    losses: u64,
+    refuted: bool
+}
+
+fn base_mtu() -> PathMtu {
+    PathMtu(size: BASE_MTU, high: 0xffffffffffffffff, trying: 0, probe: None, losses: 0, refuted: false)
+}
+
+/// The largest datagram this connection may send: the endpoint's max_mtu, and the peer's
+/// max_udp_payload_size once known (RFC 9000 §18.2).
+fn mtu_ceiling(c: Connection, mtu: u64) -> u64 {
+    match c.params {
+        Some(p) => order.min(mtu, p.max_udp_payload),
+        None => mtu,
+    }
+}
+
+/// The datagram size packets are built to: the validated path MTU.
+fn packet_limit(c: Connection, mtu: u64) -> u64 {
+    order.min(c.mtu.size, mtu_ceiling(c, mtu))
+}
+
+/// The next probe size, if the search is not done: the ceiling first, a lost size again
+/// until MAX_PROBES, then halving the range between the validated size and the largest
+/// size not refuted.
+fn next_probe(c: Connection, mtu: u64) -> Option[u64] {
+    let high = order.min(c.mtu.high, mtu_ceiling(c, mtu))
+    if high <= c.mtu.size {
+        return None
+    }
+    if c.mtu.losses > 0 {
+        return Some(c.mtu.trying)
+    }
+    if c.mtu.refuted {
+        return Some(c.mtu.size + (high - c.mtu.size + 1) / 2)
+    }
+    Some(high)
+}
+
+/// Start over at the base size: a new path (RFC 9000 §14.2.1), or a black hole that
+/// persistent congestion reveals above it (RFC 8899 §4.3).
+fn reset_mtu(mut c: Connection) {
+    c.mtu = base_mtu()
+    recovery.set_mss(mut c.recovery, BASE_MTU)
+}
+
+/// Settle the probe in flight against an ACK's verdict. A probe's loss says nothing about
+/// congestion (RFC 9000 §14.4), so recovery does not react to it.
+fn settle_mtu(mut c: Connection, index: u64, acked: List[u64], lost: List[u64]) {
+    if recovery.take_collapse(mut c.recovery) && c.mtu.size > BASE_MTU {
+        reset_mtu(mut c)
+        return
+    }
+    if index != recovery.APPLICATION {
+        return
+    }
+    let Some(n) = c.mtu.probe else {
+        return
+    }
+    for a in acked {
+        if a == n {
+            c.mtu.size = c.mtu.trying
+            c.mtu.probe = None
+            c.mtu.losses = 0
+            recovery.set_mss(mut c.recovery, c.mtu.size)
+            return
+        }
+    }
+    for l in lost {
+        if l == n {
+            c.mtu.probe = None
+            c.mtu.losses += 1
+            if c.mtu.losses >= MAX_PROBES {
+                c.mtu.high = c.mtu.trying - 1
+                c.mtu.losses = 0
+                c.mtu.refuted = true
+            }
+            return
+        }
+    }
+}
+
+/// Stage one probe after the packets of a poll: once the handshake is confirmed, on a
+/// validated path, with none in flight, and only when the window and pacer allow its size.
+/// A PING padded to the size under test, so it carries nothing that must be resent.
+fn stage_mtu_probe(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, pending: u64, ecn: u8, mut out: Bytes, mut tx: List[Output]) {
+    if !recovery.confirmed(c.recovery) || !c.validated || c.application.hold_data {
+        return
+    }
+    if let Some(_) = c.mtu.probe {
+        return
+    }
+    let Some(size) = next_probe(c, mtu) else {
+        return
+    }
+    let start = list.len(out)
+    if list.len(tx) == list.capacity(tx) || list.capacity(out) - start < size {
+        return
+    }
+    if !recovery.window_allows(c.recovery, pending, size) {
+        return
+    }
+    if let Some(_) = recovery.pacing_delay(c.recovery, now, pending, size) {
+        return
+    }
+    let mut payload: Bytes = list.with_capacity(1)
+    if let Error(_) = codec.write_frame(Ping, b"", mut payload) {
+        return
+    }
+    let at = c.application.crypto_committed
+    let Some(number) = seal_packet(mut c.application, OneRtt, c.peer_id, c.local_id, payload, size, mut out) else {
+        return
+    }
+    let p = StagedPacket(number: number, size: list.len(out) - start, crypto_at: at, crypto_end: at, resent: false, ack: false, done: false, close: false, eliciting: true, path: false, mtu_probe: true, frames: list.new())
+    list.push(mut staged, Packet(slot: slot, handle: c.handle, kind: OneRtt, packet: p))
+    list.push(mut tx, Transmit(to: c.peer, at: start, len: list.len(out) - start, ecn: ecn, send_at: now))
+}

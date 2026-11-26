@@ -22,7 +22,8 @@ const ALPN: String = "hq-interop"
 // The parameters interop.py expects quinn to read from us.
 const IDLE_MS: u32 = 7000
 
-const MTU: u16 = 1200
+// Above the 1,200 base, so a transfer runs the path MTU search against quinn (QUIC-1).
+const MTU: u16 = 1452
 
 // Transfer windows: QUIC-5 receive credit and send memory.
 const WINDOW: u64 = 4194304

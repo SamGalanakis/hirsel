@@ -1,3 +1,7 @@
+/// QUIC-9: CRYPTO reassembly per encryption level, a denial-of-service bound and not a
+/// capacity setting. It caps what an unauthenticated peer can make the endpoint hold
+/// before the handshake completes: bytes ahead of the read position and one reassembled
+/// message. Past it the handshake is CRYPTO_BUFFER_EXCEEDED.
 const CRYPTO_LIMIT: u64 = 16384
 
 fn new_space() -> Space {

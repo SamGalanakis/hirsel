@@ -4,10 +4,7 @@ fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot
     c.application.ack_staged = false
     key_maintenance(mut c, now)
     path_maintenance(mut c, now)
-    let mut limit = order.min(mtu, MSS)
-    if let Some(p) = c.params {
-        limit = order.min(limit, p.max_udp_payload)
-    }
+    let mut limit = packet_limit(c, mtu)
     let closing: Option[CloseFrame] = match c.life {
         Draining => return,
         Closing(f) if !f.pending => return,
@@ -61,6 +58,7 @@ fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot
         }
         // B.5: a sender held back by nothing it controls is application limited.
         recovery.set_app_limited(mut c.recovery, limited)
+        stage_mtu_probe(mut staged, mut c, now, slot, mtu, pending, ecn, mut out, mut tx)
     } else if let Some(_) = c.application.send {
         let _ = stage_level(mut staged, mut c.application, mut c.streams, OneRtt, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut out, mut tx)
     } else if let Some(_) = c.encrypted.send {
@@ -187,7 +185,11 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
         // packet that is neither is never retransmitted nor counted, so it is not
         // tracked: a receive-only peer never acknowledges it.
         let ect = recovery.ecn_mark(c.recovery) != 0
-        recovery.on_sent(mut c.recovery, now, space_index(packet_level(kind)), p.number, p.size, p.eliciting, true, ect)
+        recovery.on_sent(mut c.recovery, now, space_index(packet_level(kind)), p.number, p.size, p.eliciting, true, ect, p.mtu_probe)
+    }
+    if p.mtu_probe {
+        c.mtu.probe = Some(p.number)
+        c.mtu.trying = p.size
     }
     if kind == Handshake {
         if let Client = c.side {

@@ -2,7 +2,7 @@
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 2, Media Wave 2 package 1
 of 4); design review applied the same day (media-w2-spec-fix-2918). Not built. Rules QUIC-1 to
-QUIC-10, laws Q1 to Q16, slices QS0 to QS8. The review's rulings are at the end.*
+QUIC-10, laws Q1 to Q17, slices QS0 to QS8. The review's rulings are at the end.*
 
 `quic` is a sans-IO QUIC version 1 endpoint, written in Hirsel under `core/programs/quic` <!-- doc-ref: planned -->.
 It is the transport under [WebTransport](webtransport.md), [MoQ](moq.md) and
@@ -67,7 +67,7 @@ linked into the package.
 | Streams | bidirectional and unidirectional, stream and connection flow control, RESET_STREAM, STOP_SENDING, RESET_STREAM_AT ([draft-ietf-quic-reliable-stream-reset](https://datatracker.ietf.org/doc/draft-ietf-quic-reliable-stream-reset/)) | — (WebTransport requires RESET_STREAM_AT, webtrans-http3-17 §3.1) |
 | Datagrams | RFC 9221 DATAGRAM frames, never retransmitted, counted for congestion control | — |
 | Recovery | RFC 9002 loss detection, PTO, ACK frequency of every second ack-eliciting packet, `max_ack_delay` 25 ms; NewReno and CUBIC with HyStart++ ([RFC 9406](https://www.rfc-editor.org/rfc/rfc9406)) behind the `Controller` seam; pacing | BBRv3: still an Internet-Draft; later, behind the same seam (Design review, O2) |
-| Path MTU | 1,200 bytes base; DPLPMTUD ([RFC 8899](https://www.rfc-editor.org/rfc/rfc8899)) probes up to `EndpointConfig.max_mtu`, never the socket's `slot_bytes` (65,792 under `UDP_GRO`) | — |
+| Path MTU | 1,200 bytes base; DPLPMTUD ([RFC 8899](https://www.rfc-editor.org/rfc/rfc8899)) probes up to the lesser of `EndpointConfig.max_mtu` and the peer's `max_udp_payload_size`, never the socket's `slot_bytes` (65,792 under `UDP_GRO`); packets are built to the size the path has acknowledged (QUIC-1, **Path MTU**) | PMTU raise timer (RFC 8899 `PMTU_RAISE_TIMER`): a search ends when it converges and starts again only on a new path or a black hole |
 | ECN | RFC 9000 §13.4 validation from NET-16's `ecn` field; CE reaction as loss | L4S: deferred with SCReAM (C3) |
 | Key update | RFC 9001 §6 over TLS-8 `key_update`, with a non-consuming next-phase open (QS0) and the §6.6 AEAD limits | — |
 | Multipath | — | draft-ietf-quic-multipath: TLS-8 has the `QuicMultipath` profile, but no consumer needs it in Wave 2 |
@@ -142,6 +142,21 @@ state for a single socket". It is sans-IO and the package never calls the host:
   frames go back to their send queues as if never sent, with no congestion response, and a
   frame whose stream was reset or whose datagram was dropped since (QUIC-5, QUIC-7) is not
   requeued. A `poll` with no `committed` before the next `poll` abandons the whole batch.
+- **Path MTU.** Each connection builds packets to its validated path MTU, which starts at
+  1,200 bytes (RFC 9000 §14, RFC 8899 `BASE_PLPMTU`) and is RFC 9002 §7.2's
+  `max_datagram_size`. Once the handshake is confirmed and the path validated, `poll` adds
+  at most one probe in flight: a 1-RTT PING padded to the size under test (RFC 9000 §14.3),
+  sent only when the window and pacer allow its size. The first probe is the ceiling, the
+  lesser of `max_mtu` and the peer's `max_udp_payload_size`; an acknowledged probe makes its
+  size the validated one, and three losses of one size (RFC 8899 `MAX_PROBES`) refute it
+  and every size above, after which the search halves the range between the validated size
+  and the largest one not refuted, to the byte. A lost probe is no congestion signal: it
+  leaves the window alone and starts no persistent congestion period (RFC 9000 §14.4). A
+  new peer address (§14.2.1) and persistent congestion while above 1,200 bytes (RFC 8899
+  §4.3's black hole) both return the connection to 1,200 bytes and start the search again.
+  Packing and `send_datagram` size a packet's frames by one rule: the validated size less
+  the header `poll` writes (a 1-RTT header is 1 byte, the peer's CID and a 4-byte packet
+  number) and the 16-byte AEAD tag.
 
 A `Connection` is reached only through its handle, which the endpoint looks up from a
 datagram's destination CID.
@@ -435,9 +450,13 @@ server sends HANDSHAKE_DONE once its handshake is complete (§4.1.2).
 A connection that agreed `max_datagram_frame_size` (RFC 9221 §3) may `send_datagram` a
 payload whose DATAGRAM frame fits both the peer's limit and one packet. RFC 9221 §3 counts
 the limit over the whole frame, so the payload bound is the peer's limit less the frame type
-(one byte) and the length varint (1 to 8 bytes); a larger payload is `TooLarge(n)` and
-nothing is sent. A queued datagram is charged its length plus 48 bytes against `send_bytes`
-(QUIC-5), past which `send_datagram` is `Limit`; one the window has not let out within one
+(one byte) and the length varint (1 to 8 bytes); a payload whose frame does not fit one
+empty 1-RTT packet at the validated path MTU (QUIC-1, **Path MTU**) is `TooLarge(n)` too,
+and nothing is sent. A queued datagram is charged its length plus 288 bytes against
+`send_bytes` (QUIC-5): its 72-byte record (nine words) in each of the two lists it passes
+through, queued then staged, each grown to at most twice its peak length (budgets.md's
+growth rule). The charge is taken once and released once, when its packet is committed or
+it is dropped or expires. Past `send_bytes`, `send_datagram` is `Limit`. A datagram the window has not let out within one
 smoothed RTT of the first `poll` that saw it is dropped and counted as `DatagramLate`.
 
 Each queued datagram carries a `Priority`, which schedules it among the streams (QUIC-1),
@@ -473,6 +492,9 @@ charged then, so a connection's cost is exact like RTC-10's room cost:
 - received ranges: 64 per space (QUIC-6);
 - CIDs: `active_connection_id_limit` each way;
 - the CRYPTO stream: 16 KiB per space, past which the handshake is `CRYPTO_BUFFER_EXCEEDED`.
+  It is a denial-of-service bound, not a capacity setting: it caps what an unauthenticated
+  peer can make the endpoint hold per encryption level before the handshake completes, both
+  the bytes ahead of the read position and one reassembled handshake message.
 
 Per endpoint, received datagrams are bounded by `EndpointLimits.datagram_bytes`.
 
@@ -586,6 +608,12 @@ the package. RFC 9001's Appendix A vectors are TLS-8's PC1 and are not repeated 
 - **Q15 `datagram_never_retransmitted`.** Under 5 % loss, 10,000 datagrams: every one that
   arrives arrives once, none is sent twice (a seam counter), and they consume congestion
   window. *Oracle:* RFC 9221 §5.2.
+- **Q17 `path_mtu_fills_admitted_size`.** Under `sim.udp`, both ends set `max_mtu` 1,600
+  and each socket's slot truncates anything over 1,496 bytes, which `drive` drops. After the
+  search, the client's `send_datagram` accepts a 1,464-byte payload, which arrives whole,
+  and refuses 1,465 bytes as `TooLarge`. *Oracle:* 1,496 less the 1-RTT header (1 byte, the
+  server's 8-byte CID and a 4-byte packet number), the 16-byte AEAD tag and the DATAGRAM
+  frame's type (1 byte) and length (2 bytes), by hand: a packet filled to exactly 1,496.
 - **Q16 `pin_mismatch_refuses`.** A server whose leaf matches no pin in the client's list
   (`Cert` and `Spki` each off by one bit) is refused before any stream opens, with
   `Refused(Pin)` and TLS alert `bad_certificate` (QUIC error `0x012a`); a list `[old, new]`
@@ -612,7 +640,7 @@ comparison.
 | **QS4** Streams | stream states, flow control, `max_gaps`, `send_bytes` and `write_shared` backpressure, RESET_STREAM_AT and its discard, priority | QS3 | Q4, Q11 |
 | **QS5** Recovery | RFC 9002, NewReno, CUBIC with HyStart++, pacing, ECN | QS3 | Q9, Q10 |
 | **QS6** Validation and resets | anti-amplification, Retry and NEW_TOKEN tokens, stateless reset, path validation, key update and AEAD limits | QS3, QS5 | Q6, Q7, Q8, Q12, Q13 |
-| **QS7** Datagrams, driver, steering | RFC 9221 with `Priority`, `tag` and `drop_datagrams`, `drive`, GSO trains, `Steer.Quic` CIDs | QS4, QS5, QS6 | Q14, Q15 |
+| **QS7** Datagrams, driver, steering | RFC 9221 with `Priority`, `tag` and `drop_datagrams`, `drive`, GSO trains, `Steer.Quic` CIDs, DPLPMTUD | QS4, QS5, QS6 | Q14, Q15, Q17 |
 | **QS8** Interop and cost | the interop runner on Boat; the cost bench | QS6, QS7 | Q5, cost target |
 
 Reds that may ride: law Q5 and the cost target. Laws Q6, Q7, Q8, Q11 and Q16 are soundness laws and

@@ -195,3 +195,130 @@ fn datagram_never_retransmitted(tasks: Tasks) -> Result[(), ()] waits {
     }
     Ok(())
 }
+
+// Q17: the path MTU search. Both ends allow 1,600-byte packets; each socket's slot
+// (1,752 bytes, a multiple of 8 as NET-16 requires, less sim.udp's 256) truncates
+// anything over 1,496, which drive drops.
+const MTU_PATH: u64 = 1496
+
+const MTU_SOCKET: UdpOptions = UdpOptions(slots: 64, slot_bytes: 1752)
+
+const MTU_END: u64 = 10000 * MS
+
+/// 1,496 less the 1-RTT header (1 byte, the server's 8-byte CID, a 4-byte packet number),
+/// the 16-byte AEAD tag and the DATAGRAM frame's type (1 byte) and length (2 bytes).
+const MTU_PAYLOAD: u64 = MTU_PATH - (1 + 8 + 4) - 16 - (1 + 2)
+
+pub type MtuSender: send {
+    admitted: bool,
+    over: Option[quic.QuicError],
+}
+
+fn mtu_limits() -> quic.EndpointConfig {
+    let mut c = datagram_limits()
+    c.max_mtu = 1600
+    take c
+}
+
+fn mtu_transport() -> quic.TransportConfig {
+    let mut t = datagram_transport()
+    t.max_datagram_frame = 1600
+    take t
+}
+
+fn filled(len: u64) -> Shared[Bytes] {
+    let mut d: Bytes = list.with_capacity(len)
+    list.fill(mut d, len, 0x5a)
+    shared.new(take d)
+}
+
+/// The client offers one byte over MTU_PAYLOAD, then MTU_PAYLOAD, each round until the
+/// second is admitted.
+fn mtu_client(take plan: DatagramEnd) -> MtuSender waits {
+    let DatagramEnd(clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(41), mtu_limits(), None))
+    let _ = result.unwrap(quic.connect(mut e, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, mtu_transport()))
+    let mut conn: Option[quic.ConnectionHandle] = None
+    let mut trace = MtuSender(admitted: false, over: None)
+    let mut events: List[quic.Event] = list.new()
+    while host.mono_ns(clock) < MTU_END {
+        if let Some(c) = conn {
+            if !trace.admitted {
+                if let Error(err) = quic.send_datagram(mut e, c, filled(MTU_PAYLOAD + 1), quic.Priority(urgency: 3, order: 0, then: 0), 0) {
+                    trace.over = Some(err)
+                } else {
+                    trace.over = None
+                }
+                if let Ok(()) = quic.send_datagram(mut e, c, filled(MTU_PAYLOAD), quic.Priority(urgency: 3, order: 0, then: 0), 0) {
+                    trace.admitted = true
+                }
+            }
+        }
+        result.unwrap(quic.drive(mut e, clock, mut socket, order.min(host.mono_ns(clock) + 50 * MS, MTU_END), mut events))
+        for event in events {
+            if let Connected(c: h, ..) = event {
+                conn = Some(h)
+            }
+        }
+        list.clear(mut events)
+    }
+    take trace
+}
+
+/// The server counts the datagrams of exactly MTU_PAYLOAD bytes it is handed.
+fn mtu_server(take plan: DatagramEnd) -> u64 waits {
+    let DatagramEnd(clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(43), mtu_limits(), Some((p256_identity(false), mtu_transport()))))
+    let mut whole = 0u64
+    let mut events: List[quic.Event] = list.new()
+    while host.mono_ns(clock) < MTU_END {
+        result.unwrap(quic.drive(mut e, clock, mut socket, MTU_END, mut events))
+        for event in events {
+            if let Datagram(_, data) = event {
+                if list.len(data) == MTU_PAYLOAD {
+                    whole += 1
+                }
+            }
+        }
+        list.clear(mut events)
+    }
+    whole
+}
+
+/// bug: packets stay at the 1,200-byte floor after a larger path MTU is admitted, so a
+/// datagram that fits the path is TooLarge; or packets are sized to the configured ceiling
+/// without probing, so they exceed the path and are lost; or enqueue and packing disagree
+/// on a packet's header room.
+/// oracle: RFC 9000 §14 and RFC 8899: the validated size is the largest the path carries,
+/// here 1,496 bytes set by the test's sockets; less the RFC 9000 §17.3.1 1-RTT header, the
+/// RFC 9001 §5.3 16-byte tag and the RFC 9221 §4 DATAGRAM framing, worked by hand.
+@test
+fn path_mtu_fills_admitted_size(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 17, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 10 * MS
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let (take client_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_CLIENT, MTU_SOCKET))
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_SERVER, MTU_SOCKET))
+    let client_task = task.spawn(tasks, bytes 16777216, DatagramEnd(clock, socket: take client_socket), mtu_client)
+    let server_task = task.spawn(tasks, bytes 16777216, DatagramEnd(clock, socket: take server_socket), mtu_server)
+    let c = result.unwrap(task.join(take client_task))
+    let whole = result.unwrap(task.join(take server_task))
+    result.unwrap(task.join(take served))
+    if !c.admitted {
+        fail("a datagram filling a 1,496-byte packet was never admitted on a 1,496-byte path")
+    }
+    match c.over {
+        Some(TooLarge(n)) if n == MTU_PAYLOAD + 1 => (),
+        _ => fail("a datagram one byte over a 1,496-byte packet was not TooLarge"),
+    }
+    if whole != 1 {
+        fail("the admitted datagram did not arrive whole, exactly once")
+    }
+    Ok(())
+}

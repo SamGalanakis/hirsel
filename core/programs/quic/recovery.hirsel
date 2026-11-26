@@ -51,7 +51,8 @@ type Sent {
     size: u64,
     eliciting: bool,
     in_flight: bool,
-    ect: bool
+    ect: bool,
+    probe: bool
 }
 
 type Track {
@@ -110,7 +111,8 @@ pub opaque type Recovery {
     ecn: Ecn,
     next_seq: u64,
     tokens: u64,
-    refilled: Option[u64]
+    refilled: Option[u64],
+    collapsed: bool
 }
 
 fn new_track() -> Track {
@@ -124,7 +126,7 @@ pub fn new(algorithm: Algorithm, mss: u64, server: bool) -> Recovery {
         list.push(mut tracks, new_track())
     }
     let initial = order.min(10 * mss, order.max(14720u64, 2 * mss))
-    Recovery(algorithm: algorithm, mss: mss, server: server, latest_rtt: 0, smoothed_rtt: INITIAL_RTT, rttvar: INITIAL_RTT / 2, min_rtt: 0, first_sample: None, max_ack_delay: 0, confirmed: false, handshake_keys: false, handshake_acked: false, pto_count: 0, timer: None, tracks: take tracks, window: initial, ssthresh: None, recovery_start: None, in_flight: 0, app_limited: false, cubic: Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0), hystart: Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0), ecn: Testing, next_seq: 0, tokens: BURST_PACKETS * mss, refilled: None)
+    Recovery(algorithm: algorithm, mss: mss, server: server, latest_rtt: 0, smoothed_rtt: INITIAL_RTT, rttvar: INITIAL_RTT / 2, min_rtt: 0, first_sample: None, max_ack_delay: 0, confirmed: false, handshake_keys: false, handshake_acked: false, pto_count: 0, timer: None, tracks: take tracks, window: initial, ssthresh: None, recovery_start: None, in_flight: 0, app_limited: false, cubic: Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0), hystart: Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0), ecn: Testing, next_seq: 0, tokens: BURST_PACKETS * mss, refilled: None, collapsed: false)
 }
 
 /// RFC 9002 §9.4 for RFC 9000 §9.4: a peer at a new address (more than a new port)
@@ -144,6 +146,20 @@ pub fn new_path(mut r: Recovery) {
     r.ecn = Testing
     r.tokens = BURST_PACKETS * r.mss
     r.refilled = None
+}
+
+/// RFC 9002 §7.2: max_datagram_size follows the path MTU that DPLPMTUD validates (QUIC-1),
+/// so the minimum window, the pacer's burst and every increase scale with it.
+pub fn set_mss(mut r: Recovery, mss: u64) {
+    r.mss = mss
+}
+
+/// Whether persistent congestion was declared since the last call: the signal that resets
+/// a raised path MTU (RFC 8899 §4.3).
+pub fn take_collapse(mut r: Recovery) -> bool {
+    let collapsed = r.collapsed
+    r.collapsed = false
+    collapsed
 }
 
 pub fn set_max_ack_delay(mut r: Recovery, now: u64, ns: u64) {
@@ -257,13 +273,14 @@ fn shift(value: u64, n: u64) -> u64 {
     value << n
 }
 
-/// A.5 and B.4. Packets are recorded in the order they are sent.
-pub fn on_sent(mut r: Recovery, now: u64, space: u64, number: u64, size: u64, eliciting: bool, in_flight: bool, ect: bool) {
+/// A.5 and B.4. Packets are recorded in the order they are sent. A `probe` is a path MTU
+/// probe, whose loss is no congestion signal (RFC 9000 §14.4).
+pub fn on_sent(mut r: Recovery, now: u64, space: u64, number: u64, size: u64, eliciting: bool, in_flight: bool, ect: bool, probe: bool) {
     let seq = r.next_seq
     r.next_seq += 1
     let prev = r.tracks[space].last_number
     r.tracks[space].last_number = Some(number)
-    list.push(mut r.tracks[space].sent, Sent(number: number, prev: prev, seq: seq, time: now, size: size, eliciting: eliciting, in_flight: in_flight, ect: ect))
+    list.push(mut r.tracks[space].sent, Sent(number: number, prev: prev, seq: seq, time: now, size: size, eliciting: eliciting, in_flight: in_flight, ect: ect, probe: probe))
     if let CubicHystart = r.algorithm {
         if let None = r.hystart.window_end {
             if hystart_active(r) {
@@ -435,12 +452,16 @@ fn in_recovery(r: Recovery, sent: u64) -> bool {
     }
 }
 
-/// B.8, with RFC 9002 §7.6.2's persistent congestion over this space's lost packets.
+/// B.8, with RFC 9002 §7.6.2's persistent congestion over this space's lost packets. A
+/// lost path MTU probe leaves the window alone and starts no persistent congestion period
+/// (RFC 9000 §14.4).
 fn on_lost(mut r: Recovery, now: u64, lost: List[Sent]) {
     let mut last_loss: Option[u64] = None
     for p in lost {
         if p.in_flight {
             r.in_flight -= p.size
+        }
+        if p.in_flight && !p.probe {
             last_loss = Some(match last_loss {
                 None => p.time,
                 Some(t) => order.max(t, p.time),
@@ -470,7 +491,7 @@ fn on_lost(mut r: Recovery, now: u64, lost: List[Sent]) {
             start = None
         }
         previous = Some(p.number)
-        if p.eliciting {
+        if p.eliciting && !p.probe {
             match start {
                 None => {
                     start = Some(p.time)
@@ -480,6 +501,7 @@ fn on_lost(mut r: Recovery, now: u64, lost: List[Sent]) {
                         r.window = 2 * r.mss
                         r.recovery_start = None
                         r.cubic.epoch = None
+                        r.collapsed = true
                         return
                     }
                 },

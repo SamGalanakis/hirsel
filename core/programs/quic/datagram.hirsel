@@ -1,9 +1,15 @@
 // QUIC-7 datagrams (RFC 9221). A queued datagram competes with the streams in one
 // schedule, is written into one packet at most once and is never retransmitted: an
 // abandoned packet puts it back, a lost one does not (§5.2).
+/// One QueuedDatagram record, a word for each field at the widest MEM-13 allows: the
+/// Shared handle 1, Priority 3, tag, seq and turn 3, and born (an Option[u64]) 2.
+const DATAGRAM_RECORD: u64 = 8 * (1 + 3 + 3 + 2)
+
 /// What a queued datagram is charged against send_bytes beyond its payload, so a flood of
-/// empty datagrams is bounded too.
-const DATAGRAM_COST: u64 = 48
+/// empty datagrams is bounded too: its record in each of the two lists it passes through
+/// (datagrams, then staged_datagrams), each grown to at most twice its peak length
+/// (budgets.md's growth rule, max(needed, 4, 2 × old)).
+const DATAGRAM_COST: u64 = 2 * 2 * DATAGRAM_RECORD
 
 /// Whether a DATAGRAM frame of type 0x31 with a `len`-byte payload fits in `room` bytes.
 fn datagram_fits(room: u64, len: u64) -> bool {
@@ -136,12 +142,7 @@ fn datagram_room(e: Endpoint, events: List[Event]) -> u64 {
 /// The payload room of a 1-RTT packet that carries nothing else, by the bound tx_space
 /// sizes its payload with.
 fn empty_packet_room(c: Connection, mtu: u64) -> u64 {
-    let mut limit = order.min(mtu, MSS)
-    if let Some(p) = c.params {
-        limit = order.min(limit, p.max_udp_payload)
-    }
-    let overhead = 14 + list.len(c.peer_id) + list.len(c.local_id) + 8 + 16
-    limit - order.min(limit, overhead)
+    payload_room(OneRtt, c.peer_id, c.local_id, b"", packet_limit(c, mtu))
 }
 
 fn queue_datagram(mut st: Streams, take data: Shared[Bytes], p: Priority, tag: u64, room: u64) -> Result[(), QuicError] {

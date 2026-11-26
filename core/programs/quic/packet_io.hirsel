@@ -74,6 +74,29 @@ fn open_with(opener: packet.Opener, number: u64, sealed: Bytes, aad_len: u64, mu
     }
 }
 
+/// The header begin_packet writes for a packet of at most `limit` bytes: RFC 9000
+/// §17.3.1's short header, or §17.2's long header whose Length is at most `limit`, each
+/// with a 4-byte packet number.
+fn header_size(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, limit: u64) -> u64 {
+    if kind == OneRtt {
+        return 1 + list.len(dest) + 4
+    }
+    let token_field = if kind == Initial {
+        varint_width(list.len(token)) + list.len(token)
+    } else {
+        0u64
+    }
+    7 + list.len(dest) + list.len(source) + token_field + varint_width(limit) + 4
+}
+
+/// The frame bytes one packet of at most `limit` bytes holds: the limit less its header
+/// and the 16-byte AEAD tag (RFC 9001 §5.3), or 0. Packing and datagram admission both
+/// size packets by it.
+fn payload_room(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, limit: u64) -> u64 {
+    let overhead = header_size(kind, dest, source, token, limit) + 16
+    limit - order.min(limit, overhead)
+}
+
 fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, token: Bytes, phase: bool, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
     let n = codec.Number(truncated: number & 0xffffffff, size: 4)
     if kind == OneRtt {

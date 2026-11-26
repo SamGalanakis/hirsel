@@ -1,9 +1,11 @@
 // QUIC-10's driver: the thin IO loop over one NET-16 socket or group member. Its batch
 // buffers live in the endpoint and are sized on first use.
-/// Datagrams one drive call sends or receives at most.
+/// Datagrams one drive call sends or receives at most: one udp_send and one udp_recv
+/// batch, which bounds the staging buffers below (QUIC-10).
 const DRIVE_BATCH: u64 = 64
 
-/// Receive room per datagram: NET-16's smallest slot payload.
+/// Receive room per datagram past the first: NET-16's smallest slot payload. Wider
+/// packets fill the room in fewer datagrams per round; one max_mtu datagram always fits.
 const DRIVE_SLOT: u64 = 1280
 
 /// One round: run due timers, poll and hand the whole batch to one udp_send (waiting for
@@ -15,8 +17,9 @@ pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut
     let now = host.mono_ns(clock)
     timeout(mut e, now, mut events)
     let mut out = replace(mut e.drive_out, b"")
-    if list.capacity(out) < DRIVE_BATCH * MSS {
-        out = list.with_capacity(DRIVE_BATCH * MSS)
+    let send_room = DRIVE_BATCH * int.widen(e.config.max_mtu)
+    if list.capacity(out) < send_room {
+        out = list.with_capacity(send_room)
     }
     list.clear(mut out)
     let mut tx = replace(mut e.drive_tx, list.new())

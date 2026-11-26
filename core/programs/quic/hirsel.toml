@@ -35,6 +35,7 @@ std = { major = 1 }
 "token.hirsel" = "quic"
 "key_update.hirsel" = "quic"
 "path.hirsel" = "quic"
+"mtu.hirsel" = "quic"
 "datagram.hirsel" = "quic"
 "cid.hirsel" = "quic"
 "drive.hirsel" = "quic"

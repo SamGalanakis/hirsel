@@ -15,8 +15,6 @@ pub(crate) const OBJECT_COUNT_LIMIT: u64 = 4_194_304;
 pub(crate) const OBJECT_LIMIT: u64 = 512 << 20;
 pub(crate) const TOTAL_LIMIT: u64 = 4 << 30;
 pub(crate) const DEPTH_LIMIT: u32 = 4095;
-const CACHE_BYTES: usize = 64 << 20;
-const CACHE_OBJECT: usize = 8 << 20;
 
 /// The bytes of a pack as a response delivers them.
 pub(crate) trait Incoming {
@@ -69,28 +67,50 @@ pub(crate) struct Pack {
     cache: Mutex<Cache>,
 }
 
-#[derive(Default)]
 struct Cache {
     objects: HashMap<usize, Arc<Vec<u8>>>,
     order: VecDeque<usize>,
     bytes: usize,
+    budget: usize,
 }
 
 impl Cache {
+    fn new(entries: &[Entry]) -> Self {
+        let limit = hirsel_guard::limit().unwrap_or(hirsel_guard::DEFAULT_LIMIT);
+        let used = hirsel_guard::data_used()
+            .or_else(|| Some(crate::host::resident_bytes()).filter(|&bytes| bytes != 0));
+        // Applying a delta holds the base, instructions and result at once.
+        // Give the memo a share of the space left after this scratch, leaving
+        // room for the object index, snapshot and other packs in the command.
+        let largest = entries
+            .iter()
+            .map(|entry| entry.size.max(entry.result))
+            .max()
+            .unwrap_or(0);
+        let budget = used.map_or(0, |used| limit.saturating_sub(used + 3 * largest) / 4);
+        Self {
+            objects: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            budget: budget as usize,
+        }
+    }
+
     fn insert(&mut self, index: usize, object: Arc<Vec<u8>>) {
-        if object.len() > CACHE_OBJECT || self.objects.contains_key(&index) {
+        let charge = |object: &Vec<u8>| {
+            object.capacity() + size_of::<Vec<u8>>() + size_of::<(usize, Arc<Vec<u8>>, usize)>()
+        };
+        let bytes = charge(&object);
+        if bytes > self.budget || self.objects.contains_key(&index) {
             return;
         }
-        self.bytes += object.len();
+        while self.bytes > self.budget - bytes {
+            let old = self.order.pop_front().expect("a charged cached object");
+            self.bytes -= charge(&self.objects.remove(&old).expect("a cached object"));
+        }
+        self.bytes += bytes;
         self.objects.insert(index, object);
         self.order.push_back(index);
-        while self.bytes > CACHE_BYTES
-            && let Some(old) = self.order.pop_front()
-        {
-            if let Some(object) = self.objects.remove(&old) {
-                self.bytes -= object.len();
-            }
-        }
     }
 }
 
@@ -321,13 +341,14 @@ pub(crate) fn parse(format: Format, incoming: &mut dyn Incoming) -> Result<Pack,
             return Err(bad(format!("trailing bytes at {end}")));
         }
     }
+    let cache = Mutex::new(Cache::new(&entries));
     let mut pack = Pack {
         format,
         bytes: input.bytes,
         entries,
         kinds: Vec::new(),
         ids: HashMap::new(),
-        cache: Mutex::default(),
+        cache,
     };
     pack.identify()?;
     Ok(pack)

@@ -147,14 +147,17 @@ toolchain_status=0
 compiler=$(build_toolchain 2>>"$run/run.log") || toolchain_status=$?
 if [[ -z "$law_status" ]]; then
   law_status=$toolchain_status
+  # Build stores and caches go to disk under the run; each law's working files stay on
+  # tmpfs. With both on the shared /dev/shm, a night's stores filled it beside other lanes
+  # and stopped 197 laws with ENOSPC or SIGBUS (run 20261126T031505Z-YivHTQ).
   if (( law_status == 0 )); then
     # The full lock check: catches a lock moved by a compiler change the land lint does not select.
     taskset -c 8-11 python3 core/tools/law_board.py check --compiler "$checkout/$compiler/hirsel" \
-      >>"$run/run.log" 2>&1 || law_status=$?
+      --compiler-scratch "$run" >>"$run/run.log" 2>&1 || law_status=$?
   fi
   if (( law_status == 0 )); then
     taskset -c 8-11 python3 core/tools/law_board.py nightly --compiler "$checkout/$compiler/hirsel" \
-      "${law_baseline[@]}" --logs "$run/laws" >>"$run/run.log" 2>&1 || law_status=$?
+      --compiler-scratch "$run" "${law_baseline[@]}" --logs "$run/laws" >>"$run/run.log" 2>&1 || law_status=$?
   fi
 fi
 if (( law_status != 0 )); then

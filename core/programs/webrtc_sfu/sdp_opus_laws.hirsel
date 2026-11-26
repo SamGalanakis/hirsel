@@ -92,3 +92,94 @@ fn sdp_opus_fmtp_per_section() -> Result[(), sdp.SdpError] {
     }
     Ok(())
 }
+
+// The subscriber answers a server re-offer with its own offer's sections, as a
+// browser keeping its transceivers would (JSEP section 5.3).
+fn opus_answer(mut w: Units, room: peer.RoomId, sub: Client, subscriber: Bytes, version: u64) -> Result[(), sdp.SdpError] {
+    let mut d = sdp.description()
+    sdp.parse(subscriber, mut d)?
+    d.setup = Active
+    let Party(id: _, certificate: certificate) = party(81)
+    let fingerprint = std.sha256.hash(certificate)
+    for i in 0u64 .. 32 {
+        d.fingerprint[i] = fingerprint[i]
+    }
+    let mut answer: Bytes = list.new()
+    let _ = sdp.write(d, mut answer)?
+    result.unwrap(units.answer_reoffer(mut w.u0, room, sub.who, version, take answer))
+    Ok(())
+}
+
+fn announces(s: sdp.Section, ssrc: u32) -> bool {
+    for x in s.ssrcs {
+        if x == ssrc {
+            return true
+        }
+    }
+    false
+}
+
+/// bug: a down-track that takes a reused section whose Opus fmtp is unchanged is not
+/// re-offered, so the browser keeps the previous track's `a=ssrc` on that MID and the
+/// new SSRC's audio never reaches the transceiver (B stops after 4,050 bytes in Chromium).
+/// oracle: RTC-2 and RTC-4 signal each live down-track's SSRC with `a=ssrc` on its
+/// section; RFC 8843 section 9.2 and JSEP section 5.10 bind a MID's signaled SSRCs, so
+/// an announcement that names an ended track's SSRC is stale.
+@test
+fn sdp_opus_reused_section_announces_ssrc() -> Result[(), sdp.SdpError] {
+    let mono: Bytes = b"useinbandfec=1"
+    let stereo: Bytes = b"stereo=1;sprop-stereo=1;maxaveragebitrate=128000"
+    let prefs: Bytes = b"useinbandfec=0"
+    let room = room_id()
+    let mut w = three_units(90)
+    let mut log: List[Wire] = list.new()
+    let _ = settle(mut w, 0, Open(room: room, limits: room_limits()), mut log)
+    let mut offer_a = minimal_head(b" m s")
+    opus_section(mut offer_a, b"m", b"111", b"sendonly", mono)
+    opus_section(mut offer_a, b"s", b"111", b"sendonly", stereo)
+    let a = browser_with(mut w.u1, 91, 1, offer_a)
+    admit_on(mut w, a, 1, mut log)
+    let a_mic = published(settle(mut w, 0, Publish(room: room, who: a.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let a_screen = published(settle(mut w, 0, Publish(room: room, who: a.who, section: 1, id: PublicationId(0), shape: None), mut log))
+    let mut offer_c = minimal_head(b" c")
+    opus_section(mut offer_c, b"c", b"111", b"sendonly", mono)
+    let c = browser_with(mut w.u1, 93, 3, offer_c)
+    admit_on(mut w, c, 1, mut log)
+    let c_mic = published(settle(mut w, 0, Publish(room: room, who: c.who, section: 0, id: PublicationId(0), shape: None), mut log))
+    let mut subscriber = minimal_head(b" a b")
+    opus_section(mut subscriber, b"a", b"109", b"recvonly", prefs)
+    opus_section(mut subscriber, b"b", b"109", b"recvonly", prefs)
+    let b = browser_with(mut w.u2, 80, 2, subscriber)
+    admit_on(mut w, b, 2, mut log)
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let mut d = sdp.description()
+    let _ = settle(mut w, 1, Subscribe(room: room, who: b.who, p: a_mic, section: 0, target: base), mut log)
+    let first = opus_reoffer(mut w.u0, b.who, mut d)?
+    opus_answer(mut w, room, b, subscriber, first)?
+    quiesce(mut w, 2, 2, false, mut log)
+    let _ = settle(mut w, 3, Subscribe(room: room, who: b.who, p: a_screen, section: 1, target: base), mut log)
+    let second = opus_reoffer(mut w.u0, b.who, mut d)?
+    let (old, _) = option.unwrap(router.track_ssrcs(units.router_of(w.u2), room, b.who, a_mic))
+    if !announces(d.sections[0], old) || !opus_wire_section(d.sections[1], b'b', SendOnly, 109, stereo) {
+        fail("re-offer did not announce the microphone and the stereo screen")
+    }
+    opus_answer(mut w, room, b, subscriber, second)?
+    quiesce(mut w, 4, 2, false, mut log)
+    let _ = settle(mut w, 5, Unsubscribe(room: room, who: b.who, p: a_mic), mut log)
+    let _ = settle(mut w, 6, Subscribe(room: room, who: b.who, p: c_mic, section: 0, target: base), mut log)
+    quiesce(mut w, 7, 2, false, mut log)
+    let (fresh, _) = option.unwrap(router.track_ssrcs(units.router_of(w.u2), room, b.who, c_mic))
+    let mut third = 0u64
+    for take notice in units.take_events(mut w.u0) {
+        if let Offer(who: dst, version: version, text: text) = notice {
+            if dst == b.who {
+                sdp.parse(text, mut d)?
+                third = version
+            }
+        }
+    }
+    if third <= second || !announces(d.sections[0], fresh) || announces(d.sections[0], old) || !opus_wire_section(d.sections[0], b'a', SendOnly, 109, mono) || !opus_wire_section(d.sections[1], b'b', SendOnly, 109, stereo) {
+        fail("reused section kept the ended track's SSRC")
+    }
+    Ok(())
+}

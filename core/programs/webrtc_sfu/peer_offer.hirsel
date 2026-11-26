@@ -19,6 +19,36 @@ pub fn set_opus_fmtp(mut p: PeerSession, track: u16, fmtp: Bytes) -> bool {
     opus_fmtp_differs(p.agreed.sections[si].local, fmtp)
 }
 
+/// Whether the browser holds another track's `a=ssrc` on this down-track's section:
+/// the offer in flight, or else the agreement in force, announces SSRCs and not the
+/// track's own. A reused section needs a re-offer (RTC-2, RTC-4), since a MID with
+/// signaled SSRCs does not take an unsignaled one.
+pub fn ssrc_stale(p: PeerSession, track: u16) -> bool {
+    let i: u64 = int.widen(track)
+    if i >= list.len(p.tracks) || p.tracks[i].ended {
+        return false
+    }
+    let si: u64 = int.widen(p.tracks[i].section)
+    if let Some((_, sent)) = p.offered {
+        if si < list.len(sent.sections) {
+            return stale_in(sent.sections[si].ssrcs, p.tracks[i].ssrc)
+        }
+    }
+    si < list.len(p.agreed.sections) && stale_in(p.agreed.sections[si].local.ssrcs, p.tracks[i].ssrc)
+}
+
+fn stale_in(announced: List[u32], ssrc: u32) -> bool {
+    if list.len(announced) == 0 {
+        return false
+    }
+    for x in announced {
+        if x == ssrc {
+            return false
+        }
+    }
+    true
+}
+
 fn opus_fmtp_differs(s: sdp.Section, fmtp: Bytes) -> bool {
     for f in s.formats {
         if f.codec == Opus {

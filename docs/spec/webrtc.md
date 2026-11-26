@@ -379,6 +379,9 @@ When a subscription or rebind changes the Opus `fmtp` on a subscriber's sending 
 the router re-offers that section with the publication's parameters and the subscriber's
 negotiated payload type. Each publication takes its Opus parameters from its own receiving
 section, including when the two sessions live on different units.
+A down-track that takes a section whose offer in flight, or else whose agreement in force,
+announces another track's SSRCs is re-offered too, since a browser does not hand an
+unsignaled SSRC to a MID that has signaled ones.
 `accept_answer` keeps `rtcp-rsize` on a section only when the answer repeats it. It marks a removed down-track's section
 `inactive` and reuses it for a later down-track of the same media kind, keeping its MID.
 A server offer carries `a=setup:actpass` as RFC 8842 §5.5 requires of every offer. Its ICE
@@ -1775,6 +1778,13 @@ unless named otherwise.
   parameters on the assigned MID, even when the second subscription arrives while the
   first re-offer is in flight and the subscriber answers with its own Opus preferences.
   The parent refuses the publisher offer with `PayloadConflict(111)`.
+- **W32 `sdp_opus_reused_section_announces_ssrc`.** Publisher A sends a mono microphone and
+  a stereo screen on Opus PT 111, publisher C a mono microphone. Subscriber B's re-offers
+  announce A's microphone and the stereo screen. B then drops A's microphone and takes C's
+  on the freed section. A new re-offer names C's SSRC on that MID and no longer A's, with
+  the mono and stereo parameters each on their own section. *Oracle:* RTC-2 and RTC-4 by
+  hand. Red on 4c187144, where the unchanged `fmtp` raised no re-offer and the browser kept
+  A's `a=ssrc`, so Chromium stopped playing C after 4,050 bytes.
 
 **Nightly, not pre-push.** These run on Boat and route reds to the owner. They do not block
 a land.

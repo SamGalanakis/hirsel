@@ -34,6 +34,7 @@ webrtc_sfu@1/laws/rsize_nack_is_answered_with_rtx src=42a782d1a50a3ea4 sig=bbbb7
 webrtc_sfu@1/laws/sdp_browser_offers src=06e1bac42f31c65c sig=fe0c7f6a9e1e52bd run=c2c0c6612d4cbb79 bug=bcd1fc3864a5e468 oracle=4db7b7146b92e029 rows=pending
 webrtc_sfu@1/laws/sdp_descriptor_on_av1_only src=0df0cee9a7b3a9c0 sig=7ce297167012d089 run=c2c0c6612d4cbb79 bug=e5d7cadead6878b7 oracle=c5946798397dcf06 rows=pending
 webrtc_sfu@1/laws/sdp_opus_fmtp_per_section src=0c1fb7a9c37bdb81 sig=186bed5ef90a54ff run=c2c0c6612d4cbb79 bug=f1b8ae5af330b29f oracle=c9ce9f2e4dbc0c51 rows=pending
+webrtc_sfu@1/laws/sdp_opus_reused_section_announces_ssrc src=f73b1e1f97421cb2 sig=63f984fe4b84431f run=c2c0c6612d4cbb79 bug=905bb5234a1f8432 oracle=8b11893abe683c95 rows=pending
 webrtc_sfu@1/laws/sdp_refusals src=3ddf011a8a38e14b sig=761d96d0c07b43f9 run=c2c0c6612d4cbb79 bug=c5d4fb3e5b1de441 oracle=9b65796e47db47a5 rows=pending
 webrtc_sfu@1/laws/sdp_rfc_examples src=81b5ac44fee02f57 sig=b2bbe468b11154ca run=c2c0c6612d4cbb79 bug=e7f7502401bccf8d oracle=86792fafb6d5c439 rows=pending
 webrtc_sfu@1/laws/service_answers_over_the_room src=febc0c50918a23ff sig=aeebcdb785eefbf1 run=0a8864e34a11a72f bug=5cd9251c1d61fe0c oracle=42b0def1a9812cc5 rows=pending

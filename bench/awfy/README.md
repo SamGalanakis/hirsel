@@ -214,8 +214,8 @@ receipt to `~/.local/share/hirsel-board/baselines/<commit>.json` and updates
 `last-complete.json` atomically.
 
 The `hirsel-board.timer` user unit starts the board at 03:15 UTC. A failed
-service writes `~/.local/share/hirsel-board/alerts/<UTC-date>.txt` and appends
-the alert to `followups.md`.
+service appends an alert to `~/.local/share/hirsel-board/alerts/<UTC-date>.txt`
+and `followups.md`.
 
 ## Screen two revisions on Boat
 

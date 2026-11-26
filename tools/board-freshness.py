@@ -168,12 +168,8 @@ def service_failure(base, followups):
     line = f"{timestamp(now.timestamp())} Hirsel nightly board {detail}. See `{journal}`."
     alerts = base / "alerts"
     alerts.mkdir(exist_ok=True)
-    alert = alerts / f"{now.date()}.txt"
-    bisect = []
-    if alert.is_file():
-        bisect = [entry for entry in alert.read_text().splitlines()
-                  if entry.startswith(("Culprit ", "Unresolved "))]
-    atomic_write(alert, "\n".join([line, *bisect]) + "\n")
+    with (alerts / f"{now.date()}.txt").open("a") as stream:
+        stream.write(line + "\n")
     with followups.open("a") as stream:
         stream.write(f"\n- {line}\n")
     print(line)

@@ -1,0 +1,887 @@
+// QUIC-6: RFC 9002 loss detection and congestion control, sans IO. Appendix A and B's
+// pseudocode, with times in nanoseconds and windows in bytes. An unset time is None,
+// never 0: a simulated clock starts at 0. Integer steps floor, as B.5 allows.
+pub const INITIAL: u64 = 0
+
+pub const HANDSHAKE: u64 = 1
+
+pub const APPLICATION: u64 = 2
+
+const PACKET_THRESHOLD: u64 = 3
+
+const GRANULARITY: u64 = 1000000
+
+const INITIAL_RTT: u64 = 333000000
+
+const PERSISTENT_THRESHOLD: u64 = 3
+
+const BURST_PACKETS: u64 = 10
+
+// RFC 9406 §4.3.
+const MIN_RTT_THRESH: u64 = 4000000
+
+const MAX_RTT_THRESH: u64 = 16000000
+
+const MIN_RTT_DIVISOR: u64 = 8
+
+const N_RTT_SAMPLE: u64 = 8
+
+const CSS_GROWTH_DIVISOR: u64 = 4
+
+const CSS_ROUNDS: u64 = 5
+
+pub type Algorithm = Reno | CubicHystart
+
+/// ECN validation (RFC 9000 §13.4.2). Testing and Capable mark ECT(0).
+pub type Ecn = Testing | Capable | Failed
+
+/// What a loss detection timeout asks of the sender (A.9).
+pub type Expiry = Idle | Lost(space: u64, numbers: List[u64]) | Probe(space: u64)
+
+pub type AckResult {
+    acked: List[u64],
+    lost: List[u64]
+}
+
+type Sent {
+    number: u64,
+    prev: Option[u64],
+    seq: u64,
+    time: u64,
+    size: u64,
+    eliciting: bool,
+    in_flight: bool,
+    ect: bool
+}
+
+type Track {
+    sent: List[Sent],
+    largest: Option[u64],
+    loss_time: Option[u64],
+    last_eliciting: Option[u64],
+    last_number: Option[u64],
+    eliciting: u64,
+    ce: u64,
+    ect_reported: u64
+}
+
+type Phase = SlowStart | Css(rounds: u64, baseline: u64) | Done
+
+type Hystart {
+    phase: Phase,
+    window_end: Option[u64],
+    last_min: Option[u64],
+    current_min: Option[u64],
+    samples: u64
+}
+
+type Cubic {
+    w_max: u64,
+    k_ms: u64,
+    epoch: Option[u64],
+    cwnd_epoch: u64,
+    w_est: u64,
+    prior: u64
+}
+
+pub opaque type Recovery {
+    algorithm: Algorithm,
+    mss: u64,
+    server: bool,
+    latest_rtt: u64,
+    smoothed_rtt: u64,
+    rttvar: u64,
+    min_rtt: u64,
+    first_sample: Option[u64],
+    max_ack_delay: u64,
+    confirmed: bool,
+    handshake_keys: bool,
+    handshake_acked: bool,
+    pto_count: u64,
+    timer: Option[u64],
+    tracks: List[Track],
+    window: u64,
+    ssthresh: Option[u64],
+    recovery_start: Option[u64],
+    in_flight: u64,
+    app_limited: bool,
+    cubic: Cubic,
+    hystart: Hystart,
+    ecn: Ecn,
+    next_seq: u64,
+    tokens: u64,
+    refilled: Option[u64]
+}
+
+fn new_track() -> Track {
+    Track(sent: list.new(), largest: None, loss_time: None, last_eliciting: None, last_number: None, eliciting: 0, ce: 0, ect_reported: 0)
+}
+
+/// A.4 and B.3. `mss` is max_datagram_size; the initial window is RFC 9002 §7.2's.
+pub fn new(algorithm: Algorithm, mss: u64, server: bool) -> Recovery {
+    let mut tracks: List[Track] = list.with_capacity(3)
+    for _ in 0u64 .. 3 {
+        list.push(mut tracks, new_track())
+    }
+    let initial = order.min(10 * mss, order.max(14720u64, 2 * mss))
+    Recovery(algorithm: algorithm, mss: mss, server: server, latest_rtt: 0, smoothed_rtt: INITIAL_RTT, rttvar: INITIAL_RTT / 2, min_rtt: 0, first_sample: None, max_ack_delay: 0, confirmed: false, handshake_keys: false, handshake_acked: false, pto_count: 0, timer: None, tracks: take tracks, window: initial, ssthresh: None, recovery_start: None, in_flight: 0, app_limited: false, cubic: Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0), hystart: Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0), ecn: Testing, next_seq: 0, tokens: BURST_PACKETS * mss, refilled: None)
+}
+
+pub fn set_max_ack_delay(mut r: Recovery, now: u64, ns: u64) {
+    r.max_ack_delay = ns
+    set_timer(mut r, now)
+}
+
+pub fn set_handshake_keys(mut r: Recovery, now: u64) {
+    r.handshake_keys = true
+    set_timer(mut r, now)
+}
+
+pub fn confirm(mut r: Recovery, now: u64) {
+    r.confirmed = true
+    set_timer(mut r, now)
+}
+
+pub fn set_app_limited(mut r: Recovery, limited: bool) {
+    r.app_limited = limited
+}
+
+pub fn timer(r: Recovery) -> Option[u64] {
+    r.timer
+}
+
+pub fn pto_count(r: Recovery) -> u64 {
+    r.pto_count
+}
+
+pub fn window(r: Recovery) -> u64 {
+    r.window
+}
+
+pub fn ssthresh(r: Recovery) -> Option[u64] {
+    r.ssthresh
+}
+
+pub fn bytes_in_flight(r: Recovery) -> u64 {
+    r.in_flight
+}
+
+pub fn smoothed_rtt(r: Recovery) -> u64 {
+    r.smoothed_rtt
+}
+
+pub fn rttvar(r: Recovery) -> u64 {
+    r.rttvar
+}
+
+pub fn min_rtt(r: Recovery) -> u64 {
+    r.min_rtt
+}
+
+pub fn ecn_state(r: Recovery) -> Ecn {
+    r.ecn
+}
+
+/// The ECN codepoint for the next packet: ECT(0) unless validation failed.
+pub fn ecn_mark(r: Recovery) -> u8 {
+    match r.ecn {
+        Failed => 0,
+        _ => 2,
+    }
+}
+
+/// RFC 9002 §6.2.1's probe timeout with max_ack_delay and without backoff.
+pub fn pto(r: Recovery) -> u64 {
+    r.smoothed_rtt + order.max(4 * r.rttvar, GRANULARITY) + r.max_ack_delay
+}
+
+/// CUBIC's W_max in bytes and K in milliseconds (RFC 9438 §4.2).
+pub fn cubic_w_max(r: Recovery) -> u64 {
+    r.cubic.w_max
+}
+
+pub fn cubic_k_ms(r: Recovery) -> u64 {
+    r.cubic.k_ms
+}
+
+pub fn cubic_epoch(r: Recovery) -> Option[u64] {
+    r.cubic.epoch
+}
+
+/// HyStart++: true in Conservative Slow Start, and the CSS rounds completed.
+pub fn css(r: Recovery) -> Option[u64] {
+    match r.hystart.phase {
+        Css(rounds: n, ..) => Some(n),
+        _ => None,
+    }
+}
+
+pub fn has_eliciting_in_flight(r: Recovery, space: u64) -> bool {
+    r.tracks[space].eliciting != 0
+}
+
+fn any_eliciting(r: Recovery) -> bool {
+    r.tracks[0].eliciting + r.tracks[1].eliciting + r.tracks[2].eliciting != 0
+}
+
+fn shift(value: u64, n: u64) -> u64 {
+    if n >= 64 || value > (0xffffffffffffffffu64 >> n) {
+        return 0xffffffffffffffff
+    }
+    value << n
+}
+
+/// A.5 and B.4. Packets are recorded in the order they are sent.
+pub fn on_sent(mut r: Recovery, now: u64, space: u64, number: u64, size: u64, eliciting: bool, in_flight: bool, ect: bool) {
+    let seq = r.next_seq
+    r.next_seq += 1
+    let prev = r.tracks[space].last_number
+    r.tracks[space].last_number = Some(number)
+    list.push(mut r.tracks[space].sent, Sent(number: number, prev: prev, seq: seq, time: now, size: size, eliciting: eliciting, in_flight: in_flight, ect: ect))
+    if let CubicHystart = r.algorithm {
+        if let None = r.hystart.window_end {
+            if hystart_active(r) {
+                // RFC 9406 §4.2: a round starts at the first send after the last one ended.
+                r.hystart.window_end = Some(seq)
+                r.hystart.last_min = r.hystart.current_min
+                r.hystart.current_min = None
+                r.hystart.samples = 0
+            }
+        }
+    }
+    if in_flight {
+        if eliciting {
+            r.tracks[space].last_eliciting = Some(now)
+            r.tracks[space].eliciting += 1
+            pace(mut r, now, size)
+        }
+        r.in_flight += size
+        set_timer(mut r, now)
+    }
+}
+
+fn covered(ranges: List[codec.AckRange], n: u64) -> bool {
+    for range in ranges {
+        if n >= range.smallest && n <= range.largest {
+            return true
+        }
+    }
+    false
+}
+
+fn forget(mut r: Recovery, space: u64, p: Sent) {
+    if p.eliciting {
+        r.tracks[space].eliciting -= 1
+    }
+}
+
+/// A.7. `delay` is the decoded ACK Delay in nanoseconds; `ranges` were validated
+/// against the packet numbers sent.
+pub fn on_ack(mut r: Recovery, now: u64, space: u64, ranges: List[codec.AckRange], delay: u64, ecn: Option[codec.EcnCounts]) -> AckResult {
+    let mut result = AckResult(acked: list.new(), lost: list.new())
+    if list.len(ranges) == 0 {
+        return take result
+    }
+    let largest = ranges[0].largest
+    r.tracks[space].largest = Some(match r.tracks[space].largest {
+        None => largest,
+        Some(previous) => order.max(previous, largest),
+    })
+    let mut newly: List[Sent] = list.new()
+    let mut kept: List[Sent] = list.with_capacity(list.len(r.tracks[space].sent))
+    for p in r.tracks[space].sent {
+        if covered(ranges, p.number) {
+            list.push(mut newly, p)
+        } else {
+            list.push(mut kept, p)
+        }
+    }
+    r.tracks[space].sent = take kept
+    if list.len(newly) == 0 {
+        return take result
+    }
+    for p in newly {
+        forget(mut r, space, p)
+    }
+    let last = newly[list.len(newly) - 1]
+    let mut eliciting = false
+    for p in newly {
+        eliciting = eliciting || p.eliciting
+    }
+    let mut sampled = false
+    if last.number == largest && eliciting {
+        r.latest_rtt = now - last.time
+        update_rtt(mut r, now, space, delay)
+        sampled = true
+    }
+    if space == HANDSHAKE {
+        r.handshake_acked = true
+    }
+    process_ecn(mut r, now, space, newly, last.time, ecn)
+    let lost = detect_lost(mut r, now, space)
+    if list.len(lost) != 0 {
+        on_lost(mut r, now, lost)
+    }
+    for p in lost {
+        list.push(mut result.lost, p.number)
+    }
+    on_acked(mut r, now, newly, sampled)
+    if peer_validated(r) {
+        r.pto_count = 0
+    }
+    set_timer(mut r, now)
+    for p in newly {
+        list.push(mut result.acked, p.number)
+    }
+    take result
+}
+
+/// A.7 UpdateRtt. RFC 9002 §5.3 lets Initial ACK delays be ignored.
+fn update_rtt(mut r: Recovery, now: u64, space: u64, delay: u64) {
+    if let None = r.first_sample {
+        r.min_rtt = r.latest_rtt
+        r.smoothed_rtt = r.latest_rtt
+        r.rttvar = r.latest_rtt / 2
+        r.first_sample = Some(now)
+        return
+    }
+    r.min_rtt = order.min(r.min_rtt, r.latest_rtt)
+    let mut ack_delay = if space == INITIAL {
+        0u64
+    } else {
+        delay
+    }
+    if r.confirmed {
+        ack_delay = order.min(ack_delay, r.max_ack_delay)
+    }
+    let mut adjusted = r.latest_rtt
+    if r.latest_rtt >= r.min_rtt + ack_delay {
+        adjusted = r.latest_rtt - ack_delay
+    }
+    let diff = if r.smoothed_rtt > adjusted {
+        r.smoothed_rtt - adjusted
+    } else {
+        adjusted - r.smoothed_rtt
+    }
+    r.rttvar = (3 * r.rttvar + diff) / 4
+    r.smoothed_rtt = (7 * r.smoothed_rtt + adjusted) / 8
+}
+
+fn peer_validated(r: Recovery) -> bool {
+    r.server || r.handshake_acked || r.confirmed
+}
+
+/// A.10.
+fn detect_lost(mut r: Recovery, now: u64, space: u64) -> List[Sent] {
+    let mut lost: List[Sent] = list.new()
+    r.tracks[space].loss_time = None
+    let Some(largest) = r.tracks[space].largest else {
+        return take lost
+    }
+    let delay = order.max(9 * order.max(r.latest_rtt, r.smoothed_rtt) / 8, GRANULARITY)
+    let mut kept: List[Sent] = list.with_capacity(list.len(r.tracks[space].sent))
+    let mut loss_time: Option[u64] = None
+    for p in r.tracks[space].sent {
+        if p.number > largest {
+            list.push(mut kept, p)
+        } else if p.time + delay <= now || largest >= p.number + PACKET_THRESHOLD {
+            list.push(mut lost, p)
+        } else {
+            loss_time = Some(match loss_time {
+                None => p.time + delay,
+                Some(t) => order.min(t, p.time + delay),
+            })
+            list.push(mut kept, p)
+        }
+    }
+    r.tracks[space].sent = take kept
+    r.tracks[space].loss_time = loss_time
+    for p in lost {
+        forget(mut r, space, p)
+    }
+    take lost
+}
+
+fn in_recovery(r: Recovery, sent: u64) -> bool {
+    match r.recovery_start {
+        Some(start) => sent <= start,
+        None => false,
+    }
+}
+
+/// B.8, with RFC 9002 §7.6.2's persistent congestion over this space's lost packets.
+fn on_lost(mut r: Recovery, now: u64, lost: List[Sent]) {
+    let mut last_loss: Option[u64] = None
+    for p in lost {
+        if p.in_flight {
+            r.in_flight -= p.size
+            last_loss = Some(match last_loss {
+                None => p.time,
+                Some(t) => order.max(t, p.time),
+            })
+        }
+    }
+    if let Some(t) = last_loss {
+        congestion_event(mut r, now, t)
+    }
+    let Some(first) = r.first_sample else {
+        return
+    }
+    let duration = (r.smoothed_rtt + order.max(4 * r.rttvar, GRANULARITY) + r.max_ack_delay) * PERSISTENT_THRESHOLD
+    let mut previous: Option[u64] = None
+    let mut start: Option[u64] = None
+    for p in lost {
+        if p.time <= first {
+            previous = None
+            start = None
+            continue
+        }
+        let contiguous = match (previous, p.prev) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+        if !contiguous {
+            start = None
+        }
+        previous = Some(p.number)
+        if p.eliciting {
+            match start {
+                None => {
+                    start = Some(p.time)
+                },
+                Some(s) => {
+                    if p.time - s > duration {
+                        r.window = 2 * r.mss
+                        r.recovery_start = None
+                        r.cubic.epoch = None
+                        return
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// B.6 for NewReno; RFC 9438 §4.6 and §4.7 for CUBIC, which also ends HyStart++
+/// (RFC 9406 §4.2).
+fn congestion_event(mut r: Recovery, now: u64, sent: u64) {
+    if in_recovery(r, sent) {
+        return
+    }
+    r.recovery_start = Some(now)
+    let floor = 2 * r.mss
+    match r.algorithm {
+        Reno => {
+            let half = r.window / 2
+            r.ssthresh = Some(half)
+            r.window = order.max(half, floor)
+        },
+        CubicHystart => {
+            r.hystart.phase = Done
+            let cwnd = r.window
+            // Fast convergence (RFC 9438 §4.7): (1 + 0.7) / 2.
+            r.cubic.w_max = if cwnd < r.cubic.w_max {
+                cwnd * 17 / 20
+            } else {
+                cwnd
+            }
+            r.cubic.prior = cwnd
+            let reduced = order.max(cwnd * 7 / 10, floor)
+            r.ssthresh = Some(reduced)
+            r.window = reduced
+            r.cubic.epoch = Some(now)
+            r.cubic.cwnd_epoch = reduced
+            r.cubic.w_est = reduced
+            r.cubic.k_ms = cubic_k(r.cubic.w_max, reduced, r.mss)
+        },
+    }
+}
+
+/// B.7, and RFC 9000 §13.4.2.1's validation of the reported counts.
+fn process_ecn(mut r: Recovery, now: u64, space: u64, newly: List[Sent], largest_time: u64, ecn: Option[codec.EcnCounts]) {
+    let mut marked = 0u64
+    for p in newly {
+        if p.ect {
+            marked += 1
+        }
+    }
+    if let Failed = r.ecn {
+        return
+    }
+    let Some(counts) = ecn else {
+        if marked != 0 {
+            r.ecn = Failed
+        }
+        return
+    }
+    let reported = counts.ect0 + counts.ce
+    if counts.ect1 != 0 || reported < r.tracks[space].ect_reported || reported - r.tracks[space].ect_reported < marked {
+        r.ecn = Failed
+        return
+    }
+    r.tracks[space].ect_reported = reported
+    if marked != 0 {
+        r.ecn = Capable
+    }
+    if counts.ce > r.tracks[space].ce {
+        r.tracks[space].ce = counts.ce
+        congestion_event(mut r, now, largest_time)
+    }
+}
+
+fn hystart_active(r: Recovery) -> bool {
+    match r.hystart.phase {
+        Done => false,
+        _ => {
+            if let None = r.ssthresh {
+                return true
+            }
+            false
+        },
+    }
+}
+
+/// B.5 for NewReno, per packet. CUBIC and HyStart++ act once per ACK.
+fn on_acked(mut r: Recovery, now: u64, newly: List[Sent], sampled: bool) {
+    let mut size = 0u64
+    let mut round_end = false
+    for p in newly {
+        if !p.in_flight {
+            continue
+        }
+        r.in_flight -= p.size
+        if let Some(end) = r.hystart.window_end {
+            if p.seq >= end {
+                round_end = true
+            }
+        }
+        if r.app_limited || in_recovery(r, p.time) {
+            continue
+        }
+        match r.algorithm {
+            Reno => {
+                if slow_start(r) {
+                    r.window += p.size
+                } else {
+                    r.window += r.mss * p.size / r.window
+                }
+            },
+            CubicHystart => {
+                size += p.size
+            },
+        }
+    }
+    if let CubicHystart = r.algorithm {
+        if size != 0 {
+            cubic_acked(mut r, now, size, sampled)
+        }
+        if round_end {
+            r.hystart.window_end = None
+            if let Css(rounds: n, baseline: b) = r.hystart.phase {
+                if n + 1 >= CSS_ROUNDS {
+                    r.hystart.phase = Done
+                    r.ssthresh = Some(r.window)
+                } else {
+                    r.hystart.phase = Css(rounds: n + 1, baseline: b)
+                }
+            }
+        }
+    }
+}
+
+fn slow_start(r: Recovery) -> bool {
+    match r.ssthresh {
+        Some(s) => r.window < s,
+        None => true,
+    }
+}
+
+fn cubic_acked(mut r: Recovery, now: u64, size: u64, sampled: bool) {
+    if slow_start(r) {
+        if !hystart_active(r) {
+            r.window += size
+            return
+        }
+        match r.hystart.phase {
+            Css(..) => {
+                r.window += size / CSS_GROWTH_DIVISOR
+            },
+            _ => {
+                r.window += size
+            },
+        }
+        if sampled {
+            hystart_sample(mut r)
+        }
+        return
+    }
+    let Some(epoch) = r.cubic.epoch else {
+        // RFC 9438 §4.8 and §4.10: a stage entered without a reduction has K = 0.
+        r.cubic.epoch = Some(now)
+        r.cubic.cwnd_epoch = r.window
+        r.cubic.w_est = r.window
+        r.cubic.w_max = r.window
+        r.cubic.k_ms = 0
+        if r.cubic.prior == 0 {
+            r.cubic.prior = r.window
+        }
+        return
+    }
+    let t = (now - epoch) / 1000000
+    let cwnd = r.window
+    let (alpha_num, alpha_den) = if r.cubic.w_est >= r.cubic.prior {
+        (1u64, 1u64)
+    } else {
+        (9u64, 17u64)
+    }
+    r.cubic.w_est += alpha_num * r.mss * size / (alpha_den * cwnd)
+    if w_cubic(r, t) < r.cubic.w_est {
+        r.window = order.max(cwnd, r.cubic.w_est)
+        return
+    }
+    let target = order.min(order.max(w_cubic(r, t + r.smoothed_rtt / 1000000), cwnd), cwnd * 3 / 2)
+    r.window = cwnd + (target - cwnd) * size / cwnd
+}
+
+/// RFC 9406 §4.2, once per ACK that carries an RTT sample, after the window grew.
+fn hystart_sample(mut r: Recovery) {
+    let rtt = r.latest_rtt
+    r.hystart.current_min = Some(match r.hystart.current_min {
+        None => rtt,
+        Some(m) => order.min(m, rtt),
+    })
+    r.hystart.samples += 1
+    if r.hystart.samples < N_RTT_SAMPLE {
+        return
+    }
+    let Some(current) = r.hystart.current_min else {
+        return
+    }
+    match r.hystart.phase {
+        SlowStart => {
+            let Some(last) = r.hystart.last_min else {
+                return
+            }
+            let thresh = order.max(MIN_RTT_THRESH, order.min(last / MIN_RTT_DIVISOR, MAX_RTT_THRESH))
+            if current >= last + thresh {
+                r.hystart.phase = Css(rounds: 0, baseline: current)
+            }
+        },
+        Css(baseline: b, ..) => {
+            if current < b {
+                r.hystart.phase = SlowStart
+            }
+        },
+        Done => (),
+    }
+}
+
+/// W_cubic(t) = C (t - K)^3 + W_max (RFC 9438 Figure 1), C = 0.4 segments per s^3, in
+/// size, for t in milliseconds since the epoch. Exact to the byte below; saturates at
+/// the u64 bounds, past which the target is clamped to cwnd or 1.5 cwnd anyway.
+pub fn w_cubic(r: Recovery, t_ms: u64) -> u64 {
+    let k = r.cubic.k_ms
+    let (d, below) = if t_ms >= k {
+        (t_ms - k, false)
+    } else {
+        (k - t_ms, true)
+    }
+    let cube = match int.checked_mul(d, d) {
+        Some(sq) => int.checked_mul(sq, d),
+        None => None,
+    }
+    let grow = match cube {
+        Some(c) => match int.checked_mul(c, 4 * r.mss) {
+            Some(v) => v / 10000000000,
+            None => (c / 10000000000) * 4 * r.mss,
+        },
+        None => 0xffffffffffffffff,
+    }
+    if below {
+        int.saturating_sub(r.cubic.w_max, grow)
+    } else {
+        int.saturating_add(r.cubic.w_max, grow)
+    }
+}
+
+/// K = cbrt((W_max - cwnd_epoch) / C), in milliseconds: the cube root of
+/// (W_max - cwnd_epoch) * 2.5e9 / mss.
+fn cubic_k(w_max: u64, cwnd_epoch: u64, mss: u64) -> u64 {
+    if w_max <= cwnd_epoch {
+        return 0
+    }
+    let (high, low) = int.mul_wide(w_max - cwnd_epoch, 2500000000)
+    cube_root(div_wide(high, low, mss))
+}
+
+fn div_wide(high: u64, low: u64, d: u64) -> u64 {
+    if high >= d {
+        return 0xffffffffffffffff
+    }
+    let mut rem = high
+    let mut q = 0u64
+    for i in 0u64 .. 64 {
+        let bit = (low >> (63 - i)) & 1
+        let carry = rem >> 63
+        rem = (rem << 1) | bit
+        q = q << 1
+        if carry != 0 || rem >= d {
+            rem = int.wrapping_sub(rem, d)
+            q = q | 1
+        }
+    }
+    q
+}
+
+fn cube_root(n: u64) -> u64 {
+    let mut low = 0u64
+    let mut high = 2642246u64
+    while low < high {
+        let mid = (low + high + 1) / 2
+        if mid * mid * mid <= n {
+            low = mid
+        } else {
+            high = mid - 1
+        }
+    }
+    low
+}
+
+fn loss_time_space(r: Recovery) -> Option[(u64, u64)] {
+    let mut best: Option[(u64, u64)] = None
+    for space in 0u64 .. 3 {
+        if let Some(t) = r.tracks[space].loss_time {
+            best = match best {
+                Some((b, s)) if b <= t => Some((b, s)),
+                _ => Some((t, space)),
+            }
+        }
+    }
+    best
+}
+
+/// A.8 GetPtoTimeAndSpace.
+fn pto_time_space(r: Recovery, now: u64) -> Option[(u64, u64)] {
+    let duration = shift(r.smoothed_rtt + order.max(4 * r.rttvar, GRANULARITY), r.pto_count)
+    if !any_eliciting(r) {
+        let space = if r.handshake_keys {
+            HANDSHAKE
+        } else {
+            INITIAL
+        }
+        return Some((int.saturating_add(now, duration), space))
+    }
+    let mut best: Option[(u64, u64)] = None
+    for space in 0u64 .. 3 {
+        if r.tracks[space].eliciting == 0 {
+            continue
+        }
+        let mut d = duration
+        if space == APPLICATION {
+            if !r.confirmed {
+                return best
+            }
+            d = int.saturating_add(d, shift(r.max_ack_delay, r.pto_count))
+        }
+        let Some(last) = r.tracks[space].last_eliciting else {
+            continue
+        }
+        let t = int.saturating_add(last, d)
+        best = match best {
+            Some((b, s)) if b <= t => Some((b, s)),
+            _ => Some((t, space)),
+        }
+    }
+    best
+}
+
+/// A.8 SetLossDetectionTimer. Anti-amplification is QS6's.
+fn set_timer(mut r: Recovery, now: u64) {
+    if let Some((t, _)) = loss_time_space(r) {
+        r.timer = Some(t)
+        return
+    }
+    if !any_eliciting(r) && peer_validated(r) {
+        r.timer = None
+        return
+    }
+    r.timer = match pto_time_space(r, now) {
+        Some((t, _)) => Some(t),
+        None => None,
+    }
+}
+
+/// A.9. The caller sends the probe a Probe asks for.
+pub fn on_timeout(mut r: Recovery, now: u64) -> Expiry {
+    if let Some((_, space)) = loss_time_space(r) {
+        let lost = detect_lost(mut r, now, space)
+        on_lost(mut r, now, lost)
+        set_timer(mut r, now)
+        let mut numbers: List[u64] = list.with_capacity(list.len(lost))
+        for p in lost {
+            list.push(mut numbers, p.number)
+        }
+        return Lost(space: space, numbers: take numbers)
+    }
+    let space = match pto_time_space(r, now) {
+        Some((_, s)) => s,
+        None => {
+            set_timer(mut r, now)
+            return Idle
+        },
+    }
+    r.pto_count += 1
+    set_timer(mut r, now)
+    Probe(space: space)
+}
+
+/// A.11 and B.9.
+pub fn discard(mut r: Recovery, now: u64, space: u64) {
+    for p in r.tracks[space].sent {
+        if p.in_flight {
+            r.in_flight -= p.size
+        }
+    }
+    let ce = r.tracks[space].ce
+    r.tracks[space] = new_track()
+    r.tracks[space].ce = ce
+    r.pto_count = 0
+    set_timer(mut r, now)
+}
+
+/// True when `size` more bytes in flight stay within the congestion window.
+pub fn window_allows(r: Recovery, pending: u64, size: u64) -> bool {
+    r.in_flight + pending + size <= r.window
+}
+
+fn tokens_at(r: Recovery, now: u64) -> u64 {
+    let cap = BURST_PACKETS * r.mss
+    let Some(at) = r.refilled else {
+        return r.tokens
+    }
+    if now <= at {
+        return r.tokens
+    }
+    let elapsed = now - at
+    if elapsed >= r.smoothed_rtt {
+        return cap
+    }
+    order.min(cap, r.tokens + r.window * elapsed / order.max(r.smoothed_rtt, 1))
+}
+
+/// The pacer (RFC 9002 §7.7): a bucket of 10 packets refilled at one window per
+/// smoothed RTT. None when `size` more after `pending` can go now, else the time.
+pub fn pacing_delay(r: Recovery, now: u64, pending: u64, size: u64) -> Option[u64] {
+    let tokens = tokens_at(r, now)
+    if tokens >= pending + size {
+        return None
+    }
+    let short = pending + size - tokens
+    Some(now + (short * r.smoothed_rtt + r.window - 1) / r.window)
+}
+
+fn pace(mut r: Recovery, now: u64, size: u64) {
+    let tokens = tokens_at(r, now)
+    r.tokens = tokens - order.min(tokens, size)
+    r.refilled = Some(now)
+}

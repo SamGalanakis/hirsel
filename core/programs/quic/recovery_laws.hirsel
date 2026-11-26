@@ -1,0 +1,262 @@
+// Q9 and Q10 over the pure recovery module. Every expected value is worked by hand in
+// the comments from RFC 9002 Appendices A and B, RFC 9438 §4 and RFC 9406 §4; none is
+// read back from the code. Times are nanoseconds, windows bytes, MSS 1200.
+const MS: u64 = 1000000
+
+fn eq(take what: String, got: u64, want: u64) {
+    if got != want {
+        fail(take what)
+    }
+}
+
+fn some(take what: String, got: Option[u64], want: u64) {
+    match got {
+        Some(v) => eq(take what, v, want),
+        None => fail(take what),
+    }
+}
+
+/// `got` must be exactly first, first + 1, ..., first + count - 1.
+fn numbers(take what: String, got: List[u64], first: u64, count: u64) {
+    if list.len(got) != count {
+        fail(take what)
+        return
+    }
+    for i in 0u64 .. count {
+        if got[i] != first + i {
+            fail(take what)
+            return
+        }
+    }
+}
+
+fn ack(mut r: recovery.Recovery, now: u64, smallest: u64, largest: u64, delay: u64) -> recovery.AckResult {
+    let mut ranges: List[codec.AckRange] = list.new()
+    list.push(mut ranges, codec.AckRange(smallest: smallest, largest: largest))
+    recovery.on_ack(mut r, now, recovery.APPLICATION, ranges, delay, None)
+}
+
+fn send(mut r: recovery.Recovery, now: u64, number: u64, size: u64) {
+    recovery.on_sent(mut r, now, recovery.APPLICATION, number, size, true, true, false)
+}
+
+/// bug: RTT estimation, packet- or time-threshold loss, PTO backoff or persistent
+/// congestion departs from RFC 9002, so a sender retransmits too early, too late or
+/// keeps a window persistent congestion should have collapsed.
+/// oracle: RFC 9002 Appendix A.4-A.10 and B.3-B.8, evaluated by hand below.
+@test
+fn loss_recovery_matches_rfc9002() -> Result[(), ()] {
+    // A server (peer address validated), confirmed, max_ack_delay 25 ms, NewReno.
+    // B.3: cwnd = min(10 * 1200, max(14720, 2400)) = 12000.
+    let mut r = recovery.new(Reno, 1200, true)
+    recovery.set_max_ack_delay(mut r, 0, 25 * MS)
+    recovery.confirm(mut r, 0)
+    eq("initial window", recovery.window(r), 12000)
+    // A.4: srtt 333 ms, rttvar 166.5 ms. Packet 0 at t=0 arms the application PTO at
+    // 0 + 333 + max(4 * 166.5, 1) + 25 = 1024 ms (A.8).
+    send(mut r, 0, 0, 1200)
+    some("first PTO", recovery.timer(r), 1024 * MS)
+    // First sample at 100 ms (A.7 UpdateRtt): min = srtt = 100 ms, rttvar = 50 ms.
+    // B.5 slow start: cwnd = 12000 + 1200 = 13200. Nothing eliciting is in flight and a
+    // server's peer is validated, so the timer is cancelled.
+    let _ = ack(mut r, 100 * MS, 0, 0, 0)
+    eq("srtt 1", recovery.smoothed_rtt(r), 100 * MS)
+    eq("rttvar 1", recovery.rttvar(r), 50 * MS)
+    eq("cwnd 1", recovery.window(r), 13200)
+    if let Some(_) = recovery.timer(r) {
+        fail("timer armed with nothing in flight")
+    }
+    // Single loss. Packets 1-4 at 200 ms; ACK of 2-4 at 320 ms with ack_delay 10 ms.
+    // latest = 120 ms >= min_rtt + ack_delay = 110 ms, so adjusted = 110 ms.
+    // rttvar = 3/4 * 50 + 1/4 * |100 - 110| = 40 ms; srtt = 7/8 * 100 + 1/8 * 110 = 101.25 ms.
+    // Packet 1: largest acked 4 >= 1 + kPacketThreshold, lost (A.10). B.6 at 320 ms:
+    // ssthresh = 13200 / 2 = 6600 = cwnd. Packets 2-4 were sent at 200 <= 320 ms, inside
+    // recovery, so they do not grow the window (B.5).
+    for n in 1u64 .. 5 {
+        send(mut r, 200 * MS, n, 1200)
+    }
+    let single = ack(mut r, 320 * MS, 2, 4, 10 * MS)
+    numbers("single loss acked", single.acked, 2, 3)
+    numbers("single loss lost", single.lost, 1, 1)
+    eq("rttvar 2", recovery.rttvar(r), 40 * MS)
+    eq("srtt 2", recovery.smoothed_rtt(r), 101250000)
+    eq("cwnd 2", recovery.window(r), 6600)
+    some("ssthresh 2", recovery.ssthresh(r), 6600)
+    eq("in flight 2", recovery.bytes_in_flight(r), 0)
+    // Time threshold. Packets 5 and 6 at 400 ms; ACK of 6 at 520 ms, ack_delay 0.
+    // latest 120 ms: rttvar = (3 * 40 + |101.25 - 120|) / 4 = 34.6875 ms;
+    // srtt = (7 * 101.25 + 120) / 8 = 103.59375 ms. Packet 5 is one short of the packet
+    // threshold; loss_delay = 9/8 * max(120, 103.59375) = 135 ms, and 400 + 135 = 535 ms
+    // > 520 ms, so the loss timer is set to 535 ms. Packet 6 (sent after recovery began)
+    // is in congestion avoidance: cwnd += 1200 * 1200 / 6600 = 218, cwnd = 6818.
+    send(mut r, 400 * MS, 5, 1200)
+    send(mut r, 400 * MS, 6, 1200)
+    let timed = ack(mut r, 520 * MS, 6, 6, 0)
+    numbers("time threshold acked", timed.acked, 6, 1)
+    numbers("time threshold not yet lost", timed.lost, 0, 0)
+    eq("rttvar 3", recovery.rttvar(r), 34687500)
+    eq("srtt 3", recovery.smoothed_rtt(r), 103593750)
+    eq("cwnd 3", recovery.window(r), 6818)
+    some("loss timer", recovery.timer(r), 535 * MS)
+    // The loss timer fires (A.9): packet 5 is lost. Sent at 400 ms, after the 320 ms
+    // recovery start, so a new congestion event: ssthresh = cwnd = 6818 / 2 = 3409.
+    if let Lost(space: s, numbers: lost) = recovery.on_timeout(mut r, 535 * MS) {
+        eq("loss space", s, recovery.APPLICATION)
+        numbers("time threshold lost", lost, 5, 1)
+    } else {
+        fail("loss timer did not declare packet 5 lost")
+    }
+    eq("cwnd 4", recovery.window(r), 3409)
+    // Tail loss and three PTOs in a row. Packet 7 at 600 ms. PTO base =
+    // srtt + max(4 * rttvar, 1 ms) = 103.59375 + 138.75 = 242.34375 ms, plus 25 ms
+    // max_ack_delay, each doubled per pto_count (A.8).
+    // PTO 1: 600 + 267.34375 = 867.34375 ms. Probe 8 then; pto_count 1:
+    //   867.34375 + 2 * 267.34375 = 1402.03125 ms.
+    // PTO 2 there; probe 9; pto_count 2: 1402.03125 + 4 * 267.34375 = 2471.40625 ms.
+    // PTO 3 there; probe 10; pto_count 3: 2471.40625 + 8 * 267.34375 = 4610.15625 ms.
+    // A PTO alone never changes the window (RFC 9002 §7.5).
+    send(mut r, 600 * MS, 7, 1200)
+    some("tail PTO", recovery.timer(r), 867343750)
+    let probes =[867343750u64, 1402031250u64, 2471406250u64]
+    let next =[1402031250u64, 2471406250u64, 4610156250u64]
+    for i in 0u64 .. 3 {
+        if let Probe(space: s) = recovery.on_timeout(mut r, probes[i]) {
+            eq("probe space", s, recovery.APPLICATION)
+        } else {
+            fail("PTO did not ask for a probe")
+        }
+        eq("pto count", recovery.pto_count(r), i + 1)
+        send(mut r, probes[i], 8 + i, 1200)
+        some("backed-off PTO", recovery.timer(r), next[i])
+    }
+    eq("cwnd after PTOs", recovery.window(r), 3409)
+    eq("in flight before persistent congestion", recovery.bytes_in_flight(r), 4800)
+    // Persistent congestion. ACK of packet 10 at 2571.40625 ms, ack_delay 0: latest
+    // 100 ms; rttvar = (3 * 34687500 + 3593750) / 4 = 26914062 (floor);
+    // srtt = (7 * 103593750 + 100000000) / 8 = 103144531 (floor).
+    // Packet 7 is lost by the packet threshold (10 >= 7 + 3); 8 and 9 by time
+    // (loss_delay 9/8 * 103.144531 = 116.04 ms, long past). B.8: the congestion event
+    // (latest lost sent at 1402.03 > 535 ms recovery start) halves to 1704, floored to
+    // kMinimumWindow 2400. Then 7, 8, 9 are contiguous ack-eliciting losses after the
+    // first RTT sample (100 ms) spanning 1402.03125 - 600 = 802.03125 ms, longer than
+    // (srtt + max(4 * rttvar, 1 ms) + max_ack_delay) * 3 =
+    // (103144531 + 107656248 + 25000000) * 3 = 707402337 ns: persistent congestion,
+    // cwnd = 2400 and the recovery period is cleared. Packet 10 is then acked outside
+    // recovery in congestion avoidance (2400 >= ssthresh 1704): cwnd += 1200 * 1200 /
+    // 2400 = 600, cwnd = 3000. pto_count resets (A.7).
+    let persistent = ack(mut r, 2571406250, 10, 10, 0)
+    numbers("persistent acked", persistent.acked, 10, 1)
+    numbers("persistent lost", persistent.lost, 7, 3)
+    eq("rttvar 5", recovery.rttvar(r), 26914062)
+    eq("srtt 5", recovery.smoothed_rtt(r), 103144531)
+    some("ssthresh 5", recovery.ssthresh(r), 1704)
+    eq("cwnd 5", recovery.window(r), 3000)
+    eq("pto count reset", recovery.pto_count(r), 0)
+    eq("in flight 5", recovery.bytes_in_flight(r), 0)
+    Ok(())
+}
+
+/// bug: CUBIC's K, W_max, W_cubic(t), the Reno-friendly estimate or the window
+/// increment, or HyStart++'s CSS entry, growth and exit round, departs from the RFCs.
+/// oracle: RFC 9438 §4.2-4.7 and RFC 9406 §4.2-4.3, evaluated by hand below.
+@test
+fn cubic_matches_rfc9438() -> Result[(), ()] {
+    // CUBIC. A client, RTT 100 ms throughout. Packets 0-26 at t=0; ACKs of 0-25 one by
+    // one at 100 ms. Constant RTT never trips HyStart++, so slow start gives
+    // cwnd = 12000 + 26 * 1200 = 43200.
+    let mut r = recovery.new(CubicHystart, 1200, true)
+    recovery.confirm(mut r, 0)
+    for n in 0u64 .. 27 {
+        send(mut r, 0, n, 1200)
+    }
+    for n in 0u64 .. 26 {
+        let _ = ack(mut r, 100 * MS, n, n, 0)
+    }
+    eq("cubic slow start", recovery.window(r), 43200)
+    // Packets 27-29 at 100 ms; one ACK of 27-29 at 200 ms loses packet 26 (29 >= 26 + 3).
+    // RFC 9438 §4.6: W_max = 43200, cwnd = ssthresh = 0.7 * 43200 = 30240.
+    // §4.2: K = cbrt((W_max - cwnd_epoch) / C) = cbrt((43200 - 30240) / 1200 / 0.4)
+    //      = cbrt(27) = 3 s. t_epoch = 200 ms. 27-29 were sent inside recovery: no growth.
+    for n in 27u64 .. 30 {
+        send(mut r, 100 * MS, n, 1200)
+    }
+    let loss = ack(mut r, 200 * MS, 27, 29, 0)
+    numbers("cubic loss", loss.lost, 26, 1)
+    eq("W_max", recovery.cubic_w_max(r), 43200)
+    eq("K", recovery.cubic_k_ms(r), 3000)
+    eq("cubic reduced window", recovery.window(r), 30240)
+    some("cubic ssthresh", recovery.ssthresh(r), 30240)
+    some("cubic epoch", recovery.cubic_epoch(r), 200 * MS)
+    // Figure 1: W_cubic(t) = 0.4 * (t - 3)^3 segments + W_max.
+    // t = 1 s: 0.4 * -8 * 1200 = -3840, 39360. t = 3 s: 43200. t = 5 s: +3840, 47040.
+    eq("W_cubic(1 s)", recovery.w_cubic(r, 1000), 39360)
+    eq("W_cubic(3 s)", recovery.w_cubic(r, 3000), 43200)
+    eq("W_cubic(5 s)", recovery.w_cubic(r, 5000), 47040)
+    // A 2520-byte packet sent at 1000 ms and acked at 1100 ms: t = 0.9 s, RTT 100 ms.
+    // §4.3: W_est = 30240 + alpha * 1200 * 2520 / 30240, alpha = 3 * 0.3 / 1.7 = 9/17,
+    // = 30240 + 52.94, floor 30292. W_cubic(0.9 s) = 43200 - 0.4 * 2.1^3 * 1200 =
+    // 38755.2 > W_est: the concave region (§4.4). target = W_cubic(t + RTT) = W_cubic(1 s)
+    // = 39360, within [cwnd, 1.5 cwnd]; cwnd += (39360 - 30240) * 2520 / 30240 = 760.
+    recovery.on_sent(mut r, 1000 * MS, recovery.APPLICATION, 30, 2520, true, true, false)
+    let _ = ack(mut r, 1100 * MS, 30, 30, 0)
+    eq("cubic concave growth", recovery.window(r), 31000)
+    // HyStart++ (RFC 9406). Round 1 sends only M1 at 0. Each later round r opens at the
+    // ACK of M(r-1), which ends round r-1 (§4.2: the round ends when the packet that
+    // started it is acked); the next send, M(r), starts round r. Between rounds, eight
+    // packets A(r) are sent ahead of M(r) and acked first in the following round. RTT is
+    // 100 ms for rounds 1-2 and 120 ms after; every ACK is one 1200-byte packet.
+    let mut h = recovery.new(CubicHystart, 1200, true)
+    recovery.confirm(mut h, 0)
+    let mut number = 0u64
+    let mut now = 0u64
+    let mut marker = number
+    send(mut h, now, marker, 1200)
+    number += 1
+    let mut a_first = number
+    let mut a_last = number
+    // Expected cwnd after each round's ACK of M(r), from 12000:
+    // round 1: +1200 = 13200. round 2: 8 A(2) and M(2), +9 * 1200 = 24000.
+    // round 3: A(3) at 120 ms; after the 8th sample, currentRoundMinRTT 120 >=
+    //   lastRoundMinRTT 100 + RttThresh max(4, min(100 / 8, 16)) = 112.5 ms, so CSS
+    //   starts at cwnd 24000 + 8 * 1200 = 33600 (§4.3), baseline 120. M(3) grows it by
+    //   1200 / CSS_GROWTH_DIVISOR 4 = 300: 33900, and ends CSS round 1.
+    // rounds 4-7: 9 ACKs * 300 = +2700 each, RTT 120 >= baseline so CSS continues.
+    //   End of round 7 is the fifth CSS round (CSS_ROUNDS): ssthresh = cwnd = 44700.
+    let expected =[13200u64, 24000u64, 33900u64, 36600u64, 39300u64, 42000u64, 44700u64]
+    for round in 1u64 .. 8 {
+        let rtt = if round <= 2 {
+            100 * MS
+        } else {
+            120 * MS
+        }
+        now += rtt
+        for n in a_first .. a_last {
+            let _ = ack(mut h, now, n, n, 0)
+            if round == 3 && n + 1 == a_last {
+                eq("CSS entry window", recovery.window(h), 33600)
+                some("CSS entered", recovery.css(h), 0)
+            }
+        }
+        a_first = number
+        for _ in 0u64 .. 8 {
+            send(mut h, now, number, 1200)
+            number += 1
+        }
+        a_last = number
+        let _ = ack(mut h, now, marker, marker, 0)
+        eq("HyStart++ round window", recovery.window(h), expected[round - 1])
+        marker = number
+        send(mut h, now, marker, 1200)
+        number += 1
+        if round < 7 {
+            if let None = recovery.ssthresh(h) {} else {
+                fail("HyStart++ left slow start early")
+            }
+        }
+    }
+    some("HyStart++ exit ssthresh", recovery.ssthresh(h), 44700)
+    if let Some(_) = recovery.css(h) {
+        fail("still in CSS after CSS_ROUNDS")
+    }
+    Ok(())
+}

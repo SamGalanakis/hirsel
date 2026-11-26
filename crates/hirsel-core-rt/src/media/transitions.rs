@@ -14,7 +14,7 @@ use hirsel_core_net::{packet_epoch::IssueError, packet_sframe::Sframe, tls_kdf::
 #[cfg(feature = "record")]
 const APPLICATION: u8 = 11;
 #[cfg(feature = "record")]
-const UPDATE: u8 = 12;
+use hirsel_tape_format::media::KEY_UPDATE;
 #[cfg(feature = "record")]
 const RETIRE: u8 = 13;
 #[cfg(feature = "record")]
@@ -42,7 +42,7 @@ unsafe fn record_transition(
         len: 0,
         capacity: 0,
     };
-    let args = capture::arguments(operation, 0, &[origin.operand(), operand]);
+    let args = capture::arguments(operation, 0, &[origin.operand.wire(&mut [0; 9]), operand]);
     // SAFETY: the context and frame operands remain live throughout the call.
     unsafe {
         capture::issue(
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_key_update(
     if schedule.origin.captured() {
         let local_wire = [u8::from(local)];
         let answer =
-            unsafe { record_transition(context, schedule.origin, UPDATE, &local_wire, site) };
+            unsafe { record_transition(context, schedule.origin, KEY_UPDATE, &local_wire, site) };
         if answer.status != 0 || answer.error != IoError::OK {
             return answer;
         }
@@ -224,7 +224,11 @@ pub unsafe extern "C" fn hirsel_core_schedule_finished(
         let args = capture::arguments(
             FINISHED,
             spare as u64,
-            &[schedule.origin.operand(), &of.to_le_bytes(), hash],
+            &[
+                schedule.origin.operand.wire(&mut [0; 9]),
+                &of.to_le_bytes(),
+                hash,
+            ],
         );
         // SAFETY: the borrowed output carrier and all inputs stay live through delivery.
         return unsafe {
@@ -284,7 +288,12 @@ pub unsafe extern "C" fn hirsel_core_schedule_verify_finished(
         let args = capture::arguments(
             VERIFY,
             0,
-            &[schedule.origin.operand(), &of.to_le_bytes(), hash, received],
+            &[
+                schedule.origin.operand.wire(&mut [0; 9]),
+                &of.to_le_bytes(),
+                hash,
+                received,
+            ],
         );
         let mut output = Buffer {
             data: std::ptr::null_mut(),

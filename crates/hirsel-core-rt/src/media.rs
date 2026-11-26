@@ -1,6 +1,8 @@
 //! Owned media state is pinned independently of the one-word resource carrier.
 mod agreement;
 use crate::Context;
+#[cfg(feature = "record")]
+use hirsel_tape_format::media::Operand;
 
 #[cfg(feature = "record")]
 pub(crate) mod capture;
@@ -145,12 +147,16 @@ pub(crate) struct Origin {
     #[cfg(feature = "record")]
     birth: Option<(u32, u64, u64)>,
     #[cfg(feature = "record")]
-    reference: [u8; 9],
+    operand: Operand,
+}
+
+#[derive(Clone, Copy)]
+enum PairMember {
+    First,
+    Second,
 }
 
 impl Origin {
-    #[cfg(feature = "record")]
-    const ARRIVAL: u8 = 3;
     pub(crate) fn new(delivery: u64, opaque: bool, payment: &Payment) -> Self {
         #[cfg(feature = "record")]
         {
@@ -158,11 +164,10 @@ impl Origin {
                 .cell
                 .made
                 .map(|(_, stream, admission)| (stream, delivery, admission));
-            let mut reference = [0; 9];
-            if opaque {
-                reference[..8].copy_from_slice(&delivery.to_le_bytes());
+            Self {
+                birth,
+                operand: Operand::Delivery(if opaque { delivery } else { 0 }),
             }
-            Self { birth, reference }
         }
         #[cfg(not(feature = "record"))]
         {
@@ -175,37 +180,34 @@ impl Origin {
     /// birth as written, and its new ordinal there as its operand.
     #[cfg(feature = "record")]
     pub(crate) fn arrived(birth: (u32, u64, u64), ordinal: u64) -> Self {
-        let mut reference = [0; 9];
-        reference[..8].copy_from_slice(&ordinal.to_le_bytes());
-        reference[8] = Self::ARRIVAL;
         Self {
             birth: Some(birth),
-            reference,
+            operand: Operand::Arrival(ordinal),
         }
     }
 
     #[cfg(feature = "record")]
     fn captured(&self) -> bool {
-        self.reference != [0; 9]
-    }
-
-    #[cfg(feature = "record")]
-    fn operand(&self) -> &[u8] {
-        &self.reference[..8 + usize::from(self.reference[8] != 0)]
+        !matches!(self.operand, Operand::Delivery(0))
     }
 
     #[cfg(feature = "record")]
     pub(crate) fn arrival(&self) -> Option<u64> {
-        (self.reference[8] == Self::ARRIVAL)
-            .then(|| u64::from_le_bytes(self.reference[..8].try_into().unwrap()))
+        match self.operand {
+            Operand::Arrival(ordinal) => Some(ordinal),
+            _ => None,
+        }
     }
 
-    fn member(self, member: u8) -> Self {
+    fn member(self, member: PairMember) -> Self {
         #[cfg(feature = "record")]
         {
             let mut origin = self;
-            if origin.captured() {
-                origin.reference[8] = member;
+            if let Operand::Delivery(ordinal @ 1..) = origin.operand {
+                origin.operand = match member {
+                    PairMember::First => Operand::First(ordinal),
+                    PairMember::Second => Operand::Second(ordinal),
+                };
             }
             origin
         }
@@ -260,7 +262,8 @@ unsafe fn issue_child(
             return Ok(0);
         }
         use crate::provider::{Buffer, IoError, Outcome};
-        let mut args: Vec<&[u8]> = vec![parent.operand()];
+        let mut wire = [0; 9];
+        let mut args: Vec<&[u8]> = vec![parent.operand.wire(&mut wire)];
         args.extend(fields.iter().map(|field| field.as_slice()));
         let mut empty = Buffer {
             data: std::ptr::null_mut(),

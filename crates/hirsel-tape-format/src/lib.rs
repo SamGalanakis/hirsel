@@ -16,6 +16,7 @@ mod frames;
 #[cfg(test)]
 mod generator_tests;
 mod index;
+pub mod media;
 mod payload;
 mod units;
 pub use arguments::Args;

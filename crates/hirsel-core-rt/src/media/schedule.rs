@@ -1,4 +1,4 @@
-use super::{Origin, Resource};
+use super::{Origin, PairMember, Resource};
 use crate::{
     Context, media,
     provider::{Buffer, IoError, Outcome},
@@ -324,8 +324,8 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
         })
     };
     Outcome {
-        value: hold(first, first_space, 1),
-        written: hold(second, second_space, 2),
+        value: hold(first, first_space, PairMember::First),
+        written: hold(second, second_space, PairMember::Second),
         ..Outcome::default()
     }
 }

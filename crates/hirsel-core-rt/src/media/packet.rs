@@ -85,7 +85,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
                 6,
                 (buf.capacity - buf.len) as u64,
                 &[
-                    sealer.origin.operand(),
+                    sealer.origin.operand.wire(&mut [0; 9]),
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
                     &at.to_le_bytes(),
@@ -210,7 +210,7 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
                 7,
                 available as u64,
                 &[
-                    sealer.origin.operand(),
+                    sealer.origin.operand.wire(&mut [0; 9]),
                     &seq.to_le_bytes(),
                     &from.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -326,7 +326,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
                 8,
                 0,
                 &[
-                    opener.origin.operand(),
+                    opener.origin.operand.wire(&mut [0; 9]),
                     &domain.to_le_bytes(),
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -456,7 +456,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
                 9,
                 (dst.capacity - dst.len) as u64,
                 &[
-                    opener.origin.operand(),
+                    opener.origin.operand.wire(&mut [0; 9]),
                     &domain.to_le_bytes(),
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -584,8 +584,15 @@ pub unsafe extern "C" fn hirsel_core_packet_mask(
         #[cfg(feature = "record")]
         if mask.origin.captured() {
             use super::capture::{self, Delivery};
-            let args =
-                capture::arguments(10, 0, &[mask.origin.operand(), &at.to_le_bytes(), sample]);
+            let args = capture::arguments(
+                10,
+                0,
+                &[
+                    mask.origin.operand.wire(&mut [0; 9]),
+                    &at.to_le_bytes(),
+                    sample,
+                ],
+            );
             let mut target = Buffer {
                 data: out.cast(),
                 len: 0,

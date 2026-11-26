@@ -388,6 +388,9 @@ impl Decoder {
                     let op = c.u8()?;
                     let object = c.varint()?;
                     let args = Args::decode(&mut c)?;
+                    if op == op::MEDIA_CAPTURE {
+                        crate::media::validate_args(&args)?;
+                    }
                     if matches!(
                         op,
                         op::UNIT_SPAWN
@@ -433,6 +436,9 @@ impl Decoder {
                     let op = c.u8()?;
                     let object = c.varint()?;
                     let args = Args::decode(&mut c)?;
+                    if op == op::MEDIA_CAPTURE {
+                        crate::media::validate_args(&args)?;
+                    }
                     if (matches!(
                         op,
                         op::UNIT_SPAWN | op::CONN_SEND | op::CONN_TRY_SEND | op::UNIT_CANCEL

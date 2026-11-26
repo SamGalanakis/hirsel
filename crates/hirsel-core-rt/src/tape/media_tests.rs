@@ -5,6 +5,38 @@ use hirsel_core_net::{
     srtp_cipher::{SrtpProfile, SrtpSpace},
     tls_kdf::{Side, dtls12::Dtls12Keys},
 };
+use hirsel_tape_format::media::Operand;
+
+#[test]
+fn media_origin_operand_wire() {
+    let ordinal = 0x0807_0605_0403_0201;
+    let decode = |operand: &[u8]| {
+        // Next-opener mode, zero spare and the single operand length.
+        let mut args = vec![24, 0, operand.len() as u8];
+        args.extend_from_slice(operand);
+        let frame = Frame::Op {
+            task: 0,
+            op: MEDIA_CAPTURE,
+            object: 0,
+            args: Args::Literal(args).buffered([0, 0]),
+            out: Out::default(),
+        };
+        let (bytes, _) = Encoder::default().frame(&frame);
+        Decoder::default().block(&bytes, false)
+    };
+    for (operand, tag) in [
+        (Operand::Delivery(ordinal), None),
+        (Operand::First(ordinal), Some(1)),
+        (Operand::Second(ordinal), Some(2)),
+        (Operand::Arrival(ordinal), Some(3)),
+    ] {
+        let mut expected = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        expected.extend(tag);
+        assert_eq!(operand.wire(&mut [0; 9]), expected);
+        assert!(decode(&expected).is_ok());
+    }
+    assert!(decode(&[1, 2, 3, 4, 5, 6, 7, 8, 4]).is_err());
+}
 
 #[test]
 fn recorded_srtp_child_supplies_packet_on_replay() {

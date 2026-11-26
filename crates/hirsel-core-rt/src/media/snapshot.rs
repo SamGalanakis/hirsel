@@ -1,6 +1,6 @@
 //! Public state of the five media handles that move between units.
 use super::{
-    Head, Origin, Resource, Slot,
+    Head, Operand, Origin, Resource, Slot,
     schedule::{Mask, Opener, Schedule, Sealer},
 };
 use crate::secret::key_share::Share;
@@ -29,8 +29,7 @@ pub(super) unsafe fn write<T: Resource>(word: u64, arrival: Option<u64>) -> Part
         .birth
         .ok_or("a key object was made outside a recorded unit")?;
     let ordinal = if let Some(ordinal) = arrival {
-        origin.reference[..8].copy_from_slice(&ordinal.to_le_bytes());
-        origin.reference[8] = Origin::ARRIVAL;
+        origin.operand = Operand::Arrival(ordinal);
         ordinal
     } else {
         origin.arrival().unwrap_or(0)

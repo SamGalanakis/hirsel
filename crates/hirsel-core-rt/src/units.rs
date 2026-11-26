@@ -33,6 +33,10 @@ mod env;
 pub(crate) use env::workers;
 #[path = "units_hooks.rs"]
 mod hooks;
+#[path = "units_host.rs"]
+mod host_calls;
+use host_calls::Helpers;
+pub(crate) use host_calls::{HostCall, off_slot};
 #[path = "units_launch.rs"]
 mod launch;
 #[path = "units_ledger.rs"]
@@ -331,6 +335,7 @@ pub(crate) struct Pool {
     lifo_runs: Vec<AtomicU32>,
     plan: UntiedPlan,
     units: UnitDirectory,
+    helpers: Helpers,
     injector: Mutex<VecDeque<UP>>,
     memory: Memory,
     /// Units in the local queues and the injector. The LIFO slots are not
@@ -432,7 +437,7 @@ unsafe fn start_stack(p: &'static Pool, u: &Unit) -> bool {
     #[cfg(test)]
     if check::modelled() {
         // SAFETY: by the contract.
-        unsafe { first_frame(u, UnitStack::new()) };
+        unsafe { first_frame(u, UnitStack::new(p.plan.unit_stack_bytes)) };
         return true;
     }
     if let Some(stack) = p.memory.cached_unit_stack() {
@@ -447,7 +452,7 @@ unsafe fn start_stack(p: &'static Pool, u: &Unit) -> bool {
     p.memory.post(move || {
         let up = up;
         // SAFETY: nobody else holds the dequeued unit until it is published.
-        unsafe { first_frame(&*up.0, UnitStack::new()) };
+        unsafe { first_frame(&*up.0, UnitStack::new(p.plan.unit_stack_bytes)) };
         publish(p, &p.injector, up);
     });
     false
@@ -719,107 +724,10 @@ fn enqueue(p: &Pool, u: &Unit) {
 // while its unit parks. The slot's thread runs other units meanwhile, and the
 // unit resumes on whichever slot takes it after the call completes.
 
-/// Run `call` off the slot: on a host helper thread while the running unit
-/// parks, or in place when no pool unit is running on this thread (a tied
-/// run, a launcher, a helper thread). The unit's state is frozen while it
-/// is parked, so `call` may use everything the unit owns.
-pub(crate) fn off_slot<T: Send>(call: impl FnOnce() -> T + Send) -> T {
-    let mut call = Some(call);
-    let mut answer = None;
-    let mut run = || answer = Some((call.take().unwrap())());
-    if !(untied() && (pool_hooks().off_slot)(&mut run)) {
-        run();
-    }
-    answer.unwrap()
-}
-
 /// True when this thread is a slot thread running a pool unit, which can
 /// park on a `Reply`.
 pub(crate) fn in_unit() -> bool {
     !cur().is_null() && worker_ix() < pool().w
-}
-
-struct HostJob {
-    call: *mut (dyn FnMut() + Send),
-    reply: *const Reply,
-}
-// SAFETY: the parked unit pins both until the reply completes.
-unsafe impl Send for HostJob {}
-
-struct Helpers {
-    jobs: VecDeque<HostJob>,
-    idle: usize,
-}
-static HELPERS: std::sync::Mutex<Helpers> = std::sync::Mutex::new(Helpers {
-    jobs: VecDeque::new(),
-    idle: 0,
-});
-static HELPER_WORK: std::sync::Condvar = std::sync::Condvar::new();
-/// Idle helpers kept for the next calls; a helper past this many exits.
-const KEPT_HELPERS: usize = 16;
-
-fn helpers() -> std::sync::MutexGuard<'static, Helpers> {
-    HELPERS.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Queue `call` for a host helper and park the running unit until it
-/// returns. False when this thread runs no pool unit, so the caller runs
-/// the call in place.
-fn run_off_slot(call: &mut (dyn FnMut() + Send)) -> bool {
-    if !in_unit() {
-        return false;
-    }
-    let reply = Reply::new();
-    // SAFETY: only the lifetime is erased. The unit stays parked until the
-    // helper completes the reply, and the helper never touches `call` after.
-    let call: *mut (dyn FnMut() + Send + 'static) =
-        unsafe { std::mem::transmute(call as *mut (dyn FnMut() + Send + '_)) };
-    let spawn = {
-        let mut h = helpers();
-        h.jobs.push_back(HostJob {
-            call,
-            reply: &reply,
-        });
-        // Every queued call has its own helper, so one call that waits for
-        // ever (a FIFO nobody writes) never delays another.
-        h.idle < h.jobs.len()
-    };
-    if spawn {
-        if std::thread::Builder::new()
-            .name("hirsel-host".into())
-            .spawn(run_helper)
-            .is_err()
-        {
-            crate::process::stop(b"HostThreads");
-        }
-    } else {
-        HELPER_WORK.notify_one();
-    }
-    reply.wait();
-    true
-}
-
-fn run_helper() {
-    let mut h = helpers();
-    loop {
-        let Some(job) = h.jobs.pop_front() else {
-            if h.idle >= KEPT_HELPERS {
-                return;
-            }
-            h.idle += 1;
-            h = HELPER_WORK.wait(h).unwrap_or_else(|e| e.into_inner());
-            h.idle -= 1;
-            continue;
-        };
-        drop(h);
-        // SAFETY: the job's unit is parked on its reply until this
-        // completes it; nothing here touches the job after.
-        unsafe {
-            (*job.call)();
-            Reply::complete(job.reply);
-        }
-        h = helpers();
-    }
 }
 
 /// Put `up` on queue `q`, count it and tell the pool.

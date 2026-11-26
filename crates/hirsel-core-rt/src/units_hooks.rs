@@ -1,7 +1,8 @@
 //! Pool callbacks: the tied scheduler reaches the unit pool only through
 //! these, so an executable that never enables the pool keeps none of it.
+use super::host_calls::{HostCall, run_off_slot};
 use super::{
-    SharedMemory, check_slot, park_unit, pool, pool_memory, reply, run_off_slot, sync::AtomicBool,
+    SharedMemory, check_slot, park_unit, pool, pool_memory, reply, sync::AtomicBool,
     wake_unit_by_id, worker_ix, yield_unit_if_needed,
 };
 use std::sync::{OnceLock, atomic::Ordering};
@@ -17,7 +18,7 @@ pub(super) struct PoolHooks {
     pub(super) park: fn(Option<u64>),
     pub(super) maybe_yield: fn(),
     pub(super) wake: fn(u32),
-    pub(super) off_slot: fn(&mut (dyn FnMut() + Send)) -> bool,
+    pub(super) off_slot: fn(HostCall, &mut (dyn FnMut() + Send)) -> bool,
     pub(super) take_slot: fn(),
     pub(super) uses_file_ring: fn() -> bool,
     pub(super) file_request: unsafe fn(hirsel_core_net::FileEntry) -> std::io::Result<i32>,

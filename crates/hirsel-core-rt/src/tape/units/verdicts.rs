@@ -3,9 +3,15 @@
 //! `Sealed` ends only that unit. When every started stream has ended, the
 //! replay writes one line per stream whose verdict is not `Sealed`, ordered by
 //! spawn-index path compared numerically, and exits 1 if it wrote any.
+use crate::units::Reply;
 use std::sync::{Condvar, Mutex};
 
+struct Waiter(*const Reply);
+// SAFETY: the root keeps its reply live until the last helper completes it.
+unsafe impl Send for Waiter {}
+
 struct Board {
+    waiting: Option<Waiter>,
     /// Started helper streams whose verdict is still to come.
     running: usize,
     /// Each verdict line other than `Sealed`, with its unit's name.
@@ -13,6 +19,7 @@ struct Board {
 }
 
 static BOARD: Mutex<Board> = Mutex::new(Board {
+    waiting: None,
     running: 0,
     lines: Vec::new(),
 });
@@ -28,7 +35,15 @@ pub(crate) fn ended(unit: &str, line: Option<String>) {
     let mut board = BOARD.lock().unwrap();
     board.running = board.running.saturating_sub(1);
     board.lines.extend(line.map(|line| (unit.to_owned(), line)));
-    ENDED.notify_all();
+    if board.running == 0 {
+        let waiter = board.waiting.take();
+        drop(board);
+        if let Some(Waiter(reply)) = waiter {
+            // SAFETY: this is the sole completion of the root's pinned reply.
+            unsafe { Reply::complete(reply) };
+        }
+        ENDED.notify_all();
+    }
 }
 
 /// The verdict of a unit no stream replays: a missing stream's.
@@ -36,31 +51,41 @@ pub(crate) fn unstarted(unit: &str, line: String) {
     BOARD.lock().unwrap().lines.push((unit.to_owned(), line));
 }
 
-/// A helper's replay ended at its verdict: no further program code of the
-/// unit runs, and its thread holds nothing another unit waits for. On the
-/// pool the unit parks and a host thread holds the wait, so its worker runs
-/// the other units.
+/// A helper's replay ended at its verdict. The pool can run another unit
+/// while this one stays parked until the process exits.
 pub(crate) fn park() -> ! {
-    crate::units::off_slot(|| -> () {
-        loop {
-            std::thread::park();
-        }
-    });
-    unreachable!("a replay's ended unit never resumes")
+    if crate::units::in_unit() {
+        Reply::new().wait();
+        unreachable!("a reply without a producer cannot complete");
+    }
+    loop {
+        std::thread::park();
+    }
 }
 
-/// Wait for every started stream's verdict, then write each line other than
-/// `Sealed` to `stderr` in unit-name order, `root`'s with them. True when it
-/// wrote one: the replay exits 1.
+/// Wait for each started stream, then print verdicts other than Sealed
+/// in unit-name order. True when the replay must exit 1.
 pub(crate) fn conclude(stderr: i32, root: Option<String>) -> bool {
-    // On the pool the root parks while a host thread waits, so its worker
-    // runs the helper streams it waits for.
-    crate::units::off_slot(|| {
-        let mut board = BOARD.lock().unwrap();
-        while board.running > 0 {
-            board = ENDED.wait(board).unwrap();
+    if crate::units::in_unit() {
+        let reply = Reply::new();
+        let needs_wait = {
+            let mut board = BOARD.lock().unwrap();
+            let running = board.running != 0;
+            if running {
+                assert!(board.waiting.replace(Waiter(&reply)).is_none());
+            }
+            running
+        };
+        if needs_wait {
+            reply.wait();
         }
-    });
+    } else {
+        drop(
+            ENDED
+                .wait_while(BOARD.lock().unwrap(), |board| board.running != 0)
+                .unwrap(),
+        );
+    }
     let mut board = BOARD.lock().unwrap();
     let mut lines = std::mem::take(&mut board.lines);
     lines.extend(root.map(|line| ("root".to_owned(), line)));

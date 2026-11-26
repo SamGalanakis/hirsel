@@ -6,6 +6,7 @@ use super::{
 
 pub(super) fn print(p: &Pool) {
     p.memory.report();
+    let (host_peak, host_queue_peak, host_deferred) = p.helpers.report();
     let g = |i: usize| USTATS[i].load(Ordering::Relaxed);
     #[cfg(feature = "record")]
     let tape_stats = format!(
@@ -23,7 +24,7 @@ pub(super) fn print(p: &Pool) {
     #[cfg(not(feature = "record"))]
     let tape_stats = "";
     eprintln!(
-        "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} unit_epoll_waits={} lifo={} net_uring={}{tape_stats}",
+        "untied-stats workers={} units={} resumes={} parks={} yields={} steals={} os_wakes={} gpolls={} gpoll_blocks={} gpoll_events={} timer_fires={} notified_requeue={} create_ns_avg={} ready_to_park_ns_avg={} unit_epoll_waits={} lifo={} net_uring={} max_units={} host_threads_cap={} host_threads_peak={host_peak} host_queued_peak={host_queue_peak} host_spawn_deferred={host_deferred}{tape_stats}",
         p.w,
         g(S_CREATED),
         g(S_RESUMES),
@@ -41,5 +42,7 @@ pub(super) fn print(p: &Pool) {
         hirsel_core_net::EPOLL_WAITS.load(Ordering::Relaxed),
         g(S_LIFO),
         u8::from(p.uring),
+        p.plan.max_units,
+        p.plan.max_host_threads,
     );
 }

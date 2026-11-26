@@ -21,7 +21,7 @@ pub(super) fn issue(request: &mut Request) -> Outcome {
     let result = match draw(request, crate::host::sys::RANDOM_NOWAIT) {
         Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => {
             let pinned = Pinned(request);
-            crate::units::off_slot(move || {
+            crate::units::off_slot(crate::units::HostCall::System, move || {
                 let pinned = pinned;
                 draw(pinned.0, 0)
             })

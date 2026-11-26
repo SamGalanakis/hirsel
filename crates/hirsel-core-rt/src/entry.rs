@@ -7,6 +7,10 @@ mod launch_options;
 mod startup;
 pub(crate) use startup::{Missing, StartupError, report_startup, take_inherited};
 
+#[path = "entry_describe.rs"]
+mod describe;
+use describe::describe_output;
+
 use crate::{
     Context,
     os::{DirectoryOperations, OsProvider, hirsel_core_os_directory_ops},
@@ -14,6 +18,7 @@ use crate::{
     process::{Config, View},
     provider::{Buffer, IoError, Provider},
     stop_signals::{StopSignals, hirsel_core_os_process_ops},
+    units::{HostCall, off_slot},
 };
 use hirsel_core_ids::launch::Metadata;
 use std::{
@@ -471,7 +476,9 @@ impl OsProcess {
                 let input = std::fs::File::from(duplicate(libc::STDIN_FILENO)?);
                 let mut old = Vec::new();
                 let limit = n_place.saturating_add(1);
-                crate::units::off_slot(|| input.take(limit).read_to_end(&mut old))?;
+                off_slot(HostCall::PeerWait, || {
+                    input.take(limit).read_to_end(&mut old)
+                })?;
                 if old.len() as u64 > n_place {
                     return Err(io::Error::from_raw_os_error(libc::EFBIG).into());
                 }
@@ -860,7 +867,7 @@ impl OsProcess {
             if let Some(exec) = &process._exec {
                 for line in &exec.lines {
                     let (fd, line) = (input.stderr_fd, line.as_bytes());
-                    let outcome = crate::units::off_slot(|| crate::os::write_all(fd, line));
+                    let outcome = off_slot(HostCall::System, || crate::os::write_all(fd, line));
                     if outcome.error != IoError::OK {
                         return Err(StartupError::Exec(
                             "could not write Exec approval record".into(),
@@ -1216,15 +1223,3 @@ mod startup_host_tests;
 #[cfg(test)]
 #[path = "entry_layout_tests.rs"]
 mod layout_tests;
-
-unsafe extern "C" fn describe_output(state: *mut u8, data: *const u8, len: usize) -> bool {
-    // SAFETY: the run pins its response view and the launch owner pins its sink.
-    unsafe {
-        let process = &*state.cast::<OsProcess>();
-        let Some(out) = &process.describe_out else {
-            return false;
-        };
-        let (fd, bytes) = (out.as_raw_fd(), bytes(View { data, len }));
-        crate::units::off_slot(|| crate::os::write_all(fd, bytes)).error == IoError::OK
-    }
-}

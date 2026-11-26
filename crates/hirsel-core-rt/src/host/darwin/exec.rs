@@ -190,7 +190,9 @@ impl Supervisor {
         failure: Option<SetupStep>,
     ) -> Result<Spawned, SpawnError> {
         // The spawner thread starts the child; this unit waits off the slot.
-        crate::units::off_slot(|| self.spawn_now(input, failure))
+        crate::units::off_slot(crate::units::HostCall::Bounded, || {
+            self.spawn_now(input, failure)
+        })
     }
 
     fn spawn_now(

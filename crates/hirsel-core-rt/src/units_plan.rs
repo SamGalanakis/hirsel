@@ -38,6 +38,7 @@ pub(super) struct UntiedPlan {
     pub(super) task_stack_reserve: usize,
     pub(super) max_units: u32,
     pub(super) physical_unit_limit: bool,
+    pub(super) host_thread_capacity: usize,
     pub(super) max_host_threads: usize,
     pub(super) kept_host_threads: usize,
     pub(super) reserved_system_threads: usize,
@@ -125,7 +126,7 @@ impl UntiedPlan {
         let host_stack = MIB;
         let memory_stack = 256 * KIB;
         let unit_stack = MIB;
-        let commit = (64 * KIB).max(4 * page);
+        let commit = crate::fiber::commit_for_page(page);
         let task_reserve = host.address_space_limit.map_or(8 * MIB, |limit| {
             let share = (limit / (16 * w as u64)).min((8 * MIB) as u64) as usize;
             (share / page * page).max(256 * KIB)
@@ -167,9 +168,10 @@ impl UntiedPlan {
         let memory_threads = address_left
             .map(|a| a / (4 * host_stack))
             .or_else(|| memory_left.map(|m| m / (8 * 128 * KIB)));
+        let host_thread_capacity = host.thread_limit.map_or(usize::MAX, |t| t - occupied);
         let max_host_threads = (8 * w)
             .clamp(16, 256)
-            .min(host.thread_limit.map_or(usize::MAX, |t| t - occupied))
+            .min(host_thread_capacity)
             .min(memory_threads.unwrap_or(usize::MAX))
             .max(1);
         let physical_units = min_limit(
@@ -216,6 +218,7 @@ impl UntiedPlan {
             task_stack_reserve: task_reserve,
             max_units,
             physical_unit_limit,
+            host_thread_capacity,
             max_host_threads,
             kept_host_threads: (2 * w).min(max_host_threads).min(16),
             reserved_system_threads: if max_host_threads >= 4 { 2 } else { 0 },

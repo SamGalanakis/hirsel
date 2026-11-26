@@ -13,7 +13,6 @@ use std::{
 };
 
 const MIB: usize = 1 << 20;
-const UNIT_STACK_BYTES: usize = MIB;
 const RELEASE_SLOTS: usize = 32_768;
 
 pub(super) struct UnitStack {
@@ -26,9 +25,9 @@ pub(super) struct UnitStack {
 unsafe impl Send for UnitStack {}
 
 impl UnitStack {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(usable_bytes: usize) -> Self {
         let guard = crate::task_heap::page_bytes();
-        let len = UNIT_STACK_BYTES + guard;
+        let len = usable_bytes + guard;
         // SAFETY: allocate a private stack and make its lowest page inaccessible.
         unsafe {
             let raw = libc::mmap(
@@ -157,6 +156,7 @@ struct Work {
 }
 
 pub(crate) struct Memory {
+    plan: super::UntiedPlan,
     launch: OnceLock<hirsel_core_ids::launch::Metadata>,
     unit_stacks: Cache<UnitStack>,
     task_stacks: Cache<Stack>,
@@ -180,10 +180,11 @@ pub(crate) trait SharedMemory: Sync {
 }
 
 impl Memory {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(plan: super::UntiedPlan) -> Self {
         Self {
+            plan,
             launch: OnceLock::new(),
-            unit_stacks: Cache::new(64 * MIB, UNIT_STACK_BYTES),
+            unit_stacks: Cache::new(64 * MIB, plan.unit_stack_bytes),
             task_stacks: Cache::new(64 * MIB, crate::fiber::COMMIT),
             slabs: Cache::new(128 * MIB, crate::task_heap::SLAB),
             pages: Cache::new(64 * MIB, crate::task_heap::page_bytes()),
@@ -344,9 +345,10 @@ impl SharedMemory for Memory {
     }
 
     fn take_task_stack(&self) -> Stack {
+        let reserve = self.plan.task_stack_reserve;
         self.task_stacks
             .take(|_| true)
-            .unwrap_or_else(|| self.map(Stack::new))
+            .unwrap_or_else(|| self.map(move || Stack::new_with_reserve(reserve)))
     }
 
     fn put_task_stack(&self, stack: Stack) {

@@ -3178,7 +3178,7 @@ fn leave_task_tls() {
         unsafe { prof_dispatch(task, false) };
     }
     CURRENT.set_here(ptr::null_mut());
-    crate::fiber::guard_here((0, 0));
+    crate::fiber::guard_here((0, 0, 0));
 }
 /// # Safety
 /// `task` is the resuming task, pinned by its run.
@@ -3894,7 +3894,7 @@ impl RunPtr {
                 hirsel_stack::switch(idle, (*task).sp);
                 #[cfg(feature = "prof")]
                 prof_dispatch(task, false);
-                crate::fiber::guard((0, 0));
+                crate::fiber::guard((0, 0, 0));
                 crate::limit::Funding::unbind();
                 CURRENT.set(previous);
                 match (*task).state {

@@ -252,21 +252,23 @@ pub(crate) fn pinned_socket(root: BorrowedFd<'_>, path: &str) -> io::Result<Endp
 pub(crate) fn private_bind(fd: BorrowedFd<'_>, parent: OwnedFd, name: &str) -> Result<()> {
     let leaf = std::ffi::CString::new(name).map_err(|_| libc::EINVAL)?;
     let fd = fd.as_raw_fd();
-    // The bind runs on its own thread, which this unit waits for off the slot.
-    crate::units::off_slot(move || {
+    let bind = move || {
+        // SAFETY: fd remains borrowed by the caller until the bind returns.
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        hirsel_core_net::unix::bind_in(fd, parent.as_fd(), &leaf).map_err(host)
+    };
+    if crate::units::in_unit() {
+        // Its own transient thread, since the bind changes that thread's cwd.
+        crate::units::off_slot(crate::units::HostCall::PeerWait, bind)
+    } else {
         std::thread::scope(|scope| {
             std::thread::Builder::new()
-                .spawn_scoped(scope, move || {
-                    // SAFETY: fd remains borrowed until the join. Only this
-                    // helper's cwd changes, and the parent entry stays pinned.
-                    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-                    hirsel_core_net::unix::bind_in(fd, parent.as_fd(), &leaf).map_err(host)
-                })
+                .spawn_scoped(scope, bind)
                 .map_err(host)?
                 .join()
                 .unwrap()
         })
-    })
+    }
 }
 
 pub(crate) fn bound(

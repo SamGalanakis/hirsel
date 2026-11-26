@@ -44,7 +44,7 @@ impl StopSignals {
     fn install() -> io::Result<Self> {
         // The relay's start and its lock wait off the slot. The relay keeps
         // `state` while this user holds it.
-        let state = crate::units::off_slot(|| {
+        let state = crate::units::off_slot(crate::units::HostCall::System, || {
             let mut active = ACTIVE.lock().unwrap();
             if active.is_none() {
                 *active = Some(Relay::install()?);
@@ -78,7 +78,7 @@ impl Drop for StopSignals {
 
 fn release() {
     // The last user joins the relay thread, off the slot.
-    crate::units::off_slot(|| {
+    crate::units::off_slot(crate::units::HostCall::System, || {
         let mut active = ACTIVE.lock().unwrap();
         let relay = active.as_mut().unwrap();
         relay.users -= 1;

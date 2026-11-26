@@ -117,7 +117,7 @@ impl OsProvider {
     /// Only run configuration can acquire a root from an ambient host path.
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub fn grant(&mut self, path: &Path) -> io::Result<u64> {
-        let file = crate::units::off_slot(|| {
+        let file = crate::units::off_slot(crate::units::HostCall::PeerWait, || {
             let file = std::fs::File::open(path)?;
             if !file.metadata()?.is_dir() {
                 return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
@@ -137,7 +137,7 @@ impl OsProvider {
     #[cfg_attr(hirsel_runtime_size, optimize(size))]
     pub(crate) fn probe_directory(&self, handle: u64) -> io::Result<()> {
         let directory = self.directory(handle);
-        crate::units::off_slot(|| {
+        crate::units::off_slot(crate::units::HostCall::Bounded, || {
             drop(beneath(directory, b".", host::path::DIRECTORY_HANDLE)?);
             Ok(())
         })
@@ -292,7 +292,7 @@ impl OsProvider {
                 ));
             }
             CLOSE => {
-                let fd = self.tables().files.remove(&request.handle).unwrap();
+                let fd = self.tables().files.remove(&request.handle).unwrap().fd;
                 close_file(fd)?;
             }
             TRY_LOCK | TRY_LOCK_SHARED | UNLOCK => {
@@ -575,7 +575,7 @@ pub(crate) unsafe fn duplicate_file(provider: &Provider, handle: u64) -> Option<
     }
     // SAFETY: the OS provider's state is its OsProvider.
     let os = unsafe { &*provider.state.cast::<OsProvider>() };
-    let fd = os.tables().files.get(&handle)?.as_raw_fd();
+    let fd = os.tables().files.get(&handle)?.fd.as_raw_fd();
     // SAFETY: a live descriptor; the duplicate is owned by the result.
     let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
     // SAFETY: a fresh descriptor nothing else owns.
@@ -756,22 +756,51 @@ unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Ou
             // SAFETY: nonblocking flock completes in place.
             return unsafe { issue_now(state, request) };
         }
-        OPEN | OPEN_DIR | STAT | STAT_FILE | CLOSE | READ | READ_AT | WRITE | WRITE_AT
-        | ZERO_AT | SYNC | SYNC_DIR | RENAME | MKDIR | REMOVE
-            if crate::units::uses_file_ring() =>
-        {
-            // SAFETY: the request is pinned until the CQE completes.
-            return unsafe { issue_now(state, request) };
-        }
         _ => {}
+    }
+    use crate::units::HostCall;
+    // SAFETY: issue owns the request and its provider for this call.
+    let (os, r) = unsafe { (&*state.cast::<OsProvider>(), &*request) };
+    let class = match r.operation {
+        STDOUT | STDERR => HostCall::PeerWait,
+        // Exclusive creation cannot open a pre-existing FIFO or device.
+        OPEN if r.mode != 3 => HostCall::PeerWait,
+        CLOSE | READ | READ_AT | WRITE | WRITE_AT | ZERO_AT | SYNC
+            if crate::units::untied() && os.peer_file(r.handle) =>
+        {
+            HostCall::PeerWait
+        }
+        _ => HostCall::Bounded,
+    };
+    if class == HostCall::Bounded
+        && crate::units::uses_file_ring()
+        && matches!(
+            r.operation,
+            OPEN | OPEN_DIR
+                | STAT
+                | STAT_FILE
+                | CLOSE
+                | READ
+                | READ_AT
+                | WRITE
+                | WRITE_AT
+                | ZERO_AT
+                | SYNC
+                | SYNC_DIR
+                | RENAME
+                | MKDIR
+                | REMOVE
+        )
+    {
+        // SAFETY: a bounded file request stays pinned until the CQE completes.
+        return unsafe { issue_now(state, request) };
     }
     struct Issue(*mut u8, *mut Request);
     // SAFETY: the unit stays parked, and its operation pinned, until the
     // helper returns.
     unsafe impl Send for Issue {}
     let issue = Issue(state, request);
-    // Every other operation can wait without bound, so it runs off the slot.
-    crate::units::off_slot(move || {
+    crate::units::off_slot(class, move || {
         let issue = issue;
         // SAFETY: forwarded caller contract.
         unsafe { issue_now(issue.0, issue.1) }

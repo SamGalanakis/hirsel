@@ -111,7 +111,7 @@ impl Reply {
         let task = CURRENT.replace(ptr::null_mut());
         let callback = CALLBACK_TASK.replace(ptr::null_mut());
         let guard = crate::fiber::guarded();
-        crate::fiber::guard((0, 0));
+        crate::fiber::guard((0, 0, 0));
         crate::limit::preserve_binding(|| {
             while !self.done.load(Ordering::Acquire) {
                 park_unit(None);

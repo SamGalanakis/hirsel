@@ -19,13 +19,17 @@ use std::{
 };
 const RESERVE: usize = 8 << 20;
 pub(crate) const COMMIT: usize = 64 << 10;
+pub(crate) fn commit_for_page(page: usize) -> usize {
+    COMMIT.max(4 * page)
+}
+
 const GROW: usize = 256 << 10;
 /// Bytes kept at the top for the low-water word; a multiple of 16.
 const HEADER: usize = 16;
 thread_local! {
     static ALTERNATE: Alternate = Alternate::new();
 }
-crate::units::moved_tls! { static GUARD: (usize, usize) = (0, 0); }
+crate::units::moved_tls! { static GUARD: (usize, usize, usize) = (0, 0, 0); }
 crate::units::moved_tls! { static STOP_FD: i32 = 2; }
 /// The signals a touch of an inaccessible stack page raises: Darwin reports a
 /// protection fault on a mapped `PROT_NONE` page as SIGBUS, Linux as SIGSEGV.
@@ -51,11 +55,10 @@ pub(crate) fn set_stop_fd_here(fd: i32) -> i32 {
 }
 #[cfg(feature = "prof")]
 pub(crate) fn profile_stack_top(sp: usize) -> Option<usize> {
-    let (_, guard_end) = GUARD.get();
+    let (_, guard_end, top) = GUARD.get();
     if guard_end == 0 {
         return None;
     }
-    let top = guard_end + RESERVE;
     if sp < guard_end || sp >= top - HEADER {
         return None;
     }
@@ -65,23 +68,23 @@ pub(crate) fn profile_stack_top(sp: usize) -> Option<usize> {
     (sp >= committed).then_some(top - HEADER)
 }
 
-pub(crate) fn guard(bounds: (usize, usize)) {
+pub(crate) fn guard(bounds: (usize, usize, usize)) {
     GUARD.set(bounds);
 }
 /// The bounds `guard` last set.
-pub(crate) fn guarded() -> (usize, usize) {
+pub(crate) fn guarded() -> (usize, usize, usize) {
     GUARD.get()
 }
 /// `guard` from code that does not cross a stack switch before returning.
 #[inline(always)]
-pub(crate) fn guard_here(bounds: (usize, usize)) {
+pub(crate) fn guard_here(bounds: (usize, usize, usize)) {
     GUARD.set_here(bounds);
 }
 /// Whether the current stack has `bytes` above its guard page. A thread with
 /// no guarded stack current (a launcher or worker thread's own stack) has room.
 #[inline(always)]
 pub(crate) fn room(bytes: usize) -> bool {
-    let (_, end) = GUARD.get();
+    let (_, end, _) = GUARD.get();
     let here = 0u8;
     std::hint::black_box(&here as *const u8)
         .addr()
@@ -127,8 +130,13 @@ pub(crate) struct Stack {
 }
 impl Stack {
     pub(crate) fn new() -> Self {
+        Self::new_with_reserve(RESERVE)
+    }
+
+    pub(crate) fn new_with_reserve(reserve: usize) -> Self {
         let page_bytes = page();
-        let len = page_bytes + RESERVE;
+        let commit = commit_for_page(page_bytes);
+        let len = page_bytes + reserve;
         // SAFETY: fresh inaccessible private mapping, then enable only its top pages.
         unsafe {
             let raw = libc::mmap(
@@ -144,14 +152,14 @@ impl Stack {
             }
             let top = raw.addr() + len;
             if libc::mprotect(
-                raw.cast::<u8>().add(len - COMMIT).cast(),
-                COMMIT,
+                raw.cast::<u8>().add(len - commit).cast(),
+                commit,
                 libc::PROT_READ | libc::PROT_WRITE,
             ) != 0
             {
                 crate::process::stop(b"HostMemory");
             }
-            low_word(top).write(top - COMMIT);
+            low_word(top).write(top - commit);
             Self {
                 base: NonNull::new_unchecked(raw.cast()),
                 len,
@@ -164,8 +172,12 @@ impl Stack {
             }
         }
     }
-    pub(crate) fn bounds(&self) -> (usize, usize) {
-        (self.base.as_ptr().addr(), self.guard_end)
+    pub(crate) fn bounds(&self) -> (usize, usize, usize) {
+        (self.base.as_ptr().addr(), self.guard_end, self.top())
+    }
+
+    fn guard_bytes(&self) -> usize {
+        self.guard_end - self.base.as_ptr().addr()
     }
 
     /// # Safety
@@ -175,7 +187,7 @@ impl Stack {
         struct Frame<T, F> {
             call: Option<F>,
             previous: *mut u8,
-            bounds: (usize, usize),
+            bounds: (usize, usize, usize),
             result: std::mem::MaybeUninit<T>,
         }
         unsafe extern "C" fn invoke<T, F: FnOnce() -> T>(first: *mut u8, _: *mut u8) -> ! {
@@ -258,21 +270,22 @@ impl Stack {
     }
     /// Bytes an idle, trimmed stack keeps writable: its guard page and first `COMMIT`.
     fn retained(&self) -> usize {
-        self.len - RESERVE + COMMIT
+        self.guard_bytes() + commit_for_page(self.guard_bytes())
     }
     /// Upper bound on resident bytes while this idle mapping is cached.
     pub(crate) fn committed_bytes(&self) -> usize {
         let top = self.top();
         // SAFETY: this stack is idle and its low-water word is writable.
-        top - unsafe { *low_word(top) } + self.len - RESERVE
+        top - unsafe { *low_word(top) } + self.guard_bytes()
     }
     /// Return a stack that grew to its first `COMMIT` bytes. A stack that never
     /// left them costs one load and compare, inlined into recycling.
     fn trim(&self) {
         let top = self.top();
         // SAFETY: the stack is idle and its top word is always writable.
-        if unsafe { *low_word(top) } < top - COMMIT {
-            release(self.guard_end, top);
+        let committed = top - commit_for_page(self.guard_bytes());
+        if unsafe { *low_word(top) } < committed {
+            release(self.guard_end, top, committed);
         }
     }
 
@@ -281,7 +294,7 @@ impl Stack {
     /// the page containing `sp` has no live frame.
     pub(crate) unsafe fn discard_below(&self, sp: usize) {
         let top = self.top();
-        let page = self.len - RESERVE;
+        let page = self.guard_bytes();
         // SAFETY: the stack is pinned and the low-water word remains writable.
         let low = unsafe { low_word(top).read() };
         debug_assert!((low..top).contains(&sp));
@@ -299,8 +312,7 @@ impl Stack {
 /// stack stays inlined and keeps the stack in registers.
 #[cold]
 #[inline(never)]
-fn release(guard_end: usize, top: usize) {
-    let committed = top - COMMIT;
+fn release(guard_end: usize, top: usize, committed: usize) {
     // SAFETY: the stack is idle; the range is inside its own reservation.
     unsafe {
         let raw = libc::mmap(
@@ -426,7 +438,7 @@ impl Stock {
     /// frames, so the rest of its writable pages can return to the host.
     pub(crate) fn cool_kept(&mut self) {
         for (stack, _) in self.kept.iter().skip(self.cooled) {
-            let page = stack.len - RESERVE;
+            let page = stack.guard_bytes();
             // SAFETY: the stock owns this idle stack. Recycling trimmed
             // it to COMMIT, and the last native page holds its low word.
             unsafe { stack.discard_below(stack.top() - page) };
@@ -452,14 +464,15 @@ struct Alternate {
 }
 impl Alternate {
     fn new() -> Self {
-        let stack = Stack::new();
+        let commit = commit_for_page(page());
+        let stack = Stack::new_with_reserve(commit);
         // SAFETY: install owned usable pages as the current thread's signal stack.
         unsafe {
             let mut previous = std::mem::zeroed();
             let new = libc::stack_t {
-                ss_sp: std::ptr::with_exposed_provenance_mut(stack.top() - COMMIT),
+                ss_sp: std::ptr::with_exposed_provenance_mut(stack.top() - commit),
                 ss_flags: 0,
-                ss_size: COMMIT - HEADER,
+                ss_size: commit - HEADER,
             };
             if libc::sigaltstack(&new, &mut previous) != 0 {
                 crate::process::stop(b"SignalStack");
@@ -480,20 +493,21 @@ impl Drop for Alternate {
 unsafe extern "C" fn fault(signal: i32, info: *mut libc::siginfo_t, context: *mut libc::c_void) {
     // SAFETY: SA_SIGINFO receives a live kernel siginfo for this fault.
     let address = unsafe { (*info).si_addr() as usize };
-    let (lo, hi) = GUARD.get();
+    let (lo, hi, top) = GUARD.get();
     if lo <= address && address < hi {
         crate::process::stop(b"Stack");
     }
     // A touch below the current stack's writable part commits the next GROW
     // bytes (or up to the guard page) and resumes the faulting instruction.
-    if hi != 0 && hi <= address && address < hi + RESERVE {
-        let top = hi + RESERVE;
+    if hi != 0 && hi <= address && address < top {
         // SAFETY: the current stack's top word is always writable.
         unsafe {
             let low = low_word(top);
             if address < *low {
                 let page = hi - lo;
-                let from = (address & !(page - 1)).min(*low - GROW).max(hi);
+                let from = (address & !(page - 1))
+                    .min((*low).saturating_sub(GROW))
+                    .max(hi);
                 if libc::mprotect(
                     std::ptr::with_exposed_provenance_mut(from),
                     *low - from,

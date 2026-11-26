@@ -117,11 +117,11 @@ fn recycled_stacks_come_back_trimmed_whether_kept_or_surplus() {
             }
             seen
         };
-        super::guard((0, 0));
+        super::guard((0, 0, 0));
         seen
     };
     let shape = |stack: &super::Stack| {
-        let (base, guard_end) = stack.bounds();
+        let (base, guard_end, _) = stack.bounds();
         // SAFETY: an idle stack's top word is always writable.
         let low = unsafe { *super::low_word(stack.top()) };
         (stack.len, guard_end - base, stack.top() - low)
@@ -331,7 +331,7 @@ fn commit_edge_call_child() {
             super::guard(caller.bounds());
             hirsel_stack::switch(&raw mut edge.caller, start);
         }
-        super::guard((0, 0));
+        super::guard((0, 0, 0));
         assert_eq!(edge.result, 7, "offset {offset}");
     }
 }

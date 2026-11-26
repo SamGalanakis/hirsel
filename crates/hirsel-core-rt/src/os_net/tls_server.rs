@@ -121,7 +121,7 @@ unsafe fn accept_step(request: *mut Request, token: u64, first: bool) -> Step {
             };
             let chain = std::mem::take(&mut state.chain);
             let alpn = std::mem::take(&mut state.alpn);
-            let started = crate::units::off_slot(move || {
+            let started = crate::units::off_slot(crate::units::HostCall::Bounded, move || {
                 server::start(fd, *accepted, chain, &document[..], alpn)
             });
             match started {

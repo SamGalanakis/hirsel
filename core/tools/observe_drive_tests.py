@@ -68,13 +68,16 @@ def main():
                 if codec.at != len(codec.data):
                     raise ValueError('trailing drive verdict bytes')
             bad = []
-            expected_h = mix == 'AdvanceOnRefusal'
-            h_failed = any(v['clause'] == 'H' and v['status'] == 'Failed' for v in suites.get('positions', ()))
-            control_good = h_failed == expected_h
-            if expected_h:
+            # STORE-SPEC §1.8: a V1 refusal leaves the stream without a row.
+            # The control jumps to p1 (H), which the store refuses with
+            # HistoryUnavailable despite there being no latest position (HU).
+            expected_failures = {'H', 'HU'} if mix == 'AdvanceOnRefusal' else set()
+            control_failures = {v['clause'] for v in suites.get('positions', ()) if v['status'] == 'Failed'}
+            control_good = expected_failures <= control_failures
+            if expected_failures:
                 controls += control_good
-                if not control_good:
-                    print(f'OBSERVER positions CONTROL-FAILED clause=H client={mix} seed={seed} expected=Failed actual=not-Failed', flush=True)
+                for clause in sorted(expected_failures - control_failures):
+                    print(f'OBSERVER positions CONTROL-FAILED clause={clause} client={mix} seed={seed} expected=Failed actual=not-Failed', flush=True)
             for observer, verdicts in suites.items():
                 for v in verdicts:
                     name = observer + '.' + v['clause']
@@ -85,7 +88,7 @@ def main():
                     elif v['status'] == 'Unavailable':
                         unavailable.add((name, v['needs']))
                     elif v['status'] == 'Failed':
-                        expected = observer == 'positions' and v['clause'] == 'H' and expected_h
+                        expected = observer == 'positions' and v['clause'] in expected_failures
                         if not expected:
                             bad.append((observer, v))
                         print(f'OBSERVER {observer} FAILED clause={v["clause"]} key={shown_key(v["key"])} '
@@ -95,7 +98,7 @@ def main():
                         print(f'OBSERVER {observer} INCOMPLETE pending={v["clause"]}[{v["pending"]}] seed={seed}', flush=True)
                         bad.append((observer, v))
             good = value == 1 and t['header']['complete'] and control_good and not bad
-            if not good or h_failed:
+            if not good or expected_failures:
                 (args.artifacts / f'drive-{seed}.obs').write_text(json.dumps(t, indent=2) + '\n')
                 (args.artifacts / f'drive-{seed}.log').write_text(json.dumps(report, indent=2) + '\n')
             handoffs.record_visible(t, observed)
@@ -120,7 +123,7 @@ def main():
     print('HELD: ' + ', '.join(f'{c}({n})' for c, n in sorted(coverage.items())))
     print('VACUOUS: ' + ', '.join(c for c in names if c not in exercised and not any(u[0] == c for u in unavailable)))
     print('UNAVAILABLE: ' + ', '.join(f'{c}({needs})' for c, needs in sorted(unavailable)))
-    print(f'OBSERVE DRIVE seeds={len(seeds)} observer_bodies={observer_bodies} fixture_bodies={fixture_bodies} passed={passed} H_negative_controls={controls} failed={failures}')
+    print(f'OBSERVE DRIVE seeds={len(seeds)} observer_bodies={observer_bodies} fixture_bodies={fixture_bodies} passed={passed} H_HU_negative_controls={controls} failed={failures}')
     return int(bool(failures))
 
 

@@ -118,10 +118,19 @@ def incomplete_deadline():
         print('incomplete_message_deadline: PASS', flush=True)
 
 
+def max_batch_call():
+    # Call and Done both carry StreamId(t, n) as two little-endian u64s.
+    # The Batch has a 24-byte prefix and a 32-byte Returned row header.
+    arg = b'a' * (262144 - 56)
+    call = struct.pack('<IQQQIII', 1, 0, 7, 2, 0, 1000, len(arg)) + arg
+    batch = struct.pack('<IQIII', 6, 0, 0, 0, 1) + struct.pack('<QQQII', 0, 7, 2, 0, len(arg)) + arg
+    assert len(batch) == 262144
+    return call, batch
+
+
 def blocked_write_deadline():
     with session_with_hello() as s:
-        arg = b'a' * (262144 - 44)
-        call = struct.pack('<IIQIII', 1, 7, 2, 0, 1000, len(arg)) + arg
+        call, _ = max_batch_call()
         s.sendall(frame(2, call))
         time.sleep(37)
         s.settimeout(3)
@@ -174,10 +183,7 @@ def main():
                                 assert s.recv(1) == b''
                         print('session concurrent upgrades, tail, dispatch, Pong, Close: PASS', flush=True)
 
-                        arg = b'a' * (262144 - 44)
-                        call = struct.pack('<IIQIII', 1, 7, 2, 0, 1000, len(arg)) + arg
-                        batch = struct.pack('<IQIII', 6, 0, 0, 0, 1) + struct.pack('<IQII', 7, 2, 0, len(arg)) + arg
-                        assert len(batch) == 262144
+                        call, batch = max_batch_call()
                         with connect(18094) as s:
                             s.sendall(REQUEST)
                             assert b'HTTP/1.1 101 ' in head(s)

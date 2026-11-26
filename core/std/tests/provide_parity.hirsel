@@ -270,7 +270,7 @@ fn loopback(take s: Served[NetOp]) -> u64 waits {
                         id = id + 4
                         Some(Listener(id, here))
                     },
-                    Connect(addr, _) => {
+                    Connect(addr: addr, ..) => {
                         id = id + 4
                         Some(Socket(id, here))
                     },
@@ -278,8 +278,8 @@ fn loopback(take s: Served[NetOp]) -> u64 waits {
                         id = id + 4
                         Some(Socket(id, Addr(ip: V4(2130706433), port: 5000)))
                     },
-                    LocalAddr(_) => Some(Address(Addr(ip: V4(2130706433), port: 5000))),
-                    PeerAddr(_) => Some(Address(Addr(ip: V4(2130706433), port: 5000))),
+                    LocalAddr(id: _) => Some(Address(Addr(ip: V4(2130706433), port: 5000))),
+                    PeerAddr(socket: _) => Some(Address(Addr(ip: V4(2130706433), port: 5000))),
                     Send(socket, prefix, tail) => {
                         list.clear(mut data)
                         provide.payload(c, 1, mut data)

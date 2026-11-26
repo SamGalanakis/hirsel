@@ -16,8 +16,9 @@ from std_native import ROOT
 # OBSERVERS-SPEC §6 requires a client log. R1 also exercises startup,
 # reserves and direct head requests outside the traced client session.
 UNOBSERVED_CALLS = NATIVE_ONLY_CALLS | {
-    'atomic_migration', 'drain_answers_once', 'duplicate_own_reply',
-    'ready_after_activation', 'release_digest', 'serve_bounded_and_settled',
+    # The grant laws use fixture.client or wire_client directly.
+    'atomic_migration', 'bind_granted', 'drain_answers_once', 'duplicate_own_reply',
+    'granted_copied', 'ready_after_activation', 'release_digest', 'serve_bounded_and_settled',
 }
 LIVE_CASES = (*(case for case in CALLS if case not in UNOBSERVED_CALLS), 'observe_early_then_late')
 CLAUSES = ('J1', 'J2', 'J3', 'J4', 'J5', 'J6')
@@ -54,26 +55,27 @@ def traced_calls(files, work):
     text = replace(text, 'type Drive: send {', 'type Drive: send { out: Stdout, err: Stderr,')
     text = text.replace('let d = Drive(', 'let d = Drive(out: out, err: err, ')
     text = re.sub(r'(pub fn law_\w+\()', r'\1out: Stdout, err: Stderr, ', text)
-    for name in ('served', 'served_in', 'served_on', 'served_on_with_place'):
+    for name in ('served', 'served_in', 'served_on', 'served_on_with_place', 'served_expiring'):
         text = replace(text, f'fn {name}(', f'fn {name}(out: Stdout, err: Stderr, ')
         text = re.sub(rf'(?<!fn )\b{name}\(', f'{name}(out, err, ', text)
-    text = replace(text, 'Some(Socket(take cn, take h))',
-                   'Some(observed(d, Socket(take cn, take h)))')
-    text = replace(text, 'Socket(take cn, take h)\n}', 'observed(d, Socket(take cn, take h))\n}')
+    text = replace(text, 'Some(Socket(take cn, take h, d.birth))',
+                   'Some(trace_conn(d, Socket(take cn, take h, d.birth)))')
+    text = replace(text, 'Socket(take cn, take h, d.birth)\n}', 'trace_conn(d, Socket(take cn, take h, d.birth))\n}')
     text = re.sub(r'Held\(runner\.fixture_owner\(d\.post, (\w+\(\w+\))\)\)',
-                  r'observed(d, Held(runner.fixture_owner(d.post, \1)))', text)
+                  r'trace_conn(d, Held(runner.fixture_owner(d.post, \1)))', text)
     text = text.replace('match cn {', 'match cn.link {')
     text = replace(text, 'fn ask(cn: Conn,', 'fn ask(mut cn: Conn,')
-    text = replace(text, 'fn stall(b: Conn,', 'fn stall(mut b: Conn,')
-    text = re.sub(r'(?<![\w.])stall\(b,', 'stall(mut b,', text)
+    for name in ('stall', 'wrote'):
+        text = replace(text, f'fn {name}(b: Conn,', f'fn {name}(mut b: Conn,')
+        text = re.sub(rf'(?<![\w.]){name}\(b,', f'{name}(mut b,', text)
     text = replace(text, 'fn put_at(w: Conn,', 'fn put_at(mut w: Conn,')
     text = re.sub(r'(?<![\w.])put_at\(w,', 'put_at(mut w,', text)
     text = re.sub(r'(?<![\w.])ask\((\w+),', r'ask(mut \1,', text)
-    text = re.sub(r'let (\w+)(: Conn)? = (conn\(|try_conn\(|observed\()', r'let mut \1\2 = \3', text)
+    text = re.sub(r'let (\w+)(: Conn)? = (conn\(|try_conn\(|trace_conn\()', r'let mut \1\2 = \3', text)
     text = replace(text, 'let Some(take cn) = try_conn', 'let Some(take available) = try_conn')
     text = replace(text, '    let stream: u32 = int.narrow(s)',
                    '    let digest = send_digest(mut cn, key, arg)\n'
-                   '    record(cn, Sent(observe.Send(conn: cn.id, stream: sid(s), p: p, digest: take digest, deadline: host.mono_ns(clock) + after, at: host.mono_ns(clock))))\n'
+                   '    trace_event(cn, Sent(observe.Send(conn: cn.id, stream: sid(s), p: p, digest: take digest, deadline: host.mono_ns(clock) + after, at: host.mono_ns(clock))))\n'
                    '    let stream: u32 = int.narrow(s)')
     text = replace(text, '    let bad = string_arg(4096u64, true)', '    let mut cn = take available\n    let bad = string_arg(4096u64, true)')
     # Record all decoded batches, including malformed-frame probes and try_down.
@@ -84,16 +86,33 @@ def traced_calls(files, work):
     text = replace(text, '        Held(owner) => runner.fixture_try_receive(owner),\n    }',
                    '        Held(owner) => runner.fixture_try_receive(owner),\n    }\n'
                    '    if let Ok(d) = got { replies(cn, d) }\n    take got')
-    text = replace(text, '    match take cn {\n        Socket(take wire, take s) => { let _ = wire_client.close(take wire); let _ = task.join(take s) },\n        Held(take owner) => runner.fixture_close(take owner),\n    }',
+    text = replace(text, '    match take cn {\n        Socket(take wire, take s, _) => { let _ = wire_client.close(take wire); let _ = task.join(take s) },\n        Held(take owner) => runner.fixture_close(take owner),\n    }',
                    '    let _ = finish(take cn, 1000u64)')
-    text = replace(text, '    match take cn {\n        Socket(take wire, take s) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => all, _ => false } },\n        _ => false,\n    }',
+    text = replace(text, '    match take cn {\n        Socket(take wire, take s, _) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => all, _ => false } },\n        _ => false,\n    }',
                    '    finish(take cn, 1000u64) && all')
-    text = replace(text, '    match take cn {\n        Socket(take wire, take s) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => true, _ => false } },\n        _ => false,\n    }',
+    text = replace(text, '    match take cn {\n        Socket(take wire, take s, _) => { let _ = wire_client.close(take wire); match task.join(take s) { Ok(Ok(())) => true, _ => false } },\n        _ => false,\n    }',
                    '    finish(take cn, 1008u64)')
+    text = replace(text, '''    wire_client.send_frame(wire, Call(store.StreamId(t: birth, n: 7u64), 0u64, wire_client.slot(requested, k_write()), 10000u32, u64_arg(5u64)))
+    let observed = match wire_client.next(wire) {
+        Ok(Batch(_, _, _, done)) if list.len(done) == 1u64 => if done[0u64].stream == store.StreamId(t: birth, n: 7u64) && done[0u64].p == 0u64 {''', '''
+    let mut cn = trace_conn(d, Socket(take wire, take session, birth))
+    ask(mut cn, d.clock, 7u64, 0u64, k_write(), u64_arg(5u64), LATER)
+    let got = match cn.link {
+        Socket(raw_wire, _, _) => wire_client.next(raw_wire),
+        _ => fail("anonymous call needs a socket"),
+    }
+    let observed = match got {
+        Ok(Batch(v, _, _, done)) if list.len(done) == 1u64 => if done[0u64].stream == store.StreamId(t: birth, n: 7u64) && done[0u64].p == 0u64 {
+            trace_event(cn, Got(observe.Reply(conn: cn.id, stream: sid(7u64), p: 0u64,
+                version: v, outcome: observe.from_runner(done[0u64].outcome), at: host.mono_ns(cn.clock))))''')
+    text = replace(text, '''    let _ = wire_client.close(take wire)
+    let _ = task.join(take session)
+    observed''', '''    let _ = finish(take cn, 1000u64)
+    observed''')
     text += '''
 type Conn { id: u64, clock: Clock, out: Stdout, err: Stderr, log: Log[observe.Obs], digests: Map[Bytes, Bytes], link: Transport }
 
-fn observed(d: Drive, take link: Transport) -> Conn waits {
+fn trace_conn(d: Drive, take link: Transport) -> Conn waits {
     let entries: Log[observe.Obs] = log.new()
     let id = host.mono_ns(d.clock)
     emit(d.out, Opened(id))
@@ -105,7 +124,7 @@ fn replies(cn: Conn, d: runner.Down) -> () waits {
     if let Batched(b) = d {
         if b.version != NEVER {
             for t in b.outcomes {
-                record(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(t.stream), p: t.p,
+                trace_event(cn, Got(observe.Reply(conn: cn.id, stream: observe.own(t.stream), p: t.p,
                     version: b.version, outcome: observe.from_runner(t.outcome), at: host.mono_ns(cn.clock))))
             }
         }
@@ -115,7 +134,7 @@ fn replies(cn: Conn, d: runner.Down) -> () waits {
 fn finish(take cn: Conn, code: u64) -> bool waits {
     let Conn(id: id, clock: clock, out: out, err: err, log: take entries, digests: _, link: take link) = take cn
     let ended = match take link {
-        Socket(take wire, take session) => {
+        Socket(take wire, take session, _) => {
             let _ = wire_client.close(take wire)
             match task.join(take session) { Ok(Ok(())) => true, _ => false }
         },
@@ -129,22 +148,26 @@ fn finish(take cn: Conn, code: u64) -> bool waits {
 }
 
 pub fn law_observe_early_then_late(out: Stdout, err: Stderr, c: Clock, tasks: Tasks, n: Net, r: Random) -> bool waits {
-    let (head, inbox): (Sender[runner.Req], Receiver[runner.Req]) = channel.new(64u64)
+    // Keep calls pending while still answering the stream-time read in Hello.
+    let (head, from) = calls_inbox()
+    let (held, inbox) = calls_inbox()
+    let mut holder = task.spawn(tasks, bytes 65536u64, Holding(from: take from, hold: take held, clock: c), holding)
     let mail = result.unwrap(runner.mailbox(64u64))
-    let db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
     let d = Drive(out: out, err: err, head: take head, post: runner.post(mail), clock: c,
         tasks: tasks, net: n, random: r,
-        token: ingress.credential(r), accepted: None)
+        token: ingress.credential(r), accepted: None, birth: host.wall_ms(c))
     let mut cn = conn(d, 1u64)
-    ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
-    ask(mut cn, c, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
+    ask(mut cn, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), 2000000u64)
+    ask(mut cn, d.clock, 0u64, 0u64, k_write(), u64_arg(1u64), 50000000u64)
     // A request sent after the first deadline supplies an ordered reply marker.
-    host.sleep_until(c, host.mono_ns(c) + 10000000u64)
-    ask(mut cn, c, 1u64, 0u64, k_write(), u64_arg(2u64), 0u64)
+    host.sleep_until(d.clock, host.mono_ns(d.clock) + 10000000u64)
+    ask(mut cn, d.clock, 1u64, 0u64, k_write(), u64_arg(2u64), 0u64)
     let _ = frame(cn)
     let _ = frame(cn)
     hang(take cn)
-    true
+    task.cancel(mut holder)
+    let _ = task.join(take holder)
+    !empty(inbox)
 }
 
 fn emit(out: Stdout, e: observe.Obs) -> () waits {
@@ -154,7 +177,7 @@ fn emit(out: Stdout, e: observe.Obs) -> () waits {
     result.unwrap(stdout.write_bytes(out, b))
 }
 
-fn record(cn: Conn, take e: observe.Obs) -> () waits {
+fn trace_event(cn: Conn, take e: observe.Obs) -> () waits {
     emit(cn.out, e)
     log.append(cn.log, take e)
 }

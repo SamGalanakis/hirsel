@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the wire fixtures (echo, finish, session, migration) and run their loopback
-checks: echo, client, idle, half-close and the migration dry-run conflict. Each step runs to its own exit code; the
-first failing step ends the gate."""
+checks: echo, client, idle, session Close, half-close and the migration dry-run
+conflict. The first failing step ends the gate."""
 import argparse
 import os
 from pathlib import Path
@@ -36,6 +36,8 @@ def main():
             ('build migration', build + ['--migration-only']),
             ('wsock echo', [sys.executable, str(TESTS / 'wire_wsock.py'), '--echo', fixture('main'),
                             '--client', fixture('client_probe'), '--idle-echo', fixture('idle_probe')]),
+            ('wsock session', [sys.executable, str(TESTS / 'wire_wsock.py'), '--session', fixture('session'),
+                               '--idle-session', fixture('session-idle')]),
             ('finish', [sys.executable, str(TESTS / 'wire_finish.py'), '--probe', fixture('finish')]),
             ('migration dry-run', [sys.executable, str(TESTS / 'wire_admission.py'), '--case', 'cli_dry_run_conflict',
                                    '--server', fixture('migration'), '--compiler', str(compiler),

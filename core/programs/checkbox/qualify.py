@@ -23,10 +23,10 @@ SDK_MUTANTS = {"resend_new_p", "skip_resubscribe_after_reset", "clear_on_first_b
 SERVER_EDITS = {
     "bit_order_msb": ("main", "1u8 << int.narrow(i.index & 7u32)", "128u8 >> int.narrow(i.index & 7u32)"),
     "unchecked_u32_arg": ("main", "if i < 1000000 {", "if true {"),
-    "range_in_board": ("main", "    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)",
-                      "    let mut rows = result.unwrap(store.range(tx, store.shape(h.chunks), Unbounded, Unbounded))\n"
-                      "    while let Some(_) = result.unwrap(store.next_range(mut rows)) {}\n"
-                      "    runner.cover(store.shape(h.chunks), Unbounded, Unbounded)"),
+    "range_in_board": ("main", '    runner.table_answer("chunks", h.chunks, Unbounded, Unbounded)',
+                      "    let mut rows = result.unwrap(store.range(tx, h.chunks, Unbounded, Unbounded))\n"
+                      "    while let Some(_) = result.unwrap(store.next_in(tx, mut rows)) {}\n"
+                      '    runner.table_answer("chunks", h.chunks, Unbounded, Unbounded)'),
     "no_publish_to_others": ("runner", "        let has_content = next.reset",
                              "        if list.len(rows) == 0u64 && list.len(next.complete) == 0u64 { next.rows = list.new() }\n"
                              "        let has_content = next.reset"),
@@ -60,20 +60,22 @@ def replace(text, before, after):
 
 def scratch_libraries(work, case, mutant):
     """The checkout's core, or a scratch library root carrying the case's and mutant's edits."""
-    paths = {"main": "checkbox/main.hirsel", "runner": "runner/runner.hirsel"}
+    paths = {
+        "main": "checkbox/main.hirsel",
+        "runner": "runner/runner.hirsel",
+        "runner_subscriptions": "runner/runner-subscriptions.hirsel",
+    }
     changed = {}
     if case == "toggle_no_rerun":
         # Wire-only witness in the scratch server. An empty key cannot be a
         # data-tree key. Count one marker after each query body returns a Cover.
-        original = "        Some(Query(_, _, go)) => go(s, h, input.caller, input.arg, prior, old, sub, rows),"
-        marker = """        Some(Query(_, _, go)) => {
-            let answer = go(s, h, input.caller, input.arg, prior, old, sub, rows)
-            if let Covered(_) = answer {
-                log.append(rows, Row(sub: sub, key: list.new(), value: None))
-            }
-            take answer
-        },"""
-        changed["runner"] = replace((PROGRAMS / paths["runner"]).read_text(), original, marker)
+        original = "    (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)"
+        marker = """    let answer = (registered.run)(registered.slots, bindings, access, read_handle, h, input.caller, input.arg, at, prior, rows, old)
+    if let Covered(_) = answer {
+        log.append(rows, Row(slot: 0u16, key: list.new(), value: None))
+    }
+    take answer"""
+        changed["runner_subscriptions"] = replace((PROGRAMS / paths["runner_subscriptions"]).read_text(), original, marker)
     if mutant in SERVER_EDITS:
         module, before, after = SERVER_EDITS[mutant]
         changed[module] = replace(changed.get(module, (PROGRAMS / paths[module]).read_text()), before, after)

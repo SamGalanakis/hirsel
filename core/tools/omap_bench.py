@@ -28,7 +28,7 @@ DEPENDENCIES = [
     ('rand_xoshiro', '0.6.0', ['rand_core'], []),
     ('im', '15.1.0', ['typenum', 'bitmaps', 'sized_chunks', 'rand_core', 'rand_xoshiro'], []),
 ]
-EXPECTED = {'overwrite': 5000050000, 'insert': 100000, 'lookup': 5000050000, 'range': 5000000000, 'snapshots': 500500, 'bulk': 100000, 'unwrap': 100000, 'unique': 100000, 'recover': 100000}
+EXPECTED = {'overwrite': 5000050000, 'insert': 100000, 'lookup': 5000050000, 'range': 5000000000, 'snapshots': 500500, 'bulk': 100000, 'unwrap': 100000, 'unique': 100000}
 
 
 def inputs(source):

@@ -18,22 +18,12 @@ fn value(m: std.omap.OMap[u64, u64], k: u64) -> u64 {
     }
 }
 
-fn unique_inserts(mut ids: u64, recover: bool) -> std.omap.OMap[u64, u64] {
+fn unique_inserts(mut ids: u64) -> std.omap.OMap[u64, u64] {
     let mut m: std.omap.OMap[u64, u64] = std.omap.new()
     for i in 0u64 .. 100000 {
         let previous = take m
-        let replacement = if recover {
-            {
-                let (take next_map, _) = result.unwrap(std.omap.insert_recover(mut ids, take previous, i, i + 1))
-                take next_map
-            }
-        } else {
-            {
-                let (take next_map, _) = std.omap.insert_owned(mut ids, take previous, i, i + 1)
-                take next_map
-            }
-        }
-        m = take replacement
+        let (take next_map, _) = std.omap.insert_owned(mut ids, take previous, i, i + 1)
+        m = take next_map
     }
     m
 }
@@ -71,8 +61,8 @@ fn unwrap_edits(mut edits: List[Arc[EditNode]]) -> u64 {
 }
 
 fn work(mut ids: u64, mut m: std.omap.OMap[u64, u64], mut held: List[std.omap.OMap[u64, u64]], mut edits: List[Arc[EditNode]], keys: List[u64], values: List[u64], mode: String) -> u64 {
-    if mode == "unique" || mode == "recover" {
-        m = unique_inserts(mut ids, mode == "recover");
+    if mode == "unique" {
+        m = unique_inserts(mut ids)
         return std.omap.len(m)
     }
     if mode == "overwrite" {
@@ -138,7 +128,7 @@ fn work(mut ids: u64, mut m: std.omap.OMap[u64, u64], mut held: List[std.omap.OM
 pub fn main(argv: Args, out: Stdout, dir: Dir, clock: Clock) -> Result[(), Exit] waits {
     let mode = option.unwrap(args.get(argv, 0))
     let mut ids: u64 = 0
-    let mut m: std.omap.OMap[u64, u64] = if mode == "insert" || mode == "unique" || mode == "recover" || mode == "bulk" || mode == "unwrap" {
+    let mut m: std.omap.OMap[u64, u64] = if mode == "insert" || mode == "unique" || mode == "bulk" || mode == "unwrap" {
         std.omap.new()
     } else {
         populated(mut ids)
@@ -170,7 +160,7 @@ pub fn main(argv: Args, out: Stdout, dir: Dir, clock: Clock) -> Result[(), Exit]
     let elapsed = host.mono_ns(clock) - start
     let expected = if mode == "overwrite" {
         5000050000u64
-    } else if mode == "insert" || mode == "unique" || mode == "recover" || mode == "bulk" || mode == "unwrap" {
+    } else if mode == "insert" || mode == "unique" || mode == "bulk" || mode == "unwrap" {
         100000u64
     } else if mode == "lookup" {
         5000050000u64

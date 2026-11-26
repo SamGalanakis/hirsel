@@ -10,6 +10,10 @@ fn response_bytes() -> Bytes {
     b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
 }
 
+fn selected_response_bytes() -> Bytes {
+    b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n"
+}
+
 fn status(b: Bytes) -> u16 {
     match websocket.server(b) {
         Waiting => 0,
@@ -58,7 +62,7 @@ fn rfc6455_accept() -> bool {
 fn server_response() -> bool {
     let b = request_bytes()
     match websocket.server(b) {
-        Upgraded(end, out) => end == list.len(b) && out == b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
+        Upgraded(end, out) => end == list.len(b) && out == selected_response_bytes(),
         _ => false
     }
 }
@@ -252,7 +256,7 @@ fn served_upgrade(mut s: Served[NetOp]) -> bool waits {
         return false
     }
     let dialed = match provide.net_op(connect) {
-        Connect(addr, _) => addr.port == 80,
+        Connect(addr: addr, ..) => addr.port == 80,
         _ => false
     }
     if !dialed || !answered(mut s, take connect, Socket(8, Addr(ip: V4(2130706433), port: 80))) {
@@ -274,7 +278,7 @@ fn served_upgrade(mut s: Served[NetOp]) -> bool waits {
     provide.payload(response, 1, mut p)
     provide.payload(response, 2, mut p)
     let k = list.len(p)
-    p == response_bytes() && answered(mut s, take response, Count(k))
+    p == selected_response_bytes() && answered(mut s, take response, Count(k))
 }
 
 // Takes the next call: true when it is Ready(8), answered with r.

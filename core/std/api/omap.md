@@ -22,50 +22,34 @@ through the existing constant-stack Arc worklist.
 `insert(mut ids,m,k,v)` and `remove(mut ids,m,k)` path-copy, split, merge or
 redistribute O(log n) nodes, at most 32 holders per node. `ids` is the writer's
 last issued u64, shared across all branches. Every new node receives the next
-id after its children; an exhausted counter raises checked Overflow. Capacity
-preserves m; insertion returns its taken key/value. Failed attempts may consume
-ids, which must never be reused. These APIs continue to borrow m. Successful inserts move their inputs into
-one shared row. On Capacity, temporary path holders are dropped before the
-row is unwrapped to recover the original inputs, without copying them.
+id after its children; an exhausted counter raises checked Overflow. Both forms
+borrow m, so a raised Capacity leaves the input version valid. Failed attempts
+may consume ids, which must never be reused. Insertion moves the key and value
+into one shared row.
 
 `insert_owned(mut ids,take m,take k,take v)` is a separate consuming update.
 At a unique Arc, `arc.with_unique` lends the payload for in-place edits.
 An overwrite whose entire path and row are unique moves the raw inputs only
 after acquiring those borrows, then completes without allocation. Other
-updates first move the inputs into one row shared by the draft and recovery
-holder.
+updates first move the inputs into one shared row.
 The node stays allocated, including the left half of a split; a split allocates
 only the new sibling. Shared nodes use path copying. Branches retain their shared
 separator block while boundaries stay unchanged and rebuild it when they change.
-Capacity consumes the draft m and returns k/v; keep an independent snapshot
-for rollback. Every held version and its node ids stay unchanged.
+Capacity consumes the draft m. Keep an independent snapshot for rollback.
+Every held version and its node ids stay unchanged.
 
-`insert_recover(mut ids,take m,take k,take v)` returns
-`Result[(OMap[K,V],Option[Replaced[K,V]]),(Capacity,(OMap[K,V],(K,V)))]`. On refusal it returns the
-original map with unchanged contents and node ids, plus its key and value.
-The original root stays alive until publication, so the implementation uses
-path copying even when the caller owns the only version. No fallible rollback
-allocation is needed. This is the transaction-friendly recovery contract;
-`insert_owned` remains the explicit discard-on-Capacity alternative.
-
-All insert forms return `Ok((map, Option[Replaced[K,V]]))`. New keys return
+Both insert forms return `(map, Option[Replaced[K,V]])`. New keys return
 `None`. Replacements return the value that was stored before the update, from
 the insertion descent without a second lookup or payload clone. Read it with
 `replaced_value(old) -> View[V] in old`. The opaque, sendable result moves the old value out of a unique row or
 retains just the old shared row through its Arc, independently of its leaf.
-It allocates no extra box. Snapshots keep their previous values. Error results have no replaced
-entry. A caller uninterested in the entry binds and drops the second tuple field.
+It allocates no extra box. Snapshots keep their previous values. A caller
+uninterested in the entry can drop the second tuple field.
 
 | form | map input | success | Capacity | reason today |
 |---|---|---|---|---|
-| insert | borrowed | new map, optional old value holder | key/value; input remains valid | persistent update while retaining a version |
-| insert_owned | taken | new map, optional old value holder | key/value; draft consumed | in-place edits through arc.with_unique |
-| insert_recover | taken | new map, optional old value holder | original map and key/value | strong recovery without fallible rollback |
-
-The consuming forms retain different recovery contracts. `insert_owned` edits unique
-payloads in place and may discard its draft on Capacity. `insert_recover` retains the
-original root; taking the unique path there requires a failure-atomic update algorithm.
-Borrowed `insert` continues to express a persistent update of a retained version.
+| insert | borrowed | new map, optional old value holder | input map remains valid | persistent update while retaining a version |
+| insert_owned | taken | new map, optional old value holder | draft consumed | in-place edits through arc.with_unique |
 
 `range(m, lower, take upper)` accepts `Unbounded`, `Included(k)` or
 `Excluded(k)` endpoints and returns an owned, sendable `Cursor`. It reserves one

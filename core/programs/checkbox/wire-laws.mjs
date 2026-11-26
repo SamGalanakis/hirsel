@@ -129,15 +129,19 @@ async function toggle_no_rerun() {
   const subscribers = await Promise.all(Array.from({length: 8}, () => welcome()));
   const callPeer = await welcome();
   const sub = 1;
-  await Promise.all(subscribers.map(async (peer) => {
+  const initialRuns = await Promise.all(subscribers.map(async (peer) => {
     peer.send({tag: 'Subscribe', values: [sub, peer.slots[1], values.unit.encode(undefined), none]});
     const initial = await peer.next();
     assert.equal(initial.tag, 'Batch');
     assert.deepEqual(initial.values[1], [sub]);
+    const rows = initial.values[2][0].rows;
+    const marker = {slot: 0, key: new Uint8Array(), value: none};
     assert.deepEqual(initial.values[2], [{sub, value: new Uint8Array(),
-      rows: [{slot: 0, key: new Uint8Array(), value: none}]}]);
+      rows: rows.length ? [marker] : []}]);
+    return rows.length;
   }));
-  let runs = subscribers.length;
+  assert.equal(initialRuns.reduce((a, b) => a + b, 0), 1, 'the eight subscriptions share one initial query');
+  let reruns = 0;
   for (let i = 0; i < 1000; i++) {
     const start = performance.now();
     const p = BigInt(i);
@@ -154,7 +158,7 @@ async function toggle_no_rerun() {
       assert.equal(update.values[0], response.values[0]);
       const rows = update.values[2].find(group => group.sub === sub).rows;
       const boardRows = rows.filter(row => row.key.length > 0);
-      runs += rows.length - boardRows.length;
+      reruns += rows.length - boardRows.length;
       const chunk = new Uint8Array(64);
       chunk[0] = checked ? 8 : 0;
       assert.equal(boardRows.length, 1);
@@ -163,8 +167,8 @@ async function toggle_no_rerun() {
     }));
     await pause(Math.max(0, 50 - (performance.now() - start)));
   }
-  assert.equal(runs, 8, 'each board query should run once, at Subscribe');
-  console.log('8 board queries for 8 subscriptions and 1,000 durable toggles');
+  assert.equal(reruns, 0, 'durable toggles should not rerun the shared board query');
+  console.log('1 shared board query for 8 subscriptions and 1,000 durable toggles');
 }
 
 function upgradeStatus() {

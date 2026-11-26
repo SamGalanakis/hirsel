@@ -260,11 +260,32 @@ type JoinDrive: send {
     scenario: JoinCase
 }
 
+type HeadTime: send {
+    from: Receiver[runner.HeadInput],
+    forward: Sender[runner.HeadInput],
+    clock: Clock
+}
+
+// Hello needs keyed time even while the test holds calls before admission.
+fn answer_head_time(take seed: HeadTime) -> () waits {
+    while let Ok(take input) = channel.receive(seed.from) {
+        match take input {
+            ReadStreamTime(take to) => {
+                let _ = channel.try_send(to, runner.StreamTime(now_ms: host.wall_ms(seed.clock), retention_ms: store.STREAM_RETENTION_MS))
+            },
+            take request => {
+                let _ = channel.send(seed.forward, take request)
+            },
+        }
+    }
+}
+
 // The original early-then-late observer case retains its 1000 ns timing oracle
 // on the evaluator's virtual Clock. Wire ordering is checked separately.
 pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
-    let db = store.memory(clock, random, result.unwrap(store.sized(Memory, 1074790400u64)))
-    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let (head, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let (forward, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let mut holder = task.spawn(tasks, bytes 65536u64, HeadTime(from: take from, forward: take forward, clock: clock), answer_head_time)
     let mail = result.unwrap(runner.mailbox(64u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
     let trace: Log[observe.Obs] = log.new()
@@ -274,6 +295,9 @@ pub fn deadline_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tas
     ask(cn, trace, a, entry(), 50000000u64)
     let _ = frame(cn, trace)
     close(take cn, trace)
+    task.cancel(mut holder)
+    let _ = task.join(take holder)
+    let _ = take inbox
     join_verdicts(err, log.finish(take trace))
     true
 }
@@ -353,7 +377,9 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     let mut declaration = result.unwrap(store.declare(db, Migrate))
     let _ = result.unwrap(observe_fixture.schema(mut declaration))
     let _ = result.unwrap(store.seal(mut db, take declaration))
-    let (head, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let (head, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let (forward, inbox): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(64u64)
+    let mut holder = task.spawn(tasks, bytes 65536u64, HeadTime(from: take from, forward: take forward, clock: clock), answer_head_time)
     let mail = result.unwrap(runner.mailbox(4u64))
     let d = drive_input(take head, runner.post(mail), clock, random, tasks, net, out, err, 0u64, Correct)
     let input = JoinDrive(drive: take d, scenario: scenario)
@@ -361,6 +387,8 @@ pub fn run_join(out: Stdout, err: Stderr, clock: Clock, random: Random, tasks: T
     host.sleep_until(clock, host.mono_ns(clock) + 20000000u64)
     let opened = runner.place_head(take db, code.describe(place), N_PLACE, None, code.describe(observe_fixture.schema), take inbox, take mail, tasks, 1048576u64)
     let driven = task.join(take body)
+    task.cancel(mut holder)
+    let _ = task.join(take holder)
     match opened {
         Ok(()) => (),
         Error(_) => return false

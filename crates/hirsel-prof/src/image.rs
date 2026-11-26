@@ -8,6 +8,7 @@ use object::{Object, ObjectSection, ObjectSegment, ObjectSymbol};
 use sha2::{Digest, Sha256};
 
 pub(crate) use crate::capture::SymbolSource;
+use crate::compact::CompactUnwind;
 use crate::profile::Result;
 use crate::record::Mapping;
 use crate::unwind::UnwindInfo;
@@ -42,6 +43,8 @@ pub(crate) struct Image {
     pub(crate) digest: String,
     pub(crate) unwind: UnwindInfo,
     pub(crate) main: bool,
+    /// A Mach-O image's `LC_MAIN` entry, which dyld calls.
+    entry: Option<u64>,
     pub(crate) remarks: Vec<SourceRemark>,
     dwarf: Option<addr2line::Context<Reader>>,
     symbols: Vec<Symbol>,
@@ -163,9 +166,28 @@ impl Image {
             })
             .transpose()?
             .unwrap_or_default();
+        let macho = file.format() == object::BinaryFormat::MachO;
+        let text = file
+            .segments()
+            .find(|s| macho && s.name().ok().flatten() == Some("__TEXT"));
+        // `entryoff` and `__unwind_info` function offsets count from `__TEXT`,
+        // which starts at file offset zero.
+        let entry = text
+            .as_ref()
+            .filter(|_| file.entry() != 0)
+            .map(|text| text.address() + file.entry());
+        let compact = text
+            .filter(|_| arch == object::Architecture::Aarch64)
+            .and_then(|text| {
+                Some(CompactUnwind::new(
+                    text.address(),
+                    section("__unwind_info")?.1,
+                ))
+            });
         let unwind = UnwindInfo::new(
             section(".eh_frame"),
             embedded_frame.or(detached_frame),
+            compact,
             file.section_by_name(".text").map_or(0, |s| s.address()),
             file.section_by_name(".got").map_or(0, |s| s.address()),
         );
@@ -219,6 +241,7 @@ impl Image {
             digest: hirsel_core_ids::hex::encode(&Sha256::digest(bytes)),
             unwind,
             main,
+            entry,
             dwarf,
             symbols,
             segments,
@@ -235,6 +258,15 @@ impl Image {
             let delta = i128::from(mapping.offset) - i128::from(segment.offset);
             u64::try_from(i128::from(segment.address) + delta).ok()
         })
+    }
+
+    /// Whether `address` lies in the main image's Mach-O entry function.
+    pub(crate) fn in_entry(&self, address: u64) -> bool {
+        let name = |address| self.physical_name(address);
+        self.main
+            && self
+                .entry
+                .is_some_and(|entry| name(entry).is_some() && name(entry) == name(address))
     }
 
     pub(crate) fn physical_name(&self, address: u64) -> Option<&str> {

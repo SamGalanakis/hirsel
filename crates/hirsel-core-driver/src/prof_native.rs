@@ -699,6 +699,7 @@ pub fn main() -> Result[(), Exit] {
     let quality = hirsel_prof::query(&profile, hirsel_prof::Query::PeakMem, 20).unwrap();
     assert_eq!(quality.quality["capture_mode"], "replay");
     assert_eq!(quality.quality["mem_records_lost"], 0);
+    assert_eq!(quality.quality["mem_unwind_failed"], 0);
     assert_eq!(quality.quality["mem_callsites_exact"], true);
     let profile = hirsel_prof::Profile::open(&profile).unwrap();
     let db = profile.connection();

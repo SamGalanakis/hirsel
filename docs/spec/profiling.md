@@ -139,19 +139,31 @@ integer up to 9 223 372 036 854 775 807, with larger u64 values stored as
 canonical decimal text. CPU rollups and pprof weights use that row's
 event and period. Instruction profiles use the `instructions` event directly.
 
-The unwinder reads ELF CFI with gimli and uses the captured stack and
-registers. It leaves the sampled instruction pointer intact and subtracts
-one byte once from caller return addresses. x86-64 captures IP, SP and BP.
-AArch64 captures PC, LR, SP and X29.
+The unwinder reads DWARF CFI (`.eh_frame`, `.debug_frame`) with gimli and
+uses the captured stack and registers. A Mach-O image's linker keeps an
+`__eh_frame` FDE only where compact unwind cannot state the rules, so for
+arm64 Mach-O images the unwinder also reads `__TEXT,__unwind_info`: a frame
+encoding recovers the caller from the frame record at X29, a frameless
+encoding from LR and its stack size, and a function without an encoding
+falls back to frame pointers as missing CFI does. It leaves the sampled
+instruction pointer intact and subtracts one byte once from caller return
+addresses. x86-64 captures IP, SP and BP. AArch64 captures PC, LR, SP and
+X29.
 
 `stack_root` is `fiber`, `host`, `truncated`, `failed` or `kernel`. A host stack
 can contain a Foreign or OS operation whose calling fiber is unreachable.
 `unwind_status` is `ok`, `fiber_root`, `truncated_stack`, `missing_cfi`,
 `unknown_mapping`, `eval_error` or `not_attempted`. An undefined return address ends the
-walk. Missing CFI may permit frame-pointer recovery, but the sample retains
-`missing_cfi` and a `failed` root. Expression rules and CFA rules that
-require uncaptured registers, such as a stack-probe scratch register,
-produce `eval_error` with a `failed` root.
+walk. On Mach-O, a step out of the main image's `LC_MAIN` entry function to
+an address with no image file ends the walk with a `host` root and `ok`:
+dyld calls the entry from the shared cache, which has no file to unwind.
+Missing CFI may permit frame-pointer recovery, but the sample retains
+`missing_cfi` and a `failed` root. Expression rules for the return address
+or frame pointer, and CFA rules that require uncaptured registers, such as
+a stack-probe scratch register, produce `eval_error` with a `failed` root.
+Rules for other registers do not affect the walk, except that AArch64's
+`RA_SIGN_STATE` must be the literal zero Cranelift emits (an unsigned return
+address).
 
 A sample marked as kernel by perf, or with a kernel-range IP outside user
 mappings, has a single kernel leaf and `unwind_status = 'not_attempted'`.

@@ -1,5 +1,6 @@
 //! Portable CPU profiles for Hirsel.
 
+mod compact;
 mod image;
 mod import;
 mod memory;

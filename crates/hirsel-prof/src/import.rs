@@ -571,6 +571,15 @@ impl<'a> Import<'a> {
             let physical_name = image.physical_name(address);
             host |= image.main && physical_name.is_some_and(image::host_fiber_invocation);
             match image.unwind.step(address, &mut self.context, &regs, &stack) {
+                // dyld calls a Mach-O entry from the shared cache, which has
+                // no image file to unwind: the entry is the thread's root.
+                Step::Caller(caller)
+                    if image.in_entry(address)
+                        && Self::active_mapping(&self.mapping, caller.pc.saturating_sub(1))
+                            .is_none_or(|active| active.image.is_none()) =>
+                {
+                    break ("host", "ok");
+                }
                 Step::Caller(caller) => {
                     pc = caller.pc.saturating_sub(1);
                     registers = Some(caller);

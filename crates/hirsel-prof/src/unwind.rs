@@ -5,12 +5,15 @@ use gimli::{
     LittleEndian, Register, RegisterRule, UnwindContext, UnwindSection,
 };
 
+use crate::compact::CompactUnwind;
+
 type Reader = EndianArcSlice<LittleEndian>;
 
 #[derive(Default)]
 pub(crate) struct UnwindInfo {
     eh: Option<Indexed<EhFrame<Reader>>>,
     debug: Option<Indexed<DebugFrame<Reader>>>,
+    compact: Option<CompactUnwind>,
     malformed: bool,
 }
 
@@ -58,11 +61,24 @@ impl<S: UnwindSection<Reader>> Indexed<S> {
             Ok(row) => row,
             Err(_) => return Some(Step::EvalError),
         };
-        if row.registers().any(|(_, rule)| {
-            matches!(
-                rule,
-                RegisterRule::Expression(_) | RegisterRule::ValExpression(_)
-            )
+        let ra_register = entry.cie().return_address_register();
+        // The walk recovers only the return address and frame pointer, so an
+        // expression rule elsewhere cannot change it. AArch64's RA_SIGN_STATE
+        // must say the return address is unsigned (`DW_OP_lit0`, as Cranelift
+        // states in every FDE).
+        if row.registers().any(|(register, rule)| match rule {
+            RegisterRule::Expression(_) | RegisterRule::ValExpression(_)
+                if *register == ra_register || *register == FP =>
+            {
+                true
+            }
+            RegisterRule::ValExpression(expression) if RA_SIGN_STATE == Some(*register) => {
+                !expression
+                    .get(&self.section)
+                    .is_ok_and(|e| *e.0 == [gimli::constants::DW_OP_lit0.0])
+            }
+            RegisterRule::Expression(_) if RA_SIGN_STATE == Some(*register) => true,
+            _ => false,
         }) {
             return Some(Step::EvalError);
         }
@@ -76,7 +92,6 @@ impl<S: UnwindSection<Reader>> Indexed<S> {
             return Some(Step::EvalError);
         };
 
-        let ra_register = entry.cie().return_address_register();
         let ra_rule = row.register(ra_register).unwrap_or(DEFAULT_RA);
         let bp_rule = row.register(FP).unwrap_or(RegisterRule::SameValue);
         if matches!(ra_rule, RegisterRule::Undefined) {
@@ -106,7 +121,13 @@ impl<S: UnwindSection<Reader>> Indexed<S> {
 }
 
 impl UnwindInfo {
-    pub(crate) fn new(eh: Option<(u64, &[u8])>, debug: Option<&[u8]>, text: u64, got: u64) -> Self {
+    pub(crate) fn new(
+        eh: Option<(u64, &[u8])>,
+        debug: Option<&[u8]>,
+        compact: Option<CompactUnwind>,
+        text: u64,
+        got: u64,
+    ) -> Self {
         let bases = BaseAddresses::default().set_text(text).set_got(got);
         let reader = |bytes: &[u8]| EndianArcSlice::new(Arc::from(bytes), LittleEndian);
         let eh = eh.map(|(address, bytes)| {
@@ -121,6 +142,7 @@ impl UnwindInfo {
         Self {
             eh: eh.and_then(Result::ok),
             debug: debug.and_then(Result::ok),
+            compact,
             malformed,
         }
     }
@@ -140,6 +162,11 @@ impl UnwindInfo {
                 self.debug
                     .as_ref()
                     .and_then(|debug| debug.step(pc, context, registers, stack))
+            })
+            .or_else(|| {
+                self.compact
+                    .as_ref()
+                    .and_then(|compact| compact.step(pc, registers, stack))
             });
         match step {
             Some(step) => step,
@@ -155,8 +182,8 @@ impl UnwindInfo {
 pub(crate) struct Registers {
     pub(crate) pc: u64,
     pub(crate) sp: u64,
-    fp: Option<u64>,
-    link: Option<u64>,
+    pub(crate) fp: Option<u64>,
+    pub(crate) link: Option<u64>,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -167,6 +194,8 @@ const SP: Register = gimli::X86_64::RSP;
 const RA: Register = gimli::X86_64::RA;
 #[cfg(target_arch = "x86_64")]
 const DEFAULT_RA: RegisterRule<usize> = RegisterRule::Undefined;
+#[cfg(target_arch = "x86_64")]
+const RA_SIGN_STATE: Option<Register> = None;
 
 #[cfg(target_arch = "aarch64")]
 const FP: Register = gimli::AArch64::X29;
@@ -176,6 +205,8 @@ const SP: Register = gimli::AArch64::SP;
 const RA: Register = gimli::AArch64::X30;
 #[cfg(target_arch = "aarch64")]
 const DEFAULT_RA: RegisterRule<usize> = RegisterRule::SameValue;
+#[cfg(target_arch = "aarch64")]
+const RA_SIGN_STATE: Option<Register> = Some(gimli::AArch64::RA_SIGN_STATE);
 
 impl Registers {
     pub(crate) fn new(pc: u64, sp: u64, fp: u64, link: u64) -> Self {
@@ -203,7 +234,7 @@ pub(crate) struct Stack<'a> {
 }
 
 impl Stack<'_> {
-    fn word(&self, addr: u64) -> Option<u64> {
+    pub(crate) fn word(&self, addr: u64) -> Option<u64> {
         let offset = usize::try_from(addr.checked_sub(self.base)?).ok()?;
         let (word, _) = self.bytes.get(offset..)?.split_first_chunk::<8>()?;
         Some(u64::from_le_bytes(*word))
@@ -302,7 +333,7 @@ mod tests {
         table.add_fde(cie, root);
         let mut section = OutputFrame::from(EndianVec::new(LittleEndian));
         table.write_eh_frame(&mut section).unwrap();
-        let info = UnwindInfo::new(Some((0, section.0.slice())), None, 0, 0);
+        let info = UnwindInfo::new(Some((0, section.0.slice())), None, None, 0, 0);
         let mut context = UnwindContext::new();
         let rs = Registers::new(0x1000, 0x2000, 0x2000, 0x1000);
         let stack_bytes = [0u64.to_le_bytes(), 0x1010u64.to_le_bytes()].concat();

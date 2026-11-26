@@ -317,6 +317,16 @@ def write_log(invoke, log, *args, **kwargs):
         return invoke(*args, stdout=output, stderr=subprocess.STDOUT, **kwargs).returncode
 
 
+def prepare_log_root(path=None):
+    if path is None:
+        root = Path(tempfile.mkdtemp(prefix="boat-logs-"))
+    else:
+        root = path.resolve()
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    print(f"Boat logs: {root}", file=sys.stderr, flush=True)
+    return root
+
+
 def create_vm(invoke, lane, ttl, vm, log):
     command = ("--json", "new", "--type", "default", "--no-env",
                "--from", SNAPSHOT, "--name", lane, "--ttl", str(ttl))
@@ -380,15 +390,15 @@ def execute(invoke, vm, jobs, archives, log):
     return status
 
 
-def dispatch(groups, ttl, state, invoke, dry_run=False, job_class="law"):
+def dispatch(groups, ttl, state, invoke, dry_run=False, job_class="law", log_root=None):
     lock = (state / "laws.lock").open("a") if state and job_class == "law" else nullcontext()
     with lock as pending:
         if pending is not None:
             fcntl.flock(pending, fcntl.LOCK_SH)
-        return run_batches(groups, ttl, state, invoke, dry_run, job_class)
+        return run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root)
 
 
-def run_batches(groups, ttl, state, invoke, dry_run, job_class):
+def run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root):
     archives = {}
     if not dry_run:
         cache = state / "bundles"
@@ -397,6 +407,8 @@ def run_batches(groups, ttl, state, invoke, dry_run, job_class):
             if job.inputs not in archives:
                 archives[job.inputs] = stage(cache, job.inputs)
 
+    if log_root is None and not dry_run:
+        log_root = prepare_log_root()
     budget = LocalBudget(state)
     status = 0
     interrupted = None
@@ -419,7 +431,7 @@ def run_batches(groups, ttl, state, invoke, dry_run, job_class):
                     limits = invoke("--json", "limits", "--all", check=True, capture_output=True)
                     budget.reserve(json.loads(limits.stdout), job_class)
                     if not dry_run:
-                        log = Path(tempfile.mkdtemp(prefix=f"boat-{group[0].lane}-", dir=Path.cwd()))
+                        log = Path(tempfile.mkdtemp(prefix=f"boat-{group[0].lane}-", dir=log_root))
                     critical = True
                     create_vm(invoke, group[0].lane, ttl, vm, log)
                     critical = False
@@ -491,6 +503,8 @@ def main():
                         help="VOPR yields to law dispatches and uses spare starts only")
     parser.add_argument("--batch-seconds", type=positive, default=900, help="estimated runtime per VM")
     parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
+    parser.add_argument("--log-dir", type=Path,
+                        help="root for per-VM log directories (default: a fresh directory under TMPDIR)")
     parser.add_argument("--dry-run", action="store_true", help="simulate VM starts without contacting Boat")
     args = parser.parse_args()
     if args.manifest and (args.lane or args.worktree or args.fetch):
@@ -517,11 +531,13 @@ def run(args, parser):
         jobs = [Job(args.lane, Input(args.directory.resolve(), args.worktree), args.command, 0,
                     tuple(fetch_spec(value, Path.cwd()) for value in args.fetch))]
     groups = batches(jobs, args.batch_seconds)
+    log_root = prepare_log_root(args.log_dir)
     if args.dry_run:
-        return dispatch(groups, args.ttl, None, DryRunBoat(), dry_run=True, job_class=args.job_class)
+        return dispatch(groups, args.ttl, None, DryRunBoat(), dry_run=True, job_class=args.job_class,
+                        log_root=log_root)
     state = Path.home() / ".local/state/hirsel-boat"
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return dispatch(groups, args.ttl, state, boat, job_class=args.job_class)
+    return dispatch(groups, args.ttl, state, boat, job_class=args.job_class, log_root=log_root)
 
 
 if __name__ == "__main__":

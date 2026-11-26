@@ -74,7 +74,7 @@ fi
 if (( ${#screen[@]} )); then
   (
     cd "$run"
-    taskset -c 8-11 "$checkout/tools/boat-dispatch" "${screen[@]}"
+    taskset -c 8-11 "$checkout/tools/boat-dispatch" --log-dir "$run/boat-logs" "${screen[@]}"
   ) >>"$run/run.log" 2>&1 || boat_status=$?
 fi
 # Warm peer Rust caches before board.py invokes cargo --offline.
@@ -182,8 +182,8 @@ run_w2() (
   export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   taskset -c 8-11 python3 core/tools/store_crash_tests.py prepare \
     --compiler "$compiler" --runtime "$runtime" --bridge "$bridge" --bundle "$run/w2" || return
-  exec taskset -c 8-11 tools/boat-dispatch --job-class vopr w2-damage "$run/w2" \
-    "python3 store_crash_tests.py sweep $((started * 4))"
+  exec taskset -c 8-11 tools/boat-dispatch --log-dir "$run/boat-logs" --job-class vopr \
+    w2-damage "$run/w2" "python3 store_crash_tests.py sweep $((started * 4))"
 )
 
 w2_status=0

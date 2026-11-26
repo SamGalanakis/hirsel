@@ -476,7 +476,8 @@ def dispatch_campaign(args, executable=None, laws=None):
                 jobs[0]["fetch"] = ["coverage:fetched"]
         manifest = root / "shards.json"
         manifest.write_text(json.dumps(jobs))
-        command = [args.dispatcher, "--job-class", "vopr", "--manifest", manifest]
+        command = [args.dispatcher, "--job-class", "vopr", "--log-dir",
+                   (args.results.parent / "boat-logs").resolve(), "--manifest", manifest]
         with subprocess.Popen(command, stdout=subprocess.PIPE, text=True) as boat:
             complete, failed = record(db, args.campaign, ranges, boat.stdout, results, executable, laws)
             status = boat.wait()

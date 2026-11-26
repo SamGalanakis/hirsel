@@ -103,7 +103,8 @@ def run_screen(args):
     with tempfile.TemporaryDirectory(dir=args.out) as directory:
         bundle = Path(directory)
         job = screen_job(args, bundle)
-        subprocess.run([args.boat_run, job["lane"], job["bundle"], job["command"]],
+        subprocess.run([args.boat_run, "--log-dir", args.out / "boat-logs",
+                        job["lane"], job["bundle"], job["command"]],
                        check=True, cwd=args.out)
 
 

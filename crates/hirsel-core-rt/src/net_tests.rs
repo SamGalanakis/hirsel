@@ -355,15 +355,15 @@ fn stdin_stream_preserves_bytes_across_timeout_and_abort() {
     );
 }
 fn inherited_child(listener: &std::net::TcpListener, law: &str) -> std::process::Command {
+    use crate::host::sys::ACTIVATION_PID_SHELL as PID;
     use std::{os::fd::AsRawFd, os::unix::process::CommandExt, process::Command};
-
     let fd = listener.as_raw_fd();
     let executable = crate::test_process::command();
     let mut child = Command::new("sh");
     child
         .args([
             "-c",
-            r#"LISTEN_PID=$$ LISTEN_FDS=1 exec "$@""#,
+            &format!(r#"LISTEN_PID={PID} LISTEN_FDS=1 exec "$@""#),
             "net-activation",
         ])
         .arg(executable.get_program())

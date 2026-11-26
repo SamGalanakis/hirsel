@@ -326,6 +326,10 @@ pub(crate) fn activation_pid() -> u32 {
     std::process::id()
 }
 
+/// A shell's spelling of `activation_pid` for the process it execs: its own PID.
+#[cfg(test)]
+pub(crate) const ACTIVATION_PID_SHELL: &str = "$$";
+
 /// Whether the open descriptor `fd` is the running executable's file.
 pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;

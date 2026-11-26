@@ -507,6 +507,10 @@ pub(crate) fn activation_pid() -> u32 {
     unsafe { libc::getppid() as u32 }
 }
 
+/// A shell's spelling of `activation_pid` for the process it execs: its parent's PID.
+#[cfg(test)]
+pub(crate) const ACTIVATION_PID_SHELL: &str = "$PPID";
+
 /// Whether the open descriptor `fd` is the running executable's file.
 pub(crate) fn running_image(fd: RawFd) -> io::Result<bool> {
     use std::os::unix::fs::MetadataExt;

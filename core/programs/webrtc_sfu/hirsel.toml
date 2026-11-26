@@ -34,6 +34,7 @@ quic = { major = 1, path = "../quic" }
 "router_cost.hirsel" = "router"
 "router_rate.hirsel" = "router"
 "units.hirsel" = "units"
+"units_io.hirsel" = "units"
 "signal.hirsel" = "signal"
 "signal_turn.hirsel" = "signal"
 "signal_build.hirsel" = "signal"

@@ -619,7 +619,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         })
         let _ = channel.send(order_to, Open(name: name, dial: take dial, limits: limits, embed: take embed))
     }
-    let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: session, limits: pool_limits, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
+    let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: session, limits: pool_limits, timing: webrtc_sfu.signal.DEFAULT_TIMING, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
     match webrtc_sfu.signal.serve_pool(take pool) {
         Ok(_) => (),
         Error(e) => {
@@ -630,6 +630,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
                 Identity => 101,
                 Spawn => 102,
                 Units => 103,
+                Timers => 104,
             })
             say(out, line)
         },

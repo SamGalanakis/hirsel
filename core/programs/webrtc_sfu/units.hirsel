@@ -105,6 +105,7 @@ pub opaque type Unit {
     tapping: bool,
     tap: List[Sent],
     plane: Plane,
+    timing: Timing,
     last_room: u64,
     // On the control unit: each room's calls, the room served first in the last
     // admission round, and the ordinary calls in flight.
@@ -115,8 +116,6 @@ pub opaque type Unit {
     held: List[Held],
     events: List[Event]
 }
-
-pub const UNIT_WAIT_NS: u64 = 50000000
 
 const INBOX: u64 = 1024
 
@@ -201,7 +200,7 @@ pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[Contr
     for d in doors {
         list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
     }
-    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
+    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, timing: DEFAULT_TIMING, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
 }
 
 pub fn router_of(u: Unit) -> View[router.Router] in u {
@@ -854,127 +853,4 @@ fn advance(mut u: Unit, k: u64, sent: bool) {
     list.truncate(mut u.out.data, w)
     list.truncate(mut u.out.pkts, kept)
     list.truncate(mut u.out.tags, kept)
-}
-
-// The units this turn posted to, cleared.
-fn doorbells(mut u: Unit) -> List[Addr] {
-    let mut to: List[Addr] = list.new()
-    for i in 0u64 .. list.len(u.doors) {
-        if (u.rung >> i) & 1 == 1 && i != int.widen(u.index) {
-            list.push(mut to, u.doors[i].addr)
-        }
-    }
-    u.rung = 0
-    to
-}
-
-// ---- A turn over a socket ----
-/// One turn (RTC-5): the control inbox, the media inbox, one `udp_recv` batch that
-/// waits until `until`, the control inbox again before any of it is routed, the
-/// datagrams, the timers, then the send step and the doorbells. It answers the
-/// earliest deadline.
-pub fn turn(mut u: Unit, clock: Clock, mut sock: UdpSocket, until: u64) -> Result[Option[u64], router.RouterError] waits {
-    let start = host.mono_ns(clock)
-    take_control(mut u, start)
-    take_media(mut u, start)
-    list.clear(mut u.rx)
-    list.clear(mut u.batch)
-    let got = match host.udp_recv(mut sock, mut u.rx, mut u.batch, At(clock, until)) {
-        Ok(n) => n,
-        Error(_) => 0,
-    }
-    let now = host.mono_ns(clock)
-    take_control(mut u, now)
-    for i in 0u64 .. got {
-        let UdpPacket(peer: from, at, len, truncated, ecn: _) = u.batch[i]
-        if truncated {
-            u.counts.truncated += 1
-            continue
-        }
-        let data = copy_out(u.rx, at, len)
-        let _ = take_datagram(mut u, now, from, data)
-    }
-    let wake = take_timers(mut u, now)
-    send(mut u, clock, mut sock, now)
-    Ok(wake)
-}
-
-fn copy_out(rx: Bytes, at: u64, len: u64) -> Bytes {
-    let mut b: Bytes = list.with_capacity(len)
-    list.append(mut b, list.slice(rx, at, at + len))
-    b
-}
-
-/// The send step over a socket: purge, `udp_send` (a partial commit keeps the rest
-/// as the uncommitted suffix), then one doorbell per unit posted to.
-pub fn send(mut u: Unit, clock: Clock, mut sock: UdpSocket, now: u64) waits {
-    let n = ready(mut u)
-    if n != 0 {
-        let deadline = now + UNIT_WAIT_NS
-        let sent = host.udp_send(mut sock, u.out.data, list.slice(u.out.pkts, 0, n), At(clock, deadline))
-        match sent {
-            Ok(k) => committed(mut u, k),
-            Error(TimedOut) => committed(mut u, 0),
-            // One bad datagram refuses the whole call: send them one by one, and drop
-            // and count the ones refused.
-            Error(_) => singly(mut u, clock, mut sock, deadline, n),
-        }
-    }
-    let bells = doorbells(mut u)
-    if list.len(bells) != 0 {
-        let empty: Bytes = list.new()
-        let mut tx: List[UdpTx] = list.new()
-        for a in bells {
-            list.push(mut tx, UdpTx(to: a, at: 0, len: 0, ecn: 0))
-        }
-        let _ = host.udp_send(mut sock, empty, tx, At(clock, now + UNIT_WAIT_NS))
-    }
-}
-
-fn singly(mut u: Unit, clock: Clock, mut sock: UdpSocket, deadline: u64, n: u64) waits {
-    for _ in 0u64 .. n {
-        let sent = host.udp_send(mut sock, u.out.data, list.slice(u.out.pkts, 0, 1), At(clock, deadline))
-        match sent {
-            Ok(1) => advance(mut u, 1, true),
-            Ok(_) => return,
-            Error(TimedOut) => return,
-            Error(_) => {
-                u.counts.refused += 1
-                advance(mut u, 1, false)
-            },
-        }
-    }
-}
-
-/// A unit's loop (RTC-5): `turns` turns, each waiting until the earliest deadline or
-/// 50 ms, whichever comes first.
-pub fn run(mut u: Unit, clock: Clock, mut sock: UdpSocket, turns: u64) -> Result[(), router.RouterError] waits {
-    let mut wake: Option[u64] = None
-    for _ in 0u64 .. turns {
-        let now = host.mono_ns(clock)
-        let cap = now + UNIT_WAIT_NS
-        let until = match wake {
-            Some(t) if t < cap => t,
-            _ => cap,
-        }
-        wake = turn(mut u, clock, mut sock, until)?
-    }
-    Ok(())
-}
-
-/// A control call on the control unit over its socket: begin it, then turn until
-/// every unit it waits on has acknowledged it.
-pub fn call(mut u: Unit, clock: Clock, mut sock: UdpSocket, take c: router.Change) -> Result[router.Answer, router.RouterError] waits {
-    let now = host.mono_ns(clock)
-    let room = router.change_room(c)
-    begin(mut u, now, take c)?
-    send(mut u, clock, mut sock, now)
-    while true {
-        if let Some(a) = finished(mut u, room) {
-            return a
-        }
-        let at = host.mono_ns(clock)
-        let _ = turn(mut u, clock, mut sock, at + UNIT_WAIT_NS)?
-    }
-    Error(NoRoom)
 }

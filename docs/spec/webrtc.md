@@ -800,10 +800,10 @@ the turn by sending that unit one zero-length **doorbell** datagram from its own
 the other unit's port, at most one per destination per turn. Each unit's service rules
 allow `UdpSend` to the sibling units' ports. A zero-length datagram from a sibling unit's
 address only wakes the unit, and from any other address it is dropped and counted. A
-forged doorbell costs one turn and nothing else, because it carries no data. A doorbell is
-only a wake. No fence or ordering depends on it arriving: a unit never waits longer than
-its next timer deadline, nor longer than 50 ms when it has no deadline sooner, so a lost
-doorbell delays a fence by at most 50 ms.
+forged doorbell costs one turn and nothing else, because it carries no data. The unit sends
+doorbells before media with an independently measured deadline. It retries the unsent
+suffix on the next turn. The receive deadline still provides a fallback for a doorbell
+the network loses. The default idle fallback is 50 ms and the default pool tick is 5 ms.
 
 **A turn.** `turn` drains the control inbox, then the cross-unit media inbox (below). It then
 takes one `udp_recv` batch, and **drains the control inbox again before it routes any
@@ -816,7 +816,7 @@ tag names a fenced generation, or a suspended room with a `src`, then calls `udp
 which the next turn's send step rechecks against the fences before it retries it. It
 queues signaling and dynacast events, which the adapter takes with `units.take_events`
 (RTC-8). It returns the earliest deadline, if any. The unit passes the earlier of that
-deadline and 50 ms from the current time as the next turn's `until`.
+deadline and the configured poll deadline as the next turn's `until`.
 
 **Fan-out.** For a `Media` packet of publication `P`, encoding `e`:
 
@@ -1641,7 +1641,7 @@ pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomN
 pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
 pub type CloseWhy = Asked | Fault(RouterError)
 pub type RoomName = RoomName(Inline[u8, 32])
-pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
+pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
 
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits
 pub fn room_cost(limits: RoomLimits, session: peer.PeerLimits) -> RoomCost

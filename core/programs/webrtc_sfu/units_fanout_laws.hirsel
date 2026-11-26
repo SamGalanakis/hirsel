@@ -480,3 +480,37 @@ fn units_on_loopback(net: Net, clock: Clock) -> Result[(), router.RouterError] w
     loopback_run(net, clock)
     Ok(())
 }
+
+/// bug: a UDP refusal clears the unit's doorbell even though the receiver was never woken.
+/// oracle: a second send on an allowed socket wakes the worker with no intervening post.
+@test
+fn doorbell_retries_after_refusal(network: Net, clock: Clock) -> Result[(), router.RouterError] waits {
+    let options = UdpOptions(slots: 8, slot_bytes: 1536)
+    let (take socket0, first) = result.unwrap(host.udp_bind(network, LOOPBACK, options))
+    let (take socket1, second) = result.unwrap(host.udp_bind(network, LOOPBACK, options))
+    let (take socket2, third) = result.unwrap(host.udp_bind(network, LOOPBACK, options))
+    let mut rules: List[Rule] = list.new()
+    list.push(mut rules, Rule(dir: UdpBind, prefix: LOOPBACK.ip, bits: 32, ports: (0, 65535), reach: Any))
+    let narrow = result.unwrap(net.narrow(network, rules))
+    let (take socket, _) = result.unwrap(host.udp_bind(narrow, LOOPBACK, options))
+    let mut denied = take socket
+    let mut sending = take socket0
+    let mut receiver_socket = take socket1
+    let mut all = three_units_at(7800, first, second, third)
+    let now = host.mono_ns(clock)
+    units.begin(mut all.u0, now, Open(room: room_id(), limits: room_limits()))?
+    units.send(mut all.u0, clock, mut denied)
+    units.send(mut all.u0, clock, mut sending)
+    let mut data: Bytes = list.with_capacity(1536)
+    let mut packets: List[UdpPacket] = list.with_capacity(8)
+    let until = host.mono_ns(clock) + 50000000u64
+    let Ok(1) = host.udp_recv(mut receiver_socket, mut data, mut packets, At(clock, until)) else {
+        fail("the worker received no retried doorbell")
+    }
+    let UdpPacket(peer: from, at: _, len, truncated, ecn: _) = packets[0]
+    if from != first || len != 0 || truncated {
+        fail("expected the sending unit's empty UDP doorbell")
+    }
+    let _ = take socket2
+    Ok(())
+}

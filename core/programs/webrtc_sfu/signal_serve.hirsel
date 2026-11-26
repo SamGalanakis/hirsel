@@ -20,6 +20,7 @@ pub type Pool[M] {
     policy: sdp.Policy,
     session: peer.PeerLimits,
     limits: PoolLimits,
+    timing: ServiceTiming,
     orders: Receiver[PoolOrder[M]],
     reports: Sender[PoolReport],
     until: u64,
@@ -34,14 +35,21 @@ pub type RelayLink {
     revokes: Sender[RelayRevoke]
 }
 
-pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units
+pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers
 
-/// A unit's turn when nothing is due sooner: the bound on how long a build or a room
-/// entry waits for its unit.
-pub const SERVE_TICK_NS: u64 = 5000000
+/// The pool's unit deadlines, active polling interval and signaling retry policy.
+pub type ServiceTiming: key {
+    udp: units.Timing,
+    active_tick_ns: u64,
+    rejoin_initial_ns: u64,
+    rejoin_max_ns: u64
+}
 
-/// After a failed join or rejoin, the room client tries again this much later.
-pub const REJOIN_NS: u64 = 1000000000
+pub const DEFAULT_TIMING: ServiceTiming = ServiceTiming(udp: units.DEFAULT_TIMING, active_tick_ns: 5000000, rejoin_initial_ns: 1000000000, rejoin_max_ns: 8000000000)
+
+fn timing_valid(t: ServiceTiming) -> bool {
+    t.udp.control_send_ns != 0 && t.udp.media_send_ns != 0 && t.active_tick_ns != 0 && t.active_tick_ns <= t.udp.idle_poll_ns && t.udp.idle_poll_ns <= units.DEFAULT_TIMING.idle_poll_ns && t.rejoin_initial_ns != 0 && t.rejoin_initial_ns <= t.rejoin_max_ns
+}
 
 const OUT_BYTES: u64 = 1048576
 
@@ -63,6 +71,7 @@ type Start: cross {
     plane: units.Plane,
     rates: router.Rates,
     pool: router.PoolBounds,
+    timing: ServiceTiming,
     until: u64
 }
 
@@ -154,8 +163,8 @@ fn build_on(mut u: units.Unit, h: Home, r: Random, b: Build) -> Result[Built, ro
     Ok(take made)
 }
 
-fn wait_until(wake: Option[u64], now: u64) -> u64 {
-    let cap = now + SERVE_TICK_NS
+fn wait_until(wake: Option[u64], now: u64, tick_ns: u64, until: u64) -> u64 {
+    let cap = order.min(int.saturating_add(now, tick_ns), until)
     match wake {
         Some(t) if t < cap => t,
         _ => cap,
@@ -165,7 +174,7 @@ fn wait_until(wake: Option[u64], now: u64) -> u64 {
 // Unit `s.index` (not 0): bind, report, take the roster, then turn and build until
 // `s.until`.
 fn unit_task(take s: Start) -> Result[(), ServeError] waits {
-    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, pool: bounds, until: until) = take s
+    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, until: until) = take s
     let (take socket, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
     let (doors, take control, take media) = units.inboxes(at, index, n, plane) ?=> |take e| Router(e)
     let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes ROSTER_BYTES)
@@ -190,6 +199,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
     }
     let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
     units.reserve_pool(mut u, bounds)
+    units.set_timing(mut u, timing.udp)
     units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: take policy, limits: session)
     let mut sock = take socket
@@ -199,7 +209,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
         if now >= until {
             break
         }
-        wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
+        wake = units.turn(mut u, clock, mut sock, wait_until(wake, now, timing.active_tick_ns, until)) ?=> |take e| Router(e)
         while let Ok(b) = conn.try_receive(wanted) {
             if !units.take_build(mut u, b.who.room) {
                 continue
@@ -230,6 +240,7 @@ type ClientStart[M: send]: send {
     ready: Sender[peer.RoomId],
     outs: Receiver[Outgoing[M]],
     clock: Clock,
+    timing: ServiceTiming,
     until: u64
 }
 
@@ -246,25 +257,26 @@ type RoomClient[M: send] {
 /// and the room's entries in flight.
 pub const ROOM_CLIENT_BYTES: u64 = 8388608
 
-fn room_client_task[M: codec + send](tasks: Tasks, room: peer.RoomId, take dial: runner.room_client.Dial, take ready: Sender[peer.RoomId], clock: Clock, until: u64) -> Option[RoomClient[M]] {
+fn room_client_task[M: codec + send](tasks: Tasks, room: peer.RoomId, take dial: runner.room_client.Dial, take ready: Sender[peer.RoomId], clock: Clock, timing: ServiceTiming, until: u64) -> Option[RoomClient[M]] {
     let (entries_to, entries): (Sender[Entry[M]], Receiver[Entry[M]]) = channel.new(ROOM_OUT)
     let (outs, outs_from): (Sender[Outgoing[M]], Receiver[Outgoing[M]]) = channel.new(ROOM_OUT)
-    let start = ClientStart(room: room, dial: take dial, entries: take entries_to, ready: take ready, outs: take outs_from, clock: clock, until: until)
+    let start = ClientStart(room: room, dial: take dial, entries: take entries_to, ready: take ready, outs: take outs_from, clock: clock, timing: timing, until: until)
     match task.try_spawn(tasks, bytes ROOM_CLIENT_BYTES, take start, run_room_client) {
         Ok(take t) => Some(RoomClient(room: room, entries: take entries, outs: take outs, quitting: false, task: Some(take t))),
         Error(_) => None,
     }
 }
 
-// One room's client: it joins, rejoins after `Lost` every `REJOIN_NS` until it gets a
+// One room's client: it joins, rejoins after `Lost` with bounded backoff until it gets a
 // session, posts what it receives to unit 0 and marks the room ready, and sends what
 // unit 0 hands it. Every blocking call is here, so a slow relay or a rejoin backoff
 // delays only this room.
 fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
-    let ClientStart(room: room, dial: take dial, entries: take entries, ready: take ready, outs: take outs, clock: clock, until: until) = take s
+    let ClientStart(room: room, dial: take dial, entries: take entries, ready: take ready, outs: take outs, clock: clock, timing: timing, until: until) = take s
     let mut joined: Option[runner.room_client.Room[M]] = None
     let mut down = true
     let mut retry_at = 0u64
+    let mut retry_ns = timing.rejoin_initial_ns
     let mut was: Option[u32] = None
     while host.mono_ns(clock) < until {
         let now = host.mono_ns(clock)
@@ -276,9 +288,7 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
                     Ok(_) => {
                         down = false
                     },
-                    Error(_) => {
-                        retry_at = now + REJOIN_NS
-                    },
+                    Error(_) => (),
                 }
                 joined = Some(take c)
             } else {
@@ -289,10 +299,14 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
                         joined = Some(take r)
                         down = false
                     },
-                    Error(_) => {
-                        retry_at = now + REJOIN_NS
-                    },
+                    Error(_) => (),
                 }
+            }
+            if down {
+                retry_at = int.saturating_add(host.mono_ns(clock), retry_ns)
+                retry_ns = order.min(int.saturating_mul(retry_ns, 2u64), timing.rejoin_max_ns)
+            } else {
+                retry_ns = timing.rejoin_initial_ns
             }
         }
         if let Some(take r) = replace(mut joined, None) {
@@ -303,7 +317,8 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
                     Ok(true) => (),
                     _ => {
                         down = true
-                        retry_at = now + REJOIN_NS
+                        retry_at = int.saturating_add(now, retry_ns)
+                        retry_ns = order.min(int.saturating_mul(retry_ns, 2u64), timing.rejoin_max_ns)
                     },
                 }
             }
@@ -347,7 +362,7 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
             }
         }
         if !moved {
-            host.sleep_until(clock, now + SERVE_TICK_NS)
+            host.sleep_until(clock, wait_until(None, now, timing.active_tick_ns, until))
         }
     }
     if let Some(take r) = replace(mut joined, None) {
@@ -362,13 +377,16 @@ fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
 /// order and hands each room client its messages without waiting. A one-room service is
 /// a pool with one `Open` queued.
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits {
-    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
+    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, timing: timing, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
     let n = limits.units
     if n == 0 || n > router.UNITS_MAX || list.len(binds) != int.widen(n) {
         return Error(Units)
     }
     if !peer.dtls_transport_fits(session.dtls_transport) {
         return Error(Router(Peer(Dtls(Config))))
+    }
+    if !timing_valid(timing) {
+        return Error(Timers)
     }
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
@@ -388,7 +406,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     let mut running: List[Task[Result[(), ServeError]]] = list.new()
     for k in 1u16 .. n {
         let terms: sdp.Policy = clone(policy)
-        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, until: until)
+        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, timing: timing, until: until)
         match task.spawn_unit(tasks, bytes limits.unit_bytes, take start, unit_task) {
             Ok(take t) => list.push(mut running, take t),
             Error(_) => return Error(Spawn),
@@ -431,6 +449,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     }
     let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
     units.reserve_pool(mut u, bounds)
+    units.set_timing(mut u, timing.udp)
     units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
     let mut free: List[u64] = list.new()
@@ -455,7 +474,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         if now >= until {
             break
         }
-        wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
+        wake = units.turn(mut u, clock, mut sock, wait_until(wake, now, timing.active_tick_ns, until)) ?=> |take e| Router(e)
         let after = host.mono_ns(clock)
         wall_rooms(mut pool, host.wall_ms(clock) / 1000)
         // The application's orders.
@@ -465,7 +484,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
                     let Some(room) = open_room(mut pool, mut u, name, room_limits, take embed) else {
                         continue
                     }
-                    let started: Option[RoomClient[M]] = room_client_task(tasks, room, take dial, channel.sender(ready_to), clock, until)
+                    let started: Option[RoomClient[M]] = room_client_task(tasks, room, take dial, channel.sender(ready_to), clock, timing, until)
                     let Some(take c) = take started else {
                         return Error(Spawn)
                     }
@@ -514,7 +533,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
                 }
             }
         }
-        units.send(mut u, clock, mut sock, after)
+        units.send(mut u, clock, mut sock)
         // A revoke reaches the relay outside RTC-7's acknowledgement (TURN-9): the fence
         // already drops the epoch's packets, so a full queue only delays reclaiming.
         for take r in take_room_revokes(mut pool) {

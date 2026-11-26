@@ -742,6 +742,9 @@ opaque owner such as `Causes`.
 operation reads, counts, clears or iterates its entries.
 
 - `log.new() -> Log[E]` admits the node.
+- `log.try_reserve(l: Log[E], n: u64) -> Result[(), log.Full]` reserves room for `n`
+  additional entries through `cell.with` and `list.try_reserve`. A refused reserve
+  returns `Error(Full())` and leaves the log unchanged.
 - `log.append(l: Log[E], take e: E)` takes a view of the log and pushes `e` through
   `cell.with`. It admits the growth of the entries' storage, as `list.push` grows a
   `List[E]` ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; a

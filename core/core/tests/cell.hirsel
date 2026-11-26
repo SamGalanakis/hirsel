@@ -170,6 +170,40 @@ fn growth_under_inner_bound() -> u64 {
     digits(cell.into_inner(take c))
 }
 
+// The four-entry backing costs 32 bytes. A rejected reserve preserves the first
+// entry, and all four entries fit without allocation once space is reserved.
+// expect: run log_reserve_exact_and_one_below() = 1234
+fn log_reserve_exact_and_one_below() -> u64 {
+    let entries: Log[u64] = log.new()
+    let short = bound bytes 31 {
+        log.try_reserve(entries, 4)
+    }
+    match short {
+        Ok(Error(_)) => {},
+        _ => return 0,
+    }
+    let exact = bound bytes 32 {
+        log.try_reserve(entries, 4)
+    }
+    match exact {
+        Ok(Ok(())) => {},
+        _ => return 0,
+    }
+    let appended = bound bytes 0 {
+        log.append(entries, 1)
+        if let Ok(()) = log.try_reserve(entries, 4) {
+            return 0
+        }
+        log.append(entries, 2)
+        log.append(entries, 3)
+        log.append(entries, 4)
+    }
+    match appended {
+        Ok(()) => digits(log.finish(take entries)),
+        _ => 0,
+    }
+}
+
 // A list moved out by replace and into_inner outlives the frame that owned the cell,
 // with its entries.
 // expect: run moved_past_owner() = 12312

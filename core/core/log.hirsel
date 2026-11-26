@@ -5,8 +5,19 @@ pub opaque type Log[E: inert] {
     entries: Cell[List[E]]
 }
 
+pub type Full = Full()
+
 pub fn new[E: inert]() -> Log[E] {
     Log(entries: cell.new(list.new()))
+}
+
+pub fn try_reserve[E: inert](l: Log[E], n: u64) -> Result[(), Full] {
+    cell.with(l.entries, n, fn(mut entries: List[E], take additional: u64) -> Result[(), Full] {
+        match list.try_reserve(mut entries, additional) {
+            Ok(()) => Ok(()),
+            Error(_) => Error(Full()),
+        }
+    })
 }
 
 pub fn append[E: inert](l: Log[E], take e: E) {

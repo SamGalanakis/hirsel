@@ -63,6 +63,9 @@ limit = 134217728
 [tests.runs."platform@1/local_laws/test_local_reopen_keeps"]
 limit = 134217728
 
+[tests.runs."platform@1/local_laws/test_local_stale_dial"]
+limit = 134217728
+
 # The host's own catalog store; the place budget is below one child's charge.
 [tests.runs."platform@1/local_laws/test_local_start_full"]
 limit = 134217728

@@ -491,6 +491,58 @@ fn test_local_reopen_keeps(parent: Dir, clock: Clock, random: Random, tasks: Tas
     }
 }
 
+// local_stale_dial (RUNNER-SPEC §14.11 "Co-located places"): a dialer belongs to one
+// child. A lease of A's first child is kept across an unload; after A is routed again,
+// a session dialed through the old lease must be refused (its child stopped, so its dial
+// inbox is gone), while the new lease's session reads the write the first child
+// committed. Wrong implementation: dials kept per group rather than per child, so the old
+// lease reaches the next child (or the new lease reaches nothing).
+pub fn law_local_stale_dial(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> bool waits {
+    let run = start_local(parent, keeping_place, 60000u64, clock, random, tasks, net)
+    let wanted = kept_keys()
+    let first = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: first route refused")
+    }
+    let stale = option.unwrap(local.dialer(first))
+    let writer = connect_lease(first, tasks, net, clock, random, wanted)
+    let _ = ping_call(writer, wanted, wanted[0u64], 0u64, 7u64)
+    let _ = runner.wire_client.close(take writer)
+    let _ = take first
+    let unloaded = match local.unload(run.door, A) {
+        Ok(done) => match done.ended {
+            Ok(Stopped(_)) => true,
+            _ => false
+        },
+        Error(_) => false
+    }
+    let second = match local.route(run.door, A) {
+        Ok(take held) => take held,
+        Error(_) => fail("local: second route refused")
+    }
+    let refused = match runner.wire_client.connect_dial(tasks, take stale, clock, random, wanted, Some(runner.ingress.credential(random)), local_wire().socket) {
+        Ok(take reached) => {
+            let _ = runner.wire_client.close(take reached)
+            false
+        },
+        Error(_) => true,
+    }
+    let reader = connect_lease(second, tasks, net, clock, random, wanted)
+    let kept_write = ping_call(reader, wanted, wanted[1u64], 0u64, 7u64) == 7u64
+    let _ = runner.wire_client.close(take reader)
+    let _ = take second
+    end_local(parent, take run) && unloaded && refused && kept_write
+}
+
+@test
+fn test_local_stale_dial(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), ()] waits {
+    if law_local_stale_dial(parent, clock, random, tasks, net) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}
+
 // The laws' place: one u64 table, "data", and the reads and writes the laws call.
 type Hd: shareable + send {
     t: store.Table[u64, u64],

@@ -28,7 +28,6 @@ jobs:
       fdata: ${{ steps.profiles.outputs.fdata }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
       - name: Choose the version
         id: version
         shell: bash
@@ -204,13 +203,16 @@ jobs:
           tools/toolchain-dist/smoke-darwin "$HIRSEL_VERSION" "$RUNNER_TEMP/release" "$RUNNER_TEMP/witness"
 
   publish:
-    needs: [train, smoke, smoke-darwin]
+    needs: [train, build, build-darwin, smoke, smoke-darwin]
     # A dispatch publishes only when asked, and never from a branch.
     if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: linux-release

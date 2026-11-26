@@ -1986,15 +1986,18 @@ fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits
     } else {
         TRANSPORT_BACKOFF_NS
     }
-    let span = base << (attempt - 1)
-    list.clear(mut lane.jitter)
-    host.random(lane.random, mut lane.jitter)
+    retry_backoff(lane.clock, lane.random, mut lane.jitter, base << (attempt - 1), deadline)
+}
+
+fn retry_backoff(clock: Clock, random: Random, mut entropy: Bytes, span: u64, deadline: u64) waits {
+    list.clear(mut entropy)
+    host.random(random, mut entropy)
     let mut sample = 0u64
-    for b in lane.jitter {
+    for b in entropy {
         sample = (sample << 8) | int.widen(b)
     }
-    let wake = int.saturating_add(host.mono_ns(lane.clock), span + sample % span)
-    host.sleep_until(lane.clock, order.min(wake, deadline))
+    let wake = int.saturating_add(host.mono_ns(clock), span + sample % span)
+    host.sleep_until(clock, order.min(wake, deadline))
 }
 
 type Resolution: send = Committed(Value) | Reissue | Doubtful | Undecided
@@ -2606,6 +2609,15 @@ pub fn deadline_after_ms(c: Client, ms: u64) -> u64 {
     clock.deadline_after_ms(host.mono_ns(c.requests.clock), ms)
 }
 
+/// Waits before retrying an operation that spans several object requests.
+/// The first retry is attempt 0. Sleep never extends past the operation deadline.
+pub fn pause_retry(mut c: Client, attempt: u64, deadline_ns: u64) waits {
+    if host.mono_ns(c.requests.clock) < deadline_ns {
+        let span = TRANSPORT_BACKOFF_NS << order.min(attempt, MAX_ATTEMPTS - 1)
+        retry_backoff(c.requests.clock, c.requests.random, mut c.requests.entropy, span, deadline_ns)
+    }
+}
+
 pub fn fetch(mut c: Client, key: String, take into: Bytes, deadline_ns: u64) -> (Result[Meta, Error], Bytes) waits {
     let request = object_job(mut c, S3Fetch, key, take into, deadline_ns)
     let Reply(result: take result, data: take data, ..) = run(mut c, take request)
@@ -2962,11 +2974,15 @@ fn run_batch(c: Client, take queued: List[Option[Job]], streams: u64) -> List[Op
     take replies
 }
 
+pub const MULTIPART_MAX_PARTS: u64 = 10000
+
+pub const MULTIPART_MAX_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024
+
 pub fn parts(mut c: Client, mut u: Upload, take bodies: List[Bytes], deadline_ns: u64) -> (Result[(), Error], List[Bytes]) waits {
     let mut returned = take bodies
     let count = list.len(returned)
     let existing = list.len(u.parts)
-    if count > 10000 - existing {
+    if count > MULTIPART_MAX_PARTS - existing {
         return (Error(TooLarge), take returned)
     }
     let mut queued: List[Option[Job]] = list.with_capacity(count)

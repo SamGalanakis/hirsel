@@ -16,6 +16,18 @@ fn stream_control(db: Db) -> Result[StreamControl, Error] {
     decode_stream_control(raw)
 }
 
+fn check_stream_quota(tree: PageTree, declared: Option[u64]) -> Result[(), Error] {
+    let Some(expected) = declared else {
+        return Ok(())
+    }
+    if let Some(raw) = get_page_row(tree, b"") {
+        if decode_stream_control(raw)?.max != expected {
+            return Error(Changed("streams_max"))
+        }
+    }
+    Ok(())
+}
+
 fn decode_stream_control(raw: Bytes) -> Result[StreamControl, Error] {
     let mut at = 0u64
     let saved_max = std.codec.take_u64(raw, mut at) ?=> Decode

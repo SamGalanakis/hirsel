@@ -28,9 +28,9 @@
     "lines": 1936
   },
   "core/programs/store/store.hirsel": {
-    "lines": 5153,
-    "raise_revision": 18,
-    "reason": "store-ring-build-2293: formatter-gate growth (314ec03b)"
+    "lines": 4816,
+    "raise_revision": 19,
+    "reason": "hardcoded-batch2-groupb-3083"
   },
   "core/std/codec.hirsel": {
     "lines": 2633,
@@ -56,8 +56,8 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 3170,
-    "raise_revision": 15,
+    "lines": 3150,
+    "raise_revision": 16,
     "reason": "hardcoded-batch2-groupb-3083"
   },
   "core/std/omap.hirsel": {

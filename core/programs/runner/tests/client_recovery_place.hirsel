@@ -198,7 +198,7 @@ pub fn recovery_main(root: Dir, net: Net, clock: Clock, random: Random, tasks: T
         let mut options = result.unwrap(store.sized(Directory, 134217728u64))
         if mode == "quota-one" {
             options.streams_per_caller_max = 1u64
-            options.streams_max = 1u64
+            options.streams_max = Some(1u64)
         }
         if mode == "inspect" {
             recovery_inspect(directory, clock, out, options)

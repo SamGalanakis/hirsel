@@ -1,6 +1,16 @@
 const HISTORY_LOCATE_ROWS: u64 = 32768
 
-const HISTORY_PART_BYTES: u64 = 8388608
+const HISTORY_PART_TARGET: u64 = 8 * MIB
+
+fn history_part_width(total: u64) -> u64 {
+    let parts = std.object.MULTIPART_MAX_PARTS
+    let required = total / parts + if total % parts == 0 {
+        0
+    } else {
+        1
+    }
+    order.min(total, order.max(HISTORY_PART_TARGET, required))
+}
 
 const HISTORY_UPLOAD_ATTEMPTS: u64 = 5
 
@@ -195,10 +205,10 @@ fn history_copy_header(mut raw: Bytes, ctx: DiskContext, epoch: u64, kind: u8) -
     Ok(())
 }
 
-fn history_pack_parts(mut client: std.object.Client, mut upload: std.object.Upload, raw: Bytes, mut bodies: List[Bytes], deadline: u64) -> Result[(), Error] waits {
+fn history_pack_parts(mut client: std.object.Client, mut upload: std.object.Upload, raw: Bytes, mut bodies: List[Bytes], width: u64, deadline: u64) -> Result[(), Error] waits {
     let mut at = 0u64
     while at < list.len(raw) {
-        let end = at + order.min(list.len(raw) - at, HISTORY_PART_BYTES)
+        let end = at + order.min(list.len(raw) - at, width)
         list.clear(mut bodies[0u64])
         list.append(mut bodies[0u64], list.slice(raw, at, end))
         let (take sent, take returned) = std.object.parts(mut client, mut upload, replace(mut bodies, list.new()), deadline)
@@ -226,13 +236,17 @@ fn history_confirm_pack(mut client: std.object.Client, key: String, raw: Bytes, 
 }
 
 fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, mut scratch: Bytes, deadline: u64) -> Result[(), Error] waits {
+    let width = history_part_width(list.len(raw))
+    if width > std.object.MULTIPART_MAX_PART_BYTES {
+        return Error(Remote(TooLarge))
+    }
     let mut bodies = disk_allocation(scoped fn() -> Result[List[Bytes], Error] {
         let mut part_batch: List[Bytes] = list.with_capacity(1)
-        list.push(mut part_batch, list.with_capacity(order.min(list.len(raw), HISTORY_PART_BYTES)))
+        list.push(mut part_batch, list.with_capacity(width))
         Ok(take part_batch)
     })?
     let mut last_upload_error: std.object.Error = Retriable(Deadline)
-    for _ in 0u64 .. HISTORY_UPLOAD_ATTEMPTS {
+    for attempt in 0u64 .. HISTORY_UPLOAD_ATTEMPTS {
         if std.object.deadline_after_ms(client, 0) >= deadline {
             break
         }
@@ -240,7 +254,7 @@ fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, m
             Ok(take active) => take active,
             Error(take problem) => return Error(Remote(take problem)),
         }
-        if let Error(take problem) = history_pack_parts(mut client, mut upload, raw, mut bodies, deadline) {
+        if let Error(take problem) = history_pack_parts(mut client, mut upload, raw, mut bodies, width, deadline) {
             let _ = std.object.abort(mut client, take upload, deadline)
             return Error(take problem)
         }
@@ -263,6 +277,9 @@ fn history_upload_pack(mut client: std.object.Client, key: String, raw: Bytes, m
             return Error(Remote(take completed))
         }
         last_upload_error = take completed
+        if attempt + 1 < HISTORY_UPLOAD_ATTEMPTS {
+            std.object.pause_retry(mut client, attempt, deadline)
+        }
     }
     Error(Remote(take last_upload_error))
 }

@@ -208,6 +208,7 @@ fn prepare_object_writer(tasks: Tasks, mut read_source: ObjectPackRead, c: Clock
         Ok(clone(options))
     })?
     let (take register, take opened, take started, take metadata) = history_open_with(mut read_source, c, r, options, declaration.levels, authority_kind, take genesis_authority, mut workspace, op_ms, mut link, scoped fn(id: StoreId, replay: JournalReplay) -> Result[Db, Error] {
+        check_stream_quota(replay.state.tips[0u64].roots.streams, options.streams_max)?
         let state = copy_follow_state(replay.state)?
         let mut prepared = disk_allocation(scoped fn() -> Result[Db, Error] {
             Ok(empty_db(c, id, options))

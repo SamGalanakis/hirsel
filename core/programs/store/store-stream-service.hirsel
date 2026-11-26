@@ -317,7 +317,10 @@ fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent:
     let mut candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
     stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
     let mut pre = lane.tag
-    for _ in 0u64 .. STREAM_REG_ATTEMPTS {
+    for attempt in 0u64 .. STREAM_REG_ATTEMPTS {
+        if std.object.deadline_after_ms(client, 0) >= deadline {
+            break
+        }
         let (take outcome, take buffer) = std.object.store_if(mut client, key, Match(pre), replace(mut lane.body, list.new()), deadline)
         lane.body = take buffer
         match take outcome {
@@ -344,6 +347,9 @@ fn stream_reg_write(mut lane: StreamLane, mut client: std.object.Client, intent:
             },
             Error(Retriable(_)) => (),
             Error(take problem) => return Error(Remote(take problem)),
+        }
+        if attempt + 1 < STREAM_REG_ATTEMPTS {
+            std.object.pause_retry(mut client, attempt, deadline)
         }
     }
     if uncertain {
@@ -453,7 +459,10 @@ fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, 
     history_check_conditions(mut client, probe, mut lane.body, deadline)?
     let old_inc = lane.reg.inc
     let mut won = false
-    for _ in 0u64 .. STREAM_REG_ATTEMPTS {
+    for attempt in 0u64 .. STREAM_REG_ATTEMPTS {
+        if std.object.deadline_after_ms(client, 0) >= deadline {
+            break
+        }
         let mut elected = disk_allocation(scoped fn() -> Result[StreamRegister, Error] {
             Ok(clone(lane.reg))
         })?
@@ -486,6 +495,9 @@ fn stream_elect_with_check(mut lane: StreamLane, mut client: std.object.Client, 
                 }
             },
             Error(take problem) => return Error(Remote(take problem)),
+        }
+        if attempt + 1 < STREAM_REG_ATTEMPTS {
+            std.object.pause_retry(mut client, attempt, deadline)
         }
     }
     if !won {

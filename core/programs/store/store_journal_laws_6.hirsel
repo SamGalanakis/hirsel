@@ -150,7 +150,7 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let dir = disk_test_directory(d)
     let mut options = journal_crash_options()
     options.streams_per_caller_max = 1u64
-    options.streams_max = 1u64
+    options.streams_max = Some(1u64)
     let mut before = result.unwrap(open(tasks, dir, c, r, options))
     result.unwrap(law_table(mut before, "effects", std.codec.key_u64(), std.codec.of_u64()))
     let birth = keyed_time(before)
@@ -167,6 +167,17 @@ fn stream_quota_reopen_lost_response(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     let x = count_stream_effect(mut before, first_raw, 10u64)
     result.unwrap(durable(mut before, x))
     result.unwrap(close(take before))
+    // A requested global quota of two cannot silently open with the
+    // recorded quota of one. With no requested quota, reopen uses one.
+    options.streams_max = Some(2u64)
+    if let Error(Changed(field)) = open(tasks, dir, c, r, options) {
+        if field != "streams_max" {
+            return Error(6u64)
+        }
+    } else {
+        return Error(6u64)
+    }
+    options.streams_max = None
     // X did not receive its committed response. Reopening still has its reply.
     let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
     match result.unwrap(admit(mut reopened, first, 0u64, first_digest)) {

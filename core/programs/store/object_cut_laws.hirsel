@@ -152,6 +152,10 @@ fn upload_pack_with_expired_completion(tasks: Tasks, sim: BucketSim, name: Strin
 // first upload. Its HTTP 200 error spends the ID without publishing the key.
 @test
 fn bucket_test_m2_multipart_restart(c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    // One byte above what 10,000 parts of 8 MiB can hold requires wider parts.
+    if history_part_width(83886080000 + 1) != 8388609 {
+        fail("multipart width did not grow at the 10,000-part boundary")
+    }
     let mut faults: List[std.sim.s3.Fault] = list.with_capacity(2)
     list.push(mut faults, Clean)
     list.push(mut faults, CompleteExpired)

@@ -29,7 +29,9 @@ pub type Options: send {
     retain: u8,
     stream_retention_ms: u64,
     streams_per_caller_max: u64,
-    streams_max: u64,
+    // A declared quota must match the recorded quota on a writer reopen.
+    // None takes the recorded quota, or derives the default for a new store.
+    streams_max: Option[u64],
     // The store's frame, value and MANIFEST limits (§11.1 AP4a). Genesis
     // records them; None records today's ceilings, and an open with None
     // takes the recorded ones. An open naming others is LimitsDiffer.
@@ -59,6 +61,20 @@ pub type Shortage: send {
 }
 
 const MIB: u64 = 1048576
+
+const DEFAULT_BUCKET_CLAIM_MS: u64 = 30000
+
+const DEFAULT_BUCKET_HEAD_POLL_MS: u64 = 1000
+
+const DEFAULT_BUCKET_CHECKPOINT_ENTRIES: u64 = 4096
+
+const DEFAULT_BUCKET_RETAIN: u8 = 2
+
+const DEFAULT_STREAMS_PER_CALLER: u64 = 256
+
+// The default quota's target density. Stream rows and replies also pay
+// their actual resident charges when they are written.
+const DEFAULT_STREAM_RESIDENT_BYTES: u64 = 4096
 
 const CUT_FIXED_BYTES: u64 = 65536
 
@@ -350,7 +366,7 @@ fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, 
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
     let tiered = tiered_sizes(kind, resident, o)
-    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: 30000, head_poll_ms: 1000, checkpoint_entries: 4096, retain: 2, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: 256u64, streams_max: resident / 4096u64, limits: o.limits)
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: DEFAULT_BUCKET_CLAIM_MS, head_poll_ms: DEFAULT_BUCKET_HEAD_POLL_MS, checkpoint_entries: DEFAULT_BUCKET_CHECKPOINT_ENTRIES, retain: DEFAULT_BUCKET_RETAIN, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: DEFAULT_STREAMS_PER_CALLER, streams_max: None, limits: o.limits)
 }
 
 // The Directory journal worker's grant beyond its group buffer, holding its
@@ -408,7 +424,7 @@ fn bucket_cut_parts(pack: u64, l: StoreLimits) -> WriterParts {
     let unbounded = 18446744073709551615u64
     let output = cut_output_bytes(pack, l)
     let manifest = option.unwrap(charge.seq(bytes[u8], cut_output_bytes(0, l)))
-    let staging = option.unwrap(charge.seq(bytes[u8], order.min(output, HISTORY_PART_BYTES))) + option.unwrap(charge.seq(bytes[Bytes], 1))
+    let staging = option.unwrap(charge.seq(bytes[u8], history_part_width(output))) + option.unwrap(charge.seq(bytes[Bytes], 1))
     // PackBuffers.out stays live through the MANIFEST PUT. The cut has
     // its own history workspace and may grow its comparison buffer to
     // the output width. The multipart part and the encoded MANIFEST are
@@ -530,6 +546,9 @@ pub fn follower_plan(kind: Kind, o: Options) -> Result[FollowerPlan, Shortage] {
     effective_options.head_poll_ms = o.head_poll_ms
     effective_options.checkpoint_entries = o.checkpoint_entries
     effective_options.retain = o.retain
+    effective_options.stream_retention_ms = o.stream_retention_ms
+    effective_options.streams_per_caller_max = o.streams_per_caller_max
+    effective_options.streams_max = o.streams_max
     follower_from_options(kind, take effective_options, writer_bytes(writer) - transport)
 }
 

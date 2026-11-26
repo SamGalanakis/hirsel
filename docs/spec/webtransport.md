@@ -1,8 +1,8 @@
 # WebTransport over HTTP/3
 
-*Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 2 of 4). Not built.
-Rules WT-1 to WT-7, laws T1 to T10, slices TS1 to TS5. Goes to design review (astra) before
-any build.*
+*Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 2 of 4); design
+review applied the same day (media-w2-spec-fix-2918). Not built. Rules WT-1 to WT-7, laws T1
+to T10, slices TS1 to TS5. The review's rulings are at the end.*
 
 `webtransport` is a sans-IO HTTP/3 server and client with only what WebTransport needs. It is
 written in Hirsel under `core/programs/webtransport` <!-- doc-ref: planned --> and runs over
@@ -25,14 +25,14 @@ with no body, so `std.http` stays the one HTTP server and no second request rout
 | Area | In Wave 2 | Not in Wave 2 (and why) |
 | --- | --- | --- |
 | HTTP/3 | control streams, SETTINGS, GOAWAY, HEADERS, DATA, the frame and stream-type registries, unknown-type skipping (RFC 9114 §9) | server push, PRIORITY_UPDATE: no consumer uses them; a received PUSH_PROMISE is `H3_FRAME_UNEXPECTED` (a server never receives one; a client never enables push) |
-| QPACK | static table, literal fields, Huffman decode and encode; `SETTINGS_QPACK_MAX_TABLE_CAPACITY` 0 | dynamic table: a WebTransport session has one CONNECT, so a dynamic table saves nothing; open item O3 |
+| QPACK | static table, literal fields, Huffman decode and encode; `SETTINGS_QPACK_MAX_TABLE_CAPACITY` 0 | dynamic table: a WebTransport session has one CONNECT, so a dynamic table saves nothing (Design review, O3) |
 | CONNECT | extended CONNECT with `:protocol` `webtransport-h3` (draft-17 §3.2) | other `:protocol` values (`connect-udp`, `websocket`) answer `501` |
 | Sessions | several per connection when both sides give flow-control limits (draft-17 §5); one otherwise | — |
 | Streams | unidirectional (type `0x54`) and bidirectional (signal `0x41`), each tagged with its session id | — |
 | Datagrams | HTTP Datagrams on the session's quarter stream id (RFC 9297 §2.1) over QUIC DATAGRAM | — |
 | Capsules | WT_CLOSE_SESSION, WT_DRAIN_SESSION, WT_MAX_DATA, WT_MAX_STREAMS, WT_DATA_BLOCKED, WT_STREAMS_BLOCKED | DATAGRAM capsules: QUIC DATAGRAM is mandatory here |
-| Browsers | Chromium and Firefox `new WebTransport(url, {serverCertificateHashes})` | Web PKI server certificates: [quic](quic.md) open item O4 |
-| Versions | draft-17 codepoints only | earlier drafts' `SETTINGS_ENABLE_WEBTRANSPORT` (`0x2b603742`): no supported browser needs it after Chromium's and Firefox's current releases; open item O1 |
+| Browsers | Chromium and Firefox `new WebTransport(url, {serverCertificateHashes})` | Web PKI server certificates: ruled out for Wave 2 ([quic](quic.md) Design review, O4) |
+| Versions | draft-17 codepoints only | earlier drafts' `SETTINGS_ENABLE_WEBTRANSPORT` (`0x2b603742`) and pre-17 `SETTINGS_WT_ENABLED` values: a second draft is a compatibility path (Design review, O1) |
 
 ## WT-1: Codepoints
 
@@ -62,8 +62,16 @@ From draft-17 §9 and the RFCs above. These are the only values the package writ
 | application errors | `0x52e4a40fa8db` to `0x52e5ac983162`, a 32-bit code `n` maps to `0x52e4a40fa8db + n + n / 0x1e` (draft-17 §4.4), which skips the reserved values `0x1f·N + 0x21` | RESET_STREAM, STOP_SENDING |
 
 The QUIC connection must have agreed `max_datagram_frame_size` > 0 and `reset_stream_at`
-(draft-17 §3.1). A peer whose SETTINGS or transport parameters lack any requirement is
-closed with `WT_REQUIREMENTS_NOT_MET` before any session opens. The ALPN is `h3`.
+(draft-17 §3.1), which the package reads from `quic.peer_params`. A peer whose SETTINGS or
+transport parameters lack any requirement is closed with `WT_REQUIREMENTS_NOT_MET` before
+any session opens. The ALPN is `h3`.
+
+The HTTP/3 and QPACK codes the package uses are RFC 9114 §8.1's and RFC 9204 §6's:
+`H3_REQUEST_REJECTED` (`0x010b`), `H3_CLOSED_CRITICAL_STREAM` (`0x0104`),
+`H3_MESSAGE_ERROR` (`0x010e`), `H3_ID_ERROR` (`0x0108`), `H3_FRAME_UNEXPECTED` (`0x0105`),
+`QPACK_DECOMPRESSION_FAILED` (`0x0200`) and `QPACK_ENCODER_STREAM_ERROR` (`0x0201`). The
+package also sends `SETTINGS_MAX_FIELD_SECTION_SIZE` (`0x06`, RFC 9114 §4.2.2) as
+`Limits.header_bytes`.
 
 Because the draft is in Last Call, the IANA values may change at RFC publication. WT-1 is the
 only place they live, and law T1 checks each against the draft's text, so a change of
@@ -72,46 +80,80 @@ codepoint is one table edit and one law update.
 ## WT-2: Shape
 
 ```hirsel unbuilt
-pub opaque type Server
-pub opaque type Client
-pub type SessionId = SessionId(u64)
-pub type Limits { origins: List[String], sessions: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, header_bytes: u32 }
+pub opaque type Endpoint
+pub type SessionHandle = SessionHandle(conn: quic.ConnectionHandle, id: quic.StreamId)
+pub type Limits { authorities: List[String], origins: List[String], require_origin: bool, sessions: u16, sessions_per_connection: u16, pending_connects: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, buffered_datagrams: u16, header_bytes: u32 }
 pub type Request { authority: String, path: String, origin: Option[String], protocols: List[String], headers: List[(String, String)] }
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
-pub type Event = Requested(SessionId, Request) | Ready(id: SessionId, protocol: Option[String]) | Stream(id: SessionId, stream: quic.StreamId, bidi: bool) | Datagram(SessionId, Bytes) | Draining(SessionId) | Closed(id: SessionId, code: u32, reason: Bytes)
+pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, status: u16) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: u32, final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: u32) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 
-pub fn server(limits: Limits) -> Server
-pub fn receive(mut s: Server, mut e: quic.Endpoint, events: List[quic.Event], mut out: List[Event])
-pub fn answer(mut s: Server, mut e: quic.Endpoint, id: SessionId, v: Verdict) -> Result[(), WtError]
-pub fn open(mut s: Server, mut e: quic.Endpoint, id: SessionId, bidi: bool) -> Result[quic.StreamId, WtError]
-pub fn send_datagram(mut s: Server, mut e: quic.Endpoint, id: SessionId, data: Shared[Bytes]) -> Result[(), WtError]
-pub fn drain(mut s: Server, mut e: quic.Endpoint, id: SessionId)
-pub fn close(mut s: Server, mut e: quic.Endpoint, id: SessionId, code: u32, reason: Bytes)
-pub fn connect(mut e: quic.Endpoint, now: u64, to: Addr, url: String, pin: quic.Pin, protocols: List[String], limits: Limits) -> Result[(Client, SessionId), WtError]
+pub fn endpoint(limits: Limits) -> Endpoint
+pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[quic.Event], mut out: List[Event])
+pub fn poll(mut w: Endpoint, mut e: quic.Endpoint, now: u64, mut out: List[Event]) -> Option[u64]
+pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, v: Verdict) -> Result[(), WtError]
+pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, pins: List[quic.Pin], protocols: List[String]) -> Result[SessionHandle, WtError]
+pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool) -> Result[quic.StreamId, WtError]
+pub fn read(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, mut into: Bytes) -> Result[(u64, bool), WtError]
+pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Bytes, fin: bool) -> Result[u64, WtError]
+pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Shared[Bytes], fin: bool) -> Result[bool, WtError]
+pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError]
+pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError]
+pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError]
+pub fn drain(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle)
+pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32, reason: Bytes)
+pub fn rotate(mut w: Endpoint, mut e: quic.Endpoint, take next: quic.Identity)
+pub fn certificate_hashes(w: Endpoint) -> List[quic.Pin]
 ```
 
-The package sits between `quic.receive` and the application: it consumes the QUIC events of
+One `Endpoint` serves both roles over one `quic.Endpoint`, as `quic` does: a server's
+sessions arrive as `Requested`, a client's start with `connect`. A session is named by
+`SessionHandle(conn, id)`, its QUIC connection and its CONNECT stream's id, so two clients
+that each open their first session on stream 0 hold different handles. A handle is never
+reused: QUIC never reuses a connection handle while the endpoint lives, and never reuses a
+stream id within a connection.
+
+`connect` starts the QUIC connection with the pin list (QUIC-3) if none is open to `to`,
+and returns the session's handle at once, pending. `Ready` follows once the QUIC handshake
+has completed, both SETTINGS have arrived, and the server has answered `200`; `Refused`
+follows any other status, and `Closed` follows a QUIC or HTTP/3 failure first.
+
+The package sits between `quic` and the application: it consumes the QUIC events of
 HTTP/3 streams, reads and writes the HTTP/3 control and QPACK streams itself, and hands the
-application only session events. Streams of a session stay QUIC streams: the application
-reads and writes them with `quic.read`, `quic.write` and `quic.write_shared` after the
-package has consumed their `0x54` or `0x41` header and session id, so stream data is
-never copied through this layer.
+application only session events. The application reads and writes a session's streams
+through `read`, `write`, `write_shared`, `reset` and `stop`, never `quic`'s own. Each is a
+thin wrapper over the `quic` call of the same name that first checks the stream belongs to
+the session, and then does the session's accounting (WT-5): it charges `WT_MAX_DATA`, raises
+the session's windows as the application reads, maps a 32-bit application code to the
+draft-17 §4.4 range (WT-1), and resets with `RESET_STREAM_AT` at the stream header's
+length so the header always arrives. Stream data is never copied through this layer: the
+wrappers pass the caller's buffers and `Shared[Bytes]` straight to `quic`.
 
 `answer` is the application's verdict on a CONNECT: `Accept` sends `200` with the protocol
 it picked from the client's `WT-Available-Protocols` (draft-17 §3.3) in
 `WT-Protocol`, and `Refuse(n)` sends `n`. No session data flows before `Accept`.
 
+`receive` takes the QUIC events of one `quic.receive_datagram` or `quic.timeout`; `poll`
+runs the package's own timers (a buffered stream's 3-PTO expiry, WT-4) and returns the next
+deadline, which the caller folds into the `quic` driver's wait.
+
 ## WT-3: Session establishment
 
 1. Both sides send SETTINGS on their control stream with WT-1's values. A CONNECT received
-   before the peer's SETTINGS is held, as RFC 9114 §7.2.4.2 allows, up to `header_bytes`.
+   before the peer's SETTINGS is held, as RFC 9114 §7.2.4.2 allows; at most
+   `pending_connects` CONNECTs per connection are held unanswered, whether waiting for
+   SETTINGS or for `answer`, and one past that is reset with `H3_REQUEST_REJECTED`
+   (draft-17 §5.2). Closing the control stream or either QPACK stream is
+   `H3_CLOSED_CRITICAL_STREAM` (RFC 9114 §6.2.1, RFC 9204 §4.2).
 2. The client sends HEADERS with `:method CONNECT`, `:protocol webtransport-h3`, `:scheme
    https`, `:authority`, `:path`, and `Origin` from a browser. The CONNECT stream's id is the
-   session id.
-3. The server checks that each pseudo-header is present once (RFC 9114 §4.3.1), that
-   `:authority` matches a configured authority, and emits `Requested`. When the request carries `Origin`, the package checks it against
-   `Limits.origins` and answers `403` on a mismatch, as draft-17 §3.2 requires of the server;
-   the application never sees such a request.
+   session's `id`.
+3. The server checks that each pseudo-header is present once (RFC 9114 §4.3.1) and that
+   `:authority` is one of `Limits.authorities`, answering `404` otherwise. When the request
+   carries `Origin`, the package checks it against `Limits.origins` and answers `403` on a
+   mismatch, as draft-17 §3.2 requires of the server. With `require_origin` set, a request
+   without `Origin` is also answered `403`: draft-17 §3.2 makes `Origin` mandatory only for
+   browsers, and a server that serves only browsers can demand it. The application never
+   sees a refused request; one that passes is emitted as `Requested`.
 4. On `Accept`, the server sends `200` and the session is live; the CONNECT stream then
    carries only capsules (RFC 9297 §3) in both directions.
 5. A session ends with a WT_CLOSE_SESSION capsule (a 32-bit code and a reason of at most
@@ -126,33 +168,60 @@ it picked from the client's `WT-Available-Protocols` (draft-17 §3.3) in
   the session.
 - A stream or datagram may arrive before its session's CONNECT is processed (draft-17 §4.6).
   The server keeps at most `buffered` such streams across the connection, holding their
-  header only, and at most one datagram each; past that it resets the newest with
-  `WT_BUFFERED_STREAM_REJECTED`. A buffered stream whose session is refused or never
-  arrives is reset with the same code when the session's CONNECT stream closes, or after 3
-  PTOs.
+  header only, and at most `buffered_datagrams` such datagrams across the connection; past
+  either it resets the newest stream with `WT_BUFFERED_STREAM_REJECTED`, or drops the newest
+  datagram and counts it. A buffered stream whose session is refused or never arrives is
+  reset with the same code when the session's CONNECT stream closes, or after 3 PTOs
+  (`quic.pto_ns`); buffered datagrams go with it.
 - A stream naming a session id that is not a client-initiated bidirectional stream id is
   `H3_ID_ERROR`. A stream naming a closed session is reset with `WT_SESSION_GONE`.
 - A datagram's payload is the quarter stream id of the CONNECT stream (a varint) then the
-  data (RFC 9297 §2.1). One naming no session is dropped and counted.
+  data (RFC 9297 §2.1). One naming no session is dropped and counted. `send_datagram` passes
+  its `quic.Priority` and `tag` to `quic.send_datagram` (QUIC-7).
 
 ## WT-5: Flow control and session limits
 
 draft-17 §5's session-level limits are enforced at both ends: `data` bounds the bytes of all a
-session's streams together, `streams_bidi` and `streams_uni` bound the streams it may open.
-They are sent as SETTINGS initial values and raised with WT_MAX_DATA and WT_MAX_STREAMS
-capsules as the application reads, at half the window as `quic` does (QUIC-5). Exceeding a
-limit closes that session (not the connection) with `WT_FLOW_CONTROL_ERROR` (draft-17 §5.6). A client that sent no
-WT flow-control SETTINGS can hold one session only (draft-17 §5.1), so the server refuses its second CONNECT with
-`429`; the status is this package's choice, the refusal is the draft's.
+session's streams together, excluding stream headers (§5.4), and `streams_bidi` and
+`streams_uni` bound the streams the peer may open in it (§5.3). They are sent as SETTINGS
+initial values and raised with WT_MAX_DATA and WT_MAX_STREAMS capsules as the application
+reads through `read`, at half the window as `quic` does (QUIC-5).
+
+The receive side counts, per session, the largest offset received on each of its streams
+(`quic.received`), less the header, and for a reset stream its final size from
+`quic.Event.Reset` (§5.4 requires the final size so both ends agree on the credit
+consumed). The count is checked on every `quic.Event.Readable` and `Reset` the package
+consumes, so a peer that writes past `data` is caught when its bytes arrive, not when the
+application reads them; that, or opening past `streams_bidi` or `streams_uni`, closes that
+session (not the connection) with `WT_FLOW_CONTROL_ERROR`. A received WT_MAX_STREAM_DATA or
+WT_STREAM_DATA_BLOCKED capsule is a session error (§5.4). The send side does the same
+accounting in `write` and `write_shared`: they take no more than the peer's WT_MAX_DATA
+allows and send WT_DATA_BLOCKED when it stops them, and `open` past the peer's
+WT_MAX_STREAMS is `Blocked` and sends WT_STREAMS_BLOCKED.
+
+Sessions:
+
+- **Without flow control** (draft-17 §5.1: either side sent no nonzero
+  `SETTINGS_WT_INITIAL_MAX_*`), a connection holds one session. The server resets a second
+  CONNECT stream with `H3_REQUEST_REJECTED`, as §5.1 requires, and the client never sends
+  one. Flow-control capsules are ignored (§5.1).
+- **With flow control**, a connection holds at most `sessions_per_connection` sessions, and
+  the endpoint at most `sessions` across all connections. A CONNECT past either is answered
+  `429` (§5.2's rate-limit signal, which reaches the application), since the request was
+  read and refused, not unprocessed.
 
 ## WT-6: QPACK
 
 The encoder writes only static-table references and literals with a static-table name or a
-literal name, Huffman-coded when shorter; it never inserts. The decoder accepts the same,
-and since it advertised a table capacity of 0, any dynamic reference, any encoder-stream
-instruction past `Set Dynamic Table Capacity 0`, or a non-zero Required Insert Count is
-`QPACK_DECOMPRESSION_FAILED` (RFC 9204 §4.5.1). A field section over `header_bytes`
-decoded is `H3_EXCESSIVE_LOAD`, a bound checked as it is decoded, never after.
+literal name, Huffman-coded when shorter; it never inserts. The decoder advertises
+`SETTINGS_QPACK_MAX_TABLE_CAPACITY` 0 and accepts the same. On the encoder stream, a Set
+Dynamic Table Capacity above 0 or any insert instruction is the connection error
+`QPACK_ENCODER_STREAM_ERROR` (`0x0201`, RFC 9204 §4.3.1 and §3.2.2: the capacity exceeds the
+limit, or the entry cannot fit). In a field section, a dynamic reference or a non-zero
+Required Insert Count is `QPACK_DECOMPRESSION_FAILED` (`0x0200`, §4.5.1). A field section
+whose decoded size passes `header_bytes`, the `SETTINGS_MAX_FIELD_SECTION_SIZE` the package
+advertised, is malformed (RFC 9114 §4.2.2): decoding stops at the bound and the stream is
+reset with `H3_MESSAGE_ERROR`, a bound checked as it is decoded, never after.
 
 ## WT-7: Certificates for browsers
 
@@ -160,11 +229,17 @@ A browser reaches a server that has no Web PKI certificate through
 `serverCertificateHashes`: SHA-256 of the DER certificate, and the certificate must be ECDSA
 P-256 and valid for at most 14 days (W3C WebTransport,
 [§ 6.4 serverCertificateHashes](https://w3c.github.io/webtransport/#dom-webtransportoptions-servercertificatehashes)).
-The server mints one with `std.x509_build.self_signed_p256` and a key minted by
-`secret.p256_key`, rotates it before 13 days, and publishes both the current and the next
-hash so a client fetched near a rotation accepts either. The hash is published by whatever
-page or signaling serves the client; the package exposes `certificate_hashes(s)` and nothing
-else about it.
+That hash is exactly `quic.Pin.Cert` (QUIC-3).
+
+The server holds two identities, each minted with `std.x509_build.self_signed_p256` and a key
+from `secret.p256_key`: the *current* one, which `quic` serves, and the *next* one.
+`certificate_hashes(w)` is `[Cert(current), Cert(next)]`, and whatever page or signaling
+serves the client publishes it, so a client fetched at any time holds a list that contains
+the certificate served now and the one served after the next rotation. `rotate(w, e, next)`
+makes the old next identity current through `quic.set_identity` (live connections keep
+theirs) and takes `next` as the new next. The server rotates before the current certificate
+is 13 days old. A client pinned only to a certificate that has rotated out is refused with
+`Refused(Pin)`.
 
 ## Laws
 
@@ -175,15 +250,21 @@ Red first in `core/programs/webtransport/laws.hirsel` <!-- doc-ref: planned --> 
   *Oracle:* the documents.
 - **T2 `qpack_static_vectors`.** RFC 9204 Appendix A's static table, and the field sections of
   RFC 9204 Appendix B.1 that use no dynamic table, encoded and decoded byte for byte; a
-  dynamic reference in any position is `QPACK_DECOMPRESSION_FAILED`. *Oracle:* the RFC.
+  dynamic reference in any position is `QPACK_DECOMPRESSION_FAILED`, and a Set Dynamic Table
+  Capacity of 1 or an insert on the encoder stream is `QPACK_ENCODER_STREAM_ERROR`.
+  *Oracle:* the RFC.
 - **T3 `huffman_round_trip_and_vectors`.** RFC 7541 Appendix C.4's Huffman strings (QPACK
   uses HPACK's code, RFC 9204 §4.1.2), then every byte string up to length 3 round-trips,
   and EOS or padding over 7 bits is an error. *Oracle:* RFC 7541.
-- **T4 `session_against_quiche_and_wtransport`.** The Hirsel server accepts a session from
-  quiche's h3 client and from the `wtransport` crate's client
-  ([github.com/BiagioFesta/wtransport](https://github.com/BiagioFesta/wtransport)), and the
-  Hirsel client opens one on each's server. Each side echoes 100 uni streams, 100 bidi
-  streams and 10,000 datagrams. *Oracle:* the other side's received bytes hash to the
+- **T4 `session_against_draft17_peer`.** The Hirsel server accepts a session from a
+  draft-17 WebTransport implementation's client, and the Hirsel client opens one on its
+  server. Each side echoes 100 uni streams, 100 bidi streams and 10,000 datagrams. The peer
+  must send draft-17's `SETTINGS_WT_ENABLED` (`0x20b8933b`); quiche (`ac43c0d`) has no
+  WebTransport, and on 2026-11-26 neither webtransport-go (`d0c9357`, which sends
+  `0x2c7cf000` and the draft-06 `0x2b603742`) nor `wtransport`
+  ([github.com/BiagioFesta/wtransport](https://github.com/BiagioFesta/wtransport), `b16674e`,
+  `0x2b603742` only) does, so T4 names the first of them to ship draft-17 and rides red until
+  one does, as MoQ's M2 does. *Oracle:* the other side's received bytes hash to the
   sender's.
 - **T5 `browser_echo`.** Headless Chromium and Firefox, through `serverCertificateHashes`,
   open a session, echo a bidi stream of 10 MiB and 1,000 datagrams, then close with code 7 and
@@ -197,16 +278,26 @@ Red first in `core/programs/webtransport/laws.hirsel` <!-- doc-ref: planned --> 
   resets each of its streams with `WT_SESSION_GONE` and drops its datagrams while the
   other's streams complete. *Oracle:* draft-17 §6.
 - **T8 `refusals`.** A CONNECT with `:protocol` other than `webtransport-h3` (`501`), a
-  missing `:authority` (stream error `H3_MESSAGE_ERROR`), an Origin outside `origins` (`403`, and no
-  session), a second session without flow-control SETTINGS
-  (`429`), a peer without `H3_DATAGRAM` (`WT_REQUIREMENTS_NOT_MET`). *Oracle:* the
-  sections cited in WT-3 and WT-5.
-- **T9 `session_flow_control`.** A peer that writes past `data`, or opens past
-  `streams_uni`, gets `WT_FLOW_CONTROL_ERROR`; an honest peer that reads slowly never stalls
-  for more than one window. *Oracle:* draft-17 §5.
-- **T10 `certificate_rotation_accepts_either`.** Across a rotation, a client pinned to the old
-  hash and one pinned to the new both connect; a certificate valid for 15 days is refused by
-  `self_signed_p256`'s caller check before it can be served. *Oracle:* the W3C rule.
+  missing `:authority` (stream error `H3_MESSAGE_ERROR`), an `:authority` outside
+  `authorities` (`404`), an Origin outside `origins` (`403`, and no session), no Origin with
+  `require_origin` (`403`), a second session without flow-control SETTINGS (CONNECT stream
+  reset with `H3_REQUEST_REJECTED`), a session past `sessions_per_connection` with flow
+  control (`429`), CONNECTs past `pending_connects` (`H3_REQUEST_REJECTED`), a field section
+  past `header_bytes` (`H3_MESSAGE_ERROR`, decoding stopped at the bound), a closed control
+  stream (`H3_CLOSED_CRITICAL_STREAM`), a peer without `H3_DATAGRAM`
+  (`WT_REQUIREMENTS_NOT_MET`). *Oracle:* the sections cited in WT-1, WT-3, WT-5 and WT-6.
+- **T9 `session_flow_control`.** A peer that writes past `data` while the application reads
+  nothing, or resets a stream with a final size past it, or opens past `streams_uni`, gets
+  `WT_FLOW_CONTROL_ERROR` on that session only, and the connection's other session carries
+  on; an honest peer that reads slowly never stalls for more than one window. Two clients
+  whose first sessions are both on stream 0 get distinct handles, and one's `close` leaves
+  the other's session live. *Oracle:* draft-17 §5.
+- **T10 `certificate_rotation_accepts_either`.** A client given `certificate_hashes` before a
+  rotation (`[old, new]`) connects both before and after `rotate`; a client pinned to `[old]`
+  only connects before and is refused with `Refused(Pin)` after; a connection made before
+  the rotation stays up across it. A certificate valid for 15 days is refused by
+  `self_signed_p256`'s caller check before it can be served. *Oracle:* the W3C rule, and
+  QUIC-3's any-pin rule.
 
 ## Build slices
 
@@ -214,9 +305,9 @@ Red first in `core/programs/webtransport/laws.hirsel` <!-- doc-ref: planned --> 
 | --- | --- | --- | --- |
 | **TS1** QPACK and frames | HTTP/3 frames, stream types, static QPACK, Huffman | — | T1, T2, T3 |
 | **TS2** HTTP/3 connection | control streams, SETTINGS, GOAWAY, the CONNECT exchange, 404 for others | quic QS4 | T8 (H3 rows) |
-| **TS3** Sessions | WT streams and datagrams, buffering, capsules, close and drain | TS2, quic QS7 | T4, T6, T7 |
-| **TS4** Flow control and limits | WT-5 | TS3 | T8, T9 |
-| **TS5** Browsers | WT-7 rotation; browser laws on Boat | TS3, quic QS8 | T5, T10 |
+| **TS3** Sessions | `SessionHandle`, the unified `Endpoint`, the stream wrappers, WT streams and datagrams, buffering, capsules, close and drain | TS2, quic QS7 | T4, T6, T7 |
+| **TS4** Flow control and limits | WT-5, pooled sessions, `Limits` | TS3 | T8, T9 |
+| **TS5** Browsers | WT-7 rotation; browser laws on Boat | TS4, quic QS8 | T5, T10 |
 
 Reds that may ride: laws T4 and T5 (interop and browsers, nightly). Laws T6, T8 and T9 bound
 memory and block.
@@ -235,13 +326,17 @@ rs/moq-relay and rs/moq-tokio), quinn (/tmp/ref-quinn at `75d08d9`, no HTTP/3 of
 | moq-rs | WebTransport as one of two transports under MoQ, native QUIC the other (rs/moq-relay, rs/moq-tokio) | **ADOPTED** in [MoQ](moq.md) MOQ-1 |
 | Goose | one obvious path per capability | **ADOPTED**: one WebTransport draft, one QPACK mode |
 
-## Open for design review
+## Design review
 
-- **O1** Draft-17 only, or also the `SETTINGS_ENABLE_WEBTRANSPORT` (draft-02 era) values that
-  older Chromium releases still send? Supporting two drafts is a compatibility path; the cost
-  is browsers a few releases old.
-- **O2** Should a WebTransport browser client of the SFU (media over datagrams instead of
-  SRTP) be specified now, or wait for MoQ to be the browser path?
-- **O3** Static-only QPACK. Cheaper and has no state attacks; it costs a few hundred bytes per
-  CONNECT. Confirm the browsers accept a peer advertising table capacity 0 (they must, by
-  RFC 9204, but it is worth a law).
+Rulings of the media Wave 2 design review (VERDICT-MEDIA-W2, 2026-11-26), applied above:
+
+- **O1 (draft-17 only).** Draft-17 codepoints only; no earlier draft's settings. Law T4 targets
+  a draft-17 peer instead of quiche's h3, which has no WebTransport.
+
+Not ruled by the review; the standing choice is kept as written:
+
+- **O2 (a WebTransport browser client of the SFU).** Not specified in Wave 2: MoQ over
+  WebTransport is the browser QUIC path, and a second media framing over WebTransport
+  datagrams would be a second path for one capability.
+- **O3 (static-only QPACK).** Static only. Every browser must accept a peer advertising table
+  capacity 0 (RFC 9204 §3.2.3), and law T5 exercises it against Chromium and Firefox.

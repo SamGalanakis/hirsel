@@ -88,10 +88,11 @@ pub type Controller = NewReno | Cubic
 pub type RetryPolicy = Never | Always | Above(u32)
 pub type Identity = Identity(chain: List[Bytes], key: Secret, alg: SignAlg)
 pub type Pin = Spki(Inline[u8, 32]) | Cert(Inline[u8, 32])
+pub type Priority { urgency: u8, order: u64, then: u64 }
 pub type PeerParams { max_idle_ms: u64, max_udp_payload: u64, max_ack_delay_ms: u64, max_datagram_frame: u64, reset_stream_at: bool, active_cid_limit: u64 }
 
 pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
-pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
 
@@ -105,11 +106,12 @@ pub fn open(mut e: Endpoint, c: ConnectionHandle, bidi: bool) -> Result[StreamId
 pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError]
 pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Shared[Bytes], fin: bool) -> Result[bool, QuicError]
 pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError]
+pub fn received(e: Endpoint, c: ConnectionHandle, s: StreamId) -> u64
 pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError]
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError]
-pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, data: Shared[Bytes], urgency: u8, order: u64, tag: u64) -> Result[(), QuicError]
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, data: Shared[Bytes], p: Priority, tag: u64) -> Result[(), QuicError]
 pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64
-pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, urgency: u8, order: u64) -> Result[(), QuicError]
+pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError]
 pub fn close(mut e: Endpoint, c: ConnectionHandle, code: u64, reason: Bytes)
 pub fn set_identity(mut e: Endpoint, id: Identity)
 pub fn set_client_pins(mut e: Endpoint, pins: Option[List[Pin]])
@@ -150,11 +152,18 @@ cascade) holds one copy, and each connection copies only into its own sealed pac
 TLS-8 `seal_into` does in the cipher. A packet is assembled contiguously in `out` and sealed
 in place; there is no scatter-input seal.
 
-`priority` sets a stream's urgency (0 to 7, lower first) and its order within that urgency
-(lower first); among equal priorities streams take turns, as
-[RFC 9218](https://www.rfc-editor.org/rfc/rfc9218)'s `u` and `i` do. A datagram carries the
-same `(urgency, order)` key and competes in the same schedule. MoQ's scheduling
-(moq-transport-23 §5.1.2) maps onto it (MOQ-5).
+`priority` sets a stream's `Priority`: its urgency (0 to 7), then its `order` within that
+urgency, then `then` within equal orders, each lower first; among equal priorities streams
+take turns, as [RFC 9218](https://www.rfc-editor.org/rfc/rfc9218)'s `u` and `i` do. A
+datagram carries a `Priority` too and competes in the same schedule. MoQ's scheduling
+(moq-transport-23 §5.1.2) maps onto the two 64-bit keys exactly (MOQ-5).
+
+`Acked` reports that every byte of a stream's send side, and its FIN, has been
+acknowledged (RFC 9000 §3.1's "Data Recvd"), which MoQ's subgroup delivery timeout
+waits for (MOQ-5).
+
+`received` is the largest offset received on a stream so far, read or not, which
+WebTransport's session flow control counts on arrival (WT-5).
 
 `set_identity` replaces the server's certificate chain and key for connections that start
 after it; live connections keep the identity they were made with. It is how a
@@ -426,8 +435,8 @@ the limit over the whole frame, so the payload bound is the peer's limit less th
 (one byte) and the length varint (1 to 8 bytes); a larger payload is `TooLarge(n)` and
 nothing is sent.
 
-Each queued datagram carries `(urgency, order)`, which schedules it among the streams
-(QUIC-1), and a caller-chosen `tag`. `drop_datagrams(e, c, tag)` removes every queued
+Each queued datagram carries a `Priority`, which schedules it among the streams (QUIC-1),
+and a caller-chosen `tag`. `drop_datagrams(e, c, tag)` removes every queued
 datagram with that tag, including those in a polled but uncommitted suffix, and returns how
 many it removed; a datagram already committed to the socket is not recalled. MoQ tags
 datagrams by track so a revocation fence can purge them (MOQ-8).
@@ -591,7 +600,7 @@ comparison.
 | **QS4** Streams | stream states, flow control, `max_gaps`, `send_bytes` and `write_shared` backpressure, RESET_STREAM_AT and its discard, priority | QS3 | Q4, Q11 |
 | **QS5** Recovery | RFC 9002, NewReno, CUBIC with HyStart++, pacing, ECN | QS3 | Q9, Q10 |
 | **QS6** Validation and resets | anti-amplification, Retry and NEW_TOKEN tokens, stateless reset, path validation, key update and AEAD limits | QS3, QS5 | Q6, Q7, Q8, Q12, Q13 |
-| **QS7** Datagrams, driver, steering | RFC 9221 with `(urgency, order, tag)` and `drop_datagrams`, `drive`, GSO trains, `Steer.Quic` CIDs | QS4, QS5, QS6 | Q14, Q15 |
+| **QS7** Datagrams, driver, steering | RFC 9221 with `Priority`, `tag` and `drop_datagrams`, `drive`, GSO trains, `Steer.Quic` CIDs | QS4, QS5, QS6 | Q14, Q15 |
 | **QS8** Interop and cost | the interop runner on Boat; the cost bench | QS6, QS7 | Q5, cost target |
 
 Reds that may ride: law Q5 and the cost target. Laws Q6, Q7, Q8, Q11 and Q16 are soundness laws and

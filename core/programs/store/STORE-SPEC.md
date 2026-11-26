@@ -5699,8 +5699,9 @@ pub type StreamPlan: cross { sid: HostStreamId, prefix: String, batching: Batchi
 pub opaque type JournalService                                   // not send: holds the service task's handle
 pub opaque type JournalSlot: cross                               // one Place's data connection client and its slot number
 pub type StreamRoot: cross { prefix: String }
-pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u64) -> Result[JournalService, Refusal] waits
-pub fn journal_slot(mut s: JournalService, p: PlacePlan) -> Result[JournalSlot, Error] waits
+pub fn stream_service_bytes(plan: StreamPlan) -> u64
+pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u64, c: Clock, r: Random) -> Result[JournalService, Refusal] waits
+pub fn journal_slot(mut s: JournalService) -> Result[JournalSlot, Error] waits
 pub fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, Error]   // a writer Authority whose opens attach
 pub fn stream_reader(take a: Authority, root: StreamRoot) -> Result[Authority, Error]   // a read-only Authority (§12.11.9)
 pub fn close_journal_service(take s: JournalService) -> Result[(), Error] waits

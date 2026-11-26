@@ -92,6 +92,11 @@ pub fn local[T: cross](take way: Doorway, take config: Config[T]) -> Result[Loca
     if config.units == 0u64 {
         return Error(Configuration)
     }
+    // `platform.local` currently serves Directory stores; Disk streams are
+    // refused (STORE-SPEC §12.11.0). `journal: None` preserves v2.141 behavior.
+    if let Some(_) = config.journal {
+        return Error(Configuration)
+    }
     if config.max_places == 0u64 || config.idle_ms == 0u64 || config.place_bytes == 0u64 || config.sessions == 0u64 {
         return Error(Full)
     }

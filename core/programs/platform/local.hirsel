@@ -71,6 +71,7 @@ pub type Config[T: cross]: send {
     random: Random,
     net: Net,
     watch: Option[Sender[Change]],
+    journal: Option[store.StreamPlan],
 }
 
 pub opaque type Local {
@@ -794,7 +795,7 @@ fn open_host(tasks: Tasks, root: Dir, clock: Clock, random: Random, options: sto
 
 fn run_local[T: cross](take begin: Begin[T]) -> () waits {
     let Begin(config: take config, inbox: take inbox, me: take me, ready: take ready) = take begin
-    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes, units: units, sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch) = take config
+    let Config(root: root, options: take options, factory: take making, seed: take seed, max_places: max_places, idle_ms: idle_ms, place_bytes: place_bytes, units: units, sessions: sessions, tasks: tasks, clock: clock, random: random, net: net, watch: take watch, journal: _) = take config
     // A reopened host keeps its recorded Config; this one applies to a new catalog only.
     let (opened_host, listed_sessions, hello) = match open_host(tasks, root, clock, random, options, platform.Config(max_places: max_places, idle_ms: idle_ms)) {
         Ok(take opened) => take opened,

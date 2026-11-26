@@ -1,12 +1,11 @@
 // The Bucket host stream's plan, its refusals, the service handle and a
-// Place's slot (STORE-SPEC §12.11.1, §12.11.12). Package-private until the
-// claim and the terminal fence land.
-type Batching: cross {
+// Place's slot (STORE-SPEC §12.11.1, §12.11.12).
+pub type Batching: cross {
     max_wait_ms: u64,
     max_batch_bytes: u64
 }
 
-type StreamLimits: cross {
+pub type StreamLimits: cross {
     max_frames: u32,
     max_slots: u32,
     max_pins: u32,
@@ -19,15 +18,19 @@ type StreamLimits: cross {
     slot_bytes: u64
 }
 
-fn stream_limits() -> StreamLimits {
+pub fn stream_limits() -> StreamLimits {
     StreamLimits(max_frames: 4096, max_slots: 512, max_pins: 4096, hold_ms: 2000, idle_poll_ms: 1000, prescan_batches: 4096, index_every: 512, pin_ttl_s: 86400, recover_parallel: 16, slot_bytes: 65536)
 }
 
-type StreamPlan: cross {
+pub type StreamPlan: cross {
     sid: HostStreamId,
     prefix: String,
     batching: Batching,
     limits: StreamLimits
+}
+
+pub type StreamRoot: cross {
+    prefix: String
 }
 
 // What a Place sends on its slot: its attachment with its Place prefix and the
@@ -62,7 +65,7 @@ type ServiceControl: send = NewSlot(Sender[Result[(Client[SlotMsg], u32), Error]
 // One Place's data connection client, the doorbell, the report connection,
 // and the stream it names (§12.11.12). `root` is the stream root as a key
 // prefix in the bucket.
-type JournalSlot: cross {
+pub opaque type JournalSlot: cross {
     data: Client[SlotMsg],
     bell: Client[u32],
     reports: Client[SlotReport],
@@ -76,7 +79,7 @@ type JournalSlot: cross {
     max_rows: u64
 }
 
-type JournalService {
+pub opaque type JournalService {
     task: Task[StreamServiceEnd],
     control: Sender[ServiceControl],
     bell: Client[u32],
@@ -95,7 +98,7 @@ type JournalService {
 // octets and the 412 compare (each `max_batch_bytes`), its register
 // buffers, the doorbell, the stall poll's alarm, and per slot its room and
 // ack item (§12.11.12).
-fn stream_service_bytes(plan: StreamPlan) -> u64 {
+pub fn stream_service_bytes(plan: StreamPlan) -> u64 {
     let batch = plan.batching.max_batch_bytes + BINDING_BYTES + 64
     let reg = REG_LIMIT + 88 + BINDING_BYTES + 64
     let slots: u64 = int.widen(plan.limits.max_slots)
@@ -167,9 +170,9 @@ fn stream_authority_parts(a: Authority) -> Result[(u8, u64, bool), Error] {
 }
 
 // Starts the host stream's service (§12.11.1): every refusal is decided
-// before any request; then the task creates the stream and elects
-// incarnation 1 (§12.11.7) before this returns.
-fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u64, c: Clock, r: Random) -> Result[JournalService, Refusal] waits {
+// before any request; then the task creates or re-elects the stream (§12.11.7)
+// before this returns.
+pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u64, c: Clock, r: Random) -> Result[JournalService, Refusal] waits {
     let checked: Result[(u8, u64), Error] = match stream_authority_parts(a) {
         Ok((_, _, true)) => Error(Stream(WeakLevels)),
         Ok((kind, op_ms, false)) => match stream_plan_check(plan, op_ms) {
@@ -246,7 +249,7 @@ fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: Stri
 
 // One Place's slot (§12.11.12): the service creates its data connection, so
 // its room is charged to the service. One slot stays the janitor's.
-fn journal_slot(mut s: JournalService) -> Result[JournalSlot, Error] waits {
+pub fn journal_slot(mut s: JournalService) -> Result[JournalSlot, Error] waits {
     let (reply_send, reply_receive): (Sender[Result[(Client[SlotMsg], u32), Error]], Receiver[Result[(Client[SlotMsg], u32), Error]]) = channel.new(1)
     if let Error(_) = channel.send(s.control, NewSlot(take reply_send)) {
         return Error(Io(Closed))
@@ -264,7 +267,7 @@ fn journal_slot(mut s: JournalService) -> Result[JournalSlot, Error] waits {
 
 // A writer Authority whose opens attach to the slot's stream (§12.11.1).
 // Its refusals are configuration errors and consume the Authority.
-fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, Error] {
+pub fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, Error] {
     let (kind, _, weak) = stream_authority_parts(a)?
     if weak {
         return Error(Stream(WeakLevels))
@@ -287,7 +290,7 @@ fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, Erro
 
 // Stops the service. Every slot's Place should be closed first: a frame
 // still queued is never acked.
-fn close_journal_service(take s: JournalService) -> Result[(), Error] waits {
+pub fn close_journal_service(take s: JournalService) -> Result[(), Error] waits {
     let JournalService(task: take running, control: take control, bell: take bell, ..) = take s
     let _ = channel.send(control, StopService)
     let _ = conn.send(bell, STREAM_CONTROL_RING)

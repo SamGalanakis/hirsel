@@ -304,6 +304,31 @@ fn finish(child: Child) -> (std::process::ExitStatus, String) {
     )
 }
 
+/// Waits for the program to end and gives what its terminal wrote to the
+/// master meanwhile. The read's restore drains the terminal's output first
+/// (`TCSAFLUSH`), and a Darwin pty's output has drained only once the master
+/// has read it, so a law that waited without reading would wait for ever.
+fn finish_on(mut child: Child, master: &OwnedFd) -> (std::process::ExitStatus, String, Vec<u8>) {
+    let start = Instant::now();
+    let mut written = Vec::new();
+    let status = loop {
+        written.extend(master_output(master));
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() >= PATIENCE {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("the program never ended");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    written.extend(master_output(master));
+    let mut err = Vec::new();
+    std::io::Read::read_to_end(&mut child.stderr.take().unwrap(), &mut err).unwrap();
+    (status, String::from_utf8_lossy(&err).into_owned(), written)
+}
+
 /// What the program's terminal has written to the master side, read without
 /// waiting.
 fn master_output(master: &OwnedFd) -> Vec<u8> {
@@ -342,12 +367,12 @@ fn a_line_becomes_a_secret_and_is_not_echoed() {
         let mut child = spawn(&built, &slave);
         armed(&slave, &mut child);
         type_on(&master, b"hunter2\n");
-        let (status, err) = finish(child);
+        let (status, err, written) = finish_on(child, &master);
         assert!(status.success(), "{backend:?}: {status} {err}");
         let tag: String = built.out().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(tag, HUNTER2_TAG, "{backend:?}");
         // ECHONL echoes the Enter; output processing makes it "\r\n".
-        assert_eq!(master_output(&master), b"\r\n", "{backend:?}");
+        assert_eq!(written, b"\r\n", "{backend:?}");
         assert_eq!(modes(&slave), before, "{backend:?}");
     }
 
@@ -370,11 +395,11 @@ fn a_line_becomes_a_secret_and_is_not_echoed() {
     type_on(&master, b"h");
     std::thread::sleep(Duration::from_millis(200));
     type_on(&master, b"unter2\n");
-    let (status, err) = finish(child);
+    let (status, err, written) = finish_on(child, &master);
     assert!(status.success(), "{status} {err}");
     let tag: String = built.out().iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(tag, HUNTER2_TAG, "non-canonical");
-    assert_eq!(master_output(&master), b"\r\n", "non-canonical");
+    assert_eq!(written, b"\r\n", "non-canonical");
     assert_eq!(modes(&slave), before, "non-canonical");
 }
 
@@ -601,8 +626,10 @@ fn e_sigttou_during_restore_does_not_stop_the_run() {
     let built = build(&prompt("", "", "Never"), Backend::Cranelift, &[]);
     let exec = Exec::new(&built);
     let null = File::options().write(true).open("/dev/null").unwrap();
-    let (_master, slave) = pty();
-    let before = modes(&slave);
+    // The modes are read on the master: Darwin revokes the slave's descriptors
+    // when the supervisor, the terminal's session leader, exits.
+    let (master, slave) = pty();
+    let before = modes(&master);
     let mut gate = [0; 2];
     // SAFETY: two live result slots.
     assert_eq!(unsafe { libc::pipe(gate.as_mut_ptr()) }, 0);
@@ -648,7 +675,7 @@ fn e_sigttou_during_restore_does_not_stop_the_run() {
         }
     });
     assert_eq!(code, SUPERVISED_OK, "STOPPED is {STOPPED}");
-    assert_eq!(modes(&slave), before);
+    assert_eq!(modes(&master), before);
 }
 
 // Law E2: a read started in a background group is stopped by SIGTTOU and
@@ -660,8 +687,9 @@ fn e2_a_background_read_changes_nothing() {
     let built = build(&prompt("", "", "Never"), Backend::Cranelift, &[]);
     let exec = Exec::new(&built);
     let null = File::options().write(true).open("/dev/null").unwrap();
-    let (_master, slave) = pty();
-    let mut foreground = modes(&slave);
+    // Read on the master, as in law E.
+    let (master, slave) = pty();
+    let mut foreground = modes(&master);
     foreground.lflag ^= libc::ECHOK;
     let code = supervise(&slave, |tty| {
         // SAFETY: in the forked supervisor: async-signal-safe calls only.
@@ -697,7 +725,7 @@ fn e2_a_background_read_changes_nothing() {
         }
     });
     assert_eq!(code, SUPERVISED_OK, "STOPPED is {STOPPED}");
-    assert_eq!(modes(&slave), foreground);
+    assert_eq!(modes(&master), foreground);
 }
 
 /// The `STDIN_SECRET` issue and the outcome that answers it, and every
@@ -767,7 +795,7 @@ fn f_the_recording_holds_no_secret() {
             .unwrap();
         armed(&slave, &mut child);
         type_on(&master, &[*typed, b"\n"].concat());
-        let (status, err) = finish(child);
+        let (status, err, _) = finish_on(child, &master);
         assert!(status.success(), "{status} {err}");
         assert_eq!(modes(&slave), before);
         std::fs::remove_file(dir.path().join("out")).unwrap();

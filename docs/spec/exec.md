@@ -394,6 +394,16 @@ exec equal the bytes the digest was checked on, including when a process writes 
 truncates the image path at any point from step 1 on. The law is stated at the exec: after
 entry, the image may change its own private pages, as any native program may.
 
+**macOS.** macOS has no sealable anonymous file and executes by path. Step 1 clones the
+image (`fclonefileat`, else a copy) into a directory private to the run (mode 0700). Step 2
+makes the copy mode 0500 and immutable (`UF_IMMUTABLE`) and keeps the flags the copy has,
+so an image stored compressed keeps its bytes. Each spawn executes the copy by its path.
+A native executable is a 64-bit Mach-O executable for the machine, or a universal file
+with at least one image for the machine's CPU type, where each such image is a 64-bit
+Mach-O executable that lies inside the file. The kernel chooses which of those images
+runs, and the pin covers the whole file. A universal file with no image for the machine
+is refused, also where a translator could run it.
+
 ## Owning a child
 
 ### EXEC-5: Wait and signal

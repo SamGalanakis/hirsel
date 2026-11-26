@@ -92,7 +92,23 @@ int main(void) {
         );
         let flags = std::fs::metadata(&compressed).unwrap().st_flags();
         assert_ne!(flags & libc::UF_COMPRESSED, 0, "ditto left the image plain");
-        vec![compressed]
+        // A universal file holds an image per machine: the pin covers them all, and
+        // this machine runs its own.
+        std::fs::create_dir(fixture.path().join("universal")).unwrap();
+        let universal = fixture.path().join("universal/digest");
+        let compilation = Command::new("cc")
+            .args(["-arch", "arm64", "-arch", "x86_64"])
+            .arg(&source)
+            .args(["-o"])
+            .arg(&universal)
+            .output()
+            .unwrap();
+        assert!(
+            compilation.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compilation.stderr)
+        );
+        vec![compressed, universal]
     };
     #[cfg(target_os = "linux")]
     let forms = Vec::new();
@@ -115,6 +131,59 @@ int main(void) {
             String::from_utf8_lossy(&check.stdout),
             String::from_utf8_lossy(&check.stderr)
         );
+    }
+}
+
+/// A universal file is admitted for the images it holds for this machine, each of which
+/// must lie inside it (EXEC-4).
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_pin_admits_a_universal_file_only_for_an_image_of_this_machine() {
+    use hirsel_core_net::exec::Request as PolicyRequest;
+    use ring::digest::{SHA256, digest};
+    const ARM64: u32 = 0x0100_000c;
+    const X86_64: u32 = 0x0100_0007;
+    // A universal header (magic, slice count) and one slice entry (CPU type, subtype,
+    // offset, size, alignment), all big-endian, then the slice: the header of a 64-bit
+    // arm64 Mach-O executable.
+    let universal = |cpu: u32, size: u32| {
+        let table = [0xcafe_babe, 1, cpu, 0, 28, size, 0].map(u32::to_be_bytes);
+        let slice = [0xfeed_facf, ARM64, 0, 2, 0, 0, 0, 0].map(u32::to_le_bytes);
+        [table.as_flattened(), slice.as_flattened()].concat()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let image = root.path().join("image");
+    let profile = root.path().join("policy.toml");
+    for (case, bytes, admitted) in [
+        ("an image of this machine", universal(ARM64, 32), true),
+        ("an image of another machine", universal(X86_64, 32), false),
+        (
+            "an image that ends outside the file",
+            universal(ARM64, 33),
+            false,
+        ),
+    ] {
+        std::fs::write(&image, &bytes).unwrap();
+        let pin = hirsel_core_ids::hex::encode(digest(&SHA256, &bytes).as_ref());
+        std::fs::write(
+            &profile,
+            format!(
+                "[held]\nimage = {:?}\nsha256 = {:?}\nargv0 = \"held\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+                image,
+                pin,
+                root.path()
+            ),
+        )
+        .unwrap();
+        let policy = PolicyRequest::parse(&format!("{} held", profile.display()))
+            .unwrap()
+            .load()
+            .unwrap();
+        let refusal = policy.pin_images().err();
+        assert_eq!(refusal.is_none(), admitted, "{case}: {refusal:?}");
+        if let Some(refusal) = refusal {
+            assert!(refusal.contains("parse sealed image"), "{case}: {refusal}");
+        }
     }
 }
 

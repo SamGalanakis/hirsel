@@ -8,7 +8,6 @@
 // over every head, pin and queue row finds each stamp at one location in a
 // listed pack on disk (AP6), each pin reads the rows its Snapshot held, and
 // after P retires a reopen reads them again (no `Corrupt(Absent)`).
-
 type GateFixture {
     rows: Table[u64, Bytes],
     options: Options,
@@ -97,7 +96,11 @@ fn gate_pin_cut(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options, tak
 fn gate_snapshot_rows(db: Db, s: Snapshot, rows: Table[u64, Bytes], edits: Map[u64, u8], deleted: Map[u64, ()]) -> Result[(), Error] waits {
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     for key in 0u64 .. 160 {
-        let wanted: Option[Bytes] = if map.contains(deleted, key) { None } else { Some(compact_value_of(key, map.get_or(edits, key, 0u8), 48)) }
+        let wanted: Option[Bytes] = if map.contains(deleted, key) {
+            None
+        } else {
+            Some(compact_value_of(key, map.get_or(edits, key, 0u8), 48))
+        }
         if get(read_handle, s, rows, key)? != wanted {
             fail("L88: every holder reads the rows its Snapshot held")
         }
@@ -496,4 +499,95 @@ fn test_l88_hot_slot_takes_the_sealed_copy_crash_before_rename(d: Dir, c: Clock,
 @test
 fn test_l88_hot_slot_takes_the_sealed_copy_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     gate_l88_hot_slots(d, c, r, tasks, AfterRename)
+}
+
+// L100 (d), STORE-SPEC v2.161 (store-tiered-idle-design-3161): lane 3160's
+// counterexample to v2.157's partial Tiered-idle probe. Main converts the
+// fixture table to Memory in the same open and drains it, so P stays listed
+// with `live` 0 and the generation is Tiered-idle (Memory head, empty
+// queue, no anchor); Snapshot S, captured before the conversion, still
+// reaches every frame of P. The next cut selects P at budget one. pin(S)
+// follows, then cuts until P retires. Expected, after every crash row of
+// the pin's cut: each stamp the pin and the queue reach has one location in
+// a listed pack on disk, the pin reads S's rows, and a reopen reads the pin again. Main runs the reading
+// probe here (cursor at row 1, A copied, the rest moved by the probe);
+// v2.161's Tiered-idle step retires P whole at that cut, and the pin copies
+// through S's locator. Seeded bug `idle_forgets_prefix` (v2.157's row-count
+// idle step: rows advance, `next_data` stays 72): the pin keeps A in P, the
+// reading probe resumes at row 1 and retires P under it, and the walker
+// finds A in an unlisted pack.
+fn idle_walk_holders(d: Dir, db: Db, collection: u32) -> Result[CompactWalk, Error] waits {
+    let mut walk = CompactWalk(live: map.new(), places: map.new())
+    for k in 0u64 .. list.len(db.pins) {
+        gate_walk_roots(d, db, db.pins[k].roots, collection, mut walk)?
+    }
+    let queued = l87_queue(db)?
+    for k in 0u64 .. list.len(queued) {
+        let (_, row) = queued[k]
+        match row.target {
+            TieredPage(ptr) => compact_walk_frame(d, db, ptr, mut walk)?,
+            TieredBlob(body) => compact_walk_blob(d, db, body, mut walk)?,
+        }
+    }
+    for (seq, _) in walk.live {
+        if !compact_listed(db, seq) || !disk_exists(d, paged_pack_path(seq)?)? {
+            fail("L100 (d): every holder reaches its frames in listed packs on disk")
+        }
+    }
+    Ok(take walk)
+}
+
+fn idle_l100_pin_after_idle(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: GateCrash) -> Result[(), Error] waits {
+    let fixture = gate_l88_fixture(d, c, r, tasks)?
+    let rows: Table[u64, Bytes] = clone(fixture.rows)
+    let mut options: Options = clone(fixture.options)
+    options.compact_permille = 500
+    let mut db = open(tasks, d, c, r, options)?
+    let s = snapshot(db)
+    set_residency(mut db, rows.id, Memory)?
+    let mut drains = 0u64
+    while list.len(l87_queue(db)?) != 0 {
+        if drains == 8 {
+            fail("L100 (d): the converted table's Cold tree drains")
+        }
+        let _ = checkpoint(mut db)?
+        drains += 1
+    }
+    if !compact_listed(db, fixture.pack) || list.len(db.pins) != 0 {
+        fail("L100 (d): after the drain P is listed and no holder is Tiered")
+    }
+    let _ = checkpoint(mut db)?
+    let pinned_db = gate_pin_cut(d, c, r, tasks, options, take db, "s", take s, crash)?
+    let mut settling = take pinned_db
+    let _ = idle_walk_holders(d, settling, rows.id)?
+    let mut cuts = 0u64
+    while compact_listed(settling, fixture.pack) {
+        if cuts == 4 * fixture.frames + 8 {
+            fail("L100 (d): P retires within its PACK_INDEX rows at budget one")
+        }
+        let _ = checkpoint(mut settling)?
+        cuts += 1
+        let _ = idle_walk_holders(d, settling, rows.id)?
+    }
+    gate_l88_reads(settling, "s", rows, map.new(), map.new(), map.new(), gate_pin_kept(crash))?
+    close(take settling)?
+    let reopened = open(tasks, d, c, r, options)?
+    let _ = idle_walk_holders(d, reopened, rows.id)?
+    gate_l88_reads(reopened, "s", rows, map.new(), map.new(), map.new(), gate_pin_kept(crash))?
+    close(take reopened)
+}
+
+@test
+fn test_l100_pin_after_idle_probe(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    idle_l100_pin_after_idle(d, c, r, tasks, NoCrash)
+}
+
+@test
+fn test_l100_pin_after_idle_probe_crash_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    idle_l100_pin_after_idle(d, c, r, tasks, BeforeRename)
+}
+
+@test
+fn test_l100_pin_after_idle_probe_crash_after_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    idle_l100_pin_after_idle(d, c, r, tasks, AfterRename)
 }

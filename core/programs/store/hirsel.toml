@@ -608,6 +608,15 @@ limit = 536870912
 [tests.runs."store@1/store/test_l87_queue_rows_move_as_roots_retry_after_rename"]
 limit = 536870912
 
+[tests.runs."store@1/store/test_l100_pin_after_idle_probe"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_pin_after_idle_probe_crash_before_rename"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_l100_pin_after_idle_probe_crash_after_rename"]
+limit = 536870912
+
 [tests.runs."store@1/store/test_l88_pin_takes_the_moved_leaf"]
 limit = 536870912
 

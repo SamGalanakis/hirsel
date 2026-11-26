@@ -40,6 +40,7 @@ webrtc_sfu@1/laws/red_recovers_bursty_loss_10 src=b09755ce519bbf4b sig=af24683a5
 webrtc_sfu@1/laws/red_recovers_bursty_loss_20 src=302e83ad02d5ab7b sig=af24683a5d0babdd run=c7b2a52baff70a63 bug=e0eb19fd67a493c8 oracle=d8746b772842d1dc rows=pending
 webrtc_sfu@1/laws/red_steps_down_on_a_clean_leg src=69dd03f050b5198c sig=1d08b48a39a391b5 run=c2c0c6612d4cbb79 bug=ec31ef3d23898fc9 oracle=cdb21342e05c7c2f rows=pending
 webrtc_sfu@1/laws/relay_only_session src=72bb426a50848bf3 sig=2f74d039012e4976 run=c2c0c6612d4cbb79 bug=d5afab3f74383985 oracle=3a10fc0b90aceff2 rows=pending
+webrtc_sfu@1/laws/repair_is_edge_local src=b399bcf5b854a780 sig=918e542c9cbf1b21 run=c7b2a52baff70a63 bug=0d7408b2ed323104 oracle=fdf107cf435070b5 rows=pending
 webrtc_sfu@1/laws/revoke_fence_schedules src=a2b83b51d2a52490 sig=cab150dee81d3583 run=c2c0c6612d4cbb79 bug=976db2212d09cbbe oracle=589d05094dce6410 rows=pending
 webrtc_sfu@1/laws/revoke_stops_everything src=e0c37e94668f37ab sig=9502ef8121168ae3 run=c7b2a52baff70a63 bug=1c407a7aa1603e6b oracle=f1aeeecbf335555c rows=pending
 webrtc_sfu@1/laws/rotation_survives_a_layer_switch src=151e2bc8ac90a1b1 sig=03fb2c2d78efcaa2 run=c2c0c6612d4cbb79 bug=a4415f41e4787b4f oracle=d0a4b1194ae3287d rows=pending

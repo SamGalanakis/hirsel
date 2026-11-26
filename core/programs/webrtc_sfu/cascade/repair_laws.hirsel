@@ -1,0 +1,266 @@
+// SFU cascade KS3 law: K4 (`repair_is_edge_local`).
+const K4_HOME_ADDR: Addr = Addr(ip: V4(0x0a040001), port: 4530)
+
+const K4_EDGE_A_ADDR: Addr = Addr(ip: V4(0x0a040002), port: 4531)
+
+const K4_EDGE_B_ADDR: Addr = Addr(ip: V4(0x0a040003), port: 4532)
+
+const K4_PACKETS: u16 = 120
+
+type K4HomeOut: send {
+    held_all: bool,
+    nacks_received: u64,
+    nacks_answered: u64,
+    pli_forwarded: u64,
+    pli_throttled: u64
+}
+
+type K4EdgeAOut: send {
+    initial_received: u64,
+    missing_initial: u64,
+    local_hits: u64,
+    upstream_nacks_sent: u64,
+    dup_suppressed: u64,
+    recovered_after_nack: u64
+}
+
+type K4EdgeBOut: send {
+    nacks_received: u64,
+    pli_received: u64
+}
+
+fn k4_home_task(take cfg: K3HomeCfg) -> K4HomeOut waits {
+    let K3HomeCfg(clock: clock, socket: take given, node_id: nid, key: take k, cert: take c, pins: take pins) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4001), lim, rebuild_id(take k, take c), take pins, 8))
+    let mut cr = cascade.cascade_router(nid, lim)
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k4", 1, k_room_limits()))
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 1700 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 4 * MS, end), mut events))
+        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        events = list.new()
+    }
+    let pub1 = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
+    let mut held = 0u64
+    for s in 1u16 .. K4_PACKETS + 1 {
+        if cascade.history_holds(cr, b"room-k4", pub1, 0, s) {
+            held += 1
+        }
+    }
+    let rc = cascade.repair_counts(cr)
+    K4HomeOut(held_all: held == int.widen(K4_PACKETS), nacks_received: rc.nacks_received, nacks_answered: rc.nacks_answered, pli_forwarded: rc.pli_forwarded, pli_throttled: rc.pli_throttled)
+}
+
+fn k4_edge_a_task(take cfg: K3EdgeACfg) -> K4EdgeAOut waits {
+    let K3EdgeACfg(clock: clock, socket: take given, node_id: nid, key: take k, cert: take c, home_id: hid, home_addr: haddr, home_pin: hpin) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let id1 = rebuild_id(secret.share(k), clone(c))
+    let id2 = rebuild_id(take k, take c)
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4002), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
+    let mut attached = false
+    let mut subbed = false
+    let mut probed_nacks = false
+    let mut sent_plis = false
+    let pub1 = cascade.PubKey(participant: 1, epoch: 1, pub_slot: 1)
+    let mut missing_seqs: List[u16] = list.new()
+    let mut initial_rx = 0u64
+    let mut dup_suppressed = 0u64
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 1700 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 4 * MS, end), mut events))
+        let mut got_up = false
+        for ev in events {
+            if let LinkUp(handle: h, ..) = ev {
+                if h == h_home {
+                    got_up = true
+                }
+            }
+        }
+        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        events = list.new()
+        if got_up && !attached {
+            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, b"room-k4", h_home, 1, k_room_limits()))
+            attached = true
+        }
+        if attached && !subbed && host.mono_ns(clock) >= 200 * MS {
+            result.unwrap(cascade.subscribe_local(mut cr, mut hub, b"room-k4", 1, pub1, 0))
+            subbed = true
+        }
+        let cur = host.mono_ns(clock)
+        // After all 200 packets have been sent (500..900 ms, all within 1 s history age),
+        // inspect Edge A's RTP-12 history:
+        if subbed && !probed_nacks && cur >= 1100 * MS {
+            let mut held_seqs: List[u16] = list.new()
+            for s in 1u16 .. K4_PACKETS + 1 {
+                if cascade.history_holds(cr, b"room-k4", pub1, 0, s) {
+                    list.push(mut held_seqs, s)
+                    initial_rx += 1
+                } else {
+                    list.push(mut missing_seqs, s)
+                }
+            }
+            // Two subscribers NACK every packet Edge A already holds.
+            let _ = cascade.handle_local_nack(mut cr, mut hub, b"room-k4", pub1, 0, clone(held_seqs), cur)
+            let _ = cascade.handle_local_nack(mut cr, mut hub, b"room-k4", pub1, 0, take held_seqs, cur)
+            // Three subscribers NACK every missing packet: only the first triggers an upstream NACK.
+            let r1 = cascade.handle_local_nack(mut cr, mut hub, b"room-k4", pub1, 0, clone(missing_seqs), cur)
+            let r2 = cascade.handle_local_nack(mut cr, mut hub, b"room-k4", pub1, 0, clone(missing_seqs), cur)
+            let r3 = cascade.handle_local_nack(mut cr, mut hub, b"room-k4", pub1, 0, clone(missing_seqs), cur)
+            dup_suppressed = r1.already_asked + r2.already_asked + r3.already_asked
+            probed_nacks = true
+        }
+        if probed_nacks && !sent_plis && cur >= 1300 * MS {
+            // Send 5 rapid PLIs in one turn: Home rate-limits to 1 per 100 ms (RTC-6).
+            for _ in 0u64 .. 5 {
+                cascade.request_keyframe_upstream(mut cr, mut hub, b"room-k4", pub1, 0, false)
+            }
+            sent_plis = true
+        }
+    }
+    let mut recovered = 0u64
+    for s in missing_seqs {
+        if cascade.history_holds(cr, b"room-k4", pub1, 0, s) {
+            recovered += 1
+        }
+    }
+    let rc = cascade.repair_counts(cr)
+    K4EdgeAOut(initial_received: initial_rx, missing_initial: list.len(missing_seqs), local_hits: rc.local_hits, upstream_nacks_sent: rc.upstream_nacks_sent, dup_suppressed: dup_suppressed, recovered_after_nack: recovered)
+}
+
+fn k4_edge_b_task(take cfg: K3EdgeBCfg) -> K4EdgeBOut waits {
+    let K3EdgeBCfg(clock: clock, socket: take given, node_id: nid, key: take k, cert: take c, home_id: hid, home_addr: haddr, home_pin: hpin) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let id1 = rebuild_id(secret.share(k), clone(c))
+    let id2 = rebuild_id(take k, take c)
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(4003), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
+    let mut attached = false
+    let mut admit_asked = false
+    let mut pub_ok = false
+    let mut pub_id = 0u64
+    let mut sent = 0u16
+    let mut next_send = 500 * MS
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 1700 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 4 * MS, end), mut events))
+        let mut got_up = false
+        for ev in events {
+            if let LinkUp(handle: h, ..) = ev {
+                if h == h_home {
+                    got_up = true
+                }
+            }
+        }
+        cascade.handle_events(mut cr, mut hub, take events, host.mono_ns(clock) / MS)
+        events = list.new()
+        if got_up && !attached {
+            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, b"room-k4", h_home, 1, k_room_limits()))
+            attached = true
+        }
+        if attached && !admit_asked && host.mono_ns(clock) >= 150 * MS {
+            result.unwrap(cascade.request_edge_admit(mut cr, mut hub, b"room-k4", 44, 0))
+            admit_asked = true
+        }
+        for adm in cascade.take_admitted(mut cr) {
+            if adm.req_id == 44 && adm.ok {
+                pub_id = adm.participant
+                if !pub_ok {
+                    let pub1 = cascade.PubKey(participant: adm.participant, epoch: adm.epoch, pub_slot: 1)
+                    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-k4", pub1, Vp8, one_rid()))
+                    pub_ok = true
+                }
+            }
+        }
+        let cur = host.mono_ns(clock)
+        if pub_ok && sent < K4_PACKETS && cur >= next_send {
+            sent += 1
+            let pub1 = cascade.PubKey(participant: pub_id, epoch: 1, pub_slot: 1)
+            let s_u32: u32 = int.widen(sent)
+            let pkt = make_canon_rtp(Vp8, sent, 90000u32 + s_u32 * 3000u32, 0x400u32, 120)
+            cascade.forward_local_rtp(mut cr, mut hub, b"room-k4", pub1, 0, pkt, cur / MS)
+            next_send = cur + 4 * MS
+        }
+    }
+    let rc = cascade.repair_counts(cr)
+    K4EdgeBOut(nacks_received: rc.nacks_received, pli_received: rc.pli_forwarded)
+}
+
+/// bug: an edge forwards subscriber NACKs upstream for packets it already holds, asks
+/// upstream more than once per missing sequence number, or the home forwards an edge's
+/// NACK across a second link to the publisher's node; or home fails to rate-limit PLIs.
+/// oracle: docs/spec/sfu_cascade.md K4 and CAS-3: under 5% loss on Home->A only, Home
+/// holds all 200 packets, A answers local NACKs for every packet A holds (0 upstream asks),
+/// A asks Home exactly once per missing seq even across 3 subscribers, Home answers from
+/// its own history, B's publisher receives 0 NACKs, and 5 rapid PLIs coalesce to 1.
+@test
+fn repair_is_edge_local(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 404, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, clock) = std.sim.world.new(404, 0, 0)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take sim_world, clock, list.new(), 2097152)
+    // Apply 5% loss on the Home -> Edge A directed link ONLY (B -> Home is lossless).
+    result.unwrap(std.sim.udp.link(vnet, K4_HOME_ADDR.ip, K4_EDGE_A_ADDR.ip, Impaired(std.sim.udp.Impairment(loss: 50000, delay_ns: 5 * MS, jitter_ns: 0, reorder: 0, reorder_ns: 0, duplicate: 0))))
+    let mut dir = cascade.sim_directory(clock, cascade.DEFAULT_DRIFT_PPM)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(411), clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let (take ak, take ac) = result.unwrap(signal.unit_certificate(provide.random(412), clock))
+    let a_pin: quic.handshake.Pin = Cert(std.sha256.hash(ac))
+    let (take bk, take bc) = result.unwrap(signal.unit_certificate(provide.random(413), clock))
+    let b_pin: quic.handshake.Pin = Cert(std.sha256.hash(bc))
+    let home_id = cascade.node_id(b"home-k4")
+    let a_id = cascade.node_id(b"edge-a-k4")
+    let b_id = cascade.node_id(b"edge-b-k4")
+    cascade.register_node(mut dir, home_id, K4_HOME_ADDR, single_pin(clone(home_pin)))
+    cascade.register_node(mut dir, a_id, K4_EDGE_A_ADDR, single_pin(take a_pin))
+    cascade.register_node(mut dir, b_id, K4_EDGE_B_ADDR, single_pin(take b_pin))
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K4_HOME_ADDR, K_SOCKET))
+    let (take s_a, _) = result.unwrap(host.udp_bind(vnet, K4_EDGE_A_ADDR, K_SOCKET))
+    let (take s_b, _) = result.unwrap(host.udp_bind(vnet, K4_EDGE_B_ADDR, K_SOCKET))
+    let pins = cascade.all_pins(dir)
+    let t_home = task.spawn(tasks, bytes 14680064, K3HomeCfg(clock: clock, socket: take s_home, node_id: home_id, key: take hk, cert: take hc, pins: take pins), k4_home_task)
+    let t_a = task.spawn(tasks, bytes 14680064, K3EdgeACfg(clock: clock, socket: take s_a, node_id: a_id, key: take ak, cert: take ac, home_id: home_id, home_addr: K4_HOME_ADDR, home_pin: clone(home_pin)), k4_edge_a_task)
+    let t_b = task.spawn(tasks, bytes 14680064, K3EdgeBCfg(clock: clock, socket: take s_b, node_id: b_id, key: take bk, cert: take bc, home_id: home_id, home_addr: K4_HOME_ADDR, home_pin: take home_pin), k4_edge_b_task)
+    let hs = result.unwrap(task.join(take t_home))
+    let ea = result.unwrap(task.join(take t_a))
+    let eb = result.unwrap(task.join(take t_b))
+    result.unwrap(task.join(take net_task))
+    if !hs.held_all {
+        fail("home RTP-12 history did not hold all 200 packets from lossless B->home link")
+    }
+    if ea.missing_initial == 0 {
+        fail("5% loss on home->A produced zero missing packets on edge A")
+    }
+    if ea.local_hits != 2 * ea.initial_received {
+        fail("edge A did not answer all local NACKs for packets it holds from its own history")
+    }
+    if ea.upstream_nacks_sent != ea.missing_initial || ea.dup_suppressed != 2 * ea.missing_initial {
+        fail("edge A did not ask home strictly once per missing sequence number")
+    }
+    if hs.nacks_received != ea.missing_initial || hs.nacks_answered != ea.missing_initial {
+        fail("home did not receive and answer every missing seq from its own history")
+    }
+    if ea.recovered_after_nack == 0 {
+        fail("edge A did not recover missing packets from home's history replies")
+    }
+    if eb.nacks_received != 0 {
+        fail("a NACK crossed two links and reached edge B's publisher")
+    }
+    if hs.pli_forwarded != 1 || hs.pli_throttled != 4 || eb.pli_received != 1 {
+        fail("home did not rate-limit 5 rapid PLIs to 1 forwarded to edge B")
+    }
+    Ok(())
+}

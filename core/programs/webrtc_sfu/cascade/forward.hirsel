@@ -153,12 +153,13 @@ pub opaque type CascadeRouter {
     forward_logs: List[ForwardLog],
     delivered: List[LocalDelivered],
     admitted: List[AdmittedPeer],
+    repair: RepairState,
     attach_refusals: u64,
     sr_received: u64
 }
 
 pub fn cascade_router(local_node: NodeId, limits: LinkLimits) -> CascadeRouter {
-    CascadeRouter(node: local_node, limits: limits, rooms: list.new(), congestion: list.new(), forward_logs: list.new(), delivered: list.new(), admitted: list.new(), attach_refusals: 0, sr_received: 0)
+    CascadeRouter(node: local_node, limits: limits, rooms: list.new(), congestion: list.new(), forward_logs: list.new(), delivered: list.new(), admitted: list.new(), repair: new_repair_state(), attach_refusals: 0, sr_received: 0)
 }
 
 fn find_room(cr: CascadeRouter, room_name: Bytes) -> Option[u64] {
@@ -553,6 +554,7 @@ pub fn forward_local_rtp(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Byt
         Ok(h) => (h.seq, h.ts),
         Error(_) => (0u16, 0u32),
     }
+    repair_record(mut cr, ri, key, encoding, seq, rtp_pkt, now_ms * 1000000)
     deliver_locally(mut cr, ri, key, encoding, seq, ts)
     if cr.rooms[ri].role == Edge {
         let Some(h) = cr.rooms[ri].home_handle else {
@@ -715,7 +717,7 @@ pub fn handle_events(mut cr: CascadeRouter, mut hub: LinkHub, take events: List[
                 let _ = find_congestion(mut cr, h)
             },
             ControlIn(handle: h, msg: take msg) => on_ctrl_msg(mut cr, mut hub, h, take msg),
-            RoomIn(handle: h, room_num: rn, msg: take msg) => on_room_msg(mut cr, mut hub, h, rn, take msg),
+            RoomIn(handle: h, room_num: rn, msg: take msg) => on_room_msg(mut cr, mut hub, h, rn, take msg, now_ms * 1000000),
             MediaIn(handle: h, room_num: rn, layer_num: ln, layer: take info, rtp: take pkt) => on_media_in(mut cr, mut hub, h, rn, ln, take info, take pkt, now_ms),
             _ => (),
         }
@@ -847,7 +849,7 @@ fn on_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
     }
 }
 
-fn on_room_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle, rn: u32, take msg: RoomMsg) {
+fn on_room_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle, rn: u32, take msg: RoomMsg, now_ns: u64) {
     let Some(ri) = find_room_by_link(cr, h, rn) else {
         return
     }
@@ -908,6 +910,18 @@ fn on_room_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
                 }
             }
         },
+        Nack(room_num: _, term: term, seq: _, layer_num: ln, rtp_seqs: take seqs) => {
+            if term < cr.rooms[ri].term {
+                return
+            }
+            on_remote_nack(mut cr, mut hub, ri, h, rn, ln, take seqs, now_ns)
+        },
+        SwitchReq(room_num: _, term: term, seq: _, layer_num: ln, fir: fir) => {
+            if term < cr.rooms[ri].term {
+                return
+            }
+            on_switch_req(mut cr, mut hub, ri, h, ln, fir, now_ns)
+        },
         _ => (),
     }
 }
@@ -925,6 +939,7 @@ fn on_media_in(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
         Ok(hdr) => (hdr.seq, hdr.ts),
         Error(_) => (0u16, 0u32),
     }
+    repair_record(mut cr, ri, key, encoding, seq, pkt, now_ms * 1000000)
     deliver_locally(mut cr, ri, key, encoding, seq, ts)
     if cr.rooms[ri].role == Home {
         forward_to_edges(mut cr, mut hub, ri, Some(h), key, encoding, seq, ts, pkt, now_ms)

@@ -69,16 +69,22 @@ fn next_stream(st: Streams) -> Option[u64] {
 }
 
 fn goes_before(a: Send, b: Send) -> bool {
-    if a.priority.urgency != b.priority.urgency {
-        return a.priority.urgency < b.priority.urgency
+    ranks_before(a.priority, a.turn, b.priority, b.turn)
+}
+
+/// One schedule for streams and datagrams (QUIC-1): lower (urgency, order, then) first,
+/// then the earlier turn.
+fn ranks_before(a: Priority, a_turn: u64, b: Priority, b_turn: u64) -> bool {
+    if a.urgency != b.urgency {
+        return a.urgency < b.urgency
     }
-    if a.priority.order != b.priority.order {
-        return a.priority.order < b.priority.order
+    if a.order != b.order {
+        return a.order < b.order
     }
-    if a.priority.then != b.priority.then {
-        return a.priority.then < b.priority.then
+    if a.then != b.then {
+        return a.then < b.then
     }
-    a.turn < b.turn
+    a_turn < b_turn
 }
 
 fn varint_width(n: u64) -> u64 {
@@ -259,20 +265,44 @@ fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: Lis
     }
 }
 
-/// Fill the rest of a 1-RTT payload: control frames, then STREAM frames by priority.
-fn fill_streams(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
+/// Fill the rest of a 1-RTT payload: control frames, then STREAM and DATAGRAM frames by
+/// priority. True when the packet ran out of room before the queues ran out of frames.
+fn fill_streams(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
     if !st.ready {
-        return
+        return false
     }
     control_frames(mut st, cap, mut payload, mut frames)
     while cap - list.len(payload) > 4 {
-        let Some(i) = next_stream(st) else {
-            return
+        let stream = next_stream(st)
+        let datagram_first: Option[u64] = match (stream, next_datagram(st)) {
+            (_, None) => None,
+            (None, Some(k)) => Some(k),
+            (Some(i), Some(k)) => {
+                let d = st.datagrams[k]
+                let mut first: Option[u64] = None
+                if let Some(s) = st.list[i].send {
+                    if ranks_before(d.priority, d.turn, s.priority, s.turn) {
+                        first = Some(k)
+                    }
+                }
+                first
+            },
+        }
+        if let Some(k) = datagram_first {
+            if write_datagram(mut st, k, cap, mut payload, mut frames) {
+                continue
+            }
+        }
+        // A datagram that does not fit leaves the room to a stream; the next packet
+        // starts with it.
+        let Some(i) = stream else {
+            return datagram_first != None
         }
         if !write_stream_frame(mut st, i, cap, mut payload, mut frames) {
-            return
+            return true
         }
     }
+    true
 }
 
 /// Free queued pieces wholly below the acknowledged floor.
@@ -356,7 +386,7 @@ fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], l
                 st.held -= freed
             }
         } else if contains(lost, p.number) {
-            requeue(mut st, p.frames)
+            requeue(mut st, p.frames, false)
         } else {
             list.push(mut st.inflight, take p)
         }
@@ -366,10 +396,16 @@ fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], l
 }
 
 /// Put an abandoned or lost packet's frames back on their queues. Bytes a
-/// reset has discarded since are not requeued (QUIC-1 Commit, QUIC-5).
-fn requeue(mut st: Streams, frames: List[SentFrame]) {
+/// reset has discarded since are not requeued (QUIC-1 Commit, QUIC-5). A datagram goes
+/// back only from an abandoned packet that never left: a lost one is gone (RFC 9221 §5.2).
+fn requeue(mut st: Streams, frames: List[SentFrame], abandoned: bool) {
     for f in frames {
         match f {
+            DatagramSent(seq) => {
+                if abandoned {
+                    unstage_datagram(mut st, seq)
+                }
+            },
             MaxDataSent => {
                 st.max_data_pending = true
             },

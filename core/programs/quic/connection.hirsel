@@ -46,15 +46,15 @@ pub type PeerParams {
 
 pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
 
-pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Closed(ConnectionHandle, CloseReason)
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
 
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
 
-pub type QuicError = Config | Limit | Handshake(handshake.Error) | UnknownConnection | UnknownStream | StreamState | StreamReset(u64) | Unsupported
+pub type QuicError = Config | Limit | Handshake(handshake.Error) | UnknownConnection | UnknownStream | StreamState | StreamReset(u64) | TooLarge(u64) | Unsupported
 
-pub type DropReason: key = DatagramTooShort | SmallInitial | SmallUnsupportedVersion | VersionNegotiation | UnsupportedVersion | MalformedHeader | UnknownConnection | WrongPath | SampleTooShort | KeysUnavailable | PacketProtection | Duplicate | Draining | Gaps | ReceiveBuffer
+pub type DropReason: key = DatagramTooShort | SmallInitial | SmallUnsupportedVersion | VersionNegotiation | UnsupportedVersion | MalformedHeader | UnknownConnection | WrongPath | SampleTooShort | KeysUnavailable | PacketProtection | Duplicate | Draining | Gaps | ReceiveBuffer | DatagramBuffer | DatagramLate | Truncated
 
 /// RFC 9002 §7.2's max_datagram_size: the 1,200-byte base PMTU every QUIC path carries.
 /// Packets are built to it until DPLPMTUD raises it (QUIC-1's Path MTU row).

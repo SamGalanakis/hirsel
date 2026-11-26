@@ -1,0 +1,197 @@
+// QS7 law Q15: DATAGRAM frames under loss (RFC 9221 §5.2). Both ends run quic.drive over
+// sim.udp, which drops each datagram with probability 5 %.
+const DATAGRAMS: u64 = 10000
+
+const DATAGRAM_LEN: u64 = 200
+
+/// Datagrams the client keeps queued; it tops the queue up after every drive round.
+const DATAGRAM_QUEUE: u64 = 48
+
+const DATAGRAM_END: u64 = 60000 * MS
+
+pub type DatagramEnd: send {
+    clock: Clock,
+    socket: UdpSocket
+}
+
+pub type DatagramSender: send {
+    offered: u64,
+    sent: u64,
+    queued: u64,
+    late: u64,
+    peak_flight: u64,
+    window_cut: bool,
+}
+
+pub type DatagramReceiver: send {
+    distinct: u64,
+    duplicates: u64,
+    malformed: u64
+}
+
+fn datagram_transport() -> quic.TransportConfig {
+    let mut t = transport_config(None)
+    t.max_idle_ms = 30000
+    t.max_datagram_frame = 1200
+    t.send_bytes = 1048576
+    t.cc = NewReno
+    take t
+}
+
+fn datagram_limits() -> quic.EndpointConfig {
+    let mut c = endpoint_config()
+    c.limits.datagram_bytes = 1048576
+    take c
+}
+
+/// Datagram `id`: its number in 8 big-endian bytes, then filler to DATAGRAM_LEN.
+fn numbered(id: u64) -> Bytes {
+    let mut d: Bytes = list.with_capacity(DATAGRAM_LEN)
+    for k in 0u64 .. 8 {
+        list.push(mut d, int.truncate((id >> (56 - 8 * k)) & 255))
+    }
+    list.fill(mut d, DATAGRAM_LEN - 8, 0x5a)
+    take d
+}
+
+/// The client offers DATAGRAMS numbered datagrams, keeping DATAGRAM_QUEUE queued, and
+/// samples its bytes in flight and congestion window after every round.
+fn datagram_client(take plan: DatagramEnd) -> DatagramSender waits {
+    let DatagramEnd(clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(39), datagram_limits(), None))
+    let _ = result.unwrap(quic.connect(mut e, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, datagram_transport()))
+    let mut conn: Option[quic.ConnectionHandle] = None
+    let mut trace = DatagramSender(offered: 0, sent: 0, queued: 0, late: 0, peak_flight: 0, window_cut: false)
+    let mut last_window = 0u64
+    let mut closing = false
+    let mut events: List[quic.Event] = list.new()
+    loop {
+        if host.mono_ns(clock) >= DATAGRAM_END {
+            break
+        }
+        if let Some(c) = conn {
+            let (_, queued, _, _) = quic.datagram_counts(e, c)
+            let mut room = DATAGRAM_QUEUE - order.min(DATAGRAM_QUEUE, queued)
+            while room > 0 && trace.offered < DATAGRAMS {
+                result.unwrap(quic.send_datagram(mut e, c, shared.new(numbered(trace.offered)), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+                trace.offered += 1
+                room -= 1
+            }
+            if trace.offered == DATAGRAMS && queued == 0 && !closing {
+                let (sent, left, _, _) = quic.datagram_counts(e, c)
+                trace.sent = sent
+                trace.queued = left
+                trace.late = quic.drop_count(e, DatagramLate)
+                closing = true
+                quic.close(mut e, c, 0, b"")
+            }
+        }
+        result.unwrap(quic.drive(mut e, clock, mut socket, DATAGRAM_END, mut events))
+        if let Some(c) = conn {
+            let (_, _, flight, window) = quic.datagram_counts(e, c)
+            trace.peak_flight = order.max(trace.peak_flight, flight)
+            trace.window_cut = trace.window_cut || window < last_window
+            last_window = window
+        }
+        let mut gone = false
+        for event in events {
+            match event {
+                Connected(c: h, ..) => {
+                    conn = Some(h)
+                },
+                Closed(..) => {
+                    gone = true
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+        // The round after close() sent the CONNECTION_CLOSE; a lost one idles out.
+        if gone || closing {
+            break
+        }
+    }
+    take trace
+}
+
+/// The server counts each numbered datagram it is handed, once or more.
+fn datagram_server(take plan: DatagramEnd) -> DatagramReceiver waits {
+    let DatagramEnd(clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(17), datagram_limits(), Some((p256_identity(false), datagram_transport()))))
+    let mut seen: List[bool] = list.with_capacity(DATAGRAMS)
+    list.fill(mut seen, DATAGRAMS, false)
+    let mut trace = DatagramReceiver(distinct: 0, duplicates: 0, malformed: 0)
+    let mut events: List[quic.Event] = list.new()
+    let mut done = false
+    while !done && host.mono_ns(clock) < DATAGRAM_END {
+        result.unwrap(quic.drive(mut e, clock, mut socket, DATAGRAM_END, mut events))
+        for event in events {
+            match event {
+                Datagram(_, data) => {
+                    let id: u64 = if list.len(data) == DATAGRAM_LEN {
+                        list.word_be(data, 0)
+                    } else {
+                        DATAGRAMS
+                    }
+                    if id >= DATAGRAMS {
+                        trace.malformed += 1
+                    } else if seen[id] {
+                        trace.duplicates += 1
+                    } else {
+                        seen[id] = true
+                        trace.distinct += 1
+                    }
+                },
+                Closed(..) => {
+                    done = true
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+    }
+    take trace
+}
+
+/// bug: a lost DATAGRAM frame is sent again (or an abandoned one is lost for good), a
+/// datagram arrives twice, or datagram packets are not counted in flight and so never
+/// meet the congestion controller.
+/// oracle: RFC 9221 §5.2: DATAGRAM frames are ack-eliciting and congestion controlled,
+/// and a lost one is not retransmitted. Each numbered datagram is committed once or
+/// expired (QUIC-6), so committed + expired is exactly the number offered.
+@test
+fn datagram_never_retransmitted(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 15, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 10 * MS
+    config.loss = std.sim.udp.Loss(good_to_bad: 0, bad_to_good: 0, good_loss: 50000, bad_loss: 0)
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let (take client_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_CLIENT, SIM_SOCKET))
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_SERVER, SIM_SOCKET))
+    let client_task = task.spawn(tasks, bytes 16777216, DatagramEnd(clock, socket: take client_socket), datagram_client)
+    let server_task = task.spawn(tasks, bytes 16777216, DatagramEnd(clock, socket: take server_socket), datagram_server)
+    let c = result.unwrap(task.join(take client_task))
+    let s = result.unwrap(task.join(take server_task))
+    result.unwrap(task.join(take served))
+    if c.offered != DATAGRAMS || c.queued != 0 {
+        fail("the client did not offer every datagram and drain its queue")
+    }
+    if c.sent + c.late != DATAGRAMS {
+        fail("committed and expired datagrams do not add up to those offered: one was sent twice or lost before the wire")
+    }
+    if s.duplicates != 0 || s.malformed != 0 {
+        fail("a datagram arrived twice or altered")
+    }
+    if s.distinct > c.sent || 10 * s.distinct < 8 * c.sent || 2 * c.sent < DATAGRAMS {
+        fail("arrivals do not match one copy of each committed datagram under 5 % loss")
+    }
+    if c.peak_flight < 4 * 1200 || !c.window_cut {
+        fail("datagram packets were not counted in flight or never met a congestion response")
+    }
+    Ok(())
+}

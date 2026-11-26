@@ -22,6 +22,7 @@ fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot
     let ecn = recovery.ecn_mark(c.recovery)
     c.wake = None
     if let None = closing {
+        expire_datagrams(mut c.streams, now, recovery.smoothed_rtt(c.recovery))
         // RFC 9002 §7 and §7.7: new ack-eliciting data waits for congestion window
         // and pacer room for a whole packet; acknowledgments and probes do not.
         // 1-RTT packets repeat while they carry stream-layer frames and room remains.
@@ -122,7 +123,7 @@ fn abandon(mut e: Endpoint, from: u64) {
         if let Packet(slot: slot, handle: handle, packet: p, ..) = e.staged[i] {
             if let Some(mut c) = e.connections[slot] {
                 if c.handle == handle {
-                    requeue(mut c.streams, p.frames)
+                    requeue(mut c.streams, p.frames, true)
                 }
             }
         }
@@ -146,6 +147,7 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
     for i in 0u64 .. list.len(e.connections) {
         if let Some(mut c) = e.connections[i] {
             staged_connection(mut e.staged, mut c, now, i, mtu, mut out, mut tx)
+            dropped_many(mut e.drops, DatagramLate, replace(mut c.streams.datagrams_late, 0))
         }
     }
     let at = next_deadline(e)
@@ -167,6 +169,11 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
             c.keys.sealed = int.saturating_add(c.keys.sealed, 1)
             if list.len(p.frames) > 0 {
                 c.stream_packets += 1
+                for f in p.frames {
+                    if let DatagramSent(seq) = f {
+                        sent_datagram(mut c.streams, seq)
+                    }
+                }
                 list.push(mut c.streams.inflight, SentPacket(number: p.number, frames: clone(p.frames)))
             }
         },

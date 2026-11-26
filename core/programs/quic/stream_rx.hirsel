@@ -298,6 +298,17 @@ fn stream_frame(mut st: Streams, handle: ConnectionHandle, f: codec.Frame, input
             receive_max_streams(mut st, bidi, limit)
             Ok(None)
         },
+        Datagram(data: data, ..) => {
+            // QUIC-4: held received payloads stay within datagram_bytes; past it a
+            // datagram is dropped and counted, and its packet is still acknowledged.
+            if data.len <= st.datagram_room {
+                st.datagram_room -= data.len
+                list.push(mut events, Datagram(handle, clone(list.slice(input, data.at, data.at + data.len))))
+            } else {
+                st.datagrams_refused += 1
+            }
+            Ok(None)
+        },
         _ => Ok(None),
     }
 }

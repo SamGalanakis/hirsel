@@ -35,6 +35,8 @@ std = { major = 1 }
 "token.hirsel" = "quic"
 "key_update.hirsel" = "quic"
 "path.hirsel" = "quic"
+"datagram.hirsel" = "quic"
+"drive.hirsel" = "quic"
 
 [tests]
 limit = 67108864
@@ -54,3 +56,4 @@ grants = ["Tasks"]
 "retry_laws.hirsel" = "laws"
 "key_update_laws.hirsel" = "laws"
 "path_laws.hirsel" = "laws"
+"datagram_laws.hirsel" = "laws"

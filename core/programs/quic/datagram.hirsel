@@ -1,0 +1,194 @@
+// QUIC-7 datagrams (RFC 9221). A queued datagram competes with the streams in one
+// schedule, is written into one packet at most once and is never retransmitted: an
+// abandoned packet puts it back, a lost one does not (§5.2).
+/// What a queued datagram is charged against send_bytes beyond its payload, so a flood of
+/// empty datagrams is bounded too.
+const DATAGRAM_COST: u64 = 48
+
+/// Whether a DATAGRAM frame of type 0x31 with a `len`-byte payload fits in `room` bytes.
+fn datagram_fits(room: u64, len: u64) -> bool {
+    len < room && room - len >= 1 + varint_width(len)
+}
+
+fn next_datagram(st: Streams) -> Option[u64] {
+    let mut best: Option[u64] = None
+    for i in 0u64 .. list.len(st.datagrams) {
+        let d = st.datagrams[i]
+        let better = match best {
+            None => true,
+            Some(b) => ranks_before(d.priority, d.turn, st.datagrams[b].priority, st.datagrams[b].turn),
+        }
+        if better {
+            best = Some(i)
+        }
+    }
+    best
+}
+
+/// Move entry `i` of `from` to the end of `to`; the order of `from` is not kept.
+fn move_datagram(mut from: List[QueuedDatagram], i: u64, mut to: List[QueuedDatagram]) {
+    let last = list.len(from) - 1
+    list.swap(mut from, i, last)
+    if let Some(take d) = list.pop(mut from) {
+        list.push(mut to, take d)
+    }
+}
+
+/// Write queued datagram `k` as one DATAGRAM frame if it fits; it then waits in
+/// staged_datagrams until its packet is committed or abandoned.
+fn write_datagram(mut st: Streams, k: u64, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
+    let len = list.len(st.datagrams[k].data)
+    if !datagram_fits(cap - list.len(payload), len) {
+        return false
+    }
+    let _ = codec.write_varint(0x31, mut payload)
+    let _ = codec.write_varint(len, mut payload)
+    list.append(mut payload, list.slice(st.datagrams[k].data, 0, len))
+    list.push(mut frames, DatagramSent(st.datagrams[k].seq))
+    move_datagram(mut st.datagrams, k, mut st.staged_datagrams)
+    st.turn += 1
+    true
+}
+
+fn staged_at(st: Streams, seq: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(st.staged_datagrams) {
+        if st.staged_datagrams[i].seq == seq {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// An abandoned packet's datagram goes back on the queue, unless it was dropped since.
+fn unstage_datagram(mut st: Streams, seq: u64) {
+    if let Some(i) = staged_at(st, seq) {
+        move_datagram(mut st.staged_datagrams, i, mut st.datagrams)
+    }
+}
+
+/// A committed packet's datagram is gone for good: its memory is released and it counts.
+fn sent_datagram(mut st: Streams, seq: u64) {
+    st.datagrams_sent += 1
+    if let Some(i) = staged_at(st, seq) {
+        st.held -= list.len(st.staged_datagrams[i].data) + DATAGRAM_COST
+        let last = list.len(st.staged_datagrams) - 1
+        list.swap(mut st.staged_datagrams, i, last)
+        let _ = list.pop(mut st.staged_datagrams)
+    }
+}
+
+/// QUIC-6: a datagram the window has not let out within one smoothed RTT of the first
+/// poll that saw it is dropped and counted, not queued on.
+fn expire_datagrams(mut st: Streams, now: u64, rtt: u64) {
+    let mut i = 0u64
+    while i < list.len(st.datagrams) {
+        if let None = st.datagrams[i].born {
+            st.datagrams[i].born = Some(now)
+        }
+        let late = match st.datagrams[i].born {
+            Some(at) => now > at && now - at > rtt,
+            None => false,
+        }
+        if late {
+            st.held -= list.len(st.datagrams[i].data) + DATAGRAM_COST
+            st.datagrams_late += 1
+            let last = list.len(st.datagrams) - 1
+            list.swap(mut st.datagrams, i, last)
+            let _ = list.pop(mut st.datagrams)
+        } else {
+            i += 1
+        }
+    }
+}
+
+/// Remove every datagram tagged `tag` from `l`; returns how many and the memory freed.
+fn remove_tagged(mut l: List[QueuedDatagram], tag: u64) -> (u64, u64) {
+    let mut count = 0u64
+    let mut freed = 0u64
+    let mut i = 0u64
+    while i < list.len(l) {
+        if l[i].tag == tag {
+            count += 1
+            freed += list.len(l[i].data) + DATAGRAM_COST
+            let last = list.len(l) - 1
+            list.swap(mut l, i, last)
+            let _ = list.pop(mut l)
+        } else {
+            i += 1
+        }
+    }
+    (count, freed)
+}
+
+/// QUIC-4: the room left under datagram_bytes for received payloads, less what the
+/// application has not yet taken from `events`.
+fn datagram_room(e: Endpoint, events: List[Event]) -> u64 {
+    let mut held = 0u64
+    for event in events {
+        if let Datagram(_, data) = event {
+            held += list.len(data)
+        }
+    }
+    let limit: u64 = int.widen(e.config.limits.datagram_bytes)
+    limit - order.min(limit, held)
+}
+
+/// The payload room of a 1-RTT packet that carries nothing else, by the bound tx_space
+/// sizes its payload with.
+fn empty_packet_room(c: Connection, mtu: u64) -> u64 {
+    let mut limit = order.min(mtu, MSS)
+    if let Some(p) = c.params {
+        limit = order.min(limit, p.max_udp_payload)
+    }
+    let overhead = 14 + list.len(c.peer_id) + list.len(c.local_id) + 8 + 16
+    limit - order.min(limit, overhead)
+}
+
+fn queue_datagram(mut st: Streams, take data: Shared[Bytes], p: Priority, tag: u64, room: u64) -> Result[(), QuicError] {
+    if st.peer_datagram == 0 {
+        return Error(Unsupported)
+    }
+    let len = list.len(data)
+    if !datagram_fits(order.min(st.peer_datagram, room), len) {
+        return Error(TooLarge(len))
+    }
+    if len + DATAGRAM_COST > headroom(st.send_bytes, st.held) {
+        return Error(Limit)
+    }
+    list.push(mut st.datagrams, QueuedDatagram(data: take data, priority: p, tag: tag, seq: st.datagram_seq, turn: st.turn, born: None))
+    st.datagram_seq += 1
+    st.turn += 1
+    st.held += len + DATAGRAM_COST
+    Ok(())
+}
+
+/// Queue one datagram (QUIC-7). Its DATAGRAM frame must fit the peer's
+/// max_datagram_frame_size and one packet, or it is TooLarge; a peer that advertised none
+/// makes it Unsupported; past send_bytes it is Limit. Nothing is queued on an error.
+pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: Shared[Bytes], p: Priority, tag: u64) -> Result[(), QuicError] {
+    if p.urgency > 7 {
+        return Error(Config)
+    }
+    let i = stream_slot(e, c)?
+    let mtu: u64 = int.widen(e.config.max_mtu)
+    if let Some(mut conn) = e.connections[i] {
+        let room = empty_packet_room(conn, mtu)
+        return queue_datagram(mut conn.streams, take data, p, tag, room)
+    }
+    Error(UnknownConnection)
+}
+
+/// Remove every queued datagram tagged `tag`, those in a polled but uncommitted suffix
+/// included, and return how many. A datagram already committed is not recalled.
+pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64 {
+    let Some(i) = slot_at(e, c) else {
+        return 0
+    }
+    if let Some(mut conn) = e.connections[i] {
+        let (queued, freed) = remove_tagged(mut conn.streams.datagrams, tag)
+        let (staged, staged_freed) = remove_tagged(mut conn.streams.staged_datagrams, tag)
+        conn.streams.held -= freed + staged_freed
+        return queued + staged
+    }
+    0
+}

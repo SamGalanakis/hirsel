@@ -104,7 +104,10 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
             Server => !before,
             Client => false,
         }
+        c.streams.datagram_room = e.datagram_room
         let outcome = receive_known(mut c, now, from, h, mut wire, mut e.plain, e.random, e.config.max_mtu, ecn, mut events)
+        e.datagram_room = c.streams.datagram_room
+        dropped_many(mut e.drops, DatagramBuffer, replace(mut c.streams.datagrams_refused, 0))
         let finished = awaiting && established(c)
         if finished {
             e.unconfirmed -= 1
@@ -252,6 +255,7 @@ pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf:
     }
     let end = at + len
     let mut next = at
+    e.datagram_room = datagram_room(e, events)
     let server = match e.server {
         Some(_) => true,
         None => false

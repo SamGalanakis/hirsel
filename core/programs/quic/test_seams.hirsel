@@ -80,3 +80,16 @@ pub fn path_state(e: Endpoint, c: ConnectionHandle) -> Option[(Addr, bool, u64, 
     }
     None
 }
+
+/// Q15 seam: the DATAGRAM frames a connection has committed to the socket, those still
+/// queued or staged, and its bytes in flight and congestion window.
+pub fn datagram_counts(e: Endpoint, c: ConnectionHandle) -> (u64, u64, u64, u64) {
+    let Some(i) = slot_at(e, c) else {
+        return (0, 0, 0, 0)
+    }
+    if let Some(conn) = e.connections[i] {
+        let queued = list.len(conn.streams.datagrams) + list.len(conn.streams.staged_datagrams)
+        return (conn.streams.datagrams_sent, queued, recovery.bytes_in_flight(conn.recovery), recovery.window(conn.recovery))
+    }
+    (0, 0, 0, 0)
+}

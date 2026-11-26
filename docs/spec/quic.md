@@ -433,7 +433,9 @@ A connection that agreed `max_datagram_frame_size` (RFC 9221 §3) may `send_data
 payload whose DATAGRAM frame fits both the peer's limit and one packet. RFC 9221 §3 counts
 the limit over the whole frame, so the payload bound is the peer's limit less the frame type
 (one byte) and the length varint (1 to 8 bytes); a larger payload is `TooLarge(n)` and
-nothing is sent.
+nothing is sent. A queued datagram is charged its length plus 48 bytes against `send_bytes`
+(QUIC-5), past which `send_datagram` is `Limit`; one the window has not let out within one
+smoothed RTT of the first `poll` that saw it is dropped and counted as `DatagramLate`.
 
 Each queued datagram carries a `Priority`, which schedules it among the streams (QUIC-1),
 and a caller-chosen `tag`. `drop_datagrams(e, c, tag)` removes every queued
@@ -442,7 +444,8 @@ many it removed; a datagram already committed to the socket is not recalled. MoQ
 datagrams by track so a revocation fence can purge them (MOQ-8).
 
 Received datagrams are delivered in arrival order as `Event.Datagram`, never reassembled and
-never acknowledged to the application, within `EndpointLimits.datagram_bytes` (QUIC-4).
+never acknowledged to the application, within `EndpointLimits.datagram_bytes` (QUIC-4); one
+that would pass it is dropped and counted as `DatagramBuffer`.
 
 ## QUIC-8: Timers, closing and idling
 
@@ -478,18 +481,23 @@ Per endpoint, received datagrams are bounded by `EndpointLimits.datagram_bytes`.
 pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut events: List[Event]) -> Result[(), NetError] waits
 ```
 
-It does one `udp_recv` batch until the endpoint's next deadline or `until`, passes each
-datagram to `receive_datagram` as a slice of the receive buffer (dropping and counting any
-`UdpPacket` with `truncated` set), then calls `timeout`, then `poll`s and hands the whole
-batch to one `udp_send` with `UdpTx(to, at, len, ecn)` per `Transmit`, waiting until the
-first `send_at` that is in the future. It passes the committed count `udp_send` returns to
-`committed`; the uncommitted suffix is abandoned as QUIC-1 says and is rebuilt by the next
-`poll`. A service with many cores binds a group with `steer: Quic` and runs one endpoint per
+It calls `timeout`, then `poll`s and hands the whole batch to one `udp_send` with
+`UdpTx(to, at, len, ecn)` per `Transmit`, waiting until the first `send_at` that is in the
+future. It passes the committed count `udp_send` returns to `committed`; the uncommitted
+suffix is abandoned as QUIC-1 says and is rebuilt by the next `poll`. Then it does one
+`udp_recv` batch until the endpoint's next deadline (taken after `committed`, which arms the
+loss timers) or `until`, and passes each datagram to `receive_datagram` as a slice of the
+receive buffer, dropping and counting any `UdpPacket` with `truncated` set as `Truncated`.
+Sending first means data written between calls leaves on the next call, not after a
+receive wait. Packets that fill to the limit are padded to it, so a run of full packets
+reaches the host as equal lengths and leaves as one GSO train on Linux; on Darwin the host
+sends them one by one. A service with many cores binds a group with `steer: Quic` and runs one endpoint per
 member, each in its own unit, which is how an SFU unit owns its connections (QUIC-4).
 
-`endpoint` refuses a `max_mtu` below 1,200, and `drive` refuses a socket whose `slot_bytes`
-is less than `max_mtu` plus 256. Under `UDP_GRO` `slot_bytes` is the coalesced buffer (up to
-65,792), not a packet size, which is why the MTU is its own setting.
+`endpoint` refuses a `max_mtu` below 1,200. Under `UDP_GRO` `slot_bytes` is the coalesced
+buffer (up to 65,792), not a packet size, which is why the MTU is its own setting; NET-16
+gives no query for a socket's `slot_bytes`, so `drive` cannot check it and a too-small slot
+shows as `Truncated` drops.
 
 ## Laws
 

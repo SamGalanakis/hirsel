@@ -25,7 +25,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
     // RFC 9000 §8.2.1: a datagram with PATH_CHALLENGE or PATH_RESPONSE is expanded to
     // 1200 bytes when the anti-amplification limit allows.
     let path_frames = kind == OneRtt && list.len(s.path_out) > 0
-    let padding = if kind == Initial || (path_frames && limit >= 1200) {
+    let mut padding = if kind == Initial || (path_frames && limit >= 1200) {
         1200u64
     } else {
         0u64
@@ -119,7 +119,11 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
                 }
             }
             if fill && kind == OneRtt && !s.hold_data {
-                fill_streams(mut st, cap, mut payload, mut frames)
+                // A packet filled to the brim is padded to the limit, so the packets
+                // before the last of a batch have one length: a NET-16 GSO train.
+                if fill_streams(mut st, cap, mut payload, mut frames) {
+                    padding = limit
+                }
                 eliciting = eliciting || list.len(frames) > 0
             }
             if probe && !eliciting && list.len(payload) < cap {
@@ -133,7 +137,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
         return None
     }
     let Some(number) = seal_packet(mut s, kind, dest, source, payload, padding, mut out) else {
-        requeue(mut st, frames)
+        requeue(mut st, frames, true)
         return None
     }
     Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, frames: take frames))

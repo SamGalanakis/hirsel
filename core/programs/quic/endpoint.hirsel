@@ -20,7 +20,13 @@ pub opaque type Endpoint {
     drops: Map[DropReason, u64],
     plain: Bytes,
     tail: Bytes,
-    reset_peers: Map[Addr, List[u64]]
+    reset_peers: Map[Addr, List[u64]],
+    datagram_room: u64,
+    drive_out: Bytes,
+    drive_tx: List[Output],
+    drive_udp: List[UdpTx],
+    drive_in: Bytes,
+    drive_packets: List[UdpPacket]
 }
 
 pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshake.Identity, TransportConfig)]) -> Result[Endpoint, QuicError] {
@@ -35,11 +41,17 @@ pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshak
             return Error(Config)
         }
     }
-    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new()))
+    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new(), datagram_room: 0, drive_out: b"", drive_tx: list.new(), drive_udp: list.new(), drive_in: b"", drive_packets: list.new()))
 }
 
 fn dropped(mut drops: Map[DropReason, u64], reason: DropReason) {
     map.update_or_insert(mut drops, reason, 0, count_drop)
+}
+
+fn dropped_many(mut drops: Map[DropReason, u64], reason: DropReason, n: u64) {
+    for _ in 0u64 .. n {
+        dropped(mut drops, reason)
+    }
 }
 
 fn count_drop(mut count: u64) {

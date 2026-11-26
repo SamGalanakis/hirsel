@@ -91,6 +91,7 @@ std = { major = 1 }
 "store-reclaim.hirsel" = "store"
 "store-register.hirsel" = "store"
 "store-object-authority.hirsel" = "store"
+"store-object-cache.hirsel" = "store"
 "store-object-open.hirsel" = "store"
 "store-object-import.hirsel" = "store"
 "store-object-export.hirsel" = "store"
@@ -712,3 +713,7 @@ limit = 134217728
 
 [tests.runs."store@1/store/test_frozen_format_corpus"]
 limit = 268435456
+
+[tests.runs."store@1/store/bucket_test_pack_cache"]
+limit = 134217728
+grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Stdout"]

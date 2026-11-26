@@ -847,3 +847,120 @@ fn bucket_test_m2_q5_matrix(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_gran
 fn bucket_test_m2_genesis_debris(d: Dir, c: Clock, tasks: Tasks, seed_grant: Env) -> Result[(), DeployError] waits {
     trust_seed_deploy_gate("bucket_test_m2_genesis_debris", bucket_m2_genesis_debris_run(d, c, tasks, seed_grant))
 }
+
+fn measure_cached_reopen(tasks: Tasks, c: Clock, sim: BucketSim, head: HistoryHead, cache: Option[ObjectsCache]) -> Result[u64, Error] waits {
+    let client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let mut source = history_reader(take client, due)
+    source.cache = cache
+    let start = host.mono_ns(c)
+    let replay = history_paged_capture(mut source, head, 1048576)?
+    let elapsed = host.mono_ns(c) - start
+    let tip = view replay.state.tips[0]
+    let snap = Snapshot(store: head.store, open: 0, branch: 0, head: tip.head, roots: share_roots(tip.roots), watermark: 1, bases: no_tail_bases())
+    let rows = catalog_handle(head.store, tip.roots.catalog, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    if version(snap) != 2 || get(law_reader(snap), snap, rows, 7)? != Some(bucket_m2_pack_value()) {
+        fail("cache changed the recovered row")
+    }
+    let mut marker: Bytes = list.with_capacity(64)
+    let _ = history_fetch(mut source.client, "cache-sample-end", mut marker, due)
+    Ok(elapsed)
+}
+
+fn corrupt_one_cached_pack(d: Dir, partial: bool) waits {
+    let dir = result.unwrap(std.dir.narrow(d, OBJECTS_CACHE_DIR))
+    for member in result.unwrap(std.dir.list(dir, None)) {
+        if string.starts_with(member.name, "p-") && (string.byte_len(member.name) > 60) == partial {
+            let mut file = result.unwrap(host.open(dir, member.name, ReadWrite))
+            let mut damage: Bytes = list.with_capacity(1)
+            result.unwrap(host.read_at(mut file, 0, mut damage))
+            damage[0u64] ^= 1u8
+            result.unwrap(std.file.write_at(mut file, 0, damage))
+            return
+        }
+    }
+    fail("cold recovery did not fill the cache")
+}
+
+fn bucket_cache_samples(report: std.sim.s3.Report, times: List[u64], out: Stdout) waits {
+    let mut sample_at = 0u64
+    let mut gets = 0u64
+    let mut pack_gets = 0u64
+    for request in report.requests {
+        if request.method != "GET" {
+            continue
+        }
+        if request.key != "cache-sample-end" {
+            gets += 1
+            if string.starts_with(request.key, "p-") {
+                pack_gets += 1
+            }
+            continue
+        }
+        let case_name = match sample_at % 4 {
+            0 => "before cold",
+            1 => "before reopen",
+            2 => "after cold",
+            _ => "after warm",
+        }
+        if sample_at == 12 {
+            if pack_gets != 1 {
+                fail("corrupt cache entry did not trigger exactly one Bucket pack GET")
+            }
+        } else if (sample_at % 4 == 3 && pack_gets != 0) || (sample_at % 4 != 3 && pack_gets == 0) {
+            fail("Bucket pack GET count did not distinguish cold and warm recovery")
+        }
+        let mut sample = string.from(if sample_at == 12 {
+            "corrupt"
+        } else {
+            case_name
+        })
+        for field in[times[sample_at], gets, pack_gets] {
+            string.push(mut sample, " ")
+            string.push_u64(mut sample, field)
+        }
+        string.push(mut sample, "\n")
+        result.unwrap(stdout.write(out, sample))
+        sample_at += 1
+        gets = 0
+        pack_gets = 0
+    }
+    if sample_at != list.len(times) {
+        fail("missing cache measurement boundaries")
+    }
+}
+
+@test
+fn bucket_test_pack_cache(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env, out: Stdout) -> Result[(), Error] waits {
+    let checkpoint_dir = disk_test_directory(d)
+    bucket_m2_seed_checkpoint(checkpoint_dir, c, r, tasks)?
+    let sim = bucket_law_sim(tasks, c, bucket_law_seed(seed_grant, 72), None, list.new())
+    let (take setup, head) = bucket_m2_upload_checkpoint(checkpoint_dir, tasks, sim)?
+    drop(take setup)
+    let local = ObjectsCache(dir: disk_test_directory(d), capacity_bytes: 1048576)
+    let mut times: List[u64] = list.with_capacity(13)
+    let arms: Inline[Option[ObjectsCache], 4] =[None, None, Some(local), Some(local)]
+    for i in 0u64 .. 3 {
+        if i != 0 {
+            result.unwrap(std.dir.remove_all(local.dir, OBJECTS_CACHE_DIR))
+        }
+        for cache in arms {
+            let elapsed = measure_cached_reopen(tasks, c, sim, head, cache)?
+            list.push(mut times, elapsed)
+        }
+    }
+    corrupt_one_cached_pack(local.dir, false)
+    list.push(mut times, measure_cached_reopen(tasks, c, sim, head, Some(local))?)
+    let report = bucket_law_finish(take sim)
+    bucket_cache_samples(report, times, out)
+    let cold_pager = bucket_law_sim(tasks, c, 8464, None, list.new())
+    let window_cache = ObjectsCache(dir: disk_test_directory(d), capacity_bytes: 1048576)
+    let paging = l84_bucket_pager_batch(cold_pager, tasks, Some(window_cache))
+    let requests = bucket_law_report(take cold_pager)
+    paging?
+    // Three PUTs, three cold GETs and one refetch of the damaged range.
+    if requests.attempts != 7 {
+        fail("the restarted pager did not reuse and refetch the expected ranges")
+    }
+    Ok(())
+}

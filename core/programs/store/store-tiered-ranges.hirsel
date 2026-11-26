@@ -137,3 +137,77 @@ fn read_tiered_bucket_windows(mut client: std.object.Client, gets: List[TieredBu
     }
     Ok(take outcomes)
 }
+
+fn tiered_window_cache_key(request: TieredBucketGet) -> Result[(String, Option[u64]), Error] {
+    if request.window.lo == 0 && request.window.hi == request.pack_ref.len {
+        return Ok((history_read_key("p-", request.pack_ref)?, Some(request.pack_ref.digest)))
+    }
+    capacity(bound bytes 104 {
+        let mut path = string.with_capacity(104)
+        history_fill_key(mut path, "p-", request.pack_ref)
+        string.push(mut path, "-")
+        string.push_u64(mut path, request.window.lo)
+        string.push(mut path, "-")
+        string.push_u64(mut path, request.window.hi)
+        (take path, None)
+    })
+}
+
+fn tiered_window_cached(cache: ObjectsCache, request: TieredBucketGet) -> Option[Bytes] waits {
+    let width = request.window.hi - request.window.lo
+    if width > cache.capacity_bytes {
+        return None
+    }
+    let Ok((take path, expected)) = tiered_window_cache_key(request) else {
+        return None
+    }
+    let trailer = if expected == None {
+        8u64
+    } else {
+        0u64
+    }
+    let Ok(take buffer) = disk_read_buffer(width + trailer) else {
+        return None
+    }
+    let mut raw = take buffer
+    if pack_cache_read(cache, path, width, expected, mut raw) {
+        Some(take raw)
+    } else {
+        None
+    }
+}
+
+fn tiered_window_cache_store(cache: ObjectsCache, request: TieredBucketGet, raw: Bytes) waits {
+    let Ok((take path, expected)) = tiered_window_cache_key(request) else {
+        return
+    }
+    if let Some(digest) = expected {
+        if std.check.xxh3(raw, 0, list.len(raw)) != digest {
+            return
+        }
+    }
+    pack_cache_write(cache, path, raw, expected == None)
+}
+
+fn tiered_window_cache_discard(cache: ObjectsCache, request: TieredBucketGet) waits {
+    if let Ok((take path, _)) = tiered_window_cache_key(request) {
+        pack_cache_discard(cache, path)
+    }
+}
+
+fn read_checked_bucket_window[T](mut client: std.object.Client, cache: Option[ObjectsCache], request: TieredBucketGet, check: scoped[view] fn(Bytes) -> Result[T, Error]) -> Result[(Bytes, T), Error] waits {
+    if let Some(local) = cache {
+        if let Some(take raw) = tiered_window_cached(local, request) {
+            if let Ok(take checked_frame) = check(raw) {
+                return Ok((take raw, take checked_frame))
+            }
+            tiered_window_cache_discard(local, request)
+        }
+    }
+    let raw = read_tiered_bucket_window(mut client, request.pack_ref, request.window, request.deadline)?
+    let checked_frame = check(raw)?
+    if let Some(local) = cache {
+        tiered_window_cache_store(local, request, raw)
+    }
+    Ok((take raw, take checked_frame))
+}

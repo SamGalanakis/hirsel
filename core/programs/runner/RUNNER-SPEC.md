@@ -2239,6 +2239,8 @@ Keyset pages are a store read. They are specified in STORE-SPEC v2.25 §1.5 and 
 
 **One owner.** `runner.operate` owns a place from store open to store close. It replaces the sequence that place programs and the runner's harnesses wire by hand today (`store.open`, `place_head`, `mailbox`, `serve`), so the sequence exists once.
 
+`BucketBacking.cache: Option[(Dir, u64)]` gives the managed head a host directory and a disk byte limit for `store.objects_cache` (STORE §13.2). Keep the directory across process exits to reuse packs on the next open. The Bucket retains the durable state if the cache directory is deleted.
+
 ```hirsel
 pub type Step: send = Recovering | Activating | Publishing | Listening(Addr)
 pub type Phase: send = Starting(Step) | Ready | Paused | Draining

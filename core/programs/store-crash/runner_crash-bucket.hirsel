@@ -38,7 +38,7 @@ fn bucket_place(mut r: Calls) -> Result[(), runner.RegisterError] {
 fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[runner.PlaceConfig[(), Hd, ()], Exit] {
     let spot = std.object.Bucket(endpoint: bucket_endpoint(argv), aws_region: "us-east-1", bucket: "bucket-t1", prefix: "", style: Path)
     let credentials = std.cred.from_secret(string.from(BUCKET_ACCESS), secret.share(key), "")
-    let backing = runner.BucketBacking(net: n, place: take spot, credentials: take credentials, lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64)
+    let backing = runner.BucketBacking(net: n, place: take spot, credentials: take credentials, lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64, cache: None)
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let selection = runner.launch_selection(argv)?

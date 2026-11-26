@@ -13,7 +13,7 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
         return Error(disk_fault(path, at, Malformed))
     }
     let width = order.min(PACK_INDEX_LIMIT + 16, pack.payload_bytes - at)
-    let mut wire = match input {
+    let (take raw, end) = match input {
         PagerLocal(d) => {
             let mut opened = match host.open(d, path, Read) {
                 Ok(take fd) => take fd,
@@ -22,9 +22,11 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
             }
             let obtained = read_disk_bytes(mut opened, path, at, width)
             disk_io(host.close(take opened))?
-            obtained?
+            let wire = obtained?
+            let end = checked_tiered_index(path, owner, request.pack, at, width, wire)?
+            (take wire, end)
         },
-        PagerObjects(mut client, op_ms) => {
+        PagerObjects(mut client, op_ms, cache) => {
             let Some(item) = request.listed.object else {
                 return Error(disk_fault(path, at, Absent))
             }
@@ -36,25 +38,35 @@ fn read_tiered_index_frame(mut input: TieredPagerInput, owner: StoreId, request:
             } else {
                 request.deadline
             }
-            read_tiered_bucket_window(mut client, item, TieredRange(lo: at, hi: at + width), deadline)?
+            let read = TieredBucketGet(pack_ref: item, window: TieredRange(lo: at, hi: at + width), deadline)
+            read_checked_bucket_window(mut client, cache, read, scoped fn(wire: Bytes) -> Result[u64, Error] {
+                checked_tiered_index(path, owner, request.pack, at, width, wire)
+            })?
         },
     }
-    let head = disk_read_frame_head(path, list.slice(wire, 0, 16), at)?
-    if head.kind != PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
-        return Error(disk_fault(path, at, Malformed))
-    }
-    let end = 16 + head.size
-    let context = DiskContext(store: owner, role: 3, seq: request.pack)
-    if capacity(disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end)))? != head.checksum {
-        return Error(disk_fault(path, at, Checksum))
-    }
+    let mut wire = take raw
     list.truncate(mut wire, end)
-    let mut pin_bytes_owner = disk_allocation(fn() -> Result[Arc[Bytes], Error] { Ok(arc.new(list.new())) })?
+    let mut pin_bytes_owner = disk_allocation(fn() -> Result[Arc[Bytes], Error] {
+        Ok(arc.new(list.new()))
+    })?
     let installed = arc.with_unique(mut pin_bytes_owner, scoped fn(mut payload: Bytes) {
         payload = replace(mut wire, list.new())
     })
     let _ = option.unwrap(installed)
     Ok(take pin_bytes_owner)
+}
+
+fn checked_tiered_index(path: String, owner: StoreId, pack_seq: u64, at: u64, width: u64, wire: Bytes) -> Result[u64, Error] {
+    let head = disk_read_frame_head(path, list.slice(wire, 0, 16), at)?
+    if head.kind != PACK_INDEX_KIND || head.flags != 1 || head.size > width - 16 {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    let end = 16 + head.size
+    let context = DiskContext(store: owner, role: 3, seq: pack_seq)
+    if capacity(disk_check(context, at, list.slice(wire, 0, 16), list.slice(wire, 16, end)))? != head.checksum {
+        return Error(disk_fault(path, at, Checksum))
+    }
+    Ok(end)
 }
 
 fn pin_tiered_index(cut: TieredPageSource, pack: u64, offset: u64, listed: TieredPagerPack) -> Result[Arc[Bytes], Error] waits {
@@ -109,9 +121,12 @@ fn probe_tiered_index[S](cut: TieredPageSource, seq: u64, mut cursor: TieredProb
                 break
             }
             let width: u64 = int.widen(row.len)
-            let expected_kind = if pack.class == 3 { 0x21u8 } else { 0x22u8 }
-            if row.kind != expected_kind || row.offset != cursor.next_data || row.stamp >= cut.next_stamp ||
-                row.offset >= pack.index || 16 + width > pack.index - row.offset || cursor.rows >= int.widen(pack.frames) {
+            let expected_kind = if pack.class == 3 {
+                0x21u8
+            } else {
+                0x22u8
+            }
+            if row.kind != expected_kind || row.offset != cursor.next_data || row.stamp >= cut.next_stamp || row.offset >= pack.index || 16 + width > pack.index - row.offset || cursor.rows >= int.widen(pack.frames) {
                 return Error(disk_fault(path, at, Malformed))
             }
             let _ = probe_routing_key(seq, row)?

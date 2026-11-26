@@ -48,7 +48,7 @@ fn history_import_base(mut client: std.object.Client, draft: Db, options: Option
     let limit = order.max(options.pack_bytes, page_manifest_file_size(MANIFEST_LIMIT, 1))
     let mut buffers = cut_output_buffers(cut_plan, cut_manifest_size(draft, NoHolderChange), limit)?
     let no_packs = empty_history_locator()
-    let (take layout, take refs) = history_write_page_cut(mut client, draft.store, 1, 1, take cut_plan, no_packs, mut buffers, mut workspace, deadline)?
+    let (take layout, take refs) = history_write_page_cut(mut client, draft.store, 1, 1, take cut_plan, no_packs, None, mut buffers, mut workspace, deadline)?
     fill_cut_manifest(mut buffers.out, draft, NoHolderChange, participants.roots, 1, 1, 1, layout, next_stamp, base.account, seal_page_manifest_file)?
     let (_, take manifest) = disk_read_page_manifest("MANIFEST", buffers.out)?
     let uploaded = history_create_manifest(mut client, draft.store, 1, 1, manifest, mut workspace, deadline)?

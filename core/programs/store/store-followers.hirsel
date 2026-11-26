@@ -33,7 +33,7 @@ pub opaque type Follower {
     stopped: Option[StoreCapacity]
 }
 
-type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8, Option[String])
+type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8, Option[String], Option[ObjectsCache])
 
 type FollowerRequest: send = Bind(FollowerTransport, Option[StoreId], u64) | Apply(Arc[FollowCapture], u64) | Floor(Arc[FollowCapture], u64, u64, u64) | Fresh(Arc[FollowCapture], u64, u64) | Await(Arc[FollowCapture], Position, u64, Option[u64])
 
@@ -253,10 +253,11 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
     }
     let mut source = match take transport {
         DirectoryFollow(directory, c) => DirectorySource(directory, c),
-        ObjectFollow(take requests, kind, take stream_root) => {
+        ObjectFollow(take requests, kind, take stream_root, cache) => {
             let mut remote = history_reader(std.object.attach(take requests, None), due)
             remote.authority_kind = kind
             remote.stream_root = take stream_root
+            remote.cache = cache
             ObjectSource(take remote)
         },
     }
@@ -305,7 +306,7 @@ pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: 
 }
 
 fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {
-    let ObjectAuthorityConfig(client: take client, op_ms, stream_root: take stream_root, ..) = take config
+    let ObjectAuthorityConfig(client: take client, op_ms, stream_root: take stream_root, cache, ..) = take config
     if kind == 2 && !std.object.simulated(client) {
         return Error(Endpoint(NotSimulator))
     }
@@ -314,7 +315,7 @@ fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object
     }
     let deadline = std.object.deadline_after_ms(client, op_ms)
     let (take requests, take workers) = std.object.split(take client)
-    Ok((ObjectFollow(take requests, kind, take stream_root), take workers, false, op_ms, deadline))
+    Ok((ObjectFollow(take requests, kind, take stream_root, cache), take workers, false, op_ms, deadline))
 }
 
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {

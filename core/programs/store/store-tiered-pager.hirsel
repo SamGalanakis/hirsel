@@ -1,6 +1,6 @@
-type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Requests, u64)
+type TieredPagerSource: send = PagerDirectory(Dir) | PagerBucket(std.object.Requests, u64, Option[ObjectsCache])
 
-type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Client, u64)
+type TieredPagerInput = PagerLocal(Dir) | PagerObjects(std.object.Client, u64, Option[ObjectsCache])
 
 type TieredPagerTarget: send {
     edge: TieredTarget,
@@ -102,7 +102,11 @@ fn start_tiered_pager_link(tasks: Tasks, owner: StoreId, opened: u64, take autho
     let Some(shared) = int.checked_sub(funding.cache_bytes, funding.writer_pin_bytes) else {
         return Error(Missing("cache_bytes"))
     }
-    let cut_room = if funding.cut_pins { CUT_PIN_BYTES } else { 0u64 }
+    let cut_room = if funding.cut_pins {
+        CUT_PIN_BYTES
+    } else {
+        0u64
+    }
     let Some(cache_and_task) = int.checked_add(funding.cache_bytes, funding.pager_task_bytes) else {
         return Error(Missing("cache_bytes"))
     }
@@ -132,7 +136,13 @@ fn run_tiered_pager(take launch: TieredPagerStart) waits {
     let TieredPagerStart(store: owner, opened: opened, authority: take authority, inbox: take incoming, writer: take writer, notices: take notify, shared_bytes: shared) = take launch
     let mut input = match take authority {
         PagerDirectory(d) => PagerLocal(d),
-        PagerBucket(take requests, op_ms) => PagerObjects(std.object.attach(take requests, None), op_ms),
+        PagerBucket(take requests, op_ms, cache) => {
+            let local = pack_cache_directory(cache)
+            if let Some(directory) = local {
+                pack_cache_trim(directory)
+            }
+            PagerObjects(std.object.attach(take requests, None), op_ms, local)
+        },
     }
     let mut private_cache = new_tiered_cache(shared)
     loop {
@@ -208,7 +218,11 @@ fn tiered_point_continuation(frame: TieredFrame, key: Bytes, direction: TieredDi
             std.page.count(image) - 1
         } else {
             let (_, equal) = std.page.search(image, key)
-            if equal { sought - 1 } else { sought }
+            if equal {
+                sought - 1
+            } else {
+                sought
+            }
         }
     } else {
         sought
@@ -228,11 +242,19 @@ type TieredDescent {
 }
 
 fn tiered_demand_key(demand: TieredPointDemand, path: u64) -> View[Bytes] in demand {
-    if path == 0 { view demand.key } else { view demand.paths[path - 1].key }
+    if path == 0 {
+        view demand.key
+    } else {
+        view demand.paths[path - 1].key
+    }
 }
 
 fn tiered_demand_values(demand: TieredPointDemand, path: u64) -> View[TieredValues] in demand {
-    if path == 0 { view demand.values } else { view demand.paths[path - 1].values }
+    if path == 0 {
+        view demand.values
+    } else {
+        view demand.paths[path - 1].values
+    }
 }
 
 // The Cold BLOB holding a leaf row's value, if the value is a Cold BLOB.
@@ -292,7 +314,11 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
     for path in 0u64 .. width {
         list.push(mut found, list.new())
         list.push(mut failed, None)
-        let edge: TieredTarget = if path == 0 { clone(demand.target) } else { clone(demand.paths[path - 1].target) }
+        let edge: TieredTarget = if path == 0 {
+            clone(demand.target)
+        } else {
+            clone(demand.paths[path - 1].target)
+        }
         list.push(mut walking, TieredDescent(path: path, edge: take edge, level: None))
     }
     let mut siblings: List[Result[Arc[TieredFrame], Error]] = list.new()
@@ -509,7 +535,11 @@ fn tiered_pager_point(mut input: TieredPagerInput, mut private_cache: TieredCach
     }
     // A delivery with more than one path's frames leads with its path frames
     // (`held`); a lone path's frames are installed in order, as they always were.
-    let held = if list.len(demand.paths) != 0 || list.len(frames) > lead { lead } else { 0u64 }
+    let held = if list.len(demand.paths) != 0 || list.len(frames) > lead {
+        lead
+    } else {
+        0u64
+    }
     Ok(TieredPointDelivery(frames: take frames, held: held, failure: take failure, grant: clone(demand.grant)))
 }
 
@@ -534,7 +564,7 @@ fn checked_tiered_pager_target(input: TieredPagerInput, demand: TieredPagerTarge
     let expected = tiered_frame_id(demand.edge)
     let path = match input {
         PagerLocal(_) => paged_pack_path(expected.pack)?,
-        PagerObjects(_, _) => {
+        PagerObjects(..) => {
             let file = paged_pack_path(expected.pack)?
             let Some(item) = demand.object else {
                 return Error(disk_fault(file, expected.offset, Dangling(expected.stamp)))
@@ -576,7 +606,7 @@ fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCach
         return Ok(take found)
     }
     let width = 16 + expected.len
-    let (take raw, start) = match input {
+    let page = match input {
         PagerLocal(d) => {
             let mut opened = match host.open(d, path, Read) {
                 Ok(take fd) => take fd,
@@ -585,9 +615,12 @@ fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCach
             }
             let obtained = read_disk_bytes(mut opened, path, expected.offset, width)
             disk_io(host.close(take opened))?
-            (obtained?, expected.offset)
+            let raw = obtained?
+            disk_allocation(scoped fn() -> Result[Arc[TieredFrame], Error] {
+                read_tiered_frame(path, owner, demand.edge, raw, expected.offset, demand.next_stamp)
+            })?
         },
-        PagerObjects(mut client, op_ms) => {
+        PagerObjects(mut client, op_ms, cache) => {
             let item = option.unwrap(demand.object)
             let window = tiered_bucket_range(path, demand.edge, item.len, demand.direction)?
             let deadline = if demand.deadline == 0 {
@@ -595,12 +628,15 @@ fn tiered_pager_frame(mut input: TieredPagerInput, mut private_cache: TieredCach
             } else {
                 demand.deadline
             }
-            (read_tiered_bucket_window(mut client, item, window, deadline)?, window.lo)
+            let request = TieredBucketGet(pack_ref: item, window, deadline)
+            let (_, take checked_frame) = read_checked_bucket_window(mut client, cache, request, scoped fn(raw: Bytes) -> Result[Arc[TieredFrame], Error] {
+                disk_allocation(scoped fn() -> Result[Arc[TieredFrame], Error] {
+                    read_tiered_frame(path, owner, demand.edge, raw, window.lo, demand.next_stamp)
+                })
+            })?
+            take checked_frame
         },
     }
-    let page = disk_allocation(scoped fn() -> Result[Arc[TieredFrame], Error] {
-        read_tiered_frame(path, owner, demand.edge, raw, start, demand.next_stamp)
-    })?
     tiered_cache_admit(mut private_cache, page)
     Ok(take page)
 }

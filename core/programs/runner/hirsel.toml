@@ -234,3 +234,7 @@ limit = 805306368
 # among it), the head, the HTTP listener, the relay and the client tasks.
 [tests.runs."runner@1/runner/keyed_http_join_on_cold_read"]
 limit = 536870912
+
+[tests.runs."runner@1/runner/bucket_reopens_without_objects_cache"]
+limit = 134217728
+grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]

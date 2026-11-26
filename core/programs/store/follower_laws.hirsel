@@ -281,7 +281,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
     // The longest object key has 60 bytes, rounded to 64.
     let key_room = option.unwrap(charge.round(60))
     let bad = capacity(bound bytes key_room {
-        history_load_data_pack(mut client, locator, due, observed.store, 1, pack, 1)
+        history_load_data_pack(mut client, locator, due, None, observed.store, 1, pack, 1)
     })?
     if let Error(Corrupt(Fault(why: Malformed, ..))) = bad {} else {
         fail("L85: the known format error consumed another key allocation")

@@ -545,7 +545,7 @@ fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: Hist
     let manifest = history_read_manifest(mut client, head.store, mark, head.checkpoint.seq, deadline)?
     let locator = history_locator(mut client, head, mark, checkpoint_data, deadline)?
     let name = history_read_key("m-", mark.manifest)?
-    let _ = validate_bucket_graph(mut client, locator, deadline, head.store, name, take manifest, true)?
+    let _ = validate_bucket_graph(mut client, locator, deadline, head.store, name, take manifest, true, None)?
     Ok(())
 }
 

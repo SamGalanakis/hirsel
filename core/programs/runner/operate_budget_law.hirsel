@@ -69,7 +69,7 @@ fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfi
 }
 
 fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret) -> PlaceConfig[(), (), ()] {
-    let bucket = BucketBacking(net: n, place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64)
+    let bucket = BucketBacking(net: n, place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64, cache: None)
     let mut config = budget_config(Bucket(take bucket), c, r, tasks, n)
     config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64), pack_bytes: Some(65536u64), group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
     take config
@@ -246,4 +246,56 @@ fn operate_derived_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) ->
         Ok(Error(Full(cap))) if cap.requested == minimum && cap.available == minimum - 1 => Ok(()),
         _ => Error("L60: an infeasible share must be returned as Full"),
     }
+}
+
+fn reopen_cached_bucket(take config: PlaceConfig[(), (), ()], id: store.StoreId) -> Result[(), String] waits {
+    let (take options, _, _, _, _) = place_store(placing_of(config), config, None, true) ?=> |problem| start_text(problem)
+    let PlaceConfig(backing: take backing, clock: clock, random: random, tasks: tasks, ..) = take config
+    let mut opening = take options
+    opening.create = false
+    opening.expect = Some(id)
+    let (take db, _) = open_backing(take backing, opening, tasks, clock, random) ?=> |problem| start_text(backing_start_error(take problem))
+    let active = activation_window(db) ?=> |problem| start_text(Open(Store(take problem)))
+    if store.identity_words(db) != (id.hi, id.lo) || active.0 != 3u64 {
+        return Error("Bucket cache deletion changed the recovered place")
+    }
+    store.close(take db) ?=> |problem| start_text(Open(Store(take problem)))
+    Ok(())
+}
+
+fn restart_cache_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret, d: Dir) -> PlaceConfig[(), (), ()] {
+    let mut config = capture_budget_config(c, r, tasks, n, endpoint, key)
+    let Bucket(take backing) = replace(mut config.backing, Memory) else {
+        fail("Bucket restart fixture has no backing")
+    }
+    let mut with_cache = take backing
+    with_cache.cache = Some((d, 1048576u64))
+    config.backing = Bucket(take with_cache)
+    take config
+}
+
+@test
+fn bucket_reopens_without_objects_cache(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), String] waits {
+    let key = result.unwrap(secret.seal(clone(string.as_bytes("bucket restart fixture")), "kdf"))
+    let (take listener, address) = result.unwrap(host.listen(n, Addr(ip: V4(0x7f000001u32), port: 0u16), 16u16))
+    let mut endpoint = string.from("http://127.0.0.1:")
+    string.push_u64(mut endpoint, int.widen(address.port))
+    let server = task.spawn(tasks, bytes 524288u64, (take listener, std.sim.s3.Loopback(bucket: "bucket", access_key: "access", aws_region: "us-east-1", root: secret.share(key), exists_status: 412u16, max_body: 65536u64), c), budget_bucket_server)
+    let mut leaf = string.with_capacity(32u64)
+    let dir = result.unwrap(std.dir.create_temp(d, mut leaf))
+    let id = seed_budget_bucket(restart_cache_config(c, r, tasks, n, endpoint, key, dir))?
+    let cache = result.unwrap(std.dir.narrow(dir, "objects-cache"))
+    let mut pack_found = false
+    for entry in result.unwrap(std.dir.list(cache, None)) {
+        pack_found = pack_found || string.starts_with(entry.name, "p-")
+    }
+    if !pack_found {
+        return Error("Bucket cut did not fill the cache")
+    }
+    reopen_cached_bucket(restart_cache_config(c, r, tasks, n, endpoint, key, dir), id)?
+    result.unwrap(std.dir.remove_all(dir, "objects-cache"))
+    reopen_cached_bucket(restart_cache_config(c, r, tasks, n, endpoint, key, dir), id)?
+    result.unwrap(std.dir.remove_all(d, leaf))
+    let _ = task.cancel_join(take server)
+    Ok(())
 }

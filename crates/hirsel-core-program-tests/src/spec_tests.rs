@@ -140,7 +140,7 @@ fn read_fences(
         let mode = match info {
             "hirsel" | "hirsel run" | "hirsel unbuilt" => ParseMode::Source,
             "hirsel core" => ParseMode::Signatures,
-            "" | "ebnf" | "json" | "sh" | "text" => continue,
+            "" | "ebnf" | "json" | "sh" | "text" | "toml" => continue,
             _ => panic!("{location}: unknown fence info string {info:?}"),
         };
         let signatures = mode == ParseMode::Signatures;

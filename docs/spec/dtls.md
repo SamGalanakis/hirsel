@@ -99,7 +99,7 @@ other than null, `srtp_mki` (a non-empty MKI fails the handshake), and DTLS 1.0.
 
 ### DTLS-2: Types
 
-```hirsel unbuilt
+```hirsel core
 // package dtls
 pub type Setup = Active | Passive | ActPass
 pub type HashFunc = Sha256 | Sha384 | Sha512
@@ -617,7 +617,7 @@ no key derivation rate other than 0, no `AES_CM_128_HMAC_SHA1_32`, no NULL ciphe
 
 ### SRTP-2: Types
 
-```hirsel unbuilt
+```hirsel core
 // package srtp
 pub type Discard = Malformed | Replayed | TooOld | Tampered
 pub type SrtpError = Discarded(Discard) | Reused | Exhausted | Streams | Retired

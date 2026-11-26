@@ -1129,7 +1129,7 @@ and comes from the recording.
 
 **Std credentials.** Std's `cred` module wraps the fetch in a record:
 
-```hirsel unbuilt
+```hirsel core
 pub type Credentials: send { access_key_id: String, secret: Secret, session_token: String, expires_ns: u64 }
 pub fn credentials(c: Cred, until: Until) -> Result[Credentials, CredError] waits
 pub fn from_secret(take access_key_id: String, take secret: Secret, take session_token: String) -> Credentials
@@ -1194,7 +1194,7 @@ bytes under two purposes, so a payload key could serve as a header-mask key. A s
 fixes the labels, the output boundaries and the purpose of every output, and it computes
 each output once.
 
-```hirsel unbuilt
+```hirsel core
 pub opaque resource type KeyShare
 pub opaque resource type Schedule
 pub opaque resource type Sealer

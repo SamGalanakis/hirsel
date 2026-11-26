@@ -273,7 +273,7 @@ reach the host's loopback, a private network, link-local addresses (including th
 metadata service at `169.254.169.254`), or the host's own addresses. This is a filter on
 the grant, not authentication. It says where a socket may go and nothing about who opens it.
 
-```hirsel unbuilt
+```hirsel core
 pub type Reach = Any | Public
 pub type Rule = Rule(dir: NetDirection, prefix: Ip, bits: u8, ports: (u16, u16), reach: Reach) | Tls(names: String, ports: (u16, u16), trust: TlsPin) | Resolve(names: String) | Unix(dir: UnixDirection, root: String, path: String)
 pub type AddressClass = Public | Unspecified | ThisNetwork | Private | SharedCgnat | Loopback | LinkLocal | Protocol | Documentation | Relay6to4 | Benchmarking | Multicast | Reserved | Broadcast | UniqueLocal | Nat64Local | NotGlobal6
@@ -951,7 +951,7 @@ a replay and a served Net make the same checks.
 
 ### NET-16: UDP sockets and batches
 
-```hirsel unbuilt
+```hirsel core
 pub opaque resource type UdpSocket
 pub type Steer = Hash | Quic
 pub type UdpOptions = UdpOptions(slots: u32, slot_bytes: u32)
@@ -1505,7 +1505,7 @@ delivery that fails is `Corrupt`.
 each UDP direction, as served Unix does (NET-14); intersecting it with a concrete rule gives
 the concrete rule. Its port receives these calls in addition to NET-14's:
 
-```hirsel unbuilt
+```hirsel core
 pub type UdpNetOp = UdpOpen(v6: bool, slots: u32, slot_bytes: u32) | UdpBind(addr: Addr, slots: u32, slot_bytes: u32, members: u16, steer: Steer) | UdpRecv(socket: u64, room: u64, entries: u64) | UdpSend(socket: u64, data: u64, pkts: u64) | UdpLocal(socket: u64)
 pub type UdpNetReply = UdpSockets(first: u64, count: u16, addr: Addr) | UdpPackets(count: u64)
 pub type UdpStaged = UdpStaged(peer: Addr, len: u64, appended: u64, ecn: u8)

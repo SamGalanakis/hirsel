@@ -115,9 +115,9 @@ pub type Fields = Fields(marker: bool, pt: u8, seq: u16, ts: u32, ssrc: u32)
 pub type WriteError = Capacity(Capacity) | Form
 
 pub fn parse(pkt: Bytes) -> Result[Header, Error]
-pub fn payload(h: Header, pkt: Bytes) -> Result[(u64, u64), Error]
-pub fn csrc(h: Header, pkt: Bytes, i: u8) -> Result[u32, Error]
-pub fn write(f: Fields, w: View[ExtWriter], mut out: Bytes) -> Result[u64, WriteError]
+pub fn payload(h: header.Header, pkt: Bytes) -> Result[(u64, u64), Error]
+pub fn csrc(h: header.Header, pkt: Bytes, i: u8) -> Result[u32, Error]
+pub fn write(f: Fields, w: View[ext.ExtWriter], mut out: Bytes) -> Result[u64, WriteError]
 ```
 
 `header.parse(pkt)` reads the fixed header of [RFC 3550 §5.1](https://www.rfc-editor.org/rfc/rfc3550#section-5.1)
@@ -170,7 +170,7 @@ extension values written.
 
 ## RTP-2: Extended sequence numbers
 
-```hirsel unbuilt
+```hirsel core
 // module seq
 pub type Index = Index(u64) | Before | Beyond
 pub fn nearest(highest: i64, wire: u64, bits: u8) -> i64
@@ -251,18 +251,18 @@ pub opaque type Found
 pub fn map(form: Form) -> ExtMap
 pub fn bind(mut m: ExtMap, id: u8, k: Kind) -> Result[(), MapError]
 pub fn vad(mut m: ExtMap, on: bool)
-pub fn next(pkt: Bytes, h: Header, mut at: u64) -> Result[Option[Element], Error]
-pub fn scan(m: ExtMap, pkt: Bytes, h: Header) -> Result[Found, Error]
+pub fn next(pkt: Bytes, h: header.Header, mut at: u64) -> Result[Option[Element], Error]
+pub fn scan(m: ExtMap, pkt: Bytes, h: header.Header) -> Result[Found, Error]
 pub fn found(f: Found, k: Kind) -> Option[Element]
-pub fn find(m: ExtMap, pkt: Bytes, h: Header, k: Kind) -> Result[Option[Element], Error]
-pub fn audio_level(m: ExtMap, pkt: Bytes, h: Header, e: Element) -> Result[(Option[bool], u8), Error]
-pub fn abs_send_time(pkt: Bytes, h: Header, e: Element) -> Result[u32, Error]
-pub fn transport_seq(pkt: Bytes, h: Header, e: Element) -> Result[u16, Error]
-pub fn token(pkt: Bytes, h: Header, k: Kind, e: Element) -> Result[Element, Error]
-pub fn orientation(pkt: Bytes, h: Header, e: Element) -> Result[u8, Error]
-pub fn playout_delay(pkt: Bytes, h: Header, e: Element) -> Result[(u16, u16), Error]
-pub fn abs_capture_time(pkt: Bytes, h: Header, e: Element) -> Result[(u64, Option[i64]), Error]
-pub fn allocation(pkt: Bytes, h: Header, e: Element) -> Result[Allocation, Error]
+pub fn find(m: ExtMap, pkt: Bytes, h: header.Header, k: Kind) -> Result[Option[Element], Error]
+pub fn audio_level(m: ExtMap, pkt: Bytes, h: header.Header, e: Element) -> Result[(Option[bool], u8), Error]
+pub fn abs_send_time(pkt: Bytes, h: header.Header, e: Element) -> Result[u32, Error]
+pub fn transport_seq(pkt: Bytes, h: header.Header, e: Element) -> Result[u16, Error]
+pub fn token(pkt: Bytes, h: header.Header, k: Kind, e: Element) -> Result[Element, Error]
+pub fn orientation(pkt: Bytes, h: header.Header, e: Element) -> Result[u8, Error]
+pub fn playout_delay(pkt: Bytes, h: header.Header, e: Element) -> Result[(u16, u16), Error]
+pub fn abs_capture_time(pkt: Bytes, h: header.Header, e: Element) -> Result[(u64, Option[i64]), Error]
+pub fn allocation(pkt: Bytes, h: header.Header, e: Element) -> Result[Allocation, Error]
 pub fn empty_allocation() -> Allocation
 pub fn last_stream(a: Allocation) -> Option[u64]
 pub fn stream_kbps(a: Allocation, s: u64) -> Option[u32]
@@ -391,7 +391,7 @@ element a receiver of that negotiation would misread.
 
 ## RTP-4: RTCP compound packets
 
-```hirsel unbuilt
+```hirsel core
 // module rtcp
 pub type Mode = Compound | Reduced
 pub type Error = Version | Length | Padding | NotCompound | Body(u8) | Buffer | Index
@@ -412,7 +412,7 @@ pub fn fir_next(pkt: Bytes, p: Packet, mut at: u64) -> Result[Option[(u32, u8)],
 
 pub fn write_sr(info: SenderInfo, blocks: View[List[Block]], mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_rr(ssrc: u32, blocks: View[List[Block]], mut out: Bytes) -> Result[u64, WriteError]
-pub fn write_cname(ssrc: u32, cname: Bytes, mut out: Bytes) -> Result[u64, WriteError]
+pub fn write_cname(ssrc: u32, name: Bytes, mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_bye(ssrc: u32, mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_nack(sender: u32, media: u32, pairs: View[List[(u16, u16)]], mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_pli(sender: u32, media: u32, mut out: Bytes) -> Result[u64, WriteError]
@@ -516,8 +516,8 @@ pub opaque type Sent
 
 pub fn received(clock: u32, first: u64, first_ts: i64, at_ns: u64) -> Received
 pub fn on_packet(mut r: Received, index: u64, ts: i64, at_ns: u64) -> Seen
-pub fn on_sr(mut r: Received, info: SenderInfo, at_ns: u64)
-pub fn report(mut r: Received, ssrc: u32, now_ns: u64) -> Block
+pub fn on_sr(mut r: Received, info: rtcp.SenderInfo, at_ns: u64)
+pub fn report(mut r: Received, ssrc: u32, now_ns: u64) -> rtcp.Block
 pub fn rtt(b: Block, ntp_now: u64) -> Option[u64]
 
 pub fn sent(clock: u32) -> Sent
@@ -586,7 +586,7 @@ the bit, across reordering, duplicates, restarts and wraps. The round-trip time 
 
 ## RTP-6: Loss tracking, NACK and keyframe requests
 
-```hirsel unbuilt
+```hirsel core
 // module loss
 pub type NackConfig = NackConfig(window: u32, retry_ns: u64, tries: u8, max_age_ns: u64)
 pub type Gap = Tracked | Reset
@@ -683,7 +683,7 @@ pub fn clear[P](mut h: History[P]) -> u64
 
 // module rtx
 pub type Rtx = Repair(u16, u64) | Probe
-pub fn unwrap(h: Header, pkt: Bytes) -> Result[Rtx, header.Error]
+pub fn unwrap(h: header.Header, pkt: Bytes) -> Result[Rtx, header.Error]
 pub fn write(f: Fields, w: View[ExtWriter], osn: u16, pre: Bytes, payload: Bytes, from: u64, len: u64, mut out: Bytes) -> Result[u64, WriteError]
 pub fn write_probe(f: Fields, w: View[ExtWriter], pad: u8, mut out: Bytes) -> Result[u64, WriteError]
 ```
@@ -789,8 +789,8 @@ pub opaque type RecvLog
 
 pub fn send_log(slots: u32) -> Result[SendLog, Capacity]
 pub fn assign(mut s: SendLog, sent_ns: u64, size: u32) -> u16
-pub fn parse(pkt: Bytes, p: Packet) -> Result[u32, Error]
-pub fn on_feedback(mut s: SendLog, pkt: Bytes, p: Packet, max: u32, mut out: List[Acked]) -> Result[u64, Error]
+pub fn parse(pkt: Bytes, p: rtcp.Packet) -> Result[u32, Error]
+pub fn on_feedback(mut s: SendLog, pkt: Bytes, p: rtcp.Packet, max: u32, mut out: List[Acked]) -> Result[u64, Error]
 
 pub fn recv_log(slots: u32) -> Result[RecvLog, Capacity]
 pub fn on_packet(mut r: RecvLog, seq: u16, at_ns: u64)
@@ -893,7 +893,7 @@ pub type Config = Config(start_bps: u64, min_bps: u64, max_bps: u64)
 pub opaque type Bwe
 
 pub fn bwe(c: Config) -> Bwe
-pub fn on_acked(mut b: Bwe, acked: View[List[Acked]], now_ns: u64, rtt_ns: Option[u64])
+pub fn on_acked(mut b: Bwe, acked: View[List[twcc.Acked]], now_ns: u64, rtt_ns: Option[u64])
 pub fn target(b: Bwe) -> u64
 pub type Cluster = Cluster(id: u32, rate_bps: u64, packets: u32, min_ns: u64)
 pub fn probe(mut b: Bwe, want_bps: u64, now_ns: u64) -> Option[Cluster]
@@ -1134,7 +1134,7 @@ pub opaque type Pacer[Q]
 
 pub fn pacer[Q](slots: u32, factor: f64, queue_limit_ns: u64, header: u32) -> Result[Pacer[Q], Capacity]
 pub fn set_rate[Q](mut p: Pacer[Q], target_bps: u64, padding_bps: u64)
-pub fn probe[Q](mut p: Pacer[Q], c: Cluster, now_ns: u64)
+pub fn probe[Q](mut p: Pacer[Q], c: bwe.Cluster, now_ns: u64)
 pub fn cluster[Q](p: Pacer[Q]) -> Option[u32]
 pub fn push[Q](mut p: Pacer[Q], stream: u32, class: Class, size: u32, now_ns: u64, take q: Q) -> Result[(), Q]
 pub fn poll[Q](mut p: Pacer[Q], now_ns: u64) -> Next[Q]
@@ -1214,7 +1214,7 @@ pub opaque type Rewrite
 pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u32) -> Result[Rewrite, Capacity]
 pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError]
 pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, padding_only: bool, u: Unit) -> Out
-pub fn on_sr(mut r: Rewrite, source: u32, info: SenderInfo, at_ns: u64)
+pub fn on_sr(mut r: Rewrite, source: u32, info: rtcp.SenderInfo, at_ns: u64)
 pub fn sr_timestamp(mut r: Rewrite, now_ns: u64) -> Option[u32]
 pub fn switch_index(r: Rewrite) -> Option[u64]
 pub fn pending(r: Rewrite) -> Option[u32]
@@ -1526,7 +1526,7 @@ ratio is quoted.
 
 ## RTP-13: Redundant audio (RED)
 
-```hirsel unbuilt
+```hirsel core
 // module red
 pub type Error: key = Short | Overrun
 pub type Block { pt: u8, offset: u16, at: u64, len: u64 }

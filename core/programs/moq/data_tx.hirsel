@@ -462,9 +462,15 @@ pub fn finish_subgroup(mut s: Session, mut io: Io, now: u64, track: codec.TrackN
 /// MOQ-8 revocation fence helper: reset every open outbound subgroup stream of `track` with
 /// `reliable = header_len` and drop every queued datagram of `track` before `end_track`.
 pub fn fence_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64) {
+    let _ = fence_track_counts(mut s, mut io, track, code)
+}
+
+/// MOQ-8 revocation fence helper returning `(reset_streams, dropped_datagrams)`.
+pub fn fence_track_counts(mut s: Session, mut io: Io, track: codec.TrackName, code: u64) -> (u64, u64) {
     if s.phase == Ended {
-        return
+        return (0, 0)
     }
+    let mut reset_streams = 0u64
     let mut i = 0u64
     while i < list.len(s.tx_subgroups) {
         if s.tx_subgroups[i].track == track {
@@ -473,14 +479,17 @@ pub fn fence_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64
             tx_reset(s.transport, mut io, st, code, rel)
             drop_outgoing(mut s, st)
             let _ = list.remove(mut s.tx_subgroups, i)
+            reset_streams += 1
         } else {
             i += 1
         }
     }
+    let mut dropped_dgs = 0u64
     if let Some(pt) = pub_track_at(s, clone(track)) {
-        let _ = tx_drop_datagrams(s.transport, mut io, s.pub_tracks[pt].tag)
+        dropped_dgs = tx_drop_datagrams(s.transport, mut io, s.pub_tracks[pt].tag)
     }
     end_track(mut s, mut io, track, code)
+    (reset_streams, dropped_dgs)
 }
 
 /// Send a FETCH response stream (FETCH_HEADER + entries) for an accepted FETCH request (MOQ-6).

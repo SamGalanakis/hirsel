@@ -392,7 +392,7 @@ Red first in `core/programs/moq/laws.hirsel` unless named.
   frees the relay's per-subscription state; when the last subscriber of a track leaves,
   the upstream request ends. *Oracle:* moqt-23 §6.4.2 and the seam's table counts.
 - **M12 `bridge_ends_on_revoke`** (in
-  `core/programs/webrtc_sfu/pool_laws.hirsel` <!-- doc-ref: planned -->). Scoped to the bridge's send boundary (MOQ-8). Under
+  `core/programs/webrtc_sfu/pool_laws.hirsel`). Scoped to the bridge's send boundary (MOQ-8). Under
   `sim.udp` with 20 % loss, so retransmissions are pending, and with a polled but
   uncommitted batch at the moment of revocation: a revoked participant's MoQ tracks end
   with PUBLISH_DONE before the RTC-7 fence acknowledges, and after it no datagram leaves the

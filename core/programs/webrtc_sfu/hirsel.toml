@@ -14,6 +14,8 @@ turn = { major = 1, path = "../turn" }
 runner = { major = 1, path = "../runner" }
 store = { major = 1, path = "../store" }
 quic = { major = 1, path = "../quic" }
+moq = { major = 1, path = "../moq" }
+rtp_jitter = { major = 1, path = "../rtp_jitter" }
 
 [sources]
 "sdp.hirsel" = "sdp"
@@ -49,6 +51,7 @@ quic = { major = 1, path = "../quic" }
 "cascade/link.hirsel" = "cascade"
 "cascade/cost.hirsel" = "cascade"
 "cascade/forward.hirsel" = "cascade"
+"moq_bridge.hirsel" = "bridge"
 "cascade/repair.hirsel" = "cascade"
 "cascade/fence.hirsel" = "cascade"
 

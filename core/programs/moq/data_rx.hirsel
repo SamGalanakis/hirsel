@@ -58,7 +58,12 @@ fn attach_or_park_subgroup(mut s: Session, mut io: Io, stream: quic.StreamId, sh
         if let Some(take tr) = take tr_opt {
             let cap: u64 = order.max(list.len(buf) + 256u64, 2048u64)
             let mut full: Bytes = list.with_capacity(cap)
+            let init_past = list.len(buf)
             list.append(mut full, buf)
+            if init_past > 0 {
+                let gi = ensure_guard(mut s, clone(tr))
+                s.guards[gi].rx_past_header_bytes += init_past
+            }
             let sg_id = match sh.subgroup {
                 ZeroSubgroup => Some(0u64),
                 ExplicitSubgroup(v) => Some(v),
@@ -200,7 +205,14 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
                 Some(p) => order.max(p.length + 256u64, 65536u64),
                 None => 65536u64,
             }
+            let before_len = list.len(s.rx_subgroups[cur].buf)
             let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_subgroups[cur].buf, max_cap)
+            let added = list.len(s.rx_subgroups[cur].buf) - before_len
+            if added > 0 {
+                let tr_copy: codec.TrackName = clone(s.rx_subgroups[cur].track)
+                let gi = ensure_guard(mut s, take tr_copy)
+                s.guards[gi].rx_past_header_bytes += added
+            }
             if fin {
                 s.rx_subgroups[cur].fin = true
             }
@@ -464,8 +476,18 @@ fn on_datagram(mut s: Session, mut io: Io, data: Bytes, mut out: List[Event]) {
     }
     let mut payload: Bytes = list.with_capacity(end - at)
     list.append(mut payload, list.slice(data, at, end))
+    let gi = ensure_guard(mut s, clone(tr))
+    s.guards[gi].rx_past_header_bytes += end
     let obj = Object(track: take tr, group: dg_group, subgroup: 0, id: dg_obj, mode: Datagram, publisher_priority: prio, status: status, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
     deliver_object(mut s, mut io, take obj, props_kvs, dg_eog, mut out)
+}
+
+/// Total object/datagram bytes received past stream headers for `track` (MOQ-8 / M12).
+pub fn track_rx_bytes_past_header(s: Session, track: codec.TrackName) -> u64 {
+    match guard_index(s, track) {
+        Some(gi) => s.guards[gi].rx_past_header_bytes,
+        None => 0,
+    }
 }
 
 // ---- Malformed track validation & deduplication (MOQ-3 / moqt-23 §12.1) ----
@@ -482,7 +504,7 @@ fn ensure_guard(mut s: Session, take track: codec.TrackName) -> u64 {
     if let Some(i) = guard_index(s, track) {
         return i
     }
-    list.push(mut s.guards, TrackGuard(track: take track, malformed: false, track_end: None, group_ends: list.new(), subgroups: list.new(), seen: list.new(), non_existent: list.new()))
+    list.push(mut s.guards, TrackGuard(track: take track, malformed: false, track_end: None, group_ends: list.new(), subgroups: list.new(), seen: list.new(), non_existent: list.new(), rx_past_header_bytes: 0))
     list.len(s.guards) - 1
 }
 

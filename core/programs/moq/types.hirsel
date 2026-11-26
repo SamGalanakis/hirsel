@@ -355,7 +355,8 @@ type TrackGuard {
     group_ends: List[(u64, u64)],
     subgroups: List[SubgroupMeta],
     seen: List[SeenObj],
-    non_existent: List[(codec.Location, codec.Location)]
+    non_existent: List[(codec.Location, codec.Location)],
+    rx_past_header_bytes: u64
 }
 
 /// Track-level publisher metadata (largest object, datagram tag, delivery timeouts).

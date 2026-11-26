@@ -268,3 +268,530 @@ fn pool_revoke_waits_for_no_other_room() -> Result[(), router.RouterError] {
     }
     Ok(())
 }
+
+// ---- MOQ-8 SFU bridge revocation fence over sim.udp with 20% loss (M12) ----
+const M12_U0: Addr = Addr(ip: V4(0xc0000201), port: 6100)
+
+const M12_U1: Addr = Addr(ip: V4(0xc0000201), port: 6101)
+
+const M12_U2: Addr = Addr(ip: V4(0xc0000201), port: 6102)
+
+const M12_BRIDGE_ADDR: Addr = Addr(ip: V4(0xc0000201), port: 6103)
+
+const M12_SUB_ADDR: Addr = Addr(ip: V4(0xc0000201), port: 6104)
+
+fn m12_cert() -> Bytes {
+    option.unwrap(std.hex.decode(b"308201043081aba003020102020101300a06082a8648ce3d040302300c310a300806035504030c0171301e170d3236313132363030303030305a170d3236313132373030303030305a300c310a300806035504030c01713059301306072a8648ce3d020106082a8648ce3d030107034200045ecbe4d1a6330a44c8f7ef951d4bf165e6c6b721efada985fb41661bc6e7fd6c8734640c4998ff7e374b06ce1a64a2ecd82ab036384fb83d9a79b127a27d5032300a06082a8648ce3d040302034800304502203ae1fbb72d234a6ce188c8693380ed8526f5b7fc48e3a19f12b3eefc486199a50221009a76d6d74202fdfd262bc39acea04d8d6a9924558f8e0672fbdf1e7bcfc0a537"))
+}
+
+fn m12_digest() -> Inline[u8, 32] {
+    [22, 152, 95, 217, 108, 32, 99, 25, 28, 177, 201, 36, 198, 124, 23, 187, 129, 43, 78, 68, 81, 35, 158, 172, 159, 56, 49, 60, 242, 53, 214, 166]
+}
+
+fn m12_pins() -> List[quic.handshake.Pin] {
+    let mut ps: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut ps, Cert(m12_digest()))
+    take ps
+}
+
+fn m12_identity() -> quic.handshake.Identity {
+    let mut scalar: Bytes = list.with_capacity(32)
+    for _ in 0u64 .. 31 {
+        list.push(mut scalar, 0)
+    }
+    list.push(mut scalar, 3)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(provide.random_tape(take scalar), "sign(p256)", mut point))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, m12_cert())
+    Identity(chain: take chain, key: take key, alg: P256)
+}
+
+fn m12_ep_cfg() -> quic.EndpointConfig {
+    let reset = result.unwrap(secret.seal(b"M12 bridge reset", "mac"))
+    let token = result.unwrap(secret.seal(b"M12 bridge token", "kdf"))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: 8, unvalidated: 8, datagram_bytes: 262144))
+}
+
+fn m12_moq_limits() -> moq.Limits {
+    moq.Limits(requests: 32, tracks: 16, control_bytes: 65536, filter_ranges: 8, max_early_streams: 16, max_timeout_ms: 0)
+}
+
+fn m12_vp8_frame(mark: u8, seq: u16, key: bool, body_len: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(body_len + 16)
+    if key {
+        list.append(mut b, vp8_key())
+    } else {
+        // VP8 descriptor S=1 partition 0, P=1 (interframe) tag.
+        list.append(mut b, b"\x10\x11\x02\x00")
+    }
+    for k in 0u64 .. body_len {
+        let v: u8 = int.truncate((k + int.widen(seq)) & 0xff)
+        list.push(mut b, v ^ mark)
+    }
+    list.push(mut b, mark)
+    list.push(mut b, int.truncate(seq >> 8))
+    list.push(mut b, int.truncate(seq))
+    list.push(mut b, mark)
+    take b
+}
+
+type M12Rig {
+    u0: units.Unit,
+    u1: units.Unit,
+    u2: units.Unit,
+    s0: UdpSocket,
+    s1: UdpSocket,
+    s2: UdpSocket,
+    b: bridge.Bridge,
+    b_ctrl: Inbox[units.ControlMessage],
+    b_media: Inbox[router.Carried],
+    doors: List[units.Doors],
+    s_bridge: UdpSocket,
+    sub_io: moq.Io,
+    sub_sess: moq.Session,
+    sub_events: List[moq.Event],
+    s_sub: UdpSocket,
+    clock: Clock,
+    net: Net,
+    px: Peer,
+    py: Peer,
+    bridge_sent_pre: u64,
+    bridge_sent_post: u64,
+    sub_recv_pre: u64,
+    sub_recv_post: u64,
+    post_revoke: bool
+}
+
+fn m12_send_udp(mut sock: UdpSocket, clock: Clock, to: Addr, data: Bytes) waits {
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to: to, at: 0, len: list.len(data), ecn: 0))
+    let now = host.mono_ns(clock)
+    let _ = host.udp_send(mut sock, data, tx, At(clock, now + 50 * MS))
+}
+
+fn m12_step_units(mut r: M12Rig) waits {
+    let now = host.mono_ns(r.clock) + 1
+    let _ = result.unwrap(units.turn(mut r.u1, r.clock, mut r.s1, now))
+    let _ = result.unwrap(units.turn(mut r.u2, r.clock, mut r.s2, now))
+    let _ = result.unwrap(units.turn(mut r.u0, r.clock, mut r.s0, now))
+}
+
+fn m12_step_bridge(mut r: M12Rig, hold_staged: bool) waits {
+    let now = host.mono_ns(r.clock)
+    // 1. Drain control inbox and post Acks back to unit 0 (MOQ-8 fence runs before Ack).
+    while let Ok(take cm) = conn.try_receive(r.b_ctrl) {
+        let units.ControlMessage(step: take step, opus_fmtp: _) = take cm
+        if let Some(take ack) = bridge.control(mut r.b, now, take step) {
+            let _ = conn.try_send(r.doors[0].control, units.ControlMessage(step: take ack, opus_fmtp: None))
+        }
+    }
+    // 2. Drain media inbox from publisher home units.
+    while let Ok(take msg) = conn.try_receive(r.b_media) {
+        bridge.carried(mut r.b, now, take msg)
+    }
+    for take post in bridge.take_posts(mut r.b) {
+        let router.Post(to: to, carried: take c) = take post
+        let idx: u64 = int.widen(to)
+        if idx < list.len(r.doors) {
+            let _ = conn.try_send(r.doors[idx].media, take c)
+        }
+    }
+    // 3. Receive UDP datagrams on bridge's QUIC socket.
+    let mut rx: Bytes = list.with_capacity(65536)
+    let mut batch: List[UdpPacket] = list.with_capacity(64)
+    if let Ok(got) = host.udp_recv(mut r.s_bridge, mut rx, mut batch, At(r.clock, now + 1)) {
+        for i in 0u64 .. got {
+            let UdpPacket(peer: from, at: at, len: len, truncated: tr, ecn: ecn) = batch[i]
+            if tr {
+                continue
+            }
+            let mut pkt: Bytes = list.with_capacity(len)
+            list.append(mut pkt, list.slice(rx, at, at + len))
+            let qev = bridge.receive_quic(mut r.b, now, from, ecn, mut pkt, 0, len)
+            for ev in qev {
+                if let Connected(c: c, ..) = ev {
+                    let _ = bridge.accept_moq_peer(mut r.b, now, c, m12_moq_limits(), qev)
+                    break
+                }
+            }
+        }
+    }
+    let _ = bridge.accept_pending(mut r.b, moq.default_scope(b"sfu.bridge", b"/room"))
+    bridge.poll_jitter(mut r.b, now)
+    // 4. Stage and (unless holding a polled-but-uncommitted batch) commit & send QUIC datagrams.
+    let _ = bridge.stage_tx(mut r.b, now)
+    if !hold_staged {
+        let mut wire: Bytes = list.with_capacity(64 * 1200)
+        let mut pkts: List[(Addr, u64, u64)] = list.with_capacity(64)
+        let sent = bridge.commit_tx(mut r.b, now, 0, mut wire, mut pkts)
+        for p in pkts {
+            let (to, at, len) = p
+            let mut dg: Bytes = list.with_capacity(len)
+            list.append(mut dg, list.slice(wire, at, at + len))
+            m12_send_udp(mut r.s_bridge, r.clock, to, take dg)
+            if r.post_revoke {
+                r.bridge_sent_post += 1
+            } else {
+                r.bridge_sent_pre += 1
+            }
+        }
+        let _ = sent
+    }
+}
+
+fn m12_step_sub(mut r: M12Rig) waits {
+    let now = host.mono_ns(r.clock)
+    let mut rx: Bytes = list.with_capacity(65536)
+    let mut batch: List[UdpPacket] = list.with_capacity(64)
+    if let Ok(got) = host.udp_recv(mut r.s_sub, mut rx, mut batch, At(r.clock, now + 1)) {
+        for i in 0u64 .. got {
+            let UdpPacket(peer: from, at: at, len: len, truncated: tr, ecn: ecn) = batch[i]
+            if tr {
+                continue
+            }
+            if r.post_revoke {
+                r.sub_recv_post += 1
+            } else {
+                r.sub_recv_pre += 1
+            }
+            let mut pkt: Bytes = list.with_capacity(len)
+            list.append(mut pkt, list.slice(rx, at, at + len))
+            let mut qev: List[quic.Event] = list.new()
+            quic.receive_datagram(mut r.sub_io.q, now, from, ecn, mut pkt, 0, len, mut qev)
+            let mut tevs: List[moq.TransportEvent] = list.new()
+            for ev in qev {
+                list.push(mut tevs, Quic(clone(ev)))
+            }
+            moq.receive(mut r.sub_sess, mut r.sub_io, now, tevs, mut r.sub_events)
+        }
+    }
+    let _ = moq.poll(mut r.sub_sess, mut r.sub_io, now)
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut out: List[quic.Output] = list.with_capacity(65)
+    let _ = quic.poll(mut r.sub_io.q, now, mut wire, mut out)
+    let mut sent = 0u64
+    for o in out {
+        if let Transmit(to: to, at: at, len: len, ..) = o {
+            let mut dg: Bytes = list.with_capacity(len)
+            list.append(mut dg, list.slice(wire, at, at + len))
+            m12_send_udp(mut r.s_sub, r.clock, to, take dg)
+            sent += 1
+        }
+    }
+    if sent > 0 {
+        quic.committed(mut r.sub_io.q, now, sent)
+    }
+}
+
+fn m12_tick(mut r: M12Rig, hold_staged: bool) waits {
+    m12_step_units(mut r)
+    m12_step_bridge(mut r, hold_staged)
+    m12_step_sub(mut r)
+    let now = host.mono_ns(r.clock)
+    host.sleep_until(r.clock, now + 5 * MS)
+}
+
+fn m12_call(mut r: M12Rig, take c: router.Change, hold_staged: bool) -> router.Answer waits {
+    let now = host.mono_ns(r.clock)
+    let room = router.change_room(c)
+    result.unwrap(units.begin(mut r.u0, now, take c))
+    for _ in 0u64 .. 32 {
+        m12_tick(mut r, hold_staged)
+        if let Some(a) = units.finished(mut r.u0, room) {
+            return result.unwrap(a)
+        }
+    }
+    fail("M12: SFU control call did not settle across 4 units (including bridge)")
+}
+
+fn m12_speak_x(mut r: M12Rig, key: bool, body_len: u64) waits {
+    let seq = r.px.seq
+    r.px.seq = int.wrapping_add(seq, 1u16)
+    let body = m12_vp8_frame(MARK_X, seq, key, body_len)
+    let wide: u32 = int.widen(seq)
+    let pkt = media_carrying(mut r.px.c.cs, r.px.ssrc, seq, 3000 * wide, b"a", 96, body)
+    m12_send_udp(mut r.px.sock, r.clock, r.px.home, pkt)
+}
+
+fn m12_speak_y(mut r: M12Rig, key: bool, body_len: u64) waits {
+    let seq = r.py.seq
+    r.py.seq = int.wrapping_add(seq, 1u16)
+    let body = m12_vp8_frame(MARK_Y, seq, key, body_len)
+    let wide: u32 = int.widen(seq)
+    let pkt = media_carrying(mut r.py.c.cs, r.py.ssrc, seq, 3000 * wide, b"a", 96, body)
+    m12_send_udp(mut r.py.sock, r.clock, r.py.home, pkt)
+}
+
+/// bug: on RTC-7 revoke, the MOQ-8 SFU bridge leaves a revoked participant's MoQ track open,
+/// retransmits lost subgroup stream bytes or sends queued datagrams or a polled-but-uncommitted
+/// batch past a stream header after the revoke acknowledges, keeps reassembly buffers allocated,
+/// or disrupts unrelated participants' bridged MoQ tracks.
+/// oracle: MOQ-8 and M12 (docs/spec/moq.md) over sim.udp with 20% packet loss and a polled
+/// uncommitted batch at revocation: PUBLISH_DONE ends X's track before the fence acks, zero bytes
+/// of X's objects past a stream header leave the bridge's socket after the fence acks (neither
+/// first send, nor retransmission, nor queued datagram), X's reassembly buffers are freed, and Y
+/// continues streaming cleanly to the MoQ subscriber.
+@test
+fn bridge_ends_on_revoke(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    // 0. Verify MOQ-8 budgeted reassembly pricing & ledger reservation in RoomCost.bridge.
+    let lim_room = revoke_limits()
+    let sess_lim = peer.PeerLimits(sections: 4, down_tracks: 8, rtx_bytes: 65536, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
+    let cost_b = signal.room_cost_bridge(lim_room, sess_lim, 4096)
+    if cost_b.bridge == 0 {
+        fail("M12: room_cost_bridge returned zero bridge reassembly cost")
+    }
+    let mut free_units: List[u64] = list.new()
+    list.push(mut free_units, 16777216)
+    let mut ledger = signal.ledger(take free_units, 16, sess_lim)
+    let before_free = signal.ledger_free(ledger, 0)
+    result.unwrap(signal.reserve_bridge(mut ledger, room_id(), cost_b.bridge))
+    if signal.ledger_free(ledger, 0) != before_free - cost_b.bridge {
+        fail("M12: reserve_bridge did not debit RoomCost.bridge")
+    }
+    signal.release_bridge(mut ledger, room_id())
+    if signal.ledger_free(ledger, 0) != before_free {
+        fail("M12: release_bridge did not refund RoomCost.bridge")
+    }
+    // 1. Stand up sim.udp with 20% loss (200,000 ppm) and 1 ms delay.
+    let (net, clock, take served) = sim_net_with(tasks, 8812, 200000, MS)
+    let (take s0, b0) = result.unwrap(host.udp_bind(net, M12_U0, SOCK))
+    let (take s1, b1) = result.unwrap(host.udp_bind(net, M12_U1, SOCK))
+    let (take s2, b2) = result.unwrap(host.udp_bind(net, M12_U2, SOCK))
+    let (take s_bridge, b_addr) = result.unwrap(host.udp_bind(net, M12_BRIDGE_ADDR, SOCK))
+    let (take s_sub, _) = result.unwrap(host.udp_bind(net, M12_SUB_ADDR, SOCK))
+    // 4-unit pool: u0 control, u1 X's home, u2 Y's home, u3 virtual subscriber unit (MoQ bridge).
+    let (d0, take c0, take m0) = result.unwrap(units.inboxes(b0, 0, 4, TEST_PLANE))
+    let (d1, take c1, take m1) = result.unwrap(units.inboxes(b1, 1, 4, TEST_PLANE))
+    let (d2, take c2, take m2) = result.unwrap(units.inboxes(b2, 2, 4, TEST_PLANE))
+    let (d3, take c3, take m3) = result.unwrap(units.inboxes(b_addr, 3, 4, TEST_PLANE))
+    let mut doors: List[units.Doors] = list.new()
+    list.push(mut doors, take d0)
+    list.push(mut doors, take d1)
+    list.push(mut doors, take d2)
+    list.push(mut doors, take d3)
+    let u0 = result.unwrap(units.unit(provide.random(8800), 0, doors, take c0, take m0, 65536, 64, TEST_PLANE))
+    let mut u1 = result.unwrap(units.unit(provide.random(8801), 1, doors, take c1, take m1, 65536, 64, TEST_PLANE))
+    let mut u2 = result.unwrap(units.unit(provide.random(8802), 2, doors, take c2, take m2, 65536, 64, TEST_PLANE))
+    let mlim = m12_moq_limits()
+    let b_cfg = bridge.BridgeConfig(unit: 3, window: 128, max_wait_us: 15000, max_frame_bytes: 750, mode: StreamsAndDatagrams)
+    let b_quic = result.unwrap(quic.endpoint(provide.random(8803), m12_ep_cfg(), Some((m12_identity(), moq.transport_config(mlim)))))
+    let br = result.unwrap(bridge.bridge(provide.random(8804), b_cfg, take b_quic))
+    let mut sub_q = result.unwrap(quic.endpoint(provide.random(8805), m12_ep_cfg(), None))
+    let sub_conn = result.unwrap(quic.connect(mut sub_q, host.mono_ns(clock), b_addr, "server", m12_pins(), None, moq.transport_config(mlim)))
+    let sub_sess = moq.session(Client, Subscriber, Native(c: sub_conn), mlim)
+    // Two WebRTC publishers: X on unit 1, Y on unit 2.
+    let room = room_id()
+    let x = gen_of(1)
+    let y = gen_of(2)
+    let seat_bridge = gen_of(3)
+    let one_pub = unit_offer(1, b"96", b"97", b"1", b"3")
+    let (take sx, ax) = result.unwrap(host.udp_bind(net, addr_of(1), SOCK))
+    let Rig(p: take px_s, c: _, cs: take csx, out: _) = established_as(8810, one_pub, peer.Participant(gen: x, room: room), ax, 64, b"ufragbx")
+    result.unwrap(units.park(mut u1, take px_s))
+    let (take sy, ay) = result.unwrap(host.udp_bind(net, addr_of(2), SOCK))
+    let Rig(p: take py_s, c: _, cs: take csy, out: _) = established_as(8820, one_pub, peer.Participant(gen: y, room: room), ay, 64, b"ufragby")
+    result.unwrap(units.park(mut u2, take py_s))
+    let mut r = M12Rig(
+        u0: take u0,
+        u1: take u1,
+        u2: take u2,
+        s0: take s0,
+        s1: take s1,
+        s2: take s2,
+        b: take br,
+        b_ctrl: take c3,
+        b_media: take m3,
+        doors: take doors,
+        s_bridge: take s_bridge,
+        sub_io: moq.Io(q: take sub_q, w: None),
+        sub_sess: take sub_sess,
+        sub_events: list.new(),
+        s_sub: take s_sub,
+        clock: clock,
+        net: net,
+        px: Peer(c: Client(who: x, at: ax, cs: take csx), sock: take sx, home: b1, ssrc: 0x51000001, seq: 1000, mark: MARK_X),
+        py: Peer(c: Client(who: y, at: ay, cs: take csy), sock: take sy, home: b2, ssrc: 0x51000002, seq: 2000, mark: MARK_Y),
+        bridge_sent_pre: 0,
+        bridge_sent_post: 0,
+        sub_recv_pre: 0,
+        sub_recv_post: 0,
+        post_revoke: false,
+    )
+    // 2. Open room, admit X (u1), Y (u2), and the virtual bridge seat (u3); publish X & Y and subscribe bridge.
+    let _ = m12_call(mut r, Open(room: room, limits: lim_room), false)
+    let _ = m12_call(mut r, Admit(who: peer.Participant(gen: x, room: room), home: 1), false)
+    let _ = m12_call(mut r, Admit(who: peer.Participant(gen: y, room: room), home: 2), false)
+    let _ = m12_call(mut r, Admit(who: peer.Participant(gen: seat_bridge, room: room), home: 3), false)
+    let px_pub = published(m12_call(mut r, Publish(room: room, who: x, section: 0, id: PublicationId(0), shape: None), false))
+    let py_pub = published(m12_call(mut r, Publish(room: room, who: y, section: 0, id: PublicationId(0), shape: None), false))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    let _ = m12_call(mut r, Subscribe(room: room, who: seat_bridge, p: px_pub, section: 0, target: base), false)
+    let _ = m12_call(mut r, Subscribe(room: room, who: seat_bridge, p: py_pub, section: 1, target: base), false)
+    // Wait for MoQ QUIC handshake + SETUP to establish over 20%-loss sim.udp.
+    let mut moq_up = false
+    for _ in 0u64 .. 240 {
+        m12_tick(mut r, false)
+        if moq.is_established(r.sub_sess) {
+            moq_up = true
+            break
+        }
+    }
+    if !moq_up {
+        fail("M12: MoQ subscriber did not establish session with bridge under 20% loss")
+    }
+    // Subscribe to X's and Y's MOQ-8 tracks: ((room, participant_id), video/0).
+    let tr_x = bridge.track_name(room, x, Vp8, 0)
+    let tr_y = bridge.track_name(room, y, Vp8, 0)
+    let sub_x_id = result.unwrap(moq.subscribe(mut r.sub_sess, mut r.sub_io, host.mono_ns(r.clock), clone(tr_x), NoFilter, 10, None))
+    let _ = result.unwrap(moq.subscribe(mut r.sub_sess, mut r.sub_io, host.mono_ns(r.clock), clone(tr_y), NoFilter, 10, None))
+    for _ in 0u64 .. 24 {
+        m12_tick(mut r, false)
+    }
+    // Verify reassembly buffers are live for X and Y before revoke.
+    if bridge.track_reassembly_bytes(r.b, x) == 0 || bridge.track_reassembly_bytes(r.b, y) == 0 {
+        fail("M12: bridge did not allocate reassembly buffers for X and Y")
+    }
+    // 3. Stream keyframes & interframes from X and Y (including one oversized frame for X).
+    m12_speak_x(mut r, true, 600)
+    m12_speak_y(mut r, true, 600)
+    for k in 0u64 .. 16 {
+        m12_tick(mut r, false)
+        if k % 2 == 0 {
+            m12_speak_x(mut r, k == 8, 600)
+            m12_speak_y(mut r, k == 8, 600)
+        }
+    }
+    // Send oversized VP8 frames (> max_frame_bytes = 750) for X until one reaches the bridge
+    // under 20% loss and verify it is dropped & counted, then follow with a valid keyframe.
+    for _ in 0u64 .. 20 {
+        if bridge.counts(r.b).oversized > 0 {
+            break
+        }
+        m12_speak_x(mut r, true, 850)
+        for _ in 0u64 .. 5 {
+            m12_tick(mut r, false)
+        }
+    }
+    if bridge.counts(r.b).oversized == 0 {
+        fail("M12: bridge did not drop and count oversized frame past max_frame_bytes")
+    }
+    m12_speak_x(mut r, true, 600)
+    for _ in 0u64 .. 6 {
+        m12_tick(mut r, false)
+    }
+    // Verify subscriber received objects of both X and Y before revocation.
+    let mut pre_x = 0u64
+    let mut pre_y = 0u64
+    for ev in r.sub_events {
+        if let Received(o) = ev {
+            if o.track == tr_x {
+                pre_x += 1
+            } else if o.track == tr_y {
+                pre_y += 1
+            }
+        }
+    }
+    if pre_x == 0 || pre_y == 0 {
+        fail("M12: subscriber did not receive pre-revoke media from both X and Y")
+    }
+    list.clear(mut r.sub_events)
+    // 4. Stage fresh frames of X (subgroup streams + datagrams) WITHOUT committing so a
+    // polled-but-uncommitted batch and queued datagrams sit in the bridge at revocation!
+    let mut staged_ok = false
+    for attempt in 0u64 .. 12 {
+        m12_speak_x(mut r, attempt == 0, 500)
+        m12_speak_x(mut r, false, 500)
+        m12_tick(mut r, true)
+        if bridge.staged_count(r.b) > 0 {
+            staged_ok = true
+            break
+        }
+    }
+    if !staged_ok {
+        fail("M12: harness failed to create a polled-but-uncommitted batch before revocation")
+    }
+    if r.bridge_sent_pre <= r.sub_recv_pre {
+        fail("M12: 20% loss did not drop any pre-revoke bridge packet (no retransmissions pending)")
+    }
+    // 5. Execute RTC-7 Revoke(room, id: 1, epoch: 1) across all 4 units (including bridge u3).
+    // Keep hold_staged = true during Revoke so nothing drains until after the fence acknowledges!
+    let _ = m12_call(mut r, Revoke(room: room, id: 1, epoch: 1), true)
+    // Immediately at fence acknowledgement: X's reassembly buffers freed, uncommitted batch purged,
+    // streams reset, and queued datagrams dropped!
+    if bridge.track_reassembly_bytes(r.b, x) != 0 {
+        fail("M12: revoked participant X's reassembly buffer was not freed at revoke ack")
+    }
+    let fc = bridge.counts(r.b)
+    if fc.discarded_staged == 0 {
+        fail("M12: polled-but-uncommitted batch was not discarded by the bridge revocation fence")
+    }
+    if fc.fenced_tracks == 0 || fc.fenced_streams == 0 || fc.dropped_datagrams == 0 {
+        fail("M12: bridge fence did not reset open subgroup streams and drop queued datagrams")
+    }
+    // Let any pre-revoke in-flight sim.udp packets (1 ms delay) arrive and be consumed BEFORE
+    // starting the post-revoke socket boundary audit.
+    host.sleep_until(r.clock, host.mono_ns(r.clock) + 5 * MS)
+    m12_step_sub(mut r)
+    list.clear(mut r.sub_events)
+    let x_bytes_at_fence = moq.track_rx_bytes_past_header(r.sub_sess, clone(tr_x))
+    r.post_revoke = true
+    // 6. Post-revoke phase: run 60 ticks (300 ms) under 20% loss so QUIC retransmissions/PTO
+    // fire, PUBLISH_DONE arrives, X keeps sending (must be dropped), and Y keeps streaming!
+    for t in 0u64 .. 60 {
+        if t % 3 == 0 {
+            m12_speak_x(mut r, t % 9 == 0, 500)
+            m12_speak_y(mut r, t % 9 == 0, 500)
+        }
+        m12_tick(mut r, false)
+    }
+    // Verify ZERO bytes of X's objects past a stream header (neither first send, retransmission,
+    // nor datagram) arrived from ANY datagram leaving the bridge's socket after the fence!
+    let x_bytes_after = moq.track_rx_bytes_past_header(r.sub_sess, clone(tr_x))
+    if x_bytes_after != x_bytes_at_fence {
+        fail("M12: a post-revoke datagram from the bridge carried revoked participant X's object bytes past a stream header")
+    }
+    let mut got_publish_done = false
+    let mut post_x_objs = 0u64
+    let mut post_y_objs = 0u64
+    for ev in r.sub_events {
+        match ev {
+            Done(id: id, code: code) => {
+                if id == sub_x_id && code == moq.DONE_TRACK_ENDED {
+                    got_publish_done = true
+                }
+            },
+            Received(o) => {
+                if o.track == tr_x {
+                    post_x_objs += 1
+                } else if o.track == tr_y {
+                    post_y_objs += 1
+                }
+            },
+            _ => (),
+        }
+    }
+    if post_x_objs != 0 {
+        fail("M12: subscriber received an object of revoked participant X after the fence")
+    }
+    if !got_publish_done {
+        fail("M12: subscriber did not receive PUBLISH_DONE for revoked participant X's track")
+    }
+    if post_y_objs == 0 {
+        fail("M12: unrelated participant Y stopped delivering frames over MoQ after X's revoke")
+    }
+    if r.bridge_sent_post == 0 || r.sub_recv_post == 0 {
+        fail("M12: post-revoke phase carried no bridge datagrams")
+    }
+    // Clean up sockets so sim.udp server finishes cleanly.
+    let M12Rig(s0: take ds0, s1: take ds1, s2: take ds2, s_bridge: take dsb, s_sub: take dss, px: take dpx, py: take dpy, ..) = take r
+    drop(take ds0)
+    drop(take ds1)
+    drop(take ds2)
+    drop(take dsb)
+    drop(take dss)
+    drop(take dpx)
+    drop(take dpy)
+    result.unwrap(task.join(take served))
+    Ok(())
+}

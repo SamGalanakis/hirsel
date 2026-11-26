@@ -29,7 +29,7 @@ type Held {
     what: Hold
 }
 
-type Hold = Whole | Session(peer.Gen) | Remote(sub: peer.Gen, owner: peer.Gen, publication: u64) | Cascade(link: u64)
+type Hold = Whole | Session(peer.Gen) | Remote(sub: peer.Gen, owner: peer.Gen, publication: u64) | Cascade(link: u64) | Bridge
 
 /// The ledgers of a pool whose unit `k` has `free[k]` bytes once its fixed cost is
 /// paid, each unit homing at most `sessions` sessions of `session`'s size.
@@ -204,6 +204,7 @@ pub fn release_session(mut l: Ledger, room: peer.RoomId, g: peer.Gen) {
             Remote(sub: s, owner: o, publication: _) => s == g || o == g,
             Whole => false,
             Cascade(link: _) => false,
+            Bridge => false,
         }
         if mine {
             refund(mut l, i)
@@ -244,6 +245,32 @@ pub fn release_cascade(mut l: Ledger, room: peer.RoomId, link: u64) {
     while i < list.len(l.held) {
         let mine = l.held[i].room == room && match l.held[i].what {
             Cascade(link: k) => k == link,
+            _ => false,
+        }
+        if mine {
+            refund(mut l, i)
+        } else {
+            i += 1
+        }
+    }
+}
+
+/// Reserve a room's MOQ-8 bridge reassembly buffer budget on unit 0 (MOQ-8, RTC-10).
+pub fn reserve_bridge(mut l: Ledger, room: peer.RoomId, amount: u64) -> Result[(), PoolRefusal] {
+    let free = l.free[0]
+    if free < amount {
+        return Error(Bytes(unit: 0, need: amount, free: free))
+    }
+    hold(mut l, room, 0, amount, Bridge)
+    Ok(())
+}
+
+/// Refund a room's MOQ-8 bridge reservation on unit 0 (MOQ-8, RTC-10).
+pub fn release_bridge(mut l: Ledger, room: peer.RoomId) {
+    let mut i = 0u64
+    while i < list.len(l.held) {
+        let mine = l.held[i].room == room && match l.held[i].what {
+            Bridge => true,
             _ => false,
         }
         if mine {

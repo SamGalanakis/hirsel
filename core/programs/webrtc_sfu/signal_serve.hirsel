@@ -634,6 +634,13 @@ pub fn room_cost_cascade(limits: router.RoomLimits, session: peer.PeerLimits, li
     c
 }
 
+/// Price a room including its MOQ-8 bridge reassembly buffer budget (RTC-10, MOQ-8).
+pub fn room_cost_bridge(limits: router.RoomLimits, session: peer.PeerLimits, max_frame_bytes: u64) -> RoomCost {
+    let mut c = room_cost(limits, session)
+    c.bridge = bridge.bridge_room_cost(limits, max_frame_bytes)
+    c
+}
+
 /// Fixed grant a media unit needs before it opens any room.
 pub fn pool_unit_bytes(index: u16, limits: PoolLimits, session: peer.PeerLimits, queues: units.MediaQueues) -> u64 {
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)

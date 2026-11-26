@@ -1,1 +1,4 @@
-pub type Health: shareable + send = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error)
+pub type Health: shareable + send = Ok(u32) | Fenced(u64) | Undecided | Poisoned(IoError) | Remote(std.object.Error) | Latched(StreamLatch)
+
+// Why a Place's host stream latched (STORE-SPEC §12.11.10).
+pub type StreamLatch: shareable + cross = Superseded | Batch | Register | Unreachable

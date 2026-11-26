@@ -118,5 +118,6 @@ fn health_result(value: Health) -> Result[(), Error] {
         Undecided => Error(Undecided),
         Poisoned(problem) => Error(Poisoned(problem)),
         Remote(problem) => Error(Remote(clone(problem))),
+        Latched(cause) => Error(Latched(cause)),
     }
 }

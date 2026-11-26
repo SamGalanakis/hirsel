@@ -125,5 +125,6 @@ fn check_store_health(db: store.Db) -> Result[(), store.Error] {
         Undecided => Error(Undecided),
         Poisoned(problem) => Error(Poisoned(problem)),
         Remote(take problem) => Error(Remote(take problem)),
+        Latched(cause) => Error(Latched(cause)),
     }
 }

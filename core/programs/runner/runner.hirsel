@@ -784,15 +784,6 @@ fn capacity_room(c: Capacity) -> Room {
     Room(requested: c.requested, available: c.available)
 }
 
-fn store_capacity(cause: store.StoreCapacity) -> Capacity {
-    match cause {
-        Journal(c) => c,
-        Resident(c) => c,
-        Allocation(c) => c,
-        Cache(c) => c,
-    }
-}
-
 // RUNNER-SPEC §1.1's fixed Bad.kind table.
 fn bad(e: std.codec.DecodeError) -> Bad {
     match e {

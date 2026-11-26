@@ -41,6 +41,18 @@ fn push_store_error(mut line: String, problem: store.Error) {
             string.push(mut line, "the store's cache partition is full: ");
             push_capacity(mut line, cap)
         },
+        Full(Slots(cap)) => {
+            string.push(mut line, "every host stream slot is taken: ");
+            push_capacity(mut line, cap)
+        },
+        Full(Pins(cap)) => {
+            string.push(mut line, "the host stream's pins are full: ");
+            push_capacity(mut line, cap)
+        },
+        Full(Register(cap)) => {
+            string.push(mut line, "the host stream's register is full: ");
+            push_capacity(mut line, cap)
+        },
         Limit(_) => string.push(mut line, "a store limit was exceeded"),
         Schema(_) => string.push(mut line, "a table's stored schema differs from this build's handles"),
         Stale(_) => string.push(mut line, "a stale table handle"),
@@ -112,6 +124,8 @@ fn push_store_error(mut line: String, problem: store.Error) {
         Remote(_) => string.push(mut line, "a bucket operation failed"),
         Tiered(reason) => string.push(mut line, store.tiered_refusal_text(reason)),
         Attached(_) => string.push(mut line, "the bucket store's head is attached to a host stream; open it through the stream's service"),
+        Stream(reason) => string.push(mut line, store.stream_refusal_text(reason)),
+        Latched(cause) => string.push(mut line, store.stream_latch_text(cause)),
     }
 }
 
@@ -202,4 +216,16 @@ pub fn start_text(problem: StartError) -> String {
         Open(Operator(refusal)) => push_operator_refusal(mut line, refusal),
     }
     take line
+}
+
+fn store_capacity(cause: store.StoreCapacity) -> Capacity {
+    match cause {
+        Journal(c) => c,
+        Resident(c) => c,
+        Allocation(c) => c,
+        Cache(c) => c,
+        Slots(c) => c,
+        Pins(c) => c,
+        Register(c) => c,
+    }
 }

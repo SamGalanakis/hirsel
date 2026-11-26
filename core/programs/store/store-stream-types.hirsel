@@ -1,0 +1,43 @@
+// The host stream's id and its refusal and latch causes (STORE-SPEC §12.11.1, §12.11.10).
+
+// A host stream's 16-byte id. It is never a Place's StoreId: HEADER carries it
+// as the identity of stream objects only.
+pub type HostStreamId: shareable + cross {
+    hi: u64,
+    lo: u64
+}
+
+// A plan limit outside its §12.11.1 range.
+pub type StreamField: shareable + cross = MaxBatchBytes | MaxSlots | MaxPins | HoldMs | IdlePollMs | IndexEvery | RecoverParallel | SlotBytes
+
+// A streamed open's configuration refusal: a sim@1 grant with a weak level, or a
+// Place prefix that overlaps the stream root, or a plan limit out of range.
+pub type StreamRefusal: shareable + cross = WeakLevels | Overlap | Bound(StreamField)
+
+pub type StreamLatch = status.StreamLatch
+
+pub fn stream_refusal_text(reason: StreamRefusal) -> String {
+    string.from(match reason {
+        WeakLevels => "a host stream cannot serve a sim grant with a weak durability level",
+        Overlap => "the Place prefix and the host stream root overlap",
+        Bound(field) => match field {
+            MaxBatchBytes => "the stream plan's max_batch_bytes is outside FRAME_LIMIT + 4,096 to 2^32",
+            MaxSlots => "the stream plan's max_slots is outside 1 to 10,698",
+            MaxPins => "the stream plan's max_pins is below 2",
+            HoldMs => "the stream plan's hold_ms is below 4 times the authority's op_ms",
+            IdlePollMs => "the stream plan's idle_poll_ms is outside 1 to hold_ms",
+            IndexEvery => "the stream plan's index_every is 0",
+            RecoverParallel => "the stream plan's recover_parallel is 0",
+            SlotBytes => "the stream plan's slot_bytes is below 4,096",
+        },
+    })
+}
+
+pub fn stream_latch_text(cause: StreamLatch) -> String {
+    string.from(match cause {
+        Superseded => "the Place's host stream was superseded by another incarnation",
+        Batch => "a host stream batch key holds bytes the stream did not write",
+        Register => "the host stream's register is missing, malformed or regressed",
+        Unreachable => "a host stream batch create ran out of its budget",
+    })
+}

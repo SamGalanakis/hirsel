@@ -66,6 +66,7 @@ std = { major = 1 }
 "store-cut-retirement.hirsel" = "store"
 "store-history.hirsel" = "store"
 "store-stream-frames.hirsel" = "store"
+"store-stream-types.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
 "store-history-packs.hirsel" = "store"

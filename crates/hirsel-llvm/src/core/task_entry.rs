@@ -222,7 +222,7 @@ fn spawn_entries(
     let mut spawnable = BTreeSet::new();
     // A function made a plain `fn(take X) -> R` value: the link joins its
     // descriptor to the spawn entry of its rows by this marker's name.
-    for (function, _, spawn) in super::partition::descriptor_refs(module, members) {
+    for (function, _, spawn) in super::partition::descriptor_refs(module, members, items) {
         if let Some(spawn) = spawn {
             let name = module.descriptor_symbol(function, items.function_symbol(function));
             spawnable.insert(hirsel_core_ir::spawnable_symbol(

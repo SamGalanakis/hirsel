@@ -128,24 +128,47 @@ pub(super) fn bodies<'m>(
 }
 
 /// The descriptor references whose descriptors the unit, or the partition
-/// of its `members`, defines: its bodies' own, and in a partition every
-/// reference to a member's descriptor wherever it is, since the release cut
-/// keeps a descriptor (and its spawnable markers) only in its function's part.
+/// of its `members`, defines, each with the function its descriptor's code
+/// word names: its bodies' own, and in a partition every reference to a
+/// member's descriptor wherever it is, since the release cut keeps a
+/// descriptor (and its spawnable markers) only in its function's part.
+///
+/// Callable adapters of one generic instance share its descriptor symbol
+/// ([`Module::descriptor_symbol`]), so one symbol can describe several
+/// functions, which partitions may define apart. The unit's first
+/// reference to a symbol, as the whole unit defines it, names the one
+/// function every partition describes it by: only that function's
+/// partition defines it strong, and the others weak.
 pub(super) fn descriptor_refs<'m>(
     module: &'m Module,
     members: Option<&'m [bool]>,
+    items: &'m Items,
 ) -> impl Iterator<Item = (FuncId, StaticId, Option<SpawnTypes>)> + 'm {
-    let member = move |i: usize| members.is_none_or(|members| members[i]);
-    bodies(module, None).flat_map(move |(i, body)| {
-        body.insts.iter().filter_map(move |inst| match *inst {
-            Inst::DescriptorRef {
-                function,
-                identity,
-                spawn,
-                ..
-            } if member(i) || member(function.index()) => Some((function, identity, spawn)),
-            _ => None,
+    let refs = move || {
+        bodies(module, None).flat_map(move |(i, body)| {
+            body.insts.iter().filter_map(move |inst| match *inst {
+                Inst::DescriptorRef {
+                    function,
+                    identity,
+                    spawn,
+                    ..
+                } => Some((i, function, identity, spawn)),
+                _ => None,
+            })
         })
+    };
+    let name = move |f: FuncId| module.descriptor_symbol(f, items.function_symbol(f));
+    let mut owners = std::collections::HashMap::new();
+    let mut owner = vec![None; module.functions.len()];
+    for (_, function, _, _) in refs() {
+        if owner[function.index()].is_none() {
+            owner[function.index()] = Some(*owners.entry(name(function)).or_insert(function));
+        }
+    }
+    let member = move |i: usize| members.is_none_or(|members| members[i]);
+    refs().filter_map(move |(i, function, identity, spawn)| {
+        let function = owner[function.index()].expect("every reference has an owner");
+        (member(i) || member(function.index())).then_some((function, identity, spawn))
     })
 }
 

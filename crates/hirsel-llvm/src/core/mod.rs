@@ -527,7 +527,7 @@ fn emit_prepared(
     // declares it); an intrinsic's holds its revision, weak_odr.
     let mut described = BTreeSet::new();
     let mut revisions = BTreeSet::new();
-    for (function, identity, _) in partition::descriptor_refs(module, members) {
+    for (function, identity, _) in partition::descriptor_refs(module, members, &items) {
         let function_symbol = items.function_symbol(function);
         let name = module.descriptor_symbol(function, function_symbol);
         if !described.insert(name.clone()) {

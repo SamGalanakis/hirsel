@@ -138,3 +138,25 @@ fn release_edit_is_the_cold_build() {
         }
     }
 }
+
+/// Two generic describers of one generic function: each instance's
+/// `code.describe(same)` has its own callable adapter (`$callable[instance:
+/// <describer>]`), and both describe `same[u64]` under one descriptor symbol
+/// (`Module::descriptor_symbol`). Lowered one body per partition, the
+/// adapters sit in different partitions; each defined the shared descriptor
+/// as its own and the link stopped on a duplicate `$static`. Exit 24 when
+/// both values are the one described function and call it: hand-derived
+/// from `same`, 3 == 3 and 3 != 4.
+#[test]
+#[ignore = "explicit native integration target"]
+fn release_partitions_define_a_shared_descriptor_once() {
+    const SHARED: &str = "fn same[T: key](a: T, b: T) -> bool { a == b }\nfn first[T: key]() -> StaticFn[fn(T, T) -> bool] { code.describe(same) }\nfn second[T: key]() -> StaticFn[fn(T, T) -> bool] { code.describe(same) }\npub fn main() -> Result[(), Exit] {\n    let a: StaticFn[fn(u64, u64) -> bool] = first()\n    let b: StaticFn[fn(u64, u64) -> bool] = second()\n    if a == b && (code.callable(a))(3, 3) && !(code.callable(b))(3, 4) {\n        Error(exit_with(24u8))\n    } else {\n        Error(exit_with(1u8))\n    }\n}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let core = reach_core(dir.path(), "core", 0);
+    let mut options = native_options(Backend::Llvm, dir.path());
+    options.optimize = true;
+    super::release::RELEASE_PARTITION.set(Some(1));
+    let (_, _, status) = reach_build(&record_check(SHARED, &core, dir.path(), "store"), &options);
+    super::release::RELEASE_PARTITION.set(None);
+    assert_eq!(status, Some(24));
+}

@@ -15,6 +15,26 @@ fn site_item(site: &Site) -> DefPath {
     crate::source_delta::site_item(&site.file, site.line, site.column)
 }
 
+/// The digest of a recipe's source bindings: the std's points, which are all
+/// it gives the source map ([`bind_annexes`]), and each body's and annex's
+/// hash. Not the std's key, which names the libLLVM file that lowered it: that
+/// file differs by host, and this digest reaches the executable's source note
+/// (docs/building.md, "Compiler identity").
+pub(super) fn source_bindings<'a>(
+    std: Option<&super::super::std_release::StdSide>,
+    bodies: impl Iterator<Item = &'a [u8]>,
+) -> Result<ContentHash, NativeStop> {
+    let points = std
+        .map(|std| key("hirsel.recipe-std-points.v1", &std.points))
+        .transpose()?;
+    let mut parts: Vec<&[u8]> = points.iter().map(|p| &p.0[..]).collect();
+    parts.extend(bodies.map(|body| &body[..]));
+    Ok(ContentHash::of_parts(
+        "hirsel.recipe-source-bindings.v2",
+        parts,
+    ))
+}
+
 /// The anchor of `site` in a unit whose source items are `items`, adding its
 /// item on first sight: the unit's own with a unit `symbol`, else the site's.
 /// Keyed by the borrowed site, so each distinct site builds its DefPath once.

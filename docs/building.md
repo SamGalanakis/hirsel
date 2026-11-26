@@ -52,8 +52,7 @@ target's runtime.
 The compiler identity is what the compiler is, not where it was built or linked: two
 builds of one source tree with the same pins are one compiler on every host, so a
 Linux-built cross compiler and a Mac-built native one emit the same bytes for the same
-program and share every cached product. The identity keys native objects, the image
-root and the product caches.
+Mac program. The identity keys native objects, the image root and the product caches.
 
 It is a SHA-256 the driver's build script computes over:
 
@@ -77,7 +76,13 @@ It leaves out:
   exactly on every host.
 
 The LLVM engine library and each target's runtime archive are keyed by their own
-identities, beside this one. A resident compiler (`hirsel serve`) is still named by its
+identities, beside this one. The engine library's key is the content of its file, which
+differs by host, so what LLVM lowers (the release std, LLVM units and objects) is cached
+per host. A Mach-O takes no byte of that key: a program's source bindings hash the
+std's points, which are all the source note takes from it, not the std's key, and its
+debug rows name each function. An ELF's debug rows name a part by an alias symbol,
+`__hirsel_debug_<key>_<section>`, whose key is the part's cache key, so a Linux
+executable's symbol table still differs by the engine file. A resident compiler (`hirsel serve`) is still named by its
 executable's link ID, because a client must talk to the same file it would run.
 
 A Mach-O's `LC_UUID` is ld64.lld's digest of the linked image and the ad-hoc code

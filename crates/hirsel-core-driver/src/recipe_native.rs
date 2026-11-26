@@ -23,7 +23,7 @@ use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 #[path = "recipe_binding.rs"]
 mod binding;
 pub(super) use binding::bind_annexes;
-use binding::{Bindings, bind_module};
+use binding::{Bindings, bind_module, source_bindings};
 #[path = "recipe_unit.rs"]
 mod unit;
 pub(super) use unit::prepare_std_unit;
@@ -1509,15 +1509,10 @@ impl Publication {
                 .retain(|identity, _| identity == &entry_identity || !std.roots.contains(identity));
         }
         let entry = &self.recipe.entry;
-        let sources_digest = ContentHash::of_parts(
-            "hirsel.recipe-source-bindings.v1",
-            std.iter().map(|std| &std.key.0[..]).chain(
-                self.recipe
-                    .bodies
-                    .iter()
-                    .flat_map(|body| [&body.body.hash.0[..], &body.annex.hash.0[..]]),
-            ),
-        );
+        let sources_digest = source_bindings(
+            std.as_ref(),
+            (self.recipe.bodies.iter()).flat_map(|b| [&b.body.hash.0[..], &b.annex.hash.0[..]]),
+        )?;
         let no_points = BTreeMap::new();
         let Bindings {
             sources,

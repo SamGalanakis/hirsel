@@ -156,9 +156,8 @@ mod tests {
     }
 
     /// Two builds of one source whose links differ, here only in their build
-    /// ID, are one compiler: products are keyed by what the compiler is, so a
-    /// cross and a native build share every key (docs/building.md, "Compiler
-    /// identity").
+    /// ID, are one compiler: products are keyed by what the compiler is, not
+    /// by its link (docs/building.md, "Compiler identity").
     #[test]
     fn a_link_id_is_not_the_compiler() {
         let driver = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

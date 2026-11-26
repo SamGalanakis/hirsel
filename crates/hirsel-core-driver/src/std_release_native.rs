@@ -772,6 +772,55 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
     assert_eq!(run("after"), (Some(2), Vec::new()), "over the edited std");
 }
 
+/// Law: the libLLVM file a release std was lowered with keys the side, but no
+/// byte of the executable over it but an ELF debug alias. Linux and macOS load
+/// different files of one pinned LLVM, so a cross and a native compiler stored
+/// the side under different keys, and the source note took that key
+/// (docs/building.md, "Compiler identity"). An ELF part's debug alias is named
+/// by its cache key, so its 64 hex digits are masked; a Mach-O's rows name the
+/// function instead. Two stand-ins one byte apart play the two files, each over
+/// fresh stores; the real library emits under both.
+#[test]
+#[ignore = "explicit native integration target"]
+fn the_engine_file_keys_the_std_side_and_only_elf_debug_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let (name, source) = UNIT_PROGRAMS[2];
+    let build = |stand_in: u8| {
+        let library = dir.path().join(format!("libLLVM-{stand_in}.so"));
+        std::fs::write(&library, [0x5a, 0x5a, 0x5a, stand_in]).unwrap();
+        let base = dir.path().join(format!("build-{stand_in}"));
+        let mut options = native_options(Backend::Llvm, &base);
+        options.optimize = true;
+        options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
+        options.grant_mask = 1 << 4;
+        crate::tool_inputs::LLVM_LIBRARY.set(Some(library));
+        let product = std_checked(&base, name, source, "cache");
+        let code = crate::code_store::CodeStore::new(base.join("code"));
+        let reached = product.reachable(&entry, options.instance_limit).unwrap();
+        let limit = 16 * 1024 * 1024;
+        let mut publication = product.publish_release(&entry, &reached, &options, &code, limit).unwrap();
+        let std = std_of(&options, &mut publication, None).expect("an optimised build's std");
+        let key = std.key;
+        let limits = crate::request::local_admission_limits();
+        let opened = crate::native::recipe_build::Publication::open(&code, publication.root, &limits);
+        let built = opened.unwrap().assemble_over(&options, reached.counters, Some(std), None).unwrap();
+        crate::tool_inputs::LLVM_LIBRARY.set(None);
+        let run = Command::new(&built.executable).output().unwrap();
+        assert_eq!((run.status.code(), run.stdout), (Some(0), b"right".to_vec()), "{stand_in}");
+        let mut bytes = std::fs::read(&built.executable).unwrap();
+        let (mut at, alias) = (0, b"__hirsel_debug_");
+        while let Some(found) = bytes[at..].windows(alias.len()).position(|w| w == alias) {
+            at += found + alias.len();
+            bytes[at..at + 64].fill(b'0');
+        }
+        (key, bytes)
+    };
+    let (first, second) = (build(0), build(1));
+    assert_ne!(first.0, second.0, "the engine file keys the std side");
+    assert!(first.1 == second.1, "the executables differ by the engine file");
+}
+
 /// Each corpus program, built for development and over the separate std, under each
 /// of `modes` (the options a mode changes from the base); the number of runs
 /// whose tape both builds replayed.

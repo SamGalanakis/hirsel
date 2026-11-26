@@ -38,7 +38,8 @@ fn trust_store(mut db: Db) -> Result[(), Error] waits {
 fn trust_expected_reopen_fault(case: String, problem: Error) -> bool {
     // The W2 read-only law publishes a MANIFEST with its last byte removed.
     match problem {
-        Corrupt(Fault(file: file, why: Truncated, ..)) => case == "read-only/torn-manifest" && file == "MANIFEST",
+        Corrupt(Fault(file: file, why: Truncated, ..)) if case == "read-only/torn-manifest" => file == "MANIFEST",
+        Corrupt(_) => case == "L69/seeded-write",
         _ => false,
     }
 }

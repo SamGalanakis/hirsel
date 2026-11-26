@@ -72,6 +72,16 @@ fn visible(v: Version) -> View[Bytes] in v {
     }
 }
 
+/// Whether any inode's current version still contains simulated write damage.
+pub fn has_write_damage(fs: Fs) -> bool {
+    for node in fs.nodes {
+        if let Some(_) = current(node).overlay {
+            return true
+        }
+    }
+    false
+}
+
 fn retain(mut node: Inode, at: u64) {
     let saved = list.set(mut node.history, at, empty())
     list.clear(mut node.history)

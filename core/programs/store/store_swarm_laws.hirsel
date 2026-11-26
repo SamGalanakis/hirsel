@@ -1,0 +1,154 @@
+type StoreSwarm: send {
+    options: Options,
+    weights: Inline[u64, 16],
+    ttl_every: u64,
+    faults: std.sim.world.WriteFaults
+}
+
+// L69's operation numbers. Put and delete have their own mask entries.
+const SWARM_PUT: u64 = 0
+
+const SWARM_DELETE: u64 = 1
+
+const SWARM_FORK: u64 = 2
+
+const SWARM_PIN: u64 = 3
+
+const SWARM_HISTORY: u64 = 4
+
+const SWARM_UNPIN: u64 = 5
+
+const SWARM_DROP: u64 = 6
+
+const SWARM_CUT: u64 = 7
+
+const SWARM_CRASH_BEFORE: u64 = 8
+
+const SWARM_CRASH_AFTER: u64 = 9
+
+const SWARM_RESIDENCY: u64 = 10
+
+const SWARM_TX: u64 = 11
+
+const SWARM_DIFF: u64 = 12
+
+const SWARM_SPAN: u64 = 13
+
+const SWARM_SCAN: u64 = 14
+
+const SWARM_MARKS: u64 = 15
+
+fn swarm_draw(mut src: std.prop.Source) -> StoreSwarm {
+    let group_commits: Inline[u32, 3] =[1, 4, 64]
+    let group_bytes: Inline[u64, 3] =[65536, 262144, 4194304]
+    let pack_bytes: Inline[u64, 3] =[8192, 65536, 1048576]
+    let checkpoint_bytes: Inline[u64, 3] =[32768, 131072, 1048576]
+    let pin_extra = 1048576 * std.prop.below(mut src, 5)
+    let cache_extra = 1048576 * std.prop.below(mut src, 5)
+    let mut overrides = derived_sizes()
+    overrides.group_commits = Some(group_commits[std.prop.below(mut src, 3)])
+    overrides.group_bytes = Some(group_bytes[std.prop.below(mut src, 3)])
+    overrides.pack_bytes = Some(pack_bytes[std.prop.below(mut src, 3)])
+    overrides.checkpoint_bytes = Some(checkpoint_bytes[std.prop.below(mut src, 3)])
+    // Start at the Tiered L70 floor. Charge any additional cache and pin
+    // space once in the resident budget. Writer pins are part of the cache.
+    overrides.resident_limit = Some(182375272 + pin_extra + cache_extra)
+    overrides.writer_pin_bytes = Some(34471936 + pin_extra)
+    overrides.cache_bytes = Some(52232192 + pin_extra + cache_extra)
+    let mut options = result.unwrap(sized_with(Directory, 2147483648, overrides))
+    options.probe_budget = 4
+    options.compact_permille = 1001
+    let mut weights: Inline[u64, 16] =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    for op in 0u64 .. 16 {
+        let enabled = std.prop.weighted(mut src, 1, 2)
+        let weight = 1u64 << std.prop.below(mut src, 3)
+        if enabled {
+            weights[op] = weight
+        }
+    }
+    // Each step can check the model even when all optional operations shrink
+    // away. A clean end and both recovery paths also check it.
+    weights[SWARM_CUT] += 1
+    let ttl_every = 1u64 << std.prop.below(mut src, 4)
+    let faults = std.sim.world.WriteFaults(
+        corrupt: std.prop.below(mut src, 4),
+        misdirect: std.prop.below(mut src, 4),
+        lost_write: std.prop.below(mut src, 4),
+    )
+    StoreSwarm(options: take options, weights, ttl_every, faults)
+}
+
+fn swarm_show(s: StoreSwarm, mut out: String) {
+    let o = view s.options
+    let settings: Inline[(String, u64), 14] =[
+        ("group_commits", int.widen(o.group_commits)),
+        ("group_bytes", int.widen(o.group_bytes)),
+        ("pack_bytes", o.pack_bytes),
+        ("checkpoint_bytes", o.checkpoint_bytes),
+        ("resident_limit", o.resident_limit),
+        ("cache_bytes", o.cache_bytes),
+        ("writer_pin_bytes", o.writer_pin_bytes),
+        ("dirty_bytes", o.dirty_bytes),
+        ("pager_task_bytes", o.pager_task_bytes),
+        ("ttl_every", s.ttl_every),
+        ("corrupt_per_10000", s.faults.corrupt),
+        ("misdirect_per_10000", s.faults.misdirect),
+        ("lost_write_per_10000", s.faults.lost_write),
+        ("journal_limit", o.journal_limit),
+    ]
+    for (name, value) in settings {
+        string.push(mut out, name)
+        string.push(mut out, "=")
+        string.push_u64(mut out, value)
+        string.push(mut out, " ")
+    }
+    let names: Inline[String, 16] =["put", "delete", "fork", "pin", "history", "unpin", "drop", "cut", "crash_before", "crash_after", "residency", "tx", "diff", "span", "scan", "marks"]
+    string.push(mut out, "weights[")
+    for i in 0u64 .. 16 {
+        if i != 0 {
+            string.push(mut out, ",")
+        }
+        string.push(mut out, names[i])
+        string.push(mut out, "=")
+        string.push_u64(mut out, s.weights[i])
+    }
+    string.push(mut out, "]")
+}
+
+fn swarm_pick(s: StoreSwarm, mut rng: std.rand.Pcg) -> u64 {
+    let mut total = 0u64
+    for i in 0u64 .. 16 {
+        total += s.weights[i]
+    }
+    let mut choice = std.rand.below(mut rng, total)
+    for i in 0u64 .. 16 {
+        let weight = s.weights[i]
+        if choice < weight {
+            return i
+        }
+        choice -= weight
+    }
+    fail("L69 swarm: a workload weight was skipped")
+}
+
+fn swarm_case(take case: std.prop.Case[StoreSwarm]) -> Result[(), String] waits {
+    let std.prop.Case(value: take swarm, world_seed, tasks, ..) = take case
+    let (c, _hand) = provide.clock(0, 0)
+    let r = provide.random(world_seed)
+    let (clean, init_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), 33554432)
+    let fixture = random_tables(clean, c, r, tasks, swarm.options) ?=> |_| "L69 swarm: clean setup failed"
+    let image = sim_disk_unmount(take clean, take init_server)
+    let mut faults = std.sim.world.plan(std.prop.world_seed(world_seed, 1))
+    std.sim.world.set_write_faults(mut faults, swarm.faults)
+    let (disk, fault_server) = sim_disk_mount(tasks, c, take image, take faults, 33554432)
+    let verdict = random_arm(disk, c, r, tasks, world_seed, take fixture, swarm)
+    let final_image = sim_disk_unmount(take disk, take fault_server)
+    match verdict {
+        Ok(()) => Ok(()),
+        Error(problem) if std.sim.fs.has_write_damage(final_image) && trust_expected_reopen_fault("L69/seeded-write", problem) => {
+            let _ = std.prop.sometimes("disk fault detected", true)
+            Ok(())
+        },
+        Error(_) => Error("L69 swarm: store returned an unexpected error"),
+    }
+}

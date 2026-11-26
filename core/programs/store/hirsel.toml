@@ -210,6 +210,7 @@ dirs = ["."]
 "tiered_gate_laws.hirsel" = "store"
 "tiered_pin_gate_laws.hirsel" = "store"
 "tiered_random_laws.hirsel" = "store"
+"store_swarm_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
 "store_format10_laws.hirsel" = "store"
@@ -509,6 +510,7 @@ limit = 268435456
 
 [tests.runs."store@1/store/test_l69_random_arm"]
 limit = 268435456
+grants = ["Tasks", "Env=HIRSEL_TEST_SIM_SEED,HIRSEL_TEST_SWARM_REPLAY"]
 
 [tests.runs."store@1/store/test_local_projector_laws"]
 limit = 536870912

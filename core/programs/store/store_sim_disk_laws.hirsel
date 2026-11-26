@@ -1,25 +1,25 @@
-type ScrubMount: send {
+type SimDiskMount: send {
     image: std.sim.fs.Fs,
     plan: std.sim.world.Plan,
     clock: Clock,
     port: core.Served[DirOp]
 }
 
-fn scrub_serve(take mount: ScrubMount) -> std.sim.fs.Fs waits {
-    let ScrubMount(image: take saved, plan: take decisions, clock, port: take port) = take mount
+fn sim_disk_serve(take mount: SimDiskMount) -> std.sim.fs.Fs waits {
+    let SimDiskMount(image: take saved, plan: take decisions, clock, port: take port) = take mount
     let mut image = take saved
     let mut plan = take decisions
     std.sim.fs.serve(mut image, mut plan, clock, take port)
     take image
 }
 
-fn scrub_mount(tasks: Tasks, c: Clock, take image: std.sim.fs.Fs, take plan: std.sim.world.Plan) -> (Dir, Task[std.sim.fs.Fs]) {
-    let (d, port) = provide.dir(bytes 4096)
-    let server = task.spawn(tasks, bytes 1048576, ScrubMount(image: take image, plan: take plan, clock: c, port: take port), scrub_serve)
+fn sim_disk_mount(tasks: Tasks, c: Clock, take image: std.sim.fs.Fs, take plan: std.sim.world.Plan, room: u64) -> (Dir, Task[std.sim.fs.Fs]) {
+    let (d, port) = provide.dir(bytes 65536)
+    let server = task.spawn(tasks, bytes room, SimDiskMount(image: take image, plan: take plan, clock: c, port: take port), sim_disk_serve)
     (d, take server)
 }
 
-fn scrub_unmount(take d: Dir, take server: Task[std.sim.fs.Fs]) -> std.sim.fs.Fs waits {
+fn sim_disk_unmount(take d: Dir, take server: Task[std.sim.fs.Fs]) -> std.sim.fs.Fs waits {
     drop(take d)
     result.unwrap(task.join(take server))
 }
@@ -31,21 +31,21 @@ fn scrub_sim_fault(tasks: Tasks, c: Clock, rates: std.sim.world.WriteFaults, kin
     let width = list.len(frame)
     let mut blank: Bytes = list.with_capacity(width * 2)
     list.fill(mut blank, width * 2, 0u8)
-    let (clean, server) = scrub_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1))
+    let (clean, server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(1), 1048576)
     disk_write_synced(clean, name, blank)?
     disk_io(host.sync_dir(clean))?
-    let image = scrub_unmount(take clean, take server)
+    let image = sim_disk_unmount(take clean, take server)
     let mut plan = std.sim.world.plan(2)
     std.sim.world.set_write_faults(mut plan, rates)
-    let (d, writer) = scrub_mount(tasks, c, take image, take plan)
+    let (d, writer) = sim_disk_mount(tasks, c, take image, take plan, 1048576)
     let mut f = disk_io(host.open(d, name, ReadWrite))?
     host.write_at(mut f, 0, frame) ?=> |e| Io(e.error)
     disk_io(host.sync(mut f))?
     disk_io(host.close(take f))?
-    let mut crashed = scrub_unmount(take d, take writer)
+    let mut crashed = sim_disk_unmount(take d, take writer)
     let mut cut = std.sim.world.plan(3)
     std.sim.fs.crash(mut crashed, mut cut)
-    let (after, recovered) = scrub_mount(tasks, c, take crashed, std.sim.world.plan(4))
+    let (after, recovered) = sim_disk_mount(tasks, c, take crashed, std.sim.world.plan(4), 1048576)
     let raw = disk_read_paged_file(after, name, width * 2)?
     let first = list.slice(raw, 0, width)
     let second = list.slice(raw, width, width * 2)
@@ -89,7 +89,7 @@ fn scrub_sim_fault(tasks: Tasks, c: Clock, rates: std.sim.world.WriteFaults, kin
     disk_io(host.close(take repair_file))?
     let repaired = disk_read_paged_file(after, name, width * 2)?
     let _ = disk_read_frame(name, ctx, repaired, 0)?
-    let _ = scrub_unmount(take after, take recovered)
+    let _ = sim_disk_unmount(take after, take recovered)
     Ok(())
 }
 

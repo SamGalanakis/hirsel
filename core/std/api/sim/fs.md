@@ -22,3 +22,5 @@ the same file. `LostWrite` leaves the old bytes and length in place.
 Reads and stats see the damaged version. The image keeps the intended
 bytes separately, and sync and crash retain the damage with its version.
 Later successful writes update both versions.
+
+`has_write_damage` reports whether a current inode version has an overlay.

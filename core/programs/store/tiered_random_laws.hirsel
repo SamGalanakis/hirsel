@@ -23,6 +23,10 @@ const RANDOM_ROWS: u64 = 160
 
 const RANDOM_WIDTH: u64 = 48
 
+const RANDOM_ARM_OPS: u64 = 80
+
+const RANDOM_TX_STEPS: u64 = 100000000
+
 // The second table, `marks`, created Memory beside the Tiered `rows`.
 const MARK_ROWS: u64 = 32
 
@@ -205,7 +209,7 @@ fn random_check(d: Dir, db: Db, rows: Table[u64, Bytes], marks: Option[Table[u64
 fn random_edit(mut db: Db, rows: Table[u64, Bytes], id: u32, key: u64, edit: Option[u8]) -> Result[(), Error] waits {
     let fixture: Table[u64, Bytes] = clone(rows)
     let target = Branch(store: db.store, id)
-    let Committed(_) = run_on(mut db, target, Some(100000000), copy_env((fixture, key, edit)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, Option[u8])) -> Result[(), Error] {
+    let outcome = run_on(mut db, target, Some(RANDOM_TX_STEPS), copy_env((fixture, key, edit)), fn(mut tx: Tx, env: (Table[u64, Bytes], u64, Option[u8])) -> Result[(), Error] {
         match env.2 {
             Some(e) => put(mut tx, env.0, env.1, compact_value_of(env.1, e, random_width(e))),
             None => {
@@ -213,10 +217,13 @@ fn random_edit(mut db: Db, rows: Table[u64, Bytes], id: u32, key: u64, edit: Opt
                 Ok(())
             },
         }
-    })? else {
-        fail("L69 random: every edit commits")
+    })?
+    match take outcome {
+        Committed(_) => Ok(()),
+        Aborted(Undone(value: take problem, ..)) => Error(take problem),
+        Stopped(_) => fail("L69 random: an edit exhausted its transaction steps"),
+        _ => fail("L69 random: every edit commits"),
     }
-    Ok(())
 }
 
 // §13.8 residency changes on main: the table moves to Memory, where main
@@ -240,8 +247,8 @@ fn random_residency_round_trip(mut db: Db, rows: Table[u64, Bytes], model: Rando
 // into one pack as compact_cold_table_of builds it, and `marks`, a Memory
 // table of MARK_ROWS rows. Both are declared before `rows` turns Tiered,
 // since a Tiered store refuses a schema change (§13.10, Tiered(Migrate)).
-fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Result[(Table[u64, Bytes], Table[u64, Bytes]), Error] waits {
-    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, options: Options) -> Result[(Table[u64, Bytes], Table[u64, Bytes]), Error] waits {
+    let mut db = open(tasks, d, c, r, clone(options))?
     let (take rows, take marks) = law_pair(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes(), "marks", std.codec.key_u64(), std.codec.of_bytes())?
     let fixture: (Table[u64, Bytes], Table[u64, Bytes]) = (clone(rows), clone(marks))
     let Committed(_) = run(mut db, None, copy_env(fixture), fn(mut tx: Tx, env: (Table[u64, Bytes], Table[u64, Bytes])) -> Result[(), Error] {
@@ -342,7 +349,7 @@ fn random_tx_body(mut tx: Tx, env: RandomTxEnv) -> Result[bool, Error] {
 
 fn random_tx_reads(mut db: Db, id: u32, take env: RandomTxEnv) -> Result[(), Error] waits {
     let target = Branch(store: db.store, id)
-    let done = match run_on(mut db, target, Some(100000000), copy_env(env), random_tx_body)? {
+    let done = match run_on(mut db, target, Some(RANDOM_TX_STEPS), copy_env(env), random_tx_body)? {
         Committed(take done) => take done,
         // A read that fails inside the call names its own error.
         Aborted(Undone(value: take e, ..)) => return Error(take e),
@@ -542,11 +549,9 @@ fn random_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, take db: Db, renamed:
     Ok(reopened)
 }
 
-fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[(), Error] waits {
-    let floor = 182375272u64
-    let (take rows, take marks) = random_tables(d, c, r, tasks, floor)?
-    let mut options = compact_crash_options(floor)?
-    options.probe_budget = 4
+fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, take tables: (Table[u64, Bytes], Table[u64, Bytes]), swarm: StoreSwarm) -> Result[(), Error] waits {
+    let (take rows, take marks) = take tables
+    let options = view swarm.options
     let mut db = open(tasks, d, c, r, clone(options))?
     let mut g = std.rand.new(seed, 2397)
     let mut initial: Map[u64, u8] = map.new()
@@ -562,9 +567,18 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
     let mut history: Option[(Snapshot, Map[u64, u8])] = None
     let mut crashes = 0u64
     let mut marks_tiered = false
-    for _ in 0u64 .. 80 {
-        let op = std.rand.below(mut g, 20)
-        if op < 6 {
+    for iteration in 0u64 .. RANDOM_ARM_OPS {
+        if iteration % swarm.ttl_every == 0 {
+            sweep_streams(mut db, fn(StreamKey) -> bool {
+                false
+            })?
+        }
+        let op = if iteration + 1 == RANDOM_ARM_OPS && crashes == 0 {
+            SWARM_CRASH_BEFORE
+        } else {
+            swarm_pick(swarm, mut g)
+        }
+        if op == SWARM_PUT || op == SWARM_DELETE {
             let slot = std.rand.below(mut g, list.len(db.heads))
             let id = db.heads[slot].id
             let on_marks = std.rand.below(mut g, 4) == 0
@@ -573,7 +587,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             } else {
                 RANDOM_ROWS
             })
-            let edit: Option[u8] = if std.rand.below(mut g, 4) == 0 {
+            let edit: Option[u8] = if op == SWARM_DELETE {
                 None
             } else {
                 Some(int.truncate(1 + std.rand.below(mut g, 254)))
@@ -603,7 +617,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 },
             }
             map.insert(mut model.heads, id, take changed)
-        } else if op == 6 && list.len(db.heads) < 4 {
+        } else if op == SWARM_FORK && list.len(db.heads) < 4 {
             let slot = std.rand.below(mut g, list.len(db.heads))
             let from = snapshot_of(db, Branch(store: db.store, id: db.heads[slot].id))?
             let snap_model: Map[u64, u8] = {
@@ -617,7 +631,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             // vopr probe
             let _ = std.prop.sometimes("fork", true)
             map.insert(mut model.heads, child.id, take snap_model)
-        } else if op == 7 && map.len(model.pins) < 3 {
+        } else if op == SWARM_PIN && map.len(model.pins) < 3 {
             let name = random_pin_name(model.pinned_count)
             if !map.contains(model.pins, name) {
                 let slot = std.rand.below(mut g, list.len(db.heads))
@@ -636,7 +650,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 let _ = std.prop.sometimes("pin a head", true)
             }
             model.pinned_count += 1
-        } else if op == 8 {
+        } else if op == SWARM_HISTORY {
             match take history {
                 None => {
                     let snap_model: Map[u64, u8] = {
@@ -673,7 +687,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                     history = None
                 },
             }
-        } else if op == 9 && map.len(model.pins) > 0 {
+        } else if op == SWARM_UNPIN && map.len(model.pins) > 0 {
             let name = random_pin_name(std.rand.below(mut g, 3))
             if map.contains(model.pins, name) {
                 let _ = unpin(mut db, name)?
@@ -682,7 +696,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
                 // vopr probe
                 let _ = std.prop.sometimes("unpin", true)
             }
-        } else if op == 10 && list.len(db.heads) > 1 {
+        } else if op == SWARM_DROP && list.len(db.heads) > 1 {
             let slot = 1 + std.rand.below(mut g, list.len(db.heads) - 1)
             let id = db.heads[slot].id
             let gone = Branch(store: db.store, id)
@@ -690,16 +704,16 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let _ = map.remove(mut model.heads, id)
             // vopr probe
             let _ = std.prop.sometimes("delete a branch", true)
-        } else if op == 11 {
+        } else if op == SWARM_CUT {
             let _ = checkpoint(mut db)?
             random_check(d, db, rows, Some(clone(marks)), model)?
             // vopr probe
             let _ = std.prop.sometimes("cut", true)
-        } else if op == 14 {
+        } else if op == SWARM_RESIDENCY {
             random_residency_round_trip(mut db, rows, model)?
             // vopr probe
             let _ = std.prop.sometimes("residency round trip", true)
-        } else if op == 15 {
+        } else if op == SWARM_TX {
             let slot = std.rand.below(mut g, list.len(db.heads))
             let id = db.heads[slot].id
             let on_marks = std.rand.below(mut g, 2) == 0
@@ -748,7 +762,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             map.insert(mut model.heads, id, take changed)
             // vopr probe
             let _ = std.prop.sometimes("transaction reads its staged writes", true)
-        } else if op == 16 {
+        } else if op == SWARM_DIFF {
             let sides = list.len(db.heads) + map.len(model.pins)
             let (take a, take a_model) = random_side(db, model, std.rand.below(mut g, sides))?
             let (take b, take b_model) = random_side(db, model, std.rand.below(mut g, sides))?
@@ -759,7 +773,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             drop(take read_handle)
             // vopr probe
             let _ = std.prop.sometimes("diff two heads or pins", true)
-        } else if op == 17 || op == 18 {
+        } else if op == SWARM_SPAN || op == SWARM_SCAN {
             let sides = list.len(db.heads) + map.len(model.pins)
             let (take s, take side_model) = random_side(db, model, std.rand.below(mut g, sides))?
             let on_marks = std.rand.below(mut g, 2) == 0
@@ -775,7 +789,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             }
             let part = random_part(side_model, on_marks)
             let read_handle = reader(db, VALUE_LIMIT + 1048576)?
-            if op == 17 {
+            if op == SWARM_SPAN {
                 let one_end = std.rand.below(mut g, n + 2)
                 let other_end = std.rand.below(mut g, n + 2)
                 let (lo, hi) = if one_end <= other_end {
@@ -798,7 +812,7 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             }
             drop(take s)
             drop(take read_handle)
-        } else if op == 19 {
+        } else if op == SWARM_MARKS {
             // §13.8 on the second table: main's marks move to the other
             // residency and stay there (Tiered takes effect at the cut
             // below), and main reads its model.
@@ -822,12 +836,12 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
             let _ = std.prop.sometimes("marks to Memory", to_memory)
             // vopr probe
             let _ = std.prop.sometimes("marks to Tiered", !to_memory)
-        } else if op >= 12 {
+        } else if op == SWARM_CRASH_BEFORE || op == SWARM_CRASH_AFTER {
             if let Some((take s, _)) = take history {
                 drop(take s)
             }
             history = None
-            let renamed = std.rand.below(mut g, 2) == 0
+            let renamed = op == SWARM_CRASH_AFTER
             let crashing = take db
             db = random_crash(d, c, r, tasks, take crashing, renamed, clone(options))?
             crashes += 1
@@ -856,12 +870,26 @@ fn random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64) -> Result[()
 }
 
 @test
-fn test_l69_random_arm(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
+fn test_l69_random_arm(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {
     let seed = match std.sim.world.test_seed(seed_grant) {
         Some(active) => active,
         None => 1u64,
     }
-    random_arm(d, c, r, tasks, seed)
+    let mut cfg = std.prop.config()
+    cfg.seed = seed
+    cfg.sim_seed = Some(seed)
+    cfg.cases = 1
+    cfg.max_choices = 64
+    cfg.max_shrinks = 12
+    cfg.case_bytes = 251658240
+    // Admit the existing per-transaction bound inside the property's task.
+    cfg.case_steps = (RANDOM_ARM_OPS + 2) * RANDOM_TX_STEPS
+    // Use the token from the property report with the same --seed.
+    let replayable = match env.get(seed_grant, "HIRSEL_TEST_SWARM_REPLAY") {
+        Ok(Some(token)) => std.prop.replay(take cfg, token),
+        _ => take cfg,
+    }
+    std.prop.check_tasks(tasks, replayable, std.prop.make(swarm_draw, swarm_show), swarm_case)
 }
 
 // The seed-3 failure as a fixed case: capture main, run cuts until the probe

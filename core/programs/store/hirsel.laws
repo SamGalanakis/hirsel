@@ -118,7 +118,7 @@ store@1/store/disk_test_scrub_damage_budget src=99d848b2ab22ac49 sig=bb55f294942
 store@1/store/disk_test_scrub_interleaved src=5e2098bf4439de9c sig=5e5bee00db4fa125 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_scrub_lease src=d3022b7be39fa465 sig=6b8cb31d0783ba43 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/disk_test_scrub_misdirected src=664d04c8cc924bf5 sig=112a745caca0d622 run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/disk_test_seeded_write_faults src=449f64a9ec8593d1 sig=373d405047e3be2e run=c9049a952ba23a49 bug=- oracle=- rows=pending
+store@1/store/disk_test_seeded_write_faults src=8d77e9e38f3f9ff0 sig=373d405047e3be2e run=c9049a952ba23a49 bug=- oracle=- rows=pending
 store@1/store/disk_test_typed_error_drops_frame_tail src=fd710eaf5266b6c0 sig=94abab275aa1f5dc run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/dropped_claim_time_survives_reopen_before_sweep src=af31e3df97b05fe6 sig=87bb931a5d2c7cd6 run=52846919a3decb1f bug=- oracle=- rows=pending
 store@1/store/expired_cutover_keeps_old_serving src=235e69619d921896 sig=e84bf700b5e8dd85 run=ea720f3846592392 bug=- oracle=- rows=pending
@@ -299,7 +299,7 @@ store@1/store/test_l68_trim_preserves_untouched_cold_slots src=736f78febff76090 
 store@1/store/test_l69_cut_files_replaced_cold_frames src=094dd6ece8c1f00e sig=d196b35c8d497929 run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
 store@1/store/test_l69_lineage_last_holder_ghost_and_adopt src=2fae17284c99d2ae sig=44357b120761f569 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l69_pin_after_its_pack_retires src=844bf30d0ad03382 sig=601d78ac4578889c run=0fbf0f9c200aa0aa bug=- oracle=- rows=pending
-store@1/store/test_l69_random_arm src=363ecf7387c01b63 sig=a2e7ef8a51c74617 run=db39366644a2cf00 bug=- oracle=- rows=pending
+store@1/store/test_l69_random_arm src=eb321c2e360e5bb2 sig=e2c62b2135b61e4b run=ccc71412effed0bb bug=- oracle=- rows=pending
 store@1/store/test_l70_cache_overlap src=d009b9bf0f2e481c sig=7c7f9e31672cb046 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_dirty_admission src=34d671df9acfe9fc sig=33430717e4cfbb20 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/test_l70_pager_admits_cache_backing src=4b01d80b82d06212 sig=d2fd83d67801ff6a run=722e0e8306f441ca bug=- oracle=- rows=pending

@@ -606,7 +606,7 @@ fn schedule_commit(mut db: Db, mut model: ScheduleModel, mut history: std.sim.hi
     std.sim.history.check(std.sim.history.committed(mut history, clone(stream), model.head + 1, schedule_reply(old, add)))
     std.sim.history.check(std.sim.history.reply(mut history, 1, stream, committed, Some(clone(answer))))
     map.insert(mut model.marks, env.3, old + add + 1)
-    schedule_moved(db, mut model)
+    schedule_moved(db, mut model, true)
     let retried = match admit_law_stream(mut db, stream, 0, request_digest(stream, stream))? {
         Duplicate(Stored(reply: take saved)) => Some(take saved),
         _ => None,
@@ -618,10 +618,12 @@ fn schedule_commit(mut db: Db, mut model: ScheduleModel, mut history: std.sim.hi
     Ok(())
 }
 
-fn schedule_moved(db: Db, mut model: ScheduleModel) {
-    model.head += 1
+fn schedule_moved(db: Db, mut model: ScheduleModel, mutating: bool) {
+    if mutating {
+        model.head += 1
+    }
     if version(snapshot(db)) != model.head {
-        fail("L63 schedule: each commit moves the head by exactly one")
+        fail("L63 schedule: each mutating commit moves the head by exactly one and each skipped commit leaves it unchanged")
     }
 }
 
@@ -697,7 +699,7 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             // vopr probe
             let _ = std.prop.sometimes("head move", true)
             map.insert(mut model.marks, key, value)
-            schedule_moved(db, mut model)
+            schedule_moved(db, mut model, true)
         } else if op == 2 {
             let key = 1 + std.rand.below(mut g, 6)
             let value: Option[u32] = if std.rand.below(mut g, 3) == 0 {
@@ -718,13 +720,17 @@ fn l63_schedule(mut db: Db, handles: (Table[u64, u32], Table[u64, u32]), seed: u
             }
             // vopr probe
             let _ = std.prop.sometimes("held write", true)
+            let mutating = match value {
+                Some(_) => true,
+                None => map.contains(model.rows, key),
+            }
             match value {
                 Some(v) => map.insert(mut model.rows, key, v),
                 None => {
                     let _ = map.remove(mut model.rows, key)
                 },
             }
-            schedule_moved(db, mut model)
+            schedule_moved(db, mut model, mutating)
         } else if op == 3 && list.len(parked) != 0 {
             let ready = poll_parked(mut db)?
             let at = std.rand.below(mut g, list.len(parked))

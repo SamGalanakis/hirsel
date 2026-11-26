@@ -333,7 +333,7 @@ fn cell_elision_and_inline_boundary(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     let from = snapshot(db)
     let size = db.file_end
     let _ = cell_law_nested(mut db, cell, a, b, false)?
-    cell_law_require(db.file_end == size + 42, "net-zero cell has no op")?
+    cell_law_require(db.file_end == size, "net-zero cell has no op")?
     cell_law_require(tree_stamp(snapshot(db).roots.collections) == tree_stamp(from.roots.collections), "net-zero cell stamp")?
     cell_law_require(list.len((changes(cell_reader, from, snapshot(db))?).rows) == 0, "net-zero cell diff")?
     let held_a = snapshot(db)

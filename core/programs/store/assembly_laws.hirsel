@@ -101,9 +101,13 @@ fn test_shared_payload_copy(c: Clock) -> Result[(), ()] {
 }
 
 fn pages_match(s: Snapshot, sh: Table[u64, u64], ix: Index[u64, u64, u64, ()], indexed: bool, limits: Limits) -> bool waits {
-    let table_model: Inline[(u64, u64), 5] = [(2, 5), (3, 9), (4, 2), (5, 13), (6, 6)]
-    let index_model: Inline[(u64, u64), 5] = [(2, 5), (3, 9), (5, 13), (4, 2), (6, 6)]
-    let expected = if indexed { index_model } else { table_model }
+    let table_model: Inline[(u64, u64), 5] =[(2, 5), (3, 9), (4, 2), (5, 13), (6, 6)]
+    let index_model: Inline[(u64, u64), 5] =[(2, 5), (3, 9), (5, 13), (4, 2), (6, 6)]
+    let expected = if indexed {
+        index_model
+    } else {
+        table_model
+    }
     let mut page = if indexed {
         result.unwrap(find_page(law_reader(s), s, ix, Included(1), Excluded(3), limits))
     } else {
@@ -140,7 +144,9 @@ fn pages_match(s: Snapshot, sh: Table[u64, u64], ix: Index[u64, u64, u64, ()], i
                     scan_next(law_reader(s), s, sh, take token, limits)
                 }
                 match take resumed {
-                    Ok(Paged(take following)) => { page = take following },
+                    Ok(Paged(take following)) => {
+                        page = take following
+                    },
                     _ => return false
                 }
             }
@@ -174,7 +180,7 @@ pub fn law_keyset_pages(c: Clock, tasks: Tasks) -> bool waits {
     let (original, ix) = result.unwrap(law_indexed(mut db, "pages", std.codec.key_u64(), std.codec.of_u64(), "bucket", code.describe(bucket), std.codec.key_u64()))
     let sh: Table[u64, u64] = clone(original)
     let written = run(mut db, None, original, fn(mut tx, call_env) -> Result[(), Error] {
-        let inserted: Inline[(u64, u64), 7] = [(5, 13), (3, 9), (7, 3), (1, 8), (6, 6), (2, 5), (4, 2)]
+        let inserted: Inline[(u64, u64), 7] =[(5, 13), (3, 9), (7, 3), (1, 8), (6, 6), (2, 5), (4, 2)]
         for (key, value) in inserted {
             put(mut tx, call_env, key, value)?
         }
@@ -185,7 +191,7 @@ pub fn law_keyset_pages(c: Clock, tasks: Tasks) -> bool waits {
         _ => return false
     }
     let held = snapshot(db)
-    let byte_limits: Inline[u64, 3] = [21, 22, 66]
+    let byte_limits: Inline[u64, 3] =[21, 22, 66]
     for row_limit in 1u64 .. 4 {
         for byte_limit in byte_limits {
             let limits = Limits(rows: row_limit, byte_limit: byte_limit)
@@ -195,30 +201,29 @@ pub fn law_keyset_pages(c: Clock, tasks: Tasks) -> bool waits {
         }
     }
     let one = Limits(rows: 1, byte_limit: 22)
-    if !page_empty(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Excluded(5), Included(5), one))) ||
-        !page_empty(result.unwrap(find_page(result.unwrap(reader(db, 0u64)), held, ix, Included(1), Excluded(1), one))) {
+    if !page_empty(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Excluded(5), Included(5), one))) || !page_empty(result.unwrap(find_page(result.unwrap(reader(db, 0u64)), held, ix, Included(1), Excluded(1), one))) {
         return false
     }
     let zero_rows = Limits(rows: 0, byte_limit: 22)
     let zero_bytes = Limits(rows: 1, byte_limit: 0)
-    if !page_missing(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, zero_rows), "rows") ||
-        !page_missing(find_page(result.unwrap(reader(db, 0u64)), held, ix, Unbounded, Unbounded, zero_bytes), "bytes") ||
-        !page_missing(scan_next(result.unwrap(reader(db, 0u64)), held, sh, page_token(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, one))), zero_bytes), "bytes") ||
-        !page_missing(find_next(result.unwrap(reader(db, 0u64)), held, ix, page_token(result.unwrap(find_page(result.unwrap(reader(db, 0u64)), held, ix, Unbounded, Unbounded, one))), zero_rows), "rows") {
+    if !page_missing(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, zero_rows), "rows") || !page_missing(find_page(result.unwrap(reader(db, 0u64)), held, ix, Unbounded, Unbounded, zero_bytes), "bytes") || !page_missing(scan_next(result.unwrap(reader(db, 0u64)), held, sh, page_token(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, one))), zero_bytes), "bytes") || !page_missing(find_next(result.unwrap(reader(db, 0u64)), held, ix, page_token(result.unwrap(find_page(result.unwrap(reader(db, 0u64)), held, ix, Unbounded, Unbounded, one))), zero_rows), "rows") {
         return false
     }
-
     result.unwrap(law_drop(mut db, tasks))
     result.unwrap(law_table(mut db, "pages", std.codec.key_u64(), std.codec.of_u64()))
     let (newer, fresh_ix) = result.unwrap(law_indexed(mut db, "pages", std.codec.key_u64(), std.codec.of_u64(), "bucket", code.describe(bucket), std.codec.key_u64()))
     let fresh_shape = view newer
     let current = snapshot(db)
     match scan_next(result.unwrap(reader(db, 0u64)), current, fresh_shape, page_token(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, one))), one) {
-        Ok(Moved(head)) => if head != version(current) { return false },
+        Ok(Moved(head)) => if head != version(current) {
+            return false
+        },
         _ => return false
     }
     match find_next(result.unwrap(reader(db, 0u64)), current, fresh_ix, page_token(result.unwrap(find_page(result.unwrap(reader(db, 0u64)), held, ix, Unbounded, Unbounded, one))), one) {
-        Ok(Moved(head)) => if head != version(current) { return false },
+        Ok(Moved(head)) => if head != version(current) {
+            return false
+        },
         _ => return false
     }
     match scan_next(result.unwrap(reader(db, 0u64)), held, fresh_shape, page_token(result.unwrap(scan_page(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded, one))), one) {
@@ -233,7 +238,11 @@ pub fn law_keyset_pages(c: Clock, tasks: Tasks) -> bool waits {
 
 @test
 fn test_keyset_pages(c: Clock, tasks: Tasks) -> Result[(), ()] waits {
-    if law_keyset_pages(c, tasks) { Ok(()) } else { Error(()) }
+    if law_keyset_pages(c, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 fn settle_fault_at(mut tx: Tx, attempted_at: u64) -> Result[Bytes, Bytes] {
@@ -255,7 +264,11 @@ pub fn law_settled_callinfo(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool w
 
 @test
 fn test_settled_callinfo(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
-    if law_settled_callinfo(d, c, r, tasks) { Ok(()) } else { Error(()) }
+    if law_settled_callinfo(d, c, r, tasks) {
+        Ok(())
+    } else {
+        Error(())
+    }
 }
 
 fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal: bool) -> bool waits {
@@ -266,14 +279,24 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     let rec = call_for(stream, 32)
     let request = request_digest(rec.key, rec.args)
     let admission = result.unwrap(admit_law_stream(mut db, stream, 0, request))
-    let Admitted(take complete) = take admission else { return false }
+    let Admitted(take complete) = take admission else {
+        return false
+    }
     result.unwrap(durable(mut db, ticket(complete)))
     let original_at = keyed_time(db) + 60000u64
     db.heads[0].at = original_at
     let plan = Plan(n_e: 8192, s_e: 8192, reply_max: 4096)
-    if room_refusal { db.ceiling = db.resident }
-    let fault_at = if room_refusal { original_at + 1u64 } else { original_at }
-    let tried = serve(mut db, take complete, plan, Some(take rec), fault_at, fn(mut tx, call_env) -> Result[Bytes, Bytes] {settle_fault_at(mut tx, call_env) })
+    if room_refusal {
+        db.ceiling = db.resident
+    }
+    let fault_at = if room_refusal {
+        original_at + 1u64
+    } else {
+        original_at
+    }
+    let tried = serve(mut db, take complete, plan, Some(take rec), fault_at, fn(mut tx, call_env) -> Result[Bytes, Bytes] {
+        settle_fault_at(mut tx, call_env)
+    })
     let (take stopped, way) = match take tried {
         Ok(Failed(take pending_run, Raised(2u32))) if !room_refusal => (take pending_run, 1u8),
         // entry(k, v) = 62 + r8(k) + r8(v) (§1.11). The 26-byte stream row
@@ -288,21 +311,34 @@ fn settled_callinfo_case(d: Dir, c: Clock, r: Random, tasks: Tasks, room_refusal
     if version(snapshot(db)) != 1 || stream_now(db, stream) != (0u64, 1u64) {
         return false
     }
-    if let Some(_) = result.unwrap(recorded(db, main_branch(db), 2)) { return false }
+    if let Some(_) = result.unwrap(recorded(db, main_branch(db), 2)) {
+        return false
+    }
     db.ceiling = options.resident_limit
     db.heads[0].at = original_at + 1u64
     for _ in 0u64 .. 2 {
-        let advanced = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), ()] {Ok(()) }))
-        if let Committed(_) = advanced {} else { return false }
+        let advanced = result.unwrap(run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), ()] {
+            let _ = info(mut tx)
+            Ok(())
+        }))
+        if let Committed(_) = advanced {} else {
+            return false
+        }
     }
     let settled = conclude(mut db, take stopped, key_word(2), Resident)
-    let Ok(Committed(receipt)) = take settled else { return false }
-    if receipt.reply != key_word(2) { return false }
+    let Ok(Committed(receipt)) = take settled else {
+        return false
+    }
+    if receipt.reply != key_word(2) {
+        return false
+    }
     result.unwrap(durable(mut db, receipt.ticket))
     result.unwrap(close(take db))
     let mut reopened = result.unwrap(open(tasks, dir, c, r, options))
     let line = main_branch(reopened)
-    let Some(found) = result.unwrap(recorded(reopened, line, 4)) else { return false }
+    let Some(found) = result.unwrap(recorded(reopened, line, 4)) else {
+        return false
+    }
     let ctx = call_info(reopened.store, 0, 2, original_at, original_at)
     if found.settle != way || found.base != 1 || found.at != original_at || found.seed != ctx.seed || reopened.heads[0].at != original_at + 1u64 {
         return false

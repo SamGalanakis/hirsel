@@ -1,12 +1,5 @@
 name: Hirsel Tree-sitter grammar
 on:
-  push:
-    paths:
-      - editors/tree-sitter-hirsel/**
-      - core/**
-      - docs/spec/**
-      - docs/PRIMER.md
-      - .github/workflows/tree-sitter.yml
   pull_request:
     paths:
       - editors/tree-sitter-hirsel/**
@@ -14,11 +7,13 @@ on:
       - docs/spec/**
       - docs/PRIMER.md
       - .github/workflows/tree-sitter.yml
+  schedule:
+    - cron: '5 4 * * *'
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

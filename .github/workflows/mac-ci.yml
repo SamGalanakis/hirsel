@@ -1,9 +1,10 @@
 name: Mac CI
 on:
-  push:
-    branches: [main]
   schedule:
+    - cron: '30 */6 * * *'
     - cron: '30 3 * * *'
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       control:
@@ -13,8 +14,8 @@ on:
         options: [none, linux-platform, unexplained-skip]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event.schedule }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,13 +32,14 @@ jobs:
       nightly_native_reason: ${{ steps.plan.outputs.nightly_reason }}
     steps:
       - uses: actions/checkout@v4
-        if: ${{ github.event_name == 'schedule' }}
+        if: ${{ github.event.schedule == '30 3 * * *' }}
         with:
           persist-credentials: false
       - name: Record planned exclusions
         id: plan
         env:
           CONTROL: ${{ inputs.control || 'none' }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
           {
             echo "control=$CONTROL"
@@ -49,9 +51,9 @@ jobs:
                 echo 'mac_reason=The aggregator negative control skips the Linux image build.'
                 ;;
             esac
-            if [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
-              echo 'cross_reason=Per-push checks are scheduled on pushes to main.'
-              echo 'mac_reason=Per-push checks are scheduled on pushes to main.'
+            if [[ "$SCHEDULE" == '30 3 * * *' ]]; then
+              echo 'cross_reason=Mac laws run separately from the nightly corpus comparison.'
+              echo 'mac_reason=Mac laws run separately from the nightly corpus comparison.'
               dist_help=$(tools/toolchain-dist/build --help)
               if ! grep -Eq -- '(^|[[:space:]])--host([=[:space:]]|$)' <<< "$dist_help"; then
                 echo 'nightly_reason=Waiting for R4: toolchain-dist/build --host aarch64-apple-darwin.'
@@ -229,7 +231,7 @@ jobs:
           NEEDS: ${{ toJSON(needs) }}
         run: python3 tools/ci/mac_aggregate.py "$RUNNER_TEMP/mac-reds.json"
       - name: File or update failure issues
-        if: ${{ failure() && steps.aggregate.outcome == 'failure' && (github.event_name != 'workflow_dispatch' || inputs.control == 'none') }}
+        if: ${{ failure() && steps.aggregate.outcome == 'failure' && github.event_name != 'pull_request' && (github.event_name != 'workflow_dispatch' || inputs.control == 'none') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

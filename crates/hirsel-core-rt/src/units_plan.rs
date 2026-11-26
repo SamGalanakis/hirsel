@@ -47,7 +47,6 @@ pub(super) struct UntiedPlan {
     pub(super) retained_bytes: usize,
     pub(super) reclaim_bytes: usize,
     pub(super) reclaim_slots: usize,
-    pub(super) dedicated_clean_bytes: usize,
     pub(super) ready_scratch_bytes: usize,
     pub(super) idle_release_ms: u64,
     pub(super) fixed_memory_bytes: usize,
@@ -203,10 +202,6 @@ impl UntiedPlan {
         } else {
             (reclaim / crate::task_heap::SLAB).clamp(64, 4096)
         };
-        let clean = (retained * 4).clamp(16 * MIB, 512 * MIB).min(
-            host.address_space_limit
-                .map_or(usize::MAX, |a| (a / 8) as usize),
-        );
         Ok(Self {
             initial_units: k,
             workers: w,
@@ -227,7 +222,6 @@ impl UntiedPlan {
             retained_bytes: retained,
             reclaim_bytes: reclaim,
             reclaim_slots,
-            dedicated_clean_bytes: clean,
             ready_scratch_bytes: 2
                 * reactor.poll_batch as usize
                 * size_of::<crate::tasks::ReadyArm>(),

@@ -15,6 +15,7 @@ impl FrameReader {
     /// A reader of `blocks`: a helper stream's decoder starts from its
     /// header block, which carries its entry.
     pub(super) fn open(source: ProviderFile, mut blocks: StreamBlocks) -> Result<Self, Fault> {
+        Self::take_block_storage(&mut blocks);
         let decoder = match blocks.decoder(|offset, bytes| source.read_at(offset, bytes)) {
             Ok(decoder) => decoder,
             Err(ReadError::Format(s)) => return Err(Fault::stopped(s, 0)),
@@ -31,7 +32,19 @@ impl FrameReader {
         Ok(reader)
     }
 
+    fn take_block_storage(blocks: &mut StreamBlocks) {
+        if let Some(memory) = crate::units::memory() {
+            blocks.swap_buffer(&mut memory.take_tape_buffer());
+        }
+    }
+
     fn keep_block_storage(&mut self) {
+        if let Some(memory) = crate::units::memory() {
+            let mut bytes = Vec::new();
+            self.blocks.swap_buffer(&mut bytes);
+            memory.put_tape_buffer(bytes);
+            return;
+        }
         self.retained_block = RETENTION.retain(self.blocks.buffer_capacity());
         if self.retained_block.is_none() {
             self.blocks.discard_buffer();
@@ -47,6 +60,7 @@ impl FrameReader {
                 return Ok(frame);
             }
             self.retained_block = None;
+            Self::take_block_storage(&mut self.blocks);
             let decoded = match self
                 .blocks
                 .next(|offset, bytes| self.source.read_at(offset, bytes))
@@ -78,6 +92,7 @@ impl FrameReader {
                 return Err(Fault::Corrupt);
             }
             self.retained_block = None;
+            Self::take_block_storage(&mut self.blocks);
             let decoded = match self
                 .blocks
                 .next(|offset, bytes| self.source.read_at(offset, bytes))

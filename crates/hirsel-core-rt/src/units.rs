@@ -649,38 +649,6 @@ fn wake_unit_by_id(id: u32) {
     }
 }
 
-fn push_arrival(u: &Unit, id: u64, flags: Ready) {
-    let mut q = u.xready.lock().unwrap();
-    q.push((id, flags));
-    u.xpending.store(true, Ordering::Release);
-}
-
-/// Readiness queued for the running unit, as (reactor identity, flags), in
-/// the order it reached the unit. A push after the check wakes the unit, so
-/// it is taken at the unit's next switch. Nobody else takes the readiness of
-/// the slot this unit runs on, so each scheduler turn takes it here first
-/// rather than going dry, parking and resuming for readiness already there.
-pub(crate) fn take_xready(mut each: impl FnMut(u64, Ready)) {
-    if untied() {
-        (pool_hooks().take_slot)();
-    }
-    // SAFETY: called by the running unit's scheduler.
-    let u = unsafe { &*cur() };
-    if !u.xpending.load(Ordering::Acquire) {
-        return;
-    }
-    // SAFETY: only the running unit touches its spare buffer.
-    let batch = unsafe { &mut *u.xspare.get() };
-    {
-        let mut q = u.xready.lock().unwrap();
-        u.xpending.store(false, Ordering::Relaxed);
-        std::mem::swap(&mut *q, batch);
-    }
-    for (id, flags) in batch.drain(..) {
-        each(id, flags);
-    }
-}
-
 /// The running unit and the slot its registrations go to, for the slot
 /// pollers' tags: this thread's slot.
 fn here() -> Option<hirsel_core_net::Here> {
@@ -855,6 +823,7 @@ fn fire_timers(p: &Pool, ix: usize) {
 
 #[path = "units_poll.rs"]
 mod poll;
+pub(crate) use poll::take_xready;
 use poll::{check_slot, park_slot};
 
 /// The next unit for worker `ix`, taken off the queues and the count.

@@ -12,8 +12,9 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-const MIB: usize = 1 << 20;
-const RELEASE_SLOTS: usize = 32_768;
+#[path = "unit_retention.rs"]
+mod retention;
+use retention::{Retention, Stock};
 
 pub(super) struct UnitStack {
     base: NonNull<u8>,
@@ -61,72 +62,6 @@ impl Drop for UnitStack {
     }
 }
 
-struct Stock<T> {
-    idle: Vec<(T, usize)>,
-    bytes: usize,
-    peak: usize,
-    hits: usize,
-    misses: usize,
-}
-
-struct Cache<T> {
-    stock: Mutex<Stock<T>>,
-    cap: usize,
-}
-
-impl<T> Cache<T> {
-    fn new(cap: usize, min_bytes: usize) -> Self {
-        Self {
-            stock: Mutex::new(Stock {
-                idle: Vec::with_capacity(cap / min_bytes),
-                bytes: 0,
-                peak: 0,
-                hits: 0,
-                misses: 0,
-            }),
-            cap,
-        }
-    }
-
-    fn take(&self, fits: impl FnMut(&T) -> bool) -> Option<T> {
-        let mut stock = self.stock.lock().unwrap();
-        let mut fits = fits;
-        let Some(index) = stock.idle.iter().rposition(|(value, _)| fits(value)) else {
-            stock.misses += 1;
-            return None;
-        };
-        let (value, bytes) = stock.idle.swap_remove(index);
-        stock.bytes -= bytes;
-        stock.hits += 1;
-        Some(value)
-    }
-
-    fn put(&self, value: T, bytes: usize) -> Option<T> {
-        let mut stock = self.stock.lock().unwrap();
-        if bytes > self.cap - stock.bytes {
-            return Some(value);
-        }
-        stock.bytes += bytes;
-        stock.peak = stock.peak.max(stock.bytes);
-        stock.idle.push((value, bytes));
-        None
-    }
-
-    fn drain(&self) -> Vec<(T, usize)> {
-        let mut stock = self.stock.lock().unwrap();
-        stock.bytes = 0;
-        std::mem::take(&mut stock.idle)
-    }
-
-    fn report(&self, name: &str) -> String {
-        let stock = self.stock.lock().unwrap();
-        format!(
-            "{name}_cap={} {name}_peak={} {name}_hits={} {name}_misses={}",
-            self.cap, stock.peak, stock.hits, stock.misses
-        )
-    }
-}
-
 type Job = Box<dyn FnOnce() + Send>;
 
 enum Reclaim {
@@ -134,6 +69,8 @@ enum Reclaim {
     TaskStack(Stack),
     Slab(Slab),
     Page(Extent),
+    #[cfg(feature = "record")]
+    Tape(Vec<u8>),
 }
 
 impl Reclaim {
@@ -143,6 +80,8 @@ impl Reclaim {
             Self::TaskStack(stack) => drop(stack),
             Self::Slab(slab) => slab.dispose(),
             Self::Page(page) => drop(page),
+            #[cfg(feature = "record")]
+            Self::Tape(bytes) => drop(bytes),
         }
     }
 }
@@ -151,6 +90,10 @@ struct Work {
     maps: VecDeque<Job>,
     releases: VecDeque<(usize, Reclaim)>,
     pending_bytes: usize,
+    pending_slots: usize,
+    sync_dispose_count: usize,
+    sync_dispose_bytes: usize,
+    purge_idle: bool,
     peak_pending_bytes: usize,
     closing: bool,
 }
@@ -158,16 +101,18 @@ struct Work {
 pub(crate) struct Memory {
     plan: super::UntiedPlan,
     launch: OnceLock<hirsel_core_ids::launch::Metadata>,
-    unit_stacks: Cache<UnitStack>,
-    task_stacks: Cache<Stack>,
-    slabs: Cache<Slab>,
-    pages: Cache<Extent>,
+    retention: Mutex<Retention>,
     work: Mutex<Work>,
     ready: Condvar,
 }
 
 /// The storage operations a running task can request from its unit pool.
 pub(crate) trait SharedMemory: Sync {
+    fn ready_scratch_bytes(&self) -> usize;
+    #[cfg(feature = "record")]
+    fn take_tape_buffer(&self) -> Vec<u8>;
+    #[cfg(feature = "record")]
+    fn put_tape_buffer(&self, bytes: Vec<u8>);
     fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata;
     fn take_task_stack(&self) -> Stack;
     fn put_task_stack(&self, stack: Stack);
@@ -184,14 +129,15 @@ impl Memory {
         Self {
             plan,
             launch: OnceLock::new(),
-            unit_stacks: Cache::new(64 * MIB, plan.unit_stack_bytes),
-            task_stacks: Cache::new(64 * MIB, crate::fiber::COMMIT),
-            slabs: Cache::new(128 * MIB, crate::task_heap::SLAB),
-            pages: Cache::new(64 * MIB, crate::task_heap::page_bytes()),
+            retention: Mutex::new(Retention::new()),
             work: Mutex::new(Work {
                 maps: VecDeque::new(),
-                releases: VecDeque::with_capacity(RELEASE_SLOTS),
+                releases: VecDeque::with_capacity(plan.reclaim_slots.min(64)),
                 pending_bytes: 0,
+                pending_slots: 0,
+                sync_dispose_count: 0,
+                sync_dispose_bytes: 0,
+                purge_idle: false,
                 peak_pending_bytes: 0,
                 closing: false,
             }),
@@ -250,31 +196,98 @@ impl Memory {
         answer.unwrap()
     }
 
-    /// Queue `release` for the memory thread, or dispose of it here when the
-    /// queue is full rather than wait for room.
+    fn take<T>(
+        &self,
+        select: impl Fn(&mut Retention) -> &mut Stock<T>,
+        fits: impl FnMut(&T) -> bool,
+    ) -> Option<T> {
+        self.retention.lock().unwrap().take(select, fits)
+    }
+
+    fn keep<T>(
+        &self,
+        select: impl Fn(&mut Retention) -> &mut Stock<T>,
+        item: T,
+        bytes: usize,
+        reclaim: fn(T) -> Reclaim,
+    ) {
+        let cap = self.plan.retained_bytes;
+        if bytes > cap {
+            self.release(bytes, reclaim(item));
+            return;
+        }
+        loop {
+            let (bytes, removed) = {
+                let mut stock = self.retention.lock().unwrap();
+                if bytes <= cap - stock.used {
+                    stock.keep(select, item, bytes);
+                    return;
+                }
+                stock.pop_oldest(u64::MAX).unwrap()
+            };
+            self.release(bytes, removed);
+        }
+    }
+
+    /// The pending bounds include the disposal currently in flight.
     fn release(&self, bytes: usize, release: Reclaim) {
         let mut work = self.work.lock().unwrap();
-        if work.releases.len() == RELEASE_SLOTS {
+        if bytes > self.plan.reclaim_bytes - work.pending_bytes
+            || work.pending_slots == self.plan.reclaim_slots
+        {
+            work.sync_dispose_count += 1;
+            work.sync_dispose_bytes += bytes;
             drop(work);
             release.dispose();
             return;
         }
         work.releases.push_back((bytes, release));
+        work.pending_slots += 1;
         work.pending_bytes += bytes;
         work.peak_pending_bytes = work.peak_pending_bytes.max(work.pending_bytes);
         self.ready.notify_one();
     }
 
+    pub(super) fn has_retained(&self) -> bool {
+        self.retention.lock().unwrap().used != 0
+    }
+
+    pub(super) fn request_idle_purge(&self) {
+        self.work.lock().unwrap().purge_idle = true;
+        self.ready.notify_one();
+    }
+
+    fn purge_stocks(&self) {
+        // A resumed worker can recycle while purge is in flight. Leave that
+        // new stock for the next idle period and return to servicing maps.
+        let cutoff = self.retention.lock().unwrap().cutoff();
+        loop {
+            let next = self.retention.lock().unwrap().pop_oldest(cutoff);
+            match next {
+                Some((_, item)) => item.dispose(),
+                None => return,
+            }
+        }
+    }
+
     fn run(&self) {
         loop {
-            let (map, release) = {
+            let (map, release, purge) = {
                 let mut work = self.work.lock().unwrap();
-                while work.maps.is_empty() && work.releases.is_empty() && !work.closing {
+                while work.maps.is_empty()
+                    && work.releases.is_empty()
+                    && !work.purge_idle
+                    && !work.closing
+                {
                     work = self.ready.wait(work).unwrap();
                 }
-                (work.maps.pop_front(), work.releases.pop_front())
+                (
+                    work.maps.pop_front(),
+                    work.releases.pop_front(),
+                    std::mem::take(&mut work.purge_idle),
+                )
             };
-            if map.is_none() && release.is_none() {
+            if map.is_none() && release.is_none() && !purge {
                 break;
             }
             if let Some(map) = map {
@@ -282,41 +295,77 @@ impl Memory {
             }
             if let Some((bytes, release)) = release {
                 release.dispose();
-                self.work.lock().unwrap().pending_bytes -= bytes;
+                let mut work = self.work.lock().unwrap();
+                work.pending_bytes -= bytes;
+                work.pending_slots -= 1;
+            }
+            if purge {
+                crate::task_heap::purge();
+                self.purge_stocks();
             }
         }
-        drop(self.unit_stacks.drain());
-        drop(self.task_stacks.drain());
-        for (slab, _) in self.slabs.drain() {
-            slab.dispose();
-        }
-        drop(self.pages.drain());
+        self.purge_stocks();
     }
 
     pub(super) fn cached_unit_stack(&self) -> Option<UnitStack> {
-        self.unit_stacks.take(|_| true)
+        self.take(|stock| &mut stock.unit_stacks, |_| true)
     }
 
     pub(super) fn put_unit_stack(&self, stack: UnitStack) {
         let bytes = stack.len;
-        if let Some(stack) = self.unit_stacks.put(stack, bytes) {
-            self.release(bytes, Reclaim::UnitStack(stack));
-        }
+        self.keep(
+            |stock| &mut stock.unit_stacks,
+            stack,
+            bytes,
+            Reclaim::UnitStack,
+        );
     }
 
     pub(super) fn report(&self) {
-        let cache = [
-            self.unit_stacks.report("unit_stack"),
-            self.task_stacks.report("task_stack"),
-            self.slabs.report("slab"),
-            self.pages.report("page"),
-        ];
-        let pending = self.work.lock().unwrap().peak_pending_bytes;
-        eprintln!("pool-memory {} pending_peak={pending}", cache.join(" "));
+        let cap = self.plan.retained_bytes;
+        let (cache, peak) = {
+            let stock = self.retention.lock().unwrap();
+            (
+                [
+                    stock.unit_stacks.report("unit_stack", cap),
+                    stock.task_stacks.report("task_stack", cap),
+                    stock.slabs.report("slab", cap),
+                    stock.pages.report("page", cap),
+                ],
+                stock.peak,
+            )
+        };
+        let work = self.work.lock().unwrap();
+        eprintln!(
+            "pool-memory {} pending_peak={} retained_cap={cap} retained_peak={peak} sync_dispose_count={} sync_dispose_bytes={}",
+            cache.join(" "),
+            work.peak_pending_bytes,
+            work.sync_dispose_count,
+            work.sync_dispose_bytes
+        );
     }
 }
 
 impl SharedMemory for Memory {
+    fn ready_scratch_bytes(&self) -> usize {
+        self.plan.ready_scratch_bytes
+    }
+
+    #[cfg(feature = "record")]
+    fn take_tape_buffer(&self) -> Vec<u8> {
+        self.take(|stock| &mut stock.tapes, |_| true)
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "record")]
+    fn put_tape_buffer(&self, mut bytes: Vec<u8>) {
+        let capacity = bytes.capacity();
+        if capacity != 0 {
+            bytes.clear();
+            self.keep(|stock| &mut stock.tapes, bytes, capacity, Reclaim::Tape);
+        }
+    }
+
     fn native_metadata(&self, target: &str, n_place: u64, describe: bool) -> Metadata {
         // All units have the same target and leading launch options. Resolve
         // the lazy digest here so its file mapping is also released here.
@@ -346,26 +395,31 @@ impl SharedMemory for Memory {
 
     fn take_task_stack(&self) -> Stack {
         let reserve = self.plan.task_stack_reserve;
-        self.task_stacks
-            .take(|_| true)
+        self.take(|stock| &mut stock.task_stacks, |_| true)
             .unwrap_or_else(|| self.map(move || Stack::new_with_reserve(reserve)))
     }
 
     fn put_task_stack(&self, stack: Stack) {
         let bytes = stack.committed_bytes();
-        if let Some(stack) = self.task_stacks.put(stack, bytes) {
-            self.release(bytes, Reclaim::TaskStack(stack));
-        }
+        self.keep(
+            |stock| &mut stock.task_stacks,
+            stack,
+            bytes,
+            Reclaim::TaskStack,
+        );
     }
 
     fn take_slab(&self) -> Option<Slab> {
-        self.slabs.take(|_| true)
+        self.take(|stock| &mut stock.slabs, |_| true)
     }
 
     fn put_slab(&self, slab: Slab) {
-        if let Some(slab) = self.slabs.put(slab, crate::task_heap::SLAB) {
-            self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
-        }
+        self.keep(
+            |stock| &mut stock.slabs,
+            slab,
+            crate::task_heap::SLAB,
+            Reclaim::Slab,
+        );
     }
 
     fn dispose_slab(&self, slab: Slab) {
@@ -373,18 +427,19 @@ impl SharedMemory for Memory {
     }
 
     fn take_page(&self, granules: usize, align: usize, prefix: usize) -> Option<Extent> {
-        self.pages.take(|extent| {
-            extent.granules() == granules
-                && extent.prefix() == prefix
-                && extent.payload_aligned(align)
-        })
+        self.take(
+            |stock| &mut stock.pages,
+            |extent| {
+                extent.granules() == granules
+                    && extent.prefix() == prefix
+                    && extent.payload_aligned(align)
+            },
+        )
     }
 
     fn put_page(&self, page: Extent) {
         let bytes = page.committed_bytes();
-        if let Some(page) = self.pages.put(page, bytes) {
-            self.release(bytes, Reclaim::Page(page));
-        }
+        self.keep(|stock| &mut stock.pages, page, bytes, Reclaim::Page);
     }
 
     fn map_range(&self, len: usize, align: usize, prefix: usize) -> Option<NonNull<u8>> {
@@ -408,3 +463,7 @@ impl Drop for MemoryThread {
         self.thread.take().unwrap().join().unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "unit_memory_tests.rs"]
+mod tests;

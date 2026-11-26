@@ -247,9 +247,11 @@ pub(crate) struct ReadyArm {
     identity: u64,
 }
 
-// A network poll can return 128 events, each with a read and a write waiter.
-// Larger batches still drain in full, but release their backing after the turn.
-const RETAINED_READY_CAPACITY: usize = 256;
+#[path = "tasks_ready.rs"]
+mod ready;
+#[cfg(test)]
+pub(crate) use ready::check_ready_scratch;
+use ready::{ready_scratch_bytes, release_ready_scratch};
 
 struct Arm<T> {
     task: T,
@@ -1059,9 +1061,7 @@ impl Scheduler {
         if self.readies.pending.swap(false, Ordering::Acquire) {
             std::mem::swap(&mut self.ready_tokens, &mut *self.readies.lock());
             self.parked.capture(self.ready_tokens.drain(..), captured);
-            if self.ready_tokens.capacity() > RETAINED_READY_CAPACITY {
-                self.ready_tokens = Vec::new();
-            }
+            release_ready_scratch(&mut self.ready_tokens, ready_scratch_bytes() / 2);
         }
     }
 
@@ -1125,9 +1125,8 @@ impl Scheduler {
                 }
                 self.apply_ready(ready);
             }
-            if captured.capacity() <= RETAINED_READY_CAPACITY {
-                self.ready_arms = captured;
-            }
+            release_ready_scratch(&mut captured, ready_scratch_bytes());
+            self.ready_arms = captured;
             self.take_timers();
             #[cfg(feature = "record")]
             if !self.tapes.live.is_empty() {

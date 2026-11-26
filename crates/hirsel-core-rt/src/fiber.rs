@@ -356,9 +356,6 @@ pub(crate) struct Stock {
     // The prefix whose stack pages have already been returned during idle.
     cooled: usize,
     surplus: Vec<Stack>,
-    // Repeated calls from one live unit reuse its last stack without locking
-    // the pool. The unit gives it back with the rest of its task storage.
-    recent: Option<Stack>,
 }
 
 impl Default for Stock {
@@ -386,16 +383,12 @@ impl Stock {
             kept: Vec::new(),
             cooled: 0,
             surplus: Vec::new(),
-            recent: None,
         }
     }
 
     pub(crate) fn take(&mut self) -> Stack {
         if let Some(memory) = crate::units::memory() {
-            return self
-                .recent
-                .take()
-                .unwrap_or_else(|| memory.take_task_stack());
+            return memory.take_task_stack();
         }
         if let Some(stack) = self.surplus.pop() {
             SURPLUS.fetch_sub(1, Relaxed);
@@ -405,13 +398,11 @@ impl Stock {
     }
 
     pub(crate) fn recycle(&mut self, stack: Stack) {
+        stack.trim();
         if let Some(memory) = crate::units::memory() {
-            if let Some(previous) = self.recent.replace(stack) {
-                memory.put_task_stack(previous);
-            }
+            memory.put_task_stack(stack);
             return;
         }
-        stack.trim();
         match self.budget.retain(stack.retained()) {
             Some(held) => {
                 self.cooled = self.cooled.min(self.kept.len());
@@ -449,11 +440,6 @@ impl Stock {
 
 impl Drop for Stock {
     fn drop(&mut self) {
-        if let Some(stack) = self.recent.take()
-            && let Some(memory) = crate::units::memory()
-        {
-            memory.put_task_stack(stack);
-        }
         self.release();
     }
 }

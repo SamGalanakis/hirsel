@@ -184,6 +184,11 @@ pub struct StreamBlocks {
 }
 
 impl StreamBlocks {
+    /// Exchange idle read storage without changing the stream position.
+    pub fn swap_buffer(&mut self, bytes: &mut Vec<u8>) {
+        std::mem::swap(&mut self.bytes, bytes);
+    }
+
     pub fn buffer_capacity(&self) -> usize {
         self.bytes.capacity()
     }

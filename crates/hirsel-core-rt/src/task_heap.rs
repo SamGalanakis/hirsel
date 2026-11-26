@@ -5,6 +5,8 @@
 //! Only the custodian changes open free lists. Foreign workers publish
 //! returned slots, and an outstanding slot pins its page until collection.
 mod dedicated;
+mod idle;
+pub(crate) use idle::{has_retaining, idle_wait, purge};
 mod returns;
 pub(crate) mod slabs;
 
@@ -45,44 +47,6 @@ pub(crate) const RELEASE_DELAY_MS: i32 = 100;
 static RETAINING: Mutex<Vec<Arc<Heap>>> = Mutex::new(Vec::new());
 static RETAINING_HEAPS: AtomicUsize = AtomicUsize::new(0);
 
-/// The poll timeout for a worker about to wait `timeout` ms (-1: no limit), and the
-/// time after which a wait that finds nothing releases retained pages and stacks.
-pub(crate) fn idle_wait(timeout: i32, warm_stacks: bool) -> (i32, Option<u64>) {
-    let retaining = warm_stacks
-        || slabs::retaining()
-        || returns::orphaned_pending()
-        || RETAINING_HEAPS.load(Ordering::Relaxed) != 0
-        || crate::fiber::surplus();
-    if !retaining || (0..=RELEASE_DELAY_MS).contains(&timeout) {
-        (timeout, None)
-    } else {
-        let due = crate::os::monotonic_ns() + RELEASE_DELAY_MS as u64 * 1_000_000;
-        (RELEASE_DELAY_MS, Some(due))
-    }
-}
-
-/// Return every retained slab's and dedicated page's native pages to the
-/// host. A worker calls this after an `idle_wait` that found nothing, or
-/// before it parks without a poller.
-pub(crate) fn purge() {
-    returns::purge();
-    slabs::purge();
-    if RETAINING_HEAPS.load(Ordering::Relaxed) == 0 {
-        return;
-    }
-    let heaps = std::mem::take(&mut *RETAINING.lock().unwrap());
-    RETAINING_HEAPS.fetch_sub(heaps.len(), Ordering::Relaxed);
-    // Returns list the heap while holding its page cache, so release
-    // the list lock before taking any cache lock.
-    for heap in heaps {
-        let mut cache = heap.cache().lock().unwrap();
-        cache.listed = false;
-        cache.purge_slabs();
-        while let Some(oldest) = cache.dedicated.remove_oldest() {
-            cache.dedicated.purge(oldest);
-        }
-    }
-}
 const SLAB_BINS: usize = size_bin(SLAB / 2) as usize + 1;
 // The most native pages a slab spans.
 const _: () = assert!(SLAB / MIN_PAGE_BYTES <= u16::BITS as usize);
@@ -1036,10 +1000,15 @@ impl Heap {
             let pages = state.ensure_pages();
             let ready = if slab { pages.available(class) } else { None };
             let dedicated_payer = (!slab).then_some(payer);
-            let mut dedicated = (!slab).then(|| heap.cache().lock().unwrap());
-            let mut cached = || match dedicated.as_mut() {
-                Some(cache) => cache.dedicated.take(class),
-                None => heap.cache().lock().unwrap().slabs.pop(),
+            // A new extent can park on the memory thread. The idle purge
+            // must be able to acquire this cache during that park.
+            let cached = || {
+                let mut cache = heap.cache().lock().unwrap();
+                if slab {
+                    cache.slabs.pop()
+                } else {
+                    cache.dedicated.take(class)
+                }
             };
             let page = if let Some(page) = ready {
                 page
@@ -1052,18 +1021,20 @@ impl Heap {
             } else {
                 Page::new(heap, class, dedicated_payer)
             };
-            if let Some(cache) = dedicated.as_mut() {
+            if !slab {
                 let payload = (*page.as_ref().slots.get()).first;
                 let backing = page.as_ref().backing.dedicated();
                 let reused_reservation = backing.born.get() != 0;
                 backing.born.set(class.stride);
                 let before = backing.backed(payload);
                 let after = backing.use_extent(payload, class.stride);
-                cache
-                    .dedicated
-                    .add_live(0, after, after > before, reused_reservation);
+                heap.cache().lock().unwrap().dedicated.add_live(
+                    0,
+                    after,
+                    after > before,
+                    reused_reservation,
+                );
             }
-            drop(dedicated);
             if (*page.as_ref().slots.get()).free.is_null() {
                 extend(heap, pages, page, class);
             }
@@ -1576,8 +1547,12 @@ unsafe fn release_slow(mut state: Local<'_>, page: PagePointer, payload: NonNull
         let heap = state.0;
         if payload.addr().get() & (SLAB - 1) == 0 {
             let mut cache = heap.cache().lock().unwrap();
-            cache.dedicated.retain(page);
-            cache.list_retaining(&page.as_ref().heap);
+            if crate::units::memory().is_some() {
+                cache.dedicated.return_to_pool(page);
+            } else {
+                cache.dedicated.retain(page);
+                cache.list_retaining(&page.as_ref().heap);
+            }
             return;
         }
         let pages = state.private_pages();
@@ -1604,10 +1579,14 @@ unsafe fn release_slow(mut state: Local<'_>, page: PagePointer, payload: NonNull
                 pages.unlink(page, class);
             }
             unlist(pages, page);
-            let mut cache = heap.cache().lock().unwrap();
-            cache.slabs.push(page);
-            cache.list_retaining(&page.as_ref().heap);
-            heap.pending.set(true);
+            if crate::units::memory().is_some() {
+                Page::destroy(page);
+            } else {
+                let mut cache = heap.cache().lock().unwrap();
+                cache.slabs.push(page);
+                cache.list_retaining(&page.as_ref().heap);
+                heap.pending.set(true);
+            }
         }
     }
 }

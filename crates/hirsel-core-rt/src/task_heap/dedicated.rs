@@ -140,6 +140,16 @@ impl DedicatedCache {
         }
     }
 
+    pub(super) fn return_to_pool(&mut self, page: PagePointer) {
+        // SAFETY: this heap owns the empty mapping until it reaches the pool.
+        let bytes = unsafe {
+            let page = page.as_ref();
+            page.backing.dedicated().backed((*page.slots.get()).first)
+        };
+        self.demand -= bytes;
+        self.purge(page);
+    }
+
     /// Move an emptied page's backing from live demand to retained stock.
     pub(super) fn retain(&mut self, page: PagePointer) {
         // SAFETY: this heap owns the empty page, its mapping and its key.

@@ -421,7 +421,7 @@ pub(crate) struct Slab {
 unsafe impl Send for Slab {}
 
 impl Slab {
-    pub(super) fn allocate(heap_address: usize) -> (Self, NonNull<u8>) {
+    pub(crate) fn allocate(heap_address: usize) -> (Self, NonNull<u8>) {
         let memory = crate::units::memory();
         if let Some(slab) = memory.and_then(|memory| memory.take_slab()) {
             let start = slab.start;

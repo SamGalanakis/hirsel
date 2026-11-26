@@ -313,7 +313,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
     let mut run_args = invocation.arguments;
     let mut recording_build = false;
-    let mut additional_runtimes = crate::installation::RuntimeVariants::<PathBuf>::default();
+    let mut additional_runtimes = std::collections::BTreeMap::new();
     let mut record_path = None;
     let mut replay_tape = None;
     let mut test_replay = false;
@@ -328,6 +328,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut grants = crate::package_dir::Grants::default();
     let mut json = false;
     use crate::cli::OptionId as Opt;
+    use crate::installation::{Flavour, Observation};
     for (option, value) in invocation.options {
         let value = value.unwrap_or_default();
         match option {
@@ -343,14 +344,20 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 }
             }
             Opt::Recording => recording_build = true,
-            Opt::RecordingRuntime => additional_runtimes.recording = Some(PathBuf::from(value)),
-            Opt::ProfRuntime => additional_runtimes.prof = Some(PathBuf::from(value)),
-            Opt::ProfRecordingRuntime => {
-                additional_runtimes.prof_recording = Some(PathBuf::from(value))
+            Opt::RecordingRuntime => {
+                additional_runtimes.insert(Flavour::RECORDING, PathBuf::from(value));
             }
-            Opt::ObservedRuntime => additional_runtimes.observed = Some(PathBuf::from(value)),
+            Opt::ProfRuntime => {
+                additional_runtimes.insert(Flavour::PROF, PathBuf::from(value));
+            }
+            Opt::ProfRecordingRuntime => {
+                additional_runtimes.insert(Flavour::PROF_RECORDING, PathBuf::from(value));
+            }
+            Opt::ObservedRuntime => {
+                additional_runtimes.insert(Flavour::OBSERVED, PathBuf::from(value));
+            }
             Opt::ObservedRecordingRuntime => {
-                additional_runtimes.observed_recording = Some(PathBuf::from(value))
+                additional_runtimes.insert(Flavour::OBSERVED_RECORDING, PathBuf::from(value));
             }
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
@@ -765,23 +772,29 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         .as_ref()
         .is_some_and(crate::prof_command::Run::observes);
     let charge_observation = logical_charge_report.is_some();
+    let combined_observation = observe && charge_observation;
+    let flavour = Flavour {
+        observation: if observe {
+            Observation::Prof
+        } else if charge_observation {
+            Observation::Observed
+        } else {
+            Observation::None
+        },
+        record: needs_recording,
+    };
     let env_recording_runtime = installed
         .as_ref()
-        .and_then(|installed| installed.recording_runtime(&target));
+        .and_then(|installed| installed.runtime(&target, Flavour::RECORDING));
     let source_tree = libraries.is_some();
     let source_libraries = source_core || source_std || source_tree;
     if let Some(installed) = &installed {
         if core_product.is_none() && !source_tree {
             core_product = Some(installed.cache());
         }
-        if runtime.is_none() {
-            runtime = match (observe, charge_observation) {
-                (false, true) => installed.observed_runtime(&target, needs_recording),
-                (true, false) => installed.prof_runtime(&target, needs_recording),
-                (false, false) if needs_recording => installed.recording_runtime(&target),
-                (false, false) => installed.runtime(&target),
-                (true, true) => None,
-            };
+        // A combined archive can only be supplied explicitly.
+        if runtime.is_none() && !combined_observation {
+            runtime = installed.runtime(&target, flavour);
         }
     }
     if command == "env" {
@@ -807,11 +820,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if install_root.is_none()
         && ((command == "core-product" && (explicit_runtime || explicit_target))
             || (command == "std-product" && explicit_runtime)
-            || additional_runtimes.recording.is_some()
-            || additional_runtimes.prof.is_some()
-            || additional_runtimes.prof_recording.is_some()
-            || additional_runtimes.observed.is_some()
-            || additional_runtimes.observed_recording.is_some())
+            || !additional_runtimes.is_empty())
     {
         return Err("product --runtime, core-product --target and runtime variant options require --install".into());
     }
@@ -869,7 +878,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     };
     let select_runtime = || -> Result<PathBuf, Box<dyn std::error::Error>> {
         let archive = runtime.as_deref().ok_or_else(|| {
-            if observe && charge_observation {
+            if combined_observation {
                 format!("no combined profiling and charge observation runtime archive for {target}; pass --runtime with a combined archive")
             } else if charge_observation {
                 let mode = if needs_recording { " with recording" } else { "" };
@@ -968,32 +977,16 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             )
         } else {
             let package = if let Some(root) = &install_root {
+                if let Some(path) = runtime {
+                    additional_runtimes.insert(Flavour::PLAIN, path);
+                }
                 crate::installation::publish(
                     root,
                     command == "std-product",
-                    runtime.as_deref().map(|runtime| (runtime, target.as_str())),
-                    crate::installation::RuntimeVariants {
-                        recording: additional_runtimes
-                            .recording
-                            .as_deref()
-                            .map(|path| (path, target.as_str())),
-                        prof: additional_runtimes
-                            .prof
-                            .as_deref()
-                            .map(|path| (path, target.as_str())),
-                        prof_recording: additional_runtimes
-                            .prof_recording
-                            .as_deref()
-                            .map(|path| (path, target.as_str())),
-                        observed: additional_runtimes
-                            .observed
-                            .as_deref()
-                            .map(|path| (path, target.as_str())),
-                        observed_recording: additional_runtimes
-                            .observed_recording
-                            .as_deref()
-                            .map(|path| (path, target.as_str())),
-                    },
+                    additional_runtimes
+                        .iter()
+                        .map(|(flavour, path)| (*flavour, (path.as_path(), target.as_str())))
+                        .collect(),
                     link_kit.as_deref(),
                     &mut meter,
                 )?
@@ -1467,12 +1460,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             seeds: test_seeds.unwrap_or(1),
             seed: test_seed,
             seed_base,
-            plain_runtime: installed.as_ref().and_then(|i| {
-                if charge_observation {
-                    i.observed_runtime(&target, false)
+            plain_runtime: installed.as_ref().and_then(|installed| {
+                let flavour = if charge_observation {
+                    Flavour::OBSERVED
                 } else {
-                    i.runtime(&target)
-                }
+                    Flavour::PLAIN
+                };
+                installed.runtime(&target, flavour)
             }),
             runner,
             expect_verdict,

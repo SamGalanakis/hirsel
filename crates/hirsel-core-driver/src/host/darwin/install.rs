@@ -77,8 +77,7 @@ pub(crate) fn test_link(runtime: &Path) -> crate::native::Link {
             crate::installation::publish(
                 dir.path(),
                 false,
-                Some((runtime, target)),
-                Default::default(),
+                [(crate::installation::Flavour::PLAIN, (runtime, target))].into(),
                 Some(&kit),
                 &mut crate::Meter::new(false),
             )

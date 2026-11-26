@@ -1936,7 +1936,7 @@ fn package_l13_explicit_image_uses_only_the_closure() {
 
     let prefix = law.path("installed");
     let std = crate::PackageProduct::bundled_std(&prefix.join("images"), &mut Meter::new(false)).unwrap();
-    crate::installation::register(&prefix, "std", &std.image, None, Default::default(), None).unwrap();
+    crate::installation::register(&prefix, "std", &std.image, [], None).unwrap();
     let binary = prefix.join("bin/hirsel");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
     let harness = std::env::current_exe().unwrap();

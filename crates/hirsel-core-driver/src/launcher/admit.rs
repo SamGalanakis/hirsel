@@ -834,12 +834,15 @@ fn assemble<'a>(
     let launch = &publication.recipe().launch;
     let installed = crate::installation::Installed::discover(&std::env::current_exe()?)?
         .ok_or("launcher assembly requires an installed toolchain")?;
-    let runtime = if recording {
-        installed.recording_runtime(&launch.target)
-    } else {
-        installed.runtime(&launch.target)
-    }
-    .ok_or("missing installed runtime")?;
+    let runtime = installed
+        .runtime(
+            &launch.target,
+            crate::installation::Flavour {
+                record: recording,
+                ..crate::installation::Flavour::PLAIN
+            },
+        )
+        .ok_or("missing installed runtime")?;
     let link = installed
         .link(&launch.target)
         .ok_or("missing installed linker")?;

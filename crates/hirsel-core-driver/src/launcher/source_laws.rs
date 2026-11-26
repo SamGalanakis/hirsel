@@ -439,8 +439,11 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     crate::installation::publish(
         &prefix,
         false,
-        Some((&runtime, target)),
-        Default::default(),
+        [(
+            crate::installation::Flavour::PLAIN,
+            (runtime.as_path(), target),
+        )]
+        .into(),
         Some(&kit),
         &mut crate::Meter::new(false),
     )

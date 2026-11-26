@@ -427,6 +427,8 @@ fn profiler_replays_an_explicit_inputs_entry_and_checks_its_identity() {
 
 #[test]
 fn run_logical_charge_report_selects_the_installed_observer() {
+    use crate::installation::Flavour;
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -450,11 +452,10 @@ fn run_logical_charge_report_selects_the_installed_observer() {
         &prefix,
         "core",
         &product.image,
-        Some((&ordinary, TARGET)),
-        crate::installation::RuntimeVariants {
-            observed: Some((&observed, TARGET)),
-            ..Default::default()
-        },
+        [
+            (Flavour::PLAIN, (ordinary.as_slice(), TARGET)),
+            (Flavour::OBSERVED, (observed.as_slice(), TARGET)),
+        ],
         None,
     )
     .unwrap();
@@ -483,6 +484,27 @@ fn run_logical_charge_report_selects_the_installed_observer() {
     assert_eq!(report["metric_version"], 2);
     // MEM-19 charges 256 bytes for the root task and 32 for its cause cell.
     assert_eq!(report["peak_root_reserved_bytes"], 288);
+
+    std::fs::write(
+        prefix.join("hirsel-core-toolchain.json"),
+        br#"{
+            "version": 4,
+            "products": {},
+            "runtimes": {},
+            "recording_runtimes": {},
+            "prof_runtimes": {},
+            "prof_recording_runtimes": {},
+            "observed_runtimes": {},
+            "observed_recording_runtimes": {},
+            "links": {}
+        }"#,
+    )
+    .unwrap();
+    let command = process::request_command_at(&compiler, &["--version".into()], dir.path());
+    let (code, _, error) = process::tape_request_output(command);
+    assert_eq!(code, Some(2), "{error}");
+    assert!(error.contains("unsupported core toolchain registration version 4"));
+    assert!(error.contains("reinstall the toolchain in a fresh prefix"));
 }
 
 #[test]

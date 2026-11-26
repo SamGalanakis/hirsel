@@ -12,6 +12,28 @@ from sim_campaign import CANARY
 
 
 class NightlyReceipt(unittest.TestCase):
+    def test_sometimes_counts_hits_per_seed_across_batches(self):
+        from vopr_nightly_receipt import summarize
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            manifest = run / "manifest.json"
+            manifest.write_text(json.dumps([
+                {"build": "commit", "law": "a", "required_witnesses": ["never", "rare", "repeat"]}
+            ]))
+            for batch, rows in enumerate((
+                [{"repeat": 10, "rare": 0}, None],
+                [{"repeat": 2, "extra": 4}, {"rare": 1}],
+            )):
+                with gzip.open(run / f"{batch}.jsonl.gz", "wt") as stream:
+                    for i, witnesses in enumerate(rows):
+                        print(json.dumps({"build": "commit", "law": "a", "seed": 2 * batch + i + 1,
+                                          "status": 0, "witnesses": witnesses}), file=stream)
+            probes = summarize(run, manifest, "commit")["probes"]
+            self.assertEqual([(probe["label"], probe["hits"], probe["true_calls"]) for probe in probes],
+                             [("extra", 1, 4), ("never", 0, 0), ("rare", 1, 1), ("repeat", 2, 12)])
+            self.assertTrue(all(probe["runs"] == 4 and probe["observed_runs"] == 3 for probe in probes))
+
     def test_receipt_preserves_red_nights_and_executable_revisions(self):
         tool = Path(__file__).with_name("vopr_nightly_receipt.py")
         with tempfile.TemporaryDirectory() as directory:

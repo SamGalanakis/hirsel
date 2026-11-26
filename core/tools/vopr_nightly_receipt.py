@@ -1,6 +1,6 @@
 """Append the outcome of one nightly run, including runs that never dispatched."""
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -85,6 +85,12 @@ def summarize(run, manifest, commit):
     seen = set()
     failed_at_zero = set()
     canary_red = None
+    runs = Counter()
+    observed_runs = Counter()
+    probes = defaultdict(Counter)
+    for law, entry in prepared.items():
+        for label in entry.get("required_witnesses", []):
+            probes[law, label]
     for batch in sorted(run.glob("*.jsonl.gz")):
         canaries = []
         for row in read_evidence(batch, errors):
@@ -110,8 +116,15 @@ def summarize(run, manifest, commit):
             if law == CANARY:
                 canaries.append((seed % 2, expected_red))
             counts["seeds_failed"] += bool(row["status"] and not expected_red)
-            faults.update(label.removeprefix("fault:") for label, hits in (row.get("witnesses") or {}).items()
-                          if hits and label.startswith("fault:"))
+            runs[law] += 1
+            if (witnesses := row.get("witnesses")) is not None:
+                observed_runs[law] += 1
+                for label, calls in witnesses.items():
+                    probe = probes[law, label]
+                    probe["hits"] += calls > 0
+                    probe["true_calls"] += calls
+                    if calls and label.startswith("fault:"):
+                        faults.add(label.removeprefix("fault:"))
         good = sorted(canaries) == [(0, True), (1, True)]
         canary_red = good if canary_red is None else canary_red and good
     return {
@@ -123,6 +136,11 @@ def summarize(run, manifest, commit):
         "deterministic_reds": sorted(failed_at_zero),
         "trace_diversity_reds": counts["trace_diversity_reds"],
         "replays_diverged": counts["replays_diverged"],
+        "probes": [
+            {"law": law, "label": label, "runs": runs[law], "observed_runs": observed_runs[law],
+             "hits": count["hits"], "true_calls": count["true_calls"]}
+            for (law, label), count in sorted(probes.items())
+        ],
         "probes_missed": sorted(misses),
         "fault_classes_sampled": sorted(faults),
         "canary_red": canary_red,

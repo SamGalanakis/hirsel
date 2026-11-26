@@ -1,5 +1,7 @@
 // K10 CALM advisory state kernel: monotone join-semilattice for volatile heartbeats
 // and per-key range route generations. Strictly separated from fenced move authority.
+// Uses fixed-size roster slots (`MAX_ADVISORY_ENTRIES`) with pointwise lattice join so
+// merge is unconditionally commutative, associative, and idempotent even when full.
 pub const MAX_ADVISORY_ENTRIES: u64 = 64
 
 pub type RouteEntry: codec + key + send {
@@ -11,12 +13,21 @@ pub type RouteEntry: codec + key + send {
 pub type AdvisoryState: codec + send {
     issuer_epoch: u64,
     seq: u64,
-    heartbeats: Map[u64, u64],
-    routes: Map[u64, RouteEntry]
+    heartbeats: List[u64],
+    routes: List[Option[RouteEntry]]
 }
 
 pub fn empty_advisory() -> AdvisoryState {
-    AdvisoryState(issuer_epoch: 0, seq: 0, heartbeats: map.new(), routes: map.new())
+    let mut heartbeats: List[u64] = list.with_capacity(MAX_ADVISORY_ENTRIES)
+    list.fill(mut heartbeats, MAX_ADVISORY_ENTRIES, 0u64)
+    let mut routes: List[Option[RouteEntry]] = list.with_capacity(MAX_ADVISORY_ENTRIES)
+    list.fill(mut routes, MAX_ADVISORY_ENTRIES, None)
+    AdvisoryState(issuer_epoch: 0, seq: 0, heartbeats: take heartbeats, routes: take routes)
+}
+
+/// Deterministic roster slot index for a node or range identifier.
+pub fn roster_slot(id: u64) -> u64 {
+    id % MAX_ADVISORY_ENTRIES
 }
 
 /// Monotone range-merge generation rule (FLT-4): max(parent_a, parent_b) + 1.
@@ -24,6 +35,8 @@ pub fn merged_range_generation(parent_a: u64, parent_b: u64) -> u64 {
     order.max(parent_a, parent_b) + 1
 }
 
+/// Total lexicographic join on `(generation, owner_node, range_id)`:
+/// commutative, associative, and idempotent even when distinct keys share a roster slot.
 fn route_join(a: RouteEntry, b: RouteEntry) -> RouteEntry {
     if b.generation > a.generation {
         b
@@ -31,12 +44,67 @@ fn route_join(a: RouteEntry, b: RouteEntry) -> RouteEntry {
         a
     } else if b.owner_node > a.owner_node {
         b
+    } else if a.owner_node > b.owner_node {
+        a
+    } else if b.range_id > a.range_id {
+        b
     } else {
         a
     }
 }
 
-/// Join-semilattice merge: associative, commutative and idempotent.
+fn route_slot_join(a: Option[RouteEntry], b: Option[RouteEntry]) -> Option[RouteEntry] {
+    match (a, b) {
+        (None, right) => right,
+        (left, None) => left,
+        (Some(x), Some(y)) => Some(route_join(x, y)),
+    }
+}
+
+fn heartbeat_at(s: AdvisoryState, idx: u64) -> u64 {
+    if idx < list.len(s.heartbeats) {
+        s.heartbeats[idx]
+    } else {
+        0u64
+    }
+}
+
+fn route_at(s: AdvisoryState, idx: u64) -> Option[RouteEntry] {
+    if idx < list.len(s.routes) {
+        s.routes[idx]
+    } else {
+        None
+    }
+}
+
+/// Monotonically update a node's heartbeat in its fixed roster slot.
+pub fn set_heartbeat(mut s: AdvisoryState, node_id: u64, beat: u64) {
+    let idx = roster_slot(node_id)
+    if idx < list.len(s.heartbeats) && beat > s.heartbeats[idx] {
+        s.heartbeats[idx] = beat
+    }
+}
+
+/// Read the heartbeat stored in `node_id`'s roster slot.
+pub fn heartbeat(s: AdvisoryState, node_id: u64) -> u64 {
+    heartbeat_at(s, roster_slot(node_id))
+}
+
+/// Monotonically update a range route in its fixed roster slot using `route_join`.
+pub fn set_route(mut s: AdvisoryState, entry: RouteEntry) {
+    let idx = roster_slot(entry.range_id)
+    if idx < list.len(s.routes) {
+        s.routes[idx] = route_slot_join(s.routes[idx], Some(entry))
+    }
+}
+
+/// Read the route entry stored in `range_id`'s roster slot.
+pub fn route(s: AdvisoryState, range_id: u64) -> Option[RouteEntry] {
+    route_at(s, roster_slot(range_id))
+}
+
+/// Pointwise join-semilattice merge over fixed roster slots:
+/// unconditionally associative, commutative, and idempotent.
 pub fn merge(a: AdvisoryState, b: AdvisoryState) -> AdvisoryState {
     let issuer_epoch = order.max(a.issuer_epoch, b.issuer_epoch)
     let seq = if a.issuer_epoch > b.issuer_epoch {
@@ -46,39 +114,11 @@ pub fn merge(a: AdvisoryState, b: AdvisoryState) -> AdvisoryState {
     } else {
         order.max(a.seq, b.seq)
     }
-    let mut heartbeats: Map[u64, u64] = clone(a.heartbeats)
-    for (node, beat) in b.heartbeats {
-        let existing: Option[u64] = match map.get(heartbeats, node) {
-            Some(v) => Some(v),
-            None => None,
-        }
-        match existing {
-            Some(prev) => {
-                if beat > prev {
-                    map.insert(mut heartbeats, node, beat)
-                }
-            },
-            None => {
-                if map.len(heartbeats) < MAX_ADVISORY_ENTRIES {
-                    map.insert(mut heartbeats, node, beat)
-                }
-            },
-        }
-    }
-    let mut routes: Map[u64, RouteEntry] = clone(a.routes)
-    for (range_id, entry) in b.routes {
-        let existing: Option[RouteEntry] = match map.get(routes, range_id) {
-            Some(v) => Some(v),
-            None => None,
-        }
-        match existing {
-            Some(prev) => map.insert(mut routes, range_id, route_join(prev, entry)),
-            None => {
-                if map.len(routes) < MAX_ADVISORY_ENTRIES {
-                    map.insert(mut routes, range_id, entry)
-                }
-            },
-        }
+    let mut heartbeats: List[u64] = list.with_capacity(MAX_ADVISORY_ENTRIES)
+    let mut routes: List[Option[RouteEntry]] = list.with_capacity(MAX_ADVISORY_ENTRIES)
+    for i in 0u64 .. MAX_ADVISORY_ENTRIES {
+        list.push(mut heartbeats, order.max(heartbeat_at(a, i), heartbeat_at(b, i)))
+        list.push(mut routes, route_slot_join(route_at(a, i), route_at(b, i)))
     }
     AdvisoryState(issuer_epoch: issuer_epoch, seq: seq, heartbeats: take heartbeats, routes: take routes)
 }
@@ -87,19 +127,12 @@ pub fn equal(a: AdvisoryState, b: AdvisoryState) -> bool {
     if a.issuer_epoch != b.issuer_epoch || a.seq != b.seq {
         return false
     }
-    if map.len(a.heartbeats) != map.len(b.heartbeats) || map.len(a.routes) != map.len(b.routes) {
-        return false
-    }
-    for (k, v) in a.heartbeats {
-        match map.get(b.heartbeats, k) {
-            Some(bv) if bv == v => {},
-            _ => return false,
+    for i in 0u64 .. MAX_ADVISORY_ENTRIES {
+        if heartbeat_at(a, i) != heartbeat_at(b, i) {
+            return false
         }
-    }
-    for (k, v) in a.routes {
-        match map.get(b.routes, k) {
-            Some(bv) if bv == v => {},
-            _ => return false,
+        if route_at(a, i) != route_at(b, i) {
+            return false
         }
     }
     true

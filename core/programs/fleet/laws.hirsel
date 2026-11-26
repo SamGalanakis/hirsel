@@ -193,26 +193,26 @@ fn barrier_freeze_codec_keys_and_k13_outcomes() -> Result[(), ()] {
     Ok(())
 }
 
-/// bug: Violate join-semilattice commutativity, associativity or idempotence in K10 advisory state.
-/// oracle: docs/spec/fleet.md FLT-4 range generation merge and K10 CALM lattice laws.
+/// bug: Violate join-semilattice commutativity, associativity or idempotence in K10 advisory state, including when merging two disjoint full rosters.
+/// oracle: docs/spec/fleet.md FLT-4 range generation merge and K10 CALM lattice laws across sparse and full disjoint rosters.
 @test
 fn advisory_k10_lattice_laws() -> Result[(), ()] {
     let mut a = advisory.empty_advisory()
     a.issuer_epoch = 2
     a.seq = 5
-    map.insert(mut a.heartbeats, 1u64, 100u64)
-    map.insert(mut a.routes, 10u64, advisory.RouteEntry(range_id: 10, generation: 3, owner_node: 1))
+    advisory.set_heartbeat(mut a, 1u64, 100u64)
+    advisory.set_route(mut a, advisory.RouteEntry(range_id: 10, generation: 3, owner_node: 1))
     let mut b = advisory.empty_advisory()
     b.issuer_epoch = 2
     b.seq = 9
-    map.insert(mut b.heartbeats, 1u64, 80u64)
-    map.insert(mut b.heartbeats, 2u64, 200u64)
-    map.insert(mut b.routes, 10u64, advisory.RouteEntry(range_id: 10, generation: 4, owner_node: 2))
+    advisory.set_heartbeat(mut b, 1u64, 80u64)
+    advisory.set_heartbeat(mut b, 2u64, 200u64)
+    advisory.set_route(mut b, advisory.RouteEntry(range_id: 10, generation: 4, owner_node: 2))
     let mut c = advisory.empty_advisory()
     c.issuer_epoch = 3
     c.seq = 1
-    map.insert(mut c.heartbeats, 2u64, 250u64)
-    map.insert(mut c.routes, 10u64, advisory.RouteEntry(range_id: 10, generation: 2, owner_node: 3))
+    advisory.set_heartbeat(mut c, 2u64, 250u64)
+    advisory.set_route(mut c, advisory.RouteEntry(range_id: 10, generation: 2, owner_node: 3))
     if !advisory.equal(advisory.merge(a, a), a) {
         fail("K10 merge not idempotent")
     }
@@ -224,6 +224,38 @@ fn advisory_k10_lattice_laws() -> Result[(), ()] {
     }
     if advisory.merged_range_generation(4, 7) != 8 || advisory.merged_range_generation(7, 4) != 8 {
         fail("FLT-4 range merge generation rule wrong")
+    }
+    // Two disjoint full rosters (all 64 slots populated with distinct keys):
+    // merge(full_a, full_b) MUST equal merge(full_b, full_a) and stay associative with full_c.
+    let mut full_a = advisory.empty_advisory()
+    let mut full_b = advisory.empty_advisory()
+    let mut full_c = advisory.empty_advisory()
+    full_a.issuer_epoch = 4
+    full_a.seq = 1
+    full_b.issuer_epoch = 4
+    full_b.seq = 2
+    full_c.issuer_epoch = 4
+    full_c.seq = 3
+    for i in 0u64 .. advisory.MAX_ADVISORY_ENTRIES {
+        let key_a = i
+        let key_b = i + advisory.MAX_ADVISORY_ENTRIES
+        let key_c = i + 2u64 * advisory.MAX_ADVISORY_ENTRIES
+        advisory.set_heartbeat(mut full_a, key_a, 100u64 + i)
+        advisory.set_heartbeat(mut full_b, key_b, 200u64 + i)
+        advisory.set_heartbeat(mut full_c, key_c, 150u64 + i)
+        // Same (generation, owner_node) on distinct range_ids tests deterministic tie-breaking too.
+        advisory.set_route(mut full_a, advisory.RouteEntry(range_id: key_a, generation: 5u64, owner_node: 10u64))
+        advisory.set_route(mut full_b, advisory.RouteEntry(range_id: key_b, generation: 5u64, owner_node: 10u64))
+        advisory.set_route(mut full_c, advisory.RouteEntry(range_id: key_c, generation: 4u64, owner_node: 11u64))
+    }
+    if !advisory.equal(advisory.merge(full_a, full_b), advisory.merge(full_b, full_a)) {
+        fail("K10 merge of two disjoint full rosters is not commutative")
+    }
+    if !advisory.equal(advisory.merge(advisory.merge(full_a, full_b), full_c), advisory.merge(full_a, advisory.merge(full_b, full_c))) {
+        fail("K10 merge of disjoint full rosters is not associative")
+    }
+    if !advisory.equal(advisory.merge(full_a, full_a), full_a) {
+        fail("K10 merge of full roster is not idempotent")
     }
     Ok(())
 }

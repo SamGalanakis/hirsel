@@ -749,20 +749,22 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
             moves_completed += 1u64
         }
     }
-    // Verify K10 CALM advisory join-semilattice commutativity & idempotence over sampled host shards.
+    // Verify K10 CALM advisory join-semilattice commutativity & idempotence across ALL hosts (>64 at 1,000 hosts!).
     let mut adv_a = advisory.empty_advisory()
     let mut adv_b = advisory.empty_advisory()
     adv_a.issuer_epoch = 2u64
     adv_a.seq = 10u64
     adv_b.issuer_epoch = 2u64
     adv_b.seq = 12u64
-    let sample_n = order.min(cfg.hosts, 32u64)
-    for i in 0u64 .. sample_n {
+    for i in 0u64 .. cfg.hosts {
         let nid = hosts[i].node_id
-        map.insert(mut adv_a.heartbeats, nid, 100u64 + i)
-        map.insert(mut adv_b.heartbeats, nid, 105u64 + i)
-        map.insert(mut adv_a.routes, nid, advisory.RouteEntry(range_id: nid, generation: 2u64, owner_node: nid))
-        map.insert(mut adv_b.routes, nid, advisory.RouteEntry(range_id: nid, generation: 3u64, owner_node: nid))
+        if i % 2 == 0 {
+            advisory.set_heartbeat(mut adv_a, nid, 100u64 + i)
+            advisory.set_route(mut adv_a, advisory.RouteEntry(range_id: nid, generation: 2u64, owner_node: nid))
+        } else {
+            advisory.set_heartbeat(mut adv_b, nid, 105u64 + i)
+            advisory.set_route(mut adv_b, advisory.RouteEntry(range_id: nid, generation: 3u64, owner_node: nid))
+        }
     }
     if !advisory.equal(advisory.merge(adv_a, adv_b), advisory.merge(adv_b, adv_a)) || !advisory.equal(advisory.merge(adv_a, adv_a), adv_a) {
         fail("scale_sim invariant: K10 advisory lattice violation")

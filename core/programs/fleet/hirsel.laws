@@ -1,5 +1,5 @@
 hirsel.laws 1
-fleet@1/laws/advisory_k10_lattice_laws src=e34e5f48e45940d2 sig=825a19f1678fe2c6 run=5ffc56bae06a36d7 bug=f8deda6c938ddf1e oracle=0f9df8f336ea9270 rows=pending
+fleet@1/laws/advisory_k10_lattice_laws src=3708def6ea9197b7 sig=0e6425f1bba37545 run=5ffc56bae06a36d7 bug=e14b4a927dd5d856 oracle=cc71362f98e760cb rows=pending
 fleet@1/laws/barrier_freeze_codec_keys_and_k13_outcomes src=a2a9ec67df8eb774 sig=d7980f353b89a471 run=5ffc56bae06a36d7 bug=9d01041b06ba1d00 oracle=c260ffd58c319cdc rows=pending
 fleet@1/laws/move_kernel_closes_three_stale_races_and_lost_h src=fc70245c7232bbdd sig=83e09e2f8fb89668 run=5ffc56bae06a36d7 bug=6b0679117cf1e660 oracle=10ef25ab43d64531 rows=pending
 fleet@1/laws/origin_wire_49_bytes_and_o3_o4 src=2e268373cc6d1ee3 sig=9dc2478c5984d6cf run=5ffc56bae06a36d7 bug=e470365b53736031 oracle=682b692ae1f95af1 rows=pending

@@ -265,7 +265,7 @@ fn check_journal_commit(mut state: CheckJournal, path: String, offset: u64, raw:
     Ok(())
 }
 
-fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[(), Error] waits {
+fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[u64, Error] waits {
     let m = view p.manifest
     let mut state = CheckJournal(
         branches: list.with_capacity(capture_branch_slots(m.limits)),
@@ -297,5 +297,5 @@ fn check_journal(mut p: PreparedCapture, mut spent: u64) -> Result[(), Error] wa
         })?
         spent = capture_add(spent, end - start)
     }
-    Ok(())
+    Ok(state.branches[0].head)
 }

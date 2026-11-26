@@ -6181,13 +6181,13 @@ Source: OPTIMAL-STORE-ENDSTATE §II.6 and Part IV row 1.5. A backup is a consist
 
 ### 15.0 Scope and the choices that shape it
 
-1. **A backup is an export that no prepare child consumes.** It has the same lease, the same copy and the same image: packs, `MANIFEST`, the journal through the leased end, then the `EXPORT` stamp, written last. The one difference is where the image goes. An export makes a fresh scratch subdirectory. A backup writes into the empty directory its caller names. *Wholehog:* one image format and one copier, because a backup is a deploy export with no consumer. A second format would need a second opener and a second set of checks.
+1. **A backup uses the export image.** It contains packs, `MANIFEST`, the journal through the captured end, and the `EXPORT` stamp, written last. Online backup captures the image under an export lease. Offline backup captures it under exclusive `LOCK`. A backup writes into the empty directory its caller names.
 2. **A restore keeps the store's identity.** Every frame is sealed under the `StoreId` (§2.1, §2.3), and a host checks a store's identity before it serves it (RUNNER §14.5). So a restored store is the same store, recovered, and a host accepts it for the group that ran it. A copy with a new identity is a different operation: the standalone import of §12.7, which reseals everything. It is not part of this section. *Wholehog:* restore means "this store again". A clone is its own operation with its own name, not a flag on restore.
 3. **Not built here:** incremental backup (a follower that catches up to a target is the natural form), restore into a bucket, and a backup of a store with a Tiered collection, which waits for M3b like every export (D6, §13.10).
 
 ### 15.1 What a backup captures
 
-A backup holds the store at its **leased head**: the main branch at the version H that the lease records, with everything the MANIFEST and journal describe at H:
+A backup captures the main branch at version H, with everything the MANIFEST and journal describe at H. The writer lease records H for online backup. Locked journal recovery determines H for offline backup.
 
 - every table's rows and every index's entries, as stored;
 - the catalog: tables, indexes with their kinds and revisions, Cells and Logs;
@@ -6196,9 +6196,9 @@ A backup holds the store at its **leased head**: the main branch at the version 
 Index entries are copied as stored and never rebuilt. The catalog's revisions travel with them, so a release opening the restored store gets the same answer as on the source: `Changed` for an index whose extractor differs (§I.2 of the design, D1), and the entries otherwise.
 
 **Files.** As E1–E3:
-- the live packs the lease lists;
-- the `MANIFEST` bytes captured under the lease, after the journal settled every acknowledged commit;
-- segments `first_live` through the terminal segment. Each middle segment is copied through its successor's `prev_end`, and the terminal segment through the lease's `end`;
+- the live packs listed in the MANIFEST pack tree and the class-2 packs reached by its four list roots;
+- the `MANIFEST` bytes captured with the journal bounds;
+- segments `first_live` through the terminal segment. Each middle segment is copied through its successor's `prev_end`, and the terminal segment through the captured `end`;
 - `EXPORT`, last.
 
 Nothing else is copied: no `LOCK`, no `END` file, no `.tmp` file, no retired pack, no segment before `first_live`. The terminal segment ends exactly at `end`, so recovery's torn-tail rule (§3.4 step 5, which applies when a segment has no `END` file) reads exactly to H.
@@ -6243,7 +6243,7 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
 |---|---|---|
 | R1 | Checks that `to` is empty | `Scratch(Exists("restore target"))`; `to` unchanged |
 | R2 | Reads `from/EXPORT` with the prepare opener's stamp check (`read_export_stamp`) | missing: `Scratch(Io(NotFound))`. Bad header, frame or fields: `Store(Corrupt(_))` or `ExportMismatch`. `to` unchanged. A directory with no good stamp is not a backup: `EXPORT` is written last, so an interrupted backup has none |
-| R3 | Copies `EXPORT` first, synced, then `sync_dir`. Then `MANIFEST`, every pack in the backup (a backup holds only the packs its `MANIFEST` lists; R4 decodes each one the `MANIFEST` names), and the segments `first_live` through `terminal`, each copied whole (they are already cut at their ends) and synced, then `sync_dir` | an I/O error: `Scratch(e)`. `to` holds `EXPORT`, so it never opens (below) |
+| R3 | Copies `EXPORT` first, synced, then `sync_dir`. Then `MANIFEST`, the live packs it lists or reaches (§15.1), and the segments `first_live` through `terminal`, each copied whole (they are already cut at their ends) and synced, then `sync_dir`. Unlisted files and temporary files are ignored | an I/O error: `Scratch(e)`. MANIFEST or list-tree damage: `Store(e)`. `to` holds `EXPORT`, so it never opens (below) |
 | R4 | Validates the copy with the prepare opener's recovery (`open_export`'s steps on `to`, with the stamp's own attempt). The identity must equal the stamp's. The `MANIFEST`'s FENCE level is not checked here: a deploy export requires level 1 because it comes from a runner store, but a backup keeps its source's supported level, and the later ordinary `open` checks it as any open does. Every listed pack must decode, the journal must replay through `end`, and the replayed main head must equal the stamp's `head`. The resident account must fit `options.resident_limit` | `ExportMismatch`, `Store(Corrupt(_))` or `Store(Full(_))`; `to` holds `EXPORT` |
 | R5 | Removes `to/EXPORT`, then `sync_dir`. This is the commit point. Returns the stamp | an I/O error: `Scratch(e)`. If the removal is not durable, `to` still holds `EXPORT` |
 
@@ -6257,10 +6257,11 @@ These commands sit beside the `inspect`, `stats` and `verify` commands that row 
 
 | Form | Does |
 |---|---|
-| `hirsel store backup DIR TARGET` | Creates `TARGET` if it is absent. `TARGET` must be empty. Opens `DIR` as its writer (`create` false), then makes the backup (`begin_backup`, `export_copy`, `release_export`), closes the store and prints `backup <store id> head <H>` |
+| `hirsel store backup DIR TARGET` | Creates `TARGET` if it is absent. Takes exclusive `LOCK` on `DIR` and probes that `TARGET` is empty. Captures and checks the recovered store, writes the backup and prints `backup <store id> head <H>` |
 | `hirsel store restore BACKUP DIR` | Creates `DIR` if it is absent. `DIR` must be empty. Restores (§15.3) and prints `restored <store id> head <H>` |
 
-- **Served stores.** `backup DIR TARGET` opens the store as its writer. If another process holds `LOCK`, the command exits 75 and changes nothing: "the store is held by a writer". Backing up a store that a place serves goes through the place's head, which already holds the `Db`, and the consistency of §15.2 is the library's. The operator route is `hirsel store backup --state S --group G TARGET`: the CLI sends `BackupAsk(G)` over `S/operator.sock`; when `G` has a Ready serving place, the host forwards `HostBackup(attempt)` over the control socket without stopping the place, the place runs `begin_backup`, `export_copy` into its scratch directory, and `release_export`, and answers `PlaceBackedUp(store_hi, store_lo, head, name)`; the CLI moves the image into `TARGET` with `EXPORT` last and prints `backup <store id> head <H>`. When the registered group is cold, the host answers `BackupOfflineAnswer(store_path)` and the CLI runs offline `store_tool` on it. Laws: `runner_online_backup_copies_without_stopping_head` (`runner-backup-law.hirsel`), `host_online_backup_routes_through_serving_place` (`platform_backup_laws.hirsel`).
+- **Offline recovery.** Backup waits for shared segment fences, syncs the files and directory, and recovers the terminal through the last complete frame, including valid frames after END. Under the same LOCK it checks pack envelopes while copying, checks reachability and AP21 stamp locations, and checks the journal structurally as in §15.6. It syncs every copied file and writes and syncs EXPORT last. The stamp records a random 16-byte attempt, the source identity, branch 0 and its recovered head, the MANIFEST's `next_table`, activation 0, the terminal seq in both `opened` and `terminal`, and the recovered `end`. Ordinary offline capture leaves the source contents intact. An import pin or an incomplete first segment with no exportable terminal releases LOCK and runs the writer path with `create` false. That path cuts away the orphan import pin or establishes a terminal, then uses `begin_backup`, `export_copy` and `release_export`.
+- **Served stores.** If another process holds `LOCK`, `backup DIR TARGET` exits 75 with "the store is held by a writer". Backing up a store that a place serves goes through the place's head, which already holds the `Db`, and the consistency of §15.2 is the library's. The operator route is `hirsel store backup --state S --group G TARGET`: the CLI sends `BackupAsk(G)` over `S/operator.sock`; when `G` has a Ready serving place, the host forwards `HostBackup(attempt)` over the control socket without stopping the place, the place runs `begin_backup`, `export_copy` into its scratch directory, and `release_export`, and answers `PlaceBackedUp(store_hi, store_lo, head, name)`; the CLI moves the image into `TARGET` with `EXPORT` last and prints `backup <store id> head <H>`. When the registered group is cold, the host answers `BackupOfflineAnswer(store_path)` and the CLI runs offline `store_tool` on it. Laws: `runner_online_backup_copies_without_stopping_head` (`runner-backup-law.hirsel`), `host_online_backup_routes_through_serving_place` (`platform_backup_laws.hirsel`).
 - **Exit status.** 0: done. 1: refused, with the refusal's name on stderr after `hirsel store: refused: `.
   Names include `AttemptBusy`, `ExportMismatch`, `Exists`, `Corrupt`, `Full`, `Tiered`, and `Io`.
   A `Full` refusal includes its `StoreCapacity` variant and both figures, as in
@@ -6268,7 +6269,7 @@ These commands sit beside the `inspect`, `stats` and `verify` commands that row 
   `Allocation`, `Cache`, `Slots`, `Pins` and `Register` print the same field names.
   The tool returns `Exit(1)` for these refusals, including `Allocation`, so the run
   omits the generic `--limit` advice. 2: usage. 75: the store is held.
-- **Memory.** The tool opens the store with the resident limit compiled into it, `store.sized(Directory, 2 GiB)`, inside a 1 GiB process limit as the platform executables have. A larger store is refused `Full`.
+- **Memory.** Offline capture uses Check's parts plus a 65,536-byte copy chunk in the tool's 1 GiB root. The writer fallback and restore use `store.sized(Directory, 2 GiB)` in that same root and can refuse `Full` for a large store.
 
 ### 15.5 Law L89 `backup_restore`
 
@@ -6285,6 +6286,8 @@ The case uses a log@1 store with two tables, one of them with a `Many` index. It
 |---|---|
 | The copy reads the terminal segment to its file size instead of `end` | post-lease rows appear |
 | The `MANIFEST` is captured after the copy instead of under the lease | missing or extra rows, or a `Corrupt` pack |
+
+`backup_offline_routes_and_packs` exercises locked recovery past a stale END while a residual fence is held. It restores a checkpointed blob and the recovered suffix rows, and checks both writer fallback cases. Its T5 corpus adds an unlisted pack and a temporary file to the source and backup, then removes, truncates and renames a listed pack. The extra files are ignored. Listed-pack damage refuses with a typed error before backup publishes a stamp or restore removes it.
 
 ### 15.6 `hirsel store inspect`, `stats`, `verify` and `repair` (Store 1.4, v2.127)
 

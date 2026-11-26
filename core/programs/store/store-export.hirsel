@@ -266,9 +266,14 @@ fn deploy_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
 
 fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Result[(), Error] waits {
     let mut input = disk_io(host.open(from, name, Read))?
+    copy_export_prefix(mut input, to, name, end, 16384)?;
+    disk_io(host.close(take input))
+}
+
+fn copy_export_prefix(mut input: HostFile, to: Dir, name: String, end: Option[u64], chunk_bytes: u64) -> Result[(), Error] waits {
     let mut output = disk_io(host.open(to, name, Write))?
     let mut offset = 0u64
-    let mut chunk: Bytes = list.with_capacity(16384)
+    let mut chunk: Bytes = list.with_capacity(chunk_bytes)
     loop {
         list.clear(mut chunk)
         if let Some(total) = end {
@@ -276,6 +281,7 @@ fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Resul
                 break
             }
             if total - offset < list.capacity(chunk) {
+                chunk = list.new()
                 chunk = list.with_capacity(total - offset)
             }
         }
@@ -303,7 +309,6 @@ fn copy_export_file(from: Dir, to: Dir, name: String, end: Option[u64]) -> Resul
         }
         offset += written
     }
-    disk_io(host.close(take input))?
     disk_io(host.sync(mut output))?
     disk_io(host.close(take output))
 }
@@ -659,16 +664,10 @@ fn read_export_stamp(d: Dir) -> Result[ExportStamp, DeployError] waits {
     Ok(take stamp)
 }
 
-fn backup_listing(d: Dir) -> Result[List[std.dir.Entry], DeployError] waits {
-    match std.dir.list(d, None) {
-        Ok(take names) => Ok(take names),
-        Error(Io(problem)) => Error(Scratch(Io(problem))),
-        Error(_) => Error(ExportMismatch),
-    }
-}
-
 fn require_empty(d: Dir, take what: String) -> Result[(), DeployError] waits {
-    if list.len(backup_listing(d)?) != 0 {
+    let mut listing = scratch_result(disk_io(std.dir.entries(d, None)))?
+    let mut first_entry: Bytes = list.with_capacity(258)
+    if scratch_result(disk_io(std.dir.next_entries(mut listing, mut first_entry)))? != 0 {
         return Error(Scratch(Exists(take what)))
     }
     Ok(())
@@ -687,15 +686,27 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
     copy_restore_file(from, to, "EXPORT")?
     scratch_result(disk_io(host.sync_dir(to)))?
     copy_restore_file(from, to, "MANIFEST")?
-    let (_, take manifest) = deploy_result(read_page_manifest_file(to))?
-    for listed in backup_listing(from)? {
-        if string.starts_with(listed.name, "p-") {
-            copy_restore_file(from, to, listed.name)?
+    let (id, take manifest) = deploy_result(read_page_manifest_file(to))?
+    if id.hi != stamp.store_hi || id.lo != stamp.store_lo || manifest.first_live > stamp.terminal || manifest.next_table > stamp.next_table {
+        return Error(ExportMismatch)
+    }
+    let mut packs = capture_packs(from, id, manifest, false, 0)
+    let counts = deploy_result(capture_lists(mut packs, manifest))?
+    let slots = capture_add(counts.rows, counts.pages)
+    let need_bytes = capture_add(CAPTURE_PATH + CAPTURE_SCRATCH, capture_mul(CAPTURE_LIST_ROW, slots))
+    let selected = deploy_result(capacity(bound bytes need_bytes {
+        check_inventory(from, id, manifest, slots)
+    }))?
+    let inventory = deploy_result(take selected)?
+    for pack in inventory {
+        if pack.class != CHECK_RETIRED {
+            copy_restore_file(from, to, deploy_result(paged_pack_path(pack.seq))?)?
         }
     }
-    for seq in manifest.first_live .. stamp.terminal + 1 {
+    for seq in manifest.first_live .. stamp.terminal {
         copy_restore_file(from, to, scratch_result(capacity(disk_path("j-", seq, "")))?)?
     }
+    copy_restore_file(from, to, scratch_result(capacity(disk_path("j-", stamp.terminal, "")))?)?
     scratch_result(disk_io(host.sync_dir(to)))?
     let _validated = open_copied(to, c, stamp.attempt, options, false)?
     scratch_result(disk_io(host.remove(to, "EXPORT")))?

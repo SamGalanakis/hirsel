@@ -24,6 +24,7 @@ std = { major = 1 }
 "store-journal-recover.hirsel" = "store"
 "store-capture.hirsel" = "store"
 "store-capture-check.hirsel" = "store"
+"store-backup-offline.hirsel" = "store"
 "store-capture-check-journal.hirsel" = "store"
 "store-capture-journal.hirsel" = "store"
 "store-capture-pages.hirsel" = "store"
@@ -698,6 +699,9 @@ limit = 536870912
 
 [tests.runs."store@1/store/check_detects"]
 limit = 134217728
+
+[tests.runs."store@1/store/backup_offline_routes_and_packs"]
+limit = 268435456
 
 [tests.runs."store@1/store/need_covers"]
 limit = 536870912

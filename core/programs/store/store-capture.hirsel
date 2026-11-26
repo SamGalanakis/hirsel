@@ -42,6 +42,7 @@ type PreparedSegment: send {
 }
 
 pub opaque type PreparedCapture: send {
+    purpose: Purpose,
     dir: Dir,
     raw: Bytes,
     id: StoreId,
@@ -97,18 +98,25 @@ fn capture_check_scratch(p: PreparedCapture) -> u64 {
 
 fn capture_check_need(p: PreparedCapture) -> u64 {
     let tables = capture_add(capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)), 2 * capture_bitmap_bytes(p))
-    capture_add(capture_add(capture_check_scratch(p), tables), capture_mul(SEG, list.len(p.segments)))
+    let total = capture_add(capture_add(capture_check_scratch(p), tables), capture_mul(SEG, list.len(p.segments)))
+    if p.purpose == Copy {
+        return capture_add(total, JOURNAL_CHUNK_BYTES)
+    }
+    total
 }
 
 pub fn capture_need(p: PreparedCapture) -> Need {
-    let mut n = Need(total: 0, parts: list.with_capacity(7))
+    let mut n = Need(total: 0, parts: list.with_capacity(8))
     capture_need_part(mut n, "bootstrap", capture_bootstrap(p))
     capture_need_part(mut n, "segments", capture_mul(SEG, list.len(p.segments)))
-    if let Some(_) = p.lock {
+    if p.purpose != Describe {
         capture_need_part(mut n, "lists", capture_mul(CAPTURE_LIST_ROW, capture_list_slots(p)))
         capture_need_part(mut n, "bitmaps", 2 * capture_bitmap_bytes(p))
         capture_need_part(mut n, "branches", CAPTURE_BRANCH * capture_branch_slots(p.manifest.limits))
         capture_need_part(mut n, "chunk", JOURNAL_CHUNK_BYTES)
+        if p.purpose == Copy {
+            capture_need_part(mut n, "copy chunk", JOURNAL_CHUNK_BYTES)
+        }
         capture_need_part(mut n, "scratch", CAPTURE_PATH + CAPTURE_SCRATCH)
         return take n
     }
@@ -292,18 +300,19 @@ fn capture_segment_bounds(s: CaptureSelection, c: Clock, mut segments: List[Prep
 }
 
 pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Error] waits {
-    if purpose == Copy {
-        return Error(Unsupported(0))
+    let lock: Option[HostFile] = match purpose {
+        Describe => None,
+        Check => Some(disk_lock(d, c, 0)?),
+        Copy => Some(backup_lock(d)?),
     }
-    let locked = if purpose == Check {
+    prepare_capture(d, c, purpose, take lock)
+}
+
+fn prepare_capture(d: Dir, c: Clock, purpose: Purpose, take lock: Option[HostFile]) -> Result[PreparedCapture, Error] waits {
+    let locked: Option[Clock] = if purpose == Describe {
+        None
+    } else {
         Some(c)
-    } else {
-        None
-    }
-    let lock = if purpose == Check {
-        Some(disk_lock(d, c, 0)?)
-    } else {
-        None
     }
     loop {
         let selection = capacity(bound bytes BOOTSTRAP {
@@ -318,10 +327,10 @@ pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Er
             list.with_capacity(s.segments)
         })?
         let selected = capacity(bound bytes BOOTSTRAP {
-            if purpose == Check {
-                capture_locked_bounds(s, c, mut segments)
-            } else {
+            if purpose == Describe {
                 capture_segment_bounds(s, c, mut segments)
+            } else {
+                capture_locked_bounds(s, c, mut segments)
             }
         })?
         let stable = match take selected {
@@ -337,7 +346,7 @@ pub fn prepare(d: Dir, c: Clock, purpose: Purpose) -> Result[PreparedCapture, Er
             continue
         }
         let CaptureSelection(dir: dir, raw: take raw, id: id, manifest: take manifest, lists: lists, names: names, name_bytes: amount, ..) = take s
-        return Ok(PreparedCapture(dir: dir, raw: take raw, id: id, manifest: take manifest, segments: take segments, lists: lists, names: names, name_bytes: amount, lock: take lock))
+        return Ok(PreparedCapture(purpose: purpose, dir: dir, raw: take raw, id: id, manifest: take manifest, segments: take segments, lists: lists, names: names, name_bytes: amount, lock: take lock))
     }
 }
 

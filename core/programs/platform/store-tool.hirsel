@@ -91,38 +91,51 @@ fn finished(out: Stdout, verb: String, stamp: store.ExportStamp) -> Result[(), E
     }
 }
 
-fn backup(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, take options: store.Options, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
-    // §15.4: a backup never creates the store it names.
-    options.create = false
-    let mut db = match store.open(tasks, from, c, r, options) {
-        Ok(take opened) => take opened,
-        Error(Held) => {
-            let _ = stderr.write(err, "hirsel store: the store is held by a writer\n")
-            return Error(Exit(status: 75u8))
-        },
-        Error(e) => return refused(err, store_refusal(e)),
+fn held_writer(err: Stderr) -> Result[(), Exit] waits {
+    let _ = stderr.write(err, "hirsel store: the store is held by a writer\n")
+    Error(Exit(status: 75u8))
+}
+
+fn backup(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    let (take selected, take budget) = match store.prepare_backup(from, to, c) {
+        Ok(take prepared) => take prepared,
+        Error(Store(Held)) => return held_writer(err),
+        Error(Store(Full(Allocation(cause)))) => return capture_part_shortage(err, "backup", cause, "bootstrap"),
+        Error(Store(Corrupt(found))) => return backup_fault(err, found),
+        Error(e) => return refused(err, deploy_refusal(e)),
     }
     let mut attempt: Bytes = list.with_capacity(16)
     host.random(r, mut attempt)
-    let mut kept: Bytes = list.with_capacity(16)
-    list.append(mut kept, attempt)
-    let copied = match store.begin_backup(mut db, to, take attempt) {
-        Ok(take job) => store.export_copy(take job),
-        Error(e) => {
-            let _ = store.close(take db)
-            return refused(err, deploy_refusal(e))
+    match store.backup_offline(take selected, clone(attempt)) {
+        Ok(Some((take stamp, repeats))) => {
+            let mut text = string.from("hirsel store backup needs ")
+            string.push_u64(mut text, budget.total)
+            string.push(mut text, " bytes\nhirsel store backup repeats need ")
+            string.push_u64(mut text, repeats)
+            string.push(mut text, " bytes\n")
+            let _ = stderr.write(err, text)
+            finished(out, "backup", stamp)
         },
+        Ok(None) => backup_writer(from, to, c, r, tasks, take attempt, out, err),
+        Error(BackupCheck(CheckBudget(cause))) => capture_shortage(err, "backup", cause, budget.parts),
+        Error(BackupCheck(CheckRepeats(cause))) => capture_part_shortage(err, "backup", cause, "repeats"),
+        Error(BackupCheck(CheckStore(Corrupt(found)))) => backup_fault(err, found),
+        Error(BackupCheck(CheckStore(Io(Other(24))))) => refused(err, "Io(Other(24)): EMFILE"),
+        Error(BackupCheck(CheckStore(e))) => refused(err, store_refusal(e)),
+        Error(BackupDeploy(e)) => refused(err, deploy_refusal(e)),
     }
-    store.release_export(mut db, kept)
-    let closed = store.close(take db)
-    let exported = match copied {
-        Ok(take done) => take done,
-        Error(e) => return refused(err, deploy_refusal(e)),
+}
+
+fn backup_writer(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, take attempt: Bytes, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    let options = match store.sized(Directory, 2147483648u64) {
+        Ok(take sized) => take sized,
+        Error(_) => return refused(err, "Full"),
     }
-    if let Error(e) = closed {
-        return refused(err, store_refusal(e))
+    match store.backup_with_writer(tasks, from, to, c, r, take options, take attempt) {
+        Ok(take stamp) => finished(out, "backup", stamp),
+        Error(Store(Held)) => held_writer(err),
+        Error(e) => refused(err, deploy_refusal(e)),
     }
-    finished(out, "backup", exported.stamp)
 }
 
 fn say(out: Stdout, line: String) -> Result[(), Exit] waits {
@@ -285,6 +298,8 @@ fn capture_shortage(err: Stderr, verb: String, c: Capacity, parts: List[store.Pa
     }
     if verb == "verify" {
         let _ = stderr.write(err, "hirsel store: the release that serves this store can verify it: hirsel store verify DIR --release EXE\n")
+    } else if verb == "backup" {
+        let _ = stderr.write(err, "hirsel store: try the serving place with hirsel store backup --state S --group G TARGET\n")
     } else {
         let mut remedy = string.from("hirsel store: the need is ")
         string.push_u64(mut remedy, c.requested)
@@ -331,8 +346,13 @@ fn describe(d: Dir, c: Clock, verb: String, out: Stdout, err: Stderr) -> Result[
     }
 }
 
-fn verify_fault(out: Stdout, fault: store.Fault) -> Result[(), store.Error] waits {
-    let mut text = string.from("scrub fault ")
+fn backup_fault(err: Stderr, fault: store.Fault) -> Result[(), Exit] waits {
+    let _ = stderr.write(err, format_fault("backup fault ", fault))
+    refused(err, "Corrupt")
+}
+
+fn format_fault(prefix: String, fault: store.Fault) -> String {
+    let mut text = string.from(prefix)
     string.push(mut text, fault.file)
     string.push(mut text, " at ")
     string.push_u64(mut text, fault.offset)
@@ -351,16 +371,20 @@ fn verify_fault(out: Stdout, fault: store.Fault) -> Result[(), store.Error] wait
         Regressed => "Regressed",
     })
     string.push(mut text, "\n")
-    match stdout.write(out, text) {
+    take text
+}
+
+fn verify_fault(out: Stdout, fault: store.Fault) -> Result[(), store.Error] waits {
+    match stdout.write(out, format_fault("scrub fault ", fault)) {
         Ok(_) => Ok(()),
         Error(_) => Error(Io(Closed)),
     }
 }
 
-fn verify_shortage(err: Stderr, cause: Capacity, name: String) -> Result[(), Exit] waits {
+fn capture_part_shortage(err: Stderr, verb: String, cause: Capacity, name: String) -> Result[(), Exit] waits {
     let mut parts: List[store.Part] = list.with_capacity(1)
     list.push(mut parts, store.Part(name: clone(name), amount: cause.requested))
-    capture_shortage(err, "verify", cause, parts)
+    capture_shortage(err, verb, cause, parts)
 }
 
 fn verify_done(out: Stdout, totals: store.CheckTotals) -> Result[(), Exit] waits {
@@ -383,11 +407,8 @@ fn verify_done(out: Stdout, totals: store.CheckTotals) -> Result[(), Exit] waits
 fn verify_image(d: Dir, c: Clock, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
     let prepared = match store.prepare(d, c, Check) {
         Ok(take found) => take found,
-        Error(Held) => {
-            let _ = stderr.write(err, "hirsel store: the store is held by a writer\n")
-            return Error(Exit(status: 75u8))
-        },
-        Error(Full(Allocation(cause))) => return verify_shortage(err, cause, "bootstrap"),
+        Error(Held) => return held_writer(err),
+        Error(Full(Allocation(cause))) => return capture_part_shortage(err, "verify", cause, "bootstrap"),
         Error(Corrupt(take found)) => {
             verify_fault(out, found) ?=> |_| Exit(status: 1u8)
             return verify_done(out, store.CheckTotals(scrubbed: 0, pages: 0, journal: 0, faults: 1, repeats: 0))
@@ -401,7 +422,7 @@ fn verify_image(d: Dir, c: Clock, out: Stdout, err: Stderr) -> Result[(), Exit] 
     }) {
         Ok(take found) => take found,
         Error(CheckBudget(cause)) => return capture_shortage(err, "verify", cause, budget.parts),
-        Error(CheckRepeats(cause)) => return verify_shortage(err, cause, "repeats"),
+        Error(CheckRepeats(cause)) => return capture_part_shortage(err, "verify", cause, "repeats"),
         Error(CheckStore(Io(Other(24)))) => return refused(err, "Io(Other(24)): EMFILE, 0 open packs"),
         Error(CheckStore(e)) => return refused(err, store_refusal(e)),
     }
@@ -424,15 +445,15 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
     if verb == "verify" {
         return verify_image(from, c, out, err)
     }
-    let options = match store.sized(Directory, 2147483648u64) {
-        Ok(take sized) => take sized,
-        Error(_) => return refused(err, "Full"),
-    }
     if verb == "backup" {
-        return backup(from, to, c, r, tasks, take options, out, err)
+        return backup(from, to, c, r, tasks, out, err)
     }
     if verb != "restore" {
         return Error(Exit(status: 2u8))
+    }
+    let options = match store.sized(Directory, 2147483648u64) {
+        Ok(take sized) => take sized,
+        Error(_) => return refused(err, "Full"),
     }
     match store.restore(from, to, c, options) {
         Ok(take stamp) => finished(out, "restored", stamp),

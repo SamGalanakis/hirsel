@@ -210,8 +210,8 @@ passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the fu
 
 | Form | Does |
 |---|---|
-| `hirsel store backup DIR TARGET` | copies the store at `DIR` into the empty directory `TARGET`, which it creates if absent, at the head it leases; prints `backup <store id> head <H>` |
-| `hirsel store restore BACKUP DIR` | makes a store at the empty directory `DIR` from a backup; prints `restored <store id> head <H>` |
+| `hirsel store backup DIR TARGET` | locks the offline store at `DIR`, checks it and copies its recovered head into the empty directory `TARGET`, which it creates if absent. Prints `backup <store id> head <H>` |
+| `hirsel store restore BACKUP DIR` | copies and validates the backup's MANIFEST, journals and listed or reached packs to make a store at the empty directory `DIR`. Prints `restored <store id> head <H>` |
 | `hirsel store inspect DIR` | captures the store beside a live writer and prints its identity and head, then each table and index with its state, revision and exact row count |
 | `hirsel store stats DIR` | the `inspect` lines with each collection's charged bytes, plus the journal's segments and bytes, the account at the cut, pins and pack rows |
 | `hirsel store verify DIR` | scrubs a copy of the store and prints each fault |

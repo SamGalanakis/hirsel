@@ -25,10 +25,9 @@ fn check_pack_row(seq: u64, class: u8, frames: u32, size: u64) -> CheckPack {
     CheckPack(seq: seq, payload_bytes: size, base: 0, size: 0, head: 72, frames: frames, class: class)
 }
 
-fn check_inventory(p: PreparedCapture) -> Result[List[CheckPack], Error] waits {
-    let mut inventory: List[CheckPack] = list.with_capacity(capture_list_slots(p))
-    let m = view p.manifest
-    let mut packs = capture_packs(p.dir, p.id, m, false, 0)
+fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[List[CheckPack], Error] waits {
+    let mut inventory: List[CheckPack] = list.with_capacity(slots)
+    let mut packs = capture_packs(d, id, m, false, 0)
     let mut pages = 0u64
     for (kind, root) in[(PackList, m.pack_root), (RetiredList, m.retirement_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
         capture_walk_list(mut packs, root, 2, None, mut inventory, mut pages, fn(mut rows: List[CheckPack], ptr: std.page.PagePtr) {
@@ -75,10 +74,13 @@ fn check_open_pack(d: Dir, path: String) -> Result[HostFile, Error] waits {
     }
 }
 
-fn check_envelope(p: PreparedCapture, mut pack: CheckPack, mut spent: u64) -> Result[(), Error] waits {
+fn check_envelope(p: PreparedCapture, mut pack: CheckPack, target: Option[Dir], mut spent: u64) -> Result[(), Error] waits {
     let path = paged_pack_path(pack.seq)?
     let opened = check_open_pack(p.dir, path)?
     let mut input = journal_input(take opened, false)?
+    if let Some(to) = target {
+        input.copy_to = Some(disk_io(host.open(to, path, Write))?)
+    }
     let header = disk_read_header(path, scrub_prefix(mut input, path, 0, 72, mut spent)?, 3, Some(pack.seq), Some(p.id))?
     let mut scanned = pack_scan(pack.class, p.manifest.next_stamp)
     let mut at = 72u64
@@ -92,6 +94,12 @@ fn check_envelope(p: PreparedCapture, mut pack: CheckPack, mut spent: u64) -> Re
     }
     if (pack.class == 2 && scanned.frames > 4294967295) || (pack.class != 2 && (scanned.frames != int.widen(pack.frames) || scanned.payload_bytes != pack.payload_bytes)) {
         return Error(disk_fault(path, at, Malformed))
+    }
+    let JournalInput(copy_to: take copy_to, ..) = take input
+    if let Some(take finished) = take copy_to {
+        let mut output = take finished
+        disk_io(host.sync(mut output))?
+        disk_io(host.close(take output))?
     }
     pack.size = at
     Ok(())
@@ -311,14 +319,14 @@ fn check_emit(take problem: Error, mut summary: CheckTotals, fault: scoped[view]
     }
 }
 
-fn check_mark(p: PreparedCapture, mut summary: CheckTotals, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[Option[CheckWalk], Error] waits {
-    let mut packs = check_inventory(p)?
+fn check_mark(p: PreparedCapture, target: Option[Dir], mut summary: CheckTotals, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[Option[CheckWalk], Error] waits {
+    let mut packs = check_inventory(p.dir, p.id, p.manifest, capture_list_slots(p))?
     let mut base = 0u64
     for i in 0u64 .. list.len(packs) {
         if packs[i].class == CHECK_RETIRED {
             continue
         }
-        if let Error(take problem) = check_envelope(p, mut packs[i], mut summary.scrubbed) {
+        if let Error(take problem) = check_envelope(p, mut packs[i], target, mut summary.scrubbed) {
             check_emit(take problem, mut summary, fault)?
         }
         packs[i].base = base
@@ -360,10 +368,10 @@ fn check_repeat_slots(visits: CheckVisits) -> List[(u64, u64)] {
 
 // The initial scope refunds its scratch after marking. The repeat table is
 // reserved from the enclosing limit before a second scratch scope is taken.
-fn check_prepared(mut p: PreparedCapture, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[CheckTotals, CheckError] waits {
+fn check_prepared(mut p: PreparedCapture, target: Option[Dir], fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[(CheckTotals, u64), CheckError] waits {
     let mut summary = CheckTotals(scrubbed: 0, pages: 0, journal: 0, faults: 0, repeats: 0)
     let marked = bound bytes capture_check_need(p) {
-        check_mark(p, mut summary, fault)
+        check_mark(p, target, mut summary, fault)
     } ?=> CheckBudget
     let mut thorough = match take marked {
         Ok(take walk) => take walk,
@@ -392,10 +400,14 @@ fn check_prepared(mut p: PreparedCapture, fault: scoped[view] fn(Fault) -> Resul
     let journal = bound bytes capture_check_scratch(p) {
         check_journal(mut p, mut summary.journal)
     } ?=> CheckBudget
-    if let Error(take problem) = journal {
-        check_emit(take problem, mut summary, fault) ?=> CheckStore
+    let head = match take journal {
+        Ok(found) => found,
+        Error(take problem) => {
+            check_emit(take problem, mut summary, fault) ?=> CheckStore
+            0u64
+        },
     }
-    Ok(take summary)
+    Ok((take summary, head))
 }
 
 pub fn check_capture(take p: PreparedCapture, fault: scoped[view] fn(Fault) -> Result[(), Error] waits) -> Result[CheckTotals, CheckError] waits {
@@ -403,5 +415,6 @@ pub fn check_capture(take p: PreparedCapture, fault: scoped[view] fn(Fault) -> R
     if let None = selected.lock {
         return Error(CheckStore(Unsupported(0)))
     }
-    check_prepared(mut selected, fault)
+    let (take summary, _) = check_prepared(mut selected, None, fault)?
+    Ok(take summary)
 }

@@ -1,3 +1,44 @@
+type JournalInput {
+    file: HostFile,
+    size: u64,
+    base: u64,
+    chunk: Bytes,
+    copy_to: Option[HostFile]
+}
+
+fn journal_input(take file: HostFile, flush: bool) -> Result[JournalInput, Error] waits {
+    let mut opened = take file
+    if flush {
+        disk_io(host.sync(mut opened))?
+    }
+    let file_stat = disk_io(host.stat_file(mut opened))?
+    let chunk = disk_allocation(fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(JOURNAL_CHUNK_BYTES))
+    })?
+    Ok(JournalInput(file: take opened, size: file_stat.size, base: 0, chunk: take chunk, copy_to: None))
+}
+
+fn journal_chunk(mut input: JournalInput, path: String, offset: u64) -> Result[u64, Error] waits {
+    if offset >= input.base && offset - input.base < list.len(input.chunk) {
+        return Ok(offset - input.base)
+    }
+    list.clear(mut input.chunk)
+    if disk_io(host.read_at(mut input.file, offset, mut input.chunk))? == 0 {
+        return Error(disk_fault(path, offset, Truncated))
+    }
+    // The pack envelope consumes the entire file in order. Copy each
+    // refill once, using the same bytes that the checksum pass reads.
+    if let Some(mut output) = input.copy_to {
+        let width = order.min(list.len(input.chunk), input.size - offset)
+        match host.write(mut output, list.slice(input.chunk, 0, width)) {
+            Ok(()) => (),
+            Error(problem) => return Error(Io(problem.error)),
+        }
+    }
+    input.base = offset
+    Ok(0u64)
+}
+
 type JournalRecovered {
     replay: JournalReplay,
     seq: u64,

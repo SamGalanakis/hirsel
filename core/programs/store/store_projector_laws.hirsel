@@ -496,7 +496,7 @@ fn law_projector_disk(d: Dir, c: Clock, r: Random, tasks: Tasks, tiered: bool) -
     }
     let mut reopened = open(tasks, directory, c, r, options)?
     let loaded = projector_fixture(mut reopened, Open, Own, quick)?
-    if tiered && residency_mode(reopened, loaded.source_table.id)? != (1u8, 1u8) {
+    if tiered && residency_mode(reopened, loaded.source_table.id)? != (TableCollection, ResidentTiered) {
         fail("projector: the source stays Tiered across reopens")
     }
     project_until_idle(mut reopened, narrow)?

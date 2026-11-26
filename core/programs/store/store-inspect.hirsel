@@ -60,7 +60,10 @@ pub fn catalog_entries(s: Snapshot) -> Result[List[CatalogEntry], Error] {
             (string.from(own), take own, form)
         }
         let (rows, charge, tiered) = match std.page.collection_entry(s.roots.collections.root, prefix(record.id)?) {
-            Some((_, descriptor)) => (list.word_le(descriptor, 36), list.word_le(descriptor, 44), descriptor[53u64] == 1),
+            Some((_, map_value)) => {
+                let descriptor = collection_descriptor(map_value)
+                (descriptor.rows, descriptor.row_bytes, descriptor.residency == ResidentTiered)
+            },
             None => (0u64, 0u64, false),
         }
         capacity(list.try_reserve(mut out, 1))?

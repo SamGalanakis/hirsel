@@ -47,7 +47,7 @@ fn read_tiered_count(source: TieredPageSource, grant: Arc[TieredReaderGrant], ro
         }
         if list.slice(high, 0, 4) != id {
             let omitted = tiered_count_overlay(overlay, id, low, before)?
-            let rows: u64 = list.word_le(descriptor, 36)
+            let rows: u64 = collection_descriptor(descriptor).rows
             let Some(total) = int.checked_sub(rows, omitted) else {
                 return Error(malformed(0))
             }

@@ -54,11 +54,11 @@ fn residency_memory_stamps(page: Arc[std.page.Page], mut stamps: List[u64]) {
     }
 }
 
-fn residency_mode(db: Db, id: u32) -> Result[(u8, u8), Error] {
-    let Some(mode) = collection_mode(db.heads[0u64].roots.collections, prefix(id)?) else {
+fn residency_mode(db: Db, id: u32) -> Result[(std.page_descriptor.CollectionKind, std.page_descriptor.Residency), Error] {
+    let Some(mode) = collection_by_key(db.heads[0u64].roots.collections, prefix(id)?) else {
         fail("residency: the table is in main's collection map")
     }
-    Ok(mode)
+    Ok((mode.kind, mode.residency))
 }
 
 fn residency_check_published(d: Dir, db: Db, id: u32, held_stamps: List[u64]) -> Result[(), Error] waits {
@@ -111,7 +111,7 @@ fn test_set_residency_moves_a_table_to_tiered(d: Dir, c: Clock, r: Random, tasks
         residency_memory_stamps(arc.share(page), mut held_stamps)
     }
     set_residency(mut db, rows.id, Tiered)?
-    if residency_mode(db, rows.id)? != (1u8, 1u8) {
+    if residency_mode(db, rows.id)? != (TableCollection, ResidentTiered) {
         fail("residency: main's descriptor names the table Tiered")
     }
     if let None = db.pager {
@@ -128,7 +128,7 @@ fn test_set_residency_moves_a_table_to_tiered(d: Dir, c: Clock, r: Random, tasks
     }
     close(take db)?
     let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
-    if residency_mode(reopened, rows.id)? != (1u8, 1u8) {
+    if residency_mode(reopened, rows.id)? != (TableCollection, ResidentTiered) {
         fail("residency: the change survives a reopen")
     }
     residency_check_published(d, reopened, rows.id, held_stamps)?
@@ -154,7 +154,7 @@ fn test_set_residency_refused_admission_changes_nothing(d: Dir, c: Clock, r: Ran
     if db.checkpointed != generation || disk_state(db).pages.next_pack != next_pack {
         fail("residency: a refused change publishes nothing")
     }
-    if residency_mode(db, rows.id)? != (1u8, 0u8) {
+    if residency_mode(db, rows.id)? != (TableCollection, ResidentMemory) {
         fail("residency: a refused change leaves the table Memory")
     }
     residency_check_rows(db, snapshot(db), rows, 20)?
@@ -177,7 +177,7 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     let before = snapshot(db)
     let _ = pin(mut db, "tiered", before)?
     set_residency(mut db, rows.id, Memory)?
-    if residency_mode(db, rows.id)? != (1u8, 0u8) {
+    if residency_mode(db, rows.id)? != (TableCollection, ResidentMemory) {
         fail("residency: main's descriptor names the table Memory")
     }
     let mut loaded: List[u64] = list.new()
@@ -201,7 +201,7 @@ fn test_set_residency_moves_a_table_back_to_memory(d: Dir, c: Clock, r: Random, 
     }
     close(take db)?
     let reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
-    if residency_mode(reopened, rows.id)? != (1u8, 0u8) {
+    if residency_mode(reopened, rows.id)? != (TableCollection, ResidentMemory) {
         fail("residency: the change survives a reopen")
     }
     residency_check_rows(reopened, snapshot(reopened), rows, row_count)?
@@ -302,7 +302,7 @@ fn test_set_residency_refused_load_changes_nothing(d: Dir, c: Clock, r: Random, 
     if db.checkpointed != generation || disk_state(db).pages.next_pack != next_pack {
         fail("residency: a refused load publishes nothing")
     }
-    if residency_mode(db, rows.id)? != (1u8, 1u8) {
+    if residency_mode(db, rows.id)? != (TableCollection, ResidentTiered) {
         fail("residency: a refused load leaves the table Tiered")
     }
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
@@ -415,7 +415,7 @@ fn test_tiered_log_range_reads_cold_leaves_and_staged_tail(d: Dir, c: Clock, r: 
         }
     }
     set_residency(mut db, events.binding.id, Tiered)?
-    if residency_mode(db, events.binding.id)? != (4u8, 1u8) {
+    if residency_mode(db, events.binding.id)? != (LogCollection, ResidentTiered) {
         fail("Tiered Log: main's descriptor names the Log Tiered")
     }
     {

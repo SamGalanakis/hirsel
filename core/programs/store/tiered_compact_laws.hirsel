@@ -3,7 +3,6 @@
 // cut, every match moves to a fresh pack, and the pack retires when the
 // probe ends. The oracle walks the published tree frame by frame from the
 // pack files, independently of the store's location records.
-
 type CompactWalk {
     // pack -> payload bytes of the reachable frames it holds.
     live: Map[u64, u64],
@@ -79,7 +78,11 @@ fn compact_entry(seq: u64) -> Bytes {
 
 fn compact_check_rows(r: Reader, s: Snapshot, events: Log[Bytes], floor_seq: u64) -> Result[(), Error] waits {
     for seq in 0u64 .. 120 {
-        let wanted: Option[Bytes] = if seq < floor_seq { None } else { Some(compact_entry(seq)) }
+        let wanted: Option[Bytes] = if seq < floor_seq {
+            None
+        } else {
+            Some(compact_entry(seq))
+        }
         if log_get(r, s, events, seq)? != wanted {
             fail("L88 (h): every acknowledged entry reads back, and none below the floor")
         }
@@ -236,7 +239,7 @@ fn compact_cold_table_of(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, 
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("L87 (b): the fixture has no table")
         }
-        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+        (arc.share(here), rooted_collection_record(here, before[52u64], ResidentTiered)?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L87 (b): the fixture table must span more than one leaf")
@@ -256,7 +259,11 @@ fn compact_branch_rows(db: Db, b: Branch, rows: Table[u64, Bytes], row_count: u6
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot_of(db, b)?
     for key in 0u64 .. row_count {
-        let wanted = compact_value(key, if key == edited { edit } else { 0u8 })
+        let wanted = compact_value(key, if key == edited {
+            edit
+        } else {
+            0u8
+        })
         if get(read_handle, s, rows, key)? != Some(wanted) {
             fail("L87 (b): each branch reads its own rows through the moved paths")
         }
@@ -340,7 +347,11 @@ fn compact_blob_rows(db: Db, rows: Table[u64, Bytes], row_count: u64, width: u64
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot(db)
     for key in 0u64 .. row_count {
-        let wanted: Option[Bytes] = if key % 2 == 0 { None } else { Some(compact_value_of(key, 0, width)) }
+        let wanted: Option[Bytes] = if key % 2 == 0 {
+            None
+        } else {
+            Some(compact_value_of(key, 0, width))
+        }
         if get(read_handle, s, rows, key)? != wanted {
             fail("L88 (h): every kept row reads its BLOB back through the moved path")
         }
@@ -454,7 +465,11 @@ fn test_l88_compaction_relocates_blobs(d: Dir, c: Clock, r: Random, tasks: Tasks
     {
         let read_handle = reader(db, VALUE_LIMIT + 1048576)?
         for key in 0u64 .. row_count {
-            let wanted: Option[Bytes] = if key % 2 == 0 { None } else { Some(compact_value_of(key, 0, width)) }
+            let wanted: Option[Bytes] = if key % 2 == 0 {
+                None
+            } else {
+                Some(compact_value_of(key, 0, width))
+            }
             if get(read_handle, before, rows, key)? != wanted {
                 fail("L88 (h): a Snapshot that lists the retired pack reads its BLOBs")
             }

@@ -153,7 +153,7 @@ fn transaction_log_state(tx: Tx, id: u32) -> Result[LogState, Error] {
         return Error(Stale(id))
     }
     let head = descriptor_bounds(descriptor)
-    let height = if descriptor[53u64] == 1 {
+    let height = if collection_descriptor(descriptor).residency == ResidentTiered {
         transaction_write_height(tx, log_key(id, head.next)?)?
     } else {
         collection_write_height(tree, key)
@@ -440,11 +440,12 @@ fn trim_log_page(mut tree: PageTree, key: Bytes, floor: u64, expected: Option[u6
         let Some((old, descriptor)) = std.page.collection_entry(tree.root, key) else {
             return Error(malformed(0))
         }
-        if descriptor[52] != 4 || descriptor[53] != 0 {
+        let fields = collection_descriptor(descriptor)
+        if fields.kind != LogCollection || fields.residency != ResidentMemory {
             return Error(malformed(0))
         }
         let limits = descriptor_bounds(descriptor)
-        let previous: u64 = list.word_le(descriptor, 44)
+        let previous = fields.row_bytes
         if floor < limits.first {
             return Error(malformed(0))
         }
@@ -474,7 +475,7 @@ fn trim_log_page(mut tree: PageTree, key: Bytes, floor: u64, expected: Option[u6
             return Error(malformed(0))
         }
     }
-    let descriptor = log_record(kept, floor, next_seq, 0)?
+    let descriptor = log_record(kept, floor, next_seq, ResidentMemory)?
     page_result(std.page.insert(mut tree.root, key, descriptor, Some(take kept), tree.inline, first, mut ids))?
     Ok(dropped)
 }
@@ -557,7 +558,7 @@ fn window_insertions(r: Reader, mut out: ChangeOutput, after: Snapshot, id: u32,
     let tree = view after.roots.collections
     if let Some(inventory) = view tree.paging {
         let descriptor = option.unwrap(std.page.lookup(tree.root, list.slice(low, 0, 4)))
-        if descriptor[53u64] == 1 {
+        if collection_descriptor(descriptor).residency == ResidentTiered {
             let rows = snapshot_tiered_span(r, after, inventory, low, high)?
             capacity(list.try_reserve(mut out.rows, list.len(rows)))?
             for take row in take rows {

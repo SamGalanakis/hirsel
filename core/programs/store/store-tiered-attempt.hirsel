@@ -58,9 +58,7 @@ type TieredTouchSet: send {
 }
 
 fn tiered_touch_set(partition: u64) -> TieredTouchSet {
-    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone,
-        sibling_window: 0, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()),
-        stopped: None, intent: None)
+    TieredTouchSet(stamps: map.new(), touched_bytes: 0, partition: partition, seek: SeekOperation, values: ValuesNone, sibling_window: 0, siblings: list.new(), gather: TieredGather(on: false, full: false, seek: list.new(), values: ValuesNone, paths: list.new()), stopped: None, intent: None)
 }
 
 fn tiered_attempt(partition: u64, window: u64) -> core.Cell[TieredTouchSet] {
@@ -163,7 +161,11 @@ fn tiered_gather_touch(mut a: TieredTouchSet, stamp: u64, payload: u64, take mis
         return false
     }
     let first = !map.contains(a.stamps, stamp)
-    let total = if first { int.saturating_add(a.touched_bytes, 16 + payload) } else { a.touched_bytes }
+    let total = if first {
+        int.saturating_add(a.touched_bytes, 16 + payload)
+    } else {
+        a.touched_bytes
+    }
     if total > a.partition {
         a.gather.full = true
         return false
@@ -336,8 +338,7 @@ fn tiered_touch_hot_page(attempt: core.Cell[TieredTouchSet], page: Arc[std.page.
     Ok(())
 }
 
-fn tiered_pinned_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr,
-    expected_level: Option[u8]) -> Result[View[Arc[std.page.Page]], Error] in visible {
+fn tiered_pinned_page(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ptr: std.page.PagePtr, expected_level: Option[u8]) -> Result[View[Arc[std.page.Page]], Error] in visible {
     let Some(frame) = tiered_resolve_cold(attempt, visible, TieredPage(ptr))? else {
         return Error(Missed)
     }
@@ -473,7 +474,7 @@ fn tiered_plan_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCach
     let key = list.slice(logical, 4, list.len(logical))
     let origin = tiered_point_page(attempt, visible, edge, None)?
     let leaf = tiered_plan_path(attempt, visible, origin, key)?
-    if descriptor[52u64] == 4 {
+    if collection_descriptor(descriptor).kind == LogCollection {
         return Ok(0u32)
     }
     Ok(tiered_leaf_prior(leaf, key))
@@ -553,6 +554,7 @@ fn stage_tiered_trim(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCach
     next_stamp = following_stamp
     Ok((take kept, dropped))
 }
+
 scoped type TieredBorrowedRoot {
     edge: View[std.page.Slot],
     pins: View[Map[TieredCacheKey, Arc[TieredFrame]]]
@@ -565,8 +567,7 @@ fn tiered_point_bytes(attempt: core.Cell[TieredTouchSet], root: TieredBorrowedRo
     tiered_point_bytes_at(attempt, root, root.edge, None, key)
 }
 
-fn tiered_point_bytes_at(attempt: core.Cell[TieredTouchSet], root: TieredBorrowedRoot, edge: View[std.page.Slot] in root,
-    expected: Option[u8], key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
+fn tiered_point_bytes_at(attempt: core.Cell[TieredTouchSet], root: TieredBorrowedRoot, edge: View[std.page.Slot] in root, expected: Option[u8], key: Bytes) -> Result[Option[View[Bytes]], Error] in root {
     if tiered_blocked(attempt) {
         return Error(Missed)
     }

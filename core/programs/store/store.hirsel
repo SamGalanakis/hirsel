@@ -1799,7 +1799,7 @@ fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], tiered: Opt
         let prior = match (delta, base) {
             (Some(TieredPrior(prior)), _) => prior,
             (_, Some(head)) => {
-                if collection_kind(head, list.slice(op.key, 0, 4)) == Some(4u8) {
+                if collection_kind(head, list.slice(op.key, 0, 4)) == Some(LogCollection) {
                     0u32
                 } else {
                     stored_prior(get_page_row(head, op.key))
@@ -2179,7 +2179,7 @@ fn remove_store_row(mut tree: PageTree, key: Bytes, mut final_item: u64) -> Resu
 fn remove_store_collection(mut tree: PageTree, id: u32, mut final_item: u64) -> Result[u64, Error] {
     let key = prefix(id)?
     let charge = match std.page.lookup(tree.root, key) {
-        Some(descriptor) => int.saturating_add(126, list.word_le(descriptor, 44)),
+        Some(descriptor) => int.saturating_add(126, collection_descriptor(descriptor).row_bytes),
         None => 0u64,
     }
     let first = stamp_after(final_item)?
@@ -4821,12 +4821,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
                     return Error(disk_fault(file, 0, Malformed))
                 }
-                let tiered_counts: Option[ReplayDescriptor] = if descriptor[53u64] == 1 {
-                    Some(tiered_replay_descriptor(descriptor))
-                } else {
-                    None
-                }
-                (descriptor[52u64], tiered_counts)
+                journal_collection_descriptor(descriptor)
             }
             if let Some(before) = tiered_descriptor {
                 replay_tiered_op(file, mut tree, mut next_stamp, mut account, before, op)?
@@ -4840,7 +4835,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
                 }
                 continue
             }
-            if kind == 4 {
+            if kind == LogCollection {
                 let Some(value) = view op.value else {
                     return Error(disk_fault(file, 0, Malformed))
                 }
@@ -4859,7 +4854,7 @@ fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[J
             if op.prior != stored_prior(get_page_row(tree, op.key)) {
                 return Error(disk_fault(file, 0, Malformed))
             }
-            if kind == 3 {
+            if kind == CellCollection {
                 if list.len(op.key) != 4 {
                     return Error(disk_fault(file, 0, Malformed))
                 }

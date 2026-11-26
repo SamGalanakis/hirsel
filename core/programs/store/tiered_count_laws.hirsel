@@ -1,4 +1,3 @@
-
 fn l62_write_count_page(d: Dir, owner: StoreId, seq: u64, collection: u32, page: Arc[std.page.Page], mut packs: std.omap.OMap[u64, TieredPagerPack], mut ids: u64) -> Result[std.page.PagePtr, Error] waits {
     let mut draft = begin_tiered_pack(owner, seq, 3, 4096)?
     let image = std.page.image_of(page)
@@ -26,7 +25,7 @@ fn l62_prepare_count_snapshot(mut db: Db, d: Dir, collection: u32) -> Result[(),
     let image = page_result(std.page.encode(branches, 1, 42, Collection))?
     let branch_page = page_result(std.page.attach_cold(take image))?
     let ptr = l62_write_count_page(d, db.store, 10, collection, branch_page, mut packs, mut ids)?
-    let mut row = collection_header(42, 2, 172, 1, 1)?
+    let mut row = collection_header(42, 2, 172, 1, ResidentTiered)?
     list.copy_from_slice(mut row, 0, std.page.encode_ptr(ptr))
     let id = prefix(collection)?
     let mut descriptors: List[std.page.Entry] = list.with_capacity(1)
@@ -52,11 +51,7 @@ fn l62_prepare_count_snapshot(mut db: Db, d: Dir, collection: u32) -> Result[(),
 fn l62_snapshot_counts(db: Db, rows_handle: Table[u64, u32]) -> Result[(), Error] waits {
     let read_handle = reader(db, VALUE_LIMIT + 1048576)?
     let s = snapshot(db)
-    if count_at(read_handle, s, rows_handle, Included(2u64), Excluded(3u64))? != 1 ||
-        count_at(read_handle, s, rows_handle, Included(3u64), Excluded(4u64))? != 0 ||
-        count_at(read_handle, s, rows_handle, Included(2u64), Unbounded)? != 1 ||
-        count_at(read_handle, s, rows_handle, Unbounded, Included(1u64))? != 1 ||
-        count_at(read_handle, s, rows_handle, Unbounded, Unbounded)? != 2 {
+    if count_at(read_handle, s, rows_handle, Included(2u64), Excluded(3u64))? != 1 || count_at(read_handle, s, rows_handle, Included(3u64), Excluded(4u64))? != 0 || count_at(read_handle, s, rows_handle, Included(2u64), Unbounded)? != 1 || count_at(read_handle, s, rows_handle, Unbounded, Included(1u64))? != 1 || count_at(read_handle, s, rows_handle, Unbounded, Unbounded)? != 2 {
         fail("L62: rank must include the replayed insertion and mask the deleted row")
     }
     Ok(())

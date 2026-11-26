@@ -735,7 +735,7 @@ fn test_l68_installed_tiered_root_reopens(d: Dir) -> Result[(), Error] waits {
 fn test_l62_replayed_log_masks_cold_rows() -> Result[(), Error] waits {
     let owner = StoreId(hi: 3, lo: 4)
     let base = std.page.PagePtr(pack: 8, offset: 72, len: 80, checksum: 111, stamp: 40)
-    let mut descriptor = collection_header(40, 3, 258, 4, 1)?
+    let mut descriptor = collection_header(40, 3, 258, 4, ResidentTiered)?
     list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
     list.put_word_le(mut descriptor, 4u64)
     list.put_word_le(mut descriptor, 1u64)

@@ -279,8 +279,8 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
             tiered_map_account(option.unwrap(std.page.child(root, slot)), mut seen, mut total)?
             continue
         }
-        let descriptor = option.unwrap(std.page.value_at(root, slot))
-        if descriptor[53u64] != 1 {
+        let descriptor = unwrap_collection_descriptor(std.page.value_at(root, slot))
+        if descriptor.residency != ResidentTiered {
             continue
         }
         let stamp = match option.unwrap(std.page.child_slot(root, slot)) {
@@ -295,7 +295,7 @@ fn tiered_map_account(root: Arc[std.page.Page], mut seen: Map[u64, ()], mut tota
             capacity(map.try_reserve(mut seen, 1))?
             map.insert(mut seen, stamp, ())
         }
-        let Some(sum) = int.checked_add(total, list.word_le(descriptor, 44)) else {
+        let Some(sum) = int.checked_add(total, descriptor.row_bytes) else {
             return Error(Limit(Ids))
         }
         total = sum

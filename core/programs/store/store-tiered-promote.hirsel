@@ -18,7 +18,7 @@ fn promotion_collection_root(tree: PageTree, collection: u32) -> Result[Option[s
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, key) else {
         return Ok(None)
     }
-    if descriptor[53u64] != 1 {
+    if collection_descriptor(descriptor).residency != ResidentTiered {
         return Ok(None)
     }
     Ok(Some(clone(edge)))
@@ -204,7 +204,7 @@ fn promotion_tiered_collections(root: Arc[std.page.Page], mut found: List[(u32, 
             promotion_tiered_collections(option.unwrap(std.page.child(root, slot)), mut found)?
             continue
         }
-        if option.unwrap(std.page.value_at(root, slot))[53u64] != 1 {
+        if unwrap_collection_descriptor(std.page.value_at(root, slot)).residency != ResidentTiered {
             continue
         }
         let key = option.unwrap(std.page.key_at(image, slot))

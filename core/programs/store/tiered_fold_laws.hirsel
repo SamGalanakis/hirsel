@@ -73,7 +73,7 @@ fn l79_fold_materializes(source: TieredPageSource, base: std.page.PagePtr) -> Re
 
 fn l79_cut_table(base: std.page.PagePtr, total_rows: u64, row_bytes: u64, mut next_stamp: u64) -> Result[Roots, Error] {
     let key = prefix(9)?
-    let mut descriptor = collection_header(base.stamp, total_rows, row_bytes, 1, 1)?
+    let mut descriptor = collection_header(base.stamp, total_rows, row_bytes, 1, ResidentTiered)?
     list.copy_from_slice(mut descriptor, 0, std.page.encode_ptr(base))
     let mut rows: List[std.page.Entry] = list.with_capacity(1)
     list.push(mut rows, std.page.Entry(key: take key, cell: InlineValue(take descriptor)))

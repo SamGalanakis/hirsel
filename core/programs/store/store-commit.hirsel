@@ -98,7 +98,7 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
             return Ok(false)
         }
         let collection = list.slice(op.key, 0, 4)
-        if collection_kind(db.heads[i].roots.collections, collection) == Some(3u8) {
+        if collection_kind(db.heads[i].roots.collections, collection) == Some(CellCollection) {
             return Ok(false)
         }
         for prior in 0u64 .. e {
@@ -428,7 +428,7 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool,
         }
         if tree_domain(tree) == CollectionMap {
             let kind = collection_kind(tree, list.slice(op.key, 0, 4))
-            if kind == Some(3u8) {
+            if kind == Some(CellCollection) {
                 match op.value {
                     Some(PageValue(raw)) => apply_cell(mut tree, op.key, Some(view raw), None, first, mut draw)?,
                     Some(BlobBody(raw)) => apply_cell(mut tree, op.key, Some(view raw), Some(view raw), first, mut draw)?,
@@ -436,7 +436,7 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool,
                 }
                 continue
             }
-            if kind == Some(4u8) {
+            if kind == Some(LogCollection) {
                 match op.value {
                     Some(PageValue(raw)) => apply_log_append(mut tree, op.key, raw, None, first, mut draw)?,
                     Some(BlobBody(raw)) => apply_log_append(mut tree, op.key, raw, Some(view raw), first, mut draw)?,

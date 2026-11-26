@@ -23,22 +23,23 @@ fn tiered_stage_collection_edit(attempt: core.Cell[TieredTouchSet], visible: Map
     let Some(empty_root) = view staged.empty_collection else {
         fail("store: missing empty collection page")
     }
-    let kind = descriptor[52u64]
+    let fields = collection_descriptor(descriptor)
+    let kind = fields.kind
     if let Some(trim) = logical.trim {
         let limits = descriptor_bounds(descriptor)
-        let before: u64 = list.word_le(descriptor, 44)
+        let before = fields.row_bytes
         let (take ready, dropped) = stage_tiered_trim(attempt, visible, root, empty_root, limits, before, trim.floor, mut next_stamp)?
-        let revised = log_record(ready, trim.floor, order.max(limits.next, trim.floor), 1)?
+        let revised = log_record(ready, trim.floor, order.max(limits.next, trim.floor), ResidentTiered)?
         return Ok((take ready, take revised, TieredDropped(dropped)))
     }
     let key = list.slice(logical.key, 4, list.len(logical.key))
     let value = tiered_staged_value(logical)?
-    let ready = stage_tiered_row(attempt, visible, root, empty_root, key, value, staged.inline, kind == 4, private_from, mut next_stamp)?
-    let revised = if kind == 4 {
+    let ready = stage_tiered_row(attempt, visible, root, empty_root, key, value, staged.inline, kind == LogCollection, private_from, mut next_stamp)?
+    let revised = if kind == LogCollection {
         let limits = descriptor_bounds(descriptor)
-        log_record(ready, limits.first, stamp_after(limits.next)?, 1)?
+        log_record(ready, limits.first, stamp_after(limits.next)?, ResidentTiered)?
     } else {
-        rooted_collection_record(ready, kind, 1)?
+        rooted_collection_record(ready, descriptor_kind_byte(kind), ResidentTiered)?
     }
     Ok((take ready, take revised, TieredPrior(prior)))
 }
@@ -78,7 +79,7 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
         let Some(descriptor) = std.page.lookup(base.root, id) else {
             return Error(Stale(list.word_be(id, 0)))
         }
-        if descriptor[53u64] == 0 {
+        if collection_descriptor(descriptor).residency == ResidentMemory {
             list.push(mut deltas, None)
             continue
         }
@@ -95,7 +96,10 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
         page_result(std.page.insert(mut staged.root, id, revised, Some(take ready), inline, first_stamp, mut draw))?
         restore_planned_root(mut staged.root, id, first_stamp, visible, mut draw)?
         list.push(mut deltas, Some(delta))
-        note_planned_collection(mut touched, id, match op.trim { Some(_) => true, None => false })?
+        note_planned_collection(mut touched, id, match op.trim {
+            Some(_) => true,
+            None => false
+        })?
         tiered_seek(attempt, SeekOperation)
     }
     let freed = planned_freed(base, staged, touched, first_stamp, visible)?
@@ -164,7 +168,6 @@ fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollecti
     }
     Ok(take freed)
 }
-
 
 fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ops: DataRows, first: u64) -> Result[Option[TieredWritePlan], Error] {
     for slot in 0u64 .. ops.count {

@@ -83,11 +83,11 @@ fn log_descriptor_cases() -> bool {
     let mut wire = descriptor_fixture(4, 16, 0, 0, 0)
     list.set_word_le(mut wire, 56, 257u64)
     list.set_word_le(mut wire, 64, 257u64)
-    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, 0)) != wire {
+    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, ResidentMemory)) != wire {
         return false
     }
     wire[53] = 1
-    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, 1)) != wire {
+    if !valid_descriptor(wire) || result.unwrap(log_record(empty, 257, 257, ResidentTiered)) != wire {
         return false
     }
     list.set_word_le(mut wire, 64, 258u64)
@@ -797,4 +797,14 @@ fn log_retain_sweep(c: Clock) -> Result[(), Error] waits {
     log_diff_write(mut db, None, kept, 12, 17, 100, 0)?
     retain_law_slice(mut db, 2, false, "kept declared Forever is not swept")?
     retain_law_check(db, kept, 100, 9, 17, "kept keeps every entry")
+}
+
+@test
+fn collection_descriptor_invalid_residency() -> Result[(), Error] {
+    let mut wire = descriptor_fixture(1, 0, 0, 0, 0)
+    wire[53] = 2
+    match page_result(std.page.decode(descriptor_page(wire), CollectionMap)) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => Ok(()),
+        _ => Error(Missing("collection descriptor residency refusal")),
+    }
 }

@@ -333,7 +333,7 @@ fn transaction_write_height(tx: Tx, key: Bytes) -> Result[u64, Error] {
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
         return Error(Stale(list.word_be(key, 0)))
     }
-    if descriptor[53u64] == 0 {
+    if collection_descriptor(descriptor).residency == ResidentMemory {
         return Ok(collection_write_height(tree, key))
     }
     tiered_seek(attempt, SeekKey(copied(list.slice(key, 4, list.len(key)))?))

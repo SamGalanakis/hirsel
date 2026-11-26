@@ -66,18 +66,20 @@ pub fn find_next[J, K, V, P](read_handle: Reader, s: Snapshot, ix: Index[J, K, V
     Ok(Paged(read_snapshot_collection_page(read_handle, s, ix.id, index_decoder(ix), Excluded(take final_item), take high, l)?))
 }
 
-fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, decoder: RowDecoder[K, V],
-    take low: Bound[Bytes], take high: Bytes, limits: Limits) -> Result[Page[K, V], Error] waits {
+fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, decoder: RowDecoder[K, V], take low: Bound[Bytes], take high: Bytes, limits: Limits) -> Result[Page[K, V], Error] waits {
     let data = view s.roots.collections
     if let Some(inventory) = view data.paging {
         let id = prefix(source)?
         if let Some((edge, descriptor)) = std.page.collection_slot(data.root, id) {
-            let tiered_rows = descriptor[53u64] == 1
+            let tiered_rows = collection_descriptor(descriptor).residency == ResidentTiered
             let tiered_owner = if source == decoder.table {
                 false
             } else {
                 let owner = std.page.lookup(data.root, prefix(decoder.table)?)
-                match owner { Some(record) => record[53u64] == 1, None => false }
+                match owner {
+                    Some(record) => collection_descriptor(record).residency == ResidentTiered,
+                    None => false
+                }
             }
             if tiered_rows || tiered_owner {
                 let (take input, take grant, root) = snapshot_pager(r, s, inventory)?
@@ -87,36 +89,33 @@ fn read_snapshot_collection_page[K, V](r: Reader, s: Snapshot, source: u32, deco
                     Some(replay) => std.omap.get(replay.collections, source),
                     None => None,
                 }
-                return retry_tiered_read(input, grant, root, hint, None, TieredForward,
-                    scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
-                        let mut walk = ()
-                        read_snapshot_page(s, source, copied(high)?, limits, mut walk,
-                            scoped fn(mut _walk: (), previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-                                if tiered_rows {
-                                    if let Some(last_key) = previous {
-                                        let after = scan_page_after(last_key)?
-                                        return tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)
-                                    }
-                                    return tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)
-                                }
-                                let mut cursor = resume_data(data, start, high, previous, false)?
-                                next_bytes(mut cursor)
-                            },
-                            scoped fn(mut _walk: (), key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
-                                tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining)
-                            })
+                return retry_tiered_read(input, grant, root, hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Page[K, V], Error] {
+                    let mut walk = ()
+                    read_snapshot_page(s, source, copied(high)?, limits, mut walk, scoped fn(mut _walk: (), previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+                        if tiered_rows {
+                            if let Some(last_key) = previous {
+                                let after = scan_page_after(last_key)?
+                                return tiered_scan_row(attempt, visible, edge, source, edits, after, high, false)
+                            }
+                            return tiered_scan_row(attempt, visible, edge, source, edits, start, high, false)
+                        }
+                        let mut cursor = resume_data(data, start, high, previous, false)?
+                        next_bytes(mut cursor)
+                    }, scoped fn(mut _walk: (), key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
+                        tiered_snapshot_row(attempt, visible, data, decoder, key, raw, remaining)
                     })
+                })
             }
         }
     }
     let mut cursor = byte_cursor(data, take low, high)?
-    read_snapshot_page(s, source, take high, limits, mut cursor,
-        scoped fn(mut current: PageRange, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-            next_bytes(mut current)
-        },
-        scoped fn(mut current: PageRange, key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
-            advance_rows(decoder, data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] { Ok(()) })
+    read_snapshot_page(s, source, take high, limits, mut cursor, scoped fn(mut current: PageRange, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+        next_bytes(mut current)
+    }, scoped fn(mut current: PageRange, key: Bytes, raw: Bytes, remaining: Option[u64]) -> Result[Option[((K, V), u64)], Error] {
+        advance_rows(decoder, data, key, raw, remaining, fn(observed: Bytes) -> Result[(), Error] {
+            Ok(())
         })
+    })
 }
 
 fn scan_page_start(low: Bound[Bytes], id: Bytes) -> Result[Bytes, Error] {
@@ -133,9 +132,7 @@ fn scan_page_after(key: Bytes) -> Result[Bytes, Error] {
     Ok(take after)
 }
 
-fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limits: Limits, mut walk: W,
-    advance: scoped[view] fn(mut W, Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error],
-    decode_row: scoped[view] fn(mut W, Bytes, Bytes, Option[u64]) -> Result[Option[((K, V), u64)], Error]) -> Result[Page[K, V], Error] {
+fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limits: Limits, mut walk: W, advance: scoped[view] fn(mut W, Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes])], Error], decode_row: scoped[view] fn(mut W, Bytes, Bytes, Option[u64]) -> Result[Option[((K, V), u64)], Error]) -> Result[Page[K, V], Error] {
     let mut page: List[(K, V)] = list.new()
     let mut byte_count = 0u64
     let mut final_item: Option[Bytes] = None
@@ -169,4 +166,3 @@ fn read_snapshot_page[K, V, W](s: Snapshot, source: u32, take high: Bytes, limit
     }
     Ok(Page(rows: take page, byte_count: byte_count, next: take resume))
 }
-

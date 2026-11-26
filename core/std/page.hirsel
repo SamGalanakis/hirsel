@@ -1,4 +1,4 @@
-// Store format 3 payloads (STORE-SPEC AP3, AP8, AP13, AP20).
+// Store page payloads (STORE-SPEC AP3, AP8, AP13, AP20).
 const HEADER: u64 = 24
 
 const TARGET: u64 = 4096
@@ -241,7 +241,7 @@ pub fn tiered_root_at(image: Image, slot: u64) -> Option[PagePtr] {
     }
     let at = entry_at(image, slot)
     let descriptor = at + 5 + u16_at(image.raw, at)
-    if image.raw[descriptor + 53] == 1 {
+    if result.unwrap(page_descriptor.fields(image.raw, descriptor, u16_at(image.raw, descriptor - 2))).residency == ResidentTiered {
         Some(ptr_at(image.raw, descriptor))
     } else {
         None
@@ -496,20 +496,14 @@ fn key_limit(domain: Domain) -> u64 {
 }
 
 fn map_value(raw: Bytes, at: u64, width: u64) -> Result[(), Error] {
-    if width < 56 {
-        return Error(MalformedPage)
-    }
+    let page_descriptor.CollectionDescriptor(kind, residency, rows, row_bytes: charge) = page_descriptor.fields(raw, at, width)?
     let ptr = ptr_at(raw, at)
-    let rows: u64 = list.word_le(raw, at + 36)
-    let charge: u64 = list.word_le(raw, at + 44)
-    let kind = raw[at + 52]
-    let residency = raw[at + 53]
-    if residency > 1 || raw[at + 55] != 0 || (ptr.stamp == 0 && ptr != unlocated(0)) {
+    if raw[at + 55] != 0 || (ptr.stamp == 0 && ptr != unlocated(0)) {
         return Error(MalformedPage)
     }
     match kind {
-        3 => {
-            if residency != 0 || width < 58 {
+        CellCollection => {
+            if residency != ResidentMemory || width < 58 {
                 return Error(MalformedPage)
             }
             let ilen = u16_at(raw, at + 56)
@@ -524,7 +518,7 @@ fn map_value(raw: Bytes, at: u64, width: u64) -> Result[(), Error] {
                 return Error(MalformedPage)
             }
         },
-        4 => {
+        LogCollection => {
             if width != 72 {
                 return Error(MalformedPage)
             }
@@ -534,11 +528,11 @@ fn map_value(raw: Bytes, at: u64, width: u64) -> Result[(), Error] {
                 return Error(MalformedPage)
             }
         },
-        _ => if (kind != 1 && kind != 2) || width != 56 {
+        _ => if width != 56 {
             return Error(MalformedPage)
         },
     }
-    if kind != 3 && ptr.stamp == 0 && (rows != 0 || charge != 0) {
+    if kind != CellCollection && ptr.stamp == 0 && (rows != 0 || charge != 0) {
         return Error(MalformedPage)
     }
     if raw[at + 54] != 0 {
@@ -1111,7 +1105,7 @@ fn check_attachment(image: Image, kids: List[Slot], blobs: List[BlobSlot]) -> Re
             } else {
                 value
             })
-            let tiered_root = lvl == 0 && image.domain == CollectionMap && image.raw[value + 56] == 1
+            let tiered_root = lvl == 0 && image.domain == CollectionMap && result.unwrap(page_descriptor.fields(image.raw, value + 3, u16_at(image.raw, value + 1))).residency == ResidentTiered
             let invalid = match kids[i] {
                 HotPage(kid) => stamp(kid.image) != ptr.stamp || (lvl != 0 && level(kid.image) != lvl - 1) || (tiered_root && ptr.pack != 0),
                 ColdPage(edge) => !(image.domain == Collection || tiered_root) || edge.pack == 0 || edge.offset < 72 || edge.len == 0 || edge != ptr,

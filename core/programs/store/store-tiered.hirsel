@@ -94,7 +94,7 @@ fn tiered_data_key(tree: PageTree, key: Bytes) -> bool {
     let Some(descriptor) = std.page.lookup(tree.root, list.slice(key, 0, 4)) else {
         return false
     }
-    descriptor[53u64] == 1
+    collection_descriptor(descriptor).residency == ResidentTiered
 }
 
 fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: PageTree, operations: DataRows) -> Result[u64, Error] {
@@ -107,7 +107,8 @@ fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: Pa
         let Some(before) = std.page.lookup(base.root, id) else {
             continue
         }
-        if before[53u64] != 1 {
+        let fields = collection_descriptor(before)
+        if fields.residency != ResidentTiered {
             continue
         }
         if retained {
@@ -119,7 +120,7 @@ fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: Pa
             if prior_collection != Some(collection) {
                 prior_collection = Some(collection)
                 let after = option.unwrap(std.page.lookup(proposed.root, id))
-                charged = replay_charge("MANIFEST", charged, list.word_le(before, 44), list.word_le(after, 44))?
+                charged = replay_charge("MANIFEST", charged, fields.row_bytes, collection_descriptor(after).row_bytes)?
             }
         }
     }

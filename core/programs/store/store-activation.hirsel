@@ -378,7 +378,7 @@ fn validate_rewrite_base(db: Db, imported: ValidatedImport) -> Result[(), Deploy
         }) {
             return Error(ImportMalformed)
         }
-        if collection_kind(tree, deploy_result(prefix(row.id))?) != Some(1u8) {
+        if collection_kind(tree, deploy_result(prefix(row.id))?) != Some(TableCollection) {
             return Error(ImportMalformed)
         }
         let logical = logical_key(row.id, row.key) ?=> |_| ImportMalformed

@@ -18,9 +18,9 @@ fn l62_prepare_snapshot_pages(mut db: Db, d: Dir, collection: u32, pack_seq: u64
         let kind = before[52u64]
         let descriptor = if kind == 4 {
             let limits = descriptor_bounds(before)
-            log_record(here, limits.first, limits.next, 1)?
+            log_record(here, limits.first, limits.next, ResidentTiered)?
         } else {
-            rooted_collection_record(here, kind, 1)?
+            rooted_collection_record(here, kind, ResidentTiered)?
         }
         (take raw, inventory, place, arc.share(here), take descriptor)
     }

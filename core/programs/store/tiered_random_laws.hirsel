@@ -261,7 +261,7 @@ fn random_tables(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Resul
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("L69 random: the fixture has no rows table")
         }
-        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+        (arc.share(here), rooted_collection_record(here, before[52u64], ResidentTiered)?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L69 random: the rows table spans more than one leaf")

@@ -1,7 +1,6 @@
 // The collection map is Memory metadata. The span's single attempt
 // crosses those entries and charges the Tiered data reached beneath them.
-fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], data: PageTree,
-    low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], data: PageTree, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
     if high <= low {
         return Ok(None)
     }
@@ -14,8 +13,16 @@ fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
         }
         let collection: u32 = list.word_be(id, 0)
         let collection_end = prefix(collection + 1)?
-        let from = if low <= id { view id } else { view low }
-        let until = if list.len(high) > 4 && high < collection_end { view high } else { view collection_end }
+        let from = if low <= id {
+            view id
+        } else {
+            view low
+        }
+        let until = if list.len(high) > 4 && high < collection_end {
+            view high
+        } else {
+            view collection_end
+        }
         let (edge, descriptor) = option.unwrap(std.page.collection_slot(data.root, id))
         if let Some(take row) = tiered_span_collection(attempt, visible, data, edge, descriptor, collection, from, until)? {
             return Ok(Some(take row))
@@ -24,15 +31,18 @@ fn tiered_span_row(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheK
     Ok(None)
 }
 
-fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], data: PageTree,
-    edge: std.page.Slot, descriptor: Bytes, collection: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
-    if low >= high { return Ok(None) }
-    if descriptor[53u64] == 0 {
+fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], data: PageTree, edge: std.page.Slot, descriptor: Bytes, collection: u32, low: Bytes, high: Bytes) -> Result[Option[(Bytes, Arc[Bytes])], Error] {
+    if low >= high {
+        return Ok(None)
+    }
+    if collection_descriptor(descriptor).residency == ResidentMemory {
         let mut cursor = byte_cursor(data, Included(copied(low)?), high)?
         return next_bytes(mut cursor)
     }
     let (take start, take stop) = tiered_scan_bounds(descriptor, collection, copied(low)?, copied(high)?)?
-    if start >= stop { return Ok(None) }
+    if start >= stop {
+        return Ok(None)
+    }
     let overlay = match data.replay {
         Some(replay) => std.omap.get(replay.collections, collection),
         None => None,
@@ -43,8 +53,7 @@ fn tiered_span_collection(attempt: core.Cell[TieredTouchSet], visible: Map[Tiere
     Ok(take found)
 }
 
-fn snapshot_tiered_span_step(r: Reader, s: Snapshot, inventory: TieredReadInventory, low: Bytes, high: Bytes,
-    previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {
+fn snapshot_tiered_span_step(r: Reader, s: Snapshot, inventory: TieredReadInventory, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let beginning = disk_allocation(scoped fn() -> Result[Bytes, Error] {
         match previous {
@@ -53,27 +62,25 @@ fn snapshot_tiered_span_step(r: Reader, s: Snapshot, inventory: TieredReadInvent
         }
     })?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward,
-        scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
-            let Some((take key, take value)) = tiered_span_row(attempt, visible, s.roots.collections, beginning, high)? else {
-                return Ok(None)
-            }
-            let resume = copied(key)?
-            Ok(Some((take key, take value, take resume)))
-        })
+    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+        let Some((take key, take value)) = tiered_span_row(attempt, visible, s.roots.collections, beginning, high)? else {
+            return Ok(None)
+        }
+        let resume = copied(key)?
+        Ok(Some((take key, take value, take resume)))
+    })
 }
 
 fn snapshot_tiered_span(r: Reader, s: Snapshot, inventory: TieredReadInventory, low: Bytes, high: Bytes) -> Result[List[Change], Error] waits {
     let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
     let empty_hint: Bytes = list.new()
-    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward,
-        scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[Change], Error] {
-            let mut out: List[Change] = list.new()
-            let mut start = copied(low)?
-            while let Some((take key, take value)) = tiered_span_row(attempt, visible, s.roots.collections, start, high)? {
-                start = scan_page_after(key)?
-                list.push(mut out, Change(tree_key: take key, value: Some(take value)))
-            }
-            Ok(take out)
-        })
+    retry_tiered_read(source, grant, root, empty_hint, None, TieredForward, scoped fn(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]]) -> Result[List[Change], Error] {
+        let mut out: List[Change] = list.new()
+        let mut start = copied(low)?
+        while let Some((take key, take value)) = tiered_span_row(attempt, visible, s.roots.collections, start, high)? {
+            start = scan_page_after(key)?
+            list.push(mut out, Change(tree_key: take key, value: Some(take value)))
+        }
+        Ok(take out)
+    })
 }

@@ -268,7 +268,7 @@ fn collection_row_changes(mut out: ChangeOutput, id: u32, left: std.page_walk.Wa
     // stops here and `tiered_changes` diffs these rows outside it.
     let before = comparison != Greater
     let after = comparison != Less
-    if (before && option.unwrap(std.page_walk.value(left))[53u64] != 0) || (after && option.unwrap(std.page_walk.value(right))[53u64] != 0) {
+    if (before && unwrap_collection_descriptor(std.page_walk.value(left)).residency != ResidentMemory) || (after && unwrap_collection_descriptor(std.page_walk.value(right)).residency != ResidentMemory) {
         out.deferred = Some(TieredRowDiff(id, start: clone(start), stop: clone(stop), before, after))
         return Ok(false)
     }
@@ -304,11 +304,11 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], afte
             } else {
                 std.page_walk.value(right)
             }
-            option.unwrap(descriptor)[52]
+            unwrap_collection_descriptor(descriptor).kind
         }
         let more = match kind {
-            3 => page_change_cell(mut out, key, left, right, comparison, low)?,
-            4 => page_change_log(mut out, key, left, right, comparison, low, high)?,
+            CellCollection => page_change_cell(mut out, key, left, right, comparison, low)?,
+            LogCollection => page_change_log(mut out, key, left, right, comparison, low, high)?,
             _ => if comparison != Equal || compare_row_versions(left, right) != Equal {
                 collection_row_changes(mut out, list.word_be(key, 0), left, right, comparison, diff_bound(low, key), diff_bound(high, key))?
             } else {

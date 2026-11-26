@@ -17,7 +17,7 @@ fn tiered_collections(root: Arc[std.page.Page]) -> bool {
     if std.page.level(image) == 0 {
         for slot in 0u64 .. slots {
             // AP7 puts residency immediately after the collection kind.
-            if option.unwrap(std.page.value_at(root, slot))[53] == 1 {
+            if unwrap_collection_descriptor(std.page.value_at(root, slot)).residency == ResidentTiered {
                 return true
             }
         }

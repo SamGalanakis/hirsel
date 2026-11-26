@@ -176,10 +176,11 @@ fn tx_page_row(tx: Tx, key: Bytes) -> Result[Option[View[Bytes]], Error] in tx {
     let Some((edge, descriptor)) = std.page.collection_slot(tree.root, list.slice(key, 0, 4)) else {
         return Ok(None)
     }
-    if descriptor[53u64] != 1 {
+    let fields = collection_descriptor(descriptor)
+    if fields.residency != ResidentTiered {
         return Ok(get_page_row(tree, key))
     }
-    if descriptor[52u64] == 4 {
+    if fields.kind == LogCollection {
         if list.len(key) != 12 {
             return Ok(None)
         }

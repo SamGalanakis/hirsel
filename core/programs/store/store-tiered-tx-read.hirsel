@@ -27,7 +27,7 @@ fn tx_tiered_descriptor(tx: Tx, collection: u32) -> Result[bool, Error] {
     let Some(descriptor) = std.page.lookup(tx.roots.collections.root, prefix(collection)?) else {
         return Ok(false)
     }
-    Ok(descriptor[53u64] == 1)
+    Ok(collection_descriptor(descriptor).residency == ResidentTiered)
 }
 
 // The rows the Tx stages for Tiered table collections, the newest op for a
@@ -58,7 +58,8 @@ fn tx_tiered_stage_rows(tree: PageTree, rows: DataRows, only: Option[u32], mut i
         let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
             continue
         }
-        if descriptor[53u64] != 1 || descriptor[52u64] == 3 || descriptor[52u64] == 4 {
+        let fields = collection_descriptor(descriptor)
+        if fields.residency != ResidentTiered || fields.kind == CellCollection || fields.kind == LogCollection {
             continue
         }
         let value: Option[Arc[Bytes]] = match op.value {
@@ -219,7 +220,7 @@ fn tx_tiered_count(tx: Tx, collection: u32, low: Bytes, high: Bytes) -> Result[u
     }
     let committed = if list.slice(high, 0, 4) != id {
         let omitted = tiered_count_overlay(overlay, id, low, before)?
-        let rows: u64 = list.word_le(descriptor, 36)
+        let rows: u64 = collection_descriptor(descriptor).rows
         let Some(total) = int.checked_sub(rows, omitted) else {
             return Error(malformed(0))
         }
@@ -264,7 +265,7 @@ fn tx_tiered_index_row[K, V](tiered: TxIndexTiered, r: RowDecoder[K, V], data: P
     let Some((edge, descriptor)) = std.page.collection_slot(data.root, list.slice(primary, 0, 4)) else {
         return Error(Stale(r.table))
     }
-    if descriptor[53u64] == 0 {
+    if collection_descriptor(descriptor).residency == ResidentMemory {
         let Some(value) = get_page_row(data, primary) else {
             return Error(Stale(r.table))
         }

@@ -117,13 +117,6 @@ fn restamp_tiered_emission(root: std.page.Slot, collection: u32, mut next_stamp:
 
 pub type Residency: send = Memory | Tiered
 
-fn collection_mode(tree: PageTree, key: Bytes) -> Option[(u8, u8)] {
-    match std.page.lookup(tree.root, key) {
-        Some(descriptor) => Some((descriptor[52], descriptor[53])),
-        None => None,
-    }
-}
-
 // §13.8 "Residency changes": a schema commit on main, published by its own
 // cut. Tables and Logs only; a Cell is `Missing("residency")`, and an index
 // follows its table's Memory tree (open_lookup and entries read it there).
@@ -136,21 +129,21 @@ pub fn set_residency(mut db: Db, id: u32, r: Residency) -> Result[(), Error] wai
     }
     healthy(db)?
     let key = prefix(id)?
-    let Some((kind, residency)) = collection_mode(db.heads[0u64].roots.collections, key) else {
+    let Some(std.page_descriptor.CollectionDescriptor(kind, residency, ..)) = collection_by_key(db.heads[0u64].roots.collections, key) else {
         return Error(Stale(id))
     }
-    if kind != 1 && kind != 4 {
+    if kind != TableCollection && kind != LogCollection {
         return Error(Missing("residency"))
     }
     match r {
         Tiered => {
-            if residency == 1 {
+            if residency == ResidentTiered {
                 return Ok(())
             }
             residency_to_tiered(mut db, id, take key)
         },
         Memory => {
-            if residency == 0 {
+            if residency == ResidentMemory {
                 return Ok(())
             }
             residency_to_memory(mut db, id, take key)
@@ -246,7 +239,7 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
             return Error(Stale(id))
         }
         let mut record = copied(before)?
-        record[53] = 1u8
+        std.page_descriptor.set_collection_residency(mut record, ResidentTiered)
         (arc.share(here), take record)
     }
     let first = stamp_after(ids)?
@@ -277,7 +270,7 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
 // failed load publishes nothing and the collection stays Tiered.
 fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error] waits {
     let charge = match std.page.lookup(db.heads[0u64].roots.collections.root, key) {
-        Some(descriptor) => list.word_le(descriptor, 44),
+        Some(descriptor) => collection_descriptor(descriptor).row_bytes,
         None => return Error(Stale(id)),
     }
     over_ceiling(int.saturating_add(db.resident, charge), tiered_memory_room(disk_state(db).options))?
@@ -323,7 +316,7 @@ fn load_memory_residency(pager: Option[View[Sender[TieredPagerMessage]]], mut ro
     for at in 0u64 .. list.len(root) {
         descriptor[at] = root[at]
     }
-    descriptor[53] = 0u8
+    std.page_descriptor.set_collection_residency(mut descriptor, ResidentMemory)
     let private_from = next_stamp
     let inline = roots[0u64].collections.inline
     page_result(std.page.insert(mut roots[0u64].collections.root, take key, take descriptor, Some(take loaded), inline, private_from, mut next_stamp))?

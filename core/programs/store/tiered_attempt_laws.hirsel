@@ -1,5 +1,4 @@
 // L62: the attempt record in a task-local cell (§13.3 "The attempt record", v2.81).
-
 // Settles and copies the attempt so a law can read it between touches.
 fn tiered_attempt_state(attempt: core.Cell[TieredTouchSet]) -> TieredTouchSet {
     cell.with(attempt, (), tiered_attempt_state_entry)
@@ -42,8 +41,7 @@ fn l62_stop_sweep() -> Result[(), Error] {
         let (warm, warm_done) = l62_bounded_resolve(warm_pins, steps)
         let warm_touched = warm.touched_bytes == 1049
         let cold_touched = cold.touched_bytes == 1049
-        if (!warm_touched && warm.touched_bytes != 0) || (!cold_touched && cold.touched_bytes != 0) ||
-            map.contains(warm.stamps, 1) != warm_touched || map.contains(cold.stamps, 1) != cold_touched {
+        if (!warm_touched && warm.touched_bytes != 0) || (!cold_touched && cold.touched_bytes != 0) || map.contains(warm.stamps, 1) != warm_touched || map.contains(cold.stamps, 1) != cold_touched {
             fail("L62: a step stop tore a first touch")
         }
         if let Some(_) = warm.stopped {
@@ -103,6 +101,7 @@ fn fetch_many_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> 
 // A BLOB-valued table: BLOB_ROWS rows whose value is BLOB_BYTES copies of
 // the byte key % 251, past the 1,024-byte inline limit.
 const BLOB_ROWS: u64 = 512
+
 const BLOB_BYTES: u64 = 1500
 
 fn blob_row_value(key: u64) -> Bytes {
@@ -137,7 +136,7 @@ fn cold_table(take opened: Db, table_id: u32) -> Result[(), Error] waits {
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("cold table: the fixture has its table")
         }
-        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+        (arc.share(here), rooted_collection_record(here, before[52u64], ResidentTiered)?)
     }
     let mut draw = stamp_after(db.next_node)?
     let first = draw
@@ -163,7 +162,11 @@ fn fetch_many_keys() -> List[u64] {
 fn fetch_many_expected(keys: List[u64]) -> List[Option[u64]] {
     let mut rows: List[Option[u64]] = list.new()
     for key in keys {
-        list.push(mut rows, if key < FETCH_MANY_ROWS { Some(key * 3) } else { None })
+        list.push(mut rows, if key < FETCH_MANY_ROWS {
+            Some(key * 3)
+        } else {
+            None
+        })
     }
     rows
 }
@@ -185,7 +188,9 @@ fn fetch_many_body(tx: Tx, env: (Table[u64, u64], bool)) -> Result[List[Option[u
 // the attempts and demands are look's own; without it every attempt has
 // window 0 and every demand reads no value, which is the oracle's read.
 fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, prefetch: bool) -> Result[(u64, u64, R), Error] waits {
-    let Some(pool) = view r.pool else { fail("cold look: the reader has a pool") }
+    let Some(pool) = view r.pool else {
+        fail("cold look: the reader has a pool")
+    }
     let partition = pool.grant.pin_bytes
     let root = TieredPinRoot(domain: s.open, branch: s.branch, generation: match s.roots.collections.paging {
         Some(inventory) => inventory.generation,
@@ -207,12 +212,16 @@ fn cold_look[E: inert, R](r: Reader, s: Snapshot, env: E, body: fn(Tx, E) -> R, 
         }
         match state.stopped {
             None => {
-                let Seen(take seen) = take looked else { fail("cold look: the look runs") }
+                let Seen(take seen) = take looked else {
+                    fail("cold look: the look runs")
+                }
                 let Seen(value: take value, ..) = take seen
                 return Ok((attempts, map.len(state.stamps), take value))
             },
             Some(AttemptMiss(_)) => {
-                let SeekKey(sought) = view state.seek else { fail("cold look: a miss seeks its key") }
+                let SeekKey(sought) = view state.seek else {
+                    fail("cold look: a miss seeks its key")
+                }
                 let pager: Option[View[Sender[TieredPagerMessage]]] = Some(view pool.requests)
                 let source = tx_page_source(pager, s.roots.collections)?
                 serve_tiered_miss(source, root, state, sought, TieredPoint, Some(arc.share(pool.grant)), mut pins, mut pending)?
@@ -350,7 +359,11 @@ fn test_fetch_many_blob_values_rerun_once(d: Dir, c: Clock, r: Random, tasks: Ta
     close(take db)?
     let mut expected: List[Option[Bytes]] = list.new()
     for key in blob_keys() {
-        list.push(mut expected, if key < BLOB_ROWS { Some(blob_row_value(key)) } else { None })
+        list.push(mut expected, if key < BLOB_ROWS {
+            Some(blob_row_value(key))
+        } else {
+            None
+        })
     }
     if oracle? != expected || together? != expected {
         fail("fetch_many blobs: the rows are the BLOB values")

@@ -73,7 +73,7 @@ fn tiered_source(roots: Roots, id: u32) -> Result[bool, Error] {
     let Some(descriptor) = std.page.lookup(roots.collections.root, prefix(id)?) else {
         return Ok(false)
     }
-    Ok(descriptor[53u64] == 1)
+    Ok(collection_descriptor(descriptor).residency == ResidentTiered)
 }
 
 // `read_tail`: the tail of `decl` over `source`, from `resume` (inclusive) or the source's

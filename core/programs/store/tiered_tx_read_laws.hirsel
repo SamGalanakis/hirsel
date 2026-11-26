@@ -4,7 +4,6 @@
 // deletes over the replay overlay over the Cold tree. A body that writes a
 // Tiered row and then ranges a Memory table reads the Memory rows. The
 // expected rows come from the fixture's generator and the body's own edits.
-
 fn tx_read_bucket(_k: u64, v: u64) -> Result[List[u64], Capacity] {
     let mut keys: List[u64] = list.new()
     list.push(mut keys, v % 4)
@@ -52,7 +51,7 @@ fn tx_read_fixture(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64) -> Res
         let Some((here, before)) = std.page.collection_entry(tree.root, id) else {
             fail("Tx reads: the fixture has its table")
         }
-        (arc.share(here), rooted_collection_record(here, before[52u64], 1)?)
+        (arc.share(here), rooted_collection_record(here, before[52u64], ResidentTiered)?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("Tx reads: the fixture table spans more than one leaf")
@@ -79,7 +78,11 @@ fn tx_read_value(key: u64) -> Option[u64] {
     if key == 2000 {
         return Some(2000)
     }
-    if key < TX_READ_ROWS { Some(key) } else { None }
+    if key < TX_READ_ROWS {
+        Some(key)
+    } else {
+        None
+    }
 }
 
 // Every check returns its number on a mismatch, 0 when all hold.

@@ -101,17 +101,44 @@ fn page_result[T](take value: Result[T, std.page.Error]) -> Result[T, Error] {
     }
 }
 
-fn collection_header(stamp: u64, rows: u64, charge: u64, kind: u8, residency: u8) -> Result[Bytes, Error] {
+type CollectionDescriptor = std.page_descriptor.CollectionDescriptor
+
+fn collection_descriptor(raw: Bytes) -> CollectionDescriptor {
+    result.unwrap(std.page_descriptor.collection_descriptor(raw))
+}
+
+fn unwrap_collection_descriptor(take raw: Option[View[Bytes]]) -> CollectionDescriptor {
+    let value = option.unwrap(take raw)
+    collection_descriptor(value)
+}
+
+fn collection_by_key(tree: PageTree, key: Bytes) -> Option[CollectionDescriptor] {
+    match std.page.lookup(tree.root, key) {
+        Some(raw) => Some(collection_descriptor(raw)),
+        None => None,
+    }
+}
+
+fn descriptor_kind_byte(kind: std.page_descriptor.CollectionKind) -> u8 {
+    match kind {
+        TableCollection => 1,
+        IndexCollection => 2,
+        CellCollection => 3,
+        LogCollection => 4,
+    }
+}
+
+fn collection_header(stamp: u64, rows: u64, charge: u64, kind: u8, residency: std.page_descriptor.Residency) -> Result[Bytes, Error] {
     let mut record = std.page.encode_ptr(std.page.unlocated(stamp))
     capacity(le(mut record, rows, 8))?
     capacity(le(mut record, charge, 8))?
     list.push(mut record, kind)
-    list.push(mut record, residency)
-    list.fill(mut record, 2, 0u8)
+    list.fill(mut record, 3, 0u8)
+    std.page_descriptor.set_collection_residency(mut record, residency)
     Ok(take record)
 }
 
-fn rooted_collection_record(root: Arc[std.page.Page], kind: u8, residency: u8) -> Result[Bytes, Error] {
+fn rooted_collection_record(root: Arc[std.page.Page], kind: u8, residency: std.page_descriptor.Residency) -> Result[Bytes, Error] {
     let (rows, charge) = std.page.totals(root)
     let stamp = if rows == 0 {
         0u64
@@ -123,17 +150,17 @@ fn rooted_collection_record(root: Arc[std.page.Page], kind: u8, residency: u8) -
 
 fn cell_record(root: Arc[std.page.Page], inline: Option[View[Bytes]]) -> Result[Bytes, Error] {
     if let Some(value) = inline {
-        let mut record = collection_header(0, 1, 70 + round8(list.len(value)), 3, 0)?
+        let mut record = collection_header(0, 1, 70 + round8(list.len(value)), 3, ResidentMemory)?
         capacity(le(mut record, list.len(value), 2))?
         list.append(mut record, value)
         return Ok(take record)
     }
-    let mut record = rooted_collection_record(root, 3, 0)?
+    let mut record = rooted_collection_record(root, 3, ResidentMemory)?
     list.fill(mut record, 2, 0u8)
     Ok(take record)
 }
 
-fn log_record(root: Arc[std.page.Page], first_seq: u64, next_seq: u64, residency: u8) -> Result[Bytes, Error] {
+fn log_record(root: Arc[std.page.Page], first_seq: u64, next_seq: u64, residency: std.page_descriptor.Residency) -> Result[Bytes, Error] {
     let mut record = rooted_collection_record(root, 4, residency)?
     list.put_word_le(mut record, next_seq)
     list.put_word_le(mut record, first_seq)
@@ -152,8 +179,8 @@ fn put_collection(mut tree: PageTree, key: Bytes, built: Option[Arc[std.page.Pag
     }
     let record = match kind {
         3 => cell_record(root, None)?,
-        4 => log_record(root, 0, 0, 0)?,
-        _ => rooted_collection_record(root, kind, 0)?,
+        4 => log_record(root, 0, 0, ResidentMemory)?,
+        _ => rooted_collection_record(root, kind, ResidentMemory)?,
     }
     page_result(std.page.insert(mut tree.root, key, record, Some(take root), tree.inline, private_from, mut ids))
 }
@@ -172,7 +199,7 @@ fn count_page_rows(tree: PageTree, id: u32, low: Bytes, high: Bytes) -> Result[u
     let Some((root, descriptor)) = std.page.collection_entry(tree.root, collection_key) else {
         return Ok(0u64)
     }
-    let total: u64 = list.word_le(descriptor, 36)
+    let total: u64 = collection_descriptor(descriptor).rows
     let from = collection_rank(root, collection_key, low, total)
     let until = collection_rank(root, collection_key, high, total)
     Ok(int.saturating_sub(until, from))
@@ -203,9 +230,9 @@ fn one_page_account(roots: PageRoots) -> u64 {
     let mut listed = std.page.cursor_open(roots.collections.root, None, true, false)
     let leading: Bytes = list.new()
     while let Some((_, slot)) = std.page.cursor_next_key(mut listed, leading) {
-        let descriptor = option.unwrap(std.page.cursor_value(listed, slot))
-        let bytes_charge: u64 = if descriptor[53] == 0 {
-            list.word_le(descriptor, 44)
+        let descriptor = unwrap_collection_descriptor(std.page.cursor_value(listed, slot))
+        let bytes_charge: u64 = if descriptor.residency == ResidentMemory {
+            descriptor.row_bytes
         } else {
             0
         }
@@ -410,9 +437,10 @@ fn page_row_account(roots: List[PageRoots]) -> u64 {
             map.insert(mut descriptors, id, ())
             {
                 let descriptor = option.unwrap(std.page_walk.value(listed))
-                if descriptor[53] == 0 {
+                let fields = collection_descriptor(descriptor)
+                if fields.residency == ResidentMemory {
                     let child = std.page_walk.collection(listed)
-                    if descriptor[52] == 3 {
+                    if fields.kind == CellCollection {
                         let value = owned_cell(child, descriptor)
                         if let Some(raw) = value {
                             map.update_or_insert(mut cells, id, list.new(), fn(mut group: List[Arc[Bytes]]) {
@@ -472,7 +500,7 @@ fn get_page_row(tree: PageTree, key: Bytes) -> Option[View[Bytes]] in tree {
     let Some((root, descriptor)) = std.page.collection_entry(tree.root, list.slice(key, 0, 4)) else {
         return None
     }
-    if descriptor[52] == 3 {
+    if collection_descriptor(descriptor).kind == CellCollection {
         if list.len(key) != 4 {
             return None
         }
@@ -483,9 +511,9 @@ fn get_page_row(tree: PageTree, key: Bytes) -> Option[View[Bytes]] in tree {
     std.page.lookup(root, list.slice(key, 4, list.len(key)))
 }
 
-fn collection_kind(tree: PageTree, key: Bytes) -> Option[u8] {
-    match std.page.lookup(tree.root, key) {
-        Some(descriptor) => Some(descriptor[52]),
+fn collection_kind(tree: PageTree, key: Bytes) -> Option[std.page_descriptor.CollectionKind] {
+    match collection_by_key(tree, key) {
+        Some(descriptor) => Some(descriptor.kind),
         None => None,
     }
 }
@@ -622,7 +650,7 @@ fn next_page_range(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], E
         let Some(take root) = take subtree else {
             return Error(malformed(0))
         }
-        if descriptor[52] == 3 {
+        if collection_descriptor(descriptor).kind == CellCollection {
             if range_has_cell(rows, key) {
                 if let Some(take value) = owned_cell(root, descriptor) {
                     return Ok(Some((take key, take value)))

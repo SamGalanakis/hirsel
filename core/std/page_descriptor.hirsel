@@ -1,0 +1,43 @@
+pub type CollectionKind: key = TableCollection | IndexCollection | CellCollection | LogCollection
+
+pub type Residency: key = ResidentMemory | ResidentTiered
+
+pub type CollectionDescriptor: send {
+    kind: CollectionKind,
+    residency: Residency,
+    rows: u64,
+    row_bytes: u64
+}
+
+/// Decode the fixed fields at the start of a collection-map value.
+pub fn fields(raw: Bytes, at: u64, width: u64) -> Result[CollectionDescriptor, page.Error] {
+    if width < 56 || at > list.len(raw) || width > list.len(raw) - at {
+        return Error(MalformedPage)
+    }
+    let kind = match raw[at + 52] {
+        1 => TableCollection,
+        2 => IndexCollection,
+        3 => CellCollection,
+        4 => LogCollection,
+        _ => return Error(MalformedPage),
+    }
+    let residency = match raw[at + 53] {
+        0 => ResidentMemory,
+        1 => ResidentTiered,
+        _ => return Error(MalformedPage),
+    }
+    Ok(CollectionDescriptor(kind, residency, rows: list.word_le(raw, at + 36), row_bytes: list.word_le(raw, at + 44)))
+}
+
+/// Read the fixed fields of a collection-map value.
+pub fn collection_descriptor(value: Bytes) -> Result[CollectionDescriptor, page.Error] {
+    fields(value, 0, list.len(value))
+}
+
+/// Encode the residency field of an existing collection-map value.
+pub fn set_collection_residency(mut value: Bytes, residency: Residency) {
+    value[53] = match residency {
+        ResidentMemory => 0,
+        ResidentTiered => 1,
+    }
+}

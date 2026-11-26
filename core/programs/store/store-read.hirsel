@@ -159,7 +159,7 @@ fn snapshot_point[R](r: Reader, s: Snapshot, logical: Bytes, decode_row: scoped[
     let tree = view s.roots.collections
     if let Some(inventory) = view tree.paging {
         if let Some((_, descriptor)) = std.page.collection_slot(tree.root, list.slice(logical, 0, 4)) {
-            if descriptor[53u64] == 1 {
+            if collection_descriptor(descriptor).residency == ResidentTiered {
                 let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
                 return read_tiered_point(source, grant, root, tree, logical, decode_row)
             }
@@ -196,12 +196,13 @@ pub fn count_at[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: 
     if let Some(inventory) = view tree.paging {
         let id = prefix(t.id)?
         if let Some((edge, descriptor)) = std.page.collection_slot(tree.root, id) {
-            if descriptor[53u64] == 1 {
+            let fields = collection_descriptor(descriptor)
+            if fields.residency == ResidentTiered {
                 if high <= low {
                     return Ok(0u64)
                 }
                 if low == id && list.slice(high, 0, 4) != id {
-                    return Ok(list.word_le(descriptor, 36))
+                    return Ok(fields.rows)
                 }
                 let (take source, take grant, root) = snapshot_pager(r, s, inventory)?
                 return read_tiered_count(source, grant, root, tree, edge, descriptor, id, low, high)
@@ -343,7 +344,7 @@ pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Err
         let data = view rows.capture.roots.collections
         if let Some(inventory) = view data.paging {
             if let Some((edge, descriptor)) = std.page.collection_slot(data.root, prefix(rows.source)?) {
-                if descriptor[53u64] == 1 {
+                if collection_descriptor(descriptor).residency == ResidentTiered {
                     let Some((take key, take result)) = snapshot_scan_step(r, rows, data, inventory, edge, descriptor)? else {
                         rows.done = true
                         return Ok(None)

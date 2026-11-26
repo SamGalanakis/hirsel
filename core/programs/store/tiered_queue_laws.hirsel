@@ -32,7 +32,7 @@ fn l87_cold_log_padded(d: Dir, c: Clock, r: Random, tasks: Tasks, floor: u64, ap
             fail("L87: the fixture has no Log")
         }
         let limits = descriptor_bounds(before)
-        (arc.share(here), log_record(here, limits.first, limits.next, 1)?)
+        (arc.share(here), log_record(here, limits.first, limits.next, ResidentTiered)?)
     }
     if std.page.level(std.page.image_of(root)) == 0 {
         fail("L87: the fixture Log must span more than one leaf")

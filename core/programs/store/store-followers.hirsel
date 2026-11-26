@@ -33,7 +33,7 @@ pub opaque type Follower {
     stopped: Option[StoreCapacity]
 }
 
-type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8)
+type FollowerTransport: send = DirectoryFollow(Dir, Clock) | ObjectFollow(std.object.Requests, u8, Option[String])
 
 type FollowerRequest: send = Bind(FollowerTransport, Option[StoreId], u64) | Apply(Arc[FollowCapture], u64) | Floor(Arc[FollowCapture], u64, u64, u64) | Fresh(Arc[FollowCapture], u64, u64) | Await(Arc[FollowCapture], Position, u64, Option[u64])
 
@@ -59,12 +59,13 @@ fn request_follower(slot: FollowerSlot, take request: FollowerRequest) -> Result
     follower_response(take answer)?
 }
 
-fn follow_capture(id: StoreId, take state: State, resident: u64, remote: Option[ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
+fn follow_capture(id: StoreId, take state: State, resident: u64, take remote: Option[ObjectFollowHead], log_id: u64, watermark: u64) -> Result[Arc[FollowCapture], Error] {
     let shared = capacity(bound bytes option.unwrap(charge.counted(bytes[State])) {
         arc.new(take state)
     })?
-    disk_allocation(scoped fn() -> Result[Arc[FollowCapture], Error] {
-        Ok(arc.new(FollowCapture(store: id, state: arc.share(shared), resident, remote, log_id, watermark)))
+    let mut held = take remote
+    capacity(bound bytes (option.unwrap(charge.counted(bytes[FollowCapture])) + 64) {
+        arc.new(FollowCapture(store: id, state: arc.share(shared), resident, remote: replace(mut held, None), log_id, watermark))
     })
 }
 
@@ -184,20 +185,20 @@ fn initial_follow_capture(mut source: FollowerSource, mut progress: LogCapturePr
         DirectorySource(directory, c) => log_follow_capture(directory, c, 18446744073709551615u64, mut progress, expect, ceiling, None),
         ObjectSource(mut remote) => {
             history_check_follower_path(remote.client)?;
-            let initial = object_follow_capture(mut remote, None, expect, ceiling)
+            let initial = object_follow_capture(mut remote, None, expect, ceiling, false)
             remote.locator = empty_history_locator()
             take initial
         },
     }
 }
 
-fn advancing_follow_capture(mut source: FollowerSource, mut progress: LogCaptureProgress, take previous: Arc[FollowCapture], ceiling: u64, deadline: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn advancing_follow_capture(mut source: FollowerSource, mut progress: LogCaptureProgress, take previous: Arc[FollowCapture], ceiling: u64, deadline: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
     let expected = Some(previous.store)
     match source {
         DirectorySource(directory, c) => log_follow_capture(directory, c, deadline, mut progress, expected, ceiling, Some(take previous)),
         ObjectSource(mut remote) => {
             remote.deadline = deadline
-            let applied_state = object_follow_capture(mut remote, Some(arc.share(previous)), expected, ceiling)
+            let applied_state = object_follow_capture(mut remote, Some(arc.share(previous)), expected, ceiling, require_fresh)
             remote.locator = empty_history_locator()
             let selected = applied_state?
             if let Some(candidate) = selected {
@@ -234,7 +235,7 @@ fn floor_follow_capture(mut source: FollowerSource, previous: FollowCapture, cei
 
 fn follower_step(mut source: FollowerSource, mut progress: LogCaptureProgress, ceiling: u64, take request: FollowerRequest) -> Result[FollowerResponse, Error] waits {
     match take request {
-        Apply(take previous, deadline) => Ok(Captured(advancing_follow_capture(mut source, mut progress, take previous, ceiling, deadline)?)),
+        Apply(take previous, deadline) => Ok(Captured(advancing_follow_capture(mut source, mut progress, take previous, ceiling, deadline, false)?)),
         Floor(previous, at_most, deadline, opened) => Ok(Historical(floor_follow_capture(mut source, previous, ceiling, at_most, deadline, opened)?)),
         Fresh(take previous, deadline, opened) => Ok(Observed(follower_prepare_fresh(mut source, mut progress, take previous, ceiling, deadline, opened)?)),
         Await(take previous, wanted, opened, probe) => Ok(Observed(follower_observe(mut source, mut progress, take previous, ceiling, wanted, opened, probe)?)),
@@ -252,9 +253,10 @@ fn follower_apply(commands: Receiver[FollowerCommand], ceiling: u64) waits {
     }
     let mut source = match take transport {
         DirectoryFollow(directory, c) => DirectorySource(directory, c),
-        ObjectFollow(take requests, kind) => {
+        ObjectFollow(take requests, kind, take stream_root) => {
             let mut remote = history_reader(std.object.attach(take requests, None), due)
             remote.authority_kind = kind
+            remote.stream_root = take stream_root
             ObjectSource(take remote)
         },
     }
@@ -303,7 +305,7 @@ pub fn follower(mut source: Followers, take slot: FollowerSlot, take authority: 
 }
 
 fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object.LaneConfig, kind: u8) -> Result[(FollowerTransport, Option[std.object.Workers], bool, u64, u64), Error] {
-    let ObjectAuthorityConfig(client: take client, op_ms, ..) = take config
+    let ObjectAuthorityConfig(client: take client, op_ms, stream_root: take stream_root, ..) = take config
     if kind == 2 && !std.object.simulated(client) {
         return Error(Endpoint(NotSimulator))
     }
@@ -312,7 +314,7 @@ fn object_follow_transport(take config: ObjectAuthorityConfig, lanes: std.object
     }
     let deadline = std.object.deadline_after_ms(client, op_ms)
     let (take requests, take workers) = std.object.split(take client)
-    Ok((ObjectFollow(take requests, kind), take workers, false, op_ms, deadline))
+    Ok((ObjectFollow(take requests, kind, take stream_root), take workers, false, op_ms, deadline))
 }
 
 pub fn follower_branch(f: Follower, name: String) -> Option[Branch] {
@@ -403,7 +405,7 @@ pub fn catch_up(mut f: Follower, deadline_ns: u64) -> Result[Position, Error] wa
 }
 
 fn follower_prepare_fresh(mut source: FollowerSource, mut progress: LogCaptureProgress, take previous: Arc[FollowCapture], ceiling: u64, deadline: u64, opened: u64) -> Result[FollowerObservation, Error] waits {
-    let update = advancing_follow_capture(mut source, mut progress, arc.share(previous), ceiling, deadline)?
+    let update = advancing_follow_capture(mut source, mut progress, arc.share(previous), ceiling, deadline, true)?
     if let Some(take advanced) = take update {
         let ready = follower_snapshot(advanced, advanced.state.tips[0], opened)
         return Ok(FollowerReached(Some(take advanced), take ready, None))
@@ -459,7 +461,7 @@ fn follower_observe(mut source: FollowerSource, mut progress: LogCaptureProgress
     let Some(due) = probe else {
         return Ok(FollowerWaiting(published))
     }
-    let next_capture = match advancing_follow_capture(mut source, mut progress, take previous, ceiling, due) {
+    let next_capture = match advancing_follow_capture(mut source, mut progress, take previous, ceiling, due, false) {
         Ok(Some(take advanced)) => take advanced,
         Ok(None) => return Ok(FollowerWaiting(published)),
         Error(Reclaimed(_)) => return Ok(FollowerWaiting(published)),

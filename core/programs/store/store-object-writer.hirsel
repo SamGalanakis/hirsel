@@ -16,6 +16,7 @@ type ObjectWriterState {
     failed: Option[Error],
     // The host stream the Place is attached to (§12.11.5).
     stream: Option[HostStreamId],
+    attached: bool,
     has_sealed: bool,
     drop_attach_on_cut: bool
 }
@@ -248,24 +249,45 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     if let Error(take problem) = object_open_checks(options) {
         return Error(Refusal(error: take problem, authority: wrap_object_authority(take config, authority_kind)))
     }
-    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream) = take config
+    if let Some(_) = config.stream_root {
+        return Error(Refusal(error: Unsupported(0), authority: wrap_object_authority(take config, authority_kind)))
+    }
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root) = take config
     let mut read_source = history_reader(take client, 0)
     let prepared = match prepare_object_writer(tasks, mut read_source, c, r, options, level_name, op_ms, sim, authority_kind, stream) {
         Ok(take ready) => take ready,
         Error(take problem) => {
             let ObjectPackRead(client: take returned, ..) = take read_source
-            return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms, sim: take sim, stream: take stream), authority_kind)))
+            return Error(Refusal(error: take problem, authority: wrap_object_authority(ObjectAuthorityConfig(client: take returned, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root), authority_kind)))
         },
     }
     let ObjectWriterOpen(db: take started, register: take register, metadata: take metadata, workspace: take workspace, blank: take blank, start: take start, frames: take frames, journal_received: take journal_received, written_send: take written_send, written_receive: take written_receive, synced_receive: take synced_receive, health_state: take health_state, reclaims_state: take reclaims_state, health_tx: take health_tx, health_rx: take health_rx, timer: take timer, work: take work, options: take held_options, levels: take names_in_order, weak: take weak, link: take link) = take prepared
     let mut db = take started
     let head = register.head
-    let (attached_sid, has_sealed) = match register.attach {
-        Some(a) => (match a.live {
-            Some(tail) => Some(tail.sid),
-            None => None,
-        }, list.len(a.sealed) != 0),
-        None => (None, false),
+    let (attached, attached_sid, has_sealed, force_open_cut) = match register.attach {
+        Some(a) => {
+            let live_missing = match a.live {
+                None => true,
+                Some(_) => false,
+            }
+            let mut foreign_or_many = live_missing || list.len(a.sealed) >= 4
+            let sid_opt = match a.live {
+                Some(tail) => {
+                    if !foreign_or_many {
+                        for st in a.sealed {
+                            if !stream_same(st.tail.sid, tail.sid) {
+                                foreign_or_many = true
+                                break
+                            }
+                        }
+                    }
+                    Some(tail.sid)
+                },
+                None => None,
+            }
+            (true, sid_opt, list.len(a.sealed) != 0, foreign_or_many)
+        },
+        None => (false, None, false, false),
     }
     let ObjectPackRead(client: take owned_client, locator: take locator, admitted_base: take base, ..) = take read_source
     let (take requests, take workers) = std.object.split(take owned_client)
@@ -281,14 +303,20 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     if let Error(Closed(take unsent)) = channel.send(start, take startup) {
         let ObjectJournalStart(requests: take returned, ..) = take unsent
         let restored = std.object.attach(take returned, take workers)
-        return Error(Refusal(error: Io(Closed), authority: wrap_object_authority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms, sim: take sim, stream: take stream), authority_kind)))
+        return Error(Refusal(error: Io(Closed), authority: wrap_object_authority(ObjectAuthorityConfig(client: take restored, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root), authority_kind)))
     }
     db.checkpointed = generation
     db.fence = fence
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
-    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, has_sealed, drop_attach_on_cut: false)
+    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false)
     db.disk = Some(DiskState(lock: None, d: None, open: head.pair.epoch, options: take held_options, lease: None, steps: list.new(), scrubs: list.new(), imported: None, reserving: None, target: None, record_cut: head.checkpoint.seq, recorded_after: recorded_after, pages: take pages, object: Some(take object), acks: take journal_received, journaled: 0, inflight: 0, uncovered: 0, since_cut: 0, tiered_dirty: clean_tiered_cut(), acked_bytes: 0, written: take written_receive, written_send: take written_send, synced: Some(take synced_receive), poison: None, journal: take frames, pending: None, journal_task: take work, journal_idle_task: take timer, creation: list.new(), pager_task: None, tasks, restamp: None, unload: None))
+    // Forced open-time cut (§12.11.5 step 7, AP16): a refused cut does not fail open.
+    if force_open_cut {
+        if let Ok(cut_ticket) = checkpoint(mut db) {
+            let _ = durable(mut db, cut_ticket)
+        }
+    }
     Ok(take db)
 }
 
@@ -516,6 +544,13 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         _ => db.heads[0].head,
     }
     let dropped_attach = object_state(db).drop_attach_on_cut
+    let next_sid = match lane.register.attach {
+        Some(a) => match a.live {
+            Some(tail) => Some(tail.sid),
+            None => None,
+        },
+        None => None,
+    }
     write_disk(mut db.disk, (take pages, take locator), scoped fn(mut state: DiskState, take installation: (PageDisk, HistoryLocator)) {
         let (take installed, take installed_locator) = take installation
         state.pages = take installed
@@ -527,8 +562,9 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
             object_writer.entries = 0
             object_writer.locator = take installed_locator
             object_writer.has_sealed = false
+            object_writer.stream = next_sid
             if dropped_attach {
-                object_writer.stream = None
+                object_writer.attached = false
             }
         }
     })
@@ -559,7 +595,9 @@ pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] w
             return Error(Io(Closed))
         }
         match channel.receive(pending) {
-            Ok(take result) => result?,
+            Ok(Ok(())) => (),
+            Ok(Error(Behind(_))) => return Error(Behind(Position(store: db.store, branch: 0, version: db.heads[0].head))),
+            Ok(Error(take problem)) => return Error(take problem),
             Error(_) => {
                 journal_poll(mut db)?
                 return Error(Io(Closed))

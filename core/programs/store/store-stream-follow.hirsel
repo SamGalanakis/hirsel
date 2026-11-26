@@ -1,0 +1,427 @@
+// Stream follower round and history-order reader (STORE-SPEC §12.11.9).
+// Reads sealed tails directly, reads `reg` only for live tails (or on a
+// sealed-tail 404 via §12.11.8's table), and enforces the strict causal round:
+// batch slices -> GET reg -> GET head.
+type FollowSlice {
+    batch_seq: u64,
+    key: String,
+    row: BatchRow,
+    slice: Bytes,
+    skip: u64
+}
+
+fn stream_follow_fetch_head(mut client: std.object.Client, authority_kind: u8, mut scratch: Bytes, deadline: u64, initial: bool) -> Result[(HistoryCapture, Option[Attach], std.object.ETag), Error] waits {
+    let outcome = history_fetch(mut client, "head", mut scratch, deadline)
+    let tag = match take outcome {
+        Ok(meta) => meta.etag,
+        Error(Remote(NotFound)) => return Error(NotFound),
+        Error(take problem) => return Error(take problem),
+    }
+    let (take capture, take attach) = history_decode_head_attach(scratch)?
+    if capture.head.authority_kind != authority_kind {
+        return Error(Unsupported(int.widen(capture.head.authority_kind)))
+    }
+    if initial && authority_kind == 1 {
+        history_check_endpoint(mut client, deadline)?
+    }
+    history_check_namespace(capture, client)?
+    Ok((take capture, take attach, tag))
+}
+
+fn stream_follow_reg_has_row(reg: StreamRegister, store: StoreId, epoch: u64) -> bool {
+    for row in reg.rows {
+        if same(row.store, store) && row.epoch == epoch {
+            return true
+        }
+    }
+    false
+}
+
+fn stream_follow_find_sealed(attach: Attach, sid: HostStreamId, inc: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(attach.sealed) {
+        let st = attach.sealed[i]
+        if stream_same(st.tail.sid, sid) && st.tail.inc == inc {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// Step 1 of a follower round (§12.11.9): reads X's slices in batches from
+// `start_seq` until the first not-yet-created batch, TERM, or retired-404
+// head move, buffering slices without publishing them yet.
+fn stream_follow_scan_slices(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, start_seq: u64, deadline: u64) -> Result[(List[FollowSlice], u64, bool), Error] waits {
+    let mut slices: List[FollowSlice] = list.new()
+    let mut seq = start_seq
+    let mut name = string.with_capacity(48)
+    loop {
+        stream_batch_key(mut name, tail.inc, seq)
+        let key = stream_key(lane.dir, name)
+        if let None = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            if let Some(outcome) = stream_resolve_404(mut client, mut lane, mut buffers, place_prefix, head_witness, key, tail.inc, seq, false, false, deadline)? {
+                match outcome {
+                    TailHeadMoved => return Ok((take slices, seq, true)),
+                    TailSkipTo(low_seq) => {
+                        if low_seq > seq {
+                            seq = low_seq
+                        } else {
+                            seq += 1
+                        }
+                        continue
+                    },
+                    _ => return Ok((take slices, seq, false)),
+                }
+            }
+        }
+        let mut batch_index = match stream_batch_head(key, buffers.index, tail.sid, tail.inc, seq)? {
+            Rows(take found) => take found,
+            Term(_, _) => return Ok((take slices, seq, false)),
+        }
+        if list.len(buffers.index) < batch_index.byte_len {
+            if let None = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
+                return Error(disk_fault(key, 0, Absent))
+            }
+            batch_index = match stream_batch_head(key, buffers.index, tail.sid, tail.inc, seq)? {
+                Rows(take found) => take found,
+                Term(_, _) => return Error(disk_fault(key, 72, Malformed)),
+            }
+        }
+        for row in batch_index.rows {
+            if same(row.store, store) && row.epoch == epoch {
+                if row.len == 0 {
+                    return Error(disk_fault(key, row.offset, Malformed))
+                }
+                if let None = stream_tail_range(mut client, key, row.offset, row.offset + row.len, mut buffers.slice, deadline)? {
+                    return Error(disk_fault(key, row.offset, Absent))
+                }
+                stream_slice_check(key, row, buffers.slice)?
+                let skip: u64 = if seq == tail.from_seq {
+                    int.widen(tail.from_frame)
+                } else {
+                    0
+                }
+                let saved = copied(buffers.slice)?
+                capacity(list.try_reserve(mut slices, 1))?
+                list.push(mut slices, FollowSlice(batch_seq: seq, key: string.from(key), row, slice: take saved, skip))
+                break
+            }
+        }
+        seq += 1
+    }
+}
+
+// Applies any remaining slices of a sealed `(sid, inc)` tail in `[from_seq, cutoff]`
+// that landed after step 1 stopped and before the claim's cutoff (Case B).
+fn stream_follow_apply_sealed_range(mut client: std.object.Client, mut buffers: TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: SealedTail, from_seq: u64, store: StoreId, epoch: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+    let dir = stream_key(root, stream_dir(st.tail.sid))
+    let mut seal_lane = stream_lane(st.tail.sid, authority_kind, 2, store)?
+    seal_lane.dir = string.from(dir)
+    let mut seq = from_seq
+    while seq <= st.cutoff {
+        let skip: u64 = if seq == st.tail.from_seq {
+            int.widen(st.tail.from_frame)
+        } else {
+            0
+        }
+        let ok = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
+            match stream_tail_batch(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, st.tail.sid, st.tail.inc, seq, store, epoch, skip, 18446744073709551615u64, true, false, mut replay, ceiling, deadline)? {
+                TailRead(_) => Ok(true),
+                TailHeadMoved => Ok(false),
+                _ => Error(disk_fault("batch", 0, Absent)),
+            }
+        })?
+        if !ok {
+            return Ok(false)
+        }
+        seq += 1
+    }
+    Ok(true)
+}
+
+fn stream_follow_make_capture(head: HistoryHead, tag: std.object.ETag, take attach: Option[Attach], take head_bytes: Bytes, live_next_seq: u64, take replay: JournalReplay) -> Result[Option[Arc[FollowCapture]], Error] {
+    let resident = journal_account(replay)?
+    let JournalReplay(state: take built, next_node, ..) = take replay
+    let remote = ObjectFollowHead(current: head, tag, next_node, attach: take attach, head_bytes: take head_bytes, live_next_seq)
+    Ok(Some(follow_capture(head.store, take built, resident, Some(remote), 0, stamp_after(next_node)?)?))
+}
+
+// Loads a head's settled history in §12.11.9 order, restarting if a sealed-tail
+// 404 observes that `head` moved.
+fn stream_follow_load_fresh(mut source: ObjectPackRead, root: String, place_prefix: String, expected: Option[StoreId], mut buffers: TailBuffers, mut scratch: Bytes, ceiling: u64, initial: bool) -> Result[(HistoryHead, std.object.ETag, Option[Attach], Bytes, JournalReplay), Error] waits {
+    loop {
+        let (take capture, take attach, tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, initial)?
+        let head = capture.head
+        check_expected_store(expected, head.store)?
+        match take attach {
+            None => {
+                let replay = history_paged_capture(mut source, head, ceiling)?
+                return Ok((head, tag, None, list.new(), take replay))
+            },
+            Some(take a) => {
+                let loaded = stream_load_settled(mut source, head, a, root, place_prefix, scratch, source.authority_kind, mut buffers, ceiling)?
+                if let Some(take replay) = take loaded {
+                    let saved = copied(scratch)?
+                    return Ok((head, tag, Some(take a), take saved, take replay))
+                }
+            },
+        }
+    }
+}
+
+fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    let root = match view source.stream_root {
+        Some(r) => string.from(r),
+        None => return Error(Missing("stream_root")),
+    }
+    let place_prefix = std.object.bucket_config(source.client).prefix
+    let old_charge = match previous {
+        Some(old_capture) => old_capture.resident,
+        None => 0u64,
+    }
+    let avail = ceiling - old_charge
+    let mut buffers = stream_tail_buffers()?
+    let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
+    })?
+    let mut cur_head: HistoryHead = HistoryHead(authority_kind: source.authority_kind, store: StoreId(hi: 0, lo: 0), pair: HistoryPair(epoch: 0, holder: StoreId(hi: 0, lo: 0)), activation: 0, entry: HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), checkpoint: HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), floor: 0, binding:[0u8; 32])
+    let mut cur_tag = std.object.ETag(octets:[0u8; 64], len: 0)
+    let mut cur_attach: Option[Attach] = None
+    let mut cur_bytes: Bytes = list.new()
+    let mut scan_from = 0u64
+    let mut advanced_anything = false
+    let mut replay: JournalReplay = match previous {
+        None => {
+            let (head, tag, take attach, take saved_bytes, take loaded) = stream_follow_load_fresh(mut source, root, place_prefix, expected, mut buffers, mut scratch, avail, true)?
+            match take attach {
+                None => return stream_follow_make_capture(head, tag, None, list.new(), 0, take loaded),
+                Some(take a) => match a.live {
+                    None => return stream_follow_make_capture(head, tag, Some(take a), take saved_bytes, 0, take loaded),
+                    Some(tail) => {
+                        cur_head = head
+                        cur_tag = tag
+                        cur_attach = Some(take a)
+                        cur_bytes = take saved_bytes
+                        scan_from = tail.from_seq
+                        advanced_anything = true
+                        take loaded
+                    },
+                },
+            }
+        },
+        Some(old_capture) => {
+            let Some(old) = view old_capture.remote else {
+                fail("stream follower missing remote head")
+            }
+            let reuse_live: Option[(Attach, StreamRef)] = match old.attach {
+                Some(a) => match a.live {
+                    Some(tail) => Some((clone(a), tail)),
+                    None => None,
+                },
+                None => None,
+            }
+            match take reuse_live {
+                Some((take old_a, _)) => {
+                    let state = copy_follow_state(old_capture.state)?
+                    let initial = journal_replay(take state, old.next_node, default_limits())?
+                    over_ceiling(journal_account(initial)?, avail)?
+                    cur_head = old.current
+                    cur_tag = old.tag
+                    cur_attach = Some(take old_a)
+                    cur_bytes = copied(old.head_bytes)?
+                    scan_from = old.live_next_seq
+                    advanced_anything = false
+                    take initial
+                },
+                None => {
+                    // Direct service (`live == None`) or previously standalone:
+                    // check `head` without touching `reg`.
+                    let (take capture, take attach, tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, false)?
+                    let head = capture.head
+                    check_expected_store(expected, head.store)?
+                    if head.floor < old.current.floor || head.entry.seq < old.current.entry.seq {
+                        return Error(disk_fault("head", 72, Order))
+                    }
+                    let old_had_attach = match old.attach {
+                        Some(_) => true,
+                        None => false,
+                    }
+                    let cur_no_attach = match attach {
+                        None => true,
+                        Some(_) => false,
+                    }
+                    if old_had_attach && scratch == old.head_bytes {
+                        return Ok(None)
+                    }
+                    if !old_had_attach && cur_no_attach && history_ref_matches(head.entry, old.current.entry) {
+                        return Ok(None)
+                    }
+                    match take attach {
+                        None => {
+                            let loaded = history_paged_capture(mut source, head, avail)?
+                            return stream_follow_make_capture(head, tag, None, list.new(), 0, take loaded)
+                        },
+                        Some(take a) => {
+                            let loaded_opt = stream_load_settled(mut source, head, a, root, place_prefix, scratch, source.authority_kind, mut buffers, avail)?
+                            let (h2, t2, take a2_opt, take b2, take loaded) = match take loaded_opt {
+                                Some(take r) => (head, tag, Some(take a), copied(scratch)?, take r),
+                                None => stream_follow_load_fresh(mut source, root, place_prefix, expected, mut buffers, mut scratch, avail, false)?,
+                            }
+                            match take a2_opt {
+                                None => return stream_follow_make_capture(h2, t2, None, list.new(), 0, take loaded),
+                                Some(take a2) => match a2.live {
+                                    None => return stream_follow_make_capture(h2, t2, Some(take a2), take b2, 0, take loaded),
+                                    Some(tail) => {
+                                        cur_head = h2
+                                        cur_tag = t2
+                                        cur_attach = Some(take a2)
+                                        cur_bytes = take b2
+                                        scan_from = tail.from_seq
+                                        advanced_anything = true
+                                        take loaded
+                                    },
+                                },
+                            }
+                        },
+                    }
+                },
+            }
+        },
+    }
+    // Follower round loop (§12.11.9) on `cur_head` with `cur_attach.live = Some(tail)`.
+    let mut rounds = 0u64
+    loop {
+        rounds += 1
+        if rounds > 32 {
+            return Error(Remote(Retriable(Deadline)))
+        }
+        let live_opt: Option[StreamRef] = match view cur_attach {
+            Some(a) => a.live,
+            None => None,
+        }
+        let Some(tail) = live_opt else {
+            return stream_follow_make_capture(cur_head, cur_tag, take cur_attach, take cur_bytes, 0, take replay)
+        }
+        let store = cur_head.store
+        let epoch = cur_head.pair.epoch
+        let mut lane = stream_lane(tail.sid, source.authority_kind, 2, store)?
+        lane.dir = stream_key(root, stream_dir(tail.sid))
+        let deadline = source.deadline
+        // Step 1: read X's slices from `scan_from` until first not-yet-created.
+        let (take slices, stop_seq, _) = stream_at_root(mut source.client, scoped fn(mut c: std.object.Client) -> Result[(List[FollowSlice], u64, bool), Error] waits {
+            stream_follow_scan_slices(mut c, mut lane, mut buffers, place_prefix, cur_bytes, tail, store, epoch, scan_from, deadline)
+        })?
+        // Step 2: GET `S/reg`, issued AFTER the last batch read completed.
+        stream_at_root(mut source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+            stream_reg_read(mut lane, mut c, deadline)
+        })?
+        // Step 3: GET X's `head`, issued AFTER step 2's response.
+        let (take after_cap, take after_attach, after_tag) = stream_follow_fetch_head(mut source.client, source.authority_kind, mut scratch, source.deadline, false)?
+        check_expected_store(expected, after_cap.head.store)?
+        // Step 4: decide by the four cases of §12.11.9.
+        if scratch == cur_bytes {
+            let clean = lane.reg.inc == tail.inc && !lane.reg.collecting && !stream_follow_reg_has_row(lane.reg, store, epoch)
+            if clean {
+                for item in slices {
+                    stream_tail_apply(item.key, item.slice, item.row, item.batch_seq, store, epoch, item.skip, mut replay, avail)?
+                }
+                if list.len(slices) == 0 && !advanced_anything && stop_seq == scan_from {
+                    return Ok(None)
+                }
+                return stream_follow_make_capture(cur_head, cur_tag, take cur_attach, take cur_bytes, stop_seq, take replay)
+            }
+            // Case D: hold present or inc changed with head still Hd -> publish nothing new.
+            if require_fresh {
+                return Error(Behind(Position(store, branch: 0, version: replay.state.tips[0].head)))
+            }
+            if advanced_anything {
+                return stream_follow_make_capture(cur_head, cur_tag, take cur_attach, take cur_bytes, scan_from, take replay)
+            }
+            return Ok(None)
+        }
+        // Head changed: check Case B (epoch > e with sealed containing (S, inc, ..., cutoff k)).
+        let after_head = after_cap.head
+        let mut case_b_idx: Option[u64] = None
+        if after_head.pair.epoch > epoch && after_head.checkpoint.seq <= cur_head.entry.seq {
+            if let Some(na) = after_attach {
+                case_b_idx = stream_follow_find_sealed(na, tail.sid, tail.inc)
+            }
+        }
+        if let Some(j) = case_b_idx {
+            let Some(take na) = take after_attach else {
+                return Error(disk_fault("head", 72, Malformed))
+            }
+            let st_j = na.sealed[j]
+            let cutoff = st_j.cutoff
+            let after_bytes = copied(scratch)?
+            for item in slices {
+                if item.batch_seq <= cutoff {
+                    stream_tail_apply(item.key, item.slice, item.row, item.batch_seq, store, epoch, item.skip, mut replay, avail)?
+                }
+            }
+            let mut case_b_ok = true
+            if stop_seq <= cutoff {
+                case_b_ok = stream_follow_apply_sealed_range(mut source.client, mut buffers, root, place_prefix, after_bytes, source.authority_kind, st_j, stop_seq, store, epoch, mut replay, avail, source.deadline)?
+            }
+            if case_b_ok {
+                let chain = history_suffix(mut source.client, after_head, cur_head.entry, source.deadline)?
+                let base_seq = cur_head.entry.seq
+                let mut done_seq = base_seq
+                let mut idx = j + 1
+                while idx < list.len(na.sealed) {
+                    let st = na.sealed[idx]
+                    if st.at < done_seq || st.at > after_head.entry.seq {
+                        return Error(disk_fault("head", 72, Malformed))
+                    }
+                    if st.at > done_seq {
+                        let lo = done_seq - base_seq
+                        let hi = st.at - base_seq
+                        let part = list.slice(chain, lo, hi)
+                        history_apply_suffix(mut source.client, after_head, done_seq, part, mut replay, avail, source.deadline)?
+                        done_seq = st.at
+                    }
+                    if !stream_apply_sealed_tail(mut source.client, mut buffers, root, place_prefix, after_bytes, source.authority_kind, st, store, mut replay, avail, source.deadline)? {
+                        case_b_ok = false
+                        break
+                    }
+                    idx += 1
+                }
+                if case_b_ok && after_head.entry.seq > done_seq {
+                    let lo = done_seq - base_seq
+                    let hi = after_head.entry.seq - base_seq
+                    let rest = list.slice(chain, lo, hi)
+                    history_apply_suffix(mut source.client, after_head, done_seq, rest, mut replay, avail, source.deadline)?
+                }
+            }
+            if case_b_ok {
+                cur_head = after_head
+                cur_tag = after_tag
+                let next_live_seq = match na.live {
+                    Some(nl) => nl.from_seq,
+                    None => 0u64,
+                }
+                cur_attach = Some(take na)
+                cur_bytes = take after_bytes
+                scan_from = next_live_seq
+                advanced_anything = true
+                continue
+            }
+        }
+        // Case C: re-follow from the new head in exact history order.
+        let (h3, t3, take a3_opt, take b3, take loaded3) = stream_follow_load_fresh(mut source, root, place_prefix, expected, mut buffers, mut scratch, avail, false)?
+        match take a3_opt {
+            None => return stream_follow_make_capture(h3, t3, None, list.new(), 0, take loaded3),
+            Some(take a3) => match a3.live {
+                None => return stream_follow_make_capture(h3, t3, Some(take a3), take b3, 0, take loaded3),
+                Some(nl) => {
+                    cur_head = h3
+                    cur_tag = t3
+                    cur_attach = Some(take a3)
+                    cur_bytes = take b3
+                    replay = take loaded3
+                    scan_from = nl.from_seq
+                    advanced_anything = true
+                },
+            },
+        }
+    }
+}

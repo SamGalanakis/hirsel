@@ -83,6 +83,7 @@ std = { major = 1 }
 "store-stream-settle.hirsel" = "store"
 "store-stream-gc.hirsel" = "store"
 "store-stream-janitor.hirsel" = "store"
+"store-stream-follow.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
 "store-history-packs.hirsel" = "store"
@@ -156,6 +157,7 @@ dirs = ["."]
 "bucket_stream_election_laws.hirsel" = "store"
 "bucket_stream_gc_laws.hirsel" = "store"
 "bucket_stream_janitor_laws.hirsel" = "store"
+"bucket_stream_direct_follow_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "store_reclaim_laws.hirsel" = "store"
@@ -677,6 +679,15 @@ limit = 536870912
 limit = 1073741824
 
 [tests.runs."store@1/store/bucket_stream_cost_window"]
+limit = 1073741824
+
+[tests.runs."store@1/store/bucket_stream_direct_service"]
+limit = 536870912
+
+[tests.runs."store@1/store/bucket_stream_follower_round"]
+limit = 536870912
+
+[tests.runs."store@1/store/bucket_stream_blast_radius"]
 limit = 1073741824
 
 [tests.runs."store@1/store/check_detects"]

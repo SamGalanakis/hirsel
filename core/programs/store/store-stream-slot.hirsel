@@ -198,7 +198,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
         SimAuthority(take config) => take config,
         LogAuthority(_) => fail("journal_service: a log authority passed the check"),
     }
-    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms: _, sim: take sim, stream: take stream) = take config
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms: _, sim: take sim, stream: take stream, stream_root: take stream_root) = take config
     let home = std.object.bucket_config(client)
     let mut root = string.with_capacity(string.byte_len(home.prefix) + string.byte_len(plan.prefix) + 1)
     string.push(mut root, home.prefix)
@@ -207,12 +207,12 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
     let made: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(slots + 1, bytes 0)
     let (take bell, take rings) = match take made {
         Ok(take pair) => take pair,
-        Error(e) => return Error(Refusal(error: Full(Allocation(e)), authority: stream_rewrap(kind, take client, take level_name, op_ms, take sim, take stream))),
+        Error(e) => return Error(Refusal(error: Full(Allocation(e)), authority: stream_rewrap(kind, take client, take level_name, op_ms, take sim, take stream, take stream_root))),
     }
     let made_reports: Result[(Client[SlotReport], Inbox[SlotReport]), Capacity] = conn.new(2 * slots + 4, bytes 0)
     let (take report_client, take report_inbox) = match take made_reports {
         Ok(take pair) => take pair,
-        Error(e) => return Error(Refusal(error: Full(Allocation(e)), authority: stream_rewrap(kind, take client, take level_name, op_ms, take sim, take stream))),
+        Error(e) => return Error(Refusal(error: Full(Allocation(e)), authority: stream_rewrap(kind, take client, take level_name, op_ms, take sim, take stream, take stream_root))),
     }
     let (control_send, control_receive): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(slots + 1)
     let (ready_send, ready_receive): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
@@ -223,7 +223,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
         Error((problem, take back)) => {
             let StreamServiceInput(requests: take returned, ..) = take back
             let restored = std.object.attach(take returned, take workers)
-            return Error(Refusal(error: Full(Allocation(problem)), authority: stream_rewrap(kind, take restored, take level_name, op_ms, take sim, take stream)))
+            return Error(Refusal(error: Full(Allocation(problem)), authority: stream_rewrap(kind, take restored, take level_name, op_ms, take sim, take stream, take stream_root)))
         },
     }
     let started = match channel.receive(ready_receive) {
@@ -235,7 +235,7 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
         return match take ended {
             Ok(StreamServiceEnd(requests: take returned, ..)) => {
                 let restored = std.object.attach(take returned, take workers)
-                Error(Refusal(error: take problem, authority: stream_rewrap(kind, take restored, take level_name, op_ms, take sim, take stream)))
+                Error(Refusal(error: take problem, authority: stream_rewrap(kind, take restored, take level_name, op_ms, take sim, take stream, take stream_root)))
             },
             Error(_) => fail("journal_service: the service task failed at its start"),
         }
@@ -243,8 +243,8 @@ pub fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget
     Ok(JournalService(task: take running, control: take control_send, bell: take bell, reports: take report_client, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes, max_rows: 2 * slots))
 }
 
-fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot]) -> Authority {
-    wrap_object_authority(ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream), kind)
+fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot], take stream_root: Option[String]) -> Authority {
+    wrap_object_authority(ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream, stream_root: take stream_root), kind)
 }
 
 // One Place's slot (§12.11.12): the service creates its data connection, so
@@ -316,6 +316,33 @@ pub fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, 
         return Error(Stream(Overlap))
     }
     config.stream = Some(take slot)
+    config.stream_root = None
+    Ok(wrap_object_authority(take config, kind))
+}
+
+// A read-only Authority for followers, `open_read_only`, scrub or verify on
+// attached Places (§12.11.1, §12.11.9). Never elects, takes no slot and never
+// writes the register.
+pub fn stream_reader(take a: Authority, root: StreamRoot) -> Result[Authority, Error] {
+    let (kind, _, weak) = stream_authority_parts(a)?
+    if weak {
+        return Error(Stream(WeakLevels))
+    }
+    if string.byte_len(root.prefix) > 1024 {
+        return Error(Limit(Name))
+    }
+    let mut config = match take a {
+        ObjectAuthority(take config) => take config,
+        SimAuthority(take config) => take config,
+        LogAuthority(_) => return Error(Unsupported(0)),
+    }
+    let place = std.object.bucket_config(config.client)
+    let dir = stream_root_dir(root.prefix)
+    if stream_overlaps(place.prefix, dir) {
+        return Error(Stream(Overlap))
+    }
+    config.stream = None
+    config.stream_root = Some(take dir)
     Ok(wrap_object_authority(take config, kind))
 }
 
@@ -413,6 +440,9 @@ fn slot_attach(mut link: SlotLink, store: StoreId, epoch: u64, place_prefix: Str
     match conn.receive(answers) {
         Ok(SlotGranted(inc, next_seq)) => {
             link.inc = inc
+            if next_seq > 0 && link.last_batch_seq + 1 < next_seq {
+                link.last_batch_seq = next_seq - 1
+            }
             Ok((inc, next_seq))
         },
         Ok(SlotLatched(cause)) => Error(Latched(cause)),

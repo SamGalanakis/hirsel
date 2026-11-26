@@ -1,0 +1,559 @@
+// Stream direct service, follower round, and blast-radius laws
+// (STORE-SPEC §12.11.5, §12.11.9, §12.11.10, §12.11.15: L90-8, L90-F, L90-N).
+const DF_OP_MS: u64 = 300
+
+const DF_HOLD_MS: u64 = 1200
+
+const DF_IDLE_MS: u64 = 200
+
+fn df_sid_a() -> HostStreamId {
+    stream_law_sid()
+}
+
+fn df_sid_b() -> HostStreamId {
+    HostStreamId(hi: 0x1112131415161718, lo: 0x191a1b1c1d1e1f20)
+}
+
+fn df_plan(sid: HostStreamId, max_slots: u32, max_wait_ms: u64, op_ms: u64) -> StreamPlan {
+    let mut limits = stream_limits()
+    limits.max_slots = max_slots
+    limits.max_pins = 64
+    limits.hold_ms = order.max(DF_HOLD_MS, 4 * op_ms)
+    limits.idle_poll_ms = DF_IDLE_MS
+    limits.index_every = 512
+    limits.recover_parallel = 16
+    StreamPlan(sid, prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms, max_batch_bytes: FRAME_LIMIT + 4096), limits)
+}
+
+fn df_client_host(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, host_name: String, seed: u64, key_prefix: String, lanes: u64) -> Result[std.object.Client, Error] waits {
+    let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
+    let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(time), BUCKET_LAW_OP_MS)
+    let mut place = bucket_law_place(host_name)
+    place.prefix = string.from(key_prefix)
+    place.aws_region = string.from("us-east-1")
+    let random = provide.random(seed)
+    match std.object.start_simulated(endpoint, tasks, take place, take credentials_set, time, random, bucket_law_lanes(lanes), deadline) {
+        Ok(take client) => Ok(take client),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn df_start_service_host(s: BucketSim, tasks: Tasks, r: Random, host_name: String, seed: u64, sid: HostStreamId, max_slots: u32, max_wait_ms: u64, op_ms: u64) -> Result[JournalService, Error] waits {
+    let plan = df_plan(sid, max_slots, max_wait_ms, op_ms)
+    let client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, "", 2)?
+    let authority = object_authority(take client, "bucket", op_ms)
+    Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn df_options(create: bool) -> Options {
+    let mut o = bucket_law_options(create)
+    o.claim_ms = 2000
+    o.group_bytes = 65536
+    o
+}
+
+fn df_open_attached_host(s: BucketSim, tasks: Tasks, r: Random, mut svc: JournalService, host_name: String, seed: u64, place_prefix: String, create: bool) -> Result[Db, Error] waits {
+    let slot = journal_slot(mut svc)?
+    let client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, place_prefix, 2)?
+    let attached = streamed(object_authority(take client, "bucket", DF_OP_MS), take slot)?
+    match open_authority(tasks, take attached, s.time, r, df_options(create)) {
+        Ok(take db) => Ok(take db),
+        Error(Refusal(error: take problem, ..)) => Error(take problem),
+    }
+}
+
+fn df_marker(s: BucketSim, tasks: Tasks, host_name: String, take key: String) -> Result[(), Error] waits {
+    let mut client = df_client_host(s.endpoint, s.time, tasks, host_name, 99, "", 1)?
+    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let _ = std.object.fetch(mut client, key, list.new(), deadline)
+    Ok(())
+}
+
+fn df_commit_ticket(mut db: Db, k: u64) -> Result[Ticket, Error] waits {
+    let rows = bucket_law_rows_table(mut db)?
+    let value = bucket_law_value(k)
+    let done = run(mut db, None, (copy_env(k), copy_env(rows), copy_env(value)), fn(mut tx, call_env) -> Result[(), Error] {
+        put(mut tx, call_env.1, call_env.0, call_env.2)
+    })?
+    let Committed(take receipt) = take done else {
+        return Error(Foreign)
+    }
+    Ok(take receipt.ticket)
+}
+
+fn df_open_follower(s: BucketSim, tasks: Tasks, mut ids: Followers, owner: FollowerOwner, plan: FollowerPlan, host_name: String, seed: u64, place_prefix: String) -> Result[Follower, Error] waits {
+    let client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, place_prefix, 2)?
+    let read_auth = stream_reader(object_authority(take client, "bucket", DF_OP_MS), StreamRoot(prefix: string.from(STREAM_SERVICE_ROOT)))?
+    let slot = follower_slot(owner, plan)?
+    follower(mut ids, take slot, take read_auth, s.time, None)
+}
+
+fn df_follower_rows(f: Follower, rows_tbl: Table[u64, Bytes]) -> Result[u64, Error] waits {
+    let main = follower_main(f)
+    let snap = snapshot_follower(f, main)?
+    let rd = follower_reader(f, 0)?
+    let mut got_rows = 0u64
+    let mut key = 1u64
+    loop {
+        match get(rd, snap, rows_tbl, key)? {
+            Some(v) => {
+                if v != bucket_law_value(key) {
+                    fail("df_follower_rows: unexpected row value")
+                }
+                got_rows += 1
+                key += 1
+            },
+            None => return Ok(got_rows),
+        }
+    }
+}
+
+fn df_head_attach_live(s: BucketSim, tasks: Tasks, host_name: String, seed: u64, place_prefix: String) -> Result[(HistoryHead, Option[Attach]), Error] waits {
+    let mut client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, place_prefix, 1)?
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let due = std.object.deadline_after_ms(client, DF_OP_MS)
+    let _ = history_fetch(mut client, "head", mut raw, due)?
+    let (take cap, take attach) = history_decode_head_attach(raw)?
+    let _ = take client
+    Ok((cap.head, take attach))
+}
+
+fn df_complete_expired_sim(tasks: Tasks, c: Clock, seed: u64) -> BucketSim {
+    let mut faults: List[std.sim.s3.Fault] = list.with_capacity(1)
+    list.push(mut faults, CompleteExpired)
+    let uncut = bucket_law_wire_cut(0xffffffffffffffffu64, false)
+    bucket_law_sim(tasks, c, seed, Some(uncut), take faults)
+}
+
+// L90-8 (direct service, A3):
+// 1. 8 migrations with refused cuts; v1 in sealed tail 1; direct service commits
+//    v2 as a chain entry; crash. Next open and cold `stream_reader` follower
+//    recover v1..v2 in exact history order (cold follower does 0 `reg` GETs).
+// 2. Follower that missed 2 migrations applies the middle sealed tail.
+// 3. A's stalled ticket whose cutoff B cut away before A's first stall poll
+//    ends `Undecided`.
+@test
+fn bucket_stream_direct_service(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    df_l90_8_direct_and_missed(c, r, tasks)?
+    df_l90_8_cut_away_cutoff(c, r, tasks)
+}
+
+fn df_l90_8_direct_and_missed(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let fplan = follower_law_plan(Bucket(bucket_law_lanes(2)), bucket_law_options(false))
+    // `CompleteExpired` refuses multipart pack uploads (cuts) on "s3.test" while
+    // "spare.test" is clean for services, followers, and normal cuts.
+    let s = df_complete_expired_sim(tasks, c, 9081)
+    let fsvc = bucket_law_start_followers(tasks, fplan, 1, "L90-8 followers")
+    let outcome = df_l90_8_run(s, tasks, r, fsvc, fplan)
+    let _ = close_follower_service(take fsvc)
+    let report = bucket_law_report(take s)
+    outcome?
+    let mut in_cold = false
+    for req in report.requests {
+        if req.key == "cold-direct-start" {
+            in_cold = true
+        } else if req.key == "cold-direct-end" {
+            in_cold = false
+        } else if in_cold && req.method == "GET" && string.ends_with(req.key, "/reg") {
+            fail("L90-8: cold stream_reader issued GET reg under live == None")
+        }
+    }
+    Ok(())
+}
+
+fn df_l90_8_run(s: BucketSim, tasks: Tasks, r: Random, fsvc: FollowerService, fplan: FollowerPlan) -> Result[(), Error] waits {
+    // `svc_clean` uses "spare.test" (clean, for table creation and final open-time cut).
+    // `svc_a` and `svc_b` use "s3.test" (where `CompleteExpired` refuses multipart
+    // pack uploads in cuts while single-PUTs for batches/reg/head/entries succeed).
+    let sid_clean = HostStreamId(hi: 0x3132333435363738, lo: 0x393a3b3c3d3e3f40)
+    let mut svc_clean = df_start_service_host(s, tasks, r, "spare.test", 100, sid_clean, 10, 0, DF_OP_MS)?
+    let mut svc_a = df_start_service_host(s, tasks, r, "s3.test", 101, df_sid_a(), 14, 0, DF_OP_MS)?
+    let mut svc_b = df_start_service_host(s, tasks, r, "s3.test", 102, df_sid_b(), 14, 0, DF_OP_MS)?
+    // --- Part 1: 8 migrations with refused cuts -> direct service ---
+    // Create p1/ and its "rows" table on clean "spare.test", then commit row 1
+    // (v1 in sealed tail 1) on svc_clean, and crash (drop handle).
+    let mut db1 = df_open_attached_host(s, tasks, r, mut svc_clean, "spare.test", 103, string.from("p1/"), true)?
+    bucket_law_commit(mut db1, 1)?
+    let p1_tbl = bucket_law_rows_table(mut db1)?
+    let _ = take db1
+    // Migrations 1..7 (epochs 2..8) connect via "s3.test" so forced open-time cuts
+    // are refused by `CompleteExpired` (AP16) while open + commit succeed cleanly.
+    for step in 1u64 .. 8u64 {
+        let mut db_step = if step % 2 == 1 {
+            df_open_attached_host(s, tasks, r, mut svc_b, "s3.test", 110 + step, string.from("p1/"), false)?
+        } else {
+            df_open_attached_host(s, tasks, r, mut svc_a, "s3.test", 110 + step, string.from("p1/"), false)?
+        }
+        bucket_law_commit(mut db_step, step + 1)?
+        if bucket_law_rows(mut db_step)? != step + 1 {
+            fail("L90-8: migration did not preserve all previous rows")
+        }
+        let _ = take db_step
+    }
+    // Migration 8 (epoch 9): appends 8th sealed tail -> sealed.len == 8, live == None (direct service)!
+    // Direct service commits row 9 (v2) as a chain entry, then crashes (drops handle).
+    let mut db8 = df_open_attached_host(s, tasks, r, mut svc_a, "s3.test", 125, string.from("p1/"), false)?
+    bucket_law_commit(mut db8, 9)?
+    if bucket_law_rows(mut db8)? != 9 {
+        fail("L90-8: direct service commit row 9 missing")
+    }
+    let _ = take db8
+    let (head_after_direct, attach_after_direct) = df_head_attach_live(s, tasks, "spare.test", 126, string.from("p1/"))?
+    let Some(a_direct) = attach_after_direct else {
+        fail("L90-8: ATTACH missing after 8th migration")
+    }
+    let is_direct = match a_direct.live {
+        None => true,
+        Some(_) => false,
+    }
+    if !is_direct || list.len(a_direct.sealed) != 8 {
+        fail("L90-8: expected live == None and 8 sealed tails after 8th migration")
+    }
+    if head_after_direct.entry.seq < 3 {
+        fail("L90-8: direct service did not write CLAIM and v2 as chain entries")
+    }
+    // Cold `stream_reader` follower recovers v1..v2 (all 9 rows) with 0 GET reg calls!
+    let mut ids = followers()
+    let owner = follower_owner(fsvc)?
+    df_marker(s, tasks, "spare.test", string.from("cold-direct-start"))?
+    let cold_f = df_open_follower(s, tasks, mut ids, owner, fplan, "spare.test", 127, string.from("p1/"))?
+    df_marker(s, tasks, "spare.test", string.from("cold-direct-end"))?
+    if df_follower_rows(cold_f, p1_tbl)? != 9 {
+        fail("L90-8: cold follower did not recover all 9 rows across 8 sealed tails + direct entry")
+    }
+    let _ = take cold_f
+    // Next writer open on clean "spare.test" recovers all 9 rows AND its forced
+    // open-time cut consumes `sealed` and resumes streaming!
+    let mut db_recovered = df_open_attached_host(s, tasks, r, mut svc_clean, "spare.test", 128, string.from("p1/"), false)?
+    if bucket_law_rows(mut db_recovered)? != 9 {
+        fail("L90-8: next writer open did not recover all 9 rows")
+    }
+    let (_, attach_after_cut) = df_head_attach_live(s, tasks, "spare.test", 129, string.from("p1/"))?
+    let Some(a_cut) = attach_after_cut else {
+        fail("L90-8: ATTACH dropped on normal open-time cut")
+    }
+    let resumed_live = match a_cut.live {
+        Some(_) => true,
+        None => false,
+    }
+    if !resumed_live || list.len(a_cut.sealed) != 0 {
+        fail("L90-8: open-time cut did not consume sealed tails and resume streaming")
+    }
+    close(take db_recovered)?
+    // --- Part 2: Follower that missed two migrations applies the middle sealed tail ---
+    let mut p2_a = df_open_attached_host(s, tasks, r, mut svc_clean, "spare.test", 130, string.from("p2/"), true)?
+    bucket_law_commit(mut p2_a, 1)?
+    let p2_tbl = bucket_law_rows_table(mut p2_a)?
+    let mut f2 = df_open_follower(s, tasks, mut ids, owner, fplan, "spare.test", 131, string.from("p2/"))?
+    if df_follower_rows(f2, p2_tbl)? != 1 {
+        fail("L90-8(missed-2): initial follower did not see row 1")
+    }
+    let _ = take p2_a
+    // Migration 1 (svc_clean -> svc_b, cut refused via "s3.test") + commit row 2 in S_B's tail.
+    let mut p2_b = df_open_attached_host(s, tasks, r, mut svc_b, "s3.test", 132, string.from("p2/"), false)?
+    bucket_law_commit(mut p2_b, 2)?
+    let _ = take p2_b
+    // Migration 2 (svc_b -> svc_a, cut refused via "s3.test") + commit row 3 in S_A's new live tail.
+    let mut p2_a2 = df_open_attached_host(s, tasks, r, mut svc_a, "s3.test", 133, string.from("p2/"), false)?
+    bucket_law_commit(mut p2_a2, 3)?
+    let _ = take p2_a2
+    let due_f2 = clock.deadline_after_ms(host.mono_ns(s.time), 2000)
+    let _ = fresh(mut f2, due_f2)?
+    if df_follower_rows(f2, p2_tbl)? != 3 {
+        fail("L90-8(missed-2): follower missed middle sealed tail")
+    }
+    let _ = take f2
+    close_journal_service(take svc_clean)?
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_b)
+}
+
+// L90-8 Part 3: A's stalled ticket whose cutoff B cut away before A's first
+// stall poll ends `Undecided` (missing evidence A3).
+fn df_l90_8_cut_away_cutoff(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg_a = stream_service_key(string.from("reg"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // p3/head PUTs: #1 genesis, #2 law_table cut, #3 B's H, #4 B's forced open-time cut!
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(reg_a), from: 4, count: 1, until: Applied("PUT", string.from("p3/head"), 4), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 9082, None, list.new(), take holds, std.sim.world.plan(9082))
+    let outcome = df_l90_8_cut_away_run(s, tasks, r)
+    let _ = bucket_law_report(take s)
+    outcome
+}
+
+fn df_l90_8_cut_away_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = df_start_service_host(s, tasks, r, "s3.test", 141, df_sid_a(), 4, 0, 2000)?
+    let mut svc_b = df_start_service_host(s, tasks, r, "s3.test", 142, df_sid_b(), 4, 0, 2000)?
+    let mut db_a = df_open_attached_host(s, tasks, r, mut svc_a, "s3.test", 143, string.from("p3/"), true)?
+    bucket_law_commit(mut db_a, 1)?
+    // Start row 2 commit on A (ticket t2); svc_a creates batch 3 and blocks on GET reg #4.
+    let t2 = df_commit_ticket(mut db_a, 2)?
+    result.unwrap(std.sim.s3.requested(s.endpoint, "GET", stream_service_key(string.from("reg")), 4))
+    // B claims p3/ on svc_b: B holds S_A/reg, writes H (p3/head PUT #2), and
+    // B's forced open-time cut consumes sealed (p3/head PUT #3), releasing S_A's GET reg #4!
+    let mut db_b = df_open_attached_host(s, tasks, r, mut svc_b, "s3.test", 144, string.from("p3/"), false)?
+    match durable(mut db_a, t2) {
+        Error(Undecided) => (),
+        Ok(()) => fail("L90-8(A3): stalled ticket returned Ok despite cut-away cutoff"),
+        Error(Fenced(_)) => fail("L90-8(A3): stalled ticket returned Fenced without cutoff evidence"),
+        Error(take e) => return Error(take e),
+    }
+    let _ = take db_a
+    close(take db_b)?
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_b)
+}
+
+// L90-F (follower round, §12.11.9):
+// A follower that saw `n + 1` absent publishes through `n` only; while a hold
+// stands it publishes nothing new (`Behind`); it publishes `n + 1` only after
+// a clean round (batches -> GET reg -> GET head) or a sealed cutoff >= `n + 1`.
+@test
+fn bucket_stream_follower_round(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let fplan = follower_law_plan(Bucket(bucket_law_lanes(2)), bucket_law_options(false))
+    let s = df_complete_expired_sim(tasks, c, 9091)
+    let fsvc = bucket_law_start_followers(tasks, fplan, 1, "L90-F followers")
+    let outcome = df_l90_f_run(s, tasks, r, fsvc, fplan)
+    let _ = close_follower_service(take fsvc)
+    let report = bucket_law_report(take s)
+    outcome?
+    let reg_a = stream_service_key(string.from("reg"))
+    let batch_pfx = stream_service_key(string.from("b-"))
+    let mut in_clean = false
+    let mut last_batch_idx = 0u64
+    let mut reg_idx = 0u64
+    let mut head_idx = 0u64
+    for i in 0u64 .. list.len(report.requests) {
+        let req = view report.requests[i]
+        if req.key == "l90-f-clean-start" {
+            in_clean = true
+        } else if req.key == "l90-f-clean-end" {
+            in_clean = false
+        } else if in_clean && req.method == "GET" {
+            if string.starts_with(req.key, batch_pfx) {
+                last_batch_idx = i
+            } else if req.key == reg_a {
+                reg_idx = i
+            } else if req.key == "p1/head" {
+                head_idx = i
+            }
+        }
+    }
+    if last_batch_idx == 0 || reg_idx <= last_batch_idx || head_idx <= reg_idx {
+        fail("L90-F: clean round did not preserve causal order batch GETs < GET reg < GET head")
+    }
+    Ok(())
+}
+
+fn df_l90_f_run(s: BucketSim, tasks: Tasks, r: Random, fsvc: FollowerService, fplan: FollowerPlan) -> Result[(), Error] waits {
+    let mut svc_a = df_start_service_host(s, tasks, r, "spare.test", 201, df_sid_a(), 6, 0, DF_OP_MS)?
+    // svc_b uses "s3.test" so migrating p1/ to svc_b hits `CompleteExpired` on
+    // its forced open-time cut, leaving batch m in `sealed` for Case B.
+    let mut svc_b = df_start_service_host(s, tasks, r, "s3.test", 202, df_sid_b(), 6, 0, DF_OP_MS)?
+    let mut db_a = df_open_attached_host(s, tasks, r, mut svc_a, "spare.test", 203, string.from("p1/"), true)?
+    bucket_law_commit(mut db_a, 1)?
+    let p1_tbl = bucket_law_rows_table(mut db_a)?
+    let mut ids = followers()
+    let owner = follower_owner(fsvc)?
+    let mut f = df_open_follower(s, tasks, mut ids, owner, fplan, "spare.test", 204, string.from("p1/"))?
+    if df_follower_rows(f, p1_tbl)? != 1 {
+        fail("L90-F: follower did not publish through batch n")
+    }
+    let ver_at_n = applied(f, follower_main(f))?.version
+    // Commit row 2 (batch n + 1), acked by A.
+    bucket_law_commit(mut db_a, 2)?
+    // Place a raw Held row on S_A/reg for (p1, epoch 1).
+    let hold_tok = StoreId(hi: 0xF011, lo: 1)
+    let mut hold_lane = stream_lane(df_sid_a(), 1, 12, StoreId(hi: 0xF012, lo: 1))?
+    hold_lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(df_sid_a()))
+    let mut hc = df_client_host(s.endpoint, s.time, tasks, "spare.test", 205, "", 1)?
+    let due_h = std.object.deadline_after_ms(hc, DF_OP_MS)
+    stream_reg_read(mut hold_lane, mut hc, due_h)?
+    let _ = stream_reg_write(mut hold_lane, mut hc, Hold(RegRow(store: db_a.store, epoch: 1, token: hold_tok, rev_hold: 0, abandoned: false), 1), due_h)?
+    // While the hold stands, follower `fresh` must return Behind and publish nothing new!
+    let due1 = clock.deadline_after_ms(host.mono_ns(s.time), 500)
+    match fresh(mut f, due1) {
+        Error(Behind(pos)) if pos.version == ver_at_n => (),
+        Ok(_) => fail("L90-F: follower published n + 1 while hold stood"),
+        Error(take e) => return Error(take e),
+    }
+    if df_follower_rows(f, p1_tbl)? != 1 {
+        fail("L90-F: follower state advanced during active hold")
+    }
+    // Attached holder `fresh_snapshot` also returns Behind while hold stands (§12.11.9).
+    match fresh_snapshot(mut db_a, due1) {
+        Error(Behind(_)) => (),
+        Ok(_) => fail("L90-F: fresh_snapshot succeeded while hold stood"),
+        Error(take e) => return Error(take e),
+    }
+    // Abandon the hold so A unholds by rule (b), then verify clean round publishes n + 1!
+    let due_a = std.object.deadline_after_ms(hc, DF_OP_MS)
+    stream_reg_read(mut hold_lane, mut hc, due_a)?
+    let _ = stream_reg_write(mut hold_lane, mut hc, Abandon(hold_tok), due_a)?
+    let _ = take hc
+    std.clock.sleep_ns(s.time, (DF_IDLE_MS + 100) * 1000000)
+    df_marker(s, tasks, "spare.test", string.from("l90-f-clean-start"))?
+    let due2 = clock.deadline_after_ms(host.mono_ns(s.time), 1000)
+    let _ = fresh(mut f, due2)?
+    df_marker(s, tasks, "spare.test", string.from("l90-f-clean-end"))?
+    if df_follower_rows(f, p1_tbl)? != 2 {
+        fail("L90-F: follower did not publish n + 1 after clean round")
+    }
+    let _ = fresh_snapshot(mut db_a, due2)?
+    // Commit row 3 (batch m), migrate to svc_b via "s3.test" (cut refused so m stays in sealed cutoff >= m),
+    // and verify follower publishes through m via Case B!
+    bucket_law_commit(mut db_a, 3)?
+    let _ = take db_a
+    let db_b = df_open_attached_host(s, tasks, r, mut svc_b, "s3.test", 207, string.from("p1/"), false)?
+    let _ = take db_b
+    let due3 = clock.deadline_after_ms(host.mono_ns(s.time), 1000)
+    let _ = fresh(mut f, due3)?
+    if df_follower_rows(f, p1_tbl)? != 3 {
+        fail("L90-F: follower did not publish batch m via sealed cutoff >= m")
+    }
+    let _ = take f
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_b)
+}
+
+type BlastReopenJob: send {
+    endpoint: std.sim.s3.Endpoint,
+    time: Clock,
+    r: Random,
+    tasks: Tasks,
+    slot: JournalSlot,
+    seed: u64,
+    place_prefix: String
+}
+
+fn df_blast_reopen_only(take job: BlastReopenJob) -> Result[u64, Error] waits {
+    let BlastReopenJob(endpoint, time, r, tasks, slot: take slot, seed, place_prefix: take place_prefix) = take job
+    let client = df_client_host(endpoint, time, tasks, "s3.test", seed, place_prefix, 2)?
+    let attached = streamed(object_authority(take client, "bucket", DF_OP_MS), take slot)?
+    let mut db = match open_authority(tasks, take attached, time, r, df_options(false)) {
+        Ok(take opened) => take opened,
+        Error(Refusal(error: take problem, ..)) => return Error(take problem),
+    }
+    let rows = bucket_law_rows(mut db)?
+    let _ = take db
+    Ok(rows)
+}
+
+fn df_place_prefix(i: u64) -> String {
+    let mut s = string.with_capacity(8)
+    string.push(mut s, "p")
+    string.push_u64(mut s, i)
+    string.push(mut s, "/")
+    take s
+}
+
+// L90-N (blast radius, §12.11.10):
+// 32 Places; every batch create attempt dropped until the stream latches
+// `Unreachable`, none dropped after it. Acked tickets stay `Ok`, outstanding
+// ones end `Undecided`, and all 32 reopen within ceil(32/16) = 2 rounds with
+// at most 32 A for H (0 holds, 0 open-time cuts).
+@test
+fn bucket_stream_blast_radius(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // 32 Places * (CLAIM + row 1; law_table is a cut) = 64 batches; batch 65 is wave 2.
+    // Drop the first 4 PUT attempts of b-1-65 (exhausting svc1's 50 ms op_ms budget so
+    // it latches Unreachable); svc2's 3000 ms op_ms retries past any remaining drop to
+    // write TERM, and zero drops occur after the latch.
+    let drop_key = stream_service_key(string.from("b-00000000000000000001-00000000000000000065"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(drop_key), from: 1, count: 4, until: At(0), then: Drop))
+    let s = bucket_law_sim_holds(tasks, c, 9095, None, list.new(), take holds, std.sim.world.plan(9095))
+    let outcome = df_l90_n_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let mut after_marker = false
+    let mut head_puts = 0u64
+    let mut reg_holds = 0u64
+    let reg_key = stream_service_key(string.from("reg"))
+    for req in report.requests {
+        if req.key == "l90-n-reopen-start" {
+            after_marker = true
+        } else if req.key == "l90-n-reopen-end" {
+            after_marker = false
+        } else if after_marker && req.method == "PUT" {
+            if string.ends_with(req.key, "/head") {
+                head_puts += 1
+            } else if req.key == reg_key {
+                reg_holds += 1
+            }
+        }
+    }
+    if head_puts > 32 {
+        fail("L90-N: reopened 32 Places used more than 32 A for H")
+    }
+    if reg_holds != 0 {
+        fail("L90-N: no-hold recovery wrote a hold on reg")
+    }
+    Ok(())
+}
+
+fn df_l90_n_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let n = 32u64
+    let mut svc1 = df_start_service_host(s, tasks, r, "s3.test", 301, df_sid_a(), 36, 0, 50)?
+    let mut dbs: List[Db] = list.with_capacity(n)
+    // Open 32 Places and commit row 1 on each (acked -> batches 1..64).
+    for i in 0u64 .. n {
+        let mut db = df_open_attached_host(s, tasks, r, mut svc1, "s3.test", 400 + i, df_place_prefix(i), true)?
+        bucket_law_commit(mut db, 1)?
+        list.push(mut dbs, take db)
+    }
+    // Issue row 2 commit on all 32 Places -> batch 65 is dropped until svc1 latches Unreachable!
+    let mut tickets: List[Ticket] = list.with_capacity(n)
+    for i in 0u64 .. n {
+        let t = df_commit_ticket(mut dbs[i], 2)?
+        list.push(mut tickets, take t)
+    }
+    // Every outstanding ticket must end Undecided, and every Db must become Latched(Unreachable).
+    for i in 0u64 .. n {
+        match durable(mut dbs[i], tickets[i]) {
+            Error(Undecided) => (),
+            Ok(()) => fail("L90-N: dropped batch ticket returned Ok"),
+            Error(take e) => return Error(take e),
+        }
+        match healthy(dbs[i]) {
+            Error(Latched(Unreachable)) => (),
+            Ok(()) => fail("L90-N: Db did not latch Unreachable"),
+            Error(take e) => return Error(take e),
+        }
+    }
+    // Drop latched handles and close svc1.
+    let _ = take dbs
+    let _ = close_journal_service(take svc1)
+    // Re-elect on the SAME sid (inc = 2, fences inc = 1, rebuilds pins).
+    let mut svc2 = df_start_service_host(s, tasks, r, "s3.test", 302, df_sid_a(), 36, 10, 3000)?
+    // Reopen all 32 Places in ceil(32 / 16) = 2 concurrent rounds!
+    df_marker(s, tasks, "s3.test", string.from("l90-n-reopen-start"))?
+    let mut round = 0u64
+    while round < 2 {
+        let mut handles: List[Task[Result[u64, Error]]] = list.with_capacity(16)
+        for j in 0u64 .. 16u64 {
+            let idx = round * 16 + j
+            let slot = journal_slot(mut svc2)?
+            let job = BlastReopenJob(endpoint: s.endpoint, time: s.time, r, tasks, slot: take slot, seed: 500 + idx, place_prefix: df_place_prefix(idx))
+            let h = match task.try_spawn(tasks, bytes (16 * MIB), take job, df_blast_reopen_only) {
+                Ok(take running) => take running,
+                Error(_) => fail("L90-N: failed to spawn reopen worker"),
+            }
+            list.push(mut handles, take h)
+        }
+        for take h in take handles {
+            let got_rows = match task.join(take h) {
+                Ok(Ok(got)) => got,
+                Ok(Error(take e)) => return Error(take e),
+                Error(_) => fail("L90-N: reopen worker panicked"),
+            }
+            if got_rows != 1 {
+                fail("L90-N: reopened Place missing acked row 1")
+            }
+        }
+        round += 1
+    }
+    df_marker(s, tasks, "s3.test", string.from("l90-n-reopen-end"))?
+    close_journal_service(take svc2)
+}

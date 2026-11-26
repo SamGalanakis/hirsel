@@ -48,7 +48,7 @@ const ROLE_BATCH: u8 = 12
 
 // The position of a Place's tail in a stream: frame `from_frame` of its slice
 // in batch `from_seq` of incarnation `inc` (M4).
-type StreamRef: send {
+type StreamRef: shareable + send {
     sid: HostStreamId,
     inc: u64,
     from_seq: u64,
@@ -57,13 +57,13 @@ type StreamRef: send {
 
 // A tail a claim froze: the Place's frames from `tail` through the end of its
 // slice in batch `cutoff`, frozen at entry position `at`.
-type SealedTail: send {
+type SealedTail: shareable + send {
     tail: StreamRef,
     cutoff: u64,
     at: u64
 }
 
-type Attach: send {
+type Attach: shareable + send {
     settles: u64,
     live: Option[StreamRef],
     sealed: List[SealedTail]

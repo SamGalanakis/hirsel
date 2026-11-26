@@ -71,11 +71,15 @@ fn history_locator_rows(mut client: std.object.Client, id: StoreId, checkpoint_r
         })?
         let child_rows = list.slice(payload, child.payload, child.end)
         let child_count = list.len(child_rows) / 32
-        if child_count == 0 { return Error(disk_fault(chunk, 72, Malformed)) }
+        if child_count == 0 {
+            return Error(disk_fault(chunk, 72, Malformed))
+        }
         let mut children: List[HistoryRef] = list.new()
         if depth > 1 {
             capacity(list.try_reserve(mut children, child_count))?
-            for j in 0u64 .. child_count { list.push(mut children, history_locate_row(child_rows, j * 32)) }
+            for j in 0u64 .. child_count {
+                list.push(mut children, history_locate_row(child_rows, j * 32))
+            }
         }
         history_remember_chunk(mut located, item, depth - 1, child_count, history_locate_row(child_rows, 0), history_locate_row(child_rows, (child_count - 1) * 32), take children)?
         history_locator_rows(mut client, id, checkpoint_ref, chunk, depth - 1, child_rows, mut located, deadline)?
@@ -95,11 +99,12 @@ type ObjectPackRead {
     client: std.object.Client,
     locator: HistoryLocator,
     deadline: u64,
-    admitted_base: Option[HistoryOpenBase]
+    admitted_base: Option[HistoryOpenBase],
+    stream_root: Option[String]
 }
 
 fn history_reader(take client: std.object.Client, deadline: u64) -> ObjectPackRead {
-    ObjectPackRead(authority_kind: 1, client: take client, locator: empty_history_locator(), deadline, admitted_base: None)
+    ObjectPackRead(authority_kind: 1, client: take client, locator: empty_history_locator(), deadline, admitted_base: None, stream_root: None)
 }
 
 fn history_list_page(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
@@ -251,7 +256,9 @@ fn history_want_roots(mut pending: Map[u64, List[LocatedNeed]], roots: LocatedRo
         history_want(mut pending, roots.catalog.pack, NeedPage(roots.catalog, Unprefixed, None))?
     }
     for ptr in roots.keyed {
-        if ptr.stamp != 0 { history_want(mut pending, ptr.pack, NeedPage(ptr, Unprefixed, None))? }
+        if ptr.stamp != 0 {
+            history_want(mut pending, ptr.pack, NeedPage(ptr, Unprefixed, None))?
+        }
     }
     Ok(())
 }
@@ -303,7 +310,9 @@ fn history_resolve_page(path: String, pack: LoadedPack, inventory: RecoveryInven
         }
         return Ok(())
     }
-    let body: Bytes = capacity(bound bytes round8(list.len(payload)) { clone(payload) })?
+    let body: Bytes = capacity(bound bytes round8(list.len(payload)) {
+        clone(payload)
+    })?
     let image = decode_manifest_page(path, ptr.offset, take body, domain, inventory.allow_tiered)?
     let height = std.page.level(image)
     if let Some(wanted) = expected_level {
@@ -380,15 +389,13 @@ fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator,
     let blank = PageGraph(stamps: map.new(), frames: map.new(), postorder: list.new())
     let mut lists = empty_listed_pages(allow_tiered, take blank)
     let mut final_item: Option[u64] = None
-    read_page_list(mut client, id, manifest, manifest.pack_root, None, PackList, mut final_item, mut lists,
-        scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
-            history_list_page(mut reader_client, locator, deadline, store_id, ptr)
-        })?
+    read_page_list(mut client, id, manifest, manifest.pack_root, None, PackList, mut final_item, mut lists, scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
+        history_list_page(mut reader_client, locator, deadline, store_id, ptr)
+    })?
     final_item = None
-    read_page_list(mut client, id, manifest, manifest.lineage, None, LineageList, mut final_item, mut lists,
-        scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
-            history_list_page(mut reader_client, locator, deadline, store_id, ptr)
-        })?
+    read_page_list(mut client, id, manifest, manifest.lineage, None, LineageList, mut final_item, mut lists, scoped fn(mut reader_client: std.object.Client, store_id: StoreId, ptr: std.page.PagePtr) -> Result[(String, std.page.Image), Error] waits {
+        history_list_page(mut reader_client, locator, deadline, store_id, ptr)
+    })?
     validate_lineage_forks(file, manifest, lists.lineage.forks)?
     for (seq, _) in lists.class_two {
         if map.contains(lists.packs, seq) || !map.contains(locator.rows, seq) {
@@ -460,8 +467,7 @@ fn history_paged_load(mut source: ObjectPackRead, head: HistoryHead, ceiling: u6
     Ok((take recovered, take loaded))
 }
 
-fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: HistoryMark, checkpoint_data: Bytes,
-    take manifest: PageManifest, ceiling: u64) -> Result[(JournalReplay, LoadedPageStore), Error] waits {
+fn history_open_checkpoint(mut source: ObjectPackRead, head: HistoryHead, mark: HistoryMark, checkpoint_data: Bytes, take manifest: PageManifest, ceiling: u64) -> Result[(JournalReplay, LoadedPageStore), Error] waits {
     source.locator = history_locator(mut source.client, head, mark, checkpoint_data, source.deadline)?
     let name = history_read_key("m-", mark.manifest)?
     let validated = history_validate_manifest(mut source.client, source.locator, source.deadline, head.store, name, take manifest)?

@@ -4,21 +4,26 @@ type ObjectAuthorityConfig {
     op_ms: u64,
     sim: Option[(List[String], LevelSync)],
     // The host stream slot whose writer opens attach (§12.11.1 `streamed`).
-    stream: Option[JournalSlot]
+    stream: Option[JournalSlot],
+    // Read-only stream root from `stream_reader` (§12.11.1, §12.11.9).
+    stream_root: Option[String]
 }
 
 pub fn object_authority(take c: std.object.Client, level_name: String, op_ms: u64) -> Authority {
-    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None, stream: None))
+    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None, stream: None, stream_root: None))
 }
 
 pub fn sim_authority(take c: std.object.Client, declared: SimLevels, take sync: LevelSync, op_ms: u64) -> Authority {
-    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync)), stream: None))
+    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync)), stream: None, stream_root: None))
 }
 
 type ObjectFollowHead: shareable + send {
     current: HistoryHead,
     tag: std.object.ETag,
-    next_node: u64
+    next_node: u64,
+    attach: Option[Attach],
+    head_bytes: Bytes,
+    live_next_seq: u64
 }
 
 pub type Claim {
@@ -77,7 +82,10 @@ fn history_check_follower_path(client: std.object.Client) -> Result[(), Error] {
 
 fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], mut scratch: Bytes) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {
     if let Some(capture) = previous {
-        return history_probe_head(mut source.client, option.unwrap(capture.remote).tag, mut scratch, source.deadline)
+        let Some(old) = view capture.remote else {
+            fail("object follower missing remote head")
+        }
+        return history_probe_head(mut source.client, old.tag, mut scratch, source.deadline)
     }
     let outcome = history_fetch(mut source.client, "head", mut scratch, source.deadline)
     let tag = match take outcome {
@@ -98,7 +106,9 @@ fn object_follow_head(mut source: ObjectPackRead, previous: Option[Arc[FollowCap
 
 fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previous: Option[Arc[FollowCapture]], ceiling: u64) -> Result[JournalReplay, Error] waits {
     if let Some(old_capture) = previous {
-        let old = option.unwrap(old_capture.remote)
+        let Some(old) = view old_capture.remote else {
+            fail("object follower missing remote head")
+        }
         if latest.checkpoint.seq <= old.current.entry.seq {
             let state = copy_follow_state(old_capture.state)?
             let initial = journal_replay(take state, old.next_node, default_limits())?
@@ -109,7 +119,10 @@ fn object_follow_replay(mut source: ObjectPackRead, latest: HistoryHead, previou
     history_paged_capture(mut source, latest, ceiling)
 }
 
-fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64) -> Result[Option[Arc[FollowCapture]], Error] waits {
+fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[FollowCapture]], expected: Option[StoreId], ceiling: u64, require_fresh: bool) -> Result[Option[Arc[FollowCapture]], Error] waits {
+    if let Some(_) = source.stream_root {
+        return stream_follow_capture(mut source, previous, expected, ceiling, require_fresh)
+    }
     let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
     })?
@@ -120,13 +133,15 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let latest = head_capture.head
     check_expected_store(expected, latest.store)?
     let old_charge = if let Some(old_capture) = previous {
-        let old = option.unwrap(old_capture.remote)
+        let Some(old) = view old_capture.remote else {
+            fail("object follower missing remote head")
+        }
         if latest.floor < old.current.floor || latest.entry.seq < old.current.entry.seq {
             return Error(disk_fault("head", 72, Order))
         }
         if history_ref_matches(latest.entry, old.current.entry) {
             return disk_allocation(scoped fn() -> Result[Option[Arc[FollowCapture]], Error] {
-                Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node)), log_id: 0, watermark: old_capture.watermark))))
+                Ok(Some(arc.new(FollowCapture(store: latest.store, state: arc.share(old_capture.state), resident: old_capture.resident, remote: Some(ObjectFollowHead(current: latest, tag, next_node: old.next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)), log_id: 0, watermark: old_capture.watermark))))
             })
         }
         old_capture.resident
@@ -151,7 +166,7 @@ fn object_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     }
     let resident = journal_account(replay)?
     let JournalReplay(state: take built, next_node, ..) = take replay
-    let remote = ObjectFollowHead(current: latest, tag, next_node)
+    let remote = ObjectFollowHead(current: latest, tag, next_node, attach: None, head_bytes: list.new(), live_next_seq: 0)
     Ok(Some(follow_capture(latest.store, take built, resident, Some(remote), 0, stamp_after(next_node)?)?))
 }
 

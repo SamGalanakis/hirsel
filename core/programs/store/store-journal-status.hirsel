@@ -81,10 +81,7 @@ pub fn close(take db: Db) -> Result[(), Error] waits {
     if let None = failure {
         let (attached, has_sealed) = match owned.disk {
             Some(state) => match state.object {
-                Some(w) => (match w.stream {
-                    Some(_) => true,
-                    None => false,
-                }, w.has_sealed),
+                Some(w) => (w.attached, w.has_sealed),
                 None => (false, false),
             },
             None => (false, false),

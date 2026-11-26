@@ -246,15 +246,24 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
         reclaim_due = true
         match take selected {
             Frame(take raw, sequence) => {
-                if let Some(link) = lane.stream {
-                    if stream_in_flight != None || is_stalled || stream_awaiting_fence {
-                        capacity(list.try_reserve(mut stream_queued, 1))?
-                        list.push(mut stream_queued, (take raw, sequence))
+                let use_stream = match lane.register.attach {
+                    Some(a) => match a.live {
+                        Some(_) => true,
+                        None => false,
+                    },
+                    None => false,
+                }
+                if use_stream {
+                    if let Some(link) = lane.stream {
+                        if stream_in_flight != None || is_stalled || stream_awaiting_fence {
+                            capacity(list.try_reserve(mut stream_queued, 1))?
+                            list.push(mut stream_queued, (take raw, sequence))
+                            continue
+                        }
+                        let (last_sequence, group_size) = object_journal_stream_send(link, input, take raw, sequence, mut stream_queued, mut deferred)?
+                        stream_in_flight = Some((last_sequence, group_size))
                         continue
                     }
-                    let (last_sequence, group_size) = object_journal_stream_send(link, input, take raw, sequence, mut stream_queued, mut deferred)?
-                    stream_in_flight = Some((last_sequence, group_size))
-                    continue
                 }
                 let ctx = history_group_context(lane.register.head)?
                 history_packet_header(mut lane.buffers.packet, ctx, lane.register.head.pair.epoch, lane.register.head.authority_kind, lane.register.head.entry)?
@@ -454,7 +463,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             },
             ObjectFresh(take destination, deadline) => {
                 let due = order.min(deadline, std.object.deadline_after_ms(lane.client, lane.op_ms))
-                let observed = history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
+                let observed = object_journal_fresh_probe(mut lane, due)
                 let terminal = match observed {
                     Error(Fenced(e)) => Some(e),
                     _ => None
@@ -484,6 +493,46 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
             Rotate(..) => fail("object journal received a segment rotation"),
         }
     }
+}
+
+fn object_journal_fresh_probe(mut lane: ObjectJournalSession, due: u64) -> Result[(), Error] waits {
+    let is_attached = match view lane.register.attach {
+        Some(_) => true,
+        None => false,
+    }
+    if !is_attached {
+        return history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)
+    }
+    let live_opt: Option[StreamRef] = match view lane.register.attach {
+        Some(a) => a.live,
+        None => None,
+    }
+    let head = lane.register.head
+    let store = head.store
+    let epoch = head.pair.epoch
+    if let Some(tail) = live_opt {
+        if let Some(link) = lane.stream {
+            let dir = stream_key(link.root, stream_dir(tail.sid))
+            let reg = stream_at_root(mut lane.client, scoped fn(mut c: std.object.Client) -> Result[StreamRegister, Error] waits {
+                stream_reg_fetch_once(mut c, dir, tail.sid, link.max_rows, due)
+            })?
+            if reg.inc != tail.inc || reg.collecting {
+                return Error(Latched(Superseded))
+            }
+            if stream_follow_reg_has_row(reg, store, epoch) {
+                return Error(Behind(Position(store, branch: 0, version: 0)))
+            }
+        }
+    }
+    let _ = history_fetch(mut lane.client, "head", mut lane.buffers.witness, due)?
+    let (take capture, _) = history_decode_head_attach(lane.buffers.witness)?
+    check_expected_store(Some(store), capture.head.store)?
+    if !history_pair_matches(capture.head.pair, head.pair) {
+        let fenced: Error = Fenced(epoch)
+        lane.register.terminal = Some(HistoryFault(clone(fenced)))
+        return Error(fenced)
+    }
+    Ok(())
 }
 
 fn object_journal_worker(take input: ObjectJournalTask) -> Result[(), Error] waits {

@@ -87,6 +87,25 @@ fn stream_latched(lane: StreamLane) -> Result[(), Error] {
     }
 }
 
+fn stream_reg_fetch_once(mut client: std.object.Client, dir: String, sid: HostStreamId, max_rows: u64, deadline: u64) -> Result[StreamRegister, Error] waits {
+    let key = stream_key(dir, "reg")
+    let room = order.min(REG_LIMIT, stream_register_bytes(max_rows)) + 88 + BINDING_BYTES
+    let mut raw: Bytes = capacity(bound bytes (room + 64) {
+        list.with_capacity(room)
+    })?
+    let (take outcome, take body) = std.object.fetch(mut client, key, replace(mut raw, list.new()), deadline)
+    raw = take body
+    let meta = match take outcome {
+        Ok(found) => found,
+        Error(NotFound) => return Error(disk_fault("reg", 0, Absent)),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    if meta.size != list.len(raw) || meta.etag.len == 0 {
+        return Error(disk_fault("reg", 0, Truncated))
+    }
+    stream_register_decode(raw, sid, 0)
+}
+
 fn stream_stalled(lane: StreamLane, store: StoreId, epoch: u64) -> bool {
     for p in lane.stalled {
         if same(p.store, store) && p.epoch == epoch {

@@ -403,6 +403,9 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
     let base_seq = head.checkpoint.seq
     let mut done_seq = base_seq
     for st in attach.sealed {
+        if st.at < done_seq || st.at > head.entry.seq {
+            return Error(disk_fault("head", 72, Malformed))
+        }
         if st.at > done_seq {
             let lo = done_seq - base_seq
             let hi = st.at - base_seq
@@ -434,8 +437,46 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         return Error(Exists("head"))
     }
     let Some(tail) = attach.live else {
-        // Direct service: §12.3's claim with ATTACH copied.
-        return Error(Exists("head"))
+        // Direct service (§12.11.5): no live tail to hold; recover in history
+        // order, write H copying ATTACH (`live = None`), and write CLAIM as an
+        // entry. The forced open-time cut in `open_object_writer` consumes
+        // `sealed` and resumes streaming when admitted.
+        let head = capture.head
+        let store = head.store
+        let epoch = head.pair.epoch
+        let place_prefix = std.object.bucket_config(read_source.client).prefix
+        let Some(take loaded_settled) = stream_load_settled(mut read_source, head, attach, link.root, place_prefix, workspace.witness, authority_kind, mut side.buffers, options.resident_limit)? else {
+            return Ok(None)
+        }
+        let replay = take loaded_settled
+        check_limits(options.limits, replay.limits)?
+        if let None = side.granted {
+            let grant = slot_attach(mut link, store, epoch + 1, place_prefix)?
+            side.granted = Some(grant)
+        }
+        let Some((take admitted, tag)) = stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)? else {
+            return Ok(None)
+        }
+        let claimed = history_claim_head(head, holder)?
+        let authority_end = history_authority_end(workspace.witness)?
+        let authority = copied(list.slice(workspace.witness, 240, authority_end))?
+        history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach)))?
+        let written = history_write_head(mut read_source.client, Match(tag), mut workspace.body, mut workspace.witness, deadline)
+        let applied_tag = match take written {
+            HistoryApplied(t) => t,
+            HistoryConflict(_) => {
+                let (take moved, _) = history_decode_head_attach(workspace.witness)?
+                if !history_pair_matches(moved.head.pair, head.pair) {
+                    return Error(Lost)
+                }
+                return Ok(None)
+            },
+            HistoryRefused(take problem) => return Error(Remote(take problem)),
+            HistoryUndecided => return Error(Undecided),
+        }
+        let mut reg = HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach))
+        history_advance_claim(mut read_source.client, mut reg, authority, mut workspace, deadline)?
+        return Ok(Some((take reg, take replay, take admitted, take authority)))
     }
     if !stream_same(side.lane.sid, tail.sid) {
         let mut next_lane = stream_lane(tail.sid, authority_kind, link.max_rows, holder)?
@@ -567,15 +608,24 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         HistoryRefused(take problem) => return Error(Remote(take problem)),
         HistoryUndecided => return Error(Undecided),
     }
-    // Step 7: the CLAIM is X's first frame on S_B.
-    slot_claim_frame(mut workspace.packet, claimed.pair.epoch, holder)
-    slot_send(link, workspace.packet, 0)?
-    match slot_wait(mut link, 0) {
-        Ok(()) => (),
-        Error(Fenced(_)) => return Error(Lost),
-        Error(take problem) => return Error(take problem),
+    // Step 7: the CLAIM rides S_B when `live` is Some, or is written as a
+    // chain entry when sealed overflow entered direct service (`live = None`).
+    let mut reg = HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach_next))
+    match next_live {
+        Some(_) => {
+            slot_claim_frame(mut workspace.packet, claimed.pair.epoch, holder)
+            slot_send(link, workspace.packet, 0)?
+            match slot_wait(mut link, 0) {
+                Ok(()) => (),
+                Error(Fenced(_)) => return Error(Lost),
+                Error(take problem) => return Error(take problem),
+            }
+        },
+        None => {
+            history_advance_claim(mut read_source.client, mut reg, authority, mut workspace, deadline)?
+        },
     }
-    Ok(Some((HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach_next)), take replay, take admitted, take authority)))
+    Ok(Some((take reg, take replay, take admitted, take authority)))
 }
 
 // Steps 4 and 5 under the hold: every failure here abandons the row (rule

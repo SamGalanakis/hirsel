@@ -447,3 +447,74 @@ fn journal_fork_case(scenario: String) -> Option[ForkCrash] {
         None
     }
 }
+
+fn s4_account_key(id: u32) -> Bytes {
+    let mut key: Bytes = list.with_capacity(4)
+    list.put_word_be(mut key, id)
+    take key
+}
+
+// S4's transfer, as its archived Place registers it: a 65,536 B body budget,
+// two reads and two puts on one resident table of 100,000 accounts. Before
+// 2135031b these transfers were red at that budget: rebuilding the touched
+// leaf for the two sorted puts materialized a second 44,040 B List[PageSlot].
+// 3156's per-leaf sorted batch copies the leaf once and edits that copy in
+// place, so each transfer now drafts within budget through the batch path.
+@test
+fn test_s4_transfer_budget(c: Clock) -> Result[(), String] waits {
+    let mut db = raw_test_db(c, 1073741824)
+    let mut start = 0u32
+    while start < 100000u32 {
+        let from = start
+        let seeded = execute(mut db, 0, 20, None, scoped fn(mut tx: Tx) -> Result[(), Error] {
+            for i in 0u32 .. 10000u32 {
+                put_bytes(mut tx, 1, s4_account_key(from + i + 1), key_word(1000000000))?
+            }
+            Ok(())
+        })
+        let Ok(Committed(_)) = seeded else {
+            return Error("S4 seed did not commit")
+        }
+        start += 10000u32
+    }
+    let pairs: Inline[(u32, u32), 4] =[(1u32, 2u32), (2u32, 1u32), (1u32, 90000u32), (90000u32, 1u32)]
+    for pair in pairs {
+        let (from, to) = pair
+        let wide_from: u64 = int.widen(from)
+        let wide_to: u64 = int.widen(to)
+        let request = key_word(wide_from * 1000000 + wide_to)
+        let stream = law_stream_name(request, keyed_time(db))
+        let admission = result.unwrap(admit(mut db, stream, 0, request_digest(request, request)))
+        let Admitted(take complete) = take admission else {
+            return Error("S4 transfer was not admitted")
+        }
+        let ci = next_call_info(db)
+        let no_record: Option[CallRecord] = None
+        let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
+        let drafted = draft_call(db, complete, ci, Plan(n_e: 65536, s_e: 1048576, reply_max: 64), no_record, None, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, Bytes] {
+            let debit = match fetch_logical(tx, result.unwrap(logical_key(1, s4_account_key(from)))) {
+                Ok(Some(raw)) => decode_word(raw),
+                _ => return Error(key_word(1)),
+            }
+            let credit = match fetch_logical(tx, result.unwrap(logical_key(1, s4_account_key(to)))) {
+                Ok(Some(raw)) => decode_word(raw),
+                _ => return Error(key_word(2)),
+            }
+            if let Error(_) = put_bytes(mut tx, 1, s4_account_key(from), key_word(debit - 1)) {
+                return Error(key_word(3))
+            }
+            if let Error(_) = put_bytes(mut tx, 1, s4_account_key(to), key_word(credit + 1)) {
+                return Error(key_word(4))
+            }
+            Ok(key_word(0))
+        })
+        let admitted = match drafted.stage {
+            Ran(_) => true,
+            _ => false,
+        }
+        if !admitted {
+            return Error("S4 transfer did not draft within 65,536 B")
+        }
+    }
+    Ok(())
+}

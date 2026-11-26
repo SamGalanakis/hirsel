@@ -453,6 +453,7 @@ store@1/store/test_reserve_latches src=3f7610ddc552a035 sig=54d18216c46d52d5 run
 store@1/store/test_resident src=f76b350ec1a040f6 sig=7df2e3565eb62511 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_retention_keeps_steps src=3203e95de40f3df4 sig=71c90b7bb24499f8 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_rollback_on_overrun src=b10a87d0666aa804 sig=83fb8724cf3fc441 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
+store@1/store/test_s4_transfer_budget src=3827f2a0418b3523 sig=43b662760beb70d3 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_scan_cursor_parity src=42149d9f91e095d6 sig=15048b9b03d696f6 run=a6b003f729117be3 bug=- oracle=- rows=pending
 store@1/store/test_schema_numbers src=3229f6cabd2a35e0 sig=e085795a9ab8a1e6 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_schema_steps_journal_replay src=c3e133ed5a8afc3d sig=a8a25d580b78f5fe run=bc0855e1b21bfb40 bug=- oracle=- rows=pending

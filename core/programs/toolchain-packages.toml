@@ -10,6 +10,7 @@ packages = [
     "dtls",
     "stun_ice",
     "turn",
+    "quic",
     "webrtc_sfu",
     "rtp_jitter",
     "media_record",

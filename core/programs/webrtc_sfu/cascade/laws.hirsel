@@ -1,0 +1,334 @@
+// SFU cascade laws (docs/spec/sfu_cascade.md, K1-K10).
+// Slice KS1: Law K9 (`unpinned_node_refused`), plus link control, room streams,
+// canonical RTP rewrite, layer announcement, MTU floor and `sim_directory`.
+const K_HOME_ADDR: Addr = Addr(ip: V4(0x0a010001), port: 4500)
+
+const K_EDGE_ADDR: Addr = Addr(ip: V4(0x0a010002), port: 4501)
+
+const K_ROGUE_ADDR: Addr = Addr(ip: V4(0x0a010003), port: 4502)
+
+const K_SOCKET: UdpOptions = UdpOptions(slots: 64, slot_bytes: 1792)
+
+const K_END: u64 = 5000 * MS
+
+fn single_pin(take p: quic.handshake.Pin) -> List[quic.handshake.Pin] {
+    let mut xs: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut xs, take p)
+    take xs
+}
+
+type K9HomePlan: send {
+    clock: Clock,
+    socket: UdpSocket,
+    home_id: cascade.NodeId,
+    home_key: Secret,
+    home_cert: Bytes,
+    allowed_pins: List[quic.handshake.Pin]
+}
+
+type K9EdgePlan: send {
+    clock: Clock,
+    socket: UdpSocket,
+    edge_id: cascade.NodeId,
+    edge_key: Secret,
+    edge_cert: Bytes,
+    home_id: cascade.NodeId,
+    home_addr: Addr,
+    home_pin: quic.handshake.Pin,
+    rogue_id: cascade.NodeId,
+    rogue_addr: Addr,
+    expected_rogue_pin: quic.handshake.Pin
+}
+
+type K9RoguePlan: send {
+    clock: Clock,
+    socket: UdpSocket,
+    rogue_id: cascade.NodeId,
+    rogue_key: Secret,
+    rogue_cert: Bytes,
+    home_id: cascade.NodeId,
+    home_addr: Addr,
+    home_pin: quic.handshake.Pin,
+    edge_pin: quic.handshake.Pin
+}
+
+type K9HomeOut: send {
+    connected: bool,
+    media_received: u64,
+    unknown_dropped: u64,
+    rogue_refused_pin: bool,
+    rogue_streams: u64
+}
+
+type K9EdgeOut: send {
+    connected: bool,
+    mtu_ready: bool,
+    dial_rogue_refused_pin: bool,
+    dial_rogue_streams: u64
+}
+
+fn join_msg(who: String, e: JoinError) -> String {
+    let mut s = string.from(who)
+    match e {
+        Failed(_) => string.push(mut s, " failed"),
+        Cancelled(..) => string.push(mut s, " cancelled"),
+        _ => string.push(mut s, " other"),
+    }
+    take s
+}
+
+fn rebuild_id(take key: Secret, take cert: Bytes) -> quic.handshake.Identity {
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, take cert)
+    Identity(chain: take chain, key: take key, alg: P256)
+}
+
+fn k9_home_task(take cfg: K9HomePlan) -> K9HomeOut waits {
+    let K9HomePlan(clock: clock, socket: take given, home_id: home_id, home_key: take hk, home_cert: take hc, allowed_pins: take pins) = take cfg
+    let mut sock = take given
+    let mut hub = result.unwrap(cascade.link_hub(home_id, provide.random(901), cascade.default_link_limits(), rebuild_id(take hk, take hc), take pins, 8))
+    let mut out = K9HomeOut(connected: false, media_received: 0, unknown_dropped: 0, rogue_refused_pin: false, rogue_streams: 0)
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let mut done_at: Option[u64] = None
+    while host.mono_ns(clock) < K_END {
+        let now = host.mono_ns(clock)
+        if let Some(end) = done_at {
+            if now >= end {
+                break
+            }
+        }
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 20 * MS, K_END), mut events))
+        for take ev in take events {
+            match take ev {
+                LinkUp(..) => {
+                    out.connected = true
+                },
+                MediaIn(room_num: rn, layer_num: ln, rtp: rtp_pkt, ..) => {
+                    if rn == 1 && ln == 1 {
+                        if let Ok(h) = rtp.header.parse(rtp_pkt) {
+                            if h.pt == cascade.canon_pt(Vp8) {
+                                out.media_received += 1
+                            }
+                        }
+                    }
+                },
+                LinkDown(peer: p, reason: reason, ..) => {
+                    if p == None {
+                        if let Refused(Pin) = reason {
+                            out.rogue_refused_pin = true
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+        events = list.new()
+        out.unknown_dropped = cascade.link_counts(hub).unknown_layer
+        if out.connected && out.media_received >= 1 && out.unknown_dropped >= 1 && out.rogue_refused_pin && done_at == None {
+            done_at = Some(host.mono_ns(clock) + 50 * MS)
+        }
+    }
+    out.rogue_streams = cascade.link_counts(hub).streams_opened
+    out
+}
+
+fn k9_edge_task(take cfg: K9EdgePlan) -> Result[K9EdgeOut, String] waits {
+    let K9EdgePlan(clock: clock, socket: take given, edge_id: edge_id, edge_key: take ek, edge_cert: take ec, home_id: home_id, home_addr: home_addr, home_pin: home_pin, rogue_id: rogue_id, rogue_addr: rogue_addr, expected_rogue_pin: bad_pin) = take cfg
+    let mut sock = take given
+    let id1 = rebuild_id(secret.share(ek), clone(ec))
+    let id2 = rebuild_id(secret.share(ek), clone(ec))
+    let id3 = rebuild_id(take ek, take ec)
+    let mut hub = cascade.link_hub(edge_id, provide.random(902), cascade.default_link_limits(), take id1, single_pin(clone(home_pin)), 8) ?=> |_| "link_hub"
+    let h_home = cascade.dial_addr(mut hub, home_id, home_addr, single_pin(home_pin), 0, take id2) ?=> |_| "dial_home"
+    let h_rogue = cascade.dial_addr(mut hub, rogue_id, rogue_addr, single_pin(bad_pin), 0, take id3) ?=> |_| "dial_rogue"
+    let mut out = K9EdgeOut(connected: false, mtu_ready: false, dial_rogue_refused_pin: false, dial_rogue_streams: 0)
+    let mut sent = false
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let mut done_at: Option[u64] = None
+    while host.mono_ns(clock) < K_END {
+        let now = host.mono_ns(clock)
+        if let Some(end) = done_at {
+            if now >= end {
+                break
+            }
+        }
+        cascade.drive_links(mut hub, clock, mut sock, order.min(now + 20 * MS, K_END), mut events) ?=> |_| "drive_links"
+        for take ev in take events {
+            match take ev {
+                LinkUp(handle: h, ..) => {
+                    if h == h_home {
+                        out.connected = true
+                        cascade.attach_room_stream(mut hub, h_home, 1, 1, true) ?=> |_| "attach_room"
+                        let ln = cascade.announce_layer(mut hub, h_home, 1, 1, 1, 7, 1, Vp8, b"q") ?=> |_| "announce_layer"
+                        if ln != 1 {
+                            return Error("first layer number was not 1")
+                        }
+                    } else if h == h_rogue {
+                        return Error("pinned edge connected to unpinned rogue server")
+                    }
+                },
+                LinkMtuReady(handle: h) => {
+                    if h == h_home {
+                        out.mtu_ready = true
+                    }
+                },
+                LinkDown(handle: h, reason: reason, ..) => {
+                    if h == h_rogue {
+                        if let Refused(Pin) = reason {
+                            out.dial_rogue_refused_pin = true
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+        events = list.new()
+        if out.connected && out.mtu_ready && !sent {
+            // Rewrite a publisher packet (PT 120, AudioLevel ext id 9) to canonical table.
+            let mut src_map = rtp.ext.map(OneOnly)
+            let _ = rtp.ext.bind(mut src_map, 9, AudioLevel)
+            let mut w = rtp.ext.writer()
+            let _ = rtp.ext.put_level(mut w, src_map, true, 12)
+            let mut raw_rtp: Bytes = list.with_capacity(128)
+            let _ = rtp.header.write(rtp.header.Fields(marker: true, pt: 120, seq: 1, ts: 90000, ssrc: 0x11223344), view w, mut raw_rtp) ?=> |_| "header_write"
+            list.append(mut raw_rtp, b"\x90\x01\x02\x03")
+            let mut canon_rtp: Bytes = list.new()
+            if let Error(_) = cascade.rewrite_to_canon(raw_rtp, Vp8, src_map, mut canon_rtp) {
+                return Error("rewrite_to_canon failed")
+            }
+            // Send on announced layer 1 and on unannounced layer 99.
+            if let Error(_) = cascade.send_media(mut hub, h_home, 1, 1, canon_rtp) {
+                return Error("send_media layer 1 failed")
+            }
+            if let Error(_) = cascade.send_media(mut hub, h_home, 1, 99, canon_rtp) {
+                return Error("send_media layer 99 failed")
+            }
+            sent = true
+        }
+        if sent && out.dial_rogue_refused_pin && done_at == None {
+            done_at = Some(host.mono_ns(clock) + 150 * MS)
+        }
+    }
+    // Only the 2 streams on h_home (link control + room 1) should have opened, 0 on h_rogue.
+    out.dial_rogue_streams = cascade.link_counts(hub).streams_opened
+    Ok(out)
+}
+
+fn k9_rogue_task(take cfg: K9RoguePlan) -> bool waits {
+    let K9RoguePlan(clock: clock, socket: take given, rogue_id: rogue_id, rogue_key: take rk, rogue_cert: take rc, home_id: home_id, home_addr: home_addr, home_pin: home_pin, edge_pin: edge_pin) = take cfg
+    let mut sock = take given
+    let id_srv = rebuild_id(secret.share(rk), clone(rc))
+    let id_cli = rebuild_id(take rk, take rc)
+    // Rogue runs as both server (dialed by edge) and client (dialing home).
+    let mut hub = result.unwrap(cascade.link_hub(rogue_id, provide.random(903), cascade.default_link_limits(), take id_srv, single_pin(edge_pin), 8))
+    let h_dial = result.unwrap(cascade.dial_addr(mut hub, home_id, home_addr, single_pin(home_pin), 0, take id_cli))
+    let mut closed_dial_alert = false
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let mut end_at: Option[u64] = None
+    while host.mono_ns(clock) < K_END {
+        let now = host.mono_ns(clock)
+        if let Some(end) = end_at {
+            if now >= end {
+                break
+            }
+        }
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 20 * MS, K_END), mut events))
+        for take ev in take events {
+            match take ev {
+                LinkUp(..) => {
+                    fail("unpinned rogue node got a live cascade link")
+                },
+                LinkDown(handle: h, reason: reason, ..) => {
+                    if h == h_dial {
+                        if let Transport(code: c, ..) = reason {
+                            if c == 0x012a {
+                                closed_dial_alert = true
+                            }
+                        }
+                        end_at = Some(host.mono_ns(clock) + 150 * MS)
+                    }
+                },
+                _ => (),
+            }
+        }
+        events = list.new()
+    }
+    closed_dial_alert
+}
+
+/// bug: a node presenting a certificate the directory does not list is allowed to
+/// establish a cascade link or open a stream, either when dialing or when dialed; or
+/// canonical RTP rewrite or unannounced-layer drop fails on a valid pinned link.
+/// oracle: docs/spec/sfu_cascade.md K9 and QUIC-3: unpinned peers fail the handshake
+/// with `Refused(Pin)` in both roles with 0 streams opened; pinned peers connect over
+/// ALPN `hirsel-cascade-1`, pass the 1,400-byte MTU check, rewrite RTP to canonical PT
+/// 97 (VP8), deliver announced layers and drop unannounced layers.
+@test
+fn unpinned_node_refused(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 909, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, clock) = std.sim.world.new(909, 0, 0)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take sim_world, clock, list.new(), 1048576)
+    // Register home and edge in sim_directory; rogue is NOT registered.
+    let mut dir = cascade.sim_directory(clock, cascade.DEFAULT_DRIFT_PPM)
+    let r_home = provide.random(911)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(r_home, clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let r_edge = provide.random(912)
+    let (take ek, take ec) = result.unwrap(signal.unit_certificate(r_edge, clock))
+    let edge_pin: quic.handshake.Pin = Cert(std.sha256.hash(ec))
+    let r_rogue = provide.random(913)
+    let (take rk, take rc) = result.unwrap(signal.unit_certificate(r_rogue, clock))
+    let home_id = cascade.node_id(b"home")
+    let edge_id = cascade.node_id(b"edge-a")
+    let rogue_id = cascade.node_id(b"rogue")
+    cascade.register_node(mut dir, home_id, K_HOME_ADDR, single_pin(clone(home_pin)))
+    cascade.register_node(mut dir, edge_id, K_EDGE_ADDR, single_pin(clone(edge_pin)))
+    // Verify sim_directory lookups and claim/renew/commit_fence basics.
+    let h_entry = result.unwrap(cascade.node(dir, home_id))
+    if h_entry.addr != K_HOME_ADDR {
+        fail("sim_directory returned wrong address for home")
+    }
+    let Error(Unknown) = cascade.node(dir, rogue_id) else {
+        fail("sim_directory returned an entry for unregistered rogue node")
+    }
+    let term = result.unwrap(cascade.claim(mut dir, b"room-k9", home_id, 0))
+    if term != 1 {
+        fail("first claim did not yield term 1")
+    }
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K_HOME_ADDR, K_SOCKET))
+    let (take s_edge, _) = result.unwrap(host.udp_bind(vnet, K_EDGE_ADDR, K_SOCKET))
+    let (take s_rogue, _) = result.unwrap(host.udp_bind(vnet, K_ROGUE_ADDR, K_SOCKET))
+    let allowed = cascade.all_pins(dir)
+    let t_home = task.spawn(tasks, bytes 16777216, K9HomePlan(clock: clock, socket: take s_home, home_id: home_id, home_key: take hk, home_cert: take hc, allowed_pins: take allowed), k9_home_task)
+    let t_edge = task.spawn(tasks, bytes 16777216, K9EdgePlan(clock: clock, socket: take s_edge, edge_id: edge_id, edge_key: take ek, edge_cert: take ec, home_id: home_id, home_addr: K_HOME_ADDR, home_pin: clone(home_pin), rogue_id: rogue_id, rogue_addr: K_ROGUE_ADDR, expected_rogue_pin: clone(edge_pin)), k9_edge_task)
+    let t_rogue = task.spawn(tasks, bytes 16777216, K9RoguePlan(clock: clock, socket: take s_rogue, rogue_id: rogue_id, rogue_key: take rk, rogue_cert: take rc, home_id: home_id, home_addr: K_HOME_ADDR, home_pin: take home_pin, edge_pin: take edge_pin), k9_rogue_task)
+    let h_out = match task.join(take t_home) {
+        Ok(v) => v,
+        Error(e) => fail(join_msg("home", e)),
+    }
+    let e_out = match task.join(take t_edge) {
+        Ok(Ok(v)) => v,
+        Ok(Error(take msg)) => fail(take msg),
+        Error(e) => fail(join_msg("edge", e)),
+    }
+    let rogue_closed_alert = match task.join(take t_rogue) {
+        Ok(v) => v,
+        Error(e) => fail(join_msg("rogue", e)),
+    }
+    result.unwrap(task.join(take net_task))
+    if !h_out.connected || !e_out.connected || !e_out.mtu_ready {
+        fail("pinned nodes failed to connect or validate 1,400-byte MTU")
+    }
+    if h_out.media_received != 1 || h_out.unknown_dropped != 1 {
+        fail("pinned link did not deliver announced canonical RTP or drop unannounced layer")
+    }
+    if !h_out.rogue_refused_pin || !rogue_closed_alert || h_out.rogue_streams != 0 {
+        fail("rogue node dialing home was not refused with Refused(Pin) and 0 streams on home")
+    }
+    if !e_out.dial_rogue_refused_pin || e_out.dial_rogue_streams != 2 {
+        fail("edge dialing unpinned rogue was not refused with Refused(Pin) and 0 streams on h_rogue")
+    }
+    Ok(())
+}

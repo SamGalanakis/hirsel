@@ -1,0 +1,580 @@
+// CAS-2 wire framing: 8-byte media datagram header, link control stream (urgency 0)
+// messages, and per-room stream (urgency 1) messages.
+pub const WIRE_VERSION: u32 = 1
+
+pub const MEDIA_HEADER_LEN: u64 = 8
+
+pub const MAX_FRAME_LEN: u64 = 65536
+
+pub const MAX_FENCES_PER_MSG: u64 = 4096
+
+pub const MAX_NACKS_PER_MSG: u64 = 256
+
+pub type WireError = Malformed | TooLarge
+
+/// Messages carried on the link control stream (bidi, urgency 0).
+/// Every room-scoped message carries `(room_num, term, seq)`.
+pub type LinkMsg = Hello(version: u32, node: NodeId) | Attach(room_num: u32, term: u64, seq: u64, room_name: Bytes) | AttachAck(room_num: u32, term: u64, seq: u64, ok: bool, reason: u32) | Detach(room_num: u32, term: u64, seq: u64, reason: u32) | LeaseRequest(room_num: u32, term: u64, seq: u64) | LeaseGrant(room_num: u32, term: u64, seq: u64, remaining_ms: u32) | Fence(room_num: u32, term: u64, seq: u64, participant: u64, epoch: u64) | FenceAck(room_num: u32, term: u64, seq: u64) | FenceTable(room_num: u32, term: u64, seq: u64, fences: List[(u64, u64)]) | FenceTableAck(room_num: u32, term: u64, seq: u64) | Layer(room_num: u32, term: u64, seq: u64, layer_num: u32, participant: u64, epoch: u64, kind: sdp.Codec, rid: Bytes)
+
+/// Messages carried on each room's own bidirectional stream (urgency 1).
+/// Every message carries `(room_num, term, seq)`.
+pub type RoomMsg = RoomOpen(room_num: u32, term: u64, seq: u64) | AdmitReq(room_num: u32, term: u64, seq: u64, req_id: u64, participant_hint: u64) | AdmitResp(room_num: u32, term: u64, seq: u64, req_id: u64, ok: bool, participant: u64, epoch: u64, reason: u32) | Subscribe(room_num: u32, term: u64, seq: u64, layer_num: u32, on: bool) | WantedMask(room_num: u32, term: u64, seq: u64, participant: u64, epoch: u64, pub_slot: u32, mask: u8) | SwitchReq(room_num: u32, term: u64, seq: u64, layer_num: u32, fir: bool) | Score(room_num: u32, term: u64, seq: u64, participant: u64, epoch: u64, score: i64, murmur: i64) | SenderReport(room_num: u32, term: u64, seq: u64, layer_num: u32, ntp_hi: u32, ntp_lo: u32, rtp_ts: u32, packets: u32, octets: u32) | Nack(room_num: u32, term: u64, seq: u64, layer_num: u32, rtp_seqs: List[u16])
+
+/// CAS-2: prepend the 8-byte media header `(room_num: u32, layer_num: u32)` to `rtp`.
+pub fn write_media_datagram(room_num: u32, layer_num: u32, rtp_pkt: Bytes, mut out: Bytes) {
+    list.put_word_be(mut out, room_num)
+    list.put_word_be(mut out, layer_num)
+    list.append(mut out, rtp_pkt)
+}
+
+/// CAS-2: read the 8-byte media header; returns `(room_num, layer_num)` if valid.
+pub fn read_media_datagram(dgram: Bytes) -> Option[(u32, u32)] {
+    if list.len(dgram) < MEDIA_HEADER_LEN {
+        return None
+    }
+    let room_num: u32 = list.word_be(dgram, 0)
+    let layer_num: u32 = list.word_be(dgram, 4)
+    Some((room_num, layer_num))
+}
+
+fn codec_tag(c: sdp.Codec) -> u64 {
+    int.widen(canon_pt(c) - PT_BASE)
+}
+
+fn tag_codec(tag: u64) -> Result[sdp.Codec, WireError] {
+    if tag > 8 {
+        return Error(Malformed)
+    }
+    let pt: u8 = PT_BASE + int.narrow(tag)
+    match codec_from_canon(pt) {
+        Some(c) => Ok(c),
+        None => Error(Malformed),
+    }
+}
+
+fn put_v(n: u64, mut out: Bytes) -> Result[(), WireError] {
+    quic.codec.write_varint(n, mut out) ?=> |_| TooLarge
+    Ok(())
+}
+
+fn put_bytes(b: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    put_v(list.len(b), mut out)?
+    list.append(mut out, b)
+    Ok(())
+}
+
+fn get_v(buf: Bytes, mut at: u64, end: u64) -> Result[u64, WireError] {
+    let v = quic.codec.read_varint(buf, mut at, end) ?=> |_| Malformed
+    Ok(v)
+}
+
+fn get_u32(buf: Bytes, mut at: u64, end: u64) -> Result[u32, WireError] {
+    let v = get_v(buf, mut at, end)?
+    if v > 0xffffffff {
+        return Error(Malformed)
+    }
+    Ok(int.narrow(v))
+}
+
+fn get_bytes(buf: Bytes, mut at: u64, end: u64, max_len: u64) -> Result[Bytes, WireError] {
+    let n = get_v(buf, mut at, end)?
+    if n > max_len || n > end - at {
+        return Error(Malformed)
+    }
+    let out: Bytes = clone(list.slice(buf, at, at + n))
+    at += n
+    Ok(take out)
+}
+
+fn wrap_frame(tag: u64, body: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    if list.len(body) > MAX_FRAME_LEN {
+        return Error(TooLarge)
+    }
+    put_v(tag, mut out)?
+    put_v(list.len(body), mut out)?
+    list.append(mut out, body)
+    Ok(())
+}
+
+/// Encode one link control message as `[tag: varint][len: varint][body]`.
+pub fn encode_link_msg(msg: LinkMsg, mut out: Bytes) -> Result[(), WireError] {
+    let mut body: Bytes = list.new()
+    let tag: u64 = match msg {
+        Hello(version: v, node: NodeId(raw)) => {
+            put_v(int.widen(v), mut body)?
+            for i in 0u64 .. 16 {
+                list.push(mut body, raw[i])
+            }
+            1
+        },
+        Attach(room_num: r, term: t, seq: s, room_name: name) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_bytes(name, mut body)?
+            2
+        },
+        AttachAck(room_num: r, term: t, seq: s, ok: ok, reason: why) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(if ok {
+                1
+            } else {
+                0
+            }, mut body)?
+            put_v(int.widen(why), mut body)?
+            3
+        },
+        Detach(room_num: r, term: t, seq: s, reason: why) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(why), mut body)?
+            4
+        },
+        LeaseRequest(room_num: r, term: t, seq: s) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            5
+        },
+        LeaseGrant(room_num: r, term: t, seq: s, remaining_ms: rem) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(rem), mut body)?
+            6
+        },
+        Fence(room_num: r, term: t, seq: s, participant: p, epoch: ep) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(p, mut body)?
+            put_v(ep, mut body)?
+            7
+        },
+        FenceAck(room_num: r, term: t, seq: s) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            8
+        },
+        FenceTable(room_num: r, term: t, seq: s, fences: fs) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(list.len(fs), mut body)?
+            for (p, ep) in fs {
+                put_v(p, mut body)?
+                put_v(ep, mut body)?
+            }
+            9
+        },
+        FenceTableAck(room_num: r, term: t, seq: s) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            10
+        },
+        Layer(room_num: r, term: t, seq: s, layer_num: l, participant: p, epoch: ep, kind: k, rid: rid) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(l), mut body)?
+            put_v(p, mut body)?
+            put_v(ep, mut body)?
+            put_v(codec_tag(k), mut body)?
+            put_bytes(rid, mut body)?
+            11
+        },
+    }
+    wrap_frame(tag, body, mut out)
+}
+
+/// Encode one room stream message as `[tag: varint][len: varint][body]`.
+pub fn encode_room_msg(msg: RoomMsg, mut out: Bytes) -> Result[(), WireError] {
+    let mut body: Bytes = list.new()
+    let tag: u64 = match msg {
+        RoomOpen(room_num: r, term: t, seq: s) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            1
+        },
+        AdmitReq(room_num: r, term: t, seq: s, req_id: id, participant_hint: h) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(id, mut body)?
+            put_v(h, mut body)?
+            2
+        },
+        AdmitResp(room_num: r, term: t, seq: s, req_id: id, ok: ok, participant: p, epoch: ep, reason: why) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(id, mut body)?
+            put_v(if ok {
+                1
+            } else {
+                0
+            }, mut body)?
+            put_v(p, mut body)?
+            put_v(ep, mut body)?
+            put_v(int.widen(why), mut body)?
+            3
+        },
+        Subscribe(room_num: r, term: t, seq: s, layer_num: l, on: on) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(l), mut body)?
+            put_v(if on {
+                1
+            } else {
+                0
+            }, mut body)?
+            4
+        },
+        WantedMask(room_num: r, term: t, seq: s, participant: p, epoch: ep, pub_slot: ps, mask: m) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(p, mut body)?
+            put_v(ep, mut body)?
+            put_v(int.widen(ps), mut body)?
+            put_v(int.widen(m), mut body)?
+            5
+        },
+        SwitchReq(room_num: r, term: t, seq: s, layer_num: l, fir: fir) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(l), mut body)?
+            put_v(if fir {
+                1
+            } else {
+                0
+            }, mut body)?
+            6
+        },
+        Score(room_num: r, term: t, seq: s, participant: p, epoch: ep, score: sc, murmur: mu) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(p, mut body)?
+            put_v(ep, mut body)?
+            list.put_word_be(mut body, zigzag_encode(sc))
+            list.put_word_be(mut body, zigzag_encode(mu))
+            7
+        },
+        SenderReport(room_num: r, term: t, seq: s, layer_num: l, ntp_hi: hi, ntp_lo: lo, rtp_ts: ts, packets: pkts, octets: octs) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(l), mut body)?
+            list.put_word_be(mut body, hi)
+            list.put_word_be(mut body, lo)
+            list.put_word_be(mut body, ts)
+            list.put_word_be(mut body, pkts)
+            list.put_word_be(mut body, octs)
+            8
+        },
+        Nack(room_num: r, term: t, seq: s, layer_num: l, rtp_seqs: seqs) => {
+            put_v(int.widen(r), mut body)?
+            put_v(t, mut body)?
+            put_v(s, mut body)?
+            put_v(int.widen(l), mut body)?
+            put_v(list.len(seqs), mut body)?
+            for n in seqs {
+                list.put_word_be(mut body, n)
+            }
+            9
+        },
+    }
+    wrap_frame(tag, body, mut out)
+}
+
+fn zigzag_encode(v: i64) -> u64 {
+    if v >= 0 {
+        let u: u64 = int.narrow(v)
+        u << 1
+    } else {
+        let mag: u64 = int.narrow(-(v + 1))
+        (mag << 1) | 1
+    }
+}
+
+fn zigzag_decode(u: u64) -> i64 {
+    let half = u >> 1
+    if (u & 1) == 0 {
+        int.narrow(half)
+    } else {
+        let pos: i64 = int.narrow(half)
+        -pos - 1
+    }
+}
+
+/// Extract one complete `[tag][len][body]` frame from `buf`, advancing `buf` on success.
+/// Returns `Ok(None)` if more bytes are needed, `Error(Malformed)` on bad framing.
+pub fn take_raw_frame(mut buf: Bytes) -> Result[Option[(u64, Bytes)], WireError] {
+    let total = list.len(buf)
+    if total == 0 {
+        return Ok(None)
+    }
+    let mut at = 0u64
+    let tag = match quic.codec.read_varint(buf, mut at, total) {
+        Ok(v) => v,
+        Error(Truncated) => return Ok(None),
+        Error(_) => return Error(Malformed),
+    }
+    let len = match quic.codec.read_varint(buf, mut at, total) {
+        Ok(v) => v,
+        Error(Truncated) => return Ok(None),
+        Error(_) => return Error(Malformed),
+    }
+    if len > MAX_FRAME_LEN {
+        return Error(Malformed)
+    }
+    if total - at < len {
+        return Ok(None)
+    }
+    let body: Bytes = clone(list.slice(buf, at, at + len))
+    let rest: Bytes = clone(list.slice(buf, at + len, total))
+    buf = take rest
+    Ok(Some((tag, take body)))
+}
+
+/// Decode one link control message from `(tag, body)`.
+pub fn decode_link_msg(tag: u64, body: Bytes) -> Result[LinkMsg, WireError] {
+    let end = list.len(body)
+    let mut at = 0u64
+    let msg: LinkMsg = match tag {
+        1 => {
+            let v = get_u32(body, mut at, end)?
+            if end - at != 16 {
+                return Error(Malformed)
+            }
+            let mut raw: Inline[u8, 16] =[0; 16]
+            for i in 0u64 .. 16 {
+                raw[i] = body[at + i]
+            }
+            at += 16
+            Hello(version: v, node: NodeId(raw))
+        },
+        2 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let name = get_bytes(body, mut at, end, 256)?
+            Attach(room_num: r, term: t, seq: s, room_name: take name)
+        },
+        3 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let ok_v = get_v(body, mut at, end)?
+            if ok_v > 1 {
+                return Error(Malformed)
+            }
+            let why = get_u32(body, mut at, end)?
+            AttachAck(room_num: r, term: t, seq: s, ok: ok_v == 1, reason: why)
+        },
+        4 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let why = get_u32(body, mut at, end)?
+            Detach(room_num: r, term: t, seq: s, reason: why)
+        },
+        5 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            LeaseRequest(room_num: r, term: t, seq: s)
+        },
+        6 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let rem = get_u32(body, mut at, end)?
+            LeaseGrant(room_num: r, term: t, seq: s, remaining_ms: rem)
+        },
+        7 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let p = get_v(body, mut at, end)?
+            let ep = get_v(body, mut at, end)?
+            Fence(room_num: r, term: t, seq: s, participant: p, epoch: ep)
+        },
+        8 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            FenceAck(room_num: r, term: t, seq: s)
+        },
+        9 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let count = get_v(body, mut at, end)?
+            if count > MAX_FENCES_PER_MSG {
+                return Error(Malformed)
+            }
+            let mut fs: List[(u64, u64)] = list.with_capacity(count)
+            for _ in 0u64 .. count {
+                let p = get_v(body, mut at, end)?
+                let ep = get_v(body, mut at, end)?
+                list.push(mut fs, (p, ep))
+            }
+            FenceTable(room_num: r, term: t, seq: s, fences: take fs)
+        },
+        10 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            FenceTableAck(room_num: r, term: t, seq: s)
+        },
+        11 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let l = get_u32(body, mut at, end)?
+            let p = get_v(body, mut at, end)?
+            let ep = get_v(body, mut at, end)?
+            let k = tag_codec(get_v(body, mut at, end)?)?
+            let rid = get_bytes(body, mut at, end, 32)?
+            Layer(room_num: r, term: t, seq: s, layer_num: l, participant: p, epoch: ep, kind: k, rid: take rid)
+        },
+        _ => return Error(Malformed),
+    }
+    if at != end {
+        return Error(Malformed)
+    }
+    Ok(take msg)
+}
+
+/// Decode one room stream message from `(tag, body)`.
+pub fn decode_room_msg(tag: u64, body: Bytes) -> Result[RoomMsg, WireError] {
+    let end = list.len(body)
+    let mut at = 0u64
+    let msg: RoomMsg = match tag {
+        1 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            RoomOpen(room_num: r, term: t, seq: s)
+        },
+        2 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let id = get_v(body, mut at, end)?
+            let hint = get_v(body, mut at, end)?
+            AdmitReq(room_num: r, term: t, seq: s, req_id: id, participant_hint: hint)
+        },
+        3 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let id = get_v(body, mut at, end)?
+            let ok_v = get_v(body, mut at, end)?
+            if ok_v > 1 {
+                return Error(Malformed)
+            }
+            let p = get_v(body, mut at, end)?
+            let ep = get_v(body, mut at, end)?
+            let why = get_u32(body, mut at, end)?
+            AdmitResp(room_num: r, term: t, seq: s, req_id: id, ok: ok_v == 1, participant: p, epoch: ep, reason: why)
+        },
+        4 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let l = get_u32(body, mut at, end)?
+            let on_v = get_v(body, mut at, end)?
+            if on_v > 1 {
+                return Error(Malformed)
+            }
+            Subscribe(room_num: r, term: t, seq: s, layer_num: l, on: on_v == 1)
+        },
+        5 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let p = get_v(body, mut at, end)?
+            let ep = get_v(body, mut at, end)?
+            let ps = get_u32(body, mut at, end)?
+            let mv = get_v(body, mut at, end)?
+            if mv > 255 {
+                return Error(Malformed)
+            }
+            WantedMask(room_num: r, term: t, seq: s, participant: p, epoch: ep, pub_slot: ps, mask: int.narrow(mv))
+        },
+        6 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let l = get_u32(body, mut at, end)?
+            let fv = get_v(body, mut at, end)?
+            if fv > 1 {
+                return Error(Malformed)
+            }
+            SwitchReq(room_num: r, term: t, seq: s, layer_num: l, fir: fv == 1)
+        },
+        7 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let p = get_v(body, mut at, end)?
+            let ep = get_v(body, mut at, end)?
+            if end - at != 16 {
+                return Error(Malformed)
+            }
+            let sc_u: u64 = list.word_be(body, at)
+            let mu_u: u64 = list.word_be(body, at + 8)
+            at += 16
+            Score(room_num: r, term: t, seq: s, participant: p, epoch: ep, score: zigzag_decode(sc_u), murmur: zigzag_decode(mu_u))
+        },
+        8 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let l = get_u32(body, mut at, end)?
+            if end - at != 20 {
+                return Error(Malformed)
+            }
+            let hi: u32 = list.word_be(body, at)
+            let lo: u32 = list.word_be(body, at + 4)
+            let ts: u32 = list.word_be(body, at + 8)
+            let pkts: u32 = list.word_be(body, at + 12)
+            let octs: u32 = list.word_be(body, at + 16)
+            at += 20
+            SenderReport(room_num: r, term: t, seq: s, layer_num: l, ntp_hi: hi, ntp_lo: lo, rtp_ts: ts, packets: pkts, octets: octs)
+        },
+        9 => {
+            let r = get_u32(body, mut at, end)?
+            let t = get_v(body, mut at, end)?
+            let s = get_v(body, mut at, end)?
+            let l = get_u32(body, mut at, end)?
+            let count = get_v(body, mut at, end)?
+            if count > MAX_NACKS_PER_MSG || end - at != count * 2 {
+                return Error(Malformed)
+            }
+            let mut seqs: List[u16] = list.with_capacity(count)
+            for _ in 0u64 .. count {
+                let n: u16 = list.word_be(body, at)
+                at += 2
+                list.push(mut seqs, n)
+            }
+            Nack(room_num: r, term: t, seq: s, layer_num: l, rtp_seqs: take seqs)
+        },
+        _ => return Error(Malformed),
+    }
+    if at != end {
+        return Error(Malformed)
+    }
+    Ok(take msg)
+}

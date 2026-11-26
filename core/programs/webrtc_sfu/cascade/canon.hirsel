@@ -1,0 +1,157 @@
+// CAS-2: Canonical RTP metadata table for cascade links.
+// Extension IDs are the order of RTC-1's `sdp.Ext` variants from 1.
+// Payload types are RTC-2's `sdp.Codec` formats in order from 96.
+pub const PT_BASE: u8 = 96
+
+/// Canonical 1-byte header extension ID (1..=11) for an RTC-1 extension.
+pub fn canon_ext_id(e: sdp.Ext) -> u8 {
+    match e {
+        Mid => 1,
+        RidExtension => 2,
+        RepairedRid => 3,
+        AudioLevel => 4,
+        AbsSendTime => 5,
+        TransportCc => 6,
+        DependencyDescriptor => 7,
+        VideoLayersAllocation => 8,
+        PlayoutDelay => 9,
+        VideoOrientation => 10,
+        AbsCaptureTime => 11,
+    }
+}
+
+/// Inverse of `canon_ext_id`.
+pub fn ext_from_canon(id: u8) -> Option[sdp.Ext] {
+    match id {
+        1 => Some(Mid),
+        2 => Some(RidExtension),
+        3 => Some(RepairedRid),
+        4 => Some(AudioLevel),
+        5 => Some(AbsSendTime),
+        6 => Some(TransportCc),
+        7 => Some(DependencyDescriptor),
+        8 => Some(VideoLayersAllocation),
+        9 => Some(PlayoutDelay),
+        10 => Some(VideoOrientation),
+        11 => Some(AbsCaptureTime),
+        _ => None,
+    }
+}
+
+/// Canonical payload type (96..=104) for an RTC-2 codec.
+pub fn canon_pt(c: sdp.Codec) -> u8 {
+    match c {
+        Opus => 96,
+        Vp8 => 97,
+        Vp9 => 98,
+        H264 => 99,
+        Av1 => 100,
+        Rtx => 101,
+        Red => 102,
+        Ulpfec => 103,
+        Flexfec => 104,
+    }
+}
+
+/// Inverse of `canon_pt`.
+pub fn codec_from_canon(pt: u8) -> Option[sdp.Codec] {
+    match pt {
+        96 => Some(Opus),
+        97 => Some(Vp8),
+        98 => Some(Vp9),
+        99 => Some(H264),
+        100 => Some(Av1),
+        101 => Some(Rtx),
+        102 => Some(Red),
+        103 => Some(Ulpfec),
+        104 => Some(Flexfec),
+        _ => None,
+    }
+}
+
+/// RTP clock rate of each codec in the canonical table.
+pub fn canon_clock(c: sdp.Codec) -> u32 {
+    match c {
+        Opus => 48000,
+        Red => 48000,
+        _ => 90000,
+    }
+}
+
+/// Canonical `sdp.Extmap` table (IDs 1..=11).
+pub fn canon_extmaps() -> List[sdp.Extmap] {
+    let mut out: List[sdp.Extmap] = list.with_capacity(11)
+    let exts: Inline[sdp.Ext, 11] =[Mid, RidExtension, RepairedRid, AudioLevel, AbsSendTime, TransportCc, DependencyDescriptor, VideoLayersAllocation, PlayoutDelay, VideoOrientation, AbsCaptureTime]
+    for ext in exts {
+        let vad: Option[sdp.Vad] = if ext == AudioLevel {
+            Some(VadOn)
+        } else {
+            None
+        }
+        list.push(mut out, sdp.Extmap(id: canon_ext_id(ext), ext: ext, dir: None, vad: vad))
+    }
+    take out
+}
+
+/// Canonical `sdp.Format` table (payload types 96..=104).
+pub fn canon_formats() -> List[sdp.Format] {
+    let mut out: List[sdp.Format] = list.with_capacity(9)
+    let codecs: Inline[sdp.Codec, 9] =[Opus, Vp8, Vp9, H264, Av1, Rtx, Red, Ulpfec, Flexfec]
+    for codec in codecs {
+        let channels: u8 = match codec {
+            Opus => 2,
+            Red => 2,
+            _ => 0,
+        }
+        let nack = codec != Opus && codec != Red && codec != Rtx && codec != Ulpfec && codec != Flexfec
+        let pli = nack
+        let fir = nack
+        list.push(mut out, sdp.Format(pt: canon_pt(codec), codec: codec, clock: canon_clock(codec), channels: channels, fmtp: b"", apt: None, nack: nack, pli: pli, fir: fir, twcc: false))
+    }
+    take out
+}
+
+/// Canonical `rtp.ext.ExtMap` with IDs 1..=11 and VAD enabled on AudioLevel.
+pub fn canon_ext_map() -> rtp.ext.ExtMap {
+    let mut m = rtp.ext.map(OneOnly)
+    let _ = rtp.ext.bind(mut m, 1, Mid)
+    let _ = rtp.ext.bind(mut m, 2, Rid)
+    let _ = rtp.ext.bind(mut m, 3, RepairedRid)
+    let _ = rtp.ext.bind(mut m, 4, AudioLevel)
+    let _ = rtp.ext.bind(mut m, 5, AbsSendTime)
+    let _ = rtp.ext.bind(mut m, 6, TransportSeq)
+    let _ = rtp.ext.bind(mut m, 7, DependencyDescriptor)
+    let _ = rtp.ext.bind(mut m, 8, VideoLayersAllocation)
+    let _ = rtp.ext.bind(mut m, 9, PlayoutDelay)
+    let _ = rtp.ext.bind(mut m, 10, VideoOrientation)
+    let _ = rtp.ext.bind(mut m, 11, AbsCaptureTime)
+    rtp.ext.vad(mut m, true)
+    take m
+}
+
+/// Rewrite one plaintext RTP packet from a publisher's `src_map` and `codec` into the
+/// canonical cascade table (CAS-2). Link-local extensions (MID, RID, RepairedRid,
+/// TransportSeq) are stripped; media-semantic extensions are mapped to canonical IDs.
+pub fn rewrite_to_canon(pkt: Bytes, codec: sdp.Codec, src_map: rtp.ext.ExtMap, mut out: Bytes) -> Result[(), rtp.header.WriteError] {
+    let Ok(h) = rtp.header.parse(pkt) else {
+        return Error(Form)
+    }
+    let Ok((pay_at, pay_len)) = rtp.header.payload(h, pkt) else {
+        return Error(Form)
+    }
+    let dst_map = canon_ext_map()
+    let mut w = rtp.ext.writer()
+    if let Ok(found) = rtp.ext.scan(src_map, pkt, h) {
+        let kinds: Inline[rtp.ext.Kind, 7] =[AudioLevel, AbsSendTime, DependencyDescriptor, VideoLayersAllocation, PlayoutDelay, VideoOrientation, AbsCaptureTime]
+        for kind in kinds {
+            if let Some(el) = rtp.ext.found(found, kind) {
+                let _ = rtp.ext.put(mut w, dst_map, kind, pkt, el.at, el.len)
+            }
+        }
+    }
+    let fields = rtp.header.Fields(marker: h.marker, pt: canon_pt(codec), seq: h.seq, ts: h.ts, ssrc: h.ssrc)
+    list.try_reserve(mut out, list.len(pkt) + 64) ?=> |c| Capacity(c)
+    let _ = rtp.header.write(fields, view w, mut out)?
+    list.append(mut out, list.slice(pkt, pay_at, pay_at + pay_len))
+    Ok(())
+}

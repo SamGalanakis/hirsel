@@ -6,7 +6,7 @@ to K10, slices KS1 to KS5. The review's rulings are at the end.*
 
 `sfu_cascade` lets one room span several SFU nodes. Participants join the node nearest
 them; the nodes relay each published layer between them over [QUIC](quic.md). It lives in
-`core/programs/webrtc_sfu/cascade` <!-- doc-ref: planned --> as part of the SFU, because
+`core/programs/webrtc_sfu/cascade` as part of the SFU, because
 its state is the router's: down-tracks, layers, fences. It extends [RTC-10](webrtc.md)'s
 pooled service; a node that cascades no room behaves exactly as RTC-10 says.
 
@@ -310,7 +310,7 @@ are dropped and counted, never queued, as RTC-5's ingress does.
 
 ## Laws
 
-Red first in `core/programs/webrtc_sfu/cascade/laws.hirsel` <!-- doc-ref: planned -->,
+Red first in `core/programs/webrtc_sfu/cascade/laws.hirsel`,
 under `sim.udp` with three simulated nodes and `sim_directory` unless named.
 
 - **K1 `partition_fence_fails_closed`.** A home and two edges; the link to edge B is cut, and

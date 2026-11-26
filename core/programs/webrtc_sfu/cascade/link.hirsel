@@ -1,0 +1,688 @@
+// CAS-2: Mutually authenticated QUIC links, control stream (urgency 0), per-room
+// streams (urgency 1), layer announcements, MTU floor check (1,400 B), and media
+// datagram framing.
+pub const ALPN: String = "hirsel-cascade-1"
+
+/// CAS-2 / O5: minimum validated QUIC datagram payload before a link carries media.
+pub const MIN_MTU_PAYLOAD: u64 = 1400
+
+pub const MAX_LAYER_NUM: u32 = 0xffffffff
+
+const MTU_PROBE_TAG: u64 = 0xffffffffffffffff
+
+const ERR_MALFORMED_CTRL: u64 = 0xca01
+
+const ERR_MALFORMED_ROOM: u64 = 0xca02
+
+const ERR_ALPN: u64 = 0xca03
+
+pub type LinkLimits {
+    rooms: u32,
+    layers: u32,
+    link_bytes: u64,
+    lease_ms: u32,
+    drift_ppm: u32,
+    guard_ms: u32
+}
+
+pub type CascadeError = Term(u64) | Router(router.RouterError)
+
+pub type LinkError = UnknownLink | NotReady | MtuTooSmall | RoomsLimit | LayersLimit | RoomExists | UnknownRoom | LayerRollover | Quic(quic.QuicError) | Wire(WireError) | Dir(DirError)
+
+pub type LayerInfo {
+    room_num: u32,
+    term: u64,
+    layer_num: u32,
+    participant: u64,
+    epoch: u64,
+    kind: sdp.Codec,
+    rid: Bytes
+}
+
+pub type LinkCounts: key {
+    unknown_layer: u64,
+    malformed_datagram: u64,
+    mtu_refused: u64,
+    streams_opened: u64,
+    datagrams_sent: u64,
+    datagrams_received: u64
+}
+
+pub type LinkEvent = LinkUp(peer: NodeId, handle: quic.ConnectionHandle) | LinkDown(peer: Option[NodeId], handle: quic.ConnectionHandle, reason: quic.CloseReason) | LinkMtuReady(handle: quic.ConnectionHandle) | ControlIn(handle: quic.ConnectionHandle, msg: LinkMsg) | RoomIn(handle: quic.ConnectionHandle, room_num: u32, msg: RoomMsg) | RoomDetached(handle: quic.ConnectionHandle, room_num: u32, malformed: bool) | MediaIn(handle: quic.ConnectionHandle, room_num: u32, layer_num: u32, layer: LayerInfo, rtp: Bytes)
+
+type RoomStream {
+    room_num: u32,
+    term: u64,
+    stream: Option[quic.StreamId],
+    rx: Bytes,
+    tx_queue: Bytes,
+    next_layer: u32,
+    last_rx_layer: Option[u32],
+    tx_layers: List[LayerInfo],
+    rx_layers: List[LayerInfo]
+}
+
+type PeerLink {
+    handle: quic.ConnectionHandle,
+    dialed: bool,
+    peer: Option[NodeId],
+    connected: bool,
+    mtu_ready: bool,
+    ctrl_stream: Option[quic.StreamId],
+    ctrl_rx: Bytes,
+    ctrl_tx: Bytes,
+    unbound_streams: List[(quic.StreamId, Bytes)],
+    rooms: List[RoomStream],
+    next_room_num: u32
+}
+
+/// Manages one node's cascade QUIC endpoint and peer links (CAS-2).
+pub opaque type LinkHub {
+    node: NodeId,
+    limits: LinkLimits,
+    ep: quic.Endpoint,
+    links: List[PeerLink],
+    counts: LinkCounts,
+    mtu_probe: Shared[Bytes],
+    quic_events: List[quic.Event]
+}
+
+pub fn default_link_limits() -> LinkLimits {
+    LinkLimits(rooms: 64, layers: 256, link_bytes: 1048576, lease_ms: DEFAULT_LEASE_MS, drift_ppm: DEFAULT_DRIFT_PPM, guard_ms: DEFAULT_GUARD_MS)
+}
+
+/// Build the QUIC transport config for a cascade link (ALPN `hirsel-cascade-1`,
+/// RFC 9221 datagrams, optional mutual `client_pins`).
+pub fn cascade_transport(limits: LinkLimits, take client_pins: Option[List[quic.handshake.Pin]]) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, ALPN)
+    let rooms_u64: u64 = int.widen(limits.rooms)
+    let bidi: u64 = rooms_u64 + 4u64
+    quic.TransportConfig(max_idle_ms: 30000, initial_max_data: limits.link_bytes, initial_max_stream_data: 65536, max_streams_bidi: bidi, max_streams_uni: 4, max_datagram_frame: 1500, send_bytes: limits.link_bytes, max_gaps: 64, cc: Cubic, alpn: take alpn, client_pins: take client_pins)
+}
+
+/// Build the QUIC endpoint config for a cascade node, with `max_mtu >= 1500` so
+/// DPLPMTUD can validate at least `MIN_MTU_PAYLOAD` (1,400 B) of datagram payload.
+pub fn cascade_endpoint_config(r: Random, max_connections: u32) -> quic.EndpointConfig {
+    let mut k1: Bytes = list.with_capacity(32)
+    host.random(r, mut k1)
+    let mut k2: Bytes = list.with_capacity(32)
+    host.random(r, mut k2)
+    let reset_key = result.unwrap(secret.seal(take k1, "mac"))
+    let token_key = result.unwrap(secret.seal(take k2, "kdf"))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1500, retry: Never, reset_key: take reset_key, token_key: take token_key, limits: quic.EndpointLimits(connections: max_connections, unvalidated: max_connections, datagram_bytes: 1048576))
+}
+
+/// Create a `LinkHub` for `local_node`, accepting mutually-authenticated links pinned to `client_pins`.
+pub fn link_hub(local_node: NodeId, r: Random, limits: LinkLimits, take identity: quic.handshake.Identity, take client_pins: List[quic.handshake.Pin], max_connections: u32) -> Result[LinkHub, LinkError] {
+    let cfg = cascade_endpoint_config(r, max_connections)
+    let transport = cascade_transport(limits, Some(take client_pins))
+    let ep = quic.endpoint(r, take cfg, Some((take identity, take transport))) ?=> |e| Quic(e)
+    let mut probe: Bytes = list.with_capacity(MIN_MTU_PAYLOAD)
+    list.fill(mut probe, MIN_MTU_PAYLOAD, 0)
+    Ok(LinkHub(node: local_node, limits: limits, ep: take ep, links: list.new(), counts: LinkCounts(unknown_layer: 0, malformed_datagram: 0, mtu_refused: 0, streams_opened: 0, datagrams_sent: 0, datagrams_received: 0), mtu_probe: shared.new(take probe), quic_events: list.new()))
+}
+
+/// Update the accepting side's allowed client pins (e.g. from `directory.all_pins`).
+pub fn set_client_pins(mut hub: LinkHub, take pins: List[quic.handshake.Pin]) {
+    quic.set_client_pins(mut hub.ep, Some(take pins))
+}
+
+pub fn link_counts(hub: LinkHub) -> LinkCounts {
+    hub.counts
+}
+
+pub fn quic_drop_count(hub: LinkHub, reason: quic.DropReason) -> u64 {
+    quic.drop_count(hub.ep, reason)
+}
+
+/// Dial a peer node whose address and pins come from `RoomDirectory` (CAS-1, CAS-2).
+pub fn dial_peer(mut hub: LinkHub, d: RoomDirectory, peer: NodeId, now: u64, take identity: quic.handshake.Identity) -> Result[quic.ConnectionHandle, LinkError] waits {
+    let NodeEntry(addr: addr, pins: take pins) = node(d, peer) ?=> |e| Dir(e)
+    dial_addr(mut hub, peer, addr, take pins, now, take identity)
+}
+
+/// Dial a peer at an explicit address with its pinned certificates (CAS-2).
+pub fn dial_addr(mut hub: LinkHub, peer: NodeId, addr: Addr, take pins: List[quic.handshake.Pin], now: u64, take identity: quic.handshake.Identity) -> Result[quic.ConnectionHandle, LinkError] {
+    let transport = cascade_transport(hub.limits, None)
+    let h = quic.connect(mut hub.ep, now, addr, "cascade", take pins, Some(take identity), take transport) ?=> |e| Quic(e)
+    list.push(mut hub.links, new_link(h, true, Some(peer)))
+    Ok(h)
+}
+
+fn new_link(h: quic.ConnectionHandle, dialed: bool, peer: Option[NodeId]) -> PeerLink {
+    PeerLink(handle: h, dialed: dialed, peer: peer, connected: false, mtu_ready: false, ctrl_stream: None, ctrl_rx: list.new(), ctrl_tx: list.new(), unbound_streams: list.new(), rooms: list.new(), next_room_num: 1)
+}
+
+fn link_at(hub: LinkHub, h: quic.ConnectionHandle) -> Option[u64] {
+    for i in 0u64 .. list.len(hub.links) {
+        if hub.links[i].handle == h {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn link_room_at(l: PeerLink, room_num: u32) -> Option[u64] {
+    for i in 0u64 .. list.len(l.rooms) {
+        if l.rooms[i].room_num == room_num {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Allocate the next link-local room number on link `h` (never reused on a link).
+pub fn alloc_room_num(mut hub: LinkHub, h: quic.ConnectionHandle) -> Result[u32, LinkError] {
+    let Some(i) = link_at(hub, h) else {
+        return Error(UnknownLink)
+    }
+    let n = hub.links[i].next_room_num
+    hub.links[i].next_room_num += 1
+    Ok(n)
+}
+
+/// Queue a message on link `h`'s link control stream (urgency 0).
+pub fn send_control(mut hub: LinkHub, h: quic.ConnectionHandle, msg: LinkMsg) -> Result[(), LinkError] {
+    let Some(i) = link_at(hub, h) else {
+        return Error(UnknownLink)
+    }
+    if !hub.links[i].connected {
+        return Error(NotReady)
+    }
+    encode_link_msg(msg, mut hub.links[i].ctrl_tx) ?=> |e| Wire(e)
+    flush_ctrl(mut hub, i)
+    Ok(())
+}
+
+/// Attach a room locally on link `h`, opening its bidirectional room stream at urgency 1
+/// if `open_stream` is true and sending `RoomOpen(room_num, term, 0)`.
+pub fn attach_room_stream(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, term: u64, open_stream: bool) -> Result[(), LinkError] {
+    let Some(i) = link_at(hub, h) else {
+        return Error(UnknownLink)
+    }
+    if !hub.links[i].connected {
+        return Error(NotReady)
+    }
+    if link_room_at(hub.links[i], room_num) != None {
+        return Error(RoomExists)
+    }
+    if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
+        return Error(RoomsLimit)
+    }
+    let mut sid: Option[quic.StreamId] = None
+    let mut tx: Bytes = list.new()
+    if open_stream {
+        let s = quic.open(mut hub.ep, h, true) ?=> |e| Quic(e)
+        let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 1, order: int.widen(room_num), then: 0))
+        hub.counts.streams_opened += 1
+        encode_room_msg(RoomOpen(room_num: room_num, term: term, seq: 0), mut tx) ?=> |e| Wire(e)
+        sid = Some(s)
+    }
+    list.push(mut hub.links[i].rooms, RoomStream(room_num: room_num, term: term, stream: sid, rx: list.new(), tx_queue: take tx, next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new()))
+    let ri = list.len(hub.links[i].rooms) - 1
+    flush_room(mut hub, i, ri)
+    Ok(())
+}
+
+/// Send one message on `room_num`'s dedicated room stream (urgency 1).
+pub fn send_room_msg(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, msg: RoomMsg) -> Result[(), LinkError] {
+    let Some(i) = link_at(hub, h) else {
+        return Error(UnknownLink)
+    }
+    let Some(ri) = link_room_at(hub.links[i], room_num) else {
+        return Error(UnknownRoom)
+    }
+    encode_room_msg(msg, mut hub.links[i].rooms[ri].tx_queue) ?=> |e| Wire(e)
+    flush_room(mut hub, i, ri)
+    Ok(())
+}
+
+/// Announce a new outbound layer on the link control stream (CAS-2).
+/// `layer_num` rises monotonically within `(room_num, term)` and is never reused;
+/// reaching `MAX_LAYER_NUM` detaches the room with `LayerRollover`.
+pub fn announce_layer(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, term: u64, seq: u64, participant: u64, epoch: u64, kind: sdp.Codec, rid: Bytes) -> Result[u32, LinkError] {
+    let Some(i) = link_at(hub, h) else {
+        return Error(UnknownLink)
+    }
+    let Some(ri) = link_room_at(hub.links[i], room_num) else {
+        return Error(UnknownRoom)
+    }
+    let total_layers = count_link_layers(hub.links[i])
+    if total_layers >= int.widen(hub.limits.layers) {
+        return Error(LayersLimit)
+    }
+    let layer_num = hub.links[i].rooms[ri].next_layer
+    if layer_num == MAX_LAYER_NUM {
+        detach_room_internal(mut hub, i, ri)
+        return Error(LayerRollover)
+    }
+    hub.links[i].rooms[ri].next_layer = layer_num + 1
+    let info = LayerInfo(room_num: room_num, term: term, layer_num: layer_num, participant: participant, epoch: epoch, kind: kind, rid: clone(rid))
+    list.push(mut hub.links[i].rooms[ri].tx_layers, take info)
+    send_control(mut hub, h, Layer(room_num: room_num, term: term, seq: seq, layer_num: layer_num, participant: participant, epoch: epoch, kind: kind, rid: clone(rid)))?
+    Ok(layer_num)
+}
+
+fn count_link_layers(l: PeerLink) -> u64 {
+    let mut total = 0u64
+    for r in l.rooms {
+        total += list.len(r.tx_layers) + list.len(r.rx_layers)
+    }
+    total
+}
+
+/// Check whether DPLPMTUD on link `h` has validated a path MTU that fits `MIN_MTU_PAYLOAD` (1,400 B).
+pub fn mtu_ready(mut hub: LinkHub, h: quic.ConnectionHandle) -> bool {
+    let Some(i) = link_at(hub, h) else {
+        return false
+    }
+    if !hub.links[i].connected {
+        return false
+    }
+    if hub.links[i].mtu_ready {
+        return true
+    }
+    let probe = shared.share(hub.mtu_probe)
+    let p = quic.Priority(urgency: 7, order: 0, then: 0)
+    match quic.send_datagram(mut hub.ep, h, take probe, p, MTU_PROBE_TAG) {
+        Ok(()) => {
+            let _ = quic.drop_datagrams(mut hub.ep, h, MTU_PROBE_TAG)
+            hub.links[i].mtu_ready = true
+            true
+        },
+        Error(_) => false,
+    }
+}
+
+/// Send one plaintext RTP packet as a QUIC datagram tagged with `room_num` (CAS-2, QUIC-7).
+/// Refused with `MtuTooSmall` until DPLPMTUD validates >= 1,400 bytes of datagram payload.
+pub fn send_media(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, layer_num: u32, rtp_pkt: Bytes) -> Result[(), LinkError] {
+    if !mtu_ready(mut hub, h) {
+        hub.counts.mtu_refused += 1
+        return Error(MtuTooSmall)
+    }
+    let mut wire: Bytes = list.with_capacity(MEDIA_HEADER_LEN + list.len(rtp_pkt))
+    write_media_datagram(room_num, layer_num, rtp_pkt, mut wire)
+    let p = quic.Priority(urgency: 3, order: int.widen(room_num), then: int.widen(layer_num))
+    match quic.send_datagram(mut hub.ep, h, shared.new(take wire), p, int.widen(room_num)) {
+        Ok(()) => {
+            hub.counts.datagrams_sent += 1
+            Ok(())
+        },
+        Error(TooLarge(_)) => {
+            if let Some(i) = link_at(hub, h) {
+                hub.links[i].mtu_ready = false
+            }
+            hub.counts.mtu_refused += 1
+            Error(MtuTooSmall)
+        },
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+/// Drop every queued QUIC datagram for `room_num` on link `h` (CAS-5, QUIC-7).
+pub fn drop_room_datagrams(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32) -> u64 {
+    quic.drop_datagrams(mut hub.ep, h, int.widen(room_num))
+}
+
+/// Detach a room locally from link `h`, resetting its room stream and dropping queued datagrams.
+pub fn detach_room(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32) {
+    let Some(i) = link_at(hub, h) else {
+        return
+    }
+    if let Some(ri) = link_room_at(hub.links[i], room_num) {
+        detach_room_internal(mut hub, i, ri)
+    }
+}
+
+fn detach_room_internal(mut hub: LinkHub, i: u64, ri: u64) {
+    let h = hub.links[i].handle
+    let room_num = hub.links[i].rooms[ri].room_num
+    let _ = quic.drop_datagrams(mut hub.ep, h, int.widen(room_num))
+    if let Some(s) = hub.links[i].rooms[ri].stream {
+        let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
+        let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
+    }
+    let _ = list.remove(mut hub.links[i].rooms, ri)
+}
+
+/// Close link `h` cleanly.
+pub fn close_link(mut hub: LinkHub, h: quic.ConnectionHandle, code: u64) {
+    quic.close(mut hub.ep, h, code, b"")
+}
+
+/// Drive the underlying QUIC endpoint for one round over `sock` and emit `LinkEvent`s.
+pub fn drive_links(mut hub: LinkHub, clock: Clock, mut sock: UdpSocket, until: u64, mut out: List[LinkEvent]) -> Result[(), NetError] waits {
+    let mut raw = replace(mut hub.quic_events, list.new())
+    list.clear(mut raw)
+    let res = quic.drive(mut hub.ep, clock, mut sock, until, mut raw)
+    process_events(mut hub, take raw, mut out)
+    res
+}
+
+/// Sans-IO step: process QUIC events into `LinkEvent`s (also used after `quic.receive_datagram`).
+pub fn process_events(mut hub: LinkHub, take raw: List[quic.Event], mut out: List[LinkEvent]) {
+    for take ev in take raw {
+        match take ev {
+            Connected(c: h, alpn: alpn) => on_connected(mut hub, h, alpn),
+            Opened(h, s) => on_opened(mut hub, h, s),
+            Readable(h, s) => on_readable(mut hub, h, s, mut out),
+            Writable(h, s) => on_writable(mut hub, h, s),
+            Datagram(h, take data) => on_datagram(mut hub, h, take data, mut out),
+            Closed(h, reason) => on_closed(mut hub, h, reason, mut out),
+            _ => (),
+        }
+    }
+    // Check DPLPMTUD readiness on connected links not yet marked ready.
+    for i in 0u64 .. list.len(hub.links) {
+        if hub.links[i].connected && !hub.links[i].mtu_ready {
+            let h = hub.links[i].handle
+            if mtu_ready(mut hub, h) {
+                list.push(mut out, LinkMtuReady(handle: h))
+            }
+        }
+    }
+}
+
+fn on_connected(mut hub: LinkHub, h: quic.ConnectionHandle, alpn: String) {
+    if alpn != ALPN {
+        quic.close(mut hub.ep, h, ERR_ALPN, b"bad alpn")
+        return
+    }
+    let idx = match link_at(hub, h) {
+        Some(i) => i,
+        None => {
+            list.push(mut hub.links, new_link(h, false, None))
+            list.len(hub.links) - 1
+        },
+    }
+    hub.links[idx].connected = true
+    if hub.links[idx].dialed {
+        if let Ok(s) = quic.open(mut hub.ep, h, true) {
+            let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 0, order: 0, then: 0))
+            hub.counts.streams_opened += 1
+            hub.links[idx].ctrl_stream = Some(s)
+            let _ = encode_link_msg(Hello(version: WIRE_VERSION, node: hub.node), mut hub.links[idx].ctrl_tx)
+            flush_ctrl(mut hub, idx)
+        }
+    }
+}
+
+fn on_opened(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId) {
+    let Some(i) = link_at(hub, h) else {
+        return
+    }
+    if hub.links[i].ctrl_stream == None && !hub.links[i].dialed {
+        hub.links[i].ctrl_stream = Some(s)
+        let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 0, order: 0, then: 0))
+        let _ = encode_link_msg(Hello(version: WIRE_VERSION, node: hub.node), mut hub.links[i].ctrl_tx)
+        flush_ctrl(mut hub, i)
+        return
+    }
+    list.push(mut hub.links[i].unbound_streams, (s, list.new()))
+}
+
+fn on_writable(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId) {
+    let Some(i) = link_at(hub, h) else {
+        return
+    }
+    if hub.links[i].ctrl_stream == Some(s) {
+        flush_ctrl(mut hub, i)
+        return
+    }
+    for ri in 0u64 .. list.len(hub.links[i].rooms) {
+        if hub.links[i].rooms[ri].stream == Some(s) {
+            flush_room(mut hub, i, ri)
+            return
+        }
+    }
+}
+
+fn flush_ctrl(mut hub: LinkHub, i: u64) {
+    let Some(s) = hub.links[i].ctrl_stream else {
+        return
+    }
+    let h = hub.links[i].handle
+    if list.len(hub.links[i].ctrl_tx) == 0 {
+        return
+    }
+    if let Ok(n) = quic.write(mut hub.ep, h, s, hub.links[i].ctrl_tx, false) {
+        if n > 0 {
+            let rest: Bytes = clone(list.slice(hub.links[i].ctrl_tx, n, list.len(hub.links[i].ctrl_tx)))
+            hub.links[i].ctrl_tx = take rest
+        }
+    }
+}
+
+fn flush_room(mut hub: LinkHub, i: u64, ri: u64) {
+    let Some(s) = hub.links[i].rooms[ri].stream else {
+        return
+    }
+    let h = hub.links[i].handle
+    if list.len(hub.links[i].rooms[ri].tx_queue) == 0 {
+        return
+    }
+    if let Ok(n) = quic.write(mut hub.ep, h, s, hub.links[i].rooms[ri].tx_queue, false) {
+        if n > 0 {
+            let rest: Bytes = clone(list.slice(hub.links[i].rooms[ri].tx_queue, n, list.len(hub.links[i].rooms[ri].tx_queue)))
+            hub.links[i].rooms[ri].tx_queue = take rest
+        }
+    }
+}
+
+fn read_stream_chunk(mut ep: quic.Endpoint, h: quic.ConnectionHandle, s: quic.StreamId, mut dst: Bytes) -> bool {
+    let mut tmp: Bytes = list.with_capacity(4096)
+    let mut got_any = false
+    loop {
+        list.clear(mut tmp)
+        match quic.read(mut ep, h, s, mut tmp) {
+            Ok((n, _)) => {
+                if n == 0 {
+                    break
+                }
+                list.append(mut dst, tmp)
+                got_any = true
+            },
+            Error(_) => break,
+        }
+    }
+    got_any
+}
+
+fn on_readable(mut hub: LinkHub, h: quic.ConnectionHandle, s: quic.StreamId, mut out: List[LinkEvent]) {
+    let Some(i) = link_at(hub, h) else {
+        return
+    }
+    if hub.links[i].ctrl_stream == Some(s) {
+        let _ = read_stream_chunk(mut hub.ep, h, s, mut hub.links[i].ctrl_rx)
+        drain_ctrl(mut hub, i, mut out)
+        return
+    }
+    for ri in 0u64 .. list.len(hub.links[i].rooms) {
+        if hub.links[i].rooms[ri].stream == Some(s) {
+            let _ = read_stream_chunk(mut hub.ep, h, s, mut hub.links[i].rooms[ri].rx)
+            drain_room(mut hub, i, ri, mut out)
+            return
+        }
+    }
+    for ui in 0u64 .. list.len(hub.links[i].unbound_streams) {
+        let sid = hub.links[i].unbound_streams[ui].0
+        if sid == s {
+            let mut buf = replace(mut hub.links[i].unbound_streams[ui].1, list.new())
+            let _ = read_stream_chunk(mut hub.ep, h, s, mut buf)
+            let frame = take_raw_frame(mut buf)
+            match take frame {
+                Ok(Some((tag, take body))) => {
+                    match decode_room_msg(tag, take body) {
+                        Ok(RoomOpen(room_num: rn, term: term, seq: _)) => {
+                            let _ = list.remove(mut hub.links[i].unbound_streams, ui)
+                            let ri = match link_room_at(hub.links[i], rn) {
+                                Some(existing) => {
+                                    hub.links[i].rooms[existing].stream = Some(s)
+                                    list.append(mut hub.links[i].rooms[existing].rx, buf)
+                                    existing
+                                },
+                                None => {
+                                    if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
+                                        let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
+                                        let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
+                                        return
+                                    }
+                                    list.push(mut hub.links[i].rooms, RoomStream(room_num: rn, term: term, stream: Some(s), rx: take buf, tx_queue: list.new(), next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new()))
+                                    list.len(hub.links[i].rooms) - 1
+                                },
+                            }
+                            let _ = quic.priority(mut hub.ep, h, s, quic.Priority(urgency: 1, order: int.widen(rn), then: 0))
+                            flush_room(mut hub, i, ri)
+                            drain_room(mut hub, i, ri, mut out)
+                        },
+                        _ => {
+                            let _ = list.remove(mut hub.links[i].unbound_streams, ui)
+                            let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
+                            let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
+                        },
+                    }
+                },
+                Ok(None) => {
+                    hub.links[i].unbound_streams[ui].1 = take buf
+                },
+                Error(_) => {
+                    let _ = list.remove(mut hub.links[i].unbound_streams, ui)
+                    let _ = quic.reset(mut hub.ep, h, s, ERR_MALFORMED_ROOM, 0)
+                    let _ = quic.stop(mut hub.ep, h, s, ERR_MALFORMED_ROOM)
+                },
+            }
+            return
+        }
+    }
+}
+
+fn drain_ctrl(mut hub: LinkHub, i: u64, mut out: List[LinkEvent]) {
+    let h = hub.links[i].handle
+    loop {
+        match take_raw_frame(mut hub.links[i].ctrl_rx) {
+            Ok(Some((tag, take body))) => {
+                match decode_link_msg(tag, take body) {
+                    Ok(Hello(version: v, node: peer)) => {
+                        if v != WIRE_VERSION {
+                            quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"bad version")
+                            return
+                        }
+                        hub.links[i].peer = Some(peer)
+                        list.push(mut out, LinkUp(peer: peer, handle: h))
+                    },
+                    Ok(Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)) => {
+                        if !record_rx_layer(mut hub, i, rn, term, ln, p, ep, k, clone(rid)) {
+                            quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"bad layer")
+                            return
+                        }
+                        list.push(mut out, ControlIn(handle: h, msg: Layer(room_num: rn, term: term, seq: seq, layer_num: ln, participant: p, epoch: ep, kind: k, rid: take rid)))
+                    },
+                    Ok(take msg) => {
+                        list.push(mut out, ControlIn(handle: h, msg: take msg))
+                    },
+                    Error(_) => {
+                        // CAS-2 / CAS-7: malformed message on link control stream closes the link.
+                        quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"malformed control")
+                        return
+                    },
+                }
+            },
+            Ok(None) => return,
+            Error(_) => {
+                quic.close(mut hub.ep, h, ERR_MALFORMED_CTRL, b"malformed control frame")
+                return
+            },
+        }
+    }
+}
+
+fn record_rx_layer(mut hub: LinkHub, i: u64, room_num: u32, term: u64, layer_num: u32, participant: u64, epoch: u64, kind: sdp.Codec, take rid: Bytes) -> bool {
+    if count_link_layers(hub.links[i]) >= int.widen(hub.limits.layers) {
+        return false
+    }
+    let ri = match link_room_at(hub.links[i], room_num) {
+        Some(existing) => existing,
+        None => {
+            if list.len(hub.links[i].rooms) >= int.widen(hub.limits.rooms) {
+                return false
+            }
+            list.push(mut hub.links[i].rooms, RoomStream(room_num: room_num, term: term, stream: None, rx: list.new(), tx_queue: list.new(), next_layer: 1, last_rx_layer: None, tx_layers: list.new(), rx_layers: list.new()))
+            list.len(hub.links[i].rooms) - 1
+        },
+    }
+    if let Some(prev) = hub.links[i].rooms[ri].last_rx_layer {
+        if layer_num <= prev {
+            return false
+        }
+    }
+    hub.links[i].rooms[ri].last_rx_layer = Some(layer_num)
+    list.push(mut hub.links[i].rooms[ri].rx_layers, LayerInfo(room_num: room_num, term: term, layer_num: layer_num, participant: participant, epoch: epoch, kind: kind, rid: take rid))
+    true
+}
+
+fn drain_room(mut hub: LinkHub, i: u64, ri: u64, mut out: List[LinkEvent]) {
+    let h = hub.links[i].handle
+    let rn = hub.links[i].rooms[ri].room_num
+    loop {
+        match take_raw_frame(mut hub.links[i].rooms[ri].rx) {
+            Ok(Some((tag, take body))) => {
+                match decode_room_msg(tag, take body) {
+                    Ok(take msg) => {
+                        list.push(mut out, RoomIn(handle: h, room_num: rn, msg: take msg))
+                    },
+                    Error(_) => {
+                        // CAS-2 / CAS-7: malformed message on a room stream detaches only that room.
+                        detach_room_internal(mut hub, i, ri)
+                        list.push(mut out, RoomDetached(handle: h, room_num: rn, malformed: true))
+                        return
+                    },
+                }
+            },
+            Ok(None) => return,
+            Error(_) => {
+                detach_room_internal(mut hub, i, ri)
+                list.push(mut out, RoomDetached(handle: h, room_num: rn, malformed: true))
+                return
+            },
+        }
+    }
+}
+
+fn on_datagram(mut hub: LinkHub, h: quic.ConnectionHandle, take data: Bytes, mut out: List[LinkEvent]) {
+    let Some((room_num, layer_num)) = read_media_datagram(data) else {
+        hub.counts.malformed_datagram += 1
+        return
+    }
+    let Some(i) = link_at(hub, h) else {
+        hub.counts.unknown_layer += 1
+        return
+    }
+    let Some(ri) = link_room_at(hub.links[i], room_num) else {
+        hub.counts.unknown_layer += 1
+        return
+    }
+    for layer in hub.links[i].rooms[ri].rx_layers {
+        if layer.layer_num == layer_num {
+            let rtp: Bytes = clone(list.slice(data, MEDIA_HEADER_LEN, list.len(data)))
+            hub.counts.datagrams_received += 1
+            list.push(mut out, MediaIn(handle: h, room_num: room_num, layer_num: layer_num, layer: LayerInfo(room_num: layer.room_num, term: layer.term, layer_num: layer.layer_num, participant: layer.participant, epoch: layer.epoch, kind: layer.kind, rid: clone(layer.rid)), rtp: take rtp))
+            return
+        }
+    }
+    // CAS-2: a datagram whose layer is not announced is dropped and counted.
+    hub.counts.unknown_layer += 1
+}
+
+fn on_closed(mut hub: LinkHub, h: quic.ConnectionHandle, reason: quic.CloseReason, mut out: List[LinkEvent]) {
+    let peer = match link_at(hub, h) {
+        Some(i) => {
+            let p = hub.links[i].peer
+            let _ = list.remove(mut hub.links, i)
+            p
+        },
+        None => None,
+    }
+    list.push(mut out, LinkDown(peer: peer, handle: h, reason: reason))
+}

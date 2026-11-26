@@ -1,0 +1,239 @@
+// CAS-1: RoomDirectory contract and `sim_directory` fake.
+// Linearizable per room over (home, term, lease_end_ms, fences), with injectable
+// unavailability and delay for the K laws.
+pub type NodeId: key = NodeId(Inline[u8, 16])
+
+pub type DirEntry {
+    home: NodeId,
+    term: u64,
+    fences: List[(u64, u64)]
+}
+
+pub type NodeEntry {
+    addr: Addr,
+    pins: List[quic.handshake.Pin]
+}
+
+pub type DirError = Stale(term: u64) | Held(until_ms: u64) | Unknown | Unavailable
+
+pub const DEFAULT_LEASE_MS: u32 = 2000
+
+pub const DEFAULT_DRIFT_PPM: u32 = 200
+
+pub const DEFAULT_GUARD_MS: u32 = 5
+
+const PPM: u64 = 1000000
+
+const NS_PER_MS: u64 = 1000000
+
+type DirRoom {
+    room: Bytes,
+    home: NodeId,
+    term: u64,
+    lease_end_ms: u64,
+    last_seq: u64,
+    fences: List[(u64, u64)]
+}
+
+type NodeRecord {
+    id: NodeId,
+    entry: NodeEntry
+}
+
+pub opaque type RoomDirectory {
+    clock: Clock,
+    drift_ppm: u32,
+    lease_ms: u32,
+    unavailable: bool,
+    delay_ns: u64,
+    nodes: List[NodeRecord],
+    rooms: List[DirRoom]
+}
+
+/// Build a `NodeId` from `b`'s first 16 bytes, zero-padded.
+pub fn node_id(b: Bytes) -> NodeId {
+    let mut out: Inline[u8, 16] =[0; 16]
+    let n = order.min(list.len(b), 16)
+    for i in 0u64 .. n {
+        out[i] = b[i]
+    }
+    NodeId(out)
+}
+
+/// CAS-1 / CAS-5: `ceil(lease_ms * (1 + d) / (1 - d))` where `d = drift_ppm / 10^6`.
+pub fn lease_wait_ms(lease_ms: u32, drift_ppm: u32) -> u64 {
+    let l: u64 = int.widen(lease_ms)
+    let d: u64 = int.widen(drift_ppm)
+    let num = l * (PPM + d)
+    let den = PPM - d
+    (num + den - 1) / den
+}
+
+/// CAS-5: `floor(R * (1 - d) / (1 + d)) - guard_ms`, saturating at 0.
+pub fn transitive_remaining_ms(home_remaining_ms: u64, drift_ppm: u32, guard_ms: u32) -> u64 {
+    let d: u64 = int.widen(drift_ppm)
+    let scaled = (home_remaining_ms * (PPM - d)) / (PPM + d)
+    int.saturating_sub(scaled, int.widen(guard_ms))
+}
+
+/// CAS-1: in-memory linearizable `RoomDirectory` fake under the simulator's clock.
+pub fn sim_directory(clock: Clock, drift_ppm: u32) -> RoomDirectory {
+    RoomDirectory(clock: clock, drift_ppm: drift_ppm, lease_ms: DEFAULT_LEASE_MS, unavailable: false, delay_ns: 0, nodes: list.new(), rooms: list.new())
+}
+
+/// Configure the directory's term lease duration in milliseconds.
+pub fn set_lease_ms(mut d: RoomDirectory, lease_ms: u32) {
+    d.lease_ms = lease_ms
+}
+
+/// Inject or clear directory unavailability (CAS-1 / CAS-4).
+pub fn set_unavailable(mut d: RoomDirectory, down: bool) {
+    d.unavailable = down
+}
+
+/// Inject per-operation delay on the directory's clock.
+pub fn set_delay_ns(mut d: RoomDirectory, delay_ns: u64) {
+    d.delay_ns = delay_ns
+}
+
+/// Register or update a node's address and certificate pins in `sim_directory`.
+pub fn register_node(mut d: RoomDirectory, n: NodeId, addr: Addr, take pins: List[quic.handshake.Pin]) {
+    for i in 0u64 .. list.len(d.nodes) {
+        if d.nodes[i].id == n {
+            d.nodes[i].entry = NodeEntry(addr: addr, pins: take pins)
+            return
+        }
+    }
+    list.push(mut d.nodes, NodeRecord(id: n, entry: NodeEntry(addr: addr, pins: take pins)))
+}
+
+/// Every pin currently listed across all nodes in the directory, for `client_pins`.
+pub fn all_pins(d: RoomDirectory) -> List[quic.handshake.Pin] {
+    let mut pins: List[quic.handshake.Pin] = list.new()
+    for rec in d.nodes {
+        for p in rec.entry.pins {
+            list.push(mut pins, clone(p))
+        }
+    }
+    take pins
+}
+
+fn dir_now_ms(d: RoomDirectory) -> u64 {
+    host.mono_ns(d.clock) / NS_PER_MS
+}
+
+fn dir_wait(d: RoomDirectory) waits {
+    if d.delay_ns > 0 {
+        let now = host.mono_ns(d.clock)
+        host.sleep_until(d.clock, now + d.delay_ns)
+    }
+}
+
+fn room_index(d: RoomDirectory, room: Bytes) -> Option[u64] {
+    for i in 0u64 .. list.len(d.rooms) {
+        if list.compare_bytes(d.rooms[i].room, room) == Equal {
+            return Some(i)
+        }
+    }
+    None
+}
+
+pub fn read(d: RoomDirectory, room: Bytes) -> Result[DirEntry, DirError] waits {
+    dir_wait(d)
+    if d.unavailable {
+        return Error(Unavailable)
+    }
+    let Some(i) = room_index(d, room) else {
+        return Error(Unknown)
+    }
+    let r = d.rooms[i]
+    Ok(DirEntry(home: r.home, term: r.term, fences: clone(r.fences)))
+}
+
+pub fn node(d: RoomDirectory, n: NodeId) -> Result[NodeEntry, DirError] waits {
+    dir_wait(d)
+    if d.unavailable {
+        return Error(Unavailable)
+    }
+    for rec in d.nodes {
+        if rec.id == n {
+            return Ok(NodeEntry(addr: rec.entry.addr, pins: clone(rec.entry.pins)))
+        }
+    }
+    Error(Unknown)
+}
+
+pub fn claim(mut d: RoomDirectory, room: Bytes, n: NodeId, seen: u64) -> Result[u64, DirError] waits {
+    dir_wait(d)
+    if d.unavailable {
+        return Error(Unavailable)
+    }
+    let now_ms = dir_now_ms(d)
+    let wait = lease_wait_ms(d.lease_ms, d.drift_ppm)
+    let Some(i) = room_index(d, room) else {
+        if seen != 0 {
+            return Error(Stale(term: 0))
+        }
+        list.push(mut d.rooms, DirRoom(room: clone(room), home: n, term: 1, lease_end_ms: now_ms + wait, last_seq: 0, fences: list.new()))
+        return Ok(1)
+    }
+    let cur_term = d.rooms[i].term
+    if cur_term != seen {
+        return Error(Stale(term: cur_term))
+    }
+    if now_ms < d.rooms[i].lease_end_ms {
+        return Error(Held(until_ms: d.rooms[i].lease_end_ms))
+    }
+    let next = seen + 1
+    d.rooms[i].home = n
+    d.rooms[i].term = next
+    d.rooms[i].lease_end_ms = now_ms + wait
+    d.rooms[i].last_seq = 0
+    Ok(next)
+}
+
+pub fn renew(mut d: RoomDirectory, room: Bytes, n: NodeId, term: u64, seq: u64) -> Result[u32, DirError] waits {
+    dir_wait(d)
+    if d.unavailable {
+        return Error(Unavailable)
+    }
+    let Some(i) = room_index(d, room) else {
+        return Error(Unknown)
+    }
+    if d.rooms[i].term != term || d.rooms[i].home != n {
+        return Error(Stale(term: d.rooms[i].term))
+    }
+    if seq > d.rooms[i].last_seq {
+        d.rooms[i].last_seq = seq
+    }
+    let now_ms = dir_now_ms(d)
+    let end = now_ms + lease_wait_ms(d.lease_ms, d.drift_ppm)
+    if end > d.rooms[i].lease_end_ms {
+        d.rooms[i].lease_end_ms = end
+    }
+    Ok(d.lease_ms)
+}
+
+pub fn commit_fence(mut d: RoomDirectory, room: Bytes, term: u64, participant: u64, epoch: u64) -> Result[(), DirError] waits {
+    dir_wait(d)
+    if d.unavailable {
+        return Error(Unavailable)
+    }
+    let Some(i) = room_index(d, room) else {
+        return Error(Unknown)
+    }
+    if d.rooms[i].term != term {
+        return Error(Stale(term: d.rooms[i].term))
+    }
+    for j in 0u64 .. list.len(d.rooms[i].fences) {
+        let (p, ep) = d.rooms[i].fences[j]
+        if p == participant {
+            if epoch > ep {
+                d.rooms[i].fences[j] = (participant, epoch)
+            }
+            return Ok(())
+        }
+    }
+    list.push(mut d.rooms[i].fences, (participant, epoch))
+    Ok(())
+}

@@ -13,6 +13,7 @@ stun_ice = { major = 1, path = "../stun_ice" }
 turn = { major = 1, path = "../turn" }
 runner = { major = 1, path = "../runner" }
 store = { major = 1, path = "../store" }
+quic = { major = 1, path = "../quic" }
 
 [sources]
 "sdp.hirsel" = "sdp"
@@ -40,6 +41,10 @@ store = { major = 1, path = "../store" }
 "signal_pool.hirsel" = "signal"
 "signal_room.hirsel" = "signal"
 "signal_ledger.hirsel" = "signal"
+"cascade/directory.hirsel" = "cascade"
+"cascade/canon.hirsel" = "cascade"
+"cascade/wire.hirsel" = "cascade"
+"cascade/link.hirsel" = "cascade"
 
 [tests]
 limit = 67108864
@@ -75,6 +80,7 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 "pool_fault_laws.hirsel" = "laws"
 "pool_cost_laws.hirsel" = "laws"
 "pool_ledger_laws.hirsel" = "laws"
+"cascade/laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"
 "vectors/chromium_rtp.hirsel" = "vectors"

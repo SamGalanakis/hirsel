@@ -213,7 +213,8 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
         events = "instructions:u,duration_time" + (",cycles:u" if cycles else "")
         perf = ["perf", "stat", "-x", ";", "-e", events,
                 "-o", directory / "perf.csv"]
-    return ["taskset", "-c", ",".join(map(str, cpus)), str(ROOT / "tools/capped"),
+    pin = ["taskset", "-c", ",".join(map(str, cpus))] if cpus else []
+    return [*pin, str(ROOT / "tools/capped"),
             *map(str, perf), "--", "/usr/bin/time", "-f", "%M", "-o", str(directory / "rss.txt"),
             *map(str, command)]
 
@@ -221,8 +222,8 @@ def measured_command(directory, cpus, command, profile=False, cycles=False):
 def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0=False,
             *, command=None, profile=False, allow_smt=False, cycles=False,
             shipping_units=False, launch_measurement=None, repeat=None):
-    width = len(cpus)
-    siblings = sibling_cpus(cpus, allow_smt=allow_smt)
+    width = len(cpus) if cpus else 1
+    siblings = sibling_cpus(cpus, allow_smt=allow_smt) if cpus else ()
     command = command or sample_command(bins, case, language, width, size, s0)
     if not command[0].is_file():
         return {"status": "missing-binary"}
@@ -240,7 +241,7 @@ def observe(bins, out, case, language, cpus, size, wanted, kernel, lock_path, s0
               (directory / "stdout").open("wb") as out_file, (directory / "stderr").open("wb") as err):
             result = subprocess.run(launch, cwd=bins if case == "knucleotide" else ROOT, env=env,
                                     stdin=inp, stdout=out_file, stderr=err)
-    cpu_list = ",".join(map(str, cpus))
+    cpu_list = ",".join(map(str, cpus)) if cpus else None
     row = {"status": "ok", "cpus": cpu_list, "smt_busy_percent": busy}
     if result.returncode:
         if case == "mandelbrot":
@@ -272,12 +273,15 @@ def validate_sample(directory, case, wanted, cpus, kernel=False):
         iterations, checksum = map(int, output.split())
         row.update(iterations=iterations, checksum=checksum)
     counters = {}
+    instruction_active_percent = None
     perf = directory / "perf.csv"
     if perf.is_file():
         for line in perf.read_text().splitlines():
             fields = line.split(";")
             if len(fields) >= 3 and fields[0].strip().isdigit():
                 counters[fields[2]] = int(fields[0])
+                if fields[2] == "instructions:u" and len(fields) > 4:
+                    instruction_active_percent = float(fields[4])
     if any(counters.get(event, 0) <= 0 for event in ("instructions:u", "duration_time")):
         row["status"] = "missing-counter"
         return row
@@ -297,12 +301,20 @@ def validate_sample(directory, case, wanted, cpus, kernel=False):
         row["cycles"] = counters["cycles:u"]
     return row | {
         "instructions": counters["instructions:u"],
+        "instruction_active_percent": instruction_active_percent,
         "seconds": counters["duration_time"] / 1e9,
         "max_rss_kib": int(rss_lines[-1]),
     }
 
 
-def table(rows):
+def table(rows, *, counters_only=False):
+    if counters_only:
+        print("| Workload | Language | Instructions | Seconds | Status |")
+        print("| --- | --- | ---: | ---: | --- |")
+        for row in rows:
+            print(f"| {row['case']} | {row['language']} | {row.get('instructions', '')} | "
+                  f"{row.get('seconds', '')} | {row['status']} |")
+        return
     index = {}
     for row in rows:
         index.setdefault((row["case"], row["language"], row["width"]), []).append(row)
@@ -639,6 +651,7 @@ def main():
     selection.add_argument("--languages", nargs="+", choices=LANGUAGES)
     selection.add_argument("--standard-rust", action="store_true", help="measure published Rust data inputs")
     parser.add_argument("--s0", action="store_true", help="validate both fields and measure only the S0 fixtures")
+    parser.add_argument("--unshielded", action="store_true", help="count S0 instructions on the build pool")
     parser.add_argument("--read", nargs="+", type=Path, help="render existing sample JSON files")
     parser.add_argument("--regimes", action="store_true", help="run the scheduler grain sweep")
     parser.add_argument("--grain-ns", nargs="+", type=int, default=regimes.GRAINS)
@@ -664,6 +677,9 @@ def main():
     args.repeats = args.repeats or (3 if args.regimes else 1)
     if args.plan and (args.read or args.regimes):
         parser.error("--plan selects runtime workloads")
+    if args.unshielded and (not args.s0 or args.read or args.regimes or args.profile
+                            or args.cycles or (args.workers and set(args.workers) != {1})):
+        parser.error("--unshielded requires a single-worker S0 instruction sample")
     if args.block_process_check and (not args.regimes or args.read):
         parser.error("--block-process-check requires a grain measurement")
     if args.also_lock and (not args.block_process_check or args.also_lock.resolve() == args.lock.resolve()):
@@ -714,9 +730,10 @@ def main():
                 for language in sides:
                     print(f"{case} {language} W{width} ({args.repeats} repeat{'s' if args.repeats != 1 else ''})")
             return 0
-        validate_cpu_sets(parser, args, width=max(workers), allow_smt=args.allow_smt,
-                          measure_affinity=assigned)
-        os.sched_setaffinity(0, args.build_cpus)
+        if not args.unshielded:
+            validate_cpu_sets(parser, args, width=max(workers), allow_smt=args.allow_smt,
+                              measure_affinity=assigned)
+            os.sched_setaffinity(0, args.build_cpus)
         oracles = {case: S0_WORK[case] if args.s0 else expected(case, bins / "input.fasta", args.standard_rust)
                    for case in cases}
         out.mkdir(parents=True)
@@ -727,8 +744,10 @@ def main():
             for repeat in range(1, args.repeats + 1):
                 for language in sides if repeat % 2 else reversed(sides):
                     try:
-                        result = observe(bins, out, case, language, args.measure_cpus[:width], size,
-                                         oracles[case], kernel, args.lock, args.s0, allow_smt=args.allow_smt,
+                        cpus = None if args.unshielded else args.measure_cpus[:width]
+                        lock = None if args.unshielded else args.lock
+                        result = observe(bins, out, case, language, cpus, size,
+                                         oracles[case], kernel, lock, args.s0, allow_smt=args.allow_smt,
                                          repeat=repeat if args.repeats > 1 else None)
                     except ValueError as error:
                         parser.error(str(error))
@@ -745,7 +764,7 @@ def main():
     for case in {row["case"] for row in rows}:
         if len({row.get("size") for row in rows if row["case"] == case}) > 1:
             parser.error(f"mixed input sizes for {case}")
-    table(rows)
+    table(rows, counters_only=args.unshielded)
     return 0 if rows and all(s["status"] == "ok" for s in rows) else 1
 
 

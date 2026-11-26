@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """R1–R3, using the ordered-map bench's gated, CPU-16 phase protocol."""
 import argparse
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -13,6 +14,7 @@ from std_native import ROOT
 from store_tests import inputs
 
 EXPECTED = {'R1': 5000750000, 'R2': 5000750000, 'R3': 4994343687}
+PROFILES = ('dev', 'release')
 
 
 def main():
@@ -26,7 +28,10 @@ def main():
     p.add_argument('--measure', action='store_true')
     p.add_argument('--profile', action='store_true')
     p.add_argument('--only-language', action='append', choices=['hirsel', 'rust'])
+    p.add_argument('--unshielded', action='store_true', help='count instructions on the build pool')
     args = p.parse_args()
+    if args.unshielded and args.profile:
+        p.error('--unshielded is for instruction samples')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     host = out / 'host'
@@ -47,10 +52,12 @@ def main():
         manifest['packages'][-1]['sources'].append(dict(file=str(ROOT / 'core/programs/store/bench.hirsel'),
                                                        modules=['bench'], signatures=False))
         (out / 'inputs.json').write_text(json.dumps(manifest))
-        rustc = subprocess.check_output(['rustup', 'which', '--toolchain', '1.99.0', 'rustc'], text=True).strip()
+        rustc = (subprocess.check_output(['rustup', 'which', '--toolchain', '1.99.0', 'rustc'], text=True).strip()
+                 if not args.only_language or 'rust' in args.only_language else None)
         metadata = dict(artifacts=identity, source_base=subprocess.check_output(
             ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-            rustc=subprocess.check_output([rustc, '-vV'], text=True), cpu=16,
+            rustc=subprocess.check_output([rustc, '-vV'], text=True) if rustc else None,
+            cpu=None if args.unshielded else 16,
             host=list(os.uname()), cpu_model=subprocess.check_output(['lscpu'], text=True),
             workloads=EXPECTED, sample='one per configuration; population and final drops excluded; OS cache not flushed')
         (out / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
@@ -64,39 +71,41 @@ def main():
                       '-o', out / ('hirsel-' + profile), '--json']
             if profile == 'release':
                 native.append('--release')
-            command(native, out / ('hirsel-' + profile + '-build.json'), env)
-            command([ROOT / 'tools/capped', rustc, '--edition=2024', '--target=x86_64-unknown-linux-gnu',
+            if not args.only_language or 'hirsel' in args.only_language:
+                command(native, out / ('hirsel-' + profile + '-build.json'), env)
+            if rustc:
+                command([ROOT / 'tools/capped', rustc, '--edition=2024', '--target=x86_64-unknown-linux-gnu',
                      '-Ctarget-cpu=x86-64', '-Copt-level=' + opt, '-Coverflow-checks=yes', '-Ccodegen-units=1',
                      '-Cdebug-assertions=' + ('yes' if profile == 'dev' else 'no'), '-Cdebuginfo=0',
                      ROOT / 'core/twins/m4/store_mem.rs', '-o', out / ('rust-' + profile)],
-                    out / ('rust-' + profile + '-build.log'), env)
+                        out / ('rust-' + profile + '-build.log'), env)
             print('prepared', profile, flush=True)
     if args.measure or args.profile:
-        locks = [open('/tmp/' + name, 'a') for name in
-                 ['core-llvm-905-measure.lock', 'hirsel-langarena-measure.lock']]
-        for lock in locks:
-            fcntl.flock(lock, fcntl.LOCK_EX)
         rows = []
-        profiles = ['release'] if args.profile else ['dev', 'release']
-        for profile in profiles:
-            for mode in EXPECTED:
-                languages = ['hirsel'] if args.profile else ['hirsel', 'rust']
-                for language in languages:
-                    if args.only_language and language not in args.only_language:
-                        continue
-                    argv = [out / (language + '-' + profile), mode]
-                    if language == 'rust':
-                        argv.append(host / 'gate')
-                    tag = '-'.join([language, profile, mode]) + ('-insert-profile' if args.profile and mode == 'R1' else '-profile' if args.profile else '')
-                    for sample in range(args.samples):
-                        row = measure(argv, out, env, tag + ('-' + str(sample) if args.samples > 1 else ''), EXPECTED[mode],
-                                      recording=args.profile, host_directory=host)
-                        row.update(language=language, profile=profile, workload=mode, artifacts=identity)
-                        rows.append(row)
-                        print(tag, row, flush=True)
-                        (out / ('profiles.json' if args.profile else 'samples.json')).write_text(json.dumps(rows, indent=2) + '\n')
-        for lock in locks:
-            lock.close()
+        profiles = ['release'] if args.profile else PROFILES
+        with ExitStack() as locks:
+            if not args.unshielded:
+                for name in ('core-llvm-905-measure.lock', 'hirsel-langarena-measure.lock'):
+                    lock = locks.enter_context(open('/tmp/' + name, 'a'))
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+            for profile in profiles:
+                for mode in EXPECTED:
+                    languages = ['hirsel'] if args.profile else ['hirsel', 'rust']
+                    for language in languages:
+                        if args.only_language and language not in args.only_language:
+                            continue
+                        argv = [out / (language + '-' + profile), mode]
+                        if language == 'rust':
+                            argv.append(host / 'gate')
+                        tag = '-'.join([language, profile, mode]) + ('-insert-profile' if args.profile and mode == 'R1' else '-profile' if args.profile else '')
+                        for sample in range(args.samples):
+                            row = measure(argv, out, env, tag + ('-' + str(sample) if args.samples > 1 else ''), EXPECTED[mode],
+                                          recording=args.profile, host_directory=host,
+                                          unshielded=args.unshielded)
+                            row.update(language=language, profile=profile, workload=mode, artifacts=identity)
+                            rows.append(row)
+                            print(tag, row, flush=True)
+                            (out / ('profiles.json' if args.profile else 'samples.json')).write_text(json.dumps(rows, indent=2) + '\n')
     return 0
 
 

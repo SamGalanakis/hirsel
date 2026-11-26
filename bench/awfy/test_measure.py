@@ -17,7 +17,7 @@ from pathlib import Path
 
 import awfy_measure
 import board_baseline
-from board import EXPECTED, Board, measurement_slot, rebaseline, receipt
+from board import EXPECTED, Board, board_counters, measurement_slot, place_density, rebaseline, receipt
 from checkbox_gate import checkbox_value, session_rss_sample
 import bench_cpus
 import build
@@ -193,6 +193,7 @@ class BoardCompletion(unittest.TestCase):
 
     def board_fixture(self, out, omit_edit=False, sample_status="ok"):
         board = Board(out, "abcd1234" * 5)
+        board.report["counter_identity"] = {"cpu_model": "fixture"}
         board.report["size_measurement"] = {
             "strip_version": "GNU strip 2.42", "strip_flags": ["--strip-all"],
             "verified_workloads": sorted(awfy_measure.EXPECTED["AWFY original"]),
@@ -202,6 +203,13 @@ class BoardCompletion(unittest.TestCase):
         for goal, names in EXPECTED.items():
             for name in names:
                 if name == "LangArena edit" and omit_edit:
+                    continue
+                if goal in board_counters.EXPECTED:
+                    starting = dict.fromkeys(board_counters.RESOURCES, 4)
+                    values = {"allocations_per_packet": 0, "instructions_per_packet": 100,
+                              "instructions": 100, "peak_rss_kib": 100, "seconds": 1,
+                              "work/compiled_parts": 1, "starting": starting, **starting}
+                    board_counters.add(board, goal, name, values)
                     continue
                 sides = ("hirsel", "rust") if goal in ("Compile", "Checkbox") else awfy_measure.SIDES
                 fields, values = self.sample(goal, name)
@@ -245,6 +253,31 @@ class BoardCompletion(unittest.TestCase):
         self.assertEqual(sample["server_idle_rss_bytes"], idle)
         self.assertEqual(sample["server_loaded_rss_bytes"], loaded)
         self.assertEqual(int(checkbox_value(sample, "server_rss_bytes")), (loaded - idle) // 64)
+
+    def test_counter_limits_and_zero_idle_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = self.board_fixture(Path(directory)).report
+            current = deepcopy(baseline)
+            candidates = {(row["goal"], row["row"]): row["samples"]["hirsel"] for row in current["rows"]}
+            candidates["RTP", "parse/rewrite"].update(allocations_per_packet=0.000001, instructions_per_packet=102)
+            candidates["Notes release", "cold"].update(instructions=103, peak_rss_kib=105, seconds=99)
+            candidates["Notes release", "edit"].update(peak_rss_kib=106, **{"work/compiled_parts": 99})
+            candidates[board_counters.CHURN, board_counters.CHURN_ROW]["launcher_fds"] += 1
+            gates = {(gate["goal"], gate["row"], gate["metric"]): gate["status"]
+                     for gate in board_counters.compare(current, baseline)}
+            self.assertEqual(gates["RTP", "parse/rewrite", "instructions_per_packet"], "pass")
+            self.assertEqual(gates["Notes release", "cold", "peak_rss_kib"], "pass")
+            self.assertEqual({key for key, state in gates.items() if state == "fail"}, {
+                ("RTP", "parse/rewrite", "allocations_per_packet"),
+                ("Notes release", "cold", "instructions"), ("Notes release", "edit", "peak_rss_kib"),
+                (board_counters.CHURN, board_counters.CHURN_ROW, "launcher_fds"),
+            })
+            self.assertFalse(any(metric == "seconds" or metric.startswith("work/") for _, _, metric in gates))
+        density = json.loads(place_density.BASELINE.read_text())
+        current = deepcopy(density)
+        for rate, failed in ((0.1, False), (0.1001, True)):
+            current["metrics"]["idle_instructions_per_second"] = rate
+            self.assertEqual(list(place_density.compare(current, density))[-1][0], failed)
 
     def test_second_descriptor_cannot_take_measurement_lock(self):
         with tempfile.TemporaryDirectory() as temp:

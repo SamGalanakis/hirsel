@@ -104,7 +104,7 @@ def resident(pid):
 
 
 def measure(argv, directory, env, tag, expected, recording=False, host_directory=None,
-            events="instructions:u", before_phase=None):
+            events="instructions:u", before_phase=None, unshielded=False):
     """Counters start after population; HWM resets to resident size at READY.
 
     The target reports its own monotonic operation duration. The post-DONE gate
@@ -127,7 +127,9 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
     perf = work / ('perf.data' if recording else 'perf.tsv')
     wait_load()
     with (work / 'stderr').open('w') as err:
-        command_line = [ROOT / 'tools/capped', 'taskset', '-c', '16']
+        command_line = [ROOT / 'tools/capped']
+        if not unshielded:
+            command_line += ['taskset', '-c', '16']
         if use_perf:
             mode = (['record', '-e', 'instructions:u', '-c', '100000' if 'insert' in tag else '10000',
                      '--call-graph', 'fp'] if recording else ['stat', '-x', '\t', '-e', events])
@@ -168,15 +170,19 @@ def measure(argv, directory, env, tag, expected, recording=False, host_directory
     (work / 'stdout').write_text(ready + done + remainder)
     raw = perf.read_text() if not recording and perf.exists() else ''
     counts = {}
+    active = {}
     for line in raw.splitlines():
         cols = line.split('\t')
         if len(cols) > 2 and cols[0].replace(',', '').isdigit():
             counts[cols[2]] = int(cols[0].replace(',', ''))
+            if len(cols) > 4 and cols[4]:
+                active[cols[2]] = float(cols[4])
     instructions = next((int(line.split('\t')[0].replace(',', '')) for line in raw.splitlines()
                          if '\tinstructions:u\t' in line and line.split('\t')[0].replace(',', '').isdigit()), None)
     ok = (code == 0 and match is not None and (expected is None or int(match[1]) == expected)
           and (not use_perf or recording or instructions is not None))
     row = dict(tag=tag, exit=code, complete=ok, instructions=instructions, counts=counts,
+               instruction_active_percent=active.get('instructions:u'),
                wall_ns=int(match[2]) if match and use_perf else None,
                resident_before_kib=start_resident['VmRSS'] if start_resident else None,
                peak_rss_kib=peak['VmHWM'] if peak else None,

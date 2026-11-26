@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure 64 idle Places on the production launcher. Requires Linux and perf."""
+"""Measure idle Place density or wake/refuse churn on the production launcher."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -30,6 +30,8 @@ PLACES = 64
 SETTLE_SECONDS = 5
 QUIET_SECONDS = 20
 HOST_IDLE_MS = 120_000
+CHURN_IDLE_MS = 50
+CHURN_CYCLES = 1000
 METRICS = {
     "pss_kib": ("Pss", "KiB"),
     "dirty_swap_kib": ("Private_Dirty + Swap", "KiB"),
@@ -40,12 +42,15 @@ METRICS = {
     "fds": ("FDs", ""),
 }
 LIMITS = {"pss_kib": 5, "dirty_swap_kib": 5, "idle_instructions_per_second": 10}
+IDLE_BASELINE_FLOOR = Decimal(1)  # instructions/s per Place
 BASELINE = HERE / "baseline.json"
 GOAL = "Place density"
 ROW = f"{PLACES} live Places"
 NOTE = ("Mean per Place across 64 processes sharing one executable. Each reopens its own Store via "
         "the launcher. Memory and descriptor counts follow a 5 s settle. Idle instructions cover a "
-        "20 s quiet window. Wake time runs from fork to the first ready HTTP response and is ungated.")
+        "20 s quiet window. The idle gate allows growth of 10% of the recorded rate, "
+        "with a 1 instruction/s per Place floor for the denominator. Wake time runs "
+        "from fork to the first ready HTTP response and is ungated.")
 ROOT_LIMIT = 512 << 20
 
 
@@ -87,7 +92,7 @@ def served_children(launcher):
         try:
             if b"--hirsel-wake" in (proc / "cmdline").read_bytes().split(b"\0"):
                 children[(proc / "cwd").readlink()] = int(pid_text)
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             continue
     return children
 
@@ -130,9 +135,9 @@ def stop_places(launcher):
 
 
 @contextmanager
-def host(compiler, state, log_path, *, measured=False):
-    command = [compiler, "host", "--state", state, "--max-places", str(PLACES),
-               "--idle-ms", str(HOST_IDLE_MS)]
+def host(compiler, state, log_path, *, measured=False, places=PLACES, idle_ms=HOST_IDLE_MS):
+    command = [compiler, "host", "--state", state, "--max-places", str(places),
+               "--idle-ms", str(idle_ms)]
     names = ("hirsel",)
     if measured and in_timing_slice():
         command = scoped_command(command, memory_bytes=2 << 30)
@@ -188,9 +193,9 @@ def ready(port):
     return wait_until(request, f"Place on port {port} did not listen")
 
 
-def register_places(compiler, scratch, state, recipe, launcher):
+def register_places(compiler, scratch, state, recipe, launcher, places=PLACES):
     addresses = {}
-    sockets = [socket.socket() for _ in range(PLACES)]
+    sockets = [socket.socket() for _ in range(places)]
     try:
         for index, port in enumerate(sockets):
             port.bind(("127.0.0.1", 0))
@@ -218,8 +223,8 @@ def register_places(compiler, scratch, state, recipe, launcher):
             digests = set()
             for number, digest in enumerate(registrations.map(register, addresses), 1):
                 digests.add(digest)
-                if number % 16 == 0 or number == PLACES:
-                    print(f"Ready after genesis: {number}/{PLACES}", flush=True)
+                if number % 16 == 0 or number == places:
+                    print(f"Ready after genesis: {number}/{places}", flush=True)
         except BaseException:
             registrations.shutdown(cancel_futures=True)
             raise
@@ -231,8 +236,8 @@ def register_places(compiler, scratch, state, recipe, launcher):
     time.sleep(1)
     # The two Store ID words immediately follow the manifest seal prefix.
     stores = {(work / "live/MANIFEST").read_bytes()[32:48] for work in addresses}
-    if len(stores) != PLACES or any(len(store) != 16 for store in stores):
-        raise RuntimeError("genesis did not create 64 distinct Stores")
+    if len(stores) != places or any(len(store) != 16 for store in stores):
+        raise RuntimeError(f"genesis did not create {places} distinct Stores")
     return addresses, digests.pop()
 
 
@@ -277,7 +282,55 @@ def proc_values(pid):
     return {metric: int(smaps[key]) for metric, key in (
         ("pss_kib", "Pss"), ("private_dirty_kib", "Private_Dirty"), ("swap_kib", "Swap"),
         ("rss_kib", "Rss"), ("shared_clean_kib", "Shared_Clean"),
-    )} | {"threads": len(list((proc / "task").iterdir())), "fds": len(list((proc / "fd").iterdir()))}
+    )} | resource_counts(pid)
+
+
+def resource_counts(pid):
+    proc = Path(f"/proc/{pid}")
+    return {"threads": len(list((proc / "task").iterdir())), "fds": len(list((proc / "fd").iterdir()))}
+
+
+def churn(compiler, scratch):
+    recipe = publish(compiler, scratch)
+    state = scratch / "host"
+    state.mkdir(mode=0o700)
+    # The platform persists its initial idle policy in the catalog at genesis.
+    with host(compiler, state, scratch / "register.log", places=1, idle_ms=CHURN_IDLE_MS) as launcher:
+        addresses, digest = register_places(compiler, scratch, state, recipe, launcher, places=1)
+    work, = addresses
+    port = addresses[work]
+    with host(compiler, state, scratch / "churn.log", places=1, idle_ms=CHURN_IDLE_MS) as launcher:
+        def cold():
+            return not served_children(launcher)
+
+        def host_pids():
+            children = Path(f"/proc/{launcher}/task/{launcher}/children").read_text().split()
+            if not children or not cold():
+                raise RuntimeError("churn snapshot requires the platform host and a cold Place")
+            return [launcher, *map(int, children)]
+
+        # Warm up once so lazy startup does not count as resource growth.
+        ready(port)
+        wait_until(cold, "Place did not idle after warmup")
+        pids = host_pids()
+        start = [resource_counts(pid) for pid in pids]
+        for cycle in range(1, CHURN_CYCLES + 1):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                connection.request("GET", "/hirsel")
+                response = connection.getresponse()
+                response.read()
+                if response.status != 400:
+                    raise RuntimeError(f"cycle {cycle}: expected upgrade refusal 400, got {response.status}")
+                if ready(port)[2] != digest or cold():
+                    raise RuntimeError(f"cycle {cycle}: woke the wrong image")
+            finally:
+                connection.close()
+            wait_until(cold, f"cycle {cycle}: Place did not idle")
+        if host_pids() != pids:
+            raise RuntimeError("platform processes changed during churn")
+        end = [resource_counts(pid) for pid in pids]
+    return {"cycles": CHURN_CYCLES, "before": start, "after": end}
 
 
 def idle_instructions(pids):
@@ -398,9 +451,11 @@ def compare(result, baseline):
         metric = current["metrics"][key]
         before = Decimal(str(recorded["metrics"][key]["value"]))
         after = Decimal(str(metric["value"]))
-        failed = after * 100 > before * (100 + limit)
+        denominator = max(before, IDLE_BASELINE_FLOOR) if key == "idle_instructions_per_second" else before
+        ceiling = before + denominator * limit / 100
+        failed = after > ceiling
         yield failed, (f"{metric['label']} {before:,.2f} -> {after:,.2f} {metric['unit']} "
-                       f"(limit +{limit}%){' FAIL' if failed else ''}")
+                       f"(limit +{limit}%, ceiling {ceiling:,.2f}){' FAIL' if failed else ''}")
 
 
 def main():
@@ -409,9 +464,15 @@ def main():
     parser.add_argument("--cpus", type=cpu_list, default=(16, 17, 18, 19))
     parser.add_argument("--lock", type=Path, default=BOARD)
     parser.add_argument("--sample", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--churn", action="store_true", help="run 1,000 unshielded wake/refuse cycles")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
     compiler = args.hirsel.resolve()
+    if args.churn:
+        with tempfile.TemporaryDirectory(prefix="hirsel-churn-", dir="/dev/shm") as directory:
+            result = churn(compiler, Path(directory))
+        args.output.write_text(json.dumps(result, indent=2) + "\n")
+        return 0
     if args.sample:
         addresses, digest = json.load(sys.stdin)
         prepared = {Path(work): port for work, port in addresses}, digest

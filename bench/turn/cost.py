@@ -37,14 +37,13 @@ OPERATIONS = ("from_client", "from_peer")
 PACKETS = 1_000_000
 ALLOCATIONS_WIDE = 1000
 LIMIT = 512 << 20
-CPUSET = ("taskset", "-c", "8-11")
 
 
 def phase_linker(cc, out, flavor):
     support = out / f"{flavor}-phase.o"
     define = ["-DCOUNT_ALLOCATIONS"] if flavor == "counted" else []
     subprocess.run([
-        *CPUSET, cc, "-c", "-O2", "-Wall", "-Wextra", "-Werror", *define,
+        cc, "-c", "-O2", "-Wall", "-Wextra", "-Werror", *define,
         "-I", ROOT / "crates/hirsel-core-rt/include",
         ROOT / "bench/srtp/phase.c", "-o", support,
     ], check=True)
@@ -63,11 +62,12 @@ def program(directory, dependencies):
                          for f, m in manifest["sources"].items()])
 
 
-def build(out):
-    targets = [COMPILER_TARGET, "//:core-driver-runtime-pic", RUNTIME_TARGET, ALLOCATION_RUNTIME_TARGET,
-               RECORD_RUNTIME_TARGET]
+def build(out, counters_only=False):
+    targets = [COMPILER_TARGET, "//:core-driver-runtime-pic", RUNTIME_TARGET, ALLOCATION_RUNTIME_TARGET]
+    if not counters_only:
+        targets.append(RECORD_RUNTIME_TARGET)
     paths = json.loads(subprocess.check_output([
-        *CPUSET, ROOT / ".buck2/bin/buck2", "build", "-j4", "--target-platforms",
+        ROOT / ".buck2/bin/buck2", "build", "-j4", "--target-platforms",
         "//tools/buck2:release", "--show-json-output", *targets,
     ], cwd=ROOT))
     compiler = ROOT / paths["root" + COMPILER_TARGET]
@@ -86,14 +86,15 @@ def build(out):
     ])
     manifest_path = out / "inputs.json"
     manifest_path.write_text(json.dumps(document))
-    flavors = (("shipping", RUNTIME_TARGET, True), ("counted", ALLOCATION_RUNTIME_TARGET, True),
-               ("recorded", RECORD_RUNTIME_TARGET, False))
+    flavors = [("shipping", RUNTIME_TARGET, True), ("counted", ALLOCATION_RUNTIME_TARGET, True)]
+    if not counters_only:
+        flavors.append(("recorded", RECORD_RUNTIME_TARGET, False))
     for flavor, target, phased in flavors:
         runtime = ROOT / paths["root" + target] / PLATFORM / "libhirsel_core_rt.a"
         linker = phase_linker(cc, out, flavor) if phased else cc
         recording = ["--recording"] if flavor == "recorded" else []
         subprocess.run([
-            *CPUSET, compiler, "build", "--release", "--backend", "llvm", "--source-core",
+            compiler, "build", "--release", "--backend", "llvm", "--source-core",
             "--source-std", "--inputs", manifest_path, "--entry", "turn_cost@1/main/main", *recording,
             "--limit", str(LIMIT), "--runtime", runtime, "--cc", linker, "--grant", "Stdout",
             "--grant", "Random", "--store", out / "build-store", "-o", out / flavor,
@@ -102,7 +103,7 @@ def build(out):
 
 def scoped():
     return ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=2G",
-            "-p", "MemorySwapMax=0", *CPUSET, "timeout", "300"]
+            "-p", "MemorySwapMax=0", "timeout", "300"]
 
 
 def sample(out, binary, operation, allocations, instructions):
@@ -148,7 +149,7 @@ def sample(out, binary, operation, allocations, instructions):
             os.close(fd)
     for line in perf.read_text().splitlines():
         fields = line.split(",")
-        if len(fields) >= 5 and fields[2] == "instructions:u" and float(fields[4]) >= 99.5:
+        if len(fields) >= 5 and fields[2] == "instructions:u" and float(fields[4]) == 100:
             return int(fields[0])
     raise RuntimeError(f"{operation}: no complete instruction count in {perf.read_text()}")
 
@@ -167,6 +168,7 @@ def tape_size(out, operation, packets):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("output", type=Path, help="scratch directory for the native executables")
+    parser.add_argument("--counters-only", action="store_true", help="skip recording and tape-size checks")
     build_mode = parser.add_mutually_exclusive_group()
     build_mode.add_argument("--build-only", action="store_true")
     build_mode.add_argument("--skip-build", action="store_true")
@@ -174,7 +176,7 @@ def main():
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     if not args.skip_build:
-        build(out)
+        build(out, args.counters_only)
     if args.build_only:
         return 0
     passed = True
@@ -182,7 +184,9 @@ def main():
           flush=True)
     for operation in OPERATIONS:
         count = sample(out, out / "counted", operation, 1, False)
-        small, large = tape_size(out, operation, PACKETS), tape_size(out, operation, 2 * PACKETS)
+        small, large = "", ""
+        if not args.counters_only:
+            small, large = tape_size(out, operation, PACKETS), tape_size(out, operation, 2 * PACKETS)
         passed &= count == 0 and small == large
         narrow = sample(out, out / "shipping", operation, 1, True)
         print(f"{operation},1,{count / PACKETS:g},{small},{large},{narrow / PACKETS:.1f}", flush=True)

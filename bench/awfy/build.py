@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import shutil
 import sys
@@ -74,6 +75,67 @@ def native_provenance(command, manifest, *, cwd=None):
         "runtime_archive_sha256": sha256(cwd / command[command.index("--runtime") + 1]),
         "clang_sha256": sha256(cwd / command[command.index("--cc") + 1]),
     }
+
+
+def hirsel_build_evidence(path, check, manifest, image, cwd):
+    report = json.loads(path.read_text())
+    ok = (report["accepted"] is True and report["stopped"] is None
+          and not any(report[key] for key in ("diagnostics", "incomplete", "resources")))
+    if check:
+        own_sources = manifest["packages"][-1]["sources"]
+        correct_files = (report["files"] == len(own_sources) and report["source_bytes"] ==
+                         sum(Path(source["file"]).stat().st_size for source in own_sources))
+        return {"rebuilt": ok and correct_files and report["rechecked"] > 0,
+                "front_only": report["native"] is None,
+                "rechecked_bodies": report["rechecked"], "source_files": report["files"],
+                "expected_source_files": len(own_sources), "source_bytes": report["source_bytes"],
+                "check_root": report["root"]}
+    native = report["native"] or {}
+    return {
+        "rebuilt": (ok and native.get("linked") is True and native.get("compiled", 0) > 0
+                    and (cwd / native["executable"]).resolve() == image.resolve() and image.is_file()),
+        "compiled_parts": native.get("compiled"),
+        "release_std_lowered": native.get("reach", {}).get("std_lowered"),
+    }
+
+
+def cargo_build_evidence(path, package, check, image):
+    messages = [json.loads(line) for line in path.read_text().splitlines()]
+    artifacts = [line for line in messages if line["reason"] == "compiler-artifact"]
+    own = [line for line in artifacts if line["target"]["name"] == package and "bin" in line["target"]["kind"]]
+    dependency_work = [line["target"]["name"] for line in artifacts if line not in own and not line["fresh"]]
+    rebuilt = len(own) == 1 and own[0]["fresh"] is False and any(
+        line["reason"] == "build-finished" and line["success"] is True for line in messages)
+    if check:
+        metadata = rebuilt and own[0]["executable"] is None and any(
+            filename.endswith(".rmeta") and Path(filename).is_file() for filename in own[0]["filenames"])
+        return {"rebuilt": bool(metadata), "front_only": bool(metadata), "dependency_work": dependency_work}
+    return {"rebuilt": rebuilt and own[0]["executable"] == str(image) and image.is_file(),
+            "dependency_work": dependency_work}
+
+
+def goose_build_evidence(target, check, image):
+    if not check:
+        return {"rebuilt": image.is_file() and os.access(image, os.X_OK)}
+    output = (target / "stdout").read_text() + "\n" + (target / "stderr").read_text()
+    files = re.search(r"^parsed ok: \d+ top-level declarations, (\d+) file\(s\)$", output, re.M)
+    verified = files is not None and int(files[1]) > 1 and re.search(r"^typechecked ok: ", output, re.M)
+    return {"rebuilt": bool(verified), "front_only": bool(verified),
+            "source_files": int(files[1]) if files else None}
+
+
+def native_objects(package_store):
+    # Count writes to the published library store only. Recipe assembly also
+    # emits library units into the request's native store.
+    objects = set()
+    for directory in package_store.resolve().rglob("native"):
+        for path in directory.iterdir():
+            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}", path.name):
+                with path.open("rb") as binary:
+                    header = binary.read(18)
+                if header[:6] == b"\x7fELF\x02\x01" and header[16:18] == b"\x01\0":
+                    objects.add(path)
+    return objects
 
 
 def write_native_report(binary, stdout, provenance, *, path=None):

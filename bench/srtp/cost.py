@@ -32,14 +32,13 @@ OPERATIONS = (
 ALL_OPERATIONS = OPERATIONS + ("seal", "open")
 PACKETS = 1_000_000
 ROOT_LIMIT = 1536 << 20  # The opening rows prepare up to 1.22 GB of distinct wire packets.
-CPUSET = ("taskset", "-c", "8-11")
 
 
 def phase_linker(cc, out, flavor):
     support = out / f"{flavor}-phase.o"
     define = ["-DCOUNT_ALLOCATIONS"] if flavor == "counted" else []
     subprocess.run([
-        *CPUSET, cc, "-c", "-O2", "-Wall", "-Wextra", "-Werror", *define,
+        cc, "-c", "-O2", "-Wall", "-Wextra", "-Werror", *define,
         "-I", ROOT / "crates/hirsel-core-rt/include",
         HERE / "phase.c", "-o", support,
     ], check=True)
@@ -57,7 +56,7 @@ def build(out, mode):
     if mode != "instructions":
         targets.append(ALLOCATION_RUNTIME_TARGET)
     paths = json.loads(subprocess.check_output([
-        *CPUSET, ROOT / ".buck2/bin/buck2", "build", "-j4", "--target-platforms",
+        ROOT / ".buck2/bin/buck2", "build", "-j4", "--target-platforms",
         "//tools/buck2:release", "--show-json-output", *targets,
     ], cwd=ROOT))
     compiler = ROOT / paths["root" + COMPILER_TARGET]
@@ -89,7 +88,7 @@ def build(out, mode):
         runtime = ROOT / paths["root" + target] / PLATFORM / "libhirsel_core_rt.a"
         linker = phase_linker(cc, out, flavor)
         subprocess.run([
-            *CPUSET, compiler, "build", "--release", "--backend", "llvm", "--source-core",
+            compiler, "build", "--release", "--backend", "llvm", "--source-core",
             "--source-std", "--inputs", manifest_path, "--entry", "srtp_cost@1/main/main",
             "--limit", str(ROOT_LIMIT), "--runtime", runtime, "--cc", linker, "--grant", "Stdout",
             "--store", out / "build-store", "-o", out / flavor,
@@ -98,7 +97,7 @@ def build(out, mode):
 
 def sample(out, binary, profile, operation, instructions):
     command = ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=2G",
-               "-p", "MemorySwapMax=0", *CPUSET, "timeout", "300"]
+               "-p", "MemorySwapMax=0", "timeout", "300"]
     perf = out / f"{profile}-{operation}.stat.csv"
     control_read, control_write = os.pipe()
     ack_read, ack_write = os.pipe()
@@ -141,7 +140,7 @@ def sample(out, binary, profile, operation, instructions):
             os.close(fd)
     for line in perf.read_text().splitlines():
         fields = line.split(",")
-        if len(fields) >= 5 and fields[2] == "instructions:u" and float(fields[4]) >= 99.5:
+        if len(fields) >= 5 and fields[2] == "instructions:u" and float(fields[4]) == 100:
             return int(fields[0])
     raise RuntimeError(f"{profile} {operation}: no complete instruction count in {perf.read_text()}")
 

@@ -107,7 +107,7 @@ def sources(name, layout):
 
 
 def sample(command, directory, compiler_only=False, env=None, *, cycles=False, cwd=None, pmu_times=False,
-           smt_siblings=None, stdin=None):
+           smt_siblings=None, stdin=None, unshielded=False):
     directory.mkdir()
     perf = directory/'perf.csv'
     stats = directory/'time.txt'
@@ -121,8 +121,10 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
         os.mkfifo(control)
         os.mkfifo(control.with_suffix('.ack'))
         env['PERF_CTL_FIFO'] = str(control)
-        launch = [str(REPO/'tools/capped'), '--stats', str(stats),
-                  'taskset', '-c', '16', 'setarch', os.uname().machine, '-R', 'perf', 'stat', '-x', ';',
+        pin = [] if unshielded else ['taskset', '-c', '16', 'setarch', os.uname().machine, '-R']
+        verbose = ['-vv'] if pmu_times else []
+        launch = [str(REPO/'tools/capped'), '--stats', str(stats), *pin,
+                  'perf', 'stat', *verbose, '-x', ';',
                   '-e', 'instructions:u,duration_time', '-o', str(perf),
                   '--control', f'fifo:{control},{control.with_suffix(".ack")}',
                   '--', *map(str, command)]
@@ -139,7 +141,7 @@ def sample(command, directory, compiler_only=False, env=None, *, cycles=False, c
     started = time.monotonic()
     with contextlib.ExitStack() as stack:
         input_file = stack.enter_context(Path(stdin).open('rb')) if stdin is not None else None
-        if compiler_only:
+        if compiler_only and not unshielded:
             lock = stack.enter_context(open('/tmp/hirsel-langarena-measure.lock', 'a'))
             fcntl.flock(lock, fcntl.LOCK_EX)
         with (directory/'stdout').open('wb') as out, (directory/'stderr').open('wb') as err:

@@ -20,6 +20,13 @@ from store_r6 import Manifest, check_r6
 from store_tests import inputs
 from timing_shield import BOARD, REGIMES, hold
 
+PROFILES = ('dev', 'release')
+PHASES = ('R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open')
+
+
+def phase_indexes(mode):
+    return (0, 1) if mode.startswith('R8') else (0,)
+
 
 def r6_result(row, output, before):
     timing = re.search(r'CUT (\d+) REMOVAL (\d+) REMOVE_ATTEMPTS (\d+) DRAIN_GROUP_SYNCS (\d+)\n', output)
@@ -199,7 +206,10 @@ def main():
     p.add_argument('--workload', action='append', choices=['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open', 'migrate', 'RB', 'BL15'])
     p.add_argument('--index', action='append', type=int, choices=[0, 1])
     p.add_argument('--timing-hold', action='store_true', help='shield CPU 16 for each measured sample')
+    p.add_argument('--unshielded', action='store_true', help='count phase instructions on the build pool')
     args = p.parse_args()
+    if args.unshielded and (args.timing_hold or set(args.workload or ()) & {'BL15', 'RB'}):
+        p.error('--unshielded is for phase counters')
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
     host = out / 'host'
@@ -218,7 +228,7 @@ def main():
         suffix = '-allocations'
     env = os.environ | {'HIRSEL_MEMORY_LIMIT': '2G',
                         'LD_LIBRARY_PATH': str(ROOT / 'tools/buck2/toolchains/llvm-files/lib')}
-    profiles = args.profile or ['dev', 'release']
+    profiles = args.profile or PROFILES
     if args.prepare:
         build_env = env | {'HIRSEL_MEMORY_LIMIT': os.environ.get('HIRSEL_MEMORY_LIMIT', '2G')}
         if args.allocations:
@@ -249,17 +259,19 @@ def main():
             artifacts=identity, root_limit=1073741824,
             population='R4/R5 16 keys after 64 durable commits, 100k R6/R7/migrate, 1M R8; Account codec30 with schema2, tree key12',
             indexes='none or one J=id%4', sample='one per configuration',
-            cpu=16, protocol='READY/DONE; R8-load counts creation, population and the first checkpoint; other modes exclude population; validation and final drops excluded'), indent=2) + '\n')
+            cpu=None if args.unshielded else 16, protocol='READY/DONE; R8-load counts creation, population and the first checkpoint; other modes exclude population; validation and final drops excluded'), indent=2) + '\n')
     if args.measure:
         # One pool worker: the bench body's spawned unit runs on the pool, so its file ops take the
         # slot ring (STORE-SPEC §3.3b) instead of running inline on a tied thread.
         env |= {'HIRSEL_UNTIED': '1'}
         rows = []
-        with open('/tmp/core-llvm-905-measure.lock', 'a') as core_lock, open('/tmp/hirsel-langarena-measure.lock', 'a') as shared_lock:
-            fcntl.flock(core_lock, fcntl.LOCK_EX)
-            fcntl.flock(shared_lock, fcntl.LOCK_EX)
+        with ExitStack() as locks:
+            if not args.unshielded:
+                for name in ('core-llvm-905-measure.lock', 'hirsel-langarena-measure.lock'):
+                    lock = locks.enter_context(open('/tmp/' + name, 'a'))
+                    fcntl.flock(lock, fcntl.LOCK_EX)
             for profile in profiles:
-                for mode in args.workload or ['R4', 'R5', 'R6', 'R7', 'R8-load', 'R8-open']:
+                for mode in args.workload or PHASES:
                     if mode == 'BL15':
                         for follower in (False, True):
                             with hold(REGIMES, BOARD) if args.timing_hold else nullcontext():
@@ -279,7 +291,7 @@ def main():
                                     (out / (row['tag'] + '-sample.json')).write_text(json.dumps(row, indent=2) + '\n')
                                     print(row['tag'], json.dumps(row), flush=True)
                         continue
-                    indexes = args.index or ([0, 1] if mode.startswith('R8') else [0])
+                    indexes = args.index or phase_indexes(mode)
                     for index in indexes:
                         # R4's DONE is the sum of c over 64..10064; R5's is its commit count.
                         n = {'R4': 50635000, 'R5': None}.get(mode, 1000000 if mode.startswith('R8') else 100000)
@@ -298,7 +310,8 @@ def main():
                         with hold(REGIMES, BOARD) if args.timing_hold else nullcontext():
                             row = measure([out / (profile + suffix), mode, str(index)], out, env, tag, n,
                                           host_directory=host, events=None if args.allocations else 'instructions:u',
-                                          before_phase=before_phase if mode == 'R6' else None)
+                                          before_phase=before_phase if mode == 'R6' else None,
+                                          unshielded=args.unshielded)
                         text = (out / tag / 'stdout').read_text()
                         extra = re.search(r'PACK_BYTES (\d+) NEW_PAGES (\d+) ACCOUNT (\d+)\n', text)
                         journal = re.search(r'COMMITS (\d+) VERSION (\d+)\n', text)

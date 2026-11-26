@@ -29,6 +29,7 @@ import board_size
 import build
 import comparison
 import comparison_units
+import board_counters
 import receipt
 from board_baseline import rows_by_label
 from checkbox_gate import CHECKBOX_CLIENTS, checkbox_changes, process_rss_bytes, session_rss_sample
@@ -79,7 +80,7 @@ NOTES = (
     "Throughput is reported as a trend. Each memory row reads the server's smaps_rollup RSS "
     "after startup before any session opens and again while 64 sessions are live, and reports "
     "the increase per live session. The board flags that RSS rising by more than 10%. "
-    "Goose has no compile or checkbox peer here.", board_host.NOTE,
+    "Goose has no compile or checkbox peer here.", board_host.NOTE, board_counters.NOTE,
 )
 
 
@@ -91,7 +92,8 @@ def load(name, path):
 
 
 place_density = load("place_density", ROOT / "bench/place-density/run.py")
-EXPECTED = {**awfy_measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values()), place_density.GOAL: (place_density.ROW,)}
+EXPECTED = {**awfy_measure.EXPECTED, "Startup": tuple(label for _, label in STARTUP.values()),
+            place_density.GOAL: (place_density.ROW,), **board_counters.EXPECTED}
 
 
 def git(directory, *args):
@@ -160,9 +162,11 @@ def instruction_keys():
 
 
 class Board:
-    def __init__(self, out, commit, *, persist=True):
+    def __init__(self, out, commit, *, persist=True, counters_only=False):
         self.out = out
         self.persist = persist
+        self.expected = board_counters.EXPECTED if counters_only else EXPECTED
+        self.counters_only = counters_only
         self.report = {"commit": commit, "pins": PINS, "notes": NOTES, "rows": [], "failures": {},
                        "instruction_receipt": receipt.make_receipt(instruction_keys())}
 
@@ -173,7 +177,7 @@ class Board:
         expected = [
             {"goal": goal, "row": name, "status": (
                 observed[goal, name]["status"] if (goal, name) in observed else "missing")}
-            for goal, names in EXPECTED.items() for name in names
+            for goal, names in self.expected.items() for name in names
         ]
         self.report["expected_rows"] = expected
         self.report["complete"] = (
@@ -184,6 +188,33 @@ class Board:
 
     def finish(self, baseline=None):
         self.save()
+        status = self.finish_counters(baseline)
+        if not self.counters_only:
+            nightly = self.finish_nightly(baseline)
+            if nightly != 0:
+                status = nightly
+        self.report["exit_status"] = status
+        self.save()
+        print(self.out / "board.md", flush=True)
+        return status
+
+    def finish_counters(self, baseline):
+        try:
+            previous = receipt.read(baseline) if baseline is not None else None
+            if previous is not None and previous["complete"] is not True:
+                raise ValueError("incomplete board baseline")
+            gates = board_counters.compare(self.report, previous)
+        except receipt.INVALID_RECEIPT as error:
+            # Keep absolute gate verdicts even if the relative comparison is refused.
+            self.report["counter_comparison"] = board_counters.compare(self.report)
+            self.report["counter_refusal"] = str(error)
+            return receipt.REFUSED
+        self.report["counter_comparison"] = gates
+        if not self.report["complete"]:
+            return 1
+        return 3 if any(gate["status"] == "fail" for gate in gates) else 0
+
+    def finish_nightly(self, baseline):
         blocked = inactive_counters(self.report)
         if not self.report["complete"] and not blocked:
             status = 1
@@ -205,9 +236,6 @@ class Board:
                 print(details[0], file=sys.stderr)
         if self.report.get("place_density", {}).get("regressed"):
             status = 3
-        self.report["exit_status"] = status
-        self.save()
-        print(self.out / "board.md", flush=True)
         return status
 
     def compare_previous(self, baseline, blocked):
@@ -287,24 +315,29 @@ class Board:
 
     def row(self, goal, name, samples, fields, *, notes=None):
         label = f"{goal}/{name}"
-        if name not in EXPECTED.get(goal, ()) or any(
+        if name not in self.expected.get(goal, ()) or any(
             (row["goal"], row["row"]) == (goal, name) for row in self.report["rows"]
         ):
             raise ValueError(f"unexpected or repeated row {label}")
-        sides = {place_density.GOAL: ("hirsel",), "Compile": ("hirsel", "rust"),
+        counter = goal in board_counters.EXPECTED
+        sides = ("hirsel",) if counter else {place_density.GOAL: ("hirsel",), "Compile": ("hirsel", "rust"),
                  "Checkbox": ("hirsel", "rust")}.get(goal, awfy_measure.SIDES)
         complete = True
         for side in sides:
             sample = samples.get(side, {})
             status = sample.get("status", "missing")
-            if status == "ok" and not all(
+            if status == "ok" and counter and not all(
+                field in sample and board_counters.metric_valid(field, sample[field]) for field in fields
+            ):
+                status = "missing-or-invalid-metric"
+            if status == "ok" and not counter and not all(
                 field in sample and math.isfinite(float(sample[field]))
                 and (float(sample[field]) > 0 or
                      (field == "idle_instructions_per_second" and sample[field] == 0))
                 for field in fields
             ):
                 status = "missing-or-invalid-metric"
-            if status == "ok" and not all(
+            if status == "ok" and not counter and not all(
                 receipt.counter_ready(sample, f"{counter}:u") for counter in COUNTERS if counter in fields
             ):
                 status = "inactive-counter"
@@ -316,7 +349,9 @@ class Board:
         self.report["rows"].append({"goal": goal, "row": name,
                                     "status": "ok" if complete else "failed",
                                     "commit": self.report["commit"], "samples": samples,
-                                    "metrics": fields, "ratios": ratios(samples, fields), "notes": notes})
+                                    "metrics": fields, "ratios": ratios(samples, tuple(
+                                        field for field in fields if not self.persist or field != "seconds")),
+                                    "notes": notes})
         self.save()
 
     def attempt(self, label, operation, *args):
@@ -688,53 +723,6 @@ def prepare_comparison_compile(out, recipe, args, artifacts, goose, packages, en
     return plan, package
 
 
-def hirsel_build_evidence(path, check, manifest, image, cwd):
-    report = json.loads(path.read_text())
-    ok = (report["accepted"] is True and report["stopped"] is None
-          and not any(report[key] for key in ("diagnostics", "incomplete", "resources")))
-    if check:
-        own_sources = manifest["packages"][-1]["sources"]
-        correct_files = (report["files"] == len(own_sources) and report["source_bytes"] ==
-                         sum(Path(source["file"]).stat().st_size for source in own_sources))
-        return {"rebuilt": ok and correct_files and report["rechecked"] > 0,
-                "front_only": report["native"] is None,
-                "rechecked_bodies": report["rechecked"], "source_files": report["files"],
-                "expected_source_files": len(own_sources), "source_bytes": report["source_bytes"],
-                "check_root": report["root"]}
-    native = report["native"] or {}
-    return {
-        "rebuilt": (ok and native.get("linked") is True and native.get("compiled", 0) > 0
-                    and (cwd / native["executable"]).resolve() == image.resolve() and image.is_file()),
-        "compiled_parts": native.get("compiled"),
-        "release_std_lowered": native.get("reach", {}).get("std_lowered"),
-    }
-
-
-def cargo_build_evidence(path, package, check, image):
-    messages = [json.loads(line) for line in path.read_text().splitlines()]
-    artifacts = [line for line in messages if line["reason"] == "compiler-artifact"]
-    own = [line for line in artifacts if line["target"]["name"] == package and "bin" in line["target"]["kind"]]
-    dependency_work = [line["target"]["name"] for line in artifacts if line not in own and not line["fresh"]]
-    rebuilt = len(own) == 1 and own[0]["fresh"] is False and any(
-        line["reason"] == "build-finished" and line["success"] is True for line in messages)
-    if check:
-        metadata = rebuilt and own[0]["executable"] is None and any(
-            filename.endswith(".rmeta") and Path(filename).is_file() for filename in own[0]["filenames"])
-        return {"rebuilt": bool(metadata), "front_only": bool(metadata), "dependency_work": dependency_work}
-    return {"rebuilt": rebuilt and own[0]["executable"] == str(image) and image.is_file(),
-            "dependency_work": dependency_work}
-
-
-def goose_build_evidence(target, check, image):
-    if not check:
-        return {"rebuilt": image.is_file() and os.access(image, os.X_OK)}
-    output = (target / "stdout").read_text() + "\n" + (target / "stderr").read_text()
-    files = re.search(r"^parsed ok: \d+ top-level declarations, (\d+) file\(s\)$", output, re.M)
-    verified = files is not None and int(files[1]) > 1 and re.search(r"^typechecked ok: ", output, re.M)
-    return {"rebuilt": bool(verified), "front_only": bool(verified),
-            "source_files": int(files[1]) if files else None}
-
-
 def compile_verification(out, recipe, side, image, mode, args, env):
     if recipe == "awfy-release":
         return {name: verify_output([image, *commands[side][0][1:]], out, env)
@@ -746,20 +734,6 @@ def compile_verification(out, recipe, side, image, mode, args, env):
         write_json(config, [dict(task, iterations=1, warmup_iterations=0, checksum=checksum)])
     result = verify_output([image, config.name, SPECTRALNORM], out, env)
     return {SPECTRALNORM: result | {"expected_checksum": checksum}}
-
-
-def native_objects(package_store):
-    # Count writes to the published library store only. Recipe assembly also
-    # emits library units into the request's native store.
-    objects = set()
-    for directory in package_store.resolve().rglob("native"):
-        for path in directory.iterdir():
-            if path.is_file() and re.fullmatch(r"[0-9a-f]{64}", path.name):
-                with path.open("rb") as binary:
-                    header = binary.read(18)
-                if header[:6] == b"\x7fELF\x02\x01" and header[16:18] == b"\x01\0":
-                    objects.add(path)
-    return objects
 
 
 def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
@@ -798,18 +772,18 @@ def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
                         image.with_suffix(".c").unlink(missing_ok=True)
                 target = out / f"{mode}-{side}"
                 dev_hirsel = side == "hirsel" and recipe == "arena-dev"
-                before = native_objects(out / "packages") if dev_hirsel else set()
+                before = build.native_objects(out / "packages") if dev_hirsel else set()
                 with smt_activity(siblings, f"{mode_id}/{side}") as busy:
                     sample = awfy_measure.core_measure.sample(command, target, env=env, cycles=True,
                                                               cwd=cwd, pmu_times=True)
                 sample.update(meta, smt_busy_percent=busy)
                 if dev_hirsel:
-                    sample["cranelift_library_objects_written"] = len(native_objects(out / "packages") - before)
+                    sample["cranelift_library_objects_written"] = len(build.native_objects(out / "packages") - before)
                 samples[side] = sample
                 if sample["status"] not in ("ok", "missing-counter"):
                     continue
                 if side == "hirsel":
-                    sample.update(hirsel_build_evidence(target / "stdout", check, manifest, image, cwd))
+                    sample.update(build.hirsel_build_evidence(target / "stdout", check, manifest, image, cwd))
                     if recipe.endswith("-release") and mode == "edit" and sample["release_std_lowered"] != 0:
                         sample["status"] = "release std was lowered again"
                     if check:
@@ -818,11 +792,11 @@ def measure_comparison_compile(evidence, out, recipe, prepared, args, modes):
                         elif sample["check_root"] == check_root:
                             sample["status"] = "check root did not change after the edit"
                 elif side == "rust":
-                    sample.update(cargo_build_evidence(target / "stdout", package, check, image))
+                    sample.update(build.cargo_build_evidence(target / "stdout", package, check, image))
                     if sample["dependency_work"]:
                         sample["status"] = "Cargo dependencies were not fully primed"
                 else:
-                    sample.update(goose_build_evidence(target, check, image))
+                    sample.update(build.goose_build_evidence(target, check, image))
                 if not check and sample["rebuilt"]:
                     sample["verification"] = compile_verification(out, recipe, side, image, mode, args, env)
                 if mode == "cold":
@@ -1076,6 +1050,12 @@ def run_board(board, args):
     artifact_file = out / "toolchain.json"
     artifacts, tools = prepare_toolchain(artifact_file, env, jobs=2)
     board.report.update(toolchain=artifacts, compiler_versions=compiler_versions(), host=board_host.facts(args.measure_cpus))
+    # The counter tier shares artifacts with the matched rows but runs without a timing hold.
+    os.sched_setaffinity(0, args.unshielded_affinity)
+    try:
+        board.attempt("Nightly counters", board_counters.collect, board, artifact_file, artifacts)
+    finally:
+        os.sched_setaffinity(0, args.build_cpus)
     goose = prepare_goose(out, args, env, jobs=2)
     awfy = out / "awfy"
     awfy_ready = board.attempt("AWFY build", lambda: prepare_awfy(
@@ -1312,6 +1292,7 @@ def validate_baseline(path, report):
     if report["size_measurement"]["verified_workloads"] != sorted(EXPECTED["AWFY original"]):
         raise ValueError(f"{path}: size requires all original-14 workloads")
     board_size.size_changes(report, report)
+    board_counters.compare(report, report)
     for mode, metric in CHECKBOX_METRICS.items():
         row = rows["Checkbox", f"{mode}, {CHECKBOX_CLIENTS} clients"]
         list(checkbox_changes(row, row, metric))
@@ -1323,6 +1304,10 @@ def rebaseline(run, base=None, expected_baseline=None, expected_inode=None):
         path = run / "board/board.json"
     path = path.resolve()
     report = receipt.read(path)
+    if report.get("counter_refusal") or any(
+        gate["status"] == "fail" for gate in report.get("counter_comparison", ())
+    ):
+        raise ValueError(f"{path}: rebaseline requires clean counter gates")
     exit_status = report["exit_status"]
     changed = set()
     if exit_status == receipt.REFUSED and report["complete"]:
@@ -1374,7 +1359,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out", type=Path)
     parser.add_argument("--baseline", type=lambda path: Path(path).resolve(),
-                        help="prior complete board.json for instruction, size and checkbox gates")
+                        help="prior complete board.json for nightly gates")
+    parser.add_argument("--counter-tier-only", action="store_true", help="run the unshielded counter rows")
     for name in PINS:
         parser.add_argument(f"--{name}", type=lambda path: Path(path).resolve(),
                             help=f"clean checkout at {PINS[name]}")
@@ -1385,16 +1371,20 @@ def main():
                         help="use a qualified same-revision fair.json")
     parser.add_argument("--weekly-units", action="store_true", help="require the weekly units inventory")
     parser.add_argument("--units-deadline-seconds", type=int, help="owner producer measurement budget")
-    add_cpu_sets(parser)
+    add_cpu_sets(parser, required=False)
     parser.add_argument("--lock", type=Path, default=LOCK)
     args = parser.parse_args()
-    validate_cpu_sets(parser, args, width=2, measure_affinity=measurement_affinity(REGIMES, args.lock))
+    if not args.counter_tier_only:
+        validate_cpu_sets(parser, args, width=2, measure_affinity=measurement_affinity(REGIMES, args.lock))
+        args.unshielded_affinity = os.sched_getaffinity(0) - set(args.measure_cpus)
     families = args.comparison_family or comparison.FAMILIES
-    peers = required_peers(set(families)) if args.comparison else set(PINS)
+    peers = required_peers(set(families)) if args.comparison else set() if args.counter_tier_only else set(PINS)
     for peer in PINS:
         if peer in peers and getattr(args, peer) is None:
             parser.error(f"--{peer} is required for these rows")
     if args.comparison:
+        if args.counter_tier_only:
+            parser.error("--counter-tier-only applies to the nightly board")
         if args.baseline:
             parser.error("--baseline applies to the nightly board")
         if len(set(families)) != len(families):
@@ -1413,13 +1403,23 @@ def main():
             args.units_deadline_seconds = 14400
     elif args.comparison_family or args.units_receipt or args.units_deadline_seconds is not None or args.weekly_units:
         parser.error("comparison options require --comparison")
-    os.sched_setaffinity(0, args.build_cpus)
+    if not args.counter_tier_only:
+        os.sched_setaffinity(0, args.build_cpus)
     out = args.out.resolve()
     if out.is_relative_to(ROOT):
         parser.error("use a new evidence directory outside the checkout")
     out.mkdir(parents=True)
     if args.comparison:
         return run_comparison(out, args)
+    if args.counter_tier_only:
+        board = Board(out, git(ROOT, "rev-parse", "HEAD"), counters_only=True)
+        artifact_file = out / "toolchain.json"
+        env = build.capped_env(out, "8G", str(board_counters.JOBS))
+        toolchain = board.attempt("Counter preparation", lambda: prepare_toolchain(
+            artifact_file, env, jobs=board_counters.JOBS))
+        if toolchain:
+            board.attempt("Nightly counters", board_counters.collect, board, artifact_file, toolchain[0])
+        return board.finish(args.baseline)
     board = Board(out, None)
     board.save()
     board.attempt("Board", run_board, board, args)

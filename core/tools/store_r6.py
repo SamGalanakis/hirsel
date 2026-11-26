@@ -8,8 +8,8 @@ FRAME_HEADER = 16
 PAGE = 0x0021
 TARGET = 4096
 COMMITS = 64
-# The Store's DISK_FORMAT (store.hirsel). Formats 6-9 left the MANIFEST payload R6 reads unchanged.
-DISK_FORMAT = 9
+# Format 10 records the limits in the MANIFEST's existing fixed-width fields.
+DISK_FORMAT = 10
 
 
 @dataclass

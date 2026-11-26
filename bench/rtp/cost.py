@@ -37,7 +37,6 @@ PACKETS = 1_000_000
 TARGET_NS = 80
 RUNS = 60
 ROOT_LIMIT = 64 << 20
-CPUSET = ("taskset", "-c", "8-11")
 FNV = 0x100000001b3
 MASK = (1 << 64) - 1
 
@@ -59,7 +58,7 @@ def phase_linker(cc, out, flavor):
     support = out / f"{flavor}-phase.o"
     define = ["-DCOUNT_ALLOCATIONS"] if flavor == "counted" else []
     subprocess.run([
-        *CPUSET, cc, "-c", "-O2", "-Wall", "-Wextra", "-Werror", *define,
+        cc, "-c", "-O2", "-Wall", "-Wextra", "-Werror", *define,
         "-I", ROOT / "crates/hirsel-core-rt/include",
         ROOT / "bench/srtp/phase.c", "-o", support,
     ], check=True)
@@ -73,7 +72,7 @@ def phase_linker(cc, out, flavor):
 def build(out):
     targets = [COMPILER_TARGET, "//:core-driver-runtime-pic", RUNTIME_TARGET, ALLOCATION_RUNTIME_TARGET]
     paths = json.loads(subprocess.check_output([
-        *CPUSET, ROOT / ".buck2/bin/buck2", "build", "-j4", "--target-platforms",
+        ROOT / ".buck2/bin/buck2", "build", "-j4", "--target-platforms",
         "//tools/buck2:release", "--show-json-output", *targets,
     ], cwd=ROOT))
     compiler = ROOT / paths["root" + COMPILER_TARGET]
@@ -103,7 +102,7 @@ def build(out):
         runtime = ROOT / paths["root" + target] / PLATFORM / "libhirsel_core_rt.a"
         linker = phase_linker(cc, out, flavor)
         subprocess.run([
-            *CPUSET, compiler, "build", "--release", "--backend", "llvm", "--source-core",
+            compiler, "build", "--release", "--backend", "llvm", "--source-core",
             "--source-std", "--inputs", manifest_path, "--entry", "rtp_cost@1/main/main",
             "--limit", str(ROOT_LIMIT), "--runtime", runtime, "--cc", linker, "--grant", "Stdout",
             "--store", out / "build-store", "-o", out / flavor,
@@ -113,7 +112,7 @@ def build(out):
 def sample(out, binary, events, checksum, *, shielded=False):
     """Run one process; answer the allocation count, or the counter values."""
     command = [] if shielded else ["systemd-run", "--user", "--scope", "--quiet", "-p", "MemoryMax=2G",
-                                   "-p", "MemorySwapMax=0", *CPUSET]
+                                   "-p", "MemorySwapMax=0"]
     command += ["timeout", "300"]
     perf = out / "perf.csv"
     control_read, control_write = os.pipe()
@@ -159,7 +158,7 @@ def sample(out, binary, events, checksum, *, shielded=False):
     for line in perf.read_text().splitlines():
         fields = line.split(",")
         if len(fields) >= 5 and fields[2] in events.split(","):
-            if float(fields[4]) < 99.5:
+            if float(fields[4]) != 100:
                 raise RuntimeError(f"multiplexed counter: {line}")
             # perf reports task-clock in msec; keep every value in its base unit.
             scale = 1e6 if fields[1] == "msec" else 1.0

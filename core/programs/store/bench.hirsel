@@ -6,7 +6,7 @@ pub type Account: send + codec {
 }
 
 fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
-    let done = result.unwrap(store.run(mut db, None, (copy_env(i), copy_env(t)), fn(mut tx, call_env) -> Result[u64, store.Error] {
+    let done = result.unwrap(store.run(mut db, None, (store.copy_env(i), store.copy_env(t)), fn(mut tx, call_env) -> Result[u64, store.Error] {
         let a = Account(id: call_env.0, balance: int.narrow(call_env.0), owner: string.from("owner000"))
         store.put(mut tx, call_env.1, call_env.0, a)?
         let back = option.unwrap(store.fetch(tx, call_env.1, call_env.0)?)
@@ -22,17 +22,18 @@ fn insert(mut db: store.Db, t: store.Table[u64, Account], i: u64) -> u64 waits {
 }
 
 type Reader: send {
+    handle: store.Reader,
     held: store.Snapshot,
     sh: store.Table[u64, Account]
 }
 
-fn read_source(take r: Reader) -> u64 {
+fn read_source(take r: Reader) -> u64 waits {
     let mut state: u64 = 1
     let mut sum: u64 = 0
     for _ in 0u64 .. 100000 {
         let k = store.splitmix64(state) % 100000
         state = int.wrapping_add(state, 0x9E3779B97F4A7C15u64)
-        let a = option.unwrap(result.unwrap(store.get(read_handle, r.held, r.sh, k)))
+        let a = option.unwrap(result.unwrap(store.get(r.handle, r.held, r.sh, k)))
         if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {
             fail("store R3 wrong row")
         }
@@ -69,15 +70,16 @@ pub fn main(dir: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout, a
             sum += insert(mut db, t, i)
         }
     } else if mode == "R2" {
-        let mut rows = result.unwrap(store.scan(result.unwrap(reader(db, 0u64)), held, sh, Unbounded, Unbounded))
-        while let Some((k, a)) = result.unwrap(store.next(result.unwrap(reader(db, 0u64)), mut rows)) {
+        let handle = result.unwrap(store.reader(db, 0u64))
+        let mut rows = result.unwrap(store.scan(handle, held, sh, Unbounded, Unbounded))
+        while let Some((k, a)) = result.unwrap(store.next(handle, mut rows)) {
             if a.id != k || a.balance != int.narrow(k) || a.owner != "owner000" {
                 fail("store R2 wrong row")
             }
             sum += a.id + string.byte_len(a.owner)
         }
     } else {
-        let payload = Reader(held: take held, sh: take sh)
+        let payload = Reader(handle: result.unwrap(store.reader(db, 0u64)), held: take held, sh: take sh)
         let h = task.spawn(tasks, bytes 16777216, take payload, read_source)
         sum = result.unwrap(task.join(take h))
     }

@@ -158,10 +158,9 @@ pub(super) fn conn_new(
     key: usize,
     client: *mut ClientH,
     item: &super::Cross,
-    cap: u64,
-    b: u64,
+    (cap, b, logical): (u64, u64, u64),
 ) {
-    tape::conn_new(u.tape(), key, client as usize, item, cap, b);
+    tape::conn_new(u.tape(), key, client as usize, item, (cap, b, logical));
 }
 
 /// `conn.client`: the new client's ordinal.
@@ -198,6 +197,8 @@ pub(super) struct SendNote {
     group: Option<crate::tape::schedule::Group>,
     op: u8,
     item: Option<Result<(u64, Vec<u8>), &'static str>>,
+    value: *const u8,
+    client: *mut ClientH,
 }
 
 #[cfg(feature = "record")]
@@ -233,18 +234,36 @@ impl SendNote {
         } else {
             hirsel_tape_format::op::CONN_TRY_SEND
         };
-        Self { group, op, item }
+        Self {
+            group,
+            op,
+            item,
+            value,
+            client,
+        }
     }
 
     /// A replaying sender's send, checked against its stream: the recorded
     /// outcome, or None inside once the replay has ended. None when the
-    /// sender does not replay.
-    pub(super) fn replayed(&mut self) -> Option<Option<u64>> {
+    /// sender does not replay. An accepted send's item leaves: the clients
+    /// it holds are dropped here, before its buffers are freed.
+    /// # Safety
+    /// `task` is the sender's task; the item is unmoved since `new`.
+    pub(super) unsafe fn replayed(&mut self, task: *mut tasks::Task) -> Option<Option<u64>> {
         if !self.group.is_some_and(|group| group.replaying()) {
             return None;
         }
         let item = self.item.take()?;
-        Some(crate::tape::units::replay::send(self.group, self.op, item))
+        let outcome = crate::tape::units::replay::send(self.group, self.op, item);
+        if outcome == Some(0) {
+            // SAFETY: by the contract; the sender's handle pins the client.
+            unsafe {
+                let client = &*self.client;
+                let rows = &client.client.0.rows;
+                super::replay::departed(&mut *tasks::lang_unit_for(task), self.value, rows);
+            }
+        }
+        Some(outcome)
     }
 
     /// An outcome at once as an `OP`, or a wait as an `ISSUE`.
@@ -273,7 +292,7 @@ impl SendNote {
     #[inline(always)]
     pub(super) fn note(&mut self, _: Option<u64>, _: Option<u32>) {}
     #[inline(always)]
-    pub(super) fn replayed(&mut self) -> Option<Option<u64>> {
+    pub(super) unsafe fn replayed(&mut self, _: *mut crate::tasks::Task) -> Option<Option<u64>> {
         None
     }
 }

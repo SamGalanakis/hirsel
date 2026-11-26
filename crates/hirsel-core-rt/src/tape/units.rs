@@ -43,16 +43,20 @@ pub(super) struct Takes {
 /// What every unit of the run knows of a connection made while recording: the
 /// stream that made it and its ordinal there, the item's layout, and its
 /// retained charge once cleaned. Keyed by the connection's address; a newer
-/// connection at the same address replaces the entry.
+/// connection at the same address replaces the entry. A replay's stand-in
+/// for a client that arrived from another unit has an entry of its own,
+/// naming the connection it stands for, which no take of that stream finds.
 struct Conn {
     stream: u32,
     ordinal: u64,
     cap: u64,
     room: u64,
+    logical: u64,
     bytes: u64,
     owners: Vec<[u64; 4]>,
     header: u64,
     retained: u64,
+    stand_in: bool,
 }
 
 static CONNS: Mutex<Option<HashMap<usize, Conn>>> = Mutex::new(None);
@@ -319,8 +323,7 @@ pub(crate) fn conn_new(
     conn: usize,
     client: usize,
     item: &Cross,
-    cap: u64,
-    room: u64,
+    (cap, room, logical): (u64, u64, u64),
 ) {
     noting(group, |live| {
         let ordinal = live.unit_object();
@@ -329,10 +332,12 @@ pub(crate) fn conn_new(
             ordinal,
             cap,
             room,
+            logical,
             bytes: item.bytes,
             owners: item.owners().to_vec(),
             header: 0,
             retained: 0,
+            stand_in: false,
         };
         conns(|c| c.insert(conn, entry));
         let client_ordinal = live.unit_object();
@@ -378,9 +383,11 @@ pub(crate) fn client_drop(group: Option<Group>, client: usize) {
 pub(crate) fn inbox_drop(group: Option<Group>, conn: usize) {
     noting(group, |live| {
         let own = stream(live);
-        if let Some(ordinal) =
-            conns(|c| c.get(&conn).filter(|e| e.stream == own).map(|e| e.ordinal))
-        {
+        if let Some(ordinal) = conns(|c| {
+            c.get(&conn)
+                .filter(|e| e.stream == own && !e.stand_in)
+                .map(|e| e.ordinal)
+        }) {
             close_frame(live, ordinal);
         }
     });
@@ -471,18 +478,58 @@ fn layout(conn: usize) -> Option<(u64, Vec<[u64; 4]>)> {
 
 /// A client's snapshot as a value part holds it after its tag: kind 0, the
 /// ordinal, the stream that made its connection and the connection's ordinal
-/// there, then `cap` and room `b`.
+/// there, then `cap`, room `b`, the item's logical size, its flat bytes and
+/// its owner rows, from which a replay builds the client's stand-in.
 pub(super) fn client_snapshot(word: u64, ordinal: u64) -> Result<Vec<u8>, &'static str> {
     let conn = crate::units_lang::takes::client_conn(word);
-    let (stream, of, cap, room) =
-        conns(|c| c.get(&conn).map(|e| (e.stream, e.ordinal, e.cap, e.room))).ok_or(UNNAMED)?;
-    let mut out = vec![0];
-    put_varint(&mut out, ordinal);
-    out.extend_from_slice(&stream.to_le_bytes());
-    put_varint(&mut out, of);
-    out.extend_from_slice(&cap.to_le_bytes());
-    out.extend_from_slice(&room.to_le_bytes());
-    Ok(out)
+    conns(|c| {
+        let e = c.get(&conn).ok_or(UNNAMED)?;
+        let mut out = vec![0];
+        put_varint(&mut out, ordinal);
+        out.extend_from_slice(&e.stream.to_le_bytes());
+        put_varint(&mut out, e.ordinal);
+        for word in [e.cap, e.room, e.logical, e.bytes] {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        put_varint(&mut out, e.owners.len() as u64);
+        for row in &e.owners {
+            for &word in row {
+                put_varint(&mut out, word);
+            }
+        }
+        Ok(out)
+    })
+}
+
+/// A replay's stand-in for a client that arrived from another unit: its own
+/// connection `conn`, with the layout of the connection it stands for, and
+/// its client `client`, numbered `ordinal` in the receiving unit.
+pub(super) fn stand_in(live: &mut Live, conn: usize, client: usize, ordinal: u64, of: StandIn) {
+    live.takes.clients.insert(client, ordinal);
+    let entry = Conn {
+        stream: of.stream,
+        ordinal: of.ordinal,
+        cap: of.cap,
+        room: of.room,
+        logical: of.logical,
+        bytes: of.bytes,
+        owners: of.owners,
+        header: 0,
+        retained: 0,
+        stand_in: true,
+    };
+    conns(|c| c.insert(conn, entry));
+}
+
+/// The connection a client snapshot names, with its item's layout.
+pub(super) struct StandIn {
+    pub(super) stream: u32,
+    pub(super) ordinal: u64,
+    pub(super) cap: u64,
+    pub(super) room: u64,
+    pub(super) logical: u64,
+    pub(super) bytes: u64,
+    pub(super) owners: Vec<[u64; 4]>,
 }
 
 const UNNAMED: &str = "a send on a client the recording did not name";
@@ -662,8 +709,13 @@ fn cell_at(group: Option<Group>) -> usize {
 pub(crate) unsafe fn take(group: Option<Group>, pump: bool, arrival: Arrival<'_>) {
     recording(group, |live| {
         let own = stream(live);
-        let ordinal =
-            |conn: usize| conns(|c| c.get(&conn).filter(|e| e.stream == own).map(|e| e.ordinal));
+        let ordinal = |conn: usize| {
+            conns(|c| {
+                c.get(&conn)
+                    .filter(|e| e.stream == own && !e.stand_in)
+                    .map(|e| e.ordinal)
+            })
+        };
         let mut body = Vec::new();
         match arrival {
             Arrival::Item {

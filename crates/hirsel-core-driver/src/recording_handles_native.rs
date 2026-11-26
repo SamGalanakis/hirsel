@@ -322,7 +322,8 @@ pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
 /// spawn. The result `(Random, Client[u64])` is 16 plain bytes, both words
 /// zeroed, then two parts in offset order: the `Random`'s tag 5 snapshot
 /// (kind 3, no stored bytes) and the client's tag 0 snapshot (stream 0,
-/// connection g+1, `cap` 2, room 0).
+/// connection g+1, `cap` 2, room 0, a `u64` item: logical size 8, flat bytes
+/// 8, no owner rows).
 /// - The helper's `END` holds it in canonical form, no ordinals.
 /// - The root's end take: helper g+3, kind 0, the result with the `Random`
 ///   numbered g+4 and the client g+5, no survivors.
@@ -342,7 +343,8 @@ fn rl9_result_crosses_with_its_handles() {
     // The result: 16 zeroed plain bytes, two parts in offset order: the
     // `Random` (handle 1, tag 5, its ordinal, kind 3, no stored bytes) and
     // the client (handle 1, tag 0, its ordinal, home stream 0, connection
-    // `conn`, `cap` 2, room 0). `ordinals` is empty in canonical form.
+    // `conn`, `cap` 2, room 0, logical size 8, flat bytes 8, no owner rows).
+    // `ordinals` is empty in canonical form.
     let result = |ordinals: &[u8], conn: u8| -> Vec<u8> {
         let at = |i: usize| ordinals.get(i).map(|o| vec![*o]).unwrap_or_default();
         [
@@ -356,6 +358,9 @@ fn rl9_result_crosses_with_its_handles() {
             vec![conn, 2],
             vec![0; 7],
             vec![0; 8],
+            vec![8, 0, 0, 0, 0, 0, 0, 0],
+            vec![8, 0, 0, 0, 0, 0, 0, 0],
+            vec![0],
         ]
         .concat()
     };

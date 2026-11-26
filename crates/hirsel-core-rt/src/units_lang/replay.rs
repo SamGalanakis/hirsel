@@ -26,13 +26,18 @@ pub(super) unsafe fn spawn_args(
 }
 
 /// Check the spawn of helper `k`, whose context stays unstarted until its
-/// end is taken.
-pub(super) fn spawn(
+/// end is taken. The clients its entry `x` hands over leave with it.
+/// # Safety
+/// As `departed`, for `x`.
+pub(super) unsafe fn spawn(
     u: &mut LangUnit,
     k: usize,
     hctx: Box<UnitCtx>,
     args: Result<Vec<u8>, &'static str>,
+    x: (*const u8, &[[u64; 4]]),
 ) {
+    // SAFETY: by the contract.
+    unsafe { departed(u, x.0, x.1) };
     tape::spawn(tasks::current_group(), k, args);
     u.unstarted.insert(k, hctx);
 }
@@ -226,5 +231,47 @@ pub(crate) unsafe fn start_helper(
             .name("hirsel-unit".into())
             .spawn(start)
             .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+    }
+}
+
+/// A replay's stand-in for a client that arrived from another unit: a
+/// connection of its own with the layout of the one it stands for, whose
+/// inbox no unit takes from, and its client's word. A replayed send on it
+/// delivers nothing; its drop's `CLOSE` is checked against the stream. None
+/// when the snapshot names no connection this build can make.
+pub(crate) fn stand_in(
+    cap: u64,
+    logical: u64,
+    b: u64,
+    bytes: u64,
+    owners: &[[u64; 4]],
+) -> Option<(usize, u64)> {
+    if cap == 0 || cap > MAX_CAP || b > MAX_ROOM {
+        return None;
+    }
+    let stride = usize::try_from(bytes).ok()?;
+    let owner = Box::leak(Box::new(UnitCtx::unfunded()));
+    let (inbox, client) = owner.conn_open(cap, logical, b, stride, owners);
+    let conn = Arc::as_ptr(&inbox.0) as usize;
+    std::mem::forget(inbox);
+    let client = Box::into_raw(Box::new(ClientH { client }));
+    Some((conn, client as u64))
+}
+
+/// The clients a replaying unit's value hands to another unit, whose spawn
+/// or send delivers nothing: each is dropped here, as the unit it went to
+/// would have dropped it, so the connection's notices reach its owner.
+/// # Safety
+/// `value` holds a value laid out by `rows` that owns its client words.
+pub(super) unsafe fn departed(u: &mut LangUnit, value: *const u8, rows: &[[u64; 4]]) {
+    // SAFETY: by the contract.
+    let rows = unsafe { live_rows(value, rows) };
+    for o in rows.iter().filter(|o| o[1] == CLIENT) {
+        // SAFETY: the value owns this client word.
+        let h = unsafe { word(value.add(o[0] as usize)) } as *mut ClientH;
+        if !h.is_null() {
+            // SAFETY: as above; the handle leaves with the value.
+            u.drop_client(unsafe { Box::from_raw(h) }.client);
+        }
     }
 }

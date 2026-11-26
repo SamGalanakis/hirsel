@@ -8,7 +8,7 @@ use format::{Arrival, HelperOutcome};
 use hirsel_core_layout::cross::{CASE, ELEMENT, PADDING, SEQ, elements, live, sequences};
 
 mod arrive;
-pub(in crate::tape) use arrive::word as arrived;
+pub(in crate::tape) use arrive::{set_across, word as arrived};
 
 impl Live {
     pub(super) fn replaying(&self) -> bool {
@@ -279,7 +279,7 @@ pub(crate) fn due(
         let own = super::stream(live);
         let mut objects: Vec<u64> = super::conns(|c| {
             c.values()
-                .filter(|e| e.stream == own)
+                .filter(|e| e.stream == own && !e.stand_in)
                 .map(|e| e.ordinal)
                 .collect()
         });
@@ -453,7 +453,7 @@ fn own_conn(
     let own = super::stream(live);
     let conn = super::conns(|c| {
         c.iter()
-            .find(|(_, e)| e.stream == own && e.ordinal == ordinal)
+            .find(|(_, e)| e.stream == own && e.ordinal == ordinal && !e.stand_in)
             .map(|(&k, _)| k)
     });
     match conn {

@@ -9,12 +9,12 @@ const ID: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 fn root_header() -> Vec<u8> {
     // The published example, including the published check.
     [
-        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x10\0\x01".as_slice(),
+        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x11\0\x01".as_slice(),
         &ID,
         &[0; 37],
         b"\0\0\x01\0\0\0\0\0",
         &[0; 11],
-        b"\xce\x20\x70\x18\x15\x56\x07\xe4",
+        b"\x9a\x37\x65\xe5\xa4\x96\xdf\x59",
     ]
     .concat()
 }
@@ -543,6 +543,10 @@ fn entry_and_end() {
     canonical.extend([1, 1, 0, 5, 0, 0, 0, 2]);
     canonical.extend(8u64.to_le_bytes());
     canonical.extend(9u64.to_le_bytes());
+    // Its item: logical size 8, flat bytes 8, no owner rows.
+    canonical.extend(8u64.to_le_bytes());
+    canonical.extend(8u64.to_le_bytes());
+    canonical.push(0);
     let mut first_end = vec![10, 0, 0, 0];
     first_end.extend(varint(canonical.len()));
     first_end.extend(varint(65536));
@@ -593,7 +597,7 @@ fn entry_and_end() {
 }
 
 #[test]
-fn format_16_bytes_rl6() {
+fn format_17_bytes_rl6() {
     let root = root_header();
     let source = [root.clone(), EXAMPLE_END.to_vec()].concat();
     let (mut index, header) = Index::open(read(&source)).unwrap();

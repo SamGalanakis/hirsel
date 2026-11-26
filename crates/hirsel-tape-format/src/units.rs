@@ -255,7 +255,13 @@ fn snapshot(c: &mut Cursor<'_>, kind: u8) -> Result<bool, Corrupt> {
     match kind {
         0 => {
             origin(c)?;
-            c.take(16)?;
+            // `cap`, room `b`, the item's logical size and flat bytes.
+            c.take(32)?;
+            for _ in 0..c.varint()? {
+                for _ in 0..4 {
+                    c.varint()?;
+                }
+            }
         }
         1 => {
             origin(c)?;

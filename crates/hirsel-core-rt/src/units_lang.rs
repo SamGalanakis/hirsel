@@ -386,7 +386,7 @@ pub unsafe extern "C" fn hirsel_core_conn_new(
         u.inboxes.insert(key, ih);
         let client = Box::into_raw(Box::new(ClientH { client }));
         #[cfg(feature = "record")]
-        takes::conn_new(u, key, client, &*item, cap, b);
+        takes::conn_new(u, key, client, &*item, (cap, b, logical));
         ConnNew {
             client,
             inbox: ih,
@@ -535,7 +535,7 @@ unsafe fn conn_send<const REC: bool>(
             let mut send = takes::SendNote::new(context, handle, value, wait, sockets.as_ref());
             // A replayed send delivers nothing: its outcome is the recorded one.
             if charge <= client.0.room()
-                && let Some(outcome) = send.replayed()
+                && let Some(outcome) = send.replayed(task)
             {
                 if outcome == Some(0) {
                     free_owners(Some(&*context), value, owners);
@@ -990,7 +990,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         #[cfg(feature = "record")]
         if let Some(args) = replayed {
             u.waits += 1;
-            replay::spawn(u, k, hctx, args);
+            replay::spawn(u, k, hctx, args, (input, x.owners()));
             return SpawnUnit {
                 task,
                 requested: 0,

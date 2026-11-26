@@ -593,7 +593,7 @@ what the receiving unit can observe of it without a host operation:
 
 | handle | snapshot |
 |---|---|
-| `Client[T]` | the connection's identity as the inbox unit names it (that unit's stream number and its connection ordinal), and its `cap` and room `b`, so a replay recomputes a send's `Bounds` failure |
+| `Client[T]` | the connection's identity as the inbox unit names it (that unit's stream number and its connection ordinal), its `cap` and room `b`, so a replay recomputes a send's `Bounds` failure, and its item's logical size, flat bytes and owner rows, so a replay rebuilds a connection of its layout |
 | `Shared[T]` | the payload in full, and its home unit's stream number and node ordinal |
 | `Socket`, `Listener`, `UdpSocket` | its direction, the bound or peer address, the negotiated protocol, peer digest and binding where they exist, and the readiness and protocol state already observed |
 | a capability | its kind and its rule list in the grant snapshot encoding above (a narrowed `Net` holds its narrowed rules) |
@@ -707,7 +707,7 @@ waiting while that `TAKE` is the unit's next frame, since the unit's waits for i
 are then not outside waits. What this build does not replay yet stops the replay with
 `replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: a helper
 end that hands its owner survivors; an entry, result or item holding a `Schedule`, a
-`Sealer`, an `Opener`, a `HeaderMask`, a client, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit (its
+`Sealer`, an `Opener`, a `HeaderMask`, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit (its
 designation does not say whether the program held its parent's bytes) or a list whose
 elements hold handles or functions; a result or item holding a capability; a helper entry
 holding a capability of virtual construction or a `Net`, `Env`, `Exec` or `Cred`
@@ -717,7 +717,7 @@ policy with no bytes behind it, as one holder with no charge: its charges stay w
 unit that paid them, and only that unit's refund takes return them. An arriving `KeyShare`
 replays as its snapshot, numbered where it arrives, with no key and no charge: its
 agreement takes the recorded verdict, and it takes no number among the run's shares, since
-the stream that made it counted it there. A failed or cancelled helper end delivers its recorded causes to
+the stream that made it counted it there. An arriving client replays as a stand-in: a connection of its own with the `cap`, room and item layout its snapshot carries, whose inbox no unit takes from. A send through it is checked against the stream and delivers nothing, and its drop's `CLOSE` is checked as any drop's is. A client that a replayed spawn or send hands to another unit is dropped where it leaves, so its connection's close reaches its owner, whose own `TAKE` of the close takes it. A `--diagnose` replay by a build of another revision refuses an arriving client, since the recorded layout need not be that build's. A failed or cancelled helper end delivers its recorded causes to
 the join, and `UNIT_CANCEL` is checked against the owner's stream. A unit's own connections
 replay: `CONN_SEND` and `CONN_TRY_SEND` are checked with the item at issue and deliver
 nothing, the item reaches the inbox at its `TAKE`, and the drops of clients and inboxes are
@@ -791,7 +791,7 @@ or a byte string with bytes left after its last field is `Corrupt`.
 The head is 20 bytes. The check covers the stream number, so a
 block moved between streams fails its check. Each stream's block 0 is its **header block**,
 with flags 0; its later blocks hold frames. The
-root's header block payload holds the current format tag (`0x0010`) and the tape id every check
+root's header block payload holds the current format tag (`0x0011`) and the tape id every check
 uses.
 
 **Helper stream header.** A helper stream's header block payload is:
@@ -861,7 +861,7 @@ receiving stream as a `varint`, then:
 
 | tag | body |
 |---|---|
-| 0 `Client` | inbox stream `u32`; connection ordinal `varint`; `cap` `u64`; room `b` `u64` |
+| 0 `Client` | inbox stream `u32`; connection ordinal `varint`; `cap` `u64`; room `b` `u64`; item logical size `u64`; item flat bytes `u64`; owner row count `varint`, then per row its offset, kind, length and stride as 4 `varint`s |
 | 1 `Shared` | home stream `u32`; node ordinal `varint`; the payload as a value |
 | 2 `Socket` | direction `u8` (0 made by `CONNECT`, 1 by `ACCEPT`); peer address, 19 bytes as a `LISTEN` delivery writes one; TLS `u8` 0, or 1 followed by the `TLS_CONNECT` success payload as `bytes`; state `u8`, bit 0 end of stream received and bit 1 reset received, as the sending unit's stream showed them (sockets that cross, above), other bits `Corrupt`; peer address for `CONNECT` the address it named |
 | 3 `Listener` | direction `u8`, always 0, any other value is `Corrupt`; bound address, 19 bytes |
@@ -898,8 +898,9 @@ from a delivery position and the two members of a sealer pair. An agreement's sh
 operand uses origin kind 2 and the receiving ordinal `u64`. This applies even if the
 object was constructed virtually. A refused send keeps its sending unit's name. A key object made outside a recorded unit has no origin to write and cuts the recording that encounters it.
 
-The format tag is `0x0010` because a `Fail` cause carries its message's capacity, which
-the join charges (format `0x000f` gave the media origin a charge ordinal and the SFrame
+The format tag is `0x0011` because a `Client` snapshot carries its connection's item layout,
+which an arriving client's replay rebuilds (format `0x0010` gave a `Fail` cause its message's
+capacity, which the join charges; format `0x000f` gave the media origin a charge ordinal and the SFrame
 schedule snapshot its sending block).
 
 A capability (tag 5) that arrives gets its new ordinal in the receiving unit, and its later
@@ -1075,7 +1076,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00 00 00 00                stream 0
 00 00 00 00 00 00 00 00    seq 0
 4b 00 00 00                len 75
-10 00                      format version
+11 00                      format version
 01                         kind Run
 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f   tape id
 00                         identity: empty bytes
@@ -1086,7 +1087,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00                         chooser FIFO
 00                         arg: empty bytes
 00                         grants: empty bytes
-ce 20 70 18 15 56 07 e4    check
+9a 37 65 e5 a4 96 df 59    check
 ```
 
 Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:

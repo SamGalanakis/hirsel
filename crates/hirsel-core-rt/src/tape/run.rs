@@ -414,6 +414,7 @@ unsafe extern "C" fn invoke(
         let mut helpers = None;
         let opened = if let Some(mut replay) = run.replay.take() {
             launch_revision = replay.stored.revision;
+            super::units::replay::set_across(replay.stored.revision != run.revision);
             let streams = match replay.helper_streams() {
                 Ok(streams) => streams,
                 Err(e) => return refused(run, e),

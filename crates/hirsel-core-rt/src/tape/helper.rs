@@ -460,7 +460,7 @@ pub(crate) unsafe fn replay_args(
     input: *const u8,
     spawned: &SpawnEntry,
 ) -> Result<Vec<u8>, &'static str> {
-    const ENTRY_HANDLE: &str = "a helper entry holding a client, a Shared holder or a socket";
+    const ENTRY_HANDLE: &str = "a helper entry holding a Shared holder or a socket";
     let x = &spawned.x;
     let held = Cross {
         owners: x.owners()[1.min(x.owners().len())..].as_ptr(),
@@ -487,6 +487,7 @@ pub(crate) unsafe fn replay_args(
             spawned,
             &mut |kind, word| match kind {
                 CAPABILITY | SECRET => units::item_grants::sent(&granted, kind, word),
+                CLIENT => units::client_snapshot(word, 0),
                 // SAFETY: the spawner pins and owns its entry.
                 MEDIA => unsafe { crate::media::snapshot(word, None) },
                 _ => Err(ENTRY_HANDLE),

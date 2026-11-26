@@ -1,13 +1,10 @@
 //! The empty dedicated-page cache: emptied mappings kept resident for reuse,
 //! indexed so a request finds its page without scanning the whole cache.
 
-use super::{
-    Class, DEDICATED_REUSE_MARGIN, DEDICATED_REUSE_WASTE, EMPTY_DEDICATED_LIMIT, Page, PagePointer,
-    page_bytes,
-};
+use super::{Class, DEDICATED_REUSE_MARGIN, DEDICATED_REUSE_WASTE, Page, PagePointer, page_bytes};
 use crate::abi_layout::own_prefix;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What a retained dedicated page can serve besides its size: the headroom
 /// before its payload and its payload's alignment, capped at a native page.
@@ -19,7 +16,6 @@ struct Shape {
 
 #[derive(Default)]
 pub(super) struct DedicatedCache {
-    pub(super) clean: VecDeque<PagePointer>,
     /// Empty pages with resident backing, keyed by retain order (oldest
     /// first). A retained page's backing is not touched until it is removed,
     /// so the two indexes below stay exact.
@@ -129,12 +125,7 @@ impl DedicatedCache {
             }
             best = smallest.map(|(_, Reverse(seq))| seq);
         }
-        let page = if let Some(seq) = best {
-            self.remove_retained(seq)
-        } else {
-            let index = self.clean.iter().copied().position(|page| fit(page))?;
-            self.clean.swap_remove_back(index).unwrap()
-        };
+        let page = self.remove_retained(best?);
         // SAFETY: the page has been taken off the cache and has no live slots.
         unsafe {
             let header = page.as_ref();
@@ -231,18 +222,8 @@ impl DedicatedCache {
     }
 
     pub(super) fn purge(&mut self, page: PagePointer) {
-        // SAFETY: the heap owns this empty page and its separate descriptor.
-        let header = unsafe { page.as_ref() };
-        let payload = unsafe { (*header.slots.get()).first };
-        if !header.backing.dedicated().discard_used(payload) {
-            // SAFETY: the page is empty and detached from both queues.
-            unsafe { Page::destroy(page) };
-            return;
-        }
-        if self.clean.len() == EMPTY_DEDICATED_LIMIT {
-            // SAFETY: this removes the cache's only reference to the empty page.
-            unsafe { Page::destroy(self.clean.pop_front().unwrap()) };
-        }
-        self.clean.push_back(page);
+        // SAFETY: the page is empty and detached from the retained index.
+        // Destroying it discards its pages and returns its granules to the arena.
+        unsafe { Page::destroy(page) };
     }
 }

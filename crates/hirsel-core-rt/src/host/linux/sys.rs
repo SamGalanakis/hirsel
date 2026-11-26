@@ -403,6 +403,24 @@ pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
     }
 }
 
+/// Make the whole anonymous pages of `[start, start + bytes)` inaccessible
+/// (`PROT_NONE`) so they no longer count against `RLIMIT_DATA` (`VmData`).
+/// Callers discard resident pages first so RSS drops too. False if the host
+/// refused the protection change, leaving the range safely mapped as before.
+/// # Safety
+/// The caller owns the range, which holds no live data.
+#[inline]
+pub(crate) unsafe fn decommit(start: usize, bytes: usize) -> bool {
+    // SAFETY: per the contract.
+    unsafe {
+        libc::mprotect(
+            std::ptr::without_provenance_mut(start),
+            bytes,
+            libc::PROT_NONE,
+        ) == 0
+    }
+}
+
 /// The path that opens the store directory a launcher passed on descriptor 5.
 pub(crate) const INHERITED_STORE: &[u8] = b"/proc/self/fd/5";
 

@@ -817,7 +817,7 @@ fn cross_task_slots_return_to_the_allocating_heap_and_survive_its_exit() {
     assert_eq!(MAP_REQUESTS.with(std::cell::Cell::get), requests);
     let survivor = Block::new(&context, Some(32), 131_072, 8192).unwrap();
     assert_eq!(survivor.pointer().addr().get() % 8192, 0);
-    requests += 1;
+    // Dedicated extents share the shard's geometric ranges instead of mapping per block.
     assert_eq!(MAP_REQUESTS.with(std::cell::Cell::get), requests);
     // SAFETY: the still-live large allocation has this aligned writable word.
     unsafe { survivor.pointer().cast::<u64>().write(17) };

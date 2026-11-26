@@ -2,7 +2,7 @@
 //! the memory thread for fresh ones on a miss. The thread owns the syscalls.
 use crate::{
     fiber::Stack,
-    task_heap::{Mapping, slabs::Slab},
+    task_heap::slabs::{Extent, Slab},
 };
 use hirsel_core_ids::launch::Metadata;
 use std::{
@@ -134,7 +134,7 @@ enum Reclaim {
     UnitStack(UnitStack),
     TaskStack(Stack),
     Slab(Slab),
-    Page(Mapping),
+    Page(Extent),
 }
 
 impl Reclaim {
@@ -161,7 +161,7 @@ pub(crate) struct Memory {
     unit_stacks: Cache<UnitStack>,
     task_stacks: Cache<Stack>,
     slabs: Cache<Slab>,
-    pages: Cache<Mapping>,
+    pages: Cache<Extent>,
     work: Mutex<Work>,
     ready: Condvar,
 }
@@ -174,14 +174,9 @@ pub(crate) trait SharedMemory: Sync {
     fn take_slab(&self) -> Option<Slab>;
     fn put_slab(&self, slab: Slab);
     fn dispose_slab(&self, slab: Slab);
-    fn aligned_page(
-        &self,
-        bytes: usize,
-        space: usize,
-        align: usize,
-        headroom: usize,
-    ) -> Option<Mapping>;
-    fn put_page(&self, page: Mapping);
+    fn take_page(&self, granules: usize, align: usize, prefix: usize) -> Option<Extent>;
+    fn put_page(&self, page: Extent);
+    fn map_range(&self, len: usize, align: usize, prefix: usize) -> Option<NonNull<u8>>;
 }
 
 impl Memory {
@@ -309,10 +304,6 @@ impl Memory {
         }
     }
 
-    pub(crate) fn take_page(&self, fits: impl FnMut(&Mapping) -> bool) -> Option<Mapping> {
-        self.pages.take(fits)
-    }
-
     pub(super) fn report(&self) {
         let cache = [
             self.unit_stacks.report("unit_stack"),
@@ -380,21 +371,27 @@ impl SharedMemory for Memory {
         self.release(crate::task_heap::SLAB, Reclaim::Slab(slab));
     }
 
-    fn aligned_page(
-        &self,
-        bytes: usize,
-        space: usize,
-        align: usize,
-        headroom: usize,
-    ) -> Option<Mapping> {
-        Mapping::pooled_page(self, bytes, space, align, headroom)
+    fn take_page(&self, granules: usize, align: usize, prefix: usize) -> Option<Extent> {
+        self.pages.take(|extent| {
+            extent.granules() == granules
+                && extent.prefix() == prefix
+                && extent.payload_aligned(align)
+        })
     }
 
-    fn put_page(&self, page: Mapping) {
+    fn put_page(&self, page: Extent) {
         let bytes = page.committed_bytes();
         if let Some(page) = self.pages.put(page, bytes) {
             self.release(bytes, Reclaim::Page(page));
         }
+    }
+
+    fn map_range(&self, len: usize, align: usize, prefix: usize) -> Option<NonNull<u8>> {
+        struct Mapped(Option<NonNull<u8>>);
+        // SAFETY: the newly mapped base address has no references yet.
+        unsafe impl Send for Mapped {}
+        self.map(move || Mapped(crate::task_heap::slabs::map_raw_range(len, align, prefix)))
+            .0
     }
 }
 

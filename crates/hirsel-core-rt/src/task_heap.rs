@@ -32,10 +32,6 @@ const _: () = assert!(
         && own_prefix(crate::block::RESOURCE) + PAYER_BYTES <= i8::MAX as usize
         && own_prefix(crate::block::SPLIT_BYTES) + PAYER_BYTES <= i8::MAX as usize
 );
-const GROWTH_RESERVE_FACTOR: usize = 8;
-const MIN_GROWTH_RESERVATION: usize = 256 * 1024;
-// Bound clean reservations and their external descriptors.
-const EMPTY_DEDICATED_LIMIT: usize = 8;
 // A reused reservation may coexist with other warm extents from its growth sequence.
 const DEDICATED_REUSE_MARGIN: usize = 4 << 20;
 // A block of another stride reuses a resident extent of at most this many
@@ -145,7 +141,7 @@ impl Class {
             return class;
         }
         let small = Self::rounded(bytes, align, kind, growable, true);
-        if small.stride <= SLAB / 2 && (!growable || small.stride <= page_bytes()) {
+        if small.stride <= SLAB / 2 {
             small
         } else {
             Self::dedicated(bytes, align, kind, growable)
@@ -284,13 +280,13 @@ struct Spread {
 
 enum Backing {
     Slab(slabs::Slab),
-    Dedicated(Mapping),
+    Dedicated(slabs::Extent),
 }
 
 impl Backing {
-    fn dedicated(&self) -> &Mapping {
+    fn dedicated(&self) -> &slabs::Extent {
         match self {
-            Self::Dedicated(mapping) => mapping,
+            Self::Dedicated(extent) => extent,
             Self::Slab(_) => unreachable!("expected dedicated backing"),
         }
     }
@@ -384,18 +380,14 @@ impl Page {
             let (allocation, start) = slabs::Slab::allocate(Arc::as_ptr(heap).addr());
             (Backing::Slab(allocation), start)
         } else {
-            let headroom = if own_prefix(class.kind) == 0 {
-                0
-            } else {
-                page_bytes()
-            };
-            let (mapping, start) = Mapping::aligned(
+            let headroom = if own_prefix(class.kind) == 0 { 0 } else { SLAB };
+            let (extent, start) = slabs::Extent::allocate(
+                Arc::as_ptr(heap).addr(),
                 class.stride,
                 class.align.max(SLAB),
                 headroom,
-                class.growable,
             );
-            (Backing::Dedicated(mapping), start)
+            (Backing::Dedicated(extent), start)
         };
         let data = Self {
             heap: Arc::clone(heap),
@@ -1161,13 +1153,7 @@ impl Heap {
                     RETAINING_HEAPS.fetch_sub(1, Ordering::Relaxed);
                 }
             }
-            for page in cache
-                .dedicated
-                .clean
-                .into_iter()
-                .chain(cache.dedicated.retained.into_values())
-                .chain(cache.slabs)
-            {
+            for page in cache.dedicated.retained.into_values().chain(cache.slabs) {
                 // SAFETY: detached from the cache, with no outstanding slots.
                 unsafe { Page::destroy(page) };
             }
@@ -1254,7 +1240,7 @@ pub(crate) unsafe fn try_grow_in_place(
         }
         let class = Class::dedicated(bytes, align, kind, true);
         let backing = header.backing.dedicated();
-        let reused_reservation = class.stride <= backing.writable.get();
+        let reused_reservation = class.stride <= backing.extent(payload);
         if !backing.extend(payload, class.stride) {
             return false;
         }
@@ -1623,222 +1609,6 @@ unsafe fn release_slow(mut state: Local<'_>, page: PagePointer, payload: NonNull
             cache.list_retaining(&page.as_ref().heap);
             heap.pending.set(true);
         }
-    }
-}
-
-pub(crate) struct Mapping {
-    base: NonNull<u8>,
-    len: usize,
-    prefix: usize,
-    // Dedicated payload bytes made writable. A live slot's sole owner or the
-    // empty cache under its mutex can update this extent.
-    writable: Cell<usize>,
-    // The payload extent that may have been touched since the last purge.
-    // Writable pages beyond it are still clean.
-    used: Cell<usize>,
-    // The starting stride of the last live allocation, before in-place growth.
-    born: Cell<usize>,
-    // A live block grew in place since the last purge, so `used` holds its
-    // growth sequence's extent for a later block of stride `born`.
-    grown: Cell<bool>,
-}
-// SAFETY: an idle mapping is uniquely owned. Moving it preserves the address;
-// only the owner can unmap it or change its writable extent.
-unsafe impl Send for Mapping {}
-
-impl Mapping {
-    const WRITABLE: libc::c_int = libc::PROT_READ | libc::PROT_WRITE;
-
-    fn aligned(bytes: usize, align: usize, headroom: usize, reserve: bool) -> (Self, NonNull<u8>) {
-        let bytes = bytes
-            .checked_next_multiple_of(page_bytes())
-            .unwrap_or_else(host_memory);
-        if reserve
-            && let Some(space) = bytes.checked_mul(GROWTH_RESERVE_FACTOR)
-            && let Some(mapping) =
-                Self::try_aligned(bytes, space.max(MIN_GROWTH_RESERVATION), align, headroom)
-        {
-            return mapping;
-        }
-        Self::try_aligned(bytes, bytes, align, headroom).unwrap_or_else(host_memory)
-    }
-
-    fn try_aligned(
-        bytes: usize,
-        space: usize,
-        align: usize,
-        headroom: usize,
-    ) -> Option<(Self, NonNull<u8>)> {
-        let mapping = if let Some(memory) = crate::units::memory() {
-            memory.aligned_page(bytes, space, align, headroom)?
-        } else {
-            Self::map_aligned(bytes, space, align, headroom)?
-        };
-        // SAFETY: the complete mapping contains this requested prefix.
-        let payload = unsafe { mapping.base.add(headroom) };
-        mapping.born.set(0);
-        mapping.grown.set(false);
-        Some((mapping, payload))
-    }
-
-    pub(crate) fn pooled_page(
-        memory: &crate::units::Memory,
-        bytes: usize,
-        space: usize,
-        align: usize,
-        headroom: usize,
-    ) -> Option<Self> {
-        let len = space.checked_add(headroom)?;
-        memory
-            .take_page(|mapping| {
-                mapping.len == len
-                    && mapping.prefix == headroom
-                    && mapping.writable.get() >= bytes
-                    && (mapping.base.addr().get() + headroom) & (align - 1) == 0
-            })
-            .or_else(|| memory.map(move || Self::map_aligned(bytes, space, align, headroom)))
-    }
-
-    fn map_aligned(bytes: usize, space: usize, align: usize, headroom: usize) -> Option<Self> {
-        let len = space.checked_add(headroom)?;
-        let extra = if align > page_bytes() { align } else { 0 };
-        let total = len.checked_add(extra)?;
-        if total > isize::MAX as usize {
-            return None;
-        }
-        #[cfg(test)]
-        MAP_REQUESTS.with(|count| count.set(count.get() + 1));
-        let protection = if space == bytes {
-            Self::WRITABLE
-        } else {
-            libc::PROT_NONE
-        };
-        // SAFETY: reserve an anonymous private mapping without replacing any address.
-        let raw = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                total,
-                protection,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if raw == libc::MAP_FAILED {
-            return None;
-        }
-        // SAFETY: a successful NULL-hint mapping is non-null. Trim to align the
-        // payload, then make the initial extent and ownership prefix writable.
-        unsafe {
-            let raw = NonNull::new_unchecked(raw.cast::<u8>());
-            let payload = raw.add(headroom).map_addr(|address| {
-                std::num::NonZeroUsize::new(address.get().next_multiple_of(align)).unwrap()
-            });
-            let base = payload.sub(headroom);
-            let left = base.as_ptr().addr() - raw.as_ptr().addr();
-            let right = total - left - len;
-            if left != 0 {
-                libc::munmap(raw.as_ptr().cast(), left);
-            }
-            if right != 0 {
-                libc::munmap(base.add(len).as_ptr().cast(), right);
-            }
-            let mapping = Self {
-                base,
-                len,
-                prefix: headroom,
-                writable: Cell::new(bytes),
-                used: Cell::new(0),
-                born: Cell::new(0),
-                grown: Cell::new(false),
-            };
-            if space != bytes
-                && libc::mprotect(base.as_ptr().cast(), headroom + bytes, Self::WRITABLE) != 0
-            {
-                return None;
-            }
-            Some(mapping)
-        }
-    }
-
-    pub(crate) fn committed_bytes(&self) -> usize {
-        self.prefix + self.writable.get()
-    }
-
-    fn headroom(&self, payload: NonNull<u8>) -> usize {
-        payload.addr().get() - self.base.addr().get()
-    }
-
-    fn extent(&self, payload: NonNull<u8>) -> usize {
-        self.len - self.headroom(payload)
-    }
-
-    #[inline(never)]
-    fn extend(&self, payload: NonNull<u8>, bytes: usize) -> bool {
-        let Some(end) = bytes.checked_next_multiple_of(page_bytes()) else {
-            return false;
-        };
-        let start = self.writable.get();
-        if end <= start {
-            return true;
-        }
-        if end > self.extent(payload) {
-            return false;
-        }
-        // SAFETY: these whole pages are in this reserved mapping, beyond its
-        // writable extent. Only the live slot owner or empty cache can extend.
-        if unsafe {
-            libc::mprotect(
-                payload.add(start).as_ptr().cast(),
-                end - start,
-                Self::WRITABLE,
-            )
-        } != 0
-        {
-            return false;
-        }
-        self.writable.set(end);
-        true
-    }
-
-    fn backed(&self, payload: NonNull<u8>) -> usize {
-        let used = self.used.get();
-        if used == 0 {
-            0
-        } else {
-            self.headroom(payload) + used
-        }
-    }
-
-    #[inline(never)]
-    fn use_extent(&self, payload: NonNull<u8>, bytes: usize) -> usize {
-        self.used
-            .set(self.used.get().max(bytes.next_multiple_of(page_bytes())));
-        self.backed(payload)
-    }
-
-    fn discard_used(&self, payload: NonNull<u8>) -> bool {
-        // SAFETY: the empty dedicated mapping owns this whole writable range.
-        if unsafe { Mapping::discard(self.base, self.backed(payload)) } {
-            self.used.set(0);
-            self.grown.set(false);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// # Safety
-    /// The caller exclusively owns these whole anonymous pages, with no live data.
-    unsafe fn discard(base: NonNull<u8>, bytes: usize) -> bool {
-        // SAFETY: the caller owns the anonymous range, with no live data.
-        unsafe { crate::host::sys::discard(base.as_ptr().addr(), bytes) }
-    }
-}
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        // SAFETY: this object owns the remaining complete mapping.
-        unsafe { libc::munmap(self.base.as_ptr().cast(), self.len) };
     }
 }
 
@@ -2236,11 +2006,11 @@ mod tests {
 
     fn resident_pages(base: NonNull<u8>, len: usize) -> usize {
         let mut flags = vec![0; len / page_bytes()];
-        // SAFETY: the test holds a live or cached mapping across this range.
-        assert_eq!(
-            unsafe { libc::mincore(base.as_ptr().cast(), len, flags.as_mut_ptr()) },
-            0
-        );
+        // SAFETY: mincore queries residency without touching pages, including
+        // after an emptied arena range was unmapped.
+        if unsafe { libc::mincore(base.as_ptr().cast(), len, flags.as_mut_ptr()) } != 0 {
+            return 0;
+        }
         flags.into_iter().filter(|flag| flag & 1 != 0).count()
     }
 
@@ -2255,14 +2025,13 @@ mod tests {
     fn mapping(payload: NonNull<u8>) -> (NonNull<u8>, usize) {
         // SAFETY: the owned buffer pins its backing until free, and the cache
         // retains the reservation during the observations below.
-        let backing = unsafe { page_of(payload).as_ref().backing.dedicated() };
-        (backing.base, backing.len)
+        unsafe { page_of(payload).as_ref().backing.dedicated().raw_span() }
     }
 
     #[test]
     fn emptied_dedicated_pages_stay_resident_within_the_peak_until_idle() {
         let _idle = IDLE.lock().unwrap_or_else(|poison| poison.into_inner());
-        const SMALL: usize = 8 * 1024;
+        const SMALL: usize = 64 * 1024;
         const LARGE: usize = 1024 * 1024;
         const OVERSIZED: usize = 8 * LARGE;
         let context = Context::new(OVERSIZED as u64);
@@ -2361,27 +2130,32 @@ mod tests {
         free(start_again, GROWN);
         purge();
 
-        // A smaller, prefix-bearing extent has to use a separate mapping.
-        // It remains warm while a previously cleaned large reservation
-        // comes back into use in the same burst.
+        // A smaller, prefix-bearing extent has to use a separate extent.
+        // It remains warm while a retained grown reservation regrows in place
+        // in the same burst.
         let recent = allocate(SMALL, block::GRAPH);
         free(recent, SMALL);
-        let large_again = allocate_unwritten(LARGE, block::PLAIN);
+        let regrow = allocate_unwritten(SMALL, block::PLAIN);
+        let _ = grow(regrow);
+        free(regrow, GROWN);
+        let regrow_again = allocate_unwritten(SMALL, block::PLAIN);
+        let _ = grow(regrow_again);
         assert!(
             resident(recent),
             "reusing a reservation discarded the recent extent"
         );
-        free(large_again, LARGE);
+        free(regrow_again, GROWN);
         purge();
 
         // A GRAPH buffer's cleanup frame uses the preceding native page;
-        // release discards that page too, and the reservation is reused.
+        // release discards that page too, and purge unmaps the emptied range.
         let graph = allocate(OVERSIZED, block::GRAPH);
         let (base, len) = mapping(graph);
         // SAFETY: the exclusive buffer owns its reserved cleanup frame.
         unsafe { graph.as_ptr().sub(own_prefix(block::GRAPH)).write(0x5a) };
+        let prefix_page = unsafe { graph.sub(page_bytes()) };
         free(graph, OVERSIZED);
-        assert!(resident(base));
+        assert!(resident(prefix_page));
         purge();
         let resident = resident_pages(base, len);
         assert_eq!(
@@ -2389,7 +2163,6 @@ mod tests {
             "released graph mapping retained {resident} native pages"
         );
         let graph_again = allocate(OVERSIZED, block::GRAPH);
-        assert_eq!(graph_again, graph);
         free(graph_again, OVERSIZED);
         slab_residency_until_idle();
     }
@@ -2466,6 +2239,209 @@ mod tests {
         unsafe { heap.trim() };
         purge();
         assert_eq!(count_resident(&pages), 0);
+    }
+
+    fn proc_maps_count() -> usize {
+        std::fs::read_to_string("/proc/self/maps")
+            .unwrap()
+            .lines()
+            .count()
+    }
+
+    /// Upper bound on task-heap VMAs for one shard holding `bytes`: geometric
+    /// ranges double from 4 MiB (`4, 4, 8, 16, ...`), so capacity `C <= 2*bytes + 4 MiB`
+    /// needs at most `ceil(log2(bytes / 4 MiB)) + 2` ranges, each at most 2 VMAs.
+    fn shard_vma_bound(bytes: usize) -> usize {
+        let min_range = slabs::MIN_RANGE_GRANULES * SLAB;
+        let units = bytes.div_ceil(min_range).max(1);
+        let log2_ceil = usize::BITS as usize - (units - 1).leading_zeros() as usize;
+        2 * (log2_ceil + 2)
+    }
+
+    #[test]
+    fn task_heap_vma_count_stays_logarithmic_at_hundreds_of_mb() {
+        if crate::test_process::run_isolated(
+            "task_heap::tests::task_heap_vma_count_stays_logarithmic_at_hundreds_of_mb",
+        ) {
+            return;
+        }
+        const EIGHT_KIB: usize = 8 * 1024;
+        const FOUR_KIB: usize = 4 * 1024;
+        const LARGE: usize = 128 * 1024;
+        const N_8K: usize = 16_384; // 128 MiB of 8 KiB growable blocks
+        const N_4K: usize = 32_768; // 128 MiB of 4 KiB blocks
+        const N_128K: usize = 1_024; // 128 MiB of 128 KiB growable blocks
+        const PAYLOAD: usize = N_8K * EIGHT_KIB + N_4K * FOUR_KIB + N_128K * LARGE;
+        const GROW_END: usize = 64 << 20;
+        const LIMIT: u64 = (PAYLOAD + 2 * GROW_END) as u64;
+
+        let mut live_8k = Vec::with_capacity(N_8K);
+        let mut live_4k = Vec::with_capacity(N_4K);
+        let mut live_128k = Vec::with_capacity(N_128K);
+        let before = proc_maps_count();
+        let context = Context::new(LIMIT);
+        let payer = context.payer();
+        let alloc = |bytes: usize, growable: bool, mark: u8| {
+            block::admit_storage(payer, Some(bytes as u64)).unwrap();
+            let ptr = Heap::allocate(&context, payer, bytes, 8, block::PLAIN, growable);
+            // SAFETY: the newly allocated block owns `bytes` writable bytes.
+            unsafe { ptr.as_ptr().write(mark) };
+            ptr
+        };
+        for _ in 0..N_8K {
+            live_8k.push(alloc(EIGHT_KIB, true, 0x33));
+        }
+        for _ in 0..N_4K {
+            live_4k.push(alloc(FOUR_KIB, false, 0x44));
+        }
+        for _ in 0..N_128K {
+            live_128k.push(alloc(LARGE, true, 0x55));
+        }
+        #[repr(C)]
+        struct Carrier {
+            data: *mut u8,
+            len: u64,
+            capacity: u64,
+        }
+        let mut carrier = Carrier {
+            data: alloc(EIGHT_KIB, true, 0x66).as_ptr(),
+            len: 0,
+            capacity: EIGHT_KIB as u64,
+        };
+        let mut cap = EIGHT_KIB;
+        while cap < GROW_END {
+            let next = cap * 2;
+            // SAFETY: the fixture owns `carrier` and supplies exact charges.
+            let grown = unsafe {
+                crate::growth::replace(
+                    &context,
+                    (&raw mut carrier).cast(),
+                    next,
+                    8,
+                    next as u64,
+                    next as u64,
+                    0,
+                    cap as u64,
+                    false,
+                    block::PLAIN,
+                    true,
+                )
+                .unwrap()
+            };
+            // SAFETY: the grown buffer owns `next` writable bytes.
+            unsafe { grown.as_ptr().add(next - 1).write(0x66) };
+            cap = next;
+        }
+        let peak = proc_maps_count();
+        let delta = peak.saturating_sub(before);
+        let bound = shard_vma_bound((PAYLOAD + GROW_END) * 3 / 2);
+        assert!(
+            delta <= bound,
+            "one task heap at {} MiB added {delta} VMAs (before={before}, peak={peak}), bound {bound}",
+            (PAYLOAD + GROW_END) >> 20,
+        );
+        let remaining = context.available();
+        assert_eq!(
+            block::admit_storage(payer, Some(remaining + 1)),
+            Err(crate::Capacity {
+                requested: remaining + 1,
+                available: remaining
+            })
+        );
+        // SAFETY: every pointer is live and freed once with its exact charge.
+        unsafe {
+            block::free_in(
+                &context,
+                NonNull::new(carrier.data).unwrap(),
+                GROW_END as u64,
+            );
+            for ptr in live_8k {
+                block::free_in(&context, ptr, EIGHT_KIB as u64);
+            }
+            for ptr in live_4k {
+                block::free_in(&context, ptr, FOUR_KIB as u64);
+            }
+            for ptr in live_128k {
+                block::free_in(&context, ptr, LARGE as u64);
+            }
+        }
+        assert_eq!(context.available(), LIMIT);
+        drop(context);
+        purge();
+        let after = proc_maps_count();
+        assert!(
+            after <= before + 4,
+            "emptied task heap left VMAs: before={before}, after={after}"
+        );
+    }
+
+    #[test]
+    fn multi_unit_task_heaps_keep_vma_count_bounded_across_many_units() {
+        if crate::test_process::run_isolated(
+            "task_heap::tests::multi_unit_task_heaps_keep_vma_count_bounded_across_many_units",
+        ) {
+            return;
+        }
+        use std::sync::atomic::AtomicBool;
+        const UNITS: usize = 64;
+        const WORKERS: usize = 8;
+        const EIGHT_KIB: usize = 8 * 1024;
+        const PER_UNIT: usize = 512; // 4 MiB per unit -> 256 MiB across 64 units
+        const UNIT_BYTES: u64 = (PER_UNIT * EIGHT_KIB) as u64;
+
+        let before = proc_maps_count();
+        let ready = AtomicUsize::new(0);
+        let done = AtomicBool::new(false);
+        let peak_maps = AtomicUsize::new(0);
+        // SAFETY: OsConfig is a plain C-layout descriptor; these units read none of its fields.
+        let config: crate::entry::OsConfig = unsafe { std::mem::zeroed() };
+        #[inline(never)]
+        fn alloc_one(context: &Context, bytes: usize) -> NonNull<u8> {
+            let payer = context.payer();
+            block::admit_storage(payer, Some(bytes as u64)).unwrap();
+            let ptr = Heap::allocate(context, payer, bytes, 8, block::PLAIN, true);
+            // SAFETY: the block owns `bytes` writable bytes.
+            unsafe { ptr.as_ptr().write(0x77) };
+            ptr
+        }
+        #[inline(never)]
+        fn free_one(context: &Context, ptr: NonNull<u8>, bytes: usize) {
+            // SAFETY: each block is live and owned by this unit's context.
+            unsafe { block::free_in(context, ptr, bytes as u64) };
+        }
+        let status = crate::units::launch(UNITS, WORKERS, &config, &|_| {
+            let context = Context::with_unit_heap(UNIT_BYTES);
+            let mut blocks = Vec::with_capacity(PER_UNIT);
+            for _ in 0..PER_UNIT {
+                blocks.push(alloc_one(&context, EIGHT_KIB));
+            }
+            if ready.fetch_add(1, Ordering::AcqRel) + 1 == UNITS {
+                peak_maps.store(proc_maps_count(), Ordering::Release);
+                done.store(true, Ordering::Release);
+            } else {
+                while !done.load(Ordering::Acquire) {
+                    crate::units::maybe_yield();
+                }
+            }
+            for ptr in blocks {
+                free_one(&context, ptr, EIGHT_KIB);
+            }
+            assert_eq!(context.available(), UNIT_BYTES);
+            0
+        });
+        assert_eq!(status, 0);
+        let peak = peak_maps.load(Ordering::Acquire);
+        let delta = peak.saturating_sub(before);
+        let shards = slabs::SHARD_COUNT;
+        let heap_bound =
+            shards * shard_vma_bound(((UNITS * PER_UNIT * EIGHT_KIB) * 3 / 2) / shards);
+        let stack_bound = 4 * UNITS + 8 * (WORKERS + 1);
+        let bound = heap_bound + stack_bound;
+        assert!(
+            delta <= bound,
+            "{UNITS} units holding {} MiB added {delta} VMAs (before={before}, peak={peak}), bound {bound}",
+            (UNITS * PER_UNIT * EIGHT_KIB) >> 20,
+        );
     }
 }
 

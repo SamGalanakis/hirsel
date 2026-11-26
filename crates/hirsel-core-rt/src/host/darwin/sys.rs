@@ -577,6 +577,25 @@ pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
     true
 }
 
+/// Replace `[start, start + bytes)` with a fresh `PROT_NONE` anonymous mapping,
+/// releasing both physical pages and writable commitment.
+/// # Safety
+/// The caller owns the range, which holds no live data.
+#[inline]
+pub(crate) unsafe fn decommit(start: usize, bytes: usize) -> bool {
+    // SAFETY: per the contract; the fixed mapping replaces only the caller's range.
+    unsafe {
+        libc::mmap(
+            std::ptr::without_provenance_mut(start),
+            bytes,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANON | libc::MAP_FIXED,
+            -1,
+            0,
+        ) != libc::MAP_FAILED
+    }
+}
+
 /// The path that opens the store directory a launcher passed on descriptor 5;
 /// Darwin's /dev/fd opens a duplicate of it.
 pub(crate) const INHERITED_STORE: &[u8] = b"/dev/fd/5";

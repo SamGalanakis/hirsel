@@ -658,6 +658,39 @@ void diagnose(const DiagnosticInfo *d, void *miss) {
     d->print(printer);
 }
 
+// Whether `c` names globals, and only absolute symbols (`!absolute_symbol`:
+// site words), so the link resolves every word of it and a load relocates none.
+bool names_only_absolute(const Constant *c, SmallPtrSetImpl<const Constant *> &seen, bool &named) {
+    if (!seen.insert(c).second) return true;
+    if (auto *g = dyn_cast<GlobalValue>(c)) {
+        named = true;
+        return g->getAbsoluteSymbolRange().has_value();
+    }
+    if (isa<BlockAddress>(c) || isa<DSOLocalEquivalent>(c) || isa<NoCFIValue>(c)) return false;
+    for (const Use &op : c->operands())
+        if (!names_only_absolute(cast<Constant>(op.get()), seen, named)) return false;
+    return true;
+}
+
+// LLVM files every constant that names a global under .data.rel.ro. A
+// constant that names only absolute symbols needs no relocation at load, yet
+// there it shares pages with the pointers the loader does relocate, and each
+// such page becomes a private copy in every process. Put it in .rodata, which
+// processes share. A reference that does need a load-time relocation refuses
+// to link from a read-only section, so a wrong call here fails the link.
+void absolute_constants_read_only(Module &part, const Triple &target) {
+    if (!target.isOSBinFormatELF()) return;
+    for (GlobalVariable &g : part.globals()) {
+        if (g.isDeclaration() || !g.hasName() || !g.isConstant() || g.isExternallyInitialized() ||
+            g.hasSection() || g.isThreadLocal() || g.hasComdat())
+            continue;
+        SmallPtrSet<const Constant *, 16> seen;
+        bool named = false;
+        if (names_only_absolute(g.getInitializer(), seen, named) && named)
+            g.setSection((".rodata." + g.getName()).str());
+    }
+}
+
 // The pass manager holds the object stream for its lifetime. LLVM runs
 // MachineModuleInfo and AsmPrinter initialization and finalization on each
 // module, as in llc's compile-twice path.
@@ -695,6 +728,7 @@ public:
 private:
     void run(TargetMachine &tm, Module &part, Miss &miss) {
         part.setDataLayout(tm.createDataLayout());
+        absolute_constants_read_only(part, tm.getTargetTriple());
         hirsel_llvm::PassCost cost("object-emission", part);
         if (!passes) {
             passes.emplace();

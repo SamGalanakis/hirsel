@@ -123,7 +123,8 @@ type StreamService {
     tasks: Tasks,
     bell: Client[u32],
     timer: Option[Task[()]],
-    poll_at: u64
+    poll_at: u64,
+    gc: StreamGcState
 }
 
 fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits {
@@ -140,15 +141,29 @@ fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits
         },
     }
     lane.dir = stream_key(dir, stream_dir(plan.sid))
-    let started = stream_elect(mut lane, mut client, false, std.object.deadline_after_ms(client, op_ms))
-    if let Error(problem) = started {
-        let _ = channel.send(ready, Error(clone(problem)))
-        let (take returned, _) = std.object.split(take client)
-        return StreamServiceEnd(requests: take returned, result: Error(clone(problem)))
+    let start_due = std.object.deadline_after_ms(client, op_ms)
+    let started = stream_elect(mut lane, mut client, false, start_due)
+    let fenced_term = match take started {
+        Ok(term) => term,
+        Error(problem) => {
+            let _ = channel.send(ready, Error(clone(problem)))
+            let (take returned, _) = std.object.split(take client)
+            return StreamServiceEnd(requests: take returned, result: Error(clone(problem)))
+        },
+    }
+    let now = host.mono_ns(clock)
+    let mut prefixes: Map[StoreId, String] = map.new()
+    let mut gc = stream_gc_new(lane.reg)
+    if let Some(term) = fenced_term {
+        let old_inc = lane.inc - 1
+        if let Error(problem) = stream_gc_rebuild(mut gc, mut prefixes, mut client, lane, old_inc, term, now, std.object.deadline_after_ms(client, op_ms)) {
+            let _ = channel.send(ready, Error(clone(problem)))
+            let (take returned, _) = std.object.split(take client)
+            return StreamServiceEnd(requests: take returned, result: Error(clone(problem)))
+        }
     }
     let _ = channel.send(ready, Ok(()))
-    let now = host.mono_ns(clock)
-    let mut service = StreamService(lane: take lane, client: take client, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, reports: take reports, control: take control, waiting: list.new(), tickets: list.new(), prefixes: map.new(), observed_rows: list.new(), active_settles: list.new(), stall_polls: list.new(), next_settle_id: 1, last_reg_ns: now, tasks, bell: take bell, timer: None, poll_at: 0)
+    let mut service = StreamService(lane: take lane, client: take client, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, reports: take reports, control: take control, waiting: list.new(), tickets: list.new(), prefixes: take prefixes, observed_rows: list.new(), active_settles: list.new(), stall_polls: list.new(), next_settle_id: 1, last_reg_ns: now, tasks, bell: take bell, timer: None, poll_at: 0, gc: take gc)
     stream_service_arm_next(mut service)
     let result = stream_service_loop(mut service)
     if let Some(take running) = replace(mut service.timer, None) {
@@ -219,8 +234,14 @@ fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
 }
 
 // A free slot, or a new one while fewer than `max_slots` - 1 are given out
-// (one is the janitor's, §12.11.8).
+// (one is the janitor's, §12.11.8). Refuses `Full(Pins)` once active pins
+// reach `max_pins` - 1 (one pin stays reserved for the janitor).
 fn stream_new_slot(mut s: StreamService) -> Result[(Client[SlotMsg], u32), Error] {
+    let pins_limit: u64 = int.widen(s.plan.limits.max_pins)
+    let max_ordinary_pins = pins_limit - 1
+    if list.len(s.gc.pins) >= max_ordinary_pins {
+        return Error(Full(Pins(Capacity(requested: 1, available: 0))))
+    }
     let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_ITEMS, bytes s.plan.limits.slot_bytes)
     let (take data, take inbox) = capacity(take made)?
     for i in 0u64 .. list.len(s.slots) {
@@ -451,14 +472,21 @@ fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> R
         list.push(mut s.waiting, (slot, through))
         list.push(mut slices, take slice)
     }
+    let batch_inc = s.lane.inc
+    let batch_seq = s.lane.seq
     let deadline = std.object.deadline_after_ms(s.client, s.op_ms)
     let mut outcome = stream_cycle(mut s.lane, mut s.client, slices, deadline)
     loop {
         match take outcome {
             Ok(take decided) => {
                 s.last_reg_ns = host.mono_ns(s.clock)
+                stream_gc_record_batch(mut s.gc, s.prefixes, batch_inc, batch_seq, slices, s.last_reg_ns)?
+                s.gc.batches_since_checkpoint += 1
                 stream_service_decided(mut s, decided)
                 stream_process_reg(mut s, std.object.deadline_after_ms(s.client, s.op_ms))?
+                if !stream_is_latched(s.lane) && s.gc.batches_since_checkpoint >= s.plan.limits.index_every {
+                    stream_gc_checkpoint(mut s, std.object.deadline_after_ms(s.client, s.op_ms))?
+                }
                 return Ok(())
             },
             Error(take problem) => {

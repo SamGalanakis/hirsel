@@ -125,7 +125,7 @@ fn stream_reg_read(mut lane: StreamLane, mut client: std.object.Client, deadline
 // `ClearEpoch` removes every row for (store, epoch < observed_epoch) (rule c).
 // `ClearDetached` removes every row for (store, epoch <= observed_epoch) once
 // the head at observed_epoch no longer names (S, inc) as live (rule f).
-type RegIntent: send = Hold(RegRow, u64) | Abandon(StoreId) | Unhold(List[StoreId]) | ClearEpoch(StoreId, u64) | ClearDetached(StoreId, u64)
+type RegIntent: send = Hold(RegRow, u64) | Abandon(StoreId) | Unhold(List[StoreId]) | ClearEpoch(StoreId, u64) | ClearDetached(StoreId, u64) | Checkpoint(u64, u64, RegIndex)
 
 // `Moved`: the register's incarnation rose past the one a hold was taken
 // against, so no row was written and the claim takes the no-hold rule.
@@ -189,6 +189,13 @@ fn stream_intent_present(intent: RegIntent, reg: StreamRegister) -> bool {
             }
             true
         },
+        Checkpoint(low_inc, low_seq, idx) => {
+            let idx_ok = match reg.index {
+                Some(cur) => cur.k >= idx.k,
+                None => false,
+            }
+            idx_ok && !stream_pair_below(reg.low_inc, reg.low_seq, low_inc, low_seq)
+        },
     }
 }
 
@@ -246,6 +253,19 @@ fn stream_intent_apply(intent: RegIntent, base: StreamRegister, max_rows: u64) -
                 }
             }
         },
+        Checkpoint(low_inc, low_seq, idx) => {
+            if stream_pair_below(built.low_inc, built.low_seq, low_inc, low_seq) {
+                built.low_inc = low_inc
+                built.low_seq = low_seq
+            }
+            let replace_idx = match built.index {
+                Some(cur) => idx.k > cur.k,
+                None => true,
+            }
+            if replace_idx {
+                built.index = Some(idx)
+            }
+        },
     }
     Ok(take built)
 }
@@ -264,6 +284,7 @@ fn stream_intent_moved(intent: RegIntent, reg: StreamRegister, inc: u64) -> bool
         Unhold(_) => reg.inc != inc,
         ClearEpoch(_, _) => reg.inc != inc,
         ClearDetached(_, _) => reg.inc != inc,
+        Checkpoint(_, _, _) => reg.inc != inc,
     }
 }
 

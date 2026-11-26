@@ -134,6 +134,11 @@ fn stream_service_reports(mut s: StreamService) -> Result[(), Error] waits {
                     }
                 }
             },
+            ReportHead(_, hi, lo, obs_inc, obs_seq, ranges) => {
+                let store = StoreId(hi, lo)
+                let now = host.mono_ns(s.clock)
+                stream_gc_record_head(mut s.gc, s.prefixes, s.lane.reg.low_inc, s.lane.reg.low_seq, store, obs_inc, obs_seq, ranges, now)?
+            },
         }
     }
 }
@@ -485,6 +490,7 @@ fn stream_service_poll(mut s: StreamService) -> Result[(), Error] waits {
             Ok(()) => {
                 s.last_reg_ns = host.mono_ns(s.clock)
                 stream_process_reg(mut s, deadline)?
+                stream_gc_poll_pins(mut s, deadline)?
             },
             Error(Corrupt(_)) => {
                 s.lane.latched = Some(Register)

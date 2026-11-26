@@ -190,6 +190,9 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
     let mut is_stalled = false
     let mut stream_awaiting_fence = false
     let mut stream_queued: List[(Bytes, u64)] = list.new()
+    if let Some(link) = lane.stream {
+        slot_report_head(link, lane.register.head.store, lane.register.attach, link.last_batch_seq)
+    }
     loop {
         if let Some(terminal) = lane.register.terminal {
             return match terminal {
@@ -345,6 +348,7 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                                     }
                                     object_journal_stream_trim_batches(mut lane, fseq)
                                     if let Some(link) = lane.stream {
+                                        slot_report_head(link, lane.register.head.store, lane.register.attach, through_seq)
                                         slot_report(link, ReportSettled(link.slot, settle_id, true, lane.register.head.entry.seq, fseq, fframe))
                                     }
                                 },
@@ -392,6 +396,8 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                     match take closed {
                         Ok(SettleApplied) => {
                             if let Some(link) = lane.stream {
+                                let no_attach: Option[Attach] = None
+                                slot_report_head(link, lane.register.head.store, no_attach, last_seq)
                                 slot_report(link, ReportDetached(link.slot, lane.register.head.pair.epoch))
                             }
                             let done_ok: Result[(), Error] = Ok(())

@@ -3,10 +3,12 @@
 // fence lands.
 // What one batch of a live tail held for X at epoch e: not yet created, a
 // batch the hold's cutoff excludes (`seen_rev ≥ rev_hold`), a TERM object
-// ending the incarnation, or a batch read with whether X had frames in it.
-type TailBatch = TailAbsent | TailBeyond | TailTerm | TailRead(bool)
+// ending the incarnation, a 404 whose head moved (restart attempt), a 404
+// retired empty for X (skip to `low_seq`), or a batch read with whether X
+// had frames in it.
+type TailBatch = TailAbsent | TailBeyond | TailTerm | TailHeadMoved | TailSkipTo(u64) | TailRead(bool)
 
-type TailStop = StopAbsent | StopBeyond | StopTerm
+type TailStop = StopAbsent | StopBeyond | StopTerm | StopHeadMoved
 
 // The reader's buffers: the INDEX range and X's slice.
 type TailBuffers {
@@ -35,16 +37,48 @@ fn stream_tail_range(mut client: std.object.Client, key: String, lo: u64, hi: u6
     }
 }
 
+// §12.11.8 404 table: a 404 on `(inc, seq)` is never an end of stream by
+// itself. Issues GET `reg` then GET X's `head`, both after the 404, and decides
+// retired-skip, head-moved restart, single re-GET, or not-yet-created stop.
+fn stream_resolve_404(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, key: String, inc: u64, seq: u64, in_sealed_range: bool, seen_higher_batch: bool, deadline: u64) -> Result[Option[TailBatch], Error] waits {
+    stream_reg_read(mut lane, mut client, deadline)?
+    let head_key = stream_key(place_prefix, "head")
+    let mut head_scratch: Bytes = list.new()
+    capacity(list.try_reserve(mut head_scratch, order.max(65776u64, list.len(head_witness))))?
+    let _ = history_fetch(mut client, head_key, mut head_scratch, deadline)?
+    let head_changed = head_scratch != head_witness
+    if stream_pair_below(inc, seq, lane.reg.low_inc, lane.reg.low_seq) {
+        if head_changed {
+            return Ok(Some(TailHeadMoved))
+        }
+        if lane.reg.low_inc > inc {
+            return Ok(Some(TailAbsent))
+        }
+        return Ok(Some(TailSkipTo(lane.reg.low_seq)))
+    }
+    let below_covers = match lane.reg.index {
+        Some(idx) => !stream_pair_below(idx.covers_inc, idx.covers_seq, inc, seq),
+        None => false,
+    }
+    if in_sealed_range || seen_higher_batch || below_covers {
+        if let Some(()) = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            return Ok(None)
+        }
+        return Error(disk_fault(key, 0, Absent))
+    }
+    Ok(Some(TailAbsent))
+}
+
 // Reads batch `seq` of incarnation `inc` and applies X's slice at `epoch`
-// to `replay`, from frame `skip` on. A batch with `seen_rev ≥ stop_rev` is
-// left unread past its INDEX. A TERM ends the incarnation, so the tail
-// cannot be read past it here.
-fn stream_tail_batch(mut client: std.object.Client, mut buffers: TailBuffers, dir: String, sid: HostStreamId, inc: u64, seq: u64, store: StoreId, epoch: u64, skip: u64, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailBatch, Error] waits {
+// to `replay`, from frame `skip` on. Resolves 404 via §12.11.8's full table.
+fn stream_tail_batch(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, sid: HostStreamId, inc: u64, seq: u64, store: StoreId, epoch: u64, skip: u64, stop_rev: u64, in_sealed_range: bool, seen_higher_batch: bool, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailBatch, Error] waits {
     let mut name = string.with_capacity(48)
     stream_batch_key(mut name, inc, seq)
-    let key = stream_key(dir, name)
+    let key = stream_key(lane.dir, name)
     if let None = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
-        return Ok(TailAbsent)
+        if let Some(outcome) = stream_resolve_404(mut client, mut lane, mut buffers, place_prefix, head_witness, key, inc, seq, in_sealed_range, seen_higher_batch, deadline)? {
+            return Ok(outcome)
+        }
     }
     let mut batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
         Rows(take found) => take found,
@@ -119,18 +153,27 @@ type TailScan {
 }
 
 // Reads batches from `cursor.next` until one is not yet created, hits TERM,
-// or (for the delta) has `seen_rev ≥ stop_rev` (§12.11.5 steps 2 and 4).
-fn stream_tail_scan(mut client: std.object.Client, mut buffers: TailBuffers, dir: String, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailStop, Error] waits {
+// sees head move on a retired 404, or (for the delta) has `seen_rev ≥ stop_rev`
+// (§12.11.5 steps 2 and 4, §12.11.8 404 table).
+fn stream_tail_scan(mut client: std.object.Client, mut lane: StreamLane, mut buffers: TailBuffers, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailStop, Error] waits {
     loop {
         let skip: u64 = if cursor.next == tail.from_seq {
             int.widen(tail.from_frame)
         } else {
             0
         }
-        match stream_tail_batch(mut client, mut buffers, dir, tail.sid, tail.inc, cursor.next, store, epoch, skip, stop_rev, mut replay, ceiling, deadline)? {
+        match stream_tail_batch(mut client, mut lane, mut buffers, place_prefix, head_witness, tail.sid, tail.inc, cursor.next, store, epoch, skip, stop_rev, false, false, mut replay, ceiling, deadline)? {
             TailAbsent => return Ok(StopAbsent),
             TailBeyond => return Ok(StopBeyond),
             TailTerm => return Ok(StopTerm),
+            TailHeadMoved => return Ok(StopHeadMoved),
+            TailSkipTo(low_seq) => {
+                if low_seq > cursor.next {
+                    cursor.next = low_seq
+                } else {
+                    cursor.next += 1
+                }
+            },
             TailRead(had) => {
                 if had {
                     cursor.last_x = Some(cursor.next)
@@ -141,15 +184,58 @@ fn stream_tail_scan(mut client: std.object.Client, mut buffers: TailBuffers, dir
     }
 }
 
+// Step 2 XINDEX fast path (§12.11.5 step 2): when `reg.index` covers
+// `(tail.inc, cursor.next)`, fetches `x-<k>` and reads only the batches X had
+// rows in up to `covers_seq`, falling back cleanly on corrupt/missing XINDEX.
+fn stream_tail_prescan_xindex(mut client: std.object.Client, mut side: ClaimStream, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
+    let Some(meta) = side.lane.reg.index else {
+        return Ok(true)
+    }
+    if meta.covers_inc != tail.inc || meta.covers_seq < cursor.next {
+        return Ok(true)
+    }
+    let Some(take xidx) = stream_xindex_fetch(mut client, side.lane.dir, tail.sid, meta, deadline)? else {
+        return Ok(true)
+    }
+    for e in xidx.entries {
+        if same(e.store, store) && e.epoch == epoch {
+            for (bi, bs) in e.batches {
+                if bi == tail.inc && bs >= cursor.next && bs <= meta.covers_seq {
+                    let skip: u64 = if bs == tail.from_seq {
+                        int.widen(tail.from_frame)
+                    } else {
+                        0
+                    }
+                    match stream_tail_batch(mut client, mut side.lane, mut side.buffers, place_prefix, head_witness, tail.sid, tail.inc, bs, store, epoch, skip, 18446744073709551615u64, false, false, mut replay, ceiling, deadline)? {
+                        TailRead(had) => if had {
+                            cursor.last_x = Some(bs)
+                        },
+                        TailHeadMoved => return Ok(false),
+                        TailSkipTo(_) => (),
+                        TailTerm => return Ok(true),
+                        TailAbsent => (),
+                        TailBeyond => (),
+                    }
+                }
+            }
+        }
+    }
+    if meta.covers_seq + 1 > cursor.next {
+        cursor.next = meta.covers_seq + 1
+    }
+    Ok(true)
+}
+
 // The no-hold rule (§12.11.7): when `live.inc < reg.inc`, scan through the
 // terminal fence of `live.inc`. If no TERM sits at the first 404, create it
 // there (advancing over any late batch that won the race so it is included).
-fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, tail: StreamRef, store: StoreId, epoch: u64, authority_kind: u8, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, place_prefix: String, head_witness: Bytes, tail: StreamRef, store: StoreId, epoch: u64, authority_kind: u8, mut cursor: TailScan, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
     let mut name = string.with_capacity(48)
     loop {
-        match stream_tail_scan(mut client, mut side.buffers, side.lane.dir, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)? {
-            StopTerm => return Ok(()),
-            StopBeyond => return Ok(()),
+        match stream_tail_scan(mut client, mut side.lane, mut side.buffers, place_prefix, head_witness, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)? {
+            StopTerm => return Ok(true),
+            StopBeyond => return Ok(true),
+            StopHeadMoved => return Ok(false),
             StopAbsent => {
                 stream_batch_key(mut name, tail.inc, cursor.next)
                 let key = stream_key(side.lane.dir, name)
@@ -157,13 +243,13 @@ fn stream_no_hold_scan(mut client: std.object.Client, mut side: ClaimStream, tai
                 let (take outcome, take buffer) = std.object.store_if_retry(mut client, key, Absent, replace(mut side.lane.body, list.new()), deadline)
                 side.lane.body = take buffer
                 match take outcome {
-                    Ok(Applied(_)) => return Ok(()),
+                    Ok(Applied(_)) => return Ok(true),
                     Ok(Mismatch) => {
                         let Some(()) = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut side.buffers.index, deadline)? else {
                             return Error(disk_fault(key, 0, Absent))
                         }
                         match stream_batch_head(key, side.buffers.index, tail.sid, tail.inc, cursor.next)? {
-                            Term(_, _) => return Ok(()),
+                            Term(_, _) => return Ok(true),
                             Rows(_) => (),
                         }
                     },
@@ -225,15 +311,23 @@ fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
 
 // Reads one sealed tail in history order (§12.11.9): discovers its epoch from
 // X's unique row in `st.cutoff` (Fable §3 guarantees it exists), then applies
-// X's slices in `[st.tail.from_seq, st.cutoff]` at that epoch.
-fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuffers, root: String, st: SealedTail, store: StoreId, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+// X's slices in `[st.tail.from_seq, st.cutoff]` at that epoch. Returns `false`
+// if a 404 resolved to a moved head (restart attempt).
+fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuffers, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, st: SealedTail, store: StoreId, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[bool, Error] waits {
     let dir = stream_key(root, stream_dir(st.tail.sid))
+    let mut seal_lane = stream_lane(st.tail.sid, authority_kind, 2, store)?
+    seal_lane.dir = string.from(dir)
     let mut cut_name = string.with_capacity(48)
     stream_batch_key(mut cut_name, st.tail.inc, st.cutoff)
     let cut_key = stream_key(dir, cut_name)
-    let tail_epoch = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[u64, Error] waits {
+    let tail_epoch_opt = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[Option[u64], Error] waits {
         if let None = stream_tail_range(mut c, cut_key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
-            return Error(disk_fault(cut_key, 0, Absent))
+            if let Some(outcome) = stream_resolve_404(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, cut_key, st.tail.inc, st.cutoff, true, false, deadline)? {
+                return match outcome {
+                    TailHeadMoved => Ok(None),
+                    _ => Error(disk_fault(cut_key, 0, Absent)),
+                }
+            }
         }
         let mut batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
             Rows(take found) => take found,
@@ -253,11 +347,14 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
                 if st.cutoff == st.tail.from_seq && row.frames <= int.widen(st.tail.from_frame) {
                     return Error(disk_fault(cut_key, 0, Malformed))
                 }
-                return Ok(row.epoch)
+                return Ok(Some(row.epoch))
             }
         }
         Error(disk_fault(cut_key, 0, Malformed))
     })?
+    let Some(tail_epoch) = tail_epoch_opt else {
+        return Ok(false)
+    }
     let mut seq = st.tail.from_seq
     while seq <= st.cutoff {
         let skip: u64 = if seq == st.tail.from_seq {
@@ -265,25 +362,31 @@ fn stream_apply_sealed_tail(mut client: std.object.Client, mut buffers: TailBuff
         } else {
             0
         }
-        stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-            match stream_tail_batch(mut c, mut buffers, dir, st.tail.sid, st.tail.inc, seq, store, tail_epoch, skip, 18446744073709551615u64, mut replay, ceiling, deadline)? {
-                TailRead(_) => Ok(()),
+        let ok = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
+            match stream_tail_batch(mut c, mut seal_lane, mut buffers, place_prefix, head_witness, st.tail.sid, st.tail.inc, seq, store, tail_epoch, skip, 18446744073709551615u64, true, false, mut replay, ceiling, deadline)? {
+                TailRead(_) => Ok(true),
+                TailHeadMoved => Ok(false),
                 TailAbsent => Error(disk_fault(cut_key, 0, Absent)),
+                TailSkipTo(_) => Error(disk_fault(cut_key, 0, Absent)),
                 TailBeyond => Error(disk_fault(cut_key, 0, Malformed)),
                 TailTerm => Error(disk_fault(cut_key, 72, Malformed)),
             }
         })?
+        if !ok {
+            return Ok(false)
+        }
         seq += 1
     }
-    Ok(())
+    Ok(true)
 }
 
 // Loads the settled part in exact §12.11.9 history order: checkpoint c, then
 // entries interleaved with `attach.sealed` at each `st.at`, then the entries
-// past the last sealed tail through `head.entry.seq`.
-fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attach: Attach, root: String, mut buffers: TailBuffers, ceiling: u64) -> Result[JournalReplay, Error] waits {
+// past the last sealed tail through `head.entry.seq`. Returns `None` if a
+// sealed-tail 404 observed a moved head.
+fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attach: Attach, root: String, place_prefix: String, head_witness: Bytes, authority_kind: u8, mut buffers: TailBuffers, ceiling: u64) -> Result[Option[JournalReplay], Error] waits {
     if list.len(attach.sealed) == 0 {
-        return history_load_admitted(mut read_source, head, ceiling)
+        return Ok(Some(history_load_admitted(mut read_source, head, ceiling)?))
     }
     let deadline = read_source.deadline
     let chain = history_suffix(mut read_source.client, head, head.checkpoint, deadline)?
@@ -307,7 +410,9 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
             history_apply_suffix(mut read_source.client, head, done_seq, part, mut recovered, ceiling, deadline)?
             done_seq = st.at
         }
-        stream_apply_sealed_tail(mut read_source.client, mut buffers, root, st, head.store, mut recovered, ceiling, deadline)?
+        if !stream_apply_sealed_tail(mut read_source.client, mut buffers, root, place_prefix, head_witness, authority_kind, st, head.store, mut recovered, ceiling, deadline)? {
+            return Ok(None)
+        }
     }
     if head.entry.seq > done_seq {
         let lo = done_seq - base_seq
@@ -315,7 +420,7 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
         let rest = list.slice(chain, lo, hi)
         history_apply_suffix(mut read_source.client, head, done_seq, rest, mut recovered, ceiling, deadline)?
     }
-    Ok(take recovered)
+    Ok(Some(take recovered))
 }
 
 // One attempt, steps 1–7. `None`: the claim's pair moved position, the row
@@ -340,32 +445,43 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     let head = capture.head
     let store = head.store
     let epoch = head.pair.epoch
+    let place_prefix = std.object.bucket_config(read_source.client).prefix
     // Step 2: the settled part in history order, then the pre-scan of the live
     // tail, both admitted before the hold.
-    let mut replay = stream_load_settled(mut read_source, head, attach, link.root, mut side.buffers, options.resident_limit)?
+    let Some(take loaded_settled) = stream_load_settled(mut read_source, head, attach, link.root, place_prefix, workspace.witness, authority_kind, mut side.buffers, options.resident_limit)? else {
+        return Ok(None)
+    }
+    let mut replay = take loaded_settled
     check_limits(options.limits, replay.limits)?
     let mut cursor = TailScan(next: tail.from_seq, last_x: None)
     let ceiling = options.resident_limit
     let mut no_hold = false
-    stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+    let step2_ok = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
         stream_reg_read(mut side.lane, mut c, deadline)?
         if side.lane.reg.inc < tail.inc {
             return Error(disk_fault("reg", 0, Regressed))
         }
         if side.lane.reg.inc > tail.inc {
             no_hold = true
-            return stream_no_hold_scan(mut c, mut side, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
+            return stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
         }
         if side.lane.reg.collecting {
             return Error(disk_fault("reg", 0, Malformed))
         }
-        let _ = stream_tail_scan(mut c, mut side.buffers, side.lane.dir, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)?
-        Ok(())
+        if !stream_tail_prescan_xindex(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, mut cursor, mut replay, ceiling, deadline)? {
+            return Ok(false)
+        }
+        match stream_tail_scan(mut c, mut side.lane, mut side.buffers, place_prefix, workspace.witness, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)? {
+            StopHeadMoved => Ok(false),
+            _ => Ok(true),
+        }
     })?
+    if !step2_ok {
+        return Ok(None)
+    }
     let (inc_b, next_b) = match side.granted {
         Some(grant) => grant,
         None => {
-            let place_prefix = std.object.bucket_config(read_source.client).prefix
             let grant = slot_attach(mut link, store, epoch + 1, place_prefix)?
             side.granted = Some(grant)
             grant
@@ -383,9 +499,12 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             },
             Ok(Moved) => {
                 no_hold = true
-                stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-                    stream_no_hold_scan(mut c, mut side, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
+                let moved_ok = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
+                    stream_no_hold_scan(mut c, mut side, place_prefix, workspace.witness, tail, store, epoch, authority_kind, mut cursor, mut replay, ceiling, deadline)
                 })?
+                if !moved_ok {
+                    return Ok(None)
+                }
             },
             Error(Undecided) => {
                 side.token = Some(token)
@@ -398,7 +517,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     let decided = if no_hold {
         stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)
     } else {
-        stream_claim_hold_scope(mut read_source, mut side, tail, store, epoch, mut cursor, mut replay, options, mut workspace, prepare_writer)
+        stream_claim_hold_scope(mut read_source, mut side, place_prefix, tail, store, epoch, mut cursor, mut replay, options, mut workspace, prepare_writer)
     }
     let (take admitted, tag) = match take decided {
         Ok(Some(take ready)) => take ready,
@@ -462,7 +581,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
 // Steps 4 and 5 under the hold: every failure here abandons the row (rule
 // e). `None`: the claim's pair moved position. Otherwise the writer's
 // prepared state and the tag H matches.
-fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimStream, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, options: Options, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
+fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimStream, place_prefix: String, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, options: Options, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
     let deadline = read_source.deadline
     let Some(token) = side.token else {
         return Error(disk_fault("reg", 0, Malformed))
@@ -473,10 +592,15 @@ fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimSt
     // Step 4: the delta, cut at the first batch absent or seen at or after
     // the hold, applied and re-admitted.
     let ceiling = options.resident_limit
-    stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
-        let _ = stream_tail_scan(mut c, mut side.buffers, side.lane.dir, tail, store, epoch, mut cursor, rev_hold, mut replay, ceiling, deadline)?
-        Ok(())
+    let delta_ok = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[bool, Error] waits {
+        match stream_tail_scan(mut c, mut side.lane, mut side.buffers, place_prefix, workspace.witness, tail, store, epoch, mut cursor, rev_hold, mut replay, ceiling, deadline)? {
+            StopHeadMoved => Ok(false),
+            _ => Ok(true),
+        }
     })?
+    if !delta_ok {
+        return Ok(None)
+    }
     stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)
 }
 

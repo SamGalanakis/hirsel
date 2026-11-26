@@ -1,0 +1,715 @@
+// The host stream's XINDEX checkpoints (0x0104, role 13 `x-<k>`), pin
+// tracking, head summaries, low-water retirement and batch deletes
+// (STORE-SPEC §12.11.2, §12.11.8, §12.11.12).
+const ROLE_XINDEX: u8 = 13
+
+// Fixed-size cross-unit summary of a Place's intervals `(inc, lo_seq, hi_seq)`
+// on one stream `sid` (`live` plus up to `ATTACH_SEALED_MAX = 8` sealed tails).
+type HeadRanges: cross {
+    count: u8,
+    items: Inline[u64, 27]
+}
+
+fn empty_head_ranges() -> HeadRanges {
+    HeadRanges(count: 0, items:[0u64; 27])
+}
+
+// Extracts the `(inc, lo_seq, hi_seq)` intervals of `attach` on stream `sid`.
+fn stream_attach_head_ranges(attach: Option[Attach], sid: HostStreamId) -> HeadRanges {
+    let mut out = empty_head_ranges()
+    let Some(a) = view attach else {
+        return out
+    }
+    let mut n = 0u64
+    if let Some(r) = a.live {
+        if stream_same(r.sid, sid) && n < 9 {
+            out.items[3 * n] = r.inc
+            out.items[3 * n + 1] = r.from_seq
+            out.items[3 * n + 2] = 18446744073709551615u64
+            n += 1
+        }
+    }
+    for st in a.sealed {
+        if stream_same(st.tail.sid, sid) && n < 9 {
+            out.items[3 * n] = st.tail.inc
+            out.items[3 * n + 1] = st.tail.from_seq
+            out.items[3 * n + 2] = st.cutoff
+            n += 1
+        }
+    }
+    out.count = int.narrow(n)
+    out
+}
+
+fn stream_head_ranges_contain(ranges: HeadRanges, inc: u64, seq: u64) -> bool {
+    let n: u64 = int.widen(ranges.count)
+    for i in 0u64 .. n {
+        let r_inc = ranges.items[3 * i]
+        let lo = ranges.items[3 * i + 1]
+        let hi = ranges.items[3 * i + 2]
+        if r_inc == inc && seq >= lo && seq <= hi {
+            return true
+        }
+    }
+    false
+}
+
+fn stream_xindex_key(mut key: String, k: u64) {
+    string.clear(mut key)
+    string.push(mut key, "x-")
+    history_number(mut key, k)
+}
+
+// One `(store, epoch)` batch index entry inside XINDEX (`0x0104`).
+type XIndexEntry: send {
+    store: StoreId,
+    epoch: u64,
+    batches: List[(u64, u64)]
+}
+
+// One Place pinning at least one unreleased batch on this stream.
+type StreamPin: send {
+    store: StoreId,
+    pin_inc: u64,
+    pin_seq: u64,
+    prefix: String,
+    first_pinned_ns: u64
+}
+
+type XIndex: send {
+    k: u64,
+    low_inc: u64,
+    low_seq: u64,
+    covers_inc: u64,
+    covers_seq: u64,
+    entries: List[XIndexEntry],
+    pins: List[StreamPin]
+}
+
+// The service's latest head observation for a Place, stamped with the
+// `(obs_inc, obs_seq)` batch watermark that had already been written before
+// the head was observed (§12.11.8 release rule).
+type HeadSummary: send {
+    obs_inc: u64,
+    obs_seq: u64,
+    ranges: HeadRanges
+}
+
+// The service's in-memory GC state: batch membership, active pins, observed
+// head summaries, known old-incarnation fences, and delete progress.
+type StreamGcState {
+    entries: List[XIndexEntry],
+    pins: List[StreamPin],
+    heads: Map[StoreId, HeadSummary],
+    fences: List[(u64, u64)],
+    deleted_inc: u64,
+    deleted_seq: u64,
+    batches_since_checkpoint: u64
+}
+
+fn stream_gc_new(reg: StreamRegister) -> StreamGcState {
+    let (d_inc, d_seq) = if reg.low_inc == 0 {
+        (1u64, 1u64)
+    } else {
+        (reg.low_inc, order.max(reg.low_seq, 1))
+    }
+    StreamGcState(entries: list.new(), pins: list.new(), heads: map.new(), fences: list.new(), deleted_inc: d_inc, deleted_seq: d_seq, batches_since_checkpoint: 0)
+}
+
+// Encodes `x-<k>` (`ROLE_XINDEX`, frame `0x0104`) and returns its `RegIndex`.
+fn stream_xindex_encode(mut raw: Bytes, sid: HostStreamId, inc: u64, authority_kind: u8, idx: XIndex) -> Result[RegIndex, Error] {
+    let mut payload_len = 32u64 + 4 + 4
+    for e in idx.entries {
+        payload_len += 28 + 16 * list.len(e.batches)
+    }
+    for p in idx.pins {
+        payload_len += 36 + string.byte_len(p.prefix)
+    }
+    if payload_len > STREAM_XINDEX_LIMIT {
+        return Error(Full(Allocation(Capacity(requested: payload_len, available: STREAM_XINDEX_LIMIT))))
+    }
+    let needed = 72 + 16 + payload_len + BINDING_BYTES
+    capacity(list.try_reserve(mut raw, needed))?
+    let ctx = stream_header(mut raw, sid, ROLE_XINDEX, idx.k, inc, authority_kind)?
+    let at = list.len(raw)
+    list.fill(mut raw, 16, 0u8)
+    list.put_word_le(mut raw, idx.low_inc)
+    list.put_word_le(mut raw, idx.low_seq)
+    list.put_word_le(mut raw, idx.covers_inc)
+    list.put_word_le(mut raw, idx.covers_seq)
+    let ec: u32 = int.narrow(list.len(idx.entries))
+    list.put_word_le(mut raw, ec)
+    for e in idx.entries {
+        list.put_word_le(mut raw, e.store.hi)
+        list.put_word_le(mut raw, e.store.lo)
+        list.put_word_le(mut raw, e.epoch)
+        let bc: u32 = int.narrow(list.len(e.batches))
+        list.put_word_le(mut raw, bc)
+        for (b_inc, b_seq) in e.batches {
+            list.put_word_le(mut raw, b_inc)
+            list.put_word_le(mut raw, b_seq)
+        }
+    }
+    let pc: u32 = int.narrow(list.len(idx.pins))
+    list.put_word_le(mut raw, pc)
+    for p in idx.pins {
+        list.put_word_le(mut raw, p.store.hi)
+        list.put_word_le(mut raw, p.store.lo)
+        list.put_word_le(mut raw, p.pin_inc)
+        list.put_word_le(mut raw, p.pin_seq)
+        let pb = string.as_bytes(p.prefix)
+        let plen: u32 = int.narrow(list.len(pb))
+        list.put_word_le(mut raw, plen)
+        list.append(mut raw, pb)
+    }
+    capacity(history_seal(mut raw, ctx, at, 0x0104))?
+    let len = list.len(raw)
+    let digest = std.check.xxh3(raw, 0, len)
+    Ok(RegIndex(k: idx.k, len, digest, covers_inc: idx.covers_inc, covers_seq: idx.covers_seq))
+}
+
+fn stream_xindex_decode(key: String, raw: Bytes, sid: HostStreamId, meta: RegIndex) -> Result[XIndex, Error] {
+    if list.len(raw) != meta.len {
+        return Error(disk_fault(key, 0, Truncated))
+    }
+    if std.check.xxh3(raw, 0, list.len(raw)) != meta.digest {
+        return Error(disk_fault(key, 0, Checksum))
+    }
+    let head = stream_read_header(key, raw, sid, ROLE_XINDEX)?
+    if head.ctx.seq != meta.k {
+        return Error(disk_fault(key, 0, Header))
+    }
+    let frame = history_frame(key, head.ctx, raw, 72, 0x0104)?
+    if frame.end != list.len(raw) {
+        return Error(disk_fault(key, frame.end, Malformed))
+    }
+    let p = list.slice(raw, frame.payload, frame.end)
+    let size = list.len(p)
+    if size < 40 {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let low_inc = read_le(p, 0, 8)
+    let low_seq = read_le(p, 8, 8)
+    let covers_inc = read_le(p, 16, 8)
+    let covers_seq = read_le(p, 24, 8)
+    if covers_inc != meta.covers_inc || covers_seq != meta.covers_seq {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let entry_count = read_le(p, 32, 4)
+    let mut cursor = 36u64
+    let mut x_entries: List[XIndexEntry] = list.new()
+    capacity(list.try_reserve(mut x_entries, entry_count))?
+    for _ in 0u64 .. entry_count {
+        if size - cursor < 28 {
+            return Error(disk_fault(key, 72, Malformed))
+        }
+        let store = StoreId(hi: read_le(p, cursor, 8), lo: read_le(p, cursor + 8, 8))
+        let epoch = read_le(p, cursor + 16, 8)
+        let bc = read_le(p, cursor + 24, 4)
+        cursor += 28
+        if size - cursor < 16 * bc {
+            return Error(disk_fault(key, 72, Malformed))
+        }
+        let mut batches: List[(u64, u64)] = list.new()
+        capacity(list.try_reserve(mut batches, bc))?
+        for _ in 0u64 .. bc {
+            let bi = read_le(p, cursor, 8)
+            let bs = read_le(p, cursor + 8, 8)
+            cursor += 16
+            list.push(mut batches, (bi, bs))
+        }
+        list.push(mut x_entries, XIndexEntry(store, epoch, batches: take batches))
+    }
+    if size - cursor < 4 {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    let pin_count = read_le(p, cursor, 4)
+    cursor += 4
+    let mut pins: List[StreamPin] = list.new()
+    capacity(list.try_reserve(mut pins, pin_count))?
+    for _ in 0u64 .. pin_count {
+        if size - cursor < 36 {
+            return Error(disk_fault(key, 72, Malformed))
+        }
+        let store = StoreId(hi: read_le(p, cursor, 8), lo: read_le(p, cursor + 8, 8))
+        let pin_inc = read_le(p, cursor + 16, 8)
+        let pin_seq = read_le(p, cursor + 24, 8)
+        let plen = read_le(p, cursor + 32, 4)
+        cursor += 36
+        if size - cursor < plen {
+            return Error(disk_fault(key, 72, Malformed))
+        }
+        let pfx_bytes = copied(list.slice(p, cursor, cursor + plen))?
+        let Ok(take pfx) = string.from_utf8(take pfx_bytes) else {
+            return Error(disk_fault(key, 72, Malformed))
+        }
+        cursor += plen
+        list.push(mut pins, StreamPin(store, pin_inc, pin_seq, prefix: take pfx, first_pinned_ns: 0))
+    }
+    if cursor != size {
+        return Error(disk_fault(key, 72, Malformed))
+    }
+    Ok(XIndex(k: meta.k, low_inc, low_seq, covers_inc, covers_seq, entries: take x_entries, pins: take pins))
+}
+
+// Fetches and validates `x-<k>`. A corrupt or missing XINDEX returns `Ok(None)`
+// so callers fall back to INDEX frames from `low` (§12.11.10 quarantine).
+fn stream_xindex_fetch(mut client: std.object.Client, dir: String, sid: HostStreamId, meta: RegIndex, deadline: u64) -> Result[Option[XIndex], Error] waits {
+    let mut name = string.with_capacity(32)
+    stream_xindex_key(mut name, meta.k)
+    let key = stream_key(dir, name)
+    let mut buf: Bytes = list.new()
+    capacity(list.try_reserve(mut buf, meta.len))?
+    let (take outcome, take back) = std.object.fetch(mut client, key, take buf, deadline)
+    buf = take back
+    match take outcome {
+        Ok(_) => match stream_xindex_decode(key, buf, sid, meta) {
+            Ok(take x_decoded) => Ok(Some(take x_decoded)),
+            Error(Corrupt(_)) => Ok(None),
+            Error(take problem) => Error(take problem),
+        },
+        Error(NotFound) => Ok(None),
+        Error(TooLarge) => Ok(None),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+fn stream_gc_batch_released(heads: Map[StoreId, HeadSummary], store: StoreId, inc: u64, seq: u64) -> bool {
+    let Some(summary) = map.get(heads, store) else {
+        return false
+    }
+    if stream_pair_below(summary.obs_inc, summary.obs_seq, inc, seq) {
+        return false
+    }
+    !stream_head_ranges_contain(summary.ranges, inc, seq)
+}
+
+fn stream_gc_add_entry(mut gc: StreamGcState, store: StoreId, epoch: u64, inc: u64, seq: u64) -> Result[(), Error] {
+    for i in 0u64 .. list.len(gc.entries) {
+        if same(gc.entries[i].store, store) && gc.entries[i].epoch == epoch {
+            let n = list.len(gc.entries[i].batches)
+            if n > 0 {
+                let (li, ls) = gc.entries[i].batches[n - 1]
+                if li == inc && ls == seq {
+                    return Ok(())
+                }
+            }
+            capacity(list.try_reserve(mut gc.entries[i].batches, 1))?
+            list.push(mut gc.entries[i].batches, (inc, seq))
+            return Ok(())
+        }
+    }
+    let mut batches: List[(u64, u64)] = list.new()
+    capacity(list.try_reserve(mut batches, 1))?
+    list.push(mut batches, (inc, seq))
+    capacity(list.try_reserve(mut gc.entries, 1))?
+    list.push(mut gc.entries, XIndexEntry(store, epoch, batches: take batches))
+    Ok(())
+}
+
+fn stream_gc_ensure_pin(mut gc: StreamGcState, prefixes: Map[StoreId, String], store: StoreId, inc: u64, seq: u64, now: u64) -> Result[(), Error] {
+    for i in 0u64 .. list.len(gc.pins) {
+        if same(gc.pins[i].store, store) {
+            if stream_pair_below(inc, seq, gc.pins[i].pin_inc, gc.pins[i].pin_seq) {
+                gc.pins[i].pin_inc = inc
+                gc.pins[i].pin_seq = seq
+            }
+            if string.byte_len(gc.pins[i].prefix) == 0 {
+                if let Some(pfx) = map.get(prefixes, store) {
+                    gc.pins[i].prefix = string.from(pfx)
+                }
+            }
+            return Ok(())
+        }
+    }
+    let pfx = match map.get(prefixes, store) {
+        Some(found) => string.from(found),
+        None => string.new(),
+    }
+    capacity(list.try_reserve(mut gc.pins, 1))?
+    list.push(mut gc.pins, StreamPin(store, pin_inc: inc, pin_seq: seq, prefix: take pfx, first_pinned_ns: now))
+    Ok(())
+}
+
+fn stream_gc_record_batch(mut gc: StreamGcState, prefixes: Map[StoreId, String], inc: u64, seq: u64, slices: List[BatchSlice], now: u64) -> Result[(), Error] {
+    for sl in slices {
+        stream_gc_add_entry(mut gc, sl.store, sl.epoch, inc, seq)?
+        stream_gc_ensure_pin(mut gc, prefixes, sl.store, inc, seq, now)?
+    }
+    Ok(())
+}
+
+// Recomputes `gc.pins` from unreleased batches in `gc.entries` at or above `low`.
+fn stream_gc_refresh_pins(mut gc: StreamGcState, prefixes: Map[StoreId, String], low_inc: u64, low_seq: u64, now: u64) -> Result[(), Error] {
+    let old_pins = replace(mut gc.pins, list.new())
+    for e in gc.entries {
+        for (bi, bs) in e.batches {
+            if stream_pair_below(bi, bs, low_inc, low_seq) {
+                continue
+            }
+            if stream_gc_batch_released(gc.heads, e.store, bi, bs) {
+                continue
+            }
+            let mut existed = false
+            for i in 0u64 .. list.len(gc.pins) {
+                if same(gc.pins[i].store, e.store) {
+                    if stream_pair_below(bi, bs, gc.pins[i].pin_inc, gc.pins[i].pin_seq) {
+                        gc.pins[i].pin_inc = bi
+                        gc.pins[i].pin_seq = bs
+                    }
+                    existed = true
+                    break
+                }
+            }
+            if !existed {
+                let mut pfx = match map.get(prefixes, e.store) {
+                    Some(found) => string.from(found),
+                    None => string.new(),
+                }
+                let mut first_ns = now
+                for op in old_pins {
+                    if same(op.store, e.store) {
+                        if string.byte_len(pfx) == 0 {
+                            pfx = string.from(op.prefix)
+                        }
+                        if op.first_pinned_ns != 0 {
+                            first_ns = op.first_pinned_ns
+                        }
+                        break
+                    }
+                }
+                capacity(list.try_reserve(mut gc.pins, 1))?
+                list.push(mut gc.pins, StreamPin(store: e.store, pin_inc: bi, pin_seq: bs, prefix: take pfx, first_pinned_ns: first_ns))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stream_gc_record_head(mut gc: StreamGcState, prefixes: Map[StoreId, String], low_inc: u64, low_seq: u64, store: StoreId, obs_inc: u64, obs_seq: u64, ranges: HeadRanges, now: u64) -> Result[(), Error] {
+    if let Some(prev) = map.get(gc.heads, store) {
+        if stream_pair_below(obs_inc, obs_seq, prev.obs_inc, prev.obs_seq) {
+            return Ok(())
+        }
+    }
+    capacity(map.try_reserve(mut gc.heads, 1))?
+    map.insert(mut gc.heads, store, HeadSummary(obs_inc, obs_seq, ranges))
+    stream_gc_refresh_pins(mut gc, prefixes, low_inc, low_seq, now)
+}
+
+// Rebuilds pins and batch entries over `[low, (old_inc, term))` after election
+// (§12.11.7 step 5, §12.11.8): loads `x-<k>` when valid, then scans INDEX of
+// later batches up to the terminal fence.
+fn stream_gc_rebuild(mut gc: StreamGcState, mut prefixes: Map[StoreId, String], mut client: std.object.Client, lane: StreamLane, old_inc: u64, term: u64, now: u64, deadline: u64) -> Result[(), Error] waits {
+    let mut scan_inc = if lane.reg.low_inc == 0 {
+        1u64
+    } else {
+        lane.reg.low_inc
+    }
+    let mut scan_seq = if lane.reg.low_inc == 0 {
+        1u64
+    } else {
+        order.max(lane.reg.low_seq, 1)
+    }
+    if let Some(meta) = lane.reg.index {
+        if let Some(take loaded) = stream_xindex_fetch(mut client, lane.dir, lane.sid, meta, deadline)? {
+            let XIndex(entries: take loaded_entries, pins: take loaded_pins, ..) = take loaded
+            for take e in take loaded_entries {
+                capacity(list.try_reserve(mut gc.entries, 1))?
+                list.push(mut gc.entries, take e)
+            }
+            for take p in take loaded_pins {
+                let StreamPin(store: p_store, pin_inc, pin_seq, prefix: take p_prefix, ..) = take p
+                if string.byte_len(p_prefix) != 0 {
+                    let _ = map.try_reserve(mut prefixes, 1)
+                    map.insert(mut prefixes, p_store, string.from(p_prefix))
+                }
+                capacity(list.try_reserve(mut gc.pins, 1))?
+                list.push(mut gc.pins, StreamPin(store: p_store, pin_inc, pin_seq, prefix: take p_prefix, first_pinned_ns: now))
+            }
+            scan_inc = meta.covers_inc
+            scan_seq = meta.covers_seq + 1
+        }
+    }
+    let mut buffers = stream_tail_buffers()?
+    let mut name = string.with_capacity(48)
+    while scan_inc <= old_inc {
+        if scan_inc == old_inc && scan_seq >= term {
+            break
+        }
+        stream_batch_key(mut name, scan_inc, scan_seq)
+        let key = stream_key(lane.dir, name)
+        let Some(()) = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? else {
+            if scan_inc < old_inc {
+                scan_inc += 1
+                scan_seq = 1
+                continue
+            }
+            break
+        }
+        let head = stream_batch_head(key, buffers.index, lane.sid, scan_inc, scan_seq)?
+        match take head {
+            Term(_, _) => {
+                capacity(list.try_reserve(mut gc.fences, 1))?
+                list.push(mut gc.fences, (scan_inc, scan_seq))
+                scan_inc += 1
+                scan_seq = 1
+            },
+            Rows(take first_index) => {
+                let mut batch_index = take first_index
+                if list.len(buffers.index) < batch_index.byte_len {
+                    let Some(()) = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? else {
+                        return Error(disk_fault(key, 0, Absent))
+                    }
+                    let Rows(take full) = stream_batch_head(key, buffers.index, lane.sid, scan_inc, scan_seq)? else {
+                        return Error(disk_fault(key, 72, Malformed))
+                    }
+                    batch_index = take full
+                }
+                for row in batch_index.rows {
+                    stream_gc_add_entry(mut gc, row.store, row.epoch, scan_inc, scan_seq)?
+                    stream_gc_ensure_pin(mut gc, prefixes, row.store, scan_inc, scan_seq, now)?
+                }
+                scan_seq += 1
+            },
+        }
+    }
+    capacity(list.try_reserve(mut gc.fences, 1))?
+    list.push(mut gc.fences, (old_inc, term))
+    Ok(())
+}
+
+// Computes the highest `(inc, seq)` the release rule allows `low` to reach.
+fn stream_gc_compute_low(gc: StreamGcState, reg: StreamRegister, cur_inc: u64, next_seq: u64) -> (u64, u64) {
+    let mut min_inc = cur_inc
+    let mut min_seq = next_seq
+    for e in gc.entries {
+        for (bi, bs) in e.batches {
+            if stream_pair_below(bi, bs, reg.low_inc, reg.low_seq) {
+                continue
+            }
+            if !stream_gc_batch_released(gc.heads, e.store, bi, bs) {
+                if stream_pair_below(bi, bs, min_inc, min_seq) {
+                    min_inc = bi
+                    min_seq = bs
+                }
+            }
+        }
+    }
+    if stream_pair_below(min_inc, min_seq, reg.low_inc, reg.low_seq) {
+        (reg.low_inc, reg.low_seq)
+    } else {
+        (min_inc, min_seq)
+    }
+}
+
+fn stream_gc_fence_of(fences: List[(u64, u64)], inc: u64) -> Option[u64] {
+    for (f_inc, f_term) in fences {
+        if f_inc == inc {
+            return Some(f_term)
+        }
+    }
+    None
+}
+
+// Prunes `entries` below `(low_inc, low_seq)` and returns a cloned list for XINDEX.
+fn stream_gc_prune_entries(mut gc: StreamGcState, low_inc: u64, low_seq: u64) -> Result[List[XIndexEntry], Error] {
+    let mut kept: List[XIndexEntry] = list.new()
+    for take e in replace(mut gc.entries, list.new()) {
+        let XIndexEntry(store, epoch, batches: take old_batches) = take e
+        let mut bs: List[(u64, u64)] = list.new()
+        for (bi, bseq) in old_batches {
+            if !stream_pair_below(bi, bseq, low_inc, low_seq) {
+                capacity(list.try_reserve(mut bs, 1))?
+                list.push(mut bs, (bi, bseq))
+            }
+        }
+        if list.len(bs) != 0 {
+            capacity(list.try_reserve(mut kept, 1))?
+            list.push(mut kept, XIndexEntry(store, epoch, batches: take bs))
+        }
+    }
+    gc.entries = take kept
+    disk_allocation(scoped fn() -> Result[List[XIndexEntry], Error] {
+        Ok(clone(gc.entries))
+    })
+}
+
+// Index checkpoint (§12.11.8): creates `x-<k+1>`, CASes `reg` with the new
+// `index` and highest `low` allowed by the release rule, then deletes retired
+// batches, old TERMs, and the previous XINDEX below the new `low`.
+fn stream_gc_checkpoint(mut s: StreamService, deadline: u64) -> Result[(), Error] waits {
+    if stream_is_latched(s.lane) || s.lane.seq <= 1 {
+        return Ok(())
+    }
+    let now = host.mono_ns(s.clock)
+    let covers_inc = s.lane.inc
+    let covers_seq = s.lane.seq - 1
+    let (new_low_inc, new_low_seq) = stream_gc_compute_low(s.gc, s.lane.reg, s.lane.inc, s.lane.seq)
+    let old_k = match s.lane.reg.index {
+        Some(x) => x.k,
+        None => 0u64,
+    }
+    let next_k = old_k + 1
+    stream_gc_refresh_pins(mut s.gc, s.prefixes, new_low_inc, new_low_seq, now)?
+    let mut snap_entries: List[XIndexEntry] = list.new()
+    for e in s.gc.entries {
+        let mut bs: List[(u64, u64)] = list.new()
+        for (bi, bseq) in e.batches {
+            if !stream_pair_below(bi, bseq, new_low_inc, new_low_seq) {
+                capacity(list.try_reserve(mut bs, 1))?
+                list.push(mut bs, (bi, bseq))
+            }
+        }
+        if list.len(bs) != 0 {
+            capacity(list.try_reserve(mut snap_entries, 1))?
+            list.push(mut snap_entries, XIndexEntry(store: e.store, epoch: e.epoch, batches: take bs))
+        }
+    }
+    let snap_pins = disk_allocation(scoped fn() -> Result[List[StreamPin], Error] {
+        Ok(clone(s.gc.pins))
+    })?
+    let xidx = XIndex(k: next_k, low_inc: new_low_inc, low_seq: new_low_seq, covers_inc, covers_seq, entries: take snap_entries, pins: take snap_pins)
+    let mut xbuf: Bytes = list.new()
+    let reg_idx = stream_xindex_encode(mut xbuf, s.lane.sid, s.lane.inc, s.lane.authority_kind, xidx)?
+    let mut xname = string.with_capacity(32)
+    stream_xindex_key(mut xname, next_k)
+    let xkey = stream_key(s.lane.dir, xname)
+    let (take created, take back) = std.object.store_if_retry(mut s.client, xkey, Absent, take xbuf, deadline)
+    xbuf = take back
+    match take created {
+        Ok(Applied(_)) => (),
+        Ok(Mismatch) => {
+            let mut cmp: Bytes = list.new()
+            capacity(list.try_reserve(mut cmp, list.len(xbuf)))?
+            let (take got, take cback) = std.object.fetch(mut s.client, xkey, take cmp, deadline)
+            cmp = take cback
+            if let Error(_) = got {
+                return Ok(())
+            }
+            if cmp != xbuf {
+                return Error(disk_fault(xkey, 0, Malformed))
+            }
+        },
+        Error(_) => return Ok(()),
+    }
+    match stream_reg_write(mut s.lane, mut s.client, Checkpoint(new_low_inc, new_low_seq, reg_idx), deadline) {
+        Ok(Written) => {
+            s.last_reg_ns = host.mono_ns(s.clock)
+            s.gc.batches_since_checkpoint = 0
+            let _ = stream_gc_prune_entries(mut s.gc, s.lane.reg.low_inc, s.lane.reg.low_seq)?
+            stream_gc_refresh_pins(mut s.gc, s.prefixes, s.lane.reg.low_inc, s.lane.reg.low_seq, s.last_reg_ns)?
+            stream_gc_delete_below(mut s, old_k, next_k, deadline)
+            Ok(())
+        },
+        Ok(Moved) => {
+            s.lane.latched = Some(Superseded)
+            stream_service_latched(mut s, Superseded)
+            Ok(())
+        },
+        Error(_) => {
+            if let Some(cause) = s.lane.latched {
+                stream_service_latched(mut s, cause)
+            }
+            Ok(())
+        },
+    }
+}
+
+// Deletes retired batches, old TERMs and the superseded XINDEX strictly below
+// `s.lane.reg.low` — called ONLY after the `reg` CAS raising `low` Applied.
+fn stream_gc_delete_below(mut s: StreamService, old_k: u64, next_k: u64, deadline: u64) waits {
+    let low_inc = s.lane.reg.low_inc
+    let low_seq = s.lane.reg.low_seq
+    let mut name = string.with_capacity(48)
+    let mut cur_inc = s.gc.deleted_inc
+    let mut cur_seq = s.gc.deleted_seq
+    while stream_pair_below(cur_inc, cur_seq, low_inc, low_seq) {
+        if cur_inc < low_inc {
+            let Some(term) = stream_gc_fence_of(s.gc.fences, cur_inc) else {
+                cur_inc += 1
+                cur_seq = 1
+                continue
+            }
+            while cur_seq <= term {
+                stream_batch_key(mut name, cur_inc, cur_seq)
+                let key = stream_key(s.lane.dir, name)
+                let _ = std.object.erase(mut s.client, key, deadline)
+                cur_seq += 1
+            }
+            cur_inc += 1
+            cur_seq = 1
+        } else {
+            stream_batch_key(mut name, cur_inc, cur_seq)
+            let key = stream_key(s.lane.dir, name)
+            let _ = std.object.erase(mut s.client, key, deadline)
+            cur_seq += 1
+        }
+    }
+    s.gc.deleted_inc = low_inc
+    s.gc.deleted_seq = order.max(low_seq, 1)
+    if old_k > 0 && old_k < next_k {
+        stream_xindex_key(mut name, old_k)
+        let old_x = stream_key(s.lane.dir, name)
+        let _ = std.object.erase(mut s.client, old_x, deadline)
+    }
+}
+
+// Pin head poll (§12.11.8): for each pinned Place not currently served on a
+// live slot, GETs its head on the service's read lane to learn whether its
+// `live` and `sealed` entries have moved past its pinned batches.
+fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error] waits {
+    if stream_is_latched(s.lane) || list.len(s.gc.pins) == 0 {
+        return Ok(())
+    }
+    let now = host.mono_ns(s.clock)
+    let mut targets: List[(StoreId, String)] = list.new()
+    for held_pin in s.gc.pins {
+        let mut served = false
+        for sl in s.slots {
+            if let Some(place) = sl.place {
+                if !place.fenced && same(place.store, held_pin.store) {
+                    served = true
+                    break
+                }
+            }
+        }
+        if served {
+            continue
+        }
+        let pfx = if string.byte_len(held_pin.prefix) != 0 {
+            string.from(held_pin.prefix)
+        } else {
+            match map.get(s.prefixes, held_pin.store) {
+                Some(found) => string.from(found),
+                None => continue,
+            }
+        }
+        capacity(list.try_reserve(mut targets, 1))?
+        list.push(mut targets, (held_pin.store, take pfx))
+    }
+    for (store, place_prefix) in targets {
+        let obs_inc = s.lane.inc
+        let obs_seq = if s.lane.seq > 1 {
+            s.lane.seq - 1
+        } else {
+            0u64
+        }
+        let key = stream_key(place_prefix, "head")
+        let mut scratch = replace(mut s.lane.compare, list.new())
+        let fetched = stream_at_root(mut s.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+            let _ = history_fetch(mut c, key, mut scratch, deadline)?
+            Ok(())
+        })
+        s.lane.compare = take scratch
+        if let Error(_) = fetched {
+            continue
+        }
+        let Ok((_, take attach)) = history_decode_head_attach(s.lane.compare) else {
+            continue
+        }
+        let ranges = stream_attach_head_ranges(attach, s.lane.sid)
+        stream_gc_record_head(mut s.gc, s.prefixes, s.lane.reg.low_inc, s.lane.reg.low_seq, store, obs_inc, obs_seq, ranges, now)?
+    }
+    Ok(())
+}

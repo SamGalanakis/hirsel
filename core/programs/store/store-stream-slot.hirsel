@@ -45,8 +45,8 @@ type SlotAck: cross = SlotGranted(u64, u64) | SlotAcked(u64, u64) | SlotPollHead
 
 // Out-of-band head reports from a Place to the service (§12.11.12), carried on
 // a dedicated shared connection so queued frames on a stalled slot never block
-// settle or fence replies.
-type SlotReport: cross = ReportSettled(u32, u64, bool, u64, u64, u32) | ReportFenced(u32, u64, u64, Option[u64]) | ReportDetached(u32, u64)
+// settle, cut or fence replies.
+type SlotReport: cross = ReportSettled(u32, u64, bool, u64, u64, u32) | ReportFenced(u32, u64, u64, Option[u64]) | ReportDetached(u32, u64) | ReportHead(u32, u64, u64, u64, u64, HeadRanges)
 
 // The doorbell item that wakes the service for its control channel.
 const STREAM_CONTROL_RING: u32 = 0xFFFFFFFF
@@ -334,6 +334,11 @@ fn slot_ring(link: SlotLink) {
 fn slot_report(link: SlotLink, take report: SlotReport) {
     let _ = conn.try_send(link.reports, take report)
     slot_ring(link)
+}
+
+fn slot_report_head(link: SlotLink, store: StoreId, attach: Option[Attach], obs_seq: u64) {
+    let ranges = stream_attach_head_ranges(attach, link.sid)
+    slot_report(link, ReportHead(link.slot, store.hi, store.lo, link.inc, obs_seq, ranges))
 }
 
 // Forwards service answers on a Place's reply connection into the Place's

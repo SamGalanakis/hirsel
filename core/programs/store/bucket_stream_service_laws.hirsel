@@ -415,23 +415,41 @@ fn stream_cost_law(c: Clock, r: Random, tasks: Tasks, wait_ms: u64, batches: u64
     let report = bucket_law_report(take s)
     outcome?
     let end = std.clock.deadline_after_ms(start, STREAM_COST_COMMITS * STREAM_COST_SPACING_MS)
+    let mut pre_batches = 0u64
     let mut puts = 0u64
+    let mut xindex_puts = 0u64
     let mut expect_put = true
+    let mut expect_ckpt_reg = false
     for request in report.requests {
-        if request.at_ns < start || request.at_ns >= end {
+        if request.at_ns < start {
+            if request.method == "PUT" && stream_service_is_batch(request.key) && request.status == 200 {
+                pre_batches += 1
+            }
             continue
         }
-        if expect_put && request.method == "PUT" && stream_service_is_batch(request.key) {
-            puts += 1
-        } else if !expect_put && request.method == "GET" && request.key == stream_service_key(string.from("reg")) {
-            ()
-        } else {
-            fail("the commit window sent other than one batch PUT then one reg GET per batch")
+        if request.at_ns >= end {
+            continue
         }
-        expect_put = !expect_put
+        if expect_ckpt_reg && request.method == "PUT" && request.key == stream_service_key(string.from("reg")) {
+            expect_ckpt_reg = false
+        } else if expect_put && request.method == "PUT" && string.starts_with(request.key, stream_service_key(string.from("x-"))) {
+            xindex_puts += 1
+            expect_ckpt_reg = true
+        } else if expect_put && request.method == "PUT" && stream_service_is_batch(request.key) {
+            puts += 1
+            expect_put = false
+        } else if !expect_put && request.method == "GET" && request.key == stream_service_key(string.from("reg")) {
+            expect_put = true
+        } else {
+            fail("the commit window sent other than one batch PUT then one reg GET per batch (and index checkpoints)")
+        }
     }
-    if puts != batches || !expect_put {
+    if puts != batches || !expect_put || expect_ckpt_reg {
         fail("the commit window's batch count is not the hand-derived one")
+    }
+    let want_ckpts = (pre_batches + batches) / 512 - pre_batches / 512
+    if xindex_puts != want_ckpts {
+        fail("the commit window's index checkpoint count is not 2 A per 512 batches")
     }
     Ok(())
 }

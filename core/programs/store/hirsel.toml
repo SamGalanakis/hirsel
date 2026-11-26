@@ -81,6 +81,7 @@ std = { major = 1 }
 "store-stream-poll.hirsel" = "store"
 "store-stream-claim.hirsel" = "store"
 "store-stream-settle.hirsel" = "store"
+"store-stream-gc.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
 "store-history-packs.hirsel" = "store"
@@ -152,6 +153,7 @@ dirs = ["."]
 "bucket_stream_claim_laws.hirsel" = "store"
 "bucket_stream_unhold_laws.hirsel" = "store"
 "bucket_stream_election_laws.hirsel" = "store"
+"bucket_stream_gc_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "store_reclaim_laws.hirsel" = "store"
@@ -281,6 +283,12 @@ limit = 402653184
 limit = 402653184
 
 [tests.runs."store@1/store/bucket_stream_zombie_election"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_stream_404_cases"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_stream_pin_limit"]
 limit = 402653184
 
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,

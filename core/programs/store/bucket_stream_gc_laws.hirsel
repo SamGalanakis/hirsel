@@ -1,0 +1,325 @@
+// L90-B4 and pin-limit laws for XINDEX checkpoints, low-water retirement,
+// batch deletes, max_pins enforcement and the full 404 table
+// (STORE-SPEC §12.11.8, §12.11.15).
+const GC_OP_MS: u64 = 2000
+
+const GC_HOLD_MS: u64 = 8000
+
+const GC_IDLE_MS: u64 = 5000
+
+fn stream_gc_plan(max_slots: u32, max_pins: u32, index_every: u64) -> StreamPlan {
+    let mut limits = stream_limits()
+    limits.max_slots = max_slots
+    limits.max_pins = max_pins
+    limits.hold_ms = GC_HOLD_MS
+    limits.idle_poll_ms = GC_IDLE_MS
+    limits.index_every = index_every
+    StreamPlan(sid: stream_law_sid(), prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms: 0, max_batch_bytes: FRAME_LIMIT + 4096), limits: take limits)
+}
+
+fn stream_gc_service(s: BucketSim, tasks: Tasks, r: Random, seed: u64, max_slots: u32, max_pins: u32, index_every: u64) -> Result[JournalService, Error] waits {
+    let plan = stream_gc_plan(max_slots, max_pins, index_every)
+    let client = stream_service_client(s, tasks, seed, "", "us-east-1")?
+    let authority = object_authority(take client, "bucket", GC_OP_MS)
+    Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn stream_gc_make_place(s: BucketSim, tasks: Tasks, r: Random, seed: u64, place_prefix: String) -> Result[(), Error] waits {
+    let client = stream_service_client(s, tasks, seed, place_prefix, "us-east-1")?
+    let mut made = open_authority(tasks, object_authority(take client, "bucket", GC_OP_MS), s.time, r, stream_unhold_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let _ = bucket_law_rows_table(mut made)?
+    close(take made)
+}
+
+fn stream_gc_open_attached(s: BucketSim, tasks: Tasks, r: Random, mut service: JournalService, seed: u64, place_prefix: String) -> Result[Db, Error] waits {
+    let slot = journal_slot(mut service)?
+    let client = stream_service_client(s, tasks, seed, place_prefix, "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", GC_OP_MS), take slot)?
+    Ok(open_authority(tasks, take attached, s.time, r, stream_unhold_options(false)) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+type GcClaimant: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    r: Random,
+    slot: JournalSlot,
+    seed: u64,
+    place_prefix: String,
+    expect_rows: u64
+}
+
+fn stream_gc_claim_task(take job: GcClaimant) -> Result[u64, Error] waits {
+    let GcClaimant(endpoint, clock, tasks, r, slot: take slot, seed, place_prefix: take place_prefix, expect_rows) = take job
+    let client = stream_endpoint_client(endpoint, clock, tasks, seed, place_prefix, "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", GC_OP_MS), take slot)?
+    let mut db = open_authority(tasks, take attached, clock, r, stream_unhold_options(false)) ?=> |Refusal(error: take problem, ..)| take problem
+    let got = bucket_law_rows(mut db)?
+    close(take db)?
+    if got != expect_rows {
+        let mut msg = string.from("rows:")
+        string.push_u64(mut msg, got)
+        string.push(mut msg, "!=")
+        string.push_u64(mut msg, expect_rows)
+        return Error(Missing(take msg))
+    }
+    Ok(got)
+}
+
+fn stream_gc_count_req(report: std.sim.s3.Report, method: String, key: String, status: u16) -> u64 {
+    let mut n = 0u64
+    for q in report.requests {
+        if q.method == method && q.key == key && q.status == status {
+            n += 1
+        }
+    }
+    n
+}
+
+// L90-B4 (§12.11.8, §12.11.15): all 4 cases of the 404 table:
+// 1. Retired, head unchanged: skip to low and read X's acked frame in batch 11.
+// 2. Head moved: X's cut moves head before delete; restart attempt from new head.
+// 3. Sealed range: X has a sealed entry containing batch 10 while live.from > 10;
+//    low never passes 10 and batch 10 is never deleted.
+// 4. Racing create: 404 for n, then n created & checkpointed with low <= n;
+//    single re-GET finds n and continues.
+@test
+fn bucket_stream_404_cases(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    stream_b4_retired_unchanged(c, r, tasks)?
+    stream_b4_head_moved(c, r, tasks)?
+    stream_b4_sealed_range(c, r, tasks)?
+    stream_b4_racing_create(c, r, tasks)
+}
+
+fn stream_b4_retired_unchanged(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let b10 = stream_service_key(string.from("b-00000000000000000001-00000000000000000010"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // Hold B's GET of batch 10 until A raises low to 11 and deletes batch 10.
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(b10), from: 1, count: 1, until: Applied("DELETE", clone(b10), 1), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 131, None, list.new(), take holds, std.sim.world.plan(131))
+    let outcome = stream_b4_retired_unchanged_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if stream_gc_count_req(report, "GET", clone(b10), 404) == 0 {
+        fail("L90-B4(1): B did not encounter 404 on retired batch 10")
+    }
+    if map.contains(report.objects, b10) {
+        fail("L90-B4(1): retired batch 10 was not deleted")
+    }
+    Ok(())
+}
+
+fn stream_b4_retired_unchanged_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc = stream_gc_service(s, tasks, r, 81, 6, 16, 12)?
+    stream_gc_make_place(s, tasks, r, 82, string.from("pY/"))?
+    stream_gc_make_place(s, tasks, r, 83, string.from("pX/"))?
+    let mut y = stream_gc_open_attached(s, tasks, r, mut svc, 84, string.from("pY/"))? // batch 1
+    let mut x = stream_gc_open_attached(s, tasks, r, mut svc, 85, string.from("pX/"))? // batch 2
+    for k in 1u64 .. 7u64 {
+        bucket_law_commit(mut y, k)? // batches 3..8
+    }
+    bucket_law_commit(mut x, 1)? // batch 9
+    let cut_x = checkpoint(mut x)?
+    durable(mut x, cut_x)? // X.live.from_seq == 10
+    bucket_law_commit(mut y, 10)? // batch 10: Y only
+    bucket_law_commit(mut x, 2)? // batch 11: X acked frame
+    let slot_b = journal_slot(mut svc)?
+    let claim = GcClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 86, place_prefix: string.from("pX/"), expect_rows: 2)
+    let running = task.spawn(tasks, bytes 33554432, take claim, stream_gc_claim_task)
+    std.clock.sleep_ns(s.time, 100 * 1000000)
+    // Y cuts (releasing batch 10) and commits batch 12 -> index checkpoint raises low to 11 & deletes 10.
+    let cut_y = checkpoint(mut y)?
+    durable(mut y, cut_y)?
+    bucket_law_commit(mut y, 12)?
+    match task.join(take running) {
+        Ok(take ended) => {
+            let _ = ended?
+        },
+        Error(_) => fail("L90-B4(1): B claim task failed"),
+    }
+    let _ = close(take x)
+    close(take y)?
+    close_journal_service(take svc)
+}
+
+fn stream_b4_head_moved(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let b10 = stream_service_key(string.from("b-00000000000000000001-00000000000000000010"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(b10), from: 1, count: 1, until: Applied("DELETE", clone(b10), 1), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 132, None, list.new(), take holds, std.sim.world.plan(132))
+    let outcome = stream_b4_head_moved_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if stream_gc_count_req(report, "GET", clone(b10), 404) == 0 {
+        fail("L90-B4(2): B did not encounter 404 on retired batch 10")
+    }
+    if map.contains(report.objects, b10) {
+        fail("L90-B4(2): retired batch 10 was not deleted")
+    }
+    Ok(())
+}
+
+fn stream_b4_head_moved_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc = stream_gc_service(s, tasks, r, 81, 6, 16, 12)?
+    stream_gc_make_place(s, tasks, r, 82, string.from("pY/"))?
+    stream_gc_make_place(s, tasks, r, 83, string.from("pX/"))?
+    let mut y = stream_gc_open_attached(s, tasks, r, mut svc, 84, string.from("pY/"))? // batch 1
+    let mut x = stream_gc_open_attached(s, tasks, r, mut svc, 85, string.from("pX/"))? // batch 2
+    for k in 1u64 .. 7u64 {
+        bucket_law_commit(mut y, k)? // batches 3..8
+    }
+    bucket_law_commit(mut x, 1)? // batch 9
+    let cut_x1 = checkpoint(mut x)?
+    durable(mut x, cut_x1)? // X.live.from_seq == 10
+    bucket_law_commit(mut x, 2)? // batch 10: X
+    bucket_law_commit(mut x, 3)? // batch 11: X
+    let slot_b = journal_slot(mut svc)?
+    let claim = GcClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 86, place_prefix: string.from("pX/"), expect_rows: 3)
+    let running = task.spawn(tasks, bytes 33554432, take claim, stream_gc_claim_task)
+    std.clock.sleep_ns(s.time, 100 * 1000000)
+    // X cuts (moving pX/head past 10..11) and Y commits batch 12 -> low rises to 12 & deletes 10.
+    let cut_x2 = checkpoint(mut x)?
+    durable(mut x, cut_x2)?
+    let cut_y = checkpoint(mut y)?
+    durable(mut y, cut_y)?
+    bucket_law_commit(mut y, 12)?
+    match task.join(take running) {
+        Ok(take ended) => {
+            let _ = ended?
+        },
+        Error(_) => fail("L90-B4(2): B claim task failed after head move"),
+    }
+    let _ = close(take x)
+    close(take y)?
+    close_journal_service(take svc)
+}
+
+fn stream_b4_sealed_range(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let b10 = stream_service_key(string.from("b-00000000000000000001-00000000000000000010"))
+    let reg = stream_service_key(string.from("reg"))
+    let s = bucket_law_sim(tasks, c, 133, None, list.new())
+    let outcome = stream_b4_sealed_range_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if !map.contains(report.objects, b10) {
+        fail("L90-B4(3): batch 10 inside X's sealed range was deleted")
+    }
+    if stream_gc_count_req(report, "DELETE", clone(b10), 204) != 0 {
+        fail("L90-B4(3): service issued DELETE on batch 10 inside sealed range")
+    }
+    let Some(reg_obj) = map.get(report.objects, reg) else {
+        fail("L90-B4(3): reg missing")
+    }
+    let final_reg = stream_register_decode(reg_obj.data, stream_law_sid(), 0)?
+    if final_reg.low_inc > 1 || (final_reg.low_inc == 1 && final_reg.low_seq > 10) {
+        fail("L90-B4(3): low passed batch 10 while X's sealed entry contained it")
+    }
+    Ok(())
+}
+
+fn stream_b4_sealed_range_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc = stream_gc_service(s, tasks, r, 81, 6, 16, 1)?
+    stream_gc_make_place(s, tasks, r, 82, string.from("pY/"))?
+    stream_gc_make_place(s, tasks, r, 83, string.from("pX/"))?
+    let mut y = stream_gc_open_attached(s, tasks, r, mut svc, 84, string.from("pY/"))? // batch 1
+    let mut x1 = stream_gc_open_attached(s, tasks, r, mut svc, 85, string.from("pX/"))? // batch 2
+    for k in 1u64 .. 8u64 {
+        bucket_law_commit(mut y, k)? // batches 3..9
+    }
+    bucket_law_commit(mut x1, 1)? // batch 10: X
+    // Claim X on same service: seals (1, from=2, cutoff=10), sets live.from = 11.
+    let mut x2 = stream_gc_open_attached(s, tasks, r, mut svc, 86, string.from("pX/"))? // CLAIM batch 11
+    let _ = close(take x1)
+    let cut_y = checkpoint(mut y)?
+    durable(mut y, cut_y)?
+    // More commits trigger checkpoints; low must stop at or before 10 because X's sealed holds 10.
+    bucket_law_commit(mut y, 12)?
+    bucket_law_commit(mut x2, 2)?
+    bucket_law_commit(mut y, 13)?
+    // Reopen X (no cut) to confirm batch 10 is still readable with zero 404.
+    let mut x3 = stream_gc_open_attached(s, tasks, r, mut svc, 87, string.from("pX/"))?
+    if bucket_law_rows(mut x3)? != 2 {
+        let _ = close(take x3)
+        let _ = close(take x2)
+        let _ = close(take y)
+        let _ = close_journal_service(take svc)
+        fail("L90-B4(3): reopen missed row in sealed batch 10")
+    }
+    // Leave x3 unclosed (drop handle) so sealed batch 10 stays pinned in final reg check.
+    let _ = take x3
+    let _ = take x2
+    close(take y)?
+    close_journal_service(take svc)
+}
+
+fn stream_b4_racing_create(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    let b3 = stream_service_key(string.from("b-00000000000000000001-00000000000000000003"))
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(2)
+    // GET reg #1: start (404); #2: CLAIM batch 1; #3: row 1 batch 2;
+    // #4: B's step 2 reg read; #5: B's post-404 reg read after GET b-1-3 returns 404.
+    // PUT reg #1: create; #2: elect; #3: ckpt 1; #4: ckpt 2; #5: ckpt 3 (covers b-1-3).
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(b3), from: 1, count: 1, until: Requested("GET", clone(reg), 5), then: Apply))
+    list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(reg), from: 5, count: 1, until: Applied("PUT", clone(reg), 5), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 134, None, list.new(), take holds, std.sim.world.plan(134))
+    let outcome = stream_b4_racing_create_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if stream_gc_count_req(report, "GET", clone(b3), 404) == 0 {
+        fail("L90-B4(4): reader did not see initial 404 on racing batch 3")
+    }
+    if stream_gc_count_req(report, "GET", clone(b3), 206) == 0 {
+        fail("L90-B4(4): reader did not re-GET batch 3 after covers_through advanced")
+    }
+    Ok(())
+}
+
+fn stream_b4_racing_create_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc = stream_gc_service(s, tasks, r, 81, 6, 16, 1)?
+    stream_gc_make_place(s, tasks, r, 82, string.from("pX/"))?
+    let mut x = stream_gc_open_attached(s, tasks, r, mut svc, 83, string.from("pX/"))? // batch 1
+    bucket_law_commit(mut x, 1)? // batch 2
+    let slot_b = journal_slot(mut svc)?
+    // Start commit row 2 -> PUT b-1-3 is held until B's post-404 GET reg #5 arrives.
+    let _t2 = stream_unhold_commit_ticket(mut x, 2)?
+    let claim = GcClaimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, seed: 84, place_prefix: string.from("pX/"), expect_rows: 2)
+    let running = task.spawn(tasks, bytes 33554432, take claim, stream_gc_claim_task)
+    match task.join(take running) {
+        Ok(take ended) => {
+            let _ = ended?
+        },
+        Error(_) => fail("L90-B4(4): B claim task failed on racing create"),
+    }
+    let _ = close(take x)
+    close_journal_service(take svc)
+}
+
+// max_pins enforcement (§12.11.1, §12.11.8): one pin is reserved for the
+// janitor, so with max_pins == 2, after 1 Place pins a batch the next
+// journal_slot returns Full(Pins); closing that Place and checkpointing frees
+// the pin so journal_slot succeeds again.
+@test
+fn bucket_stream_pin_limit(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 135, None, list.new())
+    let outcome = stream_pin_limit_run(s, tasks, r)
+    let _ = bucket_law_report(take s)
+    outcome
+}
+
+fn stream_pin_limit_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc = stream_gc_service(s, tasks, r, 81, 4, 2, 1)?
+    stream_gc_make_place(s, tasks, r, 82, string.from("p1/"))?
+    let mut p1 = stream_gc_open_attached(s, tasks, r, mut svc, 83, string.from("p1/"))?
+    bucket_law_commit(mut p1, 1)?
+    // p1 holds 1 pin; max_pins == 2 leaves 1 reserved for the janitor -> Full(Pins).
+    match journal_slot(mut svc) {
+        Error(Full(Pins(_))) => (),
+        _ => fail("journal_slot did not refuse Full(Pins) at max_pins - 1"),
+    }
+    // Closing p1 settles and drops ATTACH, releasing p1's pin.
+    close(take p1)?
+    // Wait briefly for the close ReportHead to be processed by the service.
+    std.clock.sleep_ns(s.time, 50 * 1000000)
+    let _slot2 = journal_slot(mut svc)?
+    close_journal_service(take svc)
+}

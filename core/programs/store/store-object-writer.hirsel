@@ -490,8 +490,9 @@ fn object_cut_work(mut db: Db, mut lane: ObjectJournalSession, take delta: Holde
         let advanced = history_publish_checkpoint(mut lane.client, mut lane.register, lane.authority, installed, retained, locate_root, activation, mut workspace, now)
         match take advanced {
             Ok(HistoryApplied(_)) => {
-                if drop_on_cut {
-                    if let Some(link) = lane.stream {
+                if let Some(link) = lane.stream {
+                    slot_report_head(link, old.store, lane.register.attach, link.last_batch_seq)
+                    if drop_on_cut {
                         slot_report(link, ReportDetached(link.slot, old.pair.epoch))
                     }
                 }

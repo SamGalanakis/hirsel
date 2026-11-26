@@ -159,15 +159,15 @@ fn stage_mtu_probe(mut staged: List[Staged], mut c: Connection, now: u64, slot: 
         c.wake = earliest(c.wake, Some(at))
         return
     }
-    let mut payload: Bytes = list.with_capacity(1)
-    if let Error(_) = codec.write_frame(Ping, b"", mut payload) {
+    list.clear(mut c.tx_payload)
+    if let Error(_) = codec.write_frame(Ping, b"", mut c.tx_payload) {
         return
     }
     let at = c.application.crypto_committed
-    let Some(number) = seal_packet(mut c.application, OneRtt, c.peer_id, c.local_id, payload, size, mut out) else {
+    let Some(number) = seal_packet(mut c.application, OneRtt, c.peer_id, c.local_id, c.tx_payload, size, mut out) else {
         return
     }
-    let p = StagedPacket(number: number, size: list.len(out) - start, crypto_at: at, crypto_end: at, resent: false, ack: false, done: false, close: false, eliciting: true, path: false, mtu_probe: true, frames: list.new())
+    let p = StagedPacket(number: number, size: list.len(out) - start, crypto_at: at, crypto_end: at, resent: false, ack: false, done: false, close: false, eliciting: true, path: false, mtu_probe: true, frame_start: 0, frame_len: 0)
     list.push(mut staged, Packet(slot: slot, handle: c.handle, kind: OneRtt, packet: p))
     list.push(mut tx, Transmit(to: c.peer, at: start, len: list.len(out) - start, ecn: ecn, send_at: now))
 }

@@ -17,6 +17,7 @@ pub opaque type Endpoint {
     live: u64,
     stateless: List[Stateless],
     staged: List[Staged],
+    staged_frames: List[SentFrame],
     drops: Map[DropReason, u64],
     plain: Bytes,
     tail: Bytes,
@@ -41,7 +42,7 @@ pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshak
             return Error(Config)
         }
     }
-    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new(), datagram_room: 0, drive_out: b"", drive_tx: list.new(), drive_udp: list.new(), drive_in: b"", drive_packets: list.new()))
+    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.with_capacity(DRIVE_BATCH), staged_frames: list.with_capacity(DRIVE_BATCH * 4), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new(), datagram_room: 0, drive_out: b"", drive_tx: list.new(), drive_udp: list.new(), drive_in: b"", drive_packets: list.new()))
 }
 
 fn dropped(mut drops: Map[DropReason, u64], reason: DropReason) {
@@ -119,7 +120,7 @@ fn add_connection(mut e: Endpoint, take c: Connection) {
 pub fn connect(mut e: Endpoint, now: u64, to: Addr, take name: String, take pins: List[handshake.Pin], take identity: Option[handshake.Identity], take t: TransportConfig) -> Result[ConnectionHandle, QuicError] {
     let handle = reserve_handle(e)?
     let original = random_id(e.random, 8)
-    let mut c = new_connection(handle, Client, to, draw_local_id(e), clone(original), clone(original), take original, take t, None, now)?
+    let mut c = new_connection(handle, Client, to, draw_local_id(e), clone(original), clone(original), take original, take t, None, e.config.max_mtu, now)?
     start_client(mut c, e.random, e.config.max_mtu, take name, take pins, take identity)?
     add_connection(mut e, take c)
     Ok(handle)

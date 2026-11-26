@@ -209,7 +209,7 @@ fn control(f: codec.Frame, record: SentFrame, cap: u64, mut payload: Bytes, mut 
 
 /// Flow-control, stop, reset and blocked frames, CID frames, then the test seam's raw
 /// frames.
-fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
+fn control_frames(mut st: Streams, is_confirmed: bool, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
     if st.max_data_pending && control(MaxData(st.max_data), MaxDataSent, cap, mut payload, mut frames) {
         st.max_data_pending = false
     }
@@ -259,7 +259,7 @@ fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: Lis
             st.data_blocked_at = Some(st.peer_max_data)
         }
     }
-    cid_frames(mut st, cap, mut payload, mut frames)
+    cid_frames(mut st, is_confirmed, cap, mut payload, mut frames)
     if list.len(st.seam) > 0 && cap - list.len(payload) >= list.len(st.seam) {
         list.append(mut payload, st.seam)
         list.clear(mut st.seam)
@@ -269,11 +269,11 @@ fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: Lis
 
 /// Fill the rest of a 1-RTT payload: control frames, then STREAM and DATAGRAM frames by
 /// priority. True when the packet ran out of room before the queues ran out of frames.
-fn fill_streams(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
+fn fill_streams(mut st: Streams, is_confirmed: bool, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
     if !st.ready {
         return false
     }
-    control_frames(mut st, cap, mut payload, mut frames)
+    control_frames(mut st, is_confirmed, cap, mut payload, mut frames)
     while cap - list.len(payload) > 4 {
         let stream = next_stream(st)
         let datagram_first: Option[u64] = match (stream, next_datagram(st)) {
@@ -307,6 +307,25 @@ fn fill_streams(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[
     true
 }
 
+/// Shift live queued pieces to index 0 in place, reusing the backing storage.
+fn compact_pieces(mut s: Send) {
+    if s.head == 0 {
+        return
+    }
+    let n = list.len(s.pieces)
+    if s.head >= n {
+        list.clear(mut s.pieces)
+        s.head = 0
+        return
+    }
+    let remaining = n - s.head
+    for k in 0u64 .. remaining {
+        list.swap(mut s.pieces, k, s.head + k)
+    }
+    list.truncate(mut s.pieces, remaining)
+    s.head = 0
+}
+
 /// Free queued pieces wholly below the acknowledged floor.
 fn free_pieces(mut s: Send) {
     while s.head < list.len(s.pieces) && s.pieces[s.head].offset + s.pieces[s.head].len <= s.floor {
@@ -316,10 +335,8 @@ fn free_pieces(mut s: Send) {
     if s.head == list.len(s.pieces) {
         list.clear(mut s.pieces)
         s.head = 0
-    } else if s.head >= 64 && 2 * s.head >= list.len(s.pieces) {
-        let rest: List[Piece] = clone(list.slice(s.pieces, s.head, list.len(s.pieces)))
-        s.pieces = take rest
-        s.head = 0
+    } else if s.head >= 32 && 2 * s.head >= list.len(s.pieces) {
+        compact_pieces(mut s)
     }
 }
 
@@ -339,16 +356,22 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
         match f {
             Data(offset: offset, len: len, fin: fin, ..) => {
                 let end = order.min(offset + len, s.written)
-                if end > s.floor {
-                    add_run(mut s.acked, order.max(offset, s.floor), end)
-                }
                 let mut floor = s.floor
+                if end > floor {
+                    if offset <= floor {
+                        floor = end
+                    } else {
+                        add_run(mut s.acked, offset, end)
+                    }
+                }
                 let mut k = 0u64
                 while k < list.len(s.acked) && s.acked[k].start <= floor {
                     floor = order.max(floor, s.acked[k].end)
                     k += 1
                 }
-                trim_runs_below(mut s.acked, floor)
+                if k > 0 || (list.len(s.acked) > 0 && s.acked[0].start < floor) {
+                    trim_runs_below(mut s.acked, floor)
+                }
                 freed = floor - s.floor
                 s.floor = floor
                 free_pieces(mut s)
@@ -374,97 +397,130 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
 }
 
 /// QS5's verdict for application packets: frames of an acknowledged packet settle,
-/// frames of a lost one go back on their queues.
+/// frames of a lost one go back on their queues. Compacts `inflight` and `inflight_frames`
+/// in place using ascending packet-number cursors, allocating nothing.
 fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], lost: List[u64], mut events: List[Event]) {
-    if list.len(st.inflight) == 0 {
+    let count = list.len(st.inflight)
+    if count == 0 {
         return
     }
-    let mut packets = replace(mut st.inflight, list.new())
-    for i in 0u64 .. list.len(packets) {
-        let p = list.set(mut packets, i, SentPacket(number: 0, frames: list.new()))
-        if contains(acked, p.number) {
-            for f in p.frames {
+    let ack_n = list.len(acked)
+    let lost_n = list.len(lost)
+    let mut ack_i = 0u64
+    let mut lost_i = 0u64
+    let mut write_pkt = 0u64
+    let mut write_frame = 0u64
+    for i in 0u64 .. count {
+        let p = st.inflight[i]
+        while ack_i < ack_n && acked[ack_i] < p.number {
+            ack_i += 1
+        }
+        while lost_i < lost_n && lost[lost_i] < p.number {
+            lost_i += 1
+        }
+        if ack_i < ack_n && acked[ack_i] == p.number {
+            ack_i += 1
+            for j in p.start .. p.start + p.len {
+                let f = st.inflight_frames[j]
                 let freed = ack_frame(mut st, handle, f, mut events)
                 st.held -= freed
             }
-        } else if contains(lost, p.number) {
-            requeue(mut st, p.frames, false)
+        } else if lost_i < lost_n && lost[lost_i] == p.number {
+            lost_i += 1
+            for j in p.start .. p.start + p.len {
+                let f = st.inflight_frames[j]
+                requeue_frame(mut st, f, false)
+            }
         } else {
-            list.push(mut st.inflight, take p)
+            if write_frame != p.start {
+                for k in 0u64 .. p.len {
+                    st.inflight_frames[write_frame + k] = st.inflight_frames[p.start + k]
+                }
+            }
+            st.inflight[write_pkt] = SentPacket(number: p.number, start: write_frame, len: p.len)
+            write_frame += p.len
+            write_pkt += 1
         }
     }
+    list.truncate(mut st.inflight, write_pkt)
+    list.truncate(mut st.inflight_frames, write_frame)
     wake_writers(mut st, handle, mut events)
     retire(mut st)
 }
 
-/// Put an abandoned or lost packet's frames back on their queues. Bytes a
-/// reset has discarded since are not requeued (QUIC-1 Commit, QUIC-5). A datagram goes
-/// back only from an abandoned packet that never left: a lost one is gone (RFC 9221 §5.2).
-fn requeue(mut st: Streams, frames: List[SentFrame], abandoned: bool) {
-    for f in frames {
-        match f {
-            DatagramSent(seq) => {
-                if abandoned {
-                    unstage_datagram(mut st, seq)
-                }
-            },
-            MaxDataSent => {
-                st.max_data_pending = true
-            },
-            MaxStreamsSent(bidi) => {
-                if bidi {
-                    st.bidi_limit_pending = true
-                } else {
-                    st.uni_limit_pending = true
-                }
-            },
-            NewCidSent(seq) => resend_new_cid(mut st.cids, seq),
-            RetireSent(seq) => list.push(mut st.cids.retire_out, seq),
-            DataBlockedSent => (),
-            Raw => (),
-            Data(stream: id, offset: offset, len: len, fin: fin) => {
-                if let Some(i) = find(st, id) {
-                    if let Some(mut s) = st.list[i].send {
-                        let mut end = order.min(offset + len, s.written)
-                        if let Some(x) = s.reset {
-                            end = order.min(end, x.reliable)
-                        }
-                        add_run(mut s.resend, order.max(offset, s.floor), end)
-                        if fin && s.fin {
-                            s.fin_pending = true
-                        }
+/// Put an abandoned or lost packet's frames (stored at `frames[start .. start + len)`)
+/// back on their queues. Bytes a reset has discarded since are not requeued (QUIC-1
+/// Commit, QUIC-5). A datagram goes back only from an abandoned packet that never left:
+/// a lost one is gone (RFC 9221 §5.2).
+fn requeue_range(mut st: Streams, frames: List[SentFrame], start: u64, len: u64, abandoned: bool) {
+    for j in start .. start + len {
+        requeue_frame(mut st, frames[j], abandoned)
+    }
+}
+
+fn requeue_frame(mut st: Streams, f: SentFrame, abandoned: bool) {
+    match f {
+        DatagramSent(seq) => {
+            if abandoned {
+                unstage_datagram(mut st, seq)
+            }
+        },
+        MaxDataSent => {
+            st.max_data_pending = true
+        },
+        MaxStreamsSent(bidi) => {
+            if bidi {
+                st.bidi_limit_pending = true
+            } else {
+                st.uni_limit_pending = true
+            }
+        },
+        NewCidSent(seq) => resend_new_cid(mut st.cids, seq),
+        RetireSent(seq) => list.push(mut st.cids.retire_out, seq),
+        DataBlockedSent => (),
+        Raw => (),
+        Data(stream: id, offset: offset, len: len, fin: fin) => {
+            if let Some(i) = find(st, id) {
+                if let Some(mut s) = st.list[i].send {
+                    let mut end = order.min(offset + len, s.written)
+                    if let Some(x) = s.reset {
+                        end = order.min(end, x.reliable)
+                    }
+                    add_run(mut s.resend, order.max(offset, s.floor), end)
+                    if fin && s.fin {
+                        s.fin_pending = true
                     }
                 }
-            },
-            ResetSent(id) => {
-                if let Some(i) = find(st, id) {
-                    if let Some(mut s) = st.list[i].send {
-                        s.reset_pending = true
-                    }
+            }
+        },
+        ResetSent(id) => {
+            if let Some(i) = find(st, id) {
+                if let Some(mut s) = st.list[i].send {
+                    s.reset_pending = true
                 }
-            },
-            StopSent(id) => {
-                if let Some(i) = find(st, id) {
-                    if let Some(mut r) = st.list[i].recv {
-                        r.stop_pending = true
-                    }
+            }
+        },
+        StopSent(id) => {
+            if let Some(i) = find(st, id) {
+                if let Some(mut r) = st.list[i].recv {
+                    r.stop_pending = true
                 }
-            },
-            MaxStreamDataSent(id) => {
-                if let Some(i) = find(st, id) {
-                    if let Some(mut r) = st.list[i].recv {
-                        r.limit_pending = true
-                    }
+            }
+        },
+        MaxStreamDataSent(id) => {
+            if let Some(i) = find(st, id) {
+                if let Some(mut r) = st.list[i].recv {
+                    r.limit_pending = true
                 }
-            },
-            StreamBlockedSent(id) => {
-                if let Some(i) = find(st, id) {
-                    if let Some(mut s) = st.list[i].send {
-                        s.blocked_at = None
-                    }
+            }
+        },
+        StreamBlockedSent(id) => {
+            if let Some(i) = find(st, id) {
+                if let Some(mut s) = st.list[i].send {
+                    s.blocked_at = None
                 }
-            },
-        }
+            }
+        },
     }
 }
 

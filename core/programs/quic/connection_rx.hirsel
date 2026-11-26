@@ -74,12 +74,12 @@ fn ack_delay_ns(c: Connection, field: u64) -> u64 {
     int.saturating_mul(field << exponent, 1000)
 }
 
-fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Frame, input: Bytes, mut events: List[Event]) -> Result[FrameEffect, ConnectionFailure] {
+fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Frame, input: Bytes, ack_ranges: List[codec.AckRange], mut acked: List[u64], mut lost: List[u64], mut events: List[Event]) -> Result[FrameEffect, ConnectionFailure] {
     let level = packet_level(kind)
     match f {
         Padding(_) => Ok(Quiet),
         Ack(a) => {
-            if !check_ack(c, level, a.ranges) {
+            if !check_ack(c, level, ack_ranges) {
                 let frame = if a.ecn == None {
                     0x02u64
                 } else {
@@ -89,10 +89,10 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
             }
             let index = space_index(level)
             if let Application = level {
-                note_phase_ack(mut c.keys, a.ranges)
+                note_phase_ack(mut c.keys, ack_ranges)
             }
-            let verdict = recovery.on_ack(mut c.recovery, now, index, a.ranges, ack_delay_ns(c, a.delay), a.ecn)
-            settle(mut c, now, index, verdict.acked, verdict.lost, mut events)
+            recovery.on_ack_into(mut c.recovery, now, index, ack_ranges, ack_delay_ns(c, a.delay), a.ecn, mut acked, mut lost)
+            settle(mut c, now, index, acked, lost, mut events)
             Ok(Quiet)
         },
         Crypto(offset: offset, data: data) => {
@@ -150,6 +150,17 @@ fn codec_failure(e: codec.CodecError) -> ConnectionFailure {
 }
 
 fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Bytes, opened: OpenedPacket, random: Random, mtu: u16, ecn: u8, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+    let mut ack_ranges = replace(mut c.rx_ack_ranges, list.new())
+    let mut acked = replace(mut c.ack_acked, list.new())
+    let mut lost = replace(mut c.ack_lost, list.new())
+    let outcome = apply_packet_with(mut c, now, kind, input, opened, random, mtu, ecn, mut ack_ranges, mut acked, mut lost, mut events)
+    c.rx_ack_ranges = take ack_ranges
+    c.ack_acked = take acked
+    c.ack_lost = take lost
+    outcome
+}
+
+fn apply_packet_with(mut c: Connection, now: u64, kind: codec.PacketKind, input: Bytes, opened: OpenedPacket, random: Random, mtu: u16, ecn: u8, mut ack_ranges: List[codec.AckRange], mut acked: List[u64], mut lost: List[u64], mut events: List[Event]) -> Result[(), ConnectionFailure] {
     if let Error(_) = codec.check_reserved_bits(kind, opened.first) {
         return Error(Wire(0x0a, 0))
     }
@@ -160,13 +171,13 @@ fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Byte
     let mut ack = false
     c.probing_only = true
     while true {
-        let f = match codec.next_frame(input, mut r) {
+        let f = match codec.next_frame_into(input, mut r, mut ack_ranges) {
             Ok(Some(f)) => f,
             Ok(None) => break,
             Error(e) => return Error(codec_failure(e)),
         }
         c.probing_only = c.probing_only && probing_frame(f)
-        match apply_frame(mut c, now, kind, f, input, mut events)? {
+        match apply_frame(mut c, now, kind, f, input, ack_ranges, mut acked, mut lost, mut events)? {
             Quiet => (),
             ElicitsAck => {
                 ack = true

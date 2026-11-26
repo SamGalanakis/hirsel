@@ -18,11 +18,13 @@ type IssuedCid {
     pending: bool
 }
 
-/// A CID the peer issued that is not in use and not retired.
+/// A CID the peer issued that is not in use and not retired. Fixed inline storage avoids
+/// per-frame allocation when NEW_CONNECTION_ID arrives in steady state.
 type PeerCid {
     seq: u64,
-    id: Bytes,
-    token: Bytes
+    id: Inline[u8, 20],
+    id_len: u8,
+    token: Inline[u8, 16]
 }
 
 type Cids {
@@ -39,21 +41,30 @@ fn no_cids() -> Cids {
     Cids(issued: list.new(), next_seq: 0, released: list.new(), peer: list.new(), peer_seq: 0, retire_prior: 0, retire_out: list.new())
 }
 
+fn reserve_cids(mut cids: Cids) {
+    list.reserve(mut cids.issued, CID_LIMIT)
+    list.reserve(mut cids.released, CID_LIMIT)
+    list.reserve(mut cids.peer, CID_LIMIT)
+    list.reserve(mut cids.retire_out, RETIRE_LIMIT)
+}
+
 /// Seq 0, the CID the handshake used, issued with the connection.
 fn first_cid(mut cids: Cids, take id: Bytes, take token: Bytes) {
+    reserve_cids(mut cids)
     list.push(mut cids.issued, IssuedCid(seq: 0, id: take id, token: take token, pending: false))
     cids.next_seq = 1
 }
 
-/// Top up the CIDs `slot`'s peer holds to the smaller of its active_connection_id_limit
-/// and ours, each mapped to the slot, once the handshake is confirmed (RFC 9001 §4.1.2),
-/// so none rides in 0.5-RTT data (§5.1.1). An endpoint with zero-length CIDs issues none.
-fn issue_cids(mut e: Endpoint, slot: u64) {
+/// Issue local CIDs up to the peer's active_connection_id_limit (capped at CID_LIMIT).
+/// When `require_confirmed` is false, prepares them once the handshake establishes (before
+/// confirmation) so no allocation occurs when confirmation arrives; `cid_frames` still
+/// withholds NEW_CONNECTION_ID frames until the handshake is confirmed (RFC 9001 §5.1.1).
+fn top_up_cids(mut e: Endpoint, slot: u64, require_confirmed: bool) {
     let mut want = 0u64
     if let Some(c) = e.connections[slot] {
         if let Some(p) = c.params {
             if let Some(_) = c.application.send {
-                if open_life(c) && c.streams.ready && recovery.confirmed(c.recovery) && e.config.cid_len > 0 {
+                if open_life(c) && c.streams.ready && (!require_confirmed || recovery.confirmed(c.recovery)) && e.config.cid_len > 0 {
                     let limit = order.min(p.active_cid_limit, CID_LIMIT)
                     want = limit - order.min(limit, list.len(c.streams.cids.issued))
                 }
@@ -72,6 +83,17 @@ fn issue_cids(mut e: Endpoint, slot: u64) {
     }
 }
 
+/// Top up the CIDs `slot`'s peer holds to the smaller of its active_connection_id_limit
+/// and ours, each mapped to the slot, once the handshake is confirmed (RFC 9001 §4.1.2),
+/// so none rides in 0.5-RTT data (§5.1.1). An endpoint with zero-length CIDs issues none.
+fn issue_cids(mut e: Endpoint, slot: u64) {
+    top_up_cids(mut e, slot, true)
+}
+
+fn prepare_cids(mut e: Endpoint, slot: u64) {
+    top_up_cids(mut e, slot, false)
+}
+
 /// Unmap the CIDs the peer retired since the last call, if they still route to `slot`.
 fn unmap_released(mut e: Endpoint, slot: u64, released: List[Bytes]) {
     for id in released {
@@ -85,25 +107,24 @@ fn unmap_released(mut e: Endpoint, slot: u64, released: List[Bytes]) {
     }
 }
 
-/// NEW_CONNECTION_ID for each issued CID not yet sent, then RETIRE_CONNECTION_ID for each
-/// peer CID this end retired.
-fn cid_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
-    for i in 0u64 .. list.len(st.cids.issued) {
-        if !st.cids.issued[i].pending {
-            continue
-        }
-        let seq = st.cids.issued[i].seq
-        let len = list.len(st.cids.issued[i].id)
-        let mut input: Bytes = clone(st.cids.issued[i].id)
-        list.append(mut input, st.cids.issued[i].token)
-        // Type, two varints of at most 8 bytes and the length octet.
-        if cap - list.len(payload) < list.len(input) + 18 {
-            return
-        }
-        let f: codec.Frame = NewConnectionId(sequence: seq, retire_prior_to: 0, id: codec.Span(at: 0, len: len), reset_token: codec.Span(at: len, len: list.len(input) - len))
-        if let Ok(()) = codec.write_frame(f, input, mut payload) {
-            list.push(mut frames, NewCidSent(seq))
-            st.cids.issued[i].pending = false
+/// NEW_CONNECTION_ID for each issued CID not yet sent (only once the handshake is
+/// confirmed, RFC 9001 §5.1.1), then RETIRE_CONNECTION_ID for each peer CID retired.
+fn cid_frames(mut st: Streams, is_confirmed: bool, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
+    if is_confirmed {
+        for i in 0u64 .. list.len(st.cids.issued) {
+            if !st.cids.issued[i].pending {
+                continue
+            }
+            let seq = st.cids.issued[i].seq
+            let len = list.len(st.cids.issued[i].id)
+            // Type, two varints of at most 8 bytes, length octet, id and 16-byte token.
+            if cap - list.len(payload) < len + 16 + 18 {
+                return
+            }
+            if let Ok(()) = codec.write_new_cid(seq, 0, st.cids.issued[i].id, st.cids.issued[i].token, mut payload) {
+                list.push(mut frames, NewCidSent(seq))
+                st.cids.issued[i].pending = false
+            }
         }
     }
     while list.len(st.cids.retire_out) > 0 {
@@ -133,6 +154,44 @@ fn owe_retire(mut cids: Cids, seq: u64) -> Result[(), ConnectionFailure] {
     Ok(())
 }
 
+fn inline_cid_eq(id: Inline[u8, 20], len: u8, other: Bytes) -> bool {
+    let n: u64 = int.widen(len)
+    if n != list.len(other) {
+        return false
+    }
+    for i in 0u64 .. n {
+        if id[i] != other[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn inline_token_eq(tok: Inline[u8, 16], other: Bytes) -> bool {
+    if list.len(other) != 16 {
+        return false
+    }
+    for i in 0u64 .. 16 {
+        if tok[i] != other[i] {
+            return false
+        }
+    }
+    true
+}
+
+fn pack_peer_cid(seq: u64, id: Bytes, token: Bytes) -> PeerCid {
+    let mut id_buf: Inline[u8, 20] =[0; 20]
+    let n = list.len(id)
+    for i in 0u64 .. n {
+        id_buf[i] = id[i]
+    }
+    let mut tok_buf: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        tok_buf[i] = token[i]
+    }
+    PeerCid(seq: seq, id: id_buf, id_len: int.narrow(n), token: tok_buf)
+}
+
 /// Move to the peer's lowest-numbered unused CID and retire the one in use; false when
 /// the peer has issued none to move to. A client keeps the new CID's reset token.
 fn switch_peer_cid(mut c: Connection) -> Result[bool, ConnectionFailure] {
@@ -147,15 +206,21 @@ fn switch_peer_cid(mut c: Connection) -> Result[bool, ConnectionFailure] {
         }
     }
     list.swap(mut c.streams.cids.peer, best, n - 1)
-    let Some(take next) = list.pop(mut c.streams.cids.peer) else {
+    let Some(next) = list.pop(mut c.streams.cids.peer) else {
         return Ok(false)
     }
     owe_retire(mut c.streams.cids, c.streams.cids.peer_seq)?
-    let PeerCid(seq, id: take id, token: take token) = take next
-    c.streams.cids.peer_seq = seq
-    c.peer_id = take id
-    if let Some(_) = c.peer_reset {
-        c.peer_reset = Some(take token)
+    c.streams.cids.peer_seq = next.seq
+    list.clear(mut c.peer_id)
+    let id_len: u64 = int.widen(next.id_len)
+    for i in 0u64 .. id_len {
+        list.push(mut c.peer_id, next.id[i])
+    }
+    if let Some(mut tok) = c.peer_reset {
+        list.clear(mut tok)
+        for i in 0u64 .. 16 {
+            list.push(mut tok, next.token[i])
+        }
     }
     Ok(true)
 }
@@ -176,7 +241,8 @@ fn new_connection_id(mut c: Connection, seq: u64, prior: u64, id: Bytes, token: 
         return Ok(())
     }
     for p in c.streams.cids.peer {
-        if (p.seq == seq) != (p.id == id) || (p.seq == seq && p.token != token) {
+        let same_id = inline_cid_eq(p.id, p.id_len, id)
+        if (p.seq == seq) != same_id || (p.seq == seq && !inline_token_eq(p.token, token)) {
             return Error(Wire(0x0a, 0x18))
         }
         if p.seq == seq {
@@ -189,7 +255,7 @@ fn new_connection_id(mut c: Connection, seq: u64, prior: u64, id: Bytes, token: 
     if seq < c.streams.cids.retire_prior || seq < c.streams.cids.peer_seq {
         return owe_retire(mut c.streams.cids, seq)
     }
-    list.push(mut c.streams.cids.peer, PeerCid(seq: seq, id: clone(id), token: clone(token)))
+    list.push(mut c.streams.cids.peer, pack_peer_cid(seq, id, token))
     if prior > c.streams.cids.retire_prior {
         c.streams.cids.retire_prior = prior
         let mut i = 0u64

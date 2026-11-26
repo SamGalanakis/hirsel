@@ -173,27 +173,84 @@ fn write_stream_limit(t: u64, bidi: bool, limit: u64, mut out: Bytes) -> Result[
 }
 
 fn write_ack(a: AckFields, mut out: Bytes) -> Result[(), CodecError] {
-    let count = list.len(a.ranges)
+    put_ack_ranges(a.delay, a.ranges, a.ecn, mut out)
+}
+
+/// Write an ACK frame directly from a slice of descending AckRanges without allocating,
+/// refusing before writing if the encoded frame would exceed `max_bytes`.
+pub fn write_ack_ranges(delay: u64, ranges: List[AckRange], ecn: Option[EcnCounts], max_bytes: u64, mut out: Bytes) -> Result[(), CodecError] {
+    let needed = ack_encoded_len(delay, ranges, ecn)?
+    if needed > max_bytes {
+        return Error(Bounds)
+    }
+    let mark = list.len(out)
+    match put_ack_ranges(delay, ranges, ecn, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+fn ack_encoded_len(delay: u64, ranges: List[AckRange], ecn: Option[EcnCounts]) -> Result[u64, CodecError] {
+    let count = list.len(ranges)
     if count == 0 {
         return Error(InvalidValue)
     }
-    let first = a.ranges[0]
+    let first = ranges[0]
     if first.smallest > first.largest {
         return Error(InvalidValue)
     }
-    let t = if a.ecn == None {
+    if first.largest > MAX_VARINT || delay > MAX_VARINT || count - 1 > MAX_VARINT || first.largest - first.smallest > MAX_VARINT {
+        return Error(VarintOverflow)
+    }
+    let mut total = 1 + width(first.largest) + width(delay) + width(count - 1) + width(first.largest - first.smallest)
+    let mut previous = first.smallest
+    for i in 1u64 .. count {
+        let r = ranges[i]
+        if r.smallest > r.largest || previous < 2 || r.largest > previous - 2 {
+            return Error(InvalidValue)
+        }
+        let gap = previous - r.largest - 2
+        let span = r.largest - r.smallest
+        if gap > MAX_VARINT || span > MAX_VARINT {
+            return Error(VarintOverflow)
+        }
+        total += width(gap) + width(span)
+        previous = r.smallest
+    }
+    if let Some(e) = ecn {
+        if e.ect0 > MAX_VARINT || e.ect1 > MAX_VARINT || e.ce > MAX_VARINT {
+            return Error(VarintOverflow)
+        }
+        total += width(e.ect0) + width(e.ect1) + width(e.ce)
+    }
+    Ok(total)
+}
+
+fn put_ack_ranges(delay: u64, ranges: List[AckRange], ecn: Option[EcnCounts], mut out: Bytes) -> Result[(), CodecError] {
+    let count = list.len(ranges)
+    if count == 0 {
+        return Error(InvalidValue)
+    }
+    let first = ranges[0]
+    if first.smallest > first.largest {
+        return Error(InvalidValue)
+    }
+    let t = if ecn == None {
         0x02u64
     } else {
         0x03u64
     }
     write_varint(t, mut out)?
     write_varint(first.largest, mut out)?
-    write_varint(a.delay, mut out)?
+    write_varint(delay, mut out)?
     write_varint(count - 1, mut out)?
     write_varint(first.largest - first.smallest, mut out)?
     let mut previous = first.smallest
     for i in 1u64 .. count {
-        let r = a.ranges[i]
+        let r = ranges[i]
         if r.smallest > r.largest || previous < 2 || r.largest > previous - 2 {
             return Error(InvalidValue)
         }
@@ -201,10 +258,38 @@ fn write_ack(a: AckFields, mut out: Bytes) -> Result[(), CodecError] {
         write_varint(r.largest - r.smallest, mut out)?
         previous = r.smallest
     }
-    if let Some(ecn) = a.ecn {
-        write_varint(ecn.ect0, mut out)?
-        write_varint(ecn.ect1, mut out)?
-        write_varint(ecn.ce, mut out)?
+    if let Some(e) = ecn {
+        write_varint(e.ect0, mut out)?
+        write_varint(e.ect1, mut out)?
+        write_varint(e.ce, mut out)?
     }
+    Ok(())
+}
+
+/// Write a NEW_CONNECTION_ID frame directly from separate id and reset_token buffers
+/// without concatenating them into a temporary buffer.
+pub fn write_new_cid(sequence: u64, retire_prior_to: u64, id: Bytes, reset_token: Bytes, mut out: Bytes) -> Result[(), CodecError] {
+    let id_len = list.len(id)
+    if retire_prior_to > sequence || id_len < 1 || id_len > 20 || list.len(reset_token) != 16 {
+        return Error(InvalidValue)
+    }
+    let mark = list.len(out)
+    match put_new_cid(sequence, retire_prior_to, id, reset_token, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+fn put_new_cid(sequence: u64, retire_prior_to: u64, id: Bytes, reset_token: Bytes, mut out: Bytes) -> Result[(), CodecError] {
+    write_varint(0x18, mut out)?
+    write_varint(sequence, mut out)?
+    write_varint(retire_prior_to, mut out)?
+    write_varint(list.len(id), mut out)?
+    reserve(mut out, list.len(id) + 16)?
+    list.append(mut out, id)
+    list.append(mut out, reset_token)
     Ok(())
 }

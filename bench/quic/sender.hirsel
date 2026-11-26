@@ -74,6 +74,9 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         list.push(mut data, int.narrow((i * 31 + 7) & 0xff))
     }
     let chunk = shared.new(take data)
+    let mut done_line = string.from("DONE ")
+    string.push_u64(mut done_line, total)
+    string.push(mut done_line, "\n")
     let mut events: List[quic.Event] = list.with_capacity(64)
     let mut stream: Option[quic.StreamId] = None
     let mut written = 0u64
@@ -104,9 +107,7 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
             }
         }
     }
-    let mut done = string.from("DONE ")
-    string.push_u64(mut done, total)
-    say(out, done)
+    result.unwrap(stdout.write(out, done_line))
     quic.close(mut e, c, 0, b"")
     result.unwrap(quic.drive(mut e, clock, mut socket, host.mono_ns(clock) + SECOND / 10, mut events))
     Ok(())

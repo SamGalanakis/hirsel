@@ -5,7 +5,7 @@
 const CRYPTO_LIMIT: u64 = 16384
 
 fn new_space() -> Space {
-    Space(receive: None, send: None, next: 0, sent: list.new(), received: list.new(), discard_before: 0, largest: None, ack_pending: false, ack_staged: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0, flights: list.new(), resend: list.new(), acked: list.new(), probes: 0, largest_at: 0, ecn_in: codec.EcnCounts(ect0: 0, ect1: 0, ce: 0), token: b"", key_phase: false, path_out: b"", hold_data: false)
+    Space(receive: None, send: None, next: 0, sent: list.with_capacity(8), received: list.with_capacity(65), discard_before: 0, largest: None, ack_pending: false, ack_staged: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0, flights: list.with_capacity(4), resend: list.with_capacity(4), acked: list.with_capacity(4), probes: 0, largest_at: 0, ecn_in: codec.EcnCounts(ect0: 0, ect1: 0, ce: 0), token: b"", key_phase: false, path_out: b"", hold_data: false)
 }
 
 fn install_keys(mut s: Space, mut keys: schedule.Schedule, level: packet.Space) -> bool {
@@ -45,7 +45,28 @@ fn install_handshake(mut s: Space, mut h: handshake.Handshake) -> bool {
 }
 
 fn discard(mut s: Space) {
-    s = new_space()
+    s.receive = None
+    s.send = None
+    s.next = 0
+    list.clear(mut s.sent)
+    list.clear(mut s.received)
+    s.discard_before = 0
+    s.largest = None
+    s.ack_pending = false
+    s.ack_staged = false
+    s.crypto_in = Reassembly(at: 0, data: b"", present: list.new())
+    s.crypto_out = b""
+    s.crypto_committed = 0
+    list.clear(mut s.flights)
+    list.clear(mut s.resend)
+    list.clear(mut s.acked)
+    s.probes = 0
+    s.largest_at = 0
+    s.ecn_in = codec.EcnCounts(ect0: 0, ect1: 0, ce: 0)
+    s.token = b""
+    s.key_phase = false
+    s.path_out = b""
+    s.hold_data = false
 }
 
 fn covers(ranges: List[codec.AckRange], low: u64, high: u64) -> bool {
@@ -79,27 +100,43 @@ fn valid_ack(s: Space, ranges: List[codec.AckRange]) -> bool {
 /// RFC 9000 §13.2.4 permits forgetting old ranges. Never process a packet again
 /// after its range has been forgotten. The codec writes ranges in descending order.
 fn record_received(mut s: Space, number: u64) {
+    let n = list.len(s.received)
     let mut first = 0u64
-    while first < list.len(s.received) && s.received[first].smallest > number + 1 {
+    while first < n && s.received[first].smallest > number + 1 {
         first += 1
     }
     let mut low = number
     let mut high = number
     let mut end = first
-    while end < list.len(s.received) && s.received[end].largest + 1 >= low {
+    while end < n && s.received[end].largest + 1 >= low {
         low = order.min(low, s.received[end].smallest)
         high = order.max(high, s.received[end].largest)
         end += 1
     }
-    let mut next: List[codec.AckRange] = list.with_capacity(65)
-    list.append(mut next, list.slice(s.received, 0, first))
-    list.push(mut next, codec.AckRange(smallest: low, largest: high))
-    list.append(mut next, list.slice(s.received, end, list.len(s.received)))
-    if list.len(next) > 64 {
-        s.discard_before = next[64].largest + 1
-        list.truncate(mut next, 64)
+    let merged = codec.AckRange(smallest: low, largest: high)
+    let removed = end - first
+    if removed == 1 {
+        s.received[first] = merged
+    } else if removed == 0 {
+        list.push(mut s.received, merged)
+        let mut k = n
+        while k > first {
+            s.received[k] = s.received[k - 1]
+            k -= 1
+        }
+        s.received[first] = merged
+    } else {
+        s.received[first] = merged
+        let tail = n - end
+        for k in 0u64 .. tail {
+            s.received[first + 1 + k] = s.received[end + k]
+        }
+        list.truncate(mut s.received, first + 1 + tail)
     }
-    s.received = take next
+    if list.len(s.received) > 64 {
+        s.discard_before = s.received[64].largest + 1
+        list.truncate(mut s.received, 64)
+    }
 }
 
 fn receive_crypto(mut r: Reassembly, offset: u64, data: Bytes) -> bool {
@@ -158,54 +195,82 @@ fn tls_message(mut r: Reassembly) -> Result[Option[Bytes], u64] {
     Ok(Some(take wire))
 }
 
-/// Add [at, end) to ascending, disjoint ranges, merging what it touches.
+/// Add [at, end) to ascending, disjoint ranges, merging what it touches, in place.
 fn add_range(mut l: List[Range], at: u64, end: u64) {
     if at >= end {
         return
     }
+    let n = list.len(l)
+    let mut first = 0u64
+    while first < n && l[first].end < at {
+        first += 1
+    }
     let mut low = at
     let mut high = end
-    let mut out: List[Range] = list.with_capacity(list.len(l) + 1)
-    let mut placed = false
-    for r in l {
-        if r.end < low {
-            list.push(mut out, r)
-        } else if r.at > high {
-            if !placed {
-                list.push(mut out, Range(at: low, end: high))
-                placed = true
-            }
-            list.push(mut out, r)
-        } else {
-            low = order.min(low, r.at)
-            high = order.max(high, r.end)
+    let mut last = first
+    while last < n && l[last].at <= high {
+        low = order.min(low, l[last].at)
+        high = order.max(high, l[last].end)
+        last += 1
+    }
+    let merged = Range(at: low, end: high)
+    let removed = last - first
+    if removed == 1 {
+        l[first] = merged
+    } else if removed == 0 {
+        list.push(mut l, merged)
+        let mut k = n
+        while k > first {
+            l[k] = l[k - 1]
+            k -= 1
         }
+        l[first] = merged
+    } else {
+        l[first] = merged
+        let tail = n - last
+        for k in 0u64 .. tail {
+            l[first + 1 + k] = l[last + k]
+        }
+        list.truncate(mut l, first + 1 + tail)
     }
-    if !placed {
-        list.push(mut out, Range(at: low, end: high))
-    }
-    l = take out
 }
 
-/// Remove [at, end) from ascending, disjoint ranges.
+/// Remove [at, end) from ascending, disjoint ranges, in place.
 fn remove_range(mut l: List[Range], at: u64, end: u64) {
-    if at >= end {
+    if at >= end || list.len(l) == 0 {
         return
     }
-    let mut out: List[Range] = list.with_capacity(list.len(l) + 1)
-    for r in l {
-        if r.end <= at || r.at >= end {
-            list.push(mut out, r)
-        } else {
-            if r.at < at {
-                list.push(mut out, Range(at: r.at, end: at))
+    let n = list.len(l)
+    for i in 0u64 .. n {
+        let r = l[i]
+        if r.at < at && r.end > end {
+            // [at, end) sits strictly inside one disjoint range: split it in place.
+            list.push(mut l, Range(at: end, end: r.end))
+            let mut k = n
+            while k > i + 1 {
+                l[k] = l[k - 1]
+                k -= 1
             }
-            if r.end > end {
-                list.push(mut out, Range(at: end, end: r.end))
-            }
+            l[i] = Range(at: r.at, end: at)
+            l[i + 1] = Range(at: end, end: r.end)
+            return
         }
     }
-    l = take out
+    let mut dst = 0u64
+    for i in 0u64 .. n {
+        let r = l[i]
+        if r.end <= at || r.at >= end {
+            l[dst] = r
+            dst += 1
+        } else if r.at < at {
+            l[dst] = Range(at: r.at, end: at)
+            dst += 1
+        } else if r.end > end {
+            l[dst] = Range(at: end, end: r.end)
+            dst += 1
+        }
+    }
+    list.truncate(mut l, dst)
 }
 
 fn contains(numbers: List[u64], n: u64) -> bool {
@@ -235,16 +300,21 @@ type DoneSettled {
 /// data is owed again unless a later copy was already acknowledged.
 fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> DoneSettled {
     let mut done = DoneSettled(lost: false, acked: false)
-    let flights: List[Flight] = replace(mut s.flights, list.new())
-    let mut kept: List[Flight] = list.with_capacity(list.len(flights))
-    for f in flights {
+    let n = list.len(s.flights)
+    if n == 0 {
+        return done
+    }
+    for i in 0u64 .. n {
+        let f = s.flights[i]
         if contains(acked, f.number) {
             remove_range(mut s.resend, f.crypto_at, f.crypto_end)
             add_range(mut s.acked, f.crypto_at, f.crypto_end)
             done.acked = done.acked || f.done
         }
     }
-    for f in flights {
+    let mut dst = 0u64
+    for i in 0u64 .. n {
+        let f = s.flights[i]
         if contains(acked, f.number) {
             continue
         }
@@ -252,10 +322,11 @@ fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> DoneSettled 
             owe(mut s, f.crypto_at, f.crypto_end)
             done.lost = done.lost || f.done
         } else {
-            list.push(mut kept, f)
+            s.flights[dst] = f
+            dst += 1
         }
     }
-    s.flights = take kept
+    list.truncate(mut s.flights, dst)
     done
 }
 
@@ -264,8 +335,8 @@ fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> DoneSettled 
 /// flight carried HANDSHAKE_DONE.
 fn probe_space(mut s: Space) -> bool {
     let mut done = false
-    let flights: List[Flight] = clone(s.flights)
-    for f in flights {
+    for i in 0u64 .. list.len(s.flights) {
+        let f = s.flights[i]
         owe(mut s, f.crypto_at, f.crypto_end)
         done = done || f.done
     }

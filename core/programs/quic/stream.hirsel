@@ -94,7 +94,8 @@ type QueuedDatagram {
 
 type SentPacket {
     number: u64,
-    frames: List[SentFrame]
+    start: u64,
+    len: u64
 }
 
 type Pool {
@@ -138,6 +139,7 @@ type Streams {
     credit_uni: u64,
     turn: u64,
     inflight: List[SentPacket],
+    inflight_frames: List[SentFrame],
     seam: Bytes,
     datagrams: List[QueuedDatagram],
     staged_datagrams: List[QueuedDatagram],
@@ -151,7 +153,7 @@ type Streams {
 }
 
 fn no_streams() -> Streams {
-    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"", free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0, released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0, uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false, uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0, data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0, local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0, credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(), seam: b"", datagrams: list.new(), staged_datagrams: list.new(), datagram_seq: 0, peer_datagram: 0, datagrams_sent: 0, datagrams_late: 0, datagram_room: 0, datagrams_refused: 0, cids: no_cids())
+    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"", free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0, released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0, uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false, uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0, data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0, local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0, credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(), inflight_frames: list.new(), seam: b"", datagrams: list.new(), staged_datagrams: list.new(), datagram_seq: 0, peer_datagram: 0, datagrams_sent: 0, datagrams_late: 0, datagram_room: 0, datagrams_refused: 0, cids: no_cids())
 }
 
 fn page_count(window: u64) -> u64 {
@@ -195,6 +197,10 @@ fn start_streams(mut st: Streams, t: TransportConfig, p: handshake.TransportPara
     st.credit_bidi_remote = p.initial_max_stream_data_bidi_remote
     st.credit_uni = p.initial_max_stream_data_uni
     st.peer_datagram = p.max_datagram_frame
+    let cap = inflight_capacity(t.send_bytes)
+    st.inflight = list.with_capacity(cap)
+    st.inflight_frames = list.with_capacity(cap)
+    reserve_cids(mut st.cids)
 }
 
 fn uni(id: u64) -> bool {
@@ -220,8 +226,9 @@ fn new_recv(st: Streams) -> Recv {
     Recv(base: 0, pages: take pages, read: 0, runs: list.new(), highest: 0, limit: st.stream_window, final_size: None, reset: None, stop: None, stop_pending: false, limit_pending: false)
 }
 
-fn new_send(credit: u64) -> Send {
-    Send(pieces: list.new(), head: 0, written: 0, next: 0, resend: list.new(), acked: list.new(), floor: 0, credit: credit, fin: false, fin_pending: false, fin_acked: false, reset: None, reset_pending: false, reset_acked: false, want_writable: false, acked_reported: false, blocked_at: None, priority: Priority(urgency: 3, order: 0, then: 0), turn: 0)
+fn new_send(credit: u64, send_bytes: u64) -> Send {
+    let piece_cap = order.min(order.max((send_bytes + 65535) / 65536, 8), 128)
+    Send(pieces: list.with_capacity(piece_cap), head: 0, written: 0, next: 0, resend: list.with_capacity(16), acked: list.with_capacity(16), floor: 0, credit: credit, fin: false, fin_pending: false, fin_acked: false, reset: None, reset_pending: false, reset_acked: false, want_writable: false, acked_reported: false, blocked_at: None, priority: Priority(urgency: 3, order: 0, then: 0), turn: 0)
 }
 
 /// Create a stream record. Locally opened bidi streams take the peer's bidi_remote credit,
@@ -236,48 +243,68 @@ fn add_stream(mut st: Streams, id: u64) {
     let send: Option[Send] = if uni(id) && !is_local {
         None
     } else if uni(id) {
-        Some(new_send(st.credit_uni))
+        Some(new_send(st.credit_uni, st.send_bytes))
     } else if is_local {
-        Some(new_send(st.credit_bidi_remote))
+        Some(new_send(st.credit_bidi_remote, st.send_bytes))
     } else {
-        Some(new_send(st.credit_bidi_local))
+        Some(new_send(st.credit_bidi_local, st.send_bytes))
     }
     list.push(mut st.list, Stream(id: id, recv: take recv, send: take send))
 }
 
-/// Insert [start, end) into ascending disjoint runs, merging touching ones.
+/// Insert [start, end) into ascending disjoint runs, merging touching ones, in place.
 fn add_run(mut runs: List[Run], start: u64, end: u64) {
     if end <= start {
         return
     }
+    let n = list.len(runs)
     let mut first = 0u64
-    while first < list.len(runs) && runs[first].end < start {
+    while first < n && runs[first].end < start {
         first += 1
     }
     let mut low = start
     let mut high = end
     let mut last = first
-    while last < list.len(runs) && runs[last].start <= high {
+    while last < n && runs[last].start <= high {
         low = order.min(low, runs[last].start)
         high = order.max(high, runs[last].end)
         last += 1
     }
-    let mut next: List[Run] = list.with_capacity(list.len(runs) + 1 - (last - first))
-    list.append(mut next, list.slice(runs, 0, first))
-    list.push(mut next, Run(start: low, end: high))
-    list.append(mut next, list.slice(runs, last, list.len(runs)))
-    runs = take next
+    let merged = Run(start: low, end: high)
+    let removed = last - first
+    if removed == 1 {
+        runs[first] = merged
+    } else if removed == 0 {
+        list.push(mut runs, merged)
+        let mut k = n
+        while k > first {
+            runs[k] = runs[k - 1]
+            k -= 1
+        }
+        runs[first] = merged
+    } else {
+        runs[first] = merged
+        let tail = n - last
+        for k in 0u64 .. tail {
+            runs[first + 1 + k] = runs[last + k]
+        }
+        list.truncate(mut runs, first + 1 + tail)
+    }
 }
 
-/// Drop everything below at and clip what straddles it.
+/// Drop everything below at and clip what straddles it, in place.
 fn trim_runs_below(mut runs: List[Run], at: u64) {
+    let n = list.len(runs)
     let mut keep = 0u64
-    while keep < list.len(runs) && runs[keep].end <= at {
+    while keep < n && runs[keep].end <= at {
         keep += 1
     }
     if keep > 0 {
-        let rest: List[Run] = clone(list.slice(runs, keep, list.len(runs)))
-        runs = take rest
+        let remaining = n - keep
+        for k in 0u64 .. remaining {
+            runs[k] = runs[keep + k]
+        }
+        list.truncate(mut runs, remaining)
     }
     if list.len(runs) > 0 && runs[0].start < at {
         runs[0].start = at

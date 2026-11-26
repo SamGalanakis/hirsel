@@ -83,6 +83,9 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
     if let Some(mut s) = st.list[i].send {
         n = order.min(order.min(list.len(data), memory), order.min(headroom(s.credit, s.written), connection))
         if n > 0 {
+            if list.len(s.pieces) == list.capacity(s.pieces) && s.head > 0 {
+                compact_pieces(mut s)
+            }
             let mut owned: Bytes = list.with_capacity(n)
             list.append(mut owned, list.slice(data, 0, n))
             list.push(mut s.pieces, Piece(offset: s.written, len: n, data: Owned(take owned)))
@@ -120,6 +123,9 @@ fn write_shared_in(mut st: Streams, id: u64, take data: Shared[Bytes], fin: bool
             return Ok(false)
         }
         if len > 0 {
+            if list.len(s.pieces) == list.capacity(s.pieces) && s.head > 0 {
+                compact_pieces(mut s)
+            }
             list.push(mut s.pieces, Piece(offset: s.written, len: len, data: Held(take data)))
             s.written += len
         }

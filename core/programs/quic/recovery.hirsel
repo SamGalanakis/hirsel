@@ -38,6 +38,10 @@ pub type Ecn = Testing | Capable | Failed
 /// What a loss detection timeout asks of the sender (A.9).
 pub type Expiry = Idle | Lost(space: u64, numbers: List[u64]) | Probe(space: u64)
 
+/// Zero-allocation timeout outcome: when TimeoutLost(space), lost numbers were written
+/// into the caller's reusable buffer.
+pub type TimeoutOutcome = TimeoutIdle | TimeoutLost(u64) | TimeoutProbe(u64)
+
 pub type AckResult {
     acked: List[u64],
     lost: List[u64]
@@ -112,11 +116,13 @@ pub opaque type Recovery {
     next_seq: u64,
     tokens: u64,
     refilled: Option[u64],
-    collapsed: bool
+    collapsed: bool,
+    newly_buf: List[Sent],
+    lost_buf: List[Sent]
 }
 
 fn new_track() -> Track {
-    Track(sent: list.new(), largest: None, loss_time: None, last_eliciting: None, last_number: None, eliciting: 0, ce: 0, ect_reported: 0)
+    Track(sent: list.with_capacity(8), largest: None, loss_time: None, last_eliciting: None, last_number: None, eliciting: 0, ce: 0, ect_reported: 0)
 }
 
 /// A.4 and B.3. `mss` is max_datagram_size; the initial window is RFC 9002 §7.2's.
@@ -126,7 +132,15 @@ pub fn new(algorithm: Algorithm, mss: u64, server: bool) -> Recovery {
         list.push(mut tracks, new_track())
     }
     let initial = order.min(10 * mss, order.max(14720u64, 2 * mss))
-    Recovery(algorithm: algorithm, mss: mss, server: server, latest_rtt: 0, smoothed_rtt: INITIAL_RTT, rttvar: INITIAL_RTT / 2, min_rtt: 0, first_sample: None, max_ack_delay: 0, confirmed: false, handshake_keys: false, handshake_acked: false, pto_count: 0, timer: None, tracks: take tracks, window: initial, ssthresh: None, recovery_start: None, in_flight: 0, app_limited: false, cubic: Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0), hystart: Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0), ecn: Testing, next_seq: 0, tokens: BURST_PACKETS * mss, refilled: None, collapsed: false)
+    Recovery(algorithm: algorithm, mss: mss, server: server, latest_rtt: 0, smoothed_rtt: INITIAL_RTT, rttvar: INITIAL_RTT / 2, min_rtt: 0, first_sample: None, max_ack_delay: 0, confirmed: false, handshake_keys: false, handshake_acked: false, pto_count: 0, timer: None, tracks: take tracks, window: initial, ssthresh: None, recovery_start: None, in_flight: 0, app_limited: false, cubic: Cubic(w_max: 0, k_ms: 0, epoch: None, cwnd_epoch: 0, w_est: 0, prior: 0), hystart: Hystart(phase: SlowStart, window_end: None, last_min: None, current_min: None, samples: 0), ecn: Testing, next_seq: 0, tokens: BURST_PACKETS * mss, refilled: None, collapsed: false, newly_buf: list.new(), lost_buf: list.new())
+}
+
+/// Pre-size the Application space's sent list and reusable ACK/loss scratch buffers so
+/// steady-state send and ACK processing allocates nothing (QUIC-9).
+pub fn reserve_application(mut r: Recovery, packets: u64) {
+    list.reserve(mut r.tracks[APPLICATION].sent, packets)
+    list.reserve(mut r.newly_buf, order.min(packets, 128))
+    list.reserve(mut r.lost_buf, 16)
 }
 
 /// RFC 9002 §9.4 for RFC 9000 §9.4: a peer at a new address (more than a new port)
@@ -321,36 +335,49 @@ fn forget(mut r: Recovery, space: u64, p: Sent) {
 /// A.7. `delay` is the decoded ACK Delay in nanoseconds; `ranges` were validated
 /// against the packet numbers sent.
 pub fn on_ack(mut r: Recovery, now: u64, space: u64, ranges: List[codec.AckRange], delay: u64, ecn: Option[codec.EcnCounts]) -> AckResult {
-    let mut result = AckResult(acked: list.new(), lost: list.new())
+    let mut acked: List[u64] = list.new()
+    let mut lost: List[u64] = list.new()
+    on_ack_into(mut r, now, space, ranges, delay, ecn, mut acked, mut lost)
+    AckResult(acked: take acked, lost: take lost)
+}
+
+/// Like on_ack, reusing caller-provided `acked_out` and `lost_out` lists and per-Recovery
+/// scratch buffers so steady-state ACKs perform zero allocations.
+pub fn on_ack_into(mut r: Recovery, now: u64, space: u64, ranges: List[codec.AckRange], delay: u64, ecn: Option[codec.EcnCounts], mut acked_out: List[u64], mut lost_out: List[u64]) {
+    list.clear(mut acked_out)
+    list.clear(mut lost_out)
     if list.len(ranges) == 0 {
-        return take result
+        return
     }
     let largest = ranges[0].largest
     r.tracks[space].largest = Some(match r.tracks[space].largest {
         None => largest,
         Some(previous) => order.max(previous, largest),
     })
-    let mut newly: List[Sent] = list.new()
-    let mut kept: List[Sent] = list.with_capacity(list.len(r.tracks[space].sent))
-    for p in r.tracks[space].sent {
+    list.clear(mut r.newly_buf)
+    let mut write = 0u64
+    let sent_len = list.len(r.tracks[space].sent)
+    for i in 0u64 .. sent_len {
+        let p = r.tracks[space].sent[i]
         if covered(ranges, p.number) {
-            list.push(mut newly, p)
+            list.push(mut r.newly_buf, p)
         } else {
-            list.push(mut kept, p)
+            r.tracks[space].sent[write] = p
+            write += 1
         }
     }
-    r.tracks[space].sent = take kept
-    if list.len(newly) == 0 {
-        return take result
+    list.truncate(mut r.tracks[space].sent, write)
+    let newly_len = list.len(r.newly_buf)
+    if newly_len == 0 {
+        return
     }
-    for p in newly {
-        forget(mut r, space, p)
-    }
-    let last = newly[list.len(newly) - 1]
     let mut eliciting = false
-    for p in newly {
+    for i in 0u64 .. newly_len {
+        let p = r.newly_buf[i]
+        forget(mut r, space, p)
         eliciting = eliciting || p.eliciting
     }
+    let last = r.newly_buf[newly_len - 1]
     let mut sampled = false
     if last.number == largest && eliciting {
         r.latest_rtt = now - last.time
@@ -360,23 +387,22 @@ pub fn on_ack(mut r: Recovery, now: u64, space: u64, ranges: List[codec.AckRange
     if space == HANDSHAKE {
         r.handshake_acked = true
     }
-    process_ecn(mut r, now, space, newly, last.time, ecn)
-    let lost = detect_lost(mut r, now, space)
-    if list.len(lost) != 0 {
-        on_lost(mut r, now, lost)
+    process_ecn(mut r, now, space, last.time, ecn)
+    detect_lost(mut r, now, space)
+    if list.len(r.lost_buf) != 0 {
+        on_lost(mut r, now)
     }
-    for p in lost {
-        list.push(mut result.lost, p.number)
+    for p in r.lost_buf {
+        list.push(mut lost_out, p.number)
     }
-    on_acked(mut r, now, newly, sampled)
+    on_acked(mut r, now, sampled)
     if peer_validated(r) {
         r.pto_count = 0
     }
     set_timer(mut r, now)
-    for p in newly {
-        list.push(mut result.acked, p.number)
+    for p in r.newly_buf {
+        list.push(mut acked_out, p.number)
     }
-    take result
 }
 
 /// A.7 UpdateRtt. RFC 9002 §5.3 lets Initial ACK delays be ignored.
@@ -414,35 +440,39 @@ fn peer_validated(r: Recovery) -> bool {
     r.server || r.handshake_acked || r.confirmed
 }
 
-/// A.10.
-fn detect_lost(mut r: Recovery, now: u64, space: u64) -> List[Sent] {
-    let mut lost: List[Sent] = list.new()
+/// A.10, compacting `r.tracks[space].sent` in place and writing lost packets to `r.lost_buf`.
+fn detect_lost(mut r: Recovery, now: u64, space: u64) {
+    list.clear(mut r.lost_buf)
     r.tracks[space].loss_time = None
     let Some(largest) = r.tracks[space].largest else {
-        return take lost
+        return
     }
     let delay = order.max(9 * order.max(r.latest_rtt, r.smoothed_rtt) / 8, GRANULARITY)
-    let mut kept: List[Sent] = list.with_capacity(list.len(r.tracks[space].sent))
+    let mut write = 0u64
     let mut loss_time: Option[u64] = None
-    for p in r.tracks[space].sent {
+    let sent_len = list.len(r.tracks[space].sent)
+    for i in 0u64 .. sent_len {
+        let p = r.tracks[space].sent[i]
         if p.number > largest {
-            list.push(mut kept, p)
+            r.tracks[space].sent[write] = p
+            write += 1
         } else if p.time + delay <= now || largest >= p.number + PACKET_THRESHOLD {
-            list.push(mut lost, p)
+            list.push(mut r.lost_buf, p)
         } else {
             loss_time = Some(match loss_time {
                 None => p.time + delay,
                 Some(t) => order.min(t, p.time + delay),
             })
-            list.push(mut kept, p)
+            r.tracks[space].sent[write] = p
+            write += 1
         }
     }
-    r.tracks[space].sent = take kept
+    list.truncate(mut r.tracks[space].sent, write)
     r.tracks[space].loss_time = loss_time
-    for p in lost {
+    for i in 0u64 .. list.len(r.lost_buf) {
+        let p = r.lost_buf[i]
         forget(mut r, space, p)
     }
-    take lost
 }
 
 fn in_recovery(r: Recovery, sent: u64) -> bool {
@@ -452,12 +482,12 @@ fn in_recovery(r: Recovery, sent: u64) -> bool {
     }
 }
 
-/// B.8, with RFC 9002 §7.6.2's persistent congestion over this space's lost packets. A
-/// lost path MTU probe leaves the window alone and starts no persistent congestion period
-/// (RFC 9000 §14.4).
-fn on_lost(mut r: Recovery, now: u64, lost: List[Sent]) {
+/// B.8, with RFC 9002 §7.6.2's persistent congestion over `r.lost_buf`. A lost path MTU
+/// probe leaves the window alone and starts no persistent congestion period (RFC 9000 §14.4).
+fn on_lost(mut r: Recovery, now: u64) {
     let mut last_loss: Option[u64] = None
-    for p in lost {
+    for i in 0u64 .. list.len(r.lost_buf) {
+        let p = r.lost_buf[i]
         if p.in_flight {
             r.in_flight -= p.size
         }
@@ -477,7 +507,8 @@ fn on_lost(mut r: Recovery, now: u64, lost: List[Sent]) {
     let duration = (r.smoothed_rtt + order.max(4 * r.rttvar, GRANULARITY) + r.max_ack_delay) * PERSISTENT_THRESHOLD
     let mut previous: Option[u64] = None
     let mut start: Option[u64] = None
-    for p in lost {
+    for i in 0u64 .. list.len(r.lost_buf) {
+        let p = r.lost_buf[i]
         if p.time <= first {
             previous = None
             start = None
@@ -545,11 +576,11 @@ fn congestion_event(mut r: Recovery, now: u64, sent: u64) {
     }
 }
 
-/// B.7, and RFC 9000 §13.4.2.1's validation of the reported counts.
-fn process_ecn(mut r: Recovery, now: u64, space: u64, newly: List[Sent], largest_time: u64, ecn: Option[codec.EcnCounts]) {
+/// B.7, and RFC 9000 §13.4.2.1's validation of the reported counts over `r.newly_buf`.
+fn process_ecn(mut r: Recovery, now: u64, space: u64, largest_time: u64, ecn: Option[codec.EcnCounts]) {
     let mut marked = 0u64
-    for p in newly {
-        if p.ect {
+    for i in 0u64 .. list.len(r.newly_buf) {
+        if r.newly_buf[i].ect {
             marked += 1
         }
     }
@@ -590,10 +621,11 @@ fn hystart_active(r: Recovery) -> bool {
 }
 
 /// B.5 for NewReno, per packet. CUBIC and HyStart++ act once per ACK.
-fn on_acked(mut r: Recovery, now: u64, newly: List[Sent], sampled: bool) {
+fn on_acked(mut r: Recovery, now: u64, sampled: bool) {
     let mut size = 0u64
     let mut round_end = false
-    for p in newly {
+    for i in 0u64 .. list.len(r.newly_buf) {
+        let p = r.newly_buf[i]
         if !p.in_flight {
             continue
         }
@@ -861,26 +893,36 @@ fn set_timer(mut r: Recovery, now: u64) {
 
 /// A.9. The caller sends the probe a Probe asks for.
 pub fn on_timeout(mut r: Recovery, now: u64) -> Expiry {
+    let mut numbers: List[u64] = list.new()
+    match on_timeout_into(mut r, now, mut numbers) {
+        TimeoutLost(space) => Lost(space: space, numbers: take numbers),
+        TimeoutProbe(space) => Probe(space: space),
+        TimeoutIdle => Idle,
+    }
+}
+
+/// Like on_timeout, writing lost packet numbers into the caller's reusable `lost_out`.
+pub fn on_timeout_into(mut r: Recovery, now: u64, mut lost_out: List[u64]) -> TimeoutOutcome {
+    list.clear(mut lost_out)
     if let Some((_, space)) = loss_time_space(r) {
-        let lost = detect_lost(mut r, now, space)
-        on_lost(mut r, now, lost)
+        detect_lost(mut r, now, space)
+        on_lost(mut r, now)
         set_timer(mut r, now)
-        let mut numbers: List[u64] = list.with_capacity(list.len(lost))
-        for p in lost {
-            list.push(mut numbers, p.number)
+        for p in r.lost_buf {
+            list.push(mut lost_out, p.number)
         }
-        return Lost(space: space, numbers: take numbers)
+        return TimeoutLost(space)
     }
     let space = match pto_time_space(r, now) {
         Some((_, s)) => s,
         None => {
             set_timer(mut r, now)
-            return Idle
+            return TimeoutIdle
         },
     }
     r.pto_count += 1
     set_timer(mut r, now)
-    Probe(space: space)
+    TimeoutProbe(space)
 }
 
 /// A.11 and B.9.
@@ -890,9 +932,13 @@ pub fn discard(mut r: Recovery, now: u64, space: u64) {
             r.in_flight -= p.size
         }
     }
-    let ce = r.tracks[space].ce
-    r.tracks[space] = new_track()
-    r.tracks[space].ce = ce
+    list.clear(mut r.tracks[space].sent)
+    r.tracks[space].largest = None
+    r.tracks[space].loss_time = None
+    r.tracks[space].last_eliciting = None
+    r.tracks[space].last_number = None
+    r.tracks[space].eliciting = 0
+    r.tracks[space].ect_reported = 0
     r.pto_count = 0
     set_timer(mut r, now)
 }

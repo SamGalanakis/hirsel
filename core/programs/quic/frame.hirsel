@@ -69,6 +69,17 @@ fn packet_permission(kind: PacketKind) -> u8 {
 /// Read one frame with absolute offsets into input. A refusal leaves the reader at the
 /// offending frame. Discard the packet on error.
 pub fn next_frame(input: Bytes, mut reader: FrameReader) -> Result[Option[Frame], CodecError] {
+    let mut ranges: List[AckRange] = list.new()
+    match next_frame_into(input, mut reader, mut ranges)? {
+        Some(Ack(a)) => Ok(Some(Ack(AckFields(delay: a.delay, ranges: take ranges, ecn: a.ecn)))),
+        other => Ok(other),
+    }
+}
+
+/// Like next_frame, reusing `ack_ranges` for ACK frames instead of allocating a list per
+/// frame. For Ack frames, the returned AckFields carries an empty ranges list and the
+/// decoded ranges live in `ack_ranges`.
+pub fn next_frame_into(input: Bytes, mut reader: FrameReader, mut ack_ranges: List[AckRange]) -> Result[Option[Frame], CodecError] {
     if reader.next == reader.end {
         return Ok(None)
     }
@@ -88,7 +99,7 @@ pub fn next_frame(input: Bytes, mut reader: FrameReader) -> Result[Option[Frame]
     if (t == 0x30 || t == 0x31) && reader.max_datagram_frame == 0 {
         return Error(ProtocolViolation(t))
     }
-    match frame_body(input, mut c, t) {
+    match frame_body(input, mut c, t, mut ack_ranges) {
         Ok(frame) => {
             if (t == 0x30 || t == 0x31) && c.at - start > reader.max_datagram_frame {
                 return Error(ProtocolViolation(t))
@@ -116,7 +127,7 @@ fn frame_data(input: Bytes, mut c: Cursor, explicit_len: bool) -> Result[Span, C
     }
 }
 
-fn frame_body(input: Bytes, mut c: Cursor, t: u64) -> Result[Frame, CodecError] {
+fn frame_body(input: Bytes, mut c: Cursor, t: u64, mut ack_ranges: List[AckRange]) -> Result[Frame, CodecError] {
     match t {
         0x00 => {
             let start = c.at - 1
@@ -126,7 +137,7 @@ fn frame_body(input: Bytes, mut c: Cursor, t: u64) -> Result[Frame, CodecError] 
             Ok(Padding(c.at - start))
         },
         0x01 => Ok(Ping),
-        0x02 ..= 0x03 => Ok(Ack(read_ack(input, mut c, t == 0x03)?)),
+        0x02 ..= 0x03 => Ok(Ack(read_ack_into(input, mut c, t == 0x03, mut ack_ranges)?)),
         0x04 => read_reset(input, mut c, false),
         0x05 => {
             let stream = varint(input, mut c)?
@@ -230,7 +241,7 @@ fn read_new_cid(input: Bytes, mut c: Cursor) -> Result[Frame, CodecError] {
     Ok(NewConnectionId(sequence: sequence, retire_prior_to: retire_prior_to, id: id, reset_token: reset_token))
 }
 
-fn read_ack(input: Bytes, mut c: Cursor, has_ecn: bool) -> Result[AckFields, CodecError] {
+fn read_ack_into(input: Bytes, mut c: Cursor, has_ecn: bool, mut ranges: List[AckRange]) -> Result[AckFields, CodecError] {
     let mut largest = varint(input, mut c)?
     let delay = varint(input, mut c)?
     let count = varint(input, mut c)?
@@ -238,7 +249,7 @@ fn read_ack(input: Bytes, mut c: Cursor, has_ecn: bool) -> Result[AckFields, Cod
     if first > largest || count > (c.end - c.at) / 2 {
         return Error(InvalidValue)
     }
-    let mut ranges: List[AckRange] = list.new()
+    list.clear(mut ranges)
     if let Error(e) = list.try_reserve(mut ranges, count + 1) {
         return Error(NoCapacity(e))
     }
@@ -265,5 +276,5 @@ fn read_ack(input: Bytes, mut c: Cursor, has_ecn: bool) -> Result[AckFields, Cod
     } else {
         None
     }
-    Ok(AckFields(delay: delay, ranges: take ranges, ecn: ecn))
+    Ok(AckFields(delay: delay, ranges: list.new(), ecn: ecn))
 }

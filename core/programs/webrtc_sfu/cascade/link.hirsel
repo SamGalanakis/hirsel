@@ -110,7 +110,7 @@ pub fn cascade_endpoint_config(r: Random, max_connections: u32) -> quic.Endpoint
     host.random(r, mut k2)
     let reset_key = result.unwrap(secret.seal(take k1, "mac"))
     let token_key = result.unwrap(secret.seal(take k2, "kdf"))
-    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1500, retry: Never, reset_key: take reset_key, token_key: take token_key, limits: quic.EndpointLimits(connections: max_connections, unvalidated: max_connections, datagram_bytes: 1048576))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1472, retry: Never, reset_key: take reset_key, token_key: take token_key, limits: quic.EndpointLimits(connections: max_connections, unvalidated: max_connections, datagram_bytes: 1048576))
 }
 
 /// Create a `LinkHub` for `local_node`, accepting mutually-authenticated links pinned to `client_pins`.

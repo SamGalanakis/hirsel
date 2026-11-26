@@ -221,30 +221,36 @@ impl Site {
 
     /// The same site at the same place, whatever its counts and whichever
     /// body holds it: one decision inlined into two functions is one site.
-    /// The arm position is not compared: it is the first anchored position of
-    /// the arm's target block in the instance or code variant a link kept,
-    /// and two links of one source can keep different ones ("Merge").
+    /// Links of one source may keep different target blocks, so the arm
+    /// position and its derived Fail shape can vary ("Merge").
     fn same_place(&self, other: &Self) -> bool {
-        let unarmed = |site: &Self| {
+        let decision = |site: &Self| {
             let place = Place {
                 arm_line: None,
                 arm_col: None,
                 ..site.place.clone()
             };
-            (site.arm.clone(), site.definition.clone(), place, site.shape)
+            let decision_shape = site.shape.filter(|shape| *shape != Shape::Fail);
+            (place, decision_shape)
         };
-        unarmed(self) == unarmed(other)
+        self.arm == other.arm
+            && self.definition == other.definition
+            && decision(self) == decision(other)
     }
 
-    /// Take `other`'s arm position when it is earlier than this site's, or
-    /// when this site has none: a merge keeps the earliest position any input
-    /// gives, whatever their order.
+    /// Keep the earliest known arm position and its shape. At the same
+    /// position, keep a Fail classification if either input observed one.
     fn take_earlier_arm(&mut self, other: &Self) {
-        let arm = |place: &Place| place.arm_line.map(|line| (line, place.arm_col));
-        if let Some(theirs) = arm(&other.place)
-            && arm(&self.place).is_none_or(|ours| theirs < ours)
+        let arm = |site: &Self| {
+            site.place
+                .arm_line
+                .map(|line| (line, site.place.arm_col, site.shape != Some(Shape::Fail)))
+        };
+        if let Some(theirs) = arm(other)
+            && arm(self).is_none_or(|ours| theirs < ours)
         {
             (self.place.arm_line, self.place.arm_col) = (other.place.arm_line, other.place.arm_col);
+            self.shape = other.shape;
         }
     }
 }
@@ -389,9 +395,8 @@ impl Profile {
     /// and seeds join. Refused, naming the conflict, when a run is in both
     /// (a count cannot be taken back), when one function has two sources,
     /// or when one site is placed differently: the inputs come from builds
-    /// of different sources. A site's arm position may differ between inputs
-    /// of one source; the earliest is kept. Run rows are kept only when both sides kept
-    /// them.
+    /// of different sources. Of the arm positions for one source, keep the
+    /// earliest with its shape. Run rows are kept only when both sides kept them.
     pub(crate) fn merge(&mut self, other: Self) -> Result<()> {
         for (definition, function) in &other.functions {
             if let Some(held) = self.functions.get(definition)

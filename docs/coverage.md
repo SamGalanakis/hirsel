@@ -514,7 +514,8 @@ An arm's `arm_line`/`arm_col` is the first anchored position of its target block
 instance or code variant the link kept (the first record of an id in link order), so two
 links of one source can place it differently: produce_items's `yes` sat at 232:15 in some
 contracts laws and 233:26 in others on 2026-11-26. Merge keeps the earliest position any
-input gives, in either order, and an input without one takes the other's.
+input gives and the shape at that position. If the positions match, it keeps a `fail`
+shape reported by either input. The decision's `error` and `guard` shapes must agree.
 
 Profiles from different engines merge, because keys do not depend on the engine. `builds`
 then lists each build. A merge of two inputs that share a function with the same `src`, such

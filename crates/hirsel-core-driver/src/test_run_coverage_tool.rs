@@ -12,7 +12,7 @@
 /// t1 alone reached f's `yes`, and only the others reached f's `no` and g#e.
 #[test]
 fn coverage_profiles_merge_read_back_and_refuse_conflicts() {
-    use crate::coverage::{Build, Function, Place, Profile, SiteMap};
+    use crate::coverage::{Build, Function, Place, Profile, Shape, SiteMap};
     let build = Build { engine: "cranelift".into(), optimize: false, target: "x86_64-unknown-linux-gnu".into() };
     let site = |function: &str, arm: Option<&str>, line: u64| crate::coverage::Site {
         arm: arm.map(str::to_owned),
@@ -92,19 +92,23 @@ fn coverage_profiles_merge_read_back_and_refuse_conflicts() {
         "site app@1/main/f@10-15.0:yes is placed differently in two inputs: they are builds of different sources"
     );
     // One source whose arm target sits at different first positions in two
-    // links' instances (nightly 2026-11-26: produce_items's `yes` at 232:15
-    // and 233:26) merges, keeping the earliest in either order.
-    let armed = |test: &str, line: u64, col: u64| {
+    // links' instances merges, keeping the earliest and its shape in either
+    // order. On 2026-11-26 the later Store arm landed inside a fail call.
+    let armed = |test: &str, line: u64, col: u64, shape: Option<Shape>| {
         let mut profile = run(&build, test, Some(5), true, [true, false, true], false, "src-f", 4);
-        let place = &mut profile.sites.get_mut(yes).unwrap().place;
-        (place.arm_line, place.arm_col) = (Some(line), Some(col));
+        let site = profile.sites.get_mut(yes).unwrap();
+        (site.place.arm_line, site.place.arm_col) = (Some(line), Some(col));
+        site.shape = shape;
         profile
     };
-    for (first, second) in [((233, 26), (232, 15)), ((232, 15), (233, 26))] {
-        let mut placed = armed("app@1/main/t3", first.0, first.1);
-        placed.merge(armed("app@1/main/t4", second.0, second.1)).expect("arm positions of one source merge");
-        let place = &placed.sites[yes].place;
-        assert_eq!((place.arm_line, place.arm_col), (Some(232), Some(15)));
+    for (line, col, shape) in [(233, 26, None), (232, 15, Some(Shape::Fail))] {
+        let ordinary = armed("app@1/main/t3", 232, 15, None);
+        let fail = armed("app@1/main/t4", line, col, Some(Shape::Fail));
+        for (mut placed, other) in [(ordinary.clone(), fail.clone()), (fail, ordinary)] {
+            placed.merge(other).expect("arm positions of one source merge");
+            let site = &placed.sites[yes];
+            assert_eq!((site.place.arm_line, site.place.arm_col, site.shape), (Some(232), Some(15), shape));
+        }
     }
     let mut old = document.clone();
     old["hirsel_coverage"] = 2.into();

@@ -2,7 +2,9 @@
 //! Replay constructs its grants from the entry signature, with no host provider.
 pub(crate) mod identities;
 mod launch;
+mod start;
 use launch::{read_launch, write_launch};
+use start::{on_pool, pinned_replay};
 
 use super::*;
 use crate::{
@@ -739,9 +741,21 @@ unsafe fn run_recording<const UNITS: bool>(
         if let Some((path, mode, unit)) = pinned_replay(&*input) {
             #[cfg(feature = "prof")]
             let _profile = crate::prof::Run::start_replay();
-            return run_taped(
-                input, names, sources, entry, path, mode, identity, revision, build, None, unit,
-            );
+            return on_pool(UNITS, input, &|input| {
+                run_taped(
+                    input,
+                    names,
+                    sources,
+                    entry,
+                    path.clone(),
+                    mode,
+                    identity,
+                    revision,
+                    build,
+                    None,
+                    unit.clone(),
+                )
+            });
         }
         let path = std::env::var_os("HIRSEL_RECORD");
         let id = std::env::var_os("HIRSEL_RECORD_ID");
@@ -765,47 +779,25 @@ unsafe fn run_recording<const UNITS: bool>(
         let _profile = crate::prof::Run::start();
         super::writer::start();
         // Each helper unit's recorder writes its own stream of this file.
-        let status = run_taped(
-            input,
-            names,
-            sources,
-            entry,
-            path.as_os_str().as_bytes().to_vec(),
-            0,
-            identity,
-            revision,
-            build,
-            record_id,
-            None,
-        );
+        let status = on_pool(UNITS, input, &|input| {
+            run_taped(
+                input,
+                names,
+                sources,
+                entry,
+                path.as_os_str().as_bytes().to_vec(),
+                0,
+                identity,
+                revision,
+                build,
+                record_id,
+                None,
+            )
+        });
         super::writer::flush();
         report_truncation((*input).stderr_fd);
         status
     }
-}
-
-/// `--hirsel-replay-recording MODE PATH [UNIT]`: the replay the operator CLI
-/// starts on a pinned image, with the one unit `--unit` names.
-fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64, Option<Vec<u8>>)> {
-    if !matches!(input.args_len, 3 | 4) {
-        return None;
-    }
-    // SAFETY: the native launcher pins exactly args_len View records at entry.
-    let args = unsafe { std::slice::from_raw_parts(input.args, input.args_len) };
-    let command = unsafe { crate::tls::view_bytes(&args[0]) };
-    if command != b"--hirsel-replay-recording" {
-        return None;
-    }
-    let mode = match unsafe { crate::tls::view_bytes(&args[1]) } {
-        b"same" => 1,
-        b"diagnose" => 2,
-        _ => return None,
-    };
-    let path = unsafe { crate::tls::view_bytes(&args[2]) }.to_vec();
-    let unit = args
-        .get(3)
-        .map(|unit| unsafe { crate::tls::view_bytes(unit) }.to_vec());
-    Some((path, mode, unit))
 }
 
 /// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
@@ -837,19 +829,22 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
     unsafe {
         identities::install(descriptors);
         identities::install_spawns(spawns);
-        run_taped(
-            input,
-            names,
-            sources,
-            entry,
-            CStr::from_ptr(path).to_bytes().to_vec(),
-            mode,
-            identity,
-            revision,
-            build,
-            None,
-            None,
-        )
+        let path = CStr::from_ptr(path).to_bytes().to_vec();
+        on_pool(!spawns.is_null(), input, &|input| {
+            run_taped(
+                input,
+                names,
+                sources,
+                entry,
+                path.clone(),
+                mode,
+                identity,
+                revision,
+                build,
+                None,
+                None,
+            )
+        })
     }
 }
 

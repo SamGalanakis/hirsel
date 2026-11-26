@@ -689,11 +689,13 @@ last. `--unit` skips the missing-stream check. Each unit replays against its own
 
 So no unit's replay depends on how the others are scheduled or on how many workers run
 them. A replay at any worker count of a recording made at any other worker count makes the
-same observations in every unit. `hirsel replay app --tape PATH --unit NAME` replays one
+same observations in every unit. Recording and replay run on `HIRSEL_UNTIED` workers when
+it is set, as the program's ordinary run does, and each unit waits for the others' verdicts
+off its worker. `hirsel replay app --tape PATH --unit NAME` replays one
 unit's stream alone and leaves the other streams unread.
 
-**What this build replays.** Every stream replays as above, each helper on a thread of its
-own from its stream's entry, when its entry's value holds plain bytes, lists of plain bytes,
+**What this build replays.** Every stream replays as above, each helper as a unit of its
+own from its stream's entry, on the pool beside the root or else on a thread of its own, when its entry's value holds plain bytes, lists of plain bytes,
 functions, capabilities, `Secret`s and `KeyShare`s, and its helper ends return a value of
 plain bytes, lists of plain bytes, functions, `Secret`s and `KeyShare`s. A helper's entry capability becomes an object of the helper's stream, by the
 ordinal the entry gives it. When every started stream has its verdict, the replay writes the

@@ -160,8 +160,8 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
     }
 }
 
-/// Start a helper stream's replay as its own unit, on a thread of its own,
-/// as a spawn starts a helper that runs: its context, its input unpacked
+/// Start a helper stream's replay as its own unit, on the pool beside the
+/// root or else on a thread of its own, as a spawn starts a helper that runs: its context, its input unpacked
 /// from the entry, its code and its tape. No unit owns it: its end is
 /// published to an owner that never takes it, since its parent's replay
 /// takes the end from its own stream.
@@ -220,8 +220,11 @@ pub(crate) unsafe fn start_helper(
             Some(helper),
         );
     };
-    std::thread::Builder::new()
-        .name("hirsel-unit".into())
-        .spawn(start)
-        .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+    let start: crate::units::Job = Box::new(start);
+    if let Err(start) = crate::units::spawn_job(start) {
+        std::thread::Builder::new()
+            .name("hirsel-unit".into())
+            .spawn(start)
+            .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+    }
 }

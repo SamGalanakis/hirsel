@@ -813,3 +813,107 @@ fn u5_key_shares_cross_and_agree() {
         one_line("result", 0, 7, "replay: Diverged(Arg) at 7 in root ");
     }
 }
+
+/// Nested helpers exchange a `Secret` and a `KeyShare` as items on their own
+/// connections and in their entries and results; both come back to the root
+/// that paid for them, which agrees with the share.
+const U5_WORKERS: &str = r#"
+fn inner(take k: (Secret, secret.KeyShare)) -> (Secret, secret.KeyShare) waits {
+    let (c, i): (Client[(Secret, secret.KeyShare)], Inbox[(Secret, secret.KeyShare)]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take k))
+    result.unwrap(conn.receive(i))
+}
+
+fn outer(take input: (Tasks, (Secret, secret.KeyShare))) -> (Secret, secret.KeyShare) waits {
+    let (take tasks, take k) = take input
+    let (c, i): (Client[(Secret, secret.KeyShare)], Inbox[(Secret, secret.KeyShare)]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take k))
+    let held = result.unwrap(conn.receive(i))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take held, inner))
+    result.unwrap(task.join(take h))
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let mut b: Bytes = list.with_capacity(1)
+    list.push(mut b, 5)
+    let s = result.unwrap(secret.seal(take b, "mac"))
+    let mut point: Bytes = list.with_capacity(32)
+    let share = result.unwrap(secret.key_share(provide.random(11), X25519, mut point))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 262144, (tasks, (take s, take share)), outer))
+    let back = result.unwrap(task.join(take h))
+    let (c, i): (Client[(Secret, secret.KeyShare)], Inbox[(Secret, secret.KeyShare)]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take back))
+    let (take kept, take last) = result.unwrap(conn.receive(i))
+    let profile: schedule.Profile13 = Quic(Aes128GcmSha256)
+    let hash = string.as_bytes("0123456789abcdef0123456789abcdef")
+    let keys = result.unwrap(schedule.tls13(profile, Client, take last, hash, hash))
+    drop(take keys)
+    drop(take kept)
+    result.unwrap(stdout.write(out, "workers"))
+    Ok(())
+}
+"#;
+
+/// Recording and replay run on `HIRSEL_UNTIED` workers as an ordinary run
+/// does (CONC-15: worker-count independence, docs/recording.md). A run
+/// recorded at 1 worker replays `Sealed` at 4, and one recorded at 4
+/// replays `Sealed` at 1, each with the recorded output and the same three
+/// streams (`root`, `root.0`, `root.0.0`): which worker runs a unit is not a
+/// recorded observation.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_replays_at_another_worker_count() {
+    crate::openat2_required::require();
+
+    let run = |program: &Path, argv: &[&str], record: Option<&Path>, workers: &str| {
+        // A run that hangs on the pool ends 124 and fails with its case.
+        let mut cmd = std::process::Command::new("timeout");
+        cmd.arg("120").arg(program).args(argv).env("HIRSEL_UNTIED", workers);
+        match record {
+            Some(path) => cmd.env("HIRSEL_RECORD", path),
+            None => cmd.env_remove("HIRSEL_RECORD"),
+        };
+        let output = cmd.output().unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(U5_WORKERS, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut options = native_options(backend, dir.path());
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.grant_mask = ["Tasks", "Stdout"]
+            .iter()
+            .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+        options.cas = dir.path().join(format!("u5w-store-{backend:?}"));
+        options.output = dir.path().join(format!("u5w-{backend:?}"));
+        let program = product.build(&entry, &options).unwrap().executable;
+        for (recorded, replayed) in [("1", "4"), ("4", "1")] {
+            let at = format!("{backend:?} recorded at {recorded}, replayed at {replayed}");
+            let path = dir.path().join(format!("u5w-{backend:?}-{recorded}.tape"));
+            let (code, out, err) = run(&program, &[], Some(&path), recorded);
+            assert_eq!((code, out.as_str()), (Some(0), "workers"), "{at}: {err}");
+            let frames = unit_streams(&path, &at, &["root", "root.0", "root.0.0"]);
+            let tape = path.to_str().unwrap();
+            let argv = ["--hirsel-replay-recording", "same", tape];
+            let (code, out, err) = run(&program, &argv, None, replayed);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (Some(0), "", ""),
+                "{at}: {frames:#?}"
+            );
+        }
+    }
+}

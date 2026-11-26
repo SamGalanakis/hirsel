@@ -37,21 +37,31 @@ pub(crate) fn unstarted(unit: &str, line: String) {
 }
 
 /// A helper's replay ended at its verdict: no further program code of the
-/// unit runs, and its thread holds nothing another unit waits for.
+/// unit runs, and its thread holds nothing another unit waits for. On the
+/// pool the unit parks and a host thread holds the wait, so its worker runs
+/// the other units.
 pub(crate) fn park() -> ! {
-    loop {
-        std::thread::park();
-    }
+    crate::units::off_slot(|| -> () {
+        loop {
+            std::thread::park();
+        }
+    });
+    unreachable!("a replay's ended unit never resumes")
 }
 
 /// Wait for every started stream's verdict, then write each line other than
 /// `Sealed` to `stderr` in unit-name order, `root`'s with them. True when it
 /// wrote one: the replay exits 1.
 pub(crate) fn conclude(stderr: i32, root: Option<String>) -> bool {
+    // On the pool the root parks while a host thread waits, so its worker
+    // runs the helper streams it waits for.
+    crate::units::off_slot(|| {
+        let mut board = BOARD.lock().unwrap();
+        while board.running > 0 {
+            board = ENDED.wait(board).unwrap();
+        }
+    });
     let mut board = BOARD.lock().unwrap();
-    while board.running > 0 {
-        board = ENDED.wait(board).unwrap();
-    }
     let mut lines = std::mem::take(&mut board.lines);
     lines.extend(root.map(|line| ("root".to_owned(), line)));
     lines.sort_by_cached_key(|(unit, _)| order(unit));

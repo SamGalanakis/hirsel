@@ -112,6 +112,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::u5_items_replay_from_their_takes",
         "native::tests::u5_secrets_cross_in_items_entries_and_results",
         "native::tests::u5_key_shares_cross_and_agree",
+        "native::tests::u5_replays_at_another_worker_count",
         "native::tests::rl9_sent_items_match_their_takes",
         "native::tests::rl8_take_positions_natively",
         "native::tests::rl9_shared_crosses_into_a_helper",

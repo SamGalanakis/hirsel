@@ -70,6 +70,7 @@ std = { major = 1 }
 "store-packs.hirsel" = "store"
 "store-pack-index.hirsel" = "store"
 "store-scrub.hirsel" = "store"
+"store-scrub-pace.hirsel" = "store"
 "store-cut-retirement.hirsel" = "store"
 "store-history.hirsel" = "store"
 "store-stream-frames.hirsel" = "store"
@@ -663,6 +664,9 @@ limit = 134217728
 limit = 536870912
 
 [tests.runs."store@1/store/describe_suffix_free"]
+limit = 536870912
+
+[tests.runs."store@1/store/disk_test_scrub_paced_and_history"]
 limit = 536870912
 
 [tests.runs."store@1/store/read_only_replay_step_budget"]

@@ -108,3 +108,6 @@ limit = 268435456
 
 [tests.runs."platform@1/store_tool/describe_matches_open"]
 limit = 536870912
+
+[tests.runs."platform@1/store_tool/stats_prints_persisted_scrub_round"]
+limit = 536870912

@@ -108,3 +108,63 @@ fn describe_matches_open(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[()
     let b = result.unwrap(host.mkdtemp(d, mut name))
     law_describe_matches_case(b, c, r, tasks, true)
 }
+
+// T13: persisted scrub-round history appears in `hirsel store stats` with the
+// exact operator receipt line `last complete round: versions a..b, N bytes, E errors`.
+@test
+fn stats_prints_persisted_scrub_round(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "scrub-stats-")
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let options = result.unwrap(store.sized(Directory, 268435456))
+    let mut db = store.open(tasks, dir, c, r, options)?
+    let mut schema = store.declare(db, Migrate)?
+    let created = store.declare_table(mut schema, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let items = store.finish(mut schema, take created)?
+    let _ = store.seal(mut db, take schema)?
+    let wrote = store.run(mut db, None, items, fn(mut tx, t) -> Result[(), store.Error] {
+        for k in 0u64 .. 20u64 {
+            store.put(mut tx, t, k, k * 3u64)?
+        }
+        Ok(())
+    })?
+    law_describe_ticket(mut db, wrote)?
+    let _ = store.checkpoint(mut db)?
+    let cfg = store.ScrubConfig(target_ms: 10000u64, max_rate_bps: 1000000u64, slice_bytes: 65536u64, min_rate_bps: 100000u64)
+    let mut pacer = store.begin_scrub_pacer(db, cfg, 1000u64)?
+    let mut now = 1000u64
+    let mut completed_round: Option[store.ScrubRound] = None
+    while let None = completed_round {
+        let step = store.scrub_pacer_step(mut pacer, mut db, now)?
+        if let Some(round) = step.completed {
+            completed_round = Some(round)
+        } else {
+            now = step.status.next_due_ms
+        }
+    }
+    let Some(round) = completed_round else {
+        fail("paced scrub did not finish")
+    }
+    store.close(take db)?
+    let prepared = store.prepare(dir, c, Describe)?
+    let rendered: core.Cell[Option[String]] = cell.new(None)
+    let _ = store.describe_capture(take prepared, scoped fn(fact: store.DescribeLine) -> Result[(), store.Error] {
+        if let DescribeScrubRound(found) = fact {
+            cell.with(rendered, format_scrub_round(found), fn(mut slot: Option[String], take line: String) {
+                slot = Some(take line)
+            })
+        }
+        Ok(())
+    })?
+    let mut expected = string.from("last complete round: versions ")
+    string.push_u64(mut expected, round.start_version)
+    string.push(mut expected, "..")
+    string.push_u64(mut expected, round.end_version)
+    string.push(mut expected, ", ")
+    string.push_u64(mut expected, round.examined)
+    string.push(mut expected, " bytes, 0 errors")
+    if cell.into_inner(take rendered) != Some(expected) {
+        fail("store stats scrub round line differed from persisted round")
+    }
+    Ok(())
+}

@@ -183,6 +183,19 @@ fn describe_entry(entry: store.DescribeEntry, stats: bool) -> String {
     take text
 }
 
+fn format_scrub_round(round: store.ScrubRound) -> String {
+    let mut text = string.from("last complete round: versions ")
+    string.push_u64(mut text, round.start_version)
+    string.push(mut text, "..")
+    string.push_u64(mut text, round.end_version)
+    string.push(mut text, ", ")
+    string.push_u64(mut text, round.examined)
+    string.push(mut text, " bytes, ")
+    string.push_u64(mut text, round.faults)
+    string.push(mut text, " errors")
+    take text
+}
+
 fn describe_fact(fact: store.DescribeLine, stats: bool, out: Stdout, err: Stderr) -> Result[(), store.Error] waits {
     let rendered = match fact {
         DescribeHead(id, head) => {
@@ -218,6 +231,7 @@ fn describe_fact(fact: store.DescribeLine, stats: bool, out: Stdout, err: Stderr
             string.push(mut text, " frames")
             take text
         },
+        DescribeScrubRound(round) => format_scrub_round(round),
         DescribePin(owner, name, branch_id, version) => {
             let mut text = string.from("pin ")
             string.push(mut text, match owner {

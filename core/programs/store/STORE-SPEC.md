@@ -4909,7 +4909,9 @@ Open checks every listed pack once. After that, the Store answers from resident 
 - Page body decode and the order of outgoing edges. Open checks them. A reachable frame whose bytes match its parent's pointer is the frame our writer placed there, and §2.8's host rule forbids guarding against our own writer.
 - The MANIFEST and journal segments. Open rereads them whole.
 
-A later version may add these, and a periodic tour with an I/O budget, without a format change.
+A later version may add these without a format change.
+
+**Continuous paced scrub and persisted round history (CLOUD #5, T13; built).** `begin_scrub_pacer(db, ScrubConfig { target_ms, max_rate_bps, slice_bytes, min_rate_bps }, now_ms)` runs one Directory tour at a time with an explicit read-rate ceiling and completion target. When a tour begins, it derives a byte rate from the generation's listed-pack size divided by `target_ms`, floored by `min_rate_bps` and capped at `max_rate_bps`. Each `scrub_pacer_step` debits the step's actual examined bytes (including faulted units and single-unit overshoot) against that rate to schedule `next_due_ms`, and `scrub_pacer_status` reports captured generation, examined bytes, age of the last fully clean tour, `overdue`, and faults. Stopping (`scrub_pacer_stop`) drops the active tour immediately (releasing its `ScrubLease`) and records an incomplete round. Each completed or stopped round is persisted atomically in a StoreId-bound `SCRUB` sidecar file (role 11, frame kind `0x008A`, bounded to 64 recent rounds); only a complete round with zero faults refreshes `last_clean_ms`. The runner head's idle Directory scrub (`upkeep_scrub`) also records each completed round to `SCRUB`. `hirsel store stats DIR` surfaces the latest complete round as `last complete round: versions <a>..<b>, <N> bytes, <E> errors`.
 
 **Laws** (`store_scrub_laws.hirsel`):
 - **Damage spends the step budget.** A checksum failure in the first pack spends its HEADER and the first frame’s envelope and payload. With that budget the step stops at the next pack, whose seven-byte truncated HEADER spends the next step’s seven-byte budget.
@@ -7687,7 +7689,7 @@ Two kinds of command read a store for an operator. `inspect`, `stats` and `verif
 | Form | Runs | Does |
 |---|---|---|
 | `hirsel store inspect DIR` | `store_tool`, a prepared Directory capture | prints `store <id> head <H>`, then one line per collection: its form, name, exact row count and, for indexes and aggregates, state and revision |
-| `hirsel store stats DIR` | `store_tool`, a prepared Directory capture | the `inspect` lines with each collection's charged bytes, plus the journal prefix, the account at the cut, pins and pack rows |
+| `hirsel store stats DIR` | `store_tool`, a prepared Directory capture | the `inspect` lines with each collection's charged bytes, plus the journal prefix, the last complete scrub round (if any), the account at the cut, pins and pack rows |
 | `hirsel store verify DIR` | `store_tool`, a prepared Check on a copy | checks the listed packs, the checkpoint graph and the selected journal; prints each fault and the Check totals below |
 | `hirsel store verify DIR --release EXE` | the release, on a copy | the checks below, in `Report` mode |
 | `hirsel store repair DIR --release EXE` | the release, in place | the repair below |

@@ -450,3 +450,192 @@ fn check_detects(d: Dir, c: Clock) -> Result[(), Error] waits {
     }
     Ok(())
 }
+
+// CLOUD #5 + T13: paced Directory scrub with completion target, actual byte
+// debit, overdue signal, lease release on stop, and persisted SCRUB round
+// history surfaced by `describe_capture`.
+@test
+fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (time, take clock_hand) = provide.clock(0, 1000u64)
+    let mut wall = take clock_hand
+    let path = disk_test_directory(d)
+    let mut options = result.unwrap(sized(Directory, 2147483648u64))
+    options.pack_bytes = 512
+    let mut db = open(tasks, path, time, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    scrub_fill(mut db, t, 1200, 0)?
+    let _ = checkpoint(mut db)?
+    // Independent oracle: sum of actual on-disk bytes of all listed packs.
+    let mut total_bytes = 0u64
+    let mut first_data_pack = 0u64
+    let mut cursor = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut cursor) {
+        total_bytes += list.len(disk_read_paged_file(path, paged_pack_path(seq)?, 67108864)?)
+        if pack.class == 0 && first_data_pack == 0 {
+            first_data_pack = seq
+        }
+    }
+    if total_bytes < 4096 || first_data_pack == 0 {
+        fail("paced scrub fixture needs multiple packs")
+    }
+    // 1. Infeasible target: rate clamped to max_rate_bps (4000 B/s), target 100 ms.
+    let infeasible = ScrubConfig(target_ms: 100u64, max_rate_bps: 4000u64, slice_bytes: 512u64, min_rate_bps: 1000u64)
+    let mut slow = begin_scrub_pacer(db, infeasible, 1000u64)?
+    let step1 = scrub_pacer_step(mut slow, mut db, 1000u64)?
+    if !step1.stepped || step1.completed != None || !step1.status.active || step1.status.rate_bps != 4000u64 {
+        fail("infeasible pacer must start active and clamp to max_rate_bps")
+    }
+    let expected_debit = ceil_millis_ratio(step1.status.checked, 4000u64)
+    if step1.status.next_due_ms != 1000u64 + expected_debit {
+        fail("actual byte debit must drive next_due_ms")
+    }
+    // Stepping before next_due_ms does no work.
+    if expected_debit > 1u64 {
+        let early = scrub_pacer_step(mut slow, mut db, 1000u64 + expected_debit - 1u64)?
+        if early.stepped {
+            fail("pacer must not step before next_due_ms")
+        }
+    }
+    // Past target_ms with no clean tour: overdue must be true, last_clean_ms None.
+    let overdue_status = scrub_pacer_status(slow, 1200u64)
+    if !overdue_status.overdue || overdue_status.last_clean_ms != None || overdue_status.clean_age_ms != None {
+        fail("infeasible target past target_ms must report overdue with no clean timestamp")
+    }
+    // 2. Interrupting the tour drops the lease and persists an incomplete round
+    // without advancing last_clean_ms.
+    let mut leased_packs: List[u64] = list.new()
+    let mut c2 = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut c2) {
+        if pack.class == 0 {
+            list.push(mut leased_packs, seq)
+        }
+    }
+    scrub_fill(mut db, t, 1200, 1)?
+    let _ = checkpoint(mut db)?
+    for seq in leased_packs {
+        if !disk_exists(path, paged_pack_path(seq)?)? {
+            fail("active pacer tour must hold its ScrubLease across cuts")
+        }
+    }
+    let Some(interrupted) = scrub_pacer_stop(mut slow, db, 1250u64)? else {
+        fail("stopping an active pacer must record an incomplete round")
+    }
+    if interrupted.complete || interrupted.examined != step1.status.checked {
+        fail("interrupted round must record complete=false and actual examined bytes")
+    }
+    let _ = checkpoint(mut db)?
+    let mut unlinked = 0u64
+    for seq in leased_packs {
+        if !disk_exists(path, paged_pack_path(seq)?)? {
+            unlinked += 1
+        }
+    }
+    if unlinked == 0 {
+        fail("stopping the pacer must release its ScrubLease")
+    }
+    let Some(hist_after_stop) = scrub_history(db)? else {
+        fail("SCRUB history must exist after interrupted round")
+    }
+    if hist_after_stop.last_clean_ms != None || last_complete_scrub_round(hist_after_stop) != None {
+        fail("interrupted round must never refresh last_clean_ms or last_complete_scrub_round")
+    }
+    // Recompute current on-disk pack bytes after the checkpoint above.
+    let mut live_total = 0u64
+    let mut live_data_pack = 0u64
+    let mut c3 = std.omap.range(disk_state(db).pages.locations.packs.values, Unbounded, Unbounded)
+    while let Some((seq, pack)) = std.omap.next(mut c3) {
+        live_total += list.len(disk_read_paged_file(path, paged_pack_path(seq)?, 67108864)?)
+        if pack.class == 0 && live_data_pack == 0 {
+            live_data_pack = seq
+        }
+    }
+    // 3. Feasible target: finishes within target_ms under max_rate_bps, updates
+    // last_clean_ms, persists round, and surfaces in describe_capture.
+    let feasible = ScrubConfig(target_ms: 10000u64, max_rate_bps: 100000u64, slice_bytes: 1024u64, min_rate_bps: 10000u64)
+    let mut now = 2000u64
+    clock.set_wall(mut wall, now)
+    let mut pacer = begin_scrub_pacer(db, feasible, now)?
+    let mut done_round: Option[ScrubRound] = None
+    let mut guard = 0u64
+    while let None = done_round {
+        guard += 1
+        if guard > 10000u64 {
+            fail("feasible paced tour did not finish")
+        }
+        let res = scrub_pacer_step(mut pacer, mut db, now)?
+        if let Some(round) = res.completed {
+            done_round = Some(round)
+        } else {
+            now = res.status.next_due_ms
+            clock.set_wall(mut wall, now)
+        }
+    }
+    let Some(clean_round) = done_round else {
+        fail("expected completed clean round")
+    }
+    if !clean_round.complete || clean_round.faults != 0u64 || clean_round.examined != live_total || clean_round.ended_ms - clean_round.started_ms > feasible.target_ms {
+        fail("feasible tour must complete clean within target_ms and match actual pack bytes")
+    }
+    let clean_status = scrub_pacer_status(pacer, now)
+    if clean_status.active || clean_status.overdue || clean_status.last_clean_ms != Some(now) || clean_status.clean_age_ms != Some(0u64) || clean_status.tours_completed != 1u64 {
+        fail("clean completion must advance last_clean_ms and clear overdue")
+    }
+    // Verify Describe emits the persisted clean round.
+    let prepared = prepare(path, time, Describe)?
+    let seen_round: core.Cell[Option[ScrubRound]] = cell.new(None)
+    let _ = describe_capture(take prepared, scoped fn(fact: DescribeLine) -> Result[(), Error] {
+        if let DescribeScrubRound(r_line) = fact {
+            cell.with(seen_round, r_line, fn(mut slot: Option[ScrubRound], take found: ScrubRound) {
+                slot = Some(found)
+            })
+        }
+        Ok(())
+    })?
+    if cell.into_inner(take seen_round) != Some(clean_round) {
+        fail("Describe must emit the persisted last complete scrub round")
+    }
+    // 4. Faulty tour: corrupt a listed pack, run a full tour to completion,
+    // verify faults > 0, and verify last_clean_ms is NOT refreshed.
+    let bad_name = paged_pack_path(live_data_pack)?
+    let mut bad_raw = disk_read_paged_file(path, bad_name, 67108864)?
+    bad_raw[80] = bad_raw[80] ^ 1u8
+    disk_write_synced(path, bad_name, bad_raw)?
+    now = clean_status.next_due_ms
+    clock.set_wall(mut wall, now)
+    let mut bad_done: Option[ScrubRound] = None
+    guard = 0u64
+    while let None = bad_done {
+        guard += 1
+        if guard > 10000u64 {
+            fail("faulty paced tour did not finish")
+        }
+        let res = scrub_pacer_step(mut pacer, mut db, now)?
+        if let Some(round) = res.completed {
+            bad_done = Some(round)
+        } else {
+            now = res.status.next_due_ms
+            clock.set_wall(mut wall, now)
+        }
+    }
+    let Some(faulty_round) = bad_done else {
+        fail("expected completed faulty round")
+    }
+    if !faulty_round.complete || faulty_round.faults == 0u64 {
+        fail("corrupted pack must produce faults > 0")
+    }
+    let after_fault = scrub_pacer_status(pacer, now)
+    if after_fault.last_clean_ms != Some(clean_round.ended_ms) {
+        fail("faulty tour must never refresh last_clean_ms")
+    }
+    let Some(final_hist) = scrub_history(db)? else {
+        fail("SCRUB history missing after faulty round")
+    }
+    if final_hist.last_clean_ms != Some(clean_round.ended_ms) || final_hist.last_clean_round != Some(clean_round) {
+        fail("persisted SCRUB history must preserve last_clean_ms across faulty rounds")
+    }
+    if last_complete_scrub_round(final_hist) != Some(faulty_round) {
+        fail("last_complete_scrub_round must report the latest completed round")
+    }
+    close(take db)
+}

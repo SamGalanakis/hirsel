@@ -17,7 +17,7 @@ pub type DescribeTotals: key + shareable + send {
     packs: u64
 }
 
-pub type DescribeLine: key + shareable + send = DescribeHead(StoreId, u64) | DescribeCollection(DescribeEntry) | DescribeAccount(u64, u64) | DescribeJournal(DescribeTotals) | DescribePin(u64, String, u32, u64) | DescribePack(u64, u8, u32, u64, u64) | DescribeOpenPacks(u64)
+pub type DescribeLine: key + shareable + send = DescribeHead(StoreId, u64) | DescribeCollection(DescribeEntry) | DescribeAccount(u64, u64) | DescribeJournal(DescribeTotals) | DescribePin(u64, String, u32, u64) | DescribePack(u64, u8, u32, u64, u64) | DescribeOpenPacks(u64) | DescribeScrubRound(ScrubRound)
 
 type DescribeDelta {
     rows: i64,
@@ -301,6 +301,11 @@ fn describe_lines(p: PreparedCapture, mut packs: CapturePacks, names: List[Descr
     })?
     line(DescribeAccount(p.manifest.generation, manifest_account(p.manifest)))?
     line(DescribeJournal(summary))?
+    if let Some(history) = read_scrub_history(p.dir, p.id)? {
+        if let Some(round) = last_complete_scrub_round(history) {
+            line(DescribeScrubRound(round))?
+        }
+    }
     for pin_record in p.manifest.pins {
         line(DescribePin(pin_owner_tag(pin_record.owner), clone(pin_record.name), pin_record.branch, pin_record.version))?
     }

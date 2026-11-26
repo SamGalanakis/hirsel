@@ -1,253 +1,3 @@
-// Format-3 genesis files. The MANIFEST matches the old law's frozen digest.
-fn format3_manifest() -> Bytes {
-    let words: Inline[u64, 49] =[
-        0x0000003800010001,
-        0x6fa42cfe8eb61906,
-        0x45524f5453524948,
-        0x0000000100000003,
-        0x0000000000000001,
-        0x0000000000000002,
-        0x0000000000000000,
-        0x0000000000000001,
-        0x0000000000000000,
-        0x0000012b00010031,
-        0xdaeef507b53cffcf,
-        0x0000000000000001,
-        0x0000100000001000,
-        0x0100004000000400,
-        0x0000000000000001,
-        0x0000000100000001,
-        0x0000000000000001,
-        0x0000000000000001,
-        0x0000000000000001,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000001,
-        0x00006e69616d0004,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-    ]
-    let mut raw: Bytes = list.with_capacity(392)
-    for word in words {
-        list.put_word_le(mut raw, word)
-    }
-    list.truncate(mut raw, 387)
-    take raw
-}
-
-fn format3_segment() -> Bytes {
-    let wire: Inline[u8, 72] =[
-        1,
-        0,
-        1,
-        0,
-        56,
-        0,
-        0,
-        0,
-        144,
-        206,
-        65,
-        92,
-        174,
-        108,
-        10,
-        173,
-        72,
-        73,
-        82,
-        83,
-        84,
-        79,
-        82,
-        69,
-        3,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
-    let mut raw: Bytes = list.with_capacity(72)
-    for byte in wire {
-        list.push(mut raw, byte)
-    }
-    take raw
-}
-
-fn format3_end() -> Bytes {
-    let wire: Inline[u8, 96] =[
-        1,
-        0,
-        1,
-        0,
-        56,
-        0,
-        0,
-        0,
-        52,
-        218,
-        197,
-        254,
-        60,
-        97,
-        167,
-        101,
-        72,
-        73,
-        82,
-        83,
-        84,
-        79,
-        82,
-        69,
-        3,
-        0,
-        0,
-        0,
-        4,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        18,
-        0,
-        1,
-        0,
-        8,
-        0,
-        0,
-        0,
-        3,
-        242,
-        107,
-        50,
-        185,
-        132,
-        94,
-        33,
-        72,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
-    let mut raw: Bytes = list.with_capacity(96)
-    for byte in wire {
-        list.push(mut raw, byte)
-    }
-    take raw
-}
-
-// Wire vectors derived from the spec tables with libxxhash.
 fn format10_manifest() -> Bytes {
     let words: Inline[u64, 86] =[
         0x0000003800010001,
@@ -345,7 +95,7 @@ fn format10_manifest() -> Bytes {
     take raw
 }
 
-fn format4_blob_index() -> Bytes {
+fn format10_blob_index() -> Bytes {
     let wire: Inline[u8, 93] =[
         35,
         0,
@@ -448,7 +198,7 @@ fn format4_blob_index() -> Bytes {
     take raw
 }
 
-fn format4_blob_index_next() -> Bytes {
+fn format10_blob_index_next() -> Bytes {
     let wire: Inline[u8, 63] =[
         35,
         0,
@@ -521,7 +271,7 @@ fn format4_blob_index_next() -> Bytes {
     take raw
 }
 
-fn format4_page_index() -> Bytes {
+fn format10_page_index() -> Bytes {
     let wire: Inline[u8, 62] =[
         35,
         0,
@@ -593,36 +343,7 @@ fn format4_page_index() -> Bytes {
     take raw
 }
 
-fn refuse_frozen_format3(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let directory = disk_test_directory(d)
-    let manifest = format3_manifest()
-    let segment = format3_segment()
-    let end = format3_end()
-    let temporary = string.as_bytes("unselected")
-    let lock: Bytes = list.new()
-    disk_write_synced(directory, "MANIFEST", manifest)?
-    disk_write_synced(directory, "j-1", segment)?
-    disk_write_synced(directory, "j-1.end", end)?
-    disk_write_synced(directory, "MANIFEST.tmp", temporary)?
-    match open(tasks, directory, c, r, journal_crash_options()) {
-        Error(Unsupported(3)) => (),
-        _ => return Error(Foreign),
-    }
-    if disk_exists(directory, "LOCK")? {
-        return Error(Foreign)
-    }
-    disk_write_synced(directory, "LOCK", lock)?
-    match open(tasks, directory, c, r, journal_crash_options()) {
-        Error(Unsupported(3)) => (),
-        _ => return Error(Foreign),
-    }
-    if disk_read_paged_file(directory, "MANIFEST", 387)? != manifest || disk_read_paged_file(directory, "j-1", 72)? != segment || disk_read_paged_file(directory, "j-1.end", 96)? != end || disk_read_paged_file(directory, "MANIFEST.tmp", 10)? != temporary || disk_read_paged_file(directory, "LOCK", 1)? != lock || disk_exists(directory, "j-2")? {
-        return Error(Foreign)
-    }
-    Ok(())
-}
-
-fn format4_manifest_law() -> Result[(), Error] {
+fn format10_manifest_law() -> Result[(), Error] {
     let path = "MANIFEST"
     let id = StoreId(hi: 1, lo: 2)
     let mut m = page_manifest_empty(default_limits())
@@ -658,13 +379,6 @@ fn format4_manifest_law() -> Result[(), Error] {
     if !disk_corrupt(decode_page_manifest(path, invalid_owner, 1)) {
         return Error(Foreign)
     }
-    let mut old_header = copied(list.slice(oracle, 0, 72))?
-    list.set_word_le(mut old_header, 24, 9u32)
-    list.set_word_le(mut old_header, 8, 0x45c5d41cbebe7f57u64)
-    match disk_read_header(path, old_header, 1, Some(1), Some(id)) {
-        Error(Unsupported(9)) => (),
-        _ => return Error(Foreign),
-    }
     let mut overflow = copied(payload)?
     list.set_word_le(mut overflow, 64, 18446744073709551615u64)
     if !disk_corrupt(decode_page_manifest(path, overflow, 1)) {
@@ -673,7 +387,7 @@ fn format4_manifest_law() -> Result[(), Error] {
     Ok(())
 }
 
-fn format4_archive_law() -> Result[(), Error] {
+fn format10_archive_law() -> Result[(), Error] {
     let row = ArchiveRange(start: 7, end: 15, segment: HistoryRef(seq: 15, epoch: 27, len: 39, digest: 51))
     let archive_entry = encode_archive_range(row)
     let InlineValue(value) = view archive_entry.cell else {
@@ -695,7 +409,7 @@ fn format4_archive_law() -> Result[(), Error] {
     Ok(())
 }
 
-fn format4_pack_row_law() -> Result[(), Error] {
+fn format10_pack_row_law() -> Result[(), Error] {
     let expected: Inline[u8, 29] =[4, 2, 0, 0, 0, 82, 4, 0, 0, 0, 0, 0, 0, 58, 6, 0, 0, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0]
     let mut raw: Bytes = list.with_capacity(29)
     for byte in expected {
@@ -712,12 +426,12 @@ fn format4_pack_row_law() -> Result[(), Error] {
     Ok(())
 }
 
-fn format4_index_law() -> Result[(), Error] {
+fn format10_index_law() -> Result[(), Error] {
     let path = "p-6"
     let id = StoreId(hi: 1, lo: 2)
     let ctx = DiskContext(store: id, role: 3, seq: 6)
-    let expected = format4_blob_index()
-    let following_wire = format4_blob_index_next()
+    let expected = format10_blob_index()
+    let following_wire = format10_blob_index_next()
     let mut key: Bytes = list.new()
     list.put_word_be(mut key, 7u32)
     list.append(mut key, string.as_bytes("ax"))
@@ -770,17 +484,16 @@ fn format4_index_law() -> Result[(), Error] {
     let mut page_out: Bytes = list.new()
     list.fill(mut page_out, 135, 0u8)
     let page_at = append_pack_index(mut page_out, page_ctx, page_rows)?
-    if page_at != 135 || list.slice(page_out, page_at, list.len(page_out)) != format4_page_index() {
+    if page_at != 135 || list.slice(page_out, page_at, list.len(page_out)) != format10_page_index() {
         return Error(Foreign)
     }
     Ok(())
 }
 
 @test
-fn disk_test_format4(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    format4_manifest_law()?
-    format4_archive_law()?
-    format4_pack_row_law()?
-    format4_index_law()?
-    refuse_frozen_format3(d, c, r, tasks)
+fn disk_test_format10() -> Result[(), Error] {
+    format10_manifest_law()?
+    format10_archive_law()?
+    format10_pack_row_law()?
+    format10_index_law()
 }

@@ -46,9 +46,6 @@ const CLAIM_BYTES: u64 = 24
 const PAGE_MANIFEST_FILE_LIMIT: u64 = 72 + 16 + MANIFEST_LIMIT + 20 + UNKNOWN_ROOM
 
 fn disk_page_kind(path: String, at: u64, kind: u16, expected: u16, flags: u16) -> Result[(), Error] {
-    if kind == 0x0020 || kind == 0x0030 {
-        return Error(Unsupported(int.widen(kind)))
-    }
     if kind == 0x0001 {
         return Error(disk_fault(path, at, Header))
     }

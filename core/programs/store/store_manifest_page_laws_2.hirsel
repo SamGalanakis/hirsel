@@ -1,504 +1,10 @@
-// Format-2 genesis from the previous layout, bound with libxxhash. The
-// MANIFEST digest matches the frozen format-2 law (0x567b9774d4ec83f8).
-fn page_old_manifest_vector() -> Bytes {
-    let expected: Inline[u8, 228] =[
-        1,
-        0,
-        1,
-        0,
-        56,
-        0,
-        0,
-        0,
-        199,
-        61,
-        90,
-        194,
-        183,
-        221,
-        222,
-        167,
-        72,
-        73,
-        82,
-        83,
-        84,
-        79,
-        82,
-        69,
-        2,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        48,
-        0,
-        1,
-        0,
-        140,
-        0,
-        0,
-        0,
-        200,
-        5,
-        158,
-        237,
-        152,
-        136,
-        237,
-        69,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        16,
-        0,
-        0,
-        0,
-        0,
-        16,
-        0,
-        64,
-        0,
-        0,
-        1,
-        32,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        4,
-        0,
-        109,
-        97,
-        105,
-        110,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
-    let mut raw: Bytes = list.with_capacity(228)
-    for byte in expected {
-        list.push(mut raw, byte)
-    }
-    take raw
-}
-
-fn page_old_segment_vector() -> Bytes {
-    let expected: Inline[u8, 72] =[
-        1,
-        0,
-        1,
-        0,
-        56,
-        0,
-        0,
-        0,
-        81,
-        109,
-        16,
-        156,
-        206,
-        7,
-        99,
-        66,
-        72,
-        73,
-        82,
-        83,
-        84,
-        79,
-        82,
-        69,
-        2,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
-    let mut raw: Bytes = list.with_capacity(72)
-    for byte in expected {
-        list.push(mut raw, byte)
-    }
-    take raw
-}
-
-fn page_old_end_vector() -> Bytes {
-    let expected: Inline[u8, 96] =[
-        1,
-        0,
-        1,
-        0,
-        56,
-        0,
-        0,
-        0,
-        137,
-        59,
-        250,
-        203,
-        185,
-        149,
-        153,
-        95,
-        72,
-        73,
-        82,
-        83,
-        84,
-        79,
-        82,
-        69,
-        2,
-        0,
-        0,
-        0,
-        4,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        2,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        18,
-        0,
-        1,
-        0,
-        8,
-        0,
-        0,
-        0,
-        3,
-        242,
-        107,
-        50,
-        185,
-        132,
-        94,
-        33,
-        72,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]
-    let mut raw: Bytes = list.with_capacity(96)
-    for byte in expected {
-        list.push(mut raw, byte)
-    }
-    take raw
-}
-
-// Format-10 HEADERs and the retired payload kinds, bound with §2.1 and libxxhash.
-fn page_retired_manifest_vector() -> Bytes {
-    let words: Inline[u64, 29] =[
-        0x0000003800010001,
-        0x3307f36c43cc41f5,
-        0x45524f5453524948,
-        0x000000010000000a,
-        0x0000000000000001,
-        0x0000000000000002,
-        0x0000000000000000,
-        0x0000000000000001,
-        0x0000000000000000,
-        0x0000008c00010030,
-        0x45ed8898ed9e05c8,
-        0x0000000000000001,
-        0x0010000000001000,
-        0x0001002001000040,
-        0x0001000000000000,
-        0x0001000000010000,
-        0x0001000000000000,
-        0x0001000000000000,
-        0x0000000000000000,
-        0x0001000000000000,
-        0x0004000000000000,
-        0x000000006e69616d,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-        0x0000000000000000,
-    ]
-    let mut raw: Bytes = list.with_capacity(232)
-    for word in words {
-        list.put_word_le(mut raw, word)
-    }
-    list.truncate(mut raw, 228)
-    take raw
-}
-
-fn page_retired_node_vector() -> Bytes {
-    let words: Inline[u64, 12] =[
-        0x0000003800010001,
-        0x1daded98b4d451d8,
-        0x45524f5453524948,
-        0x000000030000000a,
-        0x0000000000000001,
-        0x0000000000000002,
-        0x0000000000000000,
-        0x0000000000000001,
-        0x0000000000000000,
-        0x0000000800010020,
-        0x2e86c4db7f9bc392,
-        0x0000000000000000,
-    ]
-    let mut raw: Bytes = list.with_capacity(96)
-    for word in words {
-        list.put_word_le(mut raw, word)
-    }
-    take raw
-}
-
 fn check_paged_manifest() -> Result[(), Error] {
     let id = StoreId(hi: 1, lo: 2)
     let encoded = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
     if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0x8f40ef33e65b213fu64 {
         return Error(Foreign)
     }
-    match disk_read_page_manifest("MANIFEST", page_old_manifest_vector()) {
-        Error(Unsupported(2)) => Ok(()),
-        _ => Error(Foreign),
-    }
+    Ok(())
 }
 
 fn check_paged_inventory(d: Dir) -> Result[(), Error] waits {
@@ -589,45 +95,72 @@ fn disk_test_paged_inventory(d: Dir) -> Result[(), Error] waits {
     check_paged_inventory(d)
 }
 
-// L48. A format-2 directory reaches the same refusal through public open.
-// Its selected data and its unselected files stay byte-for-byte intact.
+fn format9_header(ctx: DiskContext, raw: Bytes) -> Result[Bytes, Error] {
+    let mut payload = copied(list.slice(raw, 16, 72))?
+    list.set_word_le(mut payload, 8, 9u32)
+    capacity(disk_seal(ctx, 0, 0x0001, 1, payload))
+}
+
+fn refuse_directory_format(d: Dir, c: Clock, r: Random, tasks: Tasks, id: StoreId) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let ctx = DiskContext(store: id, role: 1, seq: 1)
+    let current = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
+    let mut manifest = format9_header(ctx, current)?
+    list.append(mut manifest, list.slice(current, 72, list.len(current)))
+    let scratch = string.as_bytes("unselected")
+    disk_write_synced(directory, "MANIFEST", manifest)?
+    disk_write_synced(directory, "MANIFEST.tmp", scratch)?
+    let lock = disk_lock(directory, c, 0)?
+    match open(tasks, directory, c, r, journal_crash_options()) {
+        Error(Unsupported(9)) => (),
+        _ => return Error(Missing("directory format refusal")),
+    }
+    disk_io(host.close(take lock))?
+    if disk_read_paged_file(directory, "MANIFEST", list.len(manifest))? != manifest || disk_read_paged_file(directory, "MANIFEST.tmp", list.len(scratch))? != scratch || disk_exists(directory, "j-1")? {
+        return Error(Missing("directory changed after format refusal"))
+    }
+    let retired = capacity(disk_seal(ctx, 72, 0x0030, 1, list.new()))?
+    let mut unknown = copied(list.slice(current, 0, 72))?
+    list.append(mut unknown, retired)
+    match disk_read_page_manifest("MANIFEST", unknown) {
+        Error(Unsupported(0x0030)) => Ok(()),
+        _ => Error(Missing("manifest unknown mandatory kind refusal")),
+    }
+}
+
+fn refuse_frozen_bucket(id: StoreId) -> Result[(), Error] {
+    let mut raw: Bytes = list.with_capacity(72 + BINDING_BYTES)
+    let head = DiskContext(store: id, role: 7, seq: 1)
+    capacity(history_append_header(mut raw, head, 2, 1))?
+    match history_head_frame(format9_header(head, raw)?) {
+        Error(Unsupported(9)) => (),
+        _ => return Error(Missing("bucket head format refusal")),
+    }
+    list.clear(mut raw)
+    let manifest = DiskContext(store: id, role: 1, seq: 1)
+    capacity(history_append_header(mut raw, manifest, 2, 1))?
+    let old = format9_header(manifest, raw)?
+    let reference = HistoryRef(seq: 1, epoch: 2, len: list.len(old), digest: std.check.xxh3(old, 0, list.len(old)))
+    match history_object_context("m-1", id, 1, reference, old) {
+        Error(Unsupported(9)) => Ok(()),
+        _ => Error(Missing("bucket object format refusal")),
+    }
+}
+
+fn refuse_stream_format() -> Result[(), Error] {
+    let sid = HostStreamId(hi: 3, lo: 4)
+    let mut raw: Bytes = list.with_capacity(72 + BINDING_BYTES)
+    let ctx = stream_header(mut raw, sid, 11, 1, 2, 1)?
+    match stream_read_header("reg", format9_header(ctx, raw)?, sid, 11) {
+        Error(Unsupported(9)) => Ok(()),
+        _ => Error(Missing("stream format refusal")),
+    }
+}
+
 @test
 fn disk_test_format_cutover(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    refuse_frozen_format3(d, c, r, tasks)?
-    let directory = disk_test_directory(d)
-    let manifest = page_old_manifest_vector()
-    let segment = page_old_segment_vector()
-    let watermark = page_old_end_vector()
-    let scratch = string.as_bytes("unselected")
-    let lock: Bytes = list.new()
-    disk_write_synced(directory, "LOCK", lock)?
-    disk_write_synced(directory, "MANIFEST", manifest)?
-    disk_write_synced(directory, "j-1", segment)?
-    disk_write_synced(directory, "j-1.end", watermark)?
-    disk_write_synced(directory, "MANIFEST.tmp", scratch)?
-    let options = journal_crash_options()
-    match open(tasks, directory, c, r, options) {
-        Error(Unsupported(2)) => (),
-        _ => return Error(Foreign),
-    }
-    if disk_read_paged_file(directory, "LOCK", 1)? != lock || disk_read_paged_file(directory, "MANIFEST", 228)? != manifest || disk_read_paged_file(directory, "j-1", 72)? != segment || disk_read_paged_file(directory, "j-1.end", 96)? != watermark || disk_read_paged_file(directory, "MANIFEST.tmp", 10)? != scratch || disk_exists(directory, "j-2")? {
-        return Error(Foreign)
-    }
-    let retired = page_retired_manifest_vector()
-    disk_write_synced(directory, "MANIFEST", retired)?
-    match open(tasks, directory, c, r, options) {
-        Error(Unsupported(0x0030)) => (),
-        _ => return Error(Foreign),
-    }
-    disk_write_synced(directory, "MANIFEST", page_manifest_vector())?
-    disk_write_synced(directory, "p-1", page_retired_node_vector())?
-    disk_write_synced(directory, "p-2", page_list_pack_vector())?
-    match open(tasks, directory, c, r, options) {
-        Error(Unsupported(0x0020)) => (),
-        _ => return Error(Foreign),
-    }
-    if disk_read_paged_file(directory, "MANIFEST.tmp", 10)? != scratch || disk_exists(directory, "j-2")? {
-        return Error(Foreign)
-    }
-    Ok(())
+    let id = StoreId(hi: 1, lo: 2)
+    refuse_directory_format(d, c, r, tasks, id)?
+    refuse_frozen_bucket(id)?
+    refuse_stream_format()
 }

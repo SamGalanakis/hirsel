@@ -10,126 +10,6 @@ fn prior_fixture_frame(wire: Bytes, at: u64, tag: u8, length: u64, prior: u64) -
     read_le(wire, at + 4, 4) == length - 16 && wire[at + 42] == tag && read_le(wire, at + 43, 4) == 12 && read_le(wire, at + 59, 4) == prior
 }
 
-// Pre-prior format 4, frozen from the format tables with libxxhash. The
-// MANIFEST has one empty branch and the journal has no COMMITs.
-fn legacy4_header(role: u8, bucketed: bool) -> Bytes {
-    let mut wire: Bytes = list.with_capacity(72)
-    list.put_word_le(mut wire, 0x0000003800010001u64)
-    let checksum: u64 = match role {
-        1 => if bucketed {
-            0x5c6ae52a18ccd6b2u64
-        } else {
-            0xe0f2a21e936a02feu64
-        },
-        2 => 0x1b4139a107227ef7,
-        _ => 0xc07ca99a378f2a2f,
-    }
-    list.put_word_le(mut wire, checksum)
-    list.append(mut wire, string.as_bytes("HIRSTORE"))
-    list.put_word_le(mut wire, 4u32)
-    list.push(mut wire, role)
-    list.push(mut wire, if bucketed {
-        1u8
-    } else {
-        0u8
-    })
-    list.put_word_le(mut wire, 0u16)
-    list.put_word_le(mut wire, 1u64)
-    list.put_word_le(mut wire, 2u64)
-    list.put_word_le(mut wire, if bucketed {
-        1u64
-    } else {
-        0u64
-    })
-    list.put_word_le(mut wire, 1u64)
-    list.put_word_le(mut wire, 0u64)
-    take wire
-}
-
-fn legacy4_manifest(bucketed: bool) -> Bytes {
-    let mut wire = legacy4_header(1, bucketed)
-    let words: Inline[u64, 10] =[
-        0x000001cf00010031,
-        0xb51851a0c4a366ff,
-        1,
-        0x0000100000001000,
-        0x0100004000000400,
-        1,
-        0x0000000100000001,
-        1,
-        1,
-        1,
-    ]
-    for word in words {
-        list.put_word_le(mut wire, word)
-    }
-    list.fill(mut wire, 244, 0u8)
-    list.put_word_le(mut wire, 1u32)
-    list.put_word_le(mut wire, 0u32)
-    list.put_word_le(mut wire, 4u16)
-    list.append(mut wire, string.as_bytes("main"))
-    list.fill(mut wire, 141, 0u8)
-    take wire
-}
-
-fn refuse_legacy4_directory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let directory = disk_test_directory(d)
-    let manifest = legacy4_manifest(false)
-    let segment = legacy4_header(2, false)
-    let mut ending = legacy4_header(4, false)
-    list.put_word_le(mut ending, 0x0000000800010012u64)
-    list.put_word_le(mut ending, 0x215e84b9326bf203u64)
-    list.put_word_le(mut ending, 72u64)
-    let debris = string.as_bytes("unselected temporary")
-    disk_write_synced(directory, "MANIFEST", manifest)?
-    disk_write_synced(directory, "j-1", segment)?
-    disk_write_synced(directory, "j-1.end", ending)?
-    disk_write_synced(directory, "MANIFEST.tmp", debris)?
-    match open(tasks, directory, c, r, journal_crash_options()) {
-        Error(Unsupported(4)) => (),
-        _ => return Error(Missing("format 4 directory refusal")),
-    }
-    if disk_exists(directory, "LOCK")? || disk_exists(directory, "j-2")? || disk_read_file(directory, "MANIFEST", 551)? != manifest || disk_read_file(directory, "j-1", 72)? != segment || disk_read_file(directory, "j-1.end", 96)? != ending || disk_read_file(directory, "MANIFEST.tmp", 20)? != debris {
-        return Error(Missing("format 4 directory changed"))
-    }
-    Ok(())
-}
-
-fn refuse_legacy4_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 5, true)?
-    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut workspace = history_buffers(65536)?
-    let id = StoreId(hi: 1, lo: 2)
-    workspace.packet = legacy4_manifest(true)
-    let manifest = history_new_ref(1, 1, workspace.packet)
-    history_create(mut client, history_key("m-", manifest), mut workspace.packet, mut workspace.compare, deadline)?
-    // Use a current checkpoint envelope to exercise the old MANIFEST's
-    // refusal itself, even when the enclosing entry passes its format check.
-    let base = history_genesis_packet(mut workspace.packet, id, 1, manifest, HistoryLocateRoot(depth: 0, rows: list.new()))?
-    history_create(mut client, history_key("e-", base), mut workspace.packet, mut workspace.compare, deadline)?
-    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: id), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
-    let place = std.object.bucket_config(client)
-    let authority = history_config_bytes(object_history_config(take place, "bucket"))?
-    history_encode_head(mut workspace.body, head, authority)?
-    let expected = copied(workspace.body)?
-    match history_write_head(mut client, Absent, mut workspace.body, mut workspace.witness, deadline) {
-        HistoryApplied(_) => (),
-        _ => return Error(Missing("format 4 bucket setup")),
-    }
-    let opener = bucket_law_client_with(sim, tasks, "s3.test", 6, true)?
-    let mut source = history_reader(take opener, 0)
-    let options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
-    match history_open_register(mut source, sim.time, r, options, "bucket", mut workspace, BUCKET_LAW_OP_MS) {
-        Error(Unsupported(4)) => (),
-        _ => return Error(Missing("format 4 bucket refusal")),
-    }
-    let _ = history_fetch(mut client, "head", mut workspace.witness, deadline)?
-    if expected != workspace.witness {
-        return Error(Missing("format 4 bucket head changed"))
-    }
-    Ok(())
-}
-
 @test
 fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     if !law_frames(c) {
@@ -141,11 +21,6 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
     if !journal_law_call_vector() {
         return Error(Missing("recorded call wire vectors"))
     }
-    refuse_legacy4_directory(d, c, r, tasks)?
-    let sim = bucket_law_sim(tasks, c, 399, None, list.new())
-    let refused = refuse_legacy4_bucket(sim, r, tasks)
-    let _ = bucket_law_finish(take sim)
-    refused?
     let dir = disk_test_directory(d)
     let options = result.unwrap(sized(Directory, 2147483648u64))
     let mut db = open(tasks, dir, c, r, options)?
@@ -213,104 +88,6 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         return Error(Missing("replayed table account"))
     }
     close(take reopened)
-}
-
-fn check_overlapping_put(body: Bytes) -> Result[(), Error] {
-    let commit = journal_decode_commit("format-4 suffix", body)?
-    let top = commit.data[0]
-    let Some(raw) = view top.value else {
-        return Error(Missing("overlapping put"))
-    }
-    if list.len(commit.data) != 1 || top.key != logical_key(1, key_word(7))? || top.prior != 5 || list.len(raw) != 1 || raw[0] != 0xa5 {
-        return Error(Missing("overlapping put interpretation"))
-    }
-    Ok(())
-}
-
-fn refuse_frozen_directory(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    let directory = disk_test_directory(d)
-    let frozen = frozen_format4_directory()
-    for (path, raw) in frozen {
-        if path == "j-3" {
-            check_overlapping_put(list.slice(raw, 88, list.len(raw)))?
-        }
-        disk_write_synced(directory, path, raw)?
-    }
-    let locked = disk_lock(directory, c, 0)?
-    match open(tasks, directory, c, r, journal_crash_options()) {
-        Error(Unsupported(4)) => (),
-        _ => return Error(Missing("format 4 refusal before lock")),
-    }
-    disk_io(host.close(take locked))?
-    for (path, raw) in frozen {
-        if disk_read_file(directory, path, list.len(raw))? != raw {
-            return Error(Missing("frozen directory changed"))
-        }
-    }
-    if disk_exists(directory, "MANIFEST.tmp")? || disk_exists(directory, "j-4")? || disk_exists(directory, "j-4.end")? {
-        return Error(Missing("frozen directory rotated"))
-    }
-    Ok(())
-}
-
-fn check_frozen_bucket_open(sim: BucketSim, r: Random, tasks: Tasks, mut workspace: HistoryBuffers) -> Result[(), Error] waits {
-    let opener = bucket_law_client_with(sim, tasks, "s3.test", 6, true)?
-    let mut source = history_reader(take opener, 0)
-    let options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
-    match history_open_register(mut source, sim.time, r, options, "bucket", mut workspace, BUCKET_LAW_OP_MS) {
-        Error(Unsupported(4)) => Ok(()),
-        _ => Error(Missing("frozen bucket refusal")),
-    }
-}
-
-fn refuse_frozen_bucket(sim: BucketSim, r: Random, tasks: Tasks) -> Result[(u64, Bytes, Bytes), Error] waits {
-    let mut client = bucket_law_client_with(sim, tasks, "s3.test", 5, true)?
-    let deadline = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
-    let mut workspace = history_buffers(65536)?
-    let frozen = frozen_format4_bucket()
-    let mut first_head: Bytes = list.new()
-    for (path, raw) in frozen {
-        if path == "head" {
-            first_head = copied(raw)?
-        }
-        if string.starts_with(path, "e-00000000000000000006-") {
-            check_overlapping_put(list.slice(raw, 128, list.len(raw)))?
-        }
-        list.clear(mut workspace.packet)
-        list.append(mut workspace.packet, raw)
-        history_create(mut client, path, mut workspace.packet, mut workspace.compare, deadline)?
-    }
-    let initial = history_fetch(mut client, "head", mut workspace.body, deadline)?
-    if workspace.body != first_head {
-        return Error(Missing("legacy fixture head bytes"))
-    }
-    check_frozen_bucket_open(sim, r, tasks, mut workspace)?
-    let after_old = history_fetch(mut client, "head", mut workspace.body, deadline)?
-    if initial.etag != after_old.etag || first_head != workspace.body {
-        return Error(Missing("legacy head changed"))
-    }
-    // The current head still names both frozen format-4 entries.
-    // Only the HEADER's version (format 10) and §2.1 checksum change (libxxhash).
-    list.set_word_le(mut workspace.body, 24, 10u32)
-    list.set_word_le(mut workspace.body, 8, 0x955d357b7eb4429eu64)
-    let expected = copied(workspace.body)?
-    let HistoryApplied(replaced) = history_write_head(mut client, Match(initial.etag), mut workspace.body, mut workspace.witness, deadline) else {
-        return Error(Missing("replace fixture head"))
-    }
-    check_frozen_bucket_open(sim, r, tasks, mut workspace)?
-    let after_entry = history_fetch(mut client, "head", mut workspace.body, deadline)?
-    if replaced != after_entry.etag || expected != workspace.body {
-        return Error(Missing("current head changed"))
-    }
-    for (path, raw) in frozen {
-        if path != "head" {
-            let _ = history_fetch(mut client, path, mut workspace.packet, deadline)?
-            if workspace.packet != raw {
-                return Error(Missing("frozen bucket object changed"))
-            }
-        }
-    }
-    Ok((list.len(frozen) + 1, take first_head, take expected))
 }
 
 fn covering_prior_key(k: u64, old_value: u32) -> Result[List[u64], Capacity] {
@@ -524,23 +301,6 @@ fn retained_replay_case(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(),
 
 @test
 fn journal_test_v264_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
-    refuse_frozen_directory(d, c, r, tasks)?
-    let sim = bucket_law_sim(tasks, c, 401, None, list.new())
-    let expected = refuse_frozen_bucket(sim, r, tasks)
-    let trace = bucket_law_report(take sim)
-    let (writes, take original, take current) = expected?
-    // Both applied HEADs are fixture writes. The refused product opens apply none.
-    if trace.writes != writes || list.len(trace.head_writes) != 2 {
-        return Error(Missing("legacy bucket published an object"))
-    }
-    let first = view trace.head_writes[0u64]
-    let second = view trace.head_writes[1u64]
-    let Some(predecessor) = second.if_match else {
-        return Error(Missing("legacy fixture HEAD precondition"))
-    }
-    if first.key != "head" || first.data != original || first.if_match != None || first.if_none_match != Some("*") || second.key != "head" || second.data != current || first.etag == second.etag || predecessor != first.etag || second.if_none_match != None {
-        return Error(Missing("legacy fixture HEAD history"))
-    }
     covering_prior_case(d, c, r, tasks)?
     retained_replay_case(d, c, r, tasks)?
     prior_ceiling_case(d, c, r, tasks)

@@ -2784,9 +2784,6 @@ fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[DiskFrameHe
     if kind == 0 {
         return Error(disk_fault(file, at, Kind(0)))
     }
-    if kind == 0x0020 || kind == 0x0030 || kind == 0x0050 {
-        return Error(Unsupported(int.widen(kind)))
-    }
     if flags & 65534 != 0 {
         return Error(disk_fault(file, at, Flags))
     }
@@ -2802,9 +2799,6 @@ fn disk_read_frame_head(file: String, raw: Bytes, at: u64) -> Result[DiskFrameHe
 }
 
 fn disk_check_frame_kind(file: String, ctx: DiskContext, kind: u16, flags: u16, at: u64) -> Result[(), Error] {
-    if kind == 0x0020 || kind == 0x0030 {
-        return Error(Unsupported(int.widen(kind)))
-    }
     if ((kind == 0x0040 || kind == 0x0070) && ctx.role != 1) || (kind == 0x0080 && ctx.role != 5) || (kind >= 0x0081 && kind <= 0x0085 && ctx.role != 6) {
         return Error(disk_fault(file, at, Malformed))
     }

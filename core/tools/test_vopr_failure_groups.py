@@ -242,8 +242,7 @@ if seed == 2:
 
 
 class Preparation(unittest.TestCase):
-    def test_nightly_keeps_good_laws_when_a_contract_is_refused_or_has_no_binary(self):
-        group = prepare.selected_laws()["contracts"]
+    def test_board_keeps_good_laws_when_a_contract_is_refused_or_has_no_binary(self):
         names = ["std@1/tests/exec/run_until_escalates",
                  "std@1/tests/http_connection/http_request_scratch",
                  "std@1/tests/net/public_connect_preflight"]
@@ -273,9 +272,16 @@ for name in definitions:
 print(json.dumps({"tests": rows}))
 ''')
             compiler.chmod(0o755)
-            laws = prepare.prepare(compiler, root, "contracts", {name: group[name] for name in names},
-                                   1, 2, "test", None, None, root)
+            work = root / "prepared"
+            command = [sys.executable, prepare.__file__, "--compiler", str(compiler),
+                       "--work", str(work), "--prepare-results", str(root), "--seeds", "2"]
+            for name in names:
+                command.extend(("--law", name))
+            prepared = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(prepared.returncode, 1, prepared.stderr)
+            laws = json.loads((work / "manifest.json").read_text())
             self.assertEqual([law["law"] for law in laws], names[2:])
+            self.assertFalse(laws[0]["defer_probe_gate"])
             self.assertEqual(publish(root), 3)
             failures = [json.loads(line) for line in (root / "failure-groups.jsonl").read_text().splitlines()]
             self.assertEqual([row["group"][:2] for row in failures], [[name, "prepare_red"] for name in names[:2]])

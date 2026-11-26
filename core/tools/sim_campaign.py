@@ -310,11 +310,11 @@ def prepare_leg(command, scratch, report, leg, expected, errors):
 
 
 def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime,
-            nightly=None, attempt=0, probes=None):
+            results=None, attempt=0, probes=None, *, defer_probe_gate=False):
     """Build a covered normal leg and a recording leg for SEM-8 replay."""
     scratch = work / (kind if not attempt else f'{kind}-{attempt}')
     scratch.mkdir()
-    reports = scratch if nightly is None else nightly / 'prepared' / kind
+    reports = scratch if results is None else results / 'prepared' / kind
     reports.mkdir(parents=True, exist_ok=True)
     prefix = '' if not attempt else f'retry-{attempt}-'
     base = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
@@ -368,25 +368,26 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
             prepared, refused = prepare_leg(base + ['-o', str(scratch / leg)] + launch, scratch, report,
                                             leg, list(entries.values()), errors)
             rejected = {law for module in refused for law in source_laws.get(module, ())}
-            if nightly is not None and rejected and rejected != group.keys():
+            if results is not None and rejected and rejected != group.keys():
                 # Contract fixtures share a compiler invocation. Drop the refused
                 # input files and prepare the other fixtures in a fresh directory.
                 for law in sorted(rejected):
-                    prepare_outcome(nightly, build, law, 'prepare_red', '; '.join(errors[entries[law]]))
+                    prepare_outcome(results, build, law, 'prepare_red', '; '.join(errors[entries[law]]))
                 if (scratch / 'objects').exists():
                     shutil.rmtree(scratch / 'objects')
                 remaining = {law: case for law, case in group.items() if law not in rejected}
                 return prepare(compiler, work, kind, remaining, jobs, seeds, build, runtime,
-                               recording_runtime, nightly, attempt + 1, probes)
+                               recording_runtime, results, attempt + 1, probes,
+                               defer_probe_gate=defer_probe_gate)
             if leg == 'bin':
                 rows.update(prepared)
     laws = []
     for law, definition in entries.items():
         if definition in errors:
             reason = '; '.join(errors[definition])
-            if nightly is None:
+            if results is None:
                 raise ValueError(f'{law} {reason}')
-            prepare_outcome(nightly, build, law, 'prepare_red', reason)
+            prepare_outcome(results, build, law, 'prepare_red', reason)
             continue
         binary = scratch / 'bin' / output_name(definition)
         row = rows[definition]
@@ -397,18 +398,18 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
         laws.append({'build': build, 'law': law, 'executable': str(binary),
                      'recording': str(scratch / 'recording' / binary.name), 'seeds': count,
                      'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
-                     'required_witnesses': list(probes.get(law, {})), 'defer_probe_gate': nightly is not None,
+                     'required_witnesses': list(probes.get(law, {})), 'defer_probe_gate': defer_probe_gate,
                      'coverage': {'group': kind, 'map': f'{binary}.covmap', 'tool': str(compiler)}})
     if (scratch / 'objects').exists():
         shutil.rmtree(scratch / 'objects')
     return laws
 
 
-def prepare_outcome(nightly, build, law, kind, reason):
+def prepare_outcome(results, build, law, kind, reason):
     print(f'{law}: {reason}', flush=True)
-    with (nightly / 'prepare.jsonl').open('a') as results:
+    with (results / 'prepare.jsonl').open('a') as stream:
         print(json.dumps({'build': build, 'law': law, 'kind': kind, 'reason': reason,
-                          'status': int(kind == 'prepare_red')}), file=results)
+                          'status': int(kind == 'prepare_red')}), file=stream)
 
 
 def main():
@@ -417,7 +418,11 @@ def main():
     parser.add_argument('--runtime', type=Path, help='normal runtime archive for an uninstalled compiler')
     parser.add_argument('--recording-runtime', type=Path, help='recording archive for an uninstalled compiler')
     parser.add_argument('--work', type=Path)
-    parser.add_argument('--nightly-results', type=Path, help='retain preparation reports and continue past unprepared laws')
+    results_options = parser.add_mutually_exclusive_group()
+    results_options.add_argument('--nightly-results', type=Path,
+                                 help='retain reports and defer probe gates to the full nightly sweep')
+    results_options.add_argument('--prepare-results', type=Path,
+                                 help='retain reports and write a partial manifest on preparation failures')
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
     parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
     parser.add_argument('--law', action='append', help='prepare or list an exact law (repeatable)')
@@ -456,26 +461,31 @@ def main():
     recording_runtime = args.recording_runtime.resolve(strict=True) if args.recording_runtime else None
     work = args.work.resolve()
     work.mkdir()
-    nightly = args.nightly_results.resolve(strict=True) if args.nightly_results else None
-    if nightly is not None:
-        (nightly / 'prepare.jsonl').touch(exist_ok=False)
+    results = args.nightly_results or args.prepare_results
+    if results is not None:
+        results = results.resolve(strict=True)
+        (results / 'prepare.jsonl').touch(exist_ok=False)
     for law, reason in skips.items():
         if not requested or law in requested:
-            if nightly is None:
+            if results is None:
                 print(f'{law}: {reason}')
             else:
-                prepare_outcome(nightly, build, law, 'prepare_skip', reason)
+                prepare_outcome(results, build, law, 'prepare_skip', reason)
     laws = []
+    planned = 0
     for kind, group in inventory.items():
         group = {name: case for name, case in group.items() if not requested or name in requested}
         if group:
+            planned += len(group)
             laws.extend(prepare(args.compiler.resolve(), work, kind, group, args.jobs, args.seeds,
-                                build, runtime, recording_runtime, nightly, probes=probes))
-    if nightly is not None:
+                                build, runtime, recording_runtime, results, probes=probes,
+                                defer_probe_gate=args.nightly_results is not None))
+    if args.nightly_results is not None:
         laws.extend(prepare(args.compiler.resolve(), work, 'canary', {CANARY: None}, args.jobs,
-                            args.seeds, build, runtime, recording_runtime, nightly))
+                            args.seeds, build, runtime, recording_runtime, results, defer_probe_gate=True))
     (work / 'manifest.json').write_text(json.dumps(laws, indent=2) + '\n')
+    return int(args.prepare_results is not None and len(laws) != planned)
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

@@ -83,7 +83,8 @@ if [[ -n "$checkout_status" ]]; then
 fi
 step="Fresh worktree bootstrap"
 record
-python3 tools/tests/fresh_worktree.py >>"$run/run.log" 2>&1
+python3 tools/tests/fresh_worktree.py >>"$run/run.log" 2>&1 ||
+  printf 'Fresh worktree bootstrap exited %s.\n' "$?" >>"$run/run.log"
 checkout=$PWD
 boat_status=0
 step="Boat screen"
@@ -101,8 +102,11 @@ if taskset -c 8-11 python3 bench/awfy/screen.py prepare "$candidate" \
       boat_status=$?
     fi
   fi
-  ln -s "$candidate" "$run/prepared-screen"
-  mv -Tf "$run/prepared-screen" "$base/last-screen-inputs"
+  if ! { ln -s "$candidate" "$run/prepared-screen" &&
+         mv -Tf "$run/prepared-screen" "$base/last-screen-inputs"; } >>"$run/run.log" 2>&1; then
+    printf 'Boat screen could not publish prepared input.\n' >>"$run/run.log"
+    boat_status=1
+  fi
 else
   boat_status=$?
 fi
@@ -110,13 +114,21 @@ if (( ${#screen[@]} )); then
   (
     cd "$run"
     taskset -c 8-11 "$checkout/tools/boat-dispatch" --log-dir "$run/boat-logs" "${screen[@]}"
-  ) >>"$run/run.log" 2>&1 || boat_status=$?
+  ) >>"$run/run.log" 2>&1 || {
+    dispatch_status=$?
+    printf 'Boat dispatch exited %s.\n' "$dispatch_status" >>"$run/run.log"
+    boat_status=$dispatch_status
+  }
 fi
 # Warm peer Rust caches before board.py invokes cargo --offline.
+status=0
 for manifest in "$base/peers/langarena/rust/Cargo.toml" "$base/peers/awfy/rust/Cargo.toml"; do
   if [[ -f "$manifest" ]]; then
     step="cargo +1.99.0 fetch ${manifest#"$base/peers/"}"
-    taskset -c 8-11 cargo +1.99.0 fetch --locked --manifest-path "$manifest" 2>&1 | tee -a "$run/run.log"
+    taskset -c 8-11 cargo +1.99.0 fetch --locked --manifest-path "$manifest" >>"$run/run.log" 2>&1 || {
+      status=1
+      printf '%s failed.\n' "$step" >>"$run/run.log"
+    }
   fi
 done
 baseline=()
@@ -126,7 +138,10 @@ baseline_state=$(flock --close "$base/baseline.lock" bash -c '
   if [[ -e "$1" || -L "$1" ]]; then
     realpath -m -- "$1" && stat -Lc "%d:%i" -- "$1"
   fi
-' _ "$base/last-complete.json")
+' _ "$base/last-complete.json" 2>>"$run/run.log") || {
+  status=1
+  printf 'Could not resolve the performance baseline.\n' >>"$run/run.log"
+}
 baseline_path=${baseline_state%%$'\n'*}
 baseline_inode=${baseline_state#*$'\n'}
 if [[ -n "$baseline_path" ]]; then
@@ -137,14 +152,16 @@ if previous=$(python3 "$tools/board-freshness.py" --base "$base" --last-complete
   if [[ -n "$previous" ]]; then law_baseline=(--commit "$previous"); fi
 else
   law_status=$?
+  printf 'Could not resolve the law comparison baseline (exit %s).\n' "$law_status" >>"$run/run.log"
 fi
 step=board
 record
-status=0
-taskset -c 8-11,16-19 python3 bench/awfy/board.py "$run/board" \
-  --build-cpus 8-11 --measure-cpus 16-19 --awfy "$base/peers/awfy" \
-  --resid "$base/peers/resid" --goose "$base/peers/goose" --langarena "$base/peers/langarena" \
-  "${baseline[@]}" >>"$run/run.log" 2>&1 || status=$?
+if (( status == 0 )); then
+  taskset -c 8-11,16-19 python3 bench/awfy/board.py "$run/board" \
+    --build-cpus 8-11 --measure-cpus 16-19 --awfy "$base/peers/awfy" \
+    --resid "$base/peers/resid" --goose "$base/peers/goose" --langarena "$base/peers/langarena" \
+    "${baseline[@]}" >>"$run/run.log" 2>&1 || status=$?
+fi
 if (( status == 0 )); then
   step="promote baseline"
   taskset -c 8-11 python3 bench/awfy/board.py rebaseline "$run" \
@@ -166,15 +183,27 @@ build_toolchain() {
 }
 
 run_vopr() (
-  local ledger vopr
+  local ledger vopr manifest prepare_status=0 batch_status=0
   vopr="$run/vopr"
   ledger=${HIRSEL_VOPR_LEDGER:-/workspace/code/hirsel-briefs/vopr/seeds.sqlite}
   mkdir -p "$vopr" "$(dirname "$ledger")" || return
   taskset -c 8-11 python3 core/tools/sim_campaign.py --compiler "$checkout/$compiler/hirsel" \
-    --work "$vopr/prepared" || return
+    --work "$vopr/prepared" --prepare-results "$vopr" || prepare_status=$?
+  manifest="$vopr/prepared/manifest.json"
+  if (( prepare_status != 0 )); then
+    printf 'VOPR preparation exited %s. See %s.\n' "$prepare_status" "$vopr/prepare.jsonl"
+    if [[ ! -s "$manifest" || $(<"$manifest") == '[]' ]]; then
+      return "$prepare_status"
+    fi
+  fi
   cd "$vopr" || return
-  exec taskset -c 8-11 "$checkout/tools/sim-campaign" batch "$(basename "$run")" prepared/manifest.json \
-    --ledger "$ledger" --results results.jsonl
+  taskset -c 8-11 "$checkout/tools/sim-campaign" batch "$(basename "$run")" prepared/manifest.json \
+    --ledger "$ledger" --results results.jsonl || batch_status=$?
+  if (( prepare_status != 0 )); then
+    printf 'VOPR batch exited %s after partial preparation.\n' "$batch_status"
+    return "$prepare_status"
+  fi
+  return "$batch_status"
 )
 
 toolchain_status=0
@@ -186,21 +215,25 @@ fi
 if (( cgroup_status != 0 )); then
   printf 'Launcher cgroup law exited %s. See %s/run.log.\n' "$cgroup_status" "$run" >>"$run/run.log"
 fi
-if [[ -z "$law_status" ]]; then
-  law_status=$toolchain_status
+if (( toolchain_status == 0 )); then
   # Build stores and caches go to disk under the run; each law's working files stay on
   # tmpfs. With both on the shared /dev/shm, a night's stores filled it beside other lanes
   # and stopped 197 laws with ENOSPC or SIGBUS (run 20261126T031505Z-YivHTQ).
-  if (( law_status == 0 )); then
-    # The full lock check: catches a lock moved by a compiler change the land lint does not select.
-    taskset -c 8-11 python3 core/tools/law_board.py check --compiler "$checkout/$compiler/hirsel" \
-      --compiler-scratch "$run" >>"$run/run.log" 2>&1 || law_status=$?
-  fi
-  if (( law_status == 0 )); then
-    taskset -c 8-11 python3 core/tools/law_board.py nightly --compiler "$checkout/$compiler/hirsel" \
-      --compiler-scratch "$run" "${law_baseline[@]}" --logs "$run/laws" >>"$run/run.log" 2>&1 || law_status=$?
-  fi
+  # The full lock check catches a lock moved by a compiler change the land lint does not select.
+  taskset -c 8-11 python3 core/tools/law_board.py check --compiler "$checkout/$compiler/hirsel" \
+    --compiler-scratch "$run" >>"$run/run.log" 2>&1 || {
+    law_status=$?
+    printf 'Law lock check exited %s.\n' "$law_status" >>"$run/run.log"
+  }
+  taskset -c 8-11 python3 core/tools/law_board.py nightly --compiler "$checkout/$compiler/hirsel" \
+    --compiler-scratch "$run" "${law_baseline[@]}" --logs "$run/laws" >>"$run/run.log" 2>&1 || {
+    law_status=$?
+    printf 'Law execution exited %s.\n' "$law_status" >>"$run/run.log"
+  }
+elif [[ -z "$law_status" ]]; then
+  law_status=$toolchain_status
 fi
+law_status=${law_status:-0}
 if (( law_status != 0 )); then
   printf 'Law board exited %s. See %s/run.log.\n' "$law_status" "$run" >>"$run/run.log"
 fi

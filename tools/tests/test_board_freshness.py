@@ -171,22 +171,28 @@ promote(Path(run) / "board/board.json", Path(base), Path(previous) if previous e
   '.buck2/bin/buck2 build -j4') echo '{"root//:hirsel-toolchain":"prefix"}' ;;
   'python3 core/tools/law_board.py check')
     [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == --compiler && "$6" == --compiler-scratch ]] || exit 90
-    exit 0 ;;
+    exit 1 ;;
   'python3 core/tools/law_board.py nightly')
     [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$8" == --commit && "$9" == "$FIXTURE_PREVIOUS" ]] || exit 90
     echo "fixture: weaker property row"
-    exit 1 ;;
-  'python3 core/tools/sim_campaign.py --compiler') exit 0 ;;
+    exit 0 ;;
+  'python3 core/tools/sim_campaign.py --compiler')
+    [[ "$7" == --prepare-results && "$8/prepared" == "$6" ]] || exit 90
+    mkdir -p "$6"
+    echo '[{"law":"ready"}]' >"$6/manifest.json"
+    exit "$FIXTURE_PREPARE_STATUS" ;;
   */tools/boat-dispatch\ *) exit 7 ;;
   */tools/sim-campaign\ batch\ *)
-    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == prepared/manifest.json ]] || exit 90
+    [[ -f "${HIRSEL_BOARD_BASE}/board-completed" && "$4" == prepared/manifest.json && -s "$4" ]] || exit 90
+    echo "fixture: dispatched ready law"
     exit "$FIXTURE_VOPR_STATUS" ;;
   *) exit 91 ;;
 esac
 ''')
             taskset.chmod(0o755)
-            for board_status, campaign_status in ((0, 0), (0, 1), (0, 75), (2, 0)):
-                with self.subTest(board_status=board_status, campaign_status=campaign_status):
+            for board_status, prepare_status, batch_status in ((0, 0, 0), (0, 1, 0), (0, 0, 75), (2, 0, 0)):
+                with self.subTest(board_status=board_status, prepare_status=prepare_status, batch_status=batch_status):
+                    campaign_status = prepare_status or batch_status
                     (base / "board-completed").unlink(missing_ok=True)
                     (base / "last-screen-inputs").unlink(missing_ok=True)
                     if campaign_status != 0:
@@ -199,12 +205,13 @@ esac
                     snapshot = base / "baselines" / f"{commit}.json"
                     snapshot.unlink(missing_ok=True)
                     result = subprocess.run(
-                        [TOOLS / "nightly-board.sh"], capture_output=True, text=True,
+                        [TOOLS / "nightly-board.sh", "--locked", "--fetched"], capture_output=True, text=True,
                         env=os.environ | {"HIRSEL_BOARD_BASE": str(base),
                                           "HIRSEL_BOARD_CURRENT": str(base / "CURRENT-BOARD.md"),
                                           "HIRSEL_VOPR_LEDGER": str(base / "seeds.sqlite"),
                                           "FIXTURE_BOARD_STATUS": str(board_status),
-                                          "FIXTURE_VOPR_STATUS": str(campaign_status),
+                                          "FIXTURE_PREPARE_STATUS": str(prepare_status),
+                                          "FIXTURE_VOPR_STATUS": str(batch_status),
                                           "FIXTURE_PREVIOUS": previous,
                                           "PYTHONPATH": str(TOOLS.parent / "bench/awfy"),
                                           "PATH": f"{base}:{os.environ['PATH']}"},
@@ -226,8 +233,11 @@ esac
                         self.assertEqual((base / "last-complete.json").resolve(), snapshot)
                         self.assertEqual(snapshot.read_bytes(), (run / "board/board.json").read_bytes())
                     self.assertIn("fixture: weaker property row", log)
+                    self.assertIn("Law lock check exited 1", log)
+                    self.assertIn("fixture: dispatched ready law", log)
                     if campaign_status == 1:
                         self.assertIn("VOPR campaign exited 1", log)
+                        self.assertIn("VOPR batch exited 0 after partial preparation", log)
                     if campaign_status == 75:
                         self.assertIn("VOPR deferred", log)
 

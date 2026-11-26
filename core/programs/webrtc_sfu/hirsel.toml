@@ -38,6 +38,8 @@ store = { major = 1, path = "../store" }
 "signal_build.hirsel" = "signal"
 "signal_serve.hirsel" = "signal"
 "signal_pool.hirsel" = "signal"
+"signal_room.hirsel" = "signal"
+"signal_ledger.hirsel" = "signal"
 
 [tests]
 limit = 67108864
@@ -71,9 +73,14 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 "pool_rate_laws.hirsel" = "laws"
 "pool_signal_laws.hirsel" = "laws"
 "pool_fault_laws.hirsel" = "laws"
+"pool_cost_laws.hirsel" = "laws"
+"pool_ledger_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"
 "vectors/chromium_rtp.hirsel" = "vectors"
 
 [tests.runs."webrtc_sfu@1/laws/service_answers_over_the_room"]
 limit = 1342177280
+
+[tests.runs."webrtc_sfu@1/laws/pool_room_cost_is_exact"]
+limit = 268435456

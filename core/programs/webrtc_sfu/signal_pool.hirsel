@@ -59,11 +59,11 @@ type Served[M] {
     why: CloseWhy
 }
 
-/// The control unit's rooms (RTC-10). `units` is the pool's unit count, which every
-/// adapter homes sessions over.
+/// The control unit's rooms (RTC-10) and every unit's ledger, which homes and
+/// reserves each room's sessions.
 pub opaque type Rooms[M] {
     rooms: u32,
-    units: u16,
+    l: Ledger,
     served: List[Served[M]],
     reports: List[PoolReport],
     ended: List[peer.RoomId],
@@ -71,8 +71,8 @@ pub opaque type Rooms[M] {
     unix_s: u64
 }
 
-pub fn rooms[M](units: u16, most: u32) -> Rooms[M] {
-    Rooms(rooms: most, units: units, served: list.new(), reports: list.new(), ended: list.new(), relaying: None, unix_s: 0)
+pub fn rooms[M](most: u32, take l: Ledger) -> Rooms[M] {
+    Rooms(rooms: most, l: take l, served: list.new(), reports: list.new(), ended: list.new(), relaying: None, unix_s: 0)
 }
 
 /// Every room opened from now on mints its admissions' TURN credentials from `r`.
@@ -104,9 +104,11 @@ fn named_at[M](p: Rooms[M], name: RoomName) -> Option[u64] {
 }
 
 /// Open a room under `name`: its `RoomId` is drawn from the control unit's counter,
-/// which never reuses one, and its adapter's first call opens it on every unit.
-/// `Opened` is reported once that call returns. A name already open, or a pool at
-/// `rooms` live rooms, is refused and nothing is allocated.
+/// which never reuses one, its share is reserved on every unit's ledger, and its
+/// adapter's first call opens it on every unit. `Opened` is reported once that call
+/// returns. A name already open, a pool at `rooms` live rooms, or a unit whose ledger
+/// cannot hold the room and one participant is refused, in that order, and nothing
+/// is reserved or allocated.
 pub fn open_room[M: codec](mut p: Rooms[M], mut u: units.Unit, name: RoomName, limits: router.RoomLimits, take embed: Embed[M]) -> Option[peer.RoomId] {
     if named_at(p, name) != None {
         list.push(mut p.reports, Refused(name: name, why: Exists))
@@ -116,11 +118,16 @@ pub fn open_room[M: codec](mut p: Rooms[M], mut u: units.Unit, name: RoomName, l
         list.push(mut p.reports, Refused(name: name, why: Rooms))
         return None
     }
+    if let Error(why) = room_fits(p.l, limits) {
+        list.push(mut p.reports, Refused(name: name, why: why))
+        return None
+    }
     let Some(room) = units.next_room(mut u) else {
         list.push(mut p.reports, Refused(name: name, why: Rooms))
         return None
     }
-    let mut a = adapter(room, limits, take embed, p.units)
+    let _ = reserve_room(mut p.l, room, limits)
+    let mut a = adapter(room, limits, take embed)
     if let Some(r) = p.relaying {
         relay(mut a, Relaying(master: secret.share(r.master), plan: clone(r.plan), random: r.random))
     }
@@ -158,6 +165,10 @@ pub fn built_in[M](mut p: Rooms[M], who: peer.Participant, take result: Result[B
     let Some(i) = served_at(p, who.room) else {
         return
     }
+    // A failed build parked nothing.
+    if let Error(_) = result {
+        release_session(mut p.l, who.room, who.gen)
+    }
     let mut out = replace(mut p.served[i].out, list.new())
     built(mut p.served[i].a, who, take result, mut out)
     p.served[i].out = take out
@@ -181,7 +192,7 @@ pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
     for i in 0u64 .. list.len(p.served) {
         wall(mut p.served[i].a, p.unix_s)
         let mut out = replace(mut p.served[i].out, list.new())
-        let stepped = step(mut p.served[i].a, mut u, now, mut out)
+        let stepped = step(mut p.served[i].a, mut p.l, mut u, now, mut out)
         p.served[i].out = take out
         if let Error(e) = stepped {
             p.served[i].why = Fault(e)
@@ -205,6 +216,7 @@ pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
         let s = list.remove(mut p.served, i)
         let Served(name: name, a: take a, out: _, dropped: _, why: why) = take s
         let room = room_of(a)
+        release_room(mut p.l, room)
         list.push(mut p.ended, room)
         if !was_refused(a) {
             list.push(mut p.reports, Closed(name: name, room: room, why: why))
@@ -212,15 +224,24 @@ pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
     }
 }
 
-/// Take the builds every room asked for since the last call.
+/// Take the builds every room asked for since the last call, each homed and
+/// reserved on its unit's ledger.
 pub fn take_room_builds[M](mut p: Rooms[M]) -> List[Build] {
     let mut all: List[Build] = list.new()
     for i in 0u64 .. list.len(p.served) {
-        for take b in take_builds(mut p.served[i].a) {
+        let mut out = replace(mut p.served[i].out, list.new())
+        for take b in home_builds(mut p.served[i].a, mut p.l, mut out) {
             list.push(mut all, take b)
         }
+        p.served[i].out = take out
+        bound_out(mut p.served[i])
     }
     all
+}
+
+/// The pool's ledgers.
+pub fn ledgers[M](p: Rooms[M]) -> View[Ledger] in p {
+    view(p.l)
 }
 
 /// Take `room`'s messages for its room client.

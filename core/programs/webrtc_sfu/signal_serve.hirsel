@@ -62,6 +62,7 @@ type Start: cross {
     session: peer.PeerLimits,
     plane: units.Plane,
     rates: router.Rates,
+    pool: router.PoolBounds,
     until: u64
 }
 
@@ -164,12 +165,12 @@ fn wait_until(wake: Option[u64], now: u64) -> u64 {
 // Unit `s.index` (not 0): bind, report, take the roster, then turn and build until
 // `s.until`.
 fn unit_task(take s: Start) -> Result[(), ServeError] waits {
-    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, until: until) = take s
+    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, pool: bounds, until: until) = take s
     let (take socket, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
     let (doors, take control, take media) = units.inboxes(at, index, n, plane) ?=> |take e| Router(e)
-    let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes 65536)
+    let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes ROSTER_BYTES)
     let (roster, take siblings) = rc ?=> |c| Router(Capacity(c))
-    let bc: Result[(Client[Build], Inbox[Build]), Capacity] = conn.new(64, bytes 4194304)
+    let bc: Result[(Client[Build], Inbox[Build]), Capacity] = conn.new(64, bytes BUILDS_BYTES)
     let (builds, take wanted) = bc ?=> |c| Router(Capacity(c))
     if let Error(_) = conn.send(hello, Hello(index: index, doors: take doors, roster: take roster, builds: take builds)) {
         return Error(Units)
@@ -188,6 +189,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
         return Error(Units)
     }
     let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
+    units.reserve_pool(mut u, bounds)
     units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: take policy, limits: session)
     let mut sock = take socket
@@ -367,16 +369,23 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
     }
     let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
     let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
+    let bounds = router.pool_bounds(int.widen(n), int.widen(limits.rooms), int.widen(limits.sessions), session)
+    for k in 0u16 .. n {
+        let fixed = units.fixed_bytes(k, n, plane, OUT_BYTES, OUT_PACKETS, SOCKET, bounds) + serve_bytes(k, limits.rooms)
+        if fixed > limits.unit_bytes {
+            return Error(Router(Capacity(Capacity(requested: fixed, available: limits.unit_bytes))))
+        }
+    }
     let (take socket, at) = host.udp_bind(net, binds[0], SOCKET) ?=> |e| Bind(e)
     let (doors0, take control, take media) = units.inboxes(at, 0, n, plane) ?=> |take e| Router(e)
-    let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes 65536)
+    let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes HELLO_BYTES)
     let (hello, take hellos) = hc ?=> |c| Router(Capacity(c))
-    let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes 4194304)
+    let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes FINISHED_BYTES)
     let (done, take finished) = dc ?=> |c| Router(Capacity(c))
     let mut running: List[Task[Result[(), ServeError]]] = list.new()
     for k in 1u16 .. n {
         let terms: sdp.Policy = clone(policy)
-        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, until: until)
+        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, pool: bounds, until: until)
         match task.spawn_unit(tasks, bytes limits.unit_bytes, take start, unit_task) {
             Ok(take t) => list.push(mut running, take t),
             Error(_) => return Error(Spawn),
@@ -418,9 +427,14 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         }
     }
     let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
+    units.reserve_pool(mut u, bounds)
     units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
-    let mut pool: Rooms[M] = rooms(n, limits.rooms)
+    let mut free: List[u64] = list.new()
+    for k in 0u16 .. n {
+        list.push(mut free, limits.unit_bytes - units.fixed_bytes(k, n, plane, OUT_BYTES, OUT_PACKETS, SOCKET, bounds) - serve_bytes(k, limits.rooms))
+    }
+    let mut pool: Rooms[M] = rooms(limits.rooms, ledger(take free, limits.sessions, session))
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
     if let Some(take link) = take linked {
         let RelayLink(master: take master, plan: take plan, revokes: take to) = take link
@@ -572,22 +586,45 @@ pub type RoomCost {
 }
 
 /// Price a room from the bounds the router, the sessions and the adapter allocate
-/// with (RTC-10 Sizing). `control` is the adapter and its tables at the room's bounds.
-/// It leaves out what the caller owns or the peers size: the room client's membership,
-/// its Dial, Embed and WebSocket buffers, and SDP and ICE text (`peer.session_heap`).
+/// with (RTC-10 Sizing). `control` is the adapter and its tables at the room's bounds,
+/// and the room client task's grant (`ROOM_CLIENT_BYTES`). It leaves out what the
+/// caller owns or the peers size: the room client's membership, its Dial and Embed,
+/// the room's entry and message channels (sized by the application's message type),
+/// and SDP and ICE text (`peer.session_heap`).
 pub fn room_cost(limits: router.RoomLimits, session: peer.PeerLimits) -> RoomCost {
     let per_session = int.saturating_add(router.member_bytes(limits, session), peer.session_heap(session))
     RoomCost(replicated: router.room_replicated(limits), per_session: per_session, per_remote: router.remote_bytes(session), control: control_bytes(limits), bridge: 0, cascade: 0)
 }
 
 // The adapter and its tables at the room's bounds: a seat and a fence entry per id,
-// a build and a gone entry per participant, a publication per participant and slot.
+// a build and a gone entry per participant, a publication per participant and slot;
+// and the room client task with its grant.
 fn control_bytes(limits: router.RoomLimits) -> u64 {
     let ids: u64 = int.widen(limits.ids)
     let participants: u64 = int.widen(limits.participants)
     let pubs = participants * int.widen(limits.publications)
-    bytes[Adapter[u8]] + priced(bytes[Seat], ids) + priced(bytes[(peer.Gen, u32)], ids) + priced(bytes[Build], participants) + priced(bytes[peer.Gen], participants) + priced(bytes[Pub], pubs)
+    let client = option.unwrap(charge.task(0, ROOM_CLIENT_BYTES))
+    bytes[Adapter[u8]] + priced(bytes[Seat], ids) + priced(bytes[(peer.Gen, u32)], ids) + priced(bytes[Build], participants) + priced(bytes[(peer.Gen, u16)], participants) + priced(bytes[Pub], pubs) + client
 }
+
+/// What unit `index` holds for the pool besides its own unit state (`units.fixed_bytes`):
+/// a worker its roster and build inboxes; the control unit the hello and finished
+/// inboxes and the ready channel of `most` rooms.
+pub fn serve_bytes(index: u16, most: u32) -> u64 {
+    if index != 0 {
+        return ROSTER_BYTES + BUILDS_BYTES
+    }
+    let ready: u64 = int.widen(most)
+    HELLO_BYTES + FINISHED_BYTES + option.unwrap(charge.channel(bytes[peer.RoomId], ready + 1))
+}
+
+const ROSTER_BYTES: u64 = 65536
+
+const BUILDS_BYTES: u64 = 4194304
+
+const HELLO_BYTES: u64 = 65536
+
+const FINISHED_BYTES: u64 = 4194304
 
 fn priced(element: u64, capacity: u64) -> u64 {
     option.unwrap(charge.seq(element, capacity))

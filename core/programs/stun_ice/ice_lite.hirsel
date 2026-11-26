@@ -49,8 +49,8 @@ pub fn credentials(take ufrag: Bytes, take password: Bytes) -> Result[Credential
 
 /// Create an ICE-Lite responder for the local UDP bases advertised to the peer.
 pub fn lite(take local: Credentials, take bases: List[Local]) -> Result[Lite, IceError] {
-    let mut paths: List[Selection] = list.new()
     let count = list.len(bases)
+    let mut paths: List[Selection] = list.with_capacity(count)
     for i in 0u64 .. count {
         let e = bases[i]
         if e.component == 0 || e.component > 256 || e.base.port == 0 {
@@ -66,6 +66,12 @@ pub fn lite(take local: Credentials, take bases: List[Local]) -> Result[Lite, Ic
         }
     }
     Ok(Lite(credentials: take local, bases: take bases, paths: take paths))
+}
+
+/// The heap bytes a responder of `bases` bases keeps beyond its `Lite` value and its
+/// credentials (RTC-10 `room_cost`), when its bases come in a list of that capacity.
+pub fn lite_heap(bases: u64) -> u64 {
+    option.unwrap(charge.seq(bytes[Local], bases)) + option.unwrap(charge.seq(bytes[Selection], bases))
 }
 
 fn selection_index(paths: List[Selection], component: u16) -> Option[u64] {

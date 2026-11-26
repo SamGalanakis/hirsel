@@ -1,0 +1,228 @@
+// ---- RTC-10 Sizing and admission: every unit's ledger, kept on the control unit ----
+/// Every unit's ledger (RTC-10 Sizing and admission), kept on the control unit: the
+/// bytes each unit has left after its fixed cost and every reservation, and the
+/// sessions homed there. The control unit reserves before it posts any change that
+/// allocates (an `Open`, a join's `Build`, a subscription that adds a remote
+/// down-track), and a reservation is refunded only once the units have finished with
+/// what it paid for. So two pending `Build`s never both pass a check only one fits.
+pub opaque type Ledger {
+    free: List[u64],
+    live: List[u32],
+    sessions: u32,
+    session: peer.PeerLimits,
+    rooms: List[Priced],
+    held: List[Held]
+}
+
+// A room's price and its primary unit.
+type Priced {
+    room: peer.RoomId,
+    cost: RoomCost,
+    primary: u16
+}
+
+// One reservation: `amount` bytes on `unit` for `room`, for what `what` names.
+type Held {
+    room: peer.RoomId,
+    unit: u16,
+    amount: u64,
+    what: Hold
+}
+
+type Hold = Whole | Session(peer.Gen) | Remote(sub: peer.Gen, owner: peer.Gen, publication: u64)
+
+/// The ledgers of a pool whose unit `k` has `free[k]` bytes once its fixed cost is
+/// paid, each unit homing at most `sessions` sessions of `session`'s size.
+pub fn ledger(take free: List[u64], sessions: u32, session: peer.PeerLimits) -> Ledger {
+    let mut live: List[u32] = list.new()
+    for _ in free {
+        list.push(mut live, 0)
+    }
+    Ledger(free: take free, live: take live, sessions: sessions, session: session, rooms: list.new(), held: list.new())
+}
+
+/// The bytes unit `unit` has left to reserve.
+pub fn ledger_free(l: Ledger, unit: u16) -> u64 {
+    l.free[int.widen(unit)]
+}
+
+/// The sessions homed on unit `unit`, including those whose `Build` is pending.
+pub fn ledger_live(l: Ledger, unit: u16) -> u32 {
+    l.live[int.widen(unit)]
+}
+
+/// The primary unit of an open room.
+pub fn primary_of(l: Ledger, room: peer.RoomId) -> Option[u16] {
+    let i = priced_at(l, room)?
+    Some(l.rooms[i].primary)
+}
+
+fn priced_at(l: Ledger, room: peer.RoomId) -> Option[u64] {
+    for i in 0u64 .. list.len(l.rooms) {
+        if l.rooms[i].room == room {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn hold(mut l: Ledger, room: peer.RoomId, unit: u16, amount: u64, take what: Hold) {
+    let k: u64 = int.widen(unit)
+    l.free[k] -= amount
+    if let Session(_) = what {
+        l.live[k] += 1
+    }
+    list.push(mut l.held, Held(room: room, unit: unit, amount: amount, what: take what))
+}
+
+fn refund(mut l: Ledger, i: u64) {
+    let h = list.remove(mut l.held, i)
+    let k: u64 = int.widen(h.unit)
+    l.free[k] += h.amount
+    if let Session(_) = h.what {
+        l.live[k] -= 1
+    }
+}
+
+// What a room holds on unit `k` from its `Open` until its `Close` completes: its
+// replicated state everywhere, and on the control unit its adapter, bridge and cascade.
+fn room_share(cost: RoomCost, k: u64) -> u64 {
+    if k == 0 {
+        int.saturating_add(int.saturating_add(cost.replicated, cost.control), int.saturating_add(cost.bridge, cost.cascade))
+    } else {
+        cost.replicated
+    }
+}
+
+/// Reserve a room's `Open` (RTC-10 Sizing and admission). It is admitted when every
+/// unit's ledger holds what the room holds there plus one participant's `per_session`;
+/// otherwise it is refused with the lowest such unit, what it needed and what it had,
+/// and nothing is reserved. Only the room's own share is reserved: the participant's
+/// is reserved by its join. The room's primary unit is the one with the most free
+/// bytes afterwards, lowest index on a tie.
+pub fn reserve_room(mut l: Ledger, room: peer.RoomId, limits: router.RoomLimits) -> Result[(), PoolRefusal] {
+    room_fits(l, limits)?
+    let cost = room_cost(limits, l.session)
+    for k in 0u64 .. list.len(l.free) {
+        hold(mut l, room, int.narrow(k), room_share(cost, k), Whole)
+    }
+    let mut primary = 0u64
+    for k in 1u64 .. list.len(l.free) {
+        if l.free[k] > l.free[primary] {
+            primary = k
+        }
+    }
+    list.push(mut l.rooms, Priced(room: room, cost: cost, primary: int.narrow(primary)))
+    Ok(())
+}
+
+/// Home and reserve one participant's session: on the room's primary unit while it
+/// has `per_session` free and fewer than `sessions` sessions, otherwise on the unit
+/// with the most free bytes that does, lowest index on a tie. `None` when no unit has
+/// room: the join is `Limit(sessions)`.
+pub fn reserve_session(mut l: Ledger, who: peer.Participant) -> Option[u16] {
+    let i = priced_at(l, who.room)?
+    let need = l.rooms[i].cost.per_session
+    let primary: u64 = int.widen(l.rooms[i].primary)
+    let mut home: Option[u64] = None
+    if fits(l, primary, need) {
+        home = Some(primary)
+    } else {
+        for k in 0u64 .. list.len(l.free) {
+            if !fits(l, k, need) {
+                continue
+            }
+            let better = match home {
+                Some(h) => l.free[k] > l.free[h],
+                None => true,
+            }
+            if better {
+                home = Some(k)
+            }
+        }
+    }
+    let k = home?
+    hold(mut l, who.room, int.narrow(k), need, Session(who.gen))
+    Some(int.narrow(k))
+}
+
+/// Whether every unit's ledger holds a room of `limits` and one participant of it.
+pub fn room_fits(l: Ledger, limits: router.RoomLimits) -> Result[(), PoolRefusal] {
+    let cost = room_cost(limits, l.session)
+    for k in 0u64 .. list.len(l.free) {
+        let need = int.saturating_add(room_share(cost, k), cost.per_session)
+        if l.free[k] < need {
+            return Error(Bytes(unit: int.narrow(k), need: need, free: l.free[k]))
+        }
+    }
+    Ok(())
+}
+
+fn fits(l: Ledger, k: u64, need: u64) -> bool {
+    l.free[k] >= need && l.live[k] < l.sessions
+}
+
+/// Reserve a down-track of `sub` on `unit` for a publication of `owner` homed on
+/// another unit: `per_remote` there. `Error` names what was asked and what was free.
+pub fn reserve_remote(mut l: Ledger, room: peer.RoomId, unit: u16, sub: peer.Gen, owner: peer.Gen, publication: u64) -> Result[(), Capacity] {
+    let Some(i) = priced_at(l, room) else {
+        return Ok(())
+    }
+    let need = l.rooms[i].cost.per_remote
+    let free = l.free[int.widen(unit)]
+    if free < need {
+        return Error(Capacity(requested: need, available: free))
+    }
+    hold(mut l, room, unit, need, Remote(sub: sub, owner: owner, publication: publication))
+    Ok(())
+}
+
+/// Refund `sub`'s down-track of `publication`, once the units removed it.
+pub fn release_remote(mut l: Ledger, room: peer.RoomId, sub: peer.Gen, publication: u64) {
+    let mut i = 0u64
+    while i < list.len(l.held) {
+        let mine = match l.held[i].what {
+            Remote(sub: s, owner: _, publication: p) => l.held[i].room == room && s == sub && p == publication,
+            _ => false,
+        }
+        if mine {
+            refund(mut l, i)
+        } else {
+            i += 1
+        }
+    }
+}
+
+/// Refund `g`'s session and every remote down-track it held or fed, once no unit
+/// holds the session: its revoke completed, its admission was refused, or its build
+/// failed.
+pub fn release_session(mut l: Ledger, room: peer.RoomId, g: peer.Gen) {
+    let mut i = 0u64
+    while i < list.len(l.held) {
+        let mine = l.held[i].room == room && match l.held[i].what {
+            Session(x) => x == g,
+            Remote(sub: s, owner: o, publication: _) => s == g || o == g,
+            Whole => false,
+        }
+        if mine {
+            refund(mut l, i)
+        } else {
+            i += 1
+        }
+    }
+}
+
+/// Refund everything `room` holds, once its `Close` completed on every unit.
+pub fn release_room(mut l: Ledger, room: peer.RoomId) {
+    let mut i = 0u64
+    while i < list.len(l.held) {
+        if l.held[i].room == room {
+            refund(mut l, i)
+        } else {
+            i += 1
+        }
+    }
+    list.retain(mut l.rooms, scoped fn(p: Priced) -> bool {
+        p.room != room
+    })
+}

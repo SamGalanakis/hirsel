@@ -526,19 +526,27 @@ fn copied(b: Bytes) -> Bytes {
 
 /// The heap bytes one session at `limits` reserves beyond its `PeerSession` value
 /// (RTC-10 `room_cost`), from the bounds `open` and `add_track` allocate with: its
-/// sections, congestion logs, pacer and payload slab, egress scratch, and a full set of
-/// down-tracks. Not included, because their size is the peer's input and not a bound:
+/// sections, ICE responder, congestion logs and bandwidth estimator, pacer and payload
+/// slab, egress scratch, and a full set of down-tracks. Not included, because their size is the peer's input and not a bound:
 /// the agreed SDP and section mids, ICE credentials, and DTLS and SRTP state.
 pub fn session_heap(limits: PeerLimits) -> u64 {
     let n: u64 = int.widen(limits.pacer_packets)
     let tracks: u64 = int.widen(limits.down_tracks)
     let paced: Option[Paced] = None
     let mut sum = seq_of(bytes[Section], int.widen(limits.sections))
-    sum += rtp.twcc.recv_log_heap(TWCC_SLOTS) + rtp.twcc.send_log_heap(TWCC_SLOTS) + seq_of(1, CNAME_BYTES)
+    sum += rtp.twcc.recv_log_heap(TWCC_SLOTS) + rtp.twcc.send_log_heap(TWCC_SLOTS) + seq_of(1, CNAME_BYTES) + rtp.bwe.bwe_heap() + stun_ice.lite_heap(1)
     sum += rtp.pacer.pacer_heap(limits.pacer_packets, paced)
     sum += seq_of(bytes[Bytes], n) + n * seq_of(1, SLOT) + seq_of(bytes[u32], n) + seq_of(bytes[Paced], n)
     sum += seq_of(1, SLOT + 128) + 2 * seq_of(1, SLOT) + seq_of(1, 2) + seq_of(1, DD_LIMIT)
+    sum += seq_of(bytes[u32], ssrcs(limits))
     sum + seq_of(bytes[Track], tracks) + tracks * track_heap()
+}
+
+// The SSRCs a session draws while it holds a full set of down-tracks: its control SSRC,
+// and each down-track's own, RTX and FlexFEC SSRCs.
+fn ssrcs(limits: PeerLimits) -> u64 {
+    let tracks: u64 = int.widen(limits.down_tracks)
+    1 + 3 * tracks
 }
 
 // What one down-track's `Track` reserves beyond its value: its history, rewrite,
@@ -557,7 +565,7 @@ fn seq_of(element: u64, capacity: u64) -> u64 {
 pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base: Addr, limits: PeerLimits, agreed: sdp.Negotiated, participant: Participant) -> Result[PeerSession, PeerError] {
     let sections = build_sections(agreed, limits)?
     let credentials = stun_ice.credentials(copied(local.ice_ufrag), copied(local.ice_pwd)) ?=> |take e| Ice(e)
-    let mut bases: List[stun_ice.Local] = list.new()
+    let mut bases: List[stun_ice.Local] = list.with_capacity(1)
     list.push(mut bases, stun_ice.Local(component: 1, base: base))
     let ice = stun_ice.lite(take credentials, take bases) ?=> |take e| Ice(e)
     let recv_log = rtp.twcc.recv_log(TWCC_SLOTS) ?=> |c| Capacity(c)
@@ -578,7 +586,7 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.new(), used: list.new(), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_first: None, probe_last: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), repair: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None, reoffer_due: false)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.with_capacity(int.widen(limits.down_tracks)), used: list.with_capacity(ssrcs(limits)), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_first: None, probe_last: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), repair: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None, reoffer_due: false)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.red, SLOT) ?=> |c| Capacity(c)
     list.try_reserve(mut p.repair, SLOT) ?=> |c| Capacity(c)

@@ -124,6 +124,12 @@ fn ms_of_us(us: i64) -> f64 {
     f / 1000.0
 }
 
+/// The heap bytes `bwe` reserves beyond the `Bwe` value (RTC-10 `room_cost`): the
+/// delay trend's points and the loss estimator's observation window.
+pub fn bwe_heap() -> u64 {
+    option.unwrap(charge.seq(bytes[Point], WINDOW + 1)) + option.unwrap(charge.seq(bytes[Observation], OBSERVATION_SLOTS))
+}
+
 pub fn bwe(c: Config) -> Bwe {
     let min: f64 = float.from_int(c.min_bps)
     let max: f64 = float.from_int(c.max_bps)

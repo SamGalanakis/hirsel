@@ -120,7 +120,6 @@ pub opaque type Adapter[M] {
     room: peer.RoomId,
     limits: router.RoomLimits,
     embed: Embed[M],
-    units: u16,
     // The service's own peer number, and its numbers from before a rejoin whose
     // `Left` has not come yet: none of them is ever admitted.
     you: Option[u32],
@@ -138,8 +137,9 @@ pub opaque type Adapter[M] {
     jobs: List[Job],
     // Revokes whose `Fenced` waits on the fence: the participant and its peer.
     fencing: List[(peer.Gen, u32)],
-    // Sessions being built for admissions that ended before the build came back.
-    gone: List[peer.Gen],
+    // Sessions being built, and their home units, for admissions that ended before
+    // the build came back.
+    gone: List[(peer.Gen, u16)],
     builds: List[Build],
     // Answers to re-offers, for the control unit's router at the next `step`.
     answers: List[(peer.Gen, u64, Bytes)],
@@ -157,11 +157,12 @@ pub opaque type Adapter[M] {
 
 type Life: key = Serving | Closing | Gone
 
-/// The adapter of `room` over `units` media units. Its first control call opens the room.
-pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M], units: u16) -> Adapter[M] {
+/// The adapter of `room`. Its first control call opens the room; the pool's ledger
+/// homes its sessions (`home_builds`).
+pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M]) -> Adapter[M] {
     let mut jobs: List[Job] = list.new()
     list.push(mut jobs, Job(change: Open(room: room, limits: limits), after: Opening))
-    Adapter(room: room, limits: limits, embed: take embed, units: units, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), signaling: Live, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new(), life: Serving, opening: None, refused: false)
+    Adapter(room: room, limits: limits, embed: take embed, you: None, former: list.new(), incarnation: None, applied: 0, seats: list.new(), epoch: 0, pubs: list.new(), signaling: Live, calling: None, jobs: take jobs, fencing: list.new(), gone: list.new(), builds: list.new(), answers: list.new(), relaying: None, unix_s: 0, revokes: list.new(), life: Serving, opening: None, refused: false)
 }
 
 /// Give the adapter a relay: from now on each admission is minted TURN credentials and
@@ -279,9 +280,30 @@ fn busy[M](a: Adapter[M]) -> bool {
     }
 }
 
-/// Take the builds asked since the last call.
-pub fn take_builds[M](mut a: Adapter[M]) -> List[Build] {
-    replace(mut a.builds, list.new())
+/// Take the builds the room asked for since the last call, each homed and reserved
+/// on `l` (RTC-10 Home units). A join no unit has room for is `Limit(sessions)`: it is
+/// answered `Refused` as any refused join is, and nothing is reserved.
+pub fn home_builds[M](mut a: Adapter[M], mut l: Ledger, mut out: List[runner.room_client.RoomOut[M]]) -> List[Build] {
+    let mut homed: List[Build] = list.new()
+    for take b in replace(mut a.builds, list.new()) {
+        let who = b.who
+        let Some(home) = reserve_session(mut l, who) else {
+            built(mut a, who, Error(Limit(l.sessions)), mut out)
+            continue
+        }
+        if let Some(i) = seat_of(a, who.gen) {
+            a.seats[i].home = home
+        }
+        for k in 0u64 .. list.len(a.gone) {
+            if a.gone[k].0 == who.gen {
+                a.gone[k] = (who.gen, home)
+            }
+        }
+        let mut sent = take b
+        sent.home = home
+        list.push(mut homed, take sent)
+    }
+    homed
 }
 
 fn seat_at[M](a: Adapter[M], peer: u32) -> Option[u64] {
@@ -441,7 +463,7 @@ fn end_seat[M](mut a: Adapter[M], i: u64, mut out: List[runner.room_client.RoomO
     drop_pubs(mut a, g, mut out)
     match s.stage {
         Waiting => to_room(a, Fenced(int.widen(s.peer), s.epoch), mut out),
-        Building => list.push(mut a.gone, g),
+        Building => list.push(mut a.gone, (g, s.home)),
         _ => {
             list.push(mut a.fencing, (g, s.peer))
             list.push(mut a.jobs, Job(change: Revoke(room: a.room, id: s.id, epoch: s.epoch), after: Fence(s.peer, g)))
@@ -474,155 +496,7 @@ fn leave_peer[M](mut a: Adapter[M], peer: u32, mut out: List[runner.room_client.
     }
 }
 
-// ---- Signaling loss (RTC-8) ----
-// Suspend before any other input is taken: the call goes ahead of every waiting one,
-// and a waiting resume is dropped.
-fn lose[M](mut a: Adapter[M]) {
-    if let Lost(mut r) = a.signaling {
-        r.headed = false
-        return
-    }
-    let mut scratch: List[u32] = list.new()
-    for s in a.seats {
-        list.push(mut scratch, s.peer)
-    }
-    a.signaling = Lost(Recovery(scratch: take scratch, incarnation: a.incarnation, revision: a.applied, headed: false, headless: false, snapshot: false))
-    list.retain(mut a.jobs, scoped fn(j: Job) -> bool {
-        match j.change {
-            Suspend(room: _, cause: Signaling, on: false) => false,
-            _ => true,
-        }
-    })
-    list.insert(mut a.jobs, 0, Job(change: Suspend(room: a.room, cause: Signaling, on: true), after: Quiet))
-}
-
-// The scratch roster is complete at the `PartEnd` of a Part with `snapshot` set: compare
-// it with the pre-gap roster and resume, or discard a stale one.
-fn settle[M](mut a: Adapter[M], mut out: List[runner.room_client.RoomOut[M]]) {
-    let Lost(take r) = replace(mut a.signaling, Live) else {
-        return
-    }
-    let same = !r.headless && a.incarnation != None && r.incarnation == a.incarnation
-    if same && r.revision < a.applied {
-        a.signaling = Lost(take r)
-        return
-    }
-    let mut i = 0u64
-    while i < list.len(a.seats) {
-        if same && listed(r.scratch, a.seats[i].peer) {
-            i += 1
-        } else {
-            end_seat(mut a, i, mut out)
-        }
-    }
-    let Recovery(scratch: take present, incarnation: incarnation, revision: revision, ..) = take r
-    a.incarnation = incarnation
-    a.applied = revision
-    for p in present {
-        admit_new(mut a, p, mut out)
-    }
-    list.push(mut a.jobs, Job(change: Suspend(room: a.room, cause: Signaling, on: false), after: Quiet))
-}
-
-/// Take one entry of the room (RTC-8), in the order the room client appended them.
-pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomIn[M], mut out: List[runner.room_client.RoomOut[M]]) {
-    if a.life != Serving {
-        return
-    }
-    match take input {
-        Lost => lose(mut a),
-        Part(inc, revision, complete, snapshot) => {
-            // Peer numbers belong to an incarnation.
-            if a.incarnation != None && a.incarnation != Some(inc) {
-                list.clear(mut a.former)
-            }
-            if !lost(a) {
-                if let Some(known) = a.incarnation {
-                    if complete || known != inc {
-                        lose(mut a)
-                    }
-                }
-            }
-            if let Lost(mut r) = a.signaling {
-                r.headed = true
-                if complete || r.incarnation != Some(inc) {
-                    list.clear(mut r.scratch)
-                }
-                r.incarnation = Some(inc)
-                r.revision = revision
-                r.snapshot = snapshot
-            } else {
-                a.incarnation = Some(inc)
-                a.applied = revision
-            }
-        },
-        Joined(p) => {
-            if is_self(a, p) {
-                return
-            }
-            if !unheaded(mut a) {
-                admit_new(mut a, p, mut out)
-            } else if let Lost(mut r) = a.signaling {
-                if !listed(r.scratch, p) {
-                    list.push(mut r.scratch, p)
-                }
-            }
-        },
-        Left(p) => {
-            if is_self(a, p) {
-                unlist(mut a.former, p)
-                return
-            }
-            if !unheaded(mut a) {
-                leave_peer(mut a, p, mut out)
-            } else if let Lost(mut r) = a.signaling {
-                unlist(mut r.scratch, p)
-            }
-        },
-        Message(p, take m) => {
-            if unheaded(mut a) {
-                to_peer(a, p, Refused(code(Suspended)), mut out)
-                return
-            }
-            match (a.embed.unwrap)(take m) {
-                Some(take s) => signal(mut a, p, take s, mut out),
-                None => to_peer(a, p, Refused(REFUSED_NOT_TAKEN), mut out),
-            }
-        },
-        PartEnd => {
-            let whole = match a.signaling {
-                Lost(r) => r.headed && r.snapshot,
-                Live => false,
-            }
-            if whole {
-                settle(mut a, mut out)
-            }
-            if let Lost(mut r) = a.signaling {
-                r.snapshot = false
-            }
-        },
-    }
-}
-
 // ---- Signals from a peer ----
-fn home_for[M](a: Adapter[M]) -> u16 {
-    let mut best: u16 = 0
-    let mut fewest: u64 = 0xffffffffffffffff
-    for k in 0u16 .. a.units {
-        let mut n = 0u64
-        for s in a.seats {
-            if s.home == k && s.stage != Waiting {
-                n += 1
-            }
-        }
-        if n < fewest {
-            fewest = n
-            best = k
-        }
-    }
-    best
-}
-
 fn pub_at[M](a: Adapter[M], id: u64) -> Option[u64] {
     for i in 0u64 .. list.len(a.pubs) {
         if a.pubs[i].id == id {
@@ -648,7 +522,8 @@ fn signal[M](mut a: Adapter[M], p: u32, take s: Signal, mut out: List[runner.roo
                 to_peer(a, p, Refused(REFUSED_OFFER_TOO_LARGE), mut out)
                 return
             }
-            let home = home_for(a)
+            // The pool homes the session when it takes the build (`home_builds`).
+            let home = 0u16
             a.seats[i].stage = Building
             a.seats[i].home = home
             a.seats[i].version = version
@@ -733,9 +608,11 @@ pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Bu
     let g = who.gen
     let Gen(id: gid, epoch: gepoch) = g
     let mut was_gone = false
-    list.retain(mut a.gone, scoped fn(x: peer.Gen) -> bool {
-        if x == g {
+    let mut gone_home = 0u16
+    list.retain(mut a.gone, scoped fn(x: (peer.Gen, u16)) -> bool {
+        if x.0 == g {
             was_gone = true
+            gone_home = x.1
             false
         } else {
             true
@@ -746,8 +623,7 @@ pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Bu
         // nothing stays parked, and send `Fenced` once the fence holds.
         if was_gone {
             if let Ok(_) = result {
-                let home = who_home(a, g)
-                list.push(mut a.jobs, Job(change: Admit(who: who, home: home), after: Discard))
+                list.push(mut a.jobs, Job(change: Admit(who: who, home: gone_home), after: Discard))
             }
             list.push(mut a.fencing, (g, 0))
             list.push(mut a.jobs, Job(change: Revoke(room: a.room, id: gid, epoch: gepoch), after: Fence(0, g)))
@@ -771,30 +647,21 @@ pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Bu
     }
 }
 
-fn who_home[M](a: Adapter[M], g: peer.Gen) -> u16 {
-    for b in a.builds {
-        if b.who.gen == g {
-            return b.home
-        }
-    }
-    0
-}
-
 // ---- The control order, on the control unit ----
 /// Drive the control order on the control unit: answer the call in flight once every
 /// unit has acknowledged it, send `Fenced` for each revoke that returned, and begin the
 /// next call.
-pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: List[runner.room_client.RoomOut[M]]) -> Result[(), router.RouterError] {
+pub fn step[M: codec](mut a: Adapter[M], mut l: Ledger, mut u: units.Unit, now: u64, mut out: List[runner.room_client.RoomOut[M]]) -> Result[(), router.RouterError] {
     if busy(a) {
         if let Some(take answer) = units.finished(mut u, a.room) {
             let after = option.unwrap(replace(mut a.calling, None))
-            answered(mut a, take after, take answer, mut out)
+            answered(mut a, mut l, take after, take answer, mut out)
         }
     }
     let mut faulted: Option[router.RouterError] = None
     for take e in units.take_room_events(mut u, a.room) {
         match take e {
-            Fenced(who) => fenced(mut a, who.gen, mut out),
+            Fenced(who) => fenced(mut a, mut l, who.gen, mut out),
             // A unit raised the room's fault: the room is closed (RTC-10 Isolation item 2).
             Fault(room: _, error: take x) => {
                 faulted = Some(take x)
@@ -854,15 +721,51 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
     for take (g, version, take text) in replace(mut a.answers, list.new()) {
         let _ = units.answer_reoffer(mut u, a.room, g, version, take text)
     }
-    if !busy(a) && list.len(a.jobs) != 0 {
+    while !busy(a) && list.len(a.jobs) != 0 {
         let Job(change: c, after: after) = list.remove(mut a.jobs, 0)
+        if !remote_reserved(mut a, mut l, c, mut out) {
+            continue
+        }
         units.begin(mut u, now, c)?
         a.calling = Some(after)
     }
     Ok(())
 }
 
-fn fenced[M](mut a: Adapter[M], g: peer.Gen, mut out: List[runner.room_client.RoomOut[M]]) {
+// A subscription whose subscriber is homed on another unit than the publication's
+// owner adds a remote down-track there, reserved before the change is posted. One the
+// ledger has no room for is refused to the peer and never posted.
+fn remote_reserved[M](mut a: Adapter[M], mut l: Ledger, c: router.Change, mut out: List[runner.room_client.RoomOut[M]]) -> bool {
+    let Subscribe(room: _, who: g, p: PublicationId(id), section: _, target: _) = c else {
+        return true
+    }
+    let Some(si) = seat_of(a, g) else {
+        return true
+    }
+    let Some(pi) = pub_at(a, id) else {
+        return true
+    }
+    let owner = a.pubs[pi].owner
+    let Some(oi) = seat_of(a, owner) else {
+        return true
+    }
+    let home = a.seats[si].home
+    if home == a.seats[oi].home {
+        return true
+    }
+    let Error(e) = reserve_remote(mut l, a.room, home, g, owner, id) else {
+        return true
+    }
+    list.retain(mut a.seats[si].subs, scoped fn(x: (u64, u8)) -> bool {
+        x.0 != id
+    })
+    let p = a.seats[si].peer
+    to_peer(a, p, Refused(code(Capacity(e))), mut out)
+    false
+}
+
+fn fenced[M](mut a: Adapter[M], mut l: Ledger, g: peer.Gen, mut out: List[runner.room_client.RoomOut[M]]) {
+    release_session(mut l, a.room, g)
     for i in 0u64 .. list.len(a.fencing) {
         let (x, p) = a.fencing[i]
         if x == g {
@@ -876,7 +779,7 @@ fn fenced[M](mut a: Adapter[M], g: peer.Gen, mut out: List[runner.room_client.Ro
     }
 }
 
-fn answered[M](mut a: Adapter[M], take after: After, take answer: Result[router.Answer, router.RouterError], mut out: List[runner.room_client.RoomOut[M]]) {
+fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer: Result[router.Answer, router.RouterError], mut out: List[runner.room_client.RoomOut[M]]) {
     match take after {
         Quiet => (),
         Discard => (),
@@ -898,7 +801,7 @@ fn answered[M](mut a: Adapter[M], take after: After, take answer: Result[router.
         // id): the fence holds already.
         Fence(_, g) => {
             if let Error(_) = answer {
-                fenced(mut a, g, mut out)
+                fenced(mut a, mut l, g, mut out)
             }
         },
         Admitted(g, version, sdp_text, recvs) => {
@@ -918,6 +821,7 @@ fn answered[M](mut a: Adapter[M], take after: After, take answer: Result[router.
                 },
                 Error(e) => {
                     // A refused admission's session was unparked on its home unit.
+                    release_session(mut l, a.room, g)
                     a.seats[i].stage = Waiting
                     to_peer(a, p, Refused(code(e)), mut out)
                 },
@@ -944,6 +848,7 @@ fn answered[M](mut a: Adapter[M], take after: After, take answer: Result[router.
         },
         Subscribed(g, id, _) => {
             if let Error(e) = answer {
+                release_remote(mut l, a.room, g, id)
                 if let Some(i) = seat_of(a, g) {
                     list.retain(mut a.seats[i].subs, scoped fn(x: (u64, u8)) -> bool {
                         x.0 != id
@@ -956,9 +861,12 @@ fn answered[M](mut a: Adapter[M], take after: After, take answer: Result[router.
         Unsubscribed(g, id) => {
             if let Some(i) = seat_of(a, g) {
                 match answer {
-                    Ok(_) => list.retain(mut a.seats[i].subs, scoped fn(x: (u64, u8)) -> bool {
-                        x.0 != id
-                    }),
+                    Ok(_) => {
+                        release_remote(mut l, a.room, g, id)
+                        list.retain(mut a.seats[i].subs, scoped fn(x: (u64, u8)) -> bool {
+                            x.0 != id
+                        })
+                    },
                     Error(e) => {
                         let p = a.seats[i].peer
                         to_peer(a, p, Refused(code(e)), mut out)

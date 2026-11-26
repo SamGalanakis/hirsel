@@ -122,6 +122,35 @@ const INBOX: u64 = 1024
 
 const CONTROL_BYTES: u64 = 1024
 
+const MEDIA_BYTES: u64 = 4194304
+
+/// What unit `index` of `units` allocates before any room (RTC-10 Sizing): its control
+/// and media inboxes at their byte budgets, its outbox, its receive, batch and slot
+/// buffers, `socket`'s slots, and its router's row lists at `pool`
+/// (`router.reserve_pool`). Its ledger starts at its `unit_bytes` less this.
+pub fn fixed_bytes(index: u16, units: u16, plane: Plane, out_bytes: u64, out_packets: u64, socket: UdpOptions, pool: router.PoolBounds) -> u64 {
+    let boxes = control_slots(index, units, plane) * CONTROL_BYTES + MEDIA_BYTES
+    let out = priced(1, out_bytes) + priced(bytes[UdpTx], out_packets) + priced(bytes[peer.Tag], out_packets)
+    let buffers = priced(1, 65536) + priced(bytes[UdpPacket], 64) + priced(1, 1536)
+    let UdpOptions(slots: n, slot_bytes: each) = socket
+    let slots: u64 = int.widen(n)
+    let rows = match router.pool_bytes(pool) {
+        Some(b) => b,
+        None => 0xffffffffffffffff,
+    }
+    int.saturating_add(boxes + out + buffers + slots * priced(1, int.widen(each)), rows)
+}
+
+/// Reserve the unit's router row lists at `pool` before it serves any room (RTC-10
+/// Sizing), as `fixed_bytes` prices them.
+pub fn reserve_pool(mut u: Unit, pool: router.PoolBounds) {
+    router.reserve_pool(mut u.r, pool)
+}
+
+fn priced(element: u64, capacity: u64) -> u64 {
+    option.unwrap(charge.seq(element, capacity))
+}
+
 /// The control plane of a service of one room.
 pub const ONE_ROOM: Plane = Plane(inflight: 1, rooms: 1, media_take: 1024)
 
@@ -150,7 +179,7 @@ pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Door
     let slots = control_slots(index, units, plane)
     let c: Result[(Client[ControlMessage], Inbox[ControlMessage]), Capacity] = conn.new(slots, bytes slots * CONTROL_BYTES)
     let (control, take control_in) = c ?=> |x| Capacity(x)
-    let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(INBOX, bytes 4194304)
+    let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(INBOX, bytes MEDIA_BYTES)
     let (media, take media_in) = m ?=> |x| Capacity(x)
     Ok((Doors(control: control, media: media, addr: addr), take control_in, take media_in))
 }

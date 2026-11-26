@@ -1,0 +1,151 @@
+// ---- RTC-10 the ledgers reserve what fits and refund what ends (W34, admission) ----
+// The control unit's rooms over real units on sim.udp, as in W39, with each unit's
+// ledger sized by hand from `room_cost`'s terms.
+fn both_free(t: PoolSig) -> (u64, u64) {
+    let l = signal.ledgers(t.p)
+    (signal.ledger_free(l, 0), signal.ledger_free(l, 1))
+}
+
+fn total_free(t: PoolSig) -> u64 {
+    let (f0, f1) = both_free(t)
+    f0 + f1
+}
+
+fn total_live(t: PoolSig) -> u32 {
+    let l = signal.ledgers(t.p)
+    signal.ledger_live(l, 0) + signal.ledger_live(l, 1)
+}
+
+fn refused_why(reports: List[signal.PoolReport], name: signal.RoomName) -> Option[signal.PoolRefusal] {
+    for r in reports {
+        if let Refused(name: n, why: why) = r {
+            if n == name {
+                return Some(why)
+            }
+        }
+    }
+    None
+}
+
+fn ledger_run(net: Net, clock: Clock) waits {
+    let session = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000)
+    let limits = revoke_limits()
+    let cost = signal.room_cost(limits, session)
+    // Unit 0 holds each room's replicated state, adapter and client; unit 1 its
+    // replicated state. Each is sized for three rooms and, beyond them, one session and
+    // one remote down-track.
+    let on0 = cost.replicated + cost.control + cost.bridge + cost.cascade
+    let on1 = cost.replicated
+    let spare = cost.per_session + cost.per_remote
+    let mut free: List[u64] = list.new()
+    list.push(mut free, 3 * on0 + spare)
+    list.push(mut free, 3 * on1 + spare)
+    let fixture = hall(net, clock, 34500)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, signal.ledger(take free, 2, session)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
+    let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), limits, echo_embed()))
+    let _ = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), limits, echo_embed()))
+    let _ = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"c"), limits, echo_embed()))
+    if both_free(t) != (spare, spare) {
+        fail("three rooms did not reserve their shares on every unit")
+    }
+    // A fourth room needs its share and one session on unit 0, which has only `spare`.
+    let d = signal.room_name(b"d")
+    if signal.open_room(mut t.p, mut t.h.w.u0, d, limits, echo_embed()) != None {
+        fail("a fourth room opened in a pool sized for three")
+    }
+    let Some(Bytes(unit: 0, need: need, free: had)) = refused_why(signal.take_reports(mut t.p), d) else {
+        fail("the fourth room was not refused Bytes on unit 0")
+    }
+    if need != on0 + cost.per_session || had != spare || both_free(t) != (spare, spare) {
+        fail("the fourth room's refusal named another need or free, or reserved something")
+    }
+    signal.you_in(mut t.p, a, Some(YOU))
+    pool_roster(mut t, a, 5, 1, None)
+    pool_say(mut t, a, 1, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_idle(mut t)
+    if !answered_in(t, a, 1) || total_free(t) != 2 * spare - cost.per_session {
+        fail("peer 1's admission did not reserve one session")
+    }
+    // Peers 2 and 3 offer in one turn: their builds are homed together, and only one
+    // unit has a session's bytes left.
+    signal.enter(mut t.p, a, Part(inc_of(1), 6, false, false))
+    signal.enter(mut t.p, a, Joined(2))
+    signal.enter(mut t.p, a, Joined(3))
+    signal.enter(mut t.p, a, PartEnd)
+    pool_say(mut t, a, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_say(mut t, a, 3, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    for _ in 0u64 .. 20 {
+        pool_tick(mut t)
+    }
+    pool_idle(mut t)
+    let mut took = 0u64
+    for p in[2u32, 3u32] {
+        if answered_in(t, a, p) {
+            took += 1
+        }
+    }
+    if took != 1 || total_live(t) != 2 || both_free(t) != (cost.per_remote, cost.per_remote) {
+        fail("two pending builds where one fits did not admit exactly one")
+    }
+    let second = if answered_in(t, a, 2) {
+        2u32
+    } else {
+        3u32
+    }
+    // Peer 1 subscribes to the second peer's publication, homed on the other unit: a
+    // remote down-track on peer 1's unit, then its unsubscribe refunds it.
+    let from = list.len(t.offers)
+    let of_second = pub_in(t, a, second)
+    pool_say(mut t, a, 1, Subscribe(of_second, base_layer()))
+    pool_idle(mut t)
+    pool_settle(mut t, from)
+    if total_free(t) != cost.per_remote {
+        fail("a remote down-track did not reserve per_remote")
+    }
+    pool_say(mut t, a, 1, Unsubscribe(of_second))
+    pool_idle(mut t)
+    if both_free(t) != (cost.per_remote, cost.per_remote) {
+        fail("an unsubscribe did not refund its remote down-track")
+    }
+    // The second peer leaves: once its revoke returns, its session is refunded.
+    signal.enter(mut t.p, a, Left(second))
+    pool_idle(mut t)
+    for _ in 0u64 .. 8 {
+        pool_tick(mut t)
+    }
+    if total_live(t) != 1 || total_free(t) != 2 * spare - cost.per_session {
+        fail("a leave did not refund its session")
+    }
+    // Room a closes: every unit is back to two rooms' shares less than it started.
+    signal.close_room(mut t.p, signal.room_name(b"a"))
+    for _ in 0u64 .. 32 {
+        pool_tick(mut t)
+    }
+    if list.len(signal.open_rooms(t.p)) != 2 || both_free(t) != (on0 + spare, on1 + spare) || total_live(t) != 0 {
+        fail("a closed room's reservations were not all refunded")
+    }
+    if signal.open_room(mut t.p, mut t.h.w.u0, d, limits, echo_embed()) == None {
+        fail("the room refused before did not open once a room closed")
+    }
+    let PoolSig(h: take h, ..) = take t
+    close_hall(take h)
+}
+
+/// bug: the control unit admits a room or a join whose memory no unit has reserved, so
+/// two pending builds both pass a check only one fits; or a refusal reserves bytes; or a
+/// leave, an unsubscribe, a refused join or a close leaves bytes reserved, so the pool
+/// refuses rooms it has room for.
+/// oracle: docs/spec/webrtc.md RTC-10 Sizing and admission and W34, by hand from
+/// `room_cost`'s terms: units sized at three rooms' shares plus `per_session +
+/// per_remote` admit rooms a, b and c and refuse d with `Bytes(0, share + per_session,
+/// per_session + per_remote)`; of peers 2 and 3 offering together after peer 1, exactly
+/// one is admitted; a remote down-track takes `per_remote` and its unsubscribe returns
+/// it; a leave returns `per_session`; closing a returns its share on each unit, and d
+/// then opens.
+@test
+fn pool_ledger_reserves_what_fits(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 34500)
+    ledger_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}

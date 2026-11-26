@@ -1,28 +1,107 @@
 // RTC-10 Sizing: the memory terms of one room, from the bounds the router allocates
 // with. `signal.room_cost` adds the control unit's terms.
+/// A pool's bounds on the rows every unit's router holds at once (RTC-10 Sizing): its
+/// live rooms, the seats of all of them, the sessions one unit homes, and the
+/// down-tracks one seat holds. The control unit admits a participant only once its
+/// session is reserved on its home unit's ledger, so the seats are at most
+/// `units × sessions`, and at most `PEERS_MAX` a room. Once a router holds them, it
+/// refuses a seat's down-track past `downs` on every unit alike (`Limit`).
+pub type PoolBounds: key {
+    rooms: u64,
+    seats: u64,
+    sessions: u64,
+    downs: u64
+}
+
+/// The bounds of a pool of `units` units, `rooms` live rooms and `sessions` sessions
+/// a unit, each of `session`'s size: a seat holds at most `session.down_tracks`
+/// down-tracks.
+pub fn pool_bounds(units: u64, rooms: u64, sessions: u64, session: peer.PeerLimits) -> PoolBounds {
+    let peers: u64 = int.widen(PEERS_MAX)
+    let by_rooms = int.saturating_mul(rooms, peers)
+    let by_units = int.saturating_mul(units, sessions)
+    let tracks: u64 = int.widen(session.down_tracks)
+    let most: u64 = int.widen(DOWN_TRACKS_MAX)
+    PoolBounds(rooms: rooms, seats: order.min(by_rooms, by_units), sessions: sessions, downs: order.min(tracks, most))
+}
+
+/// What `reserve_pool` allocates: every pool-wide row list at its bound. A seat has at
+/// most `PUBLICATIONS_MAX` publications and `downs` down-tracks; a unit
+/// parks and seats at most `sessions` members, each with one 5-tuple row. `None` when
+/// the bounds overflow.
+pub fn pool_bytes(b: PoolBounds) -> Option[u64] {
+    let pubs = int.checked_mul(b.seats, int.widen(PUBLICATIONS_MAX))?
+    let downs = int.checked_mul(b.seats, b.downs)?
+    let mut sum = charge.seq(bytes[Room], b.rooms)?
+    sum = int.checked_add(sum, charge.seq(bytes[Seat], b.seats)?)?
+    sum = int.checked_add(sum, charge.seq(bytes[Member], b.sessions)?)?
+    sum = int.checked_add(sum, charge.seq(bytes[Member], b.sessions)?)?
+    sum = int.checked_add(sum, charge.seq(bytes[Row], b.sessions)?)?
+    sum = int.checked_add(sum, charge.seq(bytes[Publication], pubs)?)?
+    int.checked_add(sum, charge.seq(bytes[Down], downs)?)
+}
+
+/// Reserve every pool-wide row list at `b`, before the unit serves any room (RTC-10
+/// Sizing): a list that grew as rooms filled would allocate past what the ledgers
+/// reserve, by its growth's slack and by the capacity it keeps once rows are removed.
+/// Each list takes exactly its bound (`list.with_capacity`), so it allocates
+/// `pool_bytes(b)`; the caller checks that fits before it calls this. Rows the router
+/// already holds are kept.
+pub fn reserve_pool(mut r: Router, b: PoolBounds) {
+    let pubs = int.saturating_mul(b.seats, int.widen(PUBLICATIONS_MAX))
+    let downs = int.saturating_mul(b.seats, b.downs)
+    let rooms = sized(replace(mut r.rooms, list.new()), b.rooms)
+    r.rooms = take rooms
+    let roster = sized(replace(mut r.roster, list.new()), b.seats)
+    r.roster = take roster
+    let members = sized(replace(mut r.members, list.new()), b.sessions)
+    r.members = take members
+    let parked = sized(replace(mut r.parked, list.new()), b.sessions)
+    r.parked = take parked
+    let rows = sized(replace(mut r.rows, list.new()), b.sessions)
+    r.rows = take rows
+    let publications = sized(replace(mut r.publications, list.new()), pubs)
+    r.publications = take publications
+    let tracks = sized(replace(mut r.downs, list.new()), downs)
+    r.downs = take tracks
+    r.pool = Some(b)
+}
+
+// `xs` moved into a list of exactly `n` capacity, or of its length if longer.
+fn sized[T](take xs: List[T], n: u64) -> List[T] {
+    let len = list.len(xs)
+    let mut all: List[T] = list.with_capacity(if len > n {
+        len
+    } else {
+        n
+    })
+    for take x in take xs {
+        list.push(mut all, take x)
+    }
+    all
+}
+
 /// What every unit allocates for a room at `Open` and as the room fills to its
-/// bounds: the room record with its fence table and top speakers, a roster row per
-/// participant, a down-track row per down-track the room allows, and every
-/// publication row with its encodings and its Opus RED ring (RTP-13), which every unit
-/// keeps.
+/// bounds, beyond its rows in the lists `reserve_pool` holds: the room's fence table
+/// and top speakers, and every publication's encodings and Opus RED ring (RTP-13),
+/// which every unit keeps.
 pub fn room_replicated(limits: RoomLimits) -> u64 {
     let ids: u64 = int.widen(limits.ids)
     let participants: u64 = int.widen(limits.participants)
     let rows = participants * int.widen(limits.publications)
-    let downs: u64 = int.widen(limits.down_tracks)
-    let publication = bytes[Publication] + cost_seq(bytes[Encoding], ENCODINGS_MAX) + rtp.red.ring_heap(rtp.red.MAX_DISTANCE)
-    bytes[Room] + cost_seq(bytes[u64], ids) + cost_seq(bytes[Option[u64]], ids) + cost_seq(bytes[u64], TOP) + participants * bytes[Seat] + downs * bytes[Down] + rows * publication
+    let publication = cost_seq(bytes[Encoding], ENCODINGS_MAX) + rtp.red.ring_heap(rtp.red.MAX_DISTANCE)
+    cost_seq(bytes[u64], ids) + cost_seq(bytes[Option[u64]], ids) + cost_seq(bytes[u64], TOP) + rows * publication
 }
 
 /// What one admitted participant adds on its home unit beyond its session's heap
-/// (`peer.session_heap`): its member row with the session value, its 5-tuple row, and
-/// the ingress RTX ring of each publication it may make (`floor(rtx_bytes / 1500)`
-/// slots of 1,500 bytes). It saturates: `rtx_bytes` is the caller's.
+/// (`peer.session_heap`) and its rows in the lists `reserve_pool` holds: the ingress
+/// RTX ring of each publication it may make (`floor(rtx_bytes / 1500)` slots of 1,500
+/// bytes). It saturates: `rtx_bytes` is the caller's.
 pub fn member_bytes(limits: RoomLimits, session: peer.PeerLimits) -> u64 {
     let n = session.rtx_bytes / RING_SLOT
     let slots = int.saturating_mul(n, cost_seq(1, RING_SLOT))
     let rtx_ring = int.saturating_add(int.saturating_add(saturated(charge.seq(bytes[Bytes], n)), slots), saturated(charge.seq(bytes[u64], n)))
-    int.saturating_add(bytes[Member] + bytes[Row], int.saturating_mul(int.widen(limits.publications), rtx_ring))
+    int.saturating_mul(int.widen(limits.publications), rtx_ring)
 }
 
 /// What one down-track on a unit other than its publisher's home adds there: the

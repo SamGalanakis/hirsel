@@ -293,7 +293,9 @@ pub opaque type Router {
     moved: bool,
     // The pool's ingress rates, once set, and the unit's `open_pps` bucket (RTC-10).
     rates: Option[Rates],
-    opens: Bucket
+    opens: Bucket,
+    // The pool's bounds, once `reserve_pool` holds its row lists (RTC-10 Sizing).
+    pool: Option[PoolBounds]
 }
 
 const PEERS_MAX: u16 = 256
@@ -319,7 +321,7 @@ pub fn router(r: Random) -> Router {
 
 /// The router of media unit `unit` (RTC-5, at most 64 units).
 pub fn on_unit(r: Random, unit: u16) -> Router {
-    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, refused: 0, unknown: 0, stale: 0, over_open: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false, rates: None, opens: full())
+    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, refused: 0, unknown: 0, stale: 0, over_open: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false, rates: None, opens: full(), pool: None)
 }
 
 pub fn counts(r: Router) -> Counts {
@@ -788,7 +790,12 @@ fn add_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId, s
     if let Some(_) = down_at(r, room, who, p) {
         return Error(Exists)
     }
-    let limit = r.rooms[ri].limits.down_tracks
+    let mut limit = r.rooms[ri].limits.down_tracks
+    if let Some(b) = r.pool {
+        if b.downs < int.widen(limit) {
+            limit = int.narrow(b.downs)
+        }
+    }
     if r.roster[si].downs >= limit {
         return Error(Limit(limit))
     }

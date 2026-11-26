@@ -1608,8 +1608,9 @@ applied the same day (media-w2-spec-fix-2918). Slice P1 built 2026-11-26
 (rtc10-p1-room-keys-2930, law W35); slice P2 built 2026-11-26 (rtc10-p2-room-control-2956,
 law W37, `units.Plane`). Slice P3 in part 2026-11-26 (rtc10-p3-pool-service-2976):
 `serve_pool` with per-room adapters and room-client tasks, `serve` removed, `room_pps` and
-`open_pps` (W38), per-room signaling loss (W39), the three fault tiers (W36) and the
-default `inflight`; the ledgers and primary units (W34) are not yet built. P4 not built. Slices and laws W34 to W39 below.*
+`open_pps` (W38), per-room signaling loss (W39), the three fault tiers (W36), the
+default `inflight`, and the ledgers, primary units and pool-start row reservation (W34).
+P4 not built. Slices and laws W34 to W39 below.*
 
 Before RTC-10, `signal.serve` (S7) served **one** room: its `Service` named one `RoomId`, one `Dial` and one
 `RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
@@ -1705,14 +1706,42 @@ in P1, `signal.room_cost` prices each term from the router's, the session's and 
 adapter's allocation bounds (each `rtp` constructor has a `*_heap` price beside it), and
 leaves out what is sized by input rather than by a bound: a session's agreed SDP, mids,
 ICE credentials and DTLS and SRTP state, and the caller's room-client, Dial, Embed and
-WebSocket buffers. `bridge` and `cascade` are 0 until P3 attaches them. W34 (P3) closes
-the exactness. Each unit
-keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost (socket pool `slots` ×
-`slot_bytes`, out buffers, inboxes, and the router's six pool-wide lists, `rooms`, `roster`,
-`members`, `publications`, `downs` and `rows`, reserved at pool start to their bounds for
-`rooms` rooms), minus every open room's `replicated`, minus every homed session's
-`per_session`, minus every remote down-track's `per_remote`. Unit 0's ledger also carries
-each room's `control`, `bridge` and `cascade`.
+WebSocket buffers. `bridge` and `cascade` are 0: no bridge or cascade attaches to a
+pooled room in this build (CAS-6 and MOQ-8 add them), so W34 has nothing of theirs to
+measure yet. Each unit keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost
+(`units.fixed_bytes` plus `signal.serve_bytes`), minus every open room's `replicated`,
+minus every homed session's `per_session`, minus every remote down-track's `per_remote`.
+Unit 0's ledger also carries each room's `control`, `bridge` and `cascade`.
+
+**The fixed cost (as built in P3).** `units.fixed_bytes` is the unit's control and media
+inboxes at their byte budgets, its outbox, its receive, batch and slot buffers, the socket's
+slots, and `router.pool_bytes`: the router's pool-wide row lists, which `router.reserve_pool`
+allocates at exactly their bounds (`list.with_capacity`) before the unit serves any room.
+The bounds (`router.pool_bounds`) are `rooms` rooms; `min(rooms × PEERS_MAX, units ×
+sessions)` seats, since unit 0 admits a participant only once its session is reserved on a
+ledger; `sessions` members, parked sessions and 5-tuple rows on the unit; and per seat
+`PUBLICATIONS_MAX` publications and `min(session.down_tracks, DOWN_TRACKS_MAX)`
+down-tracks. A router holding its pool bounds refuses a seat's down-track past that bound
+with `Limit` on every unit alike. Without the reservation each list grew as rooms filled,
+by its growth's slack and by the capacity it keeps once rows go: W34 measured a join's
+charge at 31,440 bytes against 5,473 priced. So `replicated` prices only what is
+per room beyond those rows (the fence table, top speakers, and each publication's
+encodings and RED ring) and `member_bytes` only the ingress RTX rings. `signal.serve_bytes`
+is a worker's roster and build inboxes, and unit 0's hello and finished inboxes and ready
+channel. `serve_pool` refuses to start (`Router(Capacity(..))`) when a unit's fixed cost
+exceeds `unit_bytes`. `control` includes the room client task's grant
+(`ROOM_CLIENT_BYTES`).
+
+**Left out of `room_cost` (as built in P3), each sized by input or by the application:**
+a session's agreed SDP and section mids, ICE credentials, DTLS and SRTP state, and the
+offer text a re-offer keeps until it is answered; the room client's Dial, Embed and
+membership, and its entry and message channels (sized by the message type `M`); the
+adapter's per-seat `sends` and `subs`, and its `jobs`, `answers`, `former` and `revokes`
+queues; unit 0's `Ledger.held` and `Ledger.rooms` and `Rooms.served`; and a subscribe's
+transient scratch. Two lists grow under churn without a bound, an open red against
+Isolation item 1: a session's drawn SSRCs (`PeerSession.used`), which keep every SSRC ever
+drawn, and its `tracks`, which keep ended down-tracks. Each is sized at `open` for one full
+set of down-tracks, and a peer that subscribes and unsubscribes repeatedly grows both.
 
 **Reservations are linearized on unit 0.** Unit 0 keeps every unit's ledger, and reserves
 from it before it posts any change that allocates: an `Open`, a `join`'s `Build` (reserved
@@ -1872,6 +1901,18 @@ never for room B's backlog.
 Harness: `pool_laws.hirsel` in `webrtc_sfu`, over the S5 test seam (units stepped by hand
 over `sim.udp`), unless named otherwise. Each is red on main before its slice.
 
+- **W34 as built (P3)** is two laws. `pool_room_cost_is_exact` (pool_cost_laws.hirsel)
+  measures, per shape, what `peer.open` charges (by a bound's headroom, less its
+  input-sized copies), which must be at most `session_heap`, then opens and fills the
+  room on one router whose rows `reserve_pool` holds (itself within `pool_bytes`), within
+  `replicated + participants × (member_bytes + session_heap − opened)`, and checks the
+  room is full by the router's own refusals. `pool_ledger_reserves_what_fits`
+  (pool_ledger_laws.hirsel) runs the ledger in the hall: three rooms admitted, the fourth
+  refused `Bytes(0, need, free)` from `room_cost`'s terms with nothing reserved; two
+  pending builds where one fits; a remote down-track's `per_remote` and its unsubscribe;
+  a leave's refund; and a close that returns the room's share on each unit. The per-unit
+  live charge at every step and the remote `Shared` reference drop after `Close` are not
+  measured: the hall's units share one limit.
 - **W34 `pool_room_cost_is_exact`.** Open rooms with four `RoomLimits` shapes (the
   smallest; 256 participants and 8 publications each; 2 participants with 64 down-tracks
   each; RED and FlexFEC on), then fill each with joins up to its bounds. *Oracle:* the units'

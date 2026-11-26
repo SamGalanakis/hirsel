@@ -47,7 +47,7 @@ fn has_browser(h: Hall, p: u32) -> bool {
 
 fn room_fault_run(net: Net, clock: Clock) waits {
     let fixture = hall(net, clock, 36000)
-    let mut t = PoolSig(h: take fixture, p: signal.rooms(2, 4), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, law_ledger(2, 3)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
     let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), revoke_limits(), echo_embed()))
     let b = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), revoke_limits(), echo_embed()))
     signal.you_in(mut t.p, a, Some(YOU))

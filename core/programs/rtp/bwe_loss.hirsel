@@ -43,6 +43,9 @@ const Q: i64 = 65536
 
 const OBSERVATIONS: i64 = 15
 
+// The window's length: `OBSERVATIONS` observations.
+const OBSERVATION_SLOTS: u64 = 15
+
 // 0.9^i in Q16, rounded, for i from 0 to 14.
 const WEIGHTS: Inline[i64, 15] =[65536, 58982, 53084, 47776, 42998, 38698, 34829, 31346, 28211, 25390, 22851, 20566, 18509, 16658, 14993]
 
@@ -89,7 +92,7 @@ fn lmax(a: i64, b: i64) -> i64 {
 }
 
 fn loss_bwe(min: i64, max: i64, start: i64) -> LossBwe {
-    LossBwe(min: min, max: max, state: DelayBased, part_size: 0, part_lost: 0, last: None, count: 0, window: list.with_capacity(15), upper: None, reduced: None, recovering: None, limit: None, bw: start, inherent: INITIAL_INHERENT, estimate: start, acked: None, delay: None, hold_at: None, hold_ns: HOLD_NS, hold_rate: None)
+    LossBwe(min: min, max: max, state: DelayBased, part_size: 0, part_lost: 0, last: None, count: 0, window: list.with_capacity(OBSERVATION_SLOTS), upper: None, reduced: None, recovering: None, limit: None, bw: start, inherent: INITIAL_INHERENT, estimate: start, acked: None, delay: None, hold_at: None, hold_ns: HOLD_NS, hold_rate: None)
 }
 
 // str0m's set_bandwidth_estimate.

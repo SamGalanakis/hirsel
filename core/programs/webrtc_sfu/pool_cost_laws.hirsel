@@ -1,0 +1,293 @@
+// ---- RTC-10 a room allocates within its price (W34) ----
+// A room shape: its limits and its sessions' limits, the offer each participant makes,
+// each publication's section with the section a subscriber takes it on, and how many
+// down-tracks each participant takes when the room is filled.
+type Filled {
+    limits: router.RoomLimits,
+    session: peer.PeerLimits,
+    offer: Bytes,
+    pairs: List[(u8, u8)],
+    downs: u64
+}
+
+fn digit_mid(head: u8, k: u64) -> Bytes {
+    let mut b: Bytes = list.new()
+    list.push(mut b, head)
+    list.push(mut b, int.truncate(0x30u64 + k))
+    b
+}
+
+// `sends` sendonly VP8 sections s0, s1, ..., each a publication, then one recvonly
+// section r that every down-track is sent on.
+fn shape_offer(sends: u64) -> Bytes {
+    let mut bundle: Bytes = list.new()
+    for k in 0u64 .. sends {
+        list.push(mut bundle, 0x20)
+        list.append(mut bundle, digit_mid(0x73, k))
+    }
+    list.append(mut bundle, b" r")
+    let mut b = minimal_head(bundle)
+    for k in 0u64 .. sends {
+        list.append(mut b, minimal_video(b"96 97", digit_mid(0x73, k), true))
+        list.append(mut b, b"a=sendonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\n")
+    }
+    list.append(mut b, minimal_video(b"96 97", b"r", true))
+    list.append(mut b, b"a=recvonly\na=rtpmap:96 VP8/90000\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtcp-fb:96 nack\n")
+    take b
+}
+
+// A VP8 section with RTX and FlexFEC (RTP-14) under `mid`.
+fn fec_video(mut b: Bytes, mid: Bytes, dir: Bytes) {
+    list.append(mut b, b"m=video 9 UDP/TLS/RTP/SAVPF 96 97 49\na=mid:")
+    list.append(mut b, mid)
+    list.append(mut b, b"\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=extmap:3 http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01\na=rtcp-mux\na=rtcp-rsize\na=")
+    list.append(mut b, dir)
+    list.append(mut b, b"\na=rtpmap:96 VP8/90000\na=rtcp-fb:96 nack\na=rtcp-fb:96 transport-cc\na=rtpmap:97 rtx/90000\na=fmtp:97 apt=96\na=rtpmap:49 flexfec-03/90000\na=rtcp-fb:49 transport-cc\na=fmtp:49 repair-window=10000000\n")
+}
+
+// Opus with RED (RTP-13) and VP8 with FlexFEC, each sent and received.
+fn red_fec_offer() -> Bytes {
+    let mut b = minimal_head(b" a v r d")
+    red_audio(mut b, b"a", b"sendonly", b"111", b"63")
+    fec_video(mut b, b"v", b"sendonly")
+    red_audio(mut b, b"r", b"recvonly", b"109", b"120")
+    fec_video(mut b, b"d", b"recvonly")
+    take b
+}
+
+fn pairs_of(from: u8, to: u8, more: Option[(u8, u8)]) -> List[(u8, u8)] {
+    let mut all: List[(u8, u8)] = list.new()
+    list.push(mut all, (from, to))
+    if let Some(p) = more {
+        list.push(mut all, p)
+    }
+    all
+}
+
+// The four shapes of W34: the smallest room; 256 participants of 8 publications; 2
+// participants allowed 64 down-tracks each; and RED and FlexFEC on.
+fn shapes() -> List[Filled] {
+    let mut all: List[Filled] = list.new()
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 1, ids: 1, publications: 1, down_tracks: 1, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 2, down_tracks: 1, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000), offer: shape_offer(1), pairs: pairs_of(0, 1, None), downs: 1))
+    let mut eight: List[(u8, u8)] = list.new()
+    for k in 0u8 .. 8u8 {
+        list.push(mut eight, (k, 8u8))
+    }
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 256, ids: 256, publications: 8, down_tracks: 1, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 9, down_tracks: 1, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000), offer: shape_offer(8), pairs: clone(eight), downs: 1))
+    // Two participants publish 16 in all, so each takes every one: 16 of its 64.
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 2, ids: 2, publications: 8, down_tracks: 64, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 9, down_tracks: 64, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000), offer: shape_offer(8), pairs: take eight, downs: 16))
+    list.push(mut all, Filled(limits: router.RoomLimits(participants: 4, ids: 4, publications: 2, down_tracks: 2, audio_forward: 0, pause_delay_ms: 5000, pause: false), session: peer.PeerLimits(sections: 4, down_tracks: 2, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000), offer: red_fec_offer(), pairs: pairs_of(0, 2, Some((1u8, 3u8))), downs: 2))
+    all
+}
+
+// Every participant's session for `room`, established outside any bound: what the
+// handshake leaves (DTLS and SRTP state, the agreed SDP, ICE credentials) is sized by
+// input and left out of `session_heap` (RTC-10 Sizing).
+fn sessions_of(room: peer.RoomId, s: Filled, seed: u64) -> List[peer.PeerSession] {
+    let n: u64 = int.widen(s.limits.participants)
+    let mut all: List[peer.PeerSession] = list.new()
+    for i in 1u64 .. n + 1 {
+        let who = peer.Participant(gen: gen_of(i), room: room)
+        let Rig(p: take p, c: _, cs: _, out: _) = established_limits(seed + 4 * i, s.offer, who, addr_of(int.narrow(i)), s.session, b"server")
+        list.push(mut all, take p)
+    }
+    all
+}
+
+// The most bytes one `try_reserve` still takes inside the bound it is called in.
+fn room_left(most: u64) -> u64 {
+    let mut lo = 0u64
+    let mut hi = most
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2
+        let mut l: Bytes = list.new()
+        if let Ok(_) = list.try_reserve(mut l, mid) {
+            lo = mid
+        } else {
+            hi = mid - 1
+        }
+    }
+    lo
+}
+
+// At most what a copy of the agreed SDP charges: the headroom of one bound, measured
+// by fallible reservations with and without the copy held, to the charge's rounding.
+fn agreed_charge(n: sdp.Negotiated) -> u64 {
+    let most = 16777216u64
+    let empty = bound bytes most {
+        room_left(most)
+    }
+    let held = bound bytes most {
+        let c: sdp.Negotiated = clone(n)
+        let h = room_left(most)
+        let _ = c
+        h
+    }
+    let Ok(h0) = empty else {
+        fail("an empty bound had no headroom")
+    }
+    let Ok(h1) = held else {
+        fail("the agreed SDP did not fit 16 MiB")
+    }
+    option.unwrap(charge.seq(1u64, h0 + 1)) - option.unwrap(charge.seq(1u64, h1))
+}
+
+// The same for the per-section copies a session keeps, each section's agreement and
+// its mid.
+fn sections_charge(n: sdp.Negotiated) -> u64 {
+    let most = 16777216u64
+    let empty = bound bytes most {
+        room_left(most)
+    }
+    let held = bound bytes most {
+        let c: List[sdp.Agreed] = clone(n.sections)
+        let h = room_left(most)
+        let _ = c
+        h
+    }
+    let (Ok(h0), Ok(h1)) = (empty, held) else {
+        fail("the agreed sections did not fit 16 MiB")
+    }
+    let mut mids = 0u64
+    for a in n.sections {
+        mids += option.unwrap(charge.seq(1u64, int.widen(a.mid_len)))
+    }
+    option.unwrap(charge.seq(1u64, h0 + 1)) - option.unwrap(charge.seq(1u64, h1)) + mids
+}
+
+// What one session of `s` charges from `peer.open` on, less what is sized by its
+// input: its copies of the agreed SDP, each section's agreement and mid, and its ICE
+// credentials. The open's charge is measured as headroom, like the copies'.
+fn open_charge(s: Filled, seed: u64) -> u64 {
+    let mut local = rig_local()
+    local.ice_ufrag = copy_of(b"server")
+    let Party(id: take server_id, certificate: _) = party(seed)
+    let mut offer = sdp.description()
+    result.unwrap(sdp.parse(s.offer, mut offer))
+    let mut reply = sdp.description()
+    let mut n = sdp.negotiated(local)
+    result.unwrap(sdp.answer(sdp.default_policy(), None, offer, local, mut reply, mut n))
+    let who = peer.Participant(gen: gen_of(1), room: room_id())
+    let ice = option.unwrap(charge.seq(1u64, list.len(local.ice_ufrag))) + option.unwrap(charge.seq(1u64, list.len(local.ice_pwd)))
+    let input = agreed_charge(n) + sections_charge(n) + ice
+    let most = 16777216u64
+    let empty = bound bytes most {
+        room_left(most)
+    }
+    let held = bound bytes most {
+        let p = peer.open(take local, take server_id, provide.random(seed + 2), server_addr(), s.session, n, who)
+        let h = room_left(most)
+        let _ = p
+        h
+    }
+    let (Ok(h0), Ok(h1)) = (empty, held) else {
+        fail("a session did not open within 16 MiB")
+    }
+    let used = option.unwrap(charge.seq(1u64, h0 + 1)) - option.unwrap(charge.seq(1u64, h1))
+    int.saturating_sub(used, input)
+}
+
+// Open `room` to `s` and fill it: every participant joins, publishes on every pair's
+// section, and takes `s.downs` down-tracks, starting at the next participant's
+// publications, each on its pair's receiving section.
+fn fill_room(mut r: router.Router, room: peer.RoomId, s: Filled, take sessions: List[peer.PeerSession], mut pubs: List[router.PublicationId], mut out: peer.Outbox) -> Result[(), router.RouterError] {
+    router.open_room(mut r, room, s.limits)?
+    let n: u64 = int.widen(s.limits.participants)
+    for take p in sessions {
+        router.join(mut r, take p)?
+    }
+    for i in 1u64 .. n + 1 {
+        for (from, _) in s.pairs {
+            list.push(mut pubs, router.publish(mut r, room, gen_of(i), from)?)
+        }
+    }
+    let k = list.len(s.pairs)
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    for i in 1u64 .. n + 1 {
+        for m in 0u64 .. s.downs {
+            let j = ((i % n) * k + m) % list.len(pubs)
+            let (_, to) = s.pairs[j % k]
+            router.subscribe(mut r, room, gen_of(i), pubs[j], to, base, 0, mut out)?
+            peer.clear_outbox(mut out)
+            let _ = router.take_notices(mut r)
+        }
+    }
+    Ok(())
+}
+
+// The room is full: one more join, publication and down-track are each refused at the
+// room's own bound (`Limit`), or the down-track exists when every publication is taken.
+fn refuses_more(mut r: router.Router, room: peer.RoomId, s: Filled, seed: u64, pubs: List[router.PublicationId], mut out: peer.Outbox) {
+    let n: u64 = int.widen(s.limits.participants)
+    let who = peer.Participant(gen: gen_of(n + 1), room: room)
+    let Rig(p: take p, c: _, cs: _, out: _) = established_limits(seed + 4 * (n + 1), s.offer, who, addr_of(int.narrow(n + 1)), s.session, b"server")
+    let Error(Limit(_)) = router.join(mut r, take p) else {
+        fail("a full room took one more participant")
+    }
+    let (from, _) = s.pairs[0]
+    let Error(Limit(_)) = router.publish(mut r, room, gen_of(1), from) else {
+        fail("a full participant made one more publication")
+    }
+    let k = list.len(s.pairs)
+    let j = ((1 % n) * k + s.downs) % list.len(pubs)
+    let (_, to) = s.pairs[j % k]
+    let next = router.subscribe(mut r, room, gen_of(1), pubs[j], to, Layer(encoding: 0, spatial: 0, temporal: 0), 0, mut out)
+    if list.len(pubs) > s.downs {
+        let Error(Limit(_)) = next else {
+            fail("a full participant took one more down-track")
+        }
+    } else {
+        let Error(Exists) = next else {
+            fail("a participant holding every publication took one again")
+        }
+    }
+}
+
+/// bug: `room_cost` under-prices what a room allocates as it fills (a term priced per
+/// room that grows per participant, a ring left out), so a unit's ledger admits rooms
+/// whose growth takes memory another room was admitted with.
+/// oracle: the runtime's charge records (MEM-20), in two parts whose sum is held to
+/// `replicated + participants × per_session`. What one session charges from
+/// `peer.open` on, less its input-sized copies, is measured as a bound's headroom and
+/// is at most `session_heap`; each shape's room, opened and filled to its bounds on a
+/// router whose row lists `reserve_pool` holds, from sessions established outside the
+/// bound, allocates within `replicated` plus, per participant, `member_bytes` and the
+/// rest of `session_heap`. That the room is full is checked after, by the router's
+/// own refusals; that `reserve_pool` allocates within `pool_bytes`, which `fixed_bytes`
+/// carries, by a bound of that size.
+@test
+fn pool_room_cost_is_exact() -> Result[(), router.RouterError] {
+    let mut seed = 34000u64
+    for s in shapes() {
+        let cost = signal.room_cost(s.limits, s.session)
+        let n: u64 = int.widen(s.limits.participants)
+        let opened = open_charge(s, seed)
+        let heap = peer.session_heap(s.session)
+        if opened > heap {
+            return Error(Capacity(Capacity(requested: opened, available: heap)))
+        }
+        let budget = cost.replicated + n * (router.member_bytes(s.limits, s.session) + heap - opened)
+        let sessions = sessions_of(room_id(), s, seed)
+        let mut r = router.router(provide.random(seed))
+        let rows = router.pool_bounds(1, 1, n, s.session)
+        let held = option.unwrap(router.pool_bytes(rows))
+        let whole = bound bytes held {
+            router.reserve_pool(mut r, rows)
+        }
+        let Ok(()) = whole else {
+            fail("reserve_pool did not fit in pool_bytes")
+        }
+        let mut pubs: List[router.PublicationId] = list.with_capacity(n * list.len(s.pairs))
+        let mut out = result.unwrap(peer.outbox(65536, 64))
+        let charged = bound bytes budget {
+            fill_room(mut r, room_id(), s, take sessions, mut pubs, mut out)
+        }
+        let Ok(inner) = charged else {
+            fail("a filled room allocated more than replicated + participants x per_session")
+        }
+        inner?
+        refuses_more(mut r, room_id(), s, seed, pubs, mut out)
+        seed += 4096
+    }
+    Ok(())
+}

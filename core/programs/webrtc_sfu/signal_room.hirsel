@@ -1,0 +1,129 @@
+// ---- Signaling loss (RTC-8) ----
+// Suspend before any other input is taken: the call goes ahead of every waiting one,
+// and a waiting resume is dropped.
+fn lose[M](mut a: Adapter[M]) {
+    if let Lost(mut r) = a.signaling {
+        r.headed = false
+        return
+    }
+    let mut scratch: List[u32] = list.new()
+    for s in a.seats {
+        list.push(mut scratch, s.peer)
+    }
+    a.signaling = Lost(Recovery(scratch: take scratch, incarnation: a.incarnation, revision: a.applied, headed: false, headless: false, snapshot: false))
+    list.retain(mut a.jobs, scoped fn(j: Job) -> bool {
+        match j.change {
+            Suspend(room: _, cause: Signaling, on: false) => false,
+            _ => true,
+        }
+    })
+    list.insert(mut a.jobs, 0, Job(change: Suspend(room: a.room, cause: Signaling, on: true), after: Quiet))
+}
+
+// The scratch roster is complete at the `PartEnd` of a Part with `snapshot` set: compare
+// it with the pre-gap roster and resume, or discard a stale one.
+fn settle[M](mut a: Adapter[M], mut out: List[runner.room_client.RoomOut[M]]) {
+    let Lost(take r) = replace(mut a.signaling, Live) else {
+        return
+    }
+    let same = !r.headless && a.incarnation != None && r.incarnation == a.incarnation
+    if same && r.revision < a.applied {
+        a.signaling = Lost(take r)
+        return
+    }
+    let mut i = 0u64
+    while i < list.len(a.seats) {
+        if same && listed(r.scratch, a.seats[i].peer) {
+            i += 1
+        } else {
+            end_seat(mut a, i, mut out)
+        }
+    }
+    let Recovery(scratch: take present, incarnation: incarnation, revision: revision, ..) = take r
+    a.incarnation = incarnation
+    a.applied = revision
+    for p in present {
+        admit_new(mut a, p, mut out)
+    }
+    list.push(mut a.jobs, Job(change: Suspend(room: a.room, cause: Signaling, on: false), after: Quiet))
+}
+
+/// Take one entry of the room (RTC-8), in the order the room client appended them.
+pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomIn[M], mut out: List[runner.room_client.RoomOut[M]]) {
+    if a.life != Serving {
+        return
+    }
+    match take input {
+        Lost => lose(mut a),
+        Part(inc, revision, complete, snapshot) => {
+            // Peer numbers belong to an incarnation.
+            if a.incarnation != None && a.incarnation != Some(inc) {
+                list.clear(mut a.former)
+            }
+            if !lost(a) {
+                if let Some(known) = a.incarnation {
+                    if complete || known != inc {
+                        lose(mut a)
+                    }
+                }
+            }
+            if let Lost(mut r) = a.signaling {
+                r.headed = true
+                if complete || r.incarnation != Some(inc) {
+                    list.clear(mut r.scratch)
+                }
+                r.incarnation = Some(inc)
+                r.revision = revision
+                r.snapshot = snapshot
+            } else {
+                a.incarnation = Some(inc)
+                a.applied = revision
+            }
+        },
+        Joined(p) => {
+            if is_self(a, p) {
+                return
+            }
+            if !unheaded(mut a) {
+                admit_new(mut a, p, mut out)
+            } else if let Lost(mut r) = a.signaling {
+                if !listed(r.scratch, p) {
+                    list.push(mut r.scratch, p)
+                }
+            }
+        },
+        Left(p) => {
+            if is_self(a, p) {
+                unlist(mut a.former, p)
+                return
+            }
+            if !unheaded(mut a) {
+                leave_peer(mut a, p, mut out)
+            } else if let Lost(mut r) = a.signaling {
+                unlist(mut r.scratch, p)
+            }
+        },
+        Message(p, take m) => {
+            if unheaded(mut a) {
+                to_peer(a, p, Refused(code(Suspended)), mut out)
+                return
+            }
+            match (a.embed.unwrap)(take m) {
+                Some(take s) => signal(mut a, p, take s, mut out),
+                None => to_peer(a, p, Refused(REFUSED_NOT_TAKEN), mut out),
+            }
+        },
+        PartEnd => {
+            let whole = match a.signaling {
+                Lost(r) => r.headed && r.snapshot,
+                Live => false,
+            }
+            if whole {
+                settle(mut a, mut out)
+            }
+            if let Lost(mut r) = a.signaling {
+                r.snapshot = false
+            }
+        },
+    }
+}

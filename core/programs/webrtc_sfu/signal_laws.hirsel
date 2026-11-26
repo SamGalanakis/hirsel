@@ -19,6 +19,7 @@ type Member {
 type Sig {
     h: Hall,
     a: signal.Adapter[signal.Signal],
+    l: signal.Ledger,
     out: List[runner.room_client.RoomOut[signal.Signal]],
     members: List[Member],
     // Published (peer, publication), Fenced (peer, epoch, capture index when sent),
@@ -102,7 +103,7 @@ fn say_as(mut r: Sig, p: u32, take s: signal.Signal) {
 // the offer as that unit and its outcome goes to the adapter, while the session parked
 // there is the fixture's, established with the browser end out of band.
 fn serve_builds(mut r: Sig) waits {
-    for take b in signal.take_builds(mut r.a) {
+    for take b in signal.home_builds(mut r.a, mut r.l, mut r.out) {
         let Party(id: take unit_id, certificate: _) = party(16100)
         let built = signal.build(signal.Home(id: take unit_id, at: r.h.addrs[b.home], policy: sdp.default_policy(), limits: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000)), provide.random(16200), b)
         let (_, take outcome) = result.unwrap(take built)
@@ -138,7 +139,7 @@ fn turn_all(mut r: Sig) waits {
     step_unit(mut r.h, 2)
     step_unit(mut r.h, 0)
     let now = host.mono_ns(r.h.clock)
-    result.unwrap(signal.step(mut r.a, mut r.h.w.u0, now, mut r.out))
+    result.unwrap(signal.step(mut r.a, mut r.l, mut r.h.w.u0, now, mut r.out))
     read_room_out(mut r)
     serve_builds(mut r)
     for k in 0u16 .. 3u16 {
@@ -182,9 +183,9 @@ fn base_layer() -> router.Target {
 
 // The room at revision 5 of incarnation 1: the service (9) and peers 1 to 3, each
 // publishing one video section and subscribed to the other two. Peers offer in the
-// order 3, 2, 1, and the adapter homes sessions on units 0 and 1 only, so peers 3
-// and 1 share unit 0 and peer 2 is on unit 1; unit 2 hosts no session but takes every
-// control call and fence.
+// order 3, 1, 2, and the ledger homes sessions on units 0 and 1 only, two each, so
+// peers 3 and 1 share the primary unit 0 and peer 2 is on unit 1; unit 2 hosts no
+// session but takes every control call and fence.
 fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     let mut r = adapter_room(net, clock, seed, loss)
     enter_room(mut r, Part(inc_of(1), 5, true, true))
@@ -194,7 +195,7 @@ fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     }
     enter_room(mut r, PartEnd)
     let from = list.len(r.offers)
-    for p in[3u32, 2u32, 1u32] {
+    for p in[3u32, 1u32, 2u32] {
         say_as(mut r, p, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
     }
     until_idle(mut r)
@@ -285,9 +286,11 @@ fn adapter_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     }, publish: fn(n: u32) -> bool {
         n != YOU
     })
-    let mut a = signal.adapter(room_id(), revoke_limits(), take embed, 2)
+    let mut a = signal.adapter(room_id(), revoke_limits(), take embed)
     signal.you(mut a, Some(YOU))
-    Sig(h: take h, a: take a, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), settled: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
+    let mut l = law_ledger(2, 2)
+    result.unwrap(signal.reserve_room(mut l, room_id(), revoke_limits()))
+    Sig(h: take h, a: take a, l: take l, out: list.new(), members: list.new(), pubs: list.new(), fenced: list.new(), refused: list.new(), answered: list.new(), offers: list.new(), settled: list.new(), told: list.new(), unpublished: list.new(), loss: loss, revoking: list.new())
 }
 
 fn seam_on(mut h: Hall, k: u16, limit: u64) {
@@ -314,7 +317,7 @@ fn queued_on(h: Hall, k: u16) -> u64 {
 // turns again.
 fn step_now(mut r: Sig) {
     let now = host.mono_ns(r.h.clock)
-    result.unwrap(signal.step(mut r.a, mut r.h.w.u0, now, mut r.out))
+    result.unwrap(signal.step(mut r.a, mut r.l, mut r.h.w.u0, now, mut r.out))
     read_room_out(mut r)
 }
 
@@ -695,7 +698,7 @@ fn reoffer_run(net: Net, clock: Clock) waits {
         }
     }
     say_as(mut r, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
-    let builds = signal.take_builds(mut r.a)
+    let builds = signal.home_builds(mut r.a, mut r.l, mut r.out)
     if list.len(builds) != 1 {
         fail("peer 2's fresh offer asked no single build")
     }
@@ -745,4 +748,20 @@ fn signaling_loss_fails_closed(tasks: Tasks) -> Result[(), router.RouterError] w
     reoffer_run(net, clock)
     result.unwrap(task.join(take served))
     Ok(())
+}
+
+/// A ledger of `units` units, homing at most `sessions` sessions per unit of the size
+/// the laws' builds make. Unit 0 has 2 GiB and the others 1 GiB, so unit 0 stays every
+/// room's primary unit; the cap splits a room's peers across units: they fill unit 0,
+/// then the next.
+fn law_ledger(units: u64, sessions: u32) -> signal.Ledger {
+    let mut free: List[u64] = list.new()
+    for k in 0u64 .. units {
+        list.push(mut free, if k == 0 {
+            2147483648
+        } else {
+            1073741824
+        })
+    }
+    signal.ledger(take free, sessions, peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000))
 }

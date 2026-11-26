@@ -8,7 +8,7 @@ not its target).
 
 On a Mac, the tree is the `darwin_llvm` archive alone: the compiler's
 libLLVM.23.1.dylib, the ld.lld that loads it through @loader_path/../lib,
-llvm-config and the headers. Clang and the C++ headers come from the Xcode
+llvm-config, llvm-ar, llvm-objdump and the headers. Clang and the C++ headers come from the Xcode
 command line tools.
 
 The static LLVM component archives are left out: llvm-sys links libLLVM
@@ -66,6 +66,8 @@ LINUX_REQUIRED = (
 DARWIN_REQUIRED = (
     "bin/ld.lld",
     "bin/llvm-config",
+    "bin/llvm-ar",
+    "bin/llvm-objdump",
     "lib/libLLVM.23.1.dylib",
     "lib/libLLVM-23.dylib",
     "include/llvm-c/Core.h",
@@ -175,7 +177,7 @@ def build_darwin(stage: pathlib.Path) -> None:
         with tarfile.open(fetch_built("darwin_llvm", scratch)) as archive:
             archive.extractall(tree, filter="data")
         place_tree(tree, stage)
-    for name in ("ld.lld", "llvm-config"):
+    for name in ("ld.lld", "llvm-config", "llvm-ar", "llvm-objdump"):
         tool_version(stage / "bin" / name)
 
 

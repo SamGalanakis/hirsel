@@ -105,8 +105,9 @@ pinned source by `build-libllvm-darwin DIR` on an Apple Silicon Mac with the
 Xcode command line tools, cmake and ninja. It holds `lib/libLLVM.23.1.dylib`
 (named `@rpath/libLLVM.23.1.dylib`, no search path of its own), its
 `libLLVM-23.dylib` alias, `bin/ld.lld` with the ELF and Mach-O ports of lld,
-`bin/llvm-config`, and the `llvm` and `llvm-c` headers. ld.lld and llvm-config
-load the dylib through their one search path, `@loader_path/../lib`, so the
+`bin/llvm-config`, `bin/llvm-ar` and `bin/llvm-objdump` (the bridge build
+scripts' archiver and LC_UUID reader), and the `llvm` and `llvm-c` headers.
+Each tool loads the dylib through its one search path, `@loader_path/../lib`, so the
 installer can copy `bin/ld.lld` and `lib/libLLVM.23.1.dylib` from this prefix
 into an installation unchanged. The build is a plain Release (no profile, LTO
 or BOLT) whose minos is the link kit's `DARWIN_FLOOR`; it checks each Mach-O's

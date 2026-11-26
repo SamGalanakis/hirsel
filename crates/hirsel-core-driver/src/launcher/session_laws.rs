@@ -1,4 +1,6 @@
 use super::*;
+use crate::code_admission::ObjectKind;
+use hirsel_core_ids::ContentHash;
 
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -113,6 +115,13 @@ fn session_vectors() {
         (
             Request::Command(serving(), HostCommand::Abort(vec![0xaa], Some(vec![0xbb]))),
             "07000000010000006703000000000000000100000007000000000000000300000001000000aa0100000001000000bb".into(),
+        ),
+        (
+            Request::Command(
+                serving(),
+                HostCommand::Import(vec![0xaa], vec![0xbb], vec![0xcc], vec![0xdd]),
+            ),
+            "07000000010000006703000000000000000100000007000000000000000100000001000000aa01000000bb01000000cc01000000dd".into(),
         ),
         (
             Request::Command(serving(), HostCommand::StoreAccepted),
@@ -274,6 +283,13 @@ fn session_vectors() {
                 }),
             ),
             "09000000010000006703000000000000000100000007000000000000000000000004000000000000000100000000000000020000000000000001000000050100000000000000630000000000000000000000",
+        ),
+        (
+            Event::Placed(
+                serving(),
+                HostReply::Imported(vec![0xaa], vec![0xbb], vec![b"t".to_vec()]),
+            ),
+            "09000000010000006703000000000000000100000007000000000000000400000001000000aa01000000bb010000000100000074",
         ),
         (
             Event::Placed(serving(), HostReply::StoreMismatch(1, 2, 3, 4)),

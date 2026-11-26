@@ -386,6 +386,45 @@ pub fn row_value(p: Pending) -> Result[Bytes, std.codec.EncodeError] {
     Ok(take raw)
 }
 
+/// A pending row as the store keeps it: its encoded `Id` key and its stored value (the
+/// 2-byte schema number, then the row). None when either does not decode.
+pub fn stored_pending(key: Bytes, value: Bytes) -> Option[Pending] {
+    let mut at = 0u64
+    let Ok(id) = take_id(key, mut at) else {
+        return None
+    }
+    if at != list.len(key) || list.len(value) < 2u64 {
+        return None
+    }
+    let codec: std.codec.Codec[SubRow] = std.codec.of()
+    let Ok(row) = std.codec.decode(codec, clone(list.slice(value, 2u64, list.len(value)))) else {
+        return None
+    }
+    Some(Pending(id: id, row: take row))
+}
+
+/// The prepare scan reads only main's rows.
+pub fn on_main(p: Pending) -> bool {
+    p.id.branch == 0u32
+}
+
+/// The stored value that `settle` stages for `p`, whose stored value is `value`.
+pub fn settled_value(p: Pending, value: Bytes, restamp: bool, image: Bytes) -> Option[Bytes] {
+    let mut row: SubRow = clone(p.row)
+    row.state = Waiting
+    if restamp {
+        row.revision = clone(image)
+    } else {
+        row.cancel = true
+    }
+    let codec: std.codec.Codec[SubRow] = std.codec.of()
+    let mut raw: Bytes = clone(list.slice(value, 0u64, 2u64))
+    if let Error(_) = std.codec.encode(codec, row, mut raw) {
+        return None
+    }
+    Some(take raw)
+}
+
 pub fn pending_at(read_handle: store.Reader, s: store.Snapshot, t: Tables, id: Id) -> Result[Option[Pending], store.Error] waits {
     match store.get(read_handle, s, t.rows, id)? {
         Some(take row) => Ok(Some(Pending(id: id, row: take row))),

@@ -94,11 +94,13 @@ pub type EntryLine: codec + send {
 // A deploy's preview (launch.md "Deploy preview"): the grant diff against OLD's recipe,
 // every entry of OLD or NEW sorted by identity, and the prepare child's report of what NEW
 // does with each pending trigger, with each held group's fate and the unmatched held entry
-// paths. A part not yet computed when the deploy ended is empty.
+// paths, and the migration OLD reported for the PREPARED it bound (RUNNER-SPEC §14.3
+// "Preparing"). A part not yet computed when the deploy ended is empty.
 pub type Preview: codec + send {
     grants: launcher.Grants,
     entries: List[EntryLine],
-    triggers: runner.TriggerReport
+    triggers: runner.TriggerReport,
+    migration: Option[Migration]
 }
 
 pub fn no_triggers() -> runner.TriggerReport {
@@ -106,7 +108,7 @@ pub fn no_triggers() -> runner.TriggerReport {
 }
 
 pub fn no_preview() -> Preview {
-    Preview(grants: launcher.no_grants(), entries: list.new(), triggers: no_triggers())
+    Preview(grants: launcher.no_grants(), entries: list.new(), triggers: no_triggers(), migration: None)
 }
 
 // A deploy's timing and preview: fetch and assembly nanoseconds, the write pause, and the

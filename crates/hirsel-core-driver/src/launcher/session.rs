@@ -5,8 +5,7 @@
 //! String/Bytes/List a u32 count then the contents, Option and sums a u32 tag then the
 //! payload, and records their fields in order. Declared variant order is the tag. Each
 //! frame on the socket is a u32 little-endian length followed by one value.
-use crate::code_admission::{ObjectKey, ObjectKind};
-use hirsel_core_ids::ContentHash;
+use crate::code_admission::ObjectKey;
 use std::io::{self, Write};
 
 pub(crate) use super::grants::Grants;
@@ -122,7 +121,7 @@ impl Launch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HostCommand {
     Export(Vec<u8>, bool),
-    Import(Vec<u8>, Vec<u8>, Vec<u8>),
+    Import(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
     Cutover(Vec<u8>, Vec<u8>, u64, bool),
     Abort(Vec<u8>, Option<Vec<u8>>),
     StoreAccepted,
@@ -146,7 +145,9 @@ pub(crate) enum HostReply {
     Current(u64, Vec<u8>),
     Refused(String),
     Exported(u64, String),
-    Imported(Vec<u8>),
+    /// The installed hash, then OLD's migration of the bound PREPARED: its digest and
+    /// changed catalog keys.
+    Imported(Vec<u8>, Vec<u8>, Vec<Vec<u8>>),
     Installed(u64, bool),
     Drift,
     Aborted,
@@ -587,11 +588,12 @@ impl Wire for HostCommand {
                 w.bytes(a);
                 w.bool(*retry);
             }
-            Self::Import(d, release, digest) => {
+            Self::Import(d, release, digest, fates) => {
                 w.u32(1);
                 w.bytes(d);
                 w.bytes(release);
                 w.bytes(digest);
+                w.bytes(fates);
             }
             Self::Cutover(a, digest, pause, retry) => {
                 w.u32(2);
@@ -611,7 +613,7 @@ impl Wire for HostCommand {
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(match r.u32()? {
             0 => Self::Export(r.bytes()?, r.bool()?),
-            1 => Self::Import(r.bytes()?, r.bytes()?, r.bytes()?),
+            1 => Self::Import(r.bytes()?, r.bytes()?, r.bytes()?, r.bytes()?),
             2 => Self::Cutover(r.bytes()?, r.bytes()?, r.u64()?, r.bool()?),
             3 => Self::Abort(r.bytes()?, r.option(Reader::bytes)?),
             4 => Self::StoreAccepted,
@@ -644,7 +646,13 @@ impl Wire for HostReply {
                 w.u64(*version);
                 w.bytes(name.as_bytes());
             }
-            Self::Imported(digest) => (w.u32(4), w.bytes(digest)).1,
+            Self::Imported(hash, digest, changes) => {
+                w.u32(4);
+                w.bytes(hash);
+                w.bytes(digest);
+                w.len(changes.len());
+                changes.iter().for_each(|change| w.bytes(change));
+            }
             Self::Installed(version, waiting) => {
                 w.u32(5);
                 w.u64(*version);
@@ -681,7 +689,10 @@ impl Wire for HostReply {
             1 => Self::Current(r.u64()?, r.bytes()?),
             2 => Self::Refused(r.string()?),
             3 => Self::Exported(r.u64()?, r.string()?),
-            4 => Self::Imported(r.bytes()?),
+            4 => Self::Imported(r.bytes()?, r.bytes()?, {
+                let n = r.count(4)?;
+                (0..n).map(|_| r.bytes()).collect::<io::Result<_>>()?
+            }),
             5 => Self::Installed(r.u64()?, r.bool()?),
             6 => Self::Drift,
             7 => Self::Aborted,
@@ -714,41 +725,9 @@ impl Wire for Input {
     }
 }
 
-/// A `List[Wanted]`: each key's kind as a tag, then its 32-byte hash as Bytes.
-pub(crate) fn put_wanted(w: &mut Writer, keys: &[ObjectKey]) {
-    w.len(keys.len());
-    for key in keys {
-        w.u32(match key.kind {
-            ObjectKind::Group => 0,
-            ObjectKind::Body => 1,
-            ObjectKind::Annex => 2,
-            ObjectKind::ForeignArchive => 3,
-            ObjectKind::Recipe => unreachable!("a recipe is never needed"),
-        });
-        w.bytes(&key.hash.0);
-    }
-}
-
-pub(crate) fn get_wanted(r: &mut Reader<'_>) -> io::Result<Vec<ObjectKey>> {
-    let n = r.count(8)?;
-    (0..n)
-        .map(|_| {
-            let kind = match r.u32()? {
-                0 => ObjectKind::Group,
-                1 => ObjectKind::Body,
-                2 => ObjectKind::Annex,
-                3 => ObjectKind::ForeignArchive,
-                _ => return Err(malformed("needed object tag")),
-            };
-            let hash =
-                <[u8; 32]>::try_from(r.bytes()?).map_err(|_| malformed("needed object hash"))?;
-            Ok(ObjectKey {
-                kind,
-                hash: ContentHash(hash),
-            })
-        })
-        .collect()
-}
+#[path = "wanted.rs"]
+mod wanted;
+pub(crate) use wanted::{get_wanted, put_wanted};
 
 // Each row supplies the tag to both directions of the codec.
 macro_rules! session_wire {

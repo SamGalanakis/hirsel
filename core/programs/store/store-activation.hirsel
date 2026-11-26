@@ -414,3 +414,95 @@ fn apply_import_rewrites(mut plan: SchemaPlan, rewrites: List[ActivationRewrite]
 pub fn prepared_rewrites(value: ValidatedImport) -> u64 {
     list.len(value.rewrites)
 }
+
+/// The settlement PREPARED applies to the table that `name` names, the runner's pending
+/// table (RUNNER-SPEC §14.3 "Preparing"). `base` holds OLD's rows of that table at the
+/// exported base, `rewrites` PREPARED's 0x0085 rows, and `shipped` the rows of the range
+/// PREPARED ships in its place (none when the table is dropped), each as (key after the
+/// table id, stored value) in key order.
+pub type ImportSettlement: send {
+    base: List[(Bytes, Bytes)],
+    rewrites: List[(Bytes, Bytes)],
+    shipped: Option[List[(Bytes, Bytes)]]
+}
+
+/// `ImportSettlement` for `imported` over OLD's export lease. A rewrite of any other table
+/// is `Unsettled`.
+pub fn import_settlement(db: Db, imported: ValidatedImport, name: String) -> Result[ImportSettlement, DeployError] {
+    let Some(lease) = disk_state(db).lease else {
+        return Error(ExportMismatch)
+    }
+    let key = deploy_result(table_key(name))?
+    let mut old = 0u32
+    if let Some(raw) = get_page_row(db.heads[0].roots.catalog, key) {
+        let record = deploy_result(decode_catalog(raw))?
+        if record.kind == 1 {
+            old = record.id
+        }
+    }
+    let mut base: List[(Bytes, Bytes)] = list.new()
+    if old != 0 {
+        let tree = view lease.collections
+        let mut rows = deploy_result(byte_cursor(tree, Included(deploy_result(prefix(old))?), deploy_result(prefix(old + 1))?))?
+        while let Some((take logical, raw)) = deploy_result(next_bytes(mut rows))? {
+            list.push(mut base, (clone(list.slice(logical, 4, list.len(logical))), deploy_result(copied(raw))?))
+        }
+    }
+    let mut rewrites: List[(Bytes, Bytes)] = list.new()
+    for row in imported.rewrites {
+        if old == 0 || row.id != old {
+            return Error(Unsettled)
+        }
+        list.push(mut rewrites, (clone(row.key), clone(row.value)))
+    }
+    let mut shipped: Option[List[(Bytes, Bytes)]] = None
+    for change in imported.delta {
+        if change.key != key {
+            continue
+        }
+        let Some(after) = change.after else {
+            shipped = Some(list.new())
+            continue
+        }
+        let record = deploy_result(decode_catalog(after))?
+        for checked_range in imported.ranges {
+            if checked_range.id == record.id {
+                let mut rows: List[(Bytes, Bytes)] = list.new()
+                for row in checked_range.rows {
+                    list.push(mut rows, (clone(row.key), clone(row.value)))
+                }
+                shipped = Some(take rows)
+            }
+        }
+    }
+    Ok(ImportSettlement(base: take base, rewrites: take rewrites, shipped: take shipped))
+}
+
+/// The migration fact of `imported` (launch.md "The settler"): the SHA-256 of its 0x0082
+/// payloads in order, then each 0x0083 (id, kind) as 4 bytes little endian and 1 byte, and
+/// the catalog key of each change.
+pub fn import_migration(imported: ValidatedImport) -> Result[(Bytes, List[Bytes]), DeployError] {
+    let codec: std.codec.Codec[CatalogChange] = std.codec.of()
+    let mut hashed = std.sha256.start()
+    let mut keys: List[Bytes] = list.new()
+    for change in imported.delta {
+        let mut raw: Bytes = list.new()
+        std.codec.encode(codec, change, mut raw) ?=> |_| ImportMalformed
+        std.sha256.add(mut hashed, raw, 0u64, list.len(raw))
+        list.push(mut keys, clone(change.key))
+    }
+    for checked_range in imported.ranges {
+        let id = checked_range.id
+        let mut raw: Bytes = list.with_capacity(5u64)
+        for shift in[0u32, 8u32, 16u32, 24u32] {
+            list.push(mut raw, int.truncate(id >> shift))
+        }
+        list.push(mut raw, checked_range.kind)
+        std.sha256.add(mut hashed, raw, 0u64, 5u64)
+    }
+    let mut digest: Bytes = list.with_capacity(32u64)
+    for byte in std.sha256.finish(hashed) {
+        list.push(mut digest, byte)
+    }
+    Ok((take digest, take keys))
+}

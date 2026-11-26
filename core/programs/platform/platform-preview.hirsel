@@ -387,3 +387,39 @@ fn previewed(b: Bytes, p: Prep, count: u64) -> Result[(Bytes, Bytes, List[runner
     let runner.Describe(exported: take exported, ..) = take description
     Ok((take raw, take release, take exported))
 }
+
+// The fates OLD's settlement check settles held rows by (RUNNER-SPEC §14.3 "Preparing"). A
+// Fates that does not encode is sent empty, which OLD refuses.
+fn fates_bytes(f: runner.fate.Fates) -> Bytes {
+    match runner.fate.encode(f) {
+        Some(take raw) => take raw,
+        None => list.new(),
+    }
+}
+
+// The migration fact OLD reported for the PREPARED it bound, with each changed catalog key
+// named: a table key by its name, any other key in hex.
+fn migration_of(m: runner.ImportedMigration) -> operator.Migration {
+    let mut changes: List[String] = list.new()
+    for key in m.changes {
+        let mut named: Option[String] = None
+        if list.len(key) > 1u64 && key[0] == 1u8 {
+            if let Ok(take name) = string.from_utf8(clone(list.slice(key, 1u64, list.len(key)))) {
+                named = Some(take name)
+            }
+        }
+        match take named {
+            Some(take name) => list.push(mut changes, take name),
+            None => list.push(mut changes, std.hex.encode(key)),
+        }
+    }
+    operator.Migration(digest: clone(m.digest), changes: take changes)
+}
+
+fn report_of(row: DeployRow, pause: operator.Pause) -> operator.Report {
+    operator.Report(fetch_ns: row.fetch_ns, assemble_ns: row.assemble_ns, pause: clone(pause), preview: clone(row.preview))
+}
+
+fn same_attempt(a: launcher.Attempt, b: launcher.Attempt) -> bool {
+    a.hi == b.hi && a.lo == b.lo
+}

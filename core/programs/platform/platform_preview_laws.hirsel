@@ -66,7 +66,7 @@ fn trigger_answer() -> Bytes {
 fn imports_of(r: Rig) -> u64 {
     let mut n = 0u64
     for q in r.asked {
-        if let Command(_, HostImport(_, _, _)) = q {
+        if let Command(_, HostImport(_, _, _, _)) = q {
             n += 1u64
         }
     }
@@ -132,7 +132,7 @@ fn unsettled_deploy(c: Clock, rnd: Random) waits {
     helper_answers(mut u, helper_child(old, PrepareMode(a, "export-2", list.new())), trigger_answer())
     let fates = prepare_fates(u)
     expect(list.len(fates) == 2u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000", "L54: the repeated prepare did not get the decision's fates")
-    let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two()))))
+    let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
     pump(mut u, take cut)
     answer(mut u, old, PlaceInstalled(2u64, true))
     expect(is_installed(status_of(mut u, held_d)), "L54: the decided deploy was not Installed")
@@ -190,7 +190,7 @@ fn deploy_preview(c: Clock, rnd: Random) -> Result[(), ()] waits {
     helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), take preview_bytes)
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
     helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
-    let cut = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
+    let cut = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
     pump(mut r, take cut)
     answer(mut r, old, PlaceInstalled(2u64, true))
     expect(committed_once(r), "L54: the proposed source did not install NEW once")

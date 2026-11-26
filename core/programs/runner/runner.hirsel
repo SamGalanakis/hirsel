@@ -1653,6 +1653,8 @@ pub type ExportCommand: send {
 
 pub type ReserveImport: send {
     checked: store.ValidatedImport,
+    image: Bytes,
+    fates: fate.Fates,
     answer: Sender[Result[store.ImportWork, store.DeployError]]
 }
 
@@ -1661,7 +1663,7 @@ pub type KeepImport: send {
     answer: Sender[Result[Inline[u8, 32], store.DeployError]]
 }
 
-pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes) | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes, Option[Bytes]) | HostStoreAccepted
+pub type HostCommand: codec + send = HostExport(Bytes, bool) | HostImport(Bytes, Bytes, Bytes, Bytes) | HostCutover(Bytes, Bytes, u64, bool) | HostAbort(Bytes, Option[Bytes]) | HostStoreAccepted
 
 pub type PlaceReady: codec + send {
     version: u64,
@@ -1673,7 +1675,7 @@ pub type PlaceReady: codec + send {
     read: Bytes
 }
 
-pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
+pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes, ImportedMigration) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal)
 
 pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64) | InstallPredecessor(Bytes) | InstallUnsettled
 
@@ -1796,6 +1798,7 @@ fn host_refusal(why: store.DeployError) -> String {
         ExportMismatch => "ExportMismatch",
         AttemptBusy => "Busy",
         ImportMalformed => "ImportMalformed",
+        Unsettled => "Unsettled",
         IdBound => "IdBound",
         Drift => "Drift",
         Expired => "Expired",
@@ -1813,32 +1816,6 @@ fn host_export(head: Sender[HeadInput], scratch: Dir, attempt: Bytes, retry: boo
         return Error(AttemptBusy)
     }
     store.export_copy(started?)
-}
-
-fn host_import(head: Sender[HeadInput], exported: store.Exported, description: Bytes, release: Bytes, digest: Bytes) -> Result[Inline[u8, 32], store.DeployError] waits {
-    let checked = store.validate_prepared(exported.dir)?
-    if !store.prepared_matches(checked, description, release, digest) {
-        return Error(ImportMalformed)
-    }
-    let mut awaiting = Some(take checked)
-    let reserved = host_head(head, scoped fn(take answer: Sender[Result[store.ImportWork, store.DeployError]]) -> Result[HeadInput, Capacity] {
-        let payload = ReserveImport(checked: option.unwrap(replace(mut awaiting, None)), answer: take answer)
-        let command = box.new(take payload)
-        Ok(ReserveImport(take command))
-    })
-    let Some(take reserved_work) = take reserved else {
-        return Error(AttemptBusy)
-    }
-    let mut built = Some(store.import_trees(reserved_work?)?)
-    let kept = host_head(head, scoped fn(take answer: Sender[Result[Inline[u8, 32], store.DeployError]]) -> Result[HeadInput, Capacity] {
-        let payload = KeepImport(built: option.unwrap(replace(mut built, None)), answer: take answer)
-        let command = box.new(take payload)
-        Ok(KeepImport(take command))
-    })
-    match take kept {
-        Some(take answer) => take answer,
-        None => Error(AttemptBusy)
-    }
 }
 
 fn host_cutover(head: Sender[HeadInput], attempt: Bytes, digest: Bytes, deadline: u64) -> HostReply waits {
@@ -1878,15 +1855,9 @@ fn host_reader(take reader: HostReader) -> () waits {
                 },
                 Error(why) => PlaceRefused(host_refusal(why)),
             },
-            HostImport(description, release, digest) => match exported {
-                Some(info) => match host_import(head, info, description, release, digest) {
-                    Ok(hash) => {
-                        let mut wire_hash: Bytes = list.with_capacity(32u64)
-                        for byte in hash {
-                            list.push(mut wire_hash, byte)
-                        }
-                        PlaceImported(take wire_hash)
-                    },
+            HostImport(description, release, digest, fates) => match exported {
+                Some(info) => match host_import(head, info, description, release, digest, fates) {
+                    Ok((take hash, take migration)) => PlaceImported(take hash, take migration),
                     Error(why) => PlaceRefused(host_refusal(why)),
                 },
                 None => PlaceRefused("ExportMismatch"),

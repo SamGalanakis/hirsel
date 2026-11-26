@@ -248,7 +248,7 @@ pub opaque type ExportCopy: send {
     lease: Arc[ExportLease]
 }
 
-pub type DeployError: send = Store(Error) | Scratch(Error) | ExportMismatch | AttemptBusy | ImportMalformed | IdBound | Drift | Expired | FullNew(StoreCapacity)
+pub type DeployError: send = Store(Error) | Scratch(Error) | ExportMismatch | AttemptBusy | ImportMalformed | Unsettled | IdBound | Drift | Expired | FullNew(StoreCapacity)
 
 fn scratch_result[T](take answer: Result[T, Error]) -> Result[T, DeployError] {
     match take answer {

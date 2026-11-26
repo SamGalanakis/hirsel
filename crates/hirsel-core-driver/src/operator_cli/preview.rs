@@ -8,7 +8,8 @@ use super::{
 use crate::cli::{Invocation, OptionId as Opt};
 use crate::launcher::session::Grants;
 use crate::operator::{
-    Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Phase, Preview,
+    Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Migration, Phase,
+    Preview,
 };
 use std::path::PathBuf;
 
@@ -147,10 +148,7 @@ pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
         DecisionStage::Admission => "admission",
         DecisionStage::Prepared => "prepared",
     };
-    let migration = decision
-        .migration
-        .as_ref()
-        .map(|m| serde_json::json!({"digest": hex(&m.digest), "changes": m.changes}));
+    let migration = decision.migration.as_ref().map(migration_json);
     let approvals = decision.approvals.as_ref().map(|a| {
         serde_json::json!({"recipe": hex(&a.r), "foreign": a.foreign, "exec": a.exec, "text": a.text})
     });
@@ -217,7 +215,12 @@ pub(super) fn preview_json(preview: &Preview) -> serde_json::Value {
     serde_json::json!({
         "grants": grants_json(&preview.grants), "entries": entries,
         "triggers": {"rows": rows, "unmatched": unmatched},
+        "migration": preview.migration.as_ref().map(migration_json),
     })
+}
+
+fn migration_json(m: &Migration) -> serde_json::Value {
+    serde_json::json!({"digest": hex(&m.digest), "changes": m.changes})
 }
 
 /// An entry path as `--held-entry` takes it: its text, or hex when it is not UTF-8.

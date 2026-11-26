@@ -92,6 +92,8 @@ pub(crate) struct Preview {
     pub(crate) grants: Grants,
     pub(crate) entries: Vec<EntryLine>,
     pub(crate) triggers: TriggerReport,
+    /// The migration OLD reported for the PREPARED it bound.
+    pub(crate) migration: Option<Migration>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,6 +216,7 @@ impl Wire for Preview {
             w.u32(ENTRY_CHANGES.iter().position(|c| *c == e.change).unwrap() as u32);
         }
         self.triggers.put(w);
+        w.option(&self.migration, Migration::put);
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         let grants = Grants::get(r)?;
@@ -230,6 +233,7 @@ impl Wire for Preview {
             grants,
             entries,
             triggers: TriggerReport::get(r)?,
+            migration: r.option(Migration::get)?,
         })
     }
 }
@@ -323,6 +327,19 @@ pub(crate) struct Migration {
     pub(crate) changes: Vec<String>,
 }
 
+impl Migration {
+    fn put(w: &mut Writer, m: &Self) {
+        w.bytes(&m.digest);
+        w.strings(&m.changes);
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        Ok(Self {
+            digest: r.bytes()?,
+            changes: r.strings()?,
+        })
+    }
+}
+
 /// What a held request awaits the operator's decision on (`operator.Decision`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Decision {
@@ -357,10 +374,7 @@ impl Wire for Decision {
             w.strings(&a.exec);
             w.bytes(a.text.as_bytes());
         });
-        w.option(&self.migration, |w, m| {
-            w.bytes(&m.digest);
-            w.strings(&m.changes);
-        });
+        w.option(&self.migration, Migration::put);
         self.triggers.put(w);
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -381,12 +395,7 @@ impl Wire for Decision {
                     text: r.string()?,
                 })
             })?,
-            migration: r.option(|r| {
-                Ok(Migration {
-                    digest: r.bytes()?,
-                    changes: r.strings()?,
-                })
-            })?,
+            migration: r.option(Migration::get)?,
             triggers: TriggerReport::get(r)?,
         })
     }

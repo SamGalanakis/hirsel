@@ -193,6 +193,33 @@ pub fn settle_read(read_handle: store.Reader, snap: store.Snapshot, mut staged: 
     Ok(None)
 }
 
+/// What OLD's settlement check expects PREPARED to apply (RUNNER-SPEC §14.3 "Preparing"):
+/// for each stored row of OLD's pending table at the exported base, in key order, its key,
+/// the value it must hold after the import, and whether `settle` changes it. None when a row
+/// does not decode, or a held row has no fate in `f`.
+pub fn expected_settlement(base: List[(Bytes, Bytes)], image: Bytes, f: Fates) -> Option[List[(Bytes, Bytes, bool)]] {
+    let mut out: List[(Bytes, Bytes, bool)] = list.new()
+    for (key, value) in base {
+        let Some(p) = triggers.stored_pending(key, value) else {
+            return None
+        }
+        if !triggers.on_main(p) || !is_held(p, image) {
+            list.push(mut out, (clone(key), clone(value), false))
+            continue
+        }
+        let release = match resolve(f, triggers.entry_path(p)) {
+            Some(Release) => true,
+            Some(Cancel) => false,
+            None => return None,
+        }
+        let Some(settled) = triggers.settled_value(p, value, release, image) else {
+            return None
+        }
+        list.push(mut out, (clone(key), take settled, true))
+    }
+    Some(take out)
+}
+
 fn push_path(mut line: String, path: Bytes) {
     match string.from_utf8(clone(path)) {
         Ok(text) => string.push(mut line, text),

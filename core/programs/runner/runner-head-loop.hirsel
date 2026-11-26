@@ -141,8 +141,11 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
                 continue
             },
             Some(ReserveImport(take command)) => {
-                let ReserveImport(checked: take checked, answer: take host_result) = box.unbox(take command)
-                let reserved = store.reserve_import(mut head.db, take checked)
+                let ReserveImport(checked: take checked, image: take image, fates: take fates, answer: take host_result) = box.unbox(take command)
+                let reserved = match settlement_check(head.db, checked, image, fates) {
+                    Ok(()) => store.reserve_import(mut head.db, take checked),
+                    Error(why) => Error(why),
+                }
                 let _ = channel.try_send(host_result, take reserved)
                 continue
             },

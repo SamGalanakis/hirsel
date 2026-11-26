@@ -1,0 +1,104 @@
+// OLD's side of the import (RUNNER-SPEC §14.3 "Preparing", v2.82): the facts the host
+// clears a deploy on come from the PREPARED bytes OLD validated and binds, never from a
+// file the prepare child wrote beside them.
+// The migration fact of the bound PREPARED (launch.md "The settler"): `digest` is the
+// SHA-256 of its 0x0082 payloads in order and its 0x0083 (id, kind) list, and `changes`
+// holds the catalog key of each 0x0082 change.
+pub type ImportedMigration: codec + send {
+    digest: Bytes,
+    changes: List[Bytes]
+}
+
+fn host_import(head: Sender[HeadInput], exported: store.Exported, description: Bytes, release: Bytes, digest: Bytes, fates: Bytes) -> Result[(Bytes, ImportedMigration), store.DeployError] waits {
+    let checked = store.validate_prepared(exported.dir)?
+    if !store.prepared_matches(checked, description, release, digest) {
+        return Error(ImportMalformed)
+    }
+    let Some(approved) = fate.decode(fates) else {
+        return Error(ImportMalformed)
+    }
+    let image = import_image(description)?
+    let (take migrated, take changes) = store.import_migration(checked)?
+    let mut awaiting = Some(take checked)
+    let mut chosen = Some(take approved)
+    let reserved = host_head(head, scoped fn(take answer: Sender[Result[store.ImportWork, store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let payload = ReserveImport(checked: option.unwrap(replace(mut awaiting, None)), image: clone(image), fates: option.unwrap(replace(mut chosen, None)), answer: take answer)
+        let command = box.new(take payload)
+        Ok(ReserveImport(take command))
+    })
+    let Some(take reserved_work) = take reserved else {
+        return Error(AttemptBusy)
+    }
+    let mut built = Some(store.import_trees(reserved_work?)?)
+    let kept = host_head(head, scoped fn(take answer: Sender[Result[Inline[u8, 32], store.DeployError]]) -> Result[HeadInput, Capacity] {
+        let payload = KeepImport(built: option.unwrap(replace(mut built, None)), answer: take answer)
+        let command = box.new(take payload)
+        Ok(KeepImport(take command))
+    })
+    let hash = match take kept {
+        Some(take answer) => answer?,
+        None => return Error(AttemptBusy),
+    }
+    let mut wire_hash: Bytes = list.with_capacity(32u64)
+    for byte in hash {
+        list.push(mut wire_hash, byte)
+    }
+    Ok((take wire_hash, ImportedMigration(digest: take migrated, changes: take changes)))
+}
+
+// NEW's identity digest, as its prepare child computes it to classify held rows: empty for
+// a Describe with no revision.
+fn import_image(description: Bytes) -> Result[Bytes, store.DeployError] {
+    let codec: std.codec.Codec[Describe] = std.codec.of()
+    let Ok(shown) = std.codec.decode(codec, description) else {
+        return Error(ImportMalformed)
+    }
+    if list.len(shown.revision) == 0u64 {
+        return Ok(list.new())
+    }
+    match identity_digest(shown) {
+        Ok(digest) => Ok(digest),
+        Error(_) => Error(ImportMalformed),
+    }
+}
+
+// OLD's settlement check (launch.md "From check to cutover" item 4). The prepare child runs
+// submitted code and `store.write_prepared` is public, so OLD settles its own pending rows
+// at the exported base under NEW's identity digest `image` and the approved fates, and
+// refuses the import `Unsettled` unless PREPARED applies exactly those values: as its
+// 0x0085 rewrites, or folded into the range it ships for the pending table. With no fate
+// for a held row there is no settlement, so a PREPARED that settles it is refused.
+fn settlement_check(db: store.Db, imported: store.ValidatedImport, image: Bytes, f: fate.Fates) -> Result[(), store.DeployError] {
+    let applied = store.import_settlement(db, imported, "store.triggers.pending")?
+    let Some(expected) = fate.expected_settlement(applied.base, image, f) else {
+        return Error(Unsettled)
+    }
+    let mut matched = 0u64
+    match applied.shipped {
+        Some(rows) => {
+            if list.len(applied.rewrites) != 0u64 || list.len(rows) != list.len(expected) {
+                return Error(Unsettled)
+            }
+            for i in 0u64 .. list.len(rows) {
+                if rows[i].0 != expected[i].0 || rows[i].1 != expected[i].1 {
+                    return Error(Unsettled)
+                }
+            }
+        },
+        None => {
+            for row in expected {
+                if !row.2 {
+                    continue
+                }
+                if matched >= list.len(applied.rewrites) || applied.rewrites[matched].0 != row.0 || applied.rewrites[matched].1 != row.1 {
+                    return Error(Unsettled)
+                }
+                matched += 1u64
+            }
+            if matched != list.len(applied.rewrites) {
+                return Error(Unsettled)
+            }
+        },
+    }
+    Ok(())
+}

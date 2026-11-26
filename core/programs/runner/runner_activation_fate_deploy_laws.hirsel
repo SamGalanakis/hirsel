@@ -3,6 +3,13 @@
 // it, and the cutover's one commit holds the same rows (a) states: A, B and F
 // `Waiting` at r2 with their attempts, C a `Waiting` cancel with its r0 stamp,
 // and D and E byte-identical.
+fn settle_refused(checked: Result[(), store.DeployError]) -> bool {
+    match checked {
+        Error(Unsettled) => true,
+        _ => false,
+    }
+}
+
 @test
 fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
     let dir = triggers.law_directory(d)
@@ -35,6 +42,32 @@ fn activation_fate_hot_deploy(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     let validated = result.unwrap(store.validate_prepared(exported.dir))
     if store.prepared_rewrites(validated) != 4u64 {
         fail("L70 (e): PREPARED does not carry one rewrite per held row")
+    }
+    // F2 (RUNNER-SPEC §14.3 "Preparing"): OLD settles its own rows at the base under the
+    // approved fates and accepts only a PREPARED that applies exactly those values.
+    if let Error(_) = settlement_check(db, validated, r2, fate_crash_flags()) {
+        fail("L70 (e): OLD refuses the PREPARED of the approved fates")
+    }
+    // The operator approved Release for C; PREPARED cancels it.
+    if !settle_refused(settlement_check(db, validated, r2, fate.Fates(all: Some(Release), entries: list.new()))) {
+        fail("L70 (e): OLD accepts Cancel where Release was approved")
+    }
+    // No fates were approved, yet PREPARED's 0x0085 frame releases held runs.
+    if !settle_refused(settlement_check(db, validated, r2, fate.none())) {
+        fail("L70 (e): OLD accepts a release no fate approved")
+    }
+    // A forged TRIGGERS beside the honest PREPARED shows nothing held, so the host sends no
+    // fates; OLD refuses the settlement all the same.
+    let quiet = TriggerReport(rows: list.new(), unmatched: list.new())
+    let codec: std.codec.Codec[TriggerReport] = std.codec.of()
+    let mut forged: Bytes = list.new()
+    result.unwrap(std.codec.encode(codec, quiet, mut forged))
+    result.unwrap(write_trigger_scan(exported.dir, take forged))
+    if trigger_report_unsettled(trigger_scan_report(exported.dir)) {
+        fail("L70 (e): the forged report holds")
+    }
+    if !settle_refused(settlement_check(db, validated, r2, fate.none())) {
+        fail("L70 (e): OLD accepts a settlement beside a forged report")
     }
     let work = result.unwrap(store.reserve_import(mut db, take validated))
     let imported = result.unwrap(store.import_trees(take work))

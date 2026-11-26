@@ -898,7 +898,7 @@ fn prepared(mut r: Rig, old: launcher.Child) -> List[launcher.Request] waits {
     old_says(mut r, old, PlaceExported(1u64, "export-1"))
     let a = r.a
     helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
-    apply(mut r, Got(Placed(clone(old), PlaceImported(image_two()))))
+    apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
 }
 
 // What the launcher was asked: OLD 1 an export, 2 a cutover, 3 an abort; 4 an Assemble,
@@ -1125,7 +1125,7 @@ fn deploy_drift_retry(c: Clock, rnd: Random) -> Result[(), ()] waits {
     }
     old_says(mut r, old, PlaceExported(1u64, "export-2"))
     helper_answers(mut r, helper_child(old, PrepareMode(retry, "export-2", list.new())), trigger_answer())
-    old_says(mut r, old, PlaceImported(image_two()))
+    old_says(mut r, old, PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))
     expect(still_preparing(r) && gens(r, "g") == two(1u64, 2u64), "L52: the retry's candidate started while the discarded one was live")
     finish(mut r, discarded, Code(0i32), Some(None))
     expect(is_dirty(r, "g", 1u64), "L52: the discarded candidate's end moved the row")

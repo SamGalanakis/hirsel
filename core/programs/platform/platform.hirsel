@@ -1873,7 +1873,7 @@ fn set_quota_turn(mut h: Host, tenant: String, q: Quota, now: Now) -> Result[Lis
 fn prepare(mut h: Host, name: String, request: Bytes, attempt: launcher.Attempt, assembly: Bytes, image_digest: Bytes, target: String, n_place: u64, grants: launcher.Grants, fetch_ns: u64, assemble_ns: u64) -> Result[List[launcher.Request], Refused] waits {
     let required = deploy_required_entries(h, request)?
     let held = deploy_held(h, request)?
-    let shown = operator.Preview(grants: clone(grants), entries: list.new(), triggers: operator.no_triggers())
+    let shown = operator.Preview(grants: clone(grants), entries: list.new(), triggers: operator.no_triggers(), migration: None)
     let Some(g) = group_row(h, name)? else {
         return Error(Unknown)
     }
@@ -2051,10 +2051,6 @@ fn refuse(mut h: Host, conn: u64, class: operator.Class, why: String) {
 
 fn request_row(h: Host, d: Bytes) -> Result[Option[RequestRow], Refused] waits {
     st(store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.requests, d))
-}
-
-fn report_of(row: DeployRow, pause: operator.Pause) -> operator.Report {
-    operator.Report(fetch_ns: row.fetch_ns, assemble_ns: row.assemble_ns, pause: clone(pause), preview: clone(row.preview))
 }
 
 // The admission of request d, if the host runs one.
@@ -2614,10 +2610,6 @@ fn interrupted(mut h: Host, name: String) {
         let _ = map.remove(mut h.shown, adm.request)
         refuse(mut h, conn, BusyClass, "the launcher session ended during admission: send the same Begin again")
     }
-}
-
-fn same_attempt(a: launcher.Attempt, b: launcher.Attempt) -> bool {
-    a.hi == b.hi && a.lo == b.lo
 }
 
 // The group whose running admission is attempt `a`.
@@ -3230,7 +3222,7 @@ fn helper_done(mut h: Host, c: launcher.Child, succeeded: bool, why: String, mut
             prep_fail(mut h, name, take p, "held for the operator's decision", true, mut out)
         } else if succeeded {
             p.stage = Importing(head)
-            list.push(mut out, Command(child_of(name, p.incarnation, p.old), HostImport(clone(p.describe), clone(p.release), clone(p.image))))
+            list.push(mut out, Command(child_of(name, p.incarnation, p.old), HostImport(clone(p.describe), clone(p.release), clone(p.image), fates_bytes(p.held))))
             set_prep(mut h, name, Some(take p))
         } else {
             prep_fail(mut h, name, take p, joined("prepare: ", why), true, mut out)
@@ -3270,12 +3262,14 @@ fn prep_placed(mut h: Host, name: String, take p: Prep, reply: runner.HostReply,
             _ => set_prep(mut h, name, Some(take q)),
         },
         Importing(head) => match reply {
-            PlaceImported(digest) => if list.len(digest) != 32u64 {
+            PlaceImported(digest, migration) => if list.len(digest) != 32u64 {
                 prep_fail(mut h, name, take q, "import: a malformed prepared digest", true, mut out)
             } else if let Some(_) = q.discarded {
+                q.preview.migration = Some(migration_of(migration))
                 q.stage = Imported(head, clone(digest))
                 set_prep(mut h, name, Some(take q))
             } else {
+                q.preview.migration = Some(migration_of(migration))
                 prep_pending(mut h, name, take q, head, digest, mut out)
             },
             PlaceRefused(why) => prep_fail(mut h, name, take q, joined("import: ", why), true, mut out),

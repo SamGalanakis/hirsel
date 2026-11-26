@@ -635,7 +635,8 @@ A run grants them with the Net rule list:
 hirsel run app --grant 'Net=UnixRoot pg /run/postgresql;UnixConnect pg .s.PGSQL.5432'
 ```
 
-`UnixRoot <label> <absolute-path>` binds a label. A rule whose label no `UnixRoot` of the same
+`UnixRoot <label> <absolute-path|.>` binds a label. The path `.` names the working directory
+at startup. A rule whose label no `UnixRoot` of the same
 grant binds is refused with the required syntax, and so is a label bound twice. A `UnixRoot` is
 not a rule: it grants nothing alone, and `net.narrow` cannot name one. `net.narrow` intersects
 a `Unix` rule only with a `Unix` rule of the same direction, root and path, and drops every

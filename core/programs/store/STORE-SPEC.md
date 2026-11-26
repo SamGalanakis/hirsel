@@ -7633,7 +7633,7 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
 
 ### 15.4 `hirsel store backup` and `hirsel store restore`
 
-These commands sit beside the `inspect`, `stats` and `verify` commands that row 1.4 adds. Every `hirsel store` command names the directory of a log@1 store as an operand, and every one runs in `libexec/hirsel/store_tool`, an executable of the platform package built with the installation, as `pin_reader` is (launch.md). The driver opens the directories and passes them to the tool as descriptors 3 and 4. The tool's two `Dir` grants are `/proc/self/fd/3` and `/proc/self/fd/4`, so it reaches nothing else on the file system.
+These commands sit beside the `inspect`, `stats` and `verify` commands that row 1.4 adds. Every `hirsel store` command names the directory of a log@1 store as an operand, and every one runs in `libexec/hirsel/store_tool`, an executable of the platform package built with the installation, as `pin_reader` is (launch.md). The driver opens the directories and passes them to the tool as descriptors 3 and 4. The tool's two `Dir` grants are `/proc/self/fd/3` and `/proc/self/fd/4` on Linux and `/dev/fd/3` and `/dev/fd/4` on macOS, so it reaches nothing else on the file system.
 
 | Form | Does |
 |---|---|

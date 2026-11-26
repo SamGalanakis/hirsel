@@ -673,8 +673,9 @@ def _toolchain_bundle_impl(ctx):
     # images, recorded in hirsel-core-toolchain.json, and the toolchain package archives. The compiler copies
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
     # builds the platform host as libexec/hirsel/platform_main (docs/spec/launch.md "Starting
-    # the host") and its offline pin reader as libexec/hirsel/pin_reader: their grants name the state directory as /proc/self/cwd, the directory the
-    # launcher starts the host in, and the driver the reader. libexec/hirsel/store_tool runs `hirsel store
+    # the host") and its offline pin reader as libexec/hirsel/pin_reader. The launcher
+    # starts the host in the state directory, and the driver starts the reader there.
+    # libexec/hirsel/store_tool runs `hirsel store
     # backup|restore` (STORE-SPEC §15.4) on the two directories the driver passes as fds 3 and 4.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
@@ -689,6 +690,8 @@ def _toolchain_bundle_impl(ctx):
         # Keep the build-tree RPATH valid. Install products with the final
         # compiler because BOLT changes its GNU build ID.
         compiler = ctx.actions.copy_file("hirsel", ctx.attrs._bolt_compiler, executable_bit_override = True)
+    cwd = "." if ctx.attrs._darwin else "/proc/self/cwd"
+    fd_dir = "/dev/fd" if ctx.attrs._darwin else "/proc/self/fd"
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
@@ -699,12 +702,12 @@ def _toolchain_bundle_impl(ctx):
         'mkdir -p "$TMPDIR/platform" "$root/libexec/hirsel"; cp -L "${14}"/platform/* "$TMPDIR/platform/"; rm -f "$TMPDIR/platform/hirsel.toml"',
         TOOLCHAIN_BINDINGS + ' "${14}/platform/hirsel.toml" > "$TMPDIR/platform/hirsel.toml"',
         '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/main --grant Clock --grant Random --grant Tasks'
-        + ' --grant "Net=UnixRoot ctl /proc/self/cwd;UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'
-        + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(PLATFORM_HOST_LIMIT),
+        + ' --grant "Net=UnixRoot ctl {};UnixConnect ctl launcher.sock;UnixListen ctl operator.sock"'.format(cwd)
+        + ' --dir {}/catalog --limit {} -o "$root/libexec/hirsel/platform_main" > /dev/null'.format(cwd, PLATFORM_HOST_LIMIT),
         '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/platform_main/read_pin --grant Clock --grant Stdout'
-        + ' --dir /proc/self/cwd/catalog --limit {} -o "$root/libexec/hirsel/pin_reader" > /dev/null'.format(PLATFORM_HOST_LIMIT),
+        + ' --dir {}/catalog --limit {} -o "$root/libexec/hirsel/pin_reader" > /dev/null'.format(cwd, PLATFORM_HOST_LIMIT),
         '"$root/hirsel" build "$TMPDIR/platform" --entry platform@1/store_tool/main --grant Clock --grant Random --grant Tasks --grant Stdout --grant Stderr'
-        + ' --dir /proc/self/fd/3 --dir /proc/self/fd/4 --limit {} -o "$root/libexec/hirsel/store_tool" > /dev/null'.format(PLATFORM_HOST_LIMIT),
+        + ' --dir {}/3 --dir {}/4 --limit {} -o "$root/libexec/hirsel/store_tool" > /dev/null'.format(fd_dir, fd_dir, PLATFORM_HOST_LIMIT),
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     ctx.actions.run(
@@ -746,6 +749,7 @@ hirsel_toolchain_bundle = rule(
         "observed_recording_runtimes": attrs.dep(),
         "toolchain_packages": attrs.dep(),
         "platform_sources": attrs.list(attrs.source()),
+        "_darwin": attrs.bool(default = select({"prelude//os:macos": True, "DEFAULT": False})),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
     } | ({"_bolt_compiler": attrs.source(default = "root//tools/toolchain-dist:hirsel-bolt")} if DIST_BOLT == "use" else {}),

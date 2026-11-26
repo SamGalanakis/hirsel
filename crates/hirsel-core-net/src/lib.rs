@@ -18,7 +18,7 @@ pub mod unix;
 pub use env::{EnvPatterns, EnvSnapshot};
 
 /// The public grant spelling, also used in configuration diagnostics.
-pub const RULE_SYNTAX: &str = "Net=<Connect|Listen|UdpBind|UdpSend> <prefix>/<len> <lo>-<hi>[ public][;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
+pub const RULE_SYNTAX: &str = "Net=<Connect|Listen|UdpBind|UdpSend> <prefix>/<len> <lo>-<hi>[ public][;<rule>] or Net=Tls <names> <lo>-<hi> <System|Roots=sha256:<hex>> or Net=Resolve <names> or Net=UnixRoot <label> <absolute-path|.>;<UnixConnect|UnixListen|UnixBind|UnixSend> <label> <path>";
 
 /// Address rule tags in grant rows and tape headers. Tags 2 through 5
 /// identify other kinds of Net rules and are separate from Core variants.
@@ -652,6 +652,19 @@ mod tests {
         assert!(!fixed.permits("git", &[], &["FIXED"], "work"));
         assert!(!fixed.permits("git", &[], &["CALLER"], "work"));
         assert_eq!(fixed.charge(), Some(80)); // 32 + 11 + 16 + 8 + 12, rounded.
+    }
+
+    #[test]
+    fn unix_root_dot_names_the_startup_working_directory() {
+        let grant = NetGrant::parse(["UnixRoot ctl .", "UnixConnect ctl launcher.sock"]).unwrap();
+        assert_eq!(grant.roots["ctl"], ".");
+        let row = RuleView::unix_root(3, "ctl.");
+        // SAFETY: a string literal backs the row for the entire call.
+        assert_eq!(unsafe { row.decode_unix_root() }, Some(("ctl", ".")));
+        assert!(NetGrant::parse(["UnixRoot ctl ./other"]).is_err());
+        let row = RuleView::unix_root(3, "ctl./other");
+        // SAFETY: a string literal backs the row for the entire call.
+        assert_eq!(unsafe { row.decode_unix_root() }, None);
     }
 
     #[test]

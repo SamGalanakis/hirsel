@@ -1175,9 +1175,12 @@ the platform host as its first and only bootstrap child. N and M are positive de
 1 and 30000 by default. The launcher binds both sockets mode 0600, creates `S/catalog`, and
 starts the installed executable with working directory S and the program-visible argv
 `platform_main ctl launcher.sock N M`. The host's grants are compiled into that executable:
-its `Dir` is `/proc/self/cwd/catalog`, and its Net root `ctl` is `/proc/self/cwd` with
-`UnixConnect ctl launcher.sock` and `UnixListen ctl operator.sock`, beside Clock, Random and
-Tasks. Nothing in the host changes its working directory. A missing executable is an
+its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
+is `/proc/self/cwd` on Linux and `.` on macOS, with `UnixConnect ctl launcher.sock` and
+`UnixListen ctl operator.sock`, beside Clock, Random and Tasks. The offline pin reader
+uses the same `Dir` path. The store backup and restore helper's two `Dir` grants are
+`/proc/self/fd/3` and `/proc/self/fd/4` on Linux and `/dev/fd/3` and `/dev/fd/4` on macOS.
+Nothing in the host changes its working directory. A missing executable is an
 incomplete installation, and the launcher ends with status 74.
 
 **The operator listener.** The launcher passes the operator listener as descriptor 3 and

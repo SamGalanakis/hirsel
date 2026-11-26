@@ -89,6 +89,10 @@ pub struct NetGrant {
     pub roots: BTreeMap<String, String>,
 }
 
+fn unix_root_path(path: &str) -> bool {
+    (path == "." || path.starts_with('/')) && !path.contains('\0')
+}
+
 impl NetGrant {
     pub fn parse(rows: impl IntoIterator<Item = impl AsRef<str>>) -> Result<Self, String> {
         let mut grant = Self::default();
@@ -100,7 +104,7 @@ impl NetGrant {
                 else {
                     return Err(format!("expected --grant {RULE_SYNTAX}: {text}"));
                 };
-                if !path.starts_with('/') || text.contains('\0') || grant.roots.contains_key(label)
+                if !unix_root_path(path) || label.contains('\0') || grant.roots.contains_key(label)
                 {
                     return Err(format!("expected --grant {RULE_SYNTAX}: {text}"));
                 }
@@ -345,11 +349,8 @@ impl RuleView {
             return None;
         }
         let (label, path) = unsafe { self.text()? }.split_at_checked(self.address.hi as usize)?;
-        (!label.is_empty()
-            && path.starts_with('/')
-            && !label.contains('\0')
-            && !path.contains('\0'))
-        .then_some((label, path))
+        (!label.is_empty() && !label.contains('\0') && unix_root_path(path))
+            .then_some((label, path))
     }
 
     unsafe fn text(&self) -> Option<&str> {

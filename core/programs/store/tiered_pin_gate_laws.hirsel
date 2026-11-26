@@ -553,8 +553,10 @@ fn idle_l100_pin_after_idle(d: Dir, c: Clock, r: Random, tasks: Tasks, crash: Ga
         let _ = checkpoint(mut db)?
         drains += 1
     }
-    if !compact_listed(db, fixture.pack) || list.len(db.pins) != 0 {
-        fail("L100 (d): after the drain P is listed and no holder is Tiered")
+    // On main P stays listed here; after M3b-S1 the drain's own cut may be
+    // Tiered-idle and retire it. The walker and the reads are the outcomes.
+    if list.len(db.pins) != 0 {
+        fail("L100 (d): after the drain no holder is Tiered")
     }
     let _ = checkpoint(mut db)?
     let pinned_db = gate_pin_cut(d, c, r, tasks, options, take db, "s", take s, crash)?

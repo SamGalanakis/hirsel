@@ -286,3 +286,128 @@ fn capture_scan(id: StoreId, take walk: CaptureWalk, take initial: JournalReplay
     }
     Ok(take replay)
 }
+
+fn journal_apply_ops(file: String, mut ids: u64, mut tree: PageTree, ops: List[JournalOp], mut account: ReplayTieredAccount) -> Result[(), Error] {
+    if list.len(ops) == 0 {
+        return Ok(())
+    }
+    let mut next_stamp = stamp_after(ids)?
+    let domain = tree_domain(tree)
+    let mut processed = 0u64
+    for slot in 0u64 .. list.len(ops) {
+        if slot < processed {
+            continue
+        }
+        let op = view ops[slot]
+        if domain == CollectionMap {
+            if list.len(op.key) < 4 {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+            let (kind, tiered_descriptor) = {
+                let Some(descriptor) = std.page.lookup(tree.root, list.slice(op.key, 0, 4)) else {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                journal_collection_descriptor(descriptor)
+            }
+            if let Some(before) = tiered_descriptor {
+                replay_tiered_op(file, mut tree, mut next_stamp, mut account, before, op)?
+                continue
+            }
+            if let Some(trim) = op.trim {
+                match trim_log_page(mut tree, op.key, trim.floor, Some(trim.dropped), 0, mut next_stamp) {
+                    Ok(_) => (),
+                    Error(Corrupt(_)) => return Error(disk_fault(file, 0, Malformed)),
+                    Error(take problem) => return Error(take problem),
+                }
+                continue
+            }
+            if kind == LogCollection {
+                let Some(value) = view op.value else {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                if list.len(op.key) != 12 || op.prior != 0 || list.len(value) < 2 {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                let seq: u64 = list.word_be(op.key, 4)
+                let id: u32 = list.word_be(op.key, 0)
+                let limits = committed_log_bounds(tree, id)?
+                if seq != limits.next || seq == 18446744073709551615u64 {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                apply_log_append(mut tree, op.key, value, None, 0, mut next_stamp)?
+                continue
+            }
+            if kind == TableCollection || kind == IndexCollection {
+                processed = journal_sorted_run(ops, slot)
+                if processed > slot + 1 {
+                    journal_collection_batch(file, mut tree, ops, slot, processed, mut next_stamp)?
+                    continue
+                }
+            }
+            if op.prior != stored_prior(get_page_row(tree, op.key)) {
+                return Error(disk_fault(file, 0, Malformed))
+            }
+            if kind == CellCollection {
+                if list.len(op.key) != 4 {
+                    return Error(disk_fault(file, 0, Malformed))
+                }
+                let raw = match op.value {
+                    Some(stored) => Some(view stored),
+                    None => None
+                }
+                if let Some(stored) = raw {
+                    if list.len(stored) < 2 {
+                        return Error(disk_fault(file, 0, Malformed))
+                    }
+                }
+                apply_cell(mut tree, op.key, raw, None, 0, mut next_stamp)?
+                continue
+            }
+        } else if let Some(_) = op.trim {
+            return Error(disk_fault(file, 0, Malformed))
+        }
+        match op.value {
+            Some(value) => put_page_row(mut tree, op.key, value, 0, mut next_stamp)?,
+            None => {
+                let _ = remove_page_row(mut tree, op.key, 0, mut next_stamp)?
+            },
+        }
+    }
+    canonical_tree(mut tree)?
+    ids = next_stamp - 1
+    Ok(())
+}
+
+fn journal_sorted_run(ops: List[JournalOp], start: u64) -> u64 {
+    let collection = list.slice(ops[start].key, 0, 4)
+    let mut end = start + 1
+    while end < list.len(ops) {
+        let op = view ops[end]
+        if let Some(_) = op.trim {
+            break
+        }
+        if list.len(op.key) < 4 || list.slice(op.key, 0, 4) != collection || list.compare_bytes(ops[end - 1].key, op.key) != Less {
+            break
+        }
+        end += 1
+    }
+    end
+}
+
+fn journal_collection_batch(file: String, mut tree: PageTree, ops: List[JournalOp], start: u64, end: u64, mut draw: u64) -> Result[(), Error] {
+    let mut edits: List[std.page.BatchEdit] = list.with_capacity(end - start)
+    for slot in start .. end {
+        let op = view ops[slot]
+        let value: Option[std.page.BatchValue] = match view op.value {
+            Some(raw) => Some(BatchBytes(copied(raw)?)),
+            None => None,
+        }
+        let key = copied(list.slice(op.key, 4, list.len(op.key)))?
+        list.push(mut edits, std.page.BatchEdit(key: take key, value: take value, prior: Some(op.prior)))
+    }
+    match apply_collection_batch(mut tree, list.slice(ops[start].key, 0, 4), edits, 0, mut draw) {
+        Ok(()) => Ok(()),
+        Error(MalformedPage) => Error(disk_fault(file, 0, Malformed)),
+        Error(problem) => Error(page_error(problem)),
+    }
+}

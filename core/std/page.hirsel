@@ -2285,6 +2285,7 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
     let mut rows: List[Entry] = list.with_capacity(hi - lo)
     let mut kids: List[Slot] = list.new()
     let mut blobs: List[BlobSlot] = list.new()
+    let mut loose_below = false
     for i in lo .. hi {
         let piece = view items[i]
         let mut row: Entry = clone(piece.row)
@@ -2292,6 +2293,7 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
             list.clear(mut row.key)
         }
         if let Some(kid) = piece.kid {
+            loose_below = loose_below || child_loose(kid)
             list.push(mut kids, clone(kid))
         }
         if let BlobValue(edge) = row.cell {
@@ -2306,7 +2308,7 @@ fn build_section(items: List[PageSlot], domain: Domain, lvl: u8, lo: u64, hi: u6
         list.push(mut rows, take row)
     }
     let image = pack_entries(rows, lvl, id, domain)?
-    Ok(arc.new(new_page(take image, take kids, take blobs, true)))
+    Ok(arc.new(new_page(take image, take kids, take blobs, loose_below)))
 }
 
 fn build_pieces(items: List[PageSlot], domain: Domain, lvl: u8, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
@@ -2711,6 +2713,291 @@ fn contains_row(root: Arc[Page], key: Bytes, load: scoped fn(PagePtr) -> Result[
     }
     let (_, hit) = search(root.image, key)
     Ok(hit)
+}
+
+/// The value of a sorted edit. A shared value can become an overflow body
+/// without copying its bytes.
+pub type BatchValue: shareable + send = BatchBytes(Bytes) | BatchShared(Arc[Bytes])
+
+/// One edit to a resident row tree. An expected prior is the previous value's
+/// length plus one, with zero for an absent row.
+pub type BatchEdit: shareable + send {
+    key: Bytes,
+    value: Option[BatchValue],
+    prior: Option[u32]
+}
+
+fn batch_value_bytes(value: BatchValue) -> View[Bytes] in value {
+    match value {
+        BatchBytes(raw) => view raw,
+        BatchShared(contents) => view contents,
+    }
+}
+
+fn batch_value_slot(edit: BatchEdit, value: BatchValue, inline: u64, mut next: u64) -> Result[PageSlot, Error] {
+    let raw = batch_value_bytes(value)
+    let width = list.len(raw)
+    let key: Bytes = clone(edit.key)
+    if width <= inline {
+        return Ok(PageSlot(row: Entry(key: take key, cell: InlineValue(clone(raw))), kid: None, blob: None))
+    }
+    let overflow = BlobRef(stamp: take_stamp(mut next)?, len: width, checksum: check.xxh3(raw, 0, width), pack: 0, offset: 0, body: 0)
+    let contents: Arc[Bytes] = match value {
+        BatchBytes(data) => arc.new(clone(data)),
+        BatchShared(shared) => arc.share(shared),
+    }
+    Ok(PageSlot(row: Entry(key: take key, cell: BlobValue(overflow)), kid: None, blob: Some(HotBlob(take contents))))
+}
+
+fn batch_prior(slot: PageSlot) -> u32 {
+    match slot.row.cell {
+        InlineValue(raw) => int.truncate(1 + list.len(raw)),
+        BlobValue(overflow) => int.truncate(1 + overflow.len),
+        Child(_) => fail("page: batch leaf has a child"),
+    }
+}
+
+fn merge_batch_leaf(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inline: u64, mut next: u64) -> Result[(List[PageSlot], bool), Error] {
+    let rows = owned_slots(root)
+    let mut merged: List[PageSlot] = list.with_capacity(list.len(rows) + end - start)
+    let mut row = 0u64
+    let mut changed = false
+    for i in start .. end {
+        let edit = view ops[i]
+        while row < list.len(rows) && list.compare_bytes(rows[row].row.key, edit.key) == Less {
+            list.push(mut merged, clone(rows[row]))
+            row += 1
+        }
+        let hit = row < list.len(rows) && rows[row].row.key == edit.key
+        if let Some(expected) = edit.prior {
+            let prior = if hit {
+                batch_prior(rows[row])
+            } else {
+                0u32
+            }
+            if expected != prior {
+                return Error(MalformedPage)
+            }
+        }
+        if hit {
+            row += 1
+            changed = true
+        }
+        if let Some(value) = view edit.value {
+            list.push(mut merged, batch_value_slot(edit, value, inline, mut next)?)
+            changed = true
+        }
+    }
+    while row < list.len(rows) {
+        list.push(mut merged, clone(rows[row]))
+        row += 1
+    }
+    Ok((take merged, changed))
+}
+
+// Pack a merged run in key order. In a branch, pass the original divider up
+// and keep at least two entries in each piece when the run has siblings.
+fn batch_pieces(items: List[PageSlot], domain: Domain, lvl: u8, mut next: u64) -> Result[List[PagePiece], Error] {
+    let n = list.len(items)
+    let mut parts: List[PagePiece] = list.new()
+    let mut lo = 0u64
+    while lo < n {
+        let mut sum = full_size(items[lo].row)
+        let mut hi = lo + 1
+        while hi < n {
+            sum += full_size(items[hi].row)
+            if !legal(lvl, hi - lo + 1, slot_size_with_prefix(items, lvl, lo, hi + 1, sum)) {
+                break
+            }
+            hi += 1
+        }
+        if lvl != 0 && hi == n - 1 {
+            hi = if hi - lo == 2 {
+                n
+            } else {
+                hi - 1u64
+            }
+        }
+        let divider: Bytes = if lo == 0 {
+            list.new()
+        } else if lvl == 0 {
+            separator(items[lo - 1].row.key, items[lo].row.key)?
+        } else {
+            clone(items[lo].row.key)
+        }
+        let page = build_section(items, domain, lvl, lo, hi, take_stamp(mut next)?)?
+        list.push(mut parts, PagePiece(root: take page, separator: take divider))
+        lo = hi
+    }
+    Ok(take parts)
+}
+
+fn batch_children(mut rows: List[PageSlot], domain: Domain, child_level: u8, first: u64, mut next: u64) -> Result[(), Error] {
+    let mut i = 0u64
+    while i < list.len(rows) && list.len(rows) > 1 {
+        let (unary, room) = {
+            let Some(edge) = view rows[i].kid else {
+                fail("page: batch branch has no child")
+            }
+            let selected = edit_page(edge, child_level, resident_edit_frame)?
+            let unary = child_level != 0 && count(selected.image) == 1
+            (unary, unary || (stamp(selected.image) >= first && sealed_size(selected.image) < TARGET / 4))
+        }
+        if !room {
+            i += 1
+            continue
+        }
+        let left = if i + 1 == list.len(rows) {
+            i - 1
+        } else {
+            i
+        }
+        let right = left + 1u64
+        let (take replacement, take bridge) = {
+            let (Some(a_edge), Some(b_edge)) = (view rows[left].kid, view rows[right].kid) else {
+                fail("page: batch siblings have no children")
+            }
+            let a = edit_page(a_edge, child_level, resident_edit_frame)?
+            let b = edit_page(b_edge, child_level, resident_edit_frame)?
+            let mut joined = owned_slots(a)
+            let start = list.len(joined)
+            let mut more = owned_slots(b)
+            if child_level != 0 {
+                more[0].row.key = clone(rows[right].row.key)
+            }
+            for take item in take more {
+                list.push(mut joined, take item)
+            }
+            if !unary && !legal(child_level, list.len(joined), section_size(joined, child_level, 0, list.len(joined))) {
+                i += 1
+                continue
+            }
+            if child_level != 0 {
+                batch_children(mut joined, domain, child_level - 1, first, mut next)?
+            }
+            let mut pieces: List[PagePiece] = list.new()
+            let n = list.len(joined)
+            if unary && n > 3 {
+                let pivot = if start == 1 {
+                    2u64
+                } else {
+                    n - 2
+                }
+                let left_page = build_section(joined, domain, child_level, 0, pivot, take_stamp(mut next)?)?
+                let right_page = build_section(joined, domain, child_level, pivot, n, take_stamp(mut next)?)?
+                list.push(mut pieces, PagePiece(root: take left_page, separator: list.new()))
+                list.push(mut pieces, PagePiece(root: take right_page, separator: clone(joined[pivot].row.key)))
+            } else {
+                pieces = batch_pieces(joined, domain, child_level, mut next)?
+            }
+            let bridge: Bytes = clone(rows[left].row.key)
+            (take pieces, take bridge)
+        }
+        rows[left] = branch_slot(take bridge, replacement[0].root)
+        if list.len(replacement) == 1 {
+            close_slot(mut rows, right)
+            i = left
+        } else {
+            rows[right] = branch_slot(clone(replacement[1].separator), replacement[1].root)
+            for part in 2u64 .. list.len(replacement) {
+                let held = view replacement[part]
+                list.insert(mut rows, left + part, branch_slot(clone(held.separator), held.root))
+            }
+            i = left + list.len(replacement)
+        }
+    }
+    Ok(())
+}
+
+fn batch_path(root: Arc[Page], ops: List[BatchEdit], start: u64, end: u64, inline: u64, first: u64, mut next: u64) -> Result[List[PagePiece], Error] {
+    let lvl = level(root.image)
+    let domain = root.image.domain
+    if lvl == 0 {
+        let (take rows, changed) = merge_batch_leaf(root, ops, start, end, inline, mut next)?
+        if !changed {
+            return Ok(one_trim_piece(root))
+        }
+        return batch_pieces(rows, domain, 0, mut next)
+    }
+    let mut rows: List[PageSlot] = list.new()
+    let mut at = start
+    let size = count(root.image)
+    for slot in 0u64 .. size {
+        let edge = view root.kids[slot]
+        let divider = option.unwrap(key_at(root.image, slot))
+        let from = at
+        if slot + 1 == size {
+            at = end
+        } else {
+            let high = option.unwrap(key_at(root.image, slot + 1))
+            while at < end && list.compare_bytes(ops[at].key, high) == Less {
+                at += 1
+            }
+        }
+        if at == from {
+            let row = option.unwrap(entry(root.image, slot))
+            list.push(mut rows, PageSlot(row: take row, kid: Some(clone(edge)), blob: None))
+            continue
+        }
+        let base = edit_page(edge, lvl - 1, resident_edit_frame)?
+        let pieces = batch_path(base, ops, from, at, inline, first, mut next)?
+        for part in 0u64 .. list.len(pieces) {
+            let key: Bytes = if part == 0 {
+                clone(divider)
+            } else {
+                clone(pieces[part].separator)
+            }
+            list.push(mut rows, branch_slot(take key, pieces[part].root))
+        }
+    }
+    batch_children(mut rows, domain, lvl - 1, first, mut next)?
+    batch_pieces(rows, domain, lvl, mut next)
+}
+
+/// Apply strictly increasing, distinct edits to a resident row tree.
+/// The root is replaced only after the candidate and prior checks succeed.
+pub fn apply_sorted_batch(mut root: Arc[Page], ops: List[BatchEdit], inline: u64, mut next: u64) -> Result[(), Error] {
+    let domain = root.image.domain
+    if domain == CollectionMap || inline > INLINE_MAX {
+        return Error(MalformedPage)
+    }
+    let n = list.len(ops)
+    if n == 0 {
+        return Ok(())
+    }
+    for i in 0u64 .. n {
+        let op = view ops[i]
+        if list.len(op.key) > key_limit(domain) {
+            return Error(PageLimit)
+        }
+        if let Some(value) = view op.value {
+            if list.len(batch_value_bytes(value)) > VALUE_MAX {
+                return Error(PageLimit)
+            }
+        }
+        if i != 0 && list.compare_bytes(ops[i - 1].key, op.key) != Less {
+            return Error(OutOfOrder)
+        }
+    }
+    let first = next
+    let mut parts = batch_path(root, ops, 0, n, inline, first, mut next)?
+    if list.len(parts) == 0 {
+        root = empty(0, 0, domain)
+        return Ok(())
+    }
+    while list.len(parts) > 1 {
+        let mut rows: List[PageSlot] = list.with_capacity(list.len(parts))
+        append_piece_slots(mut rows, parts)
+        let lvl = level(parts[0u64].root.image) + 1
+        parts = batch_pieces(rows, domain, lvl, mut next)?
+    }
+    let mut reduced = arc.share(parts[0u64].root)
+    while level(reduced.image) != 0 && count(reduced.image) == 1 {
+        let descendant = arc.share(hot_child(reduced.kids[0u64]))
+        reduced = take descendant
+    }
+    root = take reduced
+    Ok(())
 }
 
 /// Upsert one row, copying a shared path and keeping private pages editable.

@@ -422,8 +422,36 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool,
 }
 
 fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
+    let collection_map = tree_domain(tree) == CollectionMap
+    let mut processed = 0u64
     for slot_order in 0u64 .. operations.count {
-        materialize_row(mut tree, ordered_row(operations, order, slot_order), memory_only, first, mut draw)?
+        if slot_order < processed {
+            continue
+        }
+        let op = ordered_row(operations, order, slot_order)
+        if collection_map {
+            let collection = list.slice(op.key, 0, 4)
+            if let Some(descriptor) = collection_by_key(tree, collection) {
+                if descriptor.kind == TableCollection || descriptor.kind == IndexCollection {
+                    processed = slot_order + 1
+                    while processed < operations.count {
+                        let following = ordered_row(operations, order, processed)
+                        if list.slice(following.key, 0, 4) != collection {
+                            break
+                        }
+                        processed += 1
+                    }
+                    if memory_only && descriptor.residency == ResidentTiered {
+                        continue
+                    }
+                    if processed > slot_order + 1 {
+                        materialize_collection_batch(mut tree, operations, order, slot_order, processed, first, mut draw)?
+                        continue
+                    }
+                }
+            }
+        }
+        materialize_row(mut tree, op, memory_only, first, mut draw)?
     }
     Ok(())
 }
@@ -460,6 +488,36 @@ fn materialize_row(mut tree: PageTree, op: DataOp, memory_only: bool, first: u64
             Ok(())
         },
     }
+}
+
+fn materialize_collection_batch(mut tree: PageTree, operations: DataRows, order: DataOrder, start: u64, end: u64, first: u64, mut draw: u64) -> Result[(), Error] {
+    let mut edits: List[std.page.BatchEdit] = list.with_capacity(end - start)
+    for slot in start .. end {
+        let op = ordered_row(operations, order, slot)
+        let value: Option[std.page.BatchValue] = match view op.value {
+            Some(PageValue(raw)) => Some(BatchBytes(copied(raw)?)),
+            Some(BlobBody(raw)) => Some(BatchShared(arc.share(raw))),
+            None => None,
+        }
+        let key = copied(list.slice(op.key, 4, list.len(op.key)))?
+        list.push(mut edits, std.page.BatchEdit(key: take key, value: take value, prior: None))
+    }
+    let collection = list.slice(ordered_row(operations, order, start).key, 0, 4)
+    page_result(apply_collection_batch(mut tree, collection, edits, first, mut draw))
+}
+
+fn apply_collection_batch(mut tree: PageTree, collection: Bytes, edits: List[std.page.BatchEdit], first: u64, mut draw: u64) -> Result[(), std.page.Error] {
+    let inline = tree.inline
+    let Some(empty_root) = view tree.empty_collection else {
+        fail("store: missing empty collection page")
+    }
+    std.page.edit_collection(mut tree.root, collection, first, mut draw, scoped fn(mut root: Arc[std.page.Page], mut stamps: u64) -> Result[(), std.page.Error] {
+        std.page.apply_sorted_batch(mut root, edits, inline, mut stamps)?
+        if std.page.count(std.page.image_of(root)) == 0 {
+            root = arc.share(empty_root)
+        }
+        Ok(())
+    })
 }
 
 fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {

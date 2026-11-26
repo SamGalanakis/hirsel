@@ -8,3 +8,8 @@ and sorted bulk build are specified in the
 positions. It skips rows with equal keys and value bytes without allocating.
 It returns the first differing slots and their key order, or no order when
 one leaf is exhausted.
+
+`apply_sorted_batch` merges strictly increasing, distinct edits into a
+resident row tree. An edit can carry the expected prior value length plus
+one, with zero for an absent row. A prior mismatch refuses the batch
+before the root is replaced.

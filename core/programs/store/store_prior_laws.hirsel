@@ -347,3 +347,161 @@ fn journal_test_v264_recovery(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     retained_replay_case(d, c, r, tasks)?
     prior_ceiling_case(d, c, r, tasks)
 }
+
+fn batch_law_edits(round: u64) -> Result[DataRows, Error] {
+    let mut ops = new_data_rows()
+    for i in 0u64 .. 3072 {
+        let k = 3071 - i
+        let id: u32 = int.truncate(1 + k % 2)
+        let key = logical_key(id, key_word(k))?
+        let choice = (k * 41 + round * 107 + k * round * 59) % 211
+        if round >= 2 && choice >= 13 {
+            continue
+        }
+        let value: Option[StagedValue] = if round == 1 || (round >= 2 && choice % 3 == 0) {
+            None
+        } else {
+            let width = if choice % 17 == 0 {
+                1100 + choice
+            } else {
+                160 + choice
+            }
+            let mut raw = prior_fixture_value(width)
+            list.set_word_le(mut raw, 0, round * 3072 + k)
+            Some(stage_value(take raw, 1024))
+        }
+        push_data_row(mut ops, DataOp(key: take key, value: take value, trim: None, prior: None))
+    }
+    Ok(take ops)
+}
+
+fn batch_law_bounds(root: Arc[std.page.Page], low: Option[View[Bytes]], high: Option[View[Bytes]]) -> Result[(), Error] {
+    let image = std.page.image_of(root)
+    let height = std.page.level(image)
+    let n = std.page.count(image)
+    if height != 0 && n < 2 {
+        return Error(Missing("unary batch branch"))
+    }
+    let mut prev: Option[Bytes] = None
+    for i in 0u64 .. n {
+        let key = option.unwrap(std.page.key_at(image, i))
+        if height != 0 && i == 0 {
+            if list.len(key) != 0 {
+                return Error(Missing("batch entry zero divider"))
+            }
+        } else {
+            if let Some(edge) = low {
+                if key < edge {
+                    return Error(Missing("batch lower bound"))
+                }
+            }
+            if let Some(edge) = high {
+                if key >= edge {
+                    return Error(Missing("batch upper bound"))
+                }
+            }
+            if let Some(previous) = view prev {
+                if key <= previous {
+                    return Error(Missing("batch key order"))
+                }
+            }
+        }
+        if height != 0 {
+            let child = option.unwrap(std.page.child(root, i))
+            let ceiling = std.page.key_at(image, i + 1)
+            let from = if i == 0 {
+                low
+            } else {
+                Some(view key)
+            }
+            let to = if let Some(edge) = view ceiling {
+                Some(view edge)
+            } else {
+                high
+            }
+            if std.page.level(std.page.image_of(child)) + 1 != height {
+                return Error(Missing("batch page level"))
+            }
+            batch_law_bounds(child, from, to)?
+        }
+        prev = Some(take key)
+    }
+    Ok(())
+}
+
+fn batch_law_compare(candidate: PageTree, oracle: PageTree) -> Result[(), Error] {
+    for id in 1u32 .. 3 {
+        let collection = prefix(id)?
+        let want = option.unwrap(std.page.collection_child(oracle.root, collection))
+        let got = option.unwrap(std.page.collection_child(candidate.root, collection))
+        if std.page.totals(want) != std.page.totals(got) {
+            return Error(Missing("batch row totals"))
+        }
+        batch_law_bounds(got, None, None)?
+        let mut a = std.page.cursor_open(want, None, true, false)
+        let mut b = std.page.cursor_open(got, None, true, false)
+        while let Some(row) = std.page.cursor_read(mut a, scoped fn(key: Bytes, value: Bytes) -> (Bytes, Bytes) {
+            (clone(key), clone(value))
+        }) {
+            let equal = std.page.cursor_read(mut b, scoped fn(key: Bytes, value: Bytes) -> bool {
+                key == row.0 && value == row.1
+            })
+            if equal != Some(true) {
+                return Error(Missing("batch row mismatch"))
+            }
+        }
+        if let Some(_) = std.page.cursor_next(mut b) {
+            return Error(Missing("extra batch row"))
+        }
+    }
+    Ok(())
+}
+
+@test
+fn sorted_batch_equivalence() -> Result[(), Error] {
+    let mut empty = std.page.empty(0, 0, Collection)
+    let mut invalid: List[std.page.BatchEdit] = list.new()
+    list.push(mut invalid, std.page.BatchEdit(key: key_word(0), value: Some(BatchBytes(key_word(70))), prior: Some(0u32)))
+    list.push(mut invalid, std.page.BatchEdit(key: key_word(1), value: None, prior: Some(3u32)))
+    let mut rejected_ids = 1u64
+    match std.page.apply_sorted_batch(mut empty, invalid, 1024, mut rejected_ids) {
+        Error(MalformedPage) => (),
+        _ => return Error(Missing("batch prior was accepted")),
+    }
+    if std.page.count(std.page.image_of(empty)) != 0 {
+        return Error(Missing("batch prior published a prefix"))
+    }
+    let mut oracle = new_page_tree(CollectionMap, 1024)
+    let mut oracle_ids = 0u64
+    define_store_collection(mut oracle, 1, 1, mut oracle_ids)?
+    define_store_collection(mut oracle, 2, 1, mut oracle_ids)?
+    let mut live_tree = share_page_tree(oracle)
+    let mut replay = share_page_tree(oracle)
+    let mut live_ids = oracle_ids + 1
+    let mut replay_ids = oracle_ids
+    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    for round in 0u64 .. 200 {
+        let mut ops = batch_law_edits(round)?
+        let order = capacity(data_order(ops))?
+        let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: round + 1), at: round, seed: 0)
+        let wire = capacity(encode_staged(ci, Some(view oracle), None, None, mut ops, order, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT))?
+        let frame = journal_decode_commit("batch", list.slice(wire, 16, list.len(wire)))?
+        for op in frame.data {
+            if let Some(value) = op.value {
+                put_page_row(mut oracle, op.key, value, 0, mut oracle_ids)?
+            } else {
+                let _ = remove_page_row(mut oracle, op.key, 0, mut oracle_ids)?
+            }
+        }
+        let first = live_ids
+        materialize_ordered_rows(mut live_tree, ops, order, false, first, mut live_ids)?
+        canonical_tree(mut live_tree)?
+        journal_apply_ops("batch", mut replay_ids, mut replay, frame.data, mut account)?
+        if !page_result(std.page.canonical(live_tree.root))? || !page_result(std.page.canonical(replay.root))? {
+            return Error(Missing("batch canonical form"))
+        }
+        batch_law_compare(live_tree, oracle)?
+        batch_law_compare(replay, oracle)?
+    }
+    Ok(())
+}

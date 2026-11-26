@@ -193,6 +193,7 @@ store@1/store/projector_bounded src=cdb341fd95967f34 sig=573f659966011bed run=af
 store@1/store/read_tail_step_budget src=33660962a0c8bdd8 sig=64bd102aabcf2184 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/small_bucket_place_plan_at_floor src=dbe626e3f6dcceff sig=27e2999eae5963c0 run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/small_directory_place_need src=2d4056db6c7ff73b sig=17af88bdbcf7cfc9 run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/sorted_batch_equivalence src=83f50276ff912e12 sig=5f21e5c55084d63c run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/stream_age_refusal_survives_longer_retention src=4ee426e54737f6bf sig=573159fa03004ac8 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/stream_quota_preserves_eviction_floor src=36d83b090a60b66e sig=7ab35b0b35ae3428 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/stream_quota_reopen_lost_response src=1f014df411b28ed3 sig=61493ae7ba858250 run=ea720f3846592392 bug=- oracle=- rows=pending

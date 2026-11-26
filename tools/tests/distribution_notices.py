@@ -161,6 +161,15 @@ class Notices(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'uninventoried bundle entries'):
             self.generate()
 
+    def test_cache_budget_is_refused_as_shipped_runtime_state(self):
+        self.sources['bundle_entries'].append('core-packages')
+        self.sources['files']['core-packages/*'] = dict(contents='core and std package images')
+        budget = self.bundle / 'core-packages/image/native/.budget'
+        budget.parent.mkdir(parents=True)
+        budget.write_bytes(b'\0' * 8)
+        with self.assertRaisesRegex(ValueError, 'runtime state'):
+            notices.check_bundle(self.bundle, self.sources, {'native': []})
+
     def test_unclassified_file_in_a_known_entry_refuses(self):
         (self.bundle / 'hirsel-std.products/nested').mkdir()
         (self.bundle / 'hirsel-std.products/nested/libz.so.1').write_bytes(b'extra code')

@@ -360,6 +360,8 @@ def check_bundle(bundle, sources, inventory):
         raise ValueError(f'missing bundle entries: {sorted(set(sources["bundle_entries"]) - present - OPTIONAL_ENTRIES)}')
     files = file_inventory(bundle)
     for path in files:
+        if PurePosixPath(path).name == '.budget':
+            raise ValueError(f'{path}: cache-size estimate is runtime state, not shipped content')
         classes = [p for p in sources['files'] if fnmatch.fnmatchcase(path, p)]
         if len(classes) != 1:
             raise ValueError(f'{path}: {"no notice covers this shipped file" if not classes else "classified twice: " + str(classes)}')

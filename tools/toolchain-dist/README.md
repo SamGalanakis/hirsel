@@ -138,9 +138,9 @@ separate Buck2 state, and keeps both bundles in the output directory.
 `OUTPUT/profile/`.
 It compares every file and reports the first differing byte offset in each
 changed file, starting at zero. It then builds the x86_64 release std with the
-first bundle at 1, 2 and 8 jobs and compares the three stores the same way,
-except each part cache's `.budget` size estimate: programs key their parts on
-the release std's bytes, so they must not depend on `HIRSEL_JOBS`.
+first bundle at 1, 2 and 8 jobs and compares the three stores the same way:
+programs key their parts on the release std's bytes, so they must not depend on
+`HIRSEL_JOBS`.
 `check-repro --output DIR --std-jobs PREFIX` runs only that comparison, on
 an installed bundle.
 

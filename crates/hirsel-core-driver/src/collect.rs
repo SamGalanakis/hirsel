@@ -81,19 +81,31 @@ const REPORT_BLOCKS: u64 = 64 * 1024 * 1024 / BLOCK;
 #[derive(Clone)]
 pub(crate) struct Cas {
     _pin: Option<Arc<File>>,
-    cache: Arc<Cache>,
+    cache: Option<Arc<Cache>>,
 }
 
 impl Store {
     /// The content store at `root`, its old layout deleted if its stamp is
     /// not this format's.
     pub(crate) fn cas(root: &Path) -> io::Result<Self> {
+        Self::content_store(root, true)
+    }
+
+    /// A bounded artifact store in the content-store layout, without the
+    /// per-install cache-size estimate or collection a mutable cache keeps.
+    pub(crate) fn cas_artifact(root: &Path) -> io::Result<Self> {
+        Self::content_store(root, false)
+    }
+
+    fn content_store(root: &Path, collected: bool) -> io::Result<Self> {
         let mut store = Self::new(root)?;
         store.cas = Some(Cas {
-            cache: Arc::new(Cache {
-                root: root.to_owned(),
-                pending: AtomicU64::new(0),
-                sweep: Mutex::new(None),
+            cache: collected.then(|| {
+                Arc::new(Cache {
+                    root: root.to_owned(),
+                    pending: AtomicU64::new(0),
+                    sweep: Mutex::new(None),
+                })
             }),
             _pin: None,
         });
@@ -125,7 +137,7 @@ impl Store {
         let mut side = Self::new(&path)?;
         let _ = File::open(&path)?.set_modified(SystemTime::now());
         side.cas = Some(Cas {
-            cache: Arc::clone(&cas.cache),
+            cache: cas.cache.clone(),
             _pin: Some(Arc::new(pin)),
         });
         Ok(side)
@@ -203,20 +215,23 @@ impl Cas {
     }
 
     pub(super) fn wrote(&self, bytes: usize) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
         let blocks = (bytes as u64).div_ceil(BLOCK).max(1);
-        let prior = self.cache.pending.fetch_add(blocks, Ordering::Relaxed);
+        let prior = cache.pending.fetch_add(blocks, Ordering::Relaxed);
         if prior + blocks < REPORT_BLOCKS {
             return;
         }
-        let mut worker = self.cache.sweep.lock().unwrap();
+        let mut worker = cache.sweep.lock().unwrap();
         if worker.as_ref().is_some_and(|thread| !thread.is_finished()) {
             return;
         }
         if let Some(done) = worker.take() {
             let _ = done.join();
         }
-        let root = self.cache.root.clone();
-        let blocks = self.cache.pending.swap(0, Ordering::Relaxed);
+        let root = cache.root.clone();
+        let blocks = cache.pending.swap(0, Ordering::Relaxed);
         *worker = thread::Builder::new()
             .name("hirsel-collect".into())
             .spawn(move || {
@@ -226,7 +241,7 @@ impl Cas {
             })
             .ok();
         if worker.is_none() {
-            self.cache.pending.fetch_add(blocks, Ordering::Relaxed);
+            cache.pending.fetch_add(blocks, Ordering::Relaxed);
         }
     }
 }
@@ -506,6 +521,23 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::sync::Barrier;
+
+    #[test]
+    fn an_artifact_store_writes_no_budget_estimate() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let key = ContentHash::of_bytes(b"artifact");
+        {
+            let store = Store::cas_artifact(root).unwrap();
+            store.put_keyed_blob(key, b"artifact bytes").unwrap();
+        }
+        assert!(!root.join(".budget").exists());
+        let store = Store::cas(root).unwrap();
+        assert_eq!(
+            store.get_keyed_blob(key).unwrap().map(|(_, bytes)| bytes),
+            Some(b"artifact bytes".to_vec())
+        );
+    }
 
     /// Law: eviction never makes a build read wrong bytes. A blob a build
     /// holds open reads whole after it is evicted, and a later read misses;

@@ -50,12 +50,12 @@ def first_difference(left, right):
             offset += len(x)
 
 
-def files(root, skip=()):
-    return {p.relative_to(root) for p in root.rglob('*') if p.is_file() and p.name not in skip}
+def files(root):
+    return {p.relative_to(root) for p in root.rglob('*') if p.is_file()}
 
 
-def compare(left, right, skip=()):
-    left_files, right_files = files(left, skip), files(right, skip)
+def compare(left, right):
+    left_files, right_files = files(left), files(right)
     equal = True
     for path in sorted(left_files | right_files):
         a, b = left / path, right / path
@@ -87,15 +87,14 @@ def std_at(prefix, run, jobs):
 
 
 def check_std_jobs(prefix, work):
-    """The release std store at each of STD_JOBS, byte for byte. `.budget` is a
-    part cache's size estimate, not content."""
+    """The release std store at each of STD_JOBS, byte for byte."""
     print(f'check-repro: building the {STD_TARGET} release std at jobs {STD_JOBS}', flush=True)
     with ThreadPoolExecutor(len(STD_JOBS)) as pool:
         outputs = list(pool.map(lambda jobs: std_at(prefix, work / f'std-j{jobs}', jobs), STD_JOBS))
     equal = True
     for jobs, other in zip(STD_JOBS[1:], outputs[1:]):
         print(f'check-repro: release std at jobs {STD_JOBS[0]} against jobs {jobs}', flush=True)
-        equal &= compare(outputs[0], other, skip=('.budget',))
+        equal &= compare(outputs[0], other)
     return equal
 
 

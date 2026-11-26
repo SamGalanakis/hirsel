@@ -43,7 +43,7 @@ impl CheckProduct {
             .ok_or_else(|| NativeStop::Entry("a prebuild emits an image's instances".into()))?;
         let mut inputs = crate::native::native_inputs(self, options).map_err(NativeStop::Input)?;
         // An installation writes its image's shipped objects themselves.
-        let library = Store::cas(
+        let library = Store::cas_artifact(
             &image
                 .store_root()
                 .join(crate::native::recipe_build::LIBRARY_OBJECTS),

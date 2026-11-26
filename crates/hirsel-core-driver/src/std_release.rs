@@ -290,7 +290,7 @@ fn prebuilt_side(
     else {
         return Ok(None);
     };
-    let store = Store::cas(&path)?;
+    let store = Store::cas_artifact(&path)?;
     let Some(key) = store
         .get(prebuilt_name(kin)?)?
         .and_then(|bytes| decode::<ContentHash>(&bytes))
@@ -467,7 +467,7 @@ impl CheckProduct {
         let (units, modules) = self.image_side(build)?;
         Ok(PrebuiltStd {
             target: target.to_owned(),
-            store: Store::cas(&image.store_root().join(PREBUILT))?,
+            store: Store::cas_artifact(&image.store_root().join(PREBUILT))?,
             units,
             modules,
         })

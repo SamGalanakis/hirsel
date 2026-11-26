@@ -156,7 +156,7 @@
     "reason": "atomic-write-durability-2912"
   },
   "crates/hirsel-core-driver/src/native.rs": {
-    "lines": 2768,
+    "lines": 2456,
     "raise_revision": 14,
     "reason": "http-server-https-2884"
   },

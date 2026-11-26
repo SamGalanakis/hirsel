@@ -229,7 +229,8 @@ draws its own from host entropy at entry, no recording holds it, and nothing obs
 depends on it ([SEM-5](semantics.md#sem-5-maps), [PROG-11](programs.md#prog-11-map-index)). A provider operation passes the replay point twice: at issue, before any host
 effect, and at delivery, before its result reaches the task. Each input enters the run once,
 at its own point, and nothing outside the run reaches a value except through such a point,
-or through a foreign call, which is not a replay point and which no recording build reaches
+or through a native foreign call, which is not a replay point and which no recording build reaches
+(a contained call reads only values the run computed, [FFI-14](foreign.md#ffi-14-determinism-traps-and-replay))
 ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)).
 A scheduler choice is an input; the result of an event is not, since the order and the
 run's other inputs determine it, so the same choices give the same `receive`,

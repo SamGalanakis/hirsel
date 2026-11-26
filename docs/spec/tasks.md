@@ -17,6 +17,8 @@ connection ([CONC-17](#conc-17-connections)) or a join. A flow stage ([CONC-14](
 is `send`. An own or resource type is `send` when it declares the bound
 ([OWN-4](ownership.md#own-4-bounds)) and each field type is `send`; a capability type is
 `send` when its declaration says so ([CAP-2](capabilities.md#cap-2-capabilities-are-opaque)).
+A handle of a contained foreign kind is plain but not `send`
+([FFI-12](foreign.md#ffi-12-the-contained-abi)).
 A plain `fn` is `send`; an owning closure is `own[send] fn` when every capture is `send`
 ([LANG-13](language.md#lang-13-callables)). Never `send`: `Rc`, region values, regions,
 scoped values, builders and task handles. The check reads declarations and capture lists only.

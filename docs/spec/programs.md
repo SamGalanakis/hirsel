@@ -138,7 +138,7 @@ passes the test; `Error(e)` fails it, `e` cleaned as its run ends whatever `E` i
 included; a failure fails it; a run stop fails the test it stops and ends no other test's
 run. A test that takes no parameters has its outcome fixed by its program and its run's
 configuration, so an implementation may report a pass it recorded for the same program and
-configuration in place of the run, unless its reach holds a foreign function, whose pass is
+configuration in place of the run, unless its reach holds a native foreign function, whose pass is
 never reused ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)), and then says that test's pass was reused; it never
 reuses any other outcome. A test function can be named, called or taken as a value only by
 another test function, and a value so taken may be passed on and called anywhere, as any function value;

@@ -381,7 +381,9 @@ is core's plain record `{ steps: u64 }`.
   `inline.prefetch` takes none either, since a hint must not fail
   ([core](core.md#contracts-the-signatures-do-not-state)). Any other core function's call, and a
   foreign function's ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)), is one
-  step plus any steps taken by the user code it enters. `secret.scram_sha256` takes
+  step plus any steps taken by the user code it enters. A contained foreign call also takes
+  one step for each 16 units of Wasm fuel it consumes, and its slice ends and exhaustion fall
+  inside it ([FFI-13](foreign.md#ffi-13-instances-bounds-and-steps)). `secret.scram_sha256` takes
   one further step for each PBKDF2 iteration it admits, at the call and before any
   derivation, because an untrusted server chooses the work ([TLS-6](tls.md#tls-6-scram-sha-256)).
   `argon2.id` and `secret.derive_argon2id` take one further step for each Argon2 block

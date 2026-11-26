@@ -69,7 +69,7 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Profiling](profiling.md) | |
 | [Packages](packages.md) | |
 | [Launch](launch.md) | |
-| [Foreign calls](foreign.md) | FFI-1 to FFI-9 |
+| [Foreign calls](foreign.md) | FFI-1 to FFI-16 |
 | [Process creation](exec.md) | EXEC-1 to EXEC-8 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |

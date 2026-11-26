@@ -218,7 +218,8 @@ type Q: key { w: f64 }                                     // refused: OWN-4, f6
 Given the same program, the same values at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)), the same root limit and the same charge
 policy, every run that no run stop ends ([FAIL-15](failure.md#fail-15-run-stops)) and whose
-program reaches no foreign function ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused)) behaves
+program reaches no native foreign function ([FFI-8](foreign.md#ffi-8-a-program-that-reaches-foreign-code-is-never-recorded-replayed-or-reused);
+a contained one keeps this rule, [FFI-14](foreign.md#ffi-14-determinism-traps-and-replay)) behaves
 identically on every run of one **build**: the program as one engine compiled it, for one
 target, at one optimisation level. A recording or coverage build of it is the same build
 ([CAP-9](capabilities.md#cap-9-recording-is-outside-the-program)). Its **observables** are exactly:

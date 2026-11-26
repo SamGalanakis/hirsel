@@ -154,12 +154,13 @@ pub opaque type CascadeRouter {
     delivered: List[LocalDelivered],
     admitted: List[AdmittedPeer],
     repair: RepairState,
+    fence: FenceState,
     attach_refusals: u64,
     sr_received: u64
 }
 
 pub fn cascade_router(local_node: NodeId, limits: LinkLimits) -> CascadeRouter {
-    CascadeRouter(node: local_node, limits: limits, rooms: list.new(), congestion: list.new(), forward_logs: list.new(), delivered: list.new(), admitted: list.new(), repair: new_repair_state(), attach_refusals: 0, sr_received: 0)
+    CascadeRouter(node: local_node, limits: limits, rooms: list.new(), congestion: list.new(), forward_logs: list.new(), delivered: list.new(), admitted: list.new(), repair: new_repair_state(), fence: new_fence_state(), attach_refusals: 0, sr_received: 0)
 }
 
 fn find_room(cr: CascadeRouter, room_name: Bytes) -> Option[u64] {
@@ -550,6 +551,14 @@ pub fn forward_local_rtp(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Byt
     let Some(ri) = find_room(cr, room_name) else {
         return
     }
+    if room_is_fenced(cr.rooms[ri], key.participant, key.epoch) {
+        cr.fence.dropped_fenced_media += 1
+        return
+    }
+    if !lease_allows_media(cr, room_name, now_ms) {
+        cr.fence.dropped_expired_media += 1
+        return
+    }
     let (seq, ts) = match rtp.header.parse(rtp_pkt) {
         Ok(h) => (h.seq, h.ts),
         Error(_) => (0u16, 0u32),
@@ -711,20 +720,28 @@ fn send_and_log(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandl
 /// Process a batch of `LinkEvent`s from `LinkHub` into `CascadeRouter`.
 pub fn handle_events(mut cr: CascadeRouter, mut hub: LinkHub, take events: List[LinkEvent], now_ms: u64) {
     poll_congestion(mut cr, hub, now_ms)
+    enforce_leases(mut cr, mut hub, now_ms)
     for take ev in take events {
         match take ev {
             LinkUp(handle: h, ..) => {
                 let _ = find_congestion(mut cr, h)
             },
-            ControlIn(handle: h, msg: take msg) => on_ctrl_msg(mut cr, mut hub, h, take msg),
+            LinkDown(handle: h, ..) => on_link_lost(mut cr, h),
+            RoomDetached(room_num: rn, malformed: m, ..) => {
+                if m {
+                    list.push(mut cr.fence.detached_malformed, rn)
+                }
+            },
+            ControlIn(handle: h, msg: take msg) => on_ctrl_msg(mut cr, mut hub, h, take msg, now_ms),
             RoomIn(handle: h, room_num: rn, msg: take msg) => on_room_msg(mut cr, mut hub, h, rn, take msg, now_ms * 1000000),
             MediaIn(handle: h, room_num: rn, layer_num: ln, layer: take info, rtp: take pkt) => on_media_in(mut cr, mut hub, h, rn, ln, take info, take pkt, now_ms),
             _ => (),
         }
     }
+    step_edge_leases(mut cr, mut hub, now_ms)
 }
 
-fn on_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle, take msg: LinkMsg) {
+fn on_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle, take msg: LinkMsg, now_ms: u64) {
     match take msg {
         Attach(room_num: rn, term: term, seq: seq, room_name: name) => {
             let Some(ri) = find_room(cr, name) else {
@@ -750,6 +767,7 @@ fn on_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
             list.push(mut cr.rooms[ri].edges, EdgeAttachment(peer: peer, handle: h, room_num: rn, attached: true, outbound_layers: list.new(), wanted: list.new()))
             let ei = list.len(cr.rooms[ri].edges) - 1
             let _ = send_control(mut hub, h, AttachAck(room_num: rn, term: cr.rooms[ri].term, seq: seq, ok: true, reason: REFUSE_OK))
+            on_home_edge_attached(mut cr, mut hub, ri, h, rn, peer, now_ms)
             // Announce all existing local and remote publications to this newly attached edge.
             let n_local = list.len(cr.rooms[ri].local_pubs)
             for pi in 0u64 .. n_local {
@@ -845,7 +863,7 @@ fn on_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
                 recompute_wanted(mut cr, mut hub, ri, key)
             }
         },
-        _ => (),
+        other => on_fence_ctrl_msg(mut cr, mut hub, h, take other, now_ms),
     }
 }
 
@@ -854,22 +872,34 @@ fn on_room_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
         return
     }
     match take msg {
-        AdmitReq(room_num: _, term: term, seq: seq, req_id: req_id, participant_hint: _) => {
+        AdmitReq(room_num: _, term: term, seq: seq, req_id: req_id, participant_hint: hint) => {
             if cr.rooms[ri].role != Home || term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
                 return
             }
-            let pid = cr.rooms[ri].next_participant_id
-            cr.rooms[ri].next_participant_id += 1
+            if hint != 0 && room_is_fenced(cr.rooms[ri], hint, 1) {
+                let _ = send_room_msg(mut hub, h, rn, AdmitResp(room_num: rn, term: cr.rooms[ri].term, seq: seq, req_id: req_id, ok: false, participant: hint, epoch: 1, reason: REFUSE_FENCED))
+                return
+            }
+            let pid = if hint != 0 {
+                hint
+            } else {
+                let id = cr.rooms[ri].next_participant_id
+                cr.rooms[ri].next_participant_id += 1
+                id
+            }
             let _ = send_room_msg(mut hub, h, rn, AdmitResp(room_num: rn, term: cr.rooms[ri].term, seq: seq, req_id: req_id, ok: true, participant: pid, epoch: 1, reason: REFUSE_OK))
         },
         AdmitResp(room_num: _, term: term, seq: _, req_id: req_id, ok: ok, participant: p, epoch: ep, reason: why) => {
             if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
                 return
             }
             list.push(mut cr.admitted, AdmittedPeer(req_id: req_id, ok: ok, participant: p, epoch: ep, reason: why))
         },
         WantedMask(room_num: _, term: term, seq: _, participant: p, epoch: ep, pub_slot: ps, mask: mask) => {
             if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
                 return
             }
             let key = PubKey(participant: p, epoch: ep, pub_slot: ps)
@@ -931,6 +961,17 @@ fn on_media_in(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
         return
     }
     if info.term < cr.rooms[ri].term {
+        cr.fence.stale_msgs_ignored += 1
+        return
+    }
+    // CAS-4: both ends drop a fenced participant's media at ingress.
+    if room_is_fenced(cr.rooms[ri], info.participant, info.epoch) {
+        cr.fence.dropped_fenced_media += 1
+        return
+    }
+    let rname: Bytes = clone(cr.rooms[ri].room_name)
+    if !lease_allows_media(cr, rname, now_ms) {
+        cr.fence.dropped_expired_media += 1
         return
     }
     let (pub_slot, encoding, _) = decode_pub_rid(info.rid)
@@ -945,19 +986,4 @@ fn on_media_in(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle
         forward_to_edges(mut cr, mut hub, ri, Some(h), key, encoding, seq, ts, pkt, now_ms)
     }
     let _ = ln
-}
-
-/// Read the latest forwarded SR timing for `(key, encoding)` in `room_name`.
-pub fn remote_sr(cr: CascadeRouter, room_name: Bytes, key: PubKey, encoding: u8) -> Option[SrTiming] {
-    let ri = find_room(cr, room_name)?
-    for p in cr.rooms[ri].remote_pubs {
-        if p.key == key {
-            for l in p.layers {
-                if l.encoding == encoding {
-                    return l.last_sr
-                }
-            }
-        }
-    }
-    None
 }

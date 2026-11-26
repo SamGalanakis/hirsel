@@ -141,6 +141,51 @@ pub fn purge(r: Router, mut out: peer.Outbox) -> u64 {
     n - kept
 }
 
+/// CAS-5: Set or clear a room's lease deadline (ms on the shared lease clock) and
+/// `guard_ms` on this media unit. Checked where media leaves, regardless of the control unit.
+pub fn set_lease_deadline(mut r: Router, room: peer.RoomId, deadline_ms: Option[u64], guard_ms: u32) {
+    if let Some(ri) = room_at(r, room) {
+        r.rooms[ri].lease_deadline_ms = deadline_ms
+        r.rooms[ri].lease_guard_ms = guard_ms
+    }
+}
+
+/// Whether a queued entry's room lease has passed `deadline_ms - guard_ms` at `now_ms`.
+pub fn lease_expired(r: Router, t: peer.Tag, now_ms: u64) -> bool {
+    if t.src == None {
+        return false
+    }
+    let Some(ri) = room_at(r, t.room) else {
+        return true
+    }
+    match r.rooms[ri].lease_deadline_ms {
+        Some(dl) => {
+            let guard: u64 = int.widen(r.rooms[ri].lease_guard_ms)
+            int.saturating_add(now_ms, guard) > dl
+        },
+        None => false,
+    }
+}
+
+/// CAS-5: Purge both fenced/suspended entries and media entries whose room lease
+/// cannot cover `guard_ms` at `now_ms` right before `udp_send`.
+pub fn purge_at(r: Router, now_ms: u64, mut out: peer.Outbox) -> u64 {
+    let n = list.len(out.pkts)
+    let mut kept = 0u64
+    for i in 0u64 .. n {
+        if !dead(r, out.tags[i]) && !lease_expired(r, out.tags[i], now_ms) {
+            if kept != i {
+                out.pkts[kept] = out.pkts[i]
+                out.tags[kept] = out.tags[i]
+            }
+            kept += 1
+        }
+    }
+    list.truncate(mut out.pkts, kept)
+    list.truncate(mut out.tags, kept)
+    n - kept
+}
+
 // ---- The control order ----
 /// The unit that applies `c` first: the home of the session it touches. A change
 /// that touches no session goes first to this unit.

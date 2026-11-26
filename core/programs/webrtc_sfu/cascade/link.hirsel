@@ -361,6 +361,19 @@ pub fn send_media(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, lay
     }
 }
 
+/// Send raw bytes on `room_num`'s dedicated room stream (for K6 malformed room-stream law).
+pub fn send_room_raw(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32, raw: Bytes) -> Result[(), LinkError] {
+    let Some(i) = link_at(hub, h) else {
+        return Error(UnknownLink)
+    }
+    let Some(ri) = link_room_at(hub.links[i], room_num) else {
+        return Error(UnknownRoom)
+    }
+    list.append(mut hub.links[i].rooms[ri].tx_queue, raw)
+    flush_room(mut hub, i, ri)
+    Ok(())
+}
+
 /// Drop every queued QUIC datagram for `room_num` on link `h` (CAS-5, QUIC-7).
 pub fn drop_room_datagrams(mut hub: LinkHub, h: quic.ConnectionHandle, room_num: u32) -> u64 {
     quic.drop_datagrams(mut hub.ep, h, int.widen(room_num))

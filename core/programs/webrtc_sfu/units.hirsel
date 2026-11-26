@@ -897,6 +897,22 @@ pub fn ready(mut u: Unit) -> u64 {
     }
 }
 
+/// CAS-5: Set a room's lease deadline on this media unit, checked where media leaves.
+pub fn set_lease_deadline(mut u: Unit, room: peer.RoomId, deadline_ms: Option[u64], guard_ms: u32) {
+    router.set_lease_deadline(mut u.r, room, deadline_ms, guard_ms)
+}
+
+/// CAS-5: Send-step pre-check at `now_ms`: drops fenced and lease-expired media before `udp_send`.
+pub fn ready_at(mut u: Unit, now_ms: u64) -> u64 {
+    let _ = router.purge_at(u.r, now_ms, mut u.out)
+    let n = list.len(u.out.pkts)
+    if u.limit != 0 && n > u.limit {
+        u.limit
+    } else {
+        n
+    }
+}
+
 /// The send step's second half: the first `k` datagrams were committed. What
 /// remains is the uncommitted suffix, compacted to the front of the outbox.
 pub fn committed(mut u: Unit, k: u64) {

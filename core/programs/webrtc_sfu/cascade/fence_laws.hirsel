@@ -1,0 +1,543 @@
+// SFU cascade KS4 soundness laws: K1 (`partition_fence_fails_closed`) and
+// K2 (`fence_reaches_every_node`).
+const K1_HOME_ADDR: Addr = Addr(ip: V4(0x0a050001), port: 4540)
+
+const K1_EDGE_A_ADDR: Addr = Addr(ip: V4(0x0a050002), port: 4541)
+
+const K1_EDGE_B_ADDR: Addr = Addr(ip: V4(0x0a050003), port: 4542)
+
+const K2_HOME_ADDR: Addr = Addr(ip: V4(0x0a060001), port: 4550)
+
+const K2_EDGE_A_ADDR: Addr = Addr(ip: V4(0x0a060002), port: 4551)
+
+const K2_EDGE_B_ADDR: Addr = Addr(ip: V4(0x0a060003), port: 4552)
+
+// ---- K1: partition_fence_fails_closed ----
+type K1ArmOut: send {
+    revoke_done_base_ms: u64,
+    last_grant_base_ms: u64,
+    severed_b: bool,
+    b_last_media_base_ms: u64,
+    b_purged_prebuilt_batch: bool,
+    b_control_stalled_safe: bool
+}
+
+type K1HomePlan: send {
+    home_clock: Clock,
+    base_clock: Clock,
+    socket: UdpSocket,
+    vnet: Net,
+    node_id: cascade.NodeId,
+    key: Secret,
+    cert: Bytes,
+    pins: List[quic.handshake.Pin],
+    b_id: cascade.NodeId,
+    cut_ms: u64,
+    revoke_ms: u64,
+    end_ms: u64
+}
+
+type K1HomeRes: send {
+    last_grant_base_ms: u64,
+    revoke_done_base_ms: u64,
+    severed_b: bool
+}
+
+type K1EdgeBPlan: send {
+    edge_clock: Clock,
+    base_clock: Clock,
+    socket: UdpSocket,
+    node_id: cascade.NodeId,
+    key: Secret,
+    cert: Bytes,
+    home_id: cascade.NodeId,
+    home_addr: Addr,
+    home_pin: quic.handshake.Pin,
+    end_ms: u64
+}
+
+type K1EdgeBRes: send {
+    had_grant: bool,
+    last_media_base_ms: u64,
+    purged_prebuilt_batch: bool,
+    stalled_sent_after_deadline: u64
+}
+
+fn k1_home_task(take cfg: K1HomePlan) -> K1HomeRes waits {
+    let K1HomePlan(home_clock: hclock, base_clock: bclock, socket: take given, vnet: vnet, node_id: nid, key: take k, cert: take c, pins: take pins, b_id: b_id, cut_ms: cut_ms, revoke_ms: revoke_ms, end_ms: end_ms) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(1001), lim, rebuild_id(take k, take c), take pins, 8))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let mut dir = cascade.sim_directory(bclock, lim.drift_ppm)
+    let _ = result.unwrap(cascade.claim(mut dir, b"room-k1", nid, 0))
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k1", 1, k_room_limits()))
+    cascade.enable_leases(mut cr, b"room-k1", 10000, list.new())
+    let mut cut_done = false
+    let mut revoke_seq: Option[u64] = None
+    let mut last_grant_base = 0u64
+    let mut revoke_done_base = 0u64
+    let mut severed_b = false
+    let mut events: List[cascade.LinkEvent] = list.new()
+    while host.mono_ns(bclock) < end_ms * MS {
+        let now_h = host.mono_ns(hclock)
+        result.unwrap(cascade.drive_links(mut hub, hclock, mut sock, order.min(now_h + 10 * MS, end_ms * MS + 100 * MS), mut events))
+        let h_ms = host.mono_ns(hclock) / MS
+        let b_ms = host.mono_ns(bclock) / MS
+        cascade.handle_events(mut cr, mut hub, take events, h_ms)
+        events = list.new()
+        for tr in cascade.take_fence_trace(mut cr) {
+            if tr.kind == TraceLeaseGrant {
+                last_grant_base = b_ms
+            }
+        }
+        if !cut_done && b_ms >= cut_ms {
+            // Partition Edge B completely in both directions.
+            result.unwrap(std.sim.udp.link(vnet, K1_HOME_ADDR.ip, K1_EDGE_B_ADDR.ip, Cut))
+            result.unwrap(std.sim.udp.link(vnet, K1_EDGE_B_ADDR.ip, K1_HOME_ADDR.ip, Cut))
+            cut_done = true
+        }
+        if cut_done && revoke_seq == None && b_ms >= revoke_ms {
+            let fseq = result.unwrap(cascade.begin_revoke(mut cr, mut hub, mut dir, b"room-k1", 7, 1, h_ms))
+            revoke_seq = Some(fseq)
+        }
+        if let Some(fseq) = revoke_seq {
+            if revoke_done_base == 0 && cascade.poll_revoke(mut cr, mut hub, b"room-k1", fseq, h_ms) {
+                revoke_done_base = host.mono_ns(bclock) / MS
+                for (_, peer) in cascade.take_severed(mut cr) {
+                    if peer == b_id {
+                        severed_b = true
+                    }
+                }
+            }
+        }
+    }
+    K1HomeRes(last_grant_base_ms: last_grant_base, revoke_done_base_ms: revoke_done_base, severed_b: severed_b)
+}
+
+fn k1_edge_b_task(take cfg: K1EdgeBPlan) -> K1EdgeBRes waits {
+    let K1EdgeBPlan(edge_clock: eclock, base_clock: bclock, socket: take given, node_id: nid, key: take k, cert: take c, home_id: hid, home_addr: haddr, home_pin: hpin, end_ms: end_ms) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let id1 = rebuild_id(secret.share(k), clone(c))
+    let id2 = rebuild_id(take k, take c)
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(1002), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, haddr, single_pin(hpin), 0, take id2))
+    let mut attached = false
+    let mut pub_ok = false
+    let mut had_grant = false
+    let mut last_media_base = 0u64
+    let mut purged_prebuilt = false
+    let mut stalled_sent = 0u64
+    let pub7 = cascade.PubKey(participant: 7, epoch: 1, pub_slot: 1)
+    // Also attach a local Router + Outbox representing B's media unit, with a batch
+    // pre-built BEFORE the deadline and B's control unit stalled past the deadline!
+    let mut r = router.router(provide.random(1009))
+    let local_room: peer.RoomId = RoomId(1)
+    result.unwrap(router.open_room(mut r, local_room, k_room_limits()))
+    let mut outbox = result.unwrap(peer.outbox(65536, 64))
+    let mut prebuilt_loaded = false
+    let mut seq = 1u16
+    let mut events: List[cascade.LinkEvent] = list.new()
+    while host.mono_ns(bclock) < end_ms * MS {
+        let now_e = host.mono_ns(eclock)
+        result.unwrap(cascade.drive_links(mut hub, eclock, mut sock, order.min(now_e + 10 * MS, end_ms * MS + 100 * MS), mut events))
+        let e_ms = host.mono_ns(eclock) / MS
+        let b_ms = host.mono_ns(bclock) / MS
+        let mut got_up = false
+        for ev in events {
+            if let LinkUp(handle: h, ..) = ev {
+                if h == h_home {
+                    got_up = true
+                }
+            }
+        }
+        cascade.handle_events(mut cr, mut hub, take events, e_ms)
+        events = list.new()
+        if got_up && !attached {
+            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, b"room-k1", h_home, 1, k_room_limits()))
+            cascade.enable_leases(mut cr, b"room-k1", 0, list.new())
+            attached = true
+        }
+        if let Some(dl) = cascade.room_lease_deadline(cr, b"room-k1") {
+            if dl > 0 {
+                had_grant = true
+                router.set_lease_deadline(mut r, local_room, Some(dl), lim.guard_ms)
+                if !pub_ok {
+                    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-k1", pub7, Vp8, one_rid()))
+                    result.unwrap(cascade.subscribe_local(mut cr, mut hub, b"room-k1", 101, pub7, 0))
+                    pub_ok = true
+                }
+                // Pre-build a local Outbox batch BEFORE deadline (simulating media routed before expiry).
+                if !prebuilt_loaded && e_ms + 50 < dl {
+                    let pkt = make_canon_rtp(Vp8, 999, 999000, 0x777, 64)
+                    list.append(mut outbox.data, pkt)
+                    list.push(mut outbox.pkts, UdpTx(to: K1_EDGE_A_ADDR, at: 0, len: list.len(pkt), ecn: 0))
+                    list.push(mut outbox.tags, peer.Tag(src: Some(Gen(id: 7, epoch: 1)), dst: Gen(id: 101, epoch: 1), room: local_room))
+                    prebuilt_loaded = true
+                }
+                // After deadline - guard_ms, simulate B's control unit STALLED (never calls Suspend!),
+                // and verify B's media unit purges the pre-built batch right at udp_send!
+                if prebuilt_loaded && !purged_prebuilt && e_ms + int.widen(lim.guard_ms) > dl {
+                    let dropped_n = router.purge_at(r, e_ms, mut outbox)
+                    if dropped_n == 1 && list.len(outbox.pkts) == 0 {
+                        purged_prebuilt = true
+                    }
+                    // Also confirm media unit sends 0 packets if another send is attempted while stalled.
+                    stalled_sent += list.len(outbox.pkts)
+                }
+            }
+        }
+        if pub_ok {
+            let seq_u32: u32 = int.widen(seq)
+            let pkt = make_canon_rtp(Vp8, seq, seq_u32 * 3000u32, 0x777, 64)
+            seq += 1
+            cascade.forward_local_rtp(mut cr, mut hub, b"room-k1", pub7, 0, pkt, e_ms)
+            let deliv = cascade.take_delivered(mut cr)
+            let fwds = cascade.take_forward_logs(mut cr)
+            if list.len(deliv) > 0 || list.len(fwds) > 0 {
+                last_media_base = b_ms
+            }
+        }
+    }
+    K1EdgeBRes(had_grant: had_grant, last_media_base_ms: last_media_base, purged_prebuilt_batch: purged_prebuilt, stalled_sent_after_deadline: stalled_sent)
+}
+
+type K1DriveArg: send {
+    clocks: std.sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn k1_drive_clocks(take arg: K1DriveArg) waits {
+    let K1DriveArg(clocks: take c, tasks: t) = take arg
+    std.sim.world.drive(take c, t)
+}
+
+fn run_k1_drift_arm(tasks: Tasks, seed: u64, home_ppm: i64, edge_ppm: i64) waits {
+    let script = std.sim.world.Script(tail_seed: seed, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, base_clock) = std.sim.world.new(seed, 0, 0)
+    let mut w_sim = take sim_world
+    let mut clocks = std.sim.world.clocks(mut w_sim)
+    let (_, home_clock) = std.sim.world.drifting(mut clocks, 0, 0, home_ppm)
+    let (_, edge_clock) = std.sim.world.drifting(mut clocks, 0, 0, edge_ppm)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take w_sim, base_clock, list.new(), 2097152)
+    let drive_task = task.spawn(tasks, bytes 2097152, K1DriveArg(clocks: take clocks, tasks: tasks), k1_drive_clocks)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(seed + 1), base_clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let (take bk, take bc) = result.unwrap(signal.unit_certificate(provide.random(seed + 2), base_clock))
+    let b_pin: quic.handshake.Pin = Cert(std.sha256.hash(bc))
+    let home_id = cascade.node_id(b"home-k1")
+    let b_id = cascade.node_id(b"edge-b-k1")
+    let mut pins: List[quic.handshake.Pin] = list.with_capacity(2)
+    list.push(mut pins, clone(home_pin))
+    list.push(mut pins, take b_pin)
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K1_HOME_ADDR, K_SOCKET))
+    let (take s_b, _) = result.unwrap(host.udp_bind(vnet, K1_EDGE_B_ADDR, K_SOCKET))
+    let t_home = task.spawn(tasks, bytes 14680064, K1HomePlan(home_clock: home_clock, base_clock: base_clock, socket: take s_home, vnet: vnet, node_id: home_id, key: take hk, cert: take hc, pins: take pins, b_id: b_id, cut_ms: 900, revoke_ms: 1000, end_ms: 4000), k1_home_task)
+    let t_b = task.spawn(tasks, bytes 14680064, K1EdgeBPlan(edge_clock: edge_clock, base_clock: base_clock, socket: take s_b, node_id: b_id, key: take bk, cert: take bc, home_id: home_id, home_addr: K1_HOME_ADDR, home_pin: take home_pin, end_ms: 4000), k1_edge_b_task)
+    let h_res = result.unwrap(task.join(take t_home))
+    let b_res = result.unwrap(task.join(take t_b))
+    result.unwrap(task.join(take net_task))
+    result.unwrap(task.join(take drive_task))
+    if !b_res.had_grant || h_res.last_grant_base_ms == 0 {
+        fail("edge B did not obtain a lease grant before partition")
+    }
+    if h_res.revoke_done_base_ms == 0 || !h_res.severed_b {
+        fail("partitioned revoke did not complete and emit Severed(room, edge_b)")
+    }
+    // CAS-5 real-time bound: revoke returns within L * (1 + d) / (1 - d)^2 + 1 ms
+    // of the last grant to B (plus one 10 ms poll quantum in the harness).
+    // For L=2000, d=200 ppm: 2000 * 1.0002 / 0.9998^2 + 1 = 2003 ms.
+    let elapsed_base = h_res.revoke_done_base_ms - h_res.last_grant_base_ms
+    if elapsed_base > 2020 {
+        fail("partitioned revoke exceeded CAS-5 real-time bound L*(1+d)/(1-d)^2 + 1 ms")
+    }
+    // Soundness invariant: from the moment revoke returns, B sends NO media!
+    if b_res.last_media_base_ms >= h_res.revoke_done_base_ms {
+        fail("edge B sent media at or after home's revoke returned under clock drift")
+    }
+    if !b_res.purged_prebuilt_batch || b_res.stalled_sent_after_deadline != 0 {
+        fail("edge B's media unit failed to purge its pre-built Outbox batch when control stalled past deadline")
+    }
+}
+
+/// bug: a partitioned edge continues sending media after home's revoke returns (including
+/// from a pre-built batch or stalled control unit under ±drift_ppm clocks), or an old home
+/// / transitive-lease edge sends after a new home claims the next term and revokes, or a
+/// late grant answering an older request extends a lease.
+/// oracle: docs/spec/sfu_cascade.md K1, CAS-1, CAS-5 worked by hand at d = 200 ppm.
+@test
+fn partition_fence_fails_closed(tasks: Tasks) -> Result[(), ()] waits {
+    // Part A1: Edge B fast (+200 ppm), Home slow (-200 ppm).
+    run_k1_drift_arm(tasks, 1101, -200, 200)
+    // Part A2: Edge B slow (-200 ppm), Home fast (+200 ppm) — worst case for soundness!
+    run_k1_drift_arm(tasks, 1102, 200, -200)
+    // Part B: Home cut from directory & edges; New Home claims term 2 and revokes.
+    let (take w, dir_clock) = std.sim.world.new(1103, 0, 0)
+    let mut w_sim = take w
+    let mut clocks = std.sim.world.clocks(mut w_sim)
+    // Old home slow (-200 ppm), Edge A slow (-200 ppm), New home fast (+200 ppm).
+    let (_, old_clock) = std.sim.world.drifting(mut clocks, 0, 0, -200)
+    let (_, edge_clock) = std.sim.world.drifting(mut clocks, 0, 0, -200)
+    let drive_t = task.spawn(tasks, bytes 2097152, K1DriveArg(clocks: take clocks, tasks: tasks), k1_drive_clocks)
+    let lim = cascade.default_link_limits()
+    let mut dir = cascade.sim_directory(dir_clock, lim.drift_ppm)
+    let old_id = cascade.node_id(b"old-home")
+    let new_id = cascade.node_id(b"new-home")
+    let edge_id = cascade.node_id(b"edge-trans")
+    let t1 = result.unwrap(cascade.claim(mut dir, b"room-term", old_id, 0))
+    if t1 != 1 {
+        fail("old home did not claim term 1")
+    }
+    let mut old_cr = cascade.cascade_router(old_id, lim)
+    result.unwrap(cascade.open_home_room(mut old_cr, b"room-term", 1, k_room_limits()))
+    let lms = result.unwrap(cascade.home_renew_term(mut old_cr, mut dir, b"room-term", host.mono_ns(old_clock) / MS))
+    // Edge receives transitive lease from Old Home at t = 100 ms.
+    host.sleep_until(dir_clock, 100 * MS)
+    let old_dl = option.unwrap(cascade.room_lease_deadline(old_cr, b"room-term"))
+    let old_rem = int.saturating_sub(old_dl, host.mono_ns(old_clock) / MS)
+    let trans_rem = cascade.transitive_remaining_ms(old_rem, lim.drift_ppm, lim.guard_ms)
+    let mut edge_cr = cascade.cascade_router(edge_id, lim)
+    result.unwrap(cascade.open_home_room(mut edge_cr, b"room-term", 1, k_room_limits()))
+    cascade.enable_leases(mut edge_cr, b"room-term", host.mono_ns(edge_clock) / MS + trans_rem, list.new())
+    // While Old Home's term lease may still hold, New Home's claim MUST return Held.
+    let Error(Held(..)) = cascade.claim(mut dir, b"room-term", new_id, 1) else {
+        fail("directory let new home claim term 2 while old home's term lease was still held")
+    }
+    // Wait until directory's CAS-1 wait (ceil(2000 * 1.0002 / 0.9998) = 2001 ms) has passed.
+    let wait_ms = cascade.lease_wait_ms(lms, lim.drift_ppm)
+    host.sleep_until(dir_clock, (wait_ms + 2) * MS)
+    let t2 = result.unwrap(cascade.claim(mut dir, b"room-term", new_id, 1))
+    if t2 != 2 {
+        fail("new home did not claim term 2 after old term lease ended")
+    }
+    result.unwrap(cascade.commit_fence(mut dir, b"room-term", 2, 9, 1))
+    // From New Home's revoke onward, NEITHER Old Home NOR the transitive-lease edge may send media!
+    if cascade.lease_allows_media(old_cr, b"room-term", host.mono_ns(old_clock) / MS) {
+        fail("old home still allowed media after new home claimed term 2 and revoked")
+    }
+    if cascade.lease_allows_media(edge_cr, b"room-term", host.mono_ns(edge_clock) / MS) {
+        fail("edge with transitive lease from old home still allowed media after term 2 revoke")
+    }
+    // Part C: Late grant answering an older request extends no lease.
+    let mut late_cr = cascade.cascade_router(edge_id, lim)
+    let (take lk, take lc) = result.unwrap(signal.unit_certificate(provide.random(1199), dir_clock))
+    let mut lhub = result.unwrap(cascade.link_hub(edge_id, provide.random(1198), lim, rebuild_id(take lk, take lc), list.new(), 4))
+    let fake_h: quic.ConnectionHandle = ConnectionHandle(0)
+    // Open room directly and test late grant rejection via enable_leases + handle_events:
+    result.unwrap(cascade.open_home_room(mut late_cr, b"room-late", 1, k_room_limits()))
+    cascade.enable_leases(mut late_cr, b"room-late", 2800, list.new())
+    let mut evs: List[cascade.LinkEvent] = list.new()
+    list.push(mut evs, ControlIn(handle: fake_h, msg: LeaseGrant(room_num: 0, term: 1, seq: 1, remaining_ms: 2000)))
+    cascade.handle_events(mut late_cr, mut lhub, take evs, 2500)
+    if cascade.room_lease_deadline(late_cr, b"room-late") != Some(2800) {
+        fail("late grant for an older/untracked request extended the lease")
+    }
+    result.unwrap(task.join(take drive_t))
+    Ok(())
+}
+
+// ---- K2: fence_reaches_every_node ----
+type K2HomeOut: send {
+    revoke_ok: bool,
+    acks_seen: u64,
+    rejoin_fenced: bool,
+    dropped_fenced: u64,
+    dropped_edge_waited: bool,
+    stale_home_err_term: bool,
+    new_home_fenced_rejoin: bool,
+    new_home_dropped_media: bool
+}
+
+type K2EdgeOut: send {
+    fenced_local: bool,
+    rejoin_refused_fenced: bool,
+    dropped_fenced: u64
+}
+
+fn k2_home_task(take cfg: K3HomeCfg) -> K2HomeOut waits {
+    let K3HomeCfg(clock: clock, socket: take given, node_id: nid, key: take k, cert: take c, pins: take pins) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(2001), lim, rebuild_id(take k, take c), take pins, 8))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let mut dir = cascade.sim_directory(clock, lim.drift_ppm)
+    let _ = result.unwrap(cascade.claim(mut dir, b"room-k2", nid, 0))
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k2", 1, k_room_limits()))
+    cascade.enable_leases(mut cr, b"room-k2", 10000, list.new())
+    let mut revoke_seq: Option[u64] = None
+    let mut revoke_ok = false
+    let mut acks = 0u64
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 1600 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 10 * MS, end), mut events))
+        let ms = host.mono_ns(clock) / MS
+        cascade.handle_events(mut cr, mut hub, take events, ms)
+        events = list.new()
+        for tr in cascade.take_fence_trace(mut cr) {
+            if tr.kind == TraceFenceAck {
+                acks += 1
+            }
+        }
+        if revoke_seq == None && ms >= 500 {
+            let fseq = result.unwrap(cascade.begin_revoke(mut cr, mut hub, mut dir, b"room-k2", 5, 1, ms))
+            revoke_seq = Some(fseq)
+        }
+        if let Some(fseq) = revoke_seq {
+            if !revoke_ok && cascade.poll_revoke(mut cr, mut hub, b"room-k2", fseq, ms) {
+                revoke_ok = true
+            }
+        }
+    }
+    let (dropped_f, _, _, _) = cascade.fence_stats(cr)
+    let rejoin_fenced = cascade.is_fenced(cr, b"room-k2", 5, 1)
+    // Now verify: an edge whose link dropped AFTER receiving a lease and BEFORE the fence
+    // is STILL in the grant ledger and still waited for until lease_wait_ms!
+    let dropped_peer = cascade.node_id(b"edge-dropped")
+    let h_drop = option.unwrap(cascade.find_link(hub, cascade.node_id(b"edge-a-k2")))
+    cascade.on_home_edge_attached(mut cr, mut hub, 0, h_drop, 99, dropped_peer, 1600)
+    // Simulate link loss after grant by setting a grant on a fresh room.
+    let mut cr_drop = cascade.cascade_router(nid, lim)
+    result.unwrap(cascade.open_home_room(mut cr_drop, b"room-drop", 1, k_room_limits()))
+    let _ = result.unwrap(cascade.claim(mut dir, b"room-drop", nid, 0))
+    cascade.on_home_edge_attached(mut cr_drop, mut hub, 0, h_drop, 77, dropped_peer, 100)
+    let mut req_evs: List[cascade.LinkEvent] = list.new()
+    list.push(mut req_evs, ControlIn(handle: h_drop, msg: Attach(room_num: 77, term: 1, seq: 1, room_name: b"room-drop")))
+    list.push(mut req_evs, ControlIn(handle: h_drop, msg: LeaseRequest(room_num: 77, term: 1, seq: 1)))
+    cascade.handle_events(mut cr_drop, mut hub, take req_evs, 100)
+    // Link drops BEFORE fence!
+    cascade.on_link_lost(mut cr_drop, h_drop)
+    let d_fseq = result.unwrap(cascade.begin_revoke(mut cr_drop, mut hub, mut dir, b"room-drop", 8, 1, 150))
+    let early_done = cascade.poll_revoke(mut cr_drop, mut hub, b"room-drop", d_fseq, 1000)
+    let after_wait = cascade.poll_revoke(mut cr_drop, mut hub, b"room-drop", d_fseq, 100 + cascade.lease_wait_ms(lim.lease_ms, lim.drift_ppm))
+    let dropped_edge_waited = !early_done && after_wait
+    // Now kill Old Home right after revoke returned Ok; New Home claims term 2 after lease wait!
+    let wait_ms = cascade.lease_wait_ms(lim.lease_ms, lim.drift_ppm)
+    host.sleep_until(clock, (end / MS + wait_ms + 50) * MS)
+    let new_id = cascade.node_id(b"home2-k2")
+    let t2 = result.unwrap(cascade.claim(mut dir, b"room-k2", new_id, 1))
+    let entry2 = result.unwrap(cascade.read(dir, b"room-k2"))
+    let mut cr2 = cascade.cascade_router(new_id, lim)
+    result.unwrap(cascade.open_home_room(mut cr2, b"room-k2", t2, k_room_limits()))
+    cascade.enable_leases(mut cr2, b"room-k2", 20000, entry2.fences)
+    let new_fenced_rejoin = cascade.is_fenced(cr2, b"room-k2", 5, 1)
+    let pub5 = cascade.PubKey(participant: 5, epoch: 1, pub_slot: 1)
+    cascade.forward_local_rtp(mut cr2, mut hub, b"room-k2", pub5, 0, make_canon_rtp(Vp8, 1, 90000, 0x555, 64), 5000)
+    let (new_dropped, _, _, _) = cascade.fence_stats(cr2)
+    // Old Home that lost its term calls revoke -> MUST get Error(Term(2))!
+    let stale_err = match cascade.begin_revoke(mut cr, mut hub, mut dir, b"room-k2", 6, 1, 5000) {
+        Error(Term(t)) => t == 2,
+        _ => false,
+    }
+    K2HomeOut(revoke_ok: revoke_ok, acks_seen: acks, rejoin_fenced: rejoin_fenced, dropped_fenced: dropped_f, dropped_edge_waited: dropped_edge_waited, stale_home_err_term: stale_err, new_home_fenced_rejoin: new_fenced_rejoin, new_home_dropped_media: new_dropped >= 1)
+}
+
+fn k2_edge_task(take cfg: K7EdgeCfg) -> K2EdgeOut waits {
+    let K7EdgeCfg(clock: clock, socket: take given, node_id: nid, key: take k, cert: take c, home_id: hid, dial_addr: daddr, home_pin: hpin, room_name: rname, seed: seed) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let id1 = rebuild_id(secret.share(k), clone(c))
+    let id2 = rebuild_id(take k, take c)
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(seed), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let h_home = result.unwrap(cascade.dial_addr(mut hub, hid, daddr, single_pin(hpin), 0, take id2))
+    let mut attached = false
+    let mut rejoin_asked = false
+    let mut rejoin_refused = false
+    let pub5 = cascade.PubKey(participant: 5, epoch: 1, pub_slot: 1)
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 1600 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 10 * MS, end), mut events))
+        let ms = host.mono_ns(clock) / MS
+        let mut got_up = false
+        for ev in events {
+            if let LinkUp(handle: h, ..) = ev {
+                if h == h_home {
+                    got_up = true
+                }
+            }
+        }
+        cascade.handle_events(mut cr, mut hub, take events, ms)
+        events = list.new()
+        if got_up && !attached {
+            let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub, clone(rname), h_home, 1, k_room_limits()))
+            cascade.enable_leases(mut cr, clone(rname), 0, list.new())
+            attached = true
+        }
+        // After fence lands (~550 ms), attempt rejoin at same epoch (5, 1) and send fenced media.
+        if attached && !rejoin_asked && ms >= 800 {
+            result.unwrap(cascade.request_edge_admit(mut cr, mut hub, clone(rname), 55, 5))
+            cascade.forward_local_rtp(mut cr, mut hub, clone(rname), pub5, 0, make_canon_rtp(Vp8, 1, 90000, 0x555, 64), ms)
+            rejoin_asked = true
+        }
+        for adm in cascade.take_admitted(mut cr) {
+            if adm.req_id == 55 && !adm.ok && adm.reason == cascade.REFUSE_FENCED {
+                rejoin_refused = true
+            }
+        }
+    }
+    let (dropped_f, _, _, _) = cascade.fence_stats(cr)
+    K2EdgeOut(fenced_local: cascade.is_fenced(cr, rname, 5, 1), rejoin_refused_fenced: rejoin_refused, dropped_fenced: dropped_f)
+}
+
+/// bug: revoke returns before every edge acknowledges, allows a fenced participant to
+/// rejoin or send media, forgets an unlinked edge in the grant ledger, loses a committed
+/// fence across home failover, or fails to return `Err(Term)` when the home lost its term.
+/// oracle: docs/spec/sfu_cascade.md K2, CAS-4 step 0, and RTC-7 across nodes.
+@test
+fn fence_reaches_every_node(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 202, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, clock) = std.sim.world.new(202, 0, 0)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take sim_world, clock, list.new(), 2097152)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(211), clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let (take ak, take ac) = result.unwrap(signal.unit_certificate(provide.random(212), clock))
+    let a_pin: quic.handshake.Pin = Cert(std.sha256.hash(ac))
+    let (take bk, take bc) = result.unwrap(signal.unit_certificate(provide.random(213), clock))
+    let b_pin: quic.handshake.Pin = Cert(std.sha256.hash(bc))
+    let home_id = cascade.node_id(b"home-k2")
+    let a_id = cascade.node_id(b"edge-a-k2")
+    let b_id = cascade.node_id(b"edge-b-k2")
+    let mut pins: List[quic.handshake.Pin] = list.with_capacity(3)
+    list.push(mut pins, clone(home_pin))
+    list.push(mut pins, take a_pin)
+    list.push(mut pins, take b_pin)
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K2_HOME_ADDR, K_SOCKET))
+    let (take s_a, _) = result.unwrap(host.udp_bind(vnet, K2_EDGE_A_ADDR, K_SOCKET))
+    let (take s_b, _) = result.unwrap(host.udp_bind(vnet, K2_EDGE_B_ADDR, K_SOCKET))
+    let t_home = task.spawn(tasks, bytes 14680064, K3HomeCfg(clock: clock, socket: take s_home, node_id: home_id, key: take hk, cert: take hc, pins: take pins), k2_home_task)
+    let t_a = task.spawn(tasks, bytes 14680064, K7EdgeCfg(clock: clock, socket: take s_a, node_id: a_id, key: take ak, cert: take ac, home_id: home_id, dial_addr: K2_HOME_ADDR, home_pin: clone(home_pin), room_name: b"room-k2", seed: 2002), k2_edge_task)
+    let t_b = task.spawn(tasks, bytes 14680064, K7EdgeCfg(clock: clock, socket: take s_b, node_id: b_id, key: take bk, cert: take bc, home_id: home_id, dial_addr: K2_HOME_ADDR, home_pin: take home_pin, room_name: b"room-k2", seed: 2003), k2_edge_task)
+    let hs = result.unwrap(task.join(take t_home))
+    let ea = result.unwrap(task.join(take t_a))
+    let eb = result.unwrap(task.join(take t_b))
+    result.unwrap(task.join(take net_task))
+    if !hs.revoke_ok || hs.acks_seen != 2 || !hs.rejoin_fenced {
+        fail("revoke did not wait for both edges' FenceAcks or hold locally on home")
+    }
+    if !ea.fenced_local || !eb.fenced_local || !ea.rejoin_refused_fenced || !eb.rejoin_refused_fenced {
+        fail("fence did not reach both edges or did not refuse rejoin at same epoch with Fenced")
+    }
+    if ea.dropped_fenced == 0 || eb.dropped_fenced == 0 {
+        fail("edges did not drop fenced participant's media")
+    }
+    if !hs.dropped_edge_waited {
+        fail("home failed to wait for an edge whose link dropped after grant and before fence")
+    }
+    if !hs.new_home_fenced_rejoin || !hs.new_home_dropped_media {
+        fail("new home after failover did not enforce committed fence from directory")
+    }
+    if !hs.stale_home_err_term {
+        fail("old home that lost its term did not receive Error(Term(2))")
+    }
+    Ok(())
+}

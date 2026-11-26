@@ -1,0 +1,671 @@
+// CAS-4, CAS-5 & CAS-7: Cross-node fences, directory-committed revokes,
+// transitive leases with drift bounds, per-unit deadline enforcement,
+// persistent grant ledgers, term fencing, and ordered reattach.
+pub type FenceTraceKind: key = TraceFenceTable | TraceFenceTableAck | TraceLeaseGrant | TraceFence | TraceFenceAck
+
+pub type FenceTrace {
+    kind: FenceTraceKind,
+    room_num: u32,
+    term: u64,
+    seq: u64,
+    at_ms: u64
+}
+
+pub type PendingRevoke {
+    room_name: Bytes,
+    term: u64,
+    fence_seq: u64,
+    participant: u64,
+    epoch: u64,
+    committed: bool,
+    started_ms: u64
+}
+
+pub type LeaseLedgerEntry {
+    room_name: Bytes,
+    peer: NodeId,
+    handle: Option[quic.ConnectionHandle],
+    room_num: u32,
+    linked: bool,
+    fence_table_acked: bool,
+    fence_table_seq: u64,
+    fence_table_covers_seq: u64,
+    last_grant_ms: u64,
+    has_grant: bool,
+    pending_fence_seq: Option[u64],
+    acked_fence_seq: u64
+}
+
+type LeaseReqRecord {
+    room_name: Bytes,
+    seq: u64,
+    sent_ms: u64
+}
+
+type RoomLease {
+    room_name: Bytes,
+    // On Edge: end of edge lease. On Home: end of home's term lease from directory.
+    deadline_ms: u64,
+    // Whether lease enforcement is active for this room.
+    enforced: bool,
+    // Cause bits matching RTC-7 (1=Signaling, 2=Lease, 4=Term).
+    suspend_causes: u8,
+    // Edge lease request scheduling.
+    next_req_seq: u64,
+    last_req_ms: u64,
+    // Home term lease renewal scheduling.
+    term_renew_seq: u64,
+    last_renew_ms: u64,
+    fence_table_applied: bool,
+    next_fence_seq: u64
+}
+
+pub type FenceState {
+    leases: List[RoomLease],
+    ledger: List[LeaseLedgerEntry],
+    pending_reqs: List[LeaseReqRecord],
+    pending_revokes: List[PendingRevoke],
+    severed: List[(Bytes, NodeId)],
+    trace: List[FenceTrace],
+    dropped_fenced_media: u64,
+    dropped_expired_media: u64,
+    stale_msgs_ignored: u64,
+    late_grants_ignored: u64,
+    detached_malformed: List[u32]
+}
+
+pub fn new_fence_state() -> FenceState {
+    FenceState(leases: list.new(), ledger: list.new(), pending_reqs: list.new(), pending_revokes: list.new(), severed: list.new(), trace: list.new(), dropped_fenced_media: 0, dropped_expired_media: 0, stale_msgs_ignored: 0, late_grants_ignored: 0, detached_malformed: list.new())
+}
+
+pub fn take_severed(mut cr: CascadeRouter) -> List[(Bytes, NodeId)] {
+    replace(mut cr.fence.severed, list.new())
+}
+
+pub fn take_fence_trace(mut cr: CascadeRouter) -> List[FenceTrace] {
+    replace(mut cr.fence.trace, list.new())
+}
+
+pub fn take_detached_malformed(mut cr: CascadeRouter) -> List[u32] {
+    replace(mut cr.fence.detached_malformed, list.new())
+}
+
+pub fn fence_stats(cr: CascadeRouter) -> (u64, u64, u64, u64) {
+    (cr.fence.dropped_fenced_media, cr.fence.dropped_expired_media, cr.fence.stale_msgs_ignored, cr.fence.late_grants_ignored)
+}
+
+fn find_lease(fs: FenceState, room_name: Bytes) -> Option[u64] {
+    for i in 0u64 .. list.len(fs.leases) {
+        if list.compare_bytes(fs.leases[i].room_name, room_name) == Equal {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn ensure_lease(mut fs: FenceState, room_name: Bytes) -> u64 {
+    if let Some(i) = find_lease(fs, room_name) {
+        return i
+    }
+    list.push(mut fs.leases, RoomLease(room_name: clone(room_name), deadline_ms: 0, enforced: false, suspend_causes: 0, next_req_seq: 1, last_req_ms: 0, term_renew_seq: 1, last_renew_ms: 0, fence_table_applied: false, next_fence_seq: 1))
+    list.len(fs.leases) - 1
+}
+
+fn find_ledger(fs: FenceState, room_name: Bytes, peer: NodeId) -> Option[u64] {
+    for i in 0u64 .. list.len(fs.ledger) {
+        if fs.ledger[i].peer == peer && list.compare_bytes(fs.ledger[i].room_name, room_name) == Equal {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn find_ledger_by_handle(fs: FenceState, room_name: Bytes, h: quic.ConnectionHandle) -> Option[u64] {
+    for i in 0u64 .. list.len(fs.ledger) {
+        if fs.ledger[i].handle == Some(h) && list.compare_bytes(fs.ledger[i].room_name, room_name) == Equal {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Enable strict CAS-5 lease & CAS-7 ordered-reattach enforcement for `room_name`.
+/// On Home: initializes the room's term lease deadline (`deadline_ms`) and loads
+/// committed `fences` from the directory's `DirEntry` before routing (CAS-7).
+pub fn enable_leases(mut cr: CascadeRouter, room_name: Bytes, initial_deadline_ms: u64, fences: List[(u64, u64)]) {
+    let li = ensure_lease(mut cr.fence, room_name)
+    cr.fence.leases[li].enforced = true
+    cr.fence.leases[li].deadline_ms = initial_deadline_ms
+    if let Some(ri) = find_room(cr, room_name) {
+        for (p, ep) in fences {
+            record_local_fence(mut cr.rooms[ri], p, ep)
+        }
+    }
+}
+
+/// Advance a room's highest seen term (CAS-1, CAS-7). Ends any old-term lease.
+pub fn advance_room_term(mut cr: CascadeRouter, room_name: Bytes, new_term: u64) {
+    let Some(ri) = find_room(cr, room_name) else {
+        return
+    }
+    if new_term > cr.rooms[ri].term {
+        cr.rooms[ri].term = new_term
+        let li = ensure_lease(mut cr.fence, room_name)
+        cr.fence.leases[li].deadline_ms = 0
+        cr.fence.leases[li].fence_table_applied = false
+        cr.fence.leases[li].suspend_causes = cr.fence.leases[li].suspend_causes | 4u8
+    }
+}
+
+/// Current lease deadline (ms) for `room_name` on this node's lease clock.
+pub fn room_lease_deadline(cr: CascadeRouter, room_name: Bytes) -> Option[u64] {
+    let li = find_lease(cr.fence, room_name)?
+    if !cr.fence.leases[li].enforced {
+        return None
+    }
+    Some(cr.fence.leases[li].deadline_ms)
+}
+
+/// Whether `room_name` is suspended for `Lease` (bit 2) or `Term` (bit 4).
+pub fn room_lease_suspended(cr: CascadeRouter, room_name: Bytes) -> bool {
+    match find_lease(cr.fence, room_name) {
+        Some(li) => (cr.fence.leases[li].suspend_causes & 6u8) != 0,
+        None => false,
+    }
+}
+
+/// Record `(participant, epoch)` into a room's fence table, monotonically raising epoch.
+pub fn record_local_fence(mut room: CascadeRoom, participant: u64, epoch: u64) {
+    for i in 0u64 .. list.len(room.fences) {
+        let (p, ep) = room.fences[i]
+        if p == participant {
+            if epoch > ep {
+                room.fences[i] = (participant, epoch)
+            }
+            return
+        }
+    }
+    list.push(mut room.fences, (participant, epoch))
+}
+
+/// Whether `(participant, epoch)` is covered by `room_name`'s fence table (CAS-4).
+pub fn is_fenced(cr: CascadeRouter, room_name: Bytes, participant: u64, epoch: u64) -> bool {
+    let Some(ri) = find_room(cr, room_name) else {
+        return false
+    }
+    room_is_fenced(cr.rooms[ri], participant, epoch)
+}
+
+pub fn room_is_fenced(room: CascadeRoom, participant: u64, epoch: u64) -> bool {
+    for (p, ep) in room.fences {
+        if p == participant && epoch <= ep {
+            return true
+        }
+    }
+    false
+}
+
+/// CAS-5 check performed right where media leaves (and at ingress):
+/// returns `true` iff `room_name` is allowed to send/forward media at `now_ms`.
+pub fn lease_allows_media(cr: CascadeRouter, room_name: Bytes, now_ms: u64) -> bool {
+    let Some(li) = find_lease(cr.fence, room_name) else {
+        return true
+    }
+    if !cr.fence.leases[li].enforced {
+        return true
+    }
+    if (cr.fence.leases[li].suspend_causes & 6u8) != 0 {
+        return false
+    }
+    let guard: u64 = int.widen(cr.limits.guard_ms)
+    int.saturating_add(now_ms, guard) <= cr.fence.leases[li].deadline_ms
+}
+
+/// CAS-5: Enforce lease deadlines right before committing QUIC packets / local media.
+/// Drops queued link datagrams with `quic.drop_datagrams` once `now_ms + guard_ms > deadline_ms`,
+/// and marks the room suspended with cause `Lease` (bit 2, never `Signaling`).
+pub fn enforce_leases(mut cr: CascadeRouter, mut hub: LinkHub, now_ms: u64) {
+    let guard: u64 = int.widen(cr.limits.guard_ms)
+    for li in 0u64 .. list.len(cr.fence.leases) {
+        if !cr.fence.leases[li].enforced {
+            continue
+        }
+        let expired = int.saturating_add(now_ms, guard) > cr.fence.leases[li].deadline_ms
+        if expired {
+            cr.fence.leases[li].suspend_causes = cr.fence.leases[li].suspend_causes | 2u8
+            let rname: Bytes = clone(cr.fence.leases[li].room_name)
+            if let Some(ri) = find_room(cr, rname) {
+                if cr.rooms[ri].role == Edge {
+                    if let Some(h) = cr.rooms[ri].home_handle {
+                        let _ = drop_room_datagrams(mut hub, h, cr.rooms[ri].edge_room_num)
+                    }
+                } else {
+                    for ei in 0u64 .. list.len(cr.rooms[ri].edges) {
+                        let eh = cr.rooms[ri].edges[ei].handle
+                        let ern = cr.rooms[ri].edges[ei].room_num
+                        let _ = drop_room_datagrams(mut hub, eh, ern)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Home renews its term lease with `RoomDirectory` (CAS-1).
+/// Counts the lease from `sent_ms` (before `renew`) for the returned `lease_ms`.
+pub fn home_renew_term(mut cr: CascadeRouter, mut dir: RoomDirectory, room_name: Bytes, home_now_ms: u64) -> Result[u32, DirError] waits {
+    let Some(ri) = find_room(cr, room_name) else {
+        return Error(Unknown)
+    }
+    let term = cr.rooms[ri].term
+    let li = ensure_lease(mut cr.fence, room_name)
+    let seq = cr.fence.leases[li].term_renew_seq
+    cr.fence.leases[li].term_renew_seq += 1
+    cr.fence.leases[li].last_renew_ms = home_now_ms
+    match renew(mut dir, room_name, cr.node, term, seq) {
+        Ok(lease_ms) => {
+            let dl = home_now_ms + int.widen(lease_ms)
+            if dl > cr.fence.leases[li].deadline_ms {
+                cr.fence.leases[li].deadline_ms = dl
+            }
+            cr.fence.leases[li].enforced = true
+            cr.fence.leases[li].suspend_causes = cr.fence.leases[li].suspend_causes & ~6u8
+            Ok(lease_ms)
+        },
+        Error(Stale(term: t)) => {
+            cr.fence.leases[li].deadline_ms = 0
+            cr.fence.leases[li].suspend_causes = cr.fence.leases[li].suspend_causes | 4u8
+            Error(Stale(term: t))
+        },
+        Error(e) => Error(e),
+    }
+}
+
+/// Edge sends a `LeaseRequest` every `L / 3` ms on the link control stream (CAS-5).
+pub fn step_edge_leases(mut cr: CascadeRouter, mut hub: LinkHub, now_ms: u64) {
+    let lease_w: u64 = int.widen(cr.limits.lease_ms)
+    let period: u64 = order.max(1u64, lease_w / 3u64)
+    for ri in 0u64 .. list.len(cr.rooms) {
+        if cr.rooms[ri].role != Edge || !cr.rooms[ri].edge_attached {
+            continue
+        }
+        let rname: Bytes = clone(cr.rooms[ri].room_name)
+        let li = ensure_lease(mut cr.fence, rname)
+        if !cr.fence.leases[li].enforced || !cr.fence.leases[li].fence_table_applied {
+            continue
+        }
+        if cr.fence.leases[li].last_req_ms != 0 && now_ms < cr.fence.leases[li].last_req_ms + period {
+            continue
+        }
+        let Some(h) = cr.rooms[ri].home_handle else {
+            continue
+        }
+        let rn = cr.rooms[ri].edge_room_num
+        let term = cr.rooms[ri].term
+        let seq = cr.fence.leases[li].next_req_seq
+        cr.fence.leases[li].next_req_seq += 1
+        cr.fence.leases[li].last_req_ms = now_ms
+        list.push(mut cr.fence.pending_reqs, LeaseReqRecord(room_name: clone(rname), seq: seq, sent_ms: now_ms))
+        let _ = send_control(mut hub, h, LeaseRequest(room_num: rn, term: term, seq: seq))
+    }
+}
+
+/// CAS-7: Called by `forward.hirsel` when Home attaches an edge: registers/updates
+/// the edge in Home's persistent grant ledger and sends `FenceTable` FIRST before any
+/// `LeaseGrant` can be issued on the link.
+pub fn on_home_edge_attached(mut cr: CascadeRouter, mut hub: LinkHub, ri: u64, h: quic.ConnectionHandle, rn: u32, peer: NodeId, now_ms: u64) {
+    let rname: Bytes = clone(cr.rooms[ri].room_name)
+    let term = cr.rooms[ri].term
+    let li = ensure_lease(mut cr.fence, rname)
+    let ft_seq = cr.rooms[ri].next_ctrl_seq
+    cr.rooms[ri].next_ctrl_seq += 1
+    let covers_seq = cr.fence.leases[li].next_fence_seq - 1
+    let existing = find_ledger(cr.fence, rname, peer)
+    match existing {
+        Some(idx) => {
+            cr.fence.ledger[idx].handle = Some(h)
+            cr.fence.ledger[idx].room_num = rn
+            cr.fence.ledger[idx].linked = true
+            cr.fence.ledger[idx].fence_table_acked = !cr.fence.leases[li].enforced
+            cr.fence.ledger[idx].fence_table_seq = ft_seq
+            cr.fence.ledger[idx].fence_table_covers_seq = covers_seq
+        },
+        None => {
+            list.push(mut cr.fence.ledger, LeaseLedgerEntry(room_name: clone(rname), peer: peer, handle: Some(h), room_num: rn, linked: true, fence_table_acked: !cr.fence.leases[li].enforced, fence_table_seq: ft_seq, fence_table_covers_seq: covers_seq, last_grant_ms: 0, has_grant: false, pending_fence_seq: None, acked_fence_seq: 0))
+        },
+    }
+    if cr.fence.leases[li].enforced {
+        let fences: List[(u64, u64)] = clone(cr.rooms[ri].fences)
+        list.push(mut cr.fence.trace, FenceTrace(kind: TraceFenceTable, room_num: rn, term: term, seq: ft_seq, at_ms: now_ms))
+        let _ = send_control(mut hub, h, FenceTable(room_num: rn, term: term, seq: ft_seq, fences: take fences))
+    }
+}
+
+/// CAS-7: On link loss (`LinkDown`), end room attachments on both sides, but KEEP
+/// Home's grant ledger entries intact so pending/future revokes still wait for them!
+pub fn on_link_lost(mut cr: CascadeRouter, h: quic.ConnectionHandle) {
+    for ri in 0u64 .. list.len(cr.rooms) {
+        if cr.rooms[ri].role == Edge {
+            if cr.rooms[ri].home_handle == Some(h) {
+                cr.rooms[ri].home_handle = None
+                cr.rooms[ri].edge_attached = false
+                let rname: Bytes = clone(cr.rooms[ri].room_name)
+                let li = ensure_lease(mut cr.fence, rname)
+                cr.fence.leases[li].fence_table_applied = false
+            }
+        } else {
+            let mut ei = 0u64
+            while ei < list.len(cr.rooms[ri].edges) {
+                if cr.rooms[ri].edges[ei].handle == h {
+                    let _ = list.remove(mut cr.rooms[ri].edges, ei)
+                } else {
+                    ei += 1
+                }
+            }
+        }
+    }
+    // Grant ledger outlives the link (CAS-5): mark unlinked, never remove!
+    for i in 0u64 .. list.len(cr.fence.ledger) {
+        if cr.fence.ledger[i].handle == Some(h) {
+            cr.fence.ledger[i].linked = false
+            cr.fence.ledger[i].handle = None
+        }
+    }
+}
+
+/// Edge reattaches an existing room onto a new link `new_home_handle` under a fresh
+/// link-local room number (CAS-7).
+pub fn reattach_edge_room(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Bytes, new_home_handle: quic.ConnectionHandle, term: u64) -> Result[u32, LinkError] {
+    let Some(ri) = find_room(cr, room_name) else {
+        return Error(UnknownRoom)
+    }
+    let rn = alloc_room_num(mut hub, new_home_handle)?
+    attach_room_stream(mut hub, new_home_handle, rn, term, true)?
+    let seq = cr.rooms[ri].next_ctrl_seq
+    cr.rooms[ri].next_ctrl_seq += 1
+    send_control(mut hub, new_home_handle, Attach(room_num: rn, term: term, seq: seq, room_name: clone(room_name)))?
+    cr.rooms[ri].home_handle = Some(new_home_handle)
+    cr.rooms[ri].edge_room_num = rn
+    cr.rooms[ri].edge_attached = false
+    if term > cr.rooms[ri].term {
+        cr.rooms[ri].term = term
+    }
+    let li = ensure_lease(mut cr.fence, room_name)
+    cr.fence.leases[li].fence_table_applied = false
+    cr.fence.leases[li].last_req_ms = 0
+    list.clear(mut cr.rooms[ri].remote_pubs)
+    for pi in 0u64 .. list.len(cr.rooms[ri].local_pubs) {
+        for l_i in 0u64 .. list.len(cr.rooms[ri].local_pubs[pi].layers) {
+            cr.rooms[ri].local_pubs[pi].layers[l_i].upstream_layer = None
+        }
+    }
+    let _ = find_congestion(mut cr, new_home_handle)
+    Ok(rn)
+}
+
+/// CAS-4 step 0-2: Start a cross-node `revoke(room, participant, epoch)` on Home.
+/// Commits the fence to `RoomDirectory` first (compare-and-set on term), applies locally,
+/// and sends `Fence` on the urgency-0 link control stream to EVERY edge in the grant ledger.
+/// Returns `Error(Term(t))` immediately if Home lost its term.
+pub fn begin_revoke(mut cr: CascadeRouter, mut hub: LinkHub, mut dir: RoomDirectory, room_name: Bytes, participant: u64, epoch: u64, now_ms: u64) -> Result[u64, CascadeError] waits {
+    let Some(ri) = find_room(cr, room_name) else {
+        return Error(Router(NoRoom))
+    }
+    let term = cr.rooms[ri].term
+    // Step 0: durable directory commit (CAS on term).
+    match commit_fence(mut dir, room_name, term, participant, epoch) {
+        Ok(()) => (),
+        Error(Stale(term: t)) => return Error(Term(t)),
+        Error(_) => return Error(Router(Suspended)),
+    }
+    // Step 1: apply locally on Home immediately.
+    record_local_fence(mut cr.rooms[ri], participant, epoch)
+    let li = ensure_lease(mut cr.fence, room_name)
+    let fseq = cr.fence.leases[li].next_fence_seq
+    cr.fence.leases[li].next_fence_seq += 1
+    // Step 2: send Fence to every linked edge in the grant ledger, and mark EVERY
+    // entry in the ledger (linked OR unlinked) as pending `fseq` (blocks renewals!).
+    for idx in 0u64 .. list.len(cr.fence.ledger) {
+        if list.compare_bytes(cr.fence.ledger[idx].room_name, room_name) != Equal {
+            continue
+        }
+        cr.fence.ledger[idx].pending_fence_seq = Some(fseq)
+        if cr.fence.ledger[idx].linked {
+            if let Some(eh) = cr.fence.ledger[idx].handle {
+                let ern = cr.fence.ledger[idx].room_num
+                list.push(mut cr.fence.trace, FenceTrace(kind: TraceFence, room_num: ern, term: term, seq: fseq, at_ms: now_ms))
+                let _ = send_control(mut hub, eh, Fence(room_num: ern, term: term, seq: fseq, participant: participant, epoch: epoch))
+            }
+        }
+    }
+    list.push(mut cr.fence.pending_revokes, PendingRevoke(room_name: clone(room_name), term: term, fence_seq: fseq, participant: participant, epoch: epoch, committed: true, started_ms: now_ms))
+    Ok(fseq)
+}
+
+/// CAS-4 step 4 / CAS-5: Advance pending revokes at `now_ms` (Home's lease clock).
+/// Returns `true` once `fence_seq` is complete: every edge in the grant ledger has either
+/// acknowledged `fence_seq`, or `ceil(L * (1 + d) / (1 - d))` ms have passed since its last
+/// grant (in which case Home closes the room on that link and emits `Severed`).
+pub fn poll_revoke(mut cr: CascadeRouter, mut hub: LinkHub, room_name: Bytes, fence_seq: u64, now_ms: u64) -> bool {
+    let wait = lease_wait_ms(cr.limits.lease_ms, cr.limits.drift_ppm)
+    let mut all_settled = true
+    let mut i = 0u64
+    while i < list.len(cr.fence.ledger) {
+        if list.compare_bytes(cr.fence.ledger[i].room_name, room_name) != Equal {
+            i += 1
+            continue
+        }
+        if cr.fence.ledger[i].acked_fence_seq >= fence_seq {
+            if cr.fence.ledger[i].pending_fence_seq == Some(fence_seq) {
+                cr.fence.ledger[i].pending_fence_seq = None
+            }
+            i += 1
+            continue
+        }
+        if !cr.fence.ledger[i].has_grant {
+            // Edge was never granted a lease in this term; cannot forward media.
+            cr.fence.ledger[i].pending_fence_seq = None
+            i += 1
+            continue
+        }
+        if now_ms >= cr.fence.ledger[i].last_grant_ms + wait {
+            // CAS-5: edge's lease has provably ended even under worst-case ±drift_ppm!
+            let peer = cr.fence.ledger[i].peer
+            let ern = cr.fence.ledger[i].room_num
+            if let Some(eh) = cr.fence.ledger[i].handle {
+                detach_room(mut hub, eh, ern)
+            }
+            if let Some(ri) = find_room(cr, room_name) {
+                let mut ei = 0u64
+                while ei < list.len(cr.rooms[ri].edges) {
+                    if cr.rooms[ri].edges[ei].peer == peer {
+                        let _ = list.remove(mut cr.rooms[ri].edges, ei)
+                    } else {
+                        ei += 1
+                    }
+                }
+            }
+            list.push(mut cr.fence.severed, (clone(room_name), peer))
+            let _ = list.remove(mut cr.fence.ledger, i)
+            continue
+        }
+        all_settled = false
+        i += 1
+    }
+    if all_settled {
+        let mut r = 0u64
+        while r < list.len(cr.fence.pending_revokes) {
+            if cr.fence.pending_revokes[r].fence_seq == fence_seq && list.compare_bytes(cr.fence.pending_revokes[r].room_name, room_name) == Equal {
+                let _ = list.remove(mut cr.fence.pending_revokes, r)
+            } else {
+                r += 1
+            }
+        }
+    }
+    all_settled
+}
+
+/// Handle CAS-4/5/7 link control messages (`LeaseRequest`, `LeaseGrant`, `Fence`,
+/// `FenceAck`, `FenceTable`, `FenceTableAck`).
+pub fn on_fence_ctrl_msg(mut cr: CascadeRouter, mut hub: LinkHub, h: quic.ConnectionHandle, take msg: LinkMsg, now_ms: u64) {
+    match take msg {
+        LeaseRequest(room_num: rn, term: term, seq: req_seq) => {
+            let Some(ri) = find_room_by_link(cr, h, rn) else {
+                return
+            }
+            if cr.rooms[ri].role != Home || term != cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
+                return
+            }
+            let rname: Bytes = clone(cr.rooms[ri].room_name)
+            let Some(idx) = find_ledger_by_handle(cr.fence, rname, h) else {
+                return
+            }
+            // CAS-7: never grant before edge acknowledges the room's fence table!
+            if !cr.fence.ledger[idx].fence_table_acked {
+                return
+            }
+            // CAS-5: no renewal across a pending fence!
+            if cr.fence.ledger[idx].pending_fence_seq != None {
+                return
+            }
+            let li = ensure_lease(mut cr.fence, rname)
+            let grant_rem: u32 = if cr.fence.leases[li].enforced {
+                let home_rem = int.saturating_sub(cr.fence.leases[li].deadline_ms, now_ms)
+                let trans = transitive_remaining_ms(home_rem, cr.limits.drift_ppm, cr.limits.guard_ms)
+                if trans == 0 {
+                    return
+                }
+                let lease_w: u64 = int.widen(cr.limits.lease_ms)
+                int.narrow(order.min(lease_w, trans))
+            } else {
+                cr.limits.lease_ms
+            }
+            cr.fence.ledger[idx].last_grant_ms = now_ms
+            cr.fence.ledger[idx].has_grant = true
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceLeaseGrant, room_num: rn, term: term, seq: req_seq, at_ms: now_ms))
+            let _ = send_control(mut hub, h, LeaseGrant(room_num: rn, term: term, seq: req_seq, remaining_ms: grant_rem))
+        },
+        LeaseGrant(room_num: rn, term: term, seq: grant_seq, remaining_ms: rem_ms) => {
+            let Some(ri) = find_room_by_link(cr, h, rn) else {
+                return
+            }
+            if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
+                return
+            }
+            let rname: Bytes = clone(cr.rooms[ri].room_name)
+            // CAS-5: match `grant_seq` against a request this edge actually sent, and
+            // count from `sent_ms` (never from receipt time!). A late grant for an older
+            // request therefore never extends a lease past a newer one.
+            let mut found_sent: Option[u64] = None
+            let mut i = 0u64
+            while i < list.len(cr.fence.pending_reqs) {
+                if list.compare_bytes(cr.fence.pending_reqs[i].room_name, rname) == Equal && cr.fence.pending_reqs[i].seq == grant_seq {
+                    found_sent = Some(cr.fence.pending_reqs[i].sent_ms)
+                    let _ = list.remove(mut cr.fence.pending_reqs, i)
+                    break
+                }
+                i += 1
+            }
+            let Some(sent_ms) = found_sent else {
+                cr.fence.late_grants_ignored += 1
+                return
+            }
+            let li = ensure_lease(mut cr.fence, rname)
+            let lease_w: u64 = int.widen(cr.limits.lease_ms)
+            let rem_w: u64 = int.widen(rem_ms)
+            let dur = order.min(lease_w, rem_w)
+            let cand_dl = sent_ms + dur
+            if cand_dl <= cr.fence.leases[li].deadline_ms {
+                cr.fence.late_grants_ignored += 1
+                return
+            }
+            cr.fence.leases[li].deadline_ms = cand_dl
+            cr.fence.leases[li].enforced = true
+            let guard: u64 = int.widen(cr.limits.guard_ms)
+            if int.saturating_add(now_ms, guard) <= cand_dl {
+                // Lift ONLY cause `Lease` (bit 2); never lifts `Signaling` (1) or `Term` (4).
+                cr.fence.leases[li].suspend_causes = cr.fence.leases[li].suspend_causes & ~2u8
+            }
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceLeaseGrant, room_num: rn, term: term, seq: grant_seq, at_ms: now_ms))
+        },
+        Fence(room_num: rn, term: term, seq: fseq, participant: p, epoch: ep) => {
+            let Some(ri) = find_room_by_link(cr, h, rn) else {
+                return
+            }
+            if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
+                return
+            }
+            record_local_fence(mut cr.rooms[ri], p, ep)
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceFence, room_num: rn, term: term, seq: fseq, at_ms: now_ms))
+            let _ = send_control(mut hub, h, FenceAck(room_num: rn, term: term, seq: fseq))
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceFenceAck, room_num: rn, term: term, seq: fseq, at_ms: now_ms))
+        },
+        FenceAck(room_num: rn, term: term, seq: fseq) => {
+            let Some(ri) = find_room_by_link(cr, h, rn) else {
+                return
+            }
+            if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
+                return
+            }
+            let rname: Bytes = clone(cr.rooms[ri].room_name)
+            if let Some(idx) = find_ledger_by_handle(cr.fence, rname, h) {
+                if fseq > cr.fence.ledger[idx].acked_fence_seq {
+                    cr.fence.ledger[idx].acked_fence_seq = fseq
+                }
+                if cr.fence.ledger[idx].pending_fence_seq == Some(fseq) {
+                    cr.fence.ledger[idx].pending_fence_seq = None
+                }
+            }
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceFenceAck, room_num: rn, term: term, seq: fseq, at_ms: now_ms))
+        },
+        FenceTable(room_num: rn, term: term, seq: ft_seq, fences: fs) => {
+            let Some(ri) = find_room_by_link(cr, h, rn) else {
+                return
+            }
+            if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
+                return
+            }
+            for (p, ep) in fs {
+                record_local_fence(mut cr.rooms[ri], p, ep)
+            }
+            let rname: Bytes = clone(cr.rooms[ri].room_name)
+            let li = ensure_lease(mut cr.fence, rname)
+            cr.fence.leases[li].fence_table_applied = true
+            cr.fence.leases[li].last_req_ms = 0
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceFenceTable, room_num: rn, term: term, seq: ft_seq, at_ms: now_ms))
+            let _ = send_control(mut hub, h, FenceTableAck(room_num: rn, term: term, seq: ft_seq))
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceFenceTableAck, room_num: rn, term: term, seq: ft_seq, at_ms: now_ms))
+        },
+        FenceTableAck(room_num: rn, term: term, seq: ft_seq) => {
+            let Some(ri) = find_room_by_link(cr, h, rn) else {
+                return
+            }
+            if term < cr.rooms[ri].term {
+                cr.fence.stale_msgs_ignored += 1
+                return
+            }
+            let rname: Bytes = clone(cr.rooms[ri].room_name)
+            if let Some(idx) = find_ledger_by_handle(cr.fence, rname, h) {
+                if cr.fence.ledger[idx].fence_table_seq == ft_seq {
+                    cr.fence.ledger[idx].fence_table_acked = true
+                    let covers = cr.fence.ledger[idx].fence_table_covers_seq
+                    if covers > cr.fence.ledger[idx].acked_fence_seq {
+                        cr.fence.ledger[idx].acked_fence_seq = covers
+                    }
+                    if let Some(ps) = cr.fence.ledger[idx].pending_fence_seq {
+                        if ps <= covers {
+                            cr.fence.ledger[idx].pending_fence_seq = None
+                        }
+                    }
+                }
+            }
+            list.push(mut cr.fence.trace, FenceTrace(kind: TraceFenceTableAck, room_num: rn, term: term, seq: ft_seq, at_ms: now_ms))
+        },
+        _ => (),
+    }
+}

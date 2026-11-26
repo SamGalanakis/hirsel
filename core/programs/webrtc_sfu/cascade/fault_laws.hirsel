@@ -1,0 +1,357 @@
+// SFU cascade KS4 laws: K5 (`stale_term_ignored`) and K6 (`link_loss_recovers`).
+const K6_HOME_ADDR: Addr = Addr(ip: V4(0x0a070001), port: 4560)
+
+const K6_EDGE_A_ADDR: Addr = Addr(ip: V4(0x0a070002), port: 4561)
+
+const K6_EDGE_A2_ADDR: Addr = Addr(ip: V4(0x0a070003), port: 4562)
+
+// ---- K5: stale_term_ignored ----
+/// bug: an edge that has seen a higher term still accepts a fence-free subscribe,
+/// wanted mask, media datagram, or lease grant from an old home in a lower term.
+/// oracle: docs/spec/sfu_cascade.md K5 and CAS-1: every message carrying `term < room.term`
+/// is refused and counted stale, and an old home's `LeaseGrant` extends no lease.
+@test
+fn stale_term_ignored() -> Result[(), ()] {
+    let lim = cascade.default_link_limits()
+    let edge_id = cascade.node_id(b"edge-k5")
+    let (_, clock) = std.sim.world.new(505, 0, 0)
+    let (take k, take c) = result.unwrap(signal.unit_certificate(provide.random(511), clock))
+    let mut hub = result.unwrap(cascade.link_hub(edge_id, provide.random(512), lim, rebuild_id(take k, take c), list.new(), 4))
+    let mut cr = cascade.cascade_router(edge_id, lim)
+    let h_old: quic.ConnectionHandle = ConnectionHandle(0)
+    // Open room at term 1, then advance to term 2 (edge learned new term from directory/new home).
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k5", 1, k_room_limits()))
+    cascade.enable_leases(mut cr, b"room-k5", 1000, list.new())
+    cascade.advance_room_term(mut cr, b"room-k5", 2)
+    // After advancing to term 2, old term's lease ended (deadline 0, suspended with Term).
+    if cascade.room_lease_deadline(cr, b"room-k5") != Some(0) || !cascade.room_lease_suspended(cr, b"room-k5") {
+        fail("advancing to term 2 did not end old term's lease")
+    }
+    // Old home (still in term 1) sends a fence-free WantedMask/Subscribe and a LeaseGrant(term: 1).
+    let mut evs: List[cascade.LinkEvent] = list.new()
+    list.push(mut evs, ControlIn(handle: h_old, msg: Attach(room_num: 1, term: 1, seq: 1, room_name: b"room-k5")))
+    list.push(mut evs, ControlIn(handle: h_old, msg: LeaseGrant(room_num: 1, term: 1, seq: 1, remaining_ms: 2000)))
+    list.push(mut evs, RoomIn(handle: h_old, room_num: 1, msg: WantedMask(room_num: 1, term: 1, seq: 1, participant: 1, epoch: 1, pub_slot: 1, mask: 7)))
+    let stale_layer = cascade.LayerInfo(room_num: 1, term: 1, layer_num: 1, participant: 1, epoch: 1, kind: Vp8, rid: b"\x00\x00\x00\x01\x00q")
+    list.push(mut evs, MediaIn(handle: h_old, room_num: 1, layer_num: 1, layer: take stale_layer, rtp: make_canon_rtp(Vp8, 1, 90000, 0x111, 64)))
+    cascade.handle_events(mut cr, mut hub, take evs, 500)
+    // Verify old home's Attach was refused, LeaseGrant extended NO lease, and no media was delivered!
+    if cascade.attach_refusal_count(cr) == 0 {
+        fail("stale term 1 Attach was not refused")
+    }
+    if cascade.room_lease_deadline(cr, b"room-k5") != Some(0) {
+        fail("old home's term 1 LeaseGrant extended the edge's lease in term 2")
+    }
+    if list.len(cascade.take_delivered(mut cr)) != 0 {
+        fail("old home's term 1 media was delivered in term 2")
+    }
+    if !cascade.room_lease_suspended(cr, b"room-k5") {
+        fail("old home's term 1 grant cleared term 2 suspension")
+    }
+    Ok(())
+}
+
+// ---- K6: link_loss_recovers ----
+type K6HomePlan: send {
+    clock: Clock,
+    socket: UdpSocket,
+    vnet: Net,
+    node_id: cascade.NodeId,
+    key: Secret,
+    cert: Bytes,
+    pins: List[quic.handshake.Pin]
+}
+
+type K6HomeOut: send {
+    reattach_order_ok: bool,
+    fence_r1_acked_after_flood: bool,
+    malformed_detached_room2_only: bool
+}
+
+type K6EdgeOut: send {
+    suspended_during_cut: bool,
+    reattach_order_ok: bool,
+    fenced_p_dropped: bool,
+    resumed_q_delivered: u64,
+    room1_still_alive: bool
+}
+
+fn check_reattach_order(trace: List[cascade.FenceTrace], rn: u32) -> bool {
+    let mut seen_ft = false
+    let mut seen_ft_ack = false
+    let mut seen_grant = false
+    for tr in trace {
+        if tr.room_num != rn {
+            continue
+        }
+        match tr.kind {
+            TraceFenceTable => {
+                if seen_ft_ack || seen_grant {
+                    return false
+                }
+                seen_ft = true
+            },
+            TraceFenceTableAck => {
+                if !seen_ft || seen_grant {
+                    return false
+                }
+                seen_ft_ack = true
+            },
+            TraceLeaseGrant => {
+                if !seen_ft || !seen_ft_ack {
+                    return false
+                }
+                seen_grant = true
+            },
+            _ => (),
+        }
+    }
+    seen_ft && seen_ft_ack && seen_grant
+}
+
+fn k6_home_task(take cfg: K6HomePlan) -> K6HomeOut waits {
+    let K6HomePlan(clock: clock, socket: take given, vnet: vnet, node_id: nid, key: take k, cert: take c, pins: take pins) = take cfg
+    let mut sock = take given
+    let lim = cascade.default_link_limits()
+    let mut hub = result.unwrap(cascade.link_hub(nid, provide.random(6001), lim, rebuild_id(take k, take c), take pins, 8))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let mut dir = cascade.sim_directory(clock, lim.drift_ppm)
+    let _ = result.unwrap(cascade.claim(mut dir, b"room-k6-1", nid, 0))
+    let _ = result.unwrap(cascade.claim(mut dir, b"room-k6-2", nid, 0))
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k6-1", 1, k_room_limits()))
+    result.unwrap(cascade.open_home_room(mut cr, b"room-k6-2", 1, k_room_limits()))
+    cascade.enable_leases(mut cr, b"room-k6-1", 30000, list.new())
+    cascade.enable_leases(mut cr, b"room-k6-2", 30000, list.new())
+    let pub_p = cascade.PubKey(participant: 10, epoch: 1, pub_slot: 1)
+    let pub_q = cascade.PubKey(participant: 20, epoch: 1, pub_slot: 1)
+    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-k6-1", pub_p, Vp8, one_rid()))
+    result.unwrap(cascade.publish_local(mut cr, mut hub, b"room-k6-1", pub_q, Vp8, one_rid()))
+    let mut cut_done = false
+    let mut revoked_p = false
+    let mut restored = false
+    let mut sent_post_flood_fence = false
+    let mut fseq2 = 0u64
+    let mut fence_r1_acked = false
+    let mut malformed_room2 = false
+    let mut all_trace: List[cascade.FenceTrace] = list.new()
+    let mut seq = 1u16
+    let mut next_media = 6400 * MS
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 7500 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        result.unwrap(cascade.drive_links(mut hub, clock, mut sock, order.min(now + 15 * MS, end), mut events))
+        let ms = host.mono_ns(clock) / MS
+        cascade.handle_events(mut cr, mut hub, take events, ms)
+        events = list.new()
+        for tr in cascade.take_fence_trace(mut cr) {
+            list.push(mut all_trace, tr)
+        }
+        for rn in cascade.take_detached_malformed(mut cr) {
+            if rn == 2 {
+                malformed_room2 = true
+            }
+        }
+        // Cut link to Edge A at t = 600 ms for 5 seconds (600..5600 ms).
+        if !cut_done && ms >= 600 {
+            result.unwrap(std.sim.udp.link(vnet, K6_HOME_ADDR.ip, K6_EDGE_A_ADDR.ip, Cut))
+            result.unwrap(std.sim.udp.link(vnet, K6_EDGE_A_ADDR.ip, K6_HOME_ADDR.ip, Cut))
+            cut_done = true
+        }
+        // During the 5 s cut, revoke participant 10 (fenced in directory & home).
+        if cut_done && !revoked_p && ms >= 1200 {
+            let _ = result.unwrap(cascade.begin_revoke(mut cr, mut hub, mut dir, b"room-k6-1", 10, 1, ms))
+            revoked_p = true
+        }
+        // Restore link after 5 s cut at t = 5600 ms.
+        if cut_done && !restored && ms >= 5600 {
+            result.unwrap(std.sim.udp.restore(vnet, K6_HOME_ADDR.ip, K6_EDGE_A_ADDR.ip))
+            result.unwrap(std.sim.udp.restore(vnet, K6_EDGE_A_ADDR.ip, K6_HOME_ADDR.ip))
+            list.clear(mut all_trace)
+            restored = true
+        }
+        // After reattach (~6400 ms), send Q's media (should resume on A) and P's (should be dropped).
+        let cur = host.mono_ns(clock)
+        if restored && cur >= next_media && cur < 6900 * MS {
+            let sq: u32 = int.widen(seq)
+            cascade.forward_local_rtp(mut cr, mut hub, b"room-k6-1", pub_p, 0, make_canon_rtp(Vp8, seq, sq * 3000u32, 0x10, 64), ms)
+            cascade.forward_local_rtp(mut cr, mut hub, b"room-k6-1", pub_q, 0, make_canon_rtp(Vp8, seq, sq * 3000u32, 0x20, 64), ms)
+            seq += 1
+            next_media = cur + 40 * MS
+        }
+        // At t = 7000 ms (right after Edge A floods room 2 with malformed bytes), revoke participant 30
+        // on room 1 over urgency-0 link control stream — must still be acked!
+        if restored && !sent_post_flood_fence && ms >= 7000 {
+            fseq2 = result.unwrap(cascade.begin_revoke(mut cr, mut hub, mut dir, b"room-k6-1", 30, 1, ms))
+            sent_post_flood_fence = true
+        }
+        if sent_post_flood_fence && !fence_r1_acked {
+            if cascade.poll_revoke(mut cr, mut hub, b"room-k6-1", fseq2, ms) {
+                fence_r1_acked = true
+            }
+        }
+    }
+    // On the new link (room_num 1 on the reconnected link), verify FenceTable -> FenceTableAck -> LeaseGrant order.
+    let order_ok = check_reattach_order(all_trace, 1)
+    K6HomeOut(reattach_order_ok: order_ok, fence_r1_acked_after_flood: fence_r1_acked, malformed_detached_room2_only: malformed_room2)
+}
+
+type K6EdgePlan: send {
+    clock: Clock,
+    sock1: UdpSocket,
+    sock2: UdpSocket,
+    node_id: cascade.NodeId,
+    key: Secret,
+    cert: Bytes,
+    home_id: cascade.NodeId,
+    home_addr: Addr,
+    home_pin: quic.handshake.Pin
+}
+
+fn k6_edge_task(take cfg: K6EdgePlan) -> K6EdgeOut waits {
+    let K6EdgePlan(clock: clock, sock1: take s1_in, sock2: take s2_in, node_id: nid, key: take k, cert: take c, home_id: hid, home_addr: haddr, home_pin: hpin) = take cfg
+    let mut sock1 = take s1_in
+    let mut sock2 = take s2_in
+    let lim = cascade.default_link_limits()
+    let id1 = rebuild_id(secret.share(k), clone(c))
+    let id2 = rebuild_id(secret.share(k), clone(c))
+    let mut hub1 = result.unwrap(cascade.link_hub(nid, provide.random(6002), lim, take id1, single_pin(clone(hpin)), 4))
+    let mut cr = cascade.cascade_router(nid, lim)
+    let h1 = result.unwrap(cascade.dial_addr(mut hub1, hid, haddr, single_pin(clone(hpin)), 0, take id2))
+    let mut attached1 = false
+    let mut suspended_cut = false
+    let mut reconnected = false
+    let mut h2_opt: Option[quic.ConnectionHandle] = None
+    let mut hub2_opt: Option[cascade.LinkHub] = None
+    let mut reattached = false
+    let mut flooded_r2 = false
+    let mut resumed_q = 0u64
+    let mut reattach_trace: List[cascade.FenceTrace] = list.new()
+    let pub_p = cascade.PubKey(participant: 10, epoch: 1, pub_slot: 1)
+    let pub_q = cascade.PubKey(participant: 20, epoch: 1, pub_slot: 1)
+    let mut events: List[cascade.LinkEvent] = list.new()
+    let end = 7500 * MS
+    while host.mono_ns(clock) < end {
+        let now = host.mono_ns(clock)
+        let ms = now / MS
+        if !reconnected {
+            result.unwrap(cascade.drive_links(mut hub1, clock, mut sock1, order.min(now + 15 * MS, end), mut events))
+            let mut got_up = false
+            for ev in events {
+                if let LinkUp(handle: h, ..) = ev {
+                    if h == h1 {
+                        got_up = true
+                    }
+                }
+            }
+            cascade.handle_events(mut cr, mut hub1, take events, host.mono_ns(clock) / MS)
+            events = list.new()
+            if got_up && !attached1 {
+                let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub1, b"room-k6-1", h1, 1, k_room_limits()))
+                cascade.enable_leases(mut cr, b"room-k6-1", 0, list.new())
+                result.unwrap(cascade.subscribe_local(mut cr, mut hub1, b"room-k6-1", 1, pub_q, 0))
+                attached1 = true
+            }
+            // During the 5 s cut (600..5600 ms), Edge A's 2 s lease MUST expire and suspend room 1!
+            if attached1 && ms >= 3000 && ms < 5600 && cascade.room_lease_suspended(cr, b"room-k6-1") {
+                suspended_cut = true
+            }
+            // After the 5 s cut ends (5700 ms), reconnect over a fresh link (new socket/hub).
+            if ms >= 5700 {
+                cascade.on_link_lost(mut cr, h1)
+                let _ = cascade.take_fence_trace(mut cr)
+                let id_new = rebuild_id(secret.share(k), clone(c))
+                let id_dial = rebuild_id(secret.share(k), clone(c))
+                let mut h2 = result.unwrap(cascade.link_hub(nid, provide.random(6003), lim, take id_new, single_pin(clone(hpin)), 4))
+                let conn2 = result.unwrap(cascade.dial_addr(mut h2, hid, haddr, single_pin(clone(hpin)), host.mono_ns(clock), take id_dial))
+                h2_opt = Some(conn2)
+                hub2_opt = Some(take h2)
+                reconnected = true
+            }
+        } else if let Some(take h2_val) = replace(mut hub2_opt, None) {
+            let mut hub2 = take h2_val
+            let h2 = option.unwrap(h2_opt)
+            result.unwrap(cascade.drive_links(mut hub2, clock, mut sock2, order.min(now + 15 * MS, end), mut events))
+            let mut got_up2 = false
+            for ev in events {
+                if let LinkUp(handle: h, ..) = ev {
+                    if h == h2 {
+                        got_up2 = true
+                    }
+                }
+            }
+            let cur_ms = host.mono_ns(clock) / MS
+            cascade.handle_events(mut cr, mut hub2, take events, cur_ms)
+            events = list.new()
+            if got_up2 && !reattached {
+                let _ = result.unwrap(cascade.reattach_edge_room(mut cr, mut hub2, b"room-k6-1", h2, 1))
+                let _ = result.unwrap(cascade.attach_edge_room(mut cr, mut hub2, b"room-k6-2", h2, 1, k_room_limits()))
+                cascade.enable_leases(mut cr, b"room-k6-2", 0, list.new())
+                reattached = true
+            }
+            for tr in cascade.take_fence_trace(mut cr) {
+                list.push(mut reattach_trace, tr)
+            }
+            for d in cascade.take_delivered(mut cr) {
+                if d.pub_key == pub_p {
+                    fail("fenced participant P was delivered on Edge A after reattach")
+                }
+                if d.pub_key == pub_q {
+                    resumed_q += 1
+                }
+            }
+            // At t = 6850 ms, flood room 2's stream and send a malformed frame (unknown tag 99, len 3, garbage).
+            if reattached && !flooded_r2 && cur_ms >= 6850 {
+                let _ = cascade.send_room_raw(mut hub2, h2, 2, b"\x40\x63\x03\xff\xfe\xfd")
+                flooded_r2 = true
+            }
+            hub2_opt = Some(take hub2)
+        }
+    }
+    let fenced_p = cascade.is_fenced(cr, b"room-k6-1", 10, 1)
+    let r1_alive = cascade.is_fenced(cr, b"room-k6-1", 30, 1)
+    K6EdgeOut(suspended_during_cut: suspended_cut, reattach_order_ok: check_reattach_order(reattach_trace, 1), fenced_p_dropped: fenced_p, resumed_q_delivered: resumed_q, room1_still_alive: r1_alive)
+}
+
+/// bug: an edge fails to suspend within its lease during a 5 s link cut, forwards media
+/// on reattach before applying the room's fence table and receiving its first LeaseGrant,
+/// or a malformed message on one room stream kills another room or delays its fence.
+/// oracle: docs/spec/sfu_cascade.md K6, CAS-2, and CAS-7.
+@test
+fn link_loss_recovers(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 606, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    let (take sim_world, clock) = std.sim.world.new(606, 0, 0)
+    let (vnet, take net_task) = std.sim.udp.start(tasks, config, std.sim.world.plan_from(script, 0), take sim_world, clock, list.new(), 2097152)
+    let (take hk, take hc) = result.unwrap(signal.unit_certificate(provide.random(611), clock))
+    let home_pin: quic.handshake.Pin = Cert(std.sha256.hash(hc))
+    let (take ak, take ac) = result.unwrap(signal.unit_certificate(provide.random(612), clock))
+    let a_pin: quic.handshake.Pin = Cert(std.sha256.hash(ac))
+    let home_id = cascade.node_id(b"home-k6")
+    let a_id = cascade.node_id(b"edge-a-k6")
+    let mut pins: List[quic.handshake.Pin] = list.with_capacity(2)
+    list.push(mut pins, clone(home_pin))
+    list.push(mut pins, take a_pin)
+    let (take s_home, _) = result.unwrap(host.udp_bind(vnet, K6_HOME_ADDR, K_SOCKET))
+    let (take s_a1, _) = result.unwrap(host.udp_bind(vnet, K6_EDGE_A_ADDR, K_SOCKET))
+    let (take s_a2, _) = result.unwrap(host.udp_bind(vnet, K6_EDGE_A2_ADDR, K_SOCKET))
+    let t_home = task.spawn(tasks, bytes 14680064, K6HomePlan(clock: clock, socket: take s_home, vnet: vnet, node_id: home_id, key: take hk, cert: take hc, pins: take pins), k6_home_task)
+    let t_a = task.spawn(tasks, bytes 16777216, K6EdgePlan(clock: clock, sock1: take s_a1, sock2: take s_a2, node_id: a_id, key: take ak, cert: take ac, home_id: home_id, home_addr: K6_HOME_ADDR, home_pin: take home_pin), k6_edge_task)
+    let hs = result.unwrap(task.join(take t_home))
+    let ea = result.unwrap(task.join(take t_a))
+    result.unwrap(task.join(take net_task))
+    if !ea.suspended_during_cut {
+        fail("edge A did not suspend the room within its 2 s lease during the 5 s link cut")
+    }
+    if !hs.reattach_order_ok || !ea.reattach_order_ok {
+        fail("reattach did not enforce strict FenceTable -> FenceTableAck -> LeaseGrant order")
+    }
+    if !ea.fenced_p_dropped || ea.resumed_q_delivered == 0 {
+        fail("fence set during cut did not hold before media resumed or non-fenced Q did not resume")
+    }
+    if !hs.malformed_detached_room2_only || !hs.fence_r1_acked_after_flood || !ea.room1_still_alive {
+        fail("malformed room 2 stream did not detach only room 2 while room 1 fence succeeded")
+    }
+    Ok(())
+}

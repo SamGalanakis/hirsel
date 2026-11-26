@@ -288,3 +288,18 @@ pub fn on_switch_req(mut cr: CascadeRouter, mut hub: LinkHub, ri: u64, h: quic.C
         }
     }
 }
+
+/// Read the latest forwarded SR timing for `(key, encoding)` in `room_name`.
+pub fn remote_sr(cr: CascadeRouter, room_name: Bytes, key: PubKey, encoding: u8) -> Option[SrTiming] {
+    let ri = find_room(cr, room_name)?
+    for p in cr.rooms[ri].remote_pubs {
+        if p.key == key {
+            for l in p.layers {
+                if l.encoding == encoding {
+                    return l.last_sr
+                }
+            }
+        }
+    }
+    None
+}

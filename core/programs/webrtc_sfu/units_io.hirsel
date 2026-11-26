@@ -77,7 +77,7 @@ fn copy_out(rx: Bytes, at: u64, len: u64) -> Bytes {
 /// Send doorbells before media. Each send gets its own deadline.
 pub fn send(mut u: Unit, clock: Clock, mut sock: UdpSocket) waits {
     doorbells(mut u, clock, mut sock)
-    let n = ready(mut u)
+    let n = ready_at(mut u, host.mono_ns(clock) / 1000000)
     if n != 0 {
         let deadline = int.saturating_add(host.mono_ns(clock), u.timing.media_send_ns)
         let sent = host.udp_send(mut sock, u.out.data, list.slice(u.out.pkts, 0, n), At(clock, deadline))

@@ -50,6 +50,7 @@ quic = { major = 1, path = "../quic" }
 "cascade/cost.hirsel" = "cascade"
 "cascade/forward.hirsel" = "cascade"
 "cascade/repair.hirsel" = "cascade"
+"cascade/fence.hirsel" = "cascade"
 
 [tests]
 limit = 67108864
@@ -88,6 +89,8 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 "cascade/laws.hirsel" = "laws"
 "cascade/forward_laws.hirsel" = "laws"
 "cascade/repair_laws.hirsel" = "laws"
+"cascade/fence_laws.hirsel" = "laws"
+"cascade/fault_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"
 "vectors/chromium_rtp.hirsel" = "vectors"

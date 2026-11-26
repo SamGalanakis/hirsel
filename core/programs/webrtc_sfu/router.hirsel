@@ -188,7 +188,10 @@ type Room {
     // next tick, and the top speakers last emitted (RTC-6).
     heard: bool,
     tick: u64,
-    top: List[u64]
+    top: List[u64],
+    // CAS-5: shared lease clock deadline and guard window checked where media leaves.
+    lease_deadline_ms: Option[u64],
+    lease_guard_ms: u32
 }
 
 // The home unit's 5-tuple table (RTC-3): the selected path of each local session.
@@ -500,7 +503,7 @@ fn open(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), Rout
     list.try_reserve(mut ids, n) ?=> |c| Capacity(c)
     list.try_reserve(mut fences, n) ?=> |c| Capacity(c)
     list.try_reserve(mut r.rooms, 1) ?=> |c| Capacity(c)
-    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, full: 0, over_rate: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
+    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, full: 0, over_rate: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new(), lease_deadline_ms: None, lease_guard_ms: 0))
     Ok(())
 }
 

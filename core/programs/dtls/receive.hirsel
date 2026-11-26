@@ -49,7 +49,7 @@ fn reading_version(e: Endpoint) -> RecordVersion {
 
 /// A Cookie server checks the cookie again on its first datagram (DTLS-5 Admission) and
 /// numbers its records and messages from that ClientHello's.
-fn admitted(mut e: Endpoint, datagram: Bytes) -> bool {
+fn admitted(mut e: Endpoint, now: u64, datagram: Bytes) -> bool {
     if e.proven {
         return true
     }
@@ -61,7 +61,7 @@ fn admitted(mut e: Endpoint, datagram: Bytes) -> bool {
         e.layer.dropped.malformed += 1
         return false
     }
-    if !cookie_right(key, e.peer, list.slice(datagram, f.random, f.random + RANDOM), list.slice(datagram, f.cookie, f.cookie + f.length)) {
+    if !cookie_right(key, now, e.peer, list.slice(datagram, f.random, f.random + RANDOM), list.slice(datagram, f.cookie, f.cookie + f.length)) {
         e.layer.dropped.malformed += 1
         return false
     }
@@ -82,7 +82,7 @@ pub fn receive(mut e: Endpoint, now: u64, r: Random, datagram: Bytes, mut data: 
     if let Some(c) = e.closed {
         return Error(Closed(c))
     }
-    if !admitted(mut e, datagram) {
+    if !admitted(mut e, now, datagram) {
         return Ok(0)
     }
     match receive_records(mut e, now, r, datagram, mut data) {

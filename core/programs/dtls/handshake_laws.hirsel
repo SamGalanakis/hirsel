@@ -216,7 +216,7 @@ fn verify_request(sequence: u64, cookie: String) -> Bytes {
 
 fn replies(datagram: Bytes, peer: Addr, want: Bytes) {
     let mut out: Bytes = list.with_capacity(100)
-    match dtls.admit(cookie_key(), peer, datagram, mut out) {
+    match dtls.admit(cookie_key(), 0, peer, datagram, mut out) {
         Reply(60) => (),
         _ => fail("expected a 60-byte HelloVerifyRequest"),
     }
@@ -228,7 +228,7 @@ fn replies(datagram: Bytes, peer: Addr, want: Bytes) {
 fn discards_quietly(datagram: Bytes) {
     let mut out: Bytes = list.with_capacity(100)
     list.push(mut out, 0xaa)
-    if let Discard = dtls.admit(cookie_key(), address(1), datagram, mut out) {} else {
+    if let Discard = dtls.admit(cookie_key(), 0, address(1), datagram, mut out) {} else {
         fail("expected Discard")
     }
     if out != b"\xaa" {
@@ -239,16 +239,16 @@ fn discards_quietly(datagram: Bytes) {
 /// bug: keep state or reply larger than the input for an unproven address, or accept a
 /// cookie bound to another address; flight 4 numbered from the wrong record or message.
 /// oracle: RFC 6347 section 4.2.1 by hand; cookies from Python hmac over the hand-built
-/// address bytes (family 4, address, port) and client random.
+/// bucket (0), address bytes (family 4, address, port) and client random.
 @test
 fn cookie_bounds_unproven_address() -> Result[(), ()] {
-    let cookies =["04f2690e202c1d9dccc8c5916e24f7446c803507927031dd7093555561acf95b", "a723a71d78aee0e0f7dd968c9882fab317c8caefae99c4daeef0d6abab49a225", "cf8e3002ec5396452cad0ec96fbfb79f84f0419b3aacfda5d3db9288246d1849", "45cd9fbf6812d6aa74421c5506a1e79469cf7c1651dd2d451d9ebf56b56f859d", "87f7ebd386861a49346b3d1c6a040350f75d0d44d0c36830158a0259c9587e65", "e5058de65a74685ea9599d95bd371fdf24495ce12d13403d882018bcbcd3cff0", "df988bbd9ee03f4cbc341cdc6cce77f496742bacb03ab3a95a0f00178772efc4", "305ccfa1bea4aea62ff0c70bdd8365d04dd896d9475c1c50776800c45c3fc5b9", "31c58cb4f7782e5fb4b2b1407d1374f2ba0d62a62d75c94cd4e69a8be201a279", "86cbebae00f41117fb55eebba591b7e11e322223893179357d714771348b455c"]
+    let cookies =["0cc70d2c3ebe50ee3dc106452fca88382f781b8ac721e26ec16797f67e8a8e8a", "5e7a71bb4c140ff58622a77c0ca1326b0bb1edbe9d50fb42c0d36be69fb78344", "cedd20f1d9f3846c634f532ab511a402a240fd822078022b1d8e04212faa944d", "39f70e59539a565bce530d264e801331b336a86a4b3ba7693765907a6074d0fb", "053e6d1daee4104d4441412565a93d51c1c9a68a50231fcab221dc33980e97d8", "44235859a75e109278349befc617b736e51997a73046c699aa45d203b90bade1", "7ed0d813be907d639d8e7046d1041d89e6841c559d5763712ba45c1bda75bf77", "8104b802c7b3ec7bb031fadad7a1536f7f1639e061556091beeac35183f181de", "482373353d04ceb44d0ee36174650af25c1b61137ce3a27e0b8cea9a6594955a", "c82cb2812d343b199520bc0089595a01813d375fad60dd8fe17156f0623b4140"]
     for i in 0u64 .. 10 {
         let n: u32 = int.narrow(i + 1)
         replies(whole_hello(i + 1, 0, b""), address(n), verify_request(i + 1, cookies[i]))
     }
     // A cookie made for address 2 presented from address 11.
-    replies(whole_hello(40, 1, unhex(cookies[1])), address(11), verify_request(40, "e4b5238687a1467fae21d8374261be08da75ab4fa6b105cf3922c194ceec634f"))
+    replies(whole_hello(40, 1, unhex(cookies[1])), address(11), verify_request(40, "b1019e5e032bfe964d77b8f503aad20b3da7aab9e5f9551163a2303437a6a214"))
     let plain = hello_body(b"")
     let total = list.len(plain)
     let through_cookie = plain_record(22, 30, hs_fragment(1, total, 0, 0, list.slice(plain, 0, 36)))
@@ -262,12 +262,12 @@ fn cookie_bounds_unproven_address() -> Result[(), ()] {
     }
     discards_quietly(short)
     discards_quietly(plain_record(22, 32, hs_fragment(1, total, 0, 36, list.slice(plain, 36, total))))
-    let body = hello_body(unhex("b7baea18def8e6069d6b2150d3d07f074db708906f540f553b707e968b8dff26"))
+    let body = hello_body(unhex("c823235fa5963b82b0bcac000a58ea327555365645d2599d097f1499a6529419"))
     let size = list.len(body)
     let first = plain_record(22, 7, hs_fragment(1, size, 1, 0, list.slice(body, 0, 80)))
     let second = plain_record(22, 8, hs_fragment(1, size, 1, 80, list.slice(body, 80, size)))
     let mut nothing: Bytes = list.with_capacity(100)
-    if let Admitted = dtls.admit(cookie_key(), address(20), first, mut nothing) {} else {
+    if let Admitted = dtls.admit(cookie_key(), 0, address(20), first, mut nothing) {} else {
         fail("right cookie not admitted")
     }
     let a = party(31)

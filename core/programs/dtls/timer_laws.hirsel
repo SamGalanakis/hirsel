@@ -61,7 +61,7 @@ fn flight_timer_schedule() -> Result[(), ()] {
     let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
     let first = drain(mut client, rc, 0)
     let mut reply: Bytes = list.with_capacity(100)
-    if let Reply(_) = dtls.admit(cookie_key(), address(1), first[0], mut reply) {} else {
+    if let Reply(_) = dtls.admit(cookie_key(), 0, address(1), first[0], mut reply) {} else {
         fail("flight 1 not answered with a HelloVerifyRequest")
     }
     let _ = deliver(mut client, rc, half, single(reply))
@@ -70,7 +70,7 @@ fn flight_timer_schedule() -> Result[(), ()] {
     }
     let resent = drain(mut client, rc, half + SECOND)
     let mut nothing: Bytes = list.new()
-    if let Admitted = dtls.admit(cookie_key(), address(1), resent[0], mut nothing) {} else {
+    if let Admitted = dtls.admit(cookie_key(), half + SECOND, address(1), resent[0], mut nothing) {} else {
         fail("resent flight 3 not admitted")
     }
     let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(1), Cookie(cookie_key())))

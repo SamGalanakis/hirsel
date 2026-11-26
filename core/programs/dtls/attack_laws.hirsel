@@ -14,17 +14,17 @@ fn empties(kind: u8, from: u16, n: u16, step: u16) -> Bytes {
 /// ClientHello has message_seq 0 or 1.
 @test
 fn atk_cookie_seq_overflow() -> Result[(), ()] {
-    let c = dtls.cookie_for(cookie_key(), address(20), hello_random())
+    let c = dtls.cookie_for(cookie_key(), address(20), hello_random(), 0)
     let mut cookie: Bytes = list.with_capacity(32)
     for i in 0u64 .. 32 {
         list.push(mut cookie, c[i])
     }
     let mut out: Bytes = list.with_capacity(100)
-    if let Discard = dtls.admit(cookie_key(), address(20), whole_hello(7, 2, cookie), mut out) {} else {
+    if let Discard = dtls.admit(cookie_key(), 0, address(20), whole_hello(7, 2, cookie), mut out) {} else {
         fail("message_seq 2 admitted")
     }
     let hello = whole_hello(7, 0xffff, cookie)
-    if let Discard = dtls.admit(cookie_key(), address(20), hello, mut out) {} else {
+    if let Discard = dtls.admit(cookie_key(), 0, address(20), hello, mut out) {} else {
         fail("message_seq 0xFFFF admitted")
     }
     if list.len(out) != 0 {
@@ -513,6 +513,132 @@ fn capacity_sweep_handshake() -> Result[(), ()] {
         if let Error(take text) = take swept {
             fail(take text)
         }
+    }
+    Ok(())
+}
+
+/// bug: an off-path plaintext epoch-0 fatal alert or close_notify before the peer's
+/// Finished verifies closes the endpoint and aborts the handshake.
+/// oracle: DTLS-4 Alerts and DTLS-6: plaintext epoch-0 closing alerts are counted in
+/// `early_alert` and dropped without closing; the handshake completes and authenticated
+/// epoch-1 alerts still close, while a dead handshake still ends in Timeout.
+@test
+fn atk_early_epoch0_alert_dropped() -> Result[(), ()] {
+    let a = party(831)
+    let b = party(832)
+    let rc = provide.random(833)
+    let rs = provide.random(834)
+    let Party(id: take client_id, certificate: client_certificate) = take a
+    let Party(id: take server_id, certificate: server_certificate) = take b
+    let mut client = result.unwrap(dtls.client(take client_id, dtls.defaults(), address(1)))
+    let mut server = result.unwrap(dtls.server(take server_id, dtls.defaults(), address(2), Verified))
+    result.unwrap(dtls.expect(mut client, pin_list(server_certificate)))
+    result.unwrap(dtls.expect(mut server, pin_list(client_certificate)))
+    let flight1 = drain(mut client, rc, 0)
+    let _ = deliver(mut server, rs, 0, flight1)
+    let flight4 = drain(mut server, rs, 0)
+    // Off-path epoch-0 fatal alert (handshake_failure) and close_notify to both sides.
+    let fatal = plain_record(21, 99, unhex("0228"))
+    let close_notify = plain_record(21, 100, unhex("0100"))
+    let warning = plain_record(21, 101, unhex("0164"))
+    let bad = plain_record(21, 102, unhex("02"))
+    let _ = deliver(mut client, rc, 0, single(fatal))
+    let _ = deliver(mut client, rc, 0, single(close_notify))
+    let _ = deliver(mut client, rc, 0, single(warning))
+    let _ = deliver(mut client, rc, 0, single(bad))
+    let _ = deliver(mut server, rs, 0, single(fatal))
+    let _ = deliver(mut server, rs, 0, single(close_notify))
+    match (dtls.state(client), dtls.state(server)) {
+        (Handshaking, Handshaking) => (),
+        _ => fail("plaintext epoch-0 alert closed an in-progress handshake"),
+    }
+    let cd = dtls.discards(client)
+    let sd = dtls.discards(server)
+    if cd.early_alert != 2 || cd.malformed != 1 || sd.early_alert != 2 {
+        fail("plaintext epoch-0 alerts were not counted in early_alert")
+    }
+    // The real handshake still completes and carries application data.
+    let _ = deliver(mut client, rc, 0, flight4)
+    let flight5 = drain(mut client, rc, 0)
+    let _ = deliver(mut server, rs, 0, flight5)
+    let flight6 = drain(mut server, rs, 0)
+    let _ = deliver(mut client, rc, 0, flight6)
+    if !is_connected(client) || !is_connected(server) {
+        fail("handshake did not complete after off-path epoch-0 alerts")
+    }
+    let mut wire: Bytes = list.with_capacity(1200)
+    let _ = result.unwrap(dtls.send(mut client, b"after alert", mut wire))
+    let mut got: Bytes = list.new()
+    if result.unwrap(dtls.receive(mut server, 0, rs, wire, mut got)) != 11 || got != b"after alert" {
+        fail("application data after off-path alert")
+    }
+    // Once connected, an authenticated epoch-1 close_notify still closes the peer.
+    let mut closing: Bytes = list.with_capacity(1200)
+    let _ = result.unwrap(dtls.close(mut client, mut closing))
+    let mut empty: Bytes = list.new()
+    match dtls.receive(mut server, 0, rs, closing, mut empty) {
+        Error(Closed(PeerClosed)) => (),
+        _ => fail("authenticated epoch-1 close_notify did not close the peer"),
+    }
+    // A dead handshake whose peer only sent a plaintext alert still ends at handshake_ns.
+    let mut doomed = fresh_client(835)
+    let rd = provide.random(836)
+    let _ = drain(mut doomed, rd, 0)
+    let _ = deliver(mut doomed, rd, 0, single(fatal))
+    let mut out: Bytes = list.with_capacity(1200)
+    match dtls.poll(mut doomed, 60 * SECOND, rd, mut out) {
+        Error(Closed(Timeout)) => (),
+        _ => fail("handshake timer did not close a dead handshake"),
+    }
+    Ok(())
+}
+
+/// bug: DTLS cookies never expire, so a former holder of an address can replay a saved
+/// cookie indefinitely and draw flight 4 to the new holder.
+/// oracle: DTLS-5 Admission with 60 s time buckets and Python hmac vectors for buckets
+/// 0, 1 and 2: current and previous bucket admit; two buckets ago and future buckets refuse.
+@test
+fn atk_cookie_expires_after_two_buckets() -> Result[(), ()] {
+    let bucket = dtls.COOKIE_BUCKET_NS
+    // Python hmac(sha256("dtls cookie key"), u64_be(b) || 4 || 10.0.0.20 || 5000 || random).
+    let b0 = unhex("c823235fa5963b82b0bcac000a58ea327555365645d2599d097f1499a6529419")
+    let b1 = unhex("3b7fa1bef8d0e349a0e98bbd769fc9e5f517665f75fb8ab594e535ff44032687")
+    let b2_hex = "d30a9b515313fe7f11ff8885487024a1b0fde9f559edba5908eb5d295b90659f"
+    let hello_b0 = whole_hello(7, 1, b0)
+    let hello_b1 = whole_hello(8, 1, b1)
+    let mut out: Bytes = list.with_capacity(100)
+    // Bucket 0 cookie is admitted in bucket 0 and in bucket 1 (previous bucket).
+    if let Admitted = dtls.admit(cookie_key(), 0, address(20), hello_b0, mut out) {} else {
+        fail("bucket 0 cookie refused in bucket 0")
+    }
+    if let Admitted = dtls.admit(cookie_key(), bucket, address(20), hello_b0, mut out) {} else {
+        fail("bucket 0 cookie refused in bucket 1")
+    }
+    if let Admitted = dtls.admit(cookie_key(), 2 * bucket - 1, address(20), hello_b0, mut out) {} else {
+        fail("bucket 0 cookie refused at end of bucket 1")
+    }
+    // A future bucket cookie (bucket 1 presented in bucket 0) is refused.
+    list.clear(mut out)
+    if let Reply(60) = dtls.admit(cookie_key(), 0, address(20), hello_b1, mut out) {} else {
+        fail("future bucket cookie was not refused")
+    }
+    // At bucket 2, the bucket 0 cookie is two buckets old and is refused with a fresh bucket-2 cookie.
+    list.clear(mut out)
+    match dtls.admit(cookie_key(), 2 * bucket, address(20), hello_b0, mut out) {
+        Reply(60) => (),
+        _ => fail("cookie from two buckets ago was not refused by admit"),
+    }
+    if out != verify_request(7, b2_hex) {
+        fail("refusal did not issue a fresh bucket-2 cookie")
+    }
+    // The Cookie server endpoint also refuses the two-buckets-old cookie on receive.
+    let p = party(837)
+    let Party(id: take sid, ..) = take p
+    let rs = provide.random(838)
+    let mut server = result.unwrap(dtls.server(take sid, dtls.defaults(), address(20), Cookie(cookie_key())))
+    let _ = deliver(mut server, rs, 2 * bucket, single(hello_b0))
+    if list.len(drain(mut server, rs, 2 * bucket)) != 0 || dtls.discards(server).malformed != 1 {
+        fail("Cookie server admitted a cookie from two buckets ago")
     }
     Ok(())
 }

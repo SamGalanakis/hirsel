@@ -5,7 +5,8 @@ pub type Discards {
     replayed: u64,
     tampered: u64,
     stale_epoch: u64,
-    overflow: u64
+    overflow: u64,
+    early_alert: u64
 }
 
 pub type RecordError = Capacity(Capacity) | Packet(packet.PacketError) | Schedule(schedule.ScheduleError) | DatagramFull | SequenceExhausted | InvalidRecord | Closed(Close)
@@ -95,7 +96,7 @@ pub fn ahead(max_ahead: u16) -> Ahead {
 }
 
 pub fn records(first_plain_sequence: u64) -> Records {
-    Records(read: None, write: None, plain_next: first_plain_sequence, connected: false, close: None, dropped: Discards(malformed: 0, replayed: 0, tampered: 0, stale_epoch: 0, overflow: 0))
+    Records(read: None, write: None, plain_next: first_plain_sequence, connected: false, close: None, dropped: Discards(malformed: 0, replayed: 0, tampered: 0, stale_epoch: 0, overflow: 0, early_alert: 0))
 }
 
 pub fn record_discards(r: Records) -> Discards {
@@ -195,6 +196,17 @@ fn overflow(mut dropped: Discards) -> RecordEvent {
     Discarded
 }
 
+fn plain_alert(mut dropped: Discards, payload: Bytes) -> RecordEvent {
+    if list.len(payload) != 2 || (payload[0] != 1 && payload[0] != 2) {
+        return malformed(mut dropped)
+    }
+    if payload[1] == 0 || payload[0] == 2 {
+        dropped.early_alert += 1
+        return Discarded
+    }
+    Ignored
+}
+
 fn alert(mut closed: Option[Close], mut dropped: Discards, payload: Bytes) -> RecordEvent {
     if list.len(payload) != 2 || (payload[0] != 1 && payload[0] != 2) {
         return malformed(mut dropped)
@@ -274,7 +286,7 @@ fn receive_plain(mut r: Records, datagram: Bytes, h: RecordHeader) -> Result[Rec
         })
     }
     if h.kind == ALERT {
-        return Ok(alert(mut r.close, mut r.dropped, payload))
+        return Ok(plain_alert(mut r.dropped, payload))
     }
     let body = copy_record(datagram, h.start, h.end)?
     Ok(HandshakeRecord(h, take body))

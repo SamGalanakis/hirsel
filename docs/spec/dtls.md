@@ -126,7 +126,7 @@ pub type Close = Local | PeerClosed | PeerAlert(u8) | SentAlert(u8) | Timeout
 pub type Poll = Send(u64) | WakeAt(u64) | Idle
 pub type Admission = Verified | Cookie(Inline[u8, 32])
 pub type Admit = Reply(u64) | Admitted | Discard
-pub type Discards { malformed: u64, replayed: u64, tampered: u64, stale_epoch: u64, overflow: u64 }
+pub type Discards { malformed: u64, replayed: u64, tampered: u64, stale_epoch: u64, overflow: u64, early_alert: u64 }
 
 pub type DtlsError = Config | Setup | Fingerprint | Closed(Close) | NotConnected
                    | Taken | NoSrtp | Key(KeyError) | Schedule(schedule.ScheduleError)
@@ -140,7 +140,7 @@ pub fn fingerprint_text(f: Fingerprint, mut out: Bytes) -> u64
 pub fn parse_fingerprint(text: Bytes) -> Result[Fingerprint, DtlsError]
 pub fn negotiate_setup(offer: Setup, answer: Setup) -> Result[schedule.Side, DtlsError]
 
-pub fn admit(key: Inline[u8, 32], peer: Addr, datagram: Bytes, mut out: Bytes) -> Admit
+pub fn admit(key: Inline[u8, 32], now: u64, peer: Addr, datagram: Bytes, mut out: Bytes) -> Admit
 pub fn client(take id: Identity, c: Config, peer: Addr) -> Result[Endpoint, DtlsError]
 pub fn server(take id: Identity, c: Config, peer: Addr, a: Admission) -> Result[Endpoint, DtlsError]
 pub fn expect(mut e: Endpoint, take fingerprints: List[Fingerprint]) -> Result[(), DtlsError]
@@ -253,15 +253,17 @@ then is the authenticated one in DTLS-5 Final flights.
 **Invalid records.** A record that fails authentication is discarded as `tampered` and
 sends no alert (RFC 6347 §4.1.2.7). The association continues.
 
-**Alerts.** A received fatal alert (level 2), or a received `close_notify` (0), closes the
-endpoint as `PeerAlert(n)` or `PeerClosed`. A warning alert other than `close_notify` is
-ignored. This holds for a plaintext epoch-0 alert too, until the peer's ChangeCipherSpec
-has arrived: anyone on the path can close a handshake that way, as in every DTLS 1.2
-implementation, and the endpoint gains nothing by ignoring it, because the same attacker
-can drop every datagram. Once the peer's ChangeCipherSpec has arrived, an epoch-0 alert is
-discarded as `stale_epoch` and only epoch-1 alerts act. When the endpoint fails a handshake it queues one fatal alert record with the
-description the table in DTLS-5 gives, protected if epoch 1 is active, and closes as
-`SentAlert(n)`. `close` queues `close_notify` and closes as `Local`.
+**Alerts.** A received authenticated (epoch-1) fatal alert (level 2), or a received
+authenticated `close_notify` (0), closes the endpoint as `PeerAlert(n)` or `PeerClosed`. A
+warning alert other than `close_notify` is ignored. Before the peer's ChangeCipherSpec has
+arrived (and thus before the peer's Finished verifies), a plaintext epoch-0 fatal alert or
+`close_notify` is counted in `early_alert` and dropped instead of closing, so an off-path
+sender cannot abort a handshake in progress; the handshake timer still ends a dead
+handshake. Once the peer's ChangeCipherSpec has arrived, any epoch-0 alert is discarded as
+`stale_epoch` and only authenticated epoch-1 alerts act. When the endpoint fails a handshake
+it queues one fatal alert record with the description the table in DTLS-5 gives, protected
+if epoch 1 is active, and closes as `SentAlert(n)`. `close` queues `close_notify` and closes
+as `Local`.
 
 ### DTLS-5: Handshake and flights
 
@@ -405,7 +407,7 @@ waiting for flight 5 resends flight 4. Every other retransmitted message is igno
 **Admission (cookies).** `server(.., Verified)` skips flights 2 and 3: the caller attests the
 peer address is proven, for example by an ICE connectivity check that carried
 `MESSAGE-INTEGRITY` under the peer's credentials ([RFC 8445](https://www.rfc-editor.org/rfc/rfc8445)).
-For an unproven address the caller runs **`admit(key, peer, datagram, mut out)` before it
+For an unproven address the caller runs **`admit(key, now, peer, datagram, mut out)` before it
 builds anything**. `admit` is a pure function: it takes no `Endpoint`, no `Identity` and no
 `Random`, and it keeps nothing, so a sender spoofing many source addresses makes the
 caller allocate nothing per address. It reads only the first record of `datagram`:
@@ -419,10 +421,13 @@ caller allocate nothing per address. It reads only the first record of `datagram
 - `Discard`: anything else (not a ClientHello, a later fragment, a first fragment cut before
   the cookie, malformed framing, an `out` without 60 bytes spare). Nothing is sent.
 
-The cookie is `HMAC-SHA256(key, address bytes ‖ client_random)` (32 bytes,
-`std.hmac.sha256`), where the address bytes are the peer `Addr`'s family byte, address and
-big-endian port; it is right when it equals that value in constant time
-(`std.hmac.equal`). A `Cookie` server checks the cookie again on the first ClientHello it
+The cookie is `HMAC-SHA256(key, bucket ‖ address bytes ‖ client_random)` (32 bytes,
+`std.hmac.sha256`), where `bucket` is the big-endian `u64` coarse time bucket
+`now / COOKIE_BUCKET_NS` (`COOKIE_BUCKET_NS` = 60 s) and the address bytes are the peer
+`Addr`'s family byte, address and big-endian port. A cookie is right when it equals the
+current bucket's value or (when `bucket > 0`) the previous bucket's value in constant time
+(`std.hmac.equal`), giving every cookie a 60–120 s validity window and refusing cookies from
+two buckets ago. A `Cookie` server checks the cookie again on the first ClientHello it
 receives: one that is not right is discarded as `malformed` and gets no reply, so a caller
 that skips `admit` never sends flight 4 to an unproven address.
 
@@ -461,13 +466,14 @@ first read). Both let a spoofing sender make the server allocate per address, wh
 RFC 6347 §4.2.1's cookie exists to prevent; the clean end state is the stateless gate.
 
 **Deviations in the cookie.** dimpl binds the cookie to the client random only
-(`src/dtls12/server.rs:1217`); binding the address too means a cookie seen on one path cannot
-admit a ClientHello from another. RFC 6347 §4.2.1 says the cookie SHOULD also cover the
-version, `session_id`, cipher suites and compression methods; this one does not, and it
-never expires. Both are harmless here: the transcript starts at the cookie ClientHello, so a
-client that changes those fields after the cookie only negotiates on its own second
-ClientHello, and the address binding is what bounds reuse. Rotating the key (and so
-expiring cookies) is the caller's: it passes a new key to `admit` and `server`.
+(`src/dtls12/server.rs:1217`); binding the address and time bucket too means a cookie seen
+on one path or from an earlier lease cannot admit a ClientHello from another address or
+after two 60 s buckets. RFC 6347 §4.2.1 says the cookie SHOULD also cover the version,
+`session_id`, cipher suites and compression methods; this one does not, which is harmless
+here because the transcript starts at the cookie ClientHello, so a client that changes those
+fields after the cookie only negotiates on its own second ClientHello. Rotating the key
+immediately invalidates even in-window cookies: the caller passes a new key to `admit` and
+`server`.
 
 **Failures.** Each handshake failure sends one fatal alert and closes as `SentAlert(n)`:
 
@@ -484,9 +490,10 @@ expiring cookies) is the caller's: it passes a new key to `admit` and `server`.
 
 Every datagram or record the endpoint drops without failing is counted in `discards(e)`:
 `malformed` (framing), `replayed` (window), `tampered` (authentication), `stale_epoch`
-(an epoch it holds no keys for and cannot hold) and `overflow` (the `max_ahead` bound). A
-dropped datagram never changes any other state. These counts are the observable cost of noise
-and attack traffic; nothing is dropped silently.
+(an epoch it holds no keys for and cannot hold), `overflow` (the `max_ahead` bound), and
+`early_alert` (plaintext epoch-0 fatal alert or `close_notify` before the peer's
+ChangeCipherSpec). A dropped datagram never changes any other state. These counts are the
+observable cost of noise and attack traffic; nothing is dropped silently.
 
 ### DTLS-7: Certificates, fingerprints and roles
 

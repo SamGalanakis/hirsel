@@ -333,12 +333,12 @@ fn vopr_inject_endpoint(mut e: dtls.Endpoint, mut end: End, now: u64, d: Bytes) 
 
 /// A Cookie server with no endpoint yet runs `admit` (DTLS-5 Admission), on honest and
 /// injected datagrams alike.
-fn vopr_admit(mut end: End, mut socket: UdpSocket, s: Settings, d: Bytes) waits {
+fn vopr_admit(mut end: End, mut socket: UdpSocket, s: Settings, now: u64, d: Bytes) waits {
     if let Some(_) = end.e {
         return
     }
     let mut reply: Bytes = list.with_capacity(64)
-    match dtls.admit(cookie_key(), VOPR_CLIENT, d, mut reply) {
+    match dtls.admit(cookie_key(), now, VOPR_CLIENT, d, mut reply) {
         Reply(_) => vopr_transmit(mut socket, VOPR_CLIENT, reply),
         Admitted => {
             let Some(take id) = replace(mut end.id, None) else {
@@ -352,7 +352,7 @@ fn vopr_admit(mut end: End, mut socket: UdpSocket, s: Settings, d: Bytes) waits 
 
 /// An honest datagram from the peer.
 fn vopr_honest(mut end: End, mut socket: UdpSocket, s: Settings, now: u64, d: Bytes) waits {
-    vopr_admit(mut end, mut socket, s, d)
+    vopr_admit(mut end, mut socket, s, now, d)
     let Some(take found) = replace(mut end.e, None) else {
         return
     }
@@ -421,7 +421,7 @@ fn vopr_honest_endpoint(mut e: dtls.Endpoint, mut end: End, mut socket: UdpSocke
 }
 
 fn vopr_feed_injected(mut end: End, mut socket: UdpSocket, s: Settings, now: u64, d: Bytes) waits {
-    vopr_admit(mut end, mut socket, s, d)
+    vopr_admit(mut end, mut socket, s, now, d)
     vopr_inject(mut end, now, d)
 }
 

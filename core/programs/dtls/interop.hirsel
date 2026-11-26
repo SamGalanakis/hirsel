@@ -105,7 +105,7 @@ fn is_connected(e: dtls.Endpoint) -> bool {
 
 /// Wait for the first ClientHello; in Cookie mode answer HelloVerifyRequests until one
 /// carries the right cookie (DTLS-5 Admission).
-fn first_hello(mut socket: UdpSocket, clock: Clock, cookie: Option[Inline[u8, 32]], mut data: Bytes, deadline: u64) -> Addr waits {
+fn first_hello(mut socket: UdpSocket, clock: Clock, start: u64, cookie: Option[Inline[u8, 32]], mut data: Bytes, deadline: u64) -> Addr waits {
     loop {
         let Some(from) = arrive(mut socket, At(clock, deadline), mut data) else {
             fail("no ClientHello")
@@ -114,7 +114,7 @@ fn first_hello(mut socket: UdpSocket, clock: Clock, cookie: Option[Inline[u8, 32
             return from
         }
         let mut reply: Bytes = list.with_capacity(256)
-        match dtls.admit(key, from, data, mut reply) {
+        match dtls.admit(key, host.mono_ns(clock) - start, from, data, mut reply) {
             Reply(_) => transmit(mut socket, from, reply),
             Admitted => return from,
             Discard => (),
@@ -149,7 +149,7 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         } else {
             None
         }
-        peer = first_hello(mut socket, clock, cookie, mut data, deadline)
+        peer = first_hello(mut socket, clock, start, cookie, mut data, deadline)
         have = true
         let admission: dtls.Admission = if cookie_mode {
             Cookie(key)

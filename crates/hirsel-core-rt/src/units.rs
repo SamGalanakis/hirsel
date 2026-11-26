@@ -24,6 +24,9 @@ pub(crate) use memory::{Memory, SharedMemory};
 #[cfg(test)]
 #[path = "units_check.rs"]
 mod check;
+#[path = "units_env.rs"]
+mod env;
+pub(crate) use env::workers;
 #[path = "units_hooks.rs"]
 mod hooks;
 #[path = "units_ledger.rs"]
@@ -171,21 +174,9 @@ pub(crate) const NONE: u32 = u32::MAX;
 /// Unit ids end below this; helpers take theirs from HELPER_BASE up.
 const ID_END: u32 = 0xffff;
 const WAKE_TAG: u64 = u64::MAX;
-
-/// `HIRSEL_UNTIED=W`: run the root unit, and every helper unit it makes, on W
-/// worker threads. Only executables that can spawn a helper unit read it.
-pub(crate) fn workers() -> Option<usize> {
-    std::env::var("HIRSEL_UNTIED")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&w: &usize| w >= 1)
-}
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+const CONNECTION_SPINS: u64 = 16;
+const SLICE_NS: u64 = 500_000;
+const POLL_EVERY_NS: u64 = 100_000;
 
 /// Counts from outside the worker pool and from workers that have exited.
 pub(crate) static USTATS: [AtomicU64; STATS] = [const { AtomicU64::new(0) }; STATS];
@@ -355,9 +346,6 @@ pub(crate) struct Pool {
     net_used: AtomicBool,
     stop: AtomicBool,
     spin_ns: u64,
-    connection_spins: u64,
-    slice_ns: u64,
-    poll_every_ns: u64,
 }
 
 /// One worker slot's poller and timers. The slot's thread owns both: it
@@ -677,19 +665,14 @@ fn work_waiting(p: &Pool, ix: usize) -> bool {
 }
 
 pub(crate) fn connection_spinner() -> *mut Unit {
-    if untied() && pool().connection_spins != 0 {
-        cur()
-    } else {
-        ptr::null_mut()
-    }
+    if untied() { cur() } else { ptr::null_mut() }
 }
 
 /// Spin only while a peer can make progress on another worker. Check work
 /// on every iteration, including the private slot that queued excludes.
 pub(crate) fn spin_connection(peer: &Unit, mut ready: impl FnMut() -> bool) -> bool {
     let p = pool();
-    if p.connection_spins == 0
-        || p.w == 1
+    if p.w == 1
         || !matches!(peer.state.load(Ordering::Relaxed), RUNNING | NOTIFIED)
         || ptr::eq(peer, cur())
     {
@@ -699,7 +682,7 @@ pub(crate) fn spin_connection(peer: &Unit, mut ready: impl FnMut() -> bool) -> b
     if ix >= p.w {
         return false;
     }
-    for _ in 0..p.connection_spins {
+    for _ in 0..CONNECTION_SPINS {
         if work_waiting(p, ix) || !matches!(peer.state.load(Ordering::Relaxed), RUNNING | NOTIFIED)
         {
             break;
@@ -733,7 +716,7 @@ fn yield_unit_if_needed() {
     // If work has arrived since then, yield at this checkpoint.
     if u.slice_start
         .get()
-        .is_some_and(|start| now().saturating_sub(start) < p.slice_ns)
+        .is_some_and(|start| now().saturating_sub(start) < SLICE_NS)
     {
         return;
     }
@@ -1335,6 +1318,7 @@ pub(crate) fn launch(
     input: &crate::entry::OsConfig,
     run: &(dyn Fn(&crate::entry::OsConfig) -> u8 + Sync),
 ) -> u8 {
+    let spin_ns = env::idle_spin_ns();
     // One poller per worker slot for the descriptors its units register.
     let pollers = hirsel_core_net::slot_pollers(w, here)
         .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
@@ -1345,7 +1329,7 @@ pub(crate) fn launch(
             .map(|_| AtomicPtr::new(std::ptr::null_mut()))
             .collect(),
         lifo_runs: (0..w).map(|_| AtomicU32::new(0)).collect(),
-        lifo_on: env_u64("HIRSEL_UNTIED_LIFO", 1) != 0,
+        lifo_on: env::lifo_on(),
         injector: Mutex::new(VecDeque::new()),
         memory: Memory::new(),
         queued: AtomicUsize::new(0),
@@ -1357,10 +1341,7 @@ pub(crate) fn launch(
         slots: pollers.into_iter().map(Slot::new).collect(),
         net_used: AtomicBool::new(false),
         stop: AtomicBool::new(false),
-        connection_spins: env_u64("HIRSEL_UNTIED_CONN_SPINS", 16).min(128),
-        spin_ns: env_u64("HIRSEL_UNTIED_SPIN_US", 5) * 1000,
-        slice_ns: env_u64("HIRSEL_UNTIED_SLICE_US", 500) * 1000,
-        poll_every_ns: env_u64("HIRSEL_UNTIED_POLL_US", 100) * 1000,
+        spin_ns,
     });
     // SAFETY: the launch joins every worker before `run` goes out of scope.
     let run: &'static (dyn Fn(&crate::entry::OsConfig) -> u8 + Sync) =

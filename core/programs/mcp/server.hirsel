@@ -157,6 +157,8 @@ fn read_body(req: std.http.Request, mut responder: std.http.Responder) -> Result
     }
 }
 
+const SUPPORTED_VERSIONS: String = rpc.typed_json(rpc.versions(Some(PerRequest)))
+
 fn metadata_check(req: std.http.Request, id: rpc.Id, method: String, params: rpc.Fields) -> Result[(), rpc.Fault] {
     let mismatch = scoped fn() -> rpc.Fault {
         rpc.fault(rpc.id_value(id_json(id)), -32020, "Missing or mismatched MCP request header")
@@ -173,11 +175,11 @@ fn metadata_check(req: std.http.Request, id: rpc.Id, method: String, params: rpc
     if !field_equal(req, b"mcp-protocol-version", revision, false) || !field_equal(req, b"mcp-method", method, false) {
         return Error(mismatch())
     }
-    if revision != rpc.REVISION {
+    if !rpc.supports(PerRequest, revision) {
         let mut fault = rpc.fault(rpc.id_value(id_json(id)), -32022, "Unsupported protocol version")
         let mut data: rpc.Fields = map.new()
         rpc.put(mut data, "requested", rpc.typed_json(revision))
-        rpc.put(mut data, "supported", string.from("[\"2026-07-28\"]"))
+        rpc.put(mut data, "supported", string.from(SUPPORTED_VERSIONS))
         fault.data = Some(rpc.encode_object(data))
         return Error(take fault)
     }
@@ -480,7 +482,7 @@ fn dispatch(req: std.http.Request, state: Server, id: rpc.Id, method: String, pa
         rpc.put(mut body, "cacheScope", string.from("\"private\""))
     }
     if method == "server/discover" {
-        rpc.put(mut body, "supportedVersions", string.from("[\"2026-07-28\"]"))
+        rpc.put(mut body, "supportedVersions", string.from(SUPPORTED_VERSIONS))
         let capabilities = match state.tools {
             Fixed(_) => "{\"tools\":{},\"resources\":{}}",
             Dynamic(_, _, _, _) => "{\"tools\":{\"listChanged\":true},\"resources\":{}}",

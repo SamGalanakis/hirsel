@@ -90,7 +90,7 @@ pub(super) fn park_slot(p: &Pool, ix: usize) -> bool {
 
 /// The owning thread's check of its slot between units: take whatever its
 /// poller holds without blocking (an io_uring ring says so without a
-/// syscall; epoll is asked every `poll_every_ns` once sockets exist), then
+/// syscall; epoll is asked every `POLL_EVERY_NS` once sockets exist), then
 /// fire the slot's due timers.
 pub(super) fn check_slot(p: &Pool, ix: usize) {
     let due = if p.uring {
@@ -99,7 +99,7 @@ pub(super) fn check_slot(p: &Pool, ix: usize) {
         p.slots[ix].poller.udp_due()
             || p.net_used.load(Ordering::Relaxed)
                 && now().saturating_sub(p.slots[ix].last_poll.load(Ordering::Relaxed))
-                    > p.poll_every_ns
+                    > super::POLL_EVERY_NS
     };
     if due && poll_slot(p, ix, Some(0)) > 0 {
         notify_worker(p, 0);

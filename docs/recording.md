@@ -689,8 +689,10 @@ last. `--unit` skips the missing-stream check. Each unit replays against its own
 
 So no unit's replay depends on how the others are scheduled or on how many workers run
 them. A replay at any worker count of a recording made at any other worker count makes the
-same observations in every unit. Recording and replay run on `HIRSEL_UNTIED` workers when
-it is set, as the program's ordinary run does, and each unit waits for the others' verdicts
+same observations in every unit. A program that can spawn helper units uses the
+worker count in `HIRSEL_UNTIED` in ordinary runs, recording and replay. With the
+variable unset it uses the tied scheduler. An invalid or zero count exits with
+status 2 and names `HIRSEL_UNTIED`. Each unit waits for the others' verdicts
 off its worker. `hirsel replay app --tape PATH --unit NAME` replays one
 unit's stream alone and leaves the other streams unread.
 

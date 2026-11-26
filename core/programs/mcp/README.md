@@ -6,17 +6,18 @@ revision uses `server/discover` and `subscriptions/listen`.
 [MCP specification](https://modelcontextprotocol.io/specification/2026-07-28)
 
 The client speaks 2026-07-28 and the Streamable HTTP session revisions
-2025-11-25, 2025-06-18 and 2025-03-26. `client.connect` negotiates the version
-in one place, following the 2026-07-28 backward-compatibility rules:
+2025-11-25, 2025-06-18 and 2025-03-26. The table in `rpc.supported` drives the
+server's per-request advertisements, the client's offer and its session
+validation. `client.connect` follows the 2026-07-28 backward-compatibility rules:
 
 1. It probes with a `server/discover` request at 2026-07-28.
    - A reply means the server serves requests statelessly at that revision.
    - A -32020, -32021 or -32022 error comes from a 2026-07-28 server.
      A -32022 error's `supported` list chooses the version.
    - Any other JSON-RPC error, or a 400, 404 or 405 without one, falls back
-     to `initialize` at 2025-11-25.
-2. The server answers with the version it chose, which must be one of the
-   three. The client then sends `notifications/initialized` and expects 202.
+     to `initialize` at the newest session revision in the table.
+2. The server answers with its chosen session revision. The client checks it
+   against the session entries, sends `notifications/initialized` and expects 202.
 
 The `Session` keeps the version and the `Mcp-Session-Id` from the initialize
 response. Every later request sends them as `MCP-Protocol-Version` and

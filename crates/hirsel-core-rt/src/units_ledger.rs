@@ -468,9 +468,6 @@ impl Port {
     }
 
     pub(crate) fn spin_before_park(&self, settling_on: Option<&Self>) -> bool {
-        if super::pool().connection_spins == 0 {
-            return false;
-        }
         let peer = match settling_on {
             Some(port) => port.receiver(),
             // SAFETY: the publisher stores a leaked pool unit record.

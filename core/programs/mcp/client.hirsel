@@ -10,22 +10,21 @@ pub type Endpoint {
 
 /// `SessionExpired` is a 404 on a request that carried `Mcp-Session-Id`: the
 /// caller starts a new session with `connect`. `Unsupported` names the
-/// version (or the server's supported list) none of `VERSIONS` matched.
+/// version (or the server's supported list) none of the client's revisions
+/// matched.
 pub type Error: send = Transport(std.http_client.Error) | Http(u16) | Event(std.sse.SseError) | InvalidMessage | InvalidRequest | Disconnected | Cancelled | Remote(rpc.Fault) | SessionExpired | Unsupported(String)
 
 /// Every protocol version this client speaks, most preferred first. The
 /// first is per-request (`rpc.REVISION`); the rest open an `initialize` session.
 pub fn versions() -> List[String] {
-    let mut out: List[String] = list.new()
-    for v in[rpc.REVISION, "2025-11-25", "2025-06-18", "2025-03-26"] {
-        list.push(mut out, string.from(v))
-    }
-    take out
+    rpc.versions(None)
 }
 
 fn session_version(version: String) -> bool {
-    version == "2025-11-25" || version == "2025-06-18" || version == "2025-03-26"
+    rpc.supports(InitializeSession, version)
 }
+
+const SESSION_FALLBACK: String = rpc.preferred(InitializeSession)
 
 /// The negotiated protocol version and, for an `initialize` session, the
 /// server's `Mcp-Session-Id`.
@@ -354,10 +353,12 @@ fn listed_version(data: Option[String], stateless_ok: bool) -> Option[String] {
             list.push(mut offered, take text)
         }
     }
-    for wanted in versions() {
-        if wanted == rpc.REVISION && !stateless_ok {
-            continue
-        }
+    let mode: Option[rpc.Transport] = if stateless_ok {
+        None
+    } else {
+        Some(InitializeSession)
+    }
+    for wanted in rpc.versions(mode) {
         for have in offered {
             if have == wanted {
                 return Some(string.from(wanted))
@@ -421,7 +422,7 @@ pub fn connect(n: Net, clock: Clock, peer: Endpoint, bearer: Option[Secret], ide
             if fault.code == -32022 {
                 match listed_version(fault.data, true) {
                     Some(take v) => {
-                        if v == rpc.REVISION {
+                        if rpc.supports(PerRequest, v) {
                             return Error(Remote(take fault))
                         }
                         take v
@@ -437,14 +438,14 @@ pub fn connect(n: Net, clock: Clock, peer: Endpoint, bearer: Option[Secret], ide
             } else if fault.code == -32020 || fault.code == -32021 {
                 return Error(Remote(take fault))
             } else {
-                string.from("2025-11-25")
+                string.from(SESSION_FALLBACK)
             }
         },
         Error(Http(code)) => {
             if code != 400 && code != 404 && code != 405 {
                 return Error(Http(code))
             }
-            string.from("2025-11-25")
+            string.from(SESSION_FALLBACK)
         },
         Error(take issue) => return Error(take issue),
     }

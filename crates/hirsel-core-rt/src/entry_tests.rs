@@ -1,6 +1,27 @@
 use crate::{Context, entry::*, process::*, provider::*};
 use std::{fs::File, os::fd::AsRawFd, ptr};
 
+#[test]
+fn invalid_untied_worker_count_refuses_startup() {
+    const CASE: &str = "entry_tests::invalid_untied_worker_count_refuses_startup";
+    const CHILD: &str = "HIRSEL_TEST_UNTIED_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let _ = crate::units::workers();
+        return;
+    }
+    for value in ["abc", "0"] {
+        let output = crate::test_process::command()
+            .args(["--exact", CASE, "--nocapture"])
+            .env(CHILD, "1")
+            .env("HIRSEL_UNTIED", value)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{value}: {stderr}");
+        assert!(stderr.contains("HIRSEL_UNTIED"), "{value}: {stderr}");
+    }
+}
+
 fn launch_config(launch: &hirsel_core_ids::launch::Metadata) -> Config {
     unsafe extern "C" fn diagnostic(_: *mut u8, _: *const u8, _: usize) {
         panic!("launch identity emitted a diagnostic");

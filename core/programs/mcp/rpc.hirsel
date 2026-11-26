@@ -1,4 +1,40 @@
-pub const REVISION: String = "2026-07-28"
+pub type Transport: key = PerRequest | InitializeSession
+
+/// Supported MCP revisions, newest first. LANG-20 does not admit aggregates
+/// of static Strings as constants.
+pub fn supported() -> Inline[(String, Transport), 4] {
+    [("2026-07-28", PerRequest), ("2025-11-25", InitializeSession), ("2025-06-18", InitializeSession), ("2025-03-26", InitializeSession)]
+}
+
+pub fn versions(mode: Option[Transport]) -> List[String] {
+    let mut out: List[String] = list.new()
+    for (version, transport) in supported() {
+        if mode == None || mode == Some(transport) {
+            list.push(mut out, string.from(version))
+        }
+    }
+    take out
+}
+
+pub fn supports(mode: Transport, requested: String) -> bool {
+    for (version, transport) in supported() {
+        if mode == transport && requested == version {
+            return true
+        }
+    }
+    false
+}
+
+pub fn preferred(mode: Transport) -> String {
+    for (version, transport) in supported() {
+        if mode == transport {
+            return string.from(version)
+        }
+    }
+    fail("MCP transport has no supported revision")
+}
+
+pub const REVISION: String = preferred(PerRequest)
 
 pub type Id: codec + send = TextId(String) | IntegerId(String)
 

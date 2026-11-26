@@ -11,6 +11,34 @@ fn refused(input: String, code: i64) {
     expect(failure.code == code)
 }
 
+// MCP 2026-07-28 per-request discovery and the Streamable HTTP initialize
+// revisions from the MCP 2025-11-25, 2025-06-18 and 2025-03-26 specifications.
+@test
+fn revisions_follow_transport() -> Result[(), ()] {
+    let requests = rpc.versions(Some(PerRequest))
+    let sessions = rpc.versions(Some(InitializeSession))
+    if rpc.typed_json(requests) != "[\"2026-07-28\"]" || rpc.typed_json(sessions) != "[\"2025-11-25\",\"2025-06-18\",\"2025-03-26\"]" {
+        fail("wrong supported revisions for the MCP transport")
+    }
+    if rpc.typed_json(client.versions()) != "[\"2026-07-28\",\"2025-11-25\",\"2025-06-18\",\"2025-03-26\"]" {
+        fail("wrong client revision preference order")
+    }
+    for version in requests {
+        if !rpc.supports(PerRequest, version) || rpc.supports(InitializeSession, version) {
+            fail("per-request revision validated for the wrong transport")
+        }
+    }
+    for version in sessions {
+        if !rpc.supports(InitializeSession, version) || rpc.supports(PerRequest, version) {
+            fail("session revision validated for the wrong transport")
+        }
+    }
+    if rpc.supports(InitializeSession, "2099-01-01") || rpc.supports(PerRequest, "2099-01-01") {
+        fail("unknown revision validated")
+    }
+    Ok(())
+}
+
 @test
 fn jsonrpc_framing() -> Result[(), ()] {
     refused("[", -32700)

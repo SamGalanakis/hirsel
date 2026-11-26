@@ -103,21 +103,21 @@ def sample(args, shape, label, profile):
     env = os.environ | {
         "HIRSEL_NET_REACTOR": "io_uring",
         "HIRSEL_UDP_MEASURE_CLOCK": "1",
-        "HIRSEL_UNTIED": "3" if shape == "group" else "0",
         "HIRSEL_UDP_MEASURE_GROUP": "1" if shape == "group" else "0",
     }
+    env.pop("HIRSEL_UNTIED", None)
+    rx_env = env | {"HIRSEL_UNTIED": "3"} if shape == "group" else env
     rx_cpu = "17-19" if shape == "group" else "17"
     processes = []
     pipes = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True}
     perf_path = args.output / (label + (".perf" if profile else ".csv"))
     try:
-        rx = child(rx_cpu, args.load, shape, port, env=env, stdin=subprocess.PIPE, **pipes)
+        rx = child(rx_cpu, args.load, shape, port, env=rx_env, stdin=subprocess.PIPE, **pipes)
         processes.append(rx)
         clock_schedule(rx, stop)
         ready(rx)
         tx_command = (args.flows, "s1" if shape == "s1" else "s2", port, start, rate)
-        tx_env = env | {"HIRSEL_UNTIED": "0"}
-        tx = child("16", *tx_command, env=tx_env, stdin=subprocess.PIPE, **pipes)
+        tx = child("16", *tx_command, env=env, stdin=subprocess.PIPE, **pipes)
         processes.append(tx)
         ready(tx)
         if profile:

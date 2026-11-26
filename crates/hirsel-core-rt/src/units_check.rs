@@ -1185,9 +1185,6 @@ pub(super) fn run_one(case: &Case, seed: u64, out: &str) -> ! {
         net_used: super::AtomicBool::new(true),
         stop: super::AtomicBool::new(false),
         spin_ns: 5_000,
-        connection_spins: 8,
-        slice_ns: 500_000,
-        poll_every_ns: 100_000,
     });
     static BODY: std::sync::OnceLock<fn(u32) -> u8> = std::sync::OnceLock::new();
     let _ = BODY.set(case.body);

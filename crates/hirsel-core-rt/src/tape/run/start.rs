@@ -41,12 +41,13 @@ pub(super) unsafe fn on_pool(
     // worker before returning; its operands are pinned startup tables.
     unsafe impl Sync for Root<'_> {}
     let root = &Root(run);
-    match crate::units::workers().filter(|_| units) {
+    if units && let Some(w) = crate::units::workers() {
         // SAFETY: the caller pins the configuration for the launch.
-        Some(w) => crate::units::launch(1, w, unsafe { &*input }, &move |config| {
+        crate::units::launch(1, w, unsafe { &*input }, &move |config| {
             let Root(run) = root;
             run(config)
-        }),
-        None => run(input),
+        })
+    } else {
+        run(input)
     }
 }

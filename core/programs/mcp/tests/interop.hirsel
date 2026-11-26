@@ -98,7 +98,10 @@ fn check_sdk(n: Net, c: Clock, authority: String, port: u16) waits {
         fail("negotiated a session version with a per-request server")
     }
     let discover = result.unwrap(invoke(n, c, peer, session, "server/discover", "{}", ignore_notice))
-    expect_content(discover, "supportedVersions", "2026-07-28")
+    let discover_fields = result.unwrap(rpc.object(discover))
+    if map.get(discover_fields, "supportedVersions") != Some("[\"2026-07-28\"]") {
+        fail("discovery advertised revisions outside the per-request transport")
+    }
     let tools = result.unwrap(invoke(n, c, peer, session, "tools/list", "{}", ignore_notice))
     expect_content(tools, "tools", "echo")
     let listed = result.unwrap(metadata.tools(tools))

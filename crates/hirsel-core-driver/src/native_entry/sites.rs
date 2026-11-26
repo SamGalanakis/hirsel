@@ -217,11 +217,10 @@ fn filter(sources: &SourceMap, scans: &[Referenced]) -> (std::sync::Arc<SourceMa
 }
 
 /// Whether each of `sources`' items, in map order, is one of `names` by its
-/// own site symbol. A symbol is a hash of its item, so the items are split
-/// across this process's processors.
+/// own site symbol. The site scan shares the driver's worker budget.
 fn named_items(sources: &SourceMap, names: &HashSet<&[u8]>) -> Vec<bool> {
     let items: Vec<&hirsel_core_ids::DefPath> = sources.items.keys().collect();
-    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = hirsel_guard::jobs();
     let chunk = items.len().div_ceil(threads).max(1024);
     let named = |items: &[&hirsel_core_ids::DefPath]| -> Vec<bool> {
         items
@@ -545,6 +544,12 @@ mod tests {
                     },
                 )]),
             };
+            let name = site_symbol(&path);
+            assert_eq!(
+                named_items(&sources, &HashSet::from([name.as_bytes()])),
+                [true]
+            );
+            assert_eq!(named_items(&sources, &HashSet::new()), [false]);
             define(&mut object, &sources).unwrap();
             let bytes = object.write().unwrap();
             let file = object::File::parse(bytes.as_slice()).unwrap();

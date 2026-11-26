@@ -297,9 +297,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut emulator = None;
     let mut sysroot = None;
     let mut target = crate::host::HOST_TARGET.triple().to_owned();
-    // How a native request links: --cc, else the recipe the installation
-    // captured, else (uninstalled) the pinned LLVM's clang. Never a `cc`
-    // found on PATH.
+    // Link with --cc, the installed recipe, or the pinned LLVM clang.
+    // Never use a cc found on PATH.
     let mut cc = None;
     let pinned =
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
@@ -535,7 +534,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::FleetHosts
             | Opt::FleetRounds
             | Opt::FleetPlaces
-            | Opt::FleetPartitions => unreachable!("CLI early command option"),
+            | Opt::FleetPartitions
+            | Opt::FleetPlacement => unreachable!("CLI early command option"),
         }
     }
     if test_filter.is_some() && !test_exact.is_empty() {

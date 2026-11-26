@@ -8,6 +8,7 @@ fleet@1/laws/sim_acto_desired_state_edits_and_conformance src=327be28711e307cd s
 fleet@1/laws/sim_directory_no_dual_holders_across_suspend src=10fca1f000ee4d63 sig=7d219a15a8fa2bd7 run=db4e4334fc7b99e2 bug=2020449b42ab7867 oracle=bef4a98d799d1e58 rows=pending
 fleet@1/laws/sim_directory_refuses_drift_beyond_d src=11f4a662a79b2138 sig=60f91f2477a7368f run=b8720e32dc0c26eb bug=5615f4e5c2d22a2a oracle=7a67544e27c1999a rows=pending
 fleet@1/laws/sim_directory_takeover_waits_w src=30c90e4d2153d053 sig=4a8fb38659b89e3d run=db4e4334fc7b99e2 bug=283bd9d374806333 oracle=ea5a863af05c097e rows=pending
+fleet@1/laws/sim_fleet_credit_desk_gate src=6477a223df50c55e sig=33335a3982ef26c2 run=5ffc56bae06a36d7 bug=d587ae9c61e675ce oracle=54981e9e14952a21 rows=pending
 fleet@1/laws/sim_fleet_scale_1000_hosts src=f2f350de5e756c54 sig=fe4b30a8946a4d27 run=c8f37220d8cae014 bug=094b7f5603c11ac8 oracle=554bbdac09ba3b78 rows=pending
 fleet@1/laws/sim_fleet_scale_50_hosts src=9c9cff372284db34 sig=fe4b30a8946a4d27 run=b8720e32dc0c26eb bug=00026f91da7ce7d2 oracle=08f576a2f697148b rows=pending
 fleet@1/laws/sim_lost_head_write_before_claim_settles_readonly src=45e6ebd9852167b5 sig=e621a888280ada62 run=b8720e32dc0c26eb bug=106b3735f4b720b2 oracle=cadfa3430e4244cb rows=pending

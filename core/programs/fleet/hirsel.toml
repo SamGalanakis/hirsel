@@ -16,6 +16,7 @@ runner = { major = 1, path = "../runner" }
 "directory.hirsel" = "directory"
 "directory_place.hirsel" = "directory"
 "scale_sim.hirsel" = "scale_sim"
+"placement_sim.hirsel" = "placement_sim"
 "fleet_sim_main.hirsel" = "fleet_sim"
 
 [tests]

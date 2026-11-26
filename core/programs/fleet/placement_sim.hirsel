@@ -1,0 +1,380 @@
+// Logical-worker phase of the fleet scale simulator. Times are virtual microseconds.
+const WORKER_RTT: u64 = 100
+
+const MEAN_LIFETIME: u64 = 1000000
+
+type Phase = Free | Offered | Busy
+
+type Slot {
+    incarnation: u64,
+    generation: u64,
+    phase: Phase
+}
+
+type Grant: key {
+    slot: u64,
+    incarnation: u64,
+    generation: u64
+}
+
+type Ledger {
+    slots: List[Slot],
+    occupied: u64
+}
+
+fn new_ledger(workers: u64, per_worker: u64) -> Ledger {
+    let size = workers * per_worker
+    let mut slots: List[Slot] = list.with_capacity(size)
+    for _ in 0u64 .. size {
+        list.push(mut slots, Slot(incarnation: 1, generation: 0, phase: Free))
+    }
+    Ledger(slots: take slots, occupied: 0)
+}
+
+fn mint(mut ledger: Ledger, slot: u64) -> Grant {
+    if let Free = ledger.slots[slot].phase {
+        ledger.slots[slot].generation += 1
+        ledger.slots[slot].phase = Offered
+        return Grant(slot: slot, incarnation: ledger.slots[slot].incarnation, generation: ledger.slots[slot].generation)
+    }
+    fail("a live offer or busy slot cannot be reissued")
+}
+
+fn withdraw(mut ledger: Ledger, grant: Grant) {
+    if let Offered = ledger.slots[grant.slot].phase {
+        if ledger.slots[grant.slot].incarnation == grant.incarnation && ledger.slots[grant.slot].generation == grant.generation {
+            ledger.slots[grant.slot].phase = Free
+        }
+    }
+}
+
+fn start(mut ledger: Ledger, slot: u64) {
+    ledger.slots[slot].phase = Busy
+    ledger.occupied += 1
+}
+
+fn redeem(mut ledger: Ledger, grant: Grant) -> bool {
+    let slot = grant.slot
+    if let Offered = ledger.slots[slot].phase {
+        if ledger.slots[slot].incarnation == grant.incarnation && ledger.slots[slot].generation == grant.generation {
+            start(mut ledger, slot)
+            return true
+        }
+    }
+    false
+}
+
+fn release(mut ledger: Ledger, slot: u64) {
+    if let Busy = ledger.slots[slot].phase {
+        ledger.slots[slot].phase = Free
+        ledger.occupied -= 1
+        return
+    }
+    fail("retirement requires a busy slot")
+}
+
+type Request {
+    arrived: u64,
+    lifetime: u64,
+    measured: bool
+}
+
+type Event = Arrive(Request) | Ask(Request) | Redeem(Request, Grant) | Retire(u64)
+
+type Queue[T] {
+    times: Heap[(u64, u64)],
+    events: Map[u64, T],
+    sequence: u64
+}
+
+fn enqueue[T](mut q: Queue[T], at: u64, take event: T) {
+    q.sequence += 1
+    heap.push(mut q.times, (at, q.sequence))
+    map.insert(mut q.events, q.sequence, take event)
+}
+
+type Workload = Burst | Poisson | Sparse
+
+type Config {
+    workers: u64,
+    per_worker: u64,
+    load: u64,
+    samples: u64,
+    desk_rtt: u64,
+    workload: Workload
+}
+
+pub type Trial: codec + key + send {
+    offered: u64,
+    overload: u64,
+    false_overload: u64,
+    started_by_deadline: u64,
+    burst_bound: u64,
+    p50_us: u64,
+    erlang_ppb: u64
+}
+
+fn erlang_b(capacity: u64, traffic: f64) -> f64 {
+    let mut b: f64 = 1.0
+    for slot in 1u64 .. capacity + 1 {
+        let i: f64 = float.from_int(slot)
+        b = traffic * b / (i + traffic * b)
+    }
+    b
+}
+
+// Inverse CDF for the exponential distribution, rounded to microseconds.
+// Decompose U into m*2^e, then evaluate log(m) on [1, 2).
+fn exponential(mut random: std.rand.Pcg, mean: f64) -> u64 {
+    let u = 1.0 - std.rand.float64(mut random)
+    let bits = float.to_bits64(u)
+    let exponent: f64 = float.from_int(1023u64 - (bits >> 52))
+    let m = float.from_bits64((bits & 0x000fffffffffffff) | 0x3ff0000000000000)
+    let z = (m - 1.0) / (m + 1.0)
+    let r = z * z
+    let mut term = z
+    let mut sum = z
+    for i in 1u64 .. 18 {
+        term *= r
+        let denominator: f64 = float.from_int(2 * i + 1)
+        sum += term / denominator
+    }
+    let delay: Result[u64, FloatError] = float.to_int(mean * (exponent * 0.6931471805599453 - 2.0 * sum) + 0.5)
+    result.unwrap(delay)
+}
+
+fn burst_deadline(cfg: Config) -> u64 {
+    cfg.desk_rtt + 3 * WORKER_RTT
+}
+
+fn overloaded(mut result: Trial, ledger: Ledger, req: Request) {
+    if !req.measured {
+        return
+    }
+    result.overload += 1
+    if ledger.occupied < list.len(ledger.slots) {
+        result.false_overload += 1
+    }
+}
+
+fn started(mut q: Queue[Event], mut r: Trial, mut latency: List[u64], cfg: Config, req: Request, at: u64, slot: u64) {
+    enqueue(mut q, at + req.lifetime, Retire(slot))
+    if let Burst = cfg.workload {
+        if at <= burst_deadline(cfg) {
+            r.started_by_deadline += 1
+        }
+    }
+    if let Sparse = cfg.workload {
+        list.push(mut latency, at - req.arrived)
+    }
+}
+
+fn trial(cfg: Config, seed: u64) -> Trial {
+    let mut worker = new_ledger(cfg.workers, cfg.per_worker)
+    let capacity = list.len(worker.slots)
+    let mut credits: List[Grant] = list.with_capacity(capacity)
+    for slot in 0u64 .. capacity {
+        list.push(mut credits, mint(mut worker, slot))
+    }
+    let mut q: Queue[Event] = Queue(times: heap.new(), events: map.new(), sequence: 0)
+    let mut latency: List[u64] = list.new()
+    let mut r = Trial(offered: cfg.samples, overload: 0, false_overload: 0, started_by_deadline: 0, burst_bound: 0, p50_us: 0, erlang_ppb: 0)
+    let load_percent: f64 = float.from_int(capacity * cfg.load)
+    let traffic = load_percent / 100.0
+    let mut arrivals = std.rand.new(seed, 1)
+    let mut lifetimes = std.rand.new(seed, 2)
+    let mut at = 0u64
+    let mut arrived = 0u64
+    let warmup = match cfg.workload {
+        Poisson => 5 * capacity,
+        _ => 0u64,
+    }
+    let total = warmup + cfg.samples
+    if let Burst = cfg.workload {
+        // Fable's bound under the explicit service envelope here. W = f_i
+        // and the deadline covers one complete service round, with no retires.
+        let cycles = burst_deadline(cfg) / (cfg.desk_rtt + WORKER_RTT)
+        r.burst_bound = order.min(cfg.samples, cfg.workers * order.min(cfg.per_worker, cfg.per_worker * cycles))
+    }
+    while arrived < total || heap.len(q.times) > 0 {
+        if arrived < total {
+            let next_arrival = match heap.peek(q.times) {
+                Some(next) => {
+                    let (time, _) = next
+                    at <= time
+                },
+                None => true,
+            }
+            if next_arrival {
+                let lifetime = match cfg.workload {
+                    Poisson => exponential(mut lifetimes, 1000000.0),
+                    Burst => MEAN_LIFETIME,
+                    Sparse => WORKER_RTT,
+                }
+                enqueue(mut q, at, Arrive(Request(arrived: at, lifetime: lifetime, measured: arrived >= warmup)))
+                arrived += 1
+                match cfg.workload {
+                    Poisson => {
+                        at += exponential(mut arrivals, 1000000.0 / traffic)
+                    },
+                    Sparse => {
+                        at += MEAN_LIFETIME
+                    },
+                    Burst => (),
+                }
+                continue
+            }
+        }
+        let (now, seq) = option.unwrap(heap.pop(mut q.times))
+        let event = option.unwrap(map.remove(mut q.events, seq))
+        match take event {
+            Arrive(req) => enqueue(mut q, now + cfg.desk_rtt / 2, Ask(req)),
+            Ask(req) => {
+                if let Some(grant) = list.pop(mut credits) {
+                    enqueue(mut q, now + cfg.desk_rtt - cfg.desk_rtt / 2 + WORKER_RTT, Redeem(req, grant))
+                } else {
+                    overloaded(mut r, worker, req)
+                }
+            },
+            Redeem(req, grant) => {
+                if !redeem(mut worker, grant) {
+                    fail("a normally delivered exclusive grant did not redeem")
+                }
+                started(mut q, mut r, mut latency, cfg, req, now, grant.slot)
+            },
+            Retire(slot) => {
+                release(mut worker, slot)
+                list.push(mut credits, mint(mut worker, slot))
+            },
+        }
+    }
+    if list.len(latency) != 0 {
+        list.sort(mut latency, order.compare)
+        r.p50_us = latency[(list.len(latency) - 1) / 2]
+    }
+    if let Poisson = cfg.workload {
+        let rounded: Result[u64, FloatError] = float.to_int(erlang_b(capacity, traffic) * 1000000000.0 + 0.5)
+        r.erlang_ppb = result.unwrap(rounded)
+    }
+    r
+}
+
+const DETECT_US: u64 = 1000
+
+const HOLD_US: u64 = 5000
+
+const LINK_US: u64 = 50
+
+pub type Recovery: codec + key + send {
+    reoffered_us: u64,
+    bound_us: u64,
+    replay_attempts: u64,
+    double_redemptions: u64
+}
+
+fn replay(mut worker: Ledger, grant: Grant, mut r: Recovery) {
+    r.replay_attempts += 1
+    if redeem(mut worker, grant) {
+        r.double_redemptions += 1
+    }
+}
+
+const HEAL_US: u64 = 10000
+
+type DeskFault = DemandAtB | DemandAtWorker | Rotate | OfferAtB(Grant) | CreateAtWorker(Grant) | AccountBeforeMint
+
+fn recover_desk() -> Recovery {
+    let mut worker = new_ledger(1, 1)
+    let a_grant = mint(mut worker, 0)
+    let mut primary = 0u64
+    let mut wire: std.sim.message.Queue[Grant] = std.sim.message.new()
+    std.sim.message.hold_until(mut wire, 0, 1, "create", "rotate")
+    std.sim.message.send(mut wire, std.sim.message.Message(from: 0, to: 1, name: "create", value: a_grant))
+    if let Some(_) = std.sim.message.receive(mut wire, 1) {
+        fail("the original create crossed the held link")
+    }
+    let mut r = Recovery(reoffered_us: 0, bound_us: DETECT_US + 3 * LINK_US + HOLD_US, replay_attempts: 0, double_redemptions: 0)
+    let mut faults: Queue[DeskFault] = Queue(times: heap.new(), events: map.new(), sequence: 0)
+    // Dispatcher D cannot reach A. Healing restores its route to B. A still
+    // has a healthy worker stream, so a worker reset cannot drive this case.
+    enqueue(mut faults, HEAL_US + DETECT_US + LINK_US, DemandAtB)
+    while let Some((now, seq)) = heap.pop(mut faults.times) {
+        match option.unwrap(map.remove(mut faults.events, seq)) {
+            DemandAtB => enqueue(mut faults, now + LINK_US, DemandAtWorker),
+            DemandAtWorker => enqueue(mut faults, now + HOLD_US, Rotate),
+            Rotate => {
+                if primary != 0 {
+                    fail("the shard had more than one primary")
+                }
+                withdraw(mut worker, a_grant)
+                primary = 1
+                enqueue(mut faults, now + LINK_US, OfferAtB(mint(mut worker, 0)))
+                std.sim.message.fire(mut wire, "rotate")
+                let old = option.unwrap(std.sim.message.receive(mut wire, 1))
+                replay(mut worker, old.value, mut r)
+            },
+            OfferAtB(g) => {
+                if primary != 1 {
+                    fail("the standby received a live ordinal")
+                }
+                r.reoffered_us = now - HEAL_US
+                enqueue(mut faults, now + 2 * LINK_US, CreateAtWorker(g))
+            },
+            CreateAtWorker(g) => {
+                if !redeem(mut worker, g) || worker.occupied != 1 {
+                    fail("B could not redeem the slot stranded at A")
+                }
+                replay(mut worker, g, mut r)
+                // An abandon delayed past the start must not refund a child.
+                withdraw(mut worker, g)
+                replay(mut worker, a_grant, mut r)
+                replay(mut worker, g, mut r)
+                enqueue(mut faults, now + DETECT_US, AccountBeforeMint)
+            },
+            AccountBeforeMint => {
+                // The successor has fenced the old execution before refund.
+                release(mut worker, 0)
+                worker.slots[0].incarnation += 1
+                worker.slots[0].generation = 0
+                let next = mint(mut worker, 0)
+                replay(mut worker, a_grant, mut r)
+                if !redeem(mut worker, next) || worker.occupied != 1 {
+                    fail("the successor could not redeem the accounted slot")
+                }
+                replay(mut worker, next, mut r)
+            },
+        }
+    }
+    r
+}
+
+pub type Scenario: codec + key + send {
+    name: String,
+    desk: Trial
+}
+
+pub type Gate: codec + key + send {
+    hosts: u64,
+    seed: u64,
+    cases: List[Scenario],
+    desk_recovery: Recovery
+}
+
+fn scenario(take name: String, cfg: Config, seed: u64) -> Scenario {
+    Scenario(name: take name, desk: trial(cfg, seed))
+}
+
+pub fn run(hosts: u64, seed: u64) -> Gate {
+    let scarce = order.max(5u64, hosts / 5)
+    let mut cases: List[Scenario] = list.new()
+    list.push(mut cases, scenario("scarce_burst_05", Config(workers: scarce, per_worker: 1, load: 5, samples: order.max(1u64, scarce / 20), desk_rtt: 100, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_burst_50", Config(workers: scarce, per_worker: 1, load: 50, samples: scarce / 2, desk_rtt: 100, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_burst_100", Config(workers: scarce, per_worker: 1, load: 100, samples: scarce, desk_rtt: 100, workload: Burst), seed))
+    list.push(mut cases, scenario("common_burst_50", Config(workers: hosts, per_worker: 4, load: 50, samples: hosts * 2, desk_rtt: 100, workload: Burst), seed))
+    list.push(mut cases, scenario("scarce_poisson_50", Config(workers: scarce, per_worker: 1, load: 50, samples: 8192, desk_rtt: 100, workload: Poisson), seed))
+    list.push(mut cases, scenario("erlang_calibration_50", Config(workers: 4, per_worker: 1, load: 50, samples: 16384, desk_rtt: 100, workload: Poisson), seed))
+    list.push(mut cases, scenario("sparse_100us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 100, workload: Sparse), seed))
+    list.push(mut cases, scenario("sparse_200us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 200, workload: Sparse), seed))
+    list.push(mut cases, scenario("sparse_250us", Config(workers: hosts, per_worker: 4, load: 0, samples: 33, desk_rtt: 250, workload: Sparse), seed))
+    Gate(hosts: hosts, seed: seed, cases: take cases, desk_recovery: recover_desk())
+}

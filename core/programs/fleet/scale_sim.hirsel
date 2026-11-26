@@ -849,3 +849,11 @@ pub fn run_scale_sim(cfg: SimConfig, tasks: Tasks) -> Result[SimReport, ()] wait
         sm1_itf_bytes: list.len(string.as_bytes(itf)),
     ))
 }
+
+/// Run the logical-worker placement phase with the same scale and seed.
+pub fn run_placement(cfg: SimConfig) -> placement_sim.Gate {
+    if cfg.hosts < 5 {
+        fail("fleet placement needs at least five logical workers")
+    }
+    placement_sim.run(cfg.hosts, cfg.seed)
+}

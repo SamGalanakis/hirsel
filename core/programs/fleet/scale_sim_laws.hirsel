@@ -25,3 +25,36 @@ fn sim_fleet_scale_1000_hosts(tasks: Tasks) -> Result[(), ()] waits {
     }
     Ok(())
 }
+
+/// bug: Loss of worker-funded capacity, unsafe credit reuse across a withdrawal or restart, or a placement cost beyond the qualified envelope.
+/// oracle: Summit verdict items 3, 4 and 13. Exact burst bound and Erlang-B with four slots at two Erlangs.
+@test
+fn sim_fleet_credit_desk_gate() -> Result[(), ()] {
+    let gate = scale_sim.run_placement(scale_sim.default_config(1000u64, 3087u64))
+    for scenario in gate.cases {
+        let trial = scenario.desk
+        if trial.false_overload * 1000 > trial.offered {
+            fail("false Overloaded exceeded one per thousand offered creates")
+        }
+        if trial.started_by_deadline < trial.burst_bound {
+            fail("the desk missed the exact burst lower bound")
+        }
+        if scenario.name == "erlang_calibration_50" {
+            // B(4, 2) = 2/21. Allow one percentage point of sampling error.
+            if trial.erlang_ppb != 95238095 || trial.overload * 1000 < 85 * trial.offered || trial.overload * 1000 > 106 * trial.offered {
+                fail("four-slot placement diverged from Erlang-B")
+            }
+        }
+        if scenario.name == "sparse_200us" && trial.p50_us != 300 {
+            fail("a sparse create on the modeled RTT boundary took more than the two expected legs")
+        }
+    }
+    let recovery = gate.desk_recovery
+    if recovery.reoffered_us == 0 || recovery.reoffered_us > 6150 || recovery.bound_us != 6150 {
+        fail("the desk failed to reoffer the stranded slot within the heal bound")
+    }
+    if recovery.double_redemptions != 0 || recovery.replay_attempts != 6 {
+        fail("the desk did not reject all held and duplicate credits")
+    }
+    Ok(())
+}

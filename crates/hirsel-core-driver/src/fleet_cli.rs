@@ -57,6 +57,9 @@ pub(crate) fn prepare(
                 forwarded.push("--partitions".to_owned());
                 forwarded.push(v);
             }
+            Opt::FleetPlacement => {
+                forwarded.push("--placement".to_owned());
+            }
             Opt::Json => {
                 forwarded.push("--json".to_owned());
             }

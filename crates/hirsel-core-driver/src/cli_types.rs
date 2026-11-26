@@ -65,6 +65,7 @@ pub enum OptionId {
     FleetRounds,
     FleetPlaces,
     FleetPartitions,
+    FleetPlacement,
     Release,
     DebugLines,
     Backend,

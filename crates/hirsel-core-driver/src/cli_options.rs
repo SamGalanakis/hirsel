@@ -700,6 +700,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Number of keyspace-partitioned Directory[K] Places."
     ),
     option!(
+        FleetPlacement,
+        ["--placement"],
+        None,
+        ["fleet sim"],
+        "Run the logical-worker placement gate."
+    ),
+    option!(
         Release,
         ["--release"],
         None,

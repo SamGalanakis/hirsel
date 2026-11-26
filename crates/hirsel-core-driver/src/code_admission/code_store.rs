@@ -104,6 +104,8 @@ pub(crate) struct Fixture {
     objects: BTreeMap<ObjectKey, Vec<u8>>,
 }
 
+const U8_ERROR_DESCRIPTION: &[u8] = &[0, 0, 0, 0, 1, 6];
+
 impl Fixture {
     fn new(entry: &str) -> Self {
         Self {
@@ -152,11 +154,8 @@ impl Fixture {
         let sources = hirsel_core_ir::source::SourceMap::default();
         let (body, mut annex) = normal::encode_with_annex(&module, FuncId(0), &sources.positions());
         if identity(name) == self.recipe.entry {
-            annex.1 = Some(if params == "(u64)" {
-                vec!["f".into()]
-            } else {
-                vec![]
-            });
+            annex.1 = Some(vec!["f".into(); usize::from(params == "(u64)")]);
+            annex.2 = Some(U8_ERROR_DESCRIPTION.to_vec());
         }
         let row = BodyRef {
             body: self.object(ObjectKind::Body, body.bytes),

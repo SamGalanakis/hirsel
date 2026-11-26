@@ -1,5 +1,5 @@
-//! The deploy command's refusals that need no host.
-use super::{UNAVAILABLE, deploy};
+//! The deploy and decide commands' refusals that need no host.
+use super::{UNAVAILABLE, decide, deploy};
 
 #[test]
 fn contradictory_deploy_actions_refuse_before_io() {
@@ -7,56 +7,69 @@ fn contradictory_deploy_actions_refuse_before_io() {
     let request = "01".repeat(16);
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("no-host");
-    let invoke = |extra: &[&str]| {
-        let arguments = ["deploy", "--state", state.to_str().unwrap()]
+    let invoke = |command: &str, extra: &[&str]| {
+        let arguments = [command, "--state", state.to_str().unwrap()]
             .into_iter()
             .chain(extra.iter().copied())
             .map(str::to_owned);
         let crate::cli::Action::Invoke(invocation) = crate::cli::parse(arguments).unwrap() else {
-            panic!("expected a deploy invocation");
+            panic!("expected an operator invocation");
         };
-        deploy(invocation)
+        match command {
+            "deploy" => deploy(invocation),
+            "decide" => decide(invocation),
+            _ => unreachable!(),
+        }
     };
-    for (args, want) in [
+    for (command, args, want) in [
         (
-            &["--status", &request, "--refuse-grants"][..],
+            "deploy",
+            &["--status", &request, "--approve-grant", "+Clock"][..],
             "deploy --status takes only --state",
         ),
         (
-            &["--status", &request, "--approve-grant", "+Clock"],
+            "deploy",
+            &["--status", &request, "--request-id", &request],
             "deploy --status takes only --state",
         ),
         (
-            &[&recipe, "--refuse-grants"],
-            "deploy with a recipe takes no --refuse-grants",
+            "deploy",
+            &[&recipe, "--status", &request],
+            "deploy --status takes only --state",
         ),
         (
-            &[&recipe, "--refuse-grants", "--approve-grant", "+Clock"],
-            "--refuse-grants takes no --approve-grant",
-        ),
-        (
+            "deploy",
             &["--status", &request, "--held", "release"],
             "deploy --status takes only --state",
         ),
         (
+            "decide",
             &[
                 "--request-id",
                 &request,
-                "--refuse-grants",
-                "--held-entry",
-                "p=cancel",
+                "--refuse",
+                "--approve-grant",
+                "+Clock",
             ],
-            "deploy decisions take only --state and --request-id",
+            "--refuse takes no --approve-grant, --held or --held-entry",
         ),
         (
+            "decide",
+            &["--request-id", &request, "--refuse", "--held", "release"],
+            "--refuse takes no --approve-grant, --held or --held-entry",
+        ),
+        (
+            "deploy",
             &[&recipe, "--held", "keep"],
             "--held takes release or cancel",
         ),
         (
+            "deploy",
             &[&recipe, "--held", "release", "--held", "cancel"],
             "--held is given twice",
         ),
         (
+            "deploy",
             &[
                 &recipe,
                 "--held-entry",
@@ -67,13 +80,16 @@ fn contradictory_deploy_actions_refuse_before_io() {
             "--held-entry names a=b twice",
         ),
     ] {
-        assert_eq!(invoke(args).unwrap_err().to_string(), want);
+        assert_eq!(invoke(command, args).unwrap_err().to_string(), want);
     }
-    assert_eq!(invoke(&["--status", &request]).unwrap(), UNAVAILABLE);
     assert_eq!(
-        invoke(&["--request-id", &request, "--refuse-grants"]).unwrap(),
+        invoke("deploy", &["--status", &request]).unwrap(),
         UNAVAILABLE
     );
-    let error = invoke(&[&recipe, "--approve-grant", "+Clock"]).unwrap_err();
+    assert_eq!(
+        invoke("decide", &["--request-id", &request, "--refuse"]).unwrap(),
+        UNAVAILABLE
+    );
+    let error = invoke("deploy", &[&recipe, "--approve-grant", "+Clock"]).unwrap_err();
     assert_eq!(error.to_string(), "requires --code-store DIR");
 }

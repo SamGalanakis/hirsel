@@ -176,6 +176,12 @@ records the macOS floor (26.0). `:glibc_floor` unpacks the same `libc6` packages
 `<triple>/` loader and library directories for running executables at the
 floor through that loader (never a link input).
 
+The iOS rows (`aarch64-apple-ios`, `aarch64-apple-ios-sim`) are specified in
+`docs/spec/embed.md` (EMB-6) and not built: per-variant `libSystem.tbd`,
+`CoreFoundation.tbd` and `Security.tbd` stubs (the last two for Trust.System's SecTrust
+evaluation) from Hirsel-authored iOS symbol lists, checked against the iOS SDK on the
+simulator gate.
+
 ```sh
 .buck2/bin/buck2 test //tools/buck2/native-toolchain:proof
 ```

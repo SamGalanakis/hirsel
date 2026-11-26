@@ -8,6 +8,12 @@ the options accepted by a command.
 Build, pack, and SDK generation accept `-o` or `--output`. Use a file
 path for `build` and `pack`, and a directory for `sdk ts`.
 
+## Output kinds
+
+A native build emits an executable or a static library, chosen by `--emit exe` <!-- doc-ref: planned -->
+or `--emit staticlib` <!-- doc-ref: planned --> ([EMB-1](embed.md#emb-1-output-kinds)). Each target
+admits the kinds its row in EMB-1's table names; any other pair is refused before work.
+
 ## Checking packages
 
 `hirsel check` reports the number of definitions checked in the sources,

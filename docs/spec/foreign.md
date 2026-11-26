@@ -202,7 +202,11 @@ target the ELF rows are replaced by these, with the same diagnostics. Names are 
 and a feature `X` is the first in load-command order (a segment's sections where its command
 stands), then in symbol order. The target's **floor** is macOS 26.0 (macOS decision D2), the first
 release whose kernel enforces `O_RESOLVE_BENEATH`; a Mac law that shows an earlier release
-enforcing it lowers the floor to that release.
+enforcing it lowers the floor to that release. The floor and the platform number come from
+the target's Apple record ([EMB-2](embed.md#emb-2-apple-target-records)). For the iOS
+targets these rows apply with that record's platform (iOS 2 for `aarch64-apple-ios`, iOS
+simulator 7 for `aarch64-apple-ios-sim`) and floor in place of macOS and 26.0
+([EMB-8](embed.md#emb-8-refusals)).
 
 | check | ELF row it replaces |
 |---|---|

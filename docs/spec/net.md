@@ -266,6 +266,11 @@ the kqueue. Any `RTM_NEWADDR` or `RTM_DELADDR`, an `ENOBUFS` or a message that d
 parse takes a new `getifaddrs` snapshot, so the table is never patched from an
 `ifa_msghdr`. Nothing a program sees changes.
 
+Version note (2026-11-26, ios-spec-3137): on iOS there is no address-change source, so the
+provider takes a fresh `getifaddrs` snapshot for every public-only connect, after the
+connect is requested and before it is issued, and classifies against that snapshot
+([EMB-7](embed.md#emb-7-capabilities-on-ios)). Nothing a program sees changes.
+
 A `Connect` rule may carry the reach `Public`. That rule then covers only an address that
 the address-class table below calls public, so a program granted
 `Connect 0.0.0.0/0 443-443 public` can reach any web server on the internet. It cannot
@@ -708,6 +713,10 @@ can change.
   `UnixListener` is dropped. Removing one is a `Dir` operation.
 - Only `listen_unix` produces `BoundNotListening`. Any other Unix or IP operation that
   delivers it is `Corrupt` on a tape and fails a server with `Fail`.
+
+**iOS** has no Unix-domain provider: the macOS naming below needs `pthread_fchdir_np`, which
+iOS does not offer, so a program that reaches a Unix operation is refused at build for both
+iOS targets ([EMB-7](embed.md#emb-7-capabilities-on-ios)).
 
 **The macOS provider** (macOS slice S7). Darwin cannot bind or connect a Unix socket
 through a descriptor, and a socket file cannot be opened there to pin it. So the macOS

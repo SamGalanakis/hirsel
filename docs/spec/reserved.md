@@ -62,7 +62,9 @@ and memory budgets with `sqlite3_interrupt` or a progress handler as fuel; a typ
 of a refused handle; varargs, arbitrary pointers, dynamic loading and
 macOS. The macOS (`aarch64-apple-darwin`) rules are written but not built: FFI-3's Mach-O rows and import check, and the macOS host text in net,
 launch, profiling and the Store spec. macOS leaves this list when its native Mac gate is
-green.
+green. iOS (`aarch64-apple-ios`, `aarch64-apple-ios-sim`): the [embedding](embed.md) rules
+are written but not built. The targets are named, every request for them is refused until
+the static-library slices land, and iOS leaves this list when its device gate (EMB-9) passes.
 
 iOS targets are named and every build request for them is refused until the static-library
 slices land. iOS leaves this list when its device gate passes.

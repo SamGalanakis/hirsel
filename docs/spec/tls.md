@@ -58,7 +58,9 @@ pub fn connect(n: Net, take s: Socket, name: String, trust: Trust, alpn: List[St
   be valid for `name`. A certificate valid only for the socket's address is not enough.
 - **Trust.** `System` uses the host's root store. The OS provider loads it once per run,
   at the first `System` handshake. `Roots(b)` trusts exactly the certificates in the PEM
-  bundle `b`, and the host store is not used. Verification uses the provider's own wall
+  bundle `b`, and the host store is not used. On iOS `System` is Apple's platform
+  verifier (SecTrust), which decides the chain to a root
+  ([EMB-7](embed.md#emb-7-capabilities-on-ios)). Verification uses the provider's own wall
   clock. It cannot be turned off. Revocation is not checked.
 - **ALPN.** `alpn` lists the protocols to offer, in order of preference. An empty list
   offers none. Each entry is 1 to 255 bytes, no entry appears twice, and there are at

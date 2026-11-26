@@ -11,6 +11,9 @@ The laws describe the required runtime behavior.
 
 ## Trust
 
+On iOS no `Exec` provider exists: a program that reaches one is refused at build for both iOS
+targets, and an embedded start refuses an `Exec` grant ([EMB-7](embed.md#emb-7-capabilities-on-ios)).
+
 ### EXEC-1: An Exec grant confers what its programs can do, and Hirsel does not confine them
 
 A child process is not contained. An `Exec` grant gives the run whatever each named program

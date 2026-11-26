@@ -68,7 +68,8 @@ require or extract a constant argument.
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.
 - An embedded runtime receives the digest, target and `n_place` explicitly from
-  its embedder before entry. It copies or pins the supplied value for the whole
+  its embedder before entry ([EMB-3](embed.md#emb-3-embedded-launch)); on iOS this is
+  the only source, and the runtime never reads its own image. It copies or pins the supplied value for the whole
   launch; later mutation of the embedder's input cannot change it.
 - For a platform launch, the launcher supplies the digest through
   the embedded identity path. It checks the SHA-256 of the opened, read-only

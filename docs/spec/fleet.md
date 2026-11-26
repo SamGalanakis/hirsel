@@ -25,7 +25,7 @@ authority:
 |---|---|---|---|---|
 | **A · Durable `Place`** | Databases, sharded KV (`cluster@1`), durable workflows, `fleet@1`, `Directory[K]` | `objects@1` head CAS (`ClaimAuth` + `ORIGIN` witness) plus the workload's own in-Place fence | **Never** (`STORE-SPEC`) | Whole-Place move via conditioned claim (planned: warm follower; crash: direct claim) |
 | **B · Ephemeral Stateful Unit** | `sfu_cascade` media rooms, volatile S3-FIFO caches (`cache@1`), pub/sub relays | Dedicated `Directory[K]` Place(s): term CAS + drift-bounded lease `W = ceil(L_max * (1 + d) / (1 - d))` | **Yes** — suspend-inclusive elapsed clock (`CLOCK_BOOTTIME` / `mach_continuous_time`) | State reset by contract; new term waits `W` after directory takeover |
-| **C · Elastic Remote `Compute`** | Ray/FLAME-style tasks, shuffles, batch and AI jobs (`compute@1`) | None (pure retries via [SEM-8](semantics.md#sem-8-determinism); effectful sinks via receiver-checked keyed idempotency) | **Never** | Dispatch `(release_id, entry_name, codec_args, bounds)` to a pre-staged ready host (never ship functions, [PROG-9](programs.md#prog-9-code-descriptors)) |
+| **C · Elastic Remote `Compute`** | Ray/FLAME-style tasks, shuffles, batch, AI jobs and full-OS sandboxes (`compute@1`, [compute.md](compute.md)) | Worker-only admission; three retry classes: `pure` ([SEM-8](semantics.md#sem-8-determinism)), `keyed` (receiver-checked idempotency), and `effectful` (inert create, pinned activation, never re-dispatched) | **Never** | Dispatch `(release_id, entry_name, codec_args, bounds)` directly to an admitting worker via [compute.md](compute.md) (never placed by `fleet@1`; never ship functions, [PROG-9](programs.md#prog-9-code-descriptors)) |
 
 ## FLT-2: Move protocol (`ClaimAuth`, `ORIGIN`, `Superseded`, settlement, `Deposed`)
 
@@ -161,8 +161,8 @@ window:
   and revocations, root-signed deploy keysets, operator-signed deploy approvals, desired
   workloads and registered cold Places, rollout wave state, drain intent and disruption limits,
   and one write-ahead permit row per outstanding Place move.
-- **Derived state (volatile RAM, zero bucket commits):** heartbeats, capacity scores, ready
-  compute slots, route hints and load rankings.
+- **Derived state (volatile RAM, zero bucket commits):** heartbeats, capacity scores, route hints
+  and load rankings (`fleet@1` never holds Archetype C compute placement; see [compute.md](compute.md)).
 - **Controller takeover rule:** Only members of the restricted standby roster hold write
   credentials for `fleet@1`'s prefix. A standby candidate observes the current `(epoch, holder)`
   and bucket-committed progress (any control transaction counts as progress; an idle controller
@@ -308,25 +308,84 @@ stall detection.
 
 ## FLT-6: Code trust, revocation clearance, transport and bucket boundaries
 
-- **Operator-only attestation.** An offline root key pinned at join signs rotating deploy
-  keysets (with monotone epoch and durable node anti-rollback marks). Operators sign deploy
-  approvals covering `(fleet, group, generation, release, predecessor, recipe_root,
-  assembly_target, grant_diff, held_fates)` verified with `ed25519` / `p256`. Ed25519
-  verification follows [core.md](core.md#signature-verification)'s cofactorless RFC 8032
-  acceptance rule (`S < L`, `[S]B − [k]A = R` compared against `R`'s canonical 32-byte
-  encoding with raw `R` and `key` in `k`, rejecting cofactored-only and non-canonical-`R`
-  signatures while accepting non-canonical `key` encodings and small- or mixed-order keys
-  whenever the cofactorless equation holds). Hosts fetch
-  missing objects by digest from the bucket and feed the launcher's existing
+- **Operator-only attestation and canonical approval transcript (`v1`).** An offline root key
+  pinned at join signs rotating deploy keysets (with monotone epoch and durable node
+  anti-rollback marks). Operators sign deploy approvals covering `(fleet, group, generation,
+  release, predecessor, recipe_root, assembly_target, grant_diff, held_fates)` serialized as the
+  canonical `DeployApprovalTranscriptV1` transcript below, bound to the signing keyset entry's
+  algorithm (`ed25519` or `p256`) and key identifier:
+
+  ```hirsel unbuilt
+  pub type DeploySigAlg: codec + key + send = AlgEd25519 | AlgP256
+
+  pub type DeployApprovalTranscriptV1: codec + key + send {
+      domain_label: Bytes,
+      version: u8,
+      alg: DeploySigAlg,
+      keyset_epoch: u64,
+      key_id: Bytes,
+      fleet: Bytes,
+      group: Bytes,
+      generation: u64,
+      release: Bytes,
+      predecessor: Option[Bytes],
+      recipe_root: Inline[u8, 32],
+      assembly_target: Bytes,
+      grant_diff: Bytes,
+      held_fates: Bytes
+  }
+  ```
+
+  Canonical wire bytes for signing and verification (little-endian, exact byte concatenation in
+  field order, no padding, no trailing bytes):
+
+  - `domain_label`: `u32` LE byte length (`31`) followed by exact ASCII bytes
+    `"hirsel.fleet.deploy-approval.v1"`.
+  - `version`: `u8` equal to `1`.
+  - `alg`: `u8` wire tag (`1 = AlgEd25519`, `2 = AlgP256`; `0` and `>= 3` reserved/rejected);
+    must equal the referenced keyset entry's declared algorithm.
+  - `keyset_epoch`: `u64` LE (8 bytes).
+  - `key_id`, `fleet`, `group`, `release`, `assembly_target`, `grant_diff`, `held_fates`: each
+    encoded as a `u32` LE byte length followed by raw bytes; `grant_diff` and `held_fates` carry
+    their canonical `std.codec` encodings ([SEM-10](semantics.md#sem-10-codecs)), with any
+    map/set entries serialized in canonical sorted key order.
+  - `generation`: `u64` LE (8 bytes).
+  - `predecessor`: `u8` tag `0` for `None`, or `1` followed by `u32` LE byte length and raw
+    bytes for `Some`.
+  - `recipe_root`: 32 raw digest bytes (fixed width, no length prefix).
+
+  Verifiers reject any unknown `version`, unknown or mismatched `alg` tag, wrong `domain_label`,
+  non-canonical compound encoding, or trailing bytes. Signers and verifiers must agree
+  byte-for-byte against a shared golden transcript vector. Ed25519 verification follows
+  [core.md](core.md#signature-verification)'s cofactorless RFC 8032 acceptance rule (`S < L`,
+  `[S]B − [k]A = R` compared against `R`'s canonical 32-byte encoding with raw `R` and `key` in
+  `k`, rejecting cofactored-only and non-canonical-`R` signatures while accepting non-canonical
+  `key` encodings and small- or mixed-order keys whenever the cofactorless equation holds).
+  Hosts fetch missing objects by digest from the bucket and feed the launcher's existing
   `Admit -> Need -> AdmitData -> AdmitEnd` exchange.
-- **Revocation-ordered clearance.** Before starting any preview, prepare or serving child of a
-  new assembly, a host executes `fleet.clear(...)` in one `fleet@1` `transact` ordered with
-  `fleet.install_keyset(...)`. The host verifies the returned keyset against the pinned root,
-  raises its anti-rollback mark and re-verifies the approval signer. An isolated host emits an
-  honest `"staged, not cleared, nothing started"` receipt.
+- **Revocation-ordered clearance and anti-rollback mark bootstrap.** Before starting any preview,
+  prepare or serving child of a new assembly, a host executes `fleet.clear(...)` in one `fleet@1`
+  `transact` ordered with `fleet.install_keyset(...)`. The clearance response is authenticated
+  and bound to this host's enrolled `NodeId`, current enrollment/incarnation, and the
+  `fleet.clear(...)` transaction nonce/version. The host verifies the returned keyset against the
+  pinned root, **rejects any clearance whose keyset epoch is lower than its existing durable
+  anti-rollback floor (or provisional join floor)**, durably persists the raised floor
+  `max(existing_floor, keyset_epoch)` **before** accepting or activating any approval, and
+  re-verifies the approval signer, `key_id`, and `alg` binding against that keyset.
+  - **Fresh or disk-lost host bootstrap:** a host with **no durable anti-rollback mark** refuses
+    all deploy approvals until it completes a fresh, authenticated, ordered `fleet.clear(...)`
+    transaction against `fleet@1` (or an operator-authorized fresh re-enrollment carrying a
+    current root-signed keyset) and durably persists that authoritative keyset epoch. An older
+    saved join record supplies at most a **provisional lower bound** and never satisfies
+    disk-loss bootstrap or authorizes approval acceptance on its own, preventing a wiped host
+    from restoring an obsolete join epoch. An isolated host emits an honest
+    `"staged, not cleared, nothing started"` receipt.
 - **Transport.** Pinned [QUIC](quic.md) (`quic@1`) using SPKI netmap pins directly (no fleet
-  CA), checking the peer pin per request with bounded live-session lifetime so revocations
-  take effect on active connections.
+  CA). Every peer-authenticated request verifies the connection's authenticated pin via
+  `quic.peer_pin` and binds it to the claimed peer **node identity** (`NodeId`) against the
+  current enrolled roster/netmap pin set — never accepting an unverified peer-declared `NodeId`
+  from application framing — with bounded live-session lifetime so revocations take effect on
+  active connections.
 - **Bucket credential boundaries (L1 minimum):** (1) bucket versioning / object lock preventing
   permanent deletion or version purge; (2) only pinned controller candidates hold write access
   to `fleet@1`'s prefix; (3) only the operator/publisher writes the code prefix. L2/L3 adds
@@ -363,7 +422,7 @@ The shell owns capabilities, storage, sockets, clocks and step budgets (`bound s
 | **K8** | Every kernel ships with an independently written abstract specification (`std.model`, plus TLA+, Quint and Veil for fencing cores) and a `Boundary` mapping kernel observations to abstract labels. |
 | **K9** | The shell can capture `(Event, List[Action])` to a codec trace tape (always on in simulation; opt-in or sampled in production). |
 | **K10** | Monotone advisory state (routing hints, heartbeats, load scores) lives in a separate CALM kernel whose merge is a join-semilattice and never feeds fenced safety decisions. |
-| **K11** | **Atomic outbox.** The shell persists the new `State` and emitted outbox actions atomically before releasing any send/grant action; actions may be delivered more than once and are replayed by id. |
+| **K11** | **Atomic outbox (and volatile scope).** The shell persists the new `State` and emitted outbox actions atomically before releasing any send/grant action; actions may be delivered more than once and are replayed by id. **Volatile scope (K11-V):** a volatile ledger that persists nothing and releases directly is admissible only where every released execution either dies with its ledger or is accounted for before the slot is reused ([compute.md](compute.md)); durable control changes, quota transfers, receiver-committed effects and promised durable completions keep the durable rule at their owning authority. |
 | **K12** | **Bounded read set.** Pure `keys(ev)` selects the bounded set of entity and budget keys read at one consistent version and committed conditionally; a fleet of a million Places never enters one `step` call. |
 | **K13** | **Total outcomes.** Every shell or sink outcome is fed back as a typed `Event`: `Won`, `Lost`, `Superseded`, `Held`, `Refused`, `Undecided`, `Timeout`, `Duplicate`, `WrongIncarnation`, `LateUnknownId`, `Crash`, `Restart` and `BoundExhausted`. Exhaustion before commit releases no actions. |
 

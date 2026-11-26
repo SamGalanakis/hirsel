@@ -222,12 +222,8 @@ is generated from the Runner and std sources by `core/tools/frame_schema.py`
 and checked in as `core/programs/runner/frame-schema.bin`. The
 `core-runner-frame-schema` CI target regenerates it and compares the bytes. The generator reads that file, and
 Describe contains only per-program data. A Frame change requires a subprotocol
-change; the client checks the negotiated subprotocol. To a client that offers
-only retired tokens (`hirsel.1`, `hirsel.2`) the server answers 101 selecting the
-first token offered, so the browser completes the handshake, and then Close 1009
-with reason `hirsel.4` before any Welcome; the client reports that the page or client must be
-reloaded, and never retries. A 1009 after Welcome is the stored-reply close and
-is reported as a reply error.
+change. The client checks the negotiated subprotocol. The server answers HTTP
+400 if the offer omits `hirsel.4`. The SDK reports Close 1009 as `ReplyTooLarge`.
 Outcome has Returned, Failed, Refused, Abandoned and InDoubt at tags 0 through
 4. Fault appends Conflict at tag 4 (RUNNER-SPEC v2.45). Refusal appends RequestMismatch at tag 6, HistoryUnavailable at tag 7 and StreamFuture at tag 8. StreamFuture carries the store's keyed time as a u64 in milliseconds (RUNNER-SPEC v2.88).
 Superseded is absent. The generated codecs follow the bundled declarations.

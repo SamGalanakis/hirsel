@@ -13,7 +13,7 @@ fn response_bytes() -> Bytes {
 fn status(b: Bytes) -> u16 {
     match websocket.server(b) {
         Waiting => 0,
-        Upgraded(_, _, _) => 101,
+        Upgraded(_, _) => 101,
         Refused(s) => s
     }
 }
@@ -58,7 +58,7 @@ fn rfc6455_accept() -> bool {
 fn server_response() -> bool {
     let b = request_bytes()
     match websocket.server(b) {
-        Upgraded(end, Current, out) => end == list.len(b) && out == b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
+        Upgraded(end, out) => end == list.len(b) && out == b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n",
         _ => false
     }
 }
@@ -72,10 +72,12 @@ fn upgrade_checks() -> bool {
 // Mutant: protocol_case_fold, accept_duplicate_key, interpret_body_as_frames.
 // expect: run protocol_and_ambiguity() = true
 fn protocol_and_ambiguity() -> bool {
-    if status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: hirsel.1\r\n")) != 101 {
-        return false
+    for refused in["Sec-WebSocket-Protocol: hirsel.1\r\n", "Sec-WebSocket-Protocol: HIRSEL.4\r\n", "Sec-WebSocket-Protocol: hirsel.4\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n", "Sec-WebSocket-Protocol: hirsel.4\r\nContent-Length: 3\r\n"] {
+        if status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", refused)) != 400 {
+            return false
+        }
     }
-    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.4\r\n")) == 101 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: HIRSEL.3\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")) == 400 && status(request_with("GET", "/hirsel", "upgrade", "websocket", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Content-Length: 3\r\n")) == 400
+    status(request_with("GET", "/hirsel", "UpGrAdE", "WeBsOcKeT", "13", "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol: other, hirsel.4\r\n")) == 101
 }
 
 // Mutant: drop_tail. The masked binary frame is hand-derived with zero mask.
@@ -86,7 +88,7 @@ fn upgrade_tail_kept() -> bool {
     let tail = b"\x82\x83\x00\x00\x00\x00abc"
     list.append(mut b, tail)
     match websocket.server(b) {
-        Upgraded(at, Current, _) => at == end && list.slice(b, at, list.len(b)) == tail,
+        Upgraded(at, _) => at == end && list.slice(b, at, list.len(b)) == tail,
         _ => false
     }
 }

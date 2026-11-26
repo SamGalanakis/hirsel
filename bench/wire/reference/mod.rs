@@ -662,7 +662,6 @@ struct Ingress {
 fn handshake(
     request: &tokio_tungstenite::tungstenite::handshake::server::Request,
     mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
-    retired: &mut bool,
 ) -> std::result::Result<
     tokio_tungstenite::tungstenite::handshake::server::Response,
     tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
@@ -671,27 +670,19 @@ fn handshake(
     if request.uri().path() != "/hirsel" {
         return Err(Response::builder().status(404).body(None).unwrap());
     }
-    let offered = request
+    let current = request
         .headers()
         .get("Sec-WebSocket-Protocol")
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .split(',')
-        .map(str::trim);
-    let selected = if offered.clone().any(|token| token == "hirsel.4") {
-        "hirsel.4"
-    } else if let Some(token) = offered
-        .into_iter()
-        .find(|token| matches!(*token, "hirsel.1" | "hirsel.2"))
-    {
-        *retired = true;
-        token
-    } else {
+        .any(|token| token.trim() == "hirsel.4");
+    if !current {
         return Err(Response::builder().status(400).body(None).unwrap());
-    };
+    }
     response
         .headers_mut()
-        .insert("Sec-WebSocket-Protocol", selected.parse().unwrap());
+        .insert("Sec-WebSocket-Protocol", "hirsel.4".parse().unwrap());
     Ok(response)
 }
 
@@ -705,30 +696,15 @@ async fn session(
     launch: Arc<Launch>,
 ) -> Result<()> {
     socket.set_nodelay(true)?;
-    let mut retired = false;
-    #[allow(
-        clippy::result_large_err,
-        reason = "Tungstenite's Callback API returns the HTTP response by value."
-    )]
-    let negotiate = |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
-                     response| { handshake(request, response, &mut retired) };
     let mut ws = tokio::time::timeout(
         Duration::from_millis(5000),
         tokio_tungstenite::accept_hdr_async_with_config(
             socket,
-            negotiate,
+            handshake,
             Some(crate::websocket_config()),
         ),
     )
     .await??;
-    if retired {
-        ws.close(Some(CloseFrame {
-            code: CloseCode::Size,
-            reason: "hirsel.4".into(),
-        }))
-        .await?;
-        return Ok(());
-    }
     let first = tokio::time::timeout(Duration::from_millis(10000), async {
         loop {
             match ws.next().await.transpose()? {

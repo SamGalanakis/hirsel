@@ -281,8 +281,7 @@ export class Client implements Transport {
       // refusing this Hello's credential, which is how an expiry reached offline shows.
       if (event.code === 4401) await this.credentialLost('Close 4401');
       else if (event.code === 1008 && !this.welcomed) await this.credentialLost('Close 1008 before Welcome');
-      else if (event.code === 1009) await this.incompatible(1009,
-        !this.welcomed && event.reason === 'hirsel.4' ? 'Reload' : 'ReplyTooLarge');
+      else if (event.code === 1009) await this.incompatible(1009, 'ReplyTooLarge');
       else if ([1007, 1008].includes(event.code)) await this.incompatible(event.code);
       else this.transient();
     });
@@ -316,8 +315,7 @@ export class Client implements Transport {
   }
   private async incompatible(code: number, problem = 'Incompatible'): Promise<void> {
     this.cancelTimers(); this.disconnect(); this.setState('Incompatible');
-    const diagnostic = problem === 'Reload' ? 'Reload required before reconnecting to hirsel.4'
-      : problem === 'ReplyTooLarge' ? 'Stored reply exceeds the server message limit (1009)'
+    const diagnostic = problem === 'ReplyTooLarge' ? 'Stored reply exceeds the server message limit (1009)'
       : `Incompatible (${code}); reload bindings or reconnect explicitly`;
     this.options.onDiagnostic?.(diagnostic);
     if (problem === 'ReplyTooLarge') {

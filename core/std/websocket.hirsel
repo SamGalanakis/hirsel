@@ -3,11 +3,7 @@
 // Deadlines, entropy, idle timers and serialized writes belong to wsock.
 pub type Role: key + send = Server | Client
 
-pub type RetiredToken: key + send = One | Two
-
-pub type Protocol: key + send = Current | Retired(RetiredToken) | NoProtocol
-
-pub type Upgrade = Waiting | Upgraded(u64, Protocol, Bytes) | Refused(u16)
+pub type Upgrade = Waiting | Upgraded(u64, Bytes) | Refused(u16)
 
 // Ready carries the consumed head offset and whether hirsel.4 was selected.
 pub type Checked = Pending | Ready(u64, bool) | Failed(u16)
@@ -47,10 +43,9 @@ fn connection(b: Bytes, h: http1.Head) -> bool {
     false
 }
 
-fn protocol(b: Bytes) -> Protocol {
+fn offers_current(b: Bytes) -> bool {
     let n = list.len(b)
     let mut at = 0u64
-    let mut selected: Protocol = NoProtocol
     while at < n {
         while at < n && (b[at] == 44 || b[at] == 32 || b[at] == 9) {
             at += 1u64
@@ -59,20 +54,11 @@ fn protocol(b: Bytes) -> Protocol {
         while at < n && b[at] != 44 && b[at] != 32 && b[at] != 9 {
             at += 1u64
         }
-        let token = list.slice(b, start, at)
-        if token == b"hirsel.4" {
-            return Current
-        }
-        if selected == NoProtocol {
-            if token == b"hirsel.1" {
-                selected = Retired(One)
-            }
-            if token == b"hirsel.2" {
-                selected = Retired(Two)
-            }
+        if list.slice(b, start, at) == b"hirsel.4" {
+            return true
         }
     }
-    selected
+    false
 }
 
 /// RFC 6455 section 1.3 accept value. O(key bytes), Capacity on allocation.
@@ -104,15 +90,15 @@ fn server_checks(b: Bytes, h: http1.Head) -> Result[http1.Span, u16] {
     Ok(key)
 }
 
-fn route_checks(b: Bytes, h: http1.Head) -> Result[Protocol, u16] {
+fn route_checks(b: Bytes, h: http1.Head) -> Result[(), u16] {
     if part(b, h.target) != string.as_bytes("/hirsel") {
         return Error(404)
     }
     let offered = match field(b, h, "sec-websocket-protocol")? {
-        Some(span) => protocol(part(b, span)),
-        None => NoProtocol,
+        Some(span) => offers_current(part(b, span)),
+        None => false,
     }
-    if offered == NoProtocol {
+    if !offered {
         return Error(400)
     }
     // No HTTP body is consumed by an upgrade, so its framing cannot create
@@ -126,7 +112,7 @@ fn route_checks(b: Bytes, h: http1.Head) -> Result[Protocol, u16] {
         },
         None => {}
     }
-    Ok(offered)
+    Ok(())
 }
 
 /// Server upgrade. Returns the consumed head offset and the 101 response;
@@ -156,25 +142,15 @@ pub fn server_head(b: Bytes, h: http1.Head) -> Upgrade {
         },
         None => return Refused(400)
     }
-    let offered = match route_checks(b, h) {
-        Ok(value) => value,
-        Error(code) => return Refused(code)
+    if let Error(code) = route_checks(b, h) {
+        return Refused(code)
     }
     let accepted = accept(part(b, key))
     let mut out: Bytes = list.new()
     list.append(mut out, string.as_bytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "))
     list.append(mut out, accepted)
-    list.append(mut out, string.as_bytes("\r\n"))
-    let selected = match offered {
-        Current => b"hirsel.4",
-        Retired(One) => b"hirsel.1",
-        Retired(Two) => b"hirsel.2",
-        NoProtocol => return Refused(400),
-    }
-    list.append(mut out, b"Sec-WebSocket-Protocol: ")
-    list.append(mut out, selected)
-    list.append(mut out, b"\r\n\r\n")
-    Upgraded(h.end, offered, take out)
+    list.append(mut out, b"\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n")
+    Upgraded(h.end, take out)
 }
 
 /// Validates the client's bounded 101 response against its sent key; a 4xx or 5xx

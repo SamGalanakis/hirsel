@@ -630,24 +630,29 @@ fn status_address(status: runner.Status) -> Addr {
     option.unwrap(status.addr)
 }
 
+fn prior_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(bump), 65536u64, runner.DEFAULT_STEPS)
+}
+
+fn check_prior_activation(description: Bytes, row: runner.ReleaseRecord) {
+    let describe: std.codec.Codec[runner.Describe] = std.codec.of()
+    let decoded = result.unwrap(std.codec.decode(describe, description))
+    want(list.len(decoded.exported) == 1u64 && decoded.exported[0u64].described.identity == code.identity(code.describe(bump)), "activation: incorrect prior release")
+    want(row.release == result.unwrap(runner.release_digest(decoded.exported)) && row.digest == decoded.digest, "activation: prior release history differs from its description")
+}
+
 fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdout, phase: String, uncut: bool, genesis: bool) -> () waits {
     let codec: std.codec.Codec[Bytes] = std.codec.of_list()
-    let mut old_previous: Bytes = list.new()
-    let mut old_current: Bytes = list.new()
-    list.append(mut old_previous, string.as_bytes("previous release"))
-    list.append(mut old_current, string.as_bytes("current release"))
     if phase == "init" {
         let mut db = result.unwrap(store.open(tasks, d, c, r, options()))
+        if !genesis {
+            let ticket = result.unwrap(install_data(mut db))
+            result.unwrap(store.durable(mut db, ticket))
+        }
+        result.unwrap(store.close(take db))
         if genesis {
-            result.unwrap(store.close(take db));
             return
         }
-        let _ = result.unwrap(install_data(mut db))
-        let release_codec: std.codec.Codec[runner.ReleaseRecord] = std.codec.of()
-        let seeded = result.unwrap(store.fixture_unfenced_activation(mut db, old_previous, old_current, release_codec))
-        result.unwrap(store.durable(mut db, seeded))
-        result.unwrap(store.close(take db))
-        return
     }
     let mut existing = options()
     existing.create = false
@@ -667,7 +672,12 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         let snap = store.snapshot(db)
         let version = store.version(snap)
         let activated = version == base + 1u64
-        want((activated && store.fence_level(db) == 1) || (!activated && !uncut && version == base && store.fence_level(db) == 0), "activation and fence disagree")
+        let fence = store.fence_level(db)
+        want((activated && fence == 1) || (!uncut && version == base && fence == (if genesis {
+            0u32
+        } else {
+            1u32
+        })), "activation and fence disagree")
         if activated || !genesis {
             let table = result.unwrap(store.system_table(db, "hirsel.runner.activation", std.codec.key_u8(), codec))
             let current = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, table, 0u8)))
@@ -680,7 +690,8 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
                         fail("genesis: unexpected previous release")
                     }
                 } else {
-                    want(option.unwrap(take previous) == old_current, "activation: current changed but previous did not")
+                    let prior = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, releases, base)))
+                    check_prior_activation(option.unwrap(take previous), prior)
                 }
                 let describe: std.codec.Codec[runner.Describe] = std.codec.of()
                 let decoded = result.unwrap(std.codec.decode(describe, current))
@@ -690,11 +701,12 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
                 let _ = result.unwrap(store.checkpoint(mut db))
                 chosen = Current(version)
             } else {
-                want(current == old_current && option.unwrap(take previous) == old_previous, "activation: legacy rows changed")
+                let prior = option.unwrap(result.unwrap(store.get(result.unwrap(store.reader(db, 0u64)), snap, releases, base)))
+                check_prior_activation(current, prior)
+                want(previous == None, "activation: previous changed without a new activation")
                 if let Some(_) = history {
                     fail("activation: history committed without current")
                 }
-                chosen = Current(0u64)
             }
         } else {
             match open_data(db) {
@@ -704,19 +716,24 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         }
         result.unwrap(store.close(take db))
         if !activated && !genesis {
-            refused_open(d, c, r, tasks, Current(0u64), N_PLACE, base, true)
+            refused_open(d, c, r, tasks, Current(0u64), N_PLACE, base)
             return
         }
         if activated {
-            refused_open(d, c, r, tasks, Current(base), N_PLACE, base + 1u64, false)
-            refused_open(d, c, r, tasks, Current(base + 1u64), N_PLACE + 1u64, base + 1u64, false)
+            refused_open(d, c, r, tasks, Current(base), N_PLACE, base + 1u64)
+            refused_open(d, c, r, tasks, Current(base + 1u64), N_PLACE + 1u64, base + 1u64)
         }
     }
     let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
     let (watch, watcher): (Sender[Receiver[runner.Phase]], Receiver[Receiver[runner.Phase]]) = channel.new(1u64)
     let mut wire = runner.wire_defaults(131072u64)
     wire.n_pool = 4194304u64
-    let settings: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None), selection: take chosen, place: code.describe(place), n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
+    let placing = if phase == "init" {
+        code.describe(prior_place)
+    } else {
+        code.describe(place)
+    }
+    let settings: runner.PlaceConfig[(), Hd, ()] = runner.PlaceConfig(backing: Disk(d), sizes: store.Overrides(resident_limit: Some(existing.resident_limit), journal_limit: None, checkpoint_bytes: None, pack_bytes: Some(existing.pack_bytes), group_bytes: Some(int.widen(existing.group_bytes)), group_commits: Some(existing.group_commits), lock_wait_ms: Some(existing.lock_wait_ms), cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None), selection: take chosen, place: placing, n_place: N_PLACE, on_migrate: Some(code.describe(migrate)), schema: code.describe(schema), session: wire, max_sessions: 1u64, proxies: list.new(), n_publisher: 1048576u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks: tasks, clock: c, random: r, stop: runner.Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(runner.ingress.binding()), grants: Some(runner.ingress.bind_grants()), triggers: None, idle: None)
     let installing = match settings.selection {
         Install(_) => true,
         _ => false
@@ -729,7 +746,9 @@ fn activation_pairs(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net, out: Stdo
         if let Ok(Ok(Unstarted)) = task.join(take running) {} else {
             fail("activation: install did not finish")
         }
-        result.unwrap(stdout.write(out, "DONE"))
+        if phase == "write" {
+            result.unwrap(stdout.write(out, "DONE"))
+        }
         return
     }
     let phases = result.unwrap(channel.receive(watcher))
@@ -759,14 +778,13 @@ fn unreachable_schema(mut _catalog: store.Declare) -> Result[Hd, store.Error] {
     fail("a refused opener called handles")
 }
 
-fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Selection, allowance: u64, v: u64, legacy: bool) -> () waits {
+fn refused_open(d: Dir, c: Clock, r: Random, tasks: Tasks, selected: runner.Selection, allowance: u64, v: u64) -> () waits {
     let db = result.unwrap(store.open(tasks, d, c, r, options()))
     let (_sender, from): (Sender[runner.HeadInput], Receiver[runner.HeadInput]) = channel.new(1u64)
     let mail = result.unwrap(runner.mailbox(1u64))
     let tried = runner.place_head_selected(take db, selected, code.describe(place), allowance, None, code.describe(unreachable_schema), take from, take mail, tasks, 1048576u64)
     match take tried {
-        Error(NotCurrent(Legacy)) => want(legacy, "activation: fenced store reported legacy"),
-        Error(NotCurrent(Active(found, _, _))) => want(!legacy && found == v, "activation: wrong active version"),
+        Error(NotCurrent(Active(found, _, _))) => want(found == v, "activation: wrong active version"),
         _ => fail("activation: unexpected selection result")
     }
     let reopened = result.unwrap(store.open(tasks, d, c, r, options()))

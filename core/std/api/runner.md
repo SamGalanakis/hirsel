@@ -293,8 +293,7 @@ Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.
 Refusal appends RequestMismatch 6, HistoryUnavailable 7 and StreamFuture 8 after NotAllowed 5.
 StreamFuture carries the store's keyed time in milliseconds as a u64.
 Fault tags are Raised 0, OutOfBytes 1, OutOfTime 2, Gone 3 and Conflict 4.
-A client that offers only the retired tokens `hirsel.1` or `hirsel.2` is closed 1009
-with reason `hirsel.4` right after the upgrade, before any Welcome.
+An upgrade that omits `hirsel.4` receives HTTP 400.
 
 The head's stream state is the store's own (`store.admit` and `store.reply`, with no
 separate runner table). The gate waits on `store.durable` for the group's last ticket.

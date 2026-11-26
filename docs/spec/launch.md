@@ -847,7 +847,7 @@ Rules:
    writes nothing; dev records the store ID from it. Only a `PlaceCurrent(version, read)` reply
    leads to an install: the store holds another identity, `read.binding`, and dev installs with
    it as the expected predecessor and `read`'s store ID as the expected store (rule 6), whether
-   or not `state.json` locates an executable for it. `PlaceRefused("Legacy")`, a held store,
+   or not `state.json` locates an executable for it. A held store,
    corruption, `IdentityUnknown`, a failed readiness probe and a missing proof are each their
    own `broken` cause and never lead to an install. `state.json` is updated after each typed
    outcome; a crash before the update leaves a stale locator, and the next start's plain reopen

@@ -70,7 +70,7 @@ pub fn stream_key(c: Caller, id: StreamId) -> Result[Bytes, Capacity] {
     store.stream_key_bytes(store.StreamKey(caller: clone(c), id: id))
 }
 
-pub type FoundActivation: shareable + cross = Empty | Legacy | Active(u64, Bytes, Bytes)
+pub type FoundActivation: shareable + cross = Empty | Active(u64, Bytes, Bytes)
 
 // `Reopen` opens the store at its current activation, or runs genesis on an empty
 // store; it is what a launch without `--hirsel-activation` selects (RUNNER-SPEC §6).
@@ -722,7 +722,6 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                                 Open(NotCurrent(Active(version, _, read))) => {
                                     PlaceCurrent(version, clone(read))
                                 },
-                                Open(NotCurrent(Legacy)) => PlaceRefused("Legacy"),
                                 Open(NotCurrent(Empty)) => PlaceRefused("Empty"),
                                 Full(_) => PlaceRefused("Full"),
                                 Open(Store(Full(_))) => PlaceRefused("Full"),

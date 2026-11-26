@@ -1,5 +1,5 @@
 // L58 exercises the first bytes sent by a real accept owner. Its Hello and
-// expected Close are literal wire bytes, independent of the frame codec.
+// expected responses are literal wire bytes, independent of the frame codec.
 fn protocol_asset(_path: Bytes) -> Option[std.wsock.Asset] {
     None
 }
@@ -44,7 +44,7 @@ fn protocol_stream_time(mut requests: Receiver[HeadInput], clock: Clock) -> () w
     }
 }
 
-fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net, routed: bool, offered: Bytes, selected: Bytes) -> bool waits {
+fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net, routed: bool, offered: Bytes, current: bool) -> bool waits {
     let mut config = wire_defaults(0u64)
     if routed {
         config.site = Some(std.wsock.Site(dir: d, find: protocol_asset))
@@ -88,17 +88,10 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
     }
     // A refusal may close as soon as it has the HTTP head. Queue the full pipeline first.
     let owner = task.spawn(tasks, bytes allowance, take job, serve)
-    let mut expected: Bytes = if list.len(selected) == 0u64 {
-        clone(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+    let expected = if current {
+        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: hirsel.4\r\n\r\n"
     } else {
-        let mut bytes_out: Bytes = clone(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\nSec-WebSocket-Protocol: ")
-        list.append(mut bytes_out, selected)
-        list.append(mut bytes_out, b"\r\n\r\n")
-        take bytes_out
-    }
-    let current = selected == b"hirsel.4"
-    if !current && list.len(selected) != 0u64 {
-        list.append(mut expected, b"\x88\x0a\x03\xf1hirsel.4")
+        b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
     }
     let mut reader = take input
     let mut response: Bytes = list.with_capacity(1024u64)
@@ -129,10 +122,10 @@ fn protocol_exchange(d: Dir, tasks: Tasks, clock: Clock, random: Random, network
 }
 
 @test
-fn test_retired_token_close(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net) -> Result[(), (bool, u64)] waits {
-    let cases =[(b"hirsel.1, hirsel.2", b"hirsel.1"), (b"hirsel.2, hirsel.1", b"hirsel.2"), (b"hirsel.1, hirsel.4, hirsel.2", b"hirsel.4"), (b"hirsel.4, hirsel.2", b"hirsel.4"), (b"hirsel.2, hirsel.4", b"hirsel.4"), (b"", b""), (b"unrelated", b""), (b"hirsel.3", b"")]
+fn test_upgrade_protocol(d: Dir, tasks: Tasks, clock: Clock, random: Random, network: Net) -> Result[(), (bool, u64)] waits {
+    let cases =[(b"hirsel.1, hirsel.4, hirsel.2", true), (b"hirsel.4, hirsel.2", true), (b"hirsel.2, hirsel.4", true), (b"", false), (b"unrelated", false), (b"hirsel.3", false), (b"hirsel.1", false)]
     for routed in[false, true] {
-        for i in 0u64 .. 8u64 {
+        for i in 0u64 .. 7u64 {
             if !protocol_exchange(d, tasks, clock, random, network, routed, cases[i].0, cases[i].1) {
                 return Error((routed, i))
             }

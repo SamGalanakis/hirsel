@@ -54,13 +54,7 @@ fn wire_accepted[C: send](take x: WireAccept[C]) -> Result[(), std.wsock.Error] 
     }
     let _ = take proxies
     let ended: Result[(), std.wsock.Error] = match take received {
-        Ok(Some(take up)) => {
-            if let Retired(_) = up.protocol {
-                close_retired_upgrade(take up, c.socket, clock)
-            } else {
-                return wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control, allocate: None), take allocation, Served(take completion))
-            }
-        },
+        Ok(Some(take up)) => return wire_owner(WireOwner(upgraded: take up, service: take service, publisher: take pub_to, config: c, clock: clock, tasks: tasks, managed: take control, allocate: None), take allocation, Served(take completion)),
         Ok(None) => Ok(()),
         Error(e) => Error(e),
     }

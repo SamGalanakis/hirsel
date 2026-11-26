@@ -76,7 +76,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
             let Some(expected) = launch_env().predecessor else {
                 return Error(IdentityUnknown)
             }
-            if !persistent || store.fence_level(db) == 0 || current == None {
+            if !persistent || current == None {
                 return Error(IdentityUnknown)
             }
             let version = activation_result(activation_version(db))?
@@ -90,12 +90,7 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
         },
         Reopen => match current {
             None => None,
-            Some(_) => {
-                if store.fence_level(db) == 0 && persistent {
-                    return Error(NotCurrent(Legacy))
-                }
-                Some(activation_result(activation_version(db))?)
-            },
+            Some(_) => Some(activation_result(activation_version(db))?),
         },
         Current(expected) => match current {
             None => {
@@ -105,9 +100,6 @@ fn head_prepare_registered[G: send, H: shareable + inert + send](mut db: store.D
                 None
             },
             Some(_) => {
-                if store.fence_level(db) == 0 && persistent {
-                    return Error(NotCurrent(Legacy))
-                }
                 let version = activation_result(activation_version(db))?
                 if version != expected {
                     return Error(not_current_activation(db, version, option.unwrap(take current)))

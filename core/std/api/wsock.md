@@ -10,7 +10,7 @@ failure or cancellation. The runner calls `hello_accepted` only after decoding
 and admitting Hello; `welcomed` clears the separate Hello deadline.
 
 `server` consumes a Socket and pending lease, validates the bounded request
-and source, writes the 101 response and returns `Upgraded` with the selected protocol and
+and source, writes the 101 response and returns `Upgraded` with the
 read-ahead length. Its reader keeps
 only the request's frame read-ahead, copied into storage of exactly its length
 and charged to the connection; the 8192-byte request buffer is released. Its timers start Hello at the completed 101. `server_with` calls a

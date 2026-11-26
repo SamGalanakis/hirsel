@@ -116,19 +116,6 @@ fn wire_output_size(f: Frame) -> u64 {
     }
 }
 
-fn close_retired_upgrade(take upgraded: std.wsock.Upgraded, config: std.wsock.Config, clock: Clock) -> Result[(), std.wsock.Error] waits {
-    let std.wsock.Upgraded(reader: take input, writer: take output, ..) = take upgraded
-    let mut reader = take input
-    let mut writer = take output
-    std.wsock.finish_read(mut reader)
-    let mut encoder = std.wsock.outbound(Server, config, None)?
-    let close_bytes = std.wsock.encode(mut encoder, true, 8u8, b"\x03\xf1hirsel.4")?
-    std.wsock.stage(mut writer, take close_bytes) ?=> |_| Busy
-    let end = At(clock, std.clock.deadline_after_ms(host.mono_ns(clock), config.close_ms))
-    while !std.wsock.flush(mut writer, mut encoder, end)? {}
-    Ok(())
-}
-
 // The local row callback carries its subscription id on each row.
 pub fn publication_rows(take groups: List[Group]) -> List[SubRow] {
     let mut output: List[SubRow] = list.new()

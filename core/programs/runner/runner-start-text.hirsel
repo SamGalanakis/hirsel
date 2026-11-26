@@ -167,7 +167,6 @@ pub fn start_text(problem: StartError) -> String {
             push_store_error(mut line, e)
         },
         Open(NotCurrent(Empty)) => string.push(mut line, "the store is empty, but --hirsel-activation named a version; start without --hirsel-activation for genesis"),
-        Open(NotCurrent(Legacy)) => string.push(mut line, "the store holds data without an activation; start it once with --hirsel-install"),
         Open(NotCurrent(Active(version, description, _))) => {
             string.push(mut line, "the store is at activation ")
             string.push_u64(mut line, version)

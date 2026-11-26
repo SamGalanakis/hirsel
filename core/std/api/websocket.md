@@ -6,16 +6,13 @@ The module is pure RFC 6455 protocol logic over bytes. It performs no I/O,
 chooses no deadline, and generates no entropy. The socket owner supplies
 random client nonces and a fresh four-byte mask for each encoded client frame.
 
-`server` parses a bounded upgrade and returns the response, consumed byte
-offset and selected protocol. An offer containing `hirsel.4` selects
-`Current`. Otherwise the first `hirsel.1` or `hirsel.2` selects
-`Retired(token)`. A missing header or an offer with no supported token gives
-HTTP 400. The Runner sends Close 1009 with reason `hirsel.4` on a retired
-upgrade before reading any frames. `client` checks the 101 challenge and
+`server` parses a bounded upgrade and returns the response and consumed byte
+offset. It selects `hirsel.4` wherever it appears in the offer. A missing
+header or an offer without `hirsel.4` gives HTTP 400. `client` checks the 101 challenge and
 requires the selected `hirsel.4` protocol. A 4xx or 5xx answer fails with the
 server's status, so a full place's refusal reads as 503; any other answer that
 is not a valid 101 fails with 400. Preserve `input[end..]` as the
-initial frame input for the current protocol. `request` constructs the fixed
+initial frame input. `request` constructs the fixed
 `/hirsel` request and returns `Result[Bytes, u16]`. Refused 426 requires a
 `Sec-WebSocket-Version: 13` response header. Allocation refusal raises Capacity.
 

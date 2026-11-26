@@ -525,7 +525,6 @@ pub fn finish_read(mut r: Reader) {
 }
 
 pub type Upgraded: send {
-    protocol: websocket.Protocol,
     read_ahead: u64,
     reader: Reader,
     writer: Writer,
@@ -698,7 +697,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
     head.target.end = path_end
     let upgraded = websocket.server_head(input, head)
     match take upgraded {
-        Upgraded(end, selected, take response) => {
+        Upgraded(end, take response) => {
             let ip = match ingress_policy.source_for_head(input, head, peer, ingress) {
                 Ok(ip) => ip,
                 Error(code) => {
@@ -712,7 +711,7 @@ fn upgrade_request(take request: Request, take slot: Pending, peer: Ip, ingress:
             }
             wsock_site.send_response(mut writer, response, string.as_bytes(""), deadline)?
             let kept = unread(input, end)?
-            Ok(Upgraded(protocol: selected, read_ahead: list.len(kept), reader: Reader(half: Stream(take reader), input: take kept, cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: Stream(take writer), buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
+            Ok(Upgraded(read_ahead: list.len(kept), reader: Reader(half: Stream(take reader), input: take kept, cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: Stream(take writer), buffer: write_buffer()), source: ip, timers: timers(config, host.mono_ns(clock)), pending: take slot))
         },
         Refused(code) => {
             let _ = refuse(mut writer, code, deadline)
@@ -908,7 +907,7 @@ pub fn local_server(take dial: Dial, take slot: Pending, config: Config, clock: 
     if let Error(_) = conn.send(accept, Accepted(code: 101, to: take to)) {
         return Error(Eof)
     }
-    Ok(Upgraded(protocol: Current, read_ahead: 0, reader: Reader(half: Local(take inbox), input: list.new(), cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: Local(take back), buffer: write_buffer()), source: V4(0x7f000001), timers: timers(config, host.mono_ns(clock)), pending: take slot))
+    Ok(Upgraded(read_ahead: 0, reader: Reader(half: Local(take inbox), input: list.new(), cursor: 0, decoder: websocket.decoder(Server, config.max_frame), clock, message_end: None), writer: Writer(half: Local(take back), buffer: write_buffer()), source: V4(0x7f000001), timers: timers(config, host.mono_ns(clock)), pending: take slot))
 }
 
 /// Refuses a dial with `code`, as a TCP upgrade refusal does.

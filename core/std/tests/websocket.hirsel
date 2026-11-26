@@ -396,7 +396,7 @@ fn upgrade_frame_handoff() -> bool {
     let mut input = result.unwrap(websocket.request(b"example.com", b"the sample nonce", false))
     list.append(mut input, unhex("82 83 00 00 00 00 61 62 63"))
     let mut at = match websocket.server(input) {
-        Upgraded(end, _, _) => end,
+        Upgraded(end, _) => end,
         _ => return false
     }
     let mut d = websocket.decoder(Server, 262144)

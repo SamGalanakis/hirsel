@@ -165,18 +165,6 @@ pub fn stage_activation[V](mut staged: StagedMigration, release_at: u64, previou
     stage_system_put(mut staged.plan, releases, release_at, release)
 }
 
-// The runner-activation crash scenario (store-crash) seeds this: the rows a pre-fence
-// runner left, in one unfenced commit, with an empty release history whose
-// codec is the runner's ReleaseRecord, as stage_activation stages it.
-pub fn fixture_unfenced_activation[V](mut db: Db, previous: Bytes, current: Bytes, codec: std.codec.Codec[V]) -> Result[Ticket, Error] waits {
-    let mut plan = schema_plan(db)
-    let activation = stage_system_table(mut plan, "hirsel.runner.activation", std.codec.key_u8(), std.codec.of_bytes())?
-    let _ = stage_system_table(mut plan, "hirsel.runner.releases", std.codec.key_u64(), codec)?
-    stage_system_put(mut plan, activation, 1u8, previous)?
-    stage_system_put(mut plan, activation, 0u8, current)?
-    publish_schema_plan(mut db, take plan)
-}
-
 pub fn activation_install_allowed(db: Db) -> Result[(), Error] {
     require_memory_collections(store_has_tiered(db), Install)
 }

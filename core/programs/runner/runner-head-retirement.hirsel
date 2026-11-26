@@ -164,10 +164,6 @@ fn wire_connection_owner[C: send](take x: WireOwner[C]) -> Result[(), std.wsock.
     if !wire_configuration(x.config) {
         return Error(Configuration)
     }
-    if let Retired(_) = x.upgraded.protocol {
-        let WireOwner(upgraded: take retired, config: config, clock: clock, ..) = take x
-        return close_retired_upgrade(take retired, config.socket, clock)
-    }
     let c = x.config
     let mut owner = take x
     let allocate = match replace(mut owner.allocate, None) {

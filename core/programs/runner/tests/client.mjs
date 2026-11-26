@@ -836,19 +836,11 @@ export async function laws(codec, only, mutant, entries, http) {
     assert.deepEqual(writeViews,[bothPending,bothPending]);
     h.storage.beforeWrite=undefined;
   };
-  tests.protocol_reload_or_reply_error=async()=>{
-    const retired=await setup(undefined,{prepare:server=>{server.welcome=false;}});
-    const ready=retired.client.whenReady();
-    void ready.catch(()=>{});
-    retired.server.close(retired.server.sockets[0],1009,'hirsel.4');
-    await assert.rejects(ready,{code:'Reload'});
-    await retired.time.advance(60000);
-    assert.equal(retired.server.sockets.length,1);
-    assert.match(retired.diagnostics.at(-1),/Reload required/);
+  tests.protocol_reply_too_large=async()=>{
     const current=await setup(); await current.client.whenReady();
     const pending=current.client.call(want,bytes(3),data=>data);
     void pending.catch(()=>{}); await settle();
-    current.server.close(current.server.sockets[0],1009,'hirsel.4');
+    current.server.close(current.server.sockets[0],1009);
     await assert.rejects(pending,{code:'ReplyTooLarge'});
     assert.equal(savedStream(current.storage.raw).pending.p,0n);
     assert.match(current.diagnostics.at(-1),/Stored reply/);

@@ -665,7 +665,7 @@ pub(crate) use admission::{Approvals, Failure, Green, Input, Summary};
 
 #[path = "wanted.rs"]
 mod wanted;
-pub(crate) use wanted::{get_wanted, put_wanted};
+pub(crate) use wanted::*;
 
 // Each row supplies the tag to both directions of the codec.
 macro_rules! session_wire {
@@ -733,6 +733,7 @@ session_wire!(Request, "request tag", w, r;
         w.strings(&approvals.exec);
         w.bytes(approvals.workdir.as_bytes());
         w.option(&approvals.old, |w, old| w.bytes(old));
+        put_roots(w, &approvals.packages);
     } => Self::Admit(
         Group::get(r)?,
         Attempt::get(r)?,
@@ -743,6 +744,7 @@ session_wire!(Request, "request tag", w, r;
             exec: r.strings()?,
             workdir: r.string()?,
             old: r.option(Reader::bytes)?,
+            packages: get_roots(r)?,
         },
     ),
     13 => AdmitData(a, bytes) {

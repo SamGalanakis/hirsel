@@ -498,6 +498,8 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::HeldEntry
             | Opt::HostMemory
             | Opt::TapeRetention
+            | Opt::SourceDir
+            | Opt::PackageRoot
             | Opt::GroupName
             | Opt::Tenant
             | Opt::GroupStore

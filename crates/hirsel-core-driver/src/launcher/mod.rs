@@ -7,7 +7,7 @@
 //! endpoint notice is reported, as one ordered event stream. The launcher keeps no record
 //! that a decision reads again: what it knows of its children is in memory and reaches a
 //! new host through the inventory that answers `Hello`.
-mod admit;
+pub(crate) mod admit;
 mod bootstrap;
 mod cgroup;
 pub(crate) mod dev;

@@ -206,9 +206,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1802,
-    "raise_revision": 16,
-    "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
+    "lines": 1804,
+    "raise_revision": 17,
+    "reason": "self-edit-begin-source-2849: --source and --package-root"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2530,

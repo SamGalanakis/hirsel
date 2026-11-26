@@ -95,9 +95,113 @@ pub type SourceFile: codec + send {
     content: Bytes
 }
 
-// The most codec bytes a `Tree` may take. The host keeps a request's input twice in its
-// row (the Begin and the input), so two trees fit one stored value.
-pub const TREE_BYTES: u64 = 4194304u64
+// The most content a source's files may hold in all (launch.md "Source by content").
+pub const SOURCE_BYTES: u64 = 4194304u64
+
+// The most codec bytes a source `Manifest` may take. The host keeps it twice in a request's
+// row (in the Begin and as the input).
+pub const MANIFEST_BYTES: u64 = 1048576u64
+
+// The most codec bytes a `Tree` may take: a tree's fields cost no more than its manifest's
+// beyond the content, so every manifest within its limits assembles into a tree within this.
+pub const TREE_BYTES: u64 = 5242880u64
+
+// A source named by content (launch.md "Source by content"): the Tree's fields with each file
+// as its path, SHA-256 and length. `files` is sorted by path with no repeats.
+pub type Manifest: codec + send {
+    package: String,
+    grants: List[String],
+    dirs: List[String],
+    required_entries: List[RequiredEntry],
+    files: List[ManifestFile]
+}
+
+pub type ManifestFile: codec + send {
+    path: String,
+    digest: Bytes,
+    len: u64
+}
+
+// Whether `path` is plain and relative: `/`-separated, with no empty, `.` or `..` component
+// and no NUL.
+fn plain_path(path: String) -> bool {
+    let b = string.as_bytes(path)
+    let n = list.len(b)
+    let mut start = 0u64
+    let mut i = 0u64
+    while i <= n {
+        if i == n || b[i] == 47u8 {
+            let width = i - start
+            if width == 0u64 {
+                return false
+            }
+            if b[start] == 46u8 && (width == 1u64 || width == 2u64 && b[start + 1u64] == 46u8) {
+                return false
+            }
+            start = i + 1u64
+        } else if b[i] == 0u8 {
+            return false
+        }
+        i += 1u64
+    }
+    true
+}
+
+// The manifest `b` encodes, if it is one within its limits: files sorted by path with no
+// repeats, no file another's directory, every path plain, every digest 32 bytes, and the
+// lengths at most SOURCE_BYTES in all.
+pub fn manifest_of(b: Bytes) -> Option[Manifest] {
+    if list.len(b) > MANIFEST_BYTES {
+        return None
+    }
+    let c: std.codec.Codec[Manifest] = std.codec.of()
+    let Ok(m) = std.codec.decode(c, b) else {
+        return None
+    }
+    let empty = sha256.hash(list.new())
+    let mut paths: Map[Bytes, ()] = map.new()
+    let mut total = 0u64
+    let mut i = 0u64
+    while i < list.len(m.files) {
+        let f = m.files[i]
+        if !plain_path(f.path) || list.len(f.digest) != 32u64 || f.len > SOURCE_BYTES - total {
+            return None
+        }
+        // An empty file's digest is SHA-256 of nothing: its bytes are never sent.
+        if f.len == 0u64 {
+            for k in 0u64 .. 32u64 {
+                if f.digest[k] != empty[k] {
+                    return None
+                }
+            }
+        }
+        total += f.len
+        if i > 0u64 {
+            match order.compare(m.files[i - 1u64].path, f.path) {
+                Less => (),
+                _ => return None,
+            }
+        }
+        let mut key: Bytes = list.new()
+        list.append(mut key, string.as_bytes(f.path))
+        map.insert(mut paths, take key, ())
+        i += 1u64
+    }
+    // No file is a directory of another.
+    for f in m.files {
+        let pb = string.as_bytes(f.path)
+        let mut prefix: Bytes = list.new()
+        for ch in pb {
+            if ch == 47u8 {
+                if let Some(_) = map.get(paths, prefix) {
+                    return None
+                }
+            }
+            list.push(mut prefix, ch)
+        }
+    }
+    Some(m)
+}
 
 // The tree `b` encodes, if it encodes one within `TREE_BYTES`.
 pub fn tree_of(b: Bytes) -> Option[Tree] {
@@ -124,11 +228,16 @@ pub type Approvals: codec + send {
     foreign: List[String],
     exec: List[String],
     workdir: String,
-    old: Option[Bytes]
+    old: Option[Bytes],
+    // The package roots the group may link (launch.md "Package roots per group"): a source
+    // whose `hirsel.lock` binds another fails as that root's absence from the store does.
+    packages: List[Bytes]
 }
 
 // One object the launcher needs, by kind and 32-byte hash.
-pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes) | ValueKey(Bytes)
+// BlobKey names a source file's bytes by SHA-256; only the host asks for it, on the operator
+// socket (launch.md "Source by content").
+pub type Wanted: codec + send = GroupKey(Bytes) | BodyKey(Bytes) | AnnexKey(Bytes) | ArchiveKey(Bytes) | ValueKey(Bytes) | BlobKey(Bytes)
 
 // A grant diff (launch.md "Publish and assemble"): the sorted grant lines a new recipe
 // holds that the old one lacks, and the sorted lines of the old one it drops. A line is one

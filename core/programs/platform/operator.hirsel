@@ -43,11 +43,14 @@ pub type Registration: codec + send {
     memory: Option[u64],
     args: List[String],
     record: Option[Record],
-    front: Option[Front]
+    front: Option[Front],
+    // The package roots the group's source may link (launch.md "Package roots per group").
+    packages: List[Bytes]
 }
 
 // What a Begin or Register deploys (launch.md "The operator socket"): an attested recipe R,
-// a publication R in the launcher's code store, or source, a `launcher.Tree`'s codec bytes.
+// a publication R in the launcher's code store, or source, a `launcher.Manifest`'s codec
+// bytes, whose files the host receives by content (launch.md "Source by content").
 pub type Input: codec + send = AttestedInput(Bytes) | PublicationInput(Bytes) | SourceInput(Bytes)
 
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,

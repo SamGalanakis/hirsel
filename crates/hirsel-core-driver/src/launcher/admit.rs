@@ -6,7 +6,7 @@
 //! published by `hirsel publish` in a child process under the host's caches, and then
 //! admitted as that publication.
 use super::objects::Records;
-use super::session::{Approvals, Attempt, Failure, Grants, Green, Reader, Summary, Wire, Writer};
+use super::session::{Approvals, Attempt, Failure, Grants, Green, Summary, Wire};
 use super::{Conn, Readiness};
 use crate::code_admission::{
     AdmissionError, AdmissionLimits, AdmissionStore, AdmittedRelease, ControlConnection,
@@ -204,12 +204,13 @@ pub(super) enum Source {
 /// How long an admission may run the law gate, from its `Admit` (launch.md "The verdict").
 const ADMISSION_DEADLINE: Duration = Duration::from_secs(600);
 
-/// The source a submitted tree's codec `bytes` admit; a gated one carries their SHA-256,
-/// which a green gate names.
+/// The source a submitted tree's codec `bytes` admit; a gated one carries the SHA-256 of
+/// the tree's manifest, the bytes the operator's Begin named it by, which a green gate names.
 pub(super) fn source(bytes: &[u8], gated: bool) -> Result<Source, Failure> {
     use sha2::Digest as _;
-    let digest = gated.then(|| sha2::Sha256::digest(bytes).into());
-    Ok(Source::Tree(tree(bytes)?, digest))
+    let tree = tree(bytes)?;
+    let digest = gated.then(|| sha2::Sha256::digest(tree.manifest()).into());
+    Ok(Source::Tree(tree, digest))
 }
 
 /// Most files in one submitted tree.
@@ -237,6 +238,15 @@ pub(super) fn tree(bytes: &[u8]) -> Result<Tree, Failure> {
     }
     if tree.files.len() > TREE_FILES {
         return Err(invalid("too many files"));
+    }
+    if tree
+        .files
+        .iter()
+        .map(|(_, bytes)| bytes.len())
+        .sum::<usize>()
+        > SOURCE_BYTES
+    {
+        return Err(invalid("its files are over the content limit"));
     }
     let mut paths = BTreeSet::new();
     for (path, _) in &tree.files {
@@ -321,8 +331,7 @@ impl Worker {
                     None => None,
                     Some((Ok(root), ours)) => Some((root, ours)),
                     Some((Err((tree, gate)), ours)) => {
-                        let old = approvals.old.as_deref();
-                        match publish(&admission, &tree, gate, old, &cancelled, deadline) {
+                        match publish(&admission, &tree, gate, &approvals, &cancelled, deadline) {
                             None => return,
                             Some(Ok((root, gated))) => {
                                 green = gated;
@@ -436,56 +445,10 @@ fn failure(error: AdmissionError) -> Failure {
     }
 }
 
-/// Submitted source (`launcher.Tree`): a workspace's files, the package directory to
-/// publish within it, and the `--grant` and `--dir` values its recipe binds.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Tree {
-    pub(crate) package: String,
-    pub(crate) grants: Vec<String>,
-    pub(crate) dirs: Vec<String>,
-    pub(crate) files: Vec<(String, Vec<u8>)>,
-    // The platform checks these against the candidate's preview before importing.
-    pub(crate) required_entries: Vec<(u32, Vec<u8>)>,
-}
-
-/// The most codec bytes a tree may take (`launcher.TREE_BYTES`).
-pub(crate) const TREE_BYTES: usize = 4 << 20;
-
-impl Wire for Tree {
-    fn put(&self, w: &mut Writer) {
-        w.bytes(self.package.as_bytes());
-        w.strings(&self.grants);
-        w.strings(&self.dirs);
-        w.len(self.files.len());
-        for (path, bytes) in &self.files {
-            w.bytes(path.as_bytes());
-            w.bytes(bytes);
-        }
-        w.len(self.required_entries.len());
-        for (kind, key) in &self.required_entries {
-            w.u32(*kind);
-            w.bytes(key);
-        }
-    }
-    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        let package = r.string()?;
-        let grants = r.strings()?;
-        let dirs = r.strings()?;
-        let files = (0..r.count(8)?)
-            .map(|_| Ok((r.string()?, r.bytes()?)))
-            .collect::<io::Result<_>>()?;
-        let required_entries = (0..r.count(8)?)
-            .map(|_| Ok((r.u32()?, r.bytes()?)))
-            .collect::<io::Result<_>>()?;
-        Ok(Self {
-            package,
-            grants,
-            dirs,
-            files,
-            required_entries,
-        })
-    }
-}
+#[path = "tree.rs"]
+mod submitted;
+pub(super) use submitted::lock_roots_allowed;
+pub(crate) use submitted::{SOURCE_BYTES, TREE_BYTES, Tree};
 
 #[path = "gate.rs"]
 pub(crate) mod gate;
@@ -569,12 +532,16 @@ fn publish(
     ad: &Admission,
     tree: &Tree,
     gate: Option<[u8; 32]>,
-    old: Option<&[u8]>,
+    approvals: &Approvals,
     cancel: &AtomicBool,
     deadline: Instant,
 ) -> Option<Result<(ContentHash, Option<Green>), Failure>> {
     let unrun =
         |e: &dyn std::fmt::Display| Some(Err(Failure::Invalid(format!("publish source: {e}"))));
+    let old = approvals.old.as_deref();
+    if let Err(outside) = lock_roots_allowed(tree, &approvals.packages) {
+        return Some(Err(outside));
+    }
     // The gate's authority check costs no compile, so it comes first.
     if gate.is_some()
         && let Err(denied) = gate::authority(tree)

@@ -4,7 +4,8 @@
 //! both sides check. One connection carries one exchange.
 use crate::code_admission::ObjectKey;
 use crate::launcher::session::{
-    Attempt, Grants, Group, Reader, Wire, Writer, get_wanted, malformed, put_wanted,
+    Attempt, Grants, Group, Reader, Wire, Writer, get_object_key, get_roots, malformed,
+    put_object_key, put_roots,
 };
 use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -46,10 +47,13 @@ pub(crate) struct Registration {
     pub(crate) args: Vec<String>,
     pub(crate) record: Option<Record>,
     pub(crate) front: Option<Front>,
+    /// The package roots the group's source may link (launch.md "Package roots per group").
+    pub(crate) packages: Vec<[u8; 32]>,
 }
 
 /// What a Begin or Register deploys (`operator.Input`): an attested recipe R, a publication
-/// R in the launcher's code store, or a `launcher.Tree`'s codec bytes.
+/// R in the launcher's code store, or a source's `launcher.Manifest` codec bytes, whose
+/// blobs the host asks for by digest (launch.md "Source by content").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Input {
     Attested(Vec<u8>),
@@ -482,10 +486,44 @@ pub(crate) enum Phase {
     AwaitDecision(Box<Decision>),
 }
 
+/// One key a `Need` asks for (`launcher.Wanted`): an object the launcher's verifier lacks,
+/// or a source blob, by SHA-256, the group's blob set lacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Needed {
+    Object(ObjectKey),
+    Blob([u8; 32]),
+}
+
+const BLOB_TAG: u32 = 5;
+
+fn put_needed(w: &mut Writer, keys: &[Needed]) {
+    w.len(keys.len());
+    for key in keys {
+        match key {
+            Needed::Object(key) => put_object_key(w, key),
+            Needed::Blob(digest) => {
+                w.u32(BLOB_TAG);
+                w.bytes(digest);
+            }
+        }
+    }
+}
+
+fn get_needed(r: &mut Reader<'_>) -> io::Result<Vec<Needed>> {
+    (0..r.count(8)?)
+        .map(|_| match r.u32()? {
+            BLOB_TAG => Ok(Needed::Blob(
+                <[u8; 32]>::try_from(r.bytes()?).map_err(|_| malformed("needed blob digest"))?,
+            )),
+            tag => Ok(Needed::Object(get_object_key(tag, r)?)),
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Answer {
     State(Vec<u8>, Group, Input, Phase),
-    Need(Vec<u8>, Attempt, Vec<ObjectKey>, bool),
+    Need(Vec<u8>, Attempt, Vec<Needed>, bool),
     Display(Vec<u8>, Attempt, Vec<u8>, String),
     Pin(Resolved),
     Error(Class, String),
@@ -514,6 +552,7 @@ impl Wire for Registration {
                 Forward::Stream => 1,
             });
         });
+        put_roots(w, &self.packages);
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(Self {
@@ -540,6 +579,7 @@ impl Wire for Registration {
                 };
                 Ok(Front { names, forward })
             })?,
+            packages: get_roots(r)?,
         })
     }
 }
@@ -736,7 +776,7 @@ impl Wire for Answer {
                 w.u32(1);
                 w.bytes(d);
                 a.put(w);
-                put_wanted(w, keys);
+                put_needed(w, keys);
                 w.bool(*last);
             }
             Self::Display(d, a, root, text) => {
@@ -770,7 +810,7 @@ impl Wire for Answer {
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(match r.u32()? {
             0 => Self::State(r.bytes()?, Group::get(r)?, Input::get(r)?, Phase::get(r)?),
-            1 => Self::Need(r.bytes()?, Attempt::get(r)?, get_wanted(r)?, r.bool()?),
+            1 => Self::Need(r.bytes()?, Attempt::get(r)?, get_needed(r)?, r.bool()?),
             2 => Self::Display(r.bytes()?, Attempt::get(r)?, r.bytes()?, r.string()?),
             3 => Self::Pin(match r.u32()? {
                 0 => Resolved::Found(r.bytes()?),

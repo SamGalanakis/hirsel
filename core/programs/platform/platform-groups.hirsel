@@ -46,7 +46,7 @@ fn add_group_turn[E: inert](mut h: Host, spec: NewGroup, env: E, also: fn(mut st
                 }
             }
             let mut meta = meta_of(tx, call_env.2)?
-            let g = GroupRow(tenant: string.from(call_env.1 .tenant), workdir: string.from(call_env.1 .workdir), author: call_env.1 .author, listen: string.from(call_env.1 .listen), front: clone(call_env.1 .front), store: string.from(call_env.1 .store), memory: call_env.1 .memory, assembly: clone(call_env.1 .assembly), activation: call_env.1 .activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1 .args), record: clone(call_env.1 .record))
+            let g = GroupRow(tenant: string.from(call_env.1 .tenant), workdir: string.from(call_env.1 .workdir), author: call_env.1 .author, listen: string.from(call_env.1 .listen), front: clone(call_env.1 .front), store: string.from(call_env.1 .store), memory: call_env.1 .memory, assembly: clone(call_env.1 .assembly), activation: call_env.1 .activation, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: meta.next_incarnation, retiring: None, args: clone(call_env.1 .args), record: clone(call_env.1 .record), packages: list.new(), source: None)
             meta.next_incarnation += 1u64
             st(store.put(mut tx, call_env.2 .meta, 0u64, meta))?
             st(store.put(mut tx, call_env.2 .groups, call_env.1 .name, g))?
@@ -145,7 +145,7 @@ fn encoded_len[T](c: std.codec.Codec[T], x: T) -> Option[u64] {
 pub fn undeployed_group_bytes(spec: NewGroup) -> Option[u64] {
     let max = 18446744073709551615u64
     let name_key = encoded_key_len(std.codec.key_string(), spec.name)
-    let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, listen: string.from(spec.listen), front: clone(spec.front), store: string.from(spec.store), memory: spec.memory, assembly: clone(spec.assembly), activation: max, retained: list.new(), recovery: None, store_id: Some((max, max)), store_claim: None, incarnation: max, retiring: Some(Delete), args: clone(spec.args), record: clone(spec.record))
+    let g = GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: spec.author, listen: string.from(spec.listen), front: clone(spec.front), store: string.from(spec.store), memory: spec.memory, assembly: clone(spec.assembly), activation: max, retained: list.new(), recovery: None, store_id: Some((max, max)), store_claim: None, incarnation: max, retiring: Some(Delete), args: clone(spec.args), record: clone(spec.record), packages: list.new(), source: None)
     let groups: std.codec.Codec[GroupRow] = std.codec.of()
     let wakes: std.codec.Codec[WakeRow] = std.codec.of()
     let retirements: std.codec.Codec[Retired] = std.codec.of()

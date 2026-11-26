@@ -4,12 +4,11 @@
 //! --state` resolves a recording's pin through the host or, with no host, the offline pin
 //! reader.
 use crate::cli::{Invocation, OptionId as Opt};
-use crate::code_admission::{AdmissionError, ObjectKey, ObjectKind, send_release};
 use crate::code_store::CodeStore;
 use crate::launcher::session::{Attempt, Grants, Group};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{
-    self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Input, Pause, Phase, Record,
+    self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Needed, Pause, Phase, Record,
     Registration, Report,
 };
 use hirsel_core_ids::ContentHash;
@@ -17,19 +16,21 @@ use hirsel_core_ir::release_recipe::Recipe;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[cfg(test)]
 mod laws;
 mod preview;
+mod pump;
+mod source;
 
 use preview::decide;
 use preview::{approve_grant, decision_json, held_fate, preview_json};
+use pump::Pump;
+use source::{Source, submission};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -184,7 +185,7 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
     let mut memory = None;
     let (mut record, mut front) = (None, None);
     let mut retention_days = 30u64;
-    let mut grants = crate::package_dir::Grants::default();
+    let (mut lines, mut source_dir, mut packages) = (Vec::new(), None, Vec::new());
     let mut d = None;
     for (option, value) in invocation.options {
         let text = value.unwrap_or_default();
@@ -221,23 +222,31 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
                     .filter(|&n| n != 0)
                     .ok_or("invalid tape retention")?
             }
-            Opt::Grant => grant(&mut grants, &text)?,
+            Opt::Grant => lines.push(text),
             Opt::RequestId => d = Some(text),
+            Opt::SourceDir => source_dir = Some(PathBuf::from(text)),
+            Opt::PackageRoot => packages.push(
+                crate::package_content::Root::parse(&text)
+                    .ok_or("--package-root takes sha256:HEX")?
+                    .0,
+            ),
             _ => return Err("unexpected register option".into()),
         }
     }
     let state = state.ok_or("register requires --state DIR")?;
-    let upload = Upload::open(invocation.positional.as_deref(), code)?;
-    let approvals = approvals(grants);
-    if let Some(reason) = approvals.check(&upload.recipe) {
-        eprintln!("register: refused: {reason}");
-        return Ok(2);
-    }
-    if record.is_some()
-        && let Some(reason) = foreign_recording_refusal(&upload.recipe)
-    {
-        eprintln!("register: refused: {reason}");
-        return Ok(2);
+    let (input, upload, source, approvals) =
+        submission(source_dir, invocation.positional.as_deref(), code, lines)?;
+    if let Some(upload) = &upload {
+        if let Some(reason) = approvals.check(&upload.recipe) {
+            eprintln!("register: refused: {reason}");
+            return Ok(2);
+        }
+        if record.is_some()
+            && let Some(reason) = foreign_recording_refusal(&upload.recipe)
+        {
+            eprintln!("register: refused: {reason}");
+            return Ok(2);
+        }
     }
     // The recordings directory is made only for a registration the CLI does not refuse.
     let record = record.map(crate::launcher::private_dir).transpose()?;
@@ -258,17 +267,20 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
             retention_s: retention_days.saturating_mul(86400),
         }),
         front,
+        packages,
     };
     let d = request_id(d)?;
     eprintln!("request {}", hex(&d));
     let ask = Ask::Register(
         d.clone(),
         Box::new(registration),
-        Input::Attested(upload.root.0.to_vec()),
+        input,
         approvals.foreign.clone(),
         approvals.exec.clone(),
     );
-    Exchange::new(&state, d, "register", Some(upload), approvals).run(ask)
+    let mut exchange = Exchange::new(&state, d, "register", upload, approvals);
+    exchange.source = source;
+    exchange.run(ask)
 }
 
 /// `hirsel deploy` or `hirsel decide`.
@@ -291,7 +303,7 @@ pub(crate) fn deploy(invocation: Invocation) -> Result<i32, Error> {
 fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let (mut state, mut code, mut name, mut d, mut status) = (None, None, None, None, None);
     let mut decision = Grants::default();
-    let mut grants = crate::package_dir::Grants::default();
+    let (mut lines, mut source_dir) = (Vec::new(), None);
     let mut held = Fates::default();
     let mut held_given = false;
     for (option, value) in invocation.options {
@@ -303,7 +315,8 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
             Opt::RequestId => d = Some(text),
             Opt::RequestStatus => status = Some(text),
             Opt::ApproveGrant => approve_grant(&mut decision, &text)?,
-            Opt::Grant => grant(&mut grants, &text)?,
+            Opt::Grant => lines.push(text),
+            Opt::SourceDir => source_dir = Some(PathBuf::from(text)),
             Opt::HeldAll | Opt::HeldEntry => {
                 held_fate(&mut held, option == Opt::HeldAll, &text)?;
                 held_given = true;
@@ -316,11 +329,8 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         return Err("deploy takes no program arguments; a group's arguments are registered".into());
     }
     let has_decision = decision != Grants::default();
-    let submission_options = code.is_some()
-        || name.is_some()
-        || !grants.foreign.is_empty()
-        || !grants.exec.is_empty()
-        || held_given;
+    let submission_options =
+        code.is_some() || name.is_some() || !lines.is_empty() || source_dir.is_some() || held_given;
     if let Some(text) = status {
         if invocation.positional.is_some() || d.is_some() || submission_options || has_decision {
             return Err("deploy --status takes only --state".into());
@@ -331,9 +341,11 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         return status_of(&state, &d);
     }
     sort_grants(&mut decision);
-    let upload = Upload::open(invocation.positional.as_deref(), code)?;
-    let approvals = approvals(grants);
-    if let Some(reason) = approvals.check(&upload.recipe) {
+    let (input, upload, source, approvals) =
+        submission(source_dir, invocation.positional.as_deref(), code, lines)?;
+    if let Some(upload) = &upload
+        && let Some(reason) = approvals.check(&upload.recipe)
+    {
         eprintln!("deploy: refused: {reason}");
         return Ok(2);
     }
@@ -367,14 +379,15 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let ask = Ask::Begin(
         d.clone(),
         group,
-        Input::Attested(upload.root.0.to_vec()),
+        input,
         approvals.foreign.clone(),
         approvals.exec.clone(),
         held,
         false,
     );
-    let mut exchange = Exchange::new(&state, d, "deploy", Some(upload), approvals);
+    let mut exchange = Exchange::new(&state, d, "deploy", upload, approvals);
     exchange.decision = Some(decision);
+    exchange.source = source;
     exchange.run(ask)
 }
 
@@ -536,92 +549,6 @@ fn policy_refusal(detail: &str) -> bool {
         || detail.starts_with("Exec grants")
 }
 
-/// The local end of an upload: `send_release` writes the admission bytes into one end of a
-/// socket pair, a pump relays them to the host as `Data`, and the host's `Need` parts are
-/// written back into the pair once the last one arrives.
-struct Pump {
-    peer: UnixStream,
-    stopped: Arc<AtomicBool>,
-    sender: std::thread::JoinHandle<Result<(), AdmissionError>>,
-    relay: std::thread::JoinHandle<()>,
-    needed: Vec<ObjectKey>,
-}
-
-impl Pump {
-    fn start(
-        upload: &Upload,
-        d: &[u8],
-        a: Attempt,
-        out: Arc<Mutex<operator::Connection>>,
-    ) -> io::Result<Self> {
-        let (peer, mut local) = UnixStream::pair()?;
-        let store = upload.store.clone();
-        let root = upload.root;
-        let sender = std::thread::spawn(move || {
-            send_release(&mut local, &store, root, &crate::launcher::limits())
-        });
-        let stopped = Arc::new(AtomicBool::new(false));
-        let (mut input, stop, d) = (peer.try_clone()?, stopped.clone(), d.to_vec());
-        let relay = std::thread::spawn(move || {
-            let mut chunk = vec![0; CHUNK];
-            loop {
-                let n = match input.read(&mut chunk) {
-                    Ok(n) => n,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(_) => return,
-                };
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                let ask = if n == 0 {
-                    Ask::End(d.clone(), a)
-                } else {
-                    Ask::Data(d.clone(), a, chunk[..n].to_vec())
-                };
-                if out.lock().unwrap().send(&ask).is_err() || n == 0 {
-                    return;
-                }
-            }
-        });
-        Ok(Self {
-            peer,
-            stopped,
-            sender,
-            relay,
-            needed: Vec::new(),
-        })
-    }
-
-    /// One `Need` part; after the last, the whole set goes to the sender as its Need.
-    fn need(&mut self, keys: Vec<ObjectKey>, last: bool) -> io::Result<()> {
-        self.needed.extend(keys);
-        if !last {
-            return Ok(());
-        }
-        let mut frame = (self.needed.len() as u64).to_le_bytes().to_vec();
-        for key in self.needed.drain(..) {
-            frame.push(match key.kind {
-                ObjectKind::Group => 1,
-                ObjectKind::Body => 2,
-                ObjectKind::Annex => 3,
-                ObjectKind::ForeignArchive => 4,
-                ObjectKind::Value => 5,
-                ObjectKind::Recipe => return Err(io::ErrorKind::InvalidData.into()),
-            });
-            frame.extend_from_slice(&key.hash.0);
-        }
-        self.peer.write_all(&frame)
-    }
-
-    fn stop(self) -> Result<(), AdmissionError> {
-        self.stopped.store(true, Ordering::SeqCst);
-        let _ = self.peer.shutdown(std::net::Shutdown::Both);
-        let sent = self.sender.join().unwrap_or(Ok(()));
-        let _ = self.relay.join();
-        sent
-    }
-}
-
 /// One deploy or registration: its request, the upload, the display and the outcome.
 struct Exchange<'a> {
     state: &'a Path,
@@ -632,6 +559,8 @@ struct Exchange<'a> {
     /// The grant diff the operator approves, sent as a Decide when the request awaits an
     /// Admission-stage decision on exactly it.
     decision: Option<Grants>,
+    /// The source tree whose blobs the host's `Need` asks for, when the input is a manifest.
+    source: Option<Source>,
 }
 
 impl<'a> Exchange<'a> {
@@ -649,6 +578,7 @@ impl<'a> Exchange<'a> {
             upload,
             approvals,
             decision: None,
+            source: None,
         }
     }
 
@@ -680,6 +610,8 @@ impl<'a> Exchange<'a> {
         out.lock().unwrap().send(ask)?;
         let mut pump: Option<Pump> = None;
         let mut decided = matches!(ask, Ask::Decide(..));
+        // The blob digests the host's `Need` parts named so far, for a source input.
+        let mut blobs: Vec<[u8; 32]> = Vec::new();
         let lost = |command: &str, d: &[u8]| {
             eprintln!("{command}: outcome unknown: request {}", hex(d));
             Ok(Some(UNAVAILABLE))
@@ -690,6 +622,8 @@ impl<'a> Exchange<'a> {
                 Ok(None) | Err(_) => break lost(self.command, &self.d),
             };
             match answer {
+                // A source's blobs follow the host's Need, not its AwaitInput.
+                Answer::State(_, _, _, Phase::AwaitInput(_)) if self.source.is_some() => {}
                 Answer::State(_, _, _, Phase::AwaitInput(a)) if pump.is_none() => {
                     let Some(upload) = &self.upload else {
                         break Err(format!(
@@ -700,9 +634,53 @@ impl<'a> Exchange<'a> {
                     };
                     pump = Some(Pump::start(upload, &self.d, a, out.clone())?);
                 }
+                Answer::Need(_, a, keys, last) if self.source.is_some() => {
+                    let mut objects = false;
+                    for key in keys {
+                        match key {
+                            Needed::Blob(digest) => blobs.push(digest),
+                            Needed::Object(_) => objects = true,
+                        }
+                    }
+                    if objects {
+                        break Err("the host asked a source upload for code objects".into());
+                    }
+                    if !last {
+                        continue;
+                    }
+                    let stream = match self.source.as_ref().unwrap().stream(&blobs) {
+                        Ok(stream) => stream,
+                        Err(why) => break Err(why),
+                    };
+                    // Nothing needed: the host admits from the blobs it holds.
+                    if stream.is_empty() {
+                        continue;
+                    }
+                    let mut connection = out.lock().unwrap();
+                    let sent = stream
+                        .chunks(CHUNK)
+                        .try_for_each(|chunk| {
+                            connection.send(&Ask::Data(self.d.clone(), a, chunk.to_vec()))
+                        })
+                        .and_then(|()| connection.send(&Ask::End(self.d.clone(), a)));
+                    if sent.is_err() {
+                        drop(connection);
+                        break lost(self.command, &self.d);
+                    }
+                }
                 Answer::Need(_, _, keys, last) => {
+                    let objects = keys
+                        .into_iter()
+                        .map(|key| match key {
+                            Needed::Object(key) => Ok(key),
+                            Needed::Blob(_) => Err(()),
+                        })
+                        .collect::<Result<Vec<_>, ()>>();
+                    let Ok(objects) = objects else {
+                        break Err("the host asked a recipe upload for source blobs".into());
+                    };
                     if let Some(p) = &mut pump
-                        && p.need(keys, last).is_err()
+                        && p.need(objects, last).is_err()
                     {
                         break Err("the local upload ended before the host's Need".into());
                     }
@@ -783,6 +761,8 @@ impl<'a> Exchange<'a> {
 
     /// The display must name exactly the submitted recipe's Foreign bindings, and Exec
     /// lines only when the operator approved Exec requests.
+    /// A source's H is compiled by the host, which the CLI cannot recompute, so a source's
+    /// display is shown unchecked; the host still admits only the approvals sent.
     fn check_display(&self, root: &[u8], text: &str) -> Result<(), Error> {
         let Some(upload) = &self.upload else {
             return Ok(());

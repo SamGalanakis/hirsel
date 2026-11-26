@@ -610,7 +610,8 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     );
 
     let green_tree = tree("grants = [\"Tasks\"]\ndirs = [\"data\"]\n", green);
-    let digest = sha2::Sha256::digest(&green_tree).to_vec();
+    // The gate names the tree by its manifest's digest, which is what the operator sent.
+    let digest = sha2::Sha256::digest(Tree::decode(&green_tree).unwrap().manifest()).to_vec();
     for pass in ["first", "cached"] {
         let answered = admit(&mut rig, &green_tree, true);
         assert!(
@@ -635,5 +636,42 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
             .join("hirsel/core-packages/test-results")
             .exists(),
         "the gate wrote the user's pass cache"
+    );
+}
+
+/// A group links only the package roots its registration names (launch.md "Package roots
+/// per group"): the launcher's package store is shared by every group, so a lock that pins
+/// a root outside the group's list is Invalid before anything compiles, naming the
+/// package; a root in the list, or a lock that pins none, passes.
+#[test]
+fn source_links_only_its_groups_package_roots() {
+    let root = |byte: u8| format!("sha256:{}", format!("{byte:02x}").repeat(32));
+    let lock = |pinned: &str| {
+        format!(
+            "# hirsel.lock: written by hirsel; do not edit.\nversion = 1\n\n[[package]]\nid = \"app@1\"\nsource = \"member:.\"\nedges = [\"json@1\"]\n\n[[package]]\nid = \"json@1\"\nroot = \"{pinned}\"\nsource = \"archive:vendor/json.hpkg\"\nedges = []\n"
+        )
+    };
+    let tree = |lock: &str| Tree {
+        package: ".".into(),
+        files: vec![("hirsel.lock".into(), lock.as_bytes().to_vec())],
+        ..Tree::default()
+    };
+    let allowed =
+        |tree: &Tree, packages: &[[u8; 32]]| super::admit::lock_roots_allowed(tree, packages);
+    let pinned = tree(&lock(&root(0xab)));
+    assert!(
+        matches!(allowed(&pinned, &[[0xcd; 32]]), Err(Failure::Invalid(text))
+            if text.contains("json@1") && text.contains(&root(0xab))),
+        "a root outside the group's list was linked"
+    );
+    assert_eq!(allowed(&pinned, &[[0xcd; 32], [0xab; 32]]), Ok(()));
+    let unpinned = tree("# hirsel.lock: written by hirsel; do not edit.\nversion = 1\n");
+    assert_eq!(allowed(&unpinned, &[]), Ok(()));
+    assert!(
+        matches!(
+            allowed(&tree("version = 2\n"), &[]),
+            Err(Failure::Invalid(_))
+        ),
+        "an unreadable lock was not refused"
     );
 }

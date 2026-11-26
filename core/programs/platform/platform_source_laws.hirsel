@@ -60,15 +60,205 @@ fn gated_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     Ok(())
 }
 
-// A source input: a tree of no files publishing with `grant`.
+// A source input: a manifest of no files publishing with `grant`.
 fn source_of(grant: String) -> operator.Input {
     let mut grants: List[String] = list.new()
     list.push(mut grants, string.from(grant))
-    let tree = launcher.Tree(package: ".", grants: take grants, dirs: list.new(), files: list.new(), required_entries: list.new())
-    let codec: std.codec.Codec[launcher.Tree] = std.codec.of()
+    manifest_input(take grants, list.new())
+}
+
+// A source input whose manifest names `files`, in path order, by digest and length.
+fn manifest_input(take grants: List[String], files: List[(String, Bytes)]) -> operator.Input {
+    let mut named: List[launcher.ManifestFile] = list.new()
+    for (path, content) in files {
+        list.push(mut named, launcher.ManifestFile(path: string.from(path), digest: digest_of(content), len: list.len(content)))
+    }
+    let m = launcher.Manifest(package: ".", grants: take grants, dirs: list.new(), required_entries: list.new(), files: take named)
+    let codec: std.codec.Codec[launcher.Manifest] = std.codec.of()
     let mut out: Bytes = list.new()
-    let _ = std.codec.encode(codec, tree, mut out)
+    let _ = std.codec.encode(codec, m, mut out)
     SourceInput(take out)
+}
+
+fn file(path: String, content: Bytes) -> (String, Bytes) {
+    (string.from(path), clone(content))
+}
+
+// The blob digests connection `conn` was asked for, over every Need part, and whether the
+// last part came.
+fn needed_on(r: Rig, conn: u64) -> (List[Bytes], bool) {
+    let mut keys: List[Bytes] = list.new()
+    let mut done = false
+    for x in got_on(r, conn) {
+        if let NeedAnswer(_, _, wanted, is_last) = x {
+            for w in wanted {
+                if let BlobKey(k) = w {
+                    list.push(mut keys, clone(k))
+                }
+            }
+            done = is_last
+        }
+    }
+    (keys, done)
+}
+
+// The tree the latest Admit carried, if it carried a source.
+fn admitted_tree(r: Rig) -> Option[launcher.Tree] {
+    let mut out: Option[launcher.Tree] = None
+    for q in r.asked {
+        if let Admit(_, _, Source(b, _), _) = q {
+            out = launcher.tree_of(b)
+        }
+    }
+    out
+}
+
+// Sends `chunk` and then, when `end`, EndInput for the rig's latest request.
+fn upload(mut r: Rig, chunk: Bytes, end: bool) waits {
+    let conn = r.conn
+    let d: Bytes = clone(r.req)
+    let a = r.a
+    if list.len(chunk) > 0u64 {
+        send(mut r, conn, DataAsk(clone(d), a, clone(chunk)))
+    }
+    if end {
+        send(mut r, conn, EndAsk(clone(d), a))
+    }
+}
+
+// The rig's admitted source deploy goes through to Installed, as `prepared` drives NEW.
+fn install_admitted(mut r: Rig, old: launcher.Child) waits {
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Admitted(r.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), ""))
+    feed(mut r, take events)
+    assembled_new(mut r)
+    let a = r.a
+    helper_answers(mut r, helper_child(old, DescribeMode(a)), describe_answer())
+    helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
+    old_says(mut r, old, PlaceExported(1u64, "export-1"))
+    helper_answers(mut r, helper_child(old, PrepareMode(a, "export-1", list.new())), trigger_answer())
+    let go = apply(mut r, Got(Placed(clone(old), PlaceImported(image_two(), runner.ImportedMigration(digest: list.new(), changes: list.new())))))
+    pump(mut r, take go)
+    answer(mut r, old, PlaceInstalled(2u64, true))
+}
+
+fn incarnation_of(r: Rig) -> u64 waits {
+    match group_row(r.h, "g") {
+        Ok(Some(g)) => g.incarnation,
+        _ => fail("no group g"),
+    }
+}
+
+fn both_bytes(a: Bytes, b: Bytes) -> Bytes {
+    let mut out: Bytes = clone(a)
+    list.append(mut out, b)
+    out
+}
+
+// `source_by_content` (launch.md "Source by content"): a Begin names its files by digest,
+// and the host asks only for the blobs the group's set lacks, once per digest; an empty
+// file is never asked for. The blobs may cross Data frames; the Admit carries the tree
+// assembled from them. Once the source is installed, a second Begin of the unchanged tree
+// is asked for nothing and admits at once.
+@test
+fn source_by_content(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Trusted)
+    let old = last(r, "g")
+    let a_bytes = bytes_of(3u64, 97u8)
+    let b_bytes = bytes_of(2u64, 98u8)
+    let mut files: List[(String, Bytes)] = list.new()
+    list.push(mut files, file("a.hirsel", a_bytes))
+    list.push(mut files, file("b/c.hirsel", b_bytes))
+    list.push(mut files, file("b/d.hirsel", a_bytes))
+    list.push(mut files, file("e.hirsel", list.new()))
+    let input = manifest_input(list.new(), files)
+    let first = begin_with(mut r, request_id(61u64), input)
+    let (keys, done) = needed_on(r, first)
+    expect(done && list.len(keys) == 2u64 && keys[0u64] == digest_of(a_bytes) && keys[1u64] == digest_of(b_bytes), "content: the first Begin was not asked for each lacking digest once, in manifest order")
+    expect(admits(r) == 0u64, "content: the host admitted before the blobs arrived")
+    let both = both_bytes(a_bytes, b_bytes)
+    upload(mut r, list.slice(both, 0u64, 2u64), false)
+    upload(mut r, list.slice(both, 2u64, 5u64), true)
+    expect(admits(r) == 1u64, "content: the received source was not sent to Admit")
+    let Some(tree) = admitted_tree(r) else {
+        return fail("content: the Admit carried no tree")
+    }
+    let mut contents: List[Bytes] = list.new()
+    for f in tree.files {
+        list.push(mut contents, clone(f.content))
+    }
+    expect(list.len(contents) == 4u64 && contents[0u64] == a_bytes && contents[1u64] == b_bytes && contents[2u64] == a_bytes && list.len(contents[3u64]) == 0u64, "content: the assembled tree does not hold the received blobs at their paths")
+    install_admitted(mut r, old)
+    expect(is_installed(phase_on(r, first)), "content: the source deploy was not Installed")
+    let second = begin_with(mut r, request_id(62u64), input)
+    let (again, last_came) = needed_on(r, second)
+    expect(last_came && list.len(again) == 0u64 && admits(r) == 2u64, "content: a second Begin of the unchanged tree was asked for blobs")
+    unplug(mut r)
+    Ok(())
+}
+
+// `source_blob_checked` (launch.md "Source by content"): each blob is hashed when its last
+// byte arrives. Bytes that do not match the digest fail the request Invalid naming the path,
+// a byte past the last needed blob fails it the same way, and an input that ends within a
+// blob is Invalid; none is sent to Admit.
+@test
+fn source_blob_checked(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Trusted)
+    let mut files: List[(String, Bytes)] = list.new()
+    list.push(mut files, file("a.hirsel", bytes_of(2u64, 97u8)))
+    let input = manifest_input(list.new(), files)
+    let _ = begin_with(mut r, request_id(63u64), input)
+    upload(mut r, bytes_of(2u64, 98u8), true)
+    expect(phase_failed(status_of(mut r, request_id(63u64)), InvalidClass, "the bytes sent for a.hirsel do not match its digest") && admits(r) == 0u64, "checked: a blob that does not match its digest was not Invalid")
+    let _ = begin_with(mut r, request_id(64u64), input)
+    upload(mut r, bytes_of(3u64, 97u8), true)
+    expect(phase_failed(status_of(mut r, request_id(64u64)), InvalidClass, "a byte follows the last needed blob, a.hirsel") && admits(r) == 0u64, "checked: a byte past the last blob was not Invalid")
+    let _ = begin_with(mut r, request_id(65u64), input)
+    upload(mut r, bytes_of(1u64, 97u8), true)
+    expect(phase_failed(status_of(mut r, request_id(65u64)), InvalidClass, "the input ended within a.hirsel") && admits(r) == 0u64, "checked: a short input was not Invalid")
+    expect(list.len(blob_keys(r.h, incarnation_of(r))) == 0u64, "checked: a failed request left blobs behind")
+    unplug(mut r)
+    Ok(())
+}
+
+// `source_blobs_rooted_across_crash` (launch.md "Source by content", catalog crash law): a
+// blob is committed with its request unfinished, so it is rooted from the transaction that
+// writes it. After a crash between Data and Installed the blob is still there and still
+// rooted; when the request then fails, its own blob goes in that transaction while the
+// installed source's blobs, including one the failed request also named, stay.
+@test
+fn source_blobs_rooted_across_crash(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Trusted)
+    let old = last(r, "g")
+    let a_bytes = bytes_of(3u64, 97u8)
+    let mut installed: List[(String, Bytes)] = list.new()
+    list.push(mut installed, file("a.hirsel", a_bytes))
+    let _ = begin_with(mut r, request_id(66u64), manifest_input(list.new(), installed))
+    upload(mut r, a_bytes, true)
+    install_admitted(mut r, old)
+    let inc = incarnation_of(r)
+    expect(list.len(blob_keys(r.h, inc)) == 1u64, "crash: the installed source's blob was not kept")
+    let d_bytes = bytes_of(4u64, 100u8)
+    let e_bytes = bytes_of(4u64, 101u8)
+    let mut next: List[(String, Bytes)] = list.new()
+    list.push(mut next, file("a.hirsel", a_bytes))
+    list.push(mut next, file("d.hirsel", d_bytes))
+    list.push(mut next, file("e.hirsel", e_bytes))
+    let input = manifest_input(list.new(), next)
+    let pending = request_id(67u64)
+    let conn = begin_with(mut r, pending, input)
+    let (keys, _) = needed_on(r, conn)
+    expect(list.len(keys) == 2u64, "crash: the second Begin was asked for a blob the set holds")
+    upload(mut r, d_bytes, false)
+    let mut b = restart(take r, 4u64)
+    expect(list.len(blob_keys(b.h, inc)) == 2u64, "crash: a received blob was lost or swept while its request was unfinished")
+    b.now.wall_ms += ADMISSION_MS + 1u64
+    let late = begin_with(mut b, pending, input)
+    expect(is_failed(phase_on(b, late), InvalidClass), "crash: the request did not fail past its deadline")
+    let left = blob_keys(b.h, inc)
+    expect(list.len(left) == 1u64 && list.slice(left[0u64], 8u64, 40u64) == digest_of(a_bytes), "crash: the failed request's blob outlived it, or the installed source's blob was swept")
+    unplug(mut b)
+    Ok(())
 }
 
 fn phase_failed(p: Option[operator.Phase], class: operator.Class, detail: String) -> bool {

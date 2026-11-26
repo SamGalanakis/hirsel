@@ -16,7 +16,8 @@ pub(crate) enum Input {
 }
 
 /// The host's policy for one admission: whether the image records, the Foreign and Exec
-/// approvals, the group's working directory, and the assembly the deploy would replace.
+/// approvals, the group's working directory, the assembly the deploy would replace, and the
+/// package roots the group's source may link (launch.md "Package roots per group").
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Approvals {
     pub(crate) recording: bool,
@@ -24,6 +25,7 @@ pub(crate) struct Approvals {
     pub(crate) exec: Vec<String>,
     pub(crate) workdir: String,
     pub(crate) old: Option<Vec<u8>>,
+    pub(crate) packages: Vec<[u8; 32]>,
 }
 
 /// What the host compares before `Assemble`: the new and old root limits, the grant diff

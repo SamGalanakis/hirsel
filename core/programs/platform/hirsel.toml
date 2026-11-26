@@ -17,6 +17,7 @@ runner = { major = 1, path = "../runner" }
 "platform-admitted.hirsel" = "platform"
 "platform-groups.hirsel" = "platform"
 "platform-front.hirsel" = "platform"
+"platform-source.hirsel" = "platform"
 "launcher.hirsel" = "launcher"
 "operator.hirsel" = "operator"
 "platform_main.hirsel" = "platform_main"

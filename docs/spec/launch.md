@@ -1229,21 +1229,21 @@ answered `Error(Protocol)` and closes only that exchange.
 
 | Operator → host | Payload and rule |
 |---|---|
-| 0 Begin(D, G, input, foreign, exec, held, gate) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(tree), a `launcher.Tree`'s codec bytes; 2 Source(manifest), a source named by content ("Self-editing" below), is planned<!-- doc-ref: planned --> and replaces the inline tree on this wire. `gate` asks for the law gate ("Self-editing"); `true` with any input but a source is `Invalid`. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
+| 0 Begin(D, G, input, foreign, exec, held, gate) | `input` is 0 Attested(bytes), 1 Publication(H) or 2 Source(manifest), a `launcher.Manifest`'s codec bytes: a source named by content, whose blobs follow as Data ("Source by content" below). A manifest over 1 MiB, or one that breaks its rules, is `Invalid`. `gate` asks for the law gate ("Self-editing"); `true` with any input but a source is `Invalid`. `foreign` and `exec` are the sorted, duplicate-free Foreign definitions and Exec requests the operator approves. `held` is the deploy's `Fates { all: Option[HeldFate], entries: List[EntryFate] }`, with `HeldFate` tags 0 Release and 1 Cancel and `EntryFate(path, fate)`. It is the fate of each run the deploy holds (RUNNER-SPEC §14.6 "The activation fate"). `entries` that are not sorted by path or that repeat a path are `Invalid`. A source manifest whose files exceed 4 MiB in all is `Invalid`. For an untrusted author the host refuses, as `Denied` and before anything compiles, any input but a source, a source whose tree grants `Foreign` or `Exec`, any approved Foreign or Exec, and a recording group. |
 | 1 Data(D, A, bytes) | One nonempty chunk of the admission byte stream, only on the connection that owns D's upload under A. For a source it is the needed blobs' bytes ("Self-editing"). |
 | 2 EndInput(D, A) | Ends that stream. A publication needs neither Data nor EndInput. |
 | 3 Confirm(D, A, displayHash) | Confirms the exact display the client checked, printed and flushed: displayHash is SHA-256 over the display's UTF-8 bytes. Any other hash is `Error(Denied)`. |
 | 4 Status(D) | Returns State, or `Error(UnknownRequest)`. Does no work. |
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
-| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record), with `memory` an `Option[u64]` in bytes and `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
+| 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record, front, packages), with `memory` an `Option[u64]` in bytes, `record` an `Option` of (dir, retentionSeconds) and `packages` the group's package roots, each 32 bytes ("Package roots per group" below). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
 | 8 Decide(D, decision, fates, approve) | The operator's decision on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. `fates` settles the held runs the decision shows and is `Fates(all: None, entries: [])` when it shows none. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
 | 9 SetEditor(G, editor) | Planned ("Self-editing"). `editor` is `Option[EditorGrant]`, with `EditorGrant { uid: u32, named: List[String] }`: the editor's UID and the sorted, duplicate-free `Secret`, `Cred` and `Env` binding lines of G's approved recipe that the operator lets an editor's code use. It sets or clears G's editor in one transaction and answers `GroupInfo(G)`. It is refused `Denied` unless G passes "What editing delegates"; a UID equal to the operator's or the launcher's is `Invalid`; the platform host's group is `Denied`. Only this socket accepts it. |
 
 | Host → operator | Payload and rule |
 |---|---|
 | 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
-| 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 4 BlobKey(H)<!-- doc-ref: planned -->). |
+| 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 5 BlobKey(H), after the four object kinds' tags 0 to 4). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
 | 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red. Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Red is a gated source whose tests were not all green; its detail names each test that failed, stopped, did not start or had not ended by the admission deadline, with its outcome ("Self-editing"). A trigger report with a held run that has no fate, or with an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers, holds the request for a decision and fails nothing; the former class 13 `Unsettled` is deleted. Failed uses the same classes. An exchange error never changes another request's outcome. |
@@ -1602,7 +1602,8 @@ nothing:
    at the deadline is killed with its process group, and the verdict is `Red` with the one
    row `the tests had not all ended by the admission deadline`.
 5. **The binding.** `Admitted`'s summary gains `gate: Option[Green(tree, H, toolchain)]`.
-   Here `tree` is the SHA-256 of the assembled `launcher.Tree` codec bytes and `toolchain`
+   Here `tree` is the SHA-256 of the tree's `launcher.Manifest` codec bytes, the bytes the
+   operator's Begin carried ("Source by content"), and `toolchain`
    the launcher's toolchain identity, and the host records all three in D's row. H is the
    content of the package's sources and does not move with the toolchain, so the toolchain
    is recorded beside it. The tests and the publication are built from the same scratch files under
@@ -1795,6 +1796,44 @@ The launcher still receives a whole `launcher.Tree`, which the host assembles.
   the group's installed manifest, and its blobs go when no request names them.
 - **The request row** stores the manifest in place of the files. The rule that two trees fit
   one stored value no longer constrains `TREE_BYTES`.
+
+What the host does where the rules above leave a choice, and why:
+
+- **Limits.** `launcher.SOURCE_BYTES` is 4 MiB of file content, `MANIFEST_BYTES` 1 MiB of
+  manifest codec bytes and `TREE_BYTES` 5 MiB of assembled tree codec bytes, so a source at
+  its content limit still assembles. The CLI refuses an oversized tree before it connects.
+- **One key per digest.** Need names each digest once, at the first file that carries it,
+  in parts of at most 4096 keys; the same bytes under two paths are sent once. A file of
+  length 0 is never Needed, and its digest must be SHA-256 of no bytes, or the manifest is
+  `Invalid`. So an all-present or all-empty tree Needs nothing.
+- **Per-blob commit.** Each blob is stored in its own transaction as soon as its bytes hash
+  to its digest, and only while D is not terminal, so a lost upload resumes from the blobs
+  that arrived and a crash leaves no blob that no row could root. Blob keys are the group
+  incarnation as 8 big-endian bytes, then the digest.
+- **The installed manifest moves with the selected release.** The group row's `source` is
+  set in the transaction that selects NEW: at the first install, and in recovery's
+  selection of a new release. A non-source NEW sets it to none. Recovery that keeps OLD
+  leaves it. The sweep in D's terminal transaction keeps the installed manifest's digests
+  and the active unfinished request's, and deletes the rest of the group's blobs.
+- **Error texts.** A blob that does not hash to its digest fails `Invalid` with "the bytes
+  sent for P do not match its digest", an extra byte with "a byte follows the last needed
+  blob, P", and an EndInput inside a blob with "the input ended within P".
+- **The lock check comes first.** Publish reads the tree's `hirsel.lock` before it
+  compiles. A pinned root outside the group's `packages` fails `Invalid` with "ID ROOT is
+  not one of the group's package roots, and --frozen does not fetch (source S)", whether or
+  not the shared package store holds that root, so the answer tells no group what another
+  linked. A lock that is not a version 1 lock is `Invalid`. Register sets `packages`;
+  SetEditor does not exist yet and will carry its own list.
+- **Green names the manifest.** `Admitted.gate`'s `tree` is SHA-256 of the manifest's codec
+  bytes, the bytes the operator signed off on sending, not of the assembled tree.
+- **The CLI.** `hirsel register|deploy --source DIR [PACKAGE]` walks DIR: every regular
+  file by its `/`-joined UTF-8 path, skipping any component that starts with `.`, and
+  refusing a symbolic link or any other kind of file. PACKAGE is the package directory
+  within DIR, `.` by default. Every `--grant` becomes a tree grant, and its Foreign and
+  Exec ones are also the request's approvals. The CLI sends the manifest, then exactly the
+  blobs the host's Need names, in its order, in 256 KiB Data frames, and EndInput; nothing
+  when Need names none. A source's display is shown unchecked, since only the host knows
+  its H. `register --package-root sha256:HEX` adds one of the group's package roots.
 
 **Laws** (planned, platform host suite unless noted). Each names the bug it catches:
 

@@ -1,0 +1,390 @@
+// Module platform, source by content (launch.md "Source by content"): a source request names
+// its files by SHA-256 in a manifest, and the host receives only the blobs the group's set
+// lacks, checks each against its digest and assembles the launcher's tree from the set.
+// Blobs live in `blobs`, keyed by the group's incarnation and the digest; the group's
+// installed manifest and its one unfinished request root them, and the transaction that
+// ends a request deletes the rest.
+// The most keys in one Need part the host sends.
+const NEED_PART: u64 = 4096u64
+
+// A source request's blobs still on their way: the needed files, one per digest in manifest
+// order, the one being received and its bytes so far, and the admission they lead to.
+type Receive {
+    manifest: launcher.Manifest,
+    wanted: List[launcher.ManifestFile],
+    at: u64,
+    got: Bytes,
+    gate: bool,
+    foreign: List[String],
+    exec: List[String],
+    approved: launcher.Grants,
+}
+
+fn digest_of(b: Bytes) -> Bytes {
+    let digest = sha256.hash(b)
+    let mut out: Bytes = list.with_capacity(32u64)
+    for i in 0u64 .. 32u64 {
+        list.push(mut out, digest[i])
+    }
+    out
+}
+
+// A blob's key: the group's incarnation, 8 bytes big-endian, then the 32-byte digest. Every
+// key has 40 bytes, so one group's blobs are one range.
+fn blob_key(incarnation: u64, digest: Bytes) -> Bytes {
+    let mut k: Bytes = list.with_capacity(40u64)
+    let mut i = 8u64
+    while i > 0u64 {
+        i -= 1u64
+        list.push(mut k, int.narrow((incarnation >> (8u64 * i)) & 255u64))
+    }
+    list.append(mut k, digest)
+    k
+}
+
+fn blob_bound(incarnation: u64, fill: u8) -> Bytes {
+    let mut digest: Bytes = list.with_capacity(32u64)
+    for _ in 0u64 .. 32u64 {
+        list.push(mut digest, fill)
+    }
+    blob_key(incarnation, digest)
+}
+
+// The manifest a recorded source input names; none for another input.
+fn manifest_in(input: operator.Input) -> Option[launcher.Manifest] {
+    match input {
+        SourceInput(b) => launcher.manifest_of(b),
+        _ => None,
+    }
+}
+
+// The launcher input an attested or publication input relays.
+fn relayed_input(input: operator.Input) -> Option[launcher.Input] {
+    match input {
+        AttestedInput(r) => Some(Attested(clone(r))),
+        PublicationInput(r) => Some(Publication(clone(r))),
+        SourceInput(_) => None,
+    }
+}
+
+// Whether a Begin's `gate` fits its input: only a source can be gated.
+fn gate_fits(input: operator.Input, gate: bool) -> bool {
+    match input {
+        SourceInput(_) => true,
+        _ => !gate,
+    }
+}
+
+// The files of manifest m whose bytes the group's blob set lacks, one per digest, in
+// manifest order. An empty file is never needed: its bytes are known.
+fn lacking(h: Host, incarnation: u64, m: launcher.Manifest) -> Result[List[launcher.ManifestFile], Refused] waits {
+    let read_handle = result.unwrap(store.reader(h.db, 0u64))
+    let s = store.snapshot(h.db)
+    let mut seen: Map[Bytes, ()] = map.new()
+    let mut out: List[launcher.ManifestFile] = list.new()
+    for f in m.files {
+        if f.len == 0u64 {
+            continue
+        }
+        if let Some(_) = map.get(seen, f.digest) {
+            continue
+        }
+        map.insert(mut seen, clone(f.digest), ())
+        if is_none(st(store.get(read_handle, s, h.t.blobs, blob_key(incarnation, f.digest)))?) {
+            list.push(mut out, clone(f))
+        }
+    }
+    Ok(out)
+}
+
+// The launcher tree manifest m assembles from the group's blob set, in manifest order, or
+// the class and text that fail its request.
+fn assembled_tree(h: Host, incarnation: u64, m: launcher.Manifest) -> Result[Bytes, (operator.Class, String)] waits {
+    let read_handle = result.unwrap(store.reader(h.db, 0u64))
+    let s = store.snapshot(h.db)
+    let mut files: List[launcher.SourceFile] = list.new()
+    for f in m.files {
+        let mut content: Bytes = list.new()
+        if f.len > 0u64 {
+            match store.get(read_handle, s, h.t.blobs, blob_key(incarnation, f.digest)) {
+                Ok(Some(b)) => {
+                    content = b
+                },
+                Ok(None) => return Error((StoreClass, "a blob of the source left the group's set")),
+                Error(_) => return Error((StoreClass, "the catalog could not be read")),
+            }
+        }
+        if list.len(content) != f.len {
+            let mut why = string.from("the length of ")
+            string.push(mut why, f.path)
+            string.push(mut why, " does not match its digest")
+            return Error((InvalidClass, take why))
+        }
+        list.push(mut files, launcher.SourceFile(path: string.from(f.path), content: take content))
+    }
+    let tree = launcher.Tree(package: string.from(m.package), grants: clone(m.grants), dirs: clone(m.dirs), files: take files, required_entries: clone(m.required_entries))
+    let codec: std.codec.Codec[launcher.Tree] = std.codec.of()
+    let mut out: Bytes = list.new()
+    if let Error(_) = std.codec.encode(codec, tree, mut out) {
+        return Error((InvalidClass, "the source does not assemble into a tree"))
+    }
+    Ok(out)
+}
+
+// Opens request d's admission of `requested` under attempt `a`. A source first answers its
+// owner `Need` with the blobs the group's set lacks, in parts, and receives them; with none
+// lacking it admits at once, from the set.
+fn open_input(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, requested: operator.Input, gate: bool, foreign: List[String], exec: List[String], added: launcher.Grants, now: Now, mut out: List[launcher.Request]) waits {
+    if let Some(input) = relayed_input(requested) {
+        admit_request(mut h, name, g, d, a, input, foreign, exec, added, now, mut out)
+        return
+    }
+    let Some(m) = manifest_in(requested) else {
+        fail_request(mut h, d, InvalidClass, "the source is not a manifest within its limits")
+        return
+    }
+    let wanted = match lacking(h, g.incarnation, m) {
+        Ok(w) => w,
+        Error(e) => {
+            fail_request(mut h, d, class_of(e), refused_text(e))
+            return
+        },
+    }
+    if let Some(conn) = owner_of(h, d) {
+        let n = list.len(wanted)
+        let mut at = 0u64
+        loop {
+            let end = order.min(at + NEED_PART, n)
+            let mut keys: List[launcher.Wanted] = list.new()
+            while at < end {
+                list.push(mut keys, BlobKey(clone(wanted[at].digest)))
+                at += 1u64
+            }
+            say(mut h, conn, NeedAnswer(clone(d), a, take keys, at == n), false)
+            if at == n {
+                break
+            }
+        }
+    }
+    if list.len(wanted) == 0u64 {
+        admit_source(mut h, name, g, d, a, m, gate, foreign, exec, added, now, mut out)
+        return
+    }
+    let mut v = vol_read(h, name)
+    let receive = Receive(manifest: take m, wanted: take wanted, at: 0u64, got: list.new(), gate: gate, foreign: clone(foreign), exec: clone(exec), approved: clone(added))
+    v.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(added), stage: Receiving, summary: None, ended: false, genesis: registering(h, name), receive: Some(take receive)))
+    vol_put(mut h, name, take v)
+}
+
+// Admits request d's source, assembled from the group's set.
+fn admit_source(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.Attempt, m: launcher.Manifest, gate: bool, foreign: List[String], exec: List[String], added: launcher.Grants, now: Now, mut out: List[launcher.Request]) waits {
+    match assembled_tree(h, g.incarnation, m) {
+        Ok(tree) => admit_request(mut h, name, g, d, a, Source(take tree, gate), foreign, exec, added, now, mut out),
+        Error((class, why)) => fail_request(mut h, d, class, why),
+    }
+}
+
+// Whether group `name`'s admission is receiving a source's blobs.
+fn receiving(h: Host, name: String) -> bool {
+    match vol_read(h, name).admit {
+        Some(adm) => !is_none(adm.receive),
+        None => false,
+    }
+}
+
+// Ends the receiving admission of request d and fails it.
+fn refuse_blobs(mut h: Host, name: String, d: Bytes, why: String) waits {
+    let mut v = vol_read(h, name)
+    v.admit = None
+    vol_put(mut h, name, take v)
+    fail_request(mut h, d, InvalidClass, why)
+}
+
+fn path_text(head: String, path: String, tail: String) -> String {
+    let mut out = string.from(head)
+    string.push(mut out, path)
+    string.push(mut out, tail)
+    out
+}
+
+// Stores one received blob, if request d is still unfinished: d's row then names it, so
+// the blob is rooted from the transaction that writes it.
+fn keep_blob(mut h: Host, d: Bytes, incarnation: u64, digest: Bytes, take blob: Bytes) -> Result[(), Refused] waits {
+    let key = blob_key(incarnation, digest)
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(key), store.copy_env(blob), store.copy_env(t)), fn(mut tx, call_env) -> Result[(), Refused] {
+            let Some(r) = st(store.fetch(tx, call_env.3 .requests, call_env.0))? else {
+                return Error(Missing("request"))
+            }
+            if let Some(_) = r.done {
+                return Error(Missing("unfinished request"))
+            }
+            st(store.put(mut tx, call_env.3 .blobs, call_env.1, call_env.2))
+        })
+    }
+    decided(mut h, take made)
+}
+
+// Data for request d's source: the needed blobs back to back in Need order, each exactly
+// its manifest length. Each blob is hashed when complete and stored when it matches; a
+// mismatch or a byte past the last fails d Invalid, naming the path.
+fn received(mut h: Host, name: String, d: Bytes, chunk: Bytes) waits {
+    let mut v = vol_read(h, name)
+    let Some(take adm) = replace(mut v.admit, None) else {
+        return
+    }
+    let mut x = take adm
+    let Some(take rc) = replace(mut x.receive, None) else {
+        return
+    }
+    let mut r = take rc
+    let incarnation = x.incarnation
+    let n = list.len(chunk)
+    let mut pos = 0u64
+    while pos < n {
+        if r.at >= list.len(r.wanted) {
+            let final_path = string.from(r.wanted[list.len(r.wanted) - 1u64].path)
+            refuse_blobs(mut h, name, d, path_text("a byte follows the last needed blob, ", final_path, ""))
+            return
+        }
+        let f: launcher.ManifestFile = clone(r.wanted[r.at])
+        let taken = order.min(f.len - list.len(r.got), n - pos)
+        list.append(mut r.got, list.slice(chunk, pos, pos + taken))
+        pos += taken
+        if list.len(r.got) == f.len {
+            let blob = replace(mut r.got, list.new())
+            if digest_of(blob) != f.digest {
+                refuse_blobs(mut h, name, d, path_text("the bytes sent for ", f.path, " do not match its digest"))
+                return
+            }
+            if let Error(e) = keep_blob(mut h, d, incarnation, f.digest, take blob) {
+                let mut w = vol_read(h, name)
+                w.admit = None
+                vol_put(mut h, name, take w)
+                fail_request(mut h, d, class_of(e), refused_text(e))
+                return
+            }
+            r.at += 1u64
+        }
+    }
+    x.receive = Some(take r)
+    v.admit = Some(take x)
+    vol_put(mut h, name, take v)
+}
+
+// EndInput for request d's source: every needed blob arrived, so the tree is assembled from
+// the set and admitted; a short input fails d Invalid, naming the file it stopped in.
+fn end_received(mut h: Host, name: String, d: Bytes, now: Now, mut out: List[launcher.Request]) waits {
+    let Some(adm) = vol_read(h, name).admit else {
+        return
+    }
+    let Some(r) = adm.receive else {
+        return
+    }
+    if r.at < list.len(r.wanted) {
+        refuse_blobs(mut h, name, d, path_text("the input ended within ", r.wanted[r.at].path, ""))
+        return
+    }
+    let g = match group_row(h, name) {
+        Ok(Some(g)) if g.incarnation == adm.incarnation => g,
+        _ => {
+            refuse_blobs(mut h, name, d, "the group was removed")
+            return
+        },
+    }
+    admit_source(mut h, name, g, d, adm.attempt, r.manifest, r.gate, r.foreign, r.exec, r.approved, now, mut out)
+}
+
+// The digests that request d's manifest names, added to `kept`.
+fn keep_named(mut kept: Map[Bytes, ()], take input: Option[Bytes]) {
+    let Some(b) = input else {
+        return
+    }
+    let Some(m) = launcher.manifest_of(b) else {
+        return
+    }
+    for f in m.files {
+        map.insert(mut kept, clone(f.digest), ())
+    }
+}
+
+// Deletes every blob of the group's incarnation whose digest `kept` lacks.
+fn sweep_blobs(mut tx: store.Tx, t: Tables, incarnation: u64, kept: Map[Bytes, ()]) -> Result[(), Refused] {
+    let mut gone: List[Bytes] = list.new()
+    {
+        let mut rows = store.range(tx, t.blobs, Included(blob_bound(incarnation, 0u8)), Included(blob_bound(incarnation, 255u8))) ?=> |e| Store(take e)
+        while let Some((k, _)) = st(store.next_in(tx, mut rows))? {
+            let mut digest: Bytes = list.with_capacity(32u64)
+            list.append(mut digest, list.slice(k, 8u64, 40u64))
+            let known = match map.get(kept, digest) {
+                Some(_) => true,
+                None => false,
+            }
+            if !known {
+                list.push(mut gone, clone(k))
+            }
+        }
+    }
+    for k in gone {
+        let _ = st(store.delete(mut tx, t.blobs, k))?
+    }
+    Ok(())
+}
+
+// The sweep of the transaction that ends a request of group `name`'s incarnation: a blob
+// stays while the group's installed manifest or its unfinished request names it.
+fn sweep_group_blobs(mut tx: store.Tx, t: Tables, name: String, incarnation: u64) -> Result[(), Refused] {
+    let mut kept: Map[Bytes, ()] = map.new()
+    if let Some(g) = st(store.fetch(tx, t.groups, name))? {
+        if g.incarnation == incarnation {
+            keep_named(mut kept, clone(g.source))
+        }
+    }
+    if let Some(other) = st(store.fetch(tx, t.active, name))? {
+        if let Some(r) = st(store.fetch(tx, t.requests, other))? {
+            if is_none(r.done) && r.group.incarnation == incarnation {
+                if let SourceInput(b) = r.input {
+                    keep_named(mut kept, Some(clone(b)))
+                }
+            }
+        }
+    }
+    sweep_blobs(mut tx, t, incarnation, kept)
+}
+
+// The manifest request d installs: its source's, or none for another input.
+fn installed_source(tx: store.Tx, t: Tables, d: Bytes) -> Result[Option[Bytes], Refused] {
+    let Some(r) = st(store.fetch(tx, t.requests, d))? else {
+        return Ok(None)
+    }
+    match r.input {
+        SourceInput(b) => Ok(Some(clone(b))),
+        _ => Ok(None),
+    }
+}
+
+// Every blob key of group incarnation `incarnation`, for the laws.
+fn blob_keys(h: Host, incarnation: u64) -> List[Bytes] waits {
+    let read_handle = result.unwrap(store.reader(h.db, 0u64))
+    let mut out: List[Bytes] = list.new()
+    let Ok(take scanned) = store.scan(read_handle, store.snapshot(h.db), h.t.blobs, Included(blob_bound(incarnation, 0u8)), Included(blob_bound(incarnation, 255u8))) else {
+        return out
+    }
+    let mut rows = take scanned
+    while let Ok(Some((k, _))) = store.next(read_handle, mut rows) {
+        list.push(mut out, clone(k))
+    }
+    out
+}
+
+// The input and approvals a recorded Begin or Register admits: the operator input, a Begin's
+// law gate, and the Foreign and Exec lines. Every repeated admission reads them here, so it
+// is gated exactly as the first.
+fn admission_ask(body: Bytes) -> Option[(operator.Input, bool, List[String], List[String])] {
+    match operator.decode_ask(body) {
+        Some(BeginAsk(_, _, input, foreign, exec, _, gate)) if gate_fits(input, gate) => Some((clone(input), gate, clone(foreign), clone(exec))),
+        Some(RegisterAsk(_, _, input, foreign, exec)) => Some((clone(input), false, clone(foreign), clone(exec))),
+        _ => None,
+    }
+}

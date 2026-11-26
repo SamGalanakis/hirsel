@@ -233,6 +233,17 @@ fn old_rows(bytes: &[u8]) -> Option<Rows> {
     Some(rows)
 }
 
+/// Each package a lock file pins to a content root, as `(id, root, source)`; `None` when
+/// the bytes are no version 1 lock.
+pub(crate) fn pinned_roots(bytes: &[u8]) -> Option<Vec<(String, Root, String)>> {
+    Some(
+        old_rows(bytes)?
+            .into_iter()
+            .filter_map(|(id, row)| Some((id.to_string(), row.root?, row.source)))
+            .collect(),
+    )
+}
+
 fn differences(old: &[u8], now: &Rows) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(old) = old_rows(old) {

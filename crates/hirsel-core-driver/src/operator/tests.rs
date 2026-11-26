@@ -147,12 +147,13 @@ fn operator_vectors() {
                         names: vec!["edge.example".into()],
                         forward: Forward::Stream,
                     }),
+                    packages: vec![[0xee; 32]],
                 }),
                 Input::Publication(vec![1]),
                 Vec::new(),
                 Vec::new(),
             ),
-            "07000000100000002121212121212121212121212121212101000000670100000074020000002f77000b0000003132372e302e302e313a39060000002f73746f726501000000001000000000000001000000060000002d2d706f727401000000060000002f74617065733c0000000000000001000000010000000c000000656467652e6578616d706c65010000000100000001000000010000000000000000",
+            "07000000100000002121212121212121212121212121212101000000670100000074020000002f77000b0000003132372e302e302e313a39060000002f73746f726501000000001000000000000001000000060000002d2d706f727401000000060000002f74617065733c0000000000000001000000010000000c000000656467652e6578616d706c65010000000100000020000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0100000001000000010000000000000000",
         ),
     ];
     let answers = [
@@ -236,13 +237,17 @@ fn operator_vectors() {
             Answer::Need(
                 d(),
                 attempt(),
-                vec![ObjectKey {
+                vec![Needed::Object(ObjectKey {
                     kind: ObjectKind::Group,
                     hash: ContentHash([0xaa; 32]),
-                }],
+                })],
                 true,
             ),
             "01000000100000002121212121212121212121212121212108070605040302011817161514131211010000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01",
+        ),
+        (
+            Answer::Need(d(), attempt(), vec![Needed::Blob([0xcc; 32])], false),
+            "01000000100000002121212121212121212121212121212108070605040302011817161514131211010000000500000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc00",
         ),
         (
             Answer::Display(d(), attempt(), vec![0xcc; 32], "foreign: x\n".into()),

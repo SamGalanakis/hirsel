@@ -95,12 +95,15 @@ mod options;
 use options::OPTIONS;
 #[path = "cli_coverage_options.rs"]
 mod cli_coverage_options;
+#[path = "cli_operator_options.rs"]
+mod cli_operator_options;
 #[path = "cli_package_options.rs"]
 mod cli_package_options;
 fn options() -> impl Iterator<Item = &'static OptionSpec> {
     cli_package_options::OPTIONS
         .iter()
         .chain(OPTIONS)
+        .chain(cli_operator_options::OPTIONS)
         .chain(cli_coverage_options::OPTIONS)
 }
 #[path = "cli_help.rs"]

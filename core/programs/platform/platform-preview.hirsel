@@ -145,7 +145,7 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: 
             return
         },
     }
-    let Some((input, foreign, exec)) = admission_ask(r.begin) else {
+    let Some((input, gate, foreign, exec)) = admission_ask(r.begin) else {
         fail_request(mut h, d, StoreClass, "the recorded request does not decode")
         return
     }
@@ -201,7 +201,7 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: 
             return
         },
     }
-    admit_request(mut h, name, g, d, a, input, foreign, exec, diff, now, mut out)
+    open_input(mut h, name, g, d, a, input, gate, foreign, exec, diff, now, mut out)
 }
 
 // The group's unresolved deploy row, if it runs request d.
@@ -318,10 +318,10 @@ fn deploy_required_entries(h: Host, d: Bytes) -> Result[List[launcher.RequiredEn
         return Error(Missing("deploy request"))
     }
     if let SourceInput(b) = row.input {
-        let Some(tree) = launcher.tree_of(b) else {
-            return Error(Missing("deploy source tree"))
+        let Some(m) = launcher.manifest_of(b) else {
+            return Error(Missing("deploy source manifest"))
         }
-        return Ok(clone(tree.required_entries))
+        return Ok(clone(m.required_entries))
     }
     Ok(list.new())
 }

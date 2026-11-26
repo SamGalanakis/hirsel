@@ -129,6 +129,8 @@ pub enum OptionId {
     HeldEntry,
     HostMemory,
     TapeRetention,
+    SourceDir,
+    PackageRoot,
     GroupName,
     Tenant,
     GroupStore,

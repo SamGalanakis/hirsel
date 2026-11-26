@@ -37,6 +37,13 @@ pub type GroupRow: codec + send {
     args: List[String],
     // Whether its serving starts are recorded, and where.
     record: Option[operator.Record],
+    // The package roots its source may link, set by Register (launch.md "Package roots per
+    // group").
+    packages: List[Bytes],
+    // The manifest of the installed release's source; none when it was installed from an
+    // attested or publication input. It roots the group's blobs (launch.md "Source by
+    // content").
+    source: Option[Bytes],
 }
 
 // Which of an Undecided deploy's two recorded pairs the group's next probe opens: NEW's
@@ -212,6 +219,8 @@ pub opaque type Tables {
     config: store.Table[u64, Config],
     meta: store.Table[u64, Meta],
     retired: store.Table[String, Retired],
+    // Source blobs by group incarnation and SHA-256 (launch.md "Source by content").
+    blobs: store.Table[Bytes, Bytes],
 }
 
 type Phase = Requested | Started | Ready(u64)
@@ -288,7 +297,8 @@ type Prep {
 // payload, or the host's own policy refusal.
 // Uploading counts the keys the verifier has asked for and whether its last Need came:
 // the relay of each chunk reads this stage, so it holds no list that grows with the closure.
-pub type AdmitStage: codec + send = Uploading(u64, bool) | Confirming(String) | Assembling | Unadmitted(launcher.Failure) | Rejected(String)
+// Receiving is a source's blobs on their way to the host, before the launcher has the input.
+pub type AdmitStage: codec + send = Uploading(u64, bool) | Confirming(String) | Assembling | Unadmitted(launcher.Failure) | Rejected(String) | Receiving
 
 type Admitting {
     // The operator request this admission runs for.
@@ -304,6 +314,8 @@ type Admitting {
     ended: bool,
     // The admission is a registering group's first release, with no OLD.
     genesis: bool,
+    // A source's blobs still being received, while the stage is Receiving.
+    receive: Option[Receive],
 }
 
 type Vol {
@@ -406,6 +418,7 @@ pub fn declare_tables(mut d: store.Declare) -> Result[Tables, store.Error] {
         config: declared(mut d, "platform.config", std.codec.key_u64(), std.codec.of())?,
         meta: declared(mut d, "platform.meta", std.codec.key_u64(), std.codec.of())?,
         retired: declared(mut d, "platform.retired", std.codec.key_string(), std.codec.of())?,
+        blobs: declared(mut d, "platform.blobs", std.codec.key_bytes(), std.codec.of_bytes())?,
     ))
 }
 
@@ -1927,10 +1940,10 @@ fn start_admission(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher
         Some(_) => true,
         None => false,
     }
-    let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old)
+    let approvals = launcher.Approvals(recording: recording, foreign: clone(foreign), exec: clone(exec), workdir: string.from(g.workdir), old: take old, packages: clone(g.packages))
     list.push(mut out, Admit(group_of(name, g.incarnation), a, clone(input), take approvals))
     let mut w = vol_read(h, name)
-    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(0u64, false), summary: None, ended: complete, genesis: genesis))
+    w.admit = Some(Admitting(request: clone(d), attempt: a, incarnation: g.incarnation, approved: clone(approved), stage: Uploading(0u64, false), summary: None, ended: complete, genesis: genesis, receive: None))
     vol_put(mut h, name, take w)
 }
 
@@ -1947,7 +1960,7 @@ fn sorted_unique(xs: List[String]) -> bool {
 }
 
 // Why request d's admission cannot start now for group `name`, if it cannot.
-fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: launcher.Input, foreign: List[String], exec: List[String]) -> Option[(operator.Class, String)] waits {
+fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: operator.Input, foreign: List[String], exec: List[String]) -> Option[(operator.Class, String)] waits {
     if let Some(_) = g.retiring {
         return Some((UnknownGroupClass, "the group is retiring"))
     }
@@ -1956,17 +1969,17 @@ fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: launch
     }
     // Submitted source is checked here, before the launcher compiles it: its grants are
     // part of the recipe it publishes (launch.md "What an untrusted author submits").
-    let tree: Option[launcher.Tree] = match input {
-        Source(b, _) => {
-            let Some(t) = launcher.tree_of(b) else {
-                return Some((InvalidClass, "the source is not a tree within its byte limit"))
+    let manifest: Option[launcher.Manifest] = match input {
+        SourceInput(b) => {
+            let Some(m) = launcher.manifest_of(b) else {
+                return Some((InvalidClass, "the source is not a manifest within its limits"))
             }
-            Some(take t)
+            Some(take m)
         },
         _ => None,
     }
     if let Untrusted = g.author {
-        let Some(t) = tree else {
+        let Some(t) = manifest else {
             return Some((DeniedClass, "an untrusted author publishes source only, without Foreign or Exec grants"))
         }
         if list.len(foreign) > 0u64 || list.len(exec) > 0u64 {
@@ -2042,6 +2055,7 @@ fn admission_of(h: Host, name: String, d: Bytes) -> Option[Admitting] {
             Uploading(_, _) => Some(clone(adm)),
             Confirming(_) => Some(clone(adm)),
             Assembling => Some(clone(adm)),
+            Receiving => Some(clone(adm)),
             _ => None,
         },
         _ => None,
@@ -2107,9 +2121,13 @@ fn fresh_attempt(mut tx: store.Tx, t: Tables) -> Result[launcher.Attempt, Refuse
 }
 
 // Records request d's terminal phase and ends it as the group's active request.
+// The same transaction deletes every blob of the request's group that neither the installed
+// manifest nor an unfinished request names (launch.md "Source by content").
 fn finish_request(mut tx: store.Tx, t: Tables, name: String, d: Bytes, p: operator.Phase) -> Result[(), Refused] {
+    let mut incarnation: Option[u64] = None
     if let Some(found) = st(store.fetch(tx, t.requests, d))? {
         let mut r = found
+        incarnation = Some(r.group.incarnation)
         r.done = Some(clone(p))
         st(store.put(mut tx, t.requests, d, r))?
     }
@@ -2117,6 +2135,9 @@ fn finish_request(mut tx: store.Tx, t: Tables, name: String, d: Bytes, p: operat
         if x == d {
             let _ = st(store.delete(mut tx, t.active, name))?
         }
+    }
+    if let Some(i) = incarnation {
+        sweep_group_blobs(mut tx, t, name, i)?
     }
     Ok(())
 }
@@ -2216,7 +2237,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
         return
     }
-    let Some(input) = launcher_input(requested, gate) else {
+    if !gate_fits(requested, gate) {
         refuse(mut h, conn, InvalidClass, "the law gate runs only for a source input")
         return
     }
@@ -2251,7 +2272,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         refuse(mut h, conn, UnknownGroupClass, "the group is still registering")
         return
     }
-    if let Some((class, why)) = admission_refusal(h, g.name, row, d, input, foreign, exec) {
+    if let Some((class, why)) = admission_refusal(h, g.name, row, d, requested, foreign, exec) {
         refuse(mut h, conn, class, why)
         return
     }
@@ -2282,7 +2303,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
         },
     }
     map.insert(mut h.owners, clone(d), conn)
-    admit_request(mut h, g.name, row, d, a, input, foreign, exec, launcher.no_grants(), now, mut out)
+    open_input(mut h, g.name, row, d, a, requested, gate, foreign, exec, launcher.no_grants(), now, mut out)
 }
 
 // Wakes a cold group, then opens request d's admission; a wake that cannot start fails d.
@@ -2303,38 +2324,6 @@ fn admit_request(mut h: Host, name: String, g: GroupRow, d: Bytes, a: launcher.A
 // group").
 fn registering(h: Host, name: String) -> bool waits {
     is_none(wake_row(h, name))
-}
-
-// The launcher input that admits an operator input: a source carries whether its Begin asked
-// for the law gate. The gate with any other input is None, which a Begin refuses Invalid.
-fn launcher_input(input: operator.Input, gate: bool) -> Option[launcher.Input] {
-    match input {
-        AttestedInput(r) if !gate => Some(Attested(clone(r))),
-        PublicationInput(r) if !gate => Some(Publication(clone(r))),
-        SourceInput(b) => Some(Source(clone(b), gate)),
-        _ => None,
-    }
-}
-
-// The input and approvals a recorded Begin or Register admits: the launcher input, with a
-// Begin's law gate, and the Foreign and Exec lines. Every repeated admission reads them here,
-// so it is gated exactly as the first.
-fn admission_ask(body: Bytes) -> Option[(launcher.Input, List[String], List[String])] {
-    match operator.decode_ask(body) {
-        Some(BeginAsk(_, _, input, foreign, exec, _, gate)) => {
-            let Some(relayed) = launcher_input(input, gate) else {
-                return None
-            }
-            Some((take relayed, clone(foreign), clone(exec)))
-        },
-        Some(RegisterAsk(_, _, input, foreign, exec)) => {
-            let Some(relayed) = launcher_input(input, false) else {
-                return None
-            }
-            Some((take relayed, clone(foreign), clone(exec)))
-        },
-        _ => None,
-    }
 }
 
 // An identical Begin for a known D. While another connection owns it, this one gets the
@@ -2370,7 +2359,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         },
     }
-    let Some((input, foreign, exec)) = admission_ask(r.begin) else {
+    let Some((input, gate, foreign, exec)) = admission_ask(r.begin) else {
         fail_request(mut h, d, StoreClass, "the recorded request does not decode")
         return
     }
@@ -2400,7 +2389,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         },
     }
-    admit_request(mut h, name, g, d, a, input, foreign, exec, clone(r.approved), now, mut out)
+    open_input(mut h, name, g, d, a, input, gate, foreign, exec, clone(r.approved), now, mut out)
 }
 
 // The group of request d's upload under attempt `a`, when connection `conn` owns it and
@@ -2418,6 +2407,7 @@ fn upload_of(h: Host, conn: u64, d: Bytes, a: launcher.Attempt) -> Option[String
     }
     let uploading = match adm.stage {
         Uploading(_, _) => !adm.ended,
+        Receiving => true,
         _ => false,
     }
     if uploading && same_attempt(adm.attempt, a) {
@@ -2453,10 +2443,12 @@ pub fn asked(mut h: Host, conn: u64, body: Bytes, now: Now) -> List[launcher.Req
         DecideAsk(_, _, _, _) if !h.binds_sent => refuse(mut h, conn, BusyClass, "the host is reconciling with the launcher"),
         DecideAsk(d, decision, fates, approve) => decide(mut h, conn, d, decision, fates, approve, now, mut out),
         DataAsk(d, a, chunk) => match upload_of(h, conn, d, a) {
+            Some(name) if list.len(chunk) > 0u64 && receiving(h, name) => received(mut h, name, d, chunk),
             Some(_) if list.len(chunk) > 0u64 => list.push(mut out, AdmitData(a, clone(chunk))),
             _ => refuse(mut h, conn, ProtocolClass, "no open upload of this request and attempt on this connection"),
         },
         EndAsk(d, a) => match upload_of(h, conn, d, a) {
+            Some(name) if receiving(h, name) => end_received(mut h, name, d, now, mut out),
             Some(name) => {
                 let mut v = vol_read(h, name)
                 if let Some(take adm) = replace(mut v.admit, None) {
@@ -2556,13 +2548,18 @@ pub fn detach(mut h: Host, conn: u64) -> List[launcher.Request] waits {
         let Some(adm) = admission_of(h, name, d) else {
             continue
         }
+        // A source still receiving its blobs has no launcher attempt to release; the blobs
+        // that arrived stay rooted by the unfinished request.
         let missing = match adm.stage {
             Uploading(_, _) => !adm.ended,
             Confirming(_) => true,
+            Receiving => true,
             _ => false,
         }
         if missing {
-            list.push(mut out, Release(adm.attempt))
+            if is_none(adm.receive) {
+                list.push(mut out, Release(adm.attempt))
+            }
             let mut v = vol_read(h, name)
             v.admit = None
             vol_put(mut h, name, take v)
@@ -2693,7 +2690,7 @@ fn assembled(mut h: Host, a: launcher.Attempt, key: Bytes, digest: Bytes, fetch_
         },
         Error(e) => {
             let mut w = vol_read(h, name)
-            w.admit = Some(Admitting(request: clone(d.request), attempt: a, incarnation: d.incarnation, approved: clone(d.approved), stage: Rejected(refused_text(e)), summary: Some(clone(summary)), ended: true, genesis: false))
+            w.admit = Some(Admitting(request: clone(d.request), attempt: a, incarnation: d.incarnation, approved: clone(d.approved), stage: Rejected(refused_text(e)), summary: Some(clone(summary)), ended: true, genesis: false, receive: None))
             vol_put(mut h, name, take w)
             list.push(mut out, Release(a))
             fail_request(mut h, d.request, class_of(e), refused_text(e))
@@ -2722,6 +2719,7 @@ fn install_first(mut h: Host, name: String, d: Admitting, key: Bytes, fetch_ns: 
             let mut g = found
             g.assembly = clone(call_env.3)
             g.activation = 0u64
+            g.source = installed_source(tx, call_env.5, call_env.1 .request)?
             st(store.put(mut tx, call_env.5 .groups, call_env.4, g))?
             st(store.put(mut tx, call_env.5 .wake, call_env.4, WakeRow(wake: Clean(None), gen: 0u64)))?
             let report = operator.Report(fetch_ns: Some(call_env.2), assemble_ns: Some(call_env.0), pause: NotStarted, preview: operator.no_preview())
@@ -2747,10 +2745,6 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
         refuse(mut h, conn, ProtocolClass, "a request ID is 16 bytes")
         return
     }
-    let Some(input) = launcher_input(requested, false) else {
-        refuse(mut h, conn, InvalidClass, "a registration's input is not admissible")
-        return
-    }
     let canonical = operator.ask_bytes(ask)
     let found = match request_row(h, d) {
         Ok(f) => f,
@@ -2771,7 +2765,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
         refuse(mut h, conn, InvalidClass, "a registration names its group, tenant, listener and store")
         return
     }
-    if let Some((class, why)) = admission_refusal(h, spec.name, registered_row(spec, 0u64), d, input, foreign, exec) {
+    if let Some((class, why)) = admission_refusal(h, spec.name, registered_row(spec, 0u64), d, requested, foreign, exec) {
         refuse(mut h, conn, class, why)
         return
     }
@@ -2822,7 +2816,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
     }
     map.insert(mut h.owners, clone(d), conn)
     list.push(mut out, bind_request(spec.name, g))
-    start_admission(mut h, spec.name, g, d, a, input, foreign, exec, launcher.no_grants(), true, mut out)
+    open_input(mut h, spec.name, g, d, a, requested, false, foreign, exec, launcher.no_grants(), now, mut out)
 }
 
 // A registering group's catalog row: no assembly yet, activation 0.
@@ -2832,7 +2826,7 @@ fn registered_row(spec: operator.Registration, incarnation: u64) -> GroupRow {
     } else {
         Untrusted
     }
-    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, listen: string.from(spec.listen), front: clone(spec.front), store: string.from(spec.store), memory: spec.memory, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record))
+    GroupRow(tenant: string.from(spec.tenant), workdir: string.from(spec.workdir), author: author, listen: string.from(spec.listen), front: clone(spec.front), store: string.from(spec.store), memory: spec.memory, assembly: list.new(), activation: 0u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: incarnation, retiring: None, args: clone(spec.args), record: clone(spec.record), packages: clone(spec.packages), source: None)
 }
 
 // Whether a catalog group already holds store directory `path`.
@@ -3299,6 +3293,7 @@ fn drop_rows(mut tx: store.Tx, t: Tables, name: String, g: GroupRow, due: Option
         finish_request(mut tx, t, name, d, FailedPhase(UnknownGroupClass, "the group was removed", operator.no_report()))?
     }
     let _ = st(store.delete(mut tx, t.groups, name))?
+    sweep_blobs(mut tx, t, g.incarnation, map.new())?
     let _ = st(store.delete(mut tx, t.wake, name))?
     let _ = st(store.delete(mut tx, t.deploys, name))?
     if let Some(at) = due {

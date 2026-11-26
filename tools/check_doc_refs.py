@@ -44,7 +44,7 @@ def cli_names(root):
             children.add(match[1])
 
     flags = set()
-    for name in ('cli_options.rs', 'cli_package_options.rs', 'cli_coverage_options.rs'):
+    for name in ('cli_options.rs', 'cli_package_options.rs', 'cli_operator_options.rs', 'cli_coverage_options.rs'):
         module = driver.with_name(name).read_text(encoding='utf-8')
         options = module.split('static OPTIONS:', 1)[1].split('\n];', 1)[0]
         for names in re.findall(r'option!\(\s*\w+,\s*\[([^\]]+)\]', options):

@@ -1254,7 +1254,7 @@ fn seed_clean(mut r: Rig, n: u64, due: u64) waits {
                 for i in call_env.2 .. call_env.1 {
                     let mut name = string.from("bulk-")
                     string.push_uint(mut name, i, 10u32, 6u64, '0')
-                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", front: None, store: string.new(), memory: None, assembly: image(), activation: 1u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None)
+                    let g = GroupRow(tenant: "bulk", workdir: string.from(name), author: Trusted, listen: "127.0.0.1:0", front: None, store: string.new(), memory: None, assembly: image(), activation: 1u64, retained: list.new(), recovery: None, store_id: None, store_claim: None, incarnation: 1000000u64 + i, retiring: None, args: list.new(), record: None, packages: list.new(), source: None)
                     st(store.put(mut tx, call_env.3 .groups, name, g))?
                     let at: Option[u64] = if i < call_env.0 {
                         Some(T0 + 10u64)
@@ -1657,7 +1657,7 @@ fn released(r: Rig, a: launcher.Attempt) -> bool {
 }
 
 fn registration(name: String, store_dir: String) -> operator.Registration {
-    operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, listen: "127.0.0.1:0", store: string.from(store_dir), memory: None, args: list.new(), record: None, front: None)
+    operator.Registration(name: string.from(name), tenant: "t", workdir: string.from(name), trusted: true, listen: "127.0.0.1:0", store: string.from(store_dir), memory: None, args: list.new(), record: None, front: None, packages: list.new())
 }
 
 // Registers `spec` under request `d` with NEW attested, on a new connection; the rig's

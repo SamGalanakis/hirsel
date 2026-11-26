@@ -174,9 +174,10 @@ fn session_vectors() {
                     exec: vec!["e".into()],
                     workdir: "/w".into(),
                     old: Some((0..32).collect()),
+                    packages: vec![[0xdd; 32]],
                 },
             ),
-            "0c00000001000000670300000000000000080706050403020118171615141312110000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065020000002f770100000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".into(),
+            "0c00000001000000670300000000000000080706050403020118171615141312110000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065020000002f770100000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0100000020000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".into(),
         ),
         (
             Request::Admit(
@@ -188,7 +189,7 @@ fn session_vectors() {
                     ..Approvals::default()
                 },
             ),
-            "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f7700000000".into(),
+            "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f770000000000000000".into(),
         ),
         (
             Request::Admit(
@@ -200,7 +201,7 @@ fn session_vectors() {
                     ..Approvals::default()
                 },
             ),
-            "0c000000010000006703000000000000000807060504030201181716151413121102000000010000000101000000000000000000020000002f7700000000".into(),
+            "0c000000010000006703000000000000000807060504030201181716151413121102000000010000000101000000000000000000020000002f770000000000000000".into(),
         ),
         (
             Request::AdmitData(attempt(), vec![1, 2]),
@@ -421,4 +422,24 @@ pub(in crate::launcher) fn serve_fixture(activation: u64, candidate: Option<u64>
         store_id: None,
         witness: None,
     }
+}
+
+// A source's manifest (launch.md "Source by content"): the CLI derives it from the tree
+// it sends, and the platform decodes the same bytes (launcher_wire.hirsel's manifest
+// vector), so a digest or a field order that differs between the two fails here.
+#[test]
+fn manifest_vector() {
+    let tree = super::super::admit::Tree {
+        package: ".".into(),
+        grants: vec!["G".into()],
+        dirs: vec!["d".into()],
+        files: vec![("a".into(), vec![1, 2])],
+        required_entries: vec![(2, vec![0xaa, 0xbb])],
+    };
+    assert_eq!(
+        tree.manifest(),
+        hex(
+            "010000002e010000000100000047010000000100000064010000000200000002000000aabb01000000010000006120000000a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f632220200000000000000"
+        )
+    );
 }

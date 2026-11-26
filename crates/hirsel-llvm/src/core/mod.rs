@@ -41,9 +41,7 @@ pub use optimized_ir::*;
 use oracle::printed_oracle;
 #[cfg(hirsel_lazy_core)]
 pub(crate) use partition::emit_release_unit;
-use partition::{
-    Analyses, Foreign, ForeignBody, bodies, define_static, descriptor_refs, foreign_symbols, prepare,
-};
+use partition::{Analyses, Foreign, ForeignBody, bodies, define_static, foreign_symbols, prepare};
 mod scalar;
 mod simd;
 mod sink;
@@ -529,7 +527,7 @@ fn emit_prepared(
     // declares it); an intrinsic's holds its revision, weak_odr.
     let mut described = BTreeSet::new();
     let mut revisions = BTreeSet::new();
-    for (function, identity, _) in descriptor_refs(module, members) {
+    for (function, identity, _) in partition::descriptor_refs(module, members) {
         let function_symbol = items.function_symbol(function);
         let name = module.descriptor_symbol(function, function_symbol);
         if !described.insert(name.clone()) {

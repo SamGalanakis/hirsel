@@ -192,7 +192,9 @@ pub(super) fn emit(
         drop(e);
         sink.end_function();
     }
-    spawn_entries(module, members, target, recipes, failures, facts, sink, items)
+    spawn_entries(
+        module, members, target, recipes, failures, facts, sink, items,
+    )
 }
 
 /// Defines, weak, a marker per spawnable function's descriptor
@@ -220,10 +222,13 @@ fn spawn_entries(
     let mut spawnable = BTreeSet::new();
     // A function made a plain `fn(take X) -> R` value: the link joins its
     // descriptor to the spawn entry of its rows by this marker's name.
-    for (function, _, spawn) in super::descriptor_refs(module, members) {
+    for (function, _, spawn) in super::partition::descriptor_refs(module, members) {
         if let Some(spawn) = spawn {
             let name = module.descriptor_symbol(function, items.function_symbol(function));
-            spawnable.insert(hirsel_core_ir::spawnable_symbol(&name, module.spawn_key(spawn)));
+            spawnable.insert(hirsel_core_ir::spawnable_symbol(
+                &name,
+                module.spawn_key(spawn),
+            ));
         }
     }
     for (_, body) in super::bodies(module, members) {

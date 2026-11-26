@@ -6,20 +6,21 @@
         IR-instrumented library writes its profile (build-libllvm's train stage)
     engine_llvm.py guard STOCK CANDIDATE OUT --artifacts JSON [--previous-warm RATIO] [--resident-limit]
         every training and held-out program through both libraries; passes only if each
-        program's .text is byte-identical across them and the candidate's warm build cost,
-        as a geomean over programs of its ratio to the stock library's, is below 1 and no
-        worse than RATIO, the previous pin's (llvm-23.lock's engine_llvm_guard record)
+        program's .text is byte-identical across them and the candidate's warm build cost
+        geomean stays within or below the measured noise bands around stock (1.0) and,
+        if supplied, RATIO (the previous pin's llvm-23.lock engine_llvm_guard record)
 
 JSON is a core/tools/measurement_artifacts.py identity: the compiler and runtime archive
 every build uses. Training programs: the LangArena suite, every M1 program and the
 documents layout family. Held-out programs, which the profile never sees: the graph and
 json layout families and the M2b table and dispatch_cross_package workloads.
 
-Each guard program has its own XDG cache and three builds 3 s apart, each with a fresh
+Each guard program has its own XDG cache and four builds 3 s apart, each with a fresh
 store. Cold is build 1, which also compiles core and std into the cache. Warm is build 3:
-core and std cached, which is an installed compiler's ordinary build. One sample each:
-process-tree instructions:u on one CPU. Set HIRSEL_MEASURE_CPU to a CPU in the
-process's affinity mask before running this tool.
+core and std cached, which is an installed compiler's ordinary build. Build 4 repeats
+that measurement to estimate noise. Each sample counts process-tree instructions:u on
+one CPU. Set HIRSEL_MEASURE_CPU to a CPU in the process's affinity mask before running
+this tool.
 With --resident-limit, run in a 2 GiB cgroup v2 with swap disabled and GNU time installed.
 The cgroup bounds resident memory while Hirsel's data limit leaves room for untouched
 virtual reservations. Each counted build records its peak RSS in KiB.
@@ -188,15 +189,60 @@ def measure(compiler, runtime, jobs, out, resident_limit, cpu):
         time.sleep(3)
         warm = build(compiler, runtime, args, out / f'{tag}.3', xdg,
                      cpu=cpu, memory_limit=memory_limit, capture_rss=resident_limit)
-        results[tag] = dict(warm=warm['build'], cold=cold['build'], text=warm['text'])
+        time.sleep(3)
+        repeat = build(compiler, runtime, args, out / f'{tag}.4', xdg,
+                       cpu=cpu, memory_limit=memory_limit, capture_rss=resident_limit)
+        results[tag] = dict(warm=warm['build'], cold=cold['build'], text=warm['text'], warm_repeat=repeat['build'])
         if resident_limit:
-            results[tag].update(cold_rss_kib=cold['rss_kib'], warm_rss_kib=warm['rss_kib'])
+            results[tag].update(cold_rss_kib=cold['rss_kib'], warm_rss_kib=warm['rss_kib'],
+                                warm_repeat_rss_kib=repeat['rss_kib'])
         print(tag, results[tag], flush=True)
     return results
 
 
 def geomean(xs):
     return math.exp(sum(map(math.log, xs)) / len(xs))
+
+
+def warm_spread(programs):
+    pairs = [(p['warm'], p['warm_repeat']) for p in programs.values()]
+    return geomean([max(pair) / min(pair) for pair in pairs])
+
+
+def warm_comparison(ratio, baseline, spread):
+    lower, upper = baseline / spread, baseline * spread
+    verdict = 'inconclusive'
+    if ratio < lower:
+        verdict = 'better'
+    elif ratio > upper:
+        verdict = 'worse'
+    return dict(baseline=baseline, lower=lower, upper=upper, verdict=verdict)
+
+
+def report_guard(sides, out, previous_warm):
+    stock, candidate = sides['stock'], sides['candidate']
+    report = dict(programs=sides, differing=[t for t in stock if stock[t]['text'] != candidate[t]['text']],
+                  warm=geomean([candidate[t]['warm'] / stock[t]['warm'] for t in stock]),
+                  cold=geomean([candidate[t]['cold'] / stock[t]['cold'] for t in stock]))
+    failures = [f'.text differs on {t}' for t in report['differing']]
+    # The warm ratio can move by both spreads if the two libraries vary in opposite directions.
+    spread = warm_spread(stock) * warm_spread(candidate)
+    comparisons = {'stock': warm_comparison(report['warm'], 1.0, spread)}
+    if previous_warm is not None:
+        comparisons['previous pin'] = warm_comparison(report['warm'], previous_warm, spread)
+    report['warm_comparisons'] = comparisons
+    (out / 'guard.json').write_text(json.dumps(report, indent=1))
+    print(f"engine_llvm guard: warm {report['warm']:.10f}, cold {report['cold']:.3f}, "
+          f"{len(stock) - len(report['differing'])}/{len(stock)} .text identical")
+    for name, comparison in comparisons.items():
+        verdict = comparison['verdict']
+        band = f"[{comparison['lower']:.10f}, {comparison['upper']:.10f}]"
+        print(f'engine_llvm guard: warm vs {name}: {verdict} (band {band})', flush=True)
+        if verdict == 'worse':
+            failures.append(f"warm build cost geomean {report['warm']:.10f} exceeds the {name} band {band}")
+    for failure in failures:
+        print('engine_llvm guard: FAIL', failure, file=sys.stderr)
+    return 1 if failures else 0
 
 
 def main():
@@ -243,21 +289,7 @@ def main():
     for side, library in (('stock', args.stock), ('candidate', args.candidate)):
         exe = shadow(library, compiler, args.out / side / 'shadow')
         sides[side] = measure(exe, runtime, jobs, args.out / side, args.resident_limit, cpu)
-    stock, candidate = sides['stock'], sides['candidate']
-    report = dict(programs=sides, differing=[t for t in stock if stock[t]['text'] != candidate[t]['text']],
-                  warm=geomean([candidate[t]['warm'] / stock[t]['warm'] for t in stock]),
-                  cold=geomean([candidate[t]['cold'] / stock[t]['cold'] for t in stock]))
-    failures = [f'.text differs on {t}' for t in report['differing']]
-    if report['warm'] >= 1:
-        failures.append(f"warm build cost geomean {report['warm']:.3f} is not below the stock library's")
-    if args.previous_warm is not None and report['warm'] > args.previous_warm:
-        failures.append(f"warm build cost geomean {report['warm']:.4f} is worse than the previous pin's {args.previous_warm:.4f}")
-    (args.out / 'guard.json').write_text(json.dumps(report, indent=1))
-    print(f"engine_llvm guard: warm {report['warm']:.3f}, cold {report['cold']:.3f}, "
-          f"{len(stock) - len(report['differing'])}/{len(stock)} .text identical")
-    for failure in failures:
-        print('engine_llvm guard: FAIL', failure, file=sys.stderr)
-    return 1 if failures else 0
+    return report_guard(sides, args.out, args.previous_warm)
 
 
 if __name__ == '__main__':

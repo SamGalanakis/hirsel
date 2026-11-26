@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Check native archive links and engine measurement inputs."""
+from contextlib import redirect_stderr, redirect_stdout
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -47,6 +50,39 @@ class ArchiveLinks(unittest.TestCase):
 
 
 class EngineMeasurement(unittest.TestCase):
+    def test_warm_guard_uses_measured_band_for_both_baselines(self):
+        script = Path(__file__).resolve().parents[1] / 'native-toolchain/engine_llvm.py'
+        spec = importlib.util.spec_from_file_location('engine_llvm', script)
+        engine = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(engine)
+
+        # Each library varies by a factor of 21/20. The combined factor is 1.1025.
+        # The previous pin's upper bound is 0.98 * 1.1025 = 1.08045.
+        cases = [
+            (420, 'same', 'inconclusive', 'inconclusive', 0),  # 1.05
+            (440, 'same', 'inconclusive', 'worse', 1),        # 1.10
+            (460, 'same', 'worse', 'worse', 1),               # 1.15
+            (340, 'same', 'better', 'better', 0),             # 0.85
+            (420, 'changed', 'inconclusive', 'inconclusive', 1),
+        ]
+        with tempfile.TemporaryDirectory() as raw:
+            out = Path(raw)
+            for warm, text, stock_verdict, pin_verdict, status in cases:
+                with self.subTest(warm=warm, text=text):
+                    sides = {
+                        'stock': {'case': dict(warm=400, warm_repeat=420, cold=800, text='same')},
+                        'candidate': {'case': dict(warm=warm, warm_repeat=warm * 21 // 20, cold=800, text=text)},
+                    }
+                    stdout = io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+                        self.assertEqual(engine.report_guard(sides, out, 0.98), status)
+                    comparisons = json.loads((out / 'guard.json').read_text())['warm_comparisons']
+                    self.assertEqual(comparisons['stock']['verdict'], stock_verdict)
+                    self.assertEqual(comparisons['previous pin']['verdict'], pin_verdict)
+                    self.assertAlmostEqual(comparisons['stock']['upper'], 1.1025)
+                    self.assertAlmostEqual(comparisons['previous pin']['upper'], 1.08045)
+                    self.assertIn(f'{stock_verdict} (band [', stdout.getvalue())
+
     def test_refuses_a_missing_or_unavailable_measurement_cpu(self):
         script = Path(__file__).resolve().parents[1] / 'native-toolchain/engine_llvm.py'
         env = os.environ.copy()

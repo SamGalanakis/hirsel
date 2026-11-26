@@ -154,31 +154,26 @@ fn unique_owner_end(raw: Bytes) -> Result[u64, Error] {
     Ok(at + width)
 }
 
-fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes, old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
+fn plan_index_put(tx: Tx, mut edits: IndexEdits, mut batch: Option[OrderedBatch], mut frame: Option[u64], record: Catalog, primary: Bytes, old_keys: List[Bytes], take incoming: IndexValue) -> Result[(), Error] {
     let IndexValue(keys: take keys, payload: take payload, ..) = take incoming
     let mut old = 0u64
     for take key in take keys {
         while old < list.len(old_keys) && old_keys[old] < key {
-            append_index_remove(tx, mut edits, record, primary, copied(old_keys[old])?, mut frame)?
+            append_index_remove(tx, mut edits, mut batch, record, primary, copied(old_keys[old])?, mut frame)?
             old += 1
         }
         let unchanged = old < list.len(old_keys) && old_keys[old] == key
-        let stored = transaction_row(tx, key)?
+        let shape = catalog_index(record)?.shape
+        let already_equal = plan_index_existing(tx, mut edits, mut batch, record.id, shape, key, primary, payload, !unchanged)?
         if unchanged {
             old += 1
-        } else if let Entries(Unique) = catalog_index(record)?.shape {
-            list.push(mut edits.probes, (record.id, copied(key)?))
         }
-        if let Some(prior) = stored {
-            if prior == payload {
-                continue
-            }
+        if !already_equal {
+            plan_index_store(tx, mut edits, mut batch, shape, take key, payload, mut frame)?
         }
-        frame = put_frame(tx, key, payload, frame)?
-        push_index_edit(mut edits, StoreRow(take key, copied(payload)?))
     }
     while old < list.len(old_keys) {
-        append_index_remove(tx, mut edits, record, primary, copied(old_keys[old])?, mut frame)?
+        append_index_remove(tx, mut edits, mut batch, record, primary, copied(old_keys[old])?, mut frame)?
         old += 1
     }
     Ok(())
@@ -528,10 +523,10 @@ fn push_index_edit(mut edits: IndexEdits, take edit: DataEdit) {
 // entries: a Public index, or a Backfilling one at or before its cursor.
 // A building index has no entries past its cursor yet, and a Failed one
 // is incomplete, so a remove there may find nothing.
-fn append_index_remove(tx: Tx, mut edits: IndexEdits, record: Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
-    if let Some(refund) = delete_refund(tx, key)? {
-        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
-        push_index_edit(mut edits, RemoveRow(take key, refund))
+fn append_index_remove(tx: Tx, mut edits: IndexEdits, mut batch: Option[OrderedBatch], record: Catalog, primary: Bytes, take key: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
+    let shape = catalog_index(record)?.shape
+    if let Some(refund) = plan_index_refund(tx, batch, shape, key)? {
+        plan_index_delete(tx, mut edits, mut batch, shape, take key, refund, mut frame)?
         return Ok(())
     }
     if index_claims(catalog_index(record)?.state, primary) {
@@ -590,11 +585,7 @@ fn apply_edits(mut tx: Tx, take edits: IndexEdits) -> Result[(), Error] {
     Ok(())
 }
 
-// Index IDs are distinct from the table ID and each other. Within one index,
-// a delete and put are emitted only for distinct keys. Each planned edit can
-// therefore check the original op table while carrying the cumulative frame size.
-// A returned Error leaves all roots, accounting and issued IDs untouched.
-fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
+fn encode_put_value[K, V](t: Table[K, V], v: V) -> Result[Bytes, Error] {
     // The schema tag and the codec's least length, so a fixed-width value encodes without growing.
     let mut raw: Bytes = list.new()
     let least = 2 + std.codec.least(t.readers.codec)
@@ -606,6 +597,43 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
     capacity(bytebuf.try_reserve_hint(mut raw, least, hint))?
     capacity(le(mut raw, int.widen(t.readers.current), 2))?
     std.codec.encode(t.readers.codec, v, mut raw) ?=> |_| Limit(Value)
+    Ok(take raw)
+}
+
+fn plan_put_indexes[K, V](tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], p: Bytes, raw: Bytes, previous: Option[View[Bytes]], mut pending: IndexEdits, mut batch: Option[OrderedBatch], mut frame: Option[u64]) -> Result[(), Error] {
+    let primary = list.slice(p, 4, list.len(p))
+    for (_, ix) in indexes {
+        let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
+        let incoming = (bound_index.extract)(raw, primary)?
+        if list.len(incoming.payload) > tx.limits.value {
+            return Error(Limit(Value))
+        }
+        if let Sums = catalog_index(ix)?.shape {
+            let old = match previous {
+                Some(value) => Some((bound_index.extract)(value, primary)?),
+                None => None,
+            }
+            plan_aggregate_edit(tx, mut pending, mut batch, mut frame, ix, primary, take old, Some(take incoming))?
+            continue
+        }
+        let old_keys = match previous {
+            Some(value) => {
+                let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
+                take keys
+            },
+            None => list.new(),
+        }
+        plan_index_put(tx, mut pending, mut batch, mut frame, ix, primary, old_keys, take incoming)?
+    }
+    Ok(())
+}
+
+// Index IDs are distinct from the table ID and each other. Within one index,
+// a delete and put are emitted only for distinct keys. Each planned edit can
+// therefore check the original op table while carrying the cumulative frame size.
+// A returned Error leaves all roots, accounting and issued IDs untouched.
+fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], take p: Bytes, v: V, tail: bool) -> Result[(), Error] {
+    let raw = encode_put_value(t, v)?
     let mut frame = put_frame(tx, p, raw, tx.frame_bytes)?
     if list.len(indexes) == 0 {
         apply_put(mut tx, take p, take raw, tail)?
@@ -613,30 +641,8 @@ fn put_impl[K, V](mut tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], tak
         let mut edits = {
             let previous = transaction_row(tx, p)?
             let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
-            let primary = list.slice(p, 4, list.len(p))
-            for (_, ix) in indexes {
-                let bound_index = registered_index(tx, t.id, t.readers.current, ix)?
-                let incoming = (bound_index.extract)(raw, primary)?
-                if list.len(incoming.payload) > tx.limits.value {
-                    return Error(Limit(Value))
-                }
-                if let Sums = catalog_index(ix)?.shape {
-                    let old = match previous {
-                        Some(value) => Some((bound_index.extract)(value, primary)?),
-                        None => None,
-                    }
-                    plan_aggregate_edit(tx, mut pending, mut frame, ix, primary, take old, Some(take incoming))?
-                    continue
-                }
-                let old_keys = match previous {
-                    Some(value) => {
-                        let IndexValue(keys: take keys, ..) = (bound_index.extract)(value, primary)?
-                        take keys
-                    },
-                    None => list.new(),
-                }
-                plan_index_put(tx, mut pending, mut frame, ix, primary, old_keys, take incoming)?
-            }
+            let mut batch: Option[OrderedBatch] = None
+            plan_put_indexes(tx, t, indexes, p, raw, previous, mut pending, mut batch, mut frame)?
             take pending
         }
         if let Some(take seen) = replace(mut edits.drift, None) {
@@ -719,16 +725,17 @@ fn plan_delete(tx: Tx, table_id: u32, schema: u16, indexes: List[(u64, Catalog)]
     let mut frame = tx.frame_bytes
     let refund = row_refund(tx, p, old)
     let mut pending = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
+    let mut batch: Option[OrderedBatch] = None
     for (_, ix) in indexes {
         let bound_index = registered_index(tx, table_id, schema, ix)?
         let removed = (bound_index.extract)(old, key)?
         if let Sums = catalog_index(ix)?.shape {
-            plan_aggregate_edit(tx, mut pending, mut frame, ix, key, Some(take removed), None)?
+            plan_aggregate_edit(tx, mut pending, mut batch, mut frame, ix, key, Some(take removed), None)?
             continue
         }
         let IndexValue(keys: take keys, ..) = take removed
         for take row in take keys {
-            append_index_remove(tx, mut pending, ix, key, take row, mut frame)?
+            append_index_remove(tx, mut pending, mut batch, ix, key, take row, mut frame)?
         }
     }
     Ok(DeletePlan(edits: take pending, refund: refund, frame: frame, indexed: list.len(indexes) != 0))

@@ -187,7 +187,7 @@ fn totals_bytes(members: u64, sum: u64) -> Result[Bytes, Error] {
 // its count and sum less the old row's part and plus the new row's. The
 // edits are planned against the transaction's rows before any is applied;
 // a claimed row whose old part is not in its group's totals is drift.
-fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], record: Catalog, primary: Bytes, take old: Option[IndexValue], take new: Option[IndexValue]) -> Result[(), Error] {
+fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut batch: Option[OrderedBatch], mut frame: Option[u64], record: Catalog, primary: Bytes, take old: Option[IndexValue], take new: Option[IndexValue]) -> Result[(), Error] {
     if !index_claims(catalog_index(record)?.state, primary) {
         return Ok(())
     }
@@ -228,10 +228,7 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
         if less_count == more_count && less_sum == more_sum {
             continue
         }
-        let (members, sum) = match transaction_row(tx, key)? {
-            Some(raw) => group_totals(raw)?,
-            None => (0u64, 0u64),
-        }
+        let (members, sum) = plan_group_totals(tx, batch, key)?
         if less_count > members || less_sum > sum {
             stage_index_drift(mut edits, record)
             return Ok(())
@@ -245,15 +242,13 @@ fn plan_aggregate_edit(tx: Tx, mut edits: IndexEdits, mut frame: Option[u64], re
                 stage_index_drift(mut edits, record)
                 return Ok(())
             }
-            if let Some(refund) = delete_refund(tx, key)? {
-                frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
-                push_index_edit(mut edits, RemoveRow(take key, refund))
+            if let Some(refund) = plan_index_refund(tx, batch, Sums, key)? {
+                plan_index_delete(tx, mut edits, mut batch, Sums, take key, refund, mut frame)?
             }
             continue
         }
         let value = totals_bytes(next_count, next_sum)?
-        frame = put_frame(tx, key, value, frame)?
-        push_index_edit(mut edits, StoreRow(take key, take value))
+        plan_index_store(tx, mut edits, mut batch, Sums, take key, value, mut frame)?
     }
     Ok(())
 }

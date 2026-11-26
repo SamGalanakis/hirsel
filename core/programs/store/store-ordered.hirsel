@@ -1,0 +1,294 @@
+fn ordered_key[K, V](t: Table[K, V], key: K, tail: bool) -> Result[Bytes, Error] {
+    let mut encoded_key = prefixed(t.id, 8, tail)?
+    std.codec.encode_key(t.key, key, mut encoded_key)
+    Ok(take encoded_key)
+}
+
+fn above_staged(ops: DataRows, table_id: u32, first_key: Bytes) -> bool {
+    let n = data_row_count(ops)
+    if n > SCANNED_OPS && rows_ascending(ops) {
+        let mut lo = 0u64
+        let mut hi = n
+        while lo < hi {
+            let middle = lo + (hi - lo) / 2
+            let staged_id: u32 = list.word_be(data_row(ops, middle).key, 0)
+            if staged_id <= table_id {
+                lo = middle + 1
+            } else {
+                hi = middle
+            }
+        }
+        if lo == 0 {
+            return true
+        }
+        let last_row = data_row(ops, lo - 1)
+        let last_key = view last_row.key
+        let last_collection: u32 = list.word_be(last_key, 0)
+        return last_collection != table_id || list.compare_bytes(last_key, first_key) == Less
+    }
+    for i in 0u64 .. n {
+        let staged_row_ordered = data_row(ops, i)
+        let staged_key = view staged_row_ordered.key
+        let staged_collection: u32 = list.word_be(staged_key, 0)
+        if staged_collection == table_id && list.compare_bytes(staged_key, first_key) != Less {
+            return false
+        }
+    }
+    true
+}
+
+fn ordered_input[K, V](tx: Tx, t: Table[K, V], rows: List[(K, V)]) -> Result[(), Error] {
+    let mut previous_key: Bytes = list.new()
+    let mut first_row = true
+    for (key, _) in rows {
+        let next_key = ordered_key(t, key, false)?
+        if first_row {
+            if !above_staged(tx.ops.rows, t.id, next_key) {
+                return Error(OutOfOrder)
+            }
+            for layer in tx.below {
+                if !above_staged(layer.ops.rows, t.id, next_key) {
+                    return Error(OutOfOrder)
+                }
+            }
+        } else if list.compare_bytes(previous_key, next_key) != Less {
+            return Error(OutOfOrder)
+        }
+        first_row = false
+        previous_key = take next_key
+    }
+    Ok(())
+}
+
+fn ordered_intrinsic[K, V](tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], rows: List[(K, V)]) -> Result[(), Error] {
+    for (key, value) in rows {
+        let encoded_key = ordered_key(t, key, false)?
+        if list.len(encoded_key) > KEY_LIMIT {
+            return Error(Limit(Key))
+        }
+        let encoded_value = encode_put_value(t, value)?
+        if list.len(encoded_value) > tx.limits.value {
+            return Error(Limit(Value))
+        }
+        let primary = list.slice(encoded_key, 4, list.len(encoded_key))
+        for (_, record) in indexes {
+            let registered = registered_index(tx, t.id, t.readers.current, record)?
+            let extracted = (registered.extract)(encoded_value, primary)?
+            if list.len(extracted.payload) > tx.limits.value {
+                return Error(Limit(Value))
+            }
+        }
+    }
+    Ok(())
+}
+
+// A Unique entry holds a row number biased by one and its payload width.
+// A Sums entry holds the member count and the sum. Zero marks a tombstone.
+type OrderedBatch {
+    overlay: Map[Bytes, (u64, u64)],
+    row_number: u64,
+    stamp_cost: u64,
+    conflict_index: Option[u32]
+}
+
+fn pending_index_value(batch: Option[OrderedBatch], key: Bytes) -> Option[(u64, u64)] {
+    if let Some(proposed) = view batch {
+        if let Some(item) = map.get(proposed.overlay, key) {
+            return Some(copy item)
+        }
+    }
+    None
+}
+
+fn plan_group_totals(tx: Tx, batch: Option[OrderedBatch], key: Bytes) -> Result[(u64, u64), Error] {
+    if let Some(aggregate_pair) = pending_index_value(batch, key) {
+        return Ok(aggregate_pair)
+    }
+    match transaction_row(tx, key)? {
+        Some(raw) => group_totals(raw),
+        None => Ok((0u64, 0u64)),
+    }
+}
+
+fn plan_index_existing(tx: Tx, mut edits: IndexEdits, mut batch: Option[OrderedBatch], index_id: u32, shape: IndexShape, key: Bytes, primary: Bytes, payload: Bytes, new_key: bool) -> Result[bool, Error] {
+    let unique_probe = new_key && match shape {
+        Entries(Unique) => true,
+        _ => false
+    }
+    if let Some((held_by, _)) = pending_index_value(batch, key) {
+        if let Some(mut proposed) = batch {
+            if unique_probe && held_by != 0 && proposed.conflict_index == None {
+                proposed.conflict_index = Some(index_id)
+            }
+        }
+        return Ok(false)
+    }
+    let previous_index = transaction_row(tx, key)?
+    if unique_probe {
+        if let Some(mut proposed) = batch {
+            if proposed.conflict_index == None {
+                if let Some(prior) = previous_index {
+                    if list.slice(prior, 4, unique_owner_end(prior)?) != primary {
+                        proposed.conflict_index = Some(index_id)
+                    }
+                }
+            }
+        } else {
+            list.push(mut edits.probes, (index_id, copied(key)?))
+        }
+    }
+    match previous_index {
+        Some(value) => Ok(value == payload),
+        None => Ok(false),
+    }
+}
+
+fn plan_index_refund(tx: Tx, batch: Option[OrderedBatch], shape: IndexShape, key: Bytes) -> Result[Option[DataRefund], Error] {
+    if let Some((state, width)) = pending_index_value(batch, key) {
+        if state == 0 {
+            return Ok(None)
+        }
+        let stored_width = match shape {
+            Sums => 16u64,
+            _ => width
+        }
+        return Ok(Some(DataRefund(charge: stored_row_charge(list.len(key), stored_width), prior: None)))
+    }
+    delete_refund(tx, key)
+}
+
+fn ordered_index_frame(tx: Tx, batch: OrderedBatch, shape: IndexShape, key: Bytes, value_size: Option[u64], frame: Option[u64]) -> Result[Option[u64], Error] {
+    let Some(current) = frame else {
+        return Ok(None)
+    }
+    let old_size = match map.get(batch.overlay, key) {
+        Some((0u64, _)) => 9 + list.len(key),
+        Some((_, width)) => 13 + list.len(key) + (match shape {
+            Sums => 16u64,
+            _ => width
+        }),
+        None => old_data_op_size(tx.ops, tx.below, false, key),
+    }
+    frame_after_edit(current, old_size, tx.extra_bytes, key, value_size, transaction_limit(tx.limits))
+}
+
+fn plan_index_store(tx: Tx, mut edits: IndexEdits, mut batch: Option[OrderedBatch], shape: IndexShape, take key: Bytes, payload: Bytes, mut frame: Option[u64]) -> Result[(), Error] {
+    if let Some(mut proposed) = batch {
+        if list.len(key) > KEY_LIMIT {
+            return Error(Limit(Key))
+        }
+        if list.len(payload) > tx.limits.value {
+            return Error(Limit(Value))
+        }
+        frame = ordered_index_frame(tx, proposed, shape, key, Some(list.len(payload)), frame)?
+        proposed.stamp_cost = int.saturating_add(proposed.stamp_cost, write_stamp_cost(tx, key)?)
+        match shape {
+            Sums => {
+                let aggregate_pair = group_totals(payload)?
+                map.insert(mut proposed.overlay, take key, aggregate_pair)
+            },
+            Entries(Unique) => {
+                let width = list.len(payload)
+                map.insert(mut proposed.overlay, take key, (proposed.row_number, width))
+            },
+            Entries(Many) => (),
+        }
+    } else {
+        frame = put_frame(tx, key, payload, frame)?
+        push_index_edit(mut edits, StoreRow(take key, copied(payload)?))
+    }
+    Ok(())
+}
+
+fn plan_index_delete(tx: Tx, mut edits: IndexEdits, mut batch: Option[OrderedBatch], shape: IndexShape, take key: Bytes, refund: DataRefund, mut frame: Option[u64]) -> Result[(), Error] {
+    if let Some(mut proposed) = batch {
+        frame = ordered_index_frame(tx, proposed, shape, key, None, frame)?
+        proposed.stamp_cost = int.saturating_add(proposed.stamp_cost, 6 * transaction_write_height(tx, key)? + 2)
+        match shape {
+            Entries(Many) => (),
+            _ => map.insert(mut proposed.overlay, take key, (0u64, 0u64)),
+        }
+    } else {
+        frame = edit_frame(tx.ops, tx.below, tx.extra_bytes, key, None, frame, transaction_limit(tx.limits))?
+        push_index_edit(mut edits, RemoveRow(take key, refund))
+    }
+    Ok(())
+}
+
+type OrderedEvidence = OrderedDuplicate(u32) | OrderedDrift(List[(u32, u32)]) | OrderedMiss
+
+fn ordered_plan_row[K, V](tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], key: K, value: V, mut batch: Option[OrderedBatch], mut frame: Option[u64], mut stamps: u64) -> Result[Option[OrderedEvidence], Error] {
+    let encoded_key = ordered_key(t, key, false)?
+    let encoded_value = encode_put_value(t, value)?
+    frame = put_frame(tx, encoded_key, encoded_value, frame)?
+    let previous_value = transaction_row(tx, encoded_key)?
+    let mut edits = IndexEdits(probes: list.new(), drift: None, first: None, rest: list.new())
+    plan_put_indexes(tx, t, indexes, encoded_key, encoded_value, previous_value, mut edits, mut batch, mut frame)?
+    let mut conflict: Option[u32] = None
+    if let Some(mut proposed) = batch {
+        let stamp_cost = int.saturating_add(proposed.stamp_cost, write_stamp_cost(tx, encoded_key)?)
+        let Some(after) = int.checked_add(stamps, stamp_cost) else {
+            return Error(Limit(Ids))
+        }
+        stamps = after
+        proposed.row_number += 1
+        proposed.stamp_cost = 0
+        conflict = replace(mut proposed.conflict_index, None)
+    }
+    if let Some(take seen) = replace(mut edits.drift, None) {
+        return Ok(Some(OrderedDrift(take seen)))
+    }
+    match conflict {
+        Some(index_id) => Ok(Some(OrderedDuplicate(index_id))),
+        None => Ok(None),
+    }
+}
+
+fn ordered_validate[K, V](tx: Tx, t: Table[K, V], indexes: List[(u64, Catalog)], rows: List[(K, V)]) -> Result[Option[OrderedEvidence], Error] {
+    ordered_input(tx, t, rows)?
+    ordered_intrinsic(tx, t, indexes, rows)?
+    let mut batch = Some(OrderedBatch(overlay: map.new(), row_number: 1, stamp_cost: 0, conflict_index: None))
+    let mut frame = tx.frame_bytes
+    let mut stamps = tx.ids
+    let mut evidence: Option[OrderedEvidence] = None
+    for (key, value) in rows {
+        match ordered_plan_row(tx, t, indexes, key, value, mut batch, mut frame, mut stamps) {
+            Ok(take finding) => {
+                if let None = evidence {
+                    evidence = take finding
+                }
+            },
+            Error(Missed) => {
+                if let None = evidence {
+                    evidence = Some(OrderedMiss)
+                }
+                break
+            },
+            Error(take problem) => return Error(take problem),
+        }
+    }
+    Ok(take evidence)
+}
+
+pub fn put_ordered[K, V](mut tx: Tx, t: Table[K, V], rows: List[(K, V)]) -> Result[(), Error] {
+    let indexes = check_table_write(tx, t)?
+    if list.len(rows) == 0 {
+        return Ok(())
+    }
+    match ordered_validate(tx, t, indexes, rows)? {
+        Some(OrderedDuplicate(index_id)) => {
+            let name = find_index_name(tx.roots.catalog, t.id, index_id)?
+            tx.index_conflict = Some(Duplicate(clone(name)))
+            return Error(Conflict(take name))
+        },
+        Some(OrderedDrift(take seen)) => return Error(drift_stop(mut tx, take seen)),
+        Some(OrderedMiss) => return Error(Missed),
+        None => (),
+    }
+    for (key, value) in rows {
+        let tail = tx.frame_tail == OPEN_FRAME_TAIL
+        let encoded_key = ordered_key(t, key, tail)?
+        put_impl(mut tx, t, indexes, take encoded_key, value, tail)?
+    }
+    Ok(())
+}

@@ -405,11 +405,15 @@ fn edit_frame(ops: DataOps, below: List[Arc[Staged]], extra: u64, key: Bytes, va
     let Some(current) = frame else {
         return Ok(None)
     }
+    frame_after_edit(current, old_data_op_size(ops, below, false, key), extra, key, value_size, transaction)
+}
+
+fn frame_after_edit(current: u64, old_size: u64, extra: u64, key: Bytes, value_size: Option[u64], transaction: u64) -> Result[Option[u64], Error] {
     let width = match value_size {
         Some(size) => 13 + size,
         None => 9u64,
     } + list.len(key)
-    let after = int.saturating_add(current - old_data_op_size(ops, below, false, key), width)
+    let after = int.saturating_add(current - old_size, width)
     if int.saturating_add(after, extra) - 16 > transaction {
         return Error(Limit(Transaction))
     }

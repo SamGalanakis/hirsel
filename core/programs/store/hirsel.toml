@@ -8,6 +8,7 @@ std = { major = 1 }
 
 [sources]
 "store.hirsel" = "store"
+"store-ordered.hirsel" = "store"
 "store-limits.hirsel" = "store"
 "store-stream-key.hirsel" = "store"
 "store-keyed-journal.hirsel" = "store"
@@ -144,6 +145,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"store_ordered_laws.hirsel" = "store"
 "store_capture_laws.hirsel" = "store"
 "store_trust_laws.hirsel" = "store"
 "store_size_laws.hirsel" = "store"

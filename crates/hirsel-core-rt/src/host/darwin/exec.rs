@@ -133,6 +133,7 @@ struct Shared {
     completed: Condvar,
     change: Wake,
     poller: Selector,
+    slots: Slots,
 }
 
 /// Owns the thread that creates direct children and reaps released ones.
@@ -154,6 +155,7 @@ impl Supervisor {
             completed: Condvar::new(),
             change,
             poller,
+            slots: Slots::new()?,
         });
         let state = shared.clone();
         let (ready, initialized) = std::sync::mpsc::sync_channel(0);
@@ -445,16 +447,18 @@ impl Shared {
         let path = image_path(input.image.as_raw_fd())?;
         let argv = pointers(&input.argv)?;
         let envp = pointers(&input.envp)?;
+        let [stdin, stdout, stderr] = &streams.child;
+        let low = self.slots.hold([stdin, stdout, stderr, &input.cwd])?;
         let mut actions = Actions::new()?;
-        for (stream, target) in streams.child.iter().zip(0..) {
-            // SAFETY: the actions object is initialized; the fd is ours.
+        for (&slot, target) in low.0.slots[..3].iter().zip(0..) {
+            // SAFETY: the actions object is initialized; the slot holds a stream.
             spawned(unsafe {
-                libc::posix_spawn_file_actions_adddup2(&mut actions.0, stream.as_raw_fd(), target)
+                libc::posix_spawn_file_actions_adddup2(&mut actions.0, slot, target)
             })?;
         }
-        // SAFETY: as above; the directory fd stays open through the spawn.
+        // SAFETY: as above; the slot holds the directory through the spawn.
         spawned(unsafe {
-            libc::posix_spawn_file_actions_addfchdir(&mut actions.0, input.cwd.as_raw_fd())
+            libc::posix_spawn_file_actions_addfchdir(&mut actions.0, low.0.slots[3])
         })?;
         let attributes = Attributes::new()?;
         let mut pid: libc::pid_t = 0;
@@ -591,16 +595,6 @@ fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(ends)
 }
 
-/// Keep a child stream off 0..=2, so one dup2 action cannot overwrite the
-/// source of a later one.
-fn above_stdio(fd: OwnedFd) -> io::Result<OwnedFd> {
-    if fd.as_raw_fd() > 2 {
-        return Ok(fd);
-    }
-    // SAFETY: duplicates a live descriptor we own.
-    owned(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) })
-}
-
 struct Streams {
     child: [OwnedFd; 3],
     parent: [Option<OwnedFd>; 3],
@@ -626,14 +620,14 @@ impl Streams {
             };
             // SAFETY: constant path and no creation flags.
             let null = owned(unsafe { libc::open(c"/dev/null".as_ptr(), mode | libc::O_CLOEXEC) })?;
-            return Ok((above_stdio(null)?, None));
+            return Ok((null, None));
         }
         let (read, send) = pipe()?;
         let (child, parent) = if write { (send, read) } else { (read, send) };
         // SAFETY: each pipe end has a distinct open file description. Change
         // the reactor's end only, leaving blocking stdio for the child.
         check(unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) })?;
-        Ok((above_stdio(child)?, Some(parent)))
+        Ok((child, Some(parent)))
     }
 }
 
@@ -645,6 +639,78 @@ fn pointers(strings: &[CString]) -> io::Result<Vec<*const libc::c_char>> {
     pointers.extend(strings.iter().map(|s| s.as_ptr()));
     pointers.push(std::ptr::null());
     Ok(pointers)
+}
+
+/// `OPEN_MAX` in `<sys/syslimits.h>`; the libc crate does not export it.
+const OPEN_MAX: RawFd = 10_240;
+
+/// Descriptor numbers below `OPEN_MAX` (10,240), taken when the supervisor
+/// starts, for the four descriptors a child receives. Darwin's
+/// `posix_spawn_file_actions_adddup2` and `addfchdir` refuse a descriptor at
+/// or above `OPEN_MAX` with EBADF whatever `RLIMIT_NOFILE` allows, so a spawn
+/// moves its streams and working directory into the slots first. Between
+/// spawns every slot names `/dev/null`; the slots stay above 0..=2, so one
+/// dup2 action cannot overwrite the source of a later one.
+struct Slots {
+    slots: [RawFd; 4],
+    null: OwnedFd,
+}
+
+impl Slots {
+    fn new() -> io::Result<Self> {
+        // SAFETY: constant path and no creation flags.
+        let null =
+            owned(unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) })?;
+        let mut slots = [-1; 4];
+        for slot in &mut slots {
+            // SAFETY: duplicates a live descriptor we own into a fresh one.
+            let fd = owned(unsafe { libc::fcntl(null.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) })?;
+            if fd.as_raw_fd() >= OPEN_MAX {
+                return Err(io::Error::from_raw_os_error(libc::EMFILE));
+            }
+            *slot = std::os::fd::IntoRawFd::into_raw_fd(fd);
+        }
+        Ok(Self { slots, null })
+    }
+
+    /// Put `fds` in the slots until the guard drops. Only the supervisor
+    /// thread spawns, so the slots have one user at a time.
+    fn hold(&self, fds: [&OwnedFd; 4]) -> io::Result<Held<'_>> {
+        let held = Held(self);
+        for (fd, &slot) in fds.into_iter().zip(&self.slots) {
+            // SAFETY: both descriptors are live; dup2 replaces only our slot.
+            check(unsafe { libc::dup2(fd.as_raw_fd(), slot) })?;
+            // SAFETY: the slot is ours; dup2 cleared its close-on-exec flag.
+            check(unsafe { libc::fcntl(slot, libc::F_SETFD, libc::FD_CLOEXEC) })?;
+        }
+        Ok(held)
+    }
+}
+
+impl Drop for Slots {
+    fn drop(&mut self) {
+        for &slot in &self.slots {
+            // SAFETY: each slot is a descriptor this object owns.
+            unsafe { libc::close(slot) };
+        }
+    }
+}
+
+/// Slots in use by one spawn. Drop points them back at `/dev/null`, so the
+/// parent keeps no reference to the child's pipe ends or directory.
+struct Held<'s>(&'s Slots);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        for &slot in &self.0.slots {
+            // SAFETY: both descriptors are ours; the slot stays open.
+            if unsafe { libc::dup2(self.0.null.as_raw_fd(), slot) } < 0
+                || unsafe { libc::fcntl(slot, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+            {
+                crate::process::stop(b"ExecSlots");
+            }
+        }
+    }
 }
 
 /// The spawn's file actions: stdio onto 0..=2 and the working directory.

@@ -51,6 +51,7 @@ _dispatch_semaphore_create
 _dispatch_semaphore_signal
 _dispatch_semaphore_wait
 _dispatch_time
+_dup2
 _exit
 _exp
 _exp2

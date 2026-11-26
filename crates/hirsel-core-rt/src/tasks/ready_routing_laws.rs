@@ -24,8 +24,15 @@ unsafe extern "C" fn deliver(state: *mut u8, _: *mut Request, outcome: Outcome) 
 unsafe extern "C" fn abort(_: *mut u8, _: *mut Request, _: u64, _: u8) -> Outcome {
     Outcome::default()
 }
+/// Runs in its own process: its 10,000 socket pairs would push the
+/// descriptors of tests running beside it above Darwin's `OPEN_MAX`.
 #[test]
 fn ready_routes_one_and_work_is_independent_of_parked_count() {
+    if crate::test_process::run_isolated(
+        "tasks::ready_routing_laws::ready_routes_one_and_work_is_independent_of_parked_count",
+    ) {
+        return;
+    }
     for n in [3, 10_000] {
         let mut counters = [0usize; 2];
         let provider = Provider {

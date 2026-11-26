@@ -348,6 +348,8 @@ mod region_tests;
 mod tests;
 
 #[cfg(test)]
+mod exec_slots_tests;
+#[cfg(test)]
 mod provider_s0_tests;
 #[cfg(test)]
 mod provider_tests;

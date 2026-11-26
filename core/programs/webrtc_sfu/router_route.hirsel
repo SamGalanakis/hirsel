@@ -438,7 +438,7 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
         None
     }
     let closes = picture_ends(vp9, av1, view r.publications[pi].encodings[e].structure)
-    let src = source(id, m.encoding)
+    let src = source_id(id, m.encoding)
     if let Some(o) = m.orientation {
         r.publications[pi].orientation = Some(o)
     }
@@ -847,7 +847,7 @@ fn control(mut r: Router, now: u64, mi: u64, take c: peer.ControlIn, mut out: pe
                 if r.publications[pi].encodings[e].ssrc != info.ssrc {
                     continue
                 }
-                let src = source(r.publications[pi].id, int.narrow(e))
+                let src = source_id(r.publications[pi].id, int.narrow(e))
                 let id = r.publications[pi].id
                 let mut remote = 0u64
                 for d in 0u64 .. list.len(r.downs) {

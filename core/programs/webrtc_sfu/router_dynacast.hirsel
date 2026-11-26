@@ -126,7 +126,7 @@ fn local_mask(r: Router, pi: u64) -> u8 {
         let track = r.downs[d].track
         let pending = peer.pending(r.members[mi].session, track)
         for e in 0u64 .. n {
-            let src = source(id, int.narrow(e))
+            let src = source_id(id, int.narrow(e))
             if pending == Some(src) || peer.current_layer(r.members[mi].session, track, src) != None {
                 mask = mask | (1u64 << e)
             }

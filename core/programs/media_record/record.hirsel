@@ -97,8 +97,6 @@ pub opaque type Recorder {
 
 const NS: i64 = 1000000000
 
-const ENCODINGS: u64 = 4
-
 pub fn recorder(random: Random, config: Config) -> Result[Recorder, webrtc_sfu.router.RouterError] {
     let out = webrtc_sfu.peer.outbox(1500, 1) ?=> |take e| Peer(e)
     let empty: Bytes = list.new()
@@ -239,8 +237,8 @@ fn open(mut rec: Recorder, d: webrtc_sfu.router.DownInfo) {
     } else {
         48000u64
     }
-    let mut syncs: List[rtp_jitter.sync.Sync] = list.new()
-    for _ in 0u64 .. ENCODINGS {
+    let mut syncs: List[rtp_jitter.sync.Sync] = list.with_capacity(webrtc_sfu.router.ENCODINGS_MAX)
+    for _ in 0u64 .. webrtc_sfu.router.ENCODINGS_MAX {
         list.push(mut syncs, rtp_jitter.sync.new(rate))
     }
     let file = rec.next_file
@@ -356,19 +354,15 @@ fn media(mut rec: Recorder, now: u64, room: webrtc_sfu.peer.RoomId, p: webrtc_sf
     }
 }
 
-// RTP-11's source of a sender report is publication id × 4 + encoding.
 fn sender(mut rec: Recorder, room: webrtc_sfu.peer.RoomId, p: webrtc_sfu.router.PublicationId, owner: webrtc_sfu.peer.Gen, source: u32, info: rtp.rtcp.SenderInfo) {
     if webrtc_sfu.router.fenced(rec.r, room, owner) || webrtc_sfu.router.suspended(rec.r, room) {
         rec.counts.stale += 1
         return
     }
-    let PublicationId(n) = p
-    let wide: u64 = int.widen(source)
-    if wide / ENCODINGS != n {
+    let Some(e) = webrtc_sfu.router.source_encoding(p, source) else {
         rec.counts.stale += 1
         return
     }
-    let e = wide % ENCODINGS
     for i in 0u64 .. list.len(rec.tracks) {
         if rec.tracks[i].seat.room != room || rec.tracks[i].seat.publication != p || rec.tracks[i].seat.owner != owner {
             continue

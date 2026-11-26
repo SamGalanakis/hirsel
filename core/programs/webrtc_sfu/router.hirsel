@@ -301,7 +301,8 @@ pub opaque type Router {
     pool: Option[PoolBounds]
 }
 
-const ENCODINGS_MAX: u64 = 4
+/// The maximum encodings per publication and the stride of RTP-11 source IDs.
+pub const ENCODINGS_MAX: u64 = 4
 
 const RING_SLOT: u64 = 1500
 
@@ -681,11 +682,21 @@ fn add_publication(mut r: Router, room: peer.RoomId, who: peer.Gen, section: u8,
     Ok(shape)
 }
 
-// RTP-11's source key of encoding `e` of publication index `pi`.
-fn source(p: PublicationId, e: u8) -> u32 {
+/// RTP-11's source ID for encoding `e` of publication `p`.
+pub fn source_id(p: PublicationId, e: u8) -> u32 {
     let PublicationId(n) = p
     let wide: u64 = int.widen(e)
     int.truncate(n * ENCODINGS_MAX + wide)
+}
+
+/// The encoding that `source` names within `p`, when it names this publication.
+pub fn source_encoding(p: PublicationId, source: u32) -> Option[u64] {
+    let PublicationId(n) = p
+    let wide: u64 = int.widen(source)
+    if wide / ENCODINGS_MAX != n {
+        return None
+    }
+    Some(wide % ENCODINGS_MAX)
 }
 
 /// RTC-6's stable target map: `i = t` clamped to 3 for VP8, `i = 4s + t` with each
@@ -699,7 +710,7 @@ fn rewrite_target(p: Publication, t: Target) -> Option[rtp.rewrite.Target] {
             if p.codec == Av1 {
                 let n: u64 = int.widen(e)
                 let i = av1_target(view p.encodings[n].structure, sid, tid)?
-                return Some(Layer(source: source(p.id, e), target: i))
+                return Some(Layer(source: source_id(p.id, e), target: i))
             }
             let top_t = if tid > 3 {
                 3u8
@@ -716,7 +727,7 @@ fn rewrite_target(p: Publication, t: Target) -> Option[rtp.rewrite.Target] {
                 Vp9 => 4 * top_s + top_t,
                 _ => 0u8,
             }
-            Some(Layer(source: source(p.id, e), target: i))
+            Some(Layer(source: source_id(p.id, e), target: i))
         },
     }
 }

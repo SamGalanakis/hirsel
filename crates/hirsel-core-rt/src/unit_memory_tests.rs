@@ -197,6 +197,8 @@ fn stack_pair_admission_charging_and_guard_pages() {
     )
     .unwrap();
     plan.idle_release_ms = 20;
+    // Only recycling contributes retained bytes in this fixture.
+    plan.pair_refill_batch = 0;
     let pollers = hirsel_core_net::slot_readiness_pollers(2, here).unwrap();
     // SAFETY: Rust fixture with no capability operands.
     let config: crate::entry::OsConfig = unsafe { std::mem::zeroed() };
@@ -232,11 +234,9 @@ fn stack_pair_admission_charging_and_guard_pages() {
             // Spawn 8 helpers and hold them until all are admitted and running.
             let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
             let entered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let done = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
             for _ in 0..8 {
                 let hold = hold.clone();
                 let entered = entered.clone();
-                let done = done.clone();
                 assert!(
                     super::super::spawn_job(Box::new(move || {
                         let me = super::super::running().unwrap();
@@ -249,9 +249,6 @@ fn stack_pair_admission_charging_and_guard_pages() {
                         }
                         while hold.load(Ordering::Acquire) {
                             super::super::park(Some(super::super::now() + 1_000_000));
-                        }
-                        if done.fetch_add(1, Ordering::AcqRel) + 1 == 8 {
-                            super::super::wake(owner);
                         }
                     }))
                     .is_ok()
@@ -266,25 +263,24 @@ fn stack_pair_admission_charging_and_guard_pages() {
                 memory.admitted_bytes.load(Ordering::Acquire),
                 9 * pair_bytes
             );
-            check_retention_accounting(memory);
+            // No worker is moving pairs while all helpers hold their stacks.
+            // Sample on the memory thread to serialize with idle purging.
+            memory.map(move || check_retention_accounting(memory));
 
             hold.store(false, Ordering::Release);
-            while done.load(Ordering::Acquire) < 8 {
-                super::super::park(Some(super::super::now() + 1_000_000));
-            }
-            // Wait briefly for the final helper units to finish After::Done.
-            while memory.admitted_bytes.load(Ordering::Acquire) > pair_bytes {
+            // After::Done recycles the stacks before retiring the live unit.
+            while super::super::LIVE.load(Ordering::Acquire) != 1 {
                 super::super::park(Some(super::super::now() + 1_000_000));
             }
             assert_eq!(memory.admitted_bytes.load(Ordering::Acquire), pair_bytes);
-            assert!(
-                check_retention_accounting(memory) > 0,
-                "recycled pairs should be retained in worker/shared stock"
-            );
+            memory.map(move || check_retention_accounting(memory));
+            let peak = memory.retained_peak.load(Ordering::Acquire);
+            assert!(peak > 0, "recycled pairs should enter worker/shared stock");
+            assert!(peak <= memory.plan.retained_bytes);
 
             // Idle purge must drain per-worker stocks as well as shared retention.
             super::super::park(Some(super::super::now() + 200_000_000));
-            assert_eq!(check_retention_accounting(memory), 0);
+            assert_eq!(memory.map(move || check_retention_accounting(memory)), 0);
             assert!(!memory.has_retained());
             0
         },

@@ -86,9 +86,9 @@ impl ServerCertVerifier for Deferred {
 }
 
 #[derive(Debug)]
-struct ProviderClock {
+pub(super) struct ProviderClock {
     #[cfg(all(test, target_vendor = "apple"))]
-    now: Option<UnixTime>,
+    pub(super) now: Option<UnixTime>,
 }
 
 impl TimeProvider for ProviderClock {

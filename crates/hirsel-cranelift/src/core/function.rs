@@ -378,20 +378,15 @@ pub(super) fn emit(
                 if !body.parked_returns.contains(&BlockId(i as u32)) {
                     f.law_leave(true)?;
                 }
-                let override_return = f.store_teardown_return()?;
                 let mut results = std::mem::take(&mut f.calls.results);
                 results.clear();
-                if let Some(value) = override_return {
-                    results.push(value);
-                } else {
-                    results.extend(
-                        range
-                            .get(&body.pools.values)
-                            .unwrap()
-                            .iter()
-                            .flat_map(|&v| f.parts(v)),
-                    );
-                }
+                results.extend(
+                    range
+                        .get(&body.pools.values)
+                        .unwrap()
+                        .iter()
+                        .flat_map(|&v| f.parts(v)),
+                );
                 if let Some(record) = signature.record {
                     if body.parked_returns.contains(&BlockId(i as u32)) {
                         results.extend(record.fields().iter().map(|&(_, t)| f.bits(t, 0)));

@@ -25,7 +25,7 @@ impl FunctionEmitter<'_> {
         if block == 0
             && self.module.store_teardown
             && let Some(func) = self.function
-            && let Some(hook) = hirsel_core_ir::law::store_teardown_hook(
+            && hirsel_core_ir::law::is_store_teardown_hook(
                 &self.module.instances[self.module.functions[func.index()].instance.index()]
                     .definition,
             )
@@ -34,32 +34,19 @@ impl FunctionEmitter<'_> {
                 .params
                 .get(&self.body.pools.values)
                 .unwrap();
-            match hook {
-                hirsel_core_ir::law::StoreTeardownHook::CheckDb => {
-                    let db = self.numeric(params[0]);
-                    let failed = self.runtime(
-                        "hirsel_core_test_db_teardown",
-                        Type::I8,
-                        &[
-                            ptr(CONTEXT),
-                            ptr(db),
-                            (Type::I64.into(), self.caller_site.clone()),
-                        ],
-                        &CallAttrs::default(),
-                    );
-                    let failed = self.cmp(Predicate::Ne, &Type::I8, &failed, &int(0));
-                    self.branch_failure(&failed, None, None);
-                }
-                hirsel_core_ir::law::StoreTeardownHook::OptOut => {
-                    let hi = self.numeric(params[0]);
-                    let lo = self.numeric(params[1]);
-                    self.runtime_void(
-                        "hirsel_core_test_db_opt_out",
-                        &[(Type::I64.into(), hi), (Type::I64.into(), lo)],
-                    );
-                }
-                hirsel_core_ir::law::StoreTeardownHook::IsOptedOut => {}
-            }
+            let db = self.numeric(params[0]);
+            let failed = self.runtime(
+                "hirsel_core_test_db_teardown",
+                Type::I8,
+                &[
+                    ptr(CONTEXT),
+                    ptr(db),
+                    (Type::I64.into(), self.caller_site.clone()),
+                ],
+                &CallAttrs::default(),
+            );
+            let failed = self.cmp(Predicate::Ne, &Type::I8, &failed, &int(0));
+            self.branch_failure(&failed, None, None);
         }
         if self
             .law
@@ -70,31 +57,6 @@ impl FunctionEmitter<'_> {
             self.law_hook(law.callee, law.entry.operation, Some(&law.entry));
             self.law = Some(law);
         }
-    }
-
-    pub(super) fn store_teardown_return(&mut self) -> Option<Value> {
-        if self.module.store_teardown
-            && let Some(func) = self.function
-            && hirsel_core_ir::law::store_teardown_hook(
-                &self.module.instances[self.module.functions[func.index()].instance.index()]
-                    .definition,
-            ) == Some(hirsel_core_ir::law::StoreTeardownHook::IsOptedOut)
-        {
-            let params = self.body.blocks[0]
-                .params
-                .get(&self.body.pools.values)
-                .unwrap();
-            let hi = self.numeric(params[0]);
-            let lo = self.numeric(params[1]);
-            let value = self.runtime(
-                "hirsel_core_test_db_is_opted_out",
-                Type::I8,
-                &[(Type::I64.into(), hi), (Type::I64.into(), lo)],
-                &CallAttrs::default(),
-            );
-            return Some(value);
-        }
-        None
     }
 
     pub(super) fn law_leave(&mut self, returned: bool) {

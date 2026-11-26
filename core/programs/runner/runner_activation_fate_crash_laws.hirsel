@@ -63,6 +63,9 @@ fn fate_crash_case(c: Clock, r: Random, tasks: Tasks, site: u64) -> FateCrashCut
     if let Ok(take db2) = store.open(tasks, dir2, c, r, triggers.law_options()) {
         let mut installing = take db2
         let _ = head_prepare(mut installing, Install(fate_crash_flags()), false, placing_at(code.describe(fate_law_r2), n_place), None, code.describe(trigger_law_schema), n_place, tasks)
+        if let Some(Other(5)) = store.observe_teardown_poison(mut installing) {
+            store.allow_unverified_teardown(mut installing)
+        }
         let _ = store.close(take installing)
     }
     let (cut_image, after) = fate_crash_unmount(take dir2, take server2)

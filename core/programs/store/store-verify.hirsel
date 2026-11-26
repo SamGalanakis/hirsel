@@ -467,23 +467,25 @@ fn walk_check_entry_row(extractor: RegisteredIndex, entry_key: Bytes, raw: Bytes
     Ok(Some(Extra))
 }
 
-// Test-build hook points: inert in production builds; lowered by the compiler
-// in `@test` builds to `hirsel_core_test_db_*`.
+// The compiler inserts the verifier call in test builds.
 fn teardown_hook(db: Db) {
     if list.len(db.heads) == 18446744073709551615u64 {
         fail("store trust teardown")
     }
 }
 
-pub fn allow_unverified_teardown(hi: u64, lo: u64) {
-    let _ = hi
-    let _ = lo
+// Applies to this handle's test teardown, even if recovery reuses the same
+// store identity and journal segment number.
+pub fn allow_unverified_teardown(mut db: Db) {
+    db.skip_test_teardown = true
 }
 
-fn teardown_opted_out(hi: u64, lo: u64) -> bool {
-    let _ = hi
-    let _ = lo
-    false
+// Observe journal poison that close would collect before running the verifier.
+pub fn observe_teardown_poison(mut db: Db) -> Option[IoError] waits {
+    if is_disk(db) {
+        let _ = drain_close_journal(mut db)
+    }
+    journal_poison(db)
 }
 
 fn teardown_fault_name(fault: WalkFault) -> String {
@@ -567,10 +569,7 @@ fn teardown_validate_bucket_checkpoint(mut client: std.object.Client, head: Hist
 
 // Registered by the test launcher (`native_entry/start.rs`) only in `@test` builds.
 fn verify_teardown(db: Db) waits {
-    if list.len(db.heads) == 0 {
-        return
-    }
-    if teardown_opted_out(db.store.hi, db.store.lo) {
+    if db.skip_test_teardown || list.len(db.heads) == 0 {
         return
     }
     if let Some(state) = view db.disk {

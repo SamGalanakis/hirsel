@@ -135,7 +135,7 @@ fn disk_test_scrub_misdirected(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
     if get(result.unwrap(reader(db, 0u64)), snapshot(db), t, 1999)? != Some(1999u64) {
         return Error(MigrationFault)
     }
-    trust_opt_out("scrub/misdirected", db)
+    trust_opt_out("scrub/misdirected", mut db)
     close(take db)
 }
 
@@ -178,7 +178,7 @@ fn disk_test_scrub_damage_budget(d: Dir, c: Clock, r: Random, tasks: Tasks) -> R
         fail("the partial header must spend its seven bytes before the next pack")
     }
     drop(take tour)
-    trust_opt_out("scrub/damage-budget", db)
+    trust_opt_out("scrub/damage-budget", mut db)
     close(take db)
 }
 
@@ -606,6 +606,7 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     now = clean_status.next_due_ms
     clock.set_wall(mut wall, now)
     let mut bad_done: Option[ScrubRound] = None
+    let mut saw_damage = false
     guard = 0u64
     while let None = bad_done {
         guard += 1
@@ -613,6 +614,11 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
             fail("faulty paced tour did not finish")
         }
         let res = scrub_pacer_step(mut pacer, mut db, now)?
+        for fault in res.faults {
+            if scrub_fault_is(fault, live_data_pack, 72, Checksum)? {
+                saw_damage = true
+            }
+        }
         if let Some(round) = res.completed {
             bad_done = Some(round)
         } else {
@@ -623,9 +629,10 @@ fn disk_test_scrub_paced_and_history(d: Dir, r: Random, tasks: Tasks) -> Result[
     let Some(faulty_round) = bad_done else {
         fail("expected completed faulty round")
     }
-    if !faulty_round.complete || faulty_round.faults == 0u64 {
-        fail("corrupted pack must produce faults > 0")
+    if !faulty_round.complete || faulty_round.faults == 0u64 || !saw_damage {
+        fail("faulty tour must report the corrupted pack frame")
     }
+    trust_opt_out("scrub/paced-history", mut db)
     let after_fault = scrub_pacer_status(pacer, now)
     if after_fault.last_clean_ms != Some(clean_round.ended_ms) {
         fail("faulty tour must never refresh last_clean_ms")

@@ -4,16 +4,12 @@
 use crate::{Context, limit::Funding};
 use std::{
     cell::Cell,
-    sync::{
-        Mutex,
-        atomic::{AtomicPtr, Ordering},
-    },
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 type TeardownFn = unsafe extern "C" fn(*mut Context, *const u8, u64) -> u8;
 
 static TEARDOWN_FN: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
-static OPTED_OUT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
 thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
@@ -23,23 +19,6 @@ thread_local! {
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_test_db_teardown_register(f: *const ()) {
     TEARDOWN_FN.store(f.cast_mut(), Ordering::Release);
-}
-
-/// Mark a `StoreId` (or `(0, 0)` for the whole test process) as opted out of
-/// automatic teardown verification.
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_test_db_opt_out(hi: u64, lo: u64) {
-    let mut list = OPTED_OUT.lock().unwrap();
-    if !list.contains(&(hi, lo)) {
-        list.push((hi, lo));
-    }
-}
-
-/// Query whether `(hi, lo)` (or the whole test process via `(0, 0)`) opted out.
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_test_db_is_opted_out(hi: u64, lo: u64) -> u8 {
-    let list = OPTED_OUT.lock().unwrap();
-    u8::from(list.contains(&(0, 0)) || list.contains(&(hi, lo)))
 }
 
 /// Run the registered `store@1/store/verify_teardown(db)` on a live `Db` during

@@ -410,7 +410,7 @@ fn test_f3_corrupt_fold_refuses_the_call(d: Dir, c: Clock, r: Random, tasks: Tas
         },
         _ => fail("F3: a write over a corrupt fold returns Corrupt"),
     }
-    trust_opt_out("tiered/corrupt-fold", replayed)
+    trust_opt_out("tiered/corrupt-fold", mut replayed)
     let _ = close(take replayed)
     Ok(())
 }

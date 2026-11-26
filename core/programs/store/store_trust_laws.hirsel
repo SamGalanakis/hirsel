@@ -111,21 +111,18 @@ fn trust_expected_reopen_fault(case: String, problem: Error) -> bool {
 }
 
 fn trust_allows_teardown_opt_out(case: String) -> bool {
-    case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf" || case == "journal/poison" || case == "follower-crash/enospc" || case == "teardown/opt-out-control" || case == "crash-sim/fault"
+    case == "L69/seeded-write" || case == "scrub/misdirected" || case == "scrub/damage-budget" || case == "tiered/corrupt-fold" || case == "catchup/settled-leaf" || case == "journal/poison" || case == "follower-crash/enospc" || case == "teardown/opt-out-control" || case == "teardown/session-scope" || case == "scrub/paced-history" || case == "crash-sim/fault"
 }
 
-fn trust_opt_out(case: String, db: Db) {
+fn trust_require_opt_out(case: String) {
     if !trust_allows_teardown_opt_out(case) {
         fail("store trust: unlisted teardown opt-out")
     }
-    allow_unverified_teardown(db.store.hi, db.store.lo)
 }
 
-fn trust_opt_out_world(case: String) {
-    if !trust_allows_teardown_opt_out(case) {
-        fail("store trust: unlisted teardown opt-out")
-    }
-    allow_unverified_teardown(0u64, 0u64)
+fn trust_opt_out(case: String, mut db: Db) {
+    trust_require_opt_out(case)
+    allow_unverified_teardown(mut db)
 }
 
 // One shared fault gate for every seeded store law: unexpected Corrupt or
@@ -236,6 +233,14 @@ type TeardownBucketCase: send {
     endpoint: std.sim.s3.Endpoint
 }
 
+type TeardownSessionCase: send {
+    d: Dir,
+    c: Clock,
+    r: Random,
+    tasks: Tasks,
+    id: StoreId
+}
+
 fn trust_teardown_mem_case(take job: TeardownMemCase) -> Result[(), Error] waits {
     let mut mem_fx = walk_fixture(job.c)?
     walk_edit(mut mem_fx.db, mem_fx.bucket.id, walk_entry(3, Some(3)), None)?
@@ -266,6 +271,38 @@ fn trust_teardown_bucket_case(take job: TeardownBucketCase) -> Result[(), Error]
     let _ = checkpoint(mut bad_bucket)?
     walk_edit(mut bad_bucket, by_v.id, walk_entry(20, Some(2)), None)?
     Ok(())
+}
+
+fn trust_indexed_schema(mut decl: Declare) -> Result[(Table[u64, u64], Index[u64, u64, u64, ()]), Error] {
+    let mut items = declare_table(mut decl, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let by_v = index(mut decl, mut items, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let rows = finish(mut decl, take items)?
+    Ok((rows, by_v))
+}
+
+fn trust_teardown_session_reopen_case(take job: TeardownSessionCase) -> Result[(), Error] waits {
+    let mut reopened = open(job.tasks, job.d, job.c, job.r, disk_crash_options("checkpoint"))?
+    if identity(reopened) != job.id {
+        fail("store trust: the reopened session has a different StoreId")
+    }
+    let (_, by_v) = bind_declaration(mut reopened, Open, trust_indexed_schema)?
+    walk_edit(mut reopened, by_v.id, walk_entry(20, Some(2)), None)?
+    Ok(())
+}
+
+fn trust_indexed_directory_fixture(tasks: Tasks, d: Dir, c: Clock, r: Random) -> Result[(Db, Table[u64, u64]), Error] waits {
+    let mut db = open(tasks, d, c, r, disk_crash_options("checkpoint"))?
+    let mut decl = declare(db, Migrate)?
+    let (rows, _) = trust_indexed_schema(mut decl)?
+    let _ = seal(mut db, take decl)?
+    for k in 1u64 .. 5 {
+        if !typed_put(mut db, rows, k, k * 10) {
+            return Error(Foreign)
+        }
+    }
+    let cut = checkpoint(mut db)?
+    durable(mut db, cut)?
+    Ok((take db, rows))
 }
 
 // Red before universal teardown: a @test world leaves a corrupted index binding
@@ -309,14 +346,47 @@ fn test_teardown_catches_corrupt_live_db(c: Clock, d: Dir, r: Random, tasks: Tas
     // unlisted case is rejected.
     let mut opted = walk_fixture(c)?
     walk_edit(mut opted.db, opted.bucket.id, walk_entry(3, Some(3)), None)?
-    trust_opt_out("teardown/opt-out-control", opted.db)
+    trust_opt_out("teardown/opt-out-control", mut opted.db)
     drop(take opted)
     let rejected_opt_out = result.unwrap(isolate(scoped fn() {
-        trust_opt_out_world("not-in-allowlist")
+        trust_require_opt_out("not-in-allowlist")
     }))
     match rejected_opt_out {
         Error(causes) if trust_causes_contain(causes, "unlisted teardown opt-out") => (),
         _ => fail("store trust: unlisted opt-out must fail"),
+    }
+    Ok(())
+}
+
+// A session opt-out is not a StoreId opt-out: session A's intentional poison is
+// exempt, then the same directory is reopened as session B and B's own corrupted
+// index still turns its teardown red.
+@test
+fn test_teardown_session_opt_out_does_not_leak(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let directory = disk_test_directory(d)
+    let (take initial, rows) = trust_indexed_directory_fixture(tasks, directory, c, r)?
+    let mut first = take initial
+    let id = identity(first)
+    fixture_broken_handoff(mut first)
+    let failed = run(mut first, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 9u64, 90u64)
+    })
+    match failed {
+        Error(Poisoned(Closed)) => (),
+        _ => fail("store trust: session fixture did not poison session A"),
+    }
+    trust_opt_out("teardown/session-scope", mut first)
+    match close(take first) {
+        Error(Poisoned(Closed)) => (),
+        _ => fail("store trust: session A close did not report its poison"),
+    }
+    let reopened_case = task.spawn(tasks, bytes 33554432, TeardownSessionCase(d: directory, c, r, tasks, id), trust_teardown_session_reopen_case)
+    match task.join(take reopened_case) {
+        Error(Failed(causes)) if trust_causes_contain(causes, "index by_v fault Missing") => (),
+        Error(Failed(_)) => fail("store trust: reopened session B failed without its index fault"),
+        Ok(Error(_)) => fail("store trust: reopened session B setup failed"),
+        Ok(Ok(())) => fail("store trust: session A exemption leaked into reopened session B"),
+        _ => fail("store trust: reopened session B join had an unexpected shape"),
     }
     Ok(())
 }

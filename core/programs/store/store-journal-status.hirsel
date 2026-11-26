@@ -135,17 +135,29 @@ fn open_directory(tasks: Tasks, d: Dir, c: Clock, r: Random, options: Options, c
     open_started(tasks, d, c, options, cadence_spec, take session)
 }
 
+fn journal_poison(db: Db) -> Option[IoError] {
+    match db.disk {
+        Some(state) => state.poison,
+        None => None,
+    }
+}
+
+fn drain_close_journal(mut db: Db) -> Result[(), Error] waits {
+    if let Some(_) = journal_poison(db) {
+        return Ok(())
+    }
+    let last_frame = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
+    durable(mut db, last_frame)
+}
+
 pub fn close(take db: Db) -> Result[(), Error] waits {
     let mut owned = take db
     if !is_disk(owned) {
         return Ok(())
     }
     let mut failure: Option[Error] = None
-    if let None = journal_poison(owned) {
-        let last_frame = Ticket(store: owned.store, open: open_number(owned), mark: Journal(owned.frame_seq, 0, 0))
-        if let Error(take e) = durable(mut owned, last_frame) {
-            failure = Some(take e)
-        }
+    if let Error(take e) = drain_close_journal(mut owned) {
+        failure = Some(take e)
     }
     if let None = failure {
         let (attached, has_sealed) = match owned.disk {

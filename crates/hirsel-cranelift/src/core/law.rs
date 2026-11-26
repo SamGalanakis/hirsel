@@ -25,39 +25,22 @@ impl Function<'_, '_, '_> {
     pub(super) fn law_enter(&mut self, block: usize) -> Result<()> {
         if block == 0
             && self.input.store_teardown
-            && let Some(hook) = c::law::store_teardown_hook(&self.instance.definition)
+            && c::law::is_store_teardown_hook(&self.instance.definition)
         {
             let params = self.body.blocks[0]
                 .params
                 .get(&self.body.pools.values)
                 .unwrap();
-            match hook {
-                c::law::StoreTeardownHook::CheckDb => {
-                    let db = self.get(params[0]);
-                    let status = self.calls.c(
-                        self.object,
-                        &mut self.b,
-                        "hirsel_core_test_db_teardown",
-                        &[Ty::Ptr, Ty::Ptr, Ty::Scalar(Scalar::U64)],
-                        &[Ty::Scalar(Scalar::Bool)],
-                        &[self.context, db, self.caller_site],
-                    )?[0];
-                    self.call_failure(status, None)?;
-                }
-                c::law::StoreTeardownHook::OptOut => {
-                    let hi = self.get(params[0]);
-                    let lo = self.get(params[1]);
-                    self.calls.c(
-                        self.object,
-                        &mut self.b,
-                        "hirsel_core_test_db_opt_out",
-                        &[Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
-                        &[],
-                        &[hi, lo],
-                    )?;
-                }
-                c::law::StoreTeardownHook::IsOptedOut => {}
-            }
+            let db = self.get(params[0]);
+            let status = self.calls.c(
+                self.object,
+                &mut self.b,
+                "hirsel_core_test_db_teardown",
+                &[Ty::Ptr, Ty::Ptr, Ty::Scalar(Scalar::U64)],
+                &[Ty::Scalar(Scalar::Bool)],
+                &[self.context, db, self.caller_site],
+            )?[0];
+            self.call_failure(status, None)?;
         }
         if self
             .law
@@ -69,30 +52,6 @@ impl Function<'_, '_, '_> {
             self.law = Some(law);
         }
         Ok(())
-    }
-
-    pub(super) fn store_teardown_return(&mut self) -> Result<Option<Value>> {
-        if self.input.store_teardown
-            && c::law::store_teardown_hook(&self.instance.definition)
-                == Some(c::law::StoreTeardownHook::IsOptedOut)
-        {
-            let params = self.body.blocks[0]
-                .params
-                .get(&self.body.pools.values)
-                .unwrap();
-            let hi = self.get(params[0]);
-            let lo = self.get(params[1]);
-            let value = self.calls.c(
-                self.object,
-                &mut self.b,
-                "hirsel_core_test_db_is_opted_out",
-                &[Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
-                &[Ty::Scalar(Scalar::Bool)],
-                &[hi, lo],
-            )?[0];
-            return Ok(Some(value));
-        }
-        Ok(None)
     }
 
     pub(super) fn law_leave(&mut self, returned: bool) -> Result<()> {

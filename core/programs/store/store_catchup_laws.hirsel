@@ -572,7 +572,7 @@ fn lcu_case(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, rounds: String
         if !in_place {
             fail("L-IX catch-up: the install keeps the damaged leaf in place")
         }
-        trust_opt_out("catchup/settled-leaf", db)
+        trust_opt_out("catchup/settled-leaf", mut db)
         deploy_result(close(take db))?
         match open(tasks, directory, c, r, options) {
             Error(Corrupt(Fault(file: file, offset: at, why: Checksum))) if file == name && at == leaf.offset => return Ok(()),

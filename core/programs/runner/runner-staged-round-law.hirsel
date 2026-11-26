@@ -391,6 +391,7 @@ fn staged_socket_trial(take opened: store.Db, random: Random, tasks: Tasks, tria
         if let Error(Poisoned(Closed)) = release_held(mut hd, true) {} else {
             return Error("L61 durable did not report poison")
         }
+        store.allow_unverified_teardown(mut hd.db)
         let _ = clock.idle(mut ticks)
         if let Ok(WireEvent(e: FromRunner(take leaked))) = channel.try_receive(peer.inbox) {
             let _ = staged_send(mut peer, mut socket, commands, take leaked)
@@ -426,10 +427,6 @@ fn staged_socket_trial(take opened: store.Db, random: Random, tasks: Tasks, tria
     let _ = take commands
     result.unwrap(task.join(take recorder))
     let Head(db: take completed, ..) = take hd
-    if let Poison = trial {
-        let id = store.identity(completed)
-        store.allow_unverified_teardown(id.hi, id.lo)
-    }
     match store.close(take completed) {
         Ok(()) => (),
         Error(Poisoned(Closed)) => if let Poison = trial {} else {
@@ -758,8 +755,7 @@ fn test_zero_mutation_behind_latch(d: Dir, real: Clock, random: Random, tasks: T
     // Because B's output was never released, history.recovered at pa passes cleanly.
     std.sim.history.check(std.sim.history.recovered(phistory, pa))
     // This arm poisons the store on purpose, so the trust teardown is waived.
-    let pid = store.identity(pdb)
-    store.allow_unverified_teardown(pid.hi, pid.lo)
+    store.allow_unverified_teardown(mut pdb)
     let _ = store.close(take pdb)
     result.unwrap(std.dir.remove_all(d, dir_name))
     Ok(())

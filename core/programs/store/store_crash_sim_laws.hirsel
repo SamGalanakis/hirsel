@@ -624,7 +624,7 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
             return Error(csim_fail(st, take text))
         },
     }
-    let twin = match open(tasks, restored, c, r, clone(options)) {
+    let mut twin = match open(tasks, restored, c, r, clone(options)) {
         Ok(take t) => take t,
         Error(e) => return csim_error(mut st, "open of the restored backup", e, None),
     }
@@ -632,7 +632,7 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
         Ok(take got) => take got,
         Error(bad) => {
             if csim_fault_active(st) {
-                trust_opt_out("crash-sim/fault", twin)
+                trust_opt_out("crash-sim/fault", mut twin)
             }
             drop(take twin)
             return csim_read_error(mut st, "the restored backup", bad)
@@ -729,12 +729,12 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
             if st.write_faults {
                 // Silent write damage can reach the files before any call
                 // reports it; (d) is this law's check for it.
-                trust_opt_out("crash-sim/fault", db)
+                trust_opt_out("crash-sim/fault", mut db)
             }
             match csim_recovered(db, rows, mut st)? {
                 true => (),
                 false => {
-                    trust_opt_out("crash-sim/fault", db)
+                    trust_opt_out("crash-sim/fault", mut db)
                     drop(take db)
                     if st.damage_seen {
                         terminal = true
@@ -761,7 +761,7 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
             }
             list.clear(mut st.held)
             if st.faulted {
-                trust_opt_out("crash-sim/fault", db)
+                trust_opt_out("crash-sim/fault", mut db)
             }
             match after {
                 Go => {

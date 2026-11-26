@@ -398,7 +398,7 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
     })?
     let LoadedPageStore(manifest: take loaded_manifest, lists: take lists, locations: take locations, ..) = take checkpoint_state
     let pages = PageDisk(next_pack: loaded_manifest.next_pack, locations: take locations, lists: take lists, owners: take owners, carried: list.new(), deferred: None, forked: list.new(), compaction: no_tiered_compaction())
-    read_source.admitted_base = Some(HistoryOpenBase(generation: loaded_manifest.generation, fence: loaded_manifest.fence, recorded_after: loaded_manifest.branches[0].version, sweep: loaded_manifest.sweep, pages: take pages))
+    read_source.admitted_base = Some(HistoryOpenBase(generation: loaded_manifest.generation, fence: loaded_manifest.fence, recorded_after: loaded_manifest.branches[0].version, sweep: loaded_manifest.sweep, archive_on: loaded_manifest.archive_on, pages: take pages))
     let mut recovered = take replay
     let base_seq = head.checkpoint.seq
     let mut done_seq = base_seq
@@ -475,6 +475,17 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             HistoryUndecided => return Error(Undecided),
         }
         let mut reg = HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach))
+        let archive_on = match view read_source.admitted_base {
+            Some(base) => base.archive_on,
+            None => 0u64,
+        }
+        if archive_on != 0 {
+            match stream_settle_sealed_core(mut read_source.client, mut reg, authority, mut workspace, link.root, options.claim_ms, int.widen(options.group_bytes), int.widen(options.group_commits))? {
+                SettleApplied => (),
+                SettleFenced(_, _) => return Error(Lost),
+                SettleNotApplied => return Error(Undecided),
+            }
+        }
         history_advance_claim(mut read_source.client, mut reg, authority, mut workspace, deadline)?
         return Ok(Some((take reg, take replay, take admitted, take authority)))
     }
@@ -622,6 +633,17 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             }
         },
         None => {
+            let archive_on = match view read_source.admitted_base {
+                Some(base) => base.archive_on,
+                None => 0u64,
+            }
+            if archive_on != 0 {
+                match stream_settle_sealed_core(mut read_source.client, mut reg, authority, mut workspace, link.root, options.claim_ms, int.widen(options.group_bytes), int.widen(options.group_commits))? {
+                    SettleApplied => (),
+                    SettleFenced(_, _) => return Error(Lost),
+                    SettleNotApplied => return Error(Undecided),
+                }
+            }
             history_advance_claim(mut read_source.client, mut reg, authority, mut workspace, deadline)?
         },
     }

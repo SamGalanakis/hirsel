@@ -90,6 +90,20 @@ fn stream_settle_attach(base: Attach, sid: HostStreamId, inc: u64, from_seq: u64
 // `live.from = (max(next_seq, live.from_seq), 0)`. On a close settle
 // (`drop_attach == true`), the final head write drops ATTACH.
 fn stream_settle(mut lane: ObjectJournalSession, through_seq: u64, next_seq: u64, drop_attach: bool, group_bytes: u64, group_commits: u64) -> Result[SettleOutcome, Error] waits {
+    // Under archival (§12.11.11 M6), no entry is written above `sealed[0].at`
+    // until all sealed tails are rewritten in order via the sealed cursor.
+    if lane.archive_on != 0 {
+        let has_sealed = match view lane.register.attach {
+            Some(a) => list.len(a.sealed) != 0,
+            None => false,
+        }
+        if has_sealed {
+            match stream_settle_sealed(mut lane, group_bytes, group_commits)? {
+                SettleApplied => (),
+                other => return Ok(other),
+            }
+        }
+    }
     let (take root, last_acked, take known_batches): (String, u64, List[u64]) = match lane.stream {
         Some(link) => (string.from(link.root), link.last_batch_seq, clone(link.commit_batches)),
         None => return Ok(SettleApplied),

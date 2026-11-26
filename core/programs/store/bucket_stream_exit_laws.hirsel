@@ -1,0 +1,321 @@
+// Stream exits, export/backup, archival, and sealed-cursor crash laws
+// (STORE-SPEC §12.11.11 M5/M6, §13.9, §12.11.15 L90-E).
+fn exit_attempt(tag: u8) -> Bytes {
+    let mut b: Bytes = list.with_capacity(16)
+    list.fill(mut b, 16, tag)
+    take b
+}
+
+fn exit_open_opts(create: bool, group_commits: u32) -> Options {
+    let mut o = bucket_law_options(create)
+    o.claim_ms = 2000
+    o.group_bytes = 65536
+    o.group_commits = group_commits
+    o
+}
+
+fn exit_open_attached_op(s: BucketSim, tasks: Tasks, r: Random, mut svc: JournalService, host_name: String, seed: u64, place_prefix: String, create: bool, group_commits: u32, op_ms: u64) -> Result[Db, Error] waits {
+    let slot = journal_slot(mut svc)?
+    let client = df_client_host(s.endpoint, s.time, tasks, host_name, seed, place_prefix, 2)?
+    let attached = streamed(object_authority(take client, "bucket", op_ms), take slot)?
+    match open_authority(tasks, take attached, s.time, r, exit_open_opts(create, group_commits)) {
+        Ok(take db) => Ok(take db),
+        Error(Refusal(error: take problem, ..)) => Error(take problem),
+    }
+}
+
+fn exit_open_attached(s: BucketSim, tasks: Tasks, r: Random, mut svc: JournalService, host_name: String, seed: u64, place_prefix: String, create: bool, group_commits: u32) -> Result[Db, Error] waits {
+    exit_open_attached_op(s, tasks, r, mut svc, host_name, seed, place_prefix, create, group_commits, DF_OP_MS)
+}
+
+fn exit_backup_rows(parent: Dir, target: Dir, tasks: Tasks, c: Clock, r: Random) -> Result[u64, Error] waits {
+    let mut opts = bucket_law_options(false)
+    opts.group_bytes = 65536
+    let restored_dir = disk_test_directory(parent)
+    match restore(target, restored_dir, c, opts) {
+        Ok(_) => (),
+        Error(_) => fail("L90-E: restore(backup) failed"),
+    }
+    let mut restored = open(tasks, restored_dir, c, r, opts)?
+    let n = bucket_law_rows(mut restored)?
+    close(take restored)?
+    Ok(n)
+}
+
+// Finds the unique archive segment `a-<c>-<e>-<digest>` under `place_prefix`,
+// decodes it via `history_decode_archive_segment`, and replays its named
+// entries from the checkpoint in exact segment order, returning the count of
+// consecutive `rows` keys 1..N recovered strictly in history order.
+fn exit_verify_archive_segment(report: std.sim.s3.Report, place_prefix: String, store: StoreId) -> Result[(u64, u64), Error] {
+    let seg_prefix = stream_key(place_prefix, "a-")
+    let mut seg_key: Option[String] = None
+    let mut seg_raw: Bytes = list.new()
+    for (k, obj) in report.objects {
+        if string.starts_with(k, seg_prefix) {
+            seg_key = Some(string.from(k))
+            seg_raw = copied(obj.data)?
+        }
+    }
+    let Some(take found_key) = take seg_key else {
+        fail("L90-E: archive segment a-* missing after archival cut")
+    }
+    let short_name = string.from(string.slice(found_key, string.byte_len(place_prefix), string.byte_len(found_key)))
+    let Some(parsed) = history_parse_archive_name(short_name) else {
+        fail("L90-E: archive segment key failed history_parse_archive_name")
+    }
+    let seg_ref = HistoryRef(seq: parsed.seq, epoch: parsed.epoch, len: list.len(seg_raw), digest: parsed.digest)
+    let seg_entries = history_decode_archive_segment(found_key, store, seg_ref, seg_raw)?
+    if list.len(seg_entries) < 2 {
+        fail("L90-E: archive segment named fewer than 2 entries")
+    }
+    // Verify ascending positions and that every named entry exists in the bucket
+    // and decodes cleanly, counting total commit frames in exact segment order.
+    let mut commit_frames = 0u64
+    let mut expected_seq = seg_entries[0u64].seq
+    for i in 0u64 .. list.len(seg_entries) {
+        let item = seg_entries[i]
+        if item.seq != expected_seq {
+            fail("L90-E: archive segment entry positions not contiguous/ascending")
+        }
+        expected_seq += 1
+        let ekey = stream_key(place_prefix, history_key("e-", item))
+        let Some(eobj) = map.get(report.objects, ekey) else {
+            fail("L90-E: archive segment names missing entry object")
+        }
+        let (ctx, _) = history_entry_context(ekey, store, item, eobj.data)?
+        history_object_digest(ekey, item, eobj.data)?
+        if i > 0 {
+            let mut at = 112u64
+            while at < list.len(eobj.data) {
+                let frame = disk_frame_bytes(ekey, ctx, eobj.data, at)?
+                if frame.kind == 0x0011 || frame.kind == 0x0013 {
+                    commit_frames += 1
+                }
+                at = frame.end
+            }
+        }
+    }
+    Ok((list.len(seg_entries), commit_frames))
+}
+
+// L90-E (exits, M5, M6):
+// 1. Export/backup with `sealed` empty settles, keeps ATTACH, exports all rows,
+//    and the holder keeps serving.
+// 2. Export/backup with `sealed` non-empty runs a cut: returns the cut's refusal
+//    if refused, or cuts and exports when admitted, keeping ATTACH.
+// 3. With archival on (`archive(true)`), a cut's segment `a-*` names every
+//    commit of the window (sealed tails + live tail) in exact history order.
+// 4. Crash point: with archival on and two sealed tails, the first needing two
+//    GROUP entries (`group_commits = 1`), crash after the first entry's head
+//    write; next open holds each commit exactly once, and a cut then archives it.
+@test
+fn bucket_stream_exits_and_archival(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    exit_l90_e_export_and_archival(d, c, r, tasks)?
+    exit_l90_e_sealed_cursor_crash(c, r, tasks)
+}
+
+fn exit_l90_e_export_and_archival(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = df_complete_expired_sim(tasks, c, 9098)
+    let outcome = exit_l90_e_export_run(d, s, tasks, c, r)
+    let report = bucket_law_report(take s)
+    let p3_store = outcome?
+    let (_, commits_in_seg) = exit_verify_archive_segment(report, string.from("p3/"), p3_store)?
+    if commits_in_seg != 3 {
+        fail("L90-E: archival cut segment did not cover all 3 commits (2 sealed + 1 live)")
+    }
+    Ok(())
+}
+
+fn exit_l90_e_export_run(d: Dir, s: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[StoreId, Error] waits {
+    let sid_clean = HostStreamId(hi: 0x4142434445464748, lo: 0x494a4b4c4d4e4f50)
+    let mut svc_clean = df_start_service_host(s, tasks, r, "spare.test", 601, sid_clean, 10, 0, DF_OP_MS)?
+    let mut svc_bad = df_start_service_host(s, tasks, r, "s3.test", 602, df_sid_b(), 10, 0, DF_OP_MS)?
+    // --- Variant 1: Export/backup with `sealed` empty settles and keeps ATTACH ---
+    let mut p1 = exit_open_attached(s, tasks, r, mut svc_clean, "spare.test", 603, string.from("p1/"), true, 4)?
+    bucket_law_commit(mut p1, 1)?
+    bucket_law_commit(mut p1, 2)?
+    let dir1 = disk_test_directory(d)
+    let att1 = exit_attempt(1u8)
+    let job1 = match begin_backup(mut p1, dir1, copied(att1)?) {
+        Ok(take j) => take j,
+        Error(_) => fail("L90-E(1): begin_backup failed with empty sealed"),
+    }
+    let _ = match export_copy(take job1) {
+        Ok(take done) => take done,
+        Error(_) => fail("L90-E(1): export_copy failed"),
+    }
+    release_export(mut p1, att1)
+    let (_, attach1) = df_head_attach_live(s, tasks, "spare.test", 604, string.from("p1/"))?
+    let Some(a1) = attach1 else {
+        fail("L90-E(1): export with empty sealed dropped ATTACH")
+    }
+    let still_live1 = match a1.live {
+        Some(_) => true,
+        None => false,
+    }
+    if !still_live1 || a1.settles == 0 {
+        fail("L90-E(1): export with empty sealed did not settle keeping ATTACH")
+    }
+    if exit_backup_rows(d, dir1, tasks, c, r)? != 2 {
+        fail("L90-E(1): exported backup missing settled live-tail commits")
+    }
+    // Holder keeps serving with ATTACH intact.
+    bucket_law_commit(mut p1, 3)?
+    if bucket_law_rows(mut p1)? != 3 {
+        fail("L90-E(1): holder stopped serving after export")
+    }
+    close(take p1)?
+    // --- Variant 2a: Export with `sealed` non-empty returns cut refusal if cut refused ---
+    let mut p2_a = exit_open_attached(s, tasks, r, mut svc_clean, "spare.test", 605, string.from("p2/"), true, 4)?
+    bucket_law_commit(mut p2_a, 1)?
+    let _ = take p2_a
+    // Migrate to svc_bad on "s3.test": forced open-time cut refused -> sealed non-empty!
+    let mut p2_b = exit_open_attached(s, tasks, r, mut svc_bad, "s3.test", 606, string.from("p2/"), false, 4)?
+    let dir2a = disk_test_directory(d)
+    let att2a = exit_attempt(2u8)
+    match begin_backup(mut p2_b, dir2a, copied(att2a)?) {
+        Error(Store(Remote(Uncertain(Status(200, _))))) => (),
+        Ok(_) => fail("L90-E(2a): export succeeded despite refused cut with non-empty sealed"),
+        Error(_) => fail("L90-E(2a): unexpected error on refused-cut export"),
+    }
+    let _ = take p2_b
+    // --- Variant 2b: Export with `sealed` non-empty cuts and exports when cut admitted ---
+    // Reopen p2/ on svc_clean (epoch 3 -> cut succeeds, sealed emptied), commit row 2,
+    // then migrate on SAME svc_clean (epoch 4 -> sealed has 1 entry on same sid -> no open-time cut!),
+    // commit row 3, then export -> cuts, clears sealed, keeps ATTACH, exports all 3 rows!
+    let mut p2_c = exit_open_attached(s, tasks, r, mut svc_clean, "spare.test", 607, string.from("p2/"), false, 4)?
+    bucket_law_commit(mut p2_c, 2)?
+    let _ = take p2_c
+    let mut p2_d = exit_open_attached(s, tasks, r, mut svc_clean, "spare.test", 608, string.from("p2/"), false, 4)?
+    bucket_law_commit(mut p2_d, 3)?
+    let (_, pre_exp_attach) = df_head_attach_live(s, tasks, "spare.test", 609, string.from("p2/"))?
+    let Some(pre_a) = pre_exp_attach else {
+        fail("L90-E(2b): ATTACH missing before export")
+    }
+    if list.len(pre_a.sealed) == 0 {
+        fail("L90-E(2b): expected non-empty sealed before export")
+    }
+    let dir2b = disk_test_directory(d)
+    let att2b = exit_attempt(3u8)
+    let job2b = match begin_backup(mut p2_d, dir2b, copied(att2b)?) {
+        Ok(take j) => take j,
+        Error(_) => fail("L90-E(2b): begin_backup failed with non-empty sealed on clean host"),
+    }
+    let _ = match export_copy(take job2b) {
+        Ok(take done) => take done,
+        Error(_) => fail("L90-E(2b): export_copy failed"),
+    }
+    release_export(mut p2_d, att2b)
+    let (_, post_exp_attach) = df_head_attach_live(s, tasks, "spare.test", 610, string.from("p2/"))?
+    let Some(post_a) = post_exp_attach else {
+        fail("L90-E(2b): export cut dropped ATTACH")
+    }
+    if list.len(post_a.sealed) != 0 {
+        fail("L90-E(2b): export cut did not empty sealed")
+    }
+    if exit_backup_rows(d, dir2b, tasks, c, r)? != 3 {
+        fail("L90-E(2b): exported backup missing rows after cut")
+    }
+    close(take p2_d)?
+    // --- Variant 3: Archival on -> cut segment covers sealed + live in history order ---
+    let mut p3_a = exit_open_attached(s, tasks, r, mut svc_clean, "spare.test", 611, string.from("p3/"), true, 4)?
+    let p3_store = p3_a.store
+    let _ = bucket_law_rows_table(mut p3_a)?
+    let (_, arch_t) = archive(mut p3_a, true)?
+    durable(mut p3_a, arch_t)?
+    // Epoch 1 commits rows 1 & 2, then crashes -> sealed[0].
+    bucket_law_commit(mut p3_a, 1)?
+    bucket_law_commit(mut p3_a, 2)?
+    let _ = take p3_a
+    // Epoch 2 on same svc_clean -> sealed = [tail_1 (rows 1, 2)], commit row 3 (live).
+    let mut p3_b = exit_open_attached(s, tasks, r, mut svc_clean, "spare.test", 612, string.from("p3/"), false, 4)?
+    bucket_law_commit(mut p3_b, 3)?
+    // Cut settles sealed[0] + live as GROUP entries and seals archive segment a-*!
+    let cut_t = checkpoint(mut p3_b)?
+    durable(mut p3_b, cut_t)?
+    if bucket_law_rows(mut p3_b)? != 3 {
+        fail("L90-E(3): rows missing after archival cut")
+    }
+    close(take p3_b)?
+    close_journal_service(take svc_clean)?
+    close_journal_service(take svc_bad)?
+    Ok(p3_store)
+}
+
+// L90-E Crash Point:
+// With archival on and two sealed tails, the first needing two GROUP entries
+// (`group_commits = 1`), crash right after the first GROUP entry's head write
+// applies; the next open holds each commit exactly once, and a cut archives all 4.
+fn exit_l90_e_sealed_cursor_crash(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // PUT p4/head counts:
+    // #1: genesis (epoch 1)
+    // #2: law_table("rows") cut
+    // #3: archive(true) cut
+    // #4: epoch 2 H (seals tail 1: rows 1 & 2)
+    // #5: epoch 3 H (seals tail 2: row 3)
+    // #6: 1st GROUP settle head write of sealed[0] (row 1) -> APPLIES!
+    // #7: 2nd GROUP settle head write of sealed[0] (row 2) -> DROPPED (crash)!
+    // Drop attempts 7..10 (exhausting e3's 60 ms op_ms on 2nd settle head write);
+    // e4 opens with op_ms = 2000 so it retries past any leftover drop cleanly.
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: string.from("p4/head"), from: 7, count: 4, until: At(0), then: Drop))
+    let s = bucket_law_sim_holds(tasks, c, 9099, None, list.new(), take holds, std.sim.world.plan(9099))
+    let outcome = exit_l90_e_crash_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    let p4_store = outcome?
+    let (_, commits_in_seg) = exit_verify_archive_segment(report, string.from("p4/"), p4_store)?
+    if commits_in_seg != 4 {
+        fail("L90-E(crash): archival cut segment after crash recovery did not cover all 4 commits")
+    }
+    Ok(())
+}
+
+fn exit_l90_e_crash_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[StoreId, Error] waits {
+    let mut svc = df_start_service_host(s, tasks, r, "s3.test", 701, df_sid_a(), 10, 0, DF_OP_MS)?
+    // Epoch 1: create table, enable archival, commit rows 1 & 2 (will need 2 GROUP entries under group_commits=1).
+    let mut e1 = exit_open_attached(s, tasks, r, mut svc, "s3.test", 702, string.from("p4/"), true, 1)?
+    let p4_store = e1.store
+    let _ = bucket_law_rows_table(mut e1)?
+    let (_, arch_t) = archive(mut e1, true)?
+    durable(mut e1, arch_t)?
+    bucket_law_commit(mut e1, 1)?
+    bucket_law_commit(mut e1, 2)?
+    let _ = take e1
+    // Epoch 2 (same svc): sealed = [tail_1 (rows 1, 2)], commit row 3 -> crash.
+    let mut e2 = exit_open_attached(s, tasks, r, mut svc, "s3.test", 703, string.from("p4/"), false, 1)?
+    bucket_law_commit(mut e2, 3)?
+    let _ = take e2
+    // Epoch 3 (same svc, short op_ms = 60): sealed = [tail_1 (rows 1, 2), tail_2 (row 3)], commit row 4 (live).
+    let mut e3 = exit_open_attached_op(s, tasks, r, mut svc, "s3.test", 704, string.from("p4/"), false, 1, 60)?
+    bucket_law_commit(mut e3, 4)?
+    // Start cut with group_commits = 1: entry 1 (row 1) applies (PUT p4/head #6),
+    // entry 2 (row 2) is dropped (PUT p4/head #7+) -> simulate crash!
+    match checkpoint(mut e3) {
+        Error(_) => (),
+        Ok(_) => fail("L90-E(crash): expected dropped 2nd settle head write to fail cut"),
+    }
+    let _ = take e3
+    // Verify intermediate crash state on p4/head: 2 sealed tails remain, with
+    // sealed[0]'s cursor moved past row 1 and both sealed `at` == head.entry.seq!
+    let (crash_head, crash_attach) = df_head_attach_live(s, tasks, "s3.test", 705, string.from("p4/"))?
+    let Some(ca) = crash_attach else {
+        fail("L90-E(crash): ATTACH missing at crash point")
+    }
+    if list.len(ca.sealed) != 2 || ca.sealed[0u64].at != crash_head.entry.seq || ca.sealed[1u64].at != crash_head.entry.seq {
+        fail("L90-E(crash): sealed cursor did not advance `at` on both sealed tails after 1st GROUP entry")
+    }
+    // Next open (epoch 4, generous op_ms = 2000): history must hold every commit 1..4 ONCE!
+    let mut e4 = exit_open_attached_op(s, tasks, r, mut svc, "s3.test", 706, string.from("p4/"), false, 1, 2000)?
+    if bucket_law_rows(mut e4)? != 4 {
+        fail("L90-E(crash): next open did not recover all 4 rows cleanly after mid-rewrite crash")
+    }
+    // Clean cut now finishes rewriting remaining sealed tails + live tail and archives all 4 commits!
+    let cut_ok = checkpoint(mut e4)?
+    durable(mut e4, cut_ok)?
+    if bucket_law_rows(mut e4)? != 4 {
+        fail("L90-E(crash): rows missing after recovery archival cut")
+    }
+    close(take e4)?
+    close_journal_service(take svc)?
+    Ok(p4_store)
+}

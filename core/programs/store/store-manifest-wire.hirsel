@@ -265,7 +265,7 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
     let deferred_frees = read_page_ptr(file, raw, mut at)?
     let deferred_next = disk_number(file, raw, mut at, 8)?
     let archive_on = disk_number(file, raw, mut at, 8)?
-    let archive = read_page_ptr(file, raw, mut at)?
+    let archive_ptr = read_page_ptr(file, raw, mut at)?
     let archive_drop = disk_number(file, raw, mut at, 8)?
     let sweep_position = disk_number(file, raw, mut at, 8)?
     let epoch = disk_number(file, raw, mut at, 8)?
@@ -323,7 +323,7 @@ fn decode_page_manifest(file: String, raw: Bytes, number: u64) -> Result[PageMan
         list.push(mut pins, LocatedPin(owner: owner, name: take name, branch: branch_id, version: head, roots: roots, watermark: watermark))
     }
     read_keyed_roots(file, raw, mut at, mut branches, mut pins)?
-    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, retirement_root: retirement_root, branches: take branches, pins: take pins))
+    Ok(PageManifest(generation: generation, fence: 0, inline: inline, limits: limits, next_stamp: next_stamp, next_branch: next_branch, next_table: next_table, next_pack: next_pack, first_live: first_live, prev_first: prev_first, account_memory: account_memory, account_tiered: account_tiered, lineage: lineage, deferred_frees: deferred_frees, deferred_next: deferred_next, archive_on: archive_on, archive: archive_ptr, archive_drop: archive_drop, sweep: sweep, pack_root: pack_root, retirement_root: retirement_root, branches: take branches, pins: take pins))
 }
 
 fn manifest_account(m: PageManifest) -> u64 {
@@ -339,6 +339,19 @@ fn require_memory_manifest(m: PageManifest) -> Result[(), Error] {
         return Error(Unsupported(0x0031))
     }
     require_unarchived_manifest(m)
+}
+
+// Objects@1 / sim@1 memory manifests allow §13.9 archival fields (`archive_on`,
+// `archive`, `archive_drop`) while still refusing Tiered roots until Tiered
+// lands on object stores.
+fn require_object_memory_manifest(m: PageManifest) -> Result[(), Error] {
+    if m.account_tiered != 0 {
+        return Error(Unsupported(0x0031))
+    }
+    if m.deferred_frees.stamp != 0 || m.deferred_next != 0 {
+        return Error(Unsupported(0x0031))
+    }
+    Ok(())
 }
 
 // The archive plan (M3 S7) has no reader yet.

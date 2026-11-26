@@ -1,0 +1,352 @@
+// Sealed-tail cursor rewrite (STORE-SPEC §12.11.11 M4/M6) and §13.9 archival
+// segment encoding (`a-<position>-<epoch>-<digest>`, role 15, kind 0x00E1).
+const ROLE_ARCHIVE: u8 = 15
+
+const KIND_ARCHIVE_ROWS: u16 = 0x00E1
+
+const ARCHIVE_ROWS_PER_FRAME: u64 = 32768
+
+fn stream_sealed_publish(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, has_entry: bool, take next_attach: Option[Attach], deadline: u64) -> Result[SettleOutcome, Error] waits {
+    let mut candidate = register.head
+    if has_entry {
+        let next_pos = history_next_id(candidate.entry.seq)?
+        candidate.entry = history_new_ref(next_pos, candidate.pair.epoch, buffers.packet)
+        history_fill_key(mut buffers.key, "e-", candidate.entry)
+        list.clear(mut buffers.compare)
+        capacity(list.try_reserve(mut buffers.compare, list.len(buffers.packet)))?
+        history_create(mut client, buffers.key, mut buffers.packet, mut buffers.compare, deadline)?
+    }
+    history_encode_register_head(mut buffers.body, candidate, authority, next_attach)?
+    match history_write_head(mut client, Match(register.tag), mut buffers.body, mut buffers.witness, deadline) {
+        HistoryApplied(tag) => {
+            register.head = candidate
+            register.tag = tag
+            register.attach = take next_attach
+            Ok(SettleApplied)
+        },
+        HistoryConflict(_) => {
+            let (take moved, take moved_attach) = history_decode_head_attach(buffers.witness)?
+            if moved.head.pair.epoch > register.head.pair.epoch {
+                let cutoff = match view register.attach {
+                    Some(a) => match a.live {
+                        Some(r) => stream_find_sealed_cutoff(moved_attach, r.sid, r.inc),
+                        None => None,
+                    },
+                    None => None,
+                }
+                return Ok(SettleFenced(moved.head.pair.epoch, cutoff))
+            }
+            Ok(SettleNotApplied)
+        },
+        HistoryRefused(take problem) => Error(Remote(take problem)),
+        HistoryUndecided => Error(Undecided),
+    }
+}
+
+fn stream_sealed_step_attach(base: Attach, cursor_seq: u64, cursor_frame: u32, next_pos: u64, drop_first: bool) -> Result[Attach, Error] {
+    let mut out: List[SealedTail] = disk_allocation(scoped fn() -> Result[List[SealedTail], Error] {
+        Ok(list.with_capacity(list.len(base.sealed)))
+    })?
+    let n = list.len(base.sealed)
+    for i in 0u64 .. n {
+        let st = base.sealed[i]
+        if i == 0 {
+            if !drop_first {
+                let moved = StreamRef(sid: st.tail.sid, inc: st.tail.inc, from_seq: cursor_seq, from_frame: cursor_frame)
+                list.push(mut out, SealedTail(tail: moved, cutoff: st.cutoff, at: next_pos))
+            }
+        } else {
+            list.push(mut out, SealedTail(tail: st.tail, cutoff: st.cutoff, at: next_pos))
+        }
+    }
+    Ok(Attach(settles: base.settles + 1, live: base.live, sealed: take out))
+}
+
+fn stream_sealed_tail_epoch(mut client: std.object.Client, mut buffers: TailBuffers, root: String, st: SealedTail, store: StoreId, deadline: u64) -> Result[u64, Error] waits {
+    let dir = stream_key(root, stream_dir(st.tail.sid))
+    let mut cut_name = string.with_capacity(48)
+    stream_batch_key(mut cut_name, st.tail.inc, st.cutoff)
+    let cut_key = stream_key(dir, cut_name)
+    stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[u64, Error] waits {
+        if let None = stream_tail_range(mut c, cut_key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            return Error(disk_fault(cut_key, 0, Absent))
+        }
+        let mut batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
+            Rows(take found) => take found,
+            Term(_, _) => return Error(disk_fault(cut_key, 72, Malformed)),
+        }
+        if list.len(buffers.index) < batch_index.byte_len {
+            if let None = stream_tail_range(mut c, cut_key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
+                return Error(disk_fault(cut_key, 0, Absent))
+            }
+            batch_index = match stream_batch_head(cut_key, buffers.index, st.tail.sid, st.tail.inc, st.cutoff)? {
+                Rows(take found) => take found,
+                Term(_, _) => return Error(disk_fault(cut_key, 72, Malformed)),
+            }
+        }
+        for row in batch_index.rows {
+            if same(row.store, store) {
+                return Ok(row.epoch)
+            }
+        }
+        Error(disk_fault(cut_key, 0, Malformed))
+    })
+}
+
+fn stream_sealed_fetch_slice(mut client: std.object.Client, mut buffers: TailBuffers, key: String, sid: HostStreamId, inc: u64, seq: u64, store: StoreId, tail_epoch: u64, deadline: u64) -> Result[Option[BatchRow], Error] waits {
+    stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[Option[BatchRow], Error] waits {
+        if let None = stream_tail_range(mut c, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+            return Error(disk_fault(key, 0, Absent))
+        }
+        let mut batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+            Rows(take found) => take found,
+            Term(_, _) => return Error(disk_fault(key, 72, Malformed)),
+        }
+        if list.len(buffers.index) < batch_index.byte_len {
+            if let None = stream_tail_range(mut c, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
+                return Error(disk_fault(key, 0, Absent))
+            }
+            batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+                Rows(take found) => take found,
+                Term(_, _) => return Error(disk_fault(key, 72, Malformed)),
+            }
+        }
+        for row in batch_index.rows {
+            if same(row.store, store) && row.epoch == tail_epoch {
+                if row.len == 0 {
+                    return Error(disk_fault(key, row.offset, Malformed))
+                }
+                if let None = stream_tail_range(mut c, key, row.offset, row.offset + row.len, mut buffers.slice, deadline)? {
+                    return Error(disk_fault(key, row.offset, Absent))
+                }
+                stream_slice_check(key, row, buffers.slice)?
+                return Ok(Some(row))
+            }
+        }
+        Ok(None)
+    })
+}
+
+// Rewrites every sealed tail in `register.attach.sealed` in order as GROUP
+// entries using the §12.11.11 M4 sealed cursor: each entry's head write moves
+// `sealed[0].tail.(from_seq, from_frame)` past the frames the entry holds, sets
+// `at` of every remaining sealed entry to the new head position, and drops
+// `sealed[0]` with its last frame.
+fn stream_settle_sealed_core(mut client: std.object.Client, mut register: HistoryRegister, authority: Bytes, mut buffers: HistoryBuffers, root: String, op_ms: u64, group_bytes: u64, group_commits: u64) -> Result[SettleOutcome, Error] waits {
+    let mut tail_bufs = stream_tail_buffers()?
+    loop {
+        let first_opt: Option[SealedTail] = match view register.attach {
+            Some(a) if list.len(a.sealed) != 0 => Some(a.sealed[0u64]),
+            _ => None,
+        }
+        let Some(st) = first_opt else {
+            return Ok(SettleApplied)
+        }
+        let store = register.head.store
+        let due_ep = std.object.deadline_after_ms(client, op_ms)
+        let tail_epoch = stream_sealed_tail_epoch(mut client, mut tail_bufs, root, st, store, due_ep)?
+        let dir = stream_key(root, stream_dir(st.tail.sid))
+        let mut entry_frames = 0u64
+        let mut entry_bytes = 0u64
+        let mut cursor_seq = st.tail.from_seq
+        let mut cursor_frame = st.tail.from_frame
+        let mut seq = st.tail.from_seq
+        let mut name = string.with_capacity(48)
+        while seq <= st.cutoff {
+            stream_batch_key(mut name, st.tail.inc, seq)
+            let key = stream_key(dir, name)
+            let due = std.object.deadline_after_ms(client, op_ms)
+            let fetched = stream_sealed_fetch_slice(mut client, mut tail_bufs, key, st.tail.sid, st.tail.inc, seq, store, tail_epoch, due)?
+            if let Some(row) = fetched {
+                let skip: u64 = if seq == st.tail.from_seq {
+                    int.widen(st.tail.from_frame)
+                } else {
+                    0
+                }
+                let batch_ctx = DiskContext(store, role: ROLE_BATCH, seq)
+                let mut at = 0u64
+                let mut fidx = 0u64
+                while at < list.len(tail_bufs.slice) {
+                    let frame = disk_frame_bytes(key, batch_ctx, tail_bufs.slice, at)?
+                    if fidx >= skip {
+                        if frame.kind == 0x0040 {
+                            if frame.end - frame.payload != 24 || read_le(tail_bufs.slice, frame.payload, 8) != tail_epoch {
+                                return Error(disk_fault(key, row.offset + at, Malformed))
+                            }
+                        } else if frame.kind == 0x0011 || frame.kind == 0x0013 {
+                            let width = frame.end - at
+                            if entry_frames > 0 && (entry_frames >= group_commits || entry_bytes + width > group_bytes) {
+                                let next_pos = history_next_id(register.head.entry.seq)?
+                                let step_attach = match view register.attach {
+                                    Some(cur) => stream_sealed_step_attach(cur, cursor_seq, cursor_frame, next_pos, false)?,
+                                    None => return Ok(SettleNotApplied),
+                                }
+                                let pub_due = std.object.deadline_after_ms(client, op_ms)
+                                match stream_sealed_publish(mut client, mut register, authority, mut buffers, true, Some(take step_attach), pub_due)? {
+                                    SettleApplied => (),
+                                    other => return Ok(other),
+                                }
+                                entry_frames = 0
+                                entry_bytes = 0
+                            }
+                            if entry_frames == 0 {
+                                let group_ctx = history_group_context(register.head)?
+                                history_packet_header(mut buffers.packet, group_ctx, register.head.pair.epoch, register.head.authority_kind, register.head.entry)?
+                            }
+                            let group_ctx = history_group_context(register.head)?
+                            capacity(list.try_reserve(mut buffers.packet, width + BINDING_BYTES))?
+                            history_group_append(mut buffers.packet, group_ctx, list.slice(tail_bufs.slice, at, frame.end))?
+                            entry_frames += 1
+                            entry_bytes += width
+                            if fidx + 1 < row.frames {
+                                cursor_seq = seq
+                                cursor_frame = int.narrow(fidx + 1)
+                            } else {
+                                cursor_seq = seq + 1
+                                cursor_frame = 0
+                            }
+                        } else {
+                            return Error(disk_fault(key, row.offset + at, Kind(int.widen(frame.kind))))
+                        }
+                    }
+                    fidx += 1
+                    at = frame.end
+                }
+                if fidx != row.frames {
+                    return Error(disk_fault(key, row.offset, Malformed))
+                }
+            }
+            seq += 1
+        }
+        let next_pos = if entry_frames > 0 {
+            history_next_id(register.head.entry.seq)?
+        } else {
+            register.head.entry.seq
+        }
+        let done_attach = match view register.attach {
+            Some(cur) => stream_sealed_step_attach(cur, cursor_seq, cursor_frame, next_pos, true)?,
+            None => return Ok(SettleNotApplied),
+        }
+        let pub_due = std.object.deadline_after_ms(client, op_ms)
+        match stream_sealed_publish(mut client, mut register, authority, mut buffers, entry_frames > 0, Some(take done_attach), pub_due)? {
+            SettleApplied => (),
+            other => return Ok(other),
+        }
+    }
+}
+
+fn stream_settle_sealed(mut lane: ObjectJournalSession, group_bytes: u64, group_commits: u64) -> Result[SettleOutcome, Error] waits {
+    let root = match view lane.stream {
+        Some(link) => string.from(link.root),
+        None => return Ok(SettleApplied),
+    }
+    let outcome = stream_settle_sealed_core(mut lane.client, mut lane.register, lane.authority, mut lane.buffers, root, lane.op_ms, group_bytes, group_commits)?
+    if let SettleApplied = outcome {
+        if let Some(link) = view lane.stream {
+            slot_report_head(link, lane.register.head.store, lane.register.attach, link.last_batch_seq)
+        }
+    }
+    Ok(outcome)
+}
+
+// Writes create-only archive segment `a-<cut_seq>-<epoch>-<digest>` (§13.9)
+// naming every chain entry in `[old.checkpoint.seq, cut_seq)` in ascending
+// position (history) order.
+fn history_write_archive_segment(mut client: std.object.Client, old: HistoryHead, cut_seq: u64, epoch: u64, authority_kind: u8, mut workspace: HistoryBuffers, deadline: u64) -> Result[HistoryRef, Error] waits {
+    let suffix = history_suffix(mut client, old, old.checkpoint, deadline)?
+    let mut seg_refs: List[HistoryRef] = disk_allocation(scoped fn() -> Result[List[HistoryRef], Error] {
+        let mut list_refs: List[HistoryRef] = list.with_capacity(1 + list.len(suffix))
+        list.push(mut list_refs, old.checkpoint)
+        for i in 0u64 .. list.len(suffix) {
+            list.push(mut list_refs, history_length(suffix[i], old.checkpoint.seq + 1 + i))
+        }
+        Ok(take list_refs)
+    })?
+    let ctx = DiskContext(store: old.store, role: ROLE_ARCHIVE, seq: cut_seq)
+    let mut raw: Bytes = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(72 + 40 + 32 * list.len(seg_refs) + BINDING_BYTES))
+    })?
+    capacity(history_append_header(mut raw, ctx, epoch, authority_kind))?
+    let total = list.len(seg_refs)
+    let mut pos = 0u64
+    while pos < total {
+        let chunk = order.min(ARCHIVE_ROWS_PER_FRAME, total - pos)
+        let mut payload: Bytes = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+            Ok(list.with_capacity(32 * chunk))
+        })?
+        for i in 0u64 .. chunk {
+            let item = seg_refs[pos + i]
+            list.put_word_le(mut payload, item.seq)
+            list.put_word_le(mut payload, item.epoch)
+            list.put_word_le(mut payload, item.digest)
+            list.put_word_le(mut payload, item.len)
+        }
+        let at = list.len(raw)
+        list.append(mut raw, capacity(disk_seal(ctx, at, KIND_ARCHIVE_ROWS, 1, payload))?)
+        pos += chunk
+    }
+    let seg_ref = history_new_ref(cut_seq, epoch, raw)
+    let key = history_key("a-", seg_ref)
+    list.clear(mut workspace.compare)
+    capacity(list.try_reserve(mut workspace.compare, list.len(raw)))?
+    history_create(mut client, key, mut raw, mut workspace.compare, deadline)?
+    Ok(seg_ref)
+}
+
+fn history_parse_archive_name(key: String) -> Option[HistoryName] {
+    let raw = string.as_bytes(key)
+    if list.len(raw) != 60 || raw[0] != b'a' || raw[1] != b'-' || raw[22] != b'-' || raw[43] != b'-' {
+        return None
+    }
+    let Ok(seq) = int.parse_decimal_span(raw, 2, 22, 18446744073709551615u64) else {
+        return None
+    }
+    let Ok(epoch) = int.parse_decimal_span(raw, 23, 43, 18446744073709551615u64) else {
+        return None
+    }
+    if epoch == 0 || seq == 0 {
+        return None
+    }
+    let mut digest = 0u64
+    for i in 44u64 .. 60 {
+        let digit = raw[i]
+        if digit >= b'0' && digit <= b'9' {
+            digest = (digest << 4) | int.widen(digit - b'0')
+        } else if digit >= b'a' && digit <= b'f' {
+            digest = (digest << 4) | int.widen(10 + digit - b'a')
+        } else {
+            return None
+        }
+    }
+    Some(HistoryName(kind: b'a', seq, epoch, digest))
+}
+
+// Decodes and validates an archive segment `a-<cut_seq>-<epoch>-<digest>`.
+fn history_decode_archive_segment(key: String, store: StoreId, reference: HistoryRef, raw: Bytes) -> Result[List[HistoryRef], Error] {
+    let ctx = history_object_context(key, store, ROLE_ARCHIVE, reference, raw)?
+    history_object_digest(key, reference, raw)?
+    let mut out: List[HistoryRef] = list.new()
+    let mut at = 72u64
+    while at < list.len(raw) {
+        let frame = disk_frame_bytes(key, ctx, raw, at)?
+        if frame.kind != KIND_ARCHIVE_ROWS {
+            return Error(disk_fault(key, at, Kind(int.widen(frame.kind))))
+        }
+        let body_len = frame.end - frame.payload
+        if body_len % 32 != 0 {
+            return Error(disk_fault(key, at, Malformed))
+        }
+        let rows = body_len / 32
+        capacity(list.try_reserve(mut out, rows))?
+        for i in 0u64 .. rows {
+            let off = frame.payload + i * 32
+            let seq = read_le(raw, off, 8)
+            let ep = read_le(raw, off + 8, 8)
+            let dig = read_le(raw, off + 16, 8)
+            let len = read_le(raw, off + 24, 8)
+            list.push(mut out, HistoryRef(seq, epoch: ep, len, digest: dig))
+        }
+        at = frame.end
+    }
+    Ok(take out)
+}

@@ -381,7 +381,7 @@ fn history_graph_order(mut graph: PageGraph) {
 }
 
 fn history_validate_manifest(mut client: std.object.Client, locator: HistoryLocator, deadline: u64, id: StoreId, file: String, take manifest: PageManifest) -> Result[ValidatedPageManifest, Error] waits {
-    require_memory_manifest(manifest)?
+    require_object_memory_manifest(manifest)?
     validate_bucket_graph(mut client, locator, deadline, id, file, take manifest, false)
 }
 

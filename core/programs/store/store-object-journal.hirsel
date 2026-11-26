@@ -6,6 +6,7 @@ type ObjectJournalStart: send {
     op_ms: u64,
     failed_polls: u32,
     sweep: SweepCursor,
+    archive_on: u64,
     issued_generation: u64,
     next_pack: u64,
     export_lease: Option[ObjectExportLease],
@@ -61,6 +62,7 @@ type ObjectJournalSession {
     op_ms: u64,
     failed_polls: u32,
     sweep: SweepCursor,
+    archive_on: u64,
     issued_generation: u64,
     next_pack: u64,
     export_lease: Option[ObjectExportLease],
@@ -71,14 +73,14 @@ type ObjectJournalSession {
 }
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take input
-    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take input
+    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, archive_on, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
 }
 
 fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), Error] waits {
@@ -263,6 +265,21 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                         let (last_sequence, group_size) = object_journal_stream_send(link, input, take raw, sequence, mut stream_queued, mut deferred)?
                         stream_in_flight = Some((last_sequence, group_size))
                         continue
+                    }
+                }
+                // Under archival (§12.11.11 M6), a direct-service entry rewrites
+                // any remaining sealed tails in order before writing above them.
+                if lane.archive_on != 0 {
+                    let has_sealed = match view lane.register.attach {
+                        Some(a) => list.len(a.sealed) != 0,
+                        None => false,
+                    }
+                    if has_sealed {
+                        match stream_settle_sealed(mut lane, input.group_bytes, input.group_commits)? {
+                            SettleApplied => (),
+                            SettleFenced(_, _) => return Error(Fenced(lane.register.head.pair.epoch)),
+                            SettleNotApplied => return Error(Undecided),
+                        }
                     }
                 }
                 let ctx = history_group_context(lane.register.head)?

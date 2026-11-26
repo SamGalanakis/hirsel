@@ -7123,7 +7123,7 @@ pub fn drop_archive(mut db: Db, below: u64) -> Result[Ticket, Error] waits      
 
 **Every cut seals what it covers.** A cut at position c, whose previous cut was at c′, does this before it writes its CHECKPOINT entry:
 1. If `archive_on` was non-zero at c′, or this cut turns archival off, the window [c′, c) was archived. The window includes c′'s own entry.
-2. The cut writes one segment `a-<c>-<e>-<digest>`. It is a HEADER, then frames of rows (position u64, epoch u64, digest u64, len u64), at most 32,768 rows per 1 MiB frame. It names every chain entry in the window, which the holder knows exactly from recovery's walk and its own advances. Then come the window's sequence rows for archived Tiered Logs (§14.10), at most 21,845 per 1 MiB frame.
+2. The cut writes one segment `a-<c>-<e>-<digest>` (role 15). It is a HEADER, then kind `0x00E1` frames of rows (position u64, epoch u64, digest u64, len u64), at most 32,768 rows per 1 MiB frame. It names every chain entry in the window, which the holder knows exactly from recovery's walk and its own advances. Then come the window's sequence rows for archived Tiered Logs (§14.10), at most 21,845 per 1 MiB frame.
 3. The cut adds the index row [c′, c) → that segment.
 4. The cut then sets `archive_on` to c (turning on) or to 0 (turning off), or leaves it unchanged.
 5. If archival is on after the cut, it writes the anchor rows for c (§14.10, v2.61). The anchors, the segment and the index row become durable in this generation, before it publishes the coverage they give.

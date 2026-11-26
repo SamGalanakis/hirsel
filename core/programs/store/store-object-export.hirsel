@@ -24,7 +24,7 @@ fn object_export_read(mut lane: ObjectJournalSession, key: String, reference: Hi
     match history_range(mut lane.client, key, reference, 0, reference.len, mut raw, due) {
         Ok(()) => Ok(take raw),
         Error(HistoryMissing(..)) => {
-            history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due)?
+            object_journal_fresh_probe(mut lane, due)?
             Error(disk_fault(key, 0, Absent))
         },
         Error(take problem) => Error(take problem),
@@ -49,13 +49,62 @@ fn object_export_fetch(plan: ObjectExportCopy, lead: String, reference: HistoryR
 fn begin_object_export_copy(mut db: Db, take into: ExportInto, take attempt: Bytes, activation: Option[u64]) -> Result[ExportCopy, DeployError] waits {
     let receipt = Ticket(store: db.store, open: open_number(db), mark: Journal(db.frame_seq, 0, 0))
     deploy_result(durable(mut db, receipt))?
-    let (take parked, take resume) = deploy_result(take_object_journal(mut db))?
+    // §12.11.11 M5: export/backup on an attached Place cuts when `sealed` is
+    // non-empty (returning its refusal if refused), or settles keeping ATTACH
+    // when `sealed` is empty so the holder keeps serving with ATTACH intact.
+    let (is_attached, has_sealed) = match disk_state(db).object {
+        Some(w) => (w.attached, w.has_sealed),
+        None => (false, false),
+    }
+    if is_attached && has_sealed {
+        let cut_ticket = deploy_result(checkpoint(mut db))?
+        deploy_result(durable(mut db, cut_ticket))?
+    }
+    let (take parked, take resume) = deploy_result(take_object_journal_with(mut db, true))?
     let mut lane = take parked
+    let settle_err: Option[Error] = if is_attached && !has_sealed {
+        let group_bytes: u64 = int.widen(disk_state(db).options.group_bytes)
+        let group_commits: u64 = int.widen(disk_state(db).options.group_commits)
+        let last_seq = match view lane.stream {
+            Some(link) => link.last_batch_seq,
+            None => 0u64,
+        }
+        match stream_settle(mut lane, last_seq, last_seq + 1, false, group_bytes, group_commits) {
+            Ok(SettleApplied) => {
+                let fseq = match view lane.register.attach {
+                    Some(a) => match a.live {
+                        Some(r) => r.from_seq,
+                        None => 0u64,
+                    },
+                    None => 0u64,
+                }
+                object_journal_stream_trim_batches(mut lane, fseq)
+                if let Some(link) = view lane.stream {
+                    slot_report_head(link, lane.register.head.store, lane.register.attach, last_seq)
+                }
+                None
+            },
+            Ok(SettleFenced(moved_epoch, cutoff)) => {
+                if let Some(link) = view lane.stream {
+                    slot_report(link, ReportFenced(link.slot, lane.register.head.pair.epoch, moved_epoch, cutoff))
+                }
+                Some(Fenced(lane.register.head.pair.epoch))
+            },
+            Ok(SettleNotApplied) => Some(Undecided),
+            Error(take problem) => Some(take problem),
+        }
+    } else {
+        None
+    }
+    if let Some(take problem) = take settle_err {
+        deploy_result(return_object_journal(take lane, resume))?
+        return Error(Store(take problem))
+    }
     let (lifetime, stop): (Sender[()], Receiver[()]) = channel.new(1)
     let captured: Result[ExportCopy, DeployError] = match object_export_capture(db, mut lane, take into, take attempt, activation, take stop) {
         Error(Store(HistoryMissing(take key, _))) => {
             let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-            match history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due) {
+            match object_journal_fresh_probe(mut lane, due) {
                 Ok(()) => Error(Store(disk_fault(key, 0, Absent))),
                 Error(take problem) => Error(Store(take problem)),
             }
@@ -87,7 +136,7 @@ fn object_export_capture(db: Db, mut lane: ObjectJournalSession, take into: Expo
         return Error(Drift)
     }
     let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
-    deploy_result(history_probe_writer(mut lane.client, mut lane.register, mut lane.buffers, due))?
+    deploy_result(object_journal_fresh_probe(mut lane, due))?
     let (take mark, _) = deploy_result(history_checkpoint(mut lane.client, head, due))?
     let suffix = deploy_result(history_suffix(mut lane.client, head, head.checkpoint, due))?
     let (take packs, take history_entries, take names) = deploy_result(disk_allocation(scoped fn() -> Result[(List[HistoryRef], List[HistoryRef], Map[String, ()]), Error] {

@@ -16,6 +16,6 @@ fn nested_outer(take input: NestedInput) -> u64 waits {
 }
 
 fn nested_join(tasks: Tasks) -> u64 waits {
-    let outer = task.spawn(tasks, bytes 4096, NestedInput(tasks: tasks, n: 41u64), nested_outer)
+    let outer = task.spawn(tasks, bytes 8192, NestedInput(tasks: tasks, n: 41u64), nested_outer)
     result.unwrap(task.join(take outer))
 }

@@ -12,11 +12,14 @@ fn budget_data_key(offset: u64) -> u64 {
 fn budget_view(tx: store.Tx, h: Qh, take input: BudgetQuery) -> Result[Answer[u64], Capacity] {
     let member = option.unwrap(result.unwrap(store.fetch(tx, h.t, input.member)))
     let mut work = 0u64
-    while work < input.work { work += 1u64 }
+    while work < input.work {
+        work += 1u64
+    }
     let value = member + work
-    if input.rows == 0 { return Ok(Answer(value: value, covers: covers())) }
-    let Answer(covers: take selected, ..) =
-        table_answer("data", h.t, Included(input.first), Included(input.first + 8 * input.rows - 1))?
+    if input.rows == 0 {
+        return Ok(Answer(value: value, covers: covers()))
+    }
+    let Answer(covers: take selected, ..) = table_answer("data", h.t, Included(input.first), Included(input.first + 8 * input.rows - 1))?
     Ok(Answer(value: value, covers: take selected))
 }
 
@@ -36,8 +39,7 @@ fn budget_board(db: store.Db, h: Qh, base: store.Snapshot, bytes_limit: u64, ste
         let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
-    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),
-        reads: publisher_reads(), base: clone(base), newest: None, subs: subscriptions())
+    let b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: clone(base), newest: None, subs: subscriptions())
     (take b, take key)
 }
 
@@ -55,8 +57,12 @@ fn budget_reader_allocation(db: store.Db, h: Qh) -> bool waits {
     let mut hi: Bytes = clone(lo)
     list.push(mut hi, 0u8)
     let mut cursor = result.unwrap(store.open_span_changes(read_handle, s, lo, hi))
-    let opened = bound bytes 0 { store.open_span_changes(read_handle, s, lo, hi) }
-    let selected = bound bytes 0 { store.next_span_change(read_handle, mut cursor) }
+    let opened = bound bytes 0 {
+        store.open_span_changes(read_handle, s, lo, hi)
+    }
+    let selected = bound bytes 0 {
+        store.next_span_change(read_handle, mut cursor)
+    }
     let page = bound bytes 0 {
         store.changes_page(read_handle, None, s, lo, hi, store.Limits(rows: 1, byte_limit: 1))
     }
@@ -85,7 +91,11 @@ fn least_query_budget(db: store.Db, h: Qh, input: BudgetQuery, search_steps: boo
         } else {
             budget_probe(db, h, input, middle, 1048576)
         }
-        if fits { hi = middle } else { lo = middle + 1 }
+        if fits {
+            hi = middle
+        } else {
+            lo = middle + 1
+        }
     }
     lo
 }
@@ -94,7 +104,9 @@ fn budget_split_image(db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> bo
     let (take prepared, take key) = budget_board(db, h, store.snapshot(db), 1048576, steps)
     let mut b = take prepared
     let first = at_base(mut b, 1, 7, take key, budget_arguments(input))
-    let Some(image) = group_payload(first) else { return false }
+    let Some(image) = group_payload(first) else {
+        return false
+    }
     if !budget_complete(first) || !group_number(image.value, input.work + 19) || list.len(image.rows) != input.rows {
         return false
     }
@@ -105,15 +117,23 @@ fn budget_split_image(db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> bo
         let mut expected_key: Bytes = list.new()
         list.put_word_be(mut expected_key, id)
         list.put_word_be(mut expected_key, k)
-        if raw.slot != 0 || raw.key != expected_key { return false }
-        let Some(v) = view raw.value else { return false }
-        if !group_number(v, k + 23) { return false }
+        if raw.slot != 0 || raw.key != expected_key {
+            return false
+        }
+        let Some(v) = view raw.value else {
+            return false
+        }
+        if !group_number(v, k + 23) {
+            return false
+        }
     }
     true
 }
 
 fn budget_ended(o: Owe, sub: u32, steps: u64, byte_limit: bool) -> bool {
-    if o.reset || list.len(o.ended) != 1 || o.ended[0u64].sub != sub { return false }
+    if o.reset || list.len(o.ended) != 1 || o.ended[0u64].sub != sub {
+        return false
+    }
     match o.ended[0u64].outcome {
         Failed(OutOfBytes(_)) => byte_limit,
         Failed(OutOfTime(n)) => !byte_limit && n == steps,
@@ -122,32 +142,37 @@ fn budget_ended(o: Owe, sub: u32, steps: u64, byte_limit: bool) -> bool {
 }
 
 fn slow_budget_reader(steps: u64) -> PublisherReads {
-    let next_row: own[send] fn(store.Reader, mut store.SpanRows, bool) -> Result[Option[store.Change], store.Error] waits =
-        fn(reader: store.Reader, mut cursor: store.SpanRows, first: bool) -> Result[Option[store.Change], store.Error] waits {
-            let row = store.next_span_change(reader, mut cursor)?
-            if first {
-                let mut done = 0u64
-                while done < steps { done += 1 }
-                if done != steps { fail("L8: reader work did not finish") }
+    let next_row: own[send] fn(store.Reader, mut store.SpanRows, bool) -> Result[Option[store.Change], store.Error] waits = fn(reader: store.Reader, mut cursor: store.SpanRows, first: bool) -> Result[Option[store.Change], store.Error] waits {
+        let row = store.next_span_change(reader, mut cursor)?
+        if first {
+            let mut done = 0u64
+            while done < steps {
+                done += 1
             }
-            Ok(take row)
+            if done != steps {
+                fail("L8: reader work did not finish")
+            }
         }
+        Ok(take row)
+    }
     PublisherReads(changes: store.changes_page, span: take next_row)
 }
 
 // The membership-only commit must fence sub 7 after it ends. A later
 // cover-only commit must still reach sub 8 on the same session.
-fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64, bytes_limit: u64,
-    byte_limit: bool, inside_reader: bool) -> bool waits {
+fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64, bytes_limit: u64, byte_limit: bool, inside_reader: bool) -> bool waits {
     let (take prepared, take key) = budget_board(db, h, store.snapshot(db), bytes_limit, steps)
     let mut b = take prepared
     let other = BudgetQuery(work: 0, first: budget_data_key(input.rows), rows: 1, member: budget_data_key(input.rows + 1))
     let surviving = at_base(mut b, 1, 8, clone(key), budget_arguments(other))
-    if !budget_complete(surviving) { return false }
-    if inside_reader { b.reads = slow_budget_reader(steps) }
+    if !budget_complete(surviving) {
+        return false
+    }
+    if inside_reader {
+        b.reads = slow_budget_reader(steps)
+    }
     let stopped = at_base(mut b, 1, 7, take key, budget_arguments(input))
-    if !budget_ended(stopped, 7, steps, byte_limit) || list.len(stopped.rows) != 0 || list.len(stopped.complete) != 0 ||
-        !ended_entry(b.subs, SubId(who: 1, sub: 7, serial: 0)) {
+    if !budget_ended(stopped, 7, steps, byte_limit) || list.len(stopped.rows) != 0 || list.len(stopped.complete) != 0 || !ended_entry(b.subs, SubId(who: 1, sub: 7, serial: 0)) {
         return false
     }
     b.reads = publisher_reads()
@@ -157,13 +182,16 @@ fn budget_projection_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u6
     b.newest = Some(store.snapshot(db))
     let mut fenced = Fenced(sessions: map.new())
     let member_round = round(mut b, mut fenced)
-    if !map.contains(fenced.sessions, 1u64) || list.len(member_round) != 0 { return false }
+    if !map.contains(fenced.sessions, 1u64) || list.len(member_round) != 0 {
+        return false
+    }
     set(mut db, h.t, other.first, prior_other + 1)
     let delta = step(mut b, db)
-    if list.len(delta) != 1 { return false }
+    if list.len(delta) != 1 {
+        return false
+    }
     let owed = view delta[0u64]
-    owed.session == 1 && !owed.reset && list.len(owed.ended) == 0 &&
-        list.len(owed.groups) == 1 && owed.groups[0u64].sub == 8
+    owed.session == 1 && !owed.reset && list.len(owed.ended) == 0 && list.len(owed.groups) == 1 && owed.groups[0u64].sub == 8
 }
 
 fn budget_run_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> bool waits {
@@ -184,8 +212,7 @@ fn budget_run_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64) -> b
     list.len(round(mut b, mut fenced)) == 0 && map.contains(fenced.sessions, 1u64)
 }
 
-fn budget_cover_trial(db: store.Db, h: Qh, base: store.Snapshot, newest: store.Snapshot,
-    input: BudgetQuery, steps: u64) -> (Board[(), Qh], bool) waits {
+fn budget_cover_trial(db: store.Db, h: Qh, base: store.Snapshot, newest: store.Snapshot, input: BudgetQuery, steps: u64) -> (Board[(), Qh], bool) waits {
     let (take prepared, take key) = budget_board(db, h, base, 1048576, steps)
     let mut b = take prepared
     let other = BudgetQuery(work: 0, first: budget_data_key(input.rows), rows: 1, member: budget_data_key(input.rows + 1))
@@ -201,13 +228,17 @@ fn budget_cover_trial(db: store.Db, h: Qh, base: store.Snapshot, newest: store.S
     let mut failed_sessions: u64 = 0
     let mut other_group = false
     for owed in delta {
-        if owed.reset { fail("L8: a Cover-only overrun must not reset its session") }
+        if owed.reset {
+            fail("L8: a Cover-only overrun must not reset its session")
+        }
         if budget_ended(owed, 7, steps, false) {
             failed_sessions += 1
         }
         if owed.session == 1 {
             for batch in owed.groups {
-                if batch.sub == 8 { other_group = true }
+                if batch.sub == 8 {
+                    other_group = true
+                }
             }
         }
     }
@@ -233,22 +264,29 @@ fn budget_cover_stop(mut db: store.Db, h: Qh, input: BudgetQuery, steps: u64) ->
         list.push(mut versions, store.snapshot(db))
     }
     let (_, can_stop) = budget_cover_trial(db, h, base, versions[last], input, steps)
-    if !can_stop { fail("L8: even the largest Cover-only delta fit the projection bound") }
+    if !can_stop {
+        fail("L8: even the largest Cover-only delta fit the projection bound")
+    }
     let mut lo = 1u64
     let mut hi = last
     while lo < hi {
         let middle = lo + (hi - lo) / 2
         let (_, stopped) = budget_cover_trial(db, h, base, versions[middle], input, steps)
-        if stopped { hi = middle } else { lo = middle + 1 }
+        if stopped {
+            hi = middle
+        } else {
+            lo = middle + 1
+        }
     }
     let (_, too_few) = budget_cover_trial(db, h, base, versions[lo - 1], input, steps)
     let (take prepared, stopped) = budget_cover_trial(db, h, base, versions[lo], input, steps)
     let mut b = take prepared
-    if too_few || !stopped || !ended_entry(b.subs, SubId(who: 1, sub: 7, serial: 0)) ||
-        !ended_entry(b.subs, SubId(who: 2, sub: 7, serial: 0)) {
+    if too_few || !stopped || !ended_entry(b.subs, SubId(who: 1, sub: 7, serial: 0)) || !ended_entry(b.subs, SubId(who: 2, sub: 7, serial: 0)) {
         return false
     }
-    if list.len(step(mut b, db)) != 0 { return false }
+    if list.len(step(mut b, db)) != 0 {
+        return false
+    }
     let prior_member = option.unwrap(result.unwrap(store.get(read_handle, base, h.t, 0)))
     set(mut db, h.t, 0, prior_member + 1)
     b.newest = Some(store.snapshot(db))

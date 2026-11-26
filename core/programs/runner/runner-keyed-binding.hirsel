@@ -119,7 +119,9 @@ fn keyed_route_conflicts[G: send, H: shareable + inert + send](reg: Registry[G, 
 }
 
 pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding, take rule: KeyedRule[G]) -> Result[(), RegisterError] {
-    if reg.replay { return Ok(()) }
+    if reg.replay {
+        return Ok(())
+    }
     let KeyedRule(claim: take claim, retention_ms: retention_ms, keys_max: keys_max, principal_keys_max: principal_keys_max) = take rule
     if retention_ms == 0 || retention_ms > 9007199254740992 || retention_ms <= binding.deadline_ms || principal_keys_max == 0 || principal_keys_max > keys_max {
         return Error(keyed_registration_error(binding.op, MetadataBytes))
@@ -147,7 +149,9 @@ pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H],
 }
 
 pub fn bind_retired[G: send, H: shareable + inert + send](mut reg: Registry[G, H], name: String, method: Method, route: String, take retired: Retirement[G]) -> Result[(), RegisterError] {
-    if reg.replay { return Ok(()) }
+    if reg.replay {
+        return Ok(())
+    }
     let Retirement(claim: take claim, keys_max: keys_max) = take retired
     if keys_max == 0 {
         return Error(keyed_registration_error(name, MetadataBytes))
@@ -227,7 +231,7 @@ fn check_keyed_grants[G: send, H: shareable + inert + send, S: send](placing: Pl
         }
     }
     if let Ok(made) = placing.made {
-        for (name, _) in made.0.keyed {
+        for (name, _) in made.0 .keyed {
             return Some(KeyedNoGrant(clone(name)))
         }
     }

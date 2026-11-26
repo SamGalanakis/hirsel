@@ -583,7 +583,7 @@ pub fn law_wire_replacement_generation(tasks: Tasks, c: Clock, r: Random) -> boo
     let base = store.snapshot(db)
     let Mailbox(to: take to, from: take from, rounds: take rounds) = result.unwrap(mailbox(8u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let pub_job = Publish( placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
+    let pub_job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take from, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take pub_job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         return false

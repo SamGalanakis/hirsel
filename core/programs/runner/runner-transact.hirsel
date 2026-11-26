@@ -26,14 +26,21 @@ fn adapt_transact[H: shareable + inert + send, A, R, E](f: StaticFn[fn(mut store
     match std.codec.decode(ca, arg) {
         Ok(take a) => {
             let res = body(mut tx, h, author, take a)
-            let kept = match res { Ok(_) => true, Error(_) => false }
+            let kept = match res {
+                Ok(_) => true,
+                Error(_) => false
+            }
             let mut out: Bytes = list.new()
             match std.codec.put_result(res, cr, ce, mut out) {
                 Ok(()) => {
                     let length = list.len(out)
                     if length > MAX_RETURNED_BYTES {
                         Exhausted(Capacity(requested: length, available: MAX_RETURNED_BYTES))
-                    } else if kept { Commit(take out) } else { Abort(take out) }
+                    } else if kept {
+                        Commit(take out)
+                    } else {
+                        Abort(take out)
+                    }
                 },
                 Error(_) => fail("runner: unrepresentable reply count"),
             }
@@ -80,8 +87,12 @@ fn transact_replay[H: shareable + inert + send, A, R, E](record: store.Recorded,
 
 fn run_trigger_body[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, A, R, E], triggers.Tables, triggers.Pending, u64)) -> Result[(), TriggerBodyError] {
     // The wall can move backwards between the scheduler's sample and this transaction.
-    if store.info(mut tx).at < triggers.due_time(env.2) { return Error(NotDue) }
-    let ran = bound bytes env.3 { transact_body(mut tx, env.0) }
+    if store.info(mut tx).at < triggers.due_time(env.2) {
+        return Error(NotDue)
+    }
+    let ran = bound bytes env.3 {
+        transact_body(mut tx, env.0)
+    }
     let terminal: triggers.Terminal = match take ran {
         Ok(Commit(take payload)) => Returned(take payload),
         Ok(Abort(take payload)) => return Error(Terminal(Returned(take payload))),
@@ -104,7 +115,9 @@ fn check_attempt(tx: store.Tx, tables: triggers.Tables, attempt: triggers.Attemp
 
 fn run_transact_attempt[H: shareable + inert + send, A, R, E](mut tx: store.Tx, env: (TransactBody[H, A, R, E], triggers.Tables, triggers.Attempt, u64)) -> Result[Outcome, FencedRefusal] {
     check_attempt(tx, env.1, env.2)?
-    let ran = bound bytes env.3 { transact_body(mut tx, env.0) }
+    let ran = bound bytes env.3 {
+        transact_body(mut tx, env.0)
+    }
     match take ran {
         Ok(Commit(take payload)) => Ok(Returned(take payload)),
         Ok(Abort(take payload)) => Error(BodyOutcome(Returned(take payload))),
@@ -136,7 +149,9 @@ pub fn transact[G: send, H: shareable + inert + send, A: codec, R: codec, E: cod
         None => None,
     }
     register_check(mut r, key, ca, n, s)?
-    let check = fn(arg: Bytes) -> Option[Refusal] { check_arg(ca, arg, n) }
+    let check = fn(arg: Bytes) -> Option[Refusal] {
+        check_arg(ca, arg, n)
+    }
     let entry = TransactEntry(run: f, args: ca, reply: cr, error: ce)
     let serve_entry = fn(mut db: store.Db, take complete: store.Completion, plan: store.Plan, take rec: Option[store.CallRecord], h: H, author: Caller, arg: Bytes) -> Result[store.Served, store.ServeError] waits {
         let env = TransactBody(entry: store.copy_env(entry), handles: store.copy_env(h), caller: clone(author), raw: clone(arg))
@@ -195,8 +210,7 @@ fn run_fenced_entry[H: shareable + inert + send, Env: inert + send, A, R](mut tx
     }
 }
 
-pub fn register_attempt[G: send, H: shareable + inert + send, F, Env: inert + send, A: codec, R: codec](mut registered: Registry[G, H], definition: StaticFn[F],
-    env: Env, run: fn(mut store.Tx, H, triggers.Attempt, take A, Env) -> Result[R, store.Error], n: u64, steps: u64) -> Result[(), RegisterError] {
+pub fn register_attempt[G: send, H: shareable + inert + send, F, Env: inert + send, A: codec, R: codec](mut registered: Registry[G, H], definition: StaticFn[F], env: Env, run: fn(mut store.Tx, H, triggers.Attempt, take A, Env) -> Result[R, store.Error], n: u64, steps: u64) -> Result[(), RegisterError] {
     check_call_reserve(n, steps)?
     let ca: std.codec.Codec[A] = std.codec.of()
     let cr: std.codec.Codec[R] = std.codec.of()

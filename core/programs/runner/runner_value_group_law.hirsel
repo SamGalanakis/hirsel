@@ -1,7 +1,11 @@
 fn value_group_query(tx: store.Tx, h: Qh, take _args: u32) -> Result[Answer[u64], Capacity] {
     let number = option.unwrap(result.unwrap(store.fetch(tx, h.t, 0u64)))
     let side = option.unwrap(result.unwrap(store.fetch(tx, h.t, 2u64)))
-    let name = if side == 0u64 { "left" } else { "right" }
+    let name = if side == 0u64 {
+        "left"
+    } else {
+        "right"
+    }
     let Answer(covers: take selected, ..) = table_answer(take name, h.t, Included(1u64), Included(1u64))?
     Ok(Answer(value: number % 2u64, covers: take selected))
 }
@@ -13,10 +17,15 @@ fn value_group_place(mut r: Registry[(), Qh]) -> Result[(), RegisterError] {
     query(mut r, code.describe(value_group_query), take declarations, 65536u64, DEFAULT_STEPS)
 }
 
-type GroupLawPayload: codec { value: Bytes, rows: List[Row] }
+type GroupLawPayload: codec {
+    value: Bytes,
+    rows: List[Row]
+}
 
 fn group_payload(owing: Owe) -> Option[GroupLawPayload] {
-    if list.len(owing.groups) != 1u64 { return None }
+    if list.len(owing.groups) != 1u64 {
+        return None
+    }
     Some(result.unwrap(std.codec.decode(std.codec.of(), owing.groups[0u64].payload)))
 }
 
@@ -142,15 +151,13 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
         let entry = view registered.t.exported[0u64]
         entry_key(entry.described.identity, entry.args_fp, entry.result_fp)
     }
-    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)),
-        reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let mut b = Board(r: take registered, h: arc.new(clone(h)), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
     let first = at_base(mut b, 1u64, 10u32, clone(key), no_arg())
     let joined = at_base(mut b, 2u64, 20u32, take key, no_arg())
-    let Some(initial) = group_payload(first) else { return Error("first complete must carry a full group") }
-    if list.len(first.complete) != 1u64 || list.len(joined.complete) != 1u64 ||
-        list.compare_bytes(first.groups[0u64].payload, joined.groups[0u64].payload) != Equal ||
-        !group_number(initial.value, 1u64) ||
-        list.len(initial.rows) != 1u64 || initial.rows[0u64].slot != 0u16 {
+    let Some(initial) = group_payload(first) else {
+        return Error("first complete must carry a full group")
+    }
+    if list.len(first.complete) != 1u64 || list.len(joined.complete) != 1u64 || list.compare_bytes(first.groups[0u64].payload, joined.groups[0u64].payload) != Equal || !group_number(initial.value, 1u64) || list.len(initial.rows) != 1u64 || initial.rows[0u64].slot != 0u16 {
         return Error("subscribers did not get the same initial image")
     }
     if !apply_view(mut images, first) || !apply_view(mut images, joined) || !view_images_match(images, key1, model) {
@@ -164,45 +171,68 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     if list.len(elided) != 2u64 || map.len(fences.sessions) != 2u64 {
         return Error("an equal value did not retain its row groups and fences")
     }
-    let Some(row_only) = group_payload(elided[0u64]) else { return Error("the changed row needs a group") }
+    let Some(row_only) = group_payload(elided[0u64]) else {
+        return Error("the changed row needs a group")
+    }
     if list.len(row_only.value) != 0u64 || list.len(row_only.rows) != 1u64 {
         return Error("equal encoded values must elide")
     }
     for owing in elided {
-        if !apply_view(mut images, owing) { return Error("an elided group reached a client without an image") }
+        if !apply_view(mut images, owing) {
+            return Error("an elided group reached a client without an image")
+        }
     }
-    if !view_images_match(images, key1, model) { return Error("an elided group left a client image wrong") }
-
+    if !view_images_match(images, key1, model) {
+        return Error("an elided group left a client image wrong")
+    }
     law_set(mut db, mut model, h.t, 0u64, 4u64)
     law_set(mut db, mut model, h.t, 2u64, 1u64)
     let moved = step(mut b, db)
-    if list.len(moved) != 2u64 { return Error("slot move did not reach both subscribers") }
-    let Some(atomic) = group_payload(moved[0u64]) else { return Error("slot move split the group") }
-    if list.compare_bytes(moved[0u64].groups[0u64].payload, moved[1u64].groups[0u64].payload) != Equal ||
-        !group_number(atomic.value, 0u64) ||
-        list.len(atomic.rows) != 2u64 || atomic.rows[0u64].slot != 0u16 || atomic.rows[0u64].value != None ||
-        atomic.rows[1u64].slot != 1u16 || atomic.rows[0u64].key != atomic.rows[1u64].key {
+    if list.len(moved) != 2u64 {
+        return Error("slot move did not reach both subscribers")
+    }
+    let Some(atomic) = group_payload(moved[0u64]) else {
+        return Error("slot move split the group")
+    }
+    if list.compare_bytes(moved[0u64].groups[0u64].payload, moved[1u64].groups[0u64].payload) != Equal || !group_number(atomic.value, 0u64) || list.len(atomic.rows) != 2u64 || atomic.rows[0u64].slot != 0u16 || atomic.rows[0u64].value != None || atomic.rows[1u64].slot != 1u16 || atomic.rows[0u64].key != atomic.rows[1u64].key {
         return Error("new value, removal and insertion must share one group")
     }
-    let Some(value_bytes) = atomic.rows[1u64].value else { return Error("slot move must insert row 1") }
-    if !group_number(value_bytes, 6u64) { return Error("slot move inserted the wrong value") }
-    for owing in moved {
-        if !apply_view(mut images, owing) { return Error("a slot move reached a client without an image") }
+    let Some(value_bytes) = atomic.rows[1u64].value else {
+        return Error("slot move must insert row 1")
     }
-    if !view_images_match(images, key1, model) { return Error("a slot move left a client image wrong") }
-
+    if !group_number(value_bytes, 6u64) {
+        return Error("slot move inserted the wrong value")
+    }
+    for owing in moved {
+        if !apply_view(mut images, owing) {
+            return Error("a slot move reached a client without an image")
+        }
+    }
+    if !view_images_match(images, key1, model) {
+        return Error("a slot move left a client image wrong")
+    }
     law_set(mut db, mut model, h.t, 0u64, 5u64)
     let only = step(mut b, db)
-    if list.len(only) != 2u64 { return Error("value-only update did not reach both subscribers") }
-    let Some(computed_only) = group_payload(only[0u64]) else { return Error("value-only group was dropped") }
+    if list.len(only) != 2u64 {
+        return Error("value-only update did not reach both subscribers")
+    }
+    let Some(computed_only) = group_payload(only[0u64]) else {
+        return Error("value-only group was dropped")
+    }
     if !group_number(computed_only.value, 1u64) || list.len(computed_only.rows) != 0u64 {
         return Error("value-only group sent the wrong image")
     }
     for owing in only {
-        if !apply_view(mut images, owing) { return Error("a value-only group reached a client without an image") }
+        if !apply_view(mut images, owing) {
+            return Error("a value-only group reached a client without an image")
+        }
     }
-    if !view_images_match(images, key1, model) { return Error("a value-only group left a client image wrong") }
-    if !mark_due(mut b.subs, 1u64, 10u32) { return Error("subscriber did not become due") }
+    if !view_images_match(images, key1, model) {
+        return Error("a value-only group left a client image wrong")
+    }
+    if !mark_due(mut b.subs, 1u64, 10u32) {
+        return Error("subscriber did not become due")
+    }
     law_set(mut db, mut model, h.t, 0u64, 7u64)
     b.newest = Some(store.snapshot(db))
     let mut same_fences = Fenced(sessions: map.new())
@@ -210,12 +240,15 @@ fn test_value_elided(clock: Clock, random: Random) -> Result[(), String] waits {
     if list.len(unchanged) != 0u64 || map.len(same_fences.sessions) != 2u64 {
         return Error("empty delta must be skipped while the hit fences both sessions")
     }
-    if !view_images_match(images, key1, model) { return Error("a skipped delta left a client image wrong") }
+    if !view_images_match(images, key1, model) {
+        return Error("a skipped delta left a client image wrong")
+    }
     let at = store.version(b.base)
     let full = repair_entry(mut b, 1u64, 10u32, at)
-    let Some(repaired) = group_payload(full) else { return Error("repair needs a full group") }
-    if list.len(full.complete) != 1u64 || !group_number(repaired.value, 1u64) ||
-        list.len(repaired.rows) != 1u64 || repaired.rows[0u64].slot != 1u16 {
+    let Some(repaired) = group_payload(full) else {
+        return Error("repair needs a full group")
+    }
+    if list.len(full.complete) != 1u64 || !group_number(repaired.value, 1u64) || list.len(repaired.rows) != 1u64 || repaired.rows[0u64].slot != 1u16 {
         return Error("repair elided or misplaced content")
     }
     if !apply_view(mut images, full) || !view_images_match(images, key1, model) {

@@ -3,7 +3,9 @@ type SlotLawHandles: shareable + send {
     other: store.Table[u64, u64]
 }
 
-fn slot_law_table(h: SlotLawHandles) -> store.Table[u64, u64] { clone(h.primary) }
+fn slot_law_table(h: SlotLawHandles) -> store.Table[u64, u64] {
+    clone(h.primary)
+}
 
 fn slot_law_schema(mut d: store.Declare) -> Result[SlotLawHandles, store.Error] {
     let first = store.declare_table(mut d, "primary", std.codec.key_u64(), std.codec.of_u64())?
@@ -15,7 +17,11 @@ fn slot_law_schema(mut d: store.Declare) -> Result[SlotLawHandles, store.Error] 
 
 fn slot_law_answer(tx: store.Tx, h: SlotLawHandles, take wrong: bool) -> Result[Answer[u64], Capacity] {
     let mut selected = covers()
-    let chosen: store.Table[u64, u64] = if wrong { clone(h.other) } else { clone(h.primary) }
+    let chosen: store.Table[u64, u64] = if wrong {
+        clone(h.other)
+    } else {
+        clone(h.primary)
+    }
     result.unwrap(cover(mut selected, "left", chosen, Included(1u64), Included(2u64)))
     result.unwrap(cover(mut selected, "left", h.primary, Included(2u64), Included(2u64)))
     result.unwrap(cover(mut selected, "right", h.primary, Included(2u64), Included(2u64)))
@@ -39,7 +45,9 @@ fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
         store.put(mut tx, table, 1u64, 8u64)?
         store.put(mut tx, table, 2u64, 9u64)
     })
-    if let Ok(Committed(_)) = committed {} else { return Error("fixture write refused") }
+    if let Ok(Committed(_)) = committed {} else {
+        return Error("fixture write refused")
+    }
     let mut r = result.unwrap(placed(code.describe(slot_law_place), 1048576u64))
     result.unwrap(bind_query_slots(mut r, h))
     let entry = view r.t.exported[0u64]
@@ -52,15 +60,27 @@ fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
     list.push(mut arg, 0u8)
     let good = SubscriptionInput(grants: None, room: None, key: clone(key), arg: take arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
     let observed = run_query(r, h, access, read_handle, base, good, base, None, output)
-    let Covered(projected) = observed else { return Error("matching slots did not project") }
+    let Covered(projected) = observed else {
+        return Error("matching slots did not project")
+    }
     let mut expected: Bytes = list.new()
     list.push(mut expected, 42u8)
-    for _ in 0u64 .. 7u64 { list.push(mut expected, 0u8) }
-    if projected.value != expected { return Error("query value differs") }
+    for _ in 0u64 .. 7u64 {
+        list.push(mut expected, 0u8)
+    }
+    if projected.value != expected {
+        return Error("query value differs")
+    }
     let rows = slot_rows(take output)
-    if list.len(rows) != 3u64 { return Error("slot spans did not form a union") }
-    if rows[0u64].slot != 0u16 || rows[1u64].slot != 0u16 || rows[2u64].slot != 1u16 { return Error("row names the wrong slot") }
-    if rows[1u64].key != rows[2u64].key { return Error("the second slot missed the shared row") }
+    if list.len(rows) != 3u64 {
+        return Error("slot spans did not form a union")
+    }
+    if rows[0u64].slot != 0u16 || rows[1u64].slot != 0u16 || rows[2u64].slot != 1u16 {
+        return Error("row names the wrong slot")
+    }
+    if rows[1u64].key != rows[2u64].key {
+        return Error("the second slot missed the shared row")
+    }
     let mut bad_arg: Bytes = list.new()
     list.push(mut bad_arg, 1u8)
     let wrong = SubscriptionInput(grants: None, room: None, key: take key, arg: take bad_arg, caller: store.Caller(issuer: 1u8, subject: list.new()))
@@ -69,7 +89,9 @@ fn test_named_slots(clock: Clock, random: Random) -> Result[(), String] waits {
         Faulted(Failed(Raised(5u32)), _) => (),
         _ => return Error("another table satisfied the slot"),
     }
-    if list.len(slot_rows(take refused)) != 0u64 { return Error("wrong cover published rows") }
+    if list.len(slot_rows(take refused)) != 0u64 {
+        return Error("wrong cover published rows")
+    }
     result.unwrap(store.close(take db))
     Ok(())
 }

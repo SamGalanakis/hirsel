@@ -180,7 +180,9 @@ fn answer_claim_waiters[G: send, H: shareable + inert + send](mut hd: Head[G, H]
 
 fn finish_claim_run[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut queue: ClaimQueue, take run: ClaimRun, take receipt: store.Receipt) -> Result[(), store.Error] waits {
     finish_recovered(mut hd, mut queue, run.claim, receipt)
-    if list.len(run.waiters) == 0 { return Ok(()) }
+    if list.len(run.waiters) == 0 {
+        return Ok(())
+    }
     let codec: std.codec.Codec[Outcome] = std.codec.of()
     let outcome = std.codec.decode(codec, receipt.reply) ?=> |take problem| Decode(take problem)
     let expires = store.claim_reply_expiry(hd.db, run.claim)?
@@ -239,9 +241,10 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
         let at = first.deadline
         list.push(mut waiters, take first)
         at
-    } else { initial }
-    let run = ClaimRun(claim: take named, entry: clone(activation.entry), caller: take caller, arguments: take arguments,
-        deadline: deadline, waiters: take waiters, background: background)
+    } else {
+        initial
+    }
+    let run = ClaimRun(claim: take named, entry: clone(activation.entry), caller: take caller, arguments: take arguments, deadline: deadline, waiters: take waiters, background: background)
     let live = match map.get(hd.r.t.keyed, op) {
         Some(KeyedRegistration(policy: Some(_), ..)) => true,
         _ => false,
@@ -271,7 +274,12 @@ fn run_claim_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H], 
 
 fn recovery_turn[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut state: RecoverClaims) -> Result[(), store.Error] waits {
     let mut background = false
-    for pending in state.parked { if pending.run.background { background = true; break } }
+    for pending in state.parked {
+        if pending.run.background {
+            background = true;
+            break
+        }
+    }
     if !background {
         if let Some(take named) = dequeue_recovery(mut state.queue) {
             if let Some(take recovery) = store.recover_claim(hd.db, named)? {
@@ -296,14 +304,18 @@ fn recovery_turn[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut s
 
 fn parked_claim_index(state: RecoverClaims, name: Bytes) -> Option[u64] {
     for i in 0u64 .. list.len(state.parked) {
-        if state.parked[i].run.claim == name { return Some(i) }
+        if state.parked[i].run.claim == name {
+            return Some(i)
+        }
     }
     None
 }
 
 fn start_keyed_request[G: send, H: shareable + inert + send](mut hd: Head[G, H], mut state: RecoverClaims, take request: Request) -> Result[(), store.Error] waits {
     let name = {
-        let Some(raw_key) = view request.claim else { fail("runner: keyed request has no claim key") }
+        let Some(raw_key) = view request.claim else {
+            fail("runner: keyed request has no claim key")
+        }
         store.ClaimKey(op: clone(request.key), caller: clone(request.caller), key: clone(raw_key))
     }
     let policies: Option[Option[store.KeyedPolicy]] = match map.get(hd.r.t.keyed, name.op) {
@@ -363,7 +375,9 @@ fn keyed_work_pending[G: send, H: shareable + inert + send](head: Head[G, H]) ->
 }
 
 fn close_keyed_admission[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Result[(), store.Error] waits {
-    let Some(take boxed) = replace(mut hd.recovery, None) else { return Ok(()) }
+    let Some(take boxed) = replace(mut hd.recovery, None) else {
+        return Ok(())
+    }
     let RecoverClaims(parked: take parked, ..) = box.unbox(take boxed)
     for take entry in take parked {
         let ParkedRecovery(run: ClaimRun(waiters: take waiters, ..), served: take served) = take entry
@@ -390,7 +404,9 @@ fn resume_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> 
         let Some(active) = view hd.recovery else {
             return Ok(false)
         }
-        if list.len(active.parked) == 0 { return Ok(false) }
+        if list.len(active.parked) == 0 {
+            return Ok(false)
+        }
         let ready = store.poll_parked(mut hd.db)?
         let now = host.mono_ns(store.claim_clock(hd.db))
         let mut found: Option[(u64, bool)] = None
@@ -404,7 +420,9 @@ fn resume_recovery[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> 
         }
         found
     }
-    let Some((index, timed_out)) = next else { return Ok(false) }
+    let Some((index, timed_out)) = next else {
+        return Ok(false)
+    }
     let mut state = box.unbox(option.unwrap(replace(mut hd.recovery, None)))
     let ParkedRecovery(run: take run, served: take parked_call) = list.remove(mut state.parked, index)
     close_group(mut hd)

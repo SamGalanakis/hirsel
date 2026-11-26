@@ -1,6 +1,5 @@
 // A place's registration (RUNNER-SPEC §3 "One Registry"): the shared Template it derives
 // once, the per-task Registry that replays against it, and the Placing that carries both.
-
 // One erased adapter per kind, holding the entry's byte bound n from registration
 // (RUNNER-SPEC v2.4 §1.1). A compute slot runs in the caller's task; a granted slot
 // starts a task under `bytes n` that holds the grant. A transact slot has two: the

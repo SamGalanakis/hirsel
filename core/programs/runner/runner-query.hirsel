@@ -167,8 +167,8 @@ fn register_query[G: send, Outer: shareable + inert + send, H: shareable + inert
             As(f) => described_result(code.identity(f), code.revision(f), kind, ca, take result),
         }
         let mut entry = described_query ?=> |_| Bounds
-        entry.1.slots = take schemas
-        entry.1.value = take value
+        entry.1 .slots = take schemas
+        entry.1 .value = take value
         Ok(take entry)
     })?
     register_check(mut r, key, ca, n, s)?

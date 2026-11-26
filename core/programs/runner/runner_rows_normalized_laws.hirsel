@@ -1,0 +1,221 @@
+// ---- L16 (rows_normalized, RUNNER-SPEC v2.11.1 §3 Rows): a SubRow's key is the table id
+// big-endian ‖ the key codec, and its value is the table's current value codec without the
+// stored u16 schema prefix. 257 pad tables take ids 1..257, so "accounts" is 0x00000102,
+// whose bytes differ under the two byte orders. Its row 1 is stored under schema 0
+// ({balance}); the table is then opened at schema 1 ({balance, bonus = 7}) and row 2 is put.
+// The expected bytes are written out by hand: u64 keys are 8 bytes big-endian (codec.md's
+// order-preserving key format), u64 values 8 bytes little-endian.
+type Old {
+    balance: u64
+}
+
+fn old_put(v: Old, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(v.balance, mut b)
+    Ok(())
+}
+
+fn old_take(b: Bytes, mut at: u64) -> Result[Old, std.codec.DecodeError] {
+    Ok(Old(balance: std.codec.take_u64(b, mut at)?))
+}
+
+fn old_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[Old]) -> Result[(), std.codec.EncodeError] {
+    std.codec.define(mut s, "runner.runner.New", 0)?
+    if std.codec.record(mut s, 1)? {
+        return Ok(())
+    }
+    std.codec.field(mut s, "balance")?
+    std.codec.schema_u64(mut s)
+    std.codec.close(mut s)
+    Ok(())
+}
+
+fn new_put(v: New, mut b: Bytes) -> Result[(), std.codec.EncodeError] {
+    std.codec.put_u64(v.balance, mut b)
+    std.codec.put_u64(v.bonus, mut b)
+    Ok(())
+}
+
+fn new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
+    let balance = std.codec.take_u64(b, mut at)?
+    let bonus = std.codec.take_u64(b, mut at)?
+    Ok(New(balance: balance, bonus: bonus))
+}
+
+fn new_schema(mut s: std.codec.Schema, dictionary: std.codec.Codec[New]) -> Result[(), std.codec.EncodeError] {
+    let derived: std.codec.Codec[New] = std.codec.of()
+    std.codec.schema_of(mut s, derived)
+}
+
+type Ah: shareable + send {
+    t: store.Table[u64, New]
+}
+
+fn account_table(h: Ah) -> store.Table[u64, New] {
+    clone(h.t)
+}
+
+fn account_slots() -> Result[Slots[Ah], RegisterError] {
+    table_slot("accounts", code.describe(account_table))
+}
+
+fn accounts_q(tx: store.Tx, h: Ah, take _arg: u32) -> Result[Answer[()], Capacity] {
+    table_answer("accounts", h.t, Included(1u64), Included(2u64))
+}
+
+fn accounts_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(accounts_q), account_slots()?, 65536u64, DEFAULT_STEPS)
+}
+
+fn push_bytes(mut out: Bytes, x: u8, n: u64) {
+    for _ in 0u64 .. n {
+        list.push(mut out, x)
+    }
+}
+
+// The tree key of accounts row k (k < 256), by hand.
+fn account_key(k: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    push_bytes(mut out, 0u8, 2u64)
+    push_bytes(mut out, 1u8, 1u64)
+    push_bytes(mut out, 2u8, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    push_bytes(mut out, k, 1u64)
+    out
+}
+
+// A New value by hand: balance then bonus, each 8 bytes little-endian (both < 256).
+fn account_value(balance: u8, bonus: u8) -> Bytes {
+    let mut out: Bytes = list.new()
+    push_bytes(mut out, balance, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    push_bytes(mut out, bonus, 1u64)
+    push_bytes(mut out, 0u8, 7u64)
+    out
+}
+
+fn row_is(r: SubRow, key: Bytes, value: Bytes) -> bool {
+    r.sub == 7u32 && r.key == key && match r.value {
+        Some(v) => v == value,
+        None => false,
+    }
+}
+
+// 257 pad tables, so accounts' table id takes two bytes, then accounts at schema 0.
+fn padded_accounts(mut d: store.Declare) -> Result[store.Table[u64, Old], store.Error] {
+    for i in 0i64 .. 257i64 {
+        let mut name = string.from("pad")
+        string.push_i64(mut name, i)
+        let pad = store.declare_table(mut d, take name, std.codec.key_u64(), std.codec.of_u64())?
+        let _ = store.finish(mut d, take pad)?
+    }
+    old_accounts(mut d)
+}
+
+fn old_accounts(mut d: store.Declare) -> Result[store.Table[u64, Old], store.Error] {
+    let oc: std.codec.Codec[Old] = std.codec.make(code.describe(old_put), code.describe(old_take), code.describe(old_schema), 8u64)
+    let accounts = store.declare_table(mut d, "accounts", std.codec.key_u64(), oc)?
+    store.finish(mut d, take accounts)
+}
+
+pub fn law_rows_normalized(c: Clock, r: Random) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let old = result.unwrap(store.bind_declaration(mut db, Migrate, padded_accounts))
+    let nc: std.codec.Codec[New] = std.codec.make(code.describe(new_put), code.describe(new_take), code.describe(new_schema), 16u64)
+    let first = store.run(mut db, None, old, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env, 1u64, Old(balance: 10u64))
+    })
+    match take first {
+        Ok(Committed(_)) => (),
+        _ => return false,
+    }
+    let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
+    let h = Ah(t: clone(current))
+    let reg = match placed(code.describe(accounts_place), 1048576u64) {
+        Ok(take x) => take x,
+        Error(_) => return false,
+    }
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let result_schema = result.unwrap(query_result_schema(std.codec.of_unit(), result.unwrap(account_slots())))
+    let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    // G3: the initial result, from span_changes, holds row 1 normalized from schema 0.
+    let initial = at_base(mut b, 0u64, 7u32, take key, no_arg())
+    if list.len(initial.complete) != 1u64 || list.len(initial.rows) != 1u64 || !row_is(initial.rows[0], account_key(1u8), account_value(10u8, 7u8)) {
+        return false
+    }
+    // G2: row 2, put at schema 1, arrives from changes with the same normalization.
+    let second = store.run(mut db, None, current, fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env, 2u64, New(balance: 20u64, bonus: 9u64))
+    })
+    match take second {
+        Ok(Committed(_)) => (),
+        _ => return false,
+    }
+    let owes = step(mut b, db)
+    list.len(owes) == 1u64 && list.len(owes[0].rows) == 1u64 && row_is(owes[0].rows[0], account_key(2u8), account_value(20u8, 9u8))
+}
+
+fn faulting_new_take(b: Bytes, mut at: u64) -> Result[New, std.codec.DecodeError] {
+    let value = new_take(b, mut at)?
+    if value.balance == 10u64 {
+        fail("fixture: old row failed in the current decoder")
+    }
+    let mut i = 0u64
+    while i < 8192u64 {
+        i += 1u64
+    }
+    Ok(value)
+}
+
+fn projection_place(mut r: Registry[(), Ah]) -> Result[(), RegisterError] {
+    query(mut r, code.describe(accounts_q), account_slots()?, 65536u64, 4096u64)
+}
+
+fn faulting_projection(c: Clock, r: Random, balance: u64) -> bool waits {
+    let mut db = store.memory(c, r, result.unwrap(store.sized(Memory, 1074790400u64)))
+    let nc: std.codec.Codec[New] = std.codec.make(code.describe(new_put), code.describe(faulting_new_take), code.describe(new_schema), 16u64)
+    let old = result.unwrap(store.bind_declaration(mut db, Migrate, old_accounts))
+    let _ = result.unwrap(store.run(mut db, None, (store.copy_env(balance), store.copy_env(old)), fn(mut tx, call_env) -> Result[(), store.Error] {
+        store.put(mut tx, call_env.1, 1u64, Old(balance: call_env.0))
+    }))
+    let current = result.unwrap(store.table(mut db, "accounts", std.codec.key_u64(), nc))
+    let h = Ah(t: clone(current))
+    let reg = result.unwrap(placed(code.describe(projection_place), 1048576u64))
+    let ca: std.codec.Codec[u32] = std.codec.of()
+    let result_schema = result.unwrap(query_result_schema(std.codec.of_unit(), result.unwrap(account_slots())))
+    let (take key, _) = result.unwrap(described_result(code.identity(code.describe(accounts_q)), None, Query, ca, take result_schema))
+    let mut bound_registry = take reg
+    result.unwrap(bind_query_slots(mut bound_registry, h))
+    let mut b = Board(r: take bound_registry, h: arc.new(take h), read_handle: result.unwrap(store.reader(db, 0u64)), reads: publisher_reads(), base: store.snapshot(db), newest: None, subs: subscriptions())
+    let o = at_base(mut b, 1u64, 7u32, take key, no_arg())
+    !o.reset && list.len(o.rows) == 0u64 && list.len(o.complete) == 0u64 && list.len(o.ended) == 1u64 && o.ended[0].sub == 7u32 && ended_entry(b.subs, SubId(who: 1u64, sub: 7u32, serial: 0u64)) && match o.ended[0].outcome {
+        Failed(Raised(5u32)) => balance == 10u64,
+        Failed(OutOfTime(4096u64)) => balance == 11u64,
+        _ => false,
+    }
+}
+
+// The old stored layout takes the reader path and executes application code. The faulted
+// first run stays only as an ended entry (v2.19.2).
+pub fn law_projection_isolated(c: Clock, r: Random) -> bool waits {
+    faulting_projection(c, r, 10u64) && faulting_projection(c, r, 11u64)
+}
+
+@test
+fn test_projection_isolated(c: Clock, r: Random) -> Result[(), String] waits {
+    if !law_projection_isolated(c, r) {
+        return Error("L8: old-schema conversion must end only its subscription")
+    }
+    law_query_budget_split(c, r)
+}
+
+@test
+fn test_rows_normalized(c: Clock, r: Random) -> Result[(), ()] waits {
+    if law_rows_normalized(c, r) {
+        Ok(())
+    } else {
+        Error(())
+    }
+}

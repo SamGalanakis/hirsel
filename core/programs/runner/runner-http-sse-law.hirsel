@@ -314,7 +314,7 @@ fn test_l16(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[(), ()] waits {
     let first_version = store.version(store.snapshot(db))
     let Mailbox(to: take pub_in, from: take waiting, rounds: take rounds) = result.unwrap(mailbox(16u64))
     let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
-    let job = Publish( placing: placing_at(code.describe(sse_law_place), HTTP_LAW_PLACE_BYTES), n_place: HTTP_LAW_PLACE_BYTES, staging: 1048576u64, h: arc.new(clone(tables)), read_handle: result.unwrap(store.reader(db, 0u64)), base: store.snapshot(db), from: take waiting, rounds: take rounds, ready: take ready_to)
+    let job = Publish(placing: placing_at(code.describe(sse_law_place), HTTP_LAW_PLACE_BYTES), n_place: HTTP_LAW_PLACE_BYTES, staging: 1048576u64, h: arc.new(clone(tables)), read_handle: result.unwrap(store.reader(db, 0u64)), base: store.snapshot(db), from: take waiting, rounds: take rounds, ready: take ready_to)
     let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
     if let Ok(None) = channel.receive(ready_from) {} else {
         fail("L16 publisher did not start")

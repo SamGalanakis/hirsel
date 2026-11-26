@@ -48,6 +48,8 @@ fn strings() -> std.codec.Codec[List[String]] {
     std.codec.make(code.describe(strings_encode), code.describe(strings_decode), code.describe(strings_schema), 4)
 }
 
+type BenchError = Build(Capacity) | Encode(std.codec.EncodeError)
+
 // Owner k: "owner-" then k's decimal digits, 7 to 11 bytes.
 fn owner_of(k: u64) -> Result[String, Capacity] {
     let mut s = string.from("owner-")
@@ -55,15 +57,15 @@ fn owner_of(k: u64) -> Result[String, Capacity] {
     Ok(take s)
 }
 
-fn run[T](c: std.codec.Codec[T], xs: T, mode: u64, r: u64, check: fn(T) -> u64) -> Result[u64, Capacity] {
+fn run[T](c: std.codec.Codec[T], xs: T, mode: u64, r: u64, check: fn(T) -> u64) -> Result[u64, BenchError] {
     let mut out: Bytes = list.new()
-    std.codec.encode(c, xs, mut out)?
+    std.codec.encode(c, xs, mut out) ?=> Encode
     let mut sum: u64 = list.len(out)
     let mut i: u64 = 0
     while i < r {
         if mode == 1 {
             list.clear(mut out)
-            std.codec.encode(c, xs, mut out)?
+            std.codec.encode(c, xs, mut out) ?=> Encode
             sum += list.len(out)
         } else if mode == 2 {
             match std.codec.decode(c, out) {
@@ -95,13 +97,13 @@ fn check_strings(xs: List[String]) -> u64 {
     list.len(xs) + string.byte_len(xs[list.len(xs) - 1])
 }
 
-fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
+fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, BenchError] {
     if work == 0 || work == 3 {
         let mut xs: List[Account] = list.with_capacity(n)
         let mut k: u64 = 0
         while k < n {
             let wide: i64 = int.truncate(k)
-            let a = Account(id: k, owner: owner_of(k)?, balance: wide - 50000)
+            let a = Account(id: k, owner: owner_of(k) ?=> Build, balance: wide - 50000)
             list.push(mut xs, take a)
             k += 1
         }
@@ -125,7 +127,7 @@ fn bench(work: u64, mode: u64, n: u64, r: u64) -> Result[u64, Capacity] {
         let mut xs: List[String] = list.with_capacity(n)
         let mut k: u64 = 0
         while k < n {
-            list.push(mut xs, owner_of(k)?)
+            list.push(mut xs, owner_of(k) ?=> Build)
             k += 1
         }
         run(strings(), xs, mode, r, check_strings)

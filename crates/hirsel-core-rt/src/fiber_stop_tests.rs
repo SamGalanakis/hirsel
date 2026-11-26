@@ -63,9 +63,12 @@ fn host_stops_have_exact_names_and_skip_cleanup() {
         ("missing action", b"run stop: Signal\n".as_slice()),
     ];
     // A host refusing a stack's growth is HostMemory (FAIL-15), not a fault.
-    // qemu-user ignores the guest's data limit, so only native targets refuse.
-    if cfg!(not(target_arch = "aarch64")) {
-        modes.push(("refused growth", b"run stop: HostMemory\n".as_slice()));
+    // qemu-user and Darwin ignore the data limit, so x86-64 Linux runs that case.
+    match crate::host::HOST_TARGET {
+        hirsel_core_layout::Target::X86_64Linux => {
+            modes.push(("refused growth", b"run stop: HostMemory\n".as_slice()));
+        }
+        hirsel_core_layout::Target::Aarch64Linux | hirsel_core_layout::Target::Aarch64Darwin => {}
     }
     for (mode, expected) in modes {
         let output = crate::test_process::command()

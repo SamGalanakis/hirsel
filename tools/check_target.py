@@ -37,25 +37,25 @@ HOST_SEAMS = (
     'crates/hirsel-prof/src/linux/',
     'crates/hirsel-llvm-lazy/src/host/',
 )
-# Host-OS code that predates its seam. Each entry names the slice of the macOS design
-# (research-1124/macos-arm64, §9) that moves it behind a seam; remove an entry when it
-# no longer reads the host. A stale entry fails the check.
+# Host-OS code that predates its seam. Each entry names the ticket that owns moving
+# it behind a seam; remove an entry when it no longer reads the host. A stale entry
+# fails the check.
 HOST_FILES = {
-    # S6/S7: the runtime host seam and its Darwin provider.
-    'crates/hirsel-core-net/src/reactor.rs': 'S6',
-    'crates/hirsel-core-rt/src/fiber.rs': 'S6',
-    'crates/hirsel-core-rt/src/fiber_stop_tests.rs': 'S6',
-    'crates/hirsel-core-rt/src/provider_tests.rs': 'S6',
-    'crates/hirsel-core-rt/src/secret/key.rs': 'S6',
-    'crates/hirsel-core-rt/src/task_heap.rs': 'S6',
-    'crates/hirsel-core-rt/src/openat2_required.rs': 'S7',
-    'crates/hirsel-core-rt/src/test_process.rs': 'S7',
-    'crates/hirsel-core-rt/src/tests.rs': 'S6',
-    # S12: the driver on a Mac host (sealed files, launcher, compiler identity).
-    'crates/hirsel-core-driver/src/startup_native.rs': 'S12',
-    'crates/hirsel-core-ids/src/launch.rs': 'S12',
-    'crates/hirsel-intern/src/instructions.rs': 'S12',
-    # S13: hirsel-prof on Darwin.
+    # macos-s6-host-seam-2498 / macos-s7-darwin-provider-2585: the runtime host
+    # seam and its Darwin provider.
+    'crates/hirsel-core-net/src/reactor.rs': 'macos-s6-host-seam-2498',
+    'crates/hirsel-core-rt/src/fiber.rs': 'macos-s6-host-seam-2498',
+    'crates/hirsel-core-rt/src/provider_tests.rs': 'macos-s6-host-seam-2498',
+    'crates/hirsel-core-rt/src/secret/key.rs': 'macos-s6-host-seam-2498',
+    'crates/hirsel-core-rt/src/task_heap.rs': 'macos-s6-host-seam-2498',
+    'crates/hirsel-core-rt/src/openat2_required.rs': 'macos-s7-darwin-provider-2585',
+    'crates/hirsel-core-rt/src/test_process.rs': 'macos-s7-darwin-provider-2585',
+    'crates/hirsel-core-rt/src/tests.rs': 'macos-s6-host-seam-2498',
+    # macos-s12-driver-2828: the driver on a Mac host (sealed files, launcher,
+    # compiler identity).
+    'crates/hirsel-core-ids/src/launch.rs': 'macos-s12-driver-2828',
+    'crates/hirsel-intern/src/instructions.rs': 'macos-s12-driver-2828',
+    # S13 is unlanded: hirsel-prof on Darwin.
     'crates/hirsel-prof/src/lib.rs': 'S13',
 }
 

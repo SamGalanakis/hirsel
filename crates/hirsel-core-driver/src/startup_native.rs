@@ -540,10 +540,9 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     let mut executable = [0u8; 192];
     executable[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
     executable[16..18].copy_from_slice(&2u16.to_le_bytes()); // ET_EXEC
-    let machine = if cfg!(target_arch = "x86_64") {
-        62u16
-    } else {
-        183
+    let machine = match crate::host::HOST_TARGET {
+        hirsel_core_layout::Target::X86_64Linux => 62u16,
+        hirsel_core_layout::Target::Aarch64Linux | hirsel_core_layout::Target::Aarch64Darwin => 183,
     };
     executable[18..20].copy_from_slice(&machine.to_le_bytes());
     executable[20..24].copy_from_slice(&1u32.to_le_bytes());

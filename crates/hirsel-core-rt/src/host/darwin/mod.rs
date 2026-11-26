@@ -8,3 +8,7 @@ pub(crate) mod stat;
 pub(crate) mod sync;
 pub(crate) mod sys;
 pub(crate) mod unix;
+
+#[cfg(test)]
+pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
+    hirsel_core_layout::Target::Aarch64Darwin;

@@ -19,7 +19,10 @@ pub(crate) mod spawn;
 
 pub(crate) use install::{installed_executable, loaded_libraries};
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::X86_64Linux;
+#[cfg(target_arch = "aarch64")]
+pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::Aarch64Linux;
 
 #[cfg(test)]
 pub(crate) fn test_link(_runtime: &Path) -> crate::native::Link {

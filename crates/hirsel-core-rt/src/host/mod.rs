@@ -11,6 +11,8 @@ use darwin as provider;
 #[cfg(target_os = "linux")]
 use linux as provider;
 
+#[cfg(test)]
+pub(crate) use provider::HOST_TARGET;
 pub use provider::exec;
 pub(crate) use provider::{clock, file, path, stat::stat, sync, sys, unix};
 

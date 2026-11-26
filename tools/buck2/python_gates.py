@@ -45,6 +45,7 @@ def python_gates(out, call, Raw):
         ("test-ignored-tests", "tools/tests/ignored_tests.py"),
         ("test-vopr-failure-groups", "core/tools/test_vopr_failure_groups.py"),
         ("test-vopr-nightly-receipt", "core/tools/test_vopr_nightly_receipt.py"),
+        ("test-store-cross-build", "core/tools/test_store_cross_build.py"),
         ("test-board-bisect", "tools/tests/test_board_bisect.py"),
         ("test-hot-files", "tools/tests/hot_files.py"),
         ("bench-awfy-measure", "bench/awfy/test_measure.py"),

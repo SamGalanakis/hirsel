@@ -161,6 +161,14 @@ def summarize(run, manifest, commit):
             if missed:
                 misses.add((law, label))
         frequencies.append(row)
+    cross_build = None
+    for row in read_evidence(run / "cross-build.jsonl", errors):
+        if row.get("kind") == "summary":
+            cross_build = {
+                field: row[field]
+                for field in ("status", "saved_commit", "saved_format", "current_format", "checked", "failed")
+                if field in row
+            }
     return {
         "laws_prepared": sorted(prepared),
         "laws_unprepared": unprepared,
@@ -178,6 +186,7 @@ def summarize(run, manifest, commit):
             {field: row[field] for field in ("oracle", "rejected", "exit_status")}
             for row in read_evidence(run / "negative.jsonl", errors)
         ],
+        "cross_build_reopen": cross_build,
         "evidence_errors": errors,
     }
 
@@ -220,6 +229,8 @@ def finish(run, manifest, commit, phase, status):
     )):
         status = status or 1
     if negatives_missing:
+        status = status or 1
+    if evidence.get("cross_build_reopen") and evidence["cross_build_reopen"].get("failed", 0) > 0:
         status = status or 1
     receipt = {
         "night": run.name,

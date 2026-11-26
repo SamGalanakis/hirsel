@@ -36,6 +36,7 @@ extern uint8_t store_crash_late_polls(const void *);
 extern uint8_t store_crash_eio(void *, const char *, size_t);
 extern uint8_t store_crash_eio_reached(const void *);
 extern uint8_t store_crash_intercepted(const void *);
+extern uint8_t store_crash_load_snapshot(void *, const char *, size_t);
 
 static struct {
     uint64_t phase, issued;
@@ -385,12 +386,20 @@ uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,
     }
     static const char *phases[]={"init","write","read","reopen"};
     static const uint64_t reopen_order[]={0,1,3,2};
+    const char *load_dir=getenv("HIRSEL_W2_LOAD_DIR");
+    int load_only=load_dir && *load_dir;
+    if(load_only && !store_crash_load_snapshot(state,load_dir,strlen(load_dir))) {
+        fprintf(stderr,"W2 load snapshot failed: %s\n",load_dir);
+        store_crash_free(state);
+        return 120;
+    }
     int reopen=orphan_end || checkpoint_reopen || late || eio_reopen;
     int read_only=!strcmp(scenario,"read-only");
     uint64_t original_manifest=0;
     uint8_t status=0;
-    for(uint64_t run=0;run<(reopen && !recovery_failure?4:3);run++) {
-        uint64_t phase=reopen?reopen_order[run]:run;
+    uint64_t total_runs=load_only?1:(reopen && !recovery_failure?4:3);
+    for(uint64_t run=0;run<total_runs;run++) {
+        uint64_t phase=load_only?2:(reopen?reopen_order[run]:run);
         store_crash_phase(state,phase);
         if(phase==2 && read_only) store_crash_expect_read_only(state);
         if(phase==1 && read_only && input->args_len==4) original_manifest=store_crash_manifest_inode(state);

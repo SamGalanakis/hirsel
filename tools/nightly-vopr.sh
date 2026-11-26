@@ -106,6 +106,20 @@ if (( ${#law_filter[@]} == 0 )); then
   fi
   python3 core/tools/vopr_nightly_negative.py "${paths[0]}" "${paths[1]}" \
     "$manifest" "$scratch/negative" "$run/negative.jsonl" "${crash_flags[@]}" || status=$?
+  phase=cross-build
+  if (( ${#crash_flags[@]} )); then
+    python3 core/tools/store_cross_build.py reopen \
+      --compiler "${paths[0]}" --runtime "${crash[1]}" --bridge "${crash[0]}" \
+      --stage-bins "$scratch/w2-bins" \
+      --saved "$briefs/vopr/nightly/last-green-w2" \
+      --output "$run/cross-build.jsonl" || status=$?
+    if [[ -x "$scratch/w2-bins/disk" && -x "$scratch/w2-bins/journal" ]]; then
+      python3 core/tools/store_cross_build.py capture \
+        --disk-bin "$scratch/w2-bins/disk" --journal-bin "$scratch/w2-bins/journal" \
+        --bridge "${crash[0]}" --commit "$commit" \
+        --stage "$scratch/cross-build-stage" || status=$?
+    fi
+  fi
 fi
 
 cd "$scratch"
@@ -130,6 +144,11 @@ if (( sweep_status != 0 )); then
   status=$sweep_status
   phase=sweep-failed
 else
+  if (( status == 0 && ${#law_filter[@]} == 0 )) && [[ -f "$scratch/cross-build-stage/manifest.json" ]]; then
+    python3 core/tools/store_cross_build.py promote \
+      --stage "$scratch/cross-build-stage" \
+      --target "$briefs/vopr/nightly/last-green-w2" || status=$?
+  fi
   phase=finished
 fi
 exit "$status"

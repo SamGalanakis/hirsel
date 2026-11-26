@@ -18,6 +18,8 @@ const POISON_GROUP: u8 = 12;
 mod late;
 #[path = "store_crash_reach.rs"]
 mod reach;
+#[path = "store_crash_snapshot.rs"]
+mod snapshot;
 #[path = "store_crash_sync.rs"]
 mod sync;
 #[path = "store_crash_window.rs"]
@@ -793,6 +795,9 @@ pub unsafe extern "C" fn store_crash_phase(p: *mut c_void, phase: u64) {
             }
         }
         bridge.crashed = false;
+        if phase == 2 {
+            bridge.maybe_dump_snapshot();
+        }
     }
     bridge.phase = phase;
     bridge.calls = 0;

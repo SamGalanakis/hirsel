@@ -143,9 +143,8 @@ pub(super) fn finish(
                 })
             }
             hirsel_core_layout::ObjectFormat::MachO => {
-                let name = String::from_utf8_lossy(&symbol.name).into_owned();
                 debug.sections.push(CodeSection {
-                    symbol: name,
+                    symbol: function.linkage.clone(),
                     size: function.size,
                 });
                 debug.sections.len() as u32 - 1

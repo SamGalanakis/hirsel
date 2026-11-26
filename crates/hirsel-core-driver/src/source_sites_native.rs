@@ -1,3 +1,10 @@
+fn site_fixture_is_macho() -> bool {
+    match crate::host::HOST_TARGET.object_format() {
+        hirsel_core_layout::ObjectFormat::Elf => false,
+        hirsel_core_layout::ObjectFormat::MachO => true,
+    }
+}
+
 // FAIL-2 / PROG-3: output precedes a failure at the actual callee expression.
 // Both positions are hand-counted below; no evaluator-derived expected value.
 fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
@@ -17,35 +24,37 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     };
     let mut options = native_options(backend, dir.path());
     options.optimize = optimize;
-    options.debug_lines = debug_lines;
+    let macho = site_fixture_is_macho();
+    options.debug_lines = debug_lines && !macho;
     options.grant_mask = 1 << 4;
     let run = |built: &BuildProduct, line: u32| {
         let output = Command::new(&built.executable).output().unwrap();
         assert_eq!(output.status.code(), Some(101), "{output:?}");
         assert_eq!(output.stdout, b"before\n", "{output:?}");
         assert_eq!(output.stderr, format!("Overflow at app@1/main.hirsel:{line}:5\n").as_bytes(), "{output:?}");
-        assert_eq!(built.debug_lines, debug_lines);
+        assert_eq!(built.debug_lines, options.debug_lines);
         let bytes = std::fs::read(&built.executable).unwrap();
-        use object::Object as _;
-        assert_eq!(object::File::parse(bytes.as_slice()).unwrap().kind(), object::ObjectKind::Dynamic,
-            "site constants must survive a PIE load bias");
-        if debug_lines {
+        use object::{Object as _, ObjectSection as _};
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        if macho {
+            assert_eq!(file.kind(), object::ObjectKind::Executable);
+            assert!(matches!(file.flags(), object::FileFlags::MachO { flags } if flags.0 & object::macho::MH_PIE.0 != 0),
+                "site constants must survive a PIE load bias");
+        } else {
+            assert_eq!(file.kind(), object::ObjectKind::Dynamic, "site constants must survive a PIE load bias");
+        }
+        if options.debug_lines {
             let positions = crate::native_debug::source_positions(&bytes).unwrap();
             assert!(positions.contains(&("app@1/main.hirsel".to_string(), line, 5)),
                 "debug line table lost the raising expression: {positions:?}");
         } else {
-            use object::{Object as _, ObjectSection as _};
-            let file = object::File::parse(bytes.as_slice()).unwrap();
-            assert!(file.sections().all(|s| !s.name().unwrap().starts_with(".debug")),
-                "release without line rows must not link a debug object");
-            let crate::native_debug::SymbolSource::DetachedDwarf(rows) =
-                crate::native_debug::resolve_symbols(&built.executable, &bytes, None).unwrap()
-            else {
-                panic!("missing detached source locations");
-            };
-            let positions = crate::native_debug::source_positions(&rows).unwrap();
-            assert!(positions.contains(&("app@1/main.hirsel".to_string(), line, 5)),
-                "detached line table lost the raising expression: {positions:?}");
+            if macho {
+                assert!(file.sections().all(|s| s.segment_name() != Ok(Some("__DWARF"))));
+            } else {
+                assert!(file.sections().all(|s| !s.name().unwrap().starts_with(".debug")),
+                    "release without line rows must not link a debug object");
+            }
+            assert_detached_site(built, &bytes, line, 5);
         }
     };
     let cold = check(source).build(&entry, &options).unwrap();
@@ -122,6 +131,19 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     }
 }
 
+fn assert_detached_site(built: &BuildProduct, bytes: &[u8], line: u32, column: u32) {
+    let crate::native_debug::SymbolSource::DetachedDwarf(rows) =
+        crate::native_debug::resolve_symbols(&built.executable, bytes, None).unwrap()
+    else {
+        panic!("missing detached source locations");
+    };
+    let positions = crate::native_debug::source_positions(&rows).unwrap();
+    assert!(
+        positions.contains(&("app@1/main.hirsel".to_string(), line, column)),
+        "detached line table lost the raising expression: {positions:?}"
+    );
+}
+
 #[test]
 #[ignore = "explicit native integration target"]
 fn failure_sites_cranelift_dev() { failure_sites_rebind(Backend::Cranelift, false, true); }
@@ -152,6 +174,10 @@ fn failure_sites_llvm_dev_default() { failure_sites_rebind(Backend::Llvm, false,
 #[test]
 #[ignore = "explicit native integration target"]
 fn failure_sites_dynamic_relocation_is_refused() {
+    if site_fixture_is_macho() {
+        failure_sites_chained_rebase();
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let mut object = object::write::Object::new(object::BinaryFormat::Elf, object::Architecture::X86_64, object::Endianness::Little);
     let section = object.add_section(vec![], b".data".to_vec(), object::SectionKind::Data);
@@ -166,6 +192,82 @@ fn failure_sites_dynamic_relocation_is_refused() {
     assert!(linked.status.success(),"{linked:?}");
     let error = crate::native_entry::check_linked_sites(&std::fs::read(output).unwrap()).unwrap_err();
     assert!(error.contains("dynamic relocation against site symbol"),"{error}");
+}
+
+fn failure_sites_chained_rebase() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let options = native_options(Backend::Cranelift, dir);
+    let (_, recipe) =
+        crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime).unwrap();
+    let clang = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
+    let assemble = |name: &str, source: &str| {
+        let input = dir.join(name);
+        let output = input.with_extension("o");
+        std::fs::write(&input, source).unwrap();
+        command(
+            Command::new(&clang)
+                .args(["--target=arm64-apple-macos26.0", "-c"])
+                .arg(input)
+                .arg("-o")
+                .arg(&output),
+        )
+        .unwrap();
+        output
+    };
+    let definitions = assemble(
+        "abs.s",
+        "\
+        .globl _hirsel_core_site_probe\n\
+        .globl _site_zero\n\
+        _hirsel_core_site_probe = 0x1234\n\
+        _site_zero = 0\n",
+    );
+    let main = assemble(
+        "main.c",
+        "\
+        extern unsigned long *site_pointer;\n\
+        int main(void) { return *site_pointer != 0x1239; }\n",
+    );
+    for (name, expression) in [
+        ("clean", "_hirsel_core_site_probe - _site_zero + 5"),
+        ("below-base", "_hirsel_core_site_probe + 5"),
+    ] {
+        // The pointer to site_word needs a rebase in both links. Only the
+        // single-symbol site word gets a rebase of its own.
+        let use_site = assemble(
+            &format!("{name}.s"),
+            &format!(
+                "\
+            .section __DATA,__const\n\
+            .p2align 3\n\
+            .globl _site_word\n\
+            _site_word: .quad {expression}\n\
+            .globl _site_pointer\n\
+            _site_pointer: .quad _site_word\n"
+            ),
+        );
+        let image = dir.join(name);
+        direct_link(
+            &recipe,
+            &[definitions.clone(), main.clone(), use_site],
+            None,
+            &image,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+        let bytes = std::fs::read(&image).unwrap();
+        let checked = crate::native_entry::check_linked_sites(&bytes);
+        if name == "clean" {
+            checked.unwrap();
+            run_clean(&image, 0);
+        } else {
+            let error = checked.unwrap_err();
+            assert!(error.contains("targets 0x1239 below image base"), "{error}");
+        }
+    }
 }
 
 // An executable names its sources by package (FAIL-2's report reads
@@ -225,7 +327,7 @@ fn failure_sites_relocated_llvm() {
 
 fn failure_sites_discarded_by_linker() {
     use hirsel_core_ir::source::{ItemSource, site_symbol};
-    use hirsel_core_layout::source_positions::{POINTS_TAG, point_position};
+    use hirsel_core_layout::source_positions::{POINTS_TAG, TAG, point_position, position};
     use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 
     let dir = tempfile::tempdir().unwrap();
@@ -269,14 +371,16 @@ fn failure_sites_discarded_by_linker() {
 
     // The only reference to line 1, column 2 (the n of fn) is in a separate
     // allocated section. LLD can discard it, even though it shares the live file.
-    let mut input = object::write::Object::new(
-        object::BinaryFormat::Elf,
-        object::Architecture::X86_64,
-        object::Endianness::Little,
-    );
+    let macho = site_fixture_is_macho();
+    let (format, arch, segment, section_name) = if macho {
+        (object::BinaryFormat::MachO, object::Architecture::Aarch64, "__TEXT", "__dead_site")
+    } else {
+        (object::BinaryFormat::Elf, object::Architecture::X86_64, "", ".rodata.dead_coordinate")
+    };
+    let mut input = object::write::Object::new(format, arch, object::Endianness::Little);
     let section = input.add_section(
-        vec![],
-        b".rodata.dead_coordinate".to_vec(),
+        segment.as_bytes().to_vec(),
+        section_name.as_bytes().to_vec(),
         object::SectionKind::ReadOnlyData,
     );
     input.section_mut(section).set_data(vec![0; 8], 8);
@@ -290,8 +394,12 @@ fn failure_sites_discarded_by_linker() {
         section: object::write::SymbolSection::Section(section),
         flags: object::SymbolFlags::None,
     });
+    let mut name = site_symbol(&dead).into_bytes();
+    if let Some(prefix) = input.mangling().global_prefix() {
+        name.insert(0, prefix);
+    }
     let binding = input.add_symbol(object::write::Symbol {
-        name: site_symbol(&dead).into_bytes(),
+        name,
         value: 0,
         size: 0,
         kind: object::SymbolKind::Unknown,
@@ -307,8 +415,10 @@ fn failure_sites_discarded_by_linker() {
                 offset: 0,
                 symbol: binding,
                 addend: 0,
-                flags: object::RelocationFlags::Elf {
-                    r_type: object::elf::R_X86_64_64,
+                flags: object::RelocationFlags::Generic {
+                    kind: object::RelocationKind::Absolute,
+                    encoding: object::RelocationEncoding::Generic,
+                    size: 64,
                 },
             },
         )
@@ -372,28 +482,35 @@ fn failure_sites_discarded_by_linker() {
     assert_eq!(output.stderr, b"Overflow at app@1/main.hirsel:2:5\n");
 
     let bytes = std::fs::read(&built.executable).unwrap();
-    let elf = object::File::parse(bytes.as_slice()).unwrap();
+    let image = object::File::parse(bytes.as_slice()).unwrap();
+    let discarded = if macho { "_dead_coordinate_section" } else { "dead_coordinate_section" };
     assert!(
-        !elf.symbols()
-            .any(|symbol| symbol.name() == Ok("dead_coordinate_section"))
+        !image.symbols().any(|symbol| symbol.name() == Ok(discarded))
     );
-    let table = elf
-        .symbols()
-        .find(|symbol| symbol.name() == Ok("__hirsel_source_files"))
-        .unwrap();
-    let section = elf
-        .section_by_index(table.section_index().unwrap())
-        .unwrap();
-    let data = section
-        .data_range(table.address(), table.size())
-        .unwrap()
-        .unwrap();
+    let data = if macho {
+        assert!(image.section_by_name(section_name).is_none());
+        image.section_by_name("__hirsel_sites").unwrap().data().unwrap()
+    } else {
+        let table = image
+            .symbols()
+            .find(|symbol| symbol.name() == Ok("__hirsel_source_files"))
+            .unwrap();
+        let section = image.section_by_index(table.section_index().unwrap()).unwrap();
+        section.data_range(table.address(), table.size()).unwrap().unwrap()
+    };
     let word = |offset| u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
     assert_eq!(word(0), 40, "the only source file is main.hirsel");
     assert_eq!(word(32), 1);
-    let points = data[word(16)..word(16) + word(24)]
-        .strip_prefix(&[POINTS_TAG])
-        .unwrap();
+    let positions = &data[word(16)..word(16) + word(24)];
+    if macho {
+        // ld64 does not emit the live relocations the ELF link uses to prune
+        // the table, so the discarded coordinate still has a source position.
+        let markers = positions.strip_prefix(&[TAG]).unwrap();
+        assert_eq!(position(markers, 1), (1, 2));
+        assert_eq!(position(markers, PREFIX.len()), (2, 5));
+        return;
+    }
+    let points = positions.strip_prefix(&[POINTS_TAG]).unwrap();
     assert_eq!(point_position(points, 1), None);
     assert_eq!(point_position(points, PREFIX.len()), Some((2, 5)));
 }
@@ -405,6 +522,7 @@ fn failure_sites_discarded_by_linker() {
 // maker's copy the linker kept: with two makers, one of them never run. Positions
 // are hand-counted in each source.
 fn failure_sites_adapter(backend: Backend, optimize: bool, debug_lines: bool) {
+    let macho = site_fixture_is_macho();
     const APPLY: &str = "fn apply(f: fn(take Option[u64]) -> u64, x: Option[u64]) -> u64 {\n    f(x)\n}\n";
     let cases = [
         // One maker, a core callee: the call `f(x)`, 2:5.
@@ -429,7 +547,7 @@ fn failure_sites_adapter(backend: Backend, optimize: bool, debug_lines: bool) {
             assert!(product.accepted(), "{case}: {:?} {:?}", product.diagnostics, product.incomplete);
             let mut options = native_options(backend, dir.path());
             options.optimize = optimize;
-            options.debug_lines = debug_lines;
+            options.debug_lines = debug_lines && !macho;
             let built = product.build(&entry, &options).unwrap();
             if request_number == 1 {
                 assert_eq!(built.compiled, 0, "{case}: every body is a hit");
@@ -441,6 +559,10 @@ fn failure_sites_adapter(backend: Backend, optimize: bool, debug_lines: bool) {
                 format!("Unwrap at app@1/main.hirsel:{line}:{column}\n"),
                 "{case}"
             );
+            if macho && debug_lines {
+                let bytes = std::fs::read(&built.executable).unwrap();
+                assert_detached_site(&built, &bytes, line, column);
+            }
         }
     }
 }

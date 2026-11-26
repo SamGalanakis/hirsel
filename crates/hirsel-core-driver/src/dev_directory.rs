@@ -11,6 +11,8 @@ use std::{
 };
 
 const MARKER: &str = ".hirsel-dev-owned";
+// The store path can expand sixfold in JSON, alongside fixed-size locator fields.
+const STATE_LIMIT: u64 = 32 << 10;
 
 pub(super) struct Directory {
     pub root: PathBuf,
@@ -25,6 +27,16 @@ pub(super) struct Directory {
 pub(super) struct Locator {
     pub active: Option<ImageRef>,
     pub pending: Option<Pending>,
+}
+
+fn check_state_size(bytes: u64) -> io::Result<()> {
+    if bytes > STATE_LIMIT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("dev state exceeds {STATE_LIMIT} bytes"),
+        ));
+    }
+    Ok(())
 }
 
 fn open_dir(path: &Path) -> io::Result<File> {
@@ -319,10 +331,14 @@ impl Directory {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Locator::default()),
             Err(error) => return Err(error.into()),
         };
-        let expected = id(&self.store_dir)?;
+        let length = file.metadata()?.len();
+        check_state_size(length)?;
+        let mut bytes = Vec::with_capacity(length as usize);
+        file.take(STATE_LIMIT + 1).read_to_end(&mut bytes)?;
+        check_state_size(bytes.len() as u64)?;
         let (store, inode, locator): (PathBuf, (u64, u64), Locator) =
-            serde_json::from_reader(file.take(16 * 1024))?;
-        if store == self.store && inode == expected {
+            serde_json::from_slice(&bytes)?;
+        if store == self.store && inode == id(&self.store_dir)? {
             Ok(locator)
         } else {
             Ok(Locator::default())
@@ -330,10 +346,9 @@ impl Directory {
     }
 
     pub(super) fn save(&self, locator: &Locator) -> Result<(), Error> {
-        crate::fs::atomic_write(
-            &self.root.join("state.json"),
-            &serde_json::to_vec(&(&self.store, id(&self.store_dir)?, locator))?,
-        )?;
+        let bytes = serde_json::to_vec(&(&self.store, id(&self.store_dir)?, locator))?;
+        check_state_size(bytes.len() as u64)?;
+        crate::fs::atomic_write(&self.root.join("state.json"), &bytes)?;
         Ok(())
     }
 }
@@ -372,4 +387,50 @@ fn retire(path: &Path, runtime: &Path) -> io::Result<()> {
         return Err(io::Error::other("store replaced during retirement"));
     }
     fs::remove_dir_all(detached)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_reopens_with_an_escaped_store_path_at_the_host_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let server = root.join("server");
+        fs::create_dir(&server).unwrap();
+        let mut store = root.join("store");
+        fs::create_dir(&store).unwrap();
+
+        // A path byte of 0x01 needs six bytes in JSON. On Linux the encoded
+        // record exceeds the old 16 KiB reader limit.
+        let longest = libc::PATH_MAX as usize - 1;
+        let mut remaining = longest - store.as_os_str().len();
+        for parts in (1..=remaining.div_ceil(256)).rev() {
+            let bytes = remaining / parts;
+            store.push("\u{1}".repeat(bytes - 1));
+            fs::create_dir(&store).unwrap();
+            remaining -= bytes;
+        }
+        assert_eq!(store.as_os_str().len(), longest);
+        let image = ImageRef {
+            number: u64::MAX,
+            identity: [0xff; 32],
+        };
+        let directory = Directory::open(&server, Some(&store), false, None).unwrap();
+        directory
+            .save(&Locator {
+                active: Some(image),
+                pending: None,
+            })
+            .unwrap();
+        drop(directory);
+
+        let reopened = Directory::open(&server, Some(&store), false, None).unwrap();
+        let found = reopened.load().unwrap().active.unwrap();
+        assert_eq!(
+            (found.number, found.identity),
+            (image.number, image.identity)
+        );
+    }
 }

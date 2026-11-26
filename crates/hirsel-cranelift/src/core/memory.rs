@@ -177,9 +177,7 @@ impl Function<'_, '_, '_> {
                 // there is no guessed function status or call to the old runtime.
                 let values = if matches!(
                     kind,
-                    AllocKind::Own {
-                        edge: hirsel_core_layout::FieldTy::FrozenBytes
-                    }
+                    AllocKind::Own { edge } if **edge == hirsel_core_layout::FieldTy::FrozenBytes
                 ) {
                     let tag = self.b.ins().iconst(
                         types::I64,

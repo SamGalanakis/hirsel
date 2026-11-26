@@ -358,10 +358,10 @@ pub(crate) fn emit_release_unit(
             close_partition(&module, &recipes, &foreign, &mut native)?;
         }
         debug = native.take_release_debug();
-        each(native.finish().map_err(Error::Llvm)?).map_err(Error::Llvm)?;
         if let Some(members) = &members {
             release_bodies(module.to_mut(), members);
         }
+        each(native.finish().map_err(Error::Llvm)?).map_err(Error::Llvm)?;
     }
     Ok((sites.unwrap().bindings, debug.sites()))
 }

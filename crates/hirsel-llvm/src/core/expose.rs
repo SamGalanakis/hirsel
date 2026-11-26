@@ -826,8 +826,13 @@ fn expose_caller(
     }
     if budget != EXPOSE_BUDGET {
         merge_blocks(&mut body);
-        let old = std::mem::take(&mut body.insts);
-        let anchors = std::mem::take(&mut body.inst_anchors);
+        let len = body
+            .blocks
+            .iter()
+            .map(|block| block.insts.len as usize)
+            .sum();
+        let old = std::mem::replace(&mut body.insts, Vec::with_capacity(len));
+        let anchors = std::mem::replace(&mut body.inst_anchors, Vec::with_capacity(len));
         for block in &mut body.blocks {
             let range = block.insts;
             let start = body.insts.len() as u32;

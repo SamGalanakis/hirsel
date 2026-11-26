@@ -136,9 +136,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 result: block,
                 available,
                 region_entry: None,
-                kind: AllocKind::Own {
-                    edge: FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
-                },
+                kind: AllocKind::own(FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8)))),
                 place: AllocPlace::LentFrame(frame),
                 charge,
                 overflow: None,

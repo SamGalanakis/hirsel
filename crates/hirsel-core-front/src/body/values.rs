@@ -190,13 +190,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     result: block,
                     available,
                     region_entry: None,
-                    kind: AllocKind::Own {
-                        edge: if frozen {
-                            FieldTy::FrozenBytes
-                        } else {
-                            FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8)))
-                        },
-                    },
+                    kind: AllocKind::own(if frozen {
+                        FieldTy::FrozenBytes
+                    } else {
+                        FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8)))
+                    }),
                     place: AllocPlace::Current,
                     charge,
                     overflow: None,

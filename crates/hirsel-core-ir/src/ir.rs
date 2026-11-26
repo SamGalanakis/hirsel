@@ -13,12 +13,14 @@ pub use crate::static_data::StaticValue;
 pub(crate) use flow::for_each_successor;
 #[cfg(any(test, feature = "wf"))]
 pub(crate) use flow::successors;
+mod allocation;
 mod closed;
 mod closure;
 mod host_op;
 mod marks;
 mod runtime_types;
 mod simd;
+pub use allocation::*;
 pub use closed::CLOSED;
 pub use host_op::{HostOp, host_drop_symbol};
 pub use marks::without_marks;
@@ -28,7 +30,7 @@ pub use simd::SimdOp;
 use crate::decode::{Debit, DecodeResult};
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Row, Scalar, Shape, Ty, Vector};
-use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, RecipeRow, TypeRef, cleanup_class};
+use hirsel_core_layout::{FieldTy, FuncRef, TypeRef};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -740,102 +742,6 @@ pub enum LayoutQuery {
     /// The index of the build's target in [`hirsel_core_layout::Target::ALL`]. Only a targeted
     /// selection reads it, and retention replaces it before any engine runs (PROG-6).
     Target,
-}
-
-/// What an `Alloc` makes. The block's bookkeeping (its limit record,
-/// and for a resource its cause cell and grant) is the engine's.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub enum AllocKind {
-    /// Own storage for the owning edge that will hold it (crate docs, "Cleanup
-    /// classes"): `box tN`, `seq E`, `map K V`, or
-    /// `rc tN` / `arc tN`, a counted node: the count (u64, starting at 1) at offset 0,
-    /// the payload at 8. `arc` makes a node whose every later `share`, `release`
-    /// and `try_unwrap` is an event (MEM-15); its operations name the same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
-    /// native prefix.
-    Own { edge: FieldTy },
-    /// An `own fn` environment (`alloc env tN`, crate docs "Callable
-    /// environments"): word 0 names row `tN`'s fixed environment descriptor and
-    /// the captures follow from offset 8, laid out as row `tN`. The alloc writes
-    /// word 0 (an engine writes the descriptor's address); it is never charged
-    /// (MEM-24). Its class is Fixed: the drain cleans it from that descriptor.
-    Environment { ty: TypeRef },
-    /// Region storage (MEM-1): freed when its region closes, never by an edge. Only
-    /// `in` a region, and every region allocation is stable.
-    Region,
-    /// A resource block: `charge` covers its storage, its cause cell and `grant`.
-    Resource { grant: u64 },
-}
-
-impl AllocKind {
-    /// The count kind of a counted node (an `rc` or `arc` edge).
-    pub fn counted(&self) -> Option<Counted> {
-        match self {
-            AllocKind::Own {
-                edge: FieldTy::Rc(_),
-            } => Some(Counted::Rc),
-            AllocKind::Own {
-                edge: FieldTy::Arc(_),
-            } => Some(Counted::Arc),
-            _ => None,
-        }
-    }
-    /// The cleanup class of the block (crate docs, "Cleanup classes"); `None` for
-    /// region storage, which no edge cleans.
-    pub fn cleanup(&self, shapes: &[Row], recipes: &[RecipeRow]) -> Option<Cleanup> {
-        match self {
-            AllocKind::Own { edge } => cleanup_class(shapes, recipes, edge),
-            AllocKind::Environment { .. } => Some(Cleanup::Fixed),
-            AllocKind::Region => None,
-            AllocKind::Resource { .. } => Some(Cleanup::Resource),
-        }
-    }
-    /// Whether the block is terminal: the 8-byte payer prefix, freed with nothing
-    /// to drop (crate docs, "Cleanup classes").
-    pub fn terminal(&self, shapes: &[Row], recipes: &[RecipeRow]) -> bool {
-        self.cleanup(shapes, recipes) == Some(Cleanup::Terminal)
-    }
-}
-
-/// The owning `seq E` edge of a sequence carrier place, which `grow` replaces the
-/// storage of (crate docs, "Growth"): a row whose only field is that edge, as
-/// `List[T]` (`items`) and `String` (`bytes`) are. None for any other place.
-pub fn sequence_edge(shapes: &[Row], place: PlaceTy) -> Option<&FieldTy> {
-    let PlaceTy::Declared(t) = place else {
-        return None;
-    };
-    match &shapes.get(t.index())?.body {
-        hirsel_core_layout::Body::Record(fields) => match fields.as_slice() {
-            [f] if matches!(f.ty, FieldTy::Seq(_)) => Some(&f.ty),
-            _ => None,
-        },
-        hirsel_core_layout::Body::Variant(_) => None,
-    }
-}
-
-/// Which limit an `Alloc` is charged to.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum AllocPlace {
-    /// The current limit (MEM-19).
-    Current,
-    /// Like allocation uses the current limit, as does growth (MEM-26).
-    Like(ValueId),
-    /// FORM v1b: in this region, charged to the current limit until it closes (MEM-1).
-    Region(ValueId),
-    /// Frame storage with a live allocation record understood by lent callees.
-    /// The aligned slot includes FRAME_LIST_LINK_BYTES after its payload.
-    LentFrame(ValueId),
-    /// The current limit. A short byte buffer may reserve disjoint tail backing.
-    ByteHead,
-    /// The current limit. A nonnull pointer is data exclusively lent from a
-    /// nonempty owning Bytes carrier, which may have an unused tail.
-    ByteTail(ValueId),
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Counted {
-    Rc,
-    /// Every operation is an event in the run's order (MEM-15).
-    Arc,
 }
 
 /// The smallest `list.fill` span, in bytes, that lowers to `rt.zero_bytes`

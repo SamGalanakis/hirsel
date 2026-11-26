@@ -240,7 +240,7 @@ impl FunctionEmitter<'_> {
             return (block, room);
         }
         let (block, room) = self.allocate_raw(
-            &AllocKind::Own { edge },
+            &AllocKind::own(edge),
             &Payer::Current,
             charge,
             size,

@@ -62,9 +62,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     result: block,
                     available,
                     region_entry: None,
-                    kind: AllocKind::Own {
-                        edge: FieldTy::FrozenBytes,
-                    },
+                    kind: AllocKind::own(FieldTy::FrozenBytes),
                     place: AllocPlace::Current,
                     charge,
                     overflow: None,

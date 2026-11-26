@@ -559,9 +559,7 @@ impl FunctionEmitter<'_> {
     ) -> (Value, Value) {
         if matches!(
             kind,
-            AllocKind::Own {
-                edge: FieldTy::FrozenBytes
-            }
+            AllocKind::Own { edge } if **edge == FieldTy::FrozenBytes
         ) {
             return (
                 Value::IntToPtr(hirsel_core_layout::FROZEN_STATIC_UNCHARGED),

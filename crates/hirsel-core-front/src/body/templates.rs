@@ -953,7 +953,7 @@ fn fill(
         // The alloc names its owning edge; its cleanup class is derived from the
         // instance's recipes wherever it is needed, so only the edge is remapped.
         match kind {
-            AllocKind::Own { edge } => *edge = s.field(edge, false),
+            AllocKind::Own { edge } => *edge = std::sync::Arc::new(s.field(edge, false)),
             AllocKind::Environment { ty } => {
                 let FieldTy::Inline(row) = s.field(&FieldTy::Inline(*ty), false) else {
                     unreachable!("an inline row remaps to an inline row")

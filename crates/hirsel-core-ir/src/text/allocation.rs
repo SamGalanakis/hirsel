@@ -7,9 +7,7 @@ pub(super) fn parse(l: &mut Line<'_>, defs: &[ValueId]) -> R<Inst> {
         _ => return Err("alloc takes pointer, room and optionally region entry".into()),
     };
     let kind = match l.next()? {
-        "for" => AllocKind::Own {
-            edge: l.field_ty()?,
-        },
+        "for" => AllocKind::own(l.field_ty()?),
         "env" => AllocKind::Environment { ty: l.tref()? },
         "region" => AllocKind::Region,
         "resource" => {

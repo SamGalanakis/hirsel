@@ -19,9 +19,7 @@ impl Cx<'_, '_, '_> {
     ) -> (ValueId, ValueId) {
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
-        let kind = AllocKind::Own {
-            edge: plan.edge.clone(),
-        };
+        let kind = AllocKind::own(plan.edge.clone());
         self.inst(
             Inst::Alloc {
                 result: block,

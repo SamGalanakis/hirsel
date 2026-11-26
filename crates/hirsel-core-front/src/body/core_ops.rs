@@ -1296,7 +1296,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 result: node,
                 available,
                 region_entry: None,
-                kind: AllocKind::Own { edge },
+                kind: AllocKind::own(edge),
                 place: AllocPlace::Current,
                 charge,
                 overflow: Some(overflow),

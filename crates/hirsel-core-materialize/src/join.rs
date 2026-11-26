@@ -89,7 +89,8 @@ impl Remap {
                     kind: AllocKind::Own { edge },
                     ..
                 } => {
-                    edge.map_refs(&mut |r| TypeRef(self.types[r.index()].0));
+                    std::sync::Arc::make_mut(edge)
+                        .map_refs(&mut |r| TypeRef(self.types[r.index()].0));
                 }
                 Inst::Alloc {
                     kind: AllocKind::Environment { ty },

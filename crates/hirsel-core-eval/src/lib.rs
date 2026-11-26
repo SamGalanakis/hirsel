@@ -6106,9 +6106,7 @@ impl<'m, H: Host<'m>> Machine<'m, H> {
                     Ok(())
                         if matches!(
                             kind,
-                            AllocKind::Own {
-                                edge: FieldTy::FrozenBytes
-                            }
+                            AllocKind::Own { edge } if **edge == FieldTy::FrozenBytes
                         ) =>
                     {
                         let receipt = self.block(0, Some(l), n, None);

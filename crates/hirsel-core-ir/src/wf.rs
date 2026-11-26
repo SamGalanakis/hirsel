@@ -1135,24 +1135,22 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             {
                 c.is(v, Ty::Ptr)?;
             }
+            use hirsel_core_layout::FieldTy as F;
+            let edge = match kind {
+                AllocKind::Own { edge } => Some(edge.as_ref()),
+                _ => None,
+            };
             if matches!(place, AllocPlace::LentFrame(_)) {
-                need(
-                    matches!(
-                        kind,
-                        AllocKind::Own {
-                            edge: hirsel_core_layout::FieldTy::Seq(_)
-                        }
-                    ),
-                    || "lent frame bytes back only sequence storage".into(),
-                )?;
+                need(matches!(edge, Some(F::Seq(_))), || {
+                    "lent frame bytes back only sequence storage".into()
+                })?;
             }
             if matches!(place, AllocPlace::ByteHead | AllocPlace::ByteTail(_)) {
                 need(
                     align == 8
                         && matches!(
-                            kind,
-                            AllocKind::Own { edge: hirsel_core_layout::FieldTy::Seq(item) }
-                                if **item == hirsel_core_layout::FieldTy::Scalar(Scalar::U8)
+                            edge,
+                            Some(F::Seq(item)) if **item == F::Scalar(Scalar::U8)
                         ),
                     || "split byte backing requires a word-aligned byte sequence".into(),
                 )?;
@@ -1163,8 +1161,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 matches!(kind, AllocKind::Region) == matches!(place, AllocPlace::Region(_)),
                 || "stable storage is exactly the storage allocated in a region".into(),
             )?;
-            if let AllocKind::Own { edge } = kind {
-                use hirsel_core_layout::FieldTy as F;
+            if let Some(edge) = edge {
                 if matches!(edge, F::FrozenBytes) {
                     need(
                         matches!(place, AllocPlace::Current) && overflow.is_none(),

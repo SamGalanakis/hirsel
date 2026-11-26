@@ -280,9 +280,7 @@ impl Derive<'_> {
                 let charge = self.box_charge(t);
                 let charged = c.constant(charge);
                 let size = c.field_size(&FieldTy::Inline(TypeRef(t.0)));
-                let kind = AllocKind::Own {
-                    edge: field.clone(),
-                };
+                let kind = AllocKind::own(field.clone());
                 let block = alloc_kind(c, kind, charged, size, fail);
                 let f = self.function(t, KeyOp::Clone)?;
                 let old = c.read(from, Ty::Ptr);
@@ -364,9 +362,7 @@ impl Derive<'_> {
                 let k = c.field_size(item);
                 let bytes = c.mul(len, k);
                 let charge = self.seq_charge(c, item, len);
-                let kind = AllocKind::Own {
-                    edge: FieldTy::Seq(Box::new(item.clone())),
-                };
+                let kind = AllocKind::own(FieldTy::Seq(Box::new(item.clone())));
                 let block = alloc_kind(c, kind, charge, bytes, fail);
                 let old = c.read(from, Ty::Ptr);
                 copy_value(c, block, old, bytes);
@@ -424,9 +420,7 @@ impl Derive<'_> {
                     bytes = c.binary(BinaryOp::Add, bytes, column);
                 }
                 let charge = self.seq_charge(c, row, len);
-                let kind = AllocKind::Own {
-                    edge: field.clone(),
-                };
+                let kind = AllocKind::own(field.clone());
                 let block = alloc_kind(c, kind, charge, bytes, fail);
                 let old = c.read(from, Ty::Ptr);
                 let (mut from_base, mut to_base) = (zero, zero);

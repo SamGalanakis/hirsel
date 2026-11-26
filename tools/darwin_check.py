@@ -34,12 +34,15 @@ def rust_changed():
 
 
 def check():
-    if not (RUSTC.parent.parent / 'lib/rustlib' / TARGET / 'lib').is_dir():
+    sysroot = RUSTC.parent.parent
+    if not (sysroot / 'lib/rustlib' / TARGET / 'lib').is_dir():
         raise SystemExit('darwin check: run python3 tools/buck2/prepare.py for the pinned Darwin std')
     target_dir = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target')) / 'darwin-check'
     triple = TARGET.replace('-', '_')
+    # Rustup's library path can make the pinned rustc infer Rustup's sysroot.
+    flags = '\x1f'.join(('-Awarnings', '--sysroot', str(sysroot)))
     env = dict(os.environ, RUSTC=str(RUSTC), CARGO_TARGET_DIR=str(target_dir), HIRSEL_METADATA_CHECK='1',
-               RUSTFLAGS='-Awarnings',
+               CARGO_ENCODED_RUSTFLAGS=flags,
                **{f'CC_{triple}': 'true', f'CXX_{triple}': 'true', f'AR_{triple}': 'true'})
     command = ['cargo', 'check', '--locked', '--quiet', '--target', TARGET, '--workspace', '--tests', '--keep-going',
                *(flag for crate in EXCLUDED for flag in ('--exclude', crate))]

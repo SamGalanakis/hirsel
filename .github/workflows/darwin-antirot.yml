@@ -99,7 +99,7 @@ jobs:
             elif [[ "$LAWS" == failure && -n "$FAILED_LAWS" ]]; then
               read -r -a failures <<< "$FAILED_LAWS"
               for law in "${failures[@]}"; do
-                report "$law" "Buck failed the target \`//$law\` in the Darwin laws step."
+                report "$law" "Buck failed the target \`//:$law\` in the Darwin laws step."
               done
             elif [[ "$LAWS" != success ]]; then
               report darwin-laws 'The Darwin laws step failed before it returned individual results.'

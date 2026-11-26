@@ -47,35 +47,34 @@ type GenMeta: codec {
     lineage: Option[u32]
 }
 
+// Use the bulk byte codec for the packed planes.
+type PackedCodes = Bytes
+
 // Up to 32 vectors of one cluster of one generation. `signs` is the sign
 // plane interleaved for the kernel: byte p * 32 + v holds the signs of
 // dimensions 8p .. 8p + 7 of vector v. `base`, `f` and `g` are the 1-bit
 // estimator's per-vector factors.
 type Block: codec {
     keys: List[Bytes],
-    signs: Bytes,
+    signs: PackedCodes,
     pop: List[u32],
     base: List[f64],
     f: List[f64],
     g: List[f64]
 }
 
-// A key's entry in one generation: where its codes sit, with the raw code
-// (so a merge can encode it under another lineage), its 4-bit code and the
-// ex estimator's factor. Masked is a delete.
-type Placed: codec {
-    cluster: u32,
-    blk: u32,
-    slot: u32,
-    raw: List[i8],
-    ex: Bytes,
-    h: f64
-}
+// Section zero is the FastScan plane. The following sections store, in
+// slot order, each factor's eight little-endian bytes followed by its
+// padded / 2 bytes of 4-bit codes.
+type BlockSection: codec = Scan(Block) | Refine(PackedCodes)
 
-type Mention: codec = At(Placed) | Masked
+// A generation mention retains the raw code for re-encoding during merges.
+type Mention: codec = At(List[i8]) | Masked
+
+type BlockKey = (u32, u32, u32, u32)
 
 type IvfTables: shareable + send {
-    blocks: store.Table[(u32, u32, u32), Block],
+    blocks: store.Table[BlockKey, BlockSection],
     mentions: store.Table[(u32, Bytes), Mention],
     fill: store.Table[(u32, u32), u32],
     gens: store.Table[u32, GenMeta],
@@ -123,7 +122,7 @@ pub fn declare_ivf[K, V](mut d: store.Declare, source: store.Table[K, V], name: 
     }
     let padded = padded_dims(shape.dims)
     let decl = store.projection(mut d, name) ?=> |e| Store(e)
-    let blocks: store.Table[(u32, u32, u32), Block] = sub_table(mut d, name, ".blocks", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
+    let blocks: store.Table[BlockKey, BlockSection] = sub_table(mut d, name, ".blocks", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
     let mentions: store.Table[(u32, Bytes), Mention] = sub_table(mut d, name, ".mentions", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
     let fill: store.Table[(u32, u32), u32] = sub_table(mut d, name, ".fill", std.codec.key_of(), std.codec.of()) ?=> |e| Store(e)
     let gens: store.Table[u32, GenMeta] = sub_table(mut d, name, ".gens", std.codec.key_u32(), std.codec.of()) ?=> |e| Store(e)
@@ -546,6 +545,12 @@ fn key_bytes[K, V](v: Ivf[K, V], key: K) -> Bytes {
     take out
 }
 
+// Limit a refinement row to 2048 code bytes and 256 factor bytes so it
+// fits even at Store's minimum configured value ceiling.
+fn refinement_slots(padded: u64) -> u64 {
+    order.min(BATCH, 4096 / padded)
+}
+
 // Appends one encoded vector to its cluster's last block of `generation`
 // and records the key's mention.
 fn append[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, take key: Bytes, take raw: List[i8], take encoded: Encoded) -> Result[(), store.Error] {
@@ -557,8 +562,10 @@ fn append[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, take key: Bytes
     let blk = filled / 32
     let slot = filled % 32
     let pairs = v.padded / 8
-    let mut block = match store.fetch(tx, v.tables.blocks, (generation, cluster, blk))? {
-        Some(take found) => take found,
+    let block_key = (generation, cluster, blk, 0u32)
+    let mut block = match store.fetch(tx, v.tables.blocks, block_key)? {
+        Some(Scan(take found)) => take found,
+        Some(Refine(_)) => return Error(MigrationFault),
         None => {
             let mut plane: Bytes = list.with_capacity(pairs * BATCH)
             for _ in 0u64 .. pairs * BATCH {
@@ -576,10 +583,19 @@ fn append[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, take key: Bytes
     list.push(mut block.base, base)
     list.push(mut block.f, f)
     list.push(mut block.g, g)
-    store.put(mut tx, v.tables.blocks, (generation, cluster, blk), take block)?
+    store.put(mut tx, v.tables.blocks, block_key, Scan(take block))?
+    let part: u32 = int.narrow(1 + at / refinement_slots(v.padded))
+    let refine_key = (generation, cluster, blk, part)
+    let mut refinement = match store.fetch(tx, v.tables.blocks, refine_key)? {
+        Some(Refine(take found)) => take found,
+        Some(Scan(_)) => return Error(MigrationFault),
+        None => list.new(),
+    }
+    list.put_word_le(mut refinement, float.to_bits64(h))
+    list.append(mut refinement, ex)
+    store.put(mut tx, v.tables.blocks, refine_key, Refine(take refinement))?
     store.put(mut tx, v.tables.fill, (generation, cluster), filled + 1)?
-    let placed = Placed(cluster: cluster, blk: blk, slot: slot, raw: take raw, ex: take ex, h: h)
-    store.put(mut tx, v.tables.mentions, (generation, key), At(take placed))
+    store.put(mut tx, v.tables.mentions, (generation, key), At(take raw))
 }
 
 // The fold's apply: a put encodes the row into the generation; a delete is
@@ -657,8 +673,7 @@ fn ivf_merge[K, V](mut tx: store.Tx, v: Ivf[K, V], merge: store.Merge, limits: s
             }
         }
         match take newest {
-            Some(At(take placed)) => {
-                let Placed(raw: take raw, ..) = take placed
+            Some(At(take raw)) => {
                 let e = encode(t, v.metric, v.dims, v.padded, rotation, raw)
                 append(mut tx, v, merge.into, clone(key), take raw, take e)?
             },
@@ -697,9 +712,9 @@ fn ivf_drop[K, V](mut tx: store.Tx, v: Ivf[K, V], generation: u32, limits: store
     if budget == 0 {
         return Ok(true)
     }
-    let mut blocks: List[(u32, u32, u32)] = list.new()
+    let mut blocks: List[BlockKey] = list.new()
     {
-        let mut cursor = store.range(tx, v.tables.blocks, Included((generation, 0u32, 0u32)), Excluded((generation + 1, 0u32, 0u32)))?
+        let mut cursor = store.range(tx, v.tables.blocks, Included((generation, 0u32, 0u32, 0u32)), Excluded((generation + 1, 0u32, 0u32, 0u32)))?
         while list.len(blocks) < budget {
             let Some((key, _)) = store.next_in(tx, mut cursor)? else {
                 break

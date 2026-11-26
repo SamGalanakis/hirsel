@@ -305,6 +305,9 @@ pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: 
     let rotation = rotation_signs(v.padded)
     let rotated_q = rotate(rotation, v.padded, widened(q, v.padded))
     let pairs = v.padded / 8
+    let section_slots = refinement_slots(v.padded)
+    let code_bytes = v.padded / 2
+    let record_bytes = 8 + code_bytes
     let r = RERANK * k
     let mut best: List[Est] = list.new()
     let mut lanes: List[u16] = list.with_capacity(BATCH)
@@ -335,38 +338,55 @@ pub fn query_ivf[K, V](tx: store.Tx, v: Ivf[K, V], q: List[i8], k: u64, probes: 
                 None => clone(zero),
             }
             let probe = probe_of(v.metric, q, t.centroids, cluster * v.dims, v.dims, rotated_q, rotated_c, v.padded)
-            for blk in 0u32 .. (filled + 31) / 32 {
-                let Some(block) = store.fetch(tx, v.tables.blocks, (generation, c32, blk)) ?=> |e| Store(e) else {
+            let block_count = (filled + 31) / 32
+            let mut blocks = store.range(tx, v.tables.blocks, Included((generation, c32, 0u32, 0u32)), Excluded((generation, c32, block_count, 0u32))) ?=> |e| Store(e)
+            for blk in 0u32 .. block_count {
+                let Some((block_key, Scan(take block))) = (store.next_in(tx, mut blocks) ?=> |e| Store(e)) else {
+                    return Error(Store(MigrationFault))
+                }
+                if block_key != (generation, c32, blk, 0u32) {
                     return Error(Store(MigrationFault))
                 }
                 list.truncate(mut lanes, 0)
                 scan_block(block.signs, probe.luts, pairs, mut lanes)
-                for slot in 0u64 .. list.len(block.keys) {
-                    let acc: u64 = int.widen(lanes[(slot % 2) * 16 + slot / 2])
-                    let pop: u64 = int.widen(block.pop[slot])
-                    let signed = 2.0 * probe.lo * to_f64(int.narrow(pop)) + 2.0 * probe.delta * to_f64(int.narrow(acc)) - probe.total
-                    let upper = probe.centre + block.base[slot] + m * (block.f[slot] * signed + block.g[slot] * probe.norm)
-                    if list.len(best) == r && !float.gt(upper, best[r - 1].est) {
-                        continue
-                    }
-                    let key = view block.keys[slot]
-                    if !allowed_bytes(v, filter, key)? {
-                        continue
-                    }
-                    if holds(changed, key) || (shadowed(tx, v, ids, gi, key) ?=> |e| Store(e)) {
-                        continue
-                    }
-                    let Some(At(placed)) = store.fetch(tx, v.tables.mentions, (generation, clone(key))) ?=> |e| Store(e) else {
+                let mut first = 0u64
+                let mut part = 1u32
+                while first < list.len(block.keys) {
+                    let Some((section_key, Refine(take section))) = (store.next_in(tx, mut blocks) ?=> |e| Store(e)) else {
                         return Error(Store(MigrationFault))
                     }
-                    let mut z = 0i64
-                    for i in 0u64 .. pairs * 4 {
-                        let b = placed.ex[i]
-                        let lo: i64 = int.widen(b & 15)
-                        let hi: i64 = int.widen(b >> 4)
-                        z += (2 * lo - 15) * probe.residual[2 * i] + (2 * hi - 15) * probe.residual[2 * i + 1]
+                    let end = order.min(first + section_slots, list.len(block.keys))
+                    if section_key != (generation, c32, blk, part) || list.len(section) != (end - first) * record_bytes {
+                        return Error(Store(MigrationFault))
                     }
-                    admit(mut best, r, Est(key: clone(key), est: probe.centre + block.base[slot] + m * placed.h * to_f64(z)))
+                    for slot in first .. end {
+                        let acc: u64 = int.widen(lanes[(slot % 2) * 16 + slot / 2])
+                        let pop: u64 = int.widen(block.pop[slot])
+                        let signed = 2.0 * probe.lo * to_f64(int.narrow(pop)) + 2.0 * probe.delta * to_f64(int.narrow(acc)) - probe.total
+                        let upper = probe.centre + block.base[slot] + m * (block.f[slot] * signed + block.g[slot] * probe.norm)
+                        if list.len(best) == r && !float.gt(upper, best[r - 1].est) {
+                            continue
+                        }
+                        let key = view block.keys[slot]
+                        if !allowed_bytes(v, filter, key)? {
+                            continue
+                        }
+                        if holds(changed, key) || (shadowed(tx, v, ids, gi, key) ?=> |e| Store(e)) {
+                            continue
+                        }
+                        let at = (slot - first) * record_bytes
+                        let h = float.from_bits64(list.word_le(section, at))
+                        let mut z = 0i64
+                        for i in 0u64 .. code_bytes {
+                            let b = section[at + 8 + i]
+                            let lo: i64 = int.widen(b & 15)
+                            let hi: i64 = int.widen(b >> 4)
+                            z += (2 * lo - 15) * probe.residual[2 * i] + (2 * hi - 15) * probe.residual[2 * i + 1]
+                        }
+                        admit(mut best, r, Est(key: clone(key), est: probe.centre + block.base[slot] + m * h * to_f64(z)))
+                    }
+                    first = end
+                    part += 1
                 }
             }
         }

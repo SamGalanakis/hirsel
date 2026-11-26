@@ -542,15 +542,54 @@ fn ordered_import(clock: Clock, random: Random) waits {
     result.unwrap(store.close(take db))
 }
 
+fn refinement_sections(clock: Clock, random: Random) waits {
+    let shape = vector.Shape(dims: 512, clusters: 32, steps: 1099511627776u64)
+    let (take opened, points, _, far) = open_far(clock, random, L2, code.describe(row_ordinal), shape)
+    let mut db = take opened
+    let mut query: List[i8] = list.new()
+    let mut opposite: List[i8] = list.new()
+    for i in 0u64 .. shape.dims {
+        let component: i8 = int.narrow(i % 127)
+        list.push(mut query, component)
+        list.push(mut opposite, 0i8 - component)
+    }
+    // The nearest keys straddle a refinement boundary and a block
+    // boundary, and include the last slot of a partial section.
+    let nearest: Inline[u64, 5] =[7, 8, 31, 32, 68]
+    let mut steps: List[Step] = list.new()
+    for key in 0u64 .. 69 {
+        let raw: List[i8] = if key == 7 || key == 8 || key == 31 || key == 32 || key == 68 {
+            clone(query)
+        } else {
+            clone(opposite)
+        }
+        list.push(mut steps, Put(key, take raw))
+    }
+    write_rows(mut db, points, far, take steps)
+    let _ = settle(mut db, far)
+    let hits = hits_or_fail(far_look(db, far, query, 5, 1))
+    if list.len(hits) != 5 {
+        fail("ivf law: refinement sections lost a nearest row")
+    }
+    for i in 0u64 .. 5 {
+        if hits[i].key != nearest[i] || hits[i].score != 0 {
+            fail("ivf law: refinement sections changed the nearest rows or tie order")
+        }
+    }
+    result.unwrap(store.close(take db))
+}
+
 /// bug: a form B query that misses a row's newest generation mention, reads
 /// a masked or tail-changed key from an old generation, mis-scores a
 /// candidate, or prunes with a wrong 1-bit bound loses recall against form
 /// A, returns an absent row, or answers a run and a look differently.
 /// Training on a key prefix can omit a population and miss its nearest row at one probe.
-/// oracle: the form A exhaustive scan and brute-force model scores over the same rows.
+/// Reading refinement codes from the wrong section can lose exact matches.
+/// oracle: the form A exhaustive scan, brute-force model scores, and hand-chosen exact ties across section boundaries.
 @test
 fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
     ordered_import(clock, random)
+    refinement_sections(clock, random)
     let metrics: Inline[vector.Metric, 2] =[L2, Dot]
     for metric in metrics {
         let (take opened, points, near, far) = open_far(clock, random, metric, code.describe(row_ordinal), recall_shape())

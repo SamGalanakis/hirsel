@@ -80,7 +80,13 @@ The projector folds the source into immutable generations (STORE-SPEC
 - It keeps the residual's sign bits, packed 32 vectors to a block (one byte
   per vector per 8 dimensions, as the kernel reads them), with the
   estimator's factors.
-- It keeps a 4-bit extended code (Extended RaBitQ) in the key's mention.
+- It packs the slots' 4-bit extended codes (Extended RaBitQ) and factors
+  into separately keyed sections beside the sign plane in the same table.
+  A key's mention keeps its raw code for merges.
+
+The block table's key includes a section number. Stores with the previous
+three-component block key refuse declaration with `Store(Schema(0))`.
+The IVF image must be built in a fresh store.
 
 A delete is a mask. A merge writes each key's newest mention among its
 inputs and encodes the row again under the output's centroids. It writes a
@@ -109,13 +115,14 @@ increasing primary key order. The query:
    inner product for `Dot`, by distance for `L2`) and reads the best
    `probes` of them.
 3. Per probed cluster, quantizes the rotated query residual to 4 bits and
-   builds a lookup table. The integer FastScan kernel sums it over each
-   block's sign planes, 32 vectors at a time.
+   builds a lookup table. One transaction-bound cursor streams the cluster's
+   blocks in order. The integer FastScan kernel sums the lookup table over
+   each block's sign plane, 32 vectors at a time.
 4. Takes each vector's 1-bit estimate plus RaBitQ's error bound (ε0 = 1.9)
    as an upper bound. A vector whose bound cannot beat the 10 · k best
    extended estimates so far is pruned.
 5. Skips a key the tail holds or a newer generation mentions. A survivor
-   is scored with its 4-bit code.
+   is scored with its slot's 4-bit code from the block's refinement section.
 6. Reranks the 10 · k best estimates exactly from their rows, read with
    `store.fetch_many`, and merges them with the tail's rows.
 
@@ -130,10 +137,11 @@ Tiered sources wait on D7. A query on a Tiered source is refused with
 
 ### Cost
 
-The kernel takes about 33 steps per vector at 768 dimensions. A query costs
-the tail's rows, `probes` clusters per generation, one mention read per
-survivor and one batched fetch of 10 · k rows. A query in a `run` records
-the read of the projection row and of the tail's span. Its result is
+The kernel takes about 33 steps per vector at 768 dimensions. A query reads
+the tail's rows, streams `probes` clusters per generation, checks newer
+generations' mentions for shadowed keys, and fetches up to 10 · k source rows
+in one batch. A query in a `run` records reads of the projection row, the
+tail's span and the visited block ranges. Its result is
 approximate: rows outside the probed clusters are not seen. The kill-check
 numbers are in the lane report (store-vector-b-3-2-2774).
 

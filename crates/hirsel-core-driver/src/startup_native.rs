@@ -453,7 +453,7 @@ fn a_user_package_named_runner_is_not_a_place() {
             .unwrap();
         let recipe = crate::native::recipe_build::Publication::open(&code, published.root, &crate::request::local_admission_limits())
             .unwrap()
-            .assemble_with(&options, reached.counters, Some(&product), None)
+            .assemble_with(&options, reached.counters, None)
             .unwrap()
             .executable;
         for executable in [native, recipe] {

@@ -506,9 +506,15 @@ are refused, naming the conflict, when:
 - **Same run twice.** Two inputs hold the same run (test, seed, and build: engine,
   optimisation level and target). A run cannot be taken back out of a count.
 - **Different sources.** Two inputs give different `src` for one function, or place one site
-  key differently (its arm, definition or place). This is checked first, so two builds of
+  key differently (its arm, definition or place other than `arm_line`/`arm_col`). This is checked first, so two builds of
   different sources are named as such even when they also share a run. They are builds of different sources, and their counts would not mean
   the same lines.
+
+An arm's `arm_line`/`arm_col` is the first anchored position of its target block in the
+instance or code variant the link kept (the first record of an id in link order), so two
+links of one source can place it differently: produce_items's `yes` sat at 232:15 in some
+contracts laws and 233:26 in others on 2026-11-26. Merge keeps the earliest position any
+input gives, in either order, and an input without one takes the other's.
 
 Profiles from different engines merge, because keys do not depend on the engine. `builds`
 then lists each build. A merge of two inputs that share a function with the same `src`, such

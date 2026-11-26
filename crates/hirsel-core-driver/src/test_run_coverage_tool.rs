@@ -91,6 +91,21 @@ fn coverage_profiles_merge_read_back_and_refuse_conflicts() {
         refusal(run(&build, "app@1/main/t3", Some(5), true, [true, false, false], false, "src-f", 5)),
         "site app@1/main/f@10-15.0:yes is placed differently in two inputs: they are builds of different sources"
     );
+    // One source whose arm target sits at different first positions in two
+    // links' instances (nightly 2026-11-26: produce_items's `yes` at 232:15
+    // and 233:26) merges, keeping the earliest in either order.
+    let armed = |test: &str, line: u64, col: u64| {
+        let mut profile = run(&build, test, Some(5), true, [true, false, true], false, "src-f", 4);
+        let place = &mut profile.sites.get_mut(yes).unwrap().place;
+        (place.arm_line, place.arm_col) = (Some(line), Some(col));
+        profile
+    };
+    for (first, second) in [((233, 26), (232, 15)), ((232, 15), (233, 26))] {
+        let mut placed = armed("app@1/main/t3", first.0, first.1);
+        placed.merge(armed("app@1/main/t4", second.0, second.1)).expect("arm positions of one source merge");
+        let place = &placed.sites[yes].place;
+        assert_eq!((place.arm_line, place.arm_col), (Some(232), Some(15)));
+    }
     let mut old = document.clone();
     old["hirsel_coverage"] = 2.into();
     assert_eq!(Profile::from_json(&old).unwrap_err().0, "profile format 2; this hirsel reads format 3");

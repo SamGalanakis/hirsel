@@ -221,9 +221,31 @@ impl Site {
 
     /// The same site at the same place, whatever its counts and whichever
     /// body holds it: one decision inlined into two functions is one site.
+    /// The arm position is not compared: it is the first anchored position of
+    /// the arm's target block in the instance or code variant a link kept,
+    /// and two links of one source can keep different ones ("Merge").
     fn same_place(&self, other: &Self) -> bool {
-        (&self.arm, &self.definition, &self.place, self.shape)
-            == (&other.arm, &other.definition, &other.place, other.shape)
+        let unarmed = |site: &Self| {
+            let place = Place {
+                arm_line: None,
+                arm_col: None,
+                ..site.place.clone()
+            };
+            (site.arm.clone(), site.definition.clone(), place, site.shape)
+        };
+        unarmed(self) == unarmed(other)
+    }
+
+    /// Take `other`'s arm position when it is earlier than this site's, or
+    /// when this site has none: a merge keeps the earliest position any input
+    /// gives, whatever their order.
+    fn take_earlier_arm(&mut self, other: &Self) {
+        let arm = |place: &Place| place.arm_line.map(|line| (line, place.arm_col));
+        if let Some(theirs) = arm(&other.place)
+            && arm(&self.place).is_none_or(|ours| theirs < ours)
+        {
+            (self.place.arm_line, self.place.arm_col) = (other.place.arm_line, other.place.arm_col);
+        }
     }
 }
 
@@ -367,7 +389,8 @@ impl Profile {
     /// and seeds join. Refused, naming the conflict, when a run is in both
     /// (a count cannot be taken back), when one function has two sources,
     /// or when one site is placed differently: the inputs come from builds
-    /// of different sources. Run rows are kept only when both sides kept
+    /// of different sources. A site's arm position may differ between inputs
+    /// of one source; the earliest is kept. Run rows are kept only when both sides kept
     /// them.
     pub(crate) fn merge(&mut self, other: Self) -> Result<()> {
         for (definition, function) in &other.functions {
@@ -420,6 +443,7 @@ impl Profile {
                     slot.insert(site);
                 }
                 std::collections::btree_map::Entry::Occupied(mut held) => {
+                    held.get_mut().take_earlier_arm(&site);
                     held.get_mut().passed_runs += site.passed_runs;
                     held.get_mut().failed_runs += site.failed_runs;
                 }

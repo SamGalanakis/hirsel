@@ -1,0 +1,113 @@
+// The Hirsel side of the QUIC cost bench (docs/spec/quic.md, cost target): one
+// unidirectional stream of BYTES to a receiver on loopback, through quic.drive.
+// Usage: sender PORT PIN BYTES
+// PIN is the SHA-256 of the receiver's leaf. BYTES is a multiple of CHUNK. The sender
+// prints READY once connected and DONE once the receiver has acknowledged the last byte
+// and FIN; bench/srtp/phase.c gates both lines, so allocations are counted between them.
+const SECOND: u64 = 1000000000
+
+const LOOPBACK: u32 = 0x7f000001
+
+const ALPN: String = "hq-interop"
+
+const MTU: u16 = 1200
+
+/// One write: a shared CHUNK, queued without a copy (write_shared).
+const CHUNK: u64 = 65536
+
+/// QUIC-5 send memory.
+const SEND_BYTES: u64 = 4194304
+
+fn argument(a: Args, i: u64) -> String {
+    let Some(v) = args.get(a, i) else {
+        fail("missing argument")
+    }
+    string.from(v)
+}
+
+fn say(out: Stdout, text: String) waits {
+    let mut line = string.from(text)
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn pins(text: String) -> List[quic.handshake.Pin] {
+    let digest = option.unwrap(std.hex.decode(string.as_bytes(text)))
+    let mut d: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        d[i] = digest[i]
+    }
+    let mut out: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut out, Cert(d))
+    take out
+}
+
+fn config(r: Random) -> quic.EndpointConfig {
+    let mut reset: Bytes = list.with_capacity(32)
+    host.random(r, mut reset)
+    let mut token: Bytes = list.with_capacity(32)
+    host.random(r, mut token)
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: MTU, retry: Never, reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 1, unvalidated: 1, datagram_bytes: 0))
+}
+
+fn transport() -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, ALPN)
+    quic.TransportConfig(max_idle_ms: 30000, initial_max_data: 65536, initial_max_stream_data: 65536, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: SEND_BYTES, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: None)
+}
+
+pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let port: u16 = result.unwrap(int.parse(argument(a, 0)))
+    let pin = argument(a, 1)
+    let total: u64 = result.unwrap(int.parse(argument(a, 2)))
+    if total == 0 || total % CHUNK != 0 {
+        fail("BYTES must be a positive multiple of CHUNK")
+    }
+    let mut e = result.unwrap(quic.endpoint(r, config(r), None))
+    let mut socket = match host.udp_bind(n, Addr(ip: V4(LOOPBACK), port: 0), UdpOptions(slots: 64, slot_bytes: 2048)) {
+        Ok((take socket, _)) => take socket,
+        Error(_) => fail("UDP bind failed"),
+    }
+    let c = result.unwrap(quic.connect(mut e, host.mono_ns(clock), Addr(ip: V4(LOOPBACK), port: port), "localhost", pins(pin), None, transport()))
+    let mut data: Bytes = list.with_capacity(CHUNK)
+    for i in 0u64 .. CHUNK {
+        list.push(mut data, int.narrow((i * 31 + 7) & 0xff))
+    }
+    let chunk = shared.new(take data)
+    let mut events: List[quic.Event] = list.with_capacity(64)
+    let mut stream: Option[quic.StreamId] = None
+    let mut written = 0u64
+    let mut acked = false
+    while !acked {
+        result.unwrap(quic.drive(mut e, clock, mut socket, host.mono_ns(clock) + SECOND, mut events))
+        for event in events {
+            match event {
+                Connected(..) => {
+                    stream = Some(result.unwrap(quic.open(mut e, c, false)))
+                    say(out, "READY")
+                },
+                Acked(..) => {
+                    acked = true
+                },
+                Closed(..) => fail("closed before the last byte was acknowledged"),
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+        if let Some(s) = stream {
+            while written < total {
+                let last = written + CHUNK == total
+                if !result.unwrap(quic.write_shared(mut e, c, s, shared.share(chunk), last)) {
+                    break
+                }
+                written += CHUNK
+            }
+        }
+    }
+    let mut done = string.from("DONE ")
+    string.push_u64(mut done, total)
+    say(out, done)
+    quic.close(mut e, c, 0, b"")
+    result.unwrap(quic.drive(mut e, clock, mut socket, host.mono_ns(clock) + SECOND / 10, mut events))
+    Ok(())
+}

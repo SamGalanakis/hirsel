@@ -263,14 +263,47 @@ pub(crate) fn background_thread() {
 }
 
 /// The bytes a new UDP socket's two kernel queues start with: the host's
-/// default receive and send sizes, or `None` when either cannot be read.
+/// default receive and send sizes, or `None` when neither source answers.
+/// On older kernels a network namespace other than the host's (a
+/// container's) has no `net.core.{r,w}mem_default` files, so the sizes
+/// then come from a fresh socket, whose SO_RCVBUF and SO_SNDBUF report each
+/// default doubled (socket(7)).
 pub(crate) fn udp_queue_bytes() -> Option<u64> {
     let size = |name| {
         std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
             .ok()
             .and_then(|n| n.trim().parse::<u64>().ok())
     };
-    size("rmem_default")?.checked_add(size("wmem_default")?)
+    match (size("rmem_default"), size("wmem_default")) {
+        (Some(receive), Some(send)) => receive.checked_add(send),
+        _ => probed_udp_queue_bytes(),
+    }
+}
+
+fn probed_udp_queue_bytes() -> Option<u64> {
+    // SAFETY: plain socket syscall; the descriptor is owned below.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: fd was just returned by socket and nothing else owns it.
+    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+    let size = |option| {
+        let mut value: libc::c_int = 0;
+        let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: value and len are live locals of the sizes the kernel writes.
+        let rc = unsafe {
+            libc::getsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                option,
+                (&raw mut value).cast(),
+                &mut len,
+            )
+        };
+        (rc == 0 && value > 0).then(|| value as u64 / 2)
+    };
+    size(libc::SO_RCVBUF)?.checked_add(size(libc::SO_SNDBUF)?)
 }
 
 /// The CPU this thread is running on, for the unit observer's trace lines.

@@ -1,0 +1,384 @@
+// The Hirsel QUIC endpoint the QUIC Interop Runner drives (law Q5 `interop_runner_cases`,
+// docs/spec/quic.md). HTTP/0.9 over `hq-interop`: a request is `GET /<name>\r\n` on a
+// client-opened bidirectional stream with FIN, and the reply is the file's bytes with FIN.
+// run_endpoint.sh maps the runner's environment to the arguments:
+//   endpoint server TESTCASE CHAIN_COUNT
+//     serves /www on UDP 443; /hq holds cert-0.der (the leaf) .. cert-<n-1>.der and the
+//     PKCS#8 key key.der. TESTCASE `retry` answers every tokenless Initial with a Retry.
+//   endpoint client TESTCASE IP PORT NAME PIN NAME...
+//     fetches each name into /downloads over one connection, or one connection per name
+//     for `multiconnect`, pinning the server's leaf by its SHA-256 (QUIC-3).
+// Directory grants, in order: /www, /downloads, /hq.
+const SECOND: u64 = 1000000000
+
+const ALPN: String = "hq-interop"
+
+const MTU: u16 = 1200
+
+// QUIC-5 receive credit and send memory for each side.
+const WINDOW: u64 = 4194304
+
+const STREAM_WINDOW: u64 = 1048576
+
+const SEND_BYTES: u64 = 1048576
+
+/// A write's largest piece.
+const CHUNK: u64 = 65536
+
+/// One HTTP/0.9 exchange: the server's request and reply, or the client's name and reply.
+type Exchange {
+    c: quic.ConnectionHandle,
+    s: Option[quic.StreamId],
+    name: String,
+    request: Bytes,
+    body: Bytes,
+    sent: u64,
+    writing: bool,
+    done: bool,
+    received: bool
+}
+
+fn argument(a: Args, i: u64) -> String {
+    let Some(v) = args.get(a, i) else {
+        fail("missing argument")
+    }
+    string.from(v)
+}
+
+fn say(out: Stdout, text: String) waits {
+    let mut line = string.from(text)
+    string.push(mut line, "\n")
+    let _ = stdout.write(out, line)
+}
+
+fn transport(server: bool) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, ALPN)
+    let streams: u64 = if server {
+        256
+    } else {
+        0
+    }
+    quic.TransportConfig(max_idle_ms: 30000, initial_max_data: WINDOW, initial_max_stream_data: STREAM_WINDOW, max_streams_bidi: streams, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: SEND_BYTES, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: None)
+}
+
+fn endpoint_config(r: Random, retry: bool) -> quic.EndpointConfig {
+    let mut reset: Bytes = list.with_capacity(32)
+    host.random(r, mut reset)
+    let mut token: Bytes = list.with_capacity(32)
+    host.random(r, mut token)
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: MTU, retry: if retry {
+        Always
+    } else {
+        Never
+    }, reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 1024, unvalidated: 1024, datagram_bytes: 0))
+}
+
+/// The runner's chain and key, as run_endpoint.sh converted them to DER.
+fn identity(hq: Dir, count: u64) -> quic.handshake.Identity waits {
+    let mut chain: List[Bytes] = list.with_capacity(count)
+    for i in 0u64 .. count {
+        let mut name = string.from("cert-")
+        string.push_u64(mut name, i)
+        string.push(mut name, ".der")
+        list.push(mut chain, result.unwrap(std.file.read(hq, name)))
+    }
+    let key = result.unwrap(secret.seal(result.unwrap(std.file.read(hq, "key.der")), "sign(p256)"))
+    Identity(chain: take chain, key: take key, alg: P256)
+}
+
+fn pins(text: String) -> List[quic.handshake.Pin] {
+    let digest = option.unwrap(std.hex.decode(string.as_bytes(text)))
+    let mut d: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        d[i] = digest[i]
+    }
+    let mut out: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut out, Cert(d))
+    take out
+}
+
+/// The name an HTTP/0.9 request asks for: `GET /<name>` up to CR, LF or a space. None for
+/// anything else, or a name that leaves the directory.
+fn requested(request: Bytes) -> Option[String] {
+    if !list.starts_with(request, b"GET /") {
+        return None
+    }
+    let mut end: u64 = 5
+    while end < list.len(request) && request[end] != b'\r' && request[end] != b'\n' && request[end] != b' ' {
+        if request[end] == b'/' {
+            return None
+        }
+        end += 1
+    }
+    if end == 5 {
+        return None
+    }
+    match string.from_utf8(clone(list.slice(request, 5, end))) {
+        Ok(name) => Some(take name),
+        Error(_) => None,
+    }
+}
+
+fn find(exchanges: List[Exchange], c: quic.ConnectionHandle, s: quic.StreamId) -> Option[u64] {
+    for i in 0u64 .. list.len(exchanges) {
+        if exchanges[i].c == c && exchanges[i].s == Some(s) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Read everything that has arrived on a stream onto `into`; true once FIN is reached.
+/// quic.read fills spare capacity only, so each pass reads into `buf`.
+fn read_all(mut e: quic.Endpoint, c: quic.ConnectionHandle, s: quic.StreamId, mut buf: Bytes, mut into: Bytes) -> Result[bool, quic.QuicError] {
+    while true {
+        list.clear(mut buf)
+        let (n, fin) = quic.read(mut e, c, s, mut buf)?
+        list.append(mut into, buf)
+        if fin {
+            return Ok(true)
+        }
+        if n == 0 {
+            return Ok(false)
+        }
+    }
+    Ok(false)
+}
+
+/// Queue what fits of each reply or request still being written.
+fn write_pending(mut e: quic.Endpoint, mut exchanges: List[Exchange]) {
+    for i in 0u64 .. list.len(exchanges) {
+        if !exchanges[i].writing {
+            continue
+        }
+        let Some(s) = exchanges[i].s else {
+            continue
+        }
+        let c = exchanges[i].c
+        let size = list.len(exchanges[i].body)
+        while exchanges[i].writing {
+            let at = exchanges[i].sent
+            let end = order.min(size, at + CHUNK)
+            let written = quic.write(mut e, c, s, list.slice(exchanges[i].body, at, end), end == size)
+            match written {
+                Ok(n) => {
+                    exchanges[i].sent += n
+                    if n == end - at && end == size {
+                        exchanges[i].writing = false
+                        exchanges[i].done = true
+                    } else if n < end - at {
+                        break
+                    }
+                },
+                Error(_) => {
+                    exchanges[i].writing = false
+                    exchanges[i].done = true
+                },
+            }
+        }
+    }
+}
+
+/// Bind UDP: the server on 443, the client on any port.
+fn bind(n: Net, out: Stdout, port: u16) -> UdpSocket waits {
+    match host.udp_bind(n, Addr(ip: V4(0), port), UdpOptions(slots: 64, slot_bytes: 2048)) {
+        Ok((take socket, _)) => take socket,
+        Error(err) => {
+            let mut line = string.from("UDP bind failed: ")
+            string.push(mut line, match err {
+                Denied => "denied",
+                InUse => "in use",
+                EphemeralOutsideNetGrant => "outside the Net grant",
+                Exhausted => "exhausted",
+                _ => "other",
+            })
+            if let Other(code) = err {
+                string.push(mut line, " ")
+                string.push_u64(mut line, int.widen(code))
+            }
+            say(out, line)
+            fail("UDP bind failed")
+        },
+    }
+}
+
+fn serve(n: Net, clock: Clock, r: Random, out: Stdout, www: Dir, hq: Dir, testcase: String, count: u64) -> Result[(), Exit] waits {
+    let id = identity(hq, count)
+    let mut e = result.unwrap(quic.endpoint(r, endpoint_config(r, testcase == "retry"), Some((take id, transport(true)))))
+    let mut socket = bind(n, out, 443)
+    say(out, "listening 443")
+    let mut exchanges: List[Exchange] = list.new()
+    let mut events: List[quic.Event] = list.new()
+    let mut buf: Bytes = list.with_capacity(CHUNK)
+    while true {
+        if let Error(_) = quic.drive(mut e, clock, mut socket, host.mono_ns(clock) + SECOND, mut events) {
+            say(out, "udp error")
+        }
+        for event in events {
+            match event {
+                Connected(c: c, ..) => say(out, "connected"),
+                Opened(c, s) => {
+                    if find(exchanges, c, s) == None {
+                        list.push(mut exchanges, Exchange(c: c, s: Some(s), name: "", request: b"", body: b"", sent: 0, writing: false, done: false, received: false))
+                    }
+                },
+                Readable(c, s) => {
+                    if find(exchanges, c, s) == None {
+                        list.push(mut exchanges, Exchange(c: c, s: Some(s), name: "", request: b"", body: b"", sent: 0, writing: false, done: false, received: false))
+                    }
+                    let i = option.unwrap(find(exchanges, c, s))
+                    if exchanges[i].received {
+                        continue
+                    }
+                    if let Ok(true) = read_all(mut e, c, s, mut buf, mut exchanges[i].request) {
+                        match requested(exchanges[i].request) {
+                            Some(name) => {
+                                match std.file.read(www, name) {
+                                    Ok(body) => {
+                                        exchanges[i].body = take body
+                                    },
+                                    Error(_) => say(out, "no such file"),
+                                }
+                            },
+                            None => say(out, "bad request"),
+                        }
+                        exchanges[i].received = true
+                        exchanges[i].writing = true
+                    }
+                },
+                Closed(c, _) => {
+                    let mut i = list.len(exchanges)
+                    while i > 0 {
+                        i -= 1
+                        if exchanges[i].c == c {
+                            let _ = list.swap_remove(mut exchanges, i)
+                        }
+                    }
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+        write_pending(mut e, mut exchanges)
+        let mut i = list.len(exchanges)
+        while i > 0 {
+            i -= 1
+            if exchanges[i].done {
+                let _ = list.swap_remove(mut exchanges, i)
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One connection fetching `names`; Ok once every reply is in /downloads.
+fn fetch(mut e: quic.Endpoint, mut socket: UdpSocket, clock: Clock, out: Stdout, downloads: Dir, to: Addr, take server: String, pin: String, names: List[String]) -> Result[(), Exit] waits {
+    let c = result.unwrap(quic.connect(mut e, host.mono_ns(clock), to, take server, pins(pin), None, transport(false)))
+    let mut exchanges: List[Exchange] = list.with_capacity(list.len(names))
+    for name in names {
+        let mut request = string.from("GET /")
+        string.push(mut request, name)
+        string.push(mut request, "\r\n")
+        list.push(mut exchanges, Exchange(c: c, s: None, name: string.from(name), request: b"", body: string.into_bytes(take request), sent: 0, writing: false, done: false, received: false))
+    }
+    let mut connected = false
+    let mut left = list.len(names)
+    let mut events: List[quic.Event] = list.new()
+    let mut buf: Bytes = list.with_capacity(CHUNK)
+    while left > 0 {
+        if let Error(_) = quic.drive(mut e, clock, mut socket, host.mono_ns(clock) + SECOND, mut events) {
+            say(out, "udp error")
+        }
+        for event in events {
+            match event {
+                Connected(..) => {
+                    say(out, "connected")
+                    connected = true
+                },
+                Readable(rc, s) => {
+                    if let Some(i) = find(exchanges, rc, s) {
+                        if exchanges[i].received {
+                            continue
+                        }
+                        match read_all(mut e, rc, s, mut buf, mut exchanges[i].request) {
+                            Ok(true) => {
+                                if let Error(_) = std.file.write(downloads, exchanges[i].name, exchanges[i].request) {
+                                    say(out, "cannot write the download")
+                                    return Error(Exit(status: 1))
+                                }
+                                exchanges[i].received = true
+                                left -= 1
+                            },
+                            Ok(_) => (),
+                            Error(_) => {
+                                say(out, "stream error")
+                                return Error(Exit(status: 1))
+                            },
+                        }
+                    }
+                },
+                Closed(..) => {
+                    say(out, "closed early")
+                    return Error(Exit(status: 1))
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+        if connected {
+            for i in 0u64 .. list.len(exchanges) {
+                if exchanges[i].s == None {
+                    match quic.open(mut e, c, true) {
+                        Ok(s) => {
+                            exchanges[i].s = Some(s)
+                            exchanges[i].writing = true
+                        },
+                        Error(_) => break,
+                    }
+                }
+            }
+            write_pending(mut e, mut exchanges)
+        }
+    }
+    quic.close(mut e, c, 0, b"")
+    // Send the CONNECTION_CLOSE before the next connection or the exit.
+    let _ = quic.drive(mut e, clock, mut socket, host.mono_ns(clock), mut events)
+    Ok(())
+}
+
+fn client(a: Args, n: Net, clock: Clock, r: Random, out: Stdout, downloads: Dir, testcase: String) -> Result[(), Exit] waits {
+    let ip = match std.net.parse_ip(string.as_bytes(argument(a, 2))) {
+        Ok(ip) => ip,
+        Error(_) => fail("bad server address"),
+    }
+    let port: u16 = result.unwrap(int.parse(argument(a, 3)))
+    let to = Addr(ip: ip, port: port)
+    let server = argument(a, 4)
+    let pin = argument(a, 5)
+    let mut e = result.unwrap(quic.endpoint(r, endpoint_config(r, false), None))
+    let mut socket = bind(n, out, 0)
+    let mut names: List[String] = list.new()
+    for i in 6u64 .. args.len(a) {
+        list.push(mut names, argument(a, i))
+    }
+    if testcase == "multiconnect" {
+        for name in names {
+            let mut one: List[String] = list.with_capacity(1)
+            list.push(mut one, string.from(name))
+            fetch(mut e, mut socket, clock, out, downloads, to, clone(server), pin, one)?
+        }
+        return Ok(())
+    }
+    fetch(mut e, mut socket, clock, out, downloads, to, take server, pin, names)
+}
+
+pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout, www: Dir, downloads: Dir, hq: Dir) -> Result[(), Exit] waits {
+    let role = argument(a, 0)
+    let testcase = argument(a, 1)
+    if role == "server" {
+        let count: u64 = result.unwrap(int.parse(argument(a, 2)))
+        return serve(n, clock, r, out, www, hq, testcase, count)
+    }
+    client(a, n, clock, r, out, downloads, testcase)
+}

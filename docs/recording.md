@@ -620,9 +620,8 @@ host, as every replayed handle does. A socket's `RETIRED` frame is in the stream
 position where that unit folds it, and it names the pool by its home: the stream number
 `u32` whose object ordinal it is, then the pool id (`ordinal << 1`, plus 1 for a group's
 intake). That is the name its helper-end survivor carries (kinds 5 and 6 below), so a pool
-an owner adopted from a helper is named the same in the owner's `RETIRED`. A replay of a
-unit whose `RETIRED` names another stream's pool faults, as per-stream replay of helpers is
-not built.
+an owner adopted from a helper is named the same in the owner's `RETIRED`, and replay
+resolves another stream's `RETIRED` against the owner's kept survivor charge.
 
 **Designations across units.** A designation is its origin kind (`Granted` 0, `Sealed` 1,
 `Derived` 2, `Unwrapped` 3, `Fetched` 4, `GeneratedP256` 5, `Prompted` 6), the stream
@@ -697,24 +696,20 @@ off its worker. `hirsel replay app --tape PATH --unit NAME` replays one
 unit's stream alone and leaves the other streams unread.
 
 **What this build replays.** Every stream replays as above, each helper as a unit of its
-own from its stream's entry, on the pool beside the root or else on a thread of its own, when its entry's value holds plain bytes, lists of plain bytes,
-functions, capabilities, `Secret`s and `KeyShare`s, and its helper ends return a value of
-plain bytes, lists of plain bytes, functions, granted capabilities, `Secret`s and `KeyShare`s. A helper's entry capability becomes an object of the helper's stream, by the
-ordinal the entry gives it. When every started stream has its verdict, the replay writes the
+own from its stream's entry, on the pool beside the root or else on a thread of its own, when its entry's value, its helper ends' results, and its items hold plain bytes, lists (including lists whose elements hold handles or functions),
+functions, granted capabilities, `Secret`s (other than derived or unwrapped), `KeyShare`s, `Client`s, `Shared` holders (plain payloads and locally known nested payloads), and TCP `Socket`s or `Listener`s. A helper's entry capability becomes an object of the helper's stream, by the
+ordinal the entry gives it. Helper-end survivors are kept by their owner under their `SurvivorName` and released at the recorded `LastRelease`, `SharedRelease`, foreign `RETIRED`, or tag-9 `Refund` take (during replay, the limit forest holds real foreign refund posts and credits each refund at its take). Waiting sends (`CONN_SEND` `ISSUE`) enter a pending-send ledger resolved by their tag-3 settlement take (`Accepted`, `Closed`, or `Withdrawn`), returning detached crossing sockets on refusal. When every started stream has its verdict, the replay writes the
 lines that are not `Sealed`, as below, and exits 1 if it wrote any, else 0. A helper end's `TAKE` that names
 no helper the unit spawned, or carries a value of another layout than the handle's result
 type, ends the replay `Diverged(Take)` at the `TAKE`. A kind 0 take applies at the unit's
 next take point; a kind 1 take applies at the scheduler's pump, which pumps instead of
 waiting while that `TAKE` is the unit's next frame, since the unit's waits for its helpers
 are then not outside waits. What this build does not replay yet stops the replay with
-`replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: a helper
-end that hands its owner survivors; an entry, result or item holding a `Schedule`, a
-`Sealer`, an `Opener`, a `HeaderMask`, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit (its
-designation does not say whether the program held its parent's bytes) or a list whose
-elements hold handles or functions; an entry, result or item holding a capability of
+`replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: an entry, result or item holding a `Schedule`, a
+`Sealer`, an `Opener`, a `HeaderMask`, a `UdpSocket`, a foreign `Shared` holder whose payload holds owners, or a `Secret` derived or unwrapped in another unit (its
+designation does not say whether the program held its parent's bytes); and an entry, result or item holding a capability of
 virtual construction or a `Net`, `Env`, `Exec` or `Cred` capability, whose rules the
-root's startup holds by its own ordinals; a send that waits; a notice another unit
-sent; and every other take kind. An arriving granted capability replays as its tag 5 snapshot, numbered where it arrives and granted on the receiving unit's own cell with the kind and stored bytes the snapshot carries, so its operations are checked against that unit's stream. An arriving `Secret` replays as its designation and
+root's startup holds by its own ordinals. An arriving granted capability replays as its tag 5 snapshot, numbered where it arrives and granted on the receiving unit's own cell with the kind and stored bytes the snapshot carries, so its operations are checked against that unit's stream. An arriving `Secret` replays as its designation and
 policy with no bytes behind it, as one holder with no charge: its charges stay with the
 unit that paid them, and only that unit's refund takes return them. An arriving `KeyShare`
 replays as its snapshot, numbered where it arrives, with no key and no charge: its
@@ -915,9 +910,8 @@ is the unit that narrowed it; a unit it reaches keeps that home when it sends it
 recording unit that takes it gets its profile from the cell that recorded the narrowing,
 so its spawns and further narrowings there are checked against the narrowed profile; a
 `SPAWN` through it is an issue and a delivery as through any `Exec`. A narrowing is
-recomputed, not written, and tag 6 holds no profile, so a replay of a unit other than the
-home could not recompute one made there: that waits on per-stream replay of helpers,
-which this build does not have. A value holding any other capability of virtual
+recomputed, not written, and tag 6 holds no profile, so replay refuses an arriving
+capability of virtual construction. A value holding any other capability of virtual
 construction still ends the stream at that value.
 
 **`TAKE` frames.** `TAKE` is frame kind 14 (kind 10 is `END`), and its head is `0x0E`: the

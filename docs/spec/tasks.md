@@ -507,10 +507,10 @@ action in one unit becomes visible in another.
 
 - Boards, which would publish the latest version of a `Shared` payload to many units; no
   program can name them.
-- The replay of a unit that hands its owner survivors, takes a refund or a notice another
-  unit sent, sends with a wait, or crosses a `Schedule`, `Sealer`, `Opener` or
-  `HeaderMask`, a client, a `Shared` holder, a socket, a `Secret` derived or unwrapped in another unit or a `Net`, `Env`, `Exec` or
-  `Cred` capability in a helper's entry, its result or an item: such a replay is refused,
+- The replay of a unit that crosses a `Schedule`, `Sealer`, `Opener` or `HeaderMask`, a
+  `UdpSocket`, a foreign `Shared` holder whose payload holds owners, a `Secret` derived or
+  unwrapped in another unit, a capability of virtual construction, or a `Net`, `Env`, `Exec`
+  or `Cred` capability in a helper's entry, its result or an item: such a replay is refused,
   so no equality of recordings made at different worker counts is promised for such a
   program. What does replay is listed in
   [What this build replays](../recording.md#replay-of-a-run-with-helpers).

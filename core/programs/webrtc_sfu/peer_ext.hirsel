@@ -4,7 +4,7 @@
 // (RTP-8). The publisher's MID, RID and transport number never pass. RTC-5's CVO,
 // playout delay and abs-capture-time follow where the leg's section binds them; one
 // that does not fit costs the packet only that extension.
-fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, q: Paced) -> Result[(), PeerError] {
+fn leg_ext(mut p: PeerSession, now: u64, t: u64, si: u64, size: u32, q: Paced) -> Result[(), PeerError] {
     let level = q.level
     let voice = q.voice
     let map = p.sections[si].map
@@ -24,12 +24,9 @@ fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, q: Paced) -> Result
     if let Some(b) = q.cvo {
         let _ = rtp.ext.put_orientation(mut p.ext, map, b)
     }
-    let t: u64 = int.widen(q.track)
     if let Media(guard: _) = q.stream {
-        if t < list.len(p.tracks) {
-            if let Some(d) = p.tracks[t].playout {
-                let _ = rtp.ext.put_playout_delay(mut p.ext, map, d.min, d.max)
-            }
+        if let Some(d) = p.tracks[t].playout {
+            let _ = rtp.ext.put_playout_delay(mut p.ext, map, d.min, d.max)
         }
     }
     if let Some(c) = q.capture {
@@ -41,8 +38,7 @@ fn leg_ext(mut p: PeerSession, now: u64, si: u64, size: u32, q: Paced) -> Result
 /// Set the static playout delay track `track` writes on its media packets (RTC-5),
 /// or stop writing one. A delay outside 12 bits or with `min` above `max` is refused.
 pub fn set_playout(mut p: PeerSession, track: u16, delay: Option[Delay]) -> bool {
-    let t: u64 = int.widen(track)
-    if t >= list.len(p.tracks) {
+    let Some(t) = track_index(p, track) else {
         return false
     }
     if let Some(d) = delay {

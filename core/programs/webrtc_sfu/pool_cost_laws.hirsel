@@ -110,6 +110,60 @@ fn room_left(most: u64) -> u64 {
     lo
 }
 
+/// bug: unsubscribe keeps the ended down-track's rewrite tables, history and counters live.
+/// oracle: RTC-7 and RTC-10 by hand. Two subscriptions fit. Removing either returns its
+/// allocations and leaves the other subscription's SSRC unchanged. All draws fit in
+/// the session's pre-reserved SSRC list.
+@test
+fn pool_unsubscribe_frees_down_tracks() -> Result[(), router.RouterError] {
+    let room = room_id()
+    let mut r = router.router(provide.random(30390))
+    let limits = peer.PeerLimits(sections: 3, down_tracks: 8, rtx_bytes: 1500, pacer_packets: 8, start_bps: 300000)
+    router.reserve_pool(mut r, router.pool_bounds(1, 1, 2, limits))
+    router.open_room(mut r, room, room_limits())?
+    let mut offer = minimal_head(b" a b c")
+    for mid in[b"a", b"b"] {
+        list.append(mut offer, minimal_video(b"96", mid, true))
+        list.append(mut offer, b"a=sendonly\na=rtpmap:96 VP8/90000\n")
+    }
+    list.append(mut offer, minimal_video(b"96", b"c", true))
+    list.append(mut offer, b"a=recvonly\na=rtpmap:96 VP8/90000\n")
+    let sender = gen_of(1)
+    let sub = gen_of(2)
+    for i in 1u64 .. 3 {
+        let who = peer.Participant(gen: gen_of(i), room: room)
+        let Rig(p: take p, c: _, cs: _, out: _) = established_limits(30390 + 4 * i, offer, who, addr_of(int.narrow(i)), limits, b"server")
+        router.join(mut r, take p)?
+    }
+    let a = router.publish(mut r, room, sender, 0)?
+    let b = router.publish(mut r, room, sender, 1)?
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let most = 4194304u64
+    let Ok(answer) = (bound bytes most {
+        let before = room_left(most)
+        for _ in 0u64 .. 4 {
+            result.unwrap(router.subscribe(mut r, room, sub, a, 2, Off, 0, mut out))
+            result.unwrap(router.subscribe(mut r, room, sub, b, 2, Off, 0, mut out))
+            let kept = option.unwrap(router.track_ssrcs(r, room, sub, b))
+            result.unwrap(router.unsubscribe(mut r, room, sub, a))
+            if router.track_ssrcs(r, room, sub, b) != Some(kept) {
+                fail("ending a track changed the live track's identity")
+            }
+            result.unwrap(router.unsubscribe(mut r, room, sub, b))
+            if room_left(most) != before {
+                fail("unsubscribe kept a down-track's allocations")
+            }
+        }
+        router.live_tracks(r, room, sub)
+    }) else {
+        fail("down-track churn exceeded the bound")
+    }
+    if answer != Some(0u64) {
+        fail("unsubscribe left live tracks")
+    }
+    Ok(())
+}
+
 // At most what a copy of the agreed SDP charges: the headroom of one bound, measured
 // by fallible reservations with and without the copy held, to the charge's rounding.
 fn agreed_charge(n: sdp.Negotiated) -> u64 {

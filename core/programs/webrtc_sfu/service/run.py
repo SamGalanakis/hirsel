@@ -30,8 +30,8 @@ def library(name):
     ]
 
 
-def inputs(work):
-    """Core, std and every package the service reaches through path dependencies."""
+def inputs(work, root_package=PROGRAM):
+    """Core, std and the root package's transitive path dependencies."""
     core, std = {"name": "core", "version": "1"}, {"name": "std", "version": "1"}
     packages = [
         {"package": core, "dependencies": [], "sources": library("core")},
@@ -52,12 +52,12 @@ def inputs(work):
         packages.append({"package": package, "dependencies": dependencies, "sources": [
             {"file": str(directory / file), "modules": module.split("."), "signatures": False}
             for file, module in manifest["sources"].items()
-            if module != program or directory == PROGRAM
+            if module != program or directory == root_package
         ]})
         done[directory] = package
         return package
 
-    visit(PROGRAM)
+    visit(root_package)
     path = work / "inputs.json"
     path.write_text(json.dumps({"core": core, "packages": packages}) + "\n")
     return path

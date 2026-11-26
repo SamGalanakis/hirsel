@@ -55,7 +55,8 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(
             p.tracks[t].sent = rtp.stats.sent(0)
             let _ = rtp.history.clear(mut p.tracks[t].history)
             p.tracks[t].gated = None
-            unpace(mut p, int.narrow(t))
+            let id = p.tracks[t].id
+            unpace(mut p, id)
             let mut b: Bytes = list.with_capacity(6)
             host.random(p.random, mut b)
             let first_seq: u16 = list.word_be(b, 0)
@@ -63,7 +64,7 @@ fn collide(mut p: PeerSession, now: u64, ssrc: u32, mut out: Outbox) -> Result[(
             let clock = section_clock(p, p.tracks[t].section)
             p.tracks[t].rewrite = rtp.rewrite.rewrite(clock, REWRITE_RANGES, REWRITE_FRAMES, int.widen(first_seq), first_ts) ?=> |c| Capacity(c)
             list.try_reserve(mut p.collided, 1) ?=> |c| Capacity(c)
-            list.push(mut p.collided, int.narrow(t))
+            list.push(mut p.collided, id)
         }
     }
     Ok(())
@@ -116,7 +117,6 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     if si >= list.len(p.sections) || !p.sections[si].agreed.send {
         return Error(Sdp(AnswerMismatch(section)))
     }
-    // The bound is on live down-tracks: an ended one's slot is taken again.
     let live = live_tracks(p)
     if live >= int.widen(p.limits.down_tracks) {
         return Error(Capacity(Capacity(requested: live + 1, available: int.widen(p.limits.down_tracks))))
@@ -141,23 +141,21 @@ pub fn add_track(mut p: PeerSession, section: u8, first_seq: u16, first_ts: u32)
     let pictures = rtp.counter.counter(15, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let tl0s = rtp.counter.counter(8, Compact, COUNTER_SLOTS) ?=> |c| Capacity(c)
     let frames = rtp.counter.counter(16, Translate, COUNTER_SLOTS) ?=> |c| Capacity(c)
-    let track = Track(section: section, video: video, opus_fmtp: None, ssrc: ssrc, rtx: rtx, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, ended: false, last_ts: first_ts, last_pt: 0, playout: None, fec: take fec)
-    for t in 0u64 .. list.len(p.tracks) {
-        if p.tracks[t].ended {
-            p.tracks[t] = take track
-            return Ok(int.narrow(t))
-        }
+    let mut slot = 0u64
+    while p.track_slots[slot] != NO_TRACK {
+        slot += 1
     }
-    list.try_reserve(mut p.tracks, 1) ?=> |c| Capacity(c)
+    let id: u16 = int.narrow(slot)
+    let track = Track(id: id, section: section, video: video, opus_fmtp: None, ssrc: ssrc, rtx: rtx, highest: EMPTY, sent: rtp.stats.sent(clock), history: take history, src: None, rewrite: take rewrite, gated: None, pictures: take pictures, tl0s: take tl0s, tl0: 0, frames: take frames, frames_source: None, red: rtp.red.policy(), red_from: 0, nacked: 0, forwarded: 0, last_ts: first_ts, last_pt: 0, playout: None, fec: take fec)
+    p.track_slots[slot] = int.narrow(live)
     list.push(mut p.tracks, take track)
-    Ok(int.narrow(list.len(p.tracks) - 1))
+    Ok(id)
 }
 
 /// Point a down-track at a source layer (RTP-11 `target`). The router owns the map
 /// from `Layer(e, s, t)` to `(source, i)` (RTC-6).
 pub fn set_target(mut p: PeerSession, track: u16, t: rtp.rewrite.Target) -> Result[(), rtp.rewrite.TargetError] {
-    let i: u64 = int.widen(track)
-    if i < list.len(p.tracks) {
+    if let Some(i) = track_index(p, track) {
         rtp.rewrite.target(mut p.tracks[i].rewrite, t)?
     }
     Ok(())
@@ -165,27 +163,20 @@ pub fn set_target(mut p: PeerSession, track: u16, t: rtp.rewrite.Target) -> Resu
 
 /// A source's sender report, for the switch timeline (RTP-11 `on_sr`).
 pub fn source_report(mut p: PeerSession, track: u16, source: u32, info: rtp.rtcp.SenderInfo, now: u64) {
-    let i: u64 = int.widen(track)
-    if i < list.len(p.tracks) {
+    if let Some(i) = track_index(p, track) {
         rtp.rewrite.on_sr(mut p.tracks[i].rewrite, source, info, now)
     }
 }
 
 /// The source a down-track waits to switch to, if any (RTP-11 `pending`).
 pub fn pending(p: PeerSession, track: u16) -> Option[u32] {
-    let i: u64 = int.widen(track)
-    if i >= list.len(p.tracks) {
-        return None
-    }
+    let i = track_index(p, track)?
     rtp.rewrite.pending(p.tracks[i].rewrite)
 }
 
 /// The target index the down-track forwards on `source`, if that is its current source.
 pub fn current_layer(p: PeerSession, track: u16, source: u32) -> Option[u8] {
-    let i: u64 = int.widen(track)
-    if i >= list.len(p.tracks) {
-        return None
-    }
+    let i = track_index(p, track)?
     rtp.rewrite.current(p.tracks[i].rewrite, source)
 }
 
@@ -354,8 +345,8 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
     }
     let f = rtp.header.Fields(marker: rec.marker, pt: rpt, seq: rtx.seq, ts: ts, ssrc: rtx.ssrc)
     let osn: u16 = int.truncate(index)
-    let q = Paced(slot: 0, track: int.narrow(t), stream: Rtx, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
-    if stage(mut p, now, mut out, q, Retransmit, Some(osn), payload, rec.from, rec.len, rec.picture, rec.tl0, rec.dd)? {
+    let q = Paced(slot: 0, track: p.tracks[t].id, stream: Rtx, fields: f, level: None, voice: false, src: rec.src, dd: 0, cvo: rec.cvo, capture: rec.capture)
+    if stage(mut p, now, mut out, t, q, Retransmit, Some(osn), payload, rec.from, rec.len, rec.picture, rec.tl0, rec.dd)? {
         if let Some(mut current) = p.tracks[t].rtx {
             current.seq = int.wrapping_add(current.seq, 1u16)
         }
@@ -368,8 +359,7 @@ fn write_rtx(mut p: PeerSession, now: u64, t: u64, index: u64, ts: u32, rec: Rec
 // header is written when the pacer lets it out (`emit`). A full pacer refuses it,
 // and the refusal is counted. A section without TWCC has no estimate to pace at, so its
 // packets go out at once (RTC-5 step 2).
-fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pacer.Class, osn: Option[u16], payload: Bytes, from: u64, len: u64, picture: Option[u16], tl0: Option[u8], dd: Option[Dd]) -> Result[bool, PeerError] {
-    let t: u64 = int.widen(q.track)
+fn stage(mut p: PeerSession, now: u64, mut out: Outbox, t: u64, q: Paced, class: rtp.pacer.Class, osn: Option[u16], payload: Bytes, from: u64, len: u64, picture: Option[u16], tl0: Option[u8], dd: Option[Dd]) -> Result[bool, PeerError] {
     let si: u64 = int.widen(p.tracks[t].section)
     if !p.sections[si].twcc {
         let extra: u64 = if osn == None {
@@ -377,7 +367,7 @@ fn stage(mut p: PeerSession, now: u64, mut out: Outbox, q: Paced, class: rtp.pac
         } else {
             2
         }
-        leg_ext(mut p, now, si, int.narrow(12 + extra + len), q)?
+        leg_ext(mut p, now, t, si, int.narrow(12 + extra + len), q)?
         if let Some(d) = dd {
             list.clear(mut p.dd)
             copy_dd(mut p.dd, payload, d)
@@ -491,7 +481,7 @@ fn pad_tracks(p: PeerSession) -> List[(u64, Option[u8])] {
     for t in 0u64 .. list.len(p.tracks) {
         let track = p.tracks[t]
         let si: u64 = int.widen(track.section)
-        if !track.video || track.ended || !p.sections[si].twcc {
+        if !track.video || !p.sections[si].twcc {
             continue
         }
         let pt: Option[u8] = match track.rtx {
@@ -552,8 +542,8 @@ fn pad_out(mut p: PeerSession, now: u64, pad: u8, mut out: Outbox) -> Result[(),
         }
         let si: u64 = int.widen(p.tracks[t].section)
         let wide: u32 = int.widen(pad)
-        let q = Paced(slot: 0, track: int.narrow(t), stream: Padding, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
-        leg_ext(mut p, now, si, RTP_HEADER + wide, q)?
+        let q = Paced(slot: 0, track: p.tracks[t].id, stream: Padding, fields: f, level: None, voice: false, src: p.who.gen, dd: 0, cvo: None, capture: None)
+        leg_ext(mut p, now, t, si, RTP_HEADER + wide, q)?
         let _ = rtp.rtx.write_probe(f, view p.ext, pad, mut p.pkt) ?=> |take x| Rtp(x)
         let tag = own_tag(p)
         let mut b = replace(mut p.pkt, list.new())
@@ -607,8 +597,10 @@ pub fn probe(mut p: PeerSession, want_bps: u64, now: u64, mut out: Outbox) -> Op
 fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), PeerError] {
     let at: u64 = int.widen(q.slot)
     list.push(mut p.free, q.slot)
-    let t: u64 = int.widen(q.track)
-    if p.closed || t >= list.len(p.tracks) || barred(p, q.src) {
+    if p.closed || barred(p, q.src) {
+        return Ok(())
+    }
+    let Some(t) = track_index(p, q.track) else {
         return Ok(())
     }
     let current = match q.stream {
@@ -623,7 +615,7 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
     let si: u64 = int.widen(p.tracks[t].section)
     let len = list.len(p.slab[at]) - q.dd
     let size: u32 = int.narrow(12 + len)
-    leg_ext(mut p, now, si, size, q)?
+    leg_ext(mut p, now, t, si, size, q)?
     if q.dd != 0 {
         let map = p.sections[si].map
         let _ = rtp.ext.put(mut p.ext, map, DependencyDescriptor, p.slab[at], len, q.dd)
@@ -650,44 +642,36 @@ fn emit(mut p: PeerSession, now: u64, q: Paced, mut out: Outbox) -> Result[(), P
     Ok(())
 }
 
-/// End a down-track the router removed (RTC-7 step 3): its `Rewrite` closes, so
-/// every later packet answers `Drop`, its egress history is cleared and its paced
-/// packets are taken out unsent.
+/// End a down-track (RTC-7 step 3), dropping its state and its queued packets.
 pub fn end_track(mut p: PeerSession, track: u16) {
-    let t: u64 = int.widen(track)
-    if t < list.len(p.tracks) {
-        rtp.rewrite.close(mut p.tracks[t].rewrite)
-        let _ = rtp.history.clear(mut p.tracks[t].history)
-        if let Some(mut f) = p.tracks[t].fec {
-            rtp.fec.clear(mut f.group)
-        }
-        p.tracks[t].ended = true
-        // The track's SRTP send streams end with it, so the session's stream bound counts
-        // live down-tracks, not every one it has held (RTC-7).
-        let ssrc = p.tracks[t].ssrc
-        let rtx = track_rtx_ssrc(p, t)
-        let fec = track_fec_ssrc(p, t)
-        end_send(mut p, ssrc)
-        if let Some(r) = rtx {
-            end_send(mut p, r)
-        }
-        if let Some(f) = fec {
-            end_send(mut p, f)
-        }
+    let Some(t) = track_index(p, track) else {
+        return
+    }
+    let ssrc = p.tracks[t].ssrc
+    let rtx = track_rtx_ssrc(p, t)
+    let fec = track_fec_ssrc(p, t)
+    end_send(mut p, ssrc)
+    if let Some(r) = rtx {
+        end_send(mut p, r)
+    }
+    if let Some(f) = fec {
+        end_send(mut p, f)
     }
     unpace(mut p, track)
+    let last = list.len(p.tracks) - 1
+    if t != last {
+        let moved: u64 = int.widen(p.tracks[last].id)
+        list.swap(mut p.tracks, t, last)
+        p.track_slots[moved] = int.narrow(t)
+    }
+    let _ = list.pop(mut p.tracks)
+    let id: u64 = int.widen(track)
+    p.track_slots[id] = NO_TRACK
 }
 
-/// The down-tracks the session holds that have not ended: what `PeerLimits.down_tracks`
-/// bounds.
+/// The down-tracks the session holds, bounded by `PeerLimits.down_tracks`.
 pub fn live_tracks(p: PeerSession) -> u64 {
-    let mut n = 0u64
-    for t in p.tracks {
-        if !t.ended {
-            n += 1
-        }
-    }
-    n
+    list.len(p.tracks)
 }
 
 /// Take a down-track's packets out of the pacer unsent: at a collision, and when the
@@ -710,8 +694,7 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
     if p.closed {
         return Error(Closed)
     }
-    let t: u64 = int.widen(track)
-    if t >= list.len(p.tracks) {
+    let Some(t) = track_index(p, track) else {
         return Error(Sdp(AnswerMismatch(0)))
     }
     let decision = rtp.rewrite.on_packet(mut p.tracks[t].rewrite, leg.source, leg.index, leg.ts, now, leg.padding_only, leg.unit)
@@ -781,14 +764,14 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
                 Ok(n) => {
                     let mut g = q
                     g.fields.pt = rpt
-                    stage(mut p, now, mut out, g, class, None, buf, 0, n, None, None, None)
+                    stage(mut p, now, mut out, t, g, class, None, buf, 0, n, None, None, None)
                 },
-                Error(_) => stage(mut p, now, mut out, q, class, None, payload, leg.from, leg.len, picture, tl0, dd),
+                Error(_) => stage(mut p, now, mut out, t, q, class, None, payload, leg.from, leg.len, picture, tl0, dd),
             }
             p.red = take buf
             r?
         },
-        _ => stage(mut p, now, mut out, q, class, None, payload, leg.from, leg.len, picture, tl0, dd)?,
+        _ => stage(mut p, now, mut out, t, q, class, None, payload, leg.from, leg.len, picture, tl0, dd)?,
     }
     if staged {
         p.tracks[t].forwarded += 1
@@ -809,8 +792,10 @@ pub fn forward(mut p: PeerSession, now: u64, track: u16, leg: Leg, payload: Byte
 /// Answer a `RepairAsk` with the plaintext its handle names, rebuilt from the
 /// recorded output rewrite, never from the track's current state.
 pub fn resend(mut p: PeerSession, now: u64, ask: RepairAsk, payload: Bytes, mut out: Outbox) -> Result[bool, PeerError] {
-    let t: u64 = int.widen(ask.track)
-    if p.closed || t >= list.len(p.tracks) {
+    if p.closed {
+        return Ok(false)
+    }
+    let Some(t) = track_index(p, ask.track) else {
         return Ok(false)
     }
     let rec: Record = match rtp.history.entry(p.tracks[t].history, ask.index) {
@@ -870,7 +855,7 @@ fn ntp(now: u64) -> u64 {
 fn reports(mut p: PeerSession, now: u64, mut out: Outbox) -> Result[(), PeerError] {
     // One SR per down-track, under that track's SSRC and its own counts.
     for t in 0u64 .. list.len(p.tracks) {
-        if p.tracks[t].highest == EMPTY || p.tracks[t].ended {
+        if p.tracks[t].highest == EMPTY {
             continue
         }
         let Some(ts) = rtp.rewrite.sr_timestamp(mut p.tracks[t].rewrite, now) else {

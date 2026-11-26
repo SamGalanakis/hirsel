@@ -1,0 +1,324 @@
+// RTC-10 N3. One authenticated VP8/Opus publisher and three receiving peers in
+// each room. A room's four peers share a home unit. The first 20 rooms lose their
+// publisher, one a second. The old publishers keep sending, so an ineffective
+// fence would also show up in the receive counts.
+const N3_ROOMS: u64 = 200
+
+const N3_UNITS: u64 = 8
+
+const N3_SECONDS: u64 = 20
+
+const N3_TICKS: u64 = 100
+
+const N3_VIDEO_SSRC: u32 = 0x71000001
+
+const N3_AUDIO_SSRC: u32 = 0x71000002
+
+const N3_SESSION: peer.PeerLimits = peer.PeerLimits(sections: 2, down_tracks: 2, rtx_bytes: 1500, pacer_packets: 16, start_bps: 2000000)
+
+const N3_ROOM: router.RoomLimits = router.RoomLimits(participants: 4, ids: 5, publications: 2, down_tracks: 2, audio_forward: 0, pause_delay_ms: 5000, pause: false)
+
+type N3Bind {
+    sock: UdpSocket,
+    control: Inbox[units.ControlMessage],
+    inbox: Inbox[router.Carried]
+}
+
+type N3Unit {
+    unit: units.Unit,
+    sock: UdpSocket
+}
+
+type N3Peer {
+    sock: UdpSocket,
+    srtp: srtp.Session,
+    video_seq: u16,
+    audio_seq: u16,
+    video_packets: u64,
+    frames: u64,
+    audio: u64
+}
+
+type N3Room {
+    room: peer.RoomId,
+    home: Addr,
+    peers: List[N3Peer]
+}
+
+fn n3_offer(publisher: bool) -> Bytes {
+    let mut offer = minimal_head(b" v a")
+    list.append(mut offer, minimal_video(b"96", b"v", true))
+    let dir = if publisher {
+        b"a=sendonly\n"
+    } else {
+        b"a=recvonly\n"
+    }
+    list.append(mut offer, dir)
+    list.append(mut offer, b"a=rtpmap:96 VP8/90000\nm=audio 9 UDP/TLS/RTP/SAVPF 111\na=mid:a\na=rtcp-mux\na=extmap:1 urn:ietf:params:rtp-hdrext:sdes:mid\na=rtpmap:111 opus/48000/2\n")
+    list.append(mut offer, dir)
+    take offer
+}
+
+fn n3_units(net: Net, mut homes: List[Addr]) -> List[N3Unit] waits {
+    let plane = units.Plane(inflight: signal.INFLIGHT, rooms: int.narrow(N3_ROOMS), media_take: 1024)
+    let mut binds: List[N3Bind] = list.with_capacity(N3_UNITS)
+    let mut doors: List[units.Doors] = list.with_capacity(N3_UNITS)
+    for k in 0u64 .. N3_UNITS {
+        let addr = Addr(ip: V4(0x7f000001), port: int.narrow(6000 + k))
+        let (take sock, home) = result.unwrap(host.udp_bind(net, addr, SOCK))
+        let (take door, take control, take inbox) = result.unwrap(units.inboxes(home, int.narrow(k), int.narrow(N3_UNITS), plane))
+        list.push(mut homes, home)
+        list.push(mut doors, take door)
+        list.push(mut binds, N3Bind(sock: take sock, control: take control, inbox: take inbox))
+    }
+    let mut pool: List[N3Unit] = list.with_capacity(N3_UNITS)
+    let per_unit = 4 * N3_ROOMS / N3_UNITS
+    for take b in take binds {
+        let N3Bind(sock: take sock, control: take control, inbox: take inbox) = take b
+        let k = list.len(pool)
+        let mut u = result.unwrap(units.unit(provide.random(30390 + k), int.narrow(k), doors, take control, take inbox, 524288, 1024, plane))
+        units.reserve_pool(mut u, router.pool_bounds(N3_UNITS, N3_ROOMS, per_unit, N3_SESSION))
+        list.push(mut pool, N3Unit(unit: take u, sock: take sock))
+    }
+    take pool
+}
+
+// Drive related control calls directly during setup. Timed revokes below use the
+// same unit control points, reached through units.turn over the simulated sockets.
+fn n3_setup_call(mut pool: List[N3Unit], take change: router.Change) -> router.Answer {
+    let room = router.change_room(change)
+    result.unwrap(units.begin(mut pool[0].unit, 0, take change))
+    // A home unit may apply first. Its acknowledgement lets unit 0 post to the rest.
+    for _ in 0u64 .. 2 {
+        for k in 1u64 .. N3_UNITS {
+            units.take_control(mut pool[k].unit, 0)
+        }
+        units.take_control(mut pool[0].unit, 0)
+        if let Some(answer) = units.finished(mut pool[0].unit, room) {
+            return ok_or_say(answer, "N3 setup")
+        }
+    }
+    fail("N3 setup call did not finish")
+}
+
+fn n3_room(mut pool: List[N3Unit], net: Net, home: Addr, k: u64, r: u64) -> N3Room waits {
+    let room = option.unwrap(units.next_room(mut pool[0].unit))
+    let _ = n3_setup_call(mut pool, Open(room: room, limits: N3_ROOM))
+    let mut clients: List[N3Peer] = list.with_capacity(4)
+    for i in 1u64 .. 5 {
+        let addr = Addr(ip: V4(0x7f000002), port: int.narrow(10000 + r * 4 + i))
+        let (take sock, at) = result.unwrap(host.udp_bind(net, addr, UdpOptions(slots: 64, slot_bytes: 1536)))
+        let who = peer.Participant(gen: gen_of(i), room: room)
+        let Rig(p: take p, c: _, cs: take cs, out: _) = established_limits(30400 + 16 * r + 4 * i, n3_offer(i == 1), who, at, N3_SESSION, b"server")
+        result.unwrap(units.park(mut pool[k].unit, take p))
+        let _ = n3_setup_call(mut pool, Admit(who: who, home: int.narrow(k)))
+        list.push(mut clients, N3Peer(sock: take sock, srtp: take cs, video_seq: 0, audio_seq: 0, video_packets: 0, frames: 0, audio: 0))
+    }
+    let video = published(n3_setup_call(mut pool, Publish(room: room, who: gen_of(1), section: 0, id: PublicationId(0), shape: None)))
+    let audio = published(n3_setup_call(mut pool, Publish(room: room, who: gen_of(1), section: 1, id: PublicationId(0), shape: None)))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    for i in 2u64 .. 5 {
+        let _ = n3_setup_call(mut pool, Subscribe(room: room, who: gen_of(i), p: video, section: 0, target: base))
+        let _ = n3_setup_call(mut pool, Subscribe(room: room, who: gen_of(i), p: audio, section: 1, target: base))
+    }
+    N3Room(room: room, home: home, peers: take clients)
+}
+
+fn n3_packet(mut src: N3Peer, clock: Clock, to: Addr, fields: rtp.header.Fields, mid: Bytes, prefix: Option[u8], payload: Bytes) waits {
+    let mut ext = rtp.ext.writer()
+    let mut map = rtp.ext.map(OneOnly)
+    result.unwrap(rtp.ext.bind(mut map, 1, Mid))
+    result.unwrap(rtp.ext.put(mut ext, map, Mid, mid, 0, 1))
+    let mut packet: Bytes = list.with_capacity(1536)
+    let _ = result.unwrap(rtp.header.write(fields, view ext, mut packet))
+    if let Some(b) = prefix {
+        list.push(mut packet, b)
+    }
+    list.append(mut packet, payload)
+    let _ = result.unwrap(srtp.protect_rtp(mut src.srtp, mut packet))
+    let mut tx: List[UdpTx] = list.with_capacity(1)
+    list.push(mut tx, UdpTx(to: to, at: 0, len: list.len(packet), ecn: 0))
+    if let Ok(1) = host.udp_send(mut src.sock, packet, tx, At(clock, host.mono_ns(clock) + MS)) {} else {
+        fail("N3 publisher could not send a packet")
+    }
+}
+
+fn n3_send(mut room: N3Room, clock: Clock, slot: u64, index: u64) waits {
+    let step = slot + index % N3_TICKS
+    let to = room.home
+    if (slot + index / N3_UNITS) % 2 == 0 {
+        let seq = room.peers[0].audio_seq
+        // A 20 ms Opus silence packet, on its own clock.
+        n3_packet(mut room.peers[0], clock, to, rtp.header.Fields(marker: false, pt: 111, seq: seq, ts: 960u32 * int.widen(seq), ssrc: N3_AUDIO_SSRC), b"a", None, b"\xf8\xff\xfe")
+        room.peers[0].audio_seq += 1
+    }
+    let frame = step * 30 / N3_TICKS
+    if (step + 1) * 30 / N3_TICKS == frame {
+        return
+    }
+    let body = n3_video(frame % 30)
+    let mut at = 0u64
+    while at < list.len(body) {
+        let end = order.min(at + 1100, list.len(body))
+        // RFC 7741: S on the first packet of partition 0, marker on the last packet.
+        let descriptor: u8 = if at == 0 {
+            0x10
+        } else {
+            0
+        }
+        let seq = room.peers[0].video_seq
+        n3_packet(mut room.peers[0], clock, to, rtp.header.Fields(marker: end == list.len(body), pt: 96, seq: seq, ts: int.narrow(3000 * frame), ssrc: N3_VIDEO_SSRC), b"v", Some(descriptor), list.slice(body, at, end))
+        room.peers[0].video_seq += 1
+        at = end
+    }
+}
+
+fn n3_receive(mut client: N3Peer, clock: Clock, mut data: Bytes, mut batch: List[UdpPacket]) waits {
+    list.clear(mut data)
+    list.clear(mut batch)
+    let count = match host.udp_recv(mut client.sock, mut data, mut batch, At(clock, host.mono_ns(clock) + 1)) {
+        Ok(n) => n,
+        Error(TimedOut) => 0,
+        Error(_) => fail("N3 receiver socket failed"),
+    }
+    for i in 0u64 .. count {
+        let UdpPacket(at: at, len: len, truncated: cut, ..) = batch[i]
+        if cut {
+            fail("N3 receiver got a truncated datagram")
+        }
+        let mut packet = copy_of(list.slice(data, at, at + len))
+        if rtcp_like(packet) {
+            continue
+        }
+        let opened = result.unwrap(srtp.unprotect_rtp(mut client.srtp, mut packet))
+        list.truncate(mut packet, opened.length)
+        let h = result.unwrap(rtp.header.parse(packet))
+        if h.pt == 96 {
+            client.video_packets += 1
+            if h.marker {
+                client.frames += 1
+            }
+        } else if h.pt == 111 {
+            client.audio += 1
+        } else {
+            fail("N3 receiver got an unexpected payload type")
+        }
+    }
+}
+
+fn n3_turn(mut worker: N3Unit, clock: Clock, until: u64) waits {
+    let _ = result.unwrap(units.turn(mut worker.unit, clock, mut worker.sock, until))
+}
+
+fn n3_turns(mut pool: List[N3Unit], clock: Clock, wall: Clock, mut slowest: u64) waits {
+    for i in 1u64 .. N3_UNITS + 1 {
+        let k = i % N3_UNITS
+        let until = host.mono_ns(clock) + 1
+        let start = host.mono_ns(wall)
+        n3_turn(mut pool[k], clock, until)
+        slowest = order.max(slowest, host.mono_ns(wall) - start)
+    }
+}
+
+fn n3_metric(mut line: String, key: String, value: u64) {
+    string.push(mut line, key)
+    string.push_u64(mut line, value)
+    string.push(mut line, "\n")
+}
+
+pub fn main(tasks: Tasks, wall: Clock, out: Stdout) -> Result[(), Exit] waits {
+    let (net, clock, take sim) = sim_net(tasks, 3039)
+    let mut homes: List[Addr] = list.with_capacity(N3_UNITS)
+    let mut pool = n3_units(net, mut homes)
+    let mut rooms: List[N3Room] = list.with_capacity(N3_ROOMS)
+    for i in 0u64 .. N3_ROOMS {
+        let k = i % N3_UNITS
+        let room = n3_room(mut pool, net, homes[k], k, i)
+        list.push(mut rooms, take room)
+    }
+    let mut data: Bytes = list.with_capacity(65536)
+    let mut batch: List[UdpPacket] = list.with_capacity(64)
+    let mut latency: List[u64] = list.with_capacity(N3_SECONDS)
+    let mut slowest = 0u64
+    let mut wrong = 0u64
+    let mut video = 0u64
+    let mut audio = 0u64
+    let mut sent_per_gop = 0u64
+    for f in 0u64 .. 30 {
+        sent_per_gop += (list.len(n3_video(f)) + 1099) / 1100
+    }
+    let start = host.mono_ns(clock)
+    // Let every phased stream reach its first keyframe. The next second is the
+    // reference window with all rooms still sending and receiving.
+    for window in 0u64 .. N3_SECONDS + 2 {
+        let revoked = rooms[int.saturating_sub(window, 2)].room
+        let mut pending: Option[u64] = None
+        for step in 0u64 .. N3_TICKS {
+            host.sleep_until(clock, start + (window * N3_TICKS + step) * 10 * MS)
+            for i in 0u64 .. N3_ROOMS {
+                n3_send(mut rooms[i], clock, window * N3_TICKS + step, i)
+            }
+            if step == 0 && window > 1 {
+                pending = Some(host.mono_ns(wall))
+                result.unwrap(units.begin(mut pool[0].unit, host.mono_ns(clock), Revoke(room: revoked, id: 1, epoch: 1)))
+            }
+            n3_turns(mut pool, clock, wall, mut slowest)
+            if let Some(at) = pending {
+                if let Some(answer) = units.finished(mut pool[0].unit, revoked) {
+                    let _ = ok_or_say(answer, "N3 revoke")
+                    list.push(mut latency, host.mono_ns(wall) - at)
+                    pending = None
+                }
+            }
+            for i in 0u64 .. N3_ROOMS {
+                for j in 0u64 .. 4 {
+                    n3_receive(mut rooms[i].peers[j], clock, mut data, mut batch)
+                }
+            }
+        }
+        if pending != None {
+            fail("N3 revoke did not finish in its one-second window")
+        }
+        for i in 0u64 .. N3_ROOMS {
+            for j in 0u64 .. 4 {
+                let frames = rooms[i].peers[j].frames
+                let packets = rooms[i].peers[j].video_packets
+                let heard = rooms[i].peers[j].audio
+                if window > 0 {
+                    if j == 0 || i + 1 < window {
+                        if frames != 0 || packets != 0 || heard != 0 {
+                            wrong += 1
+                        }
+                    } else if frames != 30 || packets != sent_per_gop || heard != 50 {
+                        wrong += 1
+                    }
+                    video += frames
+                    audio += heard
+                }
+                rooms[i].peers[j].frames = 0
+                rooms[i].peers[j].video_packets = 0
+                rooms[i].peers[j].audio = 0
+            }
+        }
+    }
+    list.sort_stable(mut latency, scoped fn(a: u64, b: u64) -> Order {
+        order.compare(a, b)
+    })
+    let p99 = latency[(99 * N3_SECONDS + 99) / 100 - 1]
+    let mut line = ""
+    n3_metric(mut line, "rooms=", N3_ROOMS)
+    n3_metric(mut line, "peers=", 4 * N3_ROOMS)
+    n3_metric(mut line, "units=", N3_UNITS)
+    n3_metric(mut line, "revokes=", list.len(latency))
+    n3_metric(mut line, "revoke_p99_ns=", p99)
+    n3_metric(mut line, "slowest_turn_ns=", slowest)
+    n3_metric(mut line, "video_frames=", video)
+    n3_metric(mut line, "audio_packets=", audio)
+    n3_metric(mut line, "failed_receiver_windows=", wrong)
+    result.unwrap(stdout.write(out, line))
+    drop(take sim)
+    if wrong != 0 || p99 >= slowest + 50 * MS {
+        fail("N3 isolation or revoke latency failed")
+    }
+    Ok(())
+}

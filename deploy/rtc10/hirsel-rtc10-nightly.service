@@ -1,0 +1,9 @@
+[Unit]
+Description=Run Hirsel RTC-10 N3 on Boat
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-rtc10/main fetch --quiet origin main
+ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-rtc10/main switch --quiet --detach origin/main
+ExecStart=%h/.local/share/hirsel-rtc10/main/tools/nightly-rtc10.sh

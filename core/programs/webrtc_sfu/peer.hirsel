@@ -254,6 +254,7 @@ type FecState {
 }
 
 type Track {
+    id: u16,
     section: u8,
     video: bool,
     opus_fmtp: Option[Bytes],
@@ -280,9 +281,7 @@ type Track {
     red_from: u64,
     nacked: u64,
     forwarded: u64,
-    // Whether the router ended the track (RTC-7 step 3), and the timestamp and payload
-    // type of its last media packet sent, which its padding carries (RTC-6 probing).
-    ended: bool,
+    // The timestamp and payload type its padding carries (RTC-6 probing).
     last_ts: u32,
     last_pt: u8,
     // The subscription's static playout delay, written on every media packet (RTC-5).
@@ -315,6 +314,8 @@ pub opaque type PeerSession {
     drops: Drops,
     inbound: List[Inbound],
     tracks: List[Track],
+    // Stable IDs held by the router and pacer map to positions in the live track list.
+    track_slots: List[u16],
     used: List[u32],
     control: u32,
     cname: Bytes,
@@ -539,7 +540,7 @@ pub fn session_heap(limits: PeerLimits) -> u64 {
     sum += seq_of(bytes[Bytes], n) + n * seq_of(1, SLOT) + seq_of(bytes[u32], n) + seq_of(bytes[Paced], n)
     sum += seq_of(1, SLOT + 128) + 2 * seq_of(1, SLOT) + seq_of(1, 2) + seq_of(1, DD_LIMIT)
     sum += seq_of(bytes[u32], ssrcs(limits))
-    sum + seq_of(bytes[Track], tracks) + tracks * track_heap()
+    sum + seq_of(bytes[Track], tracks) + seq_of(bytes[u16], tracks) + tracks * track_heap()
 }
 
 // The SSRCs a session draws while it holds a full set of down-tracks: its control SSRC,
@@ -586,7 +587,9 @@ pub fn open(take local: sdp.LocalEnd, take cert: dtls.Identity, r: Random, base:
         list.push(mut slab, take b)
         list.push(mut free, int.narrow(n - 1 - i))
     }
-    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.with_capacity(int.widen(limits.down_tracks)), used: list.with_capacity(ssrcs(limits)), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_first: None, probe_last: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), repair: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None, reoffer_due: false)
+    let mut slots: List[u16] = list.with_capacity(int.widen(limits.down_tracks))
+    list.fill(mut slots, int.widen(limits.down_tracks), NO_TRACK)
+    let mut p = PeerSession(who: participant, limits: limits, random: r, base: base, agreed: clone(agreed), sections: take sections, ice: take ice, path: None, identity: Some(take cert), dtls: None, srtp: None, closed: false, drops: no_drops(), inbound: list.new(), tracks: list.with_capacity(int.widen(limits.down_tracks)), track_slots: take slots, used: list.with_capacity(ssrcs(limits)), control: 0, cname: take cname, recv_log: take recv_log, send_log: take send_log, bwe: rtp.bwe.bwe(rtp.bwe.Config(start_bps: limits.start_bps, min_bps: 30000, max_bps: 20000000)), rtt: None, numbered: 0, probe_from: 0, probe_first: None, probe_last: 0, next_report: 0, next_feedback: 0, collided: list.new(), pkt: list.new(), word: list.new(), dd: list.new(), red: list.new(), repair: list.new(), ext: rtp.ext.writer(), pacer: take pacer, slab: take slab, free: take free, unpaced: take unpaced, barred: list.new(), offered: None, reoffer_due: false)
     list.try_reserve(mut p.pkt, SLOT + 128) ?=> |c| Capacity(c)
     list.try_reserve(mut p.red, SLOT) ?=> |c| Capacity(c)
     list.try_reserve(mut p.repair, SLOT) ?=> |c| Capacity(c)
@@ -731,12 +734,19 @@ pub fn control_ssrc(p: PeerSession) -> u32 {
     p.control
 }
 
-/// A down-track's media and RTX SSRCs, for `a=ssrc` and `a=ssrc-group:FID`.
-pub fn track_ssrcs(p: PeerSession, track: u16) -> Option[(u32, Option[u32])] {
-    let i: u64 = int.widen(track)
-    if i >= list.len(p.tracks) {
+const NO_TRACK: u16 = 0xffff
+
+fn track_index(p: PeerSession, track: u16) -> Option[u64] {
+    let id: u64 = int.widen(track)
+    if id >= list.len(p.track_slots) || p.track_slots[id] == NO_TRACK {
         return None
     }
+    Some(int.widen(p.track_slots[id]))
+}
+
+/// A down-track's media and RTX SSRCs, for `a=ssrc` and `a=ssrc-group:FID`.
+pub fn track_ssrcs(p: PeerSession, track: u16) -> Option[(u32, Option[u32])] {
+    let i = track_index(p, track)?
     let rtx = match p.tracks[i].rtx {
         Some(r) => Some(r.ssrc),
         None => None,

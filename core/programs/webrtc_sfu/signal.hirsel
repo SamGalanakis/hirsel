@@ -858,21 +858,21 @@ fn answered[M](mut a: Adapter[M], mut l: Ledger, take after: After, take answer:
                 }
             }
         },
-        Unsubscribed(g, id) => {
-            if let Some(i) = seat_of(a, g) {
-                match answer {
-                    Ok(_) => {
-                        release_remote(mut l, a.room, g, id)
-                        list.retain(mut a.seats[i].subs, scoped fn(x: (u64, u8)) -> bool {
-                            x.0 != id
-                        })
-                    },
-                    Error(e) => {
-                        let p = a.seats[i].peer
-                        to_peer(a, p, Refused(code(e)), mut out)
-                    },
+        Unsubscribed(g, id) => match answer {
+            Ok(_) => {
+                release_remote(mut l, a.room, g, id)
+                if let Some(i) = seat_of(a, g) {
+                    list.retain(mut a.seats[i].subs, scoped fn(x: (u64, u8)) -> bool {
+                        x.0 != id
+                    })
                 }
-            }
+            },
+            Error(e) => {
+                if let Some(i) = seat_of(a, g) {
+                    let p = a.seats[i].peer
+                    to_peer(a, p, Refused(code(e)), mut out)
+                }
+            },
         },
         Changed(g) => {
             if let Error(e) = answer {

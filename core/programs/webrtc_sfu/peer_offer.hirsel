@@ -2,8 +2,7 @@
 // and the agreement it installs.
 /// Set the source Opus parameters on a down-track. A changed wire value needs a re-offer.
 pub fn set_opus_fmtp(mut p: PeerSession, track: u16, fmtp: Bytes) -> bool {
-    let i: u64 = int.widen(track)
-    if i >= list.len(p.tracks) || p.tracks[i].ended {
+    let Some(i) = track_index(p, track) else {
         return false
     }
     let si: u64 = int.widen(p.tracks[i].section)
@@ -24,8 +23,7 @@ pub fn set_opus_fmtp(mut p: PeerSession, track: u16, fmtp: Bytes) -> bool {
 /// track's own. A reused section needs a re-offer (RTC-2, RTC-4), since a MID with
 /// signaled SSRCs does not take an unsignaled one.
 pub fn ssrc_stale(p: PeerSession, track: u16) -> bool {
-    let i: u64 = int.widen(track)
-    if i >= list.len(p.tracks) || p.tracks[i].ended {
+    let Some(i) = track_index(p, track) else {
         return false
     }
     let si: u64 = int.widen(p.tracks[i].section)
@@ -72,18 +70,15 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
     }
     p.reoffer_due = false
     let mut current: sdp.Negotiated = clone(p.agreed)
-    // A section whose down-track ended announces no SSRC; a live one announces its own.
-    for t in p.tracks {
-        let si: u64 = int.widen(t.section)
-        if si < list.len(current.sections) {
-            list.clear(mut current.sections[si].local.ssrcs)
-            list.clear(mut current.sections[si].local.rtx_pairs)
-            list.clear(mut current.sections[si].local.fec_pairs)
-        }
+    // Rebuild the local announcements from the tracks still present.
+    for si in 0u64 .. list.len(current.sections) {
+        list.clear(mut current.sections[si].local.ssrcs)
+        list.clear(mut current.sections[si].local.rtx_pairs)
+        list.clear(mut current.sections[si].local.fec_pairs)
     }
     for t in p.tracks {
         let si: u64 = int.widen(t.section)
-        if t.ended || si >= list.len(current.sections) {
+        if si >= list.len(current.sections) {
             continue
         }
         if let Some(fmtp) = t.opus_fmtp {
@@ -119,8 +114,7 @@ pub fn reoffer(mut p: PeerSession, policy: sdp.Policy, mut text: Bytes) -> Resul
 /// (RTC-4). A track with neither, audio or video without RTX, needs no re-offer: the
 /// browser takes its media by MID.
 pub fn unannounced(p: PeerSession, track: u16) -> bool {
-    let t: u64 = int.widen(track)
-    if t >= list.len(p.tracks) {
+    let Some(t) = track_index(p, track) else {
         return false
     }
     let si: u64 = int.widen(p.tracks[t].section)

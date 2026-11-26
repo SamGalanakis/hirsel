@@ -1610,7 +1610,8 @@ law W37, `units.Plane`). Slice P3 in part 2026-11-26 (rtc10-p3-pool-service-2976
 `serve_pool` with per-room adapters and room-client tasks, `serve` removed, `room_pps` and
 `open_pps` (W38), per-room signaling loss (W39), the three fault tiers (W36), the
 default `inflight`, and the ledgers, primary units and pool-start row reservation (W34).
-P4 not built. Slices and laws W34 to W39 below.*
+P4 built 2026-11-26 (rtc10-p4-nightly-3039), with the N3 runner and down-track
+reclamation. Slices and laws W34 to W39 below.*
 
 Before RTC-10, `signal.serve` (S7) served **one** room: its `Service` named one `RoomId`, one `Dial` and one
 `RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
@@ -1738,10 +1739,8 @@ offer text a re-offer keeps until it is answered; the room client's Dial, Embed 
 membership, and its entry and message channels (sized by the message type `M`); the
 adapter's per-seat `sends` and `subs`, and its `jobs`, `answers`, `former` and `revokes`
 queues; unit 0's `Ledger.held` and `Ledger.rooms` and `Rooms.served`; and a subscribe's
-transient scratch. Two lists grow under churn without a bound, an open red against
-Isolation item 1: a session's drawn SSRCs (`PeerSession.used`), which keep every SSRC ever
-drawn, and its `tracks`, which keep ended down-tracks. Each is sized at `open` for one full
-set of down-tracks, and a peer that subscribes and unsubscribes repeatedly grows both.
+transient scratch. One list still grows under churn without a bound, an open red against
+Isolation item 1: `PeerSession.used` keeps every SSRC the session draws.
 
 **Reservations are linearized on unit 0.** Unit 0 keeps every unit's ledger, and reserves
 from it before it posts any change that allocates: an `Open`, a `join`'s `Build` (reserved
@@ -1912,7 +1911,9 @@ over `sim.udp`), unless named otherwise. Each is red on main before its slice.
   pending builds where one fits; a remote down-track's `per_remote` and its unsubscribe;
   a leave's refund; and a close that returns the room's share on each unit. The per-unit
   live charge at every step and the remote `Shared` reference drop after `Close` are not
-  measured: the hall's units share one limit.
+  measured: the hall's units share one limit. `pool_unsubscribe_frees_down_tracks`
+  churns two subscriptions and checks that unsubscribe refunds the tracks' actual
+  allocations and preserves the surviving track's SSRC.
 - **W34 `pool_room_cost_is_exact`.** Open rooms with four `RoomLimits` shapes (the
   smallest; 256 participants and 8 publications each; 2 participants with 64 down-tracks
   each; RED and FlexFEC on), then fill each with joins up to its bounds. *Oracle:* the units'
@@ -1968,6 +1969,11 @@ over `sim.udp`), unless named otherwise. Each is red on main before its slice.
 N3 (nightly, Boat): 200 rooms of 4 peers with 720p video and audio on one 8-unit pool under
 `sim.udp`, with one room revoked every second. The pool's p99 revoke latency stays under the
 slowest turn plus 50 ms, and no room's received frame count drops while another is revoked.
+The runner is `core/programs/webrtc_sfu/nightly/run.py`. Each room sends one 30 fps VP8
+stream and 50 Opus packets per second to three subscribers. After warm-up and a reference
+second, it revokes a publisher each second for 20 seconds. It checks each receiver's RTP
+packet and frame counts and prints wall-clock revoke latency and turn duration.
+The user timer in `deploy/rtc10` builds from main and submits N3 to Boat at 03:30 UTC.
 
 ### Pooling slices
 

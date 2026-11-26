@@ -557,14 +557,14 @@ fn rtcp_in(mut p: PeerSession, now: u64, mut slot: Bytes, mut out: Outbox) -> Re
             Nack(_, media) => nack_in(mut p, now, slot, pkt, media, mut c.repairs),
             Pli(_, media) => {
                 if let Some(t) = track_of(p, media) {
-                    list.push(mut c.keyframes, KeyframeAsk(track: int.narrow(t), fir: false))
+                    list.push(mut c.keyframes, KeyframeAsk(track: p.tracks[t].id, fir: false))
                 }
             },
             Fir(_) => {
                 let mut f = 0u64
                 while let Ok(Some((target, _))) = rtp.rtcp.fir_next(slot, pkt, mut f) {
                     if let Some(t) = track_of(p, target) {
-                        list.push(mut c.keyframes, KeyframeAsk(track: int.narrow(t), fir: true))
+                        list.push(mut c.keyframes, KeyframeAsk(track: p.tracks[t].id, fir: true))
                     }
                 }
             },
@@ -639,7 +639,7 @@ fn nack_in(mut p: PeerSession, now: u64, pkt: Bytes, r: rtp.rtcp.Packet, media: 
             }
             if let Found(_) = rtp.history.get(mut p.tracks[t].history, index, now, MIN_RESEND_NS) {
                 if let Some(rec) = rtp.history.entry(p.tracks[t].history, index) {
-                    list.push(mut asks, RepairAsk(track: int.narrow(t), index: index, src: rec.src, handle: rec.handle, from: rec.from, len: rec.len))
+                    list.push(mut asks, RepairAsk(track: p.tracks[t].id, index: index, src: rec.src, handle: rec.handle, from: rec.from, len: rec.len))
                 }
             }
         }

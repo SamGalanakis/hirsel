@@ -100,8 +100,8 @@ fn fec_send(mut p: PeerSession, now: u64, t: u64, src: Gen, mut out: Outbox) -> 
     let staged = match repair {
         Some((ssrc, seq, ts, n)) => {
             let f = rtp.header.Fields(marker: false, pt: pt, seq: seq, ts: ts, ssrc: ssrc)
-            let q = Paced(slot: 0, track: int.narrow(t), stream: Fec, fields: f, level: None, voice: false, src: src, dd: 0, cvo: None, capture: None)
-            stage(mut p, now, mut out, q, Video, None, buf, 0, n, None, None, None)
+            let q = Paced(slot: 0, track: p.tracks[t].id, stream: Fec, fields: f, level: None, voice: false, src: src, dd: 0, cvo: None, capture: None)
+            stage(mut p, now, mut out, t, q, Video, None, buf, 0, n, None, None, None)
         },
         None => Ok(false),
     }

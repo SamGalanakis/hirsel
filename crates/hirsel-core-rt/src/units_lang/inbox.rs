@@ -1,4 +1,5 @@
-//! An inbox's drop: its seal, its seal answer, and its cleaning.
+//! An inbox's drop (its seal, its seal answer and its cleaning) and a client's,
+//! with the releases a drop takes.
 use super::*;
 
 /// Clean an inbox: seal, wait (shielded) for the seal answer, drop every
@@ -67,5 +68,32 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         u.reach();
         pump(u);
         0
+    }
+}
+
+impl LangUnit {
+    /// Drop a client. The owner's own release of a cleaned connection takes
+    /// through its notice; each take wakes what waits on it, as in `pump`.
+    pub(super) fn drop_client(&mut self, client: Client) {
+        let took = self.ctx.drop_client(client);
+        if !took.is_empty() || self.released_own() {
+            self.on_released(took);
+        }
+    }
+
+    /// Every caller holds a commit. A release that took drained the port and
+    /// may have left later arrivals reached but untaken; pump takes them and
+    /// rearms the port, so no task parks on work the unit already holds.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn on_released(&mut self, took: Vec<Released>) {
+        self.reach();
+        let wake = self.waits > 0;
+        for (t, id, _) in took {
+            // SAFETY: a release runs in a commit that owns the unit.
+            unsafe { on_take(self, t, id, wake) };
+        }
+        // SAFETY: as above.
+        unsafe { pump(self) };
     }
 }

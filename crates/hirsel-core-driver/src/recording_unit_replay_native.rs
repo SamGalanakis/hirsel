@@ -596,3 +596,110 @@ fn u5_items_replay_from_their_takes() {
         one_line("close", &[3, 2, 0, 0, 0], 1, "replay: Diverged(Object) at 8 in root ");
     }
 }
+
+/// A sealed `Secret` crosses in an item, a helper's entry and its result,
+/// and always comes back to the root that paid for it, so no unit takes a
+/// refund of its charges.
+const U5_SECRETS: &str = r#"
+fn bounce(take k: Secret) -> Secret waits {
+    let (c, i): (Client[Secret], Inbox[Secret]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take k))
+    result.unwrap(conn.receive(i))
+}
+
+pub fn main(tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let mut b: Bytes = list.with_capacity(1)
+    list.push(mut b, 5)
+    let s = result.unwrap(secret.seal(take b, "mac"))
+    let (c, i): (Client[Secret], Inbox[Secret]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.send(c, take s))
+    let k = result.unwrap(conn.receive(i))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, take k, bounce))
+    let back = result.unwrap(task.join(take h))
+    result.unwrap(conn.send(c, take back))
+    let last = result.unwrap(conn.receive(i))
+    result.unwrap(stdout.write(out, "secret"))
+    Ok(())
+}
+"#;
+
+/// An arriving `Secret` replays as its designation with no bytes behind it,
+/// numbered where it arrives (docs/recording.md, "Handle snapshots"). Its
+/// snapshot is a handle part (1), tag 7, the receiving ordinal, then the
+/// designation: `Sealed` (1), stream `u32`, the seal's ordinal, and the
+/// policy text. By hand from recording.md: the root's grants are `Tasks` (1)
+/// and `Stdout` (2), its connection 3 and client 4; the item it takes from
+/// itself arrives as 5, the helper handle is 6 and the returned secret 7. The
+/// helper's entry secret is its 1. Each case moves one designation to stream
+/// 99, so the unit's next use of that secret, which writes its designation,
+/// is the one line, `Diverged(Arg)`: a seal and `conn.new` write no frame,
+/// so the root's frames are its two `GRANT`s, the send (3), the item's
+/// `TAKE` (4), the spawn (5), the end's `TAKE` (6) and the second send (7),
+/// and the helper's first frame is its send (1).
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_secrets_cross_in_items_entries_and_results() {
+    crate::openat2_required::require();
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(U5_SECRETS, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut options = native_options(backend, dir.path());
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.grant_mask = ["Tasks", "Stdout"]
+            .iter()
+            .fold(0, |m, g| m | 1 << grant_kind(g).unwrap());
+        options.cas = dir.path().join(format!("u5s-store-{backend:?}"));
+        options.output = dir.path().join(format!("u5s-{backend:?}"));
+        let program = product.build(&entry, &options).unwrap().executable;
+        let path = dir.path().join(format!("u5s-{backend:?}.tape"));
+        let (code, out, err) = tape_run(&program, &[], Some(&path));
+        assert_eq!((code, out.as_str()), (Some(0), "secret"), "{backend:?}: {err}");
+        let frames = unit_streams(&path, &format!("{backend:?}"), &["root", "root.0"]);
+        let (code, out, err) = u4_replay(&program, &path, None);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (Some(0), "", ""),
+            "{backend:?}: {frames:#?}"
+        );
+        let tape = std::fs::read(&path).unwrap();
+        let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+            std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+        })
+        .unwrap()
+        .1
+        .tape_id;
+        let one_line = |name: &str, stream: u32, ordinal: u8, expected: &str| {
+            // The snapshot's head and its designation's stream, which moves to 99.
+            let window = [1, 7, ordinal, 1, 0, 0, 0, 0];
+            let wrong = u4_patched(&tape, &tape_id, stream, |payload| {
+                let Some(i) = payload.windows(8).position(|w| w == window) else {
+                    return false;
+                };
+                payload[i + 4] = 99;
+                true
+            });
+            let corrupt = dir.path().join(format!("u5s-{backend:?}-{name}.tape"));
+            std::fs::write(&corrupt, wrong).unwrap();
+            let (code, out, err) = u4_replay(&program, &corrupt, None);
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} {name}: {err}");
+            let lines: Vec<_> = err.lines().collect();
+            assert!(
+                matches!(&lines[..], [l] if l.starts_with(expected)),
+                "{backend:?} {name}: {err}"
+            );
+        };
+        one_line("item", 0, 5, "replay: Diverged(Arg) at 5 in root ");
+        one_line("entry", 1, 1, "replay: Diverged(Arg) at 1 in root.0 ");
+        one_line("result", 0, 7, "replay: Diverged(Arg) at 7 in root ");
+    }
+}

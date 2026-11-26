@@ -23,6 +23,11 @@ impl LangUnit {
     /// published to it from now on, and takes only what its `TAKE`s name.
     pub(super) fn set_tape(&mut self, group: Option<crate::tape::schedule::Group>) {
         self.tape = group;
+        let context = tasks::current_context();
+        if self.files.is_null() && !context.is_null() {
+            // SAFETY: the running task pins its context.
+            self.files = unsafe { (*context).host_files };
+        }
         if group.is_some_and(|group| group.replaying()) {
             self.ctx.park();
         }

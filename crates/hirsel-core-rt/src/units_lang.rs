@@ -128,34 +128,13 @@ pub(crate) struct LangUnit {
     /// A replaying unit's helpers, unstarted until their recorded end take.
     #[cfg(feature = "record")]
     unstarted: Map<usize, Box<UnitCtx>>,
+    /// The host files of the context that bound the unit's recording, whose
+    /// run's `Secret`s an arriving one joins on replay.
+    #[cfg(feature = "record")]
+    files: *mut crate::host_file::Files,
 }
 
 impl LangUnit {
-    /// Drop a client. The owner's own release of a cleaned connection takes
-    /// through its notice; each take wakes what waits on it, as in `pump`.
-    fn drop_client(&mut self, client: Client) {
-        let took = self.ctx.drop_client(client);
-        if !took.is_empty() || self.released_own() {
-            self.on_released(took);
-        }
-    }
-
-    /// Every caller holds a commit. A release that took drained the port and
-    /// may have left later arrivals reached but untaken; pump takes them and
-    /// rearms the port, so no task parks on work the unit already holds.
-    #[cold]
-    #[inline(never)]
-    fn on_released(&mut self, took: Vec<Released>) {
-        self.reach();
-        let wake = self.waits > 0;
-        for (t, id, _) in took {
-            // SAFETY: a release runs in a commit that owns the unit.
-            unsafe { on_take(self, t, id, wake) };
-        }
-        // SAFETY: as above.
-        unsafe { pump(self) };
-    }
-
     pub(crate) fn refund_retained(&mut self, id: usize) {
         self.retained.remove(&id);
     }
@@ -205,6 +184,8 @@ impl LangUnit {
             pumping: false,
             #[cfg(feature = "record")]
             unstarted: map(),
+            #[cfg(feature = "record")]
+            files: ptr::null_mut(),
         })
     }
 }
@@ -1151,7 +1132,10 @@ fn helper_main(
         drop(data);
         let mut lu = LangUnit::new(hctx, Some(shared));
         #[cfg(feature = "record")]
-        lu.set_tape(tape_group(&tape));
+        {
+            lu.files = context.host_files;
+            lu.set_tape(tape_group(&tape));
+        }
         let mut result = vec![0u8; layout.result.bytes.max(rb as usize)];
         let provider = if run.is_null() {
             tasks::SchedulerProvider::default()

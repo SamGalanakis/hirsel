@@ -7,6 +7,9 @@ use super::{Group, point};
 use format::{Arrival, HelperOutcome};
 use hirsel_core_layout::cross::{CASE, ELEMENT, PADDING, SEQ, elements, live, sequences};
 
+mod arrive;
+pub(in crate::tape) use arrive::word as arrived;
+
 impl Live {
     pub(super) fn replaying(&self) -> bool {
         self.mode == Mode::Replay && self.fault.is_none() && self.replayer.is_some()
@@ -268,6 +271,7 @@ pub(crate) fn due(
     group: Option<Group>,
     pump: bool,
     layout: impl Fn(usize) -> Option<(u64, Vec<[u64; 4]>)>,
+    secrets: Option<&std::sync::Mutex<crate::secret::Secrets>>,
 ) -> Option<Due> {
     replaying(group, |live| {
         live.fresh_takes();
@@ -339,15 +343,19 @@ pub(crate) fn due(
                 let value = value.bytes().to_vec();
                 return own_conn(live, &frame, ordinal, |live, conn| {
                     let (bytes, owners) = super::layout(conn).unwrap_or_default();
-                    if !owners.is_empty() {
-                        live.refuse_replay("an item holding a list or a handle");
-                        return None;
-                    }
-                    let held = &mut |_: u64, _: &mut format::Cursor<'_>| Err(Unpacked::Layout);
                     let bytes = bytes as usize;
-                    match packed(&value, vec![0; bytes], (0, bytes), &owners, held) {
+                    let flat = {
+                        let held =
+                            &mut |kind, c: &mut format::Cursor<'_>| arrived(live, secrets, kind, c);
+                        packed(&value, vec![0; bytes], (0, bytes), &owners, held)
+                    };
+                    match flat {
                         Ok(flat) => Some(Due::Item { conn, flat }),
-                        Err(_) => {
+                        Err(Unpacked::Unsupported(why)) => {
+                            live.refuse_replay(why);
+                            None
+                        }
+                        Err(Unpacked::Layout) => {
                             let rep = live.replayer.as_mut().unwrap();
                             let fault = rep.compared(
                                 Mismatch::Take,
@@ -396,7 +404,7 @@ pub(crate) fn due(
                 .ok_or(Unpacked::Layout)
                 .and_then(|(bytes, owners)| {
                     let held =
-                        &mut |_: u64, _: &mut format::Cursor<'_>| Err(Unpacked::Unsupported(HELD));
+                        &mut |kind, c: &mut format::Cursor<'_>| arrived(live, secrets, kind, c);
                     let bytes = bytes as usize;
                     packed(&value, vec![0; bytes], (0, bytes), &owners, held)
                 })
@@ -576,4 +584,4 @@ pub(in crate::tape) fn packed(
     Ok(flat)
 }
 
-const HELD: &str = "a helper result holding a handle or a function";
+const HELD: &str = "a value holding a list whose elements hold handles or functions";

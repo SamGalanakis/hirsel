@@ -432,6 +432,22 @@ impl Secrets {
         })
     }
 
+    /// A `Secret` that arrives in a replaying unit (docs/recording.md, "Replay
+    /// of a run with helpers"): its designation and policy, no bytes behind
+    /// it, one holder and no charge, since its charges stay with the unit
+    /// that paid them.
+    #[cfg(feature = "record")]
+    pub(crate) fn arrived(&mut self, origin: Origin, policy: SecretPolicy) -> u64 {
+        let secret = Secret {
+            origin,
+            policy,
+            bytes: None,
+            seal: None,
+            import: None,
+        };
+        self.push(secret, None)
+    }
+
     fn push(&mut self, secret: Secret, charge: Option<Charge>) -> u64 {
         self.insert(Entry {
             secret,

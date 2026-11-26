@@ -5,7 +5,7 @@
 //! is the entry's value. Its takes come only from its own `TAKE` frames, and
 //! its `END` is checked against the outcome it reaches.
 use super::schedule::Group;
-use super::units::replay::{Unpacked, packed};
+use super::units::replay::{Unpacked, arrived, packed};
 use super::units::verdicts;
 use super::*;
 use crate::units_lang::SpawnEntry;
@@ -171,9 +171,13 @@ unsafe fn open(
     flat[f as usize..f as usize + 8].copy_from_slice(&code.to_le_bytes());
     // SAFETY: the root's host files are live for the run.
     let registry = unsafe { &(*(*context).host_files).registry };
+    let secrets = &registry.run_grants().secrets;
     let mut word = |kind: u64, c: &mut format::Cursor<'_>| -> Result<u64, Unpacked> {
-        match (kind, c.u8()?) {
-            (CAPABILITY, 1) => {
+        if kind != CAPABILITY {
+            return arrived(&mut live, Some(secrets), kind, c);
+        }
+        match c.u8()? {
+            1 => {
                 if c.u8()? != 5 {
                     return Err(Unpacked::Unsupported(ENTRY_HANDLE));
                 }
@@ -196,12 +200,7 @@ unsafe fn open(
                 live.grants.insert(o, (grant, stored));
                 Ok(registry.grant(cell.provider, handle(generation, o)))
             }
-            (FUNCTION, 2) => {
-                let identity = c.bytes()?;
-                run::identities::code_of(identity).ok_or(Unpacked::Unsupported(NO_CODE))
-            }
-            (CAPABILITY | FUNCTION, _) => Err(Unpacked::Layout),
-            _ => Err(Unpacked::Unsupported(ENTRY_HANDLE)),
+            _ => Err(Unpacked::Layout),
         }
     };
     let span = (x.at as usize, x.len as usize);
@@ -237,9 +236,8 @@ unsafe fn open(
     })
 }
 
-const ENTRY_HANDLE: &str = "a helper entry holding a handle other than a capability";
+const ENTRY_HANDLE: &str = "a helper entry holding a capability of virtual construction";
 const RULED_GRANT: &str = "a helper entry holding a Net, Env, Exec or Cred capability";
-const NO_CODE: &str = "a helper entry holding a function the replaying build does not have";
 
 /// A helper's `END`: the stream's next frame is `expected`, and nothing
 /// follows it.

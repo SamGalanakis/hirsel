@@ -63,3 +63,14 @@ pub fn control_ssrc(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u32] 
     let mi = member_at(r, room, who)?
     Some(peer.control_ssrc(r.members[mi].session))
 }
+
+/// How many participants this unit's roster seats in `room`.
+pub fn seated(r: Router, room: peer.RoomId) -> u64 {
+    let mut n = 0u64
+    for s in r.roster {
+        if s.who.room == room {
+            n += 1
+        }
+    }
+    n
+}

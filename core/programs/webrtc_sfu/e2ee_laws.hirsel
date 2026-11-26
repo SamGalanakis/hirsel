@@ -564,6 +564,7 @@ fn e2_notices(mut t: E2Trace, mut r: router.Router) {
                 e2_push_u64(mut e, version)
             },
             Shut(who: _) => list.push(mut e, 4u8),
+            Fault(room: _, error: _) => list.push(mut e, 5u8),
         }
         list.push(mut t.events, take e)
     }

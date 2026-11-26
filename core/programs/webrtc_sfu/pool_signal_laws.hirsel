@@ -11,6 +11,8 @@ type PoolSig {
     answered: List[(peer.RoomId, u32)],
     pubs: List[(peer.RoomId, u32, u64)],
     offers: List[(peer.RoomId, u32, u64)],
+    // Per room: the peers the room heard fenced, once their revoke returned.
+    fenced: List[(peer.RoomId, u64)],
     refused_out: u64
 }
 
@@ -37,6 +39,7 @@ fn pool_outs(mut t: PoolSig, room: peer.RoomId) {
         match take o {
             ToRoom(take s) => match take s {
                 Published(p, id, _, _) => list.push(mut t.pubs, (room, int.narrow(p), id)),
+                Fenced(p, _) => list.push(mut t.fenced, (room, p)),
                 _ => (),
             },
             ToPeer(p, take s) => match take s {
@@ -195,7 +198,7 @@ fn hall_index(h: Hall, p: u32) -> u64 {
 
 fn per_room_loss_run(net: Net, clock: Clock) waits {
     let fixture = hall(net, clock, 39000)
-    let mut t = PoolSig(h: take fixture, p: signal.rooms(2, 4), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused_out: 0)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(2, 4), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
     let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), revoke_limits(), echo_embed()))
     let b = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), revoke_limits(), echo_embed()))
     signal.you_in(mut t.p, a, Some(YOU))

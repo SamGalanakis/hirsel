@@ -245,7 +245,7 @@ fn change(mut r: Router, now: u64, take c: Change, fmtp: Option[Shared[Bytes]], 
             Ok(Done)
         },
         Suspend(room: room, cause: cause, on: on) => {
-            hold(mut r, room, cause, on, mut out)?
+            hold(mut r, room, cause_bit(cause), on, mut out)?
             Ok(Done)
         },
         Playout(room: room, who: who, p: p, delay: delay) => {
@@ -299,6 +299,7 @@ pub fn close_room(mut r: Router, room: peer.RoomId, mut out: peer.Outbox) -> Res
             Speakers(room: id, ..) => id != room,
             Offer(who: who, ..) => who.room != room,
             Shut(who: who) => who.room != room,
+            Fault(room: id, ..) => id != room,
         }
     })
     let _ = purge(r, mut out)
@@ -342,16 +343,45 @@ fn fence(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: peer.Ou
     Ok(())
 }
 
-// RTC-7 Suspend and resume: routing stops for the room, and every queued entry with
-// a `src` goes from `out` and from the room's pacers. Ingress stays up.
-fn hold(mut r: Router, room: peer.RoomId, cause: Cause, on: bool, mut out: peer.Outbox) -> Result[(), RouterError] {
-    let Some(ri) = room_at(r, room) else {
-        return Error(NoRoom)
-    }
-    let bit: u8 = match cause {
+fn cause_bit(cause: Cause) -> u8 {
+    match cause {
         Signaling => 1,
         Lease => 2,
         Term => 4,
+    }
+}
+
+// A room's fault holds it as a suspension does, under a cause no `Suspend` names.
+const FAULT: u8 = 8
+
+/// Raise `room`'s fault on this unit, once (RTC-10 Isolation item 2): an error in the
+/// room's shared state. The unit stops routing the room's media and repair as for a
+/// suspension and purges its queued entries with a `src`, and the control unit is told
+/// (`Notice.Fault`), whose adapter closes the room with the `Close` fence.
+pub fn fault(mut r: Router, room: peer.RoomId, take e: RouterError, mut out: peer.Outbox) {
+    let Some(ri) = room_at(r, room) else {
+        return
+    }
+    if r.rooms[ri].causes & FAULT != 0 {
+        return
+    }
+    let _ = hold(mut r, room, FAULT, true, mut out)
+    list.push(mut r.notices, Fault(room: room, error: take e))
+}
+
+/// Whether `room` has faulted on this unit.
+pub fn faulted(r: Router, room: peer.RoomId) -> bool {
+    match room_at(r, room) {
+        Some(ri) => r.rooms[ri].causes & FAULT != 0,
+        None => false,
+    }
+}
+
+// RTC-7 Suspend and resume: routing stops for the room, and every queued entry with
+// a `src` goes from `out` and from the room's pacers. Ingress stays up.
+fn hold(mut r: Router, room: peer.RoomId, bit: u8, on: bool, mut out: peer.Outbox) -> Result[(), RouterError] {
+    let Some(ri) = room_at(r, room) else {
+        return Error(NoRoom)
     }
     let before = r.rooms[ri].causes
     r.rooms[ri].causes = if on {

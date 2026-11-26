@@ -79,7 +79,7 @@ fn write(mut u: units.Unit, now: u64, limit: u64, after: bool, mut log: List[Wir
 
 fn drain(mut u: units.Unit, now: u64) {
     units.take_control(mut u, now)
-    result.unwrap(units.take_media(mut u, now))
+    units.take_media(mut u, now)
 }
 
 /// Run a control call to its end, every unit turning and writing everything.

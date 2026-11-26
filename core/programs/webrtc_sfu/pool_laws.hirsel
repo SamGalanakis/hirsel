@@ -128,7 +128,7 @@ fn pool_reopened_room_takes_no_stale_message() -> Result[(), router.RouterError]
     list.clear(mut log)
     let taken = units.counts(w.u1).media
     let stale = router.counts(units.router_of(w.u1)).stale
-    result.unwrap(units.take_media(mut w.u1, now))
+    units.take_media(mut w.u1, now)
     write(mut w.u1, now, 0, false, mut log, mut held, false)
     if units.counts(w.u1).media != taken + 2 {
         fail("unit 1 did not hold P's two messages until after the reopen")

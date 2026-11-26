@@ -35,7 +35,7 @@ fn rate_pair(mut r: router.Router, seed: u64, id: u64, room: peer.RoomId, mut ou
 // A datagram from `c`'s address, found by its 5-tuple as the unit finds any datagram.
 fn offer_to(mut r: router.Router, now: u64, c: Client, packet: Bytes, mut out: peer.Outbox) {
     let mut slot = copy_of(packet)
-    let _ = router.deliver(mut r, now, c.at, mut slot, mut out)
+    router.deliver(mut r, now, c.at, mut slot, mut out)
 }
 
 /// bug: one room's publisher over its rate takes routing from another room, its

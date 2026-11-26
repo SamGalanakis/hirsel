@@ -1608,8 +1608,8 @@ applied the same day (media-w2-spec-fix-2918). Slice P1 built 2026-11-26
 (rtc10-p1-room-keys-2930, law W35); slice P2 built 2026-11-26 (rtc10-p2-room-control-2956,
 law W37, `units.Plane`). Slice P3 in part 2026-11-26 (rtc10-p3-pool-service-2976):
 `serve_pool` with per-room adapters and room-client tasks, `serve` removed, `room_pps` and
-`open_pps` (W38), per-room signaling loss (W39); the ledgers, primary units and fault tiers
-(W34, W36) are not yet built. P4 not built. Slices and laws W34 to W39 below.*
+`open_pps` (W38), per-room signaling loss (W39), the three fault tiers (W36) and the
+default `inflight`; the ledgers and primary units (W34) are not yet built. P4 not built. Slices and laws W34 to W39 below.*
 
 Before RTC-10, `signal.serve` (S7) served **one** room: its `Service` named one `RoomId`, one `Dial` and one
 `RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
@@ -1773,7 +1773,8 @@ joins and revokes. RTC-10 orders control **per room**:
 - **Inboxes are sized, and a full one is handled.** Each worker unit's control inbox holds at
   least `inflight + rooms` messages, which is every change that can be in flight to it at
   once (one per room plus a fence slot per room), and unit 0's inbox holds at least
-  `(units − 1) × (inflight + rooms)` acknowledgements. Both are sized at pool start from
+  `(units − 1) × (inflight + 2 × rooms)` messages: those acknowledgements and one room fault
+  per room from each worker (Fault containment). Both are sized at pool start from
   `PoolLimits` and charged to the fixed per-unit cost. A post that still finds an inbox
   `Full` is never ignored: the change stays pending in its room's order and is posted again
   next turn, and the room's fence waits for it. An inbox overflow is not a pool fault
@@ -1804,6 +1805,18 @@ that guard against the router itself being wrong. A bug in the router is fixed i
      `Close`, reporting `Closed(name, room, Fault(e))`.
    - **Pool.** Only errors with no room end the pool: the socket's and a failed spawn. A full
      control inbox is not one (the control plane above).
+
+   The sites, as built in P3. `router.deliver` (a unit's datagram): a `Peer` error of the
+   session, or `NoParticipant` for a row whose session has gone, drops only that datagram;
+   any other error of `receive` or of keeping the row (routing, allocation, a restarted
+   stream, the row table's `Capacity`) is the room's fault. `router.accept` (a media-inbox
+   message, taken or held): a `Peer` error drops only that message; any other is the
+   room's fault. A re-offer the room's bounds refuse raises `Shut`, and the adapter
+   revokes that peer, which rejoins (RTC-8). A unit's own receive slot that cannot grow
+   (`Capacity`) ends its `turn`, and so the pool. A room's fault holds the room on the
+   unit that raised it as a suspension does, under its own cause, from that turn, and is
+   raised once per unit: a worker sends it to unit 0 with its acknowledgements
+   (`Control.Fault`), which are retried, never dropped, when unit 0's inbox is full.
 
    **Closing is a fence.** `router.Change` gains `Close(room)`, applied at each unit's fence
    point like a revoke. A unit applying it removes the room's sessions, down-tracks and

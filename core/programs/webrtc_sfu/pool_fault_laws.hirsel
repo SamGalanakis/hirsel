@@ -1,0 +1,183 @@
+// ---- RTC-10 a room's fault closes only that room (W36) ----
+// The W39 harness: the control unit's rooms over real units on sim.udp.
+fn closed_why(reports: List[signal.PoolReport], room: peer.RoomId) -> Option[signal.CloseWhy] {
+    for r in reports {
+        if let Closed(name: _, room: id, why: why) = r {
+            if id == room {
+                return Some(why)
+            }
+        }
+    }
+    None
+}
+
+fn open_on(t: PoolSig, room: peer.RoomId) -> u64 {
+    let mut n = 0u64
+    if router.room_open(units.router_of(t.h.w.u0), room) {
+        n += 1
+    }
+    if router.room_open(units.router_of(t.h.w.u1), room) {
+        n += 1
+    }
+    if router.room_open(units.router_of(t.h.w.u2), room) {
+        n += 1
+    }
+    n
+}
+
+// The datagrams captured to `to`, of any kind, from capture `from` on.
+fn wired_to(h: Hall, from: u64, to: Addr) -> u64 {
+    let mut n = 0u64
+    for i in from .. list.len(h.seen) {
+        if h.seen[i].to == to {
+            n += 1
+        }
+    }
+    n
+}
+
+fn has_browser(h: Hall, p: u32) -> bool {
+    for c in h.peers {
+        if c.mark == mark_for(p) {
+            return true
+        }
+    }
+    false
+}
+
+fn room_fault_run(net: Net, clock: Clock) waits {
+    let fixture = hall(net, clock, 36000)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(2, 4), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
+    let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), revoke_limits(), echo_embed()))
+    let b = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), revoke_limits(), echo_embed()))
+    signal.you_in(mut t.p, a, Some(YOU))
+    signal.you_in(mut t.p, b, Some(YOU))
+    // Room a: publisher 1 and subscriber 2. Room b: publisher 3 and subscriber 4.
+    pool_roster(mut t, a, 5, 1, Some(2))
+    pool_roster(mut t, b, 5, 3, Some(4))
+    for (room, p) in[(a, 1u32), (a, 2u32), (b, 3u32), (b, 4u32)] {
+        pool_say(mut t, room, p, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    }
+    pool_idle(mut t)
+    for (room, p) in[(a, 1u32), (a, 2u32), (b, 3u32), (b, 4u32)] {
+        if !answered_in(t, room, p) {
+            fail("a peer was not admitted before the fault")
+        }
+    }
+    let from = list.len(t.offers)
+    let of_a = pub_in(t, a, 1)
+    let of_b = pub_in(t, b, 3)
+    pool_say(mut t, a, 2, Subscribe(of_a, base_layer()))
+    pool_say(mut t, b, 4, Subscribe(of_b, base_layer()))
+    pool_idle(mut t)
+    pool_settle(mut t, from)
+    let pub_a = hall_index(t.h, 1)
+    let pub_b = hall_index(t.h, 3)
+    let at_1 = t.h.peers[pub_a].c.at
+    let at_2 = t.h.peers[hall_index(t.h, 2)].c.at
+    let to_4 = t.h.peers[hall_index(t.h, 4)].c.at
+    let at = list.len(t.h.seen)
+    let mut spoken = 0u64
+    let mut reports: List[signal.PoolReport] = list.new()
+    let mut closed_at: Option[u64] = None
+    for k in 0u64 .. 200 {
+        if k % 4 == 0 {
+            speak(mut t.h, pub_a)
+            speak(mut t.h, pub_b)
+            spoken += 1
+        }
+        // Peer 2 leaves a: its revoke goes in flight.
+        if k == 40 {
+            signal.enter(mut t.p, a, Left(2))
+        }
+        // In the next turn a worker unit faults room a while peer 5's join waits to
+        // be built.
+        if k == 41 {
+            signal.enter(mut t.p, a, Joined(5))
+            pool_say(mut t, a, 5, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+            units.fault(mut t.h.w.u1, a, Limit(7))
+        }
+        // Peer 6 joins b and leaves before its admission has returned: its revoke must
+        // not overtake its admit on any unit.
+        if k == 60 {
+            signal.enter(mut t.p, b, Joined(6))
+            pool_say(mut t, b, 6, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+        }
+        if k == 61 {
+            signal.enter(mut t.p, b, Left(6))
+        }
+        pool_tick(mut t)
+        for take r in signal.take_reports(mut t.p) {
+            if closed_at == None {
+                if let Closed(name: _, room: id, why: _) = r {
+                    if id == a {
+                        closed_at = Some(list.len(t.h.seen))
+                    }
+                }
+            }
+            list.push(mut reports, take r)
+        }
+    }
+    match closed_why(reports, a) {
+        Some(Fault(Limit(7))) => (),
+        _ => fail("room a was not reported closed for its fault"),
+    }
+    if let Some(_) = closed_why(reports, b) {
+        fail("room b was closed by room a's fault")
+    }
+    if open_on(t, a) != 0 || open_on(t, b) != 3 {
+        fail("the fault's close did not drop room a, and only room a, on every unit")
+    }
+    if !has_browser(t.h, 6) {
+        fail("peer 6 left before its join was built, so no admission was pending")
+    }
+    let seated_0 = router.seated(units.router_of(t.h.w.u0), b)
+    let seated_1 = router.seated(units.router_of(t.h.w.u1), b)
+    let seated_2 = router.seated(units.router_of(t.h.w.u2), b)
+    if seated_0 != 2 || seated_1 != 2 || seated_2 != 2 {
+        fail("a unit seats other than room b's two peers after peer 6 joined and left")
+    }
+    let mut fenced_2 = false
+    for (room, p) in t.fenced {
+        if room == a && p == 2 {
+            fenced_2 = true
+        }
+    }
+    if !fenced_2 {
+        fail("the revoke in flight when the room faulted did not return Ok")
+    }
+    if answered_in(t, a, 5) || has_browser(t.h, 5) {
+        fail("the join queued when the room faulted was built")
+    }
+    let Some(end) = closed_at else {
+        fail("room a was never reported closed")
+    }
+    if wired_to(t.h, end, at_1) != 0 || wired_to(t.h, end, at_2) != 0 {
+        fail("a session of room a got a datagram after its close returned")
+    }
+    if rtp_marked(t.h, at, to_4, mark_for(3)) != spoken {
+        fail("room b's subscriber did not receive every packet its publisher sent across a's fault")
+    }
+    let PoolSig(h: take h, ..) = take t
+    close_hall(take h)
+}
+
+/// bug: an error in one room's shared state ends the pool, or a unit keeps routing the
+/// faulted room, or its close leaves state, parked sessions or a queued join behind,
+/// sends the room's sessions anything after the close returns, or refuses a revoke in
+/// flight; or another room loses a packet across the fault; or a peer's revoke
+/// overtakes its own pending admission, so a unit seats a peer that left.
+/// oracle: docs/spec/webrtc.md RTC-10 W36 and Isolation item 2, by hand: a's fault on
+/// unit 1 reports `Closed(a, Fault(Limit(7)))` and nothing for b, no unit has a open and
+/// all three have b, peer 2's revoke in flight returns and the room hears it fenced, peer
+/// 5's join is never built, peers 1 and 2 get no datagram after the close, and b's
+/// subscriber receives each of the 50 packets its publisher sent 20 ms apart over a
+/// loss-free sim.udp; after peer 6 joins b and leaves at once, every unit seats only
+/// b's peers 3 and 4.
+@test
+fn pool_room_fault_closes_only_that_room(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 36000)
+    room_fault_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}

@@ -221,7 +221,7 @@ pub type Answer: cross = Done | Shaped(id: PublicationId, shape: Shape)
 /// The control inboxes' messages: the control unit's changes, each room's in that
 /// room's order, and each unit's acknowledgement once it has applied one. `seq`
 /// counts per room (RTC-10, The control plane).
-pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError])
+pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError]) | Fault(room: peer.RoomId, unit: u16, error: RouterError)
 
 /// The media inboxes' messages (RTC-5):
 ///
@@ -265,7 +265,7 @@ pub type Post: cross {
 
 /// What the control unit raises for the signaling adapter (RTC-6): a publication's
 /// published wanted mask, and a room's top speakers by participant id.
-pub type Notice: cross = Layers(room: peer.RoomId, publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
+pub type Notice: cross = Layers(room: peer.RoomId, publication: PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant) | Fault(room: peer.RoomId, error: RouterError)
 
 pub opaque type Router {
     random: Random,
@@ -482,11 +482,11 @@ pub fn revoke(mut r: Router, room: peer.RoomId, id: u64, epoch: u64, mut out: pe
 
 /// Stop routing media and repair for the whole room (RTC-7, Suspend); ingress stays up.
 pub fn suspend(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outbox) -> Result[(), RouterError] {
-    hold(mut r, room, cause, true, mut out)
+    hold(mut r, room, cause_bit(cause), true, mut out)
 }
 
 pub fn resume(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outbox) -> Result[(), RouterError] {
-    hold(mut r, room, cause, false, mut out)
+    hold(mut r, room, cause_bit(cause), false, mut out)
 }
 
 // ---- What each change does on a unit ----

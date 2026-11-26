@@ -80,7 +80,7 @@ type Held {
     msgs: List[router.Carried]
 }
 
-pub type Event = Fenced(peer.Participant) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
+pub type Event = Fenced(peer.Participant) | Fault(room: peer.RoomId, error: router.RouterError) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
 
 pub opaque type Unit {
     r: router.Router,
@@ -127,7 +127,8 @@ pub const ONE_ROOM: Plane = Plane(inflight: 1, rooms: 1, media_take: 1024)
 
 /// How many control messages unit `index` of `units` units must hold: a worker every
 /// change that can be in flight to it at once, one per room plus a fence slot per
-/// room; the control unit every worker's acknowledgements of those.
+/// room; the control unit every worker's acknowledgements of those, and one fault per
+/// room from each worker, which raises a room's fault once (RTC-10 Isolation item 2).
 pub fn control_slots(index: u16, units: u16, plane: Plane) -> u64 {
     let inflight: u64 = int.widen(plane.inflight)
     let rooms: u64 = int.widen(plane.rooms)
@@ -140,7 +141,7 @@ pub fn control_slots(index: u16, units: u16, plane: Plane) -> u64 {
     } else {
         1u64
     }
-    workers * per
+    workers * (per + rooms)
 }
 
 /// One unit's inboxes and doors. `addr` is the address of the socket it will run on;
@@ -244,6 +245,7 @@ pub fn take_room_events(mut u: Unit, room: peer.RoomId) -> List[Event] {
 pub fn event_room(e: Event) -> peer.RoomId {
     match e {
         Fenced(who) => who.room,
+        Fault(room: room, ..) => room,
         Offer(who: who, ..) => who.room,
         Shut(who: who) => who.room,
         Layers(room: room, ..) => room,
@@ -558,6 +560,7 @@ pub fn take_control(mut u: Unit, now: u64) {
                 ack(mut u, room, seq, take a, take published)
             },
             Ok(ControlMessage(step: Ack(room: room, seq: seq, unit: k, answer: a), opus_fmtp: fmtp)) => answered(mut u, now, room, seq, k, a, fmtp),
+            Ok(ControlMessage(step: Fault(room: room, unit: _, error: take e), opus_fmtp: _)) => list.push(mut u.events, Fault(room: room, error: take e)),
             Error(_) => break,
         }
     }
@@ -602,8 +605,9 @@ fn retry_acks(mut u: Unit) {
 /// carrying the rest to the next turn ahead of new messages. A room whose queue is
 /// past its share drops what it is sent and counts it `full`. Each message is checked
 /// against the fences when it is routed (RTC-7 step 4); one of a room this unit does
-/// not have open is routed at once, which drops it as stale.
-pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
+/// not have open is routed at once, which drops it as stale. An error routing a
+/// message is its room's fault (`routed`), and no error leaves.
+pub fn take_media(mut u: Unit, now: u64) {
     let budget: u64 = int.widen(u.plane.media_take)
     let mut taken = 0u64
     while taken < budget {
@@ -626,15 +630,33 @@ pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
                 if router.room_open(u.r, room) {
                     hold(mut u, room, take m)
                 } else {
-                    router.accept(mut u.r, now, take m, mut u.out)?
+                    let got = router.accept(mut u.r, now, take m, mut u.out)
+                    routed(mut u, room, take got)
                 }
             },
             Error(_) => break,
         }
     }
-    route_held(mut u, now)?
+    route_held(mut u, now)
     deal(mut u)
-    Ok(())
+}
+
+// RTC-10 Isolation item 2: a session's own error drops only the message; any other is
+// in the room's shared state and is the room's fault.
+fn routed(mut u: Unit, room: peer.RoomId, take got: Result[(), router.RouterError]) {
+    match take got {
+        Ok(()) => (),
+        Error(Peer(_)) => (),
+        Error(take e) => fault(mut u, room, take e),
+    }
+}
+
+/// Raise `room`'s fault on this unit (RTC-10 Isolation item 2), as an error in the
+/// room's shared state does: the unit stops routing the room and tells the control unit,
+/// whose adapter closes the room.
+pub fn fault(mut u: Unit, room: peer.RoomId, take e: router.RouterError) {
+    router.fault(mut u.r, room, take e, mut u.out)
+    deal(mut u)
 }
 
 fn share(budget: u64, rooms: u64) -> u64 {
@@ -669,20 +691,21 @@ fn hold(mut u: Unit, room: peer.RoomId, take m: router.Carried) {
 }
 
 // Route each waiting room's share, in room order, and keep the rest.
-fn route_held(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
+fn route_held(mut u: Unit, now: u64) {
     let quota = share(int.widen(u.plane.media_take), list.len(u.held))
     for q in 0u64 .. list.len(u.held) {
         let mut k = 0u64
         while k < quota && list.len(u.held[q].msgs) != 0 {
             let m = list.remove(mut u.held[q].msgs, 0)
-            router.accept(mut u.r, now, take m, mut u.out)?
+            let room = u.held[q].room
+            let got = router.accept(mut u.r, now, take m, mut u.out)
+            routed(mut u, room, take got)
             k += 1
         }
     }
     list.retain(mut u.held, scoped fn(h: Held) -> bool {
         list.len(h.msgs) != 0
     })
-    Ok(())
 }
 
 /// Route one datagram that `from` sent to this unit's socket.
@@ -696,9 +719,9 @@ pub fn take_datagram(mut u: Unit, now: u64, from: Addr, data: Bytes) -> Result[(
     list.clear(mut u.slot)
     list.try_reserve(mut u.slot, list.len(data)) ?=> |c| Capacity(c)
     list.append(mut u.slot, data)
-    let result = router.deliver(mut u.r, now, from, mut u.slot, mut u.out)
+    router.deliver(mut u.r, now, from, mut u.slot, mut u.out)
     deal(mut u)
-    result
+    Ok(())
 }
 
 fn sibling(u: Unit, from: Addr) -> bool {
@@ -727,6 +750,17 @@ fn deal(mut u: Unit) {
             Speakers(room: room, top: top, count: count) => list.push(mut u.events, Speakers(room: room, top: top, count: count)),
             Offer(who: who, version: version, text: take text) => list.push(mut u.events, Offer(who: who, version: version, text: take text)),
             Shut(who: who) => list.push(mut u.events, Shut(who: who)),
+            // A worker's fault goes to the control unit with its acknowledgements,
+            // which are retried, never dropped, when its inbox is full.
+            Fault(room: room, error: take e) => {
+                if u.index == 0 {
+                    list.push(mut u.events, Fault(room: room, error: take e))
+                } else {
+                    let index = u.index
+                    list.push(mut u.acks, ControlMessage(step: Fault(room: room, unit: index, error: take e), opus_fmtp: None))
+                    retry_acks(mut u)
+                }
+            },
         }
     }
     let posts = router.take_posts(mut u.r)
@@ -813,7 +847,7 @@ fn doorbells(mut u: Unit) -> List[Addr] {
 pub fn turn(mut u: Unit, clock: Clock, mut sock: UdpSocket, until: u64) -> Result[Option[u64], router.RouterError] waits {
     let start = host.mono_ns(clock)
     take_control(mut u, start)
-    take_media(mut u, start)?
+    take_media(mut u, start)
     list.clear(mut u.rx)
     list.clear(mut u.batch)
     let got = match host.udp_recv(mut sock, mut u.rx, mut u.batch, At(clock, until)) {

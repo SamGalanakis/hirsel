@@ -791,9 +791,14 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
             answered(mut a, take after, take answer, mut out)
         }
     }
+    let mut faulted: Option[router.RouterError] = None
     for take e in units.take_room_events(mut u, a.room) {
         match take e {
             Fenced(who) => fenced(mut a, who.gen, mut out),
+            // A unit raised the room's fault: the room is closed (RTC-10 Isolation item 2).
+            Fault(room: _, error: take x) => {
+                faulted = Some(take x)
+            },
             // A published mask goes to the publication's owner only (Unicast). While the
             // room is lost the roster is not proven, so neither Layers nor Speakers goes out.
             Layers(room: _, publication: PublicationId(id), mask: mask) => {
@@ -841,6 +846,9 @@ pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: L
                 }
             },
         }
+    }
+    if let Some(take x) = faulted {
+        return Error(take x)
     }
     // An answer whose participant is fenced or gone goes nowhere.
     for take (g, version, take text) in replace(mut a.answers, list.new()) {

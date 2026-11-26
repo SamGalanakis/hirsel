@@ -9,23 +9,34 @@ const SLOT_SHIFT: u64 = 6
 /// goes to the local session its USERNAME names, whose ICE agent checks the
 /// MESSAGE-INTEGRITY; a nomination it accepts moves the row to its source. Anything
 /// else is dropped and counted `unknown`.
-pub fn deliver(mut r: Router, now: u64, from: Addr, mut slot: Bytes, mut out: peer.Outbox) -> Result[(), RouterError] {
+///
+/// No error leaves it (RTC-10 Isolation item 2). A session's own error (`Peer`) drops
+/// only its datagram, as does a row whose session has gone. Any other error is in the
+/// room's shared state and is the room's fault (`fault`).
+pub fn deliver(mut r: Router, now: u64, from: Addr, mut slot: Bytes, mut out: peer.Outbox) {
     let mut row: Option[(peer.RoomId, peer.Gen)] = None
     for w in r.rows {
         if w.from == from {
             row = Some((w.room, w.who))
         }
     }
-    if let Some((room, who)) = row {
-        receive(mut r, now, room, who, from, mut slot, mut out)?
-        return follow(mut r, room, who)
+    if row == None {
+        row = named(r, slot)
     }
-    if let Some((room, who)) = named(r, slot) {
-        receive(mut r, now, room, who, from, mut slot, mut out)?
-        return follow(mut r, room, who)
+    let Some((room, who)) = row else {
+        r.counts.unknown += 1
+        return
     }
-    r.counts.unknown += 1
-    Ok(())
+    let mut got = receive(mut r, now, room, who, from, mut slot, mut out)
+    if let Ok(()) = got {
+        got = follow(mut r, room, who)
+    }
+    match got {
+        Ok(()) => (),
+        Error(Peer(_)) => (),
+        Error(NoParticipant) => (),
+        Error(take e) => fault(mut r, room, take e, mut out),
+    }
 }
 
 // The local session a STUN Binding's USERNAME names, by its ufrag before the colon.

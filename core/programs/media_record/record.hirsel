@@ -146,6 +146,7 @@ pub fn control(mut rec: Recorder, now: u64, take c: webrtc_sfu.router.Control) -
             Some(Ack(room: order_room, seq: seq, unit: unit, answer: take answer))
         },
         Ack(room: _, seq: _, unit: _, answer: _) => None,
+        Fault(room: _, unit: _, error: _) => None,
     }
 }
 

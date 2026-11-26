@@ -70,6 +70,7 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 "pool_laws.hirsel" = "laws"
 "pool_rate_laws.hirsel" = "laws"
 "pool_signal_laws.hirsel" = "laws"
+"pool_fault_laws.hirsel" = "laws"
 "vectors/browser.hirsel" = "vectors"
 "vectors/rfc.hirsel" = "vectors"
 "vectors/chromium_rtp.hirsel" = "vectors"

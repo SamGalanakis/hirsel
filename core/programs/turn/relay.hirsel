@@ -6,6 +6,9 @@ const PERMISSION_NS: u64 = 300000000000
 /// RFC 8656 section 12: a channel binding lives 600 s from its bind or refresh.
 const CHANNEL_NS: u64 = 600000000000
 
+/// The client and relay share the five-minute channel reuse quarantine.
+const QUARANTINE_NS: u64 = 300000000000
+
 /// The largest payload one UDP datagram to a peer carries.
 const PAYLOAD_MAX: u64 = 65507
 

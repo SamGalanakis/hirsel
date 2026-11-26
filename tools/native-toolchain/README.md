@@ -95,12 +95,26 @@ library in its `engine/`. The compiler's RPATH selects the engine while clang
 and the LLVM tools select the stock library. The installation ships the
 engine, the static linker, and the dynamic inputs of the pinned link kit.
 
-A Darwin-hosted compiler uses an LLVM prefix built from the same pinned source
-with the ELF and Mach-O ports of lld. The installer takes `bin/ld.lld` from the
-prefix that supplied `lib/libLLVM.23.1.dylib`. Build lld with
-`@loader_path/../lib` as its run path so the installed linker can load the copy
-of the dylib. A Linux host takes the kit's static linker for all targets,
-including `aarch64-apple-darwin`.
+A Linux host takes the kit's static linker for all targets, including
+`aarch64-apple-darwin`.
+
+## Darwin host
+
+A Mac-hosted compiler uses the `darwin_llvm` archive, built from the same
+pinned source by `build-libllvm-darwin DIR` on an Apple Silicon Mac with the
+Xcode command line tools, cmake and ninja. It holds `lib/libLLVM.23.1.dylib`
+(named `@rpath/libLLVM.23.1.dylib`, no search path of its own), its
+`libLLVM-23.dylib` alias, `bin/ld.lld` with the ELF and Mach-O ports of lld,
+`bin/llvm-config`, and the `llvm` and `llvm-c` headers. ld.lld and llvm-config
+load the dylib through their one search path, `@loader_path/../lib`, so the
+installer can copy `bin/ld.lld` and `lib/libLLVM.23.1.dylib` from this prefix
+into an installation unchanged. The build is a plain Release (no profile, LTO
+or BOLT) whose minos is the link kit's `DARWIN_FLOOR`; it checks each Mach-O's
+loaded libraries (libSystem, libc++ and libz only), search paths, minos and ad
+hoc signature, and that no build path is left in ld.lld or the dylib. On a Mac,
+`tools/buck2/bootstrap_llvm.py` materializes this archive as the tree that
+`.cargo/config.toml` names as `LLVM_SYS_231_PREFIX`; clang and the C++ headers
+come from the command line tools (`xcrun`).
 
 ## Publishing LLVM build inputs
 

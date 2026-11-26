@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Materialize the pinned LLVM 23 tree as an ignored Buck2 toolchain input.
 
-The locked bootstrap archive provides clang, the LLVM tools and headers, and
-their stock shared library. This script adds the independently pinned ld.lld
-and engine libLLVM and flattens symlinks (Buck2 hashes a link, not its target).
+On Linux, the locked bootstrap archive provides clang, the LLVM tools and
+headers, and their stock shared library. This script adds the independently
+pinned ld.lld and engine libLLVM and flattens symlinks (Buck2 hashes a link,
+not its target).
+
+On a Mac, the tree is the `darwin_llvm` archive alone: the compiler's
+libLLVM.23.1.dylib, the ld.lld that loads it through @loader_path/../lib,
+llvm-config and the headers. Clang and the C++ headers come from the Xcode
+command line tools.
 
 The static LLVM component archives are left out: llvm-sys links libLLVM
 dynamically (`force-dynamic`). Remote workers receive the tree as an action
@@ -39,7 +45,8 @@ CXX_LOCK = pathlib.Path(__file__).with_name("llvm-cxx-headers-lock.json")
 DEFAULT_OUTPUT = pathlib.Path(__file__).with_name("toolchains") / "llvm-files"
 RECEIPT = ".hirsel-llvm.json"
 LAYOUT = 10
-REQUIRED = (
+DARWIN = sys.platform == "darwin"
+LINUX_REQUIRED = (
     "sysroot/usr/include/c++/13/vector",
     "sysroot/usr/include/features.h",
     "bin/clang",
@@ -56,6 +63,14 @@ REQUIRED = (
     "bin/hirsel-clang++",
     "bin/hirsel-llvm-ar",
 )
+DARWIN_REQUIRED = (
+    "bin/ld.lld",
+    "bin/llvm-config",
+    "lib/libLLVM.23.1.dylib",
+    "lib/libLLVM-23.dylib",
+    "include/llvm-c/Core.h",
+)
+REQUIRED = DARWIN_REQUIRED if DARWIN else LINUX_REQUIRED
 
 WRAPPER = """#!/bin/sh
 tree="$(cd "${0%%/*}/.." && pwd)"
@@ -153,8 +168,18 @@ def unpack_headers(deb: pathlib.Path, headers: pathlib.Path) -> None:
         archive.extractall(headers, filter="data")
 
 
-def build(stage: pathlib.Path, wanted: dict) -> None:
-    stage.mkdir()
+def build_darwin(stage: pathlib.Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="hirsel-llvm-") as raw:
+        scratch = pathlib.Path(raw)
+        tree = scratch / "tree"
+        with tarfile.open(fetch_built("darwin_llvm", scratch)) as archive:
+            archive.extractall(tree, filter="data")
+        place_tree(tree, stage)
+    for name in ("ld.lld", "llvm-config"):
+        tool_version(stage / "bin" / name)
+
+
+def build_linux(stage: pathlib.Path) -> None:
     with tempfile.TemporaryDirectory(prefix="hirsel-llvm-") as raw:
         scratch = pathlib.Path(raw)
         bootstrap = scratch / "bootstrap"
@@ -174,11 +199,16 @@ def build(stage: pathlib.Path, wanted: dict) -> None:
         wrapper = stage / "bin" / f"hirsel-{name}"
         wrapper.write_text(WRAPPER % name, encoding="utf-8")
         wrapper.chmod(0o755)
+    for name in ("clang", "llvm-ar", "llvm-objcopy", "llvm-objdump", "llvm-config"):
+        tool_version(stage / "bin" / name)
+
+
+def build(stage: pathlib.Path, wanted: dict) -> None:
+    stage.mkdir()
+    (build_darwin if DARWIN else build_linux)(stage)
     missing = [path for path in REQUIRED if not (stage / path).exists()]
     if missing:
         raise SystemExit("LLVM tree omits required paths: " + ", ".join(missing))
-    for name in ("clang", "llvm-ar", "llvm-objcopy", "llvm-objdump", "llvm-config"):
-        tool_version(stage / "bin" / name)
     (stage / RECEIPT).write_text(json.dumps(wanted, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 

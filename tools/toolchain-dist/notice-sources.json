@@ -95,6 +95,19 @@
         "gcc"
       ],
       "static_note": "A static PIE built in manylinux_2_28. It includes AlmaLinux's static glibc and GCC Toolset 14 libstdc++, libgcc and libgcc_eh."
+    },
+    "darwin_llvm": {
+      "licenses": [
+        "llvm/LICENSE.TXT",
+        "lld/LICENSE.TXT"
+      ],
+      "source_dirs": [
+        "llvm/lib",
+        "llvm/include",
+        "lld"
+      ],
+      "static": [],
+      "static_note": "A Mac host's lib/libLLVM.23.1.dylib and bin/ld.lld, built by tools/native-toolchain/build-libllvm-darwin with the Xcode command line tools against the macOS SDK. They load libSystem, libc++ and libz from the system and link no third-party runtime statically."
     }
   },
   "native_text_rule": "From the locked source archive (source_url, source_sha256): each component's licenses, every file under its source_dirs named LICENSE/COPYING/COPYRIGHT/NOTICE, and every text file there that contains 'copyright', outside test, unittests, docs and utils directories.",

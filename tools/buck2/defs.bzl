@@ -89,9 +89,9 @@ LLVM_RPATH = [
 # every link uploads to the cache and every test run fetches. lld compresses
 # them; std's backtraces read zlib sections (zstd ones lose file and line), so
 # failing tests keep their locations.
-# The driver's compiler identity is its linker build ID (reuse.rs
-# compiler_identity); without the note it hashes the whole executable on every
-# request. The bootstrap clang does not pass --build-id by default.
+# A resident compiler is named by its linker build ID (reuse.rs
+# executable_identity); without the note it hashes the whole executable on
+# every load. The bootstrap clang does not pass --build-id by default.
 EXECUTABLE_LINK_FLAGS = LLVM_RPATH + [
     "-Clink-arg=-Wl,--compress-debug-sections=zlib",
     "-Clink-arg=-Wl,--build-id=sha1",

@@ -47,6 +47,42 @@ runtime archive identities by target.
 request would use; `--json` prints the same as JSON and `--target` selects another
 target's runtime.
 
+### Compiler identity
+
+The compiler identity is what the compiler is, not where it was built or linked: two
+builds of one source tree with the same pins are one compiler on every host, so a
+Linux-built cross compiler and a Mac-built native one emit the same bytes for the same
+program and share every cached product. The identity keys native objects, the image
+root and the product caches.
+
+It is a SHA-256 the driver's build script computes over:
+
+- the pins: `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml` (the Rust release),
+  `tools/native-toolchain/llvm-23.lock` and `tools/native-toolchain/native.lock.json`
+  (the LLVM tree and the link kit);
+- every file of the driver's crate closure (its path dependencies, normal and build, on
+  every target), except each crate's `tests`, `benches` and `examples`;
+- hirsel-llvm's C++ bridge, which hirsel-llvm-lazy compiles;
+- the bundled `core`, `std`, `store` and `runner` sources.
+
+It leaves out:
+
+- the build profile (opt level, debug assertions, overflow checks), host C++ compiler
+  flags and the Buck or Cargo recipes. These preserve semantics: an assertion either
+  holds or stops the compiler, so they change whether it finishes, never what it emits;
+- Cargo features. Every first-party feature is a test-only or runtime option
+  (`tools/buck2/production-features.json`), and the installed driver enables none;
+- the release version, which reaches only `--version` and documentation links;
+- the host's libm. The compile-time evaluator uses only `sqrt`, which IEEE 754 rounds
+  exactly on every host.
+
+The LLVM engine library and each target's runtime archive are keyed by their own
+identities, beside this one. A resident compiler (`hirsel serve`) is still named by its
+executable's link ID, because a client must talk to the same file it would run.
+
+A Mach-O's `LC_UUID` is ld64.lld's digest of the linked image and the ad-hoc code
+signature hashes its pages, so both follow from the bytes.
+
 `hirsel help` lists the commands and `hirsel help <command>`, `COMMAND --help` or
 `COMMAND -h` prints one command's options. A command name that is not in that list
 exits 2 with `hirsel: unknown command`.

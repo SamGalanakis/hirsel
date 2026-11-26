@@ -110,7 +110,12 @@ impl Bridge {
         };
         let (name, role) = match op {
             0 => ("open", role(&text(path))),
+            1 | 37 => ("read", role(&self.files[&handle].name)),
             2 | 38 => ("write", role(&self.files[&handle].name)),
+            3 => ("close", role(&self.files.get(&handle)?.name)),
+            4 | super::TRY_LOCK_SHARED => ("lock", role(&self.files[&handle].name)),
+            5 => ("unlock", role(&self.files[&handle].name)),
+            47 => ("stat", role(&self.files[&handle].name)),
             16 => ("sync", role(&self.files[&handle].name)),
             ZERO_AT => ("zero", role(&self.files[&handle].name)),
             8 => ("remove", role(&text(path))),

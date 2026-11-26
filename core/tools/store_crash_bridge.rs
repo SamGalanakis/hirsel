@@ -168,12 +168,18 @@ impl Bridge {
         }
         // A crashed process closes descriptors without changing the filesystem.
         if op == 3 {
+            let failure = if self.crashed {
+                None
+            } else {
+                self.eligible(op, handle, path)
+            };
             if let Some(file) = self.files.remove(&handle) {
                 if !self.late_write_holds(handle) {
                     self.locks.remove(&(file.inode, handle));
                 }
             }
-            return Outcome::default();
+            // Even a failed close consumes the descriptor.
+            return failure.unwrap_or_default();
         }
         // The out-of-process witness records returned durability even when a
         // different task has just encountered the simulated filesystem cut.

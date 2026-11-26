@@ -62,37 +62,41 @@ def run_cuts(executable, engine, env=None, scenarios=SCENARIOS, receipts=False):
     return rows
 
 
-# SQLITE #3: STORE-SPEC §3.4 steps 1-2 open LOCK (Write), then MANIFEST (Read),
-# so the reopen's second eligible call is the zero-mutation open of an
-# existing file. Its failure ends the open with Io(e) (V6), and the read after
-# it recovers the write's durable state.
 EIO_SCENARIOS = ('checkpoint',)
-EIO_OPEN = 'reopen:2:open:MANIFEST'
 
 
 def eio_cases(executable, scenario, trace, engine, env):
-    """An EIO at the reopen's MANIFEST open, at the write's MANIFEST rename and
-    at the first removal after it must each be reached. The write must not
-    acknowledge after its failure (V6 poison), and every read recovers. An
-    ordinal never reached fails."""
+    """Fail each Directory call in the write phase, from open through close.
+    Init supplies a durable fixture and read checks it after a power loss.
+    Also verify V6 at the recovery open of the already-published MANIFEST."""
     if scenario not in EIO_SCENARIOS:
         return []
     calls = re.findall(r'^w2-call (\S+) ([0-9]+) (\S+) (\S+)$', trace, re.M)
-    if ('read', '2', 'open', 'MANIFEST') not in calls:
-        raise RuntimeError(f'{scenario}: the opener\'s second call is not the MANIFEST open: {calls[:4]}')
+    manifest = next((call for call in calls if call[0] == 'read' and call[2:] == ('open', 'MANIFEST')), None)
+    if manifest is None:
+        raise RuntimeError(f'{scenario}: the read phase did not open MANIFEST')
     write = [call for call in calls if call[0] == 'write']
+    if [int(call[1]) for call in write] != list(range(1, len(write) + 1)):
+        raise RuntimeError(f'{scenario}: gapped or duplicate write ordinals: {write}')
     renamed = next((i for i, call in enumerate(write) if call[2:] == ('rename', 'MANIFEST.tmp>MANIFEST')), None)
     removal = next((call for call in write[renamed:] if call[2] == 'remove'), None) if renamed is not None else None
     if removal is None:
         raise RuntimeError(f'{scenario}: no MANIFEST rename and removal after it in {write}')
-    cases = [EIO_OPEN, ':'.join(write[renamed]), ':'.join(removal)]
+    cases = [':'.join(call) for call in write] + [':'.join(('reopen', *manifest[1:]))]
+    failures = []
     for case in cases:
-        checked([str(executable), scenario, 'eio:' + case], env, engine=engine)
-    never = [str(executable), scenario, 'eio:read:100000:open:MANIFEST']
+        try:
+            checked([str(executable), scenario, 'eio:' + case], env, engine=engine)
+        except RuntimeError as error:
+            failures.append(str(error))
+    if failures:
+        raise RuntimeError(f'{scenario}: {len(failures)}/{len(cases)} EIO cases failed\n' + '\n'.join(failures))
+    beyond = f'write:{len(write) + 1}:open:MANIFEST'
+    never = [str(executable), scenario, 'eio:' + beyond]
     ran = run_case(' '.join(never[1:]), engine, never, capture_output=True, text=True, env=env)
-    if ran.returncode != 120 or 'injected EIO read:100000:open:MANIFEST was not reached' not in ran.stderr:
+    if ran.returncode != 120 or f'injected EIO {beyond} was not reached' not in ran.stderr:
         raise RuntimeError(f'{scenario}: an unreached EIO passed: {ran.returncode}\n{ran.stderr}')
-    print(f'{engine} crash {scenario}: EIO reached at {cases}', flush=True)
+    print(f'{engine} crash {scenario}: {len(cases)}/{len(cases)} EIO cases passed', flush=True)
     return [dict(scenario=scenario, eio=case, passed=True) for case in cases]
 
 
@@ -202,9 +206,15 @@ def bridge_env(bridge, environment=None):
 
 def run_crashes(root, compiler, runtime, bridge, cc, manifest, work, engine,
                 entry="store@1/store/disk_crash_main", scenarios=SCENARIOS, environment=None, adapter="store_crash.c",
-                count_only=(), sectors=(), receipts=False):
+                count_only=(), sectors=(), receipts=False, eio_only=False):
     executable = build_crash(root, compiler, runtime, bridge, cc, manifest, work, engine, entry, environment, adapter)
     env = bridge_env(bridge, environment)
+    if eio_only:
+        rows = []
+        for scenario in EIO_SCENARIOS:
+            _, trace = count_cuts(executable, scenario, engine, dict(env, HIRSEL_W2_TRACE_CUTS='1'))
+            rows += eio_cases(executable, scenario, trace, engine, env)
+        return rows
     rows = run_cuts(executable, engine, env, scenarios, receipts)
     for scenario in count_only:
         checked([str(executable), scenario, 'count'], env, engine=engine)

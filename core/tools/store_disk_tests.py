@@ -47,7 +47,9 @@ def main():
     p.add_argument('--cc', type=Path)
     p.add_argument('--bridge', type=Path, default=os.environ.get('HIRSEL_STORE_CRASH_BRIDGE'))
     p.add_argument('--backend', action='append', choices=['evaluator', 'cranelift', 'llvm', 'llvm-release'])
-    p.add_argument('--crash-scenario', choices=SCENARIOS + LIVE_READ_SCENARIOS + WINDOW_FAILURES)
+    selector = p.add_mutually_exclusive_group()
+    selector.add_argument('--crash-scenario', choices=SCENARIOS + LIVE_READ_SCENARIOS + WINDOW_FAILURES)
+    selector.add_argument('--directory-eio', action='store_true', help='run only the Directory EIO sweep')
     p.add_argument('--report', type=Path)
     p.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = p.parse_args()
@@ -60,8 +62,11 @@ def main():
         manifest = work / 'inputs.json'
         manifest.write_text(json.dumps(inputs(args.root.resolve(), tests=True)))
         evaluator = resources.enter_context(Evaluator(args.evaluator.resolve())) if args.evaluator else None
-        for engine in args.backend or ['evaluator', 'cranelift', 'llvm', 'llvm-release']:
+        defaults = ['cranelift', 'llvm', 'llvm-release'] if args.directory_eio else ['evaluator', 'cranelift', 'llvm', 'llvm-release']
+        for engine in args.backend or defaults:
             if engine == 'evaluator':
+                if args.directory_eio:
+                    p.error('the Directory EIO sweep requires a native backend')
                 if args.evaluator is None:
                     p.error('evaluator backend requires --evaluator')
                 for name in LAWS:
@@ -88,7 +93,8 @@ def main():
                     cuts = run_crashes(args.root.resolve(), args.compiler, args.runtime, args.bridge,
                                        args.cc, crash_manifest, work, engine, scenarios=cases,
                                        count_only=count_only, receipts=True,
-                                       sectors=('window',) if args.crash_scenario in (None, 'window') else ())
+                                       sectors=('window',) if args.crash_scenario in (None, 'window') else (),
+                                       eio_only=args.directory_eio)
                     rows.append(dict(engine=engine, passed=True, crashes=cuts))
                 except RuntimeError as error:
                     rows.append(dict(engine=engine, passed=False, crash_failure=str(error)))

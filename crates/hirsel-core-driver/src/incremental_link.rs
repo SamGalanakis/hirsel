@@ -10,6 +10,11 @@
 //! edit, a link outside a resident compiler, and a release link (which
 //! collects sections) are linked by lld.
 //!
+//! The patch handles x86-64 ELF images and arm64 Mach-O images. A Mach-O
+//! image also carries two digests of itself, its `LC_UUID` and its ad-hoc
+//! code signature's page hashes. The patch derives both again as lld does,
+//! so the patched image is still lld's byte for byte ([`macho`]).
+//!
 //! The patch never pads or moves a section: the executable stays the one a
 //! full link of the same objects makes, so a build in an empty store and an
 //! incremental build deliver the same bytes.
@@ -39,8 +44,15 @@ struct Previous {
     objects: Vec<Remembered>,
     /// Publication may still hold the previous bytes when a new edit arrives.
     image: Arc<Vec<u8>>,
-    /// The image's symbols, made by the first patch over it.
-    symbols: Option<Symbols>,
+    format: Format,
+}
+
+/// What the patch knows of the remembered image, by its object format.
+enum Format {
+    /// An x86-64 ELF image's symbols, made by the first patch over it.
+    Elf(Option<Symbols>),
+    /// An arm64 Mach-O image's seal and symbols ([`macho`]).
+    MachO(Box<macho::Resident>),
 }
 
 /// A resident compiler's last development link: its objects and the
@@ -125,12 +137,18 @@ impl Incremental {
             };
             changed.push((n, new));
         }
-        let symbols = previous
-            .symbols
-            .get_or_insert_with(|| Symbols::of(&previous.image).unwrap_or_default());
         let mut edits = Vec::new();
         for (n, new) in &changed {
-            match edit(&previous.image, symbols, &previous.objects[*n].bytes, new) {
+            let old = &previous.objects[*n].bytes;
+            let more = match &mut previous.format {
+                Format::Elf(symbols) => {
+                    let symbols = symbols
+                        .get_or_insert_with(|| Symbols::of(&previous.image).unwrap_or_default());
+                    edit(&previous.image, symbols, old, new)
+                }
+                Format::MachO(resident) => resident.edit(&previous.image, old, new),
+            };
+            match more {
                 Some(more) => edits.extend(more),
                 None => return Ok(None),
             }
@@ -146,11 +164,19 @@ impl Incremental {
         }
         if !edits.is_empty() {
             let image = Arc::make_mut(&mut previous.image);
-            for edit in edits {
-                match edit {
-                    Edit::Bytes(at, bytes) => image[at..at + bytes.len()].copy_from_slice(&bytes),
-                    Edit::Rename(old, new) => symbols.rename(image, &old, new),
+            match &mut previous.format {
+                Format::Elf(symbols) => {
+                    let symbols = symbols.as_mut().unwrap();
+                    for edit in edits {
+                        match edit {
+                            Edit::Bytes(at, bytes) => {
+                                image[at..at + bytes.len()].copy_from_slice(&bytes)
+                            }
+                            Edit::Rename(old, new) => symbols.rename(image, &old, new),
+                        }
+                    }
                 }
+                Format::MachO(resident) => resident.apply(image, edits),
             }
         }
         for (n, new) in changed {
@@ -171,16 +197,24 @@ impl Incremental {
         image: &Arc<Vec<u8>>,
     ) -> io::Result<()> {
         self.0 = None;
-        let Some(elf) = Elf::parse(image) else {
-            return Ok(());
+        let format = if macho::Resident::is_macho(image) {
+            match macho::Resident::of(image) {
+                Some(resident) => Format::MachO(Box::new(resident)),
+                None => return Ok(()),
+            }
+        } else {
+            let Some(elf) = Elf::parse(image) else {
+                return Ok(());
+            };
+            // A build ID is a digest of the whole image.
+            if elf
+                .sections()
+                .any(|s| elf.name(&s) == b".note.gnu.build-id")
+            {
+                return Ok(());
+            }
+            Format::Elf(None)
         };
-        // A build ID is a digest of the whole image.
-        if elf
-            .sections()
-            .any(|s| elf.name(&s) == b".note.gnu.build-id")
-        {
-            return Ok(());
-        }
         let objects = objects
             .iter()
             .map(|slot| {
@@ -200,7 +234,7 @@ impl Incremental {
             frame,
             objects,
             image: Arc::clone(image),
-            symbols: None,
+            format,
         });
         Ok(())
     }
@@ -601,5 +635,6 @@ fn locate(
     None
 }
 
+mod macho;
 #[cfg(test)]
 mod tests;

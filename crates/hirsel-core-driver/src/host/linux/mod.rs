@@ -32,6 +32,10 @@ pub(crate) const INSTALLED_LINKER_LIBRARY: Option<&str> = None;
 /// A delegated cgroup v2 subtree can hold the launcher's children (launch.md).
 pub(crate) const CGROUPS: bool = true;
 
+/// Linux cannot run or verify an arm64 Darwin image.
+#[cfg(test)]
+pub(crate) const RUNS_DARWIN_IMAGES: bool = false;
+
 /// Keep the checked image across an atomic replacement of its path.
 pub(crate) fn release_command(file: &File, executable: &Path) -> Command {
     let mut command = Command::new(format!("/proc/self/fd/{}", file.as_raw_fd()));

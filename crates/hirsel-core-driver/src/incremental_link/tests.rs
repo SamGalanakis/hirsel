@@ -1,3 +1,5 @@
+mod macho;
+
 use super::{Incremental, Slot};
 use hirsel_core_ids::ContentHash;
 use std::path::{Path, PathBuf};

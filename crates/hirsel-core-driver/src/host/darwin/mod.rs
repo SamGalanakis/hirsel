@@ -30,6 +30,10 @@ pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
 /// Darwin has no cgroups: the launcher runs without a delegated subtree.
 pub(crate) const CGROUPS: bool = false;
 
+/// A Mac runs and verifies the arm64 Darwin images a test links.
+#[cfg(test)]
+pub(crate) const RUNS_DARWIN_IMAGES: bool = true;
+
 pub(crate) fn release_command(_file: &File, executable: &Path) -> Command {
     Command::new(executable)
 }

@@ -4,8 +4,8 @@
 //! with the `comptime-g1` feature:
 //!
 //! ```text
-//! taskset -c 8 cargo test -p hirsel-core-driver --release --features comptime-g1 \
-//!     --lib comptime_g1 -- --nocapture
+//! cargo bench -p hirsel-core-driver --profile release --features comptime-g1 \
+//!     --bench comptime_g1
 //! ```
 //!
 //! `COMPTIME_G1_RUNS` (default 3) sets the runs per probe, `COMPTIME_G1_ENGINE`
@@ -14,7 +14,10 @@
 //! module's preparation into the measured window, and `COMPTIME_G1=<file>`
 //! writes the rows as JSON. Native regex is 453,268 host instructions, so G1's
 //! 150x is 68.0M; crc's limit is 120 host instructions per executed IR.
-use crate::*;
+use hirsel_core_driver::{CheckProduct, CheckRequest, Driver, Meter, package};
+use hirsel_core_ids::DefPath;
+use std::path::Path;
+use std::sync::Arc;
 
 const APP: &str = r#"
 pub fn table() -> Inline[u32, 2048] {
@@ -87,7 +90,7 @@ fn product(dir: &Path) -> Arc<CheckProduct> {
         .packages
         .push(hirsel_core_resolve::PackageManifest {
             namespace: None,
-            package: crate::package("p"),
+            package: package("p"),
             sources: vec![hirsel_core_resolve::ModuleSource {
                 foreign: false,
                 captured: None,
@@ -95,7 +98,7 @@ fn product(dir: &Path) -> Arc<CheckProduct> {
                 modules: vec!["p".into()],
                 signatures: false,
             }],
-            dependencies: vec![crate::package("core"), crate::package("std")],
+            dependencies: vec![package("core"), package("std")],
             toolchain: false,
         });
     let product = Driver::default()
@@ -110,8 +113,7 @@ fn product(dir: &Path) -> Arc<CheckProduct> {
     product
 }
 
-#[test]
-fn comptime_g1_probe() {
+fn main() {
     let runs: usize = std::env::var("COMPTIME_G1_RUNS")
         .ok()
         .and_then(|v| v.parse().ok())

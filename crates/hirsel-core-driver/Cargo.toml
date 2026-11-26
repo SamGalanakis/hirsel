@@ -10,8 +10,13 @@ rust-version.workspace = true
 name = "hirsel"
 path = "src/main.rs"
 
+[[bench]]
+name = "comptime_g1"
+harness = false
+required-features = ["comptime-g1"]
+
 [features]
-# The comptime G1 measurement (src/comptime_g1.rs): never part of the normal suite.
+# The opt-in comptime G1 measurement.
 comptime-g1 = ["hirsel-core-eval/host-instructions"]
 
 [dependencies]

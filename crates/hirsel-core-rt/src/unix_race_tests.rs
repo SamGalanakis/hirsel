@@ -18,14 +18,16 @@ fn unix_connect_cannot_be_redirected_by_a_racing_rename() {
         sync::atomic::{AtomicBool, Ordering},
     };
 
+    crate::openat2_required::require();
     let mut files = Box::new(crate::host_file::Files::default());
     let mut f = Fixture::new();
     // SAFETY: both allocations are pinned until the fixture is dropped.
     unsafe { (*f.context).host_files = &raw mut *files };
-    let dir = f.root.path().join("confined");
+    // The executor's TMPDIR can exceed the kernel's Unix socket path limit.
+    let sockets = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = sockets.path().join("confined");
     fs::create_dir(&dir).unwrap();
-    let outside_dir = tempfile::tempdir().unwrap();
-    let outside_path = outside_dir.path().join("outside");
+    let outside_path = sockets.path().join("outside");
     let outside = UnixListener::bind(&outside_path).unwrap();
     outside.set_nonblocking(true).unwrap();
     let slot = dir.join("slot");

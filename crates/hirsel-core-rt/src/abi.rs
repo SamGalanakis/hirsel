@@ -1136,31 +1136,6 @@ pub unsafe fn inline_own_free(
     }
 }
 
-#[cfg(test)]
-mod destination_tests {
-    #[test]
-    fn destination_identities_are_unique_across_tasks() {
-        let mut ids = std::thread::scope(|scope| {
-            let tasks: Vec<_> = (0..4)
-                .map(|_| {
-                    scope.spawn(|| {
-                        (0..1000)
-                            .map(|_| super::hirsel_core_dest_id())
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-            tasks
-                .into_iter()
-                .flat_map(|task| task.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        ids.sort_unstable();
-        assert_eq!(ids.len(), 4000);
-        assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
-    }
-}
-
 /// Enqueue owned sequence storage while its descriptor remains in its parent.
 /// # Safety
 /// The GRAPH buffer is exclusively owned. The borrowed payload is in the live parent

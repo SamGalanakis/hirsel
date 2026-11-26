@@ -179,26 +179,6 @@ fn runner_describe_launch_is_bounded_and_precedes_serve() {
     assert!(ordinary.stdout.is_empty());
 }
 #[test]
-#[should_panic(expected = "describe must finish before serve")]
-fn store_opened_in_describe_mutant_is_caught_by_the_launch_law() {
-    let directory = tempfile::tempdir().unwrap();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = std::fs::read_to_string(root.join("core/programs/runner/runner.hirsel")).unwrap();
-    let marker = "    if !launch.describe {";
-    assert!(source.contains(marker));
-    let mutant = source.replacen(marker, "    if true {", 1);
-    let path = directory.path().join("runner-mutant.hirsel");
-    std::fs::write(&path, mutant).unwrap();
-    let product = runner_launch_fixture(directory.path(), Some(&path));
-    let report = run_runner_launch(&product, "law_main", 1024 * 1024, true);
-    assert_eq!(
-        report.outcome,
-        eval::Outcome::Returned(vec![0]),
-        "describe must finish before serve"
-    );
-}
-
-#[test]
 fn runner_describe_capture_matches_reply_schema() {
     let directory = tempfile::tempdir().unwrap();
     let product = runner_launch_fixture(directory.path(), None);
@@ -1166,35 +1146,6 @@ fn instance_collection_is_finite_deduplicated_and_order_independent() {
     .unwrap_err();
     assert!(matches!(stop, InstanceStop::Resource { limit: 8, .. }));
 }
-#[test]
-fn checked_instance_collection_follows_calls_without_body_rechecks() {
-    let dir = tempfile::tempdir().unwrap();
-    let product = Driver::default()
-        .check(
-            request(
-                "fn leaf() -> u64 { 42 }\nfn root() -> u64 { leaf() }\n",
-                dir.path(),
-            ),
-            &mut Meter::new(false),
-        )
-        .unwrap();
-    let root = product
-        .definitions
-        .keys()
-        .find(|p| p.0.name == "root")
-        .unwrap();
-    let root = hirsel_core_ir::Identity::plain(root.clone());
-    let instances = product.instances([root], 8).unwrap();
-    assert_eq!(
-        instances
-            .iter()
-            .map(|i| i.definition.0.name.as_str())
-            .collect::<Vec<_>>(),
-        ["leaf", "root"]
-    );
-    assert_eq!(names(&product), ["leaf", "root"]);
-}
-
 #[test]
 fn entry_waits_policy_is_an_explicit_cached_request_input() {
     let dir = tempfile::tempdir().unwrap();

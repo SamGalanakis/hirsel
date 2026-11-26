@@ -263,7 +263,9 @@ type Outgoing {
     stream: quic.StreamId,
     chunks: List[OutChunk],
     offset: u64,
-    fin: bool
+    fin: bool,
+    obj_deadline: Option[u64],
+    reliable: u64
 }
 
 /// An incoming unidirectional stream whose StreamHeader has not yet arrived whole.
@@ -320,6 +322,7 @@ type TxSubgroup {
     prev_id: Option[u64],
     fin_sent: bool,
     acked: bool,
+    obj_timeout_ms: u64,
     sg_timeout_ms: u64,
     sg_deadline: Option[u64]
 }
@@ -398,6 +401,7 @@ pub opaque type Session {
     rx_subgroups: List[RxSubgroup],
     rx_fetches: List[RxFetch],
     tx_subgroups: List[TxSubgroup],
+    dead_subgroups: List[(u64, u64, u64)],
     pub_tracks: List[PubTrack],
     guards: List[TrackGuard],
     outgoing: List[Outgoing],

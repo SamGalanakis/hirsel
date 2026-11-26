@@ -6,7 +6,7 @@ pub fn session(side: schedule.Side, role: Role, t: Transport, limits: Limits) ->
     }
     let ctrl_lim: u64 = int.widen(limits.control_bytes)
     let ctrl_cap = order.max(ctrl_lim, codec.DEFAULT_MAX_CONTROL) + 32
-    Session(side: side, role: role, transport: t, limits: limits, phase: Connecting, scope: None, setup_authority: b"", setup_path: b"", setup_token: None, setup_sent: false, setup_received: false, goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL, peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None, peer_control: None, peer_control_buf: list.with_capacity(ctrl_cap), next_req_id: next_req, next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(), peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(), early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(), rx_subgroups: list.new(), rx_fetches: list.new(), tx_subgroups: list.new(), pub_tracks: list.new(), guards: list.new(), outgoing: list.new(), timed_out_objects: 0, timed_out_subgroups: 0, now: 0)
+    Session(side: side, role: role, transport: t, limits: limits, phase: Connecting, scope: None, setup_authority: b"", setup_path: b"", setup_token: None, setup_sent: false, setup_received: false, goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL, peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None, peer_control: None, peer_control_buf: list.with_capacity(ctrl_cap), next_req_id: next_req, next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(), peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(), early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(), rx_subgroups: list.new(), rx_fetches: list.new(), tx_subgroups: list.new(), dead_subgroups: list.new(), pub_tracks: list.new(), guards: list.new(), outgoing: list.new(), timed_out_objects: 0, timed_out_subgroups: 0, now: 0)
 }
 
 /// Optional client SETUP options (AUTHORITY, PATH, AUTHORIZATION TOKEN) before SETUP is sent.
@@ -94,6 +94,7 @@ fn clear_session_state(mut s: Session) {
     list.clear(mut s.rx_subgroups)
     list.clear(mut s.rx_fetches)
     list.clear(mut s.tx_subgroups)
+    list.clear(mut s.dead_subgroups)
     list.clear(mut s.outgoing)
 }
 

@@ -188,11 +188,19 @@ fn drop_outgoing(mut s: Session, stream: quic.StreamId) {
 }
 
 fn enqueue_raw(mut s: Session, mut io: Io, stream: quic.StreamId, take data: Bytes, fin: bool) {
+    enqueue_raw_timed(mut s, mut io, stream, take data, fin, None, 0)
+}
+
+fn enqueue_raw_timed(mut s: Session, mut io: Io, stream: quic.StreamId, take data: Bytes, fin: bool, obj_deadline: Option[u64], reliable: u64) {
     if let Some(i) = out_index(s, stream) {
         if list.len(data) > 0 {
             list.push(mut s.outgoing[i].chunks, Raw(take data))
         }
         s.outgoing[i].fin = s.outgoing[i].fin || fin
+        if obj_deadline != None {
+            s.outgoing[i].obj_deadline = obj_deadline
+            s.outgoing[i].reliable = reliable
+        }
         flush_outgoing(mut s, mut io, stream)
         return
     }
@@ -207,18 +215,26 @@ fn enqueue_raw(mut s: Session, mut io: Io, stream: quic.StreamId, take data: Byt
             list.append(mut rest, list.slice(data, n, list.len(data)))
             list.push(mut chunks, Raw(take rest))
         }
-        list.push(mut s.outgoing, Outgoing(stream: stream, chunks: take chunks, offset: 0, fin: fin))
+        list.push(mut s.outgoing, Outgoing(stream: stream, chunks: take chunks, offset: 0, fin: fin, obj_deadline: obj_deadline, reliable: reliable))
     }
 }
 
 /// Queue a zero-copy Shared[Bytes] payload onto `stream`. Returns true if handed to transport
 /// immediately, false if buffered waiting for Writable.
 fn enqueue_shared(mut s: Session, mut io: Io, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> bool {
+    enqueue_shared_timed(mut s, mut io, stream, take data, fin, None, 0)
+}
+
+fn enqueue_shared_timed(mut s: Session, mut io: Io, stream: quic.StreamId, take data: Shared[Bytes], fin: bool, obj_deadline: Option[u64], reliable: u64) -> bool {
     if let Some(i) = out_index(s, stream) {
         if list.len(data) > 0 {
             list.push(mut s.outgoing[i].chunks, SharedChunk(take data))
         }
         s.outgoing[i].fin = s.outgoing[i].fin || fin
+        if obj_deadline != None {
+            s.outgoing[i].obj_deadline = obj_deadline
+            s.outgoing[i].reliable = reliable
+        }
         flush_outgoing(mut s, mut io, stream)
         return out_index(s, stream) == None
     }
@@ -227,7 +243,7 @@ fn enqueue_shared(mut s: Session, mut io: Io, stream: quic.StreamId, take data: 
         Ok(false) => {
             let mut chunks: List[OutChunk] = list.new()
             list.push(mut chunks, SharedChunk(take data))
-            list.push(mut s.outgoing, Outgoing(stream: stream, chunks: take chunks, offset: 0, fin: fin))
+            list.push(mut s.outgoing, Outgoing(stream: stream, chunks: take chunks, offset: 0, fin: fin, obj_deadline: obj_deadline, reliable: reliable))
             false
         },
         Error(_) => false,
@@ -237,6 +253,17 @@ fn enqueue_shared(mut s: Session, mut io: Io, stream: quic.StreamId, take data: 
 fn flush_outgoing(mut s: Session, mut io: Io, stream: quic.StreamId) {
     let Some(i) = out_index(s, stream) else {
         return
+    }
+    // MOQ-5: if an object waited past OBJECT_DELIVERY_TIMEOUT before quic took it, reset with DELIVERY_TIMEOUT.
+    if let Some(dl) = s.outgoing[i].obj_deadline {
+        if s.now >= dl {
+            let rel = s.outgoing[i].reliable
+            tx_reset(s.transport, mut io, stream, RESET_DELIVERY_TIMEOUT, rel)
+            let _ = list.remove(mut s.outgoing, i)
+            mark_tx_subgroup_dead(mut s, stream)
+            s.timed_out_objects += 1
+            return
+        }
     }
     loop {
         if list.len(s.outgoing[i].chunks) == 0 {

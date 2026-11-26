@@ -127,6 +127,37 @@ fn remove_tx_subgroup(mut s: Session, stream: quic.StreamId) {
     }
 }
 
+fn is_dead_subgroup(s: Session, req_id: u64, group: u64, subgroup: u64) -> bool {
+    for d in s.dead_subgroups {
+        if d == (req_id, group, subgroup) {
+            return true
+        }
+    }
+    false
+}
+
+fn record_dead_subgroup(mut s: Session, req_id: u64, group: u64, subgroup: u64) {
+    if !is_dead_subgroup(s, req_id, group, subgroup) {
+        if list.len(s.dead_subgroups) >= 512 {
+            let _ = list.remove(mut s.dead_subgroups, 0)
+        }
+        list.push(mut s.dead_subgroups, (req_id, group, subgroup))
+    }
+}
+
+fn mark_tx_subgroup_dead(mut s: Session, stream: quic.StreamId) {
+    for i in 0u64 .. list.len(s.tx_subgroups) {
+        if s.tx_subgroups[i].stream == stream {
+            let req_id = s.tx_subgroups[i].req_id
+            let group = s.tx_subgroups[i].group
+            let subgroup = s.tx_subgroups[i].subgroup
+            let _ = list.remove(mut s.tx_subgroups, i)
+            record_dead_subgroup(mut s, req_id, group, subgroup)
+            return
+        }
+    }
+}
+
 fn on_stream_acked(mut s: Session, stream: quic.StreamId) {
     for i in 0u64 .. list.len(s.tx_subgroups) {
         if s.tx_subgroups[i].stream == stream {
@@ -140,6 +171,31 @@ fn on_stream_acked(mut s: Session, stream: quic.StreamId) {
 
 fn poll_subgroup_timeouts(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
     let mut next: Option[u64] = None
+    // Check queued outgoing object deadlines first (MOQ-5 object timer).
+    let mut j = 0u64
+    while j < list.len(s.outgoing) {
+        match s.outgoing[j].obj_deadline {
+            Some(at) => {
+                if now >= at {
+                    let st = s.outgoing[j].stream
+                    let rel = s.outgoing[j].reliable
+                    tx_reset(s.transport, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
+                    let _ = list.remove(mut s.outgoing, j)
+                    mark_tx_subgroup_dead(mut s, st)
+                    s.timed_out_objects += 1
+                } else {
+                    next = match next {
+                        None => Some(at),
+                        Some(cur) => Some(order.min(cur, at)),
+                    }
+                    j += 1
+                }
+            },
+            None => {
+                j += 1
+            },
+        }
+    }
     let mut i = 0u64
     while i < list.len(s.tx_subgroups) {
         let dl = s.tx_subgroups[i].sg_deadline
@@ -150,7 +206,11 @@ fn poll_subgroup_timeouts(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
                     let rel = s.tx_subgroups[i].header_len
                     tx_reset(s.transport, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
                     drop_outgoing(mut s, st)
+                    let req_id = s.tx_subgroups[i].req_id
+                    let group = s.tx_subgroups[i].group
+                    let subgroup = s.tx_subgroups[i].subgroup
                     let _ = list.remove(mut s.tx_subgroups, i)
+                    record_dead_subgroup(mut s, req_id, group, subgroup)
                     s.timed_out_subgroups += 1
                 } else {
                     next = match next {
@@ -215,8 +275,18 @@ pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object,
         let base = match s.requests[ri].base_group {
             Some(b) => b,
             None => {
-                s.requests[ri].base_group = Some(o.group)
-                o.group
+                let b = match s.requests[ri].filter {
+                    AbsoluteStart(start: st) => st.group,
+                    GroupEnd(start: st, ..) => st.group,
+                    AbsoluteRange(start: st, ..) => st.group,
+                    _ => if o.group <= MAX_RANK {
+                        0u64
+                    } else {
+                        o.group
+                    },
+                }
+                s.requests[ri].base_group = Some(b)
+                b
             },
         }
         if o.group < base {
@@ -238,18 +308,25 @@ pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object,
             },
         }
         let req_id = s.requests[ri].id
-        let pub_obj_ms = if obj_prop_ms > 0 {
-            obj_prop_ms
-        } else {
-            s.requests[ri].pub_obj_timeout_ms
+        // MOQ-5 / moqt-23 §10.1-§10.2: on an existing subgroup, use its first-object/track
+        // timeouts; on a new subgroup (or datagram), the first object's property overrides the track's.
+        let existing_sg = tx_sg_index(s, req_id, o.group, o.subgroup)
+        let (eff_obj_ms, eff_sg_ms) = match existing_sg {
+            Some(si) => (s.tx_subgroups[si].obj_timeout_ms, s.tx_subgroups[si].sg_timeout_ms),
+            None => {
+                let pub_obj_ms = if obj_prop_ms > 0 {
+                    obj_prop_ms
+                } else {
+                    s.requests[ri].pub_obj_timeout_ms
+                }
+                let pub_sg_ms = if sg_prop_ms > 0 {
+                    sg_prop_ms
+                } else {
+                    s.requests[ri].pub_sg_timeout_ms
+                }
+                (effective_timeout_ms(pub_obj_ms, s.requests[ri].sub_obj_timeout_ms, s.limits.max_timeout_ms), effective_timeout_ms(pub_sg_ms, s.requests[ri].sub_sg_timeout_ms, s.limits.max_timeout_ms))
+            },
         }
-        let pub_sg_ms = if sg_prop_ms > 0 {
-            sg_prop_ms
-        } else {
-            s.requests[ri].pub_sg_timeout_ms
-        }
-        let eff_obj_ms = effective_timeout_ms(pub_obj_ms, s.requests[ri].sub_obj_timeout_ms, s.limits.max_timeout_ms)
-        let eff_sg_ms = effective_timeout_ms(pub_sg_ms, s.requests[ri].sub_sg_timeout_ms, s.limits.max_timeout_ms)
         let elapsed_ms = if now > born_ns {
             (now - born_ns) / 1000000
         } else {
@@ -280,26 +357,36 @@ pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object,
                 let _ = tx_send_datagram(s.transport, mut io, shared.new(take frame), prio, tag)
             }
         } else {
+            if is_dead_subgroup(s, req_id, o.group, o.subgroup) {
+                ri += 1
+                continue
+            }
             if eff_obj_ms > 0 && elapsed_ms >= eff_obj_ms {
-                if let Some(si) = tx_sg_index(s, req_id, o.group, o.subgroup) {
+                if let Some(si) = existing_sg {
                     let st = s.tx_subgroups[si].stream
                     let rel = s.tx_subgroups[si].header_len
                     tx_reset(s.transport, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
                     drop_outgoing(mut s, st)
                     let _ = list.remove(mut s.tx_subgroups, si)
                 }
+                record_dead_subgroup(mut s, req_id, o.group, o.subgroup)
                 s.timed_out_objects += 1
                 ri += 1
                 continue
             }
-            send_subgroup_object(mut s, mut io, ri, req_id, alias, prio, o, clone(props_kvs), eff_sg_ms, fin_subgroup, now)
+            let obj_dl: Option[u64] = if eff_obj_ms > 0 {
+                Some(int.saturating_add(born_ns, int.saturating_mul(eff_obj_ms, 1000000)))
+            } else {
+                None
+            }
+            send_subgroup_object(mut s, mut io, ri, req_id, alias, prio, o, clone(props_kvs), eff_obj_ms, eff_sg_ms, obj_dl, fin_subgroup, now)
         }
         ri += 1
     }
     Ok(())
 }
 
-fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias: u64, prio: quic.Priority, o: Object, take props_kvs: List[codec.KeyValue], eff_sg_ms: u64, fin_subgroup: bool, now: u64) {
+fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias: u64, prio: quic.Priority, o: Object, take props_kvs: List[codec.KeyValue], eff_obj_ms: u64, eff_sg_ms: u64, obj_dl: Option[u64], fin_subgroup: bool, now: u64) {
     let want_fin = fin_subgroup || o.status != Normal
     let si = match tx_sg_index(s, req_id, o.group, o.subgroup) {
         Some(idx) => idx,
@@ -321,7 +408,7 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
             let hlen = list.len(hbytes)
             enqueue_raw(mut s, mut io, st, take hbytes, false)
             s.requests[ri].streams_sent += 1
-            list.push(mut s.tx_subgroups, TxSubgroup(stream: st, req_id: req_id, track: clone(o.track), group: o.group, subgroup: o.subgroup, header: hdr, header_len: hlen, prev_id: None, fin_sent: false, acked: false, sg_timeout_ms: eff_sg_ms, sg_deadline: None))
+            list.push(mut s.tx_subgroups, TxSubgroup(stream: st, req_id: req_id, track: clone(o.track), group: o.group, subgroup: o.subgroup, header: hdr, header_len: hlen, prev_id: None, fin_sent: false, acked: false, obj_timeout_ms: eff_obj_ms, sg_timeout_ms: eff_sg_ms, sg_deadline: None))
             list.len(s.tx_subgroups) - 1
         },
     }
@@ -330,6 +417,7 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
     }
     let st = s.tx_subgroups[si].stream
     let hdr = s.tx_subgroups[si].header
+    let rel = s.tx_subgroups[si].header_len
     let prev = s.tx_subgroups[si].prev_id
     let plen = if o.status == Normal {
         list.len(o.payload)
@@ -343,10 +431,10 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
     }
     s.tx_subgroups[si].prev_id = Some(o.id)
     if plen == 0 {
-        enqueue_raw(mut s, mut io, st, take obytes, want_fin)
+        enqueue_raw_timed(mut s, mut io, st, take obytes, want_fin, obj_dl, rel)
     } else {
-        enqueue_raw(mut s, mut io, st, take obytes, false)
-        let _ = enqueue_shared(mut s, mut io, st, clone(o.payload), want_fin)
+        enqueue_raw_timed(mut s, mut io, st, take obytes, false, obj_dl, rel)
+        let _ = enqueue_shared_timed(mut s, mut io, st, clone(o.payload), want_fin, obj_dl, rel)
     }
     if want_fin {
         s.tx_subgroups[si].fin_sent = true

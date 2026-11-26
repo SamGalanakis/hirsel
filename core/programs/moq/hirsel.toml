@@ -27,3 +27,4 @@ grants = ["Tasks"]
 [tests.sources]
 "laws.hirsel" = "laws"
 "session_laws.hirsel" = "laws"
+"schedule_laws.hirsel" = "laws"

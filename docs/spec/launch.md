@@ -1169,10 +1169,13 @@ refused with the quota it exceeds. The host never evicts a live group to admit a
 
 ### Starting the host
 
-`hirsel launcher --state S --control S/launcher.sock --operator-listen S/operator.sock
---platform-host PREFIX/libexec/hirsel/platform_main [--max-places N] [--idle-ms M]` starts
-the platform host as its first and only bootstrap child. N and M are positive decimals,
-1 and 30000 by default. The launcher binds both sockets mode 0600, creates `S/catalog`, and
+`hirsel launcher --state S --control S/launcher.sock --lifecycle managed|leader
+--operator-listen S/operator.sock --platform-host PREFIX/libexec/hirsel/platform_main
+--max-places N [--idle-ms M]` starts
+the platform host as its first and only bootstrap child. `--max-places` is required whenever
+the launcher starts the platform host (passing `--max-places` or `--idle-ms` without
+`--operator-listen` and `--platform-host` is a usage error), and `--lifecycle` is required on
+Linux ("Child lifecycle" below). N and M are positive decimals; `--idle-ms` defaults to 30000. The launcher binds both sockets mode 0600, creates `S/catalog`, and
 starts the installed executable with working directory S and the program-visible argv
 `platform_main ctl launcher.sock N M`. The host's grants are compiled into that executable:
 its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
@@ -1324,10 +1327,12 @@ recording runtime cannot replay (a Foreign call) is refused before assembly.
 
 ### The operator CLI
 
-`hirsel host --state S [--max-places N] [--idle-ms M]` runs the launcher
-of "Starting the host" with `--control S/launcher.sock`, `--operator-listen S/operator.sock`
-and the installation's `libexec/hirsel/platform_main`, and does not return. The state
-directory must be the operator's and mode 0700.
+`hirsel host --state S --max-places N --lifecycle managed|leader [--idle-ms M]` runs the
+launcher of "Starting the host" with `--control S/launcher.sock`,
+`--operator-listen S/operator.sock` and the installation's `libexec/hirsel/platform_main`,
+and does not return. `--max-places` is required, and `--lifecycle` is required on Linux
+(on macOS `--lifecycle` defaults to `leader` and `managed` is refused). The state directory
+must be the operator's and mode 0700.
 
 The clients below connect to `S/operator.sock` only after checking that S is owned by their
 own UID with no group or other permission. Each prints `request <D hex>` on stderr before it
@@ -1961,8 +1966,8 @@ content-addressed: the code store, the image store and the assembly records, eac
 the hash of its own content (above). Such a file is either complete or absent after a crash,
 so keeping it is caching, not state. Its operations are these:
 
-`hirsel launcher --control SOCKET --state DIR` serves the control
-session of RUNNER-SPEC §14.5. It holds the launcher lock and the groups' listeners, starts
+`hirsel launcher --control SOCKET --state DIR --lifecycle managed|leader` serves the control
+session of RUNNER-SPEC §14.5 (`--lifecycle` is required on Linux). It holds the launcher lock and the groups' listeners, starts
 children, and collects unused objects. `Bind` names the group and its listener address.
 `Start` selects
 the child's mode, and a serving `Start` may name a recording (its 16-byte recording ID
@@ -2124,20 +2129,27 @@ descriptors. Standard streams use files or `/dev/null`. The runtime consumes the
 verified image descriptor at entry. A serving child receives the socket activation
 metadata and descriptors 3 through 5.
 
-Under a delegated cgroup v2, the launcher uses a subtree keyed by its state directory.
-It finds its cgroup's directory through `/proc/self/mountinfo`: the cgroup2 mount whose
-root holds the `0::` path of `/proc/self/cgroup`, joined with that path less the root, so a
-relocated or namespaced mount resolves. Each child is born in its
-own cgroup with a pidfd. After the leader exits, the launcher requests `cgroup.kill`
-and reads `cgroup.events`. If the cgroup is still populated, epoll waits for a population
-change. The launcher reports `Ended` after observing `populated 0`, reaping any adopted
-descendants and removing the cgroup. An explicit kill targets the whole cgroup.
+On Linux, `--lifecycle managed|leader` is required; the launcher never falls back silently
+from cgroup containment to leader-only tracking. Neither mode uses a pidfile.
 
-On a host without a delegated subtree, the pidfd tracks and reaps the direct child.
-Its descendants can outlive it and can keep inherited descriptors open. Neither path uses a pidfile.
+- **`--lifecycle managed`**: requires a delegated cgroup v2 subtree and fails startup before
+  opening stores or binding sockets if one cannot be opened (no cgroup2 mount or cgroup v2
+  membership, membership outside every cgroup2 root, or a non-delegated cgroup directory).
+  The launcher uses a subtree keyed by its state directory, found through
+  `/proc/self/mountinfo`: the cgroup2 mount whose root holds the `0::` path of
+  `/proc/self/cgroup`, joined with that path less the root, so a relocated or namespaced
+  mount resolves. Each child is born in its own cgroup with a pidfd. After the leader exits,
+  the launcher requests `cgroup.kill` and reads `cgroup.events`. If the cgroup is still
+  populated, epoll waits for a population change. The launcher reports `Ended` after
+  observing `populated 0`, reaping any adopted descendants and removing the cgroup. An
+  explicit kill targets the whole cgroup.
+- **`--lifecycle leader`**: explicitly chooses direct-child tracking without creating or
+  recovering cgroups. The pidfd tracks and reaps the direct child; its descendants can
+  outlive it and can keep inherited descriptors open.
 
-**macOS** (macOS slice S12). macOS has no cgroups, so the macOS
-launcher is always the case without a delegated subtree. It starts each child with
+**macOS** (macOS slice S12). macOS has no cgroups, so the macOS launcher runs in `leader`
+mode (`--lifecycle` may be omitted or set to `leader`; `--lifecycle managed` fails startup).
+It starts each child with
 `posix_spawn` in a new session (`POSIX_SPAWN_SETSID`), never with `fork`, tracks it with
 `EVFILT_PROC` registered in its kqueue before it can be reaped, and kills its process group.
 A child that exits before its watch is registered is reported at the next turn.
@@ -2148,7 +2160,7 @@ clone is a new file, and macOS charges about 130 ms on the first exec of a file.
 `posix_spawn` fixes the environment before the child has a PID, so a serving child's
 `LISTEN_PID` names the launcher, its parent (net.md, inherited listener).
 A descendant that starts its own session escapes the group kill and can outlive `Ended`.
-That is the same limit as a Linux host without delegation, stated here for operators. The
+That is the same limit as Linux `--lifecycle leader`, stated here for operators. The
 cgroup inventory a successor recovers, `cgroup.kill` and the `cgroup_lifecycle` law do not
 apply. Directory watches use `EVFILT_VNODE` on directory descriptors where Linux uses inotify.
 
@@ -2163,7 +2175,7 @@ apply. Directory watches use `EVFILT_VNODE` on directory descriptors where Linux
 | serving | the place | the group's store | the group's listener (3) | its private endpoint (4) and wake report (5) |
 
 The image's recipe declares its Hirsel grants. The launcher runs children under its
-OS user and uses cgroups for lifecycle management where a delegated subtree exists. The serving child's private endpoint
+OS user and uses cgroups for lifecycle management in `--lifecycle managed` mode. The serving child's private endpoint
 reaches only the launcher's handler for that child. Serving also gets the group's private
 staging directory for the export exchange. Prepare receives the path of the named export
 directory and syncs `PREPARED` there before it exits.
@@ -2237,7 +2249,9 @@ child of any group; `child_mode_authority`, for descriptors and the control sock
 `collect_reservation_handoff`; and L46 (RUNNER-SPEC §14.3), where a child's end samples
 its listener before the watch resumes. The delegated `cgroup_lifecycle` law checks
 that a successor recovers the predecessor's cgroup inventory and that an ordinary child's
-grandchild PID is gone by `Ended`. The platform host suite
+grandchild PID is gone by `Ended`, and `law_managed_lifecycle_fails_without_delegation`
+checks that `--lifecycle managed` fails startup without a delegatable cgroup v2 subtree
+instead of falling back silently. The platform host suite
 (`platform_laws.hirsel`) also covers `collect_reservation_handoff`'s host half,
 admit-after-collect, store-identity enforcement, and drift-retry pause recovery.
 

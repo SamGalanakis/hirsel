@@ -51,8 +51,9 @@ pub(crate) fn installed(name: &str) -> Result<PathBuf, Error> {
     Ok(installation.libexec(name))
 }
 
-/// `hirsel host --state S [--max-places N] [--idle-ms M]`: the launcher in
-/// the foreground with this installation's platform host (launch.md "Starting the host").
+/// `hirsel host --state S --max-places N --lifecycle managed|leader [--idle-ms M]`: the
+/// launcher in the foreground with this installation's platform host (launch.md "Starting
+/// the host").
 pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, Error> {
     if invocation.positional.is_some() || !invocation.arguments.is_empty() {
         return Err(
@@ -60,15 +61,31 @@ pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, E
         );
     }
     let mut state = None;
+    let mut max_places = false;
+    let mut lifecycle = None;
     let mut options = Vec::new();
     for (option, value) in invocation.options {
         match option {
             Opt::HostState => state = value.map(PathBuf::from),
-            Opt::MaxPlaces | Opt::IdleMs => options.push((option, value)),
+            Opt::MaxPlaces => {
+                max_places = true;
+                options.push((option, value));
+            }
+            Opt::Lifecycle => {
+                lifecycle = Some(crate::launcher::parse_lifecycle(
+                    value.as_deref().unwrap_or_default(),
+                )?);
+                options.push((option, value));
+            }
+            Opt::IdleMs => options.push((option, value)),
             _ => return Err("unexpected host option".into()),
         }
     }
     let state = state.ok_or("host requires --state DIR")?;
+    if !max_places {
+        return Err("host requires --max-places N".into());
+    }
+    crate::launcher::resolve_lifecycle(lifecycle)?;
     let path = |name: &str| Some(state.join(name).to_string_lossy().into_owned());
     options.extend([
         (Opt::HostState, Some(state.to_string_lossy().into_owned())),

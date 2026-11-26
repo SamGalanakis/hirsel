@@ -4,7 +4,7 @@
 //! halves (a NEW head opening the store only after OLD closed it) are the platform host's.
 use super::session::tests::serve_fixture as serve;
 use super::session::*;
-use super::{Image, Images, Launcher, hex};
+use super::{Image, Images, Launcher, Lifecycle::*, hex};
 use std::collections::BTreeSet;
 use std::fs;
 use std::net::TcpStream;
@@ -81,7 +81,7 @@ fn rig(scripts: &[&str]) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().join("state");
     fs::create_dir_all(&state).unwrap();
-    let launcher = Launcher::new(&state, || Ok(images(dir.path(), scripts))).unwrap();
+    let launcher = Launcher::new(&state, Leader, || Ok(images(dir.path(), scripts))).unwrap();
     Rig { dir, launcher }
 }
 
@@ -319,7 +319,7 @@ int main(int argc, char **argv) {
     let replacement = work.join("replacement");
     fs::write(&replacement, b"#!/bin/sh\ntouch incorrectly-executed\n").unwrap();
     fs::set_permissions(&replacement, fs::Permissions::from_mode(0o500)).unwrap();
-    let launcher = Launcher::new(&state, || {
+    let launcher = Launcher::new(&state, Leader, || {
         Ok(SwapImage {
             stores: Stores::open(&state, super::limits().recipe_bytes)?,
             replacement,
@@ -492,7 +492,7 @@ fn launcher_restart_stateless() {
     let state = work.join("state");
     fs::create_dir_all(&state).unwrap();
     let socket = work.join("control");
-    let mut launcher = Launcher::new(&state, || Ok(images(&work, &[SINGLE]))).unwrap();
+    let mut launcher = Launcher::new(&state, Leader, || Ok(images(&work, &[SINGLE]))).unwrap();
     launcher
         .listen(UnixListener::bind(&socket).unwrap())
         .unwrap();
@@ -563,10 +563,10 @@ fn launcher_restart_stateless() {
     );
 
     // A second launcher on the same state is fenced by the lock while the first lives.
-    assert!(Launcher::new(&state, || Ok(images(&work, &[SINGLE]))).is_err());
+    assert!(Launcher::new(&state, Leader, || Ok(images(&work, &[SINGLE]))).is_err());
     drop(host);
     drop(launcher);
-    let mut successor = Launcher::new(&state, || Ok(images(&work, &[SINGLE]))).unwrap();
+    let mut successor = Launcher::new(&state, Leader, || Ok(images(&work, &[SINGLE]))).unwrap();
     successor.handle(Request::Hello);
     successor.handle(Request::Bind(group(), address.to_string()));
     assert_eq!(
@@ -755,7 +755,7 @@ fn cgroup_lifecycle() {
     }
 
     fn launcher(state: &Path, work: &Path) -> Launcher<Scripts> {
-        Launcher::new(state, || {
+        Launcher::new(state, Managed, || {
             Ok(images(
                 work,
                 &[
@@ -803,7 +803,7 @@ fn cgroup_lifecycle() {
         .status()
         .unwrap();
     assert!(status.success(), "predecessor launcher: {status}");
-    let root = super::cgroup::delegated(&state).unwrap().unwrap();
+    let root = super::cgroup::delegated(&state).unwrap();
 
     let directories = || -> BTreeSet<String> {
         fs::read_dir(&root)
@@ -1218,7 +1218,7 @@ fn code_collection_keeps_reached_reserved_and_freshly_published_objects() {
     // The dropped record and its image, the unlisted body and the dropped recipe.
     assert_eq!(removed, 4);
 
-    let launcher = Launcher::new(state, || Ok(stores)).unwrap();
+    let launcher = Launcher::new(state, Leader, || Ok(stores)).unwrap();
     let mut rig = Rig { dir, launcher };
     rig.launcher.admit_with(admission).unwrap();
     rig.bind();

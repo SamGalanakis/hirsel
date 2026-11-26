@@ -121,6 +121,7 @@ pub enum OptionId {
     PlatformHost,
     MaxPlaces,
     IdleMs,
+    Lifecycle,
     Workdir,
     Listen,
     FrontHttp,

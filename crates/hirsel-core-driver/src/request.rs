@@ -495,6 +495,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::PlatformHost
             | Opt::MaxPlaces
             | Opt::IdleMs
+            | Opt::Lifecycle
             | Opt::Workdir
             | Opt::Listen
             | Opt::Fresh
@@ -1767,9 +1768,8 @@ pub enum Outcome {
 #[path = "request_launch.rs"]
 mod launch;
 pub use launch::Launch;
-pub(crate) use launch::report_request_error;
-pub(crate) use launch::serve;
 use launch::{conclude, finish};
+pub(crate) use launch::{report_request_error, serve};
 
 /// Run the request `args` names (the arguments after the program name) and
 /// exit with its status, through a resident compiler when one serves the

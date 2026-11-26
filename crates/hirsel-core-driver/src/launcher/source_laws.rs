@@ -236,7 +236,7 @@ fn source_publishes_with_the_normal_checker() {
     let admission = super::Admission::open(&state, records, super::limits(), 1 << 20)
         .unwrap()
         .compile_with(compiler);
-    let launcher = Launcher::new(&state, || Ok(stores)).unwrap();
+    let launcher = Launcher::new(&state, super::Lifecycle::Leader, || Ok(stores)).unwrap();
     let mut rig = Rig { dir, launcher };
     rig.launcher.admit_with(admission).unwrap();
     rig.bind();
@@ -589,7 +589,7 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         .unwrap()
         .compile_with(compiler.clone())
         .toolchain(toolchain);
-    let launcher = Launcher::new(&state, || Ok(stores)).unwrap();
+    let launcher = Launcher::new(&state, super::Lifecycle::Leader, || Ok(stores)).unwrap();
     let mut rig = Rig { dir, launcher };
     rig.launcher.admit_with(admission).unwrap();
     rig.bind();

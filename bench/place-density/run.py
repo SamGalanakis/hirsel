@@ -137,7 +137,7 @@ def stop_places(launcher):
 @contextmanager
 def host(compiler, state, log_path, *, measured=False, places=PLACES, idle_ms=HOST_IDLE_MS):
     command = [compiler, "host", "--state", state, "--max-places", str(places),
-               "--idle-ms", str(idle_ms)]
+               "--idle-ms", str(idle_ms), "--lifecycle", "leader"]
     names = ("hirsel",)
     if measured and in_timing_slice():
         command = scoped_command(command, memory_bytes=2 << 30)

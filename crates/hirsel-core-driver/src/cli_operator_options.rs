@@ -18,6 +18,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Idle time after which a serving group is stopped."
     ),
     option!(
+        Lifecycle,
+        ["--lifecycle"],
+        Some("managed|leader"),
+        ["host", "launcher"],
+        "Child lifecycle on Linux: managed (delegated cgroup v2, fail if unavailable) or leader (pidfd direct-child tracking only)."
+    ),
+    option!(
         TapeRetention,
         ["--tape-retention"],
         Some("DAYS"),

@@ -431,7 +431,7 @@ def host_law(args, root, work, engine, name):
     @contextmanager
     def running_host(idle_ms=None):
         with tempfile.TemporaryFile(mode='w+') as log:
-            command = [compiler, 'host', '--state', str(state)]
+            command = [compiler, 'host', '--state', str(state), '--max-places', '1', '--lifecycle', 'leader']
             if idle_ms is not None:
                 command += ['--idle-ms', str(idle_ms)]
             host = subprocess.Popen(command, stdout=log, stderr=log)
@@ -686,7 +686,7 @@ def install_child_law(compiler, state, work, old, new):
             end(identity, 0, 1)
 
     with tempfile.TemporaryFile() as log:
-        launcher = subprocess.Popen([compiler, 'launcher', '--control', str(control), '--state', str(state)],
+        launcher = subprocess.Popen([compiler, 'launcher', '--control', str(control), '--state', str(state), '--lifecycle', 'leader'],
                                     stdout=log, stderr=log)
         try:
             deadline = time.monotonic() + 10

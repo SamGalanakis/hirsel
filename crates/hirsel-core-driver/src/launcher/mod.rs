@@ -10,6 +10,7 @@
 pub(crate) mod admit;
 mod bootstrap;
 mod cgroup;
+mod cli;
 pub(crate) mod dev;
 mod grants;
 #[cfg(test)]
@@ -23,6 +24,9 @@ mod source_laws;
 pub(crate) mod spawn;
 mod stores;
 
+pub(crate) use cgroup::Lifecycle;
+pub(crate) use cli::{parse_lifecycle, resolve_lifecycle, run};
+
 use hirsel_core_ids::{hex, launch::LAUNCH_IMAGE_ENV};
 use ready::{CHANGE, NONE, READ, Readiness, ReadyEvent, WRITE, Watch};
 
@@ -31,7 +35,6 @@ use session::{
     Input, InstallKind, Launch, Mode, Phase, Refusal, Request, Role, Status, Wire,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::net::TcpListener;
@@ -44,7 +47,6 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 pub(crate) use admit::{Admission, Compiler, deploy_foreign_lines, limits, read_recipe};
-use stores::Stores;
 
 /// Create `path` as a directory only its owner can enter, or check that it is one.
 pub(crate) fn private_dir(path: PathBuf) -> io::Result<PathBuf> {
@@ -84,95 +86,7 @@ pub(crate) fn bind_control(path: &Path) -> io::Result<UnixListener> {
 const ADMISSIONS: usize = 4;
 
 /// The staging bound of the launcher's code store.
-const STAGING_BYTES: u64 = 512 << 20;
-
-/// Lock `state`, recover any child cgroups, then serve the control session on `SOCKET`.
-pub(crate) fn run(
-    invocation: crate::cli::Invocation,
-) -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
-    use crate::cli::OptionId as Opt;
-    let (mut control, mut state) = (None, None);
-    let (mut operator, mut platform_host, mut max_places, mut idle_ms) = (None, None, None, None);
-    for (option, value) in invocation.options {
-        let text = value.unwrap_or_default();
-        let value = PathBuf::from(&text);
-        match option {
-            Opt::Control => control = Some(value),
-            Opt::HostState => state = Some(value),
-            Opt::OperatorListen => operator = Some(value),
-            Opt::PlatformHost => platform_host = Some(value),
-            Opt::MaxPlaces => max_places = Some(positive(&text, "--max-places")?),
-            Opt::IdleMs => idle_ms = Some(positive(&text, "--idle-ms")?),
-            _ => return Err("unexpected launcher option".into()),
-        }
-    }
-    let state = private_dir(state.ok_or("--state DIR is required")?)?;
-    let control = control.ok_or("--control SOCKET is required")?;
-    let mut admission = None;
-    let mut launcher = Launcher::new(&state, || {
-        let stores = Stores::open(&state, limits().recipe_bytes)?;
-        admission = Some(Admission::open(
-            &state,
-            stores.records(),
-            limits(),
-            STAGING_BYTES,
-        )?);
-        Ok(stores)
-    })?;
-    launcher.admit_with(admission.expect("opened with the stores"))?;
-    launcher.listen(bind_control(&control)?)?;
-    match (operator, platform_host) {
-        (None, None) => (),
-        (Some(operator), Some(program)) => {
-            // The host's argv names the control socket by its name in STATE, which is the
-            // host's working directory (launch.md "Starting the host").
-            let name = control
-                .file_name()
-                .filter(|_| {
-                    control.parent().and_then(|p| p.canonicalize().ok()) == Some(state.clone())
-                })
-                .ok_or("--control must name a socket directly in --state")?;
-            let args = vec![
-                OsString::from("ctl"),
-                name.to_owned(),
-                OsString::from(max_places.unwrap_or(1).to_string()),
-                OsString::from(idle_ms.unwrap_or(30000).to_string()),
-            ];
-            let program = std::path::absolute(program)?;
-            if !program.is_file() {
-                eprintln!(
-                    "hirsel launcher: the installation has no platform host at {}",
-                    program.display()
-                );
-                std::process::exit(74);
-            }
-            // The host's one Dir is STATE/catalog; it creates the catalog store inside it.
-            std::fs::create_dir_all(state.join("catalog"))?;
-            launcher.bootstrap = Some(bootstrap::Bootstrap::new(
-                program,
-                args,
-                state.clone(),
-                bind_control(&std::path::absolute(operator)?)?,
-            ));
-        }
-        _ => return Err("--operator-listen and --platform-host go together".into()),
-    }
-    loop {
-        launcher.wait_turn(None)?;
-        if let Some(code) = launcher.bootstrap.as_ref().and_then(|b| b.stopped()) {
-            eprintln!("hirsel launcher: the platform host ended with status {code}");
-            drop(launcher);
-            std::process::exit(code);
-        }
-    }
-}
-
-fn positive(text: &str, name: &str) -> Result<u64, Box<dyn std::error::Error>> {
-    match text.parse::<u64>() {
-        Ok(n) if n > 0 => Ok(n),
-        _ => Err(format!("{name} takes a positive decimal").into()),
-    }
-}
+pub(super) const STAGING_BYTES: u64 = 512 << 20;
 
 /// What the launcher runs for an assembly record: its image and the recipe's launch words.
 pub(crate) struct Image {
@@ -431,7 +345,7 @@ pub(crate) struct Launcher<I> {
     session: Option<Conn>,
     /// The platform host, when this launcher starts it; then only its process may hold the
     /// control session.
-    bootstrap: Option<bootstrap::Bootstrap>,
+    pub(super) bootstrap: Option<bootstrap::Bootstrap>,
     _lock: File,
 }
 
@@ -487,12 +401,30 @@ fn pipe() -> io::Result<(File, OwnedFd)> {
 impl<I: Images> Launcher<I> {
     /// A launcher over `state`, which it locks before it opens its objects with `open`;
     /// `state/scratch` holds each group's private scratch and export directories.
-    pub(crate) fn new(state: &Path, open: impl FnOnce() -> io::Result<I>) -> io::Result<Self> {
+    pub(crate) fn new(
+        state: &Path,
+        lifecycle: Lifecycle,
+        open: impl FnOnce() -> io::Result<I>,
+    ) -> io::Result<Self> {
+        Self::new_with(state, lifecycle, open, cgroup::delegated)
+    }
+
+    pub(super) fn new_with(
+        state: &Path,
+        lifecycle: Lifecycle,
+        open: impl FnOnce() -> io::Result<I>,
+        delegate: impl FnOnce(&Path) -> io::Result<PathBuf>,
+    ) -> io::Result<Self> {
         let lock = lock(state)?;
-        let cgroup_root = if crate::host::CGROUPS {
-            cgroup::delegated(state)?
-        } else {
-            None
+        let cgroup_root = match lifecycle {
+            Lifecycle::Leader => None,
+            Lifecycle::Managed if !crate::host::CGROUPS => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "--lifecycle managed requires a delegated cgroup v2 subtree",
+                ));
+            }
+            Lifecycle::Managed => Some(delegate(state)?),
         };
         if let Some(root) = &cgroup_root {
             cgroup::recover(root)?;

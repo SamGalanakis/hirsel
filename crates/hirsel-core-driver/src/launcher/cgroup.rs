@@ -87,31 +87,54 @@ fn unescape(field: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
-/// The default uses a launcher-owned directory in the current delegated cgroup.
+/// How the launcher tracks and reaps child process trees (launch.md "Child lifecycle").
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Lifecycle {
+    /// Require a delegated cgroup v2 subtree; fail startup if one cannot be opened.
+    Managed,
+    /// Track and reap only the direct child leader (pidfd on Linux, kqueue on macOS).
+    Leader,
+}
+
+/// Open or create the launcher-owned directory in the current delegated cgroup v2.
 /// It has a stable name so a restart in the same delegation can recover it.
-pub(super) fn delegated(state: &Path) -> io::Result<Option<PathBuf>> {
-    let parent = match membership(None) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(None),
-        Err(error) => return Err(error),
-    };
+/// Fails when the host has no delegatable cgroup v2 subtree (never falls back silently).
+pub(super) fn delegated(state: &Path) -> io::Result<PathBuf> {
+    let cgroup = crate::host::cgroup_membership(None).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("--lifecycle managed requires a delegated cgroup v2 subtree: {error}"),
+        )
+    })?;
+    let mountinfo = crate::host::mountinfo().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("--lifecycle managed requires a delegated cgroup v2 subtree: {error}"),
+        )
+    })?;
+    delegated_from(&mountinfo, &cgroup, state)
+}
+
+fn delegated_from(mountinfo: &str, cgroup: &str, state: &Path) -> io::Result<PathBuf> {
+    let parent = resolve(mountinfo, cgroup).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("--lifecycle managed requires a delegated cgroup v2 subtree: {error}"),
+        )
+    })?;
     let state = fs::canonicalize(state)?;
     let key = Sha256::digest(state.as_os_str().as_encoded_bytes());
     let root = parent.join(format!("hirsel-{}", hex::encode(&key)));
     match fs::create_dir(&root) {
-        Ok(()) => Ok(Some(root)),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && root.is_dir() => {
-            Ok(Some(root))
-        }
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::EACCES | libc::EPERM | libc::EROFS | libc::ENOENT)
-            ) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
+        Ok(()) => Ok(root),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && root.is_dir() => Ok(root),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "--lifecycle managed requires a delegated cgroup v2 subtree at {}: {error}",
+                parent.display()
+            ),
+        )),
     }
 }
 
@@ -342,5 +365,93 @@ mod laws {
             resolved(&[whole], "1:cpu:/a").unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
+    }
+
+    /// `--lifecycle managed` fails startup with the stated error when a delegatable
+    /// cgroup v2 subtree cannot be opened (no cgroup2 mount, missing or read-only
+    /// directory), instead of falling back silently to leader-only tracking.
+    /// `--lifecycle leader` succeeds without probing cgroups.
+    #[test]
+    fn law_managed_lifecycle_fails_without_delegation() {
+        use super::super::{Image, Images, Launcher, Lifecycle};
+        use super::delegated_from;
+        use std::collections::BTreeSet;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct NoImages;
+        impl Images for NoImages {
+            fn resolve(&self, _: [u8; 32]) -> Result<Image, String> {
+                Err("unused".into())
+            }
+
+            fn collect(
+                &self,
+                _: &BTreeSet<[u8; 32]>,
+                _: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
+            ) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+
+        let assert_managed_fails = |mountinfo: &str, cgroup: &str| {
+            let mut opened = false;
+            let error = Launcher::new_with(
+                &state,
+                Lifecycle::Managed,
+                || {
+                    opened = true;
+                    Ok(NoImages)
+                },
+                |state| delegated_from(mountinfo, cgroup, state),
+            )
+            .err()
+            .expect("managed lifecycle must fail startup without a delegatable cgroup");
+            assert!(
+                !opened,
+                "managed failure must stop startup before opening stores"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains("--lifecycle managed") && message.contains("delegated cgroup v2"),
+                "unexpected error: {message}"
+            );
+        };
+
+        // 1. No cgroup2 mount (Unsupported): parent commit fell back silently to Ok(None).
+        let cgroup1 = "30 25 0:26 / /sys/fs/cgroup/cpu rw,nosuid shared:9 - cgroup cgroup rw,cpu";
+        assert_managed_fails(cgroup1, "0::/a");
+
+        // 2. Nonexistent cgroup directory (ENOENT): parent commit fell back silently to Ok(None).
+        let missing = dir.path().join("absent-cgroup");
+        let missing_mount = format!("41 25 0:30 / {} rw - cgroup2 cgroup2 rw", missing.display());
+        assert_managed_fails(&missing_mount, "0::/sub");
+
+        // 3. Unwritable cgroup directory (EACCES for non-root): parent commit fell back silently.
+        // SAFETY: geteuid has no failure.
+        if unsafe { libc::geteuid() } != 0 {
+            let readonly = dir.path().join("readonly-cgroup");
+            std::fs::create_dir(&readonly).unwrap();
+            std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let ro_mount = format!(
+                "41 25 0:30 / {} rw - cgroup2 cgroup2 rw",
+                readonly.display()
+            );
+            assert_managed_fails(&ro_mount, "0::/");
+            std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+
+        // 4. Explicit leader mode succeeds without probing cgroups.
+        let leader = Launcher::new_with(
+            &state,
+            Lifecycle::Leader,
+            || Ok(NoImages),
+            |_| panic!("leader lifecycle must not probe cgroups"),
+        )
+        .unwrap();
+        assert!(leader.cgroup_root.is_none());
     }
 }

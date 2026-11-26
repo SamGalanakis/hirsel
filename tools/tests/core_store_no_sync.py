@@ -500,7 +500,8 @@ class StoreNoSync(unittest.TestCase):
                 "--trusted",
             ]
             with tempfile.TemporaryFile(mode="w+") as output, subprocess.Popen(
-                [installed, "host", "--state", state], stdout=output, stderr=output, env=env,
+                [installed, "host", "--state", state, "--max-places", "1", "--lifecycle", "leader"],
+                stdout=output, stderr=output, env=env,
             ) as host:
                 try:
                     deadline = time.monotonic() + 120

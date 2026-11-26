@@ -240,7 +240,11 @@ fn upkeep_scrub[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Res
                 hd.upkeep.tour = Some(take tour)
             } else {
                 hd.upkeep.tours += 1u64
-                hd.upkeep.tour_from = int.saturating_add(store.keyed_time(hd.db), UPKEEP_REST_MS)
+                if let Some(next) = int.checked_add(store.keyed_time(hd.db), UPKEEP_REST_MS) {
+                    hd.upkeep.tour_from = next
+                } else {
+                    hd.upkeep.scrubbing = false
+                }
             }
             Ok(true)
         },
@@ -261,7 +265,11 @@ fn upkeep_walk[G: send, H: shareable + inert + send](mut hd: Head[G, H]) -> Resu
         Ok(report) => {
             if report.done {
                 hd.upkeep.walks += 1u64
-                hd.upkeep.walk_from = int.saturating_add(store.keyed_time(hd.db), UPKEEP_REST_MS)
+                if let Some(next) = int.checked_add(store.keyed_time(hd.db), UPKEEP_REST_MS) {
+                    hd.upkeep.walk_from = next
+                } else {
+                    hd.upkeep.walking = false
+                }
                 return Ok(false)
             }
             hd.upkeep.walk_findings = int.saturating_add(hd.upkeep.walk_findings, list.len(report.findings))

@@ -92,6 +92,7 @@ runner@1/runner/test_subs_main src=bea87577f6b09f95 sig=7da90cac1fd51052 run=b18
 runner@1/runner/test_subs_reset_keeps_diff src=0e6b94fb84c6304b sig=c15db03e38c7c876 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_subscribe_order src=6025650387f72240 sig=051d110662fd12f9 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_unique_conflict_wire src=bb7d7bdb242b63db sig=db58182221b6ed09 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+runner@1/runner/test_upkeep_rest_at_max_store_time src=98fd6bb4338e589d sig=6761d205a4594367 run=52846919a3decb1f bug=- oracle=- rows=pending
 runner@1/runner/test_value_elided src=c0006c3070b4308a sig=25bb4cf8caf4124e run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_admission src=31199a2c765feb3e sig=4dddc832a093e6d4 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_wire_replacement_generation src=94e04764647d79ab sig=9ac78379d6686952 run=dbf6722727633166 bug=- oracle=- rows=pending

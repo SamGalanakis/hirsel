@@ -1,9 +1,9 @@
 # HTTP
 
-This specification covers std `http`, the runner's HTTP bindings and keyed operations. Layer 1 (`std.http` and companion modules) is built; Part B (keyed operations) remains design, and each rule's slice in §7 tracks what builds it.
+This specification covers std `http`, the runner's HTTP bindings and keyed operations. The runner implements keyed bindings and persists their claims in the store. Section 7 lists the acceptance laws.
 
 - **Part A** is §0-§3 and §5-§8: std `http`, streams, runner bindings, outside inputs and cutover.
-- **Part B** is §4 and the slices H9 and H12: keyed operations. §4 and every rule, row, law and decision marked "Part B" are unbuilt and may still change, and nothing in Part A depends on them.
+- **Part B** is §4 and slices H9 and H12. It covers keyed operations and their replay laws.
 
 **Settled ground it builds on:**
 - WIRE-SPEC W-D1..12, including §2.1's `upgrade_ms = 5000`, `hello_ms = 10000`, `pending_max = 1024` and its release points;
@@ -1329,7 +1329,7 @@ A query entry returns an `Answer[R]`: a codec value R and an opaque `CoverSet` (
 - **Rendering.** A durable reply is stored as the runner's `Outcome`, with no `op` and no status. The status is a function of the entry and the Outcome in the registry that answers: every `Stream` binding of one entry in one registry has equal `ok_status` and equal `error_status` (B-3 check 6), so every route and alias gives one identity one status. A live entry's reply is rendered with the current registry's statuses; a gone entry's with `previous`'s. A deploy that changes an entry's statuses changes the status of later retries of earlier identities; the body bytes are the stored Outcome's, unchanged. Nothing about the original request's `op` or status is recorded.
 ## 4. Keyed operations
 
-**Part B, unbuilt.** This section is specified but not built; slices H9 and H12 build it (§7). Part A neither builds nor relies on it.
+**Part B.** The keyed store and runner implementation is independent of Part A. Slices H9 and H12 list its acceptance laws (§7).
 
 **Hirsel does not authenticate.** Neither Hirsel nor the runner checks a credential, a signature or a secret for a keyed operation: the application's own claim function (K-2) decides who the principal is, exactly as `Wire.bind` decides the Caller ([RUNNER-SPEC](../../core/programs/runner/RUNNER-SPEC.md) v2.24 rule 13, ruling R6).
 
@@ -1674,7 +1674,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 - runner.md still says v2.4;
 - **retirement marks** (specified in RUNNER-SPEC v2.14, CHANGES-v2.14 and law L25 `retired_without_waiting`; not built; §2 Publisher retirement): `Joined` may carry a session-owned retirement mark, and after every message the publisher sweeps the marks and retires each session whose mark is closed; an ending session's wake is v2.13's `Drained`. PubIn's variants are unchanged. It must be in RUNNER-SPEC before H6's one-shot reads and H8 start; H4 builds raw streams and the group's subscription plumbing, and its subscription cases run in H8.
 
-**Columns.** "Starts" is what must be built before a slice starts. "Lands after" is what must land first, when that differs. Part A (§0-§3, §5-§8) slices never wait on H9 or H12. Part A lands alone; §4 and Part B's rows below are marked unbuilt until they land.
+**Columns.** "Starts" is what must be built before a slice starts. "Lands after" is what must land first, when that differs. Part A (§0-§3, §5-§8) slices never wait on H9 or H12.
 
 **Oracles.** Every law's expected value comes from an oracle independent of the code under test: a hand-derived corpus, the RFC or WHATWG text, a reference parser, or an invariant over the recorded trace. A count of examined bytes or a credit sum is an invariant read from instrumentation the slice adds, not from the code's own return value.
 
@@ -1709,7 +1709,7 @@ The WebSocket upgrade moves onto std `http`. The parallel parse and serve paths 
 - **L21r, refused front: built.** `refused_front_fails_after_recover_max` (runner-keyed-recovery-law.hirsel) is red when a client worker's refusal is not counted.
 - **L17: built.** `keyed_http_join_on_cold_read` (runner-keyed-http-law.hirsel) reopens a store whose counter table is Tiered, so the first send's run parks on a cold read and the equal second send joins it. Both get 42, a retry replays 42, and the next key gets 43. `runner_http_delivery_test.py` counts 2 body runs under the native trace. The law is red when an equal send starts its own run instead of joining the parked one (`no_join_runs_twice`). The publisher's diff between two snapshots of the Tiered table has resolved Cold pages since STORE-SPEC v2.116. Without that, the law times out. STORE-SPEC v2.124's L63 (j) checks the diff's shape in the store.
 
-Run the keyed replay cases with `python3 core/tools/runner_http_delivery_test.py --compiler <hirsel> --keyed-replay`. The signed HTTP history checks application freshness reads, HMAC verdicts, quota reclaim, expiry and the `never` response header. The reopen cases check retained replies, recovery without client traffic, and the persisted expiry floor before the orphan sweep.
+Run the keyed replay cases with `python3 core/tools/runner_http_delivery_test.py --compiler <hirsel> --keyed-replay`. The signed HTTP history checks HMAC verdicts, quota reclaim, expiry and the `never` response header. The reopen cases check retained replies, recovery without client traffic, and the persisted expiry floor before the orphan sweep. The clock trace checks the signed history's freshness and `Date` reads, the recovery timer's three set reads, and the store histories' admission, reply, open and sweep reads against labelled sequences.
 
 **Start now:** H1, and B1's Tokio and hyper sides. B1's Hirsel side starts after H2.
 

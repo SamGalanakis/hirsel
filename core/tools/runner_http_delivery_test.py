@@ -68,6 +68,7 @@ KEYED_REPLAY_CASES = {
         "keyed_http_horizon_at_deciding_admission",
         "keyed_http_claim_route_and_alias",
         "quiet_reopen_recovers_bound_claims_once",
+        "test_upkeep_rest_at_max_store_time",
     ),
     "store": (
         "claim_expires_from_its_reply",
@@ -76,10 +77,97 @@ KEYED_REPLAY_CASES = {
 }
 
 
-def keyed_replay(compiler, runtime, engine):
+MAX_WALL_MS = 2**64 - 1
+WEBHOOK_WALL_MS = 1614265330000
+
+# Clock ordinals follow the fixture's provide.clock calls. Values come from
+# the fixtures' scripts and the one read per decision in HTTP K-4 and §5.
+STORE_WALL_READS = {
+    "claim_expires_from_its_reply": (
+        ("first admission", 0, 100),
+        ("ownerless admission", 0, 200),
+        ("reply", 0, 200),
+        ("one before expiry", 0, 249),
+        ("replacement at expiry", 0, 250),
+        ("admission at floor", 1, 200),
+        ("reply after rollback", 1, 100),
+        ("duplicate after rollback", 1, 100),
+        ("last finite admission", 2, MAX_WALL_MS - 51),
+        ("last finite reply", 2, MAX_WALL_MS - 51),
+        ("first never admission", 3, MAX_WALL_MS - 50),
+        ("first never reply", 3, MAX_WALL_MS - 50),
+        ("max admission", 4, MAX_WALL_MS),
+        ("max reply", 4, MAX_WALL_MS),
+        ("never admission", 5, MAX_WALL_MS),
+        ("never reply", 5, MAX_WALL_MS),
+        ("never duplicate", 5, MAX_WALL_MS),
+        ("live quota refusal", 5, MAX_WALL_MS),
+        ("sweep keeps never", 5, MAX_WALL_MS),
+        ("open names never orphan", 5, MAX_WALL_MS),
+    ),
+    "dropped_claim_time_survives_reopen_before_sweep": (
+        ("orphan admission", 0, 100),
+        ("bound admission", 0, 100),
+        ("orphan reply", 0, 100),
+        ("open before expiry", 0, 149),
+        ("open at expiry", 0, 150),
+        ("orphan sweep after rollback", 0, 149),
+        ("bound neighbor sweep after rollback", 0, 149),
+    ),
+}
+
+
+def expect_wall_reads(name, events, expected):
+    reads = [(clock, value) for kind, clock, value in events if kind == "wall"]
+    if reads != [(clock, value) for _, clock, value in expected]:
+        raise RuntimeError(f"{name} clock reads {reads}, expected {expected}")
+
+
+def check_keyed_clock(test):
+    name = test["definition"].rsplit("/", 1)[-1]
+    events = []
+    for line in test["stderr"].splitlines():
+        fields = line.split()
+        if fields and fields[0] in ("wall", "mono", "sleep"):
+            kind, clock, value = fields
+            events.append((kind, int(clock), int(value)))
+    if name in STORE_WALL_READS:
+        expect_wall_reads(name, events, STORE_WALL_READS[name])
+    elif name == "keyed_http_webhook_history":
+        expected_freshness = [WEBHOOK_WALL_MS, WEBHOOK_WALL_MS, 1614265630999,
+                              1614265631000, *([WEBHOOK_WALL_MS] * 7)]
+        expect_wall_reads(name, (e for e in events if e[1] == 1),
+                          [("Date", 1, WEBHOOK_WALL_MS)] * 18)
+        expect_wall_reads(name, (e for e in events if e[1] == 2),
+                          [("freshness", 2, value) for value in expected_freshness])
+    elif name == "quiet_reopen_recovers_bound_claims_once":
+        interval = 10**9
+        arms = []
+        for event, following in zip(events, events[1:]):
+            if event[:2] == ("mono", 0) and following == ("sleep", 0, event[2] + interval):
+                arms.append(event[2])
+        if arms != [0, interval, 2 * interval]:
+            raise RuntimeError(f"{name} recovery timer set reads {arms}")
+
+
+def keyed_clock_linker(work):
+    obj = work / "clock.o"
+    run(["cc", "-c", "-fPIC", RUNNER / "tests/http_keyed_clock_trace.c",
+         "-I", ROOT / "crates/hirsel-core-rt/include", "-o", obj])
+    llvm = os.environ.get("LLVM_SYS_231_PREFIX")
+    linker = Path(llvm) / "bin/clang" if llvm else "cc"
+    wrapper = work / "cc-clock"
+    wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(str(linker))} "$@" {shlex.quote(str(obj))}'
+                       " -Wl,--wrap=hirsel_core_provide_clock -Wl,--wrap=hirsel_core_host_clock"
+                       " -Wl,--wrap=hirsel_core_host_sleep_until\n")
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def keyed_replay(compiler, runtime, engine, cc):
     for package, cases in KEYED_REPLAY_CASES.items():
         command = [compiler, "test", RUNNER.parent / package, "--libraries", ROOT / "core",
-                   "--backend", engine, "--replay", "--rerun", "-j", "1", "--json"]
+                   "--backend", engine, "--replay", "--rerun", "--cc", cc, "-j", "1", "--json"]
         if runtime is not None:
             command.extend(["--runtime", runtime])
         names = {f"{package}@1/{package}/{name}" for name in cases}
@@ -89,6 +177,8 @@ def keyed_replay(compiler, runtime, engine):
         passed = {test["definition"] for test in verdict["tests"] if test["passed"]}
         if not verdict["passed"] or passed != names:
             raise RuntimeError(f"{engine} keyed replay missing laws: {names - passed}")
+        for test in verdict["tests"]:
+            check_keyed_clock(test)
         print(f"{engine} {package} | {len(passed)} keyed replay laws")
 
 
@@ -101,11 +191,13 @@ def main():
     compiler = args.compiler.resolve()
     if args.keyed_replay:
         runtime = args.record_runtime.resolve() if args.record_runtime else None
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            jobs = [pool.submit(keyed_replay, compiler, runtime, engine)
-                    for engine in ("cranelift", "llvm")]
-            for job in jobs:
-                job.result()
+        with tempfile.TemporaryDirectory(prefix="hirsel-http-keyed-") as temp:
+            cc = keyed_clock_linker(Path(temp))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                jobs = [pool.submit(keyed_replay, compiler, runtime, engine, cc)
+                        for engine in ("cranelift", "llvm")]
+                for job in jobs:
+                    job.result()
         return
     if args.record_runtime:
         parser.error("--record-runtime requires --keyed-replay")

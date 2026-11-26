@@ -129,6 +129,37 @@ fn test_head_sweeps_log_retention(random: Random, tasks: Tasks) -> Result[(), st
     store.close(take swept)
 }
 
+@test
+fn test_upkeep_rest_at_max_store_time(d: Dir, random: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let max = 18446744073709551615u64
+    let (time, take clock_hand) = provide.clock(0, max - 3600000u64)
+    let mut wall = take clock_hand
+    let mut name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut name))
+    let options = result.unwrap(store.sized(Directory, 2147483648u64))
+    let db = store.open(tasks, dir, time, random, options)?
+    let (out, _from): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
+    let entries: Registry[(), ()] = registry()
+    let mut hd = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    for count in 1u64 .. 3u64 {
+        let _ = upkeep_scrub(mut hd)?
+        let _ = upkeep_walk(mut hd)?
+        if hd.upkeep.tours != count || hd.upkeep.walks != count {
+            fail("one scrub and walk must finish at each representable due time")
+        }
+        clock.set_wall(mut wall, max)
+    }
+    let _ = upkeep_scrub(mut hd)?
+    let _ = upkeep_walk(mut hd)?
+    if hd.upkeep.tours != 2u64 || hd.upkeep.walks != 2u64 {
+        fail("an hour of rest is unrepresentable after a job finishes at u64::MAX")
+    }
+    let Head(db: take kept, ..) = take hd
+    store.close(take kept)?
+    result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}
+
 // Serves `db` from a head until every task waits with no timer due; returns
 // the Db and the head's last released snapshot.
 fn upkeep_law_serve(take db: store.Db, take clock_handle: ClockHand, tasks: Tasks) -> Result[(store.Db, Option[store.Snapshot]), store.Error] waits {

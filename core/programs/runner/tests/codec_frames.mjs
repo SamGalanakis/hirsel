@@ -7,7 +7,7 @@ export async function vectors(c,frame,entries,http) {
   assert.equal(frame.subprotocol,'hirsel.4');
   assert.strictEqual(frame.Frame,c.Frame);
   assert.deepEqual(frame.Raised,{Overflow:1,Bounds:2,Division:3,Unwrap:4,Fail:5,Cancelled:6,Capacity:7,OutOfTime:8});
-  assert.deepEqual(frame.BadKind,{Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6,StreamFuture:7});
+  assert.deepEqual(frame.BadKind,{Truncated:0,Invalid:1,Utf8:2,Duplicate:3,Trailing:4,Schema:5,Value:6});
   assert.deepEqual(entries.identity,{digest:bytes('0102'),target:'t',n_place:16777216n});
   assert.equal(entries.want[0].args_fp,9007199254740993n);
   let unsubscribed = false;
@@ -100,6 +100,7 @@ export async function vectors(c,frame,entries,http) {
     [{tag:'Refused',value:{tag:'NotAllowed'}},'02000000 05000000'],
     [{tag:'Refused',value:{tag:'RequestMismatch'}},'02000000 06000000'],
     [{tag:'Refused',value:{tag:'HistoryUnavailable'}},'02000000 07000000'],
+    [{tag:'Refused',value:{tag:'StreamFuture',value:0x0000019a6b2c3d4en}},'02000000 08000000 4e3d2c6b9a010000'],
     [{tag:'Abandoned'},'03000000'],[{tag:'InDoubt'},'04000000']
   ]) vector({tag:'Ended',values:[3,outcome]},'07000000 03000000 '+hex);
   vector({tag:'Set',values:[7,{tag:'Some',value:bytes('aabb')}]},'09000000 07000000 01000000 02000000 aabb');

@@ -267,7 +267,7 @@ class Codec:
                     payload += [self.uint()]
             elif (tag, inner) in ((1, 1), (2, 4)):
                 payload += [self.uint(), self.uint()]
-            elif (tag, inner) == (1, 2):
+            elif (tag, inner) in ((1, 2), (2, 8)):
                 payload += [self.uint()]
         return dict(kind=name, payload=payload)
 
@@ -465,6 +465,8 @@ def trace_source(t, name, observer):
                        f'OutOfTime({p[1]}u64)' if p[0] == 2 else 'Gone')
             return f'ObsFailed({payload})'
         if kind == 'Refused':
+            if p[0] == 8:
+                return f'ObsRefused(ObsStreamFuture({p[1]}u64))'
             payload = ('NoEntry' if p[0] == 0 else
                        f'Malformed(runner.Bad(kind: {p[1]}u32, at: {p[2]}u64))' if p[0] == 1 else
                        'Overloaded' if p[0] == 2 else 'Deadline' if p[0] == 3 else

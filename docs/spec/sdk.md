@@ -229,7 +229,7 @@ with reason `hirsel.4` before any Welcome; the client reports that the page or c
 reloaded, and never retries. A 1009 after Welcome is the stored-reply close and
 is reported as a reply error.
 Outcome has Returned, Failed, Refused, Abandoned and InDoubt at tags 0 through
-4. Fault appends Conflict at tag 4 (RUNNER-SPEC v2.45). Refusal appends RequestMismatch at tag 6 and HistoryUnavailable at tag 7.
+4. Fault appends Conflict at tag 4 (RUNNER-SPEC v2.45). Refusal appends RequestMismatch at tag 6, HistoryUnavailable at tag 7 and StreamFuture at tag 8. StreamFuture carries the store's keyed time as a u64 in milliseconds (RUNNER-SPEC v2.88).
 Superseded is absent. The generated codecs follow the bundled declarations.
 
 `--place-timeout` is a positive number of seconds, default 10. `--n-place` fixes

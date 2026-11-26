@@ -43,6 +43,7 @@ fn wire_done_size(o: Outcome) -> u64 {
         Refused(NotAllowed) => 8u64,
         Refused(RequestMismatch) => 8u64,
         Refused(HistoryUnavailable) => 8u64,
+        Refused(StreamFuture(_)) => 16u64,
         Abandoned => 4u64,
         InDoubt => 4u64,
     }

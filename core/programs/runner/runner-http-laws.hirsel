@@ -155,6 +155,7 @@ fn http_law_refused(why: Refusal) -> u16 {
         Budget(_) => 503u16,
         RequestMismatch => 422u16,
         HistoryUnavailable => 410u16,
+        StreamFuture(_) => 400u16,
     }
 }
 

@@ -335,9 +335,9 @@
     {
       "name": "done_stream_future",
       "type": "Done",
-      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0u64, outcome: Refused(Malformed(runner.Bad(kind: 7u32, at: 0x0000019a6b2c3d4eu64))))",
-      "hex": "0807060504030201282726252423222100000000000000000200000001000000070000004e3d2c6b9a010000",
-      "derivation": "stream, position, refusal tags, STREAM_FUTURE and its keyed time"
+      "value": "runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0u64, outcome: Refused(StreamFuture(0x0000019a6b2c3d4eu64)))",
+      "hex": "08070605040302012827262524232221000000000000000002000000080000004e3d2c6b9a010000",
+      "derivation": "stream, position, Outcome tag 2, Refusal tag 8, keyed time"
     },
     {
       "name": "set_state",

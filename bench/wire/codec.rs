@@ -34,6 +34,7 @@ pub enum Refusal {
     NotAllowed,
     RequestMismatch,
     HistoryUnavailable,
+    StreamFuture(u64),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fault {
@@ -273,7 +274,7 @@ macro_rules! sum {
     }};
 }
 sum!(Entry { 0 => Ready(slot), 1 => Resolve(slot, args), 2 => Gone });
-sum!(Refusal { 0 => NoEntry, 1 => Malformed(bad), 2 => Overloaded, 3 => Deadline, 4 => Budget(room), 5 => NotAllowed, 6 => RequestMismatch, 7 => HistoryUnavailable });
+sum!(Refusal { 0 => NoEntry, 1 => Malformed(bad), 2 => Overloaded, 3 => Deadline, 4 => Budget(room), 5 => NotAllowed, 6 => RequestMismatch, 7 => HistoryUnavailable, 8 => StreamFuture(at) });
 sum!(Fault { 0 => Raised(kind), 1 => OutOfBytes(room), 2 => OutOfTime(ticks), 3 => Gone, 4 => Conflict(index) });
 sum!(Outcome { 0 => Returned(bytes), 1 => Failed(fault), 2 => Refused(refusal), 3 => Abandoned, 4 => InDoubt });
 sum!(Frame {

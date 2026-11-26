@@ -34,6 +34,13 @@ fn http_refusal(take why: Refusal) -> Result[std.http.Response, std.http.Handler
         Deadline => http_reply(504u16, "", false, false, false),
         RequestMismatch => http_reply(422u16, "{\"refused\":\"request_mismatch\"}", false, false, false),
         HistoryUnavailable => http_reply(410u16, "", false, false, false),
+        StreamFuture(at) => {
+            let mut response = http_reply(400u16, "{\"refused\":\"stream_future\"}", false, false, false)?
+            let mut now = string.new()
+            string.push_u64(mut now, at)
+            std.http.header(mut response, b"Hirsel-Now", string.into_bytes(take now))?
+            Ok(take response)
+        },
     }
 }
 
@@ -164,17 +171,9 @@ fn http_refused_attempt(req: std.http.Request, take why: Refusal) -> Result[std.
         Deadline => b"deadline",
         RequestMismatch => b"request_mismatch",
         HistoryUnavailable => b"history_unavailable",
-    }
-    let sample = match why {
-        Malformed(detail) if detail.kind == 7u32 => Some(detail.at),
-        _ => None
+        StreamFuture(_) => b"stream_future",
     }
     let mut response = http_refusal(take why)?
-    if let Some(time) = sample {
-        let mut now = string.new()
-        string.push_u64(mut now, time)
-        std.http.header(mut response, b"Hirsel-Now", string.into_bytes(take now))?
-    }
     std.http.mark_refused(mut response, req, kind)?
     Ok(take response)
 }

@@ -7,7 +7,8 @@ export interface Room { requested: bigint; available: bigint }
 export type Fault = {tag: 'Raised'; value: number} | {tag: 'OutOfBytes'; value: Room}
   | {tag: 'OutOfTime'; value: bigint} | {tag: 'Gone'} | {tag: 'Conflict'; value: string};
 export type Refusal = {tag: 'NoEntry' | 'Overloaded' | 'Deadline' | 'NotAllowed' | 'RequestMismatch' | 'HistoryUnavailable'}
-  | {tag: 'Malformed'; value: {kind: number; at: bigint}} | {tag: 'Budget'; value: Room};
+  | {tag: 'Malformed'; value: {kind: number; at: bigint}} | {tag: 'Budget'; value: Room}
+  | {tag: 'StreamFuture'; value: bigint};
 export type WireOutcome<R> = {tag: 'Returned'; value: R} | {tag: 'Failed'; value: Fault}
   | {tag: 'Refused'; value: Refusal} | {tag: 'Abandoned' | 'InDoubt'};
 export type Outcome<R> = WireOutcome<R> | {tag: 'LocallyUnknown' | 'RequestMismatch'};

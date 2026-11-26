@@ -173,10 +173,7 @@ fn frame(name: &str) -> Frame {
             vec![Done {
                 stream: STREAM,
                 p: 0,
-                outcome: Outcome::Refused(Refusal::Malformed(Bad {
-                    kind: 7,
-                    at: KEYED_AT,
-                })),
+                outcome: Outcome::Refused(Refusal::StreamFuture(KEYED_AT)),
             }],
         ),
         "set_state" => Frame::Set(7, Some(bytes("aabb"))),

@@ -290,7 +290,8 @@ is the logical key, with big-endian table and integer key components;
 its optional value contains the current value codec's bytes without a stored
 schema prefix. Wire serving runs over `runner.serve_wire` / `runner.operate` (below).
 Outcome tags are Returned 0, Failed 1, Refused 2, Abandoned 3 and InDoubt 4.
-Refusal appends RequestMismatch 6 and HistoryUnavailable 7 after NotAllowed 5.
+Refusal appends RequestMismatch 6, HistoryUnavailable 7 and StreamFuture 8 after NotAllowed 5.
+StreamFuture carries the store's keyed time in milliseconds as a u64.
 Fault tags are Raised 0, OutOfBytes 1, OutOfTime 2, Gone 3 and Conflict 4.
 A client that offers only the retired tokens `hirsel.1` or `hirsel.2` is closed 1009
 with reason `hirsel.4` right after the upgrade, before any Welcome.

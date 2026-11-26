@@ -249,6 +249,10 @@ fn same_refusal(a: runner.Refusal, b: runner.Refusal) -> bool {
             HistoryUnavailable => true,
             _ => false
         },
+        StreamFuture(x) => match b {
+            StreamFuture(y) => x == y,
+            _ => false
+        },
     }
 }
 

@@ -428,9 +428,9 @@ pub fn law_frame_vectors() -> bool {
     if !wire(out, Reset(0x6162636465666768u64, one(runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0x3132333435363738u64, outcome: Refused(Budget(runner.Room(requested: 0x4142434445464748u64, available: 0x5152535455565758u64)))))), b("824008000000686766656463626101000000080706050403020128272625242322213837363534333231020000000400000048474645444342415857565554535251")) {
         return false
     }
-    // done_stream_future: stream, position, refusal tags, STREAM_FUTURE and its keyed time
+    // done_stream_future: stream, position, Outcome tag 2, Refusal tag 8, keyed time
     let c_done_stream_future: std.codec.Codec[runner.Done] = std.codec.of()
-    if !vector(c_done_stream_future, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0u64, outcome: Refused(Malformed(runner.Bad(kind: 7u32, at: 0x0000019a6b2c3d4eu64)))), b("0807060504030201282726252423222100000000000000000200000001000000070000004e3d2c6b9a010000")) {
+    if !vector(c_done_stream_future, runner.Done(stream: store.StreamId(t: 0x0102030405060708u64, n: 0x2122232425262728u64), p: 0u64, outcome: Refused(StreamFuture(0x0000019a6b2c3d4eu64))), b("08070605040302012827262524232221000000000000000002000000080000004e3d2c6b9a010000")) {
         return false
     }
     // set_state: Set tag, sub, Some tag and state blob

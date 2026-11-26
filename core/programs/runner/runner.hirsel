@@ -12,7 +12,7 @@ pub type Bad: codec + send {
 
 pub type Kind: codec + key + send = Compute | Transact | Query | Granted | Room
 
-pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable
+pub type Refusal: codec + send = NoEntry | Malformed(Bad) | Overloaded | Deadline | Budget(Room) | NotAllowed | RequestMismatch | HistoryUnavailable | StreamFuture(u64)
 
 pub type Fault: codec + send = Raised(u32) | OutOfBytes(Room) | OutOfTime(u64) | Gone | Conflict(String)
 

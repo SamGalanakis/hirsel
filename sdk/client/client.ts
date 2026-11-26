@@ -761,10 +761,10 @@ export class Client implements Transport {
     } else if (reply.status === 403 && refusal === 'not_allowed') {
       await this.finishRefusal({tag: 'NotAllowed'});
     } else if (reply.status === 400 && refusal === 'malformed') {
-      const malformed = /^\{"refused":"malformed","kind":([0-7])\}$/.exec(reply.body);
-      if (!malformed) await this.retryPending(false);
-      else if (malformed[1] === '7') await this.retryPending(false);
-      else await this.finishRefusal({tag: 'Malformed', value: {kind: Number(malformed[1]), at: at ?? 0n}});
+      const malformed = /^\{"refused":"malformed","kind":([0-9]{1,10})\}$/.exec(reply.body);
+      const kind = Number(malformed?.[1]);
+      if (kind <= 0xffffffff) await this.finishRefusal({tag: 'Malformed', value: {kind, at: 0n}});
+      else await this.retryPending(false);
     } else {
       await this.retryPending(false);
     }
@@ -823,7 +823,7 @@ export class Client implements Transport {
         else await this.retryPending(false);
       } else if (outcome.tag === 'Refused') {
         const refusal = outcome.value;
-        const future = refusal.tag === 'Malformed' && refusal.value.kind === 7;
+        const future = refusal.tag === 'StreamFuture';
         if (refusal.tag === 'RequestMismatch') await this.fence('RequestMismatch');
         else if (refusal.tag === 'HistoryUnavailable' || future) {
           if (!pending.untouched) {
@@ -831,8 +831,8 @@ export class Client implements Transport {
             else await this.retire('LocallyUnknown');
           } else if (pending.remintsLeft === 1 && this.record.minter === this.installationId) {
             if (future) {
-              this.sampleTime(refusal.value.at, this.retention);
-              await this.remint(refusal.value.at);
+              this.sampleTime(refusal.value, this.retention);
+              await this.remint(refusal.value);
               await this.sendPending();
             } else {
               this.remintOnWelcome = true;

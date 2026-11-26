@@ -157,9 +157,9 @@ def vectors():
           batch([], [], [budget_done], VERSION), '24-byte Batch prefix and one 48-byte Done', True)
     frame('reset_one_refusal', f'Reset(0x{VERSION:016x}u64, one({budget_expr}))',
           pack('<IQ', 8, VERSION) + seq([budget_done]), '16-byte Reset prefix and one 48-byte Done', True)
-    future = f'Refused(Malformed(runner.Bad(kind: 7u32, at: 0x{NOW:016x}u64)))'
+    future = f'Refused(StreamFuture(0x{NOW:016x}u64))'
     add('done_stream_future', 'Done', f'runner.Done(stream: {HS}, p: 0u64, outcome: {future})',
-        stream + pack('<QIIIQ', 0, 2, 1, 7, NOW), 'stream, position, refusal tags, STREAM_FUTURE and its keyed time')
+        stream + pack('<QIIQ', 0, 2, 8, NOW), 'stream, position, Outcome tag 2, Refusal tag 8, keyed time')
 
     frame('set_state', 'Set(7u32, Some(b("aabb")))', pack('<II', 9, 7) + optional(blob(identity)),
           'Set tag, sub, Some tag and state blob')

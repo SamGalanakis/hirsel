@@ -1162,6 +1162,7 @@ The relay knows which `Overloaded` it has, because it made the decision or recei
 |---|---|
 | `Refused(RequestMismatch)` | 422 `{"refused": "request_mismatch"}` |
 | `Refused(HistoryUnavailable)` | 410 |
+| `Refused(StreamFuture(at))` | 400 `{"refused": "stream_future"}`, `Hirsel-Now: <at>` in unsigned decimal milliseconds (RUNNER-SPEC §1.1) |
 | `Abandoned` (this send's deadline passed while it was owed) | 409, `Retry-After: 1`: in progress, retry with the same key |
 | A send the head holds in its FIFO behind `Rejected(latest)` (an earlier position not yet re-sent, H2) | no answer until the send's deadline, then `Abandoned` (409); the connection waits at most `deadline_ms`, inside the handler deadline |
 | store `Error(Full)` | 503, `Retry-After: 1` |

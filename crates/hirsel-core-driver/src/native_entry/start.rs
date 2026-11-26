@@ -12,7 +12,7 @@ pub(super) fn emit(
     foreign_waits: bool,
     spawns_units: bool,
     build: Option<DataId>,
-    descriptors: Option<DataId>,
+    descriptors: Option<(DataId, DataId)>,
 ) -> Result<()> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I32, I64], Some(I32));
@@ -224,8 +224,9 @@ pub(super) fn emit(
     } else if let Some(build) = build {
         let identity = f.string(plan.identity.as_bytes())?;
         match descriptors {
-            Some(descriptors) => {
+            Some((descriptors, spawns)) => {
                 let descriptors = f.address(descriptors);
+                let spawns = f.address(spawns);
                 f.value_call(
                     "hirsel_core_os_run_recording_with_units",
                     I8,
@@ -238,6 +239,7 @@ pub(super) fn emit(
                         revision,
                         build,
                         descriptors,
+                        spawns,
                     ],
                 )?
             }

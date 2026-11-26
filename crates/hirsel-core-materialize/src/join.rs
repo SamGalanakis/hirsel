@@ -69,10 +69,17 @@ impl Remap {
                 Inst::ReadStatic { data, .. } => *data = self.statics[data.index()],
                 Inst::FunctionRef { function, .. } => *function = self.functions[function.index()],
                 Inst::DescriptorRef {
-                    function, identity, ..
+                    function,
+                    identity,
+                    spawn,
+                    ..
                 } => {
                     *function = self.functions[function.index()];
                     *identity = self.statics[identity.index()];
+                    if let Some(spawn) = spawn {
+                        spawn.x = self.types[spawn.x.index()];
+                        spawn.r = self.types[spawn.r.index()];
+                    }
                 }
                 Inst::Drop { ty, .. }
                 | Inst::Release { ty, .. }

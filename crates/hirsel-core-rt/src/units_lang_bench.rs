@@ -110,8 +110,14 @@ unsafe extern "C" fn root(c: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
             },
         };
         let (xi, r) = (input(), plain(8));
-        let spawned =
-            hirsel_core_spawn_unit(c, 0, 4096, (&raw mut x).cast(), echo, &layout, &xi, &r, 0);
+        let entry = SpawnEntry {
+            bridge: echo,
+            adapter: 0,
+            layout,
+            x: xi,
+            r,
+        };
+        let spawned = hirsel_core_spawn_unit(c, 0, 4096, (&raw mut x).cast(), &entry, 0);
         assert!(!spawned.task.is_null());
         // CONC-15: the task charge 256 + size(R) + 32 + n.
         assert_eq!(before - (*c).available(), 256 + 8 + 32 + 4096);

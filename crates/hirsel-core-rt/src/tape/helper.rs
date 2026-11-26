@@ -13,8 +13,8 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::net::CrossingSockets;
-use crate::units_lang::Cross;
 use crate::units_lang::packing::{append, copy_elements, copy_flat};
+use crate::units_lang::{Cross, SpawnEntry};
 use hirsel_core_layout::cross::{
     CAPABILITY, CLIENT, ELEMENT, FUNCTION, MEDIA, PADDING, SECRET, SEQ, SHARED, SOCKET, elements,
     live,
@@ -238,10 +238,11 @@ pub(crate) unsafe fn spawn(
     n: u64,
     steps: Option<u64>,
     input: *const u8,
-    x: &Cross,
+    spawned: &SpawnEntry,
     sockets: Option<&CrossingSockets>,
 ) -> Option<Helper> {
     let spawner = crate::tasks::current_group()?;
+    let x = &spawned.x;
     // Resolve each capability word before any cell is locked: the registry's
     // resolution may itself reach the spawner's cell.
     // The wrapped input's first row is `f`'s, outside `x`'s span.
@@ -327,7 +328,7 @@ pub(crate) unsafe fn spawn(
     let mut grants = Vec::new();
     // SAFETY: forwarded; each capability word designates a grant of the run.
     let body = unsafe {
-        entry(context, n, steps, input, x, &mut |kind, word| {
+        entry(context, n, steps, input, spawned, &mut |kind, word| {
             units::arrive(
                 &mut live,
                 cell.provider.state as usize,
@@ -431,10 +432,11 @@ unsafe fn entry(
     n: u64,
     steps: Option<u64>,
     input: *const u8,
-    x: &Cross,
+    spawned: &SpawnEntry,
     handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
 ) -> Result<Vec<u8>, &'static str> {
     let _ = context;
+    let x = &spawned.x;
     let owners = x.owners();
     // The wrapped input's first field is `f`, so its row comes first.
     let Some(&[f, FUNCTION, ..]) = owners.first() else {
@@ -443,6 +445,13 @@ unsafe fn entry(
     // SAFETY: the input holds `f`'s code word at its row.
     let code = unsafe { input.add(f as usize).cast::<u64>().read_unaligned() };
     let identity = run::identities::identity_of(code).ok_or(NO_IDENTITY)?;
+    // A replay starts the helper from the link's row for its identity, so
+    // the recording holds only entries that row starts as this spawn does.
+    match run::identities::spawn_entry(identity) {
+        Some(row) if row.same(spawned) => {}
+        Some(_) => return Err(OTHER_ENTRY),
+        None => return Err(NO_ENTRY),
+    }
     let mut body = Vec::new();
     put_varint(&mut body, identity.len() as u64);
     body.extend_from_slice(identity);
@@ -489,6 +498,9 @@ pub(super) unsafe fn capability_words(
     words
 }
 const NO_IDENTITY: &str = "the entry's function has no code identity (a closure)";
+const NO_ENTRY: &str = "the entry's function has no row in the link's spawn table";
+const OTHER_ENTRY: &str =
+    "the link's spawn table row for the entry's function differs from the spawn's";
 
 /// A value that crosses units: its plain bytes with padding and owner words zeroed,
 /// then a part per owner in ascending offset order, each sequence's part

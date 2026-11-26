@@ -8,6 +8,7 @@
 
 use crate::*;
 
+mod descriptor;
 mod frame;
 mod own;
 mod places;
@@ -885,23 +886,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 || "bad function reference".into(),
             )
         }
-        Inst::DescriptorRef {
-            result,
-            function,
-            identity,
-        } => {
-            c.def(result)?;
-            need(
-                function.index() < c.m.functions.len()
-                    && c.m
-                        .statics
-                        .get(identity.index())
-                        .and_then(Static::literal_bytes)
-                        .is_some()
-                    && c.ty(result)? == Ty::Ptr,
-                || "bad descriptor reference".into(),
-            )
-        }
+        Inst::DescriptorRef { .. } => descriptor::descriptor_ref(c, inst),
         Inst::CompactWidth { result, word, ty } => {
             c.def(result)?;
             need(c.m.types.get(ty.index()).is_some(), || {

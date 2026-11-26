@@ -150,13 +150,14 @@ impl<'a> Plan<'a> {
         self.recording && self.replay.is_none() && spawns_units
     }
 
-    /// The link's descriptor names for [`Self::recording_units`], else none.
+    /// The link's descriptor names and spawn table for
+    /// [`Self::recording_units`], else none.
     pub(crate) fn descriptors(
         &self,
         spawns_units: bool,
         members: &[std::sync::Arc<[u8]>],
         keys: &[(hirsel_core_ids::ContentHash, u64)],
-    ) -> std::io::Result<Vec<Vec<u8>>> {
+    ) -> std::io::Result<sites::Descriptors> {
         sites::descriptors(self.recording_units(spawns_units), members, keys)
     }
     pub(crate) fn new(
@@ -349,10 +350,13 @@ impl<'a> Plan<'a> {
             None
         };
         let descriptors = if self.recording_units(spawns_units) {
-            let names = self
+            let link = self
                 .descriptors(spawns_units, members, keys)
                 .map_err(error)?;
-            Some(data::descriptors(&mut object, &names)?)
+            Some((
+                data::descriptors(&mut object, &link.names)?,
+                data::spawns(&mut object, &link.spawns)?,
+            ))
         } else {
             None
         };

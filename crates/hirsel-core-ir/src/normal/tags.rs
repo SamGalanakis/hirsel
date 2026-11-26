@@ -251,7 +251,7 @@ tags!(Inst {
     0 => Const { result, bits },
     1 => ReadStatic { result, data },
     2 => FunctionRef { result, function },
-    3 => DescriptorRef { result, function, identity },
+    3 => DescriptorRef { result, function, identity, spawn },
     4 => Unary { result, op, operand, fail },
     5 => Binary { result, op, left, right, fail },
     6 => Compare { result, op, left, right },

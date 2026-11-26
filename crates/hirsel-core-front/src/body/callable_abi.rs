@@ -383,6 +383,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         out.function
     }
+    /// The input a task of `fn(take x) -> r` takes: the function, then `x`;
+    /// with the function's type.
+    pub(super) fn task_input_ty(&mut self, x: TyId, r: TyId) -> (TyId, TyId) {
+        let callback = self
+            .t
+            .mk(TyKind::Fn(vec![(Mode::Take, x)], r, true, Callable::Plain));
+        (self.t.mk(TyKind::Tuple(vec![callback, x])), callback)
+    }
+
     /// A task's entry into user code carries its own Step. The runtime and both
     /// native task thunks only invoke this ordinary front-produced callable.
     pub(super) fn task_entry_adapter(
@@ -393,10 +402,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: Option<ValueId>,
         n: NodeId,
     ) -> Option<(TypeId, AddressId, ValueId)> {
-        let callback = self
-            .t
-            .mk(TyKind::Fn(vec![(Mode::Take, x)], r, true, Callable::Plain));
-        let wrapped = self.t.mk(TyKind::Tuple(vec![callback, x]));
+        let (wrapped, callback) = self.task_input_ty(x, r);
         let id = self.runtime_type(wrapped, n)?;
         let input = self.new_slot(PlaceTy::Declared(id), n);
         let code = self.address(

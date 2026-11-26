@@ -59,18 +59,40 @@ pub(crate) fn runtime_sources(
 /// The link names of every code descriptor the inputs define, sorted: the
 /// index a recording entry gives the runtime, which finds a spawned
 /// helper's entry identity by its code word (docs/recording.md).
-/// None unless `indexed`.
+/// With them the link's spawn table: each spawnable function's descriptor
+/// name with the name of its `(X, R)`'s spawn entry, joined from the
+/// markers the function's object defines to the entries the spawn sites'
+/// objects define. None unless `indexed`.
 pub(super) fn descriptors(
     indexed: bool,
     members: &[std::sync::Arc<[u8]>],
     keys: &[(hirsel_core_ids::ContentHash, u64)],
-) -> std::io::Result<Vec<Vec<u8>>> {
+) -> std::io::Result<Descriptors> {
     let mut names = BTreeSet::new();
+    let mut spawnables = BTreeSet::new();
+    let mut entries = BTreeSet::new();
     for (n, key) in keys.iter().enumerate().filter(|_| indexed) {
         let scan = crate::resident::REFERENCED.get_or(Some(*key), || referenced(&members[n]))?;
         names.extend(scan.descriptors.iter().cloned());
+        spawnables.extend(scan.spawnables.iter().cloned());
+        entries.extend(scan.entries.iter().cloned());
     }
-    Ok(names.into_iter().collect())
+    let spawns = spawnables
+        .into_iter()
+        .filter(|(descriptor, entry)| names.contains(descriptor) && entries.contains(entry))
+        .collect();
+    Ok(Descriptors {
+        names: names.into_iter().collect(),
+        spawns,
+    })
+}
+
+/// The link's descriptor index and spawn table, by link names.
+#[derive(Default)]
+pub(crate) struct Descriptors {
+    pub(crate) names: Vec<Vec<u8>>,
+    /// `(descriptor, spawn entry)`, one row per spawnable function.
+    pub(crate) spawns: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// [`filter`]'s result for `sources` from its result `prior` for the map
@@ -231,6 +253,10 @@ pub(crate) struct Referenced {
     spawns_units: bool,
     /// The code descriptors (PROG-9) the object defines, by link name.
     descriptors: std::sync::Arc<[Vec<u8>]>,
+    /// The spawnable markers it defines, as `(descriptor, spawn entry)`.
+    spawnables: std::sync::Arc<[(Vec<u8>, Vec<u8>)]>,
+    /// The spawn entries it defines.
+    entries: std::sync::Arc<[Vec<u8>]>,
     digest: hirsel_core_ids::ContentHash,
 }
 
@@ -240,17 +266,29 @@ fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
     let object = object::File::parse(input).map_err(std::io::Error::other)?;
     let format = crate::native_debug::object_format(object.format())?;
     let mut descriptors = BTreeSet::new();
+    let mut spawnables = BTreeSet::new();
+    let mut entries = BTreeSet::new();
     for symbol in object.symbols() {
-        if symbol.is_definition()
-            && symbol.is_global()
-            && let Ok(name) = symbol.name_bytes()
-            && let name = link_name(format, name)
-            && name.ends_with(b"$static")
-        {
+        if !symbol.is_definition() || !symbol.is_global() {
+            continue;
+        }
+        let Ok(name) = symbol.name_bytes() else {
+            continue;
+        };
+        let name = link_name(format, name);
+        if name.ends_with(b"$static") {
             descriptors.insert(name.to_vec());
+        } else if name.ends_with(b"$spawn_entry") {
+            entries.insert(name.to_vec());
+        } else if let Ok(name) = std::str::from_utf8(name)
+            && let Some((descriptor, entry)) = hirsel_core_ir::spawnable_parts(name)
+        {
+            spawnables.insert((descriptor.as_bytes().to_vec(), entry.into_bytes()));
         }
     }
     let descriptors: Vec<_> = descriptors.into_iter().collect();
+    let spawnables: Vec<_> = spawnables.into_iter().collect();
+    let entries: Vec<_> = entries.into_iter().collect();
     for section in object.sections() {
         if !allocatable(&section) {
             continue;
@@ -274,16 +312,26 @@ fn referenced(input: &[u8]) -> std::io::Result<Referenced> {
     let mut items: Vec<_> = items.into_iter().collect();
     items.sort_unstable();
     let digest = hirsel_core_ids::ContentHash::of_parts(
-        "hirsel.site-references.v2",
+        "hirsel.site-references.v3",
         std::iter::once(&[u8::from(spawns_units)][..])
             .chain(items.iter().map(Vec::as_slice))
             .chain(std::iter::once(&b"descriptors"[..]))
-            .chain(descriptors.iter().map(Vec::as_slice)),
+            .chain(descriptors.iter().map(Vec::as_slice))
+            .chain(std::iter::once(&b"spawnables"[..]))
+            .chain(
+                spawnables
+                    .iter()
+                    .flat_map(|(d, e)| [d.as_slice(), e.as_slice()]),
+            )
+            .chain(std::iter::once(&b"entries"[..]))
+            .chain(entries.iter().map(Vec::as_slice)),
     );
     Ok(Referenced {
         items: items.into(),
         spawns_units,
         descriptors: descriptors.into(),
+        spawnables: spawnables.into(),
+        entries: entries.into(),
         digest,
     })
 }

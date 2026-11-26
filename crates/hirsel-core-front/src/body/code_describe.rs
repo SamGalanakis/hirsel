@@ -143,6 +143,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 result: descriptor,
                 function,
                 identity,
+                spawn: None,
             },
             n,
         );
@@ -172,12 +173,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) {
         self.inst(Inst::FunctionRef { result, function }, n);
-        let TyKind::Fn(params, _, _, Callable::Plain) = self.t.kind(ty) else {
+        let TyKind::Fn(params, r, _, Callable::Plain) = self.t.kind(ty).clone() else {
             return;
         };
-        if !matches!(params[..], [(Mode::Take, _)]) {
+        let [(Mode::Take, x)] = params[..] else {
             return;
-        }
+        };
         let Ok((raw, _)) = self.instance_row(f, types) else {
             return;
         };
@@ -197,12 +198,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let bytes = recipe.render(&[]).expect("closed descriptor recipe");
             self.e.static_bytes(&bytes)
         };
+        // The rows `task.spawn_unit` would start it with, which key its
+        // spawn entry.
+        let (wrapped, _) = self.task_input_ty(x, r);
+        let spawn = self
+            .e
+            .type_row(self.p, &mut self.t, wrapped)
+            .zip(self.e.type_row(self.p, &mut self.t, r))
+            .map(|(x, r)| hirsel_core_ir::SpawnTypes { x, r });
         let result = self.value(Ty::Ptr);
         self.inst(
             Inst::DescriptorRef {
                 result,
                 function,
                 identity,
+                spawn,
             },
             n,
         );
@@ -233,6 +243,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     result: descriptor,
                     function,
                     identity,
+                    spawn: None,
                 },
                 n,
             );

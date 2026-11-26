@@ -300,24 +300,38 @@ fn descriptors(
     let mut descriptors = vec![None; input.functions.len()];
     let mut defined = std::collections::HashSet::new();
     let mut revisions = std::collections::HashSet::new();
+    let mut spawnable = std::collections::HashSet::new();
     for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
             let c::Inst::DescriptorRef {
-                function, identity, ..
+                function,
+                identity,
+                spawn,
+                ..
             } = *inst
             else {
                 continue;
             };
+            let name = input.descriptor_symbol(function, &symbols[function.index()]);
+            // A function made a plain `fn(take X) -> R` value: the link joins
+            // its descriptor to the spawn entry of its rows by this marker's
+            // name ([`c::spawnable_symbol`]).
+            if let Some(spawn) = spawn {
+                let marker = c::spawnable_symbol(&name, input.spawn_key(spawn));
+                if spawnable.insert(marker.clone()) {
+                    let id = object
+                        .declare_data(&marker, Linkage::Preemptible, false, false)
+                        .map_err(error)?;
+                    let mut data = DataDescription::new();
+                    data.define_zeroinit(1);
+                    object.define_data(id, &data).map_err(error)?;
+                }
+            }
             if descriptors[function.index()].is_some() {
                 continue;
             }
             let id = object
-                .declare_data(
-                    &input.descriptor_symbol(function, &symbols[function.index()]),
-                    Linkage::Preemptible,
-                    false,
-                    false,
-                )
+                .declare_data(&name, Linkage::Preemptible, false, false)
                 .map_err(error)?;
             descriptors[function.index()] = Some(id);
             // Two rows of one code identity name one descriptor.
@@ -468,7 +482,8 @@ fn emit(
         let _span = observer.enter("glue_declarations");
         drop::Glues::declare(&mut object, input, layouts)?
     };
-    let task_entries = task_entry::Glues::declare(&mut object, input)?;
+    let mut task_entries = task_entry::Glues::declare(&mut object, input)?;
+    task_entries.define_units(&mut object, input, layouts, &functions, &glues)?;
     let tables = Tables {
         input,
         layouts,

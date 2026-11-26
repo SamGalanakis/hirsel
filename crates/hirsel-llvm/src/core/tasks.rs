@@ -9,21 +9,28 @@ const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
 impl FunctionEmitter<'_> {
+    /// A `ValueLayout`'s words before its cleanup: bytes, alignment and
+    /// logical size. A task input's bytes and alignment cover its entry's
+    /// code word.
+    pub(super) fn layout_words(&self, t: TypeId, task_input: bool) -> [u64; 3] {
+        let (mut bytes, mut align) = self.place_layout(PlaceTy::Declared(t));
+        if task_input {
+            bytes += task_entry::input_offset(self.module, self.recipes, t);
+            align = align.max(8);
+        }
+        let logical = hirsel_core_layout::field_size(
+            &self.module.types,
+            self.recipes,
+            &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(t.0)),
+        )
+        .2;
+        [bytes, align, logical]
+    }
     fn value_descriptors(&mut self, types: &[TypeId], task_input: bool) -> Value {
         let buffer = self.temp(Type::bytes(32 * types.len() as u64));
         for (i, &t) in types.iter().enumerate() {
-            let (mut bytes, mut align) = self.place_layout(PlaceTy::Declared(t));
-            if task_input && i == 0 {
-                bytes += task_entry::input_offset(self.module, self.recipes, t);
-                align = align.max(8);
-            }
-            let logical = hirsel_core_layout::field_size(
-                &self.module.types,
-                self.recipes,
-                &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(t.0)),
-            )
-            .2;
-            for (j, value) in [bytes, align, logical].into_iter().enumerate() {
+            let words = self.layout_words(t, task_input && i == 0);
+            for (j, value) in words.into_iter().enumerate() {
                 let at = self.offset(&buffer, (i * 32 + j * 8) as u64);
                 self.store(&Type::I64, &int(value), &at, 8);
             }
@@ -39,31 +46,48 @@ impl FunctionEmitter<'_> {
         buffer
     }
     /// The runtime's `Cross` of a value of `ty` at `shift` bytes into a buffer
-    /// of `shift + size(ty)`: the buffer's bytes, the span of the value a
-    /// recorder writes (a task entry's `x` when `entry`), then each owner row.
-    fn cross(&mut self, ty: TypeId, shift: u64, entry: bool) -> Value {
+    /// of `shift + size(ty)`: its words, the second (the owner rows' address)
+    /// zero, and its owner rows. It spans the value a recorder writes (a task
+    /// entry's `x` when `entry`).
+    pub(super) fn cross_words(
+        &self,
+        ty: TypeId,
+        shift: u64,
+        entry: bool,
+    ) -> ([u64; 5], Vec<[u64; 4]>) {
         let (bytes, _) = self.place_layout(PlaceTy::Declared(ty));
         let row = hirsel_core_layout::TypeRef(ty.0);
-        let owners = hirsel_core_layout::cross::owners(&self.module.types, self.recipes, row);
+        let mut owners = hirsel_core_layout::cross::owners(&self.module.types, self.recipes, row);
         let [x_at, x_len] = if entry {
             hirsel_core_layout::cross::entry_span(&self.module.types, self.recipes, row)
         } else {
             [0, bytes]
         };
+        for row in &mut owners {
+            // An element row's offset is in its element.
+            if row[1] & hirsel_core_layout::cross::ELEMENT == 0 {
+                row[0] += shift;
+            }
+        }
+        (
+            [bytes + shift, 0, owners.len() as u64, x_at + shift, x_len],
+            owners,
+        )
+    }
+    fn cross(&mut self, ty: TypeId, shift: u64, entry: bool) -> Value {
+        let (words, owners) = self.cross_words(ty, shift, entry);
         let buffer = self.temp(Type::bytes(40 + 32 * owners.len() as u64));
         let rows = self.offset(&buffer, 40);
-        self.store(&Type::I64, &int(bytes + shift), &buffer, 8);
-        let at = self.offset(&buffer, 8);
-        self.store(&Type::Ptr, &rows, &at, 8);
-        for (offset, word) in [(16, owners.len() as u64), (24, x_at + shift), (32, x_len)] {
-            let at = self.offset(&buffer, offset);
-            self.store(&Type::I64, &int(word), &at, 8);
+        for (j, &n) in words.iter().enumerate() {
+            let at = self.offset(&buffer, (j * 8) as u64);
+            if j == 1 {
+                self.store(&Type::Ptr, &rows, &at, 8);
+            } else {
+                self.store(&Type::I64, &int(n), &at, 8);
+            }
         }
         for (i, row) in owners.iter().enumerate() {
             for (j, &n) in row.iter().enumerate() {
-                // An element row's offset is in its element.
-                let element = row[1] & hirsel_core_layout::cross::ELEMENT != 0;
-                let n = if j == 0 && !element { n + shift } else { n };
                 let at = self.offset(&buffer, (40 + i * 32 + j * 8) as u64);
                 self.store(&Type::I64, &int(n), &at, 8);
             }
@@ -702,10 +726,8 @@ impl FunctionEmitter<'_> {
                 )
             }
             RtOp::SpawnUnit { x, r } => {
-                let (packed, offset) = self.task_input(x, &args[2], &args[1]);
-                let layout = self.value_descriptors(&[x, r], true);
-                let xc = self.cross(x, offset, true);
-                let rc = self.cross(r, 0, false);
+                let (packed, _) = self.task_input(x, &args[2], &args[1]);
+                let key = self.module.spawn_key(hirsel_core_ir::SpawnTypes { x, r });
                 self.native_call(
                     "hirsel_core_spawn_unit",
                     &[P, U, U, K],
@@ -714,10 +736,7 @@ impl FunctionEmitter<'_> {
                         u(&args[3]),
                         u(&args[0]),
                         p(&packed),
-                        ptr(Value::global(task_entry::task_entry_name(x, r))),
-                        p(&layout),
-                        p(&xc),
-                        p(&rc),
+                        ptr(Value::global(hirsel_core_ir::spawn_entry_symbol(key))),
                         u(&at),
                     ],
                 )

@@ -42,7 +42,7 @@ mod held;
 use held::Held;
 mod crossing;
 mod ending;
-pub use crossing::Cross;
+pub use crossing::{Cross, SpawnEntry};
 use crossing::{TapeHelper, tape_group};
 use ending::end_take;
 pub(crate) mod packing;
@@ -978,7 +978,7 @@ pub struct SpawnUnit {
 
 /// `task.spawn_unit(tasks, bytes n, take x, f)`.
 /// # Safety
-/// As `hirsel_core_spawn`, with the descriptors of X and R.
+/// As `hirsel_core_spawn`; `entry` is the link's static row for X and R.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_spawn_unit(
@@ -986,17 +986,15 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
     _tasks: u64,
     n: u64,
     input: *mut u8,
-    body: Body,
-    layout: *const TaskLayout,
-    x: *const Cross,
-    r: *const Cross,
+    entry: *const SpawnEntry,
     _site: u64,
 ) -> SpawnUnit {
     // SAFETY: the spawner owns its context and `input` until the spawn commits.
     unsafe {
-        let layout = *layout;
-        let x = &*x;
-        let rx = &*r;
+        let entry = &*entry;
+        let (body, layout) = (entry.bridge, entry.layout);
+        let x = &entry.x;
+        let rx = &entry.r;
         let refused = |requested, available| SpawnUnit {
             task: ptr::null_mut(),
             requested,
@@ -1027,7 +1025,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         // The entry writes each socket as it leaves: detached first.
         let sockets = detach_sockets(context, input, socket_offsets(x.owners()));
         #[cfg(feature = "record")]
-        let tape = crate::tape::helper::spawn(context, n, steps, input, x, sockets.as_ref());
+        let tape = crate::tape::helper::spawn(context, n, steps, input, entry, sockets.as_ref());
         #[cfg(not(feature = "record"))]
         let tape = ();
         let data = pack(input, x.bytes, x.owners());

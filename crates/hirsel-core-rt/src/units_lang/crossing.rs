@@ -28,6 +28,42 @@ impl Cross {
     }
 }
 
+/// The link's static row for one spawnable `(X, R)`: what a spawn passes
+/// and what the link's spawn table holds for each spawnable function, so a
+/// replay can start a helper from its entry identity alone. `adapter` is the
+/// code word the bridge reads from the packed input's first word.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SpawnEntry {
+    pub bridge: tasks::Body,
+    pub adapter: u64,
+    pub layout: tasks::TaskLayout,
+    pub x: Cross,
+    pub r: Cross,
+}
+
+impl Cross {
+    /// The same descriptor: equal words and equal owner rows.
+    pub(crate) fn same(&self, other: &Cross) -> bool {
+        (self.bytes, self.count, self.at, self.len)
+            == (other.bytes, other.count, other.at, other.len)
+            && self.owners() == other.owners()
+    }
+}
+
+impl SpawnEntry {
+    /// The same bridge, layout and descriptors; the adapter is the spawn
+    /// site's and may be any site's for the same `(X, R)`.
+    pub(crate) fn same(&self, other: &SpawnEntry) -> bool {
+        let l = |v: &tasks::ValueLayout| (v.bytes, v.align, v.logical, v.clean.map(|c| c as usize));
+        std::ptr::fn_addr_eq(self.bridge, other.bridge)
+            && l(&self.layout.input) == l(&other.layout.input)
+            && l(&self.layout.result) == l(&other.layout.result)
+            && self.x.same(&other.x)
+            && self.r.same(&other.r)
+    }
+}
+
 /// A helper's own recording, when its spawner's unit records.
 #[cfg(feature = "record")]
 pub(super) type TapeHelper = Option<crate::tape::helper::Helper>;

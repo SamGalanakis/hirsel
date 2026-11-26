@@ -673,10 +673,12 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording(
 }
 
 /// Recording entry for a program whose ordinary run can spawn helper units.
-/// `descriptors` is the link's descriptor index ([`identities`]).
+/// `descriptors` is the link's descriptor index and `spawns` its spawn table
+/// ([`identities`]).
 ///
 /// # Safety
-/// As hirsel_core_os_run_recording; `descriptors` is pinned for the process.
+/// As hirsel_core_os_run_recording; `descriptors` and `spawns` are pinned for
+/// the process.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
@@ -688,10 +690,12 @@ pub unsafe extern "C" fn hirsel_core_os_run_recording_with_units(
     revision: *const [u8; 32],
     build: *const [u8; 32],
     descriptors: *const u64,
+    spawns: *const u64,
 ) -> u8 {
     // SAFETY: the caller pins every startup operand for the call.
     unsafe {
         identities::install(descriptors);
+        identities::install_spawns(spawns);
         run_recording::<true>(input, names, sources, entry, identity, revision, build)
     }
 }

@@ -799,6 +799,7 @@ impl Wire for Signature {
     }
 }
 record!(Field { name, ty });
+record!(SpawnTypes { x, r });
 record!(Case { name, fields });
 record!(AddressInfo { base, steps, ty });
 

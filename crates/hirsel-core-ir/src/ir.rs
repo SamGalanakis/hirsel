@@ -390,6 +390,8 @@ pub enum Inst {
         result: ValueId,
         function: FuncId,
         identity: StaticId,
+        /// Set where `function` is made a plain `fn(take X) -> R` value.
+        spawn: Option<SpawnTypes>,
     },
     Unary {
         result: ValueId,
@@ -1580,20 +1582,8 @@ impl Identity {
         symbol(self.digest())
     }
 }
-/// `h` and the 64 hex digits of `digest`.
-pub fn symbol(digest: ContentHash) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut name = String::with_capacity(65);
-    name.push('h');
-    for byte in digest.0 {
-        name.push(HEX[(byte >> 4) as usize] as char);
-        name.push(HEX[(byte & 15) as usize] as char);
-    }
-    name
-}
-
 mod revision;
-pub use revision::{RevisionRoot, intrinsic_revision, revision_symbol};
+pub use revision::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Function {

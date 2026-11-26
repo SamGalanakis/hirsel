@@ -494,6 +494,7 @@ impl Derive<'_> {
                 result,
                 function,
                 identity,
+                spawn: None,
             });
             let at = Self::address(
                 c,

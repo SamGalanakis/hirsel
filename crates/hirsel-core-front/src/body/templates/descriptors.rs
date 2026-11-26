@@ -18,6 +18,33 @@ impl Substitution<'_> {
         key
     }
 
+    /// A `descriptor` of the generic body in the instance: its function,
+    /// identity bytes and spawn rows substituted.
+    pub(super) fn descriptor_ref(
+        &mut self,
+        inst: &mut Inst,
+        template: &GenericTemplate,
+    ) -> Result<(), String> {
+        let Inst::DescriptorRef {
+            function,
+            identity,
+            spawn,
+            ..
+        } = inst
+        else {
+            unreachable!("a descriptor")
+        };
+        if let Some(recipe) = template.descriptors.get(function) {
+            *identity = self.descriptor_bytes(recipe)?;
+        }
+        *function = self.function(*function);
+        *spawn = spawn.map(|t| hirsel_core_ir::SpawnTypes {
+            x: self.ty(t.x),
+            r: self.ty(t.r),
+        });
+        Ok(())
+    }
+
     pub(super) fn descriptor_bytes(
         &mut self,
         recipe: &crate::identity::DescriptorRecipe,

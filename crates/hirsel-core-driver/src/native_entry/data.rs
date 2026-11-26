@@ -55,6 +55,24 @@ pub(super) fn descriptors(object: &mut ObjectModule, names: &[Vec<u8>]) -> Resul
     define(object, None, rows, 8, &pointers)
 }
 
+/// The link's spawn table: a `u64` count, then per row the descriptor's and
+/// its spawn entry's addresses (`tape/run/identities.rs`).
+pub(super) fn spawns(object: &mut ObjectModule, rows: &[(Vec<u8>, Vec<u8>)]) -> Result<DataId> {
+    let mut bytes = (rows.len() as u64).to_le_bytes().to_vec();
+    let mut pointers = Vec::with_capacity(2 * rows.len());
+    for (descriptor, entry) in rows {
+        for name in [descriptor, entry] {
+            let name = std::str::from_utf8(name).map_err(error)?;
+            let id = object
+                .declare_data(name, Linkage::Import, false, false)
+                .map_err(error)?;
+            pointers.push((u32::try_from(bytes.len()).map_err(error)?, id));
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+        }
+    }
+    define(object, None, bytes, 8, &pointers)
+}
+
 fn define(
     object: &mut ObjectModule,
     name: Option<&str>,

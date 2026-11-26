@@ -28,7 +28,7 @@ use super::{FLAG, served};
 use crate::Context;
 use crate::tasks::*;
 use crate::units_lang::{
-    ClientH, Cross, InboxH, hirsel_core_client_drop, hirsel_core_conn_new,
+    ClientH, Cross, InboxH, SpawnEntry, hirsel_core_client_drop, hirsel_core_conn_new,
     hirsel_core_conn_receive, hirsel_core_conn_receive_rec, hirsel_core_conn_send,
     hirsel_core_conn_send_rec, hirsel_core_inbox_drop, hirsel_core_spawn_unit,
 };
@@ -298,18 +298,15 @@ unsafe extern "C" fn client(context: *mut Context, _: *mut u8, input: *mut u8) -
                     (*a).inbox = made.inbox;
                     (*a).give = made.client;
                     let (xi, r) = (helper_input(), plain(8));
-                    let l = layout(8, 8);
-                    let spawned = hirsel_core_spawn_unit(
-                        c,
-                        0,
-                        4096,
-                        (&raw mut (*a).give).cast(),
-                        helper,
-                        &l,
-                        &xi,
-                        &r,
-                        0,
-                    );
+                    let entry = SpawnEntry {
+                        bridge: helper,
+                        adapter: 0,
+                        layout: layout(8, 8),
+                        x: xi,
+                        r,
+                    };
+                    let spawned =
+                        hirsel_core_spawn_unit(c, 0, 4096, (&raw mut (*a).give).cast(), &entry, 0);
                     assert!(
                         !spawned.task.is_null(),
                         "spawn_unit refused: requested {} available {} status {} (conn {:?} {})",

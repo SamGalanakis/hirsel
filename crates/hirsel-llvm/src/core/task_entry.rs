@@ -2,6 +2,7 @@
 //! concrete convention. The input buffer also retains the plain code pointer.
 use super::cleanup::{drop_signature, glue_emitter};
 use super::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn input_offset(
     module: &Module,
@@ -193,5 +194,163 @@ pub(super) fn emit(
         drop(e);
         sink.end_function();
     }
+    spawn_entries(module, target, recipes, failures, facts, sink, items)
+}
+
+/// Defines, weak, a marker per spawnable function's descriptor
+/// ([`hirsel_core_ir::spawnable_symbol`]) and the spawn entry of each pair of
+/// rows this unit spawns a
+/// helper with ([`hirsel_core_ir::spawn_entry_symbol`]): `{bridge, adapter,
+/// layout, x, r}` as the runtime's `SpawnEntry`. The link indexes them by the
+/// identities of the functions such a helper can start, so a replay starts
+/// one from its entry alone. The adapter is the spawn's own, which starts any
+/// function of the rows' type.
+fn spawn_entries(
+    module: &Module,
+    target: Target,
+    recipes: &[hirsel_core_layout::RecipeRow],
+    failures: &failure::Failures,
+    facts: bool,
+    sink: &mut dyn Sink,
+    items: &mut Items,
+) -> Result<()> {
+    let mut units = BTreeMap::new();
+    let mut spawnable = BTreeSet::new();
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        // A function made a plain `fn(take X) -> R` value: the link joins its
+        // descriptor to the spawn entry of its rows by this marker's name.
+        for inst in &body.insts {
+            if let Inst::DescriptorRef {
+                function,
+                spawn: Some(spawn),
+                ..
+            } = *inst
+            {
+                let name = module.descriptor_symbol(function, items.function_symbol(function));
+                spawnable.insert(hirsel_core_ir::spawnable_symbol(
+                    &name,
+                    module.spawn_key(spawn),
+                ));
+            }
+        }
+        for call in &body.calls {
+            if let Callee::Runtime(RtOp::SpawnUnit { x, r }) = call.callee
+                && !units.contains_key(&(x, r))
+            {
+                units.insert((x, r), spawn_adapter(body, call)?);
+            }
+        }
+    }
+    for marker in spawnable {
+        sink.global(&Global {
+            name: marker.into(),
+            linkage: Linkage::Weak,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::I8,
+            init: Some(Value::Zero),
+            align: 1,
+            absolute_symbol: false,
+            section: None,
+        });
+    }
+    let body = Body::default();
+    for ((x, r), adapter) in units {
+        let e = glue_emitter(
+            module,
+            recipes,
+            failures,
+            facts,
+            &body,
+            abi::Return::on_target(target, &[Ty::Scalar(Scalar::U8)]),
+            false,
+            int(0),
+            &mut *sink,
+            &mut *items,
+        );
+        let offset = input_offset(module, recipes, x);
+        let layouts = [e.layout_words(x, true), e.layout_words(r, false)];
+        let crosses = [e.cross_words(x, offset, true), e.cross_words(r, 0, false)];
+        drop(e);
+        let name = hirsel_core_ir::spawn_entry_symbol(module.spawn_key(SpawnTypes { x, r }));
+        let words = |w: &[u64]| {
+            w.iter()
+                .map(|&n| (Type::I64, Value::Int(n as i128)))
+                .collect::<Vec<_>>()
+        };
+        let mut fields = vec![
+            (Type::Ptr, Value::global(task_entry_name(x, r))),
+            (
+                Type::Ptr,
+                Value::global(items.function_symbol(adapter).to_owned()),
+            ),
+        ];
+        let cleans = [Value::Null, Value::global(format!("core_clean_{}", r.0))];
+        for (words_of, clean) in layouts.iter().zip(cleans) {
+            fields.extend(words(words_of));
+            fields.push((Type::Ptr, clean));
+        }
+        for (i, (cross, owners)) in crosses.iter().enumerate() {
+            let table = if owners.is_empty() {
+                Value::Null
+            } else {
+                let table = format!("{name}.owners.{i}");
+                let bytes: Vec<u8> = owners
+                    .iter()
+                    .flatten()
+                    .flat_map(|n| n.to_le_bytes())
+                    .collect();
+                sink.global(&Global {
+                    name: table.clone().into(),
+                    linkage: Linkage::Private,
+                    constant: true,
+                    externally_initialized: false,
+                    ty: Type::bytes(bytes.len() as u64),
+                    init: Some(Value::Bytes(bytes)),
+                    align: 8,
+                    absolute_symbol: false,
+                    section: None,
+                });
+                Value::global(table)
+            };
+            fields.extend(words(&cross[..1]));
+            fields.push((Type::Ptr, table));
+            fields.extend(words(&cross[2..]));
+        }
+        sink.global(&Global {
+            name: name.into(),
+            linkage: Linkage::Weak,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::structure(fields.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()),
+            init: Some(Value::Struct {
+                packed: false,
+                fields,
+            }),
+            align: 8,
+            absolute_symbol: false,
+            section: None,
+        });
+    }
     Ok(())
+}
+
+/// The function a spawn's input names as its adapter: `RtOp::SpawnUnit`'s
+/// third operand, which the front makes a reference to the adapter it built.
+fn spawn_adapter(body: &Body, call: &CallSite) -> Result<FuncId> {
+    let args = call.args.get(&body.pools.args).unwrap();
+    let Some(&Arg::Value(code)) = args.get(2) else {
+        return Err(Error::Unsupported(
+            "a unit spawn's adapter is not a value".into(),
+        ));
+    };
+    body.insts
+        .iter()
+        .find_map(|inst| match *inst {
+            Inst::FunctionRef { result, function } if result == code => Some(function),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            Error::Unsupported("a unit spawn's adapter is not a function reference".into())
+        })
 }

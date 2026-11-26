@@ -912,14 +912,7 @@ fn fill(
                 query.map_types(|t| TypeRef(s.ty(TypeId(t.0)).0));
             }
             Inst::FunctionRef { function, .. } => *function = s.function(*function),
-            Inst::DescriptorRef {
-                function, identity, ..
-            } => {
-                if let Some(recipe) = template.descriptors.get(function) {
-                    *identity = s.descriptor_bytes(recipe)?;
-                }
-                *function = s.function(*function);
-            }
+            Inst::DescriptorRef { .. } => s.descriptor_ref(inst, template)?,
             Inst::Drop { ty, .. } | Inst::Release { ty, .. } | Inst::CompactWidth { ty, .. } => {
                 *ty = s.ty(*ty)
             }

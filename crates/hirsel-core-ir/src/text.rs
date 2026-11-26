@@ -23,6 +23,7 @@
 //! ```
 
 mod allocation;
+mod descriptor_text;
 mod runtime;
 mod value_text;
 use runtime::rt;
@@ -476,17 +477,8 @@ impl Printer {
                     Inst::FunctionRef { result, function } => {
                         format!("{} = fnref f{}", def(*result), function.0)
                     }
-                    Inst::DescriptorRef {
-                        result,
-                        function,
-                        identity,
-                    } => {
-                        format!(
-                            "{} = descriptor f{}, d{}",
-                            def(*result),
-                            function.0,
-                            identity.0
-                        )
+                    Inst::DescriptorRef { result, .. } => {
+                        descriptor_text::print(def(*result), inst)
                     }
                     Inst::CompactWidth { result, word, ty } => {
                         format!("{} = width {} t{}", def(*result), v(word), ty.0)
@@ -1705,13 +1697,7 @@ impl BodyParser {
             }
         } else if op == "descriptor" {
             one(&defs)?;
-            let function = FuncId(l.id('f')?);
-            l.expect(",")?;
-            Inst::DescriptorRef {
-                result,
-                function,
-                identity: StaticId(l.id('d')?),
-            }
+            descriptor_text::parse(l, result)?
         } else if op == "mul_add" {
             one(&defs)?;
             let (left, right) = two(l)?;

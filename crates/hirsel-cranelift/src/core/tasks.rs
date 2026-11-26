@@ -16,17 +16,9 @@ impl Function<'_, '_, '_> {
     /// A `Cross` stores the value bytes at `shift`, the span of the value a
     /// recorder writes (a task entry's `x` when `entry`), then its owner rows.
     fn cross(&mut self, ty: TypeId, shift: u64, entry: bool) -> Result<Value> {
-        let (bytes, _) = place::storage(self.input, self.layouts, PlaceTy::Declared(ty))?;
-        let row = hirsel_core_layout::TypeRef(ty.0);
-        let owners = hirsel_core_layout::cross::owners(&self.input.types, self.layouts, row);
-        let [x_at, x_len] = if entry {
-            hirsel_core_layout::cross::entry_span(&self.input.types, self.layouts, row)
-        } else {
-            [0, bytes]
-        };
+        let (words, owners) = task_entry::cross_words(self.input, self.layouts, ty, shift, entry)?;
         let at = self.own_slot((40 + owners.len() * 32) as u32);
         let rows = self.b.ins().iadd_imm_s(at, 40);
-        let words = [bytes + shift, 0, owners.len() as u64, x_at + shift, x_len];
         for (j, &n) in words.iter().enumerate() {
             let value = if j == 1 {
                 rows
@@ -39,9 +31,6 @@ impl Function<'_, '_, '_> {
         }
         for (i, row) in owners.iter().enumerate() {
             for (j, &n) in row.iter().enumerate() {
-                // An element row's offset is in its element.
-                let element = row[1] & hirsel_core_layout::cross::ELEMENT != 0;
-                let n = if j == 0 && !element { n + shift } else { n };
                 let value = self.b.ins().iconst(types::I64, n as i64);
                 self.b.ins().store(
                     MemFlagsData::trusted(),
@@ -76,20 +65,9 @@ impl Function<'_, '_, '_> {
     }
     fn describe(&mut self, storage: Value, types: &[TypeId], task_input: bool) -> Result<Value> {
         for (i, &t) in types.iter().enumerate() {
-            let (mut bytes, mut alignment) =
-                place::storage(self.input, self.layouts, PlaceTy::Declared(t))?;
-            if task_input && i == 0 {
-                let offset = task_entry::input_offset(self.input, self.layouts, t)?;
-                bytes += offset;
-                alignment = alignment.max(8);
-            }
-            let logical = hirsel_core_layout::field_size(
-                &self.input.types,
-                self.layouts,
-                &hirsel_core_layout::FieldTy::Inline(hirsel_core_layout::TypeRef(t.0)),
-            )
-            .2;
-            for (j, n) in [bytes, alignment, logical].into_iter().enumerate() {
+            let words =
+                task_entry::layout_words(self.input, self.layouts, t, task_input && i == 0)?;
+            for (j, n) in words.into_iter().enumerate() {
                 let value = self.b.ins().iconst(types::I64, n as i64);
                 self.b.ins().store(
                     MemFlagsData::trusted(),
@@ -757,32 +735,15 @@ impl Function<'_, '_, '_> {
                 2
             }
             RtOp::SpawnUnit { x, r } => {
-                let (packed, offset) = self.task_input(x, args[2], args[1])?;
-                let bridge = self.calls.reference(
-                    self.object,
-                    &mut self.b,
-                    self.task_entries.entries[&(x, r)],
-                );
-                let bridge = self.b.ins().func_addr(types::I64, bridge);
-                let layout = self.own_slot(64);
-                let layout = self.describe(layout, &[x, r], true)?;
-                let xc = self.cross(x, offset, true)?;
-                let rc = self.cross(r, 0, false)?;
+                let (packed, _) = self.task_input(x, args[2], args[1])?;
+                let entry = self.task_entries.units[&(x, r)];
+                let entry = self.object.declare_data_in_func(entry, self.b.func);
+                let entry = self.b.ins().symbol_value(types::I64, entry);
                 let values = self.c_call(
                     "hirsel_core_spawn_unit",
-                    &[P, U, U, P, P, P, P, P, U],
+                    &[P, U, U, P, P, U],
                     &[P, U, U, K],
-                    &[
-                        self.context,
-                        args[3],
-                        args[0],
-                        packed,
-                        bridge,
-                        layout,
-                        xc,
-                        rc,
-                        site,
-                    ],
+                    &[self.context, args[3], args[0], packed, entry, site],
                 )?;
                 self.call_failure(values[3], call.fail)?;
                 for i in 0..3 {

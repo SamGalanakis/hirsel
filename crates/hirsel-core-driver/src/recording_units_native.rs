@@ -363,14 +363,24 @@ fn rl9_streams(
     path: &Path,
     at: &str,
 ) -> Vec<(Option<hirsel_tape_format::Entry>, Vec<hirsel_tape_format::Frame>)> {
+    unit_streams(path, at, &["root", "root.0"])
+}
+
+/// The streams of a recording whose units are `names`, in index order: each
+/// one's entry and frames.
+fn unit_streams(
+    path: &Path,
+    at: &str,
+    names: &[&str],
+) -> Vec<(Option<hirsel_tape_format::Entry>, Vec<hirsel_tape_format::Frame>)> {
     use hirsel_tape_format::Index;
     use std::os::unix::fs::FileExt;
     let file = std::fs::File::open(path).unwrap();
     let read = |at: u64, b: &mut [u8]| file.read_at(b, at);
     let (mut index, _) = Index::open(read).unwrap();
     let paths: Vec<_> = index.paths().collect();
-    let names: Vec<_> = paths.iter().map(|(_, n)| n.as_str()).collect();
-    assert_eq!(names, ["root", "root.0"], "{at}");
+    let found: Vec<_> = paths.iter().map(|(_, n)| n.as_str()).collect();
+    assert_eq!(found, names, "{at}");
     let mut streams = Vec::new();
     for (id, _) in &paths {
         let mut blocks = index.take(*id).unwrap();
@@ -938,3 +948,5 @@ fn rl9_capability_crosses_in_an_item() {
 include!("recording_rl8_native.rs");
 // Handle snapshots that cross in items, entries and results.
 include!("recording_handles_native.rs");
+// Spawn entries: the link table that starts a helper from its identity.
+include!("recording_spawn_entries_native.rs");

@@ -58,6 +58,28 @@ class Consumers(unittest.TestCase):
         selected = consumers.select(ROOT, ['tools/buck2/sync.py'], found, {})
         self.assertEqual(selected, [target])
 
+    def test_exported_files_own_their_exporting_target(self):
+        path = 'tools/buck2/native-toolchain/link_kit.py'
+        target = 'root//tools/buck2/native-toolchain:link_kit.py'
+        with patch.object(consumers, 'buck', return_value=json.dumps({target: {'src': 'root//' + path}})):
+            owners = consumers.direct_owners(ROOT, [path])
+        self.assertEqual(owners, {target: 'direct source owner'})
+
+    def test_darwin_laws_follow_archive_inputs_but_not_unrelated_crates(self):
+        law = 'root//:hirsel-core-rt-archives-darwin-sync-ban'
+        graph = {'root//:hirsel-core-rt': {},
+                 'root//:hirsel-core-rt-archives': {'buck.deps': ['root//:hirsel-core-rt']},
+                 law: {'buck.type': '_darwin_sync_ban',
+                       'archives': 'root//:hirsel-core-rt-archives',
+                       'paths': ['aarch64-apple-darwin/libhirsel_core_rt.a'],
+                       'buck.deps': ['root//:hirsel-core-rt-archives']}}
+        selected = consumers.select(ROOT, ['crates/hirsel-core-rt/src/abi.rs'], graph, {},
+                                    {'root//:hirsel-core-rt': 'direct source owner'})
+        self.assertIn(law, selected)
+        selected = consumers.select(ROOT, ['crates/hirsel-core-syntax/src/lexer.rs'], graph, {},
+                                    {'root//:hirsel-core-syntax': 'direct source owner'})
+        self.assertNotIn(law, selected)
+
     def test_the_cap_keeps_the_nearest_owner_and_reports_the_cut(self):
         # place-store-681: 100 of 4,261 kept by name, with no word on what was cut.
         graph = {'root//:lib': {}, 'root//:mid': {'buck.deps': ['root//:lib']},

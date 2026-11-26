@@ -44,7 +44,8 @@ def test_graph(root, seeds):
                            '--output-attribute', '^test_binary$', '--output-attribute', '^extra_env$',
                            '--output-attribute', '^args$',
                            '--output-attribute', '^script$', '--output-attribute', '^harness$',
-                           '--output-attribute', r'^buck\.deps$'))
+                           '--output-attribute', '^archives$', '--output-attribute', '^paths$',
+                           '--output-attribute', r'^buck\.type$', '--output-attribute', r'^buck\.deps$'))
     # A test's data edge can be affected while its executable is independent.
     # Resolve that executable explicitly; rdeps need not contain its node.
     missing = sorted({attrs['harness'] for attrs in graph.values()
@@ -74,13 +75,15 @@ def assignments(root, graph, inventories, *, overrides=True):
 def direct_owners(root, paths):
     expression = ' + '.join('owner(' + json.dumps(path) + ')' for path in paths)
     owners = json.loads(buck(root, 'uquery', expression, '--output-attribute', '^srcs$',
-                             '--output-attribute', '^script$'))
+                             '--output-attribute', '^src$', '--output-attribute', '^script$'))
     # owner() also includes runtime data. Only compilation/script inputs prove
     # direct ownership; shipping std or compiler sources as test data does not.
     direct = {}
     for target, attrs in owners.items():
         sources = {source.removeprefix('root//').lstrip('/') for source in attrs.get('srcs', [])}
         sources.add(attrs.get('script', '').removeprefix('root//').lstrip('/'))
+        if attrs.get('src'):
+            sources.add(attrs['src'].removeprefix('root//').lstrip('/'))
         owned = set(paths) & sources
         if owned:
             direct[target] = ('direct source owner' if any('/tests/' not in path for path in owned)
@@ -108,6 +111,11 @@ def distances(graph, owners):
     return distance
 
 
+def darwin_law(attrs):
+    return (attrs.get('buck.type', '').startswith('_darwin_')
+            and bool(attrs.get('archives')) and bool(attrs.get('paths')))
+
+
 def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIMIT, cut=None):
     """Affected targets, nearest owner first; the first `limit` (0: all) are kept.
     `cut` receives the targets past the limit."""
@@ -116,11 +124,14 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
     scripts = {target: attrs['harness'] for target, attrs in graph.items()
                if graph.get(attrs.get('harness'), {}).get('script')}
     crates = {Path(path).parts[1].replace('-', '_') for path in paths if path.startswith('crates/')}
+    distance = distances(graph, owners or {})
     for target, attrs in graph.items():
         binary = attrs.get('test_binary', '')
         if tooling and target in scripts:
             ordinary.add(target)
         elif crates and binary:
+            ordinary.add(target)
+        elif darwin_law(attrs) and target in distance:
             ordinary.add(target)
     # Ownership is established by Buck's source graph, never by test status.
     test_paths = [path for path in paths if "/tests/" in path]
@@ -135,7 +146,6 @@ def select(root, paths, graph, inventories, owners=None, reasons=None, limit=LIM
             direct[target] = (owners[owner] if isinstance(owners, dict) else
                               'direct test owner' if test_paths else 'direct source owner')
     limit = limit or len(graph) + len(ordinary | direct.keys())
-    distance = distances(graph, owners or {})
 
     # Harnesses declare their crate dependencies flat, so most tests sit two
     # edges from a changed library: the changed crate's own tests come first.

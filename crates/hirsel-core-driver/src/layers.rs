@@ -3,9 +3,12 @@
 //! A store marks the shape of each successful complete request; the second
 //! such request with one shape writes the record and selects it. A refused,
 //! incomplete, resource-stopped or reachable-only request, and a request served
-//! by snapshot, write nothing. A request whose shape the store selects installs
+//! by snapshot, write nothing. A native CLI build over a reachable library
+//! image cannot prime this gate, even across edits with the same headers.
+//! A request whose shape the store selects installs
 //! the record in place of declaration, and counts it
 //! ([`crate::meter::Counters::declared_installs`]).
+use crate::meter::{LayerClass, LayerFallback, Measurements};
 use crate::store::Store;
 use hirsel_core_ids::ContentHash;
 use std::io;
@@ -34,6 +37,22 @@ impl Layer {
             selected: store.selection(SELECTION)? == Some(key),
             marked: store.selection(MARKER)? == Some(mark),
         })
+    }
+    pub(crate) fn measure(&self, result: &mut Measurements, reachable_only: bool) {
+        let (class, fallback) = if self.selected {
+            (LayerClass::Fast, None)
+        } else {
+            let fallback = if reachable_only {
+                LayerFallback::ReachableOnly
+            } else if self.marked {
+                LayerFallback::ShapeMarked
+            } else {
+                LayerFallback::ShapeUnmarked
+            };
+            (LayerClass::Fallback, Some(fallback))
+        };
+        result.layer_class = Some(class);
+        result.layer_fallback = fallback;
     }
     /// The record to write once the request succeeds: declared when the shape
     /// is marked and not yet selected.

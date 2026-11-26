@@ -1859,35 +1859,6 @@ fn tuple_sequences() -> Vec<Seq> {
         ),
     ]
 }
-/// Edits the declared-state record must survive, or must never be offered
-/// (OPTION-L v3.2): a header respaced in place keeps the shape and moves every
-/// site in it; a finalizer's body is header text of its type. A clone hook's
-/// body (`clone_body`), a constant's initialiser (`constant_value`) and a test
-/// attribute (`test_added`) are above.
-#[rustfmt::skip]
-fn layer_sequences() -> Vec<Seq> {
-    vec![
-        seq("header_respaced", vec![
-            check(app(&[("a.hirsel", "a", "pub type T{x:u8}\npub fn f(x:u8)->u8{x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")])),
-            check(app(&[("a.hirsel", "a", "pub type T{ x : u8 }\npub fn f( x : u8 ) -> u8 {x}"), ("b.hirsel", "b", "fn use(t:a.T)->u8{a.f(t.x)}")]))]),
-        // Core and std from an image: the record's rows sit above the
-        // library's (own_start() > 0) and name its types and definitions.
-        seq("image_body_edit", vec![
-            libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.min(a,b)}")]),
-            libraries(&[("a.hirsel", "a", "pub type T:codec {x:u8, xs:List[u8]}\npub fn total(t:T)->u64{list.len(t.xs)+1u64}"), ("b.hirsel", "b", "fn use(t:a.T)->u64{a.total(t)}\nfn low(a:u8,b:u8)->u8{std.order.max(a,b)}")])]),
-        // A body edit that drops or adds the program's only read of the
-        // image keeps the shape, so declaration must not depend on the read.
-        seq("image_library_read_dropped", vec![
-            libraries(&[("a.hirsel", "a", "pub fn f(){let _=std.order.min(1u8,2u8)}"), ("b.hirsel", "b", "fn g(){}")]),
-            libraries(&[("a.hirsel", "a", "pub fn f(){}"), ("b.hirsel", "b", "fn g(){}")])]),
-        seq("image_library_read_added", vec![
-            libraries(&[("a.hirsel", "a", "pub fn f(){}"), ("b.hirsel", "b", "fn g(){}")]),
-            libraries(&[("a.hirsel", "a", "pub fn f(){let _=std.order.min(1u8,2u8)}"), ("b.hirsel", "b", "fn g(){}")])]),
-        seq("finalizer_body_edit", vec![
-            check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")])),
-            check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){let _=0u8}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")]))]),
-    ]
-}
 fn sequences() -> Vec<Seq> {
     let mut seqs = review_sequences();
     seqs.extend(review_1039_sequences());

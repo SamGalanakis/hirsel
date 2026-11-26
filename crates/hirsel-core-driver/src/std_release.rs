@@ -83,9 +83,9 @@ struct StdRecord {
     /// The plain roots the side defines under their instance symbols, in
     /// identity order.
     roots: Vec<Identity>,
-    /// Every unit the side lowered, with its owner (its body, annex and
-    /// builtins), in identity order. The side's code is a function of these
-    /// and of its toolchain and variant alone.
+    /// Every unit the side lowered, with its owner (its body, annex, builtins
+    /// and bound constant values), in identity order. The side's code is a
+    /// function of these and of its toolchain and variant alone.
     units: Vec<(Identity, ContentHash)>,
     /// Each root's step summary, by the root's code identity.
     summaries: Vec<(ContentHash, Summary)>,
@@ -402,11 +402,7 @@ impl CheckProduct {
         let mut units = BTreeMap::new();
         for identity in reached {
             let instance = materialized.get(&identity);
-            let unit = super::recipe_build::prepare_unit(
-                &*instance.transient_ir()?,
-                instance.function,
-                &sources,
-            );
+            let unit = super::recipe_build::prepare_std_unit(instance, &sources)?;
             units.insert(identity, unit);
         }
         let weights: BTreeMap<_, usize> = units

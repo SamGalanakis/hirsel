@@ -24,6 +24,10 @@ use hirsel_core_resolve::{ForeignArchiveCapture, ForeignModuleCapture};
 mod binding;
 pub(super) use binding::bind_annexes;
 use binding::{Bindings, bind_module};
+#[path = "recipe_unit.rs"]
+mod unit;
+pub(super) use unit::prepare_std_unit;
+use unit::{instance_builtins, prepare_unit};
 
 #[derive(Debug, Serialize)]
 pub struct AssemblyRecord {
@@ -152,55 +156,6 @@ impl Unit {
             unreachable!("this assembly prepares its modules together");
         };
         module
-    }
-
-    /// The owner of the unit's private callable variants: its body.
-    pub(super) fn owner(&self) -> io::Result<ContentHash> {
-        key(
-            "hirsel.recipe-release-body.v1",
-            &(self.code.body.hash, self.code.annex.hash, &self.builtins),
-        )
-    }
-}
-
-/// A reached instance's unit, as a recipe names its body and annex.
-pub(super) fn prepare_unit(
-    original: &Module,
-    function: FuncId,
-    sources: &hirsel_core_ir::source::SourcePositions<'_>,
-) -> Unit {
-    let (body, annex, module) = normal::prepare_assembly(original, function, sources);
-    unit(original, body, annex, module)
-}
-
-fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Module) -> Unit {
-    let builtins = body
-        .slots
-        .iter()
-        .map(|slot| slot.identity(original))
-        .filter_map(|identity| builtin_semantics_number(&identity.definition))
-        .collect();
-    let code = BodyRef {
-        body: ObjectRef {
-            hash: ObjectKind::Body.hash(&body.bytes),
-            len: body.bytes.len() as u64,
-        },
-        annex: {
-            let bytes = annex.encode();
-            ObjectRef {
-                hash: ObjectKind::Annex.hash(&bytes),
-                len: bytes.len() as u64,
-            }
-        },
-    };
-    Unit {
-        code,
-        module: UnitModule::Decoded(Box::new(module)),
-        values: None,
-        annex,
-        builtins,
-        memo: None,
-        coverage: None,
     }
 }
 
@@ -421,11 +376,6 @@ impl CheckProduct {
                 annex.1 = Some(names.clone());
                 annex.2.clone_from(error);
             }
-            let builtins = instance
-                .slots
-                .iter()
-                .filter_map(|identity| builtin_semantics_number(&identity.definition))
-                .collect();
             let code = BodyRef {
                 body: store.put_shared(ObjectKind::Body, instance.body, &instance.code)?,
                 annex: store.put(ObjectKind::Annex, &annex.encode())?,
@@ -437,7 +387,7 @@ impl CheckProduct {
                     module,
                     values: instance.values.clone(),
                     annex,
-                    builtins,
+                    builtins: instance_builtins(instance),
                     memo,
                     coverage,
                 },

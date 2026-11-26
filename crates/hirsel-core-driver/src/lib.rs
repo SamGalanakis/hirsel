@@ -788,11 +788,7 @@ impl Driver {
             sources.iter().map(|s| s.1).collect::<Vec<_>>(),
         ))?);
         let layer = layers::Layer::read(&store, publication.shape)?;
-        meter.result.layer_class = Some(if layer.selected {
-            meter::LayerClass::Fast
-        } else {
-            meter::LayerClass::Fallback
-        });
+        layer.measure(&mut meter.result, reachable_only);
         meter.finish("gate");
         let mut resolution_scratch = ResolutionScratch::default();
         let resolutions: Vec<Vec<Arc<Resolution>>> = modules

@@ -43,6 +43,8 @@ pub struct Measurements {
     pub counters: Counters,
     /// The gate's class (OPTION-L L2): None when the request reached no front.
     pub layer_class: Option<LayerClass>,
+    /// Why the gate could not install a declared layer.
+    pub layer_fallback: Option<LayerFallback>,
 }
 
 /// Whether the store selects the record of a request's shape, decided after
@@ -52,6 +54,14 @@ pub struct Measurements {
 pub enum LayerClass {
     Fast,
     Fallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerFallback {
+    ReachableOnly,
+    ShapeUnmarked,
+    ShapeMarked,
 }
 
 /// Counts of the work a request does, wherever in the process it happens.

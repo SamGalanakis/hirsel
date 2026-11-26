@@ -166,18 +166,22 @@ fn activation_result[T](take answer: Result[T, store.Error]) -> Result[T, OpenEr
 }
 
 fn activation_identity(place_id: Bytes, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema_id: Bytes) -> Result[Bytes, OpenError] {
+    let launch = launch_digest() ?=> |problem| Store(Full(Allocation(problem)))
+    activation_identity_for(take launch, place_id, on_migrate, schema_id)
+}
+
+fn activation_identity_for(take launch: Bytes, place_id: Bytes, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema_id: Bytes) -> Result[Bytes, OpenError] {
     let migrate_id: Bytes = match on_migrate {
         Some(callback) => clone(code.identity(callback)),
         None => list.new(),
     }
-    match replay_identity_of(place_id, migrate_id, schema_id) {
+    match replay_identity_of(take launch, place_id, migrate_id, schema_id) {
         Ok(take digest) => Ok(take digest),
         Error(problem) => Error(Store(Full(Allocation(problem)))),
     }
 }
 
-fn replay_identity_of(place_id: Bytes, migrate_id: Bytes, schema_id: Bytes) -> Result[Bytes, Capacity] {
-    let launch = launch_digest()?
+fn replay_identity_of(take launch: Bytes, place_id: Bytes, migrate_id: Bytes, schema_id: Bytes) -> Result[Bytes, Capacity] {
     if list.len(launch) == 0 {
         return Ok(list.new())
     }

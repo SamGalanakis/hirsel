@@ -18,6 +18,22 @@ pub(super) struct LaunchOptions<'a> {
     pub(super) exec_approvals: Vec<&'a [u8]>,
 }
 
+pub(super) struct StoreOp<'a> {
+    kind: u8,
+    pub(super) directory: &'a Path,
+    recorded_image: Option<[u8; 32]>,
+}
+
+impl StoreOp<'_> {
+    pub(super) fn configure(self, launch: Metadata) -> Metadata {
+        let launch = launch.with_store_op(self.kind);
+        match self.recorded_image {
+            Some(digest) => launch.with_recorded_image(digest),
+            None => launch,
+        }
+    }
+}
+
 pub(super) fn parse<'a>(
     argv: impl Iterator<Item = &'a [u8]>,
     has_exec: bool,
@@ -151,7 +167,8 @@ impl LaunchOptions<'_> {
     }
 
     /// `--hirsel-dry-run DIR` (1), `--hirsel-store-verify DIR` (2) or
-    /// `--hirsel-store-repair DIR` (3): the launch word 20 value and the store
+    /// `--hirsel-store-repair DIR` (3) or `--hirsel-tapes-check=SHA256 DIR` (4).
+    /// The launch word 20 value and the store
     /// directory the run uses instead of its granted one. Only a `place`
     /// program (one reaching the runner) reads them; any other takes them in
     /// `Args` as written.
@@ -160,14 +177,17 @@ impl LaunchOptions<'_> {
         args: &'b [Vec<u8>],
         directories: usize,
         place: bool,
-    ) -> Result<Option<(u8, &'b Path)>, StartupError> {
+    ) -> Result<Option<StoreOp<'b>>, StartupError> {
         if !place {
             return Ok(None);
         }
-        let op = match args.first().map(Vec::as_slice) {
-            Some(b"--hirsel-dry-run") => 1,
-            Some(b"--hirsel-store-verify") => 2,
-            Some(b"--hirsel-store-repair") => 3,
+        let (kind, recorded_image) = match args.first().map(Vec::as_slice) {
+            Some(b"--hirsel-dry-run") => (1, None),
+            Some(b"--hirsel-store-verify") => (2, None),
+            Some(b"--hirsel-store-repair") => (3, None),
+            Some(flag) if let Some(digest) = flag.strip_prefix(b"--hirsel-tapes-check=") => {
+                (4, Some(prepare_hex(digest)?))
+            }
             _ => return Ok(None),
         };
         let path = args.get(1).map(|value| Path::new(OsStr::from_bytes(value)));
@@ -180,7 +200,11 @@ impl LaunchOptions<'_> {
                     && !self.wake
                     && !self.installing() =>
             {
-                Ok(Some((op, dir)))
+                Ok(Some(StoreOp {
+                    kind,
+                    directory: dir,
+                    recorded_image,
+                }))
             }
             _ => Err(io::Error::from_raw_os_error(libc::EINVAL).into()),
         }

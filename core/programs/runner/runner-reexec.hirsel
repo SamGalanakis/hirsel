@@ -11,6 +11,14 @@ fn code_bytes(n: u64, s: u64, replay_identity: Bytes) -> Result[Bytes, Capacity]
 
 // Re-execute a recorded transact against its original base without publishing writes.
 pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: store.Branch, version: u64, mode: ReplayMode, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, on_migrate: Option[StaticFn[fn(mut store.Migration) -> Result[(), store.Error] waits]], schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
+    let identity: Option[Bytes] = match mode {
+        RecordedCode => Some(activation_identity(code.identity(place), on_migrate, code.identity(schema))?),
+        Candidate => None,
+    }
+    reexecute_at(db, branch, version, identity, place, n_place, schema)
+}
+
+fn reexecute_at[G: send, H: shareable + inert + send](db: store.Db, branch: store.Branch, version: u64, identity: Option[Bytes], place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[store.Verdict, OpenError] waits {
     let loaded = store.prepare_reexecute(db, branch, version) ?=> Store
     let source = match take loaded {
         Ok(take prepared) => take prepared,
@@ -18,9 +26,8 @@ pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: sto
     }
     let recorded_entry = store.replay_record(source)
     let recorded_code = view recorded_entry.record.code
-    if let RecordedCode = mode {
-        let identity = activation_identity(code.identity(place), on_migrate, code.identity(schema))?
-        if list.len(identity) == 0u64 || list.len(recorded_code) != 16u64 + list.len(identity) || !list.starts_with_at(recorded_code, 16u64, identity) {
+    if let Some(expected_identity) = identity {
+        if list.len(expected_identity) == 0u64 || list.len(recorded_code) != 16u64 + list.len(expected_identity) || !list.starts_with_at(recorded_code, 16u64, expected_identity) {
             return Ok(Unknown(RevisionUnknown))
         }
     }
@@ -28,9 +35,8 @@ pub fn reexecute[G: send, H: shareable + inert + send](db: store.Db, branch: sto
     let Some(Transact(n, s, _, check, go)) = map.get(registered.slots, recorded_entry.record.key) else {
         return Ok(Unknown(NoEntry))
     }
-    if let RecordedCode = mode {
-        let identity = list.slice(recorded_code, 16u64, list.len(recorded_code))
-        let expected = code_bytes(n, s, identity) ?=> |problem| Store(Full(Allocation(problem)))
+    if let Some(expected_identity) = identity {
+        let expected = code_bytes(n, s, expected_identity) ?=> |problem| Store(Full(Allocation(problem)))
         if expected != recorded_code {
             return Ok(Unknown(RevisionUnknown))
         }
@@ -57,4 +63,85 @@ fn failed_stop(stop: store.Stop) -> Result[Outcome, store.Error] {
 
 fn replay_fault(stop: store.Stop) -> Result[Bytes, store.Error] {
     encode_runner_reply(failed_stop(stop)?)
+}
+
+fn operate_tapes_check[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], take options: store.Options, n_place: u64) -> Result[Ended, StartError] waits {
+    // The driver checked both images' entry revisions and compiler backends.
+    // The writer's digest binds individual CALL records to these callbacks.
+    let writer = launch_bytes(LaunchBytes(field: 27u64, size: 32u64))
+    let identity = activation_identity_for(take writer, code.identity(p.place), p.on_migrate, code.identity(p.schema)) ?=> Open
+    let db = open_operator_store(p, take options, n_place)?
+    let checked = check_tape_window(db, identity, p.place, n_place, p.schema)
+    close_store(take db) ?=> Open
+    let differences = checked?
+    if differences != 0u64 {
+        return Error(Open(Operator(TapeDifferences(differences))))
+    }
+    Ok(Unstarted)
+}
+
+fn check_tape_window[G: send, H: shareable + inert + send](db: store.Db, identity: Bytes, place: StaticFn[fn(mut Registry[G, H]) -> Result[(), RegisterError]], n_place: u64, schema: StaticFn[fn(mut store.Declare) -> Result[H, store.Error]]) -> Result[u64, StartError] waits {
+    let branch = store.main_branch(db)
+    let after = store.retained_main_after(db)
+    let through = store.version(store.snapshot(db))
+    let selected: Option[Bytes] = Some(clone(identity))
+    let mut at = after
+    let mut counts: Map[String, u64] = map.new()
+    while at < through {
+        at += 1u64
+        let verdict = reexecute_at(db, branch, at, selected, place, n_place, schema) ?=> Open
+        let outcome = match verdict {
+            Same => "same",
+            Different(reason) => {
+                let mut line = string.from("{\"version\":")
+                string.push_u64(mut line, at)
+                string.push(mut line, match reason {
+                    Reply => ",\"difference\":\"Reply\"}\n",
+                    Writes => ",\"difference\":\"Writes\"}\n",
+                })
+                tapes_emit(line)?
+                "different"
+            },
+            Unknown(reason) => match reason {
+                NoEntry => "no_entry",
+                ArgsUnresolved => "args_unresolved",
+                StateGone => "state_gone",
+                RevisionUnknown => "revision_unknown",
+                NotRecorded => "not_recorded",
+                Effects => "effects",
+                AdmissionRefused => "admission_refused",
+                Residency => "residency",
+            },
+        }
+        let count = tape_count(counts, outcome)
+        map.insert(mut counts, string.from(outcome), count + 1u64)
+    }
+    let mut summary = string.from("{\"after\":")
+    string.push_u64(mut summary, after)
+    string.push(mut summary, ",\"through\":")
+    string.push_u64(mut summary, through)
+    for name in["same", "different", "no_entry", "args_unresolved", "state_gone", "revision_unknown", "not_recorded", "effects", "admission_refused", "residency"] {
+        string.push(mut summary, ",\"")
+        string.push(mut summary, name)
+        string.push(mut summary, "\":")
+        string.push_u64(mut summary, tape_count(counts, name))
+    }
+    string.push(mut summary, "}\n")
+    tapes_emit(summary)?
+    Ok(tape_count(counts, "different"))
+}
+
+fn tape_count(counts: Map[String, u64], name: String) -> u64 {
+    match map.get(counts, name) {
+        Some(count) => count,
+        None => 0u64,
+    }
+}
+
+fn tapes_emit(line: String) -> Result[(), StartError] {
+    if launch_emit(string.as_bytes(line)) {
+        Ok(())
+    } else {
+        Error(Missing("tapes check report output"))
+    }
 }

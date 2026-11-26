@@ -1,6 +1,6 @@
 //! The fresh link object: C-ABI startup, entry binding and current source data.
 //! Both program engines use this one Object/Cranelift writer on both targets.
-use crate::native::{EntryAbi, NativeOptions, NativeStop, grant_kind};
+use crate::native::{Backend, EntryAbi, NativeOptions, NativeStop, grant_kind};
 use cranelift_codegen::{
     ir,
     settings::{self, Configurable},
@@ -91,8 +91,10 @@ pub(crate) struct Plan<'a> {
     /// The program reaches the toolchain's `runner` package, so the entry reads the
     /// place-only launch words (launch.md, "Private prefix"). Absent from a
     /// plain plan's encoding, which keeps every other program's link key.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    place: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    place_backend: Option<Backend>,
+    #[serde(skip)]
+    backend: Backend,
     /// `store@1/store/verify_teardown` symbol registered at `@test` startup.
     #[serde(skip_serializing_if = "Option::is_none")]
     store_teardown_fn: Option<String>,
@@ -281,7 +283,8 @@ impl<'a> Plan<'a> {
             directories: &options.directories,
             recording: options.recording,
             coverage: options.coverage.is_some(),
-            place: false,
+            place_backend: None,
+            backend: options.backend,
             store_teardown_fn: None,
             replay: options.replay.as_ref(),
             foreign: vec![],
@@ -305,7 +308,7 @@ impl<'a> Plan<'a> {
 
     /// Marks a program that reaches the toolchain's `runner` package.
     pub(crate) fn with_place(mut self, place: bool) -> Self {
-        self.place = place;
+        self.place_backend = place.then_some(self.backend);
         self
     }
 
@@ -359,6 +362,9 @@ impl<'a> Plan<'a> {
         revisions: &[(String, [u8; 32])],
         (live_sites, spawns_units, (members, keys)): (Option<&BTreeSet<u64>>, bool, Inputs<'_>),
     ) -> Result<Vec<u8>> {
+        let format = hirsel_core_layout::Target::from_triple(target)
+            .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
+            .object_format();
         let mut object = object(target)?;
         let mut unwind = Unwind::new(object.isa()).map_err(error)?;
         let waits = foreign::emit(&mut object, &mut unwind, &self.foreign, &self.contained)?;
@@ -393,6 +399,7 @@ impl<'a> Plan<'a> {
             .declare_function("__hirsel_entry", Linkage::Local, &signature)
             .map_err(error)?;
         adapter::emit(&mut object, &mut unwind, self, entry, signature)?;
+        let launch = launch_config::emit(&mut object, format, self.place_backend, revision)?;
         start::emit(
             &mut object,
             &mut unwind,
@@ -403,11 +410,9 @@ impl<'a> Plan<'a> {
             spawns_units,
             build,
             descriptors,
+            launch,
         )?;
         let mut product = object.finish();
-        let format = hirsel_core_layout::Target::from_triple(target)
-            .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
-            .object_format();
         unwind.write(&mut product, format).map_err(error)?;
         crate::native_debug::add_source_note(&mut product.object, source_identity);
         sites::define(&mut product.object, sources)?;

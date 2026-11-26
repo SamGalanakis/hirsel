@@ -168,8 +168,9 @@ pub struct Metadata {
     witness: Option<u64>,
     move_envelope: Vec<u8>,
     /// Launch word 20: 0 serves, 1 `hirsel dry-run`, 2 `hirsel store verify`,
-    /// 3 `hirsel store repair`.
+    /// 3 `hirsel store repair`, 4 `hirsel tapes check`.
     store_op: u8,
+    recorded_image: Option<[u8; 32]>,
 }
 
 impl Metadata {
@@ -209,6 +210,7 @@ impl Metadata {
             witness: None,
             move_envelope: Vec::new(),
             store_op: 0,
+            recorded_image: None,
         }
     }
 
@@ -320,6 +322,11 @@ impl Metadata {
         self
     }
 
+    pub fn with_recorded_image(mut self, digest: [u8; 32]) -> Self {
+        self.recorded_image = Some(digest);
+        self
+    }
+
     pub fn with_witness(mut self, witness: Option<u64>) -> Self {
         self.witness = witness;
         self
@@ -398,6 +405,10 @@ impl Metadata {
                 .map_or(0, |(_, _, fates)| byte(fates)),
             25 => self.move_envelope.len() as u64,
             26 => byte(&self.move_envelope),
+            27 => self
+                .recorded_image
+                .as_ref()
+                .map_or(0, |digest| byte(digest)),
             _ => 0,
         }
     }

@@ -3,6 +3,8 @@
 //! `hirsel store repair --release` on the store itself (STORE-SPEC §15.6).
 
 use crate::cli::{Invocation, OptionId};
+use crate::native_entry::launch_config;
+use crate::package_content::Sha256Writer;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek},
@@ -30,6 +32,11 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
             b"hirsel store verify\n",
             "store verify DIR --release EXE",
         ),
+        "tapes check" => (
+            "--hirsel-tapes-check",
+            b"hirsel tapes check\n",
+            "tapes check DIR --recorded EXE --release EXE",
+        ),
         _ => (
             "--hirsel-store-repair",
             b"hirsel store repair\n",
@@ -37,12 +44,14 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
         ),
     };
     let (mut executable, mut store) = (None, invocation.positional.map(PathBuf::from));
+    let mut recorded = None;
     if name == "dry-run" && store.is_some() {
         return Err("dry-run takes the candidate through --exe".into());
     }
     for (id, value) in invocation.options {
         let destination = match id {
             OptionId::DryRunExe | OptionId::StoreRelease => &mut executable,
+            OptionId::RecordedExecutable if name == "tapes check" => &mut recorded,
             OptionId::Store if name == "dry-run" => &mut store,
             _ => return Err(format!("usage: hirsel {usage}").into()),
         };
@@ -58,15 +67,17 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
         return Err(format!("usage: hirsel {usage}").into());
     }
     let executable = std::path::absolute(executable)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(&executable)
-        .map_err(|error| format!("{}: {error}", executable.display()))?;
-    if !file.metadata()?.is_file() || !crate::native_entry::launch_config::is_place(&file) {
+    let file = open_executable(&executable)?;
+    if !file.metadata()?.is_file() || !launch_config::is_place(&file) {
         eprintln!("hirsel: {} is not a place", executable.display());
         return Ok(NOT_A_PLACE);
     }
+    let witness = if name == "tapes check" {
+        let recorded = recorded.ok_or_else(|| format!("usage: hirsel {usage}"))?;
+        Some(witness_pair(&recorded, &file)?)
+    } else {
+        None
+    };
     // A dry run and a verify read a clone and never write the store. A repair
     // writes it in place, so it needs the store stopped.
     let image = tempfile::tempdir()?;
@@ -87,8 +98,11 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     };
 
     let mut report = tempfile::tempfile()?;
+    let launch_flag = witness
+        .as_ref()
+        .map_or_else(|| flag.to_owned(), |(digest, _)| format!("{flag}={digest}"));
     let status = crate::host::release_command(&file, &executable)
-        .arg(flag)
+        .arg(launch_flag)
         .arg(target)
         .args(invocation.arguments)
         .stdin(Stdio::null())
@@ -101,11 +115,54 @@ pub(in crate::request) fn run(invocation: Invocation) -> Result<i32, Error> {
     report.rewind()?;
     let mut seen = vec![0; header.len()];
     if report.read_exact(&mut seen).is_ok() && seen == header {
+        if let Some((_, identity)) = witness {
+            println!("{identity}");
+        }
         io::copy(&mut report, &mut io::stdout().lock())?;
     } else if status.success() {
         return Err(format!("the executable did not report a {name}").into());
     }
     Ok(status.code().unwrap_or(1))
+}
+
+fn open_executable(path: &Path) -> Result<File, Error> {
+    Ok(OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?)
+}
+
+fn witness_pair(recorded: &Path, witness: &File) -> Result<(String, serde_json::Value), Error> {
+    let writer = open_executable(recorded)?;
+    if !writer.metadata()?.is_file() {
+        return Err(format!("{} is not a file", recorded.display()).into());
+    }
+    let (writer_backend, writer_revision) = launch_config::witness_identity(&writer)
+        .ok_or("the recorded executable has no Place compiler identity")?;
+    let (witness_backend, witness_revision) = launch_config::witness_identity(witness)
+        .ok_or("the witness executable has no Place compiler identity")?;
+    if writer_revision != witness_revision {
+        return Err("the recorded and witness code revisions differ".into());
+    }
+    if writer_backend == witness_backend {
+        return Err("the witness must use the other compiler backend".into());
+    }
+    let digest = |mut file: &File| -> Result<String, Error> {
+        file.rewind()?;
+        let mut hash = Sha256Writer::default();
+        io::copy(&mut file, &mut hash)?;
+        Ok(hirsel_core_ids::hex::encode(&hash.finish()))
+    };
+    let writer_digest = digest(&writer)?;
+    let identity = serde_json::json!({
+        "revision": hirsel_core_ids::hex::encode(&writer_revision),
+        "recorded_backend": writer_backend,
+        "recorded_image": writer_digest,
+        "witness_backend": witness_backend,
+        "witness_image": digest(witness)?,
+    });
+    Ok((writer_digest, identity))
 }
 
 fn open_file(path: &Path) -> io::Result<File> {

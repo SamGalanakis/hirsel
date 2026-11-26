@@ -854,8 +854,15 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         StoreRelease,
         ["--release"],
         Some("EXE"),
-        ["store verify", "store repair"],
-        "The release executable whose extractors check or rebuild the store's indexes."
+        ["store verify", "store repair", "tapes check"],
+        "The release executable that checks or repairs the store."
+    ),
+    option!(
+        RecordedExecutable,
+        ["--recorded"],
+        Some("EXE"),
+        ["tapes check"],
+        "The release executable that wrote the journal's call records."
     ),
     option!(
         Inputs,

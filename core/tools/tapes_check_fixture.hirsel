@@ -1,0 +1,71 @@
+// A directory tape with one known reply and no application writes.
+const WITNESS_BYTES: u64 = 131072u64
+
+const WITNESS_STEPS: u64 = 65536u64
+
+fn witness_entry(mut _tx: store.Tx, _h: (), _caller: Caller, take value: u64) -> Result[u64, u64] {
+    Ok(value + 1u64)
+}
+
+fn witness_place(mut r: Registry[(), ()]) -> Result[(), RegisterError] {
+    transact(mut r, code.describe(witness_entry), WITNESS_BYTES, WITNESS_STEPS)
+}
+
+fn witness_schema(mut _d: store.Declare) -> Result[(), store.Error] {
+    Ok(())
+}
+
+fn witness_reply(mut _tx: store.Tx, value: u64) -> Result[Bytes, Bytes] {
+    let mut raw: Bytes = list.new()
+    let expected: Result[u64, u64] = Ok(value)
+    result.unwrap(std.codec.put_result(expected, std.codec.of_u64(), std.codec.of_u64(), mut raw))
+    Ok(result.unwrap(encode_runner_reply(Returned(take raw))))
+}
+
+fn witness_record(d: Dir, c: Clock, r: Random, tasks: Tasks, answer: u64) -> () waits {
+    let mut db = result.unwrap(store.open(tasks, d, c, r, result.unwrap(store.sized(Directory, 536870912u64))))
+    let f = code.describe(witness_entry)
+    let reply_codec: std.codec.Codec[Result[u64, u64]] = std.codec.of()
+    let key = result.unwrap(attempt_key(f, std.codec.of_u64(), reply_codec))
+    let mut raw: Bytes = list.new()
+    std.codec.put_u64(41u64, mut raw)
+    let stream = store.StreamKey(caller: store.Caller(issuer: 1u8, subject: list.new()), id: store.StreamId(t: store.keyed_time(db), n: 1u64))
+    let admission = result.unwrap(store.admit(mut db, stream, 0u64, store.request_digest(key, raw)))
+    let Admitted(take complete) = take admission else {
+        fail("witness fixture admission")
+    }
+    result.unwrap(store.durable(mut db, store.ticket(complete)))
+    let identity = result.unwrap(activation_identity(code.identity(code.describe(witness_place)), None, code.identity(code.describe(witness_schema))))
+    let recorded_code = result.unwrap(code_bytes(WITNESS_BYTES, WITNESS_STEPS, identity))
+    let revision: Option[Bytes] = match code.revision(f) {
+        Some(digest) => Some(result.unwrap(copy_bytes(digest))),
+        None => None,
+    }
+    let record = store.CallRecord(key: take key, args: take raw, stream: take stream, revision: take revision, code: take recorded_code)
+    let plan = store.Plan(n_e: WITNESS_BYTES, s_e: WITNESS_STEPS, reply_max: 64u64)
+    let served = result.unwrap(store.serve(mut db, take complete, plan, Some(take record), answer, witness_reply))
+    let Committed(take receipt) = take served else {
+        fail("witness fixture reply")
+    }
+    result.unwrap(store.durable(mut db, receipt.ticket))
+    result.unwrap(store.close(take db))
+}
+
+pub fn witness_fixture(d: Dir, n: Net, c: Clock, r: Random, tasks: Tasks, a: Args, process: Process, errors: Stderr) -> Result[(), Exit] waits {
+    if let Some(action) = args.get(a, 0u64) {
+        if action == "record" || action == "record-different" {
+            witness_record(d, c, r, tasks, if action == "record" {
+                42u64
+            } else {
+                43u64
+            })
+            return Ok(())
+        }
+    }
+    let place = code.describe(witness_place)
+    let schema = code.describe(witness_schema)
+    main(a, process, errors, tasks, c, place, schema, scoped fn(take stop: Receiver[()]) -> Result[Ended, MainError] waits {
+        let settings: PlaceConfig[(), (), ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: Reopen, place, n_place: 1048576u64, on_migrate: None, schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks, clock: c, random: r, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: None, grants: None, triggers: None, idle: None)
+        Ok(operate(take settings, take stop, result.unwrap(status_root()), None) ?=> Start)
+    })
+}

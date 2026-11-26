@@ -370,7 +370,7 @@ impl OsProcess {
             let place = input.place != 0;
             let prepare_path = options.prepare_path(&args, input.directories_len, place)?;
             let store_op = options.store_op_path(&args, input.directories_len, place)?;
-            let isolated_store = prepare_path.or(store_op.map(|(_, dir)| dir));
+            let isolated_store = prepare_path.or(store_op.as_ref().map(|op| op.directory));
             let dry_run = store_op.is_some();
             let program_args = if dry_run { &args[2..] } else { &args[..] };
             let installing = options.installing();
@@ -435,8 +435,8 @@ impl OsProcess {
             if prepare_path.is_some() {
                 launch = launch_options::with_prepare(launch, &args)?;
             }
-            if let Some((op, _)) = store_op {
-                launch = launch.with_store_op(op);
+            if let Some(op) = store_op {
+                launch = op.configure(launch);
             }
             if let Some(predecessor) = install_predecessor {
                 launch = launch.with_install_predecessor(predecessor);

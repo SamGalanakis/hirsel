@@ -13,6 +13,7 @@ pub(super) fn emit(
     spawns_units: bool,
     build: Option<DataId>,
     descriptors: Option<(DataId, DataId)>,
+    launch: DataId,
 ) -> Result<()> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I32, I64], Some(I32));
@@ -167,8 +168,7 @@ pub(super) fn emit(
         .declare_data("hirsel_code_revision", Linkage::Import, false, false)
         .map_err(error)?;
     let revision = f.address(revision);
-    let launch_word = launch_config::emit(f.object, target.object_format(), plan.place)?;
-    let launch_word = f.address(launch_word);
+    let launch_word = f.address(launch);
     let place = f.load(I64, launch_word, 0);
     for (offset, value) in [
         (abi::OS_CONFIG_ROOT_LIMIT, limit),

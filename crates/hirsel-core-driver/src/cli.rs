@@ -70,6 +70,8 @@ commands! {
     "coverage diff", "coverage diff BASE NEW [--json] | coverage diff PROFILE --test DEFINITION [--json]", "Report the sites one coverage profile reached and the other did not, or one test and the rest of its profile.";
     "replay", "replay PACKAGE --tape TAPE [--diagnose] [options]", "Replay a recorded program with no host grants.";
     "tape", "tape show TAPE --include-credentials", "Export the header and frames stored in a credential-bearing tape.";
+    "tapes", "tapes <check>", "Check recorded calls in an offline Place store.";
+    "tapes check", "tapes check DIR --recorded EXE --release EXE", "Re-execute calls in the live journal with the other compiler backend.";
     "test", "test [package-dir] [options]", "Run each discovered @test in an independent process. When hirsel.toml contains [tests], set limit, dirs and grants there.";
     "inspect", "inspect [package-dir | ARCHIVE.hpkg | DEPENDENCY | --core | --std] [--interface [--module MODULE] [--filter TEXT] [--json] | --foreign-header MODULE | --foreign-abi MODULE | --dependents DEF [--transitive] | --affected-tests DEF | --unused [--library]]", "Inspect a package's declarations and dependencies. The default is --interface.";
     "image", "image [library-root] [options]", "Publish checked core and std source libraries.";

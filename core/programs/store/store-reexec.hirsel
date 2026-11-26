@@ -349,6 +349,15 @@ fn replay_source(db: Db, b: Branch, v: u64) -> Result[Result[ReplaySource, Unkno
         return Ok(Error(StateGone))
     }
     let Some(call) = recorded_call(db.store, b, commit) else {
+        for edit in commit.keyed {
+            if let Some(section) = edit.call {
+                if let Some(Settlement(way: 2u8, ..)) = section.settlement {
+                    return Ok(Error(AdmissionRefused))
+                }
+                // The stream replay adapter has no keyed claim source.
+                return Ok(Error(Effects))
+            }
+        }
         return Ok(Error(NotRecorded))
     }
     if call.settle == 2 {

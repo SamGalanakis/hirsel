@@ -198,9 +198,10 @@ the leading run of arguments that are recognised private launch options: the fir
 that is not one ends it, and that argument and every one after it become `Args` verbatim, so a
 private option written after a place argument is never read as one. `--hirsel-install`<!-- doc-ref: external -->
 and `--hirsel-activation=<version>`<!-- doc-ref: external --> are place arguments, read from `Args`
-by `runner.launch_selection`, so they come after every private option. Four words are read
+by `runner.launch_selection`, so they come after every private option. Five words are read
 from the first argument after the prefix, and only in a place: `--hirsel-dry-run <dir>`<!-- doc-ref: external -->,
-`--hirsel-store-verify <dir>`<!-- doc-ref: external -->, `--hirsel-store-repair <dir>`<!-- doc-ref: external --> (launch word 20, below) and
+`--hirsel-store-verify <dir>`<!-- doc-ref: external -->, `--hirsel-store-repair <dir>`<!-- doc-ref: external -->,
+`--hirsel-tapes-check=<writer-digest> <dir>`<!-- doc-ref: external --> (launch word 20, below) and
 `--hirsel-prepare`<!-- doc-ref: external --> (below). The linker bakes a `place` bit into the executable's launch
 configuration when the program reaches the toolchain's `runner` package, which holds every
 reader of these words. The link decides by where the package came from, never by its name: the
@@ -712,7 +713,7 @@ listener.
 
 *(See RUNNER-SPEC v2.45 and STORE-SPEC v2.57.)*
 
-`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6). Each backfill line names why the index rebuilds (`new index`, or the inputs whose revision changed). A store another process holds exits 75. `hirsel store verify DIR --release EXE` and `hirsel store repair DIR --release EXE` start the release the same way, verify on a copy and repair on DIR itself; launch word 20 says which (0 serves, 1 dry-run, 2 store verify, 3 store repair), and [STORE-SPEC §15.6](../../core/programs/store/STORE-SPEC.md) has what each does.
+`hirsel dry-run --exe NEW --store DIR` opens a private copy-on-write image of the place's offline store at DIR, runs NEW's `on_migrate` and then `schema` in mode `Migrate` against it, and prints what an activation would do: each table and index the declaration adds, drops or renames, each backfill with its row count, each unique index whose backfill would fail with the first conflicting key pair, and the sizes `store.sized` derives for the place's root limit with any `Shortage`. It commits nothing to DIR and exits nonzero when the activation would fail. `hirsel dev` (below) activates each edit through the ordinary install and reopen. Neither verb has a mode the serving path lacks: both run the ordinary place open (RUNNER-SPEC §6). Each backfill line names why the index rebuilds (`new index`, or the inputs whose revision changed). A store another process holds exits 75. `hirsel store verify DIR --release EXE` and `hirsel store repair DIR --release EXE` start the release the same way, verify on a copy and repair on DIR itself; launch word 20 says which (0 serves, 1 dry-run, 2 store verify, 3 store repair, 4 tapes check), and [STORE-SPEC §15.6](../../core/programs/store/STORE-SPEC.md) has what verify and repair do. `hirsel tapes check DIR --recorded WRITER --release WITNESS` starts WITNESS on a copy and carries WRITER's 32-byte executable digest in launch word 27. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24) defines the check.
 
 Backfill counts give the source rows read and the rows emitted into the
 preview image. A unique backfill reports the first duplicate by encoded

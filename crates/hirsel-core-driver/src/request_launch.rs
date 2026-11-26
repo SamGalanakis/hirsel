@@ -65,7 +65,7 @@ pub(super) fn store_tool(
             .iter()
             .any(|(id, _)| *id == crate::cli::OptionId::StoreRelease);
     conclude(Outcome::Exit(
-        if invocation.command.name == "dry-run" || releases {
+        if matches!(invocation.command.name, "dry-run" | "tapes check") || releases {
             dry_run::run(invocation)?
         } else {
             store_cli::run(invocation)?

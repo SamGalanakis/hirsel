@@ -202,6 +202,7 @@ def summarize(run, manifest, commit):
         ],
         "cross_build_reopen": cross_build,
         "ace_enumeration": ace,
+        "second_witness": next(read_evidence(run / "second-witness.jsonl", errors), None),
         "evidence_errors": errors,
     }
 

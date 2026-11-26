@@ -98,7 +98,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             )?));
         }
         "dev" => return conclude(Outcome::Exit(launch::dev::run(invocation)?)),
-        store if store == "dry-run" || store.starts_with("store ") => {
+        store if matches!(store, "dry-run" | "tapes check") || store.starts_with("store ") => {
             return launch::store_tool(invocation);
         }
         _ => {}
@@ -139,7 +139,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         ))?;
         return conclude(Outcome::Exit(0));
     }
-    crate::store::remote::begin()?; // The launcher and host returned above.
+    crate::store::remote::begin()?;
     let mut package_mode = crate::package_lock::Mode::default();
     let mut package_store = None;
     let mut pack_out = None;
@@ -514,6 +514,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::GroupStore
             | Opt::DryRunExe
             | Opt::StoreRelease
+            | Opt::RecordedExecutable
             | Opt::Trusted
             | Opt::RequestId
             | Opt::RequestStatus
@@ -1170,7 +1171,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             meter.result.image_selection = Some("image used: workspace dependencies".into());
         }
     }
-
     // The request's store keeps scratch; executables and request records live
     // in the content store, and the old flat `native` store is removed.
     let request_store = crate::Store::new(&request.store)?;

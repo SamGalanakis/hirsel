@@ -126,7 +126,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
     }
     if matches!(
         name.as_str(),
-        "prof" | "laws" | "lean" | "sdk" | "store" | "coverage"
+        "prof" | "laws" | "lean" | "sdk" | "store" | "coverage" | "tapes"
     ) {
         match arguments.next() {
             None => return Ok(Action::Help(help(Some(named(&name)?)))),

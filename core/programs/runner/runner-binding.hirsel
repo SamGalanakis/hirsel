@@ -222,15 +222,15 @@ type LaunchEnv {
 }
 
 // Launch word 20: what an isolated store launch does instead of serving.
-// `hirsel dry-run` (1), `hirsel store verify --release` (2) on a cloned image,
-// and `hirsel store repair` (3) in place.
-type StoreOp = Serving | DryRun | StoreVerify | StoreRepair
+// Store repair runs in place. The other operations use a private copy.
+type StoreOp = Serving | DryRun | StoreVerify | StoreRepair | TapesCheck
 
 fn store_op(value: u64) -> StoreOp {
     match value {
         1u64 => DryRun,
         2u64 => StoreVerify,
         3u64 => StoreRepair,
+        4u64 => TapesCheck,
         _ => Serving,
     }
 }

@@ -218,6 +218,11 @@ passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the fu
 | `hirsel store verify DIR --release EXE` | on a copy, declares the release's schema, scrubs, and checks every Public index against its table under the release's extractors; prints each changed revision, fault and wrong entry; changes nothing |
 | `hirsel store repair DIR --release EXE` | on DIR itself: demotes each index with a wrong entry and builds every index to the end; refuses while a deploy's export lease is held |
 
+`hirsel tapes check DIR --recorded WRITER --release WITNESS` checks the live journal on
+a copy of an offline Place store. Use the original executable and the same program built
+with the other compiler backend. [RUNNER-SPEC §7](../../core/programs/runner/RUNNER-SPEC.md#7-recording-and-re-execution-r5-at-store-spec-v24)
+defines the report and verdicts.
+
 `inspect` and `stats` do not open the store. They reserve the prepared capture's computed need
 inside `store_tool`'s fixed 1 GiB root, and print `hirsel store <verb> needs N bytes` on stderr
 when they succeed. A `Full` refusal prints the need's parts; its remedy line names the need and

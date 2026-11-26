@@ -124,6 +124,9 @@ if (( ${#law_filter[@]} == 0 )); then
       --compiler "${paths[0]}" --runtime "${crash[1]}" --bridge "${crash[0]}" \
       --max-len 3 --workers 4 --report "$run/ace.json" || status=$?
   fi
+  phase=second-witness
+  python3 core/tools/vopr_second_witness.py "${paths[0]}" "${paths[1]}" \
+    "$scratch/second-witness" "$run/second-witness.jsonl" || status=$?
 fi
 
 cd "$scratch"

@@ -95,6 +95,13 @@ library in its `engine/`. The compiler's RPATH selects the engine while clang
 and the LLVM tools select the stock library. The installation ships the
 engine, the static linker, and the dynamic inputs of the pinned link kit.
 
+A Darwin-hosted compiler uses an LLVM prefix built from the same pinned source
+with the ELF and Mach-O ports of lld. The installer takes `bin/ld.lld` from the
+prefix that supplied `lib/libLLVM.23.1.dylib`. Build lld with
+`@loader_path/../lib` as its run path so the installed linker can load the copy
+of the dylib. A Linux host takes the kit's static linker for all targets,
+including `aarch64-apple-darwin`.
+
 ## Publishing LLVM build inputs
 
 Create each `toolchain-llvm-*` release from its existing tag with

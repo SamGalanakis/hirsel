@@ -112,6 +112,7 @@ impl LinkRecipe {
                                     | "libutil.so.1"
                                     | "libresolv.so.2"
                                     | "libSystem.tbd"
+                                    | "libLLVM.23.1.dylib"
                             )
                         )
             })
@@ -294,8 +295,13 @@ fn kit_path(path: &str) -> io::Result<&Path> {
     Ok(path)
 }
 
-/// Install only the dynamic link inputs from the pinned kit.
-pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Result<PathBuf> {
+/// Install the host linker and the target's dynamic link inputs.
+pub(crate) fn install_recipe(
+    kit: &Path,
+    linker: &[u8],
+    target: &str,
+    root: &Path,
+) -> io::Result<PathBuf> {
     #[derive(serde::Deserialize)]
     struct KitTarget {
         start: Vec<String>,
@@ -312,7 +318,6 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
         floor: String,
         libraries: Vec<String>,
     }
-    // Rows differ in shape (Darwin's has no CRT files); read only the requested one.
     #[derive(serde::Deserialize)]
     struct KitManifest {
         targets: std::collections::BTreeMap<String, serde_json::Value>,
@@ -328,10 +333,9 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
         crate::installation::install_file(&std::fs::read(source)?, &root.join(&relative), 0o644)?;
         Ok(relative)
     };
-    let target_os = Target::from_triple(target)
-        .ok_or_else(|| io::Error::other("no installed link target"))?
-        .os();
-    let args = match target_os {
+    let target_kind =
+        Target::from_triple(target).ok_or_else(|| io::Error::other("no installed link target"))?;
+    let args = match target_kind.os() {
         Os::Linux => {
             let inputs = &serde_json::from_value::<KitTarget>(row).map_err(io::Error::other)?;
             let mut args = [
@@ -343,9 +347,9 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
             ]
             .map(str::to_owned)
             .to_vec();
-            match Target::from_triple(target) {
-                Some(Target::Aarch64Linux) => args.push("--fix-cortex-a53-843419".into()),
-                Some(Target::X86_64Linux | Target::Aarch64Darwin) | None => {}
+            match target_kind {
+                Target::Aarch64Linux => args.push("--fix-cortex-a53-843419".into()),
+                Target::X86_64Linux | Target::Aarch64Darwin => {}
             }
             for path in &inputs.start {
                 args.push(copy(path)?);
@@ -379,19 +383,14 @@ pub(crate) fn install_recipe(kit: &Path, target: &str, root: &Path) -> io::Resul
             args
         }
     };
-    crate::installation::install_file(
-        &std::fs::read(kit.join("ld.lld"))?,
-        &root.join(INSTALLED_LINKER),
-        0o755,
-    )?;
+    crate::installation::install_file(linker, &root.join(INSTALLED_LINKER), 0o755)?;
     let relative = Path::new("link").join(format!("{target}.json"));
-    let directory = root.join("link");
     let installed = InstalledRecipe {
         schema: INSTALLED_RECIPE_SCHEMA,
         target: target.into(),
         args,
     };
-    publish(&directory, &root.join(&relative), &installed)?;
+    publish(&root.join("link"), &root.join(&relative), &installed)?;
     Ok(relative)
 }
 
@@ -504,6 +503,7 @@ fn installed_toolchain(
     };
     let mut paths = closure.files;
     paths.push(linker.clone());
+    paths.extend(crate::host::INSTALLED_LINKER_LIBRARY.map(|library| root.join(library)));
     let real_root = root.canonicalize()?;
     if paths.iter().any(|path| {
         !path

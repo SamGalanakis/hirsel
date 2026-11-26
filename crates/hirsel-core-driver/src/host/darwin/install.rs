@@ -13,6 +13,18 @@ pub(crate) fn installed_executable(bytes: Vec<u8>, _source: &Path) -> io::Result
     Ok(bytes)
 }
 
+/// The Darwin LLVM prefix supplies lld next to its dylib. Its `@loader_path/../lib`
+/// search path also works after both are copied to the installation.
+pub(crate) fn installation_linker(_kit: &Path, library: &Path) -> io::Result<PathBuf> {
+    let prefix = library
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("the LLVM library has no toolchain prefix"))?;
+    Ok(prefix.join("bin/ld.lld"))
+}
+
+pub(crate) const INSTALLED_LINKER_LIBRARY: Option<&str> = Some("lib/libLLVM.23.1.dylib");
+
 /// The directories a dylib's LC_RPATH commands name, with `@loader_path` as
 /// `origin`, and the names of the dylibs it loads through `@rpath`. System dylibs,
 /// named by absolute path, are not shipped; nor is the dylib's own LC_ID_DYLIB.

@@ -17,6 +17,13 @@ pub(crate) mod spawn;
 
 pub(crate) use install::{installed_executable, loaded_libraries};
 
+/// The kit's Linux linker has both the ELF and Mach-O ports.
+pub(crate) fn installation_linker(kit: &Path, _library: &Path) -> io::Result<PathBuf> {
+    Ok(kit.join("ld.lld"))
+}
+
+pub(crate) const INSTALLED_LINKER_LIBRARY: Option<&str> = None;
+
 /// A delegated cgroup v2 subtree can hold the launcher's children (launch.md).
 pub(crate) const CGROUPS: bool = true;
 

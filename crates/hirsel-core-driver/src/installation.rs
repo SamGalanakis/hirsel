@@ -588,8 +588,8 @@ impl<T> RuntimeVariants<T> {
 /// selection is written last, so a failed install keeps the previous one.
 ///
 /// Installing a target's runtime installs the native toolchain with it: the
-/// LLVM engine the compiler loads and the pinned kit that links that target's
-/// programs. The target, never the host, selects the kit.
+/// LLVM engine and linker run on the host. The target selects the link kit's
+/// startup objects and libraries.
 pub fn publish(
     root: &Path,
     std: bool,
@@ -676,8 +676,12 @@ pub fn publish(
             let library = hirsel_llvm_lazy::llvm_library().map_err(|error| {
                 io::Error::other(format!("cannot install the LLVM engine: {error}"))
             })?;
+            let linker = crate::host::installation_linker(kit, library)?;
+            let linker_bytes = std::fs::read(&linker).map_err(|error| {
+                io::Error::new(error.kind(), format!("{}: {error}", linker.display()))
+            })?;
             install_libraries(library, &root.join("lib"))?;
-            let recipe = crate::tool_inputs::install_recipe(kit, target, &root)?;
+            let recipe = crate::tool_inputs::install_recipe(kit, &linker_bytes, target, &root)?;
             meter.finish("install/native toolchain");
             Some((target, recipe))
         }

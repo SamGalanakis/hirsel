@@ -19,7 +19,9 @@ use std::{
 mod install;
 pub(crate) mod spawn;
 
-pub(crate) use install::{installed_executable, loaded_libraries};
+pub(crate) use install::{
+    INSTALLED_LINKER_LIBRARY, installation_linker, installed_executable, loaded_libraries,
+};
 
 /// Darwin has no cgroups: the launcher runs without a delegated subtree.
 pub(crate) const CGROUPS: bool = false;

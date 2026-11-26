@@ -204,13 +204,14 @@ fn bucket_stream_batch_objects() -> Result[(), Error] {
 // --- The service core over std.sim.s3 (§12.11.3, §12.11.4).
 const STREAM_LAW_ROWS: u64 = 8
 
-fn stream_law_lane(endpoint: std.sim.s3.Endpoint, clock: Clock, tasks: Tasks, seed: u64, holder: StoreId) -> Result[StreamLane, Error] waits {
+fn stream_law_lane(endpoint: std.sim.s3.Endpoint, clock: Clock, tasks: Tasks, seed: u64, holder: StoreId) -> Result[(std.object.Client, StreamLane), Error] waits {
     let client = bucket_endpoint_client(endpoint, std.sim.s3.endpoint_network(endpoint), clock, tasks, "s3.test", seed, true, 0)?
-    stream_lane(take client, stream_law_sid(), 1, STREAM_LAW_ROWS, holder)
+    let lane = stream_lane(stream_law_sid(), 1, STREAM_LAW_ROWS, holder)?
+    Ok((take client, take lane))
 }
 
-fn stream_law_due(lane: StreamLane) -> u64 {
-    std.object.deadline_after_ms(lane.client, BUCKET_LAW_OP_MS)
+fn stream_law_due(client: std.object.Client) -> u64 {
+    std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
 }
 
 // A claimant that reads `reg` and adds its hold for (store, epoch); with
@@ -230,11 +231,13 @@ fn stream_law_holder(take actor: StreamHolder) -> Result[u64, Error] waits {
     if let Some(key) = actor.after {
         result.unwrap(std.sim.s3.requested(actor.endpoint, "PUT", key, 1))
     }
-    let mut lane = stream_law_lane(actor.endpoint, actor.clock, actor.tasks, actor.seed, actor.token)?
-    let due = stream_law_due(lane)
-    stream_reg_read(mut lane, due)?
+    let (take made_client, take made_lane) = stream_law_lane(actor.endpoint, actor.clock, actor.tasks, actor.seed, actor.token)?
+    let mut client = take made_client
+    let mut lane = take made_lane
+    let due = stream_law_due(client)
+    stream_reg_read(mut lane, mut client, due)?
     let against = lane.reg.inc
-    let Written = stream_reg_write(mut lane, Hold(RegRow(store: actor.store, epoch: actor.epoch, token: actor.token, rev_hold: 0, abandoned: false), against), due)? else {
+    let Written = stream_reg_write(mut lane, mut client, Hold(RegRow(store: actor.store, epoch: actor.epoch, token: actor.token, rev_hold: 0, abandoned: false), against), due)? else {
         fail("a hold saw the incarnation move with no election")
     }
     match stream_hold_rev(lane.reg, actor.token) {
@@ -274,15 +277,18 @@ fn bucket_stream_register_q5(c: Clock, r: Random, tasks: Tasks) -> Result[(), Er
     // with its reply lost once PUT 4, the second hold from the same rev, arrives.
     list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(reg), from: 3, count: 1, until: Requested("PUT", clone(reg), 4), then: ApplyLoseReply))
     let s = bucket_law_sim_holds(tasks, c, 41, None, list.new(), take holds, std.sim.world.plan(41))
-    let mut service = stream_law_lane(s.endpoint, s.time, tasks, 41, StoreId(hi: 50, lo: 1))?
-    stream_start_fresh(mut service, stream_law_due(service))?
+    let (take made_client, take made_lane) = stream_law_lane(s.endpoint, s.time, tasks, 41, StoreId(hi: 50, lo: 1))?
+    let mut client = take made_client
+    let mut service = take made_lane
+    stream_start_fresh(mut service, mut client, stream_law_due(client))?
     let place = StoreId(hi: 70, lo: 0)
     let b = stream_law_holder_task(s, tasks, 42, StoreId(hi: 60, lo: 1), place, 3, None)
     let held_c = stream_law_holder_task(s, tasks, 43, StoreId(hi: 60, lo: 2), place, 3, None)
     let rev_b = result.unwrap(task.join(take b))
     let rev_c = result.unwrap(task.join(take held_c))
-    let seen = stream_reg_read(mut service, stream_law_due(service))
+    let seen = stream_reg_read(mut service, mut client, stream_law_due(client))
     let StreamLane(reg: take final_reg, ..) = take service
+    let _ = take client
     let report = bucket_law_report(take s)
     seen?
     let (b_rev, c_rev) = (rev_b?, rev_c?)
@@ -313,15 +319,18 @@ fn bucket_stream_ack_after_create(c: Clock, r: Random, tasks: Tasks) -> Result[(
     let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
     list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(batch), from: 1, count: 1, until: Applied("PUT", clone(reg), 3), then: Apply))
     let s = bucket_law_sim_holds(tasks, c, 51, None, list.new(), take holds, std.sim.world.plan(51))
-    let mut service = stream_law_lane(s.endpoint, s.time, tasks, 51, StoreId(hi: 50, lo: 1))?
-    stream_start_fresh(mut service, stream_law_due(service))?
+    let (take made_client, take made_lane) = stream_law_lane(s.endpoint, s.time, tasks, 51, StoreId(hi: 50, lo: 1))?
+    let mut client = take made_client
+    let mut service = take made_lane
+    stream_start_fresh(mut service, mut client, stream_law_due(client))?
     let claimant = stream_law_holder_task(s, tasks, 52, StoreId(hi: 60, lo: 1), StoreId(hi: 70, lo: 0), 3, Some(clone(batch)))
     let mut slices: List[BatchSlice] = list.new()
     list.push(mut slices, stream_law_slice(70, stream_law_bytes(1, 3, 1)))
     list.push(mut slices, stream_law_slice(71, stream_law_bytes(9, 5, 0)))
-    let decided = stream_cycle(mut service, slices, stream_law_due(service))
+    let decided = stream_cycle(mut service, mut client, slices, stream_law_due(client))
     let held = result.unwrap(task.join(take claimant))
     let _ = take service
+    let _ = take client
     let _ = bucket_law_report(take s)
     held?
     let acked = decided?
@@ -343,13 +352,16 @@ fn bucket_stream_ack_after_lost_read(c: Clock, r: Random, tasks: Tasks) -> Resul
     // GET 1 is the start's; GETs 2–6 are the cycle's read and its resends.
     list.push(mut holds, std.sim.s3.Hold(method: "GET", key: clone(reg), from: 2, count: 5, until: At(0), then: Drop))
     let s = bucket_law_sim_holds(tasks, c, 61, None, list.new(), take holds, std.sim.world.plan(61))
-    let mut service = stream_law_lane(s.endpoint, s.time, tasks, 61, StoreId(hi: 50, lo: 1))?
-    stream_start_fresh(mut service, stream_law_due(service))?
+    let (take made_client, take made_lane) = stream_law_lane(s.endpoint, s.time, tasks, 61, StoreId(hi: 50, lo: 1))?
+    let mut client = take made_client
+    let mut service = take made_lane
+    stream_start_fresh(mut service, mut client, stream_law_due(client))?
     let mut slices: List[BatchSlice] = list.new()
     list.push(mut slices, stream_law_slice(70, stream_law_bytes(1, 3, 1)))
-    let lost = stream_cycle(mut service, slices, stream_law_due(service))
-    let later = stream_decide_pending(mut service, stream_law_due(service))
+    let lost = stream_cycle(mut service, mut client, slices, stream_law_due(client))
+    let later = stream_decide_pending(mut service, mut client, stream_law_due(client))
     let _ = take service
+    let _ = take client
     let _ = bucket_law_report(take s)
     if let Ok(_) = lost {
         fail("a cycle decided a batch with every register read dropped")

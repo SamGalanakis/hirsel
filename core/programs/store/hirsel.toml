@@ -70,6 +70,7 @@ std = { major = 1 }
 "store-stream-service.hirsel" = "store"
 "store-stream-slot.hirsel" = "store"
 "store-stream-task.hirsel" = "store"
+"store-stream-claim.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
 "store-history-packs.hirsel" = "store"
@@ -136,6 +137,7 @@ dirs = ["."]
 "bucket_q5_laws.hirsel" = "store"
 "bucket_stream_laws.hirsel" = "store"
 "bucket_stream_service_laws.hirsel" = "store"
+"bucket_stream_claim_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "authority_laws.hirsel" = "store"
@@ -229,6 +231,10 @@ limit = 268435456
 
 [tests.runs."store@1/store/bucket_stream_slot_refusals"]
 limit = 268435456
+
+# As the genesis law, with B's 32 MiB task and C's Place.
+[tests.runs."store@1/store/bucket_stream_claim_admission"]
+limit = 402653184
 
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,
 # plus the Task allocation and request channel.

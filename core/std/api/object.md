@@ -27,6 +27,10 @@ client cancels its tasks and closes their connections.
 `bucket_config` returns the configured bucket and prefix along with its
 endpoint settings. `endpoint_secure` reports whether the configured scheme
 is HTTPS.
+`set_prefix` points the client's later requests at another key prefix of
+the same bucket and returns the previous one. The prefix only names keys:
+the credentials, endpoint and lanes stay the client's, and openers made
+earlier keep their prefix.
 
 `split` moves the request state and the worker lifetime out of a client.
 `Requests` can move to another task, where `attach(requests, None)` makes it a client again. On the opening task, pass the original Workers to `attach` to restore the split client.

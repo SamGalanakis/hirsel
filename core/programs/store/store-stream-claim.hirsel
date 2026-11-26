@@ -1,0 +1,329 @@
+// The claim of an attached Place (STORE-SPEC §12.11.5) and the reader of its
+// live tail in history order (§12.11.9). Package-private until the terminal
+// fence lands.
+// What one batch of a live tail held for X at epoch e: not yet created, a
+// batch the hold's cutoff excludes (`seen_rev ≥ rev_hold`), or a batch read
+// with whether X had frames in it.
+type TailBatch = TailAbsent | TailBeyond | TailRead(bool)
+
+// The reader's buffers: the INDEX range and X's slice.
+type TailBuffers {
+    index: Bytes,
+    slice: Bytes
+}
+
+fn stream_tail_buffers() -> Result[TailBuffers, Error] {
+    let probe: Bytes = capacity(bound bytes (STREAM_INDEX_PROBE + 64) {
+        list.with_capacity(STREAM_INDEX_PROBE)
+    })?
+    Ok(TailBuffers(index: take probe, slice: list.new()))
+}
+
+// One range GET of `key` into `into`, its bytes [lo, hi) charged before the
+// request. `None` is a 404: the batch is not yet created (§12.11.8).
+fn stream_tail_range(mut client: std.object.Client, key: String, lo: u64, hi: u64, mut into: Bytes, deadline: u64) -> Result[Option[()], Error] waits {
+    list.clear(mut into)
+    capacity(list.try_reserve(mut into, hi - lo))?
+    let (take outcome, take buffer) = std.object.fetch_range(mut client, key, lo, hi, replace(mut into, list.new()), deadline)
+    into = take buffer
+    match take outcome {
+        Ok(_) => Ok(Some(())),
+        Error(NotFound) => Ok(None),
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+// Reads batch `seq` of incarnation `inc` and applies X's slice at `epoch`
+// to `replay`, from frame `skip` on. A batch with `seen_rev ≥ stop_rev` is
+// left unread past its INDEX. A TERM ends the incarnation, so the tail
+// cannot be read past it here.
+fn stream_tail_batch(mut client: std.object.Client, mut buffers: TailBuffers, dir: String, sid: HostStreamId, inc: u64, seq: u64, store: StoreId, epoch: u64, skip: u64, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[TailBatch, Error] waits {
+    let mut name = string.with_capacity(48)
+    stream_batch_key(mut name, inc, seq)
+    let key = stream_key(dir, name)
+    if let None = stream_tail_range(mut client, key, 0, STREAM_INDEX_PROBE, mut buffers.index, deadline)? {
+        return Ok(TailAbsent)
+    }
+    let mut batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+        Rows(take found) => take found,
+        Term(_, _) => return Error(Latched(Superseded)),
+    }
+    if list.len(buffers.index) < batch_index.byte_len {
+        if let None = stream_tail_range(mut client, key, 0, batch_index.byte_len, mut buffers.index, deadline)? {
+            return Error(disk_fault(key, 0, Absent))
+        }
+        batch_index = match stream_batch_head(key, buffers.index, sid, inc, seq)? {
+            Rows(take found) => take found,
+            Term(_, _) => return Error(disk_fault(key, 72, Malformed)),
+        }
+    }
+    if batch_index.seen_rev >= stop_rev {
+        return Ok(TailBeyond)
+    }
+    for row in batch_index.rows {
+        if same(row.store, store) && row.epoch == epoch {
+            if row.len == 0 {
+                return Error(disk_fault(key, row.offset, Malformed))
+            }
+            if let None = stream_tail_range(mut client, key, row.offset, row.offset + row.len, mut buffers.slice, deadline)? {
+                return Error(disk_fault(key, row.offset, Absent))
+            }
+            stream_slice_check(key, row, buffers.slice)?
+            stream_tail_apply(key, buffers.slice, row, seq, store, epoch, skip, mut replay, ceiling)?
+            return Ok(TailRead(true))
+        }
+    }
+    Ok(TailRead(false))
+}
+
+// X's frames in one slice, sealed under (X, BATCH, seq) at slice offsets
+// (§12.11.2): commits apply in order and are re-admitted after each; the
+// CLAIM names this epoch; nothing else may ride a Place's slice.
+fn stream_tail_apply(key: String, slice: Bytes, row: BatchRow, seq: u64, store: StoreId, epoch: u64, skip: u64, mut replay: JournalReplay, ceiling: u64) -> Result[(), Error] {
+    let ctx = DiskContext(store, role: ROLE_BATCH, seq)
+    let mut at = 0u64
+    let mut frames = 0u64
+    while at < list.len(slice) {
+        let frame = disk_frame_bytes(key, ctx, slice, at)?
+        if frames >= skip {
+            if frame.kind == 0x0040 {
+                if frame.end - frame.payload != 24 || read_le(slice, frame.payload, 8) != epoch {
+                    return Error(disk_fault(key, row.offset + at, Malformed))
+                }
+            } else if frame.kind == 0x0011 || frame.kind == 0x0013 {
+                let event = disk_allocation(scoped fn() -> Result[JournalEvent, Error] {
+                    journal_decode(key, frame.kind, list.slice(slice, frame.payload, frame.end))
+                })?
+                journal_apply(key, mut replay, take event)?
+                over_ceiling(journal_account(replay)?, ceiling)?
+            } else {
+                return Error(disk_fault(key, row.offset + at, Kind(int.widen(frame.kind))))
+            }
+        }
+        frames += 1
+        at = frame.end
+    }
+    if frames != row.frames {
+        return Error(disk_fault(key, row.offset, Malformed))
+    }
+    Ok(())
+}
+
+// Where a scan of X's live tail stands: the next batch to read, and the last
+// batch with X frames at or after `from`.
+type TailScan {
+    next: u64,
+    last_x: Option[u64]
+}
+
+// Reads batches from `cursor.next` until one is not yet created, or (for the
+// delta) until one has `seen_rev ≥ stop_rev` (§12.11.5 steps 2 and 4).
+fn stream_tail_scan(mut client: std.object.Client, mut buffers: TailBuffers, dir: String, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, stop_rev: u64, mut replay: JournalReplay, ceiling: u64, deadline: u64) -> Result[(), Error] waits {
+    loop {
+        let skip: u64 = if cursor.next == tail.from_seq {
+            int.widen(tail.from_frame)
+        } else {
+            0
+        }
+        match stream_tail_batch(mut client, mut buffers, dir, tail.sid, tail.inc, cursor.next, store, epoch, skip, stop_rev, mut replay, ceiling, deadline)? {
+            TailAbsent => return Ok(()),
+            TailBeyond => return Ok(()),
+            TailRead(had) => {
+                if had {
+                    cursor.last_x = Some(cursor.next)
+                }
+                cursor.next += 1
+            },
+        }
+    }
+}
+
+// A claimant's stream side: its register lane, the reader's buffers, the
+// grant on its own slot (asked once), and its hold's token once it wrote one.
+type ClaimStream {
+    lane: StreamLane,
+    buffers: TailBuffers,
+    granted: Option[(u64, u64)],
+    token: Option[StoreId]
+}
+
+// Runs `body` with the client's prefix at the bucket's top, where the stream
+// root is named from (§12.11.1), and puts the Place's prefix back.
+fn stream_at_root[R](mut client: std.object.Client, body: scoped fn(mut std.object.Client) -> Result[R, Error] waits) -> Result[R, Error] waits {
+    let place = std.object.set_prefix(mut client, string.new())
+    let result = body(mut client)
+    let _ = std.object.set_prefix(mut client, take place)
+    take result
+}
+
+// Rule (e): the claimant marks its own row Abandoned, only when it will
+// never send H for it. A failed mark leaves the row Held for rule (a).
+fn stream_claim_abandon(mut client: std.object.Client, mut side: ClaimStream, deadline: u64) waits {
+    let Some(token) = replace(mut side.token, None) else {
+        return
+    }
+    let _ = stream_at_root(mut client, scoped fn(mut c: std.object.Client) -> Result[RegWrite, Error] waits {
+        stream_reg_write(mut side.lane, mut c, Abandon(token), deadline)
+    })
+}
+
+// An attached open of an existing Place X (§12.11.5). The first push serves
+// only `live` at the register's current incarnation with no sealed tail;
+// every other ATTACH refuses before any write. `workspace.witness` holds
+// step 1's head bytes on entry.
+fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
+    let mut lane = stream_lane(link.sid, authority_kind, link.max_rows, holder)?
+    lane.dir = stream_key(link.root, stream_dir(link.sid))
+    let mut side = ClaimStream(lane: take lane, buffers: stream_tail_buffers()?, granted: None, token: None)
+    loop {
+        if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
+            return Error(Lost)
+        }
+        let attempt = stream_claim_attempt(mut read_source, mut link, mut side, r, holder, options, requested_levels, authority_kind, mut workspace, prepare_writer)?
+        if let Some(take done) = take attempt {
+            return Ok(take done)
+        }
+        let _ = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)?
+    }
+}
+
+// One attempt, steps 1–7. `None`: the claim's pair moved position, the row
+// is abandoned, and the claim restarts from a fresh head.
+fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, mut side: ClaimStream, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(HistoryRegister, JournalReplay, T, Bytes)], Error] waits {
+    let deadline = read_source.deadline
+    let (take capture, take attached) = history_decode_head_attach(workspace.witness)?
+    history_check_open(read_source.client, capture, requested_levels, authority_kind, options)?
+    let Some(take attach) = take attached else {
+        // A standalone head opened streamed: §12.3's claim writing ATTACH.
+        return Error(Exists("head"))
+    }
+    let Some(tail) = attach.live else {
+        // Direct service: §12.3's claim with ATTACH copied.
+        return Error(Exists("head"))
+    }
+    if !stream_same(tail.sid, link.sid) || list.len(attach.sealed) != 0 {
+        return Error(Exists("head"))
+    }
+    let head = capture.head
+    let store = head.store
+    let epoch = head.pair.epoch
+    // Step 2: the settled part, then the pre-scan of the live tail, both
+    // admitted before the hold.
+    let mut replay = history_load_admitted(mut read_source, head, options.resident_limit)?
+    check_limits(options.limits, replay.limits)?
+    let mut cursor = TailScan(next: tail.from_seq, last_x: None)
+    let ceiling = options.resident_limit
+    stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+        stream_reg_read(mut side.lane, mut c, deadline)?
+        if side.lane.reg.inc != tail.inc || side.lane.reg.collecting {
+            // The no-hold rule and a Collecting register are not built.
+            return Error(Exists("head"))
+        }
+        stream_tail_scan(mut c, mut side.buffers, side.lane.dir, tail, store, epoch, mut cursor, 18446744073709551615u64, mut replay, ceiling, deadline)
+    })?
+    let (inc_b, next_b) = match side.granted {
+        Some(grant) => grant,
+        None => {
+            let grant = slot_attach(mut link, store, epoch + 1)?
+            side.granted = Some(grant)
+            grant
+        },
+    }
+    // Step 3: the hold, the one thing written before H.
+    let token = capacity(disk_identity(r))?
+    let held = stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[RegWrite, Error] waits {
+        stream_reg_write(mut side.lane, mut c, Hold(RegRow(store, epoch, token, rev_hold: 0, abandoned: false), tail.inc), deadline)
+    })
+    match take held {
+        Ok(Written) => {
+            side.token = Some(token)
+        },
+        Ok(Moved) => return Error(Exists("head")),
+        Error(Undecided) => {
+            side.token = Some(token)
+            stream_claim_abandon(mut read_source.client, mut side, deadline)
+            return Error(Undecided)
+        },
+        Error(take problem) => return Error(take problem),
+    }
+    let decided = stream_claim_hold_scope(mut read_source, mut side, tail, store, epoch, mut cursor, mut replay, options, mut workspace, prepare_writer)
+    let (take admitted, tag) = match take decided {
+        Ok(Some(take ready)) => take ready,
+        Ok(None) => {
+            stream_claim_abandon(mut read_source.client, mut side, deadline)
+            return Ok(None)
+        },
+        Error(take problem) => {
+            stream_claim_abandon(mut read_source.client, mut side, deadline)
+            return Error(take problem)
+        },
+    }
+    // Step 6: H, the one authoritative publication.
+    let mut sealed: List[SealedTail] = list.new()
+    if let Some(k) = cursor.last_x {
+        list.push(mut sealed, SealedTail(tail, cutoff: k, at: head.entry.seq))
+    }
+    let attach_next = Attach(settles: attach.settles, live: Some(StreamRef(sid: link.sid, inc: inc_b, from_seq: next_b, from_frame: 0)), sealed: take sealed)
+    let claimed = history_claim_head(head, holder)?
+    let authority_end = history_authority_end(workspace.witness)?
+    let authority = copied(list.slice(workspace.witness, 240, authority_end))?
+    history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach_next)))?
+    let written = history_write_head(mut read_source.client, Match(tag), mut workspace.body, mut workspace.witness, deadline)
+    let applied_tag = match take written {
+        HistoryApplied(t) => t,
+        HistoryConflict(_) => {
+            stream_claim_abandon(mut read_source.client, mut side, deadline)
+            let (take moved, _) = history_decode_head_attach(workspace.witness)?
+            if !history_pair_matches(moved.head.pair, head.pair) {
+                return Error(Lost)
+            }
+            return Ok(None)
+        },
+        // H may yet apply or was refused: the row stays Held (rule e).
+        HistoryRefused(take problem) => return Error(Remote(take problem)),
+        HistoryUndecided => return Error(Undecided),
+    }
+    // Step 7: the CLAIM is X's first frame on S_B.
+    slot_claim_frame(mut workspace.packet, claimed.pair.epoch, holder)
+    slot_send(link, workspace.packet, 0)?
+    match slot_wait(link, 0) {
+        Ok(()) => (),
+        Error(Fenced(_)) => return Error(Lost),
+        Error(take problem) => return Error(take problem),
+    }
+    Ok(Some((HistoryRegister(head: claimed, tag: applied_tag, terminal: None, attach: Some(take attach_next)), take replay, take admitted, take authority)))
+}
+
+// Steps 4 and 5 under the hold: every failure here abandons the row (rule
+// e). `None`: the claim's pair moved position. Otherwise the writer's
+// prepared state and the tag H matches.
+fn stream_claim_hold_scope[T](mut read_source: ObjectPackRead, mut side: ClaimStream, tail: StreamRef, store: StoreId, epoch: u64, mut cursor: TailScan, mut replay: JournalReplay, options: Options, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(T, std.object.ETag)], Error] waits {
+    let deadline = read_source.deadline
+    let Some(token) = side.token else {
+        return Error(disk_fault("reg", 0, Malformed))
+    }
+    let Some(rev_hold) = stream_hold_rev(side.lane.reg, token) else {
+        return Error(disk_fault("reg", 0, Malformed))
+    }
+    // Step 4: the delta, cut at the first batch absent or seen at or after
+    // the hold, applied and re-admitted.
+    let ceiling = options.resident_limit
+    stream_at_root(mut read_source.client, scoped fn(mut c: std.object.Client) -> Result[(), Error] waits {
+        stream_tail_scan(mut c, mut side.buffers, side.lane.dir, tail, store, epoch, mut cursor, rev_hold, mut replay, ceiling, deadline)
+    })?
+    let admitted = prepare_writer(store, replay)?
+    // Step 5: the final head GET; exactly step 1's bytes go on with its tag.
+    let tag = match history_fetch_head(mut read_source.client, mut workspace.compare, deadline) {
+        Ok(found) => found,
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    if workspace.compare == workspace.witness {
+        return Ok(Some((take admitted, tag)))
+    }
+    let (take first, _) = history_decode_head_attach(workspace.witness)?
+    let (take moved, _) = history_decode_head_attach(workspace.compare)?
+    if !history_pair_matches(moved.head.pair, first.head.pair) {
+        return Error(Lost)
+    }
+    Ok(None)
+}

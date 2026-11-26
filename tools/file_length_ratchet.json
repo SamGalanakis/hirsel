@@ -56,9 +56,9 @@
     "lines": 2819
   },
   "core/std/object.hirsel": {
-    "lines": 3154,
-    "raise_revision": 13,
-    "reason": "object-range-stream-2690"
+    "lines": 3156,
+    "raise_revision": 14,
+    "reason": "store-bucket-stream-build2-2941"
   },
   "core/std/omap.hirsel": {
     "lines": 1398,

@@ -1,0 +1,162 @@
+// L90 laws for the claim of an attached Place (STORE-SPEC §12.11.5,
+// §12.11.6). Each oracle is the request log and the register's final body,
+// counted from the spec's own schedule, never the store under test.
+// The claimant B of L90-Q4: X's Place prefix on its own slot, with a
+// resident limit that fits X's history through n - 1 and not through n.
+type Q4Claimant: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    r: Random,
+    slot: JournalSlot,
+    limit: u64
+}
+
+// B's open must end `Full(Resident)`. Any other end is the law's failure.
+fn stream_q4_claim(take b: Q4Claimant) -> Result[(), Error] waits {
+    let Q4Claimant(endpoint, clock, tasks, r, slot: take slot, limit) = take b
+    let client = stream_endpoint_client(endpoint, clock, tasks, 201, "p1/", "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", BUCKET_LAW_OP_MS), take slot)?
+    let mut options = bucket_order_options(false)
+    options.head_poll_ms = 1000
+    options.resident_limit = limit
+    match open_authority(tasks, take attached, clock, r, options) {
+        Ok(take db) => {
+            let _ = close(take db)
+            fail("L90-Q4: B served X past a delta it cannot hold")
+        },
+        Error(Refusal(error: take problem, ..)) => match take problem {
+            Full(Resident(_)) => Ok(()),
+            take other => Error(take other),
+        },
+    }
+}
+
+// L90-Q4 (§12.11.5 step 4, §12.11.6 rule b): A acks X's frame n after B's
+// pre-scan and before B's hold applies; B's resident limit fits n - 1 and not
+// n. B returns `Full(Resident)` and writes no H, its row ends Abandoned, A
+// unholds it by (b) and acks X's next commit, and a later claimant C reads n
+// and n + 1. Red for a claimant that cuts its delta at its pre-scan point: it
+// admits n - 1 and serves X.
+@test
+fn bucket_stream_claim_admission(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_service_key(string.from("reg"))
+    // PUT 1 of `reg` creates it and PUT 2 elects incarnation 1, so PUT 3 is
+    // B's hold. It is held at the service until the law's release GET.
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(reg), from: 3, count: 1, until: Requested("GET", "q4-release", 1), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 89, None, list.new(), take holds, std.sim.world.plan(89))
+    let outcome = stream_q4_run(s, tasks, r, reg)
+    let report = bucket_law_report(take s)
+    outcome?
+    // Between A's attach and A's close the spec's schedule writes `reg` three
+    // times (B's hold, B's abandon, A's unhold) and X's head never.
+    let mut window = false
+    let mut heads = 0u64
+    let mut regs = 0u64
+    for q in report.requests {
+        if q.method == "GET" && q.key == "q4-start" {
+            window = true
+        }
+        if q.method == "GET" && q.key == "q4-end" {
+            window = false
+        }
+        if window && q.method == "PUT" && q.status == 200 && q.key == "p1/head" {
+            heads += 1
+        }
+        if window && q.method == "PUT" && q.status == 200 && q.key == reg {
+            regs += 1
+        }
+    }
+    if heads != 0 {
+        fail("L90-Q4: B wrote X's head after a failed admission")
+    }
+    if regs != 3 {
+        fail("L90-Q4: `reg` was written other than B's hold and abandon and A's unhold")
+    }
+    // A's unhold removed B's Abandoned row.
+    let Some(final) = map.get(report.objects, reg) else {
+        fail("L90-Q4: `reg` is gone")
+    }
+    let body = stream_register_decode(final.data, stream_law_sid(), 0)?
+    for row in body.rows {
+        if row.abandoned {
+            fail("L90-Q4: B's Abandoned row outlived A's unhold")
+        }
+    }
+    Ok(())
+}
+
+fn stream_q4_run(s: BucketSim, tasks: Tasks, r: Random, reg: String) -> Result[(), Error] waits {
+    let plan = stream_service_plan(4)
+    let mut service = stream_service_start(s, tasks, s.time, r, plan)?
+    // X is made standalone with its table declared, since a schema seal is a
+    // cut and an attached Place does not cut; A then attaches it (§12.11.5,
+    // "No ATTACH").
+    let client_x = stream_service_client(s, tasks, 84, "p1/", "us-east-1")?
+    let mut made = open_authority(tasks, object_authority(take client_x, "bucket", BUCKET_LAW_OP_MS), s.time, r, bucket_order_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let _ = bucket_law_rows_table(mut made)?
+    close(take made)?
+    let slot_a = journal_slot(mut service)?
+    let client_a = stream_service_client(s, tasks, 85, "p1/", "us-east-1")?
+    let attached_a = streamed(object_authority(take client_a, "bucket", BUCKET_LAW_OP_MS), take slot_a)?
+    let mut options = bucket_order_options(true)
+    options.head_poll_ms = 1000
+    let mut a = open_authority(tasks, take attached_a, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    stream_service_marker(s, tasks, string.from("q4-start"))?
+    // n = 3: rows 1 and 2 are n - 2 and n - 1, and one row's charge is
+    // r1 - r0, so B's limit holds n - 1 with half a row to spare.
+    bucket_law_commit(mut a, 1)?
+    let r0 = a.resident
+    bucket_law_commit(mut a, 2)?
+    let r1 = a.resident
+    let slot_b = journal_slot(mut service)?
+    let claimant = Q4Claimant(endpoint: s.endpoint, clock: s.time, tasks, r, slot: take slot_b, limit: r1 + (r1 - r0) / 2)
+    let running = task.spawn(tasks, bytes 33554432, take claimant, stream_q4_claim)
+    // B has pre-scanned and sent its hold; A acks n before the hold applies.
+    result.unwrap(std.sim.s3.requested(s.endpoint, "PUT", reg, 3))
+    bucket_law_commit(mut a, 3)?
+    stream_service_marker(s, tasks, string.from("q4-release"))?
+    match task.join(take running) {
+        Ok(take ended) => ended?,
+        Error(_) => fail("L90-Q4: B's task failed"),
+    }
+    // n + 1 stalls on B's Abandoned row and is acked once A unholds it.
+    bucket_law_commit(mut a, 4)?
+    stream_service_marker(s, tasks, string.from("q4-end"))?
+    close(take a)?
+    let slot_c = journal_slot(mut service)?
+    let client_c = stream_service_client(s, tasks, 87, "p1/", "us-east-1")?
+    let attached_c = streamed(object_authority(take client_c, "bucket", BUCKET_LAW_OP_MS), take slot_c)?
+    let mut options_c = bucket_order_options(false)
+    options_c.head_poll_ms = 1000
+    let mut later = open_authority(tasks, take attached_c, s.time, r, options_c) ?=> |Refusal(error: take problem, ..)| take problem
+    if bucket_law_rows(mut later)? != 4 {
+        fail("L90-Q4: a later claimant does not read X through n + 1")
+    }
+    close(take later)?
+    close_journal_service(take service)
+}
+
+// The claim reads the stream root by `std.object.set_prefix`, and a listing
+// after it is queried under the new prefix with its keys stripped of it: the
+// key "p1/one" under prefix "p1/o" lists as "ne". Red for lanes that strip
+// the prefix the client started with ("p1/" gives "one").
+@test
+fn bucket_stream_set_prefix_listing(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim_holds(tasks, c, 93, None, list.new(), list.new(), std.sim.world.plan(93))
+    let mut client = stream_service_client(s, tasks, 93, "p1/", "us-east-1")?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let (stored, _) = std.object.store(mut client, "one", string.into_bytes(string.from("payload")), due)
+    let _ = stored ?=> |problem| Remote(problem)
+    let old = std.object.set_prefix(mut client, string.from("p1/o"))
+    let mut found: List[std.object.Entry] = list.with_capacity(2)
+    let listed = std.object.list(mut client, "", "", mut found, due)
+    let _ = take client
+    let _ = bucket_law_report(take s)
+    let _ = listed ?=> |problem| Remote(problem)
+    if old != "p1/" || list.len(found) != 1 || std.object.key_text(found[0].key) != "ne" {
+        fail("a listing after set_prefix is not stripped of the new prefix")
+    }
+    Ok(())
+}

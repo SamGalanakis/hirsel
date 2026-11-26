@@ -500,7 +500,7 @@ fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, H
     }
     let _ = history_fetch(mut second, "head", mut b_buffers.witness, due)?
     let captured = history_decode_head(b_buffers.witness)?
-    let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), mut b_buffers, due)? else {
+    let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), mut b_buffers, due, None)? else {
         fail("second holder failed to claim")
     }
     let mut b = take claimed
@@ -797,7 +797,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
         fail("304 returned head bytes")
     }
     let _ = history_fetch(mut new_client, "head", mut successor.witness, deadline)?
-    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, mut successor, deadline)? else {
+    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, mut successor, deadline, None)? else {
         fail("second holder failed to claim")
     }
     let mut active = take claimed

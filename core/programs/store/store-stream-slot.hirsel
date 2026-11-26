@@ -44,6 +44,12 @@ const STREAM_CONTROL_RING: u32 = 0xFFFFFFFF
 // Items one slot's data connection queues; its bytes are `slot_bytes`.
 const STREAM_SLOT_ITEMS: u64 = 64
 
+// The service's own ring when its stall poll is due (§12.11.13), and the
+// alarm task that rings it.
+const STREAM_POLL_RING: u32 = 0xFFFFFFFE
+
+const STREAM_TIMER_BYTES: u64 = 4096
+
 type ServiceControl: send = NewSlot(Sender[Result[(Client[SlotMsg], u32), Error]]) | StopService
 
 // One Place's data connection client, the doorbell, and the stream it names
@@ -57,7 +63,8 @@ type JournalSlot: cross {
     aws_region: String,
     bucket: String,
     root: String,
-    slot_bytes: u64
+    slot_bytes: u64,
+    max_rows: u64
 }
 
 type JournalService {
@@ -70,18 +77,20 @@ type JournalService {
     aws_region: String,
     bucket: String,
     root: String,
-    slot_bytes: u64
+    slot_bytes: u64,
+    max_rows: u64
 }
 
 // The bytes the service task runs in: the batch buffer, the batch's slice
 // octets and the 412 compare (each `max_batch_bytes`), its register
-// buffers, the doorbell, and per slot its room and ack item (§12.11.12).
+// buffers, the doorbell, the stall poll's alarm, and per slot its room and
+// ack item (§12.11.12).
 fn stream_service_bytes(plan: StreamPlan) -> u64 {
     let batch = plan.batching.max_batch_bytes + BINDING_BYTES + 64
     let reg = REG_LIMIT + 88 + BINDING_BYTES + 64
     let slots: u64 = int.widen(plan.limits.max_slots)
     let per_slot = 64 + plan.limits.slot_bytes + 64 + 128
-    int.saturating_add(3 * order.max(batch, reg) + 64 + 4 * slots + STREAM_SERVICE_FIXED, int.saturating_mul(slots, per_slot))
+    int.saturating_add(3 * order.max(batch, reg) + 64 + 4 * slots + STREAM_SERVICE_FIXED + STREAM_TIMER_BYTES, int.saturating_mul(slots, per_slot))
 }
 
 const STREAM_SERVICE_FIXED: u64 = 262144
@@ -190,7 +199,7 @@ fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u6
     let (control_send, control_receive): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(slots + 1)
     let (ready_send, ready_receive): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
     let (take requests, take workers) = std.object.split(take client)
-    let input = StreamServiceInput(requests: take requests, clock: c, plan: clone(plan), dir: stream_root_dir(plan.prefix), authority_kind: kind, holder, op_ms, control: take control_receive, rings: take rings, ready: take ready_send)
+    let input = StreamServiceInput(requests: take requests, clock: c, plan: clone(plan), dir: stream_root_dir(plan.prefix), authority_kind: kind, holder, op_ms, control: take control_receive, rings: take rings, ready: take ready_send, tasks, bell: conn.client(bell))
     let running = match task.try_spawn(tasks, bytes budget, take input, stream_service_task) {
         Ok(take handle) => take handle,
         Error((problem, take back)) => {
@@ -213,7 +222,7 @@ fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u6
             Error(_) => fail("journal_service: the service task failed at its start"),
         }
     }
-    Ok(JournalService(task: take running, control: take control_send, bell: take bell, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes))
+    Ok(JournalService(task: take running, control: take control_send, bell: take bell, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes, max_rows: 2 * slots))
 }
 
 fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot]) -> Authority {
@@ -235,7 +244,7 @@ fn journal_slot(mut s: JournalService) -> Result[JournalSlot, Error] waits {
         Ok(Error(take e)) => return Error(take e),
         Error(_) => return Error(Io(Closed)),
     }
-    Ok(JournalSlot(data: take data, bell: conn.client(s.bell), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes))
+    Ok(JournalSlot(data: take data, bell: conn.client(s.bell), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes, max_rows: s.max_rows))
 }
 
 // A writer Authority whose opens attach to the slot's stream (§12.11.1).
@@ -275,6 +284,8 @@ fn close_journal_service(take s: JournalService) -> Result[(), Error] waits {
 
 // The Place side of an attached open: its slot and the connection the
 // service answers on (§12.11.12). `inc` is the incarnation that granted it.
+// `root` is the stream root from the bucket's top and `max_rows` the
+// register bound a claimant's hold applies (§12.11.2).
 type SlotLink: send {
     data: Client[SlotMsg],
     bell: Client[u32],
@@ -283,13 +294,15 @@ type SlotLink: send {
     chunk: u64,
     answers: Inbox[SlotAck],
     answer_client: Option[Client[SlotAck]],
-    inc: u64
+    inc: u64,
+    root: String,
+    max_rows: u64
 }
 
 fn slot_link(slot: JournalSlot) -> Result[SlotLink, Error] {
     let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(1, bytes 0)
     let (take answer_client, take answers) = capacity(take made)?
-    Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), slot: slot.slot, sid: slot.sid, chunk: slot.slot_bytes / 2, answers: take answers, answer_client: Some(take answer_client), inc: 0))
+    Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), slot: slot.slot, sid: slot.sid, chunk: slot.slot_bytes / 2, answers: take answers, answer_client: Some(take answer_client), inc: 0, root: string.from(slot.root), max_rows: slot.max_rows))
 }
 
 fn slot_ring(link: SlotLink) {

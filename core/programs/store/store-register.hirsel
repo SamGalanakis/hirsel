@@ -301,18 +301,24 @@ fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> R
     Ok(HistoryClaimMoved(backoff))
 }
 
-// The caller has already recovered and admitted the head in witness.
-fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryClaimResult, Error] waits {
+// The caller has already recovered and admitted the head in witness, a
+// head with no ATTACH. `attach` is the ATTACH the replace writes when the
+// Place is opened streamed (§12.11.5, "No ATTACH").
+fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, mut buffers: HistoryBuffers, deadline: u64, attach: Option[Attach]) -> Result[HistoryClaimResult, Error] waits {
     let candidate = history_claim_head(admitted, holder)?
     let saved = history_claim_saved(buffers.witness)
     let authority_end = history_authority_end(buffers.witness)?
     history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end))?
+    let standalone_end = list.len(buffers.body)
+    if let Some(a) = attach {
+        stream_attach_append(mut buffers.body, DiskContext(store: candidate.store, role: 7, seq: candidate.entry.seq), a)?
+    }
     let observed = history_fetch(mut client, "head", mut buffers.witness, deadline)?
-    if !history_claim_same(buffers.body, saved, buffers.witness) {
+    if !history_claim_same(list.slice(buffers.body, 0, standalone_end), saved, buffers.witness) {
         return history_claim_changed(admitted, buffers.witness, false)
     }
     match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {
-        HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None, attach: None))),
+        HistoryApplied(tag) => Ok(HistoryClaimed(HistoryRegister(head: candidate, tag, terminal: None, attach: clone(attach)))),
         HistoryConflict(_) => history_claim_changed(admitted, buffers.witness, true),
         HistoryRefused(take problem) => Error(Remote(take problem)),
         HistoryUndecided => Ok(HistoryClaimUncertain),

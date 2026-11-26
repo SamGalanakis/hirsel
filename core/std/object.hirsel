@@ -490,6 +490,8 @@ type Job: send {
     deadline: u64,
     retry_uncertain: bool,
     resolve_complete: bool,
+    // The bucket prefix a listing's keys are stripped of.
+    prefix: String,
     entries: List[Entry]
 }
 
@@ -1839,7 +1841,6 @@ type Lane: send {
     clock: Clock,
     random: Random,
     server: Endpoint,
-    prefix: String,
     auth: AuthState,
     proof: Option[Secret],
     source: Option[Cred],
@@ -1953,7 +1954,7 @@ fn exchange(mut lane: Lane, mut job: Job, op: Operation, mut progress: ReadProgr
     let result = match take req {
         Error(take e) => Invalid(take e),
         Ok(take wire) => {
-            let response = transact(mut h.connection, wire, lane.proof, lane.server.secure, mut job, op, mut progress, from, to, lane.prefix, mut lane.control, mut lane.probe, mut lane.list_parsing)
+            let response = transact(mut h.connection, wire, lane.proof, lane.server.secure, mut job, op, mut progress, from, to, mut lane.control, mut lane.probe, mut lane.list_parsing)
             reclaim_request(mut lane.wire, take wire)
             take response
         },
@@ -2030,7 +2031,7 @@ fn proven_answer(head: http_client.ResponseHead, wire: http_client.Request, key:
     false
 }
 
-fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], secure: bool, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, prefix: String, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
+fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Option[Secret], secure: bool, mut job: Job, op: Operation, mut progress: ReadProgress, from: u64, to: u64, mut control: Bytes, mut probe: Bytes, mut scratch: ListScratch) -> Exchange waits {
     if let Error(e) = http_client.start(mut c, wire, job.deadline) {
         return failure(if http_client.request_started(c) {
             RequestSent
@@ -2060,7 +2061,7 @@ fn transact(mut c: http_client.Connection, wire: http_client.Request, proof: Opt
     if payload_read(op) && status >= 200 && status < 300 {
         return receive_object(mut c, mut job.data, mut progress, status, from, to, mut probe)
     }
-    receive_control(mut c, list.len(job.data), job.id, op, status, prefix, mut job.entries, mut control, mut probe, mut scratch)
+    receive_control(mut c, list.len(job.data), job.id, op, status, job.prefix, mut job.entries, mut control, mut probe, mut scratch)
 }
 
 fn wait_retry(mut lane: Lane, attempt: u64, throttle: bool, deadline: u64) waits {
@@ -2518,7 +2519,7 @@ pub fn start(n: Net, tasks: Tasks, take bucket: Bucket, take credentials_set: cr
             Ok(take output_handle) => take output_handle,
             Error(_) => return Error(TooLarge),
         }
-        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), prefix: clone(bucket.prefix), auth: take auth, proof: match proof {
+        let setup = Lane(index, network: n, tasks, clock: c, random, server: clone(server), auth: take auth, proof: match proof {
             Some(key) => Some(secret.share(key)),
             None => None,
         }, source, refresh: take refresh, region_name: clone(bucket.aws_region), bucket_path: clone(bucket_path), pool: channel.sender(pool_tx), lease: take lease, input: take rx, wake: channel.sender(input), output: take events, held: None, wire: wire_buffers(), control: list.with_capacity(32768), list_parsing: list_scratch(), probe: list.with_capacity(1), jitter: list.with_capacity(8), skew: 0)
@@ -2563,12 +2564,18 @@ pub fn bucket_config(c: Client) -> Bucket {
     clone(c.requests.bucket)
 }
 
+/// Names later requests' keys, listings included, under `prefix` and
+/// returns the old prefix; openers made earlier keep theirs. Cost: O(1).
+pub fn set_prefix(mut c: Client, take prefix: String) -> String {
+    replace(mut c.requests.bucket.prefix, take prefix)
+}
+
 pub fn endpoint_secure(c: Client) -> bool {
     string.starts_with(c.requests.bucket.endpoint, "https://")
 }
 
 fn new_job(op: Operation, take path: String, take data: Bytes, deadline: u64) -> Job {
-    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, want: Whole, deadline, retry_uncertain: false, resolve_complete: true, entries: list.new())
+    Job(ticket: 0, op, path: take path, query: string.from(""), data: take data, tag: empty_tag(), id: None, lo: 0, hi: MAX_U64, want: Whole, deadline, retry_uncertain: false, resolve_complete: true, prefix: string.new(), entries: list.new())
 }
 
 fn submit(input: Sender[LaneMessage], index: u64, take request: Job) -> Option[Reply] waits {
@@ -2802,6 +2809,7 @@ pub fn list(mut c: Client, prefix: String, after: String, mut into: List[Entry],
     }
     let path = request_path(c.requests.bucket, "", true)
     let mut request = new_job(ListObjects, take path, list.new(), deadline_ns)
+    request.prefix = clone(c.requests.bucket.prefix)
     let mut query = string.from("list-type=2&max-keys=")
     string.push_u64(mut query, room)
     string.push(mut query, "&prefix=")
@@ -2852,6 +2860,7 @@ pub type PendingUpload: send {
 fn upload_listing(mut c: Client, prefix: String, after: Option[UploadCursor], deadline_ns: u64) -> Result[Value, Error] waits {
     let path = request_path(c.requests.bucket, "", true)
     let mut request = new_job(ListUploads, take path, list.new(), deadline_ns)
+    request.prefix = clone(c.requests.bucket.prefix)
     let mut query = string.new()
     if let Some(marker) = after {
         string.push(mut query, "key-marker=")

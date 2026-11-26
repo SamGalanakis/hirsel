@@ -164,7 +164,10 @@ fn history_claim_retry(c: Clock, r: Random, mut entropy: Bytes, pause: u64, dead
 
 // Recover and prepare_writer the state while the incumbent still holds the claim.
 // The returned register has already advanced its CLAIM entry.
-fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
+// With `link`, the head has no ATTACH and the Place is opened streamed
+// (§12.11.5, "No ATTACH"): the replace writes ATTACH naming the slot's
+// stream, and the CLAIM rides the stream as X's first frame there.
+fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random, holder: StoreId, take first: HistoryCapture, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, mut link: Option[SlotLink], prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[(HistoryRegister, JournalReplay, T, Bytes), Error] waits {
     let pair = first.head.pair
     let mut selected = take first
     let mut admitted: Option[(HistoryHead, JournalReplay)] = None
@@ -172,6 +175,8 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
         Ok(list.with_capacity(8))
     })?
     let mut pause = 10u64
+    // The slot's grant (epoch, inc, next seq), taken once for the first head.
+    let mut granted: Option[(u64, u64, u64)] = None
     loop {
         if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
@@ -208,11 +213,40 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
         if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }
-        let attempt = history_replace_claim(mut read_source.client, head, holder, mut workspace, read_source.deadline)?
+        let attach: Option[Attach] = match link {
+            Some(mut attaching) => {
+                let (inc, next_seq) = match granted {
+                    // A head moved to another epoch is another claimant's.
+                    Some((epoch, inc, next_seq)) => if epoch == head.pair.epoch + 1 {
+                        (inc, next_seq)
+                    } else {
+                        return Error(Lost)
+                    },
+                    None => {
+                        let (inc, next_seq) = slot_attach(mut attaching, head.store, head.pair.epoch + 1)?
+                        granted = Some((head.pair.epoch + 1, inc, next_seq))
+                        (inc, next_seq)
+                    },
+                }
+                Some(Attach(settles: 0, live: Some(StreamRef(sid: attaching.sid, inc, from_seq: next_seq, from_frame: 0)), sealed: list.new()))
+            },
+            None => None,
+        }
+        let attempt = history_replace_claim(mut read_source.client, head, holder, mut workspace, read_source.deadline, take attach)?
         match take attempt {
             HistoryClaimed(take result) => {
                 let mut register = take result
-                history_advance_claim(mut read_source.client, mut register, authority, mut workspace, read_source.deadline)?
+                if let Some(attaching) = link {
+                    slot_claim_frame(mut workspace.packet, register.head.pair.epoch, holder)
+                    slot_send(attaching, workspace.packet, 0)?
+                    match slot_wait(attaching, 0) {
+                        Ok(()) => (),
+                        Error(Fenced(_)) => return Error(Lost),
+                        Error(take problem) => return Error(take problem),
+                    }
+                } else {
+                    history_advance_claim(mut read_source.client, mut register, authority, mut workspace, read_source.deadline)?
+                }
                 return Ok((take register, take replay, take admitted_state, take authority))
             },
             HistoryClaimMoved(backoff) => {
@@ -258,7 +292,11 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
     read_source.deadline = std.object.deadline_after_ms(read_source.client, claim_ms)
     let observed = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)
     let selected = match take observed {
-        Ok(_) => Some(history_decode_head(workspace.witness)?),
+        // Only a streamed opener reads an attached head (§12.11.2).
+        Ok(_) => match link {
+            Some(_) => Some(history_decode_head_attach(workspace.witness)?),
+            None => Some((history_decode_head(workspace.witness)?, None)),
+        },
         Error(Remote(NotFound)) => None,
         Error(take failure) => return Error(take failure),
     }
@@ -266,21 +304,18 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
         history_check_endpoint(mut read_source.client, read_source.deadline)?
     }
     let holder = capacity(disk_identity(r))?
-    let attaching = match link {
-        Some(_) => true,
-        None => false,
-    }
-    let streamed_existing = attaching && match selected {
-        Some(_) => true,
-        None => false,
-    }
-    if streamed_existing {
-        // Attaching an existing Place is its claim (§12.11.5), not yet
-        // built: refused before any write.
-        return Error(Exists("head"))
-    }
     match take selected {
-        Some(take capture) => history_open_existing(mut read_source, c, r, holder, take capture, options, requested_levels, authority_kind, mut workspace, prepare_writer),
+        Some((take capture, take attached)) => {
+            let joined = match attached {
+                Some(_) => true,
+                None => false,
+            }
+            match link {
+                // Attaching an attached Place is its claim (§12.11.5).
+                Some(mut attaching) if joined => stream_open_attached(mut read_source, mut attaching, r, holder, options, requested_levels, authority_kind, mut workspace, prepare_writer),
+                _ => history_open_existing(mut read_source, c, r, holder, take capture, options, requested_levels, authority_kind, mut workspace, mut link, prepare_writer),
+            }
+        },
         None => history_open_genesis(mut read_source.client, r, holder, options, authority_kind, take genesis_authority, mut workspace, read_source.deadline, mut link, prepare_writer),
     }
 }

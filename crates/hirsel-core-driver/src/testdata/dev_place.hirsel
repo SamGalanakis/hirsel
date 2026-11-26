@@ -75,7 +75,7 @@ fn dev_fixture_registration(mut target_registry: Registry[DevFixtureGrant, DevFi
     })
     query(mut target_registry, code.describe(dev_fixture_read), slots(), 65536u64, DEFAULT_STEPS)?
     let key = {
-        let export = target_registry.exported[0u64]
+        let export = target_registry.t.exported[0u64]
         entry_key(view export.described.identity, export.args_fp, export.result_fp)
     }
     bind(mut target_registry, HttpBinding(op: "read", method: Get, path: "/read", entry: take key, fields: list.new(), mode: Read, ok_status: 200u16, error_status: 422u16, body_max: 0u64, arg_max: 4096u64, deadline_ms: 1000u64, steps: DEFAULT_STEPS))?
@@ -226,7 +226,7 @@ pub fn dev_fixture(d: Dir, n: Net, c: Clock, random: Random, tasks: Tasks, a: Ar
     let schema = code.describe(dev_fixture_schema)
     main(a, process, errors, tasks, c, reg, schema, scoped fn(take stop: Receiver[()]) -> Result[Ended, MainError] waits {
         let grants: Grants[DevFixtureGrant, DevFixtureTables, ()] = Grants(attempt: Some(Mint(seed: (), mint: dev_fixture_grant, mint_bytes: 65536u64, mint_steps: DEFAULT_STEPS)), call: None, claim: None, bind: Some(Mint(seed: (), mint: dev_fixture_bind, mint_bytes: 4096u64, mint_steps: DEFAULT_STEPS)))
-        let configured: PlaceConfig[DevFixtureGrant, DevFixtureTables, ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Addr(ip: V4(0x7f000001u32), port: 0u16), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(wire(code.describe(dev_fixture_caller), 4096u64, 65536u64)), grants: Some(take grants), triggers: Some(TriggerConfig(entries: dev_fixture_entries(), author: store.Caller(issuer: 0u8, subject: list.new()))), idle: None)
+        let configured: PlaceConfig[DevFixtureGrant, DevFixtureTables, ()] = PlaceConfig(backing: Disk(d), sizes: store.derived_sizes(), selection: launch_selection(a) ?=> Usage, place: reg, n_place: 1048576u64, on_migrate: Some(code.describe(dev_fixture_migrate)), schema: schema, session: wire_defaults(65536u64), max_sessions: 2u64, proxies: list.new(), n_publisher: 8388608u64, listen: Tcp(Addr(ip: V4(0x7f000001u32), port: 0u16)), net: n, tasks: tasks, clock: c, random: random, stop: Stop(lag_ms: 0u64, grace_ms: 1000u64), wire: Some(wire(code.describe(dev_fixture_caller), 4096u64, 65536u64)), grants: Some(take grants), triggers: Some(TriggerConfig(entries: dev_fixture_entries(), author: store.Caller(issuer: 0u8, subject: list.new()))), idle: None)
         Ok(operate_report(take configured, take stop, result.unwrap(status_root()), None, errors) ?=> Start)
     })
 }

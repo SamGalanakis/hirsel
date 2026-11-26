@@ -176,3 +176,110 @@ fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible
     }
     Ok(None)
 }
+
+type TieredIndexChunk = ChunkReady(TieredWritePlan) | ChunkDuplicate(Bytes, Bytes)
+
+fn index_build_has_overlay(tree: PageTree, id: u32) -> bool {
+    if let Some(replay) = view tree.replay {
+        if let Some(_) = std.omap.get(replay.collections, id) {
+            return true
+        }
+    }
+    false
+}
+
+// A schema chunk uses the writer's attempt partition. Its prepared roots
+// and replacements belong to the cut candidate until MANIFEST publication.
+fn prepare_tiered_index_chunk(mut db: Db, record: Catalog, rows: List[(Bytes, Bytes)]) -> Result[TieredIndexChunk, Error] waits {
+    let mut pins = empty_tiered_pins(call_pin_root(db, 0), db.writer_pin_bytes)
+    let mut pending: Option[(TieredTarget, Error)] = None
+    loop {
+        let attempt = tiered_attempt(db.writer_pin_bytes, tiered_window(pins))
+        let prepared = disk_allocation(scoped fn() -> Result[Result[TieredIndexChunk, Error], Error] {
+            let Some(extractor) = bound_extractor(db.indexes, record) else {
+                return Error(Stale(record.id))
+            }
+            let first = stamp_after(db.next_node)?
+            Ok(draft_tiered_index_chunk(attempt, pins.frames, db.heads[0].roots.collections, record, extractor, rows, first))
+        })
+        let state = tiered_finish(take attempt)
+        match state.stopped {
+            None => return (take prepared)?,
+            Some(AttemptMiss(_)) => {
+                revoke_parked(mut db)
+                deliver_call_miss(db, db.heads[0].roots.collections, state, mut pins, mut pending)?
+            },
+            Some(AttemptPinLimit(problem)) => return Error(Full(Cache(problem))),
+            Some(AttemptAllocation(problem)) => return Error(Full(Allocation(problem))),
+            Some(AttemptFold(_)) => fail("store: the index builder planned over a replay overlay"),
+        }
+    }
+}
+
+fn draft_tiered_index_chunk(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], tree: PageTree, record: Catalog, extractor: RegisteredIndex, rows: List[(Bytes, Bytes)], first: u64) -> Result[TieredIndexChunk, Error] {
+    let shape = catalog_index(record)?.shape
+    let Some((edge, _)) = std.page.collection_slot(tree.root, prefix(record.id)?) else {
+        return Error(Stale(record.id))
+    }
+    let mut operations = empty_ops()
+    let no_layers: List[Arc[Staged]] = list.new()
+    let mut row_count = 0u64
+    for (logical, raw) in rows {
+        let primary = list.slice(logical, 4, list.len(logical))
+        let IndexValue(keys: take keys, payload: take payload, sums: sums) = (extractor.extract)(raw, primary)?
+        let mut part = 0u64
+        for take key in take keys {
+            if list.len(key) > 4096 {
+                return Error(Limit(Key))
+            }
+            let prior: Option[Arc[Bytes]] = if let Entries(Many) = shape {
+                None
+            } else {
+                tiered_chunk_prior(attempt, visible, edge, operations, key)?
+            }
+            let value = match shape {
+                Entries(Unique) => {
+                    if let Some(value) = view prior {
+                        let owner = list.slice(value, 4, unique_owner_end(value)?)
+                        if owner != primary {
+                            return Ok(ChunkDuplicate(copied(owner)?, copied(primary)?))
+                        }
+                    }
+                    copied(payload)?
+                },
+                Entries(Many) => copied(payload)?,
+                Sums => {
+                    let (members, sum) = match prior {
+                        Some(body) => group_totals(body)?,
+                        None => (0u64, 0u64),
+                    }
+                    let Some(total) = int.checked_add(sum, sums[part]) else {
+                        return Error(Limit(Value))
+                    }
+                    totals_bytes(members + 1, total)?
+                },
+            }
+            part += 1
+            let _ = save_data_op(mut operations, no_layers, false, mut row_count, take key, Some(stage_value(take value, tree.inline)), None)
+        }
+    }
+    let order = capacity(data_order(operations.rows))?
+    Ok(ChunkReady(prepare_tiered_writes(attempt, visible, tree, operations.rows, order, first)?))
+}
+
+fn tiered_chunk_prior(attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], edge: std.page.Slot, staged: DataOps, key: Bytes) -> Result[Option[Arc[Bytes]], Error] {
+    if let Some(slot) = op_slot(staged, key) {
+        let raw = data_row(staged.rows, slot).value
+        return Ok(match raw {
+            Some(BlobBody(body)) => Some(arc.share(body)),
+            Some(PageValue(body)) => Some(arc.new(copied(body)?)),
+            None => None,
+        })
+    }
+    let suffix = list.slice(key, 4, list.len(key))
+    tiered_seek(attempt, SeekKey(copied(suffix)?))
+    tiered_reading(attempt, ValuesAt)
+    let selected = tiered_point_path(attempt, visible, edge, None, suffix)?
+    tiered_seek(attempt, SeekOperation)
+    Ok(take selected)
+}

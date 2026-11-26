@@ -168,6 +168,11 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
     }
     let mut next_stamp = stamp_after(db.next_node)?
     let mut roots = take participants
+    if let ReplaceMain(replacement, _) = delta {
+        if let Some(freed) = view replacement.chunk_freed {
+            tiered_index_dirty_room(db, roots, freed)?
+        }
+    }
     let mut seen: Map[(u32, u64, u64), ()] = map.new()
     let mut queued: List[DeferredFree] = list.new()
     queue_live_dropped(disk_state(db).tiered_dirty.dropped, mut seen, mut queued)?
@@ -177,6 +182,9 @@ fn stage_tiered_cut(db: Db, delta: HolderDelta, take participants: List[Roots], 
     if let ReplaceMain(replacement, _) = delta {
         if list.len(replacement.superseded) != 0 {
             queue_superseded(db, delta, mut seen, mut queued)?
+        }
+        if let Some(freed) = view replacement.chunk_freed {
+            queue_index_chunk_frees(freed, db.heads[0].id, mut seen, mut queued, mut replaced)?
         }
     }
     // A Tiered -> Memory change installs its loaded tree like a fold does.
@@ -428,4 +436,38 @@ fn install_tiered_holders(mut db: Db, take holder_delta: HolderDelta, take cut_s
         }
     }
     take delta
+}
+
+fn tiered_index_dirty_room(db: Db, roots: List[Roots], freed: TieredFreed) -> Result[(), Error] {
+    let frames = tiered_cut_frames(roots)?
+    let state = disk_state(db)
+    let dirty = view state.tiered_dirty
+    let replaced = int.saturating_add(dirty.replaced_rows, list.len(freed.replaced))
+    let dropped = int.saturating_add(list.len(dirty.dropped), list.len(freed.dropped))
+    let mut requested = int.saturating_add(int.saturating_mul(replaced, REPLACED_ROW), int.saturating_mul(dropped, DROPPED_ROW))
+    for item in frames.pages {
+        requested = int.saturating_add(requested, item.frame.size)
+    }
+    for item in frames.blobs {
+        requested = int.saturating_add(requested, item.frame.size)
+    }
+    over_ceiling(requested, state.options.dirty_bytes)
+}
+
+fn queue_index_chunk_frees(freed: TieredFreed, branch_id: u32, mut seen: Map[(u32, u64, u64), ()], mut queued: List[DeferredFree], mut replaced: List[TieredDrainKill]) -> Result[(), Error] {
+    for frame in freed.replaced {
+        capacity(list.try_reserve(mut replaced, 1))?
+        list.push(mut replaced, TieredDrainKill(branch_id: branch_id, frame: frame))
+    }
+    for target in freed.dropped {
+        let frame = tiered_frame_id(target)
+        let key = (branch_id, frame.pack, frame.offset)
+        if !map.contains(seen, key) {
+            capacity(map.try_reserve(mut seen, 1))?
+            map.insert(mut seen, key, ())
+            capacity(list.try_reserve(mut queued, 1))?
+            list.push(mut queued, DeferredFree(branch_id: branch_id, target: clone(target)))
+        }
+    }
+    Ok(())
 }

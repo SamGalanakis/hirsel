@@ -146,7 +146,7 @@ fn read_only_base(source: ReadOnly) -> DeclarationBase {
 
 pub fn declare_read_only(source: ReadOnly) -> Declare {
     let snap = view source.snapshot
-    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: snap.store, roots: share_roots(snap.roots), next_node: snap.watermark, next_table: 0u32, live: 0u64, ceiling: 0u64, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, read_only_base(source), take plan, true)
 }
 
@@ -184,7 +184,7 @@ pub fn describe_declarations[H](clock: Clock, schema: StaticFn[fn(mut Declare) -
 
 pub fn declare_follower(f: Follower) -> Declare {
     let capture = view f.capture
-    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
+    let plan = SchemaPlan(store: capture.store, roots: share_roots(capture.state.tips[0].roots), next_node: capture.watermark, next_table: capture.state.next_table, live: capture.resident, ceiling: f.slot.plan.options.resident_limit, retained: false, changed: false, bindings: list.new(), superseded: list.new(), chunk_freed: None, retention: list.new(), preview: None, value_limit: VALUE_LIMIT)
     new_declaration(Follower, follower_base(f), take plan, true)
 }
 

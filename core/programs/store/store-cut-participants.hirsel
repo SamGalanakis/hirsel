@@ -1,3 +1,18 @@
+type ProposedMain {
+    roots: Roots,
+    head: u64,
+    at: u64,
+    tables: u32,
+    activation: Option[HistoryActivation],
+    // The import pin slot an installing cut removes with the replacement
+    // (§3.5a "The kept import").
+    drop_pin: Option[u64],
+    superseded: List[u32],
+    chunk_freed: Option[TieredFreed]
+}
+
+type HolderDelta = NoHolderChange | AddHead(Head, String) | RemoveHead(u64) | AddPin(Pin) | RemovePin(u64) | ReplacePin(u64, Pin) | ReplaceMain(ProposedMain, Option[u64])
+
 // The holders a cut publishes: every head and pin with the holder delta applied.
 fn note_held_roots(mut holders: List[HeldPage], kind: u8, owner: u64, roots: Roots) {
     list.push(mut holders, HeldPage(source: HolderSource(kind, owner, 0), root: arc.share(roots.collections.root)))

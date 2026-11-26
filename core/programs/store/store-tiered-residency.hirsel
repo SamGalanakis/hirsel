@@ -248,7 +248,7 @@ fn publish_tiered_residency(mut db: Db, id: u32, take key: Bytes) -> Result[(), 
     page_result(std.page.install_tiered_root(mut tree.root, key, HotPage(take root), mut draw))?
     changed.collections = take tree
     let head = db.heads[0u64].head + 1
-    let replacement = ProposedMain(roots: take changed, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new())
+    let replacement = ProposedMain(roots: take changed, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None)
     let publication = capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, draw - 1))?
     db.next_node = draw - 1
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
@@ -276,7 +276,7 @@ fn residency_to_memory(mut db: Db, id: u32, take key: Bytes) -> Result[(), Error
     over_ceiling(int.saturating_add(db.resident, charge), tiered_memory_room(disk_state(db).options))?
     let SchemaPlan(roots: take roots, next_node: ids, ..) = schema_plan(db)
     let head = db.heads[0u64].head + 1
-    let replacement = ProposedMain(roots: take roots, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new())
+    let replacement = ProposedMain(roots: take roots, head: head, at: db.heads[0u64].at, tables: db.next_table, activation: None, drop_pin: None, superseded: list.new(), chunk_freed: None)
     let publication = capacity(prepare_publication(db, 0, head, db.heads[0u64].roots, ids))?
     db.next_node = ids
     edit_disk(mut db.disk, scoped fn(mut state: DiskState) {

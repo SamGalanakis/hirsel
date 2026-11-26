@@ -381,13 +381,36 @@ pub fn index_build_step(mut db: Db, limit: u64) -> Result[Option[String], Error]
         return Ok(None)
     }
     let name = declaration_index_name(key)?
+    let tiered = table_is_tiered(db.heads[0].roots.collections, record.id)?
+    if tiered && index_build_has_overlay(db.heads[0].roots.collections, record.id) {
+        let _ = cut_install(mut db, NoHolderChange)?
+    }
     let cursor = match catalog_index(record)?.state {
         Backfilling(Some(final_key)) => Some(copied(final_key)?),
         _ => None,
     }
     let (take rows, done) = tiered_rows_after(db, record.owner, cursor, limit)?
     let mut plan = schema_plan(db)
-    let found = {
+    let found = if tiered {
+        let chunk = prepare_tiered_index_chunk(mut db, record, rows)?
+        match take chunk {
+            ChunkDuplicate(take previous, take next_key) => Some((take previous, take next_key)),
+            ChunkReady(TieredWritePlan(tree: take tree, next_stamp: following, freed: take freed, ..)) => {
+                plan.roots.collections = take tree
+                plan.next_node = following - 1
+                plan.chunk_freed = Some(take freed)
+                let mut published = copied_record(record)?
+                if done {
+                    set_index_state(mut published, Public)?
+                } else if let Some((logical, _)) = list.last(rows) {
+                    let after = copied(list.slice(logical, 4, list.len(logical)))?
+                    set_index_state(mut published, Backfilling(Some(take after)))?
+                }
+                put_index_record(mut plan, key, published)?
+                None
+            },
+        }
+    } else {
         let Some(extractor) = bound_extractor(db.indexes, record) else {
             return Error(Stale(record.id))
         }

@@ -757,3 +757,12 @@ limit = 134217728
 
 [tests.runs."store@1/store/test_l68_drift_before_rename"]
 limit = 134217728
+
+[tests.runs."store@1/store/test_lix_tiered_index_build_reopen"]
+limit = 134217728
+
+[tests.runs."store@1/store/test_l68_demote_fork"]
+limit = 134217728
+
+[tests.runs."store@1/store/test_l68_demote_unique_insert"]
+limit = 134217728

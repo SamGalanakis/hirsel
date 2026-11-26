@@ -85,9 +85,13 @@ fn index_build_open(d: Dir, c: Clock, r: Random, tasks: Tasks, create: bool) -> 
 }
 
 fn index_build_schema(mut db: Db, mode: Mode) -> Result[IndexBuildSchema, Error] waits {
+    index_build_schema_kind(mut db, mode, Many)
+}
+
+fn index_build_schema_kind(mut db: Db, mode: Mode, kind: IndexKind) -> Result[IndexBuildSchema, Error] waits {
     let mut d = declare(db, mode)?
     let mut declared = declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
-    let ix = index(mut d, mut declared, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let ix = index(mut d, mut declared, "by_v", kind, code.describe(crash_value), std.codec.key_u64())?
     let groups = aggregate(mut d, mut declared, "by_sum", code.describe(index_build_parts), std.codec.key_u64())?
     let t = finish(mut d, take declared)?
     let _ = seal(mut db, take d)?
@@ -210,9 +214,20 @@ fn d7_index_write(mut db: Db, rows: Table[u64, u64], key: u64, value: u64) -> Re
     }
 }
 
-fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool) -> Result[(Db, IndexBuildSchema), Error] waits {
+type D7Seed: key = D7Update | D7Insert | D7Fork | D7Unique
+
+fn d7_seed_kind(seed: D7Seed) -> IndexKind {
+    if seed == D7Unique {
+        Unique
+    } else {
+        Many
+    }
+}
+
+fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: D7Seed) -> Result[(Db, IndexBuildSchema), Error] waits {
+    let overwrite = seed == D7Update || seed == D7Fork
     let mut db = open(tasks, d, c, r, l70_open_options(182375272)?)?
-    let schema = index_build_schema(mut db, Migrate)?
+    let schema = index_build_schema_kind(mut db, Migrate, d7_seed_kind(seed))?
     d7_index_write(mut db, schema.rows, 1u64, 10u64)?
     // The fixture skips only set_residency's public kind check.
     residency_to_tiered(mut db, schema.by_v.id, prefix(schema.by_v.id)?)?
@@ -221,7 +236,7 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool) -
         let Some((ColdPage(_), descriptor)) = std.page.collection_slot(base.root, prefix(schema.by_v.id)?) else {
             fail("L68: the checkpoint must store the index in a Cold leaf")
         }
-        if collection_descriptor(descriptor).row_bytes != 86 {
+        if seed != D7Unique && collection_descriptor(descriptor).row_bytes != 86 {
             fail("L68: the initial Many entry has a 20-byte key and an empty payload")
         }
     }
@@ -231,10 +246,15 @@ fn d7_demote_input(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool) -
         2u64
     }
     d7_index_write(mut db, schema.rows, primary, 20u64)?
+    if seed == D7Fork {
+        let from = snapshot(db)
+        let (_, fork_ticket) = fork(mut db, "beta", from)?
+        durable(mut db, fork_ticket)?
+    }
     close(take db)?
     let mut reopened = open(tasks, d, c, r, l70_open_options(182375272)?)?
-    let rebound = index_build_schema(mut reopened, Open)?
-    {
+    let rebound = index_build_schema_kind(mut reopened, Open, d7_seed_kind(seed))?
+    if seed != D7Unique {
         let tree = view reopened.heads[0].roots.collections
         let inserted = law_read_key(rebound.by_v.id, 20u64, Some(primary))
         let Some(ReplayRow(base: 0, now: ReplayPut(raw))) = tiered_replayed_row(tree, inserted) else {
@@ -288,12 +308,16 @@ fn d7_demote_seal(mut db: Db, schema: IndexBuildSchema) -> Result[Bytes, Error] 
     }
     let SchemaPlan(roots: take roots, next_node: ids, next_table: tables, superseded: take superseded, ..) = take plan
     db.next_node = ids
-    let replacement = ProposedMain(roots: take roots, head: db.heads[0].head + 1, at: db.heads[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded)
+    let replacement = ProposedMain(roots: take roots, head: db.heads[0].head + 1, at: db.heads[0].at, tables: tables, activation: None, drop_pin: None, superseded: take superseded, chunk_freed: None)
     refused_cut_bytes(mut db, ReplaceMain(take replacement, None))
 }
 
 fn d7_demote_law(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool, drift: bool) -> Result[(), Error] waits {
-    let (take opened, schema) = d7_demote_input(d, c, r, tasks, overwrite)?
+    let (take opened, schema) = d7_demote_input(d, c, r, tasks, if overwrite {
+        D7Update
+    } else {
+        D7Insert
+    })?
     let mut db = take opened
     let primary = if overwrite {
         let sealed = d7_demote_seal(mut db, schema)?
@@ -326,6 +350,12 @@ fn d7_demote_law(d: Dir, c: Clock, r: Random, tasks: Tasks, overwrite: bool, dri
         trip_drift(mut recovered, 0, evidence)?
     }
     d7_check_demoted(recovered, rebound, primary)?
+    d7_finish_index(mut recovered)?
+    if overwrite {
+        d7_expect_entries(recovered, snapshot(recovered), rebound.by_v, (20u64, 1u64), None)?
+    } else {
+        d7_expect_entries(recovered, snapshot(recovered), rebound.by_v, (10u64, 1u64), Some((20u64, 2u64)))?
+    }
     close(take recovered)
 }
 
@@ -342,4 +372,174 @@ fn test_l68_drift_before_rename(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
 @test
 fn test_l68_demote_insert(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     d7_demote_law(d, c, r, tasks, false, false)
+}
+
+fn d7_expect_entries(db: Db, snap: Snapshot, ix: Index[u64, u64, u64, ()], first: (u64, u64), second: Option[(u64, u64)]) -> Result[(), Error] waits {
+    let mut expected: List[(u64, u64)] = list.new()
+    list.push(mut expected, first)
+    if let Some(pair) = second {
+        list.push(mut expected, pair)
+    }
+    let Seen(Seen(value: Ok(true), ..)) = look(reader(db, READER_PIN_MIN)?, snap, Some(100000), (copy_env(ix), take expected), fn(tx: Tx, input: (Index[u64, u64, u64, ()], List[(u64, u64)])) -> Result[bool, Error] {
+        exact_index_entries(tx, input.0, clone(input.1))
+    })? else {
+        fail("D7: the published index must match the acknowledged table model")
+    }
+    Ok(())
+}
+
+fn d7_finish_index(mut db: Db) -> Result[(), Error] waits {
+    while let Some(_) = index_build_step(mut db, 1)? {}
+    Ok(())
+}
+
+fn d7_check_chunk_capacity(mut db: Db) -> Result[(), Error] waits {
+    let before = db.checkpointed
+    let room = edit_disk(mut db.disk, scoped fn(mut state: DiskState) -> u64 {
+        replace(mut state.options.dirty_bytes, 1)
+    })
+    let refused = index_build_step(mut db, 1)
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.options.dirty_bytes = room
+    })
+    let Error(Full(Resident(Capacity(requested: requested, available: 1)))) = refused else {
+        fail("L-IX: one dirty byte cannot admit a Tiered build chunk")
+    }
+    let Backfilling(None) = lix_state(db, "by_v")? else {
+        fail("L-IX: a refused chunk cannot advance its cursor")
+    }
+    if requested <= 1 || db.checkpointed != before {
+        fail("L-IX: a refused chunk cannot publish its pages")
+    }
+    Ok(())
+}
+
+fn d7_check_tiered_sums(mut db: Db, schema: IndexBuildSchema) -> Result[(), Error] waits {
+    d7_index_write(mut db, schema.rows, 6u64, 40u64)?
+    residency_to_tiered(mut db, schema.by_sum.id, prefix(schema.by_sum.id)?)?
+    rebuild_aggregate(mut db, schema.by_sum)?
+    d7_finish_index(mut db)?
+    let Seen(Seen(value: Ok(Totals(count: 2, sum: 72)), ..)) = look(reader(db, READER_PIN_MIN)?, snapshot(db), Some(100000), copy_env(schema.by_sum), fn(tx: Tx, sums: Aggregate[u64]) -> Result[Totals, Error] {
+        totals(tx, sums, 1u64)
+    })? else {
+        fail("L-IX: the Tiered aggregate sums both rows for group one")
+    }
+    Ok(())
+}
+
+@test
+fn test_lix_tiered_index_build_reopen(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (take opened, schema) = d7_demote_input(d, c, r, tasks, D7Insert)?
+    let mut db = take opened
+    rebuild_index(mut db, schema.by_v)?
+    d7_check_chunk_capacity(mut db)?
+    if !same_index_step(index_build_step(mut db, 1)?) {
+        fail("L-IX: the first chunk builds the Tiered index")
+    }
+    let Backfilling(Some(cursor)) = lix_state(db, "by_v")? else {
+        fail("L-IX: the first chunk leaves a durable cursor")
+    }
+    if cursor != key_word(1u64) {
+        fail("L-IX: the first chunk processes exactly one primary")
+    }
+    d7_index_write(mut db, schema.rows, 1u64, 30u64)?
+    close(take db)?
+    let mut recovered = open(tasks, d, c, r, l70_open_options(182375272)?)?
+    let rebound = index_build_schema(mut recovered, Open)?
+    {
+        let former = law_read_key(rebound.by_v.id, 10u64, Some(1u64))
+        let Some(ReplayRow(base: 1, now: ReplayAbsent)) = tiered_replayed_row(recovered.heads[0].roots.collections, former) else {
+            fail("L-IX: reopen replays the acknowledged write behind the cursor")
+        }
+    }
+    let generation = recovered.checkpointed
+    if !same_index_step(index_build_step(mut recovered, 1)?) {
+        fail("L-IX: the next chunk resumes the Tiered build")
+    }
+    if recovered.checkpointed != generation + 2 {
+        fail("L-IX: the chunk first folds the replay overlay and then publishes the build")
+    }
+    d7_expect_entries(recovered, snapshot(recovered), rebound.by_v, (20u64, 2u64), Some((30u64, 1u64)))?
+    let walked = compact_walk(d, recovered, rebound.by_v.id)?
+    if map.len(walked.places) != 1 {
+        fail("L-IX: the two rebuilt rows occupy one Cold leaf")
+    }
+    for (pack, _) in walked.live {
+        if !compact_listed(recovered, pack) {
+            fail("L-IX: the rebuilt index's pack is in the published inventory")
+        }
+    }
+    d7_check_tiered_sums(mut recovered, rebound)?
+    close(take recovered)
+}
+
+@test
+fn test_l68_demote_fork(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (take opened, schema) = d7_demote_input(d, c, r, tasks, D7Fork)?
+    let mut db = take opened
+    let Some(beta) = branch(db, "beta") else {
+        fail("L68(h): reopen replays the fork")
+    }
+    let base = compact_branch_root(db, 0, schema.by_v.id)?
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.options.probe_budget = 0
+    })
+    rebuild_index(mut db, schema.by_v)?
+    d7_check_demoted(db, schema, 1u64)?
+    {
+        let state = disk_state(db)
+        let manifest = view state.pages.lists.rows
+        let forked = option.unwrap(map.get(manifest.forks, beta.id))
+        let cell = LineageCell(branch: 0, boundary: forked.watermark, side: 1, interval: 0, pack: base.pack)
+        let expected: u64 = int.widen(base.len)
+        let Some(filed) = map.get(manifest.cells, cell) else {
+            fail("L68(h): main must file the old leaf at beta's fork boundary")
+        }
+        if map.len(manifest.cells) != 1 || filed != expected {
+            fail("L68(h): main must file the old leaf once, at beta's fork boundary")
+        }
+    }
+    d7_finish_index(mut db)?
+    let other = branch_index(db, beta)?
+    edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+        state.options.probe_budget = 64
+        state.options.compact_permille = 1001
+    })
+    for _ in 0u64 .. 8 {
+        if !compact_listed(db, base.pack) {
+            break
+        }
+        let _ = checkpoint(mut db)?
+    }
+    if compact_listed(db, base.pack) {
+        fail("L68(h): the probe must retire the unreferenced base pack")
+    }
+    let root = compact_branch_root(db, other, schema.by_v.id)?
+    let walked = compact_walk_from(d, db, root)?
+    for (pack, _) in walked.live {
+        if !compact_listed(db, pack) {
+            fail("L68(h): every frame beta reaches must remain listed")
+        }
+    }
+    d7_expect_entries(db, snapshot_of(db, beta)?, schema.by_v, (20u64, 1u64), None)?
+    d7_expect_entries(db, snapshot(db), schema.by_v, (20u64, 1u64), None)?
+    close(take db)
+}
+
+fn same_index_step(step: Option[String]) -> bool {
+    match step {
+        Some(name) => name == "by_v",
+        None => false,
+    }
+}
+
+@test
+fn test_l68_demote_unique_insert(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let (take opened, schema) = d7_demote_input(d, c, r, tasks, D7Unique)?
+    let mut db = take opened
+    rebuild_index(mut db, schema.by_v)?
+    d7_check_demoted(db, schema, 2u64)?
+    d7_finish_index(mut db)?
+    d7_expect_entries(db, snapshot(db), schema.by_v, (10u64, 1u64), Some((20u64, 2u64)))?
+    close(take db)
 }

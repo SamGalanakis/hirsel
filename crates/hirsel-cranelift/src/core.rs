@@ -10,6 +10,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, Linkage, Module as _};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::{self as c, *};
+use hirsel_core_layout::{CAbi, Target};
 
 /// Frozen native memory layout, shared with hirsel-core-rt.
 pub mod memory_layout {
@@ -59,7 +60,7 @@ type Result<T> = std::result::Result<T, Error>;
 /// Whether this engine implements the requested target's native ABI and
 /// object format: every Hirsel target, ELF and Mach-O alike.
 pub fn supports_target(triple: &str) -> bool {
-    hirsel_core_layout::Target::from_triple(triple).is_some()
+    Target::from_triple(triple).is_some()
 }
 
 /// Target and optimization policy for CoreIR emission.
@@ -111,6 +112,7 @@ pub(super) struct Tables<'a> {
     trace_drops: bool,
     observe_charge: bool,
     debug: bool,
+    c_abi: CAbi,
     unwind: std::cell::RefCell<crate::unwind::Unwind>,
     site_symbols: std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
     site_constants: std::cell::RefCell<sites::Constants>,
@@ -132,10 +134,8 @@ impl Tables<'_> {
     }
 }
 
-pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
-    let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
-    let target = hirsel_core_layout::Target::from_triple(options.target)
-        .ok_or_else(|| refuse("not a Hirsel target".into()))?;
+fn isa(target: Target, optimize: bool) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
+    let refuse = |message: String| Error::Target(format!("{}: {message}", target.triple()));
     // Inline probes touch every page of a large frame; the stride is the page.
     let probe = target.page_log2().to_string();
     let mut flags = settings::builder();
@@ -144,7 +144,7 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
         ("enable_verifier", "false"),
         // A scalar pair and the internal failure status can occupy three GPRs.
         ("enable_llvm_abi_extensions", "true"),
-        ("opt_level", if options.optimize { "speed" } else { "none" }),
+        ("opt_level", if optimize { "speed" } else { "none" }),
         // Step slow paths split otherwise sequential live ranges. The single-
         // pass allocator gives each spilled value its own permanent stack home;
         // backtracking reuses those homes across disjoint ranges in dev too.
@@ -402,16 +402,12 @@ fn emit(
     let setup = observer.enter("module_setup");
     let native = c::native_layout::resolve(std::borrow::Cow::Borrowed(input), layouts);
     let input = native.as_ref();
-    let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
-    if !supports_target(options.target) {
-        return Err(refuse(
-            "CoreIR entry implements the x86-64 Linux, AArch64 Linux and AArch64 Darwin C ABIs"
-                .into(),
-        ));
-    }
+    let target = Target::from_triple(options.target)
+        .ok_or_else(|| Error::Target(format!("{}: not a Hirsel target", options.target)))?;
+    let c_abi = target.c_abi();
     let isa = {
         let _span = observer.enter("isa_setup");
-        isa(options)?
+        isa(target, options.optimize)?
     };
     let object_setup = observer.enter("object_setup");
     let builder = ObjectBuilder::new(
@@ -428,7 +424,7 @@ fn emit(
         input
             .signatures
             .iter()
-            .map(|s| abi::Signature::new(s, &object, &call_layouts))
+            .map(|s| abi::Signature::new(s, &object, &call_layouts, c_abi))
             .collect::<Vec<_>>()
     };
     let declarations = observer.enter("declarations");
@@ -479,9 +475,9 @@ fn emit(
     drop(static_setup);
     let glues = {
         let _span = observer.enter("glue_declarations");
-        drop::Glues::declare(&mut object, input, layouts)?
+        drop::Glues::declare(&mut object, input, layouts, c_abi)?
     };
-    let mut task_entries = task_entry::Glues::declare(&mut object, input)?;
+    let mut task_entries = task_entry::Glues::declare(&mut object, input, c_abi)?;
     task_entries.define_units(&mut object, input, layouts, &functions, &glues)?;
     let tables = Tables {
         input,
@@ -495,6 +491,7 @@ fn emit(
         task_entries: &task_entries,
         trace_drops,
         observe_charge,
+        c_abi,
         debug: options.debug_lines,
         unwind: std::cell::RefCell::new(crate::unwind::Unwind::new(object.isa())?),
         site_symbols: Default::default(),
@@ -539,9 +536,7 @@ fn emit(
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
     task_entries.emit(&mut object, &tables, observer, &mut scratch)?;
     let _write = observer.enter("object_write");
-    let format = hirsel_core_layout::Target::from_triple(options.target)
-        .ok_or_else(|| refuse("not a Hirsel target".into()))?
-        .object_format();
+    let format = target.object_format();
     let origin = tables.site_constants.borrow().define(&mut object, format)?;
     let mut product = object.finish();
     if let Some(origin) = origin {

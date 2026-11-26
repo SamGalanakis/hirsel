@@ -18,6 +18,7 @@ pub(super) struct Imports {
 
 pub(super) struct Calls<'a> {
     imports: &'a RefCell<Imports>,
+    c_abi: CAbi,
     references: HashMap<cranelift_module::FuncId, FuncRef>,
     indirect: HashMap<usize, SigRef>,
     pub args: Vec<Value>,
@@ -27,24 +28,23 @@ pub(super) struct Calls<'a> {
     by_value: Option<StackSlot>,
 }
 impl<'a> Calls<'a> {
-    pub fn new(
-        imports: &'a RefCell<Imports>,
-        signatures: &[abi::Signature],
-        edge_arity: usize,
-    ) -> Self {
-        let args = signatures
+    pub fn new(tables: &'a Tables<'_>, edge_arity: usize) -> Self {
+        let args = tables
+            .signatures
             .iter()
             .map(|s| s.clif.params.len())
             .max()
             .unwrap_or(0)
             .max(8);
-        let results = signatures
+        let results = tables
+            .signatures
             .iter()
             .map(|s| s.results.len())
             .max()
             .unwrap_or(0);
         Self {
-            imports,
+            imports: &tables.runtimes,
+            c_abi: tables.c_abi,
             references: HashMap::new(),
             indirect: HashMap::new(),
             args: Vec::with_capacity(args),
@@ -98,7 +98,7 @@ impl<'a> Calls<'a> {
         results: &[Ty],
         args: &[Value],
     ) -> Result<NativeValues> {
-        let arm = abi::aapcs64(object);
+        let arm = abi::aapcs64(self.c_abi);
         let structure = match name {
             "hirsel_core_spawn" => Some((5, 64)),
             "hirsel_core_channel_new" => Some((2, 32)),
@@ -107,7 +107,7 @@ impl<'a> Calls<'a> {
         let imports = self.imports;
         let mut imports = imports.borrow_mut();
         if !imports.functions.contains_key(name) {
-            let mut signature = abi::Signature::c(object, params, results);
+            let mut signature = abi::Signature::c(object, self.c_abi, params, results);
             if let Some((index, bytes)) = structure.filter(|_| !arm) {
                 signature.clif.params[index + usize::from(signature.indirect)] =
                     AbiParam::special(types::I64, ArgumentPurpose::StructArgument(bytes));
@@ -192,7 +192,7 @@ impl<'a> Calls<'a> {
         } else {
             let mut signature = object.make_signature();
             signature.params.push(AbiParam::new(types::I64));
-            signature.params.push(if abi::aapcs64(object) {
+            signature.params.push(if abi::aapcs64(self.c_abi) {
                 AbiParam::new(types::I64)
             } else {
                 AbiParam::special(

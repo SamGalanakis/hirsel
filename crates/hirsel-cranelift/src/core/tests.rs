@@ -22,6 +22,58 @@ impl profile::Observer for Code {
 }
 
 #[test]
+fn apple_targets_resolve_the_cranelift_c_abi() {
+    use cranelift_codegen::{ir::ArgumentExtension, isa::CallConv};
+
+    struct CheckStep;
+    impl profile::Observer for CheckStep {
+        type Span = ();
+        fn enter(&self, _: &'static str) {}
+        fn define(
+            &self,
+            object: &mut ObjectModule,
+            function: cranelift_module::FuncId,
+            context: &mut cranelift_codegen::Context,
+        ) -> cranelift_module::ModuleResult<()> {
+            let step = context
+                .func
+                .dfg
+                .signatures
+                .values()
+                .find(|s| matches!(s.returns.as_slice(), [r] if r.value_type == types::I8))
+                .expect("step slow path has a single u8 status result");
+            assert_eq!(step.call_conv, CallConv::AppleAarch64);
+            assert_eq!(step.returns[0].extension, ArgumentExtension::Uext);
+            object.define_function(function, context)
+        }
+    }
+
+    let input = text::parse(
+        "core v1\nsig g0 = (u64) -> (u64)\n\
+         inst n0 = test@0/steps/apple [] []\nfn f0 = n0 g0 {\n\
+         b0(v0: u64):\n  step\n  return v0\n}\n",
+    )
+    .unwrap();
+    for target in Target::ALL
+        .into_iter()
+        .filter(|target| target.apple().is_some())
+    {
+        emit_object_profiled(
+            &input,
+            &[],
+            &Options {
+                target: target.triple(),
+                optimize: false,
+                debug_lines: false,
+            },
+            hirsel_core_ids::ContentHash([0; 32]),
+            &CheckStep,
+        )
+        .unwrap_or_else(|err| panic!("{}: {err}", target.triple()));
+    }
+}
+
+#[test]
 fn sequential_step_checks_reuse_the_native_frame() {
     struct Frame(RefCell<u32>);
     impl profile::Observer for Frame {

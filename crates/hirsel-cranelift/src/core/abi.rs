@@ -19,15 +19,15 @@ pub struct Signature {
     pub dest: bool,
 }
 impl Signature {
-    pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts) -> Self {
-        Self::build(s, Some(layouts), object, true)
+    pub fn new(s: &c::Signature, object: &ObjectModule, layouts: &CallLayouts, abi: CAbi) -> Self {
+        Self::build(s, Some(layouts), object, true, abi)
     }
     /// A Hirsel entry with no scalar-record parameter or result rewrites.
     /// Scalars, pointers and a destination follow the same ABI as unit code.
-    pub fn foreign(s: &c::Signature, object: &ObjectModule) -> Self {
-        Self::build(s, None, object, true)
+    pub fn foreign(s: &c::Signature, object: &ObjectModule, abi: CAbi) -> Self {
+        Self::build(s, None, object, true, abi)
     }
-    pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
+    pub fn c(object: &ObjectModule, abi: CAbi, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
             &c::Signature::new(
                 params.iter().copied().map(Param::Value).collect(),
@@ -37,10 +37,10 @@ impl Signature {
             None,
             object,
             false,
+            abi,
         );
         // Narrow C arguments and a lone narrow result carry the target's
         // extension: the C side of the call relies on the bits it names.
-        let abi = c_abi(object);
         for (index, &t) in params.iter().enumerate() {
             let parameter = &mut signature.clif.params[index + usize::from(signature.indirect)];
             *parameter = extended(*parameter, abi, t);
@@ -55,8 +55,9 @@ impl Signature {
         layouts: Option<&CallLayouts>,
         object: &ObjectModule,
         context: bool,
+        abi: CAbi,
     ) -> Self {
-        let arm = aapcs64(object);
+        let arm = aapcs64(abi);
         let record = layouts.and_then(|layouts| layouts.result(s));
         let dest = s.dest.is_some() && record.is_none();
         let mut results: Vec<Ty> = if let Some(record) = record {
@@ -316,24 +317,16 @@ fn result_flags(t: ir::Type) -> MemFlags {
     }
 }
 
-/// The module owns one target; every imported/generated C signature uses it.
 /// Whether C aggregates follow AAPCS64 (Linux and Apple arm64 alike): large
 /// composites by pointer to a caller copy, not SysV stack byval.
-pub(super) fn aapcs64(object: &ObjectModule) -> bool {
-    match c_abi(object) {
-        hirsel_core_layout::CAbi::SysV64 => false,
-        hirsel_core_layout::CAbi::Aapcs64 | hirsel_core_layout::CAbi::DarwinPcs => true,
+pub(super) fn aapcs64(abi: CAbi) -> bool {
+    match abi {
+        CAbi::SysV64 => false,
+        CAbi::Aapcs64 | CAbi::DarwinPcs => true,
     }
 }
 
-/// The C ABI of the module's one target.
-fn c_abi(object: &ObjectModule) -> hirsel_core_layout::CAbi {
-    let triple = object.isa().triple().to_string();
-    hirsel_core_layout::Target::from_triple(&triple)
-        .unwrap_or_else(|| panic!("no C ABI for target {triple}"))
-        .c_abi()
-}
-fn extended(param: AbiParam, abi: hirsel_core_layout::CAbi, t: Ty) -> AbiParam {
+fn extended(param: AbiParam, abi: CAbi, t: Ty) -> AbiParam {
     match hirsel_core_layout::c_extension(abi, t) {
         hirsel_core_layout::CExtension::None => param,
         hirsel_core_layout::CExtension::Zero => param.uext(),
@@ -341,8 +334,8 @@ fn extended(param: AbiParam, abi: hirsel_core_layout::CAbi, t: Ty) -> AbiParam {
     }
 }
 /// A C scalar argument or result of `t` for this module's target.
-pub fn c_param(object: &ObjectModule, t: Ty) -> AbiParam {
-    extended(AbiParam::new(ty(t)), c_abi(object), t)
+pub fn c_param(abi: CAbi, t: Ty) -> AbiParam {
+    extended(AbiParam::new(ty(t)), abi, t)
 }
 
 pub(super) fn record_place(b: &mut FunctionBuilder<'_>, record: ScalarRecord) -> Value {

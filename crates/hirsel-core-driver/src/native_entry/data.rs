@@ -1,6 +1,6 @@
 //! Static views and source bindings use the same ELF writer as generated code.
 use super::*;
-use hirsel_core_layout::source_positions;
+use hirsel_core_layout::{ObjectFormat, source_positions};
 use std::collections::BTreeSet;
 use std::mem::offset_of;
 
@@ -137,6 +137,7 @@ fn views<'a>(object: &mut ObjectModule, strings: impl Iterator<Item = &'a str>) 
 }
 pub(super) fn write(
     object: &mut ObjectModule,
+    format: ObjectFormat,
     plan: &Plan<'_>,
     sources: &hirsel_core_ir::source::SourceMap,
     live_sites: Option<&BTreeSet<u64>>,
@@ -239,16 +240,10 @@ pub(super) fn write(
         .declare_data(SOURCE_FILES, Linkage::Local, false, false)
         .map_err(error)?;
     let mut files = description(files, 8);
-    let triple = object.isa().triple().to_string();
-    files.set_custom_section(
-        match hirsel_core_layout::Target::from_triple(&triple)
-            .ok_or_else(|| error(format!("no Hirsel target {triple}")))?
-            .object_format()
-        {
-            hirsel_core_layout::ObjectFormat::Elf => ".rodata.hirsel_sites",
-            hirsel_core_layout::ObjectFormat::MachO => "__TEXT,__hirsel_sites",
-        },
-    );
+    files.set_custom_section(match format {
+        ObjectFormat::Elf => ".rodata.hirsel_sites",
+        ObjectFormat::MachO => "__TEXT,__hirsel_sites",
+    });
     object.define_data(files_id, &files).map_err(error)?;
     // The decoder symbol binds the generated entry and Context ABI to the runtime.
     let decoder = object

@@ -32,6 +32,7 @@ impl Glues {
         object: &mut ObjectModule,
         input: &c::Module,
         layouts: &[RecipeRow],
+        c_abi: CAbi,
     ) -> Result<Self> {
         let mut roots = BTreeSet::new();
         fn counted(ty: &FieldTy, roots: &mut BTreeSet<usize>) {
@@ -247,52 +248,27 @@ impl Glues {
         let mut drops = vec![None; layouts.len()];
         let mut cleans = vec![None; layouts.len()];
         let mut resumes = vec![None; layouts.len()];
+        let drop_sig = abi::Signature::c(object, c_abi, &[P, P, U], &[B]).clif;
+        let resume_sig = abi::Signature::c(object, c_abi, &[P, P, P, P], &[B]).clif;
+        let mut declare = |name: String, signature: &ir::Signature| {
+            object
+                .declare_function(&name, Linkage::Local, signature)
+                .map_err(error)
+        };
         for (i, recipe) in layouts.iter().enumerate() {
             if (recipe.drop.is_some() || descriptors.contains(&i)) && needed.contains(&i) {
-                drops[i] = Some(
-                    object
-                        .declare_function(
-                            &format!("hirsel.core.drop.{i}"),
-                            Linkage::Local,
-                            &abi::Signature::c(object, &[P, P, U], &[B]).clif,
-                        )
-                        .map_err(error)?,
-                );
+                drops[i] = Some(declare(format!("hirsel.core.drop.{i}"), &drop_sig)?);
             }
             if values.contains(&i) {
-                cleans[i] = Some(
-                    object
-                        .declare_function(
-                            &format!("hirsel.core.clean.{i}"),
-                            Linkage::Local,
-                            &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
-                        )
-                        .map_err(error)?,
-                );
+                cleans[i] = Some(declare(format!("hirsel.core.clean.{i}"), &resume_sig)?);
             }
             if roots.contains(&i) {
-                resumes[i] = Some(
-                    object
-                        .declare_function(
-                            &format!("hirsel.core.resume.{i}"),
-                            Linkage::Local,
-                            &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
-                        )
-                        .map_err(error)?,
-                );
+                resumes[i] = Some(declare(format!("hirsel.core.resume.{i}"), &resume_sig)?);
             }
         }
         let mut recipes = vec![None; layouts.len()];
         for &i in &resourced {
-            recipes[i] = Some(
-                object
-                    .declare_function(
-                        &format!("hirsel.core.resource.{i}"),
-                        Linkage::Local,
-                        &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
-                    )
-                    .map_err(error)?,
-            );
+            recipes[i] = Some(declare(format!("hirsel.core.resource.{i}"), &resume_sig)?);
         }
         let mut fixed = vec![None; layouts.len()];
         let mut environment = vec![None; layouts.len()];
@@ -412,7 +388,7 @@ impl Glues {
                 .declare_function(
                     &format!("hirsel.core.buffer.{i}"),
                     Linkage::Local,
-                    &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
+                    &resume_sig,
                 )
                 .map_err(error)?;
             buffers.push((t, function));
@@ -475,7 +451,7 @@ impl Glues {
         let build = observer.enter("build_glue");
         let context = &mut scratch.codegen;
         object.clear_context(context);
-        context.func.signature = abi::Signature::c(object, &[P, P, P, P], &[B]).clif;
+        context.func.signature = abi::Signature::c(object, tables.c_abi, &[P, P, P, P], &[B]).clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
@@ -500,7 +476,7 @@ impl Glues {
             ctx: args[0],
             caller_site,
             failed,
-            calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+            calls: calls::Calls::new(tables, 0),
             point: None,
             rank: None,
             list: Some(args[3]),
@@ -534,7 +510,7 @@ impl Glues {
         let build = observer.enter("build_glue");
         let context = &mut scratch.codegen;
         object.clear_context(context);
-        context.func.signature = abi::Signature::c(object, &[P, P, P, P], &[B]).clif;
+        context.func.signature = abi::Signature::c(object, tables.c_abi, &[P, P, P, P], &[B]).clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
@@ -555,7 +531,7 @@ impl Glues {
             ctx: args[0],
             caller_site,
             failed,
-            calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+            calls: calls::Calls::new(tables, 0),
             point: None,
             rank: None,
             list: Some(args[3]),
@@ -582,6 +558,7 @@ impl Glues {
         object.clear_context(context);
         context.func.signature = abi::Signature::c(
             object,
+            tables.c_abi,
             if resume { &[P, P, P, P] } else { &[P, P, U] },
             &[B],
         )
@@ -610,7 +587,7 @@ impl Glues {
             ctx: args[0],
             caller_site,
             failed,
-            calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+            calls: calls::Calls::new(tables, 0),
             point: resume.then(Vec::new),
             rank: Some(0),
             list: resume.then(|| args[3]),

@@ -302,8 +302,7 @@ pub(super) fn emit(
         observe_charge: tables.observe_charge,
         law: c::law::Hooks::pick(input, function, body, layouts),
         calls: calls::Calls::new(
-            &tables.runtimes,
-            signatures,
+            tables,
             body.edges
                 .iter()
                 .map(|e| e.args.len as usize)

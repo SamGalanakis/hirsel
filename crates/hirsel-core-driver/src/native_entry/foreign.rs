@@ -6,7 +6,7 @@ use crate::foreign_header::{Abi, Argument, Return};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlagsData, Value};
 use hirsel_core_ir::release_recipe::ForeignLeaf;
 use hirsel_core_ir::{Loan, Param, PlaceTy, Signature, TypeId};
-use hirsel_core_layout::{Body, Carried, Case, Field, FieldTy, Repr, Scalar, Shape, Ty};
+use hirsel_core_layout::{Body, CAbi, Carried, Case, Field, FieldTy, Repr, Scalar, Shape, Ty};
 use hirsel_cranelift::core::{NativeSignature, c_param, memory_layout as abi};
 use std::collections::BTreeMap;
 
@@ -69,6 +69,7 @@ enum Route {
 pub(super) fn emit(
     object: &mut ObjectModule,
     unwind: &mut Unwind,
+    c_abi: CAbi,
     functions: &[Function<'_>],
     modules: &[Contained<'_>],
 ) -> Result<bool> {
@@ -84,7 +85,14 @@ pub(super) fn emit(
     for (index, function) in functions.iter().enumerate() {
         let parsed = Abi::parse(function.header).ok_or("invalid checked foreign header")?;
         let route = match function.contained {
-            None => Route::Native(thunk(object, unwind, &function.c_symbol, index, &parsed)?),
+            None => Route::Native(thunk(
+                object,
+                unwind,
+                c_abi,
+                &function.c_symbol,
+                index,
+                &parsed,
+            )?),
             Some(module) => Route::Contained(modules[module]),
         };
         let mut release = false;
@@ -134,6 +142,7 @@ pub(super) fn emit(
         slot(
             object,
             unwind,
+            c_abi,
             &function.hirsel_symbol,
             &parsed,
             descriptor,
@@ -363,6 +372,7 @@ fn define(object: &mut ObjectModule, name: &str, data: &DataDescription) -> Resu
 fn thunk(
     object: &mut ObjectModule,
     unwind: &mut Unwind,
+    c_abi: CAbi,
     name: &str,
     index: usize,
     parsed: &Abi<'_>,
@@ -391,7 +401,7 @@ fn thunk(
         let offset = (index * 16) as i32;
         match argument {
             Argument::Scalar(s) => {
-                c_signature.params.push(c_param(f.object, Ty::Scalar(s)));
+                c_signature.params.push(c_param(c_abi, Ty::Scalar(s)));
                 params.push(f.load(scalar_type(s), words, offset));
             }
             Argument::Bytes { .. } => {
@@ -417,7 +427,7 @@ fn thunk(
     }
     c_signature.returns.extend(match parsed.result {
         Return::Unit => None,
-        Return::Scalar(s) => Some(c_param(f.object, Ty::Scalar(s))),
+        Return::Scalar(s) => Some(c_param(c_abi, Ty::Scalar(s))),
         Return::New(_) => Some(AbiParam::new(I64)),
     });
     let native = f
@@ -441,6 +451,7 @@ fn thunk(
 fn slot(
     object: &mut ObjectModule,
     unwind: &mut Unwind,
+    c_abi: CAbi,
     name: &str,
     parsed: &Abi<'_>,
     descriptor: DataId,
@@ -461,7 +472,7 @@ fn slot(
         Return::Scalar(s) => (vec![Ty::Scalar(s)], None),
         Return::New(_) => (vec![], Some(TypeId(0))),
     };
-    let sig = NativeSignature::foreign(&Signature::new(params, results, dest), object);
+    let sig = NativeSignature::foreign(&Signature::new(params, results, dest), object, c_abi);
     let mut context = object.make_context();
     context.func.signature = sig.clif.clone();
     let id = object

@@ -9,7 +9,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module as _};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::source::SourceMap;
-use hirsel_core_layout::{Fixed, Layout};
+use hirsel_core_layout::{Fixed, Layout, Target};
 use hirsel_cranelift::unwind::Unwind;
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -362,13 +362,19 @@ impl<'a> Plan<'a> {
         revisions: &[(String, [u8; 32])],
         (live_sites, spawns_units, (members, keys)): (Option<&BTreeSet<u64>>, bool, Inputs<'_>),
     ) -> Result<Vec<u8>> {
-        let format = hirsel_core_layout::Target::from_triple(target)
-            .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
-            .object_format();
+        let target = Target::from_triple(target)
+            .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?;
+        let format = target.object_format();
         let mut object = object(target)?;
         let mut unwind = Unwind::new(object.isa()).map_err(error)?;
-        let waits = foreign::emit(&mut object, &mut unwind, &self.foreign, &self.contained)?;
-        let data = data::write(&mut object, self, sources, live_sites)?;
+        let waits = foreign::emit(
+            &mut object,
+            &mut unwind,
+            target.c_abi(),
+            &self.foreign,
+            &self.contained,
+        )?;
+        let data = data::write(&mut object, format, self, sources, live_sites)?;
         data::bytes(
             &mut object,
             Some("hirsel_code_revision"),
@@ -403,6 +409,7 @@ impl<'a> Plan<'a> {
         start::emit(
             &mut object,
             &mut unwind,
+            target,
             self,
             &data,
             entry,
@@ -421,9 +428,7 @@ impl<'a> Plan<'a> {
     }
 }
 
-fn object(target: &str) -> Result<ObjectModule> {
-    let target = hirsel_core_layout::Target::from_triple(target)
-        .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?;
+fn object(target: Target) -> Result<ObjectModule> {
     let page = target.page_log2().to_string();
     let mut flags = settings::builder();
     for (name, value) in [

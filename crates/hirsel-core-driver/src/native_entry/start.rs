@@ -6,6 +6,7 @@ use hirsel_cranelift::core::memory_layout as abi;
 pub(super) fn emit(
     object: &mut ObjectModule,
     unwind: &mut Unwind,
+    target: Target,
     plan: &Plan<'_>,
     data: &data::Tables,
     entry: FuncId,
@@ -29,9 +30,6 @@ pub(super) fn emit(
     f.b.append_block_params_for_function_params(start);
     f.b.switch_to_block(start);
     let parameters = f.b.block_params(start).to_vec();
-    let triple = f.object.isa().triple().to_string();
-    let target = hirsel_core_layout::Target::from_triple(&triple)
-        .ok_or_else(|| format!("no Hirsel target {triple}"))?;
     match target.arch() {
         hirsel_core_layout::Arch::X86_64 => f.void_call("hirsel_core_init_isa", &[])?,
         hirsel_core_layout::Arch::Aarch64 => {}
@@ -87,6 +85,7 @@ pub(super) fn emit(
     let streams = f.constant((2u64 << 32) | 1);
     let net_rules = f.address(data.net_rules);
     let net_rules_len = f.constant((plan.net_rules.len() + plan.unix_roots.len()) as u64);
+    let triple = target.triple();
     let target_data = data::bytes(f.object, None, triple.as_bytes().to_vec(), 1)?;
     let target_address = f.address(target_data);
     let target_len = f.constant(triple.len() as u64);

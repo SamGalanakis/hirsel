@@ -1,0 +1,136 @@
+// QUIC wire ranges are offsets into the caller's buffer, including after an in-place open.
+pub type Span: key {
+    at: u64,
+    len: u64
+}
+
+pub type CodecError = Truncated | Bounds | VarintOverflow | PacketNumber | FixedBit | ReservedBits | ConnectionIdLength | VersionList | RetryToken | NoPacketNumber | SampleTooShort | DatagramTooShort | SmallInitial | SmallUnsupportedVersion | UnexpectedVersionNegotiation | UnsupportedVersion | CoalescedDestination | CoalescedUnnumbered | InvalidValue | FrameEncodingError(u64) | ProtocolViolation(u64) | NoCapacity(Capacity)
+
+type Cursor {
+    at: u64,
+    end: u64
+}
+
+const MAX_VARINT: u64 = 0x3fffffffffffffff
+
+fn cursor(input: Bytes, at: u64, end: u64) -> Result[Cursor, CodecError] {
+    if at > end || end > list.len(input) {
+        return Error(Bounds)
+    }
+    Ok(Cursor(at: at, end: end))
+}
+
+fn take_span(mut c: Cursor, len: u64) -> Result[Span, CodecError] {
+    if len > c.end - c.at {
+        return Error(Truncated)
+    }
+    let at = c.at
+    c.at += len
+    Ok(Span(at: at, len: len))
+}
+
+fn octet(input: Bytes, mut c: Cursor) -> Result[u8, CodecError] {
+    let s = take_span(mut c, 1)?
+    Ok(input[s.at])
+}
+
+fn uint(input: Bytes, s: Span) -> u64 {
+    let mut n = 0u64
+    for i in s.at .. s.at + s.len {
+        let byte: u64 = int.widen(input[i])
+        n = (n << 8) | byte
+    }
+    n
+}
+
+fn width(n: u64) -> u64 {
+    if n < 64 {
+        1
+    } else if n < 16384 {
+        2
+    } else if n < 1073741824 {
+        4
+    } else {
+        8
+    }
+}
+
+fn varint(input: Bytes, mut c: Cursor) -> Result[u64, CodecError] {
+    let first = octet(input, mut c)?
+    let shift: u64 = int.widen(first >> 6)
+    let size = 1u64 << shift
+    let tail = take_span(mut c, size - 1)?
+    let high: u64 = int.widen(first & 0x3f)
+    Ok((high << (8 * tail.len)) | uint(input, tail))
+}
+
+pub fn read_varint(input: Bytes, mut at: u64, end: u64) -> Result[u64, CodecError] {
+    let mut c = cursor(input, at, end)?
+    let n = varint(input, mut c)?
+    at = c.at
+    Ok(n)
+}
+
+fn reserve(mut out: Bytes, n: u64) -> Result[(), CodecError] {
+    match list.try_reserve(mut out, n) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(NoCapacity(e)),
+    }
+}
+
+fn put_uint(mut out: Bytes, n: u64, size: u64) {
+    let mut i = size
+    while i > 0 {
+        i -= 1
+        list.push(mut out, int.narrow((n >> (8 * i)) & 0xff))
+    }
+}
+
+pub fn write_varint(n: u64, mut out: Bytes) -> Result[(), CodecError] {
+    if n > MAX_VARINT {
+        return Error(VarintOverflow)
+    }
+    let size = width(n)
+    reserve(mut out, size)?
+    match size {
+        1 => put_uint(mut out, n, 1),
+        2 => put_uint(mut out, n | 0x4000, 2),
+        4 => put_uint(mut out, n | 0x80000000, 4),
+        _ => put_uint(mut out, n | 0xc000000000000000, 8),
+    }
+    Ok(())
+}
+
+/// RFC 9000 Appendix A.3. Only authenticated receive history in this packet number space
+/// can supply largest. None means the first expected packet number is zero.
+pub fn decode_packet_number(largest: Option[u64], truncated: u64, size: u8) -> Result[u64, CodecError] {
+    if size < 1 || size > 4 {
+        return Error(PacketNumber)
+    }
+    let bytes_wide: u64 = int.widen(size)
+    let window = 1u64 << (8 * bytes_wide)
+    if truncated >= window {
+        return Error(PacketNumber)
+    }
+    let expected: u64 = match largest {
+        None => 0,
+        Some(n) => {
+            if n > MAX_VARINT {
+                return Error(PacketNumber)
+            }
+            n + 1
+        },
+    }
+    let half = window / 2
+    let candidate = (expected & ~(window - 1)) | truncated
+    if candidate + half <= expected && candidate <= MAX_VARINT - window {
+        return Ok(candidate + window)
+    }
+    if candidate > expected + half && candidate >= window {
+        return Ok(candidate - window)
+    }
+    if candidate > MAX_VARINT {
+        return Error(PacketNumber)
+    }
+    Ok(candidate)
+}

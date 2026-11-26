@@ -1,0 +1,19 @@
+[package]
+name = "quic"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"wire.hirsel" = "codec"
+"header.hirsel" = "codec"
+"frame.hirsel" = "codec"
+"frame_write.hirsel" = "codec"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"laws.hirsel" = "laws"

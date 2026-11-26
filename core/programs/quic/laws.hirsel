@@ -1,0 +1,390 @@
+fn varint_vector(wire: Bytes, canonical: Bytes, expected: u64) {
+    let mut at = 0u64
+    if result.unwrap(codec.read_varint(wire, mut at, list.len(wire))) != expected || at != list.len(wire) {
+        fail("RFC 9000 varint decode")
+    }
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.write_varint(expected, mut out))
+    if out != canonical {
+        fail("RFC 9000 varint encode")
+    }
+}
+
+/// bug: Decode a legal varint or an authenticated packet-number window incorrectly.
+/// oracle: RFC 9000 §16 and Appendix A.1/A.3, plus hand-derived width and window edges.
+@test
+fn varint_and_packet_number_vectors() -> Result[(), ()] {
+    varint_vector(b"\xc2\x19\x7c\x5e\xff\x14\xe8\x8c", b"\xc2\x19\x7c\x5e\xff\x14\xe8\x8c", 151288809941952652)
+    varint_vector(b"\x9d\x7f\x3e\x7d", b"\x9d\x7f\x3e\x7d", 494878333)
+    varint_vector(b"\x7b\xbd", b"\x7b\xbd", 15293)
+    varint_vector(b"\x25", b"\x25", 37)
+    varint_vector(b"\x40\x25", b"\x25", 37)
+    varint_vector(b"\x80\x00\x00\x25", b"\x25", 37)
+    varint_vector(b"\xc0\x00\x00\x00\x00\x00\x00\x25", b"\x25", 37)
+    varint_vector(b"\x3f", b"\x3f", 63)
+    varint_vector(b"\x40\x40", b"\x40\x40", 64)
+    varint_vector(b"\x7f\xff", b"\x7f\xff", 16383)
+    varint_vector(b"\x80\x00\x40\x00", b"\x80\x00\x40\x00", 16384)
+    varint_vector(b"\xbf\xff\xff\xff", b"\xbf\xff\xff\xff", 1073741823)
+    varint_vector(b"\xc0\x00\x00\x00\x40\x00\x00\x00", b"\xc0\x00\x00\x00\x40\x00\x00\x00", 1073741824)
+    varint_vector(b"\xff\xff\xff\xff\xff\xff\xff\xff", b"\xff\xff\xff\xff\xff\xff\xff\xff", 0x3fffffffffffffff)
+    let mut at = 1u64
+    if let Error(Truncated) = codec.read_varint(b"\x00\x40\x25", mut at, 2) {} else {
+        fail("varint read beyond its bound")
+    }
+    if at != 1 {
+        fail("truncated varint advanced the cursor")
+    }
+    let mut out = b"a"
+    if let Error(VarintOverflow) = codec.write_varint(0x4000000000000000, mut out) {} else {
+        fail("varint accepted 2^62")
+    }
+    if out != b"a" {
+        fail("unrepresentable varint changed output")
+    }
+    pn(Some(0xa82f30ea), 0x9b32, 2, 0xa82f9b32)
+    pn(None, 255, 1, 255)
+    pn(Some(0xff), 0x80, 1, 0x180)
+    pn(Some(0x17f), 0, 1, 0x200)
+    pn(Some(0x11f), 0xf0, 1, 0xf0)
+    pn(Some(0x01fffffe), 0, 3, 0x02000000)
+    pn(Some(0x1fffffff0), 0x10, 4, 0x200000010)
+    pn(Some(0x3fffffffffffffff), 0xff, 1, 0x3fffffffffffffff)
+    if let Error(PacketNumber) = codec.decode_packet_number(Some(0x3fffffffffffffff), 0, 1) {} else {
+        fail("decoded a packet number past 2^62 - 1")
+    }
+    if let Error(PacketNumber) = codec.decode_packet_number(None, 256, 1) {} else {
+        fail("accepted a nine-bit truncated packet number as eight bits")
+    }
+    check_headers()
+    Ok(())
+}
+
+fn pn(largest: Option[u64], low: u64, size: u8, expected: u64) {
+    if result.unwrap(codec.decode_packet_number(largest, low, size)) != expected {
+        fail("RFC 9000 A.3 packet number")
+    }
+}
+
+fn span(at: u64, len: u64) -> codec.Span {
+    codec.Span(at: at, len: len)
+}
+
+fn check_headers() {
+    // An Initial and Handshake with a 20-byte protected body apiece, and a short
+    // packet last. The receive window starts one byte into the backing buffer.
+    let initial = b"\xc1\x00\x00\x00\x01\x01\xaa\x02\xbb\xcc\x02\xde\xad\x14\x12\x34"
+    let handshake = b"\xe0\x00\x00\x00\x01\x01\xaa\x00\x14\x07"
+    let short = b"\x65\xaa\xde\xad"
+    let cipher18 = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11"
+    let mut packet = b"x"
+    list.append(mut packet, initial)
+    list.append(mut packet, cipher18)
+    list.append(mut packet, handshake)
+    list.append(mut packet, cipher18)
+    list.push(mut packet, 0x12)
+    list.append(mut packet, short)
+    list.append(mut packet, cipher18)
+    list.push(mut packet, 0xff)
+    let mut at = 1u64
+    let first = result.unwrap(codec.read_header(packet, mut at, 86, 1))
+    if first.kind != Initial || first.version != 1 || first.packet != span(1, 34) || first.destination != span(7, 1) || first.source != span(9, 2) || first.token != span(12, 2) || first.body != span(15, 20) || at != 35 {
+        fail("Initial bounds and CIDs")
+    }
+    if result.unwrap(codec.sample(first)) != span(19, 16) {
+        fail("Initial sample bounds")
+    }
+    let opened = result.unwrap(codec.read_open_header(packet, first))
+    if opened.number != codec.Number(truncated: 0x1234, size: 2) || opened.aad != span(1, 16) || opened.payload != span(17, 18) {
+        fail("Initial number and associated data")
+    }
+    let second = result.unwrap(codec.read_coalesced_header(packet, mut at, 86, 1, first.destination))
+    if second.kind != Handshake || second.packet != span(35, 29) || second.body != span(44, 20) || at != 64 {
+        fail("coalesced Handshake boundary")
+    }
+    let last = result.unwrap(codec.read_coalesced_header(packet, mut at, 86, 1, first.destination))
+    let short_open = result.unwrap(codec.read_open_header(packet, last))
+    if last.kind != OneRtt || last.packet != span(64, 22) || last.body != span(66, 20) || at != 86 || !short_open.spin || !short_open.key_phase || short_open.number != codec.Number(truncated: 0xdead, size: 2) {
+        fail("short header consumes the datagram tail")
+    }
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.write_long_header(Initial, b"\xaa", b"\xbb\xcc", b"\xde\xad", codec.Number(truncated: 0x1234, size: 2), 18, mut out))
+    if out != initial {
+        fail("Initial encoding")
+    }
+    list.truncate(mut out, 0)
+    result.unwrap(codec.write_long_header(Handshake, b"\xaa", b"", b"", codec.Number(truncated: 7, size: 1), 19, mut out))
+    if out != handshake {
+        fail("Handshake encoding")
+    }
+    list.truncate(mut out, 0)
+    result.unwrap(codec.write_long_header(ZeroRtt, b"", b"", b"", codec.Number(truncated: 0x01020304, size: 4), 16, mut out))
+    if out != b"\xd3\x00\x00\x00\x01\x00\x00\x14\x01\x02\x03\x04" {
+        fail("0-RTT encoding")
+    }
+    list.truncate(mut out, 0)
+    result.unwrap(codec.write_short_header(b"\xaa", true, true, codec.Number(truncated: 0xdead, size: 2), mut out))
+    if out != short {
+        fail("short header encoding")
+    }
+    packet[41] = 0xbb
+    at = 35
+    if let Error(CoalescedDestination) = codec.read_coalesced_header(packet, mut at, 86, 1, first.destination) {} else {
+        fail("coalesced packet accepted another destination CID")
+    }
+    if at != 64 || result.unwrap(codec.read_coalesced_header(packet, mut at, 86, 1, first.destination)).kind != OneRtt {
+        fail("mismatched CID hid the following coalesced packet")
+    }
+    check_unnumbered()
+}
+
+fn check_unnumbered() {
+    let retry = b"\xf0\x00\x00\x00\x01\x01\xaa\x01\xbbtt0123456789abcdef"
+    let mut at = 0u64
+    let h = result.unwrap(codec.read_header(retry, mut at, 27, 1))
+    if h.kind != Retry || h.destination != span(6, 1) || h.source != span(8, 1) || h.token != span(9, 2) || h.body != span(11, 16) || at != 27 {
+        fail("Retry token and integrity tag")
+    }
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.write_retry_prefix(b"\xaa", b"\xbb", b"tt", mut out))
+    if out != b"\xf0\x00\x00\x00\x01\x01\xaa\x01\xbbtt" {
+        fail("Retry prefix encoding")
+    }
+    let vn = b"\x80\x00\x00\x00\x00\x01\xbb\x01\xaa\x00\x00\x00\x01\x6b\x33\x43\xcf"
+    at = 0
+    let v = result.unwrap(codec.read_header(vn, mut at, 17, 1))
+    if v.kind != Negotiation || v.version != 0 || v.body != span(9, 8) || at != 17 {
+        fail("Version Negotiation ignores the Unused bits")
+    }
+    list.truncate(mut out, 0)
+    let mut versions: List[u32] = list.new()
+    list.push(mut versions, 1)
+    list.push(mut versions, 0x6b3343cf)
+    result.unwrap(codec.write_negotiation(b"\xbb", b"\xaa", versions, mut out))
+    if out != b"\xc0\x00\x00\x00\x00\x01\xbb\x01\xaa\x00\x00\x00\x01\x6b\x33\x43\xcf" {
+        fail("Version Negotiation encoding")
+    }
+}
+
+fn expect_frame(wire: Bytes, expected: codec.Frame) {
+    let mut r = result.unwrap(codec.frames(wire, span(0, list.len(wire)), OneRtt, 1200))
+    let Some(take found) = result.unwrap(codec.next_frame(wire, mut r)) else {
+        fail("missing frame")
+    }
+    if found != expected || result.unwrap(codec.next_frame(wire, mut r)) != None {
+        fail("decoded frame fields or length")
+    }
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.write_frame(expected, wire, mut out))
+    if out != wire {
+        fail("frame encoding differs from hand-derived bytes")
+    }
+}
+
+fn check_frames() {
+    expect_frame(b"\x00\x00\x00", Padding(3))
+    expect_frame(b"\x01", Ping)
+    let mut ranges: List[codec.AckRange] = list.new()
+    list.push(mut ranges, codec.AckRange(smallest: 8, largest: 10))
+    list.push(mut ranges, codec.AckRange(smallest: 4, largest: 5))
+    expect_frame(b"\x02\x0a\x01\x01\x02\x01\x01", Ack(codec.AckFields(delay: 1, ranges: clone(ranges), ecn: None)))
+    expect_frame(b"\x03\x0a\x01\x01\x02\x01\x01\x02\x03\x04", Ack(codec.AckFields(delay: 1, ranges: take ranges, ecn: Some(codec.EcnCounts(ect0: 2, ect1: 3, ce: 4)))))
+    expect_frame(b"\x04\x07\x08\x09", ResetStream(stream: 7, code: 8, final_size: 9))
+    expect_frame(b"\x05\x07\x08", StopSending(stream: 7, code: 8))
+    expect_frame(b"\x06\x08\x02hi", Crypto(offset: 8, data: span(3, 2)))
+    expect_frame(b"\x07\x02hi", NewToken(span(2, 2)))
+    expect_frame(b"\x08\x05hi", Stream(stream: 5, offset: 0, fin: false, explicit_len: false, data: span(2, 2)))
+    expect_frame(b"\x09\x05hi", Stream(stream: 5, offset: 0, fin: true, explicit_len: false, data: span(2, 2)))
+    expect_frame(b"\x0a\x05\x02hi", Stream(stream: 5, offset: 0, fin: false, explicit_len: true, data: span(3, 2)))
+    expect_frame(b"\x0b\x05\x02hi", Stream(stream: 5, offset: 0, fin: true, explicit_len: true, data: span(3, 2)))
+    expect_frame(b"\x0c\x05\x03hi", Stream(stream: 5, offset: 3, fin: false, explicit_len: false, data: span(3, 2)))
+    expect_frame(b"\x0d\x05\x03hi", Stream(stream: 5, offset: 3, fin: true, explicit_len: false, data: span(3, 2)))
+    expect_frame(b"\x0e\x05\x03\x02hi", Stream(stream: 5, offset: 3, fin: false, explicit_len: true, data: span(4, 2)))
+    expect_frame(b"\x0f\x05\x03\x02hi", Stream(stream: 5, offset: 3, fin: true, explicit_len: true, data: span(4, 2)))
+    expect_frame(b"\x10\x40\x40", MaxData(64))
+    expect_frame(b"\x11\x05\x12", MaxStreamData(stream: 5, limit: 18))
+    expect_frame(b"\x12\x12", MaxStreams(bidi: true, limit: 18))
+    expect_frame(b"\x13\x13", MaxStreams(bidi: false, limit: 19))
+    expect_frame(b"\x14\x13", DataBlocked(19))
+    expect_frame(b"\x15\x05\x13", StreamDataBlocked(stream: 5, limit: 19))
+    expect_frame(b"\x16\x14", StreamsBlocked(bidi: true, limit: 20))
+    expect_frame(b"\x17\x15", StreamsBlocked(bidi: false, limit: 21))
+    expect_frame(b"\x18\x03\x01\x02AB0123456789abcdef", NewConnectionId(sequence: 3, retire_prior_to: 1, id: span(4, 2), reset_token: span(6, 16)))
+    expect_frame(b"\x19\x02", RetireConnectionId(2))
+    expect_frame(b"\x1a01234567", PathChallenge(span(1, 8)))
+    expect_frame(b"\x1b76543210", PathResponse(span(1, 8)))
+    expect_frame(b"\x1c\x0a\x0f\x02hi", TransportClose(code: 10, frame_type: 15, reason: span(4, 2)))
+    expect_frame(b"\x1d\x10\x02hi", ApplicationClose(code: 16, reason: span(3, 2)))
+    expect_frame(b"\x1e", HandshakeDone)
+    expect_frame(b"\x24\x04\x08\x0a\x09", ResetStreamAt(stream: 4, code: 8, final_size: 10, reliable_size: 9))
+    expect_frame(b"\x30hi", Datagram(explicit_len: false, data: span(1, 2)))
+    expect_frame(b"\x31\x02hi", Datagram(explicit_len: true, data: span(2, 2)))
+    // Non-minimal scalar varints are legal. The declared frame boundary excludes the
+    // prefix and trailer of the backing buffer, and explicit LEN leaves a following Ping.
+    let group = b"\xff\x10\x40\x25\x31\x00\x01\xff"
+    let mut r = result.unwrap(codec.frames(group, span(1, 6), OneRtt, 2))
+    if result.unwrap(codec.next_frame(group, mut r)) != Some(MaxData(37)) || result.unwrap(codec.next_frame(group, mut r)) != Some(Datagram(explicit_len: true, data: span(6, 0))) || result.unwrap(codec.next_frame(group, mut r)) != Some(Ping) || result.unwrap(codec.next_frame(group, mut r)) != None {
+        fail("legal non-minimal field or coalesced frame boundary")
+    }
+}
+
+fn wrong_level(wire: Bytes, kind: codec.PacketKind, t: u64, max_datagram_frame: u64) {
+    let mut r = result.unwrap(codec.frames(wire, span(0, list.len(wire)), kind, max_datagram_frame))
+    if let Error(ProtocolViolation(found)) = codec.next_frame(wire, mut r) {
+        if found == t {
+            return
+        }
+    }
+    fail("expected PROTOCOL_VIOLATION for frame")
+}
+
+fn bad_frame(wire: Bytes, t: u64) {
+    let mut r = result.unwrap(codec.frames(wire, span(0, list.len(wire)), OneRtt, 1200))
+    if let Error(FrameEncodingError(found)) = codec.next_frame(wire, mut r) {
+        if found == t {
+            return
+        }
+    }
+    fail("expected FRAME_ENCODING_ERROR for frame")
+}
+
+/// bug: Accept forbidden, malformed or out-of-bounds QUIC wire forms.
+/// oracle: RFC 9000 §§12.4, 17 and 19, RFC 9001 §5.4.2, RFC 9221 §3,
+/// and draft-ietf-quic-reliable-stream-reset-11 §4.
+@test
+fn frame_refusals() -> Result[(), ()] {
+    check_frames()
+    for (wire, t) in[(b"\x02\x00\x00\x00\x00", 2u64), (b"\x03\x00\x00\x00\x00\x00\x00\x00", 3u64), (b"\x06\x00\x00", 6u64)] {
+        wrong_level(wire, ZeroRtt, t, 1200)
+    }
+    for (wire, t) in[(b"\x07\x01t", 7u64), (b"\x1b01234567", 27u64), (b"\x1e", 30u64)] {
+        wrong_level(wire, Initial, t, 1200)
+        wrong_level(wire, Handshake, t, 1200)
+        wrong_level(wire, ZeroRtt, t, 1200)
+    }
+    for (wire, t) in[
+        (b"\x04\x00\x00\x00", 4u64),
+        (b"\x05\x00\x00", 5u64),
+        (b"\x08\x00", 8u64),
+        (b"\x09\x00", 9u64),
+        (b"\x0a\x00\x00", 10u64),
+        (b"\x0b\x00\x00", 11u64),
+        (b"\x0c\x00\x00", 12u64),
+        (b"\x0d\x00\x00", 13u64),
+        (b"\x0e\x00\x00\x00", 14u64),
+        (b"\x0f\x00\x00\x00", 15u64),
+        (b"\x10\x00", 16u64),
+        (b"\x11\x00\x00", 17u64),
+        (b"\x12\x00", 18u64),
+        (b"\x13\x00", 19u64),
+        (b"\x14\x00", 20u64),
+        (b"\x15\x00\x00", 21u64),
+        (b"\x16\x00", 22u64),
+        (b"\x17\x00", 23u64),
+        (b"\x18\x00\x00\x01x0123456789abcdef", 24u64),
+        (b"\x19\x00", 25u64),
+        (b"\x1a01234567", 26u64),
+        (b"\x1d\x00\x00", 29u64),
+        (b"\x24\x00\x00\x02\x01", 36u64),
+        (b"\x30a", 48u64),
+        (b"\x31\x01a", 49u64),
+    ] {
+        wrong_level(wire, Initial, t, 1200)
+        wrong_level(wire, Handshake, t, 1200)
+    }
+    wrong_level(b"\x30a", OneRtt, 0x30, 0)
+    wrong_level(b"\x31\x01a", OneRtt, 0x31, 0)
+    wrong_level(b"\x31\x01a", OneRtt, 0x31, 2)
+    bad_frame(b"\x40\x01", 1)
+    bad_frame(b"\x80\x00\x00\x01", 1)
+    bad_frame(b"\xc0\x00\x00\x00\x00\x00\x00\x01", 1)
+    bad_frame(b"\x40", 0)
+    bad_frame(b"\x40\x40", 64)
+    bad_frame(b"\x02\x00\x00\x00\x01", 2)
+    bad_frame(b"\x02\x02\x00\x01\x00\x01\x00", 2)
+    bad_frame(b"\x02\x02\x00\x01\x00\x00\x01", 2)
+    bad_frame(b"\x03\x00\x00\x00\x00\x00\x00", 3)
+    bad_frame(b"\x06\x00\x02a", 6)
+    bad_frame(b"\x07\x00", 7)
+    bad_frame(b"\x0e\x00\xff\xff\xff\xff\xff\xff\xff\xff\x01a", 14)
+    bad_frame(b"\x12\xd0\x00\x00\x00\x00\x00\x00\x01", 18)
+    bad_frame(b"\x18\x00\x01\x01x0123456789abcdef", 24)
+    bad_frame(b"\x18\x00\x00\x000123456789abcdef", 24)
+    bad_frame(b"\x1aa", 26)
+    bad_frame(b"\x24\x00\x00\x01\x02", 36)
+    bad_frame(b"\x31\x02a", 49)
+    if let Error(ProtocolViolation(0)) = codec.frames(b"", span(0, 0), OneRtt, 1200) {} else {
+        fail("empty authenticated packet")
+    }
+    let mut out = b"x"
+    if let Error(VarintOverflow) = codec.write_frame(MaxData(0x4000000000000000), b"", mut out) {} else {
+        fail("unrepresentable frame scalar accepted")
+    }
+    if out != b"x" {
+        fail("failed frame write left a partial frame")
+    }
+    header_refusals()
+    Ok(())
+}
+
+fn header_refusals() {
+    let mut initial = b"\xc0\x00\x00\x00\x01\x08abcdefgh\x00\x00\x44\x9d"
+    for _ in 0u64 .. 1181u64 {
+        list.push(mut initial, 0)
+    }
+    let mut at = 0u64
+    if let Error(SmallInitial) = codec.read_first_header(initial, mut at, 1199, 0, true) {} else {
+        fail("server accepted a 1199-byte Initial datagram")
+    }
+    initial[4] = 2
+    at = 0
+    if let Error(SmallUnsupportedVersion) = codec.read_first_header(initial, mut at, 1199, 0, true) {} else {
+        fail("server accepted a 1199-byte datagram for Version Negotiation")
+    }
+    list.push(mut initial, 0)
+    at = 0
+    if result.unwrap(codec.read_first_header(initial, mut at, 1200, 0, true)).kind != OtherVersion {
+        fail("server refused to negotiate an unsupported version at 1200 bytes")
+    }
+    at = 0
+    let short = b"\x40abcd0123456789abcdef"
+    let h = result.unwrap(codec.read_first_header(short, mut at, 21, 4, true))
+    if let Error(SampleTooShort) = codec.sample(h) {} else {
+        fail("short packet could reach header protection without a sample")
+    }
+    at = 0
+    let coalesced = b"\xe0\x00\x00\x00\x01\x00\x00\x01\x00\x40abcdefghijklmnopqrst"
+    let first = result.unwrap(codec.read_header(coalesced, mut at, 30, 0))
+    if let Error(SampleTooShort) = codec.sample(first) {} else {
+        fail("sample crossed into a following coalesced packet")
+    }
+    let last = result.unwrap(codec.read_header(coalesced, mut at, 30, 0))
+    if last.kind != OneRtt || result.unwrap(codec.sample(last)) != span(14, 16) || at != 30 {
+        fail("discarded packet hid the following coalesced packet")
+    }
+    at = 0
+    let fixed = b"\xa0\x00\x00\x00\x01\x00\x00\x00\x40abcdefghijklmnopqrst"
+    if let Error(FixedBit) = codec.read_header(fixed, mut at, 29, 0) {} else {
+        fail("v1 header accepted a clear fixed bit")
+    }
+    if at != 8 || result.unwrap(codec.read_header(fixed, mut at, 29, 0)).kind != OneRtt {
+        fail("bad fixed bit hid the following coalesced packet")
+    }
+    at = 0
+    if let Error(DatagramTooShort) = codec.read_first_header(b"\x40", mut at, 1, 0, true) {} else {
+        fail("datagram shorter than 21 bytes")
+    }
+    if let Error(Truncated) = codec.read_header(b"\xe0\x00\x00\x00\x01\x00\x00\x02a", mut at, 9, 0) {} else {
+        fail("long packet length passed datagram end")
+    }
+    if let Error(VersionList) = codec.read_header(b"\xc0\x00\x00\x00\x00\x00\x00\x00", mut at, 8, 0) {} else {
+        fail("partial Version Negotiation list")
+    }
+    at = 0
+    if let Error(RetryToken) = codec.read_header(b"\xf0\x00\x00\x00\x01\x00\x000123456789abcdef", mut at, 23, 0) {} else {
+        fail("Retry without a token")
+    }
+    if let Error(ReservedBits) = codec.check_reserved_bits(OneRtt, 0x48) {} else {
+        fail("authenticated short-header reserved bits")
+    }
+}

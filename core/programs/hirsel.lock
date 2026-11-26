@@ -97,6 +97,11 @@ source = "member:postgres"
 edges = ["std@1"]
 
 [[package]]
+id = "quic@1"
+source = "member:quic"
+edges = ["std@1"]
+
+[[package]]
 id = "rtp@1"
 source = "member:rtp"
 edges = ["std@1"]

@@ -1,0 +1,269 @@
+pub type AckRange: key {
+    smallest: u64,
+    largest: u64
+}
+
+pub type EcnCounts: key {
+    ect0: u64,
+    ect1: u64,
+    ce: u64
+}
+
+pub type AckFields: key {
+    delay: u64,
+    ranges: List[AckRange],
+    ecn: Option[EcnCounts]
+}
+
+pub type Frame: key = Padding(u64) | Ping | Ack(AckFields) | ResetStream(stream: u64, code: u64, final_size: u64) | StopSending(stream: u64, code: u64) | Crypto(offset: u64, data: Span) | NewToken(Span) | Stream(stream: u64, offset: u64, fin: bool, explicit_len: bool, data: Span) | MaxData(u64) | MaxStreamData(stream: u64, limit: u64) | MaxStreams(bidi: bool, limit: u64) | DataBlocked(u64) | StreamDataBlocked(stream: u64, limit: u64) | StreamsBlocked(bidi: bool, limit: u64) | NewConnectionId(sequence: u64, retire_prior_to: u64, id: Span, reset_token: Span) | RetireConnectionId(u64) | PathChallenge(Span) | PathResponse(Span) | TransportClose(code: u64, frame_type: u64, reason: Span) | ApplicationClose(code: u64, reason: Span) | HandshakeDone | ResetStreamAt(stream: u64, code: u64, final_size: u64, reliable_size: u64) | Datagram(explicit_len: bool, data: Span)
+
+pub opaque type FrameReader {
+    next: u64,
+    end: u64,
+    kind: PacketKind,
+    max_datagram_frame: u64
+}
+
+const MAX_STREAMS: u64 = 1u64 << 60
+
+/// Begin reading authenticated plaintext. max_datagram_frame is the locally advertised
+/// limit including the frame type and length. Zero means DATAGRAM was not advertised.
+pub fn frames(input: Bytes, payload: Span, kind: PacketKind, max_datagram_frame: u64) -> Result[FrameReader, CodecError] {
+    if payload.at > list.len(input) || payload.len > list.len(input) - payload.at {
+        return Error(Bounds)
+    }
+    if !numbered(kind) || payload.len == 0 {
+        return Error(ProtocolViolation(0))
+    }
+    Ok(FrameReader(next: payload.at, end: payload.at + payload.len, kind: kind, max_datagram_frame: max_datagram_frame))
+}
+
+// RFC 9000 Table 3, RFC 9221 §5 and reliable-stream-reset-11 §§3–4.
+// Bits in order: Initial, Handshake, 0-RTT, 1-RTT.
+fn frame_permissions(t: u64) -> u8 {
+    if t == 0x00 || t == 0x01 || t == 0x1c {
+        return 0x0f
+    }
+    if t == 0x02 || t == 0x03 || t == 0x06 {
+        return 0x0b
+    }
+    if t == 0x07 || t == 0x1b || t == 0x1e {
+        return 0x08
+    }
+    if t <= 0x1d || t == 0x24 || t == 0x30 || t == 0x31 {
+        return 0x0c
+    }
+    0
+}
+
+fn packet_permission(kind: PacketKind) -> u8 {
+    match kind {
+        Initial => 1,
+        Handshake => 2,
+        ZeroRtt => 4,
+        OneRtt => 8,
+        _ => 0,
+    }
+}
+
+/// Read one frame with absolute offsets into input. A refusal leaves the reader at the
+/// offending frame. Discard the packet on error.
+pub fn next_frame(input: Bytes, mut reader: FrameReader) -> Result[Option[Frame], CodecError] {
+    if reader.next == reader.end {
+        return Ok(None)
+    }
+    let start = reader.next
+    let mut c = cursor(input, start, reader.end)?
+    let t = match varint(input, mut c) {
+        Ok(n) => n,
+        Error(_) => return Error(FrameEncodingError(0)),
+    }
+    let allowed = frame_permissions(t)
+    if c.at - start != width(t) || allowed == 0 {
+        return Error(FrameEncodingError(t))
+    }
+    if (allowed & packet_permission(reader.kind)) == 0 {
+        return Error(ProtocolViolation(t))
+    }
+    if (t == 0x30 || t == 0x31) && reader.max_datagram_frame == 0 {
+        return Error(ProtocolViolation(t))
+    }
+    match frame_body(input, mut c, t) {
+        Ok(frame) => {
+            if (t == 0x30 || t == 0x31) && c.at - start > reader.max_datagram_frame {
+                return Error(ProtocolViolation(t))
+            }
+            reader.next = c.at
+            Ok(Some(take frame))
+        },
+        Error(NoCapacity(e)) => Error(NoCapacity(e)),
+        Error(_) => Error(FrameEncodingError(t)),
+    }
+}
+
+fn sized_data(input: Bytes, mut c: Cursor) -> Result[Span, CodecError] {
+    let n = varint(input, mut c)?
+    take_span(mut c, n)
+}
+
+fn frame_data(input: Bytes, mut c: Cursor, explicit_len: bool) -> Result[Span, CodecError] {
+    if explicit_len {
+        sized_data(input, mut c)
+    } else {
+        let data = rest(c)
+        c.at = c.end
+        Ok(data)
+    }
+}
+
+fn frame_body(input: Bytes, mut c: Cursor, t: u64) -> Result[Frame, CodecError] {
+    match t {
+        0x00 => {
+            let start = c.at - 1
+            while c.at < c.end && input[c.at] == 0 {
+                c.at += 1
+            }
+            Ok(Padding(c.at - start))
+        },
+        0x01 => Ok(Ping),
+        0x02 ..= 0x03 => Ok(Ack(read_ack(input, mut c, t == 0x03)?)),
+        0x04 => read_reset(input, mut c, false),
+        0x05 => {
+            let stream = varint(input, mut c)?
+            Ok(StopSending(stream: stream, code: varint(input, mut c)?))
+        },
+        0x06 => {
+            let offset = varint(input, mut c)?
+            let data = sized_data(input, mut c)?
+            validate_offset(offset, data.len)?
+            Ok(Crypto(offset: offset, data: data))
+        },
+        0x07 => {
+            let token = sized_data(input, mut c)?
+            if token.len == 0 {
+                return Error(InvalidValue)
+            }
+            Ok(NewToken(token))
+        },
+        0x08 ..= 0x0f => read_stream(input, mut c, t),
+        0x10 => Ok(MaxData(varint(input, mut c)?)),
+        0x11 => {
+            let stream = varint(input, mut c)?
+            Ok(MaxStreamData(stream: stream, limit: varint(input, mut c)?))
+        },
+        0x12 ..= 0x13 => Ok(MaxStreams(bidi: t == 0x12, limit: stream_limit(varint(input, mut c)?)?)),
+        0x14 => Ok(DataBlocked(varint(input, mut c)?)),
+        0x15 => {
+            let stream = varint(input, mut c)?
+            Ok(StreamDataBlocked(stream: stream, limit: varint(input, mut c)?))
+        },
+        0x16 ..= 0x17 => Ok(StreamsBlocked(bidi: t == 0x16, limit: stream_limit(varint(input, mut c)?)?)),
+        0x18 => read_new_cid(input, mut c),
+        0x19 => Ok(RetireConnectionId(varint(input, mut c)?)),
+        0x1a => Ok(PathChallenge(take_span(mut c, 8)?)),
+        0x1b => Ok(PathResponse(take_span(mut c, 8)?)),
+        0x1c => {
+            let code = varint(input, mut c)?
+            let frame_type = varint(input, mut c)?
+            Ok(TransportClose(code: code, frame_type: frame_type, reason: sized_data(input, mut c)?))
+        },
+        0x1d => {
+            let code = varint(input, mut c)?
+            Ok(ApplicationClose(code: code, reason: sized_data(input, mut c)?))
+        },
+        0x1e => Ok(HandshakeDone),
+        0x24 => read_reset(input, mut c, true),
+        0x30 ..= 0x31 => Ok(Datagram(explicit_len: t == 0x31, data: frame_data(input, mut c, t == 0x31)?)),
+        _ => Error(FrameEncodingError(t)),
+    }
+}
+
+fn stream_limit(n: u64) -> Result[u64, CodecError] {
+    if n > MAX_STREAMS {
+        return Error(InvalidValue)
+    }
+    Ok(n)
+}
+
+fn validate_offset(offset: u64, len: u64) -> Result[(), CodecError] {
+    if offset > MAX_VARINT || len > MAX_VARINT - offset {
+        return Error(InvalidValue)
+    }
+    Ok(())
+}
+
+fn read_stream(input: Bytes, mut c: Cursor, t: u64) -> Result[Frame, CodecError] {
+    let stream = varint(input, mut c)?
+    let offset = if (t & 4) != 0 {
+        varint(input, mut c)?
+    } else {
+        0
+    }
+    let explicit_len = (t & 2) != 0
+    let data = frame_data(input, mut c, explicit_len)?
+    validate_offset(offset, data.len)?
+    Ok(Stream(stream: stream, offset: offset, fin: (t & 1) != 0, explicit_len: explicit_len, data: data))
+}
+
+fn read_reset(input: Bytes, mut c: Cursor, at_reliable: bool) -> Result[Frame, CodecError] {
+    let stream = varint(input, mut c)?
+    let code = varint(input, mut c)?
+    let final_size = varint(input, mut c)?
+    if !at_reliable {
+        return Ok(ResetStream(stream: stream, code: code, final_size: final_size))
+    }
+    let reliable_size = varint(input, mut c)?
+    if reliable_size > final_size {
+        return Error(InvalidValue)
+    }
+    Ok(ResetStreamAt(stream: stream, code: code, final_size: final_size, reliable_size: reliable_size))
+}
+
+fn read_new_cid(input: Bytes, mut c: Cursor) -> Result[Frame, CodecError] {
+    let sequence = varint(input, mut c)?
+    let retire_prior_to = varint(input, mut c)?
+    let id = connection_id(input, mut c)?
+    if retire_prior_to > sequence || id.len < 1 || id.len > 20 {
+        return Error(InvalidValue)
+    }
+    let reset_token = take_span(mut c, 16)?
+    Ok(NewConnectionId(sequence: sequence, retire_prior_to: retire_prior_to, id: id, reset_token: reset_token))
+}
+
+fn read_ack(input: Bytes, mut c: Cursor, has_ecn: bool) -> Result[AckFields, CodecError] {
+    let mut largest = varint(input, mut c)?
+    let delay = varint(input, mut c)?
+    let count = varint(input, mut c)?
+    let first = varint(input, mut c)?
+    if first > largest || count > (c.end - c.at) / 2 {
+        return Error(InvalidValue)
+    }
+    let mut ranges: List[AckRange] = list.new()
+    if let Error(e) = list.try_reserve(mut ranges, count + 1) {
+        return Error(NoCapacity(e))
+    }
+    let mut smallest = largest - first
+    list.push(mut ranges, AckRange(smallest: smallest, largest: largest))
+    for _ in 0u64 .. count {
+        let gap = varint(input, mut c)?
+        let span = varint(input, mut c)?
+        if smallest < gap + 2 {
+            return Error(InvalidValue)
+        }
+        largest = smallest - gap - 2
+        if span > largest {
+            return Error(InvalidValue)
+        }
+        smallest = largest - span
+        list.push(mut ranges, AckRange(smallest: smallest, largest: largest))
+    }
+    let ecn = if has_ecn {
+        let ect0 = varint(input, mut c)?
+        let ect1 = varint(input, mut c)?
+        let ce = varint(input, mut c)?
+        Some(EcnCounts(ect0: ect0, ect1: ect1, ce: ce))
+    } else {
+        None
+    }
+    Ok(AckFields(delay: delay, ranges: take ranges, ecn: ecn))
+}

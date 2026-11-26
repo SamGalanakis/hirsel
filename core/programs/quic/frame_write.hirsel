@@ -1,0 +1,210 @@
+fn write_data(input: Bytes, s: Span, explicit_len: bool, mut out: Bytes) -> Result[(), CodecError] {
+    if s.at > list.len(input) || s.len > list.len(input) - s.at {
+        return Error(Bounds)
+    }
+    if explicit_len {
+        write_varint(s.len, mut out)?
+    }
+    reserve(mut out, s.len)?
+    list.append(mut out, list.slice(input, s.at, s.at + s.len))
+    Ok(())
+}
+
+/// Appends a frame. Data ranges refer to input. STREAM and DATAGRAM without a length
+/// must be last in the packet. On refusal, the previously written bytes are preserved.
+pub fn write_frame(f: Frame, input: Bytes, mut out: Bytes) -> Result[(), CodecError] {
+    let mark = list.len(out)
+    match put_frame(f, input, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+fn put_frame(f: Frame, input: Bytes, mut out: Bytes) -> Result[(), CodecError] {
+    match f {
+        Padding(n) => {
+            if n == 0 {
+                return Error(InvalidValue)
+            }
+            reserve(mut out, n)?
+            for _ in 0u64 .. n {
+                list.push(mut out, 0)
+            }
+            Ok(())
+        },
+        Ping => write_varint(0x01, mut out),
+        Ack(a) => write_ack(a, mut out),
+        ResetStream(stream, code, final_size) => write_reset(0x04, stream, code, final_size, mut out),
+        StopSending(stream, code) => {
+            write_varint(0x05, mut out)?
+            write_varint(stream, mut out)?
+            write_varint(code, mut out)
+        },
+        Crypto(offset, data) => {
+            validate_offset(offset, data.len)?
+            write_varint(0x06, mut out)?
+            write_varint(offset, mut out)?
+            write_data(input, data, true, mut out)
+        },
+        NewToken(token) => {
+            if token.len == 0 {
+                return Error(InvalidValue)
+            }
+            write_varint(0x07, mut out)?
+            write_data(input, token, true, mut out)
+        },
+        Stream(stream, offset, fin, explicit_len, data) => {
+            validate_offset(offset, data.len)?
+            let off = if offset != 0 {
+                4u64
+            } else {
+                0u64
+            }
+            let len = if explicit_len {
+                2u64
+            } else {
+                0u64
+            }
+            let last = if fin {
+                1u64
+            } else {
+                0u64
+            }
+            write_varint(0x08 | off | len | last, mut out)?
+            write_varint(stream, mut out)?
+            if offset != 0 {
+                write_varint(offset, mut out)?
+            }
+            write_data(input, data, explicit_len, mut out)
+        },
+        MaxData(limit) => {
+            write_varint(0x10, mut out)?
+            write_varint(limit, mut out)
+        },
+        MaxStreamData(stream, limit) => {
+            write_varint(0x11, mut out)?
+            write_varint(stream, mut out)?
+            write_varint(limit, mut out)
+        },
+        MaxStreams(bidi, limit) => write_stream_limit(0x12, bidi, limit, mut out),
+        DataBlocked(limit) => {
+            write_varint(0x14, mut out)?
+            write_varint(limit, mut out)
+        },
+        StreamDataBlocked(stream, limit) => {
+            write_varint(0x15, mut out)?
+            write_varint(stream, mut out)?
+            write_varint(limit, mut out)
+        },
+        StreamsBlocked(bidi, limit) => write_stream_limit(0x16, bidi, limit, mut out),
+        NewConnectionId(sequence, retire_prior_to, id, reset_token) => {
+            if retire_prior_to > sequence || id.len < 1 || id.len > 20 || reset_token.len != 16 {
+                return Error(InvalidValue)
+            }
+            write_varint(0x18, mut out)?
+            write_varint(sequence, mut out)?
+            write_varint(retire_prior_to, mut out)?
+            write_varint(id.len, mut out)?
+            write_data(input, id, false, mut out)?
+            write_data(input, reset_token, false, mut out)
+        },
+        RetireConnectionId(sequence) => {
+            write_varint(0x19, mut out)?
+            write_varint(sequence, mut out)
+        },
+        PathChallenge(data) => write_path(0x1a, input, data, mut out),
+        PathResponse(data) => write_path(0x1b, input, data, mut out),
+        TransportClose(code, frame_type, reason) => {
+            write_varint(0x1c, mut out)?
+            write_varint(code, mut out)?
+            write_varint(frame_type, mut out)?
+            write_data(input, reason, true, mut out)
+        },
+        ApplicationClose(code, reason) => {
+            write_varint(0x1d, mut out)?
+            write_varint(code, mut out)?
+            write_data(input, reason, true, mut out)
+        },
+        HandshakeDone => write_varint(0x1e, mut out),
+        ResetStreamAt(stream, code, final_size, reliable_size) => {
+            if reliable_size > final_size {
+                return Error(InvalidValue)
+            }
+            write_reset(0x24, stream, code, final_size, mut out)?
+            write_varint(reliable_size, mut out)
+        },
+        Datagram(explicit_len, data) => {
+            write_varint(if explicit_len {
+                0x31u64
+            } else {
+                0x30u64
+            }, mut out)?
+            write_data(input, data, explicit_len, mut out)
+        },
+    }
+}
+
+fn write_path(t: u64, input: Bytes, data: Span, mut out: Bytes) -> Result[(), CodecError] {
+    if data.len != 8 {
+        return Error(InvalidValue)
+    }
+    write_varint(t, mut out)?
+    write_data(input, data, false, mut out)
+}
+
+fn write_reset(t: u64, stream: u64, code: u64, final_size: u64, mut out: Bytes) -> Result[(), CodecError] {
+    write_varint(t, mut out)?
+    write_varint(stream, mut out)?
+    write_varint(code, mut out)?
+    write_varint(final_size, mut out)
+}
+
+fn write_stream_limit(t: u64, bidi: bool, limit: u64, mut out: Bytes) -> Result[(), CodecError] {
+    let n = stream_limit(limit)?
+    write_varint(if bidi {
+        t
+    } else {
+        t + 1
+    }, mut out)?
+    write_varint(n, mut out)
+}
+
+fn write_ack(a: AckFields, mut out: Bytes) -> Result[(), CodecError] {
+    let count = list.len(a.ranges)
+    if count == 0 {
+        return Error(InvalidValue)
+    }
+    let first = a.ranges[0]
+    if first.smallest > first.largest {
+        return Error(InvalidValue)
+    }
+    let t = if a.ecn == None {
+        0x02u64
+    } else {
+        0x03u64
+    }
+    write_varint(t, mut out)?
+    write_varint(first.largest, mut out)?
+    write_varint(a.delay, mut out)?
+    write_varint(count - 1, mut out)?
+    write_varint(first.largest - first.smallest, mut out)?
+    let mut previous = first.smallest
+    for i in 1u64 .. count {
+        let r = a.ranges[i]
+        if r.smallest > r.largest || previous < 2 || r.largest > previous - 2 {
+            return Error(InvalidValue)
+        }
+        write_varint(previous - r.largest - 2, mut out)?
+        write_varint(r.largest - r.smallest, mut out)?
+        previous = r.smallest
+    }
+    if let Some(ecn) = a.ecn {
+        write_varint(ecn.ect0, mut out)?
+        write_varint(ecn.ect1, mut out)?
+        write_varint(ecn.ce, mut out)?
+    }
+    Ok(())
+}

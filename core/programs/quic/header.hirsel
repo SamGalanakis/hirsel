@@ -1,0 +1,305 @@
+pub type PacketKind: key = Initial | ZeroRtt | Handshake | Retry | OneRtt | Negotiation | OtherVersion
+
+pub type Header {
+    kind: PacketKind,
+    version: u32,
+    first: u8,
+    packet: Span,
+    destination: Span,
+    source: Span,
+    token: Span,
+    body: Span
+}
+
+pub type Number: key {
+    truncated: u64,
+    size: u8
+}
+
+pub type OpenHeader {
+    number: Number,
+    aad: Span,
+    payload: Span,
+    spin: bool,
+    key_phase: bool
+}
+
+fn connection_id(input: Bytes, mut c: Cursor) -> Result[Span, CodecError] {
+    let len: u64 = int.widen(octet(input, mut c)?)
+    take_span(mut c, len)
+}
+
+fn rest(c: Cursor) -> Span {
+    Span(at: c.at, len: c.end - c.at)
+}
+
+/// Walk a datagram using its absolute end. The Long Header Length bounds each protected
+/// long packet. A short, Retry, VN or unsupported-version packet consumes the remainder.
+/// When a packet boundary is available, advance past it even on a header refusal.
+pub fn read_header(input: Bytes, mut at: u64, end: u64, short_cid_len: u8) -> Result[Header, CodecError] {
+    let start = at
+    let mut c = cursor(input, at, end)?
+    let first = octet(input, mut c)?
+    let mut version = 1u32
+    let mut kind = OneRtt
+    let mut source = Span(at: c.at, len: 0)
+    let mut token = source
+    let destination = if (first & 0x80) == 0 {
+        take_span(mut c, int.widen(short_cid_len))?
+    } else {
+        let raw_version = take_span(mut c, 4)?
+        version = list.word_be(input, raw_version.at)
+        let id = connection_id(input, mut c)?
+        source = connection_id(input, mut c)?
+        kind = if version == 0 {
+            Negotiation
+        } else if version != 1 {
+            OtherVersion
+        } else {
+            match (first >> 4) & 3 {
+                0 => Initial,
+                1 => ZeroRtt,
+                2 => Handshake,
+                _ => Retry,
+            }
+        }
+        id
+    }
+    let body = match kind {
+        _ if kind == Initial || kind == ZeroRtt || kind == Handshake => {
+            if kind == Initial {
+                let len = varint(input, mut c)?
+                token = take_span(mut c, len)?
+            }
+            let len = varint(input, mut c)?
+            take_span(mut c, len)?
+        },
+        Retry => {
+            at = end
+            if c.end - c.at <= 16 {
+                return Error(RetryToken)
+            }
+            let len = c.end - c.at - 16
+            token = take_span(mut c, len)?
+            take_span(mut c, 16)?
+        },
+        _ => {
+            let s = rest(c)
+            c.at = c.end
+            s
+        },
+    }
+    at = c.at
+    if kind == Negotiation {
+        if body.len == 0 || body.len % 4 != 0 {
+            return Error(VersionList)
+        }
+    } else if kind != OtherVersion {
+        // Version Negotiation's Unused field is ignored. The fixed bit is a v1 rule.
+        if (first & 0x40) == 0 {
+            return Error(FixedBit)
+        }
+        if destination.len > 20 || source.len > 20 {
+            return Error(ConnectionIdLength)
+        }
+    }
+    Ok(Header(kind: kind, version: version, first: first, packet: Span(at: start, len: at - start), destination: destination, source: source, token: token, body: body))
+}
+
+/// The stateless part of the first-packet classifier. A server can send VN for
+/// OtherVersion. A client still needs its connection state to decide whether to accept VN.
+pub fn read_first_header(input: Bytes, mut at: u64, end: u64, short_cid_len: u8, server: bool) -> Result[Header, CodecError] {
+    let c = cursor(input, at, end)?
+    let len = c.end - c.at
+    if len < 21 {
+        return Error(DatagramTooShort)
+    }
+    let h = read_header(input, mut at, end, short_cid_len)?
+    match h.kind {
+        Negotiation if server => Error(UnexpectedVersionNegotiation),
+        OtherVersion if !server => Error(UnsupportedVersion),
+        OtherVersion if len < 1200 => Error(SmallUnsupportedVersion),
+        Initial if server && len < 1200 => Error(SmallInitial),
+        _ => Ok(h),
+    }
+}
+
+/// Read a subsequent packet. A coalesced packet with another destination is ignored
+/// (RFC 9000 §12.2). As in read_header, a known boundary advances the cursor.
+pub fn read_coalesced_header(input: Bytes, mut at: u64, end: u64, short_cid_len: u8, first_destination: Span) -> Result[Header, CodecError] {
+    let mut first = cursor(input, first_destination.at, at)?
+    let original = take_span(mut first, first_destination.len)?
+    let h = read_header(input, mut at, end, short_cid_len)?
+    if !numbered(h.kind) {
+        return Error(CoalescedUnnumbered)
+    }
+    let id = h.destination
+    if id.len != original.len || list.compare_bytes(list.slice(input, id.at, id.at + id.len), list.slice(input, original.at, first.at)) != Equal {
+        return Error(CoalescedDestination)
+    }
+    Ok(h)
+}
+
+fn numbered(kind: PacketKind) -> bool {
+    kind == Initial || kind == ZeroRtt || kind == Handshake || kind == OneRtt
+}
+
+/// Sample is wholly inside this packet, even when another packet follows it.
+pub fn sample(h: Header) -> Result[Span, CodecError] {
+    if !numbered(h.kind) {
+        return Error(NoPacketNumber)
+    }
+    if h.body.len < 20 || h.body.at > 0xffffffffffffffff - h.body.len {
+        return Error(SampleTooShort)
+    }
+    Ok(Span(at: h.body.at + 4, len: 16))
+}
+
+/// Call after removing header protection in the original buffer. Authenticate with aad
+/// before acting on reserved bits or recording this packet number as received.
+/// The payload still includes the AEAD tag.
+pub fn read_open_header(input: Bytes, h: Header) -> Result[OpenHeader, CodecError] {
+    if !numbered(h.kind) {
+        return Error(NoPacketNumber)
+    }
+    if h.packet.at >= h.body.at || h.body.at > list.len(input) || h.body.len > list.len(input) - h.body.at {
+        return Error(Bounds)
+    }
+    let first = input[h.packet.at]
+    let size = (first & 3) + 1
+    let len: u64 = int.widen(size)
+    if len > h.body.len {
+        return Error(Truncated)
+    }
+    let payload_at = h.body.at + len
+    let n = uint(input, Span(at: h.body.at, len: len))
+    let short = h.kind == OneRtt
+    Ok(OpenHeader(number: Number(truncated: n, size: size), aad: Span(at: h.packet.at, len: payload_at - h.packet.at), payload: Span(at: payload_at, len: h.body.len - len), spin: short && (first & 0x20) != 0, key_phase: short && (first & 0x04) != 0))
+}
+
+/// Reserved bits are a connection error only after packet authentication (RFC 9000 §17).
+pub fn check_reserved_bits(kind: PacketKind, first: u8) -> Result[(), CodecError] {
+    if !numbered(kind) {
+        return Error(NoPacketNumber)
+    }
+    let mask = if kind == OneRtt {
+        0x18u8
+    } else {
+        0x0cu8
+    }
+    if (first & mask) != 0 {
+        return Error(ReservedBits)
+    }
+    Ok(())
+}
+
+fn packet_number_len(n: Number) -> Result[u64, CodecError] {
+    let size: u64 = int.widen(n.size)
+    if size < 1 || size > 4 || n.truncated >= (1u64 << (8 * size)) {
+        return Error(PacketNumber)
+    }
+    Ok(size)
+}
+
+fn write_cid(id: Bytes, mut out: Bytes) {
+    list.push(mut out, int.narrow(list.len(id)))
+    list.append(mut out, id)
+}
+
+fn write_long(first: u8, version: u32, destination: Bytes, source: Bytes, mut out: Bytes) {
+    list.push(mut out, first)
+    list.put_word_be(mut out, version)
+    write_cid(destination, mut out)
+    write_cid(source, mut out)
+}
+
+/// Writes through the packet number. payload_len includes the AEAD tag that will follow.
+pub fn write_long_header(kind: PacketKind, destination: Bytes, source: Bytes, token: Bytes, n: Number, payload_len: u64, mut out: Bytes) -> Result[(), CodecError] {
+    let bits = match kind {
+        Initial => 0xc0u8,
+        ZeroRtt => 0xd0u8,
+        Handshake => 0xe0u8,
+        _ => return Error(InvalidValue),
+    }
+    if list.len(destination) > 20 || list.len(source) > 20 {
+        return Error(ConnectionIdLength)
+    }
+    let token_len = list.len(token)
+    if kind != Initial && token_len != 0 {
+        return Error(InvalidValue)
+    }
+    let len = packet_number_len(n)?
+    if payload_len > MAX_VARINT - len || token_len > MAX_VARINT {
+        return Error(VarintOverflow)
+    }
+    let token_field = if kind == Initial {
+        width(token_len) + token_len
+    } else {
+        0
+    }
+    reserve(mut out, 7 + list.len(destination) + list.len(source) + token_field + width(payload_len + len) + len)?
+    write_long(bits | (n.size - 1), 1, destination, source, mut out)
+    if kind == Initial {
+        write_varint(token_len, mut out)?
+        list.append(mut out, token)
+    }
+    write_varint(payload_len + len, mut out)?
+    put_uint(mut out, n.truncated, len)
+    Ok(())
+}
+
+pub fn write_short_header(destination: Bytes, spin: bool, key_phase: bool, n: Number, mut out: Bytes) -> Result[(), CodecError] {
+    if list.len(destination) > 20 {
+        return Error(ConnectionIdLength)
+    }
+    let len = packet_number_len(n)?
+    let spin_bit = if spin {
+        0x20u8
+    } else {
+        0u8
+    }
+    let phase_bit = if key_phase {
+        4u8
+    } else {
+        0u8
+    }
+    reserve(mut out, 1 + list.len(destination) + len)?
+    list.push(mut out, 0x40 | spin_bit | phase_bit | (n.size - 1))
+    list.append(mut out, destination)
+    put_uint(mut out, n.truncated, len)
+    Ok(())
+}
+
+/// Writes the Retry packet before the integrity tag. The caller supplies the tag (RFC 9001 §5.8).
+pub fn write_retry_prefix(destination: Bytes, source: Bytes, token: Bytes, mut out: Bytes) -> Result[(), CodecError] {
+    if list.len(destination) > 20 || list.len(source) > 20 {
+        return Error(ConnectionIdLength)
+    }
+    if list.len(token) == 0 {
+        return Error(RetryToken)
+    }
+    reserve(mut out, 7 + list.len(destination) + list.len(source) + list.len(token))?
+    write_long(0xf0, 1, destination, source, mut out)
+    list.append(mut out, token)
+    Ok(())
+}
+
+pub fn write_negotiation(destination: Bytes, source: Bytes, versions: List[u32], mut out: Bytes) -> Result[(), CodecError] {
+    if list.len(destination) > 255 || list.len(source) > 255 {
+        return Error(ConnectionIdLength)
+    }
+    let count = list.len(versions)
+    if count == 0 {
+        return Error(VersionList)
+    }
+    let fixed = 7 + list.len(destination) + list.len(source)
+    if count > (0xffffffffffffffff - fixed) / 4 {
+        return Error(VersionList)
+    }
+    reserve(mut out, fixed + count * 4)?
+    write_long(0xc0, 0, destination, source, mut out)
+    for version in versions {
+        list.put_word_be(mut out, version)
+    }
+    Ok(())
+}

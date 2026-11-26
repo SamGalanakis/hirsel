@@ -179,6 +179,71 @@ pub(crate) fn listening(fd: RawFd) -> io::Result<bool> {
     Ok(options as libc::c_int & libc::SO_ACCEPTCONN != 0)
 }
 
+/// Receive one packet from the datagram socket `fd` into `room` bytes at
+/// `data`, cutting a longer one. Returns the packet's whole length, or -1
+/// with errno.
+///
+/// Darwin's `recvmsg` returns the bytes it copied, never the whole length
+/// of a cut packet, so the length comes from `SO_NREAD`, which is the size
+/// of the first queued packet. The run is the socket's only receiver, so a
+/// queued packet stays first until this call takes it. A size of 0 is an
+/// empty packet or no packet: a peek of no bytes tells them apart, and the
+/// size is read again because a packet can arrive between the two calls.
+///
+/// # Safety
+/// `data` is writable for `room` bytes, or `room` is 0.
+pub(crate) unsafe fn receive_packet(fd: RawFd, data: *mut u8, room: usize) -> isize {
+    let mut len = first_packet(fd);
+    if len == 0 {
+        // SAFETY: an empty iovec is never written.
+        if unsafe { receive(fd, std::ptr::null_mut(), 0, libc::MSG_PEEK) } < 0 {
+            return -1;
+        }
+        len = first_packet(fd);
+    }
+    if len < 0 {
+        return -1;
+    }
+    // SAFETY: by the contract.
+    let copied = unsafe { receive(fd, data, room, 0) };
+    if copied < 0 { -1 } else { len.max(copied) }
+}
+
+/// The size of the first packet queued on `fd`, 0 when none is, or -1 with
+/// errno.
+fn first_packet(fd: RawFd) -> isize {
+    let mut size: libc::c_int = 0;
+    let mut len = size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: size and len are live, sized for SO_NREAD.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NREAD,
+            (&raw mut size).cast(),
+            &mut len,
+        )
+    };
+    if rc < 0 { -1 } else { size as isize }
+}
+
+/// One `recvmsg` with no address or control area.
+///
+/// # Safety
+/// `data` is writable for `room` bytes, or `room` is 0.
+unsafe fn receive(fd: RawFd, data: *mut u8, room: usize, flags: libc::c_int) -> isize {
+    let mut iov = libc::iovec {
+        iov_base: data.cast(),
+        iov_len: room,
+    };
+    // SAFETY: integer/pointer-only header.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    // SAFETY: by the contract.
+    unsafe { libc::recvmsg(fd, &mut msg, flags) }
+}
+
 /// The UID of the process at the other end of a connected Unix stream.
 pub(crate) fn peer_uid(fd: RawFd) -> Option<u32> {
     let (mut uid, mut gid) = (0, 0);

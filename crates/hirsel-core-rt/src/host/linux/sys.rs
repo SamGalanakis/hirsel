@@ -116,6 +116,25 @@ pub(crate) fn socket_domain(fd: RawFd) -> io::Result<libc::c_int> {
     }
 }
 
+/// Receive one packet from the datagram socket `fd` into `room` bytes at
+/// `data`, cutting a longer one. Returns the packet's whole length, or -1
+/// with errno.
+///
+/// # Safety
+/// `data` is writable for `room` bytes, or `room` is 0.
+pub(crate) unsafe fn receive_packet(fd: RawFd, data: *mut u8, room: usize) -> isize {
+    let mut iov = libc::iovec {
+        iov_base: data.cast(),
+        iov_len: room,
+    };
+    // SAFETY: integer/pointer-only header. There is no address or control area.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    // SAFETY: by the contract. With MSG_TRUNC the result is the whole length.
+    unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_TRUNC) }
+}
+
 /// The UID of the process at the other end of a connected Unix stream.
 pub(crate) fn peer_uid(fd: RawFd) -> Option<u32> {
     let mut cred = libc::ucred {

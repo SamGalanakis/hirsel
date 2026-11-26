@@ -398,20 +398,14 @@ fn send(fd: i32, buf: &Buffer, target: Option<&Endpoint>) -> Result<Outcome> {
 
 fn recv(fd: i32, buf: &mut Buffer) -> Result<Outcome> {
     let room = buf.capacity.saturating_sub(buf.len);
-    let mut iov = libc::iovec {
-        iov_base: if room == 0 {
-            std::ptr::null_mut()
-        } else {
-            // SAFETY: when there is room the caller owns the pinned buffer.
-            unsafe { buf.data.add(buf.len).cast() }
-        },
-        iov_len: room,
+    let data = if room == 0 {
+        std::ptr::null_mut()
+    } else {
+        // SAFETY: when there is room the caller owns the pinned buffer.
+        unsafe { buf.data.add(buf.len) }
     };
-    // SAFETY: integer/pointer-only header. There is no address or control area.
-    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_iov = &mut iov;
-    msg.msg_iovlen = 1;
-    let len = retry(|| unsafe { libc::recvmsg(fd, &mut msg, libc::MSG_TRUNC) })? as usize;
+    // SAFETY: `data` is the buffer's spare room.
+    let len = retry(|| unsafe { crate::host::sys::receive_packet(fd, data, room) })? as usize;
     let written = room.min(len);
     buf.len += written;
     Ok(Outcome {

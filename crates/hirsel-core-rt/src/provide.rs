@@ -12,6 +12,9 @@
 //! a capability is plain and copyable, so nothing earlier proves it gone.
 mod net;
 mod payload;
+mod quiet;
+pub(crate) use quiet::Scope;
+use quiet::{IDLE, SERVERS, register};
 pub(crate) mod random;
 mod replies;
 mod udp;
@@ -576,10 +579,6 @@ fn call_room(vocab: Vocab, words: &[u64; 9]) -> u64 {
     }
 }
 
-/// `next` tokens waiting anywhere in the process, with their port. A quiescent
-/// run answers only the ones among its own parked operations.
-static SERVERS: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
-
 /// The run's cells, each with the payer of its charge and the amount. Boxed
 /// so each provider's state pointer stays put.
 #[derive(Default)]
@@ -597,10 +596,6 @@ impl Drop for Cells {
         }
     }
 }
-
-/// `clock.idle` tokens waiting anywhere in the process, with their cell. A
-/// quiescent run wakes only the ones among its own parked operations.
-static IDLE: Mutex<BTreeMap<u64, usize>> = Mutex::new(BTreeMap::new());
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -622,7 +617,7 @@ const PROVIDER: Provider = Provider {
 
 struct SchedulerHooks {
     wait: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Wait,
-    quiesce: fn(&dyn Fn(u64) -> bool) -> bool,
+    quiesce: fn(Scope) -> bool,
     forget: fn(&mut Cells),
     drop_cells: fn(&mut Cells),
 }
@@ -692,7 +687,7 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
                 }
             } else {
                 clock.idle.push((token, false));
-                lock(&IDLE).insert(token, state as usize);
+                register(&IDLE, token, state);
             }
             park()
         }
@@ -852,7 +847,7 @@ fn next_step(state: *mut u8, port: &Mutex<Port>, token: u64) -> Step {
     }
     if !port.servers.iter().any(|&(t, _)| t == token) {
         port.servers.push((token, false));
-        lock(&SERVERS).insert(token, state as usize);
+        register(&SERVERS, token, state);
     }
     pending()
 }
@@ -1077,7 +1072,10 @@ unsafe extern "C" fn abort(
             };
             collect(port, token, Some(end)).unwrap_or(end)
         }
-        _ => Outcome::default(),
+        (cell, _) => {
+            quiet::forget_wait(cell, token);
+            Outcome::default()
+        }
     }
 }
 
@@ -1113,7 +1111,7 @@ impl Cells {
         }
         SCHEDULER_HOOKS.get_or_init(|| SchedulerHooks {
             wait: PROVIDER.wait,
-            quiesce: wake_quiescent,
+            quiesce: quiet::wake_quiescent,
             forget: forget_cells,
             drop_cells,
         });
@@ -1997,65 +1995,12 @@ pub unsafe extern "C" fn hirsel_core_port_reply(
     Outcome::default()
 }
 
-/// The scheduler finds its run quiescent (FAIL-15): wake the run's `clock.idle`
-/// waits, after pruning the deadlines of operations no longer parked. Returns
-/// whether it readied one; if not, the run stops with Deadlock.
-pub(crate) fn quiesce(live: &dyn Fn(u64) -> bool) -> bool {
+/// The scheduler finds `scope` quiescent (FAIL-15): wake its `clock.idle`
+/// waits. Returns whether it readied one; if not, the run stops with Deadlock.
+pub(crate) fn quiesce(scope: Scope) -> bool {
     SCHEDULER_HOOKS
         .get()
-        .is_some_and(|hooks| (hooks.quiesce)(live))
-}
-
-fn wake_quiescent(live: &dyn Fn(u64) -> bool) -> bool {
-    let mut idle = lock(&IDLE);
-    let woken: Vec<(u64, usize)> = idle
-        .iter()
-        .filter(|&(&token, _)| live(token))
-        .map(|(&token, &cell)| (token, cell))
-        .collect();
-    let mut advances = false; // a woken idle wait answers a deadline
-    for &(token, state) in &woken {
-        idle.remove(&token);
-        // SAFETY: a parked idle wait pins its run and so its cell.
-        if let Cell::Clock(clock) = unsafe { cell(state as *mut u8) } {
-            let mut clock = lock(clock);
-            clock.timers.retain(|&(_, t)| live(t));
-            clock.wall_timers.retain(|&(_, t)| live(t));
-            advances |= !clock.timers.is_empty();
-            if let Some(entry) = clock.idle.iter_mut().find(|(t, _)| *t == token) {
-                entry.1 = true;
-            }
-        }
-    }
-    drop(idle);
-    for &(token, _) in &woken {
-        crate::tasks::hirsel_core_ready(token);
-    }
-    // No woken idle wait advances time: an empty `next` answers None (FAIL-15).
-    let servers: Vec<(u64, usize)> = lock(&SERVERS)
-        .iter()
-        .filter(|&(&token, _)| !advances && live(token))
-        .map(|(&token, &cell)| (token, cell))
-        .collect();
-    let served: Vec<u64> = servers
-        .into_iter()
-        .filter(|&(token, state)| {
-            // SAFETY: a parked `next` pins its run and so its port.
-            let Cell::Port(port) = (unsafe { cell(state as *mut u8) }) else {
-                return false;
-            };
-            let mut port = lock(port);
-            if port.queued().is_some() {
-                return false;
-            }
-            let entry = port.servers.iter_mut().find(|(t, _)| *t == token);
-            entry.map(|e| e.1 = true).is_some()
-        })
-        .map(|(token, _)| token)
-        .collect();
-    let any = !woken.is_empty() || !served.is_empty();
-    ready_all(served);
-    any
+        .is_some_and(|hooks| (hooks.quiesce)(scope))
 }
 
 /// Run teardown: forget the run's idle waits, free its cells and refund
@@ -2072,8 +2017,8 @@ fn forget_cells(cells: &mut Cells) {
         .iter()
         .map(|(c, _, _)| &raw const **c as usize)
         .collect();
-    lock(&IDLE).retain(|_, cell| !states.contains(cell));
-    lock(&SERVERS).retain(|_, cell| !states.contains(cell));
+    lock(&IDLE).retain(|_, (cell, _)| !states.contains(cell));
+    lock(&SERVERS).retain(|_, (cell, _)| !states.contains(cell));
     for (_, payer, charge) in cells {
         payer.refund(charge);
     }

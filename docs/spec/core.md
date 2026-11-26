@@ -1123,8 +1123,9 @@ pub fn trigger(take t: StopTrigger)
   time to `t` (a smaller `t` changes nothing) and completes every sleep and expires every
   deadline at or before it, in deadline order and then issue order. `clock.set_wall` sets
   wall time alone and completes every `host.sleep_until_wall` it reaches, in reading order
-  and then issue order. A pending wall wait is no deadline of `clock.idle`'s. `clock.idle(mut h)` waits until every other task waits, then returns the
-  earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
+  and then issue order. A pending wall wait is no deadline of `clock.idle`'s. `clock.idle(mut h)` waits until every other task in every unit of the run
+  waits on something inside the run (another task, a channel, a connection between its units, or a
+  virtual provider), then returns the earliest pending deadline on the clock, or `None` when there is none. `provide.random(seed)`
   answers each draw with the next bytes of a SplitMix64 stream from `seed`, eight
   little-endian bytes per step, so the same seed gives the same bytes on every engine.
   `provide.random_tape(take b)` supplies successive whole draws from `b`, or raises

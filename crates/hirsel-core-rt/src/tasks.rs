@@ -22,11 +22,13 @@ use std::{
 };
 
 mod frame;
+mod quiet;
 mod transfer;
 use frame::FrameRecord;
 pub(crate) use frame::held_wait;
 #[cfg(test)]
 pub(crate) use frame::{FRAME_HEADER, hirsel_core_frame_record};
+pub(crate) use quiet::{Member, RunView, run_tag};
 pub use transfer::hirsel_core_transfer;
 use transfer::{Moved, ZeroBlock};
 
@@ -1129,12 +1131,11 @@ impl Scheduler {
         }
     }
 
-    fn has_outside_wait(&self, alone: bool) -> bool {
-        // A queued or running sync's ready is still to come.
+    /// A wait on something outside the run: a sync's ready still to come or a host provider's.
+    fn has_outside_wait(&self) -> bool {
         #[cfg(feature = "record")]
         {
             self.readies.outside()
-                || self.lang_waits(alone)
                 // SAFETY: each entry points to its pinned provider operation.
                 || self.parked.live.values().any(|arm| unsafe {
                     let task = arm.task;
@@ -1152,21 +1153,7 @@ impl Scheduler {
                 || self.parked.live.values().any(|arm| unsafe {
                     !crate::provide::owns(&(*(*arm.task).operation).provider)
                 })
-                || self.lang_waits(alone)
         }
-    }
-
-    /// A connection wait (never a deadlock here); without `alone`, only one a peer unit settles.
-    fn lang_waits(&self, alone: bool) -> bool {
-        // SAFETY: the run pins its unit; its own waits alone do not hold clock.idle (core.md Cells).
-        unsafe { self.lang.as_ref() }
-            .is_some_and(|u| u.waits > 0 && !u.take_due() && (alone || u.has_peer()))
-    }
-
-    /// Quiescence first wakes the run's own `clock.idle` waits (FAIL-15);
-    /// returns whether it did, so the scheduler takes their readies.
-    fn quiesce(&self) -> bool {
-        crate::provide::quiesce(&|token| self.parked.live.contains_key(&ReadyToken(token)))
     }
 
     fn stop_quiescent(&mut self) -> ! {
@@ -1290,11 +1277,16 @@ impl Scheduler {
             return;
         }
         let deadline = self.timers.deadline();
-        if crate::units::untied() {
-            if deadline.is_none() && !self.has_outside_wait(true) {
-                self.stop_quiescent();
+        if deadline.is_none() && !self.has_outside_wait() {
+            match self.quiet() {
+                quiet::Decision::Run => return self.active(),
+                quiet::Decision::Deadlock => self.stop_quiescent(),
+                quiet::Decision::Park => {}
             }
+        }
+        if crate::units::untied() {
             crate::units::park(deadline);
+            self.active();
             if !self.net.is_null() {
                 self.poll_net(0);
             }
@@ -1317,12 +1309,6 @@ impl Scheduler {
                 }
             }
             None => {
-                if !self.has_outside_wait(false) && self.quiesce() {
-                    return;
-                }
-                if !self.has_outside_wait(true) {
-                    self.stop_quiescent();
-                }
                 if !self.net.is_null() {
                     let (timeout, release) = self.net_idle_wait(-1);
                     self.poll_net(timeout);
@@ -1334,6 +1320,7 @@ impl Scheduler {
                 }
             }
         };
+        self.active();
         if release && !self.readies.has_pending() {
             self.release_net_idle();
         }
@@ -1418,7 +1405,10 @@ impl Scheduler {
                     // A cancel in W still runs wait at the wake (REPLAY-SPEC §3).
                     // Cancellation wins even if the callback returns Ready.
                     if wake == Wake::Cancel {
-                        if (*request).operation == crate::foreign::helpers::WAIT_OP {
+                        // A cell forgets the wait's registration (FAIL-15).
+                        if (*request).operation == crate::foreign::helpers::WAIT_OP
+                            || crate::provide::owns(&p)
+                        {
                             provider_callback!(
                                 token,
                                 Abort,
@@ -1658,11 +1648,11 @@ pub(crate) struct Readies {
     outside: crate::units::sync::AtomicUsize,
     /// mc-units-untied: the unit this waiter belongs to, or units::NONE.
     unit: u32,
+    /// A scheduler's run (tasks/quiet.rs), and whether it idles quiet.
+    run: Option<Arc<RunView>>,
+    quiet: quiet::Quiet,
 }
 impl Readies {
-    fn new() -> Arc<Self> {
-        Self::for_unit(crate::units::current())
-    }
     pub(crate) fn for_unit(unit: u32) -> Arc<Self> {
         Arc::new(Self {
             tokens: Mutex::new(Vec::new()),
@@ -1672,6 +1662,8 @@ impl Readies {
             net: Mutex::new(None),
             outside: crate::units::sync::AtomicUsize::new(0),
             unit,
+            run: None,
+            quiet: quiet::Quiet::default(),
         })
     }
     fn outside(&self) -> bool {
@@ -1701,6 +1693,7 @@ impl Readies {
         self.notify();
     }
     fn notify(&self) {
+        self.wake_member();
         if self.unit != crate::units::NONE && crate::units::untied() {
             crate::units::wake_id(self.unit);
             return;
@@ -2631,7 +2624,9 @@ unsafe fn alone(
                 }
                 WAIT_PARK => {
                     // Only the program readies a cell's wait, and no other task runs.
-                    if crate::provide::owns(p) && !crate::provide::quiesce(&|t| t == token) {
+                    if crate::provide::owns(p)
+                        && !crate::provide::quiesce(crate::provide::Scope::Token(token))
+                    {
                         crate::process::stop(b"Deadlock");
                     }
                     wait(None);
@@ -3776,6 +3771,8 @@ pub(crate) unsafe fn run_root_with_unit(
     #[cfg(feature = "prof")]
     let _worker_profile = prof::Worker::enter();
     crate::fiber::arm();
+    let view = unit.as_ref().and_then(|u| u.run_view());
+    let root_member = view.is_none().then(|| Member::of(RunView::new()));
     let mut run = Scheduler {
         #[cfg(feature = "prof")]
         prof_id: prof::run_id(),
@@ -3795,7 +3792,10 @@ pub(crate) unsafe fn run_root_with_unit(
         script: crate::schedule_script::installed(),
         #[cfg(all(feature = "record", any(test, feature = "testing")))]
         script_groups: Vec::new(),
-        readies: Readies::new(),
+        readies: Readies::in_run(
+            view.or_else(|| root_member.as_ref().map(Member::view))
+                .unwrap(),
+        ),
         ready_tokens: Vec::new(),
         ready_arms: Vec::new(),
         cancels: Vec::new(),
@@ -3952,7 +3952,7 @@ impl RunPtr {
                         && no_live_tapes
                         && run.cancels.is_empty()
                         && !run.readies.has_pending()
-                        && run.has_outside_wait(true);
+                        && (run.has_outside_wait() || run.lang_waits());
                     let untied = crate::units::untied();
                     if wait_for_net {
                         trim_run_heap(root);

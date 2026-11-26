@@ -139,8 +139,8 @@ impl LangUnit {
         self.retained.remove(&id);
     }
 
-    pub(crate) fn has_peer(&self) -> bool {
-        self.helper.is_some() || !self.helpers.is_empty()
+    pub(crate) fn run_view(&self) -> Option<Arc<tasks::RunView>> {
+        self.helper.as_ref().map(|h| h.0.view())
     }
 
     pub(crate) fn attach(&self, readies: &Arc<Readies>) {
@@ -849,7 +849,7 @@ unsafe fn conn_receive<const REC: bool>(
 // ---------------------------------------------------------------------------
 
 /// What a helper's owner and its thread share.
-struct HelperShared {}
+struct HelperShared(tasks::Member); // active in its run until its end is published
 
 pub struct HelperH {
     k: usize,
@@ -970,7 +970,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         let tape = ();
         let data = pack(input, x.bytes, &xl);
         free_owners(None, input, &xl);
-        let shared = Arc::new(HelperShared {});
+        let shared = Arc::new(HelperShared(tasks::Member::of_current()));
         let h = Box::into_raw(Box::new(HelperH {
             k,
             waiters: Waiters::default(),
@@ -1212,7 +1212,7 @@ fn helper_main(
         // Its registry designated through the helper's sources until here.
         drop(tape);
         drop(context);
-        let LangUnit { ctx, .. } = *lu;
+        let LangUnit { ctx, .. } = *lu; // its helper stays active to the end
         ctx.end_helper(Some(ret), false);
     }
 }

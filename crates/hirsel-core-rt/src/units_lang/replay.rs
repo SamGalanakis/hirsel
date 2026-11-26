@@ -225,7 +225,7 @@ pub(crate) unsafe fn start_helper(
             entry.layout,
             n,
             steps,
-            Arc::new(HelperShared {}),
+            Arc::new(HelperShared(tasks::Member::of(tasks::RunView::new()))),
             Some(helper),
         );
     };

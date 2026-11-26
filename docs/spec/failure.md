@@ -259,6 +259,10 @@ A timer of a virtual `Clock` is pending only while some task waits in `clock.idl
 hand. Before the run stops with `Deadlock`, each task waiting in `clock.idle` is woken with
 the earliest pending deadline of its clock, and if none of them advances time, each server
 waiting in `provide.next` with no queued call is woken with `None`.
+These wakes are the run's, across all its units ([CONC-15](tasks.md#conc-15-units)): they
+happen once every task in every unit waits on something inside the run, and a wait on a
+connection between its units counts as such. A run in which some task waits on a
+connection does not stop with `Deadlock`.
 
 Termination by the host writes nothing and its status is the host's.
 

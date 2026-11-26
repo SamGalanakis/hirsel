@@ -87,3 +87,58 @@ fn idle_past_a_local_connection_wait(tasks: Tasks) -> u32 waits {
     result.unwrap(task.join(take driver))
     got
 }
+
+type Across: cross {
+    back: Client[Client[u32]],
+    poke: Client[u32]
+}
+
+// The helper unit's root task waits in conn.receive on its own connection,
+// whose client it has handed to the root unit. Once answered n and closed (so
+// no client outlives it), it sends n + 1 to the root unit's waiter and
+// returns n.
+fn across_helper(take a: Across) -> u32 waits {
+    let Across(back: take back, poke: take poke) = take a
+    let made: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(1, bytes 0)
+    let (client, take inbox) = result.unwrap(take made)
+    result.unwrap(conn.send(back, take client))
+    let n = result.unwrap(conn.receive(inbox))
+    let closed = match conn.receive(inbox) {
+        Error(Closed) => 1u32,
+        _ => 0u32
+    }
+    result.unwrap(conn.send(poke, n + closed))
+    n
+}
+
+// Send n on the last client, which this drops.
+fn send_last(take to: Client[u32], n: u32) waits {
+    result.unwrap(conn.send(to, n))
+}
+
+// FAIL-15 and Cells across units: clock.idle waits until every task in every
+// unit of the run waits on something inside the run. Each unit has a task in
+// conn.receive on a connection only the other unit settles, and the root
+// sleeps on the virtual clock: the whole run is quiet, so the driver's idle
+// answers the sleep's deadline. The root then sends 7 to the helper, which
+// sends 8 to the root unit's waiter: 8 + 7.
+// expect: run idle_past_connection_waits_across_units(tasks) = 15
+fn idle_past_connection_waits_across_units(tasks: Tasks) -> u32 waits {
+    let (c, h) = provide.clock(0, 0)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536, IdleDriver(hand: take h, stop: take stopping), idle_driver)
+    let made: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(1, bytes 0)
+    let (poke, take poked) = result.unwrap(take made)
+    let waiter = task.spawn(tasks, bytes 65536, take poked, conn_waiter)
+    let backs: Result[(Client[Client[u32]], Inbox[Client[u32]]), Capacity] = conn.new(1, bytes 0)
+    let (back, take answers) = result.unwrap(take backs)
+    let helper = result.unwrap(task.spawn_unit(tasks, bytes 4096, Across(back: take back, poke: take poke), across_helper))
+    let there = result.unwrap(conn.receive(answers))
+    host.sleep_until(c, 1000000)
+    send_last(take there, 7u32)
+    let got = result.unwrap(task.join(take waiter))
+    let sent = result.unwrap(task.join(take helper))
+    result.unwrap(channel.send(stop, ()))
+    result.unwrap(task.join(take driver))
+    got + sent
+}

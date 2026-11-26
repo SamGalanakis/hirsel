@@ -74,7 +74,7 @@ fn ready_routes_one_and_work_is_independent_of_parked_count() {
             script: None,
             #[cfg(feature = "record")]
             script_groups: Vec::new(),
-            readies: Readies::new(),
+            readies: Readies::for_unit(crate::units::current()),
             ready_tokens: Vec::new(),
             ready_arms: Vec::new(),
             cancels: Vec::new(),

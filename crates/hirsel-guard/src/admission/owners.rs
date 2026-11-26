@@ -68,15 +68,6 @@ impl Owner {
                     && matches!(&record.owner, Tag::Owner(owner) if Arc::ptr_eq(owner, &self.0))
             })
     }
-    pub fn owns_arc<T: ?Sized>(&self, value: &T) -> bool {
-        let (layout, offset) = Layout::new::<[usize; 2]>()
-            .extend(Layout::for_value(value))
-            .expect("existing Arc layout");
-        self.owns(
-            value as *const T as *const () as usize - offset,
-            layout.pad_to_align().size(),
-        )
-    }
     /// Adopt an existing allocation once, before a canonical row retains it.
     /// Existing canonical owners keep the charge through shared aliases.
     pub fn adopt(&self, address: usize, bytes: usize) {

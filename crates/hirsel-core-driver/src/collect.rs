@@ -34,9 +34,7 @@
 //! other's std bitcode mid-build; toolchains of that layout still do that
 //! to `k/`, `s/` and `r/`, which is why this layout keeps none of its files
 //! there. The collector sweeps what such a toolchain leaves in them, and
-//! skips its pinned sides as it does this layout's. The first open of a
-//! store by this layout deletes the named directories of the cache formats
-//! older than the content store, beside the per-user store.
+//! skips its pinned sides as it does this layout's.
 use super::{Store, lock};
 use hirsel_core_ids::ContentHash;
 use std::fs::{self, File, FileTimes, Metadata};
@@ -62,8 +60,7 @@ const EARLIER: [&str; 3] = ["k", "s", "r"];
 /// The layout stamp: the directory layout a store's files are kept in.
 /// Files carry their own format, so it does not name `VERSION`.
 const LAYOUT: &str = "format";
-/// The per-user store's directory name; the dead directories of older
-/// cache formats sit beside it.
+/// The per-user store's directory name.
 const USER: &str = "cas";
 
 /// The user's content store: every build's objects and records, beside the
@@ -71,21 +68,6 @@ const USER: &str = "cas";
 pub(crate) fn user() -> PathBuf {
     crate::PackageProduct::default_cache().with_file_name(USER)
 }
-/// Older formats' directories beside the per-user store, by name. Nothing
-/// in this toolchain reads them; other tools' directories there
-/// (`cargo-units`, `lean`, `n1`, `packages`, `llvm-source`) are never named.
-const DEAD: &[&str] = &[
-    "objects-v1",
-    "objects-v2",
-    "objects-v3",
-    "results-v2",
-    "results-v3",
-    "results-v12",
-    "results-v15",
-    "validator-v2",
-    "programs-v1",
-    "core-packages/release-parts",
-];
 /// The byte cap: sccache's default size.
 const CAPACITY: u64 = 10 << 30;
 const DAILY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -100,8 +82,7 @@ pub(crate) struct Cas {
 }
 
 impl Store {
-    /// The content store at `root`; its first open by this layout deletes
-    /// the dead cache directories beside the per-user store.
+    /// The content store at `root`.
     pub(crate) fn cas(root: &Path) -> io::Result<Self> {
         Self::content_store(root, true)
     }
@@ -125,13 +106,6 @@ impl Store {
             _pin: None,
         });
         if !stamped(root)? {
-            if root.file_name().is_some_and(|name| name == USER)
-                && let Some(parent) = root.parent()
-            {
-                for dead in DEAD {
-                    store.retire(&parent.join(dead))?;
-                }
-            }
             store.stamp()?;
         }
         Ok(store)
@@ -682,17 +656,11 @@ mod tests {
         );
     }
 
-    /// Law: the first open of a store by this layout deletes the named dead
-    /// directories beside the per-user store and nothing else: the store's
-    /// records, sides and blobs stay, and so do other tools' directories.
-    /// What a toolchain of the earlier layout left in `k/` and `s/` goes
-    /// through the collector, which keeps that toolchain's pinned side. Bugs:
-    /// a pattern sweep of `*-v<N>` siblings would delete another tool's
-    /// cache; an open that cleared the earlier layout's directories would take
-    /// a running older build's side; a sweep that skipped them would keep
-    /// their bytes forever.
+    /// Law: opening the store leaves sibling caches and both layouts' files
+    /// alone. The collector takes the earlier layout's records and unpinned
+    /// sides, keeping the sides that another build still pins.
     #[test]
-    fn opening_deletes_dead_directories_and_the_collector_takes_the_earlier_layout() {
+    fn opening_preserves_cache_siblings_and_the_collector_takes_the_earlier_layout() {
         let directory = tempfile::tempdir().unwrap();
         let cache = directory.path();
         let root = cache.join(USER);
@@ -700,14 +668,15 @@ mod tests {
         let key = ContentHash::of_bytes(b"a record");
         let bare = store.put_keyed_blob(key, b"bytes").unwrap();
         drop(store.side(key).unwrap());
-        for name in [
+        let siblings = [
             "objects-v2",
             "results-v15",
             "core-packages/release-parts",
             "lean",
             "cargo-units",
             "llvm-source-v2",
-        ] {
+        ];
+        for name in siblings {
             fs::create_dir_all(cache.join(name)).unwrap();
         }
         // The earlier layout's record, unpinned side and pinned side.
@@ -735,14 +704,11 @@ mod tests {
         );
         assert!(store.get_blob(bare).unwrap().is_some(), "blobs stay");
         assert!(
-            record.exists() && unpinned.exists(),
-            "the earlier layout's files stay"
+            record.exists() && unpinned.exists() && pinned.exists(),
+            "the earlier layout's files stay on open"
         );
-        for gone in ["objects-v2", "results-v15", "core-packages/release-parts"] {
-            assert!(!cache.join(gone).exists(), "{gone} is deleted");
-        }
-        for kept in ["lean", "cargo-units", "llvm-source-v2", "core-packages"] {
-            assert!(cache.join(kept).exists(), "{kept} is kept");
+        for name in siblings {
+            assert!(cache.join(name).exists(), "{name} stays on open");
         }
         sweep(&root, 0).unwrap();
         assert!(!record.exists(), "the earlier record is collected");

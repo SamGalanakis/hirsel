@@ -123,13 +123,6 @@ fn grant_calls[G: send, H: shareable + inert + send, S: send](starting: GrantSta
     }
 }
 
-fn grant_claims[G: send, H: shareable + inert + send, S: send](starting: GrantStart[G, H, S]) -> Option[Sender[MintRequest[(), G]]] {
-    match starting.claim {
-        Some(m) => Some(channel.sender(m.to)),
-        None => None
-    }
-}
-
 // A place's wire with its bind mint's inbox, for the serving start (RUNNER-SPEC v2.70).
 fn grant_binds[G: send, H: shareable + inert + send, S: send](starting: GrantStart[G, H, S], supplied: Option[Wire[G]]) -> Option[BindGrant[G]] {
     let Some(w) = view supplied else {
@@ -281,12 +274,6 @@ fn adapt_granted[G: send, A, R](take j: Job[G, A, R]) -> Outcome waits {
         Ok(take o) => take o,
         Error(e) => Failed(OutOfTime(e.steps))
     }
-}
-
-// Whether a call grant lets a wire call start the entry with this identity
-// and argument schema (RUNNER-SPEC v2.69).
-fn call_listed[G: send](grant: CallGrant[G], identity: Bytes, schema: Bytes) -> bool {
-    triggers.lists_granted(grant.entries, identity, schema)
 }
 
 // The registry key of a call is the entry's identity and two fingerprints.

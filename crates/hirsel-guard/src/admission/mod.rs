@@ -37,13 +37,6 @@ impl OwnerKind {
         }
     }
 }
-/// The host budget keeps `1 / HEADROOM_SHARE` of its limit free of header
-/// facts for the unevictable owners that grow between two eviction points.
-/// Measured on 2026-11-11 at 2 GiB: the named owners grew at most 13.1 MB
-/// between eviction points (fresh std; Tasks check, Tasks debug and
-/// LangArena release at most 6.7 MB), and a tenth of the limit, 161 MB, is
-/// twelve times that. `--timings` prints the stretch, so drift shows.
-pub const HEADROOM_SHARE: u64 = 10;
 static HOST: OnceLock<(Arc<ProcessBudget>, u64)> = OnceLock::new();
 pub fn host_budget() -> (&'static Arc<ProcessBudget>, u64) {
     let (budget, cap) = HOST.get_or_init(|| {
@@ -52,10 +45,7 @@ pub fn host_budget() -> (&'static Arc<ProcessBudget>, u64) {
             .and_then(|text| crate::parse_limit(text.as_bytes()))
             .unwrap_or(crate::DEFAULT_LIMIT);
         let limit = cap.saturating_sub(cap / 4);
-        (
-            ProcessBudget::with_headroom(limit, limit / HEADROOM_SHARE),
-            cap,
-        )
+        (ProcessBudget::host(limit), cap)
     });
     (budget, *cap)
 }

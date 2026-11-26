@@ -96,8 +96,8 @@ One collector keeps the content store under 10 GiB: at most once a day, or
 hourly while over, it removes the least recently used records, blobs and
 unpinned sides (a hit touches what it read) down to 7/8 of that. A file a
 running build has open stays readable after its removal; its next read misses.
-Opening a store of an older layout deletes its records and sides, and the user
-store also deletes, by name, the directories older formats kept beside it.
+The collector also counts previous content-store layout files under `k/`, `s/`
+and `r/`, and honours pins held by a running build.
 
 The same producer and format contain declarations, summaries/layout recipes,
 checked generic templates and nongeneric CoreIR for both libraries. Stale source

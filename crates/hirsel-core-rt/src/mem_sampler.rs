@@ -1,9 +1,9 @@
 //! Geometric gaps between independently sampled bytes.
 
-#[cfg(test)]
+use std::sync::LazyLock;
+
 const MEAN_BYTES: f64 = (512 * 1024) as f64;
-// ln(1 - 1/MEAN_BYTES), evaluated once rather than at every hit.
-const LOG_MISS: f64 = -0.000_001_907_350_451_804_216_4;
+static LOG_MISS: LazyLock<f64> = LazyLock::new(|| (-1.0 / MEAN_BYTES).ln_1p());
 
 pub(crate) struct Sampler {
     state: u64,
@@ -32,7 +32,7 @@ impl Sampler {
         mixed ^= mixed >> 31;
         // Use an open lower endpoint so ln never sees zero.
         let unit = ((mixed >> 11) + 1) as f64 * (1.0 / (1u64 << 53) as f64);
-        self.until_hit = (unit.ln() / LOG_MISS).floor() as u64 + 1;
+        self.until_hit = (unit.ln() / *LOG_MISS).floor() as u64 + 1;
     }
 
     /// The probability that at least one of this allocation's bytes hits.
@@ -43,7 +43,7 @@ impl Sampler {
             return None;
         }
         self.next_gap();
-        Some(-(bytes as f64 * LOG_MISS).exp_m1())
+        Some(-(bytes as f64 * *LOG_MISS).exp_m1())
     }
 }
 

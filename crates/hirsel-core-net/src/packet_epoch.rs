@@ -208,6 +208,12 @@ impl<C> Epoch<C> {
         Self::new(format, algorithm, keys(side), keys(side.peer()))
     }
 
+    pub(super) fn domains(&self) -> impl Iterator<Item = u64> + '_ {
+        self.domains
+            .iter()
+            .flat_map(|domains| domains.keys().copied())
+    }
+
     /// The evaluator applies refunds through its task scheduler.
     pub fn into_ledger(self) -> impl Iterator<Item = C> {
         self.domains.into_iter().flat_map(BTreeMap::into_values)

@@ -50,6 +50,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_tls13(
     // SAFETY: the call pins the public inputs and owns its KeyShare.
     unsafe {
         request.issue(
+            [profile as u8, suite as u8],
             &[&[0, profile as u8, suite as u8], hello_hash],
             |side, shared| {
                 let labels = tls13_labels(format).unwrap();
@@ -104,6 +105,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_dtls12(
     // SAFETY: the constructor pins the input carriers and uniquely owns its share.
     unsafe {
         request.issue(
+            [4, suite as u8],
             &[
                 &fields[0],
                 &fields[1],
@@ -135,6 +137,7 @@ impl Constructor<'_> {
     /// return the holder. The registry ticket stays live through the verdict.
     unsafe fn issue(
         self,
+        profile: [u8; 2],
         fields: &[&[u8]],
         make: impl FnOnce(Side, Option<&[u8; 32]>) -> packet_schedule::Schedule<super::schedule::Paid>,
     ) -> Outcome {
@@ -165,7 +168,13 @@ impl Constructor<'_> {
             ticket,
             origin,
             charge,
+            tape,
+            ..
         } = unsafe { take::<Share>(share) };
+        #[cfg(feature = "record")]
+        let origin = tape.arrival().map_or(origin, |ordinal| (2, ordinal));
+        #[cfg(not(feature = "record"))]
+        let _ = tape;
         drop(charge);
         let mut pending = Some((ticket, registry_charge));
         let opaque = origin.0 != 0;
@@ -186,6 +195,7 @@ impl Constructor<'_> {
                 []
             }
         };
+        let side_wire = side as u8;
         let side = if side == 0 {
             Side::Client
         } else {
@@ -219,10 +229,13 @@ impl Constructor<'_> {
                 return refusal(IssueError::Invalid);
             }
         }
-        owned(Schedule {
-            state: make(side, shared.as_deref()),
-            origin: if opaque { answer.written } else { 0 },
-            _charge: track(unsafe { &*context }, schedule_charge),
-        })
+        owned(Schedule::new(
+            make(side, shared.as_deref()),
+            answer.written,
+            opaque,
+            track(unsafe { &*context }, schedule_charge),
+            profile,
+            side_wire,
+        ))
     }
 }

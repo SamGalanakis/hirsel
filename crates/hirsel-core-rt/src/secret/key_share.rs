@@ -11,6 +11,9 @@ pub(crate) struct Share {
     pub(crate) ticket: ShareTicket<crate::media::Payment>,
     pub(crate) origin: (u8, u64),
     pub(crate) charge: crate::media::Payment,
+    pub(crate) tape: crate::media::Origin,
+    #[cfg(feature = "record")]
+    pub(crate) group: Group,
 }
 
 pub(crate) struct Generation {
@@ -126,6 +129,7 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
         let ticket = registry
             .new_share()
             .unwrap_or_else(|| crate::process::stop(b"key share count overflow"));
+        let tape = crate::media::Origin::new(origin.unwrap_or(0), origin.is_some(), &charge);
         let origin = origin.map_or_else(|| (0, ticket.ordinal()), |ordinal| (1, ordinal));
         (*public).len = buffer.len;
         let value = crate::media::hold(Share {
@@ -133,6 +137,9 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             ticket,
             origin,
             charge,
+            tape,
+            #[cfg(feature = "record")]
+            group,
         });
         Outcome {
             value,

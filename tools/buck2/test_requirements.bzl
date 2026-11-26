@@ -113,6 +113,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl9_variant_capabilities_cross",
         "native::tests::rl9_helper_key_object_survives_by_name",
         "native::tests::rl9_accepted_socket_crosses",
+        "native::tests::rl9_key_objects_cross_as_snapshots",
         "native::tests::test_replay_flag_records_and_replays",
         "native::tests::package_cred_grants_are_per_test_and_replay_uses_the_tape",
         "native::tests::served_scram_replays_with_the_same_send_calls",

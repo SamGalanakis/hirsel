@@ -257,8 +257,8 @@ impl ChargeCell {
         let mut cell = Self::new(charge);
         #[cfg(feature = "record")]
         {
-            let (stream, ordinal) = crate::tape::units::next_made();
-            Arc::get_mut(&mut cell).unwrap().made = Some((kind, stream, ordinal));
+            Arc::get_mut(&mut cell).unwrap().made =
+                crate::tape::units::next_made().map(|(stream, ordinal)| (kind, stream, ordinal));
         }
         cell
     }

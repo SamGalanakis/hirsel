@@ -151,7 +151,7 @@ pub(in crate::tape) fn check_launch_replay() {
     assert_eq!(replayed, recorded);
     assert_eq!(
         std::fs::read_to_string(root.join("stderr")).unwrap(),
-        "replay: refused: unsupported tape format 11 (expected 14)\n"
+        "replay: refused: unsupported tape format 11 (expected 15)\n"
     );
     assert_eq!(std::fs::read(root.join("describe")).unwrap(), b"describe\n");
 }

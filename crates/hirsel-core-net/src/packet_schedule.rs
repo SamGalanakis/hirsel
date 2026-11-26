@@ -64,6 +64,14 @@ pub struct Schedule<C> {
     kind: Kind<C>,
 }
 
+/// Public protocol state for a schedule crossing units.
+pub struct Snapshot {
+    pub application: bool,
+    pub retired: u8,
+    pub exported: bool,
+    pub domains: Vec<(u8, u64)>,
+}
+
 enum Kind<C> {
     Fixed,
     Tls13 {
@@ -317,6 +325,33 @@ impl<C> Schedule<C> {
             .and_then(Option::as_ref)
             .map(|_| ())
             .ok_or(IssueError::Invalid)
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        let mut retired = 0;
+        let mut domains = Vec::new();
+        for (space, epoch) in self.spaces.iter().enumerate() {
+            if let Some(epoch) = epoch {
+                retired |= u8::from(epoch.retired()) << space;
+                domains.extend(epoch.domains().map(|domain| (space as u8, domain)));
+            }
+        }
+        if let Kind::Sframe(sframe) = &self.kind {
+            domains.extend(sframe.domains().map(|kid| (APPLICATION as u8, kid)));
+        }
+        Snapshot {
+            application: self.spaces[APPLICATION..].iter().any(Option::is_some)
+                || matches!(self.kind, Kind::Sframe(_)),
+            retired,
+            exported: matches!(
+                self.kind,
+                Kind::Dtls12 {
+                    srtp_issued: true,
+                    ..
+                }
+            ),
+            domains,
+        }
     }
 
     pub fn into_ledger(self) -> impl Iterator<Item = C> {

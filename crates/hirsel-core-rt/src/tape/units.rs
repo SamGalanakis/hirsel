@@ -6,7 +6,7 @@ use super::*;
 use crate::net::CrossingSockets;
 use crate::units_lang::Cross;
 use format::{TakeBody, TakePoint};
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, SECRET, SHARED, SOCKET};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, MEDIA, SECRET, SHARED, SOCKET};
 use item_grants::Granted;
 use std::collections::HashMap;
 
@@ -231,15 +231,11 @@ pub(crate) fn next_designation(unwrap: bool) -> (u32, u64) {
 /// The running unit's stream and the number of its next tracked key object
 /// or registry entry charge, counted in record and replay alike: the name
 /// of its helper-end survivor (recording.md, "Unit stream format").
-pub(crate) fn next_made() -> (u32, u64) {
-    crate::tasks::current_group()
-        .and_then(|group| {
-            group.with(|live| {
-                live.takes.made += 1;
-                (stream(live), live.takes.made - 1)
-            })
-        })
-        .unwrap_or((0, 0))
+pub(crate) fn next_made() -> Option<(u32, u64)> {
+    crate::tasks::current_group()?.with(|live| {
+        live.takes.made += 1;
+        (stream(live), live.takes.made - 1)
+    })
 }
 
 /// The unit's code reached an in-operation take point.
@@ -427,6 +423,8 @@ pub(crate) unsafe fn send_item(
                 live.takes.nodes.get(&(word as usize)).copied().unwrap_or(0),
             ),
             CAPABILITY | SECRET => item_grants::sent(grants, kind, word),
+            // SAFETY: the caller pins and owns the sending item.
+            MEDIA => unsafe { crate::media::snapshot(word, None) },
             SOCKET => crossing::sent(sockets, word, None),
             _ => Err(CAPABILITY_ITEM),
         };
@@ -509,6 +507,11 @@ pub(super) fn arrive(
         }
         CAPABILITY | SECRET => {
             item_grants::arrived(live, generation, grants, kind, word, designations)
+        }
+        MEDIA => {
+            let ordinal = live.unit_object();
+            // SAFETY: the arriving value transfers exclusive ownership.
+            unsafe { crate::media::snapshot(word, Some(ordinal)) }
         }
         SOCKET => crossing::arrived(live, at, generation, sockets, word),
         _ => Err(CAPABILITY_ITEM),

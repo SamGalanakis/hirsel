@@ -16,7 +16,8 @@ use crate::net::CrossingSockets;
 use crate::units_lang::Cross;
 use crate::units_lang::packing::{append, copy_elements, copy_flat};
 use hirsel_core_layout::cross::{
-    CAPABILITY, CLIENT, ELEMENT, FUNCTION, PADDING, SECRET, SEQ, SHARED, SOCKET, elements, live,
+    CAPABILITY, CLIENT, ELEMENT, FUNCTION, MEDIA, PADDING, SECRET, SEQ, SHARED, SOCKET, elements,
+    live,
 };
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
@@ -56,6 +57,13 @@ impl Helper {
     pub(crate) fn net_tape(&self) -> Option<crate::net::SocketTape> {
         self.group
             .map(|g| crate::net::SocketTape::new(g.cell.provider, handle(g.generation, 0)))
+    }
+
+    pub(crate) fn secret_tape(&self) -> Option<crate::secret::MacTape> {
+        self.group.map(|g| crate::secret::MacTape {
+            provider: g.cell.provider,
+            handle: handle(g.generation, 0),
+        })
     }
 
     /// Designate the entry's capabilities in the helper's registry: on its
@@ -114,13 +122,15 @@ impl Helper {
                     units::item_grants::resolve(context, &(*(*context).host_files).registry, &words)
                 };
             }
-            // Each handle is written as sent, ordinal 0; the owner's take
-            // gives each its ordinal there.
+            // The END leaves out the ordinals. The owner's take gives each
+            // handle its ordinal there.
             let mut handle = |kind, word: u64| {
                 handles.push((kind, word));
                 match kind {
                     CLIENT => units::client_snapshot(word, 0),
                     SHARED => units::shared_snapshot(word, 0),
+                    // SAFETY: the initialized result uniquely holds this media word.
+                    MEDIA => unsafe { crate::media::snapshot(word, None) },
                     SOCKET => units::crossing::sent(sockets, word, Some(0)),
                     _ => units::item_grants::sent(&grants, kind, word),
                 }
@@ -631,7 +641,7 @@ fn word_part(
     handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
 ) -> Result<(), &'static str> {
     match kind {
-        CAPABILITY | CLIENT | SECRET | SOCKET => {
+        CAPABILITY | CLIENT | MEDIA | SECRET | SOCKET => {
             parts.push(1);
             parts.extend(handle(kind, word)?);
         }

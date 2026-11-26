@@ -1,3 +1,4 @@
+use super::{Origin, Resource};
 use crate::{
     Context, media,
     provider::{Buffer, IoError, Outcome},
@@ -18,31 +19,74 @@ type Cipher = packet_protection::Cipher<crate::os_tls::packet_cipher::PacketCiph
 
 pub(super) struct Schedule {
     pub(super) state: packet_schedule::Schedule<Paid>,
-    pub(super) origin: u64,
+    pub(super) origin: Origin,
+    #[cfg(feature = "record")]
+    pub(super) profile: [u8; 2],
+    #[cfg(feature = "record")]
+    pub(super) side: u8,
+    #[cfg(feature = "record")]
+    pub(super) generations: [u64; 2],
     pub(super) _charge: Paid,
+}
+
+impl Schedule {
+    pub(super) fn new(
+        state: packet_schedule::Schedule<Paid>,
+        delivery: u64,
+        opaque: bool,
+        charge: Paid,
+        _profile: [u8; 2],
+        _side: u8,
+    ) -> Self {
+        Self {
+            state,
+            origin: Origin::new(delivery, opaque, &charge),
+            #[cfg(feature = "record")]
+            profile: _profile,
+            #[cfg(feature = "record")]
+            side: _side,
+            #[cfg(feature = "record")]
+            generations: [0; 2],
+            _charge: charge,
+        }
+    }
 }
 
 pub(super) struct Sealer {
     pub(super) counter: SenderCounter,
     pub(super) algorithm: Algorithm,
     pub(super) cipher: Option<Cipher>,
-    pub(super) origin: u64,
+    pub(super) origin: Origin,
     #[cfg(feature = "record")]
-    pub(super) origin_member: u8,
+    pub(super) space: u8,
+    #[cfg(feature = "record")]
+    pub(super) profile: [u8; 2],
+    #[cfg(feature = "record")]
+    pub(super) sframe_kid: Option<u64>,
     pub(super) _charge: Paid,
 }
 
 pub(super) struct Opener {
     pub(super) nonce: ReceiverNonce,
+    #[cfg(feature = "record")]
+    pub(super) space: u8,
+    #[cfg(feature = "record")]
+    pub(super) profile: [u8; 2],
     pub(super) algorithm: Algorithm,
     pub(super) cipher: Option<Cipher>,
-    pub(super) origin: u64,
+    pub(super) origin: Origin,
     pub(super) _charge: Paid,
 }
 
 pub(super) struct Mask {
     pub(super) key: Option<HeaderMask>,
-    pub(super) origin: u64,
+    #[cfg(feature = "record")]
+    pub(super) space: u8,
+    #[cfg(feature = "record")]
+    pub(super) profile: [u8; 2],
+    #[cfg(feature = "record")]
+    pub(super) local: bool,
+    pub(super) origin: Origin,
     _charge: Paid,
 }
 
@@ -90,7 +134,7 @@ pub(super) fn track_as(context: &Context, charge: Charge, kind: u8) -> Paid {
     }
 }
 
-pub(super) fn owned<T: Send>(value: T) -> Outcome {
+pub(super) fn owned<T: Resource>(value: T) -> Outcome {
     Outcome {
         value: media::hold(value),
         ..Outcome::default()
@@ -128,11 +172,14 @@ pub unsafe extern "C" fn hirsel_core_schedule_quic_initial(
             Side::Server
         };
         let initial = Epoch::quic_initial(side, dcid).unwrap();
-        owned(Schedule {
-            state: packet_schedule::Schedule::single(INITIAL, initial),
-            origin: 0,
-            _charge: charge,
-        })
+        owned(Schedule::new(
+            packet_schedule::Schedule::single(INITIAL, initial),
+            0,
+            false,
+            charge,
+            [6, 0],
+            side as u8,
+        ))
     }
 }
 
@@ -178,9 +225,13 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer(
                 cipher: issued
                     .key
                     .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
-                origin,
+                origin: Origin::new(origin, true, &issued.charge),
                 #[cfg(feature = "record")]
-                origin_member: 0,
+                space: space as u8,
+                #[cfg(feature = "record")]
+                profile: schedule.profile,
+                #[cfg(feature = "record")]
+                sframe_kid: None,
                 _charge: issued.charge,
             })
         }
@@ -253,23 +304,28 @@ pub unsafe extern "C" fn hirsel_core_schedule_sealer_pair(
         let ledger = track(context, charge.partition(DOMAIN_CHARGE));
         (cipher, ledger)
     });
+    let [first_space, second_space] = [first, second];
     let [first, second] = pair.issue([first_floor, second_floor], charges);
-    let hold = |issued: hirsel_core_net::packet_epoch::Sealer<'_, Paid>, _member| {
+    let hold = |issued: hirsel_core_net::packet_epoch::Sealer<'_, Paid>, _space: u64, member| {
         media::hold(Sealer {
             counter: issued.counter,
             algorithm: issued.algorithm,
             cipher: issued
                 .key
                 .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
-            origin,
+            origin: Origin::new(origin, true, &issued.charge).member(member),
             #[cfg(feature = "record")]
-            origin_member: _member,
+            space: _space as u8,
+            #[cfg(feature = "record")]
+            profile: schedule.profile,
+            #[cfg(feature = "record")]
+            sframe_kid: None,
             _charge: issued.charge,
         })
     };
     Outcome {
-        value: hold(first, 1),
-        written: hold(second, 2),
+        value: hold(first, first_space, 1),
+        written: hold(second, second_space, 2),
         ..Outcome::default()
     }
 }
@@ -307,7 +363,11 @@ pub unsafe extern "C" fn hirsel_core_schedule_opener(
                 cipher: issued
                     .key
                     .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
-                origin,
+                origin: Origin::new(origin, true, &issued.charge),
+                #[cfg(feature = "record")]
+                space: space as u8,
+                #[cfg(feature = "record")]
+                profile: schedule.profile,
                 _charge: issued.charge,
             })
         }
@@ -344,7 +404,13 @@ pub unsafe extern "C" fn hirsel_core_schedule_header_mask(
             };
             owned(Mask {
                 key,
-                origin,
+                origin: Origin::new(origin, true, &charge),
+                #[cfg(feature = "record")]
+                space: space as u8,
+                #[cfg(feature = "record")]
+                profile: schedule.profile,
+                #[cfg(feature = "record")]
+                local,
                 _charge: charge,
             })
         }

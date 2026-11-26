@@ -29,7 +29,7 @@ use crate::{
 };
 use hirsel_core_layout::{
     charge,
-    cross::{CLIENT, SEQ, SHARED, SOCKET},
+    cross::{CLIENT, MEDIA, SEQ, SHARED, SOCKET},
 };
 use std::{
     collections::HashMap,
@@ -1137,7 +1137,7 @@ fn helper_main(
     run: *const crate::process::Config,
     foreign: *const crate::foreign::Run,
     map_keys: crate::MapKeys,
-    #[allow(unused_mut)] mut registry: crate::host_file::Registry,
+    registry: crate::host_file::Registry,
     body: Body,
     layout: TaskLayout,
     n: u64,
@@ -1153,14 +1153,12 @@ fn helper_main(
         context.run = run;
         context.foreign = foreign;
         context.set_map_keys(map_keys);
-        #[cfg(feature = "record")]
-        if let Some(tape) = &tape {
-            tape.designate(&mut registry);
-        }
         let mut files = crate::host_file::Files::with_registry(registry);
         #[cfg(feature = "record")]
-        {
-            files.net_tape = tape.as_ref().and_then(|tape| tape.net_tape());
+        if let Some(tape) = &tape {
+            tape.designate(&mut files.registry);
+            files.net_tape = tape.net_tape();
+            files.secret_mac_tape = tape.secret_tape();
         }
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {

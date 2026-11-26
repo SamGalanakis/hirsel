@@ -1,4 +1,4 @@
-//! Capture one synchronous opaque media operation at the root replay point.
+//! Capture one synchronous opaque media operation at the unit's replay point.
 use crate::{
     Context,
     provider::{Buffer, MEDIA_CAPTURE, Outcome, Provider, Request, STEP_DONE, Step},

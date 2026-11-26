@@ -237,6 +237,10 @@ impl<C> Sframe<C> {
         std::mem::take(&mut self.ledger)
     }
 
+    pub(super) fn domains(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ledger.keys().copied()
+    }
+
     pub(crate) fn into_ledger(self) -> impl Iterator<Item = C> {
         self.ledger.into_values()
     }

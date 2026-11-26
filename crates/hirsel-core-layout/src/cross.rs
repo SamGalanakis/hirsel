@@ -4,7 +4,8 @@
 //! and `Shared` holders. Sockets and listeners move with their host state,
 //! detached from the poller until taken. Capability, function and `Secret`
 //! words copy as bytes; their rows let a recorder write each one as its
-//! snapshot or identity (docs/recording.md, "Values"). A plain variant's
+//! snapshot or identity (docs/recording.md, "Values"). A media key object
+//! also moves by its owner word. A plain variant's
 //! words and padding are listed per case, each case's behind a `CASE` row.
 use crate::{
     Body, Encoding, Field, FieldTy, Fixed, Handle, Layout, RecipeRow, Row, Tag, TypeRef, field_size,
@@ -41,6 +42,8 @@ pub const CASE: u64 = 16;
 pub const OTHER: u64 = 32;
 /// A range to zero in the crossing copy: `[offset, PADDING, length, 0]`.
 pub const PADDING: u64 = 64;
+/// An owned media key object, written as snapshot tag 8 through 12.
+pub const MEDIA: u64 = 128;
 
 /// Owner and padding rows of a value of row `ty`. Owner rows are in field order
 /// as `[offset, kind, element bytes, element logical size]`. Each `SEQ` row is
@@ -225,6 +228,7 @@ fn held(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64, out: &mut 
         FieldTy::Handle(Handle::Socket) => out.push([at, SOCKET, 0, 0]),
         FieldTy::Handle(Handle::Capability) => out.push([at, CAPABILITY, 0, 0]),
         FieldTy::Handle(Handle::Secret) => out.push([at, SECRET, 0, 0]),
+        FieldTy::Handle(Handle::Media) => out.push([at, MEDIA, 0, 0]),
         FieldTy::Fn => out.push([at, FUNCTION, 0, 0]),
         FieldTy::Shared(_) => out.push([at, SHARED, 0, 0]),
         FieldTy::Array(e, n) => {

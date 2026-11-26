@@ -209,11 +209,18 @@ unsafe fn import(
     let state = state.unwrap_or_else(|| shape.import(authority, None).unwrap());
     // SAFETY: this call still owns the admitted charge, tied to its running context.
     let charge = track(unsafe { &*context }, charge);
-    owned(Schedule {
-        state,
-        origin,
-        _charge: charge,
-    })
+    let profile = match kind {
+        ImportKind::Traffic => [profile as u8, suite as u8],
+        ImportKind::Srtp => [5, profile as u8],
+        ImportKind::Sframe => [7, 0],
+    };
+    let side = match authority {
+        ImportUse::TrafficSend
+        | ImportUse::SrtpSend
+        | ImportUse::Sframe(SframeDirection::Send { .. }) => 2,
+        _ => 3,
+    };
+    owned(Schedule::new(state, origin, true, charge, profile, side))
 }
 
 /// # Safety
@@ -250,9 +257,15 @@ pub unsafe extern "C" fn hirsel_core_schedule_srtp(
         Err(outcome) => return outcome,
     };
     let state = parent.state.srtp(selected);
-    owned(Schedule {
+    owned(Schedule::new(
         state,
         origin,
-        _charge: track(unsafe { &*context }, charge),
-    })
+        true,
+        track(unsafe { &*context }, charge),
+        [5, profile as u8],
+        #[cfg(feature = "record")]
+        parent.side,
+        #[cfg(not(feature = "record"))]
+        0,
+    ))
 }

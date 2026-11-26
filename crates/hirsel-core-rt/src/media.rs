@@ -8,6 +8,10 @@ mod import;
 mod packet;
 mod schedule;
 mod sframe;
+#[cfg(feature = "record")]
+mod snapshot;
+#[cfg(feature = "record")]
+pub(crate) use snapshot::snapshot;
 mod transitions;
 // The tape laws drive SFrame imports and seals through the host ops (TLS-8 PC9).
 use crate::{
@@ -96,21 +100,108 @@ impl Drop for Payment {
     }
 }
 
+pub(crate) trait Resource: Send {
+    #[cfg(feature = "record")]
+    const TAG: u8;
+    #[cfg(feature = "record")]
+    fn origin(&mut self) -> &mut Origin;
+    #[cfg(feature = "record")]
+    fn write_snapshot(&self, body: &mut Vec<u8>);
+}
+
+#[cfg(not(feature = "record"))]
+impl<T: Send> Resource for T {}
+
+#[repr(C)]
+struct Head {
+    drop: unsafe fn(*mut u8),
+    #[cfg(feature = "record")]
+    snapshot: unsafe fn(u64, Option<u64>) -> snapshot::Part,
+}
+
 #[repr(C)]
 struct Slot<T> {
-    drop: unsafe fn(*mut u8),
+    head: Head,
     value: T,
 }
 
-pub(crate) fn hold<T: Send>(value: T) -> u64 {
+pub(crate) fn hold<T: Resource>(value: T) -> u64 {
     unsafe fn drop_slot<T>(slot: *mut u8) {
         // SAFETY: the owned word came from hold::<T> and is consumed once.
         drop(unsafe { Box::from_raw(slot.cast::<Slot<T>>()) });
     }
     Box::into_raw(Box::new(Slot {
-        drop: drop_slot::<T>,
+        head: Head {
+            drop: drop_slot::<T>,
+            #[cfg(feature = "record")]
+            snapshot: snapshot::write::<T>,
+        },
         value,
     })) as u64
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Origin {
+    #[cfg(feature = "record")]
+    birth: Option<(u32, u64, u64)>,
+    #[cfg(feature = "record")]
+    reference: [u8; 9],
+}
+
+impl Origin {
+    #[cfg(feature = "record")]
+    const ARRIVAL: u8 = 3;
+    pub(crate) fn new(delivery: u64, opaque: bool, payment: &Payment) -> Self {
+        #[cfg(feature = "record")]
+        {
+            let birth = payment
+                .cell
+                .made
+                .map(|(_, stream, admission)| (stream, delivery, admission));
+            let mut reference = [0; 9];
+            if opaque {
+                reference[..8].copy_from_slice(&delivery.to_le_bytes());
+            }
+            Self { birth, reference }
+        }
+        #[cfg(not(feature = "record"))]
+        {
+            let _ = (delivery, opaque, payment);
+            Self {}
+        }
+    }
+
+    #[cfg(feature = "record")]
+    fn captured(&self) -> bool {
+        self.reference != [0; 9]
+    }
+
+    #[cfg(feature = "record")]
+    fn operand(&self) -> &[u8] {
+        &self.reference[..8 + usize::from(self.reference[8] != 0)]
+    }
+
+    #[cfg(feature = "record")]
+    pub(crate) fn arrival(&self) -> Option<u64> {
+        (self.reference[8] == Self::ARRIVAL)
+            .then(|| u64::from_le_bytes(self.reference[..8].try_into().unwrap()))
+    }
+
+    fn member(self, member: u8) -> Self {
+        #[cfg(feature = "record")]
+        {
+            let mut origin = self;
+            if origin.captured() {
+                origin.reference[8] = member;
+            }
+            origin
+        }
+        #[cfg(not(feature = "record"))]
+        {
+            let _ = member;
+            self
+        }
+    }
 }
 
 /// # Safety
@@ -137,7 +228,7 @@ unsafe fn take<T>(handle: u64) -> T {
 pub unsafe extern "C" fn hirsel_core_media_drop(_: *mut Context, handle: u64) {
     let handle = handle as *mut u8;
     // SAFETY: the first field of the pinned repr(C) slot is its own destructor.
-    let drop = unsafe { *handle.cast::<unsafe fn(*mut u8)>() };
+    let drop = unsafe { (*handle.cast::<Head>()).drop };
     unsafe { drop(handle) };
 }
 
@@ -145,19 +236,18 @@ pub unsafe extern "C" fn hirsel_core_media_drop(_: *mut Context, handle: u64) {
 /// A recorded parent belongs to this running context and its synchronous tape.
 unsafe fn issue_child(
     context: *mut Context,
-    parent: u64,
+    parent: Origin,
     operation: u8,
     fields: &[[u8; 8]],
     site: u64,
 ) -> Result<u64, crate::provider::Outcome> {
-    if parent == 0 {
-        return Ok(0);
-    }
     #[cfg(feature = "record")]
     {
+        if !parent.captured() {
+            return Ok(0);
+        }
         use crate::provider::{Buffer, IoError, Outcome};
-        let parent = parent.to_le_bytes();
-        let mut args: Vec<&[u8]> = vec![&parent];
+        let mut args: Vec<&[u8]> = vec![parent.operand()];
         args.extend(fields.iter().map(|field| field.as_slice()));
         let mut empty = Buffer {
             data: std::ptr::null_mut(),
@@ -184,7 +274,7 @@ unsafe fn issue_child(
     }
     #[cfg(not(feature = "record"))]
     {
-        let _ = (context, operation, fields, site);
-        unreachable!("only recording creates a tape origin")
+        let _ = (context, parent, operation, fields, site);
+        Ok(0)
     }
 }

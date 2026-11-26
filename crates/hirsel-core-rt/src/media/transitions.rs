@@ -31,7 +31,7 @@ fn sender(of: u64) -> Side {
 #[cfg(feature = "record")]
 unsafe fn record_transition(
     context: *mut Context,
-    origin: u64,
+    origin: super::Origin,
     operation: u8,
     operand: &[u8],
     site: u64,
@@ -42,7 +42,7 @@ unsafe fn record_transition(
         len: 0,
         capacity: 0,
     };
-    let args = capture::arguments(operation, 0, &[&origin.to_le_bytes(), operand]);
+    let args = capture::arguments(operation, 0, &[origin.operand(), operand]);
     // SAFETY: the context and frame operands remain live throughout the call.
     unsafe {
         capture::issue(
@@ -72,7 +72,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_application(
         return refusal(error);
     }
     #[cfg(feature = "record")]
-    if schedule.origin != 0 {
+    if schedule.origin.captured() {
         let answer =
             unsafe { record_transition(context, schedule.origin, APPLICATION, hash, site) };
         if answer.status != 0 || answer.error != IoError::OK {
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_key_update(
         return refusal(error);
     }
     #[cfg(feature = "record")]
-    if schedule.origin != 0 {
+    if schedule.origin.captured() {
         let local_wire = [u8::from(local)];
         let answer =
             unsafe { record_transition(context, schedule.origin, UPDATE, &local_wire, site) };
@@ -109,6 +109,8 @@ pub unsafe extern "C" fn hirsel_core_schedule_key_update(
     }
     let _ = (context, site);
     drop(schedule.state.key_update(local));
+    #[cfg(feature = "record")]
+    schedule.advance_generation(local, 1);
     Outcome::default()
 }
 
@@ -131,7 +133,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_sframe_ratchet(
         return refusal(error);
     }
     #[cfg(feature = "record")]
-    if schedule.origin != 0 {
+    if schedule.origin.captured() {
         let steps_wire = steps.to_le_bytes();
         let answer = unsafe {
             record_transition(context, schedule.origin, SFRAME_RATCHET, &steps_wire, site)
@@ -142,6 +144,8 @@ pub unsafe extern "C" fn hirsel_core_schedule_sframe_ratchet(
     }
     let _ = (context, site);
     drop(schedule.state.sframe_mut().unwrap().advance(steps));
+    #[cfg(feature = "record")]
+    schedule.advance_generation(schedule.side == 2, steps);
     Outcome::default()
 }
 
@@ -160,7 +164,7 @@ pub unsafe extern "C" fn hirsel_core_schedule_retire(
         return refusal(error);
     }
     #[cfg(feature = "record")]
-    if schedule.origin != 0 {
+    if schedule.origin.captured() {
         let space_wire = space.to_le_bytes();
         let answer =
             unsafe { record_transition(context, schedule.origin, RETIRE, &space_wire, site) };
@@ -215,12 +219,12 @@ pub unsafe extern "C" fn hirsel_core_schedule_finished(
         }
     };
     #[cfg(feature = "record")]
-    if schedule.origin != 0 {
+    if schedule.origin.captured() {
         use super::capture::{self, Delivery};
         let args = capture::arguments(
             FINISHED,
             spare as u64,
-            &[&schedule.origin.to_le_bytes(), &of.to_le_bytes(), hash],
+            &[schedule.origin.operand(), &of.to_le_bytes(), hash],
         );
         // SAFETY: the borrowed output carrier and all inputs stay live through delivery.
         return unsafe {
@@ -275,17 +279,12 @@ pub unsafe extern "C" fn hirsel_core_schedule_verify_finished(
         ..Outcome::default()
     };
     #[cfg(feature = "record")]
-    if schedule.origin != 0 {
+    if schedule.origin.captured() {
         use super::capture::{self, Delivery};
         let args = capture::arguments(
             VERIFY,
             0,
-            &[
-                &schedule.origin.to_le_bytes(),
-                &of.to_le_bytes(),
-                hash,
-                received,
-            ],
+            &[schedule.origin.operand(), &of.to_le_bytes(), hash, received],
         );
         let mut output = Buffer {
             data: std::ptr::null_mut(),

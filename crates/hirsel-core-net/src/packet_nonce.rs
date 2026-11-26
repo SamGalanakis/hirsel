@@ -137,6 +137,11 @@ impl SenderCounter {
         })
     }
 
+    /// Public sender state carried in a crossing snapshot.
+    pub fn snapshot(&self) -> (u64, u64, Option<u64>) {
+        (self.domain, self.floor, self.last)
+    }
+
     /// Validation does not advance the counter. The adapter commits only
     /// after it validates lengths and reserves the caller's destination and
     /// any AAD scratch, at the same point where the operation issues.

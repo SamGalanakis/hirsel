@@ -9,12 +9,12 @@ const ID: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 fn root_header() -> Vec<u8> {
     // The published example, including the published check.
     [
-        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x0e\0\x01".as_slice(),
+        b"\x00HTB\0\0\0\0\0\0\0\0\0\0\0\0\x4b\0\0\0\x0f\0\x01".as_slice(),
         &ID,
         &[0; 37],
         b"\0\0\x01\0\0\0\0\0",
         &[0; 11],
-        b"\x1f\x50\xa3\x6d\x68\x8a\xe8\x78",
+        b"\x70\x23\x13\xbf\xd2\xdf\x26\xd6",
     ]
     .concat()
 }
@@ -589,7 +589,7 @@ fn entry_and_end() {
 }
 
 #[test]
-fn format_14_bytes_rl6() {
+fn format_15_bytes_rl6() {
     let root = root_header();
     let source = [root.clone(), EXAMPLE_END.to_vec()].concat();
     let (mut index, header) = Index::open(read(&source)).unwrap();

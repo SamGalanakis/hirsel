@@ -198,8 +198,8 @@ designation's delivery position. It holds no byte of the line and no length
 | `SECRET_MAC` AEAD ([secrets](spec/tls.md#tls-5-secrets)) | object 0; mode 5 `aead_seal`, 6 `aead_open`; canonical args = mode, key designation and policy, algorithm, nonce, associated data, plaintext or sealed bytes, and output spare | the refusal or the appended bytes, including the authenticated plaintext for open |
 | `MEDIA_KEY_SHARE` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | object 0. Canonical args bind the Random designation, group and public buffer spare. | The delivery position and public key bytes. Replay holds a share ticket with no private key. |
 | `MEDIA_P256_KEY` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned key generator at object 0. Canonical args bind the Random designation, signing policy and public buffer spare. | The delivery position and 65-byte public point. The Secret’s document stays with the provider. |
-| `MEDIA_CAPTURE` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | Root media outcome at object 0. Canonical args bind the operation, public arguments and writable spare. | A child origin, public output bytes, or a refusal. Replay validates the delivery shape before it writes any bytes. |
-| `MEDIA_AGREEMENT` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | root-owned registry verdict at object 0. Canonical args bind the constructor's public operands and share origin, including for virtual shares. | `Invalid` (0), accepted (1), or `Issued` (2). Replay supplies the verdict without an agreement provider call. |
+| `MEDIA_CAPTURE` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | The unit's media outcome at object 0. Canonical args bind the operation, public arguments and writable spare. | A child origin, public output bytes, or a refusal. Replay validates the delivery shape before it writes any bytes. |
+| `MEDIA_AGREEMENT` ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | registry verdict at object 0 in the constructor's unit. Canonical args bind the constructor's public operands and share origin, including for virtual shares. | `Invalid` (0), accepted (1), or `Issued` (2). Replay supplies the verdict without an agreement provider call. |
 | `SCRAM` | half ordinal; canonical args = secret designation, `client_first`, `server_first`, `before`, `after`, `until` | the outcome, and the committed count on failure. The new `Scram`'s ordinal on success. |
 | `SCRAM_VERIFY` | `Scram` ordinal; canonical args = `server_final` | the verdict |
 
@@ -321,7 +321,7 @@ Where cleartext can be in a recording:
 | a line read by `stdin.read_secret` ([stdin](../core/std/api/stdin.md#secret-input)) | never, nor its length | The line goes from the terminal into run-owned storage. The `STDIN_SECRET` issue holds `until` and the policy text, and its delivery holds the outcome and, on success, the designation's delivery position. The charge is fixed, so nothing recorded depends on the line. Replay touches no terminal and makes a designation with no bytes, as for a grant. |
 | a wrapped secret | only as `wrap`'s blob, sealed under the KEK | Replay delivers the blob, and opening it needs the KEK's bytes, which a recording never holds. |
 | a SCRAM exchange | the salt, iteration count, nonces and the server's `v=`, as received plaintext; never the proof | The server's messages are deliveries. With the client's first message they let a holder of the tape test password guesses offline, which is one reason every tape is credential-bearing. The proof would give the same, so it is not stored. |
-| an opaque key schedule's secrets, or a sealer's, opener's, header mask's or key share's key ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | never; the issue holds the origins it was made from | Replay delivers each seal, open, mask and Finished value from the recording. A wholly virtual schedule writes no frame at all: replay recomputes it from the seed and the recorded peer messages. |
+| an opaque key schedule's secrets, or a sealer's, opener's, header mask's or key share's key ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | never; the issue holds the origins it was made from | Replay delivers each seal, open, mask and Finished value from the recording. Replay recomputes a virtual schedule in the unit that made it from the seed and the recorded peer messages. An arriving schedule takes its operations through the receiving unit's replay point. |
 | a key drawn from a host `Random` (a key share, a signing key, an ECDSA nonce) | never; the delivery holds the public key | The draw happens inside the provider and does not pass the replay point. |
 | a packet's plaintext on an opaque path | sealed plaintext as the canonical-arguments rule stores it; every successfully opened plaintext in full, including through `open_into` | Replay checks seals and delivers opens. Opened plaintext is whatever the peer sent (media, or credentials sent inside it), which is one more reason every tape is credential-bearing. |
 | sent plaintext | as the canonical-arguments rule stores it: 16 bytes or fewer literally, otherwise a digest | Replay only checks sends. |
@@ -508,7 +508,7 @@ crosses to another unit, in an item, an entry or a helper's result. The rules, a
   ([budgets](spec/budgets.md)). Only a `UdpSocket`'s pool is charged, and it already
   survives as kind 5. So a helper's result that holds a TCP socket adds no survivor, and the
   helper-end take keeps the survivor list as it is.
-- **Format tag unchanged.** The format tag stays `0x000e`. Tags 2 and 3 already had their
+- **Format tag at the TCP crossing change.** The format tag stayed `0x000e`. Tags 2 and 3 already had their
   bodies, and the decoder already read them. No frame was added. The rules above change only
   what a recording that crosses a socket holds, and a build with the earlier rules stopped
   such a run instead of writing it. A tape replays only on the build that wrote it, so no
@@ -595,7 +595,7 @@ what the receiving unit can observe of it without a host operation:
 | a capability | its kind and its rule list in the grant snapshot encoding above (a narrowed `Net` holds its narrowed rules) |
 | a capability of virtual construction | its kind and its home unit's stream number; no rule list and no cell state. Every operation on it in the receiving unit passes the replay point there (virtual capabilities across units, above) |
 | `Secret` designation | its designation (below) and its canonical policy |
-| `KeyShare`, `Schedule`, `Sealer`, `Opener`, `HeaderMask` | its origin (stream, position) and profile; a schedule's stage, generations, retired spaces and sender ledger; a sealer's floor and highest sealed counter per domain; never key bytes |
+| `KeyShare`, `Schedule`, `Sealer`, `Opener`, `HeaderMask` | its origin and profile; a schedule's stage, generations, retired spaces and sender ledger; a sealer's floor and highest sealed counter per domain; never key bytes |
 | `Args`, `Child`, `Unique`, `Site`, `StaticFn`, a plain `fn` | as plain bytes; a function as its code descriptor |
 
 A snapshot starts with its kind tag: `Client` 0, `Shared` 1, `Socket` 2, `Listener` 3,
@@ -753,7 +753,7 @@ or a byte string with bytes left after its last field is `Corrupt`.
 The head is 20 bytes. The check covers the stream number, so a
 block moved between streams fails its check. Each stream's block 0 is its **header block**,
 with flags 0; its later blocks hold frames. The
-root's header block payload holds the current format tag (`0x000e`) and the tape id every check
+root's header block payload holds the current format tag (`0x000f`) and the tape id every check
 uses.
 
 **Helper stream header.** A helper stream's header block payload is:
@@ -800,6 +800,8 @@ as zero, including any bytes outside a variant's tag and active fields. A plain 
 holds owner words only in its active case: a capability or function word of that case is an
 owner word and gets a part. The `cross` descriptor lists each case's owner words and padding
 behind a guard row that names the case by its tag word, both inline and in sequence elements.
+A Media row names the owned word of a `KeyShare`, `Schedule`, `Sealer`, `Opener` or
+`HeaderMask`. It gets one handle part, and the native word is zeroed in the inline bytes.
 The format reads a
 value without its type. Matching the parts to the receiving type's owners, their kinds and
 each sequence's length as a multiple of its element size, is the replay's: a mismatch is
@@ -824,17 +826,37 @@ receiving stream as a `varint`, then:
 | 5 capability | grant kind `u8` in `GrantKind`'s numbering (`Dir` 0, `Net` 1, `Clock` 2, `Random` 3, `Stdout` 4, `Stderr` 5, `Stdin` 6, `Env` 7, `Process` 8, `Exec` 13, `Cred` 14; a `random_tape` cell is `Random`), as its `GRANT` frame writes it; then `bytes`: for `Net` its rule count `varint` and rules as the header's grant snapshot writes them after the `Net` kind byte; for `Env` its record as the header writes it after the `Env` kind byte; for `Cred` its record after its kind byte; for `Exec` the profile snapshot; for `Stdin`, `Stdout` and `Stderr` the terminal byte; for every other kind nothing |
 | 6 virtual capability | grant kind `u8`, as for tag 5; home stream `u32` |
 | 7 `Secret` | designation: origin kind `u8`, stream `u32`, ordinal `varint`; canonical policy text `bytes` |
-| 8 `KeyShare` | origin: stream `u32`, position `varint`; group `u8` (`X25519` 0, `P256` 1) |
-| 9 `Schedule` | origin; profile; side `u8` (`Client` 0, `Server` 1, imported send 2, imported receive 3); stage `u8` (handshake 0, `Application` 1); send generation `u64`; receive generation `u64`; retired spaces `u8`, bit `i` for space `i`; exported `u8` (1 once `srtp` was called on it); ledger count `varint`, then per issued domain of a current send epoch its space `u8` and domain `u64` |
-| 10 `Sealer` | origin; profile; space `u8`; domain `u64`; `floor` `u64`; sealed `u8` 0, or 1 followed by the highest sealed counter `u64` |
-| 11 `Opener` | origin; profile; space `u8` |
-| 12 `HeaderMask` | origin; profile; space `u8`; `local` `u8` |
+| 8 `KeyShare` | media origin (below); group `u8` (`X25519` 0, `P256` 1) |
+| 9 `Schedule` | media origin; profile; side `u8` (`Client` 0, `Server` 1, imported send 2, imported receive 3); stage `u8` (handshake 0, `Application` 1); send generation `u64`; receive generation `u64`; retired spaces `u8`, bit `i` for space `i`; exported `u8` (1 once `srtp` was called on it); ledger count `varint`, then per issued domain of a current send epoch its space `u8` and domain `u64`, sorted by space then domain. An SFrame sending schedule continues with the first KID `u64` and the width of the KID block in bits `u8` |
+| 10 `Sealer` | media origin; profile; space `u8`; domain `u64`; `floor` `u64`; sealed `u8` 0, or 1 followed by the highest sealed counter `u64` |
+| 11 `Opener` | media origin; profile; space `u8` |
+| 12 `HeaderMask` | media origin; profile; space `u8`; `local` `u8` |
 
 A **profile** is two bytes: the family `u8` (`Quic` 0, `Dtls13` 1, `Tls13` 2,
-`QuicMultipath` 3, `dtls12` 4, SRTP 5, `quic_initial` 6), then the suite `u8`, the case's
-index in its declared order in `Suite13`, `Suite12` or `SrtpProfile`, and 0 for
+`QuicMultipath` 3, `dtls12` 4, SRTP 5, `quic_initial` 6, SFrame 7), then the suite `u8`, the case's
+index in its declared order in `Suite13`, `Suite12`, `SrtpProfile` or `SframeSuite`, and 0 for
 `quic_initial`. A space is its case index in `Space`'s declared order (`Initial` 0 to
-`Rtcp` 4). A position is a frame position in the named stream, counted as verdicts count it.
+`Rtcp` 4). The stage is 0 for Initial and handshake schedules and 1 once the application
+space is installed, or for SRTP and SFrame. SFrame uses the Application space and uses its
+KID as the ledger domain and the sealer's domain. Its generation advances by the number
+of ratchet steps, in the imported direction. The sending block is part of the schedule
+snapshot because it determines which KIDs the receiver can issue.
+
+A **media origin** is the creating stream `u32` followed by its delivery position
+`varint`, counted as verdicts count it. If there was no delivery, position zero is
+followed by the primary kind 3 charge ordinal `varint`. This names a virtual Random's
+`KeyShare`, a `quic_initial` schedule and other locally derived objects without a made-up
+delivery. For a sealer, the primary charge is the cipher charge. The object's origin
+and the names of its charges remain the same across crossings.
+
+An arriving media object gets a new object ordinal in the receiving stream. Subsequent
+media capture arguments refer to it as the ordinal `u64` followed by byte 3, disjoint
+from a delivery position and the two members of a sealer pair. An agreement's share
+operand uses origin kind 2 and the receiving ordinal `u64`. This applies even if the
+object was constructed virtually. A refused send keeps its sending unit's name. A key object made outside a recorded unit has no origin to write and cuts the recording that encounters it.
+
+The format tag is `0x000f` because the media origin can include a charge ordinal and
+the SFrame schedule snapshot carries its sending block.
 
 A capability (tag 5) that arrives gets its new ordinal in the receiving unit, and its later
 operations there belong to that unit, on that ordinal. If the same word arrives again, the
@@ -1007,7 +1029,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00 00 00 00                stream 0
 00 00 00 00 00 00 00 00    seq 0
 4b 00 00 00                len 75
-0e 00                      format version
+0f 00                      format version
 01                         kind Run
 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f   tape id
 00                         identity: empty bytes
@@ -1018,7 +1040,7 @@ Block 0 (stream 0, seq 0, flags 0, 75-byte payload), 103 bytes:
 00                         chooser FIFO
 00                         arg: empty bytes
 00                         grants: empty bytes
-1f 50 a3 6d 68 8a e8 78    check
+70 23 13 bf d2 df 26 d6    check
 ```
 
 Block 1 (stream 0, seq 1, flags `END`, 25-byte payload), 53 bytes:

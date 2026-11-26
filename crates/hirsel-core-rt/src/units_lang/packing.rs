@@ -295,6 +295,11 @@ pub(super) unsafe fn drop_packed_owners(
             if !h.is_null() {
                 unit.drop_client(unsafe { Box::from_raw(h) }.client);
             }
+        } else if o[1] == MEDIA {
+            // SAFETY: the packed item still owns the live media word.
+            unsafe {
+                crate::media::hirsel_core_media_drop(context, word(flat.add(o[0] as usize)));
+            }
         } else if o[1] == SHARED {
             // SAFETY: the item moved this holder here and no one received it.
             unsafe {

@@ -221,10 +221,18 @@ fn origin(c: &mut Cursor<'_>) -> Result<(), Corrupt> {
     Ok(())
 }
 
-fn profile(c: &mut Cursor<'_>) -> Result<(), Corrupt> {
-    let family = tag(c, 6)?;
-    tag(c, if family == 6 { 0 } else { 2 })?;
+fn media_origin(c: &mut Cursor<'_>) -> Result<(), Corrupt> {
+    c.u32()?;
+    if c.varint()? == 0 {
+        c.varint()?;
+    }
     Ok(())
+}
+
+fn profile(c: &mut Cursor<'_>) -> Result<u8, Corrupt> {
+    let family = tag(c, 7)?;
+    tag(c, if family >= 6 { 0 } else { 2 })?;
+    Ok(family)
 }
 
 fn grant(c: &mut Cursor<'_>) -> Result<u8, Corrupt> {
@@ -278,13 +286,13 @@ fn snapshot(c: &mut Cursor<'_>, kind: u8) -> Result<bool, Corrupt> {
             }
         }
         8 => {
-            origin(c)?;
+            media_origin(c)?;
             tag(c, 1)?;
         }
         9 => {
-            origin(c)?;
-            profile(c)?;
-            tag(c, 3)?;
+            media_origin(c)?;
+            let family = profile(c)?;
+            let side = tag(c, 3)?;
             tag(c, 1)?;
             c.take(16)?;
             tag(c, 31)?;
@@ -293,9 +301,16 @@ fn snapshot(c: &mut Cursor<'_>, kind: u8) -> Result<bool, Corrupt> {
                 tag(c, 4)?;
                 c.u64()?;
             }
+            if family == 7 && side == 2 {
+                let kid = c.u64()?;
+                let bits = tag(c, hirsel_core_net::SframeDirection::MAX_BITS)?;
+                if kid & ((1 << bits) - 1) != 0 {
+                    return Err(Corrupt);
+                }
+            }
         }
         10..=12 => {
-            origin(c)?;
+            media_origin(c)?;
             profile(c)?;
             tag(c, 4)?;
             match kind {

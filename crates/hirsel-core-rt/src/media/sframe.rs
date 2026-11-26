@@ -1,6 +1,6 @@
 //! TLS-8 SFrame schedules: per-KID sealers and openers of an imported base key.
 use super::{
-    loan, loan_mut,
+    Origin, loan, loan_mut,
     schedule::{Opener, Paid, Schedule, Sealer, admit, owned, refusal, track},
 };
 use crate::{Context, provider::Outcome};
@@ -66,13 +66,19 @@ pub unsafe extern "C" fn hirsel_core_schedule_sframe_sealer(
     );
     let issued = sframe.sealer(steps, kid, floor, paid);
     drop(issued.retired);
+    #[cfg(feature = "record")]
+    schedule.advance_generation(true, steps);
     owned(Sealer {
         counter: issued.counter,
         algorithm: ALGORITHM,
         cipher: cipher(issued.keys),
-        origin,
+        origin: Origin::new(origin, true, &issued.charge),
         #[cfg(feature = "record")]
-        origin_member: 0,
+        space: 2,
+        #[cfg(feature = "record")]
+        profile: schedule.profile,
+        #[cfg(feature = "record")]
+        sframe_kid: Some(kid),
         _charge: issued.charge,
     })
 }
@@ -117,7 +123,11 @@ pub unsafe extern "C" fn hirsel_core_schedule_sframe_opener(
         nonce: issued.nonce,
         algorithm: ALGORITHM,
         cipher: cipher(issued.keys),
-        origin,
+        origin: Origin::new(origin, true, &issued.charge),
+        #[cfg(feature = "record")]
+        space: 2,
+        #[cfg(feature = "record")]
+        profile: schedule.profile,
         _charge: issued.charge,
     })
 }

@@ -74,19 +74,18 @@ pub unsafe extern "C" fn hirsel_core_packet_seal(
             return result(Err(error));
         }
         #[cfg(feature = "record")]
-        if sealer.origin != 0 {
+        if sealer.origin.captured() {
             use super::capture::{self, Delivery};
             let bytes = crate::tls::bytes(buf);
             let header = &bytes[aad.clone()];
             let body = &bytes[aad.end..];
             let body_len = body.len();
             let append = body_len + tag_len;
-            let origin = sealer_origin(sealer);
             let args = capture::arguments(
                 6,
                 (buf.capacity - buf.len) as u64,
                 &[
-                    &origin[..8 + usize::from(sealer.origin_member != 0)],
+                    sealer.origin.operand(),
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
                     &at.to_le_bytes(),
@@ -205,14 +204,13 @@ pub unsafe extern "C" fn hirsel_core_packet_seal_into(
             slice::from_raw_parts(dst.data.add(aad.start), aad.len())
         };
         #[cfg(feature = "record")]
-        if sealer.origin != 0 {
+        if sealer.origin.captured() {
             use super::capture::{self, Delivery};
-            let origin = sealer_origin(sealer);
             let args = capture::arguments(
                 7,
                 available as u64,
                 &[
-                    &origin[..8 + usize::from(sealer.origin_member != 0)],
+                    sealer.origin.operand(),
                     &seq.to_le_bytes(),
                     &from.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -316,7 +314,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
             return result(Err(error));
         }
         #[cfg(feature = "record")]
-        if opener.origin != 0 {
+        if opener.origin.captured() {
             use super::capture::{self, Delivery};
             let bytes = crate::tls::bytes(buf);
             let header = &bytes[aad.clone()];
@@ -328,7 +326,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open(
                 8,
                 0,
                 &[
-                    &opener.origin.to_le_bytes(),
+                    opener.origin.operand(),
                     &domain.to_le_bytes(),
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -450,7 +448,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
             return result(Err(error));
         }
         #[cfg(feature = "record")]
-        if opener.origin != 0 {
+        if opener.origin.captured() {
             use super::capture::{self, Delivery};
             let header = &src[aad.clone()];
             let reason = if sealed.len() < tag_len { 1 } else { 2 };
@@ -458,7 +456,7 @@ pub unsafe extern "C" fn hirsel_core_packet_open_into(
                 9,
                 (dst.capacity - dst.len) as u64,
                 &[
-                    &opener.origin.to_le_bytes(),
+                    opener.origin.operand(),
                     &domain.to_le_bytes(),
                     &seq.to_le_bytes(),
                     &aad_at.to_le_bytes(),
@@ -565,14 +563,6 @@ fn with_aad<T>(
     Ok(use_aad((&joined, &[])))
 }
 
-#[cfg(feature = "record")]
-fn sealer_origin(sealer: &super::schedule::Sealer) -> [u8; 9] {
-    let mut origin = [0; 9];
-    origin[..8].copy_from_slice(&sealer.origin.to_le_bytes());
-    origin[8] = sealer.origin_member;
-    origin
-}
-
 /// # Safety
 /// The mask and sample stay borrowed. Output points to five writable bytes.
 #[unsafe(no_mangle)]
@@ -592,13 +582,10 @@ pub unsafe extern "C" fn hirsel_core_packet_mask(
         };
         let mask = media::loan::<super::schedule::Mask>(mask);
         #[cfg(feature = "record")]
-        if mask.origin != 0 {
+        if mask.origin.captured() {
             use super::capture::{self, Delivery};
-            let args = capture::arguments(
-                10,
-                0,
-                &[&mask.origin.to_le_bytes(), &at.to_le_bytes(), sample],
-            );
+            let args =
+                capture::arguments(10, 0, &[mask.origin.operand(), &at.to_le_bytes(), sample]);
             let mut target = Buffer {
                 data: out.cast(),
                 len: 0,

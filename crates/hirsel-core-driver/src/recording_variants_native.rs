@@ -186,3 +186,227 @@ fn rl9_helper_key_object_survives_by_name() {
         );
     }
 }
+
+const RL9_MEDIA: &str = r#"
+fn send_keys(take input: (secret.KeyShare, Client[(schedule.Schedule, packet.Sealer, packet.Opener, packet.HeaderMask)])) -> secret.KeyShare {
+    let (take host_share, take send) = take input
+    let mut point: Bytes = list.with_capacity(32)
+    let virtual_share = result.unwrap(secret.key_share(provide.random(7), X25519, mut point))
+    let profile: schedule.Profile13 = Quic(Aes128GcmSha256)
+    let hash = string.as_bytes("0123456789abcdef0123456789abcdef")
+    let mut keys = result.unwrap(schedule.tls13(profile, Client, take host_share, hash, hash))
+    let mut sealer = result.unwrap(schedule.sealer(mut keys, Handshake, 0, 7))
+    let opener = result.unwrap(schedule.opener(keys, Handshake))
+    let mask = result.unwrap(schedule.header_mask(keys, Handshake, true))
+    let mut data: Bytes = list.with_capacity(16)
+    result.unwrap(packet.seal(mut sealer, 7, mut data, 0, 0, string.as_bytes("")))
+    result.unwrap(conn.try_send(send, (take keys, take sealer, take opener, take mask)))
+    take virtual_share
+}
+
+pub fn main(tasks: Tasks, random: Random, out: Stdout) -> Result[(), Exit] waits {
+    let mut point: Bytes = list.with_capacity(32)
+    let older = result.unwrap(secret.key_share(provide.random(11), X25519, mut point))
+    let mut public: Bytes = list.with_capacity(32)
+    let host_share = result.unwrap(secret.key_share(random, X25519, mut public))
+    let (c, i): (Client[(schedule.Schedule, packet.Sealer, packet.Opener, packet.HeaderMask)], Inbox[(schedule.Schedule, packet.Sealer, packet.Opener, packet.HeaderMask)]) = result.unwrap(conn.new(1, bytes 0))
+    let worker = result.unwrap(task.spawn_unit(tasks, bytes 65536, (take host_share, take c), send_keys))
+    let returned = result.unwrap(task.join(take worker))
+    let (take keys, take sealer, take opener, take mask) = result.unwrap(conn.try_receive(i))
+    let _ = packet.mask(mask, string.as_bytes("0123456789abcdef"), 0)
+    drop(take older)
+    drop(take returned)
+    result.unwrap(stdout.write(out, "media"))
+    Ok(())
+}
+"#;
+
+/// Host KeyShare entry, Schedule and packet objects in a sent item, and a
+/// virtual KeyShare result. The older root share keeps the helper's agreement
+/// entry live through its end. TLS-8 charges the helper in this order: share
+/// 64, registry entry 48, schedule 512, domain 16, sealer 1024, opener 1024,
+/// mask 512. All seven survive and keep their own kind and name.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_key_objects_cross_as_snapshots() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Args, Arrival, Cursor, Frame, HelperOutcome, Survivor, op};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_MEDIA,
+            dir.path(),
+            "media_cross",
+            backend,
+            "media",
+            &["Tasks", "Random", "Stdout"],
+        );
+        let streams = rl9_streams(&path, &format!("{backend:?}"));
+        let root = &streams[0].1;
+        let helper = &streams[1].1;
+        let grant_count = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u64;
+        let [key_origin] = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op {
+                    op: op::MEDIA_KEY_SHARE,
+                    out,
+                    ..
+                } => Some(out.value),
+                _ => None,
+            })
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("{backend:?}: expected one host key share delivery");
+        };
+        let stream = root
+            .iter()
+            .find_map(|f| match f {
+                Frame::Op {
+                    op: op::UNIT_SPAWN,
+                    out,
+                    ..
+                } => Some(out.value as u32),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(stream, 1, "{backend:?}: the first helper");
+
+        let entry = streams[1].0.as_ref().unwrap().body();
+        let mut input = Cursor::new(entry.value.bytes());
+        assert_eq!(input.bytes().unwrap(), [0; 16], "{backend:?}: entry words");
+        assert_eq!(input.varint().unwrap(), 2);
+        assert_eq!(input.take(3).unwrap(), [1, 8, 1]);
+        assert_eq!(input.u32().unwrap(), 0);
+        assert_eq!(input.varint().unwrap(), key_origin);
+        assert_eq!(input.u8().unwrap(), 0); // X25519
+
+        let [sealer_at, opener_at, mask_at] = helper
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op {
+                    op: op::MEDIA_CAPTURE,
+                    out,
+                    ..
+                } if out.payload.is_empty() => Some(out.value),
+                _ => None,
+            })
+            .collect::<Vec<_>>()[..]
+        else {
+            panic!("{backend:?}: expected three packet handle deliveries");
+        };
+        let mut items = root.iter().filter_map(|f| match f {
+            Frame::Take { body, .. } => match body.arrival() {
+                Arrival::Item(_, value) => Some(value),
+                _ => None,
+            },
+            _ => None,
+        });
+        let item = items.next().unwrap();
+        assert!(items.next().is_none());
+        let mut bytes = Cursor::new(item.bytes());
+        assert_eq!(bytes.bytes().unwrap(), [0; 32], "{backend:?}: item words");
+        assert_eq!(bytes.varint().unwrap(), 4);
+        for (index, tag, at) in [
+            (0, 9, None),
+            (1, 10, Some(sealer_at)),
+            (2, 11, Some(opener_at)),
+            (3, 12, Some(mask_at)),
+        ] {
+            assert_eq!(bytes.take(2).unwrap(), [1, tag]);
+            assert_eq!(bytes.varint().unwrap(), grant_count + 4 + index);
+            assert_eq!(bytes.u32().unwrap(), stream);
+            let position = bytes.varint().unwrap();
+            match at {
+                Some(at) => assert_eq!(position, at),
+                None => assert!((1..sealer_at).contains(&position)),
+            }
+            assert_eq!(bytes.take(2).unwrap(), [0, 0]); // QUIC, AES-128-GCM
+            match tag {
+                9 => {
+                    assert_eq!(bytes.take(20).unwrap(), [0; 20]); // Client, handshake, no updates/retire/export
+                    assert_eq!(bytes.varint().unwrap(), 1); // the sealer's domain
+                    assert_eq!(bytes.u8().unwrap(), 1); // Handshake
+                    assert_eq!(bytes.u64().unwrap(), 0);
+                }
+                10 => {
+                    assert_eq!(bytes.u8().unwrap(), 1);
+                    assert_eq!(bytes.u64().unwrap(), 0);
+                    assert_eq!(bytes.u64().unwrap(), 7);
+                    assert_eq!(bytes.u8().unwrap(), 1);
+                    assert_eq!(bytes.u64().unwrap(), 7);
+                }
+                11 => assert_eq!(bytes.u8().unwrap(), 1),
+                12 => assert_eq!(bytes.take(2).unwrap(), [1, 1]), // Handshake, local
+                _ => unreachable!(),
+            }
+        }
+        assert!(bytes.done());
+        let args = Args::of_parts(&[&item.canonical()]);
+        assert!(
+            helper.iter().any(|f| matches!(
+                f, Frame::Op { op: op::CONN_TRY_SEND, args: got, .. } if *got == args
+            )),
+            "{backend:?}: sender and receiver agree"
+        );
+        // MASK: opcode, zero requested spare, and lengths of the reference,
+        // offset and sample. The reference is the mask's root ordinal and 3.
+        let mask_operand = [(grant_count + 7).to_le_bytes().as_slice(), &[3]].concat();
+        let mask_args = Args::of_parts(&[
+            &[10, 0, 9, 8, 16],
+            &mask_operand,
+            &[0; 8],
+            b"0123456789abcdef",
+        ])
+        .buffered([5, 0]);
+        assert!(
+            root.iter().any(|f| matches!(
+                f, Frame::Op { op: op::MEDIA_CAPTURE, object: 0, args, out, .. }
+                    if *args == mask_args && out.payload.len() == 5
+            )),
+            "{backend:?}: the mask operates under its arriving ordinal"
+        );
+
+        let (value, survivors) = root
+            .iter()
+            .find_map(|f| match f {
+                Frame::Take { body, .. } => match body.arrival() {
+                    Arrival::HelperEnd(_, HelperOutcome::Returned(value), survivors) => {
+                        Some((value, survivors))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap();
+        let mut expected = [vec![8], vec![0; 8], vec![1, 1, 8]].concat();
+        hirsel_tape_format::put_varint(&mut expected, grant_count + 8);
+        expected.extend_from_slice(&stream.to_le_bytes());
+        expected.extend([0, 0, 0]); // no delivery, kind 3 charge ordinal 0, X25519
+        assert_eq!(value.bytes(), expected, "{backend:?}: virtual key");
+        let survivor = |kind, ordinal, amount| Survivor {
+            kind,
+            origin_kind: None,
+            stream,
+            ordinal,
+            amount,
+        };
+        assert_eq!(
+            survivors,
+            [
+                survivor(3, 0, 64),
+                survivor(3, 2, 512),
+                survivor(3, 3, 16),
+                survivor(3, 4, 1024),
+                survivor(3, 5, 1024),
+                survivor(3, 6, 512),
+                survivor(4, 1, 48),
+            ],
+            "{backend:?}: survivor names and amounts"
+        );
+    }
+}

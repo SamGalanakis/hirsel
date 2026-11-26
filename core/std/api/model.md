@@ -3,8 +3,8 @@
 [API overview](../API.md).
 
 `std.model` checks a pure reducer. It explores every state that a finite transition
-relation can reach (breadth-first search over whole states, checking `always` invariants
-and required counted `sometimes` reach properties) and checks whether an implementation's
+relation can reach, checking `always` invariants and counting witnesses for `sometimes`
+and `sometimes_step` coverage laws. It also checks whether an implementation's
 observed trace conforms to the same `Model`. It is ordinary
 Hirsel code: it takes no capability, reads no verdict, and returns ordinary values. A test
 runner may observe a result ([law table](../../../docs/laws.md)), but no
@@ -33,10 +33,12 @@ pub type Model[S: key, A] {
     done: own fn(S) -> bool,
     always: List[Always[S, A]],
     sometimes: List[Sometimes[S]],
+    sometimes_step: List[SometimesStep[S, A]],
     show: own fn(A, mut String)
 }
 pub type Always[S: key, A] { label: String, holds: own fn(S, A, S) -> bool }
 pub type Sometimes[S: key] { label: String, holds: own fn(S) -> bool }
+pub type SometimesStep[S: key, A] { label: String, holds: own fn(S, A, S) -> bool }
 pub type Bounds { depth: u64, states: u64, step_steps: u64, step_bytes: u64 }
 ```
 
@@ -54,6 +56,10 @@ pub type Bounds { depth: u64, states: u64, step_steps: u64, step_bytes: u64 }
 - **`sometimes`** are reach laws. They are counted on real edges only, never on initial
   states: a state the model starts in is not one that behaviour reached. At least one is
   required.
+- **`sometimes_step`** are optional transition coverage laws. They match `(prev, action,
+  next)` on real edges, including edges into previously visited states. Use them to
+  require a particular action or transition branch even when other edges reach the same
+  successor.
 - **`show`** renders an action in reports.
 
 `Bounds` has no defaults and no constructor function: a law writes all four fields.
@@ -95,8 +101,9 @@ and its bounds always give the same outcome:
    - **Empty list.** If `done(p)` is false, the outcome is `Failed` with kind `Stuck`
      and the path to `p`. Otherwise `p` is a legitimate terminal state.
    - **Each action** `a`, in list order: compute `n = step(p, a)`, which is one edge,
-     counted in `edges`. Evaluate every `always` on `(p, a, n)`, then every `sometimes`
-     on `n`, adding 1 to its count when it holds. Only after that, test whether `n` is
+     counted in `edges`. Evaluate every `always` on `(p, a, n)`, every `sometimes`
+     on `n`, then every `sometimes_step` on `(p, a, n)`. Each coverage law that
+     holds adds 1 to its count. Only after that, test whether `n` is
      visited. A visited `n` is not inserted again, but its edge has already been
      checked. A new `n` is inserted at depth `d + 1`.
 3. The first `always` that returns false ends the walk with `Failed`, kind
@@ -105,12 +112,13 @@ and its bounds always give the same outcome:
 **Results.**
 
 - **`Closed(stats)`.** The frontier emptied, every state was expanded, and every
-  `sometimes` count is above 0. If a closed walk leaves a `sometimes` at 0, the outcome
-  is `Failed` with kind `Unwitnessed(label)`, for the first such label in list order. The
-  whole finite space was explored, so that label holds nowhere.
+  coverage count is above 0. The `witnessed` list contains the `sometimes` counts
+  followed by the `sometimes_step` counts, each in declaration order. If any count
+  is 0, the outcome is `Failed` with kind `Unwitnessed(label)` for the first zero
+  count. The whole finite space was explored, so that law holds on no explored edge.
 - **`ToDepth(stats, Depth)`.** A state at depth `b.depth` was discovered and is left
   unexpanded. Expanding stops at `b.depth`, so this is reported even when that state has
-  no successors. Its `sometimes` counts may be 0, and `ToDepth` does not judge them.
+  no successors. Its coverage counts may be 0, and `ToDepth` does not judge them.
 - **`ToDepth(stats, States)`.** A new state would have been inserted as state number
   `b.states + 1`. Its edge was checked first, so `stats.edges` counts it. The walk stops
   at that edge.
@@ -136,7 +144,7 @@ and on `ToDepth` it raises `model: to depth K (LIMIT), not closed; states S, edg
 law that accepts a horizon matches on `explore` itself.
 
 No outcome is a run stop or a new cause. A violated law, a stuck state, an unwitnessed
-`sometimes` and a handler failure are values. `check` turns them into one `fail(text)`.
+coverage law and a handler failure are values. `check` turns them into one `fail(text)`.
 "Stuck" is not the runtime's `Deadlock` ([run stops](../../../docs/spec/failure.md#fail-15-run-stops)),
 which stops real tasks: a stuck model state is a finding about the model.
 
@@ -173,7 +181,7 @@ pub type Replayed = Reproduced(Failure) | NoLongerFails
 pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed
 ```
 
-`replay` follows the tape from its initial state, checking each `always` on each edge and
+`replay` follows the tape from its initial state, evaluating the edge predicates and
 each state's enabled list as `explore` does. It stops at the first failure on the path
 and returns it. If an index is not below its list's length, or the tape ends early,
 `replay` raises `model: config: token does not fit this model at step I`.
@@ -308,7 +316,7 @@ fn wrap_model() -> std.model.Model[u64, Act] {
         actions: fn(s: u64, mut out: List[Act]) { list.push(mut out, Inc) },
         step: fn(s: u64, a: Act) -> u64 { (s + 1) % 3 },
         done: fn(s: u64) -> bool { false },
-        always: list.new(), sometimes: take sometimes,
+        always: list.new(), sometimes: take sometimes, sometimes_step: list.new(),
         show: fn(a: Act, mut out: String) { string.push(mut out, "Inc") })
 }
 ```
@@ -405,6 +413,7 @@ token in its own body.
 | Case | Model | Expected | Checker bug it catches |
 |---|---|---|---|
 | Counter closure | counter mod 3 (above) | `Closed`, 3 states, 3 edges, depth 2, wrap 1 | a missing edge or state count; `sometimes` evaluated after pruning (wrap 0) |
+| Unwitnessed transition | counter mod 3 with `Inc` enabled and `Reset` omitted, both mapping 2 to 0 | `Unwitnessed("wrap by reset")`, depth 0, empty tape | counting only the destination (`Closed`), or skipping coverage on edges into visited states (`Unwitnessed("wrap by increment")`) |
 | Edge into visited state | counter mod 3 plus `always never_wrap: !(p == 2 && n == 0)` | `Violated("never_wrap")`, depth 3, token `AQAEAAAAAA==` | `always` skipped on an edge into a visited state (reports `Closed`) |
 | Depth horizon | counter mod 3 with `Bounds.depth = 1` | `ToDepth`, `Depth`, states 2, edges 1, depth 1 | a horizon reported as `Closed` |
 | State horizon | counter mod 3 with `Bounds.states = 2` | `ToDepth`, `States`, states 2, edges 2, depth 1 | a state bound that hides the checked edge, or that reports `Closed` |

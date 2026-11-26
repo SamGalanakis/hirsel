@@ -60,6 +60,7 @@ pub type Model[S: key, A] {
     done: own fn(S) -> bool,
     always: List[Always[S, A]],
     sometimes: List[Sometimes[S]],
+    sometimes_step: List[SometimesStep[S, A]],
     show: own fn(A, mut String)
 }
 
@@ -71,6 +72,11 @@ pub type Always[S: key, A] {
 pub type Sometimes[S: key] {
     label: String,
     holds: own fn(S) -> bool
+}
+
+pub type SometimesStep[S: key, A] {
+    label: String,
+    holds: own fn(S, A, S) -> bool
 }
 
 pub type Bounds {
@@ -223,25 +229,30 @@ fn violates[S: key, A](m: Model[S, A], b: Bounds, prev: S, action: A, next: S) -
     Ok(None)
 }
 
-fn follow[S: key, A](m: Model[S, A], b: Bounds, state: S, action: A) -> Result[Edge[S], HandlerError] {
+fn follow[S: key, A](m: Model[S, A], b: Bounds, state: S, action: A, mut counts: List[(String, u64)]) -> Result[Edge[S], HandlerError] {
     let next = advance(m, b, state, action)?
     let verdict = violates(m, b, state, action, next)?
-    match take verdict {
-        Some(take label) => Ok(Rejected(take label)),
-        None => Ok(Accepted(take next)),
+    if let Some(take label) = take verdict {
+        return Ok(Rejected(take label))
     }
-}
-
-fn witness[S: key, A](m: Model[S, A], b: Bounds, state: S, mut counts: List[(String, u64)]) -> Result[(), HandlerError] {
-    for i in 0 .. list.len(m.sometimes) {
+    let state_laws = list.len(m.sometimes)
+    for i in 0 .. state_laws {
         let law = view m.sometimes[i]
         if bounded(b, "sometimes", scoped fn() -> bool {
-            law.holds(state)
+            law.holds(next)
         })? {
             counts[i].1 += 1
         }
     }
-    Ok(())
+    for i in 0 .. list.len(m.sometimes_step) {
+        let law = view m.sometimes_step[i]
+        if bounded(b, "sometimes_step", scoped fn() -> bool {
+            law.holds(state, action, next)
+        })? {
+            counts[state_laws + i].1 += 1
+        }
+    }
+    Ok(Accepted(take next))
 }
 
 fn utf8_prefix(text: String, limit: u64) -> u64 {
@@ -323,12 +334,20 @@ fn validate[S: key, A](m: Model[S, A]) {
     }
 }
 
+fn witness_counts[S: key, A](m: Model[S, A]) -> List[(String, u64)] {
+    let mut counts: List[(String, u64)] = list.new()
+    for law in m.sometimes {
+        list.push(mut counts, (string.from(law.label), 0))
+    }
+    for law in m.sometimes_step {
+        list.push(mut counts, (string.from(law.label), 0))
+    }
+    take counts
+}
+
 pub fn explore[S: key, A](m: Model[S, A], b: Bounds) -> Outcome {
     validate(m)
-    let mut stats = Stats(states: 0, edges: 0, depth: 0, witnessed: list.new())
-    for law in m.sometimes {
-        list.push(mut stats.witnessed, (string.from(law.label), 0))
-    }
+    let mut stats = Stats(states: 0, edges: 0, depth: 0, witnessed: witness_counts(m))
     let mut visited: StateSet[S] = state_set()
     let mut depths: List[u64] = list.new()
     let mut links: List[Breadcrumb[A]] = list.new()
@@ -385,7 +404,7 @@ pub fn explore[S: key, A](m: Model[S, A], b: Bounds) -> Outcome {
         let mut index: u64 = 0
         for take action in take actions {
             let stepped = with_state(visited, m.init, from, scoped fn(state: S) -> Result[Edge[S], HandlerError] {
-                follow(m, b, state, action)
+                follow(m, b, state, action, mut stats.witnessed)
             })
             stats.edges += 1
             let next = match take stepped {
@@ -396,10 +415,6 @@ pub fn explore[S: key, A](m: Model[S, A], b: Bounds) -> Outcome {
                     return Failed(make_failure(m.show, b, links, tip, Violated(take label), None))
                 },
                 Error(take error) => return Failed(make_failure(m.show, b, links, from, Handler, Some(take error))),
-            }
-            let checked = witness(m, b, next, mut stats.witnessed)
-            if let Error(take error) = take checked {
-                return Failed(make_failure(m.show, b, links, from, Handler, Some(take error)))
             }
             if !seen_state(visited, m.init, next) {
                 if stats.states == b.states {
@@ -601,10 +616,7 @@ pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed {
         Error(take error) => return Reproduced(make_failure(m.show, b, links, 0, Handler, Some(take error))),
         Ok(None) => {},
     }
-    let mut counts: List[(String, u64)] = list.new()
-    for law in m.sometimes {
-        list.push(mut counts, (string.from(law.label), 0))
-    }
+    let mut counts = witness_counts(m)
     for i in 1u64 .. list.len(tape) {
         let gathered = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[List[A], HandlerError] {
             enabled(m, b, state)
@@ -619,7 +631,7 @@ pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed {
         }
         let action = list.swap_remove(mut actions, index)
         let stepped = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[Edge[S], HandlerError] {
-            follow(m, b, state, action)
+            follow(m, b, state, action, mut counts)
         })
         match take stepped {
             Ok(Rejected(take label)) => {
@@ -628,10 +640,6 @@ pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed {
             },
             Error(take error) => return Reproduced(make_failure(m.show, b, links, i - 1, Handler, Some(take error))),
             Ok(Accepted(take next)) => {
-                let checked = witness(m, b, next, mut counts)
-                if let Error(take error) = take checked {
-                    return Reproduced(make_failure(m.show, b, links, i - 1, Handler, Some(take error)))
-                }
                 current = Some(take next)
                 list.push(mut links, Action(i - 1, index, take action))
             },
@@ -661,15 +669,10 @@ pub fn replay[S: key, A](m: Model[S, A], b: Bounds, text: String) -> Replayed {
     // A failing handler on an outgoing edge has a path to this state.
     for action in actions {
         let stepped = with_replay_state(m.init[initial], current, scoped fn(state: S) -> Result[Edge[S], HandlerError] {
-            follow(m, b, state, action)
+            follow(m, b, state, action, mut counts)
         })
         match take stepped {
-            Ok(Accepted(next)) => {
-                let checked = witness(m, b, next, mut counts)
-                if let Error(take error) = take checked {
-                    return Reproduced(make_failure(m.show, b, links, tip, Handler, Some(take error)))
-                }
-            },
+            Ok(Accepted(_)) => {},
             Ok(Rejected(_)) => return NoLongerFails,
             Error(take error) => return Reproduced(make_failure(m.show, b, links, tip, Handler, Some(take error))),
         }

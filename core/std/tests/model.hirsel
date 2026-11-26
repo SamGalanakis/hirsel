@@ -27,7 +27,7 @@ fn bag_laws() -> bool {
     }
 }
 
-type CounterAction = Start | Inc
+type CounterAction = Start | Inc | Reset
 
 fn counter(broken: bool) -> model.Model[u64, CounterAction] {
     let mut init: List[u64] = list.new()
@@ -52,13 +52,17 @@ fn counter(broken: bool) -> model.Model[u64, CounterAction] {
             list.push(mut out, Inc)
         },
         step: fn(state: u64, action: CounterAction) -> u64 {
-            (state + 1) % 3
+            match action {
+                Reset => 0,
+                _ => (state + 1) % 3,
+            }
         },
         done: fn(state: u64) -> bool {
             false
         },
         always: take always,
         sometimes: take sometimes,
+        sometimes_step: list.new(),
         show: fn(action: CounterAction, mut out: String) {
             string.push(mut out, "Inc")
         },
@@ -92,6 +96,33 @@ fn explore_counter_closed() -> bool {
         return false
     }
     closed_stats(stats, 3, 3, 2, "wrap") && model.check(counter(false), model_bounds()) == Ok(())
+}
+
+// expect: run explore_unwitnessed_step() = true
+fn explore_unwitnessed_step() -> bool {
+    let mut m = counter(false)
+    list.push(mut m.sometimes_step, model.SometimesStep(
+        label: string.from("wrap by increment"),
+        holds: fn(prev: u64, action: CounterAction, next: u64) -> bool {
+            let Inc = action else {
+                return false
+            }
+            prev == 2 && next == 0
+        },
+    ))
+    list.push(mut m.sometimes_step, model.SometimesStep(
+        label: string.from("wrap by reset"),
+        holds: fn(prev: u64, action: CounterAction, next: u64) -> bool {
+            let Reset = action else {
+                return false
+            }
+            prev == 2 && next == 0
+        },
+    ))
+    let Failed(f) = model.explore(m, model_bounds()) else {
+        return false
+    }
+    model.kind(f) == Unwitnessed(string.from("wrap by reset")) && model.depth(f) == 0 && failure_token(f) == "AQAA"
 }
 
 // C2
@@ -171,6 +202,7 @@ fn network(take done: own fn(Network) -> bool) -> model.Model[Network, Message] 
         done: take done,
         always: list.new(),
         sometimes: take sometimes,
+        sometimes_step: list.new(),
         show: fn(action: Message, mut out: String) {
             match action {
                 StartNetwork => string.push(mut out, "Start"),
@@ -227,6 +259,7 @@ fn ghosts() -> model.Model[(u64, bool), CounterAction] {
         },
         always: list.new(),
         sometimes: take sometimes,
+        sometimes_step: list.new(),
         show: fn(action: CounterAction, mut out: String) {},
     )
 }
@@ -396,6 +429,7 @@ fn pipe() -> model.Model[Pipe, PipeAction] {
         },
         always: list.new(),
         sometimes: take sometimes,
+        sometimes_step: list.new(),
         show: fn(action: PipeAction, mut out: String) {
             string.push(mut out, pipe_label(action))
         },

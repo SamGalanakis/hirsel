@@ -363,6 +363,7 @@ fn grant_model(take start: Place, laws: List[Law]) -> std.model.Model[Place, Gra
         done: settled,
         always: take always,
         sometimes: take sometimes,
+        sometimes_step: list.new(),
         show: show_grant,
     )
 }

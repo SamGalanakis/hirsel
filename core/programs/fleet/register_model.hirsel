@@ -294,6 +294,7 @@ pub fn register_model(max_epoch: u64, max_nodes: u64) -> std.model.Model[RegStat
         },
         always: reg_always(),
         sometimes: reg_sometimes(),
+        sometimes_step: list.new(),
         show: show_reg_action,
     )
 }

@@ -312,6 +312,27 @@ fn trim_runs_below(mut runs: List[Run], at: u64) {
     }
 }
 
+/// Remove [start, end) from ascending disjoint runs.
+fn remove_run(mut runs: List[Run], start: u64, end: u64) {
+    if end <= start {
+        return
+    }
+    let mut out: List[Run] = list.with_capacity(list.len(runs) + 1)
+    for r in runs {
+        if r.end <= start || r.start >= end {
+            list.push(mut out, r)
+        } else {
+            if r.start < start {
+                list.push(mut out, Run(start: r.start, end: start))
+            }
+            if r.end > end {
+                list.push(mut out, Run(start: end, end: r.end))
+            }
+        }
+    }
+    runs = take out
+}
+
 /// Drop everything at or above at and clip what straddles it.
 fn trim_runs_above(mut runs: List[Run], at: u64) {
     let mut keep = 0u64

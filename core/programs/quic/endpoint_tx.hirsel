@@ -19,6 +19,10 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
     }
     let handle = c.handle
     let peer = c.peer
+    let server = match c.side {
+        Server => true,
+        Client => false,
+    }
     let ecn = recovery.ecn_mark(c.recovery)
     let is_confirmed = recovery.confirmed(c.recovery)
     c.wake = None
@@ -30,9 +34,19 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
         let mut pending = 0u64
         let mut limited = true
         let mut level = 0u64
+        let mut probed = 0u64
         let mut done = c.handshake_done
         let mut room = amplification_room(c)
         while level < 3 {
+            let level_probes = match level {
+                0 => c.initial.probes,
+                1 => c.encrypted.probes,
+                _ => c.application.probes,
+            }
+            let probe = probed < level_probes
+            if level == 2 && probe && probed > 0 && !has_pending_streams(c.streams) {
+                probe_streams(mut c.streams)
+            }
             let before = list.len(out)
             let level_limit = order.min(limit, room)
             let mut send = recovery.window_allows(c.recovery, pending, limit)
@@ -43,56 +57,62 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
                 }
             }
             limited = limited && send
-            let (size, more) = match level {
-                0 => stage_level(mut staged, mut staged_frames, mut c.initial, mut c.streams, is_confirmed, Initial, c.peer_id, c.local_id, false, None, now, send, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
-                1 => stage_level(mut staged, mut staged_frames, mut c.encrypted, mut c.streams, is_confirmed, Handshake, c.peer_id, c.local_id, false, None, now, send, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
-                _ => stage_level(mut staged, mut staged_frames, mut c.application, mut c.streams, is_confirmed, OneRtt, c.peer_id, c.local_id, done, None, now, send, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
+            let (size, more, eliciting) = match level {
+                0 => stage_level(mut staged, mut staged_frames, mut c.initial, mut c.streams, is_confirmed, server, Initial, c.peer_id, c.local_id, false, None, now, send, probe, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
+                1 => stage_level(mut staged, mut staged_frames, mut c.encrypted, mut c.streams, is_confirmed, server, Handshake, c.peer_id, c.local_id, false, None, now, send, probe, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
+                _ => stage_level(mut staged, mut staged_frames, mut c.application, mut c.streams, is_confirmed, server, OneRtt, c.peer_id, c.local_id, done, None, now, send, probe, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
             }
             pending += size
             room -= order.min(room, list.len(out) - before)
-            if level == 2 {
+            if probe && eliciting {
+                probed += 1
+            }
+            if level == 2 && probed >= level_probes {
                 done = false
             }
-            if level < 2 || !(more && send) {
+            let again = (probed < level_probes && eliciting) || (level == 2 && more && send)
+            if !again {
                 level += 1
+                probed = 0
             }
         }
         // B.5: a sender held back by nothing it controls is application limited.
         recovery.set_app_limited(mut c.recovery, limited)
         stage_mtu_probe(mut staged, mut c, now, slot, mtu, pending, ecn, mut out, mut tx)
     } else if let Some(_) = c.application.send {
-        let _ = stage_level(mut staged, mut staged_frames, mut c.application, mut c.streams, is_confirmed, OneRtt, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
+        let _ = stage_level(mut staged, mut staged_frames, mut c.application, mut c.streams, is_confirmed, server, OneRtt, c.peer_id, c.local_id, false, closing, now, false, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
     } else if let Some(_) = c.encrypted.send {
-        let _ = stage_level(mut staged, mut staged_frames, mut c.encrypted, mut c.streams, is_confirmed, Handshake, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
+        let _ = stage_level(mut staged, mut staged_frames, mut c.encrypted, mut c.streams, is_confirmed, server, Handshake, c.peer_id, c.local_id, false, closing, now, false, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
     } else {
-        let _ = stage_level(mut staged, mut staged_frames, mut c.initial, mut c.streams, is_confirmed, Initial, c.peer_id, c.local_id, false, closing, now, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
+        let _ = stage_level(mut staged, mut staged_frames, mut c.initial, mut c.streams, is_confirmed, server, Initial, c.peer_id, c.local_id, false, closing, now, false, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
     }
 }
 
-/// Stage one packet of a level: the in-flight bytes staged (or 0), and whether it carried
-/// stream-layer frames, so another 1-RTT packet may have more to send.
-fn stage_level(mut staged: List[Staged], mut staged_frames: List[SentFrame], mut s: Space, mut st: Streams, is_confirmed: bool, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], now: u64, send: bool, ecn: u8, slot: u64, handle: ConnectionHandle, peer: Addr, mtu: u64, mut payload: Bytes, mut out: Bytes, mut tx: List[Output]) -> (u64, bool) {
+/// Stage one packet of a level: the in-flight bytes staged (or 0), whether it carried
+/// stream-layer frames, and whether it was ack-eliciting.
+fn stage_level(mut staged: List[Staged], mut staged_frames: List[SentFrame], mut s: Space, mut st: Streams, is_confirmed: bool, server: bool, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], now: u64, send: bool, probe: bool, ecn: u8, slot: u64, handle: ConnectionHandle, peer: Addr, mtu: u64, mut payload: Bytes, mut out: Bytes, mut tx: List[Output]) -> (u64, bool, bool) {
     let start = list.len(out)
     let limit = order.min(mtu, list.capacity(out) - start)
     if list.len(tx) == list.capacity(tx) {
-        return (0, false)
+        return (0, false, false)
     }
     let fill = match closing {
         Some(_) => false,
         None => true,
     }
-    let Some(p) = tx_space(mut s, mut st, fill, is_confirmed, kind, dest, source, done, closing, limit, now, send, mut payload, mut staged_frames, mut out) else {
-        return (0, false)
+    let Some(p) = tx_space(mut s, mut st, fill, is_confirmed, server, kind, dest, source, done, closing, limit, now, send, probe, mut payload, mut staged_frames, mut out) else {
+        return (0, false, false)
     }
-    let size = if p.eliciting || kind == Initial {
+    let size = if p.eliciting || (kind == Initial && !server) {
         p.size
     } else {
         0u64
     }
     let more = p.frame_len > 0
+    let eliciting = p.eliciting
     list.push(mut staged, Packet(slot: slot, handle: handle, kind: kind, packet: p))
     list.push(mut tx, Transmit(to: peer, at: start, len: list.len(out) - start, ecn: ecn, send_at: now))
-    (size, more)
+    (size, more, eliciting)
 }
 
 fn earliest(a: Option[u64], b: Option[u64]) -> Option[u64] {
@@ -186,7 +206,11 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
             }
         },
     }
-    if open_life(c) && (p.eliciting || kind == Initial) {
+    let server = match c.side {
+        Server => true,
+        Client => false,
+    }
+    if open_life(c) && (p.eliciting || (kind == Initial && !server)) {
         // B.4: a padded Initial counts in flight even when it only acknowledges. A
         // packet that is neither is never retransmitted nor counted, so it is not
         // tracked: a receive-only peer never acknowledges it.

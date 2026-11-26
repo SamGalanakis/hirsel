@@ -330,16 +330,16 @@ fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> DoneSettled 
     done
 }
 
-/// A probe timeout (RFC 9002 §6.2.4): owe a probe and the data still in flight, which
-/// stays in flight until it is acknowledged or declared lost. True when a packet in
-/// flight carried HANDSHAKE_DONE.
-fn probe_space(mut s: Space) -> bool {
+/// A probe timeout (RFC 9002 §6.2.4): owe up to `count` probes and the data still in
+/// flight, which stays in flight until it is acknowledged or declared lost. True when a
+/// packet in flight carried HANDSHAKE_DONE.
+fn probe_space(mut s: Space, count: u64) -> bool {
     let mut done = false
     for i in 0u64 .. list.len(s.flights) {
         let f = s.flights[i]
         owe(mut s, f.crypto_at, f.crypto_end)
         done = done || f.done
     }
-    s.probes = order.min(s.probes + 1, 2)
+    s.probes = order.min(order.max(s.probes, count), 2)
     done
 }

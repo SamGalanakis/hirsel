@@ -61,13 +61,14 @@ fn negotiation(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Byt
     }
 }
 
-fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut wire: Bytes, mut plain: Bytes, random: Random, mtu: u16, ecn: u8, mut events: List[Event]) -> Result[(), DropReason] {
+fn receive_known(mut c: Connection, now: u64, from: Addr, datagram_len: u64, mut credit: u64, h: codec.Header, mut wire: Bytes, mut plain: Bytes, random: Random, mtu: u16, ecn: u8, mut events: List[Event]) -> Result[(), DropReason] {
     let moved = from != c.peer
     if moved && !may_migrate(c, h.kind) {
         return Error(WrongPath)
     }
-    if !c.validated && !moved {
-        c.path_received = int.saturating_add(c.path_received, h.packet.len)
+    if !c.validated && !moved && credit > 0 {
+        c.path_received = int.saturating_add(c.path_received, credit)
+        credit = 0
     }
     if let Draining = c.life {
         return Error(Draining)
@@ -90,12 +91,13 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
         None => true,
     }
     if moved && newest && !c.probing_only && open_life(c) {
-        migrate(mut c, now, from, h.packet.len, random)
+        migrate(mut c, now, from, datagram_len, random)
+        credit = 0
     }
     Ok(())
 }
 
-fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, datagram_len: u64, mut credit: u64, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
     let mut failed: Option[DropReason] = None
     let mut reset_peer: Option[Addr] = None
     let mut newly_established = false
@@ -107,7 +109,7 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
             Client => false,
         }
         c.streams.datagram_room = e.datagram_room
-        let outcome = receive_known(mut c, now, from, h, mut wire, mut e.plain, e.random, e.config.max_mtu, ecn, mut events)
+        let outcome = receive_known(mut c, now, from, datagram_len, mut credit, h, mut wire, mut e.plain, e.random, e.config.max_mtu, ecn, mut events)
         e.datagram_room = c.streams.datagram_room
         dropped_many(mut e.drops, DatagramBuffer, replace(mut c.streams.datagrams_refused, 0))
         released = replace(mut c.streams.cids.released, list.new())
@@ -158,12 +160,12 @@ fn refuse_initial(mut e: Endpoint, mut c: Connection, code: u64) {
     }
     let mut wire: Bytes = list.with_capacity(1200)
     let mut no_frames: List[SentFrame] = list.new()
-    if let Some(_) = tx_space(mut c.initial, mut c.streams, false, false, Initial, c.peer_id, c.local_id, false, Some(transport_close(code, 0)), 1200, 0, false, mut c.tx_payload, mut no_frames, mut wire) {
+    if let Some(_) = tx_space(mut c.initial, mut c.streams, false, false, true, Initial, c.peer_id, c.local_id, false, Some(transport_close(code, 0)), 1200, 0, false, false, mut c.tx_payload, mut no_frames, mut wire) {
         list.push(mut e.stateless, Stateless(peer: c.peer, wire: take wire))
     }
 }
 
-fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut credit: u64, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
     let (id, t): (handshake.Identity, TransportConfig) = match e.server {
         Some((id, t)) => (share_identity(id), clone(t)),
         None => {
@@ -221,7 +223,8 @@ fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wi
                 c.retry_source = Some(clone(dcid))
             }
             c.validated = validated
-            c.path_received = h.packet.len
+            c.path_received = credit
+            credit = 0
             let _ = accept_packet(mut c, now, h, opened, wire, e.plain, e.random, e.config.max_mtu, ecn, mut events)
             add_connection(mut e, take c)
         },
@@ -239,12 +242,21 @@ fn header_drop(err: codec.CodecError) -> DropReason {
     }
 }
 
-fn dispatch(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+fn all_zero(buf: Bytes, at: u64, end: u64) -> bool {
+    for i in at .. end {
+        if buf[i] != 0 {
+            return false
+        }
+    }
+    true
+}
+
+fn dispatch(mut e: Endpoint, now: u64, from: Addr, ecn: u8, datagram_len: u64, mut credit: u64, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
     if h.kind == Initial || h.kind == Handshake || h.kind == OneRtt {
         if let Some(i) = route(e, h, from, wire) {
-            receive_existing(mut e, i, now, from, ecn, h, mut wire, mut events)
+            receive_existing(mut e, i, now, from, ecn, datagram_len, mut credit, h, mut wire, mut events)
         } else if h.kind == Initial {
-            admit(mut e, now, from, ecn, h, mut wire, mut events)
+            admit(mut e, now, from, ecn, mut credit, h, mut wire, mut events)
         } else if h.kind == OneRtt {
             short_unroutable(mut e, now, from, h, wire, mut events)
         } else {
@@ -268,6 +280,7 @@ pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf:
     }
     let end = at + len
     let mut next = at
+    let mut credit = len
     e.datagram_room = datagram_room(e, events)
     let server = match e.server {
         Some(_) => true,
@@ -286,15 +299,18 @@ pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf:
     if first.kind == OneRtt {
         list.append(mut e.tail, list.slice(buf, end - 16, end))
     }
-    dispatch(mut e, now, from, ecn, first, mut buf, mut events)
+    dispatch(mut e, now, from, ecn, len, mut credit, first, mut buf, mut events)
     while next < end {
+        if all_zero(buf, next, end) {
+            break
+        }
         let start = next
         match codec.read_coalesced_header(buf, mut next, end, e.config.cid_len, first.destination) {
             Ok(h) => {
                 if server && h.kind == Initial && len < 1200 {
                     dropped(mut e.drops, SmallInitial)
                 } else {
-                    dispatch(mut e, now, from, ecn, h, mut buf, mut events)
+                    dispatch(mut e, now, from, ecn, len, mut credit, h, mut buf, mut events)
                 }
             },
             Error(err) => dropped(mut e.drops, header_drop(err)),

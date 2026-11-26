@@ -368,10 +368,28 @@ fn recovery_due(mut c: Connection, now: u64, mut events: List[Event]) {
             settle(mut c, now, index, empty, lost, mut events)
         },
         TimeoutProbe(index) => {
+            let count = order.min(order.max(recovery.pto_count(c.recovery), 1), 2)
             let done = match index {
-                0 => probe_space(mut c.initial),
-                1 => probe_space(mut c.encrypted),
-                _ => probe_space(mut c.application),
+                0 => {
+                    let mut d = probe_space(mut c.initial, count)
+                    if recovery.has_eliciting_in_flight(c.recovery, recovery.HANDSHAKE) {
+                        d = d || probe_space(mut c.encrypted, count)
+                    }
+                    d
+                },
+                1 => {
+                    let mut d = probe_space(mut c.encrypted, count)
+                    if recovery.has_eliciting_in_flight(c.recovery, recovery.INITIAL) {
+                        d = d || probe_space(mut c.initial, count)
+                    }
+                    d
+                },
+                _ => {
+                    if !has_pending_streams(c.streams) {
+                        probe_streams(mut c.streams)
+                    }
+                    probe_space(mut c.application, count)
+                },
             }
             c.handshake_done = (c.handshake_done || done) && !c.done_acked
         },

@@ -356,6 +356,9 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
         match f {
             Data(offset: offset, len: len, fin: fin, ..) => {
                 let end = order.min(offset + len, s.written)
+                if list.len(s.resend) > 0 {
+                    remove_run(mut s.resend, offset, end)
+                }
                 let mut floor = s.floor
                 if end > floor {
                     if offset <= floor {
@@ -372,11 +375,15 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
                 if k > 0 || (list.len(s.acked) > 0 && s.acked[0].start < floor) {
                     trim_runs_below(mut s.acked, floor)
                 }
+                if list.len(s.resend) > 0 && s.resend[0].start < floor {
+                    trim_runs_below(mut s.resend, floor)
+                }
                 freed = floor - s.floor
                 s.floor = floor
                 free_pieces(mut s)
                 if fin {
                     s.fin_acked = true
+                    s.fin_pending = false
                 }
                 if s.fin_acked && s.floor == s.written && !s.acked_reported {
                     if let None = s.reset {
@@ -387,6 +394,7 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
             },
             _ => {
                 s.reset_acked = true
+                s.reset_pending = false
             },
         }
     }
@@ -396,9 +404,10 @@ fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events
     freed
 }
 
-/// QS5's verdict for application packets: frames of an acknowledged packet settle,
-/// frames of a lost one go back on their queues. Compacts `inflight` and `inflight_frames`
-/// in place using ascending packet-number cursors, allocating nothing.
+/// QS5's verdict for application packets: frames of an acknowledged packet settle first,
+/// then frames of a lost one go back on their queues unless already acknowledged.
+/// Compacts `inflight` and `inflight_frames` in place using ascending packet-number
+/// cursors, allocating nothing.
 fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], lost: List[u64], mut events: List[Event]) {
     let count = list.len(st.inflight)
     if count == 0 {
@@ -406,6 +415,23 @@ fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], l
     }
     let ack_n = list.len(acked)
     let lost_n = list.len(lost)
+    if ack_n > 0 {
+        let mut ack_i = 0u64
+        for i in 0u64 .. count {
+            let p = st.inflight[i]
+            while ack_i < ack_n && acked[ack_i] < p.number {
+                ack_i += 1
+            }
+            if ack_i < ack_n && acked[ack_i] == p.number {
+                ack_i += 1
+                for j in p.start .. p.start + p.len {
+                    let f = st.inflight_frames[j]
+                    let freed = ack_frame(mut st, handle, f, mut events)
+                    st.held -= freed
+                }
+            }
+        }
+    }
     let mut ack_i = 0u64
     let mut lost_i = 0u64
     let mut write_pkt = 0u64
@@ -420,11 +446,6 @@ fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], l
         }
         if ack_i < ack_n && acked[ack_i] == p.number {
             ack_i += 1
-            for j in p.start .. p.start + p.len {
-                let f = st.inflight_frames[j]
-                let freed = ack_frame(mut st, handle, f, mut events)
-                st.held -= freed
-            }
         } else if lost_i < lost_n && lost[lost_i] == p.number {
             lost_i += 1
             for j in p.start .. p.start + p.len {
@@ -446,6 +467,77 @@ fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], l
     list.truncate(mut st.inflight_frames, write_frame)
     wake_writers(mut st, handle, mut events)
     retire(mut st)
+}
+
+fn has_pending_streams(st: Streams) -> bool {
+    if !st.ready {
+        return false
+    }
+    if st.max_data_pending || st.bidi_limit_pending || st.uni_limit_pending || list.len(st.cids.retire_out) > 0 || list.len(st.seam) > 0 {
+        return true
+    }
+    for c in st.cids.issued {
+        if c.pending {
+            return true
+        }
+    }
+    let room = connection_room(st)
+    for s in st.list {
+        if let Some(r) = s.recv {
+            if r.limit_pending {
+                return true
+            }
+            if let Some(_) = r.stop {
+                if r.stop_pending {
+                    return true
+                }
+            }
+        }
+        if let Some(tx) = s.send {
+            if has_work(tx, room) {
+                return true
+            }
+            if let Some(_) = tx.reset {
+                if tx.reset_pending {
+                    return true
+                }
+            }
+        }
+    }
+    false
+}
+
+fn probeable_frame(f: SentFrame) -> bool {
+    match f {
+        DatagramSent(_) => false,
+        DataBlockedSent => false,
+        StreamBlockedSent(_) => false,
+        Raw => false,
+        _ => true,
+    }
+}
+
+/// RFC 9002 §6.2.4: on an Application PTO, queue retransmittable frames from the oldest
+/// unacknowledged packet that yields pending work, keeping it in flight so congestion
+/// control is unchanged until an ACK arrives.
+fn probe_streams(mut st: Streams) {
+    if !st.ready {
+        return
+    }
+    for i in 0u64 .. list.len(st.inflight) {
+        let p = st.inflight[i]
+        let mut queued = false
+        for j in p.start .. p.start + p.len {
+            let f = st.inflight_frames[j]
+            if probeable_frame(f) {
+                requeue_frame(mut st, f, false)
+                queued = true
+            }
+        }
+        if queued && has_pending_streams(st) {
+            return
+        }
+    }
 }
 
 /// Put an abandoned or lost packet's frames (stored at `frames[start .. start + len)`)
@@ -476,7 +568,11 @@ fn requeue_frame(mut st: Streams, f: SentFrame, abandoned: bool) {
             }
         },
         NewCidSent(seq) => resend_new_cid(mut st.cids, seq),
-        RetireSent(seq) => list.push(mut st.cids.retire_out, seq),
+        RetireSent(seq) => {
+            if !contains(st.cids.retire_out, seq) {
+                list.push(mut st.cids.retire_out, seq)
+            }
+        },
         DataBlockedSent => (),
         Raw => (),
         Data(stream: id, offset: offset, len: len, fin: fin) => {
@@ -487,7 +583,10 @@ fn requeue_frame(mut st: Streams, f: SentFrame, abandoned: bool) {
                         end = order.min(end, x.reliable)
                     }
                     add_run(mut s.resend, order.max(offset, s.floor), end)
-                    if fin && s.fin {
+                    for r in s.acked {
+                        remove_run(mut s.resend, r.start, r.end)
+                    }
+                    if fin && s.fin && !s.fin_acked {
                         s.fin_pending = true
                     }
                 }
@@ -496,7 +595,9 @@ fn requeue_frame(mut st: Streams, f: SentFrame, abandoned: bool) {
         ResetSent(id) => {
             if let Some(i) = find(st, id) {
                 if let Some(mut s) = st.list[i].send {
-                    s.reset_pending = true
+                    if !s.reset_acked {
+                        s.reset_pending = true
+                    }
                 }
             }
         },

@@ -147,3 +147,114 @@ fn amplification_never_exceeds_three(tasks: Tasks) -> Result[(), ()] waits {
     }
     Ok(())
 }
+
+/// Seal a short client Initial carrying only a PING and pad the enclosing UDP datagram
+/// outside the packet with trailing zero bytes to 1,200 bytes (RFC 9000 §14.1).
+fn udp_padded_initial_ping(dcid: Bytes, scid: Bytes, number: u64) -> Bytes {
+    let mut keys = result.unwrap(schedule.quic_initial(Client, dcid))
+    let mut sealer = result.unwrap(schedule.sealer(mut keys, Initial, 0, number))
+    let mask = result.unwrap(schedule.header_mask(keys, Initial, true))
+    let mut wire: Bytes = list.with_capacity(1200)
+    let n = codec.Number(truncated: number & 0xffffffff, size: 4)
+    result.unwrap(codec.write_long_header(Initial, dcid, scid, b"", n, 1 + 16, mut wire))
+    let body = list.len(wire)
+    list.push(mut wire, 0x01)
+    result.unwrap(packet.seal(mut sealer, number, mut wire, 0, body, b""))
+    let m = packet.mask(mask, wire, body)
+    wire[0] = wire[0] ^ (m[0] & 0x0f)
+    for i in 0u64 .. 4 {
+        wire[body - 4 + i] = wire[body - 4 + i] ^ m[i + 1]
+    }
+    if list.len(wire) < 1200 {
+        list.fill(mut wire, 1200 - list.len(wire), 0)
+    }
+    take wire
+}
+
+/// Drain every datagram an endpoint stages at `now` and commit them all, returning their
+/// byte lengths.
+fn drain_sizes(mut e: quic.Endpoint, now: u64) -> List[u64] {
+    let mut sizes: List[u64] = list.new()
+    for _ in 0u64 .. 32 {
+        let mut out: Bytes = list.with_capacity(16 * 1500)
+        let mut outputs: List[quic.Output] = list.with_capacity(16)
+        let _ = quic.poll(mut e, now, mut out, mut outputs)
+        let mut count = 0u64
+        for o in outputs {
+            if let Transmit(len: len, ..) = o {
+                count += 1
+                list.push(mut sizes, len)
+            }
+        }
+        quic.committed(mut e, now, count)
+        if count == 0 {
+            break
+        }
+    }
+    take sizes
+}
+
+/// bug: crediting only an Initial packet's Length field instead of the UDP datagram's
+/// length starves the server's anti-amplification budget when a peer pads Initials with
+/// trailing zero bytes outside the packet; or padding server ACK-only Initials to 1,200
+/// bytes wastes anti-amplification budget.
+/// oracle: RFC 9000 §8.1 (crediting the received UDP datagram length), §12.2 (ignoring
+/// trailing zero padding), and §14.1 (servers pad only ack-eliciting Initial packets).
+@test
+fn padded_initial_datagram_credits_full_udp_length() -> Result[(), ()] {
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((large_identity(), long_idle()))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, long_idle()))
+    let mut out: Bytes = list.with_capacity(4096)
+    let mut outputs: List[quic.Output] = list.with_capacity(8)
+    let _ = quic.poll(mut client, 0, mut out, mut outputs)
+    let mut initial: Bytes = list.new()
+    for o in outputs {
+        if let Transmit(at: at, len: len, ..) = o {
+            initial = clone(list.slice(out, at, at + len))
+            break
+        }
+    }
+    quic.committed(mut client, 0, 1)
+    let mut at = 0u64
+    let h = result.unwrap(codec.read_header(initial, mut at, list.len(initial), 8))
+    let dcid: Bytes = clone(list.slice(initial, h.destination.at, h.destination.at + h.destination.len))
+    let scid: Bytes = clone(list.slice(initial, h.source.at, h.source.at + h.source.len))
+    let mut events: List[quic.Event] = list.new()
+    let len0 = list.len(initial)
+    quic.receive_datagram(mut server, 10 * MS, CLIENT_ADDR, 0, mut initial, 0, len0, mut events)
+    let first_sizes = drain_sizes(mut server, 10 * MS)
+    let mut first_total = 0u64
+    for s in first_sizes {
+        first_total += s
+    }
+    if first_total <= 2400 || first_total > 3600 {
+        fail("first flight was not bounded by 3x the first 1,200-byte datagram")
+    }
+    // Second datagram: a short ~50-byte Initial PING padded to 1,200 bytes with trailing
+    // zeros outside the packet. Must credit all 1,200 bytes (unlocking > 1,200 bytes of
+    // remaining flight), record no MalformedHeader drop, and emit an unpadded ACK-only
+    // Initial (< 1,200 bytes).
+    let mut padded = udp_padded_initial_ping(dcid, scid, 1)
+    let len1 = list.len(padded)
+    quic.receive_datagram(mut server, 20 * MS, CLIENT_ADDR, 0, mut padded, 0, len1, mut events)
+    if quic.drop_count(server, MalformedHeader) != 0 {
+        fail("trailing zero bytes after an Initial packet were counted as MalformedHeader")
+    }
+    let second_sizes = drain_sizes(mut server, 20 * MS)
+    let mut second_total = 0u64
+    let mut has_unpadded_ack = false
+    for s in second_sizes {
+        second_total += s
+        if s < 1200 {
+            has_unpadded_ack = true
+        }
+    }
+    if second_total <= 1200 {
+        fail("server did not credit the full 1,200-byte UDP datagram toward anti-amplification")
+    }
+    if !has_unpadded_ack {
+        fail("server padded an ACK-only Initial packet to 1,200 bytes")
+    }
+    Ok(())
+}

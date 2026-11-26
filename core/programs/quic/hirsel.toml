@@ -52,6 +52,7 @@ grants = ["Tasks"]
 "authentication_vectors.hirsel" = "laws"
 "connection_laws.hirsel" = "laws"
 "recovery_laws.hirsel" = "laws"
+"pto_laws.hirsel" = "laws"
 "stream_laws.hirsel" = "laws"
 "reset_laws.hirsel" = "laws"
 "amplification_laws.hirsel" = "laws"

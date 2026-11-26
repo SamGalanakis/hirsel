@@ -1,0 +1,179 @@
+/// Drain every datagram an endpoint stages at `now` and commit them all, returning the
+/// raw datagrams.
+fn drain_datagrams(mut e: quic.Endpoint, now: u64) -> List[Bytes] {
+    let mut sent: List[Bytes] = list.new()
+    for _ in 0u64 .. 32 {
+        let mut out: Bytes = list.with_capacity(16 * 1500)
+        let mut outputs: List[quic.Output] = list.with_capacity(16)
+        let _ = quic.poll(mut e, now, mut out, mut outputs)
+        let mut count = 0u64
+        for o in outputs {
+            if let Transmit(at: at, len: len, ..) = o {
+                count += 1
+                list.push(mut sent, clone(list.slice(out, at, at + len)))
+            }
+        }
+        quic.committed(mut e, now, count)
+        if count == 0 {
+            break
+        }
+    }
+    take sent
+}
+
+/// bug: when both Initial and Handshake packets are in flight on a server, probing only
+/// one space per PTO alternates between them (4x backoff per space) and sends only one
+/// probe on later PTOs, starving handshake recovery under loss.
+/// oracle: RFC 9002 §6.2.4: PTO probes both unacknowledged handshake spaces together, and
+/// sends two probes per space from the second consecutive PTO onward.
+@test
+fn server_pto_probes_initial_and_handshake_together() -> Result[(), ()] {
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), long_idle()))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, long_idle()))
+    let mut at_server: List[quic.Event] = list.new()
+    let client_init = drain_datagrams(mut client, 0)
+    // Deliver three copies of the client's 1,200-byte Initial (duplicates still credit
+    // anti-amplification per RFC 9000 §8.1) so PTO #1 and PTO #2 are not amplification-capped.
+    for _ in 0u64 .. 3 {
+        for d in client_init {
+            let mut wire: Bytes = clone(d)
+            let len = list.len(wire)
+            quic.receive_datagram(mut server, 10 * MS, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+        }
+    }
+    // Drop the server's entire initial flight (Initial + Handshake).
+    let flight0 = drain_datagrams(mut server, 10 * MS)
+    if list.len(flight0) < 2 {
+        fail("server did not send Initial and Handshake packets in its first flight")
+    }
+    // PTO #1 (10 + 999 = 1009 ms): must probe both Initial and Handshake (1 each).
+    quic.timeout(mut server, 1020 * MS, mut at_server)
+    let pto1 = drain_datagrams(mut server, 1020 * MS)
+    let mut init1 = 0u64
+    let mut hshk1 = 0u64
+    for d in pto1 {
+        let t = d[0] & 0xf0
+        if t == 0xc0 {
+            init1 += 1
+        } else if t == 0xe0 {
+            hshk1 += 1
+        }
+    }
+    if init1 != 1 || hshk1 != 1 {
+        fail("server PTO #1 did not probe both Initial and Handshake once")
+    }
+    // PTO #2 (1020 + 1998 = 3018 ms): must send 2 Initial probes and 2 Handshake probes.
+    quic.timeout(mut server, 3030 * MS, mut at_server)
+    let pto2 = drain_datagrams(mut server, 3030 * MS)
+    let mut init2 = 0u64
+    let mut hshk2 = 0u64
+    for d in pto2 {
+        let t = d[0] & 0xf0
+        if t == 0xc0 {
+            init2 += 1
+        } else if t == 0xe0 {
+            hshk2 += 1
+        }
+    }
+    if init2 != 2 || hshk2 != 2 {
+        fail("server PTO #2 did not send two probes for both Initial and Handshake")
+    }
+    Ok(())
+}
+
+/// bug: a client that never receives HANDSHAKE_DONE fails to confirm the handshake when a
+/// 1-RTT packet it sent is acknowledged; or an Application PTO sends only PING instead of
+/// retransmitting unacknowledged STREAM data.
+/// oracle: RFC 9001 §4.1.2 (1-RTT ACK confirms client handshake) and RFC 9002 §6.2.4
+/// (Application PTO retransmits unacknowledged STREAM data).
+@test
+fn application_pto_retransmits_stream_and_confirms_on_1rtt_ack() -> Result[(), ()] {
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), q9_transport()))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    let ch = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, q9_transport()))
+    let mut at_client: List[quic.Event] = list.new()
+    let mut at_server: List[quic.Event] = list.new()
+    // Exchange handshake, dropping server's first 1-RTT packet (HANDSHAKE_DONE).
+    let mut now = 0u64
+    for _ in 0u64 .. 4 {
+        let c_out = drain_datagrams(mut client, now)
+        now += 10 * MS
+        for d in c_out {
+            let mut wire: Bytes = clone(d)
+            let len = list.len(wire)
+            quic.receive_datagram(mut server, now, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+        }
+        let s_out = drain_datagrams(mut server, now)
+        now += 10 * MS
+        for d in s_out {
+            if d[0] & 0x80 == 0 {
+                // Drop server's 1-RTT HANDSHAKE_DONE.
+                continue
+            }
+            let mut wire: Bytes = clone(d)
+            let len = list.len(wire)
+            quic.receive_datagram(mut client, now, SERVER_ADDR, 0, mut wire, 0, len, mut at_client)
+        }
+    }
+    if !connected(at_client) || !connected(at_server) {
+        fail("handshake did not reach Connected")
+    }
+    // Client sends a 1-RTT stream; server's immediate 1-RTT reply carries only ACK
+    // (HANDSHAKE_DONE was already sent and dropped). Receiving that 1-RTT ACK must confirm
+    // the client handshake and drop its Handshake keys (RFC 9001 §4.1.2).
+    let s1 = result.unwrap(quic.open(mut client, ch, true))
+    let _ = result.unwrap(quic.write(mut client, ch, s1, b"ping", true))
+    for d in drain_datagrams(mut client, now) {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        quic.receive_datagram(mut server, now + 10 * MS, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+    }
+    now += 10 * MS
+    for d in drain_datagrams(mut server, now) {
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        quic.receive_datagram(mut client, now + 10 * MS, SERVER_ADDR, 0, mut wire, 0, len, mut at_client)
+    }
+    now += 10 * MS
+    // Now open a second stream, write a request, and drop its 1-RTT datagram.
+    let s2 = result.unwrap(quic.open(mut client, ch, true))
+    let _ = result.unwrap(quic.write(mut client, ch, s2, b"GET /pto", true))
+    let dropped_req = drain_datagrams(mut client, now)
+    if list.len(dropped_req) == 0 {
+        fail("client did not send the second stream")
+    }
+    // Advance past client's PTO (server never sends HANDSHAKE_DONE). The client must NOT
+    // send any Handshake packet (already confirmed via 1-RTT ACK), and its Application PTO
+    // probe must carry the lost STREAM data directly to the server.
+    list.clear(mut at_server)
+    now += 500 * MS
+    quic.timeout(mut client, now, mut at_client)
+    let probes = drain_datagrams(mut client, now)
+    if list.len(probes) == 0 {
+        fail("client did not send an Application PTO probe")
+    }
+    for d in probes {
+        if d[0] & 0x80 != 0 {
+            fail("client sent a Handshake packet after confirming via 1-RTT ACK")
+        }
+        let mut wire: Bytes = clone(d)
+        let len = list.len(wire)
+        quic.receive_datagram(mut server, now + 10 * MS, CLIENT_ADDR, 0, mut wire, 0, len, mut at_server)
+    }
+    let mut got_stream: Option[(quic.ConnectionHandle, quic.StreamId)] = None
+    for event in at_server {
+        if let Readable(c, sid) = event {
+            got_stream = Some((c, sid))
+        }
+    }
+    let Some((sh, sid)) = got_stream else {
+        fail("server did not receive STREAM data on the Application PTO probe")
+    }
+    let mut body: Bytes = list.with_capacity(64)
+    let _ = result.unwrap(quic.read(mut server, sh, sid, mut body))
+    if body != b"GET /pto" {
+        fail("Application PTO probe carried wrong stream payload")
+    }
+    Ok(())
+}

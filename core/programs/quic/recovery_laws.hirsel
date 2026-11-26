@@ -383,10 +383,11 @@ fn sim_end(take plan: SimEnd) -> SimTrace waits {
 fn loss_recovery_under_sim_udp(tasks: Tasks) -> Result[(), ()] waits {
     // sim.udp draws one word for its ephemeral port, then one loss draw per datagram in
     // send order (no jitter, reorder, duplication or rebinding). At 50% loss, word 0
-    // drops and the largest word keeps: the client's first three Initials are dropped.
-    let mut words: List[u64] = list.with_capacity(1004)
+    // drops and the largest word keeps: the client's first four Initials (initial send,
+    // PTO #1's single probe, and PTO #2's two probes) are dropped.
+    let mut words: List[u64] = list.with_capacity(1005)
     list.push(mut words, 0)
-    for _ in 0u64 .. 3 {
+    for _ in 0u64 .. 4 {
         list.push(mut words, 0)
     }
     for _ in 0u64 .. 1000 {
@@ -409,12 +410,13 @@ fn loss_recovery_under_sim_udp(tasks: Tasks) -> Result[(), ()] waits {
     let c = result.unwrap(task.join(take client_task))
     let s = result.unwrap(task.join(take server_task))
     result.unwrap(task.join(take served))
-    // Sends at 0, then PTOs at 999, 999 + 1998 = 2997 and 2997 + 3996 = 6993 ms.
-    let expected =[0u64, 999 * MS, 2997 * MS, 6993 * MS]
-    if list.len(c.sends) < 4 {
+    // Sends at 0, then PTOs at 999 (1 probe), 999 + 1998 = 2997 (2 probes) and
+    // 2997 + 3996 = 6993 ms (2 probes).
+    let expected =[0u64, 999 * MS, 2997 * MS, 2997 * MS, 6993 * MS, 6993 * MS]
+    if list.len(c.sends) < 6 {
         fail("the client did not probe its lost Initial three times")
     }
-    for i in 0u64 .. 4 {
+    for i in 0u64 .. 6 {
         eq("client Initial and probe times", c.sends[i], expected[i])
     }
     if c.connected == SIM_NONE || s.connected == SIM_NONE || c.closed || s.closed {
@@ -604,12 +606,13 @@ fn q9_transport() -> quic.TransportConfig {
 }
 
 /// Datagrams counted from T that the path loses: the first of four (single loss), the
-/// last of two (tail loss), and the first four (persistent congestion).
+/// last of two (tail loss), and the first six (persistent congestion: p1 + PTO #1's
+/// probe + PTO #2's two probes + PTO #3's two probes).
 fn q9_dropped(case: u64, index: u64) -> bool {
     match case {
         0 => index == 0,
         1 => index == 1,
-        _ => index < 4,
+        _ => index < 6,
     }
 }
 
@@ -806,25 +809,24 @@ fn q9_end_to_end(tasks: Tasks) waits {
     q9_case("single loss: sends from T, or cwnd 6000 at T + 20", traces[2], single, 20, 6000)
     // Tail loss. p1 and p2 at T; p2 lost. ACK of p1 at T + 20: p2 is above the largest
     // acknowledged, so neither threshold applies; the PTO is T + 46 (A.8). The probe (p3,
-    // a PING) leaves at T + 46 and its ACK arrives at T + 66: p2 sent at T, loss_delay
-    // 9/8 * 20 = 22.5 ms, T + 22.5 <= T + 66, so p2 is lost then (A.10) and its chunk
-    // leaves again. The PTO left the window alone (§7.5); the loss halves it to 6000.
+    // carrying p2's unacknowledged chunk per RFC 9002 §6.2.4) leaves at T + 46 and its
+    // ACK arrives at T + 66: p2 sent at T, loss_delay 9/8 * 20 = 22.5 ms, T + 22.5 <=
+    // T + 66, so p2 is lost then (A.10) while p3 already settled the chunk. The PTO left
+    // the window alone (§7.5); the loss halves it to 6000.
     let mut tail_sends: List[u64] = list.new()
-    for v in[0u64, 0u64, 46u64, 66u64] {
+    for v in[0u64, 0u64, 46u64] {
         list.push(mut tail_sends, v * MS)
     }
     q9_case("tail loss: sends from T, or cwnd 6000 at T + 66", traces[1], tail_sends, 66, 6000)
     // Persistent congestion. p1 at T and the probes at each PTO are lost: PTO k fires
-    // at the previous probe + 46 * 2^(k-1) ms, so probes at T + 46, T + 46 + 92 = T + 138
-    // and T + 138 + 184 = T + 322. The fourth PTO, at T + 322 + 368 = T + 690, sends p5,
-    // which arrives; its ACK at T + 710 declares p1 and p2 lost by the packet threshold
-    // and p3 and p4 by time. B.8: the congestion event would leave 6000, but p1-p4 are
-    // contiguous ack-eliciting losses after the first RTT sample spanning 322 ms >
-    // 3 * 46 = 138 ms (§7.6.2): cwnd = kMinimumWindow 2400 and the recovery period ends.
-    // p1's chunk leaves again at T + 710; its ACK finds the sender application limited,
-    // so nothing grows (B.5).
+    // at the previous probe + 46 * 2^(k-1) ms, sending 1 probe at T + 46 and 2 probes at
+    // T + 46 + 92 = T + 138 and T + 138 + 184 = T + 322. The fourth PTO, at T + 322 +
+    // 368 = T + 690, sends 2 probes carrying p1's chunk, which arrive; their ACK at
+    // T + 710 declares p1-p6 lost. B.8: p1-p6 are contiguous ack-eliciting losses after
+    // the first RTT sample spanning 322 ms > 3 * 46 = 138 ms (§7.6.2): cwnd =
+    // kMinimumWindow 2400 and the recovery period ends. The probes settled p1's chunk.
     let mut persistent: List[u64] = list.new()
-    for v in[0u64, 46u64, 138u64, 322u64, 690u64, 710u64] {
+    for v in[0u64, 46u64, 138u64, 138u64, 322u64, 322u64, 690u64, 690u64] {
         list.push(mut persistent, v * MS)
     }
     q9_case("persistent congestion: sends from T, or cwnd 2400 at T + 710", traces[0], persistent, 710, 2400)

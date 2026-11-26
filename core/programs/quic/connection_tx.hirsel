@@ -19,15 +19,16 @@ const ACK_DELAY_EXPONENT: u64 = 3
 
 /// Stage one packet of `kind`. Without `send`, the congestion controller or pacer holds
 /// new ack-eliciting frames back; an owed probe is sent regardless (RFC 9002 §7.5).
-fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, mut payload: Bytes, mut staged_frames: List[SentFrame], mut out: Bytes) -> Option[StagedPacket] {
+fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, server: bool, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, probe: bool, mut payload: Bytes, mut staged_frames: List[SentFrame], mut out: Bytes) -> Option[StagedPacket] {
     if let None = s.send {
         return None
     }
     let start = list.len(out)
-    // RFC 9000 §8.2.1: a datagram with PATH_CHALLENGE or PATH_RESPONSE is expanded to
-    // 1200 bytes when the anti-amplification limit allows.
+    // RFC 9000 §14.1: clients pad every Initial datagram to 1200 bytes; servers pad only
+    // ack-eliciting Initial datagrams. RFC 9000 §8.2.1: PATH_CHALLENGE/PATH_RESPONSE
+    // datagrams are expanded to 1200 bytes when the anti-amplification limit allows.
     let path_frames = kind == OneRtt && list.len(s.path_out) > 0
-    let mut padding = if kind == Initial || (path_frames && limit >= 1200) {
+    let mut padding = if (kind == Initial && !server) || (path_frames && limit >= 1200) {
         1200u64
     } else {
         0u64
@@ -36,6 +37,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, kind:
     if limit < padding || cap == 0 {
         return None
     }
+    let can_elicit = !(server && kind == Initial && limit < 1200)
     list.clear(mut payload)
     if list.capacity(payload) < cap {
         list.reserve(mut payload, cap)
@@ -64,7 +66,9 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, kind:
         }
         closed = true
     } else {
-        if s.ack_pending && !s.ack_staged {
+        let ack_owed = s.ack_pending && !s.ack_staged
+        let piggyback_ack = !ack_owed && kind != OneRtt && list.len(s.received) > 0 && (send || probe) && can_elicit && ((cap > 32 && (list.len(s.resend) != 0 || list.len(s.crypto_out) > s.crypto_committed)) || (probe && cap > 16))
+        if ack_owed || piggyback_ack {
             // RFC 9000 §13.2.5: the delay since the largest packet arrived, in units of
             // 2^ack_delay_exponent microseconds. RFC 9002 §5.3 lets Initial and
             // Handshake delays be ignored, so those report 0.
@@ -93,8 +97,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, kind:
             path = true
             eliciting = true
         }
-        let probe = s.probes > 0
-        if send || probe {
+        if (send || probe) && can_elicit {
             if done && list.len(payload) < cap {
                 if let Ok(()) = codec.write_frame(HandshakeDone, b"", mut payload) {
                     done_sent = true
@@ -133,6 +136,12 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, is_confirmed: bool, kind:
                     eliciting = true
                 }
             }
+        }
+        if piggyback_ack && !eliciting {
+            return None
+        }
+        if server && kind == Initial && eliciting {
+            padding = 1200u64
         }
     }
     let frame_len = list.len(staged_frames) - frame_start

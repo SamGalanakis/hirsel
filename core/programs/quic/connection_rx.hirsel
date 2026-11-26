@@ -93,6 +93,15 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
             }
             recovery.on_ack_into(mut c.recovery, now, index, ack_ranges, ack_delay_ns(c, a.delay), a.ecn, mut acked, mut lost)
             settle(mut c, now, index, acked, lost, mut events)
+            if let Application = level {
+                if let Client = c.side {
+                    // RFC 9001 §4.1.2: a client also confirms the handshake when any
+                    // 1-RTT packet it sent is acknowledged.
+                    if !recovery.confirmed(c.recovery) {
+                        confirm(mut c, now)
+                    }
+                }
+            }
             Ok(Quiet)
         },
         Crypto(offset: offset, data: data) => {

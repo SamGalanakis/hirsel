@@ -117,7 +117,8 @@ fn files_deliver_committed_prefixes_and_all_open_modes() {
     }
 }
 /// A sync parks while the helper runs it and delivers the syscall's own
-/// failure, never success: fdatasync(2) refuses a pipe with EINVAL.
+/// failure, never success: fdatasync(2) refuses a pipe with EINVAL, and
+/// Darwin's F_FULLFSYNC refuses anything but a file with EBADF.
 #[test]
 fn a_parked_sync_delivers_the_syscalls_failure() {
     let mut f = Fixture::new();
@@ -126,13 +127,11 @@ fn a_parked_sync_delivers_the_syscalls_failure() {
     drop(read);
     let h = f.os.adopt_file(write);
     let failed = f.simple(SYNC, h, b"", 0);
-    assert_eq!(
-        failed.error,
-        IoError {
-            tag: 5,
-            code: libc::EINVAL as u32
-        }
-    );
+    #[cfg(target_os = "linux")]
+    let refusal = libc::EINVAL;
+    #[cfg(target_os = "macos")]
+    let refusal = libc::EBADF;
+    assert_eq!(failed.error, IoError::from_errno(refusal));
 }
 #[test]
 fn locks_are_exclusive_idempotent_and_end_at_close() {

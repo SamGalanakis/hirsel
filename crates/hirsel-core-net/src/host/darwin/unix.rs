@@ -26,7 +26,11 @@ pub(crate) fn open_beneath(root: BorrowedFd<'_>, path: &CStr, flags: i32) -> io:
     // SAFETY: the C path is live for the call; a success transfers a descriptor.
     let fd = unsafe { libc::openat(root.as_raw_fd(), path.as_ptr(), flags, 0) };
     if fd < 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOTCAPABLE) => io::Error::from_raw_os_error(libc::EXDEV),
+            _ => error,
+        });
     }
     // SAFETY: openat returned an owned descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })

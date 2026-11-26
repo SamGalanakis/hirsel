@@ -85,17 +85,59 @@ pub(super) fn leaf_stat(parent: i32, name: &CStr) -> io::Result<Option<libc::sta
 }
 
 pub(super) fn remove(fd: i32, name: &CString) -> io::Result<()> {
-    // unlinkat never follows the final symlink; directory removal is retried explicitly.
+    // unlinkat never follows the final symlink. It refuses a directory with
+    // EISDIR on Linux and with EPERM on Darwin, and the removal is then retried
+    // as a directory's. A name that is no directory keeps the first error.
     match host::unlink_at(fd, name, 0) {
-        Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
-            host::unlink_at(fd, name, libc::AT_REMOVEDIR)
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EISDIR | libc::EPERM)) => {
+            match host::unlink_at(fd, name, libc::AT_REMOVEDIR) {
+                Err(second) if second.raw_os_error() == Some(libc::ENOTDIR) => Err(error),
+                done => done,
+            }
         }
         done => done,
     }
 }
+/// The names in `directory`, without `.` and `..`.
+fn names(directory: &OwnedFd) -> io::Result<Vec<CString>> {
+    // The stream owns a duplicate, which shares the directory's read position;
+    // nothing else has read this descriptor.
+    let duplicate = directory.try_clone()?;
+    // SAFETY: a live directory descriptor, which the stream owns on success.
+    let stream = unsafe { libc::fdopendir(duplicate.as_raw_fd()) };
+    if stream.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let _ = duplicate.into_raw_fd();
+    let mut names = Vec::new();
+    let listed = loop {
+        // SAFETY: this function owns the live stream. readdir reports the end
+        // and an error with null, and errno tells them apart.
+        let entry = unsafe {
+            *crate::host::sys::errno() = 0;
+            libc::readdir(stream).as_ref()
+        };
+        let Some(entry) = entry else {
+            let error = io::Error::last_os_error();
+            break match error.raw_os_error() {
+                Some(0) => Ok(names),
+                _ => Err(error),
+            };
+        };
+        // SAFETY: readdir returns a NUL-terminated name, valid until the next call.
+        let name = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) };
+        if !matches!(name.to_bytes(), b"." | b"..") {
+            names.push(name.to_owned());
+        }
+    };
+    // SAFETY: the stream is live and closed once; this also closes its descriptor.
+    unsafe { libc::closedir(stream) };
+    listed
+}
 pub(super) fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
-    // Descriptor-based walk; never follow a leaf link. std's read_dir owns the
-    // /proc fd traversal, while every child open is relative to its pinned parent.
+    // Descriptor-based walk; never follow a leaf link. Each directory is listed
+    // through its own descriptor, and every child open is relative to its pinned
+    // parent.
     let root = beneath(
         fd,
         name.as_bytes(),
@@ -112,10 +154,7 @@ pub(super) fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
             continue;
         }
         let mut children = Vec::new();
-        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
-            use std::os::unix::ffi::OsStrExt;
-            let entry = entry?;
-            let child = CString::new(entry.file_name().as_bytes())?;
+        for child in names(&directory)? {
             let opened = beneath(
                 directory.as_raw_fd(),
                 child.as_bytes(),

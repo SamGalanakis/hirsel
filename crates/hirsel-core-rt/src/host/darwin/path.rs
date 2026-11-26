@@ -1,6 +1,8 @@
 //! Confined opens on Darwin: `openat` with `O_RESOLVE_BENEATH` resolves every
-//! component beneath the granted directory and refuses an escape with
-//! `ENOTCAPABLE`; `O_NOFOLLOW_ANY` refuses every symlink on the way.
+//! component beneath the granted directory, and `O_NOFOLLOW_ANY` refuses every
+//! symlink on the way. The kernel refuses an escape with `ENOTCAPABLE`, which
+//! the seam reports as `EXDEV`, the error Linux's `RESOLVE_BENEATH` gives, so
+//! an escape is `Denied` on both hosts.
 use std::{
     ffi::CStr,
     io,
@@ -50,7 +52,11 @@ pub(crate) fn open_beneath(fd: RawFd, path: &CStr, how: &How) -> io::Result<Owne
     // SAFETY: openat reads the pinned path for the call only.
     let raw = unsafe { libc::openat(fd, path.as_ptr(), how.flags, how.mode) };
     if raw < 0 {
-        return Err(io::Error::last_os_error());
+        let error = io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOTCAPABLE) => io::Error::from_raw_os_error(libc::EXDEV),
+            _ => error,
+        });
     }
     // SAFETY: a successful openat transfers a fresh descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })

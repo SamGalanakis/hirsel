@@ -1,4 +1,44 @@
-fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
+fn space_wants_send(s: Space, st: Streams, level: u64, send: bool, probe: bool, done: bool, server: bool, level_limit: u64) -> bool {
+    if let None = s.send {
+        return false
+    }
+    if level == 0 && !server && level_limit < 1200 {
+        return false
+    }
+    if s.ack_pending && !s.ack_staged {
+        return true
+    }
+    if level == 2 && list.len(s.path_out) > 0 && level_limit >= 1200 {
+        return true
+    }
+    let can_elicit = !(server && level == 0 && level_limit < 1200)
+    if (send || probe) && can_elicit {
+        if probe || list.len(s.resend) > 0 || list.len(s.crypto_out) > s.crypto_committed {
+            return true
+        }
+        if level == 2 {
+            if done {
+                return true
+            }
+            if !s.hold_data && (list.len(st.datagrams) > 0 || has_pending_streams(st)) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn level_wants_send(c: Connection, level: u64, send: bool, probe: bool, done: bool, server: bool, level_limit: u64) -> bool {
+    match level {
+        0 => space_wants_send(c.initial, c.streams, 0, send, probe, false, server, level_limit),
+        1 => space_wants_send(c.encrypted, c.streams, 1, send, probe, false, server, level_limit),
+        _ => space_wants_send(c.application, c.streams, 2, send, probe, done, server, level_limit),
+    }
+}
+
+/// Stage packets for `c` into the current batch. Returns true when staging stopped
+/// because `out` or `tx` reached capacity while `c` still had runnable work.
+fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) -> bool {
     c.initial.ack_staged = false
     c.encrypted.ack_staged = false
     c.application.ack_staged = false
@@ -6,8 +46,8 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
     path_maintenance(mut c, now)
     let mut limit = packet_limit(c, mtu)
     let closing: Option[CloseFrame] = match c.life {
-        Draining => return,
-        Closing(f) if !f.pending => return,
+        Draining => return false,
+        Closing(f) if !f.pending => return false,
         Closing(f) => {
             if let None = c.deadline {
                 c.deadline = Some(deadline_after(now, three_pto(c)))
@@ -48,6 +88,8 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
                 probe_streams(mut c.streams)
             }
             let before = list.len(out)
+            let before_staged = list.len(staged)
+            let avail = list.capacity(out) - before
             let level_limit = order.min(limit, room)
             let mut send = recovery.window_allows(c.recovery, pending, limit)
             if send {
@@ -57,10 +99,23 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
                 }
             }
             limited = limited && send
+            if list.len(tx) == list.capacity(tx) {
+                if level_wants_send(c, level, send, probe, done, server, level_limit) {
+                    recovery.set_app_limited(mut c.recovery, limited)
+                    return true
+                }
+                level += 1
+                probed = 0
+                continue
+            }
             let (size, more, eliciting) = match level {
                 0 => stage_level(mut staged, mut staged_frames, mut c.initial, mut c.streams, is_confirmed, server, Initial, c.peer_id, c.local_id, false, None, now, send, probe, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
                 1 => stage_level(mut staged, mut staged_frames, mut c.encrypted, mut c.streams, is_confirmed, server, Handshake, c.peer_id, c.local_id, false, None, now, send, probe, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
                 _ => stage_level(mut staged, mut staged_frames, mut c.application, mut c.streams, is_confirmed, server, OneRtt, c.peer_id, c.local_id, done, None, now, send, probe, ecn, slot, handle, peer, level_limit, mut c.tx_payload, mut out, mut tx),
+            }
+            if list.len(staged) == before_staged && avail < level_limit && level_wants_send(c, level, send, probe, done, server, level_limit) {
+                recovery.set_app_limited(mut c.recovery, limited)
+                return true
             }
             pending += size
             room -= order.min(room, list.len(out) - before)
@@ -71,21 +126,33 @@ fn staged_connection(mut staged: List[Staged], mut staged_frames: List[SentFrame
                 done = false
             }
             let again = (probed < level_probes && eliciting) || (level == 2 && more && send)
-            if !again {
+            if again {
+                if list.len(tx) == list.capacity(tx) {
+                    recovery.set_app_limited(mut c.recovery, limited)
+                    return true
+                }
+            } else {
                 level += 1
                 probed = 0
             }
         }
         // B.5: a sender held back by nothing it controls is application limited.
         recovery.set_app_limited(mut c.recovery, limited)
-        stage_mtu_probe(mut staged, mut c, now, slot, mtu, pending, ecn, mut out, mut tx)
-    } else if let Some(_) = c.application.send {
+        return stage_mtu_probe(mut staged, mut c, now, slot, mtu, pending, ecn, mut out, mut tx)
+    }
+    if list.len(tx) == list.capacity(tx) {
+        return true
+    }
+    let before_staged = list.len(staged)
+    let avail = list.capacity(out) - list.len(out)
+    if let Some(_) = c.application.send {
         let _ = stage_level(mut staged, mut staged_frames, mut c.application, mut c.streams, is_confirmed, server, OneRtt, c.peer_id, c.local_id, false, closing, now, false, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
     } else if let Some(_) = c.encrypted.send {
         let _ = stage_level(mut staged, mut staged_frames, mut c.encrypted, mut c.streams, is_confirmed, server, Handshake, c.peer_id, c.local_id, false, closing, now, false, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
     } else {
         let _ = stage_level(mut staged, mut staged_frames, mut c.initial, mut c.streams, is_confirmed, server, Initial, c.peer_id, c.local_id, false, closing, now, false, false, 0, slot, handle, peer, limit, mut c.tx_payload, mut out, mut tx)
     }
+    list.len(staged) == before_staged && avail < limit
 }
 
 /// Stage one packet of a level: the in-flight bytes staged (or 0), whether it carried
@@ -124,19 +191,7 @@ fn earliest(a: Option[u64], b: Option[u64]) -> Option[u64] {
 }
 
 fn next_deadline(e: Endpoint) -> Option[u64] {
-    let mut first: Option[u64] = None
-    for connection in e.connections {
-        if let Some(c) = connection {
-            first = earliest(first, c.deadline)
-            if open_life(c) && !amplification_blocked(c) {
-                first = earliest(first, recovery.timer(c.recovery))
-                first = earliest(first, c.wake)
-                first = earliest(first, path_wake(c))
-                first = earliest(first, mtu_wake(c))
-            }
-        }
-    }
-    first
+    earliest(heap_min_at(e.timeout_heap), heap_min_at(e.wake_heap))
 }
 
 /// Put the frames of staged packets from index from on back on their queues: a suffix
@@ -144,10 +199,15 @@ fn next_deadline(e: Endpoint) -> Option[u64] {
 fn abandon(mut e: Endpoint, from: u64) {
     for i in from .. list.len(e.staged) {
         if let Packet(slot: slot, handle: handle, packet: p, ..) = e.staged[i] {
+            let mut requeued = false
             if let Some(mut c) = e.connections[slot] {
                 if c.handle == handle {
                     requeue_range(mut c.streams, e.staged_frames, p.frame_start, p.frame_len, true)
+                    requeued = true
                 }
+            }
+            if requeued {
+                enqueue_ready(mut e, slot)
             }
         }
     }
@@ -157,6 +217,7 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
     abandon(mut e, 0)
     list.truncate(mut e.staged, 0)
     list.truncate(mut e.staged_frames, 0)
+    let mut stateless_staged = 0u64
     for reply in e.stateless {
         let at = list.len(out)
         let len = list.len(reply.wire)
@@ -166,16 +227,50 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
         list.append(mut out, reply.wire)
         list.push(mut tx, Transmit(to: reply.peer, at: at, len: len, ecn: 0, send_at: now))
         list.push(mut e.staged, StatelessReply)
+        stateless_staged += 1
     }
+    let mut due = replace(mut e.due_slots, list.new())
+    heap_pop_due(mut e.wake_heap, now, mut due)
+    for slot in due {
+        enqueue_ready(mut e, slot)
+    }
+    list.clear(mut due)
+    e.due_slots = take due
     let mtu: u64 = int.widen(e.config.max_mtu)
-    for i in 0u64 .. list.len(e.connections) {
-        issue_cids(mut e, i)
-        if let Some(mut c) = e.connections[i] {
-            staged_connection(mut e.staged, mut e.staged_frames, mut c, now, i, mtu, mut out, mut tx)
+    while e.ready_len > 0 {
+        if list.len(tx) == list.capacity(tx) {
+            break
+        }
+        let Some(slot) = pop_ready(mut e) else {
+            break
+        }
+        e.slot_visits += 1
+        issue_cids(mut e, slot)
+        let before_staged = list.len(e.staged)
+        let mut hit_limit = false
+        let mut limit_hit = false
+        if let Some(mut c) = e.connections[slot] {
+            hit_limit = staged_connection(mut e.staged, mut e.staged_frames, mut c, now, slot, mtu, mut out, mut tx)
             dropped_many(mut e.drops, DatagramLate, replace(mut c.streams.datagrams_late, 0))
+            limit_hit = c.keys.limit_hit
+        }
+        if limit_hit {
+            note_limit_hit(mut e, slot)
+        }
+        sync_deadlines(mut e, slot)
+        if hit_limit {
+            if list.len(e.staged) > before_staged {
+                enqueue_ready(mut e, slot)
+            } else {
+                enqueue_ready_front(mut e, slot)
+            }
+            break
         }
     }
-    let at = next_deadline(e)
+    let mut at = next_deadline(e)
+    if e.ready_len > 0 || stateless_staged < list.len(e.stateless) {
+        at = earliest(Some(now), at)
+    }
     if let Some(deadline) = at {
         if list.len(tx) < list.capacity(tx) {
             list.push(mut tx, Wake(at: deadline))
@@ -184,7 +279,74 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
     at
 }
 
-fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedPacket, staged_frames: List[SentFrame]) {
+fn space_has_immediate_work(s: Space, kind: codec.PacketKind, server: bool, done: bool, limit: u64, room: u64, can_send: bool) -> bool {
+    if let None = s.send {
+        return false
+    }
+    let level_limit = order.min(limit, room)
+    if kind == Initial && !server && level_limit < 1200 {
+        return false
+    }
+    if s.ack_pending && level_limit >= 32 {
+        return true
+    }
+    if kind == OneRtt && list.len(s.path_out) > 0 && level_limit >= 1200 {
+        return true
+    }
+    let can_elicit = !(server && kind == Initial && level_limit < 1200)
+    if can_elicit && (can_send || s.probes > 0) {
+        if s.probes > 0 || list.len(s.resend) > 0 || list.len(s.crypto_out) > s.crypto_committed {
+            return true
+        }
+        if kind == OneRtt && done {
+            return true
+        }
+    }
+    false
+}
+
+fn has_immediate_work(c: Connection, mtu: u64, dropped_initial: bool) -> bool {
+    match c.life {
+        Draining => return false,
+        Closing(f) => return f.pending,
+        Open => (),
+    }
+    if c.keys.sealed >= c.keys.limit {
+        return true
+    }
+    if c.keys.sealed >= c.keys.update_at && !c.keys.blocked && c.keys.tx_acked && confirmed(c) {
+        return true
+    }
+    let limit = packet_limit(c, mtu)
+    let room = amplification_room(c)
+    let can_send = c.wake == None && recovery.window_allows(c.recovery, 0, limit)
+    let server = match c.side {
+        Server => true,
+        Client => false,
+    }
+    if space_has_immediate_work(c.initial, Initial, server, false, limit, room, can_send) {
+        return true
+    }
+    if space_has_immediate_work(c.encrypted, Handshake, server, false, limit, room, can_send) {
+        return true
+    }
+    if space_has_immediate_work(c.application, OneRtt, server, c.handshake_done, limit, room, can_send) {
+        return true
+    }
+    if let Some(_) = c.application.send {
+        if can_send && !c.application.hold_data && room >= 64 && c.streams.ready {
+            if list.len(c.streams.datagrams) > 0 {
+                return true
+            }
+            if dropped_initial && has_pending_streams(c.streams) {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedPacket, staged_frames: List[SentFrame]) -> bool {
     c.path_sent = int.saturating_add(c.path_sent, p.size)
     match kind {
         Initial => commit_space(mut c.initial, p),
@@ -221,10 +383,14 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
         c.mtu.probe = Some(p.number)
         c.mtu.trying = p.size
     }
+    let mut dropped_initial = false
     if kind == Handshake {
         if let Client = c.side {
             // RFC 9001 §4.9.1: a client discards Initial keys when it first sends a
             // Handshake packet.
+            if let Some(_) = c.initial.send {
+                dropped_initial = true
+            }
             drop_space(mut c, recovery.INITIAL, now)
         }
     }
@@ -240,21 +406,52 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
         refresh_idle(mut c, now)
         c.idle_rearmed = true
     }
+    dropped_initial
+}
+
+fn next_staged_slot(staged: List[Staged], i: u64, limit: u64) -> u64 {
+    if i + 1 < limit {
+        if let Packet(slot: next, ..) = staged[i + 1] {
+            return next
+        }
+    }
+    NO_SLOT
 }
 
 /// Commit the sent datagram prefix. The remaining frames stay queued, while every
 /// packet number used by poll stays consumed by its sealer.
 pub fn committed(mut e: Endpoint, now: u64, k: u64) {
     let mut replies = 0u64
-    for i in 0u64 .. order.min(k, list.len(e.staged)) {
+    let limit = order.min(k, list.len(e.staged))
+    let mtu: u64 = int.widen(e.config.max_mtu)
+    let mut slot_dropped_initial = false
+    for i in 0u64 .. limit {
         match e.staged[i] {
             StatelessReply => {
                 replies += 1
             },
             Packet(slot: slot, handle: handle, kind: kind, packet: p) => {
+                let mut more_work = false
+                let mut matched = false
+                let is_last_for_slot = next_staged_slot(e.staged, i, limit) != slot
                 if let Some(mut c) = e.connections[slot] {
                     if c.handle == handle {
-                        commit_packet(mut c, now, kind, p, e.staged_frames)
+                        matched = true
+                        if commit_packet(mut c, now, kind, p, e.staged_frames) {
+                            slot_dropped_initial = true
+                        }
+                        if is_last_for_slot {
+                            more_work = has_immediate_work(c, mtu, slot_dropped_initial)
+                        }
+                    }
+                }
+                if is_last_for_slot {
+                    slot_dropped_initial = false
+                    if matched {
+                        sync_deadlines(mut e, slot)
+                        if more_work {
+                            enqueue_ready(mut e, slot)
+                        }
                     }
                 }
             },
@@ -264,7 +461,7 @@ pub fn committed(mut e: Endpoint, now: u64, k: u64) {
         let suffix: List[Stateless] = clone(list.slice(e.stateless, replies, list.len(e.stateless)))
         e.stateless = take suffix
     }
-    abandon(mut e, order.min(k, list.len(e.staged)))
+    abandon(mut e, limit)
     list.truncate(mut e.staged, 0)
     list.truncate(mut e.staged_frames, 0)
 }

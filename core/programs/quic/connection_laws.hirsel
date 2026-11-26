@@ -235,3 +235,244 @@ fn connection_frame_refusals() -> Result[(), ()] {
     check_stream_refusals()
     Ok(())
 }
+
+fn sched_endpoint_config(max_conns: u32) -> quic.EndpointConfig {
+    let mut c = endpoint_config()
+    c.limits.connections = max_conns
+    c.limits.unvalidated = max_conns
+    c.limits.datagram_bytes = 65536
+    take c
+}
+
+fn sched_transport(idle_ms: u32) -> quic.TransportConfig {
+    let mut t = transport_config(None)
+    t.max_idle_ms = idle_ms
+    t.max_datagram_frame = 1200
+    t.send_bytes = 65536
+    take t
+}
+
+fn sched_payload(tag: u8, len: u64) -> Shared[Bytes] {
+    let mut b: Bytes = list.with_capacity(len)
+    list.fill(mut b, len, tag)
+    shared.new(take b)
+}
+
+fn sched_step(mut from: quic.Endpoint, mut to: quic.Endpoint, src: Addr, now: u64, batch: u64, commit_cap: u64, mut events: List[quic.Event]) -> u64 {
+    let mut wire: Bytes = list.with_capacity(batch * 1200)
+    let mut tx: List[quic.Output] = list.with_capacity(batch)
+    let _ = quic.poll(mut from, now, mut wire, mut tx)
+    let mut staged = 0u64
+    for o in tx {
+        if let Transmit(..) = o {
+            staged += 1
+        }
+    }
+    let committed_k = order.min(staged, commit_cap)
+    quic.committed(mut from, now, committed_k)
+    let mut sent = 0u64
+    for o in tx {
+        if sent == committed_k {
+            break
+        }
+        if let Transmit(at: at, len: len, ..) = o {
+            quic.receive_datagram(mut to, now, src, 0, mut wire, at, len, mut events)
+            sent += 1
+        }
+    }
+    committed_k
+}
+
+/// bug: polling connections from slot 0 lets a saturated connection starve higher slots under
+/// capped batches, drops unsent work after a partial batch or partial commit, loses PTO/idle
+/// deadlines after slot reuse, or scans every idle slot on each poll/timeout.
+/// oracle: fair FIFO ready scheduling serves every waiting link before repeating a saturated
+/// link; abandoned suffixes stay runnable and deliver every frame; expired slots reuse cleanly
+/// with direct handle lookup and exact idle/PTO deadlines; active rounds visit O(active) slots.
+@test
+fn scheduler_fairness_partial_batch_and_slot_reuse() -> Result[(), ()] {
+    let mut server = result.unwrap(quic.endpoint(provide.random(17), sched_endpoint_config(16), Some((p256_identity(false), sched_transport(5000)))))
+    let mut client = result.unwrap(quic.endpoint(provide.random(39), sched_endpoint_config(16), None))
+    let mut ch: List[quic.ConnectionHandle] = list.with_capacity(8)
+    let mut sh: List[quic.ConnectionHandle] = list.with_capacity(8)
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    for _ in 0u64 .. 8 {
+        let h = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, sched_transport(5000)))
+        list.push(mut ch, h)
+    }
+    let mut now = 1000000u64
+    for _ in 0u64 .. 24 {
+        let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 32, 32, mut at_server)
+        for ev in at_server {
+            if let Connected(c: h, ..) = ev {
+                list.push(mut sh, h)
+            }
+        }
+        list.clear(mut at_server)
+        now += 1000000
+        let _ = sched_step(mut server, mut client, SERVER_ADDR, now, 32, 32, mut at_client)
+        list.clear(mut at_client)
+        now += 1000000
+    }
+    if list.len(sh) != 8 {
+        fail("all 8 connections must establish")
+    }
+    let prio = quic.Priority(urgency: 3, order: 0, then: 0)
+    // 1. Fairness under a 2-packet batch cap: saturate ch[0] with 8 large datagrams (each
+    // fills a 1-RTT packet) and queue 1 datagram on each of ch[1..8]. After ch[0] fills batch
+    // 1, ch[1..8] must be served before ch[0] finishes all 8 datagrams, and all 15 must arrive.
+    for _ in 0u64 .. 8 {
+        result.unwrap(quic.send_datagram(mut client, ch[0], sched_payload(0x10, 900), prio, 0))
+    }
+    for i in 1u64 .. 8 {
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x20 + i), 900), prio, 0))
+    }
+    let mut from_zero_before_others = 0u64
+    let mut others_seen = 0u64
+    let mut total_rx = 0u64
+    for _ in 0u64 .. 24 {
+        let k = sched_step(mut client, mut server, CLIENT_ADDR, now, 2, 2, mut at_server)
+        for ev in at_server {
+            if let Datagram(_, data) = ev {
+                total_rx += 1
+                if data[0] == 0x10 {
+                    if others_seen < 7 {
+                        from_zero_before_others += 1
+                    }
+                } else {
+                    others_seen += 1
+                }
+            }
+        }
+        list.clear(mut at_server)
+        let _ = sched_step(mut server, mut client, SERVER_ADDR, now, 16, 16, mut at_client)
+        list.clear(mut at_client)
+        now += 10000
+        if k == 0 && total_rx == 15 {
+            break
+        }
+    }
+    if total_rx != 15 || others_seen != 7 {
+        fail("unsent work did not stay runnable after partial batches")
+    }
+    if from_zero_before_others >= 8 {
+        fail("saturated slot 0 starved higher slots")
+    }
+    // 2. Partial commit: queue 1 datagram on ch[0..4], commit only 1 of 4 staged packets;
+    // the 3 abandoned links must stay runnable and deliver all 4 datagrams.
+    for i in 0u64 .. 4 {
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(int.narrow(0x40 + i), 200), prio, 0))
+    }
+    let mut partial_rx = 0u64
+    let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 1, mut at_server)
+    for ev in at_server {
+        if let Datagram(..) = ev {
+            partial_rx += 1
+        }
+    }
+    list.clear(mut at_server)
+    for _ in 0u64 .. 6 {
+        now += 10000
+        let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 8, mut at_server)
+        for ev in at_server {
+            if let Datagram(..) = ev {
+                partial_rx += 1
+            }
+        }
+        list.clear(mut at_server)
+        let _ = sched_step(mut server, mut client, SERVER_ADDR, now, 8, 8, mut at_client)
+        list.clear(mut at_client)
+    }
+    if partial_rx != 4 {
+        fail("abandoned connections after partial commit did not deliver all datagrams")
+    }
+    // 3. O(active) slot visits: with 8 live links and only ch[7] active, one timeout + poll
+    // on server must not scan all 8 slots.
+    result.unwrap(quic.send_datagram(mut client, ch[7], sched_payload(0x77, 100), prio, 0))
+    now += 1000000
+    let _ = sched_step(mut client, mut server, CLIENT_ADDR, now, 8, 8, mut at_server)
+    list.clear(mut at_server)
+    let v0 = quic.slot_visits(server)
+    quic.timeout(mut server, now, mut at_server)
+    let _ = sched_step(mut server, mut client, SERVER_ADDR, now, 8, 8, mut at_client)
+    list.clear(mut at_client)
+    let v1 = quic.slot_visits(server)
+    if v1 - v0 > 2 {
+        fail("timeout + poll scanned idle slots instead of only active links")
+    }
+    // 4. Indexed idle deadlines, free-list slot reuse, and direct handle lookup:
+    // keep ch[4..8] alive at now + 3s, then expire ch[0..4] past their 5s idle deadline.
+    let keepalive_at = now + 3000000000
+    for i in 4u64 .. 8 {
+        result.unwrap(quic.send_datagram(mut client, ch[i], sched_payload(0x55, 64), prio, 0))
+    }
+    let _ = sched_step(mut client, mut server, CLIENT_ADDR, keepalive_at, 8, 8, mut at_server)
+    list.clear(mut at_server)
+    let _ = sched_step(mut server, mut client, SERVER_ADDR, keepalive_at, 8, 8, mut at_client)
+    list.clear(mut at_client)
+    let expire_at = now + 5100000000
+    quic.timeout(mut server, expire_at, mut at_server)
+    let mut idle_closed = 0u64
+    for ev in at_server {
+        if let Closed(_, Idle) = ev {
+            idle_closed += 1
+        }
+    }
+    list.clear(mut at_server)
+    if idle_closed != 4 || quic.live_connections(server) != 4 {
+        fail("indexed idle timeout did not retire exactly the 4 idle connections")
+    }
+    for i in 0u64 .. 4 {
+        if let Error(UnknownConnection) = quic.send_datagram(mut server, sh[i], sched_payload(0x99, 32), prio, 0) {} else {
+            fail("expired handle still resolved after release")
+        }
+    }
+    // Admit 4 replacement connections (reusing freed slots) and verify direct handle lookup.
+    let mut new_client = result.unwrap(quic.endpoint(provide.random(51), sched_endpoint_config(8), None))
+    let mut new_ch: List[quic.ConnectionHandle] = list.with_capacity(4)
+    let mut new_sh: List[quic.ConnectionHandle] = list.with_capacity(4)
+    for _ in 0u64 .. 4 {
+        let h = result.unwrap(quic.connect(mut new_client, expire_at, SERVER_ADDR, "server", cert_pin(old_digest()), None, sched_transport(5000)))
+        list.push(mut new_ch, h)
+    }
+    let mut t_new = expire_at + 1000000
+    for _ in 0u64 .. 16 {
+        let _ = sched_step(mut new_client, mut server, CLIENT_ADDR, t_new, 16, 16, mut at_server)
+        for ev in at_server {
+            if let Connected(c: h, ..) = ev {
+                list.push(mut new_sh, h)
+            }
+        }
+        list.clear(mut at_server)
+        let _ = sched_step(mut server, mut new_client, SERVER_ADDR, t_new, 16, 16, mut at_client)
+        list.clear(mut at_client)
+        t_new += 1000000
+    }
+    if list.len(new_sh) != 4 || quic.live_connections(server) != 8 {
+        fail("replacement connections did not reuse freed slots cleanly")
+    }
+    // Send from server to a reused-slot handle and verify PTO fires if its packet is dropped.
+    result.unwrap(quic.send_datagram(mut server, new_sh[3], sched_payload(0xaa, 64), prio, 0))
+    let mut drop_wire: Bytes = list.with_capacity(2400)
+    let mut drop_tx: List[quic.Output] = list.with_capacity(4)
+    let pto_wake = quic.poll(mut server, t_new, mut drop_wire, mut drop_tx)
+    let mut staged = 0u64
+    for o in drop_tx {
+        if let Transmit(..) = o {
+            staged += 1
+        }
+    }
+    quic.committed(mut server, t_new, staged)
+    if staged == 0 {
+        fail("server did not send on reused-slot handle")
+    }
+    let _ = pto_wake
+    let pto_at = t_new + 2000000000
+    quic.timeout(mut server, pto_at, mut at_server)
+    let probes = sched_step(mut server, mut new_client, SERVER_ADDR, pto_at, 8, 8, mut at_client)
+    if probes == 0 {
+        fail("indexed PTO timer did not fire for reused-slot connection")
+    }
+    Ok(())
+}

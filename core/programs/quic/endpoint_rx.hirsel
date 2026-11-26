@@ -39,6 +39,7 @@ fn negotiation(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Byt
         dropped(mut e.drops, VersionNegotiation)
         return
     }
+    let mut drained = false
     if let Some(mut c) = e.connections[i] {
         if let Server = c.side {
             dropped(mut e.drops, VersionNegotiation)
@@ -58,6 +59,11 @@ fn negotiation(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Byt
         }
         start_draining(mut c, now)
         list.push(mut events, Closed(c.handle, Refused(Version)))
+        drained = true
+    }
+    if drained {
+        ready_remove(mut e, i)
+        sync_deadlines(mut e, i)
     }
 }
 
@@ -101,6 +107,8 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, data
     let mut failed: Option[DropReason] = None
     let mut reset_peer: Option[Addr] = None
     let mut newly_established = false
+    let mut wake_slot = false
+    let mut is_draining = false
     let mut released: List[Bytes] = list.new()
     if let Some(mut c) = e.connections[i] {
         let before = established(c)
@@ -129,6 +137,20 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, data
                 note_failed_open(mut c, now, mut events)
             }
             failed = Some(reason)
+        } else {
+            wake_slot = true
+        }
+        match c.life {
+            Draining => {
+                is_draining = true
+                wake_slot = false
+            },
+            Closing(f) => {
+                if f.pending {
+                    wake_slot = true
+                }
+            },
+            Open => (),
         }
     }
     unmap_released(mut e, i, released)
@@ -150,6 +172,12 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, data
         }
         dropped(mut e.drops, reason)
     }
+    if is_draining {
+        ready_remove(mut e, i)
+    } else if wake_slot {
+        enqueue_ready(mut e, i)
+    }
+    sync_deadlines(mut e, i)
 }
 
 /// A stateless Initial CONNECTION_CLOSE: CONNECTION_REFUSED (0x02) at a limit,

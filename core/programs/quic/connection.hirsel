@@ -347,25 +347,28 @@ fn settle(mut c: Connection, now: u64, index: u64, acked: List[u64], lost: List[
     settle_mtu(mut c, now, index, acked, lost)
 }
 
-/// Run the loss detection timer when it is due (RFC 9002 A.9).
-fn recovery_due(mut c: Connection, now: u64, mut events: List[Event]) {
+/// Run the loss detection timer when it is due (RFC 9002 A.9). Returns true when loss or
+/// PTO queued work that must be scheduled for transmission.
+fn recovery_due(mut c: Connection, now: u64, mut events: List[Event]) -> bool {
     if !open_life(c) {
-        return
+        return false
     }
     let Some(at) = recovery.timer(c.recovery) else {
-        return
+        return false
     }
     if amplification_blocked(c) {
-        return
+        return false
     }
     if at > now {
-        return
+        return false
     }
     let mut lost = replace(mut c.ack_lost, list.new())
+    let mut queued = false
     match recovery.on_timeout_into(mut c.recovery, now, mut lost) {
         TimeoutLost(index) => {
             let empty: List[u64] = list.new()
             settle(mut c, now, index, empty, lost, mut events)
+            queued = true
         },
         TimeoutProbe(index) => {
             let count = order.min(order.max(recovery.pto_count(c.recovery), 1), 2)
@@ -392,8 +395,10 @@ fn recovery_due(mut c: Connection, now: u64, mut events: List[Event]) {
                 },
             }
             c.handshake_done = (c.handshake_done || done) && !c.done_acked
+            queued = true
         },
         TimeoutIdle => (),
     }
     c.ack_lost = take lost
+    queued
 }

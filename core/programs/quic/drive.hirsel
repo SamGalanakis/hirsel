@@ -64,9 +64,14 @@ pub fn drive(mut e: Endpoint, clock: Clock, mut sock: UdpSocket, until: u64, mut
         return Error(err)
     }
     // Taken after committed(): the batch just sent armed its loss timers.
-    let wake = match next_deadline(e) {
-        Some(at) => order.min(at, until),
-        None => until,
+    // Unsent ready work keeps the loop runnable without waiting for a timer deadline.
+    let wake = if has_ready_work(e) {
+        order.min(now, until)
+    } else {
+        match next_deadline(e) {
+            Some(at) => order.min(at, until),
+            None => until,
+        }
     }
     let mut buf = replace(mut e.drive_in, b"")
     let room = DRIVE_BATCH * DRIVE_SLOT + int.widen(e.config.max_mtu)

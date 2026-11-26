@@ -1,9 +1,9 @@
 hirsel.laws 1
-webtransport@1/laws/buffered_streams_bounded src=8a87653789f57da1 sig=a5ed7f9d29e289d9 run=c2c0c6612d4cbb79 bug=96282590340bd27c oracle=76b05a6f342fa887 rows=pending
-webtransport@1/laws/certificate_rotation_accepts_either src=484dc088d5deca6d sig=2905aef48d93c2e6 run=c2c0c6612d4cbb79 bug=06b83303e3d1f78e oracle=81b554894f74dcb1 rows=pending
+webtransport@1/laws/buffered_streams_bounded src=8a87653789f57da1 sig=20af08785f0ef610 run=c2c0c6612d4cbb79 bug=96282590340bd27c oracle=76b05a6f342fa887 rows=pending
+webtransport@1/laws/certificate_rotation_accepts_either src=484dc088d5deca6d sig=826f302a221c9f4f run=c2c0c6612d4cbb79 bug=06b83303e3d1f78e oracle=81b554894f74dcb1 rows=pending
 webtransport@1/laws/codepoints_match_draft src=9252e31d486b0442 sig=58c4181dec08a6db run=c2c0c6612d4cbb79 bug=dbd33b71b61e4ef7 oracle=d6234ba3970c4caa rows=pending
 webtransport@1/laws/huffman_round_trip_and_vectors src=50698d3139a1d36e sig=7faa450eb3d30f8a run=c2c0c6612d4cbb79 bug=2099c4d65433dd9e oracle=e3196c115b992313 rows=pending
 webtransport@1/laws/qpack_static_vectors src=71c2cbd2718dccd3 sig=ae1bcfe24d4714b2 run=c2c0c6612d4cbb79 bug=8eafda5ca2419c78 oracle=d56e927592378f38 rows=pending
-webtransport@1/laws/refusals src=3c88091ccfd6b148 sig=573a185d5d0ff889 run=c2c0c6612d4cbb79 bug=eeaf2246e227b49d oracle=9d77d4929a698335 rows=pending
-webtransport@1/laws/session_close_resets_its_streams_only src=d37487713faf69c4 sig=31d6d9dc1e1da055 run=c2c0c6612d4cbb79 bug=fe337fcdfb7ae9ac oracle=ffb94aca18273b67 rows=pending
-webtransport@1/laws/session_flow_control src=90d8f210d29dde8d sig=c5f71adfdf3dc08e run=c2c0c6612d4cbb79 bug=35069726e1940d44 oracle=15147efb11c72879 rows=pending
+webtransport@1/laws/refusals src=3c88091ccfd6b148 sig=ef65cf162fad5a60 run=c2c0c6612d4cbb79 bug=eeaf2246e227b49d oracle=9d77d4929a698335 rows=pending
+webtransport@1/laws/session_close_resets_its_streams_only src=d37487713faf69c4 sig=9da5242447b8fbea run=c2c0c6612d4cbb79 bug=fe337fcdfb7ae9ac oracle=ffb94aca18273b67 rows=pending
+webtransport@1/laws/session_flow_control src=90d8f210d29dde8d sig=ef77aa59ab7f2656 run=c2c0c6612d4cbb79 bug=35069726e1940d44 oracle=15147efb11c72879 rows=pending

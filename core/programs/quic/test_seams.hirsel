@@ -5,9 +5,14 @@
 /// in the connection's next 1-RTT packet. Laws use it to act as a peer that breaks the
 /// rules (credit past MAX_DATA, a changed reset) or grants 2^62 of credit.
 pub fn send_frames(mut e: Endpoint, c: ConnectionHandle, frames: Bytes) -> Result[(), QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
+    let mut queued = false
     if let Some(mut conn) = e.connections[i] {
         list.append(mut conn.streams.seam, frames)
+        queued = true
+    }
+    if queued {
+        enqueue_ready(mut e, i)
         return Ok(())
     }
     Error(UnknownConnection)
@@ -38,6 +43,7 @@ pub fn set_initial_token(mut e: Endpoint, c: ConnectionHandle, take token: Bytes
     if let Some(mut conn) = e.connections[i] {
         conn.initial.token = take token
     }
+    enqueue_ready(mut e, i)
 }
 
 /// Q7 seam: the NEW_TOKEN token this server would issue to `peer` at `now`.
@@ -56,6 +62,7 @@ pub fn set_aead_limits(mut e: Endpoint, c: ConnectionHandle, update_at: u64, lim
         conn.keys.limit = limit
         conn.keys.blocked = blocked
     }
+    enqueue_ready(mut e, i)
 }
 
 /// Q13 seam: the key updates a connection initiated and the ones it made in answer.
@@ -110,10 +117,14 @@ pub fn rotate_peer_cid(mut e: Endpoint, c: ConnectionHandle) -> bool {
     let Some(i) = slot_at(e, c) else {
         return false
     }
+    let mut moved = false
     if let Some(mut conn) = e.connections[i] {
-        if let Ok(moved) = switch_peer_cid(mut conn) {
-            return moved
+        if let Ok(ok) = switch_peer_cid(mut conn) {
+            moved = ok
         }
     }
-    false
+    if moved {
+        enqueue_ready(mut e, i)
+    }
+    moved
 }

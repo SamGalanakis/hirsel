@@ -171,19 +171,23 @@ pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: Shared[Byt
     if p.urgency > 7 {
         return Error(Config)
     }
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let mtu: u64 = int.widen(e.config.max_mtu)
+    let mut out: Result[(), QuicError] = Error(UnknownConnection)
     if let Some(mut conn) = e.connections[i] {
         let room = empty_packet_room(conn, mtu)
-        return queue_datagram(mut conn.streams, take data, p, tag, room)
+        out = queue_datagram(mut conn.streams, take data, p, tag, room)
     }
-    Error(UnknownConnection)
+    if let Ok(()) = out {
+        enqueue_ready(mut e, i)
+    }
+    out
 }
 
 /// Remove every queued datagram tagged `tag`, those in a polled but uncommitted suffix
 /// included, and return how many. A datagram already committed is not recalled.
 pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: u64) -> u64 {
-    let Some(i) = slot_at(e, c) else {
+    let Some(i) = slot_at_mut(mut e, c) else {
         return 0
     }
     if let Some(mut conn) = e.connections[i] {

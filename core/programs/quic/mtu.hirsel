@@ -137,37 +137,39 @@ fn mtu_wake(c: Connection) -> Option[u64] {
 /// Stage one probe after the packets of a poll: once the handshake is confirmed, on a
 /// validated path, with none in flight, and only when the window and pacer allow its size.
 /// A PING padded to the size under test, so it carries nothing that must be resent.
-fn stage_mtu_probe(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, pending: u64, ecn: u8, mut out: Bytes, mut tx: List[Output]) {
+/// Returns true when a probe could be sent now but `out` or `tx` lacked room.
+fn stage_mtu_probe(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, pending: u64, ecn: u8, mut out: Bytes, mut tx: List[Output]) -> bool {
     if !recovery.confirmed(c.recovery) || !c.validated || c.application.hold_data {
-        return
+        return false
     }
     if let Some(_) = c.mtu.probe {
-        return
+        return false
     }
     mtu_maintenance(mut c, now)
     let Some(size) = next_probe(c, mtu) else {
-        return
-    }
-    let start = list.len(out)
-    if list.len(tx) == list.capacity(tx) || list.capacity(out) - start < size {
-        return
+        return false
     }
     if !recovery.window_allows(c.recovery, pending, size) {
-        return
+        return false
     }
     if let Some(at) = recovery.pacing_delay(c.recovery, now, pending, size) {
         c.wake = earliest(c.wake, Some(at))
-        return
+        return false
+    }
+    let start = list.len(out)
+    if list.len(tx) == list.capacity(tx) || list.capacity(out) - start < size {
+        return true
     }
     list.clear(mut c.tx_payload)
     if let Error(_) = codec.write_frame(Ping, b"", mut c.tx_payload) {
-        return
+        return false
     }
     let at = c.application.crypto_committed
     let Some(number) = seal_packet(mut c.application, OneRtt, c.peer_id, c.local_id, c.tx_payload, size, mut out) else {
-        return
+        return false
     }
     let p = StagedPacket(number: number, size: list.len(out) - start, crypto_at: at, crypto_end: at, resent: false, ack: false, done: false, close: false, eliciting: true, path: false, mtu_probe: true, frame_start: 0, frame_len: 0)
     list.push(mut staged, Packet(slot: slot, handle: c.handle, kind: OneRtt, packet: p))
     list.push(mut tx, Transmit(to: c.peer, at: start, len: list.len(out) - start, ecn: ecn, send_at: now))
+    false
 }

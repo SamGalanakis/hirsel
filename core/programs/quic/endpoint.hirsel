@@ -5,11 +5,156 @@ type Stateless {
 
 type Staged = StatelessReply | Packet(slot: u64, handle: ConnectionHandle, kind: codec.PacketKind, packet: StagedPacket)
 
+const NO_SLOT: u64 = 0xffffffffffffffff
+
+const NO_POS: u64 = 0xffffffffffffffff
+
+type HeapEntry {
+    at: u64,
+    slot: u64
+}
+
+/// Indexed binary min-heap of `(at, slot)` deadlines, keyed by `slot` via `pos[slot]`.
+/// Steady-state updates and pops allocate nothing once capacity covers peak live slots.
+type DeadlineHeap {
+    entries: List[HeapEntry],
+    pos: List[u64]
+}
+
+fn new_heap() -> DeadlineHeap {
+    DeadlineHeap(entries: list.new(), pos: list.new())
+}
+
+fn heap_min_at(h: DeadlineHeap) -> Option[u64] {
+    if list.len(h.entries) == 0 {
+        return None
+    }
+    Some(h.entries[0].at)
+}
+
+fn heap_before(a: HeapEntry, b: HeapEntry) -> bool {
+    a.at < b.at || (a.at == b.at && a.slot < b.slot)
+}
+
+fn heap_swap(mut h: DeadlineHeap, i: u64, j: u64) {
+    let a = h.entries[i]
+    let b = h.entries[j]
+    h.entries[i] = b
+    h.entries[j] = a
+    h.pos[b.slot] = i
+    h.pos[a.slot] = j
+}
+
+fn heap_sift_up(mut h: DeadlineHeap, start: u64) -> u64 {
+    let mut i = start
+    while i > 0 {
+        let parent = (i - 1) / 2
+        if !heap_before(h.entries[i], h.entries[parent]) {
+            break
+        }
+        heap_swap(mut h, i, parent)
+        i = parent
+    }
+    i
+}
+
+fn heap_sift_down(mut h: DeadlineHeap, start: u64) {
+    let mut i = start
+    let n = list.len(h.entries)
+    while true {
+        let left = 2 * i + 1
+        if left >= n {
+            break
+        }
+        let mut best = left
+        let right = left + 1
+        if right < n && heap_before(h.entries[right], h.entries[left]) {
+            best = right
+        }
+        if !heap_before(h.entries[best], h.entries[i]) {
+            break
+        }
+        heap_swap(mut h, i, best)
+        i = best
+    }
+}
+
+fn heap_remove(mut h: DeadlineHeap, slot: u64) {
+    if slot >= list.len(h.pos) {
+        return
+    }
+    let p = h.pos[slot]
+    if p == NO_POS {
+        return
+    }
+    let last = list.len(h.entries) - 1
+    h.pos[slot] = NO_POS
+    if p == last {
+        let _ = list.pop(mut h.entries)
+        return
+    }
+    let moved = h.entries[last]
+    h.entries[p] = moved
+    h.pos[moved.slot] = p
+    let _ = list.pop(mut h.entries)
+    let after = heap_sift_up(mut h, p)
+    if after == p {
+        heap_sift_down(mut h, p)
+    }
+}
+
+fn heap_set(mut h: DeadlineHeap, slot: u64, at: Option[u64]) {
+    let Some(t) = at else {
+        heap_remove(mut h, slot)
+        return
+    }
+    let p = h.pos[slot]
+    if p == NO_POS {
+        let idx = list.len(h.entries)
+        list.push(mut h.entries, HeapEntry(at: t, slot: slot))
+        h.pos[slot] = idx
+        let _ = heap_sift_up(mut h, idx)
+        return
+    }
+    let old = h.entries[p].at
+    if old == t {
+        return
+    }
+    h.entries[p].at = t
+    if t < old {
+        let _ = heap_sift_up(mut h, p)
+    } else {
+        heap_sift_down(mut h, p)
+    }
+}
+
+fn heap_pop_due(mut h: DeadlineHeap, now: u64, mut out: List[u64]) {
+    list.clear(mut out)
+    while list.len(h.entries) > 0 && h.entries[0].at <= now {
+        let slot = h.entries[0].slot
+        heap_remove(mut h, slot)
+        list.push(mut out, slot)
+    }
+}
+
 pub opaque type Endpoint {
     random: Random,
     config: EndpointConfig,
     server: Option[(handshake.Identity, TransportConfig)],
     connections: List[Option[Connection]],
+    handle_slots: Map[ConnectionHandle, u64],
+    free_slots: List[u64],
+    ready_head: u64,
+    ready_tail: u64,
+    ready_len: u64,
+    ready_prev: List[u64],
+    ready_next: List[u64],
+    in_ready: List[bool],
+    timeout_heap: DeadlineHeap,
+    wake_heap: DeadlineHeap,
+    due_slots: List[u64],
+    limit_hit_slots: List[u64],
+    in_limit_hit: List[bool],
     cids: Map[Bytes, u64],
     initial_cids: Map[(Addr, Bytes), u64],
     next_handle: u64,
@@ -27,7 +172,8 @@ pub opaque type Endpoint {
     drive_tx: List[Output],
     drive_udp: List[UdpTx],
     drive_in: Bytes,
-    drive_packets: List[UdpPacket]
+    drive_packets: List[UdpPacket],
+    slot_visits: u64
 }
 
 pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshake.Identity, TransportConfig)]) -> Result[Endpoint, QuicError] {
@@ -42,7 +188,142 @@ pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshak
             return Error(Config)
         }
     }
-    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.with_capacity(DRIVE_BATCH), staged_frames: list.with_capacity(DRIVE_BATCH * 4), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new(), datagram_room: 0, drive_out: b"", drive_tx: list.new(), drive_udp: list.new(), drive_in: b"", drive_packets: list.new()))
+    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), handle_slots: map.new(), free_slots: list.new(), ready_head: NO_SLOT, ready_tail: NO_SLOT, ready_len: 0, ready_prev: list.new(), ready_next: list.new(), in_ready: list.new(), timeout_heap: new_heap(), wake_heap: new_heap(), due_slots: list.with_capacity(DRIVE_BATCH), limit_hit_slots: list.new(), in_limit_hit: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.with_capacity(DRIVE_BATCH), staged_frames: list.with_capacity(DRIVE_BATCH * 4), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new(), datagram_room: 0, drive_out: b"", drive_tx: list.new(), drive_udp: list.new(), drive_in: b"", drive_packets: list.new(), slot_visits: 0))
+}
+
+/// Total connection-slot visits performed by endpoint scheduling, lookup and timer scans.
+pub fn slot_visits(e: Endpoint) -> u64 {
+    e.slot_visits
+}
+
+fn enqueue_ready(mut e: Endpoint, slot: u64) {
+    if slot >= list.len(e.connections) || e.in_ready[slot] {
+        return
+    }
+    if let Some(c) = e.connections[slot] {
+        if let Draining = c.life {
+            return
+        }
+    } else {
+        return
+    }
+    e.in_ready[slot] = true
+    e.ready_prev[slot] = e.ready_tail
+    e.ready_next[slot] = NO_SLOT
+    if e.ready_tail == NO_SLOT {
+        e.ready_head = slot
+    } else {
+        e.ready_next[e.ready_tail] = slot
+    }
+    e.ready_tail = slot
+    e.ready_len += 1
+}
+
+fn enqueue_ready_front(mut e: Endpoint, slot: u64) {
+    if slot >= list.len(e.connections) || e.in_ready[slot] {
+        return
+    }
+    if let Some(c) = e.connections[slot] {
+        if let Draining = c.life {
+            return
+        }
+    } else {
+        return
+    }
+    e.in_ready[slot] = true
+    e.ready_prev[slot] = NO_SLOT
+    e.ready_next[slot] = e.ready_head
+    if e.ready_head == NO_SLOT {
+        e.ready_tail = slot
+    } else {
+        e.ready_prev[e.ready_head] = slot
+    }
+    e.ready_head = slot
+    e.ready_len += 1
+}
+
+fn pop_ready(mut e: Endpoint) -> Option[u64] {
+    let slot = e.ready_head
+    if slot == NO_SLOT {
+        return None
+    }
+    let next = e.ready_next[slot]
+    e.ready_head = next
+    if next == NO_SLOT {
+        e.ready_tail = NO_SLOT
+    } else {
+        e.ready_prev[next] = NO_SLOT
+    }
+    e.ready_prev[slot] = NO_SLOT
+    e.ready_next[slot] = NO_SLOT
+    e.in_ready[slot] = false
+    e.ready_len -= 1
+    Some(slot)
+}
+
+fn ready_remove(mut e: Endpoint, slot: u64) {
+    if slot >= list.len(e.in_ready) || !e.in_ready[slot] {
+        return
+    }
+    let prev = e.ready_prev[slot]
+    let next = e.ready_next[slot]
+    if prev == NO_SLOT {
+        e.ready_head = next
+    } else {
+        e.ready_next[prev] = next
+    }
+    if next == NO_SLOT {
+        e.ready_tail = prev
+    } else {
+        e.ready_prev[next] = prev
+    }
+    e.ready_prev[slot] = NO_SLOT
+    e.ready_next[slot] = NO_SLOT
+    e.in_ready[slot] = false
+    e.ready_len -= 1
+}
+
+fn has_ready_work(e: Endpoint) -> bool {
+    e.ready_len > 0 || list.len(e.stateless) > 0
+}
+
+fn note_limit_hit(mut e: Endpoint, slot: u64) {
+    if slot < list.len(e.in_limit_hit) && !e.in_limit_hit[slot] {
+        e.in_limit_hit[slot] = true
+        list.push(mut e.limit_hit_slots, slot)
+    }
+}
+
+fn timeout_deadline(c: Connection) -> Option[u64] {
+    let mut first = c.deadline
+    if open_life(c) && !amplification_blocked(c) {
+        first = earliest(first, recovery.timer(c.recovery))
+    }
+    first
+}
+
+fn wake_deadline(c: Connection) -> Option[u64] {
+    if !open_life(c) || amplification_blocked(c) {
+        return None
+    }
+    let mut first = c.wake
+    first = earliest(first, path_wake(c))
+    first = earliest(first, mtu_wake(c))
+    first
+}
+
+fn sync_deadlines(mut e: Endpoint, slot: u64) {
+    if slot >= list.len(e.connections) {
+        return
+    }
+    let mut t_at: Option[u64] = None
+    let mut w_at: Option[u64] = None
+    if let Some(c) = e.connections[slot] {
+        t_at = timeout_deadline(c)
+        w_at = wake_deadline(c)
+    }
+    heap_set(mut e.timeout_heap, slot, t_at)
+    heap_set(mut e.wake_heap, slot, w_at)
 }
 
 fn dropped(mut drops: Map[DropReason, u64], reason: DropReason) {
@@ -92,13 +373,12 @@ fn reserve_handle(e: Endpoint) -> Result[ConnectionHandle, QuicError] {
 }
 
 fn add_connection(mut e: Endpoint, take c: Connection) {
-    let mut slot = 0u64
-    while slot < list.len(e.connections) {
-        if let None = e.connections[slot] {
-            break
-        }
-        slot += 1
+    let slot = match list.pop(mut e.free_slots) {
+        Some(i) => i,
+        None => list.len(e.connections),
     }
+    e.slot_visits += 1
+    let handle = c.handle
     if let Server = c.side {
         map.insert(mut e.initial_cids, (c.peer, clone(c.initial_id)), slot)
         if let None = c.params {
@@ -110,11 +390,20 @@ fn add_connection(mut e: Endpoint, take c: Connection) {
     first_cid(mut c.streams.cids, clone(c.local_id), take token)
     if slot == list.len(e.connections) {
         list.push(mut e.connections, Some(take c))
+        list.push(mut e.ready_prev, NO_SLOT)
+        list.push(mut e.ready_next, NO_SLOT)
+        list.push(mut e.in_ready, false)
+        list.push(mut e.in_limit_hit, false)
+        list.push(mut e.timeout_heap.pos, NO_POS)
+        list.push(mut e.wake_heap.pos, NO_POS)
     } else {
         e.connections[slot] = Some(take c)
     }
+    map.insert(mut e.handle_slots, handle, slot)
     e.next_handle += 1
     e.live += 1
+    sync_deadlines(mut e, slot)
+    enqueue_ready(mut e, slot)
 }
 
 pub fn connect(mut e: Endpoint, now: u64, to: Addr, take name: String, take pins: List[handshake.Pin], take identity: Option[handshake.Identity], take t: TransportConfig) -> Result[ConnectionHandle, QuicError] {
@@ -126,13 +415,17 @@ pub fn connect(mut e: Endpoint, now: u64, to: Addr, take name: String, take pins
     Ok(handle)
 }
 
+fn slot_at_mut(mut e: Endpoint, id: ConnectionHandle) -> Option[u64] {
+    if let Some(i) = map.get(e.handle_slots, id) {
+        e.slot_visits += 1
+        return Some(i)
+    }
+    None
+}
+
 fn slot_at(e: Endpoint, id: ConnectionHandle) -> Option[u64] {
-    for i in 0u64 .. list.len(e.connections) {
-        if let Some(c) = e.connections[i] {
-            if c.handle == id {
-                return Some(i)
-            }
-        }
+    if let Some(i) = map.get(e.handle_slots, id) {
+        return Some(i)
     }
     None
 }
@@ -184,19 +477,30 @@ pub fn pto_ns(e: Endpoint, id: ConnectionHandle) -> u64 {
 }
 
 pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Bytes) {
-    let Some(i) = slot_at(e, id) else {
+    let Some(i) = slot_at_mut(mut e, id) else {
         return
     }
+    let mut changed = false
     if let Some(mut c) = e.connections[i] {
         if !open_life(c) {
             return
         }
         c.life = Closing(Closing(wire: CloseFrame(code: order.min(code, MAX_NUMBER), frame: 0, application: true, reason: take reason), pending: true, max_bytes: 65527))
         c.deadline = None
+        changed = true
+    }
+    if changed {
+        sync_deadlines(mut e, i)
+        enqueue_ready(mut e, i)
     }
 }
 
-fn release_connection(mut e: Endpoint, take c: Connection) {
+fn release_connection(mut e: Endpoint, slot: u64, take c: Connection) {
+    let _ = map.remove(mut e.handle_slots, c.handle)
+    ready_remove(mut e, slot)
+    e.in_limit_hit[slot] = false
+    heap_remove(mut e.timeout_heap, slot)
+    heap_remove(mut e.wake_heap, slot)
     for x in c.streams.cids.issued {
         let _ = map.remove(mut e.cids, x.id)
     }
@@ -212,24 +516,47 @@ fn release_connection(mut e: Endpoint, take c: Connection) {
     if let Some(_) = c.peer_reset {
         forget_reset_peer(mut e, c.peer)
     }
+    list.push(mut e.free_slots, slot)
     e.live -= 1
 }
 
 pub fn timeout(mut e: Endpoint, now: u64, mut events: List[Event]) {
-    for i in 0u64 .. list.len(e.connections) {
-        if let Some(mut c) = e.connections[i] {
-            recovery_due(mut c, now, mut events)
+    if list.len(e.limit_hit_slots) > 0 {
+        let mut hits = replace(mut e.limit_hit_slots, list.new())
+        for slot in hits {
+            e.in_limit_hit[slot] = false
+            if let Some(mut c) = e.connections[slot] {
+                report_limit(mut c, mut events)
+            }
+        }
+        list.clear(mut hits)
+        e.limit_hit_slots = take hits
+    }
+    let mut due = replace(mut e.due_slots, list.new())
+    heap_pop_due(mut e.timeout_heap, now, mut due)
+    for slot in due {
+        e.slot_visits += 1
+        let mut wake = false
+        if let Some(mut c) = e.connections[slot] {
+            wake = recovery_due(mut c, now, mut events)
             report_limit(mut c, mut events)
         }
-        if expired(e.connections[i], now) {
-            if let Some(take gone) = replace(mut e.connections[i], None) {
+        if expired(e.connections[slot], now) {
+            if let Some(take gone) = replace(mut e.connections[slot], None) {
                 if open_life(gone) {
                     list.push(mut events, Closed(gone.handle, Idle))
                 }
-                release_connection(mut e, take gone)
+                release_connection(mut e, slot, take gone)
             }
+        } else {
+            if wake {
+                enqueue_ready(mut e, slot)
+            }
+            sync_deadlines(mut e, slot)
         }
     }
+    list.clear(mut due)
+    e.due_slots = take due
 }
 
 fn expired(connection: Option[Connection], now: u64) -> bool {

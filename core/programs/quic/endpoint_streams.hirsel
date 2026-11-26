@@ -1,7 +1,7 @@
 // The QUIC-1 stream calls. Each reaches a connection by handle once the handshake has
 // its transport parameters; before then, or once closing, a call is StreamState.
-fn stream_slot(e: Endpoint, c: ConnectionHandle) -> Result[u64, QuicError] {
-    let Some(i) = slot_at(e, c) else {
+fn stream_slot(mut e: Endpoint, c: ConnectionHandle) -> Result[u64, QuicError] {
+    let Some(i) = slot_at_mut(mut e, c) else {
         return Error(UnknownConnection)
     }
     if let Some(conn) = e.connections[i] {
@@ -43,7 +43,7 @@ fn open_in(mut st: Streams, bidi: bool) -> Result[StreamId, QuicError] {
 }
 
 pub fn open(mut e: Endpoint, c: ConnectionHandle, bidi: bool) -> Result[StreamId, QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     if let Some(mut conn) = e.connections[i] {
         return open_in(mut conn.streams, bidi)
     }
@@ -104,12 +104,16 @@ fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, Qui
 }
 
 pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let StreamId(id) = s
+    let mut out: Result[u64, QuicError] = Error(UnknownConnection)
     if let Some(mut conn) = e.connections[i] {
-        return write_in(mut conn.streams, id, data, fin)
+        out = write_in(mut conn.streams, id, data, fin)
     }
-    Error(UnknownConnection)
+    if let Ok(_) = out {
+        enqueue_ready(mut e, i)
+    }
+    out
 }
 
 /// All or nothing against send_bytes; Ok(false) asks for Writable (QUIC-5).
@@ -140,12 +144,16 @@ fn write_shared_in(mut st: Streams, id: u64, take data: Shared[Bytes], fin: bool
 }
 
 pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let StreamId(id) = s
+    let mut out: Result[bool, QuicError] = Error(UnknownConnection)
     if let Some(mut conn) = e.connections[i] {
-        return write_shared_in(mut conn.streams, id, take data, fin)
+        out = write_shared_in(mut conn.streams, id, take data, fin)
     }
-    Error(UnknownConnection)
+    if let Ok(true) = out {
+        enqueue_ready(mut e, i)
+    }
+    out
 }
 
 /// Copy contiguous bytes into into's spare capacity. After a reset, bytes below the
@@ -201,12 +209,27 @@ fn read_in(mut st: Streams, id: u64, mut into: Bytes) -> Result[(u64, bool), Qui
 }
 
 pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let StreamId(id) = s
+    let mut out: Result[(u64, bool), QuicError] = Error(UnknownConnection)
+    let mut wake = false
     if let Some(mut conn) = e.connections[i] {
-        return read_in(mut conn.streams, id, mut into)
+        out = read_in(mut conn.streams, id, mut into)
+        if let Ok(_) = out {
+            wake = conn.streams.max_data_pending || conn.streams.bidi_limit_pending || conn.streams.uni_limit_pending
+            if !wake {
+                if let Some(k) = find(conn.streams, id) {
+                    if let Some(r) = conn.streams.list[k].recv {
+                        wake = r.limit_pending
+                    }
+                }
+            }
+        }
     }
-    Error(UnknownConnection)
+    if wake {
+        enqueue_ready(mut e, i)
+    }
+    out
 }
 
 /// The largest offset received on a stream, read or not (WT-5).
@@ -273,12 +296,16 @@ fn reset_in(mut st: Streams, id: u64, code: u64, reliable: u64) -> Result[(), Qu
 /// RESET_STREAM (reliable 0) or RESET_STREAM_AT, discarding at once every byte at or past
 /// reliable, including any in a polled but uncommitted suffix (QUIC-5).
 pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let StreamId(id) = s
+    let mut out: Result[(), QuicError] = Error(UnknownConnection)
     if let Some(mut conn) = e.connections[i] {
-        return reset_in(mut conn.streams, id, code, reliable)
+        out = reset_in(mut conn.streams, id, code, reliable)
     }
-    Error(UnknownConnection)
+    if let Ok(()) = out {
+        enqueue_ready(mut e, i)
+    }
+    out
 }
 
 fn stop_in(mut st: Streams, id: u64, code: u64) -> Result[(), QuicError] {
@@ -299,19 +326,23 @@ fn stop_in(mut st: Streams, id: u64, code: u64) -> Result[(), QuicError] {
 }
 
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError] {
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let StreamId(id) = s
+    let mut out: Result[(), QuicError] = Error(UnknownConnection)
     if let Some(mut conn) = e.connections[i] {
-        return stop_in(mut conn.streams, id, code)
+        out = stop_in(mut conn.streams, id, code)
     }
-    Error(UnknownConnection)
+    if let Ok(()) = out {
+        enqueue_ready(mut e, i)
+    }
+    out
 }
 
 pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError] {
     if p.urgency > 7 {
         return Error(Config)
     }
-    let i = stream_slot(e, c)?
+    let i = stream_slot(mut e, c)?
     let StreamId(id) = s
     if let Some(mut conn) = e.connections[i] {
         let Some(k) = find(conn.streams, id) else {

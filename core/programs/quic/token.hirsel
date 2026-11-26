@@ -190,6 +190,7 @@ fn client_retry(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: By
     let Some(key) = retry_key() else {
         return
     }
+    let mut retried = false
     if let Some(mut c) = e.connections[i] {
         let client = match c.side {
             Client => true,
@@ -229,6 +230,11 @@ fn client_retry(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: By
         c.peer_id = clone(scid)
         c.initial_id = clone(scid)
         c.retry_source = Some(take scid)
+        retried = true
+    }
+    if retried {
+        sync_deadlines(mut e, i)
+        enqueue_ready(mut e, i)
     }
 }
 

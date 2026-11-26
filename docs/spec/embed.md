@@ -1,9 +1,10 @@
 # Embedding and Apple mobile targets
 
 *Specified 2026-11-26 (lane ios-spec-3137, from the PR #11 review and the iOS prospect).
-Amended the same day after soundness review 3154 (lane ios-spec-fix-3158). Rules EMB-1 to
-EMB-9. Not built: every rule here is a slice in the iOS track, and iOS stays in
-[reserved](reserved.md) until its device gate passes (EMB-9).*
+Amended the same day after soundness review 3154 (lane ios-spec-fix-3158) and re-review 3167
+(lane ios-spec-fix-2-3169). Rules EMB-1 to EMB-9. Not built: every rule here is a slice in
+the iOS track, and iOS stays in [reserved](reserved.md) until its device gate passes
+(EMB-9).*
 
 This specification adds three general things and one Apple-specific thing:
 
@@ -70,17 +71,22 @@ and `LC_BUILD_VERSION` is kept.
 
 **The anchor.** Each library defines one product symbol, `hirsel_embed_v1_anchor_<b>`, a
 one-byte constant. It is defined in the same archive member as every `hirsel_embed_v1_*`
-export, and nothing else is defined in that member. Every generated consumer of the
-library references the anchor in its start path. That consumer is the Swift `Runtime` in
-EMB-5, or a C host using the generated `hirsel_product.h` <!-- doc-ref: planned -->.
+export, and nothing else is defined in that member. `hirsel_product.h`
+<!-- doc-ref: planned --> declares `extern const uint8_t hirsel_embed_v1_anchor_<b>;` and
+an inline helper `hirsel_embed_v1_require_anchor_<b>()` that reads it through a `volatile`
+pointer (`*(const volatile uint8_t *)&hirsel_embed_v1_anchor_<b>`). Every generated
+consumer calls that helper on its start path: the Swift `Runtime` in EMB-5, or a C host
+using `hirsel_product.h` <!-- doc-ref: planned -->. Because the read is `volatile`,
+compiler optimization (`-O`, whole-module optimization and LTO) cannot dead-strip the
+reference.
 
 The reference forces a lazy archive link to extract that member. Two Hirsel libraries
 linked into one host therefore both extract a member defining the same `hirsel_embed_v1_*`
 names. The host's link then fails with a duplicate symbol, in either archive order, even
-when the two programs have equal binding projections. Without the anchor, the linker could
-resolve the common names from the first archive alone, extract nothing from the second,
-and let the second program's bindings start the first program. Internal symbols never
-collide, because they carry the build prefix.
+under optimization and even when the two programs have equal binding projections. Without
+the observable anchor reference, the linker could resolve the common names from the first
+archive alone, extract nothing from the second, and let the second program's bindings start
+the first program. Internal symbols never collide, because they carry the build prefix.
 
 **The archiver.** An archive is written by the installation's own `bin/llvm-ar` with
 `rcsD`: deterministic, with zero timestamps, owners and modes. It uses the target's format:
@@ -211,14 +217,25 @@ slot**. It is built from the same runtime crates without the `standalone` featur
 - It uses the host's allocator (the C library's `malloc`), never its own global allocator.
 - It installs one process-wide signal action, for `SIGSEGV` (and `SIGBUS` on Darwin), and
   nothing else process-wide ("Faults and signal stacks" below).
-- It never calls `exit` or `_exit`. Every run stop, a place's `Fail`, a stop by the host and
-  a launch refusal end the runtime and are reported to the host (EMB-4). The process goes
-  on. No embed-slot code path calls `exit` or `_exit`. The archive may still import them
-  through Rust std members that Hirsel never calls, so the law is behavioural (slice 2s), not
-  a symbol listing.
-- It ignores `SIGPIPE` per socket (`SO_NOSIGPIPE` on Darwin, `MSG_NOSIGNAL` on Linux), never
-  process-wide.
-- It reads no environment variable, argument vector or inherited descriptor.
+- It never calls `exit` or `_exit`. Every startup refusal (including baseline-safe x86-64
+  ISA detection, which returns `UnsupportedCpu` instead of calling `std::process::exit`),
+  every run stop (including refused stack growth), a place's `Fail`, a stop by the host and
+  spontaneous teardown end the runtime and are reported to the host (EMB-4). The process
+  goes on. No embed-slot code path calls `exit` or `_exit`. The archive may still import
+  them through Rust std members that Hirsel never calls, so the law is behavioural
+  (slice 2s, covering startup refusals, run stops and spontaneous teardown), not a symbol
+  listing.
+- It never changes the process-wide `SIGPIPE` disposition. Socket sends suppress `SIGPIPE`
+  per socket (`SO_NOSIGPIPE` on Darwin, `MSG_NOSIGNAL` on Linux). Pipe writes for `Exec`
+  stdin (admitted on Linux and macOS) suppress `SIGPIPE` without altering the host's
+  `SIGPIPE` disposition or any host thread's signal mask: on macOS the pipe write end sets
+  `F_SETNOSIGPIPE`; on Linux the calling runtime worker blocks `SIGPIPE` around `writev`,
+  drains a thread-pending `SIGPIPE` with zero-timeout `sigtimedwait` when `writev` fails
+  with `EPIPE`, and restores its thread mask. Writing to a closed child pipe therefore
+  delivers `Reset` ([exec](exec.md)) while the host process continues even under `SIG_DFL`.
+- It reads no environment variable, argument vector or inherited descriptor — neither for
+  grants (`Dir`, `Secret` or any other capability), nor for ISA detection, nor during
+  startup.
 - Its Rust code is built with `panic = "abort"`, so no unwind ever crosses the C boundary.
 
 **What still ends the host process.** Four cases end the process. Each is stated here with
@@ -228,14 +245,17 @@ the reason it cannot be contained, and no other Hirsel outcome may end the host:
    unwinding allowed across the C boundary, there is no frame to recover in.
 2. A refused allocation of the runtime's own Rust bookkeeping memory. Rust's
    allocation-failure handler cannot return, and nothing may unwind. Program payload memory
-   is allocated fallibly instead, and its refusal is `OutOfBytes` or the contained run stop
-   `HostMemory` (below).
-3. A crash, abort or stack overflow in audited native foreign code. This is termination by
-   the host
+   and stack mappings are allocated fallibly instead, and their refusal is `OutOfBytes` or
+   the contained run stop `HostMemory` (below).
+3. A crash, abort, stack overflow or refused stack growth in audited native foreign code.
+   This is termination by the host
    ([FFI-1](foreign.md#ffi-1-hirsel-trusts-audited-native-code-and-does-not-contain-it)).
-   Native code runs on a worker's host stack, outside every guard
-   ([FFI-7](foreign.md#ffi-7-host-stack-and-waits)). Containing it would need a process
-   boundary, which iOS does not offer.
+   Synchronous foreign thunks may run on a guarded stack (`Stack::call`,
+   [FFI-7](foreign.md#ffi-7-host-stack-and-waits)), which the runtime marks as
+   **non-recoverable native execution** at the fault boundary. A guard hit or refused
+   growth on that stack is never abandoned or recovered; it is forwarded to the host's
+   previous fault action. Containing native code would need a process boundary, which iOS
+   does not offer.
 4. A fault on a host thread, or anywhere outside a guarded Hirsel stack. It is passed to the
    host's previous action, and that action decides.
 
@@ -268,11 +288,30 @@ every slot. The embed slot sets it up as follows.
   Hirsel chain to a handler that may itself chain back to Hirsel. A host that installs its
   own handler after Hirsel must chain to the action it replaced, as every chaining library
   does.
-- **Unrelated faults keep the host's disposition.** A fault that is not on a guarded Hirsel
-  stack is passed to the previous action exactly as standalone does. If the previous action
-  is `SIG_DFL` or `SIG_IGN`, the handler restores it and returns, so the instruction faults
-  again under it. Otherwise it calls the previous handler with that handler's own
-  signature. Crash reporters installed by the host therefore see host faults.
+- **Unrelated faults keep the host's disposition and flags.** A signal that is not on a
+  recoverable guarded Hirsel stack (including any fault on a host thread, any fault on a
+  non-recoverable native foreign stack, and any software-raised signal) is forwarded to the
+  previous action according to whether it was a synchronous hardware fault (such as
+  `SEGV_MAPERR`, `SEGV_ACCERR`, `BUS_ADRERR` or `BUS_OBJERR`) or a software-raised signal
+  (`kill`, `raise`, `pthread_kill`, `sigqueue`), preserving the previous action's flags:
+  - **Previous action is `SIG_IGN`.** For a software-raised signal, the handler returns at
+    once and leaves Hirsel's handler installed, so the process continues and fiber stack
+    growth keeps working. Ignoring a synchronous hardware fault is undefined in POSIX and
+    is treated as `SIG_DFL` below.
+  - **Previous action is `SIG_DFL`.** For a synchronous hardware fault, the handler
+    restores `SIG_DFL` and returns so the faulting instruction repeats under `SIG_DFL`. For
+    a software-raised signal (which has no faulting instruction to repeat), the handler
+    restores `SIG_DFL`, unblocks the signal, and re-raises it on the current thread so the
+    process terminates with that signal instead of dropping it and disarming Hirsel.
+  - **Previous action is a custom handler.** Before calling it, the handler blocks
+    `previous.sa_mask` (plus the delivered signal itself unless `previous.sa_flags` sets
+    `SA_NODEFER`) with `pthread_sigmask`, and restores the prior thread mask on return. If
+    `previous.sa_flags` sets `SA_RESETHAND`, the handler atomically replaces the saved
+    previous-action slot with `SIG_DFL` before invoking it (one-shot semantics while
+    keeping Hirsel's handler installed). It then invokes the previous handler with that
+    handler's own signature (`SA_SIGINFO` three-argument or single-argument). Crash
+    reporters installed by the host therefore see host faults with their expected mask and
+    flags.
 - **Signal stacks are per runtime worker.** Each runtime worker thread installs its own
   alternate signal stack when it starts, and restores the previous one before it exits.
   The handler needs an alternate stack because a guard fault leaves the faulting stack
@@ -298,19 +337,29 @@ differs is how it ends:
    cleanup, finalizers or `defer`, as FAIL-15 requires. It does so at a point where that
    task holds no lock (next item).
 3. **Workers leave.** It returns to its worker's scheduler, which runs no further task of
-   this generation. Every other worker sees the recorded end at its next scheduling point
-   (a task switch, a park or a provider completion) and leaves the same way. A provider call
-   blocked in the host finishes, and its result is discarded. Every provider wait is bounded
-   by its deadline or by the runtime's cancellation of host waits at a generation end, as at
-   a standalone run's end. An issued foreign `waits` call is the exception: it runs audited
-   native code (FFI-1, FFI-7), the runtime cannot interrupt it, and teardown, `ended` and a
-   `stop` wait until it returns. That is the one unbounded wait, and it is the foreign
-   code's.
-4. **Teardown.** Once every worker has left Hirsel code, the runtime releases every host
-   resource the generation holds. These are its stacks, descriptors, handle tables, store
-   and memory, as for a stopped run
-   ([foreign](foreign.md#ffi-6-handles): "freed when the run ends, an embedded run's
-   included"). This teardown is the runtime's, not Hirsel cleanup.
+   this generation. Every other worker observes the recorded end at its next scheduling
+   point (a task switch, a park or a provider completion) — and in pure Hirsel code with no
+   `bound steps`, through the embed slot's cooperative step check below — and leaves the
+   same way. In the embed slot, every task without an explicit step bound initializes its
+   `steps` countdown (`Inst::Step`, [MEM-30](budgets.md#mem-30-step-bounds)) to 65,536
+   instead of `2^62`; when the cold step handler fires with no step bound current, it loads
+   the generation's atomic end flag. If no end is recorded, it reloads 65,536 and returns
+   without emitting a scheduling event or ending a slice (preserving CONC-10 and MEM-30);
+   if an end is recorded, it returns a stop to the worker's scheduler immediately. A
+   provider call blocked in the host finishes, and its result is discarded. Every provider
+   wait is bounded by its deadline or by the runtime's cancellation of host waits at a
+   generation end, as at a standalone run's end (and `SecTrust` runs on an independently
+   owned job, EMB-7, so teardown never blocks on it). Audited native foreign code is the
+   one liveness boundary: an issued foreign `waits` call or an unbounded synchronous
+   foreign call runs audited native code (FFI-1, FFI-7), Hirsel cannot preempt it, and
+   teardown, `ended` and `stop` wait until it returns.
+4. **Teardown.** Once every worker has left Hirsel code **and** every already-admitted host
+   ABI call of this generation has finished its last access (the admission barrier in
+   EMB-4), the runtime releases every host resource the generation holds. These are its
+   stacks (every stack of the ended generation is unmapped whole with `munmap`, never
+   retained in a process-static stock), descriptors, handle tables, store and memory, as
+   for a stopped run ([foreign](foreign.md#ffi-6-handles): "freed when the run ends, an
+   embedded run's included"). This teardown is the runtime's, not Hirsel cleanup.
 5. **The host is told.** The host gets each session's `session_ended`, then `ended` with
    code `HIRSEL_END_RUN_STOP` and the stop's name as the reason (EMB-4). Nothing is written
    to stderr.
@@ -319,30 +368,61 @@ How a stop leaves depends on where it is raised:
 
 - **In ordinary code.** A stop raised in ordinary runtime or provider code is a value
   returned to the worker's scheduling point. Examples are `HostMemory` when the C allocator
-  refuses payload memory, a counter overflow, and `Deadlock`. Every lock guard on the way
-  is released as its owner returns. In the embed slot, no stop site diverges through
-  `crate::process::stop`. Slice 2s turns each of those sites into a returned stop.
-- **On the guard page.** A fault on a stack's guard page is stack exhaustion, the stop
-  `Stack`. The handler cannot return into the faulting frame. It records `Stack` and
-  rewrites the interrupted context so that the thread resumes at the worker's stop entry,
-  on the worker's own stack. This abandons the fiber stack, as a fiber switch would.
-  Standalone, the same fault exits through `process::stop` (`fiber.rs`, the `fault`
-  handler).
+  or a stack pre-commit refuses memory, a counter overflow, and `Deadlock`. Every lock
+  guard on the way is released as its owner returns. In the embed slot, no stop site
+  diverges through `crate::process::stop`. Slice 2s turns each of those sites into a
+  returned stop.
+- **On the guard page (recoverable Hirsel stack).** The per-worker fault descriptor
+  distinguishes **recoverable** Hirsel fiber stacks from **non-recoverable native** foreign
+  stacks (`Stack::call`). A fault on a recoverable stack's hard guard page is stack
+  exhaustion, the stop `Stack`. The handler cannot return into the faulting frame. It
+  records `Stack` through an async-signal-safe atomic handoff (first stop wins, no lock, no
+  allocation, no stdio) and rewrites the interrupted context so that the thread resumes at
+  the worker's stop entry, on the worker's own stack. This abandons the fiber stack, as a
+  fiber switch would. A fault on a non-recoverable native foreign stack's guard page never
+  rewrites the context: it chains to the host's previous action (termination by the host,
+  item 3 above). Standalone, a recoverable guard fault exits through `process::stop`
+  (`fiber.rs`, the `fault` handler).
+- **On refused stack growth.** A fault below a recoverable stack's committed low-water mark
+  (`guard_end <= addr < low_word`) grows the stack with `mprotect`. If `mprotect` fails
+  inside the signal handler, the runtime fails closed:
+  - It never returns to the faulting instruction (which would fault again) and never
+    advances `low_word`.
+  - Because the guard rule below forbids any locked or libc/allocator frame from faulting
+    on growth, abandoning the faulting Hirsel frame is sound. The handler records
+    `HostMemory` through the same async-signal-safe atomic handoff, marks the faulting
+    stack **retired** via an async-signal-safe flag, and rewrites the interrupted context
+    to resume at the worker's stop entry on the worker's own stack.
+  - The unit and its generation abort with `HIRSEL_END_RUN_STOP` and reason `"HostMemory"`
+    (named in EMB-8), leaving the host app alive.
+  - **Region retirement.** A stack whose `mprotect` failed (in the handler or in
+    `fiber::room` below) is retired: it is never trimmed, never re-`mmap`ped, and never
+    returned to `Stock` or `units::Memory`. At generation teardown, once all workers have
+    left Hirsel code, its entire `[base, base + len)` reservation is unmapped whole with
+    `munmap`. No half-mapped region is ever reused by another fiber or a later generation.
+  - If `mprotect` fails on a **non-recoverable native** foreign stack, the handler never
+    abandons native frames: it forwards to the host's previous fault action (item 3 above).
 
-**The guard rule.** Abandoning a frame at a guard fault is sound only if that frame holds no
-lock and is not inside the C library or the allocator. So only two kinds of code may run
-into the guard page:
+**The guard rule.** Abandoning a frame at a guard fault or refused-growth fault is sound
+only if that frame holds no lock and is not inside the C library or the allocator. So only
+two kinds of code may run into the guard page or an uncommitted growth page:
 
 - generated Hirsel code;
 - runtime code that holds no lock and calls no C library or allocator function.
 
 Every runtime path on a fiber stack that calls the C library or the allocator, or takes a
-lock, does one of two things first:
+lock, does one of two things *before* taking the lock or entering libc or the allocator:
 
-- checks `fiber::room` for that path's stack bound, as `os.rs` does for the clock read
-  (`CLOCK_ROOM`). A failed room check raises `Stack` in ordinary code, as a returned stop,
-  not as a fault.
-- switches to the worker's host stack.
+- ensures `bound` bytes of **already-writable** stack below the current stack pointer via
+  `fiber::room(bound)` (checking distance to the committed low-water mark `*low_word(top)`,
+  not merely distance to the hard guard page). If `bound` does not fit above the hard guard
+  page, `fiber::room` raises `Stack` as an ordinary returned stop. If `bound` fits above
+  the guard page but crosses `low_word`, `fiber::room` pre-commits the needed pages with
+  `mprotect` in ordinary code *before* any lock is taken; if that `mprotect` fails, it
+  marks the stack retired and raises `HostMemory` as an ordinary returned stop. Once the
+  check succeeds, the protected path cannot fault on either the hard guard or growth.
+- switches to the worker's host stack (which is already writable for the protected path and
+  never takes a recoverable growth fault inside a lock or libc).
 
 This rule is proven by tests (slice 2s), not guarded at run time: no product mechanism
 guards against the runtime breaking its own rule.
@@ -359,11 +439,12 @@ target is not among them.
 | Input | Meaning |
 |---|---|
 | `digest` | 32 bytes, or empty. The generated bindings pass the SHA-256 of the static library that the toolchain wrote (EMB-5). It is diagnostic only, as for every launch: the release identity is `revision`, `n_place` and the exports, never the digest. An empty digest is `Unavailable("embedded, not supplied")`. The runtime never hashes `current_exe` or the host's image. |
-| `n_place` | The place size, as for every launch. Registration runs under it at `start`: a place that does not fit refuses `start` with `PlaceCapacity(room)`, with launch.md's registration semantics ("Describe launch"). |
-| `grants` | The grant text, in the grammar `hirsel run` takes, restricted for directories (below). A grant the target cannot honour was refused at build (EMB-7, EMB-8). A grant outside the program's declared wants is refused at `start`. |
+| `n_place` | The place size, as for every launch. Registration runs under it at `start`: a place that does not fit refuses `start` with `PlaceCapacity(Room)`, with [launch](launch.md#describe-launch)'s registration semantics. |
+| `grants` | The grant text, in the grammar `hirsel run` takes, subject to the embedded grant-source restrictions below (no environment, working directory or inherited descriptor for any grant). A grant the target cannot honour was refused at build (EMB-7, EMB-8). A grant outside the program's declared wants is refused at `start`. |
 | `dir_bases` | The bases of the launcher-resolved directory forms (below). |
 | `store_dir` | An absolute path to the place's store directory. The host creates it, and it must persist across launches (on iOS, under Application Support, never under Caches). The runtime opens it once, as the launcher does. |
-| `client_bytes` | The bound on the runtime's host-client storage (EMB-4 "Host-client storage"). |
+| `client_bytes` | The bound on the runtime's host-client storage (EMB-4 "Host-client storage"). Must be at least the read/control progress floor, or `start` refuses with `ClientBytesTooSmall`. |
+| `start_timeout_ms` | Positive millisecond bound on `start` reaching Ready (`0` is `HIRSEL_ABI_MISMATCH`). If registration does not reach Ready before expiry, `start` signals generation end (interrupting provider waits and pure Hirsel loops via the embed step check), joins workers, releases resources and refuses with `PlaceTimedOut` (subject only to the native foreign-code liveness boundary above). |
 
 The target is the immutable target record of the slice the library was compiled for. The
 runtime passes it to the launch internally, and `Welcome.target` reports it. It is never an
@@ -393,11 +474,25 @@ any `Dir` grant. The grant sources resolve as follows:
 Two more checks apply:
 
 - **Store overlap.** `store_dir` must not equal, contain or lie inside a granted root.
-  Otherwise `start` refuses with `StoreOverlapsDir(grant)`, so that a program cannot write
-  its own store's files.
+  Overlap is derived from the directories actually opened and pinned (comparing the opened
+  `store_dir` descriptor and each opened `Dir` root descriptor after symlink resolution by
+  canonical `(st_dev, st_ino)` parent-chain walk to the filesystem root), never from raw
+  input path spellings. If `store_dir` and a granted root resolve to the same directory or
+  either lies on the ancestor chain of the other, `start` refuses with
+  `StoreOverlapsDir(grant)`, so that a program cannot write its own store's files even
+  through a symlink alias.
 - **Unavailable directory.** A root that cannot be opened refuses `start` with
   `DirUnavailable(path, errno)`. On iOS this includes a data-protection class that is
   locked while the device is locked.
+
+**Secret and other grant sources.** The no-environment, no-cwd and no-inherited-descriptor
+rule applies to every grant form, not only `Dir`:
+
+- A `Secret` grant ([TLS-5](tls.md#tls-5-secrets)) admits `file:<abs>` with an absolute
+  path. An `env:<VAR>` source or a relative `file:` path refuses `start` with
+  `SecretSource(grant)` before entry, without reading any environment variable.
+- Any other grant form that names an environment variable, relative path or inherited
+  descriptor refuses `start` before entry the same way.
 
 The generated Swift `Runtime.start` resolves the container's directories again at every
 start, because an app's container path can change across launches and updates. It passes:
@@ -429,14 +524,17 @@ callbacks.
 A generated binding (Swift in EMB-5, any later language the same way) is a codec and a set
 of typed stubs over these calls, with no protocol logic of its own.
 
-The runtime's client side implements the same client kernel as the TypeScript client
-(lane 3145). The two share one transition table: a set of executable vectors, each an input
-frame or host action and the effects and state it must produce. Both `client.ts` and the
-runtime's client run the vectors in their test harnesses, and the runtime's in-process
-effect adapter replaces the WebSocket one. The kernel keeps
-many calls in flight on one stream, with no limit of one call in flight per stream, so
-concurrent `call`s from the host are pipelined, not serialized. Calls beyond the session's
-1+q credits wait in the client, as in `client.ts`.
+The runtime's client side reuses the TypeScript client kernel delivered by lane 3145
+(`sdk/client/state.ts`, `sdk/client/lanes.ts`); this ABI specifies no second multiplexer.
+Because a store stream passes a position only after its reply is stored (STORE-SPEC §1.8
+S7), the kernel multiplexes concurrent calls through one host session as **lanes**, each
+in-flight call holding its own leased store stream, up to the session's `1 + q` owed units
+from `Welcome`. Calls beyond `1 + q` wait in memory in submission order. Each call keeps
+its own deadline (`deadline_ms`) and cancellation (`abandon`); in the shared kernel, a
+reconnect replays every lane's pending call once under its unchanged idempotency key and
+drops old-connection answers. Both `client.ts` and the runtime's client run one set of
+executable transition vectors (input frame or host action in; effects and state out), and
+the runtime's in-process effect adapter replaces the WebSocket one.
 
 The toolchain writes the header, `hirsel_embed.h`. It is the same for every program and
 target at one ABI version:
@@ -488,6 +586,7 @@ typedef struct {
   hirsel_bytes digest;        /* 32 bytes or empty (EMB-3) */
   uint64_t n_place;
   uint64_t client_bytes;      /* host-client storage bound */
+  uint32_t start_timeout_ms;  /* positive ms bound on start reaching Ready; 0 is HIRSEL_ABI_MISMATCH */
   hirsel_bytes grants;        /* UTF-8 grant text */
   hirsel_bytes dir_bases;     /* UTF-8 base lines (EMB-3) */
   hirsel_bytes store_dir;     /* UTF-8 absolute path */
@@ -529,11 +628,23 @@ Generations start at 1, and each `start` that reserves the registry takes the ne
 whether or not it succeeds. Session numbers start at 1 within a generation. Neither is ever
 reused in the process.
 
-A function given a handle looks it up in the registry. A handle whose generation is not the
-current one, whose runtime is not `Running`, or whose session is closed or ended, returns
-`HIRSEL_STOPPED`. It never touches freed memory. A handle the host keeps across `stop` and
-a later `start` is therefore stale, and the new runtime never answers for it. The registry
-lock is held only for the lookup and the admission step, never across a wait or a callback.
+A function given a handle validates its ABI v1 arguments first (below), then looks the
+handle up in the registry. A handle whose generation is not the current one, whose runtime
+is not `Running`, or whose session is closed or ended, returns `HIRSEL_STOPPED`. It never
+touches freed memory. A handle the host keeps across `stop` and a later `start` is
+therefore stale, and the new runtime never answers for it.
+
+**Admission barrier.** Under the registry lock, every accepted handle lookup acquires a
+per-generation **admission guard** (and, for session functions, a per-session admission
+guard) before releasing the lock, and drops the guard before returning. No function holds
+an admission guard across a blocking wait or a callback. Every transition that ends a
+session or generation (`close`, `stop` and spontaneous end) closes admission first and
+waits for all already-admitted producers to drop their guards — ensuring each admitted
+producer has either observed the closing/ended state, discarded its work and returned
+`HIRSEL_STOPPED`, or finished publishing its work before the session's `session_ended`
+drain — before releasing any session record, handle table or generation memory. The
+registry lock is held only for the lookup and admission step, never across a wait or a
+callback.
 
 **Runtime states.** The registry moves through these states. Each transition is atomic
 under the registry lock:
@@ -544,19 +655,37 @@ Stopped --start reserves--> Starting --ready--> Running --stop--> Stopping --joi
                                                 Running --ends by itself--> Ended --stop--> Stopping
 ```
 
-- **`start`.** In `Stopped`, it reserves the registry (`Starting`, next generation) before
-  it creates any worker. In any other state it returns `HIRSEL_ALREADY_RUNNING` with no
-  callback.
+- **`start`.** `start` runs in strict phase order so malformed calls never fault on a NULL
+  `out`, never call an unvalidated callback and never perturb a concurrent valid `start`:
 
-  The start then validates the config, installs the fault handler if this is the process's
-  first start (EMB-3), opens the store, creates the workers and launches the place. It
-  waits until the place is Ready and its `Dialer` is published.
+  1. **Output check and zeroing.** If `out` is NULL, return `HIRSEL_ABI_MISMATCH` at once,
+     with no write, no reservation and no callback. Otherwise set `*out` to the zero handle
+     immediately, so it is zero on every return other than `HIRSEL_OK` and before any
+     callback runs.
+  2. **ABI v1 validation.** Validate `config` before taking the registry lock (below:
+     non-NULL `config`, `size` at least v1 minimum, zero tail, matching `abi` and
+     `manifest_fp`, `start_timeout_ms > 0`, non-NULL `ended`, valid `hirsel_bytes`). A
+     failure returns `HIRSEL_ABI_MISMATCH` with no registry reservation, no generation
+     increment and no callback.
+  3. **Singleton reservation.** Under the registry lock, if the state is `Stopped`, reserve
+     the registry (`Starting`, next generation) before creating any worker. In any other
+     state, return `HIRSEL_ALREADY_RUNNING` with no callback.
+  4. **Semantic validation and launch.** Validate CPU/ISA support (baseline-safe x86-64
+     check, refusing `UnsupportedCpu` without reading the environment or calling `exit`),
+     `client_bytes` against the read/control progress floor (`ClientBytesTooSmall`), grants
+     (including EMB-7 target refusals, `Dir*` and `SecretSource`), directory overlap on
+     opened descriptors (`StoreOverlapsDir`), and install or verify the fault handler
+     (`FaultHandlerReplaced`, EMB-3). Open the store, create the workers and launch the
+     place under `n_place` and `start_timeout_ms`. Wait until the place is Ready and its
+     `Dialer` is published.
 
   Success is that publication. The state becomes `Running`, `*out` is written, and `start`
   returns `HIRSEL_OK`. The thread that called `start` may then return and exit: the
   runtime's own threads hold the launch metadata, the store and the place.
-- **A failed start.** If validation or any later step fails, the start joins every thread
-  it created and releases everything it opened. It then calls `config.ended` once,
+- **A failed start.** If step 4 fails (including `PlaceCapacity(Room)` or `PlaceTimedOut`
+  when `start_timeout_ms` expires before Ready), `start` signals generation end (stopping
+  provider waits and pure Hirsel registration loops via EMB-3's step check), joins every
+  thread it created and releases everything it opened. It then calls `config.ended` once,
   synchronously, with `HIRSEL_END_REFUSED` and the reason, while the state is still
   `Starting`. Finally it moves to `Stopped` and returns `HIRSEL_REFUSED`.
 
@@ -566,22 +695,28 @@ Stopped --start reserves--> Starting --ready--> Running --stop--> Stopping --joi
   - `start` returns `HIRSEL_ALREADY_RUNNING`;
   - any function given a handle returns `HIRSEL_STOPPED`;
   - `abi` and `manifest` work.
-- **Output on every return.** `*out` is set to the zero handle before any validation, so
-  it is zero on every return other than `HIRSEL_OK`, and before any callback runs.
+- **Output on every return.** In both `start` and `open`, `out == NULL` returns
+  `HIRSEL_ABI_MISMATCH` without writing. For every non-NULL `out`, `*out` is zeroed before
+  ABI validation or any callback, so it is zero on every return other than `HIRSEL_OK`.
 - **Ending by itself.** A place's `Fail` or a run stop ends a `Running` runtime by itself
-  (state `Ended`). Admission closes at once: `open` and every session function return
-  `HIRSEL_STOPPED`. Each open session gets `session_ended`, in the order the sessions were
-  opened, and then `ended` runs with the code and reason. The workers leave (EMB-3).
+  (state `Ended`). Admission closes at once under the registry lock: `open` and every
+  session function return `HIRSEL_STOPPED`. Spontaneous teardown then observes the same
+  ownership barrier as `stop`: it waits for every already-admitted host ABI call of the
+  generation to drop its admission guard (publishing or discarding its work) and for every
+  worker to leave Hirsel code (EMB-3), delivers each open session's `session_ended` in the
+  order the sessions were opened, then delivers `ended` with the code and reason, and only
+  after all admitted producers and workers have left releases session records, handle
+  tables and generation memory.
 - **`stop`.** On a host thread, `stop` of the current generation works as follows:
 
   1. In `Running`, it closes admission (`Stopping`). An `open` or session call that loses
      this race returns `HIRSEL_STOPPED`.
-  2. It waits for ABI calls already admitted to return. Each holds its admission only for
-     its own duration, never across a callback.
+  2. It waits for ABI calls already admitted to drop their admission guards. Each holds its
+     guard only for its own short non-blocking duration, never across a callback.
   3. It ends every session with `session_ended`, then runs `ended` with
      `HIRSEL_END_STOPPED`.
-  4. It joins the delivery thread and every worker, and closes the store ("Durability"
-     below).
+  4. It joins the delivery thread and every worker, unmaps every stack of the generation,
+     and closes the store ("Durability" below).
   5. It moves to `Stopped` and returns `HIRSEL_OK`.
 
   In `Ended`, stop does steps 4 and 5 only, with no further callback. Every successful
@@ -590,20 +725,22 @@ Stopped --start reserves--> Starting --ready--> Running --stop--> Stopping --joi
   `HIRSEL_STOPPED`, as does a `stop` of a stale generation. On the delivery thread, `stop`
   returns `HIRSEL_BUSY`, because stop waits for the delivery thread.
 
-**Validating arguments.** Every function validates its arguments before it reads any field,
-calls any callback or does any work. A failure returns `HIRSEL_ABI_MISMATCH` with no
-callback and no effect.
+**Validating arguments.** Every function validates its ABI v1 arguments before touching
+the registry, reading past `size`, calling any callback or doing any work. A failure
+returns `HIRSEL_ABI_MISMATCH` with no callback and no effect.
 
+- **Output pointer first.** In `start` and `open`, `out == NULL` returns
+  `HIRSEL_ABI_MISMATCH` before any write.
 - **The size prefix.** A struct's `size` is read first. The **v1 minimum** of each struct
   is every field listed above. A `size` below it fails, and no field past `size` is read.
 - **A larger size.** A host built against a later additive revision may pass a larger
   `size`. Bytes past the fields this library knows must be zero, or the call fails. A field
   the library cannot honour is therefore never ignored.
-- **The ABI version and fingerprint.** In the config, `abi` must equal the library's
-  version. `manifest_fp` must be 32 bytes equal to the SHA-256 of the binding projection
-  (EMB-5) of the manifest that `hirsel_embed_v1_manifest` returns. The fingerprint check
-  catches bindings generated from another build of the program, whose Want list would
-  index other entries.
+- **The ABI version, fingerprint and timeout.** In the config, `abi` must equal the
+  library's version, `start_timeout_ms` must be positive (`> 0`), and `manifest_fp` must be
+  32 bytes equal to the SHA-256 of the binding projection (EMB-5) of the manifest that
+  `hirsel_embed_v1_manifest` returns. The fingerprint check catches bindings generated from
+  another build of the program, whose Want list would index other entries.
 - **Required pointers and lengths.** Every function pointer is required and non-NULL. A
   `hirsel_bytes` with a NULL `ptr` and a nonzero `len` fails, as does an `out` pointer that
   is NULL.
@@ -616,10 +753,11 @@ callback and no effect.
 
 | Refusal | Status | Callbacks |
 |---|---|---|
-| a struct shorter than its v1 minimum, a nonzero tail, a NULL required pointer or `out`, a bad `hirsel_bytes`, a wrong `abi` or `manifest_fp` | `HIRSEL_ABI_MISMATCH` | none |
+| a struct shorter than its v1 minimum, a nonzero tail, a NULL required pointer or `out`, a bad `hirsel_bytes`, a wrong `abi` or `manifest_fp`, or `start_timeout_ms == 0` | `HIRSEL_ABI_MISMATCH` | none |
 | `start` while the registry is not `Stopped` | `HIRSEL_ALREADY_RUNNING` | none |
-| `start` refused for grants, directories, store, `n_place`, target capability (EMB-7) or `FaultHandlerReplaced`, or a start that fails after validation | `HIRSEL_REFUSED` | `config.ended` once, synchronously |
+| `start` refused for `UnsupportedCpu`, grants, `Dir*`, `SecretSource`, `StoreOverlapsDir`, unrecoverable store, `PlaceCapacity(Room)`, `PlaceTimedOut`, `ClientBytesTooSmall`, target capability (EMB-7) or `FaultHandlerReplaced`, or a start that fails after reservation | `HIRSEL_REFUSED` | `config.ended` once, synchronously |
 | `open` on a stale or not-`Running` handle | `HIRSEL_STOPPED` | none |
+| `open` whose session record or credential copy exceeds host-client storage, or is refused by the C allocator | `HIRSEL_FULL` or `HIRSEL_HOST_MEMORY` | none |
 | `open` whose dial is refused by the place (HTTP 503: full or draining) or whose Hello or credential fails | `HIRSEL_OK`, then the session ends | `session_ended` once (below) |
 
 **Ids.** The host chooses each call, subscription and room id, unique among that session's
@@ -633,16 +771,17 @@ An id becomes free at one of three points:
 - when `abandon`, `unsubscribe` or `room_leave` has returned `HIRSEL_OK`;
 - when its session's `session_ended` has returned.
 
-**Host ids and wire positions are separate.** Each call the client sends takes a wire
-position on the session's stream (RUNNER §2.1). The client keeps a link from that position
-to the host id's observer. `abandon` cuts the link, but the position stays live in the
-client until its protocol result arrives. The client consumes that result to advance the
-stream and its credits, and discards it.
+**Host ids and wire identities are separate.** Each in-flight call the client sends runs
+on a leased stream lane at its wire identity `(stream, p)` (STORE-SPEC §1.8, RUNNER §2.1,
+lane 3145). The client keeps a link from that lane's in-flight call to the host id's
+observer. `abandon` cuts the link, but the lane stays occupied until its protocol result
+arrives. The client consumes that result to settle the lane and release its credit, and
+discards it.
 
-A host id reused after `abandon` gets a new observer for a new position. So a late result
-for the abandoned call is never delivered to the reused id, and never suppresses the new
-call's outcome. Subscriptions and rooms keep the same separation between the host id and
-the protocol sub id.
+A host id reused after `abandon` gets a new observer and a new call on an available lane.
+So a late result for the abandoned call is never delivered to the reused id, and never
+suppresses the new call's outcome. Subscriptions and rooms keep the same separation
+between the host id and the protocol sub id.
 
 **Exactly one end per accepted request.** Each `call` that returned `HIRSEL_OK` ends in
 exactly one of three ways:
@@ -704,7 +843,7 @@ type RoomEvent: codec =
   | Full                        // sdk.md onFull
   | Ended(SubEnd)               // the room's final event; its id is free after it
 type PeersChange: codec {
-  incarnation: Bytes,           // 16 bytes
+  incarnation: Option[Bytes],   // None before any non-full Part; Some(16 bytes) once established
   revision: Option[u64],        // None until the Part with snapshot set
   renewed: bool,
   me: Option[u64],              // this membership's peer id (sdk.md self)
@@ -730,10 +869,23 @@ Some semantics are pinned beyond the types:
 - A `Change` with `replaced` and empty `rows` and `value` is the first completion of an
   empty image. It is always delivered, as in sdk.md.
 - A `Change` with `invalidated` is followed by the next instance's first completion.
-- In one room, the client applies each Part's `joined`, then `states`, then `msgs`, then
-  `left` (sdk.md). It emits one `Peers` event per Part, and then that Part's `Message`
-  events. `Admission` and `Peers` events have no order between them, as `Live` and `Batch`
-  frames have none.
+- In one room, the client matches [sdk](sdk.md#rooms) (`sdk/client/room.ts`): each Part
+  applies `joined`, then `states`, then delivers `msgs`, then applies `left` and snapshot
+  completion, then delivers `Gap`, `Lost` and `Full`. So a message's sender is always in
+  `peers` with its updated state when `Message` runs, and a Part with no roster, `me` or
+  `revision` change (such as a first `Full` Part, whose zero head establishes no
+  incarnation) emits no `Peers` event:
+  - When a Part has no `msgs`, the client emits at most one `Peers` event (combining
+    `renewed`, `me`, `joined`, `states`, `left` and `revision`), and only if at least one
+    of those changed.
+  - When a Part has `msgs`, the client first emits a pre-message `Peers` event if any of
+    `renewed` (with prior-incarnation removals in `left`), `me`, `joined` or `states`
+    changed; then emits each `Message` in Part order; then emits a post-message `Peers`
+    event if `part.left`, snapshot-unconfirmed removals or `revision` changed.
+  - `Gap(n)` (when `gap > 0`), `Lost(n)` (when `lost > 0`) and `Full` (when `part.full`)
+    follow in that order.
+  - `Admission` and `Peers` events have no order between them, as `Live` and `Batch`
+    frames have none.
 
 **Rooms.** The ABI exposes the TypeScript room surface:
 
@@ -777,20 +929,30 @@ removes every undelivered callback of that session from the queue, and runs
 `session_ended(Closed)` as the session's last callback. The order is fixed:
 
 - **On a host thread.** `close` first closes the session's admission, so every later call
-  on it returns `HIRSEL_STOPPED`. It then waits for a callback of that session already
-  running on the delivery thread to return, and lets no further callback of the session
-  start, other than `session_ended`. It waits for `session_ended` to return, and then
-  returns `HIRSEL_OK`. While it waits, it holds no lock that a callback needs: not the
+  on it returns `HIRSEL_STOPPED`. It then waits for every already-admitted producer call on
+  that session to drop its admission guard (publishing or discarding its work; producers
+  never block on delivery), waits for any callback of that session already running on the
+  delivery thread to return, lets no further callback of the session start other than
+  `session_ended`, waits for `session_ended` to return, releases the session's state, and
+  then returns `HIRSEL_OK`. While it waits, it holds no lock that a callback needs: not the
   registry lock, not the session's lock.
 - **On the delivery thread.** This covers a call from inside any callback, including one of
-  the same session. `close` closes the session's admission, returns `HIRSEL_DEFERRED` at
-  once, and runs `session_ended(Closed)` after the current callback returns. A callback
-  that closes its own session never waits for itself.
-- **On a closed or ending session.** `close` returns `HIRSEL_STOPPED`.
+  the same session. `close` closes the session's admission and returns `HIRSEL_DEFERRED` at
+  once. After the current callback returns, the delivery thread waits for any
+  already-admitted producer calls on that session to drop their admission guards (bounded
+  and non-blocking), drains queued callbacks of that session, runs `session_ended(Closed)`,
+  and releases the session's state. A callback that closes its own session never waits for
+  itself.
+- **On a closed or ending session.** `close` returns `HIRSEL_STOPPED` immediately without
+  waiting.
 
-The host may release a session's context once `session_ended` has returned. On a host
-thread, that is when `close` returns. On the delivery thread, it is inside or after
-`session_ended`, never at `close`'s return.
+The host may release a session's context only once `session_ended` has returned. On a host
+thread, `close` returning `HIRSEL_OK` (or `stop` returning `HIRSEL_OK`) guarantees that
+`session_ended` has already returned. A `close` that returns `HIRSEL_DEFERRED` or
+`HIRSEL_STOPPED` is **not** a context-release barrier — another `close`, a deferred
+self-close, `stop` or a spontaneous end may still owe or be running `session_ended`. In
+those cases the host may release `context` only after observing `session_ended` return (or
+after `stop` returns `HIRSEL_OK`).
 
 `stop` orders its final callbacks the same way: every session's `session_ended`, then
 `ended`, and nothing after `ended`. A Swift binding that resolves its waiters in
@@ -821,29 +983,50 @@ separately:
 
 Host-client storage holds:
 
+- each open session's record, its copied `credential` until `Hello` is sent, and its
+  terminal-notification reserve (`session_ended`);
 - the copied `args` of a call until the client has framed and sent it;
 - each outstanding call's record;
 - each subscription image and room roster;
 - each frame read from the dial and not yet applied;
 - each callback's bytes waiting for the delivery thread.
 
+**Read/control progress reserve.** At `start`, the runtime partitions `config.client_bytes`
+into a fixed **progress reserve** (at least `max_frame + 14` bytes for one inbound frame
+plus fixed control/terminal notification room for `SubEnd.ClientCapacity` and
+`session_ended`) and the **admissible pool** (`client_bytes - progress_reserve`). If
+`config.client_bytes` is smaller than the progress reserve, `start` refuses with
+`ClientBytesTooSmall`. Producer admissions draw only from the admissible pool, never from
+the progress reserve, so a full admissible pool can never starve the inbound read that
+consumes a reply and refunds its call record, nor block a terminal notification.
+
 The account is charged in four ways:
 
-- **Admission.** `call`, `subscribe`, `room_join`, `room_set` and `room_send` reserve their
-  copy and record before anything is sent. If the account cannot hold them, they return
-  `HIRSEL_FULL` and send nothing. The host may retry once callbacks have drained.
-  `HIRSEL_HOST_MEMORY` means the C allocator refused memory the account had room for.
-  Neither status is a runner refusal: a runner refusal arrives as a `Refused` outcome or a
-  `SessionEnd`, and program capacity arrives as `Failed(OutOfBytes)` in an outcome.
-- **Reading.** The client reads a frame from a session's dial only after it has reserved
-  `max_frame + 14` bytes for it. While the account is short, it stops reading. The dial's
-  16 frame slots per direction then fill (RUNNER §14.11), and the place's existing
-  backpressure and slow-reader rules apply, exactly as for a TCP client that stops reading.
-  The client never drops a frame.
-- **Images.** Applying a Batch charges its growth to the account. A Batch that the account
-  cannot hold ends that subscription or room with `SubEnd.ClientCapacity`, frees its image,
-  and sends the protocol's Unsubscribe. It is an explicit end, never a silent drop.
+- **Admission.** `open`, `call`, `subscribe`, `room_join`, `room_set` and `room_send`
+  reserve their copy and record (and, for `open`, the session's record, copied `credential`
+  and per-session `session_ended` reserve) from the admissible pool before anything is
+  registered or sent. If the admissible pool cannot hold them, they return `HIRSEL_FULL`
+  and register or send nothing (for `open`, no session is opened and no `session_ended`
+  runs). The host may retry once callbacks or calls have drained. `HIRSEL_HOST_MEMORY`
+  means the C allocator refused memory the account had room for. Neither status is a runner
+  refusal: a runner refusal arrives as a `Refused` outcome or a `SessionEnd`, and program
+  capacity arrives as `Failed(OutOfBytes)` in an outcome.
+- **Reading.** The client reads an inbound frame from a session's dial into the reserved
+  progress slot (or additional `max_frame + 14` bytes from the admissible pool). Control
+  and call-completion frames (`Done`, `Ended`, `Welcome`, `Placed`) can therefore always be
+  read, applied and refunded even when the admissible pool is full. If applying a frame
+  would queue callback bytes that the admissible pool cannot hold (such as a stalled
+  delivery callback), the client pauses further reads after that frame until callbacks
+  drain; the dial's 16 frame slots per direction then fill (RUNNER §14.11), and the place's
+  existing backpressure and slow-reader rules apply, exactly as for a TCP client that stops
+  reading. The client never drops a frame.
+- **Images.** Applying a Batch charges its growth to the admissible pool. A Batch that the
+  admissible pool cannot hold ends that subscription or room with `SubEnd.ClientCapacity`
+  (queued using the terminal reserve so it delivers even at capacity), frees its image, and
+  sends the protocol's Unsubscribe. It is an explicit end, never a silent drop.
 - **Refund.** A charge is refunded when its owner goes:
+  - a session's `credential` copy when `Hello` is sent, and its session record and
+    `session_ended` reserve when `session_ended` returns;
   - a sent call's copy when it is sent;
   - a call's record when its result is consumed, delivered or not;
   - an image when its subscription ends;
@@ -854,16 +1037,19 @@ The account is charged in four ways:
 No step of this waits while holding a lock that delivery needs. A producer inside a callback
 gets `HIRSEL_FULL` rather than blocking, so a reentrant producer cannot deadlock delivery.
 
-**Sessions.** A session is one dialled connection with one stream. `open` returns once the
-session is registered. The dial, Hello and credential then proceed on the runtime's
-threads. Calls made before the session is ready wait in the client, as in `client.ts`.
+**Sessions.** A session is one dialled connection whose client kernel (lane 3145)
+multiplexes concurrent calls across leased stream lanes (up to `1 + q` in flight, from
+`Welcome`). `open` registers the session once its admission succeeds and returns
+`HIRSEL_OK`. The dial, Hello and credential then proceed on the runtime's threads. Calls
+made before the session is ready wait in the client, as in `client.ts`.
 
 A refused dial or failed Hello ends the session with `session_ended`, carrying
 `DialRefused(503)` or `ClosedByPlace(code)`, and so ends every call queued on it.
 
-The client state is in memory. An embedded place and its client share one process, so there
-is no reconnect. The durable recovery that `client.ts` keeps in IndexedDB or files has
-nothing to recover from: a session ends with its runtime.
+The client state is in memory. An embedded place and its client share one process, so an
+in-process session does not reconnect across `stop`/`start`: a session ends with its
+runtime, and the shared 3145 kernel's reconnect replay is exercised by the kernel's
+transition vectors and transport-loss laws.
 
 **Durability.** The store's rules decide what a host may rely on:
 
@@ -885,12 +1071,14 @@ nothing to recover from: a session ends with its runtime.
   continues with its sessions, calls and subscriptions intact. Deadlines and timers follow
   the existing clock rules. Whether a suspension counts toward a deadline is the clock's
   rule, qualified on device (EMB-9).
-- **A kill.** A killed process gets no `stop` and no callback, and loses its client
-  correlation. The next `start` on the same `store_dir` opens and recovers the store as any
-  reopen does. That covers a store that was poisoned (STORE-SPEC §1.6 `Poisoned`). A store
-  that cannot be recovered refuses `start` with the store's error.
-- **A store failure while running.** A store that fails or is poisoned while running ends
-  the place with its `Fail`: `ended` with `HIRSEL_END_PLACE_FAILED`.
+- **A kill or transient poison.** A killed process gets no `stop` and no callback, and
+  loses its client correlation. A transient write or sync failure while running poisons the
+  open `Db` (STORE-SPEC §1.6 `Poisoned`) and ends the place with `Fail` (`ended` with
+  `HIRSEL_END_PLACE_FAILED`); poison is never persistent on disk. Once the failed owner
+  stops and closes, the next `start` on the same `store_dir` opens and **recovers the
+  durable prefix** with all earlier acknowledged commits intact. Only a store whose
+  on-disk state cannot be recovered (such as a corrupt manifest or journal) refuses `start`
+  with `HIRSEL_REFUSED` carrying the store's recovery error.
 - **Graceful stop discards and then closes.** `stop` does not wait for calls in flight.
   Their outcomes are not delivered, and `session_ended(RuntimeStopped)` ends them. The
   store's writer finishes the group commit it has started and that commit's durability. So
@@ -976,8 +1164,9 @@ DIR/
 ```
 
 `<slice>` is the record's `xcframework_slice`. `<Name>` is the program's package name in
-UpperCamelCase. `hirsel_product.h` declares the library's anchor (EMB-1), which `Runtime`
-references.
+UpperCamelCase. `hirsel_product.h` declares the library's anchor and its inline
+`volatile`-read helper `hirsel_embed_v1_require_anchor_<b>()` (EMB-1), which `Runtime`
+calls on start.
 
 The driver assembles the XCFramework, not `xcodebuild`. It is a directory of the three
 archives, their headers and module maps, and an XML property list. For each library the
@@ -1003,27 +1192,41 @@ Swift files, with `platforms` from the records (`.iOS("26.0")`, `.macOS("26.0")`
   - `Result` is a generated enum, not Swift's `Result`, because the error type need not be
     an `Error`.
   - Every generated type is `Sendable` and `Equatable`.
-- **Starting.** `Runtime.start(grants:nPlace:clientBytes:)` resolves the container
-  directories (EMB-3) and references the anchor. It passes the generated `abi`, the
-  projection fingerprint and the running slice's library digest. There is one generated
-  constant per slice, chosen by `#if targetEnvironment(simulator)` and `#if os(...)`.
-  `clientBytes` defaults to 64 MiB, a value written in the generated signature, never
-  hidden.
+- **Starting.** `Runtime.start(grants:nPlace:clientBytes:startTimeoutMs:)` resolves the
+  container directories (EMB-3) and calls `hirsel_embed_v1_require_anchor_<b>()` so the
+  anchor reference survives `-O` and whole-module optimization. It passes the generated
+  `abi`, the projection fingerprint and the running slice's library digest. There is one
+  generated constant per slice, chosen by `#if targetEnvironment(simulator)` and
+  `#if os(...)`. `clientBytes` defaults to 64 MiB and `startTimeoutMs` defaults to 10,000
+  ms (matching `launch.md`'s `--place-timeout`), both written in the generated signature,
+  never hidden.
 
   A refused start throws an error carrying the status, and for `HIRSEL_REFUSED`, the
   reason. `runtime.open(credential:)` returns a `Session`. `runtime.stop()` is `async`.
   The runtime value holds the `hirsel_runtime` value, not a pointer.
 - **Calls.** `api.call.<module>.<name>(args, deadline:) async throws -> Outcome<R, E>`.
-  Each call has a box with an atomic resolved flag, and whichever of outcome, cancellation
-  or session end sets it first resolves the continuation. So the continuation is resumed
-  exactly once:
-  - If the task was cancelled before `call` was issued, the binding does not issue it, and
-    throws `CancellationError`.
-  - A cancellation after issue calls `abandon`. On `HIRSEL_OK` the binding throws
-    `CancellationError`. On `HIRSEL_NOT_LIVE` it waits for the outcome, which is being
-    delivered.
-  - `session_ended` resolves every live box with the session's end.
-  - `HIRSEL_FULL` and `HIRSEL_HOST_MEMORY` throw at once.
+  Each `Session` assigns call, subscription and room ids from a monotonic 64-bit counter
+  (starting at 1, never reused within the session), so a late cancellation handler can
+  never alias another call's id. Each call has a lock-protected state box
+  (`PendingIssue` → `Issuing(cancelRequested)` → `Issued` / `CancelledBeforeIssue` /
+  `Abandoning` → `Resolved`) inserted into the session's table *before* calling C, so the
+  continuation is resumed exactly once and cancellation never races C registration:
+  - If cancellation arrives in `PendingIssue`, the box moves to `CancelledBeforeIssue` and
+    resumes with `CancellationError`; the issuer observes `CancelledBeforeIssue` and never
+    calls `hirsel_embed_v1_call` or `abandon`.
+  - If cancellation arrives while the issuer is in `Issuing` (inside
+    `hirsel_embed_v1_call`, before C registration finishes), the handler sets
+    `cancelRequested` and does not call `abandon` yet. Once `hirsel_embed_v1_call` returns
+    `HIRSEL_OK`, if the box is not already `Resolved` (an early outcome arrived before C
+    returned), the issuer moves to `Abandoning` and calls `abandon`: on `HIRSEL_OK` it
+    resolves with `CancellationError`; on `HIRSEL_NOT_LIVE` delivery already won the C race
+    and resolves the box.
+  - If cancellation arrives in `Issued`, the handler moves to `Abandoning` and calls
+    `abandon` with the same `HIRSEL_OK` / `HIRSEL_NOT_LIVE` rule.
+  - `outcome` and `session_ended` lock the box; if not `Resolved`, they move to `Resolved`
+    and resume the continuation (even if the issuer is still in `Issuing`).
+  - `HIRSEL_FULL`, `HIRSEL_HOST_MEMORY` and `HIRSEL_STOPPED` from `hirsel_embed_v1_call`
+    move the box to `Resolved` and throw at once.
 - **Subscriptions.** `api.subscribe.<module>.<name>(args, buffer:) ->
   AsyncThrowingStream<Change, Error>` yields one decoded `Change` per callback. Its buffer
   is `.bufferingOldest(buffer)`, with a default of 1,024 changes written in the signature.
@@ -1164,13 +1367,22 @@ two steps.
 
    Every failure carries Apple's code in its diagnostic.
 
-**Blocking, deadlines and cancellation.** `SecTrustEvaluateWithError` blocks. It runs where
-the provider's other blocking host calls run, never on the delivery thread or on a host
-thread inside an ABI call. The handshake's `until` and cancellation apply while it runs:
+**Blocking, deadlines and cancellation.** `SecTrustEvaluateWithError` blocks. It runs on a
+helper thread as an independently heap-owned evaluation job that copies the peer
+certificate DER chain, the verified hostname and the verification timestamp before launch,
+borrowing zero generation memory, zero `TlsRequest` buffers, zero socket descriptor and
+zero rustls session state. It never runs on the delivery thread or on a host thread inside
+an ABI call. The handshake's `until` and cancellation apply while it runs:
 
-- A passed deadline gives `TimedOut`, and a cancellation gives `Aborted`.
-- The evaluation's result is then discarded when it returns.
-- The socket and all TLS state are released exactly once, after it returns (TLS-1).
+- A passed deadline gives `TimedOut`, and a cancellation gives `Aborted`. Both close the
+  socket and free the TLS session immediately inside the abort callback, matching
+  [TLS-4](tls.md#tls-4-provider-calls) with no double close.
+- Generation teardown and `stop` do not block waiting for an outstanding
+  `SecTrustEvaluateWithError`, keeping teardown bounded (EMB-3).
+- When an aborted or orphaned evaluation eventually returns (including after `stop` and a
+  subsequent `start`), it sees its cancellation token is set and drops its own `CF*`
+  objects and result without touching generation memory, invoking any callback or closing
+  any socket.
 
 A recorded handshake replays its recorded result, whichever verifier produced it.
 
@@ -1207,11 +1419,13 @@ waste:
 | foreign archive member for the wrong platform or a later floor | FFI-3 admission, before the link or archive | the FFI-3 member diagnostic (EMB-2's `macho_platform` and `floor`) |
 | import that no link-kit stub exports | the import audit (EMB-1), before the archive is written | `UnlistedImport(name, member)` |
 | bindings whose manifests differ between Apple targets | `hirsel sdk swift` <!-- doc-ref: planned -->, before output | `TargetDependentEntries(a, b)` |
-| arguments that break ABI v1 (EMB-4 "Validating arguments") | the embed ABI, before any read past `size` | `HIRSEL_ABI_MISMATCH` |
-| grant outside the program's wants, a grant for a capability EMB-7 refuses on the target, `DirBase`, `DirSource`, `DirUnavailable`, `StoreOverlapsDir`, an unopenable or unrecoverable store, `PlaceCapacity`, `FaultHandlerReplaced` | the embedded launch's `start` | `HIRSEL_REFUSED`, with the reason in `ended` |
+| arguments that break ABI v1 (EMB-4 "Validating arguments", including `start_timeout_ms == 0`) | the embed ABI, before any read past `size` or registry reservation | `HIRSEL_ABI_MISMATCH` |
+| `UnsupportedCpu`, grant outside the program's wants, a grant for a capability EMB-7 refuses on the target, `DirBase`, `DirSource`, `DirUnavailable`, `SecretSource`, `StoreOverlapsDir`, an unopenable or unrecoverable store, `ClientBytesTooSmall`, `PlaceCapacity(Room)`, `PlaceTimedOut`, `FaultHandlerReplaced` | the embedded launch's `start` | `HIRSEL_REFUSED`, with the reason in `ended` |
+| refused stack-growth `mprotect` (in `fiber::room` pre-commit or the fault handler) or refused stack/payload mapping (EMB-3) | the embedded runtime | `HIRSEL_END_RUN_STOP` (`"HostMemory"`); the unit and generation abort fail-closed, the host survives, and any failed-growth stack is retired and unmapped whole (`munmap`) |
 
-The last two rows are the only ones after the build. They concern the host's inputs (its
-arguments, grants, directories and store), not the build's.
+The last three rows are the only ones after the build. They concern the host's inputs (its
+arguments, grants, directories and store) and host-memory availability during execution,
+not the build's.
 
 **FFI-3 on iOS.** The Mach-O member rows of [FFI-3](foreign.md) apply to both iOS targets
 with the platform and floor from the record:
@@ -1265,21 +1479,30 @@ beside its existing macOS jobs.
 `main`, and the simulator job runs on it as well as on `pull_request`, `schedule` and
 `workflow_dispatch`. The job's `if:` names those events, so a push to main is never skipped.
 
-**Inputs.** The macOS runner gets the toolchain by downloading the Linux-built installation
-as an artifact from a Linux job of the same workflow run, which builds the iOS and macOS
-archives. Alternatively, a macOS driver built in the job can be used, as the existing mac-ci
-jobs do. Either way, the job never depends on a toolchain from another run.
+**Inputs.** A Linux job of the same workflow builds the installation (with the iOS and
+macOS embed slots), runs `hirsel sdk swift` <!-- doc-ref: planned --> on the fixture
+program (and builds the two-library equal-projection Swift packages and the EMB-6 symbol
+reference fixture object), and uploads the generated packages, archives, headers and
+fixture object as artifacts to the `macos-26` job. (The `macos-26` runner never executes an
+ELF Linux driver; alternatively, it may build a native macOS driver and its Mach-O tools
+in the same job and run `hirsel sdk swift` <!-- doc-ref: planned --> locally.) Either way,
+the job never depends on artifacts from another workflow run.
 
 **What it runs.**
 
-1. **Generate the package.** Run `hirsel sdk swift` <!-- doc-ref: planned --> on the fixture program.
+1. **Receive or generate the package.** Unpack the Linux-generated Swift package, archives,
+   headers and symbol reference fixture object (or generate them with the native macOS
+   driver built in this job).
 2. **Check the XCFramework against Apple's tool.** Run `xcodebuild -create-xcframework`
    over the same three archives and headers. Compare its `Info.plist` with the driver's,
    field by field: for each library, `LibraryIdentifier`, `LibraryPath`, `HeadersPath`,
    `SupportedArchitectures`, `SupportedPlatform` and `SupportedPlatformVariant`. Apple's
    tool is the independent oracle for the driver's assembly.
-3. **Check the symbol lists.** Link the EMB-6 symbol reference fixture against the iOS SDK
-   for the device and the simulator.
+3. **Check the symbol lists and two-library Swift link.** Link the EMB-6 symbol reference
+   fixture against the iOS SDK for the device and the simulator. Also compile two generated
+   Swift packages with equal binding projections in release mode (`-O`) and link both
+   against both lazy archives in both link orders (`A, B` and `B, A`), asserting a
+   duplicate `hirsel_embed_v1_*` link error in both orders (EMB-1, EMB-5).
 4. **Prepare a simulator.** Run `xcrun simctl list runtimes`, pin the simulator runtime it
    found (never a version written blind), and create a disposable simulator. Add the TLS
    test CA to that simulator's trust store (`xcrun simctl keychain <udid> add-root-cert`).
@@ -1291,18 +1514,27 @@ jobs do. Either way, the job never depends on a toolchain from another run.
      the linked library's `hirsel_embed_v1_manifest` gives;
    - a Hirsel call's decoded result, a call of each entry kind, and a subscription with
      two changes;
-   - a room with a state, a message and a leave;
-   - abandon, and the cancellation of a Swift task before and after issue;
-   - close from a host thread and from inside a callback;
-   - the EMB-7 TLS rows: a `Trust.System` handshake to a public HTTPS host succeeds; the
-     test CA's leaf succeeds under `System` and under a matching `Roots`; a wrong name,
-     an expired leaf and a not-yet-valid leaf give their named variants; a `Roots` grant
-     with another digest is `Denied`;
+   - a room with a state, a mixed-Part message-then-leave, a first-`Full` Part, and a
+     leave, matching `sdk/client/room.ts` / `sdk.md`;
+   - abandon, Swift cancellation before issue, held at the C registration boundary, after
+     issue, early outcome before C returns, and late cancellation handler safety;
+   - close from a host thread, from inside a callback, and racing external/deferred close;
+   - the EMB-7 TLS rows:
+     - **on every executing host (simulator, macOS and signed device):** a `Trust.System`
+       handshake to a public HTTPS host succeeds and an unanchored test CA gives
+       `UnknownIssuer`; under `Trust.Roots` matching the test CA, the leaf succeeds and a
+       wrong name, expired leaf and not-yet-valid leaf give their named variants; a `Roots`
+       grant with another digest is `Denied`;
+     - **on hosts deliberately provisioned with the private test CA** (the disposable
+       simulator above, and macOS only when the CI job explicitly provisions trust for that
+       test CA): the test CA's leaf also succeeds under `Trust.System` and gives
+       `NameMismatch`, `Expired` and `NotYetValid` against it;
    - a stop and a second start, after which the old session handle returns
      `HIRSEL_STOPPED` and a new call succeeds;
    - the `Welcome.target` each slice reports.
 
-   The same XCTest runs on the macOS slice without a simulator.
+   The same XCTest runs on the macOS slice without a simulator (with the private-CA-under-
+   `Trust.System` assertion scoped to whether the macOS host provisioned that CA).
 6. **Delete the simulator.**
 
 Daytona macOS machines are for developing the Mac slices by hand. The standing gate is this
@@ -1332,6 +1564,11 @@ exports. So the comparison is defined by one shared program and one marker:
 - **The marker.** Both arms measure from process start to the first counter value seen on
   the main queue. They take resident memory at the same point. Each sample is a fresh
   process on the same simulator and configuration.
+- **Durability check (outside the timing interval).** Before accepting either arm's
+  fixture as the decided workload, each arm independently relaunches against its own
+  same-container store after observing the acknowledged counter value and confirms that the
+  persisted counter survives relaunch. This check runs outside the timed samples so neither
+  adapter can pass by serving a counter from process memory alone.
 
 PR #11 reserves 1 MiB per fiber stack and commits 256 KiB at first on iOS. The job records
 those values next to Hirsel's. Slice 9 carries that sizing difference into its device check.
@@ -1356,27 +1593,35 @@ so the OS sandbox cannot be what refuses:
 2. It grants `root/` as a `Dir`. Through the grant, a file inside `root/` opens.
 3. A relative symlink inside `root/` that points inside `root/` is followed, where the
    operation follows links.
-4. Through the grant, three valid relative names that lead outside are refused with
-   `Denied`, with the confined open reaching the kernel each time:
-   - a `..` path to `outside/`'s file;
-   - a symlink inside `root/` pointing to `outside/`;
-   - an absolute symlink target.
+4. Through the grant, three legal relative names (passing Hirsel's public path check) whose
+   symlink targets lead outside `root/` are refused with `Denied`, with the confined open
+   reaching the kernel (`O_RESOLVE_BENEATH`) each time:
+   - a legal relative name whose symlink inside `root/` has a relative `..` target pointing
+     to `outside/`'s file;
+   - a legal relative name traversing a symlink directory inside `root/` whose relative
+     `..` target points to `outside/`;
+   - a legal relative name whose symlink inside `root/` has an absolute target pointing to
+     `outside/`'s file.
 
    On the kernel path, `ENOTCAPABLE` maps to `EXDEV` and then to `Denied`
    (`crates/hirsel-core-rt/src/host/darwin/path.rs`).
 5. `outside/`'s file is unchanged afterwards.
 
-These names are not refused lexically first: the core rules reject absolute paths and
-literal parent components at the language boundary, so the test uses names that pass it.
-The three public `Denied` assertions of the macOS law are kept as well. A blanket symlink
-refusal, a sandbox `EACCES` or a lexical refusal does not pass this law.
+The three public-boundary `Denied` assertions of the macOS law (a literal `..` parent
+component, an absolute path, and a symlink escape) are kept as well; the language boundary
+continues to reject literal `..` and absolute paths before any syscall, while the three
+symlink cases above prove kernel `O_RESOLVE_BENEATH` enforcement on legal relative names.
+A blanket symlink refusal, a sandbox `EACCES` or a lexical refusal does not pass the
+kernel law.
 
 A device that behaves otherwise stops the iOS track. The floor's premise (kernel
 enforcement of `O_RESOLVE_BENEATH`) is then false, and the confinement design is reopened.
 No userspace walk is built.
 
-**Then** the same simulator test runs on device, followed by the runtime qualification that
-the simulator cannot give:
+**Then** the same simulator test runs on device (using the unprovisioned-host TLS suite
+above: public HTTPS `Trust.System` success, unanchored test CA `UnknownIssuer`, and
+`Trust.Roots` leaf-variant checks, without installing a private test CA on the user's
+device), followed by the runtime qualification that the simulator cannot give:
 
 - **Stack depth.** A recursion of a stated depth runs on the A12, and the guard page is
   observed one frame past the bound.

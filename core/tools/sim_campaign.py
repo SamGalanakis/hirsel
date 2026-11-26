@@ -406,7 +406,7 @@ def main():
     parser.add_argument('--nightly-results', type=Path, help='retain preparation reports and continue past unprepared laws')
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
     parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
-    parser.add_argument('--law', help='prepare or list just one exact law')
+    parser.add_argument('--law', action='append', help='prepare or list an exact law (repeatable)')
     parser.add_argument('--package', action='append', choices=sorted(seeded_package_inventory()),
                         help='prepare or list only this package (repeatable)')
     parser.add_argument('--list', action='store_true')
@@ -419,10 +419,12 @@ def main():
             packages.add('runner-adapters')
         inventory = {kind: laws for kind, laws in inventory.items() if kind in packages}
         skips = {name: reason for name, reason in skips.items() if name.split('@')[0] in packages}
-    if args.law and args.law not in skips and not any(args.law in laws for laws in inventory.values()):
-        parser.error('unknown simulation law')
+    requested = set(args.law or ())
+    available = {law for group in inventory.values() for law in group} | skips.keys()
+    if unknown := requested - available:
+        parser.error(f'unknown simulation law: {", ".join(sorted(unknown))}')
     if args.list:
-        print('\n'.join(name for laws in inventory.values() for name in laws if not args.law or name == args.law))
+        print('\n'.join(name for laws in inventory.values() for name in laws if not requested or name in requested))
         return
     if not args.compiler or not args.work or (args.seeds is not None and args.seeds <= 0):
         parser.error('preparation needs --compiler and --work, with a positive --seeds override')
@@ -436,20 +438,21 @@ def main():
     nightly = args.nightly_results.resolve(strict=True) if args.nightly_results else None
     if nightly is not None:
         (nightly / 'prepare.jsonl').touch(exist_ok=False)
-        if not args.law and not args.package:
-            inventory['canary'] = {CANARY: None}
     for law, reason in skips.items():
-        if not args.law or law == args.law:
+        if not requested or law in requested:
             if nightly is None:
                 print(f'{law}: {reason}')
             else:
                 prepare_outcome(nightly, build, law, 'prepare_skip', reason)
     laws = []
     for kind, group in inventory.items():
-        group = {name: case for name, case in group.items() if not args.law or name == args.law}
+        group = {name: case for name, case in group.items() if not requested or name in requested}
         if group:
             laws.extend(prepare(args.compiler.resolve(), work, kind, group, args.jobs, args.seeds,
                                 build, runtime, recording_runtime, nightly))
+    if nightly is not None:
+        laws.extend(prepare(args.compiler.resolve(), work, 'canary', {CANARY: None}, args.jobs,
+                            args.seeds, build, runtime, recording_runtime, nightly))
     (work / 'manifest.json').write_text(json.dumps(laws, indent=2) + '\n')
 
 

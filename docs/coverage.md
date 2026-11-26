@@ -732,6 +732,8 @@ exit status. The recording builds have no coverage, so tapes record and replay a
 Every law prepares with coverage. The nightly records preparation failures in `prepare.jsonl`
 and sweeps the laws that produced both executables and a coverage map. The dated run keeps the
 compiler reports under `prepared/`.
+For a focused service check, pass `--law DEFINITION` to the nightly script for each law to
+sweep. A focused sweep includes the seed canary and writes its own completion marker.
 Seed 0 runs at preparation under `hirsel test` and is not in the campaign's profiles.
 
 ## Caching

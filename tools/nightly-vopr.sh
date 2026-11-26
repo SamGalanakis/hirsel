@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+law_filter=()
+while (( $# )); do
+  if [[ $1 != --law || $# -lt 2 ]]; then
+    echo "Usage: $0 [--law DEFINITION]..." >&2
+    exit 2
+  fi
+  law_filter+=(--law "$2")
+  shift 2
+done
+
 cd "$(dirname "$(readlink -f "$0")")/.."
 checkout=$PWD
 briefs=$(realpath -m -- "${HIRSEL_BRIEFS:-/workspace/code/hirsel-briefs}")
@@ -32,7 +42,7 @@ if [[ -n ${HIRSEL_VOPR_SEEDS:-} ]]; then
 fi
 python3 core/tools/sim_campaign.py --compiler "${paths[0]}" \
   --runtime "${paths[1]}" --recording-runtime "${paths[2]}" --work "$scratch/prepared" \
-  --nightly-results "$run" "${seed_budget[@]}" || status=$?
+  --nightly-results "$run" "${seed_budget[@]}" "${law_filter[@]}" || status=$?
 # Earlier nights' reds first; this allocates no seeds.
 python3 tools/sim-campaign reds-first "$scratch/prepared/manifest.json" "$run" || status=$?
 
@@ -56,7 +66,11 @@ done
 group_status=0
 python3 "$checkout/core/tools/vopr_failure_groups.py" "$run" || group_status=$?
 if (( sweep_status == 0 && (group_status == 0 || group_status == 3) )); then
-  touch "$run/complete"
+  if (( ${#law_filter[@]} )); then
+    touch "$run/focused-complete"
+  else
+    touch "$run/complete"
+  fi
 fi
 if (( sweep_status != 0 )); then
   status=$sweep_status

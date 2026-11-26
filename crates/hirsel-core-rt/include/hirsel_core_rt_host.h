@@ -68,6 +68,7 @@ HirselCoreHostOutcome hirsel_core_host_io(HirselCoreContext *, uint8_t op, uint6
 HirselCoreHostOutcome hirsel_core_host_clock(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_stat(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_at(HirselCoreContext *, uint8_t op, uint64_t handle, uint64_t at, HirselCoreBuffer *operand, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_zero_at(HirselCoreContext *, uint64_t file, uint64_t at, uint64_t len, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
 HirselCoreHostOutcome hirsel_core_host_sleep_until_wall(HirselCoreContext *, uint64_t handle, uint64_t wall_ms, uint64_t site);

@@ -677,11 +677,9 @@ impl FunctionEmitter<'_> {
         self.likely(&positive, ready, slow);
         self.block(slow);
         let site = self.site_word();
-        let status = self.call_declared(
+        let status = self.runtime_bool(
             "hirsel_core_step_out",
-            Type::I8,
             &[ptr(CONTEXT), word(site)],
-            FnAttrs::default(),
             &CallAttrs {
                 cold: true,
                 ..CallAttrs::default()

@@ -45,7 +45,7 @@ pub type Mode = Subgroup | Datagram
 pub type Object = Object(track: TrackName, group: u64, subgroup: u64, id: u64, publisher_priority: u8, status: ObjectStatus, payload: Shared[Bytes])
 pub type ObjectStatus = Normal | EndOfGroup | EndOfTrack | DoesNotExist
 pub type Limits { requests: u32, tracks: u32, cache_groups: u32, cache_bytes: u64, control_bytes: u32, filter_ranges: u16 }
-pub type Event = Setup(path: Bytes, token: Option[Bytes]) | Subscribe(RequestId, TrackName, Filter, priority: u8) | Publish(RequestId, TrackName) | Fetch(RequestId, TrackName, from: Location, to: Location) | Received(Object) | Done(RequestId, code: u64) | Goaway(uri: Bytes)
+pub type Event = Setup(path: Bytes, token: Option[Bytes]) | Subscribe(id: RequestId, track: TrackName, filter: Filter, priority: u8) | Publish(id: RequestId, track: TrackName) | Fetch(id: RequestId, track: TrackName, from: Location, to: Location) | Received(Object) | Done(id: RequestId, code: u64) | Goaway(uri: Bytes)
 
 pub fn session(side: quic.Side, role: Role, limits: Limits) -> Session
 pub fn receive(mut s: Session, mut e: quic.Endpoint, c: quic.ConnectionHandle, events: List[quic.Event], mut out: List[Event])

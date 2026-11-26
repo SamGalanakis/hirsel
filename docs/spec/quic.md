@@ -91,7 +91,7 @@ pub type Pin = Pin(Inline[u8, 32])
 
 pub type Input = Datagram(from: Addr, to: Addr, ecn: u8, data: Bytes) | Timeout(now: u64)
 pub type Output = Transmit(to: Addr, ecn: u8, segment: u16, at: u64, len: u64) | Wake(at: u64)
-pub type Event = Connected(ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Reset(ConnectionHandle, StreamId, u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Reset(ConnectionHandle, StreamId, u64) | Stopped(ConnectionHandle, StreamId, u64) | Datagram(ConnectionHandle, Bytes) | Closed(ConnectionHandle, CloseReason)
 pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
 

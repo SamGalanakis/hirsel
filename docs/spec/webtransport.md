@@ -78,7 +78,7 @@ pub type SessionId = SessionId(u64)
 pub type Limits { sessions: u16, streams_bidi: u64, streams_uni: u64, data: u64, buffered: u16, header_bytes: u32 }
 pub type Request { authority: String, path: String, origin: Option[String], protocols: List[String], headers: List[(String, String)] }
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
-pub type Event = Requested(SessionId, Request) | Ready(SessionId, protocol: Option[String]) | Stream(SessionId, quic.StreamId, bidi: bool) | Datagram(SessionId, Bytes) | Draining(SessionId) | Closed(SessionId, code: u32, reason: Bytes)
+pub type Event = Requested(SessionId, Request) | Ready(id: SessionId, protocol: Option[String]) | Stream(id: SessionId, stream: quic.StreamId, bidi: bool) | Datagram(SessionId, Bytes) | Draining(SessionId) | Closed(id: SessionId, code: u32, reason: Bytes)
 
 pub fn server(limits: Limits) -> Server
 pub fn receive(mut s: Server, mut e: quic.Endpoint, events: List[quic.Event], mut out: List[Event])

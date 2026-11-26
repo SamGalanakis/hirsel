@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 mod origins;
+mod recipes;
 
 #[derive(Clone, Copy, Debug)]
 struct Target {
@@ -179,7 +180,7 @@ fn collect<'m>(
         variants: BTreeMap::new(),
         optional: 0,
         bound: BTreeMap::new(),
-        recipes: RefCell::new(BTreeMap::new()),
+        recipes: RefCell::default(),
         demands: RefCell::new(BTreeMap::new()),
         computing: RefCell::new(BTreeSet::new()),
         pending: roots
@@ -241,9 +242,7 @@ struct Work<'a, 'm> {
     live: BTreeSet<ContentHash>,
     semantic_count: usize,
     limit: usize,
-    /// Each unit's layout recipes, with the type count they were computed for:
-    /// an import appends rows.
-    recipes: RefCell<BTreeMap<usize, (usize, Rc<Vec<RecipeRow>>)>>,
+    recipes: RefCell<recipes::Recipes>,
     /// What each body can use of known code, by its code identity.
     demands: RefCell<BTreeMap<ContentHash, Rc<Vec<Demand>>>>,
     /// The bodies whose demands are being computed, to end a recursive forward.
@@ -336,18 +335,7 @@ impl Work<'_, '_> {
     }
     fn recipes(&self, unit: usize) -> Rc<Vec<RecipeRow>> {
         let types = &self.modules[unit].types;
-        if let Some((n, r)) = self.recipes.borrow().get(&unit)
-            && *n == types.len()
-        {
-            return r.clone();
-        }
-        // A table the layout refuses binds nothing: every field offset and
-        // layout constant stays unknown.
-        let r = Rc::new(hirsel_core_layout::compute(types).unwrap_or_default());
-        self.recipes
-            .borrow_mut()
-            .insert(unit, (types.len(), r.clone()));
-        r
+        self.recipes.borrow_mut().of(unit, types)
     }
     /// The code words body `t` can use of what a caller knows.
     fn demands(&self, t: Target) -> Rc<Vec<Demand>> {

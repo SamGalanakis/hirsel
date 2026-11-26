@@ -42,6 +42,8 @@ type Seen {
     // Whether the revoke had returned when it was committed, and when it was.
     after: bool,
     at: u64,
+    // For STUN: the low 64 bits of the transaction ID, which `check_from` sets.
+    txn: u64,
     // The opened RTP or RTCP plaintext.
     pkt: Bytes
 }
@@ -170,7 +172,10 @@ fn harvest(mut h: Hall, k: u16) {
     }
     for take sent in tap {
         let units.Sent(to: to, tag: _, data: take d) = take sent
-        let mut s = Seen(unit: k, to: to, kind: kind_of(d), ssrc: 0, seq: 0, pt: 0, mark: 0, n: 0, after: h.after, at: host.mono_ns(h.clock), pkt: list.new())
+        let mut s = Seen(unit: k, to: to, kind: kind_of(d), ssrc: 0, seq: 0, pt: 0, mark: 0, n: 0, after: h.after, at: host.mono_ns(h.clock), txn: 0, pkt: list.new())
+        if s.kind == KIND_STUN && list.len(d) >= 20 {
+            s.txn = list.word_be(d, 12)
+        }
         if s.kind == KIND_RTCP && list.len(d) >= 8 {
             s.ssrc = list.word_be(d, 4)
             for i in 0u64 .. list.len(h.peers) {
@@ -317,6 +322,40 @@ fn stun_to(h: Hall, to: Addr, from: u64) -> u64 {
     n
 }
 
+/// Whether a STUN datagram captured to `to` from capture `from` on answers a
+/// transaction in `first .. end`.
+fn stun_answers(h: Hall, to: Addr, from: u64, first: u64, end: u64) -> bool {
+    for i in from .. list.len(h.seen) {
+        let s = h.seen[i]
+        if s.to == to && s.kind == KIND_STUN && s.txn >= first && s.txn < end {
+            return true
+        }
+    }
+    false
+}
+
+/// Browser `i` checks the server ufrag `ufrag` as a browser does: each check a new
+/// transaction (`txn`, `txn + 1`, ...), sent again two ticks on while none has been
+/// answered, at most `CHECKS` times. It answers the transactions it used, `txn ..
+/// end`, and whether one was answered.
+fn check_until_answered(mut h: Hall, i: u64, ufrag: Bytes, txn: u64) -> (u64, bool) waits {
+    let at = list.len(h.seen)
+    let to = h.peers[i].c.at
+    for k in 0u64 .. CHECKS {
+        check_from(mut h, i, ufrag, txn + k)
+        tick(mut h)
+        tick(mut h)
+        if stun_answers(h, to, at, txn, txn + k + 1) {
+            return (txn + k + 1, true)
+        }
+    }
+    (txn + CHECKS, false)
+}
+
+/// How many times a test browser sends a check, or a datagram whose arrival it waits
+/// to see, before it gives up.
+const CHECKS: u64 = 16
+
 /// The last sequence number captured to `to` on `ssrc`.
 fn last_seq(h: Hall, to: Addr, ssrc: u32) -> u16 {
     let mut i = list.len(h.seen)
@@ -362,9 +401,18 @@ fn close_hall(take h: Hall) {
 
 /// A simulated network with no loss and no delay, and the task serving it.
 fn sim_net(tasks: Tasks, seed: u64) -> (Net, Clock, Task[()]) {
+    sim_net_with(tasks, seed, 0, 0)
+}
+
+/// A simulated network that drops each datagram with probability `loss_ppm` per
+/// million and delivers the rest `delay_ns` after they were sent, drawing from `seed`.
+fn sim_net_with(tasks: Tasks, seed: u64, loss_ppm: u64, delay_ns: u64) -> (Net, Clock, Task[()]) {
     let (network, take port) = provide.net(bytes 1048576)
     let (take driver, clock) = std.sim.world.new(seed, 0, 0)
-    let server = std.sim.udp.Server(config: std.sim.udp.defaults(), plan: std.sim.world.plan(seed), world: take driver, clock, tasks, port: take port, captures: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.loss = std.sim.udp.Loss(good_to_bad: 0, bad_to_good: 0, good_loss: loss_ppm, bad_loss: loss_ppm)
+    config.delay_ns = delay_ns
+    let server = std.sim.udp.Server(config: config, plan: std.sim.world.plan(seed), world: take driver, clock, tasks, port: take port, captures: list.new())
     let served = task.spawn(tasks, bytes 8388608, take server, std.sim.udp.serve)
     (network, clock, take served)
 }

@@ -452,7 +452,7 @@ fn loopback_run(net: Net, clock: Clock) waits {
         if kind != KIND_RTP {
             continue
         }
-        let mut s = Seen(unit: 1, to: h.peers[bs].c.at, kind: kind, ssrc: 0, seq: 0, pt: 0, mark: 0, n: 0, after: false, at: 0, pkt: list.new())
+        let mut s = Seen(unit: 1, to: h.peers[bs].c.at, kind: kind, ssrc: 0, seq: 0, pt: 0, mark: 0, n: 0, after: false, at: 0, txn: 0, pkt: list.new())
         look(mut h.peers[bs].c.cs, d, mut s)
         if s.kind != KIND_RTP || s.ssrc != ssrc || s.pt != 100 || s.mark != MARK_F || s.n != FIRST_SRC + k {
             fail("a packet on the subscriber's socket is not the next forwarded one")

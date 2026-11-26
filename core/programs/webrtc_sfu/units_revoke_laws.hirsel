@@ -66,7 +66,78 @@ fn holds(h: Hall, k: u16, x: peer.Gen) -> (bool, bool) {
     (from_x, to_x)
 }
 
-fn revoke_run(net: Net, clock: Clock, held: Held) waits {
+/// One arm of the fault matrix: the chance per million that the network drops a
+/// datagram, its one-way delay, and the fixed seed its drops are drawn from.
+type Arm: key {
+    loss: u64,
+    delay_ns: u64,
+    seed: u64
+}
+
+/// The four arms: loss 0 or 5%, delay 0 or 1 ms.
+fn arms() -> List[Arm] {
+    let mut a: List[Arm] = list.new()
+    list.push(mut a, Arm(loss: 0, delay_ns: 0, seed: 7400))
+    list.push(mut a, Arm(loss: 0, delay_ns: MS, seed: 7401))
+    list.push(mut a, Arm(loss: 50000, delay_ns: 0, seed: 7402))
+    list.push(mut a, Arm(loss: 50000, delay_ns: MS, seed: 7403))
+    a
+}
+
+/// A failure, naming the arm and the held repair it ran with.
+fn say(arm: Arm, held: Held, take what: String) -> String {
+    let mut m = string.from("loss ")
+    string.push_uint(mut m, arm.loss, 10, 0, '0')
+    string.push(mut m, " ppm, delay ")
+    string.push_uint(mut m, arm.delay_ns, 10, 0, '0')
+    string.push(mut m, " ns, seed ")
+    string.push_uint(mut m, arm.seed, 10, 0, '0')
+    string.push(mut m, if held == Publishing {
+        ", held Publishing: "
+    } else {
+        ", held Subscribing: "
+    })
+    string.push(mut m, what)
+    take m
+}
+
+fn holds_both(h: Hall, x: peer.Gen) -> bool {
+    let (from_x, to_x) = holds(h, 1, x)
+    from_x && to_x
+}
+
+/// 5 ms pass with no unit turning: anything sent has arrived or been lost.
+fn pass(h: Hall) waits {
+    let now = host.mono_ns(h.clock)
+    host.sleep_until(h.clock, now + 5 * MS)
+}
+
+/// Browser `i` sends a datagram unit 1 must drop as unknown (a DTLS record when
+/// `ufrag` is empty, else a check of `ufrag` at transaction `txn`, `txn + 1`, ...),
+/// again two ticks on until unit 1 has counted it. It answers how many it sent; each
+/// one that arrives is counted exactly once.
+fn dropped_as_unknown(mut h: Hall, arm: Arm, held: Held, i: u64, ufrag: Bytes, txn: u64) -> u64 waits {
+    for k in 0u64 .. CHECKS {
+        let before = unit_router(h, 1).unknown
+        if list.len(ufrag) == 0 {
+            send_from(mut h, i, b"\x17\xfe\xfd\x00\x01\x00\x00\x00\x00\x00\x07\x00\x04abcd")
+        } else {
+            check_from(mut h, i, ufrag, txn + k)
+        }
+        tick(mut h)
+        tick(mut h)
+        let counted = unit_router(h, 1).unknown - before
+        if counted > 1 {
+            fail(say(arm, held, "one datagram from a revoked or refused credential was counted unknown twice"))
+        }
+        if counted == 1 {
+            return k + 1
+        }
+    }
+    fail(say(arm, held, "harness: a datagram from a revoked or refused credential never reached unit 1"))
+}
+
+fn revoke_run(net: Net, clock: Clock, held: Held, arm: Arm) waits {
     let mut h = hall(net, clock, 7400)
     let room = room_id()
     let _ = ok_or_say(call(mut h, Open(room: room, limits: revoke_limits())), "open")
@@ -98,69 +169,98 @@ fn revoke_run(net: Net, clock: Clock, held: Held) waits {
     let (z_pa, z_pa_rtx) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), pa))
     let (z_py, _) = option.unwrap(router.track_ssrcs(units.router_of(h.w.u1), room, gen_of(3), py))
     let y_start = h.peers[BY].seq
-    // 100 ms of everyone's media, and a check of X's ufrag answered while X is in.
+    // Unit 1 takes one `Media` message per packet of Y's that reached unit 2.
+    let y_in = units.counts(h.w.u1).media
+    // Everyone's media until it has reached every subscriber, and a check of X's
+    // ufrag answered while X is in.
     talk(mut h, 20, true)
-    if marked_to(h, addr_of(2), y_pa, MARK_X) == 0 || marked_to(h, addr_of(3), z_pa, MARK_X) == 0 || marked_to(h, addr_of(1), x_py, MARK_Y) == 0 || marked_to(h, addr_of(1), x_pz, MARK_Z) == 0 || marked_to(h, addr_of(3), z_py, MARK_Y) == 0 {
-        fail("media did not reach every subscriber before the revoke")
+    let mut rounds = 0u64
+    while marked_to(h, addr_of(2), y_pa, MARK_X) == 0 || marked_to(h, addr_of(3), z_pa, MARK_X) == 0 || marked_to(h, addr_of(1), x_py, MARK_Y) == 0 || marked_to(h, addr_of(1), x_pz, MARK_Z) == 0 || marked_to(h, addr_of(3), z_py, MARK_Y) == 0 {
+        if rounds == CHECKS {
+            fail(say(arm, held, "media did not reach every subscriber before the revoke"))
+        }
+        talk(mut h, 4, true)
+        rounds += 1
     }
-    let before = list.len(h.seen)
-    check_from(mut h, BX, b"ufragx1", 1)
-    tick(mut h)
-    if stun_to(h, addr_of(1), before) != 1 {
-        fail("a check of X's ufrag was not answered while X was in")
+    let (_, x_in) = check_until_answered(mut h, BX, b"ufragx1", 100)
+    if !x_in {
+        fail(say(arm, held, "a check of X's ufrag was not answered while X was in"))
     }
     // The held repair and the held suffix. Unit 1's writer commits one datagram a
     // call until the revoke returns, so what X sends and receives waits in its suffix.
     units.seam(mut h.w.u1, 1, true)
-    for _ in 0u64 .. 4 {
+    let mut built = 0u64
+    while built < 4 || !holds_both(h, x) {
+        if built == CHECKS {
+            fail(say(arm, held, "harness: unit 1's suffix never held X's media and media to X"))
+        }
         for _ in 0u64 .. 2 {
             speak(mut h, BX)
             speak(mut h, BZ)
         }
         tick(mut h)
+        built += 1
     }
+    // The browser asks for a repair again, 5 ms on, until the answering unit has
+    // taken the ask; no unit that would take the reply turns after that.
+    let mut nacks = 0u64
     let stale_unit = if held == Publishing {
         // Y asks for X's packet: unit 2 asks unit 1, which answers; the reply waits
         // in unit 2's media inbox until after unit 2 has taken the revoke.
-        let ask = nack(mut h.peers[BY].c.cs, y_pa, last_seq(h, addr_of(2), y_pa))
-        send_from(mut h, BY, ask)
-        step_unit(mut h, 2)
-        for _ in 0u64 .. 2 {
-            speak(mut h, BX)
-            speak(mut h, BZ)
+        let asks = units.counts(h.w.u1).asks
+        while units.counts(h.w.u1).asks == asks {
+            if nacks == CHECKS {
+                fail(say(arm, held, "harness: unit 1 never took unit 2's ask for X's packet"))
+            }
+            let ask = nack(mut h.peers[BY].c.cs, y_pa, last_seq(h, addr_of(2), y_pa))
+            send_from(mut h, BY, ask)
+            pass(h)
+            step_unit(mut h, 2)
+            for _ in 0u64 .. 2 {
+                speak(mut h, BX)
+                speak(mut h, BZ)
+            }
+            step_unit(mut h, 1)
+            nacks += 1
         }
-        step_unit(mut h, 1)
         2u16
     } else {
         // X asks for Y's packet: unit 1 asks unit 2, which answers; the reply waits
         // in unit 1's media inbox until after unit 1 has taken the revoke.
-        let ask = nack(mut h.peers[BX].c.cs, x_py, last_seq(h, addr_of(1), x_py))
-        send_from(mut h, BX, ask)
-        for _ in 0u64 .. 2 {
-            speak(mut h, BX)
-            speak(mut h, BZ)
+        let asks = units.counts(h.w.u2).asks
+        while units.counts(h.w.u2).asks == asks {
+            if nacks == CHECKS {
+                fail(say(arm, held, "harness: unit 2 never took unit 1's ask for Y's packet"))
+            }
+            let ask = nack(mut h.peers[BX].c.cs, x_py, last_seq(h, addr_of(1), x_py))
+            send_from(mut h, BX, ask)
+            for _ in 0u64 .. 2 {
+                speak(mut h, BX)
+                speak(mut h, BZ)
+            }
+            pass(h)
+            step_unit(mut h, 1)
+            step_unit(mut h, 2)
+            nacks += 1
         }
-        step_unit(mut h, 1)
-        step_unit(mut h, 2)
         1u16
     }
-    let (from_x, to_x) = holds(h, 1, x)
-    if !from_x || !to_x {
-        fail("unit 1's suffix did not hold X's media and media to X at the revoke")
+    if !holds_both(h, x) {
+        fail(say(arm, held, "unit 1's suffix did not hold X's media and media to X at the revoke"))
     }
     let stale = unit_router(h, stale_unit).stale
     let misses = unit_router(h, 3 - stale_unit).ring_misses
     if misses != 0 {
-        fail("the held repair missed the publisher's ring")
+        fail(say(arm, held, "the held repair missed the publisher's ring"))
     }
     begin_call(mut h, Revoke(room: room, id: 1, epoch: 1), true)
     step_unit(mut h, stale_unit)
     if unit_router(h, stale_unit).stale <= stale {
-        fail("the held repair was not taken after the fence")
+        fail(say(arm, held, "the held repair was not taken after the fence"))
     }
     while !h.after {
         if h.calling == 0 {
-            fail("the revoke never returned")
+            fail(say(arm, held, "the revoke never returned"))
         }
         talk(mut h, 1, true)
     }
@@ -176,45 +276,41 @@ fn revoke_run(net: Net, clock: Clock, held: Held) waits {
                 fenced += 1
             },
             Offer(who: _, version: _, text: _) => (),
-            _ => fail("the revoke raised an event other than Fenced"),
+            _ => fail(say(arm, held, "the revoke raised an event other than Fenced")),
         }
     }
     if fenced != 1 {
-        fail("the revoke did not raise one Fenced event")
+        fail(say(arm, held, "the revoke did not raise one Fenced event"))
     }
-    // 200 ms of further input: X keeps sending from its old 5-tuple (media, then a
-    // DTLS record and a check of its old ufrag), and the probe checks X's ufrag from
-    // a new address. Each is dropped and counted unknown.
+    // 200 ms of further input: X keeps sending media from its old 5-tuple, each
+    // dropped and counted unknown; then its DTLS record, a check of its old ufrag,
+    // and the probe's check of X's ufrag from a new address, each sent until unit 1
+    // has counted it unknown. What X sent before the call returned lands first.
+    tick(mut h)
     let unknown = unit_router(h, 1).unknown
     let after_at = list.len(h.seen)
     let y_after = h.peers[BY].seq
-    let mut lost = 0u64
     for t in 0u64 .. 40 {
         if t % 4 == 0 {
             speak(mut h, BX)
             speak(mut h, BY)
             speak(mut h, BZ)
-            lost += 1
-        }
-        if t == 9 {
-            send_from(mut h, BX, b"\x17\xfe\xfd\x00\x01\x00\x00\x00\x00\x00\x07\x00\x04abcd")
-            lost += 1
-        }
-        if t == 13 {
-            check_from(mut h, BX, b"ufragx1", 2)
-            lost += 1
-        }
-        if t == 17 {
-            check_from(mut h, BPROBE, b"ufragx1", 3)
-            lost += 1
         }
         tick(mut h)
     }
     for _ in 0u64 .. 8 {
         tick(mut h)
     }
-    if unit_router(h, 1).unknown - unknown != lost {
-        fail("X's old 5-tuple or old ufrag was not dropped and counted exactly")
+    let media_unknown = unit_router(h, 1).unknown - unknown
+    if media_unknown > 10 || (arm.loss == 0 && media_unknown != 10) || media_unknown == 0 {
+        fail(say(arm, held, "X's media from its old 5-tuple was not dropped and counted exactly"))
+    }
+    let empty: Bytes = list.new()
+    let mut sends = dropped_as_unknown(mut h, arm, held, BX, empty, 0)
+    sends += dropped_as_unknown(mut h, arm, held, BX, b"ufragx1", 200)
+    sends += dropped_as_unknown(mut h, arm, held, BPROBE, b"ufragx1", 300)
+    if arm.loss == 0 && sends != 3 {
+        fail(say(arm, held, "X's old 5-tuple or old ufrag was not dropped and counted exactly"))
     }
     for i in 0u64 .. list.len(h.seen) {
         let s = h.seen[i]
@@ -222,72 +318,86 @@ fn revoke_run(net: Net, clock: Clock, held: Held) waits {
             continue
         }
         if s.to == addr_of(1) || s.to == addr_of(9) {
-            fail("a datagram went to the revoked session or answered its old ufrag")
+            fail(say(arm, held, "a datagram went to the revoked session or answered its old ufrag"))
         }
         if s.kind == KIND_RTP && (s.mark == MARK_X || s.ssrc == y_pa || s.ssrc == y_pa_rtx || s.ssrc == z_pa || s.ssrc == z_pa_rtx) {
-            fail("a packet of the revoked participant's publication went out")
+            fail(say(arm, held, "a packet of the revoked participant's publication went out"))
         }
         if s.kind == KIND_SHUT {
-            fail("a subscriber could not open a packet")
+            fail(say(arm, held, "a subscriber could not open a packet"))
         }
         if (s.kind == KIND_RTP || s.kind == KIND_RTCP) && (s.ssrc == x_py || s.ssrc == x_pz) {
-            fail("a datagram carried a revoked down-track's SSRC")
+            fail(say(arm, held, "a datagram carried a revoked down-track's SSRC"))
         }
     }
-    // Z got every packet Y sent, before, during and after the revoke, exactly once.
+    // Z got every packet of Y's that reached unit 2, before, during and after the
+    // revoke, exactly once; with no loss, every packet Y sent.
     let sent: u64 = int.widen(int.wrapping_sub(h.peers[BY].seq, y_start))
+    let since: u64 = int.widen(int.wrapping_sub(y_after, y_start))
     let mut got: List[u8] = list.new()
     list.fill(mut got, sent, 0u8)
     for s in h.seen {
         if s.to == addr_of(3) && s.kind == KIND_RTP && s.ssrc == z_py && s.mark == MARK_Y {
             let k: u64 = int.widen(int.wrapping_sub(s.n, y_start))
             if k >= sent {
-                fail("Z got a packet Y never sent")
+                fail(say(arm, held, "Z got a packet Y never sent"))
             }
             got[k] += 1
         }
     }
+    let mut distinct = 0u64
+    let mut after_revoke = 0u64
     for k in 0u64 .. sent {
-        if got[k] != 1 {
-            fail("an unrelated participant's media stopped or doubled across the revoke")
+        if got[k] > 1 || (arm.loss == 0 && got[k] != 1) {
+            fail(say(arm, held, "an unrelated participant's media stopped or doubled across the revoke"))
+        }
+        if got[k] == 1 {
+            distinct += 1
+            if k >= since {
+                after_revoke += 1
+            }
         }
     }
-    if int.wrapping_sub(h.peers[BY].seq, y_after) != 10 || after_at == list.len(h.seen) {
-        fail("the 200 ms after the revoke carried no input")
+    if distinct != units.counts(h.w.u1).media - y_in || after_revoke == 0 {
+        fail(say(arm, held, "an unrelated participant's media that reached its unit did not reach Z once"))
     }
-    // A join at the fenced epoch is refused; its session goes.
+    if int.wrapping_sub(h.peers[BY].seq, y_after) != 10 || after_at == list.len(h.seen) {
+        fail(say(arm, held, "the 200 ms after the revoke carried no input"))
+    }
+    // A join at the fenced epoch is refused; its session goes, so its check reaches
+    // unit 1 as unknown and is not answered.
     let (x3, at_fence) = join_unit(mut h, 1, 7450, two, x, addr_of(12), b"ufragx3", MARK_X)
     if let Error(Fenced) = at_fence {} else {
-        fail("a join at the fenced epoch was not Fenced")
+        fail(say(arm, held, "a join at the fenced epoch was not Fenced"))
     }
     let at3 = list.len(h.seen)
-    check_from(mut h, x3, b"ufragx3", 4)
-    tick(mut h)
+    let _ = dropped_as_unknown(mut h, arm, held, x3, b"ufragx3", 400)
     tick(mut h)
     if stun_to(h, addr_of(12), at3) != 0 {
-        fail("a refused join's session answered its ufrag")
+        fail(say(arm, held, "a refused join's session answered its ufrag"))
     }
     // One epoch higher succeeds, with new credentials: its ufrag is answered, X's old
     // one is not.
     let x2: peer.Gen = Gen(id: 1, epoch: 2)
     let i2 = admitted(join_unit(mut h, 1, 7460, two, x2, addr_of(11), b"ufragx2", MARK_X), "a join one epoch above the fence was refused")
     let at2 = list.len(h.seen)
-    check_from(mut h, i2, b"ufragx2", 5)
-    tick(mut h)
-    check_from(mut h, i2, b"ufragx1", 6)
-    tick(mut h)
-    tick(mut h)
-    if stun_to(h, addr_of(11), at2) != 1 {
-        fail("the new epoch's ufrag, and only it, was not answered")
+    let (_, x2_in) = check_until_answered(mut h, i2, b"ufragx2", 500)
+    if !x2_in {
+        fail(say(arm, held, "the new epoch's ufrag was not answered"))
+    }
+    for k in 0u64 .. 4 {
+        check_from(mut h, i2, b"ufragx1", 600 + k)
+        tick(mut h)
+        tick(mut h)
+    }
+    if stun_answers(h, addr_of(11), at2, 600, 604) {
+        fail(say(arm, held, "X's old ufrag was answered on the new epoch's session"))
     }
     // A repeated revoke changes nothing: the new epoch still answers.
     let _ = result.unwrap(call(mut h, Revoke(room: room, id: 1, epoch: 1)))
-    let again = list.len(h.seen)
-    check_from(mut h, i2, b"ufragx2", 7)
-    tick(mut h)
-    tick(mut h)
-    if stun_to(h, addr_of(11), again) != 1 {
-        fail("a repeated revoke changed the new epoch's session")
+    let (_, again) = check_until_answered(mut h, i2, b"ufragx2", 700)
+    if !again {
+        fail(say(arm, held, "a repeated revoke changed the new epoch's session"))
     }
     let _ = result.unwrap(call(mut h, Leave(room: room, who: x2)))
     // Churn ids 4 to 6 through the room; the room has then reserved all six.
@@ -298,11 +408,11 @@ fn revoke_run(net: Net, clock: Clock, held: Held) waits {
     }
     let (_, unseen) = join_unit(mut h, 2, 7510, one_recv, gen_of(7), addr_of(7), b"ufragc7", 0)
     if let Error(Limit(6)) = unseen {} else {
-        fail("one more unseen id was not Limit(ids)")
+        fail(say(arm, held, "one more unseen id was not Limit(ids)"))
     }
     let (_, oldest) = join_unit(mut h, 1, 7520, two, x, addr_of(13), b"ufragx4", MARK_X)
     if let Error(Fenced) = oldest {} else {
-        fail("the oldest fenced epoch was not still Fenced after the churn")
+        fail(say(arm, held, "the oldest fenced epoch was not still Fenced after the churn"))
     }
     close_hall(take h)
 }
@@ -312,22 +422,30 @@ fn revoke_run(net: Net, clock: Clock, held: Held) waits {
 /// `RepairReply` taken after the fence), keeps its 5-tuple routed or its ufrag
 /// answered, admits a join at or below the fence, frees a fenced id's entry on
 /// churn, or lets a refused join's session linger; or the fence stops an unrelated
-/// participant's media.
+/// participant's media; on a network that loses or delays datagrams as well as on
+/// one that does not.
 /// oracle: RTC-7 by hand, from captures at each unit's writer read by the browsers'
-/// own SRTP ends. After the call returns, for 200 ms: nothing goes to X's address or
-/// to the probe, no RTP carries X's mark byte or a down-track SSRC of X's publication
-/// or of X's own, and u1 counts exactly the ten media packets, one DTLS record and
-/// two checks X's old credentials sent as unknown. Every packet Y sends reaches Z
-/// once. A join at epoch 1 is `Fenced`; at epoch 2 its ufrag is answered and X's old
-/// one is not; a second revoke at epoch 1 changes nothing; after ids 4 to 6 churn
-/// through a room of six ids, id 7 is `Limit(6)` and epoch 1 is still `Fenced`. Run
-/// with each held repair direction, each shown taken after the fence (`stale`).
+/// own SRTP ends, on four networks: loss 0 or 5% of datagrams, delay 0 or 1 ms, each
+/// with a fixed seed. The test browsers retry as browsers do (checks and NACKs
+/// again until answered) and each step waits until its effect is seen. After the
+/// call returns: nothing goes to X's address or to the probe, no RTP carries X's
+/// mark byte or a down-track SSRC of X's publication or of X's own; every datagram
+/// X's old credentials send that reaches u1 (ten media packets, a DTLS record, two
+/// checks) is counted unknown once, all of them with no loss. Z gets each packet of
+/// Y's that reached Y's unit once, every one Y sent with no loss, and some sent after
+/// the revoke. A join at epoch 1 is `Fenced` and its check goes unanswered; at epoch
+/// 2 its ufrag is answered and X's old one is not; a second revoke at epoch 1
+/// changes nothing; after ids 4 to 6 churn through a room of six ids, id 7 is
+/// `Limit(6)` and epoch 1 is still `Fenced`. Run with each held repair direction,
+/// each shown taken after the fence (`stale`).
 @test
 fn revoke_stops_everything(tasks: Tasks) -> Result[(), router.RouterError] waits {
-    for held in[Publishing, Subscribing] {
-        let (net, clock, take served) = sim_net(tasks, 7400)
-        revoke_run(net, clock, held)
-        result.unwrap(task.join(take served))
+    for arm in arms() {
+        for held in[Publishing, Subscribing] {
+            let (net, clock, take served) = sim_net_with(tasks, arm.seed, arm.loss, arm.delay_ns)
+            revoke_run(net, clock, held, arm)
+            result.unwrap(task.join(take served))
+        }
     }
     Ok(())
 }

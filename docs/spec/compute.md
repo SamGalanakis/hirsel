@@ -81,11 +81,6 @@ capacity[class] = min(
   sheds excess create traffic before expensive decode or allocation while protecting retirement,
   revocation, and control work. Limit refusals are reported distinctly from host saturation
   (`Refused(Limit)` vs. `Refused(Capacity)`).
-- *Implementation note (non-normative):* background pre-mapping of native unit stack stock is a
-  candidate optimization to keep `mmap`/`munmap` off the native unit create path; if adopted,
-  warm stock and mapping-count ceilings enter `capacity[class]` and require separate
-  qualification.
-
 ### Hard per-principal concurrency limits
 
 Each principal `p` has a concurrency limit: the number of its executions that may be live at
@@ -95,8 +90,9 @@ failover. The admission ledger enforces them with **escrowed rights**, not count
 - **Disjoint escrow per worker.** A principal's allocation in a cell (COMP-8) is split into
   disjoint per-worker escrows with `sum_w escrow[p][w] <= allocation[p][cell]`. The split is an
   epoch-versioned escrow table, signed and installed per cell the same way as the federation
-  manifest (COMP-8). Moving rights between workers decreases the donor before increasing the
-  recipient, so the sum bound holds at every intermediate state.
+  manifest (COMP-8). To move rights between workers, the donor freezes the unspent rights
+  being transferred, lowers its escrow and acknowledges the decrease. The recipient's escrow
+  increases only after durable evidence of the donor's decrease. Spent rights cannot move.
 - **Debit with the slot.** Admission debits one right from `escrow[p][w]` in the same atomic
   full-vector debit that funds the slot. A worker with no unspent right for `p` refuses before
   running (`WorkerLimitRefusal`, a definitive first-send refusal). Offers (COMP-3) carry which
@@ -133,13 +129,10 @@ The following mechanisms are explicitly absent from `compute@1` and must not be 
 - epsilon overcommit on offers;
 - any second placement route for in-fleet callers (every create takes the same placement path).
 
-### Deployment latency condition
+### Placement latency cost
 
-Lane 3087 measured sparse create latency overhead at `+100 us` p50 for `100 us` desk RTT,
-crossing the `200 us` added-latency bound at approximately `200 us` effective desk RTT
-(dispatcher-to-desk and worker-to-desk round-trip time including desk service delay). Cells
-**must** place shard desks within the cell topology such that effective desk RTT stays strictly
-below `200 us` for sparse-create workloads.
+Each create adds one dispatcher-to-desk round trip. The 3087 gate measured `+100 us` p50 at
+`100 us` desk RTT.
 
 ### Roles and exclusive credit protocol
 
@@ -427,16 +420,10 @@ in observable results, step counts, failure order, or replay tapes:
      and exact trap-versus-`OutOfTime` ordering.
 
   **No closed-form tariff** (such as data-segment byte length) is used, and no automatic fallback
-  between meters is permitted. Any future CoW or pooled-instantiation path may ship only after
-  passing a differential qualification reproducing the CoW-off reference entry's exact results,
-  step counts, byte admissions/refunds, failure order, and slice-end positions across element
-  segments, extended constants, tight step+byte limits, and slice boundaries.
+  between meters is permitted.
 - **Capacity accounting.** Virtual address space slots, MEM-19 resident bytes, and concurrently
   mounted async stacks are each terms of `capacity[class]` (COMP-2); hosts shard execution
-  processes under the single physical host ledger when needed. *(Implementation note,
-  non-normative: storing prepared modules in a lock-free once-initialized slot on the module
-  record rather than behind a global mutex is a candidate create-path optimization, subject to
-  its own qualification.)*
+  processes under the single physical host ledger when needed.
 
 ## COMP-8: Multi-cell federation and one-hop spill
 
@@ -444,8 +431,8 @@ A fleet scales horizontally across independent **cells**. Each cell owns its own
 control Place, enrolled roster, placement tier (COMP-3), cleared releases, revocation sequence,
 and local `compute_pool`. A cell failure is contained to that cell.
 
-- **Signed manifest of disjoint per-cell allocations.** In the first cut there is **no running
-  federation root Place**. Federation state is a root-signed, epoch-versioned **federation
+- **Signed manifest of disjoint per-cell allocations.** There is no federation root Place.
+  Federation state is a root-signed, epoch-versioned **federation
   manifest** listing cells, their SPKI pins, residency tags, and disjoint per-cell principal
   allocations satisfying `sum_c allocation[p][c] <= limit[p]`. Each cell installs the
   manifest through its existing `fleet@1` root-signed keyset and durable anti-rollback path

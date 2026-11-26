@@ -26,6 +26,8 @@ NATIVE_EXEC_TEST_CASES = [
 # projection of the driver harness, so its ignored native::tests bodies have no
 # second shards under hirsel-core-driver-unittest.
 OPENAT2_TEST_CASES = {
+    # The aarch64 guest recorder needs openat2 through QEMU and the host kernel.
+    "hirsel-core-program-tests-test-cranelift_source_aarch64": ["wasm_laws"],
     "hirsel-core-rt-unittest": [
         "entry_tests::c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv",
         "host_file_tests::native_host_file_exit_paths_close_once_and_open_admits_nothing",

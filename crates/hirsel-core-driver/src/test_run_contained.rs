@@ -2,6 +2,46 @@
 // modules are written here byte by byte from the WebAssembly binary format, so
 // each one holds exactly the construct its law names.
 
+struct ContainedExecution {
+    target: &'static str,
+    runtime: PathBuf,
+    cc: PathBuf,
+    runner: crate::Runner,
+}
+
+impl ContainedExecution {
+    fn new(law: &PackageLaw) -> Self {
+        if let Some(runtime) = std::env::var_os("HIRSEL_CONTAINED_RUNTIME") {
+            let input = |name| PathBuf::from(std::env::var_os(name).unwrap());
+            let target = hirsel_core_layout::Target::Aarch64Linux.triple();
+            let runner = crate::Runner::qemu(&input("HIRSEL_QEMU_AARCH64"), &input("HIRSEL_AARCH64_SYSROOT"), target).unwrap();
+            Self { target, runtime: runtime.into(), cc: input("HIRSEL_AARCH64_CC"), runner }
+        } else {
+            let options = native_options(Backend::Cranelift, law.dir.path());
+            let Link::Driver(cc) = options.link else { unreachable!() };
+            Self {
+                target: crate::host::HOST_TARGET.triple(),
+                runtime: options.runtime.canonicalize().unwrap(),
+                cc: cc.canonicalize().unwrap(),
+                runner: crate::Runner::Native,
+            }
+        }
+    }
+
+    fn engines() -> &'static [&'static str] {
+        match std::env::var("HIRSEL_CONTAINED_TEST_ENGINE").as_deref() {
+            Ok("cranelift") => &["cranelift"],
+            Ok("llvm") => &["llvm"],
+            Err(std::env::VarError::NotPresent) => &["cranelift", "llvm"],
+            other => panic!("unknown contained test engine: {other:?}"),
+        }
+    }
+
+    fn link_args<'a>(&'a self, runtime: &'a Path) -> [&'a str; 4] {
+        ["--runtime", runtime.to_str().unwrap(), "--cc", self.cc.to_str().unwrap()]
+    }
+}
+
 /// A core module: the preamble, then each section as its id and framed body.
 fn wasm_module(sections: &[(u8, Vec<u8>)]) -> Vec<u8> {
     let mut module = b"\0asm\x01\0\0\0".to_vec();
@@ -114,16 +154,15 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
         let pin = pin.map_or_else(|| hirsel_core_ids::hex::encode(&Sha256::digest(bytes)), str::to_owned);
         manifest(&format!("containment = \"wasm\"\nmodule = {{ file = \"box.wasm\", sha256 = \"{pin}\" }}"));
     };
-    let options = native_options(Backend::Cranelift, law.dir.path());
-    let runtime = options.runtime.canonicalize().unwrap();
+    let execution = ContainedExecution::new(&law);
     let build = |engine: &str| {
         let request = [
-            "build", "wasm_laws", "--backend", engine,
-            "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
+            "build", "wasm_laws", "--backend", engine, "--target", execution.target,
+            "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("build").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(), "-o", "image",
             "--grant", "Foreign=wasm_laws@1/laws/Box",
-        ].map(str::to_owned);
+        ].into_iter().chain(execution.link_args(&execution.runtime)).map(str::to_owned).collect::<Vec<_>>();
         process::tape_request(&request, law.dir.path())
     };
     let refused = |engine: &str, expected: &dyn Fn(&str) -> bool, what: &str| {
@@ -157,7 +196,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     let externref = wasm_module(&[(4, vec![1, 0x6f, 0, 1])]);
     let component = b"\0asm\x0d\0\x01\0".to_vec();
 
-    for engine in ["cranelift", "llvm"] {
+    for &engine in ContainedExecution::engines() {
         // FW1: the pin is checked before a byte is parsed.
         repin(b"abc", Some(EMPTY));
         refused(engine, &line(format!("{MODULE} does not match its pin: expected sha256 {EMPTY}, found sha256 {ABC}")), "FW1 pin");
@@ -185,7 +224,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     // FW20: after W1 the fixture module builds; `native` is not a containment.
     law.write("wasm_laws/box.wasm", fs::read(fixture.join("box.wasm")).unwrap());
     law.write("wasm_laws/hirsel.toml", original.as_str());
-    for engine in ["cranelift", "llvm"] {
+    for &engine in ContainedExecution::engines() {
         let (status, output, error) = build(engine);
         assert_eq!(status, Some(0), "FW20 builds\n{output}\n{error}");
         assert!(law.path("image").exists(), "FW20: no image");
@@ -193,7 +232,7 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     }
     law.write("wasm_laws/box.wasm", b"abc");
     manifest(&format!("containment = \"native\"\nmodule = {{ file = \"box.wasm\", sha256 = \"{ABC}\" }}"));
-    refused("cranelift", &|line: &str| line.ends_with("hirsel.toml: foreign.native: containment: expected \"wasm\""), "FW20");
+    refused(ContainedExecution::engines()[0], &|line: &str| line.ends_with("hirsel.toml: foreign.native: containment: expected \"wasm\""), "FW20");
 }
 
 /// FW3, FW5 to FW16, FW21 to FW26 and FW28 on `box.wasm`, each observation
@@ -213,8 +252,7 @@ fn contained_calls_run_in_the_tasks_own_instance() {
         law.write(&format!("wasm_laws/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write("wasm_laws/main.hirsel", fs::read(fixture.join("run.hirsel")).unwrap());
-    let options = native_options(Backend::Cranelift, law.dir.path());
-    let runtime = options.runtime.canonicalize().unwrap();
+    let execution = ContainedExecution::new(&law);
     let trap = |x: &str| format!("contained trap: {x}");
     let expected: [(&str, Vec<String>); 10] = [
         ("loans", [
@@ -260,20 +298,21 @@ fn contained_calls_run_in_the_tasks_own_instance() {
         let least = 2 * 800_013u64.div_ceil(16);
         (least..=least + 1_030).contains(&n)
     };
-    for engine in ["cranelift", "llvm"] {
+    for &engine in ContainedExecution::engines() {
         let image = law.path(&format!("image-{engine}"));
         let request = [
-            "build", "wasm_laws", "--backend", engine,
-            "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
+            "build", "wasm_laws", "--backend", engine, "--target", execution.target,
+            "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("build").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(), "-o", image.to_str().unwrap(),
             "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Tasks", "--grant", "Stdout",
             "--limit", "268435456",
-        ].map(str::to_owned);
+        ].into_iter().chain(execution.link_args(&execution.runtime)).map(str::to_owned).collect::<Vec<_>>();
         let (status, output, error) = process::tape_request(&request, law.dir.path());
         assert_eq!(status, Some(0), "{engine}: build\n{output}\n{error}");
         let run = |mode: &str, threads: &str| {
-            Command::new("timeout").args(["120s", image.to_str().unwrap(), mode])
+            let command = execution.runner.command(&image);
+            Command::new("timeout").arg("120s").arg(command.get_program()).args(command.get_args()).arg(mode)
                 .env("HIRSEL_UNTIED", threads).current_dir(law.dir.path()).output().unwrap()
         };
         for (mode, lines) in &expected {
@@ -393,31 +432,36 @@ fn contained_tests_record_and_replay() {
         std::fs::read_to_string(fixture.join("laws.hirsel")).unwrap(),
     ));
     law.write("wasm_laws/main.hirsel", CONTAINED_REPLAY);
-    let record = env_record_runtime();
-    let plain = native_options(Backend::Cranelift, law.dir.path()).runtime.canonicalize().unwrap();
-    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let execution = ContainedExecution::new(&law);
+    let record = match &execution.runner {
+        crate::Runner::Native => env_record_runtime(),
+        crate::Runner::Qemu { .. } => PathBuf::from(std::env::var_os("HIRSEL_CONTAINED_RECORD_RUNTIME").unwrap()),
+    };
     let test = |args: &[&str]| {
-        let runtime = if args.contains(&"--replay") { &record } else { &plain };
+        let runtime = if args.contains(&"--replay") { &record } else { &execution.runtime };
         let mut argv = [
-            "test", "wasm_laws", "--json", "--runtime", runtime.to_str().unwrap(),
-            "--cc", llvm.join("bin/clang").to_str().unwrap(),
+            "test", "wasm_laws", "--json", "--target", execution.target,
             "--libraries", law.libraries.to_str().unwrap(),
             "--store", law.path("store").to_str().unwrap(),
             "--package-store", law.path("packages").to_str().unwrap(),
             "--grant", "Foreign=wasm_laws@1/laws/Other",
-        ].map(str::to_owned).to_vec();
+        ].into_iter().chain(execution.link_args(runtime)).map(str::to_owned).collect::<Vec<_>>();
+        if let crate::Runner::Qemu { emulator, sysroot } = &execution.runner {
+            argv.extend(["--emulator", emulator.to_str().unwrap(), "--sysroot", sysroot.to_str().unwrap()].map(str::to_owned));
+        }
         argv.extend(args.iter().map(|s| (*s).to_owned()));
         let mut command = process::tape_request_command(&argv, law.dir.path());
         command.env("HIRSEL_UNTIED", "2");
         process::tape_request_output(command)
     };
     let replay = ["--replay", "--expect-verdict", "Sealed"];
-    let (code, out, err) = test(&["--exact", "wasm_laws@1/main/fw17_contained_replays"]);
+    let engine = ContainedExecution::engines()[0];
+    let (code, out, err) = test(&["--backend", engine, "--exact", "wasm_laws@1/main/fw17_contained_replays"]);
     assert_eq!(code, Some(0), "unreplayed: {out}\n{err}");
     assert!(!err.lines().any(|line| line.starts_with("foreign: ")), "{err}");
-    for (engine, name) in ["cranelift", "llvm"]
-        .into_iter()
-        .flat_map(|e| ["fw17_contained_replays", "fw27_overflow_replays"].map(|n| (e, n)))
+    for (engine, name) in ContainedExecution::engines()
+        .iter()
+        .flat_map(|&e| ["fw17_contained_replays", "fw27_overflow_replays"].map(|n| (e, n)))
     {
         for _ in 0..2 {
             let exact = format!("wasm_laws@1/main/{name}");
@@ -429,7 +473,7 @@ fn contained_tests_record_and_replay() {
             assert_eq!((&tests[0]["source"], &tests[0]["passed"]), (&"executed".into(), &true.into()), "{report}");
         }
     }
-    let (code, out, err) = test(&[&replay[..], &["--exact", "wasm_laws@1/main/fl7_both"]].concat());
+    let (code, out, err) = test(&[&replay[..], &["--backend", engine, "--exact", "wasm_laws@1/main/fl7_both"]].concat());
     assert_eq!(code, Some(1), "{out}\n{err}");
     assert!(out.contains("refused: FFI-8: a recording build cannot reach foreign code: wasm_laws@1/main/fl7_both reaches wasm_laws@1/other/poke"), "{out}\n{err}");
 }
@@ -511,7 +555,6 @@ fn fl7_both(f: Foreign[laws.Box], g: Foreign[laws.Other]) -> Result[(), ()] {
 fn contained_recipes_pin_their_module() {
     use crate::code_store::{CodeStore, ObjectKind};
     use sha2::{Digest, Sha256};
-    use std::process::Command;
 
     let fixture = |file: &str| std::fs::read(PackageLaw::new().libraries.join("programs/wasm_laws").join(file)).unwrap();
     let original = fixture("box.wasm");
@@ -520,9 +563,22 @@ fn contained_recipes_pin_their_module() {
     changed[at] = b'q';
     let manifest = String::from_utf8(fixture("hirsel.toml")).unwrap();
     let pin = |bytes: &[u8]| ContentHash(Sha256::digest(bytes).into());
-    for engine in ["cranelift", "llvm"] {
+    for &engine in ContainedExecution::engines() {
         let law = PackageLaw::new();
-        let store = CodeStore::new(law.path("code-store"));
+        let execution = ContainedExecution::new(&law);
+        let code = law.path("code-store");
+        let store = CodeStore::new(&code);
+        let build = |root: &str| {
+            let request = [
+                "build", "--recipe", root, "-o", "sealed-program",
+                "--code-store", code.to_str().unwrap(),
+                "--store", law.path("compiler-store").to_str().unwrap(),
+                "--package-store", law.path("packages").to_str().unwrap(),
+            ].into_iter().chain(execution.link_args(&execution.runtime)).map(str::to_owned).collect::<Vec<_>>();
+            let mut command = process::tape_request_command(&request, law.dir.path());
+            command.env("XDG_CACHE_HOME", law.path("cache"));
+            process::tape_request_output(command)
+        };
         let mut runs = Vec::new();
         for module in [&original, &changed] {
             for file in ["laws.hirsel", "native.hirsel"] {
@@ -532,12 +588,12 @@ fn contained_recipes_pin_their_module() {
             law.write("wasm_laws/hirsel.toml", manifest.replace(&pin(&original).to_string(), &pin(module).to_string()));
             law.write("wasm_laws/main.hirsel", CONTAINED_RECIPE);
             let root = PackageLaw::pass(law.run(&[
-                "publish", "wasm_laws", "--backend", engine,
+                "publish", "wasm_laws", "--backend", engine, "--target", execution.target,
                 "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout",
             ])).trim().to_owned();
             std::fs::remove_dir_all(law.path("wasm_laws")).unwrap();
-            PackageLaw::pass(law.run(&["build", "--recipe", &root, "-o", "sealed-program"]));
-            let run = Command::new(law.path("sealed-program")).output().unwrap();
+            PackageLaw::pass(build(&root));
+            let run = execution.runner.command(&law.path("sealed-program")).output().unwrap();
             assert!(run.status.success(), "{engine}: {run:?}");
             assert_eq!(run.stdout.len(), 64, "{engine}: two revisions");
             runs.push((root, run.stdout));
@@ -546,7 +602,7 @@ fn contained_recipes_pin_their_module() {
         assert_ne!(a[..32], b[..32], "{engine}: the pin is in caller's address");
         assert_eq!(a[32..], b[32..], "{engine}: plain reaches no module");
         std::fs::remove_file(store.path(ObjectKind::ForeignArchive, pin(&original))).unwrap();
-        let (status, _, error) = law.run(&["build", "--recipe", first, "-o", "sealed-program"]);
+        let (status, _, error) = build(first);
         assert_eq!(status, Some(2), "{engine}: {error}");
         assert!(error.contains(&format!("Missing({})", pin(&original))), "{engine}: {error}");
     }

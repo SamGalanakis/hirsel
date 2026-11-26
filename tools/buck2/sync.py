@@ -58,7 +58,7 @@ from cargo_units import Resolution, configured, relocate
 from distribution_gates import distribution_gates
 from runner_gates import runner_gates
 from python_gates import python_gates
-from test_inputs import RUNTIME_DATA, TEST_DATA
+from test_inputs import RUNTIME_DATA, TEST_DATA, TEST_FILES_ENV
 from build_script_inputs import BUILD_SCRIPT_INPUTS
 from core_gates import core_gates
 from test_sizes_from_usage import requests_bzl
@@ -510,7 +510,7 @@ def first_party(meta: dict) -> str:
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"} if sdk_manifest
                           else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" or program_llvm else None)
             return dict(data=test_data(binary, name, package_dir, src),
-                        files_env=files_env,
+                        files_env=(files_env or {}) | TEST_FILES_ENV.get(binary, {}) or None,
                         native_tools=True if core_native or program_llvm or sdk_manifest or binary in ("hirsel-llvm-unittest", "hirsel-core-driver-unittest") else None)
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)

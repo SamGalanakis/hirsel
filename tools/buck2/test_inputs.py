@@ -1,5 +1,13 @@
 """Repository inputs read by Rust test binaries at runtime."""
 
+TEST_FILES_ENV = {
+    "hirsel-core-program-tests-test-cranelift_source_aarch64": {
+        "HIRSEL_CONTAINED_DRIVER_TESTS": "//:hirsel-core-driver-unittest-harness",
+        "HIRSEL_CONTAINED_RUNTIME": "//:hirsel-core-rt-archives[aarch64]",
+        "HIRSEL_CONTAINED_RECORD_RUNTIME": "//:hirsel-core-rt-record-archives[aarch64]",
+    },
+}
+
 # What each crate's tests read at run time outside their crate: repository
 # paths they reach from CARGO_MANIFEST_DIR. A test runs from the project root
 # and sees only its declared inputs on the pool. Those inputs are part of its
@@ -36,7 +44,10 @@ TEST_DATA = {
         "core/programs/webrtc_sfu/cascade/*.hirsel",
     ],
     "hirsel-core-program-tests-test-cranelift_source": ["core/front/**", "core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"],
-    "hirsel-core-program-tests-test-cranelift_source_aarch64": ["core/front/**", "core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"],
+    "hirsel-core-program-tests-test-cranelift_source_aarch64": [
+        "core/front/**", "core/core/**", "core/std/**", "core/programs/wasm_laws/**",
+        "crates/hirsel-core-driver/Cargo.toml", "crates/hirsel-core-rt/include/**",
+    ],
     "hirsel-core-program-tests-test-llvm_source": ["core/front/**", "core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-driver-unittest": ["core/core/**", "core/programs/ffi_laws/**", "core/programs/wasm_laws/**", "core/programs/sqlite/**", "core/front/**", "core/std/**", "core/programs/m1/**", "core/programs/m2b/**", "core/programs/store/*.hirsel", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/tests/b9-vectors.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/hirsel.toml", "core/langarena/**/*.hirsel", "core/HOOK-ALLOWLIST", "crates/hirsel-core-rt/include/**"],
     "hirsel-core-driver-test-sdk_manifest": ["core/core/**", "core/std/**", "core/programs/store/*.hirsel", "core/programs/store/hirsel.toml", "core/programs/runner/*.hirsel", "core/programs/runner/observe/*.hirsel", "core/programs/runner/hirsel.toml", "sdk/client/tests/packed_consumer.hirsel"],

@@ -40,7 +40,10 @@ pub type Counts: key {
     unknown: u64,
     // Messages from another unit dropped when taken, because a fence or a suspension
     // covers their tag or their publication or session is gone (RTC-7 step 4).
-    stale: u64
+    stale: u64,
+    // SRTP datagrams dropped before decryption: the unit's `open_pps` was spent (RTC-10,
+    // Isolation item 6).
+    over_open: u64
 }
 
 /// The plaintext of one publication's recent packets (the ingress RTX ring), in
@@ -162,7 +165,9 @@ type Member {
     // The bandwidth estimate the last allocation used, and the rate it would take to
     // carry every target, when the estimate left one short of its target (RTC-6).
     estimate: u64,
-    want: u64
+    want: u64,
+    // The session's `room_pps` bucket of authenticated media datagrams (RTC-10).
+    bucket: Bucket
 }
 
 type Room {
@@ -173,6 +178,8 @@ type Room {
     // Media messages of the room a unit dropped: its inbox, or the room's share of
     // it, was full (RTC-10, Isolation item 5).
     full: u64,
+    // Authenticated media datagrams of the room's publishers dropped over `room_pps`.
+    over_rate: u64,
     // Fence entries (RTC-7): one per admitted id, reserved at its first join and
     // kept until the room closes. `fenced` is the highest revoked epoch, if any.
     ids: List[u64],
@@ -283,7 +290,10 @@ pub opaque type Router {
     empty: Shared[Bytes],
     notices: List[Notice],
     // A down-track ended or an effective target moved since the last poll (RTC-6).
-    moved: bool
+    moved: bool,
+    // The pool's ingress rates, once set, and the unit's `open_pps` bucket (RTC-10).
+    rates: Option[Rates],
+    opens: Bucket
 }
 
 const PEERS_MAX: u16 = 256
@@ -309,7 +319,7 @@ pub fn router(r: Random) -> Router {
 
 /// The router of media unit `unit` (RTC-5, at most 64 units).
 pub fn on_unit(r: Random, unit: u16) -> Router {
-    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, refused: 0, unknown: 0, stale: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false)
+    Router(random: r, unit: unit, rooms: list.new(), roster: list.new(), members: list.new(), publications: list.new(), downs: list.new(), rows: list.new(), next_publication: 1, next_handle: int.widen(unit), counts: Counts(unrequested: 0, ring_misses: 0, unparsed: 0, unmapped: 0, refused: 0, unknown: 0, stale: 0, over_open: 0), posts: list.new(), parked: list.new(), empty: shared.new(list.new()), notices: list.new(), moved: false, rates: None, opens: full())
 }
 
 pub fn counts(r: Router) -> Counts {
@@ -406,7 +416,7 @@ pub fn park(mut r: Router, take session: peer.PeerSession) -> Result[(), RouterE
         }
     }
     list.try_reserve(mut r.parked, 1) ?=> |c| Capacity(c)
-    list.push(mut r.parked, Member(who: who, session: take session, estimate: 0, want: 0))
+    list.push(mut r.parked, Member(who: who, session: take session, estimate: 0, want: 0, bucket: full()))
     Ok(())
 }
 
@@ -414,7 +424,7 @@ fn unpark(mut r: Router, who: peer.Participant) {
     for i in 0u64 .. list.len(r.parked) {
         if r.parked[i].who.room == who.room && r.parked[i].who.gen == who.gen {
             let m = list.remove(mut r.parked, i)
-            let Member(who: _, session: take s, estimate: _, want: _) = take m
+            let Member(who: _, session: take s, ..) = take m
             drop(take s)
             return
         }
@@ -502,7 +512,7 @@ fn open(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), Rout
     list.try_reserve(mut ids, n) ?=> |c| Capacity(c)
     list.try_reserve(mut fences, n) ?=> |c| Capacity(c)
     list.try_reserve(mut r.rooms, 1) ?=> |c| Capacity(c)
-    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, full: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
+    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, full: 0, over_rate: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
     Ok(())
 }
 
@@ -967,28 +977,4 @@ fn remove_down(mut r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId
     }
     end_down(mut r, di)
     Ok(())
-}
-
-// ---- Readers ----
-/// The media and RTX SSRCs of `who`'s down-track of a publication, on its home unit.
-pub fn track_ssrcs(r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Option[(u32, Option[u32])] {
-    let di = down_at(r, room, who, p)?
-    let mi = member_at(r, room, who)?
-    peer.track_ssrcs(r.members[mi].session, r.downs[di].track)
-}
-
-pub fn session_drops(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[peer.Drops] {
-    let mi = member_at(r, room, who)?
-    Some(peer.drops(r.members[mi].session))
-}
-
-/// The live down-tracks of `who`'s session, on its home unit.
-pub fn live_tracks(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u64] {
-    let mi = member_at(r, room, who)?
-    Some(peer.live_tracks(r.members[mi].session))
-}
-
-pub fn control_ssrc(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u32] {
-    let mi = member_at(r, room, who)?
-    Some(peer.control_ssrc(r.members[mi].session))
 }

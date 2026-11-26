@@ -39,3 +39,27 @@ pub fn publication_info(r: Router, room: peer.RoomId, p: PublicationId) -> Optio
     let x = r.publications[pi]
     Some(PublicationInfo(owner: x.owner, home: x.home, shape: Shape(codec: x.codec, pli: x.pli, fir: x.fir, encodings: int.narrow(list.len(x.encodings)))))
 }
+
+// ---- Readers ----
+/// The media and RTX SSRCs of `who`'s down-track of a publication, on its home unit.
+pub fn track_ssrcs(r: Router, room: peer.RoomId, who: peer.Gen, p: PublicationId) -> Option[(u32, Option[u32])] {
+    let di = down_at(r, room, who, p)?
+    let mi = member_at(r, room, who)?
+    peer.track_ssrcs(r.members[mi].session, r.downs[di].track)
+}
+
+pub fn session_drops(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[peer.Drops] {
+    let mi = member_at(r, room, who)?
+    Some(peer.drops(r.members[mi].session))
+}
+
+/// The live down-tracks of `who`'s session, on its home unit.
+pub fn live_tracks(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u64] {
+    let mi = member_at(r, room, who)?
+    Some(peer.live_tracks(r.members[mi].session))
+}
+
+pub fn control_ssrc(r: Router, room: peer.RoomId, who: peer.Gen) -> Option[u32] {
+    let mi = member_at(r, room, who)?
+    Some(peer.control_ssrc(r.members[mi].session))
+}

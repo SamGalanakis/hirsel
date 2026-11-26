@@ -195,6 +195,11 @@ pub fn seam(mut u: Unit, limit: u64, tapping: bool) {
     u.tapping = tapping
 }
 
+/// The pool's ingress rates on this unit's router (RTC-10, Isolation items 4 and 6).
+pub fn set_rates(mut u: Unit, rates: router.Rates) {
+    router.set_rates(mut u.r, rates)
+}
+
 /// Take what the tap recorded since the last call.
 pub fn take_tap(mut u: Unit) -> List[Sent] {
     replace(mut u.tap, list.new())
@@ -215,6 +220,25 @@ pub fn take_events(mut u: Unit) -> List[Event] {
         router.room_open(u.r, event_room(e))
     })
     take events
+}
+
+/// Take `room`'s events since the last call, leaving every other room's for its own
+/// adapter (RTC-10: one adapter per room on the control unit).
+pub fn take_room_events(mut u: Unit, room: peer.RoomId) -> List[Event] {
+    let mut mine: List[Event] = list.new()
+    let mut rest: List[Event] = list.new()
+    for take e in replace(mut u.events, list.new()) {
+        if event_room(e) == room {
+            list.push(mut mine, take e)
+        } else if router.room_open(u.r, event_room(e)) {
+            list.push(mut rest, take e)
+        }
+    }
+    u.events = take rest
+    if !router.room_open(u.r, room) {
+        list.clear(mut mine)
+    }
+    take mine
 }
 
 pub fn event_room(e: Event) -> peer.RoomId {

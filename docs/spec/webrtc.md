@@ -92,7 +92,7 @@ This chapter specifies three layers, each sans-IO:
 `stun_ice@1`, `media_bits@1`, `runner@1` and `store@1`
 ([building](../building.md#the-installation)). A service outside the repository binds it as
 `webrtc_sfu = { major = 1 }`, with `turn = { major = 1 }` if it names TURN types itself, and
-builds with the installed `hirsel` alone; it calls `webrtc_sfu.signal.serve` (RTC-8). Inside
+builds with the installed `hirsel` alone; it calls `webrtc_sfu.signal.serve_pool` (RTC-8, RTC-10). Inside
 the repository the workspace binds it by path, `core/programs/webrtc_sfu`.
 
 Signaling runs over the generic `runner.room` (RTC-8) through a sans-IO adapter. The section
@@ -1606,9 +1606,12 @@ ffmpeg decode the files in `test-vectors.sh`.
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 1); design review
 applied the same day (media-w2-spec-fix-2918). Slice P1 built 2026-11-26
 (rtc10-p1-room-keys-2930, law W35); slice P2 built 2026-11-26 (rtc10-p2-room-control-2956,
-law W37, `units.Plane`); P3 and P4 not built. Slices and laws W34 to W39 below.*
+law W37, `units.Plane`). Slice P3 in part 2026-11-26 (rtc10-p3-pool-service-2976):
+`serve_pool` with per-room adapters and room-client tasks, `serve` removed, `room_pps` and
+`open_pps` (W38), per-room signaling loss (W39); the ledgers, primary units and fault tiers
+(W34, W36) are not yet built. P4 not built. Slices and laws W34 to W39 below.*
 
-`signal.serve` (S7) serves **one** room: its `Service` names one `RoomId`, one `Dial` and one
+Before RTC-10, `signal.serve` (S7) served **one** room: its `Service` named one `RoomId`, one `Dial` and one
 `RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
 that serves many small rooms runs one service per room, each with its own ports, unit tasks,
 certificates and receive pools, about 64 MiB per active room in the 2026-11-25 dogfood. RTC-10
@@ -1636,9 +1639,9 @@ pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomN
 pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
 pub type CloseWhy = Asked | Fault(RouterError)
 pub type RoomName = RoomName(Inline[u8, 32])
-pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, cascade: Option[sfu_cascade.Cascade] }
+pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
 
-pub fn serve_pool[M: codec](take p: Pool[M]) -> Result[(), ServeError] waits
+pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits
 pub fn room_cost(limits: RoomLimits, session: peer.PeerLimits) -> RoomCost
 pub type RoomCost { replicated: u64, per_session: u64, per_remote: u64, control: u64, bridge: u64, cascade: u64 }
 ```
@@ -1647,7 +1650,9 @@ pub type RoomCost { replicated: u64, per_session: u64, per_remote: u64, control:
 pool of one room, and there is no second entry point to keep (`/wholehog`). The application
 sends `Open` and `Close` orders on `orders` and reads `PoolReport`s. `RoomName` is the
 application's name for the room, 32 bytes, opaque to the pool. The pool keeps one
-`Adapter[M]` and one `room_client` membership per open room on the control unit (unit 0).
+`Adapter[M]` and one `room_client` membership per open room on the control unit (unit 0). `relay` is the TURN relay link every room mints its credentials from (TURN-11).
+`Pool.cascade` is added with [SFU cascade](sfu_cascade.md) CAS-6, which is not yet built.
+Until then `RoomCost.bridge` and `RoomCost.cascade` are 0.
 
 **Internal room ids are never reused.** `Open` draws the room's `RoomId` from a pool-wide
 counter that only rises, and `Opened` reports it. Closing a room and opening one with the
@@ -1916,7 +1921,7 @@ slowest turn plus 50 ms, and no room's received frame count drops while another 
 | --- | --- | --- | --- |
 | **P1** Room keys and close | `RoomId` from a pool-wide counter; `Participant` in `Event.Offer` and `Shut`, the room in `Event.Layers`; per-room `stale` drops; `room_cost` with all its terms; `router.Change.Close(room)` draining `r.parked` and discarding stale `Build`s; `dead(r, t)` true for a room not open (the `router_fence.hirsel` fix); RTC-7's suspend cause set (`Change.Suspend` carries its cause) | S7 | W35 |
 | **P2** Per-room control | `(room, seq)` orders and acknowledgements; the `inflight` window, one per room, round-robin, fence slots; sized control inboxes and re-posting on `Full`; fair per-room media draining | P1 | W37 |
-| **P3** Pool service | `serve_pool`, `PoolOrder` and `PoolReport`, one adapter per room on unit 0 and one room-client task per room with the ready set; ledgers with linearized reservations on unit 0; primary units; `serve` removed; the three fault tiers; `room_pps` after authentication and `open_pps`; `Pool.cascade` | P2 | W34, W36, W38, W39 |
+| **P3** Pool service | `serve_pool`, `PoolOrder` and `PoolReport`, one adapter per room on unit 0 and one room-client task per room with the ready set; ledgers with linearized reservations on unit 0; primary units; `serve` removed; the three fault tiers; `room_pps` after authentication and `open_pps`; `Pool.cascade` once CAS-6 is built | P2 | W34, W36, W38, W39 |
 | **P4** Nightly | N3 on Boat | P3 | N3 |
 
 Reds that may ride: N3 and any cost target. W34 to W39 are soundness or isolation laws of
@@ -2597,7 +2602,7 @@ W12 and W13 in `speaker_laws.hirsel`):
 
 **N1 decisions.** Gaps the spec left open, decided while N1 was built (2626)
 
-- **Deployment.** `service/main.hirsel` runs the room place, `signal.serve` and the TURN
+- **Deployment.** `service/main.hirsel` runs the room place, `signal.serve_pool` (one room) and the TURN
   relay in one process on 127.0.0.1: the place listens on its listen address (7800) and
   serves the call page (`index.html`, the bundled `page.ts`) from its site directory, the
   media units bind the media address and the next port (7810, 7811), and the relay listens

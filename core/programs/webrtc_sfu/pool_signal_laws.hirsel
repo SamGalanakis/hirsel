@@ -1,0 +1,282 @@
+// ---- RTC-10 signaling loss is per room (W39) ----
+// The control unit's rooms (`signal.Rooms`) over real units on sim.udp, stepped as
+// `serve_pool` steps them: the harness plays each room's room client and every browser.
+type PoolSig {
+    h: Hall,
+    p: signal.Rooms[signal.Signal],
+    // Room `a`'s client cannot take its messages: each is refused and counted, as
+    // `serve_pool` counts a full client queue.
+    stalled: Option[peer.RoomId],
+    // Per room: the peers sent an Answer, the publications, and the re-offers.
+    answered: List[(peer.RoomId, u32)],
+    pubs: List[(peer.RoomId, u32, u64)],
+    offers: List[(peer.RoomId, u32, u64)],
+    refused_out: u64
+}
+
+fn echo_embed() -> signal.Embed[signal.Signal] {
+    signal.Embed(wrap: fn(take s: signal.Signal) -> signal.Signal {
+        take s
+    }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
+        Some(take s)
+    }, publish: fn(n: u32) -> bool {
+        n != YOU
+    })
+}
+
+fn pool_outs(mut t: PoolSig, room: peer.RoomId) {
+    let outs = signal.take_out(mut t.p, room)
+    if t.stalled == Some(room) {
+        for _ in outs {
+            signal.drop_out(mut t.p, room)
+            t.refused_out += 1
+        }
+        return
+    }
+    for take o in outs {
+        match take o {
+            ToRoom(take s) => match take s {
+                Published(p, id, _, _) => list.push(mut t.pubs, (room, int.narrow(p), id)),
+                _ => (),
+            },
+            ToPeer(p, take s) => match take s {
+                Answer(_, _) => list.push(mut t.answered, (room, p)),
+                Offer(v, _) => list.push(mut t.offers, (room, p, v)),
+                _ => (),
+            },
+        }
+    }
+}
+
+// Each build the rooms asked for, on its home unit, as `serve_builds` makes it.
+fn pool_builds(mut t: PoolSig) waits {
+    for take b in signal.take_room_builds(mut t.p) {
+        let Party(id: take unit_id, certificate: _) = party(16100)
+        let built = signal.build(signal.Home(id: take unit_id, at: t.h.addrs[b.home], policy: sdp.default_policy(), limits: peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000)), provide.random(16200), b)
+        let (_, take outcome) = result.unwrap(take built)
+        let signal.Build(who: who, home: home, peer: p, version: _, offer: take offer, publish: _, ..) = take b
+        let mut ufrag: Bytes = list.new()
+        list.append(mut ufrag, b"ufrags")
+        let digit: u8 = int.narrow(p)
+        list.push(mut ufrag, 0x30 + digit)
+        let (take sock, local_at) = result.unwrap(host.udp_bind(t.h.net, addr_of(p), SOCK))
+        let wide: u64 = int.widen(p)
+        let Rig(p: take session, c: _, cs: take cs, out: _) = established_as(16000 + wide, offer, who, local_at, 64, ufrag)
+        if home == 0 {
+            result.unwrap(units.park(mut t.h.w.u0, take session))
+        } else {
+            result.unwrap(units.park(mut t.h.w.u1, take session))
+        }
+        let small: u16 = int.narrow(p)
+        list.push(mut t.h.peers, Peer(c: Client(who: who.gen, at: local_at, cs: take cs), sock: take sock, home: t.h.addrs[home], ssrc: 0x51000000 + p, seq: 1000 * small, mark: mark_for(p)))
+        signal.built_in(mut t.p, who, Ok(take outcome))
+    }
+}
+
+/// Every unit turns once, the rooms step on unit 0, builds are served and each room's
+/// messages are taken, then 5 ms pass.
+fn pool_tick(mut t: PoolSig) waits {
+    step_unit(mut t.h, 1)
+    step_unit(mut t.h, 2)
+    step_unit(mut t.h, 0)
+    let now = host.mono_ns(t.h.clock)
+    signal.step_rooms(mut t.p, mut t.h.w.u0, now)
+    pool_builds(mut t)
+    for room in signal.open_rooms(t.p) {
+        pool_outs(mut t, room)
+    }
+    host.sleep_until(t.h.clock, now + 5 * MS)
+}
+
+fn pool_say(mut t: PoolSig, room: peer.RoomId, p: u32, take s: signal.Signal) {
+    let e: runner.room_client.RoomIn[signal.Signal] = Message(p, take s)
+    signal.enter(mut t.p, room, take e)
+}
+
+fn pool_idle(mut t: PoolSig) waits {
+    for _ in 0u64 .. 64 {
+        let mut idle = true
+        for room in signal.open_rooms(t.p) {
+            if signal.room_idle(t.p, room) != Some(true) {
+                idle = false
+            }
+        }
+        if idle {
+            return
+        }
+        pool_tick(mut t)
+    }
+    fail("a room's control order did not drain")
+}
+
+fn answered_in(t: PoolSig, room: peer.RoomId, p: u32) -> bool {
+    for (r, q) in t.answered {
+        if r == room && q == p {
+            return true
+        }
+    }
+    false
+}
+
+fn pub_in(t: PoolSig, room: peer.RoomId, p: u32) -> u64 {
+    for (r, q, id) in t.pubs {
+        if r == room && q == p {
+            return id
+        }
+    }
+    fail("a peer has no publication in its room")
+}
+
+// The roster of `room` at `revision` of incarnation 1: the service, `first` and `second`.
+fn pool_roster(mut t: PoolSig, room: peer.RoomId, revision: u64, first: u32, second: Option[u32]) {
+    signal.enter(mut t.p, room, Part(inc_of(1), revision, true, true))
+    signal.enter(mut t.p, room, Joined(YOU))
+    signal.enter(mut t.p, room, Joined(first))
+    if let Some(p) = second {
+        signal.enter(mut t.p, room, Joined(p))
+    }
+    signal.enter(mut t.p, room, PartEnd)
+}
+
+// Each browser answers each re-offer from the `from`th on until a round raises none.
+fn pool_settle(mut t: PoolSig, from: u64) waits {
+    let mut next = from
+    for _ in 0u64 .. 8 {
+        for _ in 0u64 .. 8 {
+            pool_tick(mut t)
+        }
+        let end = list.len(t.offers)
+        if end == next {
+            return
+        }
+        for k in next .. end {
+            let (room, p, v) = t.offers[k]
+            pool_say(mut t, room, p, Answer(v, browser_answer(p)))
+        }
+        next = end
+    }
+    fail("the re-offers did not settle")
+}
+
+fn suspended_on(t: PoolSig, room: peer.RoomId) -> u64 {
+    let mut n = 0u64
+    if router.suspended(units.router_of(t.h.w.u0), room) {
+        n += 1
+    }
+    if router.suspended(units.router_of(t.h.w.u1), room) {
+        n += 1
+    }
+    if router.suspended(units.router_of(t.h.w.u2), room) {
+        n += 1
+    }
+    n
+}
+
+// The RTP captured to `to` that carried `mark`, from capture `from` on.
+fn rtp_marked(h: Hall, from: u64, to: Addr, mark: u8) -> u64 {
+    let mut n = 0u64
+    for i in from .. list.len(h.seen) {
+        let s = h.seen[i]
+        if s.to == to && s.kind == KIND_RTP && s.mark == mark {
+            n += 1
+        }
+    }
+    n
+}
+
+fn hall_index(h: Hall, p: u32) -> u64 {
+    for i in 0u64 .. list.len(h.peers) {
+        if h.peers[i].mark == mark_for(p) {
+            return i
+        }
+    }
+    fail("a peer has no browser")
+}
+
+fn per_room_loss_run(net: Net, clock: Clock) waits {
+    let fixture = hall(net, clock, 39000)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(2, 4), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused_out: 0)
+    let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), revoke_limits(), echo_embed()))
+    let b = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), revoke_limits(), echo_embed()))
+    signal.you_in(mut t.p, a, Some(YOU))
+    signal.you_in(mut t.p, b, Some(YOU))
+    // Room a: peer 1. Room b: publisher 2 and subscriber 3.
+    pool_roster(mut t, a, 5, 1, None)
+    pool_roster(mut t, b, 5, 2, Some(3))
+    pool_say(mut t, a, 1, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_say(mut t, b, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_say(mut t, b, 3, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_idle(mut t)
+    for (room, p) in[(a, 1u32), (b, 2u32), (b, 3u32)] {
+        if !answered_in(t, room, p) {
+            fail("a peer was not admitted before the loss")
+        }
+    }
+    let from = list.len(t.offers)
+    let of_b = pub_in(t, b, 2)
+    pool_say(mut t, b, 3, Subscribe(of_b, base_layer()))
+    pool_idle(mut t)
+    pool_settle(mut t, from)
+    let publisher = hall_index(t.h, 2)
+    let to = t.h.peers[hall_index(t.h, 3)].c.at
+    // Room a's relay session drops; its rejoin fails for 3 s (no entry reaches the
+    // room), and its client takes none of its messages.
+    signal.enter(mut t.p, a, Lost)
+    t.stalled = Some(a)
+    let at = list.len(t.h.seen)
+    let mut spoken = 0u64
+    for k in 0u64 .. 600 {
+        if k % 4 == 0 {
+            speak(mut t.h, publisher)
+            spoken += 1
+        }
+        // A new peer of b joins and offers a second into the loss.
+        if k == 200 {
+            signal.enter(mut t.p, b, Part(inc_of(1), 6, false, false))
+            signal.enter(mut t.p, b, Joined(4))
+            signal.enter(mut t.p, b, PartEnd)
+            pool_say(mut t, b, 4, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+        }
+        pool_tick(mut t)
+        if k >= 2 && (suspended_on(t, a) != 3 || suspended_on(t, b) != 0) {
+            fail("the loss suspended other than room a on every unit")
+        }
+    }
+    for _ in 0u64 .. 20 {
+        pool_tick(mut t)
+    }
+    if !answered_in(t, b, 4) {
+        fail("room b did not admit a new peer while room a's signaling was lost")
+    }
+    if rtp_marked(t.h, at, to, mark_for(2)) != spoken {
+        fail("room b's subscriber did not receive every packet its publisher sent during a's loss")
+    }
+    // Room a's client rejoins: its own proven roster (peer 1, still admitted) resumes it.
+    t.stalled = None
+    pool_roster(mut t, a, 6, 1, None)
+    pool_idle(mut t)
+    if suspended_on(t, a) != 0 {
+        fail("room a did not resume from its own roster")
+    }
+    if signal.room_participant(t.p, a, 1) == None {
+        fail("room a's peer did not survive its own loss")
+    }
+    let PoolSig(h: take h, ..) = take t
+    close_hall(take h)
+}
+
+/// bug: one room's signaling loss suspends another room, or stalls unit 0 so another
+/// room stops admitting or forwarding; or a room whose client cannot take its messages
+/// holds the control unit; or the lost room cannot resume from its own roster.
+/// oracle: docs/spec/webrtc.md RTC-10 W39 and Isolation item 3 with RTC-8, by hand:
+/// room a is suspended on all three units and room b on none for the whole 3 s loss;
+/// b admits peer 4 and its subscriber receives each of the 150 packets its publisher
+/// sent 20 ms apart over a loss-free sim.udp; a's Part at revision 6 naming peer 1
+/// lifts a's suspension and keeps peer 1 admitted.
+@test
+fn pool_signaling_loss_is_per_room(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 39000)
+    per_room_loss_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}

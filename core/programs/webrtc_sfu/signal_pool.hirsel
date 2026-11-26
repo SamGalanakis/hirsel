@@ -1,0 +1,287 @@
+// ---- RTC-10 pooled rooms: the control unit's rooms ----
+// One adapter per open room on the control unit (unit 0), keyed by the application's
+// room name and by the pool-wide `RoomId`. The rooms are sans-IO: the driver feeds each
+// room's entries and every build outcome, steps them once a turn, and takes builds,
+// each room's messages and the reports for the application.
+/// A pool's sizes (RTC-10 Shape). `units` is 1 to 64, one port and one unit task each.
+pub type PoolLimits {
+    units: u16,
+    unit_bytes: u64,
+    rooms: u32,
+    sessions: u32,
+    inflight: u16,
+    media_take: u32,
+    room_pps: u32,
+    open_pps: Option[u32]
+}
+
+/// The application's name for a room: 32 bytes, opaque to the pool.
+pub type RoomName: key = RoomName(Inline[u8, 32])
+
+/// The room name of `b`'s first 32 bytes, zero-padded.
+pub fn room_name(b: Bytes) -> RoomName {
+    let mut n: Inline[u8, 32] =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let len = if list.len(b) < 32 {
+        list.len(b)
+    } else {
+        32
+    }
+    for i in 0u64 .. len {
+        n[i] = b[i]
+    }
+    RoomName(n)
+}
+
+pub type PoolOrder[M]: send = Open(name: RoomName, dial: runner.room_client.Dial, limits: router.RoomLimits, embed: Embed[M]) | Close(name: RoomName)
+
+pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy)
+
+pub type PoolRefusal: send = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(router.RouterError)
+
+pub type CloseWhy: send = Asked | Fault(router.RouterError)
+
+/// The room messages one room may hold for its room client between turns. A room whose
+/// client cannot take them (its `send` blocks) loses the rest, counted, and no other
+/// room waits for it (RTC-10 Isolation item 3).
+pub const ROOM_OUT: u64 = 1024
+
+// One open room on the control unit.
+type Served[M] {
+    name: RoomName,
+    a: Adapter[M],
+    out: List[runner.room_client.RoomOut[M]],
+    dropped: u64,
+    why: CloseWhy
+}
+
+/// The control unit's rooms (RTC-10). `units` is the pool's unit count, which every
+/// adapter homes sessions over.
+pub opaque type Rooms[M] {
+    rooms: u32,
+    units: u16,
+    served: List[Served[M]],
+    reports: List[PoolReport],
+    ended: List[peer.RoomId],
+    relaying: Option[Relaying],
+    unix_s: u64
+}
+
+pub fn rooms[M](units: u16, most: u32) -> Rooms[M] {
+    Rooms(rooms: most, units: units, served: list.new(), reports: list.new(), ended: list.new(), relaying: None, unix_s: 0)
+}
+
+/// Every room opened from now on mints its admissions' TURN credentials from `r`.
+pub fn relay_rooms[M](mut p: Rooms[M], take r: Relaying) {
+    p.relaying = Some(take r)
+}
+
+/// The wall clock, in Unix seconds, for every room's credentials and relay revokes.
+pub fn wall_rooms[M](mut p: Rooms[M], unix_s: u64) {
+    p.unix_s = unix_s
+}
+
+fn served_at[M](p: Rooms[M], room: peer.RoomId) -> Option[u64] {
+    for i in 0u64 .. list.len(p.served) {
+        if room_of(p.served[i].a) == room {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn named_at[M](p: Rooms[M], name: RoomName) -> Option[u64] {
+    for i in 0u64 .. list.len(p.served) {
+        if p.served[i].name == name {
+            return Some(i)
+        }
+    }
+    None
+}
+
+/// Open a room under `name`: its `RoomId` is drawn from the control unit's counter,
+/// which never reuses one, and its adapter's first call opens it on every unit.
+/// `Opened` is reported once that call returns. A name already open, or a pool at
+/// `rooms` live rooms, is refused and nothing is allocated.
+pub fn open_room[M: codec](mut p: Rooms[M], mut u: units.Unit, name: RoomName, limits: router.RoomLimits, take embed: Embed[M]) -> Option[peer.RoomId] {
+    if named_at(p, name) != None {
+        list.push(mut p.reports, Refused(name: name, why: Exists))
+        return None
+    }
+    if list.len(p.served) >= int.widen(p.rooms) {
+        list.push(mut p.reports, Refused(name: name, why: Rooms))
+        return None
+    }
+    let Some(room) = units.next_room(mut u) else {
+        list.push(mut p.reports, Refused(name: name, why: Rooms))
+        return None
+    }
+    let mut a = adapter(room, limits, take embed, p.units)
+    if let Some(r) = p.relaying {
+        relay(mut a, Relaying(master: secret.share(r.master), plan: clone(r.plan), random: r.random))
+    }
+    list.push(mut p.served, Served(name: name, a: take a, out: list.new(), dropped: 0, why: Asked))
+    Some(room)
+}
+
+/// Close the room named `name`, as the application asked.
+pub fn close_room[M](mut p: Rooms[M], name: RoomName) {
+    if let Some(i) = named_at(p, name) {
+        close(mut p.served[i].a)
+    }
+}
+
+/// The service's own peer number in `room`, as its room client knows it.
+pub fn you_in[M](mut p: Rooms[M], room: peer.RoomId, you_are: Option[u32]) {
+    if let Some(i) = served_at(p, room) {
+        you(mut p.served[i].a, you_are)
+    }
+}
+
+/// One entry of `room`'s room client, in its order.
+pub fn enter[M: codec](mut p: Rooms[M], room: peer.RoomId, take e: runner.room_client.RoomIn[M]) {
+    let Some(i) = served_at(p, room) else {
+        return
+    }
+    let mut out = replace(mut p.served[i].out, list.new())
+    room_in(mut p.served[i].a, take e, mut out)
+    p.served[i].out = take out
+    bound_out(mut p.served[i])
+}
+
+/// A build's outcome, for the room it names.
+pub fn built_in[M](mut p: Rooms[M], who: peer.Participant, take result: Result[Built, router.RouterError]) {
+    let Some(i) = served_at(p, who.room) else {
+        return
+    }
+    let mut out = replace(mut p.served[i].out, list.new())
+    built(mut p.served[i].a, who, take result, mut out)
+    p.served[i].out = take out
+    bound_out(mut p.served[i])
+}
+
+// A room's messages past `ROOM_OUT` are dropped and counted.
+fn bound_out[M](mut s: Served[M]) {
+    let n = list.len(s.out)
+    if n > ROOM_OUT {
+        s.dropped += n - ROOM_OUT
+        list.truncate(mut s.out, ROOM_OUT)
+    }
+}
+
+/// Step every room's control order on the control unit. An error in a room's shared
+/// state is that room's fault: the room is closed with the same fence as `Close`, and
+/// reported `Closed(.., Fault(e))` once the fence has completed (RTC-10 Isolation
+/// item 2). A room whose `Close` has completed on every unit is reported and dropped.
+pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
+    for i in 0u64 .. list.len(p.served) {
+        wall(mut p.served[i].a, p.unix_s)
+        let mut out = replace(mut p.served[i].out, list.new())
+        let stepped = step(mut p.served[i].a, mut u, now, mut out)
+        p.served[i].out = take out
+        if let Error(e) = stepped {
+            p.served[i].why = Fault(e)
+            close(mut p.served[i].a)
+        }
+        bound_out(mut p.served[i])
+    }
+    let mut i = 0u64
+    while i < list.len(p.served) {
+        if let Some(r) = opened(mut p.served[i].a) {
+            let name = p.served[i].name
+            match r {
+                Ok(()) => list.push(mut p.reports, Opened(name: name, room: room_of(p.served[i].a))),
+                Error(e) => list.push(mut p.reports, Refused(name: name, why: Limits(e))),
+            }
+        }
+        if !closed(p.served[i].a) {
+            i += 1
+            continue
+        }
+        let s = list.remove(mut p.served, i)
+        let Served(name: name, a: take a, out: _, dropped: _, why: why) = take s
+        let room = room_of(a)
+        list.push(mut p.ended, room)
+        if !was_refused(a) {
+            list.push(mut p.reports, Closed(name: name, room: room, why: why))
+        }
+    }
+}
+
+/// Take the builds every room asked for since the last call.
+pub fn take_room_builds[M](mut p: Rooms[M]) -> List[Build] {
+    let mut all: List[Build] = list.new()
+    for i in 0u64 .. list.len(p.served) {
+        for take b in take_builds(mut p.served[i].a) {
+            list.push(mut all, take b)
+        }
+    }
+    all
+}
+
+/// Take `room`'s messages for its room client.
+pub fn take_out[M](mut p: Rooms[M], room: peer.RoomId) -> List[runner.room_client.RoomOut[M]] {
+    let Some(i) = served_at(p, room) else {
+        return list.new()
+    }
+    replace(mut p.served[i].out, list.new())
+}
+
+/// Count a message of `room` its room client could not take.
+pub fn drop_out[M](mut p: Rooms[M], room: peer.RoomId) {
+    if let Some(i) = served_at(p, room) {
+        p.served[i].dropped += 1
+    }
+}
+
+/// The messages of `room` dropped because its room client could not take them.
+pub fn room_dropped[M](p: Rooms[M], room: peer.RoomId) -> Option[u64] {
+    let i = served_at(p, room)?
+    Some(p.served[i].dropped)
+}
+
+/// Every room's relay revokes since the last call.
+pub fn take_room_revokes[M](mut p: Rooms[M]) -> List[RelayRevoke] {
+    let mut all: List[RelayRevoke] = list.new()
+    for i in 0u64 .. list.len(p.served) {
+        for take r in take_revokes(mut p.served[i].a) {
+            list.push(mut all, take r)
+        }
+    }
+    all
+}
+
+/// The reports for the application since the last call.
+pub fn take_reports[M](mut p: Rooms[M]) -> List[PoolReport] {
+    replace(mut p.reports, list.new())
+}
+
+/// The rooms closed or refused since the last call, whose room clients end.
+pub fn take_ended[M](mut p: Rooms[M]) -> List[peer.RoomId] {
+    replace(mut p.ended, list.new())
+}
+
+/// The open rooms, in the order they opened.
+pub fn open_rooms[M](p: Rooms[M]) -> List[peer.RoomId] {
+    let mut all: List[peer.RoomId] = list.new()
+    for s in p.served {
+        list.push(mut all, room_of(s.a))
+    }
+    all
+}
+
+/// Whether `room` is suspended for signaling loss, and whether its control order is idle.
+pub fn room_lost[M](p: Rooms[M], room: peer.RoomId) -> Option[bool] {
+    let i = served_at(p, room)?
+    Some(lost(p.served[i].a))
+}
+
+pub fn room_idle[M](p: Rooms[M], room: peer.RoomId) -> Option[bool] {
+    let i = served_at(p, room)?
+    Some(idle(p.served[i].a))
+}
+
+/// The router participant of peer `number` in `room`.
+pub fn room_participant[M](p: Rooms[M], room: peer.RoomId, number: u32) -> Option[peer.Gen] {
+    let i = served_at(p, room)?
+    participant(p.served[i].a, number)
+}

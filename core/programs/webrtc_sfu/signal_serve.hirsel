@@ -1,25 +1,27 @@
-// ---- The service (RTC-8, S7) ----
-// The process entry. Unit 0 runs in the caller's task with the adapter and the room
-// client; each other unit runs in its own unit task (CONC-15). Each unit binds its own
-// socket and makes its own inboxes, since neither may move between units, and reports
-// its doors to the entry. The entry hands every unit all units' doors in unit order,
-// then each runs `units.turn` and builds the sessions the adapter homes on it.
-/// The service's settings. `binds` names one address per unit (port 0 takes any free
-/// port; the bound address is the one sessions advertise); `until` is the monotonic
-/// time every unit stops at (`u64` max in a service that runs until killed). `relay`
-/// is the sibling TURN relay place, if the deployment runs one (TURN-8).
-pub type Service[M] {
+// ---- The pool service (RTC-8, RTC-10) ----
+// The process entry. Unit 0 runs in the caller's task with every room's adapter; each
+// other unit runs in its own unit task (CONC-15), and each open room's room client runs
+// in its own task. Each unit binds its own socket and makes its own inboxes, since
+// neither may move between units, and reports its doors to the entry. The entry hands
+// every unit all units' doors in unit order, then each runs `units.turn` and builds the
+// sessions the adapters home on it.
+/// The pool's settings (RTC-10 Shape). `binds` names one address per unit (port 0 takes
+/// any free port; the bound address is the one sessions advertise); `until` is the
+/// monotonic time every unit stops at (`u64` max in a service that runs until killed).
+/// `relay` is the sibling TURN relay place, if the deployment runs one (TURN-8): every
+/// room mints its admissions' credentials from it. The application sends `orders` and
+/// reads `reports`.
+pub type Pool[M] {
     tasks: Tasks,
     net: Net,
     clock: Clock,
     random: Random,
-    dial: runner.room_client.Dial,
-    limits: router.RoomLimits,
-    embed: Embed[M],
     binds: List[Addr],
     policy: sdp.Policy,
     session: peer.PeerLimits,
-    unit_bytes: u64,
+    limits: PoolLimits,
+    orders: Receiver[PoolOrder[M]],
+    reports: Sender[PoolReport],
     until: u64,
     relay: Option[RelayLink]
 }
@@ -58,6 +60,8 @@ type Start: cross {
     hello: Client[Hello],
     policy: sdp.Policy,
     session: peer.PeerLimits,
+    plane: units.Plane,
+    rates: router.Rates,
     until: u64
 }
 
@@ -160,9 +164,9 @@ fn wait_until(wake: Option[u64], now: u64) -> u64 {
 // Unit `s.index` (not 0): bind, report, take the roster, then turn and build until
 // `s.until`.
 fn unit_task(take s: Start) -> Result[(), ServeError] waits {
-    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, until: until) = take s
-    let (take opened, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
-    let (doors, take control, take media) = units.inboxes(at, index, n, units.ONE_ROOM) ?=> |take e| Router(e)
+    let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, plane: plane, rates: rates, until: until) = take s
+    let (take socket, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
+    let (doors, take control, take media) = units.inboxes(at, index, n, plane) ?=> |take e| Router(e)
     let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes 65536)
     let (roster, take siblings) = rc ?=> |c| Router(Capacity(c))
     let bc: Result[(Client[Build], Inbox[Build]), Capacity] = conn.new(64, bytes 4194304)
@@ -183,9 +187,10 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
     let Some(take report) = done else {
         return Error(Units)
     }
-    let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS, units.ONE_ROOM) ?=> |take e| Router(e)
+    let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
+    units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: take policy, limits: session)
-    let mut sock = take opened
+    let mut sock = take socket
     let mut wake: Option[u64] = None
     while true {
         let now = host.mono_ns(clock)
@@ -208,18 +213,162 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
     Ok(())
 }
 
-/// Run the service until `s.until`: units 1 and up in unit tasks, unit 0, the adapter
-/// and the room client here. The room client is polled once a turn (`try_next`); on
-/// `Lost` the adapter suspends the room and the client rejoins, every `REJOIN_NS` until
-/// it gets a session, while unit 0 keeps turning.
-pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
-    let Service(tasks: tasks, net: net, clock: clock, random: random, dial: take dial, limits: limits, embed: take embed, binds: binds, policy: policy, session: session, unit_bytes: unit_bytes, until: until, relay: take linked) = take s
+// ---- Room clients (RTC-10 The control plane) ----
+// What a room client's task posts to unit 0, in its order: the service's own peer number
+// when it changes, then the room's entries.
+type Entry[M: send]: send = In(runner.room_client.RoomIn[M]) | You(Option[u32])
+
+// What unit 0 hands a room client: a message for the room, or the end of the room.
+type Outgoing[M: send]: send = Say(runner.room_client.RoomOut[M]) | Quit
+
+type ClientStart[M: send]: send {
+    room: peer.RoomId,
+    dial: runner.room_client.Dial,
+    entries: Sender[Entry[M]],
+    ready: Sender[peer.RoomId],
+    outs: Receiver[Outgoing[M]],
+    clock: Clock,
+    until: u64
+}
+
+// What unit 0 keeps of one room client's task.
+type RoomClient[M: send] {
+    room: peer.RoomId,
+    entries: Receiver[Entry[M]],
+    outs: Sender[Outgoing[M]],
+    quitting: bool,
+    task: Option[Task[()]]
+}
+
+/// A room client task's memory: its WebSocket session (`runner.wire_defaults(262144)`)
+/// and the room's entries in flight.
+pub const ROOM_CLIENT_BYTES: u64 = 8388608
+
+fn room_client_task[M: codec + send](tasks: Tasks, room: peer.RoomId, take dial: runner.room_client.Dial, take ready: Sender[peer.RoomId], clock: Clock, until: u64) -> Option[RoomClient[M]] {
+    let (entries_to, entries): (Sender[Entry[M]], Receiver[Entry[M]]) = channel.new(ROOM_OUT)
+    let (outs, outs_from): (Sender[Outgoing[M]], Receiver[Outgoing[M]]) = channel.new(ROOM_OUT)
+    let start = ClientStart(room: room, dial: take dial, entries: take entries_to, ready: take ready, outs: take outs_from, clock: clock, until: until)
+    match task.try_spawn(tasks, bytes ROOM_CLIENT_BYTES, take start, run_room_client) {
+        Ok(take t) => Some(RoomClient(room: room, entries: take entries, outs: take outs, quitting: false, task: Some(take t))),
+        Error(_) => None,
+    }
+}
+
+// One room's client: it joins, rejoins after `Lost` every `REJOIN_NS` until it gets a
+// session, posts what it receives to unit 0 and marks the room ready, and sends what
+// unit 0 hands it. Every blocking call is here, so a slow relay or a rejoin backoff
+// delays only this room.
+fn run_room_client[M: codec + send](take s: ClientStart[M]) waits {
+    let ClientStart(room: room, dial: take dial, entries: take entries, ready: take ready, outs: take outs, clock: clock, until: until) = take s
+    let mut joined: Option[runner.room_client.Room[M]] = None
+    let mut down = true
+    let mut retry_at = 0u64
+    let mut was: Option[u32] = None
+    while host.mono_ns(clock) < until {
+        let now = host.mono_ns(clock)
+        let mut moved = false
+        if down && now >= retry_at {
+            if let Some(take r) = replace(mut joined, None) {
+                let mut c = take r
+                match runner.room_client.rejoin(mut c) {
+                    Ok(_) => {
+                        down = false
+                    },
+                    Error(_) => {
+                        retry_at = now + REJOIN_NS
+                    },
+                }
+                joined = Some(take c)
+            } else {
+                let first: runner.room_client.Dial = clone(dial)
+                let entry: Result[runner.room_client.Room[M], runner.room_client.RoomError] = runner.room_client.join(take first)
+                match take entry {
+                    Ok(take r) => {
+                        joined = Some(take r)
+                        down = false
+                    },
+                    Error(_) => {
+                        retry_at = now + REJOIN_NS
+                    },
+                }
+            }
+        }
+        if let Some(take r) = replace(mut joined, None) {
+            let mut c = take r
+            let mut into: List[runner.room_client.RoomIn[M]] = list.new()
+            if !down {
+                match runner.room_client.try_next(mut c, mut into) {
+                    Ok(true) => (),
+                    _ => {
+                        down = true
+                        retry_at = now + REJOIN_NS
+                    },
+                }
+            }
+            let me = runner.room_client.member(c).you
+            if me != was {
+                was = me
+                if let Error(_) = channel.send(entries, You(me)) {
+                    return
+                }
+                moved = true
+            }
+            for take e in into {
+                if let Error(_) = channel.send(entries, In(take e)) {
+                    return
+                }
+                moved = true
+            }
+            joined = Some(take c)
+        }
+        if moved {
+            if let Error(_) = channel.send(ready, room) {
+                return
+            }
+        }
+        while let Ok(o) = channel.try_receive(outs) {
+            moved = true
+            match take o {
+                Say(take m) => {
+                    if let Some(take r) = replace(mut joined, None) {
+                        let mut c = take r
+                        let _ = runner.room_client.send(mut c, take m)
+                        joined = Some(take c)
+                    }
+                },
+                Quit => {
+                    if let Some(take r) = replace(mut joined, None) {
+                        let _ = runner.room_client.leave(take r)
+                    }
+                    return
+                },
+            }
+        }
+        if !moved {
+            host.sleep_until(clock, now + SERVE_TICK_NS)
+        }
+    }
+    if let Some(take r) = replace(mut joined, None) {
+        let _ = runner.room_client.leave(take r)
+    }
+}
+
+/// Run the pool until `p.until` (RTC-10): units 1 and up in unit tasks; unit 0, every
+/// room's adapter and the application's orders here; each open room's room client in a
+/// task of its own. Unit 0 never waits on a room client and never polls an idle one:
+/// each turn it takes the entries of the rooms marked ready, steps every room's control
+/// order and hands each room client its messages without waiting. A one-room service is
+/// a pool with one `Open` queued.
+pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits {
+    let Pool(tasks: tasks, net: net, clock: clock, random: random, binds: binds, policy: policy, session: session, limits: limits, orders: take orders, reports: take reports, until: until, relay: take linked) = take p
     let n: u16 = int.narrow(list.len(binds))
-    if n == 0 {
+    if n == 0 || n > 64 || n != limits.units {
         return Error(Units)
     }
-    let (take opened, at) = host.udp_bind(net, binds[0], SOCKET) ?=> |e| Bind(e)
-    let (doors0, take control, take media) = units.inboxes(at, 0, n, units.ONE_ROOM) ?=> |take e| Router(e)
+    let plane = units.Plane(inflight: limits.inflight, rooms: limits.rooms, media_take: limits.media_take)
+    let rates = router.Rates(room_pps: limits.room_pps, open_pps: limits.open_pps)
+    let (take socket, at) = host.udp_bind(net, binds[0], SOCKET) ?=> |e| Bind(e)
+    let (doors0, take control, take media) = units.inboxes(at, 0, n, plane) ?=> |take e| Router(e)
     let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes 65536)
     let (hello, take hellos) = hc ?=> |c| Router(Capacity(c))
     let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes 4194304)
@@ -227,8 +376,8 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
     let mut running: List[Task[Result[(), ServeError]]] = list.new()
     for k in 1u16 .. n {
         let terms: sdp.Policy = clone(policy)
-        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, until: until)
-        match task.spawn_unit(tasks, bytes unit_bytes, take start, unit_task) {
+        let start = Start(index: k, units: n, bind: binds[int.widen(k)], net: net, clock: clock, random: random, hello: conn.client(hello), policy: take terms, session: session, plane: plane, rates: rates, until: until)
+        match task.spawn_unit(tasks, bytes limits.unit_bytes, take start, unit_task) {
             Ok(take t) => list.push(mut running, take t),
             Error(_) => return Error(Spawn),
         }
@@ -268,25 +417,22 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
             }
         }
     }
-    let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS, units.ONE_ROOM) ?=> |take e| Router(e)
+    let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS, plane) ?=> |take e| Router(e)
+    units.set_rates(mut u, rates)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
-    let Some(room) = units.next_room(mut u) else {
-        return Error(Units)
-    }
-    let mut a = adapter(room, limits, take embed, n)
+    let mut pool: Rooms[M] = rooms(n, limits.rooms)
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
     if let Some(take link) = take linked {
         let RelayLink(master: take master, plan: take plan, revokes: take to) = take link
-        relay(mut a, Relaying(master: take master, plan: take plan, random: random))
+        relay_rooms(mut pool, Relaying(master: take master, plan: take plan, random: random))
         revokes_to = Some(take to)
     }
-    let mut sock = take opened
+    let ready_slots: u64 = int.widen(limits.rooms)
+    let (ready_to, ready): (Sender[peer.RoomId], Receiver[peer.RoomId]) = channel.new(ready_slots + 1)
+    let mut clients: List[RoomClient[M]] = list.new()
+    let mut quit: List[Task[()]] = list.new()
+    let mut sock = take socket
     let mut wake: Option[u64] = None
-    let mut out: List[runner.room_client.RoomOut[M]] = list.new()
-    let mut joined: Option[runner.room_client.Room[M]] = None
-    let mut pending_dial: Option[runner.room_client.Dial] = Some(take dial)
-    let mut need_rejoin = false
-    let mut retry_at = 0u64
     while true {
         let now = host.mono_ns(clock)
         if now >= until {
@@ -294,53 +440,36 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
         }
         wake = units.turn(mut u, clock, mut sock, wait_until(wake, now)) ?=> |take e| Router(e)
         let after = host.mono_ns(clock)
-        wall(mut a, host.wall_ms(clock) / 1000)
-        // The room: join, rejoin after Lost, or take what has come.
-        if let Some(take d) = replace(mut pending_dial, None) {
-            let mut entered = false
-            if after >= retry_at {
-                let first: runner.room_client.Dial = clone(d)
-                let entry: Result[runner.room_client.Room[M], runner.room_client.RoomError] = runner.room_client.join(take first)
-                match take entry {
-                    Ok(take r) => {
-                        joined = Some(take r)
-                        entered = true
-                    },
-                    Error(_) => {
-                        retry_at = after + REJOIN_NS
-                    },
-                }
-            }
-            if !entered {
-                pending_dial = Some(take d)
+        wall_rooms(mut pool, host.wall_ms(clock) / 1000)
+        // The application's orders.
+        while let Ok(o) = channel.try_receive(orders) {
+            match take o {
+                Open(name: name, dial: take dial, limits: room_limits, embed: take embed) => {
+                    let Some(room) = open_room(mut pool, mut u, name, room_limits, take embed) else {
+                        continue
+                    }
+                    let started: Option[RoomClient[M]] = room_client_task(tasks, room, take dial, channel.sender(ready_to), clock, until)
+                    let Some(take c) = take started else {
+                        return Error(Spawn)
+                    }
+                    list.push(mut clients, take c)
+                },
+                Close(name: name) => close_room(mut pool, name),
             }
         }
-        if let Some(take r) = replace(mut joined, None) {
-            let mut joined_room = take r
-            if need_rejoin && after >= retry_at {
-                match runner.room_client.rejoin(mut joined_room) {
-                    Ok(_) => {
-                        need_rejoin = false
-                    },
-                    Error(_) => {
-                        retry_at = after + REJOIN_NS
-                    },
+        // The rooms marked ready, and only those.
+        while let Ok(room) = channel.try_receive(ready) {
+            for i in 0u64 .. list.len(clients) {
+                if clients[i].room != room {
+                    continue
+                }
+                while let Ok(e) = channel.try_receive(clients[i].entries) {
+                    match take e {
+                        In(take x) => enter(mut pool, room, take x),
+                        You(me) => you_in(mut pool, room, me),
+                    }
                 }
             }
-            let mut into: List[runner.room_client.RoomIn[M]] = list.new()
-            if !need_rejoin {
-                match runner.room_client.try_next(mut joined_room, mut into) {
-                    Ok(true) => (),
-                    _ => {
-                        need_rejoin = true
-                    },
-                }
-            }
-            you(mut a, runner.room_client.member(joined_room).you)
-            for take e in into {
-                room_in(mut a, take e, mut out)
-            }
-            joined = Some(take joined_room)
         }
         while let Ok(f) = conn.try_receive(finished) {
             let Finished(who: who, built: take outcome) = take f
@@ -348,46 +477,78 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
                 Ok(take b) => Ok(take b),
                 Error(c) => Error(uncode(c)),
             }
-            built(mut a, who, take result, mut out)
+            built_in(mut pool, who, take result)
         }
-        step(mut a, mut u, after, mut out) ?=> |take e| Router(e)
-        for take b in take_builds(mut a) {
+        step_rooms(mut pool, mut u, after)
+        for take b in take_room_builds(mut pool) {
             let who = b.who
             if b.home == 0 {
                 if !units.take_build(mut u, who.room) {
                     continue
                 }
                 let made = build_on(mut u, home, random, b)
-                built(mut a, who, take made, mut out)
+                built_in(mut pool, who, take made)
             } else {
                 let k: u64 = int.widen(b.home)
                 if k > list.len(builders) {
-                    built(mut a, who, Error(Limit(int.widen(n))), mut out)
+                    built_in(mut pool, who, Error(Limit(int.widen(n))))
                 } else if let Error(_) = conn.try_send(builders[k - 1], take b) {
-                    built(mut a, who, Error(Limit(64)), mut out)
+                    built_in(mut pool, who, Error(Limit(64)))
                 }
             }
         }
         units.send(mut u, clock, mut sock, after)
         // A revoke reaches the relay outside RTC-7's acknowledgement (TURN-9): the fence
         // already drops the epoch's packets, so a full queue only delays reclaiming.
-        for take r in take_revokes(mut a) {
+        for take r in take_room_revokes(mut pool) {
             if let Some(to) = revokes_to {
                 let _ = channel.try_send(to, take r)
             }
         }
-        if let Some(take r) = replace(mut joined, None) {
-            let mut joined_room = take r
-            for take o in replace(mut out, list.new()) {
-                let _ = runner.room_client.send(mut joined_room, take o)
+        // Each room client's messages, without waiting: a client that cannot take them
+        // loses them, counted against its room.
+        for i in 0u64 .. list.len(clients) {
+            let room = clients[i].room
+            for take o in take_out(mut pool, room) {
+                if let Error(_) = channel.try_send(clients[i].outs, Say(take o)) {
+                    drop_out(mut pool, room)
+                }
             }
-            joined = Some(take joined_room)
-        } else {
-            list.clear(mut out)
+        }
+        for room in take_ended(mut pool) {
+            for i in 0u64 .. list.len(clients) {
+                if clients[i].room == room {
+                    clients[i].quitting = true
+                }
+            }
+        }
+        let mut i = 0u64
+        while i < list.len(clients) {
+            if clients[i].quitting {
+                if let Ok(()) = channel.try_send(clients[i].outs, Quit) {
+                    let c = list.remove(mut clients, i)
+                    let RoomClient(task: take t, ..) = take c
+                    if let Some(take h) = take t {
+                        list.push(mut quit, take h)
+                    }
+                    continue
+                }
+            }
+            i += 1
+        }
+        for take r in take_reports(mut pool) {
+            let _ = channel.try_send(reports, take r)
         }
     }
-    if let Some(take r) = replace(mut joined, None) {
-        let _ = runner.room_client.leave(take r)
+    for take c in clients {
+        let RoomClient(outs: take to, task: take t, ..) = take c
+        let _ = channel.send(to, Quit)
+        if let Some(take h) = take t {
+            list.push(mut quit, take h)
+        }
+    }
+    for take h in quit {
+        let _ = task.join(take h)
     }
     for take t in running {
         let _ = task.join(take t)

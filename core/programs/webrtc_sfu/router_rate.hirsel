@@ -1,0 +1,89 @@
+// RTC-10 Isolation items 4 and 6: each publisher session's authenticated media rate, and
+// each unit's SRTP opens before authentication.
+/// A pool's ingress rates (RTC-10): authenticated media datagrams per second per
+/// publisher session, and SRTP open attempts per second per unit when `open_pps` is set.
+pub type Rates: key {
+    room_pps: u32,
+    open_pps: Option[u32]
+}
+
+// A token bucket one second deep, in token-nanoseconds: a datagram spends `TOKEN`, each
+// nanosecond refills the rate, and the credit never passes one second's worth. A new
+// bucket is full.
+type Bucket: key {
+    credit: u64,
+    at: u64
+}
+
+const TOKEN: u64 = 1000000000
+
+fn full() -> Bucket {
+    Bucket(credit: 0xffffffffffffffff, at: 0)
+}
+
+// Spend one datagram from `b` at `rate` per second, refilled up to `now`.
+fn spend(mut b: Bucket, pps: u32, now: u64) -> bool {
+    let per: u64 = int.widen(pps)
+    let depth = per * TOKEN
+    if now > b.at {
+        let gained = int.saturating_mul(now - b.at, per)
+        b.credit = int.saturating_add(b.credit, gained)
+        b.at = now
+    }
+    if b.credit > depth {
+        b.credit = depth
+    }
+    if b.credit < TOKEN {
+        return false
+    }
+    b.credit -= TOKEN
+    true
+}
+
+/// Set the unit's ingress rates (RTC-10). A unit with none set admits every datagram.
+pub fn set_rates(mut r: Router, rates: Rates) {
+    r.rates = Some(rates)
+}
+
+/// Authenticated media datagrams of `room`'s publishers this unit dropped over
+/// `room_pps`.
+pub fn room_over_rate(r: Router, room: peer.RoomId) -> Option[u64] {
+    let ri = room_at(r, room)?
+    Some(r.rooms[ri].over_rate)
+}
+
+// Item 6: an SRTP datagram on a session's selected path is an open attempt, which the
+// unit's `open_pps` bounds before any decryption. STUN and DTLS are not.
+fn may_open(mut r: Router, now: u64, mi: u64, from: Addr, slot: Bytes) -> bool {
+    let Some(rates) = r.rates else {
+        return true
+    }
+    let Some(cap) = rates.open_pps else {
+        return true
+    }
+    let class = peer.classify(slot)
+    if class != Rtp && class != Rtcp {
+        return true
+    }
+    if peer.selected(r.members[mi].session) != Some(from) {
+        return true
+    }
+    spend(mut r.opens, cap, now)
+}
+
+// Item 4: a datagram SRTP authenticated as the session's media spends its bucket, and
+// one over `room_pps` is dropped before routing and counted against its room. A
+// spoofed datagram fails authentication first and spends nothing (W19).
+fn within_rate(mut r: Router, now: u64, mi: u64) -> bool {
+    let Some(rates) = r.rates else {
+        return true
+    }
+    if spend(mut r.members[mi].bucket, rates.room_pps, now) {
+        return true
+    }
+    let room = r.members[mi].who.room
+    if let Some(ri) = room_at(r, room) {
+        r.rooms[ri].over_rate += 1
+    }
+    false
+}

@@ -1,0 +1,101 @@
+// ---- RTC-10 ingress rate (W38) ----
+const RATE_PPS: u32 = 50
+
+// A browser of `room` joined to `r` from `addr_of(id)`.
+fn rate_client(mut r: router.Router, seed: u64, offer: Bytes, id: u64, room: peer.RoomId) -> Client {
+    let at = addr_of(int.narrow(id))
+    let who = peer.Participant(gen: gen_of(id), room: room)
+    let Rig(p: take p, c: _, cs: take cs, out: _) = established_with(seed, offer, who, at, 64)
+    result.unwrap(router.join(mut r, take p))
+    Client(who: gen_of(id), at: at, cs: take cs)
+}
+
+fn rate_receiver() -> Bytes {
+    let mut offer = minimal_head(b" d")
+    recv_section(mut offer, b"d", b"96", b"97", b"1", b"3")
+    offer
+}
+
+// A publisher `p` and a subscriber `s` of its section 0, in one room.
+type RatePair {
+    p: Client,
+    s: Client
+}
+
+fn rate_pair(mut r: router.Router, seed: u64, id: u64, room: peer.RoomId, mut out: peer.Outbox) -> RatePair {
+    let p = rate_client(mut r, seed, session_offer(), id, room)
+    let s = rate_client(mut r, seed + 4, rate_receiver(), id + 1, room)
+    let pa = result.unwrap(router.publish(mut r, room, p.who, 0))
+    let base: router.Target = Layer(encoding: 0, spatial: 0, temporal: 0)
+    result.unwrap(router.subscribe(mut r, room, s.who, pa, 0, base, 0, mut out))
+    peer.clear_outbox(mut out)
+    RatePair(p: take p, s: take s)
+}
+
+// A datagram from `c`'s address, found by its 5-tuple as the unit finds any datagram.
+fn offer_to(mut r: router.Router, now: u64, c: Client, packet: Bytes, mut out: peer.Outbox) {
+    let mut slot = copy_of(packet)
+    let _ = router.deliver(mut r, now, c.at, mut slot, mut out)
+}
+
+/// bug: one room's publisher over its rate takes routing from another room, its
+/// excess is routed or not counted, or a datagram spoofed from a publisher's 5-tuple
+/// spends that publisher's budget because the bucket is debited before SRTP
+/// authentication.
+/// oracle: docs/spec/webrtc.md RTC-10 W38 and Isolation item 4, by hand: a bucket one
+/// second (`RATE_PPS` = 50 datagrams) deep and full at the start, refilled at 50 per
+/// second. Room a sends 1,500 datagrams 2 ms apart (10 x `RATE_PPS` for 3 s): the first 50
+/// pass on the full bucket and 0.1 token comes back per datagram, so 199 pass, which
+/// lies between `RATE_PPS` x 3 and one bucket's depth more. Room b sends 75 datagrams 40 ms
+/// apart (`RATE_PPS` / 2), and a spoofer sends 1,500 datagrams with a broken SRTP tag from
+/// b's publisher's address at 10 x `RATE_PPS`: each of b's 75 is routed.
+@test
+fn pool_over_rate_publisher_costs_its_room() -> Result[(), router.RouterError] {
+    let mut r = router.router(provide.random(380))
+    let a: peer.RoomId = RoomId(7)
+    let b: peer.RoomId = RoomId(8)
+    result.unwrap(router.open_room(mut r, a, room_limits()))
+    result.unwrap(router.open_room(mut r, b, room_limits()))
+    router.set_rates(mut r, router.Rates(room_pps: RATE_PPS, open_pps: None))
+    let mut out = result.unwrap(peer.outbox(65536, 64))
+    let mut x = rate_pair(mut r, 381, 1, a, mut out)
+    let mut y = rate_pair(mut r, 391, 3, b, mut out)
+    let mut got_a = 0u64
+    let mut got_b = 0u64
+    let start = 10 * MS
+    for k in 0u64 .. 1500u64 {
+        let now = start + 2 * MS * k
+        let seq: u16 = int.narrow(100 + k)
+        let ts: u32 = int.narrow(3000 * k)
+        let pa = media_carrying(mut x.p.cs, MEDIA_SSRC, seq, ts, b"a", 96, vp8_key())
+        offer_to(mut r, now, x.p, pa, mut out)
+        let mut spoof = media_carrying(mut y.p.cs, MEDIA_SSRC + 1, seq, ts, b"a", 96, vp8_key())
+        let last = list.len(spoof) - 1
+        spoof[last] = if spoof[last] == 0 {
+            1
+        } else {
+            0
+        }
+        offer_to(mut r, now, y.p, spoof, mut out)
+        if k % 20 == 0 {
+            let bseq: u16 = int.narrow(100 + k / 20)
+            let pb = media_carrying(mut y.p.cs, MEDIA_SSRC, bseq, ts, b"a", 96, vp8_key())
+            offer_to(mut r, now, y.p, pb, mut out)
+        }
+        let _ = router.poll(mut r, now, mut out)
+        got_a += list.len(received(mut x.s, out))
+        got_b += list.len(received(mut y.s, out))
+        peer.clear_outbox(mut out)
+    }
+    let over_a = option.unwrap(router.room_over_rate(r, a))
+    if got_a < 3 * 50 || got_a > 4 * 50 {
+        fail("the over-rate publisher's routed count is not room_pps x 3 within one bucket's depth")
+    }
+    if got_a + over_a != 1500 {
+        fail("over_rate does not count every datagram over the rate")
+    }
+    if got_b != 75 || router.room_over_rate(r, b) != Some(0) {
+        fail("the other room or the spoofed publisher lost routed packets")
+    }
+    Ok(())
+}

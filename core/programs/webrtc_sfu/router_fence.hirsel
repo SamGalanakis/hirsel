@@ -419,7 +419,7 @@ fn drop_seat(mut r: Router, si: u64, notify: bool, mut out: peer.Outbox) {
     let _ = list.remove(mut r.roster, s)
     if let Some(mi) = member_at(r, who.room, who.gen) {
         let m = list.remove(mut r.members, mi)
-        let Member(who: _, session: take session, estimate: _, want: _) = take m
+        let Member(who: _, session: take session, ..) = take m
         peer.close(take session, notify, mut out)
     }
 }

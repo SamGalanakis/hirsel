@@ -8,9 +8,9 @@ pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
 // Each room Part is its head, then its Joined, Message and Left entries in that order, then
 // PartEnd. Lost says messages were dropped: before a Part's head when the relay reports a gap,
 // or alone when the session or membership ended, after which nothing more of it arrives.
-pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
+pub type RoomIn[M]: send = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
 
-pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
+pub type RoomOut[M]: send = ToPeer(u32, M) | ToRoom(M)
 
 pub type RoomError: send = Connect(std.wsock.Error) | Encode(std.codec.EncodeError) | Decode(std.codec.DecodeError) | Disorder(u64, u64) | Closed
 
@@ -35,7 +35,7 @@ pub type Change: send {
 }
 
 // Where the session dials, and the room it subscribes to (entry and argument).
-pub type Dial {
+pub type Dial: send {
     tasks: Tasks,
     net: Net,
     address: Addr,

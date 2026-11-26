@@ -77,6 +77,10 @@ pub fn receive(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, from: 
     let Some(mi) = member_at(r, room, who) else {
         return Error(NoParticipant)
     }
+    if !may_open(mut r, now, mi, from, slot) {
+        r.counts.over_open += 1
+        return Ok(())
+    }
     let input = peer.receive(mut r.members[mi].session, now, from, mut slot, mut out) ?=> |take e| Peer(e)
     let mut restarted = false
     while let Some(track) = peer.collided(mut r.members[mi].session) {
@@ -90,6 +94,14 @@ pub fn receive(mut r: Router, now: u64, room: peer.RoomId, who: peer.Gen, from: 
     if peer.target_bps(r.members[mi].session) != r.members[mi].estimate {
         allocate(mut r, mi, None, now, mut out)?
         wants(mut r, now)
+    }
+    let media = match input {
+        Media(_) => true,
+        Repair(_) => true,
+        _ => false,
+    }
+    if media && !within_rate(mut r, now, mi) {
+        return Ok(())
     }
     match input {
         Media(m) => route(mut r, now, mi, m, true, slot, mut out),

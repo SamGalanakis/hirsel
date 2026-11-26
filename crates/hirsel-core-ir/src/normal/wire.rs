@@ -84,6 +84,33 @@ impl<'order, 'm, 'b> Write<'order, 'm, 'b> {
             LocalRow::Edge => body.edges[row].write(self),
         }
     }
+
+    pub(super) fn static_data(&mut self, data: &'m Static) {
+        match data {
+            Static::Bytes { align, bytes } => {
+                0u8.write(self);
+                align.write(self);
+                bytes.write(self);
+            }
+            Static::Aggregate { ty, value } => {
+                1u8.write(self);
+                ty.write(self);
+                value.write(self);
+            }
+            Static::Computed { ty, constant } => {
+                2u8.write(self);
+                ty.write(self);
+                if self.module.planning {
+                    let slots = &mut self.module.constant_slots;
+                    if !slots.contains(&constant) && reserve(self.module.meter, slots, 1) {
+                        slots.push(constant);
+                    }
+                } else {
+                    constant.write(self);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) struct Read<'a, 'b> {
@@ -97,6 +124,24 @@ pub(crate) struct Read<'a, 'b> {
 }
 
 impl<'a, 'b> Read<'a, 'b> {
+    pub(super) fn static_data(&mut self) -> DecodeResult<Static> {
+        match u8::read(self)? {
+            0 => Ok(Static::Bytes {
+                align: Wire::read(self)?,
+                bytes: Wire::read(self)?,
+            }),
+            1 => Ok(Static::Aggregate {
+                ty: Wire::read(self)?,
+                value: Wire::read(self)?,
+            }),
+            2 => Ok(Static::Computed {
+                ty: Wire::read(self)?,
+                constant: Wire::read(self)?,
+            }),
+            _ => Err(invalid("unknown Static tag")),
+        }
+    }
+
     pub(crate) fn new(bytes: &'a [u8], magic: &[u8], budget: &'b Debit<'b>) -> DecodeResult<Self> {
         budget.check_depth(1)?;
         let header_len = magic.len() - 2;

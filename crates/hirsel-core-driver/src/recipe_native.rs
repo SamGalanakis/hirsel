@@ -78,7 +78,7 @@ impl UnitModule {
             Self::Decoded(module) => *module,
             Self::Encoded(bytes, values) => {
                 let mut module = normal::assembly_module(&bytes);
-                crate::instances::bind_values(&mut module, &values);
+                crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
                 let symbol = hirsel_core_ir::symbol(identity.digest());
                 bind_module(&mut module, annex, Some(&symbol));
                 module
@@ -196,7 +196,7 @@ fn unit(original: &Module, body: normal::EncodedBody, annex: Annex, module: Modu
     Unit {
         code,
         module: UnitModule::Decoded(Box::new(module)),
-        values: Arc::default(),
+        values: None,
         annex,
         builtins,
         memo: None,
@@ -401,7 +401,7 @@ impl CheckProduct {
             let (mut annex, module) = if defer_modules && identity != entry {
                 (
                     instance.annex(&sources)?,
-                    UnitModule::Encoded(Arc::clone(&instance.code), Arc::clone(&instance.values)),
+                    UnitModule::Encoded(Arc::clone(&instance.code), instance.values.clone()),
                 )
             } else {
                 let (annex, module) = instance.prepare_assembly(&sources)?;
@@ -427,7 +427,7 @@ impl CheckProduct {
                 Unit {
                     code,
                     module,
-                    values: Arc::clone(&instance.values),
+                    values: instance.values.clone(),
                     annex,
                     builtins,
                     memo,
@@ -1285,7 +1285,7 @@ impl Publication {
                     Unit {
                         code,
                         module: UnitModule::Decoded(Box::new(body.module)),
-                        values: Arc::default(),
+                        values: None,
                         annex,
                         builtins,
                         memo: None,
@@ -1468,7 +1468,7 @@ impl Publication {
         for unit in self.units.values_mut() {
             if let UnitModule::Encoded(bytes, values) = &unit.module {
                 let mut module = normal::assembly_module(bytes);
-                crate::instances::bind_values(&mut module, values);
+                crate::instances::bind_values(&mut module, values.as_deref().unwrap_or_default());
                 unit.module = UnitModule::Decoded(Box::new(module));
             }
         }
@@ -1649,7 +1649,7 @@ impl Publication {
                             kept.insert(
                                 memo,
                                 Arc::new(Memo {
-                                    values: values.to_vec(),
+                                    values: values.as_deref().unwrap_or_default().to_vec(),
                                     body: object(code.body),
                                     annex: object(code.annex),
                                     builtins,

@@ -81,7 +81,10 @@ impl Group {
     pub fn encode(&self) -> Vec<u8> {
         let mut bytes = Self::header(self.members.len());
         for member in &self.members {
-            Self::write_member(&mut bytes, member.body, member.slots.iter().copied());
+            Self::write_member_header(&mut bytes, member.body, member.slots.len());
+            for &slot in &member.slots {
+                slot.encode(&mut bytes);
+            }
         }
         bytes
     }
@@ -92,16 +95,9 @@ impl Group {
         bytes
     }
 
-    fn write_member(
-        bytes: &mut Vec<u8>,
-        body: ContentHash,
-        slots: impl ExactSizeIterator<Item = Binding>,
-    ) {
+    fn write_member_header(bytes: &mut Vec<u8>, body: ContentHash, slots: usize) {
         bytes.extend_from_slice(&body.0);
-        uleb(bytes, slots.len() as u64);
-        for slot in slots {
-            slot.encode(bytes);
-        }
+        uleb(bytes, slots as u64);
     }
 
     /// Read the frame. Admission checks member order against the identities in
@@ -367,11 +363,14 @@ impl GroupPlan {
         for (identity, body, values) in rows {
             if let Ok(node) = self.graph.members.binary_search(identity) {
                 let held = &mut self.graph.nodes[node];
-                if held.body != body || held.values != values {
-                    held.body = body;
-                    held.values = values.to_vec();
-                    pending.insert(self.component[node]);
+                if held.values != values {
+                    held.values.clear();
+                    held.values.extend_from_slice(values);
+                } else if held.body == body {
+                    continue;
                 }
+                held.body = body;
+                pending.insert(self.component[node]);
             }
         }
         while let Some(i) = pending.pop_first() {
@@ -512,20 +511,21 @@ fn hash_group(
     let mut bytes = Group::header(members.len());
     for &member in members.iter() {
         let node = &nodes[member];
-        let slots = node
-            .slots
-            .iter()
-            .map(|slot| match *slot {
+        Group::write_member_header(&mut bytes, node.body, node.slots.len() + node.values.len());
+        for &slot in &node.slots {
+            let binding = match slot {
                 Slot::Instance(child) => match numbers[child] {
                     Some(k) => Binding::Internal(k),
                     None => Binding::External(addresses[child]),
                 },
                 Slot::Builtin(number) => Binding::Builtin(number),
                 Slot::External(address) => Binding::External(address),
-            })
-            .chain(node.values.iter().copied().map(Binding::Value))
-            .collect::<Vec<_>>();
-        Group::write_member(&mut bytes, node.body, slots.into_iter());
+            };
+            binding.encode(&mut bytes);
+        }
+        for &value in &node.values {
+            Binding::Value(value).encode(&mut bytes);
+        }
     }
     let group = Group::hash(&bytes);
     for &member in members.iter() {

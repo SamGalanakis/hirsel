@@ -56,20 +56,6 @@ pub fn bound_static(ty: &FieldTy, value: StaticValue) -> Static {
 }
 
 impl crate::Module {
-    /// The computed constants this module's statics name, in static order and
-    /// without repeats: a body's constant slots ([`Static::Computed`]).
-    pub fn constant_slots(&self) -> Vec<hirsel_core_ids::DefPath> {
-        let mut out: Vec<hirsel_core_ids::DefPath> = Vec::new();
-        for data in &self.statics {
-            if let Static::Computed { constant, .. } = data
-                && !out.contains(constant)
-            {
-                out.push(constant.clone());
-            }
-        }
-        out
-    }
-
     /// Bind every constant slot to its value; the first constant `value` has
     /// none for, if any, is left unbound and returned.
     pub fn bind_constants(

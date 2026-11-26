@@ -28,6 +28,7 @@ const GATES: &[(&str, Gate)] = &[
     ("constant_call_absent", Gate::Fast),
     ("constant_call_equal", Gate::Fast),
     ("constant_call_unrelated", Gate::Fallback),
+    ("constant_call_unrelated_body", Gate::Fast),
     ("constant_cycle", Gate::Fallback),
     ("constant_dfs_order", Gate::Fallback), // 1039: fast; a module of A is refused (v3.1 condition 4)
     ("constant_parts_forward", Gate::Fast),

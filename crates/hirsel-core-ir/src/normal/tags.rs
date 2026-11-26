@@ -615,12 +615,6 @@ tags!(Loan {
     2 => Take,
 });
 
-tags!(Static {
-    0 => Bytes { align, bytes },
-    1 => Aggregate { ty, value },
-    2 => Computed { ty, constant },
-});
-
 tags!(StaticValue {
     0 => Bits(part0),
     1 => Fields { case @ optional_index, fields },

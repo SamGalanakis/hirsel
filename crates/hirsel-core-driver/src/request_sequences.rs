@@ -64,8 +64,7 @@ enum Fault {
 }
 /// The gate decision OPTION-L v3.1 predicts for a sequence's last request after
 /// its priming: l-body-review-1039's settled column, falling back where a module of
-/// the generation before it is refused (v3.1 gate condition 4). Recorded for the
-/// gate's own law; nothing here reads it yet.
+/// the generation before it is refused (v3.1 gate condition 4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Gate {
     Fast,
@@ -799,6 +798,7 @@ pub const X:u8=f()"###)), src("b", "b.hirsel", false, lit(r###"fn use()->u8{a.X}
             pkg("app", &["core"], vec![src("a", "a.hirsel", false, lit(r###"pub fn f()->u8{1u8}
 pub const X:u8=f()"###)), src("b", "b.hirsel", false, lit(r###"fn use()->u8{a.X}
 fn other()->u8{2u8}"###))])])]),
+        constant_call_unrelated_body_sequence(),
         seq("constant_cycle", vec![
         check(vec![
             core(vec![]),
@@ -1887,8 +1887,6 @@ fn layer_sequences() -> Vec<Seq> {
             check(app(&[("a.hirsel", "a", "pub resource type R{x:u8} drop(r){let _=0u8}\npub fn f()->u8{1u8}"), ("b.hirsel", "b", "fn use(take r:a.R){}")]))]),
     ]
 }
-/// Not request sequences here: image_recursion compares an image layer with
-/// sources; resource needs a process allocation limit.
 fn sequences() -> Vec<Seq> {
     let mut seqs = review_sequences();
     seqs.extend(review_1039_sequences());
@@ -1902,6 +1900,7 @@ fn sequences() -> Vec<Seq> {
 const UNEQUAL_ROOTS: &[&str] = &[];
 
 include!("request_sequence_gates.rs");
+include!("request_sequence_comptime.rs");
 
 #[test]
 fn request_sequences_answer_as_an_empty_store() {

@@ -3,7 +3,7 @@
 use super::*;
 
 /// The value of each constant a module's slots name (PROG-10), by path.
-pub(crate) type Bindings = Arc<[(DefPath, hirsel_core_ir::StaticValue)]>;
+pub(crate) type Bindings = Option<Arc<[(DefPath, hirsel_core_ir::StaticValue)]>>;
 
 /// Bind `module`'s constant slots to `values`, which name each one.
 pub(crate) fn bind_values(module: &mut Module, values: &[(DefPath, hirsel_core_ir::StaticValue)]) {
@@ -29,16 +29,12 @@ pub(super) enum MaterializedModule {
 }
 
 impl MaterializedModule {
-    pub(super) fn ir(
-        &self,
-        code: &[u8],
-        values: &[(DefPath, hirsel_core_ir::StaticValue)],
-    ) -> &Module {
+    pub(super) fn ir(&self, code: &[u8], values: &Bindings) -> &Module {
         match self {
             Self::Decoded(module) => module,
             Self::Recipe { sites, decoded } => decoded.get_or_init(|| {
                 let mut module = sites.restore(code);
-                bind_values(&mut module, values);
+                bind_values(&mut module, values.as_deref().unwrap_or_default());
                 module
             }),
         }
@@ -92,25 +88,25 @@ pub(super) fn materialise(
         }
     };
     observe(key, "materialize");
+    let body = built.code.hash();
     // The constants the body names, in slot order, with their values.
-    let bindings: Bindings = built
-        .code
-        .constants
-        .iter()
-        .map(|path| {
+    let constants = built.code.constants;
+    let mut value_hashes = Vec::new();
+    let bindings = if constants.is_empty() {
+        None
+    } else {
+        let mut bindings = Vec::with_capacity(constants.len());
+        value_hashes.reserve_exact(constants.len());
+        for path in constants {
             let value = values
                 .iter()
-                .find(|(p, _)| p == path)
+                .find(|(p, _)| p == &path)
                 .ok_or_else(|| input(format!("constant {path} has no value")))?;
-            Ok((path.clone(), value.1.value.clone()))
-        })
-        .collect::<Result<_, InstanceStop>>()?;
-    let value_hashes: Vec<ContentHash> = built
-        .code
-        .constants
-        .iter()
-        .filter_map(|path| values.iter().find(|(p, _)| p == path).map(|(_, v)| v.hash))
-        .collect();
+            bindings.push((path, value.1.value.clone()));
+            value_hashes.push(value.1.hash);
+        }
+        Some(Arc::from(bindings))
+    };
     let (slots, signatures, adapters) = {
         use hirsel_core_ir::normal::{self, Slot};
         let module = built.module.as_ref().expect("materialized module");
@@ -167,14 +163,13 @@ pub(super) fn materialise(
             .collect::<Vec<_>>();
         (slots, signatures, adapters)
     };
-    let body = built.code.hash();
     let described = built.code.described;
     let unsupported = built
         .module
         .as_ref()
         .and_then(|module| hirsel_core_ir::unsupported_reason(module, built.function));
     if let Some(module) = built.module.as_mut() {
-        bind_values(module, &bindings);
+        bind_values(module, bindings.as_deref().unwrap_or_default());
     }
     Ok(Materialised {
         module: built.module.map(|module| {

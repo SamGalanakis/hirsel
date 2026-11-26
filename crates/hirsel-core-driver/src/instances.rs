@@ -250,7 +250,7 @@ impl InstanceBody {
             Some(MaterializedModule::Recipe { sites, decoded }) => Ok(decoded.get().map_or_else(
                 || {
                     let mut module = sites.restore(&self.code);
-                    bind_values(&mut module, &self.values);
+                    bind_values(&mut module, self.values.as_deref().unwrap_or_default());
                     Cow::Owned(module)
                 },
                 Cow::Borrowed,
@@ -281,7 +281,7 @@ impl InstanceBody {
         match self.module.as_deref() {
             Some(MaterializedModule::Recipe { sites, .. }) => {
                 let mut module = normal::assembly_module(&self.code);
-                bind_values(&mut module, &self.values);
+                bind_values(&mut module, self.values.as_deref().unwrap_or_default());
                 Ok((sites.annex(sources), module))
             }
             _ => Ok(normal::prepare_retained_assembly(self.ir()?, sources)),

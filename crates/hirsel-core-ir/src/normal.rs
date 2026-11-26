@@ -262,6 +262,7 @@ struct ModuleOrder<'m> {
     metadata: bool,
     layouts: Numbers,
     slots: Vec<Slot>,
+    constant_slots: Vec<&'m DefPath>,
     seen_slots: BTreeSet<Slot>,
     described: BTreeSet<Identity>,
     closure_hashes: BTreeMap<TypeId, ContentHash>,
@@ -298,6 +299,7 @@ impl<'m> ModuleOrder<'m> {
             metadata: false,
             layouts: Numbers::default(),
             slots: Vec::new(),
+            constant_slots: Vec::new(),
             seen_slots: BTreeSet::new(),
             described: BTreeSet::new(),
             closure_hashes: BTreeMap::new(),
@@ -371,7 +373,7 @@ impl<'m> ModuleOrder<'m> {
         match kind {
             GlobalRow::Type => module.types[row].write(&mut out),
             GlobalRow::Signature => module.signatures[row].write(&mut out),
-            GlobalRow::Static => module.statics[row].write(&mut out),
+            GlobalRow::Static => out.static_data(&module.statics[row]),
             GlobalRow::Instance => module.instances[row].write(&mut out),
         }
         if !out.module.planning {
@@ -594,14 +596,6 @@ fn encode_with_orders<'m>(
         })
         .collect();
     slots.append(&mut order.slots);
-    let mut constants: Vec<DefPath> = Vec::new();
-    for &row in &order.statics.numbers.order {
-        if let Static::Computed { constant, .. } = &module.statics[row]
-            && !constants.contains(constant)
-        {
-            constants.push(constant.clone());
-        }
-    }
     let mut bytes = BODY_MAGIC.to_vec();
     order.types.append(&mut bytes);
     order.signatures.append(&mut bytes);
@@ -615,7 +609,7 @@ fn encode_with_orders<'m>(
         bytes,
         slots,
         described: order.described.into_iter().collect(),
-        constants,
+        constants: order.constant_slots.into_iter().cloned().collect(),
         original_functions: order.functions.order,
     }
 }
@@ -838,11 +832,11 @@ fn function_annex(
 }
 
 /// Decode a body with canonical IDs and empty source and optimisation fields.
-/// Function 0 is the instance's root. Source positions and hints are read
-/// separately from the annex.
+/// Function 0 is the instance's root. The annex carries positions and hints.
 pub struct DecodedBody {
     pub module: Module,
     pub slots: Vec<Slot>,
+    pub constant_slots: usize,
     closures: Vec<Vec<ContentHash>>,
     abi_closures: Vec<Option<ContentHash>>,
     signatures: Vec<Option<ContentHash>>,
@@ -1014,7 +1008,7 @@ pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
     // The plan is freed here but for its live-function bitmap and builtin
     // slots, whose payers outlive it.
     let meter = PlanMeter::new(budget);
-    let (canonical, live_functions, builtins) = {
+    let (canonical, live_functions, builtins, constant_slots) = {
         let plan = plan_metered(&module, FuncId(0), Some(&meter));
         let canonical = plan.canonical_locals
             && plan.functions.is_canonical(module.functions.len())
@@ -1025,7 +1019,12 @@ pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
                 .is_canonical(module.signatures.len())
             && plan.instances.numbers.is_canonical(module.instances.len())
             && plan.statics.numbers.is_canonical(module.statics.len());
-        (canonical, plan.live_functions, plan.slots)
+        (
+            canonical,
+            plan.live_functions,
+            plan.slots,
+            plan.constant_slots.len(),
+        )
     };
     let (_live, kept_slots) = meter.finish()?;
     if !canonical {
@@ -1052,7 +1051,6 @@ pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
             external_slots.push(Slot::External(FuncId(row as u32)));
         }
     }
-    // External slots come first, then the builtins in first-use order.
     let mut slots = builtins;
     let builtin_count = slots.len();
     kept_slots.reserve(&mut slots, external_slots.len())?;
@@ -1074,6 +1072,7 @@ pub fn decode(bytes: &[u8], budget: &Debit<'_>) -> DecodeResult<DecodedBody> {
     Ok(DecodedBody {
         module,
         slots,
+        constant_slots,
         closures,
         abi_closures: Vec::new(),
         signatures: Vec::new(),
@@ -1087,7 +1086,8 @@ fn decode_payload(
     let mut input = Read::new(bytes, BODY_MAGIC, budget)?;
     let types = Wire::read(&mut input)?;
     let signatures = Wire::read(&mut input)?;
-    let statics = Wire::read(&mut input)?;
+    let static_count = input.count()?;
+    let statics = input.read_vec(static_count, Read::static_data)?;
     let instances = Wire::read(&mut input)?;
     let len = input.count()?;
     let functions = input.read_vec(len, read_function)?;

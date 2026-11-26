@@ -42,8 +42,8 @@ pub fn reader_bytes() -> u64 {
 }
 
 fn wire_outcome_reserve(c: WireConfig) -> u64 {
-    // The largest fixed encoded Done is a 12-byte stream/position prefix and a 24-byte outcome.
-    (1u64 + c.q) * (DONE_MAX + 48u64)
+    // The largest fixed encoded Done has a stream/position prefix and a 24-byte outcome.
+    (1u64 + c.q) * (DONE_MAX + DONE_POSITION_BYTES + 24u64)
 }
 
 fn wire_service_job_bytes(c: WireConfig) -> u64 {
@@ -65,9 +65,9 @@ fn wire_variable_peak(c: WireConfig) -> u64 {
     input + transport + retained + wire_service_job_bytes(c) + 32768u64
 }
 
-pub const DONE_MAX: u64 = 8192
+pub const DONE_MAX: u64 = store.CLAIM_DONE_MAX
 
-const MAX_RETURNED_BYTES: u64 = DONE_MAX - 32u64
+const MAX_RETURNED_BYTES: u64 = DONE_MAX - DONE_POSITION_BYTES - RETURNED_OUTCOME_PREFIX_BYTES
 
 // WIRE W3b. The service owns admission, dedup and outcomes.
 // Each owner holds the one publisher sender. Another transport calls the same dispatch.

@@ -73,6 +73,7 @@ type RoomPeer: send {
 type RoomRoster {
     key: RoomKey,
     peers: List[Option[RoomPeer]],
+    selected: List[Option[u32]],
     incarnation: Inline[u8, 16],
     revision: u64,
     next_peer: u64,
@@ -128,7 +129,7 @@ fn find_room(rooms: List[RoomRoster], sought: RoomKey) -> Option[u64] {
 
 fn room_roster_bytes(args: u64, peers: u64) -> u64 {
     // list growth may hold both old and new roster slots while it moves them.
-    3u64 * bytes[RoomRoster] + option.unwrap(charge.seq(bytes[Option[RoomPeer]], peers)) + option.unwrap(charge.seq(bytes[u8], args))
+    3u64 * bytes[RoomRoster] + option.unwrap(charge.seq(bytes[Option[RoomPeer]], peers)) + option.unwrap(charge.seq(bytes[Option[u32]], peers)) + option.unwrap(charge.seq(bytes[u8], args))
 }
 
 fn draw_room_incarnation(random: Random) -> Inline[u8, 16] {
@@ -150,9 +151,11 @@ fn make_room_roster(mut relay: RoomRelay, take key: RoomKey, peers: u64) -> Opti
     for _ in 0u64 .. peers {
         list.push(mut members, None)
     }
+    let mut selected: List[Option[u32]] = list.with_capacity(peers)
+    list.fill(mut selected, peers, None)
     let index = list.len(relay.rooms)
     let incarnation = draw_room_incarnation(relay.random)
-    list.push(mut relay.rooms, RoomRoster(key: take key, peers: take members, incarnation, revision: 1u64, next_peer: 1u64, count: 0u64, watching: 0u64))
+    list.push(mut relay.rooms, RoomRoster(key: take key, peers: take members, selected: take selected, incarnation, revision: 1u64, next_peer: 1u64, count: 0u64, watching: 0u64))
     relay.used_room_bytes += charge
     Some(index)
 }
@@ -456,7 +459,7 @@ fn relay_message_target(relay: RoomRelay, rounds: Latest[RoundAt], from: RoomPee
     Some(recv_seat.member.admission)
 }
 
-fn room_deliver_message(mut relay: RoomRelay, rounds: Latest[RoundAt], from: RoomPeer, to: RoomPeer, from_peer: u32, from_slot: u16, block: RoomMsgBlock) {
+fn room_deliver_message(mut relay: RoomRelay, rounds: Latest[RoundAt], from: RoomPeer, to: RoomPeer, from_peer: u32, from_slot: u32, block: RoomMsgBlock) {
     let Some(adm) = relay_message_target(relay, rounds, from, to, block) else {
         return
     }
@@ -481,7 +484,7 @@ fn room_relay_message(mut relay: RoomRelay, rounds: Latest[RoundAt], id: RoomSes
         return
     }
     let from = RoomPeer(session: id, seat: sender)
-    let from_slot: u16 = int.narrow(peer_index)
+    let from_slot: u32 = int.narrow(peer_index)
     for i in 0u64 .. list.len(relay.rooms[room_index].peers) {
         if let Some(to) = relay.rooms[room_index].peers[i] {
             room_deliver_message(mut relay, rounds, from, to, from_peer, from_slot, block)

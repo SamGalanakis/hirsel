@@ -534,13 +534,78 @@ pub fn law_history_below_latest(tasks: Tasks, clock: Clock, random: Random) -> b
 
 pub fn law_reply_over_done_max(tasks: Tasks, clock: Clock, random: Random) -> bool waits {
     let mut rig = w3c_rig(tasks, clock, random)
-    let large = w3c_send(mut rig, 1u32, 0u64, 1u32, w3c_arg(8165u32))
-    let mut ok = w3c_answer(large, 4u64, w3c_stream(rig, 1u32), 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8160u64))))
-    let big = w3c_send(mut rig, 2u32, 0u64, 2u32, w3c_arg(8169u32))
-    ok = w3c_answer(big, 4u64, w3c_stream(rig, 2u32), 0u64, Failed(OutOfBytes(Room(requested: 8173u64, available: 8160u64)))) && ok
+    let over = Failed(OutOfBytes(Room(requested: 8161u64, available: 8160u64)))
+    let large = w3c_send(mut rig, 1u32, 0u64, 1u32, w3c_arg(8153u32))
+    let mut ok = w3c_answer(large, 4u64, w3c_stream(rig, 1u32), 0u64, over)
+    let big = w3c_send(mut rig, 2u32, 0u64, 2u32, w3c_arg(8157u32))
+    ok = w3c_answer(big, 4u64, w3c_stream(rig, 2u32), 0u64, over) && ok
     ok = store.version(store.snapshot(rig.head.db)) == 4u64 && result.unwrap(store.get(result.unwrap(store.reader(rig.head.db, 0u64)), store.snapshot(rig.head.db), rig.head.h.data, 0u64)) == None && ok
     w3c_close(take rig)
     ok
+}
+
+@test
+fn reply_at_done_max_survives_claim_reopen(d: Dir, tasks: Tasks, clock: Clock, random: Random) -> Result[(), u64] waits {
+    let mut label = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(d, mut label))
+    let mut sizes = store.derived_sizes()
+    sizes.group_bytes = Some(65536u64)
+    sizes.pack_bytes = Some(65536u64)
+    // Claim admission reserves the worst-case terminal update's keyed pages.
+    sizes.resident_limit = Some(25165824u64)
+    let mut options = result.unwrap(store.sized_with(Directory, 67108864u64, sizes))
+    let mut rig = w3c_rig(tasks, clock, random)
+    // A 4-byte Result tag, 4-byte Bytes count, and 8152 bytes fill the reply.
+    let args = w3c_arg(8152u32)
+    let mut value = b"\x00\x00\x00\x00\xd8\x1f\x00\x00"
+    for _ in 0u64 .. 8152u64 {
+        list.push(mut value, 3u8)
+    }
+    let expected = Returned(take value)
+    let stream = w3c_stream(rig, 1u32)
+    let sent = w3c_send(mut rig, 1u32, 0u64, 1u32, clone(args))
+    let version = store.version(store.snapshot(rig.head.db))
+    if !w3c_answer(sent, version, stream, 0u64, expected) {
+        return Error(2u64)
+    }
+    let Batch(_, _, _, done) = sent else {
+        return Error(2u64)
+    }
+    let outcomes: std.codec.Codec[Outcome] = std.codec.of()
+    let mut reply: Bytes = list.new()
+    std.codec.encode(outcomes, done[0u64].outcome, mut reply) ?=> |_| 3u64
+    w3c_close(take rig)
+    let mut db = store.open(tasks, dir, clock, random, options) ?=> |_| 1u64
+    let claim = store.ClaimKey(op: b"pay", caller: store.Caller(issuer: 2u8, subject: b"alice"), key: b"max-reply")
+    let digest = store.request_digest(b"charge", args)
+    let Accepted(take completion) = store.admit_claim(mut db, claim, digest, args, Some(recovery_law_policy())) ?=> |_| 4u64 else {
+        return Error(4u64)
+    }
+    let _ = store.conclude_claim(mut db, take completion, reply) ?=> |_| 5u64
+    store.close(take db) ?=> |_| 8u64
+    options.create = false
+    let mut reopened = store.open(tasks, dir, clock, random, options) ?=> |_| 6u64
+    let Duplicate(saved) = store.admit_claim(mut reopened, claim, digest, args, None) ?=> |_| 7u64 else {
+        return Error(7u64)
+    }
+    store.close(take reopened) ?=> |_| 8u64
+    let outcome = std.codec.decode(outcomes, saved) ?=> |_| 9u64
+    let mut rows: List[Done] = list.with_capacity(1u64)
+    list.push(mut rows, Done(stream, p: 0u64, outcome: take outcome))
+    let socket = std.wsock.defaults()
+    let outbound = std.wsock.outbound(Server, socket, None) ?=> |_| 10u64
+    let encoded_frame = wire_encode(outbound, Batch(version, list.new(), list.new(), take rows)) ?=> |_| 11u64
+    let mut decoder = std.websocket.decoder(Client, socket.max_frame)
+    let mut cursor = 0u64
+    let Message(payload) = std.websocket.next(mut decoder, encoded_frame, mut cursor) else {
+        return Error(12u64)
+    }
+    let frames: std.codec.Codec[Frame] = std.codec.of()
+    let received = std.codec.decode(frames, payload) ?=> |_| 13u64
+    if !w3c_answer(received, version, stream, 0u64, expected) {
+        return Error(14u64)
+    }
+    Ok(())
 }
 
 @test

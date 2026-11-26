@@ -520,6 +520,47 @@ fn room_law_part(mut relay: RoomRelay, rounds: Latest[RoundAt], mut watcher: Roo
     list.pop(mut only)
 }
 
+@test
+fn room_admits_300_funded_peers(random: Random, tasks: Tasks) -> Result[(), u64] waits {
+    let peers = 300u32
+    let sessions: u64 = int.widen(peers)
+    let bounds = RoomBounds(peers, state: STATE_MAX, message: MESSAGE_MAX)
+    let mut reg: Registry[(), ()] = registry()
+    room(mut reg, code.describe(room_law_admit), slots(), std.codec.of_bytes(), std.codec.of_bytes(), bounds, 4096u64, ROOM_ARGS_MAX, DEFAULT_STEPS) ?=> |_| 1u64
+    let mut config = wire_defaults(262144u64)
+    config.n_relay = 1u64
+    let short = plan_rooms(reg, config)
+    let (pub_to, pub_from): (Sender[PubIn], Receiver[PubIn]) = channel.new(1u64)
+    let _ = take pub_from
+    if let Error(Exceeds(Bound(name, ..))) = start_room_relay(short, config, sessions, pub_to, tasks, random) {
+        if name != "n_relay" {
+            return Error(2u64)
+        }
+    } else {
+        return Error(2u64)
+    }
+    // Step the relay with the roster bytes funded by the Place's room plan.
+    let mut relay = room_relay_state(random, short.roster, sessions)
+    let rounds = latest.new(arc.new(std.http.ReleaseRound(at: 0u64)))
+    let (relay_to, relay_in): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS)
+    let (to_owner, _inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(sessions)
+    let mut members: List[RoomOwner] = list.with_capacity(sessions)
+    for i in 1u64 .. sessions + 1u64 {
+        let id = RoomSession(low: i, high: 0u64)
+        let mut owner = room_law_seed_desk(mut relay, rounds, id, relay_to, relay_in, to_owner, (peers, short.live_limit, Join))
+        if i == sessions {
+            let Some(part) = room_law_part(mut relay, rounds, mut owner, None) else {
+                return Error(3u64)
+            }
+            if !part.complete || part.you != Some(peers) {
+                return Error(4u64)
+            }
+        }
+        list.push(mut members, take owner)
+    }
+    Ok(())
+}
+
 fn room_law_disconnect(mut relay: RoomRelay, rounds: Latest[RoundAt], inbox: Receiver[RoomRelayIn], mut owner: RoomOwner) {
     room_owner_time_to_leave(mut owner)
     while let Ok(take event) = channel.try_receive(inbox) {
@@ -855,12 +896,13 @@ fn room_decode_capacity_reports_loss(c: Clock, random: Random, tasks: Tasks, net
 }
 
 // MEM-20: Desk, Seats and MsgBlocks keep the owner's record when they move to
-// the relay. So the owner's reservation at the place maxima must hold eight
-// subs of the largest room, the Desk, the MsgBlocks and one largest decode.
+// the relay. The owner's reservation must hold eight subs of the funded
+// 300-peer room, the Desk, the MsgBlocks and one maximum-size decode.
 // The law's own isolate adds one 32-byte cause cell (MEM-24).
 @test
 fn room_session_charge_covers_maximum_session() -> Result[(), u64] {
-    let membership_bytes = room_membership_charge(RoomBounds(peers: PEERS_MAX, state: STATE_MAX, message: MESSAGE_MAX), ROOM_ARGS_MAX)
+    let bounds = RoomBounds(peers: 300u32, state: STATE_MAX, message: MESSAGE_MAX)
+    let membership_bytes = room_membership_charge(bounds, ROOM_ARGS_MAX)
     let reserve = room_session_charge(membership_bytes, int.widen(MESSAGE_MAX), int.widen(MESSAGE_MAX), int.widen(LIVE_MAX))
     let (relay_to, relay_in): (Sender[RoomRelayIn], Receiver[RoomRelayIn]) = channel.new(ROOM_RELAY_TOKENS)
     let (to_owner, _events): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1u64)
@@ -882,7 +924,7 @@ fn room_session_charge_covers_maximum_session() -> Result[(), u64] {
                     decode_room_value(state_format, raw)
                 }, message: fn(raw: Bytes) -> RoomCodecCheck {
                     decode_room_value(message_format, raw)
-                }), bounds: RoomBounds(peers: PEERS_MAX, state: STATE_MAX, message: MESSAGE_MAX))
+                }), bounds)
                 result.unwrap(room_owner_join(mut owner, sub, 1u64, take req, store.Caller(issuer: 2u8, subject: take subject)))
             }
             let format: std.codec.Codec[Bytes] = std.codec.of()

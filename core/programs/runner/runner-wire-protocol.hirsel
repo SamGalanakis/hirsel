@@ -24,12 +24,15 @@ pub type Part: codec + send {
     full: bool,
 }
 
-// std codec: a u32 tag, u32 lengths and integers at their width. A Done is
-// stream 16 and p 8, then the Outcome's tag 4 and payload. Every variant is
-// named, so a new one cannot fall into another's size.
+// The codec writes StreamId.t, StreamId.n and p as three u64s. A Returned
+// outcome starts with a u32 tag and a u32 byte count.
+const DONE_POSITION_BYTES: u64 = 3u64 * bytes[u64]
+
+const RETURNED_OUTCOME_PREFIX_BYTES: u64 = 2u64 * bytes[u32]
+
 fn wire_done_size(o: Outcome) -> u64 {
-    24u64 + match o {
-        Returned(b) => 8u64 + list.len(b),
+    DONE_POSITION_BYTES + match o {
+        Returned(b) => RETURNED_OUTCOME_PREFIX_BYTES + list.len(b),
         Failed(OutOfBytes(_)) => 24u64,
         Failed(OutOfTime(_)) => 16u64,
         Failed(Raised(_)) => 12u64,
@@ -99,7 +102,7 @@ fn wire_output_size(f: Frame) -> u64 {
         Placed(Gone) => 8u64,
         Batch(_, complete, groups, done) => 24u64 + 4u64 * list.len(complete) + wire_groups_size(groups) + wire_done_bytes(done),
         Reset(_, done) => 16u64 + wire_done_bytes(done),
-        Ended(_, o) => 8u64 + wire_done_size(o) - 24u64,
+        Ended(_, o) => 8u64 + wire_done_size(o) - DONE_POSITION_BYTES,
         Set(_, state) => 12u64 + wire_optional_bytes(state),
         Send(_, destination, message) => 16u64 + (if let Some(_) = destination {
             4u64

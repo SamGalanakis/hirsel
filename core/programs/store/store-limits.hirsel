@@ -28,7 +28,7 @@ const LIMIT_VALUE_FLOOR: u64 = 4096
 
 const LIMIT_META_FLOOR: u64 = 4096
 
-const LIMIT_FRAME_ROOM: u64 = 65616
+const LIMIT_FRAME_ROOM: u64 = FRAME_LIMIT - VALUE_LIMIT
 
 fn limits_valid(l: StoreLimits) -> Option[String] {
     if l.value < LIMIT_VALUE_FLOOR || l.value > VALUE_LIMIT {

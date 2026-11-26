@@ -6,8 +6,6 @@ pub type RoomBounds: send {
     message: u32,
 }
 
-pub const PEERS_MAX: u32 = 256u32
-
 pub const STATE_MAX: u32 = 8192u32
 
 pub const MESSAGE_MAX: u32 = 32768u32
@@ -66,7 +64,7 @@ fn room_hooks() -> RoomHooks {
 }
 
 pub fn room[G: send, H: shareable + inert + send, A: codec, S: codec, M: codec](mut r: Registry[G, H], admit: StaticFn[fn(store.Tx, H, Caller, take A) -> Result[Answer[Grant], Capacity]], take declarations: Slots[H], state: std.codec.Codec[S], message: std.codec.Codec[M], bounds: RoomBounds, n: u64, arg_limit: u64, steps: u64) -> Result[(), RegisterError] {
-    if bounds.peers == 0u32 || bounds.peers > PEERS_MAX || bounds.state > STATE_MAX || bounds.message > MESSAGE_MAX || arg_limit > ROOM_ARGS_MAX || room_live_minimum(bounds.state, bounds.message) > int.widen(LIVE_MAX) {
+    if bounds.peers == 0u32 || bounds.state > STATE_MAX || bounds.message > MESSAGE_MAX || arg_limit > ROOM_ARGS_MAX || room_live_minimum(bounds.state, bounds.message) > int.widen(LIVE_MAX) {
         return Error(RoomBounds)
     }
     let state_schema = std.codec.schema(state) ?=> |_| Bounds

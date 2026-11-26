@@ -317,10 +317,10 @@ def history_below_latest():
 def reply_over_done_max():
     s, _ = welcomed(('large', 'big', 'read'))
     with s:
-        s.sendall(frame(2, call(1, 0, 0, u32(8165))))
-        done(s, (1, 0, ('out_of_bytes', 8173, 8172)), 4)
-        s.sendall(frame(2, call(2, 0, 1, u32(8169))))
-        done(s, (2, 0, ('out_of_bytes', 8173, 8172)), 4)
+        s.sendall(frame(2, call(1, 0, 0, u32(8153))))
+        done(s, (1, 0, ('out_of_bytes', 8161, 8160)), 4)
+        s.sendall(frame(2, call(2, 0, 1, u32(8157))))
+        done(s, (2, 0, ('out_of_bytes', 8161, 8160)), 4)
         s.sendall(frame(2, u32(2) + u32(1) + u32(2) + blob(u32(0)) + u32(0)))
         assert receive(s) == ('batch', 4, [1], [(1, b'', [])], [])
 

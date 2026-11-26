@@ -68,11 +68,11 @@ const KEY_LIMIT: u64 = 4096
 // store puts before it (§1.3).
 pub const ROW_KEY_LIMIT: u64 = KEY_LIMIT - 4
 
-// A small Place's limits (§11.1 AP4a): a value as large as std.wsock's
-// default message (256 KiB), a frame of that value with today's 65,616-byte
-// gap to the frame, and 64 KiB of MANIFEST metadata.
+// A small Place holds a default WebSocket message as a value, with the
+// format's frame allowance and 64 KiB of MANIFEST metadata (§11.1 AP4a).
 pub fn small_place_limits() -> StoreLimits {
-    StoreLimits(frame: 327760, value: 262144, meta: 65536)
+    let value = std.wsock.defaults().max_frame
+    StoreLimits(frame: value + LIMIT_FRAME_ROOM, value, meta: 65536)
 }
 
 // One cut step holds a full key and a full value of the store.

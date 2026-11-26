@@ -201,6 +201,9 @@ limit = 134217728
 [tests.runs."runner@1/runner/first_admission_installs_adm"]
 limit = 1342177280
 
+[tests.runs."runner@1/runner/room_admits_300_funded_peers"]
+limit = 268435456
+
 [tests.runs."runner@1/runner/waiter_set_not_installed_after_promotion"]
 limit = 1342177280
 

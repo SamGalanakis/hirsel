@@ -107,34 +107,6 @@ fn room_live_full(mut buffer: RoomLiveBuffer, part: RoomPartIdentity) {
     })
 }
 
-// One fixed selection per room. Reserve the head message and its sender's
-// diff before taking other diffs. The caller looks for the oldest deliverable
-// ring entry before beginning this selection.
-type RoomPartSlots {
-    included: Inline[bool, 256],
-    available: u64,
-    next: u64,
-    blocked_state: bool,
-}
-
-fn room_part_slots(capacity: u64, head_message: u64, sender_slot: Option[u64], sender_diff: u64, cursor: u64) -> Option[RoomPartSlots] {
-    let available = int.checked_sub(capacity, head_message + sender_diff)?
-    let mut included: Inline[bool, 256] =[false; 256]
-    if let Some(sender) = sender_slot {
-        included[sender] = true
-    }
-    Some(RoomPartSlots(included, available, next: cursor, blocked_state: false))
-}
-
-fn room_part_add_slot(mut plan: RoomPartSlots, position: u64, cost: u64) -> bool {
-    if plan.included[position] || cost > plan.available {
-        return false
-    }
-    plan.available -= cost
-    plan.included[position] = true
-    true
-}
-
 fn room_live_frame(mut buffer: RoomLiveBuffer) {
     let size = list.len(buffer.data)
     let header = if size <= 125u64 {

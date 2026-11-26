@@ -226,14 +226,15 @@ fn history_check_conditions(mut client: std.object.Client, key: String, mut raw:
     }
 }
 
-fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64, limits: StoreLimits) -> Result[HistoryRegister, Error] waits {
+fn history_publish_genesis(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, mut buffers: HistoryBuffers, deadline: u64, limits: StoreLimits, take attach: Option[Attach]) -> Result[HistoryRegister, Error] waits {
     let manifest = history_manifest_packet(mut buffers.packet, id, kind, limits)?
     history_create(mut client, history_key("m-", manifest), mut buffers.packet, mut buffers.compare, deadline)?
     let locator = HistoryLocateRoot(depth: 0, rows: list.new())
-    history_publish_base(mut client, id, holder, kind, authority, manifest, locator, mut buffers, deadline)
+    history_publish_base(mut client, id, holder, kind, authority, manifest, locator, mut buffers, deadline, take attach)
 }
 
-fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, manifest: HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64) -> Result[HistoryRegister, Error] waits {
+// With `attach` the head is a streamed genesis's (§12.11.5): no step 5a probe.
+fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: StoreId, kind: u8, authority: Bytes, manifest: HistoryRef, locator: HistoryLocateRoot, mut buffers: HistoryBuffers, deadline: u64, take attach: Option[Attach]) -> Result[HistoryRegister, Error] waits {
     let bytes_wanted = 189 + 32 * list.len(locator.rows)
     list.clear(mut buffers.packet)
     list.clear(mut buffers.compare)
@@ -242,11 +243,13 @@ fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: Stor
     let base = history_genesis_packet(mut buffers.packet, id, kind, manifest, locator)?
     let base_key = history_key("e-", base)
     history_create(mut client, base_key, mut buffers.packet, mut buffers.compare, deadline)?
-    history_check_conditions(mut client, base_key, mut buffers.packet, deadline)?
+    if let None = attach {
+        history_check_conditions(mut client, base_key, mut buffers.packet, deadline)?
+    }
     let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
-    history_encode_head(mut buffers.body, head, authority)?
+    history_encode_register_head(mut buffers.body, head, authority, attach)?
     match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {
-        HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None, attach: None)),
+        HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None, attach: take attach)),
         HistoryConflict(_) => Error(Exists("head")),
         HistoryRefused(take problem) => Error(Remote(take problem)),
         HistoryUndecided => Error(Undecided),

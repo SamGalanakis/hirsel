@@ -325,16 +325,16 @@ fn l62_snapshot_span_reads(db: Db, rows_handle: Table[u64, u32]) -> Result[(), E
     l62_check_span_row(whole[2u64], rows_handle, 5, 50)?
     let neighbor = catalog_handle(s.store, s.roots.catalog, "memory", std.codec.key_u64(), std.codec.of_u32())?
     l62_check_span_row(whole[3u64], neighbor, 7, 70)?
-    let mut streamed = open_span_changes(read_handle, s, lo, hi)?
+    let mut span_reader = open_span_changes(read_handle, s, lo, hi)?
     for row in whole {
-        let Some(found) = next_span_change(read_handle, mut streamed)? else {
+        let Some(found) = next_span_change(read_handle, mut span_reader)? else {
             fail("L62: a resumed span skipped a row")
         }
         if found.tree_key != row.tree_key || found.value != row.value {
             fail("L62: a resumed span changed the key or value")
         }
     }
-    if let Some(_) = next_span_change(read_handle, mut streamed)? {
+    if let Some(_) = next_span_change(read_handle, mut span_reader)? {
         fail("L62: the span must exhaust after the last visible row")
     }
     Ok(())

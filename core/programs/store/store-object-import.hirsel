@@ -1,11 +1,15 @@
 /// Publishes a validated export as the first checkpoint of a new object store.
 pub fn import_authority(take authority: Authority, take source: Preparation, r: Random, options: Options) -> Result[StoreId, Error] waits {
-    let ObjectAuthority(take settings) = take authority else { return Error(Unsupported(0)) }
+    let ObjectAuthority(take settings) = take authority else {
+        return Error(Unsupported(0))
+    }
     object_open_checks(options)?
     if !options.create || (options.activation != None && options.activation != Some(0u64)) {
         return Error(NotFound)
     }
-    if let Some(_) = options.expect { return Error(NotFound) }
+    if let Some(_) = options.expect {
+        return Error(NotFound)
+    }
     let ObjectAuthorityConfig(client: take connected, level_name: take level_name, op_ms, ..) = take settings
     let mut client = take connected
     let metadata = history_config_bytes(object_history_config(std.object.bucket_config(client), take level_name))?
@@ -25,7 +29,7 @@ pub fn import_authority(take authority: Authority, take source: Preparation, r: 
     draft.store = id
     draft.fence = 1
     let (manifest, take locator) = history_import_base(mut client, draft, options, mut workspace, deadline)?
-    match history_publish_base(mut client, id, holder, 1, metadata, manifest, locator, mut workspace, deadline) {
+    match history_publish_base(mut client, id, holder, 1, metadata, manifest, locator, mut workspace, deadline, None) {
         Ok(_) => Ok(id),
         Error(Exists(existing)) if existing == "head" => Error(Lost),
         Error(take problem) => Error(take problem),

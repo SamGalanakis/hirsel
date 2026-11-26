@@ -489,7 +489,7 @@ fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, H
     let mut a_buffers = history_buffers(1024)?
     let mut b_buffers = history_buffers(1024)?
     let due = std.object.deadline_after_ms(first, BUCKET_LAW_OP_MS)
-    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buffers, due, default_limits())?
+    let mut a = history_publish_genesis(mut first, StoreId(hi: 9, lo: 10), StoreId(hi: 11, lo: 12), 1, metadata, mut a_buffers, due, default_limits(), None)?
     history_claim_packet(mut a_buffers.packet, a.head)?
     let HistoryApplied(_) = history_register_advance(mut first, mut a, metadata, mut a_buffers, due)? else {
         fail("genesis CLAIM did not advance")
@@ -788,7 +788,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
     let mut successor = history_buffers(1024)?
     let id = StoreId(hi: 9, lo: 10)
     let holder = StoreId(hi: 13, lo: 14)
-    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), 1, metadata, mut first, deadline, default_limits())?
+    let previous = history_publish_genesis(mut old, id, StoreId(hi: 11, lo: 12), 1, metadata, mut first, deadline, default_limits(), None)?
     let unchanged = history_probe_head(mut old, previous.tag, mut first.witness, deadline)?
     if let Some(_) = unchanged {
         fail("unchanged conditional head probe returned a body")

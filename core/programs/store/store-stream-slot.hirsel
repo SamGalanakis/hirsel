@@ -1,0 +1,371 @@
+// The Bucket host stream's plan, its refusals, the service handle and a
+// Place's slot (STORE-SPEC §12.11.1, §12.11.12). Package-private until the
+// claim and the terminal fence land.
+type Batching: cross {
+    max_wait_ms: u64,
+    max_batch_bytes: u64
+}
+
+type StreamLimits: cross {
+    max_frames: u32,
+    max_slots: u32,
+    max_pins: u32,
+    hold_ms: u64,
+    idle_poll_ms: u64,
+    prescan_batches: u64,
+    index_every: u64,
+    pin_ttl_s: u64,
+    recover_parallel: u32,
+    slot_bytes: u64
+}
+
+fn stream_limits() -> StreamLimits {
+    StreamLimits(max_frames: 4096, max_slots: 512, max_pins: 4096, hold_ms: 2000, idle_poll_ms: 1000, prescan_batches: 4096, index_every: 512, pin_ttl_s: 86400, recover_parallel: 16, slot_bytes: 65536)
+}
+
+type StreamPlan: cross {
+    sid: HostStreamId,
+    prefix: String,
+    batching: Batching,
+    limits: StreamLimits
+}
+
+// What a Place sends on its slot: its attachment with the connection the
+// service answers on, then each frame as its first chunk and the rest.
+type SlotMsg: cross = SlotAttach(u64, u64, u64, Client[SlotAck]) | SlotFrame(u64, u64, Bytes) | SlotMore(Bytes)
+
+// The service's answers: the grant (inc, next_seq batch seq), the last ticket
+// sequence decided acked, or the incarnation's latch.
+type SlotAck: cross = SlotGranted(u64, u64) | SlotAcked(u64) | SlotLatched(StreamLatch)
+
+// The doorbell item that wakes the service for its control channel.
+const STREAM_CONTROL_RING: u32 = 0xFFFFFFFF
+
+// Items one slot's data connection queues; its bytes are `slot_bytes`.
+const STREAM_SLOT_ITEMS: u64 = 64
+
+type ServiceControl: send = NewSlot(Sender[Result[(Client[SlotMsg], u32), Error]]) | StopService
+
+// One Place's data connection client, the doorbell, and the stream it names
+// (§12.11.12). `root` is the stream root as a key prefix in the bucket.
+type JournalSlot: cross {
+    data: Client[SlotMsg],
+    bell: Client[u32],
+    slot: u32,
+    sid: HostStreamId,
+    endpoint: String,
+    aws_region: String,
+    bucket: String,
+    root: String,
+    slot_bytes: u64
+}
+
+type JournalService {
+    task: Task[StreamServiceEnd],
+    control: Sender[ServiceControl],
+    bell: Client[u32],
+    workers: Option[std.object.Workers],
+    sid: HostStreamId,
+    endpoint: String,
+    aws_region: String,
+    bucket: String,
+    root: String,
+    slot_bytes: u64
+}
+
+// The bytes the service task runs in: the batch buffer, the batch's slice
+// octets and the 412 compare (each `max_batch_bytes`), its register
+// buffers, the doorbell, and per slot its room and ack item (§12.11.12).
+fn stream_service_bytes(plan: StreamPlan) -> u64 {
+    let batch = plan.batching.max_batch_bytes + BINDING_BYTES + 64
+    let reg = REG_LIMIT + 88 + BINDING_BYTES + 64
+    let slots: u64 = int.widen(plan.limits.max_slots)
+    let per_slot = 64 + plan.limits.slot_bytes + 64 + 128
+    int.saturating_add(3 * order.max(batch, reg) + 64 + 4 * slots + STREAM_SERVICE_FIXED, int.saturating_mul(slots, per_slot))
+}
+
+const STREAM_SERVICE_FIXED: u64 = 262144
+
+fn stream_plan_check(plan: StreamPlan, op_ms: u64) -> Result[(), Error] {
+    if string.byte_len(plan.prefix) > 1024 {
+        return Error(Limit(Name))
+    }
+    let limits = plan.limits
+    let batch = plan.batching.max_batch_bytes
+    if batch < FRAME_LIMIT + 4096 || batch > 4294967296 {
+        return Error(Stream(Bound(MaxBatchBytes)))
+    }
+    let slots: u64 = int.widen(limits.max_slots)
+    if slots == 0 || slots > STREAM_MAX_SLOTS {
+        return Error(Stream(Bound(MaxSlots)))
+    }
+    if limits.hold_ms < int.saturating_mul(4, op_ms) {
+        return Error(Stream(Bound(HoldMs)))
+    }
+    if limits.idle_poll_ms == 0 || limits.idle_poll_ms > limits.hold_ms {
+        return Error(Stream(Bound(IdlePollMs)))
+    }
+    if limits.index_every == 0 {
+        return Error(Stream(Bound(IndexEvery)))
+    }
+    if limits.recover_parallel == 0 {
+        return Error(Stream(Bound(RecoverParallel)))
+    }
+    if limits.slot_bytes < 4096 {
+        return Error(Stream(Bound(SlotBytes)))
+    }
+    if limits.max_pins < 2 {
+        return Error(Stream(Bound(MaxPins)))
+    }
+    Ok(())
+}
+
+// The stream root as a key prefix: the plan's prefix with one `/` after it.
+fn stream_root_dir(plan_prefix: String) -> String {
+    let mut dir = string.with_capacity(string.byte_len(plan_prefix) + 1)
+    string.push(mut dir, plan_prefix)
+    if string.byte_len(plan_prefix) != 0 && !string.ends_with(plan_prefix, "/") {
+        string.push_char(mut dir, '/')
+    }
+    take dir
+}
+
+// Keys under one prefix are listed by the other when either is a prefix of
+// the other, so the Place's genesis LIST and the stream's keys would meet.
+fn stream_overlaps(place: String, root: String) -> bool {
+    string.starts_with(place, root) || string.starts_with(root, place)
+}
+
+fn stream_authority_parts(a: Authority) -> Result[(u8, u64, bool), Error] {
+    match a {
+        ObjectAuthority(config) => Ok((1u8, config.op_ms, false)),
+        SimAuthority(config) => match config.sim {
+            Some((names, _)) if list.len(names) != 0 => Ok((2u8, config.op_ms, true)),
+            _ => Ok((2u8, config.op_ms, false)),
+        },
+        LogAuthority(_) => Error(Unsupported(0)),
+    }
+}
+
+// Starts the host stream's service (§12.11.1): every refusal is decided
+// before any request; then the task creates the stream and elects
+// incarnation 1 (§12.11.7) before this returns.
+fn journal_service(tasks: Tasks, take a: Authority, plan: StreamPlan, budget: u64, c: Clock, r: Random) -> Result[JournalService, Refusal] waits {
+    let checked: Result[(u8, u64), Error] = match stream_authority_parts(a) {
+        Ok((_, _, true)) => Error(Stream(WeakLevels)),
+        Ok((kind, op_ms, false)) => match stream_plan_check(plan, op_ms) {
+            Ok(()) => Ok((kind, op_ms)),
+            Error(take e) => Error(take e),
+        },
+        Error(take e) => Error(take e),
+    }
+    let (kind, op_ms) = match take checked {
+        Ok(parts) => parts,
+        Error(take e) => return Error(Refusal(error: take e, authority: take a)),
+    }
+    let wanted = stream_service_bytes(plan)
+    if budget < wanted {
+        return Error(Refusal(error: Full(Allocation(Capacity(requested: wanted, available: budget))), authority: take a))
+    }
+    let holder = match capacity(disk_identity(r)) {
+        Ok(id) => id,
+        Error(take e) => return Error(Refusal(error: take e, authority: take a)),
+    }
+    let config = match take a {
+        ObjectAuthority(take config) => take config,
+        SimAuthority(take config) => take config,
+        LogAuthority(_) => fail("journal_service: a log authority passed the check"),
+    }
+    let ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms: _, sim: take sim, stream: take stream) = take config
+    let home = std.object.bucket_config(client)
+    let mut root = string.with_capacity(string.byte_len(home.prefix) + string.byte_len(plan.prefix) + 1)
+    string.push(mut root, home.prefix)
+    string.push(mut root, stream_root_dir(plan.prefix))
+    let slots: u64 = int.widen(plan.limits.max_slots)
+    let made: Result[(Client[u32], Inbox[u32]), Capacity] = conn.new(slots + 1, bytes 0)
+    let (take bell, take rings) = match take made {
+        Ok(take pair) => take pair,
+        Error(e) => return Error(Refusal(error: Full(Allocation(e)), authority: stream_rewrap(kind, take client, take level_name, op_ms, take sim, take stream))),
+    }
+    let (control_send, control_receive): (Sender[ServiceControl], Receiver[ServiceControl]) = channel.new(slots + 1)
+    let (ready_send, ready_receive): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
+    let (take requests, take workers) = std.object.split(take client)
+    let input = StreamServiceInput(requests: take requests, clock: c, plan: clone(plan), dir: stream_root_dir(plan.prefix), authority_kind: kind, holder, op_ms, control: take control_receive, rings: take rings, ready: take ready_send)
+    let running = match task.try_spawn(tasks, bytes budget, take input, stream_service_task) {
+        Ok(take handle) => take handle,
+        Error((problem, take back)) => {
+            let StreamServiceInput(requests: take returned, ..) = take back
+            let restored = std.object.attach(take returned, take workers)
+            return Error(Refusal(error: Full(Allocation(problem)), authority: stream_rewrap(kind, take restored, take level_name, op_ms, take sim, take stream)))
+        },
+    }
+    let started = match channel.receive(ready_receive) {
+        Ok(take outcome) => take outcome,
+        Error(_) => Error(Io(Closed)),
+    }
+    if let Error(take problem) = started {
+        let ended = task.join(take running)
+        return match take ended {
+            Ok(StreamServiceEnd(requests: take returned, ..)) => {
+                let restored = std.object.attach(take returned, take workers)
+                Error(Refusal(error: take problem, authority: stream_rewrap(kind, take restored, take level_name, op_ms, take sim, take stream)))
+            },
+            Error(_) => fail("journal_service: the service task failed at its start"),
+        }
+    }
+    Ok(JournalService(task: take running, control: take control_send, bell: take bell, workers: take workers, sid: plan.sid, endpoint: string.from(home.endpoint), aws_region: string.from(home.aws_region), bucket: string.from(home.bucket), root: take root, slot_bytes: plan.limits.slot_bytes))
+}
+
+fn stream_rewrap(kind: u8, take client: std.object.Client, take level_name: String, op_ms: u64, take sim: Option[(List[String], LevelSync)], take stream: Option[JournalSlot]) -> Authority {
+    wrap_object_authority(ObjectAuthorityConfig(client: take client, level_name: take level_name, op_ms, sim: take sim, stream: take stream), kind)
+}
+
+// One Place's slot (§12.11.12): the service creates its data connection, so
+// its room is charged to the service. One slot stays the janitor's.
+fn journal_slot(mut s: JournalService) -> Result[JournalSlot, Error] waits {
+    let (reply_send, reply_receive): (Sender[Result[(Client[SlotMsg], u32), Error]], Receiver[Result[(Client[SlotMsg], u32), Error]]) = channel.new(1)
+    if let Error(_) = channel.send(s.control, NewSlot(take reply_send)) {
+        return Error(Io(Closed))
+    }
+    if let Error(_) = conn.send(s.bell, STREAM_CONTROL_RING) {
+        return Error(Io(Closed))
+    }
+    let (take data, slot) = match channel.receive(reply_receive) {
+        Ok(Ok(take granted)) => take granted,
+        Ok(Error(take e)) => return Error(take e),
+        Error(_) => return Error(Io(Closed)),
+    }
+    Ok(JournalSlot(data: take data, bell: conn.client(s.bell), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes))
+}
+
+// A writer Authority whose opens attach to the slot's stream (§12.11.1).
+// Its refusals are configuration errors and consume the Authority.
+fn streamed(take a: Authority, take slot: JournalSlot) -> Result[Authority, Error] {
+    let (kind, _, weak) = stream_authority_parts(a)?
+    if weak {
+        return Error(Stream(WeakLevels))
+    }
+    let mut config = match take a {
+        ObjectAuthority(take config) => take config,
+        SimAuthority(take config) => take config,
+        LogAuthority(_) => return Error(Unsupported(0)),
+    }
+    let place = std.object.bucket_config(config.client)
+    if place.endpoint != slot.endpoint || place.aws_region != slot.aws_region || place.bucket != slot.bucket {
+        return Error(Foreign)
+    }
+    if stream_overlaps(place.prefix, slot.root) {
+        return Error(Stream(Overlap))
+    }
+    config.stream = Some(take slot)
+    Ok(wrap_object_authority(take config, kind))
+}
+
+// Stops the service. Every slot's Place should be closed first: a frame
+// still queued is never acked.
+fn close_journal_service(take s: JournalService) -> Result[(), Error] waits {
+    let JournalService(task: take running, control: take control, bell: take bell, ..) = take s
+    let _ = channel.send(control, StopService)
+    let _ = conn.send(bell, STREAM_CONTROL_RING)
+    match task.join(take running) {
+        Ok(StreamServiceEnd(result: take outcome, ..)) => take outcome,
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+// The Place side of an attached open: its slot and the connection the
+// service answers on (§12.11.12). `inc` is the incarnation that granted it.
+type SlotLink: send {
+    data: Client[SlotMsg],
+    bell: Client[u32],
+    slot: u32,
+    sid: HostStreamId,
+    chunk: u64,
+    answers: Inbox[SlotAck],
+    answer_client: Option[Client[SlotAck]],
+    inc: u64
+}
+
+fn slot_link(slot: JournalSlot) -> Result[SlotLink, Error] {
+    let made: Result[(Client[SlotAck], Inbox[SlotAck]), Capacity] = conn.new(1, bytes 0)
+    let (take answer_client, take answers) = capacity(take made)?
+    Ok(SlotLink(data: conn.client(slot.data), bell: conn.client(slot.bell), slot: slot.slot, sid: slot.sid, chunk: slot.slot_bytes / 2, answers: take answers, answer_client: Some(take answer_client), inc: 0))
+}
+
+fn slot_ring(link: SlotLink) {
+    let _ = conn.try_send(link.bell, link.slot)
+}
+
+// The grant (§12.11.5): the service registers (store, epoch) on this slot
+// and names its incarnation and the next_seq batch seq.
+fn slot_attach(mut link: SlotLink, store: StoreId, epoch: u64) -> Result[(u64, u64), Error] waits {
+    // The service holds the only answer client, so a service that ends
+    // closes the Place's answers.
+    let Some(take answer_client) = replace(mut link.answer_client, None) else {
+        return Error(disk_fault("slot", 0, Malformed))
+    }
+    if let Error(_) = conn.send(link.data, SlotAttach(store.hi, store.lo, epoch, take answer_client)) {
+        return Error(Io(Closed))
+    }
+    slot_ring(link)
+    match conn.receive(link.answers) {
+        Ok(SlotGranted(inc, next_seq)) => {
+            link.inc = inc
+            Ok((inc, next_seq))
+        },
+        Ok(SlotLatched(cause)) => Error(Latched(cause)),
+        Ok(SlotAcked(_)) => Error(disk_fault("slot", 0, Malformed)),
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+// Sends one unsealed frame in chunks of at most half the slot's room.
+fn slot_send(link: SlotLink, raw: Bytes, sequence: u64) -> Result[(), Error] waits {
+    let total = list.len(raw)
+    let mut at = 0u64
+    loop {
+        let end = order.min(at + link.chunk, total)
+        let mut piece = disk_allocation(scoped fn() -> Result[Bytes, Error] {
+            Ok(list.with_capacity(end - at))
+        })?
+        list.append(mut piece, list.slice(raw, at, end))
+        let message = if at == 0 {
+            SlotFrame(total, sequence, take piece)
+        } else {
+            SlotMore(take piece)
+        }
+        if let Error(_) = conn.send(link.data, take message) {
+            return Error(Io(Closed))
+        }
+        at = end
+        if at >= total {
+            break
+        }
+    }
+    Ok(())
+}
+
+// Waits for the service's decision on the frames sent through `sequence`.
+fn slot_wait(link: SlotLink, sequence: u64) -> Result[(), Error] waits {
+    slot_ring(link)
+    loop {
+        match conn.receive(link.answers) {
+            Ok(SlotAcked(through)) => if through >= sequence {
+                return Ok(())
+            },
+            Ok(SlotLatched(cause)) => return Error(Latched(cause)),
+            Ok(SlotGranted(_, _)) => return Error(disk_fault("slot", 0, Malformed)),
+            Error(_) => return Error(Io(Closed)),
+        }
+    }
+}
+
+// X's CLAIM frame (§12.11.5), unsealed: the service seals it in its batch.
+fn slot_claim_frame(mut raw: Bytes, epoch: u64, holder: StoreId) {
+    list.clear(mut raw)
+    list.put_word_le(mut raw, 0x0040u16)
+    list.fill(mut raw, 14, 0u8)
+    list.put_word_le(mut raw, epoch)
+    list.put_word_le(mut raw, holder.hi)
+    list.put_word_le(mut raw, holder.lo)
+}

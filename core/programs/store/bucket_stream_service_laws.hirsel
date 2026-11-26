@@ -1,0 +1,317 @@
+// L90 laws for the host stream's service and streamed genesis (STORE-SPEC
+// §12.11.1, §12.11.5, §12.11.14). Each expected request is the spec's
+// schedule, written out here, never the run's own log.
+// The stream root of these laws, under a service client with prefix "".
+const STREAM_SERVICE_ROOT: String = "streams"
+
+fn stream_service_plan(max_slots: u32) -> StreamPlan {
+    let mut limits = stream_limits()
+    limits.max_slots = max_slots
+    // BUCKET_LAW_OP_MS is 30 s, so hold_ms is its floor, 4 x 30 s.
+    limits.hold_ms = 120000
+    StreamPlan(sid: stream_law_sid(), prefix: string.from(STREAM_SERVICE_ROOT), batching: Batching(max_wait_ms: 0, max_batch_bytes: FRAME_LIMIT + 4096), limits: take limits)
+}
+
+fn stream_service_budget(plan: StreamPlan) -> u64 {
+    stream_service_bytes(plan)
+}
+
+fn stream_service_client(s: BucketSim, tasks: Tasks, seed: u64, key_prefix: String, zone: String) -> Result[std.object.Client, Error] waits {
+    let secret_bytes = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let root = result.unwrap(secret.seal(take secret_bytes, "kdf"))
+    let credentials_set = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take root, "")
+    let deadline = std.clock.deadline_after_ms(host.mono_ns(s.time), BUCKET_LAW_OP_MS)
+    let mut place = bucket_law_place("s3.test")
+    place.prefix = string.from(key_prefix)
+    // Only bucket.s3.test resolves in the simulation, so the law's other
+    // place is the same bucket name in another region.
+    place.aws_region = string.from(zone)
+    let random = provide.random(seed)
+    match std.object.start_simulated(s.endpoint, tasks, take place, take credentials_set, s.time, random, bucket_law_lanes(0), deadline) {
+        Ok(take client) => Ok(take client),
+        Error(take e) => Error(Remote(take e)),
+    }
+}
+
+fn stream_service_start(s: BucketSim, tasks: Tasks, c: Clock, r: Random, plan: StreamPlan) -> Result[JournalService, Error] waits {
+    let client = stream_service_client(s, tasks, 81, "", "us-east-1")?
+    let authority = object_authority(take client, "bucket", BUCKET_LAW_OP_MS)
+    Ok(journal_service(tasks, take authority, plan, stream_service_budget(plan), s.time, r) ?=> |Refusal(error: take problem, ..)| take problem)
+}
+
+fn stream_service_marker(s: BucketSim, tasks: Tasks, take key: String) -> Result[(), Error] waits {
+    let mut client = stream_service_client(s, tasks, 99, "", "us-east-1")?
+    let mut raw: Bytes = list.with_capacity(64)
+    match history_fetch(mut client, key, mut raw, std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)) {
+        Error(Remote(NotFound)) => Ok(()),
+        _ => fail("a marker key was found"),
+    }
+}
+
+fn stream_service_key(take name: String) -> String {
+    let mut key = string.from(STREAM_SERVICE_ROOT)
+    string.push_char(mut key, '/')
+    string.push(mut key, stream_dir(stream_law_sid()))
+    string.push(mut key, name)
+    take key
+}
+
+type ServiceStep {
+    method: String,
+    key: String,
+    exact: bool,
+    status: u16
+}
+
+fn service_step(take method: String, take key: String, exact: bool, status: u16) -> ServiceStep {
+    ServiceStep(method: take method, key: take key, exact, status)
+}
+
+// The §12.11.5 and §12.11.4 schedule from the Place's first request: genesis
+// with no 5a probes and no CLAIM entry, the CLAIM's batch and its `reg` GET
+// before open returns, then per commit one batch create and one `reg` GET
+// and no head write; and no idle head GET over three head-poll periods.
+fn stream_service_expected(commits: u64) -> List[ServiceStep] {
+    let mut steps: List[ServiceStep] = list.new()
+    list.push(mut steps, service_step("GET", "p1/head", true, 404))
+    list.push(mut steps, service_step("LIST", "", true, 200))
+    list.push(mut steps, service_step("PUT", "p1/m-00000000000000000001-", false, 200))
+    list.push(mut steps, service_step("PUT", "p1/e-00000000000000000001-", false, 200))
+    list.push(mut steps, service_step("PUT", "p1/head", true, 200))
+    list.push(mut steps, service_step("PUT", stream_service_key("b-00000000000000000001-00000000000000000001"), true, 200))
+    list.push(mut steps, service_step("GET", stream_service_key("reg"), true, 200))
+    list.push(mut steps, service_step("GET", "marker-1", true, 404))
+    for k in 0u64 .. commits {
+        let mut name = string.with_capacity(48)
+        stream_batch_key(mut name, 1, k + 2)
+        list.push(mut steps, service_step("PUT", stream_service_key(take name), true, 200))
+        list.push(mut steps, service_step("GET", stream_service_key("reg"), true, 200))
+    }
+    list.push(mut steps, service_step("GET", "marker-2", true, 404))
+    list.push(mut steps, service_step("GET", "marker-3", true, 404))
+    take steps
+}
+
+// The streamed-genesis law (§12.11.5) with L90-K's per-batch cost
+// (§12.11.14) and no idle head poll (§12.11.13). Red for a genesis that
+// probes 5a or writes a CLAIM entry, an open that returns before its CLAIM
+// batch is decided, a commit that writes the head or an entry, or an
+// attached Place that keeps its head poll.
+@test
+fn bucket_stream_streamed_genesis(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 83, None, list.new())
+    let plan = stream_service_plan(4)
+    let outcome = stream_service_genesis_run(s, tasks, c, r, plan, 2)
+    let report = bucket_law_report(take s)
+    outcome?
+    let expected = stream_service_expected(2)
+    let mut from = list.len(report.requests)
+    for i in 0u64 .. list.len(report.requests) {
+        if string.starts_with(report.requests[i].key, "p1/") {
+            from = i
+            break
+        }
+    }
+    if list.len(report.requests) - from != list.len(expected) {
+        fail("the streamed Place sent other than §12.11.5's and §12.11.4's requests")
+    }
+    for i in 0u64 .. list.len(expected) {
+        let want = expected[i]
+        let got = report.requests[from + i]
+        let key_ok = if want.exact {
+            got.key == want.key
+        } else {
+            string.starts_with(got.key, want.key)
+        }
+        if got.method != want.method || !key_ok || got.status != want.status {
+            fail("the streamed Place sent other than §12.11.5's and §12.11.4's requests")
+        }
+    }
+    let mut head_bytes: Option[Bytes] = None
+    for w in report.head_writes {
+        head_bytes = Some(clone(w.data))
+    }
+    let Some(raw) = head_bytes else {
+        fail("the streamed genesis wrote no head")
+    }
+    let (_, take attach) = history_decode_head_attach(raw)?
+    let Some(a) = attach else {
+        fail("the streamed genesis head has no ATTACH")
+    }
+    let Some(tail) = a.live else {
+        fail("the streamed genesis head names no live tail")
+    }
+    // Incarnation 1 is the stream's first election; its first batch is seq 1.
+    if a.settles != 0 || list.len(a.sealed) != 0 || !stream_same(tail.sid, stream_law_sid()) || tail.inc != 1 || tail.from_seq != 1 || tail.from_frame != 0 {
+        fail("the streamed genesis ATTACH is not {0, (S, 1, (1, 0)), []}")
+    }
+    Ok(())
+}
+
+fn stream_service_genesis_run(s: BucketSim, tasks: Tasks, c: Clock, r: Random, plan: StreamPlan, commits: u64) -> Result[(), Error] waits {
+    let mut service = stream_service_start(s, tasks, c, r, plan)?
+    let slot = journal_slot(mut service)?
+    let client = stream_service_client(s, tasks, 85, "p1/", "us-east-1")?
+    let attached = streamed(object_authority(take client, "bucket", BUCKET_LAW_OP_MS), take slot)?
+    let mut options = bucket_order_options(true)
+    options.head_poll_ms = 1000
+    let mut db = open_authority(tasks, take attached, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
+    stream_service_marker(s, tasks, string.from("marker-1"))?
+    for _ in 0u64 .. commits {
+        let receipt = bucket_order_commit(mut db)?
+        durable(mut db, receipt)?
+    }
+    stream_service_marker(s, tasks, string.from("marker-2"))?
+    std.clock.sleep_ns(s.time, 3 * 1000 * 1000000)
+    stream_service_marker(s, tasks, string.from("marker-3"))?
+    close(take db)?
+    close_journal_service(take service)
+}
+
+fn stream_service_refused(s: BucketSim, tasks: Tasks, r: Random, plan: StreamPlan, budget: u64) -> Error waits {
+    let client = match stream_service_client(s, tasks, 87, "", "us-east-1") {
+        Ok(take made) => take made,
+        Error(_) => fail("the law's client did not start"),
+    }
+    match journal_service(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), plan, budget, s.time, r) {
+        Ok(_) => fail("a plan out of range started a service"),
+        Error(Refusal(error: take problem, ..)) => take problem,
+    }
+}
+
+fn stream_service_same_refusal(take got: Error, take want: Error) -> bool {
+    match (take got, take want) {
+        (Stream(Bound(a)), Stream(Bound(b))) => stream_field_code(a) == stream_field_code(b),
+        (Limit(Name), Limit(Name)) => true,
+        _ => false,
+    }
+}
+
+fn stream_field_code(f: StreamField) -> u64 {
+    match f {
+        MaxBatchBytes => 1,
+        MaxSlots => 2,
+        MaxPins => 3,
+        HoldMs => 4,
+        IdlePollMs => 5,
+        IndexEvery => 6,
+        RecoverParallel => 7,
+        SlotBytes => 8,
+    }
+}
+
+// L90-P (§12.11.1, M12): each plan refusal is typed and decided before any
+// request. Red for a service that creates `probe` or `reg` before it
+// refuses, or a bound it does not check.
+@test
+fn bucket_stream_plan_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 89, None, list.new())
+    let good = stream_service_plan(4)
+    let fits = stream_service_budget(good)
+    let mut cases: List[(StreamPlan, u64, Error)] = list.new()
+    let mut low_batch: StreamPlan = clone(good)
+    low_batch.batching.max_batch_bytes = FRAME_LIMIT + 4095
+    list.push(mut cases, (take low_batch, fits, Stream(Bound(MaxBatchBytes))))
+    let mut high_batch: StreamPlan = clone(good)
+    high_batch.batching.max_batch_bytes = 4294967297
+    list.push(mut cases, (take high_batch, fits, Stream(Bound(MaxBatchBytes))))
+    list.push(mut cases, (stream_service_plan(0), fits, Stream(Bound(MaxSlots))))
+    list.push(mut cases, (stream_service_plan(10699), fits, Stream(Bound(MaxSlots))))
+    let mut hold: StreamPlan = clone(good)
+    hold.limits.hold_ms = 119999
+    list.push(mut cases, (take hold, fits, Stream(Bound(HoldMs))))
+    let mut idle: StreamPlan = clone(good)
+    idle.limits.idle_poll_ms = 0
+    list.push(mut cases, (take idle, fits, Stream(Bound(IdlePollMs))))
+    let mut idle_high: StreamPlan = clone(good)
+    idle_high.limits.idle_poll_ms = 120001
+    list.push(mut cases, (take idle_high, fits, Stream(Bound(IdlePollMs))))
+    let mut no_index: StreamPlan = clone(good)
+    no_index.limits.index_every = 0
+    list.push(mut cases, (take no_index, fits, Stream(Bound(IndexEvery))))
+    let mut recover: StreamPlan = clone(good)
+    recover.limits.recover_parallel = 0
+    list.push(mut cases, (take recover, fits, Stream(Bound(RecoverParallel))))
+    let mut slot_room: StreamPlan = clone(good)
+    slot_room.limits.slot_bytes = 4095
+    list.push(mut cases, (take slot_room, fits, Stream(Bound(SlotBytes))))
+    let mut pins: StreamPlan = clone(good)
+    pins.limits.max_pins = 1
+    list.push(mut cases, (take pins, fits, Stream(Bound(MaxPins))))
+    let mut long_name: StreamPlan = clone(good)
+    long_name.prefix = string.repeat("n", 1025)
+    list.push(mut cases, (take long_name, fits, Limit(Name)))
+    let mut failures = 0u64
+    for case in cases {
+        let (plan, budget, want) = case
+        if !stream_service_same_refusal(stream_service_refused(s, tasks, r, plan, budget), clone(want)) {
+            failures += 1
+        }
+    }
+    let small = stream_service_refused(s, tasks, r, good, fits - 1)
+    let report = bucket_law_report(take s)
+    if failures != 0 {
+        fail("a plan out of range was not refused with its own field")
+    }
+    match small {
+        Full(Allocation(Capacity(requested, available))) if requested == fits && available == fits - 1 => (),
+        _ => fail("a budget below the service's bytes was not Full(Allocation)"),
+    }
+    if list.len(report.requests) != 0 {
+        fail("a refused journal_service sent a request")
+    }
+    Ok(())
+}
+
+// L90-P for slots and `streamed` (§12.11.1): with `max_slots` 2 one slot is
+// ordinary and the second is the janitor's, so a second `journal_slot` is
+// `Full(Slots)`; a Place prefix over the root, an empty Place prefix and
+// another region are refused, and none of them sends a request.
+@test
+fn bucket_stream_slot_refusals(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 91, None, list.new())
+    let outcome = stream_service_slot_run(s, tasks, c, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    for request in report.requests {
+        if !string.starts_with(request.key, "streams/") {
+            fail("a refused slot or streamed call sent a request")
+        }
+        if stream_service_is_batch(request.key) {
+            fail("a refused slot or streamed call created a batch")
+        }
+    }
+    Ok(())
+}
+
+fn stream_service_is_batch(key: String) -> bool {
+    string.starts_with(key, stream_service_key(string.from("b-")))
+}
+
+fn stream_service_slot_run(s: BucketSim, tasks: Tasks, c: Clock, r: Random) -> Result[(), Error] waits {
+    let mut service = stream_service_start(s, tasks, c, r, stream_service_plan(2))?
+    let first = journal_slot(mut service)?
+    match journal_slot(mut service) {
+        Error(Full(Slots(_))) => (),
+        _ => fail("the janitor's slot was given out"),
+    }
+    let mut refused = 0u64
+    let inside = stream_service_client(s, tasks, 93, "streams/p/", "us-east-1")?
+    if let Error(Stream(Overlap)) = streamed(object_authority(take inside, "bucket", BUCKET_LAW_OP_MS), take first) {
+        refused += 1
+    }
+    let second = journal_slot(mut service)?
+    let whole = stream_service_client(s, tasks, 94, "", "us-east-1")?
+    if let Error(Stream(Overlap)) = streamed(object_authority(take whole, "bucket", BUCKET_LAW_OP_MS), take second) {
+        refused += 1
+    }
+    let third = journal_slot(mut service)?
+    let other = stream_service_client(s, tasks, 95, "p1/", "eu-west-1")?
+    if let Error(Foreign) = streamed(object_authority(take other, "bucket", BUCKET_LAW_OP_MS), take third) {
+        refused += 1
+    }
+    if refused != 3 {
+        fail("streamed accepted a prefix over the root or another region")
+    }
+    close_journal_service(take service)
+}

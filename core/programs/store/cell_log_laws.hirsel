@@ -678,9 +678,9 @@ fn log_changes_and_tail_window(c: Clock) -> Result[(), Error] waits {
     let cell_high = prefix(cell.binding.id + 1)?
     let cell_span = span_changes(reading, snapshot(db), cell_low, cell_high)?
     cell_law_require(list.len(cell_span) == 1 && cell_span[0].tree_key == cell_low && published_cell(cell, cell_span[0])? == Some(published_test_word(42)), "published inline cell")?
-    let mut streamed = open_span_changes(reading, snapshot(db), cell_low, cell_high)?
-    cell_law_require(option.unwrap(next_span_change(reading, mut streamed)?).tree_key == cell_low, "streamed inline cell")?
-    if let Some(_) = next_span_change(reading, mut streamed)? {
+    let mut span_reader = open_span_changes(reading, snapshot(db), cell_low, cell_high)?
+    cell_law_require(option.unwrap(next_span_change(reading, mut span_reader)?).tree_key == cell_low, "streamed inline cell")?
+    if let Some(_) = next_span_change(reading, mut span_reader)? {
         return Error(Missing("duplicate streamed cell"))
     }
     let mut backwards = reverse_byte_cursor(snapshot(db).roots.collections, cell_low, cell_high)?

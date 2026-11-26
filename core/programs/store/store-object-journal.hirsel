@@ -10,7 +10,9 @@ type ObjectJournalStart: send {
     next_pack: u64,
     export_lease: Option[ObjectExportLease],
     reclaim: Option[ObjectReclaimCapture],
-    weak: Option[WeakPublisher]
+    weak: Option[WeakPublisher],
+    // An attached Place's slot: its frames go to the host stream (§12.11.4).
+    stream: Option[SlotLink]
 }
 
 type ObjectJournalTask: send {
@@ -63,18 +65,20 @@ type ObjectJournalSession {
     next_pack: u64,
     export_lease: Option[ObjectExportLease],
     reclaim: Option[ObjectReclaimCapture],
-    weak: Option[WeakPublisher]
+    weak: Option[WeakPublisher],
+    // An attached Place's slot: its frames go to the host stream (§12.11.4).
+    stream: Option[SlotLink]
 }
 
 fn object_journal_begin(take input: ObjectJournalStart) -> ObjectJournalSession {
-    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak) = take input
-    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak)
+    let ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take input
+    ObjectJournalSession(client: std.object.attach(take requests, None), register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
 }
 
 fn object_journal_pause(take active: ObjectJournalSession) -> ObjectJournalStart {
-    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak) = take active
+    let ObjectJournalSession(client: take client, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream) = take active
     let (take requests, _) = std.object.split(take client)
-    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak)
+    ObjectJournalStart(requests: take requests, register: take register, authority: take authority, buffers: take buffers, op_ms, failed_polls, sweep, issued_generation, next_pack, export_lease: take export_lease, reclaim, weak: take weak, stream: take stream)
 }
 
 fn object_journal_advance(mut lane: ObjectJournalSession, sequence: u64) -> Result[(), Error] waits {
@@ -99,6 +103,35 @@ fn object_journal_add(mut lane: ObjectJournalSession, ctx: DiskContext, frame: B
     let bytes_wanted = list.len(frame)
     capacity(list.try_reserve(mut lane.buffers.packet, bytes_wanted + BINDING_BYTES))?
     history_group_append(mut lane.buffers.packet, ctx, frame)
+}
+
+// An attached Place's group (§12.11.4): its frames go to the slot unsealed,
+// and the group is durable once the service acks its last ticket.
+fn object_journal_stream(link: SlotLink, input: ObjectJournalTask, take raw: Bytes, sequence: u64, mut deferred: Option[JournalMsg]) -> Result[(u64, u64), Error] waits {
+    slot_send(link, raw, sequence)?
+    let mut group_size = list.len(raw)
+    let mut last_sequence = sequence
+    for _ in 1u64 .. input.group_commits {
+        match channel.try_receive(input.receive) {
+            Ok(Frame(take follower_frame, following)) => {
+                let width = list.len(follower_frame)
+                if group_size + width > input.group_bytes {
+                    deferred = Some(Frame(take follower_frame, following))
+                    break
+                }
+                slot_send(link, follower_frame, following)?
+                group_size += width
+                last_sequence = following
+            },
+            Ok(take control) => {
+                deferred = Some(take control)
+                break
+            },
+            Error(_) => break,
+        }
+    }
+    slot_wait(link, last_sequence)?
+    Ok((last_sequence, group_size))
 }
 
 fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJournalStart) -> Result[(), Error] waits {
@@ -165,6 +198,15 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
         reclaim_due = true
         match take selected {
             Frame(take raw, sequence) => {
+                if let Some(link) = lane.stream {
+                    let (last_sequence, group_size) = object_journal_stream(link, input, take raw, sequence, mut deferred)?
+                    written += group_size
+                    if let Error(_) = channel.send(input.acks, ObjectJournaled(last_sequence, written, lane.register.head.entry.seq - lane.register.head.checkpoint.seq)) {
+                        return Ok(())
+                    }
+                    let _ = channel.try_send(input.synced, ())
+                    continue
+                }
                 let ctx = history_group_context(lane.register.head)?
                 history_packet_header(mut lane.buffers.packet, ctx, lane.register.head.pair.epoch, lane.register.head.authority_kind, lane.register.head.entry)?
                 object_journal_add(mut lane, ctx, raw)?

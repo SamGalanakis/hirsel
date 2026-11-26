@@ -1,0 +1,403 @@
+// The host stream's service task (STORE-SPEC §12.11.4, §12.11.12): it drains
+// the slots the doorbell names, packs their frames into one batch, runs the
+// writer cycle and answers each Place. Package-private until the claim and
+// the terminal fence land.
+type StreamServiceInput: send {
+    requests: std.object.Requests,
+    clock: Clock,
+    plan: StreamPlan,
+    dir: String,
+    authority_kind: u8,
+    holder: StoreId,
+    op_ms: u64,
+    control: Receiver[ServiceControl],
+    rings: Inbox[u32],
+    ready: Sender[Result[(), Error]]
+}
+
+type StreamServiceEnd: send {
+    requests: std.object.Requests,
+    result: Result[(), Error]
+}
+
+// One attached Place on a slot: its (store, epoch) and its answer client.
+type SlotPlace {
+    store: StoreId,
+    epoch: u64,
+    answers: Client[SlotAck]
+}
+
+type ServiceSlot {
+    inbox: Option[Inbox[SlotMsg]],
+    place: Option[SlotPlace],
+    held: Option[SlotMsg],
+    unsent: Option[SlotAck]
+}
+
+// One Place's frames in the batch being built: its slot, the last ticket
+// sequence among them, and its slice.
+type BatchEntry {
+    slot: u64,
+    through: u64,
+    slice: BatchSlice
+}
+
+type StreamService {
+    lane: StreamLane,
+    clock: Clock,
+    plan: StreamPlan,
+    op_ms: u64,
+    slots: List[ServiceSlot],
+    rings: Inbox[u32],
+    control: Receiver[ServiceControl],
+    // The slots of the created batch whose ack is undecided, with each
+    // slice's last ticket sequence, in `lane.pending` order.
+    waiting: List[(u64, u64)]
+}
+
+fn stream_service_task(take input: StreamServiceInput) -> StreamServiceEnd waits {
+    let StreamServiceInput(requests: take requests, clock, plan: take plan, dir: take dir, authority_kind, holder, op_ms, control: take control, rings: take rings, ready: take ready) = take input
+    let client = std.object.attach(take requests, None)
+    let slot_count: u64 = int.widen(plan.limits.max_slots)
+    let rows = 2 * slot_count
+    let built = stream_lane(take client, plan.sid, authority_kind, rows, holder)
+    let mut lane = match take built {
+        Ok(take made) => take made,
+        Error(take e) => {
+            let _ = channel.send(ready, Error(clone(e)))
+            return fail("stream service: its lane could not be built")
+        },
+    }
+    lane.dir = stream_key(dir, stream_dir(plan.sid))
+    let started = stream_start_fresh(mut lane, std.object.deadline_after_ms(lane.client, op_ms))
+    if let Error(problem) = started {
+        let _ = channel.send(ready, Error(clone(problem)))
+        let StreamLane(client: take back, ..) = take lane
+        let (take returned, _) = std.object.split(take back)
+        return StreamServiceEnd(requests: take returned, result: Error(clone(problem)))
+    }
+    let _ = channel.send(ready, Ok(()))
+    let mut service = StreamService(lane: take lane, clock, plan: take plan, op_ms, slots: list.new(), rings: take rings, control: take control, waiting: list.new())
+    let result = stream_service_loop(mut service)
+    let StreamService(lane: take finished, ..) = take service
+    let StreamLane(client: take back, ..) = take finished
+    let (take returned, _) = std.object.split(take back)
+    StreamServiceEnd(requests: take returned, result: take result)
+}
+
+fn stream_service_loop(mut s: StreamService) -> Result[(), Error] waits {
+    loop {
+        match conn.receive(s.rings) {
+            Ok(_) => (),
+            Error(Closed) => return Ok(()),
+            Error(Capacity(_)) => (),
+        }
+        if !stream_service_wake(mut s)? {
+            return Ok(())
+        }
+    }
+}
+
+// One wake: control, attachments, then batches until no slot has a frame.
+// A frame held for want of batch room rings no bell again, so the wake
+// goes on to the next batch rather than waiting. False once the service is
+// stopped.
+fn stream_service_wake(mut s: StreamService) -> Result[bool, Error] waits {
+    stream_drain_rings(s)
+    if !stream_service_control(mut s)? {
+        return Ok(false)
+    }
+    stream_flush_acks(mut s)
+    loop {
+        let mut batch: List[BatchEntry] = list.new()
+        stream_gather(mut s, mut batch)?
+        if list.len(batch) == 0 {
+            return Ok(true)
+        }
+        if s.plan.batching.max_wait_ms != 0 {
+            std.clock.sleep_ns(s.clock, int.saturating_mul(s.plan.batching.max_wait_ms, 1000000))
+            stream_drain_rings(s)
+            stream_gather(mut s, mut batch)?
+        }
+        stream_service_batch(mut s, take batch)?
+    }
+}
+
+fn stream_drain_rings(s: StreamService) {
+    while let Ok(_) = conn.try_receive(s.rings) {}
+}
+
+fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
+    loop {
+        match channel.try_receive(s.control) {
+            Ok(NewSlot(take answers)) => {
+                let granted = stream_new_slot(mut s)
+                let _ = channel.send(answers, take granted)
+            },
+            Ok(StopService) => return Ok(false),
+            Error(_) => return Ok(true),
+        }
+    }
+}
+
+// A free slot, or a new one while fewer than `max_slots` - 1 are given out
+// (one is the janitor's, §12.11.8).
+fn stream_new_slot(mut s: StreamService) -> Result[(Client[SlotMsg], u32), Error] {
+    let made: Result[(Client[SlotMsg], Inbox[SlotMsg]), Capacity] = conn.new(STREAM_SLOT_ITEMS, bytes s.plan.limits.slot_bytes)
+    let (take data, take inbox) = capacity(take made)?
+    for i in 0u64 .. list.len(s.slots) {
+        if stream_slot_unused(s.slots[i]) {
+            let _ = replace(mut s.slots[i], ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
+            return Ok((take data, int.narrow(i)))
+        }
+    }
+    let slot_count: u64 = int.widen(s.plan.limits.max_slots)
+    let ordinary = slot_count - 1
+    if list.len(s.slots) >= ordinary {
+        // A slot whose Place dropped it is free once its inbox reads Closed;
+        // anything still queued stays held for the next batch.
+        for i in 0u64 .. list.len(s.slots) {
+            if stream_slot_closed(mut s.slots[i]) {
+                let _ = replace(mut s.slots[i], ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
+                return Ok((take data, int.narrow(i)))
+            }
+        }
+        return Error(Full(Slots(Capacity(requested: 1, available: 0))))
+    }
+    capacity(list.try_reserve(mut s.slots, 1))?
+    list.push(mut s.slots, ServiceSlot(inbox: Some(take inbox), place: None, held: None, unsent: None))
+    Ok((take data, int.narrow(list.len(s.slots) - 1)))
+}
+
+fn stream_slot_unused(slot: ServiceSlot) -> bool {
+    if let Some(_) = slot.inbox {
+        return false
+    }
+    if let Some(_) = slot.held {
+        return false
+    }
+    true
+}
+
+fn stream_slot_closed(mut slot: ServiceSlot) -> bool {
+    if let Some(_) = slot.held {
+        return false
+    }
+    let polled = match slot.inbox {
+        Some(inbox) => conn.try_receive(inbox),
+        None => return true,
+    }
+    match take polled {
+        Ok(take queued) => {
+            slot.held = Some(take queued)
+            false
+        },
+        Error(Closed) => true,
+        Error(_) => false,
+    }
+}
+
+// Acks never wait on a Place (§12.11.12): a full answer connection keeps
+// the newest answer for the next wake.
+fn stream_answer(mut slot: ServiceSlot, take answer: SlotAck) {
+    let sent = match slot.place {
+        Some(place) => conn.try_send(place.answers, take answer),
+        None => return,
+    }
+    slot.unsent = match take sent {
+        Ok(()) => None,
+        Error(Full(take kept)) => Some(take kept),
+        Error(Closed(_)) => None,
+    }
+}
+
+fn stream_flush_acks(mut s: StreamService) {
+    for i in 0u64 .. list.len(s.slots) {
+        if let Some(take answer) = replace(mut s.slots[i].unsent, None) {
+            stream_answer(mut s.slots[i], take answer)
+        }
+    }
+}
+
+// The bytes a batch of `batch` takes with one more frame of `width` for a
+// Place not yet in it (`added`).
+fn stream_batch_room(batch: List[BatchEntry], width: u64, added: bool) -> u64 {
+    let mut total = STREAM_INDEX_PREFIX + 16 + STREAM_FOOTER_BYTES + BINDING_BYTES + width + BINDING_BYTES
+    let mut rows = list.len(batch)
+    if added {
+        rows += 1
+    }
+    total += STREAM_INDEX_ROW_BYTES * rows
+    for e in batch {
+        total += list.len(e.slice.octets)
+    }
+    total
+}
+
+fn stream_entry_of(batch: List[BatchEntry], slot: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(batch) {
+        if batch[i].slot == slot {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// Drains every slot into `batch` while the batch has room. A frame that
+// does not fit stays held on its slot for the next batch, so a full slot
+// blocks only its own Place.
+fn stream_gather(mut s: StreamService, mut batch: List[BatchEntry]) -> Result[(), Error] waits {
+    for i in 0u64 .. list.len(s.slots) {
+        loop {
+            let message = match replace(mut s.slots[i].held, None) {
+                Some(take kept) => take kept,
+                None => {
+                    let received = match s.slots[i].inbox {
+                        Some(inbox) => conn.try_receive(inbox),
+                        None => break,
+                    }
+                    match take received {
+                        Ok(take message) => take message,
+                        Error(Empty) => break,
+                        Error(Capacity(_)) => break,
+                        Error(Closed) => {
+                            s.slots[i].inbox = None
+                            s.slots[i].place = None
+                            break
+                        },
+                    }
+                },
+            }
+            match take message {
+                SlotAttach(hi, lo, epoch, take answers) => {
+                    s.slots[i].place = Some(SlotPlace(store: StoreId(hi, lo), epoch, answers: take answers))
+                    let answer = match s.lane.latched {
+                        Some(cause) => SlotLatched(cause),
+                        None => SlotGranted(s.lane.inc, s.lane.seq),
+                    }
+                    stream_answer(mut s.slots[i], take answer)
+                },
+                SlotFrame(width, sequence, take first) => {
+                    let (owner, fence) = match s.slots[i].place {
+                        Some(place) => (place.store, place.epoch),
+                        None => fail("stream service: a frame on a slot with no attachment"),
+                    }
+                    let at = stream_entry_of(batch, i)
+                    let room = stream_batch_room(batch, width, match at {
+                        Some(_) => false,
+                        None => true,
+                    })
+                    if room > s.plan.batching.max_batch_bytes && list.len(batch) != 0 {
+                        s.slots[i].held = Some(SlotFrame(width, sequence, take first))
+                        break
+                    }
+                    let row = match at {
+                        Some(found) => found,
+                        None => {
+                            capacity(list.try_reserve(mut batch, 1))?
+                            list.push(mut batch, BatchEntry(slot: i, through: 0, slice: BatchSlice(store: owner, epoch: fence, frames: 0, octets: list.new())))
+                            list.len(batch) - 1
+                        },
+                    }
+                    stream_take_frame(mut s, i, mut batch[row], width, sequence, take first)?
+                },
+                SlotMore(_) => fail("stream service: a chunk with no frame"),
+            }
+        }
+    }
+    Ok(())
+}
+
+// Appends one frame, receiving its remaining chunks, and seals it in its
+// slice under (X, ROLE_BATCH, batch seq) at its offset in the slice.
+fn stream_take_frame(mut s: StreamService, i: u64, mut filling: BatchEntry, width: u64, sequence: u64, take first: Bytes) -> Result[(), Error] waits {
+    let at = list.len(filling.slice.octets)
+    capacity(list.try_reserve(mut filling.slice.octets, width + BINDING_BYTES))?
+    list.append(mut filling.slice.octets, first)
+    while list.len(filling.slice.octets) - at < width {
+        let received = match s.slots[i].inbox {
+            Some(inbox) => conn.receive(inbox),
+            None => fail("stream service: a frame's slot closed"),
+        }
+        match take received {
+            Ok(SlotMore(take piece)) => list.append(mut filling.slice.octets, piece),
+            Ok(_) => fail("stream service: a frame cut short"),
+            Error(_) => {
+                // The Place dropped its slot mid-frame: the partial frame
+                // leaves with it.
+                list.truncate(mut filling.slice.octets, at)
+                s.slots[i].inbox = None
+                return Ok(())
+            },
+        }
+    }
+    let kind: u16 = int.narrow(read_le(filling.slice.octets, at, 2))
+    let ctx = DiskContext(store: filling.slice.store, role: ROLE_BATCH, seq: s.lane.seq)
+    capacity(history_seal(mut filling.slice.octets, ctx, at, kind))?
+    filling.slice.frames += 1
+    filling.through = sequence
+    Ok(())
+}
+
+// Runs the writer cycle on `batch` and answers each Place by the ack rule.
+// A read that fails leaves the batch pending; it is decided, every
+// `idle_poll_ms`, before anything else is created.
+fn stream_service_batch(mut s: StreamService, take batch: List[BatchEntry]) -> Result[(), Error] waits {
+    let mut ordered = take batch
+    list.sort(mut ordered, scoped fn(a: BatchEntry, b: BatchEntry) -> Order {
+        match order.compare(a.slice.store.hi, b.slice.store.hi) {
+            Equal => order.compare(a.slice.store.lo, b.slice.store.lo),
+            other => other,
+        }
+    })
+    let mut slices: List[BatchSlice] = list.new()
+    capacity(list.try_reserve(mut slices, list.len(ordered)))?
+    capacity(list.try_reserve(mut s.waiting, list.len(ordered)))?
+    for take e in take ordered {
+        let BatchEntry(slot, through, slice: take slice) = take e
+        list.push(mut s.waiting, (slot, through))
+        list.push(mut slices, take slice)
+    }
+    let deadline = std.object.deadline_after_ms(s.lane.client, s.op_ms)
+    let mut outcome = stream_cycle(mut s.lane, slices, deadline)
+    loop {
+        match take outcome {
+            Ok(take decided) => {
+                stream_service_decided(mut s, decided)
+                return Ok(())
+            },
+            Error(take problem) => {
+                if let Some(cause) = s.lane.latched {
+                    stream_service_latched(mut s, cause)
+                    return Ok(())
+                }
+                if list.len(s.lane.pending) == 0 {
+                    // The create itself failed before any pending slice:
+                    // nothing was written at this seq.
+                    return Error(take problem)
+                }
+            },
+        }
+        std.clock.sleep_ns(s.clock, int.saturating_mul(s.plan.limits.idle_poll_ms, 1000000))
+        outcome = stream_decide_pending(mut s.lane, std.object.deadline_after_ms(s.lane.client, s.op_ms))
+    }
+}
+
+fn stream_service_decided(mut s: StreamService, decided: List[SliceDecision]) {
+    let waiting = replace(mut s.waiting, list.new())
+    for i in 0u64 .. list.len(decided) {
+        if decided[i].acked && i < list.len(waiting) {
+            let (slot, through) = waiting[i]
+            stream_answer(mut s.slots[slot], SlotAcked(through))
+        }
+    }
+}
+
+// The incarnation latched (§12.11.10): every attached Place's outstanding
+// tickets end `Undecided` at its next answer.
+fn stream_service_latched(mut s: StreamService, cause: StreamLatch) {
+    list.clear(mut s.waiting)
+    for i in 0u64 .. list.len(s.slots) {
+        stream_answer(mut s.slots[i], SlotLatched(cause))
+    }
+}

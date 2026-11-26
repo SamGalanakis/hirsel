@@ -68,6 +68,8 @@ std = { major = 1 }
 "store-stream-frames.hirsel" = "store"
 "store-stream-types.hirsel" = "store"
 "store-stream-service.hirsel" = "store"
+"store-stream-slot.hirsel" = "store"
+"store-stream-task.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
 "store-history-packs.hirsel" = "store"
@@ -133,6 +135,7 @@ dirs = ["."]
 "bucket_order_laws.hirsel" = "store"
 "bucket_q5_laws.hirsel" = "store"
 "bucket_stream_laws.hirsel" = "store"
+"bucket_stream_service_laws.hirsel" = "store"
 "object_cut_laws.hirsel" = "store"
 "object_journal_laws.hirsel" = "store"
 "authority_laws.hirsel" = "store"
@@ -217,6 +220,15 @@ limit = 134217728
 
 [tests.runs."store@1/store/bucket_stream_ack_after_lost_read"]
 limit = 134217728
+
+# The sim's 32 MiB, the service's budget (three batch buffers of
+# FRAME_LIMIT + 4,096, its register buffers and slots: about 51 MiB) and a
+# streamed Place's plan.
+[tests.runs."store@1/store/bucket_stream_streamed_genesis"]
+limit = 268435456
+
+[tests.runs."store@1/store/bucket_stream_slot_refusals"]
+limit = 268435456
 
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,
 # plus the Task allocation and request channel.

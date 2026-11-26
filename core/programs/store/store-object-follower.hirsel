@@ -2,15 +2,17 @@ type ObjectAuthorityConfig {
     client: std.object.Client,
     level_name: String,
     op_ms: u64,
-    sim: Option[(List[String], LevelSync)]
+    sim: Option[(List[String], LevelSync)],
+    // The host stream slot whose writer opens attach (§12.11.1 `streamed`).
+    stream: Option[JournalSlot]
 }
 
 pub fn object_authority(take c: std.object.Client, level_name: String, op_ms: u64) -> Authority {
-    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None))
+    ObjectAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(level_name), op_ms, sim: None, stream: None))
 }
 
 pub fn sim_authority(take c: std.object.Client, declared: SimLevels, take sync: LevelSync, op_ms: u64) -> Authority {
-    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync))))
+    SimAuthority(ObjectAuthorityConfig(client: take c, level_name: string.from(declared.strongest), op_ms, sim: Some((clone(declared.weak), take sync)), stream: None))
 }
 
 type ObjectFollowHead: shareable + send {

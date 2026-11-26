@@ -121,6 +121,7 @@ pub(crate) struct Api {
     pub unit_forward: unsafe extern "C" fn(Raw, *mut Output),
     pub end_body: unsafe extern "C" fn(Raw),
     pub used: unsafe extern "C" fn(Raw, *const Raw, usize),
+    pub module_print: unsafe extern "C" fn(Raw, *mut Output),
 }
 
 pub(crate) struct Context {
@@ -171,6 +172,13 @@ impl NativeModule {
     }
     pub(crate) fn consume(&self) {
         self.consumed.set(true);
+    }
+    /// The module exactly as LLVM prints it before optimisation.
+    pub(crate) fn print(&self) -> Result<String, String> {
+        let mut out = Output::default();
+        // SAFETY: the live module is read through the synchronous print.
+        unsafe { (self.context.api.module_print)(self.raw, &mut out) };
+        output(out)
     }
 }
 impl Drop for NativeModule {

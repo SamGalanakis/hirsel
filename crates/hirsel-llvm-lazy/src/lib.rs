@@ -263,6 +263,12 @@ impl ReleasePartition<'_> {
         };
         Ok((lowered, sites))
     }
+
+    /// Lower and print the partition's LLVM module before optimisation.
+    pub fn print(self) -> Result<String, String> {
+        let (module, _) = (self.lower)().map_err(|error| error.to_string())?;
+        module.print()
+    }
 }
 
 /// Compose a release program for `target` and generate it in parts, one per

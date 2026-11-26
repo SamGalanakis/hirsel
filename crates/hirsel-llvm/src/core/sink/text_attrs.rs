@@ -22,6 +22,12 @@ pub(super) fn parameter(out: &mut String, p: &Parameter) {
         write!(out, " align {}", p.align).unwrap();
     }
 }
+pub(super) fn function_parameter(out: &mut String, p: &Parameter) {
+    parameter(out, p);
+    if p.task_context {
+        write!(out, " \"{TASK_CONTEXT_ATTRIBUTE}\"").unwrap();
+    }
+}
 pub(super) fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     match attrs.inline {
         Inline::Default => {}
@@ -30,6 +36,9 @@ pub(super) fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     }
     if attrs.cold {
         out.push_str(" cold");
+    }
+    if attrs.noreturn {
+        out.push_str(" noreturn");
     }
     if attrs.nounwind {
         out.push_str(" nounwind");

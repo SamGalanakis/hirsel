@@ -37,8 +37,13 @@ impl Keys {
             .as_ref()
             .map(|sites| sites.roles().collect::<Vec<_>>());
         let roles = facts.then(|| roles.consumed(module));
+        let inline: Vec<_> = analyses
+            .inline
+            .iter()
+            .map(|policy| policy.map(|p| p as u8))
+            .collect();
         let shared = hash_fixed(
-            "hirsel.release-lowering-shared.v1",
+            "hirsel.release-lowering-shared.v2",
             &(
                 (
                     &module.items,
@@ -55,9 +60,9 @@ impl Keys {
                     &items.function_symbols,
                     &items.versioned,
                     &items.step_dispatch,
-                    &analyses.step_variants,
                     &analyses.failures.may_fail,
-                    &analyses.called_in_loop,
+                    inline,
+                    &analyses.noreturn,
                     &analyses.step_neutral,
                     callbacks,
                     hirsel_core_ir::roles::FACTS_SCHEMA,

@@ -25,6 +25,7 @@ const ALIGN: u32 = 11;
 const ARGMEM_READ: u32 = 12;
 const DEREFERENCEABLE: u32 = 13;
 const NOFREE: u32 = 14;
+const NORETURN: u32 = 15;
 const ALIAS_SCOPE: u32 = 0;
 const NOALIAS_SCOPE: u32 = 1;
 const INVARIANT: u32 = 2;
@@ -364,18 +365,21 @@ impl NativeSink {
         if attrs.cold {
             self.attribute(f, FUNCTION, COLD, None, 0);
         }
+        if attrs.noreturn {
+            self.attribute(f, FUNCTION, NORETURN, None, 0);
+        }
         if attrs.nounwind {
             self.attribute(f, FUNCTION, NOUNWIND, None, 0);
         }
         if attrs.argmem_read {
             self.attribute(f, FUNCTION, ARGMEM_READ, None, 0);
         }
-        let string = |key: &str, value: &str| {
+        let string = |target: Raw, key: &str, value: &str| {
             // SAFETY: strings are borrowed through the synchronous call.
             unsafe {
                 (self.api.string_attribute)(
                     self.unit,
-                    f,
+                    target,
                     key.as_ptr().cast(),
                     key.len(),
                     value.as_ptr().cast(),
@@ -383,14 +387,24 @@ impl NativeSink {
                 )
             }
         };
+        for (i, _) in sig
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.task_context)
+        {
+            // SAFETY: the argument at this index belongs to the function just created.
+            let argument = unsafe { (self.api.parameter)(f, i as u32) };
+            string(argument, TASK_CONTEXT_ATTRIBUTE, "");
+        }
         if !attrs.carriers.is_empty() {
-            string("hirsel-carriers", &attrs.carriers);
+            string(f, "hirsel-carriers", &attrs.carriers);
         }
         if attrs.map_probe {
-            string("hirsel-map-probe", "");
+            string(f, "hirsel-map-probe", "");
         }
         if let Some(level) = attrs.level {
-            string("target-features", &level.llvm_features());
+            string(f, "target-features", &level.llvm_features());
         }
         if let Some(scope) = attrs.subprogram {
             let scope = self.md(scope);
@@ -571,19 +585,6 @@ impl Sink for NativeSink {
         unsafe { (self.api.begin_body)(self.unit, f) };
         for (i, &local) in params.iter().enumerate() {
             let argument = unsafe { (self.api.parameter)(f, i as u32) };
-            if local == Local::CONTEXT {
-                // SAFETY: the parameter belongs to this function and the key is static.
-                unsafe {
-                    (self.api.string_attribute)(
-                        self.unit,
-                        argument,
-                        TASK_CONTEXT_ATTRIBUTE.as_ptr().cast(),
-                        TASK_CONTEXT_ATTRIBUTE.len(),
-                        c"".as_ptr(),
-                        0,
-                    );
-                }
-            }
             self.define(local, argument);
         }
     }

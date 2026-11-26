@@ -119,7 +119,7 @@ pub(super) fn emit(
                 Glue::Transfer => transfer_entry_name(x, r),
                 Glue::Resume => transfer_resume_name(x, r),
             },
-            &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::Ptr]),
+            &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::Ptr]).with_task_context(),
             &[Local::CONTEXT, Local::RESULT, Local::INPUT],
             &FnAttrs::private(),
         );

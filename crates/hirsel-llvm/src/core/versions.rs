@@ -20,6 +20,14 @@ pub(super) fn symbol(name: &str, level: Level) -> String {
     format!("{name}.isa{}", level.number)
 }
 
+pub(super) fn stub_attrs(linkage: Linkage) -> FnAttrs {
+    FnAttrs {
+        linkage,
+        inline: Inline::Never,
+        ..FnAttrs::default()
+    }
+}
+
 pub(super) fn stub(
     sink: &mut dyn Sink,
     name: &str,
@@ -29,12 +37,7 @@ pub(super) fn stub(
     suffix: &str,
 ) {
     let full_name = format!("{name}{suffix}");
-    let attrs = FnAttrs {
-        linkage,
-        inline: Inline::Never,
-        ..FnAttrs::default()
-    };
-    sink.begin_function(&full_name, signature, locals, &attrs);
+    sink.begin_function(&full_name, signature, locals, &stub_attrs(linkage));
     let args: Vec<_> = locals.iter().copied().map(Value::from).collect();
     let active = Local::Named("isa.level");
     sink.instruction(

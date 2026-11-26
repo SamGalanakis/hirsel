@@ -24,9 +24,12 @@ pub(super) fn prepare<'m>(
 pub(super) struct Analyses {
     /// The unit's symbols, levels, step dispatch and callback sites.
     pub(super) items: Items,
-    pub(super) step_variants: std::collections::BTreeMap<FuncId, FuncId>,
     pub(super) failures: failure::Failures,
-    pub(super) called_in_loop: Vec<bool>,
+    /// Each defined body's definition-inline decision, read before any
+    /// partition body is freed.
+    inline: Vec<Option<Inline>>,
+    /// No lowering of the body returns to its caller.
+    noreturn: Vec<bool>,
     pub(super) step_neutral: Vec<bool>,
     pub(super) call_layouts: hirsel_core_ir::native_layout::CallLayouts,
     pub(super) local_roles: Option<hirsel_core_ir::roles::Facts>,
@@ -66,11 +69,53 @@ impl Analyses {
             .batch_steps
             .then(|| inlining::CallbackSites::new(module, &step_variants));
         let descriptors = Descriptors::new(module, &items);
+        let failures = failure::Failures::new(module);
+        let called_in_loop = empty::called_in_loop(module);
+        let noreturn = module
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                !failures.may_fail[i]
+                    && f.body.as_ref().is_some_and(|body| {
+                        !body
+                            .insts
+                            .iter()
+                            .any(|inst| matches!(inst, Inst::Step { .. }))
+                            && body.terminators.iter().all(|terminator| {
+                                !matches!(
+                                    terminator,
+                                    Terminator::Return(_)
+                                        | Terminator::Raise { .. }
+                                        | Terminator::Propagate
+                                )
+                            })
+                    })
+            })
+            .collect();
+        let inline = module
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let body = f.body.as_ref()?;
+                let definition = module.instances[f.instance.index()].definition.to_string();
+                Some(inlining::definition(
+                    &definition,
+                    module,
+                    f,
+                    body,
+                    source.batch_steps,
+                    called_in_loop[i],
+                    inlining::specialized(module, &step_variants, FuncId(i as u32)),
+                ))
+            })
+            .collect();
         Self {
             items,
-            step_variants,
-            failures: failure::Failures::new(module),
-            called_in_loop: empty::called_in_loop(module),
+            failures,
+            inline,
+            noreturn,
             step_neutral: steps::neutral_functions(module, provided.neutral),
             call_layouts: hirsel_core_ir::native_layout::CallLayouts::new(&module.types, recipes),
             local_roles: (facts && provided.roles.is_none())
@@ -90,6 +135,38 @@ impl Analyses {
             pending: Default::default(),
             release_sites: None,
             direct: BTreeSet::new(),
+        }
+    }
+
+    /// The attributes of a body, shared by its definition and declarations.
+    pub(super) fn body_attrs(
+        &self,
+        module: &Module,
+        recipes: &[hirsel_core_layout::RecipeRow],
+        roles: Option<&hirsel_core_ir::roles::Facts>,
+        function: FuncId,
+        locals: &[Local],
+        facts: bool,
+    ) -> FnAttrs {
+        let i = function.index();
+        let f = &module.functions[i];
+        let definition = module.instances[f.instance.index()].definition.to_string();
+        FnAttrs {
+            inline: self.inline[i].expect("a defined body has an inline decision"),
+            cold: f.cold,
+            noreturn: facts && self.noreturn[i],
+            // Core and the runtime ABI report failure as a status, without unwinding.
+            nounwind: facts,
+            map_probe: definition == "core@1/map/probe",
+            carriers: carriers(
+                module,
+                recipes,
+                roles,
+                function,
+                &module.signatures[f.signature.index()],
+                locals,
+            ),
+            ..FnAttrs::default()
         }
     }
 }
@@ -212,11 +289,11 @@ pub(super) struct ForeignBody<'n, P> {
     pub(super) attrs: FnAttrs,
 }
 
-/// Record how `body`'s symbols are declared: its bodies and stubs with its
-/// own convention, its public wrappers and public stub with the public one.
+/// Record each symbol's definition attributes and ABI. Every foreign symbol
+/// is declared hidden and only its defining partition owns its debug metadata.
 pub(super) fn foreign_symbols(
     foreign: &mut Foreign,
-    body: ForeignBody<'_, impl FnOnce() -> FnSig>,
+    body: ForeignBody<'_, impl Fn(bool) -> FnSig>,
 ) {
     let ForeignBody {
         name,
@@ -229,14 +306,12 @@ pub(super) fn foreign_symbols(
         public,
         attrs,
     } = body;
-    let public = (private || stubs).then(public);
-    let mut own = |symbol: String, level: Option<Level>| {
-        let attrs = FnAttrs {
-            level,
-            ..attrs.clone()
-        };
-        foreign.insert(symbol, (body.clone(), attrs));
+    let mut declare = |symbol, signature, mut attrs: FnAttrs| {
+        attrs.linkage = Linkage::Hidden;
+        attrs.subprogram = None;
+        foreign.insert(symbol, (signature, attrs));
     };
+    let public_wrapper = private.then(|| public(true));
     let levels: Vec<Option<Level>> = if versioned {
         X86_64_LEVELS.iter().copied().map(Some).collect()
     } else {
@@ -246,30 +321,41 @@ pub(super) fn foreign_symbols(
         Some(level) => versions::symbol(name, level),
         None => name.to_owned(),
     };
-    for &level in &levels {
+    for level in levels {
+        let name = variant(level);
+        let body_name = format!("{name}{suffix}");
+        let attrs = FnAttrs {
+            level,
+            ..attrs.clone()
+        };
         if free {
-            own(
-                format!("{}{suffix}", step_free::checked(&variant(level))),
-                level,
+            declare(
+                format!("{}{suffix}", step_free::checked(&name)),
+                body.clone(),
+                attrs,
+            );
+            declare(
+                body_name,
+                body.clone(),
+                step_free::stub_attrs(Linkage::Hidden),
+            );
+        } else {
+            declare(body_name, body.clone(), attrs);
+        }
+        if let Some(signature) = &public_wrapper {
+            declare(
+                name,
+                signature.clone(),
+                FnAttrs::public_wrapper(level, None),
             );
         }
-        own(format!("{}{suffix}", variant(level)), level);
     }
-    if stubs && private {
-        own(format!("{name}{suffix}"), None);
-    }
-    let Some(public) = public else {
-        return;
-    };
-    // Wrappers, one per variant, and the public stub.
-    let wrappers = levels.into_iter().filter(|_| private);
-    for level in wrappers.chain(stubs.then_some(None)) {
-        let attrs = FnAttrs {
-            linkage: Linkage::Hidden,
-            level,
-            ..FnAttrs::default()
-        };
-        foreign.insert(variant(level), (public.clone(), attrs));
+    if stubs {
+        let attrs = versions::stub_attrs(Linkage::Hidden);
+        if private {
+            declare(format!("{name}{suffix}"), body, attrs.clone());
+        }
+        declare(name.to_owned(), public(false), attrs);
     }
 }
 

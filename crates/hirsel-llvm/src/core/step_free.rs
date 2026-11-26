@@ -9,6 +9,13 @@ pub(super) fn checked(name: &str) -> String {
     format!("{name}.checked")
 }
 
+pub(super) fn stub_attrs(linkage: Linkage) -> FnAttrs {
+    FnAttrs {
+        linkage,
+        ..FnAttrs::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn stub(
     sink: &mut dyn Sink,
@@ -19,11 +26,7 @@ pub(super) fn stub(
     locals: &[Local],
     linkage: Linkage,
 ) {
-    let attrs = FnAttrs {
-        linkage,
-        ..FnAttrs::default()
-    };
-    sink.begin_function(name, signature, locals, &attrs);
+    sink.begin_function(name, signature, locals, &stub_attrs(linkage));
     let args: Vec<_> = locals.iter().copied().map(Value::from).collect();
     let address = Local::Named("step.window.at");
     sink.instruction(

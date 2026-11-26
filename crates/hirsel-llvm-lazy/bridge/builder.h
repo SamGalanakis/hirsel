@@ -97,6 +97,7 @@ typedef struct {
     void (*unit_forward)(HirselLlvmBuilder *, HirselBuilderOutput *);
     void (*end_body)(HirselLlvmBuilder *);
     void (*used)(HirselLlvmBuilder *, LLVMValueRef const *, size_t);
+    void (*module_print)(LLVMModuleRef, HirselBuilderOutput *);
 } HirselLlvmBuilderApi;
 const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api(void);
 #ifdef __cplusplus

@@ -6,7 +6,7 @@ use super::*;
 
 /// `void core_release_last_N_{rc,arc}(ptr context, ptr node)`.
 pub(super) fn release_last_signature() -> FnSig {
-    FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr])
+    FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr]).with_task_context()
 }
 
 impl FunctionEmitter<'_> {

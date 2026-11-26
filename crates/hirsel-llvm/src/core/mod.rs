@@ -479,7 +479,6 @@ fn emit_prepared(
         });
     }
     items.release_sites = release_sites.take();
-    let step_variants = &analyses.step_variants;
     let batch_steps = source.batch_steps;
     // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
     sink.metadata(
@@ -594,7 +593,6 @@ fn emit_prepared(
     }
     let mut next_scope = alias::private_steps(sink);
     let failures = &analyses.failures;
-    let called_in_loop = &analyses.called_in_loop;
     let neutral_functions = analyses.step_neutral.as_slice();
     let call_layouts = &analyses.call_layouts;
     let debug = if source.debug_lines {
@@ -635,42 +633,6 @@ fn emit_prepared(
         let (mut params, locals) = abi.parameters(sig, call_layouts, facts, |place| {
             place_size(module, recipes, place)
         });
-        // Every partition declares the unit's external functions.
-        if f.body.is_some() && !member(i) {
-            foreign_symbols(
-                &mut foreign,
-                ForeignBody {
-                    name: &name,
-                    free: items.step_dispatch[i].is_some(),
-                    versioned,
-                    stubs: versioned && !sig.has_vectors(),
-                    suffix,
-                    private,
-                    body: abi.signature(params),
-                    public: || {
-                        let public = abi::Return::for_signature(target, sig, call_layouts, true);
-                        let (params, _) = public.parameters(sig, call_layouts, facts, |place| {
-                            place_size(module, recipes, place)
-                        });
-                        public.signature(params)
-                    },
-                    attrs: FnAttrs {
-                        linkage: Linkage::Hidden,
-                        cold: f.cold,
-                        carriers: carriers(
-                            module,
-                            recipes,
-                            role_facts,
-                            FuncId(i as u32),
-                            sig,
-                            &locals,
-                        ),
-                        ..FnAttrs::default()
-                    },
-                },
-            );
-            continue;
-        }
         let Some(body) = &f.body else {
             let signature = abi.signature(params);
             if !versioned || !sig.has_vectors() {
@@ -687,6 +649,38 @@ fn emit_prepared(
             }
             continue;
         };
+        let body_attrs = analyses.body_attrs(
+            module,
+            recipes,
+            role_facts,
+            FuncId(i as u32),
+            &locals,
+            facts,
+        );
+        if !member(i) {
+            foreign_symbols(
+                &mut foreign,
+                ForeignBody {
+                    name: &name,
+                    free: items.step_dispatch[i].is_some(),
+                    versioned,
+                    stubs: versioned && !sig.has_vectors(),
+                    suffix,
+                    private,
+                    body: abi.signature(params),
+                    public: |wrapper| {
+                        let public = abi::Return::for_signature(target, sig, call_layouts, true);
+                        let (params, _) =
+                            public.parameters(sig, call_layouts, wrapper && facts, |place| {
+                                place_size(module, recipes, place)
+                            });
+                        public.signature(params)
+                    },
+                    attrs: body_attrs,
+                },
+            );
+            continue;
+        }
         if versioned && !sig.has_vectors() {
             if private {
                 versions::stub(
@@ -824,21 +818,9 @@ fn emit_prepared(
             let body_name = format!("{body_base}{suffix}");
             let attrs = FnAttrs {
                 linkage: if private { own } else { Linkage::WeakOdr },
-                inline: inlining::definition(
-                    &definition,
-                    module,
-                    f,
-                    body,
-                    batch_steps,
-                    called_in_loop[i],
-                    inlining::specialized(module, step_variants, FuncId(i as u32)),
-                ),
-                cold: f.cold,
-                map_probe: definition == "core@1/map/probe",
-                carriers: carriers(module, &recipes, role_facts, FuncId(i as u32), sig, &locals),
-                subprogram: function_debug.map(|d| d.scope),
                 level,
-                ..FnAttrs::default()
+                subprogram: function_debug.map(|d| d.scope),
+                ..body_attrs.clone()
             };
             let signature = e.abi.signature(signature_params);
             e.sink

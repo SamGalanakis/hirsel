@@ -82,6 +82,9 @@ static void unit_forward(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
 static void print(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     std::string text; raw_string_ostream stream(text); u->module->print(stream, nullptr); output(out, text);
 }
+static void module_print(LLVMModuleRef module, HirselBuilderOutput *out) {
+    std::string text; raw_string_ostream stream(text); unwrap(module)->print(stream, nullptr); output(out, text);
+}
 static void print_text(const char *data, size_t len, uint8_t anonymous, HirselBuilderOutput *out) {
     LLVMContext context; SMDiagnostic diagnostic;
     auto buffer = MemoryBuffer::getMemBufferCopy(StringRef(data, len), "hirsel-core");
@@ -207,6 +210,7 @@ static void attribute(HirselLlvmBuilder *u, LLVMValueRef value, unsigned index, 
     case 11: attr = Attribute::getWithAlignment(u->context, Align(n)); break;
     case 13: attr = Attribute::getWithDereferenceableBytes(u->context, n); break;
     case 14: attr = Attribute::get(u->context, Attribute::NoFree); break;
+    case 15: attr = Attribute::get(u->context, Attribute::NoReturn); break;
     default: attr = Attribute::getWithMemoryEffects(u->context, MemoryEffects::argMemOnly(ModRefInfo::Ref)); break;
     }
     if (auto *f = dyn_cast<Function>(unwrap(value))) f->addAttributeAtIndex(index, attr);
@@ -395,6 +399,6 @@ extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
         atomic_rmw, fence, branch, conditional, switch_value, return_value, unreachable,
         module_asm, metadata_ref, metadata_string, metadata_integer, metadata_tuple, metadata_bind, named_metadata,
         attach, location, metadata_value, di_file, di_compile_unit, di_subroutine_type, di_subprogram, di_location,
-        di_lexical_block_file, shuffle, extract_element, insert_element, unit_forward, end_body, used};
+        di_lexical_block_file, shuffle, extract_element, insert_element, unit_forward, end_body, used, module_print};
     return &api;
 }

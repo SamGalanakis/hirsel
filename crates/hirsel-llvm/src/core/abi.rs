@@ -144,7 +144,7 @@ impl Return {
             params.push(Parameter::sret(self.storage.clone()));
             locals.push(Local::SRET);
         }
-        params.push(Type::Ptr.into());
+        params.push(Parameter::task_context());
         locals.push(Local::CONTEXT);
         if sig.dest.is_some() && self.record.is_none() {
             params.push(Parameter {
@@ -856,12 +856,7 @@ impl FunctionEmitter<'_> {
         let (params, locals) = self
             .abi
             .parameters(sig, layouts, facts, |p| self.place_layout(p).0);
-        let attrs = FnAttrs {
-            linkage: Linkage::WeakOdr,
-            subprogram: debug.map(|(scope, _)| scope),
-            level: self.level,
-            ..FnAttrs::default()
-        };
+        let attrs = FnAttrs::public_wrapper(self.level, debug.map(|(scope, _)| scope));
         let signature = self.abi.signature(params);
         self.sink.begin_function(name, &signature, &locals, &attrs);
         let args = signature

@@ -155,7 +155,7 @@ const DIRECT_DEPTH: u64 = 32;
 
 /// `void core_direct_T(ptr context, ptr payload, i64 depth, i64 caller_site)`.
 fn direct_signature() -> FnSig {
-    FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr, Type::I64, Type::I64])
+    FnSig::plain(Type::Void, [Type::Ptr, Type::Ptr, Type::I64, Type::I64]).with_task_context()
 }
 const DEPTH: Local = Local::Named("depth");
 
@@ -232,14 +232,14 @@ pub(super) fn drop_signature() -> FnSig {
     // status (abi::Return::core), so a finalizer's calls agree with its definition.
     FnSig {
         extension: Extension::Zero,
-        ..FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::I64])
+        ..FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::I64]).with_task_context()
     }
 }
 /// `zeroext i1 (ptr context, ptr payload, ptr cursor, ptr worklist)`: true when done.
 pub(super) fn step_signature() -> FnSig {
     FnSig {
         extension: Extension::Zero,
-        ..FnSig::plain(Type::I1, [Type::Ptr, Type::Ptr, Type::Ptr, Type::Ptr])
+        ..FnSig::plain(Type::I1, [Type::Ptr, Type::Ptr, Type::Ptr, Type::Ptr]).with_task_context()
     }
 }
 pub(super) const STEP_PARAMS: [Local; 4] = [

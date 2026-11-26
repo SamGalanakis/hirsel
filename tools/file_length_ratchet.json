@@ -494,9 +494,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-llvm/src/core/sink.rs": {
-    "lines": 1141,
-    "raise_revision": 2,
-    "reason": "coverage-c3-2578"
+    "lines": 1145,
+    "raise_revision": 3,
+    "reason": "release-foreign-decl-attrs-2999"
   },
   "crates/hirsel-llvm/src/core/split.rs": {
     "lines": 1048,

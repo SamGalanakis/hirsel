@@ -407,6 +407,7 @@ pub(super) struct Parameter {
     pub sret: Option<Type>,
     pub byval: Option<Type>,
     pub align: u32,
+    pub task_context: bool,
 }
 impl Parameter {
     pub fn plain(ty: Type) -> Self {
@@ -419,6 +420,7 @@ impl Parameter {
             sret: None,
             byval: None,
             align: 0,
+            task_context: false,
         }
     }
     pub fn extended(ty: Type, extension: Extension) -> Self {
@@ -430,6 +432,12 @@ impl Parameter {
     pub fn sret(storage: Type) -> Self {
         Self {
             sret: Some(storage),
+            ..Self::plain(Type::Ptr)
+        }
+    }
+    pub fn task_context() -> Self {
+        Self {
+            task_context: true,
             ..Self::plain(Type::Ptr)
         }
     }
@@ -457,6 +465,10 @@ impl FnSig {
     }
     pub fn plain(result: Type, params: impl IntoIterator<Item = Type>) -> Self {
         Self::new(result, params.into_iter().map(Parameter::plain).collect())
+    }
+    pub fn with_task_context(mut self) -> Self {
+        self.params[0].task_context = true;
+        self
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -506,6 +518,7 @@ pub(super) struct FnAttrs {
     pub inline: Inline,
     /// LANG-8 `cold fn`: the definition is cold (with `inline: Never`).
     pub cold: bool,
+    pub noreturn: bool,
     pub nounwind: bool,
     pub argmem_read: bool,
     pub map_probe: bool,
@@ -522,6 +535,7 @@ impl Default for FnAttrs {
             linkage: Linkage::External,
             inline: Inline::Default,
             cold: false,
+            noreturn: false,
             nounwind: false,
             argmem_read: false,
             map_probe: false,
@@ -535,6 +549,17 @@ impl FnAttrs {
     pub fn private() -> Self {
         Self {
             linkage: Linkage::Private,
+            ..Self::default()
+        }
+    }
+    pub fn public_wrapper(
+        level: Option<hirsel_core_layout::isa::Level>,
+        subprogram: Option<usize>,
+    ) -> Self {
+        Self {
+            linkage: Linkage::WeakOdr,
+            level,
+            subprogram,
             ..Self::default()
         }
     }
@@ -757,7 +782,7 @@ fn rebind(code: &str, bound: &std::collections::HashMap<String, String>) -> Stri
 }
 
 mod text_attrs;
-use text_attrs::{function_attrs, parameter};
+use text_attrs::{function_attrs, function_parameter, parameter};
 
 impl Sink for TextSink {
     fn global(&mut self, g: &Global) {
@@ -819,7 +844,7 @@ impl Sink for TextSink {
             if i != 0 {
                 out.push_str(", ");
             }
-            parameter(out, p);
+            function_parameter(out, p);
         }
         out.push(')');
         function_attrs(out, attrs);
@@ -922,10 +947,7 @@ impl Sink for TextSink {
             if i != 0 {
                 out.push_str(", ");
             }
-            parameter(out, p);
-            if *local == Local::CONTEXT {
-                write!(out, " \"{TASK_CONTEXT_ATTRIBUTE}\"").unwrap();
-            }
+            function_parameter(out, p);
             write!(out, " {local}").unwrap();
         }
         out.push(')');

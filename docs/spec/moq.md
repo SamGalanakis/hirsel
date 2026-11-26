@@ -52,7 +52,7 @@ pub type ObjectStatus = Normal | EndOfGroup | EndOfTrack | DoesNotExist
 pub type Limits { requests: u32, tracks: u32, control_bytes: u32, filter_ranges: u16, max_early_streams: u16, max_timeout_ms: u64 }
 pub type RelayLimits { cache_groups: u32, cache_bytes: u64, per_track_cache_bytes: u64, max_objects_per_group: u32, max_object_bytes: u64 }
 pub type Event = Setup(authority: Bytes, path: Bytes, token: Option[Bytes]) | Subscribe(id: RequestId, track: TrackName, filter: Filter, priority: u8, token: Option[Bytes]) | Publish(id: RequestId, track: TrackName, token: Option[Bytes]) | Fetch(id: RequestId, track: TrackName, from: Location, to: Location, token: Option[Bytes]) | Received(Object) | Unknown(track: TrackName, from: Location, to: Location) | Malformed(track: TrackName) | Done(id: RequestId, code: u64) | Goaway(uri: Bytes) | Closed(code: u64)
-pub type RelayEvent = Authorize(session: u32, id: RequestId, scope: Scope, track: TrackName, token: Option[Bytes]) | Evicted(scope: Scope, track: TrackName, groups: u32, bytes: u64) | Ended(session: u32, code: u64)
+pub type RelayEvent = Authorize(session: u32, id: RequestId, scope: Scope, track: TrackName, token: Option[Bytes]) | Evicted(scope: Scope, track: TrackName, groups: u32, size: u64) | Ended(session: u32, code: u64)
 
 pub fn session(side: quic.Side, role: Role, t: Transport, limits: Limits) -> Session
 pub fn receive(mut s: Session, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[Event])

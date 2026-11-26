@@ -45,7 +45,7 @@ mod ending;
 pub use crossing::Cross;
 use crossing::{TapeHelper, tape_group};
 use ending::end_take;
-mod packing;
+pub(crate) mod packing;
 pub(crate) mod takes;
 pub(crate) use packing::CrossSend;
 use packing::{drop_packed_owners, free_owners, pack, unpack, unpack_owners};

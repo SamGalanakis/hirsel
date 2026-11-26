@@ -749,18 +749,18 @@ or a `Shared` payload, is:
 
 | field | width |
 |---|---|
-| plain | `bytes`: the value's inline bytes at the receiving type's layout, with every owner word (each sequence carrier, handle word, capability word and function word) written as zero bytes |
+| plain | `bytes`: the value's inline bytes at the receiving type's layout, with padding and every owner word (each sequence carrier, handle word, capability word and function word) written as zero bytes |
 | part count | `varint` |
-| parts | each a part tag `u8`, then: 0 **sequence**: `bytes`, the elements in index order at their layout, their own owner words zeroed; 1 **handle**: a snapshot (below); 2 **function**: `bytes`, the function's identity bytes |
+| parts | each a part tag `u8`, then: 0 **sequence**: `bytes`, the elements in index order at their layout, their padding and owner words zeroed; 1 **handle**: a snapshot (below); 2 **function**: `bytes`, the function's identity bytes |
 
 Parts come in owner order: the value's owner words by ascending offset, and each sequence's
 part is followed at once by the parts of the owner words inside its elements, element by
-element, before the next owner word of the value that holds the sequence. A plain variant
+element, before the next owner word of the value that holds the sequence. Padding crosses
+as zero, including any bytes outside a variant's tag and active fields. A plain variant
 holds owner words only in its active case: a capability or function word of that case is an
-owner word and gets a part, and the words of its other cases are plain bytes, since they
-hold no handle. The `cross` descriptor lists each case's words behind a guard row that names
-the case by its tag word, so the recorder reads the tag to pick them, in the value and in
-each element of a sequence. The format reads a
+owner word and gets a part. The `cross` descriptor lists each case's owner words and padding
+behind a guard row that names the case by its tag word, both inline and in sequence elements.
+The format reads a
 value without its type. Matching the parts to the receiving type's owners, their kinds and
 each sequence's length as a multiple of its element size, is the replay's: a mismatch is
 `Diverged(Take)` in a `TAKE` and `Diverged(Op)` at position 0 in an entry, as for a

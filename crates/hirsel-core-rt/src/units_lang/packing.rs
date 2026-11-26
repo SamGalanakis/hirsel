@@ -1,23 +1,129 @@
 //! An item's flat bytes and sequence contents, packed for a crossing and
 //! rebuilt where it arrives.
 use super::*;
+use crate::units::ledger::conn::ConnCore;
+use hirsel_core_layout::cross::{self, ELEMENT, PADDING};
+use std::ops::Range;
+
+/// Copy a value's flat span, zeroing the padding in the destination.
+pub(crate) unsafe fn copy_flat(
+    from: *const u8,
+    to: *mut u8,
+    at: u64,
+    bytes: usize,
+    rows: &[[u64; 4]],
+) {
+    if bytes != 0 {
+        // SAFETY: the caller supplies disjoint spans and the layout's rows.
+        unsafe {
+            ptr::copy_nonoverlapping(from.add(at as usize), to, bytes);
+            clear_padding(from, to, at..at + bytes as u64, rows, false);
+        }
+    }
+}
+
+/// Copy a sequence's plain elements, zeroing each element's own padding.
+pub(crate) unsafe fn copy_elements(
+    from: *const u8,
+    to: *mut u8,
+    bytes: usize,
+    stride: usize,
+    rows: &[[u64; 4]],
+) {
+    // SAFETY: the spans hold complete elements and are disjoint.
+    unsafe {
+        ptr::copy_nonoverlapping(from, to, bytes);
+        if rows.iter().any(|r| r[1] == (PADDING | ELEMENT)) {
+            for offset in (0..bytes).step_by(stride) {
+                clear_padding(
+                    from.add(offset),
+                    to.add(offset),
+                    0..stride as u64,
+                    rows,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+unsafe fn clear_padding(
+    from: *const u8,
+    to: *mut u8,
+    copied: Range<u64>,
+    rows: &[[u64; 4]],
+    element: bool,
+) {
+    cross::padding(
+        rows,
+        element,
+        &|at, width| {
+            let mut tag = [0; 8];
+            // SAFETY: a case row reads only its initialized tag.
+            unsafe {
+                ptr::copy_nonoverlapping(from.add(at as usize), tag.as_mut_ptr(), width as usize)
+            };
+            u64::from_le_bytes(tag)
+        },
+        |at, bytes| {
+            // A tape entry copies just its input field. The wrapper can
+            // have its own padding outside that field.
+            let start = at.max(copied.start);
+            let end = (at + bytes).min(copied.end);
+            if start < end {
+                // SAFETY: the intersection lies within the destination.
+                unsafe {
+                    to.add((start - copied.start) as usize)
+                        .write_bytes(0, (end - start) as usize)
+                };
+            }
+        },
+    );
+}
+
+/// Append a native copy that initializes all `bytes` in the spare capacity.
+/// The copy may move uninitialized padding, but clears it before returning.
+///
+/// # Safety
+/// `copy` must fully initialize the destination.
+pub(crate) unsafe fn append(data: &mut Vec<u8>, bytes: usize, copy: impl FnOnce(*mut u8)) {
+    data.reserve(bytes);
+    copy(data.spare_capacity_mut().as_mut_ptr().cast());
+    // SAFETY: the copy initialized the new bytes.
+    unsafe { data.set_len(data.len() + bytes) };
+}
+
+/// The source and physical length of a sequence's elements.
+unsafe fn content(value: *const u8, [offset, _, stride, _]: &[u64; 4]) -> (*const u8, usize) {
+    // SAFETY: the value holds this sequence carrier.
+    unsafe {
+        let at = value.add(*offset as usize);
+        (word(at) as *const u8, (word(at.add(8)) * stride) as usize)
+    }
+}
 
 /// Copy `value` and its owners' content into one buffer.
 pub(super) unsafe fn pack(value: *const u8, bytes: u64, owners: &[[u64; 4]]) -> Vec<u8> {
-    // SAFETY: `value` is an initialized item of `bytes` bytes.
+    // SAFETY: `value` holds the live fields and sequences of the item.
     unsafe {
-        let content = |o: &[u64; 4]| {
-            let at = value.add(o[0] as usize);
-            (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
-        };
-        let seqs = owners.iter().filter(|o| o[1] == SEQ);
-        let mut data =
-            Vec::with_capacity(bytes as usize + seqs.clone().map(|o| content(o).1).sum::<usize>());
-        data.extend_from_slice(std::slice::from_raw_parts(value, bytes as usize));
-        for o in seqs {
-            let (p, n) = content(o);
+        let seqs = cross::sequences(owners);
+        let bytes = bytes as usize;
+        let mut data = Vec::with_capacity(
+            bytes
+                + seqs
+                    .clone()
+                    .map(|(o, _)| content(value, o).1)
+                    .sum::<usize>(),
+        );
+        append(&mut data, bytes, |to| {
+            copy_flat(value, to, 0, bytes, owners)
+        });
+        for (o, rows) in seqs {
+            let (p, n) = content(value, o);
             if n > 0 {
-                data.extend_from_slice(std::slice::from_raw_parts(p, n));
+                append(&mut data, n, |to| {
+                    copy_elements(p, to, n, o[2] as usize, rows)
+                });
             }
         }
         data
@@ -49,25 +155,18 @@ impl CrossSend {
     pub(crate) unsafe fn copy_into(
         &self,
         slot: *mut u8,
-        stride: usize,
-        seqs: &[[u64; 4]],
+        conn: &ConnCore,
         charge: u64,
         spare: &mut Box<[MaybeUninit<u64>]>,
     ) -> Box<[MaybeUninit<u64>]> {
         // SAFETY: the reserved slot has the connection's item layout. The
         // sender pins every source buffer through publication.
         unsafe {
-            if stride != 0 {
-                ptr::copy_nonoverlapping(self.value, slot, stride);
-            }
-            let content = |o: &[u64; 4]| {
-                let at = self.value.add(o[0] as usize);
-                (word(at) as *const u8, (word(at.add(8)) * o[2]) as usize)
-            };
-            if seqs.is_empty() {
+            copy_flat(self.value, slot, 0, conn.stride, &conn.rows);
+            if conn.seqs.is_empty() {
                 return Box::default();
             }
-            let bytes: usize = seqs.iter().map(|o| content(o).1).sum();
+            let bytes: usize = conn.seqs.iter().map(|o| content(self.value, o).1).sum();
             if bytes == 0 && charge == 0 {
                 return Box::default();
             }
@@ -80,10 +179,10 @@ impl CrossSend {
             room[0].write(charge);
             let to = room.as_mut_ptr().add(1).cast::<u8>();
             let mut at = 0;
-            for o in seqs {
-                let (p, n) = content(o);
+            for (o, rows) in cross::sequences(&conn.rows) {
+                let (p, n) = content(self.value, o);
                 if n != 0 {
-                    ptr::copy_nonoverlapping(p, to.add(at), n);
+                    copy_elements(p, to.add(at), n, o[2] as usize, rows);
                     at += n;
                 }
             }

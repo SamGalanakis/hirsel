@@ -1,8 +1,8 @@
 //! A `cross` value's descriptor, and the recording a helper carries.
 use crate::tasks;
 
-/// The owners of a `cross` type, as the emitter writes them: per owner
-/// `[offset, kind, element bytes, element logical size]`. `at` and `len` are
+/// The owner and padding rows of a `cross` type, as the emitter writes them.
+/// Owner rows are `[offset, kind, element bytes, element logical size]`. `at` and `len` are
 /// the span of the value a recorder writes: a task entry's `x` inside its
 /// wrapped input, else the whole value.
 #[repr(C)]

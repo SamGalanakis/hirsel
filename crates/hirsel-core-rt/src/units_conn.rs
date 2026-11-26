@@ -129,6 +129,7 @@ pub(crate) struct ConnCore {
     /// it before the release, and a sender takes it after its admission.
     spare: UnsafeCell<CrossRoom>,
     pub(crate) stride: usize,
+    pub(crate) rows: Box<[[u64; 4]]>,
     pub(crate) seqs: Box<[[u64; 4]]>,
     pub(crate) socket_offsets: Box<[u64]>,
     free: Option<Box<Mutex<FreeArrivals>>>,
@@ -465,6 +466,7 @@ impl UnitCtx {
             },
             spare: UnsafeCell::new(Box::default()),
             stride,
+            rows: owners.into(),
             seqs: owners
                 .iter()
                 .copied()
@@ -529,24 +531,14 @@ impl UnitCtx {
             Outgoing::Cross(source) => unsafe {
                 #[cfg(test)]
                 let tag = source.tag;
-                let room = if index == 0 {
+                let mut empty = Box::default();
+                let spare = if index == 0 {
                     // SAFETY: this sender holds slot 0's reservation.
-                    source.copy_into(
-                        c.flat_ptr(index),
-                        c.stride,
-                        &c.seqs,
-                        bytes,
-                        &mut *c.spare.get(),
-                    )
+                    &mut *c.spare.get()
                 } else {
-                    source.copy_into(
-                        c.flat_ptr(index),
-                        c.stride,
-                        &c.seqs,
-                        bytes,
-                        &mut Box::default(),
-                    )
+                    &mut empty
                 };
+                let room = source.copy_into(c.flat_ptr(index), c, bytes, spare);
                 let v = Value::cross(room, source.sockets);
                 #[cfg(test)]
                 let v = Value { tag, ..v };

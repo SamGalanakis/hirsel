@@ -35,7 +35,7 @@ pub fn main(r: Random, out: Stdout) -> Result[(), Exit] waits {
 "#;
 
 /// A capability in a plain variant's active case crosses as its snapshot,
-/// and one in an inactive case is plain bytes (recording.md, "Values"),
+/// and padding crosses as zero (recording.md, "Values"),
 /// hand-derived before the first run.
 /// - `Option[Random]` has a direct 1-byte tag at 0 (`Some` is case 1) and the
 ///   word at 8: 16 bytes. Connection g+1 (client g+2) takes `Some` as 16
@@ -51,10 +51,8 @@ pub fn main(r: Random, out: Stdout) -> Result[(), Exit] waits {
 ///   word is outside the niche).
 /// - The draws are `RANDOM`s on g+3 and g+6.
 ///
-/// Bytes 1..8 after each `Option`'s tag are padding, and the whole of a
-/// `None`'s payload is plain: neither is written by the program, so the law
-/// masks them. On main a variant lists no owners: the words cross raw with no
-/// parts.
+/// Bytes 1..8 after each `Option`'s tag and the unused payload of `None`
+/// must be zero. The list element's padding previously carried stack bytes.
 #[test]
 #[ignore = "explicit native integration target"]
 fn rl9_variant_capabilities_cross() {
@@ -76,7 +74,7 @@ fn rl9_variant_capabilities_cross() {
             .iter()
             .filter(|f| matches!(f, Frame::Grant { .. }))
             .count() as u8;
-        let mut items: Vec<_> = root
+        let items: Vec<_> = root
             .iter()
             .filter_map(|f| match f {
                 Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
@@ -85,12 +83,6 @@ fn rl9_variant_capabilities_cross() {
                 _ => None,
             })
             .collect();
-        // Padding and a `None`'s payload: [item, from, to).
-        for (item, from, to) in [(0, 4, 11), (1, 4, 19), (2, 31, 38)] {
-            if let Some(bytes) = items.get_mut(item).and_then(|i| i.get_mut(from..to)) {
-                bytes.fill(0);
-            }
-        }
         let some = [vec![1], vec![0; 15]].concat();
         let expected = [
             [vec![0, g + 1, 16], some.clone(), vec![1, 1, 5, g + 3, 3, 0]].concat(),
@@ -187,6 +179,10 @@ fn rl9_helper_key_object_survives_by_name() {
             ordinal: 0,
             amount: 64,
         };
-        assert_eq!(ends, [vec![share]], "{backend:?}: the helper end's survivors");
+        assert_eq!(
+            ends,
+            [vec![share]],
+            "{backend:?}: the helper end's survivors"
+        );
     }
 }

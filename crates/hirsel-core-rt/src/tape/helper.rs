@@ -13,7 +13,10 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::units_lang::Cross;
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, ELEMENT, FUNCTION, SECRET, SEQ, SHARED, live};
+use crate::units_lang::packing::{append, copy_elements, copy_flat};
+use hirsel_core_layout::cross::{
+    CAPABILITY, CLIENT, ELEMENT, FUNCTION, PADDING, SECRET, SEQ, SHARED, elements, live,
+};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Stream numbers: unique in the process, so in each recording's file.
@@ -453,7 +456,7 @@ pub(super) unsafe fn capability_words(
 }
 const NO_IDENTITY: &str = "the entry's function has no code identity (a closure)";
 
-/// A value that crosses units: its plain bytes with each owner word zeroed,
+/// A value that crosses units: its plain bytes with padding and owner words zeroed,
 /// then a part per owner in ascending offset order, each sequence's part
 /// followed by the parts of its elements' owner words, element by element. A
 /// packed value (an item in a connection) passes `content`, its sequences'
@@ -465,9 +468,15 @@ pub(super) unsafe fn value(
     content: Option<*const u8>,
     handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
 ) -> Result<Vec<u8>, &'static str> {
-    // SAFETY: the value holds `x.len` initialized bytes at `x.at`.
-    let mut plain =
-        unsafe { std::slice::from_raw_parts(base.add(x.at as usize), x.len as usize) }.to_vec();
+    let mut plain = Vec::new();
+    let bytes = x.len as usize;
+    // SAFETY: the span contains the live fields described by the rows. The
+    // copy initializes any padding before exposing it as bytes.
+    unsafe {
+        append(&mut plain, bytes, |to| {
+            copy_flat(base, to, x.at, bytes, x.owners())
+        });
+    }
     let read = |at: u64| {
         // SAFETY: an owner row names initialized words of the value.
         unsafe { base.add(at as usize).cast::<u64>().read_unaligned() }
@@ -485,12 +494,11 @@ pub(super) unsafe fn value(
     let mut owners = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        let n = rows[i + 1..]
-            .iter()
-            .take_while(|r| r[1] & ELEMENT != 0)
-            .count();
-        owners.push((rows[i], &rows[i + 1..i + 1 + n]));
-        i += 1 + n;
+        let inner = elements(&rows[i + 1..]);
+        if rows[i][1] != PADDING {
+            owners.push((rows[i], inner));
+        }
+        i += 1 + inner.len();
     }
     let mut packed = BTreeMap::new();
     if let Some(content) = content {
@@ -521,15 +529,19 @@ pub(super) unsafe fn value(
                     continue;
                 }
                 let from = packed.get(&at).copied().unwrap_or(read(at) as *const u8);
-                // SAFETY: a sequence carrier, or the packed content, names
-                // its initialized elements.
-                let elements = unsafe { std::slice::from_raw_parts(from, bytes) };
+                let start = parts.len();
+                // SAFETY: the carrier or packed content names these live
+                // elements. The copy initializes their padding.
+                unsafe {
+                    append(&mut parts, bytes, |to| {
+                        copy_elements(from, to, bytes, element as usize, inner)
+                    });
+                }
                 if inner.is_empty() {
-                    parts.extend_from_slice(elements);
                     continue;
                 }
                 // Each element's owner words zeroed, then their parts.
-                let mut elements = elements.to_vec();
+                let elements = &mut parts[start..];
                 let inner: Vec<_> = inner
                     .iter()
                     .map(|&[offset, kind, low, count]| [offset, kind & !ELEMENT, low, count])
@@ -545,6 +557,9 @@ pub(super) unsafe fn value(
                     });
                     words.sort_by_key(|o| o[0]);
                     for [offset, kind, ..] in words {
+                        if kind == PADDING {
+                            continue;
+                        }
                         let at = base + offset as usize;
                         let held = &mut elements[at..at + 8];
                         let word = u64::from_le_bytes((&*held).try_into().unwrap());
@@ -553,7 +568,6 @@ pub(super) unsafe fn value(
                         count += 1;
                     }
                 }
-                parts.extend_from_slice(&elements);
                 parts.extend_from_slice(&tail);
             }
             SHARED => {

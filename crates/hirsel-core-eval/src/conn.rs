@@ -133,24 +133,37 @@ impl Machine<'_> {
     /// clients move with the bytes.
     pub(super) fn cross_take(&mut self, at: u64, ty: TypeRef, owners: &[[u64; 4]]) -> Item {
         let charge = self.cross_charge(at, owners);
-        let bytes = self.get(at, self.held(ty) as usize).to_vec();
+        let size = self.held(ty) as usize;
+        let mut bytes = self.get(at, size).to_vec();
+        self.clear_cross_padding(at, &mut bytes, owners, false);
         let mut seqs = Vec::new();
-        for o in owners.iter().filter(|o| o[1] == SEQ && o[2] != 0) {
-            let carrier = at + o[0];
+        for (&[offset, _, stride, logical], rows) in cross::sequences(owners) {
+            if stride == 0 {
+                continue;
+            }
+            let carrier = at + offset;
             let (p, len, cap) = (
                 self.load(carrier, 8),
                 self.load(carrier + 8, 8),
                 self.load(carrier + 16, 8),
             );
-            let n = (len * o[2]) as usize;
-            seqs.push(if n == 0 {
-                Vec::new()
-            } else {
-                self.get(p, n).to_vec()
-            });
+            let n = (len * stride) as usize;
+            let mut elements = Vec::new();
+            if n != 0 {
+                elements.extend_from_slice(self.get(p, n));
+                if rows
+                    .iter()
+                    .any(|r| r[1] == (cross::PADDING | cross::ELEMENT))
+                {
+                    for (i, element) in elements.chunks_exact_mut(stride as usize).enumerate() {
+                        self.clear_cross_padding(p + i as u64 * stride, element, rows, true);
+                    }
+                }
+            }
+            seqs.push(elements);
             // Capacity 0 is empty or static data the carrier does not own.
             if cap != 0 {
-                self.free_as(p, charge::seq(cap, o[3]), None, "a crossing buffer");
+                self.free_as(p, charge::seq(cap, logical), None, "a crossing buffer");
             }
         }
         Item {
@@ -158,6 +171,15 @@ impl Machine<'_> {
             seqs,
             charge,
         }
+    }
+
+    fn clear_cross_padding(&self, at: u64, bytes: &mut [u8], rows: &[[u64; 4]], element: bool) {
+        cross::padding(
+            rows,
+            element,
+            &|offset, width| self.load(at + offset, width as usize),
+            |offset, len| bytes[offset as usize..(offset + len) as usize].fill(0),
+        );
     }
 
     /// Write `item` at `dest`, each buffer fresh at its length and charged to

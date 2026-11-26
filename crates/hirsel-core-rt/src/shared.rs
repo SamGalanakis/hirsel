@@ -22,9 +22,9 @@ use crate::{
     block::Block,
     tasks,
     units::ledger::{ArrivalRef, Body, Port},
-    units_lang::{Cross, LangUnit},
+    units_lang::{Cross, LangUnit, packing::copy_flat},
 };
-use hirsel_core_layout::cross::{CAPABILITY, CASE, ELEMENT, FUNCTION, SEQ, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CASE, ELEMENT, FUNCTION, PADDING, SEQ, SHARED};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::{Arc, Mutex};
@@ -117,7 +117,7 @@ pub unsafe extern "C" fn hirsel_core_shared_new(
             count: AtomicU64::new(1),
         });
         let payload = header.add(1).cast::<u8>();
-        ptr::copy_nonoverlapping(x, payload, size as usize);
+        copy_flat(x, payload, 0, size as usize, rows);
         // What the node holds of its home's limit: the node and each buffer.
         let held = charge
             + rows
@@ -234,16 +234,16 @@ pub(crate) unsafe fn clean(unit: &mut LangUnit, context: *mut Context, node: *mu
             std::slice::from_raw_parts(owners, rows as usize)
         };
         for o in rows {
-            let at = payload.add(o[0] as usize);
             match o[1] {
                 SEQ => {
+                    let at = payload.add(o[0] as usize);
                     let cap = word(at.add(16));
                     if cap != 0 {
                         free(context, word(at) as *mut u8, round8(cap * o[3]));
                     }
                 }
-                SHARED => release(unit, context, word(at) as *mut u8),
-                CAPABILITY | FUNCTION => {}
+                SHARED => release(unit, context, word(payload.add(o[0] as usize)) as *mut u8),
+                CAPABILITY | FUNCTION | PADDING => {}
                 kind if kind & (ELEMENT | CASE) != 0 => {}
                 // Clients and sockets are resources, never shareable (OWN-4).
                 _ => unreachable!("a resource in a Shared payload"),

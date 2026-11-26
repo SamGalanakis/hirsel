@@ -294,6 +294,12 @@ HirselCoreHostOutcome hirsel_core_host_recv_bounded(HirselCoreContext *, uint64_
 HirselCoreHostOutcome hirsel_core_host_recv_ready(HirselCoreContext *, uint64_t, uint8_t, uint64_t, uint64_t, uint64_t);
 /* STDIN_READ (32): append at most the caller's existing spare capacity. */
 HirselCoreHostOutcome hirsel_core_stdin_read(HirselCoreContext *, uint64_t, HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
+/* STDIN_SECRET (182): one echo-off terminal line, sealed by the host under
+   the policy in the String carrier. Outcome.value is the Secret's
+   designation. Errors: 1 NotTerminal, 2 Busy, 3 Empty, 4 TooLong, 5 Eof,
+   6 TimedOut, 7 Aborted, 8 Other(errno), 9 the policy (code 1 Invalid, code 2
+   Capacity with value requested and written available). */
+HirselCoreHostOutcome hirsel_core_stdin_read_secret(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint8_t, uint64_t, uint64_t, uint64_t);
 /* Env get and name return a borrowed carrier address in Outcome.value (zero for None). */
 HirselCoreHostOutcome hirsel_core_env_get(HirselCoreContext *, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_env_len(HirselCoreContext *, uint64_t, uint64_t);

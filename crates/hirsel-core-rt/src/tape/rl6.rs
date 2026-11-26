@@ -365,7 +365,7 @@ fn take_cases() {
             (1, None, 5, 4, 48)
         ]
     );
-    survivor[7] = 6;
+    survivor[7] = 7;
     assert_eq!(
         Decoder::default().block(&take(0, &survivor), false),
         Err(Corrupt)
@@ -515,7 +515,7 @@ fn designation_and_returned_value() {
     assert_eq!(result.bytes(), full);
     assert_eq!(result.canonical(), canonical);
 
-    full[6] = 6;
+    full[6] = 7;
     assert_eq!(Value::decode(&full), Err(Corrupt));
 }
 

@@ -59,6 +59,9 @@ pub(crate) enum Made {
     /// by its delivery position under a tape (0 otherwise).
     Fetched(u64),
     GeneratedP256(u64),
+    /// A line read from the terminal by `stdin.read_secret`, designated by
+    /// its `STDIN_SECRET` delivery position under a tape (0 otherwise).
+    Prompted(u64),
 }
 
 impl Origin {
@@ -82,7 +85,9 @@ impl Origin {
     /// derived or unwrapped from one (TLS-5).
     pub(crate) fn opaque(self) -> bool {
         match self.made {
-            Made::Granted(_) | Made::Fetched(_) | Made::GeneratedP256(_) => true,
+            Made::Granted(_) | Made::Fetched(_) | Made::GeneratedP256(_) | Made::Prompted(_) => {
+                true
+            }
             Made::Sealed(_) => false,
             Made::Derived { opaque, .. } | Made::Unwrapped { opaque, .. } => opaque,
         }
@@ -98,6 +103,7 @@ impl Origin {
             Made::Unwrapped { ordinal, .. } => (3, ordinal),
             Made::Fetched(ordinal) => (4, ordinal),
             Made::GeneratedP256(ordinal) => (5, ordinal),
+            Made::Prompted(ordinal) => (6, ordinal),
         }
     }
 
@@ -584,7 +590,7 @@ pub(crate) unsafe fn designate(context: *mut Context, secret: Secret) -> Outcome
     }
 }
 
-unsafe fn policy(to: *const Buffer) -> Option<SecretPolicy> {
+pub(crate) unsafe fn policy(to: *const Buffer) -> Option<SecretPolicy> {
     let bytes = unsafe { crate::tls::bytes(&*to) };
     SecretPolicy::parse(std::str::from_utf8(bytes).ok()?)
 }
@@ -597,7 +603,7 @@ pub(crate) const INVALID: Outcome = Outcome {
     kind: 0,
 };
 
-fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
+pub(crate) fn admit(payer: Payer, policies: &[Pattern], len: u64) -> Result<Charge, Outcome> {
     admit_size(payer, SecretGrant::logical_size(policies, len))
 }
 
@@ -614,7 +620,7 @@ fn admit_size(payer: Payer, size: Option<u64>) -> Result<Charge, Outcome> {
     }
 }
 
-unsafe fn store_sealed(
+pub(crate) unsafe fn store_sealed(
     context: *mut Context,
     policy: SecretPolicy,
     bytes: Option<Arc<SecretBytes>>,

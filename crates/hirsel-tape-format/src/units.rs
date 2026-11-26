@@ -277,7 +277,7 @@ fn snapshot(c: &mut Cursor<'_>, kind: u8) -> Result<bool, Corrupt> {
             c.u32()?;
         }
         7 => {
-            tag(c, 5)?;
+            tag(c, 6)?;
             origin(c)?;
             let text = std::str::from_utf8(c.bytes()?).map_err(|_| Corrupt)?;
             let policy = hirsel_core_net::SecretPolicy::parse(text).ok_or(Corrupt)?;
@@ -398,7 +398,7 @@ fn read_arrival<'a>(c: &mut Cursor<'a>) -> Result<Arrival<'a>, Corrupt> {
                     if !SURVIVOR_KINDS.contains(&kind) {
                         return Err(Corrupt);
                     }
-                    let origin_kind = matches!(kind, 2 | 7).then(|| tag(c, 5)).transpose()?;
+                    let origin_kind = matches!(kind, 2 | 7).then(|| tag(c, 6)).transpose()?;
                     Ok(Survivor {
                         kind,
                         origin_kind,

@@ -3,3 +3,7 @@ pub type StdinError = Aborted | TimedOut | Other(u32)
 pub fn read(i: Stdin, mut buf: Bytes, until: Until) -> Result[u64, StdinError] waits
 
 pub fn is_terminal(i: Stdin) -> bool
+
+pub type SecretReadError = NotTerminal | Busy | Empty | TooLong | Eof | Aborted | TimedOut | Policy(SecretError) | Other(u32)
+
+pub fn read_secret(i: Stdin, uses: String, until: Until) -> Result[Secret, SecretReadError] waits

@@ -166,6 +166,8 @@ pub enum HostOp {
     TlsServerName = 176,
     /// A stream's terminal size, as `cols | rows << 16`, or 0 for none.
     StreamSize = hirsel_core_ids::host_op::TERM_SIZE as isize,
+    /// `stdin.read_secret`: an echo-off line, sealed by the host.
+    StdinSecret = hirsel_core_ids::host_op::STDIN_SECRET as isize,
 }
 
 mod name;
@@ -344,6 +346,7 @@ impl HostOp {
         HostOp::UdpLocalAddr,
         HostOp::NetNarrowUnix,
         HostOp::StdinRead,
+        HostOp::StdinSecret,
         HostOp::EnvGet,
         HostOp::EnvLen,
         HostOp::EnvName,
@@ -682,7 +685,9 @@ impl HostOp {
                     results,
                 )
             }
-            HostOp::StdinRead => (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome),
+            HostOp::StdinRead | HostOp::StdinSecret => {
+                (vec![V(u64_), V(p), V(u8_), V(u64_), V(u64_)], outcome)
+            }
             HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
             HostOp::SleepUntil | HostOp::SleepUntilWall => (vec![V(u64_), V(u64_)], outcome),
             HostOp::Stat | HostOp::StatFile => {

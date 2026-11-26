@@ -171,6 +171,9 @@ host_ops! {
     /// A granted terminal stream's size (`stdout.size`, `stderr.size`). The value is
     /// `cols | rows << 16`, zero when the descriptor gives no size.
     TERM_SIZE = 181,
+    /// `stdin.read_secret`: one echo-off terminal line, sealed by the host.
+    /// The value is the Secret's designation.
+    STDIN_SECRET = 182,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

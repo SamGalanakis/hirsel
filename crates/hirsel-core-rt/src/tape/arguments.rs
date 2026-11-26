@@ -36,6 +36,20 @@ unsafe fn operands(r: &Request) -> Args {
             }
             return Args::of(&args);
         }
+        if r.operation == STDIN_SECRET {
+            // The deadline and the policy text; never the line or its length.
+            let read = &*r.path.cast::<crate::stdin_secret::SecretRequest>();
+            let mut args = Vec::new();
+            if let Some((_, clock, at)) = read.until {
+                put_varint(&mut args, ordinal_of(clock) as u64);
+                args.extend_from_slice(&at.to_le_bytes());
+            } else {
+                args.push(0);
+            }
+            put_varint(&mut args, read.policy.len() as u64);
+            args.extend_from_slice(read.policy.as_bytes());
+            return Args::of(&args);
+        }
         if r.operation == SCRAM_VERIFY {
             return Args::of(buffer_bytes(&r.buffer));
         }

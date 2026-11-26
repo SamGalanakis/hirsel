@@ -369,6 +369,16 @@ impl Out {
         {
             return Err(Corrupt);
         }
+        // A prompted secret is designated by its delivery position; a failure
+        // is one of the read's own cases or Other(errno), never a length.
+        if op == op::STDIN_SECRET
+            && ((status == OK) != (value != 0)
+                || (status == ERROR
+                    && !((1..=5).contains(&error.0) && error.1 == 0
+                        || error.0 == 8 && u32::try_from(error.1).is_ok())))
+        {
+            return Err(Corrupt);
+        }
         if (error.0 == 10 && op != op::UNIX_LISTEN)
             || (error.0 == 11 && (op != op::LISTEN || error.1 != 0))
         {

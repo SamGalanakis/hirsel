@@ -698,7 +698,12 @@ fn creates_object(op: u8) -> bool {
 }
 
 fn waiting_io(op: u8) -> bool {
-    socket_op(op) || unix_operation(op) || udp_operation(op) || matches!(op, STDIN_READ | EXEC_WAIT)
+    socket_op(op) || unix_operation(op) || udp_operation(op) || stream_wait(op)
+}
+
+/// A standard input read or a child's exit, which wait after issue.
+fn stream_wait(op: u8) -> bool {
+    matches!(op, STDIN_READ | STDIN_SECRET | EXEC_WAIT)
 }
 
 fn waiting_io_status(error: u8) -> u8 {
@@ -1687,12 +1692,11 @@ unsafe fn replay(
         // nothing else runs before its completion. Ready it only when its
         // recorded Done comes next, as `complete` will accept; any other
         // frame is the divergence `complete` would report.
-        if (matches!(
+        let parks = matches!(
             op,
-            SYNC | SYNC_DIR | RESOLVE | CRED_FETCH | STDIN_READ | EXEC_WAIT | UDP_RECV | UDP_SEND
-        ) || unix::can_park(op))
-            && !crate::tasks::has_provider_task()
-        {
+            SYNC | SYNC_DIR | RESOLVE | CRED_FETCH | UDP_RECV | UDP_SEND
+        );
+        if (parks || stream_wait(op) || unix::can_park(op)) && !crate::tasks::has_provider_task() {
             if !matches!(rep.peek()?, Frame::Done { gap, task: t, .. }
                 if *t == task && live.schedule.last.checked_add(*gap) == Some(live.schedule.events))
             {

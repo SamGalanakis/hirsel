@@ -351,6 +351,7 @@ impl Function<'_, '_, '_> {
                     | HostOp::SecretAeadSeal
                     | HostOp::SecretAeadOpen
                     | HostOp::StdinRead
+                    | HostOp::StdinSecret
                     | HostOp::StreamTerminal
                     | HostOp::StreamSize
                     | HostOp::EnvGet

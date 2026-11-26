@@ -78,12 +78,14 @@ mod signature;
 #[cfg(all(feature = "standalone", not(test)))]
 mod standalone_allocator;
 mod stdin;
+mod stdin_secret;
 pub mod steps;
 mod stop_signals;
 #[cfg(feature = "record")]
 pub mod tape;
 mod task_heap;
 pub mod tasks;
+mod term_restore;
 #[cfg(feature = "testing")]
 pub mod test_provider;
 pub mod tls;

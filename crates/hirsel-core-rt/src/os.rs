@@ -666,6 +666,13 @@ pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64
         probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
         return step;
     }
+    if unsafe { (*request).operation == STDIN_SECRET } {
+        // SAFETY: STDIN_SECRET carries the adapter's live secret request.
+        let step = unsafe { crate::stdin_secret::step(request, token, true) };
+        #[cfg(test)]
+        probe::note(probe::ISSUE, request, probe::answer(&step.outcome));
+        return step;
+    }
     if unsafe { (*request).operation == STDIN_READ } {
         // SAFETY: STDIN_READ carries the adapter's live Stdin request.
         let step = unsafe { (crate::stdin::operations(request).step)(request, token, true) };
@@ -703,6 +710,8 @@ unsafe extern "C" fn resume(state: *mut u8, request: *mut Request, token: u64) -
             (crate::exec_runtime::operations(request).process)(&mut *request, token)
         } else if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).step)(request, token, false)
+        } else if (*request).operation == STDIN_SECRET {
+            crate::stdin_secret::step(request, token, false)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).step)(&*state.cast(), &mut *request, token, false)
         } else if udp_operation((*request).operation) {
@@ -724,6 +733,8 @@ unsafe extern "C" fn abort(
             (crate::exec_runtime::operations(request).abort)(&mut *request, reason)
         } else if (*request).operation == STDIN_READ {
             (crate::stdin::operations(request).abort)(request, token, reason)
+        } else if (*request).operation == STDIN_SECRET {
+            crate::stdin_secret::abort(request, token, reason)
         } else if unix_operation((*request).operation) {
             (unix_operations(request).abort)(&*state.cast(), &mut *request, token, reason)
         } else if udp_operation((*request).operation) {

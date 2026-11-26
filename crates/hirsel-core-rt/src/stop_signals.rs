@@ -151,6 +151,11 @@ impl Drop for Relay {
     }
 }
 
+/// Whether a Process stop relay owns `SIGINT` and `SIGTERM` in this process.
+pub(crate) fn relayed() -> bool {
+    SIGNAL_FD.load(Ordering::Acquire) != DISARMED
+}
+
 extern "C" fn handle(signal: i32) {
     loop {
         let fd = SIGNAL_FD.load(Ordering::Acquire);
@@ -162,6 +167,8 @@ extern "C" fn handle(signal: i32) {
                 return;
             }
             NOTIFYING | RECEIVED => {
+                // A secret read's terminal modes go back first.
+                crate::term_restore::restore_now();
                 // SAFETY: only async-signal-safe POSIX calls. Unblock this
                 // signal on this thread and take its default crash action.
                 unsafe {

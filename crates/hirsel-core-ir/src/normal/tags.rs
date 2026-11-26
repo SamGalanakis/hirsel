@@ -574,6 +574,7 @@ tags!(HostOp {
     183 => ScheduleSframeOpener,
     184 => ScheduleSframeRatchet,
     185 => StreamSize,
+    186 => StdinSecret,
 });
 
 tags!(RaiseCause {

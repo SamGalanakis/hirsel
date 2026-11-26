@@ -19,6 +19,7 @@ mod net_error;
 mod provide;
 mod secret_kdf;
 mod secret_key;
+mod stdin_secret;
 mod target_unsupported;
 mod tls_result;
 mod udp_runtime;
@@ -2828,6 +2829,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if op == HostOp::CredFetch {
             return self.runtime_cred_fetch(f, vals, result, n);
+        }
+        if op == HostOp::StdinSecret {
+            return self.runtime_stdin_secret(f, vals, result, n);
         }
         let u = Ty::Scalar(Scalar::U64);
         let key = if matches!(

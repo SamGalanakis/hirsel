@@ -175,9 +175,9 @@
     "reason": "h-release-1895"
   },
   "crates/hirsel-core-driver/src/lib.rs": {
-    "lines": 1476,
-    "raise_revision": 6,
-    "reason": "runner-place-provenance-2819"
+    "lines": 1474,
+    "raise_revision": 7,
+    "reason": "cli-s4-secret-2713"
   },
   "crates/hirsel-core-driver/src/native.rs": {
     "lines": 2756,
@@ -260,9 +260,9 @@
     "lines": 1308
   },
   "crates/hirsel-core-front/src/body/core_ops.rs": {
-    "lines": 3236,
-    "raise_revision": 10,
-    "reason": "cli-s2-prims-2712"
+    "lines": 3240,
+    "raise_revision": 11,
+    "reason": "cli-s4-secret-2713"
   },
   "crates/hirsel-core-front/src/body/key_glue.rs": {
     "lines": 2851,
@@ -446,9 +446,9 @@
     "lines": 1018
   },
   "crates/hirsel-core-rt/src/tape/mod.rs": {
-    "lines": 1919,
-    "raise_revision": 4,
-    "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
+    "lines": 1923,
+    "raise_revision": 5,
+    "reason": "cli-s4-secret-2713"
   },
   "crates/hirsel-core-rt/src/tape/run.rs": {
     "lines": 1104

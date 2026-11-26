@@ -55,7 +55,7 @@ None => string.push(mut s, "none"),
 }
 "#;
 
-fn product_of(dir: &Path, source: &str) -> Arc<CheckProduct> {
+pub(crate) fn product_of(dir: &Path, source: &str) -> Arc<CheckProduct> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let mut request = crate::tests::request(source, dir);
     request.entry = Some(crate::DefPath::from_full("app@1/main/main").unwrap());

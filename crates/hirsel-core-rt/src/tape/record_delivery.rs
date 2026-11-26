@@ -12,8 +12,9 @@ pub(super) unsafe fn record_out(
 ) -> (Out, Outcome, Delivery) {
     let ordinal = ordinal_of(r.handle);
     let ok = o.status == 0 && o.error == IoError::OK;
-    if ok && r.operation == CRED_FETCH {
-        // The fetched key is designated by this delivery's tape position.
+    if ok && matches!(r.operation, CRED_FETCH | STDIN_SECRET) {
+        // The fetched key or prompted line is designated by this delivery's
+        // tape position.
         o.value = live.schedule.events + 1;
     }
     let mut out = Out {

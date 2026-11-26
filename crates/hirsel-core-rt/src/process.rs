@@ -570,6 +570,8 @@ pub unsafe extern "C" fn hirsel_core_args_get(
 /// Only async-signal-safe writes and _exit are used so
 /// the stack overflow handler can take the same path from its alternate stack.
 pub fn stop(name: &[u8]) -> ! {
+    // A secret read's terminal modes go back before the process ends.
+    crate::term_restore::restore_now();
     // SAFETY: static/borrowed bytes remain live until _exit, no Rust unwinding.
     unsafe {
         let fd = crate::fiber::stop_fd();

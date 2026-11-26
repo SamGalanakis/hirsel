@@ -396,6 +396,11 @@ pub(super) unsafe fn replay_out(
         {
             return Err(Fault::Corrupt);
         }
+    } else if op == STDIN_SECRET && ok {
+        // The designation is the delivery's position; the line stays unread.
+        if out.value != live.schedule.events {
+            return Err(Fault::Corrupt);
+        }
     } else if op == CRED_FETCH && ok {
         if out.value != live.schedule.events {
             return Err(Fault::Corrupt);

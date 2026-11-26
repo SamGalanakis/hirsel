@@ -163,10 +163,14 @@ prompt.
   `stdin.read`. If another read of the stream is pending, from any copy of `Stdin`, the
   result is `Busy` and the terminal is not touched. Bytes the helper holds from an earlier
   read are dropped when the modes change, and the mode change itself discards input typed
-  before it (`TCSAFLUSH`), so typed-ahead input is discarded, as `getpass` does.
-- **Modes.** Echo is cleared and `ECHONL` is set; canonical input, the signal characters
-  and `ICRNL` are kept as the terminal had them. So the line is edited as usual, Ctrl-C
-  still signals, and the terminal itself echoes the Enter as a newline. Nothing else is
+  before it (`TCSAFLUSH`), so typed-ahead input is discarded, as `getpass` does. The read
+  leaves the helper's queue only once the modes are restored, so a `stdin.read` queued
+  behind it starts after that flush: it never sees the rest of an over-long line, or a line
+  typed while a timeout or a cancellation was ending the read.
+- **Modes.** Echo is cleared, and `ECHONL` and canonical input (`ICANON`) are set; the
+  signal characters and `ICRNL` are kept as the terminal had them. So the line is edited
+  as usual, even on a terminal left in non-canonical mode, Ctrl-C still signals, and the
+  terminal itself echoes the Enter as a newline. Nothing else is
   written: no `Stderr` is needed.
 - **The line.** Bytes up to the first newline, with the newline and a `\r` before it
   removed. End of input after some bytes (Ctrl-D mid-line) ends the line there. An empty
@@ -177,13 +181,19 @@ prompt.
 - **Restore.** The modes the terminal had before the call are put back before the call
   returns, whatever its result. They are also put back if the run ends while the read is
   pending: at the run's end, at a run stop (status 102, before `_exit`), and on the
-  terminating arm of each signal handler below. A process killed by `SIGKILL` cannot
-  restore its terminal; `stty sane` repairs it, as after any program.
+  terminating arm of each signal handler below. A run stop and a handler restore only
+  while the terminal still holds the modes the call set, apart from `FLUSHO` and `PENDIN`,
+  which the kernel changes as output and input state, so a run stopped by `SIGTTOU`
+  before its change, and killed from there, writes nothing over the modes the foreground
+  has set since. A process killed by `SIGKILL` cannot restore its terminal; `stty sane`
+  repairs it, as after any program.
 - **Signals.** At the first `read_secret` of a run, the host installs a handler that
   restores the modes and then takes the signal's default action, for `SIGHUP` and
   `SIGQUIT`, and for `SIGINT` and `SIGTERM` when the run has no `Process` stop relay. A
-  signal whose action is ignore when the handler would be installed (a run under `nohup`)
-  keeps it. The previous actions are put back at the run's end. With `Process`, the first
+  signal whose action is not the default when the handler would be installed keeps it:
+  one that is ignored (a run under `nohup`) or one an embedding host handles. The previous
+  actions are put back at the run's end, except where another owner, such as the stop relay
+  of a run overlapping in the same process, has set the action since. With `Process`, the first
   `SIGINT` or `SIGTERM` still completes `host.stopped`: the program cancels the read, and
   the cancellation restores the modes. A second one takes the relay's default action,
   which restores first. `SIGTSTP` and `SIGCONT` are not handled: an interactive shell saves
@@ -222,11 +232,12 @@ yet. Covered in `crates/hirsel-core-driver/src/secret_prompt_fixture.rs`.
 
 | law | bug caught | verification setup |
 |---|---|---|
-| **A. The line becomes a secret and is not echoed** | echo left on, bytes copied into program memory, a missing or doubled newline | Type `hunter2` and Enter on the master. The program writes `hmac_sha256(secret, "data")` and the tag equals the value computed by hand. The master's output holds none of the typed bytes and exactly one newline. |
+| **A. The line becomes a secret and is not echoed** | echo left on, bytes copied into program memory, a missing or doubled newline, a read that keeps non-canonical mode | Type `hunter2` and Enter on the master. The program writes `hmac_sha256(secret, "data")` and the tag equals the value computed by hand. The master's output holds none of the typed bytes and exactly one newline. The same holds on a pty that starts in non-canonical mode, whose modes come back non-canonical. |
 | **B. Restored on a terminating signal** | a handler that dies without restoring, or no handler | With no `Process` grant, send `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` to a program blocked in the read. Each run dies by that signal and the modes are as before. |
 | **C. The stop relay keeps the first signal** | a handler that takes `SIGINT` from `host.stopped`, or a relay arm that dies without restoring | With `Process`, the first `SIGINT` completes `host.stopped`, the program cancels the read and gets `Aborted`, and the modes are restored. A program that ignores `host.stopped` and gets `SIGINT` until it dies is restored too. |
 | **D. Restored after a timeout and a run stop** | a deadline or `_exit(102)` path that skips the restore | `until` 200 ms ahead gives `TimedOut` with the modes restored. A run stop during the read exits 102 with the modes restored. |
 | **E. `SIGTTOU` during restore** | a restore that stops the process instead of restoring | The test is the pty's session leader and starts the program in its own foreground group. Once the program is blocked in the read, the test makes its own group the foreground one and sends `SIGTERM`. The modes are restored and the program dies by `SIGTERM`, not stopped. |
-| **E2. A background read changes nothing** | arming that blocks `SIGTTOU` and turns echo off under the foreground | The program starts in a background group of the pty's session and calls `read_secret`. It is stopped by `SIGTTOU` and the modes are unchanged. |
+| **E2. A background read changes nothing** | arming that blocks `SIGTTOU` and turns echo off under the foreground, or a handler that restores a change never made | The program starts in a background group of the pty's session and calls `read_secret`. It is stopped by `SIGTTOU` with the modes unchanged. The test changes a mode, then sends `SIGTERM` and `SIGCONT`: the program dies by `SIGTERM` and the test's change stays. |
 | **F. The recording holds no secret** | a recorded line, length or length-dependent charge | Record two runs that type secrets of different lengths: neither tape holds the typed bytes, and their `STDIN_SECRET` frames are identical. A replay on pipes ends `Sealed`. |
+| **H. Nothing reaches a read queued behind** | a read that leaves the queue before the restore's flush | A task's `stdin.read` is queued behind the secret read, and the test stops the terminal's output (Ctrl-S) behind a pending write, so each restore waits in its drain. Typing 1100 bytes and Enter gives `TooLong`; a line typed after `until` passes gives `TimedOut`; one typed after a cancellation gives `Aborted`. After Ctrl-Q, the queued read gets only the line typed next. |
 | **G. Not a terminal** | an echoing fallback, or a check that consumes input | With stdin on a pipe holding `abc`, the call gives `NotTerminal` and a following `stdin.read` reads `abc`. |

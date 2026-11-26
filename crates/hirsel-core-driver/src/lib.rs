@@ -28,6 +28,8 @@ mod product;
 mod property_corpus;
 pub mod sdk;
 pub mod sdk_command;
+#[cfg(test)]
+mod secret_prompt_fixture;
 mod tape_cli;
 #[cfg(test)]
 mod terminal_fixture;

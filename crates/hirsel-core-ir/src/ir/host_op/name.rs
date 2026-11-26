@@ -129,6 +129,7 @@ impl HostOp {
             HostOp::ScramVerify => "scram_verify",
             HostOp::Stopped => "host_stopped",
             HostOp::StdinRead => "stdin_read",
+            HostOp::StdinSecret => "stdin_secret",
             HostOp::EnvGet => "env_get",
             HostOp::EnvLen => "env_len",
             HostOp::EnvName => "env_name",

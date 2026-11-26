@@ -192,6 +192,8 @@ _strrchr
 _strspn
 _sysconf
 _sysctlbyname
+_tcgetattr
+_tcsetattr
 _unlink
 _unlinkat
 _unsetenv

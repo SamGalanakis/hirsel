@@ -96,6 +96,7 @@ impl HostOp {
             Self::ScramFinalLen => "hirsel_core_scram_final_len",
             Self::ScramVerify => "hirsel_core_scram_verify",
             Self::StdinRead => "hirsel_core_stdin_read",
+            Self::StdinSecret => "hirsel_core_stdin_read_secret",
             Self::EnvGet => "hirsel_core_env_get",
             Self::EnvLen => "hirsel_core_env_len",
             Self::EnvName => "hirsel_core_env_name",

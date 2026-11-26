@@ -71,7 +71,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::PortReply => &["u64"; 9],
         HostOp::PortFill | HostOp::UdpFillPackets => &["u64", "u64", "ptr"],
         HostOp::ProvideClock | HostOp::ClockAdvance | HostOp::ClockSetWall => &["u64", "u64"],
-        HostOp::StdinRead => &["u64", "ptr", "u8", "u64", "u64"],
+        HostOp::StdinRead | HostOp::StdinSecret => &["u64", "ptr", "u8", "u64", "u64"],
         HostOp::EnvName => &["u64", "u64"],
         HostOp::Open => &["u64", "ptr", "u8"],
         HostOp::Close

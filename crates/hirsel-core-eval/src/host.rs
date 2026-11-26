@@ -32,6 +32,9 @@ impl Machine<'_> {
             return Ok(self.secret_policy(t, op, a));
         }
         self.deny_describe_capability();
+        if op == HostOp::StdinSecret {
+            return self.stdin_secret(t, a);
+        }
         let mode = if op == HostOp::Open { a[2] as u8 } else { 0 };
         if needs_writable_dir(op as u8, mode) && a[0] & DIR_READ_ONLY != 0 {
             self.check_cancel(t)?;
@@ -209,7 +212,8 @@ impl Machine<'_> {
             | HostOp::ProvideExec
             | HostOp::PortFill
             | HostOp::StreamTerminal
-            | HostOp::StreamSize => {
+            | HostOp::StreamSize
+            | HostOp::StdinSecret => {
                 unreachable!()
             }
             // The model world grants no Cred (TLS-7), so no call reaches here.

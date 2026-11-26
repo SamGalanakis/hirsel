@@ -176,7 +176,7 @@ fn out_for(opcode: u8, size: usize, entropy: &[u8]) -> Out {
         value = 0;
     } else if matches!(
         opcode,
-        op::MEDIA_P256_KEY | op::MEDIA_KEY_SHARE | op::SECRET_KDF
+        op::MEDIA_P256_KEY | op::MEDIA_KEY_SHARE | op::SECRET_KDF | op::STDIN_SECRET
     ) {
         value = size as u64 + 1;
     } else if opcode == op::MEDIA_AGREEMENT {

@@ -1,6 +1,28 @@
 use super::*;
 
 impl Machine<'_> {
+    /// `stdin.read_secret`: the policy, then seal's charge at 1024 bytes, both
+    /// before the provider. The model's stdin is never a terminal, so a call
+    /// past them refunds the charge and is `NotTerminal` (error 1). A policy
+    /// refusal is error 9 with code 1 (Invalid) or 2 (Capacity).
+    pub(super) fn stdin_secret(&mut self, t: &mut Task, a: &[u64]) -> X<Vec<u64>> {
+        let Some(policy) = std::str::from_utf8(self.carrier_bytes(a[1]))
+            .ok()
+            .and_then(SecretPolicy::parse)
+        else {
+            return Ok(vec![0, 9, 1, 0]);
+        };
+        let size = SecretGrant::logical_size(&policy.send, 1024);
+        let charge = size.unwrap_or(u64::MAX);
+        let payer = t.limits.last().unwrap().clone();
+        if let Err(available) = self.admit_charge(&payer, charge, size.is_none()) {
+            return Ok(vec![charge, 9, 2, available]);
+        }
+        self.refund(payer, charge);
+        self.check_cancel(t)?;
+        Ok(vec![0, 1, 0, 0])
+    }
+
     pub(super) fn secret_policy(&mut self, t: &Task, op: HostOp, a: &[u64]) -> Vec<u64> {
         let Some(policy) = std::str::from_utf8(self.carrier_bytes(a[1]))
             .ok()

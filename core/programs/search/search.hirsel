@@ -98,6 +98,29 @@ fn unpack(raw: Bytes) -> Result[Packed, store.Error] {
     Ok(Packed(keys: take keys, offsets: take offsets, pairs: take pairs, heads: take heads))
 }
 
+// The reader keeps the Bytes delivered by the posting codec. These offsets
+// delimit the same four sections the projector edits separately.
+type PostingBlock {
+    raw: Bytes,
+    pairs_at: u64,
+    heads_at: u64,
+    keys_at: u64
+}
+
+fn posting_block(take raw: Bytes) -> Result[PostingBlock, store.Error] {
+    if list.len(raw) < 16 {
+        return Error(MigrationFault)
+    }
+    let count: u64 = list.word_le(raw, 0)
+    let pairs_at = 16 + 8 * count
+    let heads_at = pairs_at + 16 * count
+    let keys_at = heads_at + 8 * count
+    if keys_at > list.len(raw) {
+        return Error(MigrationFault)
+    }
+    Ok(PostingBlock(raw: take raw, pairs_at: pairs_at, heads_at: heads_at, keys_at: keys_at))
+}
+
 // The derived tables, keyed by generation first: block headers and packed
 // postings (generation, term, block), each term's newest block number
 // (generation, term), and each row's mention (generation, key bytes). With the key codec and the extractor they are the fold's env.

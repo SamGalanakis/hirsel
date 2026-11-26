@@ -1,47 +1,104 @@
 // Search form B's block-max reading of one generation (STORE-SPEC §1.2
 // "Search form B"): per-term cursors over packed blocks, block-max windows
 // and the MaxScore split. The query in search.hirsel runs it per generation.
-// A block's bound under the query's statistics: its largest contribution
-// over its frontier. Each correctly rounded operation of `contribution` is
-// monotone, so no posting's computed contribution exceeds it.
-fn block_bound(scoring: Scoring, weight: f64, block: Block) -> f64 {
-    let mut most: f64 = 0.0
-    for (tf, length) in block.frontier {
-        let c = contribution(scoring.params, length_norm(scoring, length), weight, tf)
-        if float.gt(c, most) {
-            most = c
-        }
-    }
-    most
+// A header addresses the last key and frontier in the term's two buffers.
+// Consecutive headers delimit consecutive frontiers.
+type Header {
+    last_at: u64,
+    last_end: u64,
+    frontier_at: u64,
+    count: u64,
+    head: u64
 }
 
-// One query term's postings in one generation: its block headers and
-// bounds, the block `at` (the first whose last key is past every window
-// read so far) and, once loaded, that block's postings with `pos` the
-// current one, `head` its key's head and `stop` the first past the window.
+// A term in one generation of the query's transaction. The first header
+// past the consumed windows is at `at`. Only this block can have a cached
+// bound or loaded postings. `pos` is the current posting and `stop` is the
+// first past the window.
 type Cursor {
-    blocks: List[Block],
-    bounds: List[f64],
+    headers: List[Header],
+    last_keys: Bytes,
+    frontiers: List[(u64, u64)],
     at: u64,
+    maximum: f64,
+    bounded: bool,
     loaded: bool,
-    data: Packed,
+    data: PostingBlock,
     pos: u64,
     stop: u64,
     head: u64
 }
 
-fn compare_key(c: Cursor, p: u64, target: Bytes) -> Order {
-    let start: u64 = list.word_le(c.data.offsets, p * 8)
-    let end: u64 = list.word_le(c.data.offsets, p * 8 + 8)
-    list.compare_bytes(list.slice(c.data.keys, start, end), target)
+fn term_cursor[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String) -> Result[Cursor, store.Error] {
+    let mut headers: List[Header] = list.new()
+    let mut last_keys: Bytes = list.new()
+    let mut frontiers: List[(u64, u64)] = list.new()
+    let mut rows = store.range(tx, s.derived.blocks, Included((g, clone(term), 0u32)), Included((g, clone(term), LAST_BLOCK)))?
+    while let Some((_, take block)) = store.next_in(tx, mut rows)? {
+        let last_at = list.len(last_keys)
+        list.append(mut last_keys, block.last)
+        let frontier_at = list.len(frontiers)
+        list.append(mut frontiers, block.frontier)
+        list.push(mut headers, Header(last_at: last_at, last_end: list.len(last_keys), frontier_at: frontier_at, count: block.count, head: key_head(block.last)))
+    }
+    let empty = PostingBlock(raw: list.new(), pairs_at: 0, heads_at: 0, keys_at: 0)
+    Ok(Cursor(headers: take headers, last_keys: take last_keys, frontiers: take frontiers, at: 0, maximum: 0.0, bounded: false, loaded: false, data: take empty, pos: 0, stop: 0, head: 0))
 }
 
-fn key_copy(c: Cursor) -> Bytes {
-    let start: u64 = list.word_le(c.data.offsets, c.pos * 8)
-    let end: u64 = list.word_le(c.data.offsets, c.pos * 8 + 8)
-    let mut out: Bytes = list.with_capacity(end - start)
-    list.append(mut out, list.slice(c.data.keys, start, end))
-    take out
+fn last_key(c: Cursor, i: u64) -> View[Bytes] in c {
+    let h = view c.headers[i]
+    list.slice(c.last_keys, h.last_at, h.last_end)
+}
+
+// Evaluate the same per-tf frontier as the stored block. Computing the
+// greatest contribution with the query's arithmetic preserves exact bounds.
+fn ensure_bound(scoring: Scoring, weight: f64, mut c: Cursor) {
+    if c.bounded {
+        return
+    }
+    let start = c.headers[c.at].frontier_at
+    let stop = if c.at + 1 < list.len(c.headers) {
+        c.headers[c.at + 1].frontier_at
+    } else {
+        list.len(c.frontiers)
+    }
+    let mut most: f64 = 0.0
+    for (tf, length) in list.slice(c.frontiers, start, stop) {
+        let value = contribution(scoring.params, length_norm(scoring, length), weight, tf)
+        if float.gt(value, most) {
+            most = value
+        }
+    }
+    c.maximum = most
+    c.bounded = true
+}
+
+fn next_block(mut c: Cursor) {
+    c.at += 1
+    c.loaded = false
+    c.bounded = false
+}
+
+fn posting_key(c: Cursor, p: u64) -> View[Bytes] in c {
+    let offsets = list.slice(c.data.raw, 8, c.data.pairs_at)
+    let start: u64 = list.word_le(offsets, p * 8)
+    let end: u64 = list.word_le(offsets, p * 8 + 8)
+    list.slice(list.slice(c.data.raw, c.data.keys_at, list.len(c.data.raw)), start, end)
+}
+
+fn posting_head(c: Cursor, p: u64) -> u64 {
+    list.word_le(list.slice(c.data.raw, c.data.heads_at, c.data.keys_at), p * 8)
+}
+
+fn compare_posting(c: Cursor, p: u64, head: u64, target: Bytes) -> Order {
+    let current = posting_head(c, p)
+    if current < head {
+        return Less
+    }
+    if current > head {
+        return Greater
+    }
+    list.compare_bytes(posting_key(c, p), target)
 }
 
 // Orders two cursors by their current keys: by head, then by bytes.
@@ -53,21 +110,17 @@ fn compare_current(left: Cursor, right: Cursor) -> Order {
             Greater
         }
     }
-    let ls: u64 = list.word_le(left.data.offsets, left.pos * 8)
-    let le: u64 = list.word_le(left.data.offsets, left.pos * 8 + 8)
-    let rs: u64 = list.word_le(right.data.offsets, right.pos * 8)
-    let re: u64 = list.word_le(right.data.offsets, right.pos * 8 + 8)
-    list.compare_bytes(list.slice(left.data.keys, ls, le), list.slice(right.data.keys, rs, re))
+    list.compare_bytes(posting_key(left, left.pos), posting_key(right, right.pos))
 }
 
 // The first posting from `from` in the loaded block whose key is past
 // `target`.
-fn first_after(c: Cursor, from: u64, target: Bytes) -> u64 {
+fn first_after(c: Cursor, from: u64, head: u64, target: Bytes) -> u64 {
     let mut low = from
-    let mut high = c.blocks[c.at].count
+    let mut high = c.headers[c.at].count
     while low < high {
         let middle = low + (high - low) / 2
-        if compare_key(c, middle, target) == Greater {
+        if compare_posting(c, middle, head, target) == Greater {
             high = middle
         } else {
             low = middle + 1
@@ -91,7 +144,7 @@ fn catch_up(mut c: Cursor, head: u64, key: Bytes) {
             low += 1
             while low < high {
                 let middle = low + (high - low) / 2
-                if compare_key(c, middle, key) == Less {
+                if compare_posting(c, middle, head, key) == Less {
                     low = middle + 1
                 } else {
                     high = middle
@@ -106,33 +159,34 @@ fn behind(c: Cursor, head: u64, key: Bytes) -> bool {
     if c.head != head {
         return c.head < head
     }
-    compare_key(c, c.pos, key) == Less
+    list.compare_bytes(posting_key(c, c.pos), key) == Less
 }
 
 fn set_pos(mut c: Cursor, p: u64) {
     c.pos = p
-    if p < c.blocks[c.at].count {
-        c.head = list.word_le(c.data.heads, p * 8)
+    if p < c.headers[c.at].count {
+        c.head = posting_head(c, p)
     }
 }
 
 // The current posting's contribution.
 fn posting_contribution(scoring: Scoring, weight: f64, c: Cursor) -> f64 {
-    let tf: u64 = list.word_le(c.data.pairs, c.pos * 16)
-    let length: u64 = list.word_le(c.data.pairs, c.pos * 16 + 8)
+    let pairs = list.slice(c.data.raw, c.data.pairs_at, c.data.heads_at)
+    let tf: u64 = list.word_le(pairs, c.pos * 16)
+    let length: u64 = list.word_le(pairs, c.pos * 16 + 8)
     contribution(scoring.params, length_norm(scoring, length), weight, tf)
 }
 
 // Reads the cursor's block if it is not read, and sets `stop` to its first
 // posting past `end`.
-fn ready_cursor[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String, mut c: Cursor, low: Option[Bytes], end: Bytes) -> Result[(), store.Error] {
+fn ready_cursor[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String, mut c: Cursor, low: Option[Bytes], end_head: u64, end: Bytes) -> Result[(), store.Error] {
     if !c.loaded {
         load(tx, s, g, term, mut c, low)?
     }
-    c.stop = if list.compare_bytes(c.blocks[c.at].last, end) == Equal {
-        c.blocks[c.at].count
+    c.stop = if ends_at(c, end_head, end) {
+        c.headers[c.at].count
     } else {
-        first_after(c, c.pos, end)
+        first_after(c, c.pos, end_head, end)
     }
     Ok(())
 }
@@ -140,17 +194,30 @@ fn ready_cursor[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String, mut c: 
 // Reads block `at` and stands on its first posting past `low`.
 fn load[K, V](tx: store.Tx, s: Text[K, V], g: u32, term: String, mut c: Cursor, low: Option[Bytes]) -> Result[(), store.Error] {
     let number: u32 = int.narrow(c.at)
-    let Some(raw) = store.fetch(tx, s.derived.postings, (g, clone(term), number))? else {
+    let Some(take raw) = store.fetch(tx, s.derived.postings, (g, clone(term), number))? else {
         return Error(MigrationFault)
     }
-    c.data = unpack(raw)?
+    c.data = posting_block(take raw)?
     c.loaded = true
     let from = match low {
-        Some(after) => first_after(c, 0, after),
+        Some(after) => first_after(c, 0, key_head(after), after),
         None => 0,
     }
     set_pos(mut c, from)
     Ok(())
+}
+
+fn ends_at(c: Cursor, head: u64, end: Bytes) -> bool {
+    c.headers[c.at].head == head && list.compare_bytes(last_key(c, c.at), end) == Equal
+}
+
+fn earlier_block(left: Cursor, right: Cursor) -> bool {
+    let lh = left.headers[left.at].head
+    let rh = right.headers[right.at].head
+    if lh != rh {
+        return lh < rh
+    }
+    list.compare_bytes(last_key(left, left.at), last_key(right, right.at)) == Less
 }
 
 // Whether a bound keeps every row it covers out of the heap. Rows of equal
@@ -189,16 +256,7 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
     let terms = list.len(scoring.terms)
     let mut cursors: List[Cursor] = list.with_capacity(terms)
     for weighted in scoring.terms {
-        let mut blocks: List[Block] = list.new()
-        let mut bounds: List[f64] = list.new()
-        {
-            let mut rows = store.range(tx, s.derived.blocks, Included((g, clone(weighted.term), 0u32)), Included((g, clone(weighted.term), LAST_BLOCK)))?
-            while let Some((_, take block)) = store.next_in(tx, mut rows)? {
-                list.push(mut bounds, block_bound(scoring, weighted.weight, block))
-                list.push(mut blocks, take block)
-            }
-        }
-        list.push(mut cursors, Cursor(blocks: take blocks, bounds: take bounds, at: 0, loaded: false, data: empty_packed(), pos: 0, stop: 0, head: 0))
+        list.push(mut cursors, term_cursor(tx, s, g, weighted.term)?)
     }
     let mut inside: List[bool] = list.new()
     list.fill(mut inside, terms, false)
@@ -213,24 +271,26 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
     loop {
         let mut w = terms
         for i in 0u64 .. terms {
-            if cursors[i].at < list.len(cursors[i].blocks) && (w == terms || list.compare_bytes(cursors[i].blocks[cursors[i].at].last, cursors[w].blocks[cursors[w].at].last) == Less) {
+            if cursors[i].at < list.len(cursors[i].headers) && (w == terms || earlier_block(cursors[i], cursors[w])) {
                 w = i
             }
         }
         if w == terms {
             return Ok(())
         }
-        let end: Bytes = clone(cursors[w].blocks[cursors[w].at].last)
+        let end: Bytes = clone(last_key(cursors[w], cursors[w].at))
+        let end_head = cursors[w].headers[cursors[w].at].head
         // The blocks that can hold a row in (low, end], and their bound.
+        let full = list.len(best) == k
         let mut limit: f64 = 0.0
         for i in 0u64 .. terms {
-            let c = view cursors[i]
-            inside[i] = c.at < list.len(c.blocks) && (c.at == 0 || list.compare_bytes(c.blocks[c.at - 1].last, end) == Less)
-            if inside[i] {
-                limit += c.bounds[c.at]
+            let current = cursors[i].at
+            inside[i] = current < list.len(cursors[i].headers) && (current == 0 || list.compare_bytes(last_key(cursors[i], current - 1), end) == Less)
+            if full && inside[i] {
+                ensure_bound(scoring, scoring.terms[i].weight, mut cursors[i])
+                limit += cursors[i].maximum
             }
         }
-        let full = list.len(best) == k
         let mut ties_lose = false
         if full {
             if let Some(after) = view low {
@@ -240,11 +300,10 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
         if full && cannot_enter(limit, best[0].1 .score, ties_lose) {
             for i in 0u64 .. terms {
                 if inside[i] {
-                    if list.compare_bytes(cursors[i].blocks[cursors[i].at].last, end) == Equal {
-                        cursors[i].at += 1
-                        cursors[i].loaded = false
+                    if ends_at(cursors[i], end_head, end) {
+                        next_block(mut cursors[i])
                     } else if cursors[i].loaded {
-                        let next = first_after(cursors[i], cursors[i].pos, end)
+                        let next = first_after(cursors[i], cursors[i].pos, end_head, end)
                         set_pos(mut cursors[i], next)
                     }
                 }
@@ -260,7 +319,7 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
             loop {
                 let mut pick = terms
                 for i in 0u64 .. terms {
-                    if lead[i] && (pick == terms || float.lt(cursors[i].bounds[cursors[i].at], cursors[pick].bounds[cursors[pick].at])) {
+                    if lead[i] && (pick == terms || float.lt(cursors[i].maximum, cursors[pick].maximum)) {
                         pick = i
                     }
                 }
@@ -271,7 +330,7 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
                 let mut alone: f64 = 0.0
                 for i in 0u64 .. terms {
                     if inside[i] && !lead[i] {
-                        alone += cursors[i].bounds[cursors[i].at]
+                        alone += cursors[i].maximum
                     }
                 }
                 if !cannot_enter(alone, best[0].1 .score, ties_lose) {
@@ -282,7 +341,7 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
         }
         for i in 0u64 .. terms {
             if lead[i] {
-                ready_cursor(tx, s, g, scoring.terms[i].term, mut cursors[i], low, end)?
+                ready_cursor(tx, s, g, scoring.terms[i].term, mut cursors[i], low, end_head, end)?
                 ready[i] = true
             }
         }
@@ -308,22 +367,22 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
                     if held[i] {
                         most += posting_contribution(scoring, scoring.terms[i].weight, cursors[i])
                     } else if inside[i] && !lead[i] {
-                        most += cursors[i].bounds[cursors[i].at]
+                        most += cursors[i].maximum
                     }
                 }
                 passes = cannot_enter(most, best[0].1 .score, ties_lose)
             }
             if !passes {
-                let key = key_copy(cursors[m])
+                let key: Bytes = clone(posting_key(cursors[m], cursors[m].pos))
                 let head = cursors[m].head
                 for i in 0u64 .. terms {
                     if inside[i] && !lead[i] {
                         if !ready[i] {
-                            ready_cursor(tx, s, g, scoring.terms[i].term, mut cursors[i], low, end)?
+                            ready_cursor(tx, s, g, scoring.terms[i].term, mut cursors[i], low, end_head, end)?
                             ready[i] = true
                         }
                         catch_up(mut cursors[i], head, key)
-                        held[i] = cursors[i].pos < cursors[i].stop && cursors[i].head == head && compare_key(cursors[i], cursors[i].pos, key) == Equal
+                        held[i] = cursors[i].pos < cursors[i].stop && cursors[i].head == head && list.compare_bytes(posting_key(cursors[i], cursors[i].pos), key) == Equal
                     }
                 }
                 let mut score: f64 = 0.0
@@ -355,14 +414,13 @@ fn block_max_generation[K, V](mut best: List[(Bytes, Hit[K])], k: u64, tx: store
         }
         for i in 0u64 .. terms {
             if inside[i] {
-                if list.compare_bytes(cursors[i].blocks[cursors[i].at].last, end) == Equal {
-                    cursors[i].at += 1
-                    cursors[i].loaded = false
+                if ends_at(cursors[i], end_head, end) {
+                    next_block(mut cursors[i])
                 } else if ready[i] {
                     let next = cursors[i].stop
                     set_pos(mut cursors[i], next)
                 } else if cursors[i].loaded {
-                    let next = first_after(cursors[i], cursors[i].pos, end)
+                    let next = first_after(cursors[i], cursors[i].pos, end_head, end)
                     set_pos(mut cursors[i], next)
                 }
             }

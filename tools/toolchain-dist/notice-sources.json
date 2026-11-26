@@ -5,7 +5,7 @@
     "hirsel": {
       "crates": "root//:hirsel-core-driver-bin-hirsel",
       "package": "hirsel-core-driver",
-      "contents": "the compiler"
+      "contents": "the compiler, launcher and embedded platform host"
     },
     "runtime/*/*/libhirsel_core_rt.a": {
       "crates": "root//:hirsel-core-rt-archives",
@@ -30,9 +30,6 @@
     },
     "core-packages/*": {
       "contents": "the core and std package images and the Store source archive"
-    },
-    "libexec/hirsel/platform_main": {
-      "contents": "the Hirsel platform host, linked with the shipped runtime archive"
     },
     "libexec/hirsel/pin_reader": {
       "contents": "the Hirsel offline pin reader, linked with the shipped runtime archive"

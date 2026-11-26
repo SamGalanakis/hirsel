@@ -650,9 +650,7 @@ def _toolchain_bundle_impl(ctx):
     # loads, ld.lld and the link kit, the runtime archive for each target, and the core and std
     # images, recorded in hirsel-core-toolchain.json, and the toolchain package archives. The compiler copies
     # itself in; a request from the bundle loads nothing outside it. The bundled compiler then
-    # builds the helpers in libexec/hirsel (tools/toolchain-dist/toolchain_programs.py helpers).
-    # The launcher starts the platform host in the state directory, and the driver starts the
-    # pin reader there.
+    # builds the platform host for embedding in hirsel and the helpers in libexec/hirsel.
     bundle = ctx.actions.declare_output("hirsel-toolchain", dir = True)
     scratch = ctx.actions.declare_output("scratch", dir = True)
     compiler = ctx.attrs.hirsel[DefaultInfo].default_outputs[0]
@@ -663,7 +661,7 @@ def _toolchain_bundle_impl(ctx):
     script = ctx.actions.write("install.sh", [
         "set -eu",
         'compiler="$1"; mkdir -p "$2" "$3"; root="$(cd "$2" && pwd)"; export TMPDIR="$(cd "$3" && pwd)"',
-        'kit="$4"; packages="$5"; platform="$6"; programs="$7"; product="$8"; shift 8',
+        'kit="$4"; packages="$5"; platform="$6"; programs="$7"; product="$8"; objcopy="$9"; shift 9',
         '"$compiler" core-product --install "$root" > /dev/null',
     ] + [
         '"$compiler" std-product --install "$root" --link-kit "$kit" --target "$1" ' +
@@ -672,7 +670,8 @@ def _toolchain_bundle_impl(ctx):
         for _ in RUNTIME_TARGETS
     ] + [
         'cp "$packages"/*.hpkg "$root/core-packages/"',
-        'python3 "$programs" helpers "$product" "$root" "$platform/platform" "$TMPDIR"',
+        'python3 "$programs" helpers "$product" "$root" "$platform/platform" "$TMPDIR" "$TMPDIR/platform_main"',
+        '"$objcopy" --add-section ".hirsel_host=$TMPDIR/platform_main" "$root/hirsel"',
     ])
     platform_sources = _program_sources(ctx, "platform-sources", ctx.attrs.platform_sources)
     runtimes = []
@@ -684,7 +683,8 @@ def _toolchain_bundle_impl(ctx):
         cmd_args("/bin/sh", script, compiler, bundle.as_output(), scratch.as_output(),
                  ctx.attrs._link_kit[DefaultInfo].default_outputs[0],
                  ctx.attrs.toolchain_packages[DefaultInfo].default_outputs[0],
-                 platform_sources, ctx.attrs._programs, ctx.attrs._product, runtimes,
+                 platform_sources, ctx.attrs._programs, ctx.attrs._product,
+                 cmd_args(ctx.attrs._clang[DefaultInfo].default_outputs[0], format = "{}/bin/llvm-objcopy"), runtimes,
                  hidden = ctx.attrs._llvm_libraries[DefaultInfo].default_outputs),
         env = {"HIRSEL_MEMORY_LIMIT": PRODUCT_MEMORY_LIMIT, "HIRSEL_JOBS": "1"},
         category = "toolchain_bundle",
@@ -703,6 +703,7 @@ hirsel_toolchain_bundle = rule(
         "platform_sources": attrs.list(attrs.source()),
         "_product": attrs.source(default = "root//tools/toolchain-dist:product.toml"),
         "_link_kit": attrs.dep(default = "root//tools/buck2/native-toolchain:kit"),
+        "_clang": attrs.dep(default = "toolchains//:clang"),
         "_llvm_libraries": attrs.dep(default = "toolchains//:llvm-libraries"),
         "_programs": attrs.source(default = "root//tools/toolchain-dist:toolchain_programs.py"),
     } | ({"_bolt_compiler": attrs.source(default = "root//tools/toolchain-dist:hirsel-bolt")} if DIST_BOLT == "use" else {}),

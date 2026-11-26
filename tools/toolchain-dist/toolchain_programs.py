@@ -34,7 +34,7 @@ def pack(compiler, sources, output, work, names):
                        stdout=subprocess.DEVNULL, check=True)
 
 
-def helpers(product, root, source, work):
+def helpers(product, root, source, work, host_image):
     cwd, fd = ('.', '/dev/fd') if platform.system() == 'Darwin' else ('/proc/self/cwd', '/proc/self/fd')
     values = dict(product['sockets'], cwd=cwd, fd=fd)
     staged = work / source.name
@@ -45,8 +45,9 @@ def helpers(product, root, source, work):
     for name, helper in product['helpers'].items():
         grants = [word for grant in helper['grants'] for word in ('--grant', grant.format_map(values))]
         dirs = [word for path in helper['dirs'] for word in ('--dir', path.format_map(values))]
+        image = host_image if helper.get('embedded') else directory / name
         subprocess.run([root / 'hirsel', 'build', staged, '--entry', f"{identity}/{helper['entry']}",
-                        *grants, *dirs, '--limit', '1073741824', '-o', directory / name],
+                        *grants, *dirs, '--limit', '1073741824', '-o', image],
                        stdout=subprocess.DEVNULL, check=True)
 
 
@@ -55,7 +56,7 @@ if __name__ == '__main__':
     if command == 'pack':
         pack(*map(Path, args[:4]), args[4:])
     elif command == 'helpers':
-        product, root, source, work = map(Path, args)
-        helpers(tomllib.loads(product.read_text()), root, source, work)
+        product, root, source, work, host_image = map(Path, args)
+        helpers(tomllib.loads(product.read_text()), root, source, work, host_image)
     else:
         sys.exit(f'toolchain_programs.py: unknown command {command}')

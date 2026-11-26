@@ -62,14 +62,11 @@ pub(crate) fn run(
     let bootstrap_spec = match (operator, platform_host) {
         (None, None) => {
             if max_places.is_some() || idle_ms.is_some() {
-                return Err(
-                    "--max-places and --idle-ms require --operator-listen and --platform-host"
-                        .into(),
-                );
+                return Err("--max-places and --idle-ms require --operator-listen".into());
             }
             None
         }
-        (Some(operator), Some(program)) => {
+        (Some(operator), program) => {
             let max_places = max_places.ok_or("--max-places N is required")?;
             Some((
                 operator,
@@ -78,7 +75,7 @@ pub(crate) fn run(
                 idle_ms.unwrap_or(DEFAULT_IDLE_MS),
             ))
         }
-        _ => return Err("--operator-listen and --platform-host go together".into()),
+        _ => return Err("--platform-host requires --operator-listen".into()),
     };
     let envelope = launcher_envelope(bootstrap_spec.is_some(), admission_file)?;
     let state = private_dir(state_arg)?;
@@ -99,13 +96,26 @@ pub(crate) fn run(
     })?;
     launcher.admit_with(admission.expect("opened with the stores"))?;
     launcher.listen(bind_control(&control)?)?;
+    let mut embedded = None;
     if let Some((operator, program, max_places, idle_ms)) = bootstrap_spec {
         // The host's argv names both sockets relative to its working directory, STATE.
         let name = control
             .file_name()
             .filter(|_| control.parent().and_then(|p| p.canonicalize().ok()) == Some(state.clone()))
             .ok_or("--control must name a socket directly in --state")?;
-        let program = std::path::absolute(program)?;
+        let program = match program {
+            Some(program) => std::path::absolute(program)?,
+            None => match super::embedded_host::stage()? {
+                Some((directory, program)) => {
+                    embedded = Some(directory);
+                    program
+                }
+                None => {
+                    eprintln!("hirsel launcher: the executable has no embedded platform host");
+                    std::process::exit(74);
+                }
+            },
+        };
         if !program.is_file() {
             eprintln!(
                 "hirsel launcher: the installation has no platform host at {}",
@@ -138,6 +148,7 @@ pub(crate) fn run(
         if let Some(code) = launcher.bootstrap.as_ref().and_then(|b| b.stopped()) {
             eprintln!("hirsel launcher: the platform host ended with status {code}");
             drop(launcher);
+            drop(embedded);
             std::process::exit(code);
         }
     }

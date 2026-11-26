@@ -1,6 +1,7 @@
 use super::*;
 use crate::code_admission::ObjectKind;
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::launch::MAX_MOVE_ENVELOPE;
 
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
@@ -60,12 +61,12 @@ fn session_vectors() {
             "0200000001000000670300000000000000".into(),
         ),
         (
-            launch(Mode::Install(1, InstallKind::Genesis)),
-            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610000000001000000000000000000000000000000".into(),
+            launch(Mode::Install(1, InstallKind::Genesis, Vec::new())),
+            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f77010000000100000061000000000100000000000000000000000000000000000000".into(),
         ),
         (
-            launch(Mode::Install(1, InstallKind::Standalone(3))),
-            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000001000000030000000000000000000000".into(),
+            launch(Mode::Install(1, InstallKind::Standalone(3), vec![0, 0xff])),
+            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610000000001000000000000000100000003000000000000000200000000ff00000000".into(),
         ),
         (
             launch(Mode::Serving(
@@ -76,9 +77,10 @@ fn session_vectors() {
                     candidate: Some(6),
                     store_id: Some((1, 2)),
                     witness: None,
+                    move_envelope: vec![0xff, 0, 0x80],
                 },
             )),
-            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000001000000010000000000000002000000000000000000000000000000".into(),
+            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000001000000010000000000000002000000000000000000000003000000ff008000000000".into(),
         ),
         (
             launch(Mode::Describe(attempt())),
@@ -158,6 +160,7 @@ fn session_vectors() {
                         candidate: None,
                         store_id: None,
                         witness: None,
+                        move_envelope: Vec::new(),
                     },
                 ),
                 recording: Some(Recording {
@@ -165,7 +168,7 @@ fn session_vectors() {
                     destination: "/rec".into(),
                 }),
             }),
-            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa00000000000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563".into(),
+            "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000000000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563".into(),
         ),
         (
             Request::Admit(
@@ -423,6 +426,34 @@ fn session_vectors() {
         assert_eq!(value.encode(), hex(expected), "{value:?}");
         assert_eq!(&Event::decode(&hex(expected)).unwrap(), value);
     }
+    // Start, group, assembly, workdir, args, install tag, gen 1, genesis tag.
+    let prefix = hex(
+        "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000000000000",
+    );
+    let frame = |size: usize| {
+        let mut bytes = prefix.clone();
+        bytes.extend_from_slice(&(size as u32).to_le_bytes());
+        bytes.resize(bytes.len() + size, 0xff);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // Recording: None.
+        bytes
+    };
+    assert_eq!(
+        Request::decode(&frame(MAX_MOVE_ENVELOPE)).unwrap(),
+        launch(Mode::Install(
+            1,
+            InstallKind::Genesis,
+            vec![0xff; MAX_MOVE_ENVELOPE],
+        ))
+    );
+    let size = MAX_MOVE_ENVELOPE + 1;
+    let error = Request::decode(&frame(size)).unwrap_err();
+    assert_eq!(
+        error.get_ref().unwrap().downcast_ref(),
+        Some(&MoveEnvelopeTooLarge(size))
+    );
+    let mut old = prefix;
+    old.extend_from_slice(&0u32.to_le_bytes());
+    assert!(Request::decode(&old).is_err());
 }
 
 pub(in crate::launcher) fn serve_fixture(activation: u64, candidate: Option<u64>) -> Serve {
@@ -432,6 +463,7 @@ pub(in crate::launcher) fn serve_fixture(activation: u64, candidate: Option<u64>
         candidate,
         store_id: None,
         witness: None,
+        move_envelope: Vec::new(),
     }
 }
 

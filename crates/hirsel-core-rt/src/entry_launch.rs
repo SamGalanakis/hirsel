@@ -8,6 +8,7 @@ pub(super) struct LaunchOptions<'a> {
     pub(super) preview_mode: bool,
     pub(super) wake: bool,
     pub(super) install_child: Option<u64>,
+    pub(super) move_envelope: Vec<u8>,
     pub(super) dev_store: bool,
     pub(super) install_predecessor: Option<[u8; 32]>,
     pub(super) idle_ms: Option<u64>,
@@ -27,6 +28,7 @@ pub(super) fn parse<'a>(
     let mut preview_mode = false;
     let mut wake = false;
     let mut install_child = None;
+    let mut move_envelope = None;
     let mut dev_store = false;
     let mut install_predecessor = None;
     let mut idle_ms = None;
@@ -45,6 +47,13 @@ pub(super) fn parse<'a>(
             }
             describe_mode = true;
             preview_mode = argument == b"--hirsel-preview";
+        } else if let Some(value) = argument.strip_prefix(b"--hirsel-move-envelope=") {
+            if move_envelope.is_some()
+                || value.len() > 2 * hirsel_core_ids::launch::MAX_MOVE_ENVELOPE
+            {
+                return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+            }
+            move_envelope = Some(prepare_hex_bytes(value)?);
         } else if let Some(value) = argument.strip_prefix(b"--hirsel-install-child=") {
             install_child = Some(
                 std::str::from_utf8(value)
@@ -115,6 +124,9 @@ pub(super) fn parse<'a>(
         }
         prefix += 1;
     }
+    if move_envelope.is_some() && !wake && install_child.is_none() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL).into());
+    }
     Ok(LaunchOptions {
         n_place,
         n_place_explicit,
@@ -122,6 +134,7 @@ pub(super) fn parse<'a>(
         preview_mode,
         wake,
         install_child,
+        move_envelope: move_envelope.unwrap_or_default(),
         dev_store,
         install_predecessor,
         idle_ms,
@@ -268,4 +281,33 @@ fn prepare_hex_bytes(text: &[u8]) -> io::Result<Vec<u8>> {
     text.chunks_exact(2)
         .map(|pair| Ok(digit(pair[0])? * 16 + digit(pair[1])?))
         .collect()
+}
+
+/// The platform launcher pins the image across exec, including the serving shell's
+/// exec. Consume its descriptor before any grants or process metadata are opened.
+pub(super) fn receive_launch_image() -> io::Result<Option<[u8; 32]>> {
+    let Some(value) = std::env::var_os(hirsel_core_ids::launch::LAUNCH_IMAGE_ENV) else {
+        return Ok(None);
+    };
+    let invalid = || io::Error::from_raw_os_error(libc::EINVAL);
+    let Some((parent, image)) = value.to_str().and_then(|text| text.split_once(':')) else {
+        return Ok(None);
+    };
+    // SAFETY: getppid takes no arguments.
+    if parent.parse::<libc::pid_t>().ok() != Some(unsafe { libc::getppid() }) {
+        return Ok(None);
+    }
+    let (fd, digest) = image.split_once(':').ok_or_else(invalid)?;
+    let fd = fd
+        .parse::<i32>()
+        .ok()
+        .filter(|fd| *fd >= 6)
+        .ok_or_else(invalid)?;
+    let digest = prepare_hex(digest.as_bytes())?;
+    if !crate::host::sys::running_image(fd)? {
+        return Err(invalid());
+    }
+    // SAFETY: the launch transferred this descriptor for the running image.
+    drop(unsafe { OwnedFd::from_raw_fd(fd) });
+    Ok(Some(digest))
 }

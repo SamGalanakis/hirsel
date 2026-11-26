@@ -11,6 +11,8 @@ use std::{
 use std::sync::{Arc, LazyLock};
 
 pub const DEFAULT_N_PLACE: u64 = 16 * 1024 * 1024;
+/// The byte limit of the opaque move envelope on an install or serving launch.
+pub const MAX_MOVE_ENVELOPE: usize = 4096;
 /// Private platform transport for the launcher PID, image descriptor and SHA-256.
 pub const LAUNCH_IMAGE_ENV: &str = "HIRSEL_LAUNCH_IMAGE";
 /// A directory or Exec-workdir slot sealed as this byte string names no path:
@@ -164,6 +166,7 @@ pub struct Metadata {
     install_child: Option<u64>,
     install_predecessor: Option<[u8; 32]>,
     witness: Option<u64>,
+    move_envelope: Vec<u8>,
     /// Launch word 20: 0 serves, 1 `hirsel dry-run`, 2 `hirsel store verify`,
     /// 3 `hirsel store repair`.
     store_op: u8,
@@ -204,6 +207,7 @@ impl Metadata {
             install_child: None,
             install_predecessor: None,
             witness: None,
+            move_envelope: Vec::new(),
             store_op: 0,
         }
     }
@@ -325,6 +329,11 @@ impl Metadata {
         self.witness
     }
 
+    pub fn with_move_envelope(mut self, envelope: Vec<u8>) -> Self {
+        self.move_envelope = envelope;
+        self
+    }
+
     pub fn word(&self, field: u64, index: u64) -> u64 {
         let byte = |bytes: &[u8]| {
             usize::try_from(index)
@@ -387,6 +396,8 @@ impl Metadata {
                 .preparing
                 .as_ref()
                 .map_or(0, |(_, _, fates)| byte(fates)),
+            25 => self.move_envelope.len() as u64,
+            26 => byte(&self.move_envelope),
             _ => 0,
         }
     }
@@ -399,7 +410,7 @@ impl Metadata {
 /// from: a file renamed over that path since exec is refused, and the digest
 /// is unavailable. A launched process does not read it: the launcher passes
 /// the checked image's descriptor and digest (`LAUNCH_IMAGE_ENV`).
-fn running_image() -> io::Result<File> {
+pub fn running_image() -> io::Result<File> {
     #[cfg(target_os = "linux")]
     return File::open("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]

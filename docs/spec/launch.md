@@ -1171,22 +1171,25 @@ refused with the quota it exceeds. The host never evicts a live group to admit a
 ### Starting the host
 
 `hirsel launcher --state S --control S/launcher.sock --lifecycle managed|leader
---operator-listen S/operator.sock --platform-host PREFIX/libexec/hirsel/platform_main
---admission FILE --max-places N [--idle-ms M]` starts the platform host as its first and only
+--operator-listen S/operator.sock --admission FILE --max-places N [--idle-ms M]`
+starts the platform host as its first and only
 bootstrap child. `--admission` and `--max-places` are required whenever the launcher starts
-the platform host. Passing either option or `--idle-ms` without `--operator-listen` and
-`--platform-host` is a usage error. Linux requires `--lifecycle` ("Child lifecycle" below).
+the platform host. Passing either option or `--idle-ms` without `--operator-listen` is a
+usage error. Linux requires `--lifecycle` ("Child lifecycle" below).
 N and M are positive decimals. `--idle-ms` defaults to 30000. The launcher binds both sockets
-mode 0600, creates `S/catalog`, and
-starts the installed executable with working directory S and the program-visible argv
-`platform_main ctl launcher.sock N M operator.sock`. The host's grants are compiled into that executable:
+mode 0600 and creates `S/catalog`. The released `hirsel` executable embeds the native
+`platform_main` image in an ELF section on Linux and a signed Mach-O section on macOS.
+The launcher stages that image in a private temporary directory for its lifetime and
+starts it with working directory S and the program-visible argv
+`platform_main ctl launcher.sock N M operator.sock`. Direct launcher invocations can
+select an external host with `--platform-host FILE`. The host's grants are compiled into the image.
 its `Dir` is `/proc/self/cwd/catalog` on Linux and `./catalog` on macOS. Its Net root `ctl`
 is `/proc/self/cwd` on Linux and `.` on macOS, with `UnixConnect ctl launcher.sock` and
 `UnixListen ctl operator.sock`, beside Clock, Random and Tasks. The offline pin reader
 uses the same `Dir` path. The store backup and restore helper's two `Dir` grants are
 `/proc/self/fd/3` and `/proc/self/fd/4` on Linux and `/dev/fd/3` and `/dev/fd/4` on macOS.
-Nothing in the host changes its working directory. A missing executable is an
-incomplete installation, and the launcher ends with status 74.
+Nothing in the host changes its working directory. A missing host image ends the launcher
+with status 74.
 
 **The admission envelope.** FILE declares the published-release admission bounds as
 `recipe_bytes`, `closure_objects`, `object_bytes`, `decoded_bytes`, `members` and `edges`,
@@ -1345,7 +1348,7 @@ recording runtime cannot replay (a Foreign call) is refused before assembly.
 
 `hirsel host --state S --admission FILE --max-places N --lifecycle managed|leader
 [--idle-ms M]` runs the launcher of "Starting the host" with `--control S/launcher.sock`,
-`--operator-listen S/operator.sock` and the installation's `libexec/hirsel/platform_main`.
+`--operator-listen S/operator.sock` and its embedded `platform_main` image.
 It requires `--admission` and `--max-places`. Linux requires `--lifecycle`. On macOS it
 defaults to `leader` and the launcher refuses `managed`. The state directory must be the
 operator's and mode 0700.
@@ -1991,6 +1994,16 @@ the child's mode, and a serving `Start` may name a recording (its 16-byte record
 and destination), which the child receives as `HIRSEL_RECORD` and `HIRSEL_RECORD_ID`.
 The launcher waits on a single epoll set for its control session, cold listeners,
 child endpoints, pidfds and cgroup population changes.
+
+**Move envelope.** For install mode (tag 0), the fields are the generation, install
+kind and `move_envelope`. For serving mode (tag 1), the fields are the generation and
+the serving record, whose last field after `witness` is `move_envelope`. Both encode
+the platform-authored envelope as a little-endian u32 length followed by the opaque
+bytes, before the launch's recording option. The limit is `MAX_MOVE_ENVELOPE = 4096`
+bytes. The decoder refuses a larger length as `MoveEnvelopeTooLarge`. An empty envelope
+is a zero length. The launcher carries the bytes to the child in its private
+`--hirsel-move-envelope=HEX`<!-- doc-ref: external --> prefix. The runtime offers the length at launch word 25
+and the bytes at word 26. The fake launcher retains the same bytes for each start.
 
 - **Publish and assemble.** It admits recipes (steps 1-8 above) and assembles images. It
   writes objects with the "Durable publication" order above, steps 1-3. Step 4, the pending

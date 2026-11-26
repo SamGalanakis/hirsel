@@ -706,9 +706,9 @@ fn child_mode_authority() {
         export.display()
     )));
 
-    let installing = role(Role::Install(1));
-    rig.ask(launch(4, &work, Mode::Install(1, InstallKind::Genesis)));
-    rig.until(|events| ended(events, &installing));
+    let install = Mode::Install(1, InstallKind::Genesis, Vec::new());
+    rig.ask(launch(4, &work, install));
+    rig.until(|events| ended(events, &role(Role::Install(1))));
     assert_eq!(
         held("install"),
         ["args --hirsel-n-place=65536 --hirsel-install-child=0 app"]

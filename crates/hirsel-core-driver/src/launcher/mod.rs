@@ -12,6 +12,7 @@ mod bootstrap;
 mod cgroup;
 mod cli;
 pub(crate) mod dev;
+mod embedded_host;
 mod grants;
 #[cfg(test)]
 mod laws;
@@ -909,7 +910,7 @@ impl<I: Images> Launcher<I> {
             {
                 Some(Refusal::Mismatch)
             }
-            Some(_) if matches!(launch.mode, Mode::Install(_, InstallKind::Standalone(0))) => {
+            Some(_) if matches!(launch.mode, Mode::Install(_, InstallKind::Standalone(0), _)) => {
                 Some(Refusal::Mismatch)
             }
             Some(_) if !self.one_launch(&launch) => Some(Refusal::Held),
@@ -971,6 +972,7 @@ impl<I: Images> Launcher<I> {
         let mut triggers = None;
         let scratch = self.scratch_of(&launch.group);
         let host_pid = std::process::id();
+        spawn::move_envelope(&mut command, launch.mode.move_envelope());
         match &launch.mode {
             Mode::Serving(_, serve) => {
                 command.arg("--hirsel-wake");
@@ -1043,7 +1045,7 @@ impl<I: Images> Launcher<I> {
                     ]);
                 triggers = Some((path.join("TRIGGERS"), image.n_place));
             }
-            Mode::Install(_, kind) => {
+            Mode::Install(_, kind, _) => {
                 let selection = match kind {
                     InstallKind::Genesis => 0,
                     InstallKind::Standalone(activation) => *activation,
@@ -1071,11 +1073,7 @@ impl<I: Images> Launcher<I> {
                 .env_remove("HIRSEL_CONTROL_FD")
                 .env_remove("HIRSEL_SCRATCH");
         }
-        command
-            .env_remove("LISTEN_FDS")
-            .env_remove("LISTEN_PID")
-            .env_remove("LISTEN_FDNAMES")
-            .env_remove("LISTEN_PIDFDID");
+        spawn::clear_activation(&mut command);
         // Only a recorded serving start records: its destination was set above, and no
         // other child inherits one from the launcher's own environment.
         if launch.recording.is_none() {

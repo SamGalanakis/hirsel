@@ -7,6 +7,23 @@ use std::process::Command;
 
 pub(super) use crate::host::launch::{IMAGE_FD, Spawned};
 
+pub(super) fn move_envelope(command: &mut Command, envelope: &[u8]) {
+    if !envelope.is_empty() {
+        command.arg(format!(
+            "--hirsel-move-envelope={}",
+            hirsel_core_ids::hex::encode(envelope)
+        ));
+    }
+}
+
+pub(super) fn clear_activation(command: &mut Command) {
+    command
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDNAMES")
+        .env_remove("LISTEN_PIDFDID");
+}
+
 /// What a child is started with: its absolute program path, its arguments
 /// (the program first) and its environment, all as C strings. The host
 /// provider adds the activation's `LISTEN_PID` for a serving child.

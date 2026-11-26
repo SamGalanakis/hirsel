@@ -114,7 +114,7 @@ pub(crate) fn launcher_envelope(
 ) -> Result<AdmissionLimits, Box<dyn std::error::Error>> {
     if !production {
         if file.is_some() {
-            return Err("--admission requires --operator-listen and --platform-host".into());
+            return Err("--admission requires --operator-listen".into());
         }
         return Ok(limits());
     }

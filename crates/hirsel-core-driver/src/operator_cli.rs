@@ -95,13 +95,6 @@ pub(crate) fn host(invocation: Invocation) -> Result<std::convert::Infallible, E
             path(crate::product::bundled::OPERATOR_SOCKET),
         ),
     ]);
-    // With no installation the launcher reports the missing platform host (exit 74).
-    if let Ok(program) = installed("platform_main") {
-        options.push((
-            Opt::PlatformHost,
-            Some(program.to_string_lossy().into_owned()),
-        ));
-    }
     crate::launcher::run(Invocation {
         command: invocation.command,
         options,

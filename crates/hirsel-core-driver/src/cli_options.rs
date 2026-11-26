@@ -133,7 +133,7 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         ["--platform-host"],
         Some("FILE"),
         ["launcher"],
-        "Installed platform host executable to start as the first child."
+        "Use this platform host executable instead of the embedded host."
     ),
     option!(
         ReleaseManifest,

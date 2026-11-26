@@ -1,5 +1,5 @@
 //! The platform host as the launcher's first child (docs/spec/launch.md "Starting the
-//! host"). The launcher binds the passive operator listener, starts the installed
+//! host"). The launcher binds the passive operator listener, starts
 //! `platform_main` with that listener as descriptor 3 and the operator UID beside it, and
 //! starts it again when it ends: at once the first time, then after 1, 2, 4 ... s up to
 //! 5 min, with the delay reset after 5 healthy minutes. A host that ends 64 (usage) or
@@ -124,12 +124,8 @@ impl Bootstrap {
         command.args(&self.args);
         // SAFETY: getpid has no failure.
         let parent = unsafe { libc::getpid() };
-        command
-            .env(OPERATOR_ENV, format!("{parent}:{OPERATOR_FD}:{}", self.uid))
-            .env_remove("LISTEN_PID")
-            .env_remove("LISTEN_FDS")
-            .env_remove("LISTEN_FDNAMES")
-            .env_remove("LISTEN_PIDFDID");
+        command.env(OPERATOR_ENV, format!("{parent}:{OPERATOR_FD}:{}", self.uid));
+        spawn::clear_activation(&mut command);
         let null = File::options().read(true).open("/dev/null")?;
         let slots = vec![
             (above_launch_slots(null.as_raw_fd())?, 0),

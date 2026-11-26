@@ -41,6 +41,25 @@ fn inventory_children() -> List[ChildState] {
     xs
 }
 
+fn fake_receives(take request: Request, take decoded: Request) -> bool {
+    let Start(take launch) = take request else {
+        return true
+    }
+    let expected: Bytes = match launch.mode {
+        InstallMode(_, _, envelope) => clone(envelope),
+        ServingMode(_, serve) => clone(serve.move_envelope),
+        _ => return true,
+    }
+    let child = Child(group: clone(launch.group), role: role_of(launch.mode))
+    let mut f = fake()
+    let _ = handle(mut f, Bind(clone(launch.group), "127.0.0.1:9"))
+    let _ = handle(mut f, take decoded)
+    match move_envelope(f, child) {
+        Some(got) => got == expected,
+        None => false,
+    }
+}
+
 fn vector_request(take value: Request, expected: String) -> bool {
     let c: std.codec.Codec[Request] = std.codec.of()
     let mut out: Bytes = list.new()
@@ -51,16 +70,27 @@ fn vector_request(take value: Request, expected: String) -> bool {
     if out != want {
         return false
     }
-    match std.codec.decode(c, want) {
+    match decode_request(want) {
         Ok(back) => {
             let mut again: Bytes = list.new()
             if let Error(_) = std.codec.encode(c, back, mut again) {
                 return false
             }
-            again == want
+            again == want && fake_receives(take value, take back)
         },
         Error(_) => false,
     }
+}
+
+// Start, group, assembly, workdir, args, install tag, gen 1, genesis tag.
+fn install_envelope_size(n: u64) -> Result[Request, RequestDecodeError] {
+    let mut frame = option.unwrap(std.hex.decode(b"030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000000000000"))
+    std.codec.put_u32(int.narrow(n), mut frame)
+    for _ in 0u64 .. n {
+        list.push(mut frame, 0xffu8)
+    }
+    std.codec.put_u32(0u32, mut frame)
+    decode_request(frame)
 }
 
 fn vector_event(take value: Event, expected: String) -> bool {
@@ -117,9 +147,9 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_request(Hello, "00000000") && ok
     ok = vector_request(Bind(group(), "127.0.0.1:9"), "01000000010000006703000000000000000b0000003132372e302e302e313a39") && ok
     ok = vector_request(Close(group()), "0200000001000000670300000000000000") && ok
-    ok = vector_request(Start(starting(InstallMode(1u64, Genesis))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610000000001000000000000000000000000000000") && ok
-    ok = vector_request(Start(starting(InstallMode(1u64, Standalone(3u64)))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000001000000030000000000000000000000") && ok
-    ok = vector_request(Start(starting(ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: Some(6u64), store_id: Some((1u64, 2u64)), witness: None)))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000001000000010000000000000002000000000000000000000000000000") && ok
+    ok = vector_request(Start(starting(InstallMode(1u64, Genesis, list.new()))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f77010000000100000061000000000100000000000000000000000000000000000000") && ok
+    ok = vector_request(Start(starting(InstallMode(1u64, Standalone(3u64), option.unwrap(std.hex.decode(b"00ff"))))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610000000001000000000000000100000003000000000000000200000000ff00000000") && ok
+    ok = vector_request(Start(starting(ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: Some(6u64), store_id: Some((1u64, 2u64)), witness: None, move_envelope: option.unwrap(std.hex.decode(b"ff0080")))))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000001000000010000000000000002000000000000000000000003000000ff008000000000") && ok
     ok = vector_request(Start(starting(DescribeMode(attempt()))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f77010000000100000061020000000807060504030201181716151413121100000000") && ok
     ok = vector_request(Start(starting(PreviewMode(attempt(), option.unwrap(std.hex.decode(b"01"))))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610300000008070605040302011817161514131211010000000100000000") && ok
     ok = vector_request(Start(starting(PrepareMode(attempt(), "x", option.unwrap(std.hex.decode(b"f0"))))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610400000008070605040302011817161514131211010000007801000000f000000000") && ok
@@ -154,7 +184,7 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_event(Answered(preparing(), option.unwrap(std.hex.decode(b"0102"))), "0c000000010000006703000000000000000400000008070605040302011817161514131211020000000102") && ok
     ok = vector_event(Fenced, "0a000000") && ok
     ok = vector_event(Collected(3u64), "0b0000000300000000000000") && ok
-    ok = vector_request(Start(Launch(group: group(), assembly: option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")), workdir: "/w", args: one("a"), mode: ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: None, store_id: None, witness: None)), recording: Some(Recording(id: option.unwrap(std.hex.decode(b"21212121212121212121212121212121")), destination: "/rec")))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa00000000000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563") && ok
+    ok = vector_request(Start(Launch(group: group(), assembly: option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")), workdir: "/w", args: one("a"), mode: ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: None, store_id: None, witness: None, move_envelope: list.new())), recording: Some(Recording(id: option.unwrap(std.hex.decode(b"21212121212121212121212121212121")), destination: "/rec")))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000000000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563") && ok
     ok = vector_request(Admit(group(), attempt(), Attested(option.unwrap(std.hex.decode(b"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))), Approvals(recording: true, foreign: one("f"), exec: one("e"), workdir: "/w", old: Some(option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))), packages: one(option.unwrap(std.hex.decode(b"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")))), 72623859790382856u64), "0c00000001000000670300000000000000080706050403020118171615141312110000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065020000002f770100000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0100000020000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd0807060504030201") && ok
     ok = vector_request(Admit(group(), attempt(), Publication(option.unwrap(std.hex.decode(b"01"))), Approvals(recording: false, foreign: list.new(), exec: list.new(), workdir: "/w", old: None, packages: list.new()), 72623859790382856u64), "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f7700000000000000000807060504030201") && ok
     ok = vector_request(Admit(group(), attempt(), Source(option.unwrap(std.hex.decode(b"01")), true), Approvals(recording: false, foreign: list.new(), exec: list.new(), workdir: "/w", old: None, packages: list.new()), 72623859790382856u64), "0c000000010000006703000000000000000807060504030201181716151413121102000000010000000101000000000000000000020000002f7700000000000000000807060504030201") && ok
@@ -178,6 +208,13 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_tree(Tree(package: ".", grants: one("G"), dirs: one("d"), files: one(SourceFile(path: "a", content: option.unwrap(std.hex.decode(b"0102")))), required_entries: one(RequiredEntry(kind: Query, key: option.unwrap(std.hex.decode(b"aabb"))))), "010000002e010000000100000047010000000100000064010000000100000061020000000102010000000200000002000000aabb") && ok
     ok = vector_manifest(Manifest(package: ".", grants: one("G"), dirs: one("d"), required_entries: one(RequiredEntry(kind: Query, key: option.unwrap(std.hex.decode(b"aabb")))), files: one(ManifestFile(path: "a", digest: option.unwrap(std.hex.decode(b"a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f63222")), len: 2u64))), "010000002e010000000100000047010000000100000064010000000200000002000000aabb01000000010000006120000000a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f632220200000000000000") && ok
     ok = vector_event(CutoverResult(serving(), attempt(), PlaceInstalled(4u64, true)), "11000000010000006703000000000000000100000007000000000000000807060504030201181716151413121105000000040000000000000001") && ok
+    let Ok(Start(_)) = install_envelope_size(MAX_MOVE_ENVELOPE) else {
+        return Error(())
+    }
+    let Error(MoveEnvelopeTooLarge(size)) = install_envelope_size(MAX_MOVE_ENVELOPE + 1u64) else {
+        return Error(())
+    }
+    ok = size == MAX_MOVE_ENVELOPE + 1u64 && ok
     if ok {
         Ok(())
     } else {

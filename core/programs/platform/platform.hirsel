@@ -519,7 +519,7 @@ fn bind_request(name: String, g: GroupRow) -> launcher.Request {
 }
 
 fn serving_launch(name: String, g: GroupRow, gen: u64, activation: u64, assembly: Bytes, idle: u64, candidate: Option[u64], witness: Option[u64]) -> launcher.Request {
-    let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate, store_id: g.store_id, witness: witness))
+    let mode: launcher.Mode = ServingMode(gen, launcher.Serve(activation: activation, idle: idle, candidate: candidate, store_id: g.store_id, witness: witness, move_envelope: list.new()))
     let recording: Option[launcher.Recording] = match g.record {
         Some(r) => {
             let id = recording_id(g.incarnation, gen)

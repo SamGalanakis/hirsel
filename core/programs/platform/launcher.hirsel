@@ -13,6 +13,8 @@
 // protocol's own bound, not the operator socket's.
 pub const MAX_FRAME: u64 = 16777216u64
 
+pub const MAX_MOVE_ENVELOPE: u64 = 4096u64
+
 // A deploy attempt: 16 bytes, `hi` then `lo`, each little-endian.
 pub type Attempt: codec + send {
     hi: u64,
@@ -45,12 +47,13 @@ pub type Serve: codec + send {
     idle: u64,
     candidate: Option[u64],
     store_id: Option[(u64, u64)],
-    witness: Option[u64]
+    witness: Option[u64],
+    move_envelope: Bytes
 }
 
 // What the child runs, by mode (launch.md "Child modes"). Preview carries OLD's entry
 // list; prepare carries the export name OLD answered.
-pub type Mode: codec + send = InstallMode(u64, InstallKind) | ServingMode(u64, Serve) | DescribeMode(Attempt) | PreviewMode(Attempt, Bytes) | PrepareMode(Attempt, String, Bytes)
+pub type Mode: codec + send = InstallMode(u64, InstallKind, Bytes) | ServingMode(u64, Serve) | DescribeMode(Attempt) | PreviewMode(Attempt, Bytes) | PrepareMode(Attempt, String, Bytes)
 
 // A recorded serving launch: the 16-byte recording ID whose catalog pin the host made
 // durable before this start, and the designated recording destination.
@@ -374,12 +377,30 @@ Inventory(List[ChildState], List[Group], List[CutoverKey])
 
 pub fn role_of(m: Mode) -> Role {
     match m {
-        InstallMode(g, _) => Install(g),
+        InstallMode(g, _, _) => Install(g),
         ServingMode(g, _) => Serving(g),
         DescribeMode(a) => Describe(a),
         PreviewMode(a, _) => Preview(a),
         PrepareMode(a, _, _) => Prepare(a),
     }
+}
+
+pub type RequestDecodeError = MalformedRequest(std.codec.DecodeError) | MoveEnvelopeTooLarge(u64)
+
+pub fn decode_request(body: Bytes) -> Result[Request, RequestDecodeError] {
+    let codec: std.codec.Codec[Request] = std.codec.of()
+    let request = std.codec.decode(codec, body) ?=> |e| MalformedRequest(take e)
+    if let Start(launch) = request {
+        let size = match launch.mode {
+            InstallMode(_, _, envelope) => list.len(envelope),
+            ServingMode(_, serve) => list.len(serve.move_envelope),
+            _ => 0u64,
+        }
+        if size > MAX_MOVE_ENVELOPE {
+            return Error(MoveEnvelopeTooLarge(size))
+        }
+    }
+    Ok(take request)
 }
 
 pub fn same_group(a: Group, b: Group) -> bool {
@@ -417,7 +438,8 @@ fn holds_store(r: Role) -> bool {
 // verifier: a test answers an admission's requests with `Need`, `Admitted`, `Assembled`
 // or `AdmissionFailed` itself.
 type Kept {
-    state: ChildState
+    state: ChildState,
+    move_envelope: Bytes
 }
 
 type Listener {
@@ -569,6 +591,14 @@ fn live(p: Phase) -> bool {
     }
 }
 
+// The bytes the fake delivered when it started this child.
+pub fn move_envelope(f: Fake, child: Child) -> Option[Bytes] {
+    match find_child(f, child) {
+        Some(i) => Some(clone(f.children[i].move_envelope)),
+        None => None,
+    }
+}
+
 // Whether the group has a live serving launch, so its listener is not watched.
 fn serving_live(f: Fake, g: Group) -> bool {
     for i in 0u64 .. list.len(f.children) {
@@ -681,7 +711,13 @@ pub fn handle(mut f: Fake, take r: Request) -> List[Event] {
                         ServingMode(_, serve) => Some(Selection(activation: serve.activation, assembly: clone(launch.assembly))),
                         _ => None,
                     }
-                    list.push(mut f.children, Kept(state: ChildState(child: clone(child), phase: Started, selection: take selected, answer: None)))
+                    let Launch(mode: take mode, ..) = take launch
+                    let envelope = match take mode {
+                        InstallMode(_, _, take payload) => take payload,
+                        ServingMode(_, Serve(move_envelope: take payload, ..)) => take payload,
+                        _ => list.new(),
+                    }
+                    list.push(mut f.children, Kept(state: ChildState(child: clone(child), phase: Started, selection: take selected, answer: None), move_envelope: take envelope))
                     push_event(mut out, Launched(take child, Started))
                 },
             }

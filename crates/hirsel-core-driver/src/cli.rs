@@ -35,7 +35,7 @@ commands! {
     "publish", "publish PACKAGE [options]", "Check a package, publish its code objects and print the recipe hash.";
     "manifest", "manifest show PATH", "Print a release manifest.";
     "host", "host --state DIR --admission FILE --max-places N --lifecycle managed|leader [--idle-ms MS]", "Run the launcher and the installed platform host on STATE.";
-    "launcher", "launcher --control SOCKET --state DIR --lifecycle managed|leader [--operator-listen SOCKET --platform-host FILE --admission FILE --max-places N [--idle-ms MS]]", "Hold the groups' listeners and start their children for the platform host.";
+    "launcher", "launcher --control SOCKET --state DIR --lifecycle managed|leader [--operator-listen SOCKET --admission FILE --max-places N [--platform-host FILE] [--idle-ms MS]]", "Hold the groups' listeners and start their children for the platform host.";
     "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
     "decide", "decide --state DIR --request-id HEX [--approve-grant +LINE|-LINE ...] [--held release|cancel] [--held-entry PATH=release|cancel ...] [--refuse]", "Approve or refuse the decision a held request awaits.";

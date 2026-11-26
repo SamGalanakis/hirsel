@@ -54,6 +54,7 @@ operator = "operator.sock"
 # Helper entry paths relative to the selected package's name and major.
 [helpers.platform_main]
 entry = "platform_main/main"
+embedded = true
 grants = ["Clock", "Random", "Tasks", "Net=UnixRoot ctl {cwd};UnixConnect ctl {launcher};UnixListen ctl {operator}"]
 dirs = ["{cwd}/catalog"]
 

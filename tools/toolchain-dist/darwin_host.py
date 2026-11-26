@@ -325,8 +325,8 @@ def build(output, work, release_tag):
     llvm = work / 'llvm'
     run([sys.executable, ROOT / 'tools/buck2/bootstrap_llvm.py', '--output', llvm], cwd=ROOT)
     env = dict(cargo_env(work, llvm), HIRSEL_RELEASE_VERSION=release_tag)
-    run(['cargo', 'build', '--locked', '--profile', 'dist', '-p', 'hirsel-core-driver', '--bin', 'hirsel'],
-        cwd=ROOT, env=env)
+    driver = ['--locked', '--profile', 'dist', '-p', 'hirsel-core-driver', '--bin', 'hirsel']
+    run(['cargo', 'build', *driver], cwd=ROOT, env=env)
     archives = runtimes(work, env)
     kit = link_kit_tree(work)
     compiler = work / 'target/dist/hirsel'
@@ -341,7 +341,15 @@ def build(output, work, release_tag):
     packages = tomllib.loads((ROOT / 'core/programs/toolchain-packages.toml').read_text())['packages']
     run([sys.executable, programs, 'pack', compiler, ROOT / 'core/programs', output / 'core-packages', scratch / 'packs',
          *packages], env=install)
-    run([sys.executable, programs, 'helpers', Path(__file__).with_name('product.toml'), output, ROOT / 'core/programs/platform', scratch], env=install)
+    host = scratch / 'platform_main'
+    run([sys.executable, programs, 'helpers', Path(__file__).with_name('product.toml'),
+         output, ROOT / 'core/programs/platform', scratch, host], env=install)
+    run(['/usr/bin/codesign', '-v', '--strict', host])
+    # Link the host into the signed image. All compiler libraries are already
+    # built by the first invocation, which supplies hirsel for the host build.
+    run(['cargo', 'rustc', *driver, '--', '-C', 'link-arg=-Wl,-sectcreate,__TEXT,__hirsel_host',
+         '-C', 'link-arg=-Xlinker', '-C', f'link-arg={host}'], cwd=ROOT, env=env)
+    shutil.copy2(compiler, output / 'hirsel')
     return llvm
 
 

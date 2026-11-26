@@ -102,8 +102,8 @@ fn red_same(got: Bytes, want: Bytes, take what: String) {
     }
 }
 
-/// bug: Write the redundant blocks newest first, count the offset from the wrong end, carry a primary the receiver is past or one before the switch, keep a block too long or too old for its header, append part of a payload that does not fit, or lose a byte between write and parse.
-/// oracle: RFC 2198 §3, by hand: indices 7, 8 and 9 at timestamps 1000, 1960 and 2920 give ef 1e 00 03 (1920 = 30 << 6 back, 3 bytes), ef 0f 00 02 (960 = 15 << 6, 2 bytes), 6f, then abc, de and the primary; a 1,024-byte primary or one 16,384 ticks back carries no block.
+/// bug: Write the redundant blocks newest first, count the offset from the wrong end, carry a primary the receiver is past or one before the switch, keep a block too long or too old for its header, fail on a backwards or wrapped u32 timestamp instead of wrapping mod 2^32, append part of a payload that does not fit, or lose a byte between write and parse.
+/// oracle: RFC 2198 §3, by hand: indices 7, 8 and 9 at timestamps 1000, 1960 and 2920 give ef 1e 00 03 (1920 = 30 << 6 back, 3 bytes), ef 0f 00 02 (960 = 15 << 6, 2 bytes), 6f, then abc, de and the primary; a 1,024-byte primary or one 16,384 ticks back carries no block; a backwards timestamp (1000 then 500) or an out-of-range wrap (0xffff0000 then 0) carries no block; a 960-tick wrap (0xfffffc40 then 0) carries offset 960 (ef 0f 00 02).
 @test
 fn red_write_round_trip() -> Result[(), ()] {
     let mut r = result.unwrap(red.ring(2))
@@ -130,6 +130,15 @@ fn red_write_round_trip() -> Result[(), ()] {
     red_keep(mut r, 21, 100960, b"q")
     red_same(red_written(r, 22, 117344, b"Z", 2, 0), b"\x6fZ", "1,024 bytes and 16,384 ticks fit no header")
     red_same(red_written(r, 22, 117343, b"Z", 2, 0), b"\xef\xff\xfc\x01\x6fqZ", "16,383 ticks back fits")
+    // Backwards timestamp (P0-2): offset wraps above MAX_OFFSET, so the block is left out.
+    let mut rw = result.unwrap(red.ring(2))
+    red_keep(mut rw, 7, 1000, b"abc")
+    red_same(red_written(rw, 8, 500, b"PRIME", 1, 0), b"\x6fPRIME", "backwards timestamp leaves the block out")
+    // Normal Opus u32 timestamp wrap at 2^32 (P0-2): 960 ticks across 0 carries the block; 65536 ticks does not.
+    red_keep(mut rw, 7, 0xfffffc40, b"de")
+    red_same(red_written(rw, 8, 0x00000000, b"PRIME", 1, 0), b"\xef\x0f\x00\x02\x6fdePRIME", "960-tick wrap carries offset 960")
+    red_keep(mut rw, 7, 0xffff0000, b"de")
+    red_same(red_written(rw, 8, 0x00000000, b"PRIME", 1, 0), b"\x6fPRIME", "out-of-range wrap leaves the block out")
     // No room: nothing appended.
     let mut tight: Bytes = list.with_capacity(6)
     list.push(mut tight, 9u8)

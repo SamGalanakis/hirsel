@@ -156,7 +156,7 @@ fn past(r: Ring, index: u64, ts: u32, back: u64, since: u64) -> Option[u64] {
     if r.index[k] != want {
         return None
     }
-    let offset = ts - r.ts[k]
+    let offset = int.wrapping_sub(ts, r.ts[k])
     if offset == 0 || offset > MAX_OFFSET {
         return None
     }
@@ -186,7 +186,7 @@ pub fn write(mut out: Bytes, pt: u8, r: Ring, index: u64, ts: u32, pkt: Bytes, f
     back = d
     while back > 0 {
         if let Some(k) = past(r, index, ts, back, since) {
-            let offset = ts - r.ts[k]
+            let offset = int.wrapping_sub(ts, r.ts[k])
             let n = list.len(r.slots[k])
             list.push(mut out, 128u8 | pt)
             list.push(mut out, int.truncate(offset >> 6))

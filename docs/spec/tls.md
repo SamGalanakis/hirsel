@@ -343,7 +343,7 @@ order above, the `aead` and `open` uses with their algorithms in the order above
 operation yet reads `mtls_client_id`: a policy may hold it and `narrow` intersects it, so
 the policy's shape is final.
 
-**Ingestion.** A secret's bytes enter the run in one of two ways:
+**Ingestion.** A secret's bytes enter the run in one of three ways:
 
 - **An entry grant.** `main` takes a `Secret` parameter, which the run configuration
   grants ([CAP-4](capabilities.md#cap-4-entry-grants)):
@@ -379,6 +379,14 @@ the policy's shape is final.
   nor the policy. On success, sealing copies the bytes, then zeroes and refunds the
   owned source storage. A sealed secret that crosses to another unit
   ([CONC-15](tasks.md#conc-15-units)) designates the same bytes and keeps its policy. The program can still access any copies it made before sealing.
+- **`stdin.read_secret`.** This reads one line typed at the terminal on the run's
+  standard input, with echo off, into run-owned storage, with a policy in canonical
+  spelling ([stdin](../../core/std/api/stdin.md#secret-input)). The bytes never reach
+  program memory, so the secret is as opaque as a granted one. It admits `seal`'s charge
+  with the length fixed at 1024, `round_up_8(pattern_bytes + 1024 + 32)`, so the charge
+  does not depend on what was typed. An `Invalid` policy or a refused admission is decided
+  before the terminal is touched. A recording holds the designation and never the bytes or
+  their length.
 
 `secret.narrow` keeps the uses of `s` that the new policy also permits and designates the
 same bytes. Its `tls_send` patterns are the TLS-3 intersection of the two lists, so

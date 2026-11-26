@@ -3,14 +3,18 @@
 [API overview](../API.md). [Io](io.md). [Core provider signatures](../../core/stdin.hirsel).
 [Host contract](../../../docs/spec/core.md#contracts-the-signatures-do-not-state).
 
-Core module `stdin` holds one
-[provider operation](../../../docs/spec/capabilities.md#cap-5-provider-operations):
+Core module `stdin` holds two
+[provider operations](../../../docs/spec/capabilities.md#cap-5-provider-operations):
 
 ```
 pub type StdinError = Aborted | TimedOut | Other(u32)
 pub fn read(i: Stdin, mut buf: Bytes, until: Until) -> Result[u64, StdinError] waits
 pub fn is_terminal(i: Stdin) -> bool
+pub type SecretReadError = NotTerminal | Busy | Empty | TooLong | Eof | Aborted | TimedOut | Policy(SecretError) | Other(u32)
+pub fn read_secret(i: Stdin, uses: String, until: Until) -> Result[Secret, SecretReadError] waits
 ```
+
+`read_secret` reads a line with echo off into a `Secret` ([Secret input](#secret-input)).
 
 Modules `stdout` and `stderr` declare the same query, `stdout.is_terminal(o: Stdout) -> bool`
 and `stderr.is_terminal(e: Stderr) -> bool` ([Terminals](#terminals)).
@@ -129,3 +133,100 @@ are used. There is no `stdin.size`, and the run never opens `/dev/tty`.
 | **Replay answers the size from the tape** | a replay that queries its own descriptors, or a non-terminal query that records a frame | Record that program with stdout on the 132 by 43 pty and stderr on a pipe: one size frame. Replay it on pipes: it writes the recorded sizes and ends `Sealed`. A run with both streams piped records no size frame. Covered in `crates/hirsel-core-driver/src/terminal_fixture.rs`. |
 | **Virtual size** | a constructor that drops the size, or a query that queues on the port | `provide.stdout(64, Some(TermSize(cols: 100, rows: 30)))` answers that size, a zero dimension answers `None` on a terminal, and `None` answers `None`; no port sees a call. Covered in `core/core/tests/provide.hirsel`. |
 
+
+## Secret input
+
+```
+pub type SecretReadError = NotTerminal | Busy | Empty | TooLong | Eof | Aborted | TimedOut | Policy(SecretError) | Other(u32)
+pub fn read_secret(i: Stdin, uses: String, until: Until) -> Result[Secret, SecretReadError] waits
+```
+
+`stdin.read_secret(i, uses, until)` reads one line from the terminal on the run's standard
+input with echo off, and returns it as a [`Secret`](../../../docs/spec/tls.md#tls-5-secrets)
+with policy `uses`. The bytes go from the host into run-owned secret storage and never into
+program memory, as for a [credential fetch](../../../docs/spec/tls.md#tls-7-credential-grants).
+It is the one way a program prompts for a password or a token, as `getpass(3)`, Python's
+`getpass` and Go's `term.ReadPassword` are used. The program writes its own prompt first,
+to whichever stream it likes, then calls. There is no prompt parameter and no pre-`main`
+prompt, so a program parses `--help`, `--no-input` or `--token-file` before it decides to
+prompt.
+
+- **Policy first.** `uses` is a policy in canonical spelling, as for `secret.seal`. A
+  policy that does not parse is `Policy(Invalid)`. The call then admits the charge below,
+  and a refusal is `Policy(Capacity(c))`, a value as for `seal`. Both are decided before
+  the terminal is touched, have no host effect and pass no replay point.
+- **A terminal, checked live.** The provider asks the descriptor for its modes
+  (`tcgetattr`). If that fails, the result is `NotTerminal` and nothing is read: the call
+  never falls back to an echoing read, and a following `stdin.read` sees every byte. The
+  check is the descriptor's state at the call, not the terminal bit taken at launch.
+- **One reader.** The read goes through the stream's one helper, so it cannot race
+  `stdin.read`. If another read of the stream is pending, from any copy of `Stdin`, the
+  result is `Busy` and the terminal is not touched. Bytes the helper holds from an earlier
+  read are dropped when the modes change, and the mode change itself discards input typed
+  before it (`TCSAFLUSH`), so typed-ahead input is discarded, as `getpass` does.
+- **Modes.** Echo is cleared and `ECHONL` is set; canonical input, the signal characters
+  and `ICRNL` are kept as the terminal had them. So the line is edited as usual, Ctrl-C
+  still signals, and the terminal itself echoes the Enter as a newline. Nothing else is
+  written: no `Stderr` is needed.
+- **The line.** Bytes up to the first newline, with the newline and a `\r` before it
+  removed. End of input after some bytes (Ctrl-D mid-line) ends the line there. An empty
+  line is `Empty`. End of input before any byte is `Eof`. A line longer than 1024 bytes is
+  `TooLong`, and the rest of it is discarded when the modes are restored. 1024 is the
+  smallest canonical line limit of the supported hosts (Darwin's `MAX_CANON`; Linux allows
+  4095).
+- **Restore.** The modes the terminal had before the call are put back before the call
+  returns, whatever its result. They are also put back if the run ends while the read is
+  pending: at the run's end, at a run stop (status 102, before `_exit`), and on the
+  terminating arm of each signal handler below. A process killed by `SIGKILL` cannot
+  restore its terminal; `stty sane` repairs it, as after any program.
+- **Signals.** At the first `read_secret` of a run, the host installs a handler that
+  restores the modes and then takes the signal's default action, for `SIGHUP` and
+  `SIGQUIT`, and for `SIGINT` and `SIGTERM` when the run has no `Process` stop relay. A
+  signal whose action is ignore when the handler would be installed (a run under `nohup`)
+  keeps it. The previous actions are put back at the run's end. With `Process`, the first
+  `SIGINT` or `SIGTERM` still completes `host.stopped`: the program cancels the read, and
+  the cancellation restores the modes. A second one takes the relay's default action,
+  which restores first. `SIGTSTP` and `SIGCONT` are not handled: an interactive shell saves
+  and restores the terminal modes of a job it stops.
+- **Background.** Changing the modes from a background process group stops the process
+  with `SIGTTOU`, as for any program, so a background run does not turn echo off under
+  whatever is in the foreground. Every restore blocks `SIGTTOU` while it runs, so a run
+  moved to the background during the read still restores instead of stopping.
+- **Waiting.** `read_secret` waits after issue until a line arrives. It is a cancellation
+  point at issue and while it waits, and gives `Aborted` when cancellation reaches it there
+  and `TimedOut` when `until` passes, as `read` does. Either way the modes are restored and
+  no designation is made.
+- **Failures.** `Other(errno)` reports any other host error, such as `EIO` from a hung-up
+  terminal or a refused mode change.
+- **Authority.** The `Stdin` capability. The result's uses are `uses`, and the secret is
+  as opaque to the program as a granted one: the program never held its bytes.
+- **Charging.** The call admits `seal`'s charge with the length fixed at 1024:
+  `round_up_8(pattern_bytes + 1024 + 32)`, whatever was typed, so no charge, refusal or
+  later refund depends on the secret. A call that gives an error refunds it at once; a
+  secret's charge is refunded when its last designation is released, as `seal`'s is.
+- **Replay.** The read is one provider operation, `STDIN_SECRET`. Its issue holds
+  `until` and the policy text. Its delivery holds the outcome and, on success, the new
+  designation's delivery position; never the bytes, their length or any function of them
+  ([recording](../../../docs/recording.md#credentials)). A replay touches no terminal and
+  installs no handler, and gets a designation with no bytes behind it, as for a granted
+  secret. The operations that read the secret, such as `secret.hmac_sha256`, deliver their
+  recorded results.
+- **Virtual streams.** There is no virtual `Stdin`, so the call is tested on a native
+  pseudo-terminal only.
+
+### Secret input laws
+
+All run natively on Linux on the slave of a pty from `openpty`, and each compares the
+pty's modes after the run with the modes before it. Darwin builds them and has no runner
+yet. Covered in `crates/hirsel-core-driver/src/secret_prompt_fixture.rs`.
+
+| law | bug caught | verification setup |
+|---|---|---|
+| **A. The line becomes a secret and is not echoed** | echo left on, bytes copied into program memory, a missing or doubled newline | Type `hunter2` and Enter on the master. The program writes `hmac_sha256(secret, "data")` and the tag equals the value computed by hand. The master's output holds none of the typed bytes and exactly one newline. |
+| **B. Restored on a terminating signal** | a handler that dies without restoring, or no handler | With no `Process` grant, send `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` to a program blocked in the read. Each run dies by that signal and the modes are as before. |
+| **C. The stop relay keeps the first signal** | a handler that takes `SIGINT` from `host.stopped`, or a relay arm that dies without restoring | With `Process`, the first `SIGINT` completes `host.stopped`, the program cancels the read and gets `Aborted`, and the modes are restored. A program that ignores `host.stopped` and gets `SIGINT` until it dies is restored too. |
+| **D. Restored after a timeout and a run stop** | a deadline or `_exit(102)` path that skips the restore | `until` 200 ms ahead gives `TimedOut` with the modes restored. A run stop during the read exits 102 with the modes restored. |
+| **E. `SIGTTOU` during restore** | a restore that stops the process instead of restoring | The test is the pty's session leader and starts the program in its own foreground group. Once the program is blocked in the read, the test makes its own group the foreground one and sends `SIGTERM`. The modes are restored and the program dies by `SIGTERM`, not stopped. |
+| **E2. A background read changes nothing** | arming that blocks `SIGTTOU` and turns echo off under the foreground | The program starts in a background group of the pty's session and calls `read_secret`. It is stopped by `SIGTTOU` and the modes are unchanged. |
+| **F. The recording holds no secret** | a recorded line, length or length-dependent charge | Record two runs that type secrets of different lengths: neither tape holds the typed bytes, and their `STDIN_SECRET` frames are identical. A replay on pipes ends `Sealed`. |
+| **G. Not a terminal** | an echoing fallback, or a check that consumes input | With stdin on a pipe holding `abc`, the call gives `NotTerminal` and a following `stdin.read` reads `abc`. |

@@ -595,7 +595,9 @@ operations it names; nothing else about them may be inferred from an implementat
   reaches it there and `TimedOut` when `until` passes, in both cases having appended
   nothing. Bytes the host supplies afterwards go to the next read. The provider never
   changes the flags of the inherited descriptor
-  ([stdin](../../core/std/api/stdin.md)). `stdin.is_terminal(i)`, `stdout.is_terminal(o)`
+  ([stdin](../../core/std/api/stdin.md)). `stdin.read_secret(i, uses, until)` reads one
+  terminal line with echo off into a `Secret` and restores the terminal's modes before it
+  returns ([secret input](../../core/std/api/stdin.md#secret-input)). `stdin.is_terminal(i)`, `stdout.is_terminal(o)`
   and `stderr.is_terminal(e)` return the stream's **terminal bit**: whether its descriptor
   referred to a terminal when the run started. The launcher takes the bit once per granted
   stream, before `main`, and it enters with the entry's grants

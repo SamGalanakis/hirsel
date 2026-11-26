@@ -176,7 +176,11 @@ sizes, or `Aborted`, `TimedOut` or the host error. An Env grant is recorded in t
 snapshot with its patterns and the launcher's snapshot of the covered names and values.
 `env.get`, `env.len` and `env.name` read that snapshot and add no frames. A replay
 supplies both from the recording and reads neither the host's standard input nor its
-environment.
+environment. A `stdin.read_secret` is one `STDIN_SECRET` operation: its issue holds
+`until` and the policy text, and its delivery holds `NotTerminal`, `Busy`, `Empty`,
+`TooLong`, `Eof`, `Aborted`, `TimedOut` or the host error, or on success the new
+designation's delivery position. It holds no byte of the line and no length
+([credentials](#credentials)). A replay neither reads the terminal nor changes its modes.
 
 **TLS sessions.** A TLS stream is recorded through the `Net` grant it runs over.
 
@@ -235,7 +239,7 @@ at the first missing position.
 PATH with no host provider. It takes the arguments, the root limit and the grant snapshot
 from the recording and accepts no grants. It checks each issue against the recording before
 any effect, supplies each delivery from the recording, and never repeats a recorded host
-effect. It installs no signal handler, reads no `Secret` source and opens no network,
+effect. It installs no signal handler, reads no `Secret` source or terminal line and opens no network,
 roots or key. Replayed sockets, TLS halves and secrets are local designations: splitting or
 dropping one changes only local ownership, sends no `close_notify` and reaches no host.
 A replayed `Net` grant starts with no live rules, and its narrowed rule lists and their
@@ -314,6 +318,7 @@ Where cleartext can be in a recording:
 | a sealed secret | only where the bytes were already there, as the received plaintext they were computed from | Replay recomputes the same bytes from those deliveries, so the seal adds nothing. |
 | received plaintext (response bodies, cookies, minted tokens; a child's stdout and stderr; received datagrams) | always, exactly as received | Replay delivers these bytes to the program, so it needs them exactly. |
 | a credential fetch ([credential grants](spec/tls.md#tls-7-credential-grants)) | the access key id and session token, as received plaintext; never the secret key | The key is sealed by the provider. Replay makes a designation with no bytes, as for a grant. |
+| a line read by `stdin.read_secret` ([stdin](../core/std/api/stdin.md#secret-input)) | never, nor its length | The line goes from the terminal into run-owned storage. The `STDIN_SECRET` issue holds `until` and the policy text, and its delivery holds the outcome and, on success, the designation's delivery position. The charge is fixed, so nothing recorded depends on the line. Replay touches no terminal and makes a designation with no bytes, as for a grant. |
 | a wrapped secret | only as `wrap`'s blob, sealed under the KEK | Replay delivers the blob, and opening it needs the KEK's bytes, which a recording never holds. |
 | a SCRAM exchange | the salt, iteration count, nonces and the server's `v=`, as received plaintext; never the proof | The server's messages are deliveries. With the client's first message they let a holder of the tape test password guesses offline, which is one reason every tape is credential-bearing. The proof would give the same, so it is not stored. |
 | an opaque key schedule's secrets, or a sealer's, opener's, header mask's or key share's key ([packet ciphers and key agreement](spec/tls.md#tls-8-packet-ciphers-and-key-agreement)) | never; the issue holds the origins it was made from | Replay delivers each seal, open, mask and Finished value from the recording. A wholly virtual schedule writes no frame at all: replay recomputes it from the seed and the recorded peer messages. |
@@ -561,10 +566,10 @@ position where that unit folds it, and it names the socket by the stream number 
 ordinal of the unit that dropped it.
 
 **Designations across units.** A designation is its origin kind (`Granted` 0, `Sealed` 1,
-`Derived` 2, `Unwrapped` 3, `Fetched` 4, `GeneratedP256` 5), the stream number of the unit
-that made it, and that kind's number in that unit's own order: a grant ordinal, the order
-of a seal among that unit's seals or of an unwrap among its unwraps, or the position of the
-`SECRET_KDF`, credential or `MEDIA_P256_KEY` delivery. No count is run-wide. A designation that arrives keeps its origin. The canonical arguments
+`Derived` 2, `Unwrapped` 3, `Fetched` 4, `GeneratedP256` 5, `Prompted` 6), the stream
+number of the unit that made it, and that kind's number in that unit's own order: a grant
+ordinal, the order of a seal among that unit's seals or of an unwrap among its unwraps, or
+the position of the `SECRET_KDF`, credential, `MEDIA_P256_KEY` or `STDIN_SECRET` delivery. No count is run-wide. A designation that arrives keeps its origin. The canonical arguments
 of `SEND_SECRET`, `SECRET_MAC` and `SECRET_KDF` bind the full designation. Every field that
 holds a designation, in these arguments, `SCRAM`, `TLS_ACCEPT`, a schedule import and a
 `Secret` snapshot (tag 7), writes it as origin kind `u8`, stream `u32`, ordinal `varint`.

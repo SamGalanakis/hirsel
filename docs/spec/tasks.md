@@ -153,7 +153,7 @@ else is done. A provider operation that has been issued completes and delivers a
 while it waits in progress for readiness, through its provider's abort, whose result is the
 operation's `Aborted` error; the request stays pending and is observed at the next
 cancellation point. An operation that does not wait after issue is reached only at issue,
-and in v1 only the socket operations, `stdin.read`, the
+and in v1 only the socket operations, `stdin.read`, `stdin.read_secret`, the
 Unix socket operations ([NET-13](net.md#net-13-unix-streams), [NET-14](net.md#net-14-unix-datagrams)),
 I/O on a child's pipe halves, and `exec.wait` ([EXEC-5](exec.md#exec-5-wait-and-signal)) wait after issue.
 A deadline `At(c, t)` is held on `c`'s own timers, never by the operation's provider: on a

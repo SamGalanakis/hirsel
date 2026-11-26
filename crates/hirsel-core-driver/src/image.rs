@@ -414,7 +414,7 @@ impl CoreImage {
                 let mut body = DefinitionProduct::from_head(
                     &head,
                     record,
-                    |head| self.reader.decode(|| decode(head)),
+                    |head| self.reader.decode(|| crate::body::decode_head(head)),
                     source,
                 )
                 .ok_or_else(|| self.body_miss(record))?;

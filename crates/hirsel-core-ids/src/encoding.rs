@@ -37,6 +37,11 @@ pub fn read_fixed<T: de::DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
     read::<false, T>(bytes)
 }
 
+/// Read a fixed-width record prefix and return the unconsumed suffix.
+pub fn read_fixed_prefix<T: de::DeserializeOwned>(bytes: &[u8]) -> io::Result<(T, &[u8])> {
+    read_prefix::<false, T>(bytes)
+}
+
 pub fn write_compact(out: &mut impl Write, value: &(impl Serialize + ?Sized)) -> io::Result<()> {
     write::<true>(out, value)
 }
@@ -55,12 +60,19 @@ fn write<const COMPACT: bool>(
 }
 
 fn read<const COMPACT: bool, T: de::DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
-    let mut decoder = Decoder::<COMPACT>(bytes);
-    let value = T::deserialize(&mut decoder).map_err(|error| error.0)?;
-    if !decoder.0.is_empty() {
+    let (value, rest) = read_prefix::<COMPACT, T>(bytes)?;
+    if !rest.is_empty() {
         return Err(invalid("trailing record bytes").0);
     }
     Ok(value)
+}
+
+fn read_prefix<const COMPACT: bool, T: de::DeserializeOwned>(
+    bytes: &[u8],
+) -> io::Result<(T, &[u8])> {
+    let mut decoder = Decoder::<COMPACT>(bytes);
+    let value = T::deserialize(&mut decoder).map_err(|error| error.0)?;
+    Ok((value, decoder.0))
 }
 
 #[derive(Debug)]

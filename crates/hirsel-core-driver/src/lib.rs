@@ -423,6 +423,7 @@ struct DiskCheckRef<'a> {
     function: Option<u32>,
     constructor_types: &'a std::collections::BTreeSet<DefPath>,
     constructor_candidates: bool,
+    #[serde(skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     computed: &'a std::collections::BTreeSet<DefPath>,
 }
 impl<'a> DiskCheckRef<'a> {
@@ -478,7 +479,6 @@ impl<'a> DiskCheckRef<'a> {
     }
 }
 #[derive(Deserialize)]
-#[cfg_attr(test, derive(Serialize))]
 struct DiskCheck {
     anchors: Vec<DefPath>,
     key: DefinitionKey,
@@ -491,7 +491,6 @@ struct DiskCheck {
     function: Option<u32>,
     constructor_types: std::collections::BTreeSet<DefPath>,
     constructor_candidates: bool,
-    computed: std::collections::BTreeSet<DefPath>,
 }
 impl Driver {
     pub fn check(
@@ -1276,8 +1275,8 @@ fn body_record(
         store: store.clone(),
         reader: None,
     };
-    Ok(DefinitionProduct::from_head(&head, record, decode, source)
-        .filter(|product| product.definition == *path))
+    let product = DefinitionProduct::from_head(&head, record, body::decode_head, source);
+    Ok(product.filter(|product| product.definition == *path))
 }
 /// The file record: namespace map and anchor map (item ordinal, line base).
 fn file_record(

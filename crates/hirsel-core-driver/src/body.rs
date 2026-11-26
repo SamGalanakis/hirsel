@@ -35,6 +35,22 @@ pub(crate) fn ir_hash(module: &Module, scratch: &mut Vec<u8>) -> io::Result<Cont
     encoding::write_fixed(scratch, module)?;
     Ok(Store::ir_hash(scratch))
 }
+
+/// The checked header's only optional suffix is its nonempty computed-read set.
+pub(crate) fn decode_head(bytes: &[u8]) -> Option<(DiskCheck, BTreeSet<DefPath>)> {
+    let (disk, suffix) = encoding::read_fixed_prefix(bytes).ok()?;
+    let computed = if suffix.is_empty() {
+        BTreeSet::new()
+    } else {
+        let names: BTreeSet<DefPath> = decode(suffix)?;
+        if names.is_empty() {
+            return None;
+        }
+        names
+    };
+    Some((disk, computed))
+}
+
 impl DefinitionProduct {
     /// A freshly checked body. Its record is framed at publication
     /// (`frame`), which sets `ir_hash` and `record`.
@@ -85,10 +101,10 @@ impl DefinitionProduct {
     pub(crate) fn from_head(
         head: &crate::store::Head,
         record: ContentHash,
-        decode: impl FnOnce(&[u8]) -> Option<DiskCheck>,
+        decode: impl FnOnce(&[u8]) -> Option<(DiskCheck, BTreeSet<DefPath>)>,
         source: IrSource,
     ) -> Option<Self> {
-        let disk = decode(head.head())?;
+        let (disk, computed) = decode(head.head())?;
         let [nodes, uses, places, calls, types, bytes] = disk.counts;
         Some(Self {
             record,
@@ -110,7 +126,7 @@ impl DefinitionProduct {
                 flow: disk.flow,
                 constructor_types: disk.constructor_types,
                 constructor_candidates: disk.constructor_candidates,
-                computed: disk.computed,
+                computed,
                 counts: hirsel_core_front::Counts {
                     nodes,
                     uses,

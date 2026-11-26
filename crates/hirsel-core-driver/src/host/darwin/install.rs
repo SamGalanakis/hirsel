@@ -60,3 +60,36 @@ pub(crate) fn loaded_libraries(
     }
     Ok((search, needed))
 }
+
+#[cfg(test)]
+pub(crate) fn test_link(runtime: &Path) -> crate::native::Link {
+    thread_local! {
+        // Keep the recipe for all builds of one law. Its prefix goes away with
+        // the test thread.
+        static INSTALLATION: std::cell::OnceCell<(tempfile::TempDir, PathBuf)> =
+            const { std::cell::OnceCell::new() };
+    }
+    INSTALLATION.with(|installation| {
+        let (_, recipe) = installation.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let target = super::HOST_TARGET.triple();
+            let kit = PathBuf::from(std::env::var_os("HIRSEL_LINK_KIT").expect("link kit"));
+            crate::installation::publish(
+                dir.path(),
+                false,
+                Some((runtime, target)),
+                Default::default(),
+                Some(&kit),
+                &mut crate::Meter::new(false),
+            )
+            .unwrap();
+            let recipe = crate::installation::Installed::discover(&dir.path().join("hirsel"))
+                .unwrap()
+                .unwrap()
+                .link(target)
+                .unwrap();
+            (dir, recipe)
+        });
+        crate::native::Link::Installed(recipe.clone())
+    })
+}

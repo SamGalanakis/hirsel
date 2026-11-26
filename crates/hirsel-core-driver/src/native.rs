@@ -2001,6 +2001,8 @@ pub(crate) mod tests {
     }
     pub(crate) fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let runtime =
+            root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive"));
         NativeOptions {
             recording: false,
             coverage: None,
@@ -2008,12 +2010,9 @@ pub(crate) mod tests {
             backend,
             optimize: false,
             debug_lines: false,
-            target: TARGET.into(),
-            runtime: root
-                .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
-            link: Link::Driver(
-                PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            ),
+            target: crate::host::HOST_TARGET.triple().into(),
+            link: crate::host::test_link(&runtime),
+            runtime,
             cas: dir.join("cas"),
             output: dir.join("program"),
             root_limit: 1_048_576,

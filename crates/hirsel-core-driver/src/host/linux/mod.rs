@@ -21,6 +21,13 @@ pub(crate) use install::{installed_executable, loaded_libraries};
 
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::X86_64Linux;
 
+#[cfg(test)]
+pub(crate) fn test_link(_runtime: &Path) -> crate::native::Link {
+    crate::native::Link::Driver(
+        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+    )
+}
+
 /// The kit's Linux linker has both the ELF and Mach-O ports.
 pub(crate) fn installation_linker(kit: &Path, _library: &Path) -> io::Result<PathBuf> {
     Ok(kit.join("ld.lld"))

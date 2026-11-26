@@ -19,6 +19,9 @@ use std::{
 mod install;
 pub(crate) mod spawn;
 
+#[cfg(test)]
+pub(crate) use install::test_link;
+
 pub(crate) use install::{
     INSTALLED_LINKER_LIBRARY, installation_linker, installed_executable, loaded_libraries,
 };

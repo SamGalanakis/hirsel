@@ -1,6 +1,8 @@
 /// The Nano ID URL alphabet (ai/nanoid, MIT).
 pub const DEFAULT_ALPHABET: String = "57X6y3wQZNzYjJB2L_10pxbackgroundhimselfUTF-8DEMOGRAPHICSVqvt4KW9"
 
+const _: () = check_default_alphabet()
+
 pub type Error: key = AlphabetSize | DuplicateSymbol(u8) | SizeLimit | RandomLimit | RandomExhausted
 
 const MAX_SIZE: u64 = 65536
@@ -10,7 +12,8 @@ const MAX_RANDOM_BYTES: u64 = 1048576
 /// Generates size bytes using the URL-safe alphabet and caller-supplied
 /// randomness. See custom for limits and exhaustion. Fails: Capacity.
 pub fn generate(size: u64, rand: Bytes) -> Result[Bytes, Error] {
-    custom(string.as_bytes(DEFAULT_ALPHABET), size, rand)
+    check_limits(size, list.len(rand))?
+    generate_from(string.as_bytes(DEFAULT_ALPHABET), size, rand)
 }
 
 /// Generates size bytes from an alphabet of 2 to 256 distinct byte symbols.
@@ -20,17 +23,40 @@ pub fn generate(size: u64, rand: Bytes) -> Result[Bytes, Error] {
 /// Alloc: the output, discarded on refusal. Fails: Capacity.
 /// Cost: O(alphabet length + random bytes examined), constant depth.
 pub fn custom(alphabet: Bytes, size: u64, rand: Bytes) -> Result[Bytes, Error] {
-    let n = list.len(alphabet)
+    check_alphabet_size(list.len(alphabet))?
+    check_limits(size, list.len(rand))?
+    check_alphabet_symbols(alphabet)?
+    generate_from(alphabet, size, rand)
+}
+
+fn check_default_alphabet() {
+    let alphabet = string.as_bytes(DEFAULT_ALPHABET)
+    if let Error(_) = check_alphabet_size(list.len(alphabet)) {
+        core.fail("Nano ID's default alphabet must have 2 to 256 bytes")
+    }
+    if let Error(_) = check_alphabet_symbols(alphabet) {
+        core.fail("Nano ID's default alphabet must have distinct bytes")
+    }
+}
+
+fn check_alphabet_size(n: u64) -> Result[(), Error] {
     if n < 2 || n > 256 {
         return Error(AlphabetSize)
     }
+    Ok(())
+}
+
+fn check_limits(size: u64, random_bytes: u64) -> Result[(), Error] {
     if size > MAX_SIZE {
         return Error(SizeLimit)
     }
-    let random_bytes = list.len(rand)
     if random_bytes > MAX_RANDOM_BYTES {
         return Error(RandomLimit)
     }
+    Ok(())
+}
+
+fn check_alphabet_symbols(alphabet: Bytes) -> Result[(), Error] {
     let mut seen: Inline[bool, 256] =[false; 256]
     for symbol in alphabet {
         if seen[symbol] {
@@ -38,9 +64,14 @@ pub fn custom(alphabet: Bytes, size: u64, rand: Bytes) -> Result[Bytes, Error] {
         }
         seen[symbol] = true
     }
-    if random_bytes < size {
+    Ok(())
+}
+
+fn generate_from(alphabet: Bytes, size: u64, rand: Bytes) -> Result[Bytes, Error] {
+    if list.len(rand) < size {
         return Error(RandomExhausted)
     }
+    let n = list.len(alphabet)
     let mut mask: u64 = 1
     while mask < n - 1 {
         mask = (mask << 1) | 1

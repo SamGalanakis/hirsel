@@ -72,7 +72,15 @@ pub fn parse_decimal_span(b: Bytes, start: u64, end: u64, limit: u64) -> Result[
 }
 
 // The greatest magnitude for each decimal digit count that always fits u64.
-const DECIMAL_MAX: Inline[u64, 20] =[0, 9, 99, 999, 9999, 99999, 999999, 9999999, 99999999, 999999999, 9999999999, 99999999999, 999999999999, 9999999999999, 99999999999999, 999999999999999, 9999999999999999, 99999999999999999, 999999999999999999, 9999999999999999999]
+const DECIMAL_MAX: Inline[u64, 20] = decimal_maxima()
+
+fn decimal_maxima() -> Inline[u64, 20] {
+    let mut maxima: Inline[u64, 20] =[0; 20]
+    for count in 1u64 .. 20 {
+        maxima[count] = 10 * maxima[count - 1] + 9
+    }
+    maxima
+}
 
 fn digits(b: Bytes, start: u64, end: u64, base: u32, limit: u64) -> Result[u64, ParseError] {
     let mut v: u64 = 0

@@ -141,6 +141,49 @@ fn relayed_of(l: Leg) -> Addr {
     a.relayed
 }
 
+/// bug: the standalone relay binds 16 addresses even when the 17th allocation is funded.
+/// oracle: 17 live TURN clients receive distinct addresses from the bound pool.
+@test
+fn relay_plan_binds_the_seventeenth_allocation(network: Net) -> Result[(), turn.TurnError] waits {
+    let sockets_plan = option.unwrap(signal.relay_socket_plan(17, 1500, 2500))
+    let (take sockets, take addresses) = signal.bind_relay_pool(network, LOOPBACK.ip, sockets_plan) ?=> |_| Config
+    let terms = signal.relay_config(plan())?
+    let rnd = provide.random(6017)
+    let mut rl = turn.relay(take terms, rnd, master("kdf"), master("mac"), clone(addresses))?
+    let mut allocated: List[Addr] = list.with_capacity(17)
+    let inc: Inline[u8, 16] =[0u8; 16]
+    let now = tnow(1000)
+    for i in 1u64 .. 18u64 {
+        let subject = signal.admission_subject(inc, i)
+        let creds = signal.mint_session(master("mac"), rnd, subject, MINT_UNIX, plan())?
+        let suffix: u32 = int.narrow(i)
+        let origin = Addr(ip: V4(0xc6336400u32 + suffix), port: 50000)
+        let mut leg = relay_leg(mut rl, now, false, origin, 0, creds)
+        pump(mut rl, mut leg, now, rnd)
+        let relayed = relayed_of(leg)
+        let mut found = false
+        for address in addresses {
+            if address == relayed {
+                found = true
+            }
+        }
+        if !found {
+            fail("the relay granted an address without a bound socket")
+        }
+        for address in allocated {
+            if address == relayed {
+                fail("two clients received the same live relay address")
+            }
+        }
+        list.push(mut allocated, relayed)
+    }
+    if turn.relay_counts(rl).allocations != 17 {
+        fail("the relay did not retain all 17 allocations")
+    }
+    let _ = take sockets
+    Ok(())
+}
+
 /// The browser sends payload to peer through its allocation; answers what reached a peer.
 fn browser_send(mut rl: turn.Relay, mut l: Leg, now: turn.Now, rnd: Random, peer_at: Addr, payload: Bytes) -> List[(Addr, Addr, Bytes)] {
     let n = list.len(payload)

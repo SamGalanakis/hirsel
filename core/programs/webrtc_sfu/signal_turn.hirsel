@@ -11,6 +11,67 @@ pub type RelayPlan {
     host: List[Ip]
 }
 
+/// The UDP allocation pool and the receive window on each relay socket.
+pub opaque type RelaySocketPlan: key {
+    allocations: u16,
+    slots: u32,
+    slot_bytes: u32
+}
+
+pub fn relay_socket_plan(allocations: u16, media_datagram: u16, packets_per_second: u32) -> Option[RelaySocketPlan] {
+    if allocations == 0 || media_datagram == 0 || packets_per_second == 0 {
+        return None
+    }
+    let media_bytes: u64 = int.widen(media_datagram)
+    let envelope = media_bytes + turn.HEADROOM + 3u64
+    if envelope > 65535 {
+        return None
+    }
+    let rate: u64 = int.widen(packets_per_second)
+    let burst = (rate * DEFAULT_TIMING.active_tick_ns + 999999999u64) / 1000000000u64
+    let mut slots = 64u32
+    while (int.widen(slots) : u64) < burst {
+        slots *= 2
+    }
+    let UdpOptions(slots: _, slot_bytes: stride) = units.udp_options(slots, int.narrow(envelope))?
+    Some(RelaySocketPlan(allocations: allocations, slots: slots, slot_bytes: stride))
+}
+
+pub fn relay_udp_options(p: RelaySocketPlan) -> UdpOptions {
+    UdpOptions(slots: p.slots, slot_bytes: p.slot_bytes)
+}
+
+pub fn relay_udp_buffer_bytes(p: RelaySocketPlan) -> u64 {
+    let slots: u64 = int.widen(p.slots)
+    slots * int.widen(p.slot_bytes)
+}
+
+/// NET-16's socket reservations for the listener and pool, plus the receive scratch
+/// space and the lists of owned sockets, their addresses and the TURN pool copy.
+pub fn relay_socket_bytes(p: RelaySocketPlan) -> u64 {
+    let count: u64 = int.widen(p.allocations)
+    let buffer = relay_udp_buffer_bytes(p)
+    let datagrams = option.unwrap(charge.seq(bytes[UdpPacket], int.widen(p.slots)))
+    let data = option.unwrap(charge.seq(1, buffer))
+    let sockets = option.unwrap(charge.seq(bytes[UdpSocket], count))
+    let addrs = option.unwrap(charge.seq(bytes[Addr], count))
+    (count + 1u64) * buffer + sockets + 2u64 * addrs + datagrams + data
+}
+
+/// Bind each allocatable address before the relay starts receiving requests.
+pub fn bind_relay_pool(network: Net, ip: Ip, p: RelaySocketPlan) -> Result[(List[UdpSocket], List[Addr]), NetError] waits {
+    let count: u64 = int.widen(p.allocations)
+    let mut sockets: List[UdpSocket] = list.with_capacity(count)
+    let mut addresses: List[Addr] = list.with_capacity(count)
+    let options = relay_udp_options(p)
+    for _ in 0u64 .. count {
+        let (take socket, address) = host.udp_bind(network, Addr(ip: ip, port: 0), options)?
+        list.push(mut sockets, take socket)
+        list.push(mut addresses, address)
+    }
+    Ok((take sockets, take addresses))
+}
+
 /// One admission's ICE credentials for the answer (RTC-1) and its TURN credentials for the
 /// browser's ICE servers list (TURN-11), minted together at admission.
 pub type SessionCredentials {

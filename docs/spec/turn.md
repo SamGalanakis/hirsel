@@ -849,6 +849,11 @@ restricts its embedded relay to the node's media ports. An in-process hand-off t
 the socket is not offered: it would need a relayed path kind in `PeerSession`, a second
 path identity.
 
+The standalone SFU deployment requires an allocation count. It funds the TURN listener
+and that many relayed UDP sockets before starting the pool. Each socket's receive window
+uses the configured packet rate and the media datagram width plus TURN framing overhead.
+The local demo and browser fixture supply 16 allocations by default.
+
 ### TURN-9: Revocation
 
 `revoke(r, subject, until_unix_s, now)` deletes every allocation whose username's subject is

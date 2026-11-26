@@ -8,7 +8,7 @@
 //   relayed addresses. Its policy is the relay-only one (TURN-7): it relays only to the
 //   media units' ports. Signaling mints each admission's TURN credentials from the master
 //   the relay shares, and forwards each ended admission's revoke to it (TURN-9).
-// Usage: service --rooms N --participants N --unit-bytes N --down-tracks N
+// Usage: service --rooms N --participants N --unit-bytes N --down-tracks N --relay-allocations N
 //                [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT]
 //                [--audio-forward N] [--seconds N]
 // Stdout, one event per line: `listening <port>`, `turn <udp|tcp> <conn> <hex>` for each
@@ -18,9 +18,8 @@ const MS: u64 = 1000000
 
 const SECOND: u64 = 1000000000
 
-const RELAY_SOCKET: UdpOptions = UdpOptions(slots: 64, slot_bytes: 2048)
-
-const POOL_SIZE: u64 = 16
+// Relay authentication, connection state and protocol work, beside socket reservations.
+const RELAY_WORK_BYTES: u64 = 67108864
 
 // Each credential's lifetime, from its mint (turn.md U8: the relay's credential_max_s).
 const LIFETIME_S: u32 = 3600
@@ -74,6 +73,7 @@ type Settings {
     dtls_mtu: u16,
     dtls_message_bytes: u32,
     repair_pps: u32,
+    relay_allocations: u16,
     audio_forward: u8,
     seconds: u64
 }
@@ -93,7 +93,7 @@ fn address(value: String) -> Option[Addr] {
 
 fn settings(a: Args) -> Option[Settings] {
     let dtls_defaults = webrtc_sfu.peer.DTLS_DEFAULT
-    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, dtls_mtu: dtls_defaults.mtu, dtls_message_bytes: dtls_defaults.max_message, repair_pps: webrtc_sfu.peer.DEFAULT_REPAIR.packets_per_second, audio_forward: 0u8, seconds: 0u64)
+    let mut s = Settings(listen: Addr(ip: V4(0x7f000001u32), port: 7800u16), media: Addr(ip: V4(0x7f000001u32), port: 7810u16), units: 2u16, turn: Addr(ip: V4(0x7f000001u32), port: 3478u16), rooms: 0u32, participants: 0u16, unit_bytes: 0u64, down_tracks: 0u16, dtls_mtu: dtls_defaults.mtu, dtls_message_bytes: dtls_defaults.max_message, repair_pps: webrtc_sfu.peer.DEFAULT_REPAIR.packets_per_second, relay_allocations: 0u16, audio_forward: 0u8, seconds: 0u64)
     let mut i = 0u64
     while i < args.len(a) {
         let name = option.unwrap(args.get(a, i))
@@ -139,6 +139,11 @@ fn settings(a: Args) -> Option[Settings] {
                 return None
             }
             s.repair_pps = n
+        } else if name == "--relay-allocations" {
+            let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
+                return None
+            }
+            s.relay_allocations = n
         } else if name == "--units" {
             let Ok(n) = (int.parse(value) : Result[u16, ParseError]) else {
                 return None
@@ -159,7 +164,7 @@ fn settings(a: Args) -> Option[Settings] {
         }
         i += 2
     }
-    if s.units == 0 || s.units > webrtc_sfu.router.UNITS_MAX || s.rooms == 0 || s.participants == 0 || s.unit_bytes == 0 || s.down_tracks == 0 {
+    if s.units == 0 || s.units > webrtc_sfu.router.UNITS_MAX || s.rooms == 0 || s.participants == 0 || s.unit_bytes == 0 || s.down_tracks == 0 || s.relay_allocations == 0 {
         return None
     }
     Some(s)
@@ -223,7 +228,9 @@ type RelayStart: send {
     media_ip: u32,
     media_lo: u16,
     media_hi: u16,
+    sockets: webrtc_sfu.signal.RelaySocketPlan,
     revokes: Receiver[webrtc_sfu.signal.RelayRevoke],
+    ready: Sender[()],
     until: u64
 }
 
@@ -342,8 +349,9 @@ fn from_client(mut rl: turn.Relay, clock: Clock, rnd: Random, mut server: UdpSoc
 }
 
 fn relay_place(take s: RelayStart) -> Result[(), turn.TurnError] waits {
-    let RelayStart(net: n, clock: clock, random: r, out: out, turn: at, master: take master, nonce: take nonce, media_ip: media_ip, media_lo: media_lo, media_hi: media_hi, revokes: take revokes, until: until) = take s
-    let Ok((take server_socket, local)) = host.udp_bind(n, at, RELAY_SOCKET) else {
+    let RelayStart(net: n, clock: clock, random: r, out: out, turn: at, master: take master, nonce: take nonce, media_ip: media_ip, media_lo: media_lo, media_hi: media_hi, sockets: sockets, revokes: take revokes, ready: take ready, until: until) = take s
+    let options = webrtc_sfu.signal.relay_udp_options(sockets)
+    let Ok((take server_socket, local)) = host.udp_bind(n, at, options) else {
         say(out, "relay cannot bind its UDP port")
         return Error(Config)
     }
@@ -353,23 +361,23 @@ fn relay_place(take s: RelayStart) -> Result[(), turn.TurnError] waits {
         return Error(Config)
     }
     let mut listener = take owned_listener
-    let mut pools: List[UdpSocket] = list.new()
-    let mut pool_addrs: List[Addr] = list.new()
-    for _ in 0u64 .. POOL_SIZE {
-        let Ok((take p, relayed)) = host.udp_bind(n, Addr(ip: at.ip, port: 0), RELAY_SOCKET) else {
-            return Error(Config)
-        }
-        list.push(mut pools, take p)
-        list.push(mut pool_addrs, relayed)
+    let Ok((take bound_sockets, take pool_addrs)) = webrtc_sfu.signal.bind_relay_pool(n, at.ip, sockets) else {
+        say(out, "relay cannot bind the requested allocation sockets")
+        return Error(Config)
     }
+    let mut pools = take bound_sockets
     let config = webrtc_sfu.signal.relay_config(plan_of(media_ip, media_lo, media_hi, at.ip))?
     let mut rl = turn.relay(take config, r, take master, take nonce, clone(pool_addrs))?
     say_number(out, "turn listening", int.widen(local.port))
+    if let Error(_) = channel.send(ready, ()) {
+        return Ok(())
+    }
     let mut streams: List[Stream] = list.new()
     let mut next_conn = 1u64
     let mut live = 0u64
-    let mut data: Bytes = list.with_capacity(131072)
-    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    let UdpOptions(slots, slot_bytes: _) = options
+    let mut data: Bytes = list.with_capacity(webrtc_sfu.signal.relay_udp_buffer_bytes(sockets))
+    let mut packets: List[UdpPacket] = list.with_capacity(int.widen(slots))
     while host.mono_ns(clock) < until {
         let now = host.mono_ns(clock)
         while let Ok(v) = channel.try_receive(revokes) {
@@ -532,7 +540,7 @@ pub fn main(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Task
 
 fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
     let Some(s) = settings(a) else {
-        say(out, "usage: service --rooms N --participants N --unit-bytes N --down-tracks N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--dtls-mtu N] [--dtls-message-bytes N] [--repair-pps N] [--audio-forward N] [--seconds N]")
+        say(out, "usage: service --rooms N --participants N --unit-bytes N --down-tracks N --relay-allocations N [--listen IP:PORT] [--media IP:PORT] [--units N] [--turn IP:PORT] [--dtls-mtu N] [--dtls-message-bytes N] [--repair-pps N] [--audio-forward N] [--seconds N]")
         return Error(Exit(status: 2u8))
     }
     // Each room has one SFU connection. Leave a second transport slot per browser
@@ -564,6 +572,10 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
         return Error(Exit(status: 2u8))
     }
     let queues = webrtc_sfu.units.media_queues(pool_limits.sessions)
+    let Some(relay_sockets) = webrtc_sfu.signal.relay_socket_plan(s.relay_allocations, queues.datagram_bytes, s.repair_pps) else {
+        say(out, "invalid TURN relay socket plan")
+        return Error(Exit(status: 2u8))
+    }
     if !media_fits(s, limits, session, pool_limits, queues, out) {
         return Error(Exit(status: 2u8))
     }
@@ -600,9 +612,19 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     }
     list.fill(mut master_bytes, 32, 0)
     let (revoke_to, revoked): (Sender[webrtc_sfu.signal.RelayRevoke], Receiver[webrtc_sfu.signal.RelayRevoke]) = channel.new(256u64)
-    let relay_start = RelayStart(net: n, clock: clock, random: random, out: out, turn: s.turn, master: take relay_master, nonce: take nonce, media_ip: media_ip, media_lo: s.media.port, media_hi: last, revokes: take revoked, until: until)
-    let Ok(relaying) = task.try_spawn(tasks, bytes 67108864u64, take relay_start, relay_place) else {
-        say(out, "the relay place does not fit")
+    let (relay_ready, relay_started): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let relay_start = RelayStart(net: n, clock: clock, random: random, out: out, turn: s.turn, master: take relay_master, nonce: take nonce, media_ip: media_ip, media_lo: s.media.port, media_hi: last, sockets: relay_sockets, revokes: take revoked, ready: take relay_ready, until: until)
+    let relay_need = RELAY_WORK_BYTES + webrtc_sfu.signal.relay_socket_bytes(relay_sockets)
+    let Ok(relaying) = task.try_spawn(tasks, bytes relay_need, take relay_start, relay_place) else {
+        say_number(out, "the relay place needs bytes", relay_need)
+        let _ = channel.send(halt, ())
+        let _ = task.join(take running)
+        return Error(Exit(status: 3u8))
+    }
+    if let Error(_) = channel.receive(relay_started) {
+        let _ = channel.send(halt, ())
+        let _ = task.join(take relaying)
+        let _ = task.join(take running)
         return Error(Exit(status: 3u8))
     }
     say_number(out, "listening", int.widen(s.listen.port))

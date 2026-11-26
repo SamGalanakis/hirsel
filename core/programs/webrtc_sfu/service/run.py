@@ -90,7 +90,7 @@ def prepare_web(compiler, executable, web):
 
 
 def command(executable, listen, args):
-    return [executable, f"--hirsel-n-place={N_PLACE}", "--listen", listen, *args]
+    return [executable, f"--hirsel-n-place={N_PLACE}", "--listen", listen, "--relay-allocations", "16", *args]
 
 
 def wait_for_listener(server, listen, seconds=60):
@@ -115,7 +115,7 @@ def main():
     parser.add_argument("--listen", default="127.0.0.1:7800")
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("service_args", nargs=argparse.REMAINDER,
-                        help="after --: --rooms N --participants N --unit-bytes N --down-tracks N, then optional service flags")
+                        help="after --: --rooms N --participants N --unit-bytes N --down-tracks N, then optional service flags (local TURN allocation default: 16)")
     args = parser.parse_args()
     compiler, work = args.hirsel.resolve(), args.work.resolve()
     web = work / "web"

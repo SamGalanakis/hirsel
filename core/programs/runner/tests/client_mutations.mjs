@@ -16,8 +16,8 @@ export const controls = {
     'lease = await options.storage.lock(streamLock(state, n), false);',
     'lease = await options.storage.lock(streamLock(state, n), false);\n        if (!lease) lease = {lost: new Promise<void>(() => {}), release: async () => {}};')],
   new_work_before_recovery: ['stream_lease', text => replace(text,
-    "    if (this.state !== 'Ready' || this.record.pending) return;",
-    "    if (this.state !== 'Ready') return;")],
+    "    if (this.phase.tag !== 'Ready' || this.record.pending) return;",
+    "    if (this.phase.tag !== 'Ready') return;")],
   treat_as_superseded: ['history_unavailable_retires', text => replace(text,
     "            else await this.retire('LocallyUnknown');",
     "            else await this.completeCall({tag: 'LocallyUnknown'}, true, false);")],
@@ -39,8 +39,8 @@ export const controls = {
     '        record.pending = pending;\n        if (mint)',
     "        record.pending = pending;\n        this.socket!.send(this.options.frame.encode({tag: 'Call', values: [record.id!, pending.p, pending.slot, 30000, pending.args]}));\n        if (mint)")],
   backoff_reset_at_welcome: ['backoff_requires_stable_session', text => replace(text,
-    'this.welcomed = true; this.welcomedAt = this.clock.now();',
-    'this.welcomed = true; this.welcomedAt = this.clock.now(); this.backoff = 100;')],
+    'const accepted = {...phase, credential:',
+    'const accepted = {...phase, backoff: initialBackoff, credential:'), 'state'],
   resend_on_mismatch: ['request_mismatch_fences', text => replace(text,
     "if (refusal.tag === 'RequestMismatch') await this.fence('RequestMismatch');",
     "if (refusal.tag === 'RequestMismatch') await this.retryPending(true);")],
@@ -54,11 +54,12 @@ export async function mutations(codec,names) {
   assert(names.length>0 && names.length<=3,'at most three mutation controls per land');
   for(const name of names) {
     const control=controls[name];assert(control,`unknown control ${name}`);
-    const source=await readFile(new URL('../../../../sdk/client/client.ts',import.meta.url),'utf8');
+    const target=control[2]??'client';
+    const source=await readFile(new URL(`../../../../sdk/client/${target}.ts`,import.meta.url),'utf8');
     const patched=control[1](source);
     let applied=false;
     await assert.rejects(laws(codec,control[0],(module,text)=>{
-      if(module!=='client')return text;
+      if(module!==target)return text;
       applied=true;return patched;
     }),error=>error instanceof assert.AssertionError);
     assert(applied);console.log(`${name}: CAUGHT by ${control[0]}`);

@@ -118,7 +118,7 @@ export async function loadRuntime(mutant) {
   const dir=await mkdtemp(join(tmpdir(),'hirsel-client-'));
   try {
     await writeFile(join(dir,'package.json'),'{"type":"module"}');
-    for(const name of ['client','image','persistence','browser','node','room']) {
+    for(const name of ['client','image','persistence','browser','node','room','state']) {
       let text=await readFile(new URL(name+'.ts',source),'utf8');
       if(mutant)text=mutant(name,text);
       await writeFile(join(dir,name+'.js'),stripTypeScriptTypes(text,{mode:'transform'}));
@@ -541,17 +541,84 @@ export async function laws(codec, only, mutant, entries, http) {
   };
   // WS and HTTP refusals share one refresh in flight; a refresh that settles after close is discarded.
   tests.refresh_shared_and_discarded_after_close=async()=>{
-    const c=source();let replies=[];
+    const c=source(),states=[];let replies=[];
     const fetch=()=>new Promise(resolve=>replies.push(resolve));
-    const h=await setup(new Memory(),{credential:c.fn,http:{url:'http://scripted/',fetch}});await c.give(0,credential);await ready(h);
+    const h=await setup(new Memory(),{credential:c.fn,http:{url:'http://scripted/',fetch},onState:state=>states.push(state)});await c.give(0,credential);await ready(h);
     const answer=h.client.callHttp(want,{path:'/.hirsel/op/save'});await settle();
     assert.equal(replies.length,1);
     h.server.close(h.server.sockets[0],4401);await settle();
     replies[0]({status:401,text:async()=>'',headers:new Headers()});await settle();
     assert.equal(c.asks.length,2,'one refresh serves both refusals');
-    const closed=h.client.close();await c.give(1,bytes(...Array(16).fill(2)));await closed;await h.time.advance(120000);
-    assert.equal(h.client.state,'Closed');assert.equal(h.server.sockets.length,1);
+    await h.client.close();
     assert.deepEqual(await answer,{tag:'LocallyUnknown'});
+    const before=structuredClone({states,events:h.events,diagnostics:h.diagnostics,record:h.storage.raw});
+    await c.give(1,bytes(...Array(16).fill(2)));await h.time.advance(120000);
+    assert.equal(h.client.state,'Closed');assert.equal(h.server.sockets.length,1);
+    assert.deepEqual({states,events:h.events,diagnostics:h.diagnostics,record:h.storage.raw},before);
+  };
+  tests.stale_handshake_after_reconnect=async()=>{
+    const storage=new Memory();
+    const release=Promise.withResolvers(),lock=storage.lock.bind(storage);
+    let installLocks=0;
+    storage.lock=async (name,wait)=>{
+      if(name==='install' && ++installLocks===2)await release.promise;
+      return lock(name,wait);
+    };
+    const h=await setup(storage,{prepare:server=>{server.welcome=false;}});
+    const old=h.server.sockets[0],late=old.onmessage;
+    assert.equal(installLocks,2,'Hello waits for the installation lock');
+    h.server.close(old,1001);
+    release.resolve();
+    await settle();
+    assert.deepEqual(h.server.sent,[],'the old socket must not send Hello when its lock arrives');
+    assert.equal(h.client.state,'Backoff');
+    h.client.reconnect();await settle();
+    const welcome={tag:'Welcome',values:[caller,4,262144n,bytes(3),'test',1024n,birth,retention]};
+    const placed={tag:'Placed',value:{tag:'Ready',value:0}};
+    const before=structuredClone(h.storage.raw);
+    late({data:codec.encode(welcome)});late({data:codec.encode(placed)});await settle();
+    assert.equal(h.client.state,'Connecting');
+    assert.deepEqual(h.storage.raw,before);
+    h.server.emit(h.server.sockets[1],welcome);h.server.emit(h.server.sockets[1],placed);await ready(h);
+  };
+  tests.stale_send_ack_after_reconnect=async()=>{
+    const requests=[],batches=[];
+    const fetch=(_url,{headers,signal})=>{
+      const reply=Promise.withResolvers();
+      requests.push({key:headers.get('Idempotency-Key'),signal,reply});
+      return reply.promise;
+    };
+    const h=await setup(new Memory(),{http:{url:'http://scripted/',fetch},onBatch:v=>batches.push(v)});
+    await ready(h);
+    let completed=false;
+    const result=h.client.callHttp(want,{path:'/.hirsel/op/save'}).then(outcome=>{completed=true;return outcome;});
+    await settle();
+    assert.equal(requests.length,1);
+    const old=h.server.sockets[0];
+    h.server.close(old,1001);await settle();
+    h.client.reconnect();await ready(h);await settle();
+    assert.equal(requests.length,2,'a detached fetch must not block replay');
+    assert.equal(requests[0].signal.aborted,true);
+    assert.equal(requests[0].key,requests[1].key);
+    const committed=body=>({status:200,text:async()=>body,headers:new Headers({'Idempotent-Outcome':'committed'})});
+    const before=structuredClone(h.storage.raw);
+    requests[0].reply.resolve(committed('stale'));await settle();
+    assert.equal(completed,false);
+    assert.deepEqual(h.storage.raw,before);
+    requests[1].reply.resolve(committed('fresh'));
+    assert.deepEqual(await result,{tag:'Returned',value:{status:200,body:'fresh',committed:true,replayed:false}});
+
+    const ws=h.client.call(want,bytes(3),x=>x);
+    await settle();
+    const [id,p]=h.server.calls.at(-1).frame.values;
+    const previous=h.server.sockets[1];
+    h.server.close(previous,1001);await settle();h.client.reconnect();await ready(h);
+    previous.onmessage({data:codec.encode(batch(5n,[],[],[{stream:id,p,outcome:returned(99)}]))});
+    await settle();
+    assert.deepEqual(batches,[]);
+    assert.equal(savedStream(h.storage.raw).pending.p,p);
+    h.server.answer(h.server.sockets[2],id,p,returned(3));
+    assert.deepEqual(await ws,returned(3));
   };
   // The scripted Welcome serves n_place 1024; bindings generated for another value name both.
   tests.n_place_mismatch_names_both=async()=>{

@@ -12,6 +12,8 @@ import {RoomMember, type Decoded, type LiveLink, type LiveRoom, type RoomCodec, 
 export type {LiveRoom, PeerId, RoomCodec, RoomHandlers, RoomPeer, RoomPeersChange, ValueCodec} from './room.js';
 export type {Access, CallOptions, Change, Draft, Frozen, RowChange, Subscription, SubscriptionCodec, SubscriptionControl} from './image.js';
 
+import {canReconnect, credential, current, initialPhase, stableMs, step, type Action, type Event, type Phase} from './state.js';
+
 import type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want,
   WireOutcome} from './wire.js';
 export type {Codec, Done, Entry, Fault, Frame, Group, Option, Outcome, Part, Refusal, Room, SlotRow, SubscriptionEnd, Want} from './wire.js';
@@ -68,44 +70,35 @@ export class Client implements Transport {
   state: State = 'Connecting';
   readonly generation: bigint;
   private readonly installationId: bigint;
-  private credential?: Uint8Array;
   private httpAuthority = new AbortController();
   private readonly credentialWaiters = new Set<() => void>();
-  private refreshing = false;
-  private refreshed = false;
   private record: StreamRecord;
   private streamLease: Lease;
+  private phase: Phase = initialPhase;
   private socket?: Socket;
-  private epoch = 0;
+  private callAbort?: AbortController;
   private work: Promise<void> = Promise.resolve();
   private wants: Want[];
-  private placed = 0;
-  private welcomed = false;
-  private welcomedAt = 0;
   private keyedAt = 0n;
   private keyedAtClock = 0;
   private retention = 0n;
   private remintOnWelcome = false;
-  private httpFlight?: Promise<HttpAttempt>;
-  private backoff = 100;
   private timer?: unknown;
   private stableTimer?: unknown;
   private clock: Clock;
   private removeBrowserWake?: () => void;
-  private sent = false;
   private nextSub = 0;
   private subs = new Set<Sub>();
   private rooms = new Map<Sub, RoomMember>();
   private live: LiveLink = {
-    ready: () => this.state === 'Ready' && this.socket !== undefined, backlog: () => this.socket?.bufferedAmount ?? 0,
-    write: frame => { try { this.socket?.send(this.options.frame.encode(frame)); } catch { this.transient(); } },
+    ready: () => this.phase.tag === 'Ready' && this.socket !== undefined, backlog: () => this.socket?.bufferedAmount ?? 0,
+    write: frame => this.writeFrame(frame, this.phase.epoch),
     clock: {set: (fn, ms) => this.clock.set(fn, ms), clear: id => this.clock.clear(id)},
   };
   private handles = new WeakMap<object, Sub>();
   private overlays = new Map<symbol, Overlay>();
   private earlyOverlays = new Set<symbol>();
   private layer: Layer = new Map();
-  private version = 0n;
   private notifications?: Array<() => void>;
   private calls = new Set<QueuedCall>();
   private activeCall?: Pick<QueuedCall, 'resolve' | 'reject' | 'overlay'>;
@@ -180,7 +173,7 @@ export class Client implements Transport {
       }
       const client = new Client(options, state, stream, lease!);
       await lock.release();
-      client.connect();
+      await client.run({tag: 'Start'});
       client.removeBrowserWake = listenForBrowserWake(() => client.wakeBackoff());
       return client;
     } catch (error) {
@@ -209,11 +202,8 @@ export class Client implements Transport {
     this.options.onState?.(state);
   }
   private async unavailable(error: unknown): Promise<void> {
-    if (this.state === 'Closed') return;
-    this.overlays.clear();
-    this.cancelTimers(); this.disconnect(); this.setState('StorageUnavailable');
-    this.options.onDiagnostic?.(String(error));
-    this.readyReject(new ClientError('StorageUnavailable'));
+    if (this.phase.tag === 'Closed') return;
+    await this.run({tag: 'Stop', state: 'StorageUnavailable', diagnostic: String(error)});
   }
   private async installation<T>(fn: (state: Installation) => Promise<T>): Promise<T | undefined> {
     const lock = await this.options.storage.lock('install', true);
@@ -238,178 +228,155 @@ export class Client implements Transport {
       return await fn(state);
     } finally { await lock.release(); }
   }
-  private connect(): void {
-    if (['Closed', 'Fenced', 'Retired', 'Incompatible', 'Unbound', 'CredentialNeeded', 'StorageUnavailable'].includes(this.state)) return;
-    if (this.options.credential && !this.credential) { this.setState('Connecting'); this.refresh(undefined); return; }
-    this.setState('Connecting'); this.welcomed = false; this.placed = 0; this.sent = false;
-    this.clearSubscriptions();
-    const epoch = ++this.epoch;
+  private run(event: Event): Promise<void> {
+    const {phase, actions} = step(this.phase, event, {
+      wants: this.wants.length, hasCredentialSource: this.options.credential !== undefined,
+    });
+    this.phase = phase;
+    return this.effects(phase, actions);
+  }
+  private post(event: Event): void {
+    void this.enqueue(() => this.run(event)).catch(() => {});
+  }
+  private async effects(scope: Phase, actions: readonly Action[]): Promise<void> {
+    const {epoch} = scope;
+    for (const action of actions) {
+      if (!current(this.phase, scope)) return;
+      switch (action.tag) {
+        case 'State': this.setState(action.state); break;
+        case 'Diagnostic': this.options.onDiagnostic?.(action.message); break;
+        case 'ClearOverlays': this.overlays.clear(); break;
+        case 'CancelTimers':
+          if (this.timer !== undefined) this.clock.clear(this.timer);
+          if (this.stableTimer !== undefined) this.clock.clear(this.stableTimer);
+          this.timer = this.stableTimer = undefined;
+          break;
+        case 'ClearSubscriptions': this.clearSubscriptions(); break;
+        case 'CloseSocket': {
+          const socket = this.socket;
+          this.socket = undefined;
+          this.callAbort?.abort();
+          this.callAbort = undefined;
+          socket?.close();
+          break;
+        }
+        case 'OpenSocket': this.openSocket(epoch); break;
+        case 'SendHello':
+          await this.send({tag: 'Hello', values: [this.helloCredential(), this.wants]}, epoch);
+          break;
+        case 'RefreshCredential':
+          void Promise.resolve().then(this.options.credential!).then(
+            bytes => this.post({tag: 'CredentialResult', epoch, bytes}),
+            () => this.post({tag: 'CredentialResult', epoch}),
+          );
+          break;
+        case 'RecordLoss':
+          void this.enqueue(async () => {
+            await this.run({tag: 'Resume', epoch, run: async () => {
+              await this.noteLostAttempt();
+              await this.run({tag: 'LossRecorded', epoch});
+            }});
+          }).catch(() => {});
+          break;
+        case 'Begin': this.post({tag: 'Begin', epoch}); break;
+        case 'ResetReady':
+          this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
+          void this.ready.catch(() => {});
+          break;
+        case 'ArmBackoff':
+          this.timer = this.clock.set(() => this.post({tag: 'BackoffElapsed', epoch}), this.clock.random() * action.maxMs);
+          break;
+        case 'ArmRetry':
+          if (this.timer !== undefined) this.clock.clear(this.timer);
+          this.timer = this.clock.set(() => this.post({tag: 'RetryElapsed', epoch}), this.clock.random() * action.maxMs);
+          break;
+        case 'BindWelcome': await this.bindWelcome(action.frame, epoch); break;
+        case 'BecomeReady':
+          this.stableTimer = this.clock.set(() => this.post({tag: 'StableElapsed', epoch, at: this.clock.now()}),
+            Math.max(0, stableMs - (this.clock.now() - action.welcomedAt)));
+          await this.startSession(epoch);
+          break;
+        case 'Update': await this.receive(action.frame, epoch); break;
+        case 'SendPending': await this.sendPending(); break;
+        case 'ContinueFrame': this.flushRooms(); await this.startNextCall(); break;
+        case 'RejectReady': this.readyReject(new ClientError(action.code)); break;
+        case 'RejectCall':
+          if (this.activeCall?.overlay) this.overlays.delete(this.activeCall.overlay);
+          this.activeCall?.reject(new ClientError(action.code));
+          this.activeCall = undefined;
+          break;
+        case 'Finish':
+          if (this.record.pending) this.finish({tag: action.outcome});
+          break;
+        case 'Run': await action.run(); break;
+      }
+    }
+  }
+  private helloCredential(): Option<Uint8Array> {
+    const bytes = credential(this.phase);
+    return bytes ? {tag: 'Some', value: bytes} : {tag: 'None'};
+  }
+  private openSocket(epoch: number): void {
     let socket: Socket;
     try { socket = (this.options.socket ?? ((url, protocol) => new WebSocket(url, protocol) as unknown as Socket))(this.options.url, 'hirsel.4'); }
-    catch { this.transient(); return; }
+    catch { void this.run({tag: 'Transient', epoch}); return; }
     this.socket = socket; socket.binaryType = 'arraybuffer';
-    socket.onopen = () => { void this.enqueue(async () => {
-      if (epoch !== this.epoch) return;
-      await this.installation(async () => {
-        const credential: Option<Uint8Array> = this.credential ? {tag: 'Some', value: this.credential} : {tag: 'None'};
-        try { socket.send(this.options.frame.encode({tag: 'Hello', values: [credential, this.wants]})); }
-        catch { this.transient(); }
-      });
-    }); };
-    socket.onmessage = event => { void this.enqueue(async () => {
-      if (epoch !== this.epoch) return;
+    socket.onopen = () => this.post({tag: 'SocketOpen', epoch});
+    socket.onmessage = ({data}) => this.post({tag: 'Resume', epoch, run: async () => {
       let frame: Frame;
       try {
-        if (!(event.data instanceof ArrayBuffer) && !(event.data instanceof Uint8Array)) throw new Error('binary Frame required');
-        frame = this.options.frame.decode(event.data instanceof Uint8Array ? event.data : new Uint8Array(event.data));
-      } catch { await this.incompatible(1007); return; }
-      await this.receive(frame, epoch);
-      if (epoch === this.epoch) { this.flushRooms(); await this.startNextCall(); }
-    }); };
-    const lost = (finish: () => Promise<void>) => {
-      if (epoch !== this.epoch) return;
-      const lossEpoch = ++this.epoch;
-      void this.enqueue(async () => {
-        if (lossEpoch !== this.epoch) return;
-        await this.noteLostAttempt();
-        if (lossEpoch === this.epoch) await finish();
-      });
-      this.clearSubscriptions();
-    };
-    socket.onclose = event => lost(async () => {
-      // 4401 AuthExpired ends an established session; 1008 before Welcome is the binding
-      // refusing this Hello's credential, which is how an expiry reached offline shows.
-      if (event.code === 4401) await this.credentialLost('Close 4401');
-      else if (event.code === 1008 && !this.welcomed) await this.credentialLost('Close 1008 before Welcome');
-      else if (event.code === 1009) await this.incompatible(1009, 'ReplyTooLarge');
-      else if ([1007, 1008].includes(event.code)) await this.incompatible(event.code);
-      else this.transient();
-    });
-    socket.onerror = () => lost(async () => this.transient());
-  }
-  private disconnect(): void {
-    ++this.epoch; const socket = this.socket; this.socket = undefined;
-    this.clearSubscriptions();
-    socket?.close();
-  }
-  private cancelTimers(): void {
-    if (this.timer !== undefined) this.clock.clear(this.timer);
-    if (this.stableTimer !== undefined) this.clock.clear(this.stableTimer);
-    this.timer = undefined; this.stableTimer = undefined;
-  }
-  private transient(): void {
-    this.cancelTimers(); this.disconnect();
-    const delay = this.clock.random() * this.backoff;
-    this.backoff = Math.min(10000, this.backoff * 2);
-    this.timer = this.clock.set(() => this.wakeBackoff(), delay);
-    this.setState('Backoff');
+        if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array)) throw new Error('binary Frame required');
+        frame = this.options.frame.decode(data instanceof Uint8Array ? data : new Uint8Array(data));
+      } catch { await this.incompatible(1007, epoch); return; }
+      await this.run({tag: 'Frame', frame, epoch});
+    }});
+    socket.onclose = ({code}) => { void this.run({tag: 'SocketLost', epoch, code}); };
+    socket.onerror = () => { void this.run({tag: 'SocketLost', epoch}); };
   }
   private wakeBackoff(): void {
-    if (this.state !== 'Backoff' || this.timer === undefined) return;
-    this.clock.clear(this.timer);
-    this.timer = undefined;
-    const epoch = this.epoch;
-    void this.enqueue(async () => {
-      if (epoch === this.epoch && this.state === 'Backoff') this.connect();
-    });
+    if (this.phase.tag === 'Backoff') this.post({tag: 'BackoffElapsed', epoch: this.phase.epoch});
   }
-  private async incompatible(code: number, problem = 'Incompatible'): Promise<void> {
-    this.cancelTimers(); this.disconnect(); this.setState('Incompatible');
-    const diagnostic = problem === 'ReplyTooLarge' ? 'Stored reply exceeds the server message limit (1009)'
-      : `Incompatible (${code}); reload bindings or reconnect explicitly`;
-    this.options.onDiagnostic?.(diagnostic);
-    if (problem === 'ReplyTooLarge') {
-      if (this.activeCall?.overlay) this.overlays.delete(this.activeCall.overlay);
-      this.activeCall?.reject(new ClientError(problem));
-      this.activeCall = undefined;
-    }
-    this.readyReject(new ClientError(problem));
-  }
-  private async unbound(cause: string): Promise<void> {
-    this.cancelTimers(); this.disconnect(); this.credential = undefined; this.setState('Unbound');
-    this.options.onDiagnostic?.(this.options.credential
-      ? `Unbound: the place refused the credential and one refresh did not recover (${cause})`
-      : `Unbound: the place binds callers and needs a credential; pass \`credential\` to Client.open (${cause})`);
-    this.readyReject(new ClientError('Unbound'));
-  }
-  // A refused or expired credential is dropped at once, so no path sends it again. Each
-  // recovery attempt gets one refresh; WS and HTTP refusals join the refresh in flight.
-  // Pending work stays durable and is replayed only after Welcome names the same Caller.
-  private async credentialLost(cause: string): Promise<void> {
-    if (this.state === 'CredentialNeeded') return;
-    const refused = this.credential;
-    if (!this.options.credential || this.refreshed) { await this.unbound(cause); return; }
-    this.cancelTimers(); this.disconnect(); this.credential = undefined;
-    this.refreshed = true; this.setState('CredentialNeeded');
-    this.options.onDiagnostic?.(`CredentialNeeded: the place refused the session credential (${cause}); refreshing once`);
-    this.refresh(refused);
-  }
-  private refresh(refused: Uint8Array | undefined): void {
-    if (this.refreshing) return;
-    this.refreshing = true;
-    const source = this.options.credential!, epoch = this.epoch;
-    const settled = (fresh: Uint8Array | undefined) => this.enqueue(async () => {
-      this.refreshing = false;
-      // A result after close, fencing or a newer attempt is discarded.
-      if (epoch !== this.epoch || (this.state !== 'CredentialNeeded' && this.state !== 'Connecting')) return;
-      if (!fresh || (refused && equal(fresh, refused))) {
-        await this.unbound(fresh ? 'the refresh returned the refused credential' : 'the credential source gave none'); return;
-      }
-      this.credential = fresh.slice(); this.setState('Connecting'); this.connect();
-    });
-    void Promise.resolve().then(source).then(settled, () => settled(undefined));
+  private incompatible(code: number, epoch = this.phase.epoch): Promise<void> {
+    return this.run({tag: 'Incompatible', code, epoch});
   }
   reconnect(): void {
-    if (this.state !== 'Incompatible' && this.state !== 'Unbound' && this.state !== 'Backoff') throw new ClientError(this.state);
-    this.cancelTimers(); this.refreshed = false; this.setState('Connecting');
-    this.ready = new Promise((resolve, reject) => {this.readyResolve = resolve; this.readyReject = reject;});
-    void this.ready.catch(() => {});
-    void this.enqueue(async () => this.connect());
+    if (!canReconnect(this.phase)) throw new ClientError(this.state);
+    void this.run({tag: 'Reconnect'});
   }
-  private async receive(frame: Frame, epoch: number): Promise<void> {
-    if (frame.tag === 'Welcome') {
-      if (this.welcomed) { await this.incompatible(1008); return; }
-      const [caller, , , digest, target, n_place, now, retention] = frame.values;
-      if (!validCaller(caller) || !u64(now) || !u64(retention)) { await this.incompatible(1007); return; }
-      this.compareIdentity({digest, target, n_place});
-      const previous = this.record.caller;
-      if (previous && !sameCaller(previous, caller) && (previous.issuer !== 1 || caller.issuer !== 1)) {
-        await this.fence('LocallyUnknown'); return;
-      }
-      if (!sameCaller(previous, caller)) {
-        await this.installation(async state => {
-          const record = previous ? emptyStream(caller) : {...this.record, caller};
-          if (previous) {
-            const prior = state.streams[this.stream];
-            prior.retired = true;
-            const stream = 'pending-' + hex(randomGeneration(), 32);
-            await this.moveStream(state, stream, record, true);
-          } else {
-            state.streams[this.stream] = record;
-            await this.options.storage.write(state);
-          }
-          if (previous) this.overlays.clear();
-          if (this.record.pending) this.finish({tag: 'LocallyUnknown'});
-          this.record = structuredClone(record);
-        });
-        if (epoch !== this.epoch || this.state !== 'Connecting') return;
-      }
-      this.welcomed = true; this.welcomedAt = this.clock.now(); this.refreshed = false;
+  private async bindWelcome(frame: Extract<Frame, {tag: 'Welcome'}>, epoch: number): Promise<void> {
+    const [caller, , , digest, target, n_place, now, retention] = frame.values;
+    if (!validCaller(caller) || !u64(now) || !u64(retention)) { await this.incompatible(1007, epoch); return; }
+    this.compareIdentity({digest, target, n_place});
+    const previous = this.record.caller;
+    if (previous && !sameCaller(previous, caller) && (previous.issuer !== 1 || caller.issuer !== 1)) {
+      await this.fence('LocallyUnknown', epoch); return;
+    }
+    if (!sameCaller(previous, caller)) {
+      await this.installation(state => this.run({tag: 'Resume', epoch, run: async () => {
+        const record = previous ? emptyStream(caller) : {...this.record, caller};
+        if (previous) {
+          const prior = state.streams[this.stream];
+          prior.retired = true;
+          const stream = 'pending-' + hex(randomGeneration(), 32);
+          await this.moveStream(state, stream, record, true);
+        } else {
+          state.streams[this.stream] = record;
+          await this.options.storage.write(state);
+        }
+        // Publish the committed stream even if the transport went away during the write.
+        if (previous) this.overlays.clear();
+        if (this.record.pending) this.finish({tag: 'LocallyUnknown'});
+        this.record = structuredClone(record);
+      }}));
+    }
+    await this.run({tag: 'Resume', epoch, run: () => {
       this.sampleTime(now, retention);
-      if (this.wants.length === 0) await this.allPlaced();
-      return;
-    }
-    if (frame.tag === 'Placed') {
-      if (!this.welcomed || this.placed >= this.wants.length) { await this.incompatible(1008); return; }
-      if (frame.value.tag === 'Gone') { await this.incompatible(1008); return; }
-      this.placed++;
-      if (this.placed === this.wants.length) await this.allPlaced();
-      return;
-    }
-    if (this.state !== 'Ready') { await this.incompatible(1008); return; }
+      return this.run({tag: 'WelcomeBound', epoch, at: this.clock.now()});
+    }});
+  }
+  private async receive(frame: Extract<Frame, {tag: 'Batch' | 'Reset' | 'Live' | 'Ended'}>, epoch: number): Promise<void> {
     if (frame.tag === 'Batch') {
       const [version, complete, groups, outcomes] = frame.values;
-      if (version < this.version) { await this.incompatible(1008); return; }
       const byId = new Map(groups.map(group => [group.sub, group]));
       const completing = new Set(complete);
       const staged = new Map<Sub, ReturnType<typeof stageImage>>();
@@ -425,26 +392,28 @@ export class Client implements Transport {
       } catch { await this.incompatible(1007); return; }
       this.notifications = [];
       await this.outcomes(outcomes);
-      if (epoch !== this.epoch) { this.publish(); return; }
-      this.version = version;
-      for (const [sub, edit] of staged) {
-        if (sub.id !== edit.id) { staged.delete(sub); continue; }
-        sub.server ??= {value: edit.value!, slots: new Map()};
-        applyImage(sub.server, edit);
-      }
-      this.recompute(staged);
+      await this.run({tag: 'AdvanceVersion', epoch, version, apply: async () => {
+        for (const [sub, edit] of staged) {
+          if (sub.id !== edit.id) { staged.delete(sub); continue; }
+          sub.server ??= {value: edit.value!, slots: new Map()};
+          applyImage(sub.server, edit);
+        }
+        this.recompute(staged);
+        this.publish();
+        await this.run({tag: 'Resume', epoch, run: () => this.options.onBatch?.(version)});
+      }});
       this.publish();
-      if (epoch === this.epoch) this.options.onBatch?.(version);
     } else if (frame.tag === 'Reset') {
       const [version, outcomes] = frame.values;
-      if (version < this.version) { await this.incompatible(1008); return; }
       this.clearSubscriptions();
       this.notifications = [];
       await this.outcomes(outcomes);
-      if (epoch !== this.epoch) { this.publish(); return; }
-      this.version = version;
-      this.recompute();
-      this.publish(); await this.subscribeAll();
+      await this.run({tag: 'AdvanceVersion', epoch, version, apply: async () => {
+        this.recompute();
+        this.publish();
+        await this.subscribeAll();
+      }});
+      this.publish();
     } else if (frame.tag === 'Live') {
       for (const part of frame.value) {
         if (part.sub >= this.nextSub) { await this.incompatible(1008); return; }
@@ -464,7 +433,7 @@ export class Client implements Transport {
         this.recompute();
         sub.onEnd?.(reason);
       }
-    } else await this.incompatible(1008);
+    }
   }
   private compareIdentity(actual: Identity): void {
     const expected = this.options.identity;
@@ -474,11 +443,7 @@ export class Client implements Transport {
     else if (expected && (!equal(expected.digest, actual.digest) || expected.target !== actual.target))
       this.options.onDiagnostic?.('launch identity mismatch');
   }
-  private async allPlaced(): Promise<void> {
-    this.setState('Ready'); this.version = 0n;
-    this.stableTimer = this.clock.set(() => {
-      if (this.state === 'Ready' && this.clock.now() - this.welcomedAt >= 30000) this.backoff = 100;
-    }, Math.max(0, 30000 - (this.clock.now() - this.welcomedAt)));
+  private async startSession(epoch: number): Promise<void> {
     // A recovered call whose entry the loaded bindings no longer name has no known kind, so
     // neither its re-send nor its position can be decided: report it unknown on a fresh stream.
     const pending = this.record.pending;
@@ -489,7 +454,9 @@ export class Client implements Transport {
       this.remintOnWelcome = false;
       await this.remint(this.keyedAt);
     }
-    await this.sendPending(); await this.subscribeAll(); this.readyResolve();
+    await this.sendPending();
+    await this.subscribeAll();
+    await this.run({tag: 'Resume', epoch, run: () => this.readyResolve()});
   }
   call<R>(want: Want, args: Uint8Array, decode: (bytes: Uint8Array) => R, options?: CallOptions): Promise<Outcome<R>> {
     return this.queueCall(want, args, options?.optimistic)
@@ -499,7 +466,7 @@ export class Client implements Transport {
   async httpSubscribeCredential(signal: AbortSignal) {
     while (true) {
       signal.throwIfAborted();
-      if (credentialUsable(this.state) && (!this.options.credential || this.credential)) break;
+      if (credentialUsable(this.state) && (!this.options.credential || credential(this.phase))) break;
       if (this.state !== 'CredentialNeeded' && !credentialUsable(this.state)) throw new ClientError(this.state);
       await new Promise<void>(resolve => {
         const wake = () => {
@@ -513,12 +480,11 @@ export class Client implements Transport {
     }
     const authority = this.httpAuthority;
     return {
-      authorization: authorization(this.credential),
+      authorization: authorization(credential(this.phase)),
       signal: authority.signal,
       refused: (cause: string, retried: boolean) => this.enqueue(async () => {
         if (signal.aborted || authority.signal.aborted) return;
-        if (retried) await this.unbound(cause);
-        else await this.credentialLost(cause);
+        await this.run({tag: retried ? 'Unbound' : 'CredentialLost', cause});
       }),
     };
   }
@@ -570,7 +536,7 @@ export class Client implements Transport {
     return id;
   }
   private async startNextCall(): Promise<void> {
-    if (this.state !== 'Ready' || this.record.pending) return;
+    if (this.phase.tag !== 'Ready' || this.record.pending) return;
     const call = this.calls.values().next().value;
     if (!call) return;
     this.calls.delete(call);
@@ -587,7 +553,6 @@ export class Client implements Transport {
         this.record = structuredClone(record);
         this.activeCall = {resolve: call.resolve, reject: call.reject, overlay: call.overlay};
       });
-      if (this.state !== 'Ready') throw new ClientError(this.state);
       await this.sendPending();
     } catch (error) {
       if (call.overlay && this.overlays.delete(call.overlay)) this.recompute();
@@ -652,57 +617,56 @@ export class Client implements Transport {
       };
       await this.moveStream(state, streamHex(id), record);
       this.record = structuredClone(record);
-      this.sent = false;
+      await this.run({tag: 'CallFinished', epoch: this.phase.epoch});
     });
   }
   private async sendPending(): Promise<void> {
-    if (this.state !== 'Ready' || !this.record.pending || this.sent || this.httpFlight) return;
-    await this.installation(async state => {
-      let record = state.streams[this.stream];
-      const pending = record.pending!;
-      if (pending.inflight) pending.untouched = false;
-      const now = this.keyedTime();
-      const margin = futureSlackMs + BigInt(this.options.deadlineMs ?? 30000) + 1n;
-      if (!record.sent && record.minter === state.installation &&
-          now - record.id!.t > this.retention / 2n - margin) {
-        const id = this.mint(now);
-        record = {...record, id, next: 0n};
-        pending.p = 0n;
-        await this.moveStream(state, streamHex(id), record);
-      }
-      record.sent = true;
-      pending.inflight = true;
-      if (!pending.http) pending.slot = this.wants.findIndex(w => sameWant(w, pending.want));
-      const epoch = this.epoch;
-      await this.options.storage.write(state);
-      this.record = structuredClone(record);
-      this.sent = true;
-      if (epoch !== this.epoch) return;
-      if (pending.http) {
-        const flight = this.sendHttp(pending.http, record.id!, pending.p, record.caller!);
-        this.httpFlight = flight;
-        void flight.then(
-          reply => this.enqueue(() => this.httpComplete(epoch, pending.p, reply)),
-          () => this.enqueue(() => this.httpComplete(epoch, pending.p)),
-        ).catch(() => {});
-      } else {
-        try { this.socket!.send(this.options.frame.encode({tag: 'Call', values: [record.id!, pending.p, pending.slot, this.options.deadlineMs ?? 30000, pending.args]})); }
-        catch { this.transient(); }
-      }
-    });
+    if (!this.record.pending) return;
+    const {epoch} = this.phase;
+    await this.run({tag: 'PrepareCall', epoch, prepare: async () => {
+      await this.installation(state => this.run({tag: 'Resume', epoch, run: () => this.preparePending(state, epoch)}));
+    }});
   }
-  private async httpComplete(epoch: number, p: bigint, reply?: HttpAttempt): Promise<void> {
-    this.httpFlight = undefined;
-    if (epoch !== this.epoch || this.state !== 'Ready') {
-      await this.sendPending();
-    } else if (reply) await this.httpOutcome(p, reply);
-    else await this.retryPending(false);
+  private async preparePending(state: Installation, epoch: number): Promise<void> {
+    let record = state.streams[this.stream];
+    const pending = record.pending!;
+    if (pending.inflight) pending.untouched = false;
+    const now = this.keyedTime();
+    const margin = futureSlackMs + BigInt(this.options.deadlineMs ?? 30000) + 1n;
+    if (!record.sent && record.minter === state.installation &&
+        now - record.id!.t > this.retention / 2n - margin) {
+      const id = this.mint(now);
+      record = {...record, id, next: 0n};
+      pending.p = 0n;
+      await this.moveStream(state, streamHex(id), record);
+    }
+    record.sent = true;
+    pending.inflight = true;
+    if (!pending.http) pending.slot = this.wants.findIndex(w => sameWant(w, pending.want));
+    await this.options.storage.write(state);
+    this.record = structuredClone(record);
+    const delivery = pending.http ? {tag: 'Http', p: pending.p} as const : {tag: 'WebSocket'} as const;
+    await this.run({tag: 'SendCall', epoch, delivery, send: () => {
+      if (pending.http) this.startHttp(pending.http, record.id!, pending.p, record.caller!, epoch);
+      else this.writeFrame({tag: 'Call', values: [record.id!, pending.p, pending.slot,
+        this.options.deadlineMs ?? 30000, pending.args]}, epoch);
+    }});
   }
-  private async sendHttp(request: HttpRequest, id: StreamId, p: bigint, caller: Caller): Promise<HttpAttempt> {
+  private startHttp(request: HttpRequest, id: StreamId, p: bigint, caller: Caller, epoch: number): void {
+    const abort = new AbortController();
+    this.callAbort = abort;
+    const complete = (reply?: HttpAttempt) => this.post({tag: 'HttpComplete', epoch, p, complete: async () => {
+      this.callAbort = undefined;
+      if (reply) await this.httpOutcome(p, reply, epoch);
+      else await this.retryPending(false, epoch);
+    }});
+    void this.sendHttp(request, id, p, caller, abort.signal).then(complete, () => complete());
+  }
+  private async sendHttp(request: HttpRequest, id: StreamId, p: bigint, caller: Caller, signal: AbortSignal): Promise<HttpAttempt> {
     const options = this.options.http;
     if (!options) throw new ClientError('HttpUnavailable');
     const headers = new Headers();
-    const auth = authorization(this.credential);
+    const auth = authorization(credential(this.phase));
     if (auth !== undefined) headers.set('Authorization', auth);
     if (request.body !== undefined) headers.set('Content-Type', 'application/json');
     const key = `"${streamHex(id)}.${p}"`;
@@ -710,7 +674,7 @@ export class Client implements Transport {
     headers.set('Hirsel-Expected-Caller', btoa(String.fromCharCode(caller.issuer, caller.subject.length, ...caller.subject)));
     const send = options.fetch ?? globalThis.fetch;
     const result = await send(new URL(request.path, options.url), {
-      method: 'POST', headers, body: request.body, redirect: 'error',
+      method: 'POST', headers, body: request.body, redirect: 'error', signal,
     });
     const marker = /^([a-z_]+);key=(.+)$/.exec(result.headers.get('Hirsel-Refused') ?? '');
     return {status: result.status, body: await result.text(),
@@ -720,7 +684,7 @@ export class Client implements Transport {
       at: decimalU64(result.headers.get('Hirsel-Now')),
       retention: decimalU64(result.headers.get('Hirsel-Retention'))};
   }
-  private async httpOutcome(p: bigint, attempt: HttpAttempt): Promise<void> {
+  private async httpOutcome(p: bigint, attempt: HttpAttempt, epoch: number): Promise<void> {
     const pending = this.record.pending;
     if (pending?.p !== p || !pending.http || !pending.inflight) return;
     const {refusal, at, retention, ...reply} = attempt;
@@ -734,8 +698,7 @@ export class Client implements Transport {
         await this.options.storage.write(state);
         this.record = structuredClone(record);
       });
-      this.sent = false;
-      await this.credentialLost('HTTP 401');
+      await this.run({tag: 'Resume', epoch, run: () => this.run({tag: 'CredentialLost', cause: 'HTTP 401'})});
       return;
     }
     if (reply.committed) {
@@ -768,7 +731,7 @@ export class Client implements Transport {
     }
     await this.startNextCall();
   }
-  private async retryPending(proven: boolean): Promise<void> {
+  private async retryPending(proven: boolean, epoch = this.phase.epoch): Promise<void> {
     if (!proven) await this.noteLostAttempt();
     else await this.installation(async state => {
       const record = state.streams[this.stream];
@@ -776,16 +739,7 @@ export class Client implements Transport {
       await this.options.storage.write(state);
       this.record = structuredClone(record);
     });
-    if (this.state !== 'Ready') return;
-    if (this.timer !== undefined) this.clock.clear(this.timer);
-    this.timer = this.clock.set(() => {
-      this.timer = undefined;
-      void this.enqueue(async () => {
-        this.sent = false;
-        await this.sendPending();
-      });
-    }, this.clock.random() * this.backoff);
-    this.backoff = Math.min(10000, this.backoff * 2);
+    await this.run({tag: 'RetryCall', epoch});
   }
   private async completeCall(outcome: Outcome<Uint8Array>, advance: boolean, retire: boolean, http?: HttpReply): Promise<void> {
     await this.installation(async state => {
@@ -797,7 +751,7 @@ export class Client implements Transport {
       await this.options.storage.write(state);
       this.record = structuredClone(record);
       if (http && !this.activeCall && this.options.onHttpRecovered) {
-        this.sent = false;
+        await this.run({tag: 'CallFinished', epoch: this.phase.epoch});
         this.options.onHttpRecovered(http);
       } else this.finish(outcome);
       if (record.retired) await this.stop('Retired');
@@ -834,7 +788,7 @@ export class Client implements Transport {
               await this.sendPending();
             } else {
               this.remintOnWelcome = true;
-              this.transient();
+              await this.run({tag: 'Transient', epoch: this.phase.epoch});
             }
           } else await this.completeCall(outcome, false, true);
         } else if (refusal.tag === 'Overloaded' || refusal.tag === 'Deadline' || refusal.tag === 'Budget') {
@@ -851,7 +805,7 @@ export class Client implements Transport {
     for (const fn of notifications) fn();
   }
   private finish(outcome: Outcome<Uint8Array>): void {
-    this.sent = false;
+    void this.run({tag: 'CallFinished', epoch: this.phase.epoch});
     const call = this.activeCall; this.activeCall = undefined;
     if (call?.overlay) {
       const overlay = this.overlays.get(call.overlay);
@@ -885,11 +839,8 @@ export class Client implements Transport {
     for (const change of changes) this.notify(change);
     for (const diagnostic of diagnostics) this.notify(() => this.options.onDiagnostic?.(diagnostic));
   }
-  private async stop(state: 'Fenced' | 'Retired' | 'Closed', outcome?: 'LocallyUnknown' | 'RequestMismatch'): Promise<void> {
-    this.overlays.clear();
-    this.cancelTimers(); this.disconnect(); this.setState(state);
-    if (outcome && this.record.pending) this.finish({tag: outcome});
-    this.readyReject(new ClientError(state));
+  private stop(state: 'Fenced' | 'Retired' | 'Closed', outcome?: 'LocallyUnknown' | 'RequestMismatch'): Promise<void> {
+    return this.run({tag: 'Stop', state, outcome});
   }
   private async retire(outcome: 'LocallyUnknown'): Promise<void> {
     await this.installation(async state => {
@@ -902,11 +853,11 @@ export class Client implements Transport {
       await this.stop('Retired', outcome);
     });
   }
-  private async fence(outcome: 'LocallyUnknown' | 'RequestMismatch'): Promise<void> {
-    await this.installation(async state => {
+  private async fence(outcome: 'LocallyUnknown' | 'RequestMismatch', epoch = this.phase.epoch): Promise<void> {
+    await this.installation(state => this.run({tag: 'Resume', epoch, run: async () => {
       await this.options.storage.write(fresh(state.installation));
       await this.stop('Fenced', outcome);
-    });
+    }}));
   }
   subscribe(want: Want, args: Uint8Array, onChange: (sub: Subscription, change: Change<Uint8Array, Record<number, SlotRow>>) => void,
     onEnd?: (reason: SubscriptionEnd) => void): Subscription;
@@ -966,26 +917,28 @@ export class Client implements Transport {
     this.rooms.delete(sub);
   }
   private unsubscribe(sub: Sub): void {
-    const id = sub.id;
+    const id = sub.id, {epoch} = this.phase;
     this.removeSubscription(sub);
     void this.enqueue(async () => {
       this.recompute();
-      if (id !== undefined && this.state === 'Ready') await this.send({tag: 'Unsubscribe', value: id});
+      if (id !== undefined && this.state === 'Ready') await this.send({tag: 'Unsubscribe', value: id}, epoch);
     });
   }
-  private async send(frame: Frame): Promise<void> {
-    await this.installation(async () => {
-      try { this.socket?.send(this.options.frame.encode(frame)); } catch { this.transient(); }
-    });
+  private writeFrame(frame: Frame, epoch: number): void {
+    try { this.socket?.send(this.options.frame.encode(frame)); }
+    catch { void this.run({tag: 'Transient', epoch}); }
+  }
+  private async send(frame: Frame, epoch: number): Promise<void> {
+    await this.installation(() => this.run({tag: 'Resume', epoch, run: () => this.writeFrame(frame, epoch)}));
   }
   private async subscribeAll(): Promise<void> {
-    if (this.state !== 'Ready') return;
     for (const sub of this.subs) {
-      if (this.state !== 'Ready') return;
+      if (this.phase.tag !== 'Ready') return;
       if (!sub.active || sub.id !== undefined) continue;
       if (this.nextSub > 0xffffffff) { await this.incompatible(1008); return; }
       sub.id = this.nextSub++;
-      await this.send({tag: 'Subscribe', values: [sub.id, this.wants.findIndex(w => sameWant(w, sub.want)), sub.args, {tag: 'None'}]});
+      await this.send({tag: 'Subscribe', values: [sub.id, this.wants.findIndex(w => sameWant(w, sub.want)),
+        sub.args, {tag: 'None'}]}, this.phase.epoch);
     }
   }
   async close(): Promise<void> {

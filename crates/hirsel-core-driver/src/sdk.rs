@@ -603,6 +603,10 @@ pub fn generate(describe: &Describe) -> Result<BTreeMap<String, String>, Error> 
             include_str!("../../../sdk/client/room.ts").into(),
         ),
         (
+            "state.ts".into(),
+            include_str!("../../../sdk/client/state.ts").into(),
+        ),
+        (
             "wire.ts".into(),
             include_str!("../../../sdk/client/wire.ts").into(),
         ),

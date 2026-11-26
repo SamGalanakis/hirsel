@@ -14,6 +14,15 @@ pub type Target = Off | Layer(source: u32, target: u8)
 
 pub type TargetError = Unrepresentable()
 
+// A source and the layer of it a rewrite forwards or wants.
+type Layer {
+    source: u32,
+    layer: u8
+}
+
+// Closed, or open with its current layer and any target still to take effect.
+type Phase = Closed | Open(current: Option[Layer], want: Option[Layer])
+
 pub type Out = Forward(u64, u32) | Late(u64, u32) | Drop | Wait
 
 // The latest SR of a source, with its arrival time.
@@ -42,15 +51,7 @@ type Frame {
 pub opaque type Rewrite {
     clock: i64,
     first_ts: i64,
-    closed: bool,
-    // The current layer.
-    live: bool,
-    source: u32,
-    layer: u8,
-    // A target that has not yet taken effect.
-    wanting: bool,
-    want_source: u32,
-    want_layer: u8,
+    phase: Phase,
     // SRs of the current and the pending source.
     current_sr: Option[Report],
     pending_sr: Option[Report],
@@ -105,7 +106,7 @@ pub fn rewrite(clock: u32, ranges: u32, frames: u32, first_seq: u64, first_ts: u
     columns.try_reserve(mut frame_rows, f)?
     columns.fill(mut range_rows, r, Range(from: 0, offset: 0))
     columns.fill(mut frame_rows, f, Frame(gen: 0, ts: 0, id: 0, forward: false, max: 0, used: false))
-    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), closed: false, live: false, source: 0, layer: 0, wanting: false, want_source: 0, want_layer: 0, current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, ranges: range_rows, range_count: 0, range_head: 0, frames: frame_rows, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, at_end: false, switch_at: None))
+    Ok(Rewrite(clock: int.widen(clock), first_ts: int.widen(first_ts), phase: Open(current: None, want: None), current_sr: None, pending_sr: None, generation: 0, gen_start: 0, highest_in: 0, offset: 0, ts_offset: 0, last_src_ts: 0, ranges: range_rows, range_count: 0, range_head: 0, frames: frame_rows, frame_next: 0, gen_frames: false, gen_ts_max: 0, evicted: false, evicted_upto: 0, next_out: first_seq, sent: false, reported: true, last_out_ts: 0, last_at_ns: 0, at_end: false, switch_at: None))
 }
 
 /// The heap bytes `rewrite(_, ranges, frames, ..)` reserves beyond the `Rewrite` value
@@ -118,8 +119,12 @@ pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
     match t {
         Off => {
             // Going to Off takes effect at once.
-            r.live = false
-            r.wanting = false
+            match r.phase {
+                Closed => (),
+                Open(..) => {
+                    r.phase = Open(current: None, want: None)
+                }
+            }
             r.current_sr = None
             r.pending_sr = None
         },
@@ -127,20 +132,50 @@ pub fn target(mut r: Rewrite, t: Target) -> Result[(), TargetError] {
             if layer > 31 {
                 return Error(Unrepresentable())
             }
-            if r.wanting && r.want_source != source {
-                r.pending_sr = None
-            }
-            if r.live && r.source == source && r.layer == layer {
-                r.wanting = false
-                r.pending_sr = None
-            } else {
-                r.wanting = true
-                r.want_source = source
-                r.want_layer = layer
+            match r.phase {
+                Closed => (),
+                Open(current: cur, want: want) => {
+                    if let Some(w) = want {
+                        if w.source != source {
+                            r.pending_sr = None
+                        }
+                    }
+                    let already = match cur {
+                        Some(c) => c.source == source && c.layer == layer,
+                        None => false
+                    }
+                    if already {
+                        r.phase = Open(current: cur, want: None)
+                        r.pending_sr = None
+                    } else {
+                        r.phase = Open(current: cur, want: Some(Layer(source: source, layer: layer)))
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+fn phase_closed(phase: Phase) -> bool {
+    match phase {
+        Closed => true,
+        Open(..) => false
+    }
+}
+
+fn phase_current(phase: Phase) -> Option[Layer] {
+    match phase {
+        Closed => None,
+        Open(current: cur, ..) => cur
+    }
+}
+
+fn phase_want(phase: Phase) -> Option[Layer] {
+    match phase {
+        Closed => None,
+        Open(current: _, want: want) => want
+    }
 }
 
 fn has(mask: u32, bit: u8) -> bool {
@@ -264,12 +299,17 @@ fn projected(r: Rewrite, a: Report, b: Report, ts: i64) -> Option[i64] {
     int.checked_sub(t_a, r.ts_offset)
 }
 
-fn start_generation(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64) {
+fn start_generation(mut r: Rewrite, source: u32, layer: u8, index: u64, ts: i64, at_ns: u64) {
+    let cur = phase_current(r.phase)
+    let other_source = match cur {
+        Some(c) => c.source != source,
+        None => false
+    }
     let anchor = if !r.sent {
         r.first_ts
     } else {
         let mut value = r.last_out_ts + ticks(since(at_ns, r.last_at_ns), r.clock)
-        if r.live && r.source != source {
+        if other_source {
             if let Some(a) = r.current_sr {
                 if let Some(b) = r.pending_sr {
                     if let Some(p) = projected(r, a, b, ts) {
@@ -284,7 +324,11 @@ fn start_generation(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64
             value
         }
     }
-    if !r.live || r.source != source {
+    let no_current = match cur {
+        Some(_) => false,
+        None => true
+    }
+    if no_current || other_source {
         r.current_sr = r.pending_sr
     }
     r.pending_sr = None
@@ -299,8 +343,7 @@ fn start_generation(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64
     r.ts_offset = ts - anchor
     r.evicted = false
     r.switch_at = Some(r.next_out)
-    r.live = true
-    r.source = source
+    r.phase = Open(current: Some(Layer(source: source, layer: layer)), want: None)
 }
 
 fn emit(mut r: Rewrite, index: u64, offset: i64, ts: i64, at_ns: u64, end: bool) -> Out {
@@ -325,32 +368,34 @@ fn emit(mut r: Rewrite, index: u64, offset: i64, ts: i64, at_ns: u64, end: bool)
 }
 
 pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, padding_only: bool, u: Unit) -> Out {
-    if r.closed {
+    if phase_closed(r.phase) {
         return Drop
     }
-    if r.wanting && source == r.want_source && u.start && !padding_only && has(u.switches, r.want_layer) {
-        let other = !r.live || r.source != source
-        if other && u.keyframe {
-            start_generation(mut r, source, index, ts, at_ns)
-            r.layer = r.want_layer
-            r.wanting = false
-            add_frame(mut r, ts, u.frame, true, index)
-            let offset = r.offset
-            return emit(mut r, index, offset, ts, at_ns, u.end)
-        }
-        if !other && index > r.highest_in && find_frame(r, ts, u.frame) == None {
-            r.layer = r.want_layer
-            r.wanting = false
-            add_frame(mut r, ts, u.frame, true, index)
-            r.highest_in = index
-            let offset = r.offset
-            return emit(mut r, index, offset, ts, at_ns, u.end)
+    if let Some(w) = phase_want(r.phase) {
+        if source == w.source && u.start && !padding_only && has(u.switches, w.layer) {
+            let other = match phase_current(r.phase) {
+                Some(c) => c.source != source,
+                None => true
+            }
+            if other && u.keyframe {
+                start_generation(mut r, source, w.layer, index, ts, at_ns)
+                add_frame(mut r, ts, u.frame, true, index)
+                let offset = r.offset
+                return emit(mut r, index, offset, ts, at_ns, u.end)
+            }
+            if !other && index > r.highest_in && find_frame(r, ts, u.frame) == None {
+                r.phase = Open(current: Some(Layer(source: source, layer: w.layer)), want: None)
+                add_frame(mut r, ts, u.frame, true, index)
+                r.highest_in = index
+                let offset = r.offset
+                return emit(mut r, index, offset, ts, at_ns, u.end)
+            }
         }
     }
-    if !r.live {
+    let Some(cur) = phase_current(r.phase) else {
         return Wait
     }
-    if source != r.source || index < r.gen_start {
+    if source != cur.source || index < r.gen_start {
         return Drop
     }
     let forward = match find_frame(r, ts, u.frame) {
@@ -364,7 +409,7 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
             if r.evicted && index <= r.evicted_upto {
                 return Drop
             }
-            let wanted = has(u.needs, r.layer)
+            let wanted = has(u.needs, cur.layer)
             add_frame(mut r, ts, u.frame, wanted, index)
             wanted
         }
@@ -398,7 +443,13 @@ pub fn on_packet(mut r: Rewrite, source: u32, index: u64, ts: i64, at_ns: u64, p
 
 /// Whether `pad` would answer a number now.
 pub fn paddable(r: Rewrite) -> bool {
-    !r.closed && r.live && r.sent && r.at_end
+    if phase_closed(r.phase) {
+        return false
+    }
+    match phase_current(r.phase) {
+        Some(_) => r.sent && r.at_end,
+        None => false
+    }
 }
 
 /// A padding-only packet in the outgoing stream (RTP-11 `pad`): the next outgoing
@@ -423,25 +474,39 @@ pub fn pad(mut r: Rewrite) -> Option[(u64, u32)] {
 }
 
 pub fn on_sr(mut r: Rewrite, source: u32, info: rtcp.SenderInfo, at_ns: u64) {
-    if r.closed {
+    if phase_closed(r.phase) {
         return
     }
     let report = Report(ntp: info.ntp, rtp: info.rtp, at_ns: at_ns)
-    if r.live && source == r.source {
+    let current_matches = match phase_current(r.phase) {
+        Some(c) => c.source == source,
+        None => false
+    }
+    if current_matches {
         r.current_sr = Some(report)
-    } else if r.wanting && source == r.want_source {
-        r.pending_sr = Some(report)
+    } else {
+        let want_matches = match phase_want(r.phase) {
+            Some(w) => w.source == source,
+            None => false
+        }
+        if want_matches {
+            r.pending_sr = Some(report)
+        }
     }
 }
 
 pub fn sr_timestamp(mut r: Rewrite, now_ns: u64) -> Option[u32] {
-    if r.closed || r.reported {
+    if phase_closed(r.phase) || r.reported {
         return None
     }
     r.reported = true
+    let live = match phase_current(r.phase) {
+        Some(_) => true,
+        None => false
+    }
     let value = match r.current_sr {
         Some(sr) => {
-            if r.live {
+            if live {
                 seq.estimate32(r.last_src_ts, sr.rtp) + ticks(since(now_ns, sr.at_ns), r.clock) - r.ts_offset
             } else {
                 r.last_out_ts + ticks(since(now_ns, r.last_at_ns), r.clock)
@@ -457,26 +522,41 @@ pub fn switch_index(r: Rewrite) -> Option[u64] {
 }
 
 pub fn pending(r: Rewrite) -> Option[u32] {
-    if r.wanting && (!r.live || r.want_source != r.source) {
-        Some(r.want_source)
-    } else {
-        None
+    match r.phase {
+        Closed => None,
+        Open(current: cur, want: want) => match want {
+            Some(w) => {
+                let other_source = match cur {
+                    Some(c) => w.source != c.source,
+                    None => true
+                }
+                if other_source {
+                    Some(w.source)
+                } else {
+                    None
+                }
+            },
+            None => None
+        }
     }
 }
 
 /// The layer this rewrite forwards on `source` now, if it is the current source.
 pub fn current(r: Rewrite, source: u32) -> Option[u8] {
-    if r.live && r.source == source {
-        Some(r.layer)
-    } else {
-        None
+    match phase_current(r.phase) {
+        Some(c) => {
+            if c.source == source {
+                Some(c.layer)
+            } else {
+                None
+            }
+        },
+        None => None
     }
 }
 
 pub fn close(mut r: Rewrite) {
-    r.closed = true
-    r.live = false
-    r.wanting = false
+    r.phase = Closed
     r.current_sr = None
     r.pending_sr = None
 }

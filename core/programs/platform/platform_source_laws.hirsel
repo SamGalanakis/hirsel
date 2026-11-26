@@ -60,6 +60,53 @@ fn gated_source_admission(c: Clock, rnd: Random) -> Result[(), ()] waits {
     Ok(())
 }
 
+// `begin_source_limits` (launch.md "Source by content", "Limits"): a source Begin's
+// manifest is valid exactly at 1 MiB and Invalid one byte over it, and its files are
+// valid exactly at 4 MiB in all and Invalid one byte over that. The launcher-side tree
+// limit (5 MiB) is covered beside the launcher that enforces it.
+@test
+fn begin_source_limits(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = admission_case(c, rnd, None, Trusted)
+    let over_manifest = begin_with(mut r, request_id(71u64), padded_manifest(1048577u64))
+    expect(errored(r, over_manifest, InvalidClass) && admits(r) == 0u64, "limits: a manifest one byte over 1 MiB was not Invalid before Admit")
+    let at_manifest = begin_with(mut r, request_id(72u64), padded_manifest(1048576u64))
+    expect(!errored(r, at_manifest, InvalidClass) && admits(r) == 1u64, "limits: a manifest exactly 1 MiB was not accepted")
+    unplug(mut r)
+    let mut r2 = admission_case(c, rnd, None, Trusted)
+    let over_content = begin_with(mut r2, request_id(73u64), source_content(4194305u64))
+    expect(errored(r2, over_content, InvalidClass) && admits(r2) == 0u64, "limits: files one byte over 4 MiB were not Invalid before Admit")
+    let at_content = begin_with(mut r2, request_id(74u64), source_content(4194304u64))
+    let (keys, done) = needed_on(r2, at_content)
+    expect(!errored(r2, at_content, InvalidClass), "limits: files exactly 4 MiB were Invalid")
+    expect(list.len(keys) == 2u64, "limits: files exactly 4 MiB did not ask for both blobs")
+    expect(done, "limits: files exactly 4 MiB did not finish their Need")
+    expect(admits(r2) == 0u64, "limits: files exactly 4 MiB admitted before upload")
+    unplug(mut r2)
+    Ok(())
+}
+
+// A manifest whose codec length is exactly `bytes`, padded in one grant string.
+// The empty manifest is 21 bytes (five u32 fields plus one package byte); one grant
+// adds its four-byte length beside its bytes, so the pad is `bytes - 25`.
+fn padded_manifest(n: u64) -> operator.Input {
+    let mut grants: List[String] = list.new()
+    list.push(mut grants, string.repeat("g", n - 25u64))
+    let m = launcher.Manifest(package: ".", grants: take grants, dirs: list.new(), required_entries: list.new(), files: list.new())
+    let codec: std.codec.Codec[launcher.Manifest] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(codec, m, mut out)
+    expect(list.len(out) == n, "limits: the padded manifest length is wrong")
+    SourceInput(take out)
+}
+
+// Split the content so neither file alone exceeds the limit.
+fn source_content(n: u64) -> operator.Input {
+    let mut files: List[(String, Bytes)] = list.new()
+    list.push(mut files, file("a.hirsel", bytes_of(n - 2u64, 97u8)))
+    list.push(mut files, file("b.hirsel", bytes_of(2u64, 98u8)))
+    manifest_input(list.new(), take files)
+}
+
 // A source input: a manifest of no files publishing with `grant`.
 fn source_of(grant: String) -> operator.Input {
     let mut grants: List[String] = list.new()

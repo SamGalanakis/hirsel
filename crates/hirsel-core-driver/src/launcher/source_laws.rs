@@ -18,6 +18,47 @@ enum Compile {
     Held,
 }
 
+/// Source byte limits (launch.md "Source by content", "Limits"): exactly 5 MiB of
+/// assembled tree codec bytes is admitted for publishing and one byte over it is refused
+/// `Invalid`; exactly 4 MiB of file content is admitted and one byte over it is refused.
+#[test]
+fn source_tree_byte_and_content_limits_are_exact() {
+    let padded_tree = |bytes: usize| {
+        // The tag-free Tree record with "." and one grant has 25 bytes of framing.
+        Tree {
+            package: ".".into(),
+            grants: vec!["g".repeat(bytes - 25)],
+            ..Tree::default()
+        }
+        .encode()
+    };
+    let content_tree = |bytes: usize| {
+        Tree {
+            package: ".".into(),
+            files: vec![
+                ("a.hirsel".into(), vec![b'a'; bytes - 1]),
+                ("b.hirsel".into(), vec![b'b']),
+            ],
+            ..Tree::default()
+        }
+        .encode()
+    };
+    let exact_tree = padded_tree(5 << 20);
+    let over_tree = padded_tree((5 << 20) + 1);
+    assert_eq!(exact_tree.len(), 5 << 20);
+    assert_eq!(over_tree.len(), (5 << 20) + 1);
+    assert!(super::admit::source(&exact_tree, false).is_ok());
+    assert!(matches!(
+        super::admit::source(&over_tree, false),
+        Err(Failure::Invalid(text)) if text == "source tree: over its byte limit"
+    ));
+    assert!(super::admit::source(&content_tree(4 << 20), false).is_ok());
+    assert!(matches!(
+        super::admit::source(&content_tree((4 << 20) + 1), false),
+        Err(Failure::Invalid(text)) if text == "source tree: its files are over the content limit"
+    ));
+}
+
 /// Submitted source is published by the normal checker under the launcher's own stores
 /// and admitted as that publication. A type error or exhaustion records no recipe.
 /// Releasing an attempt kills the compiler's group and discards its staged recipe.

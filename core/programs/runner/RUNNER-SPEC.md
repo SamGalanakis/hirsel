@@ -643,9 +643,11 @@ Text only, not yet built. STORE-SPEC v2.47 §12 gives a place a second authority
 
 `launcher.Input.Source` used to be refused `Unsupported` by the host and was not handled by the launcher. It now carries a `launcher.Tree`, and the launcher publishes it with the normal checker before admitting the publication (launch.md "Publish and assemble" step 1).
 
+The current `TREE_BYTES` is 5 MiB. The source-by-content design stores manifests in request rows and gives the launcher up to 4 MiB of file content plus 1 MiB for the other encoded fields (launch.md "Source by content", "Limits").
+
 | # | Point | Decision | What v2.33 says | Basis |
 |---|---|---|---|---|
-| 1 | What a source is | **NEW: `launcher.Tree`** | A package path, the grants and `--dir` bindings, and the files, as codec bytes of at most `TREE_BYTES` (4 MiB) so that a request row holds the input twice. Paths are plain and relative, with no repeats and no file that is also a directory; a tree breaking this is `Invalid`. | brief; launch.md "What an untrusted author submits" |
+| 1 | What a source is | **NEW: `launcher.Tree`** | A package path, the grants and `--dir` bindings, and the files. v2.33 capped the codec bytes at 4 MiB so a request row could hold the input twice. Paths are plain and relative, with no repeats and no file that is also a directory. A tree that breaks these rules is `Invalid`. | brief; launch.md "What an untrusted author submits" |
 | 2 | Who compiles | **THE LAUNCHER, as a child `hirsel publish --frozen`** | The child runs on fresh scratch under the launcher's compiler, package and code stores and inherits the toolchain memory limit, so an out-of-memory or crashing compile ends the child and never the launcher. Its H lands in the launcher's code store and the attempt goes on as `Publication(H)`: one path, admission sees only publications. A compile is cancelled with its attempt. | launch.md "Authority" |
 | 3 | Failures | **NEW classes `Uncompiled` (10) and `Exhausted` (12)** | `launcher.Failure` gains `Uncompiled(diagnostics)` and `Exhausted(text)`. The host maps them to operator classes 10 and 12; tag 10 was `Unsupported`, whose only producer is gone. Diagnostics are cut at 64 KiB. | brief |
 | 4 | Untrusted authors | **REFUSED BEFORE `Admit`** | `admission_refusal` refuses, as `Denied`, any input but a source, any approved Foreign or Exec, a tree grant starting `Foreign` or `Exec`, and a recording group (FFI-1, EXEC-1). | launch.md |

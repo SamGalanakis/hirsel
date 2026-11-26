@@ -365,6 +365,107 @@ fn type_on(master: &OwnedFd, bytes: &[u8]) {
         .unwrap();
 }
 
+// cli@1's Prompts contract, via the real terminal port. The first CR in CRCRLF
+// remains part of the line. An empty line and terminal EOF both decline.
+#[test]
+fn cli_prompts_follow_the_terminal_contract() {
+    const SOURCE: &str = r#"
+fn expect(ok: bool, take message: String) {
+    if !ok { fail(take message) }
+}
+
+pub fn main(d: Dir, i: Stdin, e: Stderr) -> Result[(), Exit] waits {
+    let Some(take s) = result.unwrap(cli.prompt_secret(i, e, "Secret: ", "mac", false)) else {
+        fail("secret prompt returned EOF")
+    }
+    let tag = result.unwrap(secret.hmac_sha256(s, string.as_bytes("data")))
+    let mut payload: Bytes = list.with_capacity(32u64)
+    expect(bytebuf.append_inline(mut payload, tag, 0, 32), "secret tag did not fit")
+    let mut out = result.unwrap(host.open(d, "out", CreateNew))
+    result.unwrap(host.write(mut out, payload))
+
+    let mut reader = cli.prompt_input(i, 128u64)
+    let Some(take line) = result.unwrap(cli.prompt_line(mut reader, e, "Line: ", false)) else {
+        fail("line prompt returned EOF")
+    }
+    expect(line == "line\r", "the line prompt did not strip exactly one CRLF")
+    expect(!result.unwrap(cli.confirm(mut reader, e, "Empty?", false, false)), "empty input confirmed")
+    expect(result.unwrap(cli.confirm(mut reader, e, "Yes?", false, false)), "yes did not confirm")
+    expect(!result.unwrap(cli.confirm(mut reader, e, "EOF?", false, false)), "EOF confirmed")
+    Ok(())
+}
+"#;
+    use crate::{CheckRequest, Driver, Meter, package, package_dir::PackageDir};
+
+    let dir = tempfile::tempdir().unwrap();
+    let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let mut request = CheckRequest::libraries(&libraries, &dir.path().join("store")).unwrap();
+    let cli = PackageDir::open(&libraries.join("programs/cli"))
+        .unwrap()
+        .package;
+    let mut app = crate::tests::request(SOURCE, dir.path())
+        .inputs
+        .packages
+        .remove(0);
+    app.dependencies = vec![package("core"), package("cli")];
+    request.inputs.packages.extend([cli, app]);
+    let entry = crate::DefPath::from_full(ENTRY).unwrap();
+    request.entry = Some(entry.clone());
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        product.accepted(),
+        "{:?} {:?}",
+        product.diagnostics,
+        product.incomplete
+    );
+    let program = product
+        .build(
+            &entry,
+            &granted(Backend::Cranelift, dir.path(), &["Stderr"]),
+        )
+        .unwrap();
+    let built = Built {
+        executable: program.executable,
+        dir,
+    };
+
+    let (master, slave) = pty();
+    let mut settings = termios(slave.as_raw_fd());
+    settings.c_iflag &= !libc::ICRNL;
+    // SAFETY: a live descriptor and its initialized terminal settings.
+    assert_eq!(
+        unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &settings) },
+        0
+    );
+    let before = modes(&slave);
+    let mut child = spawn(&built, &slave);
+    armed(&slave, &mut child);
+    type_on(&master, b"hunter2\n");
+    // Read the terminal output while the secret port restores canonical input.
+    // Darwin waits for the master to drain its output before restoring modes.
+    let start = Instant::now();
+    let mut secret_output = Vec::new();
+    while modes(&slave) != before {
+        secret_output.extend(master_output(&master));
+        assert!(
+            start.elapsed() < PATIENCE,
+            "the secret read never restored the terminal"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    secret_output.extend(master_output(&master));
+    assert_eq!(secret_output, b"\r\n");
+    type_on(&master, b"line\r\r\n\n YeS \n");
+    type_on(&master, &[settings.c_cc[libc::VEOF]]);
+    let (status, err, _) = finish_on(child, &master);
+    assert!(status.success(), "{status} {err}");
+    let tag: String = built.out().iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(tag, HUNTER2_TAG);
+    assert_eq!(err, "Secret: Line: Empty? [y/N] Yes? [y/N] EOF? [y/N] ");
+}
+
 // Law A: the typed line becomes a secret whose tag is the hand-computed one,
 // and the master sees no typed byte and exactly one newline.
 #[test]

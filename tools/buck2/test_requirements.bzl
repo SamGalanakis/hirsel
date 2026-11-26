@@ -59,6 +59,7 @@ OPENAT2_TEST_CASES = {
         "secret_prompt_fixture::a_line_becomes_a_secret_and_is_not_echoed",
         "secret_prompt_fixture::b_terminating_signals_restore_the_modes",
         "secret_prompt_fixture::c_the_stop_relay_keeps_the_first_signal",
+        "secret_prompt_fixture::cli_prompts_follow_the_terminal_contract",
         "secret_prompt_fixture::d_a_timeout_and_a_run_stop_restore_the_modes",
         "secret_prompt_fixture::e_sigttou_during_restore_does_not_stop_the_run",
         "secret_prompt_fixture::e2_a_background_read_changes_nothing",

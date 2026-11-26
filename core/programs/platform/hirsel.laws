@@ -13,6 +13,7 @@ platform@1/local_laws/test_local_workdir_held_once src=9588863a1eaadf86 sig=6cc9
 platform@1/local_laws/test_platform_serve_budgets src=e0cbda9af8c5677e sig=c083243ea5f7d382 run=b8c2d9d0b4181905 bug=- oracle=- rows=pending
 platform@1/operator/operator_vectors src=16116a8bf0cf3db3 sig=365b0781a8e4a490 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 platform@1/platform/activation_window_recovers src=d5952778d488ffdc sig=bd9cab5ad845e8e9 run=b1818af2b24835d3 bug=- oracle=- rows=pending
+platform@1/platform/begin_source_limits src=bad5f0cc690abdf6 sig=2c623e72e26182a6 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_activation_witness_distinguishes_prepared src=659fc088eb16982b sig=aff5635c74c49092 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending
 platform@1/platform/bucket_hand_install_adopts_at_12 src=0b3bbba4d5b6da20 sig=94dd1f5395a0c7bd run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 platform@1/platform/bucket_moved_activation_recovery src=2c6a0dce4292912a sig=b3422dd889047780 run=1fd273d65cab0cd3 bug=- oracle=- rows=pending

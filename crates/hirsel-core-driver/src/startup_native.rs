@@ -528,11 +528,11 @@ fn a_user_package_named_runner_is_not_a_place() {
 }
 
 #[test]
-fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
+fn exec_startup_binds_the_policy_and_pins_the_image() {
     use crate::package_content::archive_digest;
     use hirsel_core_net::exec::{PinnedImage, Request};
-    use std::io::Read;
-    use std::os::fd::AsFd;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
 
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image");
@@ -631,12 +631,12 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
 
     let spec = &loaded.profiles["git"];
     let pinned = PinnedImage::open(spec).unwrap();
-    std::fs::write(&image, b"#!/bin/sh\n").unwrap();
-    let mut file = std::fs::File::from(pinned.file.as_fd().try_clone_to_owned().unwrap());
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).unwrap();
-    assert_eq!(bytes, executable);
+    let canonical = CString::new(std::fs::canonicalize(&image).unwrap().as_os_str().as_bytes()).unwrap();
+    assert_eq!(pinned.path.as_ref(), canonical.as_c_str());
+    assert!(pinned.pin.verify(&pinned.path).is_ok());
     assert_eq!(pinned.interpreter.as_deref(), Some(interpreter));
+    std::fs::write(&image, b"#!/bin/sh\n").unwrap();
+    assert!(pinned.pin.verify(&pinned.path).is_err());
     assert!(
         matches!(PinnedImage::open(spec), Err(reason) if reason.contains("does not match the pin"))
     );

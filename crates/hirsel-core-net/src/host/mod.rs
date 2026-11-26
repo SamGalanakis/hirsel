@@ -26,12 +26,7 @@ pub mod unix;
 pub(crate) mod exec_image;
 pub mod exec_api {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub use super::exec_image::{ImageSeal, PinnedImage, PinnedProfile, probe_seals};
-
-    #[cfg(target_os = "ios")]
-    pub fn probe_seals() -> std::io::Result<()> {
-        Err(std::io::Error::from_raw_os_error(libc::ENOTSUP))
-    }
+    pub use super::exec_image::{ImagePin, PinnedImage, PinnedProfile};
 }
 
 /// The macOS provider's pinned Unix connect (`freeze`), which the runtime's

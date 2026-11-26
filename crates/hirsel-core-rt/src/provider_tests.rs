@@ -1190,9 +1190,12 @@ fn exec_supervisor_law(image: &std::path::Path) {
             argv.push(CString::new(system.as_os_str().as_encoded_bytes()).unwrap());
         }
         SpawnInput {
-            image: Arc::new(File::open(image).unwrap().into()),
-            seal: None,
-            interpreter: None,
+            image: Arc::from(
+                CString::new(image.as_os_str().as_encoded_bytes())
+                    .unwrap()
+                    .into_boxed_c_str(),
+            ),
+            pin: None,
             cwd: File::open(system).unwrap().into(),
             argv,
             envp: vec![
@@ -1258,15 +1261,9 @@ fn exec_supervisor_law(image: &std::path::Path) {
         }
     };
     close_standard();
-    let low_image_cwd = make("literal *", [true; 3]);
-    assert_eq!(
-        (
-            low_image_cwd.image.as_raw_fd(),
-            low_image_cwd.cwd.as_raw_fd()
-        ),
-        (0, 1)
-    );
-    check(low_image_cwd);
+    let low_cwd = make("literal *", [true; 3]);
+    assert!(low_cwd.cwd.as_raw_fd() <= 2);
+    check(low_cwd);
     restore_standard();
 
     let low_report_stdio = make("literal *", [true; 3]);

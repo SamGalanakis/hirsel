@@ -21,9 +21,9 @@ can do with the argument forms, environment and working directories its profile 
 For a general program this is the whole authority of the OS user the run runs as. Hirsel
 promises exactly these things about a child, and nothing else:
 
-1. **Image.** The main image that runs is the sealed copy whose SHA-256 the profile pins
-   (EXEC-4). Its loader, its shared libraries and any script it is given as an argument are
-   host files outside the pin.
+1. **Image.** The main image that runs is the verified executable file whose SHA-256 the
+   profile pins (EXEC-4). Its loader, its shared libraries and any script it is given as an
+   argument are host files outside the pin.
 2. **Inputs.** The child starts with exactly the argv, environment, working directory and
    descriptors 0, 1 and 2 that EXEC-3 derives from the profile and the call. No other
    descriptor of the run survives into it.
@@ -79,7 +79,7 @@ carries it in its `Exec` binding ([launch](launch.md#release-recipe-and-host-ass
 
 **One rule for every launch.** A process that starts a run with an `Exec` grant loads the
 policy from `FILE` once, computes its digest, and compares it with the binding of the build
-it launches. It then builds the grant, and every sealed image, from that same parsed policy,
+it launches. It then builds the grant, and verifies every pinned image, from that same parsed policy,
 never from a second read of `FILE`. Where one process checks and another launches, the
 launching process loads and compares the policy itself. A mismatch refuses that launch
 before any process runs with the grant. For `hirsel run`, the binding is the digest computed
@@ -109,7 +109,8 @@ are resolved at each exec (EXEC-4).
 Before any process runs with the grant, the launcher writes one line per profile to stderr
 (for `hirsel deploy`, to the deploy's output):
 `exec: NAME: image PATH, sha256 E, interpreter I, policy P`. `I` is the `PT_INTERP` path read
-from the sealed image, or `none` for a static image. `P` is the grant's policy digest. The
+from the verified image, or `none` for a static image (and `none` on macOS, where `dyld` is
+implicit). `P` is the grant's policy digest. The
 line shows no environment value. What Hirsel enforces as approval is the explicit grant on
 the launching command, the match between the loaded policy and the build's binding, and
 this emitted record. It cannot establish that anyone read the record.
@@ -208,8 +209,8 @@ Rule storage is admitted at the narrowing and stays charged to its payer until t
 ([NET-6](net.md#net-6-network-rules)). Its logical size is 32, plus for each kept profile 8
 plus its name's bytes, plus per form 8 plus 8 per token plus each literal's bytes, plus per
 caller-settable key and per label 8 plus its bytes, plus 8 per fixed key, rounded up to 8.
-The fixed values, paths and sealed images belong to the launch-time grant. Every narrowing
-shares them, and no limit pays for them.
+The fixed values, paths and pinned image records belong to the launch-time grant. Every
+narrowing shares them, and no limit pays for them.
 
 A served Exec (EXEC-8) starts universal, so its narrowings keep parts that no host grant
 has. Its logical grant is a finite list of named profiles plus a **remainder**, which is
@@ -312,16 +313,15 @@ child's identity is pinned before anything can reap it. The child then works onl
 descriptor state of its own:
 
 1. It places its standard descriptors on 0, 1 and 2. Every descriptor the setup still
-   needs that sits on 0, 1 or 2 is first moved above 2: each standard source, the cwd, the
-   sealed image and the error channel. Placing a descriptor on an occupied number would
-   close that number's occupant.
+   needs that sits on 0, 1 or 2 is first moved above 2: each standard source, the cwd, and
+   the error channel. Placing a descriptor on an occupied number would close that number's
+   occupant.
 2. It enters the resolved cwd by its descriptor.
-3. It closes every descriptor except 0, 1, 2, the sealed image and a close-on-exec error
-   channel.
+3. It closes every descriptor except 0, 1, 2 and a close-on-exec error channel.
 4. It resets its signal dispositions and mask, and sets no-new-privileges. It arms the
    parent-death signal, then checks that its parent is still the run, and exits without
    executing the image if the run has already died.
-5. It executes the sealed image by descriptor.
+5. It executes the verified image directly at its real path.
 
 A failure at any step writes the step and `errno` to the error channel, and the child exits.
 The parent reaps that child before it delivers `Other(errno)`. When the channel closes with
@@ -370,46 +370,53 @@ delivered as `Other` only after that child has been reaped.
 
 ### EXEC-4: The image is the pinned bytes
 
+EXEC-4 executes each verified image in place on both Linux and macOS, with no copy, no clone
+and no memfd.
+
 At launch, for each granted profile, the launcher:
 
-1. copies the image path's bytes into a fresh private sealable anonymous file;
-2. seals that file against every write, shrink and grow, and checks that all three seals
-   hold, so no writer, shared or not, can change it afterwards;
-3. on those same sealed bytes, checks the SHA-256 against the pin, checks that they are a
-   native executable of the host's architecture with no `#!` line, and reads the
-   interpreter path that the approval line shows;
-4. keeps the sealed file for the run's spawns.
+1. opens the profile path with `O_NOFOLLOW` and requires a regular file;
+2. checks the open file's SHA-256 against the pin;
+3. checks that it is a native executable of the host's architecture with no `#!` line:
+   - on Linux, a 64-bit ELF executable for the machine, reading the `PT_INTERP` path that the
+     approval line shows;
+   - on macOS, a 64-bit Mach-O executable for the machine, or a universal file with at least
+     one image for the machine's CPU type, where each such image is a 64-bit Mach-O
+     executable that lies inside the file (a universal file with no image for the machine is
+     refused, even where a translator could run it);
+4. resolves the file's real path, records its `(dev, ino, size, mtime, ctime)` stamp, and
+   confirms the file did not change during verification.
 
-If any step fails, the run does not start, and its line names the profile and the step. A
-seal that permits only future writes is not enough: a writer that already maps the file
-could still change it.
+If any step fails, the run does not start, and its line names the profile and the step.
 
-Every spawn of that profile executes that sealed copy by descriptor (`execveat` with
-`AT_EMPTY_PATH`). Renaming, replacing or rewriting the image file after launch, by any
-process, changes nothing that runs. If the host refuses to execute the sealed copy, for
-example with `ETXTBSY`, that spawn fails with `Other(errno)`; this affects only
-availability. The pin covers the main image's bytes alone. A dynamically linked image's
-interpreter and shared libraries are host files resolved at each exec and are not pinned.
-The sealed copy is host memory outside every limit and lives for the run.
+Before each spawn of that profile, the provider re-stats the verified path with `lstat`:
 
-Law: the main image file that each exec loads is the sealed copy, and its bytes at that
-exec equal the bytes the digest was checked on, including when a process writes or
-truncates the image path at any point from step 1 on. The law is stated at the exec: after
-entry, the image may change its own private pages, as any native program may.
+- if the path is now a symlink or not a regular file, it refuses the spawn with
+  `Other(errno)`;
+- if any field of `(dev, ino, size, mtime, ctime)` changed, it opens the path with
+  `O_NOFOLLOW`, requires a regular file, and re-hashes it; on a pin mismatch (or if the file
+  changed during re-hashing), it refuses the spawn with `Other(errno)`;
+- otherwise it executes the verified real path directly (`execve` on Linux, `posix_spawn` on
+  macOS).
 
-**macOS.** macOS has no sealable anonymous file and executes by path. Step 1 clones the
-image (`fclonefileat`, else a copy) into a directory private to the run (mode 0700). Step 2
-makes the copy mode 0500 and immutable (`UF_IMMUTABLE`) and keeps the flags the copy has,
-so an image stored compressed keeps its bytes, then records its `(dev, ino, flags, size,
-mtime, ctime)` stamp around step 3's digest check. Because `UF_IMMUTABLE` is a user flag
-that a same-user process can clear, each spawn re-checks that stamp at the copy's path,
-re-hashes the copy when any field changed, and refuses with `Other(errno)` if the digest
-differs from the pin. Each spawn executes the verified copy by its path.
-A native executable is a 64-bit Mach-O executable for the machine, or a universal file
-with at least one image for the machine's CPU type, where each such image is a 64-bit
-Mach-O executable that lies inside the file. The kernel chooses which of those images
-runs, and the pin covers the whole file. A universal file with no image for the machine
-is refused, also where a translator could run it.
+Replacing or modifying the binary on disk mid-run (for example, an in-place package upgrade)
+makes later spawns of that profile refuse with `Other(errno)` until the run restarts with an
+updated pin.
+
+Executing in place leaves a microsecond window between the pre-spawn check and `execve` /
+`posix_spawn`. That window is accepted, as it is for the image's dynamic loader and shared
+libraries, which are host files resolved at each exec and outside the pin. The pin covers the
+main image's bytes alone. Running in place preserves `$ORIGIN` (Linux) and `@executable_path`
+(macOS) library resolution and satisfies platform launch constraints on system binaries such
+as `/bin/sh` and `/bin/cat`.
+
+Laws:
+
+- each spawn executes the pinned file in place, with no clone and no memfd, including
+  `/bin/sh`, `/bin/cat`, and a tool that resolves `$ORIGIN` (Linux) or `@executable_path`
+  (macOS);
+- changing the binary after launch (same size with a new mtime, or replacement by a new
+  inode) or swapping it with a symlink makes later spawns refuse with `Other(errno)`.
 
 ## Owning a child
 
@@ -528,15 +535,14 @@ every run descriptor out of the children's reach.
 
 That is all the promise covers. The run's command line, status and other public process
 metadata stay readable by every process of the user. Memory the run shares with a file the
-user can open is readable through that file. A child can read its own executable: the seal
-keeps the image's bytes fixed, and it keeps nothing about them confidential. A run granted
+user can open is readable through that file. A child can read its own executable: the pin verifies
+the image's bytes, and it keeps nothing about them confidential. A run granted
 `Exec` writes no core dump. A run without an `Exec` grant does not change these settings.
 
 On Linux the provider needs, in addition to `Dir`'s floor:
 
 - `clone3` with `CLONE_PIDFD` (Linux 5.3);
 - `close_range` (Linux 5.9);
-- sealable anonymous files;
 - no-new-privileges.
 
 A run granted `Exec` probes them once before `main`. Where one is unavailable the run does not

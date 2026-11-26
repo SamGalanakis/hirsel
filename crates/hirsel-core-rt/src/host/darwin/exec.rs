@@ -20,15 +20,13 @@ use std::{
 /// `POSIX_SPAWN_SETSID` from `<spawn.h>`, not yet exported by the libc crate.
 const POSIX_SPAWN_SETSID: libc::c_int = 0x0400;
 
-const EXEC_HOST: &str =
-    "Exec requires posix_spawn with confined opens and cloned images (macOS 26 or later)";
+const EXEC_HOST: &str = "Exec requires posix_spawn with confined opens (macOS 26 or later)";
 
 /// The launcher's resolved inputs, constructed after issue. The image is the
-/// read-only description of the immutable private copy.
+/// verified real path of the executable on disk.
 pub struct SpawnInput {
-    pub image: Arc<OwnedFd>,
-    pub seal: Option<hirsel_core_net::exec::ImageSeal>,
-    pub interpreter: Option<Arc<CStr>>,
+    pub image: Arc<CStr>,
+    pub pin: Option<hirsel_core_net::exec::ImagePin>,
     pub cwd: OwnedFd,
     pub argv: Vec<CString>,
     pub envp: Vec<CString>,
@@ -310,8 +308,8 @@ fn direct(registry: &mut Registry, pid: libc::pid_t) -> io::Result<&mut Child> {
         .ok_or_else(|| io::Error::from_raw_os_error(libc::ECHILD))
 }
 
-/// Exec's startup checks: an unprivileged run with confined opens and image
-/// copies. `posix_spawn` needs no probe.
+/// Exec's startup checks: an unprivileged run with confined opens.
+/// `posix_spawn` needs no probe.
 pub(crate) fn probe() -> io::Result<()> {
     // SAFETY: the id getters have no failure mode.
     let uids = unsafe { [libc::getuid(), libc::geteuid(), libc::geteuid()] };
@@ -322,7 +320,7 @@ pub(crate) fn probe() -> io::Result<()> {
         use std::os::fd::AsFd;
         hirsel_core_net::unix::open_beneath(root.as_fd(), c".", crate::host::path::DIRECTORY_HANDLE)
     });
-    if beneath.is_err() || hirsel_core_net::exec::probe_seals().is_err() {
+    if beneath.is_err() {
         return Err(io::Error::other(EXEC_HOST));
     }
     Ok(())
@@ -447,9 +445,8 @@ impl Shared {
             .try_reserve(1)
             .map_err(|_| io::Error::from_raw_os_error(libc::ENOMEM))?;
         let mut streams = Streams::new(input.piped)?;
-        let path = image_path(input.image.as_raw_fd())?;
-        if let Some(seal) = input.seal {
-            seal.verify_path(&path).map_err(|error| SpawnError {
+        if let Some(pin) = input.pin {
+            pin.verify(&input.image).map_err(|error| SpawnError {
                 error,
                 step: Some(SetupStep::Exec),
             })?;
@@ -476,7 +473,7 @@ impl Shared {
         let rc = unsafe {
             libc::posix_spawn(
                 &mut pid,
-                path.as_ptr(),
+                input.image.as_ptr(),
                 &actions.0,
                 &attributes.0,
                 argv.as_ptr().cast(),
@@ -578,17 +575,6 @@ fn owned(fd: RawFd) -> io::Result<OwnedFd> {
     check(fd)?;
     // SAFETY: this receives a freshly allocated file descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
-/// The path of the pinned image in the run's private directory. When a
-/// [`SpawnInput::seal`] is present, `spawn_child` verifies the file at this
-/// path before `posix_spawn`.
-fn image_path(image: RawFd) -> io::Result<CString> {
-    let mut buffer = [0u8; libc::MAXPATHLEN as usize];
-    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes, NUL included.
-    check(unsafe { libc::fcntl(image, libc::F_GETPATH, buffer.as_mut_ptr()) })?;
-    let path = CStr::from_bytes_until_nul(&buffer).map_err(|_| io::ErrorKind::InvalidData)?;
-    Ok(path.to_owned())
 }
 
 /// A close-on-exec pipe; under `POSIX_SPAWN_CLOEXEC_DEFAULT` only the

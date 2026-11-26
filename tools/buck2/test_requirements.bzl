@@ -12,11 +12,13 @@ PERF_TEST_CASES = {
     ],
 }
 
-# These laws execute sealed memfds. The native host supports them, but the
-# bwrap profile used for loopback isolation denies execveat on a memfd.
+# These laws exercise native Exec child spawning, subreaping, and dumpability
+# checks on the host without bwrap loopback isolation.
 NATIVE_EXEC_TEST_CASES = [
     "provider_tests::exec_supervisor_preserves_inputs_and_only_reaps_its_children",
-    "provider_tests::exec_provider_tests::exec_provider_runs_the_sealed_image_and_uses_directional_pipes",
+    "provider_tests::exec_provider_tests::exec_provider_runs_in_place_and_uses_directional_pipes",
+    "provider_tests::exec_provider_tests::exec_provider_refuses_post_launch_modification_replacement_and_symlink_swap",
+    "provider_tests::exec_provider_tests::exec_provider_runs_system_shells_and_origin_tools",
     "native::tests::exec_unix_recording_replays_without_host_resources",
     "native::tests::exec_child_records_its_own_replayable_output",
 ]

@@ -1,81 +1,15 @@
-//! Executable images on Linux: a verified image is copied into a sealed memfd
-//! (no write, grow or shrink, seals sealed) and reopened read-only, and its
-//! ELF program interpreter is read from the sealed copy.
+//! Executable format check on Linux: a native image is an ELF executable for
+//! this machine, and its ELF program interpreter is read for the approval line.
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::sync::Arc;
 
-const SEALS: libc::c_int =
-    libc::F_SEAL_WRITE | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
-fn memfd() -> io::Result<File> {
-    // SAFETY: constant C string and Linux memfd flags. A successful call transfers the fd.
-    unsafe {
-        let fd = libc::memfd_create(
-            c"hirsel-exec".as_ptr(),
-            libc::MFD_ALLOW_SEALING | libc::MFD_CLOEXEC,
-        );
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(File::from_raw_fd(fd))
-    }
-}
-
-fn seal(file: &File) -> io::Result<()> {
-    let fd = file.as_raw_fd();
-    // SAFETY: all fcntl requests use the ABI's integer argument or no argument.
-    unsafe {
-        if libc::fcntl(fd, libc::F_ADD_SEALS, SEALS) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let actual = libc::fcntl(fd, libc::F_GET_SEALS);
-        if actual < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if actual & SEALS != SEALS {
-            return Err(io::Error::other("memfd seals do not hold"));
-        }
-    }
-    Ok(())
-}
-
-/// Copy `source` into a private, immutable file and return it read-only.
-pub(crate) fn pin(source: &mut File) -> Result<File, String> {
-    let step = |step, error| format!("{step}: {error}");
-    let mut image = memfd().map_err(|e| step("memfd", e))?;
-    io::copy(source, &mut image).map_err(|e| step("copy image", e))?;
-    // SAFETY: this is the private descriptor whose mode the launch owns.
-    if unsafe { libc::fchmod(image.as_raw_fd(), 0o500) } < 0 {
-        return Err(step("set image mode", io::Error::last_os_error()));
-    }
-    seal(&image).map_err(|e| step("seal image", e))?;
-    File::open(format!("/proc/self/fd/{}", image.as_raw_fd()))
-        .map_err(|e| step("open sealed image read-only", e))
-}
-
-/// Linux seals the memfd in the kernel, so spawn needs no path re-check.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Seal;
-
-impl Seal {
-    pub(crate) fn capture(_file: &File, _pin: [u8; 32]) -> io::Result<Self> {
-        Ok(Self)
-    }
-
-    pub(crate) fn still_matches(&self, _file: &File) -> io::Result<bool> {
-        Ok(true)
-    }
-
-    pub fn verify_path(&self, _path: &CStr) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Whether this host can pin an image.
-pub(crate) fn probe() -> io::Result<()> {
-    memfd().and_then(|image| seal(&image))
+/// The verified executable's real path on Linux.
+pub(crate) fn real_path(_file: &File, profile: &str) -> io::Result<CString> {
+    let real = std::fs::canonicalize(profile)?;
+    CString::new(real.as_os_str().as_bytes()).map_err(io::Error::from)
 }
 
 /// The program interpreter of a native executable, which must be ELF for

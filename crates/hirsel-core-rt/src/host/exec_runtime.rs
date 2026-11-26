@@ -164,9 +164,8 @@ unsafe extern "C" fn spawn_native(_: *mut u8, request: *mut Request) -> Outcome 
             return other(error);
         }
         let result = supervisor.spawn(SpawnInput {
-            image: profile.image.file.clone(),
-            seal: Some(profile.image.seal),
-            interpreter: profile.image.interpreter.clone(),
+            image: profile.image.path.clone(),
+            pin: Some(profile.image.pin),
             cwd,
             argv,
             envp,

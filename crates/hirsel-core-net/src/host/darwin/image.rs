@@ -1,201 +1,23 @@
-//! Executable images on Darwin, which has no memfd or seals and launches by
-//! path: a verified image is cloned (`fclonefileat`, or copied across
-//! volumes) into a private directory, made read-only and immutable
-//! (`UF_IMMUTABLE`), and reopened read-only; a launch names it through
-//! `F_GETPATH`. A native image is a Mach-O executable, alone or as a slice
-//! of a universal file, which names no program interpreter.
+//! Executable format check on Darwin: a native image is a 64-bit Mach-O
+//! executable, alone or as a slice of a universal file, which names no program
+//! interpreter.
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
-use std::os::darwin::fs::MetadataExt;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::FileExt;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-/// A private (0700) directory for pinned images, kept for the process's life.
-fn directory() -> io::Result<&'static OwnedFd> {
-    static DIRECTORY: OnceLock<OwnedFd> = OnceLock::new();
-    if let Some(dir) = DIRECTORY.get() {
-        return Ok(dir);
-    }
-    let mut template = std::env::temp_dir()
-        .join("hirsel-exec-XXXXXX")
-        .into_os_string()
-        .into_vec();
-    template.push(0);
-    // SAFETY: template is a writable NUL-terminated path ending in XXXXXX;
-    // mkdtemp creates the directory 0700.
-    if unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) }.is_null() {
+/// The verified executable's real path on Darwin (`F_GETPATH` avoids linking
+/// `realpath$DARWIN_EXTSN`).
+pub(crate) fn real_path(file: &File, _profile: &str) -> io::Result<CString> {
+    let mut buffer = [0u8; libc::MAXPATHLEN as usize];
+    // SAFETY: F_GETPATH writes at most MAXPATHLEN bytes, NUL included.
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr()) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    let path = CString::from_vec_with_nul(template).map_err(io::Error::other)?;
-    let flags = libc::O_SEARCH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    // SAFETY: the C path is live; a success transfers a descriptor.
-    let fd = unsafe { libc::open(path.as_ptr(), flags) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: open returned an owned descriptor.
-    let _ = DIRECTORY.set(unsafe { OwnedFd::from_raw_fd(fd) });
-    Ok(DIRECTORY.get().unwrap())
-}
-
-fn private_copy(source: &mut File) -> io::Result<File> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = directory()?.as_raw_fd();
-    let name = CString::new(format!("image-{}", NEXT.fetch_add(1, Ordering::Relaxed)))?;
-    // SAFETY: both descriptors and the C name are live for the call.
-    if unsafe { libc::fclonefileat(source.as_raw_fd(), dir, name.as_ptr(), 0) } < 0 {
-        let error = io::Error::last_os_error();
-        if !matches!(error.raw_os_error(), Some(libc::EXDEV | libc::ENOTSUP)) {
-            return Err(error);
-        }
-        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC;
-        // SAFETY: as above; a success transfers a descriptor.
-        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags, 0o600) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: openat returned an owned descriptor.
-        let mut copy = unsafe { File::from_raw_fd(fd) };
-        io::copy(source, &mut copy)?;
-    }
-    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
-    // SAFETY: as above; a success transfers a descriptor.
-    let fd = unsafe { libc::openat(dir, name.as_ptr(), flags) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: openat returned an owned descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
-}
-
-/// Copy `source` into a private, immutable file and return it read-only.
-pub(crate) fn pin(source: &mut File) -> Result<File, String> {
-    let step = |step, error| format!("{step}: {error}");
-    let image = private_copy(source).map_err(|e| step("clone image", e))?;
-    // A clone keeps its source's flags, and a compressed file has its bytes only while
-    // UF_COMPRESSED is set: without it the file reads as empty. So the immutable flag
-    // joins the flags the copy has.
-    let flags = image
-        .metadata()
-        .map_err(|e| step("read image flags", e))?
-        .st_flags()
-        | libc::UF_IMMUTABLE;
-    // SAFETY: the private copy's mode and flags belong to this launch.
-    unsafe {
-        if libc::fchmod(image.as_raw_fd(), 0o500) < 0 {
-            return Err(step("set image mode", io::Error::last_os_error()));
-        }
-        if libc::fchflags(image.as_raw_fd(), flags) < 0 {
-            return Err(step("make image immutable", io::Error::last_os_error()));
-        }
-    }
-    Ok(image)
-}
-
-/// Metadata snapshot of a pinned copy on Darwin. Because `UF_IMMUTABLE` is a
-/// user flag that a same-user process can clear, each spawn compares the
-/// current stat at the copy's path against this snapshot and re-hashes the
-/// file whenever any field changed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Stamp {
-    dev: libc::dev_t,
-    ino: libc::ino_t,
-    flags: u32,
-    size: libc::off_t,
-    mtime_sec: libc::time_t,
-    mtime_nsec: libc::c_long,
-    ctime_sec: libc::time_t,
-    ctime_nsec: libc::c_long,
-}
-
-impl Stamp {
-    fn from_stat(st: &libc::stat) -> io::Result<Self> {
-        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err(io::Error::from_raw_os_error(libc::EACCES));
-        }
-        Ok(Self {
-            dev: st.st_dev,
-            ino: st.st_ino,
-            flags: st.st_flags,
-            size: st.st_size,
-            mtime_sec: st.st_mtime,
-            mtime_nsec: st.st_mtime_nsec,
-            ctime_sec: st.st_ctime,
-            ctime_nsec: st.st_ctime_nsec,
-        })
-    }
-
-    fn of_fd(fd: RawFd) -> io::Result<Self> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: fd is live and fstat writes st on success.
-        if unsafe { libc::fstat(fd, st.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: fstat succeeded.
-        Self::from_stat(&unsafe { st.assume_init() })
-    }
-
-    fn of_path(path: &CStr) -> io::Result<Self> {
-        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
-        // SAFETY: path is a live NUL-terminated path and lstat writes st on success.
-        if unsafe { libc::lstat(path.as_ptr(), st.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: lstat succeeded.
-        Self::from_stat(&unsafe { st.assume_init() })
-    }
-}
-
-/// Pinned-image verifier carried to each Darwin spawn.
-#[derive(Clone, Copy, Debug)]
-pub struct Seal {
-    stamp: Stamp,
-    pin: [u8; 32],
-}
-
-impl Seal {
-    pub(crate) fn capture(file: &File, pin: [u8; 32]) -> io::Result<Self> {
-        let stamp = Stamp::of_fd(file.as_raw_fd())?;
-        if stamp.flags & libc::UF_IMMUTABLE == 0 {
-            return Err(io::Error::other("image immutable flag does not hold"));
-        }
-        Ok(Self { stamp, pin })
-    }
-
-    pub(crate) fn still_matches(&self, file: &File) -> io::Result<bool> {
-        Ok(Stamp::of_fd(file.as_raw_fd())? == self.stamp)
-    }
-
-    /// Re-check `(dev, ino, flags, size, mtime, ctime)` at `path`. When any
-    /// field changed, re-hash the regular file at `path` (without following
-    /// links) and refuse if its digest differs from the pin.
-    pub fn verify_path(&self, path: &CStr) -> io::Result<()> {
-        if Stamp::of_path(path)? == self.stamp {
-            return Ok(());
-        }
-        let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
-        // SAFETY: path is a live NUL-terminated path; a success transfers a descriptor.
-        let fd = unsafe { libc::open(path.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: open returned an owned descriptor.
-        let mut file = unsafe { File::from_raw_fd(fd) };
-        let _ = Stamp::of_fd(file.as_raw_fd())?;
-        if crate::host::exec_image::sha256(&mut file)? != self.pin {
-            return Err(io::Error::from_raw_os_error(libc::EACCES));
-        }
-        Ok(())
-    }
-}
-
-/// Whether this host can pin an image.
-pub(crate) fn probe() -> io::Result<()> {
-    directory().map(|_| ())
+    let path = CStr::from_bytes_until_nul(&buffer).map_err(|_| io::ErrorKind::InvalidData)?;
+    Ok(path.to_owned())
 }
 
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;

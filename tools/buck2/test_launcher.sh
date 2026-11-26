@@ -8,7 +8,7 @@ set -eu
 if [ -n "${HIRSEL_TEST_REPORTER:-}" ] && [ -z "${HIRSEL_TEST_REPORT_ACTIVE:-}" ]; then
   exec python3 "$HIRSEL_TEST_REPORTER" sh "$0" "$@"
 fi
-# The dedicated Exec laws use no network and need the host's memfd execution policy.
+# The dedicated Exec laws use no network and run on the host without bwrap isolation.
 # Other tests run in a network namespace whose only interface is lo, so only
 # the test reaches the loopback ports it listens on. Programs on a developer
 # host probe new loopback listeners (one connects and sends `GET /` to each),

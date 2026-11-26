@@ -30,9 +30,8 @@ fn exec_starts_a_child_while_the_program_holds_more_than_open_max_descriptors() 
     assert!(held.last().unwrap().as_raw_fd() > 10_240);
     let mut started = supervisor
         .spawn(SpawnInput {
-            image: Arc::new(File::open("/bin/sh").unwrap().into()),
-            seal: None,
-            interpreter: None,
+            image: Arc::from(c"/bin/sh"),
+            pin: None,
             cwd: File::open("/").unwrap().into(),
             argv: ["sh", "-c", "pwd"]
                 .map(|arg| CString::new(arg).unwrap())

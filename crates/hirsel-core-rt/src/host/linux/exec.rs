@@ -11,11 +11,10 @@ use std::{
 };
 
 /// The launcher's resolved inputs, constructed after issue. The image is the
-/// read-only description of the sealed and checked copy.
+/// verified real path of the executable on disk.
 pub struct SpawnInput {
-    pub image: Arc<OwnedFd>,
-    pub seal: Option<hirsel_core_net::exec::ImageSeal>,
-    pub interpreter: Option<Arc<CStr>>,
+    pub image: Arc<CStr>,
+    pub pin: Option<hirsel_core_net::exec::ImagePin>,
     pub cwd: OwnedFd,
     pub argv: Vec<CString>,
     pub envp: Vec<CString>,
@@ -444,18 +443,24 @@ impl Shared {
             .children
             .try_reserve(1)
             .map_err(|_| io::Error::from_raw_os_error(libc::ENOMEM))?;
+        if let Some(pin) = input.pin {
+            pin.verify(&input.image).map_err(|error| SpawnError {
+                error,
+                step: Some(SetupStep::Exec),
+            })?;
+        }
         let (reader, writer) = pipe()?;
         let mut streams = Streams::new(input.piped)?;
         let argv = pointers(&input.argv)?;
         let envp = pointers(&input.envp)?;
         let fds = [
             writer.as_raw_fd(),
-            input.image.as_raw_fd(),
             input.cwd.as_raw_fd(),
             streams.child[0].as_raw_fd(),
             streams.child[1].as_raw_fd(),
             streams.child[2].as_raw_fd(),
         ];
+        let program = input.image.as_ptr();
         let run = std::process::id() as libc::pid_t;
         let mut pidfd = -1i32;
         // Linux clone_args version 0 (Linux 5.3).
@@ -470,7 +475,7 @@ impl Shared {
         if pid == 0 {
             // SAFETY: fork-like clone child, with private fds, pinned C strings
             // and pointer tables, and signals blocked until dispositions reset.
-            unsafe { execute(fds, run, argv.as_ptr(), envp.as_ptr(), failure) }
+            unsafe { execute(fds, run, program, argv.as_ptr(), envp.as_ptr(), failure) }
         }
         check(pid)?;
         // SAFETY: CLONE_PIDFD transfers a fresh descriptor to the parent.
@@ -661,13 +666,13 @@ fn probe_clone() -> bool {
 }
 
 /// Exec's startup checks: an unprivileged run with openat2, clone3 with
-/// pidfds, close_range and sealed images.
+/// pidfds, and close_range.
 pub(crate) fn probe() -> io::Result<()> {
     check_credentials().map_err(io::Error::other)?;
     let openat2 = fs::File::open(".").and_then(|root| {
         hirsel_core_net::unix::open_beneath(root.as_fd(), c".", crate::host::path::DIRECTORY_HANDLE)
     });
-    if openat2.is_err() || !probe_clone() || hirsel_core_net::exec::probe_seals().is_err() {
+    if openat2.is_err() || !probe_clone() {
         return Err(io::Error::other(EXEC_HOST));
     }
     Ok(())
@@ -847,8 +852,9 @@ fn read_report(reader: OwnedFd) -> io::Result<Option<SpawnError>> {
 // process's locks, allocator or thread runtime. These helpers make only
 // Linux syscalls or async-signal-safe libc calls and never unwind.
 unsafe fn execute(
-    mut fds: [RawFd; 6],
+    mut fds: [RawFd; 5],
     run: libc::pid_t,
+    program: *const libc::c_char,
     argv: *const *const libc::c_char,
     envp: *const *const libc::c_char,
     failure: Option<SetupStep>,
@@ -868,7 +874,7 @@ unsafe fn execute(
                 }
             }
         }
-        let [report, image, cwd, stdin, stdout, stderr] = fds;
+        let [report, cwd, stdin, stdout, stderr] = fds;
         for (fd, target) in [(stdin, 0), (stdout, 1), (stderr, 2)] {
             if libc::dup3(fd, target, 0) < 0 {
                 failed(report, SetupStep::Stdio, errno());
@@ -881,8 +887,8 @@ unsafe fn execute(
         }
 
         inject(report, SetupStep::Close, failure);
-        let (low, high) = (image.min(report) as u32, image.max(report) as u32);
-        for (first, last) in [(3, low - 1), (low + 1, high - 1), (high + 1, u32::MAX)] {
+        let keep = report as u32;
+        for (first, last) in [(3, keep - 1), (keep + 1, u32::MAX)] {
             if first <= last && libc::syscall(libc::SYS_close_range, first, last, 0u32) < 0 {
                 failed(report, SetupStep::Close, errno());
             }
@@ -928,14 +934,7 @@ unsafe fn execute(
         }
 
         inject(report, SetupStep::Exec, failure);
-        libc::syscall(
-            libc::SYS_execveat,
-            image,
-            c"".as_ptr(),
-            argv,
-            envp,
-            libc::AT_EMPTY_PATH,
-        );
+        libc::execve(program, argv, envp);
         failed(report, SetupStep::Exec, errno());
     }
 }

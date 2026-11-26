@@ -328,7 +328,7 @@ type DiskState {
 - **Memory** (`disk == None`): no journal or backend. Tickets use `accounting.changes`. `CallStreamState` and `PagerState` copy their policy fields from `Options`, so a memory open needs no `DiskState`.
 - **Directory** → `DirBackend(journal.DirJournalState)`:
   - owns `lock: HostFile`, `d: Dir`, `creation`, `file_seq`/`file_end`, `poison`, the Directory worker, the `DirJournalMsg` queue and `QueueAccounting`;
-  - timer and coalescing state are not part of this cutover; 3103's accepted design owns them.
+  - timer and coalescing state are not part of this cutover. 3103 (STORE-SPEC v2.150) adds no timer task, channel or queue slot. Its gather and END deadlines are locals of the worker loop, waiting in `channel.receive_until`, and `DirJournalMsg` gains a payload-less `Flush`.
 - **Object / Sim** → `ObjectBackend(object_writer.ObjectWriterState)`:
   - the 22 existing fields (§4.5) plus the moved per-backend `DiskState` fields (§4.4);
   - stream modes: standalone, attached with a live stream, and attached with `stream == None`.
@@ -704,8 +704,8 @@ Notes:
 | **3079** (landed `2d9e5e50`) | offline backup, check before stamp, writer fallback, listed-pack restore, damaged-backup laws | Placed as landed (§3.3, §5.3). Backup internals go to `capture` at L7; the public backup API stays at the root; `restore` stays public at the root with the listed-pack logic in `transfer` at L13. `store_backup_laws.hirsel:346,480` stay in `"store"`. |
 | **3080** (landed `979875cf`) | Bucket request counters in `std.object` | No store move touches the counters. Keep the `bucket_request_counts` fixture exact when tests move. No lane adds a local capture-counter display. |
 | **3082** (landed `f601b90a`) | NVMe pack cache | Cache I/O goes to `history` at L7, and writer state (`cache`) to `object_writer` at L9 (§4.5). Public `objects_cache` stays at the root. The cache stays disposable. |
-| **3103** (design) | write-path v2 | Coarse owners only: options and bytes in L1 (as root `Options` plus a `types` rep), page application in L2, Directory scheduling and acks in L6, transaction input in L12, and sizing at the root. Timer, queue-slot and sizing details follow 3103's accepted design. This cutover adds none. |
-| **3062 / 3076** (spec text) | v2.148 read path, v2.149 write path | Public `SharedCapture`, `RowView`, `Visit`, `put_ordered` and `Error.OutOfOrder` are declared at the root. Internals: shared backing in `capture` (L7), follower material in `object_writer` (L9), reader and visitors in `read` (L11), Tx range and ordered puts in `txn` (L12), and `DataRows.sorted` in `pages` (L2). |
+| **3103** (design, STORE-SPEC v2.150) | write-path v2 | Coarse owners only: options and bytes in L1 (as root `Options` plus a `types` rep), page application in L2, Directory scheduling and acks in L6, transaction input in L12, and sizing at the root. The details are in 3103's DESIGN.md §9: `DataRows.ascending`, kept by `push_data_row`, and prior-carrying `std.page.*_source` edits in L2; `DirJournalMsg.Flush` with the `2g` queue unchanged, and worker-loop deadlines in L6; two-phase `put_ordered` in L12; no sizing change (0 B). The runtime's `channel.receive_until` is a prerequisite lane. This cutover adds none. |
+| **3062 / 3076** (spec text) | v2.148 read path, v2.149 write path | Public `SharedCapture`, `RowView`, `Visit`, `put_ordered` and `Error.OutOfOrder` are declared at the root. Internals: shared backing in `capture` (L7), follower material in `object_writer` (L9), reader and visitors in `read` (L11), Tx range and ordered puts in `txn` (L12), and `DataRows.ascending` in `pages` (L2; it was `sorted` in v2.149). |
 | **3081** | platform seams | `platform.local` is an external consumer of L8/L9. Keep its standalone and streamed cases. |
 | `1b1fc30f`, `10d42c7e` (landed) | slot frame limits; recorded stream quotas | L8 carries the slot frame-limit pass-through. `check_stream_quota` (`store-streams.hirsel:19`) moves with `txn`. Its callers in `disk_start` (`store.hirsel:3631`) and `prepare_object_writer` stay where §3.4 places them. |
 
@@ -759,7 +759,7 @@ Lanes land in order on top of each other. Each lane:
 ### L2 — `pages`
 - **Move.** `store-pages.hirsel`, `store-layout.hirsel` (except public `fixture_broken_handoff`), `store-tail.hirsel` (privates only; `read_tail`, `key_codec` and `Tail` stay at the root), and the §7.2 `pages` row. `Pin` stays where §3.4 puts it, with `store-projector` privates.
 - **Data passed down.** Resolved roots only. `ProposedMain` stays at the root.
-- **State.** `holders: pages.HolderTable` (8 fields, refreshed atomically). The `DataRows.sorted` hook exists for 3076.
+- **State.** `holders: pages.HolderTable` (8 fields, refreshed atomically). The `DataRows.ascending` hook exists for 3103.
 - **Laws.** `store_pages_paged_laws`, `store_layout_laws`, `store_prior_laws`, `store_fork_laws`; O1; O4 (`HolderTable` control).
 
 ### L3 — `catalog`

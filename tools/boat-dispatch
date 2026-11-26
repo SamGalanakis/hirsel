@@ -3,7 +3,6 @@
 import argparse
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import fcntl
 import gzip
 import hashlib
@@ -20,12 +19,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import uuid
 
 SNAPSHOT = "hirsel-runner-base"
-DAY_LIMIT = 200
 LAW_DAY_RESERVE = 20
-ACTIVE_LIMIT = 100
 SOURCE_PATHS = ("core/core", "core/std", "core/programs", "core/tools",
                 "bench/awfy/hirsel", "bench/awfy/*.py", "tools/capped")
 SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
@@ -256,36 +254,73 @@ def batches(jobs, capacity):
 
 
 class LocalBudget:
+    """Attempts whose creation outcome is ambiguous, counted conservatively.
+
+    Boat's limits response is the service ledger. A creation that fails before
+    its id is read may still have happened server-side, so it stays charged for
+    a rolling day. Successful creations are not counted here: Boat already
+    counts them, and counting both would double-charge the window.
+    """
+
+    DAY_SECONDS = 24 * 60 * 60
+    WINDOW_SECONDS = {"day": DAY_SECONDS, "hour": 60 * 60, "minute": 60}
+
     def __init__(self, state):
         self.state = state
         self.db = sqlite3.connect(state / "starts.sqlite" if state else ":memory:")
-        self.db.execute("CREATE TABLE IF NOT EXISTS days (utc TEXT PRIMARY KEY, starts INTEGER)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS attempts (at INTEGER NOT NULL)")
+
+    def count(self, now, seconds):
+        since = now - seconds
+        return self.db.execute("SELECT COUNT(*) FROM attempts WHERE at >= ?", (since,)).fetchone()[0]
 
     def reserve(self, limits, job_class):
-        day = datetime.now(timezone.utc).date().isoformat()
         unavailable = StartUnavailable if job_class == "vopr" else ValueError
+        now = int(time.time())
         with self.db:
-            count = self.db.execute("SELECT starts FROM days WHERE utc = ?", (day,)).fetchone()
-            windows = limits["starts"]
-            active_limit = min(ACTIVE_LIMIT, limits["maxActiveSandboxes"])
-            if ((count and count[0] >= DAY_LIMIT) or windows["day"]["used"] >= DAY_LIMIT
-                    or windows["day"]["remaining"] <= 0):
-                raise unavailable(f"Boat daily start limit reached ({DAY_LIMIT}); run locally")
-            for window in ("hour", "minute"):
-                if windows[window]["remaining"] <= 0:
-                    raise unavailable(f"Boat {window} start limit reached; run locally")
-            if limits["activeSandboxes"] >= active_limit:
-                raise unavailable("Boat active VM limit reached; run locally")
-            if job_class == "vopr" and (
-                max(count[0] if count else 0, windows["day"]["used"]) >= DAY_LIMIT - LAW_DAY_RESERVE
-                or windows["day"]["remaining"] <= LAW_DAY_RESERVE
-                or any(windows[window]["remaining"] <= 1 for window in ("hour", "minute"))
-                or limits["activeSandboxes"] >= active_limit - 1
-            ):
-                raise StartUnavailable("Boat VOPR deferred to preserve start capacity for laws")
-            # Count an attempt before contacting Boat. If creation is ambiguous, keep it charged.
-            self.db.execute("INSERT INTO days VALUES (?, 1) "
-                            "ON CONFLICT(utc) DO UPDATE SET starts = starts + 1", (day,))
+            self.db.execute("DELETE FROM attempts WHERE at < ?", (now - self.DAY_SECONDS,))
+            ambiguous = {window: self.count(now, seconds)
+                         for window, seconds in self.WINDOW_SECONDS.items()}
+        windows = limits["starts"]
+        day_limit = windows["day"]["limit"]
+        active_limit = limits["maxActiveSandboxes"]
+        if (type(day_limit) is not int or day_limit <= 0
+                or type(active_limit) is not int or active_limit <= 0):
+            raise ValueError("Boat limits response lacks positive day and active sandbox ceilings")
+
+        def effective_remaining(window):
+            reported = windows[window]
+            service_remaining = min(reported["remaining"],
+                                    (day_limit if window == "day" else reported["limit"]) - reported["used"])
+            if service_remaining <= 0:
+                if window == "day":
+                    raise unavailable(f"Boat daily start limit reached ({day_limit}); run locally")
+                raise unavailable(f"Boat {window} start limit reached; run locally")
+            remaining = service_remaining - ambiguous[window]
+            if remaining <= 0:
+                raise unavailable("local Boat ledger is conserving ambiguous starts; run locally")
+            return remaining
+
+        day_remaining = effective_remaining("day")
+        hour_remaining = effective_remaining("hour")
+        minute_remaining = effective_remaining("minute")
+        active = limits["activeSandboxes"]
+        if active >= active_limit:
+            raise unavailable("Boat active VM limit reached; run locally")
+        active += ambiguous["day"]
+        if active >= active_limit:
+            raise unavailable("local Boat ledger is conserving ambiguous active starts; run locally")
+        if job_class == "vopr" and (
+            day_remaining <= LAW_DAY_RESERVE
+            or hour_remaining <= 1
+            or minute_remaining <= 1
+            or active >= active_limit - 1
+        ):
+            raise StartUnavailable("Boat VOPR deferred to preserve start capacity for laws")
+
+    def ambiguous(self):
+        with self.db:
+            self.db.execute("INSERT INTO attempts VALUES (?)", (int(time.time()),))
 
     @contextmanager
     def admission(self, job_class):
@@ -433,7 +468,12 @@ def run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root, bundle
                     if not dry_run:
                         log = Path(tempfile.mkdtemp(prefix=f"boat-{group[0].lane}-", dir=log_root))
                     critical = True
-                    create_vm(invoke, group[0].lane, ttl, vm, log)
+                    try:
+                        create_vm(invoke, group[0].lane, ttl, vm, log)
+                    except Exception:
+                        if not vm:
+                            budget.ambiguous()
+                        raise
                     critical = False
                     if interrupted:
                         raise KeyboardInterrupt
@@ -471,9 +511,10 @@ class DryRunBoat:
     def __call__(self, *args, **_kwargs):
         match args[:2]:
             case ("--json", "limits"):
-                data = {"activeSandboxes": 0, "maxActiveSandboxes": ACTIVE_LIMIT,
-                        "starts": {"day": {"used": self.started, "remaining": DAY_LIMIT - self.started},
-                                   "hour": {"remaining": 60}, "minute": {"remaining": 12}}}
+                windows = {"day": {"used": self.started, "remaining": 200 - self.started, "limit": 200},
+                           "hour": {"used": 0, "remaining": 60, "limit": 60},
+                           "minute": {"used": 0, "remaining": 12, "limit": 12}}
+                data = {"activeSandboxes": 0, "maxActiveSandboxes": 100, "starts": windows}
             case ("--json", "new"):
                 self.started += 1
                 data = {"event": "created", "id": f"dry-run-{self.started}"}

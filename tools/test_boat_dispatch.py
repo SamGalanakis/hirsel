@@ -20,17 +20,19 @@ stage = dispatcher["stage"]
 
 
 class FakeBoat:
-    def __init__(self):
+    def __init__(self, day_limit=200):
+        self.day_limit = day_limit
         self.started = []
         self.deleted = []
 
     def __call__(self, *args, **_kwargs):
         match args[:2]:
             case ("--json", "limits"):
-                # The provider reports spare capacity. The local counter must
-                # refuse the 201st request even if the provider would accept it.
-                windows = {window: {"used": 0, "remaining": limit}
-                           for window, limit in (("day", 200), ("hour", 60), ("minute", 12))}
+                windows = {"day": {"used": len(self.started),
+                                    "remaining": max(self.day_limit - len(self.started), 0),
+                                    "limit": self.day_limit},
+                           "hour": {"used": 0, "remaining": 60, "limit": 60},
+                           "minute": {"used": 0, "remaining": 12, "limit": 12}}
                 data = {"activeSandboxes": 0, "maxActiveSandboxes": 100, "starts": windows}
             case ("--json", "new"):
                 self.started.append(args)
@@ -130,7 +132,7 @@ raise SystemExit(subprocess.call(job["command"], shell=True, cwd=manifest.parent
             finally:
                 db.close()
 
-    def test_three_lanes_share_minimum_starts_and_stop_at_200(self):
+    def test_three_lanes_share_minimum_starts_and_stop_at_the_service_ceiling(self):
         with tempfile.TemporaryDirectory() as scratch, redirect_stdout(io.StringIO()) as output:
             root = Path(scratch)
             cache = root / "cache"
@@ -166,16 +168,17 @@ raise SystemExit(subprocess.call(job["command"], shell=True, cwd=manifest.parent
             with self.assertRaisesRegex(ValueError, "local-only input in bundle"):
                 stage(cache, dispatcher["Input"](credentials, False))
 
-            backend = FakeBoat()
+            backend = FakeBoat(201)
             self.assertEqual(dispatch([[jobs[0]]] * 190, 60, root, backend, dry_run=True), 0)
             output.seek(0)
             output.truncate()
             self.assertEqual(dispatch(groups, 60, root, backend, dry_run=True), 0)
             self.assertEqual(len(output.getvalue().splitlines()), 10)
-            with self.assertRaisesRegex(ValueError, r"daily start limit reached \(200\)"):
+            self.assertEqual(dispatch([[jobs[0]]], 60, root, backend, dry_run=True), 0)
+            with self.assertRaisesRegex(ValueError, r"daily start limit reached \(201\)"):
                 dispatch([[jobs[0]]], 60, root, backend, dry_run=True)
-            self.assertEqual(len(backend.started), 200)
-            self.assertEqual(backend.deleted, [f"fake-{n}" for n in range(1, 201)])
+            self.assertEqual(len(backend.started), 201)
+            self.assertEqual(backend.deleted, [f"fake-{n}" for n in range(1, 202)])
             self.assertTrue(all(args[args.index("--from") + 1] == "hirsel-runner-base"
                                 and "--no-env" in args for args in backend.started))
 

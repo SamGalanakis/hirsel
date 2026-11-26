@@ -305,7 +305,10 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         }
         let (id, der) = identity(r)
         say(out, "certificate", digest_bytes(std.sha256.hash(der)))
-        let retry = argument(a, 3) == "retry"
+        let retry = match args.get(a, 3) {
+            Some(v) => string.from(v) == "retry",
+            None => false,
+        }
         result.unwrap(quic.endpoint(r, endpoint_config(r, retry), Some((take id, transport(take client_pins, transfer)))))
     }
     let mut data: Bytes = list.with_capacity(16 * 2048)

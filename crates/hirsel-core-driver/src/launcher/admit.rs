@@ -457,12 +457,22 @@ impl Wire for Tree {
     }
 }
 
+#[path = "gate.rs"]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Begin's gate field is planned; the gate law drives the step"
+    )
+)]
+pub(crate) mod gate;
+
 /// The most diagnostic bytes a refused compile reports; the rest is cut and marked.
 const DIAGNOSTIC_BYTES: usize = 64 << 10;
 
 /// Leave the group leader waitable until the group is killed, so its PID cannot be
 /// reused between observing its exit and signalling the remaining processes.
-fn wait_for_compile(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
+pub(super) fn wait_for_compile(child: &mut Child, cancel: &AtomicBool) -> io::Result<ExitStatus> {
     let pid = child.id() as libc::pid_t;
     while !cancel.load(Ordering::Relaxed) {
         // SAFETY: waitid writes into a siginfo for our own child without reaping it.
@@ -521,23 +531,11 @@ fn publish(
 ) -> Option<Result<ContentHash, Failure>> {
     let unrun =
         |e: &dyn std::fmt::Display| Some(Err(Failure::Invalid(format!("publish source: {e}"))));
-    let dir = match tempfile::tempdir_in(ad.state.join("source")) {
+    let dir = match gate::scratch(&ad.state, tree) {
         Ok(dir) => dir,
         Err(e) => return unrun(&e),
     };
     let source = dir.path().join("tree");
-    if let Err(e) = fs::create_dir(&source) {
-        return unrun(&e);
-    }
-    for (path, bytes) in &tree.files {
-        let path = source.join(path);
-        let written = fs::create_dir_all(path.parent().expect("a file under the tree"))
-            .and_then(|()| fs::File::create_new(&path))
-            .and_then(|mut file| file.write_all(bytes));
-        if let Err(e) = written {
-            return unrun(&e);
-        }
-    }
     let path = |name: &str| ad.state.join(name).to_string_lossy().into_owned();
     let mut args: Vec<String> = vec![
         "publish".into(),
@@ -585,49 +583,14 @@ fn publish(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match command.spawn() {
+    let child = match command.spawn() {
         Ok(child) => child,
         Err(e) => return unrun(&e),
     };
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut kept = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let mut chunk = [0; 8192];
-                let mut cut = false;
-                while let Ok(n @ 1..) = pipe.read(&mut chunk) {
-                    let room = DIAGNOSTIC_BYTES.saturating_sub(kept.len());
-                    kept.extend_from_slice(&chunk[..n.min(room)]);
-                    cut |= n > room;
-                }
-                if cut {
-                    kept.extend_from_slice(b"\n[diagnostics cut at 64 KiB]\n");
-                }
-            }
-            kept
-        })
-    };
-    let stdout = read(
-        child
-            .stdout
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let stderr = read(
-        child
-            .stderr
-            .take()
-            .map(|p| Box::new(p) as Box<dyn Read + Send>),
-    );
-    let status = match wait_for_compile(&mut child, cancel) {
-        Ok(status) => status,
+    let (status, stdout, stderr) = match gate::collect(child, cancel, DIAGNOSTIC_BYTES)? {
+        Ok(run) => run,
         Err(e) => return unrun(&e),
     };
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    if cancel.load(Ordering::Relaxed) {
-        return None;
-    }
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
     Some(match status.code() {

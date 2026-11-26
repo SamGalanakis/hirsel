@@ -53,6 +53,7 @@ pub enum OptionId {
     InspectFilter,
     TestTimeout,
     Rerun,
+    TestCache,
     PropertyCorpus,
     Sim,
     SimSeeds,

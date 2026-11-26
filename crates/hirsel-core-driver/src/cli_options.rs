@@ -691,6 +691,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Execute every selected test, reusing no recorded pass."
     ),
     option!(
+        TestCache,
+        ["--test-cache"],
+        Some("DIR"),
+        ["test"],
+        "Read and write recorded passes under DIR instead of the user's cache."
+    ),
+    option!(
         PropertyCorpus,
         ["--property-corpus"],
         Some("DIR"),

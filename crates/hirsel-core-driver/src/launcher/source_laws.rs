@@ -410,3 +410,140 @@ fn source_trees_stay_inside_their_scratch() {
     );
     assert_eq!(super::admit::tree(&kept.encode()), Ok(kept));
 }
+
+/// The law gate (launch.md "The law gate"): a test granted anything beyond the allow list,
+/// or a `Dir` that leaves its working directory, is `Denied` before any test runs or the
+/// pass cache is made; a failing test is `Red` naming it; an all-passing tree is `Green`,
+/// and its passes are recorded under `STATE/test-results`, never the user's cache.
+#[test]
+fn law_gate_denies_authority_and_reads_the_verdict() {
+    use super::admit::gate::{Verdict, gate};
+    use crate::native::tests::process::request_command_at;
+    use std::sync::atomic::AtomicBool;
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_owned();
+    let core = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../core")
+        .canonicalize()
+        .unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let user_cache = root.join("cache");
+    let home = user_cache.clone();
+    let options = crate::native::tests::native_options(crate::native::Backend::Cranelift, &root);
+    let crate::native::Link::Driver(cc) = options.link else {
+        unreachable!()
+    };
+    let native = |path: &Path| path.canonicalize().unwrap().to_string_lossy().into_owned();
+    let (runtime, cc) = (native(&options.runtime), native(&cc));
+    let compiler: super::Compiler = Arc::new(move |args: &[String]| {
+        let mut args = args.to_vec();
+        if args[0] == "test" {
+            let more = ["--runtime", &runtime, "--cc", &cc, "--libraries"];
+            args.extend(more.map(String::from));
+            args.push(core.to_string_lossy().into_owned());
+        }
+        let mut command = request_command_at(&exe, &args, Path::new("/"));
+        command.env("XDG_CACHE_HOME", &home);
+        if args[0] != "test" {
+            return Ok(command);
+        }
+        // The gate reads the report as `hirsel test` prints it: drop the child's preamble.
+        let mut report = Command::new("sh");
+        report
+            .args(["-c", "\"$@\" | sed '1,/request-child/d'", "sh"])
+            .arg(command.get_program())
+            .args(command.get_args())
+            .envs(command.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))));
+        Ok(report)
+    });
+    let state = root.join("state");
+    fs::create_dir_all(state.join("source")).unwrap();
+    let app = root.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let tree = |tests: &str, body: &str| {
+        fs::write(
+            app.join("hirsel.toml"),
+            format!(
+                "[package]\nname = \"app\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"main.hirsel\" = \"main\"\n\n[tests]\nlimit = 67108864\n{tests}\n[tests.sources]\n\"tests.hirsel\" = \"tests\"\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            app.join("main.hirsel"),
+            "pub fn main() -> Result[(), Exit] { Ok(()) }\n",
+        )
+        .unwrap();
+        fs::write(app.join("tests.hirsel"), body).unwrap();
+        let mut lock = compiler(&[
+            "lock".into(),
+            ".".into(),
+            "--package-store".into(),
+            state.join("packages").to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let output = lock.current_dir(&app).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let files = ["hirsel.toml", "hirsel.lock", "main.hirsel", "tests.hirsel"]
+            .map(|name| (name.to_owned(), fs::read(app.join(name)).unwrap()));
+        Tree {
+            package: ".".into(),
+            files: files.into(),
+            ..Tree::default()
+        }
+    };
+    let green = "@test\nfn good() -> Result[(), ()] { Ok(()) }\n";
+    let run = |tree: &Tree| gate(&compiler, &state, tree, &AtomicBool::new(false)).unwrap();
+
+    for (case, tests, named) in [
+        (
+            "a Net grant",
+            "grants = [\"Clock\", \"Net=allow tcp a:1\"]\n",
+            "Net=allow tcp a:1",
+        ),
+        (
+            "a parent Dir",
+            "\n[tests.runs.good]\ndirs = [\"data/../../up\"]\n",
+            "data/../../up",
+        ),
+        ("an absolute Dir", "dirs = [\"/tmp\"]\n", "/tmp"),
+    ] {
+        let answered = run(&tree(tests, green));
+        assert!(
+            matches!(&answered, Err(Failure::Denied(text)) if text.contains(named)),
+            "{case} was not denied: {answered:?}"
+        );
+        assert!(
+            !state.join("test-results").exists(),
+            "{case} ran before its authority check"
+        );
+    }
+
+    let answered = run(&tree(
+        "grants = [\"Tasks\"]\n",
+        "@test\nfn bad() -> Result[(), ()] { Error(()) }\n\n@test\nfn good() -> Result[(), ()] { Ok(()) }\n",
+    ));
+    assert!(
+        matches!(&answered, Ok(Verdict::Red(rows)) if rows.len() == 1
+            && rows[0].contains("app@1/tests/bad") && rows[0].contains("status 1")),
+        "a failing test was not red: {answered:?}"
+    );
+
+    let green_tree = tree("grants = [\"Tasks\"]\ndirs = [\"data\"]\n", green);
+    for pass in ["first", "cached"] {
+        assert_eq!(run(&green_tree), Ok(Verdict::Green), "{pass} run");
+    }
+    assert!(
+        fs::read_dir(state.join("test-results"))
+            .unwrap()
+            .next()
+            .is_some(),
+        "no pass was recorded under STATE/test-results"
+    );
+    assert!(
+        !user_cache
+            .join("hirsel/core-packages/test-results")
+            .exists(),
+        "the gate wrote the user's pass cache"
+    );
+}

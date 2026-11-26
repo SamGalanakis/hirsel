@@ -191,6 +191,7 @@ A failing row names the outcome (`returned an error, exit status N`, `failed`,
 the lines below it repeat the test's stdout.
 Hirsel reuses passing results for capability-free native tests with matching code
 and configuration, and each row says `cached` or `executed`.
+`--test-cache DIR` keeps them under DIR instead of the user's cache.
 Use `--rerun` to execute every selected test and refresh passing results, `-j N` to
 run tests in parallel, and `--sim` / `--seed` / `--seeds` / `--property-corpus` for
 deterministic simulation and property campaigns.

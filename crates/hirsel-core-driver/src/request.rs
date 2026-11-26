@@ -319,7 +319,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut test_laws = false;
     let mut test_write_laws = false;
     let mut law_baseline = None;
-    let mut test_rerun = false;
+    let (mut test_rerun, mut test_cache) = (false, crate::TestCache::default_root());
     let mut coverage = crate::test_run::Flags::default();
     let mut seed_base = None;
     let mut expect_verdict = None;
@@ -358,6 +358,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::WriteLaws => test_write_laws = true,
             Opt::LawsBaseline => law_baseline = Some(PathBuf::from(value)),
             Opt::Rerun => test_rerun = true,
+            Opt::TestCache => test_cache = PathBuf::from(value),
             Opt::Coverage => coverage.on = true,
             Opt::CoverageOut => coverage.out = Some(PathBuf::from(value)),
             Opt::CoverageBase => coverage.base = Some(PathBuf::from(value)),
@@ -1436,13 +1437,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .as_deref()
             .map(crate::property_corpus::Corpus::open)
             .transpose()?;
-        // The server reads the pass cache; the process that runs a test writes it.
-        let cache = (corpus.is_none()
-            && !test_sim
-            && !test_replay
-            && matches!(runner, crate::Runner::Native))
-        .then(|| crate::TestCache::open(&crate::TestCache::default_root()))
-        .flatten();
         let session = crate::test_run::TestSession::prepare(crate::test_run::Prepare {
             options: native_options.expect("a test request has native options"),
             runs,
@@ -1450,8 +1444,14 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             law_inventory,
             law_directory: law_directory.clone(),
             law_baseline,
+            // The server reads the pass cache; the process that runs a test writes it.
+            cache: (corpus.is_none()
+                && !test_sim
+                && !test_replay
+                && matches!(runner, crate::Runner::Native))
+            .then(|| crate::TestCache::open(&test_cache))
+            .flatten(),
             corpus,
-            cache,
             sim: test_sim,
             replay: test_replay,
             laws: test_laws,

@@ -5,7 +5,7 @@
 // Seed 7: empty table Tiered -> Memory panicked "a Cold edge has no pack
 // inventory" (store-cold-edge-panic-3181, R1).
 // Seeds 96, 145: Tiered -> Memory + reopen cut/unpin returned Io(Closed)
-// (M3b-S1, R3); seeds 31, 113, 124, 127, 150: backup after Tiered -> Memory
-// failed restore Unsupported(0x0023) before the class-3/4 export lease
-// (M3b-S4, R2).
-const CSIM_CORPUS: Inline[u64, 8] =[7, 31, 96, 113, 124, 127, 145, 150]
+// (M3b-S1, R3); seeds 6, 31, 49, 113, 124, 127, 139, 150, 165: backup after
+// Tiered -> Memory failed restore Unsupported(0x0023) / Unsupported(0x0031)
+// before M3b-S4 lifted Tiered export/restore and deleted require_memory_manifest (R2).
+const CSIM_CORPUS: Inline[u64, 12] =[6, 7, 31, 49, 96, 113, 124, 127, 139, 145, 150, 165]

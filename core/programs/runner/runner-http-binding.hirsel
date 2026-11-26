@@ -101,15 +101,20 @@ fn validate_http_address(registered: List[HttpDescribe], found: HttpBinding, kin
         if prior.mode == Stream && found.mode == Stream && prior.entry == found.entry && (prior.ok_status != found.ok_status || prior.error_status != found.error_status) {
             return Error(StreamStatus(string.from(prior.op)))
         }
-        if prior.method == found.method && (std.router.conflict(prior.path, found.path) ?=> |_| Path) {
-            return Error(Route)
-        }
-        if prior.mode == Stream && found.method == Post && (std.router.conflict(operation_path(prior.op), found.path) ?=> |_| Path) {
-            return Error(Route)
-        }
-        if found.mode == Stream && prior.method == Post && (std.router.conflict(prior.path, operation_path(found.op)) ?=> |_| Path) {
-            return Error(Route)
-        }
+        check_http_route_pair(found.op, found.method, found.path, found.mode == Stream, prior.op, prior.method, prior.path, prior.mode == Stream)?
+    }
+    Ok(())
+}
+
+fn check_http_route_pair(op: String, method: Method, route: String, alias: bool, prior_op: String, prior_method: Method, prior_route: String, prior_alias: bool) -> Result[(), BindCheck] {
+    if method == prior_method && (std.router.conflict(route, prior_route) ?=> |_| Path) {
+        return Error(Route)
+    }
+    if method == Post && prior_alias && (std.router.conflict(route, operation_path(prior_op)) ?=> |_| Path) {
+        return Error(Route)
+    }
+    if prior_method == Post && alias && (std.router.conflict(prior_route, operation_path(op)) ?=> |_| Path) {
+        return Error(Route)
     }
     Ok(())
 }
@@ -128,6 +133,7 @@ pub fn bind[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take 
         return Error(keyed_registration_error(binding.op, Mode))
     }
     let details = check_http_binding(reg, binding) ?=> |take check| InvalidBinding(BindError(op: string.from(binding.op), check: take check))
+    check_routes_against_keyed(reg.t, binding.op, binding.method, binding.path, binding.mode == Stream) ?=> |take check| keyed_registration_error(binding.op, take check)
     let mut carried: Option[HttpDescribe] = Some(HttpDescribe(binding: take binding, defaults: take details))
     edit_template(mut reg, scoped fn(mut t: Template[G]) {
         if let Some(take d) = replace(mut carried, None) {

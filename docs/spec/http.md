@@ -1009,7 +1009,7 @@ Every request from any transport passes the same four steps, in this order. WebS
 There is no new syntax. A binding is immutable library data, registered in `place` after the entries:
 
 ```hirsel unbuilt
-pub type Mode: send = Read | Subscribe | Stream   // Part B adds Keyed(KeyedRule[G]) and Retired(Retirement[G]), and so the registry's G to Mode and HttpBinding (K-1)
+pub type Mode: send = Read | Subscribe | Stream | Keyed
 pub type Source: send = Path | Query | Body
 pub type FieldSource: send { field: String, source: Source }
 pub type HttpBinding: send {
@@ -1028,7 +1028,7 @@ pub fn bind[G, H](mut r: Registry[G, H], take b: HttpBinding) -> Result[(), Bind
 1. **The entry exists.**
 2. **The mode fits the entry's kind.**
    - Query entries take `Read` (GET, B-11) or `Subscribe` (GET, `text/event-stream`, B-9).
-   - Transact entries take `Stream` or `Keyed` (POST, PUT, PATCH or DELETE). `Keyed`, `Retired` and their rules are §4's, Part B: until Part B lands, those variants do not exist in std. A `Retired` binding has no entry (K-9): of these checks only 3 and 7 apply to it, with K-1's own list, because its argument schema, field mapping and statuses are the op record's, compared with the store at open (K-1), not at `bind`.
+   - Transact entries take `Stream` or `Keyed` (POST, PUT, PATCH or DELETE). A keyed binding uses `bind_keyed` and a `KeyedRule[G]` (K-1). A retirement uses `bind_retired` and has no entry (K-9). Checks 3 and 7 and K-1's retirement checks apply. Its argument schema, field mapping and statuses come from the op record at open.
    - Compute entries take `Read` (GET or POST; no identity, because they are pure).
    - Granted entries are refused. An HTTP retry of an outside effect without a durable identity is a duplicate effect.
 3. **Each durable endpoint binds exactly one entry,** and `op` is unique in the registry and matches `[a-z0-9][a-z0-9_.-]{0,63}` (B-12). One entry may have several bindings, and so several `op`s.
@@ -1389,7 +1389,7 @@ A query entry returns an `Answer[R]`: a codec value R and an opaque `CoverSet` (
 
 ### K-1: The declaration
 
-`Mode.Keyed(KeyedRule[G])` binds a transact entry (B-3). `Mode.Retired(Retirement[G])` keeps a removed keyed `op` answerable until its claims have expired (K-9). The binding's `op` (B-12) scopes its claims. `G` is the registry's grant type, so a claim function gets a `G` from the place's `claim` mint (K-2; RUNNER-SPEC v2.67, v2.69).
+`bind_keyed(reg, binding, rule)` binds a transact entry with `Mode.Keyed` and a `KeyedRule[G]` (B-3). `bind_retired(reg, op, method, route, retirement)` keeps a removed keyed `op` answerable until its claims have expired (K-9). The binding's `op` (B-12) scopes its claims. All binding registration functions check the same op namespace and check route and alias conflicts in either registration order. `G` is the registry's grant type, so a claim function gets a `G` from the place's `claim` mint (K-2; RUNNER-SPEC v2.67, v2.69).
 
 ```hirsel unbuilt
 pub type ClaimRequest: send { headers: List[(String, Bytes)], body: Bytes }

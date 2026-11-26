@@ -23,6 +23,7 @@ runner@1/runner/journal_test_trigger_cancel src=5b7a8ef577f0bf72 sig=0fe48fb3195
 runner@1/runner/journal_test_trigger_granted src=c438a62b3bf2c838 sig=7cfa9ad5e960e56f run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/journal_test_trigger_snapshot src=d130d39ff55ae7af sig=966e40b74e5b689e run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/journal_test_trigger_transact src=eb709bcbb457a651 sig=0524744f6ad09bb9 run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/keyed_http_binding_reserves_its_op_and_routes src=cb4a5dc0534eb715 sig=57390b6a11eb847e run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_claim_route_and_alias src=5ffda8e151d5f6e5 sig=8e2f476f3e0e737f run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_held_reply_across_expiry src=40e2458db334dad8 sig=1d1c4e49f55f8928 run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
 runner@1/runner/keyed_http_horizon_at_deciding_admission src=4fe2092bae51ea8e sig=1a5b540c70d7fbc3 run=ab73c978eb9eebf6 bug=- oracle=- rows=pending

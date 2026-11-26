@@ -96,6 +96,37 @@ fn keyed_http_quota_place(mut r: Registry[(), HttpLawHandles]) -> Result[(), Reg
     bind_keyed(mut r, take second, keyed_http_quota_rule())
 }
 
+@test
+fn keyed_http_binding_reserves_its_op_and_routes() -> Result[(), ()] {
+    let definition: HttpOpPlace = code.describe(keyed_http_place)
+    let mut r = result.unwrap(placed(definition, HTTP_LAW_PLACE_BYTES))
+    let mut conflicts: List[(String, String, bool)] = list.new()
+    list.push(mut conflicts, ("increment", "/other", true))
+    list.push(mut conflicts, ("other", "/old", false))
+    list.push(mut conflicts, ("other", "/.hirsel/op/increment", false))
+    for (op, path, duplicate) in conflicts {
+        let binding = http_op_binding(r, op, path, 201u16)
+        match (bind(mut r, take binding), duplicate) {
+            (Error(InvalidBinding(BindError(check: DuplicateOp, ..))), true) => (),
+            (Error(InvalidBinding(BindError(check: Route, ..))), false) => (),
+            _ => fail("a stream binding was registered over a keyed op or route"),
+        }
+    }
+    let mut original = result.unwrap(placed(code.describe(http_op_original), HTTP_LAW_PLACE_BYTES))
+    let wrong_mode = http_op_binding(original, "keyed", "/other", 201u16)
+    match bind_keyed(mut original, take wrong_mode, keyed_http_quota_rule()) {
+        Error(InvalidBinding(BindError(check: Mode, ..))) => (),
+        _ => fail("bind_keyed accepted a stream mode"),
+    }
+    let mut binding = http_op_binding(original, "keyed", "/.hirsel/op/keep", 201u16)
+    binding.mode = Keyed
+    match bind_keyed(mut original, take binding, keyed_http_quota_rule()) {
+        Error(InvalidBinding(BindError(check: Route, ..))) => (),
+        _ => fail("a keyed route was registered over a stream alias"),
+    }
+    Ok(())
+}
+
 type KeyedHttpLawDrive: send {
     head: Sender[HeadInput],
     publisher: Sender[PubIn],

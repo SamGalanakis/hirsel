@@ -77,6 +77,17 @@ fn check_claim_headers[G: send](claim: Claim[G]) -> Result[(), BindCheck] {
     Ok(())
 }
 
+fn check_routes_against_keyed[G: send](t: Template[G], name: String, method: Method, route: String, alias: bool) -> Result[(), BindCheck] {
+    if map.contains(t.keyed, string.as_bytes(name)) {
+        return Error(DuplicateOp)
+    }
+    for (raw_op, prior) in t.keyed {
+        let prior_op = result.unwrap(string.from_utf8(clone(raw_op)))
+        check_http_route_pair(name, method, route, alias, prior_op, prior.method, prior.route, true)?
+    }
+    Ok(())
+}
+
 fn keyed_route_conflicts[G: send, H: shareable + inert + send](reg: Registry[G, H], name: String, method: Method, route: String) -> Result[(), BindCheck] {
     if !valid_op(name) {
         return Error(Op)
@@ -92,28 +103,13 @@ fn keyed_route_conflicts[G: send, H: shareable + inert + send](reg: Registry[G, 
     if method == Post && (std.router.conflict(route, alias) ?=> |_| Path) {
         return Error(Route)
     }
-    if map.contains(reg.t.keyed, string.as_bytes(name)) {
-        return Error(DuplicateOp)
-    }
-    for (_, prior) in reg.t.keyed {
-        if prior.method == method && (std.router.conflict(prior.route, route) ?=> |_| Path) {
-            return Error(Route)
-        }
-        if prior.method == Post && (std.router.conflict(prior.route, alias) ?=> |_| Path) {
-            return Error(Route)
-        }
-    }
+    check_routes_against_keyed(reg.t, name, method, route, true)?
     for saved in reg.t.bindings {
         let prior = view saved.binding
         if prior.op == name {
             return Error(DuplicateOp)
         }
-        if prior.method == method && (std.router.conflict(prior.path, route) ?=> |_| Path) {
-            return Error(Route)
-        }
-        if prior.method == Post && (std.router.conflict(prior.path, alias) ?=> |_| Path) {
-            return Error(Route)
-        }
+        check_http_route_pair(name, method, route, true, prior.op, prior.method, prior.path, prior.mode == Stream)?
     }
     Ok(())
 }
@@ -121,6 +117,9 @@ fn keyed_route_conflicts[G: send, H: shareable + inert + send](reg: Registry[G, 
 pub fn bind_keyed[G: send, H: shareable + inert + send](mut reg: Registry[G, H], take binding: HttpBinding, take rule: KeyedRule[G]) -> Result[(), RegisterError] {
     if reg.replay {
         return Ok(())
+    }
+    if binding.mode != Keyed {
+        return Error(keyed_registration_error(binding.op, Mode))
     }
     let KeyedRule(claim: take claim, retention_ms: retention_ms, keys_max: keys_max, principal_keys_max: principal_keys_max) = take rule
     if retention_ms == 0 || retention_ms > 9007199254740992 || retention_ms <= binding.deadline_ms || principal_keys_max == 0 || principal_keys_max > keys_max {

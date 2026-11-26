@@ -300,8 +300,12 @@ fn run_stop_skips_host_file_cleanup_and_kernel_releases_the_descriptor() {
 }
 
 fn slot_file_child(case: &str) -> bool {
-    const CHILD: &str = "HIRSEL_SLOT_FILE_LAW_CHILD";
     crate::openat2_required::require();
+    isolated_file_child(case)
+}
+
+fn isolated_file_child(case: &str) -> bool {
+    const CHILD: &str = "HIRSEL_SLOT_FILE_LAW_CHILD";
     if std::env::var_os(CHILD).is_some() {
         return true;
     }
@@ -643,26 +647,91 @@ fn scripted_write(
 
 #[test]
 fn ring_write_loop_continues_and_retries_the_remainder() {
-    let eintr = || Err(std::io::Error::from_raw_os_error(libc::EINTR));
-    let eagain = || Err(std::io::Error::from_raw_os_error(libc::EAGAIN));
-    // An aligned short Direct write continues at its end; EINTR and EAGAIN
-    // reissue the same remainder.
-    let (out, issued) = scripted_write(
-        12288,
-        true,
-        vec![Ok(4096), eintr(), eagain(), Ok(4096), Ok(4096)],
-    );
-    assert_eq!((out.error, out.written), (IoError::OK, 12288));
-    assert_eq!(
-        issued,
-        [
-            (4096, 12288),
-            (8192, 8192),
-            (8192, 8192),
-            (8192, 8192),
-            (12288, 4096)
-        ]
-    );
+    if !isolated_file_child("host_file_tests::ring_write_loop_continues_and_retries_the_remainder")
+    {
+        return;
+    }
+    const BLOCK: usize = DIRECT_ALIGNMENT as usize;
+    let root = tempfile::tempdir().unwrap();
+    let directory = File::open(root.path()).unwrap();
+    let mut bytes = vec![0x11; 3 * BLOCK];
+    bytes[BLOCK..2 * BLOCK].fill(0x22);
+    bytes[2 * BLOCK..].fill(0x33);
+    let untouched = vec![0xff; 5 * BLOCK];
+
+    slot_file_fixture(directory, |_| {
+        let has_ring = crate::units::uses_file_ring();
+        assert_eq!(has_ring, !crate::host::sys::file_helper_expected());
+        for ring in [false, true].into_iter().filter(|ring| !ring || has_ring) {
+            let path = root.path().join(if ring { "ring" } else { "syscall" });
+            std::fs::write(&path, &untouched).unwrap();
+            let file = File::options().write(true).open(&path).unwrap();
+            // The Direct contract also applies to a buffered fallback fd.
+            // Short completions write real prefixes. Errnos submit nothing.
+            let mut script = [
+                Ok(BLOCK),
+                Err(libc::EINTR),
+                Err(libc::EAGAIN),
+                Ok(BLOCK),
+                Ok(BLOCK),
+            ]
+            .into_iter();
+            let mut issued = Vec::new();
+            let write_part = |piece: &[u8], at| {
+                crate::host::file::write_part(file.as_raw_fd(), piece, at, ring, DIRECT_ALIGNMENT)
+            };
+            let out = crate::os::write_all_from(
+                &bytes,
+                Some(DIRECT_ALIGNMENT),
+                ring,
+                true,
+                |piece, at| {
+                    issued.push((at.unwrap(), piece.len()));
+                    match script.next().expect("loop issued past its script") {
+                        Ok(count) => write_part(&piece[..count], at),
+                        Err(errno) => Err(std::io::Error::from_raw_os_error(errno)),
+                    }
+                },
+            );
+            assert!(
+                script.next().is_none(),
+                "loop stopped before its script ended"
+            );
+            assert_eq!((out.error, out.written), (IoError::OK, 12288));
+            assert_eq!(
+                issued,
+                [
+                    (4096, 12288),
+                    (8192, 8192),
+                    (8192, 8192),
+                    (8192, 8192),
+                    (12288, 4096)
+                ]
+            );
+            let mut expected = untouched.clone();
+            expected[BLOCK..4 * BLOCK].copy_from_slice(&bytes);
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+
+            let mut attempts = 0;
+            let short = crate::os::write_all_from(
+                &bytes[..BLOCK],
+                Some(4 * DIRECT_ALIGNMENT),
+                ring,
+                true,
+                |piece, at| {
+                    attempts += 1;
+                    assert_eq!(attempts, 1, "unaligned Direct completion was retried");
+                    write_part(&piece[..512], at)
+                },
+            );
+            assert_eq!(
+                (short.error, short.written, attempts),
+                (IoError::from_errno(libc::EIO), 512, 1)
+            );
+            expected[4 * BLOCK..4 * BLOCK + 512].copy_from_slice(&bytes[..512]);
+            assert_eq!(std::fs::read(&path).unwrap(), expected);
+        }
+    });
 }
 
 #[test]

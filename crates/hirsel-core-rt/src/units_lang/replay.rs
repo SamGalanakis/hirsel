@@ -53,120 +53,163 @@ impl LangUnit {
     }
 }
 
-/// Apply each helper end due at this take point: the helper's context ends
-/// with the recorded result, which its end take then takes from the port.
+/// Apply one due recorded `TAKE` at this take point: returns `true` when one
+/// was applied (so the caller drains its ledger arrival before checking for
+/// the next `TAKE` at the same position).
 /// # Safety
 /// As `pump`.
-pub(super) unsafe fn take_due(u: &mut LangUnit) {
+pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
     let Some(group) = u.tape().filter(|group| group.replaying()) else {
-        return;
+        return false;
     };
-    loop {
-        let helpers = &u.helpers;
-        let layout = |key: usize| {
-            // SAFETY: a registered handle is pinned while registered.
-            helpers
-                .get(&key)
-                .map(|&h| unsafe { ((*h).result.bytes, (*h).result.owners.clone()) })
-        };
-        // SAFETY: the context that bound the recording pins its host files.
-        let registry = unsafe { u.files.as_ref() }.map(|f| &f.registry);
-        let (key, outcome) = match tape::due(Some(group), u.pumping, layout, registry) {
-            None => return,
-            Some(tape::Due::Cancel) => {
-                if !u.root.is_null() {
-                    // SAFETY: the unit's root task is live while the unit runs.
-                    unsafe { tasks::hirsel_core_cancel(ptr::null_mut(), u.root) };
-                }
-                continue;
+    let helpers = &u.helpers;
+    let layout = |key: usize| {
+        // SAFETY: a registered handle is pinned while registered.
+        helpers
+            .get(&key)
+            .map(|&h| unsafe { ((*h).result.bytes, (*h).result.owners.clone()) })
+    };
+    // SAFETY: the context that bound the recording pins its host files.
+    let registry = unsafe { u.files.as_ref() }.map(|f| &f.registry);
+    let (key, outcome, survivors) = match tape::due(Some(group), u.pumping, layout, registry) {
+        None => return false,
+        Some(tape::Due::Cancel) => {
+            if !u.root.is_null() {
+                // SAFETY: the unit's root task is live while the unit runs.
+                unsafe { tasks::hirsel_core_cancel(ptr::null_mut(), u.root) };
             }
-            Some(tape::Due::End { key, outcome }) => (key, outcome),
-            Some(tape::Due::Item { conn, mut flat }) => {
-                let Some(&ih) = u.inboxes.get(&conn) else {
-                    tape::refuse_take(Some(group), "an item for a dropped inbox");
-                    return;
+            return true;
+        }
+        Some(tape::Due::End {
+            key,
+            outcome,
+            survivors,
+        }) => (key, outcome, survivors),
+        Some(tape::Due::Item { conn, mut flat }) => {
+            let Some(&ih) = u.inboxes.get(&conn) else {
+                tape::refuse_take(Some(group), "an item for a dropped inbox");
+                return false;
+            };
+            // SAFETY: a registered inbox is live while registered; the
+            // packed item has its connection's layout, and `flat` stays
+            // put until the item is published.
+            let admitted = unsafe {
+                let c = &(*ih).inbox.0;
+                let live = packing::unpack_in_place(&mut flat, c.stride, &c.rows, c.guarded);
+                let bytes = item_charge(flat.as_ptr(), live.as_deref().unwrap_or(&c.seqs));
+                let mut source = CrossSend::new(flat.as_ptr());
+                source.rows = live;
+                u.ctx.replay_item(c, source, bytes)
+            };
+            if !admitted {
+                tape::refuse_take(Some(group), "an item its connection cannot admit");
+                return false;
+            }
+            return true;
+        }
+        Some(tape::Due::Notice { conn, notice }) => {
+            let found = u.ctx.admit_parked(|b| match (b, notice) {
+                (LBody::Close(c), tape::Notice::Close) => Arc::as_ptr(c).addr() == conn,
+                (LBody::SealAnswer(c), tape::Notice::SealAnswer) => c.addr() == conn,
+                (LBody::LastRelease(r, c), tape::Notice::LastRelease { header, unused }) => {
+                    Arc::as_ptr(c).addr() == conn
+                        && c.retained().0 == header
+                        && r.saturating_sub(header) == unused
+                }
+                _ => false,
+            });
+            if !found {
+                let why = match notice {
+                    tape::Notice::Close => "a close another unit sent",
+                    tape::Notice::SealAnswer => "a seal answer that was not published",
+                    tape::Notice::LastRelease { .. } => "a last release another unit sent",
                 };
-                // SAFETY: a registered inbox is live while registered; the
-                // packed item has its connection's layout, and `flat` stays
-                // put until the item is published.
-                let admitted = unsafe {
-                    let c = &(*ih).inbox.0;
-                    let live = packing::unpack_in_place(&mut flat, c.stride, &c.rows, c.guarded);
-                    let bytes = item_charge(flat.as_ptr(), live.as_deref().unwrap_or(&c.seqs));
-                    let mut source = CrossSend::new(flat.as_ptr());
-                    source.rows = live;
-                    u.ctx.replay_item(c, source, bytes)
-                };
-                if !admitted {
-                    tape::refuse_take(Some(group), "an item its connection cannot admit");
-                    return;
-                }
-                continue;
+                tape::refuse_take(Some(group), why);
+                return false;
             }
-            Some(tape::Due::Notice { conn, notice }) => {
-                let found = u.ctx.admit_parked(|b| match (b, notice) {
-                    (LBody::Close(c), tape::Notice::Close) => Arc::as_ptr(c).addr() == conn,
-                    (LBody::SealAnswer(c), tape::Notice::SealAnswer) => c.addr() == conn,
-                    (LBody::LastRelease(r, c), tape::Notice::LastRelease { header, unused }) => {
-                        Arc::as_ptr(c).addr() == conn
-                            && c.retained().0 == header
-                            && r.saturating_sub(header) == unused
-                    }
-                    _ => false,
-                });
-                if !found {
-                    let why = match notice {
-                        tape::Notice::Close => "a close another unit sent",
-                        tape::Notice::SealAnswer => "a seal answer that was not published",
-                        tape::Notice::LastRelease { .. } => "a last release another unit sent",
-                    };
-                    tape::refuse_take(Some(group), why);
-                    return;
-                }
-                continue;
+            if matches!(notice, tape::Notice::LastRelease { .. }) {
+                u.last_released = Some(conn);
             }
-        };
-        let h = u.helpers[&key];
-        let hctx = u
-            .unstarted
-            .remove(&key)
-            .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
-        // SAFETY: as above.
-        let port = unsafe { Arc::as_ptr(&(*h).port) as usize };
-        let mut ret = Value::empty();
-        let ended = match outcome {
-            Ok(packed) => {
-                // SAFETY: the packed result has the handle's result layout.
-                let result = unsafe { item_charge(packed.as_ptr(), &(*h).result.owners) };
-                ret.set_item(packed, None);
-                Ended {
-                    failed: false,
-                    causes: Vec::new(),
-                    result,
-                    survivors: Vec::new(),
-                    run_grants: 0,
-                    charges: Vec::new(),
-                    tape_end: None,
-                }
-            }
-            Err(causes) => Ended {
-                failed: true,
-                causes: causes.into_iter().map(CrossedCause::replayed).collect(),
-                result: 0,
+            return true;
+        }
+        Some(tape::Due::SharedRelease(node)) => {
+            // SAFETY: `node` is a homed Shared node of this unit whose last
+            // release was recorded at this take point.
+            unsafe { crate::shared::clean(u, tasks::current_context(), node as *mut u8) };
+            return true;
+        }
+        Some(tape::Due::ReleaseSurvivor { payer, bytes }) => {
+            payer.settle_at_unit(bytes);
+            return true;
+        }
+    };
+    let h = u.helpers[&key];
+    // SAFETY: `h` is a registered helper handle of this unit.
+    let (r_size, held_bytes, result_owners) = unsafe {
+        (
+            (*h).r_size,
+            (*h).charge.as_ref().map_or(0, |c| c.bytes),
+            &(*h).result.owners,
+        )
+    };
+    let mut ret = Value::empty();
+    let ended = match outcome {
+        Ok(packed) => {
+            // SAFETY: the packed result has the handle's result layout.
+            let result = unsafe { live_charge(packed.as_ptr(), result_owners) };
+            ret.set_item(packed, None);
+            Ended {
+                failed: false,
+                causes: Vec::new(),
+                result,
                 survivors: Vec::new(),
                 run_grants: 0,
                 charges: Vec::new(),
                 tape_end: None,
-            },
-        };
-        RESULTS.lock().unwrap().insert(port, ended);
-        let helper = (&*hctx as *const UnitCtx).addr();
-        hctx.end_helper(Some(ret), false);
-        if !u.ctx.admit_end(helper) {
-            tape::refuse_take(Some(group), "a helper end that was not published");
-            return;
+                replay_survivors: survivors,
+            }
         }
+        Err(causes) => Ended {
+            failed: true,
+            causes: causes.into_iter().map(CrossedCause::replayed).collect(),
+            result: 0,
+            survivors: Vec::new(),
+            run_grants: 0,
+            charges: Vec::new(),
+            tape_end: None,
+            replay_survivors: survivors,
+        },
+    };
+    let causes_bytes: u64 = ended
+        .causes
+        .iter()
+        .map(|cause| charge::CAUSE_CELL + cause.message_charge)
+        .sum();
+    let total = ended
+        .replay_survivors
+        .iter()
+        .try_fold(0u64, |acc, s| acc.checked_add(s.amount))
+        .and_then(|s| s.checked_add(r_size))
+        .and_then(|s| s.checked_add(ended.result))
+        .and_then(|s| s.checked_add(causes_bytes));
+    if total.is_none_or(|t| t > held_bytes) {
+        tape::diverged_take(Some(group), "helper end survivors exceed reservation");
+        return false;
     }
+    let hctx = u
+        .unstarted
+        .remove(&key)
+        .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+    // SAFETY: as above.
+    let port = unsafe { Arc::as_ptr(&(*h).port) as usize };
+    RESULTS.lock().unwrap().insert(port, ended);
+    let helper = (&*hctx as *const UnitCtx).addr();
+    hctx.end_helper(Some(ret), false);
+    if !u.ctx.admit_end(helper) {
+        tape::refuse_take(Some(group), "a helper end that was not published");
+        return false;
+    }
+    true
 }
 
 /// Start a helper stream's replay as its own unit, on the pool beside the
@@ -269,8 +312,10 @@ pub(super) unsafe fn departed(u: &mut LangUnit, value: *const u8, rows: &[[u64; 
         // SAFETY: the value owns this client word.
         let h = unsafe { word(value.add(o[0] as usize)) } as *mut ClientH;
         if !h.is_null() {
-            // SAFETY: as above; the handle leaves with the value.
-            u.drop_client(unsafe { Box::from_raw(h) }.client);
+            // SAFETY: as above; the handle leaves with the value. A send or
+            // spawn is not a drop take point, so do not trigger `on_released`.
+            u.ctx.drop_client(unsafe { Box::from_raw(h) }.client);
+            let _ = u.released_own();
         }
     }
 }

@@ -192,3 +192,87 @@ fn u5_capabilities_replay_where_they_arrive() {
         }
     }
 }
+
+/// Helper-end survivors and their release takes replay: at the owner's end
+/// take, each survivor's amount stays charged under its `SurvivorName` until
+/// the `LastRelease` / `SharedRelease` / `RETIRED` or tag-9 `Refund` take
+/// releases it. Before, every helper end with survivors was refused. Three
+/// RL9 programs record and replay `Sealed`, both whole and `--unit root`, on
+/// Cranelift and LLVM: `RL9_UNITS` and `RL9_VARIANTS` (surviving connections
+/// released at the root's drop of their client) and `RL9_KEY_SURVIVOR`
+/// (surviving `KeyShare`). Corrupting the surviving connection's ordinal in
+/// `RL9_UNITS`'s `LastRelease` take ends replay `Diverged(Take)` at that
+/// frame in `root` with one line.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_survivors_and_refunds_replay() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (RL9_UNITS, "u5s-units", "conn", &["Tasks", "Stdout"][..]),
+        (RL9_VARIANTS, "u5s-variants", "variants", &["Tasks", "Stdout"][..]),
+        (
+            RL9_KEY_SURVIVOR,
+            "u5s-keysurv",
+            "kept",
+            &["Tasks", "Random", "Stdout"][..],
+        ),
+    ];
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        for (source, name, printed, grants) in cases {
+            let path = rl9_record_with(source, dir.path(), name, backend, printed, grants);
+            let program = dir.path().join(format!("{name}-{backend:?}"));
+            let at = format!("{backend:?} {name}");
+            for only in [None, Some("root")] {
+                let (code, out, err) = u4_replay(&program, &path, only);
+                assert_eq!(
+                    (code, out.as_str(), err.as_str()),
+                    (Some(0), "", ""),
+                    "{at} only={only:?}"
+                );
+            }
+            if name == "u5s-units" {
+                let streams = rl9_streams(&path, &at);
+                let root = &streams[0].1;
+                let lr = root
+                    .iter()
+                    .position(|f| match f {
+                        Frame::Take { body, .. } => {
+                            matches!(body.arrival(), Arrival::LastRelease(1, 2, ..))
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or_else(|| panic!("{at}: no LastRelease(1, 2): {root:#?}"));
+                let tape = std::fs::read(&path).unwrap();
+                let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+                    std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+                })
+                .unwrap()
+                .1
+                .tape_id;
+                // LastRelease(stream=1, ordinal=2): body length 22, tag 6,
+                // stream 1 (4 bytes LE), ordinal 2.
+                let pattern = [22u8, 6, 1, 0, 0, 0, 2];
+                let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                    let Some(i) = payload.windows(7).position(|w| w == pattern) else {
+                        return false;
+                    };
+                    payload[i + 6] = 99;
+                    true
+                });
+                let corrupt = dir.path().join(format!("{name}-{backend:?}-lr.tape"));
+                std::fs::write(&corrupt, wrong).unwrap();
+                let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+                assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+                let lines: Vec<_> = err.lines().collect();
+                let prefix = format!("replay: Diverged(Take) at {} in root ", lr + 1);
+                assert!(
+                    matches!(&lines[..], [l] if l.starts_with(&prefix)),
+                    "{at}: {err} {root:#?}"
+                );
+            }
+        }
+    }
+}

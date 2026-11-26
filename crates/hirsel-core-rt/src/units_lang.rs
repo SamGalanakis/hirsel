@@ -46,7 +46,7 @@ mod crossing;
 mod ending;
 pub use crossing::{Cross, SpawnEntry};
 use crossing::{TapeHelper, tape_group};
-use ending::end_take;
+use ending::{RESULTS, ResultsExt, end_take};
 pub(crate) use ending::{abandon, cancel};
 pub(crate) mod packing;
 #[cfg(feature = "record")]
@@ -79,9 +79,7 @@ unsafe fn set_word(at: *mut u8, v: u64) {
     unsafe { at.cast::<u64>().write_unaligned(v) }
 }
 
-// ---------------------------------------------------------------------------
 // The unit beside a scheduler
-// ---------------------------------------------------------------------------
 
 /// A task waiting on one waiting send's settlement.
 struct SendWait {
@@ -132,6 +130,10 @@ pub(crate) struct LangUnit {
     /// run's `Secret`s an arriving one joins on replay.
     #[cfg(feature = "record")]
     files: *mut crate::host_file::Files,
+    /// Replay: the own connection whose `LastRelease` was just admitted at
+    /// this pump, so `inbox_drop` knows whether `on_released` ran at record.
+    #[cfg(feature = "record")]
+    last_released: Option<usize>,
 }
 
 impl LangUnit {
@@ -186,6 +188,8 @@ impl LangUnit {
             unstarted: map(),
             #[cfg(feature = "record")]
             files: ptr::null_mut(),
+            #[cfg(feature = "record")]
+            last_released: None,
         })
     }
 }
@@ -202,6 +206,8 @@ pub(crate) fn root_unit(readies: &Arc<Readies>) -> *mut LangUnit {
 unsafe fn drop_root_unit(u: *mut LangUnit) {
     // SAFETY: made by `root_unit`.
     let mut u = unsafe { Box::from_raw(u) };
+    #[cfg(feature = "record")]
+    crate::tape::units::replay::drain_survivors(u.tape);
     u.ctx.end_root();
 }
 
@@ -214,16 +220,16 @@ pub(crate) unsafe fn pump(u: &mut LangUnit) {
 
 unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
     let wake_inboxes = u.waits > usize::from(receiving);
-    // SAFETY: the caller owns the unit for this commit.
-    #[cfg(feature = "record")]
-    unsafe {
-        replay::take_due(u)
-    };
     loop {
+        #[cfg(feature = "record")]
+        let took_replay = unsafe { replay::take_one(u) };
         while let Some((took, _a)) = u.ctx.take() {
             let id = u.ctx.took_ident;
-            // SAFETY: as in `on_take`.
             unsafe { on_take(u, took, id, wake_inboxes) };
+        }
+        #[cfg(feature = "record")]
+        if took_replay {
+            continue;
         }
         #[cfg(any(test, feature = "testing", feature = "record"))]
         u.ctx.hold_published();
@@ -883,6 +889,10 @@ struct Ended {
     /// the kind and body, or why it has none.
     #[cfg(feature = "record")]
     tape_end: Option<Result<crate::tape::helper::EndTake, &'static str>>,
+    /// Replay: the survivors recorded on the owner's helper-end `TAKE`,
+    /// partitioned from the helper's reservation at `end_take`.
+    #[cfg(feature = "record")]
+    replay_survivors: Vec<hirsel_tape_format::Survivor>,
 }
 
 /// A tagged task handle names a helper.
@@ -1184,6 +1194,8 @@ fn helper_main(
                     sockets.as_ref(),
                 )
             }),
+            #[cfg(feature = "record")]
+            replay_survivors: Vec::new(),
         };
         let mut ret = Value::empty();
         if failed == 0 {
@@ -1197,26 +1209,13 @@ fn helper_main(
             .insert(Arc::as_ptr(&lu.ctx.port) as usize, ended);
         files.close_all(&mut context);
         drop(files);
+        #[cfg(feature = "record")]
+        crate::tape::units::replay::drain_survivors(lu.tape);
         // Its registry designated through the helper's sources until here.
         drop(tape);
         drop(context);
         let LangUnit { ctx, .. } = *lu; // its helper stays active to the end
         ctx.end_helper(Some(ret), false);
-    }
-}
-
-/// Each ended helper's outcome, by its port, until its owner joins.
-static RESULTS: std::sync::Mutex<Option<HashMap<usize, Ended>>> = std::sync::Mutex::new(None);
-trait ResultsExt {
-    fn insert(&mut self, k: usize, e: Ended);
-    fn take(&mut self, k: usize) -> Option<Ended>;
-}
-impl ResultsExt for std::sync::MutexGuard<'_, Option<HashMap<usize, Ended>>> {
-    fn insert(&mut self, k: usize, e: Ended) {
-        self.get_or_insert_with(HashMap::new).insert(k, e);
-    }
-    fn take(&mut self, k: usize) -> Option<Ended> {
-        self.as_mut().and_then(|m| m.remove(&k))
     }
 }
 

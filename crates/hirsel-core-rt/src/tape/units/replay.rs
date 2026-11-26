@@ -221,11 +221,13 @@ pub(crate) struct DueCause {
 
 /// What a recorded `TAKE` delivers now.
 pub(crate) enum Due {
-    /// A helper's end: the handle's key, and its result packed for the
-    /// handle's result type, or the causes it failed or was cancelled with.
+    /// A helper's end: the handle's key, its result packed for the
+    /// handle's result type or the causes it failed or was cancelled with,
+    /// and the survivor charges its owner keeps.
     End {
         key: usize,
         outcome: Result<Vec<u8>, Vec<DueCause>>,
+        survivors: Vec<format::Survivor>,
     },
     /// A cancellation request for the unit's root.
     Cancel,
@@ -233,6 +235,13 @@ pub(crate) enum Due {
     Item { conn: usize, flat: Vec<u8> },
     /// A notice for the unit's own connection, by its address.
     Notice { conn: usize, notice: Notice },
+    /// A `Shared` node homed in this unit, by its address, to clean now.
+    SharedRelease(usize),
+    /// A kept survivor charge from an ended helper, to refund now.
+    ReleaseSurvivor {
+        payer: crate::limit::Payer,
+        bytes: u64,
+    },
 }
 
 fn due_causes(causes: &[format::Cause<'_>]) -> Vec<DueCause> {
@@ -292,14 +301,19 @@ pub(crate) fn due(
         objects.extend(live.takes.clients.values().copied());
         let created = live.objects.len() as u64;
         let rep = live.replayer.as_mut().unwrap();
-        let Ok(&Frame::Take {
-            gap,
-            point: at,
-            count: reached,
-            ..
-        }) = rep.peek()
-        else {
-            return None;
+        let (gap, at, reached, is_refund) = match rep.peek() {
+            Ok(Frame::Take {
+                gap,
+                point,
+                count,
+                body,
+            }) => (
+                *gap,
+                *point,
+                *count,
+                matches!(body.arrival(), Arrival::Refund(_)),
+            ),
+            _ => return None,
         };
         // A drop's `CLOSE` recorded before the take comes first.
         if rep
@@ -321,6 +335,10 @@ pub(crate) fn due(
             live.stop_replay(fault);
             return None;
         }
+        // Refund takes are consumed at mailbox drains (`refund_due`), not unit pumps.
+        if is_refund {
+            return None;
+        }
         let Ok(frame) = rep.next() else {
             unreachable!("the peeked TAKE")
         };
@@ -329,25 +347,15 @@ pub(crate) fn due(
         };
         live.schedule.last = events;
         live.takes.position = rep.taken;
-        let (ordinal, value) = match body.arrival() {
+        let (ordinal, value, survivors) = match body.arrival() {
             Arrival::HelperEnd(ordinal, HelperOutcome::Returned(value), survivors) => {
-                if !survivors.is_empty() {
-                    live.refuse_replay("a helper end that hands its owner survivors");
-                    return None;
-                }
-                (ordinal, Ok(value.bytes().to_vec()))
+                (ordinal, Ok(value.bytes().to_vec()), survivors)
             }
             Arrival::HelperEnd(
                 ordinal,
                 HelperOutcome::Failed(causes) | HelperOutcome::Cancelled(causes),
                 survivors,
-            ) => {
-                if !survivors.is_empty() {
-                    live.refuse_replay("a helper end that hands its owner survivors");
-                    return None;
-                }
-                (ordinal, Err(due_causes(&causes)))
-            }
+            ) => (ordinal, Err(due_causes(&causes)), survivors),
             Arrival::Cancel => return Some(Due::Cancel),
             Arrival::Item(ordinal, value) => {
                 let value = value.bytes().to_vec();
@@ -389,20 +397,94 @@ pub(crate) fn due(
                 });
             }
             Arrival::LastRelease(stream, ordinal, header, unused) => {
-                if stream != super::stream(live) {
-                    live.refuse_replay("a last release of another unit's connection");
+                if stream == super::stream(live) {
+                    let notice = Notice::LastRelease { header, unused };
+                    return own_conn(live, &frame, ordinal, |_, conn| {
+                        Some(Due::Notice { conn, notice })
+                    });
+                }
+                let name = format::SurvivorName {
+                    kind: format::SurvivorKind::Connection,
+                    stream,
+                    ordinal,
+                };
+                if let Some((payer, bytes)) = live.takes.survivors.remove(&name)
+                    && header.checked_add(unused).is_some_and(|r| r <= bytes)
+                {
+                    return Some(Due::ReleaseSurvivor { payer, bytes });
+                }
+                let rep = live.replayer.as_mut().unwrap();
+                let fault = rep.compared(
+                    Mismatch::Take,
+                    &frame,
+                    format_args!("no surviving connection ({stream}, {ordinal})"),
+                );
+                live.stop_replay(fault);
+                return None;
+            }
+            Arrival::SharedRelease(stream, ordinal) => {
+                if stream == super::stream(live) {
+                    let node = super::nodes(|n| {
+                        let key = n
+                            .iter()
+                            .find(|(_, e)| e.stream == own && e.ordinal == ordinal)
+                            .map(|(&k, _)| k);
+                        if let Some(key) = key {
+                            n.remove(&key);
+                        }
+                        key
+                    });
+                    if let Some(node) = node {
+                        live.takes.nodes.remove(&node);
+                        return Some(Due::SharedRelease(node));
+                    }
+                    let rep = live.replayer.as_mut().unwrap();
+                    let fault = rep.compared(
+                        Mismatch::Take,
+                        &frame,
+                        format_args!("no Shared node with ordinal {ordinal}"),
+                    );
+                    live.stop_replay(fault);
                     return None;
                 }
-                let notice = Notice::LastRelease { header, unused };
-                return own_conn(live, &frame, ordinal, |_, conn| {
-                    Some(Due::Notice { conn, notice })
-                });
+                let name = format::SurvivorName {
+                    kind: format::SurvivorKind::Shared,
+                    stream,
+                    ordinal,
+                };
+                if let Some((payer, bytes)) = live.takes.survivors.remove(&name) {
+                    return Some(Due::ReleaseSurvivor { payer, bytes });
+                }
+                let rep = live.replayer.as_mut().unwrap();
+                let fault = rep.compared(
+                    Mismatch::Take,
+                    &frame,
+                    format_args!("no surviving Shared node ({stream}, {ordinal})"),
+                );
+                live.stop_replay(fault);
+                return None;
             }
             other => {
                 live.refuse_replay(unsupported(&other));
                 return None;
             }
         };
+        let mut seen = std::collections::BTreeSet::new();
+        for s in &survivors {
+            use format::SurvivorKind::{Connection, GroupQueue, Shared, UdpPool};
+            if matches!(s.name.kind, Connection | Shared | UdpPool | GroupQueue)
+                && (live.takes.survivors.contains_key(&s.name) || !seen.insert(s.name))
+            {
+                let rep = live.replayer.as_mut().unwrap();
+                let fault = rep.compared(
+                    Mismatch::Take,
+                    &frame,
+                    format_args!("duplicate survivor {:?}", s.name),
+                );
+                live.stop_replay(fault);
+                return None;
+            }
+        }
         let key = live
             .takes
             .helpers
@@ -423,7 +505,11 @@ pub(crate) fn due(
         match (key, outcome) {
             (Some(key), Ok(outcome)) => {
                 live.takes.helpers.remove(&key);
-                Some(Due::End { key, outcome })
+                Some(Due::End {
+                    key,
+                    outcome,
+                    survivors,
+                })
             }
             (_, Err(Unpacked::Unsupported(why))) => {
                 live.refuse_replay(why);
@@ -485,6 +571,142 @@ pub(crate) fn refuse_take(group: Option<Group>, why: &'static str) {
     replaying(group, |live| live.refuse_replay(why));
 }
 
+/// End the replay `Diverged(Take)` at the take frame just consumed.
+pub(crate) fn diverged_take(group: Option<Group>, why: &'static str) {
+    replaying(group, |live| {
+        let rep = live.replayer.as_mut().unwrap();
+        let at = rep.taken;
+        rep.note_next(format_args!("{why}"));
+        live.stop_replay(Fault::Diverged(Divergence {
+            at,
+            kind: Mismatch::Take,
+        }));
+    });
+}
+
+/// Keep a helper end's named survivor charges in the owner's replay state.
+pub(crate) fn keep_survivors(
+    group: Option<Group>,
+    survivors: Vec<(format::SurvivorName, crate::limit::Payer, u64)>,
+) {
+    replaying(group, |live| {
+        for (name, payer, bytes) in survivors {
+            live.takes.survivors.insert(name, (payer, bytes));
+        }
+    });
+}
+
+/// Refund any kept survivor charges still held when a replaying unit ends.
+pub(crate) fn drain_survivors(group: Option<Group>) {
+    let remaining: Vec<_> = replaying(group, |live| {
+        std::mem::take(&mut live.takes.survivors)
+            .into_values()
+            .collect()
+    })
+    .unwrap_or_default();
+    for (payer, bytes) in remaining {
+        payer.settle_at_unit(bytes);
+    }
+}
+
+/// Whether the stream's next frame is an in-operation `LastRelease` take at
+/// count 1 (right after a stand-in client's `CLOSE`) when `(stream, ordinal)`
+/// is a kept surviving connection.
+pub(crate) fn is_last_release_due(group: Option<Group>, stream: u32, ordinal: u64) -> bool {
+    replaying(group, |live| {
+        let name = format::SurvivorName {
+            kind: format::SurvivorKind::Connection,
+            stream,
+            ordinal,
+        };
+        if !live.takes.survivors.contains_key(&name) {
+            return false;
+        }
+        live.fresh_takes();
+        let (events, last) = (live.schedule.events, live.schedule.last);
+        let own = super::stream(live);
+        let rep = live.replayer.as_mut().unwrap();
+        let Ok(&Frame::Take {
+            gap,
+            point: format::TakePoint::Operation,
+            count: 1,
+            ref body,
+        }) = rep.peek()
+        else {
+            return false;
+        };
+        last.checked_add(gap) == Some(events)
+            && matches!(body.arrival(), Arrival::LastRelease(s, ..) if s != own)
+    })
+    .unwrap_or(false)
+}
+
+/// The next refund `TAKE` due at this mailbox drain, if any: `(limit, amount, frame)`.
+pub(crate) fn refund_due(group: Group) -> Option<(u64, u64, Frame)> {
+    let pump = super::binding();
+    replaying(Some(group), |live| {
+        live.fresh_takes();
+        let (events, last, count) = (live.schedule.events, live.schedule.last, live.takes.count);
+        let own = super::stream(live);
+        let mut objects: Vec<u64> = super::conns(|c| {
+            c.values()
+                .filter(|e| e.stream == own && !e.stand_in)
+                .map(|e| e.ordinal)
+                .collect()
+        });
+        objects.extend(live.takes.clients.values().copied());
+        let created = live.objects.len() as u64;
+        let rep = live.replayer.as_mut().unwrap();
+        let (gap, at, reached, limit, amount) = match rep.peek() {
+            Ok(Frame::Take {
+                gap,
+                point,
+                count,
+                body,
+            }) => match body.arrival() {
+                Arrival::Refund(credit) => (*gap, *point, *count, credit.limit, credit.amount),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if rep
+            .closes
+            .unmatched_before(rep.taken + 1, created, &objects)
+        {
+            return None;
+        }
+        let position = last.checked_add(gap)?;
+        if position > events || (position == events && (at != point(pump) || reached > count)) {
+            return None;
+        }
+        if position < events || reached < count {
+            rep.note_next(format_args!(
+                "TAKE(Refund) event={events} count={count} kind={}",
+                u8::from(pump)
+            ));
+            let fault = rep.diverged_next(Mismatch::Take);
+            live.stop_replay(fault);
+            return None;
+        }
+        let Ok(frame) = rep.next() else {
+            unreachable!("the peeked TAKE")
+        };
+        live.schedule.last = events;
+        live.takes.position = rep.taken;
+        Some((limit, amount, frame))
+    })
+    .flatten()
+}
+
+/// End the replay `Diverged(Take)` for a refund `TAKE` that could not apply.
+pub(crate) fn refund_mismatch(group: Group, frame: &Frame, why: &'static str) {
+    replaying(Some(group), |live| {
+        let rep = live.replayer.as_mut().unwrap();
+        let fault = rep.compared(Mismatch::Take, frame, format_args!("{why}"));
+        live.stop_replay(fault);
+    });
+}
+
 fn unsupported(arrival: &Arrival<'_>) -> &'static str {
     match arrival {
         Arrival::Item(..) => "an item take",
@@ -492,9 +714,9 @@ fn unsupported(arrival: &Arrival<'_>) -> &'static str {
         Arrival::SealAnswer(_) => "a seal answer take",
         Arrival::Settlement(..) => "a settlement take",
         Arrival::LastRelease(..) => "a last release take",
-        Arrival::SharedRelease(..) => "a Shared release take",
+        Arrival::SharedRelease(..) => unreachable!("handled above"),
         Arrival::Cancel => "a cancel take",
-        Arrival::Refund(_) => "a refund take",
+        Arrival::Refund(_) => unreachable!("handled at drain"),
         Arrival::HelperEnd(..) => "a helper end take",
     }
 }

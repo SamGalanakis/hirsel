@@ -60,6 +60,18 @@ pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *m
         #[cfg(feature = "record")]
         crate::tape::units::retained(key, h.inbox.0.retained());
         drop(h);
+        #[cfg(feature = "record")]
+        if u.ctx.parking {
+            let _ = u.released_own();
+            u.last_released = None;
+            u.reach();
+            pump(u);
+            if u.last_released == Some(key) {
+                u.reach();
+                pump(u);
+            }
+            return 0;
+        }
         if !took.is_empty() || u.released_own() {
             u.on_released(took);
         }
@@ -73,8 +85,20 @@ impl LangUnit {
     /// Drop a client. The owner's own release of a cleaned connection takes
     /// through its notice; each take wakes what waits on it, as in `pump`.
     pub(super) fn drop_client(&mut self, client: Client) {
+        #[cfg(feature = "record")]
+        let stand_in = self
+            .ctx
+            .parking
+            .then(|| crate::tape::units::stand_in_of(Arc::as_ptr(&client.0) as usize))
+            .flatten();
         let took = self.ctx.drop_client(client);
-        if !took.is_empty() || self.released_own() {
+        #[cfg(feature = "record")]
+        let stand_in_release = stand_in.is_some_and(|(s, o)| {
+            crate::tape::units::replay::is_last_release_due(self.tape(), s, o)
+        });
+        #[cfg(not(feature = "record"))]
+        let stand_in_release = false;
+        if !took.is_empty() || self.released_own() || stand_in_release {
             self.on_released(took);
         }
     }

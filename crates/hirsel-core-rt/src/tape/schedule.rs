@@ -35,7 +35,12 @@ impl Hooks for TapeHooks {
     }
 
     fn replay_retirements(&self, group: Group, payer: crate::limit::Payer) {
-        group.with(|live| live.replay_retirements(group.task, payer));
+        let refunds = group
+            .with(|live| live.replay_retirements(group.task, payer))
+            .unwrap_or_default();
+        for (surv_payer, bytes) in refunds {
+            surv_payer.refund(bytes);
+        }
     }
 
     fn seal_deadlock(&self, group: Group) -> Result<(), (String, Fault)> {

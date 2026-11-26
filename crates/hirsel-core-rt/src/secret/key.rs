@@ -333,11 +333,19 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
         if alg == SignAlg::P256 && source == SigningRandom::Virtual && key.origin.opaque() {
             return key_error(KEY_DENIED);
         }
+        #[cfg(feature = "record")]
+        let random_id = if crate::tape::owns(&*provider) {
+            (crate::entry::hirsel_core_capability_handle(context, random) as u32) as u64
+        } else {
+            random
+        };
+        #[cfg(not(feature = "record"))]
+        let random_id = random;
         let args = KeyRequest {
             key: &key,
             op: KeyOp::Sign {
                 alg,
-                random,
+                random: random_id,
                 source,
                 msg: crate::tls::bytes(&*msg),
             },

@@ -162,7 +162,14 @@ pub unsafe extern "C" fn hirsel_core_shared_release(context: *mut Context, node:
         // Each drop of a holder is a take point (docs/recording.md): whether
         // it is the last follows the drops of every unit.
         #[cfg(feature = "record")]
-        (*tasks::lang_unit()).reach();
+        {
+            let u = &mut *tasks::lang_unit();
+            u.reach();
+            if u.ctx.parking {
+                crate::units_lang::pump(u);
+                return;
+            }
+        }
         if last(node) {
             release_last(&mut *tasks::lang_unit(), context, node);
         }
@@ -177,6 +184,11 @@ pub(crate) unsafe fn release(unit: &mut LangUnit, context: *mut Context, node: *
     // SAFETY: by the contract.
     unsafe {
         unit.reach();
+        #[cfg(feature = "record")]
+        if unit.ctx.parking {
+            crate::units_lang::pump(unit);
+            return;
+        }
         if last(node) {
             release_last(unit, context, node);
         }

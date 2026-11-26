@@ -195,10 +195,11 @@ impl Live {
         Ok(())
     }
 
-    pub(super) fn replay_retirements(&mut self, owner: u64, payer: Payer) {
+    pub(super) fn replay_retirements(&mut self, owner: u64, payer: Payer) -> Vec<(Payer, u64)> {
         let own = units::stream(self);
+        let mut refunds = Vec::new();
         let Some(replay) = self.replayer.as_mut().filter(|_| self.fault.is_none()) else {
-            return;
+            return refunds;
         };
         while let Ok(&Frame::Retired {
             gap,
@@ -210,11 +211,48 @@ impl Live {
             if gap.checked_add(self.schedule.last) != Some(self.schedule.events) || task != owner {
                 break;
             }
-            // A pool adopted from a helper is named in its home stream, whose
-            // pools a replay of this unit alone does not hold.
             if stream != own {
-                self.schedule_fault(None);
-                return;
+                let ordinal = pool >> 1;
+                let intake = pool & 1 != 0;
+                use hirsel_tape_format::{
+                    SurvivorKind::{GroupQueue, UdpPool},
+                    SurvivorName,
+                };
+                let key = if intake {
+                    SurvivorName {
+                        kind: UdpPool,
+                        stream,
+                        ordinal,
+                    }
+                } else {
+                    let queue = SurvivorName {
+                        kind: GroupQueue,
+                        stream,
+                        ordinal,
+                    };
+                    if self.takes.survivors.contains_key(&queue) {
+                        queue
+                    } else {
+                        SurvivorName {
+                            kind: UdpPool,
+                            stream,
+                            ordinal,
+                        }
+                    }
+                };
+                let Some(&(surv_payer, bytes)) = self.takes.survivors.get(&key) else {
+                    self.schedule_fault(None);
+                    return refunds;
+                };
+                if !surv_payer.is_current_owner(payer) {
+                    self.schedule_fault(None);
+                    return refunds;
+                }
+                self.takes.survivors.remove(&key);
+                replay.next().unwrap();
+                self.schedule.last = self.schedule.events;
+                refunds.push((surv_payer, bytes));
+                continue;
             }
             let Some(entry) = self
                 .udp_retirements
@@ -222,15 +260,16 @@ impl Live {
                 .filter(|p| p.remaining_closes == 0)
             else {
                 self.schedule_fault(None);
-                return;
+                return refunds;
             };
             if !entry.charge.refund_replayed(payer) {
                 self.schedule_fault(None);
-                return;
+                return refunds;
             }
             replay.next().unwrap();
             self.schedule.last = self.schedule.events;
             self.udp_retirements.remove(&pool);
         }
+        refunds
     }
 }

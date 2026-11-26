@@ -123,6 +123,17 @@ pub(super) struct Remote {
     /// payer, bytes and poster, for their refund `TAKE`s.
     #[cfg(feature = "record")]
     taken: Vec<(Payer, u64, usize)>,
+    /// Real refund posts from other units held during replay until a refund
+    /// `TAKE` credits their limit ordinal (or the domain retires).
+    #[cfg(feature = "record")]
+    held_foreign: HashMap<NonNull<Slot>, u64>,
+    #[cfg(feature = "record")]
+    held_foreign_zeros: HashMap<NonNull<Slot>, usize>,
+    /// Bytes credited by replayed refund `TAKE`s ahead of any real foreign post.
+    #[cfg(feature = "record")]
+    replayed_refunds: HashMap<NonNull<Slot>, u64>,
+    #[cfg(feature = "record")]
+    replayed_zeros: HashMap<NonNull<Slot>, usize>,
 }
 impl Remote {
     pub(super) fn new() -> Self {
@@ -134,6 +145,14 @@ impl Remote {
             retirements: HashMap::default(),
             #[cfg(feature = "record")]
             taken: Vec::new(),
+            #[cfg(feature = "record")]
+            held_foreign: HashMap::default(),
+            #[cfg(feature = "record")]
+            held_foreign_zeros: HashMap::default(),
+            #[cfg(feature = "record")]
+            replayed_refunds: HashMap::default(),
+            #[cfg(feature = "record")]
+            replayed_zeros: HashMap::default(),
         }
     }
     pub(super) fn inbox(&mut self, owner: u64) -> NonNull<Inbox> {
@@ -462,6 +481,73 @@ impl Remote {
             .get(&owner)
             .is_some_and(|inbox| inbox.pending())
     }
+    #[cfg(feature = "record")]
+    fn hold_foreign(&mut self, payer: Payer, bytes: u64) {
+        if bytes == 0 {
+            if let Some(count) = self.replayed_zeros.get_mut(&payer.0) {
+                *count -= 1;
+                if *count == 0 {
+                    self.replayed_zeros.remove(&payer.0);
+                }
+                return;
+            }
+            *self.held_foreign_zeros.entry(payer.0).or_default() += 1;
+            return;
+        }
+        let mut rem = bytes;
+        if let Some(credited) = self.replayed_refunds.get_mut(&payer.0) {
+            let cover = (*credited).min(rem);
+            *credited -= cover;
+            rem -= cover;
+            if *credited == 0 {
+                self.replayed_refunds.remove(&payer.0);
+            }
+        }
+        if rem != 0 {
+            *self.held_foreign.entry(payer.0).or_default() += rem;
+        }
+    }
+
+    #[cfg(feature = "record")]
+    fn take_replayed_refund(&mut self, payer: Payer, bytes: u64) {
+        if bytes == 0 {
+            if let Some(count) = self.held_foreign_zeros.get_mut(&payer.0) {
+                *count -= 1;
+                if *count == 0 {
+                    self.held_foreign_zeros.remove(&payer.0);
+                }
+            } else {
+                *self.replayed_zeros.entry(payer.0).or_default() += 1;
+            }
+            self.enqueue(payer, 0, None);
+            return;
+        }
+        let mut rem = bytes;
+        if let Some(held) = self.held_foreign.get_mut(&payer.0) {
+            let cover = (*held).min(rem);
+            *held -= cover;
+            rem -= cover;
+            if *held == 0 {
+                self.held_foreign.remove(&payer.0);
+            }
+        }
+        if rem != 0 {
+            *self.replayed_refunds.entry(payer.0).or_default() += rem;
+        }
+        self.enqueue(payer, bytes, None);
+    }
+
+    #[cfg(feature = "record")]
+    pub(super) fn flush_held_foreign(&mut self) {
+        for (slot, bytes) in std::mem::take(&mut self.held_foreign) {
+            self.enqueue(Payer(slot), bytes, None);
+        }
+        for (slot, count) in std::mem::take(&mut self.held_foreign_zeros) {
+            for _ in 0..count {
+                self.enqueue(Payer(slot), 0, None);
+            }
+        }
+    }
 }
 
 /// One refund posted from another Unit: `bytes` (or a zero pin when 0) for `payer`.
@@ -495,9 +581,25 @@ impl Domain {
         // SAFETY: tests read routing on the owner's thread, between operations.
         unsafe { &*self.remote() }
     }
+    /// Fold the final batch at retirement, flushing any held foreign posts.
+    pub(super) fn fold_retired(remote: &mut Remote, batch: *mut Post) {
+        Self::fold(
+            remote,
+            batch,
+            #[cfg(feature = "record")]
+            None,
+        );
+        #[cfg(feature = "record")]
+        remote.flush_held_foreign();
+    }
+
     /// Feed a mailbox batch, newest first, into the owner's unassigned list in
     /// posting order. The owner Unit only.
-    pub(super) fn fold(remote: &mut Remote, mut batch: *mut Post) {
+    pub(super) fn fold(
+        remote: &mut Remote,
+        mut batch: *mut Post,
+        #[cfg(feature = "record")] hold_foreign: Option<usize>,
+    ) {
         let mut fifo: *mut Post = std::ptr::null_mut();
         while !batch.is_null() {
             // SAFETY: the swap gave this Unit sole custody of the batch.
@@ -512,6 +614,14 @@ impl Domain {
             // SAFETY: as above; each node was boxed by its poster.
             let post = unsafe { Box::from_raw(fifo) };
             fifo = post.next;
+            #[cfg(feature = "record")]
+            if let Some(own) = hold_foreign
+                && post.retirement.is_none()
+                && post.from.is_some_and(|from| from != own)
+            {
+                remote.hold_foreign(post.payer, post.bytes);
+                continue;
+            }
             remote.enqueue(post.payer, post.bytes, None);
             #[cfg(feature = "record")]
             if let Some(retirement) = post.retirement {
@@ -639,7 +749,7 @@ impl Funding {
             self.drain_notified();
         } else {
             #[cfg(feature = "record")]
-            self.replay_retirements();
+            self.replay_drains();
         }
     }
     /// The drain of a task's bind before it resumes: a scheduler pump.
@@ -661,8 +771,66 @@ impl Funding {
     pub(crate) fn drain_notified(&self) {
         self.drain_pending();
         #[cfg(feature = "record")]
-        self.replay_retirements();
+        self.replay_drains();
         self.normalize();
+    }
+    #[cfg(feature = "record")]
+    fn replay_drains(&self) {
+        self.replay_refunds();
+        self.replay_retirements();
+    }
+    #[cfg(feature = "record")]
+    fn replay_refunds(&self) {
+        let Some(group) = crate::tasks::current_group().filter(|g| g.replaying()) else {
+            return;
+        };
+        while let Some((limit, amount, frame)) = crate::tape::units::replay::refund_due(group) {
+            if let Err(why) = self.apply_replayed_refund(limit, amount) {
+                crate::tape::units::replay::refund_mismatch(group, &frame, why);
+                return;
+            }
+        }
+    }
+    #[cfg(feature = "record")]
+    fn apply_replayed_refund(&self, limit: u64, amount: u64) -> Result<(), &'static str> {
+        let domain = self.payer.get().domain();
+        let f = self.payer.get().forest();
+        let payer = f
+            .slots()
+            .find_map(|slot| {
+                // SAFETY: called on the owning unit with exclusive routing custody.
+                let links = unsafe { &*slot.links.get() };
+                (links.live.inbox != NonNull::dangling() && links.ordinal == limit)
+                    .then(|| Payer(NonNull::from(slot)))
+            })
+            .ok_or("no limit record with that ordinal")?;
+        if amount == 0 {
+            let pending_zeros = payer.slot().pending_zeros.load(Ordering::Relaxed);
+            if pending_zeros >= f.zeros {
+                return Err("a zero refund for a limit with no zero pin");
+            }
+        } else {
+            // SAFETY: the owning unit has exclusive custody of local balances.
+            let outstanding = unsafe { (*payer.local()).outstanding };
+            let pending = payer.slot().pending.load(Ordering::Relaxed);
+            if pending
+                .checked_add(amount)
+                .is_none_or(|sum| sum > outstanding)
+            {
+                return Err("a refund larger than the limit's outstanding bytes");
+            }
+        }
+        // SAFETY: drains run on the owner Unit.
+        let remote = unsafe { &mut *domain.remote() };
+        remote.take_replayed_refund(payer, amount);
+        self.drain_locked(remote, false);
+        domain.pending.store(remote.pending(), Ordering::SeqCst);
+        if !domain.mail.load(Ordering::SeqCst).is_null() {
+            domain.pending.store(true, Ordering::Relaxed);
+        }
+        remote.reap(domain);
+        self.normalize();
+        Ok(())
     }
     #[cfg(feature = "record")]
     fn replay_retirements(&self) {
@@ -678,7 +846,16 @@ impl Funding {
         let remote = unsafe { &mut *domain.remote() };
         let batch = domain.mail.swap(std::ptr::null_mut(), Ordering::Acquire);
         debug_assert!(batch != closed(), "a drain after retirement");
-        Domain::fold(remote, batch);
+        #[cfg(feature = "record")]
+        let hold_foreign = crate::tasks::current_group()
+            .filter(|g| g.replaying())
+            .and_then(|_| crate::tape::units::poster());
+        Domain::fold(
+            remote,
+            batch,
+            #[cfg(feature = "record")]
+            hold_foreign,
+        );
         self.drain_locked(remote, false);
         // Lower, then recheck the mailbox: a post pushed after the swap either
         // shows here or raises `pending` after this store (both SeqCst).

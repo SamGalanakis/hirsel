@@ -415,3 +415,144 @@ fn rl8_refund_from_another_unit() {
         .collect();
     assert_eq!(taken, [(0, Operation, 1, body)]);
 }
+
+/// Replay of a refund `TAKE` (tag 9): during replay, a real foreign refund
+/// post is held until the `TAKE` credits its limit ordinal, a replay with no
+/// foreign post credits the same ordinal at the `TAKE`, and a `TAKE` whose
+/// amount exceeds the limit's outstanding bytes diverges `Diverged(Take)`.
+#[test]
+fn rl8_refund_take_replays_and_holds_foreign_posts() {
+    let mut store = Store::default();
+    let mut h = header(REVISION);
+    h.kind = KIND_RUN;
+    in_task(true, &mut |context| {
+        // SAFETY: the root task pins the store, its context and its limits.
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Record, &h, &expect()).unwrap();
+            drop((*context).current.reserve(64).unwrap());
+            let child = (*context).current.reserve(64).unwrap();
+            let block = crate::block::Block::paid(
+                &*context,
+                child.payer.get(),
+                Some(16),
+                16,
+                8,
+                crate::block::PLAIN,
+            )
+            .unwrap();
+            let foreign = Foreign(block);
+            std::thread::spawn(move || {
+                let mut other = Store::default();
+                let mut h = header(REVISION);
+                h.kind = KIND_RUN;
+                let mut foreign = Some(foreign);
+                in_task(true, &mut |_| {
+                    let (tape, _) =
+                        Tape::open(REVISION, other.dir(), b"t", Mode::Record, &h, &expect())
+                            .unwrap();
+                    drop(foreign.take());
+                    tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+                });
+            })
+            .join()
+            .unwrap();
+            crate::tasks::event(crate::tasks::CHECK_CANCEL, 0, 0);
+            drop(child);
+            tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+        }
+    });
+
+    // Replay 1: real foreign post arrives before the event commit; drain must
+    // hold it until the `TAKE` at the event commit credits limit 2.
+    in_task(true, &mut |context| {
+        // SAFETY: as above.
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()).unwrap();
+            drop((*context).current.reserve(64).unwrap());
+            let child = (*context).current.reserve(64).unwrap();
+            let block = crate::block::Block::paid(
+                &*context,
+                child.payer.get(),
+                Some(16),
+                16,
+                8,
+                crate::block::PLAIN,
+            )
+            .unwrap();
+            let foreign = Foreign(block);
+            std::thread::spawn(move || {
+                let mut other = Store::default();
+                let mut h = header(REVISION);
+                h.kind = KIND_RUN;
+                let mut foreign = Some(foreign);
+                in_task(true, &mut |_| {
+                    let (tape, _) =
+                        Tape::open(REVISION, other.dir(), b"t", Mode::Record, &h, &expect())
+                            .unwrap();
+                    drop(foreign.take());
+                    tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+                });
+            })
+            .join()
+            .unwrap();
+            // Fold the foreign post before the take point: it must be held,
+            // leaving child at 48 available.
+            (*context).current.drain();
+            assert_eq!(child.available(), 48, "foreign post held until refund take");
+            crate::tasks::event(crate::tasks::CHECK_CANCEL, 0, 0);
+            assert_eq!(child.available(), 64, "refund take credited limit 2");
+            drop(child);
+            tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+        }
+    });
+
+    // Replay 2: no foreign post arrives (single-unit replay); the `TAKE`
+    // credits limit 2 directly.
+    in_task(true, &mut |context| {
+        // SAFETY: as above; `block` is intentionally leaked so no foreign post
+        // runs (simulating a block handed to another unit that does not run).
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()).unwrap();
+            drop((*context).current.reserve(64).unwrap());
+            let child = (*context).current.reserve(64).unwrap();
+            let block = crate::block::Block::paid(
+                &*context,
+                child.payer.get(),
+                Some(16),
+                16,
+                8,
+                crate::block::PLAIN,
+            )
+            .unwrap();
+            std::mem::forget(block);
+            assert_eq!(child.available(), 48);
+            crate::tasks::event(crate::tasks::CHECK_CANCEL, 0, 0);
+            assert_eq!(child.available(), 64, "refund take credited limit 2");
+            drop(child);
+            tape.end(&Ending::returned(&0u32.to_le_bytes())).unwrap();
+        }
+    });
+
+    // Replay 3: wrong limit (limit 2 has 0 outstanding) -> Diverged(Take).
+    in_task(true, &mut |context| {
+        // SAFETY: as above.
+        unsafe {
+            let (tape, _) =
+                Tape::open(REVISION, store.dir(), b"t", Mode::Replay, &h, &expect()).unwrap();
+            drop((*context).current.reserve(64).unwrap());
+            let child = (*context).current.reserve(64).unwrap();
+            crate::tasks::event(crate::tasks::CHECK_CANCEL, 0, 0);
+            drop(child);
+            assert_eq!(
+                tape.end(&Ending::returned(&0u32.to_le_bytes())),
+                Err(Fault::Diverged(Divergence {
+                    at: 1,
+                    kind: Mismatch::Take,
+                }))
+            );
+        }
+    });
+}

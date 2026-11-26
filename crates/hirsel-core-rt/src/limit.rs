@@ -1280,7 +1280,7 @@ impl Drop for Funding {
         let batch = d.close_mail();
         // SAFETY: the last handle's drop is the owner's final act on Remote.
         let remote = unsafe { &mut *d.remote() };
-        Domain::fold(remote, batch);
+        Domain::fold_retired(remote, batch);
         let f = self.payer.get().forest();
         f.retired_bytes = f.outstanding();
         self.drain_locked(remote, true);

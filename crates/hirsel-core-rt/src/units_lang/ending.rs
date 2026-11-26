@@ -1,8 +1,24 @@
 //! A helper's end, as its owner takes it.
-use super::{Context, HelperH, LangUnit, RESULTS, charge, consume, helper_of, tasks, wait_end};
+use super::{Context, Ended, HelperH, LangUnit, charge, consume, helper_of, tasks, wait_end};
 #[cfg(feature = "record")]
 use super::{takes, unit};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+/// Each ended helper's outcome, by its port, until its owner joins.
+pub(super) static RESULTS: Mutex<Option<HashMap<usize, Ended>>> = Mutex::new(None);
+pub(super) trait ResultsExt {
+    fn insert(&mut self, k: usize, e: Ended);
+    fn take(&mut self, k: usize) -> Option<Ended>;
+}
+impl ResultsExt for std::sync::MutexGuard<'_, Option<HashMap<usize, Ended>>> {
+    fn insert(&mut self, k: usize, e: Ended) {
+        self.get_or_insert_with(HashMap::new).insert(k, e);
+    }
+    fn take(&mut self, k: usize) -> Option<Ended> {
+        self.as_mut().and_then(|m| m.remove(&k))
+    }
+}
 
 /// A helper's end take in its owner: the survivors' charges move into the
 /// owner's retained charges under their connections' keys. Run grants remain
@@ -30,6 +46,20 @@ pub(super) unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     let _ = taken;
     for &(key, bytes) in &ended.survivors {
         u.retained.insert(key, held.split(bytes));
+    }
+    #[cfg(feature = "record")]
+    if !ended.replay_survivors.is_empty() {
+        use hirsel_tape_format::SurvivorKind::{Connection, GroupQueue, Shared, UdpPool};
+        let mut named = Vec::new();
+        for s in &ended.replay_survivors {
+            let payer = held.partition(s.amount);
+            if matches!(s.name.kind, Connection | Shared | UdpPool | GroupQueue) {
+                named.push((s.name, payer, s.amount));
+            }
+        }
+        if !named.is_empty() {
+            crate::tape::units::replay::keep_survivors(u.tape(), named);
+        }
     }
     if ended.run_grants != 0 {
         u.run_grants.push(held.split(ended.run_grants));

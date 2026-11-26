@@ -38,6 +38,9 @@ pub(super) struct Takes {
     unwraps: u64,
     /// The key object and registry entry charges the unit tracked so far.
     made: u64,
+    /// Replay: helper-end survivors kept by this owner until their release
+    /// take (`LastRelease`, `SharedRelease` or `RETIRED`).
+    pub(in super::super) survivors: BTreeMap<format::SurvivorName, (crate::limit::Payer, u64)>,
 }
 
 /// What every unit of the run knows of a connection made while recording: the
@@ -83,7 +86,7 @@ fn nodes<R>(f: impl FnOnce(&mut HashMap<usize, Node>) -> R) -> R {
 /// `shared.new`: the node's ordinal in its home stream, and its payload's
 /// layout for the snapshots that carry it out.
 pub(crate) fn shared_new(group: Option<Group>, node: usize, payload: &Cross) {
-    recording(group, |live| {
+    noting(group, |live| {
         let ordinal = live.unit_object();
         live.takes.nodes.insert(node, ordinal);
         let entry = Node {
@@ -280,6 +283,19 @@ pub(crate) fn at_bind(drain: impl FnOnce()) {
     BINDING.set(true);
     drain();
     BINDING.set(false);
+}
+
+pub(super) fn binding() -> bool {
+    BINDING.get()
+}
+
+/// If `conn` is a replay stand-in connection, the `(stream, ordinal)` it stands for.
+pub(crate) fn stand_in_of(conn: usize) -> Option<(u32, u64)> {
+    conns(|c| {
+        c.get(&conn)
+            .filter(|e| e.stand_in)
+            .map(|e| (e.stream, e.ordinal))
+    })
 }
 
 /// The unit posting a refund now: its recording cell, if it has one.

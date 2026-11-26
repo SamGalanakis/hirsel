@@ -85,12 +85,20 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
         let charge = crate::media::run_state(grants)
             .charges
             .track(Charge(payer, BYTES), crate::media::KEY_OBJECT);
+        let provider = &*crate::entry::hirsel_core_capability_provider(context, random);
+        #[cfg(feature = "record")]
+        let random_id = if crate::tape::owns(provider) {
+            (crate::entry::hirsel_core_capability_handle(context, random) as u32) as u64
+        } else {
+            random
+        };
+        #[cfg(not(feature = "record"))]
+        let random_id = random;
         let mut call = Generation {
-            random,
+            random: random_id,
             group,
             key: None,
         };
-        let provider = &*crate::entry::hirsel_core_capability_provider(context, random);
         let (origin, buffer) = if crate::provide::owns(provider) {
             let mut point = [0; 65];
             let point = &mut point[..group.public_len()];

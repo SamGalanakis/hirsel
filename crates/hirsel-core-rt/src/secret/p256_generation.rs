@@ -94,8 +94,16 @@ pub unsafe extern "C" fn hirsel_core_secret_p256_key(
             return result;
         }
 
+        #[cfg(feature = "record")]
+        let random_id = if crate::tape::owns(provider) {
+            (crate::entry::hirsel_core_capability_handle(context, random) as u32) as u64
+        } else {
+            random
+        };
+        #[cfg(not(feature = "record"))]
+        let random_id = random;
         let mut call = Generation {
-            random,
+            random: random_id,
             policy: policy.text(),
             document: None,
         };

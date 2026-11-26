@@ -61,7 +61,9 @@
     "reason": "object-range-stream-2690"
   },
   "core/std/omap.hirsel": {
-    "lines": 1374
+    "lines": 1398,
+    "raise_revision": 1,
+    "reason": "std-omap-nth-2975"
   },
   "core/std/page.hirsel": {
     "lines": 3468,
@@ -100,7 +102,9 @@
     "lines": 1503
   },
   "core/std/tests/omap.hirsel": {
-    "lines": 1132
+    "lines": 1194,
+    "raise_revision": 1,
+    "reason": "std-omap-nth-2975"
   },
   "core/std/tests/provide_parity.hirsel": {
     "lines": 1444,

@@ -80,6 +80,11 @@ can outlive its originating map and move to another task.
 `count(m, lower, upper)` uses subtree sizes to return the number of keys in
 the requested interval. It visits O(log n) nodes and allocates nothing.
 
+`nth(m, i: u64) -> Option[(K, V)]` selects the entry at zero-based rank `i`
+in ascending key order. It returns `None` when `i >= len(m)`. It uses subtree
+sizes to visit O(log n) nodes and copies only the selected key and value.
+A refused copy raises Capacity.
+
 Checkpoint writers use `root` for an Arc holder and `node_id`, `node_level`,
 `node_count`, `node_len`, `node_key`, `node_value`, `node_child` for individual
 nodes. Node level is zero at leaves. Leaf count is the number of key/value

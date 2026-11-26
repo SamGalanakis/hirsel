@@ -1156,6 +1156,30 @@ fn rank[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], 
     before + rank(n.kids[child], k, include)
 }
 
+/// The owned pair at a zero-based rank in ascending key order, or None outside len.
+/// Visits O(log n) nodes and copies only the selected row.
+pub fn nth[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], i: u64) -> Option[(K, V)] {
+    match m.head {
+        Some(n) if i < n.size => Some(nth_in_node(n, i)),
+        _ => None
+    }
+}
+
+fn nth_in_node[K: ordered + shareable + send, V: shareable + send](n: Arc[Node[K, V]], i: u64) -> (K, V) {
+    if n.depth == 0 {
+        let key: K = clone(n.rows[i].key)
+        let value: V = clone(n.rows[i].value)
+        return (take key, take value)
+    }
+    let mut remaining = i
+    let mut child = 0u64
+    while remaining >= n.kids[child].size {
+        remaining -= n.kids[child].size
+        child += 1
+    }
+    nth_in_node(n.kids[child], remaining)
+}
+
 /// Seek to the upper bound and traverse the interval in descending key order.
 pub fn range_reverse[K: ordered + shareable + send, V: shareable + send](m: OMap[K, V], take lo: Bound[K], hi: Bound[K]) -> Cursor[K, V] {
     let mut path: List[Frame[K, V]] = list.with_capacity(match m.head {

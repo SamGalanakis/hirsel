@@ -161,6 +161,68 @@ fn held_version_sequences() -> bool {
     true
 }
 
+fn ranks_match_iteration(m: omap.OMap[u64, u64], max_rank: u64) -> bool {
+    let mut rows = omap.range(m, Unbounded, Unbounded)
+    let mut i = 0u64
+    while let Some((key, value)) = omap.next(mut rows) {
+        if omap.nth(m, i) != Some((key, value)) || omap.count(m, Unbounded, Excluded(key)) != i {
+            return false
+        }
+        i += 1
+    }
+    if omap.len(m) != i {
+        return false
+    }
+    for out_of_range in i .. max_rank + 1 {
+        if omap.nth(m, out_of_range) != None {
+            return false
+        }
+    }
+    omap.nth(m, 18446744073709551615u64) == None
+}
+
+// Shuffle distinct keys, check every size on the way up and down, and
+// overwrite some entries with different values before checking their rank.
+// expect: run nth_matches_ordered_iteration() = true
+fn nth_matches_ordered_iteration() -> bool {
+    let size = 200u64
+    let mut keys: List[u64] = list.with_capacity(size)
+    for i in 0u64 .. size {
+        list.push(mut keys, 2 * i)
+    }
+    let mut state = 2975u64
+    let mut end = size
+    while end > 1 {
+        state = int.wrapping_add(int.wrapping_mul(state, 6364136223846793005u64), 1442695040888963407u64)
+        let at = (state / 65536) % end
+        end -= 1
+        let key = keys[at]
+        keys[at] = keys[end]
+        keys[end] = key
+    }
+    let mut ids = 0u64
+    let mut m: omap.OMap[u64, u64] = omap.new()
+    if !ranks_match_iteration(m, size) {
+        return false
+    }
+    for key in keys {
+        m = put(mut ids, m, key, key + 1)
+        if key % 7 == 0 {
+            m = put(mut ids, m, key, key + 2)
+        }
+        if !ranks_match_iteration(m, size) {
+            return false
+        }
+    }
+    for key in keys {
+        m = omap.remove(mut ids, m, key)
+        if !ranks_match_iteration(m, size) {
+            return false
+        }
+    }
+    true
+}
+
 // Monotone and reverse insertions force root splits; both deletion directions
 // force redistribution, merges and root collapse while a full snapshot lives.
 // expect: run split_merge_collapse() = true

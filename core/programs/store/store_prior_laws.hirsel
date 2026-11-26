@@ -605,6 +605,107 @@ fn source_rightmost_witness() -> Result[(), Error] {
     Ok(())
 }
 
+// The in-place batch against the rebuild it replaces (DESIGN 3156): equal
+// images and capacities page by page, equal totals and equal blob bodies.
+fn batch_law_same_pages(a: Arc[std.page.Page], b: Arc[std.page.Page]) -> Result[(), Error] {
+    let ia = std.page.image_of(a)
+    let ib = std.page.image_of(b)
+    let raw_a = std.page.payload(ia)
+    let raw_b = std.page.payload(ib)
+    if raw_a != raw_b || list.capacity(raw_a) != list.capacity(raw_b) || std.page.totals(a) != std.page.totals(b) {
+        return Error(Missing("in-place batch page differs from rebuild"))
+    }
+    for slot in 0u64 .. std.page.count(ia) {
+        match std.page.owning_edge(ia, slot) {
+            Some(PageEdge(_)) => batch_law_same_pages(option.unwrap(std.page.child(a, slot)), option.unwrap(std.page.child(b, slot)))?,
+            Some(BlobEdge(body_ref)) => {
+                let (Some(x), Some(y)) = (std.page.body(a, body_ref.body), std.page.body(b, body_ref.body)) else {
+                    return Error(Missing("in-place batch lost a body"))
+                }
+                if x != y {
+                    return Error(Missing("in-place batch body differs"))
+                }
+            },
+            None => (),
+        }
+    }
+    Ok(())
+}
+
+fn batch_law_collection_edits(ops: DataRows, order: DataOrder, id: u32) -> Result[List[std.page.BatchEdit], Error] {
+    let collection = prefix(id)?
+    let mut edits: List[std.page.BatchEdit] = list.new()
+    for slot in 0u64 .. data_row_count(ops) {
+        let op = ordered_row(ops, order, slot)
+        if list.slice(op.key, 0, 4) != collection {
+            continue
+        }
+        let value: Option[std.page.BatchValue] = match view op.value {
+            Some(PageValue(raw)) => Some(BatchBytes(clone(raw))),
+            Some(BlobBody(raw)) => Some(BatchShared(arc.share(raw))),
+            None => None,
+        }
+        list.push(mut edits, std.page.BatchEdit(key: clone(list.slice(op.key, 4, list.len(op.key))), value: take value, prior: None))
+    }
+    Ok(take edits)
+}
+
+fn batch_law_rows(ops: List[u64], prior: u32) -> Result[List[JournalOp], Error] {
+    let mut rows: List[JournalOp] = list.new()
+    for n in ops {
+        let mut raw = prior_fixture_value(8)
+        list.set_word_le(mut raw, 0, n)
+        list.push(mut rows, JournalOp(key: logical_key(1, key_word(n))?, value: Some(take raw), prior: prior, trim: None))
+    }
+    Ok(take rows)
+}
+
+// 3152's counterexamples. Replaying a two-row overwrite of one leaf restamps
+// the map leaf and the collection leaf once each, so it needs exactly two
+// stamps (per-row replay needs four). Inserting keys 3 and 4 live leaves the
+// canonical 4-row leaf, 24 + 4 x (4 + 8 + 3 + 8) - 3 x 7 = 95 bytes, with no
+// spare capacity, beside the 24 + 4 + 4 + 3 + descriptor byte map leaf.
+fn batch_law_3152() -> Result[(), Error] {
+    let mut base = new_page_tree(CollectionMap, 1024)
+    let mut ids = 0u64
+    define_store_collection(mut base, 1, 1, mut ids)?
+    let mut account = ReplayTieredAccount(total: 0, exact: true)
+    let mut both: List[u64] = list.new()
+    list.push(mut both, 1u64)
+    list.push(mut both, 2u64)
+    journal_apply_ops("batch 3152", mut ids, mut base, batch_law_rows(both, 0)?, mut account, false)?
+    for left in 1u64 .. 3 {
+        let mut replay = share_page_tree(base)
+        let mut final_item = 18446744073709551615u64 - 1 - left
+        let outcome = journal_apply_ops("batch 3152", mut final_item, mut replay, batch_law_rows(both, 9)?, mut account, false)
+        match (left, outcome) {
+            (2, Ok(())) => (),
+            (1, Error(Limit(Ids))) => (),
+            _ => return Error(Missing("two-row replay stamp draws")),
+        }
+    }
+    let mut inserted = share_page_tree(base)
+    let mut ops = new_data_rows()
+    for n in 3u64 .. 5 {
+        let mut raw = prior_fixture_value(8)
+        list.set_word_le(mut raw, 0, n)
+        push_data_row(mut ops, DataOp(key: logical_key(1, key_word(n))?, value: Some(stage_value(take raw, 1024)), trim: None, prior: None))
+    }
+    let order = capacity(data_order(ops))?
+    let first = ids + 1
+    let mut draw = first
+    materialize_ordered_rows(mut inserted, ops, order, false, first, mut draw)?
+    canonical_tree(mut inserted)?
+    let collection = option.unwrap(std.page.collection_child(inserted.root, prefix(1)?))
+    let (_, descriptor) = option.unwrap(std.page.collection_entry(inserted.root, prefix(1)?))
+    let leaf = list.capacity(std.page.payload(std.page.image_of(collection)))
+    let map_leaf = list.capacity(std.page.payload(std.page.image_of(inserted.root)))
+    if leaf != 95 || map_leaf != 24 + 4 + 4 + 3 + list.len(descriptor) || draw - first != 2 {
+        return Error(Missing("two-row insert resident image bytes"))
+    }
+    Ok(())
+}
+
 @test
 fn sorted_batch_equivalence() -> Result[(), Error] {
     source_layout_witness(false)?
@@ -631,9 +732,33 @@ fn sorted_batch_equivalence() -> Result[(), Error] {
     let mut live_ids = oracle_ids + 1
     let mut replay_ids = oracle_ids
     let mut account = ReplayTieredAccount(total: 0, exact: true)
+    batch_law_3152()?
+    let mut edited: List[Arc[std.page.Page]] = list.new()
+    let mut rebuilt: List[Arc[std.page.Page]] = list.new()
+    for id in 1u32 .. 3 {
+        let Some(start) = std.page.collection_child(oracle.root, prefix(id)?) else {
+            return Error(Missing("batch collection"))
+        }
+        list.push(mut edited, arc.share(start))
+        list.push(mut rebuilt, arc.share(start))
+    }
+    let mut edited_ids = 1u64
+    let mut rebuilt_ids = 1u64
     for round in 0u64 .. 200 {
         let mut ops = batch_law_edits(round)?
         let order = capacity(data_order(ops))?
+        for c in 0u64 .. 2 {
+            let edits = batch_law_collection_edits(ops, order, int.truncate(c + 1))?
+            let held = arc.share(edited[c])
+            let previous = arc.share(rebuilt[c])
+            page_result(std.page.apply_sorted_batch(mut edited[c], edits, 1024, mut edited_ids))?
+            page_result(std.page.rebuild_sorted_batch(mut rebuilt[c], edits, 1024, mut rebuilt_ids))?
+            if edited_ids != rebuilt_ids {
+                return Error(Missing("in-place batch stamp draws"))
+            }
+            batch_law_same_pages(edited[c], rebuilt[c])?
+            batch_law_same_pages(held, previous)?
+        }
         let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: round + 1), at: round, seed: 0)
         let wire = capacity(encode_staged(ci, Some(view oracle), None, None, mut ops, order, NO_FRAME_TAIL, new_data_rows(), None, None, None, None, 1, 72, FRAME_LIMIT))?
         let frame = journal_decode_commit("batch", list.slice(wire, 16, list.len(wire)))?

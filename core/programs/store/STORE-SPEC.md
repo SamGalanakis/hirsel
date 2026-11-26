@@ -1,4 +1,4 @@
-# Store spec v2.164
+# Store spec v2.165
 
 `store@1` provides typed tables and indexes, cells, logs, transactions and snapshots.
 A writer publishes new roots at commit. Its journal acknowledges a durable prefix,
@@ -2902,6 +2902,7 @@ Each failure is `Corrupt(Checksum)`. A pack not listed, or an offset at which no
   - journal replay in `open`, before `open` returns a Db (a failure fails the open and discards its state, so it may edit in place directly);
   - bulk build (AP13), into pages it made and has not published;
   - commit-time apply of the Tx's staged operations on the writer, under the plan-then-apply rule above. The writer reserves the leaf space for a direct inline edit, or prepares the replacement pages and their links before installing them. A split or shape change installs its prepared child pages. This is M1-7 inside the cutover (M1-DESIGN §6).
+  - the sorted batch (`std.page.apply_sorted_batch`), on commit and in replay alike, copies each touched page once and edits the copy in place. It rebuilds a page only when the edits split it, empty it, or leave it under T/4 beside a sibling it joins. Either way the result has the pages, image capacities, stamps and refusals of a full rebuild on the same base, edits and counter: one stamp per page of the result and one per new overflow body, drawn children first (v2.165, store-batch-leaf-design-3156).
 
 **AP11. Index writes** keep J1's rule: an unchanged encoded index key with byte-equal payload writes nothing, so that index collection's pages and root stamp are unchanged by the commit. v2.57 (DX Q3): an entry's value is its payload (empty for `()`), or for a `Unique` index `u32 len(K) ‖ K ‖ payload` (§1.2).
 

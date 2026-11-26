@@ -220,7 +220,7 @@ store@1/store/read_tail_step_budget src=33660962a0c8bdd8 sig=363e18be52c92982 ru
 store@1/store/reexecute_zero_data_write_serve src=2724dd267e299e2a sig=8cc4843573a8deca run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/small_bucket_place_plan_at_floor src=dbe626e3f6dcceff sig=c7a68864aace086e run=dbf6722727633166 bug=- oracle=- rows=pending
 store@1/store/small_directory_place_need src=2d4056db6c7ff73b sig=2b983f60ad1fc89c run=ea720f3846592392 bug=- oracle=- rows=pending
-store@1/store/sorted_batch_equivalence src=05b31d6515936530 sig=c19862b5a24e0aba run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/sorted_batch_equivalence src=e38da2fbb8f88616 sig=6dd09b01efb28645 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/staged_row_layout_charge src=374cc488b82ac03f sig=cb8ab6cd6311148f run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/stream_age_refusal_survives_longer_retention src=b6df413a313f9ae2 sig=ba8ee40e7da83c82 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/stream_quota_preserves_eviction_floor src=36d83b090a60b66e sig=7ab35b0b35ae3428 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
@@ -460,7 +460,7 @@ store@1/store/test_shared_payload_copy src=4a53803dad2143b8 sig=7c311fcff0d08174
 store@1/store/test_snapshots src=5fb1aa71ebfb3a1c sig=92df16decd0272b7 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_staged_index_reads src=fce6af8e32975efd sig=909f768407f9629f run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_step_bounds src=d372d2b24a570df9 sig=4a0c07f3847249e0 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
-store@1/store/test_store_crash_sim src=c84f9694616df322 sig=b7be848b88abd8d3 run=674163332702cdff bug=- oracle=- rows=pending
+store@1/store/test_store_crash_sim src=3bb5ded1396b3a3c sig=b7be848b88abd8d3 run=674163332702cdff bug=- oracle=- rows=pending
 store@1/store/test_stored_size src=794f46038b30a3f8 sig=c818fbb179b4ba60 run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_streams src=dc9251b58dd3c7af sig=ebb07876a3aaff5a run=aff7b6b8625190d8 bug=- oracle=- rows=pending
 store@1/store/test_tail src=67aada6ead4b60cf sig=be518eadc604689f run=aff7b6b8625190d8 bug=- oracle=- rows=pending

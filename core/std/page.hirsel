@@ -3011,22 +3011,170 @@ fn batch_children(mut rows: List[PageSlot], domain: Domain, child_level: u8, fir
     Ok(())
 }
 
-fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, first: u64, rightmost: bool, mut next: u64) -> Result[List[PagePiece], Error] {
+// The prior of a leaf row: its value length plus one.
+fn slot_prior(image: Image, slot: u64) -> u32 {
+    let at = entry_at(image, slot)
+    let cell = at + 2 + u16_at(image.raw, at)
+    let width = if image.raw[cell] == 0 {
+        u16_at(image.raw, cell + 1)
+    } else {
+        list.word_le(image.raw, cell + 9)
+    }
+    int.truncate(1 + width)
+}
+
+// Give an edited copy the canonical image and exact capacity a rebuild gives it.
+fn settle_copy(mut page: Page) -> Result[(), Error] {
+    if page.loose {
+        canonical_page(mut page)?
+        page.loose = false
+    }
+    let n = list.len(page.image.raw)
+    if list.capacity(page.image.raw) != n {
+        let mut raw: Bytes = list.with_capacity(n)
+        list.append(mut raw, page.image.raw)
+        page.image.raw = take raw
+    }
+    Ok(())
+}
+
+// The leaf merge on one private copy: the same priors, draws and canonical
+// page as merge_batch_leaf and batch_pieces when the edits keep one page.
+// None leaves `next` alone and asks the caller to rebuild (DESIGN 3156).
+fn edit_batch_leaf[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
+    let mut cursor = next
+    let mut changed = false
+    let held = stamp(root.image)
+    let mut draft = copy_with_stamp(root, if held == 0 {
+        1u64
+    } else {
+        held
+    })
+    let kept = option.unwrap(arc.with_unique(mut draft, scoped fn(mut page: Page) -> Result[bool, Error] {
+        let mut one_page = true
+        for i in start .. end {
+            edit_at(source, i, scoped fn(edit: SourceEdit) -> Result[(), Error] {
+                let (slot, hit) = search(page.image, edit.key)
+                if let Some(expected) = edit.prior {
+                    let prior = if hit {
+                        slot_prior(page.image, slot)
+                    } else {
+                        0u32
+                    }
+                    if expected != prior {
+                        return Error(MalformedPage)
+                    }
+                }
+                if let Some((raw, shared)) = view edit.value {
+                    let incoming = batch_value_slot(edit.key, raw, shared, inline, mut cursor)?
+                    match private_put(mut page, incoming.row, incoming.kid, incoming.blob, slot, hit) {
+                        Ok(Split) => {
+                            one_page = false
+                        }
+                        Ok(_) => {
+                            changed = true
+                        }
+                        Error(_) => {
+                            one_page = false
+                        }
+                    }
+                } else if hit {
+                    delete_slot(mut page, slot)
+                    changed = true
+                }
+                Ok(())
+            })?
+            if !one_page {
+                return Ok(false)
+            }
+        }
+        if !changed {
+            return Ok(true)
+        }
+        if count(page.image) == 0 {
+            return Ok(false)
+        }
+        let id = take_stamp(mut cursor)?
+        list.set_word_le(mut page.image.raw, 8, id)
+        page.loose_below = false
+        settle_copy(mut page)?
+        Ok(true)
+    }))?
+    if !kept {
+        return Ok(None)
+    }
+    next = cursor
+    if !changed {
+        return Ok(Some(one_trim_piece(root)))
+    }
+    let mut result: List[PagePiece] = list.with_capacity(1)
+    list.push(mut result, PagePiece(root: take draft, separator: list.new()))
+    Ok(Some(take result))
+}
+
+// A branch whose touched children each came back as one page, none of which
+// batch_children would join, keeps its entries: copy it, refresh the touched
+// edges and restamp it. None asks the caller to rebuild.
+fn edit_batch_branch(root: Arc[Page], touched: List[(u64, List[PagePiece])], first: u64, mut next: u64) -> Result[Option[List[PagePiece]], Error] {
+    for item in touched {
+        if list.len(item.1) != 1 {
+            return Ok(None)
+        }
+    }
+    let child_level = level(root.image) - 1
+    let size = count(root.image)
+    let mut t = 0u64
+    for slot in 0u64 .. size {
+        let selected = if t < list.len(touched) && touched[t].0 == slot {
+            t += 1
+            arc.share(touched[t - 1].1[0u64].root)
+        } else {
+            edit_page(root.kids[slot], child_level, resident_edit_frame)?
+        }
+        let unary = child_level != 0 && count(selected.image) == 1
+        if size > 1 && (unary || (stamp(selected.image) >= first && sealed_size(selected.image) < TARGET / 4)) {
+            return Ok(None)
+        }
+    }
+    let mut draft = copy_with_stamp(root, stamp(root.image))
+    option.unwrap(arc.with_unique(mut draft, scoped fn(mut page: Page) -> Result[(), Error] {
+        for item in touched {
+            let _ = list.set(mut page.kids, item.0, HotPage(arc.share(item.1[0u64].root)))
+            refresh_child(mut page, item.0)
+        }
+        let id = take_stamp(mut next)?
+        list.set_word_le(mut page.image.raw, 8, id)
+        let mut below = false
+        for kid in page.kids {
+            below = below || child_loose(kid)
+        }
+        page.loose_below = below
+        settle_copy(mut page)
+    }))?
+    let mut result: List[PagePiece] = list.with_capacity(1)
+    list.push(mut result, PagePiece(root: take draft, separator: list.new()))
+    Ok(Some(take result))
+}
+
+fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, first: u64, rightmost: bool, rebuild: bool, mut next: u64) -> Result[List[PagePiece], Error] {
     let lvl = level(root.image)
     let domain = root.image.domain
     if lvl == 0 {
+        if !rebuild {
+            if let Some(take parts) = edit_batch_leaf(root, source, edit_at, start, end, inline, mut next)? {
+                return Ok(take parts)
+            }
+        }
         let (take rows, changed) = merge_batch_leaf(root, source, edit_at, start, end, inline, mut next)?
         if !changed {
             return Ok(one_trim_piece(root))
         }
         return batch_pieces(rows, domain, 0, mut next)
     }
-    let mut rows: List[PageSlot] = list.new()
+    let mut touched: List[(u64, List[PagePiece])] = list.new()
     let mut at = start
     let size = count(root.image)
     for slot in 0u64 .. size {
-        let edge = view root.kids[slot]
-        let divider = option.unwrap(key_at(root.image, slot))
         let from = at
         if slot + 1 == size {
             at = end
@@ -3044,21 +3192,35 @@ fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64,
                 at += 1
             }
         }
-        if at == from {
-            let row = option.unwrap(entry(root.image, slot))
-            list.push(mut rows, PageSlot(row: take row, kid: Some(clone(edge)), blob: None))
+        if at != from {
+            let base = edit_page(root.kids[slot], lvl - 1, resident_edit_frame)?
+            let pieces = batch_path(base, source, edit_at, from, at, inline, first, rightmost, rebuild, mut next)?
+            list.push(mut touched, (slot, take pieces))
+        }
+    }
+    if !rebuild {
+        if let Some(take parts) = edit_batch_branch(root, touched, first, mut next)? {
+            return Ok(take parts)
+        }
+    }
+    let mut rows: List[PageSlot] = list.new()
+    let mut t = 0u64
+    for slot in 0u64 .. size {
+        if t < list.len(touched) && touched[t].0 == slot {
+            let pieces = view touched[t].1
+            for part in 0u64 .. list.len(pieces) {
+                let key: Bytes = if part == 0 {
+                    option.unwrap(key_at(root.image, slot))
+                } else {
+                    clone(pieces[part].separator)
+                }
+                list.push(mut rows, branch_slot(take key, pieces[part].root))
+            }
+            t += 1
             continue
         }
-        let base = edit_page(edge, lvl - 1, resident_edit_frame)?
-        let pieces = batch_path(base, source, edit_at, from, at, inline, first, rightmost, mut next)?
-        for part in 0u64 .. list.len(pieces) {
-            let key: Bytes = if part == 0 {
-                clone(divider)
-            } else {
-                clone(pieces[part].separator)
-            }
-            list.push(mut rows, branch_slot(take key, pieces[part].root))
-        }
+        let row = option.unwrap(entry(root.image, slot))
+        list.push(mut rows, PageSlot(row: take row, kid: Some(clone(root.kids[slot])), blob: None))
     }
     batch_children(mut rows, domain, lvl - 1, first, mut next)?
     batch_pieces(rows, domain, lvl, mut next)
@@ -3066,8 +3228,10 @@ fn batch_path[T](root: Arc[Page], source: T, edit_at: EditSource[T], start: u64,
 
 /// Apply strictly increasing, distinct edits to a resident row tree.
 /// The root is replaced only after the candidate and prior checks succeed.
+/// A touched page is edited on a private copy and rebuilt only on a split,
+/// a join or an emptied leaf, with the pages and stamps of a rebuild.
 pub fn apply_sorted_batch(mut root: Arc[Page], ops: List[BatchEdit], inline: u64, mut next: u64) -> Result[(), Error] {
-    apply_sorted_path(mut root, ops, visit_batch_edit, 0, list.len(ops), inline, false, mut next)
+    apply_sorted_path(mut root, ops, visit_batch_edit, 0, list.len(ops), inline, false, false, mut next)
 }
 
 // A strict rightmost comparison without assembling the leaf's compressed key.
@@ -3088,10 +3252,16 @@ fn above_rightmost(root: Arc[Page], key: Bytes) -> Result[bool, Error] {
 
 /// Apply strictly increasing edits without a separate copy of the source rows.
 pub fn apply_sorted_source[T](mut root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, mut next: u64) -> Result[(), Error] {
-    apply_sorted_path(mut root, source, edit_at, start, end, inline, true, mut next)
+    apply_sorted_path(mut root, source, edit_at, start, end, inline, true, false, mut next)
 }
 
-fn apply_sorted_path[T](mut root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, fast_paths: bool, mut next: u64) -> Result[(), Error] {
+/// apply_sorted_batch rebuilding every touched page: the reference its
+/// in-place edits must equal in pages, capacities and stamps.
+pub fn rebuild_sorted_batch(mut root: Arc[Page], ops: List[BatchEdit], inline: u64, mut next: u64) -> Result[(), Error] {
+    apply_sorted_path(mut root, ops, visit_batch_edit, 0, list.len(ops), inline, false, true, mut next)
+}
+
+fn apply_sorted_path[T](mut root: Arc[Page], source: T, edit_at: EditSource[T], start: u64, end: u64, inline: u64, fast_paths: bool, rebuild: bool, mut next: u64) -> Result[(), Error] {
     let domain = root.image.domain
     if domain == CollectionMap || inline > INLINE_MAX {
         return Error(MalformedPage)
@@ -3145,7 +3315,7 @@ fn apply_sorted_path[T](mut root: Arc[Page], source: T, edit_at: EditSource[T], 
         })?
     }
     let first = next
-    let mut parts = batch_path(root, source, edit_at, start, end, inline, first, rightmost, mut next)?
+    let mut parts = batch_path(root, source, edit_at, start, end, inline, first, rightmost, rebuild, mut next)?
     finish_source_batch(mut root, mut parts, mut next)
 }
 

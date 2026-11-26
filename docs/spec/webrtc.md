@@ -1629,7 +1629,7 @@ pub type PoolLimits {
     unit_bytes: u64,           // each unit task's memory (CONC-15), as Service.unit_bytes
     rooms: u32,                // live rooms at once, across the pool
     sessions: u32,             // live PeerSessions per unit
-    inflight: u16,             // control calls in flight at once, pool-wide
+    inflight: u16,             // control calls in flight at once, pool-wide; 8 by default
     media_take: u32,           // media-inbox messages a unit takes per turn
     room_pps: u32,             // authenticated datagrams per second per publisher session
     open_pps: Option[u32]      // SRTP open attempts per second per unit, before authentication
@@ -1933,7 +1933,14 @@ Rulings of the media Wave 2 design review (VERDICT-MEDIA-W2, 2026-11-26), applie
 
 - **PO1 (the `inflight` window and inboxes).** Control inboxes are sized from `inflight +
   rooms` at pool start, a `Full` post is retried, and overflow is not a pool fault (The
-  control plane). The default `inflight` is calibrated against real runs in P3.
+  control plane). The default `inflight` is calibrated against real runs in P3: it is 8
+  (`signal.INFLIGHT`). In the P3 run (3 units, 32 rooms of 16 queued joins each, 512 calls,
+  stepped on one core), a backlog took 512 / `inflight` control turns: 4.0 ms in all at 1,
+  2.0 ms at 8 and 1.8 ms at 32, while a control turn's worst wall time grew with the window:
+  22 µs at 1, 38 µs at 8 and 123 µs at 32, about 4 µs per call in flight. Past 8 the backlog
+  finishes less than an eighth sooner, and every turn's control work, which every fence
+  waits behind (Fence latency), keeps growing. `bound steps` budgets on a turn are not set:
+  the build has no step count to read from one run, so they wait for a measured one.
 - **PO2 (primary-unit affinity).** Kept (Sizing and admission).
 - **PO3 (the shared receive pool).** Stays shared and unisolated before authentication;
   isolation starts after it (Isolation, items 4 and 6).

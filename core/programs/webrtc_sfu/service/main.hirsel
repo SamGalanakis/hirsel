@@ -503,7 +503,7 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
     let (order_to, orders): (Sender[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]], Receiver[webrtc_sfu.signal.PoolOrder[webrtc_sfu.signal.Signal]]) = channel.new(1u64)
     let (reports, _reported): (Sender[webrtc_sfu.signal.PoolReport], Receiver[webrtc_sfu.signal.PoolReport]) = channel.new(16u64)
     let _ = channel.send(order_to, Open(name: webrtc_sfu.signal.room_name(b"room"), dial: take dial, limits: limits, embed: take embed))
-    let pool_limits = webrtc_sfu.signal.PoolLimits(units: s.units, unit_bytes: 67108864, rooms: 1, sessions: 16, inflight: 1, media_take: 1024, room_pps: 100000, open_pps: None)
+    let pool_limits = webrtc_sfu.signal.PoolLimits(units: s.units, unit_bytes: 67108864, rooms: 1, sessions: 16, inflight: webrtc_sfu.signal.INFLIGHT, media_take: 1024, room_pps: 100000, open_pps: None)
     let pool = webrtc_sfu.signal.Pool(tasks, net: n, clock, random, binds: binds, policy: webrtc_sfu.sdp.default_policy(), session: webrtc_sfu.peer.PeerLimits(sections: 16, down_tracks: 12, rtx_bytes: 1048576, pacer_packets: 256, start_bps: 300000), limits: pool_limits, orders: take orders, reports: take reports, until: until, relay: Some(webrtc_sfu.signal.RelayLink(master: take signal_master, plan: take plan, revokes: take revoke_to)))
     match webrtc_sfu.signal.serve_pool(take pool) {
         Ok(_) => (),

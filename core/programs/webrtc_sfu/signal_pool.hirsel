@@ -15,6 +15,11 @@ pub type PoolLimits {
     open_pps: Option[u32]
 }
 
+/// The default `inflight`, calibrated in P3 (RTC-10, design review PO1): eight control
+/// calls in flight cut the turns a backlog takes eightfold against one, a turn's
+/// control work stays near 40 µs, and a wider window gains less than an eighth more.
+pub const INFLIGHT: u16 = 8
+
 /// The application's name for a room: 32 bytes, opaque to the pool.
 pub type RoomName: key = RoomName(Inline[u8, 32])
 

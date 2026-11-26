@@ -390,18 +390,18 @@ def execute(invoke, vm, jobs, archives, log):
     return status
 
 
-def dispatch(groups, ttl, state, invoke, dry_run=False, job_class="law", log_root=None):
+def dispatch(groups, ttl, state, invoke, dry_run=False, job_class="law", log_root=None, bundle_cache=None):
     lock = (state / "laws.lock").open("a") if state and job_class == "law" else nullcontext()
     with lock as pending:
         if pending is not None:
             fcntl.flock(pending, fcntl.LOCK_SH)
-        return run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root)
+        return run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root, bundle_cache)
 
 
-def run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root):
+def run_batches(groups, ttl, state, invoke, dry_run, job_class, log_root, bundle_cache):
     archives = {}
     if not dry_run:
-        cache = state / "bundles"
+        cache = state / "bundles" if bundle_cache is None else bundle_cache
         cache.mkdir(mode=0o700, exist_ok=True)
         for job in (job for group in groups for job in group):
             if job.inputs not in archives:
@@ -505,6 +505,8 @@ def main():
     parser.add_argument("--ttl", type=positive, default=os.environ.get("HIRSEL_BOAT_TTL", "3600"))
     parser.add_argument("--log-dir", type=Path,
                         help="root for per-VM log directories (default: a fresh directory under TMPDIR)")
+    parser.add_argument("--bundle-cache", type=Path,
+                        help="archive cache directory (default: the shared Boat bundle cache)")
     parser.add_argument("--dry-run", action="store_true", help="simulate VM starts without contacting Boat")
     args = parser.parse_args()
     if args.manifest and (args.lane or args.worktree or args.fetch):
@@ -537,7 +539,8 @@ def run(args, parser):
                         log_root=log_root)
     state = Path.home() / ".local/state/hirsel-boat"
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    return dispatch(groups, args.ttl, state, boat, job_class=args.job_class, log_root=log_root)
+    return dispatch(groups, args.ttl, state, boat, job_class=args.job_class, log_root=log_root,
+                    bundle_cache=args.bundle_cache)
 
 
 if __name__ == "__main__":

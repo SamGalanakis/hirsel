@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Locate the first-parent instruction gate crossing with matched Boat screen jobs."""
 import argparse
+from collections import deque
+from contextlib import contextmanager
 import csv
 from decimal import Decimal
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -54,43 +57,55 @@ class ScreenProbes:
         self.args = args
         self.good = good
         self.scratch = scratch
-        self.checkout = scratch / "checkout"
 
+    @contextmanager
     def prepare(self, commit, selected):
-        out = self.scratch / commit
-        if not self.checkout.exists():
-            git("worktree", "add", "--detach", self.checkout, commit)
-        else:
-            git("switch", "--detach", commit, cwd=self.checkout)
         rows = [part for suite, name in selected for part in ("--row", f"{suite}/{name}")]
-        with (self.args.out / f"{commit[:12]}-build.log").open("w") as log:
-            # Use each revision's compiler and workload adapters with the current screen driver.
-            subprocess.run([sys.executable, "-c", PREPARE, screen.__file__, "prepare", out,
-                            "--awfy", self.args.awfy, "--langarena", self.args.langarena, *rows],
-                           cwd=self.checkout, stdout=log, stderr=subprocess.STDOUT, check=True)
-        return out
-
-    def close(self):
-        if self.checkout.exists():
-            buck = self.checkout / ".buck2/bin/buck2"
+        with tempfile.TemporaryDirectory(prefix=f"{commit[:12]}-", dir=self.scratch) as temporary:
+            build = Path(temporary)
+            checkout = build / "checkout"
+            out = build / "images"
+            git("worktree", "add", "--detach", checkout, commit)
             try:
-                if buck.exists():
-                    subprocess.run([buck, "kill"], cwd=self.checkout, check=True)
+                with (build / "build.log").open("w+", errors="replace") as log:
+                    try:
+                        subprocess.run([sys.executable, "-c", PREPARE, screen.__file__, "prepare", out,
+                                        "--awfy", self.args.awfy, "--langarena", self.args.langarena, *rows],
+                                       cwd=checkout, stdout=log, stderr=subprocess.STDOUT, check=True)
+                    except subprocess.CalledProcessError:
+                        log.seek(0)
+                        sys.stderr.writelines(deque(log, maxlen=40))
+                        raise
             finally:
-                git("worktree", "remove", "--force", self.checkout)
+                buck = checkout / ".buck2/bin/buck2"
+                try:
+                    if buck.exists():
+                        subprocess.run([buck, "kill"], cwd=checkout, check=True)
+                finally:
+                    git("worktree", "remove", "--force", checkout)
+            yield out
 
     def measure(self, base, candidate, commit, rows, tag):
         print(f"Boat screen {self.good[:12]}..{commit[:12]}: {', '.join('/'.join(row) for row in rows)}",
               flush=True)
         with tempfile.TemporaryDirectory(dir=self.scratch) as temporary:
-            bundle = Path(temporary)
+            scratch = Path(temporary)
+            bundle = scratch / "bundle"
+            bundle.mkdir()
             args = argparse.Namespace(base=base, candidate=candidate, awfy=self.args.awfy)
             job = screen.screen_job(args, bundle, rows, instructions_only=True)
-            out = self.args.out / tag
-            subprocess.run([ROOT / "tools/boat-dispatch", "--log-dir", self.args.out / "boat-logs",
-                            "--fetch", f"instructions.tsv:{out}",
+            subprocess.run([ROOT / "tools/boat-dispatch", "--log-dir", scratch / "logs",
+                            "--bundle-cache", scratch / "archives", "--fetch", f"instructions.tsv:{scratch}",
                             job["lane"], job["bundle"], job["command"]], check=True)
-            return read_counts(out / "instructions.tsv", dict(base=self.good, candidate=commit), rows)
+            receipt = scratch / "instructions.tsv"
+            counts = read_counts(receipt, dict(base=self.good, candidate=commit), rows)
+            retained = self.args.out / tag
+            retained.mkdir(exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=retained) as staging:
+                staged = Path(staging) / receipt.name
+                shutil.copyfile(receipt, staged)
+                staged.replace(retained / receipt.name)
+            return counts
 
 
 def read_counts(path, commits, rows):
@@ -143,21 +158,18 @@ def bisect(commits, rows, measure, limit):
 def run(args, good, bad, rows):
     commits = revisions(good, bad)
     args.out.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="board-bisect-", dir=args.out) as temporary:
+    with tempfile.TemporaryDirectory(prefix="board-bisect-") as temporary:
         probes = ScreenProbes(args, commits[0], Path(temporary))
-        try:
-            base = probes.prepare(commits[0], rows)
+        with probes.prepare(commits[0], rows) as base:
             job = 0
 
             def measure(commit, selected):
                 nonlocal job
                 job += 1
-                candidate = probes.prepare(commit, selected)
-                return probes.measure(base, candidate, commit, selected, f"probe-{job:03d}-{commit[:12]}")
+                with probes.prepare(commit, selected) as candidate:
+                    return probes.measure(base, candidate, commit, selected, f"probe-{job:03d}-{commit[:12]}")
 
             yield from bisect(commits, rows, measure, args.limit)
-        finally:
-            probes.close()
 
 
 def announce(path, line):

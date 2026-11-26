@@ -114,6 +114,7 @@ impl HostOp {
             HostOp::ScheduleSframeRatchet => "schedule_sframe_ratchet",
             HostOp::ScheduleSealer => "schedule_sealer",
             HostOp::ScheduleOpener => "schedule_opener",
+            HostOp::ScheduleNextOpener => "schedule_next_opener",
             HostOp::ScheduleHeaderMask => "schedule_header_mask",
             HostOp::PacketSeal => "packet_seal",
             HostOp::PacketSealInto => "packet_seal_into",

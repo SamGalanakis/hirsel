@@ -113,6 +113,7 @@ pub(super) fn parameters(op: HostOp) -> &'static [&'static str] {
         HostOp::ScheduleImportSframe | HostOp::ScheduleSframeRatchet => &["u64", "u64"],
         HostOp::ScheduleSframeOpener => &["u64"; 3],
         HostOp::ScheduleSframeSealer => &["u64"; 4],
+        HostOp::ScheduleNextOpener => &["u64"],
         HostOp::ScheduleOpener | HostOp::ScheduleSpaceInfo => &["u64", "u64"],
         HostOp::ScheduleHeaderMask => &["u64", "u64", "bool"],
         HostOp::PacketSeal => &["u64", "u64", "ptr", "u64", "u64", "ptr"],

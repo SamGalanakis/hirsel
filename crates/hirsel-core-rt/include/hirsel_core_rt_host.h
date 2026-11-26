@@ -459,6 +459,7 @@ HirselCoreHostOutcome hirsel_core_schedule_sframe_sealer(HirselCoreContext *, ui
 HirselCoreHostOutcome hirsel_core_schedule_sframe_opener(HirselCoreContext *, uint64_t, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_sframe_ratchet(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_opener(HirselCoreContext *, uint64_t, uint64_t, uint64_t);
+HirselCoreHostOutcome hirsel_core_schedule_next_opener(HirselCoreContext *, uint64_t, uint64_t);
 HirselCoreHostOutcome hirsel_core_schedule_header_mask(HirselCoreContext *, uint64_t, uint64_t, bool, uint64_t);
 HirselCoreHostOutcome hirsel_core_packet_seal(HirselCoreContext *, uint64_t, uint64_t, HirselCoreBuffer *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t);
 HirselCoreHostOutcome hirsel_core_packet_seal_into(HirselCoreContext *, uint64_t, uint64_t, const HirselCoreBuffer *, uint64_t, HirselCoreBuffer *, uint64_t, const HirselCoreBuffer *, uint64_t);

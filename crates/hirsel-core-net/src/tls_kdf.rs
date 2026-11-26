@@ -294,6 +294,12 @@ impl Tls13Traffic {
         self.key_update(side);
         self.secrets[side as usize].packet_keys(self.labels, algorithm, true)
     }
+
+    pub(super) fn next_packet_keys(&self, side: Side, algorithm: AeadAlg) -> Tls13PacketKeys {
+        self.secrets[side as usize]
+            .updated(self.labels)
+            .packet_keys(self.labels, algorithm, true)
+    }
 }
 
 impl DigestSecret {
@@ -335,6 +341,12 @@ impl Tls13Direction {
     pub(super) fn key_update(&mut self) -> Tls13PacketKeys {
         self.secret = self.secret.updated(self.labels);
         self.secret.packet_keys(self.labels, self.algorithm, true)
+    }
+
+    pub(super) fn next_packet_keys(&self) -> Tls13PacketKeys {
+        self.secret
+            .updated(self.labels)
+            .packet_keys(self.labels, self.algorithm, true)
     }
 }
 

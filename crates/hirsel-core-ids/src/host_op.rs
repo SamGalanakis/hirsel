@@ -174,6 +174,8 @@ host_ops! {
     /// `stdin.read_secret`: one echo-off terminal line, sealed by the host.
     /// The value is the Secret's designation.
     STDIN_SECRET = 182,
+    /// TLS-8: issue an opener for the next QUIC receive key phase.
+    SCHEDULE_NEXT_OPENER = 183,
 }
 
 // OpenMode's appended case numbers. Existing cases and tape records keep

@@ -82,6 +82,7 @@ impl HostOp {
             Self::ScheduleSframeRatchet => "hirsel_core_schedule_sframe_ratchet",
             Self::ScheduleSealer => "hirsel_core_schedule_sealer",
             Self::ScheduleOpener => "hirsel_core_schedule_opener",
+            Self::ScheduleNextOpener => "hirsel_core_schedule_next_opener",
             Self::ScheduleHeaderMask => "hirsel_core_schedule_header_mask",
             Self::PacketSeal => "hirsel_core_packet_seal",
             Self::PacketSealInto => "hirsel_core_packet_seal_into",

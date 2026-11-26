@@ -145,6 +145,7 @@ pub enum HostOp {
     ScheduleSframeRatchet = hirsel_core_ids::host_op::SCHEDULE_SFRAME_RATCHET as isize,
     ScheduleSealer = hirsel_core_ids::host_op::SCHEDULE_SEALER as isize,
     ScheduleOpener = hirsel_core_ids::host_op::SCHEDULE_OPENER as isize,
+    ScheduleNextOpener = hirsel_core_ids::host_op::SCHEDULE_NEXT_OPENER as isize,
     ScheduleHeaderMask = hirsel_core_ids::host_op::SCHEDULE_HEADER_MASK as isize,
     PacketSeal = hirsel_core_ids::host_op::PACKET_SEAL as isize,
     PacketSealInto = hirsel_core_ids::host_op::PACKET_SEAL_INTO as isize,
@@ -300,6 +301,7 @@ impl HostOp {
         HostOp::ScheduleSframeRatchet,
         HostOp::ScheduleSealer,
         HostOp::ScheduleOpener,
+        HostOp::ScheduleNextOpener,
         HostOp::ScheduleHeaderMask,
         HostOp::PacketSeal,
         HostOp::PacketSealInto,
@@ -625,6 +627,7 @@ impl HostOp {
             ),
             HostOp::ScheduleSealer => (vec![V(u64_), V(u64_), V(u64_), V(u64_)], outcome),
             HostOp::ScheduleSealerPair => (vec![V(u64_); 6], outcome),
+            HostOp::ScheduleNextOpener => (vec![V(u64_)], outcome),
             HostOp::ScheduleOpener | HostOp::ScheduleSpaceInfo => (vec![V(u64_); 2], outcome),
             HostOp::ScheduleHeaderMask => {
                 (vec![V(u64_), V(u64_), V(Ty::Scalar(Scalar::Bool))], outcome)
@@ -743,6 +746,7 @@ impl HostOp {
                 | HostOp::ScheduleSframeRatchet
                 | HostOp::ScheduleSealer
                 | HostOp::ScheduleOpener
+                | HostOp::ScheduleNextOpener
                 | HostOp::ScheduleHeaderMask
                 | HostOp::PacketSeal
                 | HostOp::PacketSealInto

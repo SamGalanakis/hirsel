@@ -25,6 +25,14 @@ pub(super) enum Payload {
     Mask(HeaderMask),
 }
 
+fn opener_payload(issued: packet_epoch::Opener<'_, Limit>) -> Payload {
+    Payload::Opener(
+        issued.nonce,
+        issued.algorithm,
+        Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
+    )
+}
+
 pub(super) struct Media {
     owner: Limit,
     payload: Payload,
@@ -147,24 +155,23 @@ impl Machine<'_> {
             HostOp::ScheduleFinished | HostOp::ScheduleVerifyFinished => {
                 Ok(self.schedule_finished(op, a))
             }
-            HostOp::ScheduleSealer | HostOp::ScheduleOpener | HostOp::ScheduleHeaderMask => {
+            HostOp::ScheduleSealer
+            | HostOp::ScheduleOpener
+            | HostOp::ScheduleNextOpener
+            | HostOp::ScheduleHeaderMask => {
                 let slot = a[0] as usize;
                 let mut held = self.host.world.media[slot].take().unwrap();
                 let Payload::Schedule(schedule) = &mut held.payload else {
                     unreachable!()
                 };
-                let epoch = match schedule.epoch(a[1]) {
-                    Ok(epoch) => epoch,
-                    Err(error) => {
-                        self.host.world.media[slot] = Some(held);
-                        return Ok(issue_error(error));
-                    }
-                };
                 let child = match op {
-                    HostOp::ScheduleSealer => epoch
-                        .sealer(a[2], a[3], |n| {
-                            self.admit(&payer, n)
-                                .map(|()| (payer.clone(), payer.clone()))
+                    HostOp::ScheduleSealer => schedule
+                        .epoch(a[1])
+                        .and_then(|epoch| {
+                            epoch.sealer(a[2], a[3], |n| {
+                                self.admit(&payer, n)
+                                    .map(|()| (payer.clone(), payer.clone()))
+                            })
                         })
                         .map(|issued| {
                             Payload::Sealer(
@@ -173,17 +180,23 @@ impl Machine<'_> {
                                 Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
                             )
                         }),
-                    HostOp::ScheduleOpener => epoch
-                        .opener(|n| self.admit(&payer, n).map(|()| payer.clone()))
-                        .map(|issued| {
-                            Payload::Opener(
-                                issued.nonce,
-                                issued.algorithm,
-                                Cipher::new(issued.algorithm, issued.key.unwrap()).unwrap(),
-                            )
-                        }),
-                    _ => epoch
-                        .header_mask(a[2] != 0, |n| self.admit(&payer, n).map(|()| payer.clone()))
+                    HostOp::ScheduleOpener => schedule
+                        .view_epoch(a[1])
+                        .and_then(|epoch| {
+                            epoch.opener(|n| self.admit(&payer, n).map(|()| payer.clone()))
+                        })
+                        .map(opener_payload),
+                    HostOp::ScheduleNextOpener => schedule.next_opener(
+                        |n| self.admit(&payer, n).map(|()| payer.clone()),
+                        opener_payload,
+                    ),
+                    _ => schedule
+                        .view_epoch(a[1])
+                        .and_then(|epoch| {
+                            epoch.header_mask(a[2] != 0, |n| {
+                                self.admit(&payer, n).map(|()| payer.clone())
+                            })
+                        })
                         .map(|(key, _)| Payload::Mask(key.unwrap())),
                 };
                 self.host.world.media[slot] = Some(held);

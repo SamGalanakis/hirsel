@@ -179,6 +179,7 @@ impl Machine<'_> {
             | HostOp::ScheduleSframeRatchet
             | HostOp::ScheduleSealer
             | HostOp::ScheduleOpener
+            | HostOp::ScheduleNextOpener
             | HostOp::ScheduleHeaderMask
             | HostOp::PacketSeal
             | HostOp::PacketSealInto

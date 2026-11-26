@@ -6,7 +6,7 @@ use crate::{
 };
 use hirsel_core_net::{
     packet_cipher::HeaderMask,
-    packet_epoch::{CIPHER_CHARGE, DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
+    packet_epoch::{self, CIPHER_CHARGE, DOMAIN_CHARGE, Epoch, IssueError, SCHEDULE_CHARGE},
     packet_nonce::{ReceiverNonce, SenderCounter},
     packet_protection::{self, Algorithm},
     packet_schedule,
@@ -339,40 +339,101 @@ pub unsafe extern "C" fn hirsel_core_schedule_opener(
     space: u64,
     site: u64,
 ) -> Outcome {
-    // SAFETY: the checked caller lends this schedule, and context remains running.
+    // SAFETY: the checked caller lends this schedule in the running context.
     let schedule = unsafe { media::loan::<Schedule>(schedule) };
-    let parent = schedule.origin;
     let epoch = match schedule.state.view_epoch(space) {
         Ok(epoch) => epoch,
         Err(error) => return refusal(error),
     };
-    match epoch.opener(|requested| {
+    let issued = epoch.opener(|requested| {
+        // SAFETY: context remains live throughout this call.
         admit(unsafe { &*context }, requested).map(|charge| track(unsafe { &*context }, charge))
-    }) {
-        Ok(issued) => {
-            // SAFETY: the public space and result remain live through the issue.
-            let origin = match unsafe {
-                media::issue_child(context, parent, 4, &[space.to_le_bytes()], site)
-            } {
-                Ok(origin) => origin,
-                Err(outcome) => return outcome,
-            };
-            owned(Opener {
-                nonce: issued.nonce,
-                algorithm: issued.algorithm,
-                cipher: issued
-                    .key
-                    .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
-                origin: Origin::new(origin, true, &issued.charge),
-                #[cfg(feature = "record")]
-                space: space as u8,
-                #[cfg(feature = "record")]
-                profile: schedule.profile,
-                _charge: issued.charge,
-            })
-        }
+    });
+    match issued {
+        // SAFETY: the parent belongs to the running context and its tape.
+        Ok(issued) => unsafe {
+            hold_opener(
+                context,
+                schedule,
+                issued,
+                4,
+                &[space.to_le_bytes()],
+                space as u8,
+                site,
+            )
+        },
         Err(error) => refusal(error),
     }
+}
+
+/// # Safety
+/// The schedule is live and borrowed in the running context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_schedule_next_opener(
+    context: *mut Context,
+    schedule: u64,
+    site: u64,
+) -> Outcome {
+    const NEXT_OPENER: u8 = 24;
+    const APPLICATION: u8 = 2;
+    // SAFETY: the checked caller lends this schedule, and context remains running.
+    let schedule = unsafe { media::loan::<Schedule>(schedule) };
+    match schedule.state.next_opener(
+        |requested| {
+            // SAFETY: context remains live throughout this call.
+            let context = unsafe { &*context };
+            admit(context, requested).map(|charge| track(context, charge))
+        },
+        |issued| {
+            // SAFETY: the parent belongs to the running context and its tape.
+            unsafe {
+                hold_opener(
+                    context,
+                    schedule,
+                    issued,
+                    NEXT_OPENER,
+                    &[],
+                    APPLICATION,
+                    site,
+                )
+            }
+        },
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => refusal(error),
+    }
+}
+
+/// # Safety
+/// The parent belongs to the running context and its synchronous tape.
+unsafe fn hold_opener(
+    context: *mut Context,
+    schedule: &Schedule,
+    issued: packet_epoch::Opener<'_, Paid>,
+    operation: u8,
+    fields: &[[u8; 8]],
+    _space: u8,
+    site: u64,
+) -> Outcome {
+    // SAFETY: the parent, public operands and context remain live through issue.
+    let origin =
+        match unsafe { media::issue_child(context, schedule.origin, operation, fields, site) } {
+            Ok(origin) => origin,
+            Err(outcome) => return outcome,
+        };
+    owned(Opener {
+        nonce: issued.nonce,
+        algorithm: issued.algorithm,
+        cipher: issued
+            .key
+            .map(|key| Cipher::new(issued.algorithm, key).unwrap()),
+        origin: Origin::new(origin, true, &issued.charge),
+        #[cfg(feature = "record")]
+        space: _space,
+        #[cfg(feature = "record")]
+        profile: schedule.profile,
+        _charge: issued.charge,
+    })
 }
 
 /// # Safety

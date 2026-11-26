@@ -412,7 +412,7 @@ RFC 9002 as written, with its Appendix A and B pseudocode as the oracle:
 **Key update and AEAD limits** (RFC 9001 §6). The endpoint initiates a key update only once
 the handshake is confirmed and a packet of the current phase has been acknowledged (§6.1).
 A received packet with a flipped key phase is opened with the *next* receive key through
-QS0's non-consuming next-phase open; only if that packet authenticates does the endpoint
+`schedule.next_opener(s)`; only if that packet authenticates does the endpoint
 commit `schedule.key_update(s, false)` and answer with its own update. A forged packet with
 a flipped phase bit therefore cannot advance or destroy the receive key. One previous
 receive key is kept for three PTOs (§6.5). Each key counts packets sealed and packets that
@@ -593,7 +593,7 @@ comparison.
 
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
-| **QS0** TLS-8 additions | the non-consuming next-phase open TLS-8 lacks: open one packet under the next receive key phase without retiring the current one, so `key_update(s, false)` commits only after it authenticates (QUIC-6). The Retry tag: if `secret.aead_seal(key, aes128-gcm, …)` over a `Secret` holding RFC 9001 §5.8's published key covers it, QS0 adds nothing for it; otherwise `schedule.retry_tag(odcid, packet, mut out)` | — | Q2's A.4 rows, in TLS-8's PC1; Q13's forged-phase case |
+| **QS0** TLS-8 additions | `schedule.next_opener(s)` opens the next receive phase through `packet.open` before `key_update(s, false)` commits it (QUIC-6). Retry uses `secret.aead_seal` with the published AES-128-GCM key and nonce, and empty plaintext. | — | Q2's A.4 rows in TLS-8's PC1 and Q13's forged-phase case |
 | **QS1** Codec | varints, headers, every frame, coalescing, packet-number decoding | — | Q1, Q3 (codec rows) |
 | **QS2** Handshake | `quic.handshake`: TLS 1.3 messages and extensions, transport parameters, `Pin.Cert` and `Pin.Spki` lists, DER ECDSA signing, `verify_der` and Ed25519 verifying, `std.x509_key`'s Ed25519 answer and SPKI range | QS1, QS0 | Q2, Q16 |
 | **QS3** Connection core | Initial, Handshake and 1-RTT spaces, the receive classifier, CIDs, ACKs, CONNECTION_CLOSE, idle, `client_pins` (mutual TLS), the `Endpoint`, `committed` | QS2 | Q3, Q4 (handshake only), Q16 (client pins) |

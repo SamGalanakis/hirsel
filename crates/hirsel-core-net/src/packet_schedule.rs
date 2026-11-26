@@ -2,7 +2,8 @@
 use crate::{
     ImportKind, ImportUse,
     packet_epoch::{
-        DirectionKeys, Epoch, ImportError, IssueError, Sealer, tls13_labels, traffic_profile,
+        DirectionKeys, Epoch, ImportError, IssueError, Opener, Sealer, tls13_labels,
+        traffic_profile,
     },
     packet_nonce::NonceFormat,
     packet_sframe::Sframe,
@@ -423,6 +424,32 @@ impl<C> Schedule<C> {
             Kind::Tls13 { .. } if self.spaces[APPLICATION].is_some() => Ok(()),
             _ => Err(IssueError::Invalid),
         }
+    }
+
+    pub fn next_opener<T>(
+        &self,
+        admit: impl FnOnce(u64) -> Result<C, u64>,
+        issue: impl FnOnce(Opener<'_, C>) -> T,
+    ) -> Result<T, IssueError> {
+        self.check_update(false)?;
+        self.view_epoch(APPLICATION as u64)?.next_opener(
+            admit,
+            || match &self.kind {
+                Kind::Tls13 {
+                    side,
+                    algorithm,
+                    application,
+                    ..
+                } => application
+                    .as_ref()
+                    .map(|traffic| traffic.next_packet_keys(side.peer(), *algorithm)),
+                Kind::TrafficImport { traffic, .. } => {
+                    traffic.as_ref().map(Tls13Direction::next_packet_keys)
+                }
+                _ => unreachable!("checked receive key update"),
+            },
+            issue,
+        )
     }
 
     pub fn key_update(&mut self, local: bool) -> impl Iterator<Item = C> {

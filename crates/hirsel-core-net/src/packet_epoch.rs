@@ -319,21 +319,42 @@ impl<C> Epoch<C> {
         &self,
         admit: impl FnOnce(u64) -> Result<C, u64>,
     ) -> Result<Opener<'_, C>, IssueError> {
+        let charge = self.admit_opener(admit)?;
+        Ok(self.receive_opener(&self.receive, charge))
+    }
+
+    pub(super) fn next_opener<T>(
+        &self,
+        admit: impl FnOnce(u64) -> Result<C, u64>,
+        derive: impl FnOnce() -> Option<Tls13PacketKeys>,
+        issue: impl FnOnce(Opener<'_, C>) -> T,
+    ) -> Result<T, IssueError> {
+        if !matches!(self.format, NonceFormat::Quic | NonceFormat::QuicMultipath) {
+            return Err(IssueError::Invalid);
+        }
+        let charge = self.admit_opener(admit)?;
+        let keys = derive().map_or(DirectionKeys::Opaque, DirectionKeys::Live);
+        Ok(issue(self.receive_opener(&keys, charge)))
+    }
+
+    fn admit_opener(&self, admit: impl FnOnce(u64) -> Result<C, u64>) -> Result<C, IssueError> {
         self.receive.validate()?;
         if self.domains.is_none() {
             return Err(IssueError::Spent);
         }
-        let charge = admit(CIPHER_CHARGE).map_err(|available| IssueError::Capacity {
+        admit(CIPHER_CHARGE).map_err(|available| IssueError::Capacity {
             requested: CIPHER_CHARGE,
             available,
-        })?;
-        let nonce = ReceiverNonce::with_base(self.format, self.receive.base(self.algorithm));
-        Ok(Opener {
-            nonce,
-            algorithm: self.algorithm,
-            key: self.receive.key(),
-            charge,
         })
+    }
+
+    fn receive_opener<'a>(&self, keys: &'a DirectionKeys, charge: C) -> Opener<'a, C> {
+        Opener {
+            nonce: ReceiverNonce::with_base(self.format, keys.base(self.algorithm)),
+            algorithm: self.algorithm,
+            key: keys.key(),
+            charge,
+        }
     }
 
     pub fn header_mask(

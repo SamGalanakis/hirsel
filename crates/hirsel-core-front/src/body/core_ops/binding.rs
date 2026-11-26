@@ -402,6 +402,7 @@ operations! {
     ("schedule", "sframe_opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleSframeOpener)), "A", "sframe-import-build-2702", false),
     ("schedule", "sframe_ratchet", Lane::Runtime(Kernel::Media(HostOp::ScheduleSframeRatchet)), "A", "sframe-import-build-2702", false),
     ("schedule", "opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleOpener)), "A", "media-w0-crypto-build-2282", false),
+    ("schedule", "next_opener", Lane::Runtime(Kernel::Media(HostOp::ScheduleNextOpener)), "A", "quic-qs0-tls-peek-2931", false),
     ("schedule", "header_mask", Lane::Runtime(Kernel::Media(HostOp::ScheduleHeaderMask)), "A", "media-w0-crypto-build-2282", false),
     ("packet", "seal", Lane::Runtime(Kernel::Media(HostOp::PacketSeal)), "A", "media-w0-crypto-build-2282", false),
     ("packet", "seal_into", Lane::Runtime(Kernel::Media(HostOp::PacketSealInto)), "A", "media-w0-crypto-build-2282", false),

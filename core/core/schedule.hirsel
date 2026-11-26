@@ -65,6 +65,8 @@ pub fn sealer_pair(mut s: Schedule, first: packet.Space, second: packet.Space, d
 
 pub fn opener(s: Schedule, space: packet.Space) -> Result[packet.Opener, ScheduleError]
 
+pub fn next_opener(s: Schedule) -> Result[packet.Opener, ScheduleError]
+
 pub fn header_mask(s: Schedule, space: packet.Space, local: bool) -> Result[packet.HeaderMask, ScheduleError]
 
 pub fn sframe_sealer(mut s: Schedule, steps: u64, kid: u64, floor: u64) -> Result[packet.Sealer, ScheduleError]

@@ -162,8 +162,10 @@ fn enter_queue(
 impl Uring {
     pub(super) const ENTRIES: u32 = 64;
     /// NODROP retains completions past this capacity. The owner enters
-    /// with GETEVENTS to flush them once reaping has made room.
-    const READINESS_ENTRIES: u32 = 4096;
+    /// with GETEVENTS to flush them once reaping has made room. A turn reaps
+    /// at most 256 events (the runtime's poll buffer), so a larger queue only
+    /// pins more pages: 4,096 entries pinned 68 KiB in every process.
+    const READINESS_ENTRIES: u32 = 256;
     /// One SQ batch's completions: the most an entry posts is two, a
     /// zero-copy send's result and notification. More in flight wait on the
     /// kernel's overflow list (NODROP) until reaping makes room.

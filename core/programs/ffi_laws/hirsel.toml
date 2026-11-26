@@ -12,6 +12,7 @@ charge = "charge-v1"
 symbols = "hfl_"
 archives = [
   { target = "x86_64-unknown-linux-gnu", file = "libffi_laws.a", sha256 = "e537a8063c12efba7ee5c56c24306e4673de16fe53fe9b1340e3b254f0f50af6" },
+  { target = "aarch64-apple-darwin", file = "libffi_laws-aarch64-apple-darwin.a", sha256 = "ff9e14b56de53c21d71d7305e93eb69474a10186fd1e8774304dd40b1887c1c9" },
 ]
 
 [tests]

@@ -15,6 +15,7 @@ std = { major = 1 }
 symbols = "hh264_"
 archives = [
   { target = "x86_64-unknown-linux-gnu", file = "libhirsel_h264.a", sha256 = "0ad007335b669d8145b8e3eece706305f4203222b3062006d33343a3eec627b0" },
+  { target = "aarch64-apple-darwin", file = "libhirsel_h264-aarch64-apple-darwin.a", sha256 = "7148a441b9dcee186437f10db6428afd72a931254730db5e5d661895131e893a" },
 ]
 
 [tests]

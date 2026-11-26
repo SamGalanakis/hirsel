@@ -50,7 +50,19 @@ int32_t hwebp_decode(const uint8_t *input_ptr, uint64_t input_len,
     return status == VP8_STATUS_OK ? 0 : CODEC_FAILURE;
 }
 
+#ifdef __APPLE__
+int32_t hwebp_decode_on_helper(const uint8_t *input_ptr, uint64_t input_len,
+                               uint32_t width, uint32_t height, uint32_t x, uint32_t y,
+                               uint32_t crop_width, uint32_t crop_height,
+                               uint32_t out_width, uint32_t out_height,
+                               uint8_t *rgba_ptr, uint64_t rgba_len)
+{
+    return hwebp_decode(input_ptr, input_len, width, height, x, y,
+                        crop_width, crop_height, out_width, out_height, rgba_ptr, rgba_len);
+}
+#else
 extern __typeof__(hwebp_decode) hwebp_decode_on_helper __attribute__((alias("hwebp_decode")));
+#endif
 
 int32_t hwebp_decode_animation(const uint8_t *input_ptr, uint64_t input_len,
                                uint32_t width, uint32_t height, uint32_t frames,
@@ -97,8 +109,19 @@ int32_t hwebp_decode_animation(const uint8_t *input_ptr, uint64_t input_len,
     return status;
 }
 
+#ifdef __APPLE__
+int32_t hwebp_decode_animation_on_helper(const uint8_t *input_ptr, uint64_t input_len,
+                                        uint32_t width, uint32_t height, uint32_t frames,
+                                        uint8_t *rgba_ptr, uint64_t rgba_len,
+                                        uint8_t *timestamps_ptr, uint64_t timestamps_len)
+{
+    return hwebp_decode_animation(input_ptr, input_len, width, height, frames,
+                                  rgba_ptr, rgba_len, timestamps_ptr, timestamps_len);
+}
+#else
 extern __typeof__(hwebp_decode_animation) hwebp_decode_animation_on_helper
     __attribute__((alias("hwebp_decode_animation")));
+#endif
 
 struct output {
     uint8_t *data;

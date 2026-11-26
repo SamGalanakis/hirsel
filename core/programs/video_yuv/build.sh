@@ -4,12 +4,20 @@ cd "$(dirname "$0")"
 compiler=${HIRSEL:-hirsel}
 llvm=${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the pinned LLVM tree}
 target=${YUV_TARGET:-x86_64-unknown-linux-gnu}
+if [ "${1:-}" = --darwin ]; then
+    target=aarch64-apple-darwin
+    shift
+fi
+system=Linux
+cc="$llvm/bin/clang"
+cxx="$llvm/bin/clang++"
 case "$target" in
     x86_64-unknown-linux-gnu) arch=x86_64; arch_flags= ;;
     aarch64-unknown-linux-gnu)
         arch=aarch64
         arch_flags="--sysroot=${YUV_AARCH64_SYSROOT:-/usr/aarch64-linux-gnu}"
         ;;
+    aarch64-apple-darwin) system=Darwin; arch=arm64; arch_flags= ;;
     *) echo "Unsupported libyuv target: $target" >&2; exit 1 ;;
 esac
 
@@ -19,6 +27,14 @@ source_sha=0df0780ea3c7695385a7e003b4e08f2b4150d1e52781b723602a8adf85f83c29
 stage=$(mktemp -d)
 checkout=$(mktemp -d /tmp/ref-libyuv.XXXXXX)
 trap 'rm -rf "$stage" "$checkout"' EXIT
+archive="libhirsel_yuv-$arch.a"
+if [ "$system" = Darwin ]; then
+    . ../../../tools/native-toolchain/darwin/foreign-archive.sh
+    darwin_compilers
+    cc="$stage/darwin-cc"
+    cxx="$stage/darwin-cxx"
+    archive=libhirsel_yuv-aarch64-apple-darwin.a
+fi
 "$compiler" inspect . --foreign-header video_yuv@1/native "$@" > "$stage/native.h"
 cp hirsel_yuv.c "$stage"
 if [ -n "${YUV_REFERENCE_DIR:-}" ]; then
@@ -36,16 +52,26 @@ fi
     mkdir source
     tar -xf libyuv.tar -C source
     flags="-O3 -DNDEBUG -ffunction-sections -fdata-sections -fPIC -fno-ident -fno-strict-aliasing -ffile-prefix-map=$PWD=."
-    # shellcheck disable=SC2086
-    cmake -S source -B build -G Ninja -DCMAKE_SYSTEM_NAME=Linux \
+    if [ "$system" = Darwin ]; then
+        set -- -DCMAKE_PROJECT_INCLUDE="$darwin_tools/foreign-lto.cmake" \
+            -DCMAKE_CXX_FLAGS="$flags -fno-exceptions -fno-rtti -include $darwin_tools/foreign-alloc.h"
+    else
+        set -- -DCMAKE_C_COMPILER_TARGET="$target" -DCMAKE_CXX_COMPILER_TARGET="$target" \
+            -DCMAKE_CXX_FLAGS="$flags $arch_flags -fno-exceptions -fno-rtti"
+    fi
+    cmake -S source -B build -G Ninja -DCMAKE_SYSTEM_NAME="$system" \
         -DCMAKE_SYSTEM_PROCESSOR="$arch" -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-        -DCMAKE_C_COMPILER="$llvm/bin/clang" -DCMAKE_C_COMPILER_TARGET="$target" \
-        -DCMAKE_CXX_COMPILER="$llvm/bin/clang++" -DCMAKE_CXX_COMPILER_TARGET="$target" \
+        -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" \
         -DCMAKE_AR="$llvm/bin/llvm-ar" -DCMAKE_RANLIB="$llvm/bin/llvm-ranlib" \
-        -DCMAKE_C_FLAGS="$flags $arch_flags" \
-        -DCMAKE_CXX_FLAGS="$flags $arch_flags -fno-exceptions -fno-rtti" \
+        -DCMAKE_C_FLAGS="$flags $arch_flags" "$@" \
         -DLIBYUV_DISABLE_JPEG=ON -DCAN_COMPILE_SME=OFF
     cmake --build build --target yuv --parallel "${HIRSEL_JOBS:-4}"
+    if [ "$system" = Darwin ]; then
+        "$cc" -std=c11 -O3 -flto -fPIC -fno-strict-aliasing -Wall -Wextra -Werror \
+            -Wno-unterminated-string-initialization -I source/include -c hirsel_yuv.c
+        darwin_archive "$archive" hyuv_ hirsel_yuv.o build/libyuv.a
+        exit
+    fi
     # shellcheck disable=SC2086
     "$llvm/bin/clang" --target="$target" $arch_flags -std=c11 -O3 -fPIC \
         -fno-ident -fno-strict-aliasing -Wall -Wextra -Werror \
@@ -75,4 +101,8 @@ LINK
         cp -R source/include "$reference"
     fi
 )
-cp "$stage/libhirsel_yuv.a" "libhirsel_yuv-$arch.a"
+if [ "$system" = Darwin ]; then
+    cp "$stage/$archive" "$archive"
+else
+    cp "$stage/libhirsel_yuv.a" "$archive"
+fi

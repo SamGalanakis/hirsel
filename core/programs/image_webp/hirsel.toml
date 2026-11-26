@@ -14,4 +14,5 @@ image_core = { major = 1, path = "../image_core" }
 symbols = "hwebp_"
 archives = [
   { target = "x86_64-unknown-linux-gnu", file = "libhirsel_webp.a", sha256 = "091f9e1ad48db0367cc1a2e5a4fefe04ac2e18c82bc6c3b46f8970a77e0ef5c4" },
+  { target = "aarch64-apple-darwin", file = "libhirsel_webp-aarch64-apple-darwin.a", sha256 = "38e34d0525050b67a5461f89743084f6d0d4fdae9337442decf915a695c222db" },
 ]

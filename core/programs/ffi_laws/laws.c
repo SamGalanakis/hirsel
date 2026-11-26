@@ -3,7 +3,11 @@
 
 #include <errno.h>
 #include <pthread.h>
+#ifdef __APPLE__
+#include <dispatch/dispatch.h>
+#else
 #include <semaphore.h>
+#endif
 #include <stdbool.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -18,6 +22,19 @@ static uint64_t freed;
 static uint64_t held;
 static bool gated;
 static pthread_once_t semaphore_once = PTHREAD_ONCE_INIT;
+#ifdef __APPLE__
+static dispatch_semaphore_t semaphore;
+
+static void initialize_semaphore(void) {
+    semaphore = dispatch_semaphore_create(0);
+    if (semaphore == NULL) abort();
+}
+
+static void await_open(void) {
+    pthread_once(&semaphore_once, initialize_semaphore);
+    if (dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER) != 0) abort();
+}
+#else
 static sem_t semaphore;
 
 static void initialize_semaphore(void) {
@@ -30,6 +47,7 @@ static void await_open(void) {
         if (errno != EINTR) abort();
     }
 }
+#endif
 
 void *hfl_make(void) {
     uint8_t *cell = NULL;
@@ -139,8 +157,12 @@ uint64_t hfl_held(void) {
 
 int32_t hfl_open(uint32_t n) {
     pthread_once(&semaphore_once, initialize_semaphore);
+#ifdef __APPLE__
+    for (uint32_t i = 0; i < n; ++i) dispatch_semaphore_signal(semaphore);
+#else
     for (uint32_t i = 0; i < n; ++i) {
         if (sem_post(&semaphore) != 0) abort();
     }
+#endif
     return 0;
 }

@@ -6,7 +6,11 @@
 
 extern "C" {
 #include "native.h"
+#ifdef __APPLE__
+void *__real_calloc(size_t, size_t) __asm("_calloc");
+#else
 void *__real_calloc(size_t, size_t);
+#endif
 }
 
 #include "codec_api.h"
@@ -103,8 +107,13 @@ int64_t frame(const SBufferInfo &info, uint8_t *const planes[3],
 
 // ld.lld redirects the codec's malloc/calloc/free references to these private
 // functions. The ownership header allows a session to move between tasks.
+#ifdef __APPLE__
+extern "C" void *__real_malloc(size_t) __asm("_malloc");
+extern "C" void __real_free(void *) __asm("_free");
+#else
 extern "C" void *__real_malloc(size_t);
 extern "C" void __real_free(void *);
+#endif
 
 extern "C" void *__wrap_malloc(size_t bytes)
 {

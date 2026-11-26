@@ -1,10 +1,19 @@
 #!/bin/sh
 set -eu
+darwin=
+if [ "${1:-}" = --darwin ]; then
+    darwin=1
+    shift
+fi
 cd "$(dirname "$0")"
 compiler=${HIRSEL:-hirsel}
 llvm=${LLVM_SYS_231_PREFIX:?set LLVM_SYS_231_PREFIX to the pinned LLVM tree}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
+if [ -n "$darwin" ]; then
+    . ../../../tools/native-toolchain/darwin/foreign-archive.sh
+    darwin_compilers
+fi
 "$compiler" inspect . --foreign-header h264@1/native "$@" > "$stage/native.h"
 cp hirsel_h264.cpp decoder-allocation.patch "$stage"
 (
@@ -20,8 +29,21 @@ cp hirsel_h264.cpp decoder-allocation.patch "$stage"
     tar -xf openh264.tar.gz
     cd openh264-2.7.0
     patch --batch -p1 < ../decoder-allocation.patch
-    target=--target=x86_64-unknown-linux-gnu
     cxx="-fPIC -fno-ident -fno-exceptions -fno-rtti -fcheck-new -fno-threadsafe-statics -fno-sized-deallocation"
+    printf '%s\n' '#include "native.h"' 'HIRSEL_ABI_TEXT' > ../abi.c
+    if [ -n "$darwin" ]; then
+        make -j "${HIRSEL_JOBS:-4}" ARCH=arm64 OS=darwin USE_ASM=No \
+            CC="$stage/darwin-cc" CXX="$stage/darwin-cxx" AR="$llvm/bin/llvm-ar" \
+            CFLAGS_OPT="-O2 -flto -ffile-prefix-map=$PWD=. -DHIRSEL_WRAP_CALLOC -include $darwin_tools/foreign-alloc.h" \
+            CXXFLAGS="$cxx" libopenh264.a
+        "$stage/darwin-cxx" -std=c++17 -O2 -flto $cxx -Wall -Wextra -Werror \
+            -I codec/api/wels -c ../hirsel_h264.cpp -o ../hirsel_h264.o
+        "$stage/darwin-cc" -flto -fPIC -c ../abi.c -o ../abi.o
+        darwin_archive ../libhirsel_h264-aarch64-apple-darwin.a hh264_ \
+            ../hirsel_h264.o ../abi.o libopenh264.a
+        exit
+    fi
+    target=--target=x86_64-unknown-linux-gnu
     make -j "${HIRSEL_JOBS:-4}" ARCH=x86_64 OS=linux \
         CC="$llvm/bin/clang $target" CXX="$llvm/bin/clang++ $target" \
         AR="$llvm/bin/llvm-ar" \
@@ -29,7 +51,6 @@ cp hirsel_h264.cpp decoder-allocation.patch "$stage"
         CXXFLAGS="$cxx -DHAVE_AVX2" libopenh264.a
     "$llvm/bin/clang++" "$target" -std=c++17 -O2 $cxx -Wall -Wextra -Werror \
         -I codec/api/wels -c ../hirsel_h264.cpp -o ../hirsel_h264.o
-    printf '%s\n' '#include "native.h"' 'HIRSEL_ABI_TEXT' > ../abi.c
     "$llvm/bin/clang" "$target" -fPIC -fno-ident -c ../abi.c -o ../abi.o
     "$llvm/bin/ld.lld" -r --wrap=malloc --wrap=calloc --wrap=free ../hirsel_h264.o ../abi.o libopenh264.a -o ../hh264.o
     "$llvm/bin/llvm-objcopy" --wildcard --keep-global-symbol='hh264_*' ../hh264.o
@@ -46,4 +67,8 @@ cp hirsel_h264.cpp decoder-allocation.patch "$stage"
         cp libopenh264.a codec/api/wels/*.h "$OPENH264_REFERENCE_DIR"
     fi
 )
-cp "$stage/libhirsel_h264.a" libhirsel_h264.a
+archive=libhirsel_h264.a
+if [ -n "$darwin" ]; then
+    archive=libhirsel_h264-aarch64-apple-darwin.a
+fi
+cp "$stage/$archive" "$archive"

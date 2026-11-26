@@ -2,7 +2,7 @@
 // buffering, datagrams, and moqt-23 §12.1 malformed-track / deduplication checks.
 fn uni_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
     let stream = s.uni_heads[idx].stream
-    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.uni_heads[idx].buf)
+    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.uni_heads[idx].buf, 256)
     if reset != None {
         let _ = list.remove(mut s.uni_heads, idx)
         return
@@ -56,7 +56,7 @@ fn attach_or_park_subgroup(mut s: Session, mut io: Io, stream: quic.StreamId, sh
         let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
         let def_prio = s.requests[ri].default_pub_priority
         if let Some(take tr) = take tr_opt {
-            let cap: u64 = order.max(list.len(buf) + 4096u64, 65536u64)
+            let cap: u64 = order.max(list.len(buf) + 256u64, 2048u64)
             let mut full: Bytes = list.with_capacity(cap)
             list.append(mut full, buf)
             let sg_id = match sh.subgroup {
@@ -83,7 +83,7 @@ fn attach_or_park_fetch(mut s: Session, mut io: Io, stream: quic.StreamId, req_i
             let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
             let go = s.requests[ri].group_order
             if let Some(take tr) = take tr_opt {
-                let cap: u64 = order.max(list.len(buf) + 4096u64, 65536u64)
+                let cap: u64 = order.max(list.len(buf) + 256u64, 2048u64)
                 let mut full: Bytes = list.with_capacity(cap)
                 list.append(mut full, buf)
                 let st = codec.fetch_state(go)
@@ -196,7 +196,11 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
         }
         let mut reset_code: Option[u64] = None
         if !s.rx_subgroups[cur].fin {
-            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_subgroups[cur].buf)
+            let max_cap: u64 = match s.rx_subgroups[cur].pending_obj {
+                Some(p) => order.max(p.length + 256u64, 65536u64),
+                None => 65536u64,
+            }
+            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_subgroups[cur].buf, max_cap)
             if fin {
                 s.rx_subgroups[cur].fin = true
             }
@@ -281,6 +285,8 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
                     let _ = list.remove(mut s.rx_subgroups, i2)
                     if !record_subgroup_fin(mut s, clone(tr), group, sg, last_id, eog) {
                         mark_malformed(mut s, mut io, take tr, mut out)
+                    } else {
+                        list.push(mut s.finished_rx_subgroups, (take tr, group, sg))
                     }
                     return
                 }
@@ -302,7 +308,11 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
         }
         let mut reset_code: Option[u64] = None
         if !s.rx_fetches[cur].fin {
-            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_fetches[cur].buf)
+            let max_cap: u64 = match s.rx_fetches[cur].pending_obj {
+                Some(p) => order.max(p.length + 256u64, 65536u64),
+                None => 65536u64,
+            }
+            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_fetches[cur].buf, max_cap)
             if fin {
                 s.rx_fetches[cur].fin = true
             }

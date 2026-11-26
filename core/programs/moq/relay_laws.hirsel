@@ -1,0 +1,770 @@
+// MS4 Relay laws: M3 (relay_preserves_stream_order), M4 (one_upstream_per_track),
+// M5 (slow_subscriber_costs_only_itself), M8 (dedup_and_switchover),
+// M9 (cache_bounded_and_fetch_served), and M11 relay upstream teardown.
+const RELAY_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 26000)
+
+fn peer_addr(n: u16) -> Addr {
+    Addr(ip: V4(0x7f000001u32), port: 26001 + n)
+}
+
+// Disjoint-field helpers on Peer so mutating `rig.peers[i]` never double-borrows `rig.peers[i]`.
+fn peer_receive_quic(mut p: Peer, now: u64, qev: List[quic.Event]) {
+    for ev in qev {
+        list.push(mut p.raw, clone(ev))
+    }
+    if let Some(mut s) = p.sess {
+        let mut tevs: List[moq.TransportEvent] = list.new()
+        for ev in qev {
+            list.push(mut tevs, Quic(clone(ev)))
+        }
+        moq.receive(mut s, mut p.io, now, tevs, mut p.events)
+    }
+}
+
+fn peer_subscribe(mut p: Peer, now: u64, tr: codec.TrackName, f: codec.Filter, prio: u8, tok: Option[Bytes]) -> moq.RequestId {
+    if let Some(mut s) = p.sess {
+        return result.unwrap(moq.subscribe(mut s, mut p.io, now, tr, f, prio, tok))
+    }
+    fail("missing peer session")
+}
+
+fn peer_subscribe_with(mut p: Peer, now: u64, tr: codec.TrackName, prio: u8, obj_ms: u64, sg_ms: u64) -> moq.RequestId {
+    if let Some(mut s) = p.sess {
+        return result.unwrap(moq.subscribe_with(mut s, mut p.io, now, tr, NoFilter, prio, Ascending, obj_ms, sg_ms, None))
+    }
+    fail("missing peer session")
+}
+
+fn peer_fetch(mut p: Peer, now: u64, tr: codec.TrackName, from: codec.Location, to: codec.Location) -> moq.RequestId {
+    if let Some(mut s) = p.sess {
+        return result.unwrap(moq.fetch(mut s, mut p.io, now, tr, from, to, 10, Ascending, None))
+    }
+    fail("missing peer session")
+}
+
+fn peer_publish(mut p: Peer, now: u64, o: moq.Object, fin_sg: bool) {
+    if let Some(mut s) = p.sess {
+        result.unwrap(moq.publish_at(mut s, mut p.io, now, now, o, fin_sg))
+    }
+}
+
+fn peer_cancel(mut p: Peer, id: moq.RequestId, code: u64) {
+    if let Some(mut s) = p.sess {
+        moq.cancel(mut s, mut p.io, id, code)
+    }
+}
+
+fn peer_close(mut p: Peer, code: u64, reason: Bytes) {
+    if let Some(mut s) = p.sess {
+        moq.close(mut s, mut p.io, code, reason)
+    }
+}
+
+fn peer_accept_subscribes(mut p: Peer) -> u64 {
+    let mut ids: List[moq.RequestId] = list.new()
+    for ev in p.events {
+        if let Subscribe(id: id, ..) = ev {
+            list.push(mut ids, id)
+        }
+    }
+    list.clear(mut p.events)
+    if let Some(mut s) = p.sess {
+        for id in ids {
+            moq.accept(mut s, mut p.io, id, Ok(()))
+        }
+    }
+    list.len(ids)
+}
+
+type RelayRig {
+    io: moq.Io,
+    r: moq.Relay,
+    events: List[moq.RelayEvent],
+    raw: List[quic.Event],
+    peers: List[Peer],
+    peer_addrs: List[Addr],
+    peer_rids: List[u32],
+    limits: moq.Limits
+}
+
+fn relay_endpoint_config(max_conns: u32) -> quic.EndpointConfig {
+    let reset = result.unwrap(secret.seal(b"MOQ relay reset", "mac"))
+    let token = result.unwrap(secret.seal(b"MOQ relay token", "kdf"))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: max_conns, unvalidated: max_conns, datagram_bytes: 262144))
+}
+
+fn relay_transport_config(lim: moq.Limits) -> quic.TransportConfig {
+    let mut t = moq.transport_config(lim)
+    t.initial_max_data = 131072
+    t.initial_max_stream_data = 65536
+    t.send_bytes = 131072
+    take t
+}
+
+fn new_relay_rig(seed: u64, lim: moq.Limits, rlim: moq.RelayLimits, max_conns: u32) -> RelayRig {
+    let t = relay_transport_config(lim)
+    let q = result.unwrap(quic.endpoint(provide.random(seed), relay_endpoint_config(max_conns), Some((moq_identity(), take t))))
+    RelayRig(io: moq.Io(q: take q, w: None), r: moq.relay(rlim), events: list.new(), raw: list.new(), peers: list.new(), peer_addrs: list.new(), peer_rids: list.new(), limits: lim)
+}
+
+fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut total = 0u64
+    // Relay -> Peers
+    list.clear(mut wire)
+    list.clear(mut packets)
+    let _ = quic.poll(mut rig.io.q, now, mut wire, mut packets)
+    let mut sent = 0u64
+    for o in packets {
+        if let Transmit(..) = o {
+            sent += 1
+        }
+    }
+    if sent > 0 {
+        quic.committed(mut rig.io.q, now, sent)
+        total += sent
+        for o in packets {
+            if let Transmit(to: to, at: at, len: len, ..) = o {
+                for pi in 0u64 .. list.len(rig.peers) {
+                    if rig.peer_addrs[pi] == to {
+                        let mut qev: List[quic.Event] = list.new()
+                        quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
+                        peer_receive_quic(mut rig.peers[pi], now, qev)
+                        break
+                    }
+                }
+            }
+        }
+    }
+    // Peers -> Relay
+    for pi in 0u64 .. list.len(rig.peers) {
+        list.clear(mut wire)
+        list.clear(mut packets)
+        let _ = quic.poll(mut rig.peers[pi].io.q, now, mut wire, mut packets)
+        let mut psent = 0u64
+        for o in packets {
+            if let Transmit(..) = o {
+                psent += 1
+            }
+        }
+        if psent > 0 {
+            quic.committed(mut rig.peers[pi].io.q, now, psent)
+            total += psent
+            let mut qev: List[quic.Event] = list.new()
+            let pa = rig.peer_addrs[pi]
+            for o in packets {
+                if let Transmit(at: at, len: len, ..) = o {
+                    quic.receive_datagram(mut rig.io.q, now, pa, 0, mut wire, at, len, mut qev)
+                }
+            }
+            for ev in qev {
+                list.push(mut rig.raw, clone(ev))
+            }
+            let mut tevs: List[moq.TransportEvent] = list.new()
+            for ev in qev {
+                list.push(mut tevs, Quic(clone(ev)))
+            }
+            let before = list.len(rig.events)
+            moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
+            if auto_auth {
+                for k in before .. list.len(rig.events) {
+                    if let Authorize(session: sid, id: rid, ..) = rig.events[k] {
+                        moq.relay_authorize(mut rig.r, mut rig.io, now, sid, rid, Ok(()))
+                    }
+                }
+            }
+        }
+    }
+    total
+}
+
+fn rig_settle(mut rig: RelayRig, now: u64, auto_auth: bool) {
+    for _ in 0u64 .. 4000 {
+        if rig_deliver_all(mut rig, now, auto_auth) == 0 {
+            return
+        }
+    }
+    fail("relay rig never settled")
+}
+
+/// Connect a new peer (publisher or subscriber) to the relay, complete SETUP, and add its
+/// server-side session to `rig.r` under `scope`. Returns the index into `rig.peers`.
+fn rig_add_peer(mut rig: RelayRig, seed: u64, role: moq.Role, take scope: moq.Scope, lim: moq.Limits, now: u64) -> u64 {
+    let idx = list.len(rig.peers)
+    let pa = peer_addr(int.narrow(idx))
+    let q = result.unwrap(quic.endpoint(provide.random(seed), relay_endpoint_config(4), None))
+    let mut p = Peer(io: moq.Io(q: take q, w: None), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+    let cc = result.unwrap(quic.connect(mut p.io.q, now, RELAY_ADDR, "server", moq_pins(), None, relay_transport_config(lim)))
+    let cs = moq.session(Client, role, Native(c: cc), lim)
+    p.sess = Some(take cs)
+    list.push(mut rig.peers, take p)
+    list.push(mut rig.peer_addrs, pa)
+    list.push(mut rig.peer_rids, 0)
+    let raw_before = list.len(rig.raw)
+    rig_settle(mut rig, now + 1, false)
+    let mut sc_opt: Option[quic.ConnectionHandle] = None
+    for k in raw_before .. list.len(rig.raw) {
+        if let Connected(c: c, ..) = rig.raw[k] {
+            sc_opt = Some(c)
+        }
+    }
+    let sc = option.unwrap(sc_opt)
+    let relay_role: moq.Role = match role {
+        Publisher => Subscriber,
+        Subscriber => Publisher,
+        Both => Both,
+    }
+    let mut ss = moq.session(Server, relay_role, Native(c: sc), lim)
+    let mut tevs: List[moq.TransportEvent] = list.new()
+    for k in raw_before .. list.len(rig.raw) {
+        list.push(mut tevs, Quic(clone(rig.raw[k])))
+    }
+    let mut sevs: List[moq.Event] = list.new()
+    moq.receive(mut ss, mut rig.io, now + 2, tevs, mut sevs)
+    moq.accept_setup(mut ss, mut rig.io, Ok(clone(scope)))
+    let rid = moq.relay_add(mut rig.r, take ss, take scope)
+    rig.peer_rids[idx] = rid
+    rig_settle(mut rig, now + 3, false)
+    if role == Publisher {
+        moq.relay_mark_publisher(mut rig.r, mut rig.io, now + 4, rid)
+        rig_settle(mut rig, now + 5, false)
+    }
+    idx
+}
+
+/// bug: under packet loss and reordering, a relay reorders objects on a subgroup stream or
+/// delivers objects with a non-reset gap inside one subgroup stream.
+/// oracle: moqt-23 §7.5 (M3): every subscriber receives each subgroup's objects in strictly
+/// ascending object id order with no interior gaps.
+@test
+fn relay_preserves_stream_order() -> Result[(), ()] {
+    let lim = moq_limits()
+    let rlim = moq.RelayLimits(cache_groups: 16, cache_bytes: 262144, per_track_cache_bytes: 262144, max_objects_per_group: 64, max_object_bytes: 16384)
+    let mut rig = new_relay_rig(1001, lim, rlim, 8)
+    let sc = moq.default_scope(b"sim.test", b"/m3")
+    let pub_i = rig_add_peer(mut rig, 1002, Publisher, clone(sc), lim, 0)
+    let sub1 = rig_add_peer(mut rig, 1003, Subscriber, clone(sc), lim, 10)
+    let sub2 = rig_add_peer(mut rig, 1004, Subscriber, clone(sc), lim, 20)
+    let tr = track(ns1(b"m3"), b"vid")
+    let _ = peer_subscribe(mut rig.peers[sub1], 30, clone(tr), NoFilter, 10, None)
+    let _ = peer_subscribe(mut rig.peers[sub2], 30, clone(tr), NoFilter, 10, None)
+    rig_settle(mut rig, 31, true)
+    let _ = peer_accept_subscribes(mut rig.peers[pub_i])
+    rig_settle(mut rig, 32, true)
+    for g in 0u64 .. 2 {
+        for oid in 0u64 .. 12 {
+            let mut p: Bytes = list.with_capacity(200)
+            let gb: u8 = int.truncate(g)
+            let ob: u8 = int.truncate(oid)
+            list.push(mut p, gb)
+            list.push(mut p, ob)
+            for _ in 2u64 .. 200 {
+                list.push(mut p, 0x55)
+            }
+            peer_publish(mut rig.peers[pub_i], 40 * MS_NS, make_obj(clone(tr), g, 0, oid, Subgroup, 10, take p), oid == 11)
+        }
+    }
+    let mut rng = 0x9e3779b97f4a7c15u64
+    let mut delayed: List[(Addr, Bytes)] = list.new()
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut now = 50 * MS_NS
+    for step in 0u64 .. 600 {
+        now += 5 * MS_NS
+        while list.len(delayed) > 0 {
+            let (to, take dgram) = list.remove(mut delayed, 0)
+            let mut buf = take dgram
+            let blen = list.len(buf)
+            for pi in 0u64 .. list.len(rig.peers) {
+                if rig.peer_addrs[pi] == to {
+                    let mut qev: List[quic.Event] = list.new()
+                    quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut buf, 0, blen, mut qev)
+                    peer_receive_quic(mut rig.peers[pi], now, qev)
+                    break
+                }
+            }
+        }
+        let mut r_tev: List[quic.Event] = list.new()
+        quic.timeout(mut rig.io.q, now, mut r_tev)
+        if list.len(r_tev) > 0 {
+            let mut tevs: List[moq.TransportEvent] = list.new()
+            for ev in r_tev {
+                list.push(mut tevs, Quic(clone(ev)))
+            }
+            moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
+        }
+        for pi in 0u64 .. list.len(rig.peers) {
+            let mut p_tev: List[quic.Event] = list.new()
+            quic.timeout(mut rig.peers[pi].io.q, now, mut p_tev)
+            if list.len(p_tev) > 0 {
+                peer_receive_quic(mut rig.peers[pi], now, p_tev)
+            }
+        }
+        list.clear(mut wire)
+        list.clear(mut packets)
+        let _ = quic.poll(mut rig.io.q, now, mut wire, mut packets)
+        let mut sent = 0u64
+        for o in packets {
+            if let Transmit(..) = o {
+                sent += 1
+            }
+        }
+        if sent > 0 {
+            quic.committed(mut rig.io.q, now, sent)
+            for o in packets {
+                if let Transmit(to: to, at: at, len: len, ..) = o {
+                    rng = int.wrapping_add(int.wrapping_mul(rng, 6364136223846793005), 1442695040888963407)
+                    let roll = (rng >> 32) % 100
+                    if step < 200 && roll < 10 {
+                        continue
+                    }
+                    if step < 200 && roll < 30 {
+                        let mut cp: Bytes = list.with_capacity(len)
+                        list.append(mut cp, list.slice(wire, at, at + len))
+                        list.push(mut delayed, (to, take cp))
+                        continue
+                    }
+                    for pi in 0u64 .. list.len(rig.peers) {
+                        if rig.peer_addrs[pi] == to {
+                            let mut qev: List[quic.Event] = list.new()
+                            quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
+                            peer_receive_quic(mut rig.peers[pi], now, qev)
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        for pi in 0u64 .. list.len(rig.peers) {
+            list.clear(mut wire)
+            list.clear(mut packets)
+            let _ = quic.poll(mut rig.peers[pi].io.q, now, mut wire, mut packets)
+            let mut psent = 0u64
+            for o in packets {
+                if let Transmit(..) = o {
+                    psent += 1
+                }
+            }
+            if psent > 0 {
+                quic.committed(mut rig.peers[pi].io.q, now, psent)
+                let mut qev: List[quic.Event] = list.new()
+                let pa = rig.peer_addrs[pi]
+                for o in packets {
+                    if let Transmit(at: at, len: len, ..) = o {
+                        quic.receive_datagram(mut rig.io.q, now, pa, 0, mut wire, at, len, mut qev)
+                    }
+                }
+                let mut tevs: List[moq.TransportEvent] = list.new()
+                for ev in qev {
+                    list.push(mut tevs, Quic(clone(ev)))
+                }
+                moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
+            }
+        }
+        if list.len(received_objects(rig.peers[sub1].events)) == 24 && list.len(received_objects(rig.peers[sub2].events)) == 24 {
+            break
+        }
+    }
+    for si in[sub1, sub2] {
+        let objs = received_objects(rig.peers[si].events)
+        if list.len(objs) != 24 {
+            fail("subscriber did not recover all 24 objects under 10% loss and reordering")
+        }
+        let mut next0 = 0u64
+        let mut next1 = 0u64
+        for o in objs {
+            if o.group == 0 {
+                if o.id != next0 {
+                    fail("group 0 subgroup stream had out-of-order or gapped object id")
+                }
+                next0 += 1
+            } else if o.group == 1 {
+                if o.id != next1 {
+                    fail("group 1 subgroup stream had out-of-order or gapped object id")
+                }
+                next1 += 1
+            }
+        }
+        if next0 != 12 || next1 != 12 {
+            fail("subscriber missed objects in a group")
+        }
+    }
+    Ok(())
+}
+
+/// bug: 1,000 subscribers cause more than one upstream SUBSCRIBE per publisher, fan-out copies
+/// payloads, two scopes share an upstream subscription or cache, or an unauthorized request
+/// triggers upstream subscribe / cache read.
+/// oracle: moqt-23 §7.3, §7.5, and MOQ-6 (M4 + M11 relay upstream teardown).
+@test
+fn one_upstream_per_track() -> Result[(), ()] {
+    let lim = moq.Limits(requests: 1200, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let rlim = moq.RelayLimits(cache_groups: 8, cache_bytes: 262144, per_track_cache_bytes: 262144, max_objects_per_group: 64, max_object_bytes: 16384)
+    let mut rig = new_relay_rig(1101, lim, rlim, 32)
+    let sc_a = moq.default_scope(b"tenant-a", b"/live")
+    let sc_b = moq.default_scope(b"tenant-b", b"/live")
+    let pub1 = rig_add_peer(mut rig, 1102, Publisher, clone(sc_a), lim, 0)
+    let pub_b = rig_add_peer(mut rig, 1103, Publisher, clone(sc_b), lim, 10)
+    let sub_a = rig_add_peer(mut rig, 1104, Subscriber, clone(sc_a), lim, 20)
+    let sub_b = rig_add_peer(mut rig, 1105, Subscriber, clone(sc_b), lim, 30)
+    let tr = track(ns1(b"chan"), b"main")
+    // 1. Unauthorized request MUST NOT open upstream SUBSCRIBE or read cache.
+    let unauth_req = peer_subscribe(mut rig.peers[sub_a], 40, clone(tr), NoFilter, 10, Some(b"pending"))
+    rig_settle(mut rig, 41, false)
+    if moq.relay_upstream_count(rig.r) != 0 {
+        fail("unauthorized SUBSCRIBE triggered an upstream request before relay_authorize")
+    }
+    let mut auth_sid = 0u32
+    let mut auth_rid: moq.RequestId = RequestId(0)
+    for ev in rig.events {
+        if let Authorize(session: s, id: rid, ..) = ev {
+            auth_sid = s
+            auth_rid = rid
+        }
+    }
+    moq.relay_authorize(mut rig.r, mut rig.io, 42, auth_sid, auth_rid, Ok(()))
+    rig_settle(mut rig, 43, true)
+    if moq.relay_upstream_count(rig.r) != 1 || peer_accept_subscribes(mut rig.peers[pub1]) != 1 {
+        fail("first authorized subscriber did not open exactly 1 upstream SUBSCRIBE")
+    }
+    // 2. Add 999 more subscribers across 10 sessions (1,000 total!) on tenant-a -> STILL 1 upstream SUBSCRIBE!
+    let mut sub_peers: List[u64] = list.new()
+    list.push(mut sub_peers, sub_a)
+    for sp in 0u64 .. 9 {
+        let idx = rig_add_peer(mut rig, 1120 + sp, Subscriber, clone(sc_a), lim, 50 * MS_NS + sp * 10 * MS_NS)
+        list.push(mut sub_peers, idx)
+    }
+    let mut batch_t = 200 * MS_NS
+    for k in 1u64 .. 1000 {
+        let target = sub_peers[k % 10]
+        let _ = peer_subscribe(mut rig.peers[target], batch_t, clone(tr), NoFilter, 10, None)
+        if k % 50 == 0 {
+            batch_t += 10 * MS_NS
+            rig_settle(mut rig, batch_t, true)
+        }
+    }
+    batch_t += 20 * MS_NS
+    rig_settle(mut rig, batch_t, true)
+    batch_t += 20 * MS_NS
+    rig_settle(mut rig, batch_t, true)
+    if moq.relay_downstream_count(rig.r) != 1000 {
+        let mut msg = "expected 1,000 downstream subscriptions on relay, got "
+        string.push_uint(mut msg, moq.relay_downstream_count(rig.r), 10, 0, '0')
+        fail(take msg)
+    }
+    if moq.relay_upstream_count(rig.r) != 1 || moq.relay_upstream_opened(rig.r) != 1 {
+        fail("1,000 subscribers caused more than 1 upstream SUBSCRIBE")
+    }
+    // Publish 1 object from pub1: zero payload copies, 1,000 Shared[Bytes] fan-out references.
+    batch_t += 20 * MS_NS
+    peer_publish(mut rig.peers[pub1], batch_t, make_obj(clone(tr), 1, 0, 0, Datagram, 10, b"shared-payload"), false)
+    batch_t += 20 * MS_NS
+    rig_settle(mut rig, batch_t, true)
+    if moq.relay_shared_forwards(rig.r) != 1000 || moq.relay_payload_copies(rig.r) != 0 {
+        fail("fan-out did not share one payload across 1,000 subscribers without copying")
+    }
+    // 3. Second publisher appears in tenant-a -> upstream SUBSCRIBE count becomes 2!
+    batch_t += 20 * MS_NS
+    let pub2 = rig_add_peer(mut rig, 1106, Publisher, clone(sc_a), lim, batch_t)
+    if moq.relay_upstream_count(rig.r) != 2 || peer_accept_subscribes(mut rig.peers[pub2]) != 1 {
+        fail("second publisher did not cause a second upstream SUBSCRIBE")
+    }
+    // 4. Tenant-b subscribes to the SAME track name -> separate upstream subscription, no shared cache!
+    batch_t += 20 * MS_NS
+    let b_req = peer_subscribe(mut rig.peers[sub_b], batch_t, clone(tr), NoFilter, 10, None)
+    batch_t += 20 * MS_NS
+    rig_settle(mut rig, batch_t, true)
+    if moq.relay_upstream_count(rig.r) != 3 || peer_accept_subscribes(mut rig.peers[pub_b]) != 1 {
+        fail("second tenant scope did not open its own upstream subscription")
+    }
+    if moq.relay_track_bytes(rig.r, clone(sc_b), clone(tr)) != 0 || moq.relay_track_bytes(rig.r, clone(sc_a), clone(tr)) == 0 {
+        fail("tenant scopes shared cached objects")
+    }
+    // 5. M11 relay side: cancel tenant-b's only subscriber -> tenant-b's upstream SUBSCRIBE ends!
+    peer_cancel(mut rig.peers[sub_b], b_req, moq.RESET_CANCELLED)
+    batch_t += 20 * MS_NS
+    rig_settle(mut rig, batch_t, true)
+    if moq.relay_upstream_count(rig.r) != 2 {
+        fail("cancelling last subscriber of tenant-b did not end its upstream request")
+    }
+    let _ = unauth_req
+    Ok(())
+}
+
+/// bug: a slow subscriber blocks or drops objects for fast subscribers sharing the same relay.
+/// oracle: MOQ-6 (M5): 9 uncapped subscribers receive every object within the delivery timeout;
+/// the 1 slow subscriber's lost objects are counted as timed out.
+@test
+fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
+    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 80)
+    let rlim = moq.RelayLimits(cache_groups: 32, cache_bytes: 524288, per_track_cache_bytes: 524288, max_objects_per_group: 64, max_object_bytes: 16384)
+    let mut rig = new_relay_rig(1201, lim, rlim, 16)
+    let sc = moq.default_scope(b"fanout", b"/m5")
+    let pub_i = rig_add_peer(mut rig, 1202, Publisher, clone(sc), lim, 0)
+    let slow_i = rig_add_peer(mut rig, 1203, Subscriber, clone(sc), lim, 10)
+    let mut fast_idxs: List[u64] = list.new()
+    for k in 0u64 .. 9 {
+        let fi = rig_add_peer(mut rig, 1210 + k, Subscriber, clone(sc), lim, 20 + k * 10)
+        list.push(mut fast_idxs, fi)
+    }
+    let tr = track(ns1(b"m5"), b"live")
+    let _ = peer_subscribe_with(mut rig.peers[slow_i], 200, clone(tr), 10, 50, 80)
+    for fi in fast_idxs {
+        let _ = peer_subscribe_with(mut rig.peers[fi], 200, clone(tr), 10, 200, 200)
+    }
+    rig_settle(mut rig, 210, true)
+    let _ = peer_accept_subscribes(mut rig.peers[pub_i])
+    rig_settle(mut rig, 220, true)
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let slow_addr = rig.peer_addrs[slow_i]
+    let mut now = 1000 * MS_NS
+    for g in 0u64 .. 10 {
+        let mut payload: Bytes = list.with_capacity(500)
+        let gb: u8 = int.truncate(g)
+        list.push(mut payload, gb)
+        for _ in 1u64 .. 500 {
+            list.push(mut payload, 0x33)
+        }
+        peer_publish(mut rig.peers[pub_i], now, make_obj(clone(tr), g, 0, 0, Subgroup, 10, take payload), true)
+        for _ in 0u64 .. 12 {
+            now += 10 * MS_NS
+            let _ = moq.relay_poll(mut rig.r, mut rig.io, now)
+            for pi in 0u64 .. list.len(rig.peers) {
+                if pi == slow_i {
+                    continue
+                }
+                list.clear(mut wire)
+                list.clear(mut packets)
+                let _ = quic.poll(mut rig.peers[pi].io.q, now, mut wire, mut packets)
+                let mut psent = 0u64
+                for o in packets {
+                    if let Transmit(..) = o {
+                        psent += 1
+                    }
+                }
+                if psent > 0 {
+                    quic.committed(mut rig.peers[pi].io.q, now, psent)
+                    let mut qev: List[quic.Event] = list.new()
+                    let pa = rig.peer_addrs[pi]
+                    for o in packets {
+                        if let Transmit(at: at, len: len, ..) = o {
+                            quic.receive_datagram(mut rig.io.q, now, pa, 0, mut wire, at, len, mut qev)
+                        }
+                    }
+                    let mut tevs: List[moq.TransportEvent] = list.new()
+                    for ev in qev {
+                        list.push(mut tevs, Quic(clone(ev)))
+                    }
+                    moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
+                }
+            }
+            list.clear(mut wire)
+            list.clear(mut packets)
+            let _ = quic.poll(mut rig.io.q, now, mut wire, mut packets)
+            let mut sent = 0u64
+            for o in packets {
+                if let Transmit(..) = o {
+                    sent += 1
+                }
+            }
+            if sent > 0 {
+                quic.committed(mut rig.io.q, now, sent)
+                for o in packets {
+                    if let Transmit(to: to, at: at, len: len, ..) = o {
+                        if to == slow_addr {
+                            continue
+                        }
+                        for pi in 0u64 .. list.len(rig.peers) {
+                            if rig.peer_addrs[pi] == to {
+                                let mut qev: List[quic.Event] = list.new()
+                                quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
+                                peer_receive_quic(mut rig.peers[pi], now, qev)
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    now += 200 * MS_NS
+    let _ = moq.relay_poll(mut rig.r, mut rig.io, now)
+    for fi in fast_idxs {
+        if list.len(received_objects(rig.peers[fi].events)) != 10 {
+            fail("a fast subscriber lost objects due to the slow subscriber")
+        }
+    }
+    if moq.relay_timed_out_subgroups(rig.r) + moq.relay_timed_out_objects(rig.r) == 0 {
+        fail("slow subscriber's timed-out objects were not counted")
+    }
+    Ok(())
+}
+
+/// bug: overlapping publishers duplicate objects, switch mid-group, accept conflicting duplicates
+/// without terminating downstream subscriptions with PUBLISH_DONE(MALFORMED_TRACK), or reject
+/// interleaved object ids across two subgroup streams of one group.
+/// oracle: moqt-23 §2.2, §7.1, §7.3, §7.5.1, §7.7.1, §12.1 (M8).
+@test
+fn dedup_and_switchover() -> Result[(), ()] {
+    let lim = moq_limits()
+    let rlim = moq.RelayLimits(cache_groups: 16, cache_bytes: 262144, per_track_cache_bytes: 262144, max_objects_per_group: 64, max_object_bytes: 16384)
+    let mut rig = new_relay_rig(1301, lim, rlim, 8)
+    let sc = moq.default_scope(b"dup.test", b"/m8")
+    let pub1 = rig_add_peer(mut rig, 1302, Publisher, clone(sc), lim, 0)
+    let pub2 = rig_add_peer(mut rig, 1303, Publisher, clone(sc), lim, 10)
+    let sub1 = rig_add_peer(mut rig, 1304, Subscriber, clone(sc), lim, 20)
+    let tr = track(ns1(b"m8"), b"stream")
+    let _ = peer_subscribe(mut rig.peers[sub1], 30, clone(tr), NoFilter, 10, None)
+    rig_settle(mut rig, 31, true)
+    let _ = peer_accept_subscribes(mut rig.peers[pub1])
+    let _ = peer_accept_subscribes(mut rig.peers[pub2])
+    rig_settle(mut rig, 32, true)
+    // 1. Interleaved object ids across two subgroup streams of group 1 (sg 0: 0, 2; sg 1: 1, 3) -> all 4 accepted!
+    peer_publish(mut rig.peers[pub1], 40, make_obj(clone(tr), 1, 0, 0, Subgroup, 10, b"g1-o0"), false)
+    peer_publish(mut rig.peers[pub1], 41, make_obj(clone(tr), 1, 1, 1, Subgroup, 10, b"g1-o1"), false)
+    peer_publish(mut rig.peers[pub1], 42, make_obj(clone(tr), 1, 0, 2, Subgroup, 10, b"g1-o2"), false)
+    peer_publish(mut rig.peers[pub1], 43, make_obj(clone(tr), 1, 1, 3, Subgroup, 10, b"g1-o3"), false)
+    rig_settle(mut rig, 44, true)
+    // 2. Overlapping identical objects from pub2 for group 1 -> deduplicated (still 4 objects, group 1 stays on pub1)!
+    peer_publish(mut rig.peers[pub2], 45, make_obj(clone(tr), 1, 0, 0, Subgroup, 10, b"g1-o0"), false)
+    peer_publish(mut rig.peers[pub2], 46, make_obj(clone(tr), 1, 1, 1, Subgroup, 10, b"g1-o1"), false)
+    rig_settle(mut rig, 47, true)
+    if list.len(received_objects(rig.peers[sub1].events)) != 4 {
+        fail("interleaved subgroups were rejected or identical duplicate was not deduplicated")
+    }
+    if moq.relay_group_publisher(rig.r, clone(sc), clone(tr), 1) != Some(rig.peer_rids[pub1]) {
+        fail("group 1 did not stay owned by pub1")
+    }
+    // 3. Switchover at group boundary: pub1 closes, pub2 starts group 2 -> group 2 owned by pub2!
+    peer_close(mut rig.peers[pub1], 0, b"pub1 done")
+    rig_settle(mut rig, 50, true)
+    peer_publish(mut rig.peers[pub2], 51, make_obj(clone(tr), 2, 0, 0, Subgroup, 10, b"g2-o0"), false)
+    rig_settle(mut rig, 52, true)
+    if list.len(received_objects(rig.peers[sub1].events)) != 5 {
+        fail("switchover to pub2 at group 2 did not deliver object")
+    }
+    if moq.relay_group_publisher(rig.r, clone(sc), clone(tr), 2) != Some(rig.peer_rids[pub2]) {
+        fail("group 2 did not switch over cleanly to pub2")
+    }
+    // 4. Conflicting duplicate (same group 2, id 0, different payload) -> malformed track!
+    let bytes_before = moq.relay_track_bytes(rig.r, clone(sc), clone(tr))
+    peer_publish(mut rig.peers[pub2], 53, make_obj(clone(tr), 2, 0, 0, Datagram, 10, b"forged-conflict"), false)
+    rig_settle(mut rig, 54, true)
+    let mut saw_malformed_done = false
+    for ev in rig.peers[sub1].events {
+        if let Done(code: c, ..) = ev {
+            if c == moq.DONE_MALFORMED_TRACK {
+                saw_malformed_done = true
+            }
+        }
+    }
+    if !saw_malformed_done {
+        fail("conflicting duplicate did not end downstream subscription with PUBLISH_DONE(MALFORMED_TRACK)")
+    }
+    if moq.relay_track_bytes(rig.r, clone(sc), clone(tr)) != bytes_before {
+        fail("malformed object was cached")
+    }
+    Ok(())
+}
+
+/// bug: FETCH triggers an upstream request, cache exceeds cache_bytes / per_track_cache_bytes /
+/// max_objects_per_group, busy track evicts another track below fair share, zero-byte objects
+/// with large properties escape bounds, or FETCH over an evicted group omits End of Unknown Range.
+/// oracle: MOQ-6 and moqt-23 §11.4.2 (M9).
+@test
+fn cache_bounded_and_fetch_served() -> Result[(), ()] {
+    let lim = moq_limits()
+    let rlim = moq.RelayLimits(cache_groups: 4, cache_bytes: 2048, per_track_cache_bytes: 1600, max_objects_per_group: 2, max_object_bytes: 1200)
+    let mut rig = new_relay_rig(1401, lim, rlim, 8)
+    let sc = moq.default_scope(b"cache.test", b"/m9")
+    let pub_i = rig_add_peer(mut rig, 1402, Publisher, clone(sc), lim, 0)
+    let sub_i = rig_add_peer(mut rig, 1403, Subscriber, clone(sc), lim, 10)
+    let tr_a = track(ns1(b"m9"), b"a")
+    let tr_b = track(ns1(b"m9"), b"b")
+    let tr_prop = track(ns1(b"m9"), b"props")
+    let _ = peer_subscribe(mut rig.peers[sub_i], 20, clone(tr_a), NoFilter, 10, None)
+    let _ = peer_subscribe(mut rig.peers[sub_i], 21, clone(tr_b), NoFilter, 10, None)
+    let _ = peer_subscribe(mut rig.peers[sub_i], 22, clone(tr_prop), NoFilter, 10, None)
+    rig_settle(mut rig, 23, true)
+    let _ = peer_accept_subscribes(mut rig.peers[pub_i])
+    rig_settle(mut rig, 24, true)
+    peer_publish(mut rig.peers[pub_i], 30, make_obj(clone(tr_b), 1, 0, 0, Subgroup, 10, make_tagged_payload(1, 200)), true)
+    for g in 1u64 .. 6 {
+        peer_publish(mut rig.peers[pub_i], 30 + g, make_obj(clone(tr_a), g, 0, 0, Subgroup, 10, make_tagged_payload(int.truncate(g), 200)), false)
+    }
+    peer_publish(mut rig.peers[pub_i], 37, make_obj(clone(tr_a), 5, 0, 1, Subgroup, 10, make_tagged_payload(51, 50)), false)
+    peer_publish(mut rig.peers[pub_i], 38, make_obj(clone(tr_a), 5, 0, 2, Subgroup, 10, make_tagged_payload(52, 50)), true)
+    rig_settle(mut rig, 40, true)
+    if moq.relay_cache_bytes(rig.r) > rlim.cache_bytes {
+        fail("relay cache exceeded cache_bytes")
+    }
+    if moq.relay_track_bytes(rig.r, clone(sc), clone(tr_a)) > rlim.per_track_cache_bytes {
+        fail("track cache exceeded per_track_cache_bytes")
+    }
+    if moq.relay_track_groups(rig.r, clone(sc), clone(tr_b)) != 1 {
+        fail("busy track tr_a evicted quiet track tr_b below fair share")
+    }
+    let mut saw_evict = false
+    for ev in rig.events {
+        if let Evicted(track: et, groups: eg, size: es, ..) = ev {
+            if et == tr_a && eg >= 1 && es > 0 {
+                saw_evict = true
+            }
+        }
+    }
+    if !saw_evict {
+        fail("cache eviction was silent (no RelayEvent.Evicted)")
+    }
+    // Zero-byte payloads with large properties (~400 bytes each) MUST be bounded by cache_bytes too!
+    let mut big_val: Bytes = list.with_capacity(400)
+    for _ in 0u64 .. 400 {
+        list.push(mut big_val, 0x77)
+    }
+    let mut big_kvs: List[codec.KeyValue] = list.new()
+    list.push(mut big_kvs, Data(kind: 0x79, value: take big_val))
+    let mut big_props: Bytes = list.new()
+    result.unwrap(codec.write_key_values(big_kvs, mut big_props))
+    for g in 1u64 .. 6 {
+        let zp = moq.Object(track: clone(tr_prop), group: g, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: clone(big_props), payload: shared.new(b""))
+        peer_publish(mut rig.peers[pub_i], 50 + g, take zp, true)
+    }
+    rig_settle(mut rig, 60, true)
+    if moq.relay_cache_bytes(rig.r) > rlim.cache_bytes || moq.relay_track_bytes(rig.r, clone(sc), clone(tr_prop)) > rlim.per_track_cache_bytes {
+        fail("zero-byte objects with large properties escaped cache byte bounds")
+    }
+    let fetch_sub = rig_add_peer(mut rig, 1404, Subscriber, clone(sc), lim, 70)
+    let up_before = moq.relay_upstream_opened(rig.r)
+    let _ = peer_fetch(mut rig.peers[fetch_sub], 80, clone(tr_a), loc(1, 0), loc(5, 10))
+    rig_settle(mut rig, 85, true)
+    if moq.relay_upstream_opened(rig.r) != up_before {
+        fail("FETCH opened an upstream request instead of serving from cache")
+    }
+    let mut saw_unknown = false
+    let mut saw_held_g5 = false
+    let mut g5_count = 0u64
+    for ev in rig.peers[fetch_sub].events {
+        match ev {
+            Unknown(track: ut, ..) => {
+                if ut == tr_a {
+                    saw_unknown = true
+                }
+            },
+            Received(o) => {
+                if o.track == tr_a && o.group == 5 {
+                    saw_held_g5 = true
+                    g5_count += 1
+                }
+            },
+            _ => {},
+        }
+    }
+    if !saw_unknown || !saw_held_g5 {
+        fail("FETCH spanning evicted group did not emit Event.Unknown followed by held groups")
+    }
+    if g5_count > 2 {
+        fail("cache exceeded max_objects_per_group (2)")
+    }
+    Ok(())
+}

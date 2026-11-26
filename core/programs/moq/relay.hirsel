@@ -1,0 +1,581 @@
+// MOQ-6: Tenant-scoped MoQ Relay with authorization-first gating, per-publisher upstream
+// subscription aggregation, zero-copy Shared[Bytes] fan-out, group-boundary switchover,
+// cross-publisher deduplication / malformed-track termination, and cache-backed FETCH.
+type RelaySession {
+    id: u32,
+    scope: Scope,
+    sess: Session,
+    is_publisher: bool,
+    alive: bool
+}
+
+type PendingKind: key = AuthSubscribe | AuthFetch | AuthPublish
+
+type PendingAuth {
+    session: u32,
+    id: RequestId,
+    scope: Scope,
+    kind: PendingKind,
+    track: codec.TrackName,
+    filter: codec.Filter,
+    from: codec.Location,
+    to: codec.Location,
+    priority: u8
+}
+
+type DownstreamSub {
+    session: u32,
+    id: RequestId
+}
+
+type UpstreamSub {
+    pub_session: u32,
+    req_id: RequestId
+}
+
+/// Group ownership for publisher switchover at group boundaries (moqt-23 §7.5.1, §7.7.1, M8).
+type GroupOwner {
+    group: u64,
+    pub_session: u32
+}
+
+/// Per-`(scope, track)` fan-out table entry.
+type RelayTrack {
+    scope: Scope,
+    track: codec.TrackName,
+    downstream: List[DownstreamSub],
+    upstream: List[UpstreamSub],
+    group_owners: List[GroupOwner],
+    primary_pub: Option[u32],
+    malformed: bool
+}
+
+pub opaque type Relay {
+    limits: RelayLimits,
+    cache: Cache,
+    sessions: List[RelaySession],
+    next_session: u32,
+    pending: List[PendingAuth],
+    tracks: List[RelayTrack],
+    shared_forwards: u64,
+    payload_copies: u64,
+    upstream_opened: u64
+}
+
+pub fn relay(limits: RelayLimits) -> Relay {
+    Relay(limits: limits, cache: new_cache(limits), sessions: list.new(), next_session: 1, pending: list.new(), tracks: list.new(), shared_forwards: 0, payload_copies: 0, upstream_opened: 0)
+}
+
+/// Add a session to the relay under its authorized `scope` (MOQ-1).
+/// A session whose local role is `Subscriber` (i.e. the relay subscribes to a remote publisher)
+/// is automatically registered as an upstream publisher for its scope.
+pub fn relay_add(mut r: Relay, take s: Session, take scope: Scope) -> u32 {
+    let id = r.next_session
+    r.next_session += 1
+    let is_pub = s.role == Subscriber
+    list.push(mut r.sessions, RelaySession(id: id, scope: take scope, sess: take s, is_publisher: is_pub, alive: true))
+    id
+}
+
+/// Explicitly mark a session (e.g. `Role = Both` or newly connected `Publisher`) as an upstream
+/// publisher and immediately subscribe it to any active `(scope, track)` in its scope.
+pub fn relay_mark_publisher(mut r: Relay, mut io: Io, now: u64, sid: u32) {
+    let Some(si) = rsess_index(r, sid) else {
+        return
+    }
+    r.sessions[si].is_publisher = true
+    let sc: Scope = clone(r.sessions[si].scope)
+    for ti in 0u64 .. list.len(r.tracks) {
+        if r.tracks[ti].scope == sc && !r.tracks[ti].malformed && list.len(r.tracks[ti].downstream) > 0 {
+            ensure_upstream_for_pub(mut r, mut io, now, ti, sid)
+        }
+    }
+}
+
+pub fn relay_cache_bytes(r: Relay) -> u64 {
+    r.cache.total_bytes
+}
+
+pub fn relay_track_bytes(r: Relay, scope: Scope, tr: codec.TrackName) -> u64 {
+    match cache_track_index(r.cache, scope, tr) {
+        Some(ti) => r.cache.tracks[ti].used,
+        None => 0,
+    }
+}
+
+pub fn relay_track_groups(r: Relay, scope: Scope, tr: codec.TrackName) -> u64 {
+    match cache_track_index(r.cache, scope, tr) {
+        Some(ti) => list.len(r.cache.tracks[ti].groups),
+        None => 0,
+    }
+}
+
+pub fn relay_upstream_count(r: Relay) -> u64 {
+    let mut n = 0u64
+    for t in r.tracks {
+        n += list.len(t.upstream)
+    }
+    n
+}
+
+pub fn relay_upstream_opened(r: Relay) -> u64 {
+    r.upstream_opened
+}
+
+pub fn relay_downstream_count(r: Relay) -> u64 {
+    let mut n = 0u64
+    for t in r.tracks {
+        n += list.len(t.downstream)
+    }
+    n
+}
+
+pub fn relay_shared_forwards(r: Relay) -> u64 {
+    r.shared_forwards
+}
+
+pub fn relay_payload_copies(r: Relay) -> u64 {
+    r.payload_copies
+}
+
+pub fn relay_timed_out_objects(r: Relay) -> u64 {
+    let mut n = 0u64
+    for rs in r.sessions {
+        n += timed_out_objects(rs.sess)
+    }
+    n
+}
+
+pub fn relay_timed_out_subgroups(r: Relay) -> u64 {
+    let mut n = 0u64
+    for rs in r.sessions {
+        n += timed_out_subgroups(rs.sess)
+    }
+    n
+}
+
+pub fn relay_group_publisher(r: Relay, scope: Scope, tr: codec.TrackName, group: u64) -> Option[u32] {
+    let Some(ti) = rtrack_index(r, scope, tr) else {
+        return None
+    }
+    for go in r.tracks[ti].group_owners {
+        if go.group == group {
+            return Some(go.pub_session)
+        }
+    }
+    None
+}
+
+fn rsess_index(r: Relay, id: u32) -> Option[u64] {
+    for i in 0u64 .. list.len(r.sessions) {
+        if r.sessions[i].id == id {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn rtrack_index(r: Relay, scope: Scope, tr: codec.TrackName) -> Option[u64] {
+    for i in 0u64 .. list.len(r.tracks) {
+        if r.tracks[i].scope == scope && r.tracks[i].track == tr {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn ensure_rtrack(mut r: Relay, take scope: Scope, take tr: codec.TrackName) -> u64 {
+    if let Some(i) = rtrack_index(r, scope, tr) {
+        return i
+    }
+    list.push(mut r.tracks, RelayTrack(scope: take scope, track: take tr, downstream: list.new(), upstream: list.new(), group_owners: list.new(), primary_pub: None, malformed: false))
+    list.len(r.tracks) - 1
+}
+
+/// Deliver `events` to every session owned by `r` and run MOQ-6 relay logic.
+pub fn relay_receive(mut r: Relay, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[RelayEvent]) {
+    // Ensure any newly added publisher session gets upstream subscriptions for active tracks.
+    for si in 0u64 .. list.len(r.sessions) {
+        if r.sessions[si].alive && r.sessions[si].is_publisher && is_established(r.sessions[si].sess) {
+            let sid = r.sessions[si].id
+            let sc: Scope = clone(r.sessions[si].scope)
+            for ti in 0u64 .. list.len(r.tracks) {
+                if r.tracks[ti].scope == sc && !r.tracks[ti].malformed && list.len(r.tracks[ti].downstream) > 0 {
+                    ensure_upstream_for_pub(mut r, mut io, now, ti, sid)
+                }
+            }
+        }
+    }
+    // Collect per-session events, then process them so cross-session fan-out has full access to r.
+    let mut i = 0u64
+    while i < list.len(r.sessions) {
+        if !r.sessions[i].alive {
+            i += 1
+            continue
+        }
+        let sid = r.sessions[i].id
+        let sc: Scope = clone(r.sessions[i].scope)
+        let mut sevs: List[Event] = list.new()
+        receive(mut r.sessions[i].sess, mut io, now, events, mut sevs)
+        let mut fins = replace(mut r.sessions[i].sess.finished_rx_subgroups, list.new())
+        for take ev in sevs {
+            handle_relay_session_event(mut r, mut io, now, sid, clone(sc), take ev, mut out)
+        }
+        while list.len(fins) > 0 {
+            let (take tr, grp, sg) = list.remove(mut fins, 0)
+            on_relay_subgroup_fin(mut r, mut io, now, sid, clone(sc), take tr, grp, sg)
+        }
+        i += 1
+    }
+}
+
+pub fn relay_poll(mut r: Relay, mut io: Io, now: u64) -> Option[u64] {
+    let mut next: Option[u64] = None
+    for i in 0u64 .. list.len(r.sessions) {
+        if !r.sessions[i].alive {
+            continue
+        }
+        if let Some(at) = poll(mut r.sessions[i].sess, mut io, now) {
+            next = match next {
+                None => Some(at),
+                Some(cur) => Some(order.min(cur, at)),
+            }
+        }
+    }
+    next
+}
+
+fn handle_relay_session_event(mut r: Relay, mut io: Io, now: u64, sid: u32, take scope: Scope, take ev: Event, mut out: List[RelayEvent]) {
+    match take ev {
+        Subscribe(id: id, track: tr, filter: filter, priority: prio, token: tok) => {
+            // MOQ-6: authorization first — no cache lookup or upstream request before relay_authorize!
+            list.push(mut r.pending, PendingAuth(session: sid, id: id, scope: clone(scope), kind: AuthSubscribe, track: clone(tr), filter: filter, from: codec.Location(group: 0, object: 0), to: codec.Location(group: 0, object: 0), priority: prio))
+            list.push(mut out, Authorize(session: sid, id: id, scope: take scope, track: tr, token: tok))
+        },
+        Fetch(id: id, track: tr, from: from, to: to, token: tok) => {
+            list.push(mut r.pending, PendingAuth(session: sid, id: id, scope: clone(scope), kind: AuthFetch, track: clone(tr), filter: NoFilter, from: from, to: to, priority: 128))
+            list.push(mut out, Authorize(session: sid, id: id, scope: take scope, track: tr, token: tok))
+        },
+        Publish(id: id, track: tr, token: tok) => {
+            list.push(mut r.pending, PendingAuth(session: sid, id: id, scope: clone(scope), kind: AuthPublish, track: clone(tr), filter: NoFilter, from: codec.Location(group: 0, object: 0), to: codec.Location(group: 0, object: 0), priority: 128))
+            list.push(mut out, Authorize(session: sid, id: id, scope: take scope, track: tr, token: tok))
+        },
+        Received(take obj) => {
+            on_relay_object(mut r, mut io, now, sid, take scope, take obj, mut out)
+        },
+        Malformed(track: tr) => {
+            terminate_malformed_track(mut r, mut io, take scope, take tr)
+        },
+        Done(id: id, ..) => {
+            on_relay_done(mut r, mut io, sid, id)
+        },
+        Closed(code: code) => {
+            on_relay_session_closed(mut r, mut io, sid, code, mut out)
+        },
+        _ => {},
+    }
+}
+
+pub fn relay_authorize(mut r: Relay, mut io: Io, now: u64, sid_in: u32, id: RequestId, ok: Result[(), u64]) {
+    let mut pidx: Option[u64] = None
+    for i in 0u64 .. list.len(r.pending) {
+        if r.pending[i].session == sid_in && r.pending[i].id == id {
+            pidx = Some(i)
+            break
+        }
+    }
+    let Some(pi) = pidx else {
+        return
+    }
+    let PendingAuth(session: sid, id: req_id, scope: take sc, kind: kind, track: take tr, filter: _, from: from, to: to, priority: _) = list.remove(mut r.pending, pi)
+    let Some(si) = rsess_index(r, sid) else {
+        return
+    }
+    if !r.sessions[si].alive {
+        return
+    }
+    match ok {
+        Error(code) => {
+            accept(mut r.sessions[si].sess, mut io, req_id, Error(code))
+        },
+        Ok(()) => {
+            match kind {
+                AuthSubscribe => {
+                    let ti = ensure_rtrack(mut r, clone(sc), clone(tr))
+                    if r.tracks[ti].malformed {
+                        accept(mut r.sessions[si].sess, mut io, req_id, Error(REQ_MALFORMED_TRACK))
+                        return
+                    }
+                    accept(mut r.sessions[si].sess, mut io, req_id, Ok(()))
+                    list.push(mut r.tracks[ti].downstream, DownstreamSub(session: sid, id: req_id))
+                    // Aggregate upstream SUBSCRIBE: one per matching publisher in `sc`.
+                    ensure_all_upstreams(mut r, mut io, now, ti)
+                },
+                AuthFetch => {
+                    // MOQ-6: FETCH is served strictly from cache (no upstream request).
+                    let cti_opt = cache_track_index(r.cache, clone(sc), clone(tr))
+                    if let Some(cti) = cti_opt {
+                        if r.cache.tracks[cti].malformed {
+                            accept(mut r.sessions[si].sess, mut io, req_id, Error(REQ_MALFORMED_TRACK))
+                            return
+                        }
+                    }
+                    accept(mut r.sessions[si].sess, mut io, req_id, Ok(()))
+                    let entries = cache_fetch_entries(r.cache, take sc, take tr, from, to)
+                    let _ = send_fetch_stream(mut r.sessions[si].sess, mut io, req_id, entries)
+                },
+                AuthPublish => {
+                    accept(mut r.sessions[si].sess, mut io, req_id, Ok(()))
+                    r.sessions[si].is_publisher = true
+                    let _ = ensure_rtrack(mut r, take sc, take tr)
+                },
+            }
+        },
+    }
+}
+
+fn has_upstream(rt: RelayTrack, pub_sess: u32) -> bool {
+    for u in rt.upstream {
+        if u.pub_session == pub_sess {
+            return true
+        }
+    }
+    false
+}
+
+fn ensure_all_upstreams(mut r: Relay, mut io: Io, now: u64, ti: u64) {
+    let sc: Scope = clone(r.tracks[ti].scope)
+    let mut pub_ids: List[u32] = list.new()
+    for rs in r.sessions {
+        if rs.alive && rs.is_publisher && rs.scope == sc {
+            list.push(mut pub_ids, rs.id)
+        }
+    }
+    for pid in pub_ids {
+        ensure_upstream_for_pub(mut r, mut io, now, ti, pid)
+    }
+}
+
+fn ensure_upstream_for_pub(mut r: Relay, mut io: Io, now: u64, ti: u64, pub_sess: u32) {
+    if has_upstream(r.tracks[ti], pub_sess) {
+        return
+    }
+    let Some(si) = rsess_index(r, pub_sess) else {
+        return
+    }
+    if !r.sessions[si].alive || !is_established(r.sessions[si].sess) {
+        return
+    }
+    let tr: codec.TrackName = clone(r.tracks[ti].track)
+    match subscribe(mut r.sessions[si].sess, mut io, now, tr, NoFilter, 128, None) {
+        Ok(req_id) => {
+            list.push(mut r.tracks[ti].upstream, UpstreamSub(pub_session: pub_sess, req_id: req_id))
+            r.upstream_opened += 1
+        },
+        Error(_) => {},
+    }
+}
+
+fn on_relay_subgroup_fin(mut r: Relay, mut io: Io, now: u64, pub_sess: u32, take scope: Scope, take tr: codec.TrackName, group: u64, sg: u64) {
+    let Some(ti) = rtrack_index(r, scope, tr) else {
+        return
+    }
+    let mut down_sids: List[u32] = list.new()
+    for d in r.tracks[ti].downstream {
+        if d.session != pub_sess && !list.contains(down_sids, d.session) {
+            list.push(mut down_sids, d.session)
+        }
+    }
+    for dsid in down_sids {
+        if let Some(dsi) = rsess_index(r, dsid) {
+            if r.sessions[dsi].alive {
+                finish_subgroup(mut r.sessions[dsi].sess, mut io, now, clone(tr), group, sg)
+            }
+        }
+    }
+}
+
+fn on_relay_object(mut r: Relay, mut io: Io, now: u64, pub_sess: u32, take scope: Scope, take obj: Object, mut out: List[RelayEvent]) {
+    let tr: codec.TrackName = clone(obj.track)
+    let ti = ensure_rtrack(mut r, clone(scope), clone(tr))
+    if r.tracks[ti].malformed {
+        return
+    }
+    let cti = ensure_cache_track(mut r.cache, clone(scope), clone(tr))
+    match cache_check_object(r.cache, cti, obj) {
+        BadTrack => {
+            // MOQ-3 & MOQ-6: never cache offending object; terminate all downstream subscriptions
+            // with PUBLISH_DONE(MALFORMED_TRACK).
+            terminate_malformed_track(mut r, mut io, take scope, take tr)
+            return
+        },
+        Duplicate => return,
+        Fresh => {},
+    }
+    // MOQ-6 / M8: publisher switchover happens at group boundaries only.
+    let mut owner: Option[u32] = None
+    for go in r.tracks[ti].group_owners {
+        if go.group == obj.group {
+            owner = Some(go.pub_session)
+            break
+        }
+    }
+    match owner {
+        Some(o_pub) => {
+            if o_pub != pub_sess {
+                // Keep delivering from the group's owner if it is still alive; switch at next group.
+                let owner_alive = match rsess_index(r, o_pub) {
+                    Some(osi) => r.sessions[osi].alive,
+                    None => false,
+                }
+                if owner_alive {
+                    return
+                }
+            }
+        },
+        None => {
+            if list.len(r.tracks[ti].group_owners) >= 256 {
+                let _ = list.remove(mut r.tracks[ti].group_owners, 0)
+            }
+            list.push(mut r.tracks[ti].group_owners, GroupOwner(group: obj.group, pub_session: pub_sess))
+            r.tracks[ti].primary_pub = Some(pub_sess)
+        },
+    }
+    // Insert into tenant-scoped cache (zero-copy Shared[Bytes] refcount bump).
+    cache_insert(mut r.cache, cti, clone(obj), mut out)
+    // Fan out zero-copy to every downstream subscriber session of `(scope, track)`.
+    // Deduplicate by session id since Session.publish delivers to all subscriptions on that session.
+    let mut sent_sessions: List[u32] = list.new()
+    for d in r.tracks[ti].downstream {
+        if d.session == pub_sess {
+            continue
+        }
+        r.shared_forwards += 1
+        if list.contains(sent_sessions, d.session) {
+            continue
+        }
+        list.push(mut sent_sessions, d.session)
+    }
+    for dsid in sent_sessions {
+        if let Some(dsi) = rsess_index(r, dsid) {
+            if r.sessions[dsi].alive {
+                let _ = publish_at(mut r.sessions[dsi].sess, mut io, now, now, clone(obj), false)
+            }
+        }
+    }
+}
+
+fn terminate_malformed_track(mut r: Relay, mut io: Io, take scope: Scope, take tr: codec.TrackName) {
+    let cti = ensure_cache_track(mut r.cache, clone(scope), clone(tr))
+    r.cache.tracks[cti].malformed = true
+    let Some(ti) = rtrack_index(r, scope, tr) else {
+        return
+    }
+    r.tracks[ti].malformed = true
+    // End every downstream subscription with PUBLISH_DONE(MALFORMED_TRACK = 0x12).
+    let mut down_sids: List[u32] = list.new()
+    for d in r.tracks[ti].downstream {
+        if !list.contains(down_sids, d.session) {
+            list.push(mut down_sids, d.session)
+        }
+    }
+    list.clear(mut r.tracks[ti].downstream)
+    for dsid in down_sids {
+        if let Some(dsi) = rsess_index(r, dsid) {
+            if r.sessions[dsi].alive {
+                end_track(mut r.sessions[dsi].sess, mut io, clone(tr), DONE_MALFORMED_TRACK)
+            }
+        }
+    }
+    // Cancel all upstream subscriptions for this malformed track.
+    let mut ups = replace(mut r.tracks[ti].upstream, list.new())
+    while list.len(ups) > 0 {
+        let UpstreamSub(pub_session: psid, req_id: rid) = list.remove(mut ups, 0)
+        if let Some(psi) = rsess_index(r, psid) {
+            if r.sessions[psi].alive {
+                cancel(mut r.sessions[psi].sess, mut io, rid, RESET_MALFORMED_TRACK)
+            }
+        }
+    }
+}
+
+fn on_relay_done(mut r: Relay, mut io: Io, sid: u32, id: RequestId) {
+    // Check if a downstream subscription ended (M11).
+    for ti in 0u64 .. list.len(r.tracks) {
+        let mut removed = false
+        let mut j = 0u64
+        while j < list.len(r.tracks[ti].downstream) {
+            if r.tracks[ti].downstream[j].session == sid && r.tracks[ti].downstream[j].id == id {
+                let _ = list.remove(mut r.tracks[ti].downstream, j)
+                removed = true
+            } else {
+                j += 1
+            }
+        }
+        if removed && list.len(r.tracks[ti].downstream) == 0 {
+            // M11: when the last subscriber of a track leaves, every upstream request ends!
+            cancel_track_upstreams(mut r, mut io, ti)
+        }
+        // Also remove from upstream list if an upstream publisher ended its side.
+        let mut k = 0u64
+        while k < list.len(r.tracks[ti].upstream) {
+            if r.tracks[ti].upstream[k].pub_session == sid && r.tracks[ti].upstream[k].req_id == id {
+                let _ = list.remove(mut r.tracks[ti].upstream, k)
+            } else {
+                k += 1
+            }
+        }
+    }
+}
+
+fn cancel_track_upstreams(mut r: Relay, mut io: Io, ti: u64) {
+    let mut ups = replace(mut r.tracks[ti].upstream, list.new())
+    while list.len(ups) > 0 {
+        let UpstreamSub(pub_session: psid, req_id: rid) = list.remove(mut ups, 0)
+        if let Some(psi) = rsess_index(r, psid) {
+            if r.sessions[psi].alive {
+                cancel(mut r.sessions[psi].sess, mut io, rid, RESET_CANCELLED)
+            }
+        }
+    }
+}
+
+fn on_relay_session_closed(mut r: Relay, mut io: Io, sid: u32, code: u64, mut out: List[RelayEvent]) {
+    if let Some(si) = rsess_index(r, sid) {
+        r.sessions[si].alive = false
+    }
+    // Remove any pending authorizations for this session.
+    let mut p = 0u64
+    while p < list.len(r.pending) {
+        if r.pending[p].session == sid {
+            let _ = list.remove(mut r.pending, p)
+        } else {
+            p += 1
+        }
+    }
+    // Remove downstream & upstream subscriptions of this session; cancel upstream if last sub left.
+    for ti in 0u64 .. list.len(r.tracks) {
+        let mut removed = false
+        let mut j = 0u64
+        while j < list.len(r.tracks[ti].downstream) {
+            if r.tracks[ti].downstream[j].session == sid {
+                let _ = list.remove(mut r.tracks[ti].downstream, j)
+                removed = true
+            } else {
+                j += 1
+            }
+        }
+        if removed && list.len(r.tracks[ti].downstream) == 0 {
+            cancel_track_upstreams(mut r, mut io, ti)
+        }
+        let mut k = 0u64
+        while k < list.len(r.tracks[ti].upstream) {
+            if r.tracks[ti].upstream[k].pub_session == sid {
+                let _ = list.remove(mut r.tracks[ti].upstream, k)
+            } else {
+                k += 1
+            }
+        }
+    }
+    list.push(mut out, Ended(session: sid, code: code))
+}

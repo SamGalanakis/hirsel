@@ -399,6 +399,7 @@ pub opaque type Session {
     dropped_early_datagrams: u64,
     padding_streams: List[quic.StreamId],
     rx_subgroups: List[RxSubgroup],
+    finished_rx_subgroups: List[(codec.TrackName, u64, u64)],
     rx_fetches: List[RxFetch],
     tx_subgroups: List[TxSubgroup],
     dead_subgroups: List[(u64, u64, u64)],

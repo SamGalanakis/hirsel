@@ -107,7 +107,8 @@ fn send_request_error(mut s: Session, mut io: Io, stream: quic.StreamId, code: u
 
 fn bidi_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
     let stream = s.peer_bidi_heads[idx].stream
-    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.peer_bidi_heads[idx].buf)
+    let max_cap = local_max_control(s) + 32
+    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.peer_bidi_heads[idx].buf, max_cap)
     if reset != None {
         let _ = list.remove(mut s.peer_bidi_heads, idx)
         return
@@ -457,11 +458,12 @@ fn parse_track_properties(props: List[codec.KeyValue]) -> Result[(u8, codec.Dire
 
 fn request_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
     let stream = s.requests[idx].stream
+    let max_cap = local_max_control(s) + 32
     loop {
         let Some(cur) = req_by_stream(s, stream) else {
             return
         }
-        let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.requests[cur].rx_buf)
+        let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.requests[cur].rx_buf, max_cap)
         if let Some(code) = reset {
             on_stream_reset(mut s, mut io, stream, code, mut out)
             return
@@ -504,7 +506,7 @@ fn request_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) 
         let Some(i2) = req_by_stream(s, stream) else {
             return
         }
-        if list.len(s.requests[i2].rx_buf) < list.capacity(s.requests[i2].rx_buf) {
+        if list.len(s.requests[i2].rx_buf) < max_cap {
             return
         }
     }
@@ -791,7 +793,7 @@ pub fn subscribe_with(mut s: Session, mut io: Io, now: u64, track: codec.TrackNa
         tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
-    let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(f), priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: obj_timeout_ms, sub_sg_timeout_ms: sg_timeout_ms, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(local_max_control(s) + 32), rx_fin: false, tx_fin: false)
+    let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(f), priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: obj_timeout_ms, sub_sg_timeout_ms: sg_timeout_ms, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
     list.push(mut s.requests, take req)
     enqueue_raw(mut s, mut io, stream, take wire, false)
     Ok(RequestId(id))
@@ -825,7 +827,7 @@ pub fn fetch(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, from:
         tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
-    let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: f, priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(local_max_control(s) + 32), rx_fin: false, tx_fin: false)
+    let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: f, priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
     list.push(mut s.requests, take req)
     enqueue_raw(mut s, mut io, stream, take wire, false)
     Ok(RequestId(id))
@@ -855,7 +857,7 @@ pub fn publish_namespace(mut s: Session, mut io: Io, now: u64, prefix: codec.Nam
         tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
-    let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: true, state: Pending, track: None, prefix: Some(clone(prefix)), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(local_max_control(s) + 32), rx_fin: false, tx_fin: false)
+    let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: true, state: Pending, track: None, prefix: Some(clone(prefix)), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
     list.push(mut s.requests, take req)
     enqueue_raw(mut s, mut io, stream, take wire, false)
     Ok(RequestId(id))

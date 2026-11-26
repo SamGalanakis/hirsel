@@ -5,8 +5,8 @@ pub fn session(side: schedule.Side, role: Role, t: Transport, limits: Limits) ->
         Server => (1u64, 0u64),
     }
     let ctrl_lim: u64 = int.widen(limits.control_bytes)
-    let ctrl_cap = order.max(ctrl_lim, codec.DEFAULT_MAX_CONTROL) + 32
-    Session(side: side, role: role, transport: t, limits: limits, phase: Connecting, scope: None, setup_authority: b"", setup_path: b"", setup_token: None, setup_sent: false, setup_received: false, goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL, peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None, peer_control: None, peer_control_buf: list.with_capacity(ctrl_cap), next_req_id: next_req, next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(), peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(), early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(), rx_subgroups: list.new(), rx_fetches: list.new(), tx_subgroups: list.new(), dead_subgroups: list.new(), pub_tracks: list.new(), guards: list.new(), outgoing: list.new(), timed_out_objects: 0, timed_out_subgroups: 0, now: 0)
+    let _ = ctrl_lim
+    Session(side: side, role: role, transport: t, limits: limits, phase: Connecting, scope: None, setup_authority: b"", setup_path: b"", setup_token: None, setup_sent: false, setup_received: false, goaway_received: false, goaway_sent: false, peer_max_control: codec.DEFAULT_MAX_CONTROL, peer_max_filter_ranges: 0, peer_max_request_updates: 0, local_control: None, peer_control: None, peer_control_buf: list.with_capacity(256), next_req_id: next_req, next_alias: 0, next_tag: 1, peer_watermark: peer_water, peer_seen_ids: std.set.new(), peer_bidi_heads: list.new(), requests: list.new(), uni_heads: list.new(), early_streams: list.new(), dropped_early_datagrams: 0, padding_streams: list.new(), rx_subgroups: list.new(), finished_rx_subgroups: list.new(), rx_fetches: list.new(), tx_subgroups: list.new(), dead_subgroups: list.new(), pub_tracks: list.new(), guards: list.new(), outgoing: list.new(), timed_out_objects: 0, timed_out_subgroups: 0, now: 0)
 }
 
 /// Optional client SETUP options (AUTHORITY, PATH, AUTHORIZATION TOKEN) before SETUP is sent.
@@ -92,6 +92,7 @@ fn clear_session_state(mut s: Session) {
     list.clear(mut s.early_streams)
     list.clear(mut s.padding_streams)
     list.clear(mut s.rx_subgroups)
+    list.clear(mut s.finished_rx_subgroups)
     list.clear(mut s.rx_fetches)
     list.clear(mut s.tx_subgroups)
     list.clear(mut s.dead_subgroups)
@@ -401,11 +402,10 @@ fn on_web_event(mut s: Session, mut io: Io, ours: webtransport.SessionHandle, ev
 
 fn on_stream_opened(mut s: Session, mut io: Io, stream: quic.StreamId, bidi: bool, mut out: List[Event]) {
     if bidi {
-        let cap = local_max_control(s) + 32
-        list.push(mut s.peer_bidi_heads, UniHead(stream: stream, buf: list.with_capacity(cap), fin: false))
+        list.push(mut s.peer_bidi_heads, UniHead(stream: stream, buf: list.with_capacity(128), fin: false))
         bidi_head_readable(mut s, mut io, list.len(s.peer_bidi_heads) - 1, mut out)
     } else {
-        list.push(mut s.uni_heads, UniHead(stream: stream, buf: list.with_capacity(256), fin: false))
+        list.push(mut s.uni_heads, UniHead(stream: stream, buf: list.with_capacity(128), fin: false))
         uni_head_readable(mut s, mut io, list.len(s.uni_heads) - 1, mut out)
     }
 }
@@ -445,7 +445,7 @@ fn on_stream_readable(mut s: Session, mut io: Io, stream: quic.StreamId, mut out
     }
     if list.contains(s.padding_streams, stream) {
         let mut sink: Bytes = list.with_capacity(1024)
-        let (fin, _) = tx_read_more(s.transport, mut io, stream, mut sink)
+        let (fin, _) = tx_read_more(s.transport, mut io, stream, mut sink, 1024)
         if fin {
             remove_padding(mut s, stream)
         }
@@ -499,8 +499,9 @@ fn control_readable(mut s: Session, mut io: Io, mut out: List[Event]) {
     let Some(stream) = s.peer_control else {
         return
     }
+    let max_cap = local_max_control(s) + 32
     loop {
-        let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.peer_control_buf)
+        let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.peer_control_buf, max_cap)
         let max = if s.setup_received {
             local_max_control(s)
         } else {
@@ -532,7 +533,7 @@ fn control_readable(mut s: Session, mut io: Io, mut out: List[Event]) {
             fail_session(mut s, mut io, ERR_CLOSED_CONTROL_STREAM, b"control stream closed", mut out)
             return
         }
-        if list.len(s.peer_control_buf) < list.capacity(s.peer_control_buf) {
+        if list.len(s.peer_control_buf) < max_cap {
             return
         }
     }

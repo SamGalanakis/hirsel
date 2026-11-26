@@ -148,12 +148,22 @@ fn tx_close(t: Transport, mut io: Io, code: u64, reason: Bytes) {
     }
 }
 
-/// Read available bytes from `stream` onto `buf` up to `buf`'s capacity.
+/// Read available bytes from `stream` onto `buf`, growing on demand up to `max_cap`.
 /// Returns `(fin, reset_code)`.
-fn tx_read_more(t: Transport, mut io: Io, stream: quic.StreamId, mut buf: Bytes) -> (bool, Option[u64]) {
+fn tx_read_more(t: Transport, mut io: Io, stream: quic.StreamId, mut buf: Bytes, max_cap: u64) -> (bool, Option[u64]) {
     loop {
         if list.len(buf) >= list.capacity(buf) {
-            return (false, None)
+            if list.len(buf) >= max_cap {
+                return (false, None)
+            }
+            let target = order.min(max_cap, order.max(list.capacity(buf) * 2, 1024))
+            if target <= list.capacity(buf) {
+                return (false, None)
+            }
+            let extra = target - list.len(buf)
+            if let Error(_) = list.try_reserve(mut buf, extra) {
+                return (false, None)
+            }
         }
         match tx_read(t, mut io, stream, mut buf) {
             Ok((n, fin)) => {

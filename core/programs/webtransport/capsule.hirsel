@@ -1,7 +1,6 @@
 // WT-3 steps 4 to 6: a live session's CONNECT stream carries HTTP/3 DATA frames whose
 // payloads are capsules (RFC 9297 §3). WT_CLOSE_SESSION and the stream's end close the
-// session, WT_DRAIN_SESSION asks it to finish (draft-17 §4.7, §6); every other capsule is
-// skipped here, the flow-control ones being TS4's (WT-5).
+// session, WT_DRAIN_SESSION asks it to finish, and flow-control capsules update credit.
 /// Whether the caller may keep using its indexes: Done when a session or connection ended.
 type Step = Go | Done
 
@@ -124,6 +123,29 @@ fn capsules(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List
             remote_close(mut w, mut e, i, k, code, take reason, mut out)
             return Done
         }
+        if kind == h3_wire.CAPSULE_WT_MAX_STREAM_DATA || kind == h3_wire.CAPSULE_WT_STREAM_DATA_BLOCKED {
+            flow_error(mut w, mut e, i, k, mut out)
+            return Done
+        }
+        if flow(w, i) && flow_capsule(kind) {
+            if len == 0 || len > 8 {
+                flow_error(mut w, mut e, i, k, mut out)
+                return Done
+            }
+            if avail < at + len {
+                return Go
+            }
+            let mut end = at
+            let value = h3_wire.read_varint(w.conns[i].sessions[k].caps, mut end, at + len)
+            if let Some(n) = value {
+                if end == at + len && apply_credit(mut w, i, k, kind, n, mut out) {
+                    list.drop_prefix(mut w.conns[i].sessions[k].caps, end)
+                    continue
+                }
+            }
+            flow_error(mut w, mut e, i, k, mut out)
+            return Done
+        }
         if kind == h3_wire.CAPSULE_WT_DRAIN_SESSION && !w.conns[i].sessions[k].drained {
             w.conns[i].sessions[k].drained = true
             list.push(mut out, Draining(handle_of(w, i, k)))
@@ -210,6 +232,11 @@ pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32,
         refuse_stream(mut e, c, id, h3_wire.H3_REQUEST_CANCELLED)
     }
     end_session(mut w, mut e, i, k, false, 0, list.new(), mut ignored)
+    if stage == 1 {
+        // Stream 0 was promised to the caller but never opened.
+        quic.close(mut e, c, h3_wire.H3_NO_ERROR, list.new())
+        drop_conn(mut w, i, mut ignored)
+    }
 }
 
 /// Ask the peer to finish a live session with WT_DRAIN_SESSION (draft-17 §4.7).

@@ -491,11 +491,13 @@ pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: V
             let frame = headers_frame(fields)
             send(mut w, mut e, i, id, take frame, false)
             w.conns[i].sessions[k].phase = Live
+            start_credit(mut w, i, k)
             // What arrived while the request waited is the session's now: buffered streams
             // and datagrams, and capsules the client sent ahead (draft-17 §3.2, §4.6).
             let mut later = replace(mut w.backlog, list.new())
-            adopt(mut w, i, k, mut later)
-            live_readable(mut w, mut e, i, k, mut later)
+            if adopt(mut w, mut e, i, k, mut later) {
+                live_readable(mut w, mut e, i, k, mut later)
+            }
             w.backlog = take later
         },
     }
@@ -528,71 +530,121 @@ fn split_url(url: String) -> Option[(String, String, String)] {
     Some((take host, take authority, take path))
 }
 
-/// Start a session on a new QUIC connection to `to`; its handle is returned at once and
-/// Ready, Refused or Closed follows (WT-2).
+/// Compare the authentication policy as well as the destination; a connection already
+/// authenticated with another pin list cannot authorize a new CONNECT.
+fn same_pins(a: List[quic.handshake.Pin], b: List[quic.handshake.Pin]) -> bool {
+    if list.len(a) != list.len(b) {
+        return false
+    }
+    for j in 0u64 .. list.len(a) {
+        match (a[j], b[j]) {
+            (Cert(x), Cert(y)) => {
+                if x != y {
+                    return false
+                }
+            },
+            (Spki(x), Spki(y)) => {
+                if x != y {
+                    return false
+                }
+            },
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Start a session, reusing a connection only after its SETTINGS and authentication.
 pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, take pins: List[quic.handshake.Pin], take protocols: List[String]) -> Result[SessionHandle, WtError] {
     let Some((host, authority, path)) = split_url(url) else {
         return Error(Url)
     }
-    let c = match quic.connect(mut e, now, to, take host, take pins, None, transport(w.limits)) {
+    let all: u64 = int.widen(w.limits.sessions)
+    if w.live >= all {
+        return Error(Blocked)
+    }
+    let per: u64 = int.widen(w.limits.sessions_per_connection)
+    for i in 0u64 .. list.len(w.conns) {
+        if !w.conns[i].peer_ok || w.conns[i].goaway != None {
+            continue
+        }
+        let cap = if flow(w, i) {
+            per
+        } else {
+            1
+        }
+        if list.len(w.conns[i].sessions) >= cap {
+            continue
+        }
+        let eligible = match w.conns[i].destination {
+            Some(d) => d.addr == to && d.authority == authority && same_pins(d.pins, pins),
+            None => false,
+        }
+        if eligible {
+            let c = w.conns[i].handle
+            if let Ok(id) = quic.open(mut e, c, true) {
+                let k = list.len(w.conns[i].sessions)
+                list.push(mut w.conns[i].sessions, new_session(id, Awaiting, request_bound(w.limits) + 16))
+                w.live += 1
+                start_credit(mut w, i, k)
+                send(mut w, mut e, i, id, connect_frame(take authority, take path, protocols), false)
+                return Ok(SessionHandle(conn: c, id: id))
+            }
+        }
+    }
+    let c = match quic.connect(mut e, now, to, take host, clone(pins), None, transport(w.limits)) {
         Ok(c) => c,
         Error(err) => return Error(Quic(err)),
     }
     let mut conn = new_conn(c, true)
-    // The CONNECT stream is the connection's first client bidirectional stream (RFC 9000
-    // §2.1), opened once the server's SETTINGS arrive.
+    conn.destination = Some(Destination(addr: to, authority: clone(authority), pins: take pins))
+    // This connection has no other users until the first CONNECT is opened and sent.
     let id: quic.StreamId = StreamId(0)
     list.push(mut conn.sessions, new_session(id, Unsent(authority: take authority, path: take path, protocols: take protocols), request_bound(w.limits) + 16))
-    conn.next_bidi = 1
     list.push(mut w.conns, take conn)
+    w.live += 1
     Ok(SessionHandle(conn: c, id: id))
 }
 
-/// Send each Unsent CONNECT (WT-3 step 2) once the server's SETTINGS allow it.
-fn send_connects(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[Event]) {
+fn send_first_connect(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[Event]) {
     let c = w.conns[i].handle
-    for k in 0u64 .. list.len(w.conns[i].sessions) {
-        let unsent = match w.conns[i].sessions[k].phase {
-            Unsent(..) => true,
-            _ => false,
-        }
-        if !unsent {
-            continue
-        }
-        let id = match quic.open(mut e, c, true) {
-            Ok(id) => id,
-            Error(_) => {
-                fail_conn(mut w, mut e, i, h3_wire.H3_INTERNAL_ERROR, mut out)
-                return
-            },
-        }
-        if id != w.conns[i].sessions[k].id {
+    let id = match quic.open(mut e, c, true) {
+        Ok(id) => id,
+        Error(_) => {
             fail_conn(mut w, mut e, i, h3_wire.H3_INTERNAL_ERROR, mut out)
             return
-        }
-        if let Unsent(authority: take authority, path: take path, protocols: take protocols) = replace(mut w.conns[i].sessions[k].phase, Awaiting) {
-            let mut fields: List[qpack.Field] = list.new()
-            list.push(mut fields, qpack.Field(name: b":method", value: b"CONNECT"))
-            list.push(mut fields, qpack.Field(name: b":protocol", value: b"webtransport-h3"))
-            list.push(mut fields, qpack.Field(name: b":scheme", value: b"https"))
-            list.push(mut fields, qpack.Field(name: b":authority", value: string.into_bytes(take authority)))
-            list.push(mut fields, qpack.Field(name: b":path", value: string.into_bytes(take path)))
-            if list.len(protocols) > 0 {
-                let mut value: Bytes = list.new()
-                for p in protocols {
-                    if list.len(value) > 0 {
-                        list.append(mut value, b", ")
-                    }
-                    list.push(mut value, 0x22)
-                    list.append(mut value, string.as_bytes(p))
-                    list.push(mut value, 0x22)
-                }
-                list.push(mut fields, qpack.Field(name: b"wt-available-protocols", value: take value))
-            }
-            let frame = headers_frame(fields)
-            send(mut w, mut e, i, id, take frame, false)
-        }
+        },
     }
+    if id != w.conns[i].sessions[0].id {
+        fail_conn(mut w, mut e, i, h3_wire.H3_INTERNAL_ERROR, mut out)
+        return
+    }
+    if let Unsent(authority: take authority, path: take path, protocols: take protocols) = replace(mut w.conns[i].sessions[0].phase, Awaiting) {
+        start_credit(mut w, i, 0)
+        send(mut w, mut e, i, id, connect_frame(take authority, take path, protocols), false)
+    }
+}
+
+fn connect_frame(take authority: String, take path: String, protocols: List[String]) -> Bytes {
+    let mut fields: List[qpack.Field] = list.new()
+    list.push(mut fields, qpack.Field(name: b":method", value: b"CONNECT"))
+    list.push(mut fields, qpack.Field(name: b":protocol", value: b"webtransport-h3"))
+    list.push(mut fields, qpack.Field(name: b":scheme", value: b"https"))
+    list.push(mut fields, qpack.Field(name: b":authority", value: string.into_bytes(take authority)))
+    list.push(mut fields, qpack.Field(name: b":path", value: string.into_bytes(take path)))
+    if list.len(protocols) > 0 {
+        let mut value: Bytes = list.new()
+        for p in protocols {
+            if list.len(value) > 0 {
+                list.append(mut value, b", ")
+            }
+            list.push(mut value, 0x22)
+            list.append(mut value, string.as_bytes(p))
+            list.push(mut value, 0x22)
+        }
+        list.push(mut fields, qpack.Field(name: b"wt-available-protocols", value: take value))
+    }
+    headers_frame(fields)
 }
 
 /// A client's decoded response; returns whether to read on (an interim 1xx response).
@@ -632,9 +684,10 @@ fn response(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, fields: List[
     if n < 300 {
         w.conns[i].sessions[k].phase = Live
         list.push(mut out, Ready(s: s, protocol: take protocol))
-        adopt(mut w, i, k, mut out)
-        // Bytes already read past the response are capsules.
-        live_readable(mut w, mut e, i, k, mut out)
+        if adopt(mut w, mut e, i, k, mut out) {
+            // Bytes already read past the response are capsules.
+            live_readable(mut w, mut e, i, k, mut out)
+        }
         return false
     }
     list.push(mut out, Refused(s: s, status: n))

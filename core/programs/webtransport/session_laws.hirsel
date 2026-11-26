@@ -76,13 +76,17 @@ fn server_side(take l: webtransport.Limits, driven: bool) -> Side {
 }
 
 fn client_side(take l: webtransport.Limits, driven: bool) -> Side {
-    let q = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    client_side_seed(take l, driven, 39)
+}
+
+fn client_side_seed(take l: webtransport.Limits, driven: bool, seed: u64) -> Side {
+    let q = result.unwrap(quic.endpoint(provide.random(seed), endpoint_config(), None))
     Side(q: take q, wt: webtransport.endpoint(take l), driven: driven, raw: list.new(), app: list.new())
 }
 
 /// One poll of from, every datagram delivered to `to`, whose events go to its webtransport
 /// Endpoint or, for a raw side, its raw list. Returns the datagram count.
-fn deliver(mut from: Side, mut to: Side, from_addr: Addr, now: u64, mut wire: Bytes, mut packets: List[quic.Output]) -> u64 {
+fn deliver(mut from: Side, mut to: Side, from_addr: Addr, to_addr: Addr, now: u64, mut wire: Bytes, mut packets: List[quic.Output]) -> u64 {
     list.clear(mut wire)
     list.clear(mut packets)
     let _ = quic.poll(mut from.q, now, mut wire, mut packets)
@@ -95,8 +99,10 @@ fn deliver(mut from: Side, mut to: Side, from_addr: Addr, now: u64, mut wire: By
     quic.committed(mut from.q, now, count)
     let mut events: List[quic.Event] = list.new()
     for output in packets {
-        if let Transmit(at: at, len: len, ..) = output {
-            quic.receive_datagram(mut to.q, now, from_addr, 0, mut wire, at, len, mut events)
+        if let Transmit(to: dest, at: at, len: len, ..) = output {
+            if dest == to_addr {
+                quic.receive_datagram(mut to.q, now, from_addr, 0, mut wire, at, len, mut events)
+            }
         }
     }
     if to.driven {
@@ -110,11 +116,15 @@ fn deliver(mut from: Side, mut to: Side, from_addr: Addr, now: u64, mut wire: By
 }
 
 fn settle(mut client: Side, mut server: Side, now: u64) {
+    settle_address(mut client, mut server, CLIENT_ADDR, now)
+}
+
+fn settle_address(mut client: Side, mut server: Side, addr: Addr, now: u64) {
     let mut wire: Bytes = list.with_capacity(64 * 1200)
     let mut packets: List[quic.Output] = list.with_capacity(65)
     for _ in 0u64 .. 4000 {
-        let a = deliver(mut client, mut server, CLIENT_ADDR, now, mut wire, mut packets)
-        let b = deliver(mut server, mut client, SERVER_ADDR, now, mut wire, mut packets)
+        let a = deliver(mut client, mut server, addr, SERVER_ADDR, now, mut wire, mut packets)
+        let b = deliver(mut server, mut client, SERVER_ADDR, addr, now, mut wire, mut packets)
         if a == 0 && b == 0 {
             return
         }
@@ -357,6 +367,26 @@ fn refusals() -> Result[(), ()] {
         expect(reset_code(client.raw, second), 0x10b, "a second session without flow control")
         expect(reset_code(client.raw, first), 0, "the first session stands")
         expect(requested(server.app), 1, "the second is never Requested")
+    }
+    // WT-5: with both peers offering flow control, a CONNECT over the session
+    // cap is processed and refused with 429. Exercise both caps independently.
+    for local_cap in[true, false] {
+        let mut l = limits(1024, 4, false)
+        if local_cap {
+            l.sessions_per_connection = 1
+        } else {
+            l.sessions = 1
+        }
+        let mut server = server_side(clone(l), true)
+        let mut client = client_side(clone(l), false)
+        let c = raw_client(mut client, mut server, l)
+        let _ = raw_streams(mut client, c, hex_text(CLIENT_CONTROL_FLOW), false)
+        let _ = send_request(mut client, c, connect_good())
+        settle(mut client, mut server, 2)
+        let second = send_request(mut client, c, connect_good())
+        settle(mut client, mut server, 3)
+        expect(status_of(mut client, c, second), 429, "a flow-controlled session over the cap")
+        expect(requested(server.app), 1, "only the first CONNECT reaches the application")
     }
     // draft-17 §5.2: CONNECTs held before SETTINGS past pending_connects are rejected.
     {

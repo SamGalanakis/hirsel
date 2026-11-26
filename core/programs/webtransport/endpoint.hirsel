@@ -33,7 +33,7 @@ pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, pro
 /// UnknownSession names no session this endpoint holds; State is a call the session's phase
 /// does not allow (an answer to a session already answered); Url is a connect URL that is not
 /// https://authority/path.
-pub type WtError = UnknownSession | State | Url | Quic(quic.QuicError)
+pub type WtError = UnknownSession | State | Url | Blocked | Quic(quic.QuicError)
 
 /// A session's phase. Server: Reading until its HEADERS frame is whole, Held until the
 /// peer's SETTINGS arrive (draft-17 §3.1), Asked until answer, then Live. Client: Unsent
@@ -46,6 +46,14 @@ type Phase = Reading | Held(List[qpack.Field]) | Asked | Live | Unsent(authority
 type Owned {
     id: quic.StreamId,
     header: u64,
+    recv_header: u64,
+    received: u64,
+    written: u64,
+    fin_queued: bool,
+    consumed: u64,
+    discarded: bool,
+    reset: bool,
+    waiting: u64,
     recv: bool,
     send: bool
 }
@@ -62,7 +70,9 @@ type Session {
     caps: Bytes,
     cap_skip: u64,
     drained: bool,
-    streams: List[Owned]
+    streams: List[Owned],
+    rx: Credit,
+    tx: Credit
 }
 
 /// Bytes a stream did not take yet, sent on its next Writable.
@@ -78,14 +88,18 @@ type Head {
     id: quic.StreamId,
     bidi: bool,
     buf: Bytes,
-    kind: Option[u64]
+    kind: Option[u64],
+    kind_len: u64,
+    reset: Option[ResetInfo]
 }
 
 /// A peer WT stream whose session is not live yet, held by its header alone (WT-4).
 type Parked {
     id: quic.StreamId,
     sid: u64,
-    since: u64
+    since: u64,
+    header: u64,
+    reset: Option[ResetInfo]
 }
 
 type ParkedDatagram {
@@ -94,13 +108,20 @@ type ParkedDatagram {
     since: u64
 }
 
+type Destination {
+    addr: Addr,
+    authority: String,
+    pins: List[quic.handshake.Pin]
+}
+
 type Conn {
     handle: quic.ConnectionHandle,
     client: bool,
     up: bool,
     settings: bool,
     peer_ok: bool,
-    peer_flow: bool,
+    peer_credit: Credit,
+    destination: Option[Destination],
     goaway: Option[u64],
     control: Option[quic.StreamId],
     encoder: Option[quic.StreamId],
@@ -114,8 +135,7 @@ type Conn {
     parked_datagrams: List[ParkedDatagram],
     peer_bidi_next: u64,
     sessions: List[Session],
-    out: List[Outgoing],
-    next_bidi: u64
+    out: List[Outgoing]
 }
 
 pub opaque type Endpoint {
@@ -168,7 +188,7 @@ fn session_index(conn: Conn, id: quic.StreamId) -> Option[u64] {
 }
 
 fn new_conn(handle: quic.ConnectionHandle, client: bool) -> Conn {
-    Conn(handle: handle, client: client, up: false, settings: false, peer_ok: false, peer_flow: false, goaway: None, control: None, encoder: None, decoder: None, local: list.new(), control_buf: list.with_capacity(SETTINGS_MAX + 16), control_skip: 0, decoder_buf: list.with_capacity(16), heads: list.new(), parked: list.new(), parked_datagrams: list.new(), peer_bidi_next: 0, sessions: list.new(), out: list.new(), next_bidi: 0)
+    Conn(handle: handle, client: client, up: false, settings: false, peer_ok: false, peer_credit: credit(0, 0, 0), destination: None, goaway: None, control: None, encoder: None, decoder: None, local: list.new(), control_buf: list.with_capacity(SETTINGS_MAX + 16), control_skip: 0, decoder_buf: list.with_capacity(16), heads: list.new(), parked: list.new(), parked_datagrams: list.new(), peer_bidi_next: 0, sessions: list.new(), out: list.new())
 }
 
 /// The largest capsule read whole: WT_CLOSE_SESSION's code and 1,024-byte reason (draft-17
@@ -176,7 +196,7 @@ fn new_conn(handle: quic.ConnectionHandle, client: bool) -> Conn {
 const CAPSULE_MAX: u64 = 1048
 
 fn new_session(id: quic.StreamId, take phase: Phase, cap: u64) -> Session {
-    Session(id: id, phase: take phase, buf: list.with_capacity(cap), skip: 0, data_left: 0, caps: list.with_capacity(CAPSULE_MAX), cap_skip: 0, drained: false, streams: list.new())
+    Session(id: id, phase: take phase, buf: list.with_capacity(cap), skip: 0, data_left: 0, caps: list.with_capacity(CAPSULE_MAX), cap_skip: 0, drained: false, streams: list.new(), rx: credit(0, 0, 0), tx: credit(0, 0, 0))
 }
 
 /// Whether the application holds this session: it was emitted as Requested (server) or
@@ -194,7 +214,7 @@ fn app_holds(conn: Conn, k: u64) -> bool {
 
 fn counts_live(conn: Conn, k: u64) -> bool {
     if conn.client {
-        return false
+        return true
     }
     match conn.sessions[k].phase {
         Asked => true,
@@ -336,7 +356,7 @@ fn local_flow(limits: Limits) -> bool {
 }
 
 fn flow(w: Endpoint, i: u64) -> bool {
-    local_flow(w.limits) && w.conns[i].peer_flow
+    local_flow(w.limits) && offers_flow(w.conns[i].peer_credit)
 }
 
 pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[quic.Event], mut out: List[Event]) {
@@ -386,7 +406,13 @@ pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[qui
                     on_datagram(mut w, mut e, i, data, mut out)
                 }
             },
-            Acked(..) => (),
+            Acked(c, id) => {
+                if let Some(i) = conn_index(w, c) {
+                    if let Some(k) = owner(w.conns[i], id) {
+                        settle_stream(mut w, mut e, i, k, id, false, true)
+                    }
+                }
+            },
             Closed(c, _) => {
                 if let Some(i) = conn_index(w, c) {
                     drop_conn(mut w, i, mut out)
@@ -431,7 +457,7 @@ fn opened(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut 
     if bidi && !w.conns[i].client && n + 4 > w.conns[i].peer_bidi_next {
         w.conns[i].peer_bidi_next = n + 4
     }
-    list.push(mut w.conns[i].heads, Head(id: id, bidi: bidi, buf: list.with_capacity(8), kind: None))
+    list.push(mut w.conns[i].heads, Head(id: id, bidi: bidi, buf: list.with_capacity(8), kind: None, kind_len: 0, reset: None))
     head_readable(mut w, mut e, i, list.len(w.conns[i].heads) - 1, mut out)
 }
 
@@ -470,7 +496,7 @@ fn readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mu
         return
     }
     if let Some(k) = owner(w.conns[i], id) {
-        list.push(mut out, Readable(handle_of(w, i, k), id))
+        wt_readable(mut w, mut e, i, k, id, mut out)
     }
 }
 
@@ -482,7 +508,10 @@ fn writable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mu
         return
     }
     if let Some(k) = owner(w.conns[i], id) {
-        list.push(mut out, Writable(handle_of(w, i, k), id))
+        let j = option.unwrap(stream_index(w.conns[i].sessions[k], id))
+        if w.conns[i].sessions[k].streams[j].send && !w.conns[i].sessions[k].streams[j].fin_queued && w.conns[i].sessions[k].streams[j].waiting == 0 {
+            list.push(mut out, Writable(handle_of(w, i, k), id))
+        }
     }
 }
 
@@ -504,7 +533,8 @@ fn stopped(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, cod
     }
     if let Some(k) = owner(w.conns[i], id) {
         list.push(mut out, Stopped(s: handle_of(w, i, k), stream: id, code: h3_wire.application_code_of(code)))
-        settle_stream(mut w, i, k, id, false, true)
+        refund_reset(mut w, e, i, k, id, mut out)
+        settle_stream(mut w, mut e, i, k, id, false, true)
     }
 }
 
@@ -517,11 +547,11 @@ fn stream_gone(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId,
         return
     }
     let c = w.conns[i].handle
+    let info = ResetInfo(code: code, size: final_size)
     if let Some(h) = head_index(w.conns[i], id) {
+        w.conns[i].heads[h].reset = Some(info)
         head_readable(mut w, mut e, i, h, mut out)
-        if !conn_holds(w, c, i) {
-            return
-        }
+        return
     }
     if let Some(k) = session_index(w.conns[i], id) {
         let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
@@ -529,13 +559,12 @@ fn stream_gone(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId,
         return
     }
     if let Some(k) = owner(w.conns[i], id) {
-        list.push(mut out, Reset(s: handle_of(w, i, k), stream: id, code: h3_wire.application_code_of(code), final_size: final_size))
+        wt_reset(mut w, mut e, i, k, id, info, mut out)
         return
     }
     for j in 0u64 .. list.len(w.conns[i].parked) {
         if w.conns[i].parked[j].id == id {
-            let _ = list.remove(mut w.conns[i].parked, j)
-            let _ = quic.stop(mut e, c, id, h3_wire.WT_SESSION_GONE)
+            w.conns[i].parked[j].reset = Some(info)
             return
         }
     }

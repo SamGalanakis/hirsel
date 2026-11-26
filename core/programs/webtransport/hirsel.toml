@@ -17,6 +17,7 @@ quic = { major = 1, path = "../quic" }
 "streams.hirsel" = "webtransport"
 "capsule.hirsel" = "webtransport"
 "wrappers.hirsel" = "webtransport"
+"flow.hirsel" = "webtransport"
 
 [tests]
 limit = 67108864
@@ -27,3 +28,4 @@ grants = ["Tasks"]
 "session_laws.hirsel" = "laws"
 "session_vectors.hirsel" = "laws"
 "stream_laws.hirsel" = "laws"
+"flow_laws.hirsel" = "laws"

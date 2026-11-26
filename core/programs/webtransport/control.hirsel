@@ -212,7 +212,12 @@ fn peer_settings(mut w: Endpoint, mut e: quic.Endpoint, i: u64, s: h3_wire.Setti
     if datagram > 1 || connect_protocol > 1 || (w.conns[i].client && enabled > 1) {
         return h3_wire.H3_SETTINGS_ERROR
     }
-    let offers = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_UNI) > 0 || setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI) > 0 || setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_DATA) > 0
+    let bidi = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI)
+    let uni = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_UNI)
+    let data = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_DATA)
+    if bidi > MAX_STREAMS || uni > MAX_STREAMS {
+        return h3_wire.H3_SETTINGS_ERROR
+    }
     let transport_ok = match quic.peer_params(e, w.conns[i].handle) {
         Some(p) => p.max_datagram_frame > 0 && p.reset_stream_at,
         None => false,
@@ -220,14 +225,14 @@ fn peer_settings(mut w: Endpoint, mut e: quic.Endpoint, i: u64, s: h3_wire.Setti
     let ok = transport_ok && datagram == 1 && enabled == 1 && (!w.conns[i].client || connect_protocol == 1)
     w.conns[i].settings = true
     w.conns[i].peer_ok = ok
-    w.conns[i].peer_flow = offers
+    w.conns[i].peer_credit = credit(data, bidi, uni)
     if w.conns[i].client {
         if !ok {
             // draft-17 §3.1: no session on a server that lacks a requirement; this connection
             // exists only for WebTransport, so it closes.
             return h3_wire.WT_REQUIREMENTS_NOT_MET
         }
-        send_connects(mut w, mut e, i, mut out)
+        send_first_connect(mut w, mut e, i, mut out)
         return 0
     }
     // Held requests are processed now, in arrival order.

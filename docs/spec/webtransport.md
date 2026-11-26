@@ -117,7 +117,8 @@ that each open their first session on stream 0 hold different handles. A handle 
 reused: QUIC never reuses a connection handle while the endpoint lives, and never reuses a
 stream id within a connection.
 
-`connect` starts the QUIC connection with the pin list (QUIC-3) if none is open to `to`,
+`connect` reuses an eligible connection to `to` with the same authority and pin list, or starts
+a QUIC connection with the pins (QUIC-3),
 and returns the session's handle at once, pending. `Ready` follows once the QUIC handshake
 has completed, both SETTINGS have arrived, and the server has answered `200`; `Refused`
 follows any other status, and `Closed` follows a QUIC or HTTP/3 failure first.
@@ -239,7 +240,7 @@ draft-17 §5's session-level limits are enforced at both ends: `data` bounds the
 session's streams together, excluding stream headers (§5.4), and `streams_bidi` and
 `streams_uni` bound the streams the peer may open in it (§5.3). They are sent as SETTINGS
 initial values and raised with WT_MAX_DATA and WT_MAX_STREAMS capsules as the application
-reads through `read`, at half the window as `quic` does (QUIC-5).
+reads through `read` and peer-initiated streams close, at half the window as `quic` does (QUIC-5).
 
 The receive side counts, per session, the largest offset received on each of its streams
 (`quic.received`), less the header, and for a reset stream its final size from
@@ -251,7 +252,8 @@ session (not the connection) with `WT_FLOW_CONTROL_ERROR`. A received WT_MAX_STR
 WT_STREAM_DATA_BLOCKED capsule is a session error (§5.4). The send side does the same
 accounting in `write` and `write_shared`: they take no more than the peer's WT_MAX_DATA
 allows and send WT_DATA_BLOCKED when it stops them, and `open` past the peer's
-WT_MAX_STREAMS is `Blocked` and sends WT_STREAMS_BLOCKED.
+WT_MAX_STREAMS is `Blocked` and sends WT_STREAMS_BLOCKED. A reset refunds any
+accepted bytes that are outside its QUIC final size.
 
 Sessions:
 

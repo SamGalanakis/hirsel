@@ -219,6 +219,25 @@ pub fn received(e: Endpoint, c: ConnectionHandle, s: StreamId) -> u64 {
     0
 }
 
+/// The final offset declared by a local reset. Queued bytes discarded by the reset
+/// do not count toward that offset (WT-5).
+pub fn reset_final_size(e: Endpoint, c: ConnectionHandle, s: StreamId) -> Option[u64] {
+    let Some(i) = slot_at(e, c) else {
+        return None
+    }
+    let StreamId(id) = s
+    if let Some(conn) = e.connections[i] {
+        if let Some(k) = find(conn.streams, id) {
+            if let Some(tx) = conn.streams.list[k].send {
+                if let Some(r) = tx.reset {
+                    return Some(r.final_size)
+                }
+            }
+        }
+    }
+    None
+}
+
 fn reset_in(mut st: Streams, id: u64, code: u64, reliable: u64) -> Result[(), QuicError] {
     let Some(i) = find(st, id) else {
         return Error(UnknownStream)

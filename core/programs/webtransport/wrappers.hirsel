@@ -17,10 +17,8 @@ fn find(w: Endpoint, s: SessionHandle) -> Result[(u64, u64), WtError] {
 /// Session s's indexes, and its WT stream's index within it.
 fn find_stream(w: Endpoint, s: SessionHandle, stream: quic.StreamId) -> Result[(u64, u64, u64), WtError] {
     let (i, k) = find(w, s)?
-    for j in 0u64 .. list.len(w.conns[i].sessions[k].streams) {
-        if w.conns[i].sessions[k].streams[j].id == stream {
-            return Ok((i, k, j))
-        }
+    if let Some(j) = stream_index(w.conns[i].sessions[k], stream) {
+        return Ok((i, k, j))
     }
     Error(State)
 }
@@ -42,6 +40,13 @@ pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool)
     if !usable(w.conns[i], k) {
         return Error(State)
     }
+    if flow(w, i) {
+        let x = stream_window(w.conns[i].sessions[k].tx, bidi)
+        if x.used >= x.limit {
+            block_open(mut w, mut e, i, k, bidi, x)
+            return Error(Blocked)
+        }
+    }
     let c = w.conns[i].handle
     let id = match quic.open(mut e, c, bidi) {
         Ok(id) => id,
@@ -57,70 +62,94 @@ pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool)
     h3_wire.write_varint(kind, mut header)
     h3_wire.write_varint(sid, mut header)
     let size = list.len(header)
-    list.push(mut w.conns[i].sessions[k].streams, Owned(id: id, header: size, recv: bidi, send: true))
+    list.push(mut w.conns[i].sessions[k].streams, owned_stream(id, size, 0, bidi, true))
+    if flow(w, i) {
+        count_stream(mut w.conns[i].sessions[k].tx, bidi)
+    }
     send(mut w, mut e, i, id, take header, false)
     Ok(id)
 }
 
 pub fn read(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, mut into: Bytes) -> Result[(u64, bool), WtError] {
     let (i, k, j) = find_stream(w, s, stream)?
-    if !w.conns[i].sessions[k].streams[j].recv {
+    if !w.conns[i].sessions[k].streams[j].recv || w.conns[i].sessions[k].streams[j].discarded {
         return Error(State)
     }
     match quic.read(mut e, w.conns[i].handle, stream, mut into) {
         Ok((n, fin)) => {
+            consume_bytes(mut w, mut e, i, k, j, n)
             if fin {
-                settle_stream(mut w, i, k, stream, true, false)
+                finish_recv(mut w, mut e, i, k, j, stream)
             }
             Ok((n, fin))
         },
         Error(err) => {
-            settle_stream(mut w, i, k, stream, true, false)
+            finish_recv(mut w, mut e, i, k, j, stream)
             Error(Quic(err))
         },
     }
 }
 
 /// Session s's stream, ready for the application's bytes: our header has gone to quic.
-fn sendable(w: Endpoint, s: SessionHandle, stream: quic.StreamId) -> Result[(u64, u64, bool), WtError] {
+fn sendable(w: Endpoint, s: SessionHandle, stream: quic.StreamId) -> Result[(u64, u64, u64), WtError] {
     let (i, k, j) = find_stream(w, s, stream)?
-    if !w.conns[i].sessions[k].streams[j].send {
+    if !w.conns[i].sessions[k].streams[j].send || w.conns[i].sessions[k].streams[j].fin_queued {
         return Error(State)
     }
-    Ok((i, k, queued(w.conns[i], stream)))
+    Ok((i, k, j))
 }
 
-/// Write on a WT stream; 0 while its header waits for credit, and Writable follows.
+/// Write on a WT stream; a short count schedules Writable when credit is available.
 pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Bytes, fin: bool) -> Result[u64, WtError] {
-    let (i, k, waiting) = sendable(w, s, stream)?
-    if waiting {
+    let (i, k, j) = sendable(w, s, stream)?
+    if queued(w.conns[i], stream) {
         return Ok(0)
     }
-    match quic.write(mut e, w.conns[i].handle, stream, data, fin) {
-        Ok(n) => {
-            if fin && n == list.len(data) {
-                settle_stream(mut w, i, k, stream, false, true)
-            }
-            Ok(n)
-        },
-        Error(err) => Error(Quic(err)),
+    let len = list.len(data)
+    let offered = order.min(len, stream_send_room(w, i, k))
+    let n = match quic.write(mut e, w.conns[i].handle, stream, list.slice(data, 0, offered), fin && offered == len) {
+        Ok(n) => n,
+        Error(err) => return Error(Quic(err)),
     }
+    if flow(w, i) {
+        w.conns[i].sessions[k].tx.data.used += n
+        w.conns[i].sessions[k].streams[j].written += n
+        w.conns[i].sessions[k].streams[j].waiting = 0
+        if n == offered && offered < len {
+            block_data(mut w, mut e, i, k, j, 1)
+        }
+    }
+    if fin && n == len {
+        w.conns[i].sessions[k].streams[j].fin_queued = true
+    }
+    Ok(n)
 }
 
 pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, WtError] {
-    let (i, k, waiting) = sendable(w, s, stream)?
-    if waiting {
+    let (i, k, j) = sendable(w, s, stream)?
+    if queued(w.conns[i], stream) {
         return Ok(false)
     }
-    match quic.write_shared(mut e, w.conns[i].handle, stream, take data, fin) {
-        Ok(taken) => {
-            if fin && taken {
-                settle_stream(mut w, i, k, stream, false, true)
-            }
-            Ok(taken)
-        },
-        Error(err) => Error(Quic(err)),
+    let n = list.len(data)
+    if n > stream_send_room(w, i, k) {
+        block_data(mut w, mut e, i, k, j, n)
+        return Ok(false)
     }
+    let taken = match quic.write_shared(mut e, w.conns[i].handle, stream, take data, fin) {
+        Ok(taken) => taken,
+        Error(err) => return Error(Quic(err)),
+    }
+    w.conns[i].sessions[k].streams[j].waiting = 0
+    if taken {
+        if flow(w, i) {
+            w.conns[i].sessions[k].tx.data.used += n
+            w.conns[i].sessions[k].streams[j].written += n
+        }
+        if fin {
+            w.conns[i].sessions[k].streams[j].fin_queued = true
+        }
+    }
+    Ok(taken)
 }
 
 /// Reset a WT stream with RESET_STREAM_AT at its header's length (draft-17 §4.4).
@@ -131,31 +160,33 @@ pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: qu
     }
     let header = w.conns[i].sessions[k].streams[j].header
     let c = w.conns[i].handle
-    let mut j2 = 0u64
-    while j2 < list.len(w.conns[i].out) {
-        if w.conns[i].out[j2].id == stream {
-            let _ = list.remove(mut w.conns[i].out, j2)
-        } else {
-            j2 += 1
-        }
+    if queued(w.conns[i], stream) {
+        return Error(Blocked)
     }
-    let result = quic.reset(mut e, c, stream, h3_wire.application_code(code), header)
-    settle_stream(mut w, i, k, stream, false, true)
-    match result {
-        Ok(()) => Ok(()),
+    match quic.reset(mut e, c, stream, h3_wire.application_code(code), header) {
+        Ok(()) => {
+            let mut later = replace(mut w.backlog, list.new())
+            refund_reset(mut w, e, i, k, stream, mut later)
+            settle_stream(mut w, mut e, i, k, stream, false, true)
+            w.backlog = take later
+            Ok(())
+        },
         Error(err) => Error(Quic(err)),
     }
 }
 
 pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError] {
     let (i, k, j) = find_stream(w, s, stream)?
-    if !w.conns[i].sessions[k].streams[j].recv {
+    if !w.conns[i].sessions[k].streams[j].recv || w.conns[i].sessions[k].streams[j].discarded {
         return Error(State)
     }
-    let result = quic.stop(mut e, w.conns[i].handle, stream, h3_wire.application_code(code))
-    settle_stream(mut w, i, k, stream, true, false)
-    match result {
-        Ok(()) => Ok(()),
+    match quic.stop(mut e, w.conns[i].handle, stream, h3_wire.application_code(code)) {
+        Ok(()) => {
+            // STOP_SENDING does not settle the peer's final size.
+            w.conns[i].sessions[k].streams[j].discarded = true
+            discard_readable(mut w, mut e, i, k, j, stream)
+            Ok(())
+        },
         Error(err) => Error(Quic(err)),
     }
 }

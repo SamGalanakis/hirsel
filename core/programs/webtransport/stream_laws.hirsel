@@ -1,9 +1,8 @@
 // T6 and T7: a raw quic client, its HTTP/3 and WebTransport bytes written by hand from the
 // RFCs and draft-17, against a webtransport server.
-/// A raw client's control stream offering draft-17 §5 flow control: CLIENT_CONTROL's
-/// SETTINGS plus SETTINGS_WT_INITIAL_MAX_STREAMS_UNI (0x2b64, the 2-byte varint 6b64) 16,
-/// so SETTINGS is 10 bytes.
-const CLIENT_CONTROL_FLOW: String = "00 04 0a 33 01 a0b8933b 01 6b64 10"
+/// CLIENT_CONTROL plus draft-17 §5 initial limits of 16 uni streams, 16 bidi
+/// streams and 16,384 data bytes (0x2b64, 0x2b65 and 0x2b61).
+const CLIENT_CONTROL_FLOW: String = "00 04 13 33 01 a0b8933b 01 6b64 10 6b65 10 6b61 80004000"
 
 /// WT_CLOSE_SESSION (0x2843, the 2-byte varint 6843) of length 7: code 7 and reason "bye",
 /// in one DATA frame (0x00) of 10 bytes (draft-17 §6, RFC 9297 §3.2, RFC 9114 §7.2.1).

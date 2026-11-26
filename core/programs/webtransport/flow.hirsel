@@ -1,0 +1,279 @@
+// Draft-17 §5. Each limit is cumulative over the session, including closed streams.
+const MAX_STREAMS: u64 = 1u64 << 60
+
+type Window {
+    limit: u64,
+    used: u64,
+    released: u64,
+    blocked: Option[u64]
+}
+
+type Credit {
+    data: Window,
+    bidi: Window,
+    uni: Window
+}
+
+type ResetInfo {
+    code: u64,
+    size: u64
+}
+
+fn new_window(limit: u64) -> Window {
+    Window(limit: limit, used: 0, released: 0, blocked: None)
+}
+
+fn credit(data: u64, bidi: u64, uni: u64) -> Credit {
+    Credit(data: new_window(data), bidi: new_window(bidi), uni: new_window(uni))
+}
+
+fn offers_flow(c: Credit) -> bool {
+    c.data.limit > 0 || c.bidi.limit > 0 || c.uni.limit > 0
+}
+
+fn start_credit(mut w: Endpoint, i: u64, k: u64) {
+    w.conns[i].sessions[k].rx = credit(w.limits.data, w.limits.streams_bidi, w.limits.streams_uni)
+    w.conns[i].sessions[k].tx = clone(w.conns[i].peer_credit)
+}
+
+fn stream_window(c: Credit, bidi: bool) -> Window {
+    if bidi {
+        clone(c.bidi)
+    } else {
+        clone(c.uni)
+    }
+}
+
+fn count_stream(mut c: Credit, bidi: bool) {
+    if bidi {
+        c.bidi.used += 1
+    } else {
+        c.uni.used += 1
+    }
+}
+
+fn send_credit(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, kind: u64, value: u64) {
+    let mut body: Bytes = list.with_capacity(8)
+    h3_wire.write_varint(value, mut body)
+    let id = w.conns[i].sessions[k].id
+    send(mut w, mut e, i, id, capsule_frame(kind, body), false)
+}
+
+/// Advance the advertised edge when at least half the initial window has been released.
+fn release_credit(mut x: Window, n: u64, initial: u64, maximum: u64) -> Option[u64] {
+    x.released += n
+    let next = order.min(x.released + initial, maximum)
+    if next > x.limit && next - x.limit >= order.max(initial / 2, 1) {
+        x.limit = next
+        return Some(next)
+    }
+    None
+}
+
+fn release_bytes(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, n: u64) {
+    if flow(w, i) {
+        if let Some(next) = release_credit(mut w.conns[i].sessions[k].rx.data, n, w.limits.data, h3_wire.MAX_VARINT) {
+            send_credit(mut w, mut e, i, k, h3_wire.CAPSULE_WT_MAX_DATA, next)
+        }
+    }
+}
+
+fn release_stream(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, id: quic.StreamId) {
+    if !flow(w, i) || !peer_initiated(w.conns[i], id) {
+        return
+    }
+    if bidi_of(id) {
+        if let Some(next) = release_credit(mut w.conns[i].sessions[k].rx.bidi, 1, w.limits.streams_bidi, MAX_STREAMS) {
+            send_credit(mut w, mut e, i, k, h3_wire.CAPSULE_WT_MAX_STREAMS_BIDI, next)
+        }
+    } else if let Some(next) = release_credit(mut w.conns[i].sessions[k].rx.uni, 1, w.limits.streams_uni, MAX_STREAMS) {
+        send_credit(mut w, mut e, i, k, h3_wire.CAPSULE_WT_MAX_STREAMS_UNI, next)
+    }
+}
+
+fn flow_error(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let s = handle_of(w, i, k)
+    let code: u32 = int.truncate(h3_wire.WT_FLOW_CONTROL_ERROR)
+    close(mut w, mut e, s, code, b"")
+    list.push(mut out, Closed(s: s, code: code, reason: list.new()))
+}
+
+/// Charge the growth in a stream's body offset, even across a gap or a reset.
+fn charge_received(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, j: u64, offset: u64, mut out: List[Event]) -> bool {
+    if !flow(w, i) {
+        return true
+    }
+    let head = w.conns[i].sessions[k].streams[j].recv_header
+    let body = order.max(offset, head) - head
+    let previous = w.conns[i].sessions[k].streams[j].received
+    if body <= previous {
+        return true
+    }
+    let n = body - previous
+    let room = w.conns[i].sessions[k].rx.data.limit - w.conns[i].sessions[k].rx.data.used
+    if n > room {
+        flow_error(mut w, mut e, i, k, mut out)
+        return false
+    }
+    w.conns[i].sessions[k].rx.data.used += n
+    w.conns[i].sessions[k].streams[j].received = body
+    true
+}
+
+fn wt_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, id: quic.StreamId, mut out: List[Event]) {
+    let s = handle_of(w, i, k)
+    let j = option.unwrap(stream_index(w.conns[i].sessions[k], id))
+    let offset = quic.received(e, w.conns[i].handle, id)
+    if !charge_received(mut w, mut e, i, k, j, offset, mut out) {
+        return
+    }
+    if w.conns[i].sessions[k].streams[j].discarded {
+        discard_readable(mut w, mut e, i, k, j, id)
+    } else if w.conns[i].sessions[k].streams[j].recv {
+        list.push(mut out, Readable(s, id))
+    }
+}
+
+fn consume_bytes(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, j: u64, n: u64) {
+    w.conns[i].sessions[k].streams[j].consumed += n
+    release_bytes(mut w, mut e, i, k, n)
+}
+
+fn finish_recv(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, j: u64, id: quic.StreamId) {
+    if w.conns[i].sessions[k].streams[j].reset {
+        let total = w.conns[i].sessions[k].streams[j].received
+        let consumed = w.conns[i].sessions[k].streams[j].consumed
+        release_bytes(mut w, mut e, i, k, order.max(total, consumed) - consumed)
+    }
+    settle_stream(mut w, mut e, i, k, id, true, false)
+}
+
+fn discard_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, j: u64, id: quic.StreamId) {
+    let c = w.conns[i].handle
+    let mut scratch: Bytes = list.with_capacity(4096)
+    loop {
+        match quic.read(mut e, c, id, mut scratch) {
+            Ok((n, fin)) => {
+                consume_bytes(mut w, mut e, i, k, j, n)
+                if fin {
+                    break
+                }
+                if n == 0 {
+                    return
+                }
+                list.clear(mut scratch)
+            },
+            Error(_) => break,
+        }
+    }
+    finish_recv(mut w, mut e, i, k, j, id)
+}
+
+fn wt_reset(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, id: quic.StreamId, r: ResetInfo, mut out: List[Event]) {
+    let s = handle_of(w, i, k)
+    let j = option.unwrap(stream_index(w.conns[i].sessions[k], id))
+    if !charge_received(mut w, mut e, i, k, j, r.size, mut out) {
+        return
+    }
+    if !w.conns[i].sessions[k].streams[j].recv {
+        return
+    }
+    w.conns[i].sessions[k].streams[j].reset = true
+    if w.conns[i].sessions[k].streams[j].discarded {
+        discard_readable(mut w, mut e, i, k, j, id)
+        return
+    }
+    list.push(mut out, Reset(s: s, stream: id, code: h3_wire.application_code_of(r.code), final_size: r.size))
+    // A zero-capacity read reports the reset once the reliable prefix has been consumed.
+    let mut empty: Bytes = list.new()
+    if let Error(_) = quic.read(mut e, w.conns[i].handle, id, mut empty) {
+        finish_recv(mut w, mut e, i, k, j, id)
+    }
+}
+
+fn stream_send_room(w: Endpoint, i: u64, k: u64) -> u64 {
+    if !flow(w, i) {
+        return h3_wire.MAX_VARINT
+    }
+    w.conns[i].sessions[k].tx.data.limit - w.conns[i].sessions[k].tx.data.used
+}
+
+fn block_data(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, j: u64, needed: u64) {
+    w.conns[i].sessions[k].streams[j].waiting = needed
+    let limit = w.conns[i].sessions[k].tx.data.limit
+    if w.conns[i].sessions[k].tx.data.blocked != Some(limit) {
+        w.conns[i].sessions[k].tx.data.blocked = Some(limit)
+        send_credit(mut w, mut e, i, k, h3_wire.CAPSULE_WT_DATA_BLOCKED, limit)
+    }
+}
+
+fn block_open(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, bidi: bool, x: Window) {
+    if x.blocked == Some(x.limit) {
+        return
+    }
+    let kind = if bidi {
+        w.conns[i].sessions[k].tx.bidi.blocked = Some(x.limit)
+        h3_wire.CAPSULE_WT_STREAMS_BLOCKED_BIDI
+    } else {
+        w.conns[i].sessions[k].tx.uni.blocked = Some(x.limit)
+        h3_wire.CAPSULE_WT_STREAMS_BLOCKED_UNI
+    }
+    send_credit(mut w, mut e, i, k, kind, x.limit)
+}
+
+fn wake_session_writers(mut w: Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let room = stream_send_room(w, i, k)
+    let s = handle_of(w, i, k)
+    for j in 0u64 .. list.len(w.conns[i].sessions[k].streams) {
+        let needed = w.conns[i].sessions[k].streams[j].waiting
+        if needed > 0 && needed <= room {
+            w.conns[i].sessions[k].streams[j].waiting = 0
+            list.push(mut out, Writable(s, w.conns[i].sessions[k].streams[j].id))
+        }
+    }
+}
+
+fn refund_reset(mut w: Endpoint, e: quic.Endpoint, i: u64, k: u64, id: quic.StreamId, mut out: List[Event]) {
+    if !flow(w, i) {
+        return
+    }
+    if let Some(size) = quic.reset_final_size(e, w.conns[i].handle, id) {
+        let j = option.unwrap(stream_index(w.conns[i].sessions[k], id))
+        let head = w.conns[i].sessions[k].streams[j].header
+        let sent = int.saturating_sub(size, head)
+        let accepted = w.conns[i].sessions[k].streams[j].written
+        w.conns[i].sessions[k].streams[j].waiting = 0
+        w.conns[i].sessions[k].tx.data.used -= accepted - sent
+        wake_session_writers(mut w, i, k, mut out)
+    }
+}
+
+fn flow_capsule(kind: u64) -> bool {
+    kind == h3_wire.CAPSULE_WT_MAX_DATA || kind == h3_wire.CAPSULE_WT_DATA_BLOCKED || kind == h3_wire.CAPSULE_WT_MAX_STREAMS_BIDI || kind == h3_wire.CAPSULE_WT_MAX_STREAMS_UNI || kind == h3_wire.CAPSULE_WT_STREAMS_BLOCKED_BIDI || kind == h3_wire.CAPSULE_WT_STREAMS_BLOCKED_UNI
+}
+
+/// Apply a flow-control capsule. CONNECT delivers these in order, so repeated or
+/// decreasing maxima are errors (§5.6.2 and §5.6.4).
+fn apply_credit(mut w: Endpoint, i: u64, k: u64, kind: u64, value: u64, mut out: List[Event]) -> bool {
+    if kind != h3_wire.CAPSULE_WT_MAX_DATA && kind != h3_wire.CAPSULE_WT_DATA_BLOCKED && value > MAX_STREAMS {
+        return false
+    }
+    if kind == h3_wire.CAPSULE_WT_MAX_DATA {
+        if value <= w.conns[i].sessions[k].tx.data.limit {
+            return false
+        }
+        w.conns[i].sessions[k].tx.data.limit = value
+        wake_session_writers(mut w, i, k, mut out)
+    } else if kind == h3_wire.CAPSULE_WT_MAX_STREAMS_BIDI {
+        if value <= w.conns[i].sessions[k].tx.bidi.limit {
+            return false
+        }
+        w.conns[i].sessions[k].tx.bidi.limit = value
+    } else if kind == h3_wire.CAPSULE_WT_MAX_STREAMS_UNI {
+        if value <= w.conns[i].sessions[k].tx.uni.limit {
+            return false
+        }
+        w.conns[i].sessions[k].tx.uni.limit = value
+    }
+    true
+}

@@ -1,0 +1,225 @@
+const FLOW_ERROR: u32 = 0x045d4487
+
+type Violation = DataLimit | ResetFinalSize | StreamLimit | RepeatedMaximum | PerStreamCapsule
+
+fn small_windows() -> webtransport.Limits {
+    let mut l = limits(1024, 4, false)
+    l.data = 8
+    l.streams_uni = 1
+    l
+}
+
+fn lost_datagram(mut client: Side, now: u64) {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let _ = quic.poll(mut client.q, now, mut wire, mut packets)
+    let mut sent = 0u64
+    for event in packets {
+        if let Transmit(..) = event {
+            sent += 1
+        }
+    }
+    if sent == 0 {
+        fail("the peer must send the bytes before dropping the packet")
+    }
+    quic.committed(mut client.q, now, sent)
+}
+
+fn session_violation(v: Violation) {
+    let l = small_windows()
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(clone(l), false)
+    let c = raw_client(mut client, mut server, l)
+    let _ = raw_streams(mut client, c, hex_text(CLIENT_CONTROL_FLOW), false)
+    let first = send_request(mut client, c, connect_good())
+    let second = send_request(mut client, c, connect_good())
+    settle(mut client, mut server, 2)
+    let hs = requested_handles(server.app)
+    expect(list.len(hs), 2, "two CONNECTs on the same connection")
+    accept_session(mut server, hs[0])
+    accept_session(mut server, hs[1])
+    settle(mut client, mut server, 3)
+    expect(status_of(mut client, c, first), 200, "the first CONNECT")
+    expect(status_of(mut client, c, second), 200, "the second CONNECT")
+    match v {
+        DataLimit => {
+            let id = raw_wt_uni(mut client, c, 0, b"12345678", false)
+            settle(mut client, mut server, 4)
+            write_all(mut client, c, id, b"9", false)
+        },
+        ResetFinalSize => {
+            let id = raw_wt_uni(mut client, c, 0, b"", false)
+            settle(mut client, mut server, 4)
+            write_all(mut client, c, id, b"123456789", false)
+            lost_datagram(mut client, 5)
+            result.unwrap(quic.reset(mut client.q, c, id, 0x52e4a40fa8db, 3))
+        },
+        StreamLimit => {
+            let _ = raw_wt_uni(mut client, c, 0, b"", false)
+            let _ = raw_wt_uni(mut client, c, 0, b"", false)
+        },
+        RepeatedMaximum => {
+            // DATA length 9, WT_MAX_DATA length 4 and the unchanged limit 16,384.
+            write_all(mut client, c, first, hex_text("00 09 990b4d3d 04 80004000"), false)
+        },
+        PerStreamCapsule => {
+            // DATA length 7, forbidden WT_MAX_STREAM_DATA, then stream id and limit.
+            write_all(mut client, c, first, hex_text("00 07 990b4d3e 02 02 10"), false)
+        },
+    }
+    settle(mut client, mut server, 6)
+    let mut closed = 0u64
+    for event in server.app {
+        if let Closed(s: s, code: code, ..) = event {
+            if s != hs[0] || code != FLOW_ERROR {
+                fail("the offending session alone closes with WT_FLOW_CONTROL_ERROR")
+            }
+            closed += 1
+        }
+    }
+    expect(closed, 1, "the violation closes exactly one session")
+    let mut reply: Bytes = list.with_capacity(32)
+    let _ = result.unwrap(quic.read(mut client.q, c, first, mut reply))
+    if reply != hex_text("00 07 6843 04 045d4487") {
+        fail("the peer receives the flow-control close capsule")
+    }
+    let survivor = raw_wt_uni(mut client, c, 4, b"still up", true)
+    settle(mut client, mut server, 7)
+    let (body, fin) = read_all(mut server, hs[1], survivor)
+    if body != b"still up" || !fin {
+        fail("the other session retains independent stream and byte credit")
+    }
+}
+
+fn ready_session(events: List[webtransport.Event], s: webtransport.SessionHandle) -> bool {
+    for event in events {
+        if let Ready(s: ready, ..) = event {
+            if ready == s {
+                return true
+            }
+        }
+    }
+    false
+}
+
+fn pooled_session(take l: webtransport.Limits) {
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(take l, true)
+    let a = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 0, SERVER_ADDR, "https://server/one", pins(), list.new()))
+    settle(mut client, mut server, 1)
+    let ah = requested_handles(server.app)[0]
+    accept_session(mut server, ah)
+    settle(mut client, mut server, 2)
+    let b = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 3, SERVER_ADDR, "https://server/two", pins(), list.new()))
+    let webtransport.SessionHandle(conn: ac, id: ai) = a
+    let webtransport.SessionHandle(conn: bc, id: bi) = b
+    if ac != bc || ai == bi {
+        fail("the second session reuses the authenticated QUIC connection with a new stream")
+    }
+    settle(mut client, mut server, 4)
+    let bh = requested_handles(server.app)[1]
+    accept_session(mut server, bh)
+    settle(mut client, mut server, 5)
+    if !ready_session(client.app, a) || !ready_session(client.app, b) {
+        fail("both sessions become ready")
+    }
+    // The second open is blocked until the receiver consumes and closes the first uni stream.
+    let id = result.unwrap(webtransport.open(mut client.wt, mut client.q, a, false))
+    if let Error(Blocked) = webtransport.open(mut client.wt, mut client.q, a, false) {
+        ()
+    } else {
+        fail("the next uni stream must wait for WT_MAX_STREAMS")
+    }
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, a, id, b"123456789abc", true)), 8, "only one data window is accepted")
+    settle(mut client, mut server, 6)
+    let mut four: Bytes = list.with_capacity(4)
+    let (n, fin) = result.unwrap(webtransport.read(mut server.wt, mut server.q, ah, id, mut four))
+    if n != 4 || fin || four != b"1234" {
+        fail("a slow reader consumes only half a window")
+    }
+    list.clear(mut client.app)
+    settle(mut client, mut server, 7)
+    let mut writable = false
+    for event in client.app {
+        if let Writable(s, stream) = event {
+            writable = writable || (s == a && stream == id)
+        }
+    }
+    if !writable {
+        fail("WT_MAX_DATA must wake the session's blocked writer")
+    }
+    if !result.unwrap(webtransport.write_shared(mut client.wt, mut client.q, a, id, shared.new(b"9abc"), true)) {
+        fail("half a window now fits in one shared write")
+    }
+    settle(mut client, mut server, 8)
+    let (rest, end) = read_all(mut server, ah, id)
+    if rest != b"56789abc" || !end {
+        fail("only the prefix was taken in the first write, and FIN follows the suffix")
+    }
+    settle(mut client, mut server, 9)
+    let next = result.unwrap(webtransport.open(mut client.wt, mut client.q, a, false))
+    if next == id {
+        fail("WT_MAX_STREAMS permits a fresh stream")
+    }
+    // Resetting a wholly unsent write frees its reservation. Its final size is
+    // the header alone, so the receiver has no body bytes to return as credit.
+    let bidi = result.unwrap(webtransport.open(mut client.wt, mut client.q, b, true))
+    if result.unwrap(webtransport.write_shared(mut client.wt, mut client.q, b, bidi, shared.new(b"123456789"), false)) {
+        fail("a shared write past WT_MAX_DATA is atomic")
+    }
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, b, bidi, b"12345678", false)), 8, "the other session has its whole window")
+    result.unwrap(webtransport.reset(mut client.wt, mut client.q, b, bidi, 12))
+    let uni = result.unwrap(webtransport.open(mut client.wt, mut client.q, b, false))
+    expect(result.unwrap(webtransport.write(mut client.wt, mut client.q, b, uni, b"abcdefgh", true)), 8, "discarded unsent bytes are refunded")
+    settle(mut client, mut server, 10)
+    let (last, done) = read_all(mut server, bh, uni)
+    if last != b"abcdefgh" || !done {
+        fail("the refund agrees with the receiver's final-size accounting")
+    }
+}
+
+fn distinct_clients() {
+    let second_addr = Addr(ip: V4(0x7f000001u32), port: 24203)
+    let l = small_windows()
+    let mut server = server_side(clone(l), true)
+    let mut client_a = client_side_seed(clone(l), true, 39)
+    let mut client_b = client_side_seed(clone(l), true, 40)
+    let a = result.unwrap(webtransport.connect(mut client_a.wt, mut client_a.q, 0, SERVER_ADDR, "https://server/a", pins(), list.new()))
+    settle(mut client_a, mut server, 1)
+    let one = requested_handles(server.app)[0]
+    accept_session(mut server, one)
+    settle(mut client_a, mut server, 2)
+    let b = result.unwrap(webtransport.connect(mut client_b.wt, mut client_b.q, 3, SERVER_ADDR, "https://server/b", pins(), list.new()))
+    settle_address(mut client_b, mut server, second_addr, 4)
+    let two = requested_handles(server.app)[1]
+    accept_session(mut server, two)
+    settle_address(mut client_b, mut server, second_addr, 5)
+    let webtransport.SessionHandle(conn: first_conn, id: first_id) = one
+    let webtransport.SessionHandle(conn: second_conn, id: second_id) = two
+    let zero: quic.StreamId = StreamId(0)
+    if first_conn == second_conn || first_id != zero || second_id != first_id {
+        fail("two clients' stream zero have different handles")
+    }
+    webtransport.close(mut client_a.wt, mut client_a.q, a, 7, b"bye")
+    settle(mut client_a, mut server, 6)
+    let id = result.unwrap(webtransport.open(mut client_b.wt, mut client_b.q, b, false))
+    expect(result.unwrap(webtransport.write(mut client_b.wt, mut client_b.q, b, id, b"alive", true)), 5, "the second client's session is still live")
+    settle_address(mut client_b, mut server, second_addr, 7)
+    let (body, fin) = read_all(mut server, two, id)
+    if body != b"alive" || !fin {
+        fail("closing one client's stream zero must leave the other's alone")
+    }
+}
+
+/// bug: a pooled session can overspend shared transport credit, starve a neighbor, or
+/// stall an honest writer; CONNECT stream zero alone can alias two client sessions.
+/// oracle: draft-17 §5's per-session cumulative limits, final sizes and credit capsules.
+@test
+fn session_flow_control() -> Result[(), ()] {
+    for v in[DataLimit, ResetFinalSize, StreamLimit, RepeatedMaximum, PerStreamCapsule] {
+        session_violation(v)
+    }
+    pooled_session(small_windows())
+    distinct_clients()
+    Ok(())
+}

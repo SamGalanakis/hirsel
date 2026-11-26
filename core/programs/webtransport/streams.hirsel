@@ -61,12 +61,14 @@ fn head_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, h: u64, mut out:
         }
         let bidi = w.conns[i].heads[h].bidi
         if let Some(_) = w.conns[i].heads[h].kind {
-            let _ = list.remove(mut w.conns[i].heads, h)
-            wt_stream(mut w, mut e, i, id, bidi, v, mut out)
+            let Head(buf: buf, kind_len: kind_len, reset: info, ..) = list.remove(mut w.conns[i].heads, h)
+            let stream = Parked(id: id, sid: v, since: w.now, header: kind_len + list.len(buf), reset: info)
+            wt_stream(mut w, mut e, i, stream, mut out)
             return
         }
         if (bidi && v == h3_wire.SIGNAL_WT_BIDI) || (!bidi && v == h3_wire.STREAM_WT) {
             w.conns[i].heads[h].kind = Some(v)
+            w.conns[i].heads[h].kind_len = list.len(w.conns[i].heads[h].buf)
             list.clear(mut w.conns[i].heads[h].buf)
             continue
         }
@@ -124,43 +126,76 @@ fn place(conn: Conn, sid: u64) -> Place {
 }
 
 /// A peer WT stream whose header named session sid (WT-4).
-fn wt_stream(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, bidi: bool, sid: u64, mut out: List[Event]) {
-    if sid & 3 != 0 {
+fn wt_stream(mut w: Endpoint, mut e: quic.Endpoint, i: u64, take stream: Parked, mut out: List[Event]) {
+    if stream.sid & 3 != 0 {
         // draft-17 §4: a session id is a client-initiated bidirectional stream id.
         fail_conn(mut w, mut e, i, h3_wire.H3_ID_ERROR, mut out)
         return
     }
     let c = w.conns[i].handle
-    match place(w.conns[i], sid) {
-        At(k) => attach(mut w, i, k, id, bidi, mut out),
+    match place(w.conns[i], stream.sid) {
+        At(k) => {
+            let _ = attach(mut w, mut e, i, k, stream, mut out)
+        },
         Wait => {
             let most: u64 = int.widen(w.limits.buffered)
             if list.len(w.conns[i].parked) >= most {
-                refuse_stream(mut e, c, id, h3_wire.WT_BUFFERED_STREAM_REJECTED)
+                refuse_stream(mut e, c, stream.id, h3_wire.WT_BUFFERED_STREAM_REJECTED)
                 return
             }
-            list.push(mut w.conns[i].parked, Parked(id: id, sid: sid, since: w.now))
+            list.push(mut w.conns[i].parked, take stream)
         },
-        Gone => refuse_stream(mut e, c, id, h3_wire.WT_SESSION_GONE),
+        Gone => refuse_stream(mut e, c, stream.id, h3_wire.WT_SESSION_GONE),
     }
 }
 
-/// The stream belongs to live session k; the bytes after its header may already be here.
-fn attach(mut w: Endpoint, i: u64, k: u64, id: quic.StreamId, bidi: bool, mut out: List[Event]) {
-    list.push(mut w.conns[i].sessions[k].streams, Owned(id: id, header: 0, recv: true, send: bidi))
-    let s = handle_of(w, i, k)
-    list.push(mut out, Stream(s: s, stream: id, bidi: bidi))
-    list.push(mut out, Readable(s, id))
+fn owned_stream(id: quic.StreamId, header: u64, recv_header: u64, recv: bool, can_send: bool) -> Owned {
+    Owned(id: id, header: header, recv_header: recv_header, received: 0, written: 0, fin_queued: false, consumed: 0, discarded: false, reset: false, waiting: 0, recv: recv, send: can_send)
 }
 
-/// Session k is live: hand over what was buffered for it.
-fn adopt(mut w: Endpoint, i: u64, k: u64, mut out: List[Event]) {
+/// The stream belongs to live session k; the bytes after its header may already be here.
+fn attach(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, stream: Parked, mut out: List[Event]) -> bool {
+    let id = stream.id
+    let bidi = bidi_of(id)
+    let c = w.conns[i].handle
+    if flow(w, i) {
+        let x = stream_window(w.conns[i].sessions[k].rx, bidi)
+        if x.used >= x.limit {
+            refuse_stream(mut e, c, id, h3_wire.WT_SESSION_GONE)
+            flow_error(mut w, mut e, i, k, mut out)
+            return false
+        }
+        count_stream(mut w.conns[i].sessions[k].rx, bidi)
+    }
+    let j = list.len(w.conns[i].sessions[k].streams)
+    list.push(mut w.conns[i].sessions[k].streams, owned_stream(id, 0, stream.header, true, bidi))
+    let offset = match stream.reset {
+        Some(r) => r.size,
+        None => quic.received(e, c, id),
+    }
+    if !charge_received(mut w, mut e, i, k, j, offset, mut out) {
+        return false
+    }
+    let s = handle_of(w, i, k)
+    list.push(mut out, Stream(s: s, stream: id, bidi: bidi))
+    if let Some(r) = stream.reset {
+        wt_reset(mut w, mut e, i, k, id, r, mut out)
+    } else {
+        list.push(mut out, Readable(s, id))
+    }
+    true
+}
+
+/// Session k is live: hand over what was buffered for it. False means it closed.
+fn adopt(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) -> bool {
     let quic.StreamId(sid) = w.conns[i].sessions[k].id
     let mut j = 0u64
     while j < list.len(w.conns[i].parked) {
         if w.conns[i].parked[j].sid == sid {
-            let Parked(id: id, ..) = list.remove(mut w.conns[i].parked, j)
-            attach(mut w, i, k, id, bidi_of(id), mut out)
+            let stream = list.remove(mut w.conns[i].parked, j)
+            if !attach(mut w, mut e, i, k, stream, mut out) {
+                return false
+            }
         } else {
             j += 1
         }
@@ -175,6 +210,7 @@ fn adopt(mut w: Endpoint, i: u64, k: u64, mut out: List[Event]) {
             j += 1
         }
     }
+    true
 }
 
 /// Session sid will never be live: its buffered streams are rejected and its buffered
@@ -284,20 +320,28 @@ fn owner(conn: Conn, id: quic.StreamId) -> Option[u64] {
     None
 }
 
-/// Close a half of session k's stream id; a stream with both halves closed is forgotten.
-fn settle_stream(mut w: Endpoint, i: u64, k: u64, id: quic.StreamId, recv_done: bool, send_done: bool) {
-    for j in 0u64 .. list.len(w.conns[i].sessions[k].streams) {
-        if w.conns[i].sessions[k].streams[j].id == id {
-            if recv_done {
-                w.conns[i].sessions[k].streams[j].recv = false
-            }
-            if send_done {
-                w.conns[i].sessions[k].streams[j].send = false
-            }
-            if !w.conns[i].sessions[k].streams[j].recv && !w.conns[i].sessions[k].streams[j].send {
-                let _ = list.remove(mut w.conns[i].sessions[k].streams, j)
-            }
-            return
+fn stream_index(session: Session, id: quic.StreamId) -> Option[u64] {
+    for j in 0u64 .. list.len(session.streams) {
+        if session.streams[j].id == id {
+            return Some(j)
+        }
+    }
+    None
+}
+
+/// Close a half of session k's stream id; a fully closed stream returns one stream credit.
+fn settle_stream(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, id: quic.StreamId, recv_done: bool, send_done: bool) {
+    if let Some(j) = stream_index(w.conns[i].sessions[k], id) {
+        if recv_done {
+            w.conns[i].sessions[k].streams[j].recv = false
+        }
+        if send_done {
+            w.conns[i].sessions[k].streams[j].send = false
+            w.conns[i].sessions[k].streams[j].waiting = 0
+        }
+        if !w.conns[i].sessions[k].streams[j].recv && !w.conns[i].sessions[k].streams[j].send {
+            let _ = list.remove(mut w.conns[i].sessions[k].streams, j)
+            release_stream(mut w, mut e, i, k, id)
         }
     }
 }

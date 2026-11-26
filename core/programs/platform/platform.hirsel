@@ -164,10 +164,6 @@ pub type Retired: codec + send {
     disposition: Disposition
 }
 
-pub type Limit: send = Count(u64) | Live(String, u64) | Groups(String, u64)
-
-pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Denied(String) | Store(store.Error) | FrontConfig(FrontError)
-
 // Wall time for the due index, monotonic time for backoff and the Ready reset.
 pub type Now: send {
     wall_ms: u64,
@@ -1936,21 +1932,6 @@ fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: operat
     }
 }
 
-fn class_of(e: Refused) -> operator.Class {
-    match e {
-        Full(_) => FullClass,
-        Busy(_) => BusyClass,
-        Unknown => UnknownGroupClass,
-        Exists => ConflictClass,
-        Retiring => UnknownGroupClass,
-        Missing(_) => StoreClass,
-        Denied(_) => DeniedClass,
-        Store(_) => StoreClass,
-        FrontConfig(NameTaken(_)) => ConflictClass,
-        FrontConfig(_) => InvalidClass,
-    }
-}
-
 // A cutover OLD answered Drift (its store moved past the export) or refused outright: the
 // first conflicts with the store's state, the second is OLD's diagnostic of an invalid import.
 fn abort_class(why: String) -> operator.Class {
@@ -2771,24 +2752,6 @@ fn store_owned(h: Host, path: String) -> bool waits {
             Ok(None) => return false,
             Error(_) => return true,
         }
-    }
-}
-
-fn refused_text(e: Refused) -> String {
-    match e {
-        Full(_) => "full",
-        Busy(_) => "busy",
-        Unknown => "unknown group",
-        Exists => "exists",
-        Retiring => "retiring",
-        Missing(w) => joined("missing ", w),
-        Denied(w) => string.from(w),
-        Store(_) => "store error",
-        FrontConfig(NameTaken(name)) => joined("SNI name already registered: ", name),
-        FrontConfig(InvalidName(name)) => joined("invalid SNI name: ", name),
-        FrontConfig(NoNames) => "a front needs at least one SNI name",
-        FrontConfig(InvalidListener(addr)) => joined("invalid front listener: ", addr),
-        FrontConfig(_) => "invalid front configuration",
     }
 }
 

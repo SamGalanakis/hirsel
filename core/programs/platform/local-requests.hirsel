@@ -10,6 +10,8 @@ fn refused_of(r: platform.Refused) -> Refused {
         Denied(why) => Failed(string.from(why)),
         Store(e) => Failed(store_text("catalog store: ", e)),
         FrontConfig(_) => Failed("invalid front configuration"),
+        WrongIncarnation(_) => Failed("signed for another incarnation of this node"),
+        Stale(_) => Failed("a stale assignment generation"),
     }
 }
 

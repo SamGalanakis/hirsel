@@ -1,0 +1,43 @@
+// Why the platform host refuses a request, and the operator class and text it answers with.
+pub type Limit: send = Count(u64) | Live(String, u64) | Groups(String, u64)
+
+// `WrongIncarnation(current)`: a fleet message signed for another process of this node.
+// `Stale(recorded)`: an assignment generation below the one the catalog holds (§14.12.2).
+pub type Refused: send = Full(Limit) | Busy(u64) | Unknown | Exists | Retiring | Missing(String) | Denied(String) | Store(store.Error) | FrontConfig(FrontError) | WrongIncarnation(u64) | Stale(u64)
+
+fn class_of(e: Refused) -> operator.Class {
+    match e {
+        Full(_) => FullClass,
+        Busy(_) => BusyClass,
+        Unknown => UnknownGroupClass,
+        Exists => ConflictClass,
+        Retiring => UnknownGroupClass,
+        Missing(_) => StoreClass,
+        Denied(_) => DeniedClass,
+        Store(_) => StoreClass,
+        FrontConfig(NameTaken(_)) => ConflictClass,
+        FrontConfig(_) => InvalidClass,
+        WrongIncarnation(_) => DeniedClass,
+        Stale(_) => ConflictClass,
+    }
+}
+
+fn refused_text(e: Refused) -> String {
+    match e {
+        Full(_) => "full",
+        Busy(_) => "busy",
+        Unknown => "unknown group",
+        Exists => "exists",
+        Retiring => "retiring",
+        Missing(w) => joined("missing ", w),
+        Denied(w) => string.from(w),
+        Store(_) => "store error",
+        FrontConfig(NameTaken(name)) => joined("SNI name already registered: ", name),
+        FrontConfig(InvalidName(name)) => joined("invalid SNI name: ", name),
+        FrontConfig(NoNames) => "a front needs at least one SNI name",
+        FrontConfig(InvalidListener(addr)) => joined("invalid front listener: ", addr),
+        FrontConfig(_) => "invalid front configuration",
+        WrongIncarnation(_) => "signed for another incarnation of this node",
+        Stale(_) => "a stale assignment generation",
+    }
+}

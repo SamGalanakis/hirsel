@@ -22,3 +22,73 @@ fn node_incarnation(c: Clock, rnd: Random) -> Result[(), ()] waits {
     must(enroll(mut r3.h, 7u64), "enroll again")
     Ok(())
 }
+
+// The fleet's pinned key: RFC 8032 §7.1 TEST 1. The signatures below were made offline with
+// RFC 8032 §6's reference code over `assignment_message`'s bytes as §14.12.2 states them.
+fn fleet_key() -> Bytes {
+    b"\xd7\x5a\x98\x01\x82\xb1\x0a\xb7\xd5\x4b\xfe\xd3\xc9\x64\x07\x3a\x0e\xe1\x72\xf3\xda\xa6\x23\x25\xaf\x02\x1a\x68\xf7\x07\x51\x1a"
+}
+
+// Group "a" to node 7 at incarnation 1, generation 1.
+fn signed_a_7_1_1() -> Bytes {
+    b"\x40\xa4\xde\xe5\xb1\xbc\xe3\x48\xf1\x53\xdb\x6a\x29\x9e\x00\x61\x48\x3a\x2a\x01\x9e\x77\x73\x79\x64\xbc\x38\xde\x08\xf7\x6f\xaa\x29\x1a\xff\x0c\xcb\x65\xa8\x0f\xa5\x4d\xf8\x09\xc8\xca\x40\x12\x23\x6c\x9a\x6d\xdc\x21\x3e\x95\x0c\x95\xdb\x7e\x89\xd9\x19\x06"
+}
+
+// Group "a" to node 7 at incarnation 2, generation 0.
+fn signed_a_7_2_0() -> Bytes {
+    b"\xeb\x0b\x41\xc2\xee\x56\x62\xc7\x90\x5c\x52\x30\x55\x5a\x07\x92\x71\xba\x2f\x54\x48\xce\xf5\x8d\x2a\xe5\x3c\x6c\x6d\x27\x35\xd8\x91\xa6\xa2\x88\x82\x8f\x6c\xac\xf9\xba\xcf\x87\xb5\x13\x21\x6f\x7e\x74\x1b\xea\x08\xdb\x85\x14\x68\xbe\x50\x2a\xe1\x59\xba\x09"
+}
+
+// Group "a" to node 8 at incarnation 1, generation 1.
+fn signed_a_8_1_1() -> Bytes {
+    b"\x6e\xf3\xb4\x6e\xc1\x04\x22\x7d\xc2\xdb\xd2\x2f\x66\x87\x1c\x48\x2d\x3a\x63\xe2\x47\x98\x48\xa4\x8d\xf1\x49\x9d\xf9\x52\xd0\x87\xf1\x47\xf8\xf6\xf6\x04\x99\xf4\xcc\x00\x18\x45\x3e\x24\x6c\xc7\x52\x32\x58\x59\x9a\x86\x54\xb2\x74\x46\x20\xf4\xb8\x15\x7a\x0a"
+}
+
+fn assigned(r: Result[List[launcher.Request], Refused]) -> Refused {
+    match r {
+        Ok(_) => fail("assignment: accepted"),
+        Error(e) => clone(e),
+    }
+}
+
+// §14.12.2 `assignment_wake`: a signed assignment wakes its group once, a replay of the same
+// generation is a no-op, and after a restart the assignment signed for the crashed process is
+// refused `WrongIncarnation`. Catches a host that checks the signature but not the incarnation
+// it binds, so a replayed assignment from before a reboot wakes (or moves) a place on a host
+// fleet@1 has already reassigned; and a generation floor kept only in memory.
+@test
+fn assignment_wake(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    must(enroll(mut r.h, 7u64), "enroll")
+    add(mut r, "a", "t")
+    let before = launches(r, "a")
+    let first = Assignment(group: "a", node: 7u64, incarnation: 1u64, generation: 1u64)
+    let forged = match assign(mut r.h, Assignment(group: "a", node: 7u64, incarnation: 1u64, generation: 2u64), signed_a_7_1_1(), fleet_key()) {
+        Error(Denied(_)) => true,
+        _ => false
+    }
+    expect(forged && launches(r, "a") == before, "assignment: a signature over another generation was accepted")
+    let other = match assign(mut r.h, Assignment(group: "a", node: 8u64, incarnation: 1u64, generation: 1u64), signed_a_8_1_1(), fleet_key()) {
+        Error(Denied(_)) => true,
+        _ => false
+    }
+    expect(other && launches(r, "a") == before, "assignment: an assignment to node 8 woke node 7's group")
+    let reqs = must(assign(mut r.h, first, signed_a_7_1_1(), fleet_key()), "assign")
+    pump(mut r, take reqs)
+    expect(launches(r, "a") == before + 1u64, "assignment: a signed assignment did not wake its group")
+    let again = must(assign(mut r.h, first, signed_a_7_1_1(), fleet_key()), "assign again")
+    pump(mut r, take again)
+    expect(launches(r, "a") == before + 1u64, "assignment: a replay of the same generation woke the group again")
+    let mut r2 = restart(take r, 4u64)
+    let stale_boot = match assigned(assign(mut r2.h, first, signed_a_7_1_1(), fleet_key())) {
+        WrongIncarnation(n) => n == 2u64,
+        _ => false
+    }
+    expect(stale_boot, "assignment: a restarted host accepted an assignment signed for its previous incarnation")
+    let below = match assigned(assign(mut r2.h, Assignment(group: "a", node: 7u64, incarnation: 2u64, generation: 0u64), signed_a_7_2_0(), fleet_key())) {
+        Stale(n) => n == 1u64,
+        _ => false
+    }
+    expect(below, "assignment: a generation below the recorded one was not Stale after a restart")
+    Ok(())
+}

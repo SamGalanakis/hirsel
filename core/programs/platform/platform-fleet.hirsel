@@ -9,6 +9,21 @@ type NodeRow: codec + send {
     incarnation: u64
 }
 
+// The last assignment fleet@1 made of a group to this node (§14.12.2): its generation is
+// the floor every later assignment of the group must pass.
+type AssignmentRow: codec + send {
+    incarnation: u64,
+    generation: u64
+}
+
+// An assignment of `group` to this node, as fleet@1 signs it (§14.12.2).
+pub type Assignment: send {
+    group: String,
+    node: u64,
+    incarnation: u64,
+    generation: u64
+}
+
 // Opens this process's incarnation of the node (§14.12.1) inside the open's own transaction,
 // so it is durable before the host answers anything.
 fn next_node(mut tx: store.Tx, t: Tables) -> Result[NodeRow, Refused] {
@@ -56,4 +71,91 @@ pub fn enroll(mut h: Host, node: u64) -> Result[(), Refused] waits {
         h.node = row
     }
     turned_result(mut h, take done)
+}
+
+const ASSIGNMENT_CONTEXT: String = "hirsel platform assignment v1"
+
+fn push_u64_le(mut b: Bytes, v: u64) {
+    for i in 0u64 .. 8u64 {
+        list.push(mut b, int.narrow((v >> (8u64 * i)) & 255u64))
+    }
+}
+
+// The bytes fleet@1 signs for an assignment (§14.12.2): the context, a zero byte, then
+// node, incarnation and generation as u64 little-endian, the group name's length as u64
+// little-endian, and the name's UTF-8 bytes. The context keeps a signature over any other
+// fleet message from verifying as an assignment.
+pub fn assignment_message(a: Assignment) -> Bytes {
+    let name = string.as_bytes(a.group)
+    let mut b: Bytes = list.with_capacity(64u64 + list.len(name))
+    list.append(mut b, string.as_bytes(ASSIGNMENT_CONTEXT))
+    list.push(mut b, 0u8)
+    push_u64_le(mut b, a.node)
+    push_u64_le(mut b, a.incarnation)
+    push_u64_le(mut b, a.generation)
+    push_u64_le(mut b, list.len(name))
+    list.append(mut b, name)
+    b
+}
+
+// A signed assignment from fleet@1 (§14.12.2), a wake source: verified against the fleet's
+// pinned Ed25519 key, bound to this node and this incarnation, and above the group's last
+// generation. The assignment row and the group's turn to `Dirty` commit together, so a
+// restart finds the place `Dirty` and probes it (§14.5); a full host commits neither. The
+// same generation again is a no-op.
+pub fn assign(mut h: Host, a: Assignment, sig: Bytes, key: Bytes) -> Result[List[launcher.Request], Refused] waits {
+    let r = assign_turn(mut h, a, sig, key)
+    turned_result(mut h, take r)
+}
+
+fn assign_turn(mut h: Host, a: Assignment, sig: Bytes, key: Bytes) -> Result[List[launcher.Request], Refused] waits {
+    if list.len(key) != 32u64 || list.len(sig) != 64u64 || !ed25519.verify(key, assignment_message(a), sig) {
+        return Error(Denied("assignment signature"))
+    }
+    if h.node.enrolled != Some(a.node) {
+        return Error(Denied("assignment for another node"))
+    }
+    if a.incarnation != h.node.incarnation {
+        return Error(WrongIncarnation(h.node.incarnation))
+    }
+    let mut out: List[launcher.Request] = list.new()
+    let now_s = h.clock_s
+    let row = AssignmentRow(incarnation: a.incarnation, generation: a.generation)
+    let made = {
+        let t = view h.t
+        store.run(mut h.db, None, (store.copy_env(a.group), store.copy_env(row), store.copy_env(now_s), store.copy_env(t)), fn(mut tx, call_env) -> Result[Option[(GroupRow, u64)], Refused] {
+            let Some(found) = st(store.fetch(tx, call_env.3 .groups, call_env.0))? else {
+                return Error(Unknown)
+            }
+            if let Some(_) = found.retiring {
+                return Error(Retiring)
+            }
+            if let Some(prior) = st(store.fetch(tx, call_env.3 .assignments, call_env.0))? {
+                if prior.generation > call_env.1 .generation {
+                    return Error(Stale(prior.generation))
+                }
+                if prior.generation == call_env.1 .generation {
+                    return Ok(None)
+                }
+            }
+            st(store.put(mut tx, call_env.3 .assignments, call_env.0, call_env.1))?
+            let Some(w) = st(store.fetch(tx, call_env.3 .wake, call_env.0))? else {
+                return Error(Unknown)
+            }
+            let Clean(_) = w.wake else {
+                return Ok(None)
+            }
+            let (g, gen) = mark_dirty(mut tx, call_env.3, call_env.0)?
+            pin_start(mut tx, call_env.3, g, gen, g.assembly, call_env.2)?
+            Ok(Some((g, gen)))
+        })
+    }
+    let Some((g, gen)) = decided(mut h, take made)? else {
+        return Ok(take out)
+    }
+    let c = host_config(h)?
+    list.push(mut out, serving_launch(a.group, g, gen, g.activation, g.assembly, c.idle_ms, None, None))
+    set_run(mut h, a.group, Some(Run(gen: gen, phase: Requested, selected: launcher.Selection(activation: g.activation, assembly: clone(g.assembly)))))
+    dequeue(mut h, a.group)
+    Ok(take out)
 }

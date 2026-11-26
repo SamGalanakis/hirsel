@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// No kernel limit: children read the variable, and thread stacks bypass the
 /// arena.
+#[cfg(test)]
 pub(crate) const KERNEL_LIMIT: bool = false;
 
 /// `mimalloc`'s `mi_option_arena_reserve` (KiB reserved per new arena) and

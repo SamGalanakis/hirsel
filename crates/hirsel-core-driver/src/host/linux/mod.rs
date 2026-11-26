@@ -12,7 +12,10 @@ use std::{
     process::Command,
 };
 
+mod install;
 pub(crate) mod spawn;
+
+pub(crate) use install::{installed_executable, loaded_libraries};
 
 /// A delegated cgroup v2 subtree can hold the launcher's children (launch.md).
 pub(crate) const CGROUPS: bool = true;

@@ -797,36 +797,16 @@ fn prebuild(
     Ok(())
 }
 
-/// Copy this compiler into the prefix with an RPATH for its shipped libraries,
-/// including when an installer puts the executable in the prefix's `bin/`.
+/// Copy this compiler into the prefix, made ready by the host to load its shipped
+/// libraries from there, including when an installer puts it in the prefix's `bin/`.
 fn install_executable(root: &Path) -> io::Result<()> {
     let source = std::env::current_exe()?;
-    let installed = root.join(EXECUTABLE);
-    let mut bytes = std::fs::read(&source)?;
-    let rpath = dynamic_strings(&bytes)?
-        .into_iter()
-        .find(|entry| entry.tag == object::elf::DT_RPATH)
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "the compiler {} carries no RPATH for its installed libraries",
-                source.display()
-            ))
-        })?;
-    const ORIGIN_LIB: &[u8] = b"$ORIGIN/lib:$ORIGIN/../lib";
-    if rpath.value.len() < ORIGIN_LIB.len() {
-        return Err(io::Error::other(format!(
-            "the compiler {}'s RPATH is too short for the installed library paths",
-            source.display()
-        )));
-    }
-    let field = &mut bytes[rpath.offset..rpath.offset + rpath.value.len()];
-    field.fill(0);
-    field[..ORIGIN_LIB.len()].copy_from_slice(ORIGIN_LIB);
-    install_file(&bytes, &installed, 0o755)
+    let bytes = crate::host::installed_executable(std::fs::read(&source)?, &source)?;
+    install_file(&bytes, &root.join(EXECUTABLE), 0o755)
 }
 
 /// Copy a shared library and every library it loads from its own directory
-/// or its RUNPATH into `directory`, under the names they are loaded by.
+/// or its search path into `directory`, under the names they are loaded by.
 fn install_libraries(library: &Path, directory: &Path) -> io::Result<()> {
     let name = library
         .file_name()
@@ -846,26 +826,12 @@ fn install_dependencies_from(source: &Path, installed: &Path, directory: &Path) 
     let mut pending = vec![(source.canonicalize()?, std::fs::read(installed)?)];
     while let Some((path, bytes)) = pending.pop() {
         let origin = path.parent().unwrap_or(Path::new("/"));
-        let entries = dynamic_strings(&bytes)?;
-        // Where this object's loader looks besides the system: its own
-        // RUNPATH or RPATH, and the directory the first object came from
-        // (the executable's RPATH serves libraries that name none).
-        let mut search = entries
-            .iter()
-            .filter(|entry| [object::elf::DT_RUNPATH, object::elf::DT_RPATH].contains(&entry.tag))
-            .flat_map(|entry| {
-                String::from_utf8_lossy(&entry.value)
-                    .split(':')
-                    .map(|dir| PathBuf::from(dir.replace("$ORIGIN", &origin.to_string_lossy())))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
+        // Where this object's loader looks besides the system, and the directory
+        // the first object came from (the executable's search path serves
+        // libraries that name none).
+        let (mut search, needed) = crate::host::loaded_libraries(&bytes, origin)?;
         search.push(home.clone());
-        for entry in entries
-            .iter()
-            .filter(|entry| entry.tag == object::elf::DT_NEEDED)
-        {
-            let name = String::from_utf8_lossy(&entry.value).into_owned();
+        for name in needed {
             if !done.insert(name.clone()) {
                 continue;
             }
@@ -894,54 +860,4 @@ pub(crate) fn install_file(bytes: &[u8], path: &Path, mode: u32) -> io::Result<(
         .ok_or_else(|| io::Error::other(format!("{} has no directory", path.display())))?;
     std::fs::create_dir_all(parent)?;
     crate::executable::write(path, bytes, mode)
-}
-
-/// One string-valued entry of an ELF object's dynamic section.
-struct DynamicString {
-    tag: object::elf::DynamicTag,
-    /// The string's file offset.
-    offset: usize,
-    value: Vec<u8>,
-}
-
-/// The NEEDED, RPATH and RUNPATH strings of a 64-bit little-endian ELF.
-fn dynamic_strings(bytes: &[u8]) -> io::Result<Vec<DynamicString>> {
-    use object::read::elf::{Dyn as _, FileHeader as _, SectionHeader as _};
-    let malformed = |error: object::Error| io::Error::other(format!("malformed ELF: {error}"));
-    let header =
-        object::elf::FileHeader64::<object::LittleEndian>::parse(bytes).map_err(malformed)?;
-    let endian = header.endian().map_err(malformed)?;
-    let sections = header.sections(endian, bytes).map_err(malformed)?;
-    let mut strings = Vec::new();
-    for section in sections.iter() {
-        let Some((entries, link)) = section.dynamic(endian, bytes).map_err(malformed)? else {
-            continue;
-        };
-        let table = sections.section(link).map_err(malformed)?;
-        let base = table.sh_offset(endian) as usize;
-        let data = table.data(endian, bytes).map_err(malformed)?;
-        for entry in entries {
-            let tag = entry.d_tag(endian);
-            if ![
-                object::elf::DT_NEEDED,
-                object::elf::DT_RPATH,
-                object::elf::DT_RUNPATH,
-            ]
-            .contains(&tag)
-            {
-                continue;
-            }
-            let start = entry.d_val(endian) as usize;
-            let value = data
-                .get(start..)
-                .and_then(|rest| rest.split(|b| *b == 0).next())
-                .ok_or_else(|| io::Error::other("malformed ELF: dynamic string out of range"))?;
-            strings.push(DynamicString {
-                tag,
-                offset: base + start,
-                value: value.to_vec(),
-            });
-        }
-    }
-    Ok(strings)
 }

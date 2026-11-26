@@ -16,7 +16,10 @@ use std::{
     process::Command,
 };
 
+mod install;
 pub(crate) mod spawn;
+
+pub(crate) use install::{installed_executable, loaded_libraries};
 
 /// Darwin has no cgroups: the launcher runs without a delegated subtree.
 pub(crate) const CGROUPS: bool = false;

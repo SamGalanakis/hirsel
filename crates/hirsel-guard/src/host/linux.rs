@@ -4,6 +4,7 @@
 use std::process::Command;
 
 /// The kernel holds the limit: children inherit it and thread stacks count.
+#[cfg(test)]
 pub(crate) const KERNEL_LIMIT: bool = true;
 
 fn data_limit() -> libc::rlimit {

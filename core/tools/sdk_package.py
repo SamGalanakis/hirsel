@@ -72,8 +72,7 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
                         '--strict', '--module', 'NodeNext', '--target', 'ES2022',
                         '--allowImportingTsExtensions', 'consumer.ts'],
                        cwd=consumer, env=env, check=True)
-        # NodeStorage spawns flock(1) to hold a lease on its private state directory.
-        subprocess.run([*isolated_node, f'--allow-fs-write={consumer}', '--allow-child-process', 'consumer.ts'],
+        subprocess.run([*isolated_node, f'--allow-fs-write={consumer}', 'consumer.ts'],
                        cwd=consumer, env=env, check=True)
 
         standalone = work / 'standalone'
@@ -97,5 +96,5 @@ def check(root, compiler, runtime, node_dist, tool_tarballs):
         for module in (standalone / 'generated').glob('*.js'):
             shutil.copyfile(module, compiled / 'generated' / module.name)
         shutil.copyfile(consumer / 'payload.bin', compiled / 'payload.bin')
-        subprocess.run([*standalone_node, '--allow-child-process', 'consumer.js'],
+        subprocess.run([*standalone_node, 'consumer.js'],
                        cwd=compiled, env=env, check=True)

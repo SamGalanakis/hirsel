@@ -329,8 +329,9 @@ const api = bind(client);
 ```
 
 For Node 22 or later, use `NodeStorage` from `./generated/node.js` and pass
-a private state directory to its constructor. The Node adapter uses `flock`
-and needs Node type declarations when you type-check it.
+a private local state directory to its constructor. Processes sharing a state
+directory must share a PID namespace. The adapter needs Node type declarations
+when you type-check it.
 
 `Client.open` requires the ingress WebSocket `url`, the generated `frame`
 codec, `wants` and their `kinds`, and a `storage` adapter. Pass the generated `identity` to
@@ -343,7 +344,12 @@ time source. `onState`, `onDiagnostic`, `onRecovered` and `onBatch` observe
 state changes, diagnostics, recovered call outcomes and applied Batch versions.
 
 Browser storage uses strict IndexedDB transactions and generation-scoped Web
-Locks. Node storage uses durable file replacement and `flock` leases.
+Locks. Node storage uses durable file replacement and exclusive filesystem
+claims for its leases. A claim records the owner's PID and a unique token.
+After the PID exits, contenders advance to a new claim without deleting the
+old one. A PID that has been reused can delay recovery until it exits.
+Stop all clients using the old `flock` adapter before opening the same
+directory with the new adapter.
 Recovery format 4 stores a random installation ID and random fencing generation.
 Generation validation and each work send share the installation lock. Missing
 stream records fence the generation. Pending requests keep their original Caller.

@@ -129,6 +129,7 @@ export class Client implements Transport {
     let lease: Lease | null = null;
     try {
       let state: Installation | null;
+      let reset = false;
       try { state = await options.storage.read(); }
       catch (error) {
         if (!(error instanceof CorruptState)) throw error;
@@ -136,8 +137,7 @@ export class Client implements Transport {
       }
       if (!state || !intact(state)) {
         state = fresh(state?.installation);
-        await options.storage.write(state);
-        options.onRecovered?.({tag: 'LocallyUnknown'});
+        reset = true;
       }
       let stream: string | undefined;
       for (const n of state.directory) {
@@ -171,6 +171,7 @@ export class Client implements Transport {
         }
         await options.storage.write(state);
       }
+      if (reset) options.onRecovered?.({tag: 'LocallyUnknown'});
       const client = new Client(options, state, stream, lease!);
       await lock.release();
       await client.run({tag: 'Start'});

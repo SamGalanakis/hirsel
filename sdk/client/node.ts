@@ -1,37 +1,44 @@
-import {open, mkdir, readFile, rename, unlink} from 'node:fs/promises';
-import {join} from 'node:path';
-import {spawn} from 'node:child_process';
+import {open, mkdir, readFile, readlink, rename, symlink, unlink} from 'node:fs/promises';
+import {basename, join, resolve} from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {CorruptState, type Storage, type Installation, type Lease} from './client.js';
 import {encodeState, decodeState} from './persistence.js';
 
 export class NodeStorage implements Storage {
-  constructor(private directory: string) {}
+  private directory: string;
+  private leaseGenerations = new Map<string, number>();
+
+  constructor(directory: string) { this.directory = resolve(directory); }
+
   async lock(name: string, wait: boolean): Promise<Lease | null> {
     await mkdir(this.directory, {recursive: true, mode: 0o700});
-    // flock(2) locks an open file description. The helper inherits a dup of
-    // Node's descriptor, acquires the lock, and exits. Node keeps the same
-    // description open for the entire lease, including after helper exit.
-    const file = await open(join(this.directory, name === 'install' ? 'lock' : name + '.lock'), 'a', 0o600);
-    let diagnostic = '';
-    try {
-      const code = await new Promise<number | null>((resolve, reject) => {
-        const child = spawn('flock', [...(wait ? [] : ['-n']), '-E', '75', '3'], {stdio: ['ignore', 'ignore', 'pipe', file.fd]});
-        child.stderr!.setEncoding('utf8');
-        child.stderr!.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-4096); });
-        child.once('error', reject); child.once('close', resolve);
-      });
-      if (code !== 0) {
-        await file.close();
-        if (!wait && code === 75) return null;
-        throw new Error(`flock failed (${code}): ${diagnostic}`);
+    const base = join(this.directory, name === 'install' ? 'install.lease' : name + '.stream.lease');
+    const owner = join(this.directory, `.owner-${process.pid}-${crypto.randomUUID()}`);
+    let generation = this.leaseGenerations.get(base) ?? 0;
+    for (;;) {
+      const path = generation === 0 ? base : `${base}.${generation}`;
+      // symlink publishes the owner identity and claims the path in one exclusive operation.
+      try { await symlink(owner, path); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const other = await readOwner(path);
+        if (other === null) continue;
+        if (ownerExited(other)) {
+          if (await readOwner(path) !== other) continue;
+          // Leave the dead claim in place. All contenders advance to the same
+          // successor without racing to unlink a new owner's claim.
+          this.leaseGenerations.set(base, ++generation);
+          continue;
+        }
+        if (!wait) return null;
+        await delay(4);
+        continue;
       }
-    } catch (error) { await file.close(); throw error; }
-    let released = false, end!: () => void;
-    const lost = new Promise<void>(resolve => { end = resolve; });
-    return {lost, release: async () => {
-      if (released) return;
-      released = true; await file.close(); end();
-    }};
+      let end!: () => void;
+      const lost = new Promise<void>(resolve => { end = resolve; });
+      let release: Promise<void> | undefined;
+      return {lost, release: () => release ??= unlink(path).then(end)};
+    }
   }
   async read(): Promise<Installation | null> {
     try { return decodeState(await readFile(join(this.directory, 'state.json'), 'utf8')); }
@@ -46,11 +53,32 @@ export class NodeStorage implements Storage {
     const temporary = join(this.directory, `.state-${process.pid}-${crypto.randomUUID()}`);
     const file = await open(temporary, 'wx', 0o600);
     try {
-      await file.writeFile(encodeState(state)); await file.sync();
+      try { await file.writeFile(encodeState(state)); await file.sync(); }
+      finally { await file.close(); }
+      await rename(temporary, join(this.directory, 'state.json'));
     } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-    finally { await file.close(); }
-    await rename(temporary, join(this.directory, 'state.json'));
     const directory = await open(this.directory, 'r');
     try { await directory.sync(); } finally { await directory.close(); }
+  }
+}
+
+async function readOwner(path: string): Promise<string | null> {
+  try { return await readlink(path); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function ownerExited(owner: string): boolean {
+  const match = /^\.owner-([1-9][0-9]*)-[a-f0-9-]{36}$/.exec(basename(owner));
+  const pid = Number(match?.[1]);
+  if (!Number.isInteger(pid) || pid > 0x7fffffff) throw new Error('Invalid client lease owner');
+  try { process.kill(pid, 0); return false; }
+  catch (error) {
+    const {code} = error as NodeJS.ErrnoException;
+    if (code === 'ESRCH') return true;
+    if (code === 'EPERM') return false;
+    throw error;
   }
 }

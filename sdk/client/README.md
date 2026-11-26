@@ -31,10 +31,14 @@ anonymous reconnect receives a fresh Caller, any pending call becomes
 
 Node 22 or later uses the same `Client`, global `WebSocket` and generated
 bindings. Pass `new NodeStorage(stateDirectory)` from `@hirsel/client/node`.
-The Node adapter requires the system `flock` command. It holds the installation
-lock and each stream lease with kernel file locks; no stale lockfile cleanup is
-needed. State replacement writes a private temporary file, syncs it, renames it
-and syncs the directory. The state directory holds pending arguments and replies.
+Use a private local state directory. Clients that share it must run in the
+same PID namespace. The Node adapter takes installation and stream leases
+through exclusive filesystem claims. State replacement writes a private
+temporary file, syncs it, renames it and syncs the directory. The state
+directory holds pending arguments and replies.
+
+When upgrading from the `flock` adapter, stop all old clients before opening
+the same directory with the new SDK. The new adapter reads the existing state.
 
 Each client leases one stream and sends one call at a time. Calls made while
 ready wait in memory in submission order, including behind a recovered call.

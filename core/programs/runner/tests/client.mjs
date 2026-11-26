@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {getEventListeners} from 'node:events';
+import {getEventListeners, once} from 'node:events';
 import {mkdtemp, readFile, writeFile, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -1058,22 +1058,86 @@ export async function laws(codec, only, mutant, entries, http) {
       if(originalIndexedDB)Object.defineProperty(globalThis,'indexedDB',originalIndexedDB);else delete globalThis.indexedDB;
     }
   };
-  tests.node_durable_replacement_and_flock=async()=>{
+  tests.node_durable_replacement_and_leases=async()=>{
     const dir=await mkdtemp(join(tmpdir(),'hirsel-node-state-'));
+    const children=[];
+    const start=mode=>{
+      const child=spawn(process.execPath,['--input-type=module','-e',`
+        import {once} from 'node:events';
+        import fs from 'node:fs/promises';
+        import {syncBuiltinESMExports} from 'node:module';
+        import {NodeStorage} from ${JSON.stringify(pathToFileURL(join(runtime.dir,'node.js')).href)};
+        const [dir,mode]=process.argv.slice(1);
+        process.on('disconnect',()=>process.exit(0));
+        const storage=new NodeStorage(dir);
+        const proceed=()=>once(process,'message');
+        if(mode==='crash') {
+          await storage.lock('install',true);
+          const state={version:4,installation:2n,generation:1n,directory:[],streams:{}};
+          await storage.write(state);
+          fs.rename=async()=>{
+            const stop=proceed();
+            process.send('staged');
+            await stop;
+            process.exit(77);
+          };
+          syncBuiltinESMExports();
+          await storage.write({...state,generation:99n});
+        } else {
+          const race=proceed();
+          process.send('ready');
+          await race;
+          const lease=await storage.lock('install',true);
+          const state=await storage.read();
+          const write=proceed();
+          process.send(String(state.generation));
+          await write;
+          await storage.write({...state,generation:state.generation+1n});
+          await lease.release();
+          process.disconnect();
+        }
+      `,dir,mode],{stdio:['ignore','ignore','inherit','ipc']});
+      const done=once(child,'exit');
+      const message=()=>Promise.race([
+        once(child,'message').then(([value])=>value),
+        done.then(([code])=>{throw new Error(`lease process exited before sending a message (${code})`);}),
+      ]);
+      children.push({child,done});
+      return {child,done,message};
+    };
     try {
-      const storage=new runtime.NodeStorage(dir),state=initial();
+      const storage=new runtime.NodeStorage(dir);
+      const owner=start('crash');
+      assert.equal(await owner.message(),'staged');
+      assert.equal(await storage.lock('install',false),null);
+      assert.deepEqual(await storage.read(),initial());
+      owner.child.send('crash');
+      assert.deepEqual(await owner.done,[77,null]);
+
+      const contenders=[start('contend'),start('contend')];
+      assert.deepEqual(await Promise.all(contenders.map(contender=>contender.message())),['ready','ready']);
+      const acquisitions=contenders.map((contender,index)=>contender.message().then(generation=>({generation,index})));
+      for(const contender of contenders)contender.child.send('race');
+      const first=await Promise.race(acquisitions);
+      assert.equal(first.generation,'1');
+      assert.equal(await storage.lock('install',false),null);
+      contenders[first.index].child.send('write');
+      const second=await acquisitions[1-first.index];
+      assert.equal(second.generation,'2');
+      contenders[second.index].child.send('write');
+      for(const contender of contenders)assert.deepEqual(await contender.done,[0,null]);
+      assert.deepEqual(await storage.read(),{...initial(),generation:3n});
+
       const a=await storage.lock('stream-1-0',false);assert(a);
-      assert.equal(await storage.lock('stream-1-0',false),null);
-      await storage.write(state);assert.deepEqual(await storage.read(),state);
-      await a.release();const b=await storage.lock('stream-1-0',false);assert(b);await b.release();
+      assert.equal(await new runtime.NodeStorage(dir).lock('stream-1-0',false),null);
+      await a.release();await a.lost;
+      const b=await storage.lock('stream-1-0',false);assert(b);await b.release();
       await writeFile(join(dir,'state.json'),'broken');await assert.rejects(storage.read(),runtime.CorruptState);
-      // A different process dies without releasing its lease. EOF releases the
-      // flock owner; a subsequent blocking acquisition must make progress.
-      const child=spawn(process.execPath,['--input-type=module','-e',
-        `import {NodeStorage} from ${JSON.stringify(pathToFileURL(join(runtime.dir,'node.js')).href)};await new NodeStorage(${JSON.stringify(dir)}).lock('stream-1-0',true);console.log('held');process.exit(0);`],{stdio:['ignore','pipe','inherit']});
-      await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',code=>code===0?resolve():reject(new Error('lease process failed')));});
-      const c=await storage.lock('stream-1-0',true);assert(c);await c.release();
-    }finally{await rm(dir,{recursive:true,force:true});}
+    }finally{
+      for(const {child} of children)if(child.connected)child.disconnect();
+      await Promise.allSettled(children.map(({done})=>done));
+      await rm(dir,{recursive:true,force:true});
+    }
   };
   Object.assign(tests,optimisticLaws({setup,ready,want,bytes,row,group,batch,settle,returned,entries,savedStream}));
   let cases=0;

@@ -372,13 +372,7 @@ pub(crate) unsafe fn spawn(
     };
     let stream_number = recorder.stream;
     let entry = Entry::decode(parent_stream, index, body).expect("a well-formed entry");
-    let spawn_args = {
-        let b = entry.body();
-        let mut args = b.descriptor.to_vec();
-        args.extend_from_slice(&b.n.to_le_bytes());
-        args.extend(b.value.canonical());
-        args
-    };
+    let spawn_args = unit_spawn_args(&entry);
     let rest = entry.encode(&mut recorder.buffer);
     let _ = recorder.close(0);
     for chunk in rest {
@@ -399,6 +393,40 @@ pub(crate) unsafe fn spawn(
         grants,
         sources: vec![],
     })
+}
+
+/// The parts of a `UNIT_SPAWN`'s arguments: the entry's code descriptor, `n`
+/// and `x` in canonical form.
+fn unit_spawn_args(entry: &Entry) -> Vec<u8> {
+    let b = entry.body();
+    let mut args = b.descriptor.to_vec();
+    args.extend_from_slice(&b.n.to_le_bytes());
+    args.extend(b.value.canonical());
+    args
+}
+
+/// A replayed spawn's `UNIT_SPAWN` arguments, as a recorded spawn writes
+/// them, or why this build does not replay the spawn: an entry holding a
+/// handle (docs/recording.md, "Replay of a run with helpers").
+/// # Safety
+/// As for `spawn`.
+pub(crate) unsafe fn replay_args(
+    context: *const crate::Context,
+    n: u64,
+    steps: Option<u64>,
+    input: *const u8,
+    spawned: &SpawnEntry,
+) -> Result<Vec<u8>, &'static str> {
+    const ENTRY_HANDLE: &str = "a helper entry holding a handle";
+    // SAFETY: forwarded.
+    let body = unsafe {
+        entry(context, n, steps, input, spawned, &mut |_, _| {
+            Err(ENTRY_HANDLE)
+        })
+    }?;
+    Ok(unit_spawn_args(
+        &Entry::decode(0, 0, body).expect("a well-formed entry"),
+    ))
 }
 
 /// A helper whose stream is cut at its entry: its cell goes back unused, and

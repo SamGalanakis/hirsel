@@ -133,6 +133,11 @@ fn refused(run: &mut Run, error: OpenError) -> u8 {
         OpenError::Refused(Refusal::Limit) => "limit".to_owned(),
         OpenError::Refused(Refusal::Damaged(block)) => format!("damaged block {block}"),
         OpenError::Refused(Refusal::HeaderTooLarge) => "header too large".to_owned(),
+        OpenError::Refused(Refusal::HelperUnit) => {
+            "--unit replays only root in this build: a helper's replay from its stream's entry is not built"
+                .to_owned()
+        }
+        OpenError::Refused(Refusal::NoUnit) => "--unit names no stream of the tape".to_owned(),
         OpenError::Unreadable(Fault::Truncated(at)) => format!("truncated at {at}"),
         OpenError::Unreadable(Fault::Damaged(block)) => format!("damaged block {block}"),
         OpenError::Unreadable(Fault::Corrupt) => "corrupt".to_owned(),
@@ -712,11 +717,11 @@ unsafe fn run_recording<const UNITS: bool>(
     // SAFETY: process startup is single-threaded before any task or grant snapshot.
     unsafe {
         let _laws = crate::law::Run::start(sources);
-        if let Some((path, mode)) = pinned_replay(&*input) {
+        if let Some((path, mode, unit)) = pinned_replay(&*input) {
             #[cfg(feature = "prof")]
             let _profile = crate::prof::Run::start_replay();
             return run_taped(
-                input, names, sources, entry, path, mode, identity, revision, build, None,
+                input, names, sources, entry, path, mode, identity, revision, build, None, unit,
             );
         }
         let path = std::env::var_os("HIRSEL_RECORD");
@@ -752,6 +757,7 @@ unsafe fn run_recording<const UNITS: bool>(
             revision,
             build,
             record_id,
+            None,
         );
         super::writer::flush();
         report_truncation((*input).stderr_fd);
@@ -759,8 +765,10 @@ unsafe fn run_recording<const UNITS: bool>(
     }
 }
 
-fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64)> {
-    if input.args_len != 3 {
+/// `--hirsel-replay-recording MODE PATH [UNIT]`: the replay the operator CLI
+/// starts on a pinned image, with the one unit `--unit` names.
+fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64, Option<Vec<u8>>)> {
+    if !matches!(input.args_len, 3 | 4) {
         return None;
     }
     // SAFETY: the native launcher pins exactly args_len View records at entry.
@@ -775,7 +783,10 @@ fn pinned_replay(input: &OsConfig) -> Option<(Vec<u8>, u64)> {
         _ => return None,
     };
     let path = unsafe { crate::tls::view_bytes(&args[2]) }.to_vec();
-    Some((path, mode))
+    let unit = args
+        .get(3)
+        .map(|unit| unsafe { crate::tls::view_bytes(unit) }.to_vec());
+    Some((path, mode, unit))
 }
 
 /// Launcher-only replay entry (`hirsel replay --tape PATH [--diagnose]`).
@@ -811,6 +822,7 @@ pub unsafe extern "C" fn hirsel_core_os_replay(
             revision,
             build,
             None,
+            None,
         )
     }
 }
@@ -827,6 +839,7 @@ unsafe fn run_taped(
     revision: *const [u8; 32],
     build: *const [u8; 32],
     record_id: Option<[u8; 16]>,
+    unit: Option<Vec<u8>>,
 ) -> u8 {
     // SAFETY: every pointer is a borrowed generated startup operand.
     unsafe {
@@ -932,10 +945,14 @@ unsafe fn run_taped(
                 Ok(place) => place,
                 Err(error) => return stopped(&mut run, error),
             };
-            let replay = match ReplayInput::open(dir, name) {
+            let mut replay = match ReplayInput::open(dir, name) {
                 Ok(replay) => replay,
                 Err(error) => return refused(&mut run, error),
             };
+            replay.unit = unit;
+            if let Err(error) = replay.chosen() {
+                return refused(&mut run, error);
+            }
             if replay.stored.kind != KIND_RUN {
                 return refused(&mut run, OpenError::Unreadable(Fault::Corrupt));
             }

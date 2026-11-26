@@ -303,6 +303,11 @@ impl Live {
                 Frame::Cancel { gap, task } => (gap, Turn::Cancel(task)),
                 Frame::Retired { gap, task, .. } => (gap, Turn::Retired(task)),
                 Frame::Done { gap, task, .. } => (gap, Turn::Done(task)),
+                Frame::Take {
+                    gap,
+                    point: format::TakePoint::Pump,
+                    ..
+                } => (gap, Turn::Take),
                 Frame::Choose { gap, index } if self.schedule.chooser == format::CHOOSER_COMMIT => {
                     (gap, Turn::Choose(index))
                 }

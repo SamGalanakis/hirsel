@@ -125,6 +125,9 @@ pub(crate) enum Turn {
     Cancel(u64),
     Retired(u64),
     Done(u64),
+    /// A unit's `TAKE` at a scheduler pump (point kind 1) is due: the
+    /// scheduler pumps the unit instead of waiting.
+    Take,
 }
 
 const ISSUE: unsafe extern "C" fn(*mut u8, *mut Request, u64) -> Step = issue;

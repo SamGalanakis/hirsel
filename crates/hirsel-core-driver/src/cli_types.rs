@@ -17,6 +17,7 @@ pub enum OptionId {
     ObservedRecordingRuntime,
     Record,
     Tape,
+    ReplayUnit,
     Replay,
     Laws,
     WriteLaws,

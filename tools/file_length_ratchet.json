@@ -206,9 +206,9 @@
     "reason": "coverage-c3-2578"
   },
   "crates/hirsel-core-driver/src/request.rs": {
-    "lines": 1801,
-    "raise_revision": 15,
-    "reason": "runner-place-provenance-2819"
+    "lines": 1802,
+    "raise_revision": 16,
+    "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
   },
   "crates/hirsel-core-driver/src/request_sequences.rs": {
     "lines": 2530,
@@ -446,9 +446,9 @@
     "lines": 1018
   },
   "crates/hirsel-core-rt/src/tape/mod.rs": {
-    "lines": 2001,
-    "raise_revision": 3,
-    "reason": "unit-tapes-u3-2553"
+    "lines": 1919,
+    "raise_revision": 4,
+    "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
   },
   "crates/hirsel-core-rt/src/tape/run.rs": {
     "lines": 1104
@@ -489,9 +489,9 @@
     "reason": "coverage-c2-runner-2577"
   },
   "crates/hirsel-core-rt/src/units_lang.rs": {
-    "lines": 1569,
-    "raise_revision": 1,
-    "reason": "unit-tapes-u3b-2616: RL8 take points and the hold hook"
+    "lines": 1483,
+    "raise_revision": 2,
+    "reason": "unit-tapes-u4b-root-2841: unit replay of the root's stream"
   },
   "crates/hirsel-core-rt/src/units_ledger.rs": {
     "lines": 1981,

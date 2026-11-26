@@ -71,14 +71,17 @@ enum Scan {
 
 pub(super) struct Closes {
     tape_id: [u8; 16],
+    /// The replayed unit's stream, which the scan reads ahead in.
+    stream: u32,
     scan: Scan,
     entries: BTreeMap<CloseKey, Entry>,
 }
 
 impl Closes {
-    pub(super) fn new((dir, name): (Inner, Vec<u8>), tape_id: [u8; 16]) -> Self {
+    pub(super) fn new((dir, name): (Inner, Vec<u8>), tape_id: [u8; 16], stream: u32) -> Self {
         Self {
             tape_id,
+            stream,
             scan: Scan::Unopened(dir, name),
             entries: BTreeMap::new(),
         }
@@ -147,15 +150,17 @@ impl Closes {
         if let Scan::Unopened(dir, name) = &self.scan {
             // SAFETY: ReplayInput's original directory provider remains pinned
             // throughout the replay, including all of its resource drops.
-            let replay = unsafe { ReplayInput::open(*dir, name) }.map_err(|error| match error {
-                OpenError::Io(error) => Fault::Io(error),
-                OpenError::Unreadable(error) => error,
-                OpenError::Refused(_) => Fault::Corrupt,
-            })?;
+            let mut replay =
+                unsafe { ReplayInput::open(*dir, name) }.map_err(|error| match error {
+                    OpenError::Io(error) => Fault::Io(error),
+                    OpenError::Unreadable(error) => error,
+                    OpenError::Refused(_) => Fault::Corrupt,
+                })?;
             if replay.stored.tape_id != self.tape_id {
                 return Err(Fault::Corrupt);
             }
-            self.scan = Scan::Reading(FrameReader::new(replay.source, replay.blocks), 0);
+            let blocks = replay.index.take(self.stream).ok_or(Fault::Corrupt)?;
+            self.scan = Scan::Reading(FrameReader::new(replay.source, blocks), 0);
         }
         let Scan::Reading(reader, at) = &mut self.scan else {
             return Ok(None);

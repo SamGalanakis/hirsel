@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 pub(crate) mod crossing;
 pub(crate) mod item_grants;
+pub(crate) mod replay;
 
 /// One unit's take-point count and the ordinals of its unit objects.
 #[derive(Default)]
@@ -122,9 +123,14 @@ impl Live {
         self.mode == Mode::Record && self.fault.is_none() && self.recorder.is_some()
     }
 
-    /// Start a new count when an event or another frame came since the last.
+    /// Start a new count when an event or another frame came since the last:
+    /// one written, or one a replay took.
     fn fresh_takes(&mut self) {
-        let position = self.recorder.as_ref().map_or(0, |r| r.encoder.position());
+        let position = match (&self.recorder, &self.replayer) {
+            (Some(r), _) => r.encoder.position(),
+            (None, Some(r)) => r.taken,
+            (None, None) => 0,
+        };
         let t = &mut self.takes;
         if t.events != self.schedule.events || t.position != position {
             t.count = 0;
@@ -197,11 +203,16 @@ fn recording<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R) -> Option<
         .flatten()
 }
 
+/// The unit's stream number: its recorder's, or the stream its replay reads.
 pub(super) fn stream(live: &Live) -> u32 {
-    live.recorder.as_ref().map_or(0, |r| r.stream)
+    match (&live.recorder, &live.replayer) {
+        (Some(r), _) => r.stream,
+        (None, Some(r)) => r.stream,
+        (None, None) => 0,
+    }
 }
 
-/// The running unit's stream: 0 for the root, a replay, or no tape.
+/// The running unit's stream: 0 for the root or no tape.
 pub(crate) fn current_stream() -> u32 {
     crate::tasks::current_group()
         .and_then(|group| group.with(|live| stream(live)))
@@ -238,8 +249,13 @@ pub(crate) fn next_made() -> Option<(u32, u64)> {
     })
 }
 
-/// The unit's code reached an in-operation take point.
+/// The unit's code reached an in-operation take point, counted in record
+/// and replay alike.
 pub(crate) fn reach(group: Option<Group>) {
+    let _ = replay::replaying(group, |live| {
+        live.fresh_takes();
+        live.takes.count += 1;
+    });
     recording(group, |live| {
         live.fresh_takes();
         live.takes.count += 1;

@@ -885,17 +885,19 @@ fn resolve_pin(state: &Path, id: [u8; 16]) -> Result<Pin, Error> {
     }
 }
 
-/// `hirsel replay --state S --tape TAPE [--diagnose]`: run a recording's retained image.
+/// `hirsel replay --state S --tape TAPE [--diagnose] [--unit NAME]`: run a
+/// recording's retained image, or replay one unit's stream alone.
 pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
     if invocation.positional.is_some() || !invocation.arguments.is_empty() {
         return Err("host recording replay takes its program and arguments from the pin".into());
     }
-    let (mut state, mut tape, mut diagnose) = (None, None, false);
+    let (mut state, mut tape, mut diagnose, mut unit) = (None, None, false, None);
     for (option, value) in invocation.options {
         match option {
             Opt::HostState => state = value.map(PathBuf::from),
             Opt::Tape => tape = value.map(PathBuf::from),
             Opt::Diagnose => diagnose = true,
+            Opt::ReplayUnit => unit = value,
             _ => return Err("unexpected option for host recording replay".into()),
         }
     }
@@ -947,6 +949,7 @@ pub(crate) fn replay(invocation: Invocation) -> Result<i32, Error> {
         .arg("--hirsel-replay-recording")
         .arg(if diagnose { "diagnose" } else { "same" })
         .arg(tape)
+        .args(unit)
         .status()?;
     if status.success() {
         println!("Sealed");

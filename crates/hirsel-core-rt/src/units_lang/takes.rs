@@ -44,6 +44,10 @@ impl super::LangUnit {
     pub(crate) fn reach(&mut self) {}
     #[inline(always)]
     pub(super) fn set_pumping(&mut self, _: bool) {}
+    #[inline(always)]
+    pub(crate) fn take_due(&self) -> bool {
+        false
+    }
 }
 
 /// Record one take: its `TAKE` in the unit's stream.

@@ -353,6 +353,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
             Opt::Record => record_path = Some(value),
             Opt::Tape => replay_tape = Some(value),
+            Opt::ReplayUnit => return Err("replay --unit needs --state DIR with --tape".into()),
             Opt::Replay => test_replay = true,
             Opt::Laws => test_laws = true,
             Opt::WriteLaws => test_write_laws = true,

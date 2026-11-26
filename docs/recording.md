@@ -518,7 +518,7 @@ crosses to another unit, in an item, an entry or a helper's result. The rules, a
   older tape is read under the new rules.
 
 A `UdpSocket` crosses under recording too, and a value holding one is cut (`HANDLE`) rather
-than written. Unit replay is not built ([Replay of a run with helpers](#replay-of-a-run-with-helpers)),
+than written. A helper's stream is not replayed yet ([Replay of a run with helpers](#replay-of-a-run-with-helpers)),
 so the receiving unit's reads are checked from its stream: the arrival's snapshot, and the
 deliveries on its new ordinal.
 
@@ -688,8 +688,24 @@ last. `--unit` skips the missing-stream check. Each unit replays against its own
 
 So no unit's replay depends on how the others are scheduled or on how many workers run
 them. A replay at any worker count of a recording made at any other worker count makes the
-same observations in every unit. `hirsel replay app --tape PATH --unit NAME`<!-- doc-ref: planned --> replays one
+same observations in every unit. `hirsel replay app --tape PATH --unit NAME` replays one
 unit's stream alone and leaves the other streams unread.
+
+**What this build replays.** The root's stream replays as above when the root's helper ends
+return a value of plain bytes and lists of plain bytes. A helper end's `TAKE` that names
+no helper the unit spawned, or carries a value of another layout than the handle's result
+type, ends the replay `Diverged(Take)` at the `TAKE`. A kind 0 take applies at the unit's
+next take point; a kind 1 take applies at the scheduler's pump, which pumps instead of
+waiting while that `TAKE` is the unit's next frame, since the unit's waits for its helpers
+are then not outside waits. What this build does not replay yet stops the replay with
+`replay: refused: WHY` and exit 2, as a refusal at open does: a helper stream (`--unit`
+naming a helper; a full replay whose helper streams are present, at the root's end, so the
+missing-stream verdict above still wins); a helper end that failed, was cancelled or hands
+its owner survivors; a result holding a handle or a function; a helper entry holding a
+handle; and every other take kind. `UNIT_CANCEL`, connections and the drops of clients and
+inboxes reach replay as frames it does not expect and end it `Diverged`. A package replay
+(`hirsel replay PACKAGE`) refuses `--unit`: only the operator replay of a pinned image
+replays one unit. These limits close as the helper streams' replay lands.
 
 A **unit name** is fixed by the program and its inputs, never by a pool id: the root is
 `root`, and a helper is its parent's name, a dot, and the helper's 0-based index among its

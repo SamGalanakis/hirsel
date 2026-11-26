@@ -46,6 +46,8 @@ pub use crossing::{Cross, SpawnEntry};
 use crossing::{TapeHelper, tape_group};
 use ending::end_take;
 pub(crate) mod packing;
+#[cfg(feature = "record")]
+mod replay;
 mod sockets;
 use sockets::{attach_sockets, detach_sockets, socket_offsets, take_sockets};
 pub(crate) mod takes;
@@ -120,6 +122,9 @@ pub(crate) struct LangUnit {
     /// Takes now are at a scheduler pump (point kind 1).
     #[cfg(feature = "record")]
     pumping: bool,
+    /// A replaying unit's helpers, unstarted until their recorded end take.
+    #[cfg(feature = "record")]
+    unstarted: Map<usize, Box<UnitCtx>>,
 }
 
 impl LangUnit {
@@ -195,6 +200,8 @@ impl LangUnit {
             tape: None,
             #[cfg(feature = "record")]
             pumping: false,
+            #[cfg(feature = "record")]
+            unstarted: map(),
         })
     }
 }
@@ -223,6 +230,11 @@ pub(crate) unsafe fn pump(u: &mut LangUnit) {
 
 unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
     let wake_inboxes = u.waits > usize::from(receiving);
+    // SAFETY: the caller owns the unit for this commit.
+    #[cfg(feature = "record")]
+    unsafe {
+        replay::take_due(u)
+    };
     loop {
         while let Some((took, _a)) = u.ctx.take() {
             let id = u.ctx.took_ident;
@@ -1018,6 +1030,8 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         // The entry writes each socket as it leaves: detached first.
         let sockets = detach_sockets(context, input, socket_offsets(&xl));
         #[cfg(feature = "record")]
+        let replayed = replay::spawn_args(context, n, steps, input, entry);
+        #[cfg(feature = "record")]
         let tape = crate::tape::helper::spawn(context, n, steps, input, entry, sockets.as_ref());
         #[cfg(not(feature = "record"))]
         let tape = ();
@@ -1039,6 +1053,18 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
             files: (*context).host_files,
         }));
         u.helpers.insert(k, h);
+        let task = (h as usize | 1) as *mut tasks::Task;
+        #[cfg(feature = "record")]
+        if let Some(args) = replayed {
+            u.waits += 1;
+            replay::spawn(u, k, hctx, args);
+            return SpawnUnit {
+                task,
+                requested: 0,
+                available: 0,
+                status: 0,
+            };
+        }
         #[cfg(feature = "record")]
         if let Some(t) = &tape {
             crate::tape::units::spawn(tasks::current_group(), k, t.stream(), t.spawn_args());
@@ -1108,7 +1134,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
                 .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
         }
         SpawnUnit {
-            task: (h as usize | 1) as *mut tasks::Task,
+            task,
             requested: 0,
             available: 0,
             status: 0,

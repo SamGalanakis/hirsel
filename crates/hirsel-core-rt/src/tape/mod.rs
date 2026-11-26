@@ -192,8 +192,19 @@ struct Replayer {
     taken: u64,
     comparison: Option<String>,
     pending_reads: BTreeMap<usize, ReadSpace>,
+    /// The stream this replayer reads: 0 for the root.
+    stream: u32,
     /// The unit name derived from the index: `root` for stream 0.
     unit: String,
+    /// Every stream the tape's index holds, by number, with its unit name:
+    /// a replayed `UNIT_SPAWN` delivery names one of them.
+    streams: BTreeMap<u32, String>,
+    /// Replay of this stream alone (`--unit`): no check for other streams.
+    alone: bool,
+    /// The `UNIT_SPAWN`s replayed so far, numbering the next one's index.
+    spawns: u64,
+    /// A replayed spawn delivered a stream that this replay leaves unread.
+    unreplayed: bool,
 }
 
 struct Live {
@@ -329,9 +340,14 @@ enum TapeInput<'a> {
 
 struct ReplayInput {
     source: ProviderFile,
-    blocks: StreamBlocks,
+    index: Index,
+    /// Every indexed stream's unit name, by stream number.
+    streams: BTreeMap<u32, String>,
     stored: Header,
     origin: (Inner, Vec<u8>),
+    /// The one unit `--unit` replays, by name; None replays the root with
+    /// every stream's check.
+    unit: Option<Vec<u8>>,
 }
 
 impl ReplayInput {
@@ -339,7 +355,7 @@ impl ReplayInput {
         writer::flush();
         // SAFETY: forwarded.
         let source = unsafe { ProviderFile::open(dir, 0, name) }.map_err(OpenError::Io)?;
-        let (blocks, stored) = match Index::root(|offset, bytes| source.read_at(offset, bytes)) {
+        let (index, stored) = match Index::open(|offset, bytes| source.read_at(offset, bytes)) {
             Ok(b) => b,
             Err(ReadError::Source(e)) => return Err(OpenError::Io(e)),
             Err(ReadError::Format(Stop::Damaged(k))) => {
@@ -349,12 +365,31 @@ impl ReplayInput {
                 return Err(OpenError::Unreadable(Fault::stopped(s, 0)));
             }
         };
+        let streams = index.paths().collect();
         Ok(Self {
             source,
-            blocks,
+            index,
+            streams,
             stored,
             origin: (dir, name.to_vec()),
+            unit: None,
         })
+    }
+
+    /// The stream `--unit` names, or the root's: its number and name.
+    fn chosen(&self) -> Result<(u32, String), OpenError> {
+        let Some(unit) = &self.unit else {
+            return Ok((0, String::from("root")));
+        };
+        let found = self
+            .streams
+            .iter()
+            .find(|(_, name)| name.as_bytes() == unit.as_slice());
+        match found {
+            Some((0, name)) => Ok((0, name.clone())),
+            Some(_) => Err(OpenError::Refused(Refusal::HelperUnit)),
+            None => Err(OpenError::Refused(Refusal::NoUnit)),
+        }
     }
 }
 
@@ -887,12 +922,16 @@ impl Tape {
                 )
             }
             TapeInput::Replay(replay) => {
+                let (stream, unit) = replay.chosen()?;
                 let ReplayInput {
                     source,
-                    blocks,
+                    mut index,
+                    streams,
                     stored,
                     origin,
+                    unit: alone,
                 } = replay;
+                let blocks = index.take(stream).expect("an indexed stream");
                 if stored.identity != expect.identity {
                     return Err(OpenError::Refused(Refusal::Code));
                 }
@@ -926,12 +965,17 @@ impl Tape {
                     recorder: None,
                     replayer: Some(Replayer {
                         reader: FrameReader::new(source, blocks),
-                        closes: Closes::new(origin, stored.tape_id),
+                        closes: Closes::new(origin, stored.tape_id, stream),
                         lookahead: None,
                         taken: 0,
                         comparison: None,
                         pending_reads: BTreeMap::new(),
-                        unit: String::from("root"),
+                        stream,
+                        unit,
+                        streams,
+                        alone: alone.is_some(),
+                        spawns: 0,
+                        unreplayed: false,
                     }),
                 };
                 (
@@ -1271,6 +1315,8 @@ fn finish(
     }
     if let Err(f) = result {
         live.abort_replay(f, 0);
+    } else {
+        live.refuse_unreplayed();
     }
     if deadlock.is_some() && result.is_ok() && live.replay_abort.is_some() {
         // Recorded deadlock matched and sealed on replay: exit 0.

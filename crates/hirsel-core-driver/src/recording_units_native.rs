@@ -950,3 +950,5 @@ include!("recording_rl8_native.rs");
 include!("recording_handles_native.rs");
 // Spawn entries: the link table that starts a helper from its identity.
 include!("recording_spawn_entries_native.rs");
+// Replay of a run with helpers.
+include!("recording_unit_replay_native.rs");

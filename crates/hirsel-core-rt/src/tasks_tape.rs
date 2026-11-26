@@ -52,7 +52,7 @@ fn tape_boundary(group: Group, ending: bool) {
         use crate::tape::schedule::Turn;
         loop {
             match group.turn() {
-                Turn::Fifo | Turn::Event(None | Some(0)) => return,
+                Turn::Fifo | Turn::Event(None | Some(0)) | Turn::Take => return,
                 Turn::Grant if !ending => return,
                 Turn::Finish | Turn::Deadlock => return,
                 Turn::Grant => {

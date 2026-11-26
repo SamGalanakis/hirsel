@@ -129,6 +129,7 @@ pub(in crate::tape) fn check_launch_replay() {
                 &[7; 32],
                 &[9; 32],
                 None,
+                None,
             )
         };
         assert_eq!(status, u8::from(previous_format));

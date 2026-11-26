@@ -170,13 +170,6 @@ impl Index {
             bytes: Vec::new(),
         })
     }
-
-    pub fn root<E>(
-        read: impl FnMut(u64, &mut [u8]) -> Result<usize, E>,
-    ) -> Result<(StreamBlocks, Header), ReadError<E>> {
-        let (mut index, header) = Self::open(read)?;
-        Ok((index.take(0).unwrap(), header))
-    }
 }
 
 pub struct StreamBlocks {

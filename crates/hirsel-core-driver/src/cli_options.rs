@@ -345,6 +345,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Replay this tape without host grants."
     ),
     option!(
+        ReplayUnit,
+        ["--unit"],
+        Some("NAME"),
+        ["replay"],
+        "Replay this unit's stream alone (root) and read no other stream."
+    ),
+    option!(
         Replay,
         ["--replay"],
         None,

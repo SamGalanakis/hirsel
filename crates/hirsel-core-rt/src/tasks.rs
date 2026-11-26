@@ -1161,7 +1161,7 @@ impl Scheduler {
     /// wait is never called a deadlock here: a unit cannot see the others.
     fn lang_waits(&self) -> bool {
         // SAFETY: the run pins its unit.
-        !self.lang.is_null() && unsafe { (*self.lang).waits } > 0
+        !self.lang.is_null() && unsafe { (*self.lang).waits > 0 && !(*self.lang).take_due() }
     }
 
     /// Quiescence first wakes the run's own `clock.idle` waits (FAIL-15);
@@ -2720,7 +2720,7 @@ fn replay_boundary_for(task: *mut Task, provider_entry: bool) {
         }
         loop {
             match group.turn() {
-                Turn::Fifo | Turn::Deadlock => return,
+                Turn::Fifo | Turn::Deadlock | Turn::Take => return,
                 Turn::Event(Some(id)) | Turn::Retired(id) if id == group.task => return,
                 Turn::Wait(id) if id == group.task && provider_entry => return,
                 Turn::Wait(id) if id == group.task => {

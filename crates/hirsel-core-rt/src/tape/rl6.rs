@@ -432,7 +432,8 @@ fn port_delivery() {
         wire(0, 3, 2, ROOT_END),
     ]
     .concat();
-    let (mut blocks, _) = Index::root(read(&tape)).unwrap();
+    let (mut index, _) = Index::open(read(&tape)).unwrap();
+    let mut blocks = index.take(0).unwrap();
     let mut decoder = blocks.decoder(read(&tape)).unwrap();
     let mut encoder = Encoder::default();
     let (_, payload) = blocks.next(read(&tape)).unwrap().unwrap();

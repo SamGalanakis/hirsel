@@ -12,6 +12,9 @@ pub enum Mismatch {
     /// The replaying domain's outcome differs from END's (v2.3 R9).
     Outcome,
     Schedule,
+    /// A recorded `TAKE` cannot apply at its position (recording.md,
+    /// "Replay of a run with helpers").
+    Take,
 }
 
 /// Where a replay diverged: `at` is the 1-based position of the frame it was
@@ -68,6 +71,11 @@ pub enum Refusal {
     Limit,
     Damaged(u64),
     HeaderTooLarge,
+    /// `--unit` names a helper: replaying a helper from its stream's entry
+    /// needs the link's spawn-entry table, which this build does not have.
+    HelperUnit,
+    /// `--unit` names no stream the tape holds.
+    NoUnit,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenError {

@@ -12,14 +12,6 @@ pub type WebmInfo {
     duration_ticks: Option[f64]
 }
 
-pub type WebmFormat {
-    track: TrackInfo,
-    width: u64,
-    height: u64,
-    sample_rate: Option[f64],
-    channels: u64
-}
-
 pub type Cue {
     time: u64,
     track: u64,
@@ -29,7 +21,7 @@ pub type Cue {
 }
 
 type ProbeTrack {
-    format: WebmFormat,
+    track: TrackInfo,
     codec: Bytes,
     private_data: Bytes
 }
@@ -100,22 +92,6 @@ fn sparse_element(at: u64, end: u64, read: scoped fn(u64, u64) -> Result[Bytes, 
     }, known_size: e.known_size))
 }
 
-fn webm_float(input: Bytes, e: Element) -> Result[f64, ProbeError] {
-    let n = e.next - e.body
-    let value = if n == 4 {
-        let single = float.from_bits32(list.word_be(input, e.body))
-        float.widen(single)
-    } else if n == 8 {
-        float.from_bits64(list.word_be(input, e.body))
-    } else {
-        return Error(ProbeFraming(InvalidElement))
-    }
-    if !float.is_finite(value) || float.lt(value, 0.0) {
-        return Error(ProbeFraming(InvalidElement))
-    }
-    Ok(value)
-}
-
 fn webm_duration(input: Bytes, info: Element) -> Result[Option[f64], ProbeError] {
     let mut at = info.body
     let mut duration: Option[f64] = None
@@ -128,66 +104,11 @@ fn webm_duration(input: Bytes, info: Element) -> Result[Option[f64], ProbeError]
             if let Some(_) = duration {
                 return Error(ProbeFraming(InvalidElement))
             }
-            duration = Some(webm_float(input, e)?)
+            duration = Some(webm_error(webm_float(input, e))?)
         }
         at = e.next
     }
     Ok(duration)
-}
-
-fn track_format(input: Bytes, e: Element, info: TrackInfo) -> Result[WebmFormat, ProbeError] {
-    let mut format = WebmFormat(track: info, width: 0, height: 0, sample_rate: None, channels: 0)
-    let mut at = e.body
-    while at < e.next {
-        let parent = webm_error(read_element(input, at, e.next))?
-        if !parent.known_size {
-            return Error(ProbeFraming(InvalidTrack))
-        }
-        if parent.id == 0xe0 || parent.id == 0xe1 {
-            let mut cursor = parent.body
-            let mut output_rate: Option[f64] = None
-            if parent.id == 0xe1 {
-                format.channels = 1
-                format.sample_rate = Some(8000.0)
-            }
-            while cursor < parent.next {
-                let b = webm_error(read_element(input, cursor, parent.next))?
-                if !b.known_size {
-                    return Error(ProbeFraming(InvalidTrack))
-                }
-                if parent.id == 0xe0 {
-                    match b.id {
-                        0xb0 => {
-                            format.width = webm_error(uint(input, b.body, b.next))?
-                        },
-                        0xba => {
-                            format.height = webm_error(uint(input, b.body, b.next))?
-                        },
-                        _ => {},
-                    }
-                } else {
-                    match b.id {
-                        0xb5 => {
-                            format.sample_rate = Some(webm_float(input, b)?)
-                        },
-                        0x78b5 => {
-                            output_rate = Some(webm_float(input, b)?)
-                        },
-                        0x9f => {
-                            format.channels = webm_error(uint(input, b.body, b.next))?
-                        },
-                        _ => {},
-                    }
-                }
-                cursor = b.next
-            }
-            if let Some(rate) = output_rate {
-                format.sample_rate = Some(rate)
-            }
-        }
-        at = parent.next
-    }
-    Ok(format)
 }
 
 fn read_probe_tracks(input: Bytes, tracks: Element, limit: u64) -> Result[List[ProbeTrack], ProbeError] {
@@ -218,8 +139,7 @@ fn read_probe_tracks(input: Bytes, tracks: Element, limit: u64) -> Result[List[P
                 return Error(ProbeFraming(InvalidTrack))
             }
             map.insert(mut ids, info.number, true)
-            let format = track_format(input, e, info)?
-            list.push(mut found, ProbeTrack(format: format, codec: take codec, private_data: take config))
+            list.push(mut found, ProbeTrack(track: info, codec: take codec, private_data: take config))
         }
         at = e.next
     }
@@ -411,12 +331,12 @@ pub fn probe_tracks(probe: WebmProbe) -> u64 {
     list.len(probe.tracks)
 }
 
-pub fn probe_track(probe: WebmProbe, index: u64, receive: scoped fn(WebmFormat, Bytes, Bytes)) -> Result[(), ProbeError] {
+pub fn probe_track(probe: WebmProbe, index: u64, receive: scoped fn(TrackInfo, Bytes, Bytes)) -> Result[(), ProbeError] {
     if index >= list.len(probe.tracks) {
         return Error(ProbeFraming(InvalidTrack))
     }
     let track = view probe.tracks[index]
-    receive(track.format, track.codec, track.private_data)
+    receive(track.track, track.codec, track.private_data)
     Ok(())
 }
 

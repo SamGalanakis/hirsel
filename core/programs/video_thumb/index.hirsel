@@ -69,7 +69,7 @@ fn make_index(size: image_core.image.Size, matrix: video_yuv.Matrix, orientation
     Ok(Index(size: size, matrix: matrix, orientation: orientation, codec: codec, config: take config, keys: take keys))
 }
 
-fn video_matrix(height: u32, colour: Option[media_container.mp4.Colour]) -> Result[video_yuv.Matrix, Error] {
+fn video_matrix(height: u32, colour: Option[media_container.track.Colour]) -> Result[video_yuv.Matrix, Error] {
     if let Some(c) = colour {
         if c.full_range == Some(true) || c.transfer == 16 || c.transfer == 18 {
             return Error(Unsupported)
@@ -119,8 +119,8 @@ fn config_box(entry: Bytes, kind: u32) -> Result[Bytes, Error] {
 
 fn mp4_index(vod: media_container.mp4.Vod, max_samples: u64) -> Result[Index, Error] {
     for i in 0u64 .. media_container.mp4.vod_tracks(vod) {
-        let (track, hdr) = mp4_result(media_container.mp4.vod_track(vod, i))?
-        if track.handler != 0x76696465 {
+        let track = mp4_result(media_container.mp4.vod_track(vod, i))?
+        let Video(width: width, height: height, rotation: rotation, hdr: hdr) = track.kind else {
             continue
         }
         let (codec, kind) = match track.codec {
@@ -133,9 +133,9 @@ fn mp4_index(vod: media_container.mp4.Vod, max_samples: u64) -> Result[Index, Er
         mp4_result(media_container.mp4.vod_sample_entry(vod, i, scoped fn(entry: Bytes) {
             config = config_box(entry, kind)
         }))?
-        let size = image_core.image.Size(width: int.widen(track.width), height: int.widen(track.height))
+        let size = image_core.image.Size(width: int.narrow(width), height: int.narrow(height))
         let matrix = video_matrix(size.height, hdr.colour)?
-        let orientation: u8 = match track.rotation {
+        let orientation: u8 = match rotation {
             Some(0) => 1,
             Some(180) => 3,
             Some(- 180) => 3,
@@ -160,18 +160,20 @@ fn webm_index(vod: media_container.webm.WebmProbe, max_cues: u64) -> Result[Inde
     let scale = media_container.webm.probe_info(vod).timestamp_scale
     for i in 0u64 .. media_container.webm.probe_tracks(vod) {
         let mut selected: Option[(u64, image_core.image.Size, Codec, Bytes)] = None
-        webm_result(media_container.webm.probe_track(vod, i, scoped fn(info: media_container.webm.WebmFormat, codec: Bytes, config: Bytes) {
-            if info.track.kind == 1 && info.track.codec_delay == 0 {
-                let width: Option[u32] = int.try_narrow(info.width)
-                let height: Option[u32] = int.try_narrow(info.height)
-                if let (Some(w), Some(h)) = (width, height) {
-                    if codec == b"V_AV1" || codec == b"V_MPEG4/ISO/AVC" {
-                        let kind = if codec == b"V_AV1" {
-                            Av1Codec
-                        } else {
-                            H264
+        webm_result(media_container.webm.probe_track(vod, i, scoped fn(info: media_container.webm.TrackInfo, codec: Bytes, config: Bytes) {
+            if let Video(width: width, height: height, ..) = info.kind {
+                if info.codec_delay == 0 {
+                    let narrow_width: Option[u32] = int.try_narrow(width)
+                    let narrow_height: Option[u32] = int.try_narrow(height)
+                    if let (Some(w), Some(h)) = (narrow_width, narrow_height) {
+                        if codec == b"V_AV1" || codec == b"V_MPEG4/ISO/AVC" {
+                            let kind = if codec == b"V_AV1" {
+                                Av1Codec
+                            } else {
+                                H264
+                            }
+                            selected = Some((info.number, image_core.image.Size(width: w, height: h), kind, owned_bytes(config)))
                         }
-                        selected = Some((info.track.number, image_core.image.Size(width: w, height: h), kind, owned_bytes(config)))
                     }
                 }
             }

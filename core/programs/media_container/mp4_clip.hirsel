@@ -93,10 +93,10 @@ fn take_span(mut spans: List[FileRange], start: u64, end: u64) {
 
 fn tracks_plan(vod: Vod, index: u64, mut input: List[VodSample], selection: Option[ClipTrack], mut cursor: u64, mut spans: List[FileRange]) -> Result[MuxTrack, ClipError] {
     let track = vod.tracks[index].info
-    let media = match track.handler {
-        0x76696465 => Video(track.width, track.height),
-        0x736f756e => Audio,
-        _ => return Error(Container(UnsupportedVod)),
+    let media: Media = match track.kind {
+        Video(width: width, height: height, ..) => Video(int.narrow(width), int.narrow(height)),
+        Audio(..) => Audio,
+        Other(_) => return Error(Container(UnsupportedVod)),
     }
     let mut edits: List[Edit] = list.new()
     let mut entry: Bytes = list.new()
@@ -197,7 +197,7 @@ fn track_timeline(vod: Vod, index: u64, track: TrackIndex) -> Result[Timeline, C
 
 /// Visits sync sample ranges with their edited presentation time in milliseconds.
 pub fn vod_sync_samples(vod: Vod, index: u64, max_samples: u64, receive: scoped fn(u64, VodSample)) -> Result[(), ClipError] {
-    let (track, _) = clip_error(vod_track(vod, index))?
+    let track = clip_error(vod_track(vod, index))?
     let map = track_timeline(vod, index, track)?
     let movie_scale = vod.movie.timescale
     let span = scale_ticks(map.span, movie_scale, track.timescale, true)?
@@ -449,14 +449,15 @@ pub fn clip_vod(vod: Vod, start_ms: u64, end_ms: u64, limits: ClipLimits, read: 
     }
     let mut primary: Option[u64] = None
     for i in 0u64 .. list.len(vod.tracks) {
-        let kind = vod.tracks[i].info.handler
-        if kind == 0x76696465 {
-            if let Some(_) = primary {
-                return Error(Container(UnsupportedVod))
-            }
-            primary = Some(i)
-        } else if kind != 0x736f756e {
-            return Error(Container(UnsupportedVod))
+        match vod.tracks[i].info.kind {
+            Video(..) => {
+                if let Some(_) = primary {
+                    return Error(Container(UnsupportedVod))
+                }
+                primary = Some(i)
+            },
+            Audio(..) => {},
+            Other(_) => return Error(Container(UnsupportedVod)),
         }
     }
     let Some(index) = primary else {

@@ -1,0 +1,31 @@
+pub type Colour {
+    primaries: u16,
+    transfer: u16,
+    matrix: u16,
+    full_range: Option[bool]
+}
+
+pub type ContentLight {
+    max_content: u16,
+    max_frame_average: u16
+}
+
+pub type MasteringDisplay {
+    // In mdcv wire order: green, blue, red.
+    primaries: Inline[(u16, u16), 3],
+    white_point: (u16, u16),
+    max_luminance: u32,
+    min_luminance: u32
+}
+
+pub type Hdr {
+    colour: Option[Colour],
+    content_light: Option[ContentLight],
+    mastering_display: Option[MasteringDisplay]
+}
+
+pub type TrackKind = Video(width: u64, height: u64, rotation: Option[i32], hdr: Hdr) | Audio(channels: u64, sample_rate: Option[f64]) | Other(u64)
+
+pub fn empty_hdr() -> Hdr {
+    Hdr(colour: None, content_light: None, mastering_display: None)
+}

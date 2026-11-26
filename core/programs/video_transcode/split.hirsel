@@ -1,5 +1,4 @@
 // Probe, IDR split and job plan. Pure Hirsel: no foreign reach.
-
 pub type Codec = H264 | Av1
 
 /// Peak luminance of the mastering display in cd/m², for PQ sources.
@@ -54,10 +53,10 @@ pub type Plan {
     audio: Option[Track]
 }
 
-const VIDE: u32 = 0x76696465
-const SOUN: u32 = 0x736f756e
 const AVC1: u32 = 0x61766331
+
 const AV01: u32 = 0x61763031
+
 const OPUS: u32 = 0x4f707573
 
 fn word(b: Bytes, at: u64) -> u32 {
@@ -135,17 +134,17 @@ fn turn(rotation: Option[i32]) -> Result[Turn, Error] {
     match rotation {
         None => Ok(Upright),
         Some(0) => Ok(Upright),
-        Some(-90) => Ok(Quarter),
+        Some(- 90) => Ok(Quarter),
         Some(270) => Ok(Quarter),
         Some(180) => Ok(Half),
-        Some(-180) => Ok(Half),
+        Some(- 180) => Ok(Half),
         Some(90) => Ok(ThreeQuarter),
-        Some(-270) => Ok(ThreeQuarter),
+        Some(- 270) => Ok(ThreeQuarter),
         Some(other) => Error(UnsupportedRotation(other)),
     }
 }
 
-fn range(hdr: media_container.mp4.Hdr) -> Result[Range, Error] {
+fn range(hdr: media_container.track.Hdr) -> Result[Range, Error] {
     let Some(colour) = hdr.colour else {
         return Ok(Sdr)
     }
@@ -309,21 +308,28 @@ pub fn plan(file_size: u64, limits: Limits, segment_ms: u64, audio: Audio, read:
     let mut video: Option[u64] = None
     let mut sound: Option[u64] = None
     for t in 0u64 .. media_container.mp4.vod_tracks(vod) {
-        let (info, _) = media_container.mp4.vod_track(vod, t) ?=> |e| Probe(e)
-        if info.handler == VIDE {
-            if let None = video {
-                video = Some(t)
-            }
-        } else if info.handler == SOUN {
-            if let None = sound {
-                sound = Some(t)
-            }
+        let info = media_container.mp4.vod_track(vod, t) ?=> |e| Probe(e)
+        match info.kind {
+            Video(..) => {
+                if let None = video {
+                    video = Some(t)
+                }
+            },
+            Audio(..) => {
+                if let None = sound {
+                    sound = Some(t)
+                }
+            },
+            Other(_) => {},
         }
     }
     let Some(v) = video else {
         return Error(NoVideo)
     }
-    let (info, hdr) = media_container.mp4.vod_track(vod, v) ?=> |e| Probe(e)
+    let info = media_container.mp4.vod_track(vod, v) ?=> |e| Probe(e)
+    let Video(width: width, height: height, rotation: rotation, hdr: hdr) = info.kind else {
+        return Error(NoVideo)
+    }
     let codec = if info.codec == AVC1 {
         H264
     } else if info.codec == AV01 {
@@ -388,7 +394,7 @@ pub fn plan(file_size: u64, limits: Limits, segment_ms: u64, audio: Audio, read:
         Keep => match sound {
             None => None,
             Some(s) => {
-                let (a, _) = media_container.mp4.vod_track(vod, s) ?=> |e| Probe(e)
+                let a = media_container.mp4.vod_track(vod, s) ?=> |e| Probe(e)
                 if a.codec != OPUS {
                     return Error(UnsupportedAudio(a.codec))
                 }
@@ -398,5 +404,5 @@ pub fn plan(file_size: u64, limits: Limits, segment_ms: u64, audio: Audio, read:
             },
         },
     }
-    Ok(Plan(codec: codec, width: int.widen(info.width), height: int.widen(info.height), turn: turn(info.rotation)?, range: range(hdr)?, parameter_sets: take parameter_sets, length_size: length_size, video: Track(timescale: timescale, entry: take entry, rows: take rows), jobs: take jobs, audio: take audio_track))
+    Ok(Plan(codec: codec, width: int.narrow(width), height: int.narrow(height), turn: turn(rotation)?, range: range(hdr)?, parameter_sets: take parameter_sets, length_size: length_size, video: Track(timescale: timescale, entry: take entry, rows: take rows), jobs: take jobs, audio: take audio_track))
 }

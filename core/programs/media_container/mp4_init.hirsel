@@ -80,9 +80,9 @@ fn read_track(input: Bytes, trak: BoxHeader, mvex: BoxHeader, receive: scoped fn
         return Error(InvalidTrack)
     }
     let kind: u32 = list.word_be(input, hdlr.body + 8)
-    let media = if kind == 0x736f756e {
+    let media = if kind == AUDIO_HANDLER {
         Audio
-    } else if kind == 0x76696465 {
+    } else if kind == VIDEO_HANDLER {
         if tkhd.next - tkhd.body < 84 {
             return Error(InvalidTrack)
         }

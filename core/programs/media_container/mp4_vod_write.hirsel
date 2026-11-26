@@ -255,11 +255,11 @@ fn write_data_reference(mut out: Bytes) {
 
 fn write_vod_track(mut out: Bytes, track: MuxTrack, info: MuxFacts, payload_at: u64, wide: bool) {
     let (handler, volume, width, height) = match track.media {
-        Audio => (0x736f756eu32, 0x0100u16, 0u32, 0u32),
+        Audio => (AUDIO_HANDLER, 0x0100u16, 0u32, 0u32),
         Video(w, h) => {
             let x: u32 = int.widen(w)
             let y: u32 = int.widen(h)
-            (0x76696465u32, 0u16, x << 16, y << 16)
+            (VIDEO_HANDLER, 0u16, x << 16, y << 16)
         },
     }
     let trak = start_box(mut out, 0x7472616b)

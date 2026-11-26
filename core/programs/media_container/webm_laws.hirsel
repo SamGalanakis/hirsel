@@ -10,8 +10,11 @@ fn webm_reference() -> Result[(), ()] {
     let mut suffix: Bytes = list.with_capacity(16)
     let mut tracks = 0u64
     let init = result.unwrap(webm.read_init(source, 0, scoped fn(track: webm.TrackInfo, codec: Bytes, private_data: Bytes) {
-        if track.number != 1 || track.kind != 2 || track.codec_delay != 6500000 || track.seek_preroll != 80000000 || codec != b"A_OPUS" {
+        if track.number != 1 || track.codec_delay != 6500000 || track.seek_preroll != 80000000 || codec != b"A_OPUS" {
             fail("track metadata differs from the FFmpeg fixture")
+        }
+        if let Audio(..) = track.kind {} else {
+            fail("track kind differs from the FFmpeg fixture")
         }
         let head = result.unwrap(opus.read_head(private_data))
         let mut owned: Bytes = list.new()

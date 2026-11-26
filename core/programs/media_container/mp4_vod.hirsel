@@ -22,7 +22,7 @@ pub type MovieInfo {
 
 pub type TrackIndex {
     id: u32,
-    handler: u32,
+    kind: track.TrackKind,
     codec: u32,
     timescale: u32,
     media_duration: u64,
@@ -30,38 +30,7 @@ pub type TrackIndex {
     movie_duration: u64,
     sample_count: u32,
     decode_duration: u64,
-    width: u16,
-    height: u16,
-    channels: u16,
-    sample_rate: u32,
-    matrix: Inline[u32, 9],
-    rotation: Option[i32]
-}
-
-pub type Colour {
-    primaries: u16,
-    transfer: u16,
-    matrix: u16,
-    full_range: Option[bool]
-}
-
-pub type ContentLight {
-    max_content: u16,
-    max_frame_average: u16
-}
-
-pub type MasteringDisplay {
-    // In mdcv wire order: green, blue, red.
-    primaries: Inline[(u16, u16), 3],
-    white_point: (u16, u16),
-    max_luminance: u32,
-    min_luminance: u32
-}
-
-pub type Hdr {
-    colour: Option[Colour],
-    content_light: Option[ContentLight],
-    mastering_display: Option[MasteringDisplay]
+    matrix: Inline[u32, 9]
 }
 
 pub type Edit {
@@ -95,7 +64,6 @@ type VodTrack {
     edit_width: u64,
     presentation_start_us: u64,
     presentation_duration_us: u64,
-    hdr: Hdr,
     tables: SampleTables
 }
 
@@ -408,9 +376,9 @@ fn track_presentation(input: Bytes, edits: Table, edit_width: u64, movie_scale: 
     Ok((nearest_ticks(start, movie_scale, 1000000)?, duration))
 }
 
-fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[Hdr, VodError] {
+fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[track.Hdr, VodError] {
     let mut at = start
-    let mut hdr = Hdr(colour: None, content_light: None, mastering_display: None)
+    let mut hdr = track.Hdr(colour: None, content_light: None, mastering_display: None)
     while at < end {
         let child = vod_box(input, at, end)?
         let off = child.body
@@ -436,7 +404,7 @@ fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[Hdr, VodError] {
                         }
                         None
                     }
-                    hdr.colour = Some(Colour(primaries: list.word_be(input, off + 4), transfer: list.word_be(input, off + 6), matrix: list.word_be(input, off + 8), full_range: full))
+                    hdr.colour = Some(track.Colour(primaries: list.word_be(input, off + 4), transfer: list.word_be(input, off + 6), matrix: list.word_be(input, off + 8), full_range: full))
                 }
             },
             0x636c6c69 => {
@@ -446,7 +414,7 @@ fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[Hdr, VodError] {
                 if n != 4 {
                     return Error(BadMovie)
                 }
-                hdr.content_light = Some(ContentLight(max_content: list.word_be(input, off), max_frame_average: list.word_be(input, off + 2)))
+                hdr.content_light = Some(track.ContentLight(max_content: list.word_be(input, off), max_frame_average: list.word_be(input, off + 2)))
             },
             0x6d646376 => {
                 if let Some(_) = hdr.mastering_display {
@@ -459,7 +427,7 @@ fn read_hdr(input: Bytes, start: u64, end: u64) -> Result[Hdr, VodError] {
                 for i in 0u64 .. 3 {
                     primaries[i] = (list.word_be(input, off + i * 4), list.word_be(input, off + i * 4 + 2))
                 }
-                hdr.mastering_display = Some(MasteringDisplay(primaries: primaries, white_point: (list.word_be(input, off + 12), list.word_be(input, off + 14)), max_luminance: list.word_be(input, off + 16), min_luminance: list.word_be(input, off + 20)))
+                hdr.mastering_display = Some(track.MasteringDisplay(primaries: primaries, white_point: (list.word_be(input, off + 12), list.word_be(input, off + 14)), max_luminance: list.word_be(input, off + 16), min_luminance: list.word_be(input, off + 20)))
             },
             _ => {},
         }
@@ -521,22 +489,22 @@ fn read_vod_track(input: Bytes, trak: BoxHeader, movie_scale: u32) -> Result[Vod
     let (edits, edit_width) = read_edits(input, trak)?
     let (start_us, duration) = track_presentation(input, edits, edit_width, movie_scale, timescale, media_duration)?
     let duration_us = nearest_ticks(duration, timescale, 1000000)?
-    let mut info = TrackIndex(id: id, handler: handler, codec: entry.kind, timescale: timescale, media_duration: media_duration, presentation_duration: duration, movie_duration: movie_duration, sample_count: sample_count, decode_duration: decode_duration, width: 0, height: 0, channels: 0, sample_rate: 0, matrix: matrix, rotation: None)
-    let mut hdr = Hdr(colour: None, content_light: None, mastering_display: None)
-    if handler == 0x76696465 {
+    let kind: track.TrackKind = if handler == VIDEO_HANDLER {
         if entry.next - entry.body < 78 {
             return Error(BadMovie)
         }
-        info.width = list.word_be(input, entry.body + 24)
-        info.height = list.word_be(input, entry.body + 26)
-        info.rotation = matrix_rotation(matrix)
-        hdr = read_hdr(input, entry.body + 78, entry.next)?
-    } else if handler == 0x736f756e {
+        let width: u16 = list.word_be(input, entry.body + 24)
+        let height: u16 = list.word_be(input, entry.body + 26)
+        let hdr = read_hdr(input, entry.body + 78, entry.next)?
+        Video(width: int.widen(width), height: int.widen(height), rotation: matrix_rotation(matrix), hdr: hdr)
+    } else if handler == AUDIO_HANDLER {
         let (rate, channels) = audio_format(input, entry)?
-        info.sample_rate = rate
-        info.channels = channels
+        Audio(channels: int.widen(channels), sample_rate: Some(float.from_int(rate)))
+    } else {
+        Other(int.widen(handler))
     }
-    Ok(VodTrack(info: info, entry: FileRange(start: start, end: entry.next), edits: edits, edit_width: edit_width, presentation_start_us: start_us, presentation_duration_us: duration_us, hdr: hdr, tables: tables))
+    let info = TrackIndex(id: id, kind: kind, codec: entry.kind, timescale: timescale, media_duration: media_duration, presentation_duration: duration, movie_duration: movie_duration, sample_count: sample_count, decode_duration: decode_duration, matrix: matrix)
+    Ok(VodTrack(info: info, entry: FileRange(start: start, end: entry.next), edits: edits, edit_width: edit_width, presentation_start_us: start_us, presentation_duration_us: duration_us, tables: tables))
 }
 
 fn read_moov(take metadata: Bytes, file_size: u64, take media: List[FileRange], track_limit: u64, layout: VodLayout) -> Result[Vod, VodError] {
@@ -648,11 +616,11 @@ pub fn vod_tracks(vod: Vod) -> u64 {
     list.len(vod.tracks)
 }
 
-pub fn vod_track(vod: Vod, track: u64) -> Result[(TrackIndex, Hdr), VodError] {
+pub fn vod_track(vod: Vod, track: u64) -> Result[TrackIndex, VodError] {
     if track >= list.len(vod.tracks) {
         return Error(BadMovie)
     }
-    Ok((vod.tracks[track].info, vod.tracks[track].hdr))
+    Ok(vod.tracks[track].info)
 }
 
 pub fn vod_sample_entry(vod: Vod, track: u64, receive: scoped fn(Bytes)) -> Result[(), VodError] {

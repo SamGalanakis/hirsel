@@ -68,6 +68,10 @@ pub type Sample {
     composition_offset: i32
 }
 
+const VIDEO_HANDLER: u32 = 0x76696465
+
+const AUDIO_HANDLER: u32 = 0x736f756e
+
 pub const FTYP: u32 = 0x66747970
 
 pub const MOOV: u32 = 0x6d6f6f76
@@ -165,14 +169,14 @@ pub fn write_init(mut out: Bytes, track: Track, sample_entry: Bytes) -> Result[(
         return Error(InvalidTrack)
     }
     let (handler, volume, width, height, slots) = match track.media {
-        Audio => (0x736f756eu32, 0x0100u16, 0u32, 0u32, 509u64),
+        Audio => (AUDIO_HANDLER, 0x0100u16, 0u32, 0u32, 509u64),
         Video(w, h) => {
             if w == 0 || h == 0 {
                 return Error(InvalidTrack)
             }
             let wide: u32 = int.widen(w)
             let high: u32 = int.widen(h)
-            (0x76696465u32, 0u16, wide << 16, high << 16, 513u64)
+            (VIDEO_HANDLER, 0u16, wide << 16, high << 16, 513u64)
         },
     }
     if list.capacity(out) < n + slots {

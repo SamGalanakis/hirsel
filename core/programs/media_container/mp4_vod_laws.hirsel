@@ -102,12 +102,18 @@ fn sparse_vod_sample_tables() -> Result[(), ()] waits {
     if reads != 5 || mp4.vod_tracks(vod) != 2 || info.timescale != 1000 || info.duration != 1000 || info.file_size != size {
         fail("sparse movie metadata")
     }
-    let (video, _) = result.unwrap(mp4.vod_track(vod, 0))
-    let (audio, _) = result.unwrap(mp4.vod_track(vod, 1))
-    if video.codec != 0x68657631 || video.width != 170 || video.height != 98 || video.timescale != 12288 || video.sample_count != 12 || video.movie_duration != 1000 {
+    let video = result.unwrap(mp4.vod_track(vod, 0))
+    let audio = result.unwrap(mp4.vod_track(vod, 1))
+    let Video(width: video_width, height: video_height, ..) = video.kind else {
+        fail("HEVC track kind")
+    }
+    let Audio(channels: audio_channels, sample_rate: audio_rate) = audio.kind else {
+        fail("AAC track kind")
+    }
+    if video.codec != 0x68657631 || video_width != 170 || video_height != 98 || video.timescale != 12288 || video.sample_count != 12 || video.movie_duration != 1000 {
         fail("HEVC probe disagrees with ffprobe")
     }
-    if audio.codec != 0x6d703461 || audio.sample_rate != 48000 || audio.channels != 1 || audio.sample_count != 48 || audio.movie_duration != 1000 {
+    if audio.codec != 0x6d703461 || !float.eq(option.unwrap(audio_rate), 48000.0f64) || audio_channels != 1 || audio.sample_count != 48 || audio.movie_duration != 1000 {
         fail("AAC probe disagrees with ffprobe")
     }
     let mut sample_count = 0u64
@@ -179,8 +185,11 @@ fn sparse_webm_tracks() waits {
     if info.file_size != 1085 || info.timestamp_scale != 1000000 || webm.probe_tracks(stream) != 1 || !float.eq(option.unwrap(info.duration_ticks), 260.0) {
         fail("WebM duration or track count")
     }
-    result.unwrap(webm.probe_track(stream, 0, scoped fn(format: webm.WebmFormat, codec: Bytes, _config: Bytes) {
-        if codec != b"A_OPUS" || format.channels != 1 || !float.eq(option.unwrap(format.sample_rate), 48000.0) {
+    result.unwrap(webm.probe_track(stream, 0, scoped fn(track_info: webm.TrackInfo, codec: Bytes, _config: Bytes) {
+        let Audio(channels: channels, sample_rate: rate) = track_info.kind else {
+            fail("WebM audio kind")
+        }
+        if codec != b"A_OPUS" || channels != 1 || !float.eq(option.unwrap(rate), 48000.0) {
             fail("WebM audio format")
         }
     }))

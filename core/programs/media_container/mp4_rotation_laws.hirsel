@@ -14,8 +14,11 @@ fn probe_rotation(matrix: Inline[u32, 9], degrees: i32) waits {
         }
         Ok(take raw)
     }))
-    let (track_info, _) = result.unwrap(mp4.vod_track(input, 0))
-    if track_info.rotation != Some(degrees) {
+    let track_info = result.unwrap(mp4.vod_track(input, 0))
+    let Video(rotation: rotation, ..) = track_info.kind else {
+        fail("probe track kind")
+    }
+    if rotation != Some(degrees) {
         fail("rotation disagrees with ffprobe")
     }
 }

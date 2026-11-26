@@ -28,6 +28,10 @@ const BLOCK: u32 = 0xa1
 
 const MAX_SIZE: u64 = 0x00fffffffffffffe
 
+const TRACK_VIDEO: u64 = 1
+
+const TRACK_AUDIO: u64 = 2
+
 fn read_vint(input: Bytes, at: u64, limit: u64, max_width: u64) -> Result[Vint, Error] {
     if at == limit {
         return Error(Truncated)

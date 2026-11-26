@@ -8,6 +8,7 @@ std = { major = 1 }
 media_bits = { major = 1, path = "../media_bits" }
 
 [sources]
+"track.hirsel" = "track"
 "ogg.hirsel" = "ogg"
 "opus.hirsel" = "opus"
 "mp4.hirsel" = "mp4"

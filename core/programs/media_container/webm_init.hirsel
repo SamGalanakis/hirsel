@@ -1,6 +1,6 @@
 pub type TrackInfo {
     number: u64,
-    kind: u64,
+    kind: track.TrackKind,
     default_duration: u64,
     codec_delay: u64,
     seek_preroll: u64
@@ -12,8 +12,32 @@ pub type SegmentInfo {
     declared_end: Option[u64]
 }
 
+fn webm_float(input: Bytes, e: Element) -> Result[f64, Error] {
+    let n = e.next - e.body
+    let value = if n == 4 {
+        let single = float.from_bits32(list.word_be(input, e.body))
+        float.widen(single)
+    } else if n == 8 {
+        float.from_bits64(list.word_be(input, e.body))
+    } else {
+        return Error(InvalidElement)
+    }
+    if !float.is_finite(value) || float.lt(value, 0.0) {
+        return Error(InvalidElement)
+    }
+    Ok(value)
+}
+
 fn track_info(input: Bytes, entry: Element, receive: scoped fn(TrackInfo, Bytes, Bytes)) -> Result[(), Error] {
-    let mut info = TrackInfo(number: 0, kind: 0, default_duration: 0, codec_delay: 0, seek_preroll: 0)
+    let mut number = 0u64
+    let mut kind_number = 0u64
+    let mut default_duration = 0u64
+    let mut codec_delay = 0u64
+    let mut seek_preroll = 0u64
+    let mut width = 0u64
+    let mut height = 0u64
+    let mut channels = 0u64
+    let mut sample_rate: Option[f64] = None
     let mut codec_lo = 0u64
     let mut codec_hi = 0u64
     let mut private_lo = 0u64
@@ -26,19 +50,19 @@ fn track_info(input: Bytes, entry: Element, receive: scoped fn(TrackInfo, Bytes,
         }
         match e.id {
             0xd7 => {
-                info.number = uint(input, e.body, e.next)?
+                number = uint(input, e.body, e.next)?
             },
             0x83 => {
-                info.kind = uint(input, e.body, e.next)?
+                kind_number = uint(input, e.body, e.next)?
             },
             0x23e383 => {
-                info.default_duration = uint(input, e.body, e.next)?
+                default_duration = uint(input, e.body, e.next)?
             },
             0x56aa => {
-                info.codec_delay = uint(input, e.body, e.next)?
+                codec_delay = uint(input, e.body, e.next)?
             },
             0x56bb => {
-                info.seek_preroll = uint(input, e.body, e.next)?
+                seek_preroll = uint(input, e.body, e.next)?
             },
             0x86 => {
                 codec_lo = e.body
@@ -48,13 +72,68 @@ fn track_info(input: Bytes, entry: Element, receive: scoped fn(TrackInfo, Bytes,
                 private_lo = e.body
                 private_hi = e.next
             },
+            0xe0 => {
+                let mut cursor = e.body
+                while cursor < e.next {
+                    let b = read_element(input, cursor, e.next)?
+                    if !b.known_size {
+                        return Error(InvalidTrack)
+                    }
+                    match b.id {
+                        0xb0 => {
+                            width = uint(input, b.body, b.next)?
+                        },
+                        0xba => {
+                            height = uint(input, b.body, b.next)?
+                        },
+                        _ => {},
+                    }
+                    cursor = b.next
+                }
+            },
+            0xe1 => {
+                channels = 1
+                sample_rate = Some(8000.0)
+                let mut output_rate: Option[f64] = None
+                let mut cursor = e.body
+                while cursor < e.next {
+                    let b = read_element(input, cursor, e.next)?
+                    if !b.known_size {
+                        return Error(InvalidTrack)
+                    }
+                    match b.id {
+                        0xb5 => {
+                            sample_rate = Some(webm_float(input, b)?)
+                        },
+                        0x78b5 => {
+                            output_rate = Some(webm_float(input, b)?)
+                        },
+                        0x9f => {
+                            channels = uint(input, b.body, b.next)?
+                        },
+                        _ => {},
+                    }
+                    cursor = b.next
+                }
+                if let Some(rate) = output_rate {
+                    sample_rate = Some(rate)
+                }
+            },
             _ => {},
         }
         at = e.next
     }
-    if info.number == 0 || info.kind == 0 || codec_lo == codec_hi {
+    if number == 0 || kind_number == 0 || codec_lo == codec_hi {
         return Error(InvalidTrack)
     }
+    let kind: track.TrackKind = if kind_number == TRACK_VIDEO {
+        Video(width: width, height: height, rotation: None, hdr: track.empty_hdr())
+    } else if kind_number == TRACK_AUDIO {
+        Audio(channels: channels, sample_rate: sample_rate)
+    } else {
+        Other(kind_number)
+    }
+    let info = TrackInfo(number: number, kind: kind, default_duration: default_duration, codec_delay: codec_delay, seek_preroll: seek_preroll)
     receive(info, list.slice(input, codec_lo, codec_hi), list.slice(input, private_lo, private_hi))
     Ok(())
 }

@@ -17,7 +17,7 @@ fn check_presentation(edit: bool, track_ticks: u64, microseconds: u64) waits {
         }
         Ok(take raw)
     }))
-    let (t, _) = result.unwrap(mp4.vod_track(vod, 0))
+    let t = result.unwrap(mp4.vod_track(vod, 0))
     let m = mp4.vod_info(vod)
     if t.media_duration != 1536 || t.presentation_duration != track_ticks || m.duration != 126 || m.presentation_duration_us != microseconds {
         fail("presentation duration must use track ticks and edit intervals")

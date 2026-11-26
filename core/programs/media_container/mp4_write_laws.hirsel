@@ -31,8 +31,11 @@ fn written_vod(payload: u64, base: u64, expected_header: u64) waits {
         }
         Ok(take raw)
     }))
-    let (track, _) = result.unwrap(mp4.vod_track(movie, 0))
-    if track.sample_count != 3 || track.decode_duration != 1536 || track.rotation != Some(90) {
+    let track = result.unwrap(mp4.vod_track(movie, 0))
+    let Video(rotation: rotation, ..) = track.kind else {
+        fail("muxed track kind")
+    }
+    if track.sample_count != 3 || track.decode_duration != 1536 || rotation != Some(90) {
         fail("muxed track timing or display matrix")
     }
     let offsets: Inline[u64, 3] =[0, 4, 7]

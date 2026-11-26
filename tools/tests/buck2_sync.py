@@ -144,7 +144,7 @@ class CargoUnits(unittest.TestCase):
             with patch.dict('os.environ', XDG_CACHE_HOME=str(scratch / 'cache')), \
                  patch('cargo_units.rust_environment.environment', return_value={
                      'CARGO': 'cargo', 'CARGO_HOME': str(cargo_home)}), \
-                 patch('cargo_units.subprocess.run', side_effect=cargo) as queries:
+                 patch('cargo_units.rust_environment.run_offline', side_effect=cargo) as queries:
                 Resolution(roots[0], metadata[0])
                 self.assertEqual(queries.call_count, 2)
                 warm = Resolution(roots[1], metadata[1])
@@ -196,7 +196,7 @@ class CargoUnits(unittest.TestCase):
             with patch.dict('os.environ', XDG_CACHE_HOME=str(root / 'cache')), \
                  patch('cargo_units.rust_environment.environment', return_value={
                      'CARGO': 'cargo', 'CARGO_HOME': str(root / 'cargo-home')}), \
-                 patch('cargo_units.subprocess.run', side_effect=graph):
+                 patch('cargo_units.rust_environment.run_offline', side_effect=graph):
                 resolution = Resolution(root, meta)
             systems = [u for u in resolution.units.values() if u['pkg_id'] == 'system']
             self.assertEqual(len(systems), 2)

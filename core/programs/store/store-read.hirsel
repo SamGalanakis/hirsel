@@ -755,6 +755,103 @@ pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K,
     Ok(Some((take j, take k, take value)))
 }
 
+pub opaque scoped type I8Entries[K] {
+    cursor: Option[CollectionCursor],
+    reads: View[core.Log[Read]],
+    low: Bytes,
+    high: Bytes,
+    decoder: I8EntryDecoder[K]
+}
+
+type I8EntryDecoder[K] {
+    id: u32,
+    primary: std.codec.Key[K],
+    deferred_key: bool,
+    schema: u16
+}
+
+/// Borrow the current List[i8] encoding of an unbounded Many index on ().
+/// An index with other codecs or an older payload reader uses entries instead.
+pub fn i8_entries[K, V](tx: Tx, ix: Index[(), K, V, List[i8]]) -> Result[Option[I8Entries[K]], Error] in tx {
+    check_index_read(tx, ix)?
+    let Some(payload) = view ix.payload else {
+        return Ok(None)
+    }
+    let unit: std.codec.Key[()] = std.codec.key_of()
+    let Some(unit_revision) = std.codec.key_revision(unit) else {
+        return Ok(None)
+    }
+    let codes: std.codec.Codec[List[i8]] = std.codec.of_list()
+    let Some(code_revision) = std.codec.revision(codes) else {
+        return Ok(None)
+    }
+    if ix.kind != Many || list.len(payload.older) != 1 || std.codec.key_revision(ix.key) != Some(take unit_revision) || std.codec.revision(payload.codec) != Some(take code_revision) {
+        return Ok(None)
+    }
+    let deferred_key = if let Some(take numeric) = std.codec.key_revision(std.codec.key_u64()) {
+        std.codec.key_revision(ix.primary) == Some(take numeric)
+    } else {
+        false
+    }
+    let low = prefix(ix.id)?
+    let high = prefix(ix.id + 1)?
+    let tree = transaction_collection_pages(tx)?
+    let cursor = collection_cursor(tree, ix.id, low, high, false)?
+    let decoder = I8EntryDecoder(id: ix.id, primary: ix.primary, deferred_key: deferred_key, schema: payload.current)
+    Ok(Some(I8Entries(cursor: take cursor, reads: tx.reads, low: take low, high: take high, decoder: decoder)))
+}
+
+/// Visit a code in place. A custom key decoder runs before the payload is
+/// examined. For the built-in u64 codec the validated eight bytes suffice
+/// until the visitor needs the key.
+pub fn next_i8_entry[K, T](mut r: I8Entries[K], visit: scoped[view] fn(take Option[K], Bytes, Bytes) -> T) -> Result[Option[T], Error] {
+    if let Some(mut cursor) = r.cursor {
+        let step = next_i8_page(mut cursor.walk, cursor.leading, r.decoder, r.reads, r.low, r.high, visit)
+        if let Some(take advanced) = take step {
+            let (take boundary, take value) = advanced?
+            r.low = take boundary
+            return Ok(Some(value?))
+        }
+    }
+    note_index_step(r.reads, mut r.low, r.high, None)?
+    Ok(None)
+}
+
+fn next_i8_page[K, T](mut walk: std.page.Cursor, leading: Bytes, decoder: I8EntryDecoder[K], reads: View[core.Log[Read]], low: Bytes, high: Bytes, visit: scoped[view] fn(take Option[K], Bytes, Bytes) -> T) -> Option[Result[(Bytes, Result[T, Error]), Error]] {
+    std.page.cursor_read(mut walk, scoped fn(key: Bytes, raw: Bytes) -> Result[(Bytes, Result[T, Error]), Error] {
+        let full_key = collection_row_key(leading, key)
+        let mut boundary: Bytes = clone(low)
+        note_index_step(reads, mut boundary, high, Some(view full_key))?
+        let value: Result[T, Error] = visit_i8_code(decoder, key, raw, visit)
+        Ok((take boundary, take value))
+    })
+}
+
+fn visit_i8_code[K, T](r: I8EntryDecoder[K], key: Bytes, raw: Bytes, visit: scoped[view] fn(take Option[K], Bytes, Bytes) -> T) -> Result[T, Error] {
+    let width = list.len(key)
+    let primary: Option[K] = if r.deferred_key {
+        if width < 8 {
+            return Error(Decode(Truncated(0)))
+        }
+        if width > 8 {
+            return Error(Decode(Trailing(8)))
+        }
+        None
+    } else {
+        Some(decoded(std.codec.decode_key(r.primary, key))?)
+    }
+    let mut at = 0u64
+    let schema = decoded(std.codec.take_u16(raw, mut at))?
+    if schema != r.schema {
+        return Error(Stale(r.id))
+    }
+    let length = decoded(std.codec.take_count(raw, mut at, 1))?
+    if at + length != list.len(raw) {
+        return Error(Decode(Trailing(at + length)))
+    }
+    Ok(visit(take primary, key, list.slice(raw, at, at + length)))
+}
+
 /// The main-branch snapshot recovered by a read-only open.
 pub opaque type ReadOnly: shareable + send {
     snapshot: Snapshot

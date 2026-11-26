@@ -5,6 +5,7 @@ moq@1/laws/dedup_and_switchover src=d725ecbba2352da2 sig=754759e6707c540d run=c2
 moq@1/laws/delivery_timeouts_start_and_stop_apart src=b7df3177d27325d5 sig=551c7c4d08f4f994 run=c2c0c6612d4cbb79 bug=794668d87f32bfd5 oracle=b9aed96b9dc5e124 rows=pending
 moq@1/laws/one_upstream_per_track src=dfa00e1a0e939c4b sig=046ea03799c06ce3 run=c2c0c6612d4cbb79 bug=2b6f0ea71843f863 oracle=1dbbbef1c5feaf12 rows=pending
 moq@1/laws/priority_order src=ff34a8858c54f420 sig=cff7430ee6a8564f run=c2c0c6612d4cbb79 bug=075d69650f947f6f oracle=6749c8065d032e08 rows=pending
+moq@1/laws/relay_never_sees_plaintext src=34b57e9bd1ebb14b sig=42f8683d2ceba5dc run=c2c0c6612d4cbb79 bug=f04ae2e1650b024e oracle=451446b511c5db7b rows=pending
 moq@1/laws/relay_preserves_stream_order src=a1314bd08ca45036 sig=a509da5d66758365 run=c2c0c6612d4cbb79 bug=db6460d6d5956891 oracle=c3b7cbd2d7659e67 rows=pending
 moq@1/laws/session_native_webtransport_and_refusals src=895535ca724b2add sig=4497602823096f20 run=c2c0c6612d4cbb79 bug=c1e7ce9d9d177de4 oracle=201cc178352a46c6 rows=pending
 moq@1/laws/slow_subscriber_costs_only_itself src=bc0fcd2ec3a13815 sig=69559ca42b211db3 run=c2c0c6612d4cbb79 bug=929f78b21e03ec6f oracle=78e8c0181ce2eff1 rows=pending

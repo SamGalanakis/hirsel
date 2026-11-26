@@ -1,0 +1,205 @@
+// MS5: Per-object SFrame encryption/decryption for MoQ publishers and subscribers,
+// and relay memory inspection helpers for law M10 (relay_never_sees_plaintext).
+/// Canonical SFrame associated data (AAD) binding an object's routing metadata:
+/// track namespace and name, group, subgroup, object id, delivery mode, publisher priority,
+/// status, and properties. Any relay tampering with these fields fails SFrame authentication.
+pub fn object_metadata(o: Object) -> Bytes {
+    let mut out: Bytes = list.with_capacity(64 + list.len(o.properties))
+    let _ = codec.write_track_name(o.track, mut out)
+    let _ = codec.write_vi64(o.group, mut out)
+    let eff_sg = match o.mode {
+        Subgroup => o.subgroup,
+        Datagram => 0u64,
+    }
+    let _ = codec.write_vi64(eff_sg, mut out)
+    let _ = codec.write_vi64(o.id, mut out)
+    let mode_b: u8 = match o.mode {
+        Subgroup => 1,
+        Datagram => 2,
+    }
+    list.push(mut out, mode_b)
+    list.push(mut out, o.publisher_priority)
+    let st_b: u8 = match o.status {
+        Normal => 0,
+        DoesNotExist => 1,
+        EndOfGroup => 3,
+        EndOfTrack => 4,
+    }
+    list.push(mut out, st_b)
+    let _ = codec.write_vi64(list.len(o.properties), mut out)
+    list.append(mut out, o.properties)
+    take out
+}
+
+/// Seal one MoQ object's payload with SFrame using explicit associated data `metadata`.
+/// Routing headers and properties stay clear for relay routing, caching, and fan-out.
+pub fn seal_object(mut sender: sframe.Sender, o: Object, metadata: Bytes) -> Result[(Object, sframe.Sealed), sframe.SframeError] {
+    let plen = list.len(o.payload)
+    let mut out: Bytes = list.with_capacity(plen + 64)
+    let sealed = sframe.seal(mut sender, metadata, o.payload, mut out)?
+    let out_obj = Object(
+        track: clone(o.track),
+        group: o.group,
+        subgroup: o.subgroup,
+        id: o.id,
+        mode: o.mode,
+        publisher_priority: o.publisher_priority,
+        status: o.status,
+        properties: clone(o.properties),
+        payload: shared.new(take out),
+    )
+    Ok((take out_obj, sealed))
+}
+
+/// Seal one MoQ object's payload with SFrame, binding `object_metadata(o)` as AAD.
+pub fn seal_object_bound(mut sender: sframe.Sender, o: Object) -> Result[(Object, sframe.Sealed), sframe.SframeError] {
+    let aad = object_metadata(o)
+    seal_object(mut sender, o, aad)
+}
+
+/// Open one SFrame-encrypted MoQ object's payload with explicit associated data `metadata`.
+pub fn open_object(mut receiver: sframe.Receiver, o: Object, metadata: Bytes) -> Result[(Object, sframe.Opened), sframe.OpenError] {
+    let clen = list.len(o.payload)
+    let mut out: Bytes = list.with_capacity(clen)
+    let opened = sframe.open(mut receiver, metadata, o.payload, mut out)?
+    let out_obj = Object(
+        track: clone(o.track),
+        group: o.group,
+        subgroup: o.subgroup,
+        id: o.id,
+        mode: o.mode,
+        publisher_priority: o.publisher_priority,
+        status: o.status,
+        properties: clone(o.properties),
+        payload: shared.new(take out),
+    )
+    Ok((take out_obj, opened))
+}
+
+/// Open one SFrame-encrypted MoQ object's payload, verifying `object_metadata(o)` as AAD.
+pub fn open_object_bound(mut receiver: sframe.Receiver, o: Object) -> Result[(Object, sframe.Opened), sframe.OpenError] {
+    let aad = object_metadata(o)
+    open_object(mut receiver, o, aad)
+}
+
+/// Exact byte-subsequence search for M10 relay opacity verification.
+pub fn bytes_contain(haystack: Bytes, needle: Bytes) -> bool {
+    let nlen = list.len(needle)
+    let hlen = list.len(haystack)
+    if nlen == 0 {
+        return true
+    }
+    if nlen > hlen {
+        return false
+    }
+    let last = hlen - nlen + 1
+    for i in 0u64 .. last {
+        let mut ok = true
+        for j in 0u64 .. nlen {
+            if haystack[i + j] != needle[j] {
+                ok = false
+                break
+            }
+        }
+        if ok {
+            return true
+        }
+    }
+    false
+}
+
+fn session_contains_bytes(s: Session, needle: Bytes) -> bool {
+    if bytes_contain(s.peer_control_buf, needle) || bytes_contain(s.setup_authority, needle) || bytes_contain(s.setup_path, needle) {
+        return true
+    }
+    if let Some(tok) = s.setup_token {
+        if bytes_contain(tok, needle) {
+            return true
+        }
+    }
+    for r in s.requests {
+        if bytes_contain(r.rx_buf, needle) {
+            return true
+        }
+    }
+    for h in s.peer_bidi_heads {
+        if bytes_contain(h.buf, needle) {
+            return true
+        }
+    }
+    for h in s.uni_heads {
+        if bytes_contain(h.buf, needle) {
+            return true
+        }
+    }
+    for e in s.early_streams {
+        if bytes_contain(e.buf, needle) {
+            return true
+        }
+    }
+    for sg in s.rx_subgroups {
+        if bytes_contain(sg.buf, needle) {
+            return true
+        }
+    }
+    for f in s.rx_fetches {
+        if bytes_contain(f.buf, needle) {
+            return true
+        }
+    }
+    for g in s.guards {
+        for so in g.seen {
+            if bytes_contain(so.payload, needle) || bytes_contain(so.properties, needle) {
+                return true
+            }
+        }
+    }
+    for o in s.outgoing {
+        for ch in o.chunks {
+            match ch {
+                Raw(b) => {
+                    if bytes_contain(b, needle) {
+                        return true
+                    }
+                },
+                SharedChunk(sb) => {
+                    if bytes_contain(sb, needle) {
+                        return true
+                    }
+                },
+            }
+        }
+    }
+    false
+}
+
+/// Scan every byte buffer held by `r` (its cache payloads/properties and every session's
+/// control, request, early, subgroup, fetch, guard, and outgoing buffers) for `needle` (M10).
+pub fn relay_contains_bytes(r: Relay, needle: Bytes) -> bool {
+    for tr in r.cache.tracks {
+        for cg in tr.groups {
+            for co in cg.objects {
+                if bytes_contain(co.obj.payload, needle) || bytes_contain(co.obj.properties, needle) {
+                    return true
+                }
+            }
+        }
+    }
+    for rs in r.sessions {
+        if session_contains_bytes(rs.sess, needle) {
+            return true
+        }
+    }
+    false
+}
+
+/// Total number of cached objects held across all tenant-scoped tracks in `r`.
+pub fn relay_cached_object_count(r: Relay) -> u64 {
+    let mut n = 0u64
+    for tr in r.cache.tracks {
+        for cg in tr.groups {
+            n += list.len(cg.objects)
+        }
+    }
+    n
+}

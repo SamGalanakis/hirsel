@@ -743,3 +743,81 @@ fn open_page_collection(mut rows: PageRange, key: Bytes, root: Arc[std.page.Page
     list.push(mut rows.active, std.page.cursor_open_bounded(root, start, rows.inclusive, rows.reverse, take stop))
     Ok(())
 }
+
+// Keep the first two rows inline. The count's high bit records the first
+// append whose full encoded key is not above the preceding one.
+const DATA_ROWS_UNORDERED: u64 = 1u64 << 63
+
+type DataRows: shareable + send {
+    count_word: u64,
+    first: Inline[DataOp, 2],
+    rest: List[DataOp]
+}
+
+fn new_data_rows() -> DataRows {
+    let first: Inline[DataOp, 2] =[
+        DataOp(key: list.new(), value: None, trim: None, prior: None),
+        DataOp(key: list.new(), value: None, trim: None, prior: None),
+    ]
+    DataRows(count_word: 0, first: take first, rest: list.new())
+}
+
+fn data_row_count(rows: DataRows) -> u64 {
+    rows.count_word & (DATA_ROWS_UNORDERED - 1)
+}
+
+fn rows_ascending(rows: DataRows) -> bool {
+    rows.count_word & DATA_ROWS_UNORDERED == 0
+}
+
+fn data_row(rows: DataRows, slot: u64) -> View[DataOp] in rows {
+    if slot < 2 {
+        view rows.first[slot]
+    } else {
+        view rows.rest[slot - 2]
+    }
+}
+
+fn push_data_row(mut rows: DataRows, take row: DataOp) {
+    let n = data_row_count(rows)
+    let inversion = n > 0 && rows_ascending(rows) && list.compare_bytes(data_row(rows, n - 1).key, row.key) != Less
+    if n < 2 {
+        rows.first[n] = take row
+    } else {
+        list.push(mut rows.rest, take row)
+    }
+    if inversion {
+        rows.count_word = rows.count_word | DATA_ROWS_UNORDERED
+    }
+    rows.count_word += 1
+}
+
+fn op_slot(ops: DataOps, key: Bytes) -> Option[u64] {
+    let n = data_row_count(ops.rows)
+    if n > SCANNED_OPS {
+        if !rows_ascending(ops.rows) {
+            return option.copied(map.get(ops.slots, key))
+        }
+        let mut low = 0u64
+        let mut high = n
+        while low < high {
+            let mid = low + (high - low) / 2
+            match list.compare_bytes(data_row(ops.rows, mid).key, key) {
+                Less => {
+                    low = mid + 1
+                },
+                Equal => return Some(mid),
+                Greater => {
+                    high = mid
+                },
+            }
+        }
+        return None
+    }
+    for slot in 0u64 .. n {
+        if data_row(ops.rows, slot).key == key {
+            return Some(slot)
+        }
+    }
+    None
+}

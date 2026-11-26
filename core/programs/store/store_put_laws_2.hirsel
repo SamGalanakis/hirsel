@@ -503,3 +503,75 @@ fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
     }
     close(take db)
 }
+
+// Format 10 COMMIT, three zero-prior deletes in collections 1 and 2.
+// The first key is a cell. The checksum uses libxxhash over the binding,
+// frame header and payload.
+fn cell_and_table_frame() -> bool {
+    let expected: Inline[u8, 97] =[17, 0, 1, 0, 81, 0, 0, 0, 133, 115, 103, 32, 151, 58, 99, 70, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 0, 0, 0, 2, 4, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 12, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0]
+    let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 1), at: 30, seed: 0)
+    let mut cells: Map[u32, CellEdit] = map.new()
+    map.insert(mut cells, 1, CellDelete)
+    for offset in 0u64 .. 2 {
+        let mut ops = new_data_rows()
+        if offset == 0 {
+            seal_cell_edits(mut ops, cells)
+        }
+        for k in 1u64 .. 3 {
+            let key = result.unwrap(logical_key(2, key_word(k)))
+            push_data_row(mut ops, DataOp(key: take key, value: None, trim: None, prior: None))
+        }
+        if offset == 1 {
+            seal_cell_edits(mut ops, cells)
+        }
+        let raw = result.unwrap(encode_commit(ci, mut ops, 1, 72))
+        if list.len(raw) != 97 {
+            return false
+        }
+        for i in 0u64 .. 97 {
+            if raw[i] != expected[i] {
+                return false
+            }
+        }
+    }
+    true
+}
+
+// Format 10 COMMIT, two table puts followed by a trim of a staged log append.
+// Trim sealing builds the rows in the opposite collection order.
+@test
+fn trim_and_table_frame(c: Clock) -> Result[(), Error] waits {
+    let expected: Inline[u8, 129] =[17, 0, 1, 0, 113, 0, 0, 0, 145, 76, 223, 3, 14, 125, 62, 6, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3, 0, 0, 0, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 1, 12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 22, 3, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+    let mut db = test_db(c, 1048576)
+    let mut schema = declare(db, Migrate)?
+    let rows = declare_table(mut schema, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = finish(mut schema, take rows)?
+    let events = declare_log(mut schema, "events", std.codec.of_bytes(), Forever)?
+    let _ = seal(mut db, take schema)?
+    let ci = CallInfo(id: CallId(store: StoreId(hi: 1, lo: 2), branch: 0, version: 1), at: 30, seed: 0)
+    let reads: core.Log[Read] = log.new()
+    let issued: core.Cell[u64] = cell.new(0)
+    let keep: Option[fn(Error) -> bool] = None
+    let Prepared(take candidate) = draft_body(db, db.indexes, db.heads[0].roots, ci, keep, reads, issued, None, map.new(), scoped fn(mut tx: Tx) -> Result[(), Error] {
+        let _ = append(mut tx, events, key_word(3))?
+        trim_before(mut tx, events, 1)?
+        put_bytes(mut tx, 1, key_word(1), key_word(11))?
+        put_bytes(mut tx, 1, key_word(2), key_word(22))
+    }) else {
+        return Error(Missing("trim and table draft"))
+    }
+    let mut staged = take candidate
+    if let Error(take problem) = replace(mut staged.outcome, Ok(())) {
+        return Error(take problem)
+    }
+    let raw = capacity(encode_commit(ci, mut staged.ops, 1, 72))?
+    if list.len(raw) != 129 {
+        return Error(Missing("trim and table frame length"))
+    }
+    for i in 0u64 .. 129 {
+        if raw[i] != expected[i] {
+            return Error(Missing("trim and table frame differs from Format 10"))
+        }
+    }
+    Ok(())
+}

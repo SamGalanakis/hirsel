@@ -51,7 +51,7 @@ fn tiered_wait_for_fold(attempt: core.Cell[TieredTouchSet], base: PageTree, oper
     let Some(overlays) = view base.replay else {
         return Ok(())
     }
-    for slot in 0u64 .. operations.count {
+    for slot in 0u64 .. data_row_count(operations) {
         let op = ordered_row(operations, order, slot)
         let collection: u32 = list.word_be(op.key, 0)
         if let Some(_) = std.omap.get(overlays.collections, collection) {
@@ -68,11 +68,11 @@ fn prepare_tiered_writes(attempt: core.Cell[TieredTouchSet], visible: Map[Tiered
     tiered_wait_for_fold(attempt, base, operations, order)?
     let mut staged = share_page_tree(base)
     let mut deltas: List[Option[TieredDataDelta]] = list.new()
-    capacity(list.try_reserve(mut deltas, operations.count))?
+    capacity(list.try_reserve(mut deltas, data_row_count(operations)))?
     let inline = staged.inline
     let mut draw = first_stamp
     let mut touched: List[PlannedCollection] = list.new()
-    for slot in 0u64 .. operations.count {
+    for slot in 0u64 .. data_row_count(operations) {
         let op = ordered_row(operations, order, slot)
         let id = list.slice(op.key, 0, 4)
         let Some(descriptor) = std.page.lookup(base.root, id) else {
@@ -169,7 +169,7 @@ fn planned_freed(base: PageTree, staged: PageTree, touched: List[PlannedCollecti
 }
 
 fn plan_tiered_edits(base: PageTree, attempt: core.Cell[TieredTouchSet], visible: Map[TieredCacheKey, Arc[TieredFrame]], ops: DataRows, order: DataOrder, first: u64) -> Result[Option[TieredWritePlan], Error] {
-    for slot in 0u64 .. ops.count {
+    for slot in 0u64 .. data_row_count(ops) {
         if tiered_data_key(base, data_row(ops, slot).key) {
             return Ok(Some(prepare_tiered_writes(attempt, visible, base, ops, order, first)?))
         }

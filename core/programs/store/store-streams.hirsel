@@ -779,7 +779,7 @@ fn next_bytes(mut rows: PageRange) -> Result[Option[(Bytes, Arc[Bytes])], Error]
 fn stream_live(db: Db, streams: PageTree, ops: DataOps) -> Result[u64, Capacity] {
     let retained = retaining(db)
     let mut live_bytes = db.resident
-    for slot in 0u64 .. ops.rows.count {
+    for slot in 0u64 .. data_row_count(ops.rows) {
         let operation = data_row(ops.rows, slot)
         let k = operation.key
         if let Some(raw) = operation.value {

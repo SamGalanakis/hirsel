@@ -303,11 +303,11 @@ fn recorded_reply(commit: JournalCommit, stream: StreamKey) -> Option[View[Bytes
 
 // The frame records data rows in key order; the re-run's rows are sorted the same way.
 fn same_writes(rows: DataRows, committed: List[JournalOp]) -> Result[bool, Error] {
-    if rows.count != list.len(committed) {
+    if data_row_count(rows) != list.len(committed) {
         return Ok(false)
     }
     let order = capacity(data_order(rows))?
-    for slot_order in 0u64 .. rows.count {
+    for slot_order in 0u64 .. data_row_count(rows) {
         let op = ordered_row(rows, order, slot_order)
         let other = view committed[slot_order]
         if op.key != other.key {

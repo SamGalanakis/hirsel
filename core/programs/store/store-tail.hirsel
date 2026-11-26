@@ -118,7 +118,7 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
     let high = prefix(source.id + 1)?
     let mut out = change_output(Some(l))
     if low < high {
-        let after = if tx.ops.rows.count == 0 && list.len(tx.below) == 0 {
+        let after = if data_row_count(tx.ops.rows) == 0 && list.len(tx.below) == 0 {
             share_page_tree(tx.roots.collections)
         } else {
             transaction_collection_pages(tx)?

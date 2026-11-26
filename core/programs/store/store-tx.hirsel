@@ -117,13 +117,13 @@ fn advance_tx_view(mut v: TxView, rows: DataRows, memory_only: bool) -> Result[(
             materialize_row(mut v.tree, data_row(rows, slot), memory_only, v.first, mut v.draw)?
         }
     }
-    for slot in v.row .. rows.count {
+    for slot in v.row .. data_row_count(rows) {
         if v.popped != Some(slot) {
             materialize_row(mut v.tree, data_row(rows, slot), memory_only, v.first, mut v.draw)?
         }
     }
     v.popped = None
-    v.row = rows.count
+    v.row = data_row_count(rows)
     Ok(())
 }
 
@@ -240,7 +240,8 @@ fn fold_ops(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, cache: Op
     for (id, state) in logs {
         map.insert(mut ops.logs, id, state)
     }
-    let DataRows(count: staged, first: take first, rest: take rest) = take rows
+    let staged = data_row_count(rows)
+    let DataRows(first: take first, rest: take rest, ..) = take rows
     let mut head = take first
     // Moved, not copied: the frame-tail key keeps the spare room it was made with.
     for slot in 0u64 .. order.min(staged, 2) {
@@ -279,12 +280,12 @@ fn install[R, E](mut tx: Tx, take d: Drafted[R, E]) -> Result[R, E] {
     if let Ok(_) = result {
         tx.roots = take roots
         let layers = list.len(tx.below)
-        let complete = completed_tx_view(cell.into_inner(take cached), layers + 1, ops.rows.count)
+        let complete = completed_tx_view(cell.into_inner(take cached), layers + 1, data_row_count(ops.rows))
         if let Some(take ready) = take complete {
             fold_ops(mut tx.ops, tx.below, false, None, take ops)
             let mut view_tree = take ready
             view_tree.layer = layers
-            view_tree.row = tx.ops.rows.count
+            view_tree.row = data_row_count(tx.ops.rows)
             cell.set(tx.view_tree, Some(take view_tree))
         } else {
             fold_ops(mut tx.ops, tx.below, false, Some(view tx.view_tree), take ops)
@@ -367,16 +368,21 @@ fn save_data_op(mut ops: DataOps, below: List[Arc[Staged]], streams: bool, mut n
     if !beneath {
         next_slot += 1
     }
-    let slot_order = ops.rows.count
-    if slot_order == SCANNED_OPS {
-        for earlier in 0u64 .. slot_order {
-            map.insert(mut ops.slots, clone(data_row(ops.rows, earlier).key), earlier)
-        }
-    }
-    if slot_order >= SCANNED_OPS {
+    let slot_order = data_row_count(ops.rows)
+    let hashed = map.len(ops.slots) != 0
+    if hashed {
         map.insert(mut ops.slots, clone(key), slot_order)
     }
     push_data_row(mut ops.rows, DataOp(key: take key, value: take value, trim: None, prior: prior))
+    if !hashed && slot_order >= SCANNED_OPS && !rows_ascending(ops.rows) {
+        // Match the final capacity of the old doubling sequence without
+        // growing the map while the long ascending prefix is already held.
+        let bits = 64u32 - int.leading_zeros(slot_order)
+        map.reserve(mut ops.slots, 1u64 << int.widen(bits))
+        for slot in 0u64 .. slot_order + 1 {
+            map.insert(mut ops.slots, clone(data_row(ops.rows, slot).key), slot)
+        }
+    }
     if beneath {
         (OPEN_FRAME_TAIL, None)
     } else {
@@ -543,7 +549,7 @@ fn stage_delete(mut tx: Tx, take p: Bytes, refund: DataRefund, popped: bool) -> 
         if let None = replaced {
             // The primary is already absent from the working tree. Index
             // removals staged before it may still need to be applied.
-            cell.with(tx.view_tree, tx.ops.rows.count - 1, fn(mut state: Option[TxView], take slot: u64) -> () {
+            cell.with(tx.view_tree, data_row_count(tx.ops.rows) - 1, fn(mut state: Option[TxView], take slot: u64) -> () {
                 if let Some(mut cached) = state {
                     if cached.row == slot {
                         cached.row += 1

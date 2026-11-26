@@ -434,41 +434,8 @@ fn staged_bytes(value: StagedValue) -> View[Bytes] in value {
     }
 }
 
-// Keep up to two operations in the draft. Larger drafts spill subsequent
-// operations in insertion order.
-type DataRows: shareable + send {
-    count: u64,
-    first: Inline[DataOp, 2],
-    rest: List[DataOp]
-}
-
-fn new_data_rows() -> DataRows {
-    let first: Inline[DataOp, 2] =[
-        DataOp(key: list.new(), value: None, trim: None, prior: None),
-        DataOp(key: list.new(), value: None, trim: None, prior: None),
-    ]
-    DataRows(count: 0, first: take first, rest: list.new())
-}
-
-fn data_row(rows: DataRows, slot: u64) -> View[DataOp] in rows {
-    if slot < 2 {
-        view rows.first[slot]
-    } else {
-        view rows.rest[slot - 2]
-    }
-}
-
-fn push_data_row(mut rows: DataRows, take row: DataOp) {
-    if rows.count < 2 {
-        rows.first[rows.count] = take row
-    } else {
-        list.push(mut rows.rest, take row)
-    }
-    rows.count += 1
-}
-
-// A commit's rows by key. Up to SCANNED_OPS rows are found by scanning; the
-// slot map is built only when a commit stages more.
+// Small drafts scan. Larger ascending drafts search the rows directly.
+// Larger unordered drafts use the slot map.
 type DataOps: shareable + send {
     rows: DataRows,
     slots: Map[Bytes, u64],
@@ -495,19 +462,6 @@ type Staged: shareable + send {
     ops: DataOps,
     stream_ops: DataOps,
     call: Option[CallSection]
-}
-
-fn op_slot(ops: DataOps, key: Bytes) -> Option[u64] {
-    let n = ops.rows.count
-    if n > SCANNED_OPS {
-        return option.copied(map.get(ops.slots, key))
-    }
-    for slot in 0u64 .. n {
-        if data_row(ops.rows, slot).key == key {
-            return Some(slot)
-        }
-    }
-    None
 }
 
 pub opaque scoped type Tx {
@@ -1290,7 +1244,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
                 Some(_) => true,
                 None => false
             }
-            if !keep || (tx.stream_ops.rows.count == 0 && !keyed_reply) {
+            if !keep || (data_row_count(tx.stream_ops.rows) == 0 && !keyed_reply) {
                 return RolledBack(Aborted(Undone(value: take a, ticket: None)))
             }
             // F2 keeps the streams and CALL writes with the old data roots.
@@ -1353,9 +1307,9 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         Some(_) => true,
         None => false
     }
-    let mut admits_rows = stream_edits.count != 0 || keyed_writes
+    let mut admits_rows = data_row_count(stream_edits) != 0 || keyed_writes
     if !admits_rows {
-        for slot in 0u64 .. operations.count {
+        for slot in 0u64 .. data_row_count(operations) {
             let edit = data_row(operations, slot)
             if let Some(_) = edit.value {
                 if tiered != None && tiered_data_key(roots.collections, edit.key) {
@@ -1727,7 +1681,7 @@ fn encode_stream_op(mut payload: Bytes, operation: DataOp, call: Option[View[Cal
 }
 
 fn stream_control_slot(ops: DataRows) -> Option[u64] {
-    for slot in 0u64 .. ops.count {
+    for slot in 0u64 .. data_row_count(ops) {
         if list.len(data_row(ops, slot).key) == 0u64 {
             return Some(slot)
         }
@@ -1739,7 +1693,7 @@ fn encode_stream_ops(mut payload: Bytes, ops: DataRows, stream_count: u64, call:
     le(mut payload, 1, 1)?
     le(mut payload, stream_count, 4)?
     let order = data_order(ops)?
-    for slot_order in 0u64 .. ops.count {
+    for slot_order in 0u64 .. data_row_count(ops) {
         let operation = ordered_row(ops, order, slot_order)
         if list.len(operation.key) != 0u64 {
             encode_stream_op(mut payload, operation, call, settlement)?

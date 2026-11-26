@@ -43,7 +43,7 @@ fn tx_tiered_staged(tx: Tx, only: Option[u32]) -> Result[std.omap.OMap[Bytes, Op
 }
 
 fn tx_tiered_stage_rows(tree: PageTree, rows: DataRows, only: Option[u32], mut ids: u64, mut staged: std.omap.OMap[Bytes, Option[Arc[Bytes]]]) -> Result[(), Error] {
-    for slot in 0u64 .. rows.count {
+    for slot in 0u64 .. data_row_count(rows) {
         let op = data_row(rows, slot)
         if let Some(_) = op.trim {
             continue

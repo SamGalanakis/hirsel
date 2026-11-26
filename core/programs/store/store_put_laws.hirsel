@@ -520,7 +520,7 @@ fn encode_sections(ci: CallInfo, mut ops: DataRows, streams: DataRows, call: Opt
 // libxxhash 0.8.2, including store/file/offset binding and head[0..8] + payload.
 // Wrong implementation caught: insertion order, duplicate ops, wrong check extent.
 pub fn law_frames(c: Clock) -> bool {
-    if !frame_boundary_points() {
+    if !frame_boundary_points() || !cell_and_table_frame() {
         return false
     }
     let mut db = raw_test_db(c, 1073741824)
@@ -529,7 +529,7 @@ pub fn law_frames(c: Clock) -> bool {
         put_bytes(mut tx, 1, key_word(1), key_word(11))?
         put_bytes(mut tx, 1, key_word(2), key_word(33))?
         let _ = delete_bytes(mut tx, 1, key_word(1))?
-        if tx.ops.rows.count != 2 {
+        if data_row_count(tx.ops.rows) != 2 {
             return Error(Foreign)
         }
         capacity(encode_commit(info(mut tx), mut tx.ops.rows, 1, 72))

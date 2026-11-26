@@ -13,14 +13,14 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], prior_stamp: Option[
         Some(draft) => keyed_frame_bytes(draft.edits),
         None => 0u64
     }
-    let data = ops.count != 0 || (streams.count == 0 && keyed_size == 0)
+    let data = data_row_count(ops) != 0 || (data_row_count(streams) == 0 && keyed_size == 0)
     let control = stream_control_slot(streams)
     let control_count = if let Some(_) = control {
         1u64
     } else {
         0u64
     }
-    let stream_count = streams.count - control_count
+    let stream_count = data_row_count(streams) - control_count
     let sections = (if data {
         1u64
     } else {
@@ -36,11 +36,11 @@ fn encode_frame(ci: CallInfo, base: Option[View[PageTree]], prior_stamp: Option[
         1u64
     }
     let mut size = 21 + 5 * sections + keyed_size
-    for slot in 0u64 .. ops.count {
+    for slot in 0u64 .. data_row_count(ops) {
         let operation = data_row(ops, slot)
         size += data_op_size(operation, false)
     }
-    for slot in 0u64 .. streams.count {
+    for slot in 0u64 .. data_row_count(streams) {
         let operation = data_row(streams, slot)
         size += data_op_size(operation, true)
         if let (Some(_), Some(record)) = (view operation.value, view call) {
@@ -183,7 +183,7 @@ fn decode_call_fields(file: String, raw: Bytes, mut at: u64) -> Result[(KeyedCal
 type DataOrder = InOrder | ReversePair | SortedSlots(List[u64])
 
 fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
-    let n = ops.count
+    let n = data_row_count(ops)
     if n < 2 {
         return Ok(InOrder)
     }
@@ -193,6 +193,9 @@ fn data_order(ops: DataRows) -> Result[DataOrder, Capacity] {
         } else {
             InOrder
         })
+    }
+    if rows_ascending(ops) {
+        return Ok(InOrder)
     }
     let mut slots: List[u64] = list.new()
     list.try_reserve(mut slots, n)?
@@ -227,8 +230,8 @@ fn encode_data_ops(mut payload: Bytes, base: Option[View[PageTree]], prior_stamp
         None => false,
     }
     le(mut payload, 0, 1)?
-    le(mut payload, ops.count, 4)?
-    for slot_order in 0u64 .. ops.count {
+    le(mut payload, data_row_count(ops), 4)?
+    for slot_order in 0u64 .. data_row_count(ops) {
         let op = ordered_row(ops, order, slot_order)
         let delta = match tiered {
             Some(slots) => slots[slot_order],

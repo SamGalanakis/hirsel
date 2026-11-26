@@ -6,7 +6,7 @@ fn prepare_edited_roots[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[
         return Ok(())
     }
     if let None = ran.keyed {
-        if ran.edits.count == 0 && ran.replies.count == 0 {
+        if data_row_count(ran.edits) == 0 && data_row_count(ran.replies) == 0 {
             return Ok(())
         }
     }
@@ -47,8 +47,8 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
     if let Some(_) = db.heads[i].following {
         return Ok(false)
     }
-    let data_count = ran.edits.count
-    let reply_count = ran.replies.count
+    let data_count = data_row_count(ran.edits)
+    let reply_count = data_row_count(ran.replies)
     if data_count + reply_count == 0 || (reply_count != 0 && data_count + reply_count != 1) {
         return Ok(false)
     }
@@ -88,7 +88,7 @@ fn prepare_direct_edit[R, A](mut db: Db, i: u64, mut ran: Ran[R, A]) -> Result[b
 fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, Capacity] {
     let inline = db.heads[i].roots.collections.inline
     // put_inline_unique takes no stamp above this bound; each path is far shorter than 512.
-    let rows = ran.edits.count
+    let rows = data_row_count(ran.edits)
     if ran.first_stamp == 0 || rows > 1024 || ran.first_stamp > 18446744073709551103u64 - 512 * rows {
         return Ok(false)
     }
@@ -111,7 +111,7 @@ fn direct_data_edits[R, A](mut db: Db, i: u64, ran: Ran[R, A]) -> Result[bool, C
         }
     }
     let mut stamps = ran.first_stamp
-    for slot in 0u64 .. ran.edits.count {
+    for slot in 0u64 .. data_row_count(ran.edits) {
         let op = data_row(ran.edits, slot)
         let Some(raw) = view op.value else {
             fail("store: a checked direct edit lost its value")
@@ -200,7 +200,7 @@ fn reserve_tiered_freed[R, A](mut db: Db, ran: Ran[R, A]) -> Option[StoreCapacit
 fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publication: Publication) -> Outcome[R, A] {
     db.keyed_credit = draft_credit(db, ran)
     if i == 0u64 {
-        for reply_slot in 0u64 .. ran.replies.count {
+        for reply_slot in 0u64 .. data_row_count(ran.replies) {
             let drafted_reply = data_row(ran.replies, reply_slot)
             if map.contains(db.admits, drafted_reply.key) {
                 let settled = match drafted_reply.value {
@@ -295,7 +295,7 @@ fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], sett
     if let Error(_) = prepared.outcome {
         return false
     }
-    if prepared.ops.count != 0 || prepared.stream_ops.count != 0 {
+    if data_row_count(prepared.ops) != 0 || data_row_count(prepared.stream_ops) != 0 {
         return false
     }
     if !keyed_draft_empty(db, prepared.keyed) {
@@ -449,7 +449,7 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
         Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
         Prepared(take staged) => {
             let mut prepared = take staged
-            if prepared.ops.count == 0 && prepared.stream_ops.count == 0 {
+            if data_row_count(prepared.ops) == 0 && data_row_count(prepared.stream_ops) == 0 {
                 if let None = prepared.keyed {
                     return Ok(Prepared(take prepared))
                 }
@@ -494,7 +494,7 @@ fn materialize_rows(mut tree: PageTree, operations: DataRows, memory_only: bool,
 fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: DataOrder, memory_only: bool, first: u64, mut draw: u64) -> Result[(), Error] {
     let collection_map = tree_domain(tree) == CollectionMap
     let mut processed = 0u64
-    for slot_order in 0u64 .. operations.count {
+    for slot_order in 0u64 .. data_row_count(operations) {
         if slot_order < processed {
             continue
         }
@@ -504,7 +504,7 @@ fn materialize_ordered_rows(mut tree: PageTree, operations: DataRows, order: Dat
             if let Some(descriptor) = collection_by_key(tree, collection) {
                 if descriptor.kind == TableCollection || descriptor.kind == IndexCollection {
                     processed = slot_order + 1
-                    while processed < operations.count {
+                    while processed < data_row_count(operations) {
                         let following = ordered_row(operations, order, processed)
                         if list.slice(following.key, 0, 4) != collection {
                             break

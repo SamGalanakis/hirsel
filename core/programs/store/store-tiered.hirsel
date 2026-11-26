@@ -101,7 +101,7 @@ fn settled_tiered_bytes(total: u64, retained: bool, base: PageTree, proposed: Pa
     let order = capacity(data_order(operations))?
     let mut prior_collection: Option[u32] = None
     let mut charged = total
-    for slot in 0u64 .. operations.count {
+    for slot in 0u64 .. data_row_count(operations) {
         let op = ordered_row(operations, order, slot)
         let id = list.slice(op.key, 0, 4)
         let Some(before) = std.page.lookup(base.root, id) else {

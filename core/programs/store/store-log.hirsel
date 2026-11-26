@@ -512,11 +512,11 @@ fn seal_log_trims(mut tx: Tx, mut draw: u64) -> Result[DataRows, Error] {
         }
         push_data_row(mut operations, DataOp(key: take key, value: None, trim: Some(JournalTrim(floor: state.limits.first, dropped: dropped)), prior: None))
     }
-    if operations.count == 0 {
+    if data_row_count(operations) == 0 {
         return Ok(replace(mut tx.ops.rows, new_data_rows()))
     }
     tx.frame_tail = NO_FRAME_TAIL
-    for slot in 0u64 .. tx.ops.rows.count {
+    for slot in 0u64 .. data_row_count(tx.ops.rows) {
         let op = data_row(tx.ops.rows, slot)
         if !masked_log_append(states, op.key) {
             push_data_row(mut operations, clone(op))

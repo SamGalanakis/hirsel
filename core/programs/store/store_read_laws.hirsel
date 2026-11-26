@@ -413,7 +413,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let same_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 1, 21)?;
-        Ok(tx.ops.rows.count)
+        Ok(data_row_count(tx.ops.rows))
     }))
     match take same_j {
         Committed(done) => if done.value != 1 {
@@ -423,7 +423,7 @@ pub fn law_index_writes(c: Clock) -> bool waits {
     }
     let changed_j = result.unwrap(run(mut db, None, t, fn(mut tx, call_env) -> Result[u64, Error] {
         put(mut tx, call_env, 1, 22)?;
-        Ok(tx.ops.rows.count)
+        Ok(data_row_count(tx.ops.rows))
     }))
     match take changed_j {
         Committed(done) => done.value == 7,

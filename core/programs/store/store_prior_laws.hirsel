@@ -33,7 +33,7 @@ fn cached_prior_conflict_safety(c: Clock) -> Result[(), Error] waits {
     let _ = log.finish(take reads)
     let _ = cell.into_inner(take issued)
     let mut staged = take draft
-    if staged.ops.count != 1 || data_row(staged.ops, 0).prior != Some(35u32) {
+    if data_row_count(staged.ops) != 1 || data_row(staged.ops, 0).prior != Some(35u32) {
         return Error(Missing("cached base width across repeated writes"))
     }
     let before = capacity(encode_staged(ci, Some(view db.heads[0].roots.collections), Some(staged.base_stamp), None, mut staged.ops, staged.order, NO_FRAME_TAIL, staged.stream_ops, None, None, None, None, 1, 72, FRAME_LIMIT))?

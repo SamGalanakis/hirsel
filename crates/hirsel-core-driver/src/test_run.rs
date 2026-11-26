@@ -336,22 +336,27 @@ impl CheckProduct {
         // test starts.
         let mut options = self.granted(test, options);
         let slots = InheritedSlots::take(&mut options);
-        let mut reached = if options.foreign_grants.is_empty() || options.recording {
-            self.reachable_for(test, &options)?
-        } else {
-            self.reachable(test, options.instance_limit)?
+        let foreign_recipe =
+            |options: &NativeOptions| !options.foreign_grants.is_empty() && !options.recording;
+        let reach = |options: &NativeOptions| {
+            if options.llvm_release() {
+                self.reachable_recipe(test, options)
+            } else if foreign_recipe(options) {
+                self.reachable(test, options.instance_limit)
+            } else {
+                self.reachable_objects(test, options)
+            }
         };
+        let mut reached = reach(&options)?;
         let foreign = laws.is_some() && reached.foreign_functions().next().is_some();
         if foreign {
             options.recording = false;
             if let Some(runtime) = laws.flatten() {
                 options.runtime = runtime.to_owned();
             }
-            reached = if options.foreign_grants.is_empty() {
-                self.reachable_for(test, &options)?
-            } else {
-                self.reachable(test, options.instance_limit)?
-            };
+            if !options.llvm_release() {
+                reached = reach(&options)?;
+            }
         }
         let options = &options;
         let pass = cache
@@ -370,7 +375,7 @@ impl CheckProduct {
                     options.instance_limit,
                 )
                 .ok()?;
-                test_key(test, decl, &reached, sites, options).map(|key| (cache, key))
+                test_key(self, test, decl, &reached, sites, options).map(|key| (cache, key))
             });
         if !rerun
             && let Some((cache, key)) = pass
@@ -387,27 +392,42 @@ impl CheckProduct {
                 coverage,
             }));
         }
-        let built = if options.foreign_grants.is_empty() || options.recording {
-            self.build_reachable(test, &reached, options)?
-        } else {
+        let foreign_recipe = foreign_recipe(options);
+        let built = if options.llvm_release() || foreign_recipe {
+            let bound;
+            let recipe_options = if !foreign_recipe {
+                bound = options.with_bound_exec()?;
+                &*bound
+            } else {
+                options
+            };
             let store = crate::code_store::CodeStore::cache(&options.cas, "code")?;
             let publication = self.publish_release(
                 test,
                 &reached,
-                options,
+                recipe_options,
                 &store,
                 hirsel_core_ids::launch::DEFAULT_N_PLACE,
             )?;
-            let lines = crate::native::recipe_build::foreign_grant_lines(
-                publication.recipe(),
-                publication.root(),
-            )
-            .collect::<Vec<_>>();
-            let built = publication.assemble_with(options, reached.counters, Some(self), None)?;
+            let lines = if foreign_recipe {
+                crate::native::recipe_build::foreign_grant_lines(
+                    publication.recipe(),
+                    publication.root(),
+                )
+                .collect::<Vec<_>>()
+            } else {
+                vec![]
+            };
+            let counters = reached.counters;
+            drop(reached);
+            let library = self.image.as_ref().map(|image| image.store_root());
+            let built = publication.assemble_with(recipe_options, counters, library.as_deref())?;
             for line in lines {
                 eprintln!("{line}");
             }
             built
+        } else {
+            self.build_objects(test, &reached, options)?
         };
         if let Some(map) = &built.coverage {
             coverage::write_map(self, test, options, map);

@@ -289,12 +289,13 @@ impl<T: Default> WorkingMemo<(), Arc<Mutex<T>>> {
     }
 }
 
-/// Materialised instances, by identity and definition record.
+/// Materialised instances, by identity, definition record, target and representation.
 pub(crate) static MATERIALISED: Memo<
     (
         hirsel_core_ir::Identity,
         Option<hirsel_core_ids::ContentHash>,
         hirsel_core_layout::Target,
+        bool,
     ),
     crate::instances::Materialised,
 > = Memo::new();

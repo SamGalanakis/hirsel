@@ -930,7 +930,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .as_ref()
             .map(|image| image.store_root().to_owned());
         let product =
-            publication.assemble_with(&options, Default::default(), None, library.as_deref())?;
+            publication.assemble_with(&options, Default::default(), library.as_deref())?;
         if let (Some(path), Some(recipe)) = (release_manifest, recipe) {
             crate::release_manifest::write(
                 &path,
@@ -1321,17 +1321,20 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             );
         }
     };
+    let grant_lines = command == "run" && !grants.foreign.is_empty();
+    let use_recipe = recipe_command
+        || grant_lines
+        || matches!(&prepared, Some(Ok(options)) if options.llvm_release());
+    let mut reach = None;
     if foreign_replay {
         let entry = selected_entry.as_ref().ok_or("replay requires an entry")?;
-        let limit = prepared
-            .as_ref()
-            .and_then(|options| options.as_ref().ok())
-            .map_or(crate::native::DEFAULT_INSTANCE_LIMIT, |options| {
-                options.instance_limit
-            });
-        if let Some(crate::NativeStop::ForeignRecording { reason, site }) = product
-            .reachable(entry, limit)?
-            .recording_stop(&product, entry)?
+        let reached = match &prepared {
+            Some(Ok(options)) if use_recipe => product.reachable_recipe(entry, options)?,
+            Some(Ok(options)) => product.reachable(entry, options.instance_limit)?,
+            _ => product.reachable(entry, crate::native::DEFAULT_INSTANCE_LIMIT)?,
+        };
+        if let Some(crate::NativeStop::ForeignRecording { reason, site }) =
+            reached.recording_stop(&product, entry)?
         {
             eprintln!("{site}: recording refusal site");
             eprintln!("replay: refused: {reason}");
@@ -1339,6 +1342,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 profile.cleanup();
             }
             return conclude(Outcome::Exit(2));
+        }
+        if use_recipe {
+            reach = Some(reached);
         }
         if let Some(Ok(options)) = &mut prepared {
             let header =
@@ -1348,24 +1354,16 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
         }
     }
-    let mut reach = if native_command && !test_command {
-        Some({
-            let entry = selected_entry
-                .as_ref()
-                .ok_or("build/run requires an entry")?;
-            match &prepared {
-                Some(Ok(options))
-                    if recipe_command || (command == "run" && !grants.foreign.is_empty()) =>
-                {
-                    product.reachable_recipe(entry, options)?
-                }
-                Some(Ok(options)) => product.reachable_for(entry, options)?,
-                _ => product.reachable(entry, 65_536)?,
-            }
-        })
-    } else {
-        None
-    };
+    if reach.is_none() && native_command && !test_command {
+        let entry = selected_entry
+            .as_ref()
+            .ok_or("build/run requires an entry")?;
+        reach = Some(match &prepared {
+            Some(Ok(options)) if use_recipe => product.reachable_recipe(entry, options)?,
+            Some(Ok(options)) => product.reachable_objects(entry, options)?,
+            _ => product.reachable(entry, crate::native::DEFAULT_INSTANCE_LIMIT)?,
+        });
+    }
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
@@ -1492,13 +1490,15 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .as_ref()
             .ok_or("build/run requires an entry")?;
         let reached = reach.as_mut().unwrap();
-        let grant_lines = command == "run" && !grants.foreign.is_empty();
-        let assembled = if recipe_command || grant_lines {
+        let assembled = if use_recipe {
+            let local_code = (!recipe_command && !grant_lines)
+                .then(|| CodeStore::cache(&options.cas, "code"))
+                .transpose()?;
             match product.publish_release(
                 entry,
                 reached,
                 options,
-                &code_store,
+                local_code.as_ref().unwrap_or(&code_store),
                 n_place.unwrap_or(hirsel_core_ids::launch::DEFAULT_N_PLACE),
             ) {
                 Ok(publication) => {
@@ -1517,16 +1517,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         }
                         return conclude(Outcome::Exit(0));
                     }
-                    if command == "build"
-                        && matches!(options.backend, Backend::Llvm)
-                        && options.optimize
-                    {
+                    if options.llvm_release() {
                         let mut report = release::Report::new(&product, reached, key, json);
-                        let counters = reached.finish();
-                        let library = product
-                            .image
-                            .as_ref()
-                            .map(|image| image.store_root().to_owned());
+                        let counters = reached.counters;
+                        let library = product.image.as_ref().map(|image| image.store_root());
                         drop(reach);
                         drop(product);
                         let output = report.assemble(
@@ -1535,6 +1529,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                             counters,
                             library.as_deref(),
                             release_manifest.as_deref(),
+                            grant_lines,
                             place_timeout,
                             &mut meter,
                         )?;
@@ -1554,8 +1549,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     }
                     let recipe = (release_manifest.is_some() || grant_lines)
                         .then(|| publication.recipe.clone());
+                    let library = product.image.as_ref().map(|image| image.store_root());
                     let built =
-                        publication.assemble_with(options, reached.finish(), Some(&product), None);
+                        publication.assemble_with(options, reached.finish(), library.as_deref());
                     if let (Ok(built), Some(path), Some(recipe)) =
                         (&built, &release_manifest, &recipe)
                     {
@@ -1577,7 +1573,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 Err(error) => Err(error),
             }
         } else {
-            product.build_reachable(entry, reached, options)
+            product.build_objects(entry, reached, options)
         };
         match assembled {
             Ok(native) => Some(native),

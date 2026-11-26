@@ -33,7 +33,7 @@ pub struct Reachable<'a> {
     pub(crate) materialized: crate::instances::InstanceSet,
     /// The header walk's nodes, when this walk ran it.
     pub(crate) graph: Option<Arc<Graph>>,
-    /// The build's native inputs, when `reachable_for` collected this set.
+    /// The native inputs of a development object build.
     pub(crate) native: Option<crate::native::NativeInputs>,
     /// A Cranelift development request's reach record.
     pub(crate) reach: Option<crate::reach::Use>,
@@ -132,7 +132,7 @@ impl Reachable<'_> {
 
         for identity in self.require()? {
             let instance = self.materialized.get(identity);
-            let module = instance.ir()?;
+            let module = instance.transient_ir()?;
             let Some(body) = &module.functions[instance.function.index()].body else {
                 continue;
             };
@@ -339,7 +339,7 @@ impl CheckProduct {
         self.reachable_recipe_record(
             entry,
             limit,
-            matches!(options.backend, crate::native::Backend::Cranelift),
+            options.llvm_release() || matches!(options.backend, crate::native::Backend::Cranelift),
             &mut record.lock().unwrap(),
             Some(target),
         )
@@ -361,14 +361,14 @@ impl CheckProduct {
     /// reads its reach record: if every row it holds is live, the walk's result
     /// is the record's; otherwise unchanged instances expand from its table and
     /// the rest walk their instance records, so a hit materialises nothing.
-    pub fn reachable_for(
+    pub(crate) fn reachable_objects(
         &self,
         entry: &DefPath,
         options: &NativeOptions,
     ) -> io::Result<Reachable<'_>> {
         self.reachable_rebuilding(entry, options, &BTreeSet::new())
     }
-    /// [`Self::reachable_for`], rebuilding the instances in `damaged`.
+    /// [`Self::reachable_objects`], rebuilding the instances in `damaged`.
     pub(crate) fn reachable_rebuilding(
         &self,
         entry: &DefPath,

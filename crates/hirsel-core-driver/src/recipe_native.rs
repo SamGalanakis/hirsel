@@ -387,10 +387,13 @@ impl CheckProduct {
             // The materialised body is the unit's, before binding: it still
             // has its anchors.
             let coverage = match coverage {
-                Some(scope) => Some(
-                    hirsel_core_ir::coverage::unit_decisions(instance.ir()?, scope)
-                        .map_err(NativeStop::Coverage)?,
-                ),
+                Some(scope) => {
+                    let module = instance.transient_ir()?;
+                    Some(
+                        hirsel_core_ir::coverage::unit_decisions(&module, scope)
+                            .map_err(NativeStop::Coverage)?,
+                    )
+                }
                 None => None,
             };
             // The materialised module is `retain`'s canonical decoding of
@@ -815,19 +818,16 @@ impl CheckProduct {
         &self,
         reached: &Reachable<'_>,
         options: &NativeOptions,
+        link: &crate::tool_inputs::LinkRecipe,
     ) -> Result<LinkArchives, NativeStop> {
         if options.recording || reached.materialized.foreign.is_empty() {
             return Ok(LinkArchives::default());
         }
-        let inputs = reached
-            .native
-            .as_ref()
-            .ok_or_else(|| NativeStop::Entry("a foreign build needs a link recipe".into()))?;
         reached.require()?;
         let (_, sealed) = self.check_foreign_archives(
             &self.reached_foreign_modules(reached)?,
             &options.target,
-            Some((&options.runtime, &inputs.recipe)),
+            Some((&options.runtime, link)),
         )?;
         Ok(sealed)
     }
@@ -1439,29 +1439,18 @@ impl Publication {
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
     ) -> Result<BuildProduct, NativeStop> {
-        self.assemble_with(options, counters, None, None)
+        self.assemble_with(options, counters, None)
     }
 
-    /// [`Self::assemble`] of a program checked as `product`. An optimised
-    /// LLVM build takes every library instance a separately lowered release
-    /// std holds from it ([`std_side`]): the program holds none of their
-    /// bodies and calls each by its exported symbol. That std, and any other
-    /// build's prebuilt objects, are read first from `library` (a library
-    /// image's store), else from `product`'s image.
+    /// Assemble with prebuilt objects from the library image's store.
     pub(crate) fn assemble_with(
         mut self,
         options: &NativeOptions,
         counters: crate::reach::ReachCounters,
-        product: Option<&CheckProduct>,
         library: Option<&Path>,
     ) -> Result<BuildProduct, NativeStop> {
-        let library = library.map(Path::to_owned).or_else(|| {
-            product
-                .and_then(|product| product.image.as_ref())
-                .map(|image| image.store_root().to_owned())
-        });
-        let std = self.std_side(options, library.as_deref())?;
-        self.assemble_over(options, counters, std, library.as_deref())
+        let std = self.std_side(options, library)?;
+        self.assemble_over(options, counters, std, library)
     }
 
     /// The separately lowered release std an optimised LLVM build of this
@@ -1473,7 +1462,7 @@ impl Publication {
         library: Option<&Path>,
     ) -> Result<Option<StdSide>, NativeStop> {
         let (options, _) = self.launch(options)?;
-        if !matches!(options.backend, Backend::Llvm) || !options.optimize {
+        if !options.llvm_release() {
             return Ok(None);
         }
         for unit in self.units.values_mut() {
@@ -1530,7 +1519,7 @@ impl Publication {
                 crate::tool_inputs::toolchain(&options.link, &options.target, &options.runtime)?
             }
         };
-        let optimised = matches!(options.backend, Backend::Llvm) && options.optimize;
+        let optimised = options.llvm_release();
         if optimised != std.is_some() {
             return Err(NativeStop::Entry(
                 "an optimised LLVM build, and only one, assembles over a release std".into(),

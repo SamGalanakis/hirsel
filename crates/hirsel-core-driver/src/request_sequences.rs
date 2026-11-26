@@ -302,7 +302,7 @@ fn answer(product: &CheckProduct, req: &Req, options: Option<&NativeOptions>) ->
     });
     let native = options.filter(|_| req.build).map(|options| {
         let entry = DefPath::from_full(req.entry.unwrap()).unwrap();
-        let reach = product.reachable_for(&entry, options).unwrap();
+        let reach = product.reachable_recipe(&entry, options).unwrap();
         let refused = serde_json::json!({
             "diagnostics": product.diagnostics_for(reach.diagnostics.iter().copied()).unwrap(),
             "incomplete": product.incomplete_for(reach.incomplete.iter().copied()).unwrap(),

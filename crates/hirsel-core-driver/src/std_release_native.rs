@@ -707,7 +707,8 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             // The recipe outlives its inputs: with the program's source and
             // image gone, it assembles over the side its build stored.
             let root = publication.root();
-            let built = publication.assemble_with(&options, reached.counters, Some(&product), None).unwrap();
+            let library = product.image.as_ref().map(|image| image.store_root());
+            let built = publication.assemble_with(&options, reached.counters, library.as_deref()).unwrap();
             let run = Command::new(&built.executable).output().unwrap();
             assert_eq!((run.status.code(), run.stdout), (Some(0), b"right".to_vec()));
             let first = std::fs::read(&built.executable).unwrap();
@@ -717,7 +718,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
             std::fs::remove_file(&built.executable).unwrap();
             let again = Publication::open(&code, root, &crate::request::local_admission_limits())
                 .unwrap()
-                .assemble_with(&options, Default::default(), None, None)
+                .assemble(&options, Default::default())
                 .unwrap();
             assert!(std::fs::read(&again.executable).unwrap() == first, "the recipe's executable");
         }
@@ -746,7 +747,7 @@ fn a_separate_std_is_lowered_once_for_the_roots_a_program_reaches() {
         let reached = product.reachable(&entry, options.instance_limit).unwrap();
         let publication =
             product.publish_release(&entry, &reached, &options, &code, 16 * 1024 * 1024).unwrap();
-        let built = publication.assemble_with(&options, reached.counters, Some(&product), None).unwrap();
+        let built = publication.assemble(&options, reached.counters).unwrap();
         let run = Command::new(&built.executable).current_dir(&project).output().unwrap();
         (run.status.code(), run.stdout)
     };

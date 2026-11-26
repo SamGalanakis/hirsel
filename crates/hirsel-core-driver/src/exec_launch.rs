@@ -1,8 +1,21 @@
 //! Immutable build binding and the separate launch approval for Exec.
-use crate::NativeStop;
+use crate::{NativeOptions, NativeStop};
 use hirsel_core_net::exec::Request;
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+impl NativeOptions {
+    pub(crate) fn with_bound_exec(&self) -> Result<Cow<'_, Self>, NativeStop> {
+        if self.exec_grants.iter().any(|grant| grant.policy.is_none()) {
+            let mut bound = self.clone();
+            bound.bind_exec()?;
+            Ok(Cow::Owned(bound))
+        } else {
+            Ok(Cow::Borrowed(self))
+        }
+    }
+}
 
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct Binding {

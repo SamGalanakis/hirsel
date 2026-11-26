@@ -331,7 +331,7 @@ fn library_check(app: &str, lib: &str, core: &Path, dir: &Path, store: &str) -> 
 /// file span, sorted.
 fn build_diagnostics(product: &CheckProduct, options: &NativeOptions) -> Vec<(String, String, u32, u32)> {
     let entry = DefPath::from_full("app@1/main/main").unwrap();
-    let reached = product.reachable_for(&entry, options).unwrap();
+    let reached = product.reachable_objects(&entry, options).unwrap();
     let mut found: Vec<_> = reached
         .diagnostics
         .iter()

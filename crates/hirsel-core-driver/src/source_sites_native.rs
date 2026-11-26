@@ -241,7 +241,7 @@ fn failure_sites_discarded_by_linker() {
         .unwrap();
     assert!(product.accepted(), "{:?}", product.diagnostics);
     let dev = native_options(Backend::Llvm, dir.path());
-    let reached = product.reachable_for(&entry, &dev).unwrap();
+    let reached = product.reachable_objects(&entry, &dev).unwrap();
     let inputs = reached.native.as_ref().unwrap();
     let (mut objects, _) = product.emit_reached(&entry, &reached, &dev).unwrap();
     let main = reached

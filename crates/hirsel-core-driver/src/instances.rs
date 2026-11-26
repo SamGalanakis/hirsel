@@ -779,10 +779,9 @@ impl CheckProduct {
                     hirsel_core_ir::symbol(hash)
                 ))
             })?;
-            // A function of the instance's identity and its definition's
-            // published record: a resident compiler keeps it across requests.
-            let memo_key =
-                (own != Some(ContentHash::default())).then(|| (key.clone(), own, target));
+            // A resident compiler retains both code and its representation.
+            let memo_key = (own != Some(ContentHash::default()))
+                .then(|| (key.clone(), own, target, instances.compact_recipe));
             let made = crate::resident::MATERIALISED.get_or(memo_key, || {
                 materialise(
                     key,

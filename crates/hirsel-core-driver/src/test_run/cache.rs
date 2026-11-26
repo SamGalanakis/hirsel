@@ -80,6 +80,7 @@ impl TestCache {
 }
 
 pub(super) fn test_key(
+    product: &crate::CheckProduct,
     test: &DefPath,
     decl: &EntryDecl,
     reached: &Reachable<'_>,
@@ -87,7 +88,15 @@ pub(super) fn test_key(
     options: &NativeOptions,
 ) -> Option<ContentHash> {
     let address = reached.address(test).ok()?;
-    let inputs = reached.native.as_ref()?;
+    let release;
+    let inputs = match &reached.native {
+        Some(inputs) => inputs,
+        None if options.llvm_release() => {
+            release = crate::native::native_inputs(product, options).ok()?;
+            &release
+        }
+        None => return None,
+    };
     let environment = match &inputs.records {
         Some(records) => records.digest,
         None => {

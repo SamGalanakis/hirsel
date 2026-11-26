@@ -141,6 +141,10 @@ pub struct NativeOptions {
 pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
 
 impl NativeOptions {
+    pub(crate) fn llvm_release(&self) -> bool {
+        matches!(self.backend, Backend::Llvm) && self.optimize
+    }
+
     pub(crate) fn bind_exec(&mut self) -> Result<(), NativeStop> {
         self.exec_grants
             .iter_mut()
@@ -524,13 +528,16 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
-        let reached = self.reachable_for(entry, options)?;
-        self.preflight_foreign_link(&reached, options)?;
-        if !(matches!(options.backend, Backend::Llvm) && options.optimize) {
+        if !options.llvm_release() {
+            let reached = self.reachable_objects(entry, options)?;
+            let inputs = reached.native.as_ref().expect("a build's reachable set");
+            self.preflight_foreign_link(&reached, options, &inputs.recipe)?;
             return Ok(self.emit_reached(entry, &reached, options)?.0);
         }
+        let reached = self.reachable_recipe(entry, options)?;
+        let inputs = native_inputs(self, options)?;
+        self.preflight_foreign_link(&reached, options, &inputs.recipe)?;
         reached.require_native(self, entry, options)?;
-        let inputs = reached.native.as_ref().expect("a build's reachable set");
         let root = Identity::plain(entry.clone());
         let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
         let mut units = self
@@ -544,6 +551,7 @@ impl CheckProduct {
                 options.coverage.as_ref(),
             )?
             .units;
+        drop(reached);
         let runtime = inputs.toolchain.runtime;
         let library = self.image.as_ref().map(|image| image.store_root());
         let std = std_release::std_side(&units, &root, library.as_deref(), options)?;
@@ -792,48 +800,38 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
-        let reached = self.reachable_for(entry, options)?;
-        self.build_reachable(entry, &reached, options)
+        if options.llvm_release() {
+            let reached = self.reachable_recipe(entry, options)?;
+            let options = options.with_bound_exec()?;
+            let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
+            let publication = self.publish_release(
+                entry,
+                &reached,
+                &options,
+                &code,
+                hirsel_core_ids::launch::DEFAULT_N_PLACE,
+            )?;
+            let counters = reached.counters;
+            drop(reached);
+            let library = self.image.as_ref().map(|image| image.store_root());
+            publication.assemble_with(&options, counters, library.as_deref())
+        } else {
+            let reached = self.reachable_objects(entry, options)?;
+            self.build_objects(entry, &reached, options)
+        }
     }
-    /// Build `reached`, which `reachable_for` collected for `options`. A stored
+    /// Link the development objects of a walk for `options`. A stored
     /// object whose bytes fail their check at the link is removed, and the
     /// build walks again with the instances refused by that link rebuilt; an
     /// instance rebuilt by an earlier pass is reused like any other, and the
     /// link checks it again. The product's work counters are every pass's.
-    pub fn build_reachable(
+    pub(crate) fn build_objects(
         &self,
         entry: &DefPath,
         reached: &Reachable<'_>,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
-        let mut bound;
-        let options = if options
-            .exec_grants
-            .iter()
-            .any(|grant| grant.policy.is_none())
-        {
-            bound = options.clone();
-            bound.bind_exec()?;
-            &bound
-        } else {
-            options
-        };
-        // An optimised LLVM build is assembled from its published recipe over
-        // the separately lowered release std, like `build`.
-        if matches!(options.backend, Backend::Llvm) && options.optimize {
-            self.preflight_foreign_link(reached, options)?;
-            reached.require_native(self, entry, options)?;
-            let code = crate::code_store::CodeStore::cache(&options.cas, "code")?;
-            return self
-                .publish_release(
-                    entry,
-                    reached,
-                    options,
-                    &code,
-                    hirsel_core_ids::launch::DEFAULT_N_PLACE,
-                )?
-                .assemble_with(options, reached.counters, Some(self), None);
-        }
+        let options = &options.with_bound_exec()?;
         let mut refused = BTreeSet::new();
         let mut rebuild = BTreeSet::new();
         let mut compiled = 0;
@@ -877,14 +875,14 @@ impl CheckProduct {
         options: &NativeOptions,
         damaged: &BTreeSet<Identity>,
     ) -> Result<Linked, NativeStop> {
-        let link_archives = self.preflight_foreign_link(reached, options)?;
-        let instances = reached.require_native(self, entry, options)?;
-        let foreign_modules = self.reached_foreign_modules(reached)?;
-        let address = reached.address(entry)?;
         let inputs = reached
             .native
             .as_ref()
-            .ok_or_else(|| NativeStop::Entry("a build needs `reachable_for` its options".into()))?;
+            .expect("an object build's reachable set");
+        let link_archives = self.preflight_foreign_link(reached, options, &inputs.recipe)?;
+        let instances = reached.require_native(self, entry, options)?;
+        let foreign_modules = self.reached_foreign_modules(reached)?;
+        let address = reached.address(entry)?;
         let reach = reached.reach.as_ref();
         let prior = reach.and_then(|r| r.prior.as_ref());
         // The items of instances expanded from the record, by its path

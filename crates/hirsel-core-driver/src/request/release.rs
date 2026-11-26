@@ -76,14 +76,20 @@ impl Report {
         counters: ReachCounters,
         library: Option<&Path>,
         manifest: Option<&Path>,
+        grant_lines: bool,
         place_timeout: Duration,
         meter: &mut Meter,
     ) -> Result<Output<'_>, Box<dyn std::error::Error>> {
         let root = publication.root;
-        let recipe = manifest.map(|_| publication.recipe.clone());
-        let built = publication.assemble_with(options, counters, None, library);
+        let recipe = (manifest.is_some() || grant_lines).then(|| publication.recipe.clone());
+        let built = publication.assemble_with(options, counters, library);
         if let (Ok(built), Some(path), Some(recipe)) = (&built, manifest, &recipe) {
             crate::release_manifest::write(path, &built.executable, root, recipe, place_timeout)?;
+        }
+        if let (true, Ok(_), Some(recipe)) = (grant_lines, &built, &recipe) {
+            for line in crate::native::recipe_build::foreign_grant_lines(recipe, root) {
+                eprintln!("{line}");
+            }
         }
         let (native, undelivered, stopped) = match built {
             Ok(build) => (Some(build), None, None),

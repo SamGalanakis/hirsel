@@ -534,7 +534,7 @@ fn link_weak_adapter_order(
     options: &NativeOptions,
 ) -> BuildProduct {
     let entry = &main.definition;
-    let reached = product.reachable_for(entry, options).unwrap();
+    let reached = product.reachable_objects(entry, options).unwrap();
     let instances = reached.require().unwrap();
     let inputs = reached.native.as_ref().unwrap();
     let [a, b] = owners.map(|owner| instances.iter().position(|i| i == owner).unwrap());
@@ -904,7 +904,7 @@ fn revision_warm_slot_order_is_current() {
     let old = first.units([p.clone()], 4096).unwrap().address(&p).unwrap();
     for (entry, is_expansion) in [(&alt, false), (&main, true)] {
         let current = check(&b, entry);
-        let reached = current.reachable_for(entry, &options).unwrap();
+        let reached = current.reachable_objects(entry, &options).unwrap();
         let prior = reached.reach.as_ref().and_then(|r| r.prior.as_ref());
         let (body, slots) = if is_expansion {
             let row = reached.materialized.table[&p];
@@ -932,7 +932,7 @@ fn revision_warm_slot_order_is_current() {
         assert_ne!(bound[&p], old, "A9 callee edit invalidates the prior address");
         let cold = current.units([p.clone()], 4096).unwrap();
         assert_eq!(cold.address(&p), Some(expected));
-        let built = current.build_reachable(entry, &reached, &options).unwrap();
+        let built = current.build_objects(entry, &reached, &options).unwrap();
         assert_eq!(Command::new(&built.executable).status().unwrap().code(), Some(i32::from(is_expansion)));
     }
 }

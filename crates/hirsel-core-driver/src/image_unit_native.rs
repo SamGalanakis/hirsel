@@ -288,3 +288,71 @@ fn a_child_tool_sees_only_its_listed_environment() {
     );
     assert!(moved == oracle, "4: the executable is a fresh build's");
 }
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn run_and_build_share_the_release_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7)) }\n",
+    )
+    .unwrap();
+    let options = native_options(Backend::Llvm, dir.path());
+    let runtime = options.runtime.canonicalize().unwrap();
+    let clang = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
+    let libraries = core_sources().parent().unwrap().canonicalize().unwrap();
+    let cache = dir.path().join("cache");
+    let cas = cache.join("hirsel/cas");
+    let metrics = dir.path().join("metrics.json");
+    let store = dir.path().join("store");
+    let invoke = |command, expected_exit, stage| {
+        let arguments = [
+            command,
+            app.to_str().unwrap(),
+            "--release",
+            "--source-core",
+            "--libraries",
+            libraries.to_str().unwrap(),
+            "--runtime",
+            runtime.to_str().unwrap(),
+            "--cc",
+            clang.to_str().unwrap(),
+            "--store",
+            store.to_str().unwrap(),
+            "--metrics",
+            metrics.to_str().unwrap(),
+        ]
+        .map(str::to_owned);
+        let mut request = process::tape_request_command(&arguments, dir.path());
+        request.env("XDG_CACHE_HOME", &cache);
+        let (status, _, stderr) = process::tape_request_output(request);
+        assert_eq!(status, Some(expected_exit), "{command}: {stderr}");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&metrics).unwrap()).unwrap();
+        assert!(
+            report["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == stage),
+            "{command}: expected {stage} in {report}"
+        );
+        let store = Store::cas(&cas).unwrap();
+        crate::store::collect::records(&cas)
+            .into_iter()
+            .map(|(_, key)| key)
+            .filter(|&key| {
+                store
+                    .get(key)
+                    .unwrap()
+                    .is_some_and(|p| super::release::is_unit_record(&p))
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let built = invoke("build", 0, "build store/miss");
+    assert!(!built.is_empty(), "build published release units");
+    assert_eq!(invoke("run", 7, "build store/hit"), built);
+}

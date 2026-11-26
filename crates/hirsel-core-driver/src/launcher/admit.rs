@@ -831,7 +831,7 @@ fn assemble<'a>(
     native.optimize = launch.backend == hirsel_core_ir::release_recipe::Backend::Llvm;
     native.recording = recording;
     let product = publication
-        .assemble_with(&native, Default::default(), None, None)
+        .assemble(&native, Default::default())
         .map_err(|e| e.to_string())?;
     let record = product.assembly.ok_or("assembly returned no record")?;
     let image = fs::read(product.executable)?;

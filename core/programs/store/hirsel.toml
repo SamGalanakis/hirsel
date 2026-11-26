@@ -67,6 +67,7 @@ std = { major = 1 }
 "store-history.hirsel" = "store"
 "store-stream-frames.hirsel" = "store"
 "store-stream-types.hirsel" = "store"
+"store-stream-service.hirsel" = "store"
 "store-history-read.hirsel" = "store"
 "store-history-witness.hirsel" = "store"
 "store-history-packs.hirsel" = "store"
@@ -204,6 +205,14 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."store@1/store/bucket_place_plan_at_floor"]
+limit = 134217728
+
+# The sim's 32 MiB, and per stream lane two register buffers of REG_LIMIT + 88
+# plus its client: the service's and each claimant task's 16 MiB.
+[tests.runs."store@1/store/bucket_stream_register_q5"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_stream_ack_after_create"]
 limit = 134217728
 
 # The pager reserves C + K + P = 80,794,472 B at the Tiered floor,

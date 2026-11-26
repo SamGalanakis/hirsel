@@ -1,8 +1,10 @@
 hirsel.laws 1
 store@1/store/anonymous_startup_scan_keeps_current_open_caller src=d6cb5276a0e416c3 sig=fa24b7cd14dd95a0 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/bucket_place_plan_at_floor src=a9ace12b32519ff5 sig=e4b10fe04e432050 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
+store@1/store/bucket_stream_ack_after_create src=34ffbcfe1695bf38 sig=bfc3b9272faaf300 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_attached_head_refused src=9c7a9b288a5f1387 sig=1c146f355b8c03d4 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_batch_objects src=03e4c970bf9ec7e8 sig=4874db46ffb45678 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+store@1/store/bucket_stream_register_q5 src=cdb2c72b7422c2c9 sig=ec684bf393b71702 run=2f2681ca48ebe043 bug=- oracle=- rows=pending
 store@1/store/bucket_stream_register_rules src=dc01824edafa24e6 sig=800b373f8949a5ea run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/bucket_test_claim_cut src=629896efc4c22ce6 sig=01e97927f781d4d2 run=57538e9471c5f788 bug=- oracle=- rows=pending
 store@1/store/bucket_test_fence src=374f1b70d4991209 sig=2d0df308fc953b38 run=6677ce756ba8a915 bug=- oracle=- rows=pending

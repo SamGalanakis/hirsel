@@ -1,0 +1,274 @@
+// The Bucket host stream's service core (STORE-SPEC §12.11.3, §12.11.4): the
+// register's reads and conditional writes, batch creates and the ack rule.
+// Package-private until the claim and the terminal fence land.
+const ROLE_PROBE: u8 = 14
+
+// Resends of one register write: Uncertain and Retriable resend the same
+// bytes, and each Mismatch rebuilds once (§12.11.3 rule 3).
+const STREAM_REG_ATTEMPTS: u64 = 8
+
+// Every stream object sits under `s-<sid>/` in the stream root, the prefix of
+// the client the lane holds (§12.11.1).
+fn stream_dir(sid: HostStreamId) -> String {
+    let mut dir = string.with_capacity(36)
+    string.push(mut dir, "s-")
+    std.hex.push_u64(mut dir, sid.hi)
+    std.hex.push_u64(mut dir, sid.lo)
+    string.push_char(mut dir, '/')
+    take dir
+}
+
+fn stream_key(dir: String, name: String) -> String {
+    let mut key = string.with_capacity(string.byte_len(dir) + string.byte_len(name))
+    string.push(mut key, dir)
+    string.push(mut key, name)
+    take key
+}
+
+// One writer of a stream's objects: the service's incarnation, or a claimant
+// adding its hold. `reg` and `tag` are the last register body it read or wrote.
+type StreamLane {
+    client: std.object.Client,
+    dir: String,
+    sid: HostStreamId,
+    authority_kind: u8,
+    max_rows: u64,
+    inc: u64,
+    holder: StoreId,
+    seq: u64,
+    reg: StreamRegister,
+    tag: std.object.ETag,
+    body: Bytes,
+    compare: Bytes
+}
+
+fn stream_lane(take client: std.object.Client, sid: HostStreamId, authority_kind: u8, max_rows: u64, holder: StoreId) -> Result[StreamLane, Error] {
+    let room = REG_LIMIT + 88 + BINDING_BYTES
+    let body: Bytes = capacity(bound bytes (room + 64) {
+        list.with_capacity(room)
+    })?
+    let compare: Bytes = capacity(bound bytes (room + 64) {
+        list.with_capacity(room)
+    })?
+    let empty = StreamRegister(rev: 0, sid, inc: 0, holder: StoreId(hi: 0, lo: 0), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
+    Ok(StreamLane(client: take client, dir: stream_dir(sid), sid, authority_kind, max_rows, inc: 0, holder, seq: 1, reg: take empty, tag: std.object.ETag(octets:[0; 64], len: 0), body: take body, compare: take compare))
+}
+
+// An unconditional GET of `reg` (§12.11.3 rule 2). A 404 after creation is
+// `Corrupt(Absent)`; a body below the rev already seen is `Regressed`.
+fn stream_reg_read(mut lane: StreamLane, deadline: u64) -> Result[(), Error] waits {
+    let key = stream_key(lane.dir, "reg")
+    list.clear(mut lane.compare)
+    let (take outcome, take buffer) = std.object.fetch(mut lane.client, key, replace(mut lane.compare, list.new()), deadline)
+    lane.compare = take buffer
+    let meta = match take outcome {
+        Ok(take found) => take found,
+        Error(NotFound) => return Error(disk_fault("reg", 0, Absent)),
+        Error(TooLarge) => return Error(disk_fault("reg", 0, Malformed)),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    if meta.size != list.len(lane.compare) || meta.etag.len == 0 {
+        return Error(Remote(Fatal(Malformed)))
+    }
+    lane.reg = stream_register_decode(lane.compare, lane.sid, lane.reg.rev)?
+    lane.tag = meta.etag
+    Ok(())
+}
+
+// What a register write means to do, so a Mismatch can tell whether it is
+// already done and rebuild it over a fresh body (§12.11.3 rule 3).
+type RegIntent: send = Hold(RegRow)
+
+fn stream_hold_rev(reg: StreamRegister, token: StoreId) -> Option[u64] {
+    for row in reg.rows {
+        if same(row.token, token) {
+            return Some(row.rev_hold)
+        }
+    }
+    None
+}
+
+fn stream_intent_present(intent: RegIntent, reg: StreamRegister) -> bool {
+    match intent {
+        Hold(row) => match stream_hold_rev(reg, row.token) {
+            Some(_) => true,
+            None => false,
+        },
+    }
+}
+
+// The body the intent writes over `base`: rev + 1, and only the writer's own
+// row added, so every other row stands (rule 4).
+fn stream_intent_apply(intent: RegIntent, base: StreamRegister, max_rows: u64) -> Result[StreamRegister, Error] {
+    let mut built = disk_allocation(scoped fn() -> Result[StreamRegister, Error] {
+        Ok(clone(base))
+    })?
+    built.rev = base.rev + 1
+    match intent {
+        Hold(row) => {
+            let rows = list.len(base.rows) + 1
+            if rows > max_rows {
+                return Error(Full(Register(Capacity(requested: stream_register_bytes(rows), available: stream_register_bytes(max_rows)))))
+            }
+            capacity(list.try_reserve(mut built.rows, 1))?
+            list.push(mut built.rows, RegRow(store: row.store, epoch: row.epoch, token: row.token, rev_hold: built.rev, abandoned: false))
+        },
+    }
+    Ok(take built)
+}
+
+// A conditional write of `reg` with Q5 and the merge (§12.11.3 rule 3).
+// `Applied` is done. `Uncertain` resends the same bytes with the same
+// If-Match. `Mismatch` reads `reg`: exact bytes or the intent already present
+// is done, and otherwise the write is rebuilt over the fresh body.
+fn stream_reg_write(mut lane: StreamLane, intent: RegIntent, deadline: u64) -> Result[(), Error] waits {
+    let key = stream_key(lane.dir, "reg")
+    let mut candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
+    stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
+    let mut pre = lane.tag
+    for _ in 0u64 .. STREAM_REG_ATTEMPTS {
+        let (take outcome, take buffer) = std.object.store_if(mut lane.client, key, Match(pre), replace(mut lane.body, list.new()), deadline)
+        lane.body = take buffer
+        match take outcome {
+            Ok(Applied(take meta)) => {
+                lane.reg = take candidate
+                lane.tag = meta.etag
+                return Ok(())
+            },
+            Ok(Mismatch) => {
+                stream_reg_read(mut lane, deadline)?
+                if lane.compare == lane.body || stream_intent_present(intent, lane.reg) {
+                    return Ok(())
+                }
+                candidate = stream_intent_apply(intent, lane.reg, lane.max_rows)?
+                stream_register_encode(mut lane.body, candidate, lane.authority_kind)?
+                pre = lane.tag
+            },
+            Error(Uncertain(_)) => (),
+            Error(Retriable(_)) => (),
+            Error(take problem) => return Error(Remote(take problem)),
+        }
+    }
+    Error(Remote(Retriable(Deadline)))
+}
+
+// Stream creation and the first election (§12.11.3 rule 7, §12.11.7): create
+// `probe` and then `reg` with `Absent`, probe the endpoint's conditions on
+// `probe`, and CAS incarnation 1 over the created body. An existing stream
+// needs the terminal fence, which this core does not yet write.
+fn stream_start_fresh(mut lane: StreamLane, deadline: u64) -> Result[(), Error] waits {
+    let probe = stream_key(lane.dir, "probe")
+    let _ = stream_header(mut lane.body, lane.sid, ROLE_PROBE, 0, 0, lane.authority_kind)?
+    history_create(mut lane.client, probe, mut lane.body, mut lane.compare, deadline)?
+    let first = StreamRegister(rev: 1, sid: lane.sid, inc: 0, holder: StoreId(hi: 0, lo: 0), collecting: false, low_inc: 0, low_seq: 0, index: None, rows: list.new())
+    stream_register_encode(mut lane.body, first, lane.authority_kind)?
+    let reg = stream_key(lane.dir, "reg")
+    let (take created, take buffer) = std.object.store_if_retry(mut lane.client, reg, Absent, replace(mut lane.body, list.new()), deadline)
+    lane.body = take buffer
+    match take created {
+        Ok(_) => (),
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    stream_reg_read(mut lane, deadline)?
+    if lane.reg.inc != 0 {
+        return Error(Exists("reg"))
+    }
+    let _ = stream_header(mut lane.body, lane.sid, ROLE_PROBE, 0, 0, lane.authority_kind)?
+    history_check_conditions(mut lane.client, probe, mut lane.body, deadline)?
+    let mut elected = disk_allocation(scoped fn() -> Result[StreamRegister, Error] {
+        Ok(clone(lane.reg))
+    })?
+    elected.rev = lane.reg.rev + 1
+    elected.inc = lane.reg.inc + 1
+    elected.holder = lane.holder
+    elected.collecting = false
+    list.clear(mut elected.rows)
+    stream_register_encode(mut lane.body, elected, lane.authority_kind)?
+    let (take outcome, take back) = std.object.store_if_retry(mut lane.client, reg, Match(lane.tag), replace(mut lane.body, list.new()), deadline)
+    lane.body = take back
+    match take outcome {
+        Ok(Applied(take meta)) => {
+            lane.reg = take elected
+            lane.tag = meta.etag
+        },
+        Ok(Mismatch) => {
+            stream_reg_read(mut lane, deadline)?
+            if lane.compare != lane.body {
+                return Error(Latched(Superseded))
+            }
+        },
+        Error(take problem) => return Error(Remote(take problem)),
+    }
+    lane.inc = lane.reg.inc
+    lane.seq = 1
+    Ok(())
+}
+
+// Creates `b-<inc>-<seq>` (§12.11.2). A 412 is resolved by one GET: exact
+// bytes are Applied, a TERM is the terminal fence (`Superseded`), and any
+// other bytes are `Corrupt(Malformed)`, which latches `Batch`.
+fn stream_batch_put(mut lane: StreamLane, slices: List[BatchSlice], deadline: u64) -> Result[(), Error] waits {
+    let size = stream_batch_size(slices) + BINDING_BYTES
+    capacity(list.try_reserve(mut lane.body, size))?
+    capacity(list.try_reserve(mut lane.compare, size))?
+    stream_batch_encode(mut lane.body, lane.sid, lane.inc, lane.seq, lane.authority_kind, lane.reg.rev, slices)?
+    let mut name = string.with_capacity(48)
+    stream_batch_key(mut name, lane.inc, lane.seq)
+    let key = stream_key(lane.dir, name)
+    let (take outcome, take buffer) = std.object.store_if_retry(mut lane.client, key, Absent, replace(mut lane.body, list.new()), deadline)
+    lane.body = take buffer
+    match take outcome {
+        Ok(Applied(_)) => Ok(()),
+        Ok(Mismatch) => {
+            match history_fetch(mut lane.client, key, mut lane.compare, deadline) {
+                Ok(_) => (),
+                Error(take problem) => return Error(take problem),
+            }
+            if lane.compare == lane.body {
+                return Ok(())
+            }
+            match stream_batch_head(key, lane.compare, lane.sid, lane.inc, lane.seq) {
+                Ok(Term(_, _)) => Error(Latched(Superseded)),
+                _ => Error(disk_fault(key, 0, Malformed)),
+            }
+        },
+        Error(take problem) => Error(Remote(take problem)),
+    }
+}
+
+type AckDecision = Ack | Stall | Superseded
+
+// The ack rule (§12.11.4) for one Place's frames in a batch whose create
+// completed before `reg` was read: the body must carry the service's own
+// incarnation and no row, Held or Abandoned, for (store, epoch).
+fn stream_ack_rule(reg: StreamRegister, inc: u64, holder: StoreId, store: StoreId, epoch: u64) -> AckDecision {
+    if reg.inc != inc || !same(reg.holder, holder) {
+        return Superseded
+    }
+    for row in reg.rows {
+        if same(row.store, store) && row.epoch == epoch {
+            return Stall
+        }
+    }
+    Ack
+}
+
+// One writer cycle (§12.11.4): create the batch, then GET `reg`, issued after
+// the create completed, and decide each slice by the ack rule. The result is
+// true for each slice whose frames are acked and false for each stalled one.
+fn stream_cycle(mut lane: StreamLane, slices: List[BatchSlice], deadline: u64) -> Result[List[bool], Error] waits {
+    stream_batch_put(mut lane, slices, deadline)?
+    lane.seq += 1
+    stream_reg_read(mut lane, deadline)?
+    let mut acked: List[bool] = capacity(bound bytes (list.len(slices) + 64) {
+        list.with_capacity(list.len(slices))
+    })?
+    for s in slices {
+        match stream_ack_rule(lane.reg, lane.inc, lane.holder, s.store, s.epoch) {
+            Superseded => return Error(Latched(Superseded)),
+            Stall => list.push(mut acked, false),
+            Ack => list.push(mut acked, true),
+        }
+    }
+    Ok(take acked)
+}

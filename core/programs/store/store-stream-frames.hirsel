@@ -1,20 +1,31 @@
 // The host stream's frames and objects (STORE-SPEC §12.11.2): ATTACH in a
 // Place's head, and the register, batch, TERM and FOOTER objects under a
 // stream root. Encoders and decoders only; the service is built on them.
-
 const ATTACH_LIMIT: u64 = 512
+
 const ATTACH_SEALED_MAX: u64 = 8
+
 const STREAM_INDEX_LIMIT: u64 = 727480
+
 const STREAM_TERM_BYTES: u64 = 32
+
 const REG_LIMIT: u64 = 1048576
+
 const STREAM_XINDEX_LIMIT: u64 = 16777216
+
 const STREAM_FOOTER_BYTES: u64 = 32
+
 const STREAM_MAX_SLOTS: u64 = 10698
+
 const REG_FIXED_BYTES: u64 = 110
+
 const REG_ROW_BYTES: u64 = 49
+
 const STREAM_INDEX_ROW_BYTES: u64 = 68
+
 // HEADER (72) and INDEX's frame head (16) and its own head (16).
 const STREAM_INDEX_PREFIX: u64 = 104
+
 // A reader's first range GET of a batch: HEADER, INDEX's head and 58 rows.
 const STREAM_INDEX_PROBE: u64 = 4096
 
@@ -32,6 +43,7 @@ fn stream_kind_limit(kind: u16) -> Option[u64] {
 }
 
 const ROLE_REGISTER: u8 = 11
+
 const ROLE_BATCH: u8 = 12
 
 // The position of a Place's tail in a stream: frame `from_frame` of its slice
@@ -145,7 +157,9 @@ fn stream_attach_decode(raw: Bytes, frame: DiskFrame, head_at: u64) -> Result[At
     if n > ATTACH_SEALED_MAX || size - cursor != 52 * n {
         return Error(disk_fault("head", at, Malformed))
     }
-    let mut sealed: List[SealedTail] = capacity(bound bytes (56 * ATTACH_SEALED_MAX) { list.with_capacity(n) })?
+    let mut sealed: List[SealedTail] = capacity(bound bytes (56 * ATTACH_SEALED_MAX) {
+        list.with_capacity(n)
+    })?
     let mut last_at = 0u64
     for _ in 0u64 .. n {
         let tail = stream_ref_read(p, cursor)
@@ -162,7 +176,6 @@ fn stream_attach_decode(raw: Bytes, frame: DiskFrame, head_at: u64) -> Result[At
 }
 
 // --- Stream objects: HEADER(sid, role, seq, epoch = inc) then their frames.
-
 fn stream_header(mut raw: Bytes, sid: HostStreamId, role: u8, seq: u64, inc: u64, authority_kind: u8) -> Result[DiskContext, Error] {
     let ctx = DiskContext(store: stream_identity(sid), role, seq)
     list.clear(mut raw)
@@ -200,7 +213,6 @@ fn stream_read_header(key: String, raw: Bytes, sid: HostStreamId, role: u8) -> R
 }
 
 // --- The register (role 11).
-
 type RegIndex: send {
     k: u64,
     len: u64,
@@ -252,7 +264,11 @@ fn stream_register_encode(mut raw: Bytes, reg: StreamRegister, authority_kind: u
     list.put_word_le(mut raw, reg.inc)
     list.put_word_le(mut raw, reg.holder.hi)
     list.put_word_le(mut raw, reg.holder.lo)
-    list.push(mut raw, if reg.collecting { 1u8 } else { 0u8 })
+    list.push(mut raw, if reg.collecting {
+        1u8
+    } else {
+        0u8
+    })
     list.put_word_le(mut raw, reg.low_inc)
     list.put_word_le(mut raw, reg.low_seq)
     match reg.index {
@@ -279,7 +295,11 @@ fn stream_register_encode(mut raw: Bytes, reg: StreamRegister, authority_kind: u
         list.put_word_le(mut raw, row.token.hi)
         list.put_word_le(mut raw, row.token.lo)
         list.put_word_le(mut raw, row.rev_hold)
-        list.push(mut raw, if row.abandoned { 1u8 } else { 0u8 })
+        list.push(mut raw, if row.abandoned {
+            1u8
+        } else {
+            0u8
+        })
     }
     capacity(history_seal(mut raw, ctx, at, 0x0103))
 }
@@ -323,7 +343,9 @@ fn stream_register_decode(raw: Bytes, sid: HostStreamId, seen_rev: u64) -> Resul
         }
         None
     }
-    let mut rows: List[RegRow] = capacity(bound bytes (64 * n + 64) { list.with_capacity(n) })?
+    let mut rows: List[RegRow] = capacity(bound bytes (64 * n + 64) {
+        list.with_capacity(n)
+    })?
     let mut cursor = REG_FIXED_BYTES
     for _ in 0u64 .. n {
         let state = p[cursor + 48]
@@ -354,7 +376,6 @@ fn stream_register_follows(prior: StreamRegister, later: StreamRegister) -> bool
 }
 
 // --- Batches (role 12): HEADER ‖ INDEX ‖ the slices ‖ FOOTER, or HEADER ‖ TERM.
-
 type BatchSlice: send {
     store: StoreId,
     epoch: u64,
@@ -499,7 +520,9 @@ fn stream_batch_head(key: String, raw: Bytes, sid: HostStreamId, inc: u64, seq: 
     }
     let frame = history_frame(key, head.ctx, list.slice(raw, 0, byte_len), 72, 0x0101)?
     let p = list.slice(raw, frame.payload, frame.end)
-    let mut rows: List[BatchRow] = capacity(bound bytes (88 * n + 64) { list.with_capacity(n) })?
+    let mut rows: List[BatchRow] = capacity(bound bytes (88 * n + 64) {
+        list.with_capacity(n)
+    })?
     let mut cursor = 16u64
     let mut slice_at = byte_len
     for i in 0u64 .. n {
@@ -509,7 +532,7 @@ fn stream_batch_head(key: String, raw: Bytes, sid: HostStreamId, inc: u64, seq: 
         if offset != slice_at || (i > 0 && !stream_store_below(rows[i - 1].store, store)) {
             return Error(disk_fault(key, 72, Malformed))
         }
-        let mut digest: Inline[u8, 32] = [0; 32]
+        let mut digest: Inline[u8, 32] =[0; 32]
         for j in 0u64 .. 32 {
             digest[j] = p[cursor + 36 + j]
         }

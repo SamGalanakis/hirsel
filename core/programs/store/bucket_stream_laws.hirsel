@@ -1,6 +1,5 @@
 // L90 laws for the Bucket host stream (STORE-SPEC §12.11.15). Each oracle is
 // the spec's rule or a value chosen here, never the encoder's own output.
-
 fn stream_law_head(at_seq: u64) -> HistoryHead {
     let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
     let newest = HistoryRef(seq: at_seq, epoch: 1, len: 189, digest: 0x2702)
@@ -198,6 +197,133 @@ fn bucket_stream_batch_objects() -> Result[(), Error] {
     match stream_batch_head("b", term, stream_law_sid(), 2, 18)? {
         Term(2, 18) => (),
         _ => fail("a TERM did not read as the terminal fence"),
+    }
+    Ok(())
+}
+
+// --- The service core over std.sim.s3 (§12.11.3, §12.11.4).
+const STREAM_LAW_ROWS: u64 = 8
+
+fn stream_law_lane(endpoint: std.sim.s3.Endpoint, clock: Clock, tasks: Tasks, seed: u64, holder: StoreId) -> Result[StreamLane, Error] waits {
+    let client = bucket_endpoint_client(endpoint, std.sim.s3.endpoint_network(endpoint), clock, tasks, "s3.test", seed, true, 0)?
+    stream_lane(take client, stream_law_sid(), 1, STREAM_LAW_ROWS, holder)
+}
+
+fn stream_law_due(lane: StreamLane) -> u64 {
+    std.object.deadline_after_ms(lane.client, BUCKET_LAW_OP_MS)
+}
+
+// A claimant that reads `reg` and adds its hold for (store, epoch); with
+// `after`, it starts once the sim has seen that key's first PUT.
+type StreamHolder: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    seed: u64,
+    token: StoreId,
+    store: StoreId,
+    epoch: u64,
+    after: Option[String]
+}
+
+fn stream_law_holder(take actor: StreamHolder) -> Result[u64, Error] waits {
+    if let Some(key) = actor.after {
+        result.unwrap(std.sim.s3.requested(actor.endpoint, "PUT", key, 1))
+    }
+    let mut lane = stream_law_lane(actor.endpoint, actor.clock, actor.tasks, actor.seed, actor.token)?
+    let due = stream_law_due(lane)
+    stream_reg_read(mut lane, due)?
+    stream_reg_write(mut lane, Hold(RegRow(store: actor.store, epoch: actor.epoch, token: actor.token, rev_hold: 0, abandoned: false)), due)?
+    match stream_hold_rev(lane.reg, actor.token) {
+        Some(rev) => Ok(rev),
+        None => fail("a hold write returned without its row"),
+    }
+}
+
+fn stream_law_holder_task(s: BucketSim, tasks: Tasks, seed: u64, token: StoreId, store: StoreId, epoch: u64, take after: Option[String]) -> Task[Result[u64, Error]] {
+    task.spawn(tasks, bytes 16777216, StreamHolder(endpoint: s.endpoint, clock: s.time, tasks, seed, token, store, epoch, after: take after), stream_law_holder)
+}
+
+fn stream_law_puts(report: std.sim.s3.Report, key: String) -> (u64, u64) {
+    let mut sent = 0u64
+    let mut landed = 0u64
+    for request in report.requests {
+        if request.method == "PUT" && request.key == key {
+            sent += 1
+            if request.applied {
+                landed += 1
+            }
+        }
+    }
+    (sent, landed)
+}
+
+// L90-R (§12.11.3 rules 3 and 4): B's and C's holds from one rev, the first
+// one's reply lost. The resend gets 412, the GET shows its token with its
+// stored rev_hold, and the write is done; the other rebuilds over it. Both
+// rows stand, and `reg` saw 4 applied writes for revs 1–4. Red for a resend
+// that rebuilds (a fifth write) or a merge that drops the other row.
+@test
+fn bucket_stream_register_q5(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let reg = stream_key(stream_dir(stream_law_sid()), "reg")
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    // PUT 1 creates `reg` and PUT 2 elects; PUT 3, the first hold, applies
+    // with its reply lost once PUT 4, the second hold from the same rev, arrives.
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(reg), from: 3, count: 1, until: Requested("PUT", clone(reg), 4), then: ApplyLoseReply))
+    let s = bucket_law_sim_holds(tasks, c, 41, None, list.new(), take holds, std.sim.world.plan(41))
+    let mut service = stream_law_lane(s.endpoint, s.time, tasks, 41, StoreId(hi: 50, lo: 1))?
+    stream_start_fresh(mut service, stream_law_due(service))?
+    let place = StoreId(hi: 70, lo: 0)
+    let b = stream_law_holder_task(s, tasks, 42, StoreId(hi: 60, lo: 1), place, 3, None)
+    let held_c = stream_law_holder_task(s, tasks, 43, StoreId(hi: 60, lo: 2), place, 3, None)
+    let rev_b = result.unwrap(task.join(take b))
+    let rev_c = result.unwrap(task.join(take held_c))
+    let seen = stream_reg_read(mut service, stream_law_due(service))
+    let StreamLane(reg: take final_reg, ..) = take service
+    let report = bucket_law_report(take s)
+    seen?
+    let (b_rev, c_rev) = (rev_b?, rev_c?)
+    if !((b_rev == 3 && c_rev == 4) || (b_rev == 4 && c_rev == 3)) {
+        fail("the two holds did not apply at revs 3 and 4")
+    }
+    if final_reg.rev != 4 || list.len(final_reg.rows) != 2 || stream_hold_rev(final_reg, StoreId(hi: 60, lo: 1)) != Some(b_rev) || stream_hold_rev(final_reg, StoreId(hi: 60, lo: 2)) != Some(c_rev) {
+        fail("a hold row was dropped or rewritten")
+    }
+    // Create, election, the held hold, the refused hold, its rebuild and the refused resend.
+    if stream_law_puts(report, reg) != (6, 4) {
+        fail("the register's PUTs are not 4 applied of 6")
+    }
+    Ok(())
+}
+
+// L90 ack rule (§12.11.4): batch 1 holds X's and Y's frames; its create is
+// held until a hold for (X, 3) applies. The service's GET after the create
+// shows the row, so X stalls and Y is acked. Red for ack-on-create, which acks
+// X from the register read before the batch.
+@test
+fn bucket_stream_ack_after_create(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = stream_dir(stream_law_sid())
+    let reg = stream_key(dir, "reg")
+    let mut name = string.with_capacity(48)
+    stream_batch_key(mut name, 1, 1)
+    let batch = stream_key(dir, name)
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: clone(batch), from: 1, count: 1, until: Applied("PUT", clone(reg), 3), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 51, None, list.new(), take holds, std.sim.world.plan(51))
+    let mut service = stream_law_lane(s.endpoint, s.time, tasks, 51, StoreId(hi: 50, lo: 1))?
+    stream_start_fresh(mut service, stream_law_due(service))?
+    let claimant = stream_law_holder_task(s, tasks, 52, StoreId(hi: 60, lo: 1), StoreId(hi: 70, lo: 0), 3, Some(clone(batch)))
+    let mut slices: List[BatchSlice] = list.new()
+    list.push(mut slices, stream_law_slice(70, stream_law_bytes(1, 3, 1)))
+    list.push(mut slices, stream_law_slice(71, stream_law_bytes(9, 5, 0)))
+    let decided = stream_cycle(mut service, slices, stream_law_due(service))
+    let held = result.unwrap(task.join(take claimant))
+    let _ = take service
+    let _ = bucket_law_report(take s)
+    held?
+    let acked = decided?
+    if list.len(acked) != 2 || acked[0] || !acked[1] {
+        fail("the ack rule acked a held Place's frames or stalled a free one")
     }
     Ok(())
 }

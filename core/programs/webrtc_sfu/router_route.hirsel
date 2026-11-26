@@ -569,7 +569,8 @@ fn spread(mut r: Router, now: u64, pi: u64, m: peer.MediaIn, handle: u64, talkin
     Ok(())
 }
 
-fn carry_room(c: Carry) -> peer.RoomId {
+/// The room a carried message names.
+pub fn carry_room(c: Carry) -> peer.RoomId {
     match c {
         Media(room: room, ..) => room,
         Wanted(room: room, ..) => room,

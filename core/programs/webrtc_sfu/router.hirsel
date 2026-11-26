@@ -170,6 +170,9 @@ type Room {
     limits: RoomLimits,
     causes: u8,
     stale: u64,
+    // Media messages of the room a unit dropped: its inbox, or the room's share of
+    // it, was full (RTC-10, Isolation item 5).
+    full: u64,
     // Fence entries (RTC-7): one per admitted id, reserved at its first join and
     // kept until the room closes. `fenced` is the highest revoked epoch, if any.
     ids: List[u64],
@@ -208,9 +211,10 @@ pub type Change: cross = Open(room: peer.RoomId, limits: RoomLimits) | Close(roo
 /// What a unit answers when it has applied a change.
 pub type Answer: cross = Done | Shaped(id: PublicationId, shape: Shape)
 
-/// The control inboxes' messages: the control unit's changes, in order, and each
-/// unit's acknowledgement once it has applied one.
-pub type Control: cross = Order(seq: u64, change: Change) | Ack(seq: u64, unit: u16, answer: Result[Answer, RouterError])
+/// The control inboxes' messages: the control unit's changes, each room's in that
+/// room's order, and each unit's acknowledgement once it has applied one. `seq`
+/// counts per room (RTC-10, The control plane).
+pub type Control: cross = Order(room: peer.RoomId, seq: u64, change: Change) | Ack(room: peer.RoomId, seq: u64, unit: u16, answer: Result[Answer, RouterError])
 
 /// The media inboxes' messages (RTC-5):
 ///
@@ -498,7 +502,7 @@ fn open(mut r: Router, room: peer.RoomId, limits: RoomLimits) -> Result[(), Rout
     list.try_reserve(mut ids, n) ?=> |c| Capacity(c)
     list.try_reserve(mut fences, n) ?=> |c| Capacity(c)
     list.try_reserve(mut r.rooms, 1) ?=> |c| Capacity(c)
-    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
+    list.push(mut r.rooms, Room(id: room, limits: limits, causes: 0, stale: 0, full: 0, ids: take ids, fenced: take fences, heard: false, tick: 0, top: list.new()))
     Ok(())
 }
 

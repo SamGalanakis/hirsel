@@ -729,7 +729,7 @@ fn who_home[M](a: Adapter[M], g: peer.Gen) -> u16 {
 /// next call.
 pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: List[runner.room_client.RoomOut[M]]) -> Result[(), router.RouterError] {
     if busy(a) {
-        if let Some(take answer) = units.finished(mut u) {
+        if let Some(take answer) = units.finished(mut u, a.room) {
             let after = option.unwrap(replace(mut a.calling, None))
             answered(mut a, take after, take answer, mut out)
         }

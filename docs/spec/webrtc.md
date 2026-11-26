@@ -768,10 +768,11 @@ pub fn resume(mut r: Router, room: peer.RoomId, cause: Cause, mut out: peer.Outb
 ```hirsel signatures webrtc_sfu/units
 pub opaque type Unit
 pub type Event = Fenced(peer.Participant) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
-pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError]
-pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError]
+pub type Plane: key { inflight: u16, rooms: u32, media_take: u32 }
+pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError]
+pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64, plane: Plane) -> Result[Unit, router.RouterError]
 pub fn begin(mut u: Unit, now: u64, take c: router.Change) -> Result[(), router.RouterError]
-pub fn finished(mut u: Unit) -> Option[Result[router.Answer, router.RouterError]]
+pub fn finished(mut u: Unit, room: peer.RoomId) -> Option[Result[router.Answer, router.RouterError]]
 pub fn call(mut u: Unit, clock: Clock, mut sock: UdpSocket, take c: router.Change) -> Result[router.Answer, router.RouterError] waits
 pub fn turn(mut u: Unit, clock: Clock, mut sock: UdpSocket, until: u64) -> Result[Option[u64], router.RouterError] waits
 pub fn take_events(mut u: Unit) -> List[Event]
@@ -1604,7 +1605,8 @@ ffmpeg decode the files in `test-vectors.sh`.
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 1); design review
 applied the same day (media-w2-spec-fix-2918). Slice P1 built 2026-11-26
-(rtc10-p1-room-keys-2930, law W35); P2 to P4 not built. Slices and laws W34 to W39 below.*
+(rtc10-p1-room-keys-2930, law W35); slice P2 built 2026-11-26 (rtc10-p2-room-control-2956,
+law W37, `units.Plane`); P3 and P4 not built. Slices and laws W34 to W39 below.*
 
 `signal.serve` (S7) serves **one** room: its `Service` names one `RoomId`, one `Dial` and one
 `RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
@@ -1741,8 +1743,8 @@ unit's port, so the port count is fixed by the pool and not by the room count. O
 
 ### The control plane
 
-Unit 0 runs every room's adapter. One-room `serve` lets one control call be
-in flight at a time (`units.begin` refuses a second with `Exists`). With many rooms, one room
+Unit 0 runs every room's adapter. Before P2, one control call was in flight at a time
+across the pool (`units.begin` refused a second with `Exists`). With many rooms, one room
 whose units are slow to acknowledge, or one room churning, would delay every other room's
 joins and revokes. RTC-10 orders control **per room**:
 
@@ -1888,7 +1890,10 @@ over `sim.udp`), unless named otherwise. Each is red on main before its slice.
   turns. Room `a` revokes a participant. *Oracle:* by hand from the control-plane rules.
   `a`'s revoke is admitted in the turn it is asked, and returns after unit 1's next
   acknowledgement, not after `b`'s backlog. Unit 1's control inbox is then filled to its
-  sized bound: no post is lost, and the pool does not fault. With one call in flight pool-wide (main), it
+  sized bound: no post is lost, and the pool does not fault. With one call per room, legal traffic
+  puts at most one order per live room in a worker's inbox, below `inflight + rooms`; the
+  P2 law therefore sizes the inboxes for `rooms` 1 and opens six rooms, so two fence posts
+  find unit 1's inbox full (room admission against `rooms` is P3). With one call in flight pool-wide (main), it
   waits for the backlog, so the law is red.
 - **W38 `pool_over_rate_publisher_costs_its_room`.** Room `a`'s publisher sends at 10 ×
   `room_pps` and room `b`'s at half `room_pps`, homed on one unit. *Oracle:* the token bucket,
@@ -2452,8 +2457,9 @@ W19, blocks, because those are soundness reds.
 
 - **Control unit.** Unit 0 is the control unit, and it is also a media unit. It makes
   every control call: `units.begin` starts one, `units.finished` answers it once every unit
-  has acknowledged, and `units.call` blocks on both over the unit's socket. One call is in
-  flight at a time.
+  has acknowledged, and `units.call` blocks on both over the unit's socket. Since RTC-10 P2
+  one call is in flight per room, within the pool's `inflight` window (RTC-10, The control
+  plane).
 - **Apply order.** A change is applied home unit first, then to the others. A change the
   home unit refuses goes no further. `Event.Fenced` is raised on the control unit once a
   revoke has returned.

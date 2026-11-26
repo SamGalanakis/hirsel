@@ -11,6 +11,7 @@ fn pool_browser(mut u: units.Unit, seed: u64, id: u64, room: peer.RoomId) -> Cli
 /// Run a control call to its end while unit 1 takes only control: its media inbox
 /// holds whatever was posted to it.
 fn settle_holding(mut w: Units, now: u64, take c: router.Change, mut log: List[Wire]) -> router.Answer {
+    let room = router.change_room(c)
     result.unwrap(units.begin(mut w.u0, now, take c))
     let mut held: List[Wire] = list.new()
     for _ in 0u64 .. 8 {
@@ -20,7 +21,7 @@ fn settle_holding(mut w: Units, now: u64, take c: router.Change, mut log: List[W
         write(mut w.u1, now, 0, false, mut log, mut held, false)
         write(mut w.u2, now, 0, false, mut log, mut held, false)
         write(mut w.u0, now, 0, false, mut log, mut held, false)
-        if let Some(a) = units.finished(mut w.u0) {
+        if let Some(a) = units.finished(mut w.u0, room) {
             return result.unwrap(a)
         }
     }
@@ -140,6 +141,130 @@ fn pool_reopened_room_takes_no_stale_message() -> Result[(), router.RouterError]
     }
     if got_rtp(mut s2, log) {
         fail("the reopened room's subscriber received the closed room's packet")
+    }
+    Ok(())
+}
+
+// ---- RTC-10 per-room control (W37) ----
+// The answers `room` has finished since the last call: each `NoParticipant` when
+// `refused`, else each `Ok`.
+fn answers_of(mut u: units.Unit, room: peer.RoomId, refused: bool) -> u64 {
+    let mut n = 0u64
+    while let Some(a) = units.finished(mut u, room) {
+        let as_derived = match a {
+            Error(NoParticipant) => refused,
+            Error(_) => false,
+            Ok(_) => !refused,
+        }
+        if !as_derived {
+            fail("a call answered other than derived")
+        }
+        n += 1
+    }
+    n
+}
+
+/// bug: one room's revoke waits for another room's control backlog (one call in
+/// flight pool-wide), or a control post that finds a full inbox is lost or faults
+/// the pool, so its call never returns.
+/// oracle: docs/spec/webrtc.md RTC-10 W37 and The control plane, by hand: one call
+/// per room, `inflight` ordinary calls across the pool, fences outside the window,
+/// and a refused post made again at the next fence point.
+@test
+fn pool_revoke_waits_for_no_other_room() -> Result[(), router.RouterError] {
+    // Three ordinary calls in flight at once. Unit 1's control inbox holds
+    // inflight + rooms = 4 orders.
+    let plane = units.Plane(inflight: 3, rooms: 1, media_take: 1024)
+    let mut w = three_units_planned(2956, U0, U1, U2, plane)
+    let mut log: List[Wire] = list.new()
+    let mut rooms: List[peer.RoomId] = list.new()
+    for _ in 0u64 .. 6 {
+        let room = option.unwrap(units.next_room(mut w.u0))
+        let _ = settle(mut w, 0, Open(room: room, limits: room_limits()), mut log)
+        list.push(mut rooms, room)
+    }
+    let a = rooms[0]
+    let b = rooms[1]
+    let c = rooms[2]
+    let d = rooms[3]
+    let e = rooms[4]
+    let f = rooms[5]
+    let p = pool_browser(mut w.u0, 2957, 1, a)
+    let _ = settle(mut w, 0, Admit(who: peer.Participant(gen: p.who, room: a), home: 0), mut log)
+    // Rooms b, c and d each hold one join in flight, homed on unit 1, which has no
+    // session parked for any of them: unit 1 refuses each `NoParticipant`. Room b
+    // has 100 joins in all.
+    let now = 0u64
+    for k in 0u64 .. 100 {
+        result.unwrap(units.begin(mut w.u0, now, Admit(who: peer.Participant(gen: gen_of(2 + k % 8), room: b), home: 1)))
+    }
+    result.unwrap(units.begin(mut w.u0, now, Admit(who: peer.Participant(gen: gen_of(2), room: c), home: 1)))
+    result.unwrap(units.begin(mut w.u0, now, Admit(who: peer.Participant(gen: gen_of(2), room: d), home: 1)))
+    // Room a revokes P with every slot taken: a fence is admitted in the turn it is
+    // asked, and unit 0, the first to apply it, has fenced P before any other unit turns.
+    result.unwrap(units.begin(mut w.u0, now, Revoke(room: a, id: 1, epoch: 1)))
+    if !router.fenced(units.router_of(w.u0), a, p.who) {
+        fail("the revoke was not admitted in the turn it was asked")
+    }
+    // Two more fences fill unit 1's inbox past its bound: four orders are waiting
+    // there, so both posts find it full.
+    result.unwrap(units.begin(mut w.u0, now, Suspend(room: e, cause: Signaling, on: true)))
+    result.unwrap(units.begin(mut w.u0, now, Suspend(room: f, cause: Signaling, on: true)))
+    // Unit 1 takes its control inbox every fifth turn; units 2 and 0 every turn.
+    let mut revoked: Option[u64] = None
+    let mut got_b = 0u64
+    let mut got_c = 0u64
+    let mut got_d = 0u64
+    let mut got_e = 0u64
+    let mut got_f = 0u64
+    for t in 1u64 .. 601u64 {
+        if t % 5 == 0 {
+            units.take_control(mut w.u1, now)
+        }
+        units.take_control(mut w.u2, now)
+        units.take_control(mut w.u0, now)
+        if revoked == None {
+            if let Some(answer) = units.finished(mut w.u0, a) {
+                if let Error(_) = answer {
+                    fail("the revoke was refused")
+                }
+                revoked = Some(t)
+                if got_b > 1 {
+                    fail("the revoke returned after more than room b's join in flight")
+                }
+            }
+        }
+        got_b += answers_of(mut w.u0, b, true)
+        got_c += answers_of(mut w.u0, c, true)
+        got_d += answers_of(mut w.u0, d, true)
+        got_e += answers_of(mut w.u0, e, false)
+        got_f += answers_of(mut w.u0, f, false)
+    }
+    // Unit 1's next acknowledgement is at turn 5.
+    if revoked != Some(5) {
+        fail("the revoke did not return at unit 1's next acknowledgement")
+    }
+    let mut fenced = false
+    for x in units.take_events(mut w.u0) {
+        if let Fenced(who) = x {
+            if who.room == a && who.gen == p.who {
+                fenced = true
+            }
+        }
+    }
+    if !fenced {
+        fail("the revoke raised no Fenced")
+    }
+    // No post was lost: every call returned, each answered as derived, and the fences
+    // that found the inbox full hold on unit 1.
+    if got_b != 100 || got_c != 1 || got_d != 1 || got_e != 1 || got_f != 1 {
+        fail("a control call never returned")
+    }
+    if !router.suspended(units.router_of(w.u1), e) || !router.suspended(units.router_of(w.u1), f) {
+        fail("a fence refused by a full inbox never reached unit 1")
+    }
+    if !router.fenced(units.router_of(w.u1), a, p.who) {
+        fail("unit 1 did not apply the revoke")
     }
     Ok(())
 }

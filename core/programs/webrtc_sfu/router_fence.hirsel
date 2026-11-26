@@ -58,6 +58,48 @@ pub fn take_build(mut r: Router, room: peer.RoomId) -> bool {
     false
 }
 
+/// Count a media message of `room` dropped because the inbox, or the room's share
+/// of it, was full. A room this unit does not have open has no count.
+pub fn count_full(mut r: Router, room: peer.RoomId) {
+    if let Some(ri) = room_at(r, room) {
+        r.rooms[ri].full += 1
+    }
+}
+
+pub fn room_full(r: Router, room: peer.RoomId) -> Option[u64] {
+    let ri = room_at(r, room)?
+    Some(r.rooms[ri].full)
+}
+
+/// The room a change names: every change names exactly one.
+pub fn change_room(c: Change) -> peer.RoomId {
+    match c {
+        Open(room: room, ..) => room,
+        Close(room: room) => room,
+        Admit(who: who, ..) => who.room,
+        Publish(room: room, ..) => room,
+        Subscribe(room: room, ..) => room,
+        Retarget(room: room, ..) => room,
+        Rebind(room: room, ..) => room,
+        Unsubscribe(room: room, ..) => room,
+        Leave(room: room, ..) => room,
+        Revoke(room: room, ..) => room,
+        Suspend(room: room, ..) => room,
+        Playout(room: room, ..) => room,
+    }
+}
+
+/// Whether a change is a fence (RTC-10, Revokes first): it is admitted before its
+/// room's other pending changes and takes no slot of the `inflight` window.
+pub fn fencing(c: Change) -> bool {
+    match c {
+        Revoke(room: _, ..) => true,
+        Suspend(room: _, ..) => true,
+        Close(room: _) => true,
+        _ => false,
+    }
+}
+
 fn count_stale(mut r: Router, ri: Option[u64]) {
     r.counts.stale += 1
     if let Some(i) = ri {

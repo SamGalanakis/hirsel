@@ -212,7 +212,7 @@ fn step_unit(mut h: Hall, k: u16) waits {
     }
     harvest(mut h, k)
     if k == 0 && h.calling != 0 {
-        if let Some(take a) = units.finished(mut h.w.u0) {
+        if let Some(take a) = units.finished(mut h.w.u0, room_id()) {
             if h.calling == 2 {
                 h.after = true
             }

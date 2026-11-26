@@ -363,10 +363,11 @@ fn order(mut rig: Rig, take change: webrtc_sfu.router.Change) {
     rig.seq += 1
     let seq = rig.seq
     let now = rig.now
-    let Some(Ack(seq: acked, unit: unit, answer: answer)) = record.control(mut rig.rec, now, Order(seq: seq, change: take change)) else {
+    let room = webrtc_sfu.router.change_room(change)
+    let Some(Ack(room: acked_room, seq: acked, unit: unit, answer: answer)) = record.control(mut rig.rec, now, Order(room: room, seq: seq, change: take change)) else {
         fail("an order was not acknowledged")
     }
-    if acked != seq || unit != 1 {
+    if acked_room != room || acked != seq || unit != 1 {
         fail("acknowledged the wrong order or unit")
     }
     if let Error(_) = answer {

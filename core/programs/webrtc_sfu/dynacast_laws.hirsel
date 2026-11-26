@@ -20,19 +20,19 @@ type Four {
 }
 
 fn four_units(seed: u64) -> Four {
-    let (d0, take c0, take m0) = result.unwrap(units.inboxes(U0))
-    let (d1, take c1, take m1) = result.unwrap(units.inboxes(U1))
-    let (d2, take c2, take m2) = result.unwrap(units.inboxes(U2))
-    let (d3, take c3, take m3) = result.unwrap(units.inboxes(U3))
+    let (d0, take c0, take m0) = result.unwrap(units.inboxes(U0, 0, 4, TEST_PLANE))
+    let (d1, take c1, take m1) = result.unwrap(units.inboxes(U1, 1, 4, TEST_PLANE))
+    let (d2, take c2, take m2) = result.unwrap(units.inboxes(U2, 2, 4, TEST_PLANE))
+    let (d3, take c3, take m3) = result.unwrap(units.inboxes(U3, 3, 4, TEST_PLANE))
     let mut doors: List[units.Doors] = list.new()
     list.push(mut doors, take d0)
     list.push(mut doors, take d1)
     list.push(mut doors, take d2)
     list.push(mut doors, take d3)
-    let u0 = result.unwrap(units.unit(provide.random(seed), 0, doors, take c0, take m0, 65536, 64))
-    let u1 = result.unwrap(units.unit(provide.random(seed + 1), 1, doors, take c1, take m1, 65536, 64))
-    let u2 = result.unwrap(units.unit(provide.random(seed + 2), 2, doors, take c2, take m2, 65536, 64))
-    let u3 = result.unwrap(units.unit(provide.random(seed + 3), 3, doors, take c3, take m3, 65536, 64))
+    let u0 = result.unwrap(units.unit(provide.random(seed), 0, doors, take c0, take m0, 65536, 64, TEST_PLANE))
+    let u1 = result.unwrap(units.unit(provide.random(seed + 1), 1, doors, take c1, take m1, 65536, 64, TEST_PLANE))
+    let u2 = result.unwrap(units.unit(provide.random(seed + 2), 2, doors, take c2, take m2, 65536, 64, TEST_PLANE))
+    let u3 = result.unwrap(units.unit(provide.random(seed + 3), 3, doors, take c3, take m3, 65536, 64, TEST_PLANE))
     Four(u0: take u0, u1: take u1, u2: take u2, u3: take u3)
 }
 
@@ -52,6 +52,7 @@ fn turn_four(mut f: Four, now: u64, rounds: u64, mut log: List[Wire]) {
 }
 
 fn settle_four(mut f: Four, now: u64, take c: router.Change, mut log: List[Wire]) -> router.Answer {
+    let room = router.change_room(c)
     result.unwrap(units.begin(mut f.u0, now, take c))
     let mut held: List[Wire] = list.new()
     for _ in 0u64 .. 8 {
@@ -63,7 +64,7 @@ fn settle_four(mut f: Four, now: u64, take c: router.Change, mut log: List[Wire]
         write(mut f.u2, now, 0, false, mut log, mut held, false)
         write(mut f.u3, now, 0, false, mut log, mut held, false)
         write(mut f.u0, now, 0, false, mut log, mut held, false)
-        if let Some(a) = units.finished(mut f.u0) {
+        if let Some(a) = units.finished(mut f.u0, room) {
             return result.unwrap(a)
         }
     }

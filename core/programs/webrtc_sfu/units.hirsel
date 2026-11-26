@@ -39,6 +39,47 @@ pub type Sent {
     data: Bytes
 }
 
+/// The control plane's sizes (RTC-10, The control plane): at most `inflight` ordinary
+/// control calls in flight across the pool, one per room, for at most `rooms` live
+/// rooms, and at most `media_take` media-inbox messages taken per turn.
+pub type Plane: key {
+    inflight: u16,
+    rooms: u32,
+    media_take: u32
+}
+
+/// One room's control calls on the control unit: its changes not yet admitted, the
+/// one in flight, and the answers not yet taken.
+type Calls {
+    room: peer.RoomId,
+    // The room's last order; `seq` counts per room.
+    seq: u64,
+    pending: List[router.Change],
+    // The call in flight: its change, the unit that applies it first, whether that
+    // unit has answered, whether it is a fence, the units it still waits on, the
+    // units whose inbox was full when it was posted, its Opus parameters and answer.
+    change: Option[router.Change],
+    home: u16,
+    rest: bool,
+    fence: bool,
+    waiting: u64,
+    unposted: u64,
+    fmtp: Option[Shared[Bytes]],
+    answer: Option[Result[router.Answer, router.RouterError]],
+    answers: List[Done]
+}
+
+type Done {
+    change: router.Change,
+    answer: Result[router.Answer, router.RouterError]
+}
+
+// The media messages of one room a unit has taken and not yet routed.
+type Held {
+    room: peer.RoomId,
+    msgs: List[router.Carried]
+}
+
 pub type Event = Fenced(peer.Participant) | Layers(room: peer.RoomId, publication: router.PublicationId, mask: u8) | Speakers(room: peer.RoomId, top: Inline[u64, 8], count: u8) | Offer(who: peer.Participant, version: u64, text: Bytes) | Shut(who: peer.Participant)
 
 pub opaque type Unit {
@@ -63,15 +104,15 @@ pub opaque type Unit {
     limit: u64,
     tapping: bool,
     tap: List[Sent],
-    // The control unit's call in flight: its change, the unit that applies it first,
-    // whether that unit has answered, the units it still waits on and the answer.
-    seq: u64,
+    plane: Plane,
     last_room: u64,
-    change: Option[router.Change],
-    home: u16,
-    rest: bool,
-    waiting: u64,
-    answer: Option[Result[router.Answer, router.RouterError]],
+    // On the control unit: each room's calls, the room served first in the last
+    // admission round, and the ordinary calls in flight.
+    calls: List[Calls],
+    cursor: Option[peer.RoomId],
+    ordinary: u64,
+    // Media taken and carried to the next turn, per room.
+    held: List[Held],
     events: List[Event]
 }
 
@@ -79,9 +120,34 @@ pub const UNIT_WAIT_NS: u64 = 50000000
 
 const INBOX: u64 = 1024
 
-/// One unit's inboxes and doors. `addr` is the address of the socket it will run on.
-pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError] {
-    let c: Result[(Client[ControlMessage], Inbox[ControlMessage]), Capacity] = conn.new(INBOX, bytes 1048576)
+const CONTROL_BYTES: u64 = 1024
+
+/// The control plane of a service of one room.
+pub const ONE_ROOM: Plane = Plane(inflight: 1, rooms: 1, media_take: 1024)
+
+/// How many control messages unit `index` of `units` units must hold: a worker every
+/// change that can be in flight to it at once, one per room plus a fence slot per
+/// room; the control unit every worker's acknowledgements of those.
+pub fn control_slots(index: u16, units: u16, plane: Plane) -> u64 {
+    let inflight: u64 = int.widen(plane.inflight)
+    let rooms: u64 = int.widen(plane.rooms)
+    let per = inflight + rooms
+    if index != 0 {
+        return per
+    }
+    let workers: u64 = if units > 1 {
+        int.widen(units - 1)
+    } else {
+        1u64
+    }
+    workers * per
+}
+
+/// One unit's inboxes and doors. `addr` is the address of the socket it will run on;
+/// the control inbox is sized by `control_slots`.
+pub fn inboxes(addr: Addr, index: u16, units: u16, plane: Plane) -> Result[(Doors, Inbox[ControlMessage], Inbox[router.Carried]), router.RouterError] {
+    let slots = control_slots(index, units, plane)
+    let c: Result[(Client[ControlMessage], Inbox[ControlMessage]), Capacity] = conn.new(slots, bytes slots * CONTROL_BYTES)
     let (control, take control_in) = c ?=> |x| Capacity(x)
     let m: Result[(Client[router.Carried], Inbox[router.Carried]), Capacity] = conn.new(INBOX, bytes 4194304)
     let (media, take media_in) = m ?=> |x| Capacity(x)
@@ -90,7 +156,7 @@ pub fn inboxes(addr: Addr) -> Result[(Doors, Inbox[ControlMessage], Inbox[router
 
 /// Unit `index` of `list.len(doors)` units, over its own inboxes. `doors` names every
 /// unit's doors in unit order, its own included.
-pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64) -> Result[Unit, router.RouterError] {
+pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[ControlMessage], take media: Inbox[router.Carried], out_bytes: u64, out_packets: u64, plane: Plane) -> Result[Unit, router.RouterError] {
     if list.len(doors) > 64 {
         return Error(Limit(64))
     }
@@ -105,7 +171,7 @@ pub fn unit(r: Random, index: u16, doors: List[Doors], take control: Inbox[Contr
     for d in doors {
         list.push(mut all, Doors(control: conn.client(d.control), media: conn.client(d.media), addr: d.addr))
     }
-    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), seq: 0, last_room: 0, change: None, home: 0, rest: false, waiting: 0, answer: None, events: list.new()))
+    Ok(Unit(r: router.on_unit(r, index), index: index, doors: take all, control: take control, media: take media, out: take out, rx: take rx, batch: take batch, slot: take slot, rung: 0, acks: list.new(), counts: UnitCounts(media: 0, asks: 0, replies: 0, forged: 0, full: 0, refused: 0, truncated: 0), limit: 0, tapping: false, tap: list.new(), plane: plane, last_room: 0, calls: list.new(), cursor: None, ordinary: 0, held: list.new(), events: list.new()))
 }
 
 pub fn router_of(u: Unit) -> View[router.Router] in u {
@@ -181,134 +247,299 @@ pub fn park(mut u: Unit, take session: peer.PeerSession) -> Result[(), router.Ro
     router.park(mut u.r, take session)
 }
 
-// ---- The control order (RTC-5), on the control unit ----
-/// Start a control call on the control unit, unit 0: the change goes to the unit
-/// that applies it first, and once that unit answers `Ok`, to every other unit. A
-/// publication's id is the control unit's to hand out. `finished` answers it.
+// ---- The control order (RTC-5, RTC-10), on the control unit ----
+/// Ask for a control call on the control unit, unit 0. The change joins its room's
+/// pending changes. Each room has at most one call in flight, and at most
+/// `inflight` ordinary calls are in flight across the pool; a fence (`Revoke`,
+/// `Suspend`, `Close`) goes before its room's other pending changes and takes no slot
+/// of that window, so it waits only for its own room's call in flight. A call goes to
+/// the unit that applies it first, and once that unit answers `Ok`, to every other
+/// unit. A publication's id is the control unit's to hand out. `finished` answers it.
 pub fn begin(mut u: Unit, now: u64, take c: router.Change) -> Result[(), router.RouterError] {
     if u.index != 0 {
         return Error(Exists)
     }
-    if let Some(_) = u.change {
-        return Error(Exists)
+    let room = router.change_room(c)
+    let i = calls_of(mut u, room)
+    list.push(mut u.calls[i].pending, c)
+    admit(mut u, now)
+    Ok(())
+}
+
+fn calls_at(u: Unit, room: peer.RoomId) -> Option[u64] {
+    for i in 0u64 .. list.len(u.calls) {
+        if u.calls[i].room == room {
+            return Some(i)
+        }
     }
+    None
+}
+
+fn calls_of(mut u: Unit, room: peer.RoomId) -> u64 {
+    if let Some(i) = calls_at(u, room) {
+        return i
+    }
+    list.push(mut u.calls, Calls(room: room, seq: 0, pending: list.new(), change: None, home: 0, rest: false, fence: false, waiting: 0, unposted: 0, fmtp: None, answer: None, answers: list.new()))
+    list.len(u.calls) - 1
+}
+
+fn flying(c: Calls) -> bool {
+    match c.change {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// The pending change a room admits next: its first fence, else its first change.
+fn next_pending(c: Calls) -> Option[u64] {
+    for j in 0u64 .. list.len(c.pending) {
+        if router.fencing(c.pending[j]) {
+            return Some(j)
+        }
+    }
+    if list.len(c.pending) != 0 {
+        Some(0)
+    } else {
+        None
+    }
+}
+
+// Admit pending changes round-robin by room, starting after the room served first in
+// the last round, until the window is full. A call that finishes at once (a pool of
+// one unit) frees its room for another round.
+fn admit(mut u: Unit, now: u64) {
+    let window: u64 = int.widen(u.plane.inflight)
+    let mut moved = true
+    while moved {
+        moved = false
+        let n = list.len(u.calls)
+        let start = match u.cursor {
+            Some(room) => match calls_at(u, room) {
+                Some(k) => k + 1,
+                None => 0,
+            },
+            None => 0,
+        }
+        let mut first: Option[peer.RoomId] = None
+        for k in 0u64 .. n {
+            let i = (start + k) % n
+            if flying(u.calls[i]) {
+                continue
+            }
+            let Some(j) = next_pending(u.calls[i]) else {
+                continue
+            }
+            let fence = router.fencing(u.calls[i].pending[j])
+            if !fence && u.ordinary >= window {
+                continue
+            }
+            let c = list.remove(mut u.calls[i].pending, j)
+            if first == None {
+                first = Some(u.calls[i].room)
+            }
+            start_call(mut u, now, i, c, fence)
+            moved = true
+        }
+        if let Some(room) = first {
+            u.cursor = Some(room)
+        }
+    }
+}
+
+fn start_call(mut u: Unit, now: u64, i: u64, c: router.Change, fence: bool) {
     let change: router.Change = match c {
         Publish(room: room, who: who, section: section, id: _, shape: _) => Publish(room: room, who: who, section: section, id: router.next_publication(mut u.r), shape: None),
         other => other,
     }
     let home = router.first(u.r, change)
-    u.seq += 1
-    let seq = u.seq
-    u.change = Some(change)
-    u.home = home
-    u.rest = false
-    u.answer = None
+    u.calls[i].seq += 1
+    let seq = u.calls[i].seq
+    let room = u.calls[i].room
+    u.calls[i].change = Some(change)
+    u.calls[i].home = home
+    u.calls[i].rest = false
+    u.calls[i].fence = fence
+    u.calls[i].unposted = 0
+    u.calls[i].fmtp = None
+    u.calls[i].answer = None
+    if !fence {
+        u.ordinary += 1
+    }
     if home == 0 {
-        u.waiting = 1
+        u.calls[i].waiting = 1
         let a = router.apply(mut u.r, now, change, mut u.out)
         let fmtp = applied_opus_fmtp(u, change, a)
-        answered(mut u, now, seq, 0, take a, fmtp)
+        answered(mut u, now, room, seq, 0, take a, fmtp)
     } else {
         let shift: u64 = int.widen(home)
-        u.waiting = 1 << shift
-        order(mut u, home, seq, change, None)
+        u.calls[i].waiting = 1 << shift
+        order(mut u, i, home)
     }
-    Ok(())
 }
 
-/// The answer of the control call in flight, once every unit it waits on has
-/// acknowledged it; a call `finished` answers is over. A revoke's answer is followed
-/// by `Event.Fenced` (RTC-7).
-pub fn finished(mut u: Unit) -> Option[Result[router.Answer, router.RouterError]] {
-    if u.waiting != 0 {
+/// The next answer of `room`'s calls, once every unit a call waits on has
+/// acknowledged it; answers come in the order the calls were admitted. A revoke's
+/// answer is followed by `Event.Fenced` (RTC-7).
+pub fn finished(mut u: Unit, room: peer.RoomId) -> Option[Result[router.Answer, router.RouterError]] {
+    let i = calls_at(u, room)?
+    if list.len(u.calls[i].answers) == 0 {
         return None
     }
-    let Some(change) = u.change else {
-        return None
-    }
-    let Some(take a) = replace(mut u.answer, None) else {
-        return None
-    }
-    u.change = None
+    let Done(change: change, answer: take a) = list.remove(mut u.calls[i].answers, 0)
     if let Ok(_) = a {
-        if let Revoke(room: room, id: id, epoch: epoch) = change {
+        if let Revoke(room: _, id: id, epoch: epoch) = change {
             list.push(mut u.events, Fenced(peer.Participant(gen: Gen(id: id, epoch: epoch), room: room)))
         }
+    }
+    // A room no longer open with nothing pending, in flight or unanswered keeps no
+    // record: room ids are never reused.
+    let idle = list.len(u.calls[i].pending) == 0 && list.len(u.calls[i].answers) == 0 && !flying(u.calls[i])
+    if idle && !router.room_open(u.r, room) {
+        let _ = list.remove(mut u.calls, i)
     }
     Some(take a)
 }
 
-fn order(mut u: Unit, to: u16, seq: u64, c: router.Change, fmtp: Option[Shared[Bytes]]) {
-    let i: u64 = int.widen(to)
-    let _ = conn.try_send(u.doors[i].control, ControlMessage(step: Order(seq: seq, change: c), opus_fmtp: clone(fmtp)))
-    u.rung = u.rung | (1 << i)
-}
-
-// One unit's answer to the call in flight.
-fn answered(mut u: Unit, now: u64, seq: u64, from: u16, take a: Result[router.Answer, router.RouterError], fmtp: Option[Shared[Bytes]]) {
-    let Some(change) = u.change else {
+// Post room `i`'s call in flight to unit `to`. A full inbox is not an error: the
+// unit stays unposted and the post is made again at the next fence point.
+fn order(mut u: Unit, i: u64, to: u16) {
+    let Some(c) = u.calls[i].change else {
         return
     }
-    if u.seq != seq {
+    let k: u64 = int.widen(to)
+    let bit: u64 = 1 << k
+    let room = u.calls[i].room
+    let seq = u.calls[i].seq
+    match conn.try_send(u.doors[k].control, ControlMessage(step: Order(room: room, seq: seq, change: c), opus_fmtp: clone(u.calls[i].fmtp))) {
+        Ok(()) => {
+            u.calls[i].unposted = u.calls[i].unposted & ~bit
+            u.rung = u.rung | bit
+        },
+        Error(Full(_)) => {
+            u.calls[i].unposted = u.calls[i].unposted | bit
+        },
+        // A unit whose inbox is gone has ended; the pool ends with it.
+        Error(Closed(_)) => {
+            u.calls[i].unposted = u.calls[i].unposted & ~bit
+        },
+    }
+}
+
+// Post again every order a full inbox refused, each room's in its order.
+fn repost(mut u: Unit) {
+    for i in 0u64 .. list.len(u.calls) {
+        let unposted = u.calls[i].unposted
+        if unposted == 0 {
+            continue
+        }
+        for k in 0u64 .. list.len(u.doors) {
+            if (unposted >> k) & 1 == 1 {
+                order(mut u, i, int.narrow(k))
+            }
+        }
+    }
+}
+
+// One unit's answer to `room`'s call in flight.
+fn answered(mut u: Unit, now: u64, room: peer.RoomId, seq: u64, from: u16, take a: Result[router.Answer, router.RouterError], fmtp: Option[Shared[Bytes]]) {
+    let Some(i) = calls_at(u, room) else {
+        return
+    }
+    let Some(change) = u.calls[i].change else {
+        return
+    }
+    if u.calls[i].seq != seq {
         return
     }
     let shift: u64 = int.widen(from)
     let bit: u64 = 1 << shift
-    u.waiting = u.waiting & ~bit
-    if u.rest {
+    u.calls[i].waiting = u.calls[i].waiting & ~bit
+    if u.calls[i].rest {
         // A unit after the first refused a change the first accepted: their states
         // differ, which the control order rules out, so the call answers the refusal.
         if let Error(_) = a {
-            u.answer = Some(take a)
+            u.calls[i].answer = Some(take a)
         }
+        complete(mut u, i)
         return
     }
-    u.rest = true
+    u.calls[i].rest = true
     let shape = match a {
         Ok(Shaped(id: _, shape: s)) => Some(s),
         Ok(Done) => None,
         Error(_) => {
-            u.answer = Some(take a)
+            u.calls[i].answer = Some(take a)
+            complete(mut u, i)
             return
         },
     }
-    u.answer = Some(take a)
+    u.calls[i].answer = Some(take a)
     let given: router.Change = match change {
-        Publish(room: room, who: who, section: section, id: id, shape: _) => Publish(room: room, who: who, section: section, id: id, shape: shape),
+        Publish(room: _, who: who, section: section, id: id, shape: _) => Publish(room: room, who: who, section: section, id: id, shape: shape),
         other => other,
     }
-    let home = u.home
+    u.calls[i].change = Some(given)
+    u.calls[i].fmtp = clone(fmtp)
+    let home = u.calls[i].home
     let n: u64 = list.len(u.doors)
-    for i in 0u64 .. n {
-        let k: u16 = int.narrow(i)
-        if k == home {
+    for k in 0u64 .. n {
+        let to: u16 = int.narrow(k)
+        if to == home {
             continue
         }
-        if k == 0 {
+        if to == 0 {
             let _ = router.apply_with_fmtp(mut u.r, now, given, fmtp, mut u.out)
         } else {
-            u.waiting = u.waiting | (1 << i)
-            order(mut u, k, seq, given, fmtp)
+            u.calls[i].waiting = u.calls[i].waiting | (1 << k)
+            order(mut u, i, to)
         }
     }
+    complete(mut u, i)
+}
+
+// A call every unit has acknowledged is over: its answer waits for `finished`, and
+// its room may admit its next change.
+fn complete(mut u: Unit, i: u64) {
+    if u.calls[i].waiting != 0 {
+        return
+    }
+    let Some(change) = replace(mut u.calls[i].change, None) else {
+        return
+    }
+    let Some(take a) = replace(mut u.calls[i].answer, None) else {
+        return
+    }
+    if !u.calls[i].fence {
+        u.ordinary -= 1
+    }
+    u.calls[i].fmtp = None
+    u.calls[i].unposted = 0
+    list.push(mut u.calls[i].answers, Done(change: change, answer: take a))
 }
 
 // ---- A unit's steps (RTC-5, A turn) ----
 /// Take every control message waiting: a fence point. Each `Order` is applied in
 /// control order, purging the queue it fences (RTC-7 step 2), and acknowledged.
+///
+/// On the control unit it also posts again what a full inbox refused, and admits
+/// the pending changes the acknowledgements made room for.
 pub fn take_control(mut u: Unit, now: u64) {
     retry_acks(mut u)
     while true {
         match conn.try_receive(u.control) {
-            Ok(ControlMessage(step: Order(seq: seq, change: c), opus_fmtp: fmtp)) => {
+            Ok(ControlMessage(step: Order(room: room, seq: seq, change: c), opus_fmtp: fmtp)) => {
                 let a = router.apply_with_fmtp(mut u.r, now, c, fmtp, mut u.out)
                 let _ = router.purge(u.r, mut u.out)
                 let published = applied_opus_fmtp(u, c, a)
-                ack(mut u, seq, take a, take published)
+                ack(mut u, room, seq, take a, take published)
             },
-            Ok(ControlMessage(step: Ack(seq: seq, unit: k, answer: a), opus_fmtp: fmtp)) => answered(mut u, now, seq, k, a, fmtp),
+            Ok(ControlMessage(step: Ack(room: room, seq: seq, unit: k, answer: a), opus_fmtp: fmtp)) => answered(mut u, now, room, seq, k, a, fmtp),
             Error(_) => break,
         }
+    }
+    if u.index == 0 {
+        repost(mut u)
+        admit(mut u, now)
     }
 }
 
@@ -319,9 +550,9 @@ fn applied_opus_fmtp(u: Unit, c: router.Change, answer: Result[router.Answer, ro
     None
 }
 
-fn ack(mut u: Unit, seq: u64, take a: Result[router.Answer, router.RouterError], take fmtp: Option[Shared[Bytes]]) {
+fn ack(mut u: Unit, room: peer.RoomId, seq: u64, take a: Result[router.Answer, router.RouterError], take fmtp: Option[Shared[Bytes]]) {
     let index = u.index
-    list.push(mut u.acks, ControlMessage(step: Ack(seq: seq, unit: index, answer: take a), opus_fmtp: take fmtp))
+    list.push(mut u.acks, ControlMessage(step: Ack(room: room, seq: seq, unit: index, answer: take a), opus_fmtp: take fmtp))
     retry_acks(mut u)
 }
 
@@ -341,12 +572,20 @@ fn retry_acks(mut u: Unit) {
     }
 }
 
-/// Take every media-inbox message waiting, each checked against the fences when it
-/// is taken (RTC-7 step 4).
+/// Take at most `media_take` media-inbox messages and route them fairly by room
+/// (RTC-10, Isolation item 5): each room's messages queue in order, and each turn
+/// routes at most `media_take / r` of each of the `r` rooms with messages waiting,
+/// carrying the rest to the next turn ahead of new messages. A room whose queue is
+/// past its share drops what it is sent and counts it `full`. Each message is checked
+/// against the fences when it is routed (RTC-7 step 4); one of a room this unit does
+/// not have open is routed at once, which drops it as stale.
 pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
-    while true {
+    let budget: u64 = int.widen(u.plane.media_take)
+    let mut taken = 0u64
+    while taken < budget {
         match conn.try_receive(u.media) {
             Ok(take m) => {
+                taken += 1
                 match m.carry {
                     Media(room: _, publication: _, src: _, m: _, handle: _, speaking: _, rate: _, dropped: _) => {
                         u.counts.media += 1
@@ -359,12 +598,66 @@ pub fn take_media(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
                     },
                     _ => {},
                 }
-                router.accept(mut u.r, now, take m, mut u.out)?
+                let room = router.carry_room(m.carry)
+                if router.room_open(u.r, room) {
+                    hold(mut u, room, take m)
+                } else {
+                    router.accept(mut u.r, now, take m, mut u.out)?
+                }
             },
             Error(_) => break,
         }
     }
+    route_held(mut u, now)?
     deal(mut u)
+    Ok(())
+}
+
+fn share(budget: u64, rooms: u64) -> u64 {
+    if rooms == 0 || budget / rooms == 0 {
+        1u64
+    } else {
+        budget / rooms
+    }
+}
+
+fn hold(mut u: Unit, room: peer.RoomId, take m: router.Carried) {
+    let mut at: Option[u64] = None
+    for q in 0u64 .. list.len(u.held) {
+        if u.held[q].room == room {
+            at = Some(q)
+        }
+    }
+    let q = match at {
+        Some(q) => q,
+        None => {
+            list.push(mut u.held, Held(room: room, msgs: list.new()))
+            list.len(u.held) - 1
+        },
+    }
+    let cap = share(int.widen(u.plane.media_take), list.len(u.held))
+    if list.len(u.held[q].msgs) >= cap {
+        u.counts.full += 1
+        router.count_full(mut u.r, room)
+        return
+    }
+    list.push(mut u.held[q].msgs, take m)
+}
+
+// Route each waiting room's share, in room order, and keep the rest.
+fn route_held(mut u: Unit, now: u64) -> Result[(), router.RouterError] {
+    let quota = share(int.widen(u.plane.media_take), list.len(u.held))
+    for q in 0u64 .. list.len(u.held) {
+        let mut k = 0u64
+        while k < quota && list.len(u.held[q].msgs) != 0 {
+            let m = list.remove(mut u.held[q].msgs, 0)
+            router.accept(mut u.r, now, take m, mut u.out)?
+            k += 1
+        }
+    }
+    list.retain(mut u.held, scoped fn(h: Held) -> bool {
+        list.len(h.msgs) != 0
+    })
     Ok(())
 }
 
@@ -419,12 +712,14 @@ fn deal(mut u: Unit) {
         if i >= list.len(u.doors) || to == u.index {
             continue
         }
+        let room = router.carry_room(m.carry)
         match conn.try_send(u.doors[i].media, take m) {
             Ok(()) => {
                 u.rung = u.rung | (1 << i)
             },
             Error(_) => {
                 u.counts.full += 1
+                router.count_full(mut u.r, room)
             },
         }
     }
@@ -584,10 +879,11 @@ pub fn run(mut u: Unit, clock: Clock, mut sock: UdpSocket, turns: u64) -> Result
 /// every unit it waits on has acknowledged it.
 pub fn call(mut u: Unit, clock: Clock, mut sock: UdpSocket, take c: router.Change) -> Result[router.Answer, router.RouterError] waits {
     let now = host.mono_ns(clock)
+    let room = router.change_room(c)
     begin(mut u, now, take c)?
     send(mut u, clock, mut sock, now)
     while true {
-        if let Some(a) = finished(mut u) {
+        if let Some(a) = finished(mut u, room) {
             return a
         }
         let at = host.mono_ns(clock)

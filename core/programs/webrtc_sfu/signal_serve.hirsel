@@ -162,7 +162,7 @@ fn wait_until(wake: Option[u64], now: u64) -> u64 {
 fn unit_task(take s: Start) -> Result[(), ServeError] waits {
     let Start(index: index, units: n, bind: bind, net: net, clock: clock, random: random, hello: take hello, policy: take policy, session: session, until: until) = take s
     let (take opened, at) = host.udp_bind(net, bind, SOCKET) ?=> |e| Bind(e)
-    let (doors, take control, take media) = units.inboxes(at) ?=> |take e| Router(e)
+    let (doors, take control, take media) = units.inboxes(at, index, n, units.ONE_ROOM) ?=> |take e| Router(e)
     let rc: Result[(Client[Sibling], Inbox[Sibling]), Capacity] = conn.new(64, bytes 65536)
     let (roster, take siblings) = rc ?=> |c| Router(Capacity(c))
     let bc: Result[(Client[Build], Inbox[Build]), Capacity] = conn.new(64, bytes 4194304)
@@ -183,7 +183,7 @@ fn unit_task(take s: Start) -> Result[(), ServeError] waits {
     let Some(take report) = done else {
         return Error(Units)
     }
-    let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS) ?=> |take e| Router(e)
+    let mut u = units.unit(random, index, all, take control, take media, OUT_BYTES, OUT_PACKETS, units.ONE_ROOM) ?=> |take e| Router(e)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: take policy, limits: session)
     let mut sock = take opened
     let mut wake: Option[u64] = None
@@ -219,7 +219,7 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
         return Error(Units)
     }
     let (take opened, at) = host.udp_bind(net, binds[0], SOCKET) ?=> |e| Bind(e)
-    let (doors0, take control, take media) = units.inboxes(at) ?=> |take e| Router(e)
+    let (doors0, take control, take media) = units.inboxes(at, 0, n, units.ONE_ROOM) ?=> |take e| Router(e)
     let hc: Result[(Client[Hello], Inbox[Hello]), Capacity] = conn.new(64, bytes 65536)
     let (hello, take hellos) = hc ?=> |c| Router(Capacity(c))
     let dc: Result[(Client[Finished], Inbox[Finished]), Capacity] = conn.new(1024, bytes 4194304)
@@ -268,7 +268,7 @@ pub fn serve[M: codec](take s: Service[M]) -> Result[(), ServeError] waits {
             }
         }
     }
-    let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS) ?=> |take e| Router(e)
+    let mut u = units.unit(random, 0, all, take control, take media, OUT_BYTES, OUT_PACKETS, units.ONE_ROOM) ?=> |take e| Router(e)
     let home = Home(id: unit_identity(random, clock)?, at: at, policy: policy, limits: session)
     let Some(room) = units.next_room(mut u) else {
         return Error(Units)

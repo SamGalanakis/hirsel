@@ -125,7 +125,7 @@ pub fn take_output(mut rec: Recorder) -> List[Output] {
 /// a suspension covers lands in a file after the acknowledgement (RTC-7).
 pub fn control(mut rec: Recorder, now: u64, take c: webrtc_sfu.router.Control) -> Option[webrtc_sfu.router.Control] {
     match take c {
-        Order(seq: seq, change: take change) => {
+        Order(room: order_room, seq: seq, change: take change) => {
             let paused = match change {
                 Suspend(room: room, cause: _, on: true) => Some(room),
                 _ => None,
@@ -143,9 +143,9 @@ pub fn control(mut rec: Recorder, now: u64, take c: webrtc_sfu.router.Control) -
             }
             settle(mut rec)
             let unit = rec.config.unit
-            Some(Ack(seq: seq, unit: unit, answer: take answer))
+            Some(Ack(room: order_room, seq: seq, unit: unit, answer: take answer))
         },
-        Ack(seq: _, unit: _, answer: _) => None,
+        Ack(room: _, seq: _, unit: _, answer: _) => None,
     }
 }
 

@@ -22,6 +22,11 @@ std = { major = 1 }
 "store-journal-worker.hirsel" = "store"
 "store-journal-status.hirsel" = "store"
 "store-journal-recover.hirsel" = "store"
+"store-capture.hirsel" = "store"
+"store-capture-journal.hirsel" = "store"
+"store-capture-pages.hirsel" = "store"
+"store-capture-catalog.hirsel" = "store"
+"store-capture-describe.hirsel" = "store"
 "store-pages.hirsel" = "store"
 "store-changes.hirsel" = "store"
 "store-tiered.hirsel" = "store"
@@ -128,6 +133,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"store_capture_laws.hirsel" = "store"
 "store_size_laws.hirsel" = "store"
 "location_laws.hirsel" = "store"
 "assembly_laws.hirsel" = "store"
@@ -605,3 +611,9 @@ limit = 1073741824
 
 [tests.runs."store@1/store/bucket_stream_cost_window"]
 limit = 1073741824
+
+[tests.runs."store@1/store/need_covers"]
+limit = 536870912
+
+[tests.runs."store@1/store/describe_suffix_free"]
+limit = 536870912

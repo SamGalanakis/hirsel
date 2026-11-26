@@ -33,6 +33,7 @@ grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Net=Listen 12
 dirs = ["."]
 
 [tests.sources]
+"store_tool_laws.hirsel" = "store_tool"
 "local-laws.hirsel" = "local_laws"
 "local-progress-fixture.hirsel" = "local_laws"
 "local-fd-laws.hirsel" = "local_laws"
@@ -101,3 +102,6 @@ limit = 134217728
 
 [tests.runs."platform@1/local_laws/test_local_units_run_together"]
 limit = 268435456
+
+[tests.runs."platform@1/store_tool/describe_matches_open"]
+limit = 536870912

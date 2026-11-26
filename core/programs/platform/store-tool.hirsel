@@ -8,7 +8,7 @@
 // `restored <store id> head <H>`. Exit 0 done, 1 refused (details on stderr), 2 usage,
 // 75 the store is held by a writer.
 //
-// `inspect` and `stats` (§15.6) read fd 3 through a read-only open, beside a live
+// `inspect` and `stats` (§15.6) capture fd 3, beside a live
 // writer; `verify` scrubs fd 3, a cloned image the driver made, and exits 1 on a
 // fault. Each ignores fd 4, which the driver points at fd 3.
 fn id_hex(hi: u64, lo: u64) -> String {
@@ -143,101 +143,171 @@ fn form_text(form: store.EntryForm) -> String {
     }
 }
 
-fn state_text(state: store.IndexState) -> String {
+fn state_text(state: u8) -> String {
     match state {
-        Public => "Public",
-        Backfilling(_) => "Backfilling",
-        Failed(_, _) => "Failed",
+        0 => "Public",
+        3 => "Failed",
+        _ => "Backfilling",
     }
 }
 
-// `inspect`: every catalog record (tables, cells, logs, indexes and aggregates,
-// with each index's state and revision) and each collection's row count.
-// `stats` adds each collection's row charge and the directory's journal and pack
-// files. A read-only open has no writer state, so pins and Accounts are not shown.
-fn describe(d: Dir, c: Clock, options: store.Options, stats: bool, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
-    let opened = match store.open_read_only(d, c, options) {
-        Ok(take ro) => take ro,
-        Error(e) => return refused(err, store_refusal(e)),
+fn describe_entry(entry: store.DescribeEntry, stats: bool) -> String {
+    let mut text = string.from(form_text(entry.form))
+    string.push(mut text, " ")
+    if entry.table != entry.name {
+        string.push(mut text, entry.table)
+        string.push(mut text, ".")
     }
-    let s = store.read_only_snapshot(opened)
-    let entries = match store.catalog_entries(s) {
-        Ok(take found) => take found,
-        Error(e) => return refused(err, store_refusal(e)),
+    string.push(mut text, entry.name)
+    let derived = match entry.form {
+        IndexForm(_) => true,
+        AggregateForm => true,
+        _ => false,
     }
-    let mut text = string.from("store ")
-    let id = store.snapshot_identity(s)
-    string.push(mut text, id_hex(id.hi, id.lo))
-    string.push(mut text, " head ")
-    string.push_u64(mut text, store.version(s))
-    string.push(mut text, "\n")
-    for entry in entries {
-        string.push(mut text, form_text(entry.form))
+    if derived {
         string.push(mut text, " ")
-        if entry.table != entry.name {
-            string.push(mut text, entry.table)
-            string.push(mut text, ".")
+        string.push(mut text, state_text(entry.state))
+        if list.len(entry.revision) != 0 {
+            string.push(mut text, " revision ")
+            string.push(mut text, std.hex.encode(entry.revision))
         }
-        string.push(mut text, entry.name)
-        let derived = match entry.form {
-            IndexForm(_) => true,
-            AggregateForm => true,
-            _ => false,
-        }
-        if derived {
-            string.push(mut text, " ")
-            string.push(mut text, state_text(entry.state))
-            if list.len(entry.revision) != 0 {
-                string.push(mut text, " revision ")
-                string.push(mut text, std.hex.encode(entry.revision))
-            }
-        }
-        string.push(mut text, ": ")
-        string.push_u64(mut text, entry.rows)
-        string.push(mut text, " rows")
-        if stats {
-            string.push(mut text, ", ")
-            string.push_u64(mut text, entry.charge)
-            string.push(mut text, " bytes")
-        }
-        if entry.tiered {
-            string.push(mut text, ", Tiered")
-        }
-        string.push(mut text, "\n")
     }
+    string.push(mut text, ": ")
+    string.push_u64(mut text, entry.rows)
+    string.push(mut text, " rows")
     if stats {
-        let listed = match std.dir.list(d, None) {
-            Ok(take found) => take found,
-            Error(_) => return refused(err, "Io"),
-        }
-        let mut journal = (0u64, 0u64)
-        let mut packs = (0u64, 0u64)
-        for file in listed {
-            let journal_file = string.starts_with(file.name, "j-") && !string.ends_with(file.name, ".end")
-            if !journal_file && !string.starts_with(file.name, "p-") {
-                continue
-            }
-            let size = match std.dir.stat(d, file.name) {
-                Ok(seen) => seen.size,
-                Error(_) => return refused(err, "Io"),
-            }
-            if journal_file {
-                journal = (journal.0 + 1u64, journal.1 + size)
-            } else {
-                packs = (packs.0 + 1u64, packs.1 + size)
-            }
-        }
-        string.push(mut text, "journal: ")
-        string.push_u64(mut text, journal.0)
-        string.push(mut text, " segments, ")
-        string.push_u64(mut text, journal.1)
-        string.push(mut text, " bytes\npacks: ")
-        string.push_u64(mut text, packs.0)
-        string.push(mut text, " files, ")
-        string.push_u64(mut text, packs.1)
-        string.push(mut text, " bytes\naccounts and pins: not shown by a read-only open\n")
+        string.push(mut text, ", ")
+        string.push_u64(mut text, entry.charge)
+        string.push(mut text, " bytes")
     }
-    say(out, text)
+    take text
+}
+
+fn describe_fact(fact: store.DescribeLine, stats: bool, out: Stdout, err: Stderr) -> Result[(), store.Error] waits {
+    let rendered = match fact {
+        DescribeHead(id, head) => {
+            let mut text = string.from("store ")
+            string.push(mut text, id_hex(id.hi, id.lo))
+            string.push(mut text, " head ")
+            string.push_u64(mut text, head)
+            take text
+        },
+        DescribeCollection(entry) => describe_entry(entry, stats),
+        DescribeOpenPacks(held) => {
+            let mut text = string.from("hirsel store: ")
+            string.push_u64(mut text, held)
+            string.push(mut text, " open packs\n")
+            let _ = stderr.write(err, text)
+            return Ok(())
+        },
+        _ if !stats => return Ok(()),
+        DescribeAccount(generation, amount) => {
+            let mut text = string.from("account at cut ")
+            string.push_u64(mut text, generation)
+            string.push(mut text, ": ")
+            string.push_u64(mut text, amount)
+            take text
+        },
+        DescribeJournal(summary) => {
+            let mut text = string.from("journal: ")
+            string.push_u64(mut text, summary.segments)
+            string.push(mut text, " segments, ")
+            string.push_u64(mut text, summary.journal_bytes)
+            string.push(mut text, " bytes, ")
+            string.push_u64(mut text, summary.frames)
+            string.push(mut text, " frames")
+            take text
+        },
+        DescribePin(owner, name, branch_id, version) => {
+            let mut text = string.from("pin ")
+            string.push(mut text, match owner {
+                1 => "application ",
+                2 => "projector ",
+                _ => "import ",
+            })
+            string.push(mut text, name)
+            string.push(mut text, " branch ")
+            string.push_u64(mut text, int.widen(branch_id))
+            string.push(mut text, " version ")
+            string.push_u64(mut text, version)
+            take text
+        },
+        DescribePack(seq, class, frames, live, amount) => {
+            let mut text = string.from("p-")
+            string.push_u64(mut text, seq)
+            string.push(mut text, " class ")
+            string.push_u64(mut text, int.widen(class))
+            string.push(mut text, " frames ")
+            string.push_u64(mut text, int.widen(frames))
+            string.push(mut text, " live ")
+            string.push_u64(mut text, live)
+            string.push(mut text, " bytes ")
+            string.push_u64(mut text, amount)
+            take text
+        },
+    }
+    let mut text = take rendered
+    string.push(mut text, "\n")
+    match stdout.write(out, text) {
+        Ok(_) => Ok(()),
+        Error(_) => Error(Io(Closed)),
+    }
+}
+
+fn describe_shortage(err: Stderr, verb: String, c: Capacity, parts: List[store.Part]) -> Result[(), Exit] waits {
+    let mut text = string.from("hirsel store: refused: ")
+    string.push(mut text, full_refusal(Allocation(c)))
+    string.push(mut text, ": ")
+    string.push(mut text, verb)
+    string.push(mut text, " needs these parts\n")
+    let _ = stderr.write(err, text)
+    for part in parts {
+        let mut detail = string.from("  ")
+        string.push(mut detail, part.name)
+        string.push(mut detail, " ")
+        string.push_u64(mut detail, part.amount)
+        string.push(mut detail, "\n")
+        let _ = stderr.write(err, detail)
+    }
+    let _ = stderr.write(err, "hirsel store: no store_tool route reads a catalog this large\n")
+    Error(Exit(status: 1u8))
+}
+
+fn describe(d: Dir, c: Clock, verb: String, out: Stdout, err: Stderr) -> Result[(), Exit] waits {
+    let stats = verb == "stats"
+    loop {
+        let prepared = match store.prepare(d, c, Describe) {
+            Ok(take selected) => take selected,
+            Error(Full(Allocation(cause))) => {
+                let mut parts: List[store.Part] = list.with_capacity(1)
+                list.push(mut parts, store.Part(name: "bootstrap", amount: cause.requested))
+                return describe_shortage(err, verb, cause, parts)
+            },
+            Error(Io(Other(24))) => return refused(err, "Io(Other(24)): EMFILE, 0 open packs"),
+            Error(e) => return refused(err, store_refusal(e)),
+        }
+        let budget = store.capture_need(prepared)
+        let result = bound bytes budget.total {
+            store.describe_capture(take prepared, scoped fn(fact: store.DescribeLine) -> Result[(), store.Error] waits {
+                describe_fact(fact, stats, out, err)
+            })
+        }
+        match take result {
+            Error(cause) => return describe_shortage(err, verb, cause, budget.parts),
+            Ok(Error(Changed(file))) if file == "MANIFEST" => continue,
+            Ok(Error(Io(Other(24)))) => return refused(err, "Io(Other(24)): EMFILE"),
+            Ok(Error(e)) => return refused(err, store_refusal(e)),
+            Ok(Ok(_)) => {
+                let mut text = string.from("hirsel store ")
+                string.push(mut text, verb)
+                string.push(mut text, " needs ")
+                string.push_u64(mut text, budget.total)
+                string.push(mut text, " bytes\n")
+                let _ = stderr.write(err, text)
+                return Ok(())
+            },
+        }
+    }
 }
 
 // `verify` without a release: one full scrub tour over the image, every
@@ -298,7 +368,7 @@ pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, 
         return backup(from, to, c, r, tasks, take options, out, err)
     }
     if verb == "inspect" || verb == "stats" {
-        return describe(from, c, take options, verb == "stats", out, err)
+        return describe(from, c, verb, out, err)
     }
     if verb == "verify" {
         return scrub_image(from, c, r, tasks, take options, out, err)

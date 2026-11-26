@@ -7677,11 +7677,67 @@ Two kinds of command read a store for an operator. `inspect`, `stats` and `verif
 
 | Form | Runs | Does |
 |---|---|---|
-| `hirsel store inspect DIR` | `store_tool`, a read-only open | prints `store <id> head <H>`, then one line per table and index: its form, name, state (`Backfilling`, `Public`, `Failed`), revision, exact row count and charged bytes, and `Tiered` for a Tiered table |
-| `hirsel store stats DIR` | `store_tool`, a read-only open | the `inspect` lines, plus the journal's segments and bytes and the pack count |
+| `hirsel store inspect DIR` | `store_tool`, a prepared Directory capture | prints `store <id> head <H>`, then one line per collection: its form, name, exact row count and, for indexes and aggregates, state and revision |
+| `hirsel store stats DIR` | `store_tool`, a prepared Directory capture | the `inspect` lines with each collection's charged bytes, plus the journal prefix, the account at the cut, pins and pack rows |
 | `hirsel store verify DIR` | `store_tool`, on a copy | a full scrub (§11.17) of a copy of the image; prints each fault and `verify: scrubbed N bytes, F faults` |
 | `hirsel store verify DIR --release EXE` | the release, on a copy | the checks below, in `Report` mode |
 | `hirsel store repair DIR --release EXE` | the release, in place | the repair below |
+
+**Prepared description.** The tool owns the selected MANIFEST bytes and the journal handles. It
+counts the segments before reserving their table. In the collection pass each successor HEADER
+supplies its predecessor's end. The terminal segment ends at END while a live writer holds its
+fence. If the shared fence is free, the tool syncs the handle and fixes the bound at the first
+torn frame or EOF. It syncs the directory and rechecks MANIFEST before accepting the selection.
+A changed MANIFEST or growth beyond the measured segment count restarts the capture.
+
+The counting pass walks the packs, retired, deferred-free and lineage lists by exact page
+location. It retains counts, not the lists. Describe opens packs only when it reaches them,
+checks AP20 on the pages it reads and holds those file handles through rendering. A missing pack
+with a changed MANIFEST restarts. A missing pack with unchanged MANIFEST is corruption. Describe
+opens no collection's row tree. Application point reads still use the §11.19 read-only opener.
+
+**Suffix and output.** Describe checksums frames through the fixed bounds and checks consecutive
+main versions. It skips FORK, non-main commits, stream ops and keyed edits. The main data
+iterator reads op offsets and lengths from the frame buffer. A put adds one row only for a
+zero prior and adds its charge less the prior's charge. A delete subtracts the old row and
+charge when its prior is nonzero. It trusts the recorded priors and the trim's dropped charge.
+For a Log, the fold records the maximum appended sequence plus one and the maximum trim floor.
+The final first is max(cut first, floor). The final next is max(cut next, floor, observed next).
+Their difference is the row count, including when a trim masks staged appends and advances
+the sequence without writing their puts. The trim subtracts its recorded dropped charge.
+
+Describe streams the main catalog and looks up one collection descriptor at a time. It skips
+schema payloads. An out-of-line catalog entry is checksummed through the held pack in 65,536-byte
+chunks, with only its description projected. Stats prints the MANIFEST account labelled
+`at cut G`, then the segment, byte and frame totals for the selected suffix, each pin's owner,
+name, branch and version, and the listed pack rows with class, frames, live and bytes.
+Describe checks the files it reads. Use verify to check the rest of the image.
+
+**Reservation.** A fixed `BOOTSTRAP` scope covers measurement. After preparation the tool
+reserves the sum of the parts below to describe the selected capture. It prints that need on
+success. On a reservation refusal it prints `Full(Allocation(requested, available))`, the parts
+and `no store_tool route reads a catalog this large`. Overflow refuses with the maximum u64
+figure. There is no row, stamp or suffix byte term.
+
+| Part | Describe bytes |
+|---|---|
+| bootstrap | two rounded MANIFEST file lengths, plus 2 × recorded meta + 4,096 for its decoded record, 1,048,672 for END, the recorded frame limit and the page path |
+| segments | 48 per selected segment |
+| held | 32 per pack-list row or reached page of any of the four lists |
+| deltas | 32 × next_table |
+| catalog | 32 per catalog record plus the sum of rounded name lengths |
+| chunk | 65,536 for the journal or catalog BLOB reader |
+| scratch | 8,192 for the projected revision and one output line |
+
+The page path is 65 × (8,400 + `PAGE_DECODED`). Under MEM-24, `std.page.decode` retains the
+input buffer and allocates no entry table. When the walk asks for an entry, the key and inline
+value add at most r8(4,096) + r8(1,024) bytes. `PAGE_DECODED` is 5,120 for that copied entry.
+`MANIFEST_DECODED` is 2 × 16,777,216 + 4,096 at the format ceiling. Each decoded branch or pin slot
+uses at most 188 bytes per 130 or more encoded bytes. Names are charged once at their rounded
+width. Keyed-root arrays hold seven 36-byte pointers per 256 encoded bytes. The projector keeps
+at most 416 revision bytes (the extractor revision and four codec revisions), with at most
+832 hex bytes in the formatted output. The fixed bootstrap uses the maximum MANIFEST file
+size, meta and frame limits.
 
 **Copies.** `verify` never runs on the store itself. The driver copies the image into a fresh directory under `LOCK` held shared, as `dry-run` does, and the command reads the copy. A store held by a writer exits 75 and is not read. `repair` opens the store itself; a held store exits 75.
 
@@ -7700,7 +7756,6 @@ It prints `changed X` for each changed revision, each scrub fault, `finding IX M
 **Not built.**
 - A live store. `verify --release` and `repair` read a stopped store or a copy; a store a place serves is reached through its head, as §15.4's served backup is. The head already drives the walker and builds on idle turns (v2.123), and its counts are in the runner's `Status.upkeep`.
 - Aggregate indexes. The walker skips them, and `verify` names each as not walked. A third phase that folds a table's rows into each group's sum would need either one slice that reads the whole table, which breaks the walk's bound per slice, or a fold that spans slices, which reads more than one head.
-- Accounts and pins. A read-only open does not see them; `stats` says so.
 
 | Seeded bug | What the laws show |
 |---|---|

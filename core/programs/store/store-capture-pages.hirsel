@@ -1,0 +1,244 @@
+type HeldCapturePack {
+    seq: u64,
+    file: HostFile,
+    class: u8,
+    listed: bool
+}
+
+type CapturePacks {
+    dir: Dir,
+    id: StoreId,
+    next_pack: u64,
+    next_stamp: u64,
+    hold: bool,
+    files: List[HeldCapturePack]
+}
+
+fn capture_packs(d: Dir, id: StoreId, m: PageManifest, hold: bool, slots: u64) -> CapturePacks {
+    CapturePacks(dir: d, id: id, next_pack: m.next_pack, next_stamp: m.next_stamp, hold: hold, files: list.with_capacity(slots))
+}
+
+fn capture_open_pack(packs: CapturePacks, path: String, seq: u64) -> Result[HostFile, Error] waits {
+    let mut file = disk_io(host.open(packs.dir, path, Read))?
+    let _ = disk_read_header(path, read_disk_bytes(mut file, path, 0, 72)?, 3, Some(seq), Some(packs.id))?
+    Ok(take file)
+}
+
+fn capture_pack_slot(files: List[HeldCapturePack], seq: u64) -> u64 {
+    let mut lo = 0u64
+    let mut hi = list.len(files)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if files[mid].seq < seq {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    lo
+}
+
+fn capture_with_pack[T](mut packs: CapturePacks, path: String, seq: u64, stamp: u64, at: u64, class: u8, read: scoped[view] fn(mut HostFile) -> Result[T, Error] waits) -> Result[T, Error] waits {
+    if seq == 0 || seq >= packs.next_pack || stamp >= packs.next_stamp || at < 72 {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    if !packs.hold {
+        let mut file = capture_open_pack(packs, path, seq)?
+        return read(mut file)
+    }
+    let lo = capture_pack_slot(packs.files, seq)
+    if lo == list.len(packs.files) || packs.files[lo].seq != seq {
+        if list.len(packs.files) == list.capacity(packs.files) {
+            return Error(disk_fault(path, at, Dangling(stamp)))
+        }
+        let file = capture_open_pack(packs, path, seq)?
+        list.insert(mut packs.files, lo, HeldCapturePack(seq: seq, file: take file, class: class, listed: false))
+    }
+    if packs.files[lo].class != class {
+        return Error(disk_fault(path, at, Malformed))
+    }
+    read(mut packs.files[lo].file)
+}
+
+fn capture_page(mut packs: CapturePacks, ptr: std.page.PagePtr, domain: std.page.Domain, class: u8, expected_level: Option[u8]) -> Result[std.page.Image, Error] waits {
+    let path = paged_pack_path(ptr.pack)?
+    let id = packs.id
+    let width: u64 = int.widen(ptr.len)
+    if width > PAGE_LIMIT {
+        return Error(disk_fault(path, ptr.offset, Malformed))
+    }
+    let image = capture_with_pack(mut packs, path, ptr.pack, ptr.stamp, ptr.offset, class, scoped fn(mut file: HostFile) -> Result[std.page.Image, Error] waits {
+        let size = disk_io(host.stat_file(mut file))?.size
+        if ptr.offset > size || 16 + width > size - ptr.offset {
+            return Error(disk_fault(path, ptr.offset, Malformed))
+        }
+        let raw = read_disk_bytes(mut file, path, ptr.offset, 16 + width)?
+        {
+            let head = list.slice(raw, 0, 16)
+            let frame = disk_read_frame_head(path, head, ptr.offset)?
+            let payload = list.slice(raw, 16, 16 + width)
+            let ctx = DiskContext(store: id, role: 3, seq: ptr.pack)
+            disk_check_frame_kind(path, ctx, frame.kind, frame.flags, ptr.offset)?
+            if frame.kind != 0x0021 || frame.size != width || capacity(disk_check(ctx, ptr.offset, head, payload))? != frame.checksum {
+                return Error(disk_fault(path, ptr.offset, Checksum))
+            }
+            check_page_pointer(path, ptr, payload)?
+        }
+        let mut buffer = take raw
+        list.copy_within(mut buffer, 16, 0, width)
+        list.truncate(mut buffer, width)
+        decode_located_page(path, ptr.offset, take buffer, domain)
+    })?
+    let height = std.page.level(image)
+    if height >= 65 || (if let Some(wanted) = expected_level {
+        wanted != height
+    } else {
+        false
+    }) {
+        return Error(disk_fault(path, ptr.offset, Malformed))
+    }
+    Ok(take image)
+}
+
+fn capture_walk_pages[S](mut packs: CapturePacks, ptr: std.page.PagePtr, class: u8, expected_level: Option[u8], mut state: S, mut pages: u64, row: scoped[view] fn(mut CapturePacks, mut S, String, u64, Bytes, std.page.Cell) -> Result[(), Error] waits) -> Result[(), Error] waits {
+    if ptr.stamp == 0 {
+        return Ok(())
+    }
+    let path = paged_pack_path(ptr.pack)?
+    let image = capture_page(mut packs, ptr, Unprefixed, class, expected_level)?
+    pages = capture_add(pages, 1)
+    let height = std.page.level(image)
+    for i in 0u64 .. std.page.count(image) {
+        if height != 0 {
+            let PageEdge(child) = option.unwrap(std.page.owning_edge(image, i)) else {
+                return Error(disk_fault(path, ptr.offset, Malformed))
+            }
+            page_edge_order(path, ptr, child)?
+            capture_walk_pages(mut packs, child, class, Some(height - 1), mut state, mut pages, row)?
+        } else {
+            let slot = option.unwrap(std.page.entry(image, i))
+            row(mut packs, mut state, path, ptr.offset, slot.key, slot.cell)?
+        }
+    }
+    Ok(())
+}
+
+type CaptureListCount: send {
+    pack_rows: u64,
+    rows: u64,
+    pages: u64
+}
+
+type CaptureListWalk {
+    previous: Bytes,
+    rows: u64
+}
+
+fn capture_lists(mut packs: CapturePacks, m: PageManifest) -> Result[CaptureListCount, Error] waits {
+    let mut pages = 0u64
+    let mut rows = 0u64
+    let mut pack_rows = 0u64
+    for (kind, root) in[(PackList, m.pack_root), (RetiredList, m.retirement_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
+        let mut tally = CaptureListWalk(previous: list.new(), rows: 0)
+        capture_walk_pages(mut packs, root, 2, None, mut tally, mut pages, scoped fn(mut _packs: CapturePacks, mut walk: CaptureListWalk, path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
+            let raw = match cell_value {
+                InlineValue(value) => value,
+                _ => return Error(disk_fault(path, at, Malformed)),
+            }
+            if list.len(walk.previous) != 0 && order.compare(walk.previous, key) != Less {
+                return Error(disk_fault(path, at, Order))
+            }
+            if let LineageList = kind {
+                let _ = decode_lineage_row(path, at, key, raw)?
+            } else {
+                if list.len(key) != 8 {
+                    return Error(disk_fault(path, at, Malformed))
+                }
+                let seq: u64 = list.word_be(key, 0)
+                match kind {
+                    PackList => {
+                        let pack = pack_record(path, at, raw)?
+                        if pack.class >= 3 {
+                            return Error(Unsupported(0x0023))
+                        }
+                        if seq == 0 || seq >= m.next_pack {
+                            return Error(disk_fault(path, at, Malformed))
+                        }
+                    },
+                    RetiredList => if seq == 0 || seq >= m.next_pack || list.len(raw) != 0 {
+                        return Error(disk_fault(path, at, Malformed))
+                    },
+                    DeferredList => {
+                        let _ = decode_deferred_free(path, at, key, raw, m)?
+                    },
+                    LineageList => (),
+                }
+            }
+            walk.previous = copied(key)?
+            walk.rows = capture_add(walk.rows, 1)
+            Ok(())
+        })?
+        if let PackList = kind {
+            pack_rows = tally.rows
+        }
+        rows = capture_add(rows, tally.rows)
+    }
+    Ok(CaptureListCount(pack_rows: pack_rows, rows: rows, pages: pages))
+}
+
+// Seek by a stored separator, then return the exact inline leaf slot.
+fn capture_lookup(mut packs: CapturePacks, root: std.page.PagePtr, domain: std.page.Domain, key: Bytes) -> Result[Option[Bytes], Error] waits {
+    let mut ptr = root
+    let mut expected: Option[u8] = None
+    while ptr.stamp != 0 {
+        let path = paged_pack_path(ptr.pack)?
+        let image = capture_page(mut packs, ptr, domain, 0, expected)?
+        let height = std.page.level(image)
+        if height == 0 {
+            let (slot, hit) = std.page.search(image, key)
+            if !hit {
+                return Ok(None)
+            }
+            let std.page.Entry(cell: take found, ..) = option.unwrap(std.page.entry(image, slot))
+            return match take found {
+                InlineValue(take raw) => Ok(Some(take raw)),
+                _ => Error(disk_fault(path, ptr.offset, Malformed)),
+            }
+        }
+        let slot = option.unwrap(std.page.descend(image, key))
+        let PageEdge(child) = option.unwrap(std.page.owning_edge(image, slot)) else {
+            return Error(disk_fault(path, ptr.offset, Malformed))
+        }
+        page_edge_order(path, ptr, child)?
+        ptr = child
+        expected = Some(height - 1)
+    }
+    Ok(None)
+}
+
+fn capture_pack_classes(mut packs: CapturePacks, m: PageManifest) -> Result[(), Error] waits {
+    let mut ignored = ()
+    let mut visited = 0u64
+    capture_walk_pages(mut packs, m.pack_root, 2, None, mut ignored, mut visited, fn(mut source: CapturePacks, mut _state: (), path: String, at: u64, key: Bytes, value: std.page.Cell) -> Result[(), Error] {
+        let raw = match value {
+            InlineValue(found) => found,
+            _ => return Error(disk_fault(path, at, Malformed)),
+        }
+        let row = pack_record(path, at, raw)?
+        let seq: u64 = list.word_be(key, 0)
+        let slot = capture_pack_slot(source.files, seq)
+        if slot != list.len(source.files) && source.files[slot].seq == seq {
+            if source.files[slot].class != row.class {
+                return Error(disk_fault(path, at, Malformed))
+            }
+            source.files[slot].listed = true
+        }
+        Ok(())
+    })?
+    for held in packs.files {
+        if held.class != 2 && !held.listed {
+            return Error(disk_fault(paged_pack_path(held.seq)?, 72, Absent))
+        }
+    }
+    Ok(())
+}

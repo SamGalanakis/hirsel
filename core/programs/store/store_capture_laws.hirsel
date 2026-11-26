@@ -1,0 +1,268 @@
+fn capture_test_lines(take prepared: PreparedCapture, reserve: bool) -> Result[(DescribeTotals, List[DescribeLine]), Error] waits {
+    let observed: core.Cell[List[DescribeLine]] = cell.new(list.new())
+    let collect_line: scoped[view] fn(DescribeLine) -> Result[(), Error] waits = scoped fn(line: DescribeLine) -> Result[(), Error] {
+        let fact: DescribeLine = clone(line)
+        cell.with(observed, take fact, fn(mut lines: List[DescribeLine], take incoming: DescribeLine) -> () {
+            list.push(mut lines, take incoming)
+        })
+        Ok(())
+    }
+    let summary = if reserve {
+        let budget = capture_need(prepared)
+        capacity(bound bytes budget.total {
+            describe_capture(take prepared, collect_line)
+        })??
+    } else {
+        describe_capture(take prepared, collect_line)?
+    }
+    Ok((summary, cell.into_inner(take observed)))
+}
+
+fn capture_test_cover(d: Dir, c: Clock) -> Result[(), Error] waits {
+    let prepared = prepare(d, c, Describe)?
+    let (reserved, take reserved_lines) = capture_test_lines(take prepared, true)?
+    let (unbounded, take unbounded_lines) = capture_test_lines(prepare(d, c, Describe)?, false)?
+    if reserved != unbounded || reserved_lines != unbounded_lines {
+        fail("Describe's reservation changed its output")
+    }
+    Ok(())
+}
+
+fn capture_test_page(mut raw: Bytes, ctx: DiskContext, source: std.page.Image) -> Result[std.page.PagePtr, Error] {
+    let payload = std.page.payload(source)
+    let offset = list.len(raw)
+    let frame = capacity(disk_seal(ctx, offset, 0x0021, 1, payload))?
+    list.append(mut raw, frame)
+    Ok(std.page.PagePtr(pack: ctx.seq, offset: offset, len: int.truncate(list.len(payload)), checksum: std.check.xxh3(payload, 0, list.len(payload)), stamp: std.page.stamp(source)))
+}
+
+fn capture_test_fill(width: u64, value: u8) -> Bytes {
+    let mut raw: Bytes = list.with_capacity(width)
+    list.fill(mut raw, width, value)
+    take raw
+}
+
+fn capture_test_catalog(mut m: PageManifest, id: StoreId, d: Dir) -> Result[(), Error] waits {
+    let data = DiskContext(store: id, role: 3, seq: 1)
+    let large = DiskContext(store: id, role: 3, seq: 2)
+    let inventory = DiskContext(store: id, role: 3, seq: 3)
+    let mut raw = capacity(disk_header_bytes(data, 0, 0))?
+    let mut catalog_rows: List[std.page.Entry] = list.with_capacity(16)
+    for i in 1u32 .. 16 {
+        let mut name = string.from("table-")
+        string.push_u64(mut name, int.widen(i + 10))
+        let record = Catalog(kind: 1, id: i, owner: 0, epoch: 1, key: list.new(), schemas: list.new(), next: 1, by: list.new(), revision: list.new(), shape: Entries(Many), payload_schemas: list.new(), projection: None, state: Public)
+        list.push(mut catalog_rows, std.page.Entry(key: table_key(name)?, cell: InlineValue(encode_catalog(record)?)))
+    }
+    let mut schemas: List[ValueSchema] = list.with_capacity(32)
+    for i in 1u16 .. 33 {
+        list.push(mut schemas, ValueSchema(number: i, fingerprint: 0, schema: capture_test_fill(4096, 17)))
+    }
+    let index_record = Catalog(kind: 2, id: 16, owner: 1, epoch: 1, key: list.new(), schemas: take schemas, next: 33, by: list.new(), revision: capture_test_fill(CATALOG_REVISION_MAX, 19), shape: Entries(Unique), payload_schemas: list.new(), projection: None, state: Failed(capture_test_fill(4096, 23), capture_test_fill(4096, 29)))
+    let large_value = encode_catalog(index_record)?
+    if list.len(large_value) <= JOURNAL_CHUNK_BYTES {
+        fail("catalog BLOB fixture did not cross a chunk boundary")
+    }
+    let payload = page_result(std.page.encode_blob(1, large_value))?
+    let mut blob_bytes = capacity(disk_header_bytes(large, 0, 0))?
+    list.append(mut blob_bytes, capacity(disk_seal(large, 72, 0x0022, 1, payload))?)
+    disk_write_synced(d, "p-2", blob_bytes)?
+    let reference = std.page.BlobRef(stamp: 1, len: list.len(large_value), checksum: std.check.xxh3(large_value, 0, list.len(large_value)), pack: 2, offset: 72, body: 0)
+    list.push(mut catalog_rows, std.page.Entry(key: catalog_index_key(1, "large")?, cell: BlobValue(reference)))
+    let leaf = page_result(std.page.encode(catalog_rows, 0, 2, Unprefixed))?
+    let mut root = capture_test_page(mut raw, data, leaf)?
+    for height in 1u8 .. 65 {
+        let mut children: List[std.page.Entry] = list.with_capacity(1)
+        list.push(mut children, std.page.Entry(key: list.new(), cell: Child(std.page.Branch(child: root, rows: 16, charge: 0))))
+        let stamp: u64 = int.widen(height)
+        let branch_image = page_result(std.page.encode(children, height, stamp + 2, Unprefixed))?
+        root = capture_test_page(mut raw, data, branch_image)?
+    }
+    disk_write_synced(d, "p-1", raw)?
+    let mut pack_rows: List[std.page.Entry] = list.with_capacity(2)
+    let page_bytes = list.len(raw) - 72 - 16 * 65
+    list.push(mut pack_rows, std.page.Entry(key: key_word(1), cell: InlineValue(encode_pack_row(PagePack(class: 0, frames: 65, live: page_bytes, payload_bytes: page_bytes, index: 0)))))
+    list.push(mut pack_rows, std.page.Entry(key: key_word(2), cell: InlineValue(encode_pack_row(PagePack(class: 1, frames: 1, live: list.len(payload), payload_bytes: list.len(payload), index: 0)))))
+    let listing = page_result(std.page.encode(pack_rows, 0, 67, Unprefixed))?
+    let mut list_bytes = capacity(disk_header_bytes(inventory, 0, 0))?
+    m.pack_root = capture_test_page(mut list_bytes, inventory, listing)?
+    disk_write_synced(d, "p-3", list_bytes)?
+    m.next_stamp = 68
+    m.next_pack = 4
+    m.next_table = 17
+    m.branches[0].roots.catalog = root
+    let main_roots: LocatedRoots = clone(m.branches[0].roots)
+    let second_roots: LocatedRoots = clone(main_roots)
+    m.next_branch = 2
+    list.push(mut m.branches, LocatedBranch(id: 1, name: "child", parent: 0, forked_at: 0, version: 0, at: 0, roots: take second_roots))
+    for pin_name in["a", "b", "c"] {
+        list.push(mut m.pins, LocatedPin(owner: ApplicationPin, name: clone(pin_name), branch: 0, version: 0, roots: clone(main_roots), watermark: 68))
+    }
+    Ok(())
+}
+
+fn capture_test_meta_ceiling(mut m: PageManifest) -> Result[(), Error] {
+    let mut remaining = manifest_limit(m.limits) - page_manifest_size(m)
+    let additional: u64 = (remaining + 397) / 398
+    capacity(list.try_reserve(mut m.branches, additional))?
+    for i in 0u64 .. additional {
+        let left = additional - i
+        let width = (remaining - 143 * left) / left
+        let mut label = string.with_capacity(width)
+        string.push_u64(mut label, i)
+        while string.byte_len(label) < width {
+            string.push(mut label, "m")
+        }
+        let id: u32 = int.truncate(2 + i)
+        let zero = std.page.unlocated(0)
+        let roots = LocatedRoots(collections: zero, streams: zero, catalog: zero, keyed: list.new())
+        list.push(mut m.branches, LocatedBranch(id: id, name: take label, parent: 0, forked_at: 0, version: 0, at: 0, roots: take roots))
+        remaining -= 143 + width
+    }
+    m.next_branch = int.truncate(2 + additional)
+    if remaining != 0 || page_manifest_size(m) != manifest_limit(m.limits) {
+        fail("MANIFEST fixture did not reach the meta ceiling")
+    }
+    Ok(())
+}
+
+fn capture_test_commit(ctx: DiskContext, offset: u64, head_version: u64, width: u64, prior: u32) -> Result[Bytes, Error] {
+    let key = log_key(1, 1)?
+    let mut data: Bytes = list.with_capacity(width + 64)
+    list.put_word_le(mut data, 0u32)
+    list.put_word_le(mut data, head_version)
+    list.put_word_le(mut data, 0u64)
+    list.push(mut data, 1u8)
+    list.push(mut data, 0u8)
+    list.put_word_le(mut data, 1u32)
+    list.push(mut data, 1u8)
+    capacity(blob(mut data, key))?
+    list.put_word_le(mut data, prior)
+    let size: u32 = int.truncate(width)
+    list.put_word_le(mut data, size)
+    list.put_word_le(mut data, 1u16)
+    let body_len: u32 = int.truncate(width - 6)
+    list.put_word_le(mut data, body_len)
+    let stored = capture_test_fill(width - 6, int.truncate(head_version))
+    list.append(mut data, stored)
+    capacity(disk_seal(ctx, offset, 0x0011, 1, data))
+}
+
+fn capture_test_reopens(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let options = result.unwrap(sized(Directory, 268435456))
+    for _ in 0u64 .. 40 {
+        let db = open(tasks, d, c, r, options)?
+        close(take db)?
+    }
+    let prepared = prepare(d, c, Describe)?
+    if list.len(prepared.segments) != 40 {
+        fail("reopen fixture did not create 40 live segments")
+    }
+    let _ = take prepared
+    capture_test_cover(d, c)
+}
+
+fn capture_test_stored_blob(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let options = result.unwrap(sized(Directory, 268435456))
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = law_table(mut db, "blob", std.codec.key_u64(), std.codec.of_bytes())?
+    let values = table(mut db, "blob", std.codec.key_u64(), std.codec.of_bytes())?
+    let outcome = run(mut db, None, values, fn(mut tx, t) -> Result[(), Error] {
+        let large = capture_test_fill(VALUE_LIMIT - 6, 31)
+        put(mut tx, t, 1u64, large)
+    })?
+    if let Committed(done) = outcome {
+        durable(mut db, done.ticket)?
+    } else {
+        fail("largest stored BLOB fixture did not commit")
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    capture_test_cover(d, c)
+}
+
+@test
+fn need_covers(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let limits = default_limits()
+    let id = StoreId(hi: 7, lo: 3000)
+    let mut manifest = page_manifest_empty(limits)
+    capture_test_catalog(mut manifest, id, d)?
+    capture_test_meta_ceiling(mut manifest)?
+    disk_write_synced(d, "MANIFEST", disk_page_manifest_bytes(id, manifest)?)?
+    let ctx = DiskContext(store: id, role: 2, seq: 1)
+    let mut raw = capacity(disk_header_bytes(ctx, 0, 0))?
+    list.append(mut raw, capture_test_commit(ctx, 72, 1, VALUE_LIMIT, 0)?)
+    disk_write_synced(d, journal_path(1, "")?, raw)?
+    let _ = take raw
+    let _ = take manifest
+    capture_test_cover(d, c)?;
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "reopens-")
+    let reopened = result.unwrap(host.mkdtemp(d, mut name))
+    capture_test_reopens(reopened, c, r, tasks)?;
+    string.clear(mut name)
+    string.push(mut name, "largest-blob-")
+    let stored = result.unwrap(host.mkdtemp(d, mut name))
+    capture_test_stored_blob(stored, c, r, tasks)
+}
+
+@test
+fn describe_suffix_free(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let mut options = result.unwrap(sized(Directory, 268435456))
+    options.resident_limit = 33554432
+    let mut db = open(tasks, d, c, r, options)?
+    let _ = law_table(mut db, "items", std.codec.key_u64(), std.codec.of_bytes())?
+    let items = table(mut db, "items", std.codec.key_u64(), std.codec.of_bytes())?
+    let written = run(mut db, None, items, fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, b"x")
+    })?
+    if let Committed(done) = written {
+        durable(mut db, done.ticket)?
+    } else {
+        fail("suffix fixture did not commit")
+    }
+    let _ = checkpoint(mut db)?
+    close(take db)?
+    let empty = prepare(d, c, Describe)?
+    let before = capture_need(empty)
+    let main_version = empty.manifest.branches[0].version
+    let (seq, segment_end) = {
+        let final_segment = option.unwrap(list.last(empty.segments))
+        (final_segment.seq, final_segment.end)
+    }
+    let initial_segs = list.len(empty.segments)
+    let id = empty.id
+    let _ = take empty
+    let path = journal_path(seq, "")?
+    let ctx = DiskContext(store: id, role: 2, seq: seq)
+    let mut file = disk_io(host.open(d, path, ReadWrite))?
+    let mut offset = segment_end
+    let width = 1048576u64
+    for i in 0u64 .. 64 {
+        let prior = if i == 0 {
+            8u32
+        } else {
+            1048577u32
+        }
+        let frame = capture_test_commit(ctx, offset, main_version + 1 + i, width, prior)?
+        host.write_at(mut file, offset, frame) ?=> |problem| Io(problem.error)
+        offset += list.len(frame)
+    }
+    disk_io(host.sync(mut file))?
+    disk_io(host.close(take file))?
+    let with_suffix = prepare(d, c, Describe)?
+    let after = capture_need(with_suffix)
+    for i in 0u64 .. list.len(before.parts) {
+        if before.parts[i].name != "segments" && before.parts[i].amount != after.parts[i].amount {
+            fail("per-verb need grew with the journal suffix")
+        }
+    }
+    if after.total - before.total != SEG * (list.len(with_suffix.segments) - initial_segs) {
+        fail("Describe need differs by more than the held segments")
+    }
+    let (summary, _) = capture_test_lines(take with_suffix, true)?
+    if summary.head != main_version + 64 {
+        fail("Describe did not fold the entire suffix")
+    }
+    Ok(())
+}

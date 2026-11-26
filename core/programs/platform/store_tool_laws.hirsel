@@ -1,0 +1,110 @@
+fn law_describe_ticket(mut db: store.Db, outcome: store.Outcome[(), store.Error]) -> Result[(), store.Error] waits {
+    if let Committed(done) = outcome {
+        return store.durable(mut db, done.ticket)
+    }
+    fail("describe fixture did not commit")
+}
+
+fn law_describe_matches_case(d: Dir, c: Clock, r: Random, tasks: Tasks, mask_appends: bool) -> Result[(), store.Error] waits {
+    let options = result.unwrap(store.sized(Directory, 268435456))
+    let mut db = store.open(tasks, d, c, r, options)?
+    let mut schema = store.declare(db, Migrate)?
+    let created = store.declare_table(mut schema, "items", std.codec.key_u64(), std.codec.of_u64())?
+    let items = store.finish(mut schema, take created)?
+    let single = store.declare_cell(mut schema, "cell", std.codec.of_u64())?
+    let history = store.declare_log(mut schema, "history", std.codec.of_bytes(), Forever)?
+    let _ = store.seal(mut db, take schema)?
+    let seeded = store.run(mut db, None, items, fn(mut tx, t) -> Result[(), store.Error] {
+        store.put(mut tx, t, 1u64, 11u64)?
+        store.put(mut tx, t, 2u64, 22u64)
+    })?
+    law_describe_ticket(mut db, seeded)?
+    let _ = store.checkpoint(mut db)?
+    let cut = store.snapshot(db)
+    let (child, forked) = store.fork(mut db, "child", cut)?
+    store.durable(mut db, forked)?
+    let child_write = store.run_on(mut db, child, None, items, fn(mut tx, t) -> Result[(), store.Error] {
+        store.put(mut tx, t, 3u64, 33u64)
+    })?
+    law_describe_ticket(mut db, child_write)?
+    if !mask_appends {
+        let first = store.run(mut db, None, history, fn(mut tx, rows) -> Result[(), store.Error] {
+            for _ in 0u64 .. 4 {
+                let _ = store.append(mut tx, rows, b"x")?
+            }
+            Ok(())
+        })?
+        law_describe_ticket(mut db, first)?
+    }
+    let changed = store.run(mut db, None, (items, single, history, mask_appends), fn(mut tx, env) -> Result[(), store.Error] {
+        store.put(mut tx, env.0, 1u64, 111u64)?
+        let _ = store.delete(mut tx, env.0, 2u64)?
+        store.cell_set(mut tx, env.1, 7u64)?
+        if env.3 {
+            for _ in 0u64 .. 4 {
+                let _ = store.append(mut tx, env.2, b"x")?
+            }
+        }
+        store.trim_before(mut tx, env.2, 18446744073709551615u64)?
+        let n = if env.3 {
+            8u64
+        } else {
+            4u64
+        }
+        for i in 0u64 .. n {
+            // Stored Bytes has six bytes of schema and length framing.
+            let width = if env.3 {
+                1u64
+            } else if i == 0 {
+                82u64
+            } else {
+                90u64
+            }
+            let mut value: Bytes = list.with_capacity(width)
+            list.fill(mut value, width, 1u8)
+            let _ = store.append(mut tx, env.2, value)?
+        }
+        Ok(())
+    })?
+    law_describe_ticket(mut db, changed)?
+    store.close(take db)?
+    let prepared = store.prepare(d, c, Describe)?
+    let observed: core.Cell[List[(u32, u64, u64)]] = cell.new(list.new())
+    let described = store.describe_capture(take prepared, scoped fn(fact: store.DescribeLine) -> Result[(), store.Error] {
+        if let DescribeCollection(row) = fact {
+            cell.with(observed, (row.id, row.rows, row.charge), fn(mut rows, take found) {
+                list.push(mut rows, found)
+            })
+        }
+        Ok(())
+    })?
+    let reopened = store.open(tasks, d, c, r, options)?
+    let oracle = store.snapshot(reopened)
+    let entries = store.catalog_entries(oracle)?
+    let rows = cell.into_inner(take observed)
+    if described.head != store.version(oracle) {
+        fail("Describe head differs from writer replay")
+    }
+    if list.len(rows) != list.len(entries) {
+        fail("Describe catalog differs from writer replay")
+    }
+    for slot in 0u64 .. list.len(rows) {
+        let item = entries[slot]
+        if rows[slot] != (item.id, item.rows, item.charge) {
+            fail("Describe collection differs from writer replay")
+        }
+    }
+    store.close(take reopened)
+}
+
+@test
+fn describe_matches_open(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), store.Error] waits {
+    let mut name = string.with_capacity(64)
+    string.push(mut name, "capture-a-")
+    let a = result.unwrap(host.mkdtemp(d, mut name))
+    law_describe_matches_case(a, c, r, tasks, false)?
+    string.clear(mut name)
+    string.push(mut name, "capture-b-")
+    let b = result.unwrap(host.mkdtemp(d, mut name))
+    law_describe_matches_case(b, c, r, tasks, true)
+}

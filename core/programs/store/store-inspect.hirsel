@@ -3,7 +3,7 @@
 // open (§11.19) gives one beside a live writer; nothing here writes.
 /// What a catalog record declares. An index is Many or Unique; an aggregate
 /// holds per-group totals.
-pub type EntryForm: send = TableForm | IndexForm(IndexKind) | AggregateForm | CellForm | LogForm
+pub type EntryForm: key + shareable + send = TableForm | IndexForm(IndexKind) | AggregateForm | CellForm | LogForm
 
 /// One catalog record and its collection's descriptor: `rows` and `charge`
 /// are the CollectionRoot's exact row count and row charge (AP4), and `tiered`

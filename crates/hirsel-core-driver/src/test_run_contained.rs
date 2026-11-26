@@ -299,6 +299,70 @@ fn contained_calls_run_in_the_tasks_own_instance() {
     }
 }
 
+/// FW30: a host memory refusal during contained instantiation (here `RLIMIT_AS`
+/// set to 2 GiB, below Wasmtime's 4 GiB + 64 MiB linear memory reservation)
+/// stops the run with `HostMemory` (status 102, FFI-13 Bytes / FAIL-15) instead
+/// of falling into `trap_text`'s abort arm.
+#[test]
+fn contained_host_memory_refusal_stops_with_host_memory() {
+    use std::fs;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    let law = PackageLaw::new();
+    let fixture = law.libraries.join("programs/wasm_laws");
+    for file in ["hirsel.toml", "laws.hirsel", "native.hirsel", "box.wasm"] {
+        law.write(&format!("wasm_laws/{file}"), fs::read(fixture.join(file)).unwrap());
+    }
+    law.write(
+        "wasm_laws/main.hirsel",
+        r#"pub fn main(f: Foreign[laws.Box], out: Stdout) -> Result[(), Exit] waits {
+    result.unwrap(stdout.write(out, "FW30 before\n"))
+    let _ = native.count(f)
+    Ok(())
+}
+"#,
+    );
+    let options = native_options(Backend::Cranelift, law.dir.path());
+    let runtime = options.runtime.canonicalize().unwrap();
+    for engine in ["cranelift", "llvm"] {
+        let image = law.path(&format!("image-{engine}"));
+        let request = [
+            "build", "wasm_laws", "--backend", engine,
+            "--libraries", law.libraries.to_str().unwrap(), "--runtime", runtime.to_str().unwrap(),
+            "--store", law.path("build").to_str().unwrap(),
+            "--package-store", law.path("packages").to_str().unwrap(), "-o", image.to_str().unwrap(),
+            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Stdout",
+            "--limit", "268435456",
+        ].map(str::to_owned);
+        let (status, output, error) = process::tape_request(&request, law.dir.path());
+        assert_eq!(status, Some(0), "{engine}: build\n{output}\n{error}");
+        let mut command = Command::new(&image);
+        command.env("HIRSEL_UNTIED", "1").current_dir(law.dir.path());
+        // SAFETY: `setrlimit` is async-signal-safe and caps only this child's
+        // address space below Wasmtime's 4 GiB + 64 MiB linear memory reservation.
+        unsafe {
+            command.pre_exec(|| {
+                let no_core = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                let two_gib = libc::rlimit { rlim_cur: 2 << 30, rlim_max: 2 << 30 };
+                if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setrlimit(libc::RLIMIT_AS, &two_gib) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let out = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stdout, "FW30 before\n", "{engine}: {out:?}\n{stderr}");
+        assert_eq!(out.status.code(), Some(102), "{engine}: {out:?}\n{stderr}");
+        assert_eq!(stderr, "run stop: HostMemory\n", "{engine}: {out:?}");
+    }
+}
+
 /// FW17 and FW27: a test that reaches only contained code is recorded and
 /// replays `Sealed` (FFI-14). FW17's test calls `spin`, `fill`, `grow` under
 /// `bound bytes` and `trap` inside `isolate`; FW27's overflows the guest

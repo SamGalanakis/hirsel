@@ -1,5 +1,28 @@
 use std::{ptr::NonNull, sync::Arc};
-use wasmtime::{CustomCodeMemory, Engine, Module, Result};
+use wasmtime::{CustomCodeMemory, Engine, Error, Module, OutOfMemory, Result};
+
+/// Whether `error` is a host memory refusal from Wasmtime: a fallible
+/// allocation [`OutOfMemory`] or a Unix `ENOMEM` from `mmap`/`mprotect` on a
+/// linear memory reservation, growth, or fiber stack.
+pub fn is_host_memory(error: &Error) -> bool {
+    if error.is::<OutOfMemory>() {
+        return true;
+    }
+    #[cfg(unix)]
+    if error.downcast_ref::<rustix::io::Errno>() == Some(&rustix::io::Errno::NOMEM) {
+        return true;
+    }
+    error.downcast_ref::<std::io::Error>().is_some_and(|io| {
+        if io.kind() == std::io::ErrorKind::OutOfMemory {
+            return true;
+        }
+        #[cfg(unix)]
+        if io.raw_os_error() == Some(rustix::io::Errno::NOMEM.raw_os_error()) {
+            return true;
+        }
+        false
+    })
+}
 
 /// An engine that loads precompiled code from the executable image.
 pub struct ImageEngine(Engine);

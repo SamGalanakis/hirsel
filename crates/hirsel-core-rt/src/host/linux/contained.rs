@@ -5,7 +5,7 @@ use crate::foreign::contained::{Call, Module};
 use crate::foreign::handles::{Argument, Operands};
 use crate::limit::Payer;
 use crate::{Capacity, Context, causes, steps, tasks};
-use hirsel_core_contained::load::ImageEngine;
+use hirsel_core_contained::load::{ImageEngine, is_host_memory};
 use hirsel_core_contained::wasmtime::{
     Caller, Error, Extern, Instance, InstancePre, Linker, Memory, ResourceLimiter, Store, Trap, Val,
 };
@@ -96,6 +96,17 @@ impl ResourceLimiter for State {
             && self.admit((desired - current) as u64))
     }
 
+    /// FFI-13 Bytes / FFI-14 Determinism: once `memory_growing` admitted the
+    /// growth, a host refusal of the pages (`mprotect`/`mmap` `ENOMEM` or
+    /// `OutOfMemory`) stops the run as `HostMemory`, never returning a
+    /// nondeterministic −1 to the guest.
+    fn memory_grow_failed(&mut self, error: Error) -> Result<(), Error> {
+        if is_host_memory(&error) {
+            crate::process::stop(b"HostMemory");
+        }
+        Ok(())
+    }
+
     /// Eight bytes per table element.
     fn table_growing(
         &mut self,
@@ -106,6 +117,22 @@ impl ResourceLimiter for State {
         Ok(maximum.is_none_or(|maximum| desired <= maximum)
             && self.admit(((desired - current) as u64).saturating_mul(8)))
     }
+
+    fn table_grow_failed(&mut self, error: Error) -> Result<(), Error> {
+        if is_host_memory(&error) {
+            crate::process::stop(b"HostMemory");
+        }
+        Ok(())
+    }
+}
+
+fn unwrap_host<T>(result: Result<T, Error>) -> T {
+    result.unwrap_or_else(|error| {
+        if is_host_memory(&error) {
+            crate::process::stop(b"HostMemory");
+        }
+        std::process::abort()
+    })
 }
 
 impl Drop for State {
@@ -122,7 +149,7 @@ fn engine() -> &'static ImageEngine {
     static ENGINE: OnceLock<ImageEngine> = OnceLock::new();
     // The runtime's own signal handlers are installed before any task
     // runs, so Wasmtime's chain to them (FFI-15 Signals).
-    ENGINE.get_or_init(|| ImageEngine::new().unwrap_or_else(|_| std::process::abort()))
+    ENGINE.get_or_init(|| unwrap_host(ImageEngine::new()))
 }
 
 const WASI: &str = "wasi_snapshot_preview1";
@@ -132,7 +159,7 @@ fn linker() -> &'static Linker<State> {
     static LINKER: OnceLock<Linker<State>> = OnceLock::new();
     LINKER.get_or_init(|| {
         let mut linker = Linker::new(engine().engine());
-        define(&mut linker).unwrap_or_else(|_| std::process::abort());
+        unwrap_host(define(&mut linker));
         linker
     })
 }
@@ -190,11 +217,8 @@ fn prepared(module: &'static Module) -> InstancePre<State> {
             // SAFETY: the linker placed the unmodified artifact at a 64 KiB
             // boundary of the image's read-execute segment (FFI-15).
             let artifact = unsafe { std::slice::from_raw_parts(module.artifact, module.len) };
-            let loaded =
-                unsafe { engine().load(artifact) }.unwrap_or_else(|_| std::process::abort());
-            linker()
-                .instantiate_pre(&loaded)
-                .unwrap_or_else(|_| std::process::abort())
+            let loaded = unwrap_host(unsafe { engine().load(artifact) });
+            unwrap_host(linker().instantiate_pre(&loaded))
         })
         .clone()
 }
@@ -273,6 +297,7 @@ unsafe fn settle<T>(
     fuel: u64,
     granules: u64,
     outcome: Result<T, Error>,
+    initial: bool,
     site: u64,
 ) -> Result<T, Stop> {
     let bounded = fuel != u64::MAX;
@@ -292,11 +317,19 @@ unsafe fn settle<T>(
             Ok(value)
         }
         Err(error) => {
+            // FFI-13 Bytes / FAIL-15: host memory refusal (`mmap`/`mprotect`
+            // `ENOMEM` on linear memory or fiber stack, or `OutOfMemory` on
+            // table/instance allocation) is a `HostMemory` run stop, never a
+            // catchable trap or process abort.
+            if is_host_memory(&error) {
+                crate::process::stop(b"HostMemory");
+            }
             let trap = error.downcast_ref::<Trap>();
             if bounded && (left == 0 || trap == Some(&Trap::OutOfFuel)) {
                 return Err(Stop::OutOfTime);
             }
-            if let Some(capacity) = store.data().refused
+            if initial
+                && let Some(capacity) = store.data().refused
                 && trap.is_none()
                 && error.downcast_ref::<Exit>().is_none()
             {
@@ -314,10 +347,13 @@ unsafe fn settle<T>(
 
 /// One metered entry into a store.
 macro_rules! metered {
-    ($context:expr, $store:expr, $site:expr, $entry:expr) => {{
+    ($context:expr, $store:expr, $site:expr, $entry:expr) => {
+        metered!($context, $store, $site, false, $entry)
+    };
+    ($context:expr, $store:expr, $site:expr, $initial:expr, $entry:expr) => {{
         let fuel = arm($context, &mut $store);
         let (outcome, granules) = drive($context, $site, $entry);
-        settle($context, &$store, fuel, granules, outcome, $site)
+        settle($context, &$store, fuel, granules, outcome, $initial, $site)
     }};
 }
 
@@ -342,6 +378,7 @@ unsafe fn instantiate(
             context,
             store,
             site,
+            true,
             prepared(module).instantiate_async(&mut store)
         )?
     };
@@ -367,7 +404,15 @@ unsafe fn instantiate(
     }))
 }
 
-/// FFI-14's closed trap map. Any other ending is a failed runtime invariant.
+/// FFI-14's closed trap map. Any other ending is a failed runtime invariant:
+/// under Wasmtime 48.0.10 (`wasmtime-environ` `trap_encoding.rs`), the other 28
+/// `Trap` variants belong to threads, GC, function references, exceptions,
+/// stack switching, components or epochs, none admitted by `ADMITTED_FEATURES`
+/// or `epoch_interruption(false)`; `ResourceLimiter` refusals return
+/// `Ok(false)` (−1 or `Stop::Capacity`); host functions return only `Exit` or
+/// `Trap::MemoryOutOfBounds`; and host `OutOfMemory` / `ENOMEM` errors stop as
+/// `HostMemory` in `settle`, `memory_grow_failed` and `unwrap_host` before
+/// reaching this map (contained-trap-lead-3092 REPORT.md).
 fn trap_text(error: &Error) -> &'static [u8] {
     if let Some(Exit(code)) = error.downcast_ref::<Exit>() {
         return exit_text(*code);
@@ -383,6 +428,7 @@ fn trap_text(error: &Error) -> &'static [u8] {
         Some(Trap::BadConversionToInteger) => b"contained trap: bad conversion to integer",
         Some(Trap::StackOverflow) => b"contained trap: stack overflow",
         Some(Trap::OutOfFuel) => b"contained trap: out of fuel",
+        // Closed under Wasmtime 48.0.10 + ADMITTED_FEATURES + HostMemory stops above.
         _ => std::process::abort(),
     }
 }
@@ -833,4 +879,39 @@ pub unsafe extern "C" fn hirsel_core_contained_call(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_contained_thunk(_: *mut u64) -> u64 {
     std::process::abort()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_core_contained::wasmtime::OutOfMemory;
+
+    #[test]
+    #[ignore = "isolated host-memory grow refusal, invoked by the named parent"]
+    fn memory_grow_host_oom_child() {
+        let mut state = State::default();
+        let _ = state.memory_grow_failed(Error::from(OutOfMemory::new(64 << 10)));
+        panic!("memory_grow_failed returned on OutOfMemory");
+    }
+
+    #[test]
+    fn memory_grow_failed_stops_on_host_memory_only() {
+        let mut state = State::default();
+        assert!(
+            state
+                .memory_grow_failed(Error::msg("Memory maximum size exceeded"))
+                .is_ok()
+        );
+        let output = crate::test_process::command()
+            .args([
+                "--ignored",
+                "--exact",
+                "host::linux::contained::tests::memory_grow_host_oom_child",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(102), "{output:?}");
+        assert_eq!(output.stderr, b"run stop: HostMemory\n");
+    }
 }

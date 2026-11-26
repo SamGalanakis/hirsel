@@ -270,30 +270,30 @@ fn start_drain(stop: Stop, started: u64, clock: Clock, tasks: Tasks, events: Sen
 
 pub fn operate[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
     let made = placing_of(p)
-    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, None)
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, None, true)
 }
 
 pub fn operate_report[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
     let made = placing_of(p)
-    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, Some(errors))
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, Some(errors), true)
 }
 
 // operate with the place's registration already made: a host that launches one Place many
 // times passes the one shared Placing (`placing_for`) and registers nothing per launch.
 pub fn operate_placed[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]]) -> Result[Ended, StartError] waits {
-    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, None)
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, None, false)
 }
 
 pub fn operate_placed_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Receiver[()], status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], errors: Stderr) -> Result[Ended, StartError] waits {
-    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, Some(errors))
+    operate_with_report(take made, take p, InUnit(take stop), status, take watching, None, Some(errors), false)
 }
 
 // A local shard gets its stop from the owning unit and reports every status publication.
 pub fn operate_sharded[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: Inbox[()], status: Latest[Status], take observer: StatusObserver) -> Result[Ended, StartError] waits {
-    operate_with_report(take made, take p, FromUnit(take stop), status, None, Some(take observer), None)
+    operate_with_report(take made, take p, FromUnit(take stop), status, None, Some(take observer), None, false)
 }
 
-fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: StopInput, status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take observer: Option[StatusObserver], report: Option[Stderr]) -> Result[Ended, StartError] waits {
+fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made: Placing[G, H], take p: PlaceConfig[G, H, S], take stop: StopInput, status: Latest[Status], take watching: Option[Sender[Receiver[Phase]]], take observer: Option[StatusObserver], report: Option[Stderr], registered: bool) -> Result[Ended, StartError] waits {
     let launch = launch_env()
     let n_place = if launch.n_place_explicit {
         launch.n_place
@@ -319,7 +319,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
         return Error(Open(take problem))
     }
     store_op_header(launch.store_op)?
-    let sized_store = place_store(made, p, report)
+    let sized_store = place_store(made, p, report, registered)
     let (take options, _, store_bytes, take follower_plan, (claims, rooms)) = match take sized_store {
         Ok(take sized) => take sized,
         Error(take e) => {
@@ -373,7 +373,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
     let (head_to, inbox_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(65u64)
     let hosting = start_host_control(tasks, clock, n_place, head_to, to)?
     let (finish_to, finish_from): (Sender[()], Receiver[()]) = channel.new(1u64)
-    let serving_total = room_serving_bytes(wire_config, limit, n_place, rooms, int.saturating_add(wire_owner_bind_bytes(supplied_wire), listen_owner_bytes(listen))) ?=> Full
+    let serving_total = room_serving_bytes(wire_config, limit, n_place, rooms, int.saturating_add(wire_owner_bind_bytes(supplied_wire), listen_owner_bytes(listen)), listen_sockets(listen)) ?=> Full
     let serve_slots = serve_inbox_capacity(limit)
     // The supervisor allocates this channel before the serving task starts.
     let serving_reserve = serving_total - option.unwrap(charge.channel(bytes[ServeInput], serve_slots))
@@ -398,7 +398,7 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
         let incoming = IncomingStop(from: take stop, to: channel.sender(to))
         Some(task.spawn(tasks, bytes 4096u64, take incoming, watch_stop))
     }
-    let head = place_head_bytes(n_place, n_publisher, place_grant_bytes(place_grants) ?=> Full) ?=> Full
+    let head = head_bytes(n_place, n_publisher, place_grants, rooms) ?=> Full
     let granting = place_grant_start(take place_grants)
     let (session_grants, session_binds) = match granting {
         Some(starting) => (grant_calls(starting), grant_binds(starting, supplied_wire)),

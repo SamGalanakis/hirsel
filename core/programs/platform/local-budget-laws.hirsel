@@ -1,0 +1,105 @@
+// A small dialed Place fits a 4 MiB place budget (place-budget-overhead-2890, RUNNER-SPEC
+// §12.1 "What operate_bytes charges", §14.11). The place declares: n_place and n_publisher
+// 128 KiB, two transact entries of n 16 KiB, the unit bind mint, one in-process session
+// with 16 KiB frames, q 0, a 64 KiB publication budget, 64 KiB n_service and a 512 KiB
+// pool, and a store of 1 MiB resident (Store's floor), 64 KiB pack and group bytes at
+// the small place limits. Its charge, summed by hand from those limits and the tasks and
+// channels each part makes (records and channel slots rounded up):
+//   head      3 Registries x 128 KiB + publisher staging 128 KiB              =   512 KiB
+//             relays 3 x 64 KiB, claim timer 4 KiB, two 4 KiB alarms, inbox  <=   220 KiB
+//             head state 256 KiB + largest entry 16 KiB + bind mint and grant <=  290 KiB
+//   serving   Registry 128 KiB + owner floor 64 KiB + bind term 68 KiB       =   260 KiB
+//             pool 512 KiB + supervisor (64 KiB state, 1,024 pending tokens,
+//             inboxes, 8 KiB forwarder, 64 KiB n_service)                    <=   660 KiB
+//   operate   256 KiB own + PLACE_KEEP 64 KiB + place task 64 KiB            =   384 KiB
+//   store     the writer's need at these sizes (STORE-SPEC §1.1)           <= 1,800 KiB
+// = at most 4,126 KiB (measured: 4,030,555 B). Before 2890 the same place cost about
+// 8.2 MiB: the head's own 2 MiB, the supervisor's 2 MiB and the 1 MiB keep replaced
+// terms of 0.5 MiB, 0.15 MiB and 64 KiB, so the start was refused Full. The child runs at
+// exactly its charge: its head, serving task and session run at their allowances, so a
+// term cut below what its part spends fails the session's calls or faults the child.
+// Wrong implementation: a charge padded past the budget (Full at route), or a term cut
+// below its part's use (a refused session, a lost write, or a child that does not stop).
+const SMALL_PLACE_BUDGET: u64 = 4194304u64
+
+fn small_put(mut tx: store.Tx, h: Hd, author: runner.Caller, take k: u64) -> Result[u64, u32] {
+    if let Error(_) = store.put(mut tx, h.t, k, k + 1000u64) {
+        return Error(1u32)
+    }
+    Ok(k)
+}
+
+fn small_place(mut r: Calls) -> Result[(), runner.RegisterError] {
+    runner.transact(mut r, code.describe(small_put), 16384u64, runner.DEFAULT_STEPS)?
+    runner.transact(mut r, code.describe(kept), 16384u64, runner.DEFAULT_STEPS)
+}
+
+fn small_keys() -> List[Bytes] {
+    let mut wanted: List[Bytes] = list.new()
+    list.push(mut wanted, key_of(code.identity(code.describe(small_put)), std.codec.of_u64(), reply()))
+    list.push(mut wanted, key_of(code.identity(code.describe(kept)), std.codec.of_u64(), reply()))
+    wanted
+}
+
+fn small_dialed_place(take supplied: local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity] {
+    let mut config = local_config(supplied, code.describe(small_place), code.describe(schema), runner.Stop(lag_ms: 0u64, grace_ms: 2000u64))
+    config.n_place = 131072u64
+    config.n_publisher = 131072u64
+    config.session.n_pool = 524288u64
+    config.session.socket.max_frame = 16384u64
+    config.session.budget = 65536u64
+    config.session.q = 0u64
+    Ok(take config)
+}
+
+fn small_options() -> store.Options {
+    let mut o = result.unwrap(store.sized(Directory, 2147483648u64))
+    o.resident_limit = 1048576u64
+    o.pack_bytes = 65536u64
+    o.group_commits = 4u32
+    o.group_bytes = 65536u32
+    o
+}
+
+pub fn law_local_small_place_budget(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    let mut dir_name = string.with_capacity(32u64)
+    let dir = result.unwrap(host.mkdtemp(parent, mut dir_name))
+    let run = start_local_with(dir, take dir_name, small_dialed_place, 60000u64, SMALL_PLACE_BUDGET, small_options(), clock, random, tasks, net)
+    let held = match local.route(run.door, A) {
+        Ok(take lease) => take lease,
+        Error(Full) => {
+            let _ = end_local(parent, take run)
+            return Error("2890: a small dialed place is refused Full in a 4 MiB budget")
+        },
+        Error(_) => fail("2890: route refused"),
+    }
+    let wanted = small_keys()
+    let mut socket = local_wire().socket
+    socket.max_frame = 16384u64
+    let dialer = option.unwrap(local.dialer(held))
+    let client = match runner.wire_client.connect_dial(tasks, take dialer, clock, random, wanted, Some(runner.ingress.credential(random)), socket) {
+        Ok(take connected) => take connected,
+        Error(_) => fail("2890: the small place refused its session"),
+    }
+    let mut sum = 0u64
+    for k in 0u64 .. 32u64 {
+        sum += ping_call(client, wanted, wanted[0u64], 2u64 * k, k)
+        sum += ping_call(client, wanted, wanted[1u64], 2u64 * k + 1u64, k)
+    }
+    let _ = runner.wire_client.close(take client)
+    let _ = take held
+    // Each k returns k from the write and k + 1000 from the read.
+    let expected = 2u64 * (31u64 * 32u64 / 2u64) + 32u64 * 1000u64
+    if !end_local(parent, take run) {
+        return Error("2890: the small place did not stop gracefully")
+    }
+    if sum != expected {
+        return Error("2890: the small place lost a write")
+    }
+    Ok(())
+}
+
+@test
+fn test_local_small_place_budget(parent: Dir, clock: Clock, random: Random, tasks: Tasks, net: Net) -> Result[(), String] waits {
+    law_local_small_place_budget(parent, clock, random, tasks, net)
+}

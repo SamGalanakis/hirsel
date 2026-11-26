@@ -504,7 +504,7 @@ pub fn serve_wire[C: send](take listener: Listener, tasks: Tasks, clock: Clock, 
         return Error(Configuration)
     }
     // The caller supplies an allocator that already owns its Registry.
-    let required = match room_serving_bytes(c, max_sessions, 0u64, no_rooms(), bind_term) {
+    let required = match room_serving_bytes(c, max_sessions, 0u64, no_rooms(), bind_term, true) {
         Ok(total) => total,
         Error(cap) => return Error(Allocation(cap))
     }

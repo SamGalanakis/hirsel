@@ -1,8 +1,39 @@
-const PLACE_KEEP: u64 = 1048576
+// What the task that runs `operate` keeps beside operate's own state (OPERATE_OWN_BYTES):
+// the caller's locals around the call (runner.main's launch words, a host place task's
+// lease plumbing). A launch that registers its place in that task (`operate`,
+// `operate_report`) also keeps the Template, which registration built under `bytes
+// n_place`, so its keep adds n_place (`template_keep`).
+pub const PLACE_KEEP: u64 = 65536
 
-const HEAD_OWN_BYTES: u64 = 2097152
-
+// operate's own state: its locals and Status copies, the drain and identity roots, its
+// life, head and finish channels, the status watch, and the stop watcher, drain timer and
+// idle alarm (4 KiB each).
 const OPERATE_OWN_BYTES: u64 = 262144
+
+// The head's own state beside its declared bounds: the Head record and its maps, the
+// call and park queues, upkeep scratch, and the store handle's locals. The store's own
+// working set is the store term; an entry's body runs within head_entry.
+const HEAD_STATE_BYTES: u64 = 262144
+
+// A place with an `attempt` mint launches each granted trigger attempt from the head's
+// bytes, and no declared limit bounds how many run at once, so such a head keeps at
+// least this much of its own, the figure every head had before it was derived.
+const HEAD_ATTEMPT_FLOOR: u64 = 2097152
+
+// The serving task's own state beside its tasks and channels: the ServePlace fields, the
+// session factory, the target, proxies and id lists.
+const SERVE_STATE_BYTES: u64 = 65536
+
+// The owner and refusal maps' growth per owner (one SessionTask entry and its hash slot).
+const SERVE_OWNER_STATE: u64 = 6711
+
+// A socket listener's 503 writers: at most 16 at once, 16 KiB each (start_socket_refusal).
+const SERVE_REFUSALS: u64 = 16
+
+const SERVE_REFUSAL_BYTES: u64 = 16384
+
+// The acceptor, or a dialed place's forwarder.
+const SERVE_TRANSPORT_BYTES: u64 = 8192
 
 // The dev host-control writer and acknowledger; the reader runs under `bytes n_place`.
 const HOST_WRITER_BYTES: u64 = 16384
@@ -16,10 +47,45 @@ fn add_place_bytes(a: u64, b: u64) -> Result[u64, Capacity] {
     }
 }
 
-fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64) -> Result[u64, Capacity] {
+// The head, the publisher and the serving task each replay `place` under `bytes n_place`
+// (RUNNER-SPEC §3 "One Registry"), so each holds its own n_place: the head's term here,
+// the publisher's in publisher_bytes, and the serving task's in room_serving_bytes.
+fn place_head_bytes(n_place: u64, n_publisher: u64, grant: u64, own: u64) -> Result[u64, Capacity] {
     let names = add_place_bytes(n_place, publisher_bytes(n_place, n_publisher)?)?
-    let head = add_place_bytes(names, HEAD_OWN_BYTES)?
+    let head = add_place_bytes(names, own)?
     add_place_bytes(head, grant)
+}
+
+fn charged_task(n: u64) -> u64 {
+    option.unwrap(charge.task(bytes[()], n))
+}
+
+// What the head spends beyond its Registry, publisher and mints: its wake helpers (the
+// forwarder, the park and sync relays at 64 KiB and the claim timer at 4 KiB, with their
+// forwarding inbox of 65 inputs), its pause and wall alarms (4 KiB each), its state, and
+// the largest entry it runs with that entry's call reserve (store.call_reserves: n and
+// one block charge).
+fn head_own_bytes(head_entry: u64, attempting: bool) -> Result[u64, Capacity] {
+    let relays = add_place_bytes(3u64 * charged_task(65536u64), charged_task(4096u64))?
+    let inbox = option.unwrap(charge.channel(bytes[HeadInput], 65u64))
+    let wakes = add_place_bytes(relays, inbox)?
+    let timers = 2u64 * charged_task(4096u64)
+    let fixed = add_place_bytes(add_place_bytes(wakes, timers)?, HEAD_STATE_BYTES)?
+    let entry = add_place_bytes(head_entry, option.unwrap(charge.block(bytes[()], 0u64)))?
+    let own = add_place_bytes(fixed, entry)?
+    Ok(if attempting {
+        order.max(own, HEAD_ATTEMPT_FLOOR)
+    } else {
+        own
+    })
+}
+
+fn head_bytes[G: send, H: shareable + inert + send, S: send](n_place: u64, n_publisher: u64, grants: Option[Grants[G, H, S]], rooms: RoomPlan) -> Result[u64, Capacity] {
+    let attempting = match grants {
+        Some(g) => !none(g.attempt),
+        None => false,
+    }
+    place_head_bytes(n_place, n_publisher, place_grant_bytes(grants)?, head_own_bytes(rooms.head_entry, attempting)?)
 }
 
 // The publisher registers its own copy of the place, under `bytes n_place`, beside
@@ -38,10 +104,38 @@ fn listen_owner_bytes(l: Listen) -> u64 {
 }
 
 pub fn serving_bytes(c: WireConfig, owners: u64, n_place: u64) -> Result[u64, Capacity] {
-    room_serving_bytes(c, owners, n_place, no_rooms(), 0u64)
+    room_serving_bytes(c, owners, n_place, no_rooms(), 0u64, true)
 }
 
-fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan, bind_term: u64) -> Result[u64, Capacity] {
+fn listen_sockets(l: Listen) -> bool {
+    match l {
+        Tcp(_) => true,
+        InProcess(_) => false,
+    }
+}
+
+// What serve_sockets spends beside its owners, Registry, pool and relay: its state and
+// owner maps, the pending-upgrade tokens, the pool's request inbox, the acceptor or
+// forwarder, a socket listener's refusal writers, the session factory's `bytes
+// n_service`, and the serve inbox that operate makes before it starts the task. A caller
+// that serves fewer owners uses a correspondingly smaller allowance; WIRE_OVERHEAD caps it.
+fn serve_supervisor_bytes(c: WireConfig, owners: u64, sockets: bool) -> Result[u64, Capacity] {
+    let state = add_place_bytes(SERVE_STATE_BYTES, owners * SERVE_OWNER_STATE)?
+    let pending = option.unwrap(charge.channel(bytes[()], c.socket.pending_max))
+    let requests = option.unwrap(charge.channel(bytes[WireAllocation[()]], owners * WIRE_SESSION_SLOTS))
+    let inbox = option.unwrap(charge.channel(bytes[ServeInput], serve_inbox_capacity(owners)))
+    let refusals = if sockets {
+        SERVE_REFUSALS * charged_task(SERVE_REFUSAL_BYTES)
+    } else {
+        0u64
+    }
+    let channels = add_place_bytes(add_place_bytes(pending, requests)?, inbox)?
+    let tasks = add_place_bytes(add_place_bytes(charged_task(SERVE_TRANSPORT_BYTES), refusals)?, charged_task(0u64))?
+    let fixed = add_place_bytes(add_place_bytes(state, channels)?, tasks)?
+    add_place_bytes(fixed, c.n_service)
+}
+
+fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan, bind_term: u64, sockets: bool) -> Result[u64, Capacity] {
     if c.n_granted > WIRE_SESSION_CEILING {
         return Error(Capacity(requested: c.n_granted, available: WIRE_SESSION_CEILING))
     }
@@ -52,14 +146,9 @@ fn room_serving_bytes(c: WireConfig, owners: u64, n_place: u64, rooms: RoomPlan,
         return Error(Capacity(requested: bind_term, available: WIRE_SESSION_CEILING))
     }
     let floors = owners * (WIRE_OWNER_FLOOR + c.n_granted + bind_term + rooms.owner_bytes)
-    // Use less supervisor room when a caller deliberately serves fewer owners.
-    let metadata = 2097152u64 + owners * 6711u64
-    let overhead = if metadata < WIRE_OVERHEAD {
-        metadata
-    } else {
-        WIRE_OVERHEAD
-    }
-    // The place's one Registry, built once under bytes n_place for every session.
+    let supervisor = serve_supervisor_bytes(c, owners, sockets)?
+    let overhead = order.min(supervisor, WIRE_OVERHEAD)
+    // The serving task's Registry, replayed once under bytes n_place for every session.
     let fixed = match int.checked_add(overhead + floors, n_place) {
         Some(f) => f,
         None => return Error(Capacity(requested: n_place, available: 0xffffffffffffffffu64 - (overhead + floors)))
@@ -96,9 +185,9 @@ fn place_reservations[G: send, H: shareable + inert + send](placing: Placing[G, 
 }
 
 fn operate_reservation[G: send, H: shareable + inert + send, S: send](p: PlaceConfig[G, H, S], n_place: u64, claims: u64, rooms: RoomPlan) -> Result[u64, Capacity] {
-    let head = place_head_bytes(n_place, p.n_publisher, place_grant_bytes(p.grants)?)?
+    let head = head_bytes(n_place, p.n_publisher, p.grants, rooms)?
     let funded_head = add_place_bytes(head, claims)?
-    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms, int.saturating_add(wire_owner_bind_bytes(p.wire), listen_owner_bytes(p.listen)))?
+    let serving = room_serving_bytes(p.session, p.max_sessions, n_place, rooms, int.saturating_add(wire_owner_bind_bytes(p.wire), listen_owner_bytes(p.listen)), listen_sockets(p.listen))?
     let tasks = add_place_bytes(funded_head, serving)?
     let hosted = add_place_bytes(tasks, host_control_bytes(n_place)?)?
     add_place_bytes(hosted, OPERATE_OWN_BYTES)
@@ -113,11 +202,21 @@ fn host_control_bytes(n_place: u64) -> Result[u64, Capacity] {
     add_place_bytes(pair, n_place)
 }
 
-fn place_store[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], p: PlaceConfig[G, H, S], report: Option[Stderr]) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
+// A launch's keep (RUNNER-SPEC §12.1 "Store sizes"): PLACE_KEEP, and the Template's
+// n_place when operate registered the place in its own task.
+fn template_keep(n_place: u64, registered: bool) -> Result[u64, Capacity] {
+    if registered {
+        add_place_bytes(PLACE_KEEP, n_place)
+    } else {
+        Ok(PLACE_KEEP)
+    }
+}
+
+fn place_store[G: send, H: shareable + inert + send, S: send](placing: Placing[G, H], p: PlaceConfig[G, H, S], report: Option[Stderr], registered: bool) -> Result[(store.Options, u64, u64, Option[store.FollowerPlan], (u64, RoomPlan)), StartError] waits {
     let n_place = launch_n_place(p)
     let (claims, rooms) = place_reservations(placing, n_place, p.session) ?=> Full
     let overhead = operate_reservation(p, n_place, claims, rooms) ?=> Full
-    let reserved = add_place_bytes(overhead, PLACE_KEEP) ?=> Full
+    let reserved = add_place_bytes(overhead, template_keep(n_place, registered) ?=> Full) ?=> Full
     let limit = runtime.root_limit()
     let kind: store.Kind = match p.backing {
         Memory => Memory,

@@ -219,7 +219,7 @@ fn start_made[G: send, H: shareable + inert + send, S: send](take launch: Launch
     let (dialing, dials) = std.wsock.dials(DIALS) ?=> |_| Full
     config.listen = InProcess(take dials)
     let overhead = runner.placed_bytes(placing, config) ?=> |_| Full
-    let need = int.saturating_add(overhead, int.saturating_add(launch.sizing.need, 1048576u64))
+    let need = int.saturating_add(overhead, int.saturating_add(launch.sizing.need, runner.PLACE_KEEP))
     let charge = int.saturating_add(need, PLACE_TASK_BYTES)
     if charge > launch.available {
         return Error(Full)

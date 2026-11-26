@@ -1,7 +1,7 @@
 // The prepare child of a hot deploy (docs/spec/launch.md "Preparing the pending
 // trigger report"; RUNNER-SPEC §14.6 "The activation fate").
 pub fn prepare_place[G: send, H: shareable + inert + send, S: send](take p: PlaceConfig[G, H, S], take attempt: Bytes, take image: Bytes, take fates: fate.Fates, errors: Stderr) -> Result[Ended, StartError] waits {
-    let (take options, _, _, _, _) = place_store(placing_of(p), p, Some(errors))?
+    let (take options, _, _, _, _) = place_store(placing_of(p), p, Some(errors), true)?
     let n_place = p.n_place
     prepare_placed(take p, take options, n_place, take attempt, take image, take fates)
 }

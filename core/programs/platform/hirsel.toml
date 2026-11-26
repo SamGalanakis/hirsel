@@ -36,6 +36,7 @@ dirs = ["."]
 "local-laws.hirsel" = "local_laws"
 "local-progress-fixture.hirsel" = "local_laws"
 "local-fd-laws.hirsel" = "local_laws"
+"local-budget-laws.hirsel" = "local_laws"
 "launcher_wire.hirsel" = "launcher"
 "operator_wire.hirsel" = "operator"
 "platform_laws.hirsel" = "platform"
@@ -69,6 +70,10 @@ limit = 134217728
 limit = 134217728
 
 [tests.runs."platform@1/local_laws/test_local_stale_dial"]
+limit = 134217728
+
+# The host's own catalog store beside a 4 MiB place budget.
+[tests.runs."platform@1/local_laws/test_local_small_place_budget"]
 limit = 134217728
 
 # The host's own catalog store; the place budget is below one child's charge.

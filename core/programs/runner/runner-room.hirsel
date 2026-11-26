@@ -144,16 +144,28 @@ type RoomPlan: send {
     per_sub: u64,
     decode: u64,
     hooks: Option[fn() -> RoomHooks],
+    // The largest n of a transact or fenced entry: the head runs those bodies, and
+    // retains n for a call's reserve, within its own bytes (head_own_bytes).
+    head_entry: u64,
 }
 
 fn no_rooms() -> RoomPlan {
-    RoomPlan(owner_bytes: 0u64, relay_bytes: 0u64, live_limit: 0u64, min_frame: 0u64, message: 0u64, roster: 0u64, per_sub: 0u64, decode: 0u64, hooks: None)
+    RoomPlan(owner_bytes: 0u64, relay_bytes: 0u64, live_limit: 0u64, min_frame: 0u64, message: 0u64, roster: 0u64, per_sub: 0u64, decode: 0u64, hooks: None, head_entry: 0u64)
 }
 
 // The room sizes a registry's entries fold to; `close_rooms` finishes them for a WireConfig.
 fn fold_rooms[G: send, H: shareable + inert + send](r: Registry[G, H]) -> RoomPlan {
     let mut plan = no_rooms()
     for (_, entry) in r.slots {
+        match entry {
+            Transact(n, _, _, _, _) => {
+                plan.head_entry = order.max(plan.head_entry, n)
+            },
+            Fenced(n, _, _) => {
+                plan.head_entry = order.max(plan.head_entry, n)
+            },
+            _ => (),
+        }
         if let Query(_, _, query_entry) = entry {
             if let Some(registered) = query_entry.ephemeral {
                 let hooks = (registered.hooks)()

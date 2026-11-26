@@ -41,9 +41,10 @@ fn try_start_managed[G: send, S: send](tasks: Tasks, take settings: runner.Place
 
 fn managed_budget[G: send, S: send](settings: runner.PlaceConfig[G, Hd, S]) -> (u64, u64) {
     let plan = result.unwrap(store.planned(Directory, 18446744073709551615u64, settings.sizes))
-    // Operate includes the head, serving and supervisor. Its keep is 1 MiB.
+    // Operate includes the head, serving and supervisor. Its keep is PLACE_KEEP and the
+    // Template operate registers in its own task, bounded by n_place.
     let share = store.planned_bytes(plan)
-    (result.unwrap(runner.operate_bytes(settings)) + 1048576u64 + share, share)
+    (result.unwrap(runner.operate_bytes(settings)) + runner.PLACE_KEEP + settings.n_place + share, share)
 }
 
 fn start_managed[G: send, S: send](tasks: Tasks, take settings: runner.PlaceConfig[G, Hd, S], stop_pending: bool) -> (Task[Result[runner.Ended, runner.StartError]], Sender[()], Receiver[runner.Phase], Latest[runner.Status]) waits {

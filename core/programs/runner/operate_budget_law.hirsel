@@ -76,20 +76,35 @@ fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: St
 }
 
 fn bucket_budget_at_limit(take config: PlaceConfig[(), (), ()]) -> Result[(u64, u64), StartError] waits {
-    let (_, share, total, _, _) = place_store(placing_of(config), config, None)?
+    let (_, share, total, _, _) = place_store(placing_of(config), config, None, true)?
     Ok((share, total))
 }
 
-// Head: 256 KiB Registry + the publisher's own 256 KiB Registry beside its
-// 1 MiB staging + 2 MiB own grant.
-// Serving: 2 MiB supervisor + one owner at 6,711 + 64 KiB + 256 KiB
-// for the Registry + 4 MiB pool. Operate holds 256 KiB and keeps 1 MiB.
-const BUDGET_RUNNER_BYTES: u64 = (262144 + (262144 + 1048576) + 2097152) + (2097152 + 6711 + 65536 + 262144 + 4194304) + 262144 + 1048576
+fn budget_task(n: u64) -> u64 {
+    option.unwrap(charge.task(bytes[()], n))
+}
+
+// The fixture's charge, term by term (RUNNER-SPEC §12.1 "Store sizes"), from its declared
+// limits and the tasks and channels each part makes.
+// Head: 256 KiB Registry + the publisher's own 256 KiB Registry beside its 1 MiB staging,
+// then its own bytes: three 64 KiB relays, the 4 KiB claim timer, the 65-slot inbox, the
+// pause and wall alarms, 256 KiB of state and the call reserve's cause cell (no entries).
+// Serving: the supervisor (64 KiB state + one owner at 6,711, 1,024 pending tokens, two
+// allocation slots, a 24-slot inbox, the 8 KiB acceptor, 16 refusal tasks of 16 KiB, the
+// pool record, 64 KiB n_service) + the 64 KiB owner floor + 256 KiB for the Registry +
+// the 4 MiB pool. Operate holds 256 KiB and keeps 64 KiB plus the Template's 256 KiB.
+fn budget_runner_bytes() -> u64 {
+    let head_own = 3u64 * budget_task(65536u64) + budget_task(4096u64) + option.unwrap(charge.channel(bytes[HeadInput], 65u64)) + 2u64 * budget_task(4096u64) + 262144u64 + option.unwrap(charge.block(bytes[()], 0u64))
+    let head = 262144u64 + (262144u64 + 1048576u64) + head_own
+    let supervisor = 65536u64 + 6711u64 + option.unwrap(charge.channel(bytes[()], 1024u64)) + option.unwrap(charge.channel(bytes[WireAllocation[()]], 2u64)) + option.unwrap(charge.channel(bytes[ServeInput], 24u64)) + budget_task(8192u64) + 16u64 * budget_task(16384u64) + budget_task(0u64) + 65536u64
+    let serving = supervisor + 65536u64 + 262144u64 + 4194304u64
+    head + serving + 262144u64 + (65536u64 + 262144u64)
+}
 
 fn keyed_budget_runner_bytes() -> u64 {
     // With no configured keys, the startup allowance adds the periodic task
     // and a single input slot. The declared quota test prices the maps.
-    BUDGET_RUNNER_BYTES + 288 + 4096 + bytes[HeadInput]
+    budget_runner_bytes() + 288 + 4096 + bytes[HeadInput]
 }
 
 fn bucket_budget_store(config: PlaceConfig[(), (), ()]) -> u64 {
@@ -128,7 +143,7 @@ fn budget_bucket_server(take input: (Listener, std.sim.s3.Loopback, Clock)) wait
 }
 
 fn seed_budget_bucket(take config: PlaceConfig[(), (), ()]) -> Result[store.StoreId, String] waits {
-    let (take options, _, _, _, _) = place_store(placing_of(config), config, None) ?=> |problem| start_text(problem)
+    let (take options, _, _, _, _) = place_store(placing_of(config), config, None, true) ?=> |problem| start_text(problem)
     let PlaceConfig(backing: take backing, clock: clock, random: random, tasks: tasks, ..) = take config
     let (take opened, _) = open_backing(take backing, options, tasks, clock, random) ?=> |problem| start_text(backing_start_error(take problem))
     let mut db = take opened
@@ -199,13 +214,13 @@ fn exercise_local_budgets(take grants: (Dir, Clock, Random, Tasks, Net)) -> Resu
     }
     let expected_share = runtime.root_limit() - keyed_budget_runner_bytes()
     let memory = budget_config(Memory, c, r, tasks, n)
-    let (_, share, memory_total, _, _) = place_store(placing_of(memory), memory, None) ?=> |problem| start_text(problem)
+    let (_, share, memory_total, _, _) = place_store(placing_of(memory), memory, None, true) ?=> |problem| start_text(problem)
     if share != expected_share || memory_total != expected_share {
         return Error("L60: Memory share")
     }
     open_sized_place(take memory)?
     let disk = budget_config(Temp(d), c, r, tasks, n)
-    let (disk_sizes, disk_share, disk_total, _, _) = place_store(placing_of(disk), disk, None) ?=> |problem| start_text(problem)
+    let (disk_sizes, disk_share, disk_total, _, _) = place_store(placing_of(disk), disk, None, true) ?=> |problem| start_text(problem)
     let disk_plan = result.unwrap(store.planned(Directory, expected_share, disk.sizes))
     let planned = store.planned_options(disk_plan)
     if disk_share != expected_share || disk_total != store.planned_bytes(disk_plan) || disk_sizes.pack_bytes != planned.pack_bytes || disk_sizes.checkpoint_bytes != planned.checkpoint_bytes || disk_sizes.resident_limit != planned.resident_limit {

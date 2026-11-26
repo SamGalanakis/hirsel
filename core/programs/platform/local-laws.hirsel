@@ -43,21 +43,27 @@ fn start_local(parent: Dir, make: fn(take local.Supplied) -> Result[runner.Place
 
 fn start_local_in(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     // One child's charge (RUNNER-SPEC §13.4 row 7: runner.operate_bytes is what operate
-    // spends): operate_bytes of the factory's own config, the Directory writer, the 1 MiB
-    // main keeps and 1 MiB of slack for the child task's own bytes.
+    // spends): operate_bytes of the factory's own config, the Directory writer, the keep
+    // and 1 MiB of slack for the child task's own bytes.
     let sized = result.unwrap(make(local.Supplied(name: string.from("a"), tasks: tasks, clock: clock, random: random, net: net)))
     let operate = result.unwrap(runner.operate_bytes(sized))
     let writer = store.writer_bytes(result.unwrap(store.writer_plan(Directory, disk_options())))
-    start_local_sized(dir, take dir_name, make, idle_ms, operate + writer + 1048576u64 + 1048576u64, clock, random, tasks, net)
+    start_local_sized(dir, take dir_name, make, idle_ms, operate + writer + runner.PLACE_KEEP + 1048576u64, clock, random, tasks, net)
 }
 
 fn start_local_sized(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, place_bytes: u64, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
+    start_local_with(dir, take dir_name, make, idle_ms, place_bytes, disk_options(), clock, random, tasks, net)
+}
+
+fn start_local_with(dir: Dir, take dir_name: String, make: fn(take local.Supplied) -> Result[runner.PlaceConfig[(), Hd, ()], Capacity], idle_ms: u64, place_bytes: u64, take options: store.Options, clock: Clock, random: Random, tasks: Tasks, net: Net) -> LocalRun waits {
     let (watch, changes): (Sender[local.Change], Receiver[local.Change]) = channel.new(16u64)
     let making: local.Factory[()] = local.factory(make)
-    let options = disk_options()
     let config = local.Config(root: dir, options: take options, factory: take making, seed: (), max_places: 1u64, idle_ms: idle_ms, place_bytes: place_bytes, units: 1u64, sessions: 1u64, tasks: tasks, clock: clock, random: random, net: net, watch: Some(take watch))
     let made = match local.local(local.doorway(), take config) {
         Ok(take made) => take made,
+        Error(Full) => fail("local: refused a valid configuration (Full)"),
+        Error(Failed(take why)) => fail(take why),
+        Error(Configuration) => fail("local: refused a valid configuration (Configuration)"),
         Error(_) => fail("local: refused a valid configuration")
     }
     let door = local.door(made)
@@ -354,7 +360,7 @@ fn test_local_genesis_recovers(parent: Dir, clock: Clock, random: Random, tasks:
 
 // §14.2, §14.9 "Ends": a start whose charge does not fit `place_bytes` is refused, and the
 // route waiting on it is answered `Full`. The place budget here is 1 MiB, below any child's
-// charge (operate_bytes, the store share, the 1 MiB main keeps and the child task's own
+// charge (operate_bytes, the store share, the keep and the child task's own
 // bytes), so every start of the group is refused for size. Wrong implementation: the
 // launcher reports the refusal to the host but never answers the route, which waits for a
 // child that cannot start (or it is answered with an untyped failure).
@@ -723,7 +729,8 @@ fn serve_fits(take config: runner.PlaceConfig[(), (), ()], tasks: Tasks) -> Resu
 }
 
 fn serve_share(take config: runner.PlaceConfig[(), (), ()]) -> u64 {
-    runtime.root_limit() - result.unwrap(runner.operate_bytes(config)) - 1048576u64
+    // platform.serve registers its place in its own task, so it keeps the Template too.
+    runtime.root_limit() - result.unwrap(runner.operate_bytes(config)) - runner.PLACE_KEEP - config.n_place
 }
 
 fn serve_shortfall(take config: runner.PlaceConfig[(), (), ()]) -> Result[runner.Ended, runner.StartError] waits {
@@ -739,15 +746,16 @@ fn test_platform_serve_budgets(d: Dir, c: Clock, r: Random, tasks: Tasks, n: Net
     }
     serve_fits(serve_budget_config(Memory, c, r, tasks, n), tasks)?
     serve_fits(serve_budget_config(Temp(d), c, r, tasks, n), tasks)?
-    // RUNNER-SPEC "Store sizes": the share is the root limit − operate_bytes − the
-    // 1 MiB main keeps, and Store's Shortage at that share is the refusal.
+    // RUNNER-SPEC "Store sizes": the share is the root limit − operate_bytes − the keep
+    // (PLACE_KEEP and the Template's n_place), and Store's Shortage at that share is the
+    // refusal. An 8 MiB child leaves this config less than a Memory store's floor.
     let limited = serve_budget_config(Memory, c, r, tasks, n)
-    let sizing = task.spawn(tasks, bytes 12582912u64, serve_budget_config(Memory, c, r, tasks, n), serve_share)
+    let sizing = task.spawn(tasks, bytes 8388608u64, serve_budget_config(Memory, c, r, tasks, n), serve_share)
     let share = result.unwrap(task.join(take sizing))
     let Error(short) = store.planned(Memory, share, store.derived_sizes()) else {
         return Error("L60: the law's share must be short for a Memory store")
     }
-    let child = task.spawn(tasks, bytes 12582912u64, take limited, serve_shortfall)
+    let child = task.spawn(tasks, bytes 8388608u64, take limited, serve_shortfall)
     match task.join(take child) {
         Ok(Error(Full(cap))) if short.have == share && cap.requested == short.need && cap.available == share => Ok(()),
         _ => Error("L60: platform.serve must report the exact Store shortage"),

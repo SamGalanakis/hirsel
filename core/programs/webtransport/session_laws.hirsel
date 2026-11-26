@@ -1,0 +1,412 @@
+// T8's HTTP/3 rows. Two quic endpoints exchange datagrams in memory; a side is either a
+// webtransport Endpoint or a raw quic peer whose HTTP/3 bytes are written by hand from the
+// RFCs, so a hostile or minimal peer says exactly what the row needs.
+const CLIENT_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 24201)
+
+const SERVER_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 24202)
+
+/// A raw client's control stream: type 0x00, then SETTINGS (0x04, 7 bytes) with
+/// SETTINGS_H3_DATAGRAM (0x33) 1 and SETTINGS_WT_ENABLED (0x20b8933b, the 4-byte varint
+/// a0b8933b) 1 (RFC 9114 §6.2.1, §7.2.4, RFC 9297 §2.1.1, draft-17 §3.1).
+const CLIENT_CONTROL: String = "00 04 07 33 01 a0b8933b 01"
+
+/// The same without SETTINGS_H3_DATAGRAM: SETTINGS of 5 bytes.
+const CLIENT_CONTROL_NO_DATAGRAM: String = "00 04 05 a0b8933b 01"
+
+/// A raw server's control stream lacking SETTINGS_H3_DATAGRAM: SETTINGS_ENABLE_CONNECT_PROTOCOL
+/// (0x08) 1 and SETTINGS_WT_ENABLED 1 (RFC 9220 §3, draft-17 §3.1).
+const SERVER_CONTROL_NO_DATAGRAM: String = "00 04 07 08 01 a0b8933b 01"
+
+type Side {
+    q: quic.Endpoint,
+    wt: webtransport.Endpoint,
+    driven: bool,
+    raw: List[quic.Event],
+    app: List[webtransport.Event]
+}
+
+fn hex_text(s: String) -> Bytes {
+    let mut digits: Bytes = list.new()
+    for b in string.as_bytes(s) {
+        if b != 0x20 {
+            list.push(mut digits, b)
+        }
+    }
+    option.unwrap(std.hex.decode(digits))
+}
+
+fn endpoint_config() -> quic.EndpointConfig {
+    let reset = result.unwrap(secret.seal(b"WT reset key", "mac"))
+    let token = result.unwrap(secret.seal(b"WT token key", "kdf"))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 65536))
+}
+
+fn identity() -> quic.handshake.Identity {
+    let mut scalar: Bytes = list.with_capacity(32)
+    for _ in 0u64 .. 31 {
+        list.push(mut scalar, 0)
+    }
+    list.push(mut scalar, 3)
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(provide.random_tape(take scalar), "sign(p256)", mut point))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, cert_old())
+    let id: quic.handshake.Identity = Identity(chain: take chain, key: take key, alg: P256)
+    take id
+}
+
+fn pins() -> List[quic.handshake.Pin] {
+    let mut p: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut p, Cert(old_digest()))
+    take p
+}
+
+fn limits(header_bytes: u32, pending_connects: u16, require_origin: bool) -> webtransport.Limits {
+    let mut authorities: List[String] = list.new()
+    list.push(mut authorities, "server")
+    let mut origins: List[String] = list.new()
+    list.push(mut origins, "https://good.example")
+    webtransport.Limits(authorities: take authorities, origins: take origins, require_origin: require_origin, sessions: 8, sessions_per_connection: 4, pending_connects: pending_connects, streams_bidi: 4, streams_uni: 4, data: 65536, buffered: 4, buffered_datagrams: 4, header_bytes: header_bytes)
+}
+
+fn server_side(take l: webtransport.Limits, driven: bool) -> Side {
+    let t = webtransport.transport(l)
+    let q = result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((identity(), take t))))
+    Side(q: take q, wt: webtransport.endpoint(take l), driven: driven, raw: list.new(), app: list.new())
+}
+
+fn client_side(take l: webtransport.Limits, driven: bool) -> Side {
+    let q = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+    Side(q: take q, wt: webtransport.endpoint(take l), driven: driven, raw: list.new(), app: list.new())
+}
+
+/// One poll of from, every datagram delivered to `to`, whose events go to its webtransport
+/// Endpoint or, for a raw side, its raw list. Returns the datagram count.
+fn deliver(mut from: Side, mut to: Side, from_addr: Addr, now: u64, mut wire: Bytes, mut packets: List[quic.Output]) -> u64 {
+    list.clear(mut wire)
+    list.clear(mut packets)
+    let _ = quic.poll(mut from.q, now, mut wire, mut packets)
+    let mut count = 0u64
+    for output in packets {
+        if let Transmit(..) = output {
+            count += 1
+        }
+    }
+    quic.committed(mut from.q, now, count)
+    let mut events: List[quic.Event] = list.new()
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            quic.receive_datagram(mut to.q, now, from_addr, 0, mut wire, at, len, mut events)
+        }
+    }
+    if to.driven {
+        webtransport.receive(mut to.wt, mut to.q, now, events, mut to.app)
+    } else {
+        for event in events {
+            list.push(mut to.raw, clone(event))
+        }
+    }
+    count
+}
+
+fn settle(mut client: Side, mut server: Side, now: u64) {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    for _ in 0u64 .. 4000 {
+        let a = deliver(mut client, mut server, CLIENT_ADDR, now, mut wire, mut packets)
+        let b = deliver(mut server, mut client, SERVER_ADDR, now, mut wire, mut packets)
+        if a == 0 && b == 0 {
+            return
+        }
+    }
+    fail("the endpoints never went quiet")
+}
+
+fn connected(events: List[quic.Event]) -> quic.ConnectionHandle {
+    for event in events {
+        if let Connected(c: c, ..) = event {
+            return c
+        }
+    }
+    fail("no QUIC connection")
+}
+
+/// A raw client connected to server; returns its connection handle.
+fn raw_client(mut client: Side, mut server: Side, l: webtransport.Limits) -> quic.ConnectionHandle {
+    let _ = result.unwrap(quic.connect(mut client.q, 0, SERVER_ADDR, "server", pins(), None, webtransport.transport(l)))
+    settle(mut client, mut server, 1)
+    connected(client.raw)
+}
+
+fn write_all(mut side: Side, c: quic.ConnectionHandle, id: quic.StreamId, data: Bytes, fin: bool) {
+    if result.unwrap(quic.write(mut side.q, c, id, data, fin)) != list.len(data) {
+        fail("a short raw write")
+    }
+}
+
+/// A raw peer's three critical streams (RFC 9114 §6.2.1, RFC 9204 §4.2): control, then the
+/// QPACK encoder (0x02) and decoder (0x03) types. Returns the control stream.
+fn raw_streams(mut side: Side, c: quic.ConnectionHandle, control: Bytes, fin: bool) -> quic.StreamId {
+    let id = result.unwrap(quic.open(mut side.q, c, false))
+    write_all(mut side, c, id, control, fin)
+    for kind in[b"\x02", b"\x03"] {
+        let s = result.unwrap(quic.open(mut side.q, c, false))
+        write_all(mut side, c, s, kind, false)
+    }
+    id
+}
+
+/// The CONNECT of RFC 9220 §3 and draft-17 §3.2, with the fields a row changes.
+fn connect_fields(protocol: Bytes, authority: Option[Bytes], origin: Option[Bytes]) -> List[qpack.Field] {
+    let mut f: List[qpack.Field] = list.new()
+    list.push(mut f, field(b":method", b"CONNECT"))
+    list.push(mut f, field(b":protocol", protocol))
+    list.push(mut f, field(b":scheme", b"https"))
+    if let Some(a) = authority {
+        list.push(mut f, field(b":authority", a))
+    }
+    list.push(mut f, field(b":path", b"/chat"))
+    if let Some(o) = origin {
+        list.push(mut f, field(b"origin", o))
+    }
+    take f
+}
+
+/// A request on a new bidirectional stream: one HEADERS frame (RFC 9114 §4.1).
+fn send_request(mut side: Side, c: quic.ConnectionHandle, fields: List[qpack.Field]) -> quic.StreamId {
+    let mut section: Bytes = list.new()
+    qpack.encode_section(fields, mut section)
+    let mut frame: Bytes = list.new()
+    h3_wire.write_head(h3_wire.FRAME_HEADERS, list.len(section), mut frame)
+    list.append(mut frame, section)
+    let id = result.unwrap(quic.open(mut side.q, c, true))
+    write_all(mut side, c, id, frame, false)
+    id
+}
+
+/// The :status of the response on a raw client's request stream, or 0.
+fn status_of(mut side: Side, c: quic.ConnectionHandle, id: quic.StreamId) -> u64 {
+    let mut buf: Bytes = list.with_capacity(4096)
+    let _ = quic.read(mut side.q, c, id, mut buf)
+    let Some(h) = h3_wire.read_head(buf, 0, list.len(buf)) else {
+        return 0
+    }
+    if h.kind != h3_wire.FRAME_HEADERS || list.len(buf) < h.head + h.len {
+        return 0
+    }
+    let mut fields: List[qpack.Field] = list.new()
+    result.unwrap(qpack.decode_section(buf, h.head, h.head + h.len, 4096, mut fields))
+    for f in fields {
+        if f.name == b":status" {
+            let mut n = 0u64
+            for b in f.value {
+                let d: u64 = int.widen(b - 0x30)
+                n = n * 10 + d
+            }
+            return n
+        }
+    }
+    0
+}
+
+fn reset_code(events: List[quic.Event], id: quic.StreamId) -> u64 {
+    for event in events {
+        if let Reset(s: s, code: code, ..) = event {
+            if s == id {
+                return code
+            }
+        }
+    }
+    0
+}
+
+fn closed_code(events: List[quic.Event]) -> u64 {
+    for event in events {
+        if let Closed(_, Application(code: code)) = event {
+            return code
+        }
+    }
+    0
+}
+
+fn requested(events: List[webtransport.Event]) -> u64 {
+    let mut n = 0u64
+    for event in events {
+        if let Requested(..) = event {
+            n += 1
+        }
+    }
+    n
+}
+
+fn expect(got: u64, want: u64, take what: String) {
+    if got != want {
+        let mut m = take what
+        string.push(mut m, ": got ")
+        string.push_uint(mut m, got, 16, 0, '0')
+        string.push(mut m, ", want ")
+        string.push_uint(mut m, want, 16, 0, '0')
+        fail(take m)
+    }
+}
+
+/// A raw client sends one request after its SETTINGS; returns the status answered, or the
+/// stream reset code with bit 32 set.
+fn raw_row(take l: webtransport.Limits, control: Bytes, fields: List[qpack.Field]) -> (u64, u64) {
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(clone(l), false)
+    let c = raw_client(mut client, mut server, l)
+    let _ = raw_streams(mut client, c, control, false)
+    settle(mut client, mut server, 2)
+    let id = send_request(mut client, c, fields)
+    settle(mut client, mut server, 3)
+    let status = status_of(mut client, c, id)
+    (status, reset_code(client.raw, id) + requested(server.app) * 0x100000000)
+}
+
+/// Every request below is refused before the application sees it.
+fn refused_row(take l: webtransport.Limits, control: Bytes, fields: List[qpack.Field], status: u64, reset: u64, take what: String) {
+    let (got_status, rest) = raw_row(take l, control, fields)
+    expect(got_status, status, clone(what))
+    expect(rest, reset, take what)
+}
+
+/// bug: a CONNECT the package must refuse reaches the application, or a refusal carries the
+/// wrong status or stream error; a client takes a session on a server without a requirement.
+/// oracle: RFC 9114 §4.1.2, §4.3.1, §6.2.1, RFC 9220 §3, draft-17 §3.1, §3.2, §5.1, §5.2,
+/// the Limits rules of WT-3 and WT-6, and the codes of WT-1.
+@test
+fn refusals() -> Result[(), ()] {
+    let control = hex_text(CLIENT_CONTROL)
+    let good = Some(b"https://good.example")
+    // Well-formed: the application is asked, and Accept reaches the Hirsel client as Ready.
+    {
+        let mut server = server_side(limits(1024, 4, false), true)
+        let mut client = client_side(limits(1024, 4, false), true)
+        let mut protocols: List[String] = list.new()
+        list.push(mut protocols, "a")
+        list.push(mut protocols, "b")
+        let s = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 0, SERVER_ADDR, "https://server/chat", pins(), take protocols))
+        settle(mut client, mut server, 1)
+        expect(requested(server.app), 1, "a well-formed CONNECT is Requested")
+        let mut asked: Option[webtransport.SessionHandle] = None
+        for event in server.app {
+            if let Requested(h, r) = event {
+                if r.authority != "server" || r.path != "/chat" || list.len(r.protocols) != 2 || r.protocols[1] != "b" {
+                    fail("the Request does not carry the CONNECT's fields")
+                }
+                asked = Some(h)
+            }
+        }
+        let mut accept: List[(String, String)] = list.new()
+        result.unwrap(webtransport.answer(mut server.wt, mut server.q, option.unwrap(asked), Accept(protocol: Some("b"), headers: take accept)))
+        settle(mut client, mut server, 2)
+        let mut ready = false
+        for event in client.app {
+            if let Ready(s: got, protocol: Some(p)) = event {
+                ready = got == s && p == "b"
+            }
+        }
+        if !ready {
+            fail("Accept must reach the client as Ready with WT-Protocol b")
+        }
+    }
+    // RFC 9220 §3 and WT-3: another :protocol is 501.
+    refused_row(limits(1024, 4, false), control, connect_fields(b"websocket", Some(b"server"), None), 501, 0, "another :protocol")
+    // RFC 9114 §4.3.1: no :authority is malformed, H3_MESSAGE_ERROR.
+    refused_row(limits(1024, 4, false), control, connect_fields(b"webtransport-h3", None, None), 0, 0x10e, "no :authority")
+    // WT-3 step 3: an :authority outside Limits.authorities is 404.
+    refused_row(limits(1024, 4, false), control, connect_fields(b"webtransport-h3", Some(b"elsewhere"), None), 404, 0, "an unknown :authority")
+    // draft-17 §3.2: an Origin outside Limits.origins is 403 and no session.
+    refused_row(limits(1024, 4, false), control, connect_fields(b"webtransport-h3", Some(b"server"), Some(b"https://evil.example")), 403, 0, "an unknown Origin")
+    // WT-3 step 3: require_origin refuses a request without Origin.
+    refused_row(limits(1024, 4, true), control, connect_fields(b"webtransport-h3", Some(b"server"), None), 403, 0, "no Origin with require_origin")
+    // WT-6, RFC 9114 §4.2.2: a field section past header_bytes is H3_MESSAGE_ERROR.
+    {
+        let mut f = connect_fields(b"webtransport-h3", Some(b"server"), good)
+        let mut pad: Bytes = list.new()
+        for _ in 0u64 .. 300 {
+            list.push(mut pad, 0x61)
+        }
+        list.push(mut f, field(b"x-pad", pad))
+        refused_row(limits(256, 4, false), control, f, 0, 0x10e, "a field section past header_bytes")
+    }
+    // draft-17 §3.1: a client without SETTINGS_H3_DATAGRAM sends only malformed sessions.
+    refused_row(limits(1024, 4, false), hex_text(CLIENT_CONTROL_NO_DATAGRAM), connect_fields(b"webtransport-h3", Some(b"server"), good), 0, 0x10e, "a client without H3_DATAGRAM")
+    // RFC 9114 §4.1: a well-formed request that is not WebTransport is answered 404.
+    {
+        let mut f: List[qpack.Field] = list.new()
+        list.push(mut f, field(b":method", b"GET"))
+        list.push(mut f, field(b":scheme", b"https"))
+        list.push(mut f, field(b":authority", b"server"))
+        list.push(mut f, field(b":path", b"/"))
+        refused_row(limits(1024, 4, false), control, f, 404, 0, "a GET")
+    }
+    // draft-17 §5.1: without flow-control SETTINGS a second CONNECT is H3_REQUEST_REJECTED.
+    {
+        let l = limits(1024, 4, false)
+        let mut server = server_side(clone(l), true)
+        let mut client = client_side(clone(l), false)
+        let c = raw_client(mut client, mut server, l)
+        let _ = raw_streams(mut client, c, control, false)
+        let first = send_request(mut client, c, connect_fields(b"webtransport-h3", Some(b"server"), good))
+        settle(mut client, mut server, 2)
+        expect(requested(server.app), 1, "the first session is Requested")
+        let second = send_request(mut client, c, connect_fields(b"webtransport-h3", Some(b"server"), good))
+        settle(mut client, mut server, 3)
+        expect(reset_code(client.raw, second), 0x10b, "a second session without flow control")
+        expect(reset_code(client.raw, first), 0, "the first session stands")
+        expect(requested(server.app), 1, "the second is never Requested")
+    }
+    // draft-17 §5.2: CONNECTs held before SETTINGS past pending_connects are rejected.
+    {
+        let l = limits(1024, 2, false)
+        let mut server = server_side(clone(l), true)
+        let mut client = client_side(clone(l), false)
+        let c = raw_client(mut client, mut server, l)
+        let mut ids: List[quic.StreamId] = list.new()
+        for _ in 0u64 .. 3 {
+            list.push(mut ids, send_request(mut client, c, connect_fields(b"webtransport-h3", Some(b"server"), good)))
+        }
+        settle(mut client, mut server, 2)
+        expect(reset_code(client.raw, ids[2]), 0x10b, "a CONNECT past pending_connects")
+        expect(requested(server.app), 0, "nothing is processed before SETTINGS")
+        let _ = raw_streams(mut client, c, control, false)
+        settle(mut client, mut server, 3)
+        expect(requested(server.app), 1, "a held CONNECT is processed at SETTINGS")
+        expect(reset_code(client.raw, ids[0]), 0, "the first held CONNECT stands")
+    }
+    // RFC 9114 §6.2.1: a closed control stream is H3_CLOSED_CRITICAL_STREAM.
+    {
+        let l = limits(1024, 4, false)
+        let mut server = server_side(clone(l), true)
+        let mut client = client_side(clone(l), false)
+        let c = raw_client(mut client, mut server, l)
+        let _ = raw_streams(mut client, c, control, true)
+        settle(mut client, mut server, 2)
+        expect(closed_code(client.raw), 0x104, "a closed control stream")
+    }
+    // draft-17 §3.1: the Hirsel client closes a server without SETTINGS_H3_DATAGRAM with
+    // WT_REQUIREMENTS_NOT_MET, and its session is Closed.
+    {
+        let l = limits(1024, 4, false)
+        let mut server = server_side(clone(l), false)
+        let mut client = client_side(clone(l), true)
+        let s = result.unwrap(webtransport.connect(mut client.wt, mut client.q, 0, SERVER_ADDR, "https://server/chat", pins(), list.new()))
+        settle(mut client, mut server, 1)
+        let c = connected(server.raw)
+        let _ = raw_streams(mut server, c, hex_text(SERVER_CONTROL_NO_DATAGRAM), false)
+        settle(mut client, mut server, 2)
+        expect(closed_code(server.raw), 0x212c0d48, "a server without H3_DATAGRAM")
+        let mut closed = false
+        for event in client.app {
+            if let Closed(s: got, ..) = event {
+                closed = got == s
+            }
+        }
+        if !closed {
+            fail("the session on a server without a requirement must be Closed")
+        }
+    }
+    Ok(())
+}

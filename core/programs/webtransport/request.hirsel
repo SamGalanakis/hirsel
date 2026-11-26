@@ -1,0 +1,650 @@
+// WT-3: the CONNECT exchange. A server reads each request stream's HEADERS frame, checks it
+// (RFC 9114 §4.3.1, RFC 9220 §3, draft-17 §3.2) and either answers it or hands it to the
+// application as Requested; a client sends its CONNECT once the server's SETTINGS allow it
+// and reads the response.
+/// How a request or response stream fails: a stream error resets the one stream, a
+/// connection error closes the connection (RFC 9114 §8).
+type Fault = StreamFault(u64) | ConnectionFault(u64)
+
+/// The checked request: an extended CONNECT for webtransport-h3, or the status to answer.
+type Parsed = Connect(Request) | Answer(u16)
+
+fn handle_of(w: Endpoint, i: u64, k: u64) -> SessionHandle {
+    SessionHandle(conn: w.conns[i].handle, id: w.conns[i].sessions[k].id)
+}
+
+fn session_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let reading = match w.conns[i].sessions[k].phase {
+        Reading => true,
+        Awaiting => true,
+        _ => false,
+    }
+    if reading {
+        headers_readable(mut w, mut e, i, k, mut out)
+        return
+    }
+    let live = match w.conns[i].sessions[k].phase {
+        Live => true,
+        _ => false,
+    }
+    if live {
+        // TS2 reads past a live session's CONNECT stream and ends the session at its FIN.
+        let c = w.conns[i].handle
+        let id = w.conns[i].sessions[k].id
+        loop {
+            list.clear(mut w.scratch)
+            match quic.read(mut e, c, id, mut w.scratch) {
+                Ok((_, true)) => {
+                    end_session(mut w, i, k, true, 0, list.new(), mut out)
+                    return
+                },
+                Ok((0, false)) => return,
+                Ok(_) => (),
+                Error(_) => return,
+            }
+        }
+    }
+}
+
+/// The next HEADERS frame on a request or response stream: Ok(None) until it is whole.
+/// Unknown frame types before it are skipped (RFC 9114 §9).
+fn next_headers(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64) -> Result[Option[Bytes], Fault] {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    let most = request_bound(w.limits)
+    loop {
+        let ended = match read_more(mut e, c, id, mut w.conns[i].sessions[k].buf) {
+            Ok(f) => f,
+            Error(_) => true,
+        }
+        let full = list.len(w.conns[i].sessions[k].buf) == list.capacity(w.conns[i].sessions[k].buf)
+        loop {
+            let avail = list.len(w.conns[i].sessions[k].buf)
+            if w.conns[i].sessions[k].skip > 0 {
+                let n = order.min(w.conns[i].sessions[k].skip, avail)
+                list.drop_prefix(mut w.conns[i].sessions[k].buf, n)
+                w.conns[i].sessions[k].skip -= n
+                if w.conns[i].sessions[k].skip > 0 {
+                    break
+                }
+                continue
+            }
+            let Some(h) = h3_wire.read_head(w.conns[i].sessions[k].buf, 0, avail) else {
+                break
+            }
+            if h.kind == h3_wire.FRAME_HEADERS {
+                if h.len > most {
+                    return Error(StreamFault(h3_wire.H3_MESSAGE_ERROR))
+                }
+                if avail < h.head + h.len {
+                    break
+                }
+                let mut section: Bytes = list.with_capacity(h.len)
+                list.append(mut section, list.slice(w.conns[i].sessions[k].buf, h.head, h.head + h.len))
+                list.drop_prefix(mut w.conns[i].sessions[k].buf, h.head + h.len)
+                return Ok(Some(take section))
+            }
+            let unexpected = h.kind == h3_wire.FRAME_DATA || h.kind == h3_wire.FRAME_SETTINGS || h.kind == h3_wire.FRAME_GOAWAY || h.kind == h3_wire.FRAME_MAX_PUSH_ID || h.kind == h3_wire.FRAME_CANCEL_PUSH || h.kind == h3_wire.FRAME_PUSH_PROMISE || h3_wire.reserved_frame(h.kind)
+            if unexpected {
+                // RFC 9114 §4.1, §7.2: a frame out of place on a request stream.
+                return Error(ConnectionFault(h3_wire.H3_FRAME_UNEXPECTED))
+            }
+            list.drop_prefix(mut w.conns[i].sessions[k].buf, h.head)
+            w.conns[i].sessions[k].skip = h.len
+        }
+        if ended {
+            return Error(StreamFault(h3_wire.H3_REQUEST_INCOMPLETE))
+        }
+        if !full {
+            return Ok(None)
+        }
+    }
+}
+
+fn headers_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    loop {
+        let section = match next_headers(mut w, mut e, i, k) {
+            Ok(Some(take s)) => take s,
+            Ok(None) => return,
+            Error(StreamFault(code)) => {
+                refuse_stream(mut e, c, id, code)
+                end_session(mut w, i, k, true, 0, list.new(), mut out)
+                return
+            },
+            Error(ConnectionFault(code)) => {
+                fail_conn(mut w, mut e, i, code, mut out)
+                return
+            },
+        }
+        let mut fields: List[qpack.Field] = list.new()
+        let header: u64 = int.widen(w.limits.header_bytes)
+        match qpack.decode_section(section, 0, list.len(section), header, mut fields) {
+            Ok(()) => (),
+            Error(TooLarge) => {
+                // RFC 9114 §4.2.2: past the advertised size, the message is malformed.
+                refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
+                end_session(mut w, i, k, true, 0, list.new(), mut out)
+                return
+            },
+            Error(_) => {
+                fail_conn(mut w, mut e, i, h3_wire.QPACK_DECOMPRESSION_FAILED, mut out)
+                return
+            },
+        }
+        if w.conns[i].client {
+            if !response(mut w, mut e, i, k, fields, mut out) {
+                return
+            }
+        } else {
+            request(mut w, mut e, i, k, take fields, mut out)
+            return
+        }
+    }
+}
+
+fn pending(conn: Conn) -> u64 {
+    let mut n = 0u64
+    for s in conn.sessions {
+        match s.phase {
+            Held(_) => {
+                n += 1
+            },
+            Asked => {
+                n += 1
+            },
+            _ => (),
+        }
+    }
+    n
+}
+
+fn live_here(conn: Conn) -> u64 {
+    let mut n = 0u64
+    for s in conn.sessions {
+        match s.phase {
+            Asked => {
+                n += 1
+            },
+            Live => {
+                n += 1
+            },
+            _ => (),
+        }
+    }
+    n
+}
+
+/// A server's decoded request on session k (WT-3 steps 1 and 3, WT-5's session counts).
+fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: List[qpack.Field], mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    let limit: u64 = int.widen(w.limits.pending_connects)
+    if !w.conns[i].settings {
+        // draft-17 §3.1: nothing is processed before the client's SETTINGS; §5.2 bounds
+        // what is held.
+        if pending(w.conns[i]) >= limit {
+            refuse_stream(mut e, c, id, h3_wire.H3_REQUEST_REJECTED)
+            end_session(mut w, i, k, false, 0, list.new(), mut out)
+            return
+        }
+        w.conns[i].sessions[k].phase = Held(take fields)
+        return
+    }
+    let parsed = match parse_request(fields, w.limits) {
+        Ok(take p) => take p,
+        Error(()) => {
+            refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
+            end_session(mut w, i, k, false, 0, list.new(), mut out)
+            return
+        },
+    }
+    let req = match parsed {
+        Answer(status) => {
+            refuse_with(mut w, mut e, i, k, status, mut out)
+            return
+        },
+        Connect(take r) => take r,
+    }
+    let per: u64 = int.widen(w.limits.sessions_per_connection)
+    let all: u64 = int.widen(w.limits.sessions)
+    let code = if !w.conns[i].peer_ok {
+        // draft-17 §3.1: a client that lacks a requirement sends only malformed sessions.
+        h3_wire.H3_MESSAGE_ERROR
+    } else if !flow(w, i) && live_here(w.conns[i]) > 0 {
+        // draft-17 §5.1: without flow control a connection holds one session.
+        h3_wire.H3_REQUEST_REJECTED
+    } else if pending(w.conns[i]) >= limit {
+        h3_wire.H3_REQUEST_REJECTED
+    } else {
+        0
+    }
+    if code != 0 {
+        refuse_stream(mut e, c, id, code)
+        end_session(mut w, i, k, false, 0, list.new(), mut out)
+        return
+    }
+    if flow(w, i) && (live_here(w.conns[i]) >= per || w.live >= all) {
+        // WT-5: past either session bound with flow control is 429.
+        refuse_with(mut w, mut e, i, k, 429, mut out)
+        return
+    }
+    w.conns[i].sessions[k].phase = Asked
+    w.live += 1
+    list.push(mut out, Requested(SessionHandle(conn: c, id: id), take req))
+}
+
+/// Answer a request with a final status and FIN, then forget it.
+fn refuse_with(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, status: u16, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    let mut fields: List[qpack.Field] = list.new()
+    push_status(status, mut fields)
+    let frame = headers_frame(fields)
+    send(mut w, mut e, i, id, take frame, true)
+    // RFC 9114 §4.1.1: the response is complete; the rest of the request is not needed.
+    let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
+    end_session(mut w, i, k, false, 0, list.new(), mut out)
+}
+
+fn push_status(status: u16, mut fields: List[qpack.Field]) {
+    let mut value: String = string.new()
+    let n: u64 = int.widen(status)
+    string.push_uint(mut value, n, 10, 3, '0')
+    list.push(mut fields, qpack.Field(name: b":status", value: string.into_bytes(take value)))
+}
+
+fn headers_frame(fields: List[qpack.Field]) -> Bytes {
+    let mut section: Bytes = list.new()
+    qpack.encode_section(fields, mut section)
+    let mut frame: Bytes = list.with_capacity(list.len(section) + 16)
+    h3_wire.write_head(h3_wire.FRAME_HEADERS, list.len(section), mut frame)
+    list.append(mut frame, section)
+    take frame
+}
+
+fn text(b: Bytes) -> Result[String, ()] {
+    match string.from_utf8(clone(b)) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(()),
+    }
+}
+
+fn lowercase(name: Bytes) -> bool {
+    for b in name {
+        if b >= 0x41 && b <= 0x5a {
+            return false
+        }
+    }
+    true
+}
+
+/// RFC 9114 §4.2: fields that are connection-specific in HTTP/1.1 make a message malformed.
+fn connection_specific(f: qpack.Field) -> bool {
+    if f.name == b"te" {
+        return f.value != b"trailers"
+    }
+    f.name == b"connection" || f.name == b"keep-alive" || f.name == b"proxy-connection" || f.name == b"transfer-encoding" || f.name == b"upgrade"
+}
+
+/// An sf-string (RFC 9651 §3.3.3) without escapes, as draft-17 §3.3 uses for protocols.
+fn sf_string(b: Bytes) -> Option[String] {
+    let n = list.len(b)
+    if n < 2 || b[0] != 0x22 || b[n - 1] != 0x22 {
+        return None
+    }
+    for x in list.slice(b, 1, n - 1) {
+        if x == 0x22 || x == 0x5c || x < 0x20 || x > 0x7e {
+            return None
+        }
+    }
+    let mut inner: Bytes = list.with_capacity(n - 2)
+    list.append(mut inner, list.slice(b, 1, n - 1))
+    match string.from_utf8(take inner) {
+        Ok(take s) => Some(take s),
+        Error(_) => None,
+    }
+}
+
+/// WT-Available-Protocols, an sf-list of sf-strings (draft-17 §3.3). A value that does not
+/// parse is ignored, as the draft requires.
+fn available_protocols(b: Bytes) -> List[String] {
+    let mut protocols: List[String] = list.new()
+    let mut at = 0u64
+    let n = list.len(b)
+    while at <= n {
+        let end = match list.find_byte(b, at, n, 0x2c) {
+            Some(x) => x,
+            None => n,
+        }
+        let mut lo = at
+        let mut hi = end
+        while lo < hi && (b[lo] == 0x20 || b[lo] == 0x09) {
+            lo += 1
+        }
+        while hi > lo && (b[hi - 1] == 0x20 || b[hi - 1] == 0x09) {
+            hi -= 1
+        }
+        let mut item: Bytes = list.with_capacity(hi - lo)
+        list.append(mut item, list.slice(b, lo, hi))
+        match sf_string(item) {
+            Some(take s) => list.push(mut protocols, take s),
+            None => return list.new(),
+        }
+        at = end + 1
+    }
+    take protocols
+}
+
+fn set_once(mut slot: Option[Bytes], value: Bytes) -> Result[(), ()] {
+    if let Some(_) = slot {
+        return Error(())
+    }
+    slot = Some(clone(value))
+    Ok(())
+}
+
+fn member(xs: List[String], s: String) -> bool {
+    for x in xs {
+        if x == s {
+            return true
+        }
+    }
+    false
+}
+
+fn present(x: Option[Bytes]) -> bool {
+    match x {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Check a request's fields; Error(()) is malformed (H3_MESSAGE_ERROR, RFC 9114 §4.1.2).
+fn parse_request(fields: List[qpack.Field], limits: Limits) -> Result[Parsed, ()] {
+    let mut method: Option[Bytes] = None
+    let mut scheme: Option[Bytes] = None
+    let mut authority: Option[Bytes] = None
+    let mut path: Option[Bytes] = None
+    let mut protocol: Option[Bytes] = None
+    let mut origin: Option[String] = None
+    let mut protocols: List[String] = list.new()
+    let mut headers: List[(String, String)] = list.new()
+    let mut regular = false
+    for f in fields {
+        if !lowercase(f.name) || connection_specific(f) {
+            return Error(())
+        }
+        if list.len(f.name) > 0 && f.name[0] == 0x3a {
+            // RFC 9114 §4.3: pseudo-headers come first, once each, and only these five
+            // (with RFC 9220's :protocol).
+            if regular {
+                return Error(())
+            }
+            if f.name == b":method" {
+                set_once(mut method, f.value)?
+            } else if f.name == b":scheme" {
+                set_once(mut scheme, f.value)?
+            } else if f.name == b":authority" {
+                set_once(mut authority, f.value)?
+            } else if f.name == b":path" {
+                set_once(mut path, f.value)?
+            } else if f.name == b":protocol" {
+                set_once(mut protocol, f.value)?
+            } else {
+                return Error(())
+            }
+            continue
+        }
+        regular = true
+        let name = text(f.name)?
+        let value = text(f.value)?
+        if f.name == b"origin" {
+            if let Some(_) = origin {
+                return Error(())
+            }
+            origin = Some(clone(value))
+        } else if f.name == b"wt-available-protocols" {
+            protocols = available_protocols(f.value)
+        }
+        list.push(mut headers, (take name, take value))
+    }
+    let Some(m) = method else {
+        return Error(())
+    }
+    if m != b"CONNECT" {
+        // RFC 9114 §4.3.1: :scheme and :path are required; :protocol belongs to CONNECT
+        // (RFC 9220 §3). A well-formed request that is not WebTransport is answered 404.
+        if present(protocol) || !present(scheme) || !present(path) {
+            return Error(())
+        }
+        return Ok(Answer(404))
+    }
+    let Some(p) = protocol else {
+        // RFC 9114 §4.4: a plain CONNECT names only :authority; this server tunnels nothing.
+        if present(scheme) || present(path) || !present(authority) {
+            return Error(())
+        }
+        return Ok(Answer(404))
+    }
+    // RFC 9220 §3: an extended CONNECT carries :scheme, :path and :authority.
+    let Some(a) = authority else {
+        return Error(())
+    }
+    let Some(target) = path else {
+        return Error(())
+    }
+    if !present(scheme) {
+        return Error(())
+    }
+    if p != b"webtransport-h3" {
+        return Ok(Answer(501))
+    }
+    let authority_text = text(a)?
+    let path_text = text(target)?
+    if !member(limits.authorities, authority_text) {
+        return Ok(Answer(404))
+    }
+    match origin {
+        Some(o) => {
+            if !member(limits.origins, o) {
+                return Ok(Answer(403))
+            }
+        },
+        None => {
+            if limits.require_origin {
+                return Ok(Answer(403))
+            }
+        },
+    }
+    Ok(Connect(Request(authority: take authority_text, path: take path_text, origin: take origin, protocols: take protocols, headers: take headers)))
+}
+
+/// Accept the session or answer it with a final status (WT-2).
+pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: Verdict) -> Result[(), WtError] {
+    let SessionHandle(conn: c, id: id) = s
+    let Some(i) = conn_index(w, c) else {
+        return Error(UnknownSession)
+    }
+    let Some(k) = session_index(w.conns[i], id) else {
+        return Error(UnknownSession)
+    }
+    if w.conns[i].client {
+        return Error(State)
+    }
+    let asked = match w.conns[i].sessions[k].phase {
+        Asked => true,
+        _ => false,
+    }
+    if !asked {
+        return Error(State)
+    }
+    let mut ignored: List[Event] = list.new()
+    match v {
+        Refuse(status: status) => {
+            if status < 300 || status > 599 {
+                return Error(State)
+            }
+            refuse_with(mut w, mut e, i, k, status, mut ignored)
+        },
+        Accept(protocol: protocol, headers: headers) => {
+            let mut fields: List[qpack.Field] = list.new()
+            push_status(200, mut fields)
+            if let Some(p) = protocol {
+                let mut value: Bytes = list.with_capacity(string.byte_len(p) + 2)
+                list.push(mut value, 0x22)
+                list.append(mut value, string.as_bytes(p))
+                list.push(mut value, 0x22)
+                list.push(mut fields, qpack.Field(name: b"wt-protocol", value: take value))
+            }
+            for (name, value) in headers {
+                list.push(mut fields, qpack.Field(name: clone(string.as_bytes(name)), value: clone(string.as_bytes(value))))
+            }
+            let frame = headers_frame(fields)
+            send(mut w, mut e, i, id, take frame, false)
+            w.conns[i].sessions[k].phase = Live
+        },
+    }
+    Ok(())
+}
+
+/// Split https://authority/path; the authority's host is the TLS name.
+fn split_url(url: String) -> Option[(String, String, String)] {
+    let Some(rest) = string.strip_prefix(url, "https://") else {
+        return None
+    }
+    let (authority, path) = match string.find(rest, 0, "/") {
+        Some(x) => (string.from(string.slice(rest, 0, x)), string.from(string.slice(rest, x, string.byte_len(rest)))),
+        None => (string.from(rest), string.from("/")),
+    }
+    if string.byte_len(authority) == 0 {
+        return None
+    }
+    let host = if string.starts_with(authority, "[") {
+        match string.find(authority, 0, "]") {
+            Some(x) => string.from(string.slice(authority, 1, x)),
+            None => return None,
+        }
+    } else {
+        match string.find(authority, 0, ":") {
+            Some(x) => string.from(string.slice(authority, 0, x)),
+            None => clone(authority),
+        }
+    }
+    Some((take host, take authority, take path))
+}
+
+/// Start a session on a new QUIC connection to `to`; its handle is returned at once and
+/// Ready, Refused or Closed follows (WT-2).
+pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, take pins: List[quic.handshake.Pin], take protocols: List[String]) -> Result[SessionHandle, WtError] {
+    let Some((host, authority, path)) = split_url(url) else {
+        return Error(Url)
+    }
+    let c = match quic.connect(mut e, now, to, take host, take pins, None, transport(w.limits)) {
+        Ok(c) => c,
+        Error(err) => return Error(Quic(err)),
+    }
+    let mut conn = new_conn(c, true)
+    // The CONNECT stream is the connection's first client bidirectional stream (RFC 9000
+    // §2.1), opened once the server's SETTINGS arrive.
+    let id: quic.StreamId = StreamId(0)
+    let cap = request_bound(w.limits) + 16
+    list.push(mut conn.sessions, Session(id: id, phase: Unsent(authority: take authority, path: take path, protocols: take protocols), buf: list.with_capacity(cap), skip: 0))
+    conn.next_bidi = 1
+    list.push(mut w.conns, take conn)
+    Ok(SessionHandle(conn: c, id: id))
+}
+
+/// Send each Unsent CONNECT (WT-3 step 2) once the server's SETTINGS allow it.
+fn send_connects(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    for k in 0u64 .. list.len(w.conns[i].sessions) {
+        let unsent = match w.conns[i].sessions[k].phase {
+            Unsent(..) => true,
+            _ => false,
+        }
+        if !unsent {
+            continue
+        }
+        let id = match quic.open(mut e, c, true) {
+            Ok(id) => id,
+            Error(_) => {
+                fail_conn(mut w, mut e, i, h3_wire.H3_INTERNAL_ERROR, mut out)
+                return
+            },
+        }
+        if id != w.conns[i].sessions[k].id {
+            fail_conn(mut w, mut e, i, h3_wire.H3_INTERNAL_ERROR, mut out)
+            return
+        }
+        if let Unsent(authority: take authority, path: take path, protocols: take protocols) = replace(mut w.conns[i].sessions[k].phase, Awaiting) {
+            let mut fields: List[qpack.Field] = list.new()
+            list.push(mut fields, qpack.Field(name: b":method", value: b"CONNECT"))
+            list.push(mut fields, qpack.Field(name: b":protocol", value: b"webtransport-h3"))
+            list.push(mut fields, qpack.Field(name: b":scheme", value: b"https"))
+            list.push(mut fields, qpack.Field(name: b":authority", value: string.into_bytes(take authority)))
+            list.push(mut fields, qpack.Field(name: b":path", value: string.into_bytes(take path)))
+            if list.len(protocols) > 0 {
+                let mut value: Bytes = list.new()
+                for p in protocols {
+                    if list.len(value) > 0 {
+                        list.append(mut value, b", ")
+                    }
+                    list.push(mut value, 0x22)
+                    list.append(mut value, string.as_bytes(p))
+                    list.push(mut value, 0x22)
+                }
+                list.push(mut fields, qpack.Field(name: b"wt-available-protocols", value: take value))
+            }
+            let frame = headers_frame(fields)
+            send(mut w, mut e, i, id, take frame, false)
+        }
+    }
+}
+
+/// A client's decoded response; returns whether to read on (an interim 1xx response).
+fn response(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, fields: List[qpack.Field], mut out: List[Event]) -> bool {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    let s = handle_of(w, i, k)
+    let mut status: Option[u16] = None
+    let mut protocol: Option[String] = None
+    for f in fields {
+        if f.name == b":status" && list.len(f.value) == 3 {
+            let mut n = 0u16
+            let mut digits = true
+            for b in f.value {
+                if b < 0x30 || b > 0x39 {
+                    digits = false
+                } else {
+                    let d: u16 = int.widen(b - 0x30)
+                    n = n * 10 + d
+                }
+            }
+            if digits {
+                status = Some(n)
+            }
+        } else if f.name == b"wt-protocol" {
+            protocol = sf_string(f.value)
+        }
+    }
+    let Some(n) = status else {
+        refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
+        end_session(mut w, i, k, true, 0, list.new(), mut out)
+        return false
+    }
+    if n < 200 {
+        return true
+    }
+    if n < 300 {
+        w.conns[i].sessions[k].phase = Live
+        list.push(mut out, Ready(s: s, protocol: take protocol))
+        // Anything already read past the response belongs to the session (TS3).
+        return false
+    }
+    list.push(mut out, Refused(s: s, status: n))
+    let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
+    end_session(mut w, i, k, false, 0, list.new(), mut out)
+    false
+}

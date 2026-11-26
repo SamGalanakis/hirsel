@@ -1,8 +1,8 @@
 # WebTransport over HTTP/3
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 2 of 4); design
-review applied the same day (media-w2-spec-fix-2918). TS1 built (wt-ts1-ts3-2992); TS2 to TS5
-not built. Rules WT-1 to WT-7, laws T1 to T10, slices TS1 to TS5. The review's rulings are at the end.*
+review applied the same day (media-w2-spec-fix-2918). TS1 and TS2 built (wt-ts1-ts3-2992); TS3 to
+TS5 not built. Rules WT-1 to WT-7, laws T1 to T10, slices TS1 to TS5. The review's rulings are at the end.*
 
 `webtransport` is a sans-IO HTTP/3 server and client with only what WebTransport needs. It is
 written in Hirsel under `core/programs/webtransport` and runs over
@@ -87,11 +87,14 @@ pub type Request { authority: String, path: String, origin: Option[String], prot
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
 pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, status: u16) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: u32, final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: u32) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 
-pub fn endpoint(limits: Limits) -> Endpoint
+pub type WtError = UnknownSession | State | Url | Quic(quic.QuicError)
+
+pub fn endpoint(take limits: Limits) -> Endpoint
+pub fn transport(limits: Limits) -> quic.TransportConfig
 pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[quic.Event], mut out: List[Event])
 pub fn poll(mut w: Endpoint, mut e: quic.Endpoint, now: u64, mut out: List[Event]) -> Option[u64]
-pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, v: Verdict) -> Result[(), WtError]
-pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, pins: List[quic.Pin], protocols: List[String]) -> Result[SessionHandle, WtError]
+pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: Verdict) -> Result[(), WtError]
+pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: String, take pins: List[quic.Pin], take protocols: List[String]) -> Result[SessionHandle, WtError]
 pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool) -> Result[quic.StreamId, WtError]
 pub fn read(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, mut into: Bytes) -> Result[(u64, bool), WtError]
 pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Bytes, fin: bool) -> Result[u64, WtError]
@@ -132,6 +135,14 @@ wrappers pass the caller's buffers and `Shared[Bytes]` straight to `quic`.
 it picked from the client's `WT-Available-Protocols` (draft-17 §3.3) in
 `WT-Protocol`, and `Refuse(n)` sends `n`. No session data flows before `Accept`.
 
+`transport(limits)` is the `quic.TransportConfig` both roles use: QUIC datagrams on, ALPN
+`h3`, and stream credit for the three critical streams, the CONNECT streams and each
+session's WT streams. A server passes it to `quic.endpoint`; `connect` uses it. `WtError` is
+`UnknownSession` for a handle the endpoint does not hold, `State` for a call the session's
+phase does not allow (an `answer` to a session already answered, a `Refuse` with a status
+below 300 or above 599), `Url` for a `connect` URL that is not `https://authority/path`, and
+`Quic` for the `quic` call's own error.
+
 `receive` takes the QUIC events of one `quic.receive_datagram` or `quic.timeout`; `poll`
 runs the package's own timers (a buffered stream's 3-PTO expiry, WT-4) and returns the next
 deadline, which the caller folds into the `quic` driver's wait.
@@ -160,6 +171,16 @@ deadline, which the caller folds into the `quic` driver's wait.
    1,024 bytes) followed by FIN, or by the CONNECT stream's reset. Either way all its streams
    are reset with `WT_SESSION_GONE` and its datagrams are dropped (draft-17 §6).
 6. WT_DRAIN_SESSION and an HTTP/3 GOAWAY ask the peer to finish; `Draining` reports them.
+   A client's sessions at or past a GOAWAY's stream id, and those it has not sent yet, were
+   never processed (RFC 9114 §5.2) and are `Closed`; a GOAWAY id that grows, or from a server
+   one that is not a client bidirectional stream id, is `H3_ID_ERROR`.
+7. The server reads requests before the client's SETTINGS but answers none, holding each
+   (draft-17 §3.1). A well-formed request that is not an extended CONNECT, and a plain
+   CONNECT, are answered `404` with FIN, then `STOP_SENDING` `H3_NO_ERROR` (RFC 9114 §4.1.1);
+   a malformed one (RFC 9114 §4.1.2, §4.3.1: an uppercase or connection-specific field, a
+   repeated, unknown or late pseudo-header, a missing required one) is reset with
+   `H3_MESSAGE_ERROR`. A client sends its CONNECT only once the server's SETTINGS carry every
+   requirement; an interim `1xx` response is skipped.
 
 ## WT-4: Streams, datagrams and buffering
 
@@ -221,7 +242,10 @@ limit, or the entry cannot fit). In a field section, a dynamic reference or a no
 Required Insert Count is `QPACK_DECOMPRESSION_FAILED` (`0x0200`, §4.5.1). A field section
 whose decoded size passes `header_bytes`, the `SETTINGS_MAX_FIELD_SECTION_SIZE` the package
 advertised, is malformed (RFC 9114 §4.2.2): decoding stops at the bound and the stream is
-reset with `H3_MESSAGE_ERROR`, a bound checked as it is decoded, never after.
+reset with `H3_MESSAGE_ERROR`, a bound checked as it is decoded, never after. Before decoding,
+a HEADERS frame longer than 4 × `header_bytes` + 64 is refused the same way: HPACK's longest
+code is 30 bits (RFC 7541 Appendix B), so n coded bytes decode to at least 8n/30, and such a
+frame would decode past the bound; the frame is never buffered whole.
 
 ## WT-7: Certificates for browsers
 
@@ -286,8 +310,10 @@ Red first in `core/programs/webtransport/laws.hirsel` unless named.
   reset with `H3_REQUEST_REJECTED`), a session past `sessions_per_connection` with flow
   control (`429`), CONNECTs past `pending_connects` (`H3_REQUEST_REJECTED`), a field section
   past `header_bytes` (`H3_MESSAGE_ERROR`, decoding stopped at the bound), a closed control
-  stream (`H3_CLOSED_CRITICAL_STREAM`), a peer without `H3_DATAGRAM`
-  (`WT_REQUIREMENTS_NOT_MET`). *Oracle:* the sections cited in WT-1, WT-3, WT-5 and WT-6.
+  stream (`H3_CLOSED_CRITICAL_STREAM`), a server without `H3_DATAGRAM` (the client closes
+  with `WT_REQUIREMENTS_NOT_MET`), a client without `H3_DATAGRAM` (its CONNECT is reset with
+  `H3_MESSAGE_ERROR`: draft-17 §3.1 makes such a client's sessions malformed and does not close
+  the connection), and a request that is not a WebTransport CONNECT (`404`). *Oracle:* the sections cited in WT-1, WT-3, WT-5 and WT-6.
 - **T9 `session_flow_control`.** A peer that writes past `data` while the application reads
   nothing, or resets a stream with a final size past it, or opens past `streams_uni`, gets
   `WT_FLOW_CONTROL_ERROR` on that session only, and the connection's other session carries

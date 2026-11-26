@@ -1,0 +1,341 @@
+// The peer's unidirectional streams (RFC 9114 §6.2): its control stream, carrying SETTINGS
+// first and then GOAWAY and push frames, and its QPACK encoder and decoder streams.
+/// Read an untyped uni stream's type varint, exactly: the bytes after it are not ours to take.
+fn stream_type(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].untyped[k].id
+    if list.len(w.conns[i].untyped[k].buf) == 0 {
+        let mut first: Bytes = list.with_capacity(1)
+        match quic.read(mut e, c, id, mut first) {
+            Ok(_) => (),
+            Error(_) => {
+                let _ = list.remove(mut w.conns[i].untyped, k)
+                return
+            },
+        }
+        if list.len(first) == 0 {
+            return
+        }
+        let lead: u64 = int.widen(first[0])
+        let size = 1u64 << (lead >> 6)
+        let mut buf: Bytes = list.with_capacity(size)
+        list.append(mut buf, first)
+        w.conns[i].untyped[k].buf = take buf
+    }
+    let ended = match read_more(mut e, c, id, mut w.conns[i].untyped[k].buf) {
+        Ok(f) => f,
+        Error(_) => {
+            let _ = list.remove(mut w.conns[i].untyped, k)
+            return
+        },
+    }
+    let buf: Bytes = clone(w.conns[i].untyped[k].buf)
+    let mut at = 0u64
+    let Some(kind) = h3_wire.read_varint(buf, mut at, list.len(buf)) else {
+        if ended {
+            let _ = list.remove(mut w.conns[i].untyped, k)
+        }
+        return
+    }
+    let _ = list.remove(mut w.conns[i].untyped, k)
+    typed(mut w, mut e, i, id, kind, mut out)
+}
+
+fn typed(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, kind: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    if kind == h3_wire.STREAM_CONTROL || kind == h3_wire.STREAM_QPACK_ENCODER || kind == h3_wire.STREAM_QPACK_DECODER {
+        let seen = if kind == h3_wire.STREAM_CONTROL {
+            w.conns[i].control
+        } else if kind == h3_wire.STREAM_QPACK_ENCODER {
+            w.conns[i].encoder
+        } else {
+            w.conns[i].decoder
+        }
+        if let Some(_) = seen {
+            // RFC 9114 §6.2.1, RFC 9204 §4.2: a second critical stream of one type.
+            fail_conn(mut w, mut e, i, h3_wire.H3_STREAM_CREATION_ERROR, mut out)
+            return
+        }
+        if kind == h3_wire.STREAM_CONTROL {
+            w.conns[i].control = Some(id)
+            control_readable(mut w, mut e, i, mut out)
+        } else if kind == h3_wire.STREAM_QPACK_ENCODER {
+            w.conns[i].encoder = Some(id)
+            qpack_readable(mut w, mut e, i, id, mut out)
+        } else {
+            w.conns[i].decoder = Some(id)
+            qpack_readable(mut w, mut e, i, id, mut out)
+        }
+        return
+    }
+    if kind == h3_wire.STREAM_PUSH {
+        // RFC 9114 §6.2.2: a client receiving a push stream it never allowed with MAX_PUSH_ID
+        // is H3_ID_ERROR; a server receiving one is H3_STREAM_CREATION_ERROR.
+        let code = if w.conns[i].client {
+            h3_wire.H3_ID_ERROR
+        } else {
+            h3_wire.H3_STREAM_CREATION_ERROR
+        }
+        fail_conn(mut w, mut e, i, code, mut out)
+        return
+    }
+    // RFC 9114 §6.2: an unknown stream type is abandoned, never an error.
+    let _ = quic.stop(mut e, c, id, h3_wire.H3_STREAM_CREATION_ERROR)
+}
+
+/// The peer's control stream: frames until it closes, which is H3_CLOSED_CRITICAL_STREAM.
+fn control_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let Some(id) = w.conns[i].control else {
+        return
+    }
+    loop {
+        let ended = match read_more(mut e, c, id, mut w.conns[i].control_buf) {
+            Ok(f) => f,
+            Error(_) => true,
+        }
+        let before = list.len(w.conns[i].control_buf)
+        let code = control_frames(mut w, mut e, i, mut out)
+        if code != 0 {
+            fail_conn(mut w, mut e, i, code, mut out)
+            return
+        }
+        if ended {
+            fail_conn(mut w, mut e, i, h3_wire.H3_CLOSED_CRITICAL_STREAM, mut out)
+            return
+        }
+        let full = before >= list.capacity(w.conns[i].control_buf)
+        if !full || list.len(w.conns[i].control_buf) == before {
+            return
+        }
+    }
+}
+
+/// One varint filling a frame's whole payload, or H3_FRAME_ERROR (RFC 9114 §7.1).
+fn single_varint(buf: Bytes, at: u64, len: u64) -> Result[u64, u64] {
+    let mut i = at
+    let Some(n) = h3_wire.read_varint(buf, mut i, at + len) else {
+        return Error(h3_wire.H3_FRAME_ERROR)
+    }
+    if i != at + len {
+        return Error(h3_wire.H3_FRAME_ERROR)
+    }
+    Ok(n)
+}
+
+/// Consume the whole frames in control_buf; returns an H3 error code, or 0.
+fn control_frames(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[Event]) -> u64 {
+    loop {
+        let avail = list.len(w.conns[i].control_buf)
+        if w.conns[i].control_skip > 0 {
+            let n = order.min(w.conns[i].control_skip, avail)
+            list.drop_prefix(mut w.conns[i].control_buf, n)
+            w.conns[i].control_skip -= n
+            if w.conns[i].control_skip > 0 {
+                return 0
+            }
+            continue
+        }
+        let Some(h) = h3_wire.read_head(w.conns[i].control_buf, 0, avail) else {
+            return 0
+        }
+        if !w.conns[i].settings && h.kind != h3_wire.FRAME_SETTINGS {
+            return h3_wire.H3_MISSING_SETTINGS
+        }
+        if h.kind == h3_wire.FRAME_DATA || h.kind == h3_wire.FRAME_HEADERS || h.kind == h3_wire.FRAME_PUSH_PROMISE || h3_wire.reserved_frame(h.kind) {
+            return h3_wire.H3_FRAME_UNEXPECTED
+        }
+        let handled = h.kind == h3_wire.FRAME_SETTINGS || h.kind == h3_wire.FRAME_GOAWAY || h.kind == h3_wire.FRAME_MAX_PUSH_ID || h.kind == h3_wire.FRAME_CANCEL_PUSH
+        if !handled {
+            list.drop_prefix(mut w.conns[i].control_buf, h.head)
+            w.conns[i].control_skip = h.len
+            continue
+        }
+        if h.kind == h3_wire.FRAME_SETTINGS && w.conns[i].settings {
+            return h3_wire.H3_FRAME_UNEXPECTED
+        }
+        let settings = h.kind == h3_wire.FRAME_SETTINGS
+        if settings && h.len > SETTINGS_MAX {
+            return h3_wire.H3_EXCESSIVE_LOAD
+        }
+        if !settings && h.len > 8 {
+            return h3_wire.H3_FRAME_ERROR
+        }
+        if avail < h.head + h.len {
+            return 0
+        }
+        let buf: Bytes = clone(w.conns[i].control_buf)
+        list.drop_prefix(mut w.conns[i].control_buf, h.head + h.len)
+        let code = if settings {
+            match h3_wire.read_settings(buf, h.head, h.head + h.len) {
+                Ok(s) => peer_settings(mut w, mut e, i, s, mut out),
+                Error(code) => code,
+            }
+        } else {
+            match single_varint(buf, h.head, h.len) {
+                Ok(n) => control_value(mut w, i, h.kind, n, mut out),
+                Error(code) => code,
+            }
+        }
+        if code != 0 {
+            return code
+        }
+    }
+}
+
+/// GOAWAY, MAX_PUSH_ID and CANCEL_PUSH (RFC 9114 §7.2.3, §7.2.6, §7.2.7); returns an H3
+/// error code, or 0.
+fn control_value(mut w: Endpoint, i: u64, kind: u64, n: u64, mut out: List[Event]) -> u64 {
+    if kind == h3_wire.FRAME_CANCEL_PUSH {
+        // We never promise a push nor allow one with MAX_PUSH_ID, so every push id is
+        // H3_ID_ERROR.
+        return h3_wire.H3_ID_ERROR
+    }
+    if kind == h3_wire.FRAME_MAX_PUSH_ID {
+        if w.conns[i].client {
+            return h3_wire.H3_FRAME_UNEXPECTED
+        }
+        return 0
+    }
+    // GOAWAY: from a server a client-initiated bidirectional stream id, from a client a push
+    // id; never larger than an earlier one.
+    if w.conns[i].client && n % 4 != 0 {
+        return h3_wire.H3_ID_ERROR
+    }
+    let mut first = true
+    if let Some(g) = w.conns[i].goaway {
+        if n > g {
+            return h3_wire.H3_ID_ERROR
+        }
+        first = false
+    }
+    w.conns[i].goaway = Some(n)
+    if w.conns[i].client {
+        // RFC 9114 §5.2: requests at or past the id were not processed, and none may start.
+        let mut k = 0u64
+        while k < list.len(w.conns[i].sessions) {
+            let quic.StreamId(sid) = w.conns[i].sessions[k].id
+            let unsent = match w.conns[i].sessions[k].phase {
+                Unsent(..) => true,
+                _ => false,
+            }
+            if unsent || sid >= n {
+                end_session(mut w, i, k, true, 0, list.new(), mut out)
+            } else {
+                k += 1
+            }
+        }
+    }
+    if first {
+        // draft-17 §4.7: GOAWAY asks every session on the connection to finish.
+        for s in w.conns[i].sessions {
+            if let Live = s.phase {
+                list.push(mut out, Draining(SessionHandle(conn: w.conns[i].handle, id: s.id)))
+            }
+        }
+    }
+    0
+}
+
+fn setting_or_zero(s: h3_wire.Settings, id: u64) -> u64 {
+    match h3_wire.setting(s, id) {
+        Some(v) => v,
+        None => 0,
+    }
+}
+
+/// The peer's SETTINGS (RFC 9114 §7.2.4.2, RFC 9220 §3, RFC 9297 §2.1.1, draft-17 §3.1);
+/// returns an H3 error code, or 0.
+fn peer_settings(mut w: Endpoint, mut e: quic.Endpoint, i: u64, s: h3_wire.Settings, mut out: List[Event]) -> u64 {
+    let datagram = setting_or_zero(s, h3_wire.SETTINGS_H3_DATAGRAM)
+    let connect_protocol = setting_or_zero(s, h3_wire.SETTINGS_ENABLE_CONNECT_PROTOCOL)
+    let enabled = setting_or_zero(s, h3_wire.SETTINGS_WT_ENABLED)
+    if datagram > 1 || connect_protocol > 1 || (w.conns[i].client && enabled > 1) {
+        return h3_wire.H3_SETTINGS_ERROR
+    }
+    let offers = setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_UNI) > 0 || setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_STREAMS_BIDI) > 0 || setting_or_zero(s, h3_wire.SETTINGS_WT_INITIAL_MAX_DATA) > 0
+    let transport_ok = match quic.peer_params(e, w.conns[i].handle) {
+        Some(p) => p.max_datagram_frame > 0 && p.reset_stream_at,
+        None => false,
+    }
+    let ok = transport_ok && datagram == 1 && enabled == 1 && (!w.conns[i].client || connect_protocol == 1)
+    w.conns[i].settings = true
+    w.conns[i].peer_ok = ok
+    w.conns[i].peer_flow = offers
+    if w.conns[i].client {
+        if !ok {
+            // draft-17 §3.1: no session on a server that lacks a requirement; this connection
+            // exists only for WebTransport, so it closes.
+            return h3_wire.WT_REQUIREMENTS_NOT_MET
+        }
+        send_connects(mut w, mut e, i, mut out)
+        return 0
+    }
+    // Held requests are processed now, in arrival order.
+    let mut k = 0u64
+    while k < list.len(w.conns[i].sessions) {
+        let id = w.conns[i].sessions[k].id
+        let held = match w.conns[i].sessions[k].phase {
+            Held(_) => true,
+            _ => false,
+        }
+        if held {
+            if let Held(take fields) = replace(mut w.conns[i].sessions[k].phase, Reading) {
+                request(mut w, mut e, i, k, take fields, mut out)
+            }
+        }
+        if let Some(at) = session_index(w.conns[i], id) {
+            k = at + 1
+        }
+    }
+    0
+}
+
+/// The peer's QPACK streams (RFC 9204 §4.2): with a table capacity of 0, the encoder stream
+/// may only set the capacity to 0 and the decoder stream only cancel streams.
+fn qpack_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let encoder = w.conns[i].encoder == Some(id)
+    loop {
+        let mut ended = false
+        let mut more = false
+        if encoder {
+            let mut chunk: Bytes = list.with_capacity(256)
+            ended = match read_more(mut e, c, id, mut chunk) {
+                Ok(f) => f,
+                Error(_) => true,
+            }
+            if let Error(_) = qpack.read_encoder_stream(chunk, 0, list.len(chunk)) {
+                fail_conn(mut w, mut e, i, h3_wire.QPACK_ENCODER_STREAM_ERROR, mut out)
+                return
+            }
+            more = list.len(chunk) == list.capacity(chunk)
+        } else {
+            ended = match read_more(mut e, c, id, mut w.conns[i].decoder_buf) {
+                Ok(f) => f,
+                Error(_) => true,
+            }
+            more = list.len(w.conns[i].decoder_buf) == list.capacity(w.conns[i].decoder_buf)
+            let buf: Bytes = clone(w.conns[i].decoder_buf)
+            match qpack.read_decoder_stream(buf, 0, list.len(buf)) {
+                Ok(n) => list.drop_prefix(mut w.conns[i].decoder_buf, n),
+                Error(_) => {
+                    fail_conn(mut w, mut e, i, h3_wire.QPACK_DECODER_STREAM_ERROR, mut out)
+                    return
+                },
+            }
+            if list.len(w.conns[i].decoder_buf) == list.capacity(w.conns[i].decoder_buf) {
+                // An instruction longer than any 62-bit integer needs.
+                fail_conn(mut w, mut e, i, h3_wire.QPACK_DECODER_STREAM_ERROR, mut out)
+                return
+            }
+        }
+        if ended {
+            fail_conn(mut w, mut e, i, h3_wire.H3_CLOSED_CRITICAL_STREAM, mut out)
+            return
+        }
+        if !more {
+            return
+        }
+    }
+}

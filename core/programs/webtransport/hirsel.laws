@@ -2,3 +2,4 @@ hirsel.laws 1
 webtransport@1/laws/codepoints_match_draft src=9252e31d486b0442 sig=58c4181dec08a6db run=c2c0c6612d4cbb79 bug=dbd33b71b61e4ef7 oracle=d6234ba3970c4caa rows=pending
 webtransport@1/laws/huffman_round_trip_and_vectors src=50698d3139a1d36e sig=7faa450eb3d30f8a run=c2c0c6612d4cbb79 bug=2099c4d65433dd9e oracle=e3196c115b992313 rows=pending
 webtransport@1/laws/qpack_static_vectors src=71c2cbd2718dccd3 sig=ae1bcfe24d4714b2 run=c2c0c6612d4cbb79 bug=8eafda5ca2419c78 oracle=d56e927592378f38 rows=pending
+webtransport@1/laws/refusals src=1025adeb8941752b sig=10ce5ddc85ff8d0b run=c2c0c6612d4cbb79 bug=eeaf2246e227b49d oracle=9d77d4929a698335 rows=pending

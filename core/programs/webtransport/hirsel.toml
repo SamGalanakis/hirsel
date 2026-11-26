@@ -11,6 +11,9 @@ quic = { major = 1, path = "../quic" }
 "h3_wire.hirsel" = "h3_wire"
 "qpack_tables.hirsel" = "qpack"
 "qpack.hirsel" = "qpack"
+"endpoint.hirsel" = "webtransport"
+"control.hirsel" = "webtransport"
+"request.hirsel" = "webtransport"
 
 [tests]
 limit = 67108864
@@ -18,3 +21,5 @@ grants = ["Tasks"]
 
 [tests.sources]
 "laws.hirsel" = "laws"
+"session_laws.hirsel" = "laws"
+"session_vectors.hirsel" = "laws"

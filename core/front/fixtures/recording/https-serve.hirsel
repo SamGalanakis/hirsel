@@ -1,0 +1,141 @@
+// HTTP-1's HTTPS laws: std.http.serve_https with identities issued by a CA
+// minted in the run.
+// argv: serve | client <port> <name>
+//   serve   mints the CA, writes it to ca.pem, issues four identities, prints
+//           the port, and serves until stdin ends. The identities, the first
+//           the default: 127.0.0.1 (an IP SAN only), localhost, api.test, and
+//           one served for wrong.test whose leaf has CN wrong.test and the
+//           single SAN other.test.
+//   client  GET /hello over std.http_client.https with ca.pem as the only
+//           root, verifying <name>; prints the status and body, or the error.
+
+fn reply(req: std.http.Request, scratch: Region, mut out: std.http.Responder, state: ()) -> Result[std.http.Outcome, std.http.HandlerError] {
+    let body = std.http.copy_bytes(std.http.path(req))
+    Ok(Reply(std.http.response(200, take body, false)?))
+}
+
+type Stop: send {
+    input: Stdin,
+    send: Sender[u64],
+    clock: Clock
+}
+
+fn stop_server(take stop: Stop) waits {
+    let Stop(input: i, send: take send, clock: c) = take stop
+    let mut chunk: Bytes = list.with_capacity(64)
+    loop {
+        list.clear(mut chunk)
+        match stdin.read(i, mut chunk, Never) {
+            Ok(0) => break,
+            Ok(_) => {},
+            Error(_) => break,
+        }
+    }
+    let _ = channel.send(send, int.saturating_add(host.mono_ns(c), 500000000u64))
+}
+
+fn names(take first: std.x509_build.San) -> List[std.x509_build.San] {
+    let mut all: List[std.x509_build.San] = list.new()
+    list.push(mut all, take first)
+    take all
+}
+
+fn serve(n: Net, c: Clock, tasks: Tasks, d: Dir, i: Stdin, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let now = host.wall_ms(c) / 1000 * 1000
+    let not_before = option.unwrap(std.time.from_unix_ms(now - 3600000))
+    let not_after = option.unwrap(std.time.from_unix_ms(now + 86400000))
+    let mut ca = result.unwrap(std.https.run_ca(r, "Hirsel run CA", not_before, not_after))
+    let mut f = result.unwrap(host.open(d, "ca.pem", CreateNew))
+    result.unwrap(host.write(mut f, std.https.roots(ca)))
+    result.unwrap(host.close(take f))
+    let mut identities: List[std.https.Identity] = list.new()
+    list.push(mut identities, result.unwrap(std.https.issue(mut ca, r, "127.0.0.1", names(Address(V4(2130706433))))))
+    list.push(mut identities, result.unwrap(std.https.issue(mut ca, r, "localhost", names(Dns("localhost")))))
+    list.push(mut identities, result.unwrap(std.https.issue(mut ca, r, "api.test", names(Dns("api.test")))))
+    let other = result.unwrap(std.https.issue(mut ca, r, "wrong.test", names(Dns("other.test"))))
+    let std.https.Identity(names: _, chain: take chain, key: take key) = take other
+    let mut wrong: List[String] = list.new()
+    list.push(mut wrong, string.from("wrong.test"))
+    list.push(mut identities, std.https.Identity(names: take wrong, chain: take chain, key: take key))
+    let tls = option.unwrap(std.https.server(take identities))
+    let ip = V4(2130706433)
+    let (listener, addr) = result.unwrap(host.listen(n, Addr(ip: ip, port: 0), 8))
+    let mut listeners: List[Listener] = list.new()
+    list.push(mut listeners, take listener)
+    let mut builder: std.router.Builder[()] = std.router.builder()
+    result.unwrap(std.router.add(mut builder, "GET", "/{tail...}", std.router.raw(reply)))
+    let routes = result.unwrap(std.router.build(take builder))
+    let cfg = std.http.Config(ingress: list.new(), sockets_max: 4, http_max: 4, upgrades_max: 0, conns_max: 4, ip_sockets_max: 4, refuse_max: 0, refuse_ms: 500, inbox_cap: 8, head_max: 1024, fields_max: 8, pipeline_max: 1024, body_inline: 1024, body_max: 1024, out_cap: 256, handler_bytes: 4096, first_head_ms: 5000, idle_ms: 1500, head_ms: 1500, body_ms: 1500, handler_ms: 1500, write_ms: 1500, drain_ms: 100, linger_ms: 100, drain_max: 1024, streams_max: 0, state_max: 0, reads_max: 0, heartbeat_ms: 0, lease_ms: 0)
+    let (send, receive): (Sender[u64], Receiver[u64]) = channel.new(1)
+    let stopper = task.spawn(tasks, bytes 4096, Stop(input: i, send: take send, clock: c), stop_server)
+    let mut line = string.new()
+    string.push_u64(mut line, int.widen(addr.port))
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+    result.unwrap(std.http.serve_https(take listeners, c, tasks, take cfg, take routes, (), take tls, Some(take receive)))
+    let _ = task.join(take stopper)
+    Ok(())
+}
+
+fn file(d: Dir, name: String) -> Bytes waits {
+    let size = result.unwrap(host.stat(d, name)).size
+    let mut f = result.unwrap(host.open(d, name, Read))
+    let mut data: Bytes = list.with_capacity(size)
+    while list.len(data) < size {
+        if result.unwrap(host.read(mut f, mut data)) == 0 {
+            break
+        }
+    }
+    result.unwrap(host.close(take f))
+    take data
+}
+
+fn failure(e: std.http_client.Error) -> String {
+    match e {
+        Connect(Tls(Certificate(NameMismatch))) => string.from("name-mismatch"),
+        Connect(Tls(Certificate(UnknownIssuer))) => string.from("unknown-issuer"),
+        Connect(Tls(Certificate(_))) => string.from("certificate"),
+        Connect(Denied) => string.from("denied"),
+        Connect(_) => string.from("connect"),
+        _ => string.from("http"),
+    }
+}
+
+fn client(n: Net, c: Clock, d: Dir, out: Stdout, port: u16, name: String) -> Result[(), Exit] waits {
+    let req = std.http_client.Request(method: "GET", target: "/hello", headers: list.new(), body: Fixed(0))
+    let deadline = int.saturating_add(host.mono_ns(c), 10000000000u64)
+    let address = Addr(ip: V4(2130706433), port: port)
+    let mut connection = match std.http_client.https(n, address, name, name, Roots(file(d, "ca.pem")), c, req, deadline) {
+        Ok(take k) => take k,
+        Error(e) => {
+            let mut line = failure(e)
+            string.push_char(mut line, '\n')
+            result.unwrap(stdout.write(out, line))
+            return Ok(())
+        },
+    }
+    result.unwrap(std.http_client.finish_request(mut connection, 1024))
+    let mut line = string.new()
+    string.push_u64(mut line, int.widen(std.http_client.status(std.http_client.head(connection))))
+    string.push_char(mut line, ' ')
+    let mut body: Bytes = list.with_capacity(1024)
+    while result.unwrap(std.http_client.read(mut connection, mut body)) != 0 {}
+    string.push(mut line, result.unwrap(string.from_utf8(take body)))
+    string.push_char(mut line, '\n')
+    result.unwrap(stdout.write(out, line))
+    Ok(())
+}
+
+pub fn main(n: Net, c: Clock, tasks: Tasks, d: Dir, i: Stdin, r: Random, out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let mode = option.unwrap(args.get(argv, 0))
+    if mode == "serve" {
+        return serve(n, c, tasks, d, i, r, out)
+    }
+    let digits = option.unwrap(args.get(argv, 1))
+    let mut port: u64 = 0
+    for b in string.as_bytes(digits) {
+        port = port * 10 + int.widen(b - b'0')
+    }
+    let name = option.unwrap(args.get(argv, 2))
+    client(n, c, d, out, int.narrow(port), string.from(name))
+}

@@ -52,9 +52,9 @@
     "reason": "comptime-phase3-std-2830: keep float table initializers private"
   },
   "core/std/http.hirsel": {
-    "lines": 3295,
-    "raise_revision": 6,
-    "reason": "object-range-stream-2690"
+    "lines": 3326,
+    "raise_revision": 7,
+    "reason": "http-server-https-2884"
   },
   "core/std/json.hirsel": {
     "lines": 3604,
@@ -181,8 +181,8 @@
   },
   "crates/hirsel-core-driver/src/native.rs": {
     "lines": 2768,
-    "raise_revision": 13,
-    "reason": "elf-debug-alias-key-2870"
+    "raise_revision": 14,
+    "reason": "http-server-https-2884"
   },
   "crates/hirsel-core-driver/src/product.rs": {
     "lines": 1132,

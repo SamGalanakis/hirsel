@@ -83,34 +83,52 @@ fn name(common_name: String) -> Bytes {
     take rdn
 }
 
-fn tbs(public: Bytes, serial: u64, common_name: String, start: time.Civil, end: time.Civil) -> Bytes {
-    let owner = name(common_name)
+fn tbs(public: Bytes, serial: u64, issuer: Bytes, subject: Bytes, start: time.Civil, end: time.Civil, extensions: Bytes) -> Bytes {
     let alg = signature_algorithm()
-    let mut fields: Bytes = list.with_capacity(162 + 2 * list.len(owner))
+    let mut fields: Bytes = list.with_capacity(166 + list.len(issuer) + list.len(subject) + list.len(extensions))
     // X.509 v3 and the serial, followed by the signature algorithm and issuer.
     list.append(mut fields, b"\xa0\x03\x02\x01\x02")
     let mut serial_bytes: Bytes = list.with_capacity(8)
     list.put_word_be(mut serial_bytes, serial)
     unsigned(mut fields, serial_bytes)
     list.append(mut fields, alg)
-    list.append(mut fields, owner)
+    list.append(mut fields, issuer)
     let mut validity: Bytes = list.with_capacity(34)
     validity_time(mut validity, start)
     validity_time(mut validity, end)
     field(mut fields, 0x30, validity)
-    list.append(mut fields, owner)
+    list.append(mut fields, subject)
     // id-ecPublicKey with secp256r1 parameters and the uncompressed SEC 1 point.
     list.append(mut fields, b"\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00")
     list.append(mut fields, public)
+    if list.len(extensions) > 0 {
+        // RFC 5280 §4.1: extensions are [3] EXPLICIT SEQUENCE OF Extension.
+        let mut sequence: Bytes = list.with_capacity(4 + list.len(extensions))
+        field(mut sequence, 0x30, extensions)
+        field(mut fields, 0xa3, sequence)
+    }
     let mut der: Bytes = list.with_capacity(4 + list.len(fields))
     field(mut der, 0x30, fields)
     take der
 }
 
-/// Build a self-signed P-256 X.509 certificate and return its DER bytes.
-/// The serial must be positive. The name must be nonempty. Both times use UTC
-/// with whole seconds. The point must be the uncompressed public key for key.
-pub fn self_signed_p256(key: Secret, r: Random, public: Bytes, serial: u64, common_name: String, not_before: time.Timestamp, not_after: time.Timestamp) -> Result[Bytes, BuildError] {
+// One Extension: the OID's body, criticality and the DER value it wraps.
+fn extension(mut out: Bytes, oid: Bytes, critical: bool, value: Bytes) {
+    let mut body: Bytes = list.with_capacity(12 + list.len(oid) + list.len(value))
+    field(mut body, 0x06, oid)
+    if critical {
+        list.append(mut body, b"\x01\x01\xff")
+    }
+    field(mut body, 0x04, value)
+    field(mut out, 0x30, body)
+}
+
+// RFC 5280 §4.2.1.2 method (1): SHA-1 over the subjectPublicKey bits.
+fn key_id(public: Bytes) -> Bytes {
+    sha1.hash(public)
+}
+
+fn checked_times(serial: u64, public: Bytes, common_name: String, not_before: time.Timestamp, not_after: time.Timestamp) -> Result[(time.Civil, time.Civil), BuildError] {
     if serial == 0 || list.len(public) != 65 || public[0] != 4 || string.byte_len(common_name) == 0 || time.unix_secs(not_before) > time.unix_secs(not_after) || time.subsec_nanos(not_before) != 0 || time.subsec_nanos(not_after) != 0 {
         return Error(Invalid)
     }
@@ -122,13 +140,18 @@ pub fn self_signed_p256(key: Secret, r: Random, public: Bytes, serial: u64, comm
         Some(value) => value,
         None => return Error(Invalid),
     }
-    let body = tbs(public, serial, common_name, start, end)
+    Ok((start, end))
+}
+
+// Signs body with key, checks the signature with the signer's point, and
+// returns the whole certificate.
+fn signed_der(key: Secret, r: Random, signer: Bytes, body: Bytes) -> Result[Bytes, BuildError] {
     let mut raw: Bytes = list.with_capacity(64)
     match secret.sign(key, P256, r, body, mut raw) {
         Ok(_) => (),
         Error(e) => return Error(Sign(e)),
     }
-    if !p256.verify(public, body, raw) {
+    if !p256.verify(signer, body, raw) {
         return Error(Invalid)
     }
     let mut integers: Bytes = list.with_capacity(70)
@@ -144,4 +167,137 @@ pub fn self_signed_p256(key: Secret, r: Random, public: Bytes, serial: u64, comm
     let mut cert: Bytes = list.with_capacity(4 + list.len(signed))
     field(mut cert, 0x30, signed)
     Ok(take cert)
+}
+
+/// Build a self-signed P-256 X.509 certificate and return its DER bytes.
+/// The serial must be positive. The name must be nonempty. Both times use UTC
+/// with whole seconds. The point must be the uncompressed public key for key.
+pub fn self_signed_p256(key: Secret, r: Random, public: Bytes, serial: u64, common_name: String, not_before: time.Timestamp, not_after: time.Timestamp) -> Result[Bytes, BuildError] {
+    let (start, end) = checked_times(serial, public, common_name, not_before, not_after)?
+    let owner = name(common_name)
+    let body = tbs(public, serial, owner, owner, start, end, list.new())
+    signed_der(key, r, public, body)
+}
+
+/// A subject alternative name: a DNS name, or an IP address written as its
+/// 4 or 16 octets (RFC 5280 §4.2.1.6).
+pub type San: key = Dns(String) | Address(Ip)
+
+/// A certificate authority: its signing key, its uncompressed P-256 point and
+/// the common name of its subject.
+pub type Issuer {
+    key: Secret,
+    public: Bytes,
+    common_name: String
+}
+
+/// Build a self-signed P-256 CA certificate for issuer. It carries a critical
+/// basicConstraints with cA set, a critical keyUsage of keyCertSign and
+/// cRLSign, and a subjectKeyIdentifier. Arguments are checked as for
+/// self_signed_p256.
+pub fn ca_p256(issuer: Issuer, r: Random, serial: u64, not_before: time.Timestamp, not_after: time.Timestamp) -> Result[Bytes, BuildError] {
+    let (start, end) = checked_times(serial, issuer.public, issuer.common_name, not_before, not_after)?
+    let mut extensions: Bytes = list.with_capacity(64)
+    extension(mut extensions, b"\x55\x1d\x13", true, b"\x30\x03\x01\x01\xff")
+    extension(mut extensions, b"\x55\x1d\x0f", true, b"\x03\x02\x01\x06")
+    let mut ski: Bytes = list.with_capacity(22)
+    field(mut ski, 0x04, key_id(issuer.public))
+    extension(mut extensions, b"\x55\x1d\x0e", false, ski)
+    let owner = name(issuer.common_name)
+    let body = tbs(issuer.public, serial, owner, owner, start, end, extensions)
+    signed_der(issuer.key, r, issuer.public, body)
+}
+
+// A DNS name of 1 to 253 bytes: dot-separated labels of 1 to 63 ASCII
+// letters, digits and hyphens, the first of which may be a lone "*".
+fn dns_name(b: Bytes) -> bool {
+    let end = list.len(b)
+    if end == 0 || end > 253 {
+        return false
+    }
+    let mut label = 0u64
+    let mut at = 0u64
+    if end > 2 && b[0] == b'*' && b[1] == b'.' {
+        at = 2
+    }
+    while at < end {
+        let c = b[at]
+        if c == b'.' {
+            if label == 0 {
+                return false
+            }
+            label = 0
+        } else if (c >= b'a' && c <= b'z') || (c >= b'A' && c <= b'Z') || (c >= b'0' && c <= b'9') || c == b'-' {
+            label += 1
+            if label > 63 {
+                return false
+            }
+        } else {
+            return false
+        }
+        at += 1
+    }
+    label > 0
+}
+
+// The GeneralNames value of a subjectAltName extension.
+fn alternative_names(names: List[San]) -> Result[Bytes, BuildError] {
+    let mut general: Bytes = list.with_capacity(64)
+    for san in names {
+        match san {
+            Dns(text) => {
+                let encoded = string.as_bytes(text)
+                if !dns_name(encoded) {
+                    return Error(Invalid)
+                }
+                field(mut general, 0x82, encoded)
+            },
+            Address(V4(word)) => {
+                list.append(mut general, b"\x87\x04")
+                list.push(mut general, int.truncate(word >> 24))
+                list.push(mut general, int.truncate(word >> 16))
+                list.push(mut general, int.truncate(word >> 8))
+                list.push(mut general, int.truncate(word))
+            },
+            Address(V6(high, low)) => {
+                list.append(mut general, b"\x87\x10")
+                list.put_word_be(mut general, high)
+                list.put_word_be(mut general, low)
+            },
+        }
+    }
+    let mut sequence: Bytes = list.with_capacity(4 + list.len(general))
+    field(mut sequence, 0x30, general)
+    Ok(take sequence)
+}
+
+/// Build a P-256 TLS server certificate issued by issuer, whose CA
+/// certificate ca_p256 built. public is the server key's uncompressed point.
+/// names must be nonempty; each DNS name is 1 to 253 bytes of letters, digits,
+/// hyphens and dots, optionally starting with "*.". The certificate carries
+/// the names as a subjectAltName, a critical basicConstraints that is not a
+/// CA, a critical keyUsage of digitalSignature, an extKeyUsage of serverAuth,
+/// and subject and authority key identifiers. A client verifies a name only
+/// against the subjectAltName; common_name is the subject's display name.
+pub fn leaf_p256(issuer: Issuer, r: Random, public: Bytes, serial: u64, common_name: String, names: List[San], not_before: time.Timestamp, not_after: time.Timestamp) -> Result[Bytes, BuildError] {
+    let (start, end) = checked_times(serial, public, common_name, not_before, not_after)?
+    if list.len(names) == 0 || list.len(issuer.public) != 65 || issuer.public[0] != 4 || string.byte_len(issuer.common_name) == 0 {
+        return Error(Invalid)
+    }
+    let alternatives = alternative_names(names)?
+    let mut extensions: Bytes = list.with_capacity(128 + list.len(alternatives))
+    extension(mut extensions, b"\x55\x1d\x13", true, b"\x30\x00")
+    extension(mut extensions, b"\x55\x1d\x0f", true, b"\x03\x02\x07\x80")
+    extension(mut extensions, b"\x55\x1d\x25", false, b"\x30\x0a\x06\x08\x2b\x06\x01\x05\x05\x07\x03\x01")
+    extension(mut extensions, b"\x55\x1d\x11", false, alternatives)
+    let mut ski: Bytes = list.with_capacity(22)
+    field(mut ski, 0x04, key_id(public))
+    extension(mut extensions, b"\x55\x1d\x0e", false, ski)
+    let mut identifier: Bytes = list.with_capacity(22)
+    field(mut identifier, 0x80, key_id(issuer.public))
+    let mut aki: Bytes = list.with_capacity(24)
+    field(mut aki, 0x30, identifier)
+    extension(mut extensions, b"\x55\x1d\x23", false, aki)
+    let body = tbs(public, serial, name(issuer.common_name), name(common_name), start, end, extensions)
+    signed_der(issuer.key, r, issuer.public, body)
 }

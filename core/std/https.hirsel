@@ -1,0 +1,157 @@
+/// One certificate a TLS server presents: the DNS names it answers, the DER
+/// chain leaf first, and its private key, whose policy holds tls_serve.
+pub type Identity: send {
+    names: List[String],
+    chain: List[Bytes],
+    key: Secret
+}
+
+type Certificate: shareable + send {
+    names: List[String],
+    chain: List[Bytes]
+}
+
+/// A server's identities. Every connection gets its own holders of the keys.
+pub opaque type Server: send {
+    certificates: Arc[List[Certificate]],
+    keys: List[Secret]
+}
+
+/// Builds a server from its identities, the first of which is the default.
+/// Gives None for no identities, an empty chain, or a name that is empty or
+/// ends with a dot.
+pub fn server(take identities: List[Identity]) -> Option[Server] {
+    if list.len(identities) == 0 {
+        return None
+    }
+    let mut certificates: List[Certificate] = list.with_capacity(list.len(identities))
+    let mut keys: List[Secret] = list.with_capacity(list.len(identities))
+    let mut pending = take identities
+    list.reverse(mut pending)
+    while let Some(take identity) = list.pop(mut pending) {
+        let Identity(names: take names, chain: take chain, key: take key) = take identity
+        if list.len(chain) == 0 {
+            return None
+        }
+        for n in names {
+            let text = string.as_bytes(n)
+            let end = list.len(text)
+            if end == 0 || text[end - 1] == b'.' {
+                return None
+            }
+        }
+        list.push(mut certificates, Certificate(names: take names, chain: take chain))
+        list.push(mut keys, take key)
+    }
+    Some(Server(certificates: arc.new(take certificates), keys: take keys))
+}
+
+/// Another holder of the same identities, for one connection.
+pub fn share(s: Server) -> Server {
+    let mut keys: List[Secret] = list.with_capacity(list.len(s.keys))
+    for key in s.keys {
+        list.push(mut keys, secret.share(key))
+    }
+    Server(certificates: arc.share(s.certificates), keys: take keys)
+}
+
+// The identity whose names hold the client's server name, compared without
+// regard to ASCII case; otherwise the first. A client that sent no name, or
+// an IP address, gets the first.
+fn chosen(s: Server, name: String) -> u64 {
+    let wanted = string.as_bytes(name)
+    if list.len(wanted) > 0 {
+        for i in 0u64 .. list.len(s.certificates) {
+            for candidate in s.certificates[i].names {
+                if http1.equal_ascii(string.as_bytes(candidate), wanted) {
+                    return i
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Runs a TLS 1.3 server handshake on an accepted socket (TLS-9), offering
+/// HTTP/1.1, with the identity chosen by the client's server name.
+pub fn handshake(take socket: Socket, s: Server, until: Until) -> Result[(ReadHalf, WriteHalf), NetError] waits {
+    let hello = tls.hello(take socket, until)?
+    let index = chosen(s, tls.server_name(hello))
+    let mut alpn: List[String] = list.new()
+    list.push(mut alpn, string.from("http/1.1"))
+    let (take input, take output, _) = tls.accept(take hello, s.certificates[index].chain, s.keys[index], alpn, until)?
+    Ok((take input, take output))
+}
+
+/// A certificate authority minted inside one run. Its key signs certificates
+/// only and never leaves the process.
+pub opaque type RunCa {
+    issuer: x509_build.Issuer,
+    der: Bytes,
+    serial: u64,
+    not_before: time.Timestamp,
+    not_after: time.Timestamp
+}
+
+/// Mints a P-256 CA key and its self-signed certificate, valid from
+/// not_before to not_after; each certificate it issues has the same validity.
+pub fn run_ca(r: Random, common_name: String, not_before: time.Timestamp, not_after: time.Timestamp) -> Result[RunCa, x509_build.BuildError] {
+    let mut public: Bytes = list.with_capacity(65)
+    let key = match secret.p256_key(r, "sign(p256)", mut public) {
+        Ok(take k) => take k,
+        Error(e) => return Error(Sign(e)),
+    }
+    let issuer = x509_build.Issuer(key: take key, public: take public, common_name: string.from(common_name))
+    let der = x509_build.ca_p256(issuer, r, 1, not_before, not_after)?
+    Ok(RunCa(issuer: take issuer, der: take der, serial: 1, not_before, not_after))
+}
+
+/// The CA certificate in DER.
+pub fn certificate(ca: RunCa) -> View[Bytes] in ca {
+    list.slice(ca.der, 0, list.len(ca.der))
+}
+
+/// The CA certificate as one PEM block, for a client's tls Roots.
+pub fn roots(ca: RunCa) -> Bytes {
+    let mut encoded: Bytes = list.with_capacity((list.len(ca.der) + 2) / 3 * 4)
+    base64.encode(ca.der, mut encoded)
+    let mut pem: Bytes = list.with_capacity(list.len(encoded) + list.len(encoded) / 64 + 56)
+    list.append(mut pem, b"-----BEGIN CERTIFICATE-----\n")
+    let mut at = 0u64
+    while at < list.len(encoded) {
+        let end = order.min(at + 64, list.len(encoded))
+        list.append(mut pem, list.slice(encoded, at, end))
+        list.push(mut pem, b'\n')
+        at = end
+    }
+    list.append(mut pem, b"-----END CERTIFICATE-----\n")
+    take pem
+}
+
+/// Issues a server identity for names: a fresh P-256 key whose policy is
+/// tls_serve alone, and a chain holding the leaf the CA signed. The
+/// identity's names are the DNS names among names.
+pub fn issue(mut ca: RunCa, r: Random, common_name: String, names: List[x509_build.San]) -> Result[Identity, x509_build.BuildError] {
+    let mut public: Bytes = list.with_capacity(65)
+    let signing = match secret.p256_key(r, "sign(p256) tls_serve", mut public) {
+        Ok(take k) => take k,
+        Error(e) => return Error(Sign(e)),
+    }
+    // The key signs nothing itself: narrow it before anything else holds it.
+    let key = match secret.narrow(signing, "tls_serve") {
+        Ok(take k) => take k,
+        Error(_) => return Error(Invalid),
+    }
+    let _ = take signing
+    ca.serial += 1
+    let leaf = x509_build.leaf_p256(ca.issuer, r, public, ca.serial, common_name, names, ca.not_before, ca.not_after)?
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, take leaf)
+    let mut dns: List[String] = list.new()
+    for san in names {
+        if let Dns(text) = san {
+            list.push(mut dns, string.from(text))
+        }
+    }
+    Ok(Identity(names: take dns, chain: take chain, key: take key))
+}

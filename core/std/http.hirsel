@@ -1809,11 +1809,26 @@ fn owned_connection[S: send](take opening: ConnectionStart[S], state: S) waits {
     let ConnectionStart(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, inbox: take inbox, slot, stop: take signal, completion: take notice, request_done) = take opening
     let mut completion = take notice
     completion.armed = true
-    let _ = run_connection(take socket, c, cfg, peer, accepted, routes, state, inbox, slot, signal, request_done)
+    let (r, w) = net.split(take socket)
+    let _ = run_connection(take r, take w, c, cfg, peer, accepted, routes, state, inbox, slot, signal, request_done)
 }
 
-fn run_connection[S: send](take socket: Socket, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal], request_done: Option[fn(S) waits]) -> u64 waits {
-    let (r, w) = net.split(take socket)
+type Secured[S: shareable + send]: send {
+    state: Arc[S],
+    tls: https.Server
+}
+
+// The TLS handshake runs under the first head's deadline, before any request.
+fn secured_connection[S: shareable + send](take opening: ConnectionStart[S], secured: Secured[S]) waits {
+    let ConnectionStart(socket: take socket, c, cfg: take cfg, peer, at: accepted, routes: take routes, inbox: take inbox, slot, stop: take signal, completion: take notice, request_done) = take opening
+    let mut completion = take notice
+    completion.armed = true
+    if let Ok((take r, take w)) = https.handshake(take socket, secured.tls, At(c, clock.deadline_after_ms(accepted, cfg.first_head_ms))) {
+        let _ = run_connection(take r, take w, c, cfg, peer, accepted, routes, secured.state, inbox, slot, signal, request_done)
+    }
+}
+
+fn run_connection[S: send](take r: ReadHalf, take w: WriteHalf, c: Clock, cfg: Config, peer: Ip, accepted: u64, routes: router.Router[S], state: S, inbox: Sender[ConnectionSignal], slot: u64, signal: Option[DrainSignal], request_done: Option[fn(S) waits]) -> u64 waits {
     let mut reader = take r
     let mut writer = take w
     let mut input: Bytes = list.with_capacity(cfg.head_max + cfg.pipeline_max + cfg.body_inline)
@@ -2338,6 +2353,22 @@ pub fn serve_with_factory[S: send](take listeners: List[Listener], c: Clock, tas
         }
     }
     let run: fn(take ConnectionStart[S], S) waits = owned_connection
+    serve_without_managed(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
+}
+
+/// Serves HTTPS with shared handler state. Each accepted socket completes a
+/// TLS 1.3 handshake (TLS-9) under the first head's deadline, with the
+/// identity its client names, before its first request. A socket over a cap
+/// is closed with no response, so refuse_max must be zero.
+pub fn serve_https[S: shareable + send](take listeners: List[Listener], c: Clock, tasks: Tasks, take cfg: Config, take routes: router.Router[S], take state: S, take tls: https.Server, take incoming: Option[Receiver[u64]]) -> Result[(), ServeError] waits {
+    if cfg.refuse_max != 0 {
+        return Error(Configuration)
+    }
+    let shared = arc.new(take state)
+    let make: scoped[view] fn() -> Result[Secured[S], Capacity] = fn() -> Result[Secured[S], Capacity] {
+        Ok(Secured(state: arc.share(shared), tls: https.share(tls)))
+    }
+    let run: fn(take ConnectionStart[S], Secured[S]) waits = secured_connection
     serve_without_managed(take listeners, c, tasks, take cfg, take routes, make, run, take incoming)
 }
 

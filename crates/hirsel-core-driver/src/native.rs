@@ -1888,6 +1888,7 @@ pub(crate) mod tests {
     include!("link_closure_native.rs");
     include!("recording_build_native.rs");
     include!("tls_serve_native.rs");
+    include!("https_serve_native.rs");
     include!("public_reach_native.rs");
     include!("request_sequences.rs");
     include!("revision_native.rs");

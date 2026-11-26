@@ -23,6 +23,12 @@ shortens active exchanges to that deadline. A promoted stream finishes
 its current output and closes. An upgraded protocol can read the deadline
 from its socket. At the deadline any remaining socket task is cancelled.
 
+`serve_https` also takes an `https.Server` and an optional stop receiver,
+and serves HTTP/1.1 over TLS 1.3: each connection runs the handshake under
+its first-head deadline, choosing the identity by the client's server name.
+It requires `refuse_max` to be zero, since a refusal would be plaintext; a
+refused socket is closed. See [HTTPS identities](https.md).
+
 `serve_with_factory` uses the same supervisor and creates a sendable state
 value for each admitted connection. The supervisor calls the factory within
 `state_bytes`. Live state allocations stay charged there until they drop.

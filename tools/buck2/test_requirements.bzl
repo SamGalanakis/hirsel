@@ -88,6 +88,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::cr2_replay_without_the_endpoint",
         "native::tests::tls_serve_laws::tl3_server_authority_before_effect",
         "native::tests::tls_serve_laws::tl18_sni_selects_the_chain",
+        "native::tests::https_serve_laws::serve_https_verifies_the_run_ca_by_san",
         "native::tests::tls_serve_laws::tl19_wrong_key_or_chain_refused",
         "native::tests::tls_serve_laws::tl20_the_key_never_leaves_the_provider",
         "native::tests::tls_serve_laws::tl21_a_server_half_authorizes_no_secret",

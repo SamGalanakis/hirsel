@@ -9,6 +9,7 @@ cli@1/cli/error_reports src=8704ae6f9b19fe72 sig=7abfff46da9bd55b run=c2c0c6612d
 cli@1/cli/escaped_tsv_on_a_pipe src=4ce070e3696a8090 sig=b332615433d2642c run=c7b2a52baff70a63 bug=d46ed17f74e02265 oracle=fcc1000c40d13d3f rows=pending
 cli@1/cli/help_pages src=22e50b6b9d9f26e5 sig=084c7619bf0f564e run=c2c0c6612d4cbb79 bug=ecf9aa8d14c878a3 oracle=d20361588776c2da rows=pending
 cli@1/cli/jaro_values src=8c1f6ec736ef6046 sig=20b5163da2adfae5 run=c2c0c6612d4cbb79 bug=c2d73aefe1f2d0b9 oracle=2c15246f16deeaec rows=pending
+cli@1/cli/nonterminal_progress_is_one_line src=937b9133f5e5f8ff sig=65b2189bab57bca1 run=c7b2a52baff70a63 bug=282b2222a1df965e oracle=244cf663e605b28a rows=pending
 cli@1/cli/one_write_per_tty_table src=e3c871c3abba4d68 sig=465502c62da6869c run=c7b2a52baff70a63 bug=c2c830870f33377d oracle=de299cedfff0ded7 rows=pending
 cli@1/cli/sanitize_controls src=dad61c5e73d53792 sig=52bfdf5d11016bbc run=c2c0c6612d4cbb79 bug=a6eeac0baf523d96 oracle=b5a63ae94446cd33 rows=pending
 cli@1/cli/token_table src=2b9bab57ce58d466 sig=de02a0209a0e81bc run=c2c0c6612d4cbb79 bug=b559e5acfa6a6228 oracle=b6766624555da682 rows=pending

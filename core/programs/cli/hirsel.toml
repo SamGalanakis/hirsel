@@ -18,6 +18,7 @@ std = { major = 1 }
 "table.hirsel" = "cli"
 "diagnostics.hirsel" = "cli"
 "prompt.hirsel" = "cli"
+"progress.hirsel" = "progress"
 
 [tests]
 limit = 67108864
@@ -27,3 +28,4 @@ grants = ["Tasks"]
 "tests/parse.hirsel" = "cli"
 "tests/output.hirsel" = "cli"
 "tests/terminal.hirsel" = "cli"
+"tests/progress.hirsel" = "cli"

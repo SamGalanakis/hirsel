@@ -145,8 +145,8 @@ components. The directory capability checks access when it opens a path.
 
 `cli.write_out(out, text)` and `cli.table` return the stdout `WriteError`, including
 the number of bytes written. A writer loop propagates `Closed` to `main`, where it
-can exit successfully when the consumer has gone away. For example, a caller can
-match `Error(e)` with `e.error == Closed` and return `Ok(())` from `main`. Other
+can exit successfully when the consumer has gone away. For example, `main` can
+match `Error(e)`, handle `Closed` in `e.error`, and return `Ok(())`. Other
 write errors can still become a nonzero status.
 
 ## Prompts
@@ -159,6 +159,19 @@ and `PromptUnavailable` if stdin is a pipe or `--no-input` is set.
 `cli.confirm(mut reader, err, question, assume_yes, no_input)` accepts `y` or
 `yes` after ASCII trimming and case folding. `--yes` accepts immediately.
 Otherwise, EOF, a different answer or unavailable input declines.
+
+## Progress
+
+`cli.progress.start(err, label)` writes an initial frame to a terminal or a
+single `label...` line to a pipe. The caller passes the returned state to
+`cli.progress.update(mut p, err, clock)` from its work loop and calls
+`cli.progress.stop(take p, err)` to clear the terminal line. Use the same
+stderr throughout.
+
+The first terminal update reads the clock to start the interval. Subsequent
+updates redraw at most once per 100 ms. A pipe needs only the start line.
+Progress sanitizes the label, reads the clock only for a terminal, and keeps
+the cursor visible. It uses stderr and the passed clock, with no task grant.
 
 ## Departures from clap
 

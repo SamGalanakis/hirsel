@@ -251,7 +251,8 @@ the last.
   [`cli@1`](../../core/programs/cli/README.md) takes explicit `Stdout`, `Stderr` and
   `Stdin` capabilities for terminal output and prompts. Tables use the width of
   stdout on terminals and escaped TSV on pipes. Writers receive `Closed` when
-  the stdout consumer goes away.
+  the stdout consumer goes away. Progress runs in the caller's work loop and
+  uses the `Clock` only for terminal updates on stderr.
 - `{ major, path }` binds a member of the same workspace (section 4). The path is relative to
   this manifest's directory and must resolve to a member's directory, whose `[package]` has
   this name and major.

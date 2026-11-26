@@ -1,0 +1,85 @@
+/// A progress line owned by the caller. Pass it back to update or stop on the same stderr.
+pub opaque type Progress = Plain | Animated(Frame)
+
+type Frame {
+    label: String,
+    next_index: u64,
+    last_draw: Option[u64]
+}
+
+const INTERVAL_NS: u64 = 100000000
+
+fn draw(err: Stderr, label: String, frame_index: u64) -> Result[(), WriteError] waits {
+    let cols: u64 = match stderr.size(err) {
+        Some(size) => int.widen(size.cols),
+        None => 80,
+    }
+    let mut line = string.from("\r\u{1b}[K")
+    if cols > 1 {
+        string.push(mut line, string.slice("|/-\\", frame_index, frame_index + 1))
+    }
+    if cols > 3 && string.byte_len(label) > 0 {
+        string.push(mut line, " ")
+        // Keep the last column free so the terminal does not wrap.
+        let mut remaining = cols - 3
+        let mut end = 0u64
+        while let Some((c, next)) = string.next_scalar(label, end) {
+            let used = cli.char_width(c)
+            if used > remaining {
+                break
+            }
+            remaining -= used
+            end = next
+        }
+        string.push(mut line, string.slice(label, 0, end))
+    }
+    stderr.write(err, line)
+}
+
+/// Draw the first frame on a terminal, or write one label followed by "..." and LF to a pipe.
+pub fn start(err: Stderr, label: String) -> Result[Progress, WriteError] waits {
+    let safe = std.string.replace(std.string.replace(cli.sanitize(label), "\t", "\\t"), "\n", "\\n")
+    if !stderr.is_terminal(err) {
+        let mut line = take safe
+        string.push(mut line, "...\n")
+        stderr.write(err, line)?
+        return Ok(Plain)
+    }
+    draw(err, safe, 0)?
+    Ok(Animated(Frame(label: take safe, next_index: 1, last_draw: None)))
+}
+
+/// Drive the animation from the work loop. The first terminal update starts the 100 ms
+/// interval. Only terminal updates read the clock.
+pub fn update(mut p: Progress, err: Stderr, c: Clock) -> Result[(), WriteError] waits {
+    match p {
+        Plain => Ok(()),
+        Animated(mut frame) => {
+            if !stderr.is_terminal(err) {
+                return Ok(())
+            }
+            let now = host.mono_ns(c)
+            if let Some(last) = frame.last_draw {
+                if int.saturating_sub(now, last) >= INTERVAL_NS {
+                    draw(err, frame.label, frame.next_index)?
+                    frame.next_index = (frame.next_index + 1) % 4
+                    frame.last_draw = Some(now)
+                }
+            } else {
+                frame.last_draw = Some(now)
+            }
+            Ok(())
+        },
+    }
+}
+
+/// Clear an animated line. For a pipe, there is nothing to clear.
+pub fn stop(take p: Progress, err: Stderr) -> Result[(), WriteError] waits {
+    match p {
+        Animated(_) => if stderr.is_terminal(err) {
+            return stderr.write(err, "\r\u{1b}[K")
+        },
+        Plain => {},
+    }
+    Ok(())
+}

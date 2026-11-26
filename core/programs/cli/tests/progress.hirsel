@@ -1,0 +1,24 @@
+fn drive_plain_progress(take err: Stderr) -> Result[(), WriteError] waits {
+    let (c, hand) = provide.clock(0, 0)
+    let mut cursor = take hand
+    let state = progress.start(err, "fetch\r\nfiles")?
+    let mut p = take state
+    progress.update(mut p, err, c)?
+    clock.advance_to(mut cursor, 200000000)
+    progress.update(mut p, err, c)?
+    progress.stop(take p, err)
+}
+
+/// bug: progress on a pipe animates, writes CR or reads a Clock.
+/// oracle: only the start message is written. Render CR as caret-M and the label LF as
+/// backslash-n, then add three dots and LF. Advancing the clock has no effect on writes.
+@test
+fn nonterminal_progress_is_one_line(tasks: Tasks) -> Result[(), ()] waits {
+    let (err, port) = provide.stderr(bytes 128, None)
+    let mut served = take port
+    let child = task.spawn(tasks, bytes 65536, err, drive_plain_progress)
+    served_text(mut served, "fetch^M\\nfiles...\n")
+    no_more_writes(mut served)
+    result.unwrap(result.unwrap(task.join(take child)))
+    Ok(())
+}

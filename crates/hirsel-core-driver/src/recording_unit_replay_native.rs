@@ -510,3 +510,89 @@ fn u5_failed_and_cancelled_helper_ends_replay() {
         one_line(&wrong, "message", "replay: Diverged(Outcome) at 1 in root.0 ");
     }
 }
+
+/// The root sends two plain items to its own connection and receives them.
+const U5_ITEMS: &str = r#"
+pub fn main(out: Stdout) -> Result[(), Exit] waits {
+    let (c, inbox): (Client[u64], Inbox[u64]) = result.unwrap(conn.new(2, bytes 0))
+    result.unwrap(conn.send(c, 5))
+    result.unwrap(conn.send(c, 7))
+    let a = result.unwrap(conn.receive(inbox))
+    let b = result.unwrap(conn.receive(inbox))
+    if a * 10 + b != 57 { return Error(Exit(status: 3)) }
+    result.unwrap(stdout.write(out, "conn"))
+    Ok(())
+}
+"#;
+
+/// A unit's own items replay from its item `TAKE`s, and its `CONN_SEND`s
+/// and drops are checked.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_items_replay_from_their_takes() {
+    crate::openat2_required::require();
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = source_request(U5_ITEMS, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let mut options = native_options(backend, dir.path());
+        options.runtime = env_record_runtime();
+        options.recording = true;
+        options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+        options.cas = dir.path().join(format!("u5i-store-{backend:?}"));
+        options.output = dir.path().join(format!("u5i-{backend:?}"));
+        let program = product.build(&entry, &options).unwrap().executable;
+        let path = dir.path().join(format!("u5i-{backend:?}.tape"));
+        let (code, out, err) = tape_run(&program, &[], Some(&path));
+        assert_eq!((code, out.as_str()), (Some(0), "conn"), "{backend:?}: {err}");
+        let frames = unit_streams(&path, &format!("{backend:?}"), &["root"]);
+        let (code, out, err) = u4_replay(&program, &path, None);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (Some(0), "", ""),
+            "{backend:?}: {:#?}",
+            frames[0].1
+        );
+        let tape = std::fs::read(&path).unwrap();
+        let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+            std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+        })
+        .unwrap()
+        .1
+        .tape_id;
+        let one_line = |name: &str, window: &[u8], at: usize, prefix: &str| {
+            let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                let Some(i) = payload.windows(window.len()).position(|w| w == window) else {
+                    return false;
+                };
+                payload[i + at] = 99;
+                true
+            });
+            let corrupt = dir.path().join(format!("u5i-{backend:?}-{name}.tape"));
+            std::fs::write(&corrupt, wrong).unwrap();
+            let (code, out, err) = u4_replay(&program, &corrupt, None);
+            assert_eq!((code, out.as_str()), (Some(1), ""), "{backend:?} {name}: {err}");
+            let lines: Vec<_> = err.lines().collect();
+            assert!(
+                matches!(&lines[..], [l] if l.starts_with(prefix)),
+                "{backend:?} {name}: {err}"
+            );
+        };
+        // The first CONN_SEND (165) names the client, object 3, with item 5.
+        one_line("send", &[165, 3, 10, 8, 5], 1, "replay: Diverged(Object) at 2 in root ");
+        // The first item TAKE: tag 0, the connection's ordinal 2, item 5.
+        one_line("item", &[0, 2, 8, 5], 1, "replay: Diverged(Take) at 4 in root ");
+        // The inbox's CLOSE (3) names the connection, object 2. A CLOSE is
+        // matched by its object, as a provider close is, so the drop that
+        // finds none diverges at the frame after it.
+        one_line("close", &[3, 2, 0, 0, 0], 1, "replay: Diverged(Object) at 8 in root ");
+    }
+}

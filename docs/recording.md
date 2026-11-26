@@ -704,11 +704,16 @@ next take point; a kind 1 take applies at the scheduler's pump, which pumps inst
 waiting while that `TAKE` is the unit's next frame, since the unit's waits for its helpers
 are then not outside waits. What this build does not replay yet stops the replay with
 `replay: refused: WHY` and exit 2 for the whole replay, as a refusal at open does: a helper
-end that failed, was cancelled or hands its owner survivors; a result holding a handle or a
-function; a helper entry holding a handle other than a capability (a `Secret`, a key object,
-a connection, a socket) or holding a `Net`, `Env`, `Exec` or `Cred` capability, whose rules
-the root's startup holds; and every other take kind. `UNIT_CANCEL`, connections and the drops of clients and
-inboxes reach replay as frames it does not expect and end it `Diverged`. A package replay
+end that hands its owner survivors; a result holding a handle or a function; a helper entry
+holding a handle other than a capability (a `Secret`, a key object, a connection, a socket)
+or holding a `Net`, `Env`, `Exec` or `Cred` capability, whose rules the root's startup
+holds; a send that waits; an item holding a list or a handle; a notice another unit sent;
+and every other take kind. A failed or cancelled helper end delivers its recorded causes to
+the join, and `UNIT_CANCEL` is checked against the owner's stream. A unit's own connections
+replay: `CONN_SEND` and `CONN_TRY_SEND` are checked with the item at issue and deliver
+nothing, the item reaches the inbox at its `TAKE`, and the drops of clients and inboxes are
+checked as `CLOSE`s whose close, seal answer and last release are taken at their `TAKE`s. A
+take naming no connection of the unit ends the replay `Diverged(Take)` at the `TAKE`. A package replay
 (`hirsel replay PACKAGE`) refuses `--unit`: only the operator replay of a pinned image
 replays one unit. These limits close as the helper streams' replay lands.
 

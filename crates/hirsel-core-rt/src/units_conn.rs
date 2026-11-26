@@ -160,6 +160,12 @@ unsafe impl Send for ConnCore {}
 unsafe impl Sync for ConnCore {}
 
 impl ConnCore {
+    /// The room `b`: an item whose charge exceeds it fails `Bounds`, which
+    /// writes no frame, so a replay recomputes it.
+    pub(crate) fn room(&self) -> u64 {
+        self.b
+    }
+
     fn arrival_slot(&self, before: u64) -> (u32, *mut Arrival) {
         let i = if let Some(free) = &self.free {
             let mut free = free.lock().unwrap();
@@ -367,6 +373,10 @@ impl Client {
         Client(self.0.clone())
     }
 }
+
+#[cfg(feature = "record")]
+#[path = "units_conn_replay.rs"]
+mod replay;
 
 #[derive(Debug)]
 pub(crate) enum Sent {

@@ -108,6 +108,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::u4_root_replays_its_helper_takes",
         "native::tests::u4d_helper_streams_replay_as_units",
         "native::tests::u5_failed_and_cancelled_helper_ends_replay",
+        "native::tests::u5_items_replay_from_their_takes",
         "native::tests::rl9_sent_items_match_their_takes",
         "native::tests::rl8_take_positions_natively",
         "native::tests::rl9_shared_crosses_into_a_helper",

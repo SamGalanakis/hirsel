@@ -1,11 +1,45 @@
+#![cfg_attr(not(any(test, feature = "testing")), allow(dead_code))]
 //! The ledger's hold hook, driven a step at a time (RL8): hold what is
 //! published, let the oldest held arrival reach the unit, stop holding.
-//! Test builds and the `testing` feature only: a native law drives it
-//! through `hirsel_core_test_hold` (units_lang_hold.rs).
+//! A native law drives it through `hirsel_core_test_hold`
+//! (units_lang_hold.rs); a replaying unit parks with it
+//! (units_conn_replay.rs).
 use super::{Body, UnitCtx};
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 impl UnitCtx {
+    /// Test hook: the oldest held arrival from `src` reaches the unit.
+    #[cfg(test)]
+    pub(crate) fn reach(&mut self, src: &str) -> Option<String> {
+        if self.held.is_none() {
+            self.held = Some(VecDeque::new());
+        }
+        // An intake can publish a seal answer to this port: drain until empty.
+        loop {
+            let mut list = self.port.drain().peekable();
+            if list.peek().is_none() {
+                break;
+            }
+            self.intake_remaining(list);
+        }
+        let h = self.held.as_mut().unwrap();
+        let i = h
+            .iter()
+            .position(|a| a.names.as_ref().is_some_and(|n| n.src == src))?;
+        let a = h.remove(i).unwrap();
+        let id = a.names.as_ref().unwrap().ident.clone();
+        self.reached.push_back(a);
+        Some(id)
+    }
+
+    pub(crate) fn hook(&mut self) {
+        self.held.get_or_insert_with(VecDeque::new);
+    }
+
+    pub(crate) fn hooked(&self) -> bool {
+        self.held.is_some()
+    }
+
     /// Test hook: when holding, what was published to the port is held.
     pub(crate) fn hold_published(&mut self) {
         if self.held.is_none() {

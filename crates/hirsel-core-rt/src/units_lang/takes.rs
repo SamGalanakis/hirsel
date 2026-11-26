@@ -14,9 +14,18 @@ impl LangUnit {
     /// task first reaches it.
     pub(super) fn tape(&mut self) -> Option<crate::tape::schedule::Group> {
         if self.tape.is_none() {
-            self.tape = tasks::current_group();
+            self.set_tape(tasks::current_group());
         }
         self.tape
+    }
+
+    /// The unit's recording is `group`: a replaying unit parks what is
+    /// published to it from now on, and takes only what its `TAKE`s name.
+    pub(super) fn set_tape(&mut self, group: Option<crate::tape::schedule::Group>) {
+        self.tape = group;
+        if group.is_some_and(|group| group.replaying()) {
+            self.ctx.park();
+        }
     }
 
     /// The unit's code reached an in-operation take point.
@@ -32,6 +41,12 @@ impl LangUnit {
         unsafe { tape::take(group, self.pumping, Arrival::SharedRelease(node)) };
     }
 
+    /// The owner's own release took nothing because the unit replays: the
+    /// take of its notice is due at this take point.
+    pub(super) fn released_own(&mut self) -> bool {
+        std::mem::take(&mut self.ctx.released_own)
+    }
+
     /// Takes from now are at a scheduler pump (point kind 1), or not.
     pub(super) fn set_pumping(&mut self, pumping: bool) {
         self.pumping = pumping;
@@ -44,6 +59,10 @@ impl super::LangUnit {
     pub(crate) fn reach(&mut self) {}
     #[inline(always)]
     pub(super) fn set_pumping(&mut self, _: bool) {}
+    #[inline(always)]
+    pub(super) fn released_own(&mut self) -> bool {
+        false
+    }
     #[inline(always)]
     pub(crate) fn take_due(&self) -> bool {
         false
@@ -212,6 +231,17 @@ impl SendNote {
         Self { group, op, item }
     }
 
+    /// A replaying sender's send, checked against its stream: the recorded
+    /// outcome, or None inside once the replay has ended. None when the
+    /// sender does not replay.
+    pub(super) fn replayed(&mut self) -> Option<Option<u64>> {
+        if !self.group.is_some_and(|group| group.replaying()) {
+            return None;
+        }
+        let item = self.item.take()?;
+        Some(crate::tape::units::replay::send(self.group, self.op, item))
+    }
+
     /// An outcome at once as an `OP`, or a wait as an `ISSUE`.
     pub(super) fn note(&mut self, outcome: Option<u64>, waiting: Option<u32>) {
         if let Some(item) = self.item.take() {
@@ -237,6 +267,10 @@ impl SendNote {
     }
     #[inline(always)]
     pub(super) fn note(&mut self, _: Option<u64>, _: Option<u32>) {}
+    #[inline(always)]
+    pub(super) fn replayed(&mut self) -> Option<Option<u64>> {
+        None
+    }
 }
 
 /// The owner's helper-end `TAKE`, with the helper's outcome and the

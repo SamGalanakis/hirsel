@@ -43,7 +43,7 @@ pub(crate) mod abi;
 pub(crate) mod bench;
 #[path = "units_conn.rs"]
 pub(crate) mod conn;
-#[cfg(any(test, feature = "testing"))]
+#[cfg(any(test, feature = "testing", feature = "record"))]
 #[path = "units_ledger_hold.rs"]
 mod hold;
 #[cfg(test)]
@@ -1031,8 +1031,15 @@ pub(crate) struct UnitCtx {
     connections: HashMap<usize, Arc<ConnCore>>,
     /// Test hook: arrivals published to the unit wait here until the harness
     /// names the source whose oldest one reaches the unit next.
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(any(test, feature = "testing", feature = "record"))]
     held: Option<VecDeque<ArrivalRef>>,
+    /// A replaying unit parks what is published to it: it takes only what
+    /// its own `TAKE`s deliver (units_conn_replay.rs).
+    #[cfg(feature = "record")]
+    pub(crate) parking: bool,
+    /// A parked release was the owner's own: its take point follows.
+    #[cfg(feature = "record")]
+    pub(crate) released_own: bool,
     helpers: Vec<Option<Handle>>,
     helper: Option<HelperInfo>,
     /// The active primary cell (helpers only).
@@ -1070,8 +1077,12 @@ impl UnitCtx {
             books: Vec::new(),
             reached: VecDeque::new(),
             connections: HashMap::new(),
-            #[cfg(any(test, feature = "testing"))]
+            #[cfg(any(test, feature = "testing", feature = "record"))]
             held: None,
+            #[cfg(feature = "record")]
+            parking: false,
+            #[cfg(feature = "record")]
+            released_own: false,
             helpers: Vec::new(),
             helper: None,
             cell: None,
@@ -1128,7 +1139,7 @@ impl UnitCtx {
         if !self.reached.is_empty() {
             return false;
         }
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(any(test, feature = "testing", feature = "record"))]
         if self.hooked() {
             return false;
         }
@@ -1543,7 +1554,7 @@ impl UnitCtx {
         let old = h.port.fwd.swap(raw, Ordering::Release);
         debug_assert!(old.is_null());
         let mut rest = VecDeque::new();
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(any(test, feature = "testing", feature = "record"))]
         if let Some(held) = h.held.take() {
             rest.extend(held);
         }
@@ -1739,7 +1750,7 @@ impl UnitCtx {
 
     /// Where an arrival goes once it has reached this unit.
     fn layer(&mut self, a: ArrivalRef) {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(any(test, feature = "testing", feature = "record"))]
         if let Some(h) = self.held.as_mut() {
             h.push_back(a);
             return;
@@ -1779,47 +1790,13 @@ impl UnitCtx {
         a
     }
 
-    /// Test hook: the oldest held arrival from `src` reaches the unit.
-    #[cfg(test)]
-    pub(crate) fn reach(&mut self, src: &str) -> Option<String> {
-        if self.held.is_none() {
-            self.held = Some(VecDeque::new());
-        }
-        // An intake can publish a seal answer to this port: drain until empty.
-        loop {
-            let mut list = self.port.drain().peekable();
-            if list.peek().is_none() {
-                break;
-            }
-            self.intake_remaining(list);
-        }
-        let h = self.held.as_mut().unwrap();
-        let i = h
-            .iter()
-            .position(|a| a.names.as_ref().is_some_and(|n| n.src == src))?;
-        let a = h.remove(i).unwrap();
-        let id = a.names.as_ref().unwrap().ident.clone();
-        self.reached.push_back(a);
-        Some(id)
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn hook(&mut self) {
-        self.held.get_or_insert_with(VecDeque::new);
-    }
-
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn hooked(&self) -> bool {
-        self.held.is_some()
-    }
-
     /// Take the next arrival that has reached the unit and apply it. Inlined
     /// into the language pump, its hot caller; `release_take` is cold.
     #[inline(always)]
     pub(crate) fn take(&mut self) -> Option<(Took, TakeInfo)> {
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(any(test, feature = "testing", feature = "record"))]
         let hooked = self.held.is_some();
-        #[cfg(not(any(test, feature = "testing")))]
+        #[cfg(not(any(test, feature = "testing", feature = "record")))]
         let hooked = false;
         let arrival = match self.reached.pop_front() {
             Some(a) => a,
@@ -1902,6 +1879,13 @@ impl UnitCtx {
     /// never jumps the queue; a peer's release waits for the next take.
     #[cold]
     pub(crate) fn release_take(&mut self, conn: usize) -> Vec<Released> {
+        #[cfg(feature = "record")]
+        if self.parking {
+            // Its notice is taken at its recorded `TAKE`, at this take point.
+            self.hold_published();
+            self.released_own = true;
+            return Vec::new();
+        }
         #[cfg(any(test, feature = "testing"))]
         self.reach_notice(conn);
         let mut took = Vec::new();
@@ -1935,7 +1919,7 @@ impl UnitCtx {
             self.port.close_with(DEAD, &mut VecDeque::new());
         }
         self.reached.clear();
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(any(test, feature = "testing", feature = "record"))]
         {
             self.held = None;
         }

@@ -39,7 +39,9 @@ use std::{
 };
 
 mod held;
+mod inbox;
 use held::Held;
+pub use inbox::hirsel_core_inbox_drop;
 mod crossing;
 mod ending;
 pub use crossing::{Cross, SpawnEntry};
@@ -133,7 +135,7 @@ impl LangUnit {
     /// through its notice; each take wakes what waits on it, as in `pump`.
     fn drop_client(&mut self, client: Client) {
         let took = self.ctx.drop_client(client);
-        if !took.is_empty() {
+        if !took.is_empty() || self.released_own() {
             self.on_released(took);
         }
     }
@@ -242,7 +244,7 @@ unsafe fn pump_for(u: &mut LangUnit, receiving: bool) {
             // SAFETY: as in `on_take`.
             unsafe { on_take(u, took, id, wake_inboxes) };
         }
-        #[cfg(any(test, feature = "testing"))]
+        #[cfg(any(test, feature = "testing", feature = "record"))]
         u.ctx.hold_published();
         if u.ctx.port.arm() {
             return;
@@ -550,6 +552,21 @@ unsafe fn conn_send<const REC: bool>(
             };
             // The item as a value, read before the send moves it.
             let mut send = takes::SendNote::new(context, handle, value, wait, sockets.as_ref());
+            // A replayed send delivers nothing: its outcome is the recorded one.
+            if charge <= client.0.room()
+                && let Some(outcome) = send.replayed()
+            {
+                if outcome == Some(0) {
+                    free_owners(Some(&*context), value, owners);
+                    return out(0);
+                }
+                attach_sockets(context, value, offsets(), sockets.as_ref());
+                return match outcome {
+                    Some(1) if !wait => out(2),
+                    Some(_) => out(1),
+                    None => failed,
+                };
+            }
             let mut source = CrossSend::new(value);
             source.rows = live.clone();
             source.sockets = sockets.clone();
@@ -763,6 +780,9 @@ unsafe fn conn_receive<const REC: bool>(
             let pending = u.ctx.port.pending() || u.ctx.has_reached();
             #[cfg(not(any(test, feature = "testing")))]
             let pending = u.ctx.port.pending();
+            // A replaying unit's items come from its TAKEs, due at this point.
+            #[cfg(feature = "record")]
+            let pending = pending || u.ctx.parking;
             if c.side().taken.is_empty() && pending {
                 // A lone item for this inbox is all the port holds, so no
                 // other wait of this unit (a helper, another task) has
@@ -840,75 +860,6 @@ unsafe fn conn_receive<const REC: bool>(
                 (crate::prof::Reason::None, 0),
             );
         }
-    }
-}
-
-/// Clean an inbox: seal, wait (shielded) for the seal answer, drop every
-/// item not received, and keep the retained charge until the last release.
-/// # Safety
-/// Transfers the inbox.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_inbox_drop(context: *mut Context, inbox: *mut InboxH) -> u8 {
-    // SAFETY: the caller transfers the handle; it stays pinned while it waits.
-    unsafe {
-        let h = &mut *inbox;
-        tasks::before_commit();
-        (*context).cancel_shield += 1;
-        let u = unit();
-        #[cfg(feature = "record")]
-        takes::inbox_drop(u, Arc::as_ptr(&h.inbox.0) as usize);
-        u.ctx.seal(&h.inbox);
-        u.waits += 1;
-        let mut spun = false;
-        loop {
-            if !std::mem::take(&mut spun) {
-                u.reach();
-            }
-            pump(u);
-            if h.inbox.0.side().seal_taken {
-                break;
-            }
-            if tasks::park_unit_alone(tasks::current_task(), || false) {
-                tasks::before_commit();
-                spun = true;
-                continue;
-            }
-            tasks::park(
-                &raw mut h.waiters,
-                #[cfg(feature = "prof")]
-                (crate::prof::Reason::Join, 0),
-            );
-        }
-        u.waits -= 1;
-        (*context).cancel_shield -= 1;
-        let side = h.inbox.0.side();
-        for v in side.taken.iter().rev() {
-            drop_packed_owners(
-                context,
-                u,
-                h.inbox.flat_ptr(v),
-                &h.owners,
-                v.value().item_sockets(),
-            );
-        }
-        let key = Arc::as_ptr(&h.inbox.0) as usize;
-        u.inboxes.remove(&key);
-        let mut h = Box::from_raw(inbox);
-        if let Some(held) = h.charge.take() {
-            u.retained.insert(key, held);
-        }
-        // With no client left the cleaning is the owner's own release: it
-        // takes through the notice, which refunds the retained charge.
-        let (_, took) = u.ctx.clean(&h.inbox);
-        #[cfg(feature = "record")]
-        crate::tape::units::retained(key, h.inbox.0.retained());
-        drop(h);
-        if !took.is_empty() {
-            u.on_released(took);
-        }
-        u.reach();
-        pump(u);
-        0
     }
 }
 
@@ -1200,9 +1151,7 @@ fn helper_main(
         drop(data);
         let mut lu = LangUnit::new(hctx, Some(shared));
         #[cfg(feature = "record")]
-        {
-            lu.tape = tape_group(&tape);
-        }
+        lu.set_tape(tape_group(&tape));
         let mut result = vec![0u8; layout.result.bytes.max(rb as usize)];
         let provider = if run.is_null() {
             tasks::SchedulerProvider::default()

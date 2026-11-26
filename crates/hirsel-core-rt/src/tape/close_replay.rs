@@ -87,6 +87,15 @@ impl Closes {
         }
     }
 
+    /// A `CLOSE` of one of `objects`, read before position `at`, that no
+    /// drop has matched yet: a unit's drops keep their order against its
+    /// takes.
+    pub(super) fn unmatched_before(&self, at: u64, objects: &[u64]) -> bool {
+        self.entries.iter().any(|(key, entry)| {
+            !entry.used && entry.at < at && key.op == CLOSE && objects.contains(&key.object)
+        })
+    }
+
     pub(super) fn contains(&self, key: CloseKey) -> bool {
         self.entries.contains_key(&key)
     }

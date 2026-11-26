@@ -40,16 +40,27 @@ pub(super) fn replaying<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R)
 }
 
 impl Live {
+    /// A drop's `CLOSE`, matched by its object wherever it fell among the
+    /// stream's frames, as a provider close's is.
+    pub(super) fn closed(&mut self, object: u64, args: &Args) {
+        let rep = self.replayer.as_mut().unwrap();
+        let closed = crate::tape::close_replay::CloseKey::new(op::CLOSE, object, args)
+            .and_then(|key| rep.close(key));
+        match closed {
+            // As writing it does, the `CLOSE` starts the take points afresh.
+            Ok(_) => {
+                self.takes.count = 0;
+                self.takes.events = self.schedule.events;
+                self.takes.position = self.replayer.as_ref().unwrap().taken;
+            }
+            Err(fault) => self.stop_replay(fault),
+        }
+    }
+
     /// A replayed unit operation, checked as a provider issue is: the
     /// stream's next frame is its `OP`, with this task, code, object and
     /// arguments. Its outcome value, or None once the replay has ended.
-    pub(super) fn unit_op_replayed(
-        &mut self,
-        task: u64,
-        op: u8,
-        object: u64,
-        args: &Args,
-    ) -> Option<u64> {
+    pub(super) fn checked(&mut self, task: u64, op: u8, object: u64, args: &Args) -> Option<u64> {
         self.unit_commit(task);
         let rep = self.replayer.as_mut().unwrap();
         let observed = IssueEvidence {
@@ -116,7 +127,7 @@ pub(crate) fn spawn(group: Option<Group>, key: usize, args: Result<Vec<u8>, &'st
             Err(why) => return live.refuse_replay(why),
         };
         let task = group.map_or(0, |g| g.task);
-        let Some(value) = live.unit_op_replayed(task, op::UNIT_SPAWN, 0, &args) else {
+        let Some(value) = live.checked(task, op::UNIT_SPAWN, 0, &args) else {
             return;
         };
         let ordinal = live.unit_object();
@@ -147,8 +158,51 @@ pub(crate) fn cancel(group: Option<Group>, key: usize) {
         };
         let task = group.map_or(0, |g| g.task);
         let args = Args::Literal(Vec::new());
-        live.unit_op_replayed(task, op::UNIT_CANCEL, ordinal, &args);
+        live.checked(task, op::UNIT_CANCEL, ordinal, &args);
     });
+}
+
+/// A replayed send's `CONN_SEND` or `CONN_TRY_SEND`, checked as an issue
+/// with the item its client sends: its recorded outcome, or None once the
+/// replay has ended. The send delivers nothing; the receiving unit takes
+/// the item from its own `TAKE`.
+pub(crate) fn send(
+    group: Option<Group>,
+    op: u8,
+    item: Result<(u64, Vec<u8>), &'static str>,
+) -> Option<u64> {
+    replaying(group, |live| {
+        let (object, value) = match item {
+            Ok(item) => item,
+            Err(why) => {
+                live.refuse_replay(why);
+                return None;
+            }
+        };
+        if let Ok(Frame::Issue { .. }) = live.replayer.as_mut().unwrap().peek() {
+            live.refuse_replay("a send that waits");
+            return None;
+        }
+        let canonical = format::Value::decode(&value)
+            .map(|v| v.canonical())
+            .unwrap_or_default();
+        let task = group.map_or(0, |g| g.task);
+        live.checked(task, op, object, &Args::of_parts(&[&canonical]))
+    })
+    .flatten()
+}
+
+/// What a recorded notice for one of the unit's own connections is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Notice {
+    Close,
+    SealAnswer,
+    /// With the connection's header and the unused room past it, as the
+    /// recorder writes them from the retained charge.
+    LastRelease {
+        header: u64,
+        unused: u64,
+    },
 }
 
 /// A cause of a helper's recorded failure, as the owner's join delivers it.
@@ -172,6 +226,10 @@ pub(crate) enum Due {
     },
     /// A cancellation request for the unit's root.
     Cancel,
+    /// An item on the unit's own connection, by its address: its flat bytes.
+    Item { conn: usize, flat: Vec<u8> },
+    /// A notice for the unit's own connection, by its address.
+    Notice { conn: usize, notice: Notice },
 }
 
 fn due_causes(causes: &[format::Cause<'_>]) -> Vec<DueCause> {
@@ -214,6 +272,14 @@ pub(crate) fn due(
     replaying(group, |live| {
         live.fresh_takes();
         let (events, last, count) = (live.schedule.events, live.schedule.last, live.takes.count);
+        let own = super::stream(live);
+        let mut objects: Vec<u64> = super::conns(|c| {
+            c.values()
+                .filter(|e| e.stream == own)
+                .map(|e| e.ordinal)
+                .collect()
+        });
+        objects.extend(live.takes.clients.values().copied());
         let rep = live.replayer.as_mut().unwrap();
         let Ok(&Frame::Take {
             gap,
@@ -224,6 +290,10 @@ pub(crate) fn due(
         else {
             return None;
         };
+        // A drop's `CLOSE` recorded before the take comes first.
+        if rep.closes.unmatched_before(rep.taken + 1, &objects) {
+            return None;
+        }
         let position = last.checked_add(gap)?;
         if position > events || (position == events && (at != point(pump) || reached > count)) {
             return None;
@@ -265,6 +335,51 @@ pub(crate) fn due(
                 (ordinal, Err(due_causes(&causes)))
             }
             Arrival::Cancel => return Some(Due::Cancel),
+            Arrival::Item(ordinal, value) => {
+                let value = value.bytes().to_vec();
+                return own_conn(live, &frame, ordinal, |live, conn| {
+                    let (bytes, owners) = super::layout(conn).unwrap_or_default();
+                    if !owners.is_empty() {
+                        live.refuse_replay("an item holding a list or a handle");
+                        return None;
+                    }
+                    let held = &mut |_: u64, _: &mut format::Cursor<'_>| Err(Unpacked::Layout);
+                    let bytes = bytes as usize;
+                    match packed(&value, vec![0; bytes], (0, bytes), &owners, held) {
+                        Ok(flat) => Some(Due::Item { conn, flat }),
+                        Err(_) => {
+                            let rep = live.replayer.as_mut().unwrap();
+                            let fault = rep.compared(
+                                Mismatch::Take,
+                                &frame,
+                                format_args!("an item of another layout"),
+                            );
+                            live.stop_replay(fault);
+                            None
+                        }
+                    }
+                });
+            }
+            Arrival::Close(ordinal) | Arrival::SealAnswer(ordinal) => {
+                let notice = if matches!(body.arrival(), Arrival::Close(_)) {
+                    Notice::Close
+                } else {
+                    Notice::SealAnswer
+                };
+                return own_conn(live, &frame, ordinal, |_, conn| {
+                    Some(Due::Notice { conn, notice })
+                });
+            }
+            Arrival::LastRelease(stream, ordinal, header, unused) => {
+                if stream != super::stream(live) {
+                    live.refuse_replay("a last release of another unit's connection");
+                    return None;
+                }
+                let notice = Notice::LastRelease { header, unused };
+                return own_conn(live, &frame, ordinal, |_, conn| {
+                    Some(Due::Notice { conn, notice })
+                });
+            }
             other => {
                 live.refuse_replay(unsupported(&other));
                 return None;
@@ -317,6 +432,40 @@ pub(crate) fn due(
         }
     })
     .flatten()
+}
+
+/// The unit's own connection with `ordinal`, as `then` delivers it; a take
+/// naming no connection of the unit ends the replay `Diverged(Take)`.
+fn own_conn(
+    live: &mut Live,
+    frame: &Frame,
+    ordinal: u64,
+    then: impl FnOnce(&mut Live, usize) -> Option<Due>,
+) -> Option<Due> {
+    let own = super::stream(live);
+    let conn = super::conns(|c| {
+        c.iter()
+            .find(|(_, e)| e.stream == own && e.ordinal == ordinal)
+            .map(|(&k, _)| k)
+    });
+    match conn {
+        Some(conn) => then(live, conn),
+        None => {
+            let rep = live.replayer.as_mut().unwrap();
+            let fault = rep.compared(
+                Mismatch::Take,
+                frame,
+                format_args!("no connection with ordinal {ordinal}"),
+            );
+            live.stop_replay(fault);
+            None
+        }
+    }
+}
+
+/// End the replay at what this build does not replay of a take.
+pub(crate) fn refuse_take(group: Option<Group>, why: &'static str) {
+    replaying(group, |live| live.refuse_replay(why));
 }
 
 fn unsupported(arrival: &Arrival<'_>) -> &'static str {

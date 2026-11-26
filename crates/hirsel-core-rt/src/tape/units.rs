@@ -204,6 +204,14 @@ fn recording<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R) -> Option<
         .flatten()
 }
 
+/// What a unit's recording and its replay both number: its object ordinals
+/// and the items its sends hold.
+fn noting<R>(group: Option<Group>, f: impl FnOnce(&mut Live) -> R) -> Option<R> {
+    group?
+        .with(|live| (live.recording() || live.replaying()).then(|| f(live)))
+        .flatten()
+}
+
 /// The unit's stream number: its recorder's, or the stream its replay reads.
 pub(super) fn stream(live: &Live) -> u32 {
     match (&live.recorder, &live.replayer) {
@@ -314,7 +322,7 @@ pub(crate) fn conn_new(
     cap: u64,
     room: u64,
 ) {
-    recording(group, |live| {
+    noting(group, |live| {
         let ordinal = live.unit_object();
         let entry = Conn {
             stream: stream(live),
@@ -334,18 +342,24 @@ pub(crate) fn conn_new(
 
 /// `conn.client`: a new client ordinal.
 pub(crate) fn client_new(group: Option<Group>, client: usize) {
-    recording(group, |live| {
+    noting(group, |live| {
         let ordinal = live.unit_object();
         live.takes.clients.insert(client, ordinal);
     });
 }
 
+/// A drop's `CLOSE`: written, or in a replay checked.
 fn close_frame(live: &mut Live, object: u64) {
+    let args = Args::Literal(Vec::new());
+    if live.replaying() {
+        live.closed(object, &args);
+        return;
+    }
     let frame = Frame::Op {
         task: 0,
         op: op::CLOSE,
         object,
-        args: Args::Literal(Vec::new()),
+        args,
         out: Out::default(),
     };
     let _ = live.recorder.as_mut().unwrap().frame(&frame);
@@ -353,7 +367,7 @@ fn close_frame(live: &mut Live, object: u64) {
 
 /// A client's drop: its `CLOSE`.
 pub(crate) fn client_drop(group: Option<Group>, client: usize) {
-    recording(group, |live| {
+    noting(group, |live| {
         if let Some(ordinal) = live.takes.clients.remove(&client) {
             close_frame(live, ordinal);
         }
@@ -362,7 +376,7 @@ pub(crate) fn client_drop(group: Option<Group>, client: usize) {
 
 /// An inbox's drop: its `CLOSE`.
 pub(crate) fn inbox_drop(group: Option<Group>, conn: usize) {
-    recording(group, |live| {
+    noting(group, |live| {
         let own = stream(live);
         if let Some(ordinal) =
             conns(|c| c.get(&conn).filter(|e| e.stream == own).map(|e| e.ordinal))
@@ -419,7 +433,7 @@ pub(crate) unsafe fn send_item(
     grants: &[Granted],
     sockets: Option<&CrossingSockets>,
 ) -> Option<Result<(u64, Vec<u8>), &'static str>> {
-    recording(group, |live| {
+    noting(group, |live| {
         let Some(&ordinal) = live.takes.clients.get(&client) else {
             return Err(UNNAMED);
         };

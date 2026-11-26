@@ -6,6 +6,7 @@
 use super::*;
 use crate::tape::schedule::Turn;
 use crate::tape::units::replay as tape;
+use crate::units::ledger::Body as LBody;
 
 /// A replayed spawn's `UNIT_SPAWN` arguments, or why it is not replayed;
 /// None when the spawning unit does not replay.
@@ -73,6 +74,46 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
                 continue;
             }
             Some(tape::Due::End { key, outcome }) => (key, outcome),
+            Some(tape::Due::Item { conn, flat }) => {
+                let Some(&ih) = u.inboxes.get(&conn) else {
+                    tape::refuse_take(Some(group), "an item for a dropped inbox");
+                    return;
+                };
+                // SAFETY: a registered inbox is live while registered; the
+                // packed item has its connection's layout.
+                let admitted = unsafe {
+                    let c = &(*ih).inbox.0;
+                    let bytes = item_charge(flat.as_ptr(), &c.seqs);
+                    u.ctx.replay_item(c, CrossSend::new(flat.as_ptr()), bytes)
+                };
+                if !admitted {
+                    tape::refuse_take(Some(group), "an item its connection cannot admit");
+                    return;
+                }
+                continue;
+            }
+            Some(tape::Due::Notice { conn, notice }) => {
+                let found = u.ctx.admit_parked(|b| match (b, notice) {
+                    (LBody::Close(c), tape::Notice::Close) => Arc::as_ptr(c).addr() == conn,
+                    (LBody::SealAnswer(c), tape::Notice::SealAnswer) => c.addr() == conn,
+                    (LBody::LastRelease(r, c), tape::Notice::LastRelease { header, unused }) => {
+                        Arc::as_ptr(c).addr() == conn
+                            && c.retained().0 == header
+                            && r.saturating_sub(header) == unused
+                    }
+                    _ => false,
+                });
+                if !found {
+                    let why = match notice {
+                        tape::Notice::Close => "a close another unit sent",
+                        tape::Notice::SealAnswer => "a seal answer that was not published",
+                        tape::Notice::LastRelease { .. } => "a last release another unit sent",
+                    };
+                    tape::refuse_take(Some(group), why);
+                    return;
+                }
+                continue;
+            }
         };
         let h = u.helpers[&key];
         let hctx = u
@@ -108,7 +149,12 @@ pub(super) unsafe fn take_due(u: &mut LangUnit) {
             },
         };
         RESULTS.lock().unwrap().insert(port, ended);
+        let helper = (&*hctx as *const UnitCtx).addr();
         hctx.end_helper(Some(ret), false);
+        if !u.ctx.admit_end(helper) {
+            tape::refuse_take(Some(group), "a helper end that was not published");
+            return;
+        }
     }
 }
 

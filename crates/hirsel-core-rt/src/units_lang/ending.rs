@@ -1,9 +1,7 @@
 //! A helper's end, as its owner takes it.
+use super::{Context, HelperH, LangUnit, RESULTS, charge, consume, helper_of, tasks, wait_end};
 #[cfg(feature = "record")]
-use super::takes;
-use super::{
-    Context, HelperH, LangUnit, RESULTS, charge, consume, helper_of, tasks, unit, wait_end,
-};
+use super::{takes, unit};
 use std::sync::Arc;
 
 /// A helper's end take in its owner: the survivors' charges move into the

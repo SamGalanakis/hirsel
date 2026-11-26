@@ -116,7 +116,9 @@ fn l88_probe_pack(d: Dir, owner: StoreId) -> Result[(PagePack, std.page.PagePtr)
         let width = std.page.sealed_size(std.page.image_of(page))
         let frame = PackFrame(stamp: 30 + slot, size: width, body: PageBody(take page))
         let key = logical_key(9, key_word(slot))?
-        let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr { std.page.unlocated(stamp) })? else {
+        let Some(ptr) = add_tiered_pack_frame(mut draft, frame, 9, key, fn(stamp: u64) -> std.page.PagePtr {
+            std.page.unlocated(stamp)
+        })? else {
             fail("L88(f): the four leaves must fit the fixture pack")
         }
         if slot == 0 {
@@ -185,7 +187,6 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     let current = l79_cut_table(current_location, 3, 258, mut draw)?
     db.heads[0u64].roots = share_roots(current)
     l88_assert_current_pin(mut db, "relocated", old_capture, current_location)?
-
     let mut rows: List[std.page.Entry] = list.with_capacity(3)
     for slot in 0u64 .. 3 {
         list.push(mut rows, std.page.Entry(key: key_word(slot), cell: InlineValue(string.into_bytes(string.from("stored")))))
@@ -198,4 +199,71 @@ fn test_l88_stamp_equal_pin_takes_current_head(c: Clock) -> Result[(), Error] wa
     db.heads[0u64].roots = take current
     l88_assert_current_pin(mut db, "sealed", hot_capture, current_location)?
     close(take db)
+}
+
+// §13.5 steps 2 and 3: promoting a held Snapshot whose replay overlay sits
+// over an empty Tiered collection (stamp-0 HotPage base) must materialize the
+// overlay before installing the root, so `install_tiered_root` checks totals
+// against the materialized tree rather than the empty base.
+@test
+fn test_l88_pin_overlaid_empty_tiered_base(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let floor = 182375272u64
+    let mut db = open(tasks, d, c, r, l70_open_options(floor)?)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut db, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    set_residency(mut db, rows.id, Tiered)?
+    // Commit rows into the empty Tiered table without a cut, so reopening
+    // replays them as an overlay over the stamp-0 empty base.
+    let first_write: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut db, Some(100000000), copy_env(first_write), fn(mut tx: Tx, handle: Table[u64, Bytes]) -> Result[(), Error] {
+        for key in 0u64 .. 4 {
+            put(mut tx, handle, key, residency_value(key))?
+        }
+        Ok(())
+    })? else {
+        fail("L88: initial puts into empty Tiered table must commit")
+    }
+    close(take db)?
+    let mut reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+    if let None = view reopened.heads[0u64].roots.collections.replay {
+        fail("L88: reopen must carry a replay overlay over the empty Tiered base")
+    }
+    let held = snapshot(reopened)
+    // Fold and advance main past the held Snapshot so pin promotes `held`.
+    let later_write: Table[u64, Bytes] = clone(rows)
+    let Committed(_) = run(mut reopened, Some(100000000), copy_env(later_write), fn(mut tx: Tx, handle: Table[u64, Bytes]) -> Result[(), Error] {
+        put(mut tx, handle, 0u64, residency_value(99))?
+        put(mut tx, handle, 4u64, residency_value(4))
+    })? else {
+        fail("L88: post-reopen writes must commit")
+    }
+    let _ = checkpoint(mut reopened)?
+    let _ = pin(mut reopened, "overlaid", held)?
+    drop(take held)
+    for round in 0u64 .. 2 {
+        let Some(pinned_snap) = pinned(reopened, "overlaid") else {
+            fail("L88: the promoted pin must be published")
+        }
+        let read_handle = reader(reopened, VALUE_LIMIT + 1048576)?
+        for key in 0u64 .. 4 {
+            if get(read_handle, pinned_snap, rows, key)? != Some(residency_value(key)) {
+                fail("L88: the pin must read every row of its replay overlay")
+            }
+        }
+        if get(read_handle, pinned_snap, rows, 4u64)? != None {
+            fail("L88: the pin must not see rows written after its Snapshot")
+        }
+        let head = snapshot(reopened)
+        if get(read_handle, head, rows, 0u64)? != Some(residency_value(99)) || get(read_handle, head, rows, 4u64)? != Some(residency_value(4)) {
+            fail("L88: main must retain its post-snapshot writes")
+        }
+        drop(take head)
+        drop(take read_handle)
+        drop(take pinned_snap)
+        if round == 0 {
+            close(take reopened)?
+            reopened = open(tasks, d, c, r, l70_open_options(floor)?)?
+        }
+    }
+    close(take reopened)
 }

@@ -598,7 +598,6 @@ fn reach_files_build(dir: &Path, project: &str, files: &[(&str, &str)], store: &
     options.cas = dir.join(store).join("native");
     options.output = dir.join(store).join("program");
     options.debug_lines = true;
-    options.grant_mask = 1 << 4;
     let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
     let output = Command::new(&built.executable).output().unwrap();
     (std::fs::read(&built.executable).unwrap(), (output.status.code(), output.stderr))

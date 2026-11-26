@@ -178,20 +178,25 @@ fn same_length_ir_damage_refuses_once_then_builds_fresh() {
 #[test]
 #[ignore = "explicit native integration target"]
 fn each_plan_input_builds_a_fresh_stores_executable() {
-    const APP: &str = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
+    const APP: &str = "pub fn main(first: Dir, second: Dir, clock: Clock) -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
+    crate::openat2_required::require();
     let dir = tempfile::tempdir().unwrap();
     let core = core_sources();
-    let base = || native_options(Backend::Cranelift, dir.path());
-    let [a, b] = ["a", "b"].map(|name| {
+    let [a, b, c] = ["a", "b", "c"].map(|name| {
         let path = dir.path().join(name);
         std::fs::create_dir(&path).unwrap();
         path.into_os_string().into_string().unwrap()
     });
+    let base = || NativeOptions {
+        grant_mask: 1 << grant_kind("Clock").unwrap(),
+        directories: vec![a.clone(), b.clone()],
+        ..native_options(Backend::Cranelift, dir.path())
+    };
     let variants: Vec<(&str, NativeOptions)> = vec![
         ("base", base()),
         ("root limit", NativeOptions { root_limit: 2_097_152, ..base() }),
-        ("grant mask", NativeOptions { grant_mask: 1 << grant_kind("Clock").unwrap(), ..base() }),
-        ("directories", NativeOptions { directories: vec![a.clone(), b.clone()], ..base() }),
+        ("grant mask", NativeOptions { grant_mask: 0, ..base() }),
+        ("directories", NativeOptions { directories: vec![a.clone(), c], ..base() }),
         ("directory order", NativeOptions { directories: vec![b.clone(), a.clone()], ..base() }),
         ("optimize", NativeOptions { optimize: true, ..base() }),
         ("debug lines", NativeOptions { debug_lines: true, ..base() }),
@@ -209,7 +214,8 @@ fn each_plan_input_builds_a_fresh_stores_executable() {
                 ..options
             },
         );
-        assert_eq!(built.1, Some(7), "{name}: runs");
+        let status = if name == "grant mask" { 103 } else { 7 };
+        assert_eq!(built.1, Some(status), "{name}: exit status");
         assert!(built == fresh, "{name}: the shared store's executable is a fresh store's");
     }
     // A record from a complete walk is not used under a limit the walk

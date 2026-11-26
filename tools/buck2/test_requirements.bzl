@@ -79,6 +79,7 @@ OPENAT2_TEST_CASES = {
         "native::tests::xdg_directory_follows_symlinks_and_refuses_a_dangling_one",
         "native::tests::dir_cranelift_entry",
         "native::tests::dir_llvm_entry",
+        "native::tests::each_plan_input_builds_a_fresh_stores_executable",
         "native::tests::host_operations_cranelift",
         "native::tests::host_operations_llvm",
         "native::tests::prog3_startup_refusals_cranelift",

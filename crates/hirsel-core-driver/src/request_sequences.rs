@@ -2272,7 +2272,7 @@ fn run_step(root: &Path, step: &Step, store: &Path, run: &Path, exe: &Path) -> (
         let text = String::from_utf8_lossy(bytes).into_owned();
         let text = match text.find(CHILD_MARK) {
             Some(at) => text[at + CHILD_MARK.len()..].to_owned(),
-            None => panic!("request child did not start: {text}"),
+            None => panic!("{} child did not write its marker ({}): {text}\n{}", step.command, out.status, String::from_utf8_lossy(&out.stderr)),
         };
         let text = text
             .replace(&cache_for(store).display().to_string(), "<cache>")

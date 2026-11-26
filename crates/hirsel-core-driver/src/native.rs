@@ -1457,9 +1457,8 @@ thread_local! {
     /// the objects' paths.
     pub(crate) static BEFORE_OPEN: std::cell::RefCell<Option<Box<dyn FnMut(&[PathBuf])>>> =
         const { std::cell::RefCell::new(None) };
-    /// The image unit the last link on this thread read: its key, its file
-    /// and whether the link prelinked it.
-    pub(crate) static UNIT: std::cell::RefCell<Option<(ContentHash, PathBuf, bool)>> =
+    /// The image unit the last link on this thread read.
+    pub(crate) static UNIT: std::cell::RefCell<Option<tests::ImageUnitRead>> =
         const { std::cell::RefCell::new(None) };
     /// Set: a link reads the image objects one by one, not as their unit.
     pub(crate) static SEPARATE_IMAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1636,11 +1635,12 @@ fn link_objects(
                     }
                 };
                 #[cfg(test)]
-                UNIT.set(Some((
-                    unit_key,
-                    image.object_path(_unit.address),
-                    _prelinked,
-                )));
+                UNIT.set(Some(tests::ImageUnitRead {
+                    key: unit_key,
+                    blob: image.object_path(_unit.address),
+                    record: image.path(unit_key),
+                    prelinked: _prelinked,
+                }));
                 members.push(bytes.into());
                 Some(unit_key)
             }
@@ -2384,16 +2384,9 @@ pub(crate) mod tests {
         let native = installed.build(&entry, &options).unwrap();
         run_clean(&native.executable, 7);
         assert_eq!(installed.rechecked.len(), 1);
-        // A build reads the bodies its program reaches: `answer` and
-        // `identity`. An optimised LLVM build also lowers the release std of
-        // an image that holds none prebuilt, which reads every definition the
-        // image holds to find its plain roots, so `unused_bad` too.
-        let decoded = if backend == Backend::Llvm && optimize {
-            3
-        } else {
-            2
-        };
-        assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), decoded);
+        // Development and release both demand only `answer` and `identity`.
+        // Without a prebuilt side, release selects std roots from reached units.
+        assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), 2);
         // A second application's build: every object and part of
         // the same program is already in the user's content store, so it
         // compiles and generates none and links no library object.

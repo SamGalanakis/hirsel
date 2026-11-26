@@ -13,6 +13,13 @@ const UNIT_PROGRAMS: [(&str, &str); 3] = [
     ("strings", "pub fn main(out: Stdout) -> Result[(), Exit] {\n    let s = \"left right\"\n    let Some((a, b)) = string.split_once(s, \" \") else {\n        return Error(Exit(status: 2u8))\n    }\n    if string.starts_with(s, a) && string.ends_with(s, b) && string.find(s, 0, \"right\") == Some(5) {\n        result.unwrap(stdout.write(out, b));\n        Ok(())\n    } else {\n        Error(Exit(status: 1u8))\n    }\n}\n"),
 ];
 
+pub(crate) struct ImageUnitRead {
+    pub(super) key: ContentHash,
+    pub(super) blob: PathBuf,
+    pub(super) record: PathBuf,
+    pub(super) prelinked: bool,
+}
+
 /// Build `source` as project `project` over std imaged into `cache`, with
 /// debug lines; the executable, its run, and the unit the link read.
 fn unit_build(
@@ -22,7 +29,7 @@ fn unit_build(
     source: &str,
     cache: &str,
     separate: bool,
-) -> (Vec<u8>, std::process::Output, Option<(ContentHash, PathBuf, bool)>) {
+) -> (Vec<u8>, std::process::Output, Option<ImageUnitRead>) {
     let libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let project = dir.join(project);
@@ -36,7 +43,9 @@ fn unit_build(
     assert!(product.accepted(), "{:?} {:?}", product.diagnostics, product.incomplete);
     let mut options = native_options(backend, &project);
     options.debug_lines = true;
-    options.grant_mask = 1 << 4;
+    if source == UNIT_PROGRAMS[2].1 {
+        options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+    }
     UNIT.set(None);
     SEPARATE_IMAGE.set(separate);
     let built = product.build(&entry, &options);
@@ -69,7 +78,7 @@ fn image_unit_links_what_its_objects_link(backend: Backend) {
         let (unit, ran, read) = unit_build(dir.path(), backend, &format!("{name}-unit"), source, "unit-cache", false);
         let (separate, expected, none) =
             unit_build(dir.path(), backend, &format!("{name}-separate"), source, "separate-cache", true);
-        assert!(read.is_some_and(|(_, _, prelinked)| prelinked), "{name}: the link prelinked its unit");
+        assert!(read.is_some_and(|unit| unit.prelinked), "{name}: the link prelinked its unit");
         assert!(none.is_none(), "{name}: the separate link read no unit");
         assert_eq!(
             (ran.status.code(), &ran.stdout, &ran.stderr),
@@ -103,26 +112,25 @@ fn a_damaged_or_misplaced_image_unit_is_prelinked_again() {
         unit_build(dir.path(), Backend::Cranelift, project, source, "cache", false)
     };
     let (bounds, strings) = (UNIT_PROGRAMS[0].1, UNIT_PROGRAMS[2].1);
-    let (first, _, unit) = build("bounds", bounds);
-    let (key, path, _) = unit.unwrap();
+    let (first, _, first_unit) = build("bounds", bounds);
+    let first_unit = first_unit.unwrap();
     let (other, _, other_unit) = build("strings", strings);
-    let (other_key, _, _) = other_unit.unwrap();
-    assert_ne!(key, other_key, "two image object sets, two units");
+    let other_unit = other_unit.unwrap();
+    assert_ne!(first_unit.key, other_unit.key, "two image object sets, two units");
 
     // One flipped byte inside the unit's text.
-    let mut bytes = std::fs::read(&path).unwrap();
+    let mut bytes = std::fs::read(&first_unit.blob).unwrap();
     bytes[0x50] ^= 0x01;
-    std::fs::write(&path, &bytes).unwrap();
+    std::fs::write(&first_unit.blob, &bytes).unwrap();
     let (again, ran, unit) = build("bounds-damaged", bounds);
-    assert!(unit.is_some_and(|(k, _, prelinked)| k == key && prelinked), "a damaged unit is prelinked again");
+    assert!(unit.is_some_and(|unit| unit.key == first_unit.key && unit.prelinked), "a damaged unit is prelinked again");
     assert!(again == first, "the damaged unit's program links its first executable");
     assert_eq!(ran.status.code(), Some(101), "{ran:?}");
 
-    // The first unit's frame placed under the second's key.
-    let store = Store::new(path.parent().unwrap()).unwrap();
-    std::fs::write(store.path(other_key), std::fs::read(store.path(key)).unwrap()).unwrap();
+    // The first unit's record placed under the second's key.
+    std::fs::copy(&first_unit.record, &other_unit.record).unwrap();
     let (again, ran, unit) = build("strings-misplaced", strings);
-    assert!(unit.is_some_and(|(k, _, prelinked)| k == other_key && prelinked), "a misplaced unit is a miss");
+    assert!(unit.is_some_and(|unit| unit.key == other_unit.key && unit.prelinked), "a misplaced unit is a miss");
     assert!(again == other, "the misplaced unit's program links its first executable");
     assert_eq!((ran.status.code(), ran.stdout.as_slice()), (Some(0), &b"right"[..]), "{ran:?}");
 }
@@ -157,9 +165,9 @@ fn tool_environment_child() {
         .unwrap();
     std::fs::copy(&built.executable, dir.join(format!("{step}.exe"))).unwrap();
     // A reused executable reads no unit: an empty file.
-    let read = UNIT.take().map_or_else(Vec::new, |(_, unit, prelinked)| {
-        let mut read = std::fs::read(unit).unwrap();
-        read.push(u8::from(prelinked));
+    let read = UNIT.take().map_or_else(Vec::new, |unit| {
+        let mut read = std::fs::read(unit.blob).unwrap();
+        read.push(u8::from(unit.prelinked));
         read
     });
     std::fs::write(dir.join(format!("{step}.unit")), read).unwrap();

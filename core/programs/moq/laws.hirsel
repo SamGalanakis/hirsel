@@ -1,0 +1,478 @@
+// Every vector below is written by hand from the moqt-23 figures, field by field, and checked
+// against the Table 4 varint widths; none was produced by this package's encoder.
+fn vi64_vector(wire: Bytes, canonical: Bytes, expected: u64) {
+    let mut at = 0u64
+    if result.unwrap(codec.read_vi64(wire, mut at, list.len(wire))) != expected || at != list.len(wire) {
+        fail("moqt-23 varint decode")
+    }
+    let mut out: Bytes = list.new()
+    result.unwrap(codec.write_vi64(expected, mut out))
+    if out != canonical {
+        fail("moqt-23 varint encode")
+    }
+}
+
+fn copy_of(wire: Bytes, from: u64, to: u64) -> Bytes {
+    let mut out: Bytes = list.new()
+    for i in from .. to {
+        list.push(mut out, wire[i])
+    }
+    out
+}
+
+fn ns1(take a: Bytes) -> codec.Namespace {
+    let mut fields: List[Bytes] = list.new()
+    list.push(mut fields, take a)
+    Namespace(fields)
+}
+
+fn ns2(take a: Bytes, take b: Bytes) -> codec.Namespace {
+    let mut fields: List[Bytes] = list.new()
+    list.push(mut fields, take a)
+    list.push(mut fields, take b)
+    Namespace(fields)
+}
+
+fn track(take ns: codec.Namespace, take name: Bytes) -> codec.TrackName {
+    codec.TrackName(ns: ns, name: name)
+}
+
+fn loc(group: u64, object: u64) -> codec.Location {
+    codec.Location(group: group, object: object)
+}
+
+fn same(e: codec.WireError, expected: codec.WireError) -> bool {
+    codec.refusal(e) == codec.refusal(expected)
+}
+
+/// Decodes `wire` as exactly one message equal to `expected`, encodes `expected` back to
+/// exactly `wire`, and finds every strict prefix incomplete with the cursor unmoved.
+fn message_vector(wire: Bytes, expected: codec.Message) {
+    let end = list.len(wire)
+    let mut at = 0u64
+    match codec.read_message(wire, mut at, end, codec.DEFAULT_MAX_CONTROL) {
+        Ok(m) => {
+            if m != expected || at != end {
+                fail("moqt-23 control message decode")
+            }
+        },
+        Error(_) => fail("moqt-23 control message refused"),
+    }
+    let mut out: Bytes = list.new()
+    if let Error(_) = codec.write_message(expected, codec.DEFAULT_MAX_CONTROL, mut out) {
+        fail("moqt-23 control message encode refused")
+    }
+    if out != wire {
+        fail("moqt-23 control message encode")
+    }
+    for n in 0u64 .. end {
+        let mut a = 0u64
+        if let Error(Truncated) = codec.read_message(wire, mut a, n, codec.DEFAULT_MAX_CONTROL) {} else {
+            fail("a partial control message was not left for more bytes")
+        }
+        if a != 0 {
+            fail("a partial control message moved the cursor")
+        }
+    }
+}
+
+fn message_refused(wire: Bytes, expected: codec.WireError) {
+    let mut at = 0u64
+    match codec.read_message(wire, mut at, list.len(wire), codec.DEFAULT_MAX_CONTROL) {
+        Ok(_) => fail("moqt-23 control message accepted against the draft"),
+        Error(e) => {
+            if !same(e, expected) || at != 0 {
+                fail("moqt-23 control message refused with the wrong error")
+            }
+        },
+    }
+}
+
+fn datagram_vector(wire: Bytes, payload_at: u64, expected: codec.Datagram) {
+    let end = list.len(wire)
+    let mut at = 0u64
+    match codec.read_datagram(wire, mut at, end) {
+        Ok(DatagramObject(d)) => {
+            if d != expected || at != payload_at {
+                fail("moqt-23 datagram decode")
+            }
+        },
+        _ => fail("moqt-23 datagram refused"),
+    }
+    let mut out: Bytes = list.new()
+    if let Error(_) = codec.write_datagram(expected, copy_of(wire, payload_at, end), mut out) {
+        fail("moqt-23 datagram encode refused")
+    }
+    if out != wire {
+        fail("moqt-23 datagram encode")
+    }
+}
+
+fn datagram_refused(wire: Bytes, expected: codec.WireError) {
+    let mut at = 0u64
+    match codec.read_datagram(wire, mut at, list.len(wire)) {
+        Ok(_) => fail("moqt-23 datagram accepted against the draft"),
+        Error(e) => {
+            if !same(e, expected) || at != 0 {
+                fail("moqt-23 datagram refused with the wrong error")
+            }
+        },
+    }
+}
+
+fn stream_refused(wire: Bytes, expected: codec.WireError) {
+    let mut at = 0u64
+    match codec.read_stream_header(wire, mut at, list.len(wire)) {
+        Ok(_) => fail("moqt-23 stream header accepted against the draft"),
+        Error(e) => {
+            if !same(e, expected) || at != 0 {
+                fail("moqt-23 stream header refused with the wrong error")
+            }
+        },
+    }
+}
+
+/// Reads the next fetch entry from `wire` at `at`, which must equal `expected`; writes
+/// `expected` through its own state into `out`, payload included, so the caller can hold the
+/// whole re-encoded stream against the canonical bytes.
+fn fetch_step(wire: Bytes, mut at: u64, mut rd: codec.FetchState, mut wr: codec.FetchState, mut out: Bytes, expected: codec.FetchEntry) {
+    match codec.read_fetch_entry(wire, mut at, list.len(wire), mut rd) {
+        Ok(e) => {
+            if e != expected {
+                fail("moqt-23 fetch entry decode")
+            }
+        },
+        Error(_) => fail("moqt-23 fetch entry refused"),
+    }
+    if let Error(_) = codec.write_fetch_entry(expected, mut wr, mut out) {
+        fail("moqt-23 fetch entry encode refused")
+    }
+    if let FetchedObject(o) = expected {
+        for i in at .. at + o.length {
+            list.push(mut out, wire[i])
+        }
+        at += o.length
+    }
+}
+
+fn fetch_refused(wire: Bytes, mut st: codec.FetchState, expected: codec.WireError) {
+    let before = codec.FetchState(descending: st.descending, started: st.started, group: st.group, object: st.object, subgroup: st.subgroup, priority: st.priority)
+    let mut at = 0u64
+    match codec.read_fetch_entry(wire, mut at, list.len(wire), mut st) {
+        Ok(_) => fail("moqt-23 fetch entry accepted against the draft"),
+        Error(e) => {
+            if !same(e, expected) || at != 0 || st != before {
+                fail("moqt-23 fetch entry refused with the wrong error or moved state")
+            }
+        },
+    }
+}
+
+fn fetch_object(location: codec.Location, subgroup: Option[u64], priority: u8, length: u64) -> codec.FetchEntry {
+    FetchedObject(codec.FetchObject(location: location, subgroup: subgroup, priority: priority, properties: list.new(), length: length))
+}
+
+/// bug: Decode a moqt-23 varint as a QUIC varint (two length bits, 62-bit values), or emit a
+/// longer form than the value needs.
+/// oracle: moqt-23 §8.1 Table 4, and the leading-ones widths worked by hand at each edge.
+@test
+fn vi64_vectors_from_the_draft() -> Result[(), ()] {
+    vi64_vector(b"\x25", b"\x25", 37)
+    vi64_vector(b"\x80\x25", b"\x25", 37)
+    vi64_vector(b"\xbb\xbd", b"\xbb\xbd", 15293)
+    vi64_vector(b"\xed\x7f\x3e\x7d", b"\xed\x7f\x3e\x7d", 226442877)
+    vi64_vector(b"\xfa\xa1\xa0\xe4\x03\xd8", b"\xfa\xa1\xa0\xe4\x03\xd8", 2893212287960)
+    vi64_vector(b"\xfc\x89\x98\xab\xc6\x6b\xc0", b"\xfc\x89\x98\xab\xc6\x6b\xc0", 151288809941952)
+    vi64_vector(b"\xfe\xfa\x31\x8f\xa8\xe3\xca\x11", b"\xfe\xfa\x31\x8f\xa8\xe3\xca\x11", 70423237261249041)
+    vi64_vector(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff", b"\xff\xff\xff\xff\xff\xff\xff\xff\xff", 18446744073709551615)
+    // Width edges: 2^7 - 1, 2^7, 2^14, 2^56 - 1 and 2^56.
+    vi64_vector(b"\x7f", b"\x7f", 127)
+    vi64_vector(b"\x80\x80", b"\x80\x80", 128)
+    vi64_vector(b"\xc0\x40\x00", b"\xc0\x40\x00", 16384)
+    vi64_vector(b"\xfe\xff\xff\xff\xff\xff\xff\xff", b"\xfe\xff\xff\xff\xff\xff\xff\xff", 0xffffffffffffff)
+    vi64_vector(b"\xff\x01\x00\x00\x00\x00\x00\x00\x00", b"\xff\x01\x00\x00\x00\x00\x00\x00\x00", 0x100000000000000)
+    let mut at = 1u64
+    if let Error(Truncated) = codec.read_vi64(b"\x00\xed\x7f\x3e\x7d", mut at, 4) {} else {
+        fail("varint read beyond its bound")
+    }
+    if at != 1 {
+        fail("truncated varint advanced the cursor")
+    }
+    Ok(())
+}
+
+/// bug: A control message, parameter, name, token or object field laid out in another order or
+/// width than moqt-23 draws it; a delta resolved from the wrong base (subgroup object ids,
+/// fetch group and object ids in either Group Order, range filter bounds); a partial frame
+/// read as malformed or consumed; and each draft refusal accepted, or closed with another
+/// code.
+/// oracle: moqt-23 §8.3, §8.6 (its own 3-5, 10-15 example), §8.7, §8.9, §9 Figures and
+/// §9.19, §11.2-§11.5 and Tables 2, 8, 9 and 10, each byte derived by hand in the comments.
+@test
+fn wire_vectors_from_the_draft() -> Result[(), ()] {
+    // SETUP 0x2F00 (2-byte varint af 00), Length 11. Options as Key-Value-Pairs: PATH 0x01
+    // odd, so Length 2 "/m"; MAX_REQUEST_UPDATES 0x08 (delta 7) even, so varint 4;
+    // MAX_CONTROL_MESSAGE_SIZE 0x09 (delta 1) odd, Length 3 holding 100000 = 0x186a0 as a
+    // 3-byte varint c1 86 a0.
+    let mut options: List[codec.KeyValue] = list.new()
+    list.push(mut options, Data(kind: 0x01, value: b"/m"))
+    list.push(mut options, Number(kind: 0x08, value: 4))
+    list.push(mut options, Data(kind: 0x09, value: b"\xc1\x86\xa0"))
+    if result.unwrap(codec.max_control_message_size(options)) != 100000 {
+        fail("MAX_CONTROL_MESSAGE_SIZE value")
+    }
+    message_vector(b"\xaf\x00\x0b\x01\x02\x2f\x6d\x07\x04\x01\x03\xc1\x86\xa0", Setup(options: options))
+    // SUBSCRIBE 0x3, Length 27: Request ID 0; Namespace 2 fields, "live" and "cam"; Name
+    // "hd"; 4 Parameters in ascending type: 0x03 AUTHORIZATION TOKEN, Length 2, USE_ALIAS
+    // (0x2) alias 7; 0x20 (delta 0x1d) SUBSCRIBER_PRIORITY uint8 128; 0x21 (delta 1)
+    // LOCATION_FILTER type 2, StartGroup 5, StartObject 0; 0x22 (delta 1) GROUP_ORDER 2.
+    let mut ps: List[codec.Param] = list.new()
+    list.push(mut ps, AuthorizationToken(UseAlias(alias: 7)))
+    list.push(mut ps, SubscriberPriority(128))
+    list.push(mut ps, LocationFilter(AbsoluteStart(start: loc(5, 0))))
+    list.push(mut ps, GroupOrder(Descending))
+    message_vector(b"\x03\x1b\x00\x02\x04live\x03cam\x02hd\x04\x03\x02\x02\x07\x1d\x80\x01\x02\x05\x00\x01\x02", Subscribe(id: 0, track: track(ns2(b"live", b"cam"), b"hd"), params: ps))
+    // SUBSCRIBE_OK 0x4, Length 10: Track Alias 1; 2 Parameters: 0x08 EXPIRES 300 (81 2c),
+    // 0x09 (delta 1) LARGEST_OBJECT Location 10, 3; Track Properties: type 0x02 even, 1.
+    let mut ok_ps: List[codec.Param] = list.new()
+    list.push(mut ok_ps, Expires(300))
+    list.push(mut ok_ps, LargestObject(loc(10, 3)))
+    let mut props: List[codec.KeyValue] = list.new()
+    list.push(mut props, Number(kind: 0x02, value: 1))
+    message_vector(b"\x04\x0a\x01\x02\x08\x81\x2c\x01\x0a\x03\x02\x01", SubscribeOk(alias: 1, params: ok_ps, properties: props))
+    // FETCH 0x16, Length 14: Request ID 2; Namespace ("a"); Name "b"; 1 Parameter, 0x26
+    // OBJECTID_FILTER, Length 5: SetID 0, then the §8.6 example ranges 3-5 and 10-15 as
+    // Start 3, End 2, Start 5, End 5.
+    let mut ranges: List[codec.IdRange] = list.new()
+    list.push(mut ranges, codec.IdRange(start: 3, end: Some(5)))
+    list.push(mut ranges, codec.IdRange(start: 10, end: Some(15)))
+    let mut fetch_ps: List[codec.Param] = list.new()
+    list.push(mut fetch_ps, RangeFilter(Ranges(kind: ObjectIds, set: 0, property: 0, ranges: ranges)))
+    message_vector(b"\x16\x0e\x02\x01\x01a\x01b\x01\x26\x05\x00\x03\x02\x05\x05", Fetch(id: 2, track: track(ns1(b"a"), b"b"), params: fetch_ps))
+    // PUBLISH_DONE 0xb, Length 6: Status Code 2, Stream Count 5, Reason Phrase "bye".
+    message_vector(b"\x0b\x06\x02\x05\x03bye", PublishDone(status: 2, streams: 5, reason: b"bye"))
+    // GOAWAY 0x10, Length 3: empty URI, Timeout 1000 (83 e8).
+    message_vector(b"\x10\x03\x00\x83\xe8", Goaway(uri: b"", timeout: 1000))
+    // NAMESPACE_DONE 0xe, Length 5: suffix ("cam").
+    message_vector(b"\x0e\x05\x01\x03cam", NamespaceDone(suffix: ns1(b"cam")))
+    // REQUEST_OK 0x7, Length 1: no Parameters and no Track Properties.
+    message_vector(b"\x07\x01\x00", RequestOk(params: list.new(), properties: list.new()))
+    // REQUEST_ERROR 0x5, Length 21: Error Code REDIRECT 0x34, Retry Interval 0, empty Reason
+    // Phrase; Error Details: type 0x01 REDIRECT, Length 16: URI "moqt://b" (8), Namespace
+    // ("live"), empty Name (namespace-scoped request).
+    let redirect = codec.Redirect(uri: b"moqt://b", target: track(ns1(b"live"), b""))
+    let mut details: List[codec.KeyValue] = list.new()
+    list.push(mut details, Data(kind: 0x01, value: b"\x08moqt://b\x01\x04live\x00"))
+    if result.unwrap(codec.redirect(details)) != Some(clone(redirect)) {
+        fail("REDIRECT detail decode")
+    }
+    if result.unwrap(codec.redirect_detail(redirect)) != Data(kind: 0x01, value: b"\x08moqt://b\x01\x04live\x00") {
+        fail("REDIRECT detail encode")
+    }
+    message_vector(b"\x05\x15\x34\x00\x00\x01\x10\x08moqt://b\x01\x04live\x00", RequestError(code: 0x34, retry: 0, reason: b"", details: details))
+    // Control refusals (moqt-23 §9, §8.3, §8.7, §8.9, §9.19, §12).
+    message_refused(b"\x01\x00", UnexpectedMessage)
+    // Length 65536 (c1 00 00) is past the default 65535 before any body byte arrives.
+    message_refused(b"\x03\xc1\x00\x00", FieldLengthExceeded)
+    message_refused(b"\x0e\x06\x01\x03cam\x00", MalformedMessage)
+    message_refused(b"\x0e\x05\x02\x03cam", MalformedMessage)
+    message_refused(b"\x0e\x02\x01\x00", InvalidTrackNamespace)
+    message_refused(b"\x0e\x01\x21", InvalidTrackNamespace)
+    // One namespace field of 4097 bytes (90 01) is past the 4096-byte name bound.
+    message_refused(b"\x0e\x03\x01\x90\x01", FieldLengthExceeded)
+    message_refused(b"\x03\x03\x00\x00\x00", ProtocolViolation)
+    message_refused(b"\x08\x04\x00\x01\x20\x80", InvalidParameter)
+    message_refused(b"\x02\x06\x00\x02\x20\x01\x00\x02", InvalidParameter)
+    // Two OBJECTID_FILTERs with SetID 0 in one REQUEST_UPDATE.
+    message_refused(b"\x02\x0a\x00\x02\x26\x02\x00\x01\x00\x02\x00\x02", InvalidFilter)
+    // OBJECT_PROPERTY_FILTER naming odd Property Type 1.
+    message_refused(b"\x02\x06\x00\x01\x28\x02\x00\x01", InvalidFilter)
+    message_refused(b"\x03\x07\x00\x00\x01a\x01\x21\x06", InvalidParameter)
+    message_refused(b"\x03\x07\x00\x00\x01a\x01\x22\x03", InvalidParameter)
+    message_refused(b"\x03\x08\x00\x00\x01a\x01\x03\x01\x04", MalformedAuthToken)
+    message_refused(b"\xaf\x00\x03\x09\x01\x00", ProtocolViolation)
+    message_refused(b"\xaf\x00\x04\x09\x02\x00\x00", MalformedKeyValue)
+    // Option type deltas 2^64 - 2 then 2 overflow.
+    message_refused(b"\xaf\x00\x0b\xff\xff\xff\xff\xff\xff\xff\xff\xfe\x00\x02", DeltaEncodingOverflow)
+    message_refused(b"\x05\x03\x34\x00\x00", MalformedMessage)
+    // OBJECT_DATAGRAM flags 0x00: Alias 1, Group 2, Object 3, Priority 0x10, payload "hi".
+    datagram_vector(b"\x00\x01\x02\x03\x10hi", 5, codec.Datagram(alias: 1, group: 2, object: 3, priority: Some(16), properties: list.new(), end_of_group: false, status: None))
+    // Flags 0x2c (ZERO_OBJECT_ID, DEFAULT_PRIORITY, STATUS): Alias 1, Group 9, End of Group.
+    datagram_vector(b"\x2c\x01\x09\x03", 4, codec.Datagram(alias: 1, group: 9, object: 0, priority: None, properties: list.new(), end_of_group: false, status: Some(EndOfGroup)))
+    // Flags 0x03 (PROPERTIES, END_OF_GROUP): Alias 1, Group 2, Object 5, Priority 0,
+    // Properties Length 2 holding type 0x04 value 7, payload "x".
+    let mut dprops: List[codec.KeyValue] = list.new()
+    list.push(mut dprops, Number(kind: 0x04, value: 7))
+    datagram_vector(b"\x03\x01\x02\x05\x00\x02\x04\x07x", 8, codec.Datagram(alias: 1, group: 2, object: 5, priority: Some(0), properties: dprops, end_of_group: true, status: None))
+    let mut pat = 0u64
+    match codec.read_datagram(b"\xf0\x13\x2b\x3e\x29\x00\x00", mut pat, 7) {
+        Ok(DatagramPadding) => {
+            if pat != 7 {
+                fail("padding datagram left bytes unread")
+            }
+        },
+        _ => fail("padding datagram type 0x132B3E29"),
+    }
+    datagram_refused(b"\x00\x01", MalformedObject)
+    datagram_refused(b"\x10\x01\x02\x03", InvalidStreamHeader)
+    datagram_refused(b"\x22\x01\x02\x03", InvalidStreamHeader)
+    datagram_refused(b"\x40\x01\x02", InvalidStreamHeader)
+    datagram_refused(b"\x01\x01\x02\x03\x10\x00", MalformedObject)
+    datagram_refused(b"\x2c\x01\x09\x05", InvalidObjectStatus)
+    datagram_refused(b"\x2d\x01\x09\x02\x04\x07\x03", InvalidObjectStatus)
+    datagram_refused(b"\x2c\x01\x09\x00\xff", MalformedObject)
+    // Properties Length 65536 is refused before the block is waited for.
+    datagram_refused(b"\x01\x01\x02\x03\x10\xc1\x00\x00", FieldLengthExceeded)
+    // SUBGROUP_HEADER flags 0x14 (bit 4, SUBGROUP_ID_MODE 2): Alias 1, Group 2, Subgroup 7,
+    // Priority 0x20.
+    let explicit = codec.SubgroupHeader(alias: 1, group: 2, subgroup: ExplicitSubgroup(7), priority: Some(32), properties: false, end_of_group: false, first_object: false)
+    let mut sat = 0u64
+    if result.unwrap(codec.read_stream_header(b"\x14\x01\x02\x07\x20", mut sat, 5)) != SubgroupStream(explicit) || sat != 5 {
+        fail("moqt-23 subgroup header decode")
+    }
+    let mut sout: Bytes = list.new()
+    result.unwrap(codec.write_subgroup_header(explicit, mut sout))
+    if sout != b"\x14\x01\x02\x07\x20" {
+        fail("moqt-23 subgroup header encode")
+    }
+    for n in 0u64 .. 5 {
+        let mut a = 0u64
+        if let Error(Truncated) = codec.read_stream_header(b"\x14\x01\x02\x07\x20", mut a, n) {} else {
+            fail("a partial subgroup header was not left for more bytes")
+        }
+        if a != 0 {
+            fail("a partial subgroup header moved the cursor")
+        }
+    }
+    // Flags 0x79 (PROPERTIES, mode 0, END_OF_GROUP, bit 4, DEFAULT_PRIORITY, FIRST_OBJECT):
+    // Alias 1, Group 2. Object: delta 0 so id 0, Properties Length 0, Payload Length 3, "abc".
+    // Object: delta 1 so id 0 + 1 + 1 = 2, Properties Length 0, Payload Length 0, status 3.
+    let stream = b"\x79\x01\x02\x00\x00\x03abc\x01\x00\x00\x03"
+    let zero = codec.SubgroupHeader(alias: 1, group: 2, subgroup: ZeroSubgroup, priority: None, properties: true, end_of_group: true, first_object: true)
+    let first = codec.SubgroupObject(id: 0, properties: list.new(), length: 3, status: Normal)
+    let second = codec.SubgroupObject(id: 2, properties: list.new(), length: 0, status: EndOfGroup)
+    let mut sa = 0u64
+    let send = list.len(stream)
+    if result.unwrap(codec.read_stream_header(stream, mut sa, send)) != SubgroupStream(zero) {
+        fail("moqt-23 subgroup header flags decode")
+    }
+    if result.unwrap(codec.read_subgroup_object(stream, mut sa, send, zero, None)) != first || sa != 6 {
+        fail("moqt-23 first subgroup object decode")
+    }
+    sa += 3
+    if result.unwrap(codec.read_subgroup_object(stream, mut sa, send, zero, Some(0))) != second || sa != send {
+        fail("moqt-23 subgroup object id delta decode")
+    }
+    let mut sw: Bytes = list.new()
+    result.unwrap(codec.write_subgroup_header(zero, mut sw))
+    result.unwrap(codec.write_subgroup_object(first, zero, None, mut sw))
+    list.push(mut sw, 0x61)
+    list.push(mut sw, 0x62)
+    list.push(mut sw, 0x63)
+    result.unwrap(codec.write_subgroup_object(second, zero, Some(0), mut sw))
+    if sw != stream {
+        fail("moqt-23 subgroup stream encode")
+    }
+    let mut oa = 0u64
+    if let Error(e) = codec.read_subgroup_object(b"\x01\x00\x05", mut oa, 3, zero, Some(0xfffffffffffffffe)) {
+        if !same(e, DeltaEncodingOverflow) || oa != 0 {
+            fail("subgroup object id past 2^64 - 1 refused with the wrong error")
+        }
+    } else {
+        fail("subgroup object id past 2^64 - 1 accepted")
+    }
+    oa = 0
+    if let Error(e) = codec.read_subgroup_object(b"\x00\xc1\x00\x00", mut oa, 4, zero, None) {
+        if !same(e, FieldLengthExceeded) {
+            fail("oversized subgroup object properties refused with the wrong error")
+        }
+    } else {
+        fail("oversized subgroup object properties waited for")
+    }
+    // Stream types (Table 2): FETCH_HEADER 0x05 Request ID 42; padding 0x132B3E28; SETUP.
+    let mut ha = 0u64
+    if result.unwrap(codec.read_stream_header(b"\x05\x2a", mut ha, 2)) != FetchStream(request: 42) || ha != 2 {
+        fail("moqt-23 fetch header decode")
+    }
+    let mut fh: Bytes = list.new()
+    result.unwrap(codec.write_fetch_header(42, mut fh))
+    if fh != b"\x05\x2a" {
+        fail("moqt-23 fetch header encode")
+    }
+    ha = 0
+    if result.unwrap(codec.read_stream_header(b"\xf0\x13\x2b\x3e\x28\x00", mut ha, 6)) != PaddingStream || ha != 5 {
+        fail("moqt-23 padding stream type")
+    }
+    ha = 0
+    if result.unwrap(codec.read_stream_header(b"\xaf\x00\x0b", mut ha, 3)) != ControlStream || ha != 0 {
+        fail("moqt-23 control stream type")
+    }
+    stream_refused(b"\x16\x01\x02", InvalidStreamHeader)
+    stream_refused(b"\x80\x80\x01\x02", InvalidStreamHeader)
+    stream_refused(b"\x06", InvalidStreamHeader)
+    // Ascending fetch stream (Tables 8-10, §11.4.2):
+    //   1f 04 01 00 40 02 +2: flags GΔ, OΔ, priority, subgroup mode 3; first entry so
+    //     Group 4, Subgroup 1, Object 0 absolute; Priority 0x40; Payload Length 2.
+    //   01 05 +5: subgroup mode 1 (prior, 1); Object 0 + 1; prior Group and Priority.
+    //   06 02 00: OΔ 2 without GΔ so Object 1 + 2 + 2 = 5; subgroup mode 2 (1 + 1).
+    //   80 80: End of Group; the prior Object ID becomes 2^64 - 1.
+    //   0c 01 00 01 +1: GΔ 1 so Group 4 + 1 + 1 = 6, Object 0 absolute; Subgroup 0.
+    //   80 8c 00 03: End of Non-Existent Range, GΔ 0 so Group 6, Object 0 + 3 + 1 = 4.
+    //   84 0c 02 07: End of Gone Range, GΔ 2 so Group 8, Object 7 absolute.
+    //   43 00: Datagram bit, so the subgroup bits (3) are ignored; Object 7 + 1 = 8, the
+    //     Priority from the last real object. The canonical form clears those bits (40).
+    //   80 81: End of Track.
+    let fetch = b"\x1f\x04\x01\x00\x40\x02\xaa\xbb\x01\x05hello\x06\x02\x00\x80\x80\x0c\x01\x00\x01z\x80\x8c\x00\x03\x84\x0c\x02\x07\x43\x00\x80\x81"
+    let canonical = b"\x1f\x04\x01\x00\x40\x02\xaa\xbb\x01\x05hello\x06\x02\x00\x80\x80\x0c\x01\x00\x01z\x80\x8c\x00\x03\x84\x0c\x02\x07\x40\x00\x80\x81"
+    let mut fa = 0u64
+    let mut rd = codec.fetch_state(Ascending)
+    let mut wr = codec.fetch_state(Ascending)
+    let mut fout: Bytes = list.new()
+    for n in 0u64 .. 6 {
+        let mut a = 0u64
+        if let Error(Truncated) = codec.read_fetch_entry(fetch, mut a, n, mut rd) {} else {
+            fail("a partial fetch object was not left for more bytes")
+        }
+        if a != 0 || rd != codec.fetch_state(Ascending) {
+            fail("a partial fetch object moved the cursor or the state")
+        }
+    }
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, fetch_object(loc(4, 0), Some(1), 0x40, 2))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, fetch_object(loc(4, 1), Some(1), 0x40, 5))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, fetch_object(loc(4, 5), Some(2), 0x40, 0))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, FetchGroupEnd)
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, fetch_object(loc(6, 0), Some(0), 0x40, 1))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, EndOfRange(kind: NonExistentRange, end: loc(6, 4)))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, EndOfRange(kind: GoneRange, end: loc(8, 7)))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, fetch_object(loc(8, 8), None, 0x40, 0))
+    fetch_step(fetch, mut fa, mut rd, mut wr, mut fout, FetchTrackEnd)
+    if fa != list.len(fetch) || fout != canonical {
+        fail("moqt-23 ascending fetch stream")
+    }
+    // Descending fetch stream:
+    //   1c 09 02 80 00: GΔ, OΔ, priority, subgroup mode 0; Group 9, Object 2, Priority 0x80.
+    //   0c 01 00 00: GΔ 1 so Group 9 - (1 + 1) = 7, Object 0 absolute.
+    //   81 0c 02 01: End of Unknown Range, GΔ 2 so Group 7 - 2 = 5, Object 1 absolute.
+    //   then 0c 05 00 00 asks for Group 5 - (5 + 1), below zero.
+    let down = b"\x1c\x09\x02\x80\x00\x0c\x01\x00\x00\x81\x0c\x02\x01"
+    let mut da = 0u64
+    let mut drd = codec.fetch_state(Descending)
+    let mut dwr = codec.fetch_state(Descending)
+    let mut dout: Bytes = list.new()
+    fetch_step(down, mut da, mut drd, mut dwr, mut dout, fetch_object(loc(9, 2), Some(0), 0x80, 0))
+    fetch_step(down, mut da, mut drd, mut dwr, mut dout, fetch_object(loc(7, 0), Some(0), 0x80, 0))
+    fetch_step(down, mut da, mut drd, mut dwr, mut dout, EndOfRange(kind: UnknownRange, end: loc(5, 1)))
+    if da != list.len(down) || dout != down {
+        fail("moqt-23 descending fetch stream")
+    }
+    fetch_refused(b"\x0c\x05\x00\x00", mut drd, DeltaEncodingOverflow)
+    // A first entry may not lean on a prior object (§11.4.1), nor end a group (§11.4.2.2),
+    // and only Table 8 values may be 128 or more.
+    let mut fresh = codec.fetch_state(Ascending)
+    fetch_refused(b"\x01\x00", mut fresh, MalformedObject)
+    fetch_refused(b"\x0d\x00\x00", mut fresh, MalformedObject)
+    fetch_refused(b"\x0c\x00\x00\x00", mut fresh, MalformedObject)
+    fetch_refused(b"\x80\x80", mut fresh, MalformedObject)
+    fetch_refused(b"\x80\x90", mut fresh, MalformedObject)
+    Ok(())
+}

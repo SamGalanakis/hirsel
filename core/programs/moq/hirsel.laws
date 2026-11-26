@@ -1,0 +1,3 @@
+hirsel.laws 1
+moq@1/laws/vi64_vectors_from_the_draft src=65ef5cd5324fe09a sig=fb1da6e672e109f5 run=c2c0c6612d4cbb79 bug=7403f3886ddc8b7c oracle=38b3eccfa6649417 rows=pending
+moq@1/laws/wire_vectors_from_the_draft src=500b26ee72cd5a64 sig=abc17a7e9949e408 run=c2c0c6612d4cbb79 bug=010f8b2b7dcb1555 oracle=e94c1249d6213585 rows=pending

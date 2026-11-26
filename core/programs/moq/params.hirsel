@@ -1,0 +1,442 @@
+// moqt-23 §9.19 Message Parameters, with the filters of §3.3, §8.6 and §9.19.9 to §9.19.14.
+// Every parameter must be understood, so a type outside the message's allowed set is refused,
+// not skipped. A block is a count, not a length; each parameter is at least one byte, so a
+// count never sizes an allocation.
+pub type Direction: key = Ascending | Descending
+
+/// The Location Filter (moqt-23 §9.19.9, Table 6); an end group is decoded to its absolute id.
+pub type Filter: key = NoFilter | RelativeStart(groups: u64) | AbsoluteStart(start: Location) | GroupEnd(start: Location, end_group: u64) | AbsoluteRange(start: Location, end: Location) | NextObject
+
+pub type RangeKind: key = SubgroupIds | ObjectIds | Priorities | ObjectProperties | TrackProperties
+
+/// An inclusive range with absolute bounds; only the last range of a filter may be open.
+pub type IdRange: key {
+    start: u64,
+    end: Option[u64]
+}
+
+/// A range filter parameter (moqt-23 §8.6). `Removed` is its zero-length form. `property` is
+/// the even Property Type for the two property filters and 0 for the others.
+pub type FilterRanges: key = Removed(kind: RangeKind) | Ranges(kind: RangeKind, set: u8, property: u64, ranges: List[IdRange])
+
+pub type Param: key = ObjectDeliveryTimeout(u64) | AuthorizationToken(Token) | RendezvousTimeout(u64) | SubgroupDeliveryTimeout(u64) | Expires(u64) | LargestObject(Location) | FillTimeout(u64) | Paused(bool) | SubscriberPriority(u8) | LocationFilter(Filter) | GroupOrder(Direction) | FillParameters(List[Param]) | RangeFilter(FilterRanges) | NewGroupRequest(u64) | TrackNamespacePrefix(Namespace) | IncludeProperties(bool) | SubscribeTracksId(u64)
+
+const OBJECT_DELIVERY_TIMEOUT: u64 = 0x02
+
+const AUTHORIZATION_TOKEN: u64 = 0x03
+
+const RENDEZVOUS_TIMEOUT: u64 = 0x04
+
+const SUBGROUP_DELIVERY_TIMEOUT: u64 = 0x06
+
+const EXPIRES: u64 = 0x08
+
+const LARGEST_OBJECT: u64 = 0x09
+
+const FILL_TIMEOUT: u64 = 0x0a
+
+const PAUSED: u64 = 0x11
+
+const SUBSCRIBER_PRIORITY: u64 = 0x20
+
+const LOCATION_FILTER: u64 = 0x21
+
+const GROUP_ORDER: u64 = 0x22
+
+const FILL_PARAMETERS: u64 = 0x23
+
+const SUBGROUP_FILTER: u64 = 0x25
+
+const OBJECTID_FILTER: u64 = 0x26
+
+const PRIORITY_FILTER: u64 = 0x27
+
+const OBJECT_PROPERTY_FILTER: u64 = 0x28
+
+const TRACK_PROPERTY_FILTER: u64 = 0x29
+
+const NEW_GROUP_REQUEST: u64 = 0x32
+
+const TRACK_NAMESPACE_PREFIX: u64 = 0x34
+
+const INCLUDE_PROPERTIES: u64 = 0x35
+
+const SUBSCRIBE_TRACKS_ID: u64 = 0x36
+
+// The parameters each message allows, one bit per type, from each message's own list in
+// moqt-23 §9.3 to §9.17 and §9.19.15. REQUEST_UPDATE and REQUEST_OK take the union over the
+// request kinds they answer; which kind a stream carries is session state (MS2).
+const OBJECT_FILTERS: u64 = (1 << 0x25) | (1 << 0x26) | (1 << 0x27) | (1 << 0x28)
+
+pub const SUBSCRIBE_PARAMS: u64 = (1 << 0x02) | (1 << 0x03) | (1 << 0x04) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 << 0x21) | (1 << 0x22) | (1 << 0x23) | OBJECT_FILTERS | (1 << 0x32) | (1 << 0x35)
+
+pub const SUBSCRIBE_OK_PARAMS: u64 = (1 << 0x08) | (1 << 0x09)
+
+pub const PUBLISH_PARAMS: u64 = (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x08) | (1 << 0x09) | (1 << 0x11) | (1 << 0x20) | (1 << 0x21) | (1 << 0x22) | (1 << 0x23) | (1 << 0x36)
+
+pub const PUBLISH_STATE_NOTIFY_PARAMS: u64 = (1 << 0x09) | (1 << 0x11) | (1 << 0x21)
+
+pub const FETCH_PARAMS: u64 = (1 << 0x03) | (1 << 0x0a) | (1 << 0x20) | (1 << 0x21) | (1 << 0x22) | OBJECT_FILTERS | (1 << 0x35)
+
+pub const TRACK_STATUS_PARAMS: u64 = (1 << 0x03) | (1 << 0x35)
+
+pub const NAMESPACE_REQUEST_PARAMS: u64 = 1 << 0x03
+
+pub const SUBSCRIBE_TRACKS_PARAMS: u64 = (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 << 0x21) | (1 << 0x22) | (1 << 0x23) | OBJECT_FILTERS | (1 << 0x29) | (1 << 0x35)
+
+pub const NAMESPACE_PARAMS: u64 = 0
+
+pub const REQUEST_UPDATE_PARAMS: u64 = (1 << 0x02) | (1 << 0x03) | (1 << 0x06) | (1 << 0x11) | (1 << 0x20) | (1 << 0x21) | (1 << 0x23) | OBJECT_FILTERS | (1 << 0x29) | (1 << 0x32) | (1 << 0x34)
+
+pub const REQUEST_OK_PARAMS: u64 = (1 << 0x08) | (1 << 0x09)
+
+const FILL_PARAMS: u64 = (1 << 0x0a) | (1 << 0x20) | (1 << 0x21) | (1 << 0x22) | OBJECT_FILTERS
+
+fn allows(allowed: u64, kind: u64) -> bool {
+    kind < 64 && (allowed & (1u64 << kind)) != 0
+}
+
+/// Types a message may carry more than once: the token (moqt-23 §8.9) and the range filters
+/// (§3.3.2), whose repeats must differ in SetID or Property Type.
+fn repeatable(kind: u64) -> bool {
+    kind == AUTHORIZATION_TOKEN || (kind >= SUBGROUP_FILTER && kind <= TRACK_PROPERTY_FILTER)
+}
+
+fn range_code(k: RangeKind) -> u64 {
+    match k {
+        SubgroupIds => SUBGROUP_FILTER,
+        ObjectIds => OBJECTID_FILTER,
+        Priorities => PRIORITY_FILTER,
+        ObjectProperties => OBJECT_PROPERTY_FILTER,
+        TrackProperties => TRACK_PROPERTY_FILTER,
+    }
+}
+
+fn range_kind(code: u64) -> RangeKind {
+    match code {
+        0x25 => SubgroupIds,
+        0x26 => ObjectIds,
+        0x27 => Priorities,
+        0x28 => ObjectProperties,
+        _ => TrackProperties,
+    }
+}
+
+fn param_code(p: Param) -> u64 {
+    match p {
+        ObjectDeliveryTimeout(_) => OBJECT_DELIVERY_TIMEOUT,
+        AuthorizationToken(_) => AUTHORIZATION_TOKEN,
+        RendezvousTimeout(_) => RENDEZVOUS_TIMEOUT,
+        SubgroupDeliveryTimeout(_) => SUBGROUP_DELIVERY_TIMEOUT,
+        Expires(_) => EXPIRES,
+        LargestObject(_) => LARGEST_OBJECT,
+        FillTimeout(_) => FILL_TIMEOUT,
+        Paused(_) => PAUSED,
+        SubscriberPriority(_) => SUBSCRIBER_PRIORITY,
+        LocationFilter(_) => LOCATION_FILTER,
+        GroupOrder(_) => GROUP_ORDER,
+        FillParameters(_) => FILL_PARAMETERS,
+        RangeFilter(Removed(kind)) => range_code(kind),
+        RangeFilter(Ranges(kind, ..)) => range_code(kind),
+        NewGroupRequest(_) => NEW_GROUP_REQUEST,
+        TrackNamespacePrefix(_) => TRACK_NAMESPACE_PREFIX,
+        IncludeProperties(_) => INCLUDE_PROPERTIES,
+        SubscribeTracksId(_) => SUBSCRIBE_TRACKS_ID,
+    }
+}
+
+/// The identity two range filters of one message may not share (moqt-23 §3.3.2): Parameter
+/// Type, SetID and Property Type. A removal has no SetID and takes 256.
+fn filter_key(p: Param) -> Option[(u64, u64, u64)] {
+    match p {
+        RangeFilter(Removed(kind)) => Some((range_code(kind), 256, 0)),
+        RangeFilter(Ranges(kind, set, property, ..)) => {
+            let s: u64 = int.widen(set)
+            Some((range_code(kind), s, property))
+        },
+        _ => None,
+    }
+}
+
+fn flag(input: Bytes, mut c: Cursor) -> Result[bool, WireError] {
+    match octet(input, mut c)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Error(InvalidParameter),
+    }
+}
+
+fn put_flag(b: bool, mut out: Bytes) -> Result[(), WireError] {
+    if b {
+        put_octet(1, mut out)
+    } else {
+        put_octet(0, mut out)
+    }
+}
+
+fn location_filter(input: Bytes, mut c: Cursor) -> Result[Filter, WireError] {
+    match vi(input, mut c)? {
+        0x0 => Ok(NoFilter),
+        0x1 => Ok(RelativeStart(groups: vi(input, mut c)?)),
+        0x2 => Ok(AbsoluteStart(start: location(input, mut c)?)),
+        0x3 => {
+            let start = location(input, mut c)?
+            let delta = vi(input, mut c)?
+            let Some(end_group) = int.checked_add(start.group, delta) else {
+                return Error(DeltaEncodingOverflow)
+            }
+            Ok(GroupEnd(start: start, end_group: end_group))
+        },
+        0x4 => {
+            let start = location(input, mut c)?
+            let delta = vi(input, mut c)?
+            let object = vi(input, mut c)?
+            let Some(group) = int.checked_add(start.group, delta) else {
+                return Error(DeltaEncodingOverflow)
+            }
+            Ok(AbsoluteRange(start: start, end: Location(group: group, object: object)))
+        },
+        0x5 => Ok(NextObject),
+        _ => Error(InvalidParameter),
+    }
+}
+
+fn put_location_filter(f: Filter, mut out: Bytes) -> Result[(), WireError] {
+    match f {
+        NoFilter => write_vi64(0x0, mut out),
+        RelativeStart(groups) => {
+            write_vi64(0x1, mut out)?
+            write_vi64(groups, mut out)
+        },
+        AbsoluteStart(start) => {
+            write_vi64(0x2, mut out)?
+            put_location(start, mut out)
+        },
+        GroupEnd(start, end_group) => {
+            if end_group < start.group {
+                return Error(InvalidParameter)
+            }
+            write_vi64(0x3, mut out)?
+            put_location(start, mut out)?
+            write_vi64(end_group - start.group, mut out)
+        },
+        AbsoluteRange(start, end) => {
+            if end.group < start.group {
+                return Error(InvalidParameter)
+            }
+            write_vi64(0x4, mut out)?
+            put_location(start, mut out)?
+            write_vi64(end.group - start.group, mut out)?
+            write_vi64(end.object, mut out)
+        },
+        NextObject => write_vi64(0x5, mut out),
+    }
+}
+
+/// moqt-23 §8.6: Length, then SetID, the Property Type of a property filter, and Ranges, each
+/// Start a delta from the previous End (from 0 first) and each End a delta from its Start. A
+/// Range with no End can only be the last, since nothing follows it.
+fn range_filter(input: Bytes, mut c: Cursor, code: u64) -> Result[FilterRanges, WireError] {
+    let len = vi(input, mut c)?
+    let mut r = within(mut c, len)?
+    let kind = range_kind(code)
+    if len == 0 {
+        return Ok(Removed(kind: kind))
+    }
+    let set = octet(input, mut r)?
+    let mut property = 0u64
+    if code == OBJECT_PROPERTY_FILTER || code == TRACK_PROPERTY_FILTER {
+        property = vi(input, mut r)?
+        if (property & 1) != 0 {
+            return Error(InvalidFilter)
+        }
+    }
+    let mut ranges: List[IdRange] = list.new()
+    let mut prior = 0u64
+    while r.at < r.end {
+        let Some(start) = int.checked_add(prior, vi(input, mut r)?) else {
+            return Error(InvalidFilter)
+        }
+        if code == PRIORITY_FILTER && start > 0xff {
+            return Error(InvalidFilter)
+        }
+        if r.at == r.end {
+            list.push(mut ranges, IdRange(start: start, end: None))
+            break
+        }
+        let Some(end) = int.checked_add(start, vi(input, mut r)?) else {
+            return Error(InvalidFilter)
+        }
+        if code == PRIORITY_FILTER && end > 0xff {
+            return Error(InvalidFilter)
+        }
+        list.push(mut ranges, IdRange(start: start, end: Some(end)))
+        prior = end
+    }
+    Ok(Ranges(kind: kind, set: set, property: property, ranges: ranges))
+}
+
+fn put_range_filter(f: FilterRanges, mut out: Bytes) -> Result[(), WireError] {
+    match f {
+        Removed(..) => write_vi64(0, mut out),
+        Ranges(kind, set, property, ranges) => {
+            let code = range_code(kind)
+            let mut body: Bytes = list.new()
+            put_octet(set, mut body)?
+            if code == OBJECT_PROPERTY_FILTER || code == TRACK_PROPERTY_FILTER {
+                if (property & 1) != 0 {
+                    return Error(InvalidFilter)
+                }
+                write_vi64(property, mut body)?
+            } else if property != 0 {
+                return Error(InvalidFilter)
+            }
+            let mut prior = 0u64
+            let n = list.len(ranges)
+            for i in 0u64 .. n {
+                let range = ranges[i]
+                let limit = if code == PRIORITY_FILTER {
+                    0xffu64
+                } else {
+                    0xffffffffffffffffu64
+                }
+                if range.start < prior || range.start > limit {
+                    return Error(InvalidFilter)
+                }
+                write_vi64(range.start - prior, mut body)?
+                match range.end {
+                    Some(end) => {
+                        if end < range.start || end > limit {
+                            return Error(InvalidFilter)
+                        }
+                        write_vi64(end - range.start, mut body)?
+                        prior = end
+                    },
+                    None => {
+                        if i + 1 != n {
+                            return Error(InvalidFilter)
+                        }
+                    },
+                }
+            }
+            write_vi64(list.len(body), mut out)?
+            put_bytes(body, mut out)
+        },
+    }
+}
+
+fn param(input: Bytes, mut c: Cursor, kind: u64) -> Result[Param, WireError] {
+    match kind {
+        0x02 => Ok(ObjectDeliveryTimeout(vi(input, mut c)?)),
+        0x03 => {
+            let len = vi(input, mut c)?
+            let mut t = within(mut c, len)?
+            Ok(AuthorizationToken(token(input, mut t)?))
+        },
+        0x04 => Ok(RendezvousTimeout(vi(input, mut c)?)),
+        0x06 => Ok(SubgroupDeliveryTimeout(vi(input, mut c)?)),
+        0x08 => Ok(Expires(vi(input, mut c)?)),
+        0x09 => Ok(LargestObject(location(input, mut c)?)),
+        0x0a => Ok(FillTimeout(vi(input, mut c)?)),
+        0x11 => Ok(Paused(flag(input, mut c)?)),
+        0x20 => Ok(SubscriberPriority(octet(input, mut c)?)),
+        0x21 => Ok(LocationFilter(location_filter(input, mut c)?)),
+        0x22 => match octet(input, mut c)? {
+            1 => Ok(GroupOrder(Ascending)),
+            2 => Ok(GroupOrder(Descending)),
+            _ => Error(InvalidParameter),
+        },
+        0x23 => Ok(FillParameters(param_block(input, mut c, FILL_PARAMS)?)),
+        0x25 ..= 0x29 => Ok(RangeFilter(range_filter(input, mut c, kind)?)),
+        0x32 => Ok(NewGroupRequest(vi(input, mut c)?)),
+        0x34 => Ok(TrackNamespacePrefix(namespace(input, mut c)?)),
+        0x35 => Ok(IncludeProperties(flag(input, mut c)?)),
+        0x36 => Ok(SubscribeTracksId(vi(input, mut c)?)),
+        _ => Error(InvalidParameter),
+    }
+}
+
+/// Number of Parameters, then that many, each type a delta from the previous one. FILL_PARAMETERS
+/// opens one nested scope with its own allowed set, which does not include itself.
+fn param_block(input: Bytes, mut c: Cursor, allowed: u64) -> Result[List[Param], WireError] {
+    let count = vi(input, mut c)?
+    let mut out: List[Param] = list.new()
+    let mut seen: std.set.Set[(u64, u64, u64)] = std.set.new()
+    let mut kind = 0u64
+    let mut i = 0u64
+    while i < count {
+        let delta = vi(input, mut c)?
+        let Some(next) = int.checked_add(kind, delta) else {
+            return Error(DeltaEncodingOverflow)
+        }
+        if i > 0 && delta == 0 && !repeatable(next) {
+            return Error(InvalidParameter)
+        }
+        kind = next
+        if !allows(allowed, kind) {
+            return Error(InvalidParameter)
+        }
+        let p = param(input, mut c, kind)?
+        if let Some(key) = filter_key(p) {
+            if !std.set.insert(mut seen, key) {
+                return Error(InvalidFilter)
+            }
+        }
+        list.push(mut out, take p)
+        i += 1
+    }
+    Ok(out)
+}
+
+fn put_param(p: Param, mut out: Bytes) -> Result[(), WireError] {
+    match p {
+        ObjectDeliveryTimeout(n) => write_vi64(n, mut out),
+        AuthorizationToken(t) => {
+            let mut body: Bytes = list.new()
+            put_token(t, mut body)?
+            write_vi64(list.len(body), mut out)?
+            put_bytes(body, mut out)
+        },
+        RendezvousTimeout(n) => write_vi64(n, mut out),
+        SubgroupDeliveryTimeout(n) => write_vi64(n, mut out),
+        Expires(n) => write_vi64(n, mut out),
+        LargestObject(l) => put_location(l, mut out),
+        FillTimeout(n) => write_vi64(n, mut out),
+        Paused(b) => put_flag(b, mut out),
+        SubscriberPriority(n) => put_octet(n, mut out),
+        LocationFilter(f) => put_location_filter(f, mut out),
+        GroupOrder(Ascending) => put_octet(1, mut out),
+        GroupOrder(Descending) => put_octet(2, mut out),
+        FillParameters(ps) => put_params(ps, FILL_PARAMS, mut out),
+        RangeFilter(f) => put_range_filter(f, mut out),
+        NewGroupRequest(n) => write_vi64(n, mut out),
+        TrackNamespacePrefix(ns) => put_namespace(ns, mut out),
+        IncludeProperties(b) => put_flag(b, mut out),
+        SubscribeTracksId(n) => write_vi64(n, mut out),
+    }
+}
+
+/// The same rules as reading: ascending types, repeats only where allowed and distinct, and
+/// only types the message allows.
+fn put_params(ps: List[Param], allowed: u64, mut out: Bytes) -> Result[(), WireError] {
+    let mut seen: std.set.Set[(u64, u64, u64)] = std.set.new()
+    write_vi64(list.len(ps), mut out)?
+    let mut kind = 0u64
+    let mut first = true
+    for p in ps {
+        let code = param_code(p)
+        if code < kind || (code == kind && !first && !repeatable(code)) || !allows(allowed, code) {
+            return Error(InvalidParameter)
+        }
+        if let Some(key) = filter_key(p) {
+            if !std.set.insert(mut seen, key) {
+                return Error(InvalidFilter)
+            }
+        }
+        write_vi64(code - kind, mut out)?
+        put_param(p, mut out)?
+        kind = code
+        first = false
+    }
+    Ok(())
+}

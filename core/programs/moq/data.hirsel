@@ -1,0 +1,716 @@
+// moqt-23 §11 data formats: object datagrams, subgroup and fetch streams, and padding.
+// Readers leave `at` at the first payload byte and never consume payload; the caller takes
+// `length` bytes (streams) or the rest of the datagram.
+/// Object Status (moqt-23 §11.1.1). Only a Normal object carries properties or payload.
+pub type ObjectStatus: key = Normal | EndOfGroup | EndOfTrack
+
+/// One OBJECT_DATAGRAM header (moqt-23 §11.2.1). `priority` is None when the object inherits
+/// the subscription's Publisher Priority. `status` is Some exactly when the datagram has a
+/// status in place of a payload.
+pub type Datagram: key {
+    alias: u64,
+    group: u64,
+    object: u64,
+    priority: Option[u8],
+    properties: List[KeyValue],
+    end_of_group: bool,
+    status: Option[ObjectStatus]
+}
+
+pub type DatagramFrame: key = DatagramObject(Datagram) | DatagramPadding
+
+/// How a SUBGROUP_HEADER gives its Subgroup ID (moqt-23 §11.3.1 SUBGROUP_ID_MODE).
+pub type SubgroupId: key = ZeroSubgroup | FirstObjectSubgroup | ExplicitSubgroup(u64)
+
+pub type SubgroupHeader: key {
+    alias: u64,
+    group: u64,
+    subgroup: SubgroupId,
+    priority: Option[u8],
+    properties: bool,
+    end_of_group: bool,
+    first_object: bool
+}
+
+/// What a unidirectional stream is, from its first varint (moqt-23 §6.4.1). For
+/// `ControlStream` the reader leaves `at` on the SETUP type, which `read_message` reads.
+pub type StreamHeader: key = SubgroupStream(SubgroupHeader) | FetchStream(request: u64) | PaddingStream | ControlStream
+
+/// One object's fields on a subgroup stream (moqt-23 §11.3.1 Figure 27).
+pub type SubgroupObject: key {
+    id: u64,
+    properties: List[KeyValue],
+    length: u64,
+    status: ObjectStatus
+}
+
+/// One object on a fetch stream with every inherited field resolved. `subgroup` is None for
+/// an object whose Delivery Mode is Datagram.
+pub type FetchObject: key {
+    location: Location,
+    subgroup: Option[u64],
+    priority: u8,
+    properties: List[KeyValue],
+    length: u64
+}
+
+pub type RangeEnd: key = NonExistentRange | UnknownRange | TimedOutRange | GoneRange
+
+/// One entry after a FETCH_HEADER (moqt-23 §11.4).
+pub type FetchEntry: key = FetchedObject(FetchObject) | EndOfRange(kind: RangeEnd, end: Location) | FetchGroupEnd | FetchTrackEnd
+
+/// What the next fetch entry's deltas and omitted fields refer to (moqt-23 §11.4.2.2).
+/// `subgroup` and `priority` come from the last real object only.
+pub type FetchState: key {
+    descending: bool,
+    started: bool,
+    group: u64,
+    object: u64,
+    subgroup: Option[u64],
+    priority: Option[u8]
+}
+
+const FETCH_HEADER: u64 = 0x05
+
+const PADDING_STREAM: u64 = 0x132b3e28
+
+const PADDING_DATAGRAM: u64 = 0x132b3e29
+
+const CONTROL_STREAM: u64 = 0x2f00
+
+const LAST_ID: u64 = 0xffffffffffffffff
+
+/// Properties Length past this is refused before the block is buffered. moqt-23 §11.1.2 sets
+/// no bound; this package takes the Key-Value-Pair value bound (§8.3).
+const MAX_PROPERTIES: u64 = 0xffff
+
+pub fn fetch_state(order: Direction) -> FetchState {
+    let descending = match order {
+        Ascending => false,
+        Descending => true,
+    }
+    FetchState(descending: descending, started: false, group: 0, object: 0, subgroup: None, priority: None)
+}
+
+fn object_status(input: Bytes, mut c: Cursor) -> Result[ObjectStatus, WireError] {
+    match vi(input, mut c)? {
+        0 => Ok(Normal),
+        3 => Ok(EndOfGroup),
+        4 => Ok(EndOfTrack),
+        _ => Error(InvalidObjectStatus),
+    }
+}
+
+fn status_code(s: ObjectStatus) -> u64 {
+    match s {
+        Normal => 0,
+        EndOfGroup => 3,
+        EndOfTrack => 4,
+    }
+}
+
+fn is_normal(s: ObjectStatus) -> bool {
+    match s {
+        Normal => true,
+        _ => false,
+    }
+}
+
+/// Object Properties: a byte length, then Key-Value-Pairs filling it (moqt-23 §11.1.2).
+fn object_properties(input: Bytes, mut c: Cursor) -> Result[List[KeyValue], WireError] {
+    let len = vi(input, mut c)?
+    if len > MAX_PROPERTIES {
+        return Error(FieldLengthExceeded)
+    }
+    let mut p = within(mut c, len)?
+    match key_values(input, mut p) {
+        Ok(kvs) => Ok(kvs),
+        Error(e) => Error(short(e, MalformedKeyValue)),
+    }
+}
+
+fn put_properties(kvs: List[KeyValue], mut out: Bytes) -> Result[(), WireError] {
+    let mut b: Bytes = list.new()
+    put_key_values(kvs, mut b)?
+    if list.len(b) > MAX_PROPERTIES {
+        return Error(FieldLengthExceeded)
+    }
+    write_vi64(list.len(b), mut out)?
+    put_bytes(b, mut out)
+}
+
+fn put_priority(p: Option[u8], mut out: Bytes) -> Result[(), WireError] {
+    match p {
+        Some(n) => put_octet(n, mut out),
+        None => Ok(()),
+    }
+}
+
+/// Reads one datagram, `input[at..end]` being the whole of it. The header ends early only as
+/// MALFORMED_OBJECT, since a datagram has no more bytes to come. On success `at` is the first
+/// payload byte; a padding datagram leaves `at` at `end`, its bytes unread (moqt-23 §11.5.2).
+pub fn read_datagram(input: Bytes, mut at: u64, end: u64) -> Result[DatagramFrame, WireError] {
+    let mut c = cursor(input, at, end)?
+    let f = match datagram(input, mut c) {
+        Ok(f) => f,
+        Error(e) => return Error(short(e, MalformedObject)),
+    }
+    at = c.at
+    Ok(f)
+}
+
+fn datagram(input: Bytes, mut c: Cursor) -> Result[DatagramFrame, WireError] {
+    let flags = vi(input, mut c)?
+    if flags == PADDING_DATAGRAM {
+        c.at = c.end
+        return Ok(DatagramPadding)
+    }
+    if flags >= 0x40 || (flags & 0x10) != 0 || (flags & 0x22) == 0x22 {
+        return Error(InvalidStreamHeader)
+    }
+    let alias = vi(input, mut c)?
+    let group = vi(input, mut c)?
+    let object = if (flags & 0x04) != 0 {
+        0u64
+    } else {
+        vi(input, mut c)?
+    }
+    let priority: Option[u8] = if (flags & 0x08) != 0 {
+        None
+    } else {
+        Some(octet(input, mut c)?)
+    }
+    let mut props: List[KeyValue] = list.new()
+    if (flags & 0x01) != 0 {
+        props = object_properties(input, mut c)?
+        if list.len(props) == 0 {
+            return Error(MalformedObject)
+        }
+    }
+    let mut status: Option[ObjectStatus] = None
+    if (flags & 0x20) != 0 {
+        let s = object_status(input, mut c)?
+        if !is_normal(s) && list.len(props) != 0 {
+            return Error(InvalidObjectStatus)
+        }
+        if c.at != c.end {
+            return Error(MalformedObject)
+        }
+        status = Some(s)
+    }
+    Ok(DatagramObject(Datagram(alias: alias, group: group, object: object, priority: priority, properties: props, end_of_group: (flags & 0x02) != 0, status: status)))
+}
+
+/// Appends one datagram, flags chosen to omit every field the header can. A datagram with a
+/// status has no payload, and End of Group cannot ride with a status.
+pub fn write_datagram(d: Datagram, payload: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    let mut flags = 0u64
+    if list.len(d.properties) != 0 {
+        flags = flags | 0x01
+    }
+    if d.end_of_group {
+        flags = flags | 0x02
+    }
+    if d.object == 0 {
+        flags = flags | 0x04
+    }
+    if d.priority == None {
+        flags = flags | 0x08
+    }
+    if let Some(s) = d.status {
+        if d.end_of_group {
+            return Error(InvalidStreamHeader)
+        }
+        if !is_normal(s) && list.len(d.properties) != 0 {
+            return Error(InvalidObjectStatus)
+        }
+        if list.len(payload) != 0 {
+            return Error(MalformedObject)
+        }
+        flags = flags | 0x20
+    }
+    let mark = list.len(out)
+    match put_datagram(d, flags, payload, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+fn put_datagram(d: Datagram, flags: u64, payload: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(flags, mut out)?
+    write_vi64(d.alias, mut out)?
+    write_vi64(d.group, mut out)?
+    if d.object != 0 {
+        write_vi64(d.object, mut out)?
+    }
+    put_priority(d.priority, mut out)?
+    if list.len(d.properties) != 0 {
+        put_properties(d.properties, mut out)?
+    }
+    if let Some(s) = d.status {
+        write_vi64(status_code(s), mut out)?
+    }
+    put_bytes(payload, mut out)
+}
+
+/// Reads the stream type and header from the start of a unidirectional stream. A header not
+/// yet all there is `Truncated` with `at` unchanged.
+pub fn read_stream_header(input: Bytes, mut at: u64, end: u64) -> Result[StreamHeader, WireError] {
+    let mut c = cursor(input, at, end)?
+    let kind = vi(input, mut c)?
+    if kind == CONTROL_STREAM {
+        return Ok(ControlStream)
+    }
+    let h = if kind == FETCH_HEADER {
+        FetchStream(request: vi(input, mut c)?)
+    } else if kind == PADDING_STREAM {
+        PaddingStream
+    } else if kind < 0x80 && (kind & 0x10) != 0 {
+        SubgroupStream(subgroup_header(input, mut c, kind)?)
+    } else {
+        return Error(InvalidStreamHeader)
+    }
+    at = c.at
+    Ok(h)
+}
+
+fn subgroup_header(input: Bytes, mut c: Cursor, flags: u64) -> Result[SubgroupHeader, WireError] {
+    let mode = (flags & 0x06) >> 1
+    if mode == 3 {
+        return Error(InvalidStreamHeader)
+    }
+    let alias = vi(input, mut c)?
+    let group = vi(input, mut c)?
+    let subgroup = match mode {
+        0 => ZeroSubgroup,
+        1 => FirstObjectSubgroup,
+        _ => ExplicitSubgroup(vi(input, mut c)?),
+    }
+    let priority: Option[u8] = if (flags & 0x20) != 0 {
+        None
+    } else {
+        Some(octet(input, mut c)?)
+    }
+    Ok(SubgroupHeader(alias: alias, group: group, subgroup: subgroup, priority: priority, properties: (flags & 0x01) != 0, end_of_group: (flags & 0x08) != 0, first_object: (flags & 0x40) != 0))
+}
+
+pub fn write_subgroup_header(h: SubgroupHeader, mut out: Bytes) -> Result[(), WireError] {
+    let mut flags = 0x10u64
+    if h.properties {
+        flags = flags | 0x01
+    }
+    if h.end_of_group {
+        flags = flags | 0x08
+    }
+    if h.priority == None {
+        flags = flags | 0x20
+    }
+    if h.first_object {
+        flags = flags | 0x40
+    }
+    let mark = list.len(out)
+    let r = put_subgroup_header(h, flags, mut out)
+    if let Error(_) = r {
+        list.truncate(mut out, mark)
+    }
+    r
+}
+
+fn put_subgroup_header(h: SubgroupHeader, flags: u64, mut out: Bytes) -> Result[(), WireError] {
+    let mode = match h.subgroup {
+        ZeroSubgroup => 0u64,
+        FirstObjectSubgroup => 1,
+        ExplicitSubgroup(_) => 2,
+    }
+    write_vi64(flags | (mode << 1), mut out)?
+    write_vi64(h.alias, mut out)?
+    write_vi64(h.group, mut out)?
+    if let ExplicitSubgroup(id) = h.subgroup {
+        write_vi64(id, mut out)?
+    }
+    put_priority(h.priority, mut out)
+}
+
+/// Reads one object's fields on a subgroup stream; `prev` is the previous object's id on this
+/// stream. On success `at` is the first of `length` payload bytes.
+pub fn read_subgroup_object(input: Bytes, mut at: u64, end: u64, header: SubgroupHeader, prev: Option[u64]) -> Result[SubgroupObject, WireError] {
+    let mut c = cursor(input, at, end)?
+    let delta = vi(input, mut c)?
+    let id = match prev {
+        None => delta,
+        Some(p) => match int.checked_add(p, delta) {
+            Some(n) if n < LAST_ID => n + 1,
+            _ => return Error(DeltaEncodingOverflow),
+        },
+    }
+    let props = if header.properties {
+        object_properties(input, mut c)?
+    } else {
+        list.new()
+    }
+    let length = vi(input, mut c)?
+    let status = if length == 0 {
+        object_status(input, mut c)?
+    } else {
+        Normal
+    }
+    if !is_normal(status) && list.len(props) != 0 {
+        return Error(InvalidObjectStatus)
+    }
+    at = c.at
+    Ok(SubgroupObject(id: id, properties: props, length: length, status: status))
+}
+
+/// Appends one object's fields, not its payload: the caller appends `length` payload bytes.
+pub fn write_subgroup_object(o: SubgroupObject, header: SubgroupHeader, prev: Option[u64], mut out: Bytes) -> Result[(), WireError] {
+    let delta = match prev {
+        None => o.id,
+        Some(p) => {
+            if o.id <= p {
+                return Error(DeltaEncodingOverflow)
+            }
+            o.id - p - 1
+        },
+    }
+    if !header.properties && list.len(o.properties) != 0 {
+        return Error(MalformedObject)
+    }
+    if !is_normal(o.status) && (o.length != 0 || list.len(o.properties) != 0) {
+        return Error(InvalidObjectStatus)
+    }
+    let mark = list.len(out)
+    let r = put_subgroup_object(o, header, delta, mut out)
+    if let Error(_) = r {
+        list.truncate(mut out, mark)
+    }
+    r
+}
+
+fn put_subgroup_object(o: SubgroupObject, header: SubgroupHeader, delta: u64, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(delta, mut out)?
+    if header.properties {
+        put_properties(o.properties, mut out)?
+    }
+    write_vi64(o.length, mut out)?
+    if o.length == 0 {
+        write_vi64(status_code(o.status), mut out)?
+    }
+    Ok(())
+}
+
+fn range_end(flags: u64) -> Option[RangeEnd] {
+    match flags {
+        0x8c => Some(NonExistentRange),
+        0x10c => Some(UnknownRange),
+        0x20c => Some(TimedOutRange),
+        0x40c => Some(GoneRange),
+        _ => None,
+    }
+}
+
+fn end_code(k: RangeEnd) -> u64 {
+    match k {
+        NonExistentRange => 0x8c,
+        UnknownRange => 0x10c,
+        TimedOutRange => 0x20c,
+        GoneRange => 0x40c,
+    }
+}
+
+fn step(prior: u64, delta: u64, descending: bool) -> Result[u64, WireError] {
+    let n = if descending {
+        int.checked_sub(prior, delta)
+    } else {
+        int.checked_add(prior, delta)
+    }
+    match n {
+        Some(v) => Ok(v),
+        None => Error(DeltaEncodingOverflow),
+    }
+}
+
+fn plus(a: u64, b: u64) -> Result[u64, WireError] {
+    match int.checked_add(a, b) {
+        Some(v) => Ok(v),
+        None => Error(DeltaEncodingOverflow),
+    }
+}
+
+/// Reads one fetch entry and, only on success, moves `st` past it. On an object `at` is the
+/// first of `length` payload bytes.
+pub fn read_fetch_entry(input: Bytes, mut at: u64, end: u64, mut st: FetchState) -> Result[FetchEntry, WireError] {
+    let mut c = cursor(input, at, end)?
+    let flags = vi(input, mut c)?
+    let e = if flags >= 0x80 {
+        fetch_marker(input, mut c, flags, mut st)?
+    } else {
+        fetch_object(input, mut c, flags, mut st)?
+    }
+    at = c.at
+    Ok(e)
+}
+
+fn fetch_marker(input: Bytes, mut c: Cursor, flags: u64, mut st: FetchState) -> Result[FetchEntry, WireError] {
+    if flags == 0x80 || flags == 0x81 {
+        // A group or track end names the prior object as the last one; with no entry before
+        // it there is no prior object to name (moqt-23 §11.4.2.2 is silent; refused).
+        if !st.started {
+            return Error(MalformedObject)
+        }
+        st.object = LAST_ID
+        return Ok(if flags == 0x80 {
+            FetchGroupEnd
+        } else {
+            FetchTrackEnd
+        })
+    }
+    let Some(kind) = range_end(flags) else {
+        return Error(MalformedObject)
+    }
+    let gd = vi(input, mut c)?
+    let od = vi(input, mut c)?
+    let mut group = gd
+    let mut object = od
+    if st.started {
+        group = step(st.group, gd, st.descending)?
+        if gd == 0 {
+            object = plus(plus(st.object, od)?, 1)?
+        }
+    }
+    st.started = true
+    st.group = group
+    st.object = object
+    Ok(EndOfRange(kind: kind, end: Location(group: group, object: object)))
+}
+
+fn fetch_object(input: Bytes, mut c: Cursor, flags: u64, mut st: FetchState) -> Result[FetchEntry, WireError] {
+    let has_object = (flags & 0x04) != 0
+    let has_group = (flags & 0x08) != 0
+    if !st.started && !(has_object && has_group) {
+        return Error(MalformedObject)
+    }
+    let mut group = st.group
+    if has_group {
+        let gd = vi(input, mut c)?
+        group = if st.started {
+            step(st.group, plus(gd, 1)?, st.descending)?
+        } else {
+            gd
+        }
+    }
+    let subgroup: Option[u64] = if (flags & 0x40) != 0 {
+        None
+    } else {
+        match flags & 0x03 {
+            0 => Some(0u64),
+            3 => Some(vi(input, mut c)?),
+            mode => {
+                let Some(prior) = st.subgroup else {
+                    return Error(MalformedObject)
+                }
+                Some(if mode == 1 {
+                    prior
+                } else {
+                    plus(prior, 1)?
+                })
+            },
+        }
+    }
+    let object = if has_object {
+        let od = vi(input, mut c)?
+        if has_group {
+            od
+        } else {
+            plus(plus(st.object, od)?, 2)?
+        }
+    } else {
+        plus(st.object, 1)?
+    }
+    let priority = if (flags & 0x10) != 0 {
+        octet(input, mut c)?
+    } else {
+        let Some(p) = st.priority else {
+            return Error(MalformedObject)
+        }
+        p
+    }
+    let props = if (flags & 0x20) != 0 {
+        object_properties(input, mut c)?
+    } else {
+        list.new()
+    }
+    let length = vi(input, mut c)?
+    st.started = true
+    st.group = group
+    st.object = object
+    st.subgroup = subgroup
+    st.priority = Some(priority)
+    Ok(FetchedObject(FetchObject(location: Location(group: group, object: object), subgroup: subgroup, priority: priority, properties: props, length: length)))
+}
+
+pub fn write_fetch_header(request: u64, mut out: Bytes) -> Result[(), WireError] {
+    let mark = list.len(out)
+    let r = put_fetch_header(request, mut out)
+    if let Error(_) = r {
+        list.truncate(mut out, mark)
+    }
+    r
+}
+
+fn put_fetch_header(request: u64, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(FETCH_HEADER, mut out)?
+    write_vi64(request, mut out)
+}
+
+/// Appends one fetch entry, not an object's payload, using every omission the prior entry
+/// allows, and moves `st` past it on success. An entry the deltas cannot reach from `st`
+/// (a group against the Group Order, an object not after the prior one in its group) is
+/// DELTA_ENCODING_OVERFLOW.
+pub fn write_fetch_entry(e: FetchEntry, mut st: FetchState, mut out: Bytes) -> Result[(), WireError] {
+    let mut next = FetchState(descending: st.descending, started: st.started, group: st.group, object: st.object, subgroup: st.subgroup, priority: st.priority)
+    let mark = list.len(out)
+    match put_fetch_entry(e, mut next, mut out) {
+        Ok(()) => {
+            st = next
+            Ok(())
+        },
+        Error(err) => {
+            list.truncate(mut out, mark)
+            Error(err)
+        },
+    }
+}
+
+fn group_gap(st: FetchState, group: u64) -> Result[u64, WireError] {
+    let gap = if st.descending {
+        int.checked_sub(st.group, group)
+    } else {
+        int.checked_sub(group, st.group)
+    }
+    match gap {
+        Some(g) => Ok(g),
+        None => Error(DeltaEncodingOverflow),
+    }
+}
+
+fn put_fetch_entry(e: FetchEntry, mut st: FetchState, mut out: Bytes) -> Result[(), WireError] {
+    match e {
+        FetchGroupEnd => {
+            if !st.started {
+                return Error(MalformedObject)
+            }
+            st.object = LAST_ID
+            write_vi64(0x80, mut out)
+        },
+        FetchTrackEnd => {
+            if !st.started {
+                return Error(MalformedObject)
+            }
+            st.object = LAST_ID
+            write_vi64(0x81, mut out)
+        },
+        EndOfRange(kind, end) => {
+            let mut gd = end.group
+            let mut od = end.object
+            if st.started {
+                gd = group_gap(st, end.group)?
+                if gd == 0 {
+                    if end.object <= st.object {
+                        return Error(DeltaEncodingOverflow)
+                    }
+                    od = end.object - st.object - 1
+                }
+            }
+            write_vi64(end_code(kind), mut out)?
+            write_vi64(gd, mut out)?
+            write_vi64(od, mut out)?
+            st.started = true
+            st.group = end.group
+            st.object = end.object
+            Ok(())
+        },
+        FetchedObject(o) => put_fetch_object(o, mut st, mut out),
+    }
+}
+
+fn put_fetch_object(o: FetchObject, mut st: FetchState, mut out: Bytes) -> Result[(), WireError] {
+    let group = o.location.group
+    let object = o.location.object
+    let mut flags = 0u64
+    let mut gd: Option[u64] = None
+    let mut od: Option[u64] = None
+    if !st.started {
+        gd = Some(group)
+        od = Some(object)
+    } else if group != st.group {
+        let gap = group_gap(st, group)?
+        gd = Some(gap - 1)
+        od = Some(object)
+    } else {
+        if object <= st.object {
+            return Error(DeltaEncodingOverflow)
+        }
+        let gap = object - st.object
+        od = if gap == 1 {
+            None
+        } else {
+            Some(gap - 2)
+        }
+    }
+    if gd != None {
+        flags = flags | 0x08
+    }
+    if od != None {
+        flags = flags | 0x04
+    }
+    let mut sub: Option[u64] = None
+    match o.subgroup {
+        None => {
+            flags = flags | 0x40
+        },
+        Some(s) => {
+            if s == 0 {
+                flags = flags | 0x00
+            } else if st.subgroup == Some(s) {
+                flags = flags | 0x01
+            } else if st.subgroup == Some(s - 1) {
+                flags = flags | 0x02
+            } else {
+                flags = flags | 0x03
+                sub = Some(s)
+            }
+        },
+    }
+    if st.priority != Some(o.priority) {
+        flags = flags | 0x10
+    }
+    if list.len(o.properties) != 0 {
+        flags = flags | 0x20
+    }
+    write_vi64(flags, mut out)?
+    if let Some(g) = gd {
+        write_vi64(g, mut out)?
+    }
+    if let Some(s) = sub {
+        write_vi64(s, mut out)?
+    }
+    if let Some(d) = od {
+        write_vi64(d, mut out)?
+    }
+    if (flags & 0x10) != 0 {
+        put_octet(o.priority, mut out)?
+    }
+    if (flags & 0x20) != 0 {
+        put_properties(o.properties, mut out)?
+    }
+    write_vi64(o.length, mut out)?
+    st.started = true
+    st.group = group
+    st.object = object
+    st.subgroup = o.subgroup
+    st.priority = Some(o.priority)
+    Ok(())
+}

@@ -1,11 +1,12 @@
 # Media over QUIC
 
 *Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Media Wave 2 package 3 of 4); design
-review applied the same day (media-w2-spec-fix-2918). Not built. Rules MOQ-1 to MOQ-9, laws M1
-to M12, slices MS1 to MS6. The review's rulings are at the end.*
+review applied the same day (media-w2-spec-fix-2918). Slice MS1, the codec, built
+(moq-ms1-codec-2993); MS2 to MS6 not built. Rules MOQ-1 to MOQ-9, laws M1 to M12, slices MS1
+to MS6. The review's rulings are at the end.*
 
 `moq` is a sans-IO MoQ Transport endpoint and relay, written in Hirsel under
-`core/programs/moq` <!-- doc-ref: planned -->. It follows
+`core/programs/moq`. It follows
 [draft-ietf-moq-transport-23](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/23/)
 (2026-11-02; -22 was 2026-10-01), cited by section below as "moqt-23 §n". It runs over
 native [QUIC](quic.md) or over [WebTransport](webtransport.md) for browsers, and it is the
@@ -46,9 +47,10 @@ pub type Scope = Scope(Bytes)
 pub type Namespace = Namespace(List[Bytes])
 pub type TrackName = TrackName(ns: Namespace, name: Bytes)
 pub type Location = Location(group: u64, object: u64)
+pub type Filter = NoFilter | RelativeStart(groups: u64) | AbsoluteStart(start: Location) | GroupEnd(start: Location, end_group: u64) | AbsoluteRange(start: Location, end: Location) | NextObject
 pub type Mode = Subgroup | Datagram
 pub type Object = Object(track: TrackName, group: u64, subgroup: u64, id: u64, mode: Mode, publisher_priority: u8, status: ObjectStatus, properties: Bytes, payload: Shared[Bytes])
-pub type ObjectStatus = Normal | EndOfGroup | EndOfTrack | DoesNotExist
+pub type ObjectStatus = Normal | EndOfGroup | EndOfTrack
 pub type Limits { requests: u32, tracks: u32, control_bytes: u32, filter_ranges: u16, max_early_streams: u16, max_timeout_ms: u64 }
 pub type RelayLimits { cache_groups: u32, cache_bytes: u64, per_track_cache_bytes: u64, max_objects_per_group: u32, max_object_bytes: u64 }
 pub type Event = Setup(authority: Bytes, path: Bytes, token: Option[Bytes]) | Subscribe(id: RequestId, track: TrackName, filter: Filter, priority: u8, token: Option[Bytes]) | Publish(id: RequestId, track: TrackName, token: Option[Bytes]) | Fetch(id: RequestId, track: TrackName, from: Location, to: Location, token: Option[Bytes]) | Received(Object) | Unknown(track: TrackName, from: Location, to: Location) | Malformed(track: TrackName) | Done(id: RequestId, code: u64) | Goaway(uri: Bytes) | Closed(code: u64)
@@ -110,7 +112,8 @@ REQUEST_ERROR, REQUEST_UPDATE and the responses travel on the request's stream. 
 request is STOP_SENDING or RESET_STREAM on that stream; there is no UNSUBSCRIBE.
 
 - A control message longer than the peer's MAX_CONTROL_MESSAGE_SIZE is not sent; one longer
-  than ours is `PROTOCOL_VIOLATION`, checked from its length prefix before it is buffered.
+  than ours is `FIELD_LENGTH_EXCEEDED` (moqt-23 §9), checked from its length prefix before it
+  is buffered.
 - A second SETUP, or a request type opening a stream that may not, is `PROTOCOL_VIOLATION`.
 - Concurrent requests are bounded by QUIC stream credit (moqt-23 §7.4): the package gives
   `limits.requests` bidirectional streams and raises the credit only as requests end. A relay
@@ -127,7 +130,8 @@ A track is named by a namespace of 0 to 32 byte-string fields and a name (moqt-2
 track is groups, a group is subgroups, a subgroup is objects in ascending id order (§2.2). A
 subgroup's objects go on one QUIC stream in Subgroup mode, or each object goes in one QUIC
 datagram in Datagram mode. Object ids rise *within a subgroup stream*: an object id at or
-below one already received on the same stream is `PROTOCOL_VIOLATION`. Nothing orders groups
+below one already received on the same stream cannot be written, since each id is the
+previous one plus a delta plus one (§11.3.1); a delta past 2^64 − 1 is `DELTA_ENCODING_OVERFLOW`. Nothing orders groups
 across a track's streams, or subgroups within a group; they may arrive in any order.
 
 **Malformed tracks** (moqt-23 §12.1). An endpoint keeps, per track, each group's final object
@@ -166,7 +170,7 @@ queue:
 | --- | --- |
 | `urgency` | 0 for the control streams, 1 for request streams, 2 for every object (§5.1.2: control first, then requests, then objects) |
 | `order` | subscriber priority (8 bits), publisher priority (8 bits), then the group's rank (48 bits), high bits first |
-| `then` | 0 for a datagram and 1 for a stream in the top bit, then the object id (datagram) or subgroup id (stream), which are varints below 2^62 |
+| `then` | 0 for a datagram and 1 for a stream in the top bit, then the object id (datagram) or subgroup id (stream), which are varints below 2^64 |
 
 A group's rank is fixed for the life of its stream. Each subscription takes as its base the
 first group id it delivers. In ascending order the rank is `group − base`; in descending
@@ -298,22 +302,40 @@ is slice MS6.
 | --- | --- |
 | ALPN or `WT-Protocol` not `moqt-23` | connection refused (`no_application_protocol` / `WT_ALPN_ERROR`) |
 | A connection without the QUIC DATAGRAM extension | refused at setup (moqt-23 §6.2) |
-| Namespace of more than 32 fields | `PROTOCOL_VIOLATION` |
+| Namespace of more than 32 fields, or an empty field | `INVALID_TRACK_NAMESPACE` |
 | Request past `limits.requests` | QUIC `STREAM_LIMIT_ERROR` (the credit was never given) |
-| Control message past MAX_CONTROL_MESSAGE_SIZE | `PROTOCOL_VIOLATION` |
-| Object id not above the previous one on its subgroup stream | `PROTOCOL_VIOLATION` |
+| Control message past MAX_CONTROL_MESSAGE_SIZE | `FIELD_LENGTH_EXCEEDED` |
+| Object id delta past 2^64 − 1 on its subgroup or fetch stream | `DELTA_ENCODING_OVERFLOW` |
 | A track meeting a §12.1 condition | malformed track (MOQ-3) |
 | Request the application refuses, at a session or a relay | REQUEST_ERROR with its code |
 | Early streams past `max_early_streams` | the newest reset with STOP_SENDING |
 
 ## Laws
 
-Red first in `core/programs/moq/laws.hirsel` <!-- doc-ref: planned --> unless named.
+Red first in `core/programs/moq/laws.hirsel` unless named.
 
 - **M1 `wire_vectors_from_the_draft`.** SETUP, each request type, REQUEST_OK and
   REQUEST_ERROR, OBJECT_DATAGRAM, SUBGROUP_HEADER and FETCH_HEADER, written by hand from
   moqt-23 §9 and §11's field lists, round-trip byte for byte; a truncated message at every
-  length is an error and never a partial read. *Oracle:* the draft text.
+  length is an error and never a partial read. Subgroup object ids, fetch entries in both
+  Group Orders (End of Group, End of Track and End of Range included), padding, the §8.6
+  range example, and the draft's refusals (each with its §12 code) ride in the same law.
+  *Oracle:* the draft text.
+
+**Codec choices where moqt-23 is silent or self-contradictory** (MS1):
+
+- MAX_CONTROL_MESSAGE_SIZE (Setup Option 0x09) is odd, so by §8.3 its value is Length and
+  bytes, while §9.1.8 calls it a varint. The codec frames it by parity and requires the
+  bytes to hold exactly one varint (else `MALFORMED_KEY_VALUE`), at least 65535
+  (else `PROTOCOL_VIOLATION`).
+- Object Properties Length (§11.1.2) has no bound; the codec refuses one past 65535, the
+  Key-Value-Pair value bound of §8.3, with `FIELD_LENGTH_EXCEEDED` before it is buffered.
+- The REDIRECT detail's Connect URI takes GOAWAY's 8,192-byte bound (§9.2).
+- A fetch stream whose first entry is End of Group or End of Track names no prior object;
+  it is `MALFORMED_OBJECT`.
+- NAMESPACE (0x8) takes no Message Parameters: none names it in §9.19. REQUEST_UPDATE and
+  REQUEST_OK accept the union of what any request kind allows; MS2 narrows them to the
+  request on the stream.
 - **M2 `interop_with_moq_rs_draft_23`.** Against moq-rs at a pinned commit with `moqt-23`
   named explicitly (its draft-23 port is not advertised by default, version.rs:282): a moq-rs
   publisher through the Hirsel relay to a moq-rs subscriber, and a Hirsel publisher through

@@ -1,0 +1,483 @@
+// moqt-23 §8 wire primitives. Every reader takes a bounded range of the caller's buffer, never
+// reads past it, and leaves the caller's offset unchanged when it refuses.
+/// Why input was refused. Each case is named after the moqt-23 §12 code it closes the session
+/// or rejects the request with (`refusal`); `Truncated` only says more bytes are needed.
+pub type WireError = Truncated | Bounds | ProtocolViolation | MalformedKeyValue | MalformedAuthToken | InvalidStreamHeader | MalformedObject | InvalidObjectStatus | MalformedMessage | InvalidTrackNamespace | UnexpectedMessage | InvalidParameter | DeltaEncodingOverflow | FieldLengthExceeded | InvalidFilter | NoCapacity(Capacity)
+
+/// What a refusal does: wait for more bytes, close the session with a moqt-23 §12.1 code, or
+/// answer the request with REQUEST_ERROR and a §12.3 code.
+pub type Refusal: key = NeedMore | CloseSession(u64) | RejectRequest(u64)
+
+pub type Namespace: key = Namespace(List[Bytes])
+
+pub type TrackName: key {
+    ns: Namespace,
+    name: Bytes
+}
+
+pub type Location: key {
+    group: u64,
+    object: u64
+}
+
+/// moqt-23 §8.3. The type's parity fixes the form: even types carry a varint, odd ones bytes.
+pub type KeyValue: key = Number(kind: u64, value: u64) | Data(kind: u64, value: Bytes)
+
+/// moqt-23 §8.9.
+pub type Token: key = Delete(alias: u64) | Register(alias: u64, kind: u64, value: Bytes) | UseAlias(alias: u64) | UseValue(kind: u64, value: Bytes)
+
+type Cursor {
+    at: u64,
+    end: u64
+}
+
+const MAX_FIELD: u64 = 0xffff
+
+const MAX_NAME: u64 = 4096
+
+const MAX_NAMESPACE_FIELDS: u64 = 32
+
+const MAX_REASON: u64 = 1024
+
+pub fn refusal(e: WireError) -> Refusal {
+    match e {
+        Truncated => NeedMore,
+        Bounds => CloseSession(0x1),
+        NoCapacity(_) => CloseSession(0x1),
+        ProtocolViolation => CloseSession(0x3),
+        MalformedKeyValue => CloseSession(0x6),
+        MalformedAuthToken => CloseSession(0x16),
+        InvalidStreamHeader => CloseSession(0x200),
+        MalformedObject => CloseSession(0x201),
+        InvalidObjectStatus => CloseSession(0x202),
+        MalformedMessage => CloseSession(0x300),
+        InvalidTrackNamespace => CloseSession(0x302),
+        UnexpectedMessage => CloseSession(0x303),
+        InvalidParameter => CloseSession(0x305),
+        DeltaEncodingOverflow => CloseSession(0x400),
+        FieldLengthExceeded => CloseSession(0x401),
+        InvalidFilter => RejectRequest(0x36),
+    }
+}
+
+fn cursor(input: Bytes, at: u64, end: u64) -> Result[Cursor, WireError] {
+    if at > end || end > list.len(input) {
+        return Error(Bounds)
+    }
+    Ok(Cursor(at: at, end: end))
+}
+
+fn left(c: Cursor) -> u64 {
+    c.end - c.at
+}
+
+fn advance(mut c: Cursor, len: u64) -> Result[u64, WireError] {
+    if len > c.end - c.at {
+        return Error(Truncated)
+    }
+    let at = c.at
+    c.at += len
+    Ok(at)
+}
+
+/// The next `len` bytes as a cursor of their own; `c` moves past them.
+fn within(mut c: Cursor, len: u64) -> Result[Cursor, WireError] {
+    let at = advance(mut c, len)?
+    Ok(Cursor(at: at, end: at + len))
+}
+
+/// The bytes left in `c`, which is then empty.
+fn rest(mut c: Cursor) -> Cursor {
+    let r = Cursor(at: c.at, end: c.end)
+    c.at = c.end
+    r
+}
+
+/// A shortfall inside a range whose length was already given is malformed input, not a wait.
+fn short(e: WireError, malformed: WireError) -> WireError {
+    match e {
+        Truncated => malformed,
+        other => other,
+    }
+}
+
+fn octet(input: Bytes, mut c: Cursor) -> Result[u8, WireError] {
+    let at = advance(mut c, 1)?
+    Ok(input[at])
+}
+
+fn bytes_at(input: Bytes, at: u64, len: u64) -> Result[Bytes, WireError] {
+    let mut out: Bytes = list.new()
+    reserve(mut out, len)?
+    list.append(mut out, list.slice(input, at, at + len))
+    Ok(out)
+}
+
+/// A length-prefixed byte string of at most `max` bytes; past that is FIELD_LENGTH_EXCEEDED,
+/// judged from the prefix before the bytes arrive.
+fn sized(input: Bytes, mut c: Cursor, max: u64) -> Result[Bytes, WireError] {
+    let len = vi(input, mut c)?
+    if len > max {
+        return Error(FieldLengthExceeded)
+    }
+    let at = advance(mut c, len)?
+    bytes_at(input, at, len)
+}
+
+/// moqt-23 §8.1: the count of leading one bits in the first byte gives the length, 1 to 9
+/// bytes; the rest of the first byte and the following bytes are the value, big-endian. A
+/// longer form than needed is valid.
+fn vi(input: Bytes, mut c: Cursor) -> Result[u64, WireError] {
+    let mut d = Cursor(at: c.at, end: c.end)
+    let first = octet(input, mut d)?
+    let mut size = 1u64
+    let mut mask: u8 = 0x80
+    while size < 9 && (first & mask) != 0 {
+        size += 1
+        mask = mask >> 1
+    }
+    let at = advance(mut d, size - 1)?
+    let mut n: u64 = 0
+    if size < 9 {
+        let wide: u64 = int.widen(first)
+        n = wide & ((1u64 << (8 - size)) - 1)
+    }
+    for i in at .. at + size - 1 {
+        let byte: u64 = int.widen(input[i])
+        n = (n << 8) | byte
+    }
+    c.at = d.at
+    Ok(n)
+}
+
+pub fn read_vi64(input: Bytes, mut at: u64, end: u64) -> Result[u64, WireError] {
+    let mut c = cursor(input, at, end)?
+    let n = vi(input, mut c)?
+    at = c.at
+    Ok(n)
+}
+
+fn reserve(mut out: Bytes, n: u64) -> Result[(), WireError] {
+    match list.try_reserve(mut out, n) {
+        Ok(()) => Ok(()),
+        Error(e) => Error(NoCapacity(e)),
+    }
+}
+
+fn put_uint(mut out: Bytes, n: u64, size: u64) {
+    let mut i = size
+    while i > 0 {
+        i -= 1
+        list.push(mut out, int.truncate((n >> (8 * i)) & 0xff))
+    }
+}
+
+/// The shortest moqt-23 §8.1 form of `n`.
+pub fn write_vi64(n: u64, mut out: Bytes) -> Result[(), WireError] {
+    let mut size = 1u64
+    while size < 9 && (n >> (7 * size)) != 0 {
+        size += 1
+    }
+    reserve(mut out, size)?
+    if size == 9 {
+        list.push(mut out, 0xff)
+        put_uint(mut out, n, 8)
+    } else {
+        let marker = ((1u64 << (size - 1)) - 1) << (8 * size - (size - 1))
+        put_uint(mut out, n | marker, size)
+    }
+    Ok(())
+}
+
+fn put_bytes(b: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    reserve(mut out, list.len(b))?
+    list.append(mut out, b)
+    Ok(())
+}
+
+fn put_sized(b: Bytes, max: u64, mut out: Bytes) -> Result[(), WireError] {
+    if list.len(b) > max {
+        return Error(FieldLengthExceeded)
+    }
+    write_vi64(list.len(b), mut out)?
+    put_bytes(b, mut out)
+}
+
+fn put_octet(n: u8, mut out: Bytes) -> Result[(), WireError] {
+    reserve(mut out, 1)?
+    list.push(mut out, n)
+    Ok(())
+}
+
+/// moqt-23 §8.3: key-value pairs filling all of `c`, each type a delta from the one before.
+fn key_values(input: Bytes, mut c: Cursor) -> Result[List[KeyValue], WireError] {
+    let mut out: List[KeyValue] = list.new()
+    let mut kind = 0u64
+    while c.at < c.end {
+        let delta = vi(input, mut c)?
+        let Some(next) = int.checked_add(kind, delta) else {
+            return Error(DeltaEncodingOverflow)
+        }
+        kind = next
+        if (kind & 1) == 0 {
+            let value = vi(input, mut c)?
+            list.push(mut out, Number(kind: kind, value: value))
+        } else {
+            let value = sized(input, mut c, MAX_FIELD)?
+            list.push(mut out, Data(kind: kind, value: value))
+        }
+    }
+    Ok(out)
+}
+
+/// Pairs must be in ascending type order to be delta encoded, and each form must match its
+/// type's parity.
+fn put_key_values(kvs: List[KeyValue], mut out: Bytes) -> Result[(), WireError] {
+    let mut kind = 0u64
+    for kv in kvs {
+        match kv {
+            Number(kind: k, value) => {
+                if (k & 1) != 0 || k < kind {
+                    return Error(MalformedKeyValue)
+                }
+                write_vi64(k - kind, mut out)?
+                write_vi64(value, mut out)?
+                kind = k
+            },
+            Data(kind: k, value) => {
+                if (k & 1) == 0 || k < kind {
+                    return Error(MalformedKeyValue)
+                }
+                write_vi64(k - kind, mut out)?
+                put_sized(value, MAX_FIELD, mut out)?
+                kind = k
+            },
+        }
+    }
+    Ok(())
+}
+
+pub fn read_key_values(input: Bytes, mut at: u64, end: u64) -> Result[List[KeyValue], WireError] {
+    let mut c = cursor(input, at, end)?
+    let kvs = key_values(input, mut c)?
+    at = c.at
+    Ok(kvs)
+}
+
+pub fn write_key_values(kvs: List[KeyValue], mut out: Bytes) -> Result[(), WireError] {
+    let mark = list.len(out)
+    match put_key_values(kvs, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+/// moqt-23 §8.7, with the §2.4.1 bounds: 0 to 32 fields of at least one byte, 4096 bytes in all.
+fn namespace(input: Bytes, mut c: Cursor) -> Result[Namespace, WireError] {
+    let count = vi(input, mut c)?
+    if count > MAX_NAMESPACE_FIELDS {
+        return Error(InvalidTrackNamespace)
+    }
+    let mut fields: List[Bytes] = list.new()
+    let mut total = 0u64
+    for _ in 0u64 .. count {
+        let len = vi(input, mut c)?
+        if len == 0 {
+            return Error(InvalidTrackNamespace)
+        }
+        if len > MAX_NAME - total {
+            return Error(FieldLengthExceeded)
+        }
+        total += len
+        let at = advance(mut c, len)?
+        list.push(mut fields, bytes_at(input, at, len)?)
+    }
+    Ok(Namespace(fields))
+}
+
+fn namespace_len(ns: Namespace) -> u64 {
+    let mut total = 0u64
+    match ns {
+        Namespace(fields) => {
+            for f in fields {
+                total += list.len(f)
+            }
+        },
+    }
+    total
+}
+
+fn put_namespace(ns: Namespace, mut out: Bytes) -> Result[(), WireError] {
+    match ns {
+        Namespace(fields) => put_fields(fields, mut out),
+    }
+}
+
+fn put_fields(fields: List[Bytes], mut out: Bytes) -> Result[(), WireError] {
+    if list.len(fields) > MAX_NAMESPACE_FIELDS {
+        return Error(InvalidTrackNamespace)
+    }
+    let mut total = 0u64
+    for f in fields {
+        if list.len(f) == 0 {
+            return Error(InvalidTrackNamespace)
+        }
+        if list.len(f) > MAX_NAME - total {
+            return Error(FieldLengthExceeded)
+        }
+        total += list.len(f)
+    }
+    write_vi64(list.len(fields), mut out)?
+    for f in fields {
+        write_vi64(list.len(f), mut out)?
+        put_bytes(f, mut out)?
+    }
+    Ok(())
+}
+
+/// A Track Name after its namespace: at least one byte (moqt-23 §2.4.1) unless `empty_ok`, the
+/// Redirect target of a namespace-scoped request, and the Full Track Name at most 4096 bytes.
+fn track_name(input: Bytes, mut c: Cursor, take ns: Namespace, empty_ok: bool) -> Result[TrackName, WireError] {
+    let len = vi(input, mut c)?
+    if len == 0 && !empty_ok {
+        return Error(ProtocolViolation)
+    }
+    if len > MAX_NAME - namespace_len(ns) {
+        return Error(FieldLengthExceeded)
+    }
+    let at = advance(mut c, len)?
+    Ok(TrackName(ns: ns, name: bytes_at(input, at, len)?))
+}
+
+fn full_track_name(input: Bytes, mut c: Cursor) -> Result[TrackName, WireError] {
+    let ns = namespace(input, mut c)?
+    track_name(input, mut c, take ns, false)
+}
+
+fn put_track_name(t: TrackName, empty_ok: bool, mut out: Bytes) -> Result[(), WireError] {
+    if list.len(t.name) == 0 && !empty_ok {
+        return Error(ProtocolViolation)
+    }
+    if list.len(t.name) > MAX_NAME - namespace_len(t.ns) {
+        return Error(FieldLengthExceeded)
+    }
+    put_namespace(t.ns, mut out)?
+    put_sized(t.name, MAX_NAME, mut out)
+}
+
+fn location(input: Bytes, mut c: Cursor) -> Result[Location, WireError] {
+    let group = vi(input, mut c)?
+    let object = vi(input, mut c)?
+    Ok(Location(group: group, object: object))
+}
+
+fn put_location(l: Location, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(l.group, mut out)?
+    write_vi64(l.object, mut out)
+}
+
+/// moqt-23 §8.5.
+fn reason_phrase(input: Bytes, mut c: Cursor) -> Result[Bytes, WireError] {
+    sized(input, mut c, MAX_REASON)
+}
+
+fn put_reason(r: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    put_sized(r, MAX_REASON, mut out)
+}
+
+/// moqt-23 §8.9: a Token filling all of `c`. Anything that does not decode, an unknown Alias
+/// Type or bytes after an alias-only form included, is MALFORMED_AUTH_TOKEN.
+fn token(input: Bytes, mut c: Cursor) -> Result[Token, WireError] {
+    match token_fields(input, mut c) {
+        Ok(t) => Ok(t),
+        Error(NoCapacity(e)) => Error(NoCapacity(e)),
+        Error(_) => Error(MalformedAuthToken),
+    }
+}
+
+fn token_fields(input: Bytes, mut c: Cursor) -> Result[Token, WireError] {
+    let alias_type = vi(input, mut c)?
+    let t = match alias_type {
+        0x0 => Delete(alias: vi(input, mut c)?),
+        0x1 => {
+            let alias = vi(input, mut c)?
+            let kind = vi(input, mut c)?
+            let r = rest(mut c)
+            Register(alias: alias, kind: kind, value: bytes_at(input, r.at, r.end - r.at)?)
+        },
+        0x2 => UseAlias(alias: vi(input, mut c)?),
+        0x3 => {
+            let kind = vi(input, mut c)?
+            let r = rest(mut c)
+            UseValue(kind: kind, value: bytes_at(input, r.at, r.end - r.at)?)
+        },
+        _ => return Error(MalformedAuthToken),
+    }
+    if c.at != c.end {
+        return Error(MalformedAuthToken)
+    }
+    Ok(t)
+}
+
+fn put_token(t: Token, mut out: Bytes) -> Result[(), WireError] {
+    match t {
+        Delete(alias) => {
+            write_vi64(0x0, mut out)?
+            write_vi64(alias, mut out)
+        },
+        Register(alias, kind, value) => {
+            write_vi64(0x1, mut out)?
+            write_vi64(alias, mut out)?
+            write_vi64(kind, mut out)?
+            put_bytes(value, mut out)
+        },
+        UseAlias(alias) => {
+            write_vi64(0x2, mut out)?
+            write_vi64(alias, mut out)
+        },
+        UseValue(kind, value) => {
+            write_vi64(0x3, mut out)?
+            write_vi64(kind, mut out)?
+            put_bytes(value, mut out)
+        },
+    }
+}
+
+pub fn read_token(input: Bytes, mut at: u64, end: u64) -> Result[Token, WireError] {
+    let mut c = cursor(input, at, end)?
+    let t = token(input, mut c)?
+    at = c.at
+    Ok(t)
+}
+
+pub fn write_token(t: Token, mut out: Bytes) -> Result[(), WireError] {
+    let mark = list.len(out)
+    match put_token(t, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+pub fn read_track_name(input: Bytes, mut at: u64, end: u64) -> Result[TrackName, WireError] {
+    let mut c = cursor(input, at, end)?
+    let t = full_track_name(input, mut c)?
+    at = c.at
+    Ok(t)
+}
+
+pub fn write_track_name(t: TrackName, mut out: Bytes) -> Result[(), WireError] {
+    let mark = list.len(out)
+    match put_track_name(t, false, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}

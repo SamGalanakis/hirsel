@@ -1,0 +1,19 @@
+[package]
+name = "moq"
+major = 1
+charge = "charge-v1"
+
+[dependencies]
+std = { major = 1 }
+
+[sources]
+"wire.hirsel" = "codec"
+"params.hirsel" = "codec"
+"control.hirsel" = "codec"
+"data.hirsel" = "codec"
+
+[tests]
+limit = 67108864
+
+[tests.sources]
+"laws.hirsel" = "laws"

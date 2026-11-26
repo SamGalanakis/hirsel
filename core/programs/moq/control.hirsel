@@ -1,0 +1,421 @@
+// moqt-23 §9 control messages: Type, Length, then a body that must fill the Length exactly.
+/// One control message. `properties` are Track Properties (moqt-23 §8.4), the rest of the
+/// body. `PublishSkipped`'s namespace is the suffix after its SUBSCRIBE_TRACKS prefix, and
+/// `NamespaceFound` is the NAMESPACE message (type 0x8).
+pub type Message: key = Setup(options: List[KeyValue]) | Goaway(uri: Bytes, timeout: u64) | Subscribe(id: u64, track: TrackName, params: List[Param]) | SubscribeOk(alias: u64, params: List[Param], properties: List[KeyValue]) | PublishStateNotify(params: List[Param]) | Publish(id: u64, track: TrackName, alias: u64, params: List[Param], properties: List[KeyValue]) | PublishDone(status: u64, streams: u64, reason: Bytes) | Fetch(id: u64, track: TrackName, params: List[Param]) | TrackStatus(id: u64, track: TrackName, params: List[Param]) | PublishNamespace(id: u64, prefix: Namespace, params: List[Param]) | SubscribeNamespace(id: u64, prefix: Namespace, params: List[Param]) | SubscribeTracks(id: u64, prefix: Namespace, params: List[Param]) | NamespaceFound(suffix: Namespace, params: List[Param]) | NamespaceDone(suffix: Namespace) | PublishSkipped(track: TrackName) | RequestUpdate(id: u64, params: List[Param]) | RequestOk(params: List[Param], properties: List[KeyValue]) | RequestError(code: u64, retry: u64, reason: Bytes, details: List[KeyValue])
+
+/// The REDIRECT Error Detail (moqt-23 §9.4.2.1). The track name is empty for a
+/// namespace-scoped request.
+pub type Redirect: key {
+    uri: Bytes,
+    target: TrackName
+}
+
+/// MAX_CONTROL_MESSAGE_SIZE before the peer's SETUP says otherwise (moqt-23 §9.1.8).
+pub const DEFAULT_MAX_CONTROL: u64 = 65535
+
+const MAX_URI: u64 = 8192
+
+const SETUP: u64 = 0x2f00
+
+const REQUEST_UPDATE: u64 = 0x2
+
+const SUBSCRIBE: u64 = 0x3
+
+const SUBSCRIBE_OK: u64 = 0x4
+
+const REQUEST_ERROR: u64 = 0x5
+
+const PUBLISH_NAMESPACE: u64 = 0x6
+
+const REQUEST_OK: u64 = 0x7
+
+const NAMESPACE: u64 = 0x8
+
+const PUBLISH_DONE: u64 = 0xb
+
+const TRACK_STATUS: u64 = 0xd
+
+const NAMESPACE_DONE: u64 = 0xe
+
+const PUBLISH_SKIPPED: u64 = 0xf
+
+const GOAWAY: u64 = 0x10
+
+const FETCH: u64 = 0x16
+
+const PUBLISH: u64 = 0x1d
+
+const PUBLISH_STATE_NOTIFY: u64 = 0x22
+
+const SUBSCRIBE_NAMESPACE: u64 = 0x50
+
+const SUBSCRIBE_TRACKS: u64 = 0x51
+
+const OPTION_AUTHORIZATION_TOKEN: u64 = 0x03
+
+const OPTION_MAX_CONTROL_MESSAGE_SIZE: u64 = 0x09
+
+const DETAIL_REDIRECT: u64 = 0x01
+
+const REDIRECT: u64 = 0x34
+
+fn known(kind: u64) -> bool {
+    match kind {
+        0x2 ..= 0x8 => true,
+        0xb => true,
+        0xd ..= 0x10 => true,
+        0x16 => true,
+        0x1d => true,
+        0x22 => true,
+        0x50 ..= 0x51 => true,
+        0x2f00 => true,
+        _ => false,
+    }
+}
+
+/// Reads one control message from `input[at..end]`. A frame not yet all there is `Truncated`,
+/// with `at` unchanged; a Length past `max` is FIELD_LENGTH_EXCEEDED and an unknown type is
+/// UNEXPECTED_MESSAGE, each decided before the body is buffered. A body that ends early or
+/// has bytes left over is MALFORMED_MESSAGE.
+pub fn read_message(input: Bytes, mut at: u64, end: u64, max: u64) -> Result[Message, WireError] {
+    let mut c = cursor(input, at, end)?
+    let kind = vi(input, mut c)?
+    if !known(kind) {
+        return Error(UnexpectedMessage)
+    }
+    let len = vi(input, mut c)?
+    if len > max {
+        return Error(FieldLengthExceeded)
+    }
+    let mut b = within(mut c, len)?
+    let m = match message_body(input, mut b, kind) {
+        Ok(m) => m,
+        Error(e) => return Error(short(e, MalformedMessage)),
+    }
+    if b.at != b.end {
+        return Error(MalformedMessage)
+    }
+    at = c.at
+    Ok(m)
+}
+
+fn message_body(input: Bytes, mut c: Cursor, kind: u64) -> Result[Message, WireError] {
+    match kind {
+        0x2f00 => {
+            let mut r = rest(mut c)
+            let options = key_values(input, mut r)?
+            check_setup(options)?
+            Ok(Setup(options: options))
+        },
+        0x10 => {
+            let uri = sized(input, mut c, MAX_URI)?
+            Ok(Goaway(uri: uri, timeout: vi(input, mut c)?))
+        },
+        0x3 => {
+            let id = vi(input, mut c)?
+            let track = full_track_name(input, mut c)?
+            Ok(Subscribe(id: id, track: track, params: param_block(input, mut c, SUBSCRIBE_PARAMS)?))
+        },
+        0x4 => {
+            let alias = vi(input, mut c)?
+            let ps = param_block(input, mut c, SUBSCRIBE_OK_PARAMS)?
+            let mut r = rest(mut c)
+            Ok(SubscribeOk(alias: alias, params: ps, properties: key_values(input, mut r)?))
+        },
+        0x22 => Ok(PublishStateNotify(params: param_block(input, mut c, PUBLISH_STATE_NOTIFY_PARAMS)?)),
+        0x1d => {
+            let id = vi(input, mut c)?
+            let track = full_track_name(input, mut c)?
+            let alias = vi(input, mut c)?
+            let ps = param_block(input, mut c, PUBLISH_PARAMS)?
+            let mut r = rest(mut c)
+            Ok(Publish(id: id, track: track, alias: alias, params: ps, properties: key_values(input, mut r)?))
+        },
+        0xb => {
+            let status = vi(input, mut c)?
+            let streams = vi(input, mut c)?
+            Ok(PublishDone(status: status, streams: streams, reason: reason_phrase(input, mut c)?))
+        },
+        0x16 => {
+            let id = vi(input, mut c)?
+            let track = full_track_name(input, mut c)?
+            Ok(Fetch(id: id, track: track, params: param_block(input, mut c, FETCH_PARAMS)?))
+        },
+        0xd => {
+            let id = vi(input, mut c)?
+            let track = full_track_name(input, mut c)?
+            Ok(TrackStatus(id: id, track: track, params: param_block(input, mut c, TRACK_STATUS_PARAMS)?))
+        },
+        0x6 => {
+            let id = vi(input, mut c)?
+            let prefix = namespace(input, mut c)?
+            Ok(PublishNamespace(id: id, prefix: prefix, params: param_block(input, mut c, NAMESPACE_REQUEST_PARAMS)?))
+        },
+        0x50 => {
+            let id = vi(input, mut c)?
+            let prefix = namespace(input, mut c)?
+            Ok(SubscribeNamespace(id: id, prefix: prefix, params: param_block(input, mut c, NAMESPACE_REQUEST_PARAMS)?))
+        },
+        0x51 => {
+            let id = vi(input, mut c)?
+            let prefix = namespace(input, mut c)?
+            Ok(SubscribeTracks(id: id, prefix: prefix, params: param_block(input, mut c, SUBSCRIBE_TRACKS_PARAMS)?))
+        },
+        0x8 => {
+            let suffix = namespace(input, mut c)?
+            Ok(NamespaceFound(suffix: suffix, params: param_block(input, mut c, NAMESPACE_PARAMS)?))
+        },
+        0xe => Ok(NamespaceDone(suffix: namespace(input, mut c)?)),
+        0xf => Ok(PublishSkipped(track: full_track_name(input, mut c)?)),
+        0x2 => {
+            let id = vi(input, mut c)?
+            Ok(RequestUpdate(id: id, params: param_block(input, mut c, REQUEST_UPDATE_PARAMS)?))
+        },
+        0x7 => {
+            let ps = param_block(input, mut c, REQUEST_OK_PARAMS)?
+            let mut r = rest(mut c)
+            Ok(RequestOk(params: ps, properties: key_values(input, mut r)?))
+        },
+        0x5 => {
+            let code = vi(input, mut c)?
+            let retry = vi(input, mut c)?
+            let why = reason_phrase(input, mut c)?
+            let mut r = rest(mut c)
+            let details = key_values(input, mut r)?
+            check_details(code, details)?
+            Ok(RequestError(code: code, retry: retry, reason: why, details: details))
+        },
+        _ => Error(UnexpectedMessage),
+    }
+}
+
+/// The Setup Options whose form this package knows. MAX_CONTROL_MESSAGE_SIZE is odd, so its
+/// value is bytes (moqt-23 §8.3), which must hold exactly one varint of at least 65535
+/// (§9.1.8). An AUTHORIZATION TOKEN option holds a Token (§9.1.4). Other options are
+/// carried as they came, unknown ones included (§9.1).
+fn check_setup(options: List[KeyValue]) -> Result[(), WireError] {
+    for o in options {
+        match o {
+            Data(kind, value) => {
+                if kind == OPTION_MAX_CONTROL_MESSAGE_SIZE {
+                    let _ = max_control_value(value)?
+                } else if kind == OPTION_AUTHORIZATION_TOKEN {
+                    let mut c = Cursor(at: 0, end: list.len(value))
+                    let _ = token(value, mut c)?
+                }
+            },
+            Number(..) => {},
+        }
+    }
+    Ok(())
+}
+
+fn max_control_value(value: Bytes) -> Result[u64, WireError] {
+    let mut c = Cursor(at: 0, end: list.len(value))
+    let n = match vi(value, mut c) {
+        Ok(n) => n,
+        Error(Truncated) => return Error(MalformedKeyValue),
+        Error(e) => return Error(e),
+    }
+    if c.at != c.end {
+        return Error(MalformedKeyValue)
+    }
+    if n < DEFAULT_MAX_CONTROL {
+        return Error(ProtocolViolation)
+    }
+    Ok(n)
+}
+
+/// The peer's MAX_CONTROL_MESSAGE_SIZE from its SETUP options, or the default.
+pub fn max_control_message_size(options: List[KeyValue]) -> Result[u64, WireError] {
+    for o in options {
+        if let Data(kind, value) = o {
+            if kind == OPTION_MAX_CONTROL_MESSAGE_SIZE {
+                return max_control_value(value)
+            }
+        }
+    }
+    Ok(DEFAULT_MAX_CONTROL)
+}
+
+/// REQUEST_ERROR with code REDIRECT must carry a REDIRECT detail, and any REDIRECT detail must
+/// decode (moqt-23 §9.4.2.1); both failures are MALFORMED_MESSAGE.
+fn check_details(code: u64, details: List[KeyValue]) -> Result[(), WireError] {
+    match redirect_of(details)? {
+        Some(_) => Ok(()),
+        None => {
+            if code == REDIRECT {
+                return Error(MalformedMessage)
+            }
+            Ok(())
+        },
+    }
+}
+
+fn redirect_of(details: List[KeyValue]) -> Result[Option[Redirect], WireError] {
+    for d in details {
+        if let Data(kind, value) = d {
+            if kind == DETAIL_REDIRECT {
+                let mut c = Cursor(at: 0, end: list.len(value))
+                let uri = sized(value, mut c, MAX_URI)?
+                let ns = namespace(value, mut c)?
+                let target = track_name(value, mut c, take ns, true)?
+                if c.at != c.end {
+                    return Error(MalformedMessage)
+                }
+                return Ok(Some(Redirect(uri: uri, target: target)))
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The REDIRECT detail of a REQUEST_ERROR, if it has one.
+pub fn redirect(details: List[KeyValue]) -> Result[Option[Redirect], WireError] {
+    match redirect_of(details) {
+        Ok(r) => Ok(r),
+        Error(e) => Error(short(e, MalformedMessage)),
+    }
+}
+
+/// The REDIRECT detail's value, for `details`.
+pub fn redirect_detail(r: Redirect) -> Result[KeyValue, WireError] {
+    let mut value: Bytes = list.new()
+    put_sized(r.uri, MAX_URI, mut value)?
+    put_track_name(r.target, true, mut value)?
+    Ok(Data(kind: DETAIL_REDIRECT, value: value))
+}
+
+/// Appends one control message, refusing it whole when its body would be longer than `max`,
+/// the peer's MAX_CONTROL_MESSAGE_SIZE, or when it breaks a rule `read_message` enforces.
+pub fn write_message(m: Message, max: u64, mut out: Bytes) -> Result[(), WireError] {
+    let mut b: Bytes = list.new()
+    let kind = match put_body(m, mut b) {
+        Ok(k) => k,
+        Error(e) => return Error(short(e, MalformedMessage)),
+    }
+    if list.len(b) > max {
+        return Error(FieldLengthExceeded)
+    }
+    let mark = list.len(out)
+    match frame(kind, b, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+fn frame(kind: u64, b: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(kind, mut out)?
+    write_vi64(list.len(b), mut out)?
+    put_bytes(b, mut out)
+}
+
+fn put_request(id: u64, track: TrackName, ps: List[Param], allowed: u64, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(id, mut out)?
+    put_track_name(track, false, mut out)?
+    put_params(ps, allowed, mut out)
+}
+
+fn put_prefixed(id: u64, prefix: Namespace, ps: List[Param], allowed: u64, mut out: Bytes) -> Result[(), WireError] {
+    write_vi64(id, mut out)?
+    put_namespace(prefix, mut out)?
+    put_params(ps, allowed, mut out)
+}
+
+fn put_body(m: Message, mut out: Bytes) -> Result[u64, WireError] {
+    match m {
+        Setup(options) => {
+            check_setup(options)?
+            put_key_values(options, mut out)?
+            Ok(SETUP)
+        },
+        Goaway(uri, timeout) => {
+            put_sized(uri, MAX_URI, mut out)?
+            write_vi64(timeout, mut out)?
+            Ok(GOAWAY)
+        },
+        Subscribe(id, track, params) => {
+            put_request(id, track, params, SUBSCRIBE_PARAMS, mut out)?
+            Ok(SUBSCRIBE)
+        },
+        SubscribeOk(alias, params, properties) => {
+            write_vi64(alias, mut out)?
+            put_params(params, SUBSCRIBE_OK_PARAMS, mut out)?
+            put_key_values(properties, mut out)?
+            Ok(SUBSCRIBE_OK)
+        },
+        PublishStateNotify(params) => {
+            put_params(params, PUBLISH_STATE_NOTIFY_PARAMS, mut out)?
+            Ok(PUBLISH_STATE_NOTIFY)
+        },
+        Publish(id, track, alias, params, properties) => {
+            write_vi64(id, mut out)?
+            put_track_name(track, false, mut out)?
+            write_vi64(alias, mut out)?
+            put_params(params, PUBLISH_PARAMS, mut out)?
+            put_key_values(properties, mut out)?
+            Ok(PUBLISH)
+        },
+        PublishDone(status, streams, reason) => {
+            write_vi64(status, mut out)?
+            write_vi64(streams, mut out)?
+            put_reason(reason, mut out)?
+            Ok(PUBLISH_DONE)
+        },
+        Fetch(id, track, params) => {
+            put_request(id, track, params, FETCH_PARAMS, mut out)?
+            Ok(FETCH)
+        },
+        TrackStatus(id, track, params) => {
+            put_request(id, track, params, TRACK_STATUS_PARAMS, mut out)?
+            Ok(TRACK_STATUS)
+        },
+        PublishNamespace(id, prefix, params) => {
+            put_prefixed(id, prefix, params, NAMESPACE_REQUEST_PARAMS, mut out)?
+            Ok(PUBLISH_NAMESPACE)
+        },
+        SubscribeNamespace(id, prefix, params) => {
+            put_prefixed(id, prefix, params, NAMESPACE_REQUEST_PARAMS, mut out)?
+            Ok(SUBSCRIBE_NAMESPACE)
+        },
+        SubscribeTracks(id, prefix, params) => {
+            put_prefixed(id, prefix, params, SUBSCRIBE_TRACKS_PARAMS, mut out)?
+            Ok(SUBSCRIBE_TRACKS)
+        },
+        NamespaceFound(suffix, params) => {
+            put_namespace(suffix, mut out)?
+            put_params(params, NAMESPACE_PARAMS, mut out)?
+            Ok(NAMESPACE)
+        },
+        NamespaceDone(suffix) => {
+            put_namespace(suffix, mut out)?
+            Ok(NAMESPACE_DONE)
+        },
+        PublishSkipped(track) => {
+            put_track_name(track, false, mut out)?
+            Ok(PUBLISH_SKIPPED)
+        },
+        RequestUpdate(id, params) => {
+            write_vi64(id, mut out)?
+            put_params(params, REQUEST_UPDATE_PARAMS, mut out)?
+            Ok(REQUEST_UPDATE)
+        },
+        RequestOk(params, properties) => {
+            put_params(params, REQUEST_OK_PARAMS, mut out)?
+            put_key_values(properties, mut out)?
+            Ok(REQUEST_OK)
+        },
+        RequestError(code, retry, reason, details) => {
+            check_details(code, details)?
+            write_vi64(code, mut out)?
+            write_vi64(retry, mut out)?
+            put_reason(reason, mut out)?
+            put_key_values(details, mut out)?
+            Ok(REQUEST_ERROR)
+        },
+    }
+}

@@ -72,6 +72,7 @@ pub opaque type SpanRows: send {
     capture: Snapshot,
     low: Bytes,
     high: Bytes,
+    cursor: Option[PageRange],
     last: Option[Bytes],
     done: bool
 }
@@ -80,7 +81,7 @@ pub fn open_span_changes(r: Reader, s: Snapshot, lo: Bytes, hi: Bytes) -> Result
     read_access(r, s)?
     disk_allocation(scoped fn() -> Result[SpanRows, Error] {
         let captured: Snapshot = clone(s)
-        Ok(SpanRows(capture: take captured, low: copied(lo)?, high: copied(hi)?, last: None, done: hi <= lo))
+        Ok(SpanRows(capture: take captured, low: copied(lo)?, high: copied(hi)?, cursor: None, last: None, done: hi <= lo))
     })
 }
 
@@ -92,14 +93,7 @@ pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change],
     let selected = if let Some(inventory) = view rows.capture.roots.collections.paging {
         snapshot_tiered_span_step(r, rows.capture, inventory, rows.low, rows.high, rows.last)?
     } else {
-        disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
-            let mut cursor = resume_data(rows.capture.roots.collections, rows.low, rows.high, rows.last, false)?
-            let Some((take key, take value)) = next_bytes(mut cursor)? else {
-                return Ok(None)
-            }
-            let resume = copied(key)?
-            Ok(Some((take key, take value, take resume)))
-        })?
+        memory_span_step(mut rows.cursor, rows.capture.roots.collections, rows.low, rows.high, rows.last)?
     }
     match take selected {
         Some((take key, take value, take resume)) => {
@@ -110,6 +104,36 @@ pub fn next_span_change(r: Reader, mut rows: SpanRows) -> Result[Option[Change],
             rows.done = true
             Ok(None)
         },
+    }
+}
+
+fn memory_span_step(mut cursor: Option[PageRange], tree: PageTree, low: Bytes, high: Bytes, previous: Option[Bytes]) -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+    // The allocation scope can only view its captures. The cell transfers the
+    // cursor through the scope. A refusal discards it, so the next call resumes
+    // after the last key actually returned.
+    let exchange = disk_allocation(scoped fn() -> Result[core.Cell[Option[PageRange]], Error] {
+        Ok(cell.new(None))
+    })?
+    cell.set(exchange, replace(mut cursor, None))
+    let selected = disk_allocation(scoped fn() -> Result[Option[(Bytes, Arc[Bytes], Bytes)], Error] {
+        let mut walk = match cell.replace(exchange, None) {
+            Some(take active) => take active,
+            None => resume_data(tree, low, high, previous, false)?,
+        }
+        let found = next_bytes(mut walk)?
+        let Some((take key, take value)) = take found else {
+            return Ok(None)
+        }
+        let resume = copied(key)?
+        cell.set(exchange, Some(take walk))
+        Ok(Some((take key, take value, take resume)))
+    })
+    match take selected {
+        Ok(take row) => {
+            cursor = cell.into_inner(take exchange)
+            Ok(take row)
+        },
+        Error(take problem) => Error(take problem),
     }
 }
 
@@ -272,12 +296,11 @@ fn open_scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bou
 fn open_snapshot_rows[K, V](s: Snapshot, source: u32, take low: Bytes, take high: Bytes, reverse: bool, take decoder: RowDecoder[K, V]) -> Result[Rows[K, V], Error] {
     let captured: Snapshot = clone(s)
     let data = view s.roots.collections
-    let tiered = match data.paging {
-        Some(_) => match std.page.lookup(data.root, list.slice(low, 0, order.min(4, list.len(low)))) {
-            Some(descriptor) => collection_descriptor(descriptor).residency == ResidentTiered,
-            None => false,
-        },
-        None => false,
+    let tiered = if let Some(_) = data.paging {
+        let source_tiered = collection_is_tiered(data, prefix(source)?)
+        source_tiered || (source != decoder.table && collection_is_tiered(data, prefix(decoder.table)?))
+    } else {
+        false
     }
     let cursor: Option[CollectionCursor] = if tiered {
         None
@@ -290,6 +313,13 @@ fn open_snapshot_rows[K, V](s: Snapshot, source: u32, take low: Bytes, take high
         false
     }
     Ok(Rows(capture: take captured, source: source, cursor: take cursor, fault: None, low: take low, high: take high, last: None, reverse: reverse, done: done, decoder: take decoder))
+}
+
+fn collection_is_tiered(data: PageTree, key: Bytes) -> bool {
+    match std.page.lookup(data.root, key) {
+        Some(descriptor) => collection_descriptor(descriptor).residency == ResidentTiered,
+        None => false,
+    }
 }
 
 pub fn scan[K, V](r: Reader, s: Snapshot, t: Table[K, V], lo: Bound[K], hi: Bound[K]) -> Result[Rows[K, V], Error] waits {
@@ -306,10 +336,9 @@ pub fn find[J, K, V, P](r: Reader, s: Snapshot, ix: Index[J, K, V, P], lo: Bound
         return Error(Foreign)
     }
     index_readable(s.roots, ix.catalog_key, ix.catalog_page, ix.id, ix.public)?
-    let captured: Snapshot = clone(s)
     let low = index_bound(ix.id, ix.key, lo, false)?
     let high = index_bound(ix.id, ix.key, hi, true)?
-    Ok(Rows(capture: take captured, source: ix.id, cursor: None, fault: None, low: take low, high: take high, last: None, reverse: false, done: false, decoder: index_decoder(ix)))
+    open_snapshot_rows(s, ix.id, take low, take high, false, index_decoder(ix))
 }
 
 fn resume_data(data: PageTree, low: Bytes, high: Bytes, final_item: Option[Bytes], reverse: bool) -> Result[PageRange, Error] {
@@ -365,10 +394,7 @@ pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Err
         return Error(clone(problem))
     }
     if let Some(mut cursor) = rows.cursor {
-        let decoder = view rows.decoder
-        let found = std.page.cursor_read(mut cursor.walk, scoped fn(key: Bytes, raw: Bytes) -> Result[(K, V), Error] {
-            decode_table_row(decoder, key, raw)
-        })
+        let found = next_memory_snapshot(mut cursor.walk, cursor.leading, rows.decoder, rows.capture.roots.collections)
         match take found {
             Some(Ok(take row)) => return Ok(Some(take row)),
             Some(Error(take problem)) => {
@@ -407,6 +433,25 @@ pub fn next[K, V](r: Reader, mut rows: Rows[K, V]) -> Result[Option[(K, V)], Err
     let (take key, take result) = take selected
     rows.last = Some(take key)
     Ok(Some(take result))
+}
+
+fn next_memory_snapshot[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: PageTree) -> Option[Result[(K, V), Error]] {
+    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(K, V), Error] {
+        if let None = decoder.skip {
+            return decode_table_row(decoder, suffix, raw)
+        }
+        let key = collection_row_key(leading, suffix)
+        let (take row_key, take owner) = decode_row_key(decoder, key, raw)?
+        let value = if let Some(primary) = view owner {
+            let Some(stored) = get_page_row(data, primary) else {
+                return Error(Stale(decoder.table))
+            }
+            row_value(decoder.readers, decoder.table, stored)?
+        } else {
+            row_value(decoder.readers, decoder.table, raw)?
+        }
+        Ok((take row_key, take value))
+    })
 }
 
 fn decode_table_row[K, V](decoder: RowDecoder[K, V], suffix: Bytes, raw: Bytes) -> Result[(K, V), Error] {
@@ -614,8 +659,8 @@ pub fn lookup_prefix[J, K, V, P, Q](tx: Tx, ix: Index[J, K, V, P], q: Q, take ke
 
 fn open_lookup[J, K, V, P](tx: Tx, ix: Index[J, K, V, P], take low: Bytes, take high: Bytes) -> Result[IndexRows[K, V], Error] in tx {
     let tree = transaction_collection_pages(tx)?
-    let cursor = byte_cursor(tree, Included(copied(low)?), high)?
-    let rows = indexed_rows(tree, ix, take cursor)?
+    let cursor = collection_cursor(tree, ix.id, low, high, false)?
+    let rows = PageRows(cursor: take cursor, data: take tree, decoder: index_decoder(ix))
     Ok(IndexRows(rows: take rows, reads: tx.reads, low: take low, high: take high, tiered: tx_index_tiered(tx)?))
 }
 
@@ -646,25 +691,38 @@ fn note_index_step(reads: View[core.Log[Read]], mut low: Bytes, high: Bytes, las
 }
 
 pub fn next_indexed[K, V](mut r: IndexRows[K, V]) -> Result[Option[(K, V)], Error] {
-    let Some((take key, take raw)) = next_bytes(mut r.rows.cursor)? else {
-        note_index_step(r.reads, mut r.low, r.high, None)?
-        return Ok(None)
+    if let Some(mut cursor) = r.rows.cursor {
+        let stepped = next_index_page(mut cursor.walk, cursor.leading, r.rows.decoder, r.rows.data, r.tiered, r.reads, r.low, r.high)
+        if let Some(take step) = take stepped {
+            let (take boundary, take value) = step?
+            r.low = take boundary
+            return take value
+        }
     }
-    note_index_step(r.reads, mut r.low, r.high, Some(view key))?
-    let row = match r.tiered {
-        Some(tiered) => tx_tiered_index_row(tiered, r.rows.decoder, r.rows.data, key, raw, fn(observed: Bytes) -> Result[(), Error] {
-            log.append(r.reads, Point(copied(observed)?))
+    note_index_step(r.reads, mut r.low, r.high, None)?
+    Ok(None)
+}
+
+fn next_index_page[K, V](mut walk: std.page.Cursor, leading: Bytes, decoder: RowDecoder[K, V], data: PageTree, tiered: Option[TxIndexTiered], reads: View[core.Log[Read]], low: Bytes, high: Bytes) -> Option[Result[(Bytes, Result[Option[(K, V)], Error]), Error]] {
+    std.page.cursor_read(mut walk, scoped fn(suffix: Bytes, raw: Bytes) -> Result[(Bytes, Result[Option[(K, V)], Error]), Error] {
+        let key = collection_row_key(leading, suffix)
+        let mut boundary: Bytes = clone(low)
+        note_index_step(reads, mut boundary, high, Some(view key))?
+        let seen: scoped[view] fn(Bytes) -> Result[(), Error] = scoped fn(observed: Bytes) -> Result[(), Error] {
+            log.append(reads, Point(copied(observed)?))
             Ok(())
-        })?,
-        None => advance_rows(r.rows.decoder, r.rows.data, key, raw, None, fn(observed: Bytes) -> Result[(), Error] {
-            log.append(r.reads, Point(copied(observed)?))
-            Ok(())
-        })?,
-    }
-    match take row {
-        Some((take value, _)) => Ok(Some(take value)),
-        None => Ok(None),
-    }
+        }
+        let row = match tiered {
+            Some(attempt) => tx_tiered_index_row(attempt, decoder, data, key, raw, seen),
+            None => advance_rows(decoder, data, key, raw, None, seen),
+        }
+        let value: Result[Option[(K, V)], Error] = match take row {
+            Ok(Some((take found, _))) => Ok(Some(take found)),
+            Ok(None) => Ok(None),
+            Error(take problem) => Error(take problem),
+        }
+        Ok((take boundary, take value))
+    })
 }
 
 pub fn next_entry[J, K, P](mut r: IndexEntries[J, K, P]) -> Result[Option[(J, K, P)], Error] {

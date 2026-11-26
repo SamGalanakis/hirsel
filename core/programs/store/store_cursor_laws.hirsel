@@ -149,3 +149,101 @@ fn test_cursor_carries_in_collection_bound(c: Clock) -> Result[(), Error] {
     }
     Ok(())
 }
+
+fn scan_span_budget(s: Snapshot, t: Table[u64, u64]) -> Result[(), Error] waits {
+    let read_handle = law_reader(s)
+    let start = 20000u64
+    let row_count = 1000u64
+    let opened = open_span_changes(read_handle, s, log_key(t.id, start)?, log_key(t.id, start + 2 * row_count)?)?
+    let observed = bound steps(150 * row_count - 1) {
+        let mut rows = take opened
+        let mut matches = true
+        for i in 0u64 .. row_count {
+            let key = start + 2 * i
+            match next_span_change(read_handle, mut rows) {
+                Ok(Some(row)) => {
+                    let Some(raw) = view row.value else {
+                        fail("a span Change has the stored value")
+                    }
+                    let id: u32 = list.word_be(row.tree_key, 0)
+                    let actual_key: u64 = list.word_be(row.tree_key, 4)
+                    let actual_value: u64 = list.word_le(raw, 2)
+                    if id != t.id || actual_key != key || actual_value != key + 1 {
+                        matches = false
+                    }
+                },
+                _ => {
+                    matches = false
+                },
+            }
+        }
+        match next_span_change(read_handle, mut rows) {
+            Ok(None) => matches,
+            _ => false,
+        }
+    }
+    if let Ok(true) = observed {
+        return Ok(())
+    }
+    fail("a hot span must visit its sorted rows without seeking from the root on each row")
+}
+
+fn cursor_index_model(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let (t, ix) = law_indexed(mut db, "indexed cursor", std.codec.key_u64(), std.codec.of_u64(), "by bucket", code.describe(assembly_bucket), std.codec.key_u64())?
+    let Committed(_) = run(mut db, None, copy_env(t), fn(mut tx: Tx, handle: Table[u64, u64]) -> Result[(), Error] {
+        for key in 0u64 .. 512 {
+            put(mut tx, handle, key, key)?
+        }
+        Ok(())
+    })? else {
+        fail("indexed cursor fixture must commit")
+    }
+    let s = snapshot(db)
+    let read_handle = law_reader(s)
+    let mut rows = find(read_handle, s, ix, Excluded(0u64), Included(2u64))?
+    for wanted in 1u64 .. 3 {
+        for n in 0u64 .. 128 {
+            let key = 4 * n + wanted
+            if next(read_handle, mut rows)? != Some((key, key)) {
+                fail("snapshot index scan must sort by secondary key, then by primary key")
+            }
+        }
+    }
+    if next(read_handle, mut rows)? != None {
+        fail("snapshot index scan must stop at the inclusive upper bound")
+    }
+    cursor_check_merge(mut db, t)
+}
+
+fn cursor_check_merge(mut db: Db, t: Table[u64, u64]) -> Result[(), Error] waits {
+    let Committed(_) = run(mut db, None, copy_env(t), fn(mut tx: Tx, handle: Table[u64, u64]) -> Result[(), Error] {
+        for key in 1u64 .. 511 {
+            let _ = delete(mut tx, handle, key)?
+        }
+        Ok(())
+    })? else {
+        fail("collection deletes must commit")
+    }
+    let s = snapshot(db)
+    let r = law_reader(s)
+    let mut forward = scan(r, s, t, Unbounded, Unbounded)?
+    let mut backward = scan_reverse(r, s, t, Unbounded, Unbounded)?
+    if next(r, mut forward)? != Some((0u64, 0u64)) || next(r, mut forward)? != Some((511u64, 511u64)) || next(r, mut forward)? != None || next(r, mut backward)? != Some((511u64, 511u64)) || next(r, mut backward)? != Some((0u64, 0u64)) || next(r, mut backward)? != None {
+        fail("table cursors must return only the two surviving rows after the merge")
+    }
+    Ok(())
+}
+
+@test
+fn test_index_span_cursor_parity(d: Dir, c: Clock, tasks: Tasks) -> Result[(), Error] waits {
+    cursor_index_model(c)?
+    test_staged_index_reads(c)?
+    log_changes_and_tail_window(c)?
+    l62_tiered_scan_fixture(d, c, tasks, true, l62_snapshot_span_reads)?
+    let mut db = test_db(c, 1073741824)
+    let _ = law_table(mut db, "span cursor", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "span cursor", std.codec.key_u64(), std.codec.of_u64())?
+    cursor_law_rows(mut db, t, 50000)?
+    scan_span_budget(snapshot(db), t)
+}

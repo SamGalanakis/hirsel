@@ -1801,7 +1801,7 @@ pub opaque type Index[J, K, V, P]: shareable + send {
 }
 
 type PageRows[K, V]: send {
-    cursor: PageRange,
+    cursor: Option[CollectionCursor],
     data: PageTree,
     decoder: RowDecoder[K, V]
 }
@@ -1952,10 +1952,6 @@ fn index_decoder[J, K, V, P](ix: Index[J, K, V, P]) -> RowDecoder[K, V] {
         Ok(())
     }
     RowDecoder(table: ix.table, key: ix.primary, readers: arc.share(ix.readers), unique: (ix.kind == Unique), skip: Some(take skip))
-}
-
-fn indexed_rows[J, K, V, P](data: PageTree, ix: Index[J, K, V, P], take cursor: PageRange) -> Result[PageRows[K, V], Error] {
-    Ok(PageRows(cursor: take cursor, data: share_page_tree(data), decoder: index_decoder(ix)))
 }
 
 fn prefix_after(raw: Bytes) -> Result[Bytes, Error] {

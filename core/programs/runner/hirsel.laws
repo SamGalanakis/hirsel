@@ -56,7 +56,7 @@ runner@1/runner/room_roster_identity src=3d9b4d6005a1b830 sig=ea37850426db8631 r
 runner@1/runner/room_session_charge_covers_maximum_session src=a12df3b976d930fb sig=bf5f5b642f715199 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 runner@1/runner/roster_diffs_served_under_sustained_messages src=93e10016c6705ff4 sig=a3ee6ca34bd31eb9 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 runner@1/runner/runner_online_backup_copies_without_stopping_head src=99d51a7b9c317d78 sig=94f0ef2f79d1ba11 run=ea720f3846592392 bug=- oracle=- rows=pending
-runner@1/runner/test_after_publication src=d91d8f951276b5d5 sig=b8063e663ac16b6b run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/test_after_publication src=2a8af6c8262e5915 sig=870894190960d644 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_bounced_ended_ages src=5a7ebc620e13c8c2 sig=d7e8e04bdfcdf356 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_declaration_open src=ea6271993368a18a sig=6fed6fabf2fb5847 run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_dropped_keeps_outcomes src=3939ee1af20d9395 sig=b450fdd964fbbc70 run=dbf6722727633166 bug=- oracle=- rows=pending
@@ -81,7 +81,7 @@ runner@1/runner/test_named_slots src=4450b3a392e0843e sig=4b91bb1933d843b4 run=b
 runner@1/runner/test_pool_releases_cancelled_reader src=c48fd3c3a8c41e03 sig=b435f9bfcae792c5 run=4c3ef853c7dc0c9d bug=- oracle=- rows=pending
 runner@1/runner/test_projection_isolated src=06df390b3f8de1c7 sig=997d6e6bf8590044 run=b1818af2b24835d3 bug=- oracle=- rows=pending
 runner@1/runner/test_range_reruns src=ed3cc3d53892bb15 sig=ce915cbdf1383e54 run=b1818af2b24835d3 bug=- oracle=- rows=pending
-runner@1/runner/test_release_after_durable src=eefdb5f9f24980fa sig=0b6f5bcffaa31ff1 run=ea720f3846592392 bug=- oracle=- rows=pending
+runner@1/runner/test_release_after_durable src=74a4df09a85ee0c4 sig=3845eaf66f9a7beb run=ea720f3846592392 bug=- oracle=- rows=pending
 runner@1/runner/test_removal_waits_for_writer src=5e2d15ce2d45dc5d sig=2cb5de725d5b7de2 run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_coalesced src=9a31daf7e4c0819a sig=faed3d31a1484ebf run=dbf6722727633166 bug=- oracle=- rows=pending
 runner@1/runner/test_repair_one_unsent src=81c27d53893b1966 sig=977fe00168f46cfa run=dbf6722727633166 bug=- oracle=- rows=pending

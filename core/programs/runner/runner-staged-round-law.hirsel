@@ -426,6 +426,10 @@ fn staged_socket_trial(take opened: store.Db, random: Random, tasks: Tasks, tria
     let _ = take commands
     result.unwrap(task.join(take recorder))
     let Head(db: take completed, ..) = take hd
+    if let Poison = trial {
+        let id = store.identity(completed)
+        store.allow_unverified_teardown(id.hi, id.lo)
+    }
     match store.close(take completed) {
         Ok(()) => (),
         Error(Poisoned(Closed)) => if let Poison = trial {} else {

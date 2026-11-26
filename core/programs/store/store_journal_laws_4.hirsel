@@ -824,3 +824,116 @@ fn disk_window_crash(d: Dir, c: Clock, r: Random, tasks: Tasks, argv: Args, out:
     disk_window_read(d, c, r, tasks, issued, int.saturating_sub(floor, 1), poisoned) ?=> |_| Exit(status: 74)
     Ok(())
 }
+
+// L91 (E2, F3): (a) at uncovered == journal_limit on Directory, a zero-mutation
+// run commits with 0 bytes, no Refused(Journal), and Done.info == None;
+// (b) when a cut is due and was refused Full on a Bucket store (object_cut_due
+// stays true), a skipped run writes 0 bytes and performs no cut, and the next
+// real write performs the cut.
+@test
+fn journal_test_empty_commit_at_limit_and_due_cut(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // Part (a): Directory store at uncovered == journal_limit.
+    let dir = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.resident_limit = 134217728
+    options.checkpoint_bytes = 4096
+    options.journal_limit = 16781392
+    let mut first = open(tasks, dir, c, r, options)?
+    let _ = law_table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    let rows = table(mut first, "rows", std.codec.key_u64(), std.codec.of_bytes())?
+    close(take first)?
+    options.create = false
+    let mut db = open(tasks, dir, c, r, options)?
+    let Committed(_) = run(mut db, None, copy_env(rows), fn(mut tx, call_env) -> Result[(), Error] {
+        let mut body: Bytes = list.with_capacity(4023)
+        list.fill(mut body, 4023, 7u8)
+        put(mut tx, call_env, 1u64, body)
+    })? else {
+        fail("L91 E2: initial put failed")
+    }
+    let keep_reply: Option[fn(Error) -> bool] = None
+    let Committed(final_item) = append_transaction_at(mut db, 0, host.wall_ms(c), None, keep_reply, fn(mut tx: Tx) -> Result[(), Error] {
+        journal_full_frame(mut tx, rows)
+    })? else {
+        fail("L91 E2: full frame failed")
+    }
+    durable(mut db, final_item.ticket)?
+    // Here since_cut > checkpoint_bytes (cut is due) AND uncovered == journal_limit.
+    // A zero-mutation run must succeed with 0 frames/bytes and perform no cut.
+    let gen_before = db.checkpointed
+    let seg_before = db.file_seq
+    let end_before = db.file_end
+    let seq_before = db.frame_seq
+    let v_before = version(snapshot(db))
+    let Committed(skipped_at_limit) = run(mut db, None, copy_env(rows), fn(mut tx, call_env) -> Result[bool, Error] {
+        Ok(fetch(tx, call_env, 1u64)? != None)
+    })? else {
+        fail("L91 E2: zero-mutation run was refused at journal_limit")
+    }
+    if !skipped_at_limit.value || db.checkpointed != gen_before || db.file_seq != seg_before || db.file_end != end_before || db.frame_seq != seq_before || version(snapshot(db)) != v_before {
+        fail("L91 E2/F3: skipped run at journal_limit wrote bytes or triggered a cut")
+    }
+    if let Some(_) = skipped_at_limit.info {
+        fail("L91 E2/F2: skipped run at journal_limit returned Some(CallInfo)")
+    }
+    close(take db)?
+    // Part (b): F3 — cut is due and previously refused Full, then a skipped run
+    // writes 0 bytes and takes no cut, and the next write performs the cut.
+    let sim = bucket_law_sim(tasks, c, 9103, None, list.new())
+    let client = bucket_endpoint_client(sim.endpoint, std.sim.s3.endpoint_network(sim.endpoint), sim.time, tasks, "s3.test", 1, true, 0)?
+    let mut b_opts = bucket_order_options(true)
+    b_opts.checkpoint_entries = 1
+    let mut bdb = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), sim.time, r, b_opts) ?=> |Refusal(error: take problem, ..)| take problem
+    let _ = law_table(mut bdb, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let brows = table(mut bdb, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let b_gen_0 = bdb.checkpointed
+    // Commit one row, durable so object_writer.entries == 1 >= checkpoint_entries.
+    let Committed(bw1) = run(mut bdb, None, copy_env(brows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 11u64)
+    })? else {
+        fail("L91 F3: bucket write 1 failed")
+    }
+    durable(mut bdb, bw1.ticket)?
+    // Attempt maybe_checkpoint under a 64 KiB byte bound so history_buffers(65536)
+    // returns Error(Full(Allocation(..))) inside disk_allocation and maybe_checkpoint
+    // swallows Full, leaving object_cut_due(bdb) == true.
+    let refused_cut = bound bytes 65536 {
+        maybe_checkpoint(mut bdb)
+    }
+    match take refused_cut {
+        Ok(Ok(())) => (),
+        _ => fail("L91 F3: maybe_checkpoint did not swallow Full cleanly"),
+    }
+    if bdb.checkpointed != b_gen_0 || !object_cut_due(bdb) {
+        fail("L91 F3: setup did not leave a due cut after refused Full")
+    }
+    // Now run a skipped zero-mutation run with ample memory: must NOT cut and
+    // must write 0 frames/bytes.
+    let b_seq_before = bdb.frame_seq
+    let b_end_before = bdb.file_end
+    let b_v_before = version(snapshot(bdb))
+    let Committed(bskip) = run(mut bdb, None, copy_env(brows), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    })? else {
+        fail("L91 F3: bucket skipped run failed")
+    }
+    if bskip.value != Some(11u64) || bdb.checkpointed != b_gen_0 || !object_cut_due(bdb) || bdb.frame_seq != b_seq_before || bdb.file_end != b_end_before || version(snapshot(bdb)) != b_v_before {
+        fail("L91 F3: skipped run performed a due cut or wrote bytes")
+    }
+    if let Some(_) = bskip.info {
+        fail("L91 F3/F2: skipped run returned Some(CallInfo)")
+    }
+    // The next real write retries and performs the due cut.
+    let Committed(bw2) = run(mut bdb, None, copy_env(brows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 2u64, 22u64)
+    })? else {
+        fail("L91 F3: bucket write 2 failed")
+    }
+    durable(mut bdb, bw2.ticket)?
+    if bdb.checkpointed != b_gen_0 + 1 {
+        fail("L91 F3: next real write did not perform the due cut")
+    }
+    close(take bdb)?
+    let _ = bucket_law_finish(take sim)
+    Ok(())
+}

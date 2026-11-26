@@ -379,7 +379,7 @@ pub type Undone[A] {
 pub type Done[R] {
     value: R,
     ticket: Ticket,
-    info: CallInfo,
+    info: Option[CallInfo],
     reads: List[Read]
 }
 
@@ -523,6 +523,7 @@ pub opaque scoped type Tx {
     frame_tail: u64,
     reads: View[core.Log[Read]],
     issued: View[core.Cell[u64]],
+    observed_info: View[core.Cell[bool]],
     // The attempt record and the pin map it reads (§13.3, v2.81). The call's
     // driver owns both, outside the body's isolation and step bound.
     attempt: View[Option[core.Cell[TieredTouchSet]]],
@@ -1050,7 +1051,7 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
     let attempt: Option[core.Cell[TieredTouchSet]] = None
     let no_pins: Map[TieredCacheKey, Arc[TieredFrame]] = map.new()
     let credit = keyed_completion_credit(db, pending_run.completion)
-    let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
+    let draft = stage_call(mut db, 0, now, None, keep, pending_run.record, settlement, false, attempt, no_pins, scoped fn(mut tx: Tx) -> Result[Bytes, ServeReply] {
         let held: Bytes = clone(output)
         let moved = take held
         match save_reply(mut tx, pending_run.completion, output, pending_run.record, settlement, credit) {
@@ -1069,6 +1070,7 @@ pub fn conclude(mut db: Db, take pending_run: Pending, take output: Bytes, reser
 }
 
 pub fn info(mut tx: Tx) -> CallInfo {
+    cell.set(tx.observed_info, true)
     tx.info
 }
 
@@ -1109,30 +1111,6 @@ fn run_on_with_reply[R, A](mut db: Db, b: Branch, steps: Option[u64], keep_reply
 fn store_body_on[R, A](mut db: Db, i: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
     let wall = host.wall_ms(db.clock)
     store_body_at(mut db, i, wall, steps, keep_reply, body)
-}
-
-fn store_body_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
-    let outcome = append_transaction_at(mut db, i, wall, steps, keep_reply, body)
-    if let Ok(Refused(Journal(_))) = outcome {
-        return take outcome
-    }
-    maybe_checkpoint(mut db)?
-    take outcome
-}
-
-fn append_transaction_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
-    let outcome: Result[Outcome[R, A], Error] = match staged_until_decided(mut db, i, wall, steps, keep_reply, body)? {
-        Over(take o) => Ok(take o),
-        Ran(take ran) => settle_admit(mut db, i, take ran),
-        DraftError(take problem) => Error(take problem),
-        Latched => fail("store: a decided stage is latched"),
-        DriftStop(take name, take seen) => {
-            trip_drift(mut db, i, take seen)?
-            Ok(Failed(Drift(take name)))
-        },
-    }
-    handoff(mut db)?
-    take outcome
 }
 
 fn handoff(mut db: Db) -> Result[(), Error] waits {
@@ -1180,6 +1158,7 @@ type Ran[R, A] {
     live: u64,
     exact: bool,
     admits_rows: bool,
+    skipped: bool,
     frame: Option[Bytes],
     info: CallInfo,
     reads: List[Read]
@@ -1209,18 +1188,24 @@ type Prepared[R, A] {
     keyed: Option[KeyedDraft],
     first_stamp: u64,
     prepared_roots: bool,
+    observed_info: bool,
+    skipped: bool,
     call: Option[CallSection]
 }
 
 // Runs the body on branch `i` inside isolate. Everything but a body that
 // returned Ok, or Error after a reply, is final here.
 fn stage[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+    stage_with(mut db, i, wall, steps, keep_reply, false, attempt, pins, body)
+}
+
+fn stage_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let no_record: Option[CallRecord] = None
-    stage_call(mut db, i, wall, steps, keep_reply, no_record, None, attempt, pins, body)
+    stage_call(mut db, i, wall, steps, keep_reply, no_record, None, force_frame, attempt, pins, body)
 }
 
 // The caller keeps owning the record so a refused publication can return it.
-fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
+fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], rec: Option[CallRecord], settlement: Option[Settlement], force_frame: bool, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Stage[R, A] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
     let ci = call_info(db.store, db.heads[i].id, db.heads[i].head + 1, wall, db.heads[i].at)
@@ -1236,7 +1221,7 @@ fn stage_call[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_repl
             } else {
                 take staged
             }
-            match frame_draft(db, db.heads[i].roots.collections, ci, rec, settlement, take prepared) {
+            match frame_draft(db, db.heads[i].roots.collections, ci, rec, settlement, force_frame, take prepared) {
                 Ok(take framed) => take framed,
                 Error(problem) => RolledBack(Refused(Allocation(problem))),
             }
@@ -1276,7 +1261,8 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => (Some(42u64), OPEN_FRAME_TAIL),
         None => (None, NO_FRAME_TAIL),
     }
-    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), base_collection: None, bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+    let observed_info: core.Cell[bool] = cell.new(false)
+    let mut tx = Tx(store: db.store, indexes: view registry, roots: share_roots(base), base_collection: None, bases: share_tail_bases(db.bases), ids: db.next_node, private_from: int.saturating_add(db.next_node, 1), resident: db.resident, retain_old: retaining(db), frame_tail: initial_tail, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: frame_bytes, limits: db.limits, wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: ci, stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
     let outcome = body(mut tx)
     if tx.own != 0 {
         fold_own(mut tx)
@@ -1331,6 +1317,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         tx.resident = keyed_draft_live(base, keyed.edits, tx.retain_old, tx.resident)
     }
     let Tx(roots: take roots, resident: live_bytes, frame_tail: frame_tail, ops: take ops, stream_ops: take stream_ops, keyed: take keyed, call: take call, ..) = take tx
+    let saw_info = cell.replace(observed_info, false)
     let DataOps(cells: take cells, ..) = take ops
     seal_cell_edits(mut rows, cells)
     let order = match data_order(rows) {
@@ -1342,7 +1329,7 @@ fn draft_body[R, A](db: Db, registry: IndexRegistry, base: Roots, ci: CallInfo, 
         Some(_) => Some(db.tiered),
         None => None,
     }
-    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, call: take call))
+    Prepared(Prepared(outcome: take value, roots: take roots, tiered: tiered, plan: None, live: live_bytes, frame: None, ops: take rows, order: take order, base_stamp: tree_stamp(base.collections), frame_tail: frame_tail, stream_ops: take stream_rows, keyed: take keyed, first_stamp: first_stamp, prepared_roots: false, observed_info: saw_info, skipped: false, call: take call))
 }
 
 fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: List[Read]) -> Stage[R, A] {
@@ -1352,7 +1339,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
         Drifted(take name, take evidence) => return DriftStop(take name, take evidence),
         Prepared(take tx) => take tx,
     }
-    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, ..) = take prepared
+    let Prepared(outcome: take outcome, roots: take roots, tiered: tiered, plan: take plan, live: live_bytes, frame: take frame, ops: take operations, order: take order, stream_ops: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, skipped: skipped, ..) = take prepared
     // A draft without a Tiered plan makes no call here: the draft's step
     // overhead is fixed (§13.3 call reserves).
     let freed = match take plan {
@@ -1379,7 +1366,7 @@ fn finish_stage[R, A](ci: CallInfo, take finished: Finished[R, A], take seen: Li
             }
         }
     }
-    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, order: take order, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, frame: take frame, info: ci, reads: take seen))
+    Ran(Ran(value: take outcome, roots: Some(take roots), edits: take operations, order: take order, replies: take stream_edits, keyed: take keyed, first_stamp: first_stamp, prepared_roots: prepared_roots, tiered: tiered, freed: take freed, live: live_bytes, exact: false, admits_rows: admits_rows, skipped: skipped, frame: take frame, info: ci, reads: take seen))
 }
 
 fn wait_for_frame_room(mut db: Db, frame: Option[Bytes]) -> Result[(), Error] waits {

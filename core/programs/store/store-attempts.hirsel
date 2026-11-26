@@ -4,13 +4,13 @@
 // Abort and rerun (§13.3): each attempt runs the body at the head with a
 // fresh attempt record over the call's pin map. A latched miss is delivered
 // into the map and the body reruns; any other latch decides the call.
-fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Stage[R, A], Error] waits {
+fn staged_until_decided[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Stage[R, A], Error] waits {
     let mut pins = empty_tiered_pins(call_pin_root(db, i), db.writer_pin_bytes)
     let mut pending: Option[(TieredTarget, Error)] = None
     loop {
         refresh_call_pins(mut pins, mut pending, call_pin_root(db, i))
         let attempt = call_attempt(db.heads[i].roots.collections.root, db.writer_pin_bytes, tiered_window(pins))
-        let staged = stage(mut db, i, wall, steps, keep_reply, attempt, pins.frames, body)
+        let staged = stage_with(mut db, i, wall, steps, keep_reply, force_frame, attempt, pins.frames, body)
         let Some(state) = call_attempt_finish(take attempt) else {
             return Ok(take staged)
         }
@@ -87,7 +87,7 @@ fn draft_call(db: Db, complete: Completion, ci: CallInfo, plan: Plan, rec: Optio
             }
             let CallDraft(finished: take result, reads: take reads, issued: take issued) = (take draft)?
             // Encoding spends the call's steps and the head's frame bytes.
-            let framed = match frame_draft(db, db.heads[0].roots.collections, ci, rec, None, take result) {
+            let framed = match frame_draft(db, db.heads[0].roots.collections, ci, rec, None, false, take result) {
                 Ok(take finished) => take finished,
                 Error(problem) => RolledBack(Aborted(Undone(value: StoreFailure(Full(Allocation(problem))), ticket: None))),
             }
@@ -255,10 +255,11 @@ pub fn look[E: inert, R](r: Reader, s: Snapshot, steps: Option[u64], env: E, bod
 fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(Tx, E) -> R, attempt: Option[core.Cell[TieredTouchSet]], pins: Map[TieredCacheKey, Arc[TieredFrame]]) -> Looked[R] {
     let reads: core.Log[Read] = log.new()
     let issued: core.Cell[u64] = cell.new(0)
+    let observed_info: core.Cell[bool] = cell.new(false)
     let caught = isolate(fn() -> Result[R, OutOfTime] {
         let perform = scoped fn() -> R {
             let registry = empty_index_registry()
-            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), base_collection: None, bases: share_tail_bases(s.bases), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: None, limits: default_limits(), wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
+            let tx = Tx(store: s.store, indexes: view registry, roots: share_roots(s.roots), base_collection: None, bases: share_tail_bases(s.bases), ids: 0, private_from: 1, resident: 0, retain_old: false, frame_tail: NO_FRAME_TAIL, reads: view reads, issued: view issued, observed_info: view observed_info, attempt: view attempt, pins: view pins, refusal: None, index_conflict: None, drift: None, frame_bytes: None, limits: default_limits(), wrote: false, ops: empty_ops(), view_tree: cell.new(None), info: CallInfo(id: CallId(store: s.store, branch: s.branch, version: s.head), at: 0, seed: 0), stream_ops: empty_ops(), keyed: None, extra_bytes: 0, call: None, below: list.new(), own: 0, rows: 0, cell_rows: 0, trim_rows: 0, streams: 0)
             body(tx, env)
         }
         match steps {
@@ -268,6 +269,7 @@ fn look_attempt[E: inert, R](s: Snapshot, steps: Option[u64], env: E, body: fn(T
             None => Ok(perform()),
         }
     })
+    let _ = cell.into_inner(take observed_info)
     let _ = cell.into_inner(take issued)
     let seen = log.finish(take reads)
     match take caught {

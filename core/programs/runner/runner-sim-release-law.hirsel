@@ -198,6 +198,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let stored_value = option.unwrap(store.get(store.reader(reopened, 0)?, fresh, rows, 1)?)
     std.sim.history.check(std.sim.history.read(mut history, reopened_req, store.version(fresh), sim_release_bytes(std.codec.of_u64(), stored_value)))
     let written = store.run(mut reopened, None, (), fn(mut tx, unused_env) -> Result[(), store.Error] {
+        let _ = store.info(mut tx)
         Ok(())
     })?
     let Committed(store.Done(ticket: ticket, ..)) = written else {

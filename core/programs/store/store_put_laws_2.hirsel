@@ -454,3 +454,52 @@ fn test_changes_rewritten_equal(c: Clock) -> Result[(), ()] {
         Error(())
     }
 }
+
+// L91 (E7, F2, F4): memory store zero-mutation commit returns Done.info = None,
+// leaves version and changes unchanged, and carries Journal(db.changes, b, v)
+// matching the newest written commit's ticket.
+@test
+fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(w1) = run(mut db, None, copy_env(t), fn(mut tx, rows) -> Result[(), Error] {
+        put(mut tx, rows, 1u64, 10u64)
+    })? else {
+        fail("L91 E7: initial memory write did not commit")
+    }
+    let Some(w1_info) = w1.info else {
+        fail("L91 E7: written commit returned None info")
+    }
+    let v1 = version(snapshot(db))
+    let c1 = db.changes
+    if w1_info.id.version != v1 {
+        fail("L91 E7: written commit info version mismatch")
+    }
+    let Committed(skipped) = run(mut db, None, copy_env(t), fn(mut tx, rows) -> Result[Option[u64], Error] {
+        fetch(tx, rows, 1u64)
+    })? else {
+        fail("L91 E7: zero-mutation memory run did not commit")
+    }
+    if skipped.value != Some(10u64) || version(snapshot(db)) != v1 || db.changes != c1 {
+        fail("L91 E7: skipped memory run advanced version or changes")
+    }
+    if let Some(_) = skipped.info {
+        fail("L91 E7/F2: skipped memory run returned Some(CallInfo)")
+    }
+    let Journal(seq, branch_id, head) = skipped.ticket.mark else {
+        fail("L91 E7: skipped ticket was not Journal")
+    }
+    if seq != c1 || branch_id != 0u32 || head != v1 {
+        fail("L91 E7/F4: memory skipped ticket did not match newest written seq")
+    }
+    durable(mut db, skipped.ticket)?
+    if !durable_now(mut db, skipped.ticket)? {
+        fail("L91 E7: memory durable_now was false")
+    }
+    let pos = position(mut db, skipped.ticket)?
+    if pos.branch != 0u32 || pos.version != v1 {
+        fail("L91 E7: memory position mismatch")
+    }
+    close(take db)
+}

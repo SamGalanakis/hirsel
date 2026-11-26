@@ -685,3 +685,31 @@ pub fn fresh_snapshot(mut db: Db, deadline_ns: u64) -> Result[Snapshot, Error] w
     }
     Ok(snapshot(db))
 }
+
+fn object_skip_fence(mut db: Db) -> Result[(), Error] waits {
+    let (destination, pending): (Sender[Result[(), Error]], Receiver[Result[(), Error]]) = channel.new(1)
+    let closed = match channel.send(disk_state(db).journal, ObjectSkipFence(take destination)) {
+        Ok(()) => false,
+        Error(_) => true,
+    }
+    if closed {
+        journal_poll(mut db)?
+        return Error(Io(Closed))
+    }
+    match channel.receive(pending) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Error(Fenced(epoch))) => {
+            edit_disk(mut db.disk, scoped fn(mut state: DiskState) {
+                if let Some(mut object_writer) = state.object {
+                    object_writer.failed = Some(Fenced(epoch))
+                }
+            })
+            Error(Fenced(epoch))
+        },
+        Ok(Error(take problem)) => Error(take problem),
+        Error(_) => {
+            journal_poll(mut db)?
+            Error(Io(Closed))
+        },
+    }
+}

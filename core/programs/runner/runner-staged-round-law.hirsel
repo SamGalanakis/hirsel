@@ -159,6 +159,7 @@ fn staged_record(take input: StagedRecorder) waits {
 type StagedOwner {
     owner: WireSession[()],
     work: WireWork,
+    to: Sender[WireEvent],
     inbox: Receiver[WireEvent],
     closing: Sender[()],
     unused_head: Receiver[HeadInput],
@@ -175,6 +176,7 @@ fn staged_subscribe(to: Sender[PubIn], tasks: Tasks, clock: Clock, random: Rando
     let mut work = wire_work()
     work.splice = true
     let (events, inbox): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(8u64)
+    let reply_to = channel.sender(events)
     let (told, admission): (Sender[Admit], Receiver[Admit]) = channel.new(1u64)
     let (closing, closed): (Sender[()], Receiver[()]) = channel.new(1u64)
     let fence = latest.new(arc.new(std.http.ReleaseFence(prior: 0u64, latest: 0u64)))
@@ -191,7 +193,7 @@ fn staged_subscribe(to: Sender[PubIn], tasks: Tasks, clock: Clock, random: Rando
     owner.joined = Some(who)
     owner.publisher = Some(channel.sender(to))
     wire_subscribed(mut owner, mut work, 1u32, failed_read_sub())
-    Some(StagedOwner(owner: take owner, work: take work, inbox: take inbox, closing: take closing, unused_head: take unused_head, round: take register, fence: take fence))
+    Some(StagedOwner(owner: take owner, work: take work, to: take reply_to, inbox: take inbox, closing: take closing, unused_head: take unused_head, round: take register, fence: take fence))
 }
 
 fn staged_packet(mut peer: StagedOwner, take notice: Notice) -> (u64, Bytes) {
@@ -486,5 +488,275 @@ fn test_release_after_durable(d: Dir, clock: Clock, random: Random, tasks: Tasks
     let db = result.unwrap(store.open(tasks, dir, clock, random, opts))
     let _ = staged_socket_trial(take db, random, tasks, Poison)?
     result.unwrap(std.dir.remove_all(d, name))
+    Ok(())
+}
+
+// L91 (E1, F5): (1) behind the S3 PUT head latch, a zero-mutation run reading
+// the un-durable commit emits no extra PUT head, returns Done.info == None,
+// keeps durable_now == Ok(false) and 0 socket bytes while latched, resolves
+// position == (store, 0, v) after release, and releasing a zero-write attempt
+// at unchanged version v emits reply-only socket bytes with no second
+// subscription frame; (2) on the Poison arm, durable on the skipped ticket
+// returns Poisoned, discards output, and passes std.sim.history.recovered.
+@test
+fn test_zero_mutation_behind_latch(d: Dir, real: Clock, random: Random, tasks: Tasks) -> Result[(), String] waits {
+    // --- Arm 1: sim@1 bucket with S3 PUT head #7 latch (E1 + F5) ---
+    let seed = 9161u64
+    let address = Addr(ip: V4(2130706433u32), port: 8080u16)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut peers: List[Ip] = list.with_capacity(1u64)
+    list.push(mut peers, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take peers)
+    let key_bytes: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing: Bytes = list.with_capacity(32u64)
+    let _ = bytebuf.append_inline(mut signing, key_bytes, 0u64, 32u64)
+    let verify = result.unwrap(secret.seal(take signing, "verify"))
+    let mut head_holds: List[std.sim.s3.Hold] = list.with_capacity(1u64)
+    list.push(mut head_holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 7u64, count: 1u64, until: Requested("GET", "release-l91", 1u64), then: Apply))
+    let config = std.sim.s3.Config(address, cut: None, network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take verify, faults: list.new(), holds: take head_holds, exists_status: 412, fragment_bytes: 4096, max_body: 1048576)
+    let (take virtual, sim_time) = std.sim.world.new(seed, 0u64, 1369353600000u64)
+    let (control, clock_cmds): (Sender[StagedClockCommand], Receiver[StagedClockCommand]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536u64, StagedClock(world: take virtual, commands: take clock_cmds, real), staged_clock)
+    let (endpoint, take sim) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(seed), sim_time, 1048576u64, 16777216u64)
+    let mut world = result.unwrap(store.level_world(tasks, sim_time, list.new(), 1048576u64))
+    let authority = store.sim_authority(sim_release_client(endpoint, sim_time, tasks, random), sim_release_levels(), result.unwrap(store.level_sync(mut world)), 30000u64)
+    let mut db = match store.open_authority(tasks, take authority, sim_time, random, sim_release_options()) {
+        Ok(take value) => take value,
+        Error(_) => return Error("L91 E1: could not open simulated bucket"),
+    }
+    let mut schema = result.unwrap(store.declare(db, Migrate))
+    let data = result.unwrap(staged_law_table(mut schema))
+    let schema_ticket = result.unwrap(store.seal(mut db, take schema))
+    result.unwrap(store.durable(mut db, schema_ticket))
+    set(mut db, data, 0u64, 1u64)
+    set(mut db, data, 1u64, 3u64)
+    let base_write: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut db, None, data, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        store.put(mut tx, bound_data, 2u64, 4u64)
+    })
+    let Committed(store.Done(ticket: base_ticket, ..)) = result.unwrap(take base_write) else {
+        return Error("L91 E1: base write did not commit")
+    }
+    result.unwrap(store.durable(mut db, base_ticket))
+    let base = store.snapshot(db)
+    let a = store.version(base)
+    let mut history = std.sim.history.new(seed)
+    std.sim.history.model(mut history, a, b"1")
+    std.sim.history.model(mut history, a + 1u64, b"2")
+    let Mailbox(to: take out, from: take inbox, rounds: take rounds) = result.unwrap(mailbox(8u64))
+    let to = channel.sender(out)
+    let (ready_to, ready_from): (Sender[Option[RegisterError]], Receiver[Option[RegisterError]]) = channel.new(1u64)
+    let job = Publish(placing: placing_at(code.describe(subs_place), 1048576u64), n_place: 1048576u64, staging: 1048576u64, h: arc.new(Qh(t: clone(data))), read_handle: result.unwrap(store.reader(db, 0u64)), base: take base, from: take inbox, rounds: take rounds, ready: take ready_to)
+    let publishing = task.spawn(tasks, bytes 8388608u64, take job, publish)
+    if let Ok(None) = channel.receive(ready_from) {} else {
+        return Error("L91 E1: publisher did not start")
+    }
+    let (time, take stopped_clock) = provide.clock(0u64, 0u64)
+    let mut ticks = take stopped_clock
+    let (socket_net, take port) = provide.net(bytes 4096u64)
+    let (write_to, writes): (Sender[StagedSocket], Receiver[StagedSocket]) = channel.new(4u64)
+    let (rec_cmds, resume_recording): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let recorder = task.spawn(tasks, bytes 65536u64, StagedRecorder(port: take port, next: take resume_recording, clock: time, writes: take write_to), staged_record)
+    let mut socket = staged_open_socket(socket_net, rec_cmds)
+    let mut peer = option.unwrap(staged_subscribe(to, tasks, time, random))
+    if staged_receive(mut peer, mut socket, rec_cmds) != a {
+        return Error("L91 E1: initial Batch version mismatch")
+    }
+    let _ = result.unwrap(channel.receive(writes))
+    // Pause virtual clock while Commit A is held behind PUT head #7.
+    let (ready, paused): (Sender[()], Receiver[()]) = channel.new(1u64)
+    result.unwrap(channel.send(control, Pause(take ready)))
+    result.unwrap(channel.receive(paused))
+    let written_a: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut db, None, data, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        staged_law_write(mut tx, bound_data)
+    })
+    let Committed(store.Done(ticket: ticket_a, ..)) = result.unwrap(take written_a) else {
+        return Error("L91 E1: Commit A did not commit")
+    }
+    let empty_registry: Registry[(), ()] = registry()
+    let mut hd: Head[(), ()] = Head(db: take db, anonymous: anonymous_streams(), r: take empty_registry, replay_identity: list.new(), h: arc.new(()), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: Some(ticket_a), held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let v = store.version(store.snapshot(hd.db))
+    close_group(mut hd)
+    result.unwrap(std.sim.s3.requested(endpoint, "PUT", "head", 7u64))
+    if let Ok(false) = store.durable_now(mut hd.db, ticket_a) {} else {
+        return Error("L91 E1: latch did not hold Commit A")
+    }
+    // Zero-mutation run B reads Commit A's row 0 behind the latch.
+    let read_b: Result[store.Outcome[Option[u64], store.Error], store.Error] = store.run(mut hd.db, None, data, fn(mut tx, bound_data) -> Result[Option[u64], store.Error] {
+        store.fetch(tx, bound_data, 0u64)
+    })
+    let Committed(done_b) = result.unwrap(take read_b) else {
+        return Error("L91 E1: zero-mutation run B did not commit")
+    }
+    if done_b.value != Some(2u64) || store.version(store.snapshot(hd.db)) != v {
+        return Error("L91 E1: zero-mutation run B saw wrong value or advanced version")
+    }
+    if let Some(_) = done_b.info {
+        return Error("L91 E1/F2: zero-mutation run B returned Some(CallInfo)")
+    }
+    if let Ok(false) = store.durable_now(mut hd.db, done_b.ticket) {} else {
+        return Error("L91 E1: durable_now on skipped ticket returned true while latched")
+    }
+    if let Ok(_) = channel.try_receive(writes) {
+        return Error("L91 E1: socket received bytes while latched")
+    }
+    // Open the S3 latch and release Commit A first.
+    let marker = b"GET /release-l91 HTTP/1.1\r\nHost: bucket.s3.test:8080\r\nConnection: close\r\n\r\n"
+    let bucket_net = std.sim.s3.endpoint_network(endpoint)
+    let (_, take output) = net.split(result.unwrap(host.connect(bucket_net, Addr(ip: V4(2130706433u32), port: 8080u16), Never)))
+    let mut marker_socket = take output
+    let mut sent = 0u64
+    while sent < list.len(marker) {
+        let count = result.unwrap(host.send_pair(mut marker_socket, list.slice(marker, sent, list.len(marker)), b"", Never))
+        if count == 0u64 {
+            return Error("L91 E1: latch release marker incomplete")
+        }
+        sent += count
+    }
+    result.unwrap(std.sim.s3.requested(endpoint, "GET", "release-l91", 1u64))
+    result.unwrap(channel.send(control, Resume))
+    if let Error(_) = release_held(mut hd, true) {
+        return Error("L91 E1: release_held failed after latch opened")
+    }
+    if staged_receive(mut peer, mut socket, rec_cmds) != v {
+        return Error("L91 E1: released subscription Batch had wrong version")
+    }
+    let _ = result.unwrap(channel.receive(writes))
+    std.sim.history.check(std.sim.history.committed(mut history, b"a", v, b"2"))
+    std.sim.history.check(std.sim.history.reply(mut history, 1u64, b"a", v, Some(b"2")))
+    let pos_b = result.unwrap(store.position(mut hd.db, done_b.ticket))
+    if pos_b.branch != 0u32 || pos_b.version != v {
+        return Error("L91 E1: position(done_b.ticket) did not equal (store, 0, v)")
+    }
+    // F5: zero-write attempt at unchanged version v -> stage + release ->
+    // socket bytes equal the reply only, with no second subscription frame.
+    let req_b2 = std.sim.history.request(history, 1u64, Fresh)
+    let read_b2: Result[store.Outcome[Option[u64], store.Error], store.Error] = store.run(mut hd.db, None, data, fn(mut tx, bound_data) -> Result[Option[u64], store.Error] {
+        store.fetch(tx, bound_data, 0u64)
+    })
+    let Committed(done_b2) = result.unwrap(take read_b2) else {
+        return Error("L91 F5: zero-write attempt B2 did not commit")
+    }
+    if done_b2.value != Some(2u64) || store.version(store.snapshot(hd.db)) != v {
+        return Error("L91 F5: B2 saw wrong value or advanced version")
+    }
+    if let Some(_) = done_b2.info {
+        return Error("L91 F5/F2: B2 returned Some(CallInfo)")
+    }
+    let sid = store.StreamId(t: 1u64, n: 1u64)
+    let skey = store.StreamKey(caller: law_caller(1u64), id: sid)
+    let raw_stream = result.unwrap(store.stream_key_bytes(skey))
+    let held_slot = slot_key(raw_stream, 0u64)
+    let mut owed_list: List[WireOwed] = list.with_capacity(1u64)
+    list.push(mut owed_list, WireOwed(generation: 1u64, reply: list.new()))
+    let req_digest = store.request_digest(b"f5", b"")
+    let held_entry = WireHeld(stream: sid, p: 0u64, digest: req_digest, forwarded: true, queued: 0u64, owed: take owed_list)
+    map.insert(mut peer.owner.held, take held_slot, take held_entry)
+    let reply_payload: Bytes = clone(b"2")
+    let who = option.unwrap(peer.owner.joined)
+    let mut waiters: List[CallWaiter] = list.with_capacity(1u64)
+    list.push(mut waiters, CallWaiter(owner: who, target: WireReply(channel.sender(peer.to))))
+    let held_worker = Worker(p: 0u64, digest: req_digest, version: v, outcome: Returned(clone(reply_payload)), waiters: take waiters)
+    map.insert(mut hd.busy, clone(raw_stream), take held_worker)
+    list.push(mut hd.group, take raw_stream)
+    hd.last = Some(done_b2.ticket)
+    close_group(mut hd)
+    if let Error(_) = release_held(mut hd, true) {
+        return Error("L91 F5: release_held at unchanged version failed")
+    }
+    let Ok(WireEvent(e: FromRunner(take reply_notice))) = channel.receive(peer.inbox) else {
+        return Error("L91 F5: reply notice missing")
+    }
+    result.unwrap(wire_step(mut peer.owner, mut peer.work, WRunner(take reply_notice)))
+    let out_frame = option.unwrap(result.unwrap(wire_take_output(peer.owner, mut peer.work)))
+    let Batch(batch_at, dropped_subs, sub_groups, reply_rows) = view out_frame else {
+        return Error("L91 F5: expected Batch reply frame")
+    }
+    if batch_at != v || list.len(dropped_subs) != 0u64 || list.len(sub_groups) != 0u64 || list.len(reply_rows) != 1u64 {
+        return Error("L91 F5: unchanged-version Release emitted a subscription frame or wrong reply count")
+    }
+    let out_ws = result.unwrap(std.wsock.outbound(Server, wire_defaults(0u64).socket, None))
+    let actual_bytes = result.unwrap(encode_published_frame(out_ws, out_frame, peer.work.packing))
+    result.unwrap(channel.send(rec_cmds, ()))
+    if result.unwrap(host.send_pair(mut socket, actual_bytes, b"", Never)) != list.len(actual_bytes) {
+        return Error("L91 F5: partial socket write")
+    }
+    wire_sent(mut peer.owner, mut peer.work)
+    let StagedSocket(packet: take recorded_bytes, ..) = result.unwrap(channel.receive(writes))
+    let mut expected_rows: List[Done] = list.with_capacity(1u64)
+    list.push(mut expected_rows, Done(stream: sid, p: 0u64, outcome: Returned(take reply_payload)))
+    let expected_ws = result.unwrap(std.wsock.outbound(Server, wire_defaults(0u64).socket, None))
+    let expected_bytes = result.unwrap(encode_published_frame(expected_ws, Batch(v, list.new(), list.new(), take expected_rows), peer.work.packing))
+    if recorded_bytes != expected_bytes {
+        return Error("L91 F5: socket bytes did not equal the reply-only frame")
+    }
+    if let Ok(_) = channel.try_receive(peer.inbox) {
+        return Error("L91 F5: unexpected extra notice after unchanged-version Release")
+    }
+    std.sim.history.check(std.sim.history.read(mut history, req_b2, v, b"2"))
+    std.sim.history.check(std.sim.history.recovered(history, v))
+    let _ = channel.send(to, PubIn(e: Halt))
+    result.unwrap(task.join(take publishing))
+    let _ = take rec_cmds
+    result.unwrap(task.join(take recorder))
+    let Head(db: take completed, ..) = take hd
+    result.unwrap(store.close(take completed))
+    let _ = result.unwrap(store.level_log(take world))
+    let _ = channel.send(control, Stop)
+    let report = result.unwrap(task.join(take sim))
+    result.unwrap(task.join(take driver))
+    let _ = take ticks
+    // Only 7 PUT head writes total (B and B2 wrote 0 PUT head).
+    if list.len(report.head_writes) != 7u64 {
+        return Error("L91 E1/F5: skipped runs issued an extra PUT head")
+    }
+    // --- Arm 2: Poison arm on Directory store (E1 Poison + OutputGate) ---
+    let mut dir_name = string.with_capacity(64u64)
+    let dir = result.unwrap(std.dir.create_temp(d, mut dir_name))
+    let opts = result.unwrap(store.sized(Directory, 134217728u64))
+    let mut pdb = result.unwrap(store.open(tasks, dir, real, random, opts))
+    let mut pschema = result.unwrap(store.declare(pdb, Migrate))
+    let pdata = result.unwrap(staged_law_table(mut pschema))
+    let pticket = result.unwrap(store.seal(mut pdb, take pschema))
+    result.unwrap(store.durable(mut pdb, pticket))
+    set(mut pdb, pdata, 0u64, 1u64)
+    let pa = store.version(store.snapshot(pdb))
+    let mut phistory = std.sim.history.new(seed + 1u64)
+    std.sim.history.model(mut phistory, pa, b"1")
+    let pwrite: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut pdb, None, pdata, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        store.put(mut tx, bound_data, 0u64, 2u64)
+    })
+    let Committed(store.Done(ticket: pticket_a, ..)) = result.unwrap(take pwrite) else {
+        return Error("L91 E1 Poison: write A did not commit")
+    }
+    let pread: Result[store.Outcome[Option[u64], store.Error], store.Error] = store.run(mut pdb, None, pdata, fn(mut tx, bound_data) -> Result[Option[u64], store.Error] {
+        store.fetch(tx, bound_data, 0u64)
+    })
+    let Committed(pdone_b) = result.unwrap(take pread) else {
+        return Error("L91 E1 Poison: skipped read B did not commit")
+    }
+    if pdone_b.value != Some(2u64) {
+        return Error("L91 E1 Poison: skipped read B saw wrong value")
+    }
+    if let Some(_) = pdone_b.info {
+        return Error("L91 E1 Poison: skipped read B returned Some(CallInfo)")
+    }
+    let _ = pticket_a
+    store.fixture_broken_handoff(mut pdb)
+    let pfail: Result[store.Outcome[(), store.Error], store.Error] = store.run(mut pdb, None, pdata, fn(mut tx, bound_data) -> Result[(), store.Error] {
+        store.put(mut tx, bound_data, 3u64, 9u64)
+    })
+    if let Error(Poisoned(Closed)) = pfail {} else {
+        return Error("L91 E1 Poison: broken handoff did not poison store")
+    }
+    if let Error(Poisoned(Closed)) = store.durable(mut pdb, pdone_b.ticket) {} else {
+        return Error("L91 E1 Poison: durable on skipped ticket did not return Poisoned")
+    }
+    // Because B's output was never released, history.recovered at pa passes cleanly.
+    std.sim.history.check(std.sim.history.recovered(phistory, pa))
+    // This arm poisons the store on purpose, so the trust teardown is waived.
+    let pid = store.identity(pdb)
+    store.allow_unverified_teardown(pid.hi, pid.lo)
+    let _ = store.close(take pdb)
+    result.unwrap(std.dir.remove_all(d, dir_name))
     Ok(())
 }

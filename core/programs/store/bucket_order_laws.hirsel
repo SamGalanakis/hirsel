@@ -28,6 +28,7 @@ fn bucket_order_open(tasks: Tasks, r: Random, clock: Clock, endpoint: std.sim.s3
 // and their automatic cuts out of the head request schedule.
 fn bucket_order_commit(mut db: Db) -> Result[Ticket, Error] waits {
     let written = run(mut db, None, (), fn(mut tx, unused_env) -> Result[(), Error] {
+        let _ = info(mut tx)
         Ok(())
     })?
     let Committed(done) = written else {
@@ -544,4 +545,96 @@ fn bucket_test_m2_follower(c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -
     let checked = trust_bucket_then(tasks, sim, "s3.test", bucket_m2_law_follow(tasks, r, sim, seed))
     let _ = bucket_law_finish(take sim)
     trust_seed_gate("bucket_test_m2_follower", take checked)
+}
+
+// L91 (F1, E7): idle Bucket holder A with every frame durable is deposed by B,
+// who claims and commits a change to key k. Before A's idle poll, A runs a
+// zero-mutation run reading k. A must return and latch Fenced (red without
+// the skip-time conditional head GET).
+@test
+fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let sim = bucket_law_sim(tasks, c, 9101, None, list.new())
+    let mut history = std.sim.history.new(9101)
+    let mut a = bucket_order_open(tasks, r, sim.time, sim.endpoint, 1, true)?
+    let _ = law_table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(w1) = run(mut a, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 10u64)
+    })? else {
+        fail("L91 F1: A initial write failed")
+    }
+    durable(mut a, w1.ticket)?
+    let v_a = version(snapshot(a))
+    std.sim.history.model(mut history, v_a, key_word(10u64))
+    std.sim.history.check(std.sim.history.committed(mut history, key_word(1u64), v_a, key_word(10u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 1, key_word(1u64), v_a, Some(key_word(10u64))))
+    // While A still owns the claim, a zero-mutation run succeeds with 0 new PUT head.
+    let seq_before = a.frame_seq
+    let req_a1 = std.sim.history.request(history, 1, Fresh)
+    let Committed(r_ok) = run(mut a, None, copy_env(rows), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    })? else {
+        fail("L91 F1: unfenced zero-mutation run failed")
+    }
+    if r_ok.value != Some(10u64) || version(snapshot(a)) != v_a || a.frame_seq != seq_before {
+        fail("L91 F1: unfenced skipped run changed version or frame_seq")
+    }
+    if let Some(_) = r_ok.info {
+        fail("L91 F1/F2: unfenced skipped run returned Some(CallInfo)")
+    }
+    std.sim.history.check(std.sim.history.read(mut history, req_a1, v_a, key_word(10u64)))
+    // B claims the store and commits k = 20.
+    let mut b = bucket_order_open(tasks, r, sim.time, sim.endpoint, 2, false)?
+    let rows_b = table(mut b, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(w2) = run(mut b, None, copy_env(rows_b), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 20u64)
+    })? else {
+        fail("L91 F1: B write failed")
+    }
+    durable(mut b, w2.ticket)?
+    let v_b = version(snapshot(b))
+    std.sim.history.model(mut history, v_b, key_word(20u64))
+    std.sim.history.check(std.sim.history.committed(mut history, key_word(2u64), v_b, key_word(20u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 2, key_word(2u64), v_b, Some(key_word(20u64))))
+    close(take b)?
+    // A is idle with every frame durable; A runs a zero-mutation run reading k.
+    // Without the skip-time head read, A would return Ok(Committed(Some(10)))
+    // and durable would succeed, releasing stale data and failing Freshness.
+    let req_stale = std.sim.history.request(history, 1, Fresh)
+    match run(mut a, None, copy_env(rows), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    }) {
+        Error(Fenced(1)) => (),
+        Ok(Committed(done)) => {
+            let _ = durable(mut a, done.ticket)
+            std.sim.history.check(std.sim.history.read(mut history, req_stale, version(snapshot(a)), key_word(option.unwrap(done.value))))
+            fail("L91 F1: deposed Bucket holder committed stale zero-mutation run")
+        },
+        _ => fail("L91 F1: deposed Bucket holder did not return Fenced(1)"),
+    }
+    // Fenced must be latched on A.
+    match health(a) {
+        Fenced(1) => (),
+        _ => fail("L91 F1: Fenced was not latched in health(a)"),
+    }
+    match run(mut a, None, copy_env(rows), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    }) {
+        Error(Fenced(1)) => (),
+        _ => fail("L91 F1: second zero-mutation run on fenced holder was not refused"),
+    }
+    let _ = close(take a)
+    let report = bucket_law_finish(take sim)
+    // Verify the unfenced skip issued a conditional 304 GET head and the fenced
+    // skip issued a 200 GET head with no extra PUT head from A.
+    let mut saw_304 = false
+    for req in report.requests {
+        if req.method == "GET" && req.key == "head" && req.status == 304 {
+            saw_304 = true
+        }
+    }
+    if !saw_304 {
+        fail("L91 F1: unfenced skip did not issue a conditional 304 head GET")
+    }
+    Ok(())
 }

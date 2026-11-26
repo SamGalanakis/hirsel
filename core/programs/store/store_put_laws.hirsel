@@ -327,8 +327,11 @@ pub fn law_call_info(c: Clock) -> bool {
             Ok(info(mut tx).at)
         })
         match take outcome {
-            Ok(Committed(done)) => if done.value != 30 || done.info.at != 30 {
-                return false
+            Ok(Committed(done)) => match done.info {
+                Some(ci) => if done.value != 30 || ci.at != 30 {
+                    return false
+                },
+                None => return false,
             },
             _ => return false
         }

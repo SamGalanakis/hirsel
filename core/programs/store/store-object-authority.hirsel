@@ -62,3 +62,22 @@ fn history_probe_head(mut client: std.object.Client, cached_tag: std.object.ETag
         Error(take e) => Error(Remote(take e)),
     }
 }
+
+fn history_probe_head_attach(mut client: std.object.Client, cached_tag: std.object.ETag, mut scratch: Bytes, deadline: u64) -> Result[Option[(HistoryCapture, std.object.ETag)], Error] waits {
+    list.clear(mut scratch)
+    let (take outcome, take body) = std.object.fetch_if_changed(mut client, "head", cached_tag, replace(mut scratch, list.new()), deadline)
+    scratch = take body
+    match take outcome {
+        Ok(None) => Ok(None),
+        Ok(Some(meta)) => {
+            if meta.size != list.len(scratch) || meta.etag.len == 0 {
+                return Error(disk_fault("head", 0, Truncated))
+            }
+            let (take received, _) = history_decode_head_attach(scratch)?
+            history_check_namespace(received, client)?
+            Ok(Some((take received, meta.etag)))
+        },
+        Error(NotFound) => Error(disk_fault("head", 0, Absent)),
+        Error(take e) => Error(Remote(take e)),
+    }
+}

@@ -207,7 +207,8 @@ pub fn journal_law_trigger_transact(d: Dir, c: Clock, r: Random, tasks: Tasks) -
     if later.index != 0u64 || early.index != 1u64 || aborted.index != 2u64 || faulted.index != 3u64 {
         return false
     }
-    if early.version != committed.info.id.version || early.branch != committed.info.id.branch {
+    let committed_info = option.unwrap(committed.info)
+    if early.version != committed_info.id.version || early.branch != committed_info.id.branch {
         return false
     }
     result.unwrap(store.durable(mut initial, committed.ticket))

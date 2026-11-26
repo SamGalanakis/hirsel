@@ -665,3 +665,80 @@ fn schema_steps_journal_replay_run(d: Dir, c: Clock, r: Random, tasks: Tasks, se
 fn test_schema_steps_journal_replay(d: Dir, c: Clock, r: Random, tasks: Tasks, seed_grant: Env) -> Result[(), Error] waits {
     trust_seed_gate("test_schema_steps_journal_replay", schema_steps_journal_replay_run(d, c, r, tasks, seed_grant))
 }
+
+// L91 (E5): a skipped zero-mutation commit's ticket works with sim@1 weak vs
+// strongest levels (durable_at volatile succeeds while strongest is held,
+// durable_now stays false until strongest applies) and position(skipped.ticket)
+// is reachable by follower at_least.
+@test
+fn test_empty_commit_follower_and_weak_level(real: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let seed = 9105u64
+    // Genesis writes 2 heads (PUT 1, 2); schema declare writes 1 (PUT 3);
+    // seed row writes 1 (PUT 4); W1 writes PUT 5, held until GET mark-e5.
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "head", from: 5, count: 1, until: Requested("GET", "mark-e5", 1), then: Apply))
+    let sim = bucket_law_sim_holds(tasks, real, seed, None, list.new(), take holds, std.sim.world.plan(seed))
+    let mut world = level_world(tasks, sim.time, list.new(), 1048576)?
+    let declare_levels = sim_law_declared("volatile", None)
+    let mut writer = sim_law_open(tasks, r, sim, 691, declare_levels, level_sync(mut world)?, true)?
+    let _ = law_table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = table(mut writer, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(seed_done) = run(mut writer, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 10u64)
+    })? else {
+        fail("L91 E5: seed write failed")
+    }
+    durable(mut writer, seed_done.ticket)?
+    // Commit W1: PUT head #5 is held at strongest, but volatile advances.
+    let Committed(w1) = run(mut writer, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 20u64)
+    })? else {
+        fail("L91 E5: W1 failed")
+    }
+    let v_w1 = version(snapshot(writer))
+    let seq_w1 = writer.frame_seq
+    let weak = level(writer, "volatile")?
+    durable_at(mut writer, w1.ticket, weak)?
+    // Run zero-mutation R1 while W1 is durable at volatile only (not strongest).
+    let Committed(r1) = run(mut writer, None, copy_env(rows), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    })? else {
+        fail("L91 E5: R1 did not commit")
+    }
+    if r1.value != Some(20u64) || version(snapshot(writer)) != v_w1 || writer.frame_seq != seq_w1 {
+        fail("L91 E5: R1 advanced version or frame_seq")
+    }
+    if let Some(_) = r1.info {
+        fail("L91 E5/F2: R1 returned Some(CallInfo)")
+    }
+    durable_at(mut writer, r1.ticket, weak)?
+    if durable_now(mut writer, r1.ticket)? {
+        fail("L91 E5: durable_now returned true while W1 strongest barrier was held")
+    }
+    // Release PUT head #5 via marker GET.
+    let mut marker = bucket_law_client_with(sim, tasks, "s3.test", 692, true)?
+    let due = std.object.deadline_after_ms(marker, BUCKET_LAW_OP_MS)
+    let _ = std.object.fetch(mut marker, "mark-e5", list.new(), due)
+    let _ = take marker
+    durable(mut writer, r1.ticket)?
+    let pos = position(mut writer, r1.ticket)?
+    if pos.branch != 0u32 || pos.version != v_w1 {
+        fail("L91 E5: position(r1.ticket) did not match W1")
+    }
+    let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_order_options(false))
+    let service = follower_law_service(tasks, plan, 1)?
+    let mut ids = followers()
+    let follow_client = bucket_law_client_with(sim, tasks, "s3.test", 693, true)?
+    let no_levels = SimLevels(weak: list.new(), strongest: "durable")
+    let mut watch = follower(mut ids, follower_slot(follower_owner(service)?, plan)?, sim_authority(take follow_client, no_levels, level_sync(mut world)?, BUCKET_LAW_OP_MS), sim.time, Some(pos.store))?
+    let reached = at_least(mut watch, pos, std.clock.deadline_after_ms(host.mono_ns(sim.time), BUCKET_LAW_OP_MS))?
+    if version(reached) != v_w1 || get(follower_reader(watch, 0)?, reached, rows, 1u64)? != Some(20u64) {
+        fail("L91 E5: follower at_least(position(r1.ticket)) did not reach W1")
+    }
+    let _ = take watch
+    close_follower_service(take service)?
+    close(take writer)?
+    let _ = level_log(take world)?
+    let _ = bucket_law_finish(take sim)
+    Ok(())
+}

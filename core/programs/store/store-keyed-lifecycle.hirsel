@@ -138,6 +138,29 @@ fn check_keyed_open(db: Db, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[
     Ok((sampled, None))
 }
 
+fn commit_clock_floor(mut db: Db, at: u64) -> Result[(), Error] waits {
+    if at > db.heads[0].at {
+        let keep: Option[fn(Error) -> bool] = None
+        let outcome = store_body_at_with(mut db, 0, at, None, keep, true, scoped fn(mut _tx: Tx) -> Result[(), Error] {
+            Ok(())
+        })?
+        match take outcome {
+            Committed(done) => durable(mut db, done.ticket),
+            Refused(problem) => Error(Full(problem)),
+            Aborted(Undone(value: take problem, ..)) => Error(take problem),
+            _ => Error(Missing("claim open check")),
+        }
+    } else {
+        let sent_sequence = if !is_disk(db) {
+            db.changes
+        } else {
+            db.frame_seq
+        }
+        let floor_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, 0, db.heads[0].head))
+        durable(mut db, floor_ticket)
+    }
+}
+
 /// Verify that unbound operations have no live claims. The clock this check
 /// uses becomes durable before the absence of live claims is relied on.
 pub fn check_dropped_claim_ops(mut db: Db, bound_op: scoped[view] fn(Bytes) -> bool) -> Result[Option[DroppedClaimOp], Error] waits {
@@ -147,16 +170,7 @@ pub fn check_dropped_claim_ops(mut db: Db, bound_op: scoped[view] fn(Bytes) -> b
     let Some(at) = sampled else {
         return Ok(None)
     }
-    let keep: Option[fn(Error) -> bool] = None
-    let outcome = store_body_at(mut db, 0, at, None, keep, scoped fn(mut _tx: Tx) -> Result[(), Error] {
-        Ok(())
-    })?
-    match take outcome {
-        Committed(done) => durable(mut db, done.ticket)?,
-        Refused(problem) => return Error(Full(problem)),
-        Aborted(Undone(value: take problem, ..)) => return Error(take problem),
-        _ => return Error(Missing("claim open check")),
-    }
+    commit_clock_floor(mut db, at)?
     Ok(take dropped)
 }
 

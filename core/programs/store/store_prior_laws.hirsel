@@ -121,12 +121,15 @@ fn journal_test_table_priors(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resul
         Error(Corrupt(Fault(why: Malformed, ..))) => (),
         _ => return Error(Missing("oversized prior refusal")),
     }
-    if initial.info.id.version + 1 != changed.info.id.version || changed.info.id.version + 1 != removed.info.id.version {
+    let initial_info = option.unwrap(initial.info)
+    let changed_info = option.unwrap(changed.info)
+    let removed_info = option.unwrap(removed.info)
+    if initial_info.id.version + 1 != changed_info.id.version || changed_info.id.version + 1 != removed_info.id.version {
         return Error(Missing("version sequence"))
     }
     close(take db)?
     let reopened = open(tasks, dir, c, r, options)?
-    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 || reopened.heads[0].head != removed.info.id.version {
+    if reopened.resident != baseline || page_row_count(reopened.heads[0].roots.collections) != 0 || reopened.heads[0].head != removed_info.id.version {
         return Error(Missing("replayed table account"))
     }
     close(take reopened)
@@ -521,7 +524,7 @@ fn replay_budget_write(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(Dir
         return Error(Missing("10,000-row journal commit"))
     }
     durable(mut db, written.ticket)?
-    Ok((directory, take db, written.info.id.version))
+    Ok((directory, take db, option.unwrap(written.info).id.version))
 }
 
 @test

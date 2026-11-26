@@ -721,3 +721,15 @@ limit = 268435456
 [tests.runs."store@1/store/bucket_test_pack_cache"]
 limit = 134217728
 grants = ["Clock", "Random", "Tasks", "Env=HIRSEL_TEST_SIM_SEED", "Stdout"]
+
+[tests.runs."store@1/store/bucket_test_empty_commit_fenced"]
+limit = 268435456
+
+[tests.runs."store@1/store/bucket_stream_empty_commit_fenced"]
+limit = 402653184
+
+[tests.runs."store@1/store/journal_test_empty_commit_at_limit_and_due_cut"]
+limit = 536870912
+
+[tests.runs."store@1/store/test_empty_commit_follower_and_weak_level"]
+limit = 268435456

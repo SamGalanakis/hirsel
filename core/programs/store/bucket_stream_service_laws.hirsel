@@ -480,3 +480,111 @@ fn stream_cost_run(s: BucketSim, tasks: Tasks, r: Random, wait_ms: u64, start: u
     }
     close_journal_service(take service)
 }
+
+// L91 (F1, E7): idle host-stream attached holder A with every frame durable is
+// deposed by B, who claims and commits a change to key k. A's zero-mutation run
+// reading k must return and latch Fenced without releasing stale output.
+@test
+fn bucket_stream_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 9102, None, list.new())
+    let outcome = stream_empty_commit_fenced_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    let mut saw_304 = false
+    for req in report.requests {
+        if req.method == "GET" && req.key == "p1/head" && req.status == 304 {
+            saw_304 = true
+        }
+    }
+    if !saw_304 {
+        fail("L91 F1 (stream): unfenced skip did not issue a conditional 304 head GET")
+    }
+    Ok(())
+}
+
+fn stream_empty_commit_fenced_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut history = std.sim.history.new(9102)
+    let plan = stream_service_plan(4)
+    let mut service = stream_service_start(s, tasks, s.time, r, plan)?
+    // Create standalone Place with table declared, then attach A to the stream.
+    let client_init = stream_service_client(s, tasks, 911, "p1/", "us-east-1")?
+    let mut init_db = open_authority(tasks, object_authority(take client_init, "bucket", BUCKET_LAW_OP_MS), s.time, r, bucket_order_options(true)) ?=> |Refusal(error: take problem, ..)| take problem
+    let _ = law_table(mut init_db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    close(take init_db)?
+    let slot_a = journal_slot(mut service)?
+    let client_a = stream_service_client(s, tasks, 912, "p1/", "us-east-1")?
+    let attached_a = streamed(object_authority(take client_a, "bucket", BUCKET_LAW_OP_MS), take slot_a)?
+    let mut opts_a = bucket_order_options(false)
+    opts_a.head_poll_ms = 600000
+    let mut a = open_authority(tasks, take attached_a, s.time, r, opts_a) ?=> |Refusal(error: take problem, ..)| take problem
+    let rows_a = table(mut a, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(w1) = run(mut a, None, copy_env(rows_a), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 10u64)
+    })? else {
+        fail("L91 F1 (stream): A initial write failed")
+    }
+    durable(mut a, w1.ticket)?
+    let v_a = version(snapshot(a))
+    std.sim.history.model(mut history, v_a, key_word(10u64))
+    std.sim.history.check(std.sim.history.committed(mut history, key_word(1u64), v_a, key_word(10u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 1, key_word(1u64), v_a, Some(key_word(10u64))))
+    // Unfenced zero-mutation run on attached A succeeds via 304 head GET with 0 stream frames.
+    let seq_before = a.frame_seq
+    let req_ok = std.sim.history.request(history, 1, Fresh)
+    let Committed(r_ok) = run(mut a, None, copy_env(rows_a), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    })? else {
+        fail("L91 F1 (stream): unfenced zero-mutation run failed")
+    }
+    if r_ok.value != Some(10u64) || version(snapshot(a)) != v_a || a.frame_seq != seq_before {
+        fail("L91 F1 (stream): unfenced skip changed version or frame_seq")
+    }
+    if let Some(_) = r_ok.info {
+        fail("L91 F1/F2 (stream): unfenced skip returned Some(CallInfo)")
+    }
+    std.sim.history.check(std.sim.history.read(mut history, req_ok, v_a, key_word(10u64)))
+    // B claims the attached Place and commits k = 20.
+    let slot_b = journal_slot(mut service)?
+    let client_b = stream_service_client(s, tasks, 913, "p1/", "us-east-1")?
+    let attached_b = streamed(object_authority(take client_b, "bucket", BUCKET_LAW_OP_MS), take slot_b)?
+    let mut opts_b = bucket_order_options(false)
+    opts_b.head_poll_ms = 600000
+    let mut b = open_authority(tasks, take attached_b, s.time, r, opts_b) ?=> |Refusal(error: take problem, ..)| take problem
+    let rows_b = table(mut b, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let Committed(w2) = run(mut b, None, copy_env(rows_b), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 20u64)
+    })? else {
+        fail("L91 F1 (stream): B write failed")
+    }
+    durable(mut b, w2.ticket)?
+    let v_b = version(snapshot(b))
+    std.sim.history.model(mut history, v_b, key_word(20u64))
+    std.sim.history.check(std.sim.history.committed(mut history, key_word(2u64), v_b, key_word(20u64)))
+    std.sim.history.check(std.sim.history.reply(mut history, 2, key_word(2u64), v_b, Some(key_word(20u64))))
+    close(take b)?
+    // Idle deposed A runs a zero-mutation run reading k: must return and latch Fenced.
+    let req_stale = std.sim.history.request(history, 1, Fresh)
+    match run(mut a, None, copy_env(rows_a), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    }) {
+        Error(Fenced(_)) => (),
+        Ok(Committed(done)) => {
+            let _ = durable(mut a, done.ticket)
+            std.sim.history.check(std.sim.history.read(mut history, req_stale, version(snapshot(a)), key_word(option.unwrap(done.value))))
+            fail("L91 F1 (stream): deposed attached holder committed stale zero-mutation run")
+        },
+        _ => fail("L91 F1 (stream): deposed attached holder did not return Fenced"),
+    }
+    match health(a) {
+        Fenced(_) => (),
+        _ => fail("L91 F1 (stream): Fenced was not latched in health(a)"),
+    }
+    match run(mut a, None, copy_env(rows_a), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    }) {
+        Error(Fenced(_)) => (),
+        _ => fail("L91 F1 (stream): second zero-mutation run was not refused"),
+    }
+    let _ = close(take a)
+    close_journal_service(take service)
+}

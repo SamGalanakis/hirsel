@@ -449,7 +449,7 @@ fn l63_parked_prior(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Err
         fail("L63 (d): A commits after B moved the head")
     }
     durable(mut db, receipt.ticket)?
-    if receipt.reply != key_word(40) || version(snapshot(db)) != inserted.info.id.version + 1 {
+    if receipt.reply != key_word(40) || version(snapshot(db)) != option.unwrap(inserted.info).id.version + 1 {
         fail("L63 (d): A reruns at B's head, reads 40 and commits once")
     }
     let path = capacity(disk_path("j-", seq, ""))?

@@ -232,8 +232,11 @@ pub fn law_branches(c: Clock) -> bool waits {
         put(mut tx, call_env, 1, 200)
     }))
     match take on_b {
-        Committed(done) => if done.info.id.branch != 1 || done.info.id.version != 2 {
-            return false
+        Committed(done) => match done.info {
+            Some(ci) => if ci.id.branch != 1 || ci.id.version != 2 {
+                return false
+            },
+            None => return false,
         },
         _ => return false
     }

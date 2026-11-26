@@ -17,7 +17,7 @@ fn info_entry(mut tx: Tx, t: Table[u64, u64], forced: Option[CallInfo], extra: b
         result.unwrap(put(mut tx, t, 4, 1))
     }
     let mut output: Bytes = list.new()
-    for word in [before, ci.at, ci.seed, ci.id.version] {
+    for word in[before, ci.at, ci.seed, ci.id.version] {
         result.unwrap(le(mut output, word, 8))
     }
     Ok(take output)
@@ -134,8 +134,8 @@ fn reexecute_failed(mut db: Db, t: Table[u64, u64], plan: Plan) -> bool waits {
     let line = main_branch(db)
     let fault = result.unwrap(reexecute(db, line, v, plan, reexecute_fault_bytes, (copy_env(t), copy_env(attempted)), fn(_call, mut tx, call_env) -> Result[Bytes, Bytes] {
         let ci = info(mut tx)
-        let same_id = same(ci.id.store, call_env.1.id.store) && ci.id.branch == call_env.1.id.branch && ci.id.version == call_env.1.id.version
-        if !same_id || ci.at != call_env.1.at || ci.seed != call_env.1.seed {
+        let same_id = same(ci.id.store, call_env.1 .id.store) && ci.id.branch == call_env.1 .id.branch && ci.id.version == call_env.1 .id.version
+        if !same_id || ci.at != call_env.1 .at || ci.seed != call_env.1 .seed {
             return Error(key_word(1))
         }
         reexecute_fault_entry(mut tx, call_env.0)
@@ -277,4 +277,77 @@ fn test_l62_replay_stop_precedence(d: Dir, c: Clock, r: Random, tasks: Tasks) ->
         }
     }
     close(take db)
+}
+
+// L91 (E6): a zero-data-write serve still writes its streams-only COMMIT frame
+// and CallRecord (including 32-byte code.revision), preserving recorded, R5 Same,
+// and Duplicate after reopen.
+@test
+fn reexecute_zero_data_write_serve(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let options = result.unwrap(sized(Directory, 2147483648u64))
+    let mut db = open(tasks, dir, c, r, options)?
+    let _ = law_table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let t = table(mut db, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    if !set_row(mut db, t, 9u64, 42u64) {
+        fail("L91 E6: seed write failed")
+    }
+    let key = law_stream_bytes(key_word(91u64), keyed_time(db))
+    let mut record = call_for(clone(key), 32u64)
+    let mut rev: Bytes = list.with_capacity(32u64)
+    for b in 0u64 .. 32u64 {
+        let octet: u8 = int.truncate(b + 100u64)
+        list.push(mut rev, octet)
+    }
+    let expected_rev: Bytes = clone(rev)
+    record.revision = Some(take rev)
+    let digest = request_digest(record.key, record.args)
+    let Admitted(take complete) = admit_law_stream(mut db, key, 0u64, digest)? else {
+        fail("L91 E6: admit failed")
+    }
+    durable(mut db, ticket(complete))?
+    let v_before = version(snapshot(db))
+    let seq_before = db.frame_seq
+    let plan = Plan(n_e: 65536u64, s_e: 65536u64, reply_max: 4096u64)
+    let served = result.unwrap(serve(mut db, take complete, plan, Some(take record), copy_env(t), fn(mut tx, rows) -> Result[Bytes, Bytes] {
+        let got = match result.unwrap(fetch(tx, rows, 9u64)) {
+            Some(n) => n,
+            None => 0u64,
+        }
+        Ok(key_word(got))
+    }))
+    let Committed(receipt) = take served else {
+        fail("L91 E6: zero-data-write serve did not commit")
+    }
+    durable(mut db, receipt.ticket)?
+    let v_after = version(snapshot(db))
+    if v_after != v_before + 1 || db.frame_seq != seq_before + 1 || receipt.reply != key_word(42u64) {
+        fail("L91 E6: zero-data-write serve was skipped or lost its reply")
+    }
+    let Some(saved_call) = recorded(db, main_branch(db), v_after)? else {
+        fail("L91 E6: recorded lost CallRecord")
+    }
+    if saved_call.record.revision != Some(expected_rev) {
+        fail("L91 E6: recorded lost code.revision")
+    }
+    let failed = fn(_stop: Stop) -> Bytes {
+        key_word(0u64)
+    }
+    let verdict = reexecute(db, main_branch(db), v_after, plan, failed, copy_env(t), fn(_call, mut tx, rows) -> Result[Bytes, Bytes] {
+        let got = match result.unwrap(fetch(tx, rows, 9u64)) {
+            Some(n) => n,
+            None => 0u64,
+        }
+        Ok(key_word(got))
+    })?
+    if !verdict_is(verdict, Same) {
+        fail("L91 E6: reexecute did not return Same")
+    }
+    close(take db)?
+    let mut reopened = open(tasks, dir, c, r, options)?
+    match admit_law_stream(mut reopened, key, 0u64, digest)? {
+        Duplicate(stored) if stored.reply == key_word(42u64) => (),
+        _ => fail("L91 E6: retry admit after reopen did not return Duplicate"),
+    }
+    close(take reopened)
 }

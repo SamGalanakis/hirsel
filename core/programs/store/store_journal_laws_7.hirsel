@@ -145,3 +145,268 @@ fn journal_test_replay_over_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
         Error(())
     }
 }
+
+// L91 (E2): every zero-mutation shape (pure read, rejected guard Ok, absent
+// delete, empty pop_first/pop_last, byte-equal cell_set, empty cell_clear,
+// cell_set reverted to base, no-op trim_before, rolled-back error/overrun
+// callbacks) writes 0 frames and 0 bytes, leaves version/follow unchanged,
+// returns Done.info = None and exact Done.reads, while same-value put still
+// writes a frame and W2 replays contiguously on reopen.
+@test
+fn journal_test_empty_commit_skip(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut decl = declare(db, Migrate)?
+    let td = declare_table(mut decl, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = finish(mut decl, take td)?
+    let etd = declare_table(mut decl, "empty_rows", std.codec.key_u64(), std.codec.of_u64())?
+    let empty_rows = finish(mut decl, take etd)?
+    let cell_h = declare_cell(mut decl, "flag", std.codec.of_u64())?
+    let empty_cell = declare_cell(mut decl, "unset", std.codec.of_u64())?
+    let log_h = declare_log(mut decl, "events", std.codec.of_u64(), Forever)?
+    let schema_ticket = seal(mut db, take decl)?
+    durable(mut db, schema_ticket)?
+    let trunk = main_branch(db)
+    let followed = follow(mut db, trunk)?
+    let Committed(w1) = run(mut db, None, (copy_env(rows), copy_env(cell_h), copy_env(log_h)), fn(mut tx, e) -> Result[(), Error] {
+        put(mut tx, e.0, 1u64, 100u64)?
+        cell_set(mut tx, e.1, 42u64)?
+        let _ = append(mut tx, e.2, 7u64)?
+        Ok(())
+    })? else {
+        fail("L91 E2: W1 did not commit")
+    }
+    durable(mut db, w1.ticket)?
+    let v1 = version(snapshot(db))
+    let seq1 = db.frame_seq
+    let end1 = db.file_end
+    let acct1 = accounts(db).journal
+    let check_unchanged = scoped fn(take label: String, cur_db: Db, got_info: Option[CallInfo], got_ticket: Ticket) {
+        if cur_db.frame_seq != seq1 || cur_db.file_end != end1 || accounts(cur_db).journal != acct1 || version(snapshot(cur_db)) != v1 || version(latest.read(followed)) != v1 {
+            fail(take label)
+        }
+        if let Some(_) = got_info {
+            fail(take label)
+        }
+        let Journal(s, b, h) = got_ticket.mark else {
+            fail(take label)
+        }
+        if s != seq1 || b != 0u32 || h != v1 {
+            fail(take label)
+        }
+    }
+    // 1. Pure read + exact Done.reads check.
+    let Committed(r_pure) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[Option[u64], Error] {
+        fetch(tx, t, 1u64)
+    })? else {
+        fail("L91 E2: pure read failed")
+    }
+    if r_pure.value != Some(100u64) || list.len(r_pure.reads) != 1u64 {
+        fail("L91 E2: pure read value or reads wrong")
+    }
+    let expected_key = logical_key(rows.id, key_word(1u64))?
+    match r_pure.reads[0u64] {
+        Point(k) if k == expected_key => (),
+        _ => fail("L91 E2: pure read Point mismatch"),
+    }
+    check_unchanged("L91 E2: pure read wrote a frame", db, r_pure.info, r_pure.ticket)
+    durable(mut db, r_pure.ticket)?
+    let pos = position(mut db, r_pure.ticket)?
+    if pos.branch != 0u32 || pos.version != v1 {
+        fail("L91 E2: skipped position mismatch")
+    }
+    // 2. Rejected guard returning Ok(false).
+    let Committed(r_guard) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[bool, Error] {
+        if fetch(tx, t, 1u64)? == Some(100u64) {
+            return Ok(false)
+        }
+        put(mut tx, t, 1u64, 999u64)?;
+        Ok(true)
+    })? else {
+        fail("L91 E2: rejected guard failed")
+    }
+    if r_guard.value {
+        fail("L91 E2: guard did not reject")
+    }
+    check_unchanged("L91 E2: rejected guard wrote a frame", db, r_guard.info, r_guard.ticket)
+    // 3. Delete of absent key.
+    let Committed(r_del) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[bool, Error] {
+        delete(mut tx, t, 999u64)
+    })? else {
+        fail("L91 E2: absent delete failed")
+    }
+    if r_del.value {
+        fail("L91 E2: absent delete returned true")
+    }
+    check_unchanged("L91 E2: absent delete wrote a frame", db, r_del.info, r_del.ticket)
+    // 4. pop_first and pop_last on empty table.
+    let Committed(r_pop) = run(mut db, None, copy_env(empty_rows), fn(mut tx, t) -> Result[bool, Error] {
+        let a = pop_first(mut tx, t)?
+        let b = pop_last(mut tx, t)?
+        Ok(a == None && b == None)
+    })? else {
+        fail("L91 E2: empty pop failed")
+    }
+    if !r_pop.value {
+        fail("L91 E2: empty pop returned Some")
+    }
+    check_unchanged("L91 E2: empty pop wrote a frame", db, r_pop.info, r_pop.ticket)
+    // 5. No-op cell_set, empty cell_clear, and reverted cell_set.
+    let Committed(r_cell) = run(mut db, None, (copy_env(cell_h), copy_env(empty_cell)), fn(mut tx, e) -> Result[(), Error] {
+        cell_set(mut tx, e.0, 42u64)?
+        cell_clear(mut tx, e.1)?
+        cell_set(mut tx, e.0, 99u64)?
+        cell_set(mut tx, e.0, 42u64)
+    })? else {
+        fail("L91 E2: no-op cell failed")
+    }
+    check_unchanged("L91 E2: no-op/reverted cell wrote a frame", db, r_cell.info, r_cell.ticket)
+    // 6. No-op trim_before at floor 0.
+    let Committed(r_trim) = run(mut db, None, copy_env(log_h), fn(mut tx, l) -> Result[(), Error] {
+        trim_before(mut tx, l, 0u64)
+    })? else {
+        fail("L91 E2: no-op trim failed")
+    }
+    check_unchanged("L91 E2: no-op trim wrote a frame", db, r_trim.info, r_trim.ticket)
+    // 7. Rolled-back rollback_writes_on_error.
+    let Committed(r_rb_err) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        let _: Result[(), u64] = rollback_writes_on_error(mut tx, scoped fn(mut inner: Tx) -> Result[(), u64] {
+            result.unwrap(put(mut inner, t, 50u64, 500u64))
+            Error(1u64)
+        })
+        Ok(())
+    })? else {
+        fail("L91 E2: rolled-back error callback failed")
+    }
+    check_unchanged("L91 E2: rolled-back error callback wrote a frame", db, r_rb_err.info, r_rb_err.ticket)
+    // 8. Rolled-back rollback_writes_on_overrun.
+    let Committed(r_rb_over) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        let _ = rollback_writes_on_overrun(mut tx, 50u64, scoped fn(mut inner: Tx) -> Result[(), ()] {
+            result.unwrap(put(mut inner, t, 51u64, 501u64))
+            let mut spin = 0u64
+            while spin < 100000u64 {
+                spin += 1u64
+            }
+            Ok(())
+        })
+        Ok(())
+    })? else {
+        fail("L91 E2: rolled-back overrun callback failed")
+    }
+    check_unchanged("L91 E2: rolled-back overrun callback wrote a frame", db, r_rb_over.info, r_rb_over.ticket)
+    // Same-value put STILL writes a frame (§1.4).
+    let Committed(r_same_put) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 1u64, 100u64)
+    })? else {
+        fail("L91 E2: same-value put failed")
+    }
+    if db.frame_seq != seq1 + 1 || version(snapshot(db)) != v1 + 1 {
+        fail("L91 E2: same-value put was skipped")
+    }
+    if let None = r_same_put.info {
+        fail("L91 E2: same-value put returned None info")
+    }
+    // W2 commits contiguously at v1 + 2 and survives close + reopen.
+    let Committed(w2) = run(mut db, None, copy_env(rows), fn(mut tx, t) -> Result[(), Error] {
+        put(mut tx, t, 2u64, 200u64)
+    })? else {
+        fail("L91 E2: W2 failed")
+    }
+    durable(mut db, w2.ticket)?
+    close(take db)?
+    options.create = false
+    let mut reopened = open(tasks, dir, c, r, options)?
+    let r_rows = table(mut reopened, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rd = reader(reopened, 0u64)?
+    let snap = snapshot(reopened)
+    if version(snap) != v1 + 2 || get(rd, snap, r_rows, 1u64)? != Some(100u64) || get(rd, snap, r_rows, 2u64)? != Some(200u64) || get(rd, snap, r_rows, 50u64)? != None {
+        fail("L91 E2: reopen after skipped runs and W2 lost continuity")
+    }
+    close(take reopened)
+}
+
+// L91 (E3): calling info(mut tx) inside an Ok-returning run (including inside a
+// rolled-back error or overrun callback) forces a 0-op COMMIT frame, advances
+// head, keeps CallId/seed unique, and persists monotonic at across backward
+// clock steps and reopen.
+@test
+fn journal_test_info_commits_and_clock_monotonic(d: Dir, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let (time, take hand) = provide.clock(0, 1000)
+    let mut wall = take hand
+    let mut options = journal_crash_options()
+    let mut db = open(tasks, dir, time, r, options)?
+    let Committed(first) = run(mut db, None, (), fn(mut tx, _env) -> Result[CallInfo, Error] {
+        Ok(info(mut tx))
+    })? else {
+        fail("L91 E3: first info run failed")
+    }
+    let Some(ci1) = first.info else {
+        fail("L91 E3: first info run returned None info")
+    }
+    if ci1.id.version != first.value.id.version || ci1.at != 1000 || ci1.seed != first.value.seed {
+        fail("L91 E3: first info mismatch")
+    }
+    // Step clock backward to 900: second info run must advance head, distinct seed, at == 1000.
+    clock.set_wall(mut wall, 900)
+    let Committed(second) = run(mut db, None, (), fn(mut tx, _env) -> Result[CallInfo, Error] {
+        Ok(info(mut tx))
+    })? else {
+        fail("L91 E3: second info run failed")
+    }
+    let Some(ci2) = second.info else {
+        fail("L91 E3: second info run returned None info")
+    }
+    if ci2.id.version != ci1.id.version + 1 || ci2.seed == ci1.seed || ci2.at != 1000 {
+        fail("L91 E3: second info did not preserve uniqueness or monotonic at")
+    }
+    // info(mut tx) called inside a rolled-back error callback still commits.
+    let seq_before = db.frame_seq
+    let Committed(third) = run(mut db, None, (), fn(mut tx, _env) -> Result[(), Error] {
+        let _: Result[(), u64] = rollback_writes_on_error(mut tx, scoped fn(mut inner: Tx) -> Result[(), u64] {
+            let _ = info(mut inner)
+            Error(1u64)
+        })
+        Ok(())
+    })? else {
+        fail("L91 E3: inner-error info run failed")
+    }
+    let Some(ci3) = third.info else {
+        fail("L91 E3: inner-error info run was skipped")
+    }
+    if db.frame_seq != seq_before + 1 || ci3.id.version != ci2.id.version + 1 {
+        fail("L91 E3: inner-error info run did not write a frame")
+    }
+    // info(mut tx) called inside an overrunning callback still commits.
+    let seq_before_over = db.frame_seq
+    let Committed(fourth) = run(mut db, None, (), fn(mut tx, _env) -> Result[(), Error] {
+        let _ = rollback_writes_on_overrun(mut tx, 50u64, scoped fn(mut inner: Tx) -> Result[(), ()] {
+            let _ = info(mut inner)
+            let mut spin = 0u64
+            while spin < 100000u64 {
+                spin += 1u64
+            }
+            Ok(())
+        })
+        Ok(())
+    })? else {
+        fail("L91 E3: inner-overrun info run failed")
+    }
+    let Some(ci4) = fourth.info else {
+        fail("L91 E3: inner-overrun info run was skipped")
+    }
+    if db.frame_seq != seq_before_over + 1 || ci4.id.version != ci3.id.version + 1 {
+        fail("L91 E3: inner-overrun info run did not write a frame")
+    }
+    durable(mut db, fourth.ticket)?
+    close(take db)?
+    // Reopen at clock 800: monotonic at == 1000 and version == ci4.id.version must survive.
+    clock.set_wall(mut wall, 800)
+    options.create = false
+    let mut reopened = open(tasks, dir, time, r, options)?
+    if version(snapshot(reopened)) != ci4.id.version || reopened.heads[0].at != 1000 {
+        fail("L91 E3: reopen lost version or monotonic at")
+    }
+    close(take reopened)
+}

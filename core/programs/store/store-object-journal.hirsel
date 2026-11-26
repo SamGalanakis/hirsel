@@ -54,6 +54,19 @@ fn history_probe_writer(mut client: std.object.Client, mut register: HistoryRegi
     Ok(())
 }
 
+fn history_probe_writer_attach(mut client: std.object.Client, mut register: HistoryRegister, mut workspace: HistoryBuffers, deadline: u64) -> Result[(), Error] waits {
+    let result = history_probe_head_attach(mut client, register.tag, mut workspace.witness, deadline)?
+    if let Some((capture, _)) = result {
+        check_expected_store(Some(register.head.store), capture.head.store)?
+        if !history_pair_matches(capture.head.pair, register.head.pair) {
+            let fenced: Error = Fenced(register.head.pair.epoch)
+            register.terminal = Some(HistoryFault(clone(fenced)))
+            return Error(fenced)
+        }
+    }
+    Ok(())
+}
+
 type ObjectJournalSession {
     client: std.object.Client,
     register: HistoryRegister,
@@ -484,6 +497,29 @@ fn object_journal_loop(take input: ObjectJournalTask, take initial: ObjectJourna
                 let terminal = match observed {
                     Error(Fenced(e)) => Some(e),
                     _ => None
+                }
+                let _ = channel.send(destination, take observed)
+                if let Some(e) = terminal {
+                    return Error(Fenced(e))
+                }
+            },
+            ObjectSkipFence(take destination) => {
+                let observed: Result[(), Error] = if stream_awaiting_fence {
+                    let fenced: Error = Fenced(lane.register.head.pair.epoch)
+                    lane.register.terminal = Some(HistoryFault(clone(fenced)))
+                    Error(fenced)
+                } else {
+                    let due = std.object.deadline_after_ms(lane.client, lane.op_ms)
+                    history_probe_writer_attach(mut lane.client, mut lane.register, mut lane.buffers, due)
+                }
+                let terminal = match observed {
+                    Error(Fenced(e)) => Some(e),
+                    _ => None
+                }
+                if let Some(e) = terminal {
+                    if let Some(signal) = input.health_signal {
+                        emit_health(signal, health_failure(Fenced(e)))
+                    }
                 }
                 let _ = channel.send(destination, take observed)
                 if let Some(e) = terminal {

@@ -104,7 +104,8 @@ fn stream_age_refusal_survives_longer_retention(d: Dir, c: Clock, r: Random, tas
     }
     result.unwrap(durable(mut before, saved.ticket))
     let no_reply: Option[fn(Error) -> bool] = None
-    let advanced = result.unwrap(store_body_at(mut before, 0u64, time + 3600000u64, None, no_reply, fn(mut _tx: Tx) -> Result[(), Error] {
+    let advanced = result.unwrap(store_body_at(mut before, 0u64, time + 3600000u64, None, no_reply, fn(mut tx: Tx) -> Result[(), Error] {
+        let _ = info(mut tx)
         Ok(())
     }))
     if let Committed(_) = advanced {} else {

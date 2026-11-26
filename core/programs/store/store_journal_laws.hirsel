@@ -398,7 +398,7 @@ pub fn journal_law_db(d: Dir, c: Clock, r: Random, tasks: Tasks) -> bool waits {
     let ci = match take saved {
         Committed(done) => {
             result.unwrap(durable(mut db, done.ticket))
-            done.info
+            option.unwrap(done.info)
         },
         _ => return false
     }

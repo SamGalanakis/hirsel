@@ -173,6 +173,7 @@ fn witness_store_options() -> store.Options {
 fn witness_empty_commits(mut writer: store.Db, commits: u64) -> Result[(), store.Error] waits {
     for _ in 0u64 .. commits {
         let put = store.run(mut writer, None, (), fn(mut tx, unused_env) -> Result[(), store.Error] {
+            let _ = store.info(mut tx)
             Ok(())
         })?
         let Committed(store.Done(ticket: receipt, ..)) = put else {

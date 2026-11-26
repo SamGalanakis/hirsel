@@ -258,9 +258,59 @@ fn commit_prepared[R, A](mut db: Db, i: u64, take ran: Ran[R, A], take publicati
     }
     let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, db.heads[i].id, db.heads[i].head))
     match take value {
-        Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: ci, reads: take seen)),
+        Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: Some(ci), reads: take seen)),
         Error(take a) => Aborted(Undone(value: take a, ticket: Some(commit_ticket)))
     }
+}
+
+fn commit_skipped[R, A](db: Db, i: u64, take ran: Ran[R, A]) -> Outcome[R, A] {
+    let Ran(value: take value, reads: take seen, ..) = take ran
+    let sent_sequence = if !is_disk(db) {
+        db.changes
+    } else {
+        db.frame_seq
+    }
+    let commit_ticket = Ticket(store: db.store, open: open_number(db), mark: Journal(sent_sequence, db.heads[i].id, db.heads[i].head))
+    match take value {
+        Ok(take v) => Committed(Done(value: take v, ticket: commit_ticket, info: None, reads: take seen)),
+        Error(_) => fail("store: skipped commit must return Ok"),
+    }
+}
+
+fn keyed_credit_equal(a: KeyedCredit, b: KeyedCredit) -> bool {
+    a.resident == b.resident && a.padding == b.padding && a.journal == b.journal
+}
+
+fn keyed_draft_empty(db: Db, keyed: Option[KeyedDraft]) -> bool {
+    match keyed {
+        None => true,
+        Some(draft) => list.len(draft.edits) == 0 && keyed_credit_equal(draft.after, db.keyed_credit),
+    }
+}
+
+fn draft_is_empty[R, A](db: Db, force_frame: bool, rec: Option[CallRecord], settlement: Option[Settlement], prepared: Prepared[R, A]) -> bool {
+    if force_frame || prepared.observed_info {
+        return false
+    }
+    if let Error(_) = prepared.outcome {
+        return false
+    }
+    if prepared.ops.count != 0 || prepared.stream_ops.count != 0 {
+        return false
+    }
+    if !keyed_draft_empty(db, prepared.keyed) {
+        return false
+    }
+    if let Some(_) = prepared.call {
+        return false
+    }
+    if let Some(_) = rec {
+        return false
+    }
+    if let Some(_) = settlement {
+        return false
+    }
+    true
 }
 
 fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
@@ -284,6 +334,9 @@ fn draft_row_account(db: Db, i: u64, proposed: Roots) -> Result[u64, Error] {
 // AP15: an over-bound retained-root draft is admitted on its proposed union.
 // If settling old charges rotates the journal, rebind the staged frame.
 fn settle_draft[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[AdmittedDraft[R, A], Error] waits {
+    if ran.skipped {
+        return Ok(Ready(take ran, Publication(followed: None)))
+    }
     if is_disk(db) {
         let refusal = match ran.frame {
             Some(raw) => journal_refusal(disk_state(db).uncovered, list.len(raw), available_journal(db, draft_credit(db, ran))),
@@ -344,6 +397,16 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
     let checked = settle_draft(mut db, i, take ran)?
     match take checked {
         Ready(take draft, take publication) => {
+            if draft.skipped {
+                let _ = take publication
+                if object_writer_open(db) {
+                    journal_poll(mut db)?
+                    if covered(db, Journal(db.frame_seq, 0, 0)) {
+                        object_skip_fence(mut db)?
+                    }
+                }
+                return Ok(commit_skipped(db, i, take draft))
+            }
             if let Some(problem) = reserve_tiered_freed(mut db, draft) {
                 return Ok(Refused(problem))
             }
@@ -353,14 +416,16 @@ fn settle_admit[R, A](mut db: Db, i: u64, take ran: Ran[R, A]) -> Result[Outcome
     }
 }
 
-fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
+fn frame_draft[R, A](db: Db, base: PageTree, ci: CallInfo, rec: Option[CallRecord], settlement: Option[Settlement], force_frame: bool, take finished: Finished[R, A]) -> Result[Finished[R, A], Capacity] {
     match take finished {
         RolledBack(take outcome) => Ok(RolledBack(take outcome)),
         DraftFault(take problem) => Ok(DraftFault(take problem)),
         Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
         Prepared(take ready) => {
             let mut prepared = take ready
-            if is_disk(db) {
+            let skipped = draft_is_empty(db, force_frame, rec, settlement, prepared)
+            prepared.skipped = skipped
+            if !skipped && is_disk(db) {
                 let deltas: Option[View[List[Option[TieredDataDelta]]]] = match prepared.plan {
                     Some(plan) => Some(view plan.deltas),
                     None => None,
@@ -384,6 +449,11 @@ fn prepare_metered_pages[R, A](issued: core.Cell[u64], attempt: Option[core.Cell
         Drifted(take name, take seen) => Ok(Drifted(take name, take seen)),
         Prepared(take staged) => {
             let mut prepared = take staged
+            if prepared.ops.count == 0 && prepared.stream_ops.count == 0 {
+                if let None = prepared.keyed {
+                    return Ok(Prepared(take prepared))
+                }
+            }
             let first = prepared.first_stamp
             let mut draw = first
             let memory_only = match attempt {
@@ -530,4 +600,39 @@ fn journal_refusal(uncovered: u64, frame: u64, limit: u64) -> Option[Capacity] {
 
 fn over_bound[R, A](db: Db, ran: Ran[R, A]) -> bool {
     ran.admits_rows && ran.live > resident_with_credit(db.ceiling, draft_credit(db, ran))
+}
+
+fn store_body_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    store_body_at_with(mut db, i, wall, steps, keep_reply, false, body)
+}
+
+fn store_body_at_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    let outcome = append_transaction_at_with(mut db, i, wall, steps, keep_reply, force_frame, body)
+    if let Ok(Refused(Journal(_))) = outcome {
+        return take outcome
+    }
+    if let Ok(Committed(Done(info: None, ..))) = outcome {
+        return take outcome
+    }
+    maybe_checkpoint(mut db)?
+    take outcome
+}
+
+fn append_transaction_at[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    append_transaction_at_with(mut db, i, wall, steps, keep_reply, false, body)
+}
+
+fn append_transaction_at_with[R, A](mut db: Db, i: u64, wall: u64, steps: Option[u64], keep_reply: Option[fn(A) -> bool], force_frame: bool, body: scoped[view] fn(mut Tx) -> Result[R, A]) -> Result[Outcome[R, A], Error] waits {
+    let outcome: Result[Outcome[R, A], Error] = match staged_until_decided(mut db, i, wall, steps, keep_reply, force_frame, body)? {
+        Over(take o) => Ok(take o),
+        Ran(take ran) => settle_admit(mut db, i, take ran),
+        DraftError(take problem) => Error(take problem),
+        Latched => fail("store: a decided stage is latched"),
+        DriftStop(take name, take seen) => {
+            trip_drift(mut db, i, take seen)?
+            Ok(Failed(Drift(take name)))
+        },
+    }
+    handoff(mut db)?
+    take outcome
 }

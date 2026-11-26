@@ -1004,7 +1004,7 @@ pub unsafe extern "C" fn hirsel_core_spawn_unit(
         // The entry writes each socket as it leaves: detached first.
         let sockets = detach_sockets(context, input, socket_offsets(&xl));
         #[cfg(feature = "record")]
-        let replayed = replay::spawn_args(context, n, steps, input, entry);
+        let replayed = replay::spawn_args(context, n, steps, input, entry, sockets.as_ref());
         #[cfg(feature = "record")]
         let tape = crate::tape::helper::spawn(context, n, steps, input, entry, sockets.as_ref());
         #[cfg(not(feature = "record"))]
@@ -1141,11 +1141,7 @@ fn helper_main(
         context.set_map_keys(map_keys);
         let mut files = crate::host_file::Files::with_registry(registry);
         #[cfg(feature = "record")]
-        if let Some(tape) = &tape {
-            tape.designate(&mut files.registry);
-            files.net_tape = tape.net_tape();
-            files.secret_mac_tape = tape.secret_tape();
-        }
+        replay::bind_helper_files(&tape, &mut files);
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {
             crate::process::stop(b"UnitLedger");

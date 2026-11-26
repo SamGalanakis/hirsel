@@ -442,3 +442,145 @@ fn u5_waiting_sends_and_settlements_replay() {
         }
     }
 }
+
+/// `Shared` holders (including nested `Shared[Shared[u64]]` and a survivor
+/// `Shared` node) and TCP sockets replay where they arrive in entries and
+/// items (`RL9_SHARED`, `RL9_SURVIVOR`, `RL9_NESTED`, `RL9_SOCKET`), both
+/// whole and `--unit root` (and `--unit root.0` for helper streams), on
+/// Cranelift and LLVM. Corrupting an arriving `Shared` or `Socket` ordinal
+/// ends replay `Diverged(Take)` at that take frame in `root` with one line.
+#[test]
+#[ignore = "explicit native integration target"]
+fn u5_shared_and_socket_arrivals_replay() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let dir = tempfile::tempdir().unwrap();
+    let shared_cases: &[(&str, &str, &str, &[Option<&str>])] = &[
+        (
+            RL9_SHARED,
+            "u5s-shared",
+            "shared",
+            &[None, Some("root"), Some("root.0")],
+        ),
+        (
+            RL9_SURVIVOR,
+            "u5s-survivor",
+            "survivor",
+            &[None, Some("root"), Some("root.0")],
+        ),
+        (RL9_NESTED, "u5s-nested", "nested", &[None, Some("root")]),
+    ];
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        for &(source, name, printed, units) in shared_cases {
+            let path = rl9_record(source, dir.path(), name, backend, printed);
+            let program = dir.path().join(format!("{name}-{backend:?}"));
+            let at = format!("{backend:?} {name}");
+            for &only in units {
+                let (code, out, err) = u4_replay(&program, &path, only);
+                assert_eq!(
+                    (code, out.as_str(), err.as_str()),
+                    (Some(0), "", ""),
+                    "{at} only={only:?}"
+                );
+            }
+            if name == "u5s-survivor" {
+                let streams = rl9_streams(&path, &at);
+                let root = &streams[0].1;
+                let g = root
+                    .iter()
+                    .filter(|f| matches!(f, Frame::Grant { .. }))
+                    .count() as u8;
+                let item = root
+                    .iter()
+                    .position(|f| {
+                        matches!(f, Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)))
+                    })
+                    .expect("shared item take");
+                let tape = std::fs::read(&path).unwrap();
+                let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+                    std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+                })
+                .unwrap()
+                .1
+                .tape_id;
+                // Shared snapshot part: part_count 1, part tag 1, kind 1, ordinal g+4, home stream 1, node 2.
+                let pattern = [1u8, 1, 1, g + 4, 1, 0, 0, 0, 2];
+                let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+                    let Some(i) = payload.windows(pattern.len()).position(|w| w == pattern) else {
+                        return false;
+                    };
+                    payload[i + 3] = 99;
+                    true
+                });
+                let corrupt = dir.path().join(format!("{name}-{backend:?}-ord.tape"));
+                std::fs::write(&corrupt, wrong).unwrap();
+                let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+                assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+                let lines: Vec<_> = err.lines().collect();
+                let prefix = format!("replay: Diverged(Take) at {} in root ", item + 1);
+                assert!(
+                    matches!(&lines[..], [l] if l.starts_with(&prefix)),
+                    "{at}: {err}"
+                );
+            }
+        }
+        let path = rl9_record_net(
+            RL9_SOCKET,
+            dir.path(),
+            "u5s-socket",
+            backend,
+            "sock",
+            &["Net", "Tasks", "Stdout"],
+            &["Listen 127.0.0.0/8 0-65535", "Connect 127.0.0.0/8 1-65535"],
+        );
+        let program = dir.path().join(format!("u5s-socket-{backend:?}"));
+        let at = format!("{backend:?} u5s-socket");
+        for only in [None, Some("root"), Some("root.0")] {
+            let (code, out, err) = u4_replay(&program, &path, only);
+            assert_eq!(
+                (code, out.as_str(), err.as_str()),
+                (Some(0), "", ""),
+                "{at} only={only:?}"
+            );
+        }
+        let streams = rl9_streams(&path, &at);
+        let root = &streams[0].1;
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let item = root
+            .iter()
+            .position(|f| {
+                matches!(f, Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)))
+            })
+            .expect("socket item take");
+        let tape = std::fs::read(&path).unwrap();
+        let tape_id = hirsel_tape_format::Index::open(|at: u64, b: &mut [u8]| {
+            std::os::unix::fs::FileExt::read_at(&std::fs::File::open(&path).unwrap(), b, at)
+        })
+        .unwrap()
+        .1
+        .tape_id;
+        // Socket snapshot part: part_count 1, part tag 1, kind 2 (Stream), ordinal g+8, accepted 1.
+        let pattern = [1u8, 1, 2, g + 8, 1];
+        let wrong = u4_patched(&tape, &tape_id, 0, |payload| {
+            let Some(i) = payload.windows(pattern.len()).position(|w| w == pattern) else {
+                return false;
+            };
+            payload[i + 3] = 99;
+            true
+        });
+        let corrupt = dir.path().join(format!("u5s-socket-{backend:?}-ord.tape"));
+        std::fs::write(&corrupt, wrong).unwrap();
+        let (code, out, err) = u4_replay(&program, &corrupt, Some("root"));
+        assert_eq!((code, out.as_str()), (Some(1), ""), "{at}: {err}");
+        let lines: Vec<_> = err.lines().collect();
+        let prefix = format!("replay: Diverged(Take) at {} in root ", item + 1);
+        assert!(
+            matches!(&lines[..], [l] if l.starts_with(&prefix)),
+            "{at}: {err}"
+        );
+    }
+}

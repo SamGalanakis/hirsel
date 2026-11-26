@@ -55,6 +55,7 @@ pub(super) unsafe fn replay_out(
     out: Out,
     space: Option<ReadSpace>,
 ) -> Result<Outcome, Fault> {
+    let before = r.buffer.len;
     let unix_reply = UnixOperation::describe(op).map(|op| op.reply);
     if let Some(reply) = unix_reply {
         unix::delivery(
@@ -196,7 +197,8 @@ pub(super) unsafe fn replay_out(
         live.clocks.insert((op, object), o.value);
     }
     let unix_kind = unix_reply.and_then(unix::kind);
-    if ok && (creates_object(op) || unix_kind.is_some()) {
+    let created = ok && (creates_object(op) || unix_kind.is_some());
+    if created {
         if out.value != live.objects.len() as u64 + 1 {
             return Err(Fault::Corrupt);
         }
@@ -527,6 +529,7 @@ pub(super) unsafe fn replay_out(
             return Err(Fault::Corrupt);
         }
     }
+    super::units::crossing::delivered(live, r, before, created, o.error.tag);
     Ok(o)
 }
 

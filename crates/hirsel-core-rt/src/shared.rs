@@ -34,11 +34,13 @@ use std::sync::{Arc, Mutex};
 
 #[repr(C)]
 struct Header {
-    /// The home unit's port, one `Arc` strong count held by the node.
+    /// The home unit's port, one `Arc` strong count held by the node; null on
+    /// an uncharged replay stand-in.
     home: *const Port,
     /// The payload's owners table (interned), `rows` entries.
     owners: *const [u64; 4],
     rows: u64,
+    /// Charge on a homed node; payload byte length on a replay stand-in.
     charge: u64,
     count: AtomicU64,
 }
@@ -167,6 +169,9 @@ pub unsafe extern "C" fn hirsel_core_shared_release(context: *mut Context, node:
             u.reach();
             if u.ctx.parking {
                 crate::units_lang::pump(u);
+                if (*header(node)).home.is_null() {
+                    clean_stand_in(node);
+                }
                 return;
             }
         }
@@ -187,6 +192,9 @@ pub(crate) unsafe fn release(unit: &mut LangUnit, context: *mut Context, node: *
         #[cfg(feature = "record")]
         if unit.ctx.parking {
             crate::units_lang::pump(unit);
+            if (*header(node)).home.is_null() {
+                clean_stand_in(node);
+            }
             return;
         }
         if last(node) {
@@ -289,4 +297,127 @@ unsafe fn free(context: *mut Context, p: *mut u8, charge: u64) {
 
 fn header(node: *mut u8) -> *mut Header {
     node.wrapping_sub(COUNT).cast()
+}
+
+/// Allocate an uncharged replay stand-in `Shared` node from a packed payload
+/// (`bytes` flat bytes followed by each live `SEQ`'s element bytes in row order).
+/// # Safety
+/// `flat` holds a value of `bytes` flat bytes laid out by `owners`, with each
+/// live `SEQ`'s elements appended in row order.
+#[cfg(feature = "record")]
+pub(crate) unsafe fn replay_stand_in(flat: &[u8], bytes: usize, owners: &[[u64; 4]]) -> *mut u8 {
+    use std::alloc::{Layout, alloc, handle_alloc_error};
+    let layout = Layout::from_size_align(size_of::<Header>() + bytes, align_of::<Header>())
+        .expect("stand-in Shared layout");
+    // SAFETY: layout has non-zero size (size_of::<Header>() == 40).
+    let raw = unsafe { alloc(layout) };
+    if raw.is_null() {
+        handle_alloc_error(layout);
+    }
+    // SAFETY: `raw` is aligned and holds Header + `bytes` payload bytes.
+    unsafe {
+        let header = raw.cast::<Header>();
+        header.write(Header {
+            home: ptr::null(),
+            owners: intern(owners),
+            rows: owners.len() as u64,
+            charge: bytes as u64,
+            count: AtomicU64::new(1),
+        });
+        let payload = header.add(1).cast::<u8>();
+        if bytes > 0 {
+            ptr::copy_nonoverlapping(flat.as_ptr(), payload, bytes);
+        }
+        let mut at = bytes;
+        for o in live_rows(payload, owners).iter() {
+            if o[1] != SEQ {
+                continue;
+            }
+            let slot = payload.add(o[0] as usize);
+            let len = word(slot.add(8));
+            let n = (len * o[2]) as usize;
+            if n == 0 {
+                slot.cast::<u64>().write_unaligned(0);
+                slot.add(16).cast::<u64>().write_unaligned(0);
+                continue;
+            }
+            let align = o[2].clamp(1, 16) as usize;
+            let seq_layout = Layout::from_size_align(n, align).expect("stand-in seq layout");
+            let buf = alloc(seq_layout);
+            if buf.is_null() {
+                handle_alloc_error(seq_layout);
+            }
+            ptr::copy_nonoverlapping(flat.as_ptr().add(at), buf, n);
+            at += n;
+            slot.cast::<u64>().write_unaligned(buf as u64);
+            slot.add(16).cast::<u64>().write_unaligned(len);
+        }
+        raw.add(COUNT)
+    }
+}
+
+/// Release a replay stand-in `Shared` holder that left a replaying unit (no
+/// take point); homed nodes are left untouched for their `SharedRelease` take.
+/// # Safety
+/// `node` is a live `Shared` holder pointer.
+#[cfg(feature = "record")]
+pub(crate) unsafe fn drop_stand_in(node: *mut u8) {
+    // SAFETY: by the contract.
+    unsafe {
+        if !node.is_null() && (*header(node)).home.is_null() {
+            clean_stand_in(node);
+        }
+    }
+}
+
+/// Decrement and free an uncharged replay stand-in `Shared` node without
+/// touching unit limits or take points.
+#[cfg(feature = "record")]
+unsafe fn clean_stand_in(node: *mut u8) {
+    use std::alloc::{Layout, dealloc};
+    // SAFETY: `node` is a stand-in (`home.is_null()`), exclusively owned once `last`.
+    unsafe {
+        if !last(node) {
+            return;
+        }
+        let hdr = header(node);
+        let Header {
+            owners,
+            rows,
+            charge: bytes,
+            ..
+        } = hdr.read();
+        let payload = hdr.add(1).cast::<u8>();
+        let rows = if rows == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(owners, rows as usize)
+        };
+        for o in live_rows(payload, rows).iter() {
+            match o[1] {
+                SEQ => {
+                    let at = payload.add(o[0] as usize);
+                    let cap = word(at.add(16));
+                    let n = (cap * o[2]) as usize;
+                    if n != 0 {
+                        let align = o[2].clamp(1, 16) as usize;
+                        let seq_layout =
+                            Layout::from_size_align(n, align).expect("stand-in seq layout");
+                        dealloc(word(at) as *mut u8, seq_layout);
+                    }
+                }
+                SHARED => {
+                    let inner = word(payload.add(o[0] as usize)) as *mut u8;
+                    if !inner.is_null() && (*header(inner)).home.is_null() {
+                        clean_stand_in(inner);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let layout =
+            Layout::from_size_align(size_of::<Header>() + bytes as usize, align_of::<Header>())
+                .expect("stand-in Shared layout");
+        dealloc(hdr.cast(), layout);
+    }
 }

@@ -18,11 +18,14 @@ pub(super) unsafe fn spawn_args(
     steps: Option<u64>,
     input: *const u8,
     spawned: &SpawnEntry,
+    sockets: Option<&CrossingSockets>,
 ) -> Option<Result<Vec<u8>, &'static str>> {
     tasks::current_group()
         .filter(|group| group.replaying())
         // SAFETY: forwarded.
-        .map(|_| unsafe { crate::tape::helper::replay_args(context, n, steps, input, spawned) })
+        .map(|_| unsafe {
+            crate::tape::helper::replay_args(context, n, steps, input, spawned, sockets)
+        })
 }
 
 /// Check the spawn of helper `k`, whose context stays unstarted until its
@@ -53,6 +56,46 @@ impl LangUnit {
     }
 }
 
+/// Bind a helper's recording/replay tape onto its host files and install any
+/// arrived replay socket routes.
+pub(super) unsafe fn bind_helper_files(
+    tape: &Option<crate::tape::helper::Helper>,
+    files: &mut crate::host_file::Files,
+) {
+    if let Some(t) = tape {
+        t.designate(&mut files.registry);
+        files.net_tape = t.net_tape();
+        files.secret_mac_tape = t.secret_tape();
+        // SAFETY: `files` is live for the helper's lifetime.
+        unsafe { install_arrived_sockets(t.group(), &raw mut *files) };
+    }
+}
+
+/// Install arrived replay socket routes into `files.tcp_routes`.
+/// # Safety
+/// `files` is null or points to the unit's live host files.
+pub(super) unsafe fn install_arrived_sockets(
+    group: Option<crate::tape::schedule::Group>,
+    files: *mut crate::host_file::Files,
+) {
+    if files.is_null() {
+        return;
+    }
+    // SAFETY: host files live with the unit.
+    let files = unsafe { &mut *files };
+    if let Some(net_tape) = files.net_tape {
+        for (key, origin) in tape::take_arrived_sockets(group) {
+            files.tcp_routes.insert(
+                key,
+                crate::net::TcpRoute {
+                    provider: net_tape.provider,
+                    origin,
+                },
+            );
+        }
+    }
+}
+
 /// Apply one due recorded `TAKE` at this take point: returns `true` when one
 /// was applied (so the caller drains its ledger arrival before checking for
 /// the next `TAKE` at the same position).
@@ -71,7 +114,10 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
     };
     // SAFETY: the context that bound the recording pins its host files.
     let registry = unsafe { u.files.as_ref() }.map(|f| &f.registry);
-    let (key, outcome, survivors) = match tape::due(Some(group), u.pumping, layout, registry) {
+    let due = tape::due(Some(group), u.pumping, layout, registry);
+    // SAFETY: `u.files` lives with the unit.
+    unsafe { install_arrived_sockets(Some(group), u.files) };
+    let (key, outcome, survivors) = match due {
         None => return false,
         Some(tape::Due::Cancel) => {
             if !u.root.is_null() {
@@ -321,22 +367,29 @@ pub(crate) fn stand_in(
     Some((conn, client as u64))
 }
 
-/// The clients a replaying unit's value hands to another unit, whose spawn
-/// or send delivers nothing: each is dropped here, as the unit it went to
-/// would have dropped it, so the connection's notices reach its owner.
+/// The clients and stand-in `Shared` holders a replaying unit's value hands to
+/// another unit, whose spawn or send delivers nothing: each client is dropped
+/// here so its notices reach its owner, and each stand-in `Shared` node frees
+/// its uncharged memory without touching take points or homed nodes.
 /// # Safety
-/// `value` holds a value laid out by `rows` that owns its client words.
+/// `value` holds a value laid out by `rows` that owns its handle words.
 pub(super) unsafe fn departed(u: &mut LangUnit, value: *const u8, rows: &[[u64; 4]]) {
     // SAFETY: by the contract.
     let rows = unsafe { live_rows(value, rows) };
-    for o in rows.iter().filter(|o| o[1] == CLIENT) {
-        // SAFETY: the value owns this client word.
-        let h = unsafe { word(value.add(o[0] as usize)) } as *mut ClientH;
-        if !h.is_null() {
-            // SAFETY: as above; the handle leaves with the value. A send or
-            // spawn is not a drop take point, so do not trigger `on_released`.
-            u.ctx.drop_client(unsafe { Box::from_raw(h) }.client);
-            let _ = u.released_own();
+    for o in rows.iter() {
+        if o[1] == CLIENT {
+            // SAFETY: the value owns this client word.
+            let h = unsafe { word(value.add(o[0] as usize)) } as *mut ClientH;
+            if !h.is_null() {
+                // SAFETY: as above; the handle leaves with the value. A send or
+                // spawn is not a drop take point, so do not trigger `on_released`.
+                u.ctx.drop_client(unsafe { Box::from_raw(h) }.client);
+                let _ = u.released_own();
+            }
+        } else if o[1] == SHARED {
+            // SAFETY: the value owns this `Shared` holder word.
+            let node = unsafe { word(value.add(o[0] as usize)) } as *mut u8;
+            unsafe { crate::shared::drop_stand_in(node) };
         }
     }
 }

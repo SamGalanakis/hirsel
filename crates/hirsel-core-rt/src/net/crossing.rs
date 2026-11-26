@@ -48,24 +48,46 @@ impl CrossedSocket {
             };
         }
         // A recording unit's carrier names its object; the reactor key is
-        // that object's source.
+        // that object's source. A replaying unit holds no reactor socket.
         #[cfg(feature = "record")]
-        let (source, taped) = match files.net_tape {
-            Some(tape) => (
-                tape.source(key)
-                    .unwrap_or_else(|| crate::process::stop(b"HostPoll")),
-                crate::tape::units::crossing::depart(&tape.provider, key, tape.handle(key)),
+        let (carrier, taped) = match files.net_tape {
+            Some(tape) => {
+                let source = tape.source(key);
+                let taped =
+                    crate::tape::units::crossing::depart(&tape.provider, key, tape.handle(key));
+                match source {
+                    Some(source) => (
+                        Some(
+                            files
+                                .sockets
+                                .detach(source)
+                                .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
+                        ),
+                        taped,
+                    ),
+                    None if taped.is_some() => (None, taped),
+                    None => crate::process::stop(b"HostPoll"),
+                }
+            }
+            None => (
+                Some(
+                    files
+                        .sockets
+                        .detach(key)
+                        .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
+                ),
+                None,
             ),
-            None => (key, None),
         };
         #[cfg(not(feature = "record"))]
-        let source = key;
-        let carrier = files
-            .sockets
-            .detach(source)
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+        let carrier = Some(
+            files
+                .sockets
+                .detach(key)
+                .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
+        );
         Self {
-            carrier: Some(carrier),
+            carrier,
             udp: None,
             route: files.tcp_routes.remove(&key),
             hello: files.tls_hellos.remove(&key),
@@ -78,12 +100,26 @@ impl CrossedSocket {
         if let Some(udp) = self.udp.take() {
             return udp.attach(files);
         }
+        #[cfg(feature = "record")]
+        let key = match self.carrier.take() {
+            Some(carrier) => {
+                let reactor = files
+                    .sockets
+                    .attach(carrier)
+                    .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                self.carrier_in(files, reactor)
+            }
+            None => self
+                .taped
+                .as_ref()
+                .expect("a replaying socket keeps its departed record")
+                .key(),
+        };
+        #[cfg(not(feature = "record"))]
         let key = files
             .sockets
             .attach(self.carrier.take().unwrap())
             .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
-        #[cfg(feature = "record")]
-        let key = self.carrier_in(files, key);
         if let Some(route) = self.route.take() {
             files.tcp_routes.insert(key, route);
         }
@@ -104,7 +140,7 @@ impl CrossedSocket {
         let source = self
             .taped
             .as_ref()
-            .map(|d| d.source())
+            .and_then(|d| d.source())
             .or(self.route.map(|r| r.provider));
         let Some(tape) = files.net_tape else {
             if let (Some(route), Some(source)) = (self.route.as_mut(), source) {

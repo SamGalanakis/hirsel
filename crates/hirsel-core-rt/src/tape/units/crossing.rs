@@ -95,13 +95,14 @@ pub(in crate::tape) fn delivered(
 }
 
 /// A taped socket in transit: its key and object in the sending unit, its
-/// reactor source's provider, its snapshot, and the object its take gave it.
+/// reactor source's provider (absent when replaying), its snapshot, and the
+/// object its take gave it.
 pub(crate) struct Departed {
     key: u64,
     cell: usize,
     generation: u32,
     ordinal: usize,
-    source: Provider,
+    source: Option<Provider>,
     snapshot: Option<Snapshot>,
     arrival: Option<(usize, u32, usize)>,
 }
@@ -110,7 +111,7 @@ pub(crate) struct Departed {
 unsafe impl Send for Departed {}
 
 impl Departed {
-    pub(crate) fn source(&self) -> Provider {
+    pub(crate) fn source(&self) -> Option<Provider> {
         self.source
     }
 }
@@ -126,20 +127,80 @@ pub(crate) fn depart(provider: &Provider, key: u64, handle: u64) -> Option<Box<D
     }
     let live = state.live.as_mut()?;
     let ordinal = ordinal_of(handle);
-    let inner = live
-        .objects
-        .get_mut(ordinal.checked_sub(1)?)?
-        .inner
-        .take()?;
+    let inner = live.objects.get_mut(ordinal.checked_sub(1)?)?.inner.take();
+    if inner.is_none() && live.mode != Mode::Replay {
+        return None;
+    }
     Some(Box::new(Departed {
         key,
         cell: provider.state as usize,
         generation,
         ordinal,
-        source: inner.provider,
+        source: inner.map(|i| i.provider),
         snapshot: live.sockets.get(&ordinal).copied(),
         arrival: None,
     }))
+}
+
+/// Parse a `Socket` (tag 2) or `Listener` (tag 3) snapshot body after its ordinal.
+pub(in crate::tape) fn parse_snapshot(
+    tag: u8,
+    c: &mut format::Cursor<'_>,
+) -> Result<Snapshot, super::replay::Unpacked> {
+    use super::replay::Unpacked;
+    match tag {
+        2 => {
+            let accepted = match c.u8()? {
+                0 => false,
+                1 => true,
+                _ => return Err(Unpacked::Layout),
+            };
+            let address: [u8; 19] = c.fixed()?;
+            // A socket with a TLS session never crosses.
+            if c.u8()? != 0 {
+                return Err(Unpacked::Layout);
+            }
+            let state = c.u8()?;
+            if state & !3 != 0 {
+                return Err(Unpacked::Layout);
+            }
+            Ok(Snapshot::Stream {
+                accepted,
+                address,
+                state,
+            })
+        }
+        3 => {
+            if c.u8()? != 0 {
+                return Err(Unpacked::Layout);
+            }
+            let address: [u8; 19] = c.fixed()?;
+            Ok(Snapshot::Listener { address })
+        }
+        _ => Err(Unpacked::Layout),
+    }
+}
+
+/// The `TcpOrigin` a replayed `Snapshot` names for `files.tcp_routes`.
+pub(in crate::tape) fn snapshot_origin(snapshot: Snapshot) -> crate::net::TcpOrigin {
+    match snapshot {
+        Snapshot::Stream { accepted: true, .. } => crate::net::TcpOrigin::Accepted,
+        Snapshot::Stream {
+            accepted: false,
+            address,
+            ..
+        } => {
+            let mut c = format::Cursor::new(&address);
+            let addr = crate::net::Address {
+                family: c.u8().unwrap_or(0),
+                hi: u64::from_le_bytes(c.fixed().unwrap_or([0; 8])),
+                lo: u64::from_le_bytes(c.fixed().unwrap_or([0; 8])),
+                port: u16::from_le_bytes(c.fixed().unwrap_or([0; 2])),
+            };
+            crate::net::TcpOrigin::Connected(addr)
+        }
+        Snapshot::Listener { .. } => crate::net::TcpOrigin::Listener,
+    }
 }
 
 /// A crossed socket attached as reactor key `reactor` in a unit whose taped

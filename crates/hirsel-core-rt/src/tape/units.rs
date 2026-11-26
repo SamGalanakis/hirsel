@@ -46,6 +46,9 @@ pub(super) struct Takes {
     pub(super) replay_sends: HashMap<u64, (u32, Vec<u8>)>,
     /// Replay: next synthetic waiting-send id for `LangUnit::sends`.
     pub(super) next_replay_send: u32,
+    /// Replay: arrived socket carriers `(key, origin)` pending installation in
+    /// the unit's `files.tcp_routes`.
+    pub(super) arrived_sockets: Vec<(u64, crate::net::TcpOrigin)>,
 }
 
 /// What every unit of the run knows of a connection made while recording: the
@@ -77,6 +80,7 @@ struct Node {
     ordinal: u64,
     bytes: u64,
     owners: Vec<[u64; 4]>,
+    stand_in: bool,
 }
 
 static NODES: Mutex<Option<HashMap<usize, Node>>> = Mutex::new(None);
@@ -99,9 +103,44 @@ pub(crate) fn shared_new(group: Option<Group>, node: usize, payload: &Cross) {
             ordinal,
             bytes: payload.bytes,
             owners: payload.owners().to_vec(),
+            stand_in: false,
         };
         nodes(|n| n.insert(node, entry));
     });
+}
+
+/// Register a replay stand-in `Shared` node: its arriving ordinal in this
+/// stream, and its home `(stream, home_ordinal)` and payload layout.
+pub(super) fn shared_stand_in(
+    live: &mut Live,
+    node: usize,
+    ordinal: u64,
+    home_stream: u32,
+    home_ordinal: u64,
+    bytes: u64,
+    owners: Vec<[u64; 4]>,
+) {
+    live.takes.nodes.insert(node, ordinal);
+    let entry = Node {
+        stream: home_stream,
+        ordinal: home_ordinal,
+        bytes,
+        owners,
+        stand_in: true,
+    };
+    nodes(|n| n.insert(node, entry));
+}
+
+/// Look up a `Shared` node's payload layout by its `(home_stream, home_ordinal)`.
+pub(super) fn find_node_layout(
+    home_stream: u32,
+    home_ordinal: u64,
+) -> Option<(u64, Vec<[u64; 4]>)> {
+    nodes(|n| {
+        n.values()
+            .find(|e| e.stream == home_stream && e.ordinal == home_ordinal)
+            .map(|e| (e.bytes, e.owners.clone()))
+    })
 }
 
 /// A node's payload layout: its flat bytes and owner rows.

@@ -512,7 +512,7 @@ pub(crate) fn due(
                     let node = super::nodes(|n| {
                         let key = n
                             .iter()
-                            .find(|(_, e)| e.stream == own && e.ordinal == ordinal)
+                            .find(|(_, e)| e.stream == own && e.ordinal == ordinal && !e.stand_in)
                             .map(|(&k, _)| k);
                         if let Some(key) = key {
                             n.remove(&key);
@@ -708,6 +708,15 @@ pub(crate) fn keep_survivors(
     });
 }
 
+/// Drain arrived socket `(key, origin)` pairs recorded during entry/take
+/// unpacking so the unit can register their routes in `files.tcp_routes`.
+pub(crate) fn take_arrived_sockets(group: Option<Group>) -> Vec<(u64, crate::net::TcpOrigin)> {
+    replaying(group, |live| {
+        std::mem::take(&mut live.takes.arrived_sockets)
+    })
+    .unwrap_or_default()
+}
+
 /// Refund any kept survivor charges still held when a replaying unit ends.
 pub(crate) fn drain_survivors(group: Option<Group>) {
     let remaining: Vec<_> = replaying(group, |live| {
@@ -860,20 +869,38 @@ impl From<format::Corrupt> for Unpacked {
 /// from its part, given the row's kind.
 pub(in crate::tape) fn packed(
     value: &[u8],
-    mut flat: Vec<u8>,
-    (at, len): (usize, usize),
+    flat: Vec<u8>,
+    span: (usize, usize),
     owners: &[[u64; 4]],
     word: &mut dyn FnMut(u64, &mut format::Cursor<'_>) -> Result<u64, Unpacked>,
 ) -> Result<Vec<u8>, Unpacked> {
     let mut c = format::Cursor::new(value);
     let plain = c.bytes()?;
+    let parts = c.varint()?;
+    let out = packed_body(plain, parts, &mut c, flat, span, owners, word)?;
+    if !c.done() {
+        return Err(Unpacked::Layout);
+    }
+    Ok(out)
+}
+
+/// Unpack a value whose `plain` bytes and `parts` count have already been read
+/// from `c`, leaving `c` positioned immediately after this value's last part.
+pub(in crate::tape) fn packed_body(
+    plain: &[u8],
+    parts: u64,
+    c: &mut format::Cursor<'_>,
+    mut flat: Vec<u8>,
+    (at, len): (usize, usize),
+    owners: &[[u64; 4]],
+    word: &mut dyn FnMut(u64, &mut format::Cursor<'_>) -> Result<u64, Unpacked>,
+) -> Result<Vec<u8>, Unpacked> {
     if plain.len() != len {
         return Err(Unpacked::Layout);
     }
     flat.get_mut(at..at + len)
         .ok_or(Unpacked::Layout)?
         .copy_from_slice(plain);
-    let parts = c.varint()?;
     let rows = live(owners, &|at, width| {
         let mut word = [0u8; 8];
         let at = at as usize;
@@ -907,7 +934,7 @@ pub(in crate::tape) fn packed(
     let mut lists = BTreeMap::new();
     for ([at, kind, element, _], _) in held {
         if kind != SEQ {
-            let w = word(kind, &mut c)?;
+            let w = word(kind, c)?;
             let at = at as usize;
             flat.get_mut(at..at + 8)
                 .ok_or(Unpacked::Layout)?
@@ -927,9 +954,6 @@ pub(in crate::tape) fn packed(
             .ok_or(Unpacked::Layout)?
             .copy_from_slice(&len.to_le_bytes());
         lists.insert(at as u64, elements);
-    }
-    if !c.done() {
-        return Err(Unpacked::Layout);
     }
     for (row, _) in sequences(&rows) {
         if let Some(elements) = lists.get(&row[0]) {

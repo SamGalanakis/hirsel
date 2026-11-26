@@ -153,6 +153,7 @@ store@1/store/journal_test_fork_preparation src=b4b8387d3a59b5b9 sig=2297f31770d
 store@1/store/journal_test_fork_same_roots src=cd54917f6374a315 sig=7fdf6e6a4b253b9d run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_fork_threshold src=a3109cc175c606c3 sig=6f3b40fcee0e4627 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_genesis_limits src=9940614ccff93a24 sig=c32fb975a2609e1f run=ea720f3846592392 bug=- oracle=- rows=pending
+store@1/store/journal_test_live_replay_versions src=fb08dcaad5128a3b sig=db10f35f942f8d71 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_options src=05ee0a735f301fc4 sig=6b75ee85d19d8b53 run=ea720f3846592392 bug=- oracle=- rows=pending
 store@1/store/journal_test_order_workspace src=edf5a7bd5abd0ff0 sig=c7080f02f3991b7d run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
 store@1/store/journal_test_payload src=514be55879cafe66 sig=66757c003d1ef79b run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending

@@ -1,0 +1,136 @@
+// Collection-map values start with a 36-byte PagePtr. Its location and stamp
+// can differ after replay. Everything after it, including the row charge,
+// an inline Cell value and a Log's bounds, remains part of the comparison.
+fn replay_law_same_rows(a: Arc[std.page.Page], b: Arc[std.page.Page], collection_map: bool) -> bool {
+    let mut source = std.page.cursor_open(a, None, true, false)
+    let mut replayed = std.page.cursor_open(b, None, true, false)
+    let start = if collection_map {
+        36u64
+    } else {
+        0u64
+    }
+    while let Some(row) = std.page.cursor_next(mut source) {
+        let Some(other) = std.page.cursor_next(mut replayed) else {
+            return false
+        }
+        if row.key != other.key || list.slice(row.value, start, list.len(row.value)) != list.slice(other.value, start, list.len(other.value)) {
+            return false
+        }
+        if collection_map {
+            let Some(child) = view row.collection else {
+                return false
+            }
+            let Some(peer) = view other.collection else {
+                return false
+            }
+            if !replay_law_same_rows(child, peer, false) {
+                return false
+            }
+        }
+    }
+    if let Some(_) = std.page.cursor_next(mut replayed) {
+        return false
+    }
+    true
+}
+
+fn replay_law_mismatch(tip: Tip, part: String) -> Never {
+    let mut message = string.from("live and replayed branch ")
+    string.push_u64(mut message, int.widen(tip.id))
+    string.push(mut message, " version ")
+    string.push_u64(mut message, tip.head)
+    string.push(mut message, " differ in ")
+    string.push(mut message, part)
+    fail(take message)
+}
+
+fn replay_law_compare(primary: Tip, replayed: Tip) {
+    if primary.id != replayed.id || primary.head != replayed.head || primary.at != replayed.at {
+        replay_law_mismatch(primary, "commit identity or time")
+    }
+    let a = view primary.roots
+    let b = view replayed.roots
+    if !replay_law_same_rows(a.catalog.root, b.catalog.root, false) {
+        replay_law_mismatch(primary, "catalog")
+    }
+    if !replay_law_same_rows(a.collections.root, b.collections.root, true) {
+        replay_law_mismatch(primary, "collections")
+    }
+    if !replay_law_same_rows(a.streams.root, b.streams.root, false) {
+        replay_law_mismatch(primary, "streams")
+    }
+    if list.len(a.keyed) != list.len(b.keyed) {
+        replay_law_mismatch(primary, "keyed tree count")
+    }
+    for i in 0u64 .. list.len(a.keyed) {
+        if !replay_law_same_rows(a.keyed[i].root, b.keyed[i].root, false) {
+            replay_law_mismatch(primary, "keyed rows")
+        }
+    }
+}
+
+fn replay_law_capture(db: Db, d: Dir, c: Clock, floor: u64, wanted: u64) -> Result[(), Error] waits {
+    let primary = capacity(current_state(db))?
+    let tip = view primary.tips[0]
+    if db.checkpointed != floor || tip.head != wanted {
+        replay_law_mismatch(tip, "journal coverage")
+    }
+    let mut progress = LogCaptureProgress(next_id: 1, last: None)
+    let due = clock.deadline_after_ms(host.mono_ns(c), 1000)
+    let Some(take replayed) = log_follow_capture(d, c, due, mut progress, Some(db.store), db.ceiling, None)? else {
+        replay_law_mismatch(tip, "journal capture")
+    }
+    replay_law_compare(tip, replayed.state.tips[0])
+    // Compare the exact union of the live roots with the reconstructed one.
+    // Exclude cached Accounts.logical and Accounts.exact. L51(d) allows the
+    // live retained union to charge 604 conservatively and reopen to charge 518.
+    if capacity(state_account(primary))? != replayed.resident {
+        replay_law_mismatch(tip, "exact row account")
+    }
+    Ok(())
+}
+
+@test
+fn journal_test_live_replay_versions(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let dir = disk_test_directory(d)
+    let mut options = journal_crash_options()
+    options.pack_bytes = 65536
+    let mut db = open(tasks, dir, c, r, options)?
+    let mut declaring = declare(db, Migrate)?
+    let mut declared_rows = declare_table(mut declaring, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let _ = index(mut declaring, mut declared_rows, "by_v", Many, code.describe(crash_value), std.codec.key_u64())?
+    let rows = finish(mut declaring, take declared_rows)?
+    let cell = declare_cell(mut declaring, "cell", std.codec.of_bytes())?
+    let events = declare_log(mut declaring, "events", std.codec.of_u64(), Forever)?
+    let _ = seal(mut db, take declaring)?
+    let base = version(snapshot(db))
+    let floor = db.checkpointed
+    replay_law_capture(db, dir, c, floor, base)?
+    for step in 0u64 .. 4 {
+        let outcome = run(mut db, None, (copy_env(rows), copy_env(cell), copy_env(events), step), fn(mut tx: Tx, env: (Table[u64, u64], Cell[Bytes], Log[u64], u64)) -> Result[(), Error] {
+            let (data, value, history, turn) = copy_env(env)
+            if turn == 3 {
+                let _ = delete(mut tx, data, 1)?
+                cell_clear(mut tx, value)?
+                trim_before(mut tx, history, 2)?
+            } else {
+                put(mut tx, data, 1, 10 + turn)?
+                cell_set(mut tx, value, cell_law_value(200 + 500 * turn, int.truncate(turn)))?
+                let _ = append(mut tx, history, turn + 20)?
+            }
+            Ok(())
+        })?
+        let Committed(done) = outcome else {
+            fail("replay fixture did not commit")
+        }
+        durable(mut db, done.ticket)?
+        replay_law_capture(db, dir, c, floor, base + step + 1)?
+    }
+    let stream = law_stream_bytes(b"replay", keyed_time(db))
+    let Admitted(admitted) = admit_law_stream(mut db, stream, 0, digest_for("replay"))? else {
+        fail("replay fixture did not admit a stream")
+    }
+    durable(mut db, ticket(admitted))?
+    replay_law_capture(db, dir, c, floor, base + 5)?
+    close(take db)
+}

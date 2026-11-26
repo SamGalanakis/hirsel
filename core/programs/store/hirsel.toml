@@ -180,6 +180,7 @@ dirs = ["."]
 "follower_crash_laws.hirsel" = "store"
 "store_journal_laws.hirsel" = "store"
 "store_journal_laws_2.hirsel" = "store"
+"store_replay_laws.hirsel" = "store"
 "store_journal_laws_3.hirsel" = "store"
 "store_journal_laws_4.hirsel" = "store"
 "store_journal_laws_5.hirsel" = "store"

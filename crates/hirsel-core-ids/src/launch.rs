@@ -393,16 +393,65 @@ impl Metadata {
 }
 
 #[cold]
-/// The running executable's file. Linux opens the mapped inode itself; Darwin
+/// The running executable's file. Linux opens the mapped inode itself. Darwin
 /// has no /proc and opens the path dyld recorded at exec (`_NSGetExecutablePath`),
-/// so a file renamed over that path since exec is the one read. A launched
-/// process does not read it: the launcher passes the checked image's
-/// descriptor and digest (`LAUNCH_IMAGE_ENV`).
+/// then checks that the opened file is the vnode the running text was mapped
+/// from: a file renamed over that path since exec is refused, and the digest
+/// is unavailable. A launched process does not read it: the launcher passes
+/// the checked image's descriptor and digest (`LAUNCH_IMAGE_ENV`).
 fn running_image() -> io::Result<File> {
     #[cfg(target_os = "linux")]
     return File::open("/proc/self/exe");
     #[cfg(not(target_os = "linux"))]
-    return std::env::current_exe().and_then(File::open);
+    {
+        use std::os::unix::fs::MetadataExt;
+        let file = std::env::current_exe().and_then(File::open)?;
+        let opened = file.metadata()?;
+        if (opened.dev() as u32, opened.ino()) != darwin_text_vnode()? {
+            return Err(io::Error::other(
+                "the file at the start path is not the running image",
+            ));
+        }
+        Ok(file)
+    }
+}
+
+/// The device and inode of the file the region holding this function's code
+/// was mapped from: the running image, since the runtime links into it.
+#[cfg(not(target_os = "linux"))]
+fn darwin_text_vnode() -> io::Result<(u32, u64)> {
+    /// `struct proc_regionwithpathinfo` (`<sys/proc_info.h>`).
+    #[repr(C)]
+    struct Region {
+        head: [u64; 10],
+        address: u64,
+        size: u64,
+        vnode: libc::vnode_info_path,
+    }
+    const _: () = assert!(size_of::<Region>() == 1272);
+    const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+    let text = darwin_text_vnode as usize as u64;
+    let mut region = std::mem::MaybeUninit::<Region>::zeroed();
+    // SAFETY: the kernel writes at most the given size into the region record.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            PROC_PIDREGIONPATHINFO,
+            text,
+            region.as_mut_ptr().cast(),
+            size_of::<Region>() as libc::c_int,
+        )
+    };
+    if written != size_of::<Region>() as libc::c_int {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: zeroed, then filled by the kernel; every field is plain data.
+    let region = unsafe { region.assume_init() };
+    if !(region.address..region.address.saturating_add(region.size)).contains(&text) {
+        return Err(io::Error::other("no mapped region holds the running code"));
+    }
+    let stat = &region.vnode.vip_vi.vi_stat;
+    Ok((stat.vst_dev, stat.vst_ino))
 }
 
 fn read_digest(image: io::Result<File>) -> Executable {

@@ -138,6 +138,7 @@ _posix_spawnattr_setsigmask
 _pow
 _pread
 _proc_pidfdinfo
+_proc_pidinfo
 _pthread_attr_destroy
 _pthread_attr_getschedparam
 _pthread_attr_init

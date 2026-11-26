@@ -111,6 +111,88 @@ fn identity_stable() {
     );
 }
 
+/// A program started directly takes the digest of the image that runs, or
+/// none (docs/spec/launch.md). A file renamed over the start path after the
+/// exec and before the launch reads its image is never the one hashed: Linux
+/// hashes the running inode, and Darwin, which can only open the path, finds
+/// that the file is not the running text's vnode and reports no digest.
+#[test]
+fn identity_of_an_image_replaced_before_launch_is_never_the_replacement() {
+    use std::io::{BufRead, Read, Write};
+    const TEST: &str =
+        "entry_tests::identity_of_an_image_replaced_before_launch_is_never_the_replacement";
+    const COPY_TO: &str = "HIRSEL_TEST_IDENTITY_COPY_TO";
+    let executable = std::env::current_exe().unwrap();
+    if let Some(destination) = std::env::var_os(COPY_TO) {
+        std::fs::copy(&executable, destination).unwrap();
+        return;
+    }
+    if executable.file_name().unwrap() == "replaced-child" {
+        println!("READY");
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_exact(&mut [0]).unwrap();
+        let launch = hirsel_core_ids::launch::Metadata::native("test-target", 419, false);
+        let config = launch_config(&launch);
+        let mut context = Context::new(4096);
+        context.run = &config;
+        // SAFETY: Config, context and launch remain pinned in this child.
+        let digest: String = unsafe {
+            (0..hirsel_core_launch_word(&context, 1, 0))
+                .map(|i| format!("{:02x}", hirsel_core_launch_word(&context, 2, i)))
+                .collect()
+        };
+        println!("IDENTITY {digest}");
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let child_path = directory.path().join("replaced-child");
+    let copy = crate::test_process::command()
+        .args(["--exact", TEST])
+        .env(COPY_TO, &child_path)
+        .output()
+        .unwrap();
+    assert!(copy.status.success());
+    let image = std::fs::read(&child_path).unwrap();
+    let mut child = crate::test_process::command_for(child_path.as_os_str())
+        .args(["--exact", TEST, "--nocapture"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    // A single-threaded libtest prints `test NAME ... ` ahead of the output.
+    while !line.trim_end().ends_with("READY") {
+        line.clear();
+        assert_ne!(
+            output.read_line(&mut line).unwrap(),
+            0,
+            "child exited early"
+        );
+    }
+    let replacement = directory.path().join("replacement");
+    std::fs::write(&replacement, b"a different executable on disk").unwrap();
+    std::fs::rename(replacement, &child_path).unwrap();
+    child.stdin.take().unwrap().write_all(&[1]).unwrap();
+    let mut tail = String::new();
+    output.read_to_string(&mut tail).unwrap();
+    assert!(child.wait().unwrap().success(), "{tail}");
+    let digest = tail
+        .lines()
+        .find_map(|line| line.strip_prefix("IDENTITY "))
+        .unwrap_or_else(|| panic!("{tail}"));
+    // FIPS 180-4 from ring's independent SHA-256.
+    let hex = |bytes: &[u8]| -> String {
+        crate::os_tls::sha256(bytes)
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    };
+    assert_ne!(digest, hex(b"a different executable on disk"));
+    assert!(digest == hex(&image) || digest.is_empty(), "{digest}");
+}
+
 #[test]
 fn identity_unavailable() {
     let missing = std::env::temp_dir().join(format!("hirsel-missing-exe-{}", std::process::id()));

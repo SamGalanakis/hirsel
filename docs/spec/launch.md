@@ -56,10 +56,14 @@ require or extract a constant argument.
   descriptor nor a mapping. Replacement, rename or deletion of the file after
   that leaves the digest stable. The hash is not deferred: macOS lets the file
   of a running image be written and truncated, so a later read could hash other
-  bytes and a mapping could fault. A file put at that path between the exec and
-  the open is hashed in place of the running image; a child of the platform
-  launcher is not exposed to this, because it takes the digest the launcher
-  verified (below, "macOS").
+  bytes and a mapping could fault. Before it hashes, the program checks that the
+  opened file's device and inode are those of the vnode its running code was
+  mapped from (`proc_pidinfo` with `PROC_PIDREGIONPATHINFO`, one call). A file
+  renamed or linked over the path between the exec and the open is another
+  vnode: the digest is then unavailable, never that file's. The check cannot
+  see bytes written into the running image's own file in that window, since the
+  vnode stays the same. A child of the platform launcher takes the digest the
+  launcher verified (below, "macOS") and makes neither check.
 - An evaluator launching a built artifact hashes the artifact it loaded, and
   retains that artifact's target. It never hashes the evaluator executable.
   Source-only evaluation has no executable image and is unavailable.

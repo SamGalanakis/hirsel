@@ -76,6 +76,7 @@ pub enum AdmissionError {
     Conflict(Box<Identity>),
     Unsupported(&'static str),
     Limit(Limit),
+    MissingRootLimit,
     Disconnected,
     Refused(String),
     RecordingForeign(String),
@@ -96,6 +97,9 @@ impl fmt::Display for AdmissionError {
             Self::Conflict(identity) => write!(out, "Conflict({identity:?})"),
             Self::Unsupported(reason) => write!(out, "Unsupported({reason})"),
             Self::Limit(limit) => write!(out, "Limit({limit:?})"),
+            Self::MissingRootLimit => {
+                out.write_str("release requires a root limit (`[program].limit` or `--limit`)")
+            }
             Self::Disconnected => out.write_str("admission peer disconnected"),
             Self::Refused(reason) | Self::RecordingForeign(reason) => out.write_str(reason),
             Self::Io(error) => error.fmt(out),

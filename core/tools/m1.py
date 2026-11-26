@@ -267,7 +267,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 command = [str(compiler), 'build', '--inputs', str(inputs), '--entry', entry_path,
                            '--backend', engine, '--runtime', str(runtime), *grants, '--json', '-o', str(binary)]
                 if engine == 'llvm':
-                    command.append('--release')
+                    command.extend(['--release', '--limit', '67108864'])
                 if debug_lines is not None:
                     command.extend(['--debug-lines', debug_lines])
                 if target:

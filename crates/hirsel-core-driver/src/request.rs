@@ -285,7 +285,6 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut corpus_path = None;
     let mut test_seeds = None;
     let mut test_seed = None;
-    let mut explicit_limit = false;
     let mut backend = None;
     let mut release = false;
     let mut debug_lines = None;
@@ -294,7 +293,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut explicit_target = false;
     let mut logical_charge_report = None;
     let mut output_path = None;
-    let mut root_limit = 64 * 1024 * 1024;
+    let mut root_limit = None;
     let mut emulator = None;
     let mut sysroot = None;
     let mut target = crate::host::HOST_TARGET.triple().to_owned();
@@ -442,10 +441,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
             Opt::Emulator => emulator = Some(PathBuf::from(value)),
             Opt::Sysroot => sysroot = Some(PathBuf::from(value)),
-            Opt::Limit => {
-                explicit_limit = true;
-                root_limit = value.parse()?;
-            }
+            Opt::Limit => root_limit = Some(value.parse()?),
             Opt::Output => output_path = Some(PathBuf::from(value)),
             Opt::Entry => entry = Some(DefPath::from_full(&value).ok_or("invalid entry path")?),
             Opt::Libraries => libraries = Some(PathBuf::from(value)),
@@ -739,7 +735,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             || source_std
             || core_product.is_some()
             || explicit_target
-            || explicit_limit
+            || root_limit.is_some()
             || n_place.is_some()
             || !grants.is_empty()
         {
@@ -1073,7 +1069,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         (test_owner, package_root) = (Some(app.package.package.clone()), app.manifest.clone());
         manifest_runs = app.tests.take();
-        app.program_grants(command, &mut grants, &mut root_limit, explicit_limit)?;
+        app.program_grants(command, &mut grants, &mut root_limit)?;
         if let Some(root) = libraries {
             app.trust_library_root(root);
         }
@@ -1105,13 +1101,13 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 let mut configured = grants.clone();
                 configured.foreign.clear();
                 configured.exec.clear();
-                if explicit_limit || !configured.is_empty() {
+                if root_limit.is_some() || !configured.is_empty() {
                     return Err("this package declares [tests] in hirsel.toml. Set limit, dirs and grants there".into());
                 }
                 runs
             }
             None => {
-                if test_command && !explicit_limit {
+                if test_command && root_limit.is_none() {
                     return Err("test requires an explicit --limit <bytes> for each run".into());
                 }
                 // A test runs in a working directory of its own; a directory
@@ -1125,7 +1121,10 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                         .ok_or("directory path is not UTF-8")?
                         .to_owned();
                 }
-                crate::package_dir::TestRuns::given(root_limit, grants.clone())
+                crate::package_dir::TestRuns::given(
+                    root_limit.unwrap_or(crate::native::DEFAULT_ROOT_LIMIT),
+                    grants.clone(),
+                )
             }
         })
     } else {
@@ -1185,9 +1184,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         && !foreign_replay
     {
         let header = crate::tape_cli::header(Path::new(&replay.path))?;
-        if !explicit_limit {
-            root_limit = header.limit;
-        }
+        root_limit.get_or_insert(header.limit);
     }
     meter.finish("startup/discovery");
     // Concurrent requests share keyed artifacts. Their launch paths are private.
@@ -1199,6 +1196,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     // error is reported only for a request check accepts.
     let mut prepared = if native_command {
         let prepare = || -> Result<_, Box<dyn std::error::Error>> {
+            if release && (recipe_command || command == "run") && root_limit.is_none() {
+                return Err(crate::code_admission::AdmissionError::MissingRootLimit.into());
+            }
             let default_output = temporary_output.as_ref().map_or_else(
                 || PathBuf::from("program"),
                 |scratch| scratch.path().join("program"),
@@ -1226,7 +1226,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
             options.backend = backend.unwrap_or(options.backend);
             options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
-            options.root_limit = root_limit;
+            options.root_limit = root_limit.unwrap_or(options.root_limit);
             grants.apply(&mut options);
             if !test_command {
                 options.bind_exec()?;
@@ -1349,7 +1349,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         if let Some(Ok(options)) = &mut prepared {
             let header =
                 crate::tape_cli::header(Path::new(&options.replay.as_ref().unwrap().path))?;
-            if !explicit_limit {
+            if root_limit.is_none() {
                 options.root_limit = header.limit;
             }
         }

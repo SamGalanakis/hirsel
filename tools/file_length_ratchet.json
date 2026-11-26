@@ -136,9 +136,9 @@
     "reason": "ds-cold-fn-2520"
   },
   "crates/hirsel-core-driver/src/code_admission/code_store.rs": {
-    "lines": 1065,
-    "raise_revision": 3,
-    "reason": "fixfwd-place-comptime-unbound-2845"
+    "lines": 1127,
+    "raise_revision": 4,
+    "reason": "hardcoded-a30-root-limit-3088"
   },
   "crates/hirsel-core-driver/src/core_ops_native.rs": {
     "lines": 2467,

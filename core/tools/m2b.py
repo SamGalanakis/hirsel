@@ -146,7 +146,7 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch, spool=No
     if entry.get('dir'):
         command.extend(['--dir', str(spool)])
     if engine == 'llvm':
-        command.append('--release')
+        command.extend(['--release', '--limit', '67108864'])
     if cc:
         command.extend(['--cc', str(cc)])
     result = run_case(f'{entry["workload"]}:build', engine, command, cwd=ROOT, capture_output=True)

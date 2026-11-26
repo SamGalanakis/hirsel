@@ -1456,7 +1456,7 @@ fn build_names_unmatched_grant_and_entry() {
     PackageLaw::pass(law.run(&["lock", "app"]));
     for mode in [
         &["run", "app", "--backend", "cranelift"][..],
-        &["build", "app", "--release"][..],
+        &["build", "app", "--release", "--limit", "67108864"][..],
     ] {
         for (option, value, grant) in [
             ("--grant", "Stderr", "--grant Stderr"),

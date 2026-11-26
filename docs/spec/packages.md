@@ -198,7 +198,7 @@ shared = { workspace = true }                            # see section 4
 [program]                 # optional
 module = "main"           # default "main"
 function = "main"         # default "main"
-limit = 67108864          # optional; the executable's root limit
+limit = 67108864          # the executable's root limit, required for a release with manifest run configuration
 grants = ["Stdout", "Clock"]   # optional; --grant syntax
 dirs = ["data"]           # optional; --dir paths, one per Dir parameter in order
 
@@ -291,8 +291,12 @@ and dev adds no limit or grant of its own. When any of the
 three is present, they are the build's only source of `limit`, `dir` and `grant`: a `--limit`,
 `--dir` or `--grant` flag is refused with `this package declares [program] grants in
 hirsel.toml. Set limit, dirs and grants there`. `Foreign` and `Exec` approvals are outside the
-rule and still come from the command line. Without `limit` the build's default root limit
-applies. `build` accepts a recipe that leaves a `main` parameter ungranted and writes one
+rule and still come from the command line. A source build, publish or run with `--release`
+requires a root limit. Supply `limit` in `[program]`, or pass `--limit` when the manifest
+does not declare any of the three run configuration keys. A missing limit refuses the
+release and names the field. Development builds default to 67,108,864 bytes (64 MiB).
+Assembly from `--recipe` uses the limit recorded in the recipe. `build` accepts a recipe
+that leaves a `main` parameter ungranted and writes one
 ``hirsel: warning: grant `NAME` is not in the build's configuration; the executable will not
 start`` line per such parameter, in parameter order, whichever source configured it.
 

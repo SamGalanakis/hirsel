@@ -81,7 +81,7 @@ def main():
             if not args.helper_laws:
                 command.extend(grant_args(args.module, host))
             if engine == 'llvm':
-                command.append('--release')
+                command.extend(['--release', '--limit', '67108864'])
             wait_load()
             build = subprocess.run(command, capture_output=True)
             row = dict(engine=engine, built=False, passed=False)

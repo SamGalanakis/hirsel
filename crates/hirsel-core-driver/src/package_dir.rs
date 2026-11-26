@@ -647,8 +647,7 @@ impl PackageDir {
         &mut self,
         command: &str,
         grants: &mut Grants,
-        root_limit: &mut u64,
-        explicit_limit: bool,
+        root_limit: &mut Option<u64>,
     ) -> Result<(), String> {
         let Some(program) = self.program.take() else {
             return Ok(());
@@ -659,16 +658,14 @@ impl PackageDir {
         let mut configured = grants.clone();
         configured.foreign.clear();
         configured.exec.clear();
-        if explicit_limit || !configured.is_empty() {
+        if root_limit.is_some() || !configured.is_empty() {
             return Err("this package declares [program] grants in hirsel.toml. Set limit, dirs and grants there".into());
         }
         let mut manifest = program.grants;
         manifest.foreign.append(&mut grants.foreign);
         manifest.exec.append(&mut grants.exec);
         *grants = manifest;
-        if let Some(limit) = program.limit {
-            *root_limit = limit;
-        }
+        *root_limit = program.limit;
         Ok(())
     }
 

@@ -321,6 +321,8 @@ fn run_and_build_share_the_release_unit() {
             command,
             app.to_str().unwrap(),
             "--release",
+            "--limit",
+            "67108864",
             "--source-core",
             "--libraries",
             libraries.to_str().unwrap(),

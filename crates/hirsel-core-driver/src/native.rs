@@ -133,6 +133,7 @@ pub struct NativeOptions {
     >,
 }
 pub(crate) const DEFAULT_INSTANCE_LIMIT: usize = 65_536;
+pub(crate) const DEFAULT_ROOT_LIMIT: u64 = 64 * 1024 * 1024;
 
 impl NativeOptions {
     pub(crate) fn llvm_release(&self) -> bool {
@@ -145,9 +146,8 @@ impl NativeOptions {
             .try_for_each(crate::exec_launch::Binding::seal_policy)
     }
 
-    /// A request's options before its flags: the development engine
-    /// (Cranelift), unoptimised, without line tables or charge report. An
-    /// installation prebuilds for exactly these.
+    /// Development defaults use Cranelift without optimizations, line tables,
+    /// or a charge report. An installation prebuilds with these options.
     pub fn development(target: String, runtime: PathBuf, link: Link, output: PathBuf) -> Self {
         Self {
             backend: Backend::Cranelift,
@@ -158,7 +158,7 @@ impl NativeOptions {
             link,
             cas: crate::store::collect::user(),
             output,
-            root_limit: 64 * 1024 * 1024,
+            root_limit: DEFAULT_ROOT_LIMIT,
             instance_limit: DEFAULT_INSTANCE_LIMIT,
             recording: false,
             store_teardown: false,

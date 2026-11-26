@@ -150,7 +150,7 @@ def charged(args, root, work, engine, module, modes, figure, cc=None, entry=None
     if module in ('runner_rss', 'runner_cover'):
         command += ['--grant', 'Tasks', '--grant', 'Net=Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535']
     if engine == 'llvm':
-        command.append('--release')
+        command.extend(['--release', '--limit', '67108864'])
     if cc or args.cc:
         command += ['--cc', str(cc or args.cc.resolve())]
     built = run_case(f'{module}:build', engine, command, capture_output=True, text=True)

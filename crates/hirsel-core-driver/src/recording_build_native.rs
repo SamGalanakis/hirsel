@@ -261,7 +261,7 @@ pub fn main(a: Args, out: Stdout) -> Result[(), Exit] waits {
         "--libraries",
         libraries.to_str().unwrap(),
     ];
-    let source = [inputs.as_slice(), &["--grant", "Stdout"]];
+    let source = [inputs.as_slice(), &["--grant", "Stdout", "--limit", "67108864"]];
     let link = ["--cc", clang.to_str().unwrap()];
     let invoke = |args: &[&str]| {
         let mut call = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();

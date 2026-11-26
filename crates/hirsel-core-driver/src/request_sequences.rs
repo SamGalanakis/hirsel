@@ -2129,7 +2129,7 @@ pub(super) fn tape_request(args: &[String], directory: &Path) -> (Option<i32>, S
     tape_request_output(tape_request_command(args, directory))
 }
 /// Run a prepared request child and split its output after the child mark.
-pub(super) fn tape_request_output(mut command: std::process::Command) -> (Option<i32>, String, String) {
+pub(crate) fn tape_request_output(mut command: std::process::Command) -> (Option<i32>, String, String) {
     let output = command.output().unwrap();
     let after = |bytes: &[u8]| {
         let text=String::from_utf8_lossy(bytes);
@@ -2472,7 +2472,7 @@ fn cases() -> Vec<Case> {
         Case { name: "native options answer apart", steps: vec![
             build(MAIN_GRANTS),
             llvm(build(MAIN_GRANTS)),
-            opt(build(MAIN_GRANTS), &["--release"]),
+            opt(build(MAIN_GRANTS), &["--release", "--limit", "67108864"]),
             opt(build(MAIN_GRANTS), &["--debug-lines", "on"]),
             opt(build(MAIN_GRANTS), &["--limit", "1048576"]),
             opt(build(MAIN_GRANTS), &["--dir", "."]),

@@ -239,22 +239,23 @@ def main():
                     '    Ok(())\n'
                     '}\n')
                 (work / 'data' / 'input.txt').write_text('granted\n')
+                limit = ['--limit', '67108864']
                 invoke('fmt', '--check', str(app))
                 self.assertTrue(json.loads(invoke('check', str(app), '--json').stdout)['accepted'])
                 for engine in ['cranelift', 'llvm']:
                     for profile in [[], ['--release']]:
-                        flags = ['--backend', engine, *profile]
+                        flags = ['--backend', engine, *profile, *limit]
                         program = work / ('program-' + engine + ''.join(profile))
                         self.assertTrue(json.loads(invoke('build', str(app), *flags, '-o', str(program), '--json').stdout)['native']['linked'])
                         invoke('run', str(app), *flags, '--dir', str(work / 'data'))
                         # The granted directory is the one the program reads.
                         invoke('run', str(app), *flags, '--dir', str(work / 'empty'), expected=3)
-                        invoke('test', str(app), *flags, '--limit', '67108864')
+                        invoke('test', str(app), *flags)
                 # An LLVM build in a fresh store loads the prefix's engine libLLVM, and
                 # with it none of the deb library's z3, ICU, libxml2, libedit, libffi,
                 # zstd or libbsd: the loader's own record of what it initialised.
                 trace = work / 'loader'
-                traced = self.progress.run([str(installed), 'build', str(app), '--backend', 'llvm', '--release',
+                traced = self.progress.run([str(installed), 'build', str(app), '--backend', 'llvm', '--release', *limit,
                                          '--store', str(work / 'traced-store'), '-o', str(work / 'traced'), '--json'],
                                         cwd=work, env=clean | {'LD_DEBUG': 'libs', 'LD_DEBUG_OUTPUT': str(trace)},
                                         capture_output=True, text=True)
@@ -271,7 +272,7 @@ def main():
                 invoke('new', str(flat_app))
                 def flat_build():
                     return self.progress.run([
-                        str(flat_compiler), 'build', str(flat_app), '--backend', 'llvm', '--release',
+                        str(flat_compiler), 'build', str(flat_app), '--backend', 'llvm', '--release', *limit,
                         '--store', str(work / 'flat-store'), '-o', str(work / 'flat-program'),
                     ], cwd=work, env=flat_env, capture_output=True, text=True)
                 built = flat_build()
@@ -299,7 +300,7 @@ def main():
                 invoke('std-product', '--install', str(root), '--runtime', str(cross), '--target', 'aarch64-unknown-linux-gnu',
                        '--link-kit', str(kit))
                 for engine in ['cranelift', 'llvm']:
-                    aarch64 = ['--backend', engine, '--release', '--target', 'aarch64-unknown-linux-gnu']
+                    aarch64 = ['--backend', engine, '--release', *limit, '--target', 'aarch64-unknown-linux-gnu']
                     program = work / ('program-aarch64-' + engine)
                     self.assertTrue(json.loads(invoke('build', str(app), *aarch64, '-o', str(program), '--json').stdout)['native']['linked'])
                     elf = program.read_bytes()
@@ -311,7 +312,7 @@ def main():
                 self.assertFalse(found.exists(), found.read_text() if found.exists() else '')
                 linker = root / 'bin' / 'ld.lld'
                 linker.unlink()
-                refused = invoke('build', str(app), '--release', '-o', str(work / 'gone'), expected=2)
+                refused = invoke('build', str(app), '--release', *limit, '-o', str(work / 'gone'), expected=2)
                 self.assertIn(str(linker), refused.stderr)
 
         def test_installed_srtp_checks_in_an_external_consumer(self):

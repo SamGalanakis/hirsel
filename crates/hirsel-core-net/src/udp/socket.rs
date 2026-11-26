@@ -91,12 +91,14 @@ pub(super) fn address(addr: SocketAddr) -> (libc::sockaddr_storage, libc::sockle
 /// `raw` points to at least `len` initialized address bytes.
 pub(super) unsafe fn decode_address(raw: *const u8, len: libc::socklen_t) -> Option<SocketAddr> {
     let len = len as usize;
-    if len < size_of::<libc::sa_family_t>() {
+    // BSD addresses lead with a length byte, so the family is read at its field.
+    let family = std::mem::offset_of!(libc::sockaddr, sa_family);
+    if len < family + size_of::<libc::sa_family_t>() {
         return None;
     }
     // SAFETY: the length checks cover the family and the selected address type.
     unsafe {
-        match i32::from(raw.cast::<libc::sa_family_t>().read_unaligned()) {
+        match i32::from(raw.add(family).cast::<libc::sa_family_t>().read_unaligned()) {
             libc::AF_INET if len == size_of::<libc::sockaddr_in>() => {
                 let v4 = raw.cast::<libc::sockaddr_in>().read_unaligned();
                 let ip = Ipv4Addr::from(v4.sin_addr.s_addr.to_ne_bytes());

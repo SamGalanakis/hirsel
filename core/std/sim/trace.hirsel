@@ -1,0 +1,310 @@
+/// One run's ordered codec rows. Allocate it only when capture is enabled.
+pub opaque type Tape[E, A, S]: send {
+    seed: u64,
+    event: codec.Schema,
+    actions: codec.Schema,
+    state: codec.Schema,
+    rows: List[Bytes]
+}
+
+/// Apalache's optional variable type annotations (ADR-002 type strings).
+pub type Types {
+    event: String,
+    actions: String,
+    state: String
+}
+
+pub type Error = EncodeCodec(codec.EncodeError) | DecodeCodec(codec.DecodeError) | UnsupportedFloat | Depth | ReservedField(String)
+
+type Format: key = Ndjson | Itf
+
+/// Starts an empty trace for seed. The types determine the projection.
+pub fn start[E: codec, A: codec, S: codec](seed: u64) -> Result[Tape[E, A, S], Error] {
+    let event = codec.describe((codec.of() : codec.Codec[E])) ?=> EncodeCodec
+    let actions = codec.describe((codec.of() : codec.Codec[List[A]])) ?=> EncodeCodec
+    let state = codec.describe((codec.of() : codec.Codec[S])) ?=> EncodeCodec
+    Ok(Tape(seed, event: take event, actions: take actions, state: take state, rows: list.new()))
+}
+
+/// Appends one complete transition. None skips encoding and allocation.
+pub fn record[E: codec, A: codec, S: codec](mut capture: Option[Tape[E, A, S]], event: E, actions: List[A], state: S) -> Result[(), Error] {
+    if let Some(mut tape) = capture {
+        let mut bytes_out: Bytes = list.new()
+        codec.encode((codec.of() : codec.Codec[E]), event, mut bytes_out) ?=> EncodeCodec
+        codec.encode((codec.of() : codec.Codec[List[A]]), actions, mut bytes_out) ?=> EncodeCodec
+        codec.encode((codec.of() : codec.Codec[S]), state, mut bytes_out) ?=> EncodeCodec
+        list.push(mut tape.rows, take bytes_out)
+    }
+    Ok(())
+}
+
+/// Renders one line per transition, with seed, index, event, actions and state.
+pub fn ndjson[E, A, S](tape: Tape[E, A, S]) -> Result[String, Error] {
+    let mut out = string.new()
+    for i in 0u64 .. list.len(tape.rows) {
+        string.push(mut out, "{\"seed\":")
+        string.push_u64(mut out, tape.seed)
+        string.push(mut out, ",\"index\":")
+        string.push_u64(mut out, i)
+        row(tape, i, Ndjson, mut out)?
+        string.push(mut out, "}\n")
+    }
+    Ok(take out)
+}
+
+/// Renders an ADR-015 trace. Supply types for Apalache input.
+pub fn itf[E, A, S](tape: Tape[E, A, S], types: Option[Types]) -> Result[String, Error] {
+    let mut out: String = "{\"#meta\":{\"seed\":"
+    unsigned(mut out, Itf, tape.seed)
+    if let Some(t) = types {
+        string.push(mut out, ",\"varTypes\":{\"event\":")
+        json.push_quoted(mut out, t.event)
+        string.push(mut out, ",\"actions\":")
+        json.push_quoted(mut out, t.actions)
+        string.push(mut out, ",\"state\":")
+        json.push_quoted(mut out, t.state)
+        string.push(mut out, "}")
+    }
+    string.push(mut out, "},\"vars\":[\"event\",\"actions\",\"state\"],\"states\":[")
+    for i in 0u64 .. list.len(tape.rows) {
+        comma(mut out, i)
+        string.push(mut out, "{\"#meta\":{\"index\":")
+        string.push_u64(mut out, i)
+        string.push(mut out, "}")
+        row(tape, i, Itf, mut out)?
+        string.push(mut out, "}")
+    }
+    string.push(mut out, "]}")
+    Ok(take out)
+}
+
+fn row[E, A, S](tape: Tape[E, A, S], i: u64, format: Format, mut out: String) -> Result[(), Error] {
+    let b = tape.rows[i]
+    let mut pos = 0u64
+    string.push(mut out, ",\"event\":")
+    value(tape.event, codec.schema_root(tape.event), 0, format, b, mut pos, mut out, 0)?
+    string.push(mut out, ",\"actions\":")
+    value(tape.actions, codec.schema_root(tape.actions), 0, format, b, mut pos, mut out, 0)?
+    string.push(mut out, ",\"state\":")
+    value(tape.state, codec.schema_root(tape.state), 0, format, b, mut pos, mut out, 0)?
+    if pos != list.len(b) {
+        return Error(DecodeCodec(Trailing(pos)))
+    }
+    Ok(())
+}
+
+fn comma(mut out: String, i: u64) {
+    if i > 0 {
+        string.push(mut out, ",")
+    }
+}
+
+fn open_integer(mut out: String, format: Format) {
+    if format == Itf {
+        string.push(mut out, "{\"#bigint\":\"")
+    }
+}
+
+fn close_integer(mut out: String, format: Format) {
+    if format == Itf {
+        string.push(mut out, "\"}")
+    }
+}
+
+fn unsigned(mut out: String, format: Format, n: u64) {
+    open_integer(mut out, format)
+    string.push_u64(mut out, n)
+    close_integer(mut out, format)
+}
+
+fn signed(mut out: String, format: Format, n: i64) {
+    open_integer(mut out, format)
+    string.push_i64(mut out, n)
+    close_integer(mut out, format)
+}
+
+fn open_sequence(mut out: String, format: Format, tag: String) {
+    if format == Itf {
+        string.push(mut out, tag)
+    }
+    string.push(mut out, "[")
+}
+
+fn close_sequence(mut out: String, format: Format) {
+    string.push(mut out, if format == Itf {
+        "]}"
+    } else {
+        "]"
+    })
+}
+
+fn open_variant(mut out: String, tag: String) {
+    string.push(mut out, "{\"tag\":")
+    json.push_quoted(mut out, tag)
+    string.push(mut out, ",\"value\":")
+}
+
+fn unit(mut out: String, format: Format) {
+    string.push(mut out, if format == Itf {
+        "{\"#tup\":[]}"
+    } else {
+        "[]"
+    })
+}
+
+// Walk the completed SEM-10 schema and canonical bytes in lockstep.
+fn value(schema: codec.Schema, expr: Bytes, at: u64, format: Format, b: Bytes, mut pos: u64, mut out: String, depth: u64) -> Result[(), Error] {
+    if depth == 128 {
+        return Error(Depth)
+    }
+    let child = at + 1
+    match expr[at] {
+        0 => unit(mut out, format),
+        1 => {
+            let yes = codec.take_bool(b, mut pos) ?=> DecodeCodec
+            string.push(mut out, if yes {
+                "true"
+            } else {
+                "false"
+            })
+        },
+        2 => {
+            let c = codec.take_char(b, mut pos) ?=> DecodeCodec
+            let mut text = string.new()
+            string.push_char(mut text, c)
+            json.push_quoted(mut out, text)
+        },
+        3 => unsigned(mut out, format, int.widen(codec.take_u8(b, mut pos) ?=> DecodeCodec)),
+        4 => unsigned(mut out, format, int.widen(codec.take_u16(b, mut pos) ?=> DecodeCodec)),
+        5 => unsigned(mut out, format, int.widen(codec.take_u32(b, mut pos) ?=> DecodeCodec)),
+        6 => unsigned(mut out, format, codec.take_u64(b, mut pos) ?=> DecodeCodec),
+        7 => signed(mut out, format, int.widen(codec.take_i8(b, mut pos) ?=> DecodeCodec)),
+        8 => signed(mut out, format, int.widen(codec.take_i16(b, mut pos) ?=> DecodeCodec)),
+        9 => signed(mut out, format, int.widen(codec.take_i32(b, mut pos) ?=> DecodeCodec)),
+        10 => signed(mut out, format, codec.take_i64(b, mut pos) ?=> DecodeCodec),
+        11 => return Error(UnsupportedFloat),
+        12 => return Error(UnsupportedFloat),
+        13 => {
+            let text = codec.take_string(b, mut pos) ?=> DecodeCodec
+            json.push_quoted(mut out, text)
+        },
+        14 => {
+            let count: u64 = int.widen(codec.take_u32(b, mut pos) ?=> DecodeCodec)
+            string.push(mut out, "[")
+            for i in 0u64 .. count {
+                comma(mut out, i)
+                value(schema, expr, child, format, b, mut pos, mut out, depth + 1)?
+            }
+            string.push(mut out, "]")
+        },
+        15 => {
+            let count: u64 = int.widen(codec.take_u32(b, mut pos) ?=> DecodeCodec)
+            let other = codec.schema_next(expr, child)
+            open_sequence(mut out, format, "{\"#map\":")
+            for i in 0u64 .. count {
+                comma(mut out, i)
+                string.push(mut out, "[")
+                value(schema, expr, child, format, b, mut pos, mut out, depth + 1)?
+                string.push(mut out, ",")
+                value(schema, expr, other, format, b, mut pos, mut out, depth + 1)?
+                string.push(mut out, "]")
+            }
+            close_sequence(mut out, format)
+        },
+        16 => {
+            let tag = codec.take_tag(b, mut pos, 2) ?=> DecodeCodec
+            if tag == 0 {
+                open_variant(mut out, "None")
+                unit(mut out, format)
+            } else {
+                open_variant(mut out, "Some")
+                value(schema, expr, child, format, b, mut pos, mut out, depth + 1)?
+            }
+            string.push(mut out, "}")
+        },
+        17 => {
+            let tag = codec.take_tag(b, mut pos, 2) ?=> DecodeCodec
+            let item = if tag == 0 {
+                open_variant(mut out, "Ok")
+                child
+            } else {
+                open_variant(mut out, "Error")
+                codec.schema_next(expr, child)
+            }
+            value(schema, expr, item, format, b, mut pos, mut out, depth + 1)?
+            string.push(mut out, "}")
+        },
+        18 => tuple(schema, expr, child + 4, codec.schema_word(expr, child), format, b, mut pos, mut out, depth + 1)?,
+        19 => definition(schema, codec.schema_definition(schema, codec.schema_word(expr, child)), format, b, mut pos, mut out, depth + 1)?,
+        _ => return Error(DecodeCodec(Schema(at)))
+    }
+    Ok(())
+}
+
+fn tuple(schema: codec.Schema, expr: Bytes, first: u64, count: u64, format: Format, b: Bytes, mut pos: u64, mut out: String, depth: u64) -> Result[(), Error] {
+    open_sequence(mut out, format, "{\"#tup\":")
+    let mut at = first
+    for i in 0u64 .. count {
+        comma(mut out, i)
+        value(schema, expr, at, format, b, mut pos, mut out, depth)?
+        at = codec.schema_next(expr, at)
+    }
+    close_sequence(mut out, format)
+    Ok(())
+}
+
+fn definition(schema: codec.Schema, def: Bytes, format: Format, b: Bytes, mut pos: u64, mut out: String, depth: u64) -> Result[(), Error] {
+    if def[0] == 2 {
+        return value(schema, def, 1, format, b, mut pos, mut out, depth)
+    }
+    let n = codec.schema_word(def, 1)
+    let mut at = 5u64
+    if def[0] == 0 {
+        string.push(mut out, "{")
+        let mut emitted = 0u64
+        for _ in 0u64 .. n {
+            let live = def[at] == 0
+            at += 1
+            let name = codec.take_string(def, mut at) ?=> DecodeCodec
+            if live {
+                if format == Itf && string.starts_with(name, "#") {
+                    return Error(ReservedField(take name))
+                }
+                comma(mut out, emitted)
+                json.push_quoted(mut out, name)
+                string.push(mut out, ":")
+                value(schema, def, at, format, b, mut pos, mut out, depth)?
+                emitted += 1
+            }
+            at = codec.schema_next(def, at)
+        }
+        string.push(mut out, "}")
+    } else {
+        let tag_at = pos
+        let tag: u64 = int.widen(codec.take_tag(b, mut pos, int.narrow(n)) ?=> DecodeCodec)
+        for i in 0u64 .. n {
+            let live = def[at] == 0
+            at += 1
+            let name = codec.take_string(def, mut at) ?=> DecodeCodec
+            let count = codec.schema_word(def, at)
+            at += 4
+            if i == tag {
+                if !live {
+                    return Error(DecodeCodec(Invalid(tag_at)))
+                }
+                open_variant(mut out, name)
+                if count == 1 {
+                    value(schema, def, at, format, b, mut pos, mut out, depth)?
+                } else {
+                    tuple(schema, def, at, count, format, b, mut pos, mut out, depth)?
+                }
+                string.push(mut out, "}")
+                break
+            }
+            for _ in 0u64 .. count {
+                at = codec.schema_next(def, at)
+            }
+        }
+    }
+    Ok(())
+}

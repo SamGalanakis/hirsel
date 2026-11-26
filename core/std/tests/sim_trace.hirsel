@@ -1,0 +1,78 @@
+type Event: codec = Propose(u64) | Finish(bool)
+
+type State: codec {
+    epoch: u64,
+    delta: i64
+}
+
+fn nd_state(line: String, epoch: u64, delta: i64) -> bool {
+    region r {
+        let doc = result.unwrap(json.parse(r, line))
+        let Some(e) = json.pointer(doc, "/state/epoch") else {
+            return false
+        }
+        let Some(d) = json.pointer(doc, "/state/delta") else {
+            return false
+        }
+        json.as_u64(e) == Some(epoch) && json.as_i64(d) == Some(delta)
+    }
+}
+
+fn itf_state(doc: json.Json, epoch_path: String, delta_path: String, epoch: u64, delta: i64) -> bool {
+    let Some(Str(e)) = json.pointer(doc, epoch_path) else {
+        return false
+    }
+    let Some(Str(d)) = json.pointer(doc, delta_path) else {
+        return false
+    }
+    let a: Result[u64, ParseError] = int.parse(text.as_string(e))
+    let b: Result[i64, ParseError] = int.parse(text.as_string(d))
+    result.unwrap(a) == epoch && result.unwrap(b) == delta
+}
+
+// 2^53 + 1 and 2^64 - 1 lose bits in a binary64 number. Check consecutive
+// states in both formats, including the negative integer, against literals.
+// expect: run trace_formats_preserve_integer_states() = true
+fn trace_formats_preserve_integer_states() -> bool {
+    let mut capture: Option[sim.trace.Tape[Event, String, State]] = None
+    let no_actions: List[String] = list.new()
+    result.unwrap(sim.trace.record(mut capture, Finish(false), no_actions, State(epoch: 0, delta: 0)))
+    let None = capture else {
+        return false
+    }
+    capture = Some(result.unwrap(sim.trace.start(71)))
+    let mut actions: List[String] = list.new()
+    list.push(mut actions, "reply\n")
+    result.unwrap(sim.trace.record(mut capture, Propose(9007199254740993), actions, State(epoch: 9007199254740993, delta: -9007199254740993)))
+    result.unwrap(sim.trace.record(mut capture, Finish(false), no_actions, State(epoch: 18446744073709551615, delta: 0)))
+    let Some(tape) = capture else {
+        return false
+    }
+    let lines = result.unwrap(sim.trace.ndjson(tape))
+    let mut expected_ndjson: String = "{\"seed\":71,\"index\":0,\"event\":{\"tag\":\"Propose\",\"value\":9007199254740993},\"actions\":[\"reply\\n\"],\"state\":{\"epoch\":9007199254740993,\"delta\":-9007199254740993}}\n"
+    string.push(mut expected_ndjson, "{\"seed\":71,\"index\":1,\"event\":{\"tag\":\"Finish\",\"value\":false},\"actions\":[],\"state\":{\"epoch\":18446744073709551615,\"delta\":0}}\n")
+    if lines != expected_ndjson {
+        return false
+    }
+    let Some((first, next)) = string.next_line(lines, 0) else {
+        return false
+    }
+    let Some((second, end)) = string.next_line(lines, next) else {
+        return false
+    }
+    if end != string.byte_len(lines) || !nd_state(first, 9007199254740993, -9007199254740993) || !nd_state(second, 18446744073709551615, 0) {
+        return false
+    }
+    let types = sim.trace.Types(event: "Propose(Int) | Finish(Bool)", actions: "Seq(Str)", state: "{ epoch: Int, delta: Int }")
+    let itf = result.unwrap(sim.trace.itf(tape, Some(take types)))
+    let mut expected_itf: String = "{\"#meta\":{\"seed\":{\"#bigint\":\"71\"},\"varTypes\":{\"event\":\"Propose(Int) | Finish(Bool)\",\"actions\":\"Seq(Str)\",\"state\":\"{ epoch: Int, delta: Int }\"}},\"vars\":[\"event\",\"actions\",\"state\"],\"states\":["
+    string.push(mut expected_itf, "{\"#meta\":{\"index\":0},\"event\":{\"tag\":\"Propose\",\"value\":{\"#bigint\":\"9007199254740993\"}},\"actions\":[\"reply\\n\"],\"state\":{\"epoch\":{\"#bigint\":\"9007199254740993\"},\"delta\":{\"#bigint\":\"-9007199254740993\"}}}")
+    string.push(mut expected_itf, ",{\"#meta\":{\"index\":1},\"event\":{\"tag\":\"Finish\",\"value\":false},\"actions\":[],\"state\":{\"epoch\":{\"#bigint\":\"18446744073709551615\"},\"delta\":{\"#bigint\":\"0\"}}}]}")
+    if itf != expected_itf {
+        return false
+    }
+    region r {
+        let doc = result.unwrap(json.parse(r, itf))
+        itf_state(doc, "/states/0/state/epoch/#bigint", "/states/0/state/delta/#bigint", 9007199254740993, -9007199254740993) && itf_state(doc, "/states/1/state/epoch/#bigint", "/states/1/state/delta/#bigint", 18446744073709551615, 0)
+    }
+}

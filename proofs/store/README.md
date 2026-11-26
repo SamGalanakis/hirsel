@@ -37,11 +37,11 @@ Each TLA+ module takes a `Rules` constant naming the reading of the spec it chec
 - **`StoreRetention`**
   - `v2157`: v2.157 as written. An idle step advances the cursor's row count, and a later reading probe resumes there ("Progress").
   - `v2157_restart`: the only other reading v2.157 admits. A reading probe restarts an idle-advanced cursor at row 0, which "Progress" forbids.
-  - `v2161`: the current text (v2.161, D-TI-1). An idle cut reads nothing, never installs or moves a cursor, and retires the first selected pack whole. Promotion copies a frame of a pack an idle cut retired through the Snapshot's lease. Only a crash or a reselection resets a cursor. v2.164 (review 3177 F2–F3) lets an idle cut take every listed class-3/4 pack, selected or not; the model already lets any listed cursorless pack be selected at any cut, so these rules cover it (lineage cells are not modelled).
+  - `v2161`: the current text (v2.161, D-TI-1, as amended by v2.164). An idle cut reads nothing, never installs or moves a cursor, and retires the first selected pack whole. Promotion copies a frame of a pack an idle cut retired through the Snapshot's lease. Only a crash or a reselection resets a cursor. v2.164 (review 3177 F2–F3) lets an idle cut take every listed class-3/4 pack, selected or not; the model already lets any listed cursorless pack be selected at any cut, so these rules cover it (lineage cells are not modelled).
   - `count3157`: review 3157's alternative, which v2.161 lists under "Rejected" as sound but costlier. Idle progress is a count apart from the probe cursor, and the first non-idle cut restarts it at row 0, as a third allowed reset. Kept as a second passing baseline, so the rejection's "sound" stays checked.
 - **`StoreCatchUp`**
   - `v2157`: as written. A step ships "the collection rows it changed": for a Tiered index that is X's new root. The child installs it under the overlay its replayed frames built.
-  - `v2161`: the current text (v2.161, D-CU-1). A demotion step carries X as a superseded id, and `apply_steps` drops the child's overlay of X and installs the empty root (D-D7-5). A build chunk ships its entries, which the child applies against their priors as replay applies a frame. The §13.7 premise is scoped to holder reopen and log@1 followers; the prepare child is the exception.
+  - `v2161`: the current text (v2.161, D-CU-1; unchanged through v2.164). A demotion step carries X as a superseded id, and `apply_steps` drops the child's overlay of X and installs the empty root (D-D7-5). A build chunk ships its entries, which the child applies against their priors as replay applies a frame. The §13.7 premise is scoped to holder reopen and log@1 followers; the prepare child is the exception.
 
 ## Invariants
 
@@ -81,7 +81,7 @@ Counts are from one run with 8 workers. `check_proofs.py` prints them and never 
 | Python models (§3.9) | 7 of 7 pass; `model_v221_scope.py` takes about 28 s |
 | Whole default run | 168 s |
 
-**The Tiered-idle hole (v2157).** A plain cut writes pack P1 with two frames. Capture Snapshot S.
+**The Tiered-idle hole (v2157).** A plain cut writes pack P1 with two frames. Overwrite the second row, then capture Snapshot S.
 A Tiered → Memory cut hands the head's Cold root to the queue. A cut pins S (promotion copies S's
 unflushed row into pack P2) and drains the queue. Unpin S, selecting P1 for a probe: the published generation has no Tiered holder, no
 queue row and no anchor, so it is Tiered-idle, and the probe step advances P1's cursor one row
@@ -96,7 +96,9 @@ which the child replays into its overlay. A demotion follows (a step), then r b�
 At the demotion the child installs the empty root under its overlay, and at the chunk the chunk's
 root {a} under the same overlay, whose delete of a hides the new entry. The last frame's delete of a
 then fails its prior check: `Corrupt(Malformed)` on a valid store. In the shortest stale-index
-trace, a demotion with one earlier frame leaves the child's X non-empty under `Backfilling(None)`.
+trace, r a→c is written before the export, so the child begins with it as an overlay. A
+demotion's step installs the empty root under that overlay, leaving the child's X = {c} under
+`Backfilling(None)`.
 TLC runs with several workers, so `--save-traces` can write a different shortest trace on another
 run.
 

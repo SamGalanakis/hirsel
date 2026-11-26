@@ -313,19 +313,28 @@ fn direct(registry: &mut Registry, pid: libc::pid_t) -> io::Result<&mut Child> {
 /// Exec's startup checks: an unprivileged run with confined opens and image
 /// copies. `posix_spawn` needs no probe.
 pub(crate) fn probe() -> io::Result<()> {
-    // SAFETY: the id getters have no failure mode.
-    let uids = unsafe { [libc::getuid(), libc::geteuid(), libc::geteuid()] };
-    if !crate::exec::unprivileged(uids, [0; 2], [0; 2]) {
-        return Err(io::Error::other("Exec requires an unprivileged run"));
+    #[cfg(target_os = "ios")]
+    return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
+    #[cfg(not(target_os = "ios"))]
+    {
+        // SAFETY: the id getters have no failure mode.
+        let uids = unsafe { [libc::getuid(), libc::geteuid(), libc::geteuid()] };
+        if !crate::exec::unprivileged(uids, [0; 2], [0; 2]) {
+            return Err(io::Error::other("Exec requires an unprivileged run"));
+        }
+        let beneath = fs::File::open(".").and_then(|root| {
+            use std::os::fd::AsFd;
+            hirsel_core_net::unix::open_beneath(
+                root.as_fd(),
+                c".",
+                crate::host::path::DIRECTORY_HANDLE,
+            )
+        });
+        if beneath.is_err() || hirsel_core_net::exec::probe_seals().is_err() {
+            return Err(io::Error::other(EXEC_HOST));
+        }
+        Ok(())
     }
-    let beneath = fs::File::open(".").and_then(|root| {
-        use std::os::fd::AsFd;
-        hirsel_core_net::unix::open_beneath(root.as_fd(), c".", crate::host::path::DIRECTORY_HANDLE)
-    });
-    if beneath.is_err() || hirsel_core_net::exec::probe_seals().is_err() {
-        return Err(io::Error::other(EXEC_HOST));
-    }
-    Ok(())
 }
 
 fn start_thread(probe: fn() -> io::Result<()>) -> io::Result<()> {
@@ -436,6 +445,13 @@ impl Shared {
         input: SpawnInput,
         failure: Option<SetupStep>,
     ) -> Result<Started, SpawnError> {
+        #[cfg(target_os = "ios")]
+        {
+            let _ = (registry, input, failure);
+            return Err(io::Error::from_raw_os_error(libc::ENOTSUP).into());
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
         if let Some(step) = failure {
             return Err(SpawnError {
                 error: io::Error::from_raw_os_error(libc::EIO),
@@ -510,6 +526,7 @@ impl Shared {
             pid,
             pipes: mem::take(&mut streams.parent),
         })
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 // Module `target` (PROG-6): the target a build is for, as constants the toolchain supplies.
-pub type Os: key = Linux | Macos
+pub type Os: key = Linux | Macos | Ios
 
 pub type Arch: key = X86_64 | Aarch64
 

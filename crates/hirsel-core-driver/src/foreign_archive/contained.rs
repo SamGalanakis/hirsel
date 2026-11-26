@@ -116,7 +116,9 @@ pub(crate) fn compile_bytes(
         .ok_or_else(|| AdmissionError::Refused(format!("{target} is not a Hirsel target")))?;
     match target {
         Target::X86_64Linux | Target::Aarch64Linux => {}
-        Target::Aarch64Darwin => return Err(not_built()),
+        Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim => {
+            return Err(not_built());
+        }
     }
     let key = cache.map(|cache| (cache, cache.key(pin, target)));
     if let Some((cache, key)) = key

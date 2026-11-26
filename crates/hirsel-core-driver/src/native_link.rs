@@ -198,3 +198,19 @@ fn macho_link(
     std::fs::rename(directory.path().join("program"), output)?;
     Ok(())
 }
+
+/// Merge compiled objects, foreign archives, and the runtime into a single
+/// static archive (`.a`) for embedding into an iOS/macOS host app.
+pub(crate) fn static_link(inputs: &[PathBuf], output: &Path) -> Result<(), NativeStop> {
+    let parent = output.parent().filter(|p| !p.as_os_str().is_empty());
+    let directory = tempfile::tempdir_in(parent.unwrap_or(Path::new(".")))?;
+    let mut process = Command::new("/usr/bin/libtool");
+    process.current_dir(directory.path());
+    process.args(["-static", "-no_warning_for_no_symbols", "-o", "libprogram.a"]);
+    for input in inputs {
+        process.arg(std::path::absolute(input)?);
+    }
+    command(&mut process)?;
+    std::fs::rename(directory.path().join("libprogram.a"), output)?;
+    Ok(())
+}

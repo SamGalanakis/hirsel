@@ -13,8 +13,12 @@ const LC_SEGMENT_64: u32 = 0x19;
 const LC_SYMTAB: u32 = 0x2;
 const LC_BUILD_VERSION: u32 = 0x32;
 const PLATFORM_MACOS: u32 = 1;
+const PLATFORM_IOS: u32 = 2;
+const PLATFORM_IOSSIMULATOR: u32 = 7;
 /// The target's floor, macOS 26.0 (macOS decision D2), as `xxxx.yy.zz` nibbles.
 const MACOS_FLOOR: u32 = 26 << 16;
+/// iOS deployment floor (allows iOS 18.0 .. 28.0).
+const IOS_FLOOR: u32 = 28 << 16;
 const SECTION_TYPE: u32 = 0xff;
 const S_REGULAR: u32 = 0x0;
 const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
@@ -284,11 +288,12 @@ impl<'a> MachSection<'a> {
     }
 }
 
-/// A Mach-O member for `aarch64-apple-darwin`, or `None` when it is not a
-/// relocatable arm64 macOS object no later than the floor.
+/// A Mach-O member for an Apple arm64 target, or `None` when it is not a
+/// relocatable arm64 object matching the target platform and floor.
 pub(super) fn parse_member(
     bytes: &[u8],
     name: &str,
+    target: hirsel_core_layout::Target,
     budget: &Debit<'_>,
 ) -> DecodeResult<Option<Member>> {
     let Some(file) = MachO::parse(bytes) else {
@@ -299,13 +304,19 @@ pub(super) fn parse_member(
     else {
         return Ok(None);
     };
+    let (expected_platform, floor) = match target {
+        hirsel_core_layout::Target::Aarch64Darwin => (PLATFORM_MACOS, MACOS_FLOOR),
+        hirsel_core_layout::Target::Aarch64Ios => (PLATFORM_IOS, IOS_FLOOR),
+        hirsel_core_layout::Target::Aarch64IosSim => (PLATFORM_IOSSIMULATOR, IOS_FLOOR),
+        _ => return Ok(None),
+    };
     let mut builds = commands
         .iter()
         .filter(|(kind, _)| *kind == LC_BUILD_VERSION)
         .map(|(_, command)| (u32_at(command, 8), u32_at(command, 12)));
     let build = match (builds.next(), builds.next()) {
         (Some((Some(platform), Some(minos))), None) => {
-            platform == PLATFORM_MACOS && minos <= MACOS_FLOOR
+            platform == expected_platform && minos <= floor
         }
         _ => false,
     };

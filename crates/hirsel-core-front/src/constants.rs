@@ -22,7 +22,7 @@ pub struct Constant {
     pub ty: TyId,
     pub value: Option<ConstValue>,
     /// A constant that depends on `target`: its value on each `Target::ALL`.
-    pub targets: Option<[ConstValue; 3]>,
+    pub targets: Option<[ConstValue; hirsel_core_layout::Target::ALL.len()]>,
     pub(crate) expr: NodeId,
     /// Its initialiser calls a function or names a computed constant: its value is
     /// the run of the generated function under its path, after checking.

@@ -320,7 +320,11 @@ pub(crate) fn bind<'a>(
         Some(hirsel_core_layout::Target::Aarch64Linux) => object::Architecture::Aarch64,
         // ld64 copies no DWARF into an image, so a Mach-O image's rows bind
         // once it is linked ([`bind_linked`]), into its detached debug file.
-        Some(hirsel_core_layout::Target::Aarch64Darwin) => {
+        Some(
+            hirsel_core_layout::Target::Aarch64Darwin
+            | hirsel_core_layout::Target::Aarch64Ios
+            | hirsel_core_layout::Target::Aarch64IosSim,
+        ) => {
             return Err(format!(
                 "a {target} image cannot embed DWARF; its detached debug file (a .dSYM for a release link) holds the rows"
             ));

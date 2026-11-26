@@ -424,7 +424,9 @@ impl Metadata {
 pub fn running_image() -> io::Result<File> {
     #[cfg(target_os = "linux")]
     return File::open("/proc/self/exe");
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "ios")]
+    return std::env::current_exe().and_then(File::open);
+    #[cfg(all(not(target_os = "linux"), not(target_os = "ios")))]
     {
         use std::os::unix::fs::MetadataExt;
         let file = std::env::current_exe().and_then(File::open)?;
@@ -440,7 +442,7 @@ pub fn running_image() -> io::Result<File> {
 
 /// The device and inode of the file the region holding this function's code
 /// was mapped from: the running image, since the runtime links into it.
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "ios")))]
 fn darwin_text_vnode() -> io::Result<(u32, u64)> {
     /// `struct proc_regionwithpathinfo` (`<sys/proc_info.h>`).
     #[repr(C)]

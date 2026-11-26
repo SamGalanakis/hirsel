@@ -20,7 +20,7 @@ pub(super) fn initialiser(tree: &Tree, kids: &[NodeId]) -> (NodeId, bool) {
 impl Program<'_> {
     /// The values of a constant without an initialiser: only `target.os: Os` and
     /// `target.arch: Arch` in core module `target`, which the toolchain supplies.
-    pub(super) fn toolchain(&mut self, at: ItemRef, ty: TyId) -> Option<[ConstValue; 3]> {
+    pub(super) fn toolchain(&mut self, at: ItemRef, ty: TyId) -> Option<[ConstValue; Target::ALL.len()]> {
         let item = self.item(at);
         let name = self
             .index
@@ -52,12 +52,13 @@ impl Program<'_> {
             return None;
         }
         let start = self.constant_parts.len() as u32;
-        let mut values = [None; 3];
+        let mut values = [None; Target::ALL.len()];
         for target in Target::ALL {
             let case = if name == "os" {
                 match target.os() {
                     Os::Linux => "Linux",
                     Os::Macos => "Macos",
+                    Os::Ios => "Ios",
                 }
             } else {
                 match target.arch() {
@@ -94,7 +95,7 @@ impl Program<'_> {
         }
         self.refusals.truncate(refusals);
         self.constant_parts.truncate(parts);
-        let mut values = [None; 3];
+        let mut values = [None; Target::ALL.len()];
         for target in Target::ALL {
             let mark = self.refusals.len();
             values[target.index()] = self
@@ -202,16 +203,16 @@ impl Program<'_> {
                 cx.expr(n, want, true)
             })
         } else {
-            [value; 3]
+            [value; Target::ALL.len()]
         };
         let failed = refusals != self.refusals.len() || gaps != self.gaps.len();
         self.refusals.truncate(refusals);
         self.gaps.truncate(gaps);
-        match values {
-            [Some(a), Some(b), Some(c)] if !failed => {
-                self.constant_branches.insert((at, n), [a, b, c]);
-            }
-            _ => self.constant_parts.truncate(parts),
+        if !failed && values.iter().all(Option::is_some) {
+            self.constant_branches
+                .insert((at, n), values.map(Option::unwrap));
+        } else {
+            self.constant_parts.truncate(parts);
         }
     }
 }

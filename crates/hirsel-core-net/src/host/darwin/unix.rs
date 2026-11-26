@@ -21,6 +21,7 @@ pub(crate) const O_RESOLVE_BENEATH: i32 = 0x1000;
 /// A directory handle that grants lookups but no reads.
 pub(crate) const DIRECTORY: i32 = libc::O_SEARCH | libc::O_DIRECTORY;
 
+#[cfg(not(target_os = "ios"))]
 unsafe extern "C" {
     fn pthread_fchdir_np(fd: libc::c_int) -> libc::c_int;
 }
@@ -42,11 +43,19 @@ pub(crate) fn open_beneath(root: BorrowedFd<'_>, path: &CStr, flags: i32) -> io:
 
 /// Give this thread its own working directory, `dir`.
 pub(crate) fn isolate_binding_thread(dir: BorrowedFd<'_>) -> io::Result<()> {
-    // SAFETY: changes only this thread's working directory.
-    if unsafe { pthread_fchdir_np(dir.as_raw_fd()) } < 0 {
-        return Err(io::Error::last_os_error());
+    #[cfg(target_os = "ios")]
+    {
+        let _ = dir;
+        return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
     }
-    Ok(())
+    #[cfg(not(target_os = "ios"))]
+    {
+        // SAFETY: changes only this thread's working directory.
+        if unsafe { pthread_fchdir_np(dir.as_raw_fd()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 /// Bind `socket` at the empty slot `leaf` of `dir`, from a thread made for the

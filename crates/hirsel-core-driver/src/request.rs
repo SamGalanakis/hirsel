@@ -304,6 +304,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         || std::env::var_os("LLVM_SYS_231_PREFIX").map(|p| PathBuf::from(p).join("bin/clang"));
     let mut run_args = invocation.arguments;
     let mut recording_build = false;
+    let mut staticlib_build = false;
     let mut additional_runtimes = std::collections::BTreeMap::new();
     let mut record_path = None;
     let mut replay_tape = None;
@@ -335,6 +336,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                 }
             }
             Opt::Recording => recording_build = true,
+            Opt::Staticlib => staticlib_build = true,
             Opt::RecordingRuntime => {
                 additional_runtimes.insert(Flavour::RECORDING, PathBuf::from(value));
             }
@@ -937,6 +939,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         options.debug_lines = debug_lines.unwrap_or(options.debug_lines);
         options.logical_charge_report = logical_charge_report;
         options.recording = needs_recording;
+        options.staticlib = staticlib_build;
         let recipe = release_manifest.as_ref().map(|_| recipe.clone());
         let library = installed_std
             .as_ref()
@@ -1233,6 +1236,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             }
             options.logical_charge_report = logical_charge_report;
             options.recording = needs_recording;
+        options.staticlib = staticlib_build;
             options.replay = replay_plan;
             Ok(options)
         };

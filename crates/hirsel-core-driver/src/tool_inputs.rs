@@ -268,7 +268,9 @@ fn installed_prefix(target: &str) -> io::Result<[&'static str; 2]> {
     match Target::from_triple(target) {
         Some(Target::X86_64Linux) => Ok(["-dynamic-linker", "/lib64/ld-linux-x86-64.so.2"]),
         Some(Target::Aarch64Linux) => Ok(["-dynamic-linker", "/lib/ld-linux-aarch64.so.1"]),
-        Some(Target::Aarch64Darwin) => Ok(["-flavor", "darwin"]),
+        Some(Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim) => {
+            Ok(["-flavor", "darwin"])
+        }
         None => Err(io::Error::other("no installed link target")),
     }
 }
@@ -342,7 +344,10 @@ pub(crate) fn install_recipe(
             .to_vec();
             match target_kind {
                 Target::Aarch64Linux => args.push("--fix-cortex-a53-843419".into()),
-                Target::X86_64Linux | Target::Aarch64Darwin => {}
+                Target::X86_64Linux
+                | Target::Aarch64Darwin
+                | Target::Aarch64Ios
+                | Target::Aarch64IosSim => {}
             }
             for path in &inputs.start {
                 args.push(copy(path)?);
@@ -362,9 +367,15 @@ pub(crate) fn install_recipe(
         }
         // The image's minimum and SDK versions are both the floor; ld64
         // signs an arm64 image ad hoc, which macOS requires to run it.
-        Os::Macos => {
+        Os::Macos | Os::Ios => {
             let inputs = &serde_json::from_value::<DarwinTarget>(row).map_err(io::Error::other)?;
-            let mut args = ["-arch", "arm64", "-platform_version", "macos"]
+            let platform = match target_kind {
+                Target::Aarch64Darwin => "macos",
+                Target::Aarch64Ios => "ios",
+                Target::Aarch64IosSim => "ios-simulator",
+                _ => unreachable!(),
+            };
+            let mut args = ["-arch", "arm64", "-platform_version", platform]
                 .map(str::to_owned)
                 .to_vec();
             args.extend([inputs.floor.clone(), inputs.floor.clone()]);

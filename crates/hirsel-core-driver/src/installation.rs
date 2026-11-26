@@ -608,6 +608,8 @@ fn read_runtime(path: &Path, target: &str, flavour: Flavour) -> io::Result<Vec<u
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
         "aarch64-apple-darwin",
+        "aarch64-apple-ios",
+        "aarch64-apple-ios-sim",
     ]
     .contains(&target)
     {

@@ -76,7 +76,9 @@ pub(crate) fn link_only(
                 unreachable!("link-only tests have no pass cache");
             };
             match Target::from_triple(&options.target) {
-                Some(Target::Aarch64Darwin) => crate::native_debug::macho_structure(&executable)?,
+                Some(Target::Aarch64Darwin | Target::Aarch64Ios | Target::Aarch64IosSim) => {
+                    crate::native_debug::macho_structure(&executable)?
+                }
                 Some(Target::X86_64Linux | Target::Aarch64Linux) => {}
                 None => {
                     return Err(NativeStop::Entry(format!(

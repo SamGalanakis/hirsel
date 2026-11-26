@@ -98,6 +98,9 @@ pub(crate) struct Plan<'a> {
     /// `store@1/store/verify_teardown` symbol registered at `@test` startup.
     #[serde(skip_serializing_if = "Option::is_none")]
     store_teardown_fn: Option<String>,
+    /// Emit `hirsel_app_main` instead of `main` for static-library embedding.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    staticlib: bool,
     replay: Option<&'a crate::native::ReplayPlan>,
     foreign: Vec<foreign::Function<'a>>,
     /// The contained modules the foreign functions call into (FFI-15).
@@ -286,6 +289,7 @@ impl<'a> Plan<'a> {
             place_backend: None,
             backend: options.backend,
             store_teardown_fn: None,
+            staticlib: options.staticlib,
             replay: options.replay.as_ref(),
             foreign: vec![],
             contained: vec![],
@@ -404,6 +408,7 @@ impl<'a> Plan<'a> {
             &mut object,
             &mut unwind,
             self,
+            target,
             &data,
             entry,
             waits,
@@ -422,10 +427,9 @@ impl<'a> Plan<'a> {
 }
 
 fn object(target: &str) -> Result<ObjectModule> {
-    let page = hirsel_core_layout::Target::from_triple(target)
-        .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?
-        .page_log2()
-        .to_string();
+    let resolved = hirsel_core_layout::Target::from_triple(target)
+        .ok_or_else(|| error(format!("{target} is not a Hirsel target")))?;
+    let page = resolved.page_log2().to_string();
     let mut flags = settings::builder();
     for (name, value) in [
         ("is_pic", "true"),
@@ -439,7 +443,7 @@ fn object(target: &str) -> Result<ObjectModule> {
         flags.set(name, value).map_err(error)?;
     }
     // The launcher must reach the CPU check even on a pre-v2 x86-64 host.
-    let isa = cranelift_codegen::isa::lookup_by_name(target)
+    let isa = cranelift_codegen::isa::lookup_by_name(resolved.cranelift_triple())
         .map_err(error)?
         .finish(settings::Flags::new(flags))
         .map_err(error)?;

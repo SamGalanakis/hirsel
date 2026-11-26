@@ -10,6 +10,7 @@ pub enum OptionId {
     CodeStore,
     ReleaseManifest,
     Recording,
+    Staticlib,
     RecordingRuntime,
     ProfRuntime,
     ProfRecordingRuntime,

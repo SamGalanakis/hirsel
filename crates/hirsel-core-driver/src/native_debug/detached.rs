@@ -253,7 +253,9 @@ impl NativeImage {
             Some([image, detached]) => [Some(image), Some(detached)],
             None => [None, None],
         };
-        deliver(path, &self.bytes, &self.debug, detached)?;
+        if !self.debug.is_empty() {
+            deliver(path, &self.bytes, &self.debug, detached)?;
+        }
         crate::executable::deliver(path, &self.bytes, image)
     }
 }

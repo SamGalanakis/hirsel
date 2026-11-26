@@ -17,7 +17,13 @@ use std::{
         atomic::{AtomicUsize, Ordering::Relaxed},
     },
 };
+#[cfg(target_os = "ios")]
+const RESERVE: usize = 1 << 20;
+#[cfg(not(target_os = "ios"))]
 const RESERVE: usize = 8 << 20;
+#[cfg(target_os = "ios")]
+pub(crate) const COMMIT: usize = 256 << 10;
+#[cfg(not(target_os = "ios"))]
 pub(crate) const COMMIT: usize = 64 << 10;
 pub(crate) fn commit_for_page(page: usize) -> usize {
     COMMIT.max(4 * page)
@@ -35,7 +41,7 @@ crate::units::moved_tls! { static STOP_FD: i32 = 2; }
 /// protection fault on a mapped `PROT_NONE` page as SIGBUS, Linux as SIGSEGV.
 #[cfg(target_os = "linux")]
 const FAULTS: [libc::c_int; 1] = [libc::SIGSEGV];
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 const FAULTS: [libc::c_int; 2] = [libc::SIGSEGV, libc::SIGBUS];
 /// Each of `FAULTS`' handlers from before `arm`, in the same order.
 static PREVIOUS: OnceLock<[libc::sigaction; FAULTS.len()]> = OnceLock::new();

@@ -799,8 +799,12 @@ fn parse_member(
             elf::SHT_AARCH64_ATTRIBUTES,
             elf::R_AARCH64_IRELATIVE,
         ),
-        Some(hirsel_core_layout::Target::Aarch64Darwin) => {
-            return macho::parse_member(bytes, name, budget);
+        Some(
+            target @ (hirsel_core_layout::Target::Aarch64Darwin
+            | hirsel_core_layout::Target::Aarch64Ios
+            | hirsel_core_layout::Target::Aarch64IosSim),
+        ) => {
+            return macho::parse_member(bytes, name, target, budget);
         }
         None => return Ok(None),
     };

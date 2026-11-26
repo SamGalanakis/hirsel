@@ -8,11 +8,11 @@
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use darwin as source;
 #[cfg(target_os = "linux")]
 use linux as source;

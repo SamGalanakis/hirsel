@@ -158,7 +158,7 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
     ]) {
         flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
     }
-    let mut isa = cranelift_codegen::isa::lookup_by_name(options.target)
+    let mut isa = cranelift_codegen::isa::lookup_by_name(target.cranelift_triple())
         .map_err(|e| refuse(e.to_string()))?;
     match target {
         hirsel_core_layout::Target::X86_64Linux => {
@@ -167,9 +167,11 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
             }
         }
         hirsel_core_layout::Target::Aarch64Linux => {}
-        // Every Apple Silicon Mac is at least an M1 (cpu `apple-m1`): LSE,
+        // Every Apple Silicon Mac and modern iOS device is at least arm64 with LSE,
         // FP16 and DotProd, no I8MM, and arm64 rather than arm64e (no PAuth).
-        hirsel_core_layout::Target::Aarch64Darwin => {
+        hirsel_core_layout::Target::Aarch64Darwin
+        | hirsel_core_layout::Target::Aarch64Ios
+        | hirsel_core_layout::Target::Aarch64IosSim => {
             for feature in ["has_lse", "has_fp16", "has_dotprod"] {
                 isa.enable(feature).map_err(|e| refuse(e.to_string()))?;
             }

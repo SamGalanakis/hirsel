@@ -98,6 +98,7 @@ fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
     let NativeOptions {
         recording,
         store_teardown,
+        staticlib,
         coverage,
         replay,
         backend,
@@ -156,6 +157,9 @@ fn native_tuple(options: &NativeOptions) -> io::Result<Vec<u8>> {
     }
     if *store_teardown {
         tuple.extend(encode(&"hirsel.store-teardown.v1")?);
+    }
+    if *staticlib {
+        tuple.extend(encode(&"hirsel.staticlib.v1")?);
     }
     Ok(tuple)
 }

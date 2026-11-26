@@ -1,11 +1,11 @@
 //! Net's host seam: the socket, confined-path and executable-image mechanisms
 //! that differ between host kernels, with one provider per host OS chosen at
 //! compile time. Readiness has its own seam in `reactor`.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 mod darwin;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 use darwin as provider;
 #[cfg(target_os = "linux")]
 use linux as provider;
@@ -16,7 +16,7 @@ pub(crate) use provider::{image, udp, unix};
 /// Darwin provider also uses for send-to; empty on Linux, whose runtime
 /// resolves to the socket itself.
 pub mod pinned {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub use super::darwin::unix::{Frozen, freeze, socket_identity};
 }
 

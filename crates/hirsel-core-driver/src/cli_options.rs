@@ -185,6 +185,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Include recording support. Set HIRSEL_RECORD when running the executable to record."
     ),
     option!(
+        Staticlib,
+        ["--staticlib"],
+        None,
+        ["build"],
+        "Emit a static library exporting hirsel_app_main instead of linking an executable."
+    ),
+    option!(
         RecordingRuntime,
         ["--recording-runtime"],
         Some("ARCHIVE"),

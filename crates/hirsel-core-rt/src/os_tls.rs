@@ -322,6 +322,7 @@ fn payload_len(header: &[u8]) -> usize {
 
 pub(crate) fn system_roots() -> Arc<RootCertStore> {
     let mut store = RootCertStore::empty();
+    #[cfg(not(target_os = "ios"))]
     store.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
     Arc::new(store)
 }

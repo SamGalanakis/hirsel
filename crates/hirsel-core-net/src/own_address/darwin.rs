@@ -7,61 +7,76 @@ use super::{Key, errno};
 use std::collections::BTreeSet;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-/// The subscribed routing socket.
+/// The subscribed routing socket (omitted on iOS where PF_ROUTE is sandbox-denied).
 pub(super) struct Changes {
+    #[cfg(not(target_os = "ios"))]
     events: OwnedFd,
 }
 
 /// Open the routing socket, which receives every routing message the kernel
 /// sends, address changes among them.
 pub(super) fn subscribe() -> Result<Changes, i32> {
-    // SAFETY: plain socket creation; the descriptor is owned at once.
-    let fd = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
-    if fd < 0 {
-        return Err(errno());
+    #[cfg(target_os = "ios")]
+    {
+        Ok(Changes {})
     }
-    // SAFETY: `fd` is a fresh descriptor nothing else owns.
-    let events = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: `events` is an open descriptor.
-    if unsafe { libc::fcntl(events.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
-        return Err(errno());
+    #[cfg(not(target_os = "ios"))]
+    {
+        // SAFETY: plain socket creation; the descriptor is owned at once.
+        let fd = unsafe { libc::socket(libc::PF_ROUTE, libc::SOCK_RAW, libc::AF_UNSPEC) };
+        if fd < 0 {
+            return Err(errno());
+        }
+        // SAFETY: `fd` is a fresh descriptor nothing else owns.
+        let events = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: `events` is an open descriptor.
+        if unsafe { libc::fcntl(events.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(errno());
+        }
+        Ok(Changes { events })
     }
-    Ok(Changes { events })
 }
 
 impl Changes {
     /// Read every queued routing message. True when one changed an address or
     /// was lost, and the table must be read again.
     pub(super) fn drain(&mut self, _held: &mut BTreeSet<Key>) -> Result<bool, i32> {
-        let mut changed = false;
-        let mut buffer = vec![0u8; 1 << 16];
-        loop {
-            // SAFETY: `buffer` is writable for its length.
-            let rc = unsafe {
-                libc::recv(
-                    self.events.as_raw_fd(),
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len(),
-                    libc::MSG_DONTWAIT,
-                )
-            };
-            if rc >= 0 {
-                // A routing socket delivers one message per read: `rtm_msglen`,
-                // `rtm_version`, `rtm_type` lead every header.
-                let message = &buffer[..rc as usize];
-                changed |= match message {
-                    [_, _, version, kind, ..] if i32::from(*version) == libc::RTM_VERSION => {
-                        matches!(i32::from(*kind), libc::RTM_NEWADDR | libc::RTM_DELADDR)
-                    }
-                    _ => true,
+        #[cfg(target_os = "ios")]
+        {
+            Ok(false)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let mut changed = false;
+            let mut buffer = vec![0u8; 1 << 16];
+            loop {
+                // SAFETY: `buffer` is writable for its length.
+                let rc = unsafe {
+                    libc::recv(
+                        self.events.as_raw_fd(),
+                        buffer.as_mut_ptr().cast(),
+                        buffer.len(),
+                        libc::MSG_DONTWAIT,
+                    )
                 };
-                continue;
-            }
-            match errno() {
-                libc::EINTR => {}
-                libc::EAGAIN => return Ok(changed),
-                libc::ENOBUFS => changed = true,
-                e => return Err(e),
+                if rc >= 0 {
+                    // A routing socket delivers one message per read: `rtm_msglen`,
+                    // `rtm_version`, `rtm_type` lead every header.
+                    let message = &buffer[..rc as usize];
+                    changed |= match message {
+                        [_, _, version, kind, ..] if i32::from(*version) == libc::RTM_VERSION => {
+                            matches!(i32::from(*kind), libc::RTM_NEWADDR | libc::RTM_DELADDR)
+                        }
+                        _ => true,
+                    };
+                    continue;
+                }
+                match errno() {
+                    libc::EINTR => {}
+                    libc::EAGAIN => return Ok(changed),
+                    libc::ENOBUFS => changed = true,
+                    e => return Err(e),
+                }
             }
         }
     }

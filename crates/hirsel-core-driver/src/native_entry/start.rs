@@ -7,6 +7,7 @@ pub(super) fn emit(
     object: &mut ObjectModule,
     unwind: &mut Unwind,
     plan: &Plan<'_>,
+    triple: &str,
     data: &data::Tables,
     entry: FuncId,
     foreign_waits: bool,
@@ -17,8 +18,13 @@ pub(super) fn emit(
 ) -> Result<()> {
     let mut context = object.make_context();
     context.func.signature = signature(object, &[I32, I64], Some(I32));
+    let symbol_name = if plan.staticlib {
+        "hirsel_app_main"
+    } else {
+        "main"
+    };
     let main = object
-        .declare_function("main", Linkage::Export, &context.func.signature)
+        .declare_function(symbol_name, Linkage::Export, &context.func.signature)
         .map_err(error)?;
     let mut frontend = FunctionBuilderContext::new();
     let mut f = Code {
@@ -29,8 +35,7 @@ pub(super) fn emit(
     f.b.append_block_params_for_function_params(start);
     f.b.switch_to_block(start);
     let parameters = f.b.block_params(start).to_vec();
-    let triple = f.object.isa().triple().to_string();
-    let target = hirsel_core_layout::Target::from_triple(&triple)
+    let target = hirsel_core_layout::Target::from_triple(triple)
         .ok_or_else(|| format!("no Hirsel target {triple}"))?;
     match target.arch() {
         hirsel_core_layout::Arch::X86_64 => f.void_call("hirsel_core_init_isa", &[])?,
@@ -64,7 +69,7 @@ pub(super) fn emit(
             // libSystem names its stderr stream `__stderrp`.
             match target.os() {
                 hirsel_core_layout::Os::Linux => "stderr",
-                hirsel_core_layout::Os::Macos => "__stderrp",
+                hirsel_core_layout::Os::Macos | hirsel_core_layout::Os::Ios => "__stderrp",
             },
             Linkage::Import,
             true,

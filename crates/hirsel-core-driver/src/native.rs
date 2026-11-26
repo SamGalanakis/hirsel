@@ -97,6 +97,8 @@ pub struct NativeOptions {
     /// Recording runtime (`build --recording`, `run --record`, `replay`, `test --replay`).
     pub recording: bool,
     pub store_teardown: bool,
+    /// Emit a static library exporting `hirsel_app_main` instead of an executable (`hirsel build --staticlib`).
+    pub staticlib: bool,
     /// Coverage build (`docs/coverage.md`) scope, or none.
     pub coverage: Option<hirsel_core_ir::coverage::Scope>,
     pub replay: Option<ReplayPlan>,
@@ -162,6 +164,7 @@ impl NativeOptions {
             instance_limit: DEFAULT_INSTANCE_LIMIT,
             recording: false,
             store_teardown: false,
+            staticlib: false,
             coverage: None,
             replay: None,
             directories: vec![],
@@ -1490,7 +1493,13 @@ fn link_objects(
     let _phase = crate::meter::trace::span("link objects");
     let revision = hirsel_core_ir::code_revision(address);
     // The executable key includes the mode-specific lld options.
-    let link_mode = if options.optimize {
+    let link_mode = if options.staticlib {
+        if options.optimize {
+            "staticlib-release"
+        } else {
+            "staticlib-dev"
+        }
+    } else if options.optimize {
         "release-link-gc-icf-sites-after-unwind"
     } else {
         "development-link-O0"
@@ -1740,15 +1749,19 @@ fn link_objects(
                 let _phase = crate::meter::trace::span("full link");
                 let bundle = members.bundle()?.path()?;
                 inputs.insert(1, bundle.clone());
-                direct_link(
-                    recipe,
-                    &inputs,
-                    Some(&bundle),
-                    &output,
-                    options.optimize,
-                    options.debug_lines,
-                    emit_relocations,
-                )?;
+                if options.staticlib {
+                    link::static_link(&inputs, &output)?;
+                } else {
+                    direct_link(
+                        recipe,
+                        &inputs,
+                        Some(&bundle),
+                        &output,
+                        options.optimize,
+                        options.debug_lines,
+                        emit_relocations,
+                    )?;
+                }
                 let image = Arc::new(std::fs::read(&output)?);
                 if let Some((frame, objects)) = incremental {
                     crate::incremental_link::remember(frame, &objects, &image)?;
@@ -1757,7 +1770,7 @@ fn link_objects(
             };
             // ld64 keeps no relocations to probe the live sites with.
             let probes = match format {
-                hirsel_core_layout::ObjectFormat::Elf => options.optimize,
+                hirsel_core_layout::ObjectFormat::Elf => options.optimize && !options.staticlib,
                 hirsel_core_layout::ObjectFormat::MachO => false,
             };
             if probes && !runtime_sources.items.is_empty() {
@@ -1786,8 +1799,10 @@ fn link_objects(
         };
         counters.link_patched = u64::from(patched.get());
         drop(members);
-        crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
-        let debug = {
+        let debug = if options.staticlib {
+            Vec::new()
+        } else {
+            crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
             let _phase = crate::meter::trace::span("detached DWARF");
             crate::native_debug::bind_detached(
                 &rows,
@@ -2019,6 +2034,7 @@ pub(crate) mod tests {
         NativeOptions {
             recording: false,
             store_teardown: false,
+            staticlib: false,
             coverage: None,
             replay: None,
             backend,

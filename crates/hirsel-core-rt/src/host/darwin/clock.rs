@@ -4,8 +4,16 @@
 //! `CLOCK_REALTIME`.
 use std::{io, sync::OnceLock};
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MachTimebaseInfo {
+    numer: u32,
+    denom: u32,
+}
+
 unsafe extern "C" {
     fn mach_continuous_time() -> u64;
+    fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
 }
 
 fn read(clock: libc::clockid_t) -> Option<libc::timespec> {
@@ -40,11 +48,11 @@ pub(crate) fn wall_ms() -> Option<u64> {
 /// Nanoseconds on the suspend-inclusive boot clock.
 #[inline(always)]
 pub(crate) fn boot_ns() -> io::Result<u64> {
-    static TIMEBASE: OnceLock<libc::mach_timebase_info> = OnceLock::new();
+    static TIMEBASE: OnceLock<MachTimebaseInfo> = OnceLock::new();
     let base = TIMEBASE.get_or_init(|| {
-        let mut info = libc::mach_timebase_info { numer: 0, denom: 0 };
+        let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
         // SAFETY: `info` is a valid writable timebase structure.
-        unsafe { libc::mach_timebase_info(&mut info) };
+        unsafe { mach_timebase_info(&mut info) };
         info
     });
     if base.denom == 0 {

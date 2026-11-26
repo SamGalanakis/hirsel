@@ -86,8 +86,9 @@ def m1_programs(out):
         tag = f"{e['workload']}-{e['variant']}"
         file = out / f'{tag}.json'
         file.write_text(json.dumps(m1.inputs_for(manifest, e, ROOT)))
+        # Match the former 64 MiB default, now explicit in m1.py as well.
         jobs.append((tag, ['--inputs', str(file), '--entry', f"{e['package']['name']}@1/{e['module']}/{e['function']}",
-                           *m1.grant_args(e)]))
+                           '--limit', str(64 << 20), *m1.grant_args(e)]))
     return jobs
 
 
@@ -97,7 +98,9 @@ def layout(out, group):
     folder.mkdir()
     _, _, file, _, _, _ = service_build.source_sets(argparse.Namespace(out=folder), group)
     extra = ['--dir', str(ROOT / 'core/langarena/layout/inputs')] if group == 'json' else []
-    return (f'layout-{group}', ['--inputs', str(file), '--entry', f'layout@1/{group}/build_family', '--grant', 'Stdout', *extra])
+    # Match service_build.py's former 64 MiB default.
+    return (f'layout-{group}', ['--inputs', str(file), '--entry', f'layout@1/{group}/build_family',
+                               '--limit', str(64 << 20), '--grant', 'Stdout', *extra])
 
 
 def held_out(out):
@@ -119,7 +122,9 @@ def held_out(out):
         file = folder / 'inputs.json'
         file.write_text(json.dumps(selected))
         grants = [x for g in entry.get('grants', []) for x in ('--grant', g)]
-        jobs.append((f'm2b-{workload}', ['--inputs', str(file), '--entry', f'{m2b.PROBE}@1/main/main', '--grant', 'Stdout', *grants]))
+        # Match the former 64 MiB default, now explicit in m2b.py as well.
+        jobs.append((f'm2b-{workload}', ['--inputs', str(file), '--entry', f'{m2b.PROBE}@1/main/main',
+                                        '--limit', str(64 << 20), '--grant', 'Stdout', *grants]))
     return jobs
 
 

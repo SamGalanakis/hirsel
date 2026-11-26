@@ -185,6 +185,7 @@ def build_samples(args):
             dependencies += ['--extern', name + '=' + str(selected)]
     report = {'module': args.module, 'backend': args.backend, 'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'rows': [], 'missing_rust_dependencies': missing, 'toolchain': args.toolchain,
+              'root_bytes': args.limit if args.backend == 'llvm' else None,
               'result_kind': 'diagnostic' if args.diagnostic else 'result',
               'scenarios': 'check/build fresh, build reuse, one semantically neutral body edit; Rust incremental off',
               'idiomatic_build': 'whole-suite only',
@@ -270,6 +271,8 @@ def build_samples(args):
         previous = json.loads(args.resume.read_text()) if args.resume else None
         if previous and (previous.get('module') != args.module or previous.get('backend') != args.backend):
             raise ValueError('build resume must use the same module and backend')
+        if previous and args.backend == 'llvm' and previous.get('root_bytes', 64 << 20) != args.limit:
+            raise ValueError('build resume must use the same release root limit')
         report['resumed_from'] = str(args.resume) if args.resume else None
         primed = False
         for scenario in ['check-fresh', 'build-fresh', 'build-reuse', 'build-edit']:
@@ -289,7 +292,8 @@ def build_samples(args):
             if operation == 'build':
                 command += ['--backend', args.backend, '--runtime', str(args.runtime.resolve()),
                             *grant_args(args.module, host), '-o', str(scratch / 'hirsel')]
-                if args.backend == 'llvm': command.append('--release')
+                if args.backend == 'llvm':
+                    command.extend(['--release', '--limit', str(args.limit)])
             samples = {side: value for side, value in prior['samples'].items() if value.get('status') == 'ok' and (side != 'hirsel' or previous.get('toolchain') == args.toolchain)} if prior else {}
             row = {'scenario': scenario, 'samples': samples, 'ratios': {}, 'toolchain': args.toolchain,
                    'source_lines': dict(prior.get('source_lines', previous['source_lines']) if prior else counts)}

@@ -48,8 +48,9 @@ manifest.write_text(json.dumps({'core': core, 'packages': [
      'dependencies': [core, std]}]}))
 hirsel = out / 'codec-hirsel'
 wait_load()
+# Keep the former 64 MiB default for the codec workloads.
 r = subprocess.run([str(a.builder.resolve()), 'build', '--inputs', str(manifest), '--entry', 'app@1/main/main', '--backend', 'llvm',
-                    '--release', '--runtime', str(a.runtime.resolve()), '--grant', 'Stdout', '--store', str(out / 'store'),
+                    '--release', '--limit', str(64 << 20), '--runtime', str(a.runtime.resolve()), '--grant', 'Stdout', '--store', str(out / 'store'),
                     '-o', str(hirsel)], cwd=ROOT, env=env, capture_output=True, text=True, timeout=900)
 if r.returncode:
     sys.exit('hirsel build failed:\n' + r.stdout[-2000:] + r.stderr[-2000:])

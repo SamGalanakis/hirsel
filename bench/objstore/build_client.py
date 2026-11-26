@@ -55,10 +55,11 @@ def main():
         counted = ROOT / paths["root" + TARGETS[2]]
         builds = [("hirsel", shipping, cc), ("hirsel-allocations", counted, allocation_linker(cc, out))]
     for name, archive, linker in builds:
+        # Keep the former 64 MiB default for both client workloads.
         command = [
             compiler, "build", "--release", "--backend", "llvm", "--source-core",
             "--source-std", "--inputs", manifest, "--entry", "objstore_bench@1/main/main",
-            "--runtime", archive / PLATFORM / "libhirsel_core_rt.a", "--cc", linker,
+            "--limit", str(64 << 20), "--runtime", archive / PLATFORM / "libhirsel_core_rt.a", "--cc", linker,
             "--store", out / "build-store", "-o", out / name,
         ]
         for grant in grants:

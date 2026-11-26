@@ -89,7 +89,8 @@ def native(tools, paths, output, entry, document, service=False):
         finally:
             directory.rmdir()
     else:
-        run([*command, "--debug-lines", "on", "--grant", "Stderr",
+        # Keep the former 64 MiB default for the B1 server.
+        run([*command, "--limit", str(64 << 20), "--debug-lines", "on", "--grant", "Stderr",
              "--grant", "Net=Listen 127.0.0.1/32 0-65535"],
             extra_env=private_homes)
     return output

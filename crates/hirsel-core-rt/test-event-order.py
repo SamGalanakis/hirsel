@@ -98,7 +98,8 @@ def step_image_laws(args, evaluator, inputs, folder, source, recorder_linker):
         if re.search(rf'pub fn {name}\([^)]*:\s*Tasks\b', source):
             command += ['--grant', 'Tasks']
         if backend == 'llvm':
-            command.append('--release')
+            # Keep the former 64 MiB default for the step-bound fixtures.
+            command.extend(['--release', '--limit', str(64 << 20)])
         env = dict(os.environ, XDG_CACHE_HOME=str(store / 'cache'), XDG_DATA_HOME=str(store / 'data'))
         result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True)
         if result.returncode:
@@ -241,7 +242,8 @@ def check_event_order(args, work):
                            '--backend', backend, '--runtime', str(args.runtime), '--store', str(work / 'store'),
                            '--cc', str(fixture_linker), '--json', '-o', str(folder / backend)]
                 if args.release:
-                    command += ['--release']
+                    # Keep the former 64 MiB default across the event-order fixtures.
+                    command += ['--release', '--limit', str(64 << 20)]
                 for grant in ('Tasks', 'Clock', 'Stdout'):
                     if re.search(rf':\s*{grant}\b', header):
                         command += ['--grant', grant]

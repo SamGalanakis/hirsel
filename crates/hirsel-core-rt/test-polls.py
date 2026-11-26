@@ -60,7 +60,8 @@ def main():
                        '--backend', engine, '--runtime', str(args.runtime.resolve()), '--grant', 'Tasks', '--store',
                        str(folder / 'store'), '--cc', str(wrapper), '--json', '-o', str(binary)]
             if engine == 'llvm':
-                command.append('--release')
+                # Keep the former 64 MiB default across the poll fixtures.
+                command.extend(['--release', '--limit', str(64 << 20)])
             low_load()
             build = subprocess.run(command, capture_output=True, cwd=ROOT)
             (folder / 'build.json').write_bytes(build.stdout)

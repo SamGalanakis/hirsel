@@ -47,8 +47,9 @@ def build_hirsel(compiler, runtime, cc, directory):
     inputs = directory / 'inputs.json'
     inputs.write_text(json.dumps(manifest(root, Contract(fixture, 0, '', '', True, test_of='http'), source)))
     binary = directory / 'hirsel-http-b1'
+    # Keep the B1 server's former 64 MiB default, as in bench/http/build.py.
     command = [str(compiler), 'build', '--release', '--backend', 'llvm', '--source-core',
-               '--inputs', str(inputs), '--entry', 'std@1/http/b1_main',
+               '--inputs', str(inputs), '--entry', 'std@1/http/b1_main', '--limit', str(64 << 20),
                '--runtime', str(runtime), '--store', str(directory / 'store'), '-o', str(binary),
                '--grant', 'Clock', '--grant', 'Stdout', '--grant', 'Net=Listen 127.0.0.1/32 0-65535']
     if cc:

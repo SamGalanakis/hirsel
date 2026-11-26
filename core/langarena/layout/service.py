@@ -67,7 +67,8 @@ def build(args, phase, backend, observed=False):
         linker.chmod(0o755)
         command += ['--cc', linker]
     if backend == 'llvm':
-        command += ['--release']
+        # Keep the former 64 MiB default across the layout phases.
+        command += ['--release', '--limit', str(64 << 20)]
     if observed:
         command += ['--logical-charge-report', stem.with_suffix('.memory.json')]
     result = execute(command)

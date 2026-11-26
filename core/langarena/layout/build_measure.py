@@ -68,7 +68,9 @@ def main():
                            '--source-core', '--store', str((args.out / 'store').resolve()), '--json',
                            '--metrics', str((args.out / f'{stage}.metrics.json').resolve())]
                 if stage != 'check':
-                    command += ['--backend', 'llvm', '--release', '--runtime', str(args.runtime.resolve()), '--grant', 'Stdout', '-o', str(binary.resolve())]
+                    # Keep the former 64 MiB default across the layout families.
+                    command += ['--backend', 'llvm', '--release', '--limit', str(64 << 20),
+                                '--runtime', str(args.runtime.resolve()), '--grant', 'Stdout', '-o', str(binary.resolve())]
             else:
                 command = [str(rustc), *flags, str(rust.resolve()), '-o', str(binary.resolve())]
                 if stage == 'check': command += ['--emit=metadata']

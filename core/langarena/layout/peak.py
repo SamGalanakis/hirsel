@@ -51,7 +51,8 @@ def observed(args, inputs, entry, label, backend, expected, directory=None):
                '--logical-charge-report', str(report), '--store', str(args.out / 'store'),
                '--json', '-o', str(stem)]
     if backend == 'llvm':
-        command.append('--release')
+        # Keep the former 64 MiB default across the peak-memory fixtures.
+        command.extend(['--release', '--limit', str(64 << 20)])
     if label.startswith('layout-'):
         command += ['--grant', 'Stdout']
     if directory:

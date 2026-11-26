@@ -129,13 +129,14 @@ that omit function bodies.
 `hirsel build DIR -o OUT` builds a native executable from the definitions `main`
 reaches; `hirsel run DIR [-- arguments...]` builds it and runs it. Development builds
 default to Cranelift and `--release` to LLVM; `--backend cranelift|llvm` selects the
-engine explicitly. Native builds always emit debug rows and write detached DWARF
-alongside the executable; `--debug-lines on` additionally embeds DWARF in the
-executable (see [CLI specification](spec/cli.md)). Failure positions are reported
-either way.
+engine explicitly. Release builds require a logical root limit in bytes from
+`--limit` or `[program].limit` in `hirsel.toml`. Native builds always emit debug rows
+and write detached DWARF alongside the executable; `--debug-lines on` additionally
+embeds DWARF in the executable (see [CLI specification](spec/cli.md)). Failure
+positions are reported either way.
 
 ```sh
-hirsel build app --release -o hello
+hirsel build app --release --limit 1048576 -o hello
 hirsel run app --dir . --grant Stdout -- input.txt normal
 ```
 

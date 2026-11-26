@@ -74,7 +74,9 @@ def main():
                        f'layout@1/{module}/{phase}_main', '--backend', backend, '--runtime', str(args.runtime.resolve()),
                        '--store', str(args.out / 'store'), '--grant', 'Stdout', '--json', '-o', str(stem)]
             if module == 'json': command.extend(['--dir', str(Path(__file__).with_name('inputs'))])
-            if backend == 'llvm': command.append('--release')
+            if backend == 'llvm':
+                # Keep the former 64 MiB default across the layout phases.
+                command.extend(['--release', '--limit', str(64 << 20)])
             wait_load()
             built = subprocess.run(command, capture_output=True)
             stem.with_suffix('.build.stdout').write_bytes(built.stdout)

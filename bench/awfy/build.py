@@ -195,7 +195,9 @@ def awfy_hirsel_command(artifacts, out, module, manifest, binary, *, library_ima
         artifacts["compiler"], "build", *release_input_flags(manifest, library_image),
         "--entry", f"awfy@1/{module}/main", "--store", str(out / "store"),
         "--backend", "llvm", "--release", "--debug-lines", "on", "--runtime", artifacts["runtime"],
-        "--cc", str(llvm_path() / "bin/clang"), "--grant", "Stdout", "--json", "-o", str(binary),
+        # Keep the former 64 MiB default across the AWFY tasks.
+        "--limit", str(64 << 20), "--cc", str(llvm_path() / "bin/clang"),
+        "--grant", "Stdout", "--json", "-o", str(binary),
     ]
 
 

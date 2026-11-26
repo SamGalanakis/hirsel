@@ -37,10 +37,11 @@ def main():
     manifest = output / "inputs.json"
     manifest.write_text(json.dumps(document))
     linker = ROOT / "tools/buck2/toolchains/llvm-files/bin/hirsel-clang"
+    # Keep the former 64 MiB default across the UDP load cases.
     subprocess.run([
         compiler, "build", "--release", "--backend", "llvm", "--source-core", "--source-std",
         "--inputs", manifest, "--entry", "udp_comparison@1/main/main", "--runtime", runtime,
-        "--cc", linker, "--store", output / "build-store", "-o", output / "load",
+        "--limit", str(64 << 20), "--cc", linker, "--store", output / "build-store", "-o", output / "load",
         "--debug-lines", "on", "--grant", "Clock", "--grant", "Stdout", "--grant", "Stdin", "--grant", "Tasks",
         "--grant", "Net=UdpBind 127.0.0.1/32 1-65535;UdpSend 127.0.0.1/32 1-65535",
     ], cwd=ROOT, check=True, env=os.environ | {"HIRSEL_MEMORY_LIMIT": "2G"})

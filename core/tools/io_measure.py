@@ -122,7 +122,8 @@ def main():
             if operation == 'read':
                 command.extend(['--dir', str(host)])
             if engine == 'llvm':
-                command.append('--release')
+                # The line reader and writer use fixed 4 KiB buffers.
+                command.extend(['--release', '--limit', str(1 << 20)])
             build = checked(command)
             (out / f'{engine}-{operation}.build.json').write_bytes(build.stdout)
             if operation == 'read':

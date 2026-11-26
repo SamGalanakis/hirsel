@@ -62,7 +62,8 @@ def main():
                    '--runtime', str(args.runtime.resolve()), '--store', str(out / 'store'),
                    '--dir', str(host), '--grant', 'Stdout', '--json', '-o', str(exe)]
         if engine == 'llvm':
-            command.append('--release')
+            # Keep the former 64 MiB default across the numeric fixtures.
+            command.extend(['--release', '--limit', str(64 << 20)])
         built = None
         if not reuse_hirsel:
             runner.wait_load()

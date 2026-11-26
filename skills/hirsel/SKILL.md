@@ -56,7 +56,8 @@ and `take` is moved.
 Measure before tuning, and never tune from `objdump` output:
 
 ```sh
-hirsel prof run . --release --grant Stdout --out run1.hprof -- ARGS
+# Choose a logical root limit in bytes for your workload. This example uses 64 MiB.
+hirsel prof run . --release --limit 67108864 --grant Stdout --out run1.hprof -- ARGS
 hirsel prof top run1.hprof                       # hottest functions and source lines
 hirsel prof annotate run1.hprof main.hirsel:42   # one line's samples and compiler remarks
 ```

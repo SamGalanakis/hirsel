@@ -166,7 +166,8 @@ def main():
                 if stage != 'check':
                     command += ['--backend', args.backend, '--runtime', artifacts['runtime'], '--grant', 'Stdout', '-o', binary]
                     if args.backend == 'llvm':
-                        command += ['--release']
+                        # Keep the former 64 MiB default across the layout families.
+                        command += ['--release', '--limit', str(64 << 20)]
                     if args.group == 'json':
                         command += ['--dir', Path(__file__).with_name('inputs').resolve()]
             else:

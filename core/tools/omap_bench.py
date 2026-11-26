@@ -235,7 +235,8 @@ def main():
                     '--grant', 'Stdout', '--grant', 'Clock', '--dir', directory / 'host',
                     '--debug-lines', 'on', '--store', directory / 'store', '--json', '-o', directory / ('hirsel-' + profile)]
             if profile == 'release':
-                argv += ['--release']
+                # Keep the former 64 MiB default across all OMap workloads.
+                argv += ['--release', '--limit', str(64 << 20)]
             command(argv, directory / ('hirsel-' + profile + '-build.log'), env)
             rust_build(registry, directory / ('rust-' + profile), profile, env,
                        args.reuse_rust.resolve() / ('rust-' + profile) if args.reuse_rust else None)

@@ -520,7 +520,8 @@ runs it with the same grants, flags and `--` arguments that `hirsel run` takes, 
 it into a `.hprof` file:
 
 ```sh
-hirsel prof run . --release --grant Stdout --pmu cycles,branch-misses --out run1.hprof -- ARGS
+# Choose a logical root limit in bytes for your workload. This example uses 64 MiB.
+hirsel prof run . --release --limit 67108864 --grant Stdout --pmu cycles,branch-misses --out run1.hprof -- ARGS
 hirsel prof top run1.hprof --limit 10            # hottest functions, per event
 hirsel prof annotate run1.hprof main.hirsel:42   # periods and compiler remarks for one line
 hirsel prof callers run1.hprof app@1/main/work   # who calls one definition (package@major/module/fn)

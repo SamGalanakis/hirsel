@@ -414,8 +414,8 @@ hirsel explain RULE                # explain the rule code a refusal prints, wit
 hirsel test                        # every @test, each in its own process
 hirsel run --grant Stdout -- a b   # build and run; grants are explicit
 hirsel replay . --tape run.tape    # replay a recording with no host grants
-hirsel build --release -o program  # a native executable
-hirsel prof run --release .        # sample CPU or replay memory into .hprof
+hirsel build --release --limit 1048576 -o program  # a native executable
+hirsel prof run --release --limit 1048576 .        # sample CPU or replay memory into .hprof
 hirsel prof top FILE.hprof         # hottest functions and source lines; profile before tuning
 hirsel inspect --core --interface  # public core declarations
 hirsel inspect --std --interface   # public std declarations

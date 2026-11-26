@@ -90,7 +90,8 @@ def main():
                     for release in [False, True]:
                         seen = set()
                         for choice, expected in [(None, False), ('off', False), ('on', True)]:
-                            flags = ['--release'] if release else []
+                            # The scaffold is an empty main, with no heap workload.
+                            flags = ['--release', '--limit', str(1 << 20)] if release else []
                             if choice is not None:
                                 flags += ['--debug-lines', choice]
                             result = self.progress.run([str(compiler), 'build', str(app), '--runtime', str(runtime),

@@ -14,10 +14,16 @@ parser.add_argument('--compiler',type=Path,required=True)
 parser.add_argument('--runtime',type=Path,required=True)
 parser.add_argument('--out',type=Path,required=True)
 args=parser.parse_args()
-base=args.out.resolve();tools={'root//:hirsel-core-driver-bin-hirsel':str(args.compiler.resolve()),'root//:hirsel-core-rt[staticlib]':str(args.runtime.resolve())}
+base=args.out.resolve()
 manifest=base/'whole.inputs.json';manifest.write_text(json.dumps(inputs(root,'tests/io/read_whole')))
 binary=base/'hirsel-llvm-whole';wait_load()
-build=subprocess.run([str(Path(tools['root//:hirsel-core-driver-bin-hirsel'])),'build','--inputs',str(manifest),'--entry','langarena@1/tests/io/read_whole/main','--backend','llvm','--release','--runtime',str(Path(tools['root//:hirsel-core-rt[staticlib]'])),'--store',str(base/'store'),'--dir',str(base/'host'),'--grant','Stdout','--json','-o',str(binary)],capture_output=True)
+# The growing read retains 8 MiB. Allow room for the previous buffer and entry overhead.
+build = subprocess.run([
+    args.compiler.resolve(), 'build', '--inputs', manifest,
+    '--entry', 'langarena@1/tests/io/read_whole/main', '--backend', 'llvm',
+    '--release', '--limit', str(16 << 20), '--runtime', args.runtime.resolve(),
+    '--store', base / 'store', '--dir', base / 'host', '--grant', 'Stdout', '--json', '-o', binary,
+], capture_output=True)
 (base/'whole.build.json').write_bytes(build.stdout);assert build.returncode==0,(build.stdout,build.stderr)
 result={}
 for mode,capacity in [('growth',8388608),('exact',4194304)]:

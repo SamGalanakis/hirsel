@@ -28,7 +28,7 @@ pub type Request {
 
 pub type Verdict = Accept(protocol: Option[String], headers: List[(String, String)]) | Refuse(status: u16)
 
-pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, status: u16) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: u32, final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: u32) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
+pub type Event = Requested(SessionHandle, Request) | Ready(s: SessionHandle, protocol: Option[String]) | Refused(s: SessionHandle, status: u16) | Stream(s: SessionHandle, stream: quic.StreamId, bidi: bool) | Readable(SessionHandle, quic.StreamId) | Writable(SessionHandle, quic.StreamId) | Reset(s: SessionHandle, stream: quic.StreamId, code: Option[u32], final_size: u64) | Stopped(s: SessionHandle, stream: quic.StreamId, code: Option[u32]) | Datagram(SessionHandle, Bytes) | Draining(SessionHandle) | Closed(s: SessionHandle, code: u32, reason: Bytes)
 
 /// UnknownSession names no session this endpoint holds; State is a call the session's phase
 /// does not allow (an answer to a session already answered); Url is a connect URL that is not
@@ -40,11 +40,29 @@ pub type WtError = UnknownSession | State | Url | Quic(quic.QuicError)
 /// until the server's SETTINGS allow a CONNECT, Awaiting its response, then Live.
 type Phase = Reading | Held(List[qpack.Field]) | Asked | Live | Unsent(authority: String, path: String, protocols: List[String]) | Awaiting
 
+/// A WebTransport stream of a session (WT-4). header is the length of the header we wrote
+/// on a stream we opened, which RESET_STREAM_AT keeps (draft-17 §4.4); recv and send say
+/// which halves are still open.
+type Owned {
+    id: quic.StreamId,
+    header: u64,
+    recv: bool,
+    send: bool
+}
+
+/// buf holds the CONNECT stream's unread bytes; skip is the rest of a frame being skipped.
+/// Live, data_left is the rest of a DATA frame's payload, whose bytes are capsules
+/// (RFC 9297 §3) gathered in caps; cap_skip is the rest of a capsule being skipped.
 type Session {
     id: quic.StreamId,
     phase: Phase,
     buf: Bytes,
-    skip: u64
+    skip: u64,
+    data_left: u64,
+    caps: Bytes,
+    cap_skip: u64,
+    drained: bool,
+    streams: List[Owned]
 }
 
 /// Bytes a stream did not take yet, sent on its next Writable.
@@ -54,10 +72,26 @@ type Outgoing {
     fin: bool
 }
 
-/// A peer uni stream whose type varint is not whole yet.
-type Untyped {
+/// A peer stream whose leading varints are not whole yet: its type (uni) or signal (bidi),
+/// then, once kind is 0x54 or 0x41, its session id (WT-4).
+type Head {
     id: quic.StreamId,
-    buf: Bytes
+    bidi: bool,
+    buf: Bytes,
+    kind: Option[u64]
+}
+
+/// A peer WT stream whose session is not live yet, held by its header alone (WT-4).
+type Parked {
+    id: quic.StreamId,
+    sid: u64,
+    since: u64
+}
+
+type ParkedDatagram {
+    sid: u64,
+    data: Bytes,
+    since: u64
 }
 
 type Conn {
@@ -75,7 +109,10 @@ type Conn {
     control_buf: Bytes,
     control_skip: u64,
     decoder_buf: Bytes,
-    untyped: List[Untyped],
+    heads: List[Head],
+    parked: List[Parked],
+    parked_datagrams: List[ParkedDatagram],
+    peer_bidi_next: u64,
     sessions: List[Session],
     out: List[Outgoing],
     next_bidi: u64
@@ -85,14 +122,16 @@ pub opaque type Endpoint {
     limits: Limits,
     conns: List[Conn],
     live: u64,
-    scratch: Bytes
+    now: u64,
+    backlog: List[Event],
+    dropped: u64
 }
 
 /// The largest SETTINGS payload read; a larger one is H3_EXCESSIVE_LOAD.
 const SETTINGS_MAX: u64 = 4096
 
 pub fn endpoint(take limits: Limits) -> Endpoint {
-    Endpoint(limits: take limits, conns: list.new(), live: 0, scratch: list.with_capacity(4096))
+    Endpoint(limits: take limits, conns: list.new(), live: 0, now: 0, backlog: list.new(), dropped: 0)
 }
 
 /// The QUIC transport both roles use: draft-17 §3.1 needs QUIC datagrams and RESET_STREAM_AT;
@@ -129,7 +168,15 @@ fn session_index(conn: Conn, id: quic.StreamId) -> Option[u64] {
 }
 
 fn new_conn(handle: quic.ConnectionHandle, client: bool) -> Conn {
-    Conn(handle: handle, client: client, up: false, settings: false, peer_ok: false, peer_flow: false, goaway: None, control: None, encoder: None, decoder: None, local: list.new(), control_buf: list.with_capacity(SETTINGS_MAX + 16), control_skip: 0, decoder_buf: list.with_capacity(16), untyped: list.new(), sessions: list.new(), out: list.new(), next_bidi: 0)
+    Conn(handle: handle, client: client, up: false, settings: false, peer_ok: false, peer_flow: false, goaway: None, control: None, encoder: None, decoder: None, local: list.new(), control_buf: list.with_capacity(SETTINGS_MAX + 16), control_skip: 0, decoder_buf: list.with_capacity(16), heads: list.new(), parked: list.new(), parked_datagrams: list.new(), peer_bidi_next: 0, sessions: list.new(), out: list.new(), next_bidi: 0)
+}
+
+/// The largest capsule read whole: WT_CLOSE_SESSION's code and 1,024-byte reason (draft-17
+/// §6) behind its type and length varints.
+const CAPSULE_MAX: u64 = 1048
+
+fn new_session(id: quic.StreamId, take phase: Phase, cap: u64) -> Session {
+    Session(id: id, phase: take phase, buf: list.with_capacity(cap), skip: 0, data_left: 0, caps: list.with_capacity(CAPSULE_MAX), cap_skip: 0, drained: false, streams: list.new())
 }
 
 /// Whether the application holds this session: it was emitted as Requested (server) or
@@ -156,12 +203,35 @@ fn counts_live(conn: Conn, k: u64) -> bool {
     }
 }
 
-/// Forget session k; emits Closed when the application holds it.
-fn end_session(mut w: Endpoint, i: u64, k: u64, notify: bool, code: u32, take reason: Bytes, mut out: List[Event]) {
+/// Forget session k; emits Closed when the application holds it. Each of its streams is
+/// reset and stopped with WT_SESSION_GONE (draft-17 §6), and the streams and datagrams
+/// buffered for it go too (WT-4).
+fn end_session(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, notify: bool, code: u32, take reason: Bytes, mut out: List[Event]) {
     if counts_live(w.conns[i], k) {
         w.live -= 1
     }
-    let s = SessionHandle(conn: w.conns[i].handle, id: w.conns[i].sessions[k].id)
+    let c = w.conns[i].handle
+    let s = SessionHandle(conn: c, id: w.conns[i].sessions[k].id)
+    for o in w.conns[i].sessions[k].streams {
+        if o.send {
+            if let Error(_) = quic.reset(mut e, c, o.id, h3_wire.WT_SESSION_GONE, o.header) {
+                let _ = quic.reset(mut e, c, o.id, h3_wire.WT_SESSION_GONE, 0)
+            }
+        }
+        if o.recv {
+            let _ = quic.stop(mut e, c, o.id, h3_wire.WT_SESSION_GONE)
+        }
+    }
+    let mut j = 0u64
+    while j < list.len(w.conns[i].out) {
+        if owner(w.conns[i], w.conns[i].out[j].id) == Some(k) {
+            let _ = list.remove(mut w.conns[i].out, j)
+        } else {
+            j += 1
+        }
+    }
+    let quic.StreamId(sid) = w.conns[i].sessions[k].id
+    unpark(mut w, mut e, i, sid)
     if notify && app_holds(w.conns[i], k) {
         list.push(mut out, Closed(s: s, code: code, reason: take reason))
     }
@@ -175,11 +245,18 @@ fn fail_conn(mut w: Endpoint, mut e: quic.Endpoint, i: u64, code: u64, mut out: 
     drop_conn(mut w, i, mut out)
 }
 
+/// The connection is gone, and its streams with it.
 fn drop_conn(mut w: Endpoint, i: u64, mut out: List[Event]) {
-    while list.len(w.conns[i].sessions) > 0 {
-        let last = list.len(w.conns[i].sessions) - 1
-        end_session(mut w, i, last, true, 0, list.new(), mut out)
+    for k in 0u64 .. list.len(w.conns[i].sessions) {
+        if counts_live(w.conns[i], k) {
+            w.live -= 1
+        }
+        if app_holds(w.conns[i], k) {
+            let s = SessionHandle(conn: w.conns[i].handle, id: w.conns[i].sessions[k].id)
+            list.push(mut out, Closed(s: s, code: 0, reason: list.new()))
+        }
     }
+    w.dropped += list.len(w.conns[i].parked_datagrams)
     let _ = list.remove(mut w.conns, i)
 }
 
@@ -263,6 +340,8 @@ fn flow(w: Endpoint, i: u64) -> bool {
 }
 
 pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[quic.Event], mut out: List[Event]) {
+    w.now = now
+    take_backlog(mut w, mut out)
     for event in events {
         match event {
             Connected(c: c, ..) => {
@@ -289,22 +368,24 @@ pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[qui
             },
             Writable(c, id) => {
                 if let Some(i) = conn_index(w, c) {
-                    flush(mut w, mut e, i, id)
+                    writable(mut w, mut e, i, id, mut out)
                 }
             },
-            Reset(c: c, s: id, ..) => {
+            Reset(c: c, s: id, code: code, final_size: final_size) => {
                 if let Some(i) = conn_index(w, c) {
-                    stream_gone(mut w, mut e, i, id, mut out)
+                    stream_gone(mut w, mut e, i, id, code, final_size, mut out)
                 }
             },
-            Stopped(c, id, _) => {
+            Stopped(c, id, code) => {
                 if let Some(i) = conn_index(w, c) {
-                    if list.contains(w.conns[i].local, id) {
-                        fail_conn(mut w, mut e, i, h3_wire.H3_CLOSED_CRITICAL_STREAM, mut out)
-                    }
+                    stopped(mut w, mut e, i, id, code, mut out)
                 }
             },
-            Datagram(..) => (),
+            Datagram(c, data) => {
+                if let Some(i) = conn_index(w, c) {
+                    on_datagram(mut w, mut e, i, data, mut out)
+                }
+            },
             Acked(..) => (),
             Closed(c, _) => {
                 if let Some(i) = conn_index(w, c) {
@@ -313,12 +394,28 @@ pub fn receive(mut w: Endpoint, mut e: quic.Endpoint, now: u64, events: List[qui
             },
         }
     }
-    let _ = now
 }
 
-/// The package's own timers; none before TS3's buffered streams.
+/// Events that answer caused, handed out by the next receive or poll.
+fn take_backlog(mut w: Endpoint, mut out: List[Event]) {
+    let mut held = replace(mut w.backlog, list.new())
+    while list.len(held) > 0 {
+        list.push(mut out, list.remove(mut held, 0))
+    }
+}
+
+/// The package's own timers (WT-2): a stream or datagram buffered for 3 PTOs without its
+/// session is rejected (WT-4). Returns the next deadline.
 pub fn poll(mut w: Endpoint, mut e: quic.Endpoint, now: u64, mut out: List[Event]) -> Option[u64] {
-    None
+    w.now = now
+    take_backlog(mut w, mut out)
+    expire(mut w, mut e, now)
+}
+
+/// Datagrams dropped because they named no live or pending session, or found the buffer
+/// full (WT-4).
+pub fn dropped_datagrams(w: Endpoint) -> u64 {
+    w.dropped
 }
 
 fn peer_initiated(conn: Conn, id: quic.StreamId) -> bool {
@@ -327,25 +424,15 @@ fn peer_initiated(conn: Conn, id: quic.StreamId) -> bool {
     server_initiated == conn.client
 }
 
+/// Every peer stream starts as a Head until its leading varints say what it is.
 fn opened(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut out: List[Event]) {
     let quic.StreamId(n) = id
-    if n & 2 == 2 {
-        list.push(mut w.conns[i].untyped, Untyped(id: id, buf: list.with_capacity(8)))
-        return
+    let bidi = n & 2 == 0
+    if bidi && !w.conns[i].client && n + 4 > w.conns[i].peer_bidi_next {
+        w.conns[i].peer_bidi_next = n + 4
     }
-    if w.conns[i].client {
-        // RFC 9114 §6.1: a server-initiated bidirectional stream has no HTTP/3 meaning.
-        fail_conn(mut w, mut e, i, h3_wire.H3_STREAM_CREATION_ERROR, mut out)
-        return
-    }
-    if let Some(g) = w.conns[i].goaway {
-        if n >= g {
-            refuse_stream(mut e, w.conns[i].handle, id, h3_wire.H3_REQUEST_REJECTED)
-            return
-        }
-    }
-    let cap = request_bound(w.limits) + 16
-    list.push(mut w.conns[i].sessions, Session(id: id, phase: Reading, buf: list.with_capacity(cap), skip: 0))
+    list.push(mut w.conns[i].heads, Head(id: id, bidi: bidi, buf: list.with_capacity(8), kind: None))
+    head_readable(mut w, mut e, i, list.len(w.conns[i].heads) - 1, mut out)
 }
 
 /// The longest HEADERS frame read before it is decoded. HPACK's longest code is 30 bits
@@ -356,12 +443,19 @@ fn request_bound(limits: Limits) -> u64 {
     4 * header + 64
 }
 
-fn readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut out: List[Event]) {
-    for k in 0u64 .. list.len(w.conns[i].untyped) {
-        if w.conns[i].untyped[k].id == id {
-            stream_type(mut w, mut e, i, k, mut out)
-            return
+fn head_index(conn: Conn, id: quic.StreamId) -> Option[u64] {
+    for h in 0u64 .. list.len(conn.heads) {
+        if conn.heads[h].id == id {
+            return Some(h)
         }
+    }
+    None
+}
+
+fn readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut out: List[Event]) {
+    if let Some(h) = head_index(w.conns[i], id) {
+        head_readable(mut w, mut e, i, h, mut out)
+        return
     }
     if w.conns[i].control == Some(id) {
         control_readable(mut w, mut e, i, mut out)
@@ -373,20 +467,83 @@ fn readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mu
     }
     if let Some(k) = session_index(w.conns[i], id) {
         session_readable(mut w, mut e, i, k, mut out)
+        return
+    }
+    if let Some(k) = owner(w.conns[i], id) {
+        list.push(mut out, Readable(handle_of(w, i, k), id))
+    }
+}
+
+/// Our queued bytes go first; a WT stream whose header is out is Writable for the
+/// application.
+fn writable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut out: List[Event]) {
+    flush(mut w, mut e, i, id)
+    if queued(w.conns[i], id) {
+        return
+    }
+    if let Some(k) = owner(w.conns[i], id) {
+        list.push(mut out, Writable(handle_of(w, i, k), id))
+    }
+}
+
+fn queued(conn: Conn, id: quic.StreamId) -> bool {
+    for o in conn.out {
+        if o.id == id {
+            return true
+        }
+    }
+    false
+}
+
+/// STOP_SENDING on our critical stream is H3_CLOSED_CRITICAL_STREAM; on a WT stream quic
+/// has reset our side and the application hears of it.
+fn stopped(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, code: u64, mut out: List[Event]) {
+    if list.contains(w.conns[i].local, id) {
+        fail_conn(mut w, mut e, i, h3_wire.H3_CLOSED_CRITICAL_STREAM, mut out)
+        return
+    }
+    if let Some(k) = owner(w.conns[i], id) {
+        list.push(mut out, Stopped(s: handle_of(w, i, k), stream: id, code: h3_wire.application_code_of(code)))
+        settle_stream(mut w, i, k, id, false, true)
     }
 }
 
 /// A reset critical stream is H3_CLOSED_CRITICAL_STREAM; a reset CONNECT stream ends its
-/// session (WT-3 step 5).
-fn stream_gone(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, mut out: List[Event]) {
+/// session (WT-3 step 5). A stream whose header is still arriving reads what RESET_STREAM_AT
+/// kept first, so a WT stream reset after its header surfaces as Stream then Reset.
+fn stream_gone(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, code: u64, final_size: u64, mut out: List[Event]) {
     if w.conns[i].control == Some(id) || w.conns[i].encoder == Some(id) || w.conns[i].decoder == Some(id) {
         fail_conn(mut w, mut e, i, h3_wire.H3_CLOSED_CRITICAL_STREAM, mut out)
         return
     }
-    if let Some(k) = session_index(w.conns[i], id) {
-        let _ = quic.stop(mut e, w.conns[i].handle, id, h3_wire.H3_NO_ERROR)
-        end_session(mut w, i, k, true, 0, list.new(), mut out)
+    let c = w.conns[i].handle
+    if let Some(h) = head_index(w.conns[i], id) {
+        head_readable(mut w, mut e, i, h, mut out)
+        if !conn_holds(w, c, i) {
+            return
+        }
     }
+    if let Some(k) = session_index(w.conns[i], id) {
+        let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
+        end_session(mut w, mut e, i, k, true, 0, list.new(), mut out)
+        return
+    }
+    if let Some(k) = owner(w.conns[i], id) {
+        list.push(mut out, Reset(s: handle_of(w, i, k), stream: id, code: h3_wire.application_code_of(code), final_size: final_size))
+        return
+    }
+    for j in 0u64 .. list.len(w.conns[i].parked) {
+        if w.conns[i].parked[j].id == id {
+            let _ = list.remove(mut w.conns[i].parked, j)
+            let _ = quic.stop(mut e, c, id, h3_wire.WT_SESSION_GONE)
+            return
+        }
+    }
+}
+
+/// Whether conns[i] is still the connection c: a connection error removes it.
+fn conn_holds(w: Endpoint, c: quic.ConnectionHandle, i: u64) -> bool {
+    i < list.len(w.conns) && w.conns[i].handle == c
 }
 
 /// Read what a stream holds onto buf, up to buf's capacity; returns whether it ended.

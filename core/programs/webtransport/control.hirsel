@@ -1,46 +1,5 @@
 // The peer's unidirectional streams (RFC 9114 §6.2): its control stream, carrying SETTINGS
 // first and then GOAWAY and push frames, and its QPACK encoder and decoder streams.
-/// Read an untyped uni stream's type varint, exactly: the bytes after it are not ours to take.
-fn stream_type(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
-    let c = w.conns[i].handle
-    let id = w.conns[i].untyped[k].id
-    if list.len(w.conns[i].untyped[k].buf) == 0 {
-        let mut first: Bytes = list.with_capacity(1)
-        match quic.read(mut e, c, id, mut first) {
-            Ok(_) => (),
-            Error(_) => {
-                let _ = list.remove(mut w.conns[i].untyped, k)
-                return
-            },
-        }
-        if list.len(first) == 0 {
-            return
-        }
-        let lead: u64 = int.widen(first[0])
-        let size = 1u64 << (lead >> 6)
-        let mut buf: Bytes = list.with_capacity(size)
-        list.append(mut buf, first)
-        w.conns[i].untyped[k].buf = take buf
-    }
-    let ended = match read_more(mut e, c, id, mut w.conns[i].untyped[k].buf) {
-        Ok(f) => f,
-        Error(_) => {
-            let _ = list.remove(mut w.conns[i].untyped, k)
-            return
-        },
-    }
-    let buf: Bytes = clone(w.conns[i].untyped[k].buf)
-    let mut at = 0u64
-    let Some(kind) = h3_wire.read_varint(buf, mut at, list.len(buf)) else {
-        if ended {
-            let _ = list.remove(mut w.conns[i].untyped, k)
-        }
-        return
-    }
-    let _ = list.remove(mut w.conns[i].untyped, k)
-    typed(mut w, mut e, i, id, kind, mut out)
-}
-
 fn typed(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, kind: u64, mut out: List[Event]) {
     let c = w.conns[i].handle
     if kind == h3_wire.STREAM_CONTROL || kind == h3_wire.STREAM_QPACK_ENCODER || kind == h3_wire.STREAM_QPACK_DECODER {
@@ -142,7 +101,7 @@ fn control_frames(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[E
         if !w.conns[i].settings && h.kind != h3_wire.FRAME_SETTINGS {
             return h3_wire.H3_MISSING_SETTINGS
         }
-        if h.kind == h3_wire.FRAME_DATA || h.kind == h3_wire.FRAME_HEADERS || h.kind == h3_wire.FRAME_PUSH_PROMISE || h3_wire.reserved_frame(h.kind) {
+        if h.kind == h3_wire.FRAME_DATA || h.kind == h3_wire.FRAME_HEADERS || h.kind == h3_wire.FRAME_PUSH_PROMISE || h.kind == h3_wire.SIGNAL_WT_BIDI || h3_wire.reserved_frame(h.kind) {
             return h3_wire.H3_FRAME_UNEXPECTED
         }
         let handled = h.kind == h3_wire.FRAME_SETTINGS || h.kind == h3_wire.FRAME_GOAWAY || h.kind == h3_wire.FRAME_MAX_PUSH_ID || h.kind == h3_wire.FRAME_CANCEL_PUSH
@@ -173,7 +132,7 @@ fn control_frames(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[E
             }
         } else {
             match single_varint(buf, h.head, h.len) {
-                Ok(n) => control_value(mut w, i, h.kind, n, mut out),
+                Ok(n) => control_value(mut w, mut e, i, h.kind, n, mut out),
                 Error(code) => code,
             }
         }
@@ -185,7 +144,7 @@ fn control_frames(mut w: Endpoint, mut e: quic.Endpoint, i: u64, mut out: List[E
 
 /// GOAWAY, MAX_PUSH_ID and CANCEL_PUSH (RFC 9114 §7.2.3, §7.2.6, §7.2.7); returns an H3
 /// error code, or 0.
-fn control_value(mut w: Endpoint, i: u64, kind: u64, n: u64, mut out: List[Event]) -> u64 {
+fn control_value(mut w: Endpoint, mut e: quic.Endpoint, i: u64, kind: u64, n: u64, mut out: List[Event]) -> u64 {
     if kind == h3_wire.FRAME_CANCEL_PUSH {
         // We never promise a push nor allow one with MAX_PUSH_ID, so every push id is
         // H3_ID_ERROR.
@@ -220,7 +179,7 @@ fn control_value(mut w: Endpoint, i: u64, kind: u64, n: u64, mut out: List[Event
                 _ => false,
             }
             if unsent || sid >= n {
-                end_session(mut w, i, k, true, 0, list.new(), mut out)
+                end_session(mut w, mut e, i, k, true, 0, list.new(), mut out)
             } else {
                 k += 1
             }

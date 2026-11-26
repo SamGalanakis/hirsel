@@ -1,0 +1,232 @@
+// WT-3 steps 4 to 6: a live session's CONNECT stream carries HTTP/3 DATA frames whose
+// payloads are capsules (RFC 9297 §3). WT_CLOSE_SESSION and the stream's end close the
+// session, WT_DRAIN_SESSION asks it to finish (draft-17 §4.7, §6); every other capsule is
+// skipped here, the flow-control ones being TS4's (WT-5).
+/// Whether the caller may keep using its indexes: Done when a session or connection ended.
+type Step = Go | Done
+
+/// The longest WT_CLOSE_SESSION reason (draft-17 §6).
+const REASON_MAX: u64 = 1024
+
+/// Read a live session's CONNECT stream as far as quic holds it.
+fn live_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    loop {
+        let ended = match read_more(mut e, c, id, mut w.conns[i].sessions[k].buf) {
+            Ok(f) => f,
+            Error(_) => true,
+        }
+        let full = list.len(w.conns[i].sessions[k].buf) == list.capacity(w.conns[i].sessions[k].buf)
+        if let Done = live_frames(mut w, mut e, i, k, mut out) {
+            return
+        }
+        if ended {
+            // draft-17 §6: a CONNECT stream that ends without WT_CLOSE_SESSION closes the
+            // session with code 0 and no reason.
+            remote_close(mut w, mut e, i, k, 0, list.new(), mut out)
+            return
+        }
+        if !full {
+            return
+        }
+    }
+}
+
+/// Consume the whole frames in the session's buf.
+fn live_frames(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) -> Step {
+    loop {
+        let avail = list.len(w.conns[i].sessions[k].buf)
+        if w.conns[i].sessions[k].data_left > 0 {
+            let room = list.capacity(w.conns[i].sessions[k].caps) - list.len(w.conns[i].sessions[k].caps)
+            let n = order.min(order.min(w.conns[i].sessions[k].data_left, avail), room)
+            if n == 0 {
+                return Go
+            }
+            let mut chunk: Bytes = list.with_capacity(n)
+            list.append(mut chunk, list.slice(w.conns[i].sessions[k].buf, 0, n))
+            list.append(mut w.conns[i].sessions[k].caps, chunk)
+            list.drop_prefix(mut w.conns[i].sessions[k].buf, n)
+            w.conns[i].sessions[k].data_left -= n
+            if let Done = capsules(mut w, mut e, i, k, mut out) {
+                return Done
+            }
+            continue
+        }
+        if w.conns[i].sessions[k].skip > 0 {
+            let n = order.min(w.conns[i].sessions[k].skip, avail)
+            if n == 0 {
+                return Go
+            }
+            list.drop_prefix(mut w.conns[i].sessions[k].buf, n)
+            w.conns[i].sessions[k].skip -= n
+            continue
+        }
+        let Some(h) = h3_wire.read_head(w.conns[i].sessions[k].buf, 0, avail) else {
+            return Go
+        }
+        list.drop_prefix(mut w.conns[i].sessions[k].buf, h.head)
+        if h.kind == h3_wire.FRAME_DATA {
+            w.conns[i].sessions[k].data_left = h.len
+            continue
+        }
+        let unexpected = h.kind == h3_wire.FRAME_SETTINGS || h.kind == h3_wire.FRAME_GOAWAY || h.kind == h3_wire.FRAME_MAX_PUSH_ID || h.kind == h3_wire.FRAME_CANCEL_PUSH || h.kind == h3_wire.FRAME_PUSH_PROMISE || h.kind == h3_wire.SIGNAL_WT_BIDI || h3_wire.reserved_frame(h.kind)
+        if unexpected {
+            fail_conn(mut w, mut e, i, h3_wire.H3_FRAME_UNEXPECTED, mut out)
+            return Done
+        }
+        // Trailers and unknown frames carry nothing for the session (RFC 9114 §4.1, §9).
+        w.conns[i].sessions[k].skip = h.len
+    }
+}
+
+/// Consume the whole capsules in the session's caps.
+fn capsules(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) -> Step {
+    loop {
+        let avail = list.len(w.conns[i].sessions[k].caps)
+        if w.conns[i].sessions[k].cap_skip > 0 {
+            let n = order.min(w.conns[i].sessions[k].cap_skip, avail)
+            if n == 0 {
+                return Go
+            }
+            list.drop_prefix(mut w.conns[i].sessions[k].caps, n)
+            w.conns[i].sessions[k].cap_skip -= n
+            continue
+        }
+        let mut at = 0u64
+        let Some(kind) = h3_wire.read_varint(w.conns[i].sessions[k].caps, mut at, avail) else {
+            return Go
+        }
+        let Some(len) = h3_wire.read_varint(w.conns[i].sessions[k].caps, mut at, avail) else {
+            return Go
+        }
+        if kind == h3_wire.CAPSULE_WT_CLOSE_SESSION {
+            if len < 4 || len > 4 + REASON_MAX {
+                message_error(mut w, mut e, i, k, mut out)
+                return Done
+            }
+            if avail < at + len {
+                return Go
+            }
+            let caps: Bytes = clone(w.conns[i].sessions[k].caps)
+            let mut code = 0u32
+            for b in list.slice(caps, at, at + 4) {
+                let d: u32 = int.widen(b)
+                code = code << 8 | d
+            }
+            let mut reason: Bytes = list.with_capacity(len - 4)
+            list.append(mut reason, list.slice(caps, at + 4, at + len))
+            let utf8: Bytes = clone(reason)
+            if let Error(_) = string.from_utf8(take utf8) {
+                message_error(mut w, mut e, i, k, mut out)
+                return Done
+            }
+            remote_close(mut w, mut e, i, k, code, take reason, mut out)
+            return Done
+        }
+        if kind == h3_wire.CAPSULE_WT_DRAIN_SESSION && !w.conns[i].sessions[k].drained {
+            w.conns[i].sessions[k].drained = true
+            list.push(mut out, Draining(handle_of(w, i, k)))
+        }
+        list.drop_prefix(mut w.conns[i].sessions[k].caps, at)
+        w.conns[i].sessions[k].cap_skip = len
+    }
+}
+
+/// draft-17 §6: a WT_CLOSE_SESSION reason past 1,024 bytes or not UTF-8 resets the CONNECT
+/// stream with H3_MESSAGE_ERROR, which ends the session.
+fn message_error(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    refuse_stream(mut e, w.conns[i].handle, w.conns[i].sessions[k].id, h3_wire.H3_MESSAGE_ERROR)
+    end_session(mut w, mut e, i, k, true, 0, list.new(), mut out)
+}
+
+/// The peer closed session k: our side of the CONNECT stream ends too (draft-17 §6).
+fn remote_close(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, code: u32, take reason: Bytes, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].sessions[k].id
+    send(mut w, mut e, i, id, list.new(), true)
+    let _ = quic.stop(mut e, c, id, h3_wire.WT_SESSION_GONE)
+    end_session(mut w, mut e, i, k, true, code, take reason, mut out)
+}
+
+/// One capsule in one DATA frame.
+fn capsule_frame(kind: u64, value: Bytes) -> Bytes {
+    let len = list.len(value)
+    let size = h3_wire.varint_len(kind) + h3_wire.varint_len(len) + len
+    let mut frame: Bytes = list.with_capacity(size + 16)
+    h3_wire.write_head(h3_wire.FRAME_DATA, size, mut frame)
+    h3_wire.write_varint(kind, mut frame)
+    h3_wire.write_varint(len, mut frame)
+    list.append(mut frame, value)
+    take frame
+}
+
+/// The longest prefix of reason within REASON_MAX that ends on a UTF-8 character boundary
+/// (draft-17 §6).
+fn reason_cut(reason: Bytes) -> u64 {
+    let mut n = list.len(reason)
+    if n <= REASON_MAX {
+        return n
+    }
+    n = REASON_MAX
+    while n > 0 && reason[n] & 0xc0 == 0x80 {
+        n -= 1
+    }
+    n
+}
+
+/// Close the session (WT-3 step 5): a live one sends WT_CLOSE_SESSION and FIN, one not yet
+/// live is cancelled (RFC 9114 §4.1.1). Its streams are reset with WT_SESSION_GONE; the
+/// application hears no Closed for its own close.
+pub fn close(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, code: u32, reason: Bytes) {
+    let SessionHandle(conn: c, id: id) = s
+    let Some(i) = conn_index(w, c) else {
+        return
+    }
+    let Some(k) = session_index(w.conns[i], id) else {
+        return
+    }
+    let mut ignored: List[Event] = list.new()
+    let stage = match w.conns[i].sessions[k].phase {
+        Live => 0u8,
+        Unsent(..) => 1u8,
+        _ => 2u8,
+    }
+    if stage == 0 {
+        {
+            let cut = reason_cut(reason)
+            let mut value: Bytes = list.with_capacity(4 + cut)
+            let wide: u64 = int.widen(code)
+            for shift in[24u64, 16u64, 8u64, 0u64] {
+                let b: u8 = int.truncate(wide >> shift & 0xff)
+                list.push(mut value, b)
+            }
+            list.append(mut value, list.slice(reason, 0, cut))
+            let frame = capsule_frame(h3_wire.CAPSULE_WT_CLOSE_SESSION, value)
+            send(mut w, mut e, i, id, take frame, true)
+            let _ = quic.stop(mut e, c, id, h3_wire.WT_SESSION_GONE)
+        }
+    } else if stage == 2 {
+        refuse_stream(mut e, c, id, h3_wire.H3_REQUEST_CANCELLED)
+    }
+    end_session(mut w, mut e, i, k, false, 0, list.new(), mut ignored)
+}
+
+/// Ask the peer to finish a live session with WT_DRAIN_SESSION (draft-17 §4.7).
+pub fn drain(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle) {
+    let SessionHandle(conn: c, id: id) = s
+    let Some(i) = conn_index(w, c) else {
+        return
+    }
+    let Some(k) = session_index(w.conns[i], id) else {
+        return
+    }
+    let live = match w.conns[i].sessions[k].phase {
+        Live => true,
+        _ => false,
+    }
+    if live {
+        let frame = capsule_frame(h3_wire.CAPSULE_WT_DRAIN_SESSION, b"")
+        send(mut w, mut e, i, id, take frame, false)
+    }
+}

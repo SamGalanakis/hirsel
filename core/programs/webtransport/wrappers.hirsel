@@ -1,0 +1,180 @@
+// WT-2's stream wrappers: each checks that the stream belongs to the session, then calls
+// quic's function of the same name with the caller's buffer, never a copy. Application
+// codes are mapped into draft-17 §4.4's range, and a reset keeps the stream's header with
+// RESET_STREAM_AT.
+/// Session s's connection and session indexes.
+fn find(w: Endpoint, s: SessionHandle) -> Result[(u64, u64), WtError] {
+    let SessionHandle(conn: c, id: id) = s
+    let Some(i) = conn_index(w, c) else {
+        return Error(UnknownSession)
+    }
+    let Some(k) = session_index(w.conns[i], id) else {
+        return Error(UnknownSession)
+    }
+    Ok((i, k))
+}
+
+/// Session s's indexes, and its WT stream's index within it.
+fn find_stream(w: Endpoint, s: SessionHandle, stream: quic.StreamId) -> Result[(u64, u64, u64), WtError] {
+    let (i, k) = find(w, s)?
+    for j in 0u64 .. list.len(w.conns[i].sessions[k].streams) {
+        if w.conns[i].sessions[k].streams[j].id == stream {
+            return Ok((i, k, j))
+        }
+    }
+    Error(State)
+}
+
+/// Whether session k may carry streams and datagrams: live, or a client's CONNECT awaiting
+/// its response (draft-17 §4).
+fn usable(conn: Conn, k: u64) -> bool {
+    match conn.sessions[k].phase {
+        Live => true,
+        Awaiting => conn.client,
+        _ => false,
+    }
+}
+
+/// Open a WT stream in session s, its header queued ahead of the application's bytes
+/// (draft-17 §4.2, §4.3).
+pub fn open(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, bidi: bool) -> Result[quic.StreamId, WtError] {
+    let (i, k) = find(w, s)?
+    if !usable(w.conns[i], k) {
+        return Error(State)
+    }
+    let c = w.conns[i].handle
+    let id = match quic.open(mut e, c, bidi) {
+        Ok(id) => id,
+        Error(err) => return Error(Quic(err)),
+    }
+    let quic.StreamId(sid) = w.conns[i].sessions[k].id
+    let kind = if bidi {
+        h3_wire.SIGNAL_WT_BIDI
+    } else {
+        h3_wire.STREAM_WT
+    }
+    let mut header: Bytes = list.with_capacity(16)
+    h3_wire.write_varint(kind, mut header)
+    h3_wire.write_varint(sid, mut header)
+    let size = list.len(header)
+    list.push(mut w.conns[i].sessions[k].streams, Owned(id: id, header: size, recv: bidi, send: true))
+    send(mut w, mut e, i, id, take header, false)
+    Ok(id)
+}
+
+pub fn read(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, mut into: Bytes) -> Result[(u64, bool), WtError] {
+    let (i, k, j) = find_stream(w, s, stream)?
+    if !w.conns[i].sessions[k].streams[j].recv {
+        return Error(State)
+    }
+    match quic.read(mut e, w.conns[i].handle, stream, mut into) {
+        Ok((n, fin)) => {
+            if fin {
+                settle_stream(mut w, i, k, stream, true, false)
+            }
+            Ok((n, fin))
+        },
+        Error(err) => {
+            settle_stream(mut w, i, k, stream, true, false)
+            Error(Quic(err))
+        },
+    }
+}
+
+/// Session s's stream, ready for the application's bytes: our header has gone to quic.
+fn sendable(w: Endpoint, s: SessionHandle, stream: quic.StreamId) -> Result[(u64, u64, bool), WtError] {
+    let (i, k, j) = find_stream(w, s, stream)?
+    if !w.conns[i].sessions[k].streams[j].send {
+        return Error(State)
+    }
+    Ok((i, k, queued(w.conns[i], stream)))
+}
+
+/// Write on a WT stream; 0 while its header waits for credit, and Writable follows.
+pub fn write(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, data: Bytes, fin: bool) -> Result[u64, WtError] {
+    let (i, k, waiting) = sendable(w, s, stream)?
+    if waiting {
+        return Ok(0)
+    }
+    match quic.write(mut e, w.conns[i].handle, stream, data, fin) {
+        Ok(n) => {
+            if fin && n == list.len(data) {
+                settle_stream(mut w, i, k, stream, false, true)
+            }
+            Ok(n)
+        },
+        Error(err) => Error(Quic(err)),
+    }
+}
+
+pub fn write_shared(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, WtError] {
+    let (i, k, waiting) = sendable(w, s, stream)?
+    if waiting {
+        return Ok(false)
+    }
+    match quic.write_shared(mut e, w.conns[i].handle, stream, take data, fin) {
+        Ok(taken) => {
+            if fin && taken {
+                settle_stream(mut w, i, k, stream, false, true)
+            }
+            Ok(taken)
+        },
+        Error(err) => Error(Quic(err)),
+    }
+}
+
+/// Reset a WT stream with RESET_STREAM_AT at its header's length (draft-17 §4.4).
+pub fn reset(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError] {
+    let (i, k, j) = find_stream(w, s, stream)?
+    if !w.conns[i].sessions[k].streams[j].send {
+        return Error(State)
+    }
+    let header = w.conns[i].sessions[k].streams[j].header
+    let c = w.conns[i].handle
+    let mut j2 = 0u64
+    while j2 < list.len(w.conns[i].out) {
+        if w.conns[i].out[j2].id == stream {
+            let _ = list.remove(mut w.conns[i].out, j2)
+        } else {
+            j2 += 1
+        }
+    }
+    let result = quic.reset(mut e, c, stream, h3_wire.application_code(code), header)
+    settle_stream(mut w, i, k, stream, false, true)
+    match result {
+        Ok(()) => Ok(()),
+        Error(err) => Error(Quic(err)),
+    }
+}
+
+pub fn stop(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, stream: quic.StreamId, code: u32) -> Result[(), WtError] {
+    let (i, k, j) = find_stream(w, s, stream)?
+    if !w.conns[i].sessions[k].streams[j].recv {
+        return Error(State)
+    }
+    let result = quic.stop(mut e, w.conns[i].handle, stream, h3_wire.application_code(code))
+    settle_stream(mut w, i, k, stream, true, false)
+    match result {
+        Ok(()) => Ok(()),
+        Error(err) => Error(Quic(err)),
+    }
+}
+
+/// Send a datagram on session s: its CONNECT stream's quarter id, then data (RFC 9297 §2.1).
+/// A DATAGRAM frame's payload is one run of bytes, so the payload is copied once behind its
+/// prefix; p and tag go to quic.send_datagram (QUIC-7).
+pub fn send_datagram(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, data: Shared[Bytes], p: quic.Priority, tag: u64) -> Result[(), WtError] {
+    let (i, k) = find(w, s)?
+    if !usable(w.conns[i], k) {
+        return Error(State)
+    }
+    let quic.StreamId(sid) = w.conns[i].sessions[k].id
+    let quarter = sid / 4
+    let mut payload: Bytes = list.with_capacity(h3_wire.varint_len(quarter) + list.len(data))
+    h3_wire.write_varint(quarter, mut payload)
+    list.append(mut payload, data)
+    match quic.send_datagram(mut e, w.conns[i].handle, shared.new(take payload), p, tag) {
+        Ok(()) => Ok(()),
+        Error(err) => Error(Quic(err)),
+    }
+}

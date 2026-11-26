@@ -1,0 +1,226 @@
+// T6 and T7: a raw quic client, its HTTP/3 and WebTransport bytes written by hand from the
+// RFCs and draft-17, against a webtransport server.
+/// A raw client's control stream offering draft-17 §5 flow control: CLIENT_CONTROL's
+/// SETTINGS plus SETTINGS_WT_INITIAL_MAX_STREAMS_UNI (0x2b64, the 2-byte varint 6b64) 16,
+/// so SETTINGS is 10 bytes.
+const CLIENT_CONTROL_FLOW: String = "00 04 0a 33 01 a0b8933b 01 6b64 10"
+
+/// WT_CLOSE_SESSION (0x2843, the 2-byte varint 6843) of length 7: code 7 and reason "bye",
+/// in one DATA frame (0x00) of 10 bytes (draft-17 §6, RFC 9297 §3.2, RFC 9114 §7.2.1).
+const CLOSE_7_BYE: String = "00 0a 6843 07 00000007 627965"
+
+const WT_BUFFERED_STREAM_REJECTED: u64 = 0x3994bd84
+
+const WT_SESSION_GONE: u64 = 0x170d7b68
+
+/// A raw WT uni stream: type 0x54, as a varint the two bytes 40 54 (RFC 9000 §16), the
+/// session id, then body (draft-17 §4.2).
+fn raw_wt_uni(mut side: Side, c: quic.ConnectionHandle, sid: u8, body: Bytes, fin: bool) -> quic.StreamId {
+    let id = result.unwrap(quic.open(mut side.q, c, false))
+    let mut b: Bytes = list.new()
+    list.push(mut b, 0x40)
+    list.push(mut b, 0x54)
+    list.push(mut b, sid)
+    list.append(mut b, body)
+    write_all(mut side, c, id, b, fin)
+    id
+}
+
+fn stopped_code(events: List[quic.Event], id: quic.StreamId) -> u64 {
+    for event in events {
+        if let Stopped(_, s, code) = event {
+            if s == id {
+                return code
+            }
+        }
+    }
+    0
+}
+
+/// The streams the application was handed, in order.
+fn streams_of(events: List[webtransport.Event], s: webtransport.SessionHandle) -> List[quic.StreamId] {
+    let mut ids: List[quic.StreamId] = list.new()
+    for event in events {
+        if let Stream(s: got, stream: id, ..) = event {
+            if got == s {
+                list.push(mut ids, id)
+            }
+        }
+    }
+    take ids
+}
+
+fn requested_handles(events: List[webtransport.Event]) -> List[webtransport.SessionHandle] {
+    let mut hs: List[webtransport.SessionHandle] = list.new()
+    for event in events {
+        if let Requested(h, _) = event {
+            list.push(mut hs, h)
+        }
+    }
+    take hs
+}
+
+fn accept_session(mut server: Side, s: webtransport.SessionHandle) {
+    result.unwrap(webtransport.answer(mut server.wt, mut server.q, s, Accept(protocol: None, headers: list.new())))
+}
+
+fn connect_good() -> List[qpack.Field] {
+    connect_fields(b"webtransport-h3", Some(b"server"), Some(b"https://good.example"))
+}
+
+/// What the application reads from a WT stream, and whether it saw FIN.
+fn read_all(mut server: Side, s: webtransport.SessionHandle, id: quic.StreamId) -> (Bytes, bool) {
+    let mut got: Bytes = list.with_capacity(64)
+    let (_, fin) = result.unwrap(webtransport.read(mut server.wt, mut server.q, s, id, mut got))
+    (take got, fin)
+}
+
+/// bug: streams that arrive before their session are kept without bound, or are lost
+/// instead of handed over, or a refused session's buffered streams are left open.
+/// oracle: draft-17 §4.6: past the buffer a stream is rejected with
+/// WT_BUFFERED_STREAM_REJECTED, the buffered ones belong to the session once it is
+/// accepted, and nothing waits for a session that will never be.
+@test
+fn buffered_streams_bounded() -> Result[(), ()] {
+    let l = limits(1024, 4, false)
+    let buffered: u64 = int.widen(l.buffered)
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(clone(l), false)
+    let c = raw_client(mut client, mut server, l)
+    let _ = raw_streams(mut client, c, hex_text(CLIENT_CONTROL_FLOW), false)
+    // buffered + 5 streams on session 0 before its CONNECT; stream n carries the byte n.
+    let mut ids: List[quic.StreamId] = list.new()
+    for n in 0u64 .. buffered + 5 {
+        let mut body: Bytes = list.new()
+        let b: u8 = int.truncate(n)
+        list.push(mut body, b)
+        list.push(mut ids, raw_wt_uni(mut client, c, 0, body, false))
+    }
+    settle(mut client, mut server, 2)
+    for n in 0u64 .. buffered + 5 {
+        let want = if n < buffered {
+            0u64
+        } else {
+            WT_BUFFERED_STREAM_REJECTED
+        }
+        expect(stopped_code(client.raw, ids[n]), want, "a stream past the buffer is rejected, the rest are kept")
+    }
+    let first = send_request(mut client, c, connect_good())
+    settle(mut client, mut server, 3)
+    let hs = requested_handles(server.app)
+    expect(list.len(hs), 1, "the CONNECT is Requested")
+    expect(list.len(streams_of(server.app, hs[0])), 0, "no stream is handed over before Accept")
+    accept_session(mut server, hs[0])
+    settle(mut client, mut server, 4)
+    expect(status_of(mut client, c, first), 200, "the session is accepted")
+    let got = streams_of(server.app, hs[0])
+    expect(list.len(got), buffered, "the buffered streams are handed over on Accept")
+    for n in 0u64 .. buffered {
+        if got[n] != ids[n] {
+            fail("the buffered streams are handed over in order")
+        }
+        let (body, _) = read_all(mut server, hs[0], got[n])
+        if list.len(body) != 1 {
+            fail("a buffered stream keeps its body")
+        }
+        let want: u64 = n
+        let have: u64 = int.widen(body[0])
+        expect(have, want, "a buffered stream keeps its body")
+    }
+    // Streams buffered for a session the server refuses (404) are rejected with it.
+    let mut later: List[quic.StreamId] = list.new()
+    for _ in 0u64 .. 2 {
+        list.push(mut later, raw_wt_uni(mut client, c, 4, b"x", false))
+    }
+    settle(mut client, mut server, 5)
+    expect(stopped_code(client.raw, later[0]), 0, "a stream for a pending session is buffered")
+    let second = send_request(mut client, c, connect_fields(b"webtransport-h3", Some(b"elsewhere"), None))
+    settle(mut client, mut server, 6)
+    expect(status_of(mut client, c, second), 404, "the second session is refused")
+    for id in later {
+        expect(stopped_code(client.raw, id), WT_BUFFERED_STREAM_REJECTED, "a refused session's buffered stream")
+    }
+    Ok(())
+}
+
+/// bug: closing one session resets streams or drops datagrams of another on the same
+/// connection, or leaves the closed session's streams open, or its datagrams delivered.
+/// oracle: draft-17 §6: on WT_CLOSE_SESSION every stream of that session is reset and
+/// stopped with WT_SESSION_GONE and its datagrams are not delivered; the close's code and
+/// reason reach the application.
+@test
+fn session_close_resets_its_streams_only() -> Result[(), ()] {
+    let l = limits(1024, 4, false)
+    let mut server = server_side(clone(l), true)
+    let mut client = client_side(clone(l), false)
+    let c = raw_client(mut client, mut server, l)
+    let _ = raw_streams(mut client, c, hex_text(CLIENT_CONTROL_FLOW), false)
+    let connect_a = send_request(mut client, c, connect_good())
+    let connect_b = send_request(mut client, c, connect_good())
+    settle(mut client, mut server, 2)
+    let hs = requested_handles(server.app)
+    expect(list.len(hs), 2, "both sessions are Requested")
+    accept_session(mut server, hs[0])
+    accept_session(mut server, hs[1])
+    let (a, b) = (hs[0], hs[1])
+    let ua = raw_wt_uni(mut client, c, 0, b"a", false)
+    let ub = raw_wt_uni(mut client, c, 4, b"b", false)
+    let sa = result.unwrap(webtransport.open(mut server.wt, mut server.q, a, true))
+    let sb = result.unwrap(webtransport.open(mut server.wt, mut server.q, b, true))
+    settle(mut client, mut server, 3)
+    expect(status_of(mut client, c, connect_a), 200, "session a is accepted")
+    expect(status_of(mut client, c, connect_b), 200, "session b is accepted")
+    expect(list.len(streams_of(server.app, a)), 1, "session a has the client's stream")
+    expect(list.len(streams_of(server.app, b)), 1, "session b has the client's stream")
+    write_all(mut client, c, connect_a, hex_text(CLOSE_7_BYE), true)
+    settle(mut client, mut server, 4)
+    let mut closed = 0u64
+    for event in server.app {
+        if let Closed(s: s, code: code, reason: reason) = event {
+            if s != a || code != 7 || reason != b"bye" {
+                fail("only session a closes, with code 7 and reason bye")
+            }
+            closed += 1
+        }
+    }
+    expect(closed, 1, "WT_CLOSE_SESSION is Closed")
+    expect(stopped_code(client.raw, ua), WT_SESSION_GONE, "the closed session's client stream is stopped")
+    expect(reset_code(client.raw, sa), WT_SESSION_GONE, "the closed session's server stream is reset")
+    expect(stopped_code(client.raw, ub), 0, "the other session's client stream stands")
+    expect(reset_code(client.raw, sb), 0, "the other session's server stream stands")
+    // Session b's streams complete and its datagrams arrive; session a's are dropped.
+    write_all(mut client, c, ub, b"bb", true)
+    for quarter in[0u8, 1u8] {
+        let mut d: Bytes = list.new()
+        list.push(mut d, quarter)
+        list.append(mut d, b"dg")
+        result.unwrap(quic.send_datagram(mut client.q, c, shared.new(take d), quic.Priority(urgency: 3, order: 0, then: 0), 0))
+    }
+    let written = result.unwrap(webtransport.write(mut server.wt, mut server.q, b, sb, b"done", true))
+    expect(written, 4, "session b's stream takes the write")
+    settle(mut client, mut server, 5)
+    let (body, fin) = read_all(mut server, b, ub)
+    if body != b"bbb" || !fin {
+        fail("session b's client stream completes")
+    }
+    let mut back: Bytes = list.with_capacity(64)
+    let (_, done) = result.unwrap(quic.read(mut client.q, c, sb, mut back))
+    // draft-17 §4.3: the signal 0x41 (the varint 40 41), session id 4, then the body.
+    let mut want = hex_text("4041 04")
+    list.append(mut want, b"done")
+    if back != want || !done {
+        fail("session b's server stream completes behind its header")
+    }
+    let mut delivered = 0u64
+    for event in server.app {
+        if let Datagram(s, data) = event {
+            if s != b || data != b"dg" {
+                fail("only session b's datagram is delivered")
+            }
+            delivered += 1
+        }
+    }
+    expect(delivered, 1, "session b's datagram")
+    expect(webtransport.dropped_datagrams(server.wt), 1, "session a's datagram is dropped")
+    Ok(())
+}

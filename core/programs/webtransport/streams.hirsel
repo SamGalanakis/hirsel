@@ -1,0 +1,303 @@
+// WT-4: the peer's streams and datagrams. Each peer stream's leading varints are read
+// exactly, never past, so the bytes after a WT stream's header stay in quic for the
+// application. A WT stream or datagram whose session is not live yet is buffered by its
+// header alone, within Limits.buffered and buffered_datagrams (draft-17 §4.6).
+/// A varint read from a stream: whole, not yet whole, or never (the stream ended).
+type Pull = Got(u64) | More | Ended
+
+/// Where a session id leads: a live session, one still being set up, or none.
+type Place = At(u64) | Wait | Gone
+
+/// Read one varint onto buf, one byte at a time until its first byte gives its length.
+fn pull_varint(mut e: quic.Endpoint, c: quic.ConnectionHandle, id: quic.StreamId, mut buf: Bytes) -> Pull {
+    loop {
+        let have = list.len(buf)
+        let need = if have == 0 {
+            1u64
+        } else {
+            let lead: u64 = int.widen(buf[0])
+            1u64 << (lead >> 6)
+        }
+        if have > 0 && have == need {
+            let mut at = 0u64
+            return match h3_wire.read_varint(buf, mut at, have) {
+                Some(v) => Got(v),
+                None => Ended,
+            }
+        }
+        let mut more: Bytes = list.with_capacity(need - have)
+        let (n, fin) = match quic.read(mut e, c, id, mut more) {
+            Ok(r) => r,
+            Error(_) => return Ended,
+        }
+        list.append(mut buf, more)
+        if n == 0 {
+            if fin {
+                return Ended
+            }
+            return More
+        }
+    }
+}
+
+fn bidi_of(id: quic.StreamId) -> bool {
+    let quic.StreamId(n) = id
+    n & 2 == 0
+}
+
+/// Read a head's varints: a uni stream's type, a bidi stream's first frame type or WT
+/// signal, then a WT stream's session id.
+fn head_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, h: u64, mut out: List[Event]) {
+    let c = w.conns[i].handle
+    let id = w.conns[i].heads[h].id
+    loop {
+        let v = match pull_varint(mut e, c, id, mut w.conns[i].heads[h].buf) {
+            Got(v) => v,
+            More => return,
+            Ended => {
+                let _ = list.remove(mut w.conns[i].heads, h)
+                return
+            },
+        }
+        let bidi = w.conns[i].heads[h].bidi
+        if let Some(_) = w.conns[i].heads[h].kind {
+            let _ = list.remove(mut w.conns[i].heads, h)
+            wt_stream(mut w, mut e, i, id, bidi, v, mut out)
+            return
+        }
+        if (bidi && v == h3_wire.SIGNAL_WT_BIDI) || (!bidi && v == h3_wire.STREAM_WT) {
+            w.conns[i].heads[h].kind = Some(v)
+            list.clear(mut w.conns[i].heads[h].buf)
+            continue
+        }
+        let Head(buf: first, ..) = list.remove(mut w.conns[i].heads, h)
+        if !bidi {
+            typed(mut w, mut e, i, id, v, mut out)
+        } else if w.conns[i].client {
+            // RFC 9114 §6.1 and draft-17 §4.3: a server's bidirectional stream must be a WT
+            // stream.
+            fail_conn(mut w, mut e, i, h3_wire.H3_STREAM_CREATION_ERROR, mut out)
+        } else {
+            request_stream(mut w, mut e, i, id, take first, mut out)
+        }
+        return
+    }
+}
+
+/// A client bidirectional stream that is not a WT stream is a request (RFC 9114 §4.1); its
+/// first frame type is already read.
+fn request_stream(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, take first: Bytes, mut out: List[Event]) {
+    let quic.StreamId(n) = id
+    if let Some(g) = w.conns[i].goaway {
+        if n >= g {
+            refuse_stream(mut e, w.conns[i].handle, id, h3_wire.H3_REQUEST_REJECTED)
+            return
+        }
+    }
+    let mut s = new_session(id, Reading, request_bound(w.limits) + 16)
+    list.append(mut s.buf, first)
+    list.push(mut w.conns[i].sessions, take s)
+    session_readable(mut w, mut e, i, list.len(w.conns[i].sessions) - 1, mut out)
+}
+
+/// Where session id sid leads. A server waits for a client bidirectional stream not yet
+/// opened or not yet read; a client waits for its CONNECT's response.
+fn place(conn: Conn, sid: u64) -> Place {
+    let target: quic.StreamId = StreamId(sid)
+    if let Some(k) = session_index(conn, target) {
+        return match conn.sessions[k].phase {
+            Live => At(k),
+            _ => Wait,
+        }
+    }
+    if !conn.client {
+        if sid >= conn.peer_bidi_next {
+            return Wait
+        }
+        if let Some(h) = head_index(conn, target) {
+            if let None = conn.heads[h].kind {
+                return Wait
+            }
+        }
+    }
+    Gone
+}
+
+/// A peer WT stream whose header named session sid (WT-4).
+fn wt_stream(mut w: Endpoint, mut e: quic.Endpoint, i: u64, id: quic.StreamId, bidi: bool, sid: u64, mut out: List[Event]) {
+    if sid & 3 != 0 {
+        // draft-17 §4: a session id is a client-initiated bidirectional stream id.
+        fail_conn(mut w, mut e, i, h3_wire.H3_ID_ERROR, mut out)
+        return
+    }
+    let c = w.conns[i].handle
+    match place(w.conns[i], sid) {
+        At(k) => attach(mut w, i, k, id, bidi, mut out),
+        Wait => {
+            let most: u64 = int.widen(w.limits.buffered)
+            if list.len(w.conns[i].parked) >= most {
+                refuse_stream(mut e, c, id, h3_wire.WT_BUFFERED_STREAM_REJECTED)
+                return
+            }
+            list.push(mut w.conns[i].parked, Parked(id: id, sid: sid, since: w.now))
+        },
+        Gone => refuse_stream(mut e, c, id, h3_wire.WT_SESSION_GONE),
+    }
+}
+
+/// The stream belongs to live session k; the bytes after its header may already be here.
+fn attach(mut w: Endpoint, i: u64, k: u64, id: quic.StreamId, bidi: bool, mut out: List[Event]) {
+    list.push(mut w.conns[i].sessions[k].streams, Owned(id: id, header: 0, recv: true, send: bidi))
+    let s = handle_of(w, i, k)
+    list.push(mut out, Stream(s: s, stream: id, bidi: bidi))
+    list.push(mut out, Readable(s, id))
+}
+
+/// Session k is live: hand over what was buffered for it.
+fn adopt(mut w: Endpoint, i: u64, k: u64, mut out: List[Event]) {
+    let quic.StreamId(sid) = w.conns[i].sessions[k].id
+    let mut j = 0u64
+    while j < list.len(w.conns[i].parked) {
+        if w.conns[i].parked[j].sid == sid {
+            let Parked(id: id, ..) = list.remove(mut w.conns[i].parked, j)
+            attach(mut w, i, k, id, bidi_of(id), mut out)
+        } else {
+            j += 1
+        }
+    }
+    let s = handle_of(w, i, k)
+    j = 0
+    while j < list.len(w.conns[i].parked_datagrams) {
+        if w.conns[i].parked_datagrams[j].sid == sid {
+            let ParkedDatagram(data: data, ..) = list.remove(mut w.conns[i].parked_datagrams, j)
+            list.push(mut out, Datagram(s, take data))
+        } else {
+            j += 1
+        }
+    }
+}
+
+/// Session sid will never be live: its buffered streams are rejected and its buffered
+/// datagrams dropped (WT-4).
+fn unpark(mut w: Endpoint, mut e: quic.Endpoint, i: u64, sid: u64) {
+    let c = w.conns[i].handle
+    let mut j = 0u64
+    while j < list.len(w.conns[i].parked) {
+        if w.conns[i].parked[j].sid == sid {
+            let Parked(id: id, ..) = list.remove(mut w.conns[i].parked, j)
+            refuse_stream(mut e, c, id, h3_wire.WT_BUFFERED_STREAM_REJECTED)
+        } else {
+            j += 1
+        }
+    }
+    j = 0
+    while j < list.len(w.conns[i].parked_datagrams) {
+        if w.conns[i].parked_datagrams[j].sid == sid {
+            let _ = list.remove(mut w.conns[i].parked_datagrams, j)
+            w.dropped += 1
+        } else {
+            j += 1
+        }
+    }
+}
+
+/// Reject what has waited 3 PTOs for its session (WT-4); returns the next such deadline.
+fn expire(mut w: Endpoint, mut e: quic.Endpoint, now: u64) -> Option[u64] {
+    let mut next: Option[u64] = None
+    for i in 0u64 .. list.len(w.conns) {
+        let c = w.conns[i].handle
+        let wait = 3 * quic.pto_ns(e, c)
+        let mut j = 0u64
+        while j < list.len(w.conns[i].parked) {
+            let due = w.conns[i].parked[j].since + wait
+            if due <= now {
+                let Parked(id: id, ..) = list.remove(mut w.conns[i].parked, j)
+                refuse_stream(mut e, c, id, h3_wire.WT_BUFFERED_STREAM_REJECTED)
+            } else {
+                next = Some(earliest(next, due))
+                j += 1
+            }
+        }
+        j = 0
+        while j < list.len(w.conns[i].parked_datagrams) {
+            let due = w.conns[i].parked_datagrams[j].since + wait
+            if due <= now {
+                let _ = list.remove(mut w.conns[i].parked_datagrams, j)
+                w.dropped += 1
+            } else {
+                next = Some(earliest(next, due))
+                j += 1
+            }
+        }
+    }
+    next
+}
+
+fn earliest(a: Option[u64], b: u64) -> u64 {
+    match a {
+        Some(x) => order.min(x, b),
+        None => b,
+    }
+}
+
+/// A QUIC datagram: the quarter stream id of its session's CONNECT stream, then the payload
+/// (RFC 9297 §2.1, draft-17 §4.5).
+fn on_datagram(mut w: Endpoint, mut e: quic.Endpoint, i: u64, data: Bytes, mut out: List[Event]) {
+    let mut at = 0u64
+    let Some(quarter) = h3_wire.read_varint(data, mut at, list.len(data)) else {
+        fail_conn(mut w, mut e, i, h3_wire.H3_DATAGRAM_ERROR, mut out)
+        return
+    }
+    if quarter >= 1u64 << 60 {
+        // RFC 9297 §2.1: a quarter stream id past 2^60 - 1 names no stream.
+        fail_conn(mut w, mut e, i, h3_wire.H3_DATAGRAM_ERROR, mut out)
+        return
+    }
+    let sid = quarter * 4
+    let mut payload: Bytes = list.with_capacity(list.len(data) - at)
+    list.append(mut payload, list.slice(data, at, list.len(data)))
+    match place(w.conns[i], sid) {
+        At(k) => list.push(mut out, Datagram(handle_of(w, i, k), take payload)),
+        Wait => {
+            let most: u64 = int.widen(w.limits.buffered_datagrams)
+            if list.len(w.conns[i].parked_datagrams) >= most {
+                w.dropped += 1
+                return
+            }
+            list.push(mut w.conns[i].parked_datagrams, ParkedDatagram(sid: sid, data: take payload, since: w.now))
+        },
+        Gone => {
+            w.dropped += 1
+        },
+    }
+}
+
+/// The session k whose WT stream id is.
+fn owner(conn: Conn, id: quic.StreamId) -> Option[u64] {
+    for k in 0u64 .. list.len(conn.sessions) {
+        for o in conn.sessions[k].streams {
+            if o.id == id {
+                return Some(k)
+            }
+        }
+    }
+    None
+}
+
+/// Close a half of session k's stream id; a stream with both halves closed is forgotten.
+fn settle_stream(mut w: Endpoint, i: u64, k: u64, id: quic.StreamId, recv_done: bool, send_done: bool) {
+    for j in 0u64 .. list.len(w.conns[i].sessions[k].streams) {
+        if w.conns[i].sessions[k].streams[j].id == id {
+            if recv_done {
+                w.conns[i].sessions[k].streams[j].recv = false
+            }
+            if send_done {
+                w.conns[i].sessions[k].streams[j].send = false
+            }
+            if !w.conns[i].sessions[k].streams[j].recv && !w.conns[i].sessions[k].streams[j].send {
+                let _ = list.remove(mut w.conns[i].sessions[k].streams, j)
+            }
+            return
+        }
+    }
+}

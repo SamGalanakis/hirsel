@@ -23,26 +23,13 @@ fn session_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut o
         headers_readable(mut w, mut e, i, k, mut out)
         return
     }
+    // A server reads nothing past the request until it accepts (draft-17 §3.2).
     let live = match w.conns[i].sessions[k].phase {
         Live => true,
         _ => false,
     }
     if live {
-        // TS2 reads past a live session's CONNECT stream and ends the session at its FIN.
-        let c = w.conns[i].handle
-        let id = w.conns[i].sessions[k].id
-        loop {
-            list.clear(mut w.scratch)
-            match quic.read(mut e, c, id, mut w.scratch) {
-                Ok((_, true)) => {
-                    end_session(mut w, i, k, true, 0, list.new(), mut out)
-                    return
-                },
-                Ok((0, false)) => return,
-                Ok(_) => (),
-                Error(_) => return,
-            }
-        }
+        live_readable(mut w, mut e, i, k, mut out)
     }
 }
 
@@ -84,7 +71,7 @@ fn next_headers(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64) -> Result
                 list.drop_prefix(mut w.conns[i].sessions[k].buf, h.head + h.len)
                 return Ok(Some(take section))
             }
-            let unexpected = h.kind == h3_wire.FRAME_DATA || h.kind == h3_wire.FRAME_SETTINGS || h.kind == h3_wire.FRAME_GOAWAY || h.kind == h3_wire.FRAME_MAX_PUSH_ID || h.kind == h3_wire.FRAME_CANCEL_PUSH || h.kind == h3_wire.FRAME_PUSH_PROMISE || h3_wire.reserved_frame(h.kind)
+            let unexpected = h.kind == h3_wire.FRAME_DATA || h.kind == h3_wire.FRAME_SETTINGS || h.kind == h3_wire.FRAME_GOAWAY || h.kind == h3_wire.FRAME_MAX_PUSH_ID || h.kind == h3_wire.FRAME_CANCEL_PUSH || h.kind == h3_wire.FRAME_PUSH_PROMISE || h.kind == h3_wire.SIGNAL_WT_BIDI || h3_wire.reserved_frame(h.kind)
             if unexpected {
                 // RFC 9114 §4.1, §7.2: a frame out of place on a request stream.
                 return Error(ConnectionFault(h3_wire.H3_FRAME_UNEXPECTED))
@@ -110,7 +97,7 @@ fn headers_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut o
             Ok(None) => return,
             Error(StreamFault(code)) => {
                 refuse_stream(mut e, c, id, code)
-                end_session(mut w, i, k, true, 0, list.new(), mut out)
+                end_session(mut w, mut e, i, k, true, 0, list.new(), mut out)
                 return
             },
             Error(ConnectionFault(code)) => {
@@ -125,7 +112,7 @@ fn headers_readable(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, mut o
             Error(TooLarge) => {
                 // RFC 9114 §4.2.2: past the advertised size, the message is malformed.
                 refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
-                end_session(mut w, i, k, true, 0, list.new(), mut out)
+                end_session(mut w, mut e, i, k, true, 0, list.new(), mut out)
                 return
             },
             Error(_) => {
@@ -186,7 +173,7 @@ fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: L
         // what is held.
         if pending(w.conns[i]) >= limit {
             refuse_stream(mut e, c, id, h3_wire.H3_REQUEST_REJECTED)
-            end_session(mut w, i, k, false, 0, list.new(), mut out)
+            end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
             return
         }
         w.conns[i].sessions[k].phase = Held(take fields)
@@ -196,7 +183,7 @@ fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: L
         Ok(take p) => take p,
         Error(()) => {
             refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
-            end_session(mut w, i, k, false, 0, list.new(), mut out)
+            end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
             return
         },
     }
@@ -222,7 +209,7 @@ fn request(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, take fields: L
     }
     if code != 0 {
         refuse_stream(mut e, c, id, code)
-        end_session(mut w, i, k, false, 0, list.new(), mut out)
+        end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
         return
     }
     if flow(w, i) && (live_here(w.conns[i]) >= per || w.live >= all) {
@@ -245,7 +232,7 @@ fn refuse_with(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, status: u1
     send(mut w, mut e, i, id, take frame, true)
     // RFC 9114 §4.1.1: the response is complete; the rest of the request is not needed.
     let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
-    end_session(mut w, i, k, false, 0, list.new(), mut out)
+    end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
 }
 
 fn push_status(status: u16, mut fields: List[qpack.Field]) {
@@ -504,6 +491,12 @@ pub fn answer(mut w: Endpoint, mut e: quic.Endpoint, s: SessionHandle, take v: V
             let frame = headers_frame(fields)
             send(mut w, mut e, i, id, take frame, false)
             w.conns[i].sessions[k].phase = Live
+            // What arrived while the request waited is the session's now: buffered streams
+            // and datagrams, and capsules the client sent ahead (draft-17 §3.2, §4.6).
+            let mut later = replace(mut w.backlog, list.new())
+            adopt(mut w, i, k, mut later)
+            live_readable(mut w, mut e, i, k, mut later)
+            w.backlog = take later
         },
     }
     Ok(())
@@ -549,8 +542,7 @@ pub fn connect(mut w: Endpoint, mut e: quic.Endpoint, now: u64, to: Addr, url: S
     // The CONNECT stream is the connection's first client bidirectional stream (RFC 9000
     // §2.1), opened once the server's SETTINGS arrive.
     let id: quic.StreamId = StreamId(0)
-    let cap = request_bound(w.limits) + 16
-    list.push(mut conn.sessions, Session(id: id, phase: Unsent(authority: take authority, path: take path, protocols: take protocols), buf: list.with_capacity(cap), skip: 0))
+    list.push(mut conn.sessions, new_session(id, Unsent(authority: take authority, path: take path, protocols: take protocols), request_bound(w.limits) + 16))
     conn.next_bidi = 1
     list.push(mut w.conns, take conn)
     Ok(SessionHandle(conn: c, id: id))
@@ -631,7 +623,7 @@ fn response(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, fields: List[
     }
     let Some(n) = status else {
         refuse_stream(mut e, c, id, h3_wire.H3_MESSAGE_ERROR)
-        end_session(mut w, i, k, true, 0, list.new(), mut out)
+        end_session(mut w, mut e, i, k, true, 0, list.new(), mut out)
         return false
     }
     if n < 200 {
@@ -640,11 +632,13 @@ fn response(mut w: Endpoint, mut e: quic.Endpoint, i: u64, k: u64, fields: List[
     if n < 300 {
         w.conns[i].sessions[k].phase = Live
         list.push(mut out, Ready(s: s, protocol: take protocol))
-        // Anything already read past the response belongs to the session (TS3).
+        adopt(mut w, i, k, mut out)
+        // Bytes already read past the response are capsules.
+        live_readable(mut w, mut e, i, k, mut out)
         return false
     }
     list.push(mut out, Refused(s: s, status: n))
     let _ = quic.stop(mut e, c, id, h3_wire.H3_NO_ERROR)
-    end_session(mut w, i, k, false, 0, list.new(), mut out)
+    end_session(mut w, mut e, i, k, false, 0, list.new(), mut out)
     false
 }

@@ -189,7 +189,7 @@ fn describe_launch_skips_directory_grants_and_owns_only_transport_fds() {
             len: target.len(),
         },
     };
-    let fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+    let fds = || std::fs::read_dir(crate::host::sys::FD_DIR).unwrap().count();
     let before = fds();
     // SAFETY: constructor copies its views and owns the duplicated descriptors.
     unsafe {
@@ -679,7 +679,7 @@ fn run_closes_grants_after_main_cleanup_and_before_reporting_status_without_admi
 #[test]
 #[ignore = "run only by broken_pipe_is_a_typed_write_error_from_native_process_entry"]
 fn broken_pipe_child() {
-    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::fd::OwnedFd;
     unsafe extern "C" fn entry(
         context: *mut Context,
         config: *const Config,
@@ -722,10 +722,8 @@ fn broken_pipe_child() {
     // default policy to prove Run supplies Closed (EPIPE) rather than signal termination.
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-        let mut fds = [0; 2];
-        assert_eq!(libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC), 0);
-        let read = OwnedFd::from_raw_fd(fds[0]);
-        let write = OwnedFd::from_raw_fd(fds[1]);
+        let (read, write) = std::io::pipe().unwrap();
+        let (read, write) = (OwnedFd::from(read), OwnedFd::from(write));
         drop(read);
         let sink = File::options().write(true).open("/dev/null").unwrap();
         let parameters = [Requirement {

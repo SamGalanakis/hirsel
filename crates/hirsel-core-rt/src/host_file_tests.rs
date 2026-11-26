@@ -353,12 +353,8 @@ fn slot_file_fixture<T: Send>(
 }
 
 fn check_file_backend() {
-    let expected_helper = hirsel_core_net::reactor().unwrap() == hirsel_core_net::Reactor::Epoll;
-    let threads: Vec<String> = std::fs::read_dir("/proc/self/task")
-        .unwrap()
-        .filter_map(|task| std::fs::read_to_string(task.unwrap().path().join("comm")).ok())
-        .map(|comm| comm.trim_end().to_owned())
-        .collect();
+    let expected_helper = crate::host::sys::file_helper_expected();
+    let threads = crate::host::sys::thread_names();
     assert_eq!(
         threads.iter().any(|comm| comm == "hirsel-host"),
         expected_helper,
@@ -510,7 +506,7 @@ fn slot_ring_writes_report_progress_and_preserve_positioned_cursor() {
 
 /// How many of this process's descriptors refer to `path`.
 fn descriptors_on(path: &std::path::Path) -> usize {
-    std::fs::read_dir("/proc/self/fd")
+    std::fs::read_dir(crate::host::sys::FD_DIR)
         .unwrap()
         .filter(|fd| std::fs::read_link(fd.as_ref().unwrap().path()).is_ok_and(|to| to == path))
         .count()

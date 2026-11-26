@@ -7,6 +7,19 @@ fn turn_budget_starts_only_what_fits() {
     let options = Options::new(8, 65_792).unwrap();
     let loopback = "127.0.0.1:0".parse().unwrap();
     let sender = std::net::UdpSocket::bind(loopback).unwrap();
+    // Darwin caps a datagram at the send buffer, 9216 bytes by default.
+    let room = 2 * LARGE as libc::c_int;
+    // SAFETY: an int option on the live socket.
+    let set = unsafe {
+        libc::setsockopt(
+            std::os::fd::AsRawFd::as_raw_fd(&sender),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&raw const room).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0);
     let open = || {
         let socket = Socket::open(false, options).unwrap();
         let endpoint = socket.bind(loopback).unwrap();
@@ -36,7 +49,7 @@ fn turn_budget_starts_only_what_fits() {
             assert_eq!(
                 capture
                     .pool
-                    .read(&capture.group.socket, None, &mut TurnBudget::default())
+                    .read_arrived(&capture.group.socket, &mut TurnBudget::default(), 1)
                     .unwrap(),
                 1
             );

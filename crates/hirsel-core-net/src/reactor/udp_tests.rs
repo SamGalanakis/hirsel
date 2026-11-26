@@ -28,9 +28,13 @@ fn udp_receive_captures_gro_and_short_slots() {
     assert_eq!(sender.send_window(&data, &train).unwrap(), Window::Sent(2));
     let mut pool = ReceivePool::new(full).unwrap();
     let mut budget = TurnBudget::default();
+    // Linux coalesces the train into one GRO capture; Darwin has no GRO and
+    // captures each datagram, with the same segments either way.
+    let train_captures = if cfg!(target_os = "linux") { 1 } else { 2 };
     assert_eq!(
-        pool.read(&receiver, None, &mut budget).unwrap(),
-        1,
+        pool.read_arrived(&receiver, &mut budget, train_captures)
+            .unwrap(),
+        train_captures,
         "GRO capture"
     );
     for expected in [0x41, 0x42] {
@@ -58,7 +62,7 @@ fn udp_receive_captures_gro_and_short_slots() {
     }
     let mut budget = TurnBudget::default();
     assert_eq!(
-        pool.read(&receiver, None, &mut budget).unwrap(),
+        pool.read_arrived(&receiver, &mut budget, 2).unwrap(),
         2,
         "ordinary captures"
     );
@@ -84,7 +88,7 @@ fn udp_receive_captures_gro_and_short_slots() {
     );
     let mut pool = ReceivePool::new(short).unwrap();
     let mut budget = TurnBudget::default();
-    assert_eq!(pool.read(&receiver, None, &mut budget).unwrap(), 1);
+    assert_eq!(pool.read_arrived(&receiver, &mut budget, 1).unwrap(), 1);
     let Some(Captured::Datagram {
         peer: source,
         ecn,
@@ -103,6 +107,9 @@ fn udp_receive_captures_gro_and_short_slots() {
 
 /// A fresh pool's first read must not fault its slot pages in: at 1M datagrams/s, a
 /// faulting first receive held the reader past what the default socket queue holds.
+/// Linux only: Darwin counts faults per process, not per thread, so a
+/// parallel harness cannot isolate this reader's.
+#[cfg(target_os = "linux")]
 #[test]
 fn first_receive_into_a_fresh_pool_takes_no_page_faults() {
     use crate::udp::{Options, ReceivePool, Socket, TurnBudget, TxPacket, Window};

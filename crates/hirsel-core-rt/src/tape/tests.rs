@@ -1871,7 +1871,7 @@ fn filesystem_observations_survive_removing_the_recorded_directory() {
     std::fs::remove_file(child.join(format!("trial-{suffix}"))).unwrap();
 
     let child_fds = || {
-        std::fs::read_dir("/proc/self/fd")
+        std::fs::read_dir(crate::host::sys::FD_DIR)
             .unwrap()
             .flatten()
             .filter(|fd| std::fs::read_link(fd.path()).is_ok_and(|path| path == child))

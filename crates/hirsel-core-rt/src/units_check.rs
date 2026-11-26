@@ -1363,14 +1363,7 @@ mod tests {
         let all = std::env::var_os("HIRSEL_CHECK_ALL").is_some();
         let mut fails = Vec::new();
         let mut inconclusive = 0u64;
-        let cpus = {
-            // SAFETY: zeroed is the empty set; the call fills it.
-            let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-            unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) };
-            (0..libc::CPU_SETSIZE as usize)
-                .filter(|&c| unsafe { libc::CPU_ISSET(c, &set) })
-                .collect::<Vec<_>>()
-        };
+        let cpus = crate::host::sys::allowed_cpus();
         let dir = std::env::temp_dir().join(format!("hirsel-units-check-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = std::env::current_exe().unwrap();
@@ -1446,13 +1439,7 @@ mod tests {
                 .ok()
                 .and_then(|c| c.parse::<usize>().ok())
             {
-                // SAFETY: a one-CPU set for this process's main thread; the
-                // checker's threads inherit it.
-                unsafe {
-                    let mut set: libc::cpu_set_t = std::mem::zeroed();
-                    libc::CPU_SET(cpu, &mut set);
-                    libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set);
-                }
+                crate::host::sys::pin_to_cpu(cpu);
             }
             let seed = std::env::var("HIRSEL_CHECK_SEED").unwrap().parse().unwrap();
             let out = std::env::var("HIRSEL_CHECK_OUT").unwrap();

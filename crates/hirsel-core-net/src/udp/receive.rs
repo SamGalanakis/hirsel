@@ -73,6 +73,32 @@ impl ReceivePool {
         })
     }
 
+    /// Captures from [`Self::read`] calls until `want` are taken or a second
+    /// passes: Darwin's loopback hands a datagram to its input thread, so it
+    /// can land after the send returns. Stops at the first read that takes
+    /// `want` or more, so a single read's count is still checked.
+    #[cfg(test)]
+    pub(crate) fn read_arrived(
+        &mut self,
+        socket: &Socket,
+        budget: &mut TurnBudget,
+        want: usize,
+    ) -> io::Result<usize> {
+        let mut taken = 0;
+        for _ in 0..1000 {
+            match self.read(socket, None, budget) {
+                Ok(count) => taken += count,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+            if taken >= want {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(taken)
+    }
+
     /// Capture into currently free slots. A zero read limit leaves the descriptor untouched.
     pub fn read(
         &mut self,

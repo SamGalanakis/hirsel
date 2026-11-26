@@ -8,7 +8,7 @@ use std::{
 };
 
 fn fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").unwrap().count()
+    std::fs::read_dir(crate::host::sys::FD_DIR).unwrap().count()
 }
 pub(crate) fn isolated(law: &str) {
     let output = crate::test_process::command()
@@ -997,15 +997,11 @@ unsafe fn socket_law(law: &str, context: *mut Context, n: u64, clock: u64) {
                 let mut empty = [0];
                 assert_eq!(peer.read(&mut empty).unwrap(), 0);
                 if law == "spurious_connect" {
-                    let fd = libc::socket(
-                        libc::AF_INET,
-                        libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-                        0,
-                    );
+                    let fd = crate::host::sys::socket(libc::AF_INET, libc::SOCK_STREAM);
                     assert!(fd >= 0);
                     let key = (*(*context).host_files)
                         .sockets
-                        .insert(OwnedFd::from_raw_fd(fd))
+                        .insert(OwnedFd::from_raw_fd(fd as std::os::fd::RawFd))
                         .unwrap();
                     let mut network = NetworkRequest {
                         send_tail: ptr::null(),

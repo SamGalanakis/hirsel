@@ -350,3 +350,86 @@ pub(crate) fn background_thread() {
 pub(crate) fn cpu() -> u32 {
     u32::MAX
 }
+
+/// The CPUs this process may run on, for tests that pin one child per CPU.
+/// Darwin has no affinity masks, so this is every CPU.
+#[cfg(test)]
+pub(crate) fn allowed_cpus() -> Vec<usize> {
+    (0..std::thread::available_parallelism().map_or(1, usize::from)).collect()
+}
+
+/// Darwin cannot pin a thread to a CPU; the scheduler places it.
+#[cfg(test)]
+pub(crate) fn pin_to_cpu(_cpu: usize) {}
+
+/// Minor page faults taken by the process: Darwin's getrusage has no
+/// per-thread count, so callers compare deltas on a quiet process.
+#[cfg(test)]
+pub(crate) fn thread_minor_faults() -> i64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage writes the whole rusage on success.
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
+        0
+    );
+    unsafe { usage.assume_init() }.ru_minflt
+}
+
+/// `<sys/proc_info.h>`'s flavor that lists a process's thread handles; the
+/// libc crate does not export it.
+#[cfg(test)]
+const PROC_PIDLISTTHREADS: libc::c_int = 6;
+
+/// The names of this process's live threads.
+#[cfg(test)]
+pub(crate) fn thread_names() -> Vec<String> {
+    let pid = std::process::id() as libc::c_int;
+    let mut handles = vec![0u64; 4096];
+    // SAFETY: the buffer holds `handles.len()` thread handles.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            PROC_PIDLISTTHREADS,
+            0,
+            handles.as_mut_ptr().cast(),
+            (handles.len() * size_of::<u64>()) as libc::c_int,
+        )
+    };
+    assert!(bytes > 0, "{}", io::Error::last_os_error());
+    handles.truncate(bytes as usize / size_of::<u64>());
+    handles
+        .into_iter()
+        .filter_map(|handle| {
+            // SAFETY: zeroed is a valid proc_threadinfo; the call fills it.
+            let mut info: libc::proc_threadinfo = unsafe { std::mem::zeroed() };
+            let size = size_of::<libc::proc_threadinfo>() as libc::c_int;
+            // SAFETY: `info` is a writable proc_threadinfo of `size` bytes.
+            let got = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTHREADINFO,
+                    handle,
+                    (&raw mut info).cast(),
+                    size,
+                )
+            };
+            (got == size).then(|| {
+                // SAFETY: the kernel NUL-terminates pth_name.
+                unsafe { std::ffi::CStr::from_ptr(info.pth_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+        .collect()
+}
+
+/// Whether file operations take the `hirsel-host` helper thread: kqueue has
+/// no file ring, so they always do.
+#[cfg(test)]
+pub(crate) fn file_helper_expected() -> bool {
+    true
+}
+
+#[cfg(test)]
+/// The directory listing this process's open descriptors.
+pub(crate) const FD_DIR: &str = "/dev/fd";

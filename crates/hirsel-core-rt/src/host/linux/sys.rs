@@ -245,3 +245,58 @@ pub(crate) fn cpu() -> u32 {
     // SAFETY: sched_getcpu takes no pointers and has no program-visible effect.
     unsafe { libc::sched_getcpu() as u32 }
 }
+
+/// The CPUs this process may run on, for tests that pin one child per CPU.
+#[cfg(test)]
+pub(crate) fn allowed_cpus() -> Vec<usize> {
+    // SAFETY: zeroed is the empty set; the call fills it.
+    let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    unsafe { libc::sched_getaffinity(0, size_of::<libc::cpu_set_t>(), &mut set) };
+    (0..libc::CPU_SETSIZE as usize)
+        .filter(|&c| unsafe { libc::CPU_ISSET(c, &set) })
+        .collect()
+}
+
+/// Pins this process's main thread, and the threads it starts later, to `cpu`.
+#[cfg(test)]
+pub(crate) fn pin_to_cpu(cpu: usize) {
+    // SAFETY: a one-CPU set for this process's main thread.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        libc::sched_setaffinity(0, size_of::<libc::cpu_set_t>(), &set);
+    }
+}
+
+/// Minor page faults taken by the calling thread.
+#[cfg(test)]
+pub(crate) fn thread_minor_faults() -> i64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    // SAFETY: getrusage writes the whole rusage on success.
+    assert_eq!(
+        unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) },
+        0
+    );
+    unsafe { usage.assume_init() }.ru_minflt
+}
+
+/// The names of this process's live threads.
+#[cfg(test)]
+pub(crate) fn thread_names() -> Vec<String> {
+    std::fs::read_dir("/proc/self/task")
+        .unwrap()
+        .filter_map(|task| std::fs::read_to_string(task.unwrap().path().join("comm")).ok())
+        .map(|comm| comm.trim_end().to_owned())
+        .collect()
+}
+
+/// Whether file operations take the `hirsel-host` helper thread: only epoll
+/// has no ring to submit them to.
+#[cfg(test)]
+pub(crate) fn file_helper_expected() -> bool {
+    hirsel_core_net::reactor().unwrap() == hirsel_core_net::Reactor::Epoll
+}
+
+#[cfg(test)]
+/// The directory listing this process's open descriptors.
+pub(crate) const FD_DIR: &str = "/proc/self/fd";

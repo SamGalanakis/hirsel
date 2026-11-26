@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
 use std::{io::Write, os::unix::net::UnixStream};
 
@@ -43,6 +44,7 @@ fn readied(sockets: &mut Sockets, token: u64) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn refused_submit_keeps_a_closed_socket_until_consumed() {
     use std::sync::atomic::Ordering::Relaxed;
@@ -112,7 +114,9 @@ fn a_socket_registered_by_an_exited_thread_still_reports_readiness() {
 #[test]
 fn a_writer_parked_beside_a_waiting_reader_is_woken_alone() {
     use std::io::Read;
+    #[cfg_attr(not(target_os = "linux"), expect(unused_mut))]
     let mut makers: Vec<fn() -> io::Result<Arc<Poller>>> = vec![Poller::new_readiness];
+    #[cfg(target_os = "linux")]
     if kernel_offers_io_uring() {
         makers.push(Poller::new_uring);
     }
@@ -212,6 +216,7 @@ fn cross_home_release(make: fn() -> io::Result<Arc<Poller>>) -> (bool, bool, boo
     (reused, quiet, ended, woken)
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn reaping_counts_every_completion() {
     use io_uring::opcode::PollRemove;
@@ -236,6 +241,7 @@ fn reaping_counts_every_completion() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn replaced_watch_leaves_one_poll() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -327,12 +333,16 @@ fn replaced_watch_leaves_one_poll() {
 fn readiness_beyond_the_completion_queue_is_all_reported() {
     const CQ_ENTRIES: u32 = 512;
     let (poller, completion_entries) = match reactor().unwrap() {
+        #[cfg(target_os = "linux")]
         Reactor::IoUring => {
             let ring = Uring::with_cq_size(CQ_ENTRIES).unwrap();
             let entries = ring.ring.cq_entries() as u32;
             (Poller::from_uring(ring), entries)
         }
+        #[cfg(target_os = "linux")]
         Reactor::Epoll => (Poller::new_readiness().unwrap(), CQ_ENTRIES),
+        #[cfg(target_os = "macos")]
+        Reactor::Kqueue => (Poller::new_readiness().unwrap(), CQ_ENTRIES),
     };
     // Keep the burst at three times the CQ while fitting within 4,096 fds.
     let socket_count = 3 * completion_entries as usize;
@@ -389,6 +399,7 @@ fn readiness_beyond_the_completion_queue_is_all_reported() {
 /// A ready listener whose watch waits in the mailbox behind more idle
 /// watches than the SQ holds must still be reported: the owner may not
 /// sleep while mailbox work is unsubmitted.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_ready_listener_behind_a_full_sq_of_idle_watches_is_reported() {
     if reactor().unwrap() != Reactor::IoUring {
@@ -427,11 +438,13 @@ fn a_ready_listener_behind_a_full_sq_of_idle_watches_is_reported() {
     assert!(reported, "ready listener unreported after {bound:?}");
 }
 
+#[cfg(target_os = "linux")]
 const SLOT: usize = 256 << 10;
 
 /// A loopback TCP connection whose peer has stopped reading, with small
 /// buffers, so a large send waits in the kernel. None unless this
 /// process's poller sends zero-copy.
+#[cfg(target_os = "linux")]
 fn stuck_peer() -> Option<(Sockets, u64, Arc<Poller>, u64, std::net::TcpStream)> {
     let (mut sockets, key, peer) = small_pair();
     // These laws are about the slots, so their loopback peer sends
@@ -482,6 +495,7 @@ fn reap_until(sockets: &mut Sockets, mut done: impl FnMut() -> bool) {
 /// entered without reaping so the kernel parks the excess on its overflow
 /// list. Every operation submitted completes exactly once, and no turn
 /// sleeps while the overflow holds completions.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_completion_overflow_burst_loses_no_completion() {
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -572,6 +586,7 @@ unsafe fn count(context: *const (), _: i32) {
 
 /// A slot whose send waits, cancelled once part of it is in the kernel's
 /// write queue: the kernel still reads that part from the slot.
+#[cfg(target_os = "linux")]
 fn cancelled_send(sockets: &mut Sockets, poller: &Arc<Poller>, tag: u64) -> TxSlot {
     let mut slot = poller.tx_slot(SLOT).unwrap();
     slot.bytes().fill(b'a');
@@ -583,6 +598,7 @@ fn cancelled_send(sockets: &mut Sockets, poller: &Arc<Poller>, tag: u64) -> TxSl
     slot
 }
 
+#[cfg(target_os = "linux")]
 fn sent(slot: &TxSlot) -> usize {
     match slot.state() {
         TxState::Sent(n) if n > 0 => n as usize,
@@ -591,6 +607,7 @@ fn sent(slot: &TxSlot) -> usize {
 }
 
 /// Fill the slots the next sends would take.
+#[cfg(target_os = "linux")]
 fn refill(poller: &Arc<Poller>) -> Vec<TxSlot> {
     (0..4)
         .map(|_| {
@@ -601,6 +618,7 @@ fn refill(poller: &Arc<Poller>) -> Vec<TxSlot> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn read_all_a(peer: &mut std::net::TcpStream, n: usize) {
     use std::io::Read;
     let mut got = vec![0; n];
@@ -615,6 +633,7 @@ fn read_all_a(peer: &mut std::net::TcpStream, n: usize) {
 /// A send's answer does not end the kernel's reads of its slot: until
 /// the notification, the queued part is still read from it. A claim
 /// dropped after the answer must not hand the slot to the next send.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_answered_slot_is_not_reused_before_its_notification() {
     let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
@@ -631,6 +650,7 @@ fn an_answered_slot_is_not_reused_before_its_notification() {
 
 /// A claim dropped before its cancelled send answers: the answer comes
 /// with more to follow, and the slot waits for that notification too.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_cancelled_send_keeps_its_slot_until_the_notification() {
     let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
@@ -669,6 +689,7 @@ fn a_cancelled_send_keeps_its_slot_until_the_notification() {
 
 /// A ring closed while the kernel still reads a slot: those bytes must
 /// never return to the allocator.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_ring_dropped_with_notifications_owed_keeps_their_bytes() {
     // Slots come from the heap, where a freed one is handed out again.
@@ -690,6 +711,7 @@ fn a_ring_dropped_with_notifications_owed_keeps_their_bytes() {
 /// Slots stay kept while sends go on, and a ring that stopped sending
 /// frees them: a blocking turn wakes for the trim, which comes a full
 /// interval after the last slot taken, so idle memory returns to 0.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_ring_that_stopped_sending_frees_its_slots() {
     let Some((mut sockets, key, poller, tag, mut peer)) = stuck_peer() else {
@@ -722,6 +744,7 @@ fn a_ring_that_stopped_sending_frees_its_slots() {
 /// An abandoned send on a peer that stopped reading: its queued bytes
 /// are dropped at the close, the peer sees a reset rather than every
 /// committed byte, and the slot's notification follows promptly.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_abandoned_send_leaves_no_queued_bytes_after_close() {
     use std::io::Read;
@@ -753,6 +776,7 @@ fn an_abandoned_send_leaves_no_queued_bytes_after_close() {
 
 /// `auto` treats every loopback form as loopback, including an IPv4
 /// loopback peer of an IPv6 socket, and nothing else.
+#[cfg(target_os = "linux")]
 #[test]
 fn auto_send_zc_skips_loopback_peers_only() {
     use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -835,6 +859,7 @@ fn a_released_listener_can_be_bound_again_at_once() {
 
 /// Whether a ring with the features the reactor needs (NODROP, EXT_ARG)
 /// can be set up here, asked of the kernel directly.
+#[cfg(target_os = "linux")]
 fn kernel_offers_io_uring() -> bool {
     const FEAT_NODROP: u32 = 1 << 1;
     const FEAT_EXT_ARG: u32 = 1 << 8;
@@ -851,6 +876,7 @@ fn kernel_offers_io_uring() -> bool {
     params[5] & wanted == wanted
 }
 
+#[cfg(target_os = "linux")]
 #[path = "choice_tests.rs"]
 mod choice_tests;
 #[path = "udp_tests.rs"]

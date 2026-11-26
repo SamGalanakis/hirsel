@@ -121,14 +121,8 @@ fn files_deliver_committed_prefixes_and_all_open_modes() {
 #[test]
 fn a_parked_sync_delivers_the_syscalls_failure() {
     let mut f = Fixture::new();
-    let mut fds = [0; 2];
-    // SAFETY: pipe2 writes two new descriptors into the array.
-    assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
-    // SAFETY: both descriptors are new and owned here.
-    let (read, write) = unsafe {
-        use std::os::fd::FromRawFd;
-        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
-    };
+    let (read, write) = std::io::pipe().unwrap();
+    let (read, write) = (OwnedFd::from(read), OwnedFd::from(write));
     drop(read);
     let h = f.os.adopt_file(write);
     let failed = f.simple(SYNC, h, b"", 0);
@@ -1084,7 +1078,7 @@ fn foreign_helper_parks_the_issuer_and_delivers_its_writes() {
         // SAFETY: the call lends three initialized argument words. The
         // borrowed gate remains pinned and only its mutex-protected bit changes.
         unsafe {
-            assert_ne!(args.read(), libc::pthread_self());
+            assert_ne!(args.read(), libc::pthread_self() as u64);
             let gate = &*std::ptr::with_exposed_provenance::<Gate>(args.add(1).read() as usize);
             drop(
                 gate.1
@@ -1135,7 +1129,7 @@ fn foreign_helper_parks_the_issuer_and_delivers_its_writes() {
             );
             assert!(!child.task.is_null());
             let mut words = [
-                libc::pthread_self(),
+                libc::pthread_self() as u64,
                 gate_pointer.expose_provenance() as u64,
                 0,
             ];
@@ -1290,6 +1284,9 @@ fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_s
 #[path = "rule_provider_tests.rs"]
 mod rule_provider_tests;
 
+/// Linux only: the law checks pidfd reaping, prctl and /proc state. The Darwin
+/// supervisor (S7's posix_spawn Exec) has no law of its own yet.
+#[cfg(target_os = "linux")]
 #[test]
 fn exec_supervisor_preserves_inputs_and_only_reaps_its_children() {
     use std::process::Command;
@@ -1413,6 +1410,7 @@ int main(int argc, char **argv) {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn exec_supervisor_law(image: &std::path::Path) {
     use crate::host::exec::{SetupStep, Signal, SpawnInput, Supervisor, Termination};
     use std::{

@@ -1,4 +1,5 @@
-//! Reexecute native libtest children through the explicitly selected ARM runner.
+//! Reexecute native libtest children: directly on the host's own architecture,
+//! and through the explicitly selected ARM runner for aarch64 Linux under QEMU.
 use std::{ffi::OsStr, process::Command};
 
 pub(crate) fn command() -> Command {
@@ -6,7 +7,7 @@ pub(crate) fn command() -> Command {
 }
 
 pub(crate) fn command_for(executable: &OsStr) -> Command {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
     {
         let runner = std::env::var_os("HIRSEL_QEMU_AARCH64")
             .expect("ARM runtime tests require an explicit HIRSEL_QEMU_AARCH64");
@@ -16,7 +17,7 @@ pub(crate) fn command_for(executable: &OsStr) -> Command {
         command.arg("-L").arg(sysroot).arg(executable);
         command
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", target_os = "linux")))]
     Command::new(executable)
 }
 

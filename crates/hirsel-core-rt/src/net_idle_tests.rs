@@ -19,13 +19,7 @@ struct ShortWakeScenario {
 }
 
 fn thread_minor_faults() -> i64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-    // SAFETY: getrusage writes the whole rusage on success.
-    assert_eq!(
-        unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) },
-        0
-    );
-    unsafe { usage.assume_init() }.ru_minflt
+    crate::host::sys::thread_minor_faults()
 }
 
 /// Writes pages of stack well below the reader's parked frame.

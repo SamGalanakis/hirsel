@@ -1,5 +1,7 @@
 use super::*;
+use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
 use session::{PlaceReady, write_frame};
+use std::io::Seek;
 use std::time::Instant;
 
 const POLL: Duration = Duration::from_millis(20);

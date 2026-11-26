@@ -35,6 +35,15 @@ impl Readiness {
     /// ESRCH) fires on every turn, and the next wait does not block.
     pub(super) fn watch_exit(&self, child: &super::spawn::Spawned) -> io::Result<Watch> {
         let (source, token, fd) = child.exit_source();
+        self.watch_exit_source(source, token, fd)
+    }
+
+    pub(super) fn watch_exit_source(
+        &self,
+        source: hirsel_core_net::ready::Child<'_>,
+        token: u64,
+        fd: Option<RawFd>,
+    ) -> io::Result<Watch> {
         let mut watch = Watch {
             selector: Rc::clone(&self.0),
             fd,
@@ -103,6 +112,14 @@ impl Watch {
         }
         self.interest = interest;
         Ok(())
+    }
+
+    pub(super) fn token(&self) -> u64 {
+        self.token
+    }
+
+    pub(super) fn is_exited(&self) -> bool {
+        self.exited
     }
 
     pub(super) fn fired(&self, events: &[Event]) -> bool {

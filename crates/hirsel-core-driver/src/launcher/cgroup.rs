@@ -380,6 +380,6 @@ mod laws {
             |_| panic!("leader lifecycle must not probe cgroups"),
         )
         .unwrap();
-        assert!(leader.cgroup_root.is_none());
+        assert!(!leader.has_cgroup_root());
     }
 }

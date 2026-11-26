@@ -141,20 +141,19 @@ impl<I: Images> Rig<I> {
     }
 
     pub(super) fn ask(&mut self, request: Request) -> Vec<Event> {
-        self.launcher.handle(request);
-        self.launcher.take_events()
+        self.launcher.ask_request(request)
     }
 
     pub(super) fn bind(&mut self) -> std::net::SocketAddr {
         let bind = Request::Bind(group(), "127.0.0.1:0".into());
         assert_eq!(self.ask(bind), [Event::Bound(group())]);
-        self.launcher.listeners[0].socket.local_addr().unwrap()
+        self.launcher.listener_addr(&group()).unwrap()
     }
 
     /// Run the loop until `done` holds for the events seen so far, and return them.
     fn until(&mut self, done: impl Fn(&[Event]) -> bool) -> Vec<Event> {
         let end = Instant::now() + Duration::from_secs(10);
-        let mut seen = Vec::new();
+        let mut seen = self.launcher.take_events();
         while !done(&seen) {
             assert!(Instant::now() < end, "timed out with {seen:?}");
             self.launcher.turn(Duration::from_millis(20)).unwrap();
@@ -166,7 +165,7 @@ impl<I: Images> Rig<I> {
     /// Run the loop for `period` and return every event.
     fn idle(&mut self, period: Duration) -> Vec<Event> {
         let end = Instant::now() + period;
-        let mut seen = Vec::new();
+        let mut seen = self.launcher.take_events();
         while Instant::now() < end {
             self.launcher.turn(Duration::from_millis(10)).unwrap();
             seen.extend(self.launcher.take_events());
@@ -510,7 +509,7 @@ fn launcher_restart_stateless() {
         exchange(&mut launcher, &mut host, bind),
         Event::Bound(group())
     );
-    let address = launcher.listeners[0].socket.local_addr().unwrap();
+    let address = launcher.listener_addr(&group()).unwrap();
     let start = launch(0, &work, Mode::Serving(1, serve(1, None)));
     assert_eq!(
         exchange(&mut launcher, &mut host, start),
@@ -538,7 +537,7 @@ fn launcher_restart_stateless() {
     write_frame(&mut host, &Request::Kill(serving(1))).unwrap();
     drop(host);
     let end = Instant::now() + Duration::from_secs(10);
-    while launcher.children[0].process.is_some() {
+    while launcher.is_child_live(&serving(1)) {
         assert!(Instant::now() < end);
         launcher.turn(Duration::from_millis(20)).unwrap();
     }
@@ -772,16 +771,12 @@ fn cgroup_lifecycle() {
     if let Some(work) = std::env::var_os(LOSE_LAUNCHER) {
         let work = PathBuf::from(work);
         let mut first = launcher(&work.join("state"), &work);
-        assert!(
-            first.cgroup_root.is_some(),
-            "scope did not delegate cgroup v2"
-        );
+        assert!(first.has_cgroup_root(), "scope did not delegate cgroup v2");
         first.handle(Request::Bind(group(), "127.0.0.1:0".into()));
         first.handle(launch(0, &work, Mode::Serving(1, serve(1, None))));
-        assert!(
-            first
-                .take_events()
-                .contains(&Event::Launched(serving(1), Phase::Started))
+        assert_eq!(
+            first.wait_start_reply(&serving(1)),
+            Event::Launched(serving(1), Phase::Started)
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         while !fs::read_to_string(work.join("orphan")).is_ok_and(|s| !s.is_empty()) {

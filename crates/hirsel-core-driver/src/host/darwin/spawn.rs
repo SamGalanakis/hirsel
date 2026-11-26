@@ -136,6 +136,56 @@ impl Drop for PrivateImage {
     }
 }
 
+/// Result of polling a pending child's exec acknowledgement (Linux only; Darwin
+/// completes synchronously inside `posix_spawn`).
+pub(crate) enum ExecPoll {
+    Pending,
+    Ready(Spawned),
+    Failed(io::Error),
+}
+
+/// Outcome of beginning a child spawn.
+pub(crate) enum StartOutcome {
+    Started(Spawned),
+    #[allow(dead_code)]
+    Pending(PendingSpawn),
+}
+
+/// Uninhabited on Darwin because `posix_spawn` reports exec errors synchronously.
+pub(crate) struct PendingSpawn(std::convert::Infallible);
+
+impl PendingSpawn {
+    pub(crate) fn error_fd(&self) -> RawFd {
+        match self.0 {}
+    }
+
+    pub(crate) fn exit_source(&self) -> (hirsel_core_net::ready::Child<'_>, u64, Option<RawFd>) {
+        match self.0 {}
+    }
+
+    pub(crate) fn signal(&self, _: i32) -> io::Result<()> {
+        match self.0 {}
+    }
+
+    pub(crate) fn poll_exec(&mut self) -> ExecPoll {
+        match self.0 {}
+    }
+
+    pub(crate) fn kill_and_reap(self) {
+        match self.0 {}
+    }
+}
+
+pub(crate) fn begin(
+    prepared: &Prepared,
+    workdir: &Path,
+    raw: &[(RawFd, RawFd)],
+    cgroup: Option<&File>,
+    serving: bool,
+) -> io::Result<StartOutcome> {
+    start(prepared, workdir, raw, cgroup, serving).map(StartOutcome::Started)
+}
+
 pub(crate) fn start(
     prepared: &Prepared,
     workdir: &Path,

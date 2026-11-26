@@ -1,5 +1,6 @@
 use super::*;
 use session::{Reader, Writer};
+use std::io::Seek;
 
 /// The bound on a wake report (one value-codec `Option[u64]`).
 const REPORT_BYTES: u64 = 12;
@@ -30,130 +31,6 @@ impl session::Selection {
 }
 
 impl<I: Images> Launcher<I> {
-    /// Relay every whole frame a child's endpoint holds.
-    pub(super) fn drain_endpoint(&mut self, i: usize) {
-        let Some(conn) = self.children[i]
-            .process
-            .as_mut()
-            .and_then(|p| p.endpoint.as_mut())
-        else {
-            return;
-        };
-        conn.fill();
-        let mut replies = Vec::new();
-        while let Some(frame) = conn.frame() {
-            match HostReply::decode(&frame) {
-                Ok(reply) => replies.push(reply),
-                Err(_) => conn.closed = true,
-            }
-        }
-        let child = self.children[i].state.child.clone();
-        for reply in replies {
-            if matches!(reply, HostReply::Opened(_))
-                && let Some(process) = self.children[i].process.as_mut()
-            {
-                process.opened = Some(reply.clone());
-            }
-            if let HostReply::StoreMismatch(ehi, elo, ahi, alo) = reply {
-                eprintln!(
-                    "hirsel host: group {}: store identity mismatch (expected {ehi:016x}{elo:016x}, found {ahi:016x}{alo:016x})",
-                    child.group.name
-                );
-            }
-            // OLD's next answer after a forwarded cutover is that cutover's; a held-write
-            // acknowledgement is a notice.
-            if !matches!(
-                reply,
-                HostReply::Opened(_) | HostReply::WriteAck(_) | HostReply::StoreMismatch(..)
-            ) && let Some(((c, a), forwarded)) = self
-                .cutovers
-                .iter_mut()
-                .find(|((c, _), f)| *c == child && f.reply.is_none())
-            {
-                forwarded.reply = Some(reply.clone());
-                self.out.push(Event::CutoverResult(c.clone(), *a, reply));
-            } else {
-                if matches!(
-                    reply,
-                    HostReply::Current(..) | HostReply::Refused(_) | HostReply::StoreMismatch(..)
-                ) && self.children[i]
-                    .process
-                    .as_ref()
-                    .is_some_and(|process| process.opened.is_none())
-                {
-                    self.children[i].state.answer = Some(reply.clone());
-                }
-                self.out.push(Event::Placed(child.clone(), reply));
-            }
-        }
-    }
-
-    /// A child has exited: relay its endpoint's last frames, read its report and answer,
-    /// sample its listener, send its end, and only then let the listener's watch start.
-    pub(super) fn ended(&mut self, i: usize, status: Status) -> io::Result<()> {
-        self.drain_endpoint(i);
-        let mut process = self.children[i].process.take().expect("a live child");
-        let report = process.report.as_mut().and_then(read_report);
-        let child = self.children[i].state.child.clone();
-        if let Some((mut out, bound)) = process.answer.take()
-            && (status == Status::Code(0)
-                || (process.install_target.is_some() && status == Status::Code(1)))
-        {
-            let mut answer = Vec::new();
-            out.rewind()?;
-            Read::by_ref(&mut out)
-                .take(bound + 1)
-                .read_to_end(&mut answer)?;
-            if answer.len() as u64 <= bound {
-                if let Some(target) = process.install_target {
-                    if let Some(reply) = install_reply(&answer, status, Some(target)) {
-                        self.children[i].install_reply = Some(reply.clone());
-                        self.emit(Event::Placed(child.clone(), reply));
-                    }
-                } else {
-                    self.emit(Event::Answered(child.clone(), answer));
-                }
-            }
-        }
-        if let Some((path, bound)) = process.triggers.take()
-            && status == Status::Code(0)
-        {
-            // An unreadable or oversized report is no answer: the host then fails the
-            // prepare, which ended without one.
-            let mut answer = Vec::new();
-            let read =
-                File::open(&path).and_then(|file| file.take(bound + 1).read_to_end(&mut answer));
-            if read.is_ok() && answer.len() as u64 <= bound {
-                self.emit(Event::Answered(child.clone(), answer));
-            }
-        }
-        let mut sample = false;
-        if let Role::Serving(_) = child.role
-            && let Some(l) = self.listener(&child.group)
-        {
-            sample = readable(self.listeners[l].socket.as_raw_fd());
-            self.listeners[l].reported = sample;
-        }
-        let end = End {
-            status,
-            report,
-            readable: sample,
-        };
-        // OLD ended with a forwarded cutover unanswered: the launcher cannot tell whether
-        // it installed, so its saved reply is Uncertain.
-        for ((c, a), forwarded) in &mut self.cutovers {
-            if *c == child && forwarded.reply.is_none() {
-                forwarded.reply = Some(HostReply::Uncertain);
-                self.out
-                    .push(Event::CutoverResult(c.clone(), *a, HostReply::Uncertain));
-            }
-        }
-        self.children[i].state.phase = Phase::Exited(end.clone());
-        self.emit(Event::Ended(child.clone(), end));
-        self.retired(&child.group);
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(crate) fn turn(&mut self, timeout: Duration) -> io::Result<()> {
         self.wait_turn(Some(timeout))
@@ -176,8 +53,52 @@ pub(super) fn install_reply(
     }
 }
 
+/// Read a finished child's bounded stdout answer or prepare `TRIGGERS` file, returning
+/// any resulting `Placed` (install) or `Answered` event plus any saved install reply.
+pub(super) fn read_child_outputs(
+    child: &Child,
+    status: Status,
+    answer: Option<(File, u64)>,
+    install_target: Option<u64>,
+    triggers: Option<(PathBuf, u64)>,
+) -> io::Result<(Option<HostReply>, Vec<Event>)> {
+    let mut events = Vec::new();
+    let mut saved_install = None;
+    if let Some((mut out, bound)) = answer
+        && (status == Status::Code(0) || (install_target.is_some() && status == Status::Code(1)))
+    {
+        let mut bytes = Vec::new();
+        out.rewind()?;
+        Read::by_ref(&mut out)
+            .take(bound + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 <= bound {
+            if let Some(target) = install_target {
+                if let Some(reply) = install_reply(&bytes, status, Some(target)) {
+                    saved_install = Some(reply.clone());
+                    events.push(Event::Placed(child.clone(), reply));
+                }
+            } else {
+                events.push(Event::Answered(child.clone(), bytes));
+            }
+        }
+    }
+    if let Some((path, bound)) = triggers
+        && status == Status::Code(0)
+    {
+        // An unreadable or oversized report is no answer: the host then fails the
+        // prepare, which ended without one.
+        let mut bytes = Vec::new();
+        let read = File::open(&path).and_then(|file| file.take(bound + 1).read_to_end(&mut bytes));
+        if read.is_ok() && bytes.len() as u64 <= bound {
+            events.push(Event::Answered(child.clone(), bytes));
+        }
+    }
+    Ok((saved_install, events))
+}
+
 /// A wake report: an empty read is no report, and anything but one `Option[u64]` is none.
-fn read_report(file: &mut File) -> Option<Option<u64>> {
+pub(super) fn read_report(file: &mut File) -> Option<Option<u64>> {
     let mut bytes = Vec::new();
     let _ = file.take(REPORT_BYTES + 1).read_to_end(&mut bytes);
     match bytes.as_slice() {

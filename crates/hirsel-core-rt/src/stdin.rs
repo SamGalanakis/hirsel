@@ -44,7 +44,8 @@ struct State {
 struct Pending {
     token: u64,
     spare: usize,
-    secret: bool,
+    /// A secret read: the keys its line editor takes.
+    secret: Option<crate::stdin_secret::Keys>,
     outside: Outside,
 }
 
@@ -127,7 +128,7 @@ impl Stream {
         state.pending.push_back(Pending {
             token,
             spare: crate::stdin_secret::LINE_MAX + 2,
-            secret: true,
+            secret: Some(crate::stdin_secret::Keys::of(&saved)),
             outside: Outside::begin(),
         });
         drop(state);
@@ -135,10 +136,11 @@ impl Stream {
         Ok(armed)
     }
 
-    /// The bytes the helper read for the secret read `token`, once it has,
-    /// and not when they arrived after `deadline`. Delivering restores the
-    /// modes in `armed` before the read leaves the queue, so the flush has
-    /// discarded the rest of the line before a read behind it can start.
+    /// The line the helper edited for the secret read `token`, once it has
+    /// ended, and not when it ended after `deadline`. Delivering echoes the
+    /// Enter that ended it, then restores the modes in `armed` before the read
+    /// leaves the queue, so the flush has discarded input typed after the line
+    /// before a read behind it can start.
     pub(crate) fn take_secret(
         &self,
         token: u64,
@@ -162,6 +164,11 @@ impl Stream {
             return None;
         }
         let part = state.fragment.take()?;
+        if let (Ok(input), Ok(line)) = (&self.input, &part.result)
+            && line.last() == Some(&b'\n')
+        {
+            crate::term_restore::newline(input.as_raw_fd());
+        }
         armed.take();
         state.remove(token);
         drop(state);
@@ -219,8 +226,19 @@ impl Helper {
     }
 
     fn run(&self, input: &OwnedFd) {
+        // The secret line being edited, and the read it is for.
+        let mut editing: Option<(u64, crate::stdin_secret::Editor)> = None;
         loop {
             let mut state = self.state.lock().unwrap();
+            // A line whose read has ended without it is wiped before waiting.
+            if editing.as_ref().is_some_and(|(owner, _)| {
+                state
+                    .pending
+                    .front()
+                    .is_none_or(|first| first.token != *owner)
+            }) {
+                editing = None;
+            }
             while !state.closed && (state.pending.is_empty() || state.fragment.is_some()) {
                 state = self.work.wait(state).unwrap();
             }
@@ -284,7 +302,24 @@ impl Helper {
                 .pending
                 .front()
                 .is_some_and(|first| first.token == owner);
-            // A secret line whose read has ended is wiped, never kept as read-ahead.
+            // A secret read's bytes go to its line editor, and only the ended
+            // line is delivered. Bytes for a read that has ended are wiped,
+            // never kept as read-ahead.
+            let result = match (secret, result) {
+                (Some(_), _) if !owned => continue,
+                (Some(keys), Ok(typed)) => {
+                    if editing.as_ref().is_none_or(|(editor, _)| *editor != owner) {
+                        editing = Some((owner, crate::stdin_secret::Editor::new(keys)));
+                    }
+                    let (_, editor) = editing.as_mut().unwrap();
+                    if !editor.feed(&typed) {
+                        continue;
+                    }
+                    Ok(editing.take().unwrap().1.into_line())
+                }
+                (_, result) => result,
+            };
+            let secret = secret.is_some();
             if (!secret && result.as_ref().is_ok_and(|bytes| !bytes.is_empty())) || owned {
                 state.fragment = Some(Fragment {
                     owner,
@@ -437,7 +472,7 @@ unsafe fn step(request: *mut Request, token: u64, issue: bool) -> Step {
             state.pending.push_back(Pending {
                 token,
                 spare: request.buffer.capacity - request.buffer.len,
-                secret: false,
+                secret: None,
                 outside: Outside::begin(),
             });
         }

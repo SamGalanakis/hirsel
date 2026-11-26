@@ -12,6 +12,9 @@ pub(crate) fn errno() -> *mut libc::c_int {
     unsafe { libc::__error() }
 }
 
+/// The value of a terminal's special character that is switched off.
+pub(crate) const VDISABLE: libc::cc_t = libc::_POSIX_VDISABLE;
+
 fn owned(fd: libc::c_int) -> io::Result<OwnedFd> {
     if fd < 0 {
         return Err(io::Error::last_os_error());

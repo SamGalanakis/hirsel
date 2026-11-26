@@ -165,19 +165,33 @@ prompt.
   read are dropped when the modes change, and the mode change itself discards input typed
   before it (`TCSAFLUSH`), so typed-ahead input is discarded, as `getpass` does. The read
   leaves the helper's queue only once the modes are restored, so a `stdin.read` queued
-  behind it starts after that flush: it never sees the rest of an over-long line, or a line
-  typed while a timeout or a cancellation was ending the read.
-- **Modes.** Echo is cleared, and `ECHONL` and canonical input (`ICANON`) are set; the
-  signal characters and `ICRNL` are kept as the terminal had them. So the line is edited
-  as usual, even on a terminal left in non-canonical mode, Ctrl-C still signals, and the
-  terminal itself echoes the Enter as a newline. Nothing else is
-  written: no `Stderr` is needed.
+  behind it starts after that flush: it never sees any byte of the secret line, or a line
+  typed while a timeout or a cancellation was ending the read. Bytes the helper read after
+  the line's end are wiped with it.
+- **Modes.** Echo (`ECHO`, `ECHONL`), canonical input (`ICANON`) and the extended input
+  characters (`IEXTEN`) are cleared, and the terminal delivers each byte as it is typed
+  (`VMIN` 1, `VTIME` 0). The signal characters, flow control and `ICRNL` are kept as the
+  terminal had them, so Ctrl-C still signals and Enter still gives a newline. The line is
+  edited by the runtime, not by the host's line discipline, so the editing and the line
+  limit below are the same on every host: a canonical line stops at 1,023 bytes on Darwin
+  and 4,095 on Linux, and Darwin takes literal-next and discard without `ICANON` where
+  Linux does not. When Enter ends the line, the read writes one newline to the terminal
+  before the restore, as `ECHONL` would (output processing may make it `\r\n`); a
+  descriptor that refuses the write, such as one opened read-only, shows none. Nothing else
+  is written: no `Stderr` is needed.
+- **Editing.** The erase, kill and end-of-file keys are the terminal's own (`VERASE`,
+  `VKILL`, `VEOF`, from the modes before the call; a key the terminal has switched off does
+  nothing). Erase removes the last character: its last byte and, when that is a UTF-8
+  continuation byte, the bytes back to its lead byte, at most 4. Kill empties the line.
+  Every other byte, other control characters included, is part of the line.
 - **The line.** Bytes up to the first newline, with the newline and a `\r` before it
-  removed. End of input after some bytes (Ctrl-D mid-line) ends the line there. An empty
-  line is `Empty`. End of input before any byte is `Eof`. A line longer than 1024 bytes is
-  `TooLong`, and the rest of it is discarded when the modes are restored. 1024 is the
-  smallest canonical line limit of the supported hosts (Darwin's `MAX_CANON`; Linux allows
-  4095).
+  removed. The end-of-file key or end of input after some bytes ends the line there. An
+  empty line is `Empty`. The end-of-file key or end of input before any byte is `Eof`. A
+  line longer than 1024 bytes is `TooLong`, on every host. The read holds at most 1025
+  bytes of a line, so erase works up to that point; once a further byte has been typed and
+  dropped the line is `TooLong` whatever is erased after it, and only a kill starts it
+  afresh. The read still takes every byte up to Enter, so an over-long line ends at its
+  Enter and nothing of it reaches a later read.
 - **Restore.** The modes the terminal had before the call are put back before the call
   returns, whatever its result. They are also put back if the run ends while the read is
   pending: at the run's end, at a run stop (status 102, before `_exit`), and on the
@@ -226,18 +240,18 @@ prompt.
 
 ### Secret input laws
 
-All run natively on Linux on the slave of a pty from `openpty`, and each compares the
-pty's modes after the run with the modes before it. Darwin builds them and has no runner
-yet. Covered in `crates/hirsel-core-driver/src/secret_prompt_fixture.rs`.
+All run natively on the slave of a pty from `openpty`, on Linux and on Darwin, and each
+compares the pty's modes after the run with the modes before it. Covered in
+`crates/hirsel-core-driver/src/secret_prompt_fixture.rs`.
 
 | law | bug caught | verification setup |
 |---|---|---|
-| **A. The line becomes a secret and is not echoed** | echo left on, bytes copied into program memory, a missing or doubled newline, a read that keeps non-canonical mode | Type `hunter2` and Enter on the master. The program writes `hmac_sha256(secret, "data")` and the tag equals the value computed by hand. The master's output holds none of the typed bytes and exactly one newline. The same holds on a pty that starts in non-canonical mode, whose modes come back non-canonical. |
+| **A. The line becomes a secret and is not echoed** | echo left on, bytes copied into program memory, a missing or doubled newline, a read that returns a partial line, the host's editing in place of the runtime's | Type `hunter2` and Enter on the master. The program writes `hmac_sha256(secret, "data")` and the tag equals the value computed by hand. The master's output holds none of the typed bytes and exactly one newline. The same holds on a pty that starts in non-canonical mode, whose modes come back non-canonical. With the pty's own erase and kill keys, `hunzz`, two erases, `ter2`; `hunter2é` and one erase; and `wrong`, kill, `hunter2` each give the same tag, and 1100 bytes, 100 erases and Enter give `TooLong`. |
 | **B. Restored on a terminating signal** | a handler that dies without restoring, or no handler | With no `Process` grant, send `SIGINT`, `SIGTERM`, `SIGHUP` and `SIGQUIT` to a program blocked in the read. Each run dies by that signal and the modes are as before. |
 | **C. The stop relay keeps the first signal** | a handler that takes `SIGINT` from `host.stopped`, or a relay arm that dies without restoring | With `Process`, the first `SIGINT` completes `host.stopped`, the program cancels the read and gets `Aborted`, and the modes are restored. A program that ignores `host.stopped` and gets `SIGINT` until it dies is restored too. |
 | **D. Restored after a timeout and a run stop** | a deadline or `_exit(102)` path that skips the restore | `until` 200 ms ahead gives `TimedOut` with the modes restored. A run stop during the read exits 102 with the modes restored. |
 | **E. `SIGTTOU` during restore** | a restore that stops the process instead of restoring | The test is the pty's session leader and starts the program in its own foreground group. Once the program is blocked in the read, the test makes its own group the foreground one and sends `SIGTERM`. The modes are restored and the program dies by `SIGTERM`, not stopped. |
 | **E2. A background read changes nothing** | arming that blocks `SIGTTOU` and turns echo off under the foreground, or a handler that restores a change never made | The program starts in a background group of the pty's session and calls `read_secret`. It is stopped by `SIGTTOU` with the modes unchanged. The test changes a mode, then sends `SIGTERM` and `SIGCONT`: the program dies by `SIGTERM` and the test's change stays. |
 | **F. The recording holds no secret** | a recorded line, length or length-dependent charge | Record two runs that type secrets of different lengths: neither tape holds the typed bytes, and their `STDIN_SECRET` frames are identical. A replay on pipes ends `Sealed`. |
-| **H. Nothing reaches a read queued behind** | a read that leaves the queue before the restore's flush | A task's `stdin.read` is queued behind the secret read, and the test stops the terminal's output (Ctrl-S) behind a pending write, so each restore waits in its drain. Typing 1100 bytes and Enter gives `TooLong`; a line typed after `until` passes gives `TimedOut`; one typed after a cancellation gives `Aborted`. After Ctrl-Q, the queued read gets only the line typed next. |
+| **H. Nothing reaches a read queued behind** | a read that leaves the queue before the restore's flush | A task's `stdin.read` is queued behind the secret read, and the test stops the terminal's output (Ctrl-S) behind a pending write, so each restore waits in its drain. Typing 1100 bytes and Enter gives `TooLong`, on Darwin as on Linux; 1100 bytes, kill and `hunter2` gives the secret; a line typed after `until` passes gives `TimedOut`; one typed after a cancellation gives `Aborted`. After Ctrl-Q, the queued read gets only the line typed next. |
 | **G. Not a terminal** | an echoing fallback, or a check that consumes input | With stdin on a pipe holding `abc`, the call gives `NotTerminal` and a following `stdin.read` reads `abc`. |

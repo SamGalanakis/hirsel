@@ -14,8 +14,8 @@ use hirsel_core_net::secret_aead::SecretBytes;
 use std::{ptr, sync::Arc};
 use zeroize::Zeroizing;
 
-/// The longest line accepted: Darwin's `MAX_CANON`, the smallest canonical
-/// line limit of the supported hosts.
+/// The longest line accepted, on every host: the read is non-canonical, so no
+/// host line limit applies.
 pub(crate) const LINE_MAX: usize = 1024;
 const EMPTY: u8 = 3;
 const TOO_LONG: u8 = 4;
@@ -32,6 +32,99 @@ pub(crate) struct SecretRequest {
     deadline: u64,
     armed: Option<Armed>,
     line: Option<Zeroizing<Vec<u8>>>,
+}
+
+/// The keys that edit a secret line, taken from the terminal's modes before
+/// the read; a key the terminal has switched off is `None`.
+#[derive(Clone, Copy)]
+pub(crate) struct Keys {
+    erase: Option<u8>,
+    kill: Option<u8>,
+    eof: Option<u8>,
+}
+
+impl Keys {
+    pub(crate) fn of(modes: &libc::termios) -> Self {
+        let key = |n: usize| Some(modes.c_cc[n]).filter(|&c| c != crate::host::sys::VDISABLE);
+        Self {
+            erase: key(libc::VERASE),
+            kill: key(libc::VKILL),
+            eof: key(libc::VEOF),
+        }
+    }
+}
+
+/// The line editor a secret read runs over the terminal's non-canonical
+/// input, the same on every host. It holds at most `LINE_MAX + 1` bytes and a
+/// newline, in storage allocated once and wiped as it shrinks, so no copy of
+/// a typed byte outlives the read.
+pub(crate) struct Editor {
+    keys: Keys,
+    line: Zeroizing<Vec<u8>>,
+    /// A byte past `LINE_MAX + 1` was typed and dropped: the line is TooLong
+    /// until a kill, whatever is erased.
+    lost: bool,
+}
+
+impl Editor {
+    pub(crate) fn new(keys: Keys) -> Self {
+        Self {
+            keys,
+            line: Zeroizing::new(Vec::with_capacity(LINE_MAX + 2)),
+            lost: false,
+        }
+    }
+
+    /// Takes the bytes the terminal delivered, and answers true once the line
+    /// has ended: at a newline, which the line keeps, at the end-of-file key, or
+    /// at end of input (`typed` empty). Bytes after the end are not kept.
+    pub(crate) fn feed(&mut self, typed: &[u8]) -> bool {
+        if typed.is_empty() {
+            return true;
+        }
+        for &byte in typed {
+            if byte == b'\n' {
+                self.line.push(byte);
+                return true;
+            }
+            if Some(byte) == self.keys.eof {
+                return true;
+            }
+            if Some(byte) == self.keys.erase {
+                if !self.lost {
+                    self.erase();
+                }
+            } else if Some(byte) == self.keys.kill {
+                zeroize::Zeroize::zeroize(&mut *self.line);
+                self.lost = false;
+            } else if self.line.len() <= LINE_MAX {
+                self.line.push(byte);
+            } else {
+                self.lost = true;
+            }
+        }
+        false
+    }
+
+    /// Removes the last character: its last byte and, when that is a UTF-8
+    /// continuation byte, the bytes back to its lead byte (at most 4 in all).
+    fn erase(&mut self) {
+        for n in 1..=4 {
+            let Some(last) = self.line.last_mut() else {
+                return;
+            };
+            let byte = std::mem::take(last);
+            self.line.pop();
+            if byte & 0xc0 != 0x80 || n == 4 {
+                return;
+            }
+        }
+    }
+
+    /// The line as it ended: its bytes, then the newline if one ended it.
+    pub(crate) fn into_line(self) -> Zeroizing<Vec<u8>> {
+        self.line
+    }
 }
 
 fn done(outcome: Outcome) -> Step {

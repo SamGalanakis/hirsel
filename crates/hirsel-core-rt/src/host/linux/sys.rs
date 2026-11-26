@@ -12,6 +12,10 @@ pub(crate) fn errno() -> *mut libc::c_int {
     unsafe { libc::__errno_location() }
 }
 
+/// The value of a terminal's special character that is switched off (glibc's
+/// `_POSIX_VDISABLE`, which the libc crate does not name on Linux).
+pub(crate) const VDISABLE: libc::cc_t = 0;
+
 /// A one-way wakeup a writer posts and one reader takes: an eventfd, whose
 /// single descriptor is both ends.
 pub(crate) struct Notice(OwnedFd);

@@ -103,14 +103,31 @@ pub(crate) fn arm(fd: i32, saved: &libc::termios) -> Result<Armed, ArmError> {
     Ok(armed)
 }
 
-/// The modes a read sets over `saved`: canonical input, so a terminal left
-/// in non-canonical mode still gives a whole line, with echo off and the
-/// newline still echoed.
+/// The modes a read sets over `saved`: echo off, and non-canonical input a
+/// byte at a time, so the runtime edits the line itself and no host line limit
+/// or host line editing applies. `ECHONL` is off because Linux ignores it
+/// without `ICANON` and Darwin does not, and `IEXTEN` because Darwin still
+/// takes literal-next and discard without `ICANON` and Linux does not; the
+/// read echoes the Enter itself ([`newline`]).
 fn quiet(saved: &libc::termios) -> libc::termios {
     let mut quiet = *saved;
-    quiet.c_lflag &= !libc::ECHO;
-    quiet.c_lflag |= libc::ECHONL | libc::ICANON;
+    quiet.c_lflag &= !(libc::ECHO | libc::ECHONL | libc::ICANON | libc::IEXTEN);
+    quiet.c_cc[libc::VMIN] = 1;
+    quiet.c_cc[libc::VTIME] = 0;
     quiet
+}
+
+/// Echoes the Enter that ended a secret line, as `ECHONL` would: one newline,
+/// which the terminal's output processing may write as `\r\n`. `SIGTTOU` is
+/// blocked as for a restore. A descriptor that refuses the write, such as one
+/// opened read-only, writes nothing.
+pub(crate) fn newline(fd: i32) {
+    ttou_blocked(|| {
+        // SAFETY: one byte from a static, to a live descriptor.
+        while unsafe { libc::write(fd, b"\n".as_ptr().cast(), 1) } < 0
+            && unsafe { *crate::host::sys::errno() } == libc::EINTR
+        {}
+    });
 }
 
 /// At a stream's end: restore and disarm a read still armed on `fd`.
@@ -190,17 +207,24 @@ fn saved() -> Option<(i32, libc::termios, libc::termios)> {
 /// `tcsetattr` with `SIGTTOU` blocked, so a process moved to the background
 /// during the read restores instead of stopping. Async-signal-safe.
 fn set(fd: i32, action: i32, termios: &libc::termios) {
-    // SAFETY: valid signal sets on this thread, a live descriptor and an
-    // initialized termios.
+    ttou_blocked(|| {
+        // SAFETY: a live descriptor and an initialized termios.
+        while unsafe { libc::tcsetattr(fd, action, termios) } != 0
+            && unsafe { *crate::host::sys::errno() } == libc::EINTR
+        {}
+    });
+}
+
+/// Runs `f` with `SIGTTOU` blocked on this thread. Async-signal-safe.
+fn ttou_blocked(f: impl FnOnce()) {
+    // SAFETY: valid signal sets on this thread.
     unsafe {
         let mut block = std::mem::zeroed();
         let mut kept = std::mem::zeroed();
         libc::sigemptyset(&mut block);
         libc::sigaddset(&mut block, libc::SIGTTOU);
         libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut kept);
-        while libc::tcsetattr(fd, action, termios) != 0 && *crate::host::sys::errno() == libc::EINTR
-        {
-        }
+        f();
         libc::pthread_sigmask(libc::SIG_SETMASK, &kept, ptr::null_mut());
     }
 }

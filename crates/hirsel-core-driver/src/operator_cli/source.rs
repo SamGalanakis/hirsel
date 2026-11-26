@@ -1,6 +1,6 @@
 //! `--source DIR`: a deploy or registration that sends a source tree by content (launch.md
 //! "Source by content").
-use super::{Approvals, Error, Upload, approvals, grant, hex};
+use super::{Approvals, Error, Upload, approvals, grant};
 use crate::operator::Input;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -48,7 +48,7 @@ impl Source {
             let blob = self.blobs.get(digest).ok_or_else(|| {
                 format!(
                     "the host asked for a blob {} the source does not hold",
-                    hex(digest)
+                    hirsel_core_ids::hex::encode(digest)
                 )
             })?;
             out.extend_from_slice(blob);

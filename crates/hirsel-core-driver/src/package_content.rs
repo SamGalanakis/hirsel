@@ -140,41 +140,19 @@ impl Root {
     pub(crate) fn parse(text: &str) -> Option<Self> {
         Some(Self(parse_digest(text.strip_prefix("sha256:")?)?))
     }
-
-    pub(crate) fn hex(self) -> String {
-        hex(&self.0)
-    }
 }
 
 impl fmt::Display for Root {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "sha256:{}", self.hex())
+        write!(f, "sha256:{}", ContentHash(self.0))
     }
 }
 
 pub(crate) fn parse_digest(text: &str) -> Option<[u8; 32]> {
-    if text.len() != 64 {
+    if text.len() != 64 || text.bytes().any(|byte| byte.is_ascii_uppercase()) {
         return None;
     }
-    let mut bytes = [0; 32];
-    let digit = |b: u8| match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        _ => None,
-    };
-    for (slot, pair) in bytes.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
-        *slot = digit(pair[0])? * 16 + digit(pair[1])?;
-    }
-    Some(bytes)
-}
-
-pub(crate) fn hex(digest: &[u8; 32]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        write!(out, "{byte:02x}").unwrap();
-    }
-    out
+    hirsel_core_ids::hex::decode(text)?.try_into().ok()
 }
 
 #[derive(Clone)]

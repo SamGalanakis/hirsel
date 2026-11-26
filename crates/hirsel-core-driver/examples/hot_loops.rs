@@ -65,7 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fs::copy(&obj.path, &path)?;
             paths.push(path);
             if obj.instance.definition == entry {
-                names.insert(name.into(),serde_json::json!({"symbol":format!("h{}",obj.instance.digest().0.iter().map(|b|format!("{b:02x}")).collect::<String>()),"objects":[]}));
+                names.insert(
+                    name.into(),
+                    serde_json::json!({"symbol":format!("h{}",obj.instance.digest()),"objects":[]}),
+                );
             }
         }
         names.get_mut(name).unwrap()["objects"] = serde_json::json!(paths);

@@ -195,10 +195,7 @@ fn recorded(path: &Path, store: &Store) -> io::Result<RecipeFile> {
         "hirsel.host-tool-revision.v2",
         [crate::encode(&path)?.as_slice()],
     );
-    let selection = format!(
-        "tool-{}",
-        key.0.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    );
+    let selection = format!("tool-{key}");
     let previous = store
         .selection(&selection)?
         .map(|hash| store.get(hash))
@@ -809,7 +806,7 @@ impl CaptureEnvironment {
                 crate::encode(&(variables, &self.directory, self.umask))?.as_slice(),
             ],
         );
-        Ok(hash.0.iter().map(|b| format!("{b:02x}")).collect())
+        Ok(hash.to_string())
     }
 
     fn command(&self, program: impl AsRef<OsStr>) -> Command {
@@ -1485,7 +1482,7 @@ fn driver_file_key(path: &Path) -> io::Result<String> {
             &std::fs::read(path)?,
         ],
     );
-    Ok(hash.0.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hash.to_string())
 }
 
 fn is_c_source(path: &str) -> bool {

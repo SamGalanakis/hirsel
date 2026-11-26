@@ -23,7 +23,7 @@ mod source_laws;
 pub(crate) mod spawn;
 mod stores;
 
-use hirsel_core_ids::launch::LAUNCH_IMAGE_ENV;
+use hirsel_core_ids::{hex, launch::LAUNCH_IMAGE_ENV};
 use ready::{CHANGE, NONE, READ, Readiness, ReadyEvent, WRITE, Watch};
 
 use session::{
@@ -484,10 +484,6 @@ fn pipe() -> io::Result<(File, OwnedFd)> {
     Ok((File::from(read), write))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 impl<I: Images> Launcher<I> {
     /// A launcher over `state`, which it locks before it opens its objects with `open`;
     /// `state/scratch` holds each group's private scratch and export directories.
@@ -581,7 +577,7 @@ impl<I: Images> Launcher<I> {
     pub(crate) fn scratch_of(&self, group: &Group) -> PathBuf {
         self.scratch.join(format!(
             "{}-{}",
-            hex(group.name.as_bytes()),
+            hex::encode(group.name.as_bytes()),
             group.incarnation
         ))
     }
@@ -1068,7 +1064,7 @@ impl<I: Images> Launcher<I> {
                 if let Some(recording) = &launch.recording {
                     command
                         .env("HIRSEL_RECORD", &recording.destination)
-                        .env("HIRSEL_RECORD_ID", hex(&recording.id));
+                        .env("HIRSEL_RECORD_ID", hex::encode(&recording.id));
                 }
                 let (ours, theirs) = UnixStream::pair()?;
                 let (read, write) = pipe()?;
@@ -1108,7 +1104,11 @@ impl<I: Images> Launcher<I> {
                     .arg(&n_place)
                     .arg("--hirsel-prepare")
                     .arg(&path)
-                    .args([hex(&attempt.bytes()), hex(&image.digest), hex(&fates)]);
+                    .args([
+                        hex::encode(&attempt.bytes()),
+                        hex::encode(&image.digest),
+                        hex::encode(&fates),
+                    ]);
                 triggers = Some((path.join("TRIGGERS"), image.n_place));
             }
             Mode::Install(_, kind) => {
@@ -1159,7 +1159,7 @@ impl<I: Images> Launcher<I> {
                 let slot = spawn::IMAGE_FD;
                 slots.push((above_launch_slots(file.as_raw_fd())?, slot));
                 let parent = std::process::id();
-                let digest = hex(&image.digest);
+                let digest = hex::encode(&image.digest);
                 command.env(LAUNCH_IMAGE_ENV, format!("{parent}:{slot}:{digest}"));
             }
             #[cfg(test)]

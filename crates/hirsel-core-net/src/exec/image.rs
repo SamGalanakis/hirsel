@@ -78,7 +78,7 @@ impl Policy {
                 "exec: {}: image {}, sha256 {}, interpreter {}, policy {}\n",
                 field(&name),
                 field(&spec.image),
-                hex(&spec.pin),
+                hirsel_core_ids::hex::encode(&spec.pin),
                 image.interpreter.as_deref().map_or_else(
                     || "none".to_owned(),
                     |path| path
@@ -88,19 +88,10 @@ impl Policy {
                         .map(char::from)
                         .collect(),
                 ),
-                hex(&self.digest),
+                hirsel_core_ids::hex::encode(&self.digest),
             ));
             profiles.insert(name, PinnedProfile { spec, image });
         }
         Ok((profiles, lines))
     }
-}
-
-pub fn hex(bytes: &[u8; 32]) -> String {
-    use std::fmt::Write;
-    let mut text = String::with_capacity(64);
-    for byte in bytes {
-        write!(text, "{byte:02x}").unwrap();
-    }
-    text
 }

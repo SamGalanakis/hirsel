@@ -606,11 +606,10 @@ fn names(root: &Path, directory: &str) -> Vec<ContentHash> {
 }
 
 fn record_path(signer: ContentHash, key: ContentHash) -> String {
-    let hex = crate::request::hex;
-    format!("r/{}/{}", hex(signer), hex(key))
+    format!("r/{signer}/{key}")
 }
 fn blob_path(address: ContentHash) -> String {
-    format!("o/{}", crate::request::hex(address))
+    format!("o/{address}")
 }
 
 impl Records {

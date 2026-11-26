@@ -740,6 +740,7 @@ dependencies = [
  "argon2",
  "base64",
  "base64ct",
+ "hirsel-core-ids",
  "hirsel-guard",
  "io-uring",
  "libc",
@@ -905,6 +906,7 @@ version = "0.1.0"
 dependencies = [
  "addr2line",
  "gimli",
+ "hirsel-core-ids",
  "hirsel-guard",
  "libc",
  "object",

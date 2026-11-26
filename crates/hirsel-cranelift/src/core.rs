@@ -459,7 +459,7 @@ fn emit(
     // holds each once and the resident link can place an edited static's
     // section by it (incremental_link::locate). A rebuilt object renames
     // them at the same length.
-    let unit: String = object_key.0.iter().map(|b| format!("{b:02x}")).collect();
+    let unit = object_key.to_string();
     for (i, data) in input.statics.iter().enumerate() {
         let id = object
             .declare_data(

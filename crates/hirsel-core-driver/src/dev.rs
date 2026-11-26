@@ -381,10 +381,6 @@ fn stopped() -> bool {
     STOP.load(Ordering::Relaxed)
 }
 
-fn digest_text(digest: &[u8; 32]) -> String {
-    digest.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 struct Supervisor<'a> {
     options: &'a Options,
     directory: &'a directory::Directory,
@@ -487,8 +483,8 @@ impl Supervisor<'_> {
     fn pending(&self, pending: Pending, detail: impl std::fmt::Display) {
         eprintln!(
             "hirsel dev: recovery pending: NEW {}, OLD {}: {detail}",
-            digest_text(&pending.new.identity),
-            digest_text(&pending.predecessor)
+            hirsel_core_ids::hex::encode(&pending.new.identity),
+            hirsel_core_ids::hex::encode(&pending.predecessor)
         );
     }
 

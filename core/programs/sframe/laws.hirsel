@@ -1,20 +1,7 @@
 // Laws for docs/spec/sframe.md (SFRAME-14). Inputs are built here from the RFCs and codec
 // specs, not with the code under test; oracle.py gives the generated vectors.
-fn nibble(c: u8) -> u8 {
-    if c >= b'a' {
-        c - b'a' + 10u8
-    } else {
-        c - b'0'
-    }
-}
-
 fn unhex(s: String) -> Bytes {
-    let hex = string.as_bytes(s)
-    let mut out: Bytes = list.with_capacity(list.len(hex) / 2)
-    for i in 0u64 .. list.len(hex) / 2 {
-        list.push(mut out, nibble(hex[2 * i]) * 16u8 + nibble(hex[2 * i + 1]))
-    }
-    out
+    option.unwrap(std.hex.decode(string.as_bytes(s)))
 }
 
 fn check(ok: bool, take what: String) {

@@ -298,7 +298,7 @@ impl Printer {
         for (i, s) in m.statics.iter().enumerate() {
             match s {
                 Static::Bytes { align, bytes } => {
-                    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    let hex = hirsel_core_ids::hex::encode(bytes);
                     self.line(&format!("static d{i} = align {align} hex {hex}"));
                 }
                 Static::Aggregate { ty, value } => {
@@ -341,8 +341,7 @@ impl Printer {
         for (i, f) in m.functions.iter().enumerate() {
             let mut head = format!("fn f{i} = n{} g{}", f.instance.0, f.signature.0);
             if let Some(hash) = m.code_variants.get(&FuncId(i as u32)) {
-                let hex: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
-                head += &format!(" code {hex}");
+                head += &format!(" code {hash}");
             }
             if f.versioned {
                 head += " versioned";

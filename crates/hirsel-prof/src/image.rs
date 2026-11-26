@@ -215,8 +215,8 @@ impl Image {
             .collect();
         Ok(Self {
             remarks,
-            build_id: file.build_id()?.map(hex),
-            digest: hex(&Sha256::digest(bytes)),
+            build_id: file.build_id()?.map(hirsel_core_ids::hex::encode),
+            digest: hirsel_core_ids::hex::encode(&Sha256::digest(bytes)),
             unwind,
             main,
             dwarf,
@@ -367,15 +367,6 @@ fn definition_name(unit: UnitRef<'_, Reader>, offset: UnitOffset<usize>) -> Resu
             _ => return Ok(None),
         }
     }
-}
-
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut result = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(&mut result, "{byte:02x}").expect("writing to String");
-    }
-    result
 }
 
 pub(crate) fn host_fiber_invocation(name: &str) -> bool {

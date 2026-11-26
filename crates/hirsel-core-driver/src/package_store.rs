@@ -41,8 +41,11 @@ impl PackageStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Entry::Missing),
             Err(error) => return Err(error),
         };
-        let (bytes, _) = match walk(&directory, Path::new(&root.hex()))
-            .and_then(|file| file.read_vec(CONTENT_LIMIT))
+        let (bytes, _) = match walk(
+            &directory,
+            Path::new(&hirsel_core_ids::hex::encode(&root.0)),
+        )
+        .and_then(|file| file.read_vec(CONTENT_LIMIT))
         {
             Ok(captured) => captured,
             Err(WalkError::Missing) => return Ok(Entry::Missing),
@@ -64,7 +67,10 @@ impl PackageStore {
     pub(crate) fn install(&self, archive: &PackageArchive) -> io::Result<()> {
         fs::create_dir_all(&self.path)?;
         for (root, library) in &archive.entries {
-            crate::fs::atomic_write(&self.path.join(root.hex()), &library.encoded)?;
+            crate::fs::atomic_write(
+                &self.path.join(hirsel_core_ids::hex::encode(&root.0)),
+                &library.encoded,
+            )?;
         }
         Ok(())
     }
@@ -72,7 +78,7 @@ impl PackageStore {
     pub(crate) fn install_entry(&self, root: Root, encoded: &[u8]) -> io::Result<bool> {
         fs::create_dir_all(&self.path)?;
         let directory = open_directory(&self.path)?;
-        let name = root.hex();
+        let name = hirsel_core_ids::hex::encode(&root.0);
         if let Ok((mut file, _)) =
             walk(&directory, Path::new(&name)).and_then(|entry| entry.reader())
         {

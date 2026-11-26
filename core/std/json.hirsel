@@ -558,9 +558,9 @@ fn next_quote_escape(b: Bytes, start: u64, end: u64) -> u64 {
     end
 }
 
-// Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079: copy runs
-// between ASCII escapes. Each cut is a UTF-8 boundary, including after an escape.
-fn push_quoted(mut s: String, value: String) {
+// Copy runs between ASCII escapes as in Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079.
+/// Appends a JSON string, including quotes. Fails: Capacity.
+pub fn push_quoted(mut s: String, value: String) {
     string.push(mut s, "\"")
     let b = string.as_bytes(value)
     let end = list.len(b)

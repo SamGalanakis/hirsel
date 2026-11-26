@@ -97,7 +97,7 @@ fn schema_count(plan: json.JsonPlan, id: u64, mut shared: Bytes) {
 }
 
 fn schema_key(mut text: String, name: String) {
-    push_quoted(mut text, name)
+    json.push_quoted(mut text, name)
     string.push(mut text, ":")
 }
 
@@ -111,7 +111,7 @@ fn schema_description(mut w: SchemaWriter, separator: String) {
     if let Some(take description) = map.remove(mut w.descriptions, w.path) {
         string.push(mut w.text, separator)
         string.push(mut w.text, "\"description\":")
-        push_quoted(mut w.text, description)
+        json.push_quoted(mut w.text, description)
     }
 }
 
@@ -240,7 +240,7 @@ fn schema_record(plan: json.JsonPlan, id: u64, fields: List[json.Field], mut w: 
             string.push(mut w.text, ",")
         }
         first = false
-        push_quoted(mut w.text, field.name)
+        json.push_quoted(mut w.text, field.name)
     }
     string.push(mut w.text, "]")
 }
@@ -252,10 +252,10 @@ fn schema_variant(plan: json.JsonPlan, name: String, fields: List[u64], branch_i
     let width = list.len(fields)
     if width == 0 {
         string.push(mut w.text, "{\"const\":")
-        push_quoted(mut w.text, name)
+        json.push_quoted(mut w.text, name)
     } else {
         string.push(mut w.text, "{\"type\":\"object\",\"additionalProperties\":false,\"required\":[")
-        push_quoted(mut w.text, name)
+        json.push_quoted(mut w.text, name)
         string.push(mut w.text, "],\"properties\":{")
         schema_key(mut w.text, name)
         let branch = string.byte_len(w.path)
@@ -312,7 +312,7 @@ fn schema_atom(profile: json.Profile, op: u8, mut w: SchemaWriter) {
             string.push(mut pattern, ")")
         }
         string.push(mut pattern, ")(?![\\s\\S])")
-        push_quoted(mut w.text, pattern)
+        json.push_quoted(mut w.text, pattern)
         return
     }
     let keywords = match op {
@@ -371,12 +371,6 @@ fn schema_decimal_patterns(limit: String, mut pattern: String) {
         }
     }
     string.push(mut pattern, limit)
-}
-
-fn push_quoted(mut output: String, value: String) {
-    json.write(mut output, false, fn(w: json.Writer) {
-        json.write_string_value(w, value)
-    })
 }
 
 pub fn pointer_token(mut path: String, name: String) {

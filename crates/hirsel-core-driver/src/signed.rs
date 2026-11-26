@@ -146,7 +146,7 @@ impl Store {
     /// Where the record `signer` signed under `key` is kept:
     /// `signed/<signer>/<shard>/<rest>` of this content store.
     pub(crate) fn signed_path(&self, signer: ContentHash, key: ContentHash) -> std::path::PathBuf {
-        let signer = crate::request::hex(signer);
+        let signer = signer.to_string();
         self.named(&format!("{}/{signer}", collect::REMOTE), key)
     }
     /// The record of `kind` under `key` kept here, signed by one of

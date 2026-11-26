@@ -529,7 +529,7 @@ fn a_user_package_named_runner_is_not_a_place() {
 
 #[test]
 fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
-    use crate::package_content::{archive_digest, hex};
+    use crate::package_content::archive_digest;
     use hirsel_core_net::exec::{PinnedImage, Request};
     use std::io::Read;
     use std::os::fd::AsFd;
@@ -563,7 +563,7 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     executable[152..160].copy_from_slice(&(loader.len() as u64).to_le_bytes());
     executable[176..176 + loader.len()].copy_from_slice(loader);
     std::fs::write(&image, executable).unwrap();
-    let pin = hex(&archive_digest(&executable));
+    let pin = hirsel_core_ids::hex::encode(&archive_digest(&executable));
     let policy = format!(
         "[git]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"git\"\nargs = [[\"status\"]]\nenv = {{ LANG = \"C.UTF-8\" }}\ndirs = {{ work = {:?} }}\n",
         image.to_str().unwrap(),
@@ -579,7 +579,7 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
         [format!(
             "exec: git: image {}, sha256 {pin}, interpreter /oracle/loader, policy {}\n",
             image.display(),
-            hirsel_core_net::exec::hex(&expected),
+            hirsel_core_ids::hex::encode(&expected),
         )]
     );
     std::fs::write(&profile, format!("# comment\n{policy}")).unwrap();
@@ -639,7 +639,7 @@ fn exec_startup_binds_the_policy_and_keeps_the_sealed_image() {
     );
     std::fs::write(
         &profile,
-        policy.replace(&pin, &hex(&archive_digest(b"#!/bin/sh\n"))),
+        policy.replace(&pin, &hirsel_core_ids::hex::encode(&archive_digest(b"#!/bin/sh\n"))),
     )
     .unwrap();
     let script = request.load().unwrap();

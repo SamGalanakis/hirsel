@@ -301,7 +301,7 @@ pub fn register<'a>(
             .to_owned(),
     );
     for (flavour, (bytes, target)) in runtimes {
-        let hash = hex(ContentHash::of_bytes(bytes));
+        let hash = ContentHash::of_bytes(bytes).to_string();
         let relative = Path::new("runtime")
             .join(target)
             .join(hash)
@@ -323,10 +323,6 @@ pub fn register<'a>(
     }
     registration.write(&root)
 }
-fn hex(hash: ContentHash) -> String {
-    hash.0.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 pub const DOCS_URL: &str = "https://hirsel.ai";
 pub const REPOSITORY_URL: &str = "https://github.com/SamGalanakis/hirsel";
 
@@ -368,7 +364,7 @@ pub(crate) fn print_version() -> io::Result<()> {
     let installed = Installed::discover(&executable)?;
     let compiler = crate::reuse::compiler_identity();
     println!("hirsel {}", version());
-    println!("compiler {}", hex(compiler));
+    println!("compiler {compiler}");
     println!("docs {DOCS_URL}");
     if let Some(installed) = installed {
         for ((flavour, target), archive) in &installed.registration.runtimes {
@@ -463,7 +459,7 @@ pub fn environment(
     for name in ["core", "std"] {
         let directory = PackageProduct::cache_directory(cache, name == "std")?;
         let image = if directory.is_dir() {
-            CoreImage::open(&directory)?.map(|image| hex(image.identity))
+            CoreImage::open(&directory)?.map(|image| image.identity.to_string())
         } else {
             None
         };

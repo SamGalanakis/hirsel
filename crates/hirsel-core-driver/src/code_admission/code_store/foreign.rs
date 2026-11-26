@@ -13,7 +13,7 @@ fn foreign_archive_objects_follow_grant_inventory_and_raw_pins() {
     let store = CodeStore::new(local.path());
     let archive = store.put(ObjectKind::ForeignArchive, b"abc").unwrap();
     assert_eq!(
-        crate::call::hex(&archive.hash.0),
+        archive.hash.to_string(),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
     let mut fixture = Fixture::new("entry");

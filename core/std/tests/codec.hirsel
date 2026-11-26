@@ -2,14 +2,6 @@
 // hand from the format in the module header (little-endian, u32 counts and tags), never
 // taken from an encode. A decode error reads as kind * 1000 + offset: 1 Truncated,
 // 2 Invalid, 3 Utf8, 4 Duplicate, 5 Trailing, 6 Schema, 7 Value; 0 is success.
-fn nibble(x: u8) -> u8 {
-    if x >= 97 {
-        x - 87
-    } else {
-        x - 48
-    }
-}
-
 // Shared with codec.mjs through std_native.py's default TypeScript partner.
 // The default law still tests the Hirsel encoder against hand-derived bytes.
 // expect: run ts_codec_vectors() = true
@@ -88,18 +80,7 @@ pub fn ts_hirsel_differential() -> bool {
 
 // Bytes from hex digits; spaces are ignored.
 fn unhex(s: String) -> Bytes {
-    let raw = string.as_bytes(s)
-    let mut b: Bytes = list.new()
-    let mut i: u64 = 0
-    while i < list.len(raw) {
-        if raw[i] == 32 {
-            i += 1
-        } else {
-            list.push(mut b, nibble(raw[i]) * 16 + nibble(raw[i + 1]))
-            i += 2
-        }
-    }
-    take b
+    option.unwrap(hex.decode(string.as_bytes(string.replace(s, " ", ""))))
 }
 
 fn enc[T](c: codec.Codec[T], x: T) -> Bytes {

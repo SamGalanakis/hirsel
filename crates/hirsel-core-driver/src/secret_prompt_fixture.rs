@@ -479,7 +479,7 @@ fn a_line_becomes_a_secret_and_is_not_echoed() {
         type_on(&master, b"hunter2\n");
         let (status, err, written) = finish_on(child, &master);
         assert!(status.success(), "{backend:?}: {status} {err}");
-        let tag: String = built.out().iter().map(|b| format!("{b:02x}")).collect();
+        let tag = hirsel_core_ids::hex::encode(&built.out());
         assert_eq!(tag, HUNTER2_TAG, "{backend:?}");
         // ECHONL echoes the Enter; output processing makes it "\r\n".
         assert_eq!(written, b"\r\n", "{backend:?}");
@@ -507,7 +507,7 @@ fn a_line_becomes_a_secret_and_is_not_echoed() {
     type_on(&master, b"unter2\n");
     let (status, err, written) = finish_on(child, &master);
     assert!(status.success(), "{status} {err}");
-    let tag: String = built.out().iter().map(|b| format!("{b:02x}")).collect();
+    let tag = hirsel_core_ids::hex::encode(&built.out());
     assert_eq!(tag, HUNTER2_TAG, "non-canonical");
     assert_eq!(written, b"\r\n", "non-canonical");
     assert_eq!(modes(&slave), before, "non-canonical");
@@ -549,10 +549,7 @@ fn a_line_becomes_a_secret_and_is_not_echoed() {
         assert!(status.success(), "{case}: {status} {err}");
         let out = built.out();
         let got = if out.len() == 32 {
-            out.iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-                .into_bytes()
+            hirsel_core_ids::hex::encode(&out).into_bytes()
         } else {
             out
         };

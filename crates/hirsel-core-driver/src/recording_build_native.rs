@@ -1370,7 +1370,7 @@ fn cli_tls_replay(with_secret: bool) {
         random.read_exact(&mut raw).unwrap();
         random.read_exact(&mut file_bytes).unwrap();
     }
-    let token = crate::call::hex(&raw);
+    let token = hirsel_core_ids::hex::encode(&raw);
     let expected_request = if with_secret {
         [
             b"before:",
@@ -1487,7 +1487,7 @@ fn cli_tls_replay(with_secret: bool) {
     };
     let net = format!(
         "Net=Connect 127.0.0.1/32 {port}-{port};Tls *.test {port}-{port} System;Tls alpha.test {port}-{port} Roots=sha256:{}",
-        crate::package_content::hex(&crate::package_content::archive_digest(CA))
+        hirsel_core_ids::hex::encode(&crate::package_content::archive_digest(CA))
     );
     let mut grants = vec!["--grant", &net, "--grant", "Stdout", "--record", tape_path];
     let file = dir.path().join("local-credential");
@@ -1569,7 +1569,7 @@ fn cli_tls_replay(with_secret: bool) {
         ] {
             for form in [
                 bytes,
-                crate::call::hex(bytes).as_bytes(),
+                hirsel_core_ids::hex::encode(bytes).as_bytes(),
                 crate::call::base64(bytes).as_bytes(),
             ] {
                 for output in outputs {
@@ -3203,7 +3203,7 @@ pub fn main(c: Cred, i: Stdin, out: Stdout) -> Result[(), Exit] waits {
     for sts in [false, true] {
         let (hits, mac) = run(sts, b"IQoJb3JpZ2luX2VjEXAMPLETOKEN");
         assert_eq!(hits, 1, "the fetched key outside its sealed store (sts: {sts})");
-        assert_eq!(crate::call::hex(&mac), MAC_OF_X);
+        assert_eq!(hirsel_core_ids::hex::encode(&mac), MAC_OF_X);
         let (hits, _) = run(sts, KEY);
         assert!(hits >= 2, "the scan missed a key in a program String: {hits} (sts: {sts})");
     }
@@ -3285,7 +3285,7 @@ pub fn main(c: Cred, out: Stdout) -> Result[(), Exit] waits {
     assert!(holds(b"ASIAEXAMPLE") && holds(TOKEN), "the delivery keeps the public fields");
     for form in [
         KEY,
-        crate::call::hex(KEY).as_bytes(),
+        hirsel_core_ids::hex::encode(KEY).as_bytes(),
         crate::call::base64(KEY).as_bytes(),
     ] {
         assert!(!holds(form), "the tape holds the key as {:?}", String::from_utf8_lossy(form));
@@ -3868,7 +3868,7 @@ pub fn main(n: Net, password: Secret, out: Stdout) -> Result[(), Exit] waits {
     let check_absent = |bytes: &[u8]| {
         for form in [
             bytes,
-            crate::call::hex(bytes).as_bytes(),
+            hirsel_core_ids::hex::encode(bytes).as_bytes(),
             crate::call::base64(bytes).as_bytes(),
         ] {
             assert!(
@@ -3954,7 +3954,7 @@ include!("postgres_native.rs");
 /// recorded run. It must recover the child, pipes and packet only from tape.
 #[test]
 fn exec_unix_recording_replays_without_host_resources() {
-    use crate::package_content::{archive_digest, hex};
+    use crate::package_content::archive_digest;
     use hirsel_core_net::{GrantRule, UnixDirection, UnixRule};
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -3963,7 +3963,7 @@ fn exec_unix_recording_replays_without_host_resources() {
     std::fs::create_dir(&work).unwrap();
     let image = work.join("image");
     std::fs::copy("/bin/cat", &image).unwrap();
-    let pin = hex(&archive_digest(&std::fs::read(&image).unwrap()));
+    let pin = hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap()));
     let policy = work.join("policy.toml");
     // The recording must split a valid profile snapshot larger than a tape block.
     let unused_arg = "x".repeat(hirsel_tape_format::MAX_LEN);

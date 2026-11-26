@@ -220,7 +220,7 @@ impl Reservation<'_> {
             };
             staging
                 .path()
-                .join(format!("{kind}-{}", crate::call::hex(&key.hash.0)))
+                .join(format!("{kind}-{}", key.hash.to_string()))
         })
     }
 

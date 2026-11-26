@@ -374,26 +374,17 @@ fn decode_id(data: Bytes) -> Option[Inline[u8, 16]] {
     }
     let mut id: Inline[u8, 16] =[0; 16]
     for i in 0u64 .. 16 {
-        let Some(a) = hex_value(data[i * 2]) else {
+        let a = hex.digit(data[i * 2])
+        if a == 255 {
             return None
         }
-        let Some(b) = hex_value(data[i * 2 + 1]) else {
+        let b = hex.digit(data[i * 2 + 1])
+        if b == 255 {
             return None
         }
         id[i] = a * 16 + b
     }
     Some(id)
-}
-
-fn hex_value(b: u8) -> Option[u8] {
-    let c = int.to_ascii_lower(b)
-    if int.is_ascii_digit(c) {
-        Some(c - b'0')
-    } else if c >= b'a' && c <= b'f' {
-        Some(c - b'a' + 10)
-    } else {
-        None
-    }
 }
 
 type Endpoint: send {
@@ -2015,10 +2006,12 @@ fn proven_answer(head: http_client.ResponseHead, wire: http_client.Request, key:
     }
     let mut tag: Bytes = list.with_capacity(32)
     for i in 0u64 .. 32 {
-        let Some(hi) = hex_value(text[2 * i]) else {
+        let hi = hex.digit(text[2 * i])
+        if hi == 255 {
             return false
         }
-        let Some(lo) = hex_value(text[2 * i + 1]) else {
+        let lo = hex.digit(text[2 * i + 1])
+        if lo == 255 {
             return false
         }
         list.push(mut tag, hi * 16 + lo)

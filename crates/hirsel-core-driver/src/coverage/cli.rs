@@ -6,7 +6,7 @@ use super::{
     report::{Diff, Others},
 };
 use crate::cli::{Invocation, OptionId};
-use crate::request::{Outcome, hex};
+use crate::request::Outcome;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -229,7 +229,7 @@ fn raw(path: &Path, bytes: &[u8], maps: &[(PathBuf, SiteMap)]) -> super::Result<
     let flags: BTreeMap<String, Vec<u8>> = crate::test_run::records(bytes)
         .map_err(refused)?
         .into_iter()
-        .map(|(id, flags)| (hex(id), flags))
+        .map(|(id, flags)| (id.to_string(), flags))
         .collect();
     // A raw file is one run, so it keeps its run row: the seeds that reached
     // a site come from those rows ("Reached by").

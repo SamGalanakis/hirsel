@@ -67,20 +67,8 @@ pub(crate) fn show(path: &Path) -> io::Result<()> {
     let (mut index, h) = Index::open(read_at).map_err(block_error)?;
     println!("format {}  kind {}", format::FORMAT, h.kind);
     println!("identity {}", String::from_utf8_lossy(&h.identity));
-    println!(
-        "revision {}",
-        h.revision
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    );
-    println!(
-        "tape_id {}",
-        h.tape_id
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    );
+    println!("revision {}", hirsel_core_ids::hex::encode(&h.revision));
+    println!("tape_id {}", hirsel_core_ids::hex::encode(&h.tape_id));
     println!(
         "limit {}  charge_policy {}  bound {}  chooser {}  arg_bytes {}",
         h.limit,

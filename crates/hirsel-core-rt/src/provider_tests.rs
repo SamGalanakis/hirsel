@@ -2045,7 +2045,7 @@ fn exec_provider_law(image: &std::path::Path) {
         exec_runtime::{hirsel_core_exec_signal, hirsel_core_exec_spawn, hirsel_core_exec_wait},
         host::exec::Supervisor,
     };
-    use hirsel_core_net::exec::{Request as PolicyRequest, hex};
+    use hirsel_core_net::exec::Request as PolicyRequest;
     use ring::digest::{SHA256, digest};
     use std::{ptr, sync::Arc};
 
@@ -2055,7 +2055,7 @@ fn exec_provider_law(image: &std::path::Path) {
         .as_ref()
         .try_into()
         .unwrap();
-    let wanted = hex(&hash);
+    let wanted = hirsel_core_ids::hex::encode(&hash);
     std::fs::write(
         &profile,
         format!(

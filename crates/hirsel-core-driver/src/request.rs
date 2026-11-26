@@ -41,9 +41,7 @@ struct ReachableOutput<'a> {
     census: std::collections::BTreeMap<&'a str, usize>,
     first_stops: &'a [crate::GapStop],
 }
-pub(crate) fn hex(hash: hirsel_core_ids::ContentHash) -> String {
-    hash.0.iter().map(|b| format!("{b:02x}")).collect()
-}
+
 fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let mut invocation = match crate::cli::parse(args.into_iter())? {
         crate::cli::Action::Help(help) => {
@@ -1019,7 +1017,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         };
         println!(
             "{}",
-            serde_json::json!({"image":hex(image.identity),"rebuilt":rebuilt,"name":name,"index_pages":image.checked_index_pages(),"index_rows":image.decoded_index_rows()})
+            serde_json::json!({"image":image.identity.to_string(),"rebuilt":rebuilt,"name":name,"index_pages":image.checked_index_pages(),"index_rows":image.decoded_index_rows()})
         );
         drop(image);
         meter.finish("package handle teardown");
@@ -1509,9 +1507,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                             meter.write_metrics(path)?;
                         }
                         if json {
-                            println!("{}", serde_json::json!({ "recipe": hex(root) }));
+                            println!("{}", serde_json::json!({ "recipe": root.to_string() }));
                         } else {
-                            println!("{}", hex(root));
+                            println!("{root}");
                         }
                         return conclude(Outcome::Exit(0));
                     }
@@ -1594,7 +1592,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     let output = Output {
         accepted,
         root: if json {
-            hex(product.root)
+            product.root.to_string()
         } else {
             String::new()
         },
@@ -1617,7 +1615,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
         } else {
             product.machine_resources()?
         },
-        image: image.map(|i| hex(i.identity)),
+        image: image.map(|i| i.identity.to_string()),
         native,
         stopped: stopped.or_else(|| {
             reach
@@ -1727,7 +1725,7 @@ fn answer_hit(
     let output = Output {
         accepted: rendered.accepted,
         root: if json {
-            hex(rendered.root)
+            rendered.root.to_string()
         } else {
             String::new()
         },

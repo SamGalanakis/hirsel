@@ -92,11 +92,7 @@ fn identity_stable() {
     // the image spans many of the launcher's hashing windows.
     let image = std::fs::read(&child_path).unwrap();
     assert!(image.len() > 4 << 20);
-    let expected: String = crate::os_tls::sha256(&image)
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let expected = hirsel_core_ids::hex::encode(crate::os_tls::sha256(&image).as_ref());
     assert_eq!(first, expected);
     let replacement = directory.path().join("replacement");
     std::fs::write(&replacement, b"a different executable on disk").unwrap();
@@ -183,11 +179,7 @@ fn identity_of_an_image_replaced_before_launch_is_never_the_replacement() {
         .unwrap_or_else(|| panic!("{tail}"));
     // FIPS 180-4 from ring's independent SHA-256.
     let hex = |bytes: &[u8]| -> String {
-        crate::os_tls::sha256(bytes)
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        hirsel_core_ids::hex::encode(crate::os_tls::sha256(bytes).as_ref())
     };
     assert_ne!(digest, hex(b"a different executable on disk"));
     assert!(digest == hex(&image) || digest.is_empty(), "{digest}");

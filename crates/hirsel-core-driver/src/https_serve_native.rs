@@ -188,7 +188,7 @@ mod https_serve_laws {
             let running = Server::start(&server);
             let pem = std::fs::read(files.join("ca.pem")).unwrap();
             assert!(pem.starts_with(b"-----BEGIN CERTIFICATE-----\n"));
-            let roots = crate::call::hex(&crate::package_content::archive_digest(&pem));
+            let roots = hirsel_core_ids::hex::encode(&crate::package_content::archive_digest(&pem));
             let client = program(
                 &dir.path().join("client"),
                 &files,

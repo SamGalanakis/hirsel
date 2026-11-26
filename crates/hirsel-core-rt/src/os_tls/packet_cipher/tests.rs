@@ -26,11 +26,8 @@ fn vaes_seals_and_opens_packet_buffers() {
         cipher.seal_into(nonce, &aad, &plain, &mut output).unwrap();
         // SAFETY: a successful seal writes the entire ciphertext and tag.
         let sealed = output.map(|byte| unsafe { byte.assume_init() });
-        let actual: String = digest::digest(&digest::SHA256, &sealed)
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let actual =
+            hirsel_core_ids::hex::encode(digest::digest(&digest::SHA256, &sealed).as_ref());
         assert_eq!(actual, expected);
 
         let mut inline = sealed;

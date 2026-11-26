@@ -7,7 +7,6 @@ use crate::CheckProduct;
 use crate::coverage::{
     Build, Function, Place, Profile, Report, RunCounts, Shape, Site, SiteMap, Targets,
 };
-use crate::request::hex;
 use hirsel_core_ids::{ContentHash, DefPath};
 use hirsel_core_ir::coverage::{Fragment, RECORD_HEADER, RECORD_MAGIC, Record, Scope, SiteRow};
 use hirsel_core_ir::source::SourcePositions;
@@ -83,7 +82,7 @@ pub(crate) fn read(bytes: &[u8], map: &Fragment) -> RunCoverage {
         if flags.len() != record.sites.len() {
             return RunCoverage::Unobserved(format!(
                 "record {} has {} flags and {} sites",
-                hex(record.id),
+                record.id.to_string(),
                 flags.len(),
                 record.sites.len()
             ));
@@ -91,7 +90,7 @@ pub(crate) fn read(bytes: &[u8], map: &Fragment) -> RunCoverage {
         observed.push((record.clone(), flags));
     }
     match raw.keys().next() {
-        Some(id) => RunCoverage::Unobserved(format!("record {} is in no site map", hex(*id))),
+        Some(id) => RunCoverage::Unobserved(format!("record {id} is in no site map")),
         None => RunCoverage::Observed(observed),
     }
 }
@@ -204,7 +203,7 @@ fn place(product: &CheckProduct, scope: &Scope, records: &[&Record]) -> io::Resu
                     .iter()
                     .map(|row| (row.key.clone(), places.site(row, &record.function)))
                     .collect();
-                (hex(record.id), sites)
+                (record.id.to_string(), sites)
             })
             .collect(),
         functions: functions

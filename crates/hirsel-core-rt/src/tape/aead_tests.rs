@@ -157,7 +157,7 @@ fn aead_grant_uses_and_refusals_record_and_replay() {
         });
         if mode == Mode::Record {
             std::fs::remove_file(&key_path).unwrap();
-            let hex: String = KEY.iter().map(|byte| format!("{byte:02x}")).collect();
+            let hex = hirsel_core_ids::hex::encode(KEY);
             // RFC key in RFC 4648 base64.
             let base64 = b"gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8=";
             for key in [KEY, hex.as_bytes(), base64] {

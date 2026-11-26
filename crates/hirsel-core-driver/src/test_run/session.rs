@@ -799,8 +799,6 @@ pub(super) fn configure(
     }
     test_options.output = options
         .output
-        .join(crate::request::hex(ContentHash::of_bytes(
-            test.to_string().as_bytes(),
-        )));
+        .join(ContentHash::of_bytes(test.to_string().as_bytes()).to_string());
     Ok(test_options)
 }

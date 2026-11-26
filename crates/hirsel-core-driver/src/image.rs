@@ -173,7 +173,7 @@ pub(crate) fn closure_image(
     let store = request
         .store
         .join("package-images")
-        .join(crate::request::hex(digest));
+        .join(digest.to_string());
     if let Some(image) = CoreImage::open(&store)? {
         return Ok(Some(image));
     }

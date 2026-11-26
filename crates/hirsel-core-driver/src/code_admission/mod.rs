@@ -83,15 +83,12 @@ pub enum AdmissionError {
 impl fmt::Display for AdmissionError {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Hash(hash) => write!(out, "Hash({})", crate::call::hex(&hash.0)),
-            Self::Missing(hash) => write!(out, "Missing({})", crate::call::hex(&hash.0)),
-            Self::Extra(hash) => write!(out, "Extra({})", crate::call::hex(&hash.0)),
-            Self::Unsolicited(key) => write!(
-                out,
-                "Unsolicited({:?} {})",
-                key.kind,
-                crate::call::hex(&key.hash.0)
-            ),
+            Self::Hash(hash) => write!(out, "Hash({hash})"),
+            Self::Missing(hash) => write!(out, "Missing({hash})"),
+            Self::Extra(hash) => write!(out, "Extra({hash})"),
+            Self::Unsolicited(key) => {
+                write!(out, "Unsolicited({:?} {})", key.kind, key.hash)
+            }
             Self::Malformed(reason) => write!(out, "Malformed({reason})"),
             Self::Binding(reason) => write!(out, "Binding({reason})"),
             Self::Conflict(identity) => write!(out, "Conflict({identity:?})"),

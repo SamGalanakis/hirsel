@@ -29,7 +29,7 @@ fn sealed_foreign_archives_check_pin_object_features_and_abi() {
     let prefix = |hash: ContentHash| {
         format!(
             "FFI-3: archive object {} of ffi_laws@1/native for {target}",
-            crate::call::hex(&hash.0)
+            hash.to_string()
         )
     };
     let wrong = open(b"abc".to_vec(), digest(empty), 3).err().unwrap();
@@ -184,8 +184,8 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
         collision.to_string(),
         format!(
             "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by archive object {} of other@1/native",
-            crate::call::hex(&valid_object.hash.0),
-            crate::call::hex(&second_object.hash.0),
+            valid_object.hash.to_string(),
+            second_object.hash.to_string(),
         )
     );
     // The path now names the second archive, which lacks hfl_touch.
@@ -248,7 +248,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
         collision.to_string(),
         format!(
             "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by the runtime",
-            crate::call::hex(&valid_object.hash.0),
+            valid_object.hash.to_string(),
         )
     );
     let linked = Command::new(llvm.join("ld.lld"))
@@ -269,7 +269,7 @@ static const char abi[sizeof("hfl_other stack () -> i32\n") - 1] = "hfl_other st
         collision.to_string(),
         format!(
             "FFI-3: symbol hfl_shared is defined by archive object {} of ffi_laws@1/native and by link input libsystem.so",
-            crate::call::hex(&valid_object.hash.0),
+            valid_object.hash.to_string(),
         )
     );
     let (invalid, object) =

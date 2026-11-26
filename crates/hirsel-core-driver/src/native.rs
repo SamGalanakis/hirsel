@@ -286,7 +286,7 @@ pub(crate) fn debug_alias(content: &[u8]) -> ContentHash {
     ContentHash::of_parts("hirsel.core-debug-alias.v1", [content])
 }
 pub(super) fn selection(hash: ContentHash) -> String {
-    hash.0.iter().map(|b| format!("{b:02x}")).collect()
+    hash.to_string()
 }
 /// A keyed record, an executable or an entry record, is stored framed under
 /// its key: its bytes are a function of the key's inputs and are checked on

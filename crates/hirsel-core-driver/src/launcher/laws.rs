@@ -42,7 +42,7 @@ impl Images for Scripts {
         keep: &BTreeSet<[u8; 32]>,
         _: &dyn Fn(crate::code_admission::ObjectKey) -> bool,
     ) -> std::io::Result<u64> {
-        let kept: BTreeSet<_> = keep.iter().map(|&k| hex(&k)).collect();
+        let kept: BTreeSet<_> = keep.iter().map(|k| hex::encode(k)).collect();
         let mut removed = 0;
         for entry in fs::read_dir(&self.objects)? {
             let entry = entry?;
@@ -586,9 +586,9 @@ fn collect_reservation_handoff() {
     let mut rig = rig(&[]);
     let objects = rig.launcher.images.objects.clone();
     let name = |n: u8| [n; 32];
-    let exists = |n: u8| objects.join(hex(&name(n))).exists();
+    let exists = |n: u8| objects.join(hex::encode(&name(n))).exists();
     for n in [1, 2, 3] {
-        fs::write(objects.join(hex(&name(n))), b"object").unwrap();
+        fs::write(objects.join(hex::encode(&name(n))), b"object").unwrap();
     }
     // 1 is a root, 2 is reserved by the deploy attempt, 3 is garbage.
     rig.launcher.reserve(attempt(5), BTreeSet::from([name(2)]));
@@ -614,7 +614,7 @@ fn collect_reservation_handoff() {
 
     // A host that cannot read its roots aborts: nothing is removed, the fence ends at
     // once, and the release it deferred applies, so the next collection removes 4.
-    fs::write(objects.join(hex(&name(4))), b"object").unwrap();
+    fs::write(objects.join(hex::encode(&name(4))), b"object").unwrap();
     rig.launcher.reserve(attempt(6), BTreeSet::from([name(4)]));
     rig.ask(Request::CollectBegin);
     assert!(rig.ask(Request::Release(attempt(6))).is_empty());

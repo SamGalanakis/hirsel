@@ -99,10 +99,7 @@ fn srtp_derives_authenticates_and_encrypts() {
         kdf.derive(0, &mut derived[..key.len()]);
         let mut salting = [0; 12];
         kdf.derive(2, &mut salting);
-        let actual = derived[..key.len()]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let actual = hirsel_core_ids::hex::encode(&derived[..key.len()]);
         assert_eq!(actual, expected_key);
         assert_eq!(salting, hex(expected_salt));
     }

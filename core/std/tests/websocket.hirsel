@@ -1,29 +1,6 @@
 // RFC 6455 and tungstenite 89576c6 frame/mod.rs:316-430.
 fn unhex(s: String) -> Bytes {
-    let raw = string.as_bytes(s)
-    let mut b: Bytes = list.new()
-    let mut at: u64 = 0
-    while at < list.len(raw) {
-        if raw[at] == 32 {
-            at += 1;
-            continue
-        }
-        let a = raw[at]
-        let c = raw[at + 1]
-        let hi = if a >= b'a' {
-            a - b'a' + 10
-        } else {
-            a - b'0'
-        }
-        let lo = if c >= b'a' {
-            c - b'a' + 10
-        } else {
-            c - b'0'
-        }
-        list.push(mut b, hi * 16 + lo)
-        at += 2
-    }
-    take b
+    option.unwrap(hex.decode(string.as_bytes(string.replace(s, " ", ""))))
 }
 
 fn event(e: websocket.Event) -> u16 {

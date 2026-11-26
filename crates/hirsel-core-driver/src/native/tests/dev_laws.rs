@@ -283,9 +283,9 @@ impl Fixture {
             .lines()
             .map(|line| {
                 let (description, expected) = line.split_once(' ').unwrap();
-                let raw = crate::call::from_hex(description).unwrap();
+                let raw = hirsel_core_ids::hex::decode(description).unwrap();
                 let (_, digest) = crate::sdk::Describe::read_with_identity(&raw).unwrap();
-                assert_eq!(crate::call::hex(&digest), expected);
+                assert_eq!(hirsel_core_ids::hex::encode(&digest), expected);
                 digest
             })
             .collect();
@@ -669,7 +669,7 @@ fn package_dev_releases_held_runs() {
     let new_ref = fixture.state()[2]["pending"]["new"].clone();
     let new_image = fixture.executable(&new_ref);
     let identity: Vec<u8> = serde_json::from_value(new_ref["identity"].clone()).unwrap();
-    let identity = crate::call::hex(&identity);
+    let identity = hirsel_core_ids::hex::encode(&identity);
     let held = |image: &Path| {
         let read = Command::new(image)
             .args(["read-held", &identity])

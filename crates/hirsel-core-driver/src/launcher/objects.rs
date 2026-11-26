@@ -113,7 +113,7 @@ impl Records {
     }
 
     fn key(&self, directory: &str, hash: ContentHash) -> PathBuf {
-        self.root.join(directory).join(crate::call::hex(&hash.0))
+        self.root.join(directory).join(hash.to_string())
     }
 }
 

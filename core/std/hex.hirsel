@@ -19,7 +19,8 @@ pub fn encode(b: Bytes) -> String {
     result.unwrap(string.from_utf8(take out))
 }
 
-fn digit(b: u8) -> u8 {
+/// Returns the value of one ASCII hex digit in either case, or 255 for any other byte.
+pub fn digit(b: u8) -> u8 {
     if int.is_ascii_digit(b) {
         return b - b'0'
     }

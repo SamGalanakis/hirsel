@@ -1,5 +1,5 @@
 //! A published release recipe can assemble without its checked source product.
-use super::{Duration, Meter, NativeOptions, Output, Path, Publication, ReachableOutput, hex};
+use super::{Duration, Meter, NativeOptions, Output, Path, Publication, ReachableOutput};
 use crate::reach::ReachCounters;
 use crate::request_record::{self, Answer, Value};
 use crate::{CheckProduct, GapStop, NativeStop, Reachable};
@@ -53,7 +53,7 @@ impl Report {
         });
         Self {
             root: if json {
-                hex(product.root)
+                product.root.to_string()
             } else {
                 String::new()
             },

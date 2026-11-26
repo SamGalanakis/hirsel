@@ -625,7 +625,7 @@ mod tests {
             })
         })
         .unwrap();
-        let hex: String = addresses[&c].0.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = addresses[&c].to_string();
         assert_eq!(
             hex,
             "1d2b613082f724ec5e16b0b5fc7ce9576c101d86baab23e806755be92bc95384"
@@ -661,12 +661,7 @@ mod tests {
         let normal = graph(vec![a.clone()], 7, 9, true);
         assert_eq!(normal, graph(vec![b.clone()], 7, 9, true));
         assert_eq!(normal, graph(vec![b.clone(), a.clone()], 7, 9, true));
-        let hex = |hash: ContentHash| {
-            hash.0
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        };
+        let hex = |hash: ContentHash| hash.to_string();
         // Independent group of two members: a's slot is Internal(1),
         // b's Internal(0). SHA-256 framing was computed with Python hashlib.
         assert_eq!(

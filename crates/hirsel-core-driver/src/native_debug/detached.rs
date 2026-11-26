@@ -1,4 +1,5 @@
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::hex;
 use hirsel_core_layout::ObjectFormat;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 use sha2::{Digest, Sha256};
@@ -54,7 +55,7 @@ pub(crate) fn format(format: object::BinaryFormat) -> io::Result<ObjectFormat> {
 }
 
 fn build_id_path(bytes: &[u8]) -> PathBuf {
-    let id = hex(bytes);
+    let id = hex::encode(bytes);
     Path::new(".build-id")
         .join(&id[..2])
         .join(format!("{}.debug", &id[2..]))
@@ -78,8 +79,9 @@ impl<'a> Identity<'a> {
         match self {
             Self::BuildId(bytes) => image.with_file_name(build_id_path(bytes)),
             Self::Uuid(_) => super::dsym::path(image),
-            Self::ImageDigest(hash) => image
-                .with_file_name(Path::new(".hirsel-debug").join(format!("{}.debug", hex(&hash.0)))),
+            Self::ImageDigest(hash) => {
+                image.with_file_name(Path::new(".hirsel-debug").join(format!("{hash}.debug")))
+            }
         }
     }
 
@@ -131,15 +133,6 @@ impl<'a> Identity<'a> {
                 .is_some_and(|data| data == note_bytes(OWNER, 1, &hash.0)),
         }
     }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(hex, "{byte:02x}").unwrap();
-    }
-    hex
 }
 
 fn note_bytes(owner: &[u8], kind: u32, bytes: &[u8]) -> Vec<u8> {

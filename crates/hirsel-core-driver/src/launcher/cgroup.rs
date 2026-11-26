@@ -6,7 +6,8 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use super::session::{Child, Role};
-use super::{hex, wait_pid};
+use super::wait_pid;
+use hirsel_core_ids::hex;
 
 const MOUNT: &str = "/sys/fs/cgroup";
 
@@ -30,7 +31,7 @@ pub(super) fn delegated(state: &Path) -> io::Result<Option<PathBuf>> {
     };
     let state = fs::canonicalize(state)?;
     let key = Sha256::digest(state.as_os_str().as_encoded_bytes());
-    let root = parent.join(format!("hirsel-{}", hex(&key)));
+    let root = parent.join(format!("hirsel-{}", hex::encode(&key)));
     match fs::create_dir(&root) {
         Ok(()) => Ok(Some(root)),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists && root.is_dir() => {
@@ -69,7 +70,7 @@ fn child_name(child: &Child) -> String {
         Role::Preview(attempt) => ("preview", u128::from_le_bytes(attempt.bytes())),
         Role::Prepare(attempt) => ("prepare", u128::from_le_bytes(attempt.bytes())),
     };
-    let group = hex(child.group.name.as_bytes());
+    let group = hex::encode(child.group.name.as_bytes());
     format!("c-{group}-{}-{key}-{role}", child.group.incarnation)
 }
 
@@ -92,14 +93,14 @@ fn is_child_name(name: &str) -> bool {
         return false;
     }
     let (Some(bytes), Ok(incarnation), Ok(key)) = (
-        crate::call::from_hex(group),
+        hex::decode(group),
         incarnation.parse::<u64>(),
         key.parse::<u128>(),
     ) else {
         return false;
     };
     std::str::from_utf8(&bytes).is_ok()
-        && format!("c-{}-{incarnation}-{key}-{role}", hex(&bytes)) == name
+        && format!("c-{}-{incarnation}-{key}-{role}", hex::encode(&bytes)) == name
 }
 
 pub(super) struct Group {

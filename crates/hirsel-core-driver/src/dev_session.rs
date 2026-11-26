@@ -1,7 +1,8 @@
 use crate::{
-    call::{decode, encode, from_hex, hex},
+    call::{decode, encode},
     sdk::{Describe, Schema, entry_path},
 };
+use hirsel_core_ids::hex;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -143,7 +144,7 @@ impl Session {
         for want in wants.iter_mut() {
             let old = want["identity"]
                 .as_str()
-                .and_then(from_hex)
+                .and_then(hex::decode)
                 .ok_or("missing entry identity")?;
             let args_fp = want["args_fp"]
                 .as_u64()
@@ -165,7 +166,7 @@ impl Session {
             if let Some(entry) = candidates.next()
                 && candidates.next().is_none()
             {
-                *want = json!({"identity":hex(&entry.identity),"args_fp":entry.args_fp,"result_fp":entry.result_fp});
+                *want = json!({"identity":hex::encode(&entry.identity),"args_fp":entry.args_fp,"result_fp":entry.result_fp});
             }
         }
         let replies = 1 + wants.len();

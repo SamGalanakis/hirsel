@@ -1,10 +1,6 @@
 // Byte vectors for the launcher session (module launcher). The expected bytes were
 // derived from core/std/api/codec.md's format by an encoder written apart from std.codec;
 // crates/hirsel-core-driver/src/launcher/session.rs checks the same bytes in Rust.
-fn hex(s: String) -> Bytes {
-    option.unwrap(std.hex.decode(string.as_bytes(s)))
-}
-
 fn pair(a: String, b: String) -> List[String] {
     let mut l: List[String] = list.new()
     list.push(mut l, string.from(a))
@@ -35,7 +31,7 @@ fn preparing() -> Child {
 }
 
 fn starting(take mode: Mode) -> Launch {
-    Launch(group: group(), assembly: hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), workdir: "/w", args: one("a"), mode: take mode, recording: None)
+    Launch(group: group(), assembly: option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")), workdir: "/w", args: one("a"), mode: take mode, recording: None)
 }
 
 fn inventory_children() -> List[ChildState] {
@@ -51,7 +47,7 @@ fn vector_request(take value: Request, expected: String) -> bool {
     if let Error(_) = std.codec.encode(c, value, mut out) {
         return false
     }
-    let want = hex(expected)
+    let want = option.unwrap(std.hex.decode(string.as_bytes(expected)))
     if out != want {
         return false
     }
@@ -73,7 +69,7 @@ fn vector_event(take value: Event, expected: String) -> bool {
     if let Error(_) = std.codec.encode(c, value, mut out) {
         return false
     }
-    let want = hex(expected)
+    let want = option.unwrap(std.hex.decode(string.as_bytes(expected)))
     if out != want {
         return false
     }
@@ -95,7 +91,7 @@ fn vector_tree(take value: Tree, expected: String) -> bool {
     if let Error(_) = std.codec.encode(c, value, mut out) {
         return false
     }
-    let want = hex(expected)
+    let want = option.unwrap(std.hex.decode(string.as_bytes(expected)))
     match tree_of(want) {
         Some(_) => out == want,
         None => false,
@@ -108,7 +104,7 @@ fn vector_manifest(take value: Manifest, expected: String) -> bool {
     if let Error(_) = std.codec.encode(c, value, mut out) {
         return false
     }
-    let want = hex(expected)
+    let want = option.unwrap(std.hex.decode(string.as_bytes(expected)))
     match manifest_of(want) {
         Some(_) => out == want,
         None => false,
@@ -125,19 +121,19 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_request(Start(starting(InstallMode(1u64, Standalone(3u64)))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f7701000000010000006100000000010000000000000001000000030000000000000000000000") && ok
     ok = vector_request(Start(starting(ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: Some(6u64), store_id: Some((1u64, 2u64)), witness: None)))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa0000000000000001000000060000000000000001000000010000000000000002000000000000000000000000000000") && ok
     ok = vector_request(Start(starting(DescribeMode(attempt()))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f77010000000100000061020000000807060504030201181716151413121100000000") && ok
-    ok = vector_request(Start(starting(PreviewMode(attempt(), hex("01")))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610300000008070605040302011817161514131211010000000100000000") && ok
-    ok = vector_request(Start(starting(PrepareMode(attempt(), "x", hex("f0")))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610400000008070605040302011817161514131211010000007801000000f000000000") && ok
+    ok = vector_request(Start(starting(PreviewMode(attempt(), option.unwrap(std.hex.decode(b"01"))))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610300000008070605040302011817161514131211010000000100000000") && ok
+    ok = vector_request(Start(starting(PrepareMode(attempt(), "x", option.unwrap(std.hex.decode(b"f0"))))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610400000008070605040302011817161514131211010000007801000000f000000000") && ok
     ok = vector_request(Stop(serving()), "0400000001000000670300000000000000010000000700000000000000") && ok
     ok = vector_request(Kill(preparing()), "05000000010000006703000000000000000400000008070605040302011817161514131211") && ok
     ok = vector_request(Acknowledge(serving()), "0600000001000000670300000000000000010000000700000000000000") && ok
-    ok = vector_request(Command(serving(), HostCutover(hex("aa"), hex("bb"), 2000u64, false)), "07000000010000006703000000000000000100000007000000000000000200000001000000aa01000000bbd00700000000000000") && ok
-    ok = vector_request(Command(serving(), HostAbort(hex("aa"), Some(hex("bb")))), "07000000010000006703000000000000000100000007000000000000000300000001000000aa0100000001000000bb") && ok
-    ok = vector_request(Command(serving(), HostImport(hex("aa"), hex("bb"), hex("cc"), hex("dd"))), "07000000010000006703000000000000000100000007000000000000000100000001000000aa01000000bb01000000cc01000000dd") && ok
+    ok = vector_request(Command(serving(), HostCutover(option.unwrap(std.hex.decode(b"aa")), option.unwrap(std.hex.decode(b"bb")), 2000u64, false)), "07000000010000006703000000000000000100000007000000000000000200000001000000aa01000000bbd00700000000000000") && ok
+    ok = vector_request(Command(serving(), HostAbort(option.unwrap(std.hex.decode(b"aa")), Some(option.unwrap(std.hex.decode(b"bb"))))), "07000000010000006703000000000000000100000007000000000000000300000001000000aa0100000001000000bb") && ok
+    ok = vector_request(Command(serving(), HostImport(option.unwrap(std.hex.decode(b"aa")), option.unwrap(std.hex.decode(b"bb")), option.unwrap(std.hex.decode(b"cc")), option.unwrap(std.hex.decode(b"dd")))), "07000000010000006703000000000000000100000007000000000000000100000001000000aa01000000bb01000000cc01000000dd") && ok
     ok = vector_request(Command(serving(), HostStoreAccepted), "070000000100000067030000000000000001000000070000000000000004000000") && ok
     ok = vector_request(Retire(group()), "0800000001000000670300000000000000") && ok
     ok = vector_request(Release(attempt()), "0900000008070605040302011817161514131211") && ok
     ok = vector_request(CollectBegin, "0a000000") && ok
-    ok = vector_request(Collect(one(hex("0102"))), "0b00000001000000020000000102") && ok
+    ok = vector_request(Collect(one(option.unwrap(std.hex.decode(b"0102")))), "0b00000001000000020000000102") && ok
     ok = vector_event(Inventory(inventory_children(), one(group()), one(CutoverKey(old: serving(), attempt: attempt()))), "000000000200000001000000670300000000000000010000000700000000000000000000000000000000000000010000006703000000000000000400000008070605040302011817161514131211010000000100000009000000000000000000000000000000000100000001000000670300000000000000010000000100000067030000000000000001000000070000000000000008070605040302011817161514131211") && ok
     ok = vector_event(Launched(serving(), Started), "010000000100000067030000000000000001000000070000000000000000000000") && ok
     ok = vector_event(Refused(serving(), Held), "020000000100000067030000000000000001000000070000000000000000000000") && ok
@@ -149,36 +145,36 @@ fn session_vectors() -> Result[(), ()] {
     ok = vector_event(Closed(group()), "0700000001000000670300000000000000") && ok
     ok = vector_event(Retired(group()), "0800000001000000670300000000000000") && ok
     ok = vector_event(Placed(serving(), PlaceInstalled(4u64, true)), "090000000100000067030000000000000001000000070000000000000005000000040000000000000001") && ok
-    ok = vector_event(Placed(serving(), PlaceOpened(runner.PlaceReady(version: 4u64, store_hi: 1u64, store_lo: 2u64, release: hex("05"), retain_from: 1u64, ready_ns: 99u64, read: list.new()))), "09000000010000006703000000000000000100000007000000000000000000000004000000000000000100000000000000020000000000000001000000050100000000000000630000000000000000000000") && ok
-    ok = vector_event(Placed(serving(), PlaceImported(hex("aa"), runner.ImportedMigration(digest: hex("bb"), changes: one(hex("74"))))), "09000000010000006703000000000000000100000007000000000000000400000001000000aa01000000bb010000000100000074") && ok
+    ok = vector_event(Placed(serving(), PlaceOpened(runner.PlaceReady(version: 4u64, store_hi: 1u64, store_lo: 2u64, release: option.unwrap(std.hex.decode(b"05")), retain_from: 1u64, ready_ns: 99u64, read: list.new()))), "09000000010000006703000000000000000100000007000000000000000000000004000000000000000100000000000000020000000000000001000000050100000000000000630000000000000000000000") && ok
+    ok = vector_event(Placed(serving(), PlaceImported(option.unwrap(std.hex.decode(b"aa")), runner.ImportedMigration(digest: option.unwrap(std.hex.decode(b"bb")), changes: one(option.unwrap(std.hex.decode(b"74")))))), "09000000010000006703000000000000000100000007000000000000000400000001000000aa01000000bb010000000100000074") && ok
     ok = vector_event(Placed(serving(), PlaceStoreMismatch(1u64, 2u64, 3u64, 4u64)), "09000000010000006703000000000000000100000007000000000000000a0000000100000000000000020000000000000003000000000000000400000000000000") && ok
     ok = vector_event(Placed(Child(group: group(), role: Install(1u64)), PlaceInstallRefused(InstallWrongVersion(2u64))), "09000000010000006703000000000000000000000001000000000000000b000000080000000200000000000000") && ok
-    ok = vector_event(Answered(preparing(), hex("0102")), "0c000000010000006703000000000000000400000008070605040302011817161514131211020000000102") && ok
+    ok = vector_event(Answered(preparing(), option.unwrap(std.hex.decode(b"0102"))), "0c000000010000006703000000000000000400000008070605040302011817161514131211020000000102") && ok
     ok = vector_event(Fenced, "0a000000") && ok
     ok = vector_event(Collected(3u64), "0b0000000300000000000000") && ok
-    ok = vector_request(Start(Launch(group: group(), assembly: hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), workdir: "/w", args: one("a"), mode: ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: None, store_id: None, witness: None)), recording: Some(Recording(id: hex("21212121212121212121212121212121"), destination: "/rec")))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa00000000000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563") && ok
-    ok = vector_request(Admit(group(), attempt(), Attested(hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")), Approvals(recording: true, foreign: one("f"), exec: one("e"), workdir: "/w", old: Some(hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")), packages: one(hex("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")))), "0c00000001000000670300000000000000080706050403020118171615141312110000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065020000002f770100000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0100000020000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd") && ok
-    ok = vector_request(Admit(group(), attempt(), Publication(hex("01")), Approvals(recording: false, foreign: list.new(), exec: list.new(), workdir: "/w", old: None, packages: list.new())), "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f770000000000000000") && ok
-    ok = vector_request(Admit(group(), attempt(), Source(hex("01"), true), Approvals(recording: false, foreign: list.new(), exec: list.new(), workdir: "/w", old: None, packages: list.new())), "0c000000010000006703000000000000000807060504030201181716151413121102000000010000000101000000000000000000020000002f770000000000000000") && ok
-    ok = vector_request(AdmitData(attempt(), hex("0102")), "0d00000008070605040302011817161514131211020000000102") && ok
+    ok = vector_request(Start(Launch(group: group(), assembly: option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")), workdir: "/w", args: one("a"), mode: ServingMode(7u64, Serve(activation: 5u64, idle: 250u64, candidate: None, store_id: None, witness: None)), recording: Some(Recording(id: option.unwrap(std.hex.decode(b"21212121212121212121212121212121")), destination: "/rec")))), "030000000100000067030000000000000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000002f770100000001000000610100000007000000000000000500000000000000fa00000000000000000000000000000000000000010000001000000021212121212121212121212121212121040000002f726563") && ok
+    ok = vector_request(Admit(group(), attempt(), Attested(option.unwrap(std.hex.decode(b"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))), Approvals(recording: true, foreign: one("f"), exec: one("e"), workdir: "/w", old: Some(option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"))), packages: one(option.unwrap(std.hex.decode(b"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"))))), "0c00000001000000670300000000000000080706050403020118171615141312110000000020000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc01010000000100000066010000000100000065020000002f770100000020000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0100000020000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd") && ok
+    ok = vector_request(Admit(group(), attempt(), Publication(option.unwrap(std.hex.decode(b"01"))), Approvals(recording: false, foreign: list.new(), exec: list.new(), workdir: "/w", old: None, packages: list.new())), "0c0000000100000067030000000000000008070605040302011817161514131211010000000100000001000000000000000000020000002f770000000000000000") && ok
+    ok = vector_request(Admit(group(), attempt(), Source(option.unwrap(std.hex.decode(b"01")), true), Approvals(recording: false, foreign: list.new(), exec: list.new(), workdir: "/w", old: None, packages: list.new())), "0c000000010000006703000000000000000807060504030201181716151413121102000000010000000101000000000000000000020000002f770000000000000000") && ok
+    ok = vector_request(AdmitData(attempt(), option.unwrap(std.hex.decode(b"0102"))), "0d00000008070605040302011817161514131211020000000102") && ok
     ok = vector_request(AdmitEnd(attempt()), "0e00000008070605040302011817161514131211") && ok
     ok = vector_request(Assemble(attempt()), "0f00000008070605040302011817161514131211") && ok
     ok = vector_request(CutoverAck(serving(), attempt()), "100000000100000067030000000000000001000000070000000000000008070605040302011817161514131211") && ok
     ok = vector_request(CollectAbort, "11000000") && ok
     let mut wanted: List[Wanted] = list.new()
-    list.push(mut wanted, GroupKey(hex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")))
-    list.push(mut wanted, ArchiveKey(hex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")))
+    list.push(mut wanted, GroupKey(option.unwrap(std.hex.decode(b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))))
+    list.push(mut wanted, ArchiveKey(option.unwrap(std.hex.decode(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))))
     ok = vector_event(Need(attempt(), take wanted, true), "0d00000008070605040302011817161514131211020000000000000020000000aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0300000020000000bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb01") && ok
-    ok = vector_event(Admitted(attempt(), hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), Summary(root_limit: 1024u64, old_root_limit: 2048u64, grants: Grants(added: one("Clock"), dropped: one("Dir=a")), target: "t", n_place: 3u64, gate: None), "l"), "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d610100000074030000000000000000000000010000006c") && ok
-    ok = vector_event(Admitted(attempt(), hex("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"), Summary(root_limit: 1024u64, old_root_limit: 2048u64, grants: Grants(added: one("Clock"), dropped: one("Dir=a")), target: "t", n_place: 3u64, gate: Some(Green(tree: hex("aa"), root: hex("bb"), toolchain: hex("cc")))), "l"), "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d61010000007403000000000000000100000001000000aa01000000bb01000000cc010000006c") && ok
-    ok = vector_event(Assembled(attempt(), hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), hex("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"), 5u64, 6u64), "0f0000000807060504030201181716151413121120000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05000000000000000600000000000000") && ok
+    ok = vector_event(Admitted(attempt(), option.unwrap(std.hex.decode(b"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")), Summary(root_limit: 1024u64, old_root_limit: 2048u64, grants: Grants(added: one("Clock"), dropped: one("Dir=a")), target: "t", n_place: 3u64, gate: None), "l"), "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d610100000074030000000000000000000000010000006c") && ok
+    ok = vector_event(Admitted(attempt(), option.unwrap(std.hex.decode(b"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")), Summary(root_limit: 1024u64, old_root_limit: 2048u64, grants: Grants(added: one("Clock"), dropped: one("Dir=a")), target: "t", n_place: 3u64, gate: Some(Green(tree: option.unwrap(std.hex.decode(b"aa")), root: option.unwrap(std.hex.decode(b"bb")), toolchain: option.unwrap(std.hex.decode(b"cc"))))), "l"), "0e0000000807060504030201181716151413121120000000cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc000400000000000000080000000000000100000005000000436c6f636b01000000050000004469723d61010000007403000000000000000100000001000000aa01000000bb01000000cc010000006c") && ok
+    ok = vector_event(Assembled(attempt(), option.unwrap(std.hex.decode(b"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")), option.unwrap(std.hex.decode(b"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")), 5u64, 6u64), "0f0000000807060504030201181716151413121120000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20000000dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd05000000000000000600000000000000") && ok
     ok = vector_event(AdmissionFailed(attempt(), Denied("no")), "100000000807060504030201181716151413121100000000020000006e6f") && ok
     ok = vector_event(AdmissionFailed(attempt(), Uncompiled("no")), "100000000807060504030201181716151413121103000000020000006e6f") && ok
     ok = vector_event(AdmissionFailed(attempt(), Exhausted("om")), "100000000807060504030201181716151413121104000000020000006f6d") && ok
     ok = vector_event(AdmissionFailed(attempt(), Red(pair("a", "b"))), "1000000008070605040302011817161514131211050000000200000001000000610100000062") && ok
     ok = vector_event(AdmissionFailed(attempt(), GateLost("x")), "1000000008070605040302011817161514131211060000000100000078") && ok
-    ok = vector_tree(Tree(package: ".", grants: one("G"), dirs: one("d"), files: one(SourceFile(path: "a", content: hex("0102"))), required_entries: one(RequiredEntry(kind: Query, key: hex("aabb")))), "010000002e010000000100000047010000000100000064010000000100000061020000000102010000000200000002000000aabb") && ok
-    ok = vector_manifest(Manifest(package: ".", grants: one("G"), dirs: one("d"), required_entries: one(RequiredEntry(kind: Query, key: hex("aabb"))), files: one(ManifestFile(path: "a", digest: hex("a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f63222"), len: 2u64))), "010000002e010000000100000047010000000100000064010000000200000002000000aabb01000000010000006120000000a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f632220200000000000000") && ok
+    ok = vector_tree(Tree(package: ".", grants: one("G"), dirs: one("d"), files: one(SourceFile(path: "a", content: option.unwrap(std.hex.decode(b"0102")))), required_entries: one(RequiredEntry(kind: Query, key: option.unwrap(std.hex.decode(b"aabb"))))), "010000002e010000000100000047010000000100000064010000000100000061020000000102010000000200000002000000aabb") && ok
+    ok = vector_manifest(Manifest(package: ".", grants: one("G"), dirs: one("d"), required_entries: one(RequiredEntry(kind: Query, key: option.unwrap(std.hex.decode(b"aabb")))), files: one(ManifestFile(path: "a", digest: option.unwrap(std.hex.decode(b"a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f63222")), len: 2u64))), "010000002e010000000100000047010000000100000064010000000200000002000000aabb01000000010000006120000000a12871fee210fb8619291eaea194581cbd2531e4b23759d225f6806923f632220200000000000000") && ok
     ok = vector_event(CutoverResult(serving(), attempt(), PlaceInstalled(4u64, true)), "11000000010000006703000000000000000100000007000000000000000807060504030201181716151413121105000000040000000000000001") && ok
     if ok {
         Ok(())

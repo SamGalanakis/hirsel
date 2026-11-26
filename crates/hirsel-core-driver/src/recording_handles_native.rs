@@ -668,13 +668,13 @@ pub fn main(e: Exec, out: Stdout) -> Result[(), Exit] waits {
 #[ignore = "explicit native integration target"]
 fn rl9_narrowed_exec_crosses() {
     crate::openat2_required::require();
-    use crate::package_content::{archive_digest, hex};
+    use crate::package_content::archive_digest;
     use hirsel_tape_format::{Arrival, Frame};
 
     let dir = tempfile::tempdir().unwrap();
     let image = dir.path().join("image");
     std::fs::copy("/bin/cat", &image).unwrap();
-    let pin = hex(&archive_digest(&std::fs::read(&image).unwrap()));
+    let pin = hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap()));
     let policy = dir.path().join("policy.toml");
     std::fs::write(
         &policy,

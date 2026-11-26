@@ -2,21 +2,8 @@
 // Frames are RFC 9605 §4.4 frames of plaintext "hirsel" (68697273656c) at CTR 0
 // with empty metadata unless a case says otherwise. Each `expect: run` case is
 // its own run, so 00..0f is imported as a send key at most once per case.
-fn nibble(c: u8) -> u8 {
-    if c >= b'a' {
-        c - b'a' + 10u8
-    } else {
-        c - b'0'
-    }
-}
-
 fn unhex(s: String) -> Bytes {
-    let h = string.as_bytes(s)
-    let mut out: Bytes = list.with_capacity(list.len(h) / 2)
-    for i in 0u64 .. list.len(h) / 2 {
-        list.push(mut out, nibble(h[2 * i]) * 16u8 + nibble(h[2 * i + 1]))
-    }
-    out
+    option.unwrap(hex.decode(string.as_bytes(s)))
 }
 
 fn base() -> String {

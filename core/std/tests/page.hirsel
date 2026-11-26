@@ -1,18 +1,5 @@
-fn digit(x: u8) -> u8 {
-    if x <= b'9' {
-        x - b'0'
-    } else {
-        x - b'a' + 10
-    }
-}
-
 fn hex(s: String) -> Bytes {
-    let raw = string.as_bytes(s)
-    let mut out: Bytes = list.with_capacity(list.len(raw) / 2)
-    for i in 0u64 .. list.len(raw) / 2 {
-        list.push(mut out, digit(raw[2 * i]) * 16 + digit(raw[2 * i + 1]))
-    }
-    out
+    option.unwrap(hex.decode(string.as_bytes(s)))
 }
 
 fn be(n: u64) -> Bytes {

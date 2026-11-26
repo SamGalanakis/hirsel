@@ -950,7 +950,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
     assert!(archive.status.success(), "{}", String::from_utf8_lossy(&archive.stderr));
     let bytes = std::fs::read(law.path("app/native.a")).unwrap();
     let pin = ContentHash(Sha256::digest(&bytes).into());
-    let pin_text = crate::request::hex(pin);
+    let pin_text = pin.to_string();
     law.manifest("app", "app", 1, &format!(r#"
 [sources]
 "main.hirsel" = "main"
@@ -1533,9 +1533,9 @@ fn foreign_recipe_build_uses_only_selected_sealed_archive() {
         }
         let store = CodeStore::new(law.path("code-store"));
         let x86 = std::fs::read(law.path("ffi_laws/libffi_laws.a")).unwrap();
-        let x86_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(&x86).0);
+        let x86_pin = ObjectKind::ForeignArchive.hash(&x86).to_string();
         let publish = |arm: &[u8]| {
-            let arm_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(arm).0);
+            let arm_pin = ObjectKind::ForeignArchive.hash(arm).to_string();
             law.write("ffi_laws/arm.a", arm);
             law.manifest("ffi_laws", "ffi_laws", 1, &format!(r#"
 [sources]
@@ -1584,14 +1584,14 @@ pub fn main() -> Result[(), Exit] {
         let selected = *selected;
         recipe.foreign_archives.clear();
         let missing = store.put(ObjectKind::Recipe, &recipe.encode()).unwrap().hash;
-        let (status, _, error) = build(&crate::call::hex(&missing.0));
+        let (status, _, error) = build(&missing.to_string());
         assert_eq!(status, Some(2), "{error}");
         assert!(error.contains("Missing"), "{error}");
         let extra = store.put(ObjectKind::ForeignArchive, b"abc").unwrap();
         recipe.foreign_archives = vec![selected, extra];
         recipe.foreign_archives.sort_by_key(|archive| archive.hash);
         let extra = store.put(ObjectKind::Recipe, &recipe.encode()).unwrap().hash;
-        let (status, _, error) = build(&crate::call::hex(&extra.0));
+        let (status, _, error) = build(&extra.to_string());
         assert_eq!(status, Some(2), "{error}");
         assert!(error.contains("Extra"), "{error}");
     }
@@ -2438,7 +2438,7 @@ static const char abi[sizeof(ABI) - 1] = ABI;
             .output().unwrap();
         assert!(archived.status.success(), "{}", String::from_utf8_lossy(&archived.stderr));
         let bytes = std::fs::read(law.path(&path)).unwrap();
-        crate::package_content::hex(&Sha256::digest(bytes).into())
+        hirsel_core_ids::hex::encode(&Sha256::digest(bytes))
     };
     let hm = archive("hm_");
     let hn = archive("hn_");
@@ -2863,7 +2863,7 @@ fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
 }
 "#);
     let pinned = fs::read(fixture.join("libffi_laws.a")).unwrap();
-    let fixture_pin = crate::call::hex(&ObjectKind::ForeignArchive.hash(&pinned).0);
+    let fixture_pin = ObjectKind::ForeignArchive.hash(&pinned).to_string();
     let repin = |bytes: &[u8], pin: &str| {
         law.write("ffi_laws/laws.a", bytes);
         law.write("ffi_laws/hirsel.toml", original.replace("libffi_laws.a", "laws.a")
@@ -2923,7 +2923,7 @@ __attribute__((constructor)) static void init(void) { write(2, "ctor\n", 5); }
         fs::remove_file(dir.join("candidate.a")).unwrap();
         bytes
     };
-    let pin_bytes = |bytes: Vec<u8>| repin(&bytes, &crate::call::hex(&ObjectKind::ForeignArchive.hash(&bytes).0));
+    let pin_bytes = |bytes: Vec<u8>| repin(&bytes, &ObjectKind::ForeignArchive.hash(&bytes).to_string());
     compile(TARGET);
     let thin = archive("rcsT");
     let initializer = archive("rcs");

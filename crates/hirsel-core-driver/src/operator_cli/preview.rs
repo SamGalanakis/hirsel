@@ -2,8 +2,8 @@
 //! operator's decision on a held request (`hirsel decide`), and the preview's JSON.
 
 use super::{
-    Approvals, Error, Exchange, class_name, hex, one, or_unavailable, sort_grants, state_json,
-    unexpected, unhex,
+    Approvals, Error, Exchange, class_name, one, or_unavailable, sort_grants, state_json,
+    unexpected,
 };
 use crate::cli::{Invocation, OptionId as Opt};
 use crate::launcher::session::Grants;
@@ -11,6 +11,7 @@ use crate::operator::{
     Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Migration, Phase,
     Preview,
 };
+use hirsel_core_ids::hex;
 use std::path::PathBuf;
 
 /// One `--held` or `--held-entry` value into the deploy's fates (launch.md "The operator
@@ -96,7 +97,7 @@ fn decide_on(invocation: Invocation) -> Result<i32, Error> {
         return Err("decide takes no recipe and no program arguments".into());
     }
     let state = state.ok_or("decide requires --state DIR")?;
-    let d = unhex(&d.ok_or("decide requires --request-id HEX")?)
+    let d = hex::decode(&d.ok_or("decide requires --request-id HEX")?)
         .filter(|d| d.len() == 16)
         .ok_or("--request-id takes 32 hex digits")?;
     sort_grants(&mut approved);
@@ -150,7 +151,7 @@ pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
     };
     let migration = decision.migration.as_ref().map(migration_json);
     let approvals = decision.approvals.as_ref().map(|a| {
-        serde_json::json!({"recipe": hex(&a.r), "foreign": a.foreign, "exec": a.exec, "text": a.text})
+        serde_json::json!({"recipe": hex::encode(&a.r), "foreign": a.foreign, "exec": a.exec, "text": a.text})
     });
     let triggers = preview_json(&Preview {
         triggers: decision.triggers.clone(),
@@ -158,8 +159,8 @@ pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
     })["triggers"]
         .clone();
     serde_json::json!({
-        "tree": hex(&decision.tree),
-        "root": hex(&decision.root),
+        "tree": hex::encode(&decision.tree),
+        "root": hex::encode(&decision.root),
         "stage": stage,
         "grants": grants_json(&decision.grants),
         "approvals": approvals,
@@ -185,7 +186,7 @@ pub(super) fn preview_json(preview: &Preview) -> serde_json::Value {
                 EntryChange::Changed => "changed",
                 EntryChange::Unchanged => "unchanged",
             };
-            serde_json::json!({"identity": hex(&e.identity), "change": change})
+            serde_json::json!({"identity": hex::encode(&e.identity), "change": change})
         })
         .collect();
     let rows: Vec<_> = preview
@@ -200,7 +201,7 @@ pub(super) fn preview_json(preview: &Preview) -> serde_json::Value {
             });
             serde_json::json!({
                 "class": CLASSES[t.class as usize], "kind": KINDS[t.kind as usize],
-                "path": entry_path(&t.path), "schema": hex(&t.schema), "hold": hold,
+                "path": entry_path(&t.path), "schema": hex::encode(&t.schema), "hold": hold,
                 "fate": t.fate.map(HeldFate::name), "count": t.count,
                 "earliest_due": t.earliest_due,
             })
@@ -220,10 +221,10 @@ pub(super) fn preview_json(preview: &Preview) -> serde_json::Value {
 }
 
 fn migration_json(m: &Migration) -> serde_json::Value {
-    serde_json::json!({"digest": hex(&m.digest), "changes": m.changes})
+    serde_json::json!({"digest": hex::encode(&m.digest), "changes": m.changes})
 }
 
 /// An entry path as `--held-entry` takes it: its text, or hex when it is not UTF-8.
 fn entry_path(path: &[u8]) -> String {
-    std::str::from_utf8(path).map_or_else(|_| hex(path), str::to_owned)
+    std::str::from_utf8(path).map_or_else(|_| hex::encode(path), str::to_owned)
 }

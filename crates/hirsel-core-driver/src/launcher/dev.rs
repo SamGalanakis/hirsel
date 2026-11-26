@@ -110,7 +110,7 @@ pub(crate) fn command(
     if let Some(predecessor) = predecessor {
         command.arg(format!(
             "--hirsel-install-predecessor={}",
-            hex(&predecessor)
+            hirsel_core_ids::hex::encode(&predecessor)
         ));
     }
     command.arg("--hirsel-dev-store").args(arguments);

@@ -2665,7 +2665,7 @@ mod located_order_tests {
         word(&mut bytes, value.len() as u64, 8);
         word(&mut bytes, width as u64, 8);
         bytes.extend(value);
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        hirsel_core_ids::hex::encode(&bytes)
     }
     #[test]
     fn typed_locator_order_uses_values_across_widths_and_advances_private_encodings() {
@@ -2800,7 +2800,7 @@ mod located_order_tests {
             let native_reference = field == "region_ref t1";
             let hex = |width, value: &[u8]| {
                 if native_reference {
-                    value.iter().map(|b| format!("{b:02x}")).collect()
+                    hirsel_core_ids::hex::encode(value)
                 } else {
                     blob(width, value)
                 }

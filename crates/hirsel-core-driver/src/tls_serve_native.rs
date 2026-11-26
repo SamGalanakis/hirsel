@@ -146,7 +146,8 @@ mod tls_serve_laws {
             .sum();
         options.instance_limit = crate::native::DEFAULT_INSTANCE_LIMIT;
         options.directories = vec![files.display().to_string()];
-        let roots = crate::call::hex(&crate::package_content::archive_digest(file("ca.pem")));
+        let roots =
+            hirsel_core_ids::hex::encode(&crate::package_content::archive_digest(file("ca.pem")));
         options.net_rules = [
             "Listen 127.0.0.1/32 0-65535".to_owned(),
             "Connect 127.0.0.1/32 1-65535".to_owned(),
@@ -393,7 +394,7 @@ mod tls_serve_laws {
     }
 
     fn digest(der: &[u8]) -> String {
-        crate::call::hex(&crate::package_content::archive_digest(der))
+        hirsel_core_ids::hex::encode(&crate::package_content::archive_digest(der))
     }
 
     fn verified(output: &str) {
@@ -824,7 +825,7 @@ mod tls_serve_laws {
             client.join().unwrap();
             let lines = server.finish().join("\n");
             for secret in [document, &scalar[..]] {
-                let hex = crate::call::hex(secret);
+                let hex = hirsel_core_ids::hex::encode(secret);
                 for form in [hex.clone(), hex.to_uppercase(), crate::call::base64(secret)] {
                     assert!(!lines.contains(&form), "{mode}: {lines}");
                 }
@@ -872,7 +873,7 @@ mod tls_serve_laws {
             let document = file(p8);
             let scalar = scalar(p8);
             for secret in [document, &scalar[..]] {
-                let hex = crate::call::hex(secret);
+                let hex = hirsel_core_ids::hex::encode(secret);
                 for form in [
                     secret,
                     hex.as_bytes(),

@@ -203,13 +203,7 @@ fn cache_path(root: &Path, sources: ContentHash) -> io::Result<PathBuf> {
         "hirsel.package-product.v1",
         [&compiler_identity().0[..], &sources.0],
     );
-    Ok(root.join(
-        identity
-            .0
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>(),
-    ))
+    Ok(root.join(identity.to_string()))
 }
 pub(crate) enum ProductLibraries {
     Core,

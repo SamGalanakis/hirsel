@@ -12,6 +12,7 @@ use crate::operator::{
     Registration, Report,
 };
 use hirsel_core_ids::ContentHash;
+use hirsel_core_ids::hex;
 use hirsel_core_ir::release_recipe::Recipe;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -42,20 +43,6 @@ const PIN_WAIT: Duration = Duration::from_secs(5);
 const BUSY_WAIT: Duration = Duration::from_secs(60);
 /// The admission bytes per `Data` frame.
 const CHUNK: usize = 256 << 10;
-
-fn hex(bytes: &[u8]) -> String {
-    crate::call::hex(bytes)
-}
-
-fn unhex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
-}
 
 pub(crate) fn installed(name: &str) -> Result<PathBuf, Error> {
     let executable = std::env::current_exe()?;
@@ -160,7 +147,7 @@ impl Upload {
 
 fn request_id(text: Option<String>) -> Result<Vec<u8>, Error> {
     match text {
-        Some(text) => unhex(&text)
+        Some(text) => hex::decode(&text)
             .filter(|d| d.len() == 16)
             .ok_or_else(|| "--request-id takes 32 hex digits".into()),
         None => {
@@ -270,7 +257,7 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
         packages,
     };
     let d = request_id(d)?;
-    eprintln!("request {}", hex(&d));
+    eprintln!("request {}", hex::encode(&d));
     let ask = Ask::Register(
         d.clone(),
         Box::new(registration),
@@ -335,7 +322,7 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         if invocation.positional.is_some() || d.is_some() || submission_options || has_decision {
             return Err("deploy --status takes only --state".into());
         }
-        let d = unhex(&text)
+        let d = hex::decode(&text)
             .filter(|d| d.len() == 16)
             .ok_or("--status takes 32 hex digits")?;
         return status_of(&state, &d);
@@ -351,7 +338,7 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     }
     let given = d.is_some();
     let d = request_id(d)?;
-    eprintln!("request {}", hex(&d));
+    eprintln!("request {}", hex::encode(&d));
     // A resubmitted request keeps the group it was first sent to, even if the name was
     // reused since.
     let mut group = None;
@@ -443,7 +430,7 @@ fn or_unavailable(command: &str, result: Result<i32, Error>) -> Result<i32, Erro
 
 fn unexpected(command: &str, d: &[u8], answer: Option<Answer>) -> i32 {
     match answer {
-        None => eprintln!("{command}: outcome unknown: request {}", hex(d)),
+        None => eprintln!("{command}: outcome unknown: request {}", hex::encode(d)),
         Some(other) => eprintln!("{command}: unexpected reply {other:?}"),
     }
     UNAVAILABLE
@@ -499,12 +486,12 @@ fn report_json(report: &Report) -> serde_json::Value {
 }
 
 fn attempt_hex(a: &Attempt) -> String {
-    hex(&a.bytes())
+    hex::encode(&a.bytes())
 }
 
 fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
     let mut out = serde_json::json!({
-        "request": hex(d),
+        "request": hex::encode(d),
         "group": group.name,
         "incarnation": group.incarnation,
     });
@@ -527,7 +514,7 @@ fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
             serde_json::json!({"phase": "reconciling", "attempt": attempt_hex(a), "activation": v, "reason": why})
         }
         Phase::Installed(v, assembly, report) => serde_json::json!({
-            "phase": "installed", "activation": v, "assembly": hex(assembly), "report": report_json(report),
+            "phase": "installed", "activation": v, "assembly": hex::encode(assembly), "report": report_json(report),
         }),
         Phase::Failed(class, detail, report) => serde_json::json!({
             "phase": "failed", "class": class_name(*class), "detail": detail, "report": report_json(report),
@@ -594,7 +581,7 @@ impl<'a> Exchange<'a> {
                     eprintln!(
                         "{}: the host stayed busy; resend request {}",
                         self.command,
-                        hex(&self.d)
+                        hex::encode(&self.d)
                     );
                     return Ok(UNAVAILABLE);
                 }
@@ -613,7 +600,7 @@ impl<'a> Exchange<'a> {
         // The blob digests the host's `Need` parts named so far, for a source input.
         let mut blobs: Vec<[u8; 32]> = Vec::new();
         let lost = |command: &str, d: &[u8]| {
-            eprintln!("{command}: outcome unknown: request {}", hex(d));
+            eprintln!("{command}: outcome unknown: request {}", hex::encode(d));
             Ok(Some(UNAVAILABLE))
         };
         let result = loop {
@@ -628,7 +615,7 @@ impl<'a> Exchange<'a> {
                     let Some(upload) = &self.upload else {
                         break Err(format!(
                             "request {} uploads its input; resend it with `hirsel deploy R --request-id HEX`",
-                            hex(&self.d)
+                            hex::encode(&self.d)
                         )
                         .into());
                     };
@@ -721,8 +708,8 @@ impl<'a> Exchange<'a> {
                         eprintln!(
                             "{}: request {} awaits the operator's decision; decide it with `hirsel decide --state DIR --request-id {}`",
                             self.command,
-                            hex(&self.d),
-                            hex(&self.d)
+                            hex::encode(&self.d),
+                            hex::encode(&self.d)
                         );
                         println!("{}", state_json(&d, &group, &phase));
                         break Ok(Some(2));
@@ -850,7 +837,7 @@ fn resolve_pin(state: &Path, id: [u8; 16]) -> Result<Pin, Error> {
         return Ok(Pin::Unavailable("a writer holds the catalog".into()));
     };
     let output = Command::new(installed("pin_reader")?)
-        .arg(hex(&id))
+        .arg(hex::encode(&id))
         .current_dir(state)
         .output()?;
     let text = String::from_utf8_lossy(&output.stdout);

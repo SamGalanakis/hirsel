@@ -5,6 +5,7 @@
 
 pub mod dir_port;
 pub mod encoding;
+pub mod hex;
 pub mod host_op;
 pub mod launch;
 pub mod published;
@@ -29,6 +30,19 @@ use sha2::{Digest, Sha256};
     PartialOrd,
 )]
 pub struct ContentHash(pub [u8; 32]);
+
+impl std::fmt::LowerHex for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        hex::write(&self.0, f)
+    }
+}
+
+impl std::fmt::Display for ContentHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::LowerHex::fmt(self, f)
+    }
+}
+
 impl ContentHash {
     pub fn of_bytes(bytes: &[u8]) -> Self {
         Self::of_parts("hirsel.text.v1", [bytes])
@@ -334,6 +348,18 @@ mod tests {
         }
         assert!(path.write_to(&mut Refuse).is_err());
         assert!(write!(&mut Refuse, "{path}").is_err());
+    }
+
+    #[test]
+    fn hex_vectors_and_content_hash_formatting() {
+        assert_eq!(hex::encode(&[0x00, 0xab, 0xcd, 0xef]), "00abcdef");
+        assert_eq!(hex::decode("00abCDEF"), Some(vec![0x00, 0xab, 0xcd, 0xef]));
+        assert_eq!(hex::decode("0"), None);
+        assert_eq!(hex::decode("0x"), None);
+
+        let hash = ContentHash([0xab; 32]);
+        assert_eq!(hash.to_string(), "ab".repeat(32));
+        assert_eq!(format!("{hash:x}"), "ab".repeat(32));
     }
 
     #[test]

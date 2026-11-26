@@ -7,6 +7,7 @@
 //! entry from the terminal".
 use crate::cli::{Invocation, OptionId};
 use crate::sdk::{Describe, Exported, Schema, stub_paths};
+use hirsel_core_ids::hex;
 use serde_json::{Map, Number, Value, json};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -72,10 +73,9 @@ impl Options {
                 }
                 OptionId::CallTimeout => options.timeout = seconds("--timeout", &text)?,
                 OptionId::CallStream => {
-                    let bytes: [u8; 16] =
-                        from_hex(&text)
-                            .and_then(|bytes| bytes.try_into().ok())
-                            .ok_or("--stream expects exactly 32 hexadecimal digits")?;
+                    let bytes: [u8; 16] = hex::decode(&text)
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .ok_or("--stream expects exactly 32 hexadecimal digits")?;
                     let (t, n) = bytes.split_at(8);
                     options.stream = Some((
                         u64::from_be_bytes(t.try_into()?),
@@ -151,7 +151,7 @@ fn run_with(
     let outcome = exchange(&url, &frame, &description, name, entry, argument, &options)?;
     let returned = outcome["tag"] == "Returned";
     let shown = if returned {
-        let bytes = from_hex(outcome["value"].as_str().unwrap_or_default())
+        let bytes = hex::decode(outcome["value"].as_str().unwrap_or_default())
             .ok_or("Malformed: Returned bytes")?;
         json!({"tag": "Returned", "value": decode(&result, &bytes)?})
     } else {
@@ -499,20 +499,6 @@ pub fn arguments(schema: &Schema, flags: &[String]) -> Result<Vec<u8>, Error> {
 // ---------------------------------------------------------------------------
 // The std.codec value form and its JSON mapping (docs/spec/sdk.md)
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-pub(crate) fn from_hex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
-        .collect()
-}
-
 pub fn encode(schema: &Schema, value: &Value) -> Result<Vec<u8>, String> {
     if schema.key {
         return Err("key schemas are not call arguments (unsupported)".into());
@@ -620,7 +606,7 @@ fn write(
             out.extend_from_slice(text.as_bytes());
         }
         14 if t[1] == json!([3]) => {
-            let bytes = value.as_str().and_then(from_hex).ok_or_else(wrong)?;
+            let bytes = value.as_str().and_then(hex::decode).ok_or_else(wrong)?;
             count(bytes.len(), out, at)?;
             out.extend_from_slice(&bytes);
         }
@@ -825,7 +811,7 @@ fn read(t: &Value, defs: &[Value], r: &mut Cursor) -> Result<Value, String> {
         }
         14 if t[1] == json!([3]) => {
             let n = r.count()?;
-            Value::String(hex(r.take(n)?))
+            Value::String(hex::encode(r.take(n)?))
         }
         14 => {
             let n = r.count()?;
@@ -1167,7 +1153,7 @@ fn exchange(
     let timeout = options.timeout;
     let deadline = Instant::now() + timeout;
     let mut session = Session::open(url, deadline)?;
-    let want = json!({"identity": hex(&entry.identity), "args_fp": entry.args_fp, "result_fp": entry.result_fp});
+    let want = json!({"identity": hex::encode(&entry.identity), "args_fp": entry.args_fp, "result_fp": entry.result_fp});
     let hello = json!({"tag": "Hello", "values": [{"tag": "None"}, [want]]});
     session.send(0x2, &encode(frame, &hello)?)?;
     let mut stream = None;
@@ -1186,7 +1172,7 @@ fn exchange(
             "Welcome" if stream.is_none() => {
                 let subject = values[0]["subject"]
                     .as_str()
-                    .and_then(from_hex)
+                    .and_then(hex::decode)
                     .ok_or("Welcome carries an invalid Caller")?;
                 if subject.len() > 64 {
                     return Err("Welcome Caller subject exceeds 64 bytes".into());
@@ -1197,7 +1183,8 @@ fn exchange(
                     None => (now, u64::from_le_bytes(random::<8>()?)),
                 };
                 stream = Some(json!({"t": t, "n": n}));
-                let digest = from_hex(values[3].as_str().unwrap_or_default()).unwrap_or_default();
+                let digest =
+                    hex::decode(values[3].as_str().unwrap_or_default()).unwrap_or_default();
                 let target = values[4].as_str().unwrap_or_default();
                 let n_place = values[5].as_u64().unwrap_or_default();
                 if !digest.is_empty()
@@ -1208,8 +1195,8 @@ fn exchange(
                     session.close();
                     return Err(format!(
                         "the server runs release {} ({target}, n_place {n_place}), not the described {} ({}, n_place {}); the call was not sent",
-                        hex(&digest),
-                        hex(&description.digest),
+                        hex::encode(&digest),
+                        hex::encode(&description.digest),
                         description.target,
                         description.n_place
                     )
@@ -1221,7 +1208,7 @@ fn exchange(
                 match placed {
                     "Ready" => {
                         let slot = &received["value"]["value"];
-                        let call = json!({"tag": "Call", "values": [stream, 0, slot, deadline_ms, hex(&argument)]});
+                        let call = json!({"tag": "Call", "values": [stream, 0, slot, deadline_ms, hex::encode(&argument)]});
                         session
                             .send(0x2, &encode(frame, &call)?)
                             .map_err(|error| format!("LocallyUnknown: {error}"))?;

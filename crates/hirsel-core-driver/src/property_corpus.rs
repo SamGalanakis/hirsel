@@ -111,8 +111,7 @@ impl Corpus {
 
     fn path(&self, test: &DefPath) -> PathBuf {
         let digest = ContentHash::of_bytes(test.to_string().as_bytes());
-        self.root
-            .join(format!("{}.json", crate::request::hex(digest)))
+        self.root.join(format!("{digest}.json"))
     }
 
     pub(crate) fn read(&self, test: &DefPath) -> io::Result<SavedEntry> {

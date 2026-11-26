@@ -446,10 +446,7 @@ fn refuse(context: &str, problem: impl std::fmt::Display) -> AdmissionError {
 }
 
 fn archive_name(archive: ObjectRef, path: Option<&str>) -> String {
-    path.map_or_else(
-        || format!("object {}", crate::call::hex(&archive.hash.0)),
-        str::to_owned,
-    )
+    path.map_or_else(|| format!("object {}", archive.hash), str::to_owned)
 }
 
 fn context(archive: ObjectRef, module: &DefPath, target: &str, path: Option<&str>) -> String {
@@ -488,8 +485,7 @@ impl SealedArchive {
                 &context,
                 format!(
                     " does not match its pin: expected sha256 {}, found sha256 {}",
-                    crate::call::hex(&archive.hash.0),
-                    crate::call::hex(&observed.0),
+                    archive.hash, observed,
                 ),
             ));
         }

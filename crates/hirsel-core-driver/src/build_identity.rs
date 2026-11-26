@@ -113,12 +113,12 @@ mod build_identity {
     /// identical test binaries, and each run still uses its own directory.
     #[test]
     fn test_binaries_take_no_place() {
-        use crate::package_content::{archive_digest, hex};
+        use crate::package_content::archive_digest;
         let image = Path::new("/bin/true").canonicalize().unwrap();
         let profile = format!(
             "[true]\nimage = {:?}\nsha256 = \"{}\"\nargv0 = \"true\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = \"/\" }}\n",
             image.to_str().unwrap(),
-            hex(&archive_digest(&std::fs::read(&image).unwrap())),
+            hirsel_core_ids::hex::encode(&archive_digest(&std::fs::read(&image).unwrap())),
         );
         let source = "@test\nfn writes_its_directory(d: Dir) -> Result[(), ()] waits {\n\
             let file = result.unwrap(host.open(d, \"probe\", CreateNew))\n\
@@ -148,12 +148,15 @@ mod build_identity {
                 out.to_str().unwrap(),
             ]);
             assert_eq!(status, Some(0), "{stdout}\n{stderr}");
-            assert!(law.path("data/probe").is_file(), "the Dir slot is this place's");
+            assert!(
+                law.path("data/probe").is_file(),
+                "the Dir slot is this place's"
+            );
             // Each binary, and the name of the executable record that holds it.
             let records = law.path("cache/hirsel/cas/keys");
             let run = tests.map(|test| {
                 let test = DefPath::from_full(&format!("app@1/main/{test}")).unwrap();
-                let name = crate::request::hex(ContentHash::of_bytes(test.to_string().as_bytes()));
+                let name = ContentHash::of_bytes(test.to_string().as_bytes()).to_string();
                 let binary = std::fs::read(out.join(name)).unwrap();
                 let digest = archive_digest(&binary);
                 let keys = walkdir(&records)
@@ -173,7 +176,10 @@ mod build_identity {
         }
         for (test, (a, b)) in tests.iter().zip(runs[0].iter().zip(&runs[1])) {
             assert!(a.0 == b.0, "{test}: the binaries differ between places");
-            assert_eq!(a.1, b.1, "{test}: the executable keys differ between places");
+            assert_eq!(
+                a.1, b.1,
+                "{test}: the executable keys differ between places"
+            );
         }
     }
 

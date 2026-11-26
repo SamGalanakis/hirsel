@@ -1282,12 +1282,7 @@ fn a_damaged_section_page_refuses_the_request_and_names_the_image() {
         .err()
         .expect("a damaged page has no other path to its rows")
         .to_string();
-    let name: String = image
-        .identity
-        .0
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let name = image.identity.to_string();
     assert!(
         error.contains(&name) && error.contains("fails its hash check"),
         "{error}"

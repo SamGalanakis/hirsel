@@ -205,25 +205,18 @@ fn remote_bytes_and_records_are_used_only_when_they_check() {
     let id = builder(&listed).id;
     let good = sign(&listed, id, Kind::Object as u8, key, &blobs, &payload);
     let unsigned = signed::unsigned(Kind::Object, key, id, &blobs, &payload);
-    let hex = crate::request::hex;
     // Each case is a fresh remote and a fresh local store: what the remote
     // serves at the record's and the blob's paths, and whether it is a hit.
     let case = |name: &str, signer: ContentHash, record: &[u8], blob: &[u8], hit: bool| {
         let kept_record = hit || blob != object;
         let files = Files::default();
-        let record_path = format!("r/{}/{}", hex(signer), hex(key));
+        let record_path = format!("r/{signer}/{key}");
         files.lock().unwrap().insert(record_path, record.to_vec());
-        let blob_path = format!("o/{}", hex(bare.address));
+        let blob_path = format!("o/{}", bare.address);
         files.lock().unwrap().insert(blob_path, blob.to_vec());
         let config = Config {
             url: remote_fixture(files),
-            trusted: vec![
-                builder(&listed)
-                    .public
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect(),
-            ],
+            trusted: vec![hirsel_core_ids::hex::encode(&builder(&listed).public)],
             signing_key: None,
         };
         let remote = Remote::new(config).unwrap().unwrap();

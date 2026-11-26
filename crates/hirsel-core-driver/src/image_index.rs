@@ -533,7 +533,7 @@ pub(crate) struct DiskIndex {
     rows: AtomicUsize,
 }
 fn image_name(identity: ContentHash) -> String {
-    identity.0.iter().map(|b| format!("{b:02x}")).collect()
+    identity.to_string()
 }
 impl DiskIndex {
     pub fn new(path: &Path) -> io::Result<Self> {

@@ -1,18 +1,5 @@
-fn nibble(c: u8) -> u8 {
-    if c >= b'a' {
-        c - b'a' + 10u8
-    } else {
-        c - b'0'
-    }
-}
-
 fn unhex(s: String) -> Bytes {
-    let hex = string.as_bytes(s)
-    let mut out: Bytes = list.with_capacity(list.len(hex) / 2)
-    for i in 0u64 .. list.len(hex) / 2 {
-        list.push(mut out, nibble(hex[2 * i]) * 16u8 + nibble(hex[2 * i + 1]))
-    }
-    out
+    option.unwrap(std.hex.decode(string.as_bytes(s)))
 }
 
 // Record headers and AAD are assembled by hand. The ciphertext and tag use

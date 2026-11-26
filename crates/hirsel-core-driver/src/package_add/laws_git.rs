@@ -113,10 +113,6 @@ impl Kind {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn unhex(text: &str) -> Vec<u8> {
     (0..text.len())
         .step_by(2)
@@ -139,7 +135,7 @@ impl Objects {
     fn put(&mut self, kind: Kind, data: Vec<u8>) -> String {
         let mut framed = format!("{} {}\0", kind.name(), data.len()).into_bytes();
         framed.extend_from_slice(&data);
-        let id = hex(&sha1(&framed));
+        let id = hirsel_core_ids::hex::encode(&sha1(&framed));
         self.0.insert(id.clone(), (kind, data));
         id
     }
@@ -208,7 +204,7 @@ impl Objects {
                 let space = rest.iter().position(|b| *b == b' ').unwrap();
                 let mode = &rest[..space];
                 let nul = rest.iter().position(|b| *b == 0).unwrap();
-                let entry = hex(&rest[nul + 1..nul + 21]);
+                let entry = hirsel_core_ids::hex::encode(&rest[nul + 1..nul + 21]);
                 rest = &rest[nul + 21..];
                 if mode != b"160000" {
                     pending.push(entry);

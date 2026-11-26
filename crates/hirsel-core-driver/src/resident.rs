@@ -117,7 +117,7 @@ impl Toolchain {
     }
     /// The name of its server's `suffix` file: 128 bits of the identity.
     fn file(self, suffix: &str) -> String {
-        format!("{}.{suffix}", &crate::request::hex(self.0)[..32])
+        format!("{}.{suffix}", &self.0.to_string()[..32])
     }
 }
 

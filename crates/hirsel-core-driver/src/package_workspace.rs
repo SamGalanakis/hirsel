@@ -1,5 +1,5 @@
 use crate::package_content::{
-    ARCHIVE_LIMIT, ArchiveRow, Content, ForeignModule, Id, Root, Source, archive_digest, hex,
+    ARCHIVE_LIMIT, ArchiveRow, Content, ForeignModule, Id, Root, Source, archive_digest,
 };
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, FileId, WalkError, open_directory, walk};
@@ -566,8 +566,8 @@ impl Member {
                         self.manifest_path.display(),
                         module.join("."),
                         row.path,
-                        hex(&row.pin),
-                        hex(&digest),
+                        hirsel_core_ids::hex::encode(&row.pin),
+                        hirsel_core_ids::hex::encode(&digest),
                         if pointer {
                             "; it is a Git LFS pointer, and hirsel does not fetch LFS content"
                         } else {

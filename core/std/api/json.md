@@ -96,6 +96,9 @@ nesting and allocation limits, and codec `via` constraints.
 
 ## Documents, callback readers and writers
 
+`json.push_quoted(mut out, value)` appends one escaped JSON string, including
+quotes, to a String. `json.append_quoted` writes the same bytes to a Bytes buffer.
+
 Use `decode` to read one complete value into an owned type. Compose
 `record_of` for object members and `list_of` for arrays. `peek` reports the
 next `ValueKind` without advancing the cursor. `read_bool` and `read_string`

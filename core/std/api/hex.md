@@ -9,6 +9,8 @@ Capacity when allocating the output.
 
 `hex.encode_byte` returns the two ASCII digits of one byte without allocation.
 Pass `true` for wire formats that require upper-case digits.
+`hex.digit` returns the value 0 through 15 for one ASCII digit in either case
+or 255 for any other byte.
 
 `hex.append_from(mut out, n, read)` appends the encoding of `n` bytes read in
 index order by a scoped callback. It reserves all output space before calling

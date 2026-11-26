@@ -202,17 +202,11 @@ pub fn finish(take r: Recorder) -> List[Ended] {
     log.finish(take spans)
 }
 
-fn quoted(mut out: String, s: String) {
-    json.write(mut out, false, scoped fn(w: json.Writer) {
-        json.write_string_value(w, s)
-    })
-}
-
 fn push_value(mut out: String, v: Value) {
     match v {
         Str(s) => {
             string.push(mut out, "{\"stringValue\":")
-            quoted(mut out, s)
+            json.push_quoted(mut out, s)
         },
         Bool(b) => {
             string.push(mut out, if b {
@@ -254,7 +248,7 @@ fn push_attributes(mut out: String, xs: List[Attribute]) {
             string.push(mut out, ",")
         }
         string.push(mut out, "{\"key\":")
-        quoted(mut out, xs[i].key)
+        json.push_quoted(mut out, xs[i].key)
         string.push(mut out, ",\"value\":")
         push_value(mut out, xs[i].value)
         string.push(mut out, "}")
@@ -318,7 +312,7 @@ fn push_span(mut out: String, s: Span, end_ns: u64) {
         string.push(mut out, "}")
     }
     string.push(mut out, "],\"name\":")
-    quoted(mut out, s.name)
+    json.push_quoted(mut out, s.name)
     if let Some(p) = s.parent {
         push_span_id(mut out, ",\"parentSpanId\":", p)
     }
@@ -344,9 +338,9 @@ pub fn otlp_json(mut out: String, about: List[Attribute], scope: String, version
     string.push(mut out, "{\"resourceSpans\":[{\"resource\":{\"attributes\":")
     push_attributes(mut out, about)
     string.push(mut out, "},\"scopeSpans\":[{\"scope\":{\"name\":")
-    quoted(mut out, scope)
+    json.push_quoted(mut out, scope)
     string.push(mut out, ",\"version\":")
-    quoted(mut out, version)
+    json.push_quoted(mut out, version)
     string.push(mut out, "},\"spans\":[")
     for i in 0 .. list.len(spans) {
         if i > 0 {

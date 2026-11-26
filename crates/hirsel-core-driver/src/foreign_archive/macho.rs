@@ -503,7 +503,7 @@ static const char abi[sizeof("hfl_touch stack () -> i32\n") - 1] = "hfl_touch st
         let prefix = |object: ObjectRef| {
             format!(
                 "FFI-3: archive object {} of ffi_laws@1/native for {target}",
-                crate::call::hex(&object.hash.0)
+                object.hash
             )
         };
         let admit = |(bytes, object): (Vec<u8>, ObjectRef)| {

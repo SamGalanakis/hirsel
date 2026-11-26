@@ -68,8 +68,11 @@ impl Designation {
 const UNGRANTED: &str = "a value holds a capability not granted through the recording";
 const VIRTUAL: &str =
     "a value holds a capability of virtual construction, whose snapshot this build does not write";
+/// Marks a grant kind of virtual construction, a narrowed `Exec`, whose
+/// stored bytes are its home stream: its snapshot is tag 6.
+const HOMED: u8 = 0x80;
 const NARROWED: &str =
-    "a value holds a narrowed Exec capability, whose profile snapshot this build does not write";
+    "a value holds a narrowed capability whose grant this build does not snapshot";
 const HOST_SIZE: &str = "a value holds an Env or Cred capability whose snapshot a tape cannot hold";
 const NET_RULES: &str = "a value holds a Net capability whose rules a snapshot cannot hold";
 const UNRESOLVED: &str = "a value holds a capability the recording did not resolve";
@@ -132,10 +135,20 @@ fn grant(registry: &Registry, word: u64) -> Result<Grant, &'static str> {
         .filter(|_| state.generation == generation_of(h))
         .ok_or(UNGRANTED)?;
     let o = ordinal_of(h);
-    let (kind, stored) = live.grants.get(&o).cloned().ok_or(NARROWED)?;
+    let (kind, stored) = match live.grants.get(&o).cloned() {
+        Some(grant) => grant,
+        // A narrowed Exec made here: its profile is no snapshot's, so it
+        // crosses as a capability of virtual construction homed here.
+        None if live.exec_rules.contains_key(&o) => (
+            crate::entry::EXEC | HOMED,
+            super::stream(live).to_le_bytes().to_vec(),
+        ),
+        None => return Err(NARROWED),
+    };
     let inner = live.objects[o - 1].inner;
     let stored = match kind {
         0 | 2..=6 | 8 | 13 => stored,
+        kind if kind & HOMED != 0 => stored,
         // A Net's rules, granted or narrowed, are its source's handle.
         1 => net_rules(inner.ok_or(NET_RULES)?.handle)?,
         _ => return Err(UNGRANTED),
@@ -197,11 +210,19 @@ fn net_rules(rules: u64) -> Result<Vec<u8>, &'static str> {
 }
 
 /// A capability snapshot: tag 5, `ordinal`, then the kind and its stored
-/// bytes as the grant snapshot encodes them; a `Secret`'s: tag 7, `ordinal`,
-/// then its designation and policy.
+/// bytes as the grant snapshot encodes them, or for a narrowed `Exec` tag 6,
+/// `ordinal`, its kind and home stream; a `Secret`'s: tag 7, `ordinal`, then
+/// its designation and policy.
 fn snapshot(ordinal: u64, held: &Held) -> Vec<u8> {
     let mut out = vec![];
     match held {
+        Held::Capability(g) if g.kind & HOMED != 0 => {
+            // Tag 6: the kind and the home stream, no rules.
+            out.push(6);
+            put_varint(&mut out, ordinal);
+            out.push(g.kind & !HOMED);
+            out.extend_from_slice(&g.stored);
+        }
         Held::Capability(g) => {
             out.push(5);
             put_varint(&mut out, ordinal);

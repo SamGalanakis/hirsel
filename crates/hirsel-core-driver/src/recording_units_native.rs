@@ -585,6 +585,7 @@ fn rl9_record_configured(
     let program = product.build(&entry, &options).unwrap().executable;
     let path = dir.join(format!("{name}-{backend:?}.tape"));
     let output = Command::new(&program)
+        .args(options.exec_grants.iter().map(|grant| grant.argument()))
         .envs(envs.iter().copied())
         .env("HIRSEL_RECORD", &path)
         .output()

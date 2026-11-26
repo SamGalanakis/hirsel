@@ -61,7 +61,9 @@ impl FunctionEmitter<'_> {
         }
         for (i, row) in owners.iter().enumerate() {
             for (j, &n) in row.iter().enumerate() {
-                let n = if j == 0 { n + shift } else { n };
+                // An element row's offset is in its element.
+                let element = row[1] & hirsel_core_layout::cross::ELEMENT != 0;
+                let n = if j == 0 && !element { n + shift } else { n };
                 let at = self.offset(&buffer, (40 + i * 32 + j * 8) as u64);
                 self.store(&Type::I64, &int(n), &at, 8);
             }

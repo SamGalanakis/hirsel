@@ -22,9 +22,14 @@ pub const FUNCTION: u64 = 5;
 /// A `Secret` holder word: it moves with the value's bytes, the holder
 /// staying in the run's table; a recorder writes its designation.
 pub const SECRET: u64 = 6;
+/// Set on a row that follows a `SEQ` row: an owner word inside each of that
+/// sequence's elements, at its offset in the element. A crossing list's
+/// elements are plain, so the base kind is `CAPABILITY` or `FUNCTION`.
+pub const ELEMENT: u64 = 8;
 
 /// Each owner of a value of row `ty`, as `[offset, kind, element bytes, element
-/// logical size]`, in field order.
+/// logical size]`, in field order; each `SEQ` row is followed at once by its
+/// element's owner rows, flagged `ELEMENT`.
 pub fn owners(shapes: &[Row], recipes: &[RecipeRow], ty: TypeRef) -> Vec<[u64; 4]> {
     let mut out = Vec::new();
     row(shapes, recipes, ty, 0, &mut out);
@@ -49,6 +54,14 @@ fn held(shapes: &[Row], recipes: &[RecipeRow], ty: &FieldTy, at: u64, out: &mut 
         FieldTy::Seq(e) => {
             let (bytes, _, logical) = field_size(shapes, recipes, e);
             out.push([at, SEQ, bytes, logical]);
+            let mut inner = Vec::new();
+            held(shapes, recipes, e, 0, &mut inner);
+            out.extend(
+                inner
+                    .into_iter()
+                    .filter(|o| matches!(o[1], CAPABILITY | FUNCTION))
+                    .map(|[offset, kind, _, _]| [offset, kind | ELEMENT, 0, 0]),
+            );
         }
         FieldTy::Handle(Handle::Client) => out.push([at, CLIENT, 0, 0]),
         FieldTy::Handle(Handle::Socket) => out.push([at, SOCKET, 0, 0]),

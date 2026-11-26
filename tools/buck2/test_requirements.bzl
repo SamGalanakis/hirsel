@@ -106,6 +106,8 @@ OPENAT2_TEST_CASES = {
         "native::tests::rl9_result_crosses_with_its_handles",
         "native::tests::rl9_nested_shared_crosses",
         "native::tests::rl9_array_elements_cross",
+        "native::tests::rl9_list_elements_cross",
+        "native::tests::rl9_narrowed_exec_crosses",
         "native::tests::rl9_secret_crosses_with_its_designation",
         "native::tests::rl9_helper_secret_charges_survive_by_designation",
         "native::tests::test_replay_flag_records_and_replays",

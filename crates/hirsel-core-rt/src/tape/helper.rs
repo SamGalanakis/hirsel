@@ -13,7 +13,7 @@ use super::schedule::Group;
 use super::*;
 use crate::causes::{CANCELLED, CAPACITY, Cause, FAIL};
 use crate::units_lang::Cross;
-use hirsel_core_layout::cross::{CAPABILITY, CLIENT, FUNCTION, SECRET, SEQ, SHARED};
+use hirsel_core_layout::cross::{CAPABILITY, CLIENT, ELEMENT, FUNCTION, SECRET, SEQ, SHARED};
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 /// Stream numbers: unique in the process, so in each recording's file.
@@ -454,9 +454,11 @@ pub(super) unsafe fn capability_words(
 const NO_IDENTITY: &str = "the entry's function has no code identity (a closure)";
 
 /// A value that crosses units: its plain bytes with each owner word zeroed,
-/// then a part per owner in ascending offset order. A packed value (an item
-/// in a connection) passes `content`, its sequences' elements one after
-/// another in owner-row order; otherwise each sequence word points at them.
+/// then a part per owner in ascending offset order, each sequence's part
+/// followed by the parts of its elements' owner words, element by element. A
+/// packed value (an item in a connection) passes `content`, its sequences'
+/// elements one after another in owner-row order; otherwise each sequence
+/// word points at them.
 pub(super) unsafe fn value(
     base: *const u8,
     x: &Cross,
@@ -466,57 +468,83 @@ pub(super) unsafe fn value(
     // SAFETY: the value holds `x.len` initialized bytes at `x.at`.
     let mut plain =
         unsafe { std::slice::from_raw_parts(base.add(x.at as usize), x.len as usize) }.to_vec();
+    let read = |at: u64| {
+        // SAFETY: an owner row names initialized words of the value.
+        unsafe { base.add(at as usize).cast::<u64>().read_unaligned() }
+    };
+    // Each owner row with the element rows that follow it.
+    let rows = x.owners();
+    let mut owners = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let n = rows[i + 1..]
+            .iter()
+            .take_while(|r| r[1] & ELEMENT != 0)
+            .count();
+        owners.push((rows[i], &rows[i + 1..i + 1 + n]));
+        i += 1 + n;
+    }
     let mut packed = BTreeMap::new();
     if let Some(content) = content {
         let mut at = 0usize;
-        for &[offset, kind, element, _] in x.owners() {
+        for &([offset, kind, element, _], _) in &owners {
             if kind == SEQ {
-                // SAFETY: a sequence carrier's length word is initialized.
-                let len = unsafe { base.add(offset as usize + 8).cast::<u64>().read_unaligned() };
                 // SAFETY: the packed content holds each sequence's elements in row order.
                 packed.insert(offset, unsafe { content.add(at) });
-                at += (len * element) as usize;
+                at += (read(offset + 8) * element) as usize;
             }
         }
     }
-    let mut owners = x.owners().to_vec();
-    owners.sort_by_key(|o| o[0]);
+    owners.sort_by_key(|o| o.0[0]);
     let mut parts = Vec::new();
-    for &[at, kind, element, _] in &owners {
-        let word = |i: u64| {
-            // SAFETY: an owner row names initialized words of the value.
-            unsafe {
-                base.add((at + 8 * i) as usize)
-                    .cast::<u64>()
-                    .read_unaligned()
-            }
-        };
+    let mut count = 0u64;
+    for &([at, kind, element, _], inner) in &owners {
         let words = if kind == SEQ { 3 } else { 1 };
         let start = (at - x.at) as usize;
         plain[start..start + 8 * words].fill(0);
+        count += 1;
         match kind {
             SEQ => {
-                let bytes = (word(1) * element) as usize;
+                let len = read(at + 8);
+                let bytes = (len * element) as usize;
                 parts.push(0);
                 put_varint(&mut parts, bytes as u64);
-                if bytes > 0 {
-                    let from = packed.get(&at).copied().unwrap_or(word(0) as *const u8);
-                    // SAFETY: a sequence carrier, or the packed content, names
-                    // its initialized elements.
-                    let elements = unsafe { std::slice::from_raw_parts(from, bytes) };
-                    parts.extend_from_slice(elements);
+                if bytes == 0 {
+                    continue;
                 }
-            }
-            CAPABILITY | CLIENT | SECRET => {
-                parts.push(1);
-                parts.extend(handle(kind, word(0))?);
+                let from = packed.get(&at).copied().unwrap_or(read(at) as *const u8);
+                // SAFETY: a sequence carrier, or the packed content, names
+                // its initialized elements.
+                let elements = unsafe { std::slice::from_raw_parts(from, bytes) };
+                if inner.is_empty() {
+                    parts.extend_from_slice(elements);
+                    continue;
+                }
+                // Each element's owner words zeroed, then their parts.
+                let mut elements = elements.to_vec();
+                let mut inner = inner.to_vec();
+                inner.sort_by_key(|o| o[0]);
+                let mut tail = Vec::new();
+                for e in 0..len as usize {
+                    for &[offset, kind, ..] in &inner {
+                        let at = e * element as usize + offset as usize;
+                        let held = &mut elements[at..at + 8];
+                        let word = u64::from_le_bytes((&*held).try_into().unwrap());
+                        held.fill(0);
+                        word_part(kind & !ELEMENT, word, &mut tail, handle)?;
+                        count += 1;
+                    }
+                }
+                parts.extend_from_slice(&elements);
+                parts.extend_from_slice(&tail);
             }
             SHARED => {
                 // The snapshot's head, then the payload as a value: a holder
                 // points at the node's count, and the payload follows it.
+                let node = read(at);
                 parts.push(1);
-                parts.extend(handle(kind, word(0))?);
-                let (bytes, rows) = units::node_layout(word(0)).ok_or(units::UNNAMED_NODE)?;
+                parts.extend(handle(kind, node)?);
+                let (bytes, rows) = units::node_layout(node).ok_or(units::UNNAMED_NODE)?;
                 let payload = Cross {
                     bytes,
                     owners: rows.as_ptr(),
@@ -526,23 +554,40 @@ pub(super) unsafe fn value(
                 };
                 // SAFETY: a live holder pins its node, whose payload is a
                 // live value laid out as its owner rows say.
-                parts.extend(unsafe { value((word(0) + 8) as *const u8, &payload, None, handle) }?);
+                parts.extend(unsafe { value((node + 8) as *const u8, &payload, None, handle) }?);
             }
-            FUNCTION => {
-                let identity = run::identities::identity_of(word(0)).ok_or(NO_IDENTITY)?;
-                parts.push(2);
-                put_varint(&mut parts, identity.len() as u64);
-                parts.extend_from_slice(identity);
-            }
-            _ => return Err(HANDLE),
+            _ => word_part(kind, read(at), &mut parts, handle)?,
         }
     }
     let mut out = Vec::with_capacity(plain.len() + parts.len() + 20);
     put_varint(&mut out, plain.len() as u64);
     out.extend_from_slice(&plain);
-    put_varint(&mut out, owners.len() as u64);
+    put_varint(&mut out, count);
     out.extend_from_slice(&parts);
     Ok(out)
+}
+
+/// The part of one owner word: a handle's snapshot or a function's identity.
+fn word_part(
+    kind: u64,
+    word: u64,
+    parts: &mut Vec<u8>,
+    handle: &mut dyn FnMut(u64, u64) -> Result<Vec<u8>, &'static str>,
+) -> Result<(), &'static str> {
+    match kind {
+        CAPABILITY | CLIENT | SECRET => {
+            parts.push(1);
+            parts.extend(handle(kind, word)?);
+        }
+        FUNCTION => {
+            let identity = run::identities::identity_of(word).ok_or(NO_IDENTITY)?;
+            parts.push(2);
+            put_varint(parts, identity.len() as u64);
+            parts.extend_from_slice(identity);
+        }
+        _ => return Err(HANDLE),
+    }
+    Ok(())
 }
 
 /// Causes as a helper `END` writes them: each one's kind, site and detail.

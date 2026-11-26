@@ -138,20 +138,26 @@ fn rl9_net_crosses_in_an_item_and_an_entry() {
     }
 }
 
-/// The root sends its Env and its Cred to itself, reads a variable through
-/// the Env it took, and moves the Cred it took into a helper's entry, which
-/// fetches through it.
+/// The root narrows its Env and sends the narrowing to itself, reads a
+/// variable through the Env it took, sends its Cred to itself, and moves its
+/// granted Env with the Cred it took into a helper's entry, which fetches
+/// through the Cred and reads through the Env.
 const RL9_HOST: &str = r#"
-fn fetcher(take c: Cred) -> u64 waits {
+fn fetcher(take p: (Env, Cred)) -> u64 waits {
+    let (e, c) = take p
     let mut key_id = string.with_capacity(64)
     let mut token = string.with_capacity(64)
     let (_key, _expires) = result.unwrap(cred.fetch(c, mut key_id, mut token, Never))
-    7
+    match env.get(e, "HIRSEL_U3F") {
+        Ok(Some(_)) => 7,
+        _ => 8,
+    }
 }
 
 pub fn main(e: Env, c: Cred, tasks: Tasks, out: Stdout) -> Result[(), Exit] waits {
+    let narrowed = result.unwrap(env.narrow(e, "HIRSEL_U3F"))
     let (ec, ei): (Client[Env], Inbox[Env]) = result.unwrap(conn.new(1, bytes 0))
-    result.unwrap(conn.try_send(ec, e))
+    result.unwrap(conn.try_send(ec, narrowed))
     let read = result.unwrap(conn.try_receive(ei))
     let value = match env.get(read, "HIRSEL_U3F") {
         Ok(Some(s)) => s,
@@ -160,28 +166,35 @@ pub fn main(e: Env, c: Cred, tasks: Tasks, out: Stdout) -> Result[(), Exit] wait
     let (cc, ci): (Client[Cred], Inbox[Cred]) = result.unwrap(conn.new(1, bytes 0))
     result.unwrap(conn.try_send(cc, c))
     let fetch = result.unwrap(conn.try_receive(ci))
-    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, fetch, fetcher))
+    let h = result.unwrap(task.spawn_unit(tasks, bytes 65536, (e, fetch), fetcher))
     if result.unwrap(task.join(take h)) != 7 { return Error(Exit(status: 3)) }
     result.unwrap(stdout.write(out, value))
     Ok(())
 }
 "#;
 
-/// An Env and a Cred cross in an item and a Cred in an entry (recording.md,
-/// "Snapshots", tag 5), hand-derived before the first run. The run's Env is
-/// granted the pattern `HIRSEL_U3F`, set to `env`; its Cred `c` is
-/// `imds:127.0.0.1:<port>` with policy `mac`.
+/// An Env and a Cred cross in an item, a narrowed Env in the item, and an
+/// Env and a Cred in an entry (recording.md, "Snapshots", tag 5),
+/// hand-derived before the first run. The run's Env is granted the patterns
+/// `HIRSEL_U3F,HIRSEL_U3G`, with only `HIRSEL_U3F` set, to `env`; its Cred `c`
+/// is `imds:127.0.0.1:<port>` with policy `mac`.
 /// - Their stored bytes are what the header writes after the kind byte. An
-///   Env's: its patterns' text as bytes (10, `HIRSEL_U3F`), the entry count
-///   1, then the entry's name and value as bytes (10, `HIRSEL_U3F`; 3,
-///   `env`), 27 bytes. A Cred's: parameter, source and policy as bytes.
+///   Env's: its patterns' text as bytes, the entry count 1, then the entry's
+///   name and value as bytes (10, `HIRSEL_U3F`; 3, `env`). The granted Env's
+///   patterns are 21 bytes, so it is 38 bytes; the narrowing keeps the one
+///   pattern both cover, `HIRSEL_U3F`, so it is 27. A Cred's: parameter,
+///   source and policy as bytes.
 /// - An item holding one is 8 plain bytes (the zeroed word), one part, a
 ///   handle (1): tag 5, its ordinal, kind (Env 7, Cred 14), the stored
 ///   bytes' length and the stored bytes.
-/// - After g GRANT frames, the first connection takes g+1 (inbox) and g+2,
-///   the Env arrives as g+3; the second g+4 and g+5, the Cred g+6.
-/// - The helper's entry holds the Cred as its ordinal 1, and its fetch is a
-///   `CRED_FETCH` on that ordinal in the helper's stream, none in the root's.
+/// - An Env narrowing is no tape object. After g GRANT frames, the first
+///   connection takes g+1 (inbox) and g+2, the narrowed Env arrives as g+3;
+///   the second g+4 and g+5, the Cred g+6.
+/// - The helper's entry `(Env, Cred)` is 16 plain bytes and two parts: the
+///   granted Env as its ordinal 1 and the Cred as 2. Its fetch is a
+///   `CRED_FETCH` on 2 in the helper's stream, none in the root's.
+/// The narrowed Env and the entry's Env pass on main as well: their
+/// snapshot code is the granted Env's.
 #[test]
 #[ignore = "explicit native integration target"]
 fn rl9_env_and_cred_cross_in_an_item_and_an_entry() {
@@ -191,6 +204,14 @@ fn rl9_env_and_cred_cross_in_an_item_and_an_entry() {
     let field = |text: &str| [vec![text.len() as u8], text.as_bytes().to_vec()].concat();
     let env = [field("HIRSEL_U3F"), vec![1], field("HIRSEL_U3F"), field("env")].concat();
     assert_eq!(env.len(), 27);
+    let granted = [
+        field("HIRSEL_U3F,HIRSEL_U3G"),
+        vec![1],
+        field("HIRSEL_U3F"),
+        field("env"),
+    ]
+    .concat();
+    assert_eq!(granted.len(), 38);
     let value = |ordinal: u8, kind: u8, stored: &[u8]| -> Vec<u8> {
         [
             vec![8],
@@ -225,7 +246,7 @@ fn rl9_env_and_cred_cross_in_an_item_and_an_entry() {
             (backend, "env"),
             &["Env", "Tasks", "Stdout"],
             |options| {
-                options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_U3F");
+                options.env_patterns = hirsel_core_net::EnvPatterns::parse("HIRSEL_U3F,HIRSEL_U3G");
                 options.cred_grants =
                     vec![hirsel_core_net::CredGrant::new("c", &source, "mac").unwrap()];
             },
@@ -256,13 +277,20 @@ fn rl9_env_and_cred_cross_in_an_item_and_an_entry() {
             "{backend:?}: takes"
         );
         let entry = streams[1].0.as_ref().expect("a helper entry");
-        assert_eq!(
-            entry.body().value.bytes(),
-            value(1, 14, &cred).as_slice(),
-            "{backend:?}: entry"
-        );
+        let handle = |ordinal: u8, kind: u8, stored: &[u8]| -> Vec<u8> {
+            [vec![1, 5, ordinal, kind, stored.len() as u8], stored.to_vec()].concat()
+        };
+        let pair = [
+            vec![16],
+            vec![0; 16],
+            vec![2],
+            handle(1, 7, &granted),
+            handle(2, 14, &cred),
+        ]
+        .concat();
+        assert_eq!(entry.body().value.bytes(), pair.as_slice(), "{backend:?}: entry");
         assert_eq!(fetches(root), [] as [u64; 0], "{backend:?}: root fetches");
-        assert_eq!(fetches(&streams[1].1), [1], "{backend:?}: helper fetch");
+        assert_eq!(fetches(&streams[1].1), [2], "{backend:?}: helper fetch");
     }
 }
 
@@ -535,6 +563,168 @@ fn rl9_array_elements_cross() {
             })
             .collect();
         assert_eq!(draws, [u64::from(g + 4)], "{backend:?}: draw");
+    }
+}
+
+/// Capabilities as list elements cross: the root sends itself a
+/// `List[Random]` of two and draws through the second.
+const RL9_LIST: &str = r#"
+pub fn main(tasks: Tasks, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let (l, li): (Client[List[Random]], Inbox[List[Random]]) = result.unwrap(conn.new(1, bytes 64))
+    let mut rs: List[Random] = list.with_capacity(2)
+    list.push(mut rs, r)
+    list.push(mut rs, r)
+    result.unwrap(conn.try_send(l, take rs))
+    let mut got = result.unwrap(conn.try_receive(li))
+    let second = option.unwrap(list.pop(mut got))
+    let mut b: Bytes = list.with_capacity(8)
+    host.random(second, mut b)
+    result.unwrap(stdout.write(out, "list"))
+    Ok(())
+}
+"#;
+
+/// List elements that are capabilities cross as their own snapshots
+/// (recording.md, "Values": a sequence's part is followed by the parts of
+/// its elements' owner words, element by element), hand-derived before the
+/// first run. The root numbers the connection g+1 and its client g+2. The
+/// list's carrier is 24 plain bytes, all zeroed; then three parts: the
+/// sequence (16 bytes, both capability words zeroed) and a tag 5 snapshot
+/// per element in index order (kind 3, no stored bytes), arriving as g+3 and
+/// g+4. So the take is `[0, g+1]` and that value, and the draw through
+/// element 1 is a `RANDOM` on g+4. On main the descriptor lists no element
+/// owners: the part count is 1 and the elements are raw host words.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_list_elements_cross() {
+    crate::openat2_required::require();
+    use hirsel_tape_format::{Arrival, Frame, op};
+
+    let dir = tempfile::tempdir().unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_with(
+            RL9_LIST,
+            dir.path(),
+            "list",
+            backend,
+            "list",
+            &["Tasks", "Random", "Stdout"],
+        );
+        let root = &rl8_root_frames(&path);
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let items: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        let list = [
+            vec![0, g + 1, 24],
+            vec![0; 24],
+            vec![3, 0, 16],
+            vec![0; 16],
+            vec![1, 5, g + 3, 3, 0, 1, 5, g + 4, 3, 0],
+        ]
+        .concat();
+        assert_eq!(items, [list], "{backend:?}: the list");
+        let draws: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Op { op: o, object, .. } if *o == op::RANDOM => Some(*object),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(draws, [u64::from(g + 4)], "{backend:?}: draw");
+    }
+}
+
+/// A narrowed `Exec` crosses: the root narrows its granted `Exec` to its one
+/// program and sends the narrowing to itself.
+const RL9_EXEC: &str = r#"
+pub fn main(e: Exec, out: Stdout) -> Result[(), Exit] waits {
+    let n = result.unwrap(exec.narrow(e, Programs(names: "cat")))
+    let (c, i): (Client[Exec], Inbox[Exec]) = result.unwrap(conn.new(1, bytes 0))
+    result.unwrap(conn.try_send(c, n))
+    let _got = result.unwrap(conn.try_receive(i))
+    result.unwrap(stdout.write(out, "exec"))
+    Ok(())
+}
+"#;
+
+/// A narrowed `Exec`, whose profile no snapshot holds, crosses as a
+/// capability of virtual construction (recording.md, "Snapshots", tag 6),
+/// hand-derived before the first run. After g GRANT frames the narrowing is
+/// object g+1, the connection takes g+2 (inbox) and g+3, and the arrival
+/// g+4. The item is 8 plain bytes (the zeroed word), one part, a handle (1):
+/// tag 6, ordinal g+4, kind `Exec` 13 and home stream 0 as a `u32`. On main
+/// the narrowing has no grant snapshot and the item ends the stream.
+#[test]
+#[ignore = "explicit native integration target"]
+fn rl9_narrowed_exec_crosses() {
+    crate::openat2_required::require();
+    use crate::package_content::{archive_digest, hex};
+    use hirsel_tape_format::{Arrival, Frame};
+
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("image");
+    std::fs::copy("/bin/cat", &image).unwrap();
+    let pin = hex(&archive_digest(&std::fs::read(&image).unwrap()));
+    let policy = dir.path().join("policy.toml");
+    std::fs::write(
+        &policy,
+        format!(
+            "[cat]\nimage = {:?}\nsha256 = \"{pin}\"\nargv0 = \"cat\"\nargs = [[]]\nenv = {{}}\ndirs = {{ work = {:?} }}\n",
+            image.to_str().unwrap(),
+            dir.path().to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    let request =
+        hirsel_core_net::exec::Request::parse(&format!("{} cat", policy.display())).unwrap();
+    let digest = request.load().unwrap().digest;
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        let path = rl9_record_configured(
+            RL9_EXEC,
+            dir.path(),
+            "exec",
+            (backend, "exec"),
+            &["Stdout"],
+            |options| {
+                options.exec_grants.push(crate::exec_launch::Binding {
+                    request: request.clone(),
+                    policy: Some(digest),
+                    workdir: None,
+                });
+            },
+            &[],
+        );
+        let root = &rl8_root_frames(&path);
+        let g = root
+            .iter()
+            .filter(|f| matches!(f, Frame::Grant { .. }))
+            .count() as u8;
+        let items: Vec<_> = root
+            .iter()
+            .filter_map(|f| match f {
+                Frame::Take { body, .. } if matches!(body.arrival(), Arrival::Item(..)) => {
+                    Some(body.bytes().to_vec())
+                }
+                _ => None,
+            })
+            .collect();
+        let item = [
+            vec![0, g + 2, 8],
+            vec![0; 8],
+            vec![1, 1, 6, g + 4, 13, 0, 0, 0, 0],
+        ]
+        .concat();
+        assert_eq!(items, [item], "{backend:?}: the narrowed Exec");
     }
 }
 

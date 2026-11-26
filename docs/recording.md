@@ -468,6 +468,17 @@ The runtime already lets these capabilities cross: the cell sits behind the run'
 registry (`Registry::for_unit` shares `run`), and only virtual `Net` sockets are stopped at
 the crossing (`UnitSocket`).
 
+**Recorded sockets do not cross yet.** In a recording, a TCP `Socket` or `Listener` the run's
+tape made stops the run at the crossing (`UnitRecording`); its ownership does not move to the
+receiving unit, and no tag 2 or tag 3 snapshot is written. Moving it needs three things this
+build lacks: a departure record in the sender's stream, which the format above does not
+define; a source for the tag 2 fields, since the tape's resource record holds only the
+socket's kind and open parts while the peer address and the `ended` and `reset` flags live in
+the host reactor's record (and an accepted socket's peer is kept nowhere the tape reads); and
+one carrier form, since the root names its taped sockets by `ordinal << 2` through its socket
+tape while a helper names them by tape handle through their routes. A `UdpSocket` already
+crosses under recording, and a value holding one is cut (`HANDLE`) rather than written.
+
 **Takes.** A unit **takes** an arrival when it applies it: when the arrival leaves the
 unit's queue of arrivals that have reached it and changes the unit's state. That happens in
 `take`, in the single-item receive fast path `take_single_item`, and in `release_take`,
@@ -784,9 +795,16 @@ A capability (tag 5) that arrives gets its new ordinal in the receiving unit, an
 operations there belong to that unit, on that ordinal. If the same word arrives again, the
 latest ordinal is the one used. An `Env` is read through the run's own grant wherever it is
 used, so it gets an ordinal but no operation names it. A `Cred` is rebound to the receiving
-unit's ordinal, so a fetch through it is written in that unit's stream. A value holding a
-narrowed `Exec`, whose profile no snapshot holds, or a capability of virtual construction
-still ends the stream at that value.
+unit's ordinal, so a fetch through it is written in that unit's stream. A narrowed `Exec`,
+whose profile no snapshot holds, is a capability of virtual construction (tag 6) whose home
+is the unit that narrowed it; a unit it reaches keeps that home when it sends it on. The
+recording unit that takes it gets its profile from the cell that recorded the narrowing,
+so its spawns and further narrowings there are checked against the narrowed profile; a
+`SPAWN` through it is an issue and a delivery as through any `Exec`. A narrowing is
+recomputed, not written, and tag 6 holds no profile, so a replay of a unit other than the
+home could not recompute one made there: that waits on per-stream replay of helpers,
+which this build does not have. A value holding any other capability of virtual
+construction still ends the stream at that value.
 
 **`TAKE` frames.** `TAKE` is frame kind 14 (kind 10 is `END`), and its head is `0x0E`: the
 task bit is 0, because a take names no task. Then:

@@ -1,5 +1,5 @@
 fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
-    let mut limit = mtu
+    let mut limit = order.min(mtu, MSS)
     if let Some(p) = c.params {
         limit = order.min(limit, p.max_udp_payload)
     }
@@ -125,10 +125,12 @@ fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedP
         Handshake => commit_space(mut c.encrypted, p),
         _ => commit_space(mut c.application, p),
     }
-    if open_life(c) {
-        // B.4: a padded Initial counts in flight even when it only acknowledges.
+    if open_life(c) && (p.eliciting || kind == Initial) {
+        // B.4: a padded Initial counts in flight even when it only acknowledges. A
+        // packet that is neither is never retransmitted nor counted, so it is not
+        // tracked: a receive-only peer never acknowledges it.
         let ect = recovery.ecn_mark(c.recovery) != 0
-        recovery.on_sent(mut c.recovery, now, space_index(packet_level(kind)), p.number, p.size, p.eliciting, p.eliciting || kind == Initial, ect)
+        recovery.on_sent(mut c.recovery, now, space_index(packet_level(kind)), p.number, p.size, p.eliciting, true, ect)
     }
     if kind == Handshake {
         if let Client = c.side {

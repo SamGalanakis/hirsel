@@ -1,7 +1,7 @@
 const CRYPTO_LIMIT: u64 = 16384
 
 fn new_space() -> Space {
-    Space(receive: None, send: None, next: 0, sent: list.new(), received: list.new(), discard_before: 0, largest: None, ack_pending: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0, flights: list.new(), resend: list.new(), probes: 0, largest_at: 0, ecn_in: codec.EcnCounts(ect0: 0, ect1: 0, ce: 0))
+    Space(receive: None, send: None, next: 0, sent: list.new(), received: list.new(), discard_before: 0, largest: None, ack_pending: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0, flights: list.new(), resend: list.new(), acked: list.new(), probes: 0, largest_at: 0, ecn_in: codec.EcnCounts(ect0: 0, ect1: 0, ce: 0))
 }
 
 fn install_keys(mut s: Space, mut keys: schedule.Schedule, level: packet.Space) -> bool {
@@ -213,17 +213,40 @@ fn contains(numbers: List[u64], n: u64) -> bool {
     false
 }
 
+/// Owe [at, end) again, less whatever an acknowledged packet already carried.
+fn owe(mut s: Space, at: u64, end: u64) {
+    add_range(mut s.resend, at, end)
+    for r in s.acked {
+        remove_range(mut s.resend, r.at, r.end)
+    }
+}
+
+/// What settling a space's flights found about HANDSHAKE_DONE.
+type DoneSettled {
+    lost: bool,
+    acked: bool
+}
+
 /// Settle the flights an ACK or a loss names: acknowledged data is owed no more, lost
-/// data is owed again. True when a lost packet carried HANDSHAKE_DONE.
-fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> bool {
-    let mut done = false
-    let mut kept: List[Flight] = list.with_capacity(list.len(s.flights))
-    for f in s.flights {
+/// data is owed again unless a later copy was already acknowledged.
+fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> DoneSettled {
+    let mut done = DoneSettled(lost: false, acked: false)
+    let flights: List[Flight] = replace(mut s.flights, list.new())
+    let mut kept: List[Flight] = list.with_capacity(list.len(flights))
+    for f in flights {
         if contains(acked, f.number) {
             remove_range(mut s.resend, f.crypto_at, f.crypto_end)
-        } else if contains(lost, f.number) {
-            add_range(mut s.resend, f.crypto_at, f.crypto_end)
-            done = done || f.done
+            add_range(mut s.acked, f.crypto_at, f.crypto_end)
+            done.acked = done.acked || f.done
+        }
+    }
+    for f in flights {
+        if contains(acked, f.number) {
+            continue
+        }
+        if contains(lost, f.number) {
+            owe(mut s, f.crypto_at, f.crypto_end)
+            done.lost = done.lost || f.done
         } else {
             list.push(mut kept, f)
         }
@@ -237,8 +260,9 @@ fn settle_space(mut s: Space, acked: List[u64], lost: List[u64]) -> bool {
 /// flight carried HANDSHAKE_DONE.
 fn probe_space(mut s: Space) -> bool {
     let mut done = false
-    for f in s.flights {
-        add_range(mut s.resend, f.crypto_at, f.crypto_end)
+    let flights: List[Flight] = clone(s.flights)
+    for f in flights {
+        owe(mut s, f.crypto_at, f.crypto_end)
         done = done || f.done
     }
     s.probes = order.min(s.probes + 1, 2)

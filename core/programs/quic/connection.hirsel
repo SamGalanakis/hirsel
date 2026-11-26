@@ -56,7 +56,8 @@ pub type QuicError = Config | Limit | Handshake(handshake.Error)
 
 pub type DropReason: key = DatagramTooShort | SmallInitial | SmallUnsupportedVersion | VersionNegotiation | UnsupportedVersion | MalformedHeader | UnknownConnection | WrongPath | SampleTooShort | KeysUnavailable | PacketProtection | Duplicate | Draining
 
-/// RFC 9002 §7.2's max_datagram_size: the smallest datagram every QUIC path carries.
+/// RFC 9002 §7.2's max_datagram_size: the 1,200-byte base PMTU every QUIC path carries.
+/// Packets are built to it until DPLPMTUD raises it (QUIC-1's Path MTU row).
 const MSS: u64 = 1200
 
 const MAX_NUMBER: u64 = (1u64 << 62) - 1
@@ -91,6 +92,7 @@ type Space {
     crypto_committed: u64,
     flights: List[Flight],
     resend: List[Range],
+    acked: List[Range],
     probes: u64,
     largest_at: u64,
     ecn_in: codec.EcnCounts
@@ -142,6 +144,7 @@ pub opaque type Connection {
     params: Option[handshake.TransportParameters],
     peer_pin: Option[handshake.Pin],
     handshake_done: bool,
+    done_acked: bool,
     life: Life,
     deadline: Option[u64],
     idle_rearmed: bool,
@@ -190,7 +193,7 @@ fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, tak
         Server => true,
         Client => false,
     }
-    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, original_id: take original_id, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None)
+    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, original_id: take original_id, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None)
     refresh_idle(mut c, now)
     Ok(take c)
 }
@@ -293,7 +296,9 @@ fn settle(mut c: Connection, index: u64, acked: List[u64], lost: List[u64]) {
         1 => settle_space(mut c.encrypted, acked, lost),
         _ => settle_space(mut c.application, acked, lost),
     }
-    c.handshake_done = c.handshake_done || done
+    // RFC 9000 §13.3: HANDSHAKE_DONE is sent again only until one copy is acknowledged.
+    c.done_acked = c.done_acked || done.acked
+    c.handshake_done = (c.handshake_done || done.lost) && !c.done_acked
 }
 
 /// Run the loss detection timer when it is due (RFC 9002 A.9).
@@ -315,7 +320,7 @@ fn recovery_due(mut c: Connection, now: u64) {
                 1 => probe_space(mut c.encrypted),
                 _ => probe_space(mut c.application),
             }
-            c.handshake_done = c.handshake_done || done
+            c.handshake_done = (c.handshake_done || done) && !c.done_acked
         },
         Idle => (),
     }

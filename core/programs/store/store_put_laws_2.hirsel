@@ -504,7 +504,7 @@ fn test_empty_commit_memory_ticket(c: Clock) -> Result[(), Error] waits {
     close(take db)
 }
 
-// Format 10 COMMIT, three zero-prior deletes in collections 1 and 2.
+// COMMIT (layout unchanged since Format 10), three zero-prior deletes in collections 1 and 2.
 // The first key is a cell. The checksum uses libxxhash over the binding,
 // frame header and payload.
 fn cell_and_table_frame() -> bool {
@@ -537,7 +537,7 @@ fn cell_and_table_frame() -> bool {
     true
 }
 
-// Format 10 COMMIT, two table puts followed by a trim of a staged log append.
+// COMMIT (layout unchanged since Format 10), two table puts followed by a trim of a staged log append.
 // Trim sealing builds the rows in the opposite collection order.
 @test
 fn trim_and_table_frame(c: Clock) -> Result[(), Error] waits {

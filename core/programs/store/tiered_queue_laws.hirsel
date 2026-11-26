@@ -181,16 +181,6 @@ fn test_directory_drain_to_baseline(d: Dir, c: Clock, r: Random, tasks: Tasks) -
             string.push(mut message, " ")
             string.push_u64(mut message, width)
         }
-        string.push(mut message, ", retirement pack bytes")
-        for (home, root) in[(directory, used.retirement_root), (twin, baseline_manifest.retirement_root)] {
-            let width = if root.stamp == 0 {
-                0u64
-            } else {
-                disk_io(host.stat(home, paged_pack_path(root.pack)?))?.size
-            }
-            string.push(mut message, " ")
-            string.push_u64(mut message, width)
-        }
         fail(take message)
     }
     Ok(())

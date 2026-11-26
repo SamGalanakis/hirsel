@@ -699,7 +699,12 @@ fn on_down(mut a: Actor, i: u64, take ended: Result[runner.Ended, runner.StartEr
     answer_reads(mut a, name)
     let mut events: List[launcher.Event] = list.new()
     let mut failed: Option[Refused] = None
-    if !k.ready {
+    if let Ok(Deposed(claim)) = ended {
+        list.push(mut events, Placed(clone(k.child), PlaceDeposed(claim.epoch, clone(claim.holder))))
+        if !k.ready {
+            failed = Some(Failed(string.from("deposed")))
+        }
+    } else if !k.ready {
         if let Error(Open(NotCurrent(Active(version, _, read)))) = ended {
             list.push(mut events, Placed(clone(k.child), PlaceCurrent(version, clone(read))))
         }

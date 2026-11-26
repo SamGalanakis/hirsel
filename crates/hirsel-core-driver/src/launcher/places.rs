@@ -49,6 +49,7 @@ pub(super) fn install_reply(
             Some(reply)
         }
         (Ok(reply @ HostReply::InstallRefused(_)), Status::Code(1)) => Some(reply),
+        (Ok(reply @ HostReply::Deposed(..)), Status::Code(1)) => Some(reply),
         _ => None,
     }
 }

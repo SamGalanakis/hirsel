@@ -171,7 +171,7 @@ pub fn end_image(take ended: Result[Ended, StartError]) -> Shared[EndImage] {
 
 pub fn end_of_image(image: Shared[EndImage]) -> Result[Ended, StartError] {
     match image.result {
-        Ok(done) => Ok(done),
+        Ok(done) => Ok(clone(done)),
         Error(Open(e)) => Error(Open(open_of_image(e))),
         Error(Listen(e)) => Error(Listen(e)),
         Error(Missing(what)) => Error(Missing(string.from(what))),

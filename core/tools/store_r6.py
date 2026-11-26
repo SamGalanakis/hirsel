@@ -8,8 +8,8 @@ FRAME_HEADER = 16
 PAGE = 0x0021
 TARGET = 4096
 COMMITS = 64
-# Format 10 records the limits in the MANIFEST's existing fixed-width fields.
-DISK_FORMAT = 10
+# Format 11: the MANIFEST holds one pack-list root and no retirement root.
+DISK_FORMAT = 11
 
 
 @dataclass
@@ -38,7 +38,6 @@ class Manifest:
         self.packs = {}
         self.pages = {}
         self.pack_rows = {}
-        self.retired_rows = {}
         raw = (directory / 'MANIFEST').read_bytes()
         kind, version, width = unpack_from('<HHI', raw, PACK_HEADER)
         disk_format, = unpack_from('<I', raw, 24)
@@ -47,12 +46,11 @@ class Manifest:
         manifest = raw[PACK_HEADER + FRAME_HEADER:]
         self.next_stamp = unpack_from('<Q', manifest, 24)[0]
         self.next_pack = unpack_from('<Q', manifest, 40)[0]
-        branches, branch_id, name_length = unpack_from('<IIH', manifest, 308)
-        roots = 346 + name_length
+        branches, branch_id, name_length = unpack_from('<IIH', manifest, 272)
+        roots = 310 + name_length
         if (branches, branch_id) != (1, 0) or manifest[roots + 108:] != bytes(5):
             raise ValueError('R6 expected only the main branch with no pins')
         self.walk(manifest, 236, 'pack_list')
-        self.walk(manifest, 272, 'retirement')
         self.walk(manifest, roots, 'map')
         self.walk(manifest, roots + 36, 'streams')
         self.walk(manifest, roots + 72, 'catalog')
@@ -92,10 +90,9 @@ class Manifest:
                 child = self.walk(raw, value, 'collection')
                 if child is not None:
                     children.append(child)
-            elif role in ('pack_list', 'retirement'):
-                rows = self.pack_rows if role == 'pack_list' else self.retired_rows
+            elif role == 'pack_list':
                 key = raw[24:24 + prefix] + raw[entry + 2:cell]
-                rows[key] = raw[value:value + size]
+                self.pack_rows[key] = raw[value:value + size]
         self.pages[stamp] = Page((pack, offset), width, role, level, children)
         return stamp
 
@@ -154,7 +151,6 @@ def check_r6(before, after):
         'collection': COMMITS * (3 * height(before, after, 'collection') + 1),
         'map': COMMITS * (3 * height(before, after, 'map') + 1),
         'pack_list': edits * (3 * height(before, after, 'pack_list') + 1),
-        'retirement': 2 * len(after.retired_rows) + 1,
         'streams': 0,
         'catalog': 0,
         'relocation': len(closure),
@@ -167,5 +163,5 @@ def check_r6(before, after):
         violations.append(f'pack bytes {written} > {byte_bound}')
     return dict(page_counts={role: emitted[role] for role in bounds}, page_bounds=bounds,
                 pack_bytes=written, new_pages=num_pages, pack_byte_bound=byte_bound,
-                pack_list_row_edits=edits, retirement_rows=len(after.retired_rows),
+                pack_list_row_edits=edits,
                 r6_violations=violations)

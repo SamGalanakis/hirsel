@@ -31,7 +31,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let mut source = history_reader(take first_client, 0)
     let mut workspace = history_buffers(1024)?
     let metadata = history_config_bytes(object_history_config(std.object.bucket_config(source.client), "bucket"))?
-    let (take held, _) = history_open_register(mut source, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
+    let (take held, _) = history_open_register(mut source, sim.time, r, object_law_options(0), "bucket", mut workspace, BUCKET_LAW_OP_MS)?
     let initial_head = held.head
     let (init, ready): (Sender[ObjectJournalStart], Receiver[ObjectJournalStart]) = channel.new(1)
     let (send_to, receive): (Sender[JournalMsg], Receiver[JournalMsg]) = channel.new(4)
@@ -60,7 +60,7 @@ fn object_group_law(tasks: Tasks, r: Random, sim: BucketSim) -> Result[(), Error
     let next_client = bucket_law_client_with(sim, tasks, "s3.test", 2, true)?
     let mut successor = history_reader(take next_client, 0)
     let mut next_buffers = history_buffers(1024)?
-    let (take next_claim, take state) = history_open_register(mut successor, sim.time, r, result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64)), "bucket", mut next_buffers, BUCKET_LAW_OP_MS)?
+    let (take next_claim, take state) = history_open_register(mut successor, sim.time, r, object_law_options(0), "bucket", mut next_buffers, BUCKET_LAW_OP_MS)?
     if state.state.tips[0].head != 2 || next_claim.head.entry.seq != 4 {
         fail("cold claim did not recover both frames in exactly one entry")
     }
@@ -87,7 +87,7 @@ fn bucket_test_m2_object_journal(c: Clock, r: Random, tasks: Tasks) -> Result[()
 
 fn object_writer_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let first = bucket_law_https_client(sim, tasks, "s3.test", 1)?
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    let mut options = object_law_options(0)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let mut incumbent = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
@@ -152,7 +152,7 @@ fn bucket_test_m2_object_writer(c: Clock, r: Random, tasks: Tasks) -> Result[(),
 
 fn object_fresh_holder_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let first = bucket_law_client_with(sim, tasks, "s3.test", 1, true)?
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
+    let mut options = object_law_options(0)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let mut writer = open_authority(tasks, object_authority(take first, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
@@ -213,7 +213,7 @@ fn reclaim_barrier(db: Db) -> Result[(), Error] waits {
 fn object_reclaim_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
     let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    let mut options = object_law_options(1)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     options.retain = 1
@@ -281,7 +281,7 @@ fn journal_turn(db: Db) -> Result[bool, Error] waits {
 fn object_reclaim_retry_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim, orphan: String) -> Result[(String, String), Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
     let mut witness = bucket_law_client_lanes(sim, tasks, "s3.test", 2, true, 1)?
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    let mut options = object_law_options(1)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     options.retain = 1
@@ -358,7 +358,7 @@ fn sweep_fixture_name(epoch: u64, digest: u64) -> String {
 }
 
 fn object_sweep_cursor_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    let mut options = object_law_options(1)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     options.retain = 1
@@ -423,7 +423,7 @@ fn pending_pack_name(seq: u64, epoch: u64) -> String {
 
 fn object_reclaim_upload_law(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits {
     let client = bucket_law_client_lanes(sim, tasks, "s3.test", 1, true, 1)?
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    let mut options = object_law_options(1)
     options.group_bytes = 65536
     options.head_poll_ms = 10000
     let seed = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
@@ -459,7 +459,7 @@ fn bucket_test_m2_reclaim_uploads(c: Clock, r: Random, tasks: Tasks) -> Result[(
 }
 
 fn retention_witness_options() -> Options {
-    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(1)), 2147483648u64))
+    let mut options = object_law_options(1)
     options.group_bytes = 65536
     options.retain = 2
     take options
@@ -574,7 +574,6 @@ fn retention_fixture(d: Dir, predecessor: HistoryHead) -> Result[RetentionFixtur
     let mut manifest = take initial
     manifest.first_live = 2
     manifest.prev_first = 2
-    manifest.retirement_root = std.page.unlocated(0)
     let mut objects: List[(HistoryRef, Bytes)] = list.with_capacity(map.len(inventory))
     let mut refs: List[HistoryRef] = list.with_capacity(map.len(inventory))
     let mut victim = string.new()
@@ -616,7 +615,7 @@ fn retention_base(id: StoreId) -> Result[WitnessCut, Error] {
     let mut raw_entry: Bytes = list.with_capacity(1024)
     let entry_ref = history_genesis_packet(mut raw_entry, id, 1, base, HistoryLocateRoot(depth: 0, rows: list.new()))?
     let pair = HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18))
-    let selected = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
+    let selected = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
     Ok(WitnessCut(head: selected, manifest: base, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
@@ -901,4 +900,12 @@ fn retention_case_run(d: Dir, c: Clock, r: Random, tasks: Tasks, seed: u64, case
         }
     }
     fail("L59: the simulator never saw the observed missing object")
+}
+
+// The sized law Options with the operator's Adopt ClaimAuth (§12.3): these
+// laws hand one Place between their own writers, never by a move command.
+fn object_law_options(lanes: u64) -> Options {
+    let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(lanes)), 2147483648u64))
+    options.claim_auth = Some(bucket_law_adopt_auth())
+    options
 }

@@ -27,31 +27,133 @@ type ObjectFollowHead: shareable + send {
     live_next_seq: u64
 }
 
-pub type Claim {
+pub type Claim: codec + key + shareable + cross {
     epoch: u64,
     holder: Bytes
 }
+
+pub type ClaimClass: codec + key + shareable + cross = Permit | Continue | Adopt
+
+pub type ClaimAuth: codec + key + shareable + cross {
+    expect: Option[Claim],
+    attempt: Bytes,
+    class: ClaimClass
+}
+
+pub type Origin: codec + key + shareable + cross {
+    epoch: u64,
+    attempt: Bytes,
+    class: ClaimClass,
+    permit_epoch: u64,
+    permit_attempt: Bytes
+}
+
+pub type HeadSettlement: codec + key + shareable + cross = HeadOpen | HeadWon(u64) | HeadDead(Claim)
 
 pub type HeadView {
     store: StoreId,
     activation: u64,
     binding: Bytes,
-    claim: Claim
+    claim: Claim,
+    origin: Option[Origin]
+}
+
+fn claim_from_pair(pair: HistoryPair) -> Result[Claim, Error] {
+    disk_allocation(scoped fn() -> Result[Claim, Error] {
+        let mut owner: Bytes = list.with_capacity(16)
+        list.put_word_le(mut owner, pair.holder.hi)
+        list.put_word_le(mut owner, pair.holder.lo)
+        Ok(Claim(epoch: pair.epoch, holder: take owner))
+    })
+}
+
+fn claim_class_from_tag(tag: u8) -> ClaimClass {
+    match tag {
+        0 => Permit,
+        1 => Continue,
+        _ => Adopt,
+    }
+}
+
+fn origin_from_history(o: HistoryOrigin) -> Result[Origin, Error] {
+    disk_allocation(scoped fn() -> Result[Origin, Error] {
+        let mut attempt: Bytes = list.with_capacity(16)
+        let _ = bytebuf.append_inline(mut attempt, o.attempt, 0, 16)
+        let mut permit_attempt: Bytes = list.with_capacity(16)
+        let _ = bytebuf.append_inline(mut permit_attempt, o.permit_attempt, 0, 16)
+        Ok(Origin(epoch: o.epoch, attempt: take attempt, class: claim_class_from_tag(o.class), permit_epoch: o.permit_epoch, permit_attempt: take permit_attempt))
+    })
+}
+
+fn history_head_view(current: HistoryHead) -> Result[HeadView, Error] {
+    let claim = claim_from_pair(current.pair)?
+    let origin = match current.origin {
+        Some(o) => Some(origin_from_history(o)?),
+        None => None,
+    }
+    disk_allocation(scoped fn() -> Result[HeadView, Error] {
+        let mut opaque_binding: Bytes = list.with_capacity(32)
+        let _ = bytebuf.append_inline(mut opaque_binding, current.binding, 0, 32)
+        Ok(HeadView(store: current.store, activation: current.activation, binding: take opaque_binding, claim: clone(claim), origin: clone(origin)))
+    })
 }
 
 pub fn follower_head(f: Follower) -> Result[HeadView, Error] {
     let Some(record) = f.capture.remote else {
         return Error(Missing("head"))
     }
-    let current = record.current
-    disk_allocation(scoped fn() -> Result[HeadView, Error] {
-        let mut owner: Bytes = list.with_capacity(16)
-        list.put_word_le(mut owner, current.pair.holder.hi)
-        list.put_word_le(mut owner, current.pair.holder.lo)
-        let mut opaque_binding: Bytes = list.with_capacity(32)
-        let _ = bytebuf.append_inline(mut opaque_binding, current.binding, 0, 32)
-        Ok(HeadView(store: current.store, activation: current.activation, binding: take opaque_binding, claim: Claim(epoch: current.pair.epoch, holder: take owner)))
-    })
+    history_head_view(record.current)
+}
+
+// One-GET read-only head inspection for move/claim settlement (STORE-SPEC
+// §12.3): fetches `head` once, verifies namespace and optional expected store,
+// and returns its `HeadView` including `ORIGIN`. Performs zero writes and
+// never opens a writer or reads tails.
+pub fn head_view(mut client: std.object.Client, expect: Option[StoreId], op_ms: u64) -> Result[HeadView, Error] waits {
+    let deadline = std.object.deadline_after_ms(client, op_ms)
+    let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
+    })?
+    let outcome = history_fetch(mut client, "head", mut scratch, deadline)
+    match take outcome {
+        Ok(_) => (),
+        Error(Remote(NotFound)) => return Error(NotFound),
+        Error(take problem) => return Error(take problem),
+    }
+    let (take capture, _) = history_decode_head_attach(scratch)?
+    check_expected_store(expect, capture.head.store)?
+    history_check_namespace(capture, client)?
+    history_head_view(capture.head)
+}
+
+// Settles an outstanding Fleet `Permit` (STORE-SPEC §12.3 "Settlement")
+// from one fresh GET of `store`'s head through the caller's trusted client.
+// `predecessor` is the pair the Permit named and `attempt` its unique id.
+// Open: the head still names `predecessor`, so the H may yet apply and the
+// permit stays outstanding. Won(e): `ORIGIN.permit_attempt` is `attempt` and
+// the permit installed exactly `predecessor.epoch + 1`, a receipt that
+// survives the winner's later Continue/Adopt claims; it describes a
+// historical claim and confers no present writer authority. Dead names the
+// current pair. A foreign Store, another namespace, or a head older than or
+// beside `predecessor` is an error and closes nothing. Writes nothing.
+pub fn settle_permit(mut client: std.object.Client, store: StoreId, predecessor: Claim, attempt: Bytes, op_ms: u64) -> Result[HeadSettlement, Error] waits {
+    let observed = head_view(mut client, Some(store), op_ms)?
+    history_settle(observed, predecessor, attempt)
+}
+
+fn history_settle(head: HeadView, predecessor: Claim, attempt: Bytes) -> Result[HeadSettlement, Error] {
+    if head.claim.epoch == predecessor.epoch && head.claim.holder == predecessor.holder {
+        return Ok(HeadOpen)
+    }
+    if head.claim.epoch <= predecessor.epoch {
+        return Error(disk_fault("head", 72, Regressed))
+    }
+    if let Some(o) = head.origin {
+        if o.permit_epoch == predecessor.epoch + 1 && o.permit_attempt == attempt {
+            return Ok(HeadWon(o.permit_epoch))
+        }
+    }
+    Ok(HeadDead(clone(head.claim)))
 }
 
 fn copy_follow_state(previous: State) -> Result[State, Error] {

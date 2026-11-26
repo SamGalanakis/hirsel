@@ -151,7 +151,11 @@ dirs = ["."]
 "location_laws.hirsel" = "store"
 "assembly_laws.hirsel" = "store"
 "import_read_laws.hirsel" = "store"
+"bucket_claim_auth_laws.hirsel" = "store"
+"bucket_claim_auth_janitor_laws.hirsel" = "store"
+"bucket_claim_auth_entry_laws.hirsel" = "store"
 "bucket_laws.hirsel" = "store"
+"bucket_head_vector_laws.hirsel" = "store"
 "bucket_order_laws.hirsel" = "store"
 "bucket_q5_laws.hirsel" = "store"
 "bucket_stream_laws.hirsel" = "store"
@@ -200,7 +204,7 @@ dirs = ["."]
 "store_journal_laws_5.hirsel" = "store"
 "store_backup_laws.hirsel" = "store"
 "store_corpus_laws.hirsel" = "store"
-"store_corpus_format10.hirsel" = "store"
+"store_corpus_format11.hirsel" = "store"
 "store_ace_crash_laws.hirsel" = "store"
 "store_journal_laws_6.hirsel" = "store"
 "store_journal_laws_7.hirsel" = "store"
@@ -232,7 +236,7 @@ dirs = ["."]
 "store_tiered_backup_laws.hirsel" = "store"
 "store_manifest_page_laws.hirsel" = "store"
 "store_manifest_page_laws_2.hirsel" = "store"
-"store_format10_laws.hirsel" = "store"
+"store_format11_laws.hirsel" = "store"
 "cell_log_laws.hirsel" = "store"
 "store_prior_laws.hirsel" = "store"
 "store_locations_disk_laws.hirsel" = "store"
@@ -311,6 +315,18 @@ limit = 402653184
 limit = 402653184
 
 [tests.runs."store@1/store/bucket_stream_orphan_hold_no_head_task"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_claim_auth_permit_delivered_twice"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_claim_auth_deposed_standalone_meets_attached"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_claim_auth_janitor_cleanup_done"]
+limit = 402653184
+
+[tests.runs."store@1/store/bucket_claim_auth_janitor_wrong_store"]
 limit = 402653184
 
 [tests.runs."store@1/store/bucket_stream_capacity_and_janitor"]
@@ -817,3 +833,12 @@ limit = 536870912
 
 [tests.runs."store@1/store/test_l100_c_backup_restore_zero_live_pin_and_idle"]
 limit = 536870912
+
+[tests.runs."store@1/store/bucket_claim_auth_race_a_delayed_move"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_claim_auth_attempt_as_holder_negative"]
+limit = 134217728
+
+[tests.runs."store@1/store/bucket_claim_auth_race_c_stream_janitor_after_move"]
+limit = 402653184

@@ -219,6 +219,7 @@ type LaunchEnv {
     predecessor: Option[LaunchBytes],
     witness: u64,
     store_op: StoreOp,
+    move_envelope: Option[LaunchBytes],
 }
 
 // Launch word 20: what an isolated store launch does instead of serving.
@@ -267,7 +268,46 @@ fn launch_env() -> LaunchEnv {
     } else {
         None
     }
-    LaunchEnv(n_place: launch_word(0u64, 0u64), n_place_explicit: launch_word(16u64, 0u64) != 0u64, revision: LaunchBytes(field: 18u64, size: launch_word(17u64, 0u64)), digest: launch_image(), target: launch_target_bytes(), describe: launch_word(5u64, 0u64) != 0u64, preview: preview, prepare: prepare_mode, wake: launch_word(12u64, 0u64) != 0u64, idle: idle, store_id: store_id, install: install_at, predecessor: predecessor, witness: launch_word(19u64, 0u64), store_op: store_op(launch_word(20u64, 0u64)))
+    let move_envelope = {
+        let len = launch_word(25u64, 0u64)
+        if len != 0u64 {
+            Some(LaunchBytes(field: 26u64, size: len))
+        } else {
+            None
+        }
+    }
+    LaunchEnv(n_place: launch_word(0u64, 0u64), n_place_explicit: launch_word(16u64, 0u64) != 0u64, revision: LaunchBytes(field: 18u64, size: launch_word(17u64, 0u64)), digest: launch_image(), target: launch_target_bytes(), describe: launch_word(5u64, 0u64) != 0u64, preview: preview, prepare: prepare_mode, wake: launch_word(12u64, 0u64) != 0u64, idle: idle, store_id: store_id, install: install_at, predecessor: predecessor, witness: launch_word(19u64, 0u64), store_op: store_op(launch_word(20u64, 0u64)), move_envelope: move_envelope)
+}
+
+// RUNNER-SPEC §14.6: the one source of a Bucket open's ClaimAuth. A managed
+// launch (a wake or install child, the only launches the runtime gives a move
+// envelope) takes the envelope's auth and nothing else: auth on the Options or
+// the backing is dropped, so a managed launch without an envelope opens with
+// None and Store refuses it Missing("claim_auth"). Only an embedding that is not
+// a managed launch keeps the auth it put on its backing.
+fn launch_open_auth(mut opening: store.Options) -> Result[(), store.Error] {
+    let env = launch_env()
+    if env.wake || env.install != None {
+        opening.claim_auth = launch_claim_auth()?
+    }
+    Ok(())
+}
+
+fn launch_claim_auth() -> Result[Option[store.ClaimAuth], store.Error] {
+    let Some(raw_ref) = launch_env().move_envelope else {
+        return Ok(None)
+    }
+    let raw = launch_bytes(raw_ref)
+    let codec: std.codec.Codec[store.ClaimAuth] = std.codec.of()
+    // fleet.md: Adopt (expect None) is a local operator action only, never
+    // a remote move command, so a move envelope carrying Adopt is refused.
+    match std.codec.decode(codec, raw) {
+        Ok(take auth) => match auth.class {
+            Adopt => Error(Missing("claim_auth")),
+            _ => Ok(Some(take auth)),
+        },
+        Error(_) => Error(Missing("claim_auth")),
+    }
 }
 
 fn launch_image() -> LaunchBytes {

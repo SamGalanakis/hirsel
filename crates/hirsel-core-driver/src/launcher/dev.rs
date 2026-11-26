@@ -159,7 +159,8 @@ pub(crate) fn open(
                 ))),
                 reply @ (HostReply::Current(..)
                 | HostReply::Refused(_)
-                | HostReply::StoreMismatch(..)) => Ok(Open::Refused(reply)),
+                | HostReply::StoreMismatch(..)
+                | HostReply::Deposed(..)) => Ok(Open::Refused(reply)),
                 reply => Ok(Open::Unproved(format!("unexpected open reply: {reply:?}"))),
             };
         }

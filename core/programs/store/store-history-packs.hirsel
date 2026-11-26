@@ -519,10 +519,10 @@ fn validate_bucket_graph(mut client: std.object.Client, locator: HistoryLocator,
         let name = paged_pack_path(seq)?
         return Error(disk_fault(name, offset, Dangling(stamp)))
     }
-    let ListedPages(packs: take inventory, retired: take retired, lineage: take lineage, live_graph: take graph, ..) = take lists
+    let ListedPages(packs: take inventory, lineage: take lineage, live_graph: take graph, ..) = take lists
     let mut ordered = take graph
     history_graph_order(mut ordered)
-    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, lineage: take lineage, graph: take ordered, allow_tiered: allow_tiered))
+    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, lineage: take lineage, graph: take ordered, allow_tiered: allow_tiered))
 }
 
 fn history_paged_capture(mut source: ObjectPackRead, head: HistoryHead, ceiling: u64) -> Result[JournalReplay, Error] waits {

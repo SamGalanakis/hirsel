@@ -5,14 +5,16 @@ pub type BucketBacking: send {
     lanes: std.object.LaneConfig,
     level: String,
     op_ms: u64,
-    cache: Option[(Dir, u64)]
+    cache: Option[(Dir, u64)],
+    claim_auth: Option[store.ClaimAuth]
 }
 
 pub type SimBacking: send {
     requests: std.object.Requests,
     declaration: store.SimLevels,
     sync: store.LevelSync,
-    op_ms: u64
+    op_ms: u64,
+    claim_auth: Option[store.ClaimAuth]
 }
 
 pub type Backing: send = Memory | Disk(Dir) | Temp(Dir) | Bucket(BucketBacking) | StreamedBucket(BucketBacking, store.JournalSlot) | Sim(SimBacking)
@@ -96,13 +98,15 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
             store.open(tasks, dir, clock, random, options)
         },
         Sim(take sim) => {
-            let SimBacking(requests: take requests, declaration: take declaration, sync: take sync, op_ms) = take sim
+            let SimBacking(requests: take requests, declaration: take declaration, sync: take sync, op_ms, claim_auth: take backing_auth) = take sim
+            let open_opts = backing_open_options(options, take backing_auth)
             let client = std.object.attach(take requests, None)
             let authority = store.sim_authority(take client, declaration, take sync, op_ms)
-            Ok(store.open_authority(tasks, take authority, clock, random, options) ?=> |refusal| BucketOpen(take refusal, op_ms))
+            Ok(store.open_authority(tasks, take authority, clock, random, open_opts) ?=> |refusal| BucketOpen(take refusal, op_ms))
         },
         Bucket(take bucket) => {
-            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms, cache) = take bucket
+            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms, cache, claim_auth: take backing_auth) = take bucket
+            let open_opts = backing_open_options(options, take backing_auth)
             let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), op_ms)
             match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
                 Ok(take client) => {
@@ -111,13 +115,14 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
                         Some((dir, cache_bytes)) => store.objects_cache(take authority, dir, cache_bytes),
                         None => take authority,
                     }
-                    Ok(store.open_authority(tasks, take configured, clock, random, options) ?=> |refusal| BucketOpen(take refusal, op_ms))
+                    Ok(store.open_authority(tasks, take configured, clock, random, open_opts) ?=> |refusal| BucketOpen(take refusal, op_ms))
                 },
                 Error(take problem) => Error(Remote(take problem)),
             }
         },
         StreamedBucket(take bucket, take journal_slot) => {
-            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms, cache) = take bucket
+            let BucketBacking(net, place: take place, credentials: take credentials, lanes, level: take level, op_ms, cache, claim_auth: take backing_auth) = take bucket
+            let open_opts = backing_open_options(options, take backing_auth)
             let deadline = std.clock.deadline_after_ms(host.mono_ns(clock), op_ms)
             match std.object.start(net, tasks, take place, take credentials, None, System, clock, random, lanes, deadline) {
                 Ok(take client) => {
@@ -130,7 +135,7 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
                         Ok(take streamed_authority) => take streamed_authority,
                         Error(take problem) => return Error(Start(Open(Store(take problem)))),
                     }
-                    Ok(store.open_authority(tasks, take attached, clock, random, options) ?=> |refusal| BucketOpen(take refusal, op_ms))
+                    Ok(store.open_authority(tasks, take attached, clock, random, open_opts) ?=> |refusal| BucketOpen(take refusal, op_ms))
                 },
                 Error(take problem) => Error(Remote(take problem)),
             }
@@ -143,11 +148,25 @@ fn open_backing(take backing: Backing, options: store.Options, tasks: Tasks, clo
     Ok((take db, take temporary))
 }
 
+// Auth on the backing is an embedding's own. A managed launch drops it:
+// launch_open_auth has already set the envelope's auth, or None, as the only source.
+fn backing_open_options(options: store.Options, take backing_auth: Option[store.ClaimAuth]) -> store.Options {
+    let mut open_opts: store.Options = clone(options)
+    let env = launch_env()
+    if !(env.wake || env.install != None) {
+        if let None = open_opts.claim_auth {
+            open_opts.claim_auth = take backing_auth
+        }
+    }
+    open_opts
+}
+
 fn managed_head[G: send, H: shareable + inert + send, S: send](take job: ManagedHead[G, H, S]) -> Result[Option[u64], StartError] waits {
     let ManagedHead(backing: take backing, options: take options, follower_plan: take follower_plan, selection: selection, tasks: tasks, clock: clock, random: random, placing: take placing, on_migrate: on_migrate, schema: schema, n_place: n_place, n_publisher: n_publisher, inbox: take inbox, finish_from: take finish_from, to: take to, drain: take drain, head_to: take head_to, cut: take cut, triggering: take triggering, granting: take granting, idle: idle, expected_store: expected_store) = take job
     let persistent = persistent_backing(backing)
     let mut opening = take options
     let mut registration: Option[HeadRegistration[G, H]] = None
+    launch_open_auth(mut opening) ?=> |problem| Open(Store(take problem))
     if !launch_env().wake {
         if let Some((hi, lo)) = expected_store {
             opening.expect = Some(store.StoreId(hi, lo))

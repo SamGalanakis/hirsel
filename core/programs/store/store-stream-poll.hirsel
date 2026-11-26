@@ -381,16 +381,40 @@ fn stream_pair_in(pairs: List[(StoreId, u64)], store: StoreId, epoch: u64) -> bo
     false
 }
 
+// An orphan ask's cause is its Store's Held row at the ask's epoch (an
+// Abandoned row is rule (b)'s to remove); a straggler ask's is its Store's
+// pin. Either gone means the cleanup is done.
+fn stream_janitor_cause_holds(s: StreamService, ask: JanitorAsk) -> bool {
+    match ask {
+        JanitorOrphanHold(store, _, pair) => {
+            for row in s.lane.reg.rows {
+                if same(row.store, store) && row.epoch == pair.epoch && !row.abandoned {
+                    return true
+                }
+            }
+            false
+        },
+        JanitorStragglerPin(store, _, _) => {
+            for held in s.gc.pins {
+                if same(held.store, store) {
+                    return true
+                }
+            }
+            false
+        },
+    }
+}
+
 fn stream_push_janitor_ask(mut s: StreamService, take ask: JanitorAsk) {
     let mut dup = false
     for existing in s.janitor_asks {
         let same_ask = match existing {
-            JanitorOrphanHold(sa, _, ea) => match ask {
-                JanitorOrphanHold(sb, _, eb) => same(sa, sb) && ea == eb,
+            JanitorOrphanHold(sa, _, pa) => match ask {
+                JanitorOrphanHold(sb, _, pb) => same(sa, sb) && history_pair_matches(pa, pb),
                 _ => false,
             },
-            JanitorStragglerPin(sa, _) => match ask {
-                JanitorStragglerPin(sb, _) => same(sa, sb),
+            JanitorStragglerPin(sa, _, pa) => match ask {
+                JanitorStragglerPin(sb, _, pb) => same(sa, sb) && history_pair_matches(pa, pb),
                 _ => false,
             },
         }
@@ -431,6 +455,11 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, age
     let Ok((take capture, take attach)) = history_decode_head_attach(s.lane.compare) else {
         return Ok(())
     }
+    // A different Store at the remembered prefix is not this row's Place:
+    // neither its pair nor its ATTACH may clear the row or authorize an ask.
+    if !same(capture.head.store, store) {
+        return Ok(())
+    }
     let obs_epoch = capture.head.pair.epoch
     let mut still_live = false
     let intent: Option[RegIntent] = if obs_epoch > epoch {
@@ -452,7 +481,7 @@ fn stream_orphan_head_poll(mut s: StreamService, store: StoreId, epoch: u64, age
         None
     }
     if still_live && aged {
-        stream_push_janitor_ask(mut s, JanitorOrphanHold(store, string.from(place_prefix), epoch))
+        stream_push_janitor_ask(mut s, JanitorOrphanHold(store, string.from(place_prefix), capture.head.pair))
     }
     if let Some(take action) = take intent {
         match stream_reg_write(mut s.lane, mut s.client, take action, deadline) {
@@ -483,9 +512,14 @@ fn stream_service_arm_next(mut s: StreamService) waits {
     for sp in s.stall_polls {
         target = order.min(target, sp.next_poll_ns)
     }
+    let now = host.mono_ns(s.clock)
     for obs in s.observed_rows {
-        if !stream_has_active_settle(s, obs.store, obs.epoch) {
-            target = order.min(target, int.saturating_add(obs.first_seen_ns, hold_ns))
+        // A row's `hold_ms` deadline arms one poll. Once past, that poll has
+        // run (a settle, an ask, or a head that names no ask) and the row
+        // waits at the idle cadence; a past deadline would re-arm at once.
+        let due = int.saturating_add(obs.first_seen_ns, hold_ns)
+        if due > now && !stream_has_active_settle(s, obs.store, obs.epoch) {
+            target = order.min(target, due)
         }
     }
     if let Some(_) = s.timer {

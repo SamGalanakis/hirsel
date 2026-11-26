@@ -377,6 +377,7 @@ pub fn law_ready_after_activation(parent: Dir, clock: Clock, random: Random, tas
         Ok(Ok(Stopped(_))) => (),
         Ok(Ok(Forced(_))) => fail("empty place forced"),
         Ok(Ok(Unstarted)) => fail("ready place returned Unstarted"),
+        Ok(Ok(Deposed(_))) => fail("ready place returned Deposed"),
         Ok(Error(Full(_))) => fail("place allowance exhausted"),
         Ok(Error(_)) => fail("place returned a start error"),
         Error(_) => fail("operate task failed"),

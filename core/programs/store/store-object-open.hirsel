@@ -18,7 +18,64 @@ fn history_load_admitted(mut read_source: ObjectPackRead, head: HistoryHead, cei
     Ok(take replay)
 }
 
-fn history_check_open(client: std.object.Client, selected: HistoryCapture, requested_levels: List[String], authority_kind: u8, options: Options) -> Result[(), Error] {
+fn history_claim_matches_pair(expected: Claim, current: HistoryPair) -> bool {
+    if expected.epoch != current.epoch || list.len(expected.holder) != 16 {
+        return false
+    }
+    let hi = read_le(expected.holder, 0, 8)
+    let lo = read_le(expected.holder, 8, 8)
+    hi == current.holder.hi && lo == current.holder.lo
+}
+
+fn history_check_claim_auth(options: Options, current: HistoryPair) -> Result[ClaimAuth, Error] {
+    let Some(auth) = view options.claim_auth else {
+        return Error(Missing("claim_auth"))
+    }
+    if list.len(auth.attempt) != 16 {
+        return Error(Missing("claim_auth"))
+    }
+    match auth.expect {
+        Some(expected) => {
+            if expected.epoch == 0 || list.len(expected.holder) != 16 {
+                return Error(Missing("claim_auth"))
+            }
+            if !history_claim_matches_pair(expected, current) {
+                return Error(Superseded(claim_from_pair(current)?))
+            }
+        },
+        None => {
+            match auth.class {
+                // An operator Adopt is pinned to the first pair it admits:
+                // the open's later iterations check against that pair.
+                Adopt => return Ok(ClaimAuth(expect: Some(claim_from_pair(current)?), attempt: clone(auth.attempt), class: Adopt)),
+                _ => return Error(Missing("claim_auth")),
+            }
+        },
+    }
+    Ok(clone(auth))
+}
+
+// A validated successor (STORE-SPEC §12.3): the head that replaced the
+// caller's is the same Store at this namespace, so its pair is the claim
+// that deposed the caller. A head that does not decode or names another
+// Store is not a validated successor and stays `Lost`.
+fn history_superseded_by(client: std.object.Client, store: StoreId, observed: Bytes) -> Error {
+    let Ok((take capture, _)) = history_decode_head_attach(observed) else {
+        return Lost
+    }
+    if let Error(_) = check_expected_store(Some(store), capture.head.store) {
+        return Lost
+    }
+    if let Error(_) = history_check_namespace(capture, client) {
+        return Lost
+    }
+    match claim_from_pair(capture.head.pair) {
+        Ok(take actual) => Superseded(take actual),
+        Error(take problem) => take problem,
+    }
+}
+
+fn history_check_open(client: std.object.Client, selected: HistoryCapture, requested_levels: List[String], authority_kind: u8, options: Options) -> Result[ClaimAuth, Error] {
     let current = selected.head
     check_expected_store(options.expect, current.store)?
     history_check_namespace(selected, client)?
@@ -34,6 +91,8 @@ fn history_check_open(client: std.object.Client, selected: HistoryCapture, reque
     if list.len(selected.config.levels) != list.len(requested_levels) {
         return Error(Declared(string.from(selected.config.levels[list.len(selected.config.levels) - 1])))
     }
+    // Check ClaimAuth before any write, slot_attach, or Held row (STORE-SPEC §12.3).
+    let auth = history_check_claim_auth(options, current.pair)?
     if let Some(version_number) = options.activation {
         if version_number != current.activation {
             return Error(NotCurrent(current.activation))
@@ -48,7 +107,7 @@ fn history_check_open(client: std.object.Client, selected: HistoryCapture, reque
     }
     let _ = history_next_id(current.pair.epoch)?
     let _ = history_next_id(current.entry.seq)?
-    Ok(())
+    Ok(take auth)
 }
 
 fn history_binding_equals(octets: Bytes, schema_binding: Inline[u8, 32]) -> bool {
@@ -103,6 +162,14 @@ fn history_open_genesis[T](mut client: std.object.Client, r: Random, holder: Sto
     }
     if let Some(_) = options.expect {
         return Error(NotFound)
+    }
+    if let Some(auth) = options.claim_auth {
+        if list.len(auth.attempt) != 16 {
+            return Error(Missing("claim_auth"))
+        }
+        if let Some(_) = auth.expect {
+            return Error(NotFound)
+        }
     }
     history_check_empty(mut client, deadline)?
     let first = disk_allocation(scoped fn() -> Result[State, Error] {
@@ -179,11 +246,13 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
     let mut pause = 10u64
     // The slot's grant (epoch, inc, next seq), taken once for the first head.
     let mut granted: Option[(u64, u64, u64)] = None
+    let mut opening: Options = clone(options)
     loop {
         if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }
-        history_check_open(read_source.client, selected, requested_levels, authority_kind, options)?
+        let auth = history_check_open(read_source.client, selected, requested_levels, authority_kind, opening)?
+        opening.claim_auth = Some(clone(auth))
         let trial = match replace(mut admitted, None) {
             Some((base, take replay)) if selected.head.checkpoint.seq <= base.entry.seq => {
                 if selected.head.floor < base.floor {
@@ -202,6 +271,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
                         selected = take newer
                         continue
                     },
+                    HistoryWitnessLost => return Error(history_superseded_by(read_source.client, selected.head.store, workspace.witness)),
                     _ => return Error(Lost),
                 }
             },
@@ -235,7 +305,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
             },
             None => None,
         }
-        let attempt = history_replace_claim(mut read_source.client, head, holder, mut workspace, read_source.deadline, take attach)?
+        let attempt = history_replace_claim(mut read_source.client, head, holder, auth, mut workspace, read_source.deadline, take attach)?
         match take attempt {
             HistoryClaimed(take result) => {
                 let mut register = take result
@@ -254,6 +324,11 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
             },
             HistoryClaimMoved(backoff) => {
                 if options.claim_ms == 0 {
+                    // No retry: a move to another pair names its claimant.
+                    let (take moved, _) = history_decode_head_attach(workspace.witness)?
+                    if !history_pair_matches(moved.head.pair, head.pair) {
+                        return Error(history_superseded_by(read_source.client, head.store, workspace.witness))
+                    }
                     return Error(Lost)
                 }
                 selected = history_decode_head(workspace.witness)?
@@ -263,7 +338,7 @@ fn history_open_existing[T](mut read_source: ObjectPackRead, c: Clock, r: Random
                     pause = order.min(pause * 2, 1000)
                 }
             },
-            HistoryClaimLost => return Error(Lost),
+            HistoryClaimLost => return Error(history_superseded_by(read_source.client, head.store, workspace.witness)),
             HistoryClaimUncertain => return Error(Undecided),
         }
     }
@@ -296,9 +371,22 @@ fn history_open_with[T](mut read_source: ObjectPackRead, c: Clock, r: Random, op
     let observed = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)
     let selected = match take observed {
         // Only a streamed opener reads an attached head (§12.11.2).
-        Ok(_) => match link {
-            Some(_) => Some(history_decode_head_attach(workspace.witness)?),
-            None => Some((history_decode_head(workspace.witness)?, None)),
+        Ok(_) => {
+            let (take capture, take attached) = history_decode_head_attach(workspace.witness)?
+            match link {
+                Some(_) => Some((take capture, take attached)),
+                None => {
+                    // A stale ClaimAuth is refused `Superseded` before the
+                    // attachment-mode refusal, so a deposed opener parks.
+                    if let Some(a) = attached {
+                        check_expected_store(options.expect, capture.head.store)?
+                        history_check_namespace(capture, read_source.client)?
+                        let _ = history_check_claim_auth(options, capture.head.pair)?
+                        return Error(Attached(stream_attached_sid(a)))
+                    }
+                    Some((take capture, None))
+                },
+            }
         },
         Error(Remote(NotFound)) => None,
         Error(take failure) => return Error(take failure),

@@ -310,7 +310,6 @@ fn edit_pack_list(mut root: Arc[std.page.Page], known: PageLocations, retiring: 
 
 type PagedLists: shareable + send {
     packs: Arc[std.page.Page],
-    retired: Arc[std.page.Page],
     // The deferred-free queue (§13.6), keyed by its sequence below `deferred_next`.
     deferred: Arc[std.page.Page],
     deferred_next: u64,
@@ -319,12 +318,11 @@ type PagedLists: shareable + send {
     rows: Lineage
 }
 
-// An empty queue shares the empty retirement root; list edits copy it.
 fn empty_paged_lists() -> PagedLists {
-    let retired = std.page.empty(0, 0, Unprefixed)
-    let deferred = arc.share(retired)
-    let lineage = arc.share(retired)
-    PagedLists(packs: std.page.empty(0, 0, Unprefixed), retired: take retired, deferred: take deferred, deferred_next: 0, lineage: take lineage, rows: empty_lineage())
+    let empty = std.page.empty(0, 0, Unprefixed)
+    let deferred = arc.share(empty)
+    let lineage = arc.share(empty)
+    PagedLists(packs: take empty, deferred: take deferred, deferred_next: 0, lineage: take lineage, rows: empty_lineage())
 }
 
 // T8 step 3: the rows this cut adds to the queue, each at `deferred_next`.
@@ -406,8 +404,6 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     change_list_root(mut known, installed.deferred, deferred_root, 2)?
     let lineage_root = plan_lineage_root(installed, rows, mut next_stamp, issued)?
     change_list_root(mut known, installed.lineage, lineage_root, 3)?
-    // The old retirement tree contributes no edges to the new generation.
-    remove_page_source(mut known, std.page.stamp(std.page.image_of(installed.retired)), ListSource(1))?
     let moves = if let Some(observed) = relocated {
         let chosen = disk_allocation(scoped fn() -> Result[Map[u64, ()], Error] {
             Ok(relocation_ancestors(known, moved_frames(known, true)))
@@ -432,7 +428,7 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     let Some(carried_files) = carried else {
         let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
         apply_pack_layout(mut known, pack_plan)?
-        let roots = PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed), deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows))
+        let roots = PagedLists(packs: take pack_root, deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows))
         return Ok(ListLayout(roots: take roots, run_packs: take pack_plan, removals: take data_retired))
     }
     let mut retiring: Map[u64, ()] = map.new()
@@ -452,7 +448,7 @@ fn plan_paged_lists(mut known: PageLocations, installed: PagedLists, queue: CutQ
     })
     let pack_plan = layout_packs(page_frames(emission), 2, first_pack, cap)?
     apply_pack_layout(mut known, pack_plan)?
-    Ok(ListLayout(roots: PagedLists(packs: take pack_root, retired: std.page.empty(0, 0, Unprefixed), deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows)), run_packs: take pack_plan, removals: take removals))
+    Ok(ListLayout(roots: PagedLists(packs: take pack_root, deferred: take deferred_root, deferred_next: deferred_next, lineage: take lineage_root, rows: clone(rows)), run_packs: take pack_plan, removals: take removals))
 }
 
 type PageRetryBase: send {

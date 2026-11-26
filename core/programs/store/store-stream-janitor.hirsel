@@ -5,17 +5,41 @@
 // - watches foreign streams whose pins this host needs cleared and elects a
 //   Collecting incarnation (`kind = 1`) once a Serving token or Collecting rev
 //   stays unchanged for `4 * hold_ms` (with A4 election recheck).
-type JanitorAsk: send = JanitorOrphanHold(StoreId, String, u64) | JanitorStragglerPin(StoreId, String)
+type JanitorAsk: send = JanitorOrphanHold(StoreId, String, HistoryPair) | JanitorStragglerPin(StoreId, String, HistoryPair)
 
 // Opens a Place streamed on the service's reserved slot (never refused by
 // `max_pins` or ordinary `max_slots`, §12.11.8 A5) and closes it so H raises
 // the epoch (triggering rule (c) for orphan Held rows) and close settles/cuts
-// and drops ATTACH (clearing straggler pins).
-fn stream_janitor_close_place(tasks: Tasks, mut service: JournalService, take authority: Authority, c: Clock, r: Random, options: Options) -> Result[(), Error] waits {
+// and drops ATTACH (clearing straggler pins). Carries `ClaimAuth(Continue)`
+// pinned to the head pair observed when the ask was emitted so a Place that
+// moved to another host ends in `Superseded` with zero writes, and expects the
+// ask's StoreId, so a different Store at the same prefix is refused `Foreign`.
+// A same-pair ask whose cause is gone (the Held row or the pin was removed)
+// is `JanitorCleaned` with zero writes: a changed owner and a completed
+// cleanup are distinct outcomes.
+type JanitorClose = JanitorClosed | JanitorCleaned
+
+fn stream_janitor_close_place(tasks: Tasks, mut service: JournalService, take authority: Authority, c: Clock, r: Random, options: Options, ask: JanitorAsk) -> Result[JanitorClose, Error] waits {
+    let (store, expect_pair) = match ask {
+        JanitorOrphanHold(store, _, pair) => (store, pair),
+        JanitorStragglerPin(store, _, pair) => (store, pair),
+    }
+    let mut attempt: Bytes = disk_allocation(fn() -> Result[Bytes, Error] {
+        Ok(list.with_capacity(16))
+    })?
+    host.random(r, mut attempt)
+    let expected = claim_from_pair(expect_pair)?
+    let mut opts: Options = clone(options)
+    opts.expect = Some(store)
+    opts.claim_auth = Some(ClaimAuth(expect: Some(take expected), attempt: take attempt, class: Continue))
+    if !journal_janitor_still(mut service, ask)? {
+        return Ok(JanitorCleaned)
+    }
     let slot = journal_reserved_slot(mut service)?
     let attached = streamed(take authority, take slot)?
-    let mut db = open_authority(tasks, take attached, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
-    close(take db)
+    let mut db = open_authority(tasks, take attached, c, r, opts) ?=> |Refusal(error: take problem, ..)| take problem
+    close(take db)?
+    Ok(JanitorClosed)
 }
 
 // Per-foreign-stream janitor watcher (§12.11.8 "Dead and collecting streams"):

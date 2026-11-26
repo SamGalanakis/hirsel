@@ -1,0 +1,577 @@
+// Laws for universal ClaimAuth, 49-byte ORIGIN head frame (0x00E0),
+// Superseded refusal, attempt-vs-holder safety, and 1-GET HeadView settlement
+// (STORE-SPEC §12.3, §12.11.5, §12.11.6).
+fn claim_law_attempt(tag: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(16)
+    for i in 0u64 .. 16 {
+        list.push(mut out, tag + int.narrow(i))
+    }
+    take out
+}
+
+// Counts PUTs after the GET of `marker`, up to the GET of `end` when given.
+fn claim_law_count_puts(report: std.sim.s3.Report, marker: String, end: Option[String], key_filter: Option[String]) -> u64 {
+    let mut after = false
+    let mut seen = 0u64
+    for q in report.requests {
+        if q.method == "GET" && q.key == marker {
+            after = true
+            continue
+        }
+        if let Some(stop) = end {
+            if q.method == "GET" && q.key == stop {
+                after = false
+                continue
+            }
+        }
+        if !after {
+            continue
+        }
+        if q.method == "PUT" {
+            match key_filter {
+                Some(want) => if q.key == want {
+                    seen += 1
+                },
+                None => {
+                    seen += 1
+                },
+            }
+        }
+    }
+    seen
+}
+
+fn claim_law_count_gets_between(report: std.sim.s3.Report, start_marker: String, end_marker: String) -> u64 {
+    let mut window = false
+    let mut seen = 0u64
+    for q in report.requests {
+        if q.method == "GET" && q.key == start_marker {
+            window = true
+            continue
+        }
+        if q.method == "GET" && q.key == end_marker {
+            window = false
+            continue
+        }
+        if window && q.method == "GET" {
+            seen += 1
+        }
+    }
+    seen
+}
+
+fn claim_law_marker(s: BucketSim, tasks: Tasks, seed: u64, key: String) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(s, tasks, "s3.test", seed, true)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let _ = std.object.fetch(mut client, key, list.new(), due)
+    let _ = take client
+    Ok(())
+}
+
+// Race (a): delayed A->B move after C wins.
+// Controller sends Move(A->B) expecting A's pair; the message is held via
+// std.sim.message until C wins Move(A->C) and commits. When B finally runs
+// with the delayed envelope, B gets Superseded(C's pair) with zero bucket PUTs
+// and C keeps committing cleanly.
+@test
+fn bucket_claim_auth_race_a_delayed_move(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 30481, None, list.new())
+    let outcome = race_a_delayed_move_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if claim_law_count_puts(report, string.from("race-a-before-b"), None, None) != 0 {
+        fail("race (a): delayed B performed a PUT after C won")
+    }
+    Ok(())
+}
+
+fn race_a_delayed_move_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut opts_a = bucket_order_options(true)
+    opts_a.claim_auth = None
+    let mut a = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 1)?, s.time, r, opts_a) ?=> |Refusal(error: take p, ..)| take p
+    bucket_law_commit(mut a, 1)?
+    let pair_a = claim_of(a)?
+    // A crashes; Fleet moves its Place.
+    let _ = take a
+    // Queue the delayed A->B permit and hold it until C wins.
+    let mut q: std.sim.message.Queue[ClaimAuth] = std.sim.message.new()
+    std.sim.message.hold_until(mut q, 0, 2, string.from("move"), string.from("c_won"))
+    let att_b = claim_law_attempt(0x20)
+    let att_c = claim_law_attempt(0x30)
+    std.sim.message.send(mut q, std.sim.message.Message(from: 0, to: 2, name: string.from("move"), value: ClaimAuth(expect: Some(clone(pair_a)), attempt: clone(att_b), class: Permit)))
+    std.sim.message.send(mut q, std.sim.message.Message(from: 0, to: 3, name: string.from("move"), value: ClaimAuth(expect: Some(clone(pair_a)), attempt: clone(att_c), class: Permit)))
+    if let Some(_) = std.sim.message.receive(mut q, 2) {
+        fail("race (a): held A->B move was delivered before c_won")
+    }
+    let Some(msg_c) = std.sim.message.receive(mut q, 3) else {
+        fail("race (a): C's move message was missing")
+    }
+    let mut opts_c = bucket_order_options(false)
+    opts_c.claim_auth = Some(clone(msg_c.value))
+    let mut c_db = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 2)?, s.time, r, opts_c) ?=> |Refusal(error: take p, ..)| take p
+    let pair_c = claim_of(c_db)?
+    bucket_law_commit(mut c_db, 2)?
+    std.sim.message.fire(mut q, string.from("c_won"))
+    let Some(msg_b) = std.sim.message.receive(mut q, 2) else {
+        fail("race (a): delayed A->B move did not release after c_won")
+    }
+    // Mark start of B's open window: B must issue zero PUTs.
+    claim_law_marker(s, tasks, 90, string.from("race-a-before-b"))?
+    let mut opts_b = bucket_order_options(false)
+    opts_b.claim_auth = Some(clone(msg_b.value))
+    match open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 3)?, s.time, r, opts_b) {
+        Error(Refusal(error: Superseded(actual), ..)) => {
+            if actual != pair_c {
+                fail("race (a): Superseded did not name C's pair")
+            }
+        },
+        Ok(take bad) => {
+            let _ = close(take bad)
+            fail("race (a): delayed B opened a second writer")
+        },
+        Error(Refusal(error: take other, ..)) => return Error(take other),
+    }
+    // C's ORIGIN matches att_c and C stays healthy.
+    let Some(orig_c) = origin_of(c_db)? else {
+        fail("race (a): C lost ORIGIN")
+    }
+    if orig_c.epoch != 2 || orig_c.attempt != att_c || orig_c.class != Permit || orig_c.permit_epoch != 2 || orig_c.permit_attempt != att_c {
+        fail("race (a): C's ORIGIN did not match Permit(att_c)")
+    }
+    close(take c_db)
+}
+
+// Race (b): deposed A's local restart retry after B wins, plus missing/invalid
+// ClaimAuth enforcement (zero writes on refusal).
+@test
+fn bucket_claim_auth_race_b_local_restart_after_deposed(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 30482, None, list.new())
+    let outcome = race_b_local_restart_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if claim_law_count_puts(report, string.from("race-b-before-retries"), None, None) != 0 {
+        fail("race (b): deposed local restart or missing ClaimAuth performed a PUT")
+    }
+    Ok(())
+}
+
+fn race_b_local_restart_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut opts_a = bucket_order_options(true)
+    opts_a.claim_auth = None
+    let mut a = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 1)?, s.time, r, opts_a) ?=> |Refusal(error: take p, ..)| take p
+    bucket_law_commit(mut a, 1)?
+    let pair_a = claim_of(a)?
+    // Drop A (crash) while B takes over with Permit(pair_a).
+    let _ = take a
+    let mut opts_b = bucket_order_options(false)
+    opts_b.claim_auth = Some(ClaimAuth(expect: Some(clone(pair_a)), attempt: claim_law_attempt(0x40), class: Permit))
+    let mut b = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 2)?, s.time, r, opts_b) ?=> |Refusal(error: take p, ..)| take p
+    let pair_b = claim_of(b)?
+    bucket_law_commit(mut b, 2)?
+    claim_law_marker(s, tasks, 91, string.from("race-b-before-retries"))?
+    // 1. Deposed A's §14.5 local restart retry carries Continue(pair_a) -> Superseded(pair_b).
+    let mut opts_retry = bucket_order_options(false)
+    opts_retry.claim_auth = Some(ClaimAuth(expect: Some(clone(pair_a)), attempt: claim_law_attempt(0x41), class: Continue))
+    match open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 3)?, s.time, r, opts_retry) {
+        Error(Refusal(error: Superseded(actual), ..)) => {
+            if actual != pair_b {
+                fail("race (b): local restart Superseded did not name B's pair")
+            }
+        },
+        Ok(take bad) => {
+            let _ = close(take bad)
+            fail("race (b): deposed A's local restart stole head from B")
+        },
+        Error(Refusal(error: take other, ..)) => return Error(take other),
+    }
+    // 2. Non-genesis open with claim_auth: None -> Missing("claim_auth").
+    let mut opts_none = bucket_order_options(false)
+    opts_none.claim_auth = None
+    match open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 4)?, s.time, r, opts_none) {
+        Error(Refusal(error: Missing(what), ..)) if what == "claim_auth" => (),
+        _ => fail("race (b): non-genesis open without ClaimAuth was not refused Missing(claim_auth)"),
+    }
+    // 3. Permit or Continue with expect: None -> Missing("claim_auth").
+    let mut opts_bad_permit = bucket_order_options(false)
+    opts_bad_permit.claim_auth = Some(ClaimAuth(expect: None, attempt: claim_law_attempt(0x42), class: Permit))
+    match open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 5)?, s.time, r, opts_bad_permit) {
+        Error(Refusal(error: Missing(what), ..)) if what == "claim_auth" => (),
+        _ => fail("race (b): Permit without expect was not refused Missing(claim_auth)"),
+    }
+    close(take b)
+}
+
+// Race (c): attached-stream janitor after Place moved to Host B.
+// Host A's janitor ask (carrying A's pair) is held until Host B wins X onto
+// S_B. When Host A's janitor fires, stream_janitor_close_place ends in
+// Superseded(pair_B) with zero PUTs to X's head and zero Held rows on S_B/reg.
+@test
+fn bucket_claim_auth_race_c_stream_janitor_after_move(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 30483, None, list.new())
+    let outcome = race_c_janitor_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if claim_law_count_puts(report, string.from("race-c-before-janitor"), Some(string.from("race-c-after-janitor")), Some(string.from("pX/head"))) != 0 {
+        fail("race (c): stale janitor wrote X's head after B won")
+    }
+    let reg_b = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_key(stream_dir(stream_janitor_sid_b()), string.from("reg")))
+    if claim_law_count_puts(report, string.from("race-c-before-janitor"), Some(string.from("race-c-after-janitor")), Some(reg_b)) != 0 {
+        fail("race (c): stale janitor wrote a Held row on S_B/reg")
+    }
+    Ok(())
+}
+
+fn race_c_janitor_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_janitor_service(s, tasks, r, 31, stream_law_sid(), 3, 8, 86400)?
+    let mut svc_b = stream_janitor_service(s, tasks, r, 32, stream_janitor_sid_b(), 3, 8, 86400)?
+    stream_gc_make_place(s, tasks, r, 33, string.from("pX/"))?
+    let mut x_a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 34, string.from("pX/"))?
+    bucket_law_commit(mut x_a, 1)?
+    let pair_a = claim_of(x_a)?
+    let x_store = x_a.store
+    let _ = take x_a
+    // Age an orphan Held row on S_A so svc_a emits JanitorOrphanHold with pair_a.
+    stream_unhold_raw_hold(s, tasks, 35, x_store, pair_a.epoch, StoreId(hi: 99, lo: 2))?
+    let mut q: std.sim.message.Queue[JanitorAsk] = std.sim.message.new()
+    std.sim.message.hold_until(mut q, 1, 1, string.from("janitor"), string.from("b_won"))
+    let mut got_ask = false
+    for _ in 0u64 .. 16u64 {
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+        let asks = journal_janitor_asks(mut svc_a)?
+        for take ask in take asks {
+            if let JanitorOrphanHold(_, _, _) = ask {
+                std.sim.message.send(mut q, std.sim.message.Message(from: 1, to: 1, name: string.from("janitor"), value: take ask))
+                got_ask = true
+            }
+        }
+        if got_ask {
+            break
+        }
+    }
+    if !got_ask {
+        let _ = close_journal_service(take svc_a)
+        let _ = close_journal_service(take svc_b)
+        fail("race (c): svc_a did not emit JanitorOrphanHold")
+    }
+    // Host B moves X onto S_B with Permit(pair_a).
+    let slot_b = journal_slot(mut svc_b)?
+    let client_b = stream_service_client(s, tasks, 36, string.from("pX/"), "us-east-1")?
+    let attached_b = streamed(object_authority(take client_b, "bucket", JANITOR_OP_MS), take slot_b)?
+    let mut opts_b = stream_janitor_options(false)
+    let att_b = claim_law_attempt(0x50)
+    opts_b.claim_auth = Some(ClaimAuth(expect: Some(clone(pair_a)), attempt: clone(att_b), class: Permit))
+    let mut x_b = open_authority(tasks, take attached_b, s.time, r, opts_b) ?=> |Refusal(error: take p, ..)| take p
+    let pair_b = claim_of(x_b)?
+    bucket_law_commit(mut x_b, 2)?
+    // Release the delayed janitor ask after B won; must end in Superseded(pair_b) with zero writes.
+    std.sim.message.fire(mut q, string.from("b_won"))
+    let Some(take msg) = std.sim.message.receive(mut q, 1) else {
+        fail("race (c): delayed janitor ask did not release")
+    }
+    let std.sim.message.Message(value: take ask, ..) = take msg
+    let JanitorOrphanHold(stale_store, take pfx, stale_pair) = take ask else {
+        fail("race (c): unexpected janitor ask variant")
+    }
+    stream_service_marker(s, tasks, string.from("race-c-before-janitor"))?
+    let jclient = stream_service_client(s, tasks, 37, clone(pfx), "us-east-1")?
+    let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
+    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(stale_store, take pfx, stale_pair)) {
+        Error(Superseded(actual)) => {
+            if actual != pair_b {
+                fail("race (c): janitor Superseded did not name B's pair")
+            }
+        },
+        Ok(JanitorClosed) => fail("race (c): stale janitor closed B's live Place"),
+        Ok(JanitorCleaned) => fail("race (c): the janitor took B's move for a finished cleanup"),
+        Error(take other) => return Error(take other),
+    }
+    stream_service_marker(s, tasks, string.from("race-c-after-janitor"))?
+    // B's writer is untouched and still commits cleanly.
+    bucket_law_commit(mut x_b, 3)?
+    if bucket_law_rows(mut x_b)? != 3 {
+        fail("race (c): B lost rows after stale janitor")
+    }
+    close(take x_b)?
+    close_journal_service(take svc_a)?
+    close_journal_service(take svc_b)
+}
+
+// Negative test: reusing `attempt` as `holder` makes the two-writer law go red
+// because history_write_head resolves Mismatch by exact byte equality.
+// Fresh random `holder` per physical open (production behavior) keeps it green.
+@test
+fn bucket_claim_auth_attempt_as_holder_negative(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let att = claim_law_attempt(0x60)
+    let att_as_holder = StoreId(hi: read_le(att, 0, 8), lo: read_le(att, 8, 8))
+    // 1. Negative case: both physical opens reuse `attempt` as `holder` -> TWO winners (red!).
+    let bad_winners = two_claimants_same_attempt(c, r, tasks, 30484, att_as_holder, att_as_holder, clone(att))?
+    if bad_winners != 2 {
+        fail("negative test: reusing attempt as holder did not trigger two writers")
+    }
+    // 2. Positive case: each physical open draws a fresh random holder -> AT MOST ONE winner (green!).
+    let h1 = capacity(disk_identity(r))?
+    let h2 = capacity(disk_identity(r))?
+    let good_winners = two_claimants_same_attempt(c, r, tasks, 30485, h1, h2, take att)?
+    if good_winners != 1 {
+        fail("fresh random holders did not enforce single writer")
+    }
+    Ok(())
+}
+
+fn two_claimants_same_attempt(c: Clock, r: Random, tasks: Tasks, seed: u64, holder1: StoreId, holder2: StoreId, att: Bytes) -> Result[u64, Error] waits {
+    let s = bucket_law_sim(tasks, c, seed, None, list.new())
+    let outcome = two_claimants_run(s, tasks, holder1, holder2, att)
+    let _ = bucket_law_report(take s)
+    outcome
+}
+
+fn two_claimants_run(s: BucketSim, tasks: Tasks, holder1: StoreId, holder2: StoreId, att: Bytes) -> Result[u64, Error] waits {
+    let mut c0 = bucket_law_client_with(s, tasks, "s3.test", 1, true)?
+    let mut c1 = bucket_law_client_with(s, tasks, "s3.test", 2, true)?
+    let mut c2 = bucket_law_client_with(s, tasks, "s3.test", 3, true)?
+    let meta = history_config_bytes(object_history_config(std.object.bucket_config(c0), "bucket"))?
+    let mut b0 = history_buffers(1024)?
+    let mut b1 = history_buffers(1024)?
+    let mut b2 = history_buffers(1024)?
+    let due = std.object.deadline_after_ms(c0, BUCKET_LAW_OP_MS)
+    let a = history_publish_genesis(mut c0, StoreId(hi: 90, lo: 1), StoreId(hi: 91, lo: 1), 1, meta, mut b0, due, default_limits(), None)?
+    let pair_a = claim_from_pair(a.head.pair)?
+    let auth = ClaimAuth(expect: Some(pair_a), attempt: clone(att), class: Permit)
+    // Both claimants fetch the same genesis head and its ETag before either writes H.
+    let m1 = history_fetch(mut c1, "head", mut b1.witness, due)?
+    let m2 = history_fetch(mut c2, "head", mut b2.witness, due)?
+    let cap1 = history_decode_head(b1.witness)?
+    let cap2 = history_decode_head(b2.witness)?
+    let cand1 = history_claim_head(cap1.head, holder1, clone(auth))?
+    let cand2 = history_claim_head(cap2.head, holder2, auth)?
+    let auth_end1 = history_authority_end(b1.witness)?
+    let auth_end2 = history_authority_end(b2.witness)?
+    history_encode_register_head(mut b1.body, cand1, list.slice(b1.witness, 240, auth_end1), None)?
+    history_encode_register_head(mut b2.body, cand2, list.slice(b2.witness, 240, auth_end2), None)?
+    let mut winners = 0u64
+    if let HistoryApplied(_) = history_write_head(mut c1, Match(m1.etag), mut b1.body, mut b1.witness, due) {
+        winners += 1
+    }
+    if let HistoryApplied(_) = history_write_head(mut c2, Match(m2.etag), mut b2.body, mut b2.witness, due) {
+        winners += 1
+    }
+    let _ = take c0
+    let _ = take c1
+    let _ = take c2
+    Ok(winners)
+}
+
+// ORIGIN survives ordinary advances, cuts, and attached settles byte-for-byte,
+// and the 1-GET settle_permit classifies Open, Won (after lost reply and
+// after subsequent Continue), and Dead accurately, plus O4 malformation checks.
+@test
+fn bucket_origin_survives_advance_cut_settle_and_head_view(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 30486, None, list.new())
+    let outcome = origin_and_head_view_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    let expected_origin = outcome?
+    // Every 1-GET settlement window issued exactly 1 GET (and zero PUTs).
+    if claim_law_count_gets_between(report, string.from("hv-open-start"), string.from("hv-open-end")) != 1 || claim_law_count_puts(report, string.from("hv-open-start"), Some(string.from("hv-open-end")), None) != 0 {
+        fail("settle_permit (Open) did not use exactly 1 GET and no write")
+    }
+    if claim_law_count_gets_between(report, string.from("hv-won-start"), string.from("hv-won-end")) != 1 || claim_law_count_puts(report, string.from("hv-won-start"), Some(string.from("hv-won-end")), None) != 0 {
+        fail("settle_permit (Won) did not use exactly 1 GET and no write")
+    }
+    if claim_law_count_gets_between(report, string.from("hv-cont-start"), string.from("hv-cont-end")) != 1 || claim_law_count_puts(report, string.from("hv-cont-start"), Some(string.from("hv-cont-end")), None) != 0 {
+        fail("settle_permit (Continue) did not use exactly 1 GET and no write")
+    }
+    if claim_law_count_gets_between(report, string.from("hv-dead-start"), string.from("hv-dead-end")) != 1 || claim_law_count_puts(report, string.from("hv-dead-start"), Some(string.from("hv-dead-end")), None) != 0 {
+        fail("settle_permit (Dead) did not use exactly 1 GET and no write")
+    }
+    // Check that every head write at epoch 3 (B's Continue + advance + cut)
+    // carried the EXACT same 49-byte ORIGIN payload byte-for-byte!
+    let mut epoch3_count = 0u64
+    for hw in report.head_writes {
+        let (take cap, _) = history_decode_head_attach(hw.data)?
+        if cap.head.pair.epoch == 3 {
+            let n = list.len(hw.data)
+            let payload = list.slice(hw.data, n - ORIGIN_PAYLOAD_BYTES, n)
+            if payload != expected_origin {
+                fail("ORIGIN 49-byte payload changed across advance or cut")
+            }
+            epoch3_count += 1
+        }
+    }
+    if epoch3_count < 3 {
+        fail("expected at least 3 head writes at epoch 3 (H, advance, cut)")
+    }
+    // O4 validation checks on malformed ORIGIN frames.
+    origin_o4_malformed_checks()?
+    Ok(())
+}
+
+fn origin_and_head_view_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[Bytes, Error] waits {
+    let mut opts_a = bucket_order_options(true)
+    opts_a.claim_auth = None
+    let mut a = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 1)?, s.time, r, opts_a) ?=> |Refusal(error: take p, ..)| take p
+    let sid = a.store
+    bucket_law_commit(mut a, 1)?
+    let pair_a = claim_of(a)?
+    // A crashes, so no idle poll shares the settlement windows below.
+    let _ = take a
+    // 1. Before B writes H -> 1-GET HeadView settles as HeadOpen.
+    let att_b = claim_law_attempt(0x70)
+    claim_law_marker(s, tasks, 50, string.from("hv-open-start"))?
+    let mut hv_client1 = bucket_law_client_with(s, tasks, "s3.test", 51, true)?
+    let v_open = settle_permit(mut hv_client1, sid, clone(pair_a), clone(att_b), BUCKET_LAW_OP_MS)?
+    let _ = take hv_client1
+    claim_law_marker(s, tasks, 52, string.from("hv-open-end"))?
+    if v_open != HeadOpen {
+        fail("settle_permit did not classify untouched head as HeadOpen")
+    }
+    // 2. B writes its Permit H and crashes before its reply or CLAIM: the
+    // head holds B's H and nothing after it (fleet.md FLT-2 window 4).
+    permit_h_then_crash(s, tasks, r, clone(pair_a), clone(att_b))?
+    // 1-GET HeadView after lost reply settles B's Permit as HeadWon(2)!
+    claim_law_marker(s, tasks, 53, string.from("hv-won-start"))?
+    let mut hv_client2 = bucket_law_client_with(s, tasks, "s3.test", 54, true)?
+    let v_won = settle_permit(mut hv_client2, sid, clone(pair_a), clone(att_b), BUCKET_LAW_OP_MS)?
+    let _ = take hv_client2
+    claim_law_marker(s, tasks, 55, string.from("hv-won-end"))?
+    if v_won != HeadWon(2) {
+        fail("settle_permit did not classify lost-reply Permit as HeadWon(2)")
+    }
+    // 3. B restarts locally with Continue(v_won.claim, att_b2) at epoch 3,
+    // commits an ordinary advance, and runs a checkpoint cut!
+    let att_b2 = claim_law_attempt(0x71)
+    let mut opts_b2 = bucket_order_options(false)
+    let mut won_client = bucket_law_client_with(s, tasks, "s3.test", 62, true)?
+    let won_view = head_view(mut won_client, Some(sid), BUCKET_LAW_OP_MS)?
+    let _ = take won_client
+    opts_b2.claim_auth = Some(ClaimAuth(expect: Some(clone(won_view.claim)), attempt: clone(att_b2), class: Continue))
+    let mut b2 = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 3)?, s.time, r, opts_b2) ?=> |Refusal(error: take p, ..)| take p
+    let pair_b2 = claim_of(b2)?
+    // Capture exact 49-byte ORIGIN payload at epoch 3 for comparison across advance + cut.
+    let mut expected_origin: Bytes = list.with_capacity(ORIGIN_PAYLOAD_BYTES)
+    list.put_word_le(mut expected_origin, 3u64)
+    list.append(mut expected_origin, att_b2)
+    list.push(mut expected_origin, 1u8)
+    list.put_word_le(mut expected_origin, 2u64)
+    list.append(mut expected_origin, att_b)
+    bucket_law_commit(mut b2, 2)?
+    bucket_law_checkpoint(mut b2)?
+    close(take b2)?
+    // 1-GET HeadView after Continue still settles B's original Permit as HeadWon(2)!
+    claim_law_marker(s, tasks, 56, string.from("hv-cont-start"))?
+    let mut hv_client3 = bucket_law_client_with(s, tasks, "s3.test", 57, true)?
+    let v_cont = settle_permit(mut hv_client3, sid, clone(pair_a), clone(att_b), BUCKET_LAW_OP_MS)?
+    let _ = take hv_client3
+    claim_law_marker(s, tasks, 58, string.from("hv-cont-end"))?
+    if v_cont != HeadWon(2) {
+        fail("settle_permit lost HeadWon(2) after subsequent Continue claim")
+    }
+    // 4. C wins a new Permit(pair_b2, att_c) at epoch 4 -> B's old Permit settles HeadDead(pair_c)!
+    let att_c = claim_law_attempt(0x72)
+    let mut opts_c = bucket_order_options(false)
+    opts_c.claim_auth = Some(ClaimAuth(expect: Some(clone(pair_b2)), attempt: clone(att_c), class: Permit))
+    let mut c_db = open_authority(tasks, bucket_law_authority(s, tasks, "s3.test", 4)?, s.time, r, opts_c) ?=> |Refusal(error: take p, ..)| take p
+    let pair_c = claim_of(c_db)?
+    close(take c_db)?
+    claim_law_marker(s, tasks, 59, string.from("hv-dead-start"))?
+    let mut hv_client4 = bucket_law_client_with(s, tasks, "s3.test", 60, true)?
+    let v_dead = settle_permit(mut hv_client4, sid, clone(pair_a), clone(att_b), BUCKET_LAW_OP_MS)?
+    let _ = take hv_client4
+    claim_law_marker(s, tasks, 61, string.from("hv-dead-end"))?
+    if v_dead != HeadDead(clone(pair_c)) {
+        fail("settle_permit did not classify superseded Permit as HeadDead(pair_c)")
+    }
+    // A foreign Store's head, or a head no newer than the predecessor, closes
+    // no permit: both are errors, never Dead.
+    let mut foreign_client = bucket_law_client_with(s, tasks, "s3.test", 63, true)?
+    match settle_permit(mut foreign_client, StoreId(hi: sid.hi ^ 1, lo: sid.lo), clone(pair_c), claim_law_attempt(0x73), BUCKET_LAW_OP_MS) {
+        Error(Foreign) => (),
+        _ => fail("settle_permit settled a permit against another Store's head"),
+    }
+    let _ = take foreign_client
+    let mut regressed_client = bucket_law_client_with(s, tasks, "s3.test", 64, true)?
+    let ahead = Claim(epoch: pair_c.epoch, holder: clone(pair_a.holder))
+    match settle_permit(mut regressed_client, sid, ahead, claim_law_attempt(0x74), BUCKET_LAW_OP_MS) {
+        Error(Corrupt(_)) => (),
+        _ => fail("settle_permit closed a permit beside the current head at the same epoch"),
+    }
+    let _ = take regressed_client
+    Ok(take expected_origin)
+}
+
+// B's half of a Permit claim up to and including H, then a crash: no reply
+// is read back and no CLAIM entry follows.
+fn permit_h_then_crash(s: BucketSim, tasks: Tasks, r: Random, take expect: Claim, take attempt: Bytes) -> Result[(), Error] waits {
+    let mut client = bucket_law_client_with(s, tasks, "s3.test", 70, true)?
+    let mut buffers = history_buffers(1024)?
+    let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
+    let fetched = history_fetch(mut client, "head", mut buffers.witness, due)?
+    let captured = history_decode_head(buffers.witness)?
+    let holder = capacity(disk_identity(r))?
+    let candidate = history_claim_head(captured.head, holder, ClaimAuth(expect: Some(take expect), attempt: take attempt, class: Permit))?
+    let authority_end = history_authority_end(buffers.witness)?
+    history_encode_register_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end), None)?
+    let _ = history_write_head(mut client, Match(fetched.etag), mut buffers.body, mut buffers.witness, due)
+    let _ = take client
+    Ok(())
+}
+
+fn origin_o4_malformed_checks() -> Result[(), Error] {
+    let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
+    let payload = history_config_bytes(config)?
+    let id = StoreId(hi: 9, lo: 10)
+    let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let att: Inline[u8, 16] =[1; 16]
+    let zeros: Inline[u8, 16] =[0; 16]
+    // 1. Epoch 2 missing ORIGIN -> Malformed.
+    let e2_no_orig = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
+    history_encode_head(mut raw, e2_no_orig, payload)?
+    match history_decode_head(raw) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("O4: epoch 2 head without ORIGIN was accepted"),
+    }
+    // 2. Epoch 1 with ORIGIN -> Malformed.
+    let e1_with_orig = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 1, attempt: att, class: 0, permit_epoch: 1, permit_attempt: att)))
+    history_encode_head(mut raw, e1_with_orig, payload)?
+    match history_decode_head(raw) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("O4: epoch 1 head with ORIGIN was accepted"),
+    }
+    // 3. ORIGIN.epoch != HEAD.epoch -> Malformed.
+    let bad_epoch = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 3, attempt: att, class: 0, permit_epoch: 3, permit_attempt: att)))
+    history_encode_head(mut raw, bad_epoch, payload)?
+    match history_decode_head(raw) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("O4: mismatched ORIGIN.epoch was accepted"),
+    }
+    // 4. Permit with permit_epoch != epoch -> Malformed.
+    let bad_permit = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 3, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 3, attempt: att, class: 0, permit_epoch: 2, permit_attempt: att)))
+    history_encode_head(mut raw, bad_permit, payload)?
+    match history_decode_head(raw) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("O4: Permit with mismatched permit_epoch was accepted"),
+    }
+    // 5. Continue with permit_epoch == 0 and non-zero permit_attempt -> Malformed.
+    let bad_cont = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 2, attempt: att, class: 1, permit_epoch: 0, permit_attempt: att)))
+    history_encode_head(mut raw, bad_cont, payload)?
+    match history_decode_head(raw) {
+        Error(Corrupt(Fault(why: Malformed, ..))) => (),
+        _ => fail("O4: Continue with zero permit_epoch and non-zero permit_attempt was accepted"),
+    }
+    // 6. Valid Continue from genesis (permit_epoch=0, permit_attempt=zeros) -> accepted!
+    let good_cont = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 2, holder: StoreId(hi: 1, lo: 2)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: Some(HistoryOrigin(epoch: 2, attempt: att, class: 1, permit_epoch: 0, permit_attempt: zeros)))
+    history_encode_head(mut raw, good_cont, payload)?
+    let _ = history_decode_head(raw)?
+    // 7. The same head under the pre-ORIGIN format word 10, its HEADER
+    // resealed so only the format differs, is refused Unsupported(10).
+    let mut old: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    list.append(mut old, list.slice(raw, 0, 72))
+    list.set_word_le(mut old, 24, 10u32)
+    capacity(history_seal(mut old, DiskContext(store: id, role: 7, seq: read_le(raw, 56, 8)), 0, 0x0001))?
+    list.append(mut old, list.slice(raw, 72, list.len(raw)))
+    match history_decode_head(old) {
+        Error(Unsupported(10)) => (),
+        _ => fail("old-format head was not refused Unsupported(10)"),
+    }
+    Ok(())
+}

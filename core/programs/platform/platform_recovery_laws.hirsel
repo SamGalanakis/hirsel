@@ -131,7 +131,7 @@ fn trace_read(id: u8, n_place: u64) -> Bytes {
 fn claim_read(epoch: u64, holder: u8) -> Bytes {
     let description = describe_of(image())
     let binding = result.unwrap(runner.identity_digest(description))
-    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: take binding, n_place: Some(description.n_place), prepared: list.new(), witness_present: false, claim: Some((epoch, bytes_of(16u64, holder))))
+    let read = runner.PlaceRead(store_hi: 1u64, store_lo: 2u64, binding: take binding, n_place: Some(description.n_place), prepared: list.new(), witness_present: false, claim: Some(runner.PlaceClaim(epoch, holder: bytes_of(16u64, holder), attempt: list.new())))
     let codec: std.codec.Codec[runner.PlaceRead] = std.codec.of()
     let mut raw: Bytes = list.new()
     result.unwrap(std.codec.encode(codec, read, mut raw))
@@ -274,4 +274,85 @@ fn release_recovery_traces(c: Clock, rnd: Random) waits {
     trace_current(mut retained, 11u64, trace_read(6u8, 1048576u64))
     expect(failing_cause(retained, "g") == Some("No recovery candidate matches the store at activation 11: its release identity is 0606060606060606060606060606060606060606060606060606060606060606 at n_place 1048576; candidates: 0707070707070707070707070707070707070707070707070707070707070707 with identity 0101010101010101010101010101010101010101010101010101010101010101 at n_place 1048576, 0909090909090909090909090909090909090909090909090909090909090909 with identity 0202020202020202020202020202020202020202020202020202020202020202 at n_place 1048576; last start: NotCurrent: the store is at activation 11; this start requested 10"), "T4: wrong cause for a retained release outside the candidate list")
     expect(names_root(collected_roots(mut retained), bytes_of(32u64, 6u8)), "T4: collection removed the retained release")
+}
+
+// RUNNER-SPEC §14.6 Deposed: a run whose open was refused Superseded(pair)
+// parks its assignment. Its end starts no §14.5 retry, and an arrival, the retry
+// clock and an inventory replay after a host restart start nothing. (The park
+// is volatile: once the host has seen the end, a host restart probes once, and
+// that probe is refused Superseded before any write and parks again.) On an
+// outstanding cut, a Deposed candidate or OLD fails the deploy as a conflict,
+// never as an opened candidate, and the group parks the same way.
+@test
+fn deposed_parks_assignment_and_stops_retry_duel(c: Clock, rnd: Random) -> Result[(), ()] waits {
+    let mut r = rig(c, rnd, 4u64)
+    add(mut r, "g", "t")
+    op_wake(mut r, "g")
+    let first = last(r, "g")
+    let deposer = bytes_of(16u64, 0x77u8)
+    let mut notice: List[launcher.Event] = list.new()
+    list.push(mut notice, Placed(clone(first), PlaceDeposed(2u64, clone(deposer))))
+    feed(mut r, take notice)
+    finish(mut r, first, Code(1i32), None)
+    expect(launches(r, "g") == 1u64, "Deposed: the end started a §14.5 retry")
+    expect(failing_cause(r, "g") == Some("Deposed at epoch 2 holder 77777777777777777777777777777777"), "Deposed: the failing cause does not name the deposing pair")
+    let Some(grp) = must(group_row(r.h, "g"), "group row") else {
+        fail("no group")
+    }
+    let mut arrival: List[launcher.Event] = list.new()
+    list.push(mut arrival, Arrived(launcher.Group(name: "g", incarnation: grp.incarnation)))
+    feed(mut r, take arrival)
+    at_mono(mut r, r.now.mono_ns + 600u64 * SECOND_NS)
+    expect(launches(r, "g") == 1u64, "Deposed: an arrival or the retry clock relaunched the parked assignment")
+    // The host restarts after it saw the end: one probe, refused Superseded
+    // before any write, parks again and starts nothing more.
+    let mut probed = restart(take r, 4u64)
+    expect(launches(probed, "g") == 1u64, "Deposed: a host restart did not probe exactly once")
+    let probe = last(probed, "g")
+    let mut again: List[launcher.Event] = list.new()
+    list.push(mut again, Placed(clone(probe), PlaceDeposed(2u64, clone(deposer))))
+    feed(mut probed, take again)
+    finish(mut probed, probe, Code(1i32), None)
+    at_mono(mut probed, probed.now.mono_ns + 600u64 * SECOND_NS)
+    expect(launches(probed, "g") == 1u64, "Deposed: the restarted host's probe started a §14.5 retry")
+    // The child reports Deposed and ends while no host watches: the restart's
+    // inventory replays its answer and end, and the group parks without a probe.
+    let mut lost = rig(c, rnd, 4u64)
+    add(mut lost, "g", "t")
+    op_wake(mut lost, "g")
+    let child = last(lost, "g")
+    launcher.remember_place_answer(mut lost.f, child, PlaceDeposed(2u64, clone(deposer)))
+    let _ = launcher.end(mut lost.f, child, Code(1i32), None)
+    let back = restart(take lost, 4u64)
+    expect(launches(back, "g") == 0u64, "Deposed: the inventory replay after a host restart relaunched the parked assignment")
+    expect(failing_cause(back, "g") == Some("Deposed at epoch 2 holder 77777777777777777777777777777777"), "Deposed: the replayed answer did not park the group")
+    deposed_cut_fails(c, rnd, true)
+    deposed_cut_fails(c, rnd, false)
+    Ok(())
+}
+
+// A Deposed candidate (or OLD) on an outstanding cut: the deploy is Failed as a
+// conflict, the cut is gone and the group is parked, never cut over.
+fn deposed_cut_fails(c: Clock, rnd: Random, candidate: bool) waits {
+    let (take setup, old, go) = cut_case(c, rnd)
+    let mut r = take setup
+    pump(mut r, take go)
+    let new = last(r, "g")
+    let from = if candidate {
+        new
+    } else {
+        clone(old)
+    }
+    let mut events: List[launcher.Event] = list.new()
+    list.push(mut events, Placed(clone(from), PlaceDeposed(3u64, bytes_of(16u64, 0x55u8))))
+    feed(mut r, take events)
+    let failed = match deploy_outcome(r.h, "g") {
+        Some(Failed(why)) => why == "Deposed at epoch 3 holder 55555555555555555555555555555555",
+        _ => false,
+    }
+    expect(failed, "Deposed cut: the deploy was not Failed with the deposing pair")
+    expect(failing_cause(r, "g") == Some("Deposed at epoch 3 holder 55555555555555555555555555555555"), "Deposed cut: the group was not parked")
+    let starts = list.len(r.starts)
+    finish(mut r, old, Code(1i32), None)
+    expect(list.len(r.starts) == starts, "Deposed cut: OLD's end started a retry")
 }

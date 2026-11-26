@@ -23,6 +23,7 @@ pub type Options: send {
     expect: Option[StoreId],
     activation: Option[u64],
     binding: Option[Bytes],
+    claim_auth: Option[ClaimAuth],
     claim_ms: u64,
     head_poll_ms: u64,
     checkpoint_entries: u64,
@@ -366,7 +367,7 @@ fn writer_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, 
 
 fn make_sized_options(kind: Kind, o: Overrides, commits: u32, group: u64, checkpoint_budget: u64, journal: u64, pack: u64, resident: u64) -> Options {
     let tiered = tiered_sizes(kind, resident, o)
-    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_ms: DEFAULT_BUCKET_CLAIM_MS, head_poll_ms: DEFAULT_BUCKET_HEAD_POLL_MS, checkpoint_entries: DEFAULT_BUCKET_CHECKPOINT_ENTRIES, retain: DEFAULT_BUCKET_RETAIN, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: DEFAULT_STREAMS_PER_CALLER, streams_max: None, limits: o.limits)
+    Options(create: true, lock_wait_ms: size_or(o.lock_wait_ms, 0), group_commits: commits, group_bytes: int.truncate(group), checkpoint_bytes: checkpoint_budget, journal_limit: journal, pack_bytes: pack, resident_limit: resident, cache_bytes: tiered.cache, writer_pin_bytes: tiered.writer, dirty_bytes: tiered.dirty, pager_task_bytes: tiered.pager, free_budget: 4096, probe_budget: 65536, compact_permille: 500, authority: Directory(), expect: None, activation: None, binding: None, claim_auth: None, claim_ms: DEFAULT_BUCKET_CLAIM_MS, head_poll_ms: DEFAULT_BUCKET_HEAD_POLL_MS, checkpoint_entries: DEFAULT_BUCKET_CHECKPOINT_ENTRIES, retain: DEFAULT_BUCKET_RETAIN, stream_retention_ms: STREAM_RETENTION_MS, streams_per_caller_max: DEFAULT_STREAMS_PER_CALLER, streams_max: None, limits: o.limits)
 }
 
 // The Directory journal worker's grant beyond its group buffer, holding its
@@ -390,13 +391,13 @@ fn journal_channel_bytes(group_count: u64) -> u64 {
 }
 
 fn writer_state_bytes() -> u64 {
-    // The six empty pages at genesis are the collection, stream and catalog
-    // roots, the empty collection child and the two pack-list roots.
+    // The five empty pages at genesis are the collection, stream and catalog
+    // roots, the empty collection child and the pack-list root.
     // The inline Db and the provider's file bookkeeping take no allocations.
     let page = option.unwrap(charge.counted(bytes[std.page.Page]))
     // An empty format-3 image consists of its 24-byte header.
     let image = option.unwrap(charge.seq(bytes[u8], 24))
-    6 * (page + image) + option.unwrap(charge.seq(bytes[Head], 4))
+    5 * (page + image) + option.unwrap(charge.seq(bytes[Head], 4))
 }
 
 // The largest pack or MANIFEST file a cut writes (§3.9).
@@ -478,7 +479,8 @@ fn disk_reservation(kind: Kind, share: u64, o: Overrides) -> Result[(Options, Wr
         let worker = charge.task(bytes[Result[(), Error]], aligned_room + JOURNAL_WORKER_SLACK)
         writer_add(mut parts, "journal_worker", size_or(worker, unbounded))
         writer_add(mut parts, "journal_creation", option.unwrap(charge.seq(bytes[u8], 4096)))
-        writer_add(mut cut_parts, "cut_output", cut_output_bytes(pack, l))
+        // The output buffer is a byte sequence, charged rounded up to 8.
+        writer_add(mut cut_parts, "cut_output", size_or(charge.seq(bytes[u8], cut_output_bytes(pack, l)), unbounded))
     }
     writer_add(mut parts, "journal_channels", journal_channel_bytes(int.widen(commits)))
     writer_add(mut parts, "writer_state", writer_state_bytes())

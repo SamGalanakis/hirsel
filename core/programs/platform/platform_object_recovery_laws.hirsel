@@ -103,6 +103,7 @@ fn object_adoption_trace(c: Clock, rnd: Random, tasks: Tasks, sim: RecoveryBucke
     let service = store.follower_service(tasks, option.unwrap(store.service_bytes(plans)))?
     let owner = store.follower_owner(service)?
     options.head_poll_ms = 10000
+    options.claim_auth = Some(store.ClaimAuth(expect: None, attempt: bytes_of(16u64, 1u8), class: Adopt))
     let mut bare = store.open_authority(tasks, recovery_bucket_client(sim, tasks, 1), c, rnd, options) ?=> |store.Refusal(error: take problem, ..)| take problem
     let rows = store.bind_declaration(mut bare, Migrate, fn(mut d) -> Result[store.Table[u64, u64], store.Error] {
         let fresh = store.declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
@@ -167,6 +168,7 @@ fn witness_store_options() -> store.Options {
     let limits = store.Overrides(resident_limit: Some(1048576), journal_limit: None, checkpoint_bytes: Some(65536), pack_bytes: Some(65536), group_bytes: Some(65536), group_commits: Some(1), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
     let mut plan = result.unwrap(store.sized_with(Bucket(lanes), 134217728u64, limits))
     plan.head_poll_ms = 600000
+    plan.claim_auth = Some(store.ClaimAuth(expect: None, attempt: bytes_of(16u64, 2u8), class: Adopt))
     take plan
 }
 

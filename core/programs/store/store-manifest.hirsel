@@ -1,6 +1,6 @@
 const META_LIMIT: u64 = 16777216
 
-const MANIFEST_FIXED_BYTES: u64 = 316
+const MANIFEST_FIXED_BYTES: u64 = 280
 
 const MANIFEST_LIMIT: u64 = MANIFEST_FIXED_BYTES + META_LIMIT
 
@@ -655,7 +655,6 @@ fn resolve_data_roots(packs: Map[u64, LoadedPack], inventory: RecoveryInventory,
 type ValidatedPageManifest {
     manifest: PageManifest,
     inventory: Map[u64, PagePack],
-    retired: Map[u64, ()],
     lineage: Lineage,
     graph: PageGraph,
     allow_tiered: bool
@@ -685,14 +684,12 @@ fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_
     let mut directory = d
     read_page_list(mut directory, id, manifest, manifest.pack_root, None, PackList, mut final_item, mut lists, read_list_page)?
     final_item = None
-    read_page_list(mut directory, id, manifest, manifest.retirement_root, None, RetiredList, mut final_item, mut lists, read_list_page)?
-    final_item = None
     read_page_list(mut directory, id, manifest, manifest.deferred_frees, None, DeferredList, mut final_item, mut lists, read_list_page)?
     final_item = None
     read_page_list(mut directory, id, manifest, manifest.lineage, None, LineageList, mut final_item, mut lists, read_list_page)?
     validate_lineage_forks("MANIFEST", manifest, lists.lineage.forks)?
     for (seq, _) in lists.class_two {
-        if map.contains(lists.packs, seq) || map.contains(lists.retired, seq) {
+        if map.contains(lists.packs, seq) {
             return Error(disk_fault("MANIFEST", 72, Malformed))
         }
     }
@@ -738,8 +735,8 @@ fn walk_directory_graph(d: Dir, id: StoreId, take manifest: PageManifest, allow_
     if walk_cold {
         walk_cold_reachable(d, id, lists.packs, manifest.next_stamp, settled.below, cold_roots, lists.deferred, mut resolved.stamps)?
     }
-    let ListedPages(packs: take inventory, retired: take retired, lineage: take lineage, ..) = take lists
-    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, retired: take retired, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))
+    let ListedPages(packs: take inventory, lineage: take lineage, ..) = take lists
+    Ok(ValidatedPageManifest(manifest: take manifest, inventory: take inventory, lineage: take lineage, graph: take resolved, allow_tiered: allow_tiered))
 }
 
 fn parse_pack_filename(raw: Bytes, from: u64, end: u64) -> Option[(u64, bool)] {

@@ -1,0 +1,599 @@
+fn format10_manifest() -> Bytes {
+    let words: Inline[u64, 86] =[
+        0x0000003800010001,
+        0x3307f36c43cc41f5,
+        0x45524f5453524948,
+        0x000000010000000a,
+        0x0000000000000001,
+        0x0000000000000002,
+        0x0000000000000000,
+        0x0000000000000001,
+        0x0000000000000000,
+        0x0000025200010031,
+        0x2dcb5a2ee84d393f,
+        0x0000000000000001,
+        0x0100000000ff0000,
+        0x0100004000000400,
+        0x0000000000000064,
+        0x0000000100000001,
+        0x0000000000000032,
+        0x0000000000000007,
+        0x0000000000000003,
+        0x0000000000000025,
+        0x0000000000000053,
+        0x0000000000000003,
+        0x0000000000000050,
+        0x0000000c0000006f,
+        0x0000002900000000,
+        0x0000000400000000,
+        0x0000005a00000000,
+        0x0000007000000000,
+        0x000000000000000d,
+        0x000000000000002a,
+        0x0000000000000037,
+        0x0000000000000042,
+        0x0000000000000005,
+        0x0000000000000064,
+        0x0000000e00000071,
+        0x0000002b00000000,
+        0x0000004d00000000,
+        0x0000005800000000,
+        0x0000006300000000,
+        0x0000006500000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000100000000,
+        0x616d000400000000,
+        0x0000000000006e69,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0200000001000000,
+        0x0009000000007001,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x00000000005c0000,
+        0x0000000000000000,
+    ]
+    let mut raw: Bytes = list.with_capacity(688)
+    for word in words {
+        list.put_word_le(mut raw, word)
+    }
+    list.truncate(mut raw, 682)
+    take raw
+}
+
+// format10_manifest re-encoded by hand for Format 11 (AP1 word 11, AP14 without the
+// 36-byte `retired` root after `packs`), its two frame checks recomputed with libxxhash.
+fn format11_manifest() -> Bytes {
+    let words: Inline[u64, 81] =[
+        0x0000003800010001,
+        0xa892f05217b1151c,
+        0x45524f5453524948,
+        0x000000010000000b,
+        0x0000000000000001,
+        0x0000000000000002,
+        0x0000000000000000,
+        0x0000000000000001,
+        0x0000000000000000,
+        0x0000022e00010031,
+        0x5e228d32731c0a33,
+        0x0000000000000001,
+        0x0100000000ff0000,
+        0x0100004000000400,
+        0x0000000000000064,
+        0x0000000100000001,
+        0x0000000000000032,
+        0x0000000000000007,
+        0x0000000000000003,
+        0x0000000000000025,
+        0x0000000000000053,
+        0x0000000000000003,
+        0x0000000000000050,
+        0x0000000c0000006f,
+        0x0000002900000000,
+        0x0000000400000000,
+        0x0000005a00000000,
+        0x0000007000000000,
+        0x000000000000000d,
+        0x000000000000002a,
+        0x0000000000000037,
+        0x0000000000000042,
+        0x0000000000000005,
+        0x0000000000000064,
+        0x0000000e00000071,
+        0x0000002b00000000,
+        0x0000004d00000000,
+        0x0000005800000000,
+        0x0000006300000000,
+        0x0000006500000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000001,
+        0x00006e69616d0004,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0100000000000000,
+        0x0000700102000000,
+        0x0000000000090000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x0000000000000000,
+        0x005c000000000000,
+        0x0000000000000000,
+    ]
+    let mut raw: Bytes = list.with_capacity(648)
+    for word in words {
+        list.put_word_le(mut raw, word)
+    }
+    list.truncate(mut raw, 646)
+    take raw
+}
+
+fn format11_blob_index() -> Bytes {
+    let wire: Inline[u8, 93] =[
+        35,
+        0,
+        1,
+        0,
+        77,
+        0,
+        0,
+        0,
+        23,
+        42,
+        197,
+        153,
+        58,
+        132,
+        192,
+        88,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        72,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        9,
+        4,
+        0,
+        0,
+        34,
+        7,
+        0,
+        0,
+        0,
+        17,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        6,
+        0,
+        0,
+        0,
+        0,
+        7,
+        97,
+        120,
+        97,
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        73,
+        0,
+        0,
+        0,
+        34,
+        7,
+        0,
+        0,
+        0,
+        19,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        5,
+        0,
+        1,
+        0,
+        121,
+    ]
+    let mut raw: Bytes = list.with_capacity(93)
+    for byte in wire {
+        list.push(mut raw, byte)
+    }
+    take raw
+}
+
+fn format11_blob_index_next() -> Bytes {
+    let wire: Inline[u8, 63] =[
+        35,
+        0,
+        1,
+        0,
+        47,
+        0,
+        0,
+        0,
+        34,
+        244,
+        170,
+        50,
+        117,
+        104,
+        154,
+        17,
+        1,
+        0,
+        0,
+        0,
+        220,
+        5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        186,
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        12,
+        0,
+        0,
+        0,
+        34,
+        7,
+        0,
+        0,
+        0,
+        21,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        6,
+        0,
+        0,
+        0,
+        0,
+        7,
+        97,
+        120,
+    ]
+    let mut raw: Bytes = list.with_capacity(63)
+    for byte in wire {
+        list.push(mut raw, byte)
+    }
+    take raw
+}
+
+fn format11_page_index() -> Bytes {
+    let wire: Inline[u8, 62] =[
+        35,
+        0,
+        1,
+        0,
+        46,
+        0,
+        0,
+        0,
+        187,
+        35,
+        65,
+        167,
+        62,
+        107,
+        89,
+        173,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        72,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        47,
+        0,
+        0,
+        0,
+        33,
+        9,
+        0,
+        0,
+        0,
+        23,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        5,
+        0,
+        0,
+        0,
+        0,
+        9,
+        122,
+    ]
+    let mut raw: Bytes = list.with_capacity(62)
+    for byte in wire {
+        list.push(mut raw, byte)
+    }
+    take raw
+}
+
+fn format11_manifest_law() -> Result[(), Error] {
+    let path = "MANIFEST"
+    let id = StoreId(hi: 1, lo: 2)
+    // Old Format 10 MANIFEST is refused with Unsupported(10).
+    let old_format10 = format10_manifest()
+    match disk_read_page_manifest(path, old_format10) {
+        Error(Unsupported(10)) => (),
+        _ => return Error(Foreign),
+    }
+    let mut m = page_manifest_empty(default_limits())
+    m.next_stamp = 100
+    m.next_pack = 50
+    m.first_live = 7
+    m.prev_first = 3
+    m.account_memory = 37
+    m.account_tiered = 83
+    m.lineage = std.page.PagePtr(pack: 3, offset: 80, len: 111, checksum: 12, stamp: 41)
+    m.deferred_frees = std.page.PagePtr(pack: 4, offset: 90, len: 112, checksum: 13, stamp: 42)
+    m.deferred_next = 55
+    m.archive_on = 66
+    m.archive = std.page.PagePtr(pack: 5, offset: 100, len: 113, checksum: 14, stamp: 43)
+    m.archive_drop = 77
+    m.sweep = SweepCursor(position: 88, epoch: 99, digest: 101)
+    let roots: LocatedRoots = clone(m.branches[0].roots)
+    list.push(mut m.pins, LocatedPin(owner: ProjectorPin, name: "p", branch: 0, version: 9, roots: roots, watermark: 92))
+    let raw = disk_page_manifest_bytes(id, m)?
+    if raw != format11_manifest() {
+        return Error(Foreign)
+    }
+    let (_, take parsed) = disk_read_page_manifest(path, raw)?
+    if manifest_account(parsed) != 120 || parsed.account_memory != 37 || parsed.account_tiered != 83 || parsed.lineage != m.lineage || parsed.deferred_frees != m.deferred_frees || parsed.deferred_next != 55 || parsed.archive_on != 66 || parsed.archive != m.archive || parsed.archive_drop != 77 || parsed.sweep.position != 88 || parsed.sweep.epoch != 99 || parsed.sweep.digest != 101 || parsed.pins[0].owner != ProjectorPin || parsed.pins[0].watermark != 92 || disk_page_manifest_bytes(id, parsed)? != raw {
+        return Error(Foreign)
+    }
+    let payload = list.slice(raw, 88, list.len(raw))
+    if !disk_corrupt(decode_page_manifest(path, list.slice(payload, 0, list.len(payload) - 1), 1)) {
+        return Error(Foreign)
+    }
+    let mut invalid_owner = copied(payload)?
+    invalid_owner[463 - 36] = 0
+    if !disk_corrupt(decode_page_manifest(path, invalid_owner, 1)) {
+        return Error(Foreign)
+    }
+    let mut overflow = copied(payload)?
+    list.set_word_le(mut overflow, 64, 18446744073709551615u64)
+    if !disk_corrupt(decode_page_manifest(path, overflow, 1)) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+fn format11_archive_law() -> Result[(), Error] {
+    let row = ArchiveRange(start: 7, end: 15, segment: HistoryRef(seq: 15, epoch: 27, len: 39, digest: 51))
+    let archive_entry = encode_archive_range(row)
+    let InlineValue(value) = view archive_entry.cell else {
+        return Error(Foreign)
+    }
+    let expected: Inline[u8, 40] =[15, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 27, 0, 0, 0, 0, 0, 0, 0, 51, 0, 0, 0, 0, 0, 0, 0, 39, 0, 0, 0, 0, 0, 0, 0]
+    if list.len(archive_entry.key) != 8 || read_le(archive_entry.key, 0, 8) != 0x0700000000000000 || list.len(value) != 40 {
+        return Error(Foreign)
+    }
+    for i in 0u64 .. 40 {
+        if value[i] != expected[i] {
+            return Error(Foreign)
+        }
+    }
+    let parsed = decode_archive_range("archive", 72, archive_entry.key, value, 7)?
+    if parsed.start != 7 || parsed.end != 15 || parsed.segment.seq != 15 || parsed.segment.epoch != 27 || parsed.segment.len != 39 || parsed.segment.digest != 51 || !disk_corrupt(decode_archive_range("archive", 72, archive_entry.key, value, 8)) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+fn format11_pack_row_law() -> Result[(), Error] {
+    let expected: Inline[u8, 29] =[4, 2, 0, 0, 0, 82, 4, 0, 0, 0, 0, 0, 0, 58, 6, 0, 0, 0, 0, 0, 0, 220, 5, 0, 0, 0, 0, 0, 0]
+    let mut raw: Bytes = list.with_capacity(29)
+    for byte in expected {
+        list.push(mut raw, byte)
+    }
+    let pack = pack_record("p-6", 72, raw)?
+    if pack.class != 4 || pack.frames != 2 || pack.live != 1106 || pack.payload_bytes != 1594 || pack.index != 1500 || encode_pack_row(pack) != raw {
+        return Error(Foreign)
+    }
+    let _ = list.set(mut raw, 0, 0u8)
+    if !disk_corrupt(pack_record("p-6", 72, raw)) || !disk_corrupt(pack_record("p-6", 72, list.slice(raw, 0, 21))) {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+fn format11_index_law() -> Result[(), Error] {
+    let path = "p-6"
+    let id = StoreId(hi: 1, lo: 2)
+    let ctx = DiskContext(store: id, role: 3, seq: 6)
+    let expected = format11_blob_index()
+    let following_wire = format11_blob_index_next()
+    let mut key: Bytes = list.new()
+    list.put_word_be(mut key, 7u32)
+    list.append(mut key, string.as_bytes("ax"))
+    let mut other = copied(key)?
+    let _ = list.set(mut other, 5, 121u8)
+    let first = std.page.BlobRef(stamp: 17, len: 1025, checksum: 0, pack: 6, offset: 72, body: 0)
+    let second = std.page.BlobRef(stamp: 19, len: 65, checksum: 0, pack: 6, offset: 1121, body: 1)
+    let mut rows: List[PackIndexRow] = list.new()
+    list.push(mut rows, blob_index_row(first, 7, copied(key)?))
+    list.push(mut rows, blob_index_row(second, 7, copied(other)?))
+    let mut out: Bytes = list.new()
+    list.fill(mut out, 1500, 0u8)
+    let at = append_pack_index(mut out, ctx, rows)?
+    if at != 1500 || list.slice(out, at, list.len(out)) != expected {
+        return Error(Foreign)
+    }
+    let second_at = list.len(out)
+    let mut remaining: List[PackIndexRow] = list.new()
+    let third = std.page.BlobRef(stamp: 21, len: 4, checksum: 0, pack: 6, offset: 1210, body: 2)
+    list.push(mut remaining, blob_index_row(third, 7, copied(key)?))
+    append_pack_index_frame(mut out, ctx, at, remaining, 0, 1, 47)?
+    if list.slice(out, second_at, list.len(out)) != following_wire {
+        return Error(Foreign)
+    }
+    let frame = disk_read_frame(path, ctx, out, at)?
+    let payload = list.slice(out, frame.payload, frame.end)
+    let mut final_item = 0u64
+    let parsed = decode_pack_index(path, at, payload, mut final_item)?
+    let tail = decode_pack_index(path, second_at, list.slice(following_wire, 16, list.len(following_wire)), mut final_item)?
+    if frame.kind != 0x0023 || frame.flags != 1 || parsed.prev != 0 || list.len(parsed.rows) != 2 || parsed.rows[0].offset != 72 || parsed.rows[0].len != 1033 || parsed.rows[0].kind != 0x22 || parsed.rows[0].collection != 7 || parsed.rows[0].stamp != 17 || parsed.rows[0].key != key || parsed.rows[1].len != 73 || parsed.rows[1].key != other || tail.prev != at || tail.rows[0].key != key || final_item != 1210 {
+        return Error(Foreign)
+    }
+    let mut corrupt = copied(payload)?
+    let _ = list.set(mut corrupt, 37, 1u8)
+    final_item = 0
+    if !disk_corrupt(decode_pack_index(path, at, corrupt, mut final_item)) || !disk_corrupt(decode_pack_index(path, at, list.slice(payload, 0, list.len(payload) - 1), mut final_item)) {
+        return Error(Foreign)
+    }
+    final_item = 72
+    if !disk_corrupt(decode_pack_index(path, at, payload, mut final_item)) {
+        return Error(Foreign)
+    }
+    let page_ctx = DiskContext(store: id, role: 3, seq: 7)
+    let ptr = std.page.PagePtr(pack: 7, offset: 72, len: 47, checksum: 0, stamp: 23)
+    let mut page_key: Bytes = list.new()
+    list.put_word_be(mut page_key, 9u32)
+    list.push(mut page_key, 122u8)
+    let mut page_rows: List[PackIndexRow] = list.new()
+    list.push(mut page_rows, page_index_row(ptr, 9, take page_key))
+    let mut page_out: Bytes = list.new()
+    list.fill(mut page_out, 135, 0u8)
+    let page_at = append_pack_index(mut page_out, page_ctx, page_rows)?
+    if page_at != 135 || list.slice(page_out, page_at, list.len(page_out)) != format11_page_index() {
+        return Error(Foreign)
+    }
+    Ok(())
+}
+
+@test
+fn disk_test_format11() -> Result[(), Error] {
+    format11_manifest_law()?
+    format11_archive_law()?
+    format11_pack_row_law()?
+    format11_index_law()
+}

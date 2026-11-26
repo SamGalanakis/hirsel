@@ -119,7 +119,54 @@ fn opened_claim(ready: runner.PlaceReady) -> Option[(u64, Bytes)] {
         return None
     }
     let runner.PlaceRead(claim: take claim, ..) = take read
-    take claim
+    match take claim {
+        Some(runner.PlaceClaim(epoch, holder: take holder, ..)) => Some((epoch, take holder)),
+        None => None,
+    }
+}
+
+fn deposed_text(epoch: u64, holder: Bytes) -> String {
+    let mut out = string.from("Deposed at epoch ")
+    string.push_uint(mut out, epoch, 10u32, 1u64, '0')
+    if list.len(holder) != 0u64 {
+        string.push(mut out, " holder ")
+        string.push(mut out, std.hex.encode(holder))
+    }
+    take out
+}
+
+// RUNNER-SPEC §14.6: a Deposed run parks its assignment. Its end starts no
+// §14.5 retry, arrivals and ticks start nothing while the row is failing, and
+// only an operator wake launches it again.
+fn park_deposed(mut h: Host, name: String, epoch: u64, holder: Bytes) {
+    let mut v = vol_read(h, name)
+    let why = deposed_text(epoch, holder)
+    v.deposed = Some((epoch, clone(holder)))
+    v.cause = Some(clone(why))
+    v.last = take why
+    v.failing = true
+    v.retry_at = None
+    vol_put(mut h, name, take v)
+}
+
+// The end of a parked Deposed run (park_deposed): no §14.5 retry, no reprobe.
+fn end_deposed(mut h: Host, name: String, take v: Vol) {
+    let mut w = take v
+    w.retry_at = None
+    w.reprobe = false
+    w.failing = true
+    vol_put(mut h, name, take w)
+}
+
+// A cutover OLD answered Drift (its store moved past the export), or a deposed
+// runner's end: both conflict with the store's state. Any other refusal is OLD's
+// diagnostic of an invalid import.
+fn abort_class(why: String) -> operator.Class {
+    if why == "drift" || string.starts_with(why, "Deposed ") {
+        ConflictClass
+    } else {
+        InvalidClass
+    }
 }
 
 fn has_new_claim(g: GroupRow, gen: u64, incoming: Option[(u64, Bytes)]) -> bool {
@@ -145,8 +192,8 @@ fn absence_is_final(opened: bool, read: runner.PlaceRead, old_claim: Option[(u64
     }
     match read.claim {
         None => true,
-        Some(pair) => match old_claim {
-            Some(old) => old != pair,
+        Some(runner.PlaceClaim(epoch, holder, ..)) => match old_claim {
+            Some(old) => old.0 != epoch || old.1 != holder,
             None => false,
         },
     }
@@ -491,16 +538,31 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
         Some(take outstanding) => {
             let mut cut = take outstanding
             if gen == cut.candidate {
-                if let PlaceOpened(ready) = reply {
-                    if ready.version == cut.activation && ready.release == cut.release {
-                        cut.opened = true
-                        finish_ended_cut(mut h, name, take cut, now, mut out)
-                    }
+                match reply {
+                    PlaceOpened(ready) => {
+                        if ready.version == cut.activation && ready.release == cut.release {
+                            cut.opened = true
+                            finish_ended_cut(mut h, name, take cut, now, mut out)
+                        }
+                    },
+                    // RUNNER-SPEC §14.6: another writer owns the store. The cutover
+                    // fails, never counts as opened, and the assignment parks.
+                    PlaceDeposed(epoch, holder) => {
+                        park_deposed(mut h, name, epoch, holder)
+                        abort_cut(mut h, name, g, take cut, deposed_text(epoch, holder), now, mut out)
+                    },
+                    _ => (),
                 }
-            } else if gen == cut.old && !cut.held {
-                // The launcher can refuse to forward a cutover to a missing endpoint.
-                if let PlaceRefused(why) = reply {
-                    abort_cut(mut h, name, g, take cut, why, now, mut out)
+            } else if gen == cut.old {
+                match reply {
+                    // The launcher can refuse to forward a cutover to a missing endpoint.
+                    PlaceRefused(why) if !cut.held => abort_cut(mut h, name, g, take cut, why, now, mut out),
+                    // OLD lost the store, held or not: OLD's end then parks.
+                    PlaceDeposed(epoch, holder) => {
+                        park_deposed(mut h, name, epoch, holder)
+                        abort_cut(mut h, name, g, take cut, deposed_text(epoch, holder), now, mut out)
+                    },
+                    _ => (),
                 }
             }
         },
@@ -535,6 +597,7 @@ fn placed(mut h: Host, c: launcher.Child, reply: runner.HostReply, now: Now, mut
                         v.cause = Some(string.from(why))
                         vol_put(mut h, name, take v)
                     },
+                    PlaceDeposed(epoch, holder) => park_deposed(mut h, name, epoch, holder),
                     _ => (),
                 }
             }

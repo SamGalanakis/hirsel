@@ -348,7 +348,10 @@ impl<I: Images> Launcher<I> {
                     if let Some(result) = self.cutovers.answer(&child, &reply) {
                         self.session.emit(result);
                     } else {
-                        if matches!(
+                        if matches!(reply, HostReply::Deposed(..)) {
+                            // A deposed child's assignment is parked whether or not it opened.
+                            self.supervisor.record_deposed(&child, &reply);
+                        } else if matches!(
                             reply,
                             HostReply::Current(..)
                                 | HostReply::Refused(_)

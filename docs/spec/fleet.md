@@ -31,113 +31,109 @@ authority:
 
 ### Universal `ClaimAuth`
 
-Every non-genesis `objects@1` writer open — moves, local restarts, installs, serving
-candidates, attached-stream janitors and explicit repairs — carries a `ClaimAuth` precondition:
+Every non-genesis `objects@1` writer open (moves, local restarts, installs, serving
+candidates, attached-stream janitors and explicit repairs) carries a `ClaimAuth` precondition
+in `store.Options.claim_auth` (STORE-SPEC §12.3 "ClaimAuth"):
 
-```hirsel unbuilt
-pub type HeadPair: codec + key {
-    epoch: u64,
-    holder: Inline[u8, 16],
-}
-
-pub type ClaimClass: codec + key = Permit | Continue | Adopt
-
-pub type ClaimAuth: codec + key {
-    expect: Option[HeadPair],
-    attempt: Inline[u8, 16],
-    class: ClaimClass,
-}
-
-pub type ClaimRefusal: codec + key = Superseded(HeadPair) | Lost | Corrupt
+```text
+pub type Claim: codec + key + shareable + cross { epoch: u64, holder: Bytes }   // holder: 16 bytes
+pub type ClaimClass: codec + key + shareable + cross = Permit | Continue | Adopt
+pub type ClaimAuth: codec + key + shareable + cross { expect: Option[Claim], attempt: Bytes, class: ClaimClass }   // attempt: 16 bytes
 ```
 
-- **Checked before any write.** The store checks `ClaimAuth.expect` against the head's
-  `(epoch, holder)` at first GET before issuing any write, including before writing any
-  attached-stream `Held` row (§12.11). On mismatch it returns `Superseded(actual)` and performs
-  no write.
-- **Genesis and Adopt.** Conditional creation uses a distinct authorized `Genesis(Absent)`
-  operation. `expect: None` is permitted only with `class = Adopt` from an explicit local
-  operator action on a host with no recorded pair, never from a restart, wake, retry, janitor
-  or remote message, and never on a fleet-owned namespace.
+- **Checked before any write.** The store checks `expect` against the head's `(epoch, holder)`
+  on every iteration of the open, before any write, including before any attached-stream
+  `Held` row (§12.11). On mismatch it returns `Superseded(actual)` and writes nothing. A missing
+  or malformed auth is `Missing("claim_auth")`; there is no default.
+- **`Superseded` names the successor.** Whenever an open finds the head claimed away from its
+  pair, including on the attached path where it would otherwise return `Attached`, the answer
+  is `Superseded(actual)` for a validated successor (the same Store at this namespace).
+- **Genesis and Adopt.** Genesis takes only `expect: None`. `expect: None` is otherwise
+  permitted only with `class = Adopt` from an explicit local operator action on a namespace no
+  Fleet manages, never from a restart, wake, retry, janitor or remote message. A Runner move
+  envelope that carries `Adopt` is refused (RUNNER-SPEC §14.6). An Adopt is pinned to the first
+  pair it admits for the rest of that open.
 - **Fresh random `holder` per physical open.** Every physical open draws a fresh, private
-  random 16-byte `holder` reused only for retries inside that open. `holder` is never reused as
-  `attempt` across duplicate command deliveries: `history_write_head` resolves `Mismatch` by
-  byte equality, so identical proposals from two physical opens would return `HistoryApplied`
-  to both and create dual writers.
+  random 16-byte `holder`. `attempt` is never used as the holder: `history_write_head` resolves
+  `Mismatch` by byte equality, so identical proposals from two physical opens would both be
+  `Applied` and create dual writers.
 
 ### The `ORIGIN` head frame
 
-The claim's head replace (`H`) writes a 49-byte `ORIGIN` frame (`MUST = 1`) atomically with the
-new `(epoch, holder)` pair:
+The claim's head replace (`H`) writes a 49-byte `ORIGIN` frame (kind `0x00E0`, `MUST = 1`)
+atomically with the new `(epoch, holder)` pair. It is part of Store Format 11.
 
-```hirsel unbuilt
-pub type OriginFrame: codec + key {
-    epoch: u64,
-    attempt: Inline[u8, 16],
-    class: ClaimClass,
-    permit_epoch: u64,
-    permit_attempt: Inline[u8, 16],
-}
-
-pub type HeadView: codec + key {
-    pair: HeadPair,
-    origin: Option[OriginFrame],
+```text
+pub type Origin: codec + key + shareable + cross {
+    epoch: u64, attempt: Bytes, class: ClaimClass, permit_epoch: u64, permit_attempt: Bytes
 }
 ```
 
-Wire payload layout (49 bytes, little-endian, `MUST = 1`):
+Wire payload layout (49 bytes, little-endian):
 
-- `epoch: u64` (8 bytes) — the epoch installed by this claim; equals `HEAD.epoch`.
-- `attempt: Inline[u8, 16]` (16 bytes) — this claim's attempt identifier.
-- `class: u8` (1 byte) — `0 = Permit` (Fleet move), `1 = Continue` (same host: restart,
-  install candidate, janitor), `2 = Adopt` (explicit operator first open).
-- `permit_epoch: u64` (8 bytes) — epoch installed by the latest `Permit` claim in this head's
-  lineage; `0` if none.
-- `permit_attempt: Inline[u8, 16]` (16 bytes) — attempt identifier of that `Permit` claim; all
-  zeros if none.
+- `epoch: u64`: the epoch installed by this claim; equals `HEAD.epoch`.
+- `attempt: [16]`: this claim's attempt identifier.
+- `class: u8`: `0 = Permit` (Fleet move), `1 = Continue` (same host: restart, install
+  candidate, janitor), `2 = Adopt` (explicit operator open).
+- `permit_epoch: u64`: the epoch installed by the latest `Permit` claim in this head's lineage;
+  `0` if none.
+- `permit_attempt: [16]`: that `Permit`'s attempt; all zero if none.
 
-Rules **O1–O4**:
+A `Permit` claim sets the permit fields to its own `epoch` and `attempt`; a `Continue` or
+`Adopt` claim copies them from the head it replaces. Every same-epoch head write (advance,
+`CLAIM`, cut, settle, direct service, activation install) copies `ORIGIN` byte for byte.
+Decoding rules (any violation is `Corrupt`):
 
-- **O1.** `ORIGIN` is written as part of the head replace `H` that installs `(e + 1, holder)`.
-  It exists if and only if the cut applied, closing the crash window where `H` succeeds and a
-  subsequent `CLAIM` entry or reply is lost.
-- **O2.** Every ordinary advance, `CLAIM`, cut, settle or direct-service head write by that
-  holder copies `ORIGIN` byte-for-byte.
-- **O3.** A `Continue` or `Adopt` claim copies `permit_epoch` and `permit_attempt` from the
-  head it replaces. A `Permit` claim sets both to its own `epoch` and `attempt`.
-- **O4.** Any head carrying `ORIGIN` satisfies `ORIGIN.epoch == HEAD.epoch`, else
-  `Corrupt(Malformed)`. A head without `ORIGIN` reads an empty permit slot and counts as
-  `permit_attempt != X` during settlement. Because `MUST = 1`, the first claim by an
-  `ORIGIN`-writing binary is one-way for that Place: older binaries refuse the head with
-  `Unsupported(kind)`.
+- **O1.** `ORIGIN` is present exactly when `HEAD.epoch >= 2`; the genesis head has none.
+- **O2.** `MUST = 1` and the payload is exactly 49 bytes.
+- **O3.** `ORIGIN.epoch == HEAD.epoch`.
+- **O4.** `class <= 2`; a `Permit` has `permit_epoch == epoch` and `permit_attempt == attempt`;
+  a `Continue` or `Adopt` has `permit_epoch < epoch`, with an all-zero `permit_attempt` when
+  `permit_epoch == 0` and `permit_epoch >= 2` otherwise.
+
+The format change is one-way: a Format 10 binary refuses a Format 11 store `Unsupported(11)`,
+and a Format 11 binary refuses a Format 10 store `Unsupported(10)`.
 
 ### Read-only settlement and Rule F1
 
-Fleet persists a write-ahead permit row `X { expect: (e, h_A), target: B }` before releasing
-any move command. A single read-only head GET (`HeadView`) settles `X` without opening a writer
-or reading a tail:
+Fleet persists a write-ahead permit row `X { expect: (e, h_A), attempt, target: B }` before
+releasing any move command. It settles `X` with `store.settle_permit` (STORE-SPEC §12.3
+"HeadView and Permit settlement"), which makes one **fresh** GET of the Place's head through
+Fleet's own trusted client, checks that the head is the expected Store at the expected
+namespace, and writes nothing:
 
-```hirsel unbuilt
-pub type Settlement: codec + key = Open | Won(u64) | Dead(HeadPair)
+```text
+pub type HeadSettlement: codec + key + shareable + cross = HeadOpen | HeadWon(u64) | HeadDead(Claim)
+pub fn settle_permit(mut client: std.object.Client, store: StoreId, predecessor: Claim, attempt: Bytes, op_ms: u64) -> Result[HeadSettlement, Error] waits
 ```
 
-| Head read (`HeadView`) | Settlement | Controller action |
+| Fresh head read | Settlement | Controller action |
 |---|---|---|
-| `pair == (e, h_A)` | **`Open`** | `X`'s CAS may still apply. Reading the old pair never cancels `X`. To force progress against a dead target, authorize one bounded recovery contender sharing the same `expect`. |
-| `origin.permit_attempt == X` at `HEAD.epoch >= e + 1` | **`Won(permit_epoch)`** | Close `X` as won. `HEAD.epoch - permit_epoch` counts `B`'s subsequent local `Continue` claims. Any later move names the head's current pair. |
-| `HEAD.epoch > e` and `origin.permit_attempt != X` | **`Dead(pair)`** | Epoch `e` was consumed by another claim (`Continue` on `A` or a recovery contender); `X` can never apply. Close `X` as superseded and never resend it. |
+| `pair == (e, h_A)` | **`HeadOpen`** | `X`'s CAS may still apply. Reading the old pair never cancels `X`. To force progress against a dead target, authorize one bounded recovery contender sharing the same `expect`. |
+| `HEAD.epoch <= e` and `pair != (e, h_A)` | **error** (`Corrupt(Regressed)`) | A regressed or sideways head proves nothing about `X`. Close nothing; alert. |
+| `origin.permit_epoch == e + 1` and `origin.permit_attempt == X.attempt` | **`HeadWon(e + 1)`** | Close `X` as won. `HEAD.epoch - (e + 1)` counts `B`'s later local `Continue` claims. Any later move names the head's current pair. |
+| otherwise (`HEAD.epoch > e`) | **`HeadDead(pair)`** | Epoch `e + 1` went to another claim (`Continue` on `A` or a recovery contender); `X` can never apply. Close `X` as superseded and never resend it. |
 
+- A foreign Store or another namespace is an error and closes nothing. A cached head, a
+  follower's view or a caller-supplied `HeadView` never settles a permit.
+- `HeadWon` describes a historical claim. It confers no present writer authority: `B` (or its
+  successor) restarts with `Continue(expect = the current pair)`.
+- `X.attempt` must be unique per permit; Fleet draws it at random when it writes `X`.
 - **Rule F1 (single predecessor per open set).** The control transaction that authorizes a
   `Permit` on Place `P` requires that every open attempt on `P` shares the new attempt's
   `expect`. While `X` is open, only `X` and a recovery contender with the same `expect` can
-  install a new `Permit`. Fleet settles from the read-only `HeadView` before authorizing any
-  move from the successor pair.
+  install a new `Permit`. Fleet settles `X` before authorizing any move from the successor
+  pair, and acts on each settlement once.
 
 ### Deposed end cause and the three stale-open races
 
-Runner adds one end cause, `Deposed(pair: HeadPair)`. When a child is fenced, the host parks
-the assignment and stops local restart retries. Even if the end report is lost, a retry still
-names the old `expect` pair and receives `Superseded(actual)`.
+Runner adds one end cause, `Deposed(store.Claim)`, answered to the host as
+`PlaceDeposed(epoch, holder)`. Only an open refused `Superseded(actual)` ends `Deposed(actual)`,
+because only it names the successor. A running writer's `Fenced(e)` names no holder and stays an
+ordinary error; the host's next launch with the same auth is refused `Superseded(actual)` before
+any write and ends `Deposed`. The platform parks the assignment on `PlaceDeposed` and starts no
+restart. Even if the end report is lost, a retry still names the old `expect` and is refused
+again.
 
 Together, `ClaimAuth`, `ORIGIN` and `Deposed` close all three stale-open races and the lost-`H`
 window:
@@ -146,12 +142,14 @@ window:
    while the head is `(e + 1, h_C)`; Store returns `Superseded((e + 1, h_C))` before any write.
 2. **Deposed local retry duel.** `A`'s local supervisor retries with `expect = (e, h_A)` after
    `B` won `(e + 1, h_B)`; Store refuses `Superseded` and `Deposed` parks `A`'s assignment.
-3. **Attached-stream janitor claiming back a moved Place.** `A`'s in-flight janitor passes
-   `expect = (e, h_A)` with `Continue`; if `H` already installed `(e + 1, h_B)`, the janitor
-   fails `Superseded` before writing any `Held` row or head replace.
-4. **Lost `H` reply before `CLAIM`.** `H` already wrote `ORIGIN{permit_attempt = X}`. One
-   read-only `HeadView` read settles `X` as `Won(e + 1)` even if `B` crashed before `CLAIM` or
-   performed local `Continue` restarts afterwards.
+3. **Attached-stream janitor claiming back a moved Place.** `A`'s janitor ask carries the
+   StoreId and the pair `(e, h_A)` its service observed, and opens with
+   `Continue(expect = (e, h_A))`; if `H` already installed `(e + 1, h_B)`, the janitor fails
+   `Superseded` before writing any `Held` row or head replace. An ask whose cause is already
+   gone ends `JanitorCleaned` with zero writes.
+4. **Lost `H` reply before `CLAIM`.** `H` already wrote `ORIGIN{permit_attempt = X.attempt}`.
+   One `settle_permit` settles `X` as `HeadWon(e + 1)` even if `B` crashed before `CLAIM` or
+   made local `Continue` claims afterwards.
 
 ## FLT-3: Control Place (`fleet@1`) and controller takeover
 

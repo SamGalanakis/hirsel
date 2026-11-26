@@ -36,6 +36,17 @@ fn stream_janitor_options(create: bool) -> Options {
     options
 }
 
+// The host's janitor drops an ask that a later claim already settled (its
+// open is refused `Superseded` before any write) or whose cleanup is already
+// done (STORE-SPEC §12.11.6 A4).
+fn stream_janitor_close_unless_stale(tasks: Tasks, mut service: JournalService, take authority: Authority, c: Clock, r: Random, ask: JanitorAsk) -> Result[(), Error] waits {
+    match stream_janitor_close_place(tasks, mut service, take authority, c, r, stream_janitor_options(false), ask) {
+        Ok(_) => Ok(()),
+        Error(Superseded(_)) => Ok(()),
+        Error(take other) => Error(take other),
+    }
+}
+
 fn stream_janitor_open_attached(s: BucketSim, tasks: Tasks, r: Random, mut service: JournalService, seed: u64, place_prefix: String) -> Result[Db, Error] waits {
     let slot = journal_slot(mut service)?
     let client = stream_service_client(s, tasks, seed, place_prefix, "us-east-1")?
@@ -114,16 +125,16 @@ fn stream_orphan_no_head_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[()
         let asks = journal_janitor_asks(mut svc_a)?
         for take ask in take asks {
             match take ask {
-                JanitorOrphanHold(_, take pfx, _) => {
-                    let jclient = stream_service_client(s, tasks, 200 + step, pfx, "us-east-1")?
+                JanitorOrphanHold(store, take pfx, pair) => {
+                    let jclient = stream_service_client(s, tasks, 200 + step, clone(pfx), "us-east-1")?
                     let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
-                    stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false))?
+                    stream_janitor_close_unless_stale(tasks, mut svc_a, take jauth, s.time, r, JanitorOrphanHold(store, take pfx, pair))?
                     janitor_ran = true
                 },
-                JanitorStragglerPin(_, take pfx) => {
-                    let jclient = stream_service_client(s, tasks, 240 + step, pfx, "us-east-1")?
+                JanitorStragglerPin(store, take pfx, pair) => {
+                    let jclient = stream_service_client(s, tasks, 240 + step, clone(pfx), "us-east-1")?
                     let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
-                    stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false))?
+                    stream_janitor_close_unless_stale(tasks, mut svc_a, take jauth, s.time, r, JanitorStragglerPin(store, take pfx, pair))?
                 },
             }
         }
@@ -495,10 +506,10 @@ fn stream_straggler_pin_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(),
         std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
         let asks = journal_janitor_asks(mut svc)?
         for take ask in take asks {
-            if let JanitorStragglerPin(_, take pfx) = take ask {
-                let jclient = stream_service_client(s, tasks, 260 + step, pfx, "us-east-1")?
+            if let JanitorStragglerPin(store, take pfx, pair) = take ask {
+                let jclient = stream_service_client(s, tasks, 260 + step, clone(pfx), "us-east-1")?
                 let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
-                stream_janitor_close_place(tasks, mut svc, take jauth, s.time, r, stream_janitor_options(false))?
+                stream_janitor_close_unless_stale(tasks, mut svc, take jauth, s.time, r, JanitorStragglerPin(store, take pfx, pair))?
                 cleared = true
             }
         }

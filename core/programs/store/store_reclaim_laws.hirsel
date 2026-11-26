@@ -54,6 +54,7 @@ fn reclaim_preview_setup(c: Clock, r: Random, tasks: Tasks, sim: BucketSim) -> R
     let _ = std.object.upload(mut witness, dead_upload, NoClobber, deadline) ?=> Remote
     let _ = std.object.upload(mut witness, live_upload, NoClobber, deadline) ?=> Remote
     options.create = false
+    options.claim_auth = Some(bucket_law_adopt_auth())
     let second = bucket_law_authority(sim, tasks, "s3.test", 3)?
     let mut writer = open_authority(tasks, take second, c, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     if claim_of(writer)?.epoch != 2 {

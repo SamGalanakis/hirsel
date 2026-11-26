@@ -297,15 +297,19 @@ fn stream_open_attached[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
     let mut lane = stream_lane(link.sid, authority_kind, link.max_rows, holder)?
     lane.dir = stream_key(link.root, stream_dir(link.sid))
     let mut side = ClaimStream(lane: take lane, buffers: stream_tail_buffers()?, granted: None, token: None)
+    let mut opening: Options = clone(options)
     loop {
         if std.object.deadline_after_ms(read_source.client, 0) >= read_source.deadline {
             return Error(Lost)
         }
-        let attempt = stream_claim_attempt(mut read_source, mut link, mut side, r, holder, options, requested_levels, authority_kind, mut workspace, prepare_writer)?
-        if let Some(take done) = take attempt {
-            return Ok(take done)
+        let attempt = stream_claim_attempt(mut read_source, mut link, mut side, r, holder, mut opening, requested_levels, authority_kind, mut workspace, prepare_writer)
+        match take attempt {
+            Ok(Some(take done)) => return Ok(take done),
+            Ok(None) => {
+                let _ = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)?
+            },
+            Error(take problem) => return Error(take problem),
         }
-        let _ = history_fetch(mut read_source.client, "head", mut workspace.witness, read_source.deadline)?
     }
 }
 
@@ -428,10 +432,11 @@ fn stream_load_settled(mut read_source: ObjectPackRead, head: HistoryHead, attac
 
 // One attempt, steps 1–7. `None`: the claim's pair moved position, the row
 // is abandoned, and the claim restarts from a fresh head.
-fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, mut side: ClaimStream, r: Random, holder: StoreId, options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(HistoryRegister, JournalReplay, T, Bytes)], Error] waits {
+fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, mut side: ClaimStream, r: Random, holder: StoreId, mut options: Options, requested_levels: List[String], authority_kind: u8, mut workspace: HistoryBuffers, prepare_writer: scoped fn(StoreId, JournalReplay) -> Result[T, Error]) -> Result[Option[(HistoryRegister, JournalReplay, T, Bytes)], Error] waits {
     let deadline = read_source.deadline
     let (take capture, take attached) = history_decode_head_attach(workspace.witness)?
-    history_check_open(read_source.client, capture, requested_levels, authority_kind, options)?
+    let auth = history_check_open(read_source.client, capture, requested_levels, authority_kind, options)?
+    options.claim_auth = Some(clone(auth))
     let Some(take attach) = take attached else {
         // A standalone head opened streamed: §12.3's claim writing ATTACH.
         return Error(Exists("head"))
@@ -457,7 +462,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
         let Some((take admitted, tag)) = stream_claim_final_head(mut read_source, store, replay, mut workspace, prepare_writer)? else {
             return Ok(None)
         }
-        let claimed = history_claim_head(head, holder)?
+        let claimed = history_claim_head(head, holder, auth)?
         let authority_end = history_authority_end(workspace.witness)?
         let authority = copied(list.slice(workspace.witness, 240, authority_end))?
         history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach)))?
@@ -467,7 +472,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             HistoryConflict(_) => {
                 let (take moved, _) = history_decode_head_attach(workspace.witness)?
                 if !history_pair_matches(moved.head.pair, head.pair) {
-                    return Error(Lost)
+                    return Error(history_superseded_by(read_source.client, store, workspace.witness))
                 }
                 return Ok(None)
             },
@@ -582,28 +587,19 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             return Error(take problem)
         },
     }
-    // Step 6: H, the one authoritative publication. Copy `old.sealed` and
-    // append the incumbent's tail only when non-empty (Fable §3).
-    let mut sealed: List[SealedTail] = disk_allocation(scoped fn() -> Result[List[SealedTail], Error] {
-        let mut out: List[SealedTail] = list.with_capacity(list.len(attach.sealed) + 1)
-        for st in attach.sealed {
-            list.push(mut out, st)
-        }
-        Ok(take out)
-    })?
-    if let Some(k) = cursor.last_x {
-        list.push(mut sealed, SealedTail(tail, cutoff: k, at: head.entry.seq))
+    // Step 6: H, the one authoritative publication. The candidate is built
+    // while the hold is still ours: any failure before H abandons it (rule
+    // e). Once H is sent the row stays Held.
+    let next_slot = StreamRef(sid: link.sid, inc: inc_b, from_seq: next_b, from_frame: 0)
+    let built = stream_claim_candidate(head, attach, tail, cursor, next_slot, holder, auth, mut workspace)
+    let (claimed, take attach_next, take authority) = match take built {
+        Ok(take ready) => take ready,
+        Error(take problem) => {
+            stream_claim_abandon(mut read_source.client, mut side, deadline)
+            return Error(take problem)
+        },
     }
-    let next_live: Option[StreamRef] = if list.len(sealed) >= ATTACH_SEALED_MAX {
-        None
-    } else {
-        Some(StreamRef(sid: link.sid, inc: inc_b, from_seq: next_b, from_frame: 0))
-    }
-    let attach_next = Attach(settles: attach.settles, live: next_live, sealed: take sealed)
-    let claimed = history_claim_head(head, holder)?
-    let authority_end = history_authority_end(workspace.witness)?
-    let authority = copied(list.slice(workspace.witness, 240, authority_end))?
-    history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach_next)))?
+    let next_live = attach_next.live
     let written = history_write_head(mut read_source.client, Match(tag), mut workspace.body, mut workspace.witness, deadline)
     let applied_tag = match take written {
         HistoryApplied(t) => t,
@@ -611,7 +607,7 @@ fn stream_claim_attempt[T](mut read_source: ObjectPackRead, mut link: SlotLink, 
             stream_claim_abandon(mut read_source.client, mut side, deadline)
             let (take moved, _) = history_decode_head_attach(workspace.witness)?
             if !history_pair_matches(moved.head.pair, head.pair) {
-                return Error(Lost)
+                return Error(history_superseded_by(read_source.client, store, workspace.witness))
             }
             return Ok(None)
         },
@@ -691,7 +687,34 @@ fn stream_claim_final_head[T](mut read_source: ObjectPackRead, store: StoreId, r
     let (take first, _) = history_decode_head_attach(workspace.witness)?
     let (take moved, _) = history_decode_head_attach(workspace.compare)?
     if !history_pair_matches(moved.head.pair, first.head.pair) {
-        return Error(Lost)
+        return Error(history_superseded_by(read_source.client, store, workspace.compare))
     }
     Ok(None)
+}
+
+// Step 6's candidate: `old.sealed` copied with the incumbent's tail appended
+// only when non-empty (Fable §3), the claimed head with its ORIGIN, and H's
+// bytes in `workspace.body`. Writes nothing.
+fn stream_claim_candidate(head: HistoryHead, attach: Attach, tail: StreamRef, cursor: TailScan, next_slot: StreamRef, holder: StoreId, auth: ClaimAuth, mut workspace: HistoryBuffers) -> Result[(HistoryHead, Attach, Bytes), Error] {
+    let mut sealed: List[SealedTail] = disk_allocation(scoped fn() -> Result[List[SealedTail], Error] {
+        let mut out: List[SealedTail] = list.with_capacity(list.len(attach.sealed) + 1)
+        for st in attach.sealed {
+            list.push(mut out, st)
+        }
+        Ok(take out)
+    })?
+    if let Some(k) = cursor.last_x {
+        list.push(mut sealed, SealedTail(tail, cutoff: k, at: head.entry.seq))
+    }
+    let next_live: Option[StreamRef] = if list.len(sealed) >= ATTACH_SEALED_MAX {
+        None
+    } else {
+        Some(next_slot)
+    }
+    let attach_next = Attach(settles: attach.settles, live: next_live, sealed: take sealed)
+    let claimed = history_claim_head(head, holder, auth)?
+    let authority_end = history_authority_end(workspace.witness)?
+    let authority = copied(list.slice(workspace.witness, 240, authority_end))?
+    history_encode_register_head(mut workspace.body, claimed, authority, Some(clone(attach_next)))?
+    Ok((claimed, take attach_next, take authority))
 }

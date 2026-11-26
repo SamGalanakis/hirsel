@@ -40,11 +40,15 @@ type HistoryRegister: send {
     attach: Option[Attach]
 }
 
-// Encodes `head` with AUTHORITY and, when attached, ATTACH.
+// Encodes `head` with AUTHORITY, optional ATTACH, and optional ORIGIN.
 fn history_encode_register_head(mut raw: Bytes, head: HistoryHead, authority: Bytes, attach: Option[Attach]) -> Result[(), Error] {
-    history_encode_head(mut raw, head, authority)?
+    history_encode_base_head(mut raw, head, authority)?
+    let ctx = DiskContext(store: head.store, role: 7, seq: head.entry.seq)
     if let Some(a) = attach {
-        stream_attach_append(mut raw, DiskContext(store: head.store, role: 7, seq: head.entry.seq), a)?
+        stream_attach_append(mut raw, ctx, a)?
+    }
+    if let Some(o) = head.origin {
+        history_origin_append(mut raw, ctx, o)?
     }
     Ok(())
 }
@@ -246,7 +250,7 @@ fn history_publish_base(mut client: std.object.Client, id: StoreId, holder: Stor
     if let None = attach {
         history_check_conditions(mut client, base_key, mut buffers.packet, deadline)?
     }
-    let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
+    let head = HistoryHead(authority_kind: kind, store: id, pair: HistoryPair(epoch: 1, holder), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
     history_encode_register_head(mut buffers.body, head, authority, attach)?
     match history_write_head(mut client, Absent, mut buffers.body, mut buffers.witness, deadline) {
         HistoryApplied(tag) => Ok(HistoryRegister(head, tag, terminal: None, attach: take attach)),
@@ -272,8 +276,24 @@ fn history_claim_saved(admitted: Bytes) -> Inline[u8, 48] {
     saved
 }
 
-fn history_claim_same(candidate: Bytes, saved: Inline[u8, 48], observed: Bytes) -> bool {
-    if list.len(observed) != list.len(candidate) || list.slice(observed, 0, 8) != list.slice(candidate, 0, 8) || list.slice(observed, 16, 48) != list.slice(candidate, 16, 48) || list.slice(observed, 56, 80) != list.slice(candidate, 56, 80) || list.slice(observed, 112, list.len(observed)) != list.slice(candidate, 112, list.len(candidate)) {
+fn history_claim_saved_origin(admitted: Bytes, authority_end: u64) -> Option[Inline[u8, 65]] {
+    if list.len(admitted) == authority_end {
+        return None
+    }
+    let mut saved: Inline[u8, 65] =[0; 65]
+    for i in 0u64 .. 65 {
+        saved[i] = admitted[authority_end + i]
+    }
+    Some(saved)
+}
+
+fn history_claim_same(candidate_base: Bytes, saved: Inline[u8, 48], saved_origin: Option[Inline[u8, 65]], observed: Bytes) -> bool {
+    let base_len = list.len(candidate_base)
+    let want_len = match saved_origin {
+        Some(_) => base_len + ORIGIN_FRAME_BYTES,
+        None => base_len,
+    }
+    if list.len(observed) != want_len || list.slice(observed, 0, 8) != list.slice(candidate_base, 0, 8) || list.slice(observed, 16, 48) != list.slice(candidate_base, 16, 48) || list.slice(observed, 56, 80) != list.slice(candidate_base, 56, 80) || list.slice(observed, 112, base_len) != list.slice(candidate_base, 112, base_len) {
         return false
     }
     for i in 0u64 .. 8 {
@@ -284,6 +304,13 @@ fn history_claim_same(candidate: Bytes, saved: Inline[u8, 48], observed: Bytes) 
     for i in 0u64 .. 32 {
         if saved[16 + i] != observed[80 + i] {
             return false
+        }
+    }
+    if let Some(old_origin) = saved_origin {
+        for i in 0u64 .. 65 {
+            if old_origin[i] != observed[base_len + i] {
+                return false
+            }
         }
     }
     true
@@ -304,17 +331,22 @@ fn history_claim_changed(head: HistoryHead, observed: Bytes, backoff: bool) -> R
 // The caller has already recovered and admitted the head in witness, a
 // head with no ATTACH. `attach` is the ATTACH the replace writes when the
 // Place is opened streamed (§12.11.5, "No ATTACH").
-fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, mut buffers: HistoryBuffers, deadline: u64, attach: Option[Attach]) -> Result[HistoryClaimResult, Error] waits {
-    let candidate = history_claim_head(admitted, holder)?
+fn history_replace_claim(mut client: std.object.Client, admitted: HistoryHead, holder: StoreId, auth: ClaimAuth, mut buffers: HistoryBuffers, deadline: u64, attach: Option[Attach]) -> Result[HistoryClaimResult, Error] waits {
+    let candidate = history_claim_head(admitted, holder, auth)?
     let saved = history_claim_saved(buffers.witness)
     let authority_end = history_authority_end(buffers.witness)?
-    history_encode_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end))?
+    let saved_origin = history_claim_saved_origin(buffers.witness, authority_end)
+    history_encode_base_head(mut buffers.body, candidate, list.slice(buffers.witness, 240, authority_end))?
     let standalone_end = list.len(buffers.body)
+    let ctx = DiskContext(store: candidate.store, role: 7, seq: candidate.entry.seq)
     if let Some(a) = attach {
-        stream_attach_append(mut buffers.body, DiskContext(store: candidate.store, role: 7, seq: candidate.entry.seq), a)?
+        stream_attach_append(mut buffers.body, ctx, a)?
+    }
+    if let Some(o) = candidate.origin {
+        history_origin_append(mut buffers.body, ctx, o)?
     }
     let observed = history_fetch(mut client, "head", mut buffers.witness, deadline)?
-    if !history_claim_same(list.slice(buffers.body, 0, standalone_end), saved, buffers.witness) {
+    if !history_claim_same(list.slice(buffers.body, 0, standalone_end), saved, saved_origin, buffers.witness) {
         return history_claim_changed(admitted, buffers.witness, false)
     }
     match history_write_head(mut client, Match(observed.etag), mut buffers.body, mut buffers.witness, deadline) {

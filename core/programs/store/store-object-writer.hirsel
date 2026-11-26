@@ -11,6 +11,7 @@ type ObjectWriterState {
     levels: List[String],
     weak: Option[WeakWaiters],
     pair: HistoryPair,
+    origin: Option[HistoryOrigin],
     recovered: HistoryRef,
     entries: u64,
     failed: Option[Error],
@@ -314,7 +315,7 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
     db.fence = fence
     db.file_seq = head.entry.seq
     db.page_resident = resident_location_charge(pages.locations)
-    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache)
+    let object = ObjectWriterState(workers: take workers, tasks, health: take health_state, reclaims: take reclaims_state, unhealthy: Some(take health_rx), export_lifetime: None, watch: None, terminal: take health_tx, locator: take locator, levels: take names_in_order, weak: take waiters, pair: head.pair, origin: head.origin, recovered: head.checkpoint, entries: head.entry.seq - head.checkpoint.seq, failed: None, stream: attached_sid, attached, has_sealed, drop_attach_on_cut: false, archive_on, pending_archive_on: None, cache)
     let journal_wake = match take timer {
         Some(take running) => ObjectIdleTimer(take running),
         None => NoJournalWake,
@@ -332,10 +333,19 @@ fn open_object_writer(tasks: Tasks, take config: ObjectAuthorityConfig, c: Clock
 pub fn claim_of(db: Db) -> Result[Claim, Error] {
     if let Some(connection) = db.disk {
         if let Some(object_writer) = connection.object {
-            let mut owner: Bytes = list.with_capacity(16)
-            list.put_word_le(mut owner, object_writer.pair.holder.hi)
-            list.put_word_le(mut owner, object_writer.pair.holder.lo)
-            return Ok(Claim(epoch: object_writer.pair.epoch, holder: take owner))
+            return claim_from_pair(object_writer.pair)
+        }
+    }
+    Error(Missing("head"))
+}
+
+pub fn origin_of(db: Db) -> Result[Option[Origin], Error] {
+    if let Some(connection) = db.disk {
+        if let Some(object_writer) = connection.object {
+            return match object_writer.origin {
+                Some(o) => Ok(Some(origin_from_history(o)?)),
+                None => Ok(None),
+            }
         }
     }
     Error(Missing("head"))

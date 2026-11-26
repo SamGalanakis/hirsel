@@ -183,7 +183,7 @@ fn stream_follow_capture(mut source: ObjectPackRead, previous: Option[Arc[Follow
     let mut scratch = disk_allocation(fn() -> Result[Bytes, Error] {
         Ok(list.with_capacity(HISTORY_HEAD_LIMIT))
     })?
-    let mut cur_head: HistoryHead = HistoryHead(authority_kind: source.authority_kind, store: StoreId(hi: 0, lo: 0), pair: HistoryPair(epoch: 0, holder: StoreId(hi: 0, lo: 0)), activation: 0, entry: HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), checkpoint: HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), floor: 0, binding:[0u8; 32])
+    let mut cur_head: HistoryHead = HistoryHead(authority_kind: source.authority_kind, store: StoreId(hi: 0, lo: 0), pair: HistoryPair(epoch: 0, holder: StoreId(hi: 0, lo: 0)), activation: 0, entry: HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), checkpoint: HistoryRef(seq: 0, epoch: 0, len: 0, digest: 0u64), floor: 0, binding:[0u8; 32], origin: None)
     let mut cur_tag = std.object.ETag(octets:[0u8; 64], len: 0)
     let mut cur_attach: Option[Attach] = None
     let mut cur_bytes: Bytes = list.new()

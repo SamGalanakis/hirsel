@@ -216,7 +216,7 @@ fn history_decode_manifest(name: String, id: StoreId, mark: HistoryMark, checkpo
     }
     disk_allocation(scoped fn() -> Result[PageManifest, Error] {
         let (_, take manifest) = disk_read_page_manifest(name, raw)?
-        if manifest.first_live != checkpoint_seq || manifest.prev_first != checkpoint_seq || manifest.retirement_root != std.page.unlocated(0) {
+        if manifest.first_live != checkpoint_seq || manifest.prev_first != checkpoint_seq {
             return Error(disk_fault(name, 72, Malformed))
         }
         let cursor = manifest.sweep

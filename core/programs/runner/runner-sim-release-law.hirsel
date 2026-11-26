@@ -58,7 +58,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let mut history = std.sim.history.new(seed)
     let client = sim_release_client(endpoint, time, tasks, rnd)
     let (take requests, take workers) = std.object.split(take client)
-    let backing = SimBacking(requests: take requests, declaration: sim_release_levels(), sync: store.level_sync(mut world)?, op_ms: 30000)
+    let backing = SimBacking(requests: take requests, declaration: sim_release_levels(), sync: store.level_sync(mut world)?, op_ms: 30000, claim_auth: Some(budget_adopt_auth()))
     let mut config = budget_config(Sim(take backing), time, rnd, tasks, std.sim.s3.endpoint_network(endpoint))
     config.sizes = store.Overrides(resident_limit: Some(1048576), journal_limit: None, checkpoint_bytes: Some(65536), pack_bytes: Some(65536), group_bytes: Some(65536), group_commits: Some(1), lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
     let (take sized, _, _, capture, _) = result.unwrap(place_store(placing_of(config), config, None, true))
@@ -189,6 +189,7 @@ fn sim_release_round(endpoint: std.sim.s3.Endpoint, time: Clock, tasks: Tasks, r
     let authority = store.sim_authority(take next_client, sim_release_levels(), store.level_sync(mut world)?, 30000)
     let mut reopened_options = sim_release_options()
     reopened_options.create = false
+    reopened_options.claim_auth = Some(budget_adopt_auth())
     let mut reopened = store.open_authority(tasks, take authority, time, rnd, reopened_options) ?=> |store.Refusal(error: take problem, ..)| take problem
     let saved = store.snapshot(reopened)
     let rows = store.table(mut reopened, "data", std.codec.key_u64(), std.codec.of_u64())?

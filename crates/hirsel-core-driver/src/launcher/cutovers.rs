@@ -65,7 +65,10 @@ impl Cutovers {
     pub(super) fn answer(&mut self, child: &Child, reply: &HostReply) -> Option<Event> {
         if matches!(
             reply,
-            HostReply::Opened(_) | HostReply::WriteAck(_) | HostReply::StoreMismatch(..)
+            HostReply::Opened(_)
+                | HostReply::WriteAck(_)
+                | HostReply::StoreMismatch(..)
+                | HostReply::Deposed(..)
         ) {
             return None;
         }

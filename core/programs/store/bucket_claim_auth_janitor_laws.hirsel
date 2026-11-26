@@ -1,0 +1,138 @@
+// STORE-SPEC §12.11.6 A4 janitor binding (astra 3126 amendment 2). An ask
+// names its Store and the pair its poll observed; the janitor acts only while
+// the ask's cause holds and only on that Store. A changed owner (`Superseded`),
+// a completed cleanup (`JanitorCleaned`) and a foreign Store (`Foreign`) are
+// distinct outcomes, each with zero writes to the Place's head.
+// Sets up X on S_A with no head task and B's Held row for (X, e), and returns
+// the orphan ask Host A's service raises at `hold_ms`.
+fn janitor_bind_orphan(s: BucketSim, tasks: Tasks, r: Random, mut svc_a: JournalService, token: StoreId) -> Result[(StoreId, HistoryPair), Error] waits {
+    stream_gc_make_place(s, tasks, r, 83, string.from("pX/"))?
+    let mut x_a = stream_janitor_open_attached(s, tasks, r, mut svc_a, 87, string.from("pX/"))?
+    bucket_law_commit(mut x_a, 1)?
+    let x_store = x_a.store
+    let x_epoch = claim_of(x_a)?.epoch
+    let _ = take x_a
+    stream_unhold_raw_hold(s, tasks, 88, x_store, x_epoch, token)?
+    for _ in 0u64 .. 16u64 {
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+        let asks = journal_janitor_asks(mut svc_a)?
+        for take ask in take asks {
+            if let JanitorOrphanHold(store, _, pair) = take ask {
+                return Ok((store, pair))
+            }
+        }
+    }
+    fail("A4 binding: Host A's service raised no orphan ask")
+}
+
+// The PUTs of `pX/head` between two marker GETs.
+fn janitor_bind_head_puts(report: std.sim.s3.Report, start: String, end: String) -> u64 {
+    let mut window = false
+    let mut puts = 0u64
+    for q in report.requests {
+        if q.method == "GET" && q.key == start {
+            window = true
+        }
+        if q.method == "GET" && q.key == end {
+            window = false
+        }
+        if window && q.method == "PUT" && q.key == "pX/head" {
+            puts += 1
+        }
+    }
+    puts
+}
+
+// Same pair, cleanup done: B's late Abandon lands after the ask and the
+// service removes the row by rule (b), with X's pair unchanged. The janitor's
+// ask is `JanitorCleaned` and sends no PUT of X's head. Red for a janitor that
+// acts on the pair alone: it claims X (a head PUT) for a cleanup already done.
+@test
+fn bucket_claim_auth_janitor_cleanup_done(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 151, None, list.new())
+    let outcome = janitor_cleanup_done_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if janitor_bind_head_puts(report, string.from("a2-cleaned-start"), string.from("a2-cleaned-end")) != 0 {
+        fail("A4 binding: the janitor sent a PUT of X's head for a finished cleanup")
+    }
+    Ok(())
+}
+
+fn janitor_cleanup_done_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 3, 8, 86400)?
+    let token = StoreId(hi: 99, lo: 1)
+    let (store, pair) = janitor_bind_orphan(s, tasks, r, mut svc_a, token)?
+    // B's Abandon arrives late; the service's next polls remove the row.
+    let mut client = stream_service_client(s, tasks, 90, "", "us-east-1")?
+    let mut lane = stream_lane(stream_law_sid(), 1, 8, token)?
+    lane.dir = stream_key(stream_root_dir(string.from(STREAM_SERVICE_ROOT)), stream_dir(stream_law_sid()))
+    let due = std.object.deadline_after_ms(client, JANITOR_OP_MS)
+    stream_reg_read(mut lane, mut client, due)?
+    let _ = stream_reg_write(mut lane, mut client, Abandon(token), due)?
+    std.clock.sleep_ns(s.time, 4 * JANITOR_IDLE_MS * 1000000)
+    stream_service_marker(s, tasks, string.from("a2-cleaned-start"))?
+    let jclient = stream_service_client(s, tasks, 91, "pX/", "us-east-1")?
+    let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
+    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(store, string.from("pX/"), pair)) {
+        Ok(JanitorCleaned) => (),
+        Ok(JanitorClosed) => fail("A4 binding: the janitor closed X after its cleanup was done"),
+        Error(_) => fail("A4 binding: a finished cleanup was not JanitorCleaned"),
+    }
+    stream_service_marker(s, tasks, string.from("a2-cleaned-end"))?
+    close_journal_service(take svc_a)
+}
+
+// Wrong Store: X's prefix now holds another Store Y's head. Host A's poll
+// raises no ask and leaves B's row in place, and an ask carried from before
+// the replacement is refused `Foreign` by the janitor's open with no PUT of
+// the prefix's head. Red for a poll that pairs the ask's StoreId with the
+// observed pair, or a janitor open without the expected StoreId.
+@test
+fn bucket_claim_auth_janitor_wrong_store(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 152, None, list.new())
+    let outcome = janitor_wrong_store_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    if janitor_bind_head_puts(report, string.from("a2-foreign-start"), string.from("a2-foreign-end")) != 0 {
+        fail("A4 binding: the janitor sent a PUT of another Store's head")
+    }
+    Ok(())
+}
+
+fn janitor_wrong_store_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let mut svc_a = stream_janitor_service(s, tasks, r, 81, stream_law_sid(), 3, 8, 86400)?
+    let token = StoreId(hi: 99, lo: 1)
+    let (store, pair) = janitor_bind_orphan(s, tasks, r, mut svc_a, token)?
+    // Store Y, made at pZ/, has its head copied over X's prefix.
+    stream_gc_make_place(s, tasks, r, 92, string.from("pZ/"))?
+    let mut client = stream_service_client(s, tasks, 93, "", "us-east-1")?
+    let due = std.object.deadline_after_ms(client, JANITOR_OP_MS)
+    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
+    let _ = history_fetch(mut client, "pZ/head", mut raw, due)?
+    let (stored, _) = std.object.store(mut client, "pX/head", take raw, due)
+    let _ = stored ?=> |problem| Remote(problem)
+    // Asks raised from X's own head before the replacement are dropped; the
+    // service answers this drain between polls, so every later poll reads Y.
+    let _ = journal_janitor_asks(mut svc_a)?
+    stream_service_marker(s, tasks, string.from("a2-foreign-start"))?
+    for _ in 0u64 .. 8u64 {
+        std.clock.sleep_ns(s.time, JANITOR_IDLE_MS * 1000000)
+        if list.len(journal_janitor_asks(mut svc_a)?) != 0 {
+            fail("A4 binding: a poll raised an ask from another Store's head")
+        }
+    }
+    let rows = stream_q4_rows(s, tasks, stream_service_key(string.from("reg")))?
+    if stream_q4_one(rows, false, string.from("A4 binding: another Store's head cleared B's row"))? != token {
+        fail("A4 binding: B's row changed under another Store's head")
+    }
+    let jclient = stream_service_client(s, tasks, 94, "pX/", "us-east-1")?
+    let jauth = object_authority(take jclient, "bucket", JANITOR_OP_MS)
+    match stream_janitor_close_place(tasks, mut svc_a, take jauth, s.time, r, stream_janitor_options(false), JanitorOrphanHold(store, string.from("pX/"), pair)) {
+        Error(Foreign) => (),
+        Ok(_) => fail("A4 binding: the janitor acted on another Store's head"),
+        Error(_) => fail("A4 binding: another Store's head was not refused Foreign"),
+    }
+    stream_service_marker(s, tasks, string.from("a2-foreign-end"))?
+    close_journal_service(take svc_a)
+}

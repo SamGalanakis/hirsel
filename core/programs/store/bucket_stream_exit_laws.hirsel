@@ -119,6 +119,7 @@ fn exit_l90_e_export_and_archival(d: Dir, c: Clock, r: Random, tasks: Tasks) -> 
     let outcome = exit_l90_e_export_run(d, s, tasks, c, r)
     let report = bucket_law_report(take s)
     let p3_store = outcome?
+    bucket_law_head_history(report)?
     let (_, commits_in_seg) = exit_verify_archive_segment(report, string.from("p3/"), p3_store)?
     if commits_in_seg != 3 {
         fail("L90-E: archival cut segment did not cover all 3 commits (2 sealed + 1 live)")
@@ -263,6 +264,7 @@ fn exit_l90_e_sealed_cursor_crash(c: Clock, r: Random, tasks: Tasks) -> Result[(
     let outcome = exit_l90_e_crash_run(s, tasks, r)
     let report = bucket_law_report(take s)
     let p4_store = outcome?
+    bucket_law_head_history(report)?
     let (_, commits_in_seg) = exit_verify_archive_segment(report, string.from("p4/"), p4_store)?
     if commits_in_seg != 4 {
         fail("L90-E(crash): archival cut segment after crash recovery did not cover all 4 commits")

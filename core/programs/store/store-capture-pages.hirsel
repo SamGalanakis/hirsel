@@ -157,7 +157,7 @@ fn capture_lists(mut packs: CapturePacks, m: PageManifest) -> Result[CaptureList
     let mut pages = 0u64
     let mut rows = 0u64
     let mut pack_rows = 0u64
-    for (kind, root) in[(PackList, m.pack_root), (RetiredList, m.retirement_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
+    for (kind, root) in[(PackList, m.pack_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
         let mut tally = CaptureListWalk(previous: list.new(), rows: 0)
         capture_walk_pages(mut packs, root, 2, None, mut tally, mut pages, scoped fn(mut _packs: CapturePacks, mut walk: CaptureListWalk, path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
             let raw = match cell_value {
@@ -180,9 +180,6 @@ fn capture_lists(mut packs: CapturePacks, m: PageManifest) -> Result[CaptureList
                         if seq == 0 || seq >= m.next_pack {
                             return Error(disk_fault(path, at, Malformed))
                         }
-                    },
-                    RetiredList => if seq == 0 || seq >= m.next_pack || list.len(raw) != 0 {
-                        return Error(disk_fault(path, at, Malformed))
                     },
                     DeferredList => {
                         let _ = decode_deferred_free(path, at, key, raw, m)?

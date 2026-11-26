@@ -236,6 +236,9 @@ fn stream_service_control(mut s: StreamService) -> Result[bool, Error] waits {
                 let drained = replace(mut s.janitor_asks, list.new())
                 let _ = channel.send(answers, take drained)
             },
+            Ok(JanitorStill(take ask, take answers)) => {
+                let _ = channel.send(answers, stream_janitor_cause_holds(s, ask))
+            },
             Ok(StopService) => return Ok(false),
             Error(_) => return Ok(true),
         }

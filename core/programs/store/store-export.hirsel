@@ -728,9 +728,7 @@ pub fn restore(from: Dir, to: Dir, c: Clock, options: Options) -> Result[ExportS
     }))?
     let inventory = deploy_result(take selected)?
     for pack in inventory {
-        if pack.class != CHECK_RETIRED {
-            copy_restore_file(from, to, deploy_result(paged_pack_path(pack.seq))?)?
-        }
+        copy_restore_file(from, to, deploy_result(paged_pack_path(pack.seq))?)?
     }
     for seq in manifest.first_live .. stamp.terminal {
         copy_restore_file(from, to, scratch_result(capacity(disk_path("j-", seq, "")))?)?

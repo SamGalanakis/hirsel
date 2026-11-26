@@ -256,34 +256,56 @@ fn bucket_law_head_history(report: std.sim.s3.Report) -> Result[(), Error] {
             fail("VP1: duplicate or invalid applied HEAD request id")
         }
         map.insert(mut requests, event.request, ())
-        let captured = history_decode_head(event.data)?
+        // Attach-aware: a streamed Place's heads carry ATTACH (§12.11.2).
+        let (captured, attach) = history_decode_head_attach(event.data)?
         let current = captured.head
         if let Some(previous_index) = map.get(last_head, event.key) {
             let prior = view report.head_writes[previous_index]
-            let prior_capture = history_decode_head(prior.data)?
+            let (prior_capture, prior_attach) = history_decode_head_attach(prior.data)?
             let previous = prior_capture.head
+            let attached = match (prior_attach, attach) {
+                (None, None) => false,
+                _ => true,
+            }
             let Some(precondition) = event.if_match else {
                 fail("VP1: HEAD replaced without an If-Match")
             }
-            if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || list.slice(prior.data, 240, list.len(prior.data)) != list.slice(event.data, 240, list.len(event.data)) {
+            let prior_authority = list.slice(prior.data, 240, history_authority_end(prior.data)?)
+            let authority = list.slice(event.data, 240, history_authority_end(event.data)?)
+            if precondition != prior.etag || event.if_none_match != None || !same(previous.store, current.store) || prior.etag == event.etag || prior_authority != authority {
                 fail("VP1: HEAD did not condition on its predecessor or changed the authority")
             }
             if current.pair.epoch == previous.pair.epoch {
-                if !same(current.pair.holder, previous.pair.holder) || current.entry.seq != previous.entry.seq + 1 || current.entry.epoch != current.pair.epoch || current.floor < previous.floor || current.activation < previous.activation {
-                    fail("VP1: HEAD did not advance the incumbent's prefix")
+                // ORIGIN is copied byte for byte by every same-epoch advance (STORE-SPEC §12.3).
+                if !bucket_law_same_origin(current.origin, previous.origin) {
+                    fail("VP1: a same-epoch HEAD advance changed ORIGIN")
                 }
-                if !history_ref_matches(current.checkpoint, previous.checkpoint) && !history_ref_matches(current.checkpoint, current.entry) {
-                    fail("VP1: HEAD did not publish the checkpoint at its new entry")
+                if !same(current.pair.holder, previous.pair.holder) {
+                    fail("VP1: a same-epoch HEAD advance changed the holder")
                 }
-                // Reclaim can erase earlier entries. Where an entry remains,
-                // the bucket's bytes must link to the previous applied tip.
-                let offset = string.byte_len(event.key) - 4
-                let mut entry_key = string.from(string.slice(event.key, 0, offset))
-                string.push(mut entry_key, history_key("e-", current.entry))
-                if let Some(stored_entry) = map.get(report.objects, entry_key) {
-                    let (_, link) = history_entry_context(entry_key, current.store, current.entry, stored_entry.data)?
-                    if !history_ref_matches(history_length(link, current.entry.seq - 1), previous.entry) {
-                        fail("VP1: the applied advance omitted its predecessor")
+                // An attached Place may rewrite only ATTACH (a settle that
+                // moved no entry): every history field stays put.
+                if attached && history_ref_matches(current.entry, previous.entry) {
+                    if !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
+                        fail("VP1: an ATTACH-only HEAD update changed the history")
+                    }
+                } else {
+                    if current.entry.seq != previous.entry.seq + 1 || current.entry.epoch != current.pair.epoch || current.floor < previous.floor || current.activation < previous.activation {
+                        fail("VP1: HEAD did not advance the incumbent's prefix")
+                    }
+                    if !history_ref_matches(current.checkpoint, previous.checkpoint) && !history_ref_matches(current.checkpoint, current.entry) {
+                        fail("VP1: HEAD did not publish the checkpoint at its new entry")
+                    }
+                    // Reclaim can erase earlier entries. Where an entry remains,
+                    // the bucket's bytes must link to the previous applied tip.
+                    let offset = string.byte_len(event.key) - 4
+                    let mut entry_key = string.from(string.slice(event.key, 0, offset))
+                    string.push(mut entry_key, history_key("e-", current.entry))
+                    if let Some(stored_entry) = map.get(report.objects, entry_key) {
+                        let (_, link) = history_entry_context(entry_key, current.store, current.entry, stored_entry.data)?
+                        if !history_ref_matches(history_length(link, current.entry.seq - 1), previous.entry) {
+                            fail("VP1: the applied advance omitted its predecessor")
+                        }
                     }
                 }
             } else if current.pair.epoch != previous.pair.epoch + 1 || !history_ref_matches(current.entry, previous.entry) || !history_ref_matches(current.checkpoint, previous.checkpoint) || current.floor != previous.floor || current.activation != previous.activation || current.binding != previous.binding {
@@ -326,7 +348,7 @@ fn witness_cut(id: StoreId, pair: HistoryPair, pos: u64, predecessor: HistoryRef
     let retained = HistoryRetention(floor: pos, earlier: list.new())
     let locate = HistoryLocateRoot(depth: 0, rows: list.new())
     let entry_ref = history_checkpoint_packet(mut raw_entry, DiskContext(store: id, role: 2, seq: pos), pair.epoch, 1, predecessor, reference, retained, locate)?
-    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32])
+    let header = HistoryHead(authority_kind: 1, store: id, pair, activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: pos, binding:[0; 32], origin: None)
     Ok(WitnessCut(head: header, manifest: reference, manifest_bytes: take raw_manifest, entry_bytes: take raw_entry))
 }
 
@@ -453,14 +475,19 @@ fn witness_case(tasks: Tasks, c: Clock, r: Random, seed: u64, lost_marker: bool)
     let mut successor = open_authority(tasks, take grant, sim.time, r, opts) ?=> |Refusal(error: take reason, ..)| take reason
     bucket_law_checkpoint(mut successor)?
     reclaim_barrier(successor)?
-    if let Error(Lost) = result.unwrap(task.join(take pending_claim)) {} else {
-        fail("L52-W: B did not return Lost")
+    // C is the same Store, a validated successor: B names C's pair (§12.3).
+    let Error(Superseded(deposer)) = result.unwrap(task.join(take pending_claim)) else {
+        fail("L52-W: B did not return Superseded")
     }
     let successor_ticket = bucket_order_commit(mut successor)?
     durable(mut successor, successor_ticket)?
     close(take successor)?
     let _ = take publisher
     let report = bucket_law_report(take sim)
+    let final_write = report.head_writes[list.len(report.head_writes) - 1]
+    if !history_claim_matches_pair(deposer, history_decode_head(final_write.data)?.head.pair) {
+        fail("L52-W: Superseded did not name C's pair")
+    }
     if lost_marker {
         witness_ceiling_check(report, entry_key, 24, "")?
     } else {
@@ -637,4 +664,14 @@ fn bucket_test_empty_commit_fenced(c: Clock, r: Random, tasks: Tasks) -> Result[
         fail("L91 F1: unfenced skip did not issue a conditional 304 head GET")
     }
     Ok(())
+}
+
+// Every ORIGIN field, so a same-epoch advance that rewrote any byte of the
+// 49-byte payload is caught.
+fn bucket_law_same_origin(a: Option[HistoryOrigin], b: Option[HistoryOrigin]) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.epoch == y.epoch && x.class == y.class && x.permit_epoch == y.permit_epoch && history_origin_same_bytes(x.attempt, y.attempt) && history_origin_same_bytes(x.permit_attempt, y.permit_attempt),
+        _ => false,
+    }
 }

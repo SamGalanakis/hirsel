@@ -7,7 +7,6 @@ fn locate_page_cut(mut manifest: PageManifest, layout: PagedCutLayout, roots: Li
         manifest.pins[slot].roots = published_page_roots(layout.locations, roots[branch_count + slot])
     }
     manifest.pack_root = published_tree_pointer(layout.locations, layout.lists.roots.packs)
-    manifest.retirement_root = published_tree_pointer(layout.locations, layout.lists.roots.retired)
     manifest.next_pack = layout.lists.run_packs.next_pack
     manifest.next_stamp = next_stamp
     manifest.account_memory = account
@@ -281,7 +280,7 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
         return Error(Foreign)
     }
     close(take db)?
-    let raw = disk_read_paged_file(directory, "MANIFEST", 551)?
+    let raw = disk_read_paged_file(directory, "MANIFEST", 515)?
     let (id, take published) = read_page_manifest_file(directory)?
     if published.generation != old.generation + 1 || published.first_live != old.first_live + 1 || published.branches[0u64].version != old.branches[0u64].version + 1 || published.pack_root.stamp < watermarks[0u64] || published.next_stamp <= published.pack_root.stamp {
         return Error(Foreign)
@@ -290,7 +289,7 @@ fn disk_test_relocation_late_refusal(d: Dir, c: Clock, r: Random, tasks: Tasks) 
     if read_le(replacement, 72, 2) != 0x0021 || disk_read_paged_file(directory, old_name, 4096)? != original {
         return Error(Foreign)
     }
-    let collection_map = law_pointed_payload(directory, raw, 438, 4096)?
+    let collection_map = law_pointed_payload(directory, raw, 402, 4096)?
     let values = law_pointed_payload(directory, collection_map, law_leaf_cell(collection_map, 0) + 3, 4096)?
     let cell = law_leaf_cell(values, 0)
     if read_le(values, 2, 2) != 1 || values[cell] != 1 || read_le(values, cell + 25, 8) != old_blob_pack {
@@ -331,10 +330,10 @@ fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) 
     if cutoff != 1024 {
         // AP14 places inline 16 bytes into the MANIFEST payload. Bind the
         // hand-edited genesis payload to the same frame at byte 72.
-        let mut genesis = disk_read_paged_file(d, "MANIFEST", 551)?
+        let mut genesis = disk_read_paged_file(d, "MANIFEST", 515)?
         let width: u32 = int.truncate(cutoff)
         list.set_word_le(mut genesis, 104, width)
-        let digest = capacity(disk_check(DiskContext(store: id, role: 1, seq: 1), 72, list.slice(genesis, 72, 80), list.slice(genesis, 88, 551)))?
+        let digest = capacity(disk_check(DiskContext(store: id, role: 1, seq: 1), 72, list.slice(genesis, 72, 80), list.slice(genesis, 88, 515)))?
         list.set_word_le(mut genesis, 80, digest)
         disk_write_synced(d, "MANIFEST", genesis)?
     }
@@ -356,12 +355,12 @@ fn check_blob_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks, cutoff: u64) 
     }
     let _ = checkpoint(mut db)?
     close(take db)?
-    let manifest = disk_read_paged_file(d, "MANIFEST", 551)?
+    let manifest = disk_read_paged_file(d, "MANIFEST", 515)?
     if read_le(manifest, 104, 4) != cutoff {
         return Error(Foreign)
     }
-    // One main branch, named main. Its collections pointer starts at 438.
-    let collection_map = law_pointed_payload(d, manifest, 438, 4096)?
+    // One main branch, named main. Its collections pointer starts at 402.
+    let collection_map = law_pointed_payload(d, manifest, 402, 4096)?
     let descriptor = law_leaf_cell(collection_map, 0) + 3
     let values = law_pointed_payload(d, collection_map, descriptor, 4096)?
     let a = law_leaf_cell(values, 0)

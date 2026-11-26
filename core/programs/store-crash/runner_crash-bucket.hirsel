@@ -35,10 +35,19 @@ fn bucket_place(mut r: Calls) -> Result[(), runner.RegisterError] {
     runner.query(mut r, code.describe(bucket_counter), runner.slots(), 65536u64, runner.DEFAULT_STEPS)
 }
 
+// fleet.md genesis/adopt: this harness is the local operator of its own
+// non-Fleet bucket and restarts the place across crashes without a recorded
+// pair, so it adopts the current head with a fresh attempt on each open.
+fn operator_adopt(r: Random) -> store.ClaimAuth {
+    let mut attempt: Bytes = list.with_capacity(16u64)
+    host.random(r, mut attempt)
+    store.ClaimAuth(expect: None, attempt: take attempt, class: Adopt)
+}
+
 fn bucket_config(argv: Args, key: Secret, c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[runner.PlaceConfig[(), Hd, ()], Exit] {
     let spot = std.object.Bucket(endpoint: bucket_endpoint(argv), aws_region: "us-east-1", bucket: "bucket-t1", prefix: "", style: Path)
     let credentials = std.cred.from_secret(string.from(BUCKET_ACCESS), secret.share(key), "")
-    let backing = runner.BucketBacking(net: n, place: take spot, credentials: take credentials, lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64, cache: None)
+    let backing = runner.BucketBacking(net: n, place: take spot, credentials: take credentials, lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64, cache: None, claim_auth: Some(operator_adopt(r)))
     let mut wire = runner.wire_defaults(65536u64)
     wire.n_pool = 4194304u64
     let selection = runner.launch_selection(argv)?

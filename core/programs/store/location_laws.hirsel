@@ -3,7 +3,7 @@
 // pack may repeat a live stamp and still count toward that pack's totals.
 type LawLocationSource: key = LawPage(u64) | LawBranch(u64, u8) | LawPin(PinOwner, String, u8) | LawList(u8)
 
-type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRetired | LawRows
+type LawLocationTree: key = LawCollections | LawData | LawPacks | LawRows
 
 type LawLocationFrame {
     place: std.page.PagePtr,
@@ -17,7 +17,6 @@ type LawLocationGraph {
     physical: Map[(u64, u64), std.page.PagePtr],
     packs: Map[u64, PagePack],
     listed: Map[u64, PagePack],
-    retired: Map[u64, ()],
     frames: Map[u64, LawLocationFrame],
     incoming: Map[(u64, LawLocationSource), u64]
 }
@@ -98,19 +97,12 @@ fn law_read_location_list_row(mut graph: LawLocationGraph, tree: LawLocationTree
         fail("location law: pack-list row")
     }
     let width = read_le(page, cell + 1, 2)
-    if tree == LawRetired {
-        if width != 0 || map.contains(graph.retired, seq) {
-            fail("location law: retirement row")
-        }
-        map.insert(mut graph.retired, seq, ())
-    } else {
-        let value = cell + 3
-        if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
-            fail("location law: listed pack row")
-        }
-        let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
-        map.insert(mut graph.listed, seq, pack)
+    let value = cell + 3
+    if width != 29 || page[value] > 1 || map.contains(graph.listed, seq) {
+        fail("location law: listed pack row")
     }
+    let pack = PagePack(class: page[value], frames: list.word_le(page, value + 1), live: list.word_le(page, value + 5), payload_bytes: list.word_le(page, value + 13), index: list.word_le(page, value + 21))
+    map.insert(mut graph.listed, seq, pack)
 }
 
 fn law_follow_location(d: Dir, mut graph: LawLocationGraph, ptr: std.page.PagePtr, class: u8, tree: LawLocationTree, source: LawLocationSource) -> Result[(), Error] waits {
@@ -279,15 +271,14 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
     if manifest_kind != 0x0031 || read_le(raw, 76, 4) + 88 != list.len(raw) {
         fail("location law: MANIFEST frame")
     }
-    let mut graph = LawLocationGraph(next_pack: list.word_le(raw, 128), next_stamp: list.word_le(raw, 112), physical: map.new(), packs: map.new(), listed: map.new(), retired: map.new(), frames: map.new(), incoming: map.new())
+    let mut graph = LawLocationGraph(next_pack: list.word_le(raw, 128), next_stamp: list.word_le(raw, 112), physical: map.new(), packs: map.new(), listed: map.new(), frames: map.new(), incoming: map.new())
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 324), 2, LawPacks, LawList(0))?
-    law_follow_location(d, mut graph, law_read_location_ptr(raw, 360), 2, LawRetired, LawList(1))?
     // `lineage` at 168 and `deferred_frees` at 204: class-2 trees whose rows
     // name no pack the inventory counts.
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 168), 2, LawRows, LawList(3))?
     law_follow_location(d, mut graph, law_read_location_ptr(raw, 204), 2, LawRows, LawList(2))?
-    let branches = read_le(raw, 396, 4)
-    let mut at = 400u64
+    let branches = read_le(raw, 360, 4)
+    let mut at = 364u64
     for _ in 0u64 .. branches {
         let id = read_le(raw, at, 4)
         let name_bytes = read_le(raw, at + 4, 2)
@@ -339,9 +330,6 @@ fn law_parse_locations(d: Dir) -> Result[LawLocationGraph, Error] waits {
         }
     }
     for (seq, pack) in graph.packs {
-        if map.contains(graph.retired, seq) {
-            fail("location law: reached or listed pack retired")
-        }
         if pack.class != 2 {
             let Some(row) = map.get(graph.listed, seq) else {
                 fail("location law: unlisted data pack")

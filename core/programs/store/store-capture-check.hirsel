@@ -9,8 +9,6 @@ pub type CheckTotals: key + send {
 
 pub type CheckError: send = CheckStore(Error) | CheckBudget(Capacity) | CheckRepeats(Capacity)
 
-const CHECK_RETIRED: u8 = 255
-
 type CheckPack {
     seq: u64,
     // Holds `payload_bytes` until `check_envelope` finishes, then `index` for `check_reachable`
@@ -32,7 +30,7 @@ fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[L
     let mut inventory: List[CheckPack] = list.with_capacity(slots)
     let mut packs = capture_packs(d, id, m, false, 0)
     let mut pages = 0u64
-    for (kind, root) in[(PackList, m.pack_root), (RetiredList, m.retirement_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
+    for (kind, root) in[(PackList, m.pack_root), (DeferredList, m.deferred_frees), (LineageList, m.lineage)] {
         capture_walk_list(mut packs, root, 2, None, mut inventory, mut pages, fn(mut rows: List[CheckPack], ptr: std.page.PagePtr) {
             list.push(mut rows, check_pack_row(ptr.pack, 2, 0, 0, 0))
         }, scoped fn(mut _packs: CapturePacks, mut rows: List[CheckPack], path: String, at: u64, key: Bytes, cell_value: std.page.Cell) -> Result[(), Error] {
@@ -45,7 +43,6 @@ fn check_inventory(d: Dir, id: StoreId, m: PageManifest, slots: u64) -> Result[L
                     let pack = pack_record(path, at, raw)?
                     list.push(mut rows, check_pack_row(list.word_be(key, 0), pack.class, pack.frames, pack.payload_bytes, pack.index))
                 },
-                RetiredList => list.push(mut rows, check_pack_row(list.word_be(key, 0), CHECK_RETIRED, 0, 0, 0)),
                 _ => (),
             }
             Ok(())
@@ -124,7 +121,7 @@ fn check_pack_slot(packs: List[CheckPack], path: String, ptr: std.page.PagePtr, 
             hi = mid
         }
     }
-    if lo == list.len(packs) || packs[lo].seq != ptr.pack || packs[lo].class == CHECK_RETIRED {
+    if lo == list.len(packs) || packs[lo].seq != ptr.pack {
         return Error(disk_fault(path, ptr.offset, Dangling(ptr.stamp)))
     }
     if packs[lo].class != class {
@@ -328,7 +325,7 @@ fn check_roots(mut walk: CheckWalk, roots: LocatedRoots) -> Result[(), Error] wa
 
 fn check_reachable(p: PreparedCapture, mut walk: CheckWalk) -> Result[(), Error] waits {
     let m = view p.manifest
-    for root in[m.pack_root, m.retirement_root, m.deferred_frees, m.lineage] {
+    for root in[m.pack_root, m.deferred_frees, m.lineage] {
         check_page(mut walk, root, 2, Unprefixed, None)?
     }
     if m.deferred_frees.stamp != 0 {
@@ -368,9 +365,6 @@ fn check_mark(p: PreparedCapture, target: Option[Dir], mut summary: CheckTotals,
     let mut packs = check_inventory(p.dir, p.id, p.manifest, capture_list_slots(p))?
     let mut base = 0u64
     for i in 0u64 .. list.len(packs) {
-        if packs[i].class == CHECK_RETIRED {
-            continue
-        }
         if let Error(take problem) = check_envelope(p, mut packs[i], target, mut summary.scrubbed) {
             check_emit(take problem, mut summary, fault)?
         }

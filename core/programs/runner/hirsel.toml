@@ -49,6 +49,7 @@ store = { major = 1, path = "../store" }
 "runner-head-maintenance.hirsel" = "runner"
 "runner-identity.hirsel" = "runner"
 "runner-binding.hirsel" = "runner"
+"runner-host-wire.hirsel" = "runner"
 "runner-http-relay.hirsel" = "runner"
 "runner-http-binding.hirsel" = "runner"
 "runner-keyed-binding.hirsel" = "runner"
@@ -131,6 +132,7 @@ dirs = ["."]
 "runner_activation_fate_laws.hirsel" = "runner"
 "runner_subs_laws.hirsel" = "runner"
 "runner_activation_fate_crash_laws.hirsel" = "runner"
+"runner_activation_fate_bucket_crash_laws.hirsel" = "runner"
 "runner_activation_fate_deploy_laws.hirsel" = "runner"
 "schedule_laws.hirsel" = "runner"
 "park_laws.hirsel" = "runner"
@@ -238,3 +240,6 @@ limit = 536870912
 [tests.runs."runner@1/runner/bucket_reopens_without_objects_cache"]
 limit = 134217728
 grants = ["Clock", "Random", "Tasks", "Net=Resolve 127.0.0.1;Listen 127.0.0.0/8 0-65535;Connect 127.0.0.0/8 0-65535"]
+
+[tests.runs."runner@1/runner/activation_fate_survives_bucket_crash"]
+limit = 1342177280

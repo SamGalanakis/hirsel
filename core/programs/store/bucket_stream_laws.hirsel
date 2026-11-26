@@ -3,7 +3,7 @@
 fn stream_law_head(at_seq: u64) -> HistoryHead {
     let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
     let newest = HistoryRef(seq: at_seq, epoch: 1, len: 189, digest: 0x2702)
-    HistoryHead(authority_kind: 1, store: StoreId(hi: 9, lo: 10), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: newest, checkpoint: base, floor: 1, binding:[0; 32])
+    HistoryHead(authority_kind: 1, store: StoreId(hi: 9, lo: 10), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: newest, checkpoint: base, floor: 1, binding:[0; 32], origin: None)
 }
 
 fn stream_law_authority() -> Result[Bytes, Error] {

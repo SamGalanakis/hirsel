@@ -139,9 +139,18 @@ fn bucket_law_https_client(s: BucketSim, tasks: Tasks, host_name: String, seed: 
     }
 }
 
+fn bucket_law_adopt_auth() -> ClaimAuth {
+    let mut attempt: Bytes = list.with_capacity(16)
+    for i in 0u64 .. 16 {
+        list.push(mut attempt, int.narrow(i + 1))
+    }
+    ClaimAuth(expect: None, attempt: take attempt, class: Adopt)
+}
+
 fn bucket_law_options(create: bool) -> Options {
     let mut options = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     options.create = create
+    options.claim_auth = Some(bucket_law_adopt_auth())
     options
 }
 
@@ -366,6 +375,8 @@ fn bucket_law_capture(r: Random, tasks: Tasks, s: BucketSim) -> Result[(), Error
     let plan = follower_law_plan(Bucket(bucket_law_lanes(0)), bucket_law_options(true))
     let mut options: Options = clone(plan.options)
     options.create = true
+    // A plan carries no identity options: the writer names its own ClaimAuth.
+    options.claim_auth = Some(bucket_law_adopt_auth())
     let first = bucket_law_authority(s, tasks, "s3.test", 1)?
     let mut writer = open_authority(tasks, take first, s.time, r, options) ?=> |Refusal(error: take problem, ..)| take problem
     bucket_law_round(mut writer, 1)?
@@ -413,60 +424,6 @@ fn bucket_test_read_only_capture(c: Clock, r: Random, tasks: Tasks) -> Result[()
     checked
 }
 
-// STORE L60. Little-endian fields and XXH3 frame checks were derived
-// independently of the store encoder.
-// L60 wire vectors use §2.1, the format-10 §2.3 HEADER, §12.2 and libxxhash.
-@test
-fn bucket_test_m2_head_vectors() -> Result[(), Error] {
-    let config = object_history_config(std.object.Bucket(endpoint: "https://s3.amazonaws.com", aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), "bucket")
-    let payload = history_config_bytes(config)?
-    let test_id = StoreId(hi: 9, lo: 10)
-    let base = HistoryRef(seq: 1, epoch: 1, len: 189, digest: 0x2701)
-    let first = HistoryHead(authority_kind: 1, store: test_id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 11, lo: 12)), activation: 0, entry: base, checkpoint: base, floor: 1, binding:[0; 32])
-    let mut raw: Bytes = list.with_capacity(HISTORY_HEAD_LIMIT)
-    history_encode_head(mut raw, first, payload)?
-    history_check_vector(raw, "AQABADgAAADYzCuQlMXpP0hJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
-    let second = history_claim_head(first, StoreId(hi: 13, lo: 14))?
-    history_encode_head(mut raw, second, payload)?
-    history_check_vector(raw, "AQABADgAAACcg4hzVJ75n0hJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABeIDePuXa+GQIAAAAAAAAADQAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
-    let mut group = second
-    group.entry = HistoryRef(seq: 3, epoch: 2, len: 130, digest: 0x2702)
-    history_encode_head(mut raw, group, payload)?
-    history_check_vector(raw, "AQABADgAAAC/o07728+GcEhJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAAALx/4qAwqAEQIAAAAAAAAADQAAAAAAAAAOAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
-    let third = history_claim_head(group, StoreId(hi: 15, lo: 16))?
-    history_encode_head(mut raw, third, payload)?
-    history_check_vector(raw, "AQABADgAAABboOcU3X9v9EhJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAwAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAAA0iG7/ROpScQMAAAAAAAAADwAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
-    let fourth = history_claim_head(third, StoreId(hi: 17, lo: 18))?
-    history_encode_head(mut raw, fourth, payload)?
-    history_check_vector(raw, "AQABADgAAACcKpP7zy3ouUhJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAABAAAAAAAAAADAAAAAAAAAAAAAAAAAAAAoAABAIgAAACx56qhmzpHHwQAAAAAAAAAEQAAAAAAAAASAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAKIpeJ6fFk/AARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==")
-    let recovered = history_decode_head(raw)?
-    if !history_pair_matches(recovered.head.pair, fourth.pair) || history_key("e-", recovered.head.entry) != "e-00000000000000000003-00000000000000000002-0000000000002702" {
-        fail("a claim changed the inherited entry's name")
-    }
-    history_check_malformed("AQABADgAAABG7nU8O573yEhJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAACAAAAAAAAAAAAAAAAAAAAoAABAIgAAADfrRWEjxyTawEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAIIAAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAAQr6FCUN8o3ARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==", 72, "entry from a future epoch")
-    history_check_malformed("AQABADgAAADYzCuQlMXpP0hJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABjPXt4CtsV3wEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAicAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAAGIV85gSXfLaARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==", 72, "equal positions with different refs")
-    history_check_malformed("AQABADgAAADYzCuQlMXpP0hJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADQAAEAOgAAANPXKYV31wksAhgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAAAQYAYnVja2V0Ag==", 224, "unknown authority style")
-    let retired = option.unwrap(std.base64.decode(string.as_bytes("AQABADgAAADYzCuQlMXpP0hJUlNUT1JFCgAAAAcBAAAJAAAAAAAAAAoAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAoAABAIgAAABrpm/F53MsogEAAAAAAAAACwAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAL0AAAAAAAAAAScAAAAAAAABAAAAAAAAAAEAAAAAAAAAvQAAAAAAAAABJwAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQAAEAMAAAAJSyN5T/H7WmARgAaHR0cHM6Ly9zMy5hbWF6b25hd3MuY29tCQB1cy1lYXN0LTEGAGJ1Y2tldAAA")))
-    match history_decode_head(retired) {
-        Error(Unsupported(0x0050)) => Ok(()),
-        _ => fail("the retired AUTHORITY kind was accepted"),
-    }
-}
-
-fn history_check_malformed(encoded: String, expected_at: u64, take description: String) {
-    let raw = option.unwrap(std.base64.decode(string.as_bytes(encoded)))
-    match history_decode_head(raw) {
-        Error(Corrupt(Fault(file: bad_file, offset: at, why: Malformed))) if bad_file == "head" && at == expected_at => (),
-        _ => fail(take description),
-    }
-}
-
-fn history_check_vector(raw: Bytes, expected: String) {
-    if raw != option.unwrap(std.base64.decode(string.as_bytes(expected))) {
-        fail("the HEAD wire bytes differ from the L60 vector")
-    }
-}
-
 fn bucket_m2_law_commit_packet(mut raw: Bytes, head: HistoryHead, version_number: u64) -> Result[(), Error] {
     let seq = history_next_id(head.entry.seq)?
     let ctx = DiskContext(store: head.store, role: 2, seq)
@@ -500,7 +457,7 @@ fn bucket_m2_law_register(tasks: Tasks, sim: BucketSim) -> Result[(HistoryRef, H
     }
     let _ = history_fetch(mut second, "head", mut b_buffers.witness, due)?
     let captured = history_decode_head(b_buffers.witness)?
-    let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), mut b_buffers, due, None)? else {
+    let HistoryClaimed(take claimed) = history_replace_claim(mut second, captured.head, StoreId(hi: 13, lo: 14), bucket_law_adopt_auth(), mut b_buffers, due, None)? else {
         fail("second holder failed to claim")
     }
     let mut b = take claimed
@@ -651,7 +608,6 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     let mut manifest = take initial
     manifest.first_live = 1
     manifest.prev_first = 1
-    manifest.retirement_root = std.page.unlocated(0)
     let mut client = bucket_law_client_with(sim, tasks, "s3.test", 3, true)?
     let due = std.object.deadline_after_ms(client, BUCKET_LAW_OP_MS)
     let mut refs: List[HistoryRef] = list.with_capacity(map.len(inventory))
@@ -681,7 +637,7 @@ fn bucket_m2_upload_checkpoint(d: Dir, tasks: Tasks, sim: BucketSim) -> Result[(
     let mut raw_entry: Bytes = list.with_capacity(65536)
     let entry_ref = bucket_m2_pack_entry(mut raw_entry, id, base, refs)?
     history_create(mut client, history_key("e-", entry_ref), mut raw_entry, mut compare, due)?
-    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32])
+    let head = HistoryHead(authority_kind: 1, store: id, pair: HistoryPair(epoch: 1, holder: StoreId(hi: 17, lo: 18)), activation: 0, entry: entry_ref, checkpoint: entry_ref, floor: 1, binding:[0; 32], origin: None)
     let source = history_reader(take client, due)
     Ok((take source, head))
 }
@@ -801,7 +757,7 @@ fn bucket_m2_law_probe(tasks: Tasks, sim: BucketSim) -> Result[(), Error] waits 
         fail("304 returned head bytes")
     }
     let _ = history_fetch(mut new_client, "head", mut successor.witness, deadline)?
-    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, mut successor, deadline, None)? else {
+    let HistoryClaimed(take claimed) = history_replace_claim(mut new_client, previous.head, holder, bucket_law_adopt_auth(), mut successor, deadline, None)? else {
         fail("second holder failed to claim")
     }
     let mut active = take claimed
@@ -837,6 +793,7 @@ fn bucket_m2_law_admit(d: Dir, tasks: Tasks, r: Random, sim: BucketSim) -> Resul
     let mut requested = result.unwrap(sized(Bucket(bucket_law_lanes(0)), 2147483648u64))
     requested.create = false
     requested.expect = Some(head.store)
+    requested.claim_auth = Some(bucket_law_adopt_auth())
     requested.resident_limit = 0
     let small = history_open_register(mut source, sim.time, r, requested, "bucket", mut workspace, BUCKET_LAW_OP_MS)
     if let Error(Full(Resident(_))) = small {} else {

@@ -686,6 +686,12 @@ impl ChildSupervisor {
         }
     }
 
+    pub(super) fn record_deposed(&mut self, child: &Child, reply: &HostReply) {
+        if let Some(kept) = self.children.get_mut(child) {
+            kept.state.answer = Some(reply.clone());
+        }
+    }
+
     /// Snapshot child inventory, cold readable listeners (marking them reported and
     /// disarming their watches), and replayed `Placed` replies for `Request::Hello`.
     pub(super) fn inventory_for_hello(

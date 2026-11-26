@@ -305,6 +305,7 @@ type Vol {
     // The running start's own refusal (§14.5 "Genesis"), kept for its end, which names
     // only an exit status.
     cause: Option[String],
+    deposed: Option[(u64, Bytes)],
     prep: Option[Prep],
     admit: Option[Admitting],
     backup: Option[BackupWait]
@@ -753,6 +754,7 @@ fn launch_dirty(mut h: Host, name: String, probe: bool, mut out: List[launcher.R
     v.failing = v.failing && !is_none(g.recovery)
     v.reprobe = false
     v.cause = None
+    v.deposed = None
     vol_put(mut h, name, take v)
     if probe {
         h.probes += 1u64
@@ -917,6 +919,10 @@ fn apply_end(mut h: Host, name: String, g: GroupRow, gen: u64, e: launcher.End, 
     v.run = None
     if let Some(_) = g.retiring {
         vol_put(mut h, name, take v);
+        return
+    }
+    if let Some(_) = v.deposed {
+        end_deposed(mut h, name, take v)
         return
     }
     if v.reprobe {
@@ -1387,6 +1393,7 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
         v.prep = None
         v.reprobe = false
         v.cause = None
+        v.deposed = None
         vol_put(mut h, name, take v)
     }
     let mut answers: List[(launcher.Child, runner.HostReply)] = list.new()
@@ -1483,7 +1490,7 @@ fn reconcile(mut h: Host, children: List[launcher.ChildState], readable: List[la
             continue
         }
         let v = vol_read(h, name)
-        let idle = is_none(v.run) && is_none(v.cut) && is_none(v.retry_at)
+        let idle = is_none(v.run) && is_none(v.cut) && is_none(v.retry_at) && is_none(v.deposed)
         if idle {
             let _ = launch_dirty(mut h, name, true, mut out)
         }
@@ -1929,16 +1936,6 @@ fn admission_refusal(h: Host, name: String, g: GroupRow, d: Bytes, input: operat
         Some(Pending) => Some((BusyClass, "another deploy of the group is pending")),
         Some(Undecided(_)) => Some((BusyClass, "another deploy of the group is undecided")),
         _ => None,
-    }
-}
-
-// A cutover OLD answered Drift (its store moved past the export) or refused outright: the
-// first conflicts with the store's state, the second is OLD's diagnostic of an invalid import.
-fn abort_class(why: String) -> operator.Class {
-    if why == "drift" {
-        ConflictClass
-    } else {
-        InvalidClass
     }
 }
 

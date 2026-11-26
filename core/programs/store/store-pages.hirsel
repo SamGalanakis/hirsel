@@ -319,7 +319,6 @@ fn resident_images(roots: List[PageRoots], lists: Option[View[PagedLists]]) -> u
     }
     if let Some(published) = lists {
         total = int.saturating_add(total, page_image_charge(published.packs, mut seen))
-        total = int.saturating_add(total, page_image_charge(published.retired, mut seen))
         total = int.saturating_add(total, page_image_charge(published.deferred, mut seen))
         total = int.saturating_add(total, page_image_charge(published.lineage, mut seen))
     }

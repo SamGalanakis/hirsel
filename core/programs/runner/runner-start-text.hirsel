@@ -110,6 +110,10 @@ fn push_store_error(mut line: String, problem: store.Error) {
         },
         Fenced(_) => string.push(mut line, "another writer claimed the bucket store"),
         Lost => string.push(mut line, "the bucket store writer claim was lost"),
+        Superseded(actual) => {
+            string.push(mut line, "the bucket store claim was superseded at epoch ")
+            string.push_u64(mut line, actual.epoch)
+        },
         Undecided => string.push(mut line, "the object store head write has an unknown outcome"),
         Declared(_) => string.push(mut line, "the durability level differs from the store declaration"),
         NotCurrent(version) => {

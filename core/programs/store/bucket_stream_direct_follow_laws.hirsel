@@ -149,6 +149,8 @@ fn df_l90_8_direct_and_missed(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let _ = close_follower_service(take fsvc)
     let report = bucket_law_report(take s)
     outcome?
+    // VP1 over every attached publication: ORIGIN copied at each same-epoch head.
+    bucket_law_head_history(report)?
     let mut in_cold = false
     for req in report.requests {
         if req.key == "cold-direct-start" {
@@ -318,6 +320,8 @@ fn bucket_stream_follower_round(c: Clock, r: Random, tasks: Tasks) -> Result[(),
     let _ = close_follower_service(take fsvc)
     let report = bucket_law_report(take s)
     outcome?
+    // VP1 over every attached publication: ORIGIN copied at each same-epoch head.
+    bucket_law_head_history(report)?
     let reg_a = stream_service_key(string.from("reg"))
     let batch_pfx = stream_service_key(string.from("b-"))
     let mut in_clean = false
@@ -466,6 +470,8 @@ fn bucket_stream_blast_radius(c: Clock, r: Random, tasks: Tasks) -> Result[(), E
     let outcome = df_l90_n_run(s, tasks, r)
     let report = bucket_law_report(take s)
     outcome?
+    // VP1 over every attached publication: ORIGIN copied at each same-epoch head.
+    bucket_law_head_history(report)?
     let mut after_marker = false
     let mut head_puts = 0u64
     let mut reg_holds = 0u64

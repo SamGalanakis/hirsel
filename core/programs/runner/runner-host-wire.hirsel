@@ -1,0 +1,58 @@
+// The host control socket's wire helpers, and the v2.90 Deposed end (RUNNER-SPEC
+// CHANGES-v2.90): a place whose open was refused Superseded(actual) stops serving,
+// tells the host the deposing pair, and ends Deposed.
+// Only an open's ClaimAuth check names the deposing pair. A running writer's
+// Fenced(e) knows no holder: it ends as an error, and the host's retry with the
+// same ClaimAuth is refused Superseded(actual) before any write.
+fn open_deposed(problem: StartError) -> Option[store.Claim] {
+    match problem {
+        Open(Store(Superseded(actual))) => Some(clone(actual)),
+        _ => None,
+    }
+}
+
+fn depose(mut serving: Option[Task[()]], hosting: Option[HostControl], actual: store.Claim) waits {
+    if let Some(take handle) = replace(mut serving, None) {
+        let _ = task.cancel_join(take handle)
+    }
+    if let Some(host) = hosting {
+        let _ = channel.send(host.answer, PlaceDeposed(actual.epoch, clone(actual.holder)))
+        if let Ok(()) = channel.receive(host.sent) {}
+    }
+}
+
+fn deposed_line(pair: store.Claim) -> String {
+    let mut line = string.from("place: deposed at epoch ")
+    string.push_u64(mut line, pair.epoch)
+    string.push(mut line, "\n")
+    line
+}
+
+fn forward_first_write(take notice: (Receiver[u64], Sender[HostReply])) -> () waits {
+    let (take from, take answer) = take notice
+    let first = channel.receive(from)
+    let _ = take from
+    if let Ok(at) = first {
+        let _ = channel.send(answer, PlaceWriteAck(at))
+    }
+}
+
+fn read_control(mut input: ReadHalf, maximum: u64) -> Option[HostCommand] waits {
+    let Some(body) = read_frame(mut input, maximum, Never) else {
+        return None
+    }
+    let codec: std.codec.Codec[HostCommand] = std.codec.of()
+    match std.codec.decode(codec, body) {
+        Ok(take command) => Some(take command),
+        _ => None
+    }
+}
+
+fn send_control(mut output: WriteHalf, host_result: HostReply) -> bool waits {
+    let codec: std.codec.Codec[HostReply] = std.codec.of()
+    let mut body: Bytes = list.new()
+    if let Error(_) = std.codec.encode(codec, host_result, mut body) {
+        return false
+    }
+    send_frame(mut output, body, 4294967295u64, Never)
+}

@@ -201,7 +201,6 @@ fn rebuild_page_locations(validated: ValidatedPageManifest) -> Result[PageLocati
         add_location_holder(mut known, 1, slot, validated.manifest.pins[slot].roots)?
     }
     add_page_source(mut known, validated.manifest.pack_root.stamp, ListSource(0))?
-    add_page_source(mut known, validated.manifest.retirement_root.stamp, ListSource(1))?
     add_page_source(mut known, validated.manifest.deferred_frees.stamp, ListSource(2))?
     add_page_source(mut known, validated.manifest.lineage.stamp, ListSource(3))?
     Ok(take known)

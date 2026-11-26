@@ -116,8 +116,8 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let (refork, _) = deploy_result(fork(mut db, "beta", held))?
     let _ = deploy_result(checkpoint(mut db))?
-    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777640))?
-    if read_le(manifest, 76, 4) != 16777532 {
+    let manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777604))?
+    if read_le(manifest, 76, 4) != 16777496 {
         fail("cut encoded the wrong fork record total")
     }
     let _ = deploy_result(delete_branch(mut db, refork))?
@@ -128,8 +128,8 @@ fn journal_test_fork_meta_limit(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     }
     let fitting = string.repeat("q", 17)
     let _ = deploy_result(pin(mut db, fitting, held))?
-    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777640))?
-    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777532 {
+    let pinned_manifest = deploy_result(disk_read_file(child, "MANIFEST", 16777604))?
+    if db.record_bytes != 16777216 || read_le(pinned_manifest, 76, 4) != 16777496 {
         fail("cut encoded the wrong pin record total")
     }
     deploy_result(close(take db))
@@ -238,7 +238,7 @@ fn journal_test_fork_threshold(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Res
 }
 
 // L51(g), at full page size. The distinct blobs force one pack per row and
-// more than one branch of pack-list pages. The manifest still holds 463 bytes.
+// more than one branch of pack-list pages. The manifest still holds 427 bytes.
 @test
 fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
     let child = disk_test_directory(d)
@@ -261,8 +261,8 @@ fn journal_test_fork_pack_lists(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Re
     let first = disk_state(db).pages.next_pack
     let _ = checkpoint(mut db)?
     let after = disk_state(db).pages.next_pack
-    let manifest = disk_read_file(child, "MANIFEST", 551)?
-    if read_le(manifest, 76, 4) != 463 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
+    let manifest = disk_read_file(child, "MANIFEST", 515)?
+    if read_le(manifest, 76, 4) != 427 || std.page.level(std.page.image_of(disk_state(db).pages.lists.packs)) < 2 {
         return Error(Foreign)
     }
     let held = snapshot(db)

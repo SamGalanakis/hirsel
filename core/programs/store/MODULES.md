@@ -788,7 +788,7 @@ Notes:
 ### 9.1 Placement (`PROG-4`)
 
 - A test assigned to module `M` sees only `M`'s private members.
-- Mixed and end-to-end laws (`store_format10_laws`, `bucket_stream_claim_laws`, `BucketSim`/`Db` fixtures) stay in `"store"`.
+- Mixed and end-to-end laws (`store_format11_laws`, `bucket_stream_claim_laws`, `BucketSim`/`Db` fixtures) stay in `"store"`.
 - A pure single-module white-box assertion splits by declaration into a test file of the owning module, and its `[tests.runs]` key is updated.
 - Literal corpus bytes stay literal.
 - Exact admission numbers (`L90-Q4`, `L70`, `L85`, `L92`/`L93`) stay exact.
@@ -833,7 +833,7 @@ Lanes land in order on top of each other. Each lane:
 - **Stays.** `StreamId`, `StreamKey`, `keyed_time`, `caller_key`, `stream_key_bytes`, `stream_record_matches`, `ServeError`, `Served`, `Page`, `Resume`, `Done`, `Options` and every other public declaration stay. `store-stream-types.hirsel` stays whole at the root. No status move.
 - **New internal reps.** `types.Failure`, `types.FaultRep`, `types.CapacityRep`, `types.LimitsRep`, `types.StoreKey`, `format.CallRecordRep`. The root conversion functions are total `take` moves.
 - **v3.1.** L1 depends only on `status`, `types`, `format`, `core` and `std`. `stored_prior`, `DataOrder`, `DataOp`, `StagedValue`, `staged_bytes`, `word_be`, `CLAIMS`, `round8` and the other §3.5 "into `format`" declarations come down with it. `DataRows`, `data_row` and `data_order` stay with `pages` (L2). The frame writers that need ordering or page rows (`encode_frame`, `encode_staged`, `encode_data_ops`, `ordered_row`) land with `pager` at L5. `decode_keyed_edits`, which calls the L12 claim parser, stays at the root. `holders_tiered` and `tiered_collections` (over `Roots`) land with `pages`. `stream_record_matches`, `SUBJECT_MAX`, `CLAIM_DONE_MAX`, `FRAME_LIMIT`, `VALUE_LIMIT` and `default_limits` stay public at the root as adapters over bodies in `format`/`types` (A-split).
-- **Laws.** `store_format10_laws` and the corpus, `store_size_laws`, `store_journal_laws`, `bucket_stream_laws`; O1 (adds the §2.4 keys as the lane's first commit, on the unchanged tree); O4.
+- **Laws.** `store_format11_laws` and the corpus, `store_size_laws`, `store_journal_laws`, `bucket_stream_laws`; O1 (adds the §2.4 keys as the lane's first commit, on the unchanged tree); O4.
 
 ### L2 — `pages`
 - **Move.** `store-pages.hirsel`, `store-layout.hirsel` (except public `fixture_broken_handoff`), `store-tail.hirsel` (privates only; `read_tail`, `key_codec` and `Tail` stay at the root), and the §7.2 `pages` row. `Pin` stays where §3.4 puts it, with `store-projector` privates.
@@ -880,7 +880,7 @@ Lanes land in order on top of each other. Each lane:
 ### L7 — `history` (7a), `capture` (7b)
 - **7a.** History, register, authority and object-cut privates, plus the `store-object-cache.hirsel` privates §3.5 assigns to `history` (`OBJECTS_CACHE_DIR`, `pack_cache_directory`, `pack_cache_read`, `pack_cache_open` and the other cache I/O; `ObjectsCache` itself is in `pager` from L5). `objects_cache` stays public at the root. `EndpointRefusal` and `endpoint_refusal_text` stay at the root. From `store-object-open.hirsel`, only `HistoryOpenBase` moves here; `history_open_with`, `history_load_admitted`, `history_open_existing`, `history_rebase_suffix` and `history_open_register` stay at the root, because open dispatch reaches L8's `stream_open_attached`, which also stays at the root (§3.5). History consumes `pager.JournalReplay` (it lands with `pager`, whose replay code builds it; §3.5) and neutral pack inventory, including the cache and its caller (`store-history-packs.hirsel:104-122`). Keep 3082's hash-verify and refetch behaviour.
 - **7b.** Capture privates, `store-inspect.hirsel` private constants to `maintenance` (L14), and `store-backup-offline.hirsel` privates (`backup_lock`, `copy_backup_journal`). Public `PreparedCapture`, `prepare`, `capture_need`, `BackupError`, `PreparedBackup`, `prepare_backup`, `backup_offline`, `backup_with_writer`, `catalog_entries`, `CheckTotals` and `check_capture` stay at the root. Keep the three live-capture branches (§5.3.2) and the `LOCK` transfer into `PreparedCapture` (§5.3.3). The 3062 shared backing is `capture.SharedState`.
-- **Laws.** `authority_laws`, `bucket_laws`, `bucket_order_laws`, `bucket_q5_laws`, `object_cut_laws`, `location_laws`, `store_capture_laws`, `store_backup_laws` (3079, unchanged oracles), `store_crash_laws`; O1; O4 (`capture.SharedState` control).
+- **Laws.** `authority_laws`, `bucket_laws`, `bucket_head_vector_laws`, `bucket_order_laws`, `bucket_q5_laws`, `object_cut_laws`, `location_laws`, `store_capture_laws`, `store_backup_laws` (3079, unchanged oracles), `store_crash_laws`; O1; O4 (`capture.SharedState` control).
 
 ### L8 — `host_stream`
 - **Move.** Privates of the ten stream files. `slot_relay` and `SlotRelayInput` move to the root beside the current worker (they own `Sender[JournalMsg]` and build `StreamAnswer`). The public `JournalSlot`, `JournalService`, `StreamPlan` and the rest stay at the root.

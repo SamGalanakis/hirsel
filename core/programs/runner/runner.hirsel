@@ -150,7 +150,7 @@ pub type Bound: shareable + cross {
 
 pub type StartError: send = Open(OpenError) | Listen(NetError) | Missing(String) | Exceeds(Bound) | Full(Capacity)
 
-pub type Ended: codec + send = Stopped(Option[u64]) | Unstarted | Forced(u64)
+pub type Ended: codec + shareable + cross = Stopped(Option[u64]) | Unstarted | Forced(u64) | Deposed(store.Claim)
 
 // Private runtime-supplied launch metadata. The body is a declaration placeholder;
 // the call is lowered to the immutable launch transport on every engine.
@@ -710,6 +710,10 @@ fn operate_with_report[G: send, H: shareable + inert + send, S: send](take made:
                         next_due = due
                     },
                     Error(take problem) => {
+                        if let Some(take actual) = open_deposed(problem) {
+                            depose(mut serving, hosting, actual)
+                            return Ok(Deposed(take actual))
+                        }
                         if place_online(phase) {
                             // A failed head cannot settle calls or participate in a drain.
                             if let Some(take handle) = replace(mut serving, None) {
@@ -1002,6 +1006,10 @@ pub fn main[G: send, H: shareable + inert + send](_a: Args, process: Process, er
                 string.push_u64(mut line, count)
                 string.push(mut line, " sends abandoned\n")
                 let _ = stderr.write(errors, line)
+                Error(full)
+            },
+            Ok(Deposed(pair)) => {
+                let _ = stderr.write(errors, deposed_line(pair))
                 Error(full)
             },
             Error(Start(problem)) => {
@@ -1642,7 +1650,7 @@ pub type PlaceReady: codec + send {
     read: Bytes
 }
 
-pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes, ImportedMigration) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal) | PlaceBackedUp(u64, u64, u64, String)
+pub type HostReply: codec + send = PlaceOpened(PlaceReady) | PlaceCurrent(u64, Bytes) | PlaceRefused(String) | PlaceExported(u64, String) | PlaceImported(Bytes, ImportedMigration) | PlaceInstalled(u64, bool) | PlaceDrift | PlaceAborted | PlaceUncertain | PlaceWriteAck(u64) | PlaceStoreMismatch(u64, u64, u64, u64) | PlaceInstallRefused(InstallRefusal) | PlaceBackedUp(u64, u64, u64, String) | PlaceDeposed(u64, Bytes)
 
 pub type InstallRefusal: codec + send = InstallHeld | InstallStore | InstallPlace | InstallMigration | InstallCurrent | InstallIdentity | InstallCapacity | InstallConfig | InstallWrongVersion(u64) | InstallPredecessor(Bytes) | InstallUnsettled
 
@@ -1687,35 +1695,6 @@ fn start_host_control(tasks: Tasks, clock: Clock, n_place: u64, to_head: Sender[
     let request = (take first_write, channel.sender(answer))
     let acknowledging = task.spawn(tasks, bytes HOST_ACK_BYTES, take request, forward_first_write)
     Ok(Some(HostControl(answer: take answer, sent: take sent, reading: take reader, writing: take writer, ack: take ack, acknowledging: take acknowledging)))
-}
-
-fn forward_first_write(take notice: (Receiver[u64], Sender[HostReply])) -> () waits {
-    let (take from, take answer) = take notice
-    let first = channel.receive(from)
-    let _ = take from
-    if let Ok(at) = first {
-        let _ = channel.send(answer, PlaceWriteAck(at))
-    }
-}
-
-fn read_control(mut input: ReadHalf, maximum: u64) -> Option[HostCommand] waits {
-    let Some(body) = read_frame(mut input, maximum, Never) else {
-        return None
-    }
-    let codec: std.codec.Codec[HostCommand] = std.codec.of()
-    match std.codec.decode(codec, body) {
-        Ok(take command) => Some(take command),
-        _ => None
-    }
-}
-
-fn send_control(mut output: WriteHalf, host_result: HostReply) -> bool waits {
-    let codec: std.codec.Codec[HostReply] = std.codec.of()
-    let mut body: Bytes = list.new()
-    if let Error(_) = std.codec.encode(codec, host_result, mut body) {
-        return false
-    }
-    send_frame(mut output, body, 4294967295u64, Never)
 }
 
 fn host_writer(take writer: HostWriter) -> () waits {

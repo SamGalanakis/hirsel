@@ -120,6 +120,7 @@ pub(crate) enum HostReply {
     StoreMismatch(u64, u64, u64, u64),
     InstallRefused(InstallRefusal),
     BackedUp(u64, u64, u64, String),
+    Deposed(u64, Vec<u8>),
 }
 
 pub(crate) use super::places::InstallRefusal;

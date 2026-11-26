@@ -21,6 +21,7 @@ fn replication_writer(tasks: Tasks, r: Random, sim: BucketSim, seed: u64, expect
         None => true,
     }
     options.expect = expected
+    options.claim_auth = Some(bucket_law_adopt_auth())
     let (take register, take replay) = history_open_register(mut source, sim.time, r, options, "bucket", mut buffers, BUCKET_LAW_OP_MS)?
     Ok(ReplicationWriter(source: take source, register: take register, replay: take replay, authority: take authority, buffers: take buffers))
 }

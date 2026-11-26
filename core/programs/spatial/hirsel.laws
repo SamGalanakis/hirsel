@@ -1,3 +1,3 @@
 hirsel.laws 1
-spatial@1/tests/box_query_matches_model src=24009ce9fcf583ff sig=0ea6b292e59e47dc run=3f8e561022dae48c bug=- oracle=- rows=pending
+spatial@1/tests/box_query_matches_model src=24009ce9fcf583ff sig=3bc33a8be469ae7d run=3f8e561022dae48c bug=- oracle=- rows=pending
 spatial@1/tests/hilbert_ranges src=68d77b5f4e69e396 sig=f8914af393f055fe run=1ddd99282e86b5b8 bug=- oracle=- rows=pending

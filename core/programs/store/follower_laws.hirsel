@@ -255,7 +255,7 @@ fn follower_destination_admission(tasks: Tasks, sim: BucketSim) -> Result[(), Er
             fail("L85: the exactly funded destination did not read its object")
         }
     }
-    let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32])
+    let observed = HistoryHead(authority_kind: 1, store: StoreId(hi: 0, lo: 1), pair: HistoryPair(epoch: 1, holder: StoreId(hi: 2, lo: 3)), activation: 0, entry: HistoryRef(seq: 172, epoch: 1, len: 112, digest: 1), checkpoint: object_ref, floor: 1, binding:[0; 32], origin: None)
     // 171 links at three u64 fields each need 4,104 bytes.
     let suffix = option.unwrap(charge.seq(bytes[HistoryLink], observed.entry.seq - object_ref.seq))
     let denied = capacity(bound bytes 4096 {
@@ -560,7 +560,8 @@ fn follower_starter_admission(d: Dir, c: Clock, r: Random, tasks: Tasks) -> Resu
     if follower_request_bytes() != request {
         fail("L85: the request price differs from the box and reply charge")
     }
-    // The starter pays 256 + 32 + max(128, 970, 664) = 1,258.
+    // The starter pays 256 + 32 + max(128, 1,146, 664) = 1,434. The provision
+    // box (528) and its reply channel (618) each carry one 464-byte Options.
     if follower_starter_bytes() != follower_task_bytes(0) + provision {
         fail("L85: the starter peak differs from the task and provision charges")
     }

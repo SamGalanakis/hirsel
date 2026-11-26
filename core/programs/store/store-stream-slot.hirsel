@@ -64,7 +64,7 @@ const STREAM_POLL_RING: u32 = 0xFFFFFFFE
 
 const STREAM_TIMER_BYTES: u64 = 4096
 
-type ServiceControl: send = NewSlot(Sender[Result[(Client[SlotMsg], u32), Error]]) | NewReservedSlot(Sender[Result[(Client[SlotMsg], u32), Error]]) | JanitorPoll(Sender[List[JanitorAsk]]) | StopService
+type ServiceControl: send = NewSlot(Sender[Result[(Client[SlotMsg], u32), Error]]) | NewReservedSlot(Sender[Result[(Client[SlotMsg], u32), Error]]) | JanitorPoll(Sender[List[JanitorAsk]]) | JanitorStill(JanitorAsk, Sender[bool]) | StopService
 
 // One Place's data connection client, the doorbell, the report connection,
 // and the stream it names (§12.11.12). `root` is the stream root as a key
@@ -285,6 +285,23 @@ fn journal_slot_kind(mut s: JournalService, reserved: bool) -> Result[JournalSlo
         Error(_) => return Error(Io(Closed)),
     }
     Ok(JournalSlot(data: take data, bell: conn.client(s.bell), reports: conn.client(s.reports), slot, sid: s.sid, endpoint: string.from(s.endpoint), aws_region: string.from(s.aws_region), bucket: string.from(s.bucket), root: string.from(s.root), slot_bytes: s.slot_bytes, max_batch_bytes: s.max_batch_bytes, max_rows: s.max_rows))
+}
+
+// Whether an ask's cause still holds at the service (§12.11.6 A4): the Held
+// row of its Store at the ask's epoch, or its Store's pin.
+fn journal_janitor_still(mut s: JournalService, ask: JanitorAsk) -> Result[bool, Error] waits {
+    let (reply_send, reply_receive): (Sender[bool], Receiver[bool]) = channel.new(1)
+    let asked: JanitorAsk = clone(ask)
+    if let Error(_) = channel.send(s.control, JanitorStill(take asked, take reply_send)) {
+        return Error(Io(Closed))
+    }
+    if let Error(_) = conn.send(s.bell, STREAM_CONTROL_RING) {
+        return Error(Io(Closed))
+    }
+    match channel.receive(reply_receive) {
+        Ok(still) => Ok(still),
+        Error(_) => Error(Io(Closed)),
+    }
 }
 
 // Drains pending janitor asks from the service (orphan Held rows at `hold_ms`

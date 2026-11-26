@@ -16,6 +16,18 @@ type HistoryPair {
     holder: StoreId
 }
 
+const ORIGIN_PAYLOAD_BYTES: u64 = 49
+
+const ORIGIN_FRAME_BYTES: u64 = 16 + ORIGIN_PAYLOAD_BYTES
+
+type HistoryOrigin: shareable + send {
+    epoch: u64,
+    attempt: Inline[u8, 16],
+    class: u8,
+    permit_epoch: u64,
+    permit_attempt: Inline[u8, 16]
+}
+
 type HistoryHead {
     authority_kind: u8,
     store: StoreId,
@@ -24,7 +36,8 @@ type HistoryHead {
     entry: HistoryRef,
     checkpoint: HistoryRef,
     floor: u64,
-    binding: Inline[u8, 32]
+    binding: Inline[u8, 32],
+    origin: Option[HistoryOrigin]
 }
 
 type HistoryConfig {
@@ -97,7 +110,9 @@ fn history_text(raw: Bytes, mut cursor: u64, lo: u64, hi: u64, frame_at: u64) ->
     if size < lo || size > hi || size > list.len(raw) - cursor {
         return Error(disk_fault("head", frame_at, Malformed))
     }
-    let text: Bytes = capacity(bound bytes round8(size) { clone(list.slice(raw, cursor, cursor + size)) })?
+    let text: Bytes = capacity(bound bytes round8(size) {
+        clone(list.slice(raw, cursor, cursor + size))
+    })?
     let Ok(take parsed) = string.from_utf8(take text) else {
         return Error(disk_fault("head", frame_at, Malformed))
     }
@@ -119,23 +134,33 @@ fn history_config(raw: Bytes, frame_at: u64, authority_kind: u8) -> Result[Histo
     let aws_region_name = history_text(raw, mut cursor, 0, 64, frame_at)?
     let bucket_name = history_text(raw, mut cursor, 3, 63, frame_at)?
     let key_prefix = history_text(raw, mut cursor, 0, 1024, frame_at)?
-    if cursor == list.len(raw) { return Error(disk_fault("head", frame_at, Malformed)) }
+    if cursor == list.len(raw) {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
     let level_total: u64 = int.widen(raw[cursor])
     if level_total == 0 || level_total > 16 || (authority_kind == 1 && level_total != 1) {
         return Error(disk_fault("head", frame_at, Malformed))
     }
     cursor += 1
-    let mut names: List[String] = capacity(bound bytes (24 * level_total) { list.with_capacity(level_total) })?
+    let mut names: List[String] = capacity(bound bytes (24 * level_total) {
+        list.with_capacity(level_total)
+    })?
     for slot_index in 0u64 .. level_total {
         let name = history_text(raw, mut cursor, 1, 64, frame_at)?
-        let survives = if slot_index + 1 == level_total { 2u8 } else { 0u8 }
+        let survives = if slot_index + 1 == level_total {
+            2u8
+        } else {
+            0u8
+        }
         if cursor == list.len(raw) || raw[cursor] != survives || list.contains(names, name) {
             return Error(disk_fault("head", frame_at, Malformed))
         }
         cursor += 1
         list.push(mut names, take name)
     }
-    if cursor != list.len(raw) { return Error(disk_fault("head", frame_at, Malformed)) }
+    if cursor != list.len(raw) {
+        return Error(disk_fault("head", frame_at, Malformed))
+    }
     let place = std.object.Bucket(endpoint: take endpoint, aws_region: take aws_region_name, bucket: take bucket_name, prefix: take key_prefix, style)
     Ok(HistoryConfig(place: take place, levels: take names))
 }
@@ -182,6 +207,110 @@ fn history_decode_head(raw: Bytes) -> Result[HistoryCapture, Error] {
     Ok(take capture)
 }
 
+fn history_origin_zero_bytes(bytes_in: Inline[u8, 16]) -> bool {
+    for i in 0u64 .. 16 {
+        if bytes_in[i] != 0u8 {
+            return false
+        }
+    }
+    true
+}
+
+fn history_origin_same_bytes(a: Inline[u8, 16], b: Inline[u8, 16]) -> bool {
+    for i in 0u64 .. 16 {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    true
+}
+
+// The objects@1 head's own frame kinds (ORIGIN), then the host stream's.
+fn history_kind_limit(kind: u16) -> Option[u64] {
+    if kind == 0x00E0 {
+        return Some(ORIGIN_PAYLOAD_BYTES)
+    }
+    stream_kind_limit(kind)
+}
+
+fn history_origin_decode(raw: Bytes, frame: DiskFrame, head_epoch: u64) -> Result[HistoryOrigin, Error] {
+    let at = frame.payload - 16
+    if frame.flags != 1 {
+        return Error(disk_fault("head", at, Flags))
+    }
+    if frame.end - frame.payload != ORIGIN_PAYLOAD_BYTES {
+        return Error(disk_fault("head", at, Malformed))
+    }
+    let p = frame.payload
+    let epoch = read_le(raw, p, 8)
+    let mut attempt: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        attempt[i] = raw[p + 8 + i]
+    }
+    let class = raw[p + 24]
+    let permit_epoch = read_le(raw, p + 25, 8)
+    let mut permit_attempt: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        permit_attempt[i] = raw[p + 33 + i]
+    }
+    // Rules O3–O4: ORIGIN.epoch == HEAD.epoch, class in 0..=2, and permit
+    // fields match the class invariant.
+    if epoch != head_epoch || head_epoch < 2 || class > 2 {
+        return Error(disk_fault("head", at, Malformed))
+    }
+    if class == 0 {
+        if permit_epoch != epoch || !history_origin_same_bytes(permit_attempt, attempt) {
+            return Error(disk_fault("head", at, Malformed))
+        }
+    } else {
+        if permit_epoch >= epoch {
+            return Error(disk_fault("head", at, Malformed))
+        }
+        if permit_epoch == 0 {
+            if !history_origin_zero_bytes(permit_attempt) {
+                return Error(disk_fault("head", at, Malformed))
+            }
+        } else if permit_epoch < 2 {
+            return Error(disk_fault("head", at, Malformed))
+        }
+    }
+    Ok(HistoryOrigin(epoch, attempt, class, permit_epoch, permit_attempt))
+}
+
+fn history_origin_append(mut raw_bytes: Bytes, ctx: DiskContext, origin: HistoryOrigin) -> Result[(), Error] {
+    let needed = ORIGIN_FRAME_BYTES + BINDING_BYTES
+    let room = list.capacity(raw_bytes) - list.len(raw_bytes)
+    if room < needed {
+        return Error(Full(Allocation(Capacity(requested: list.len(raw_bytes) + needed, available: list.capacity(raw_bytes)))))
+    }
+    let at = list.len(raw_bytes)
+    list.fill(mut raw_bytes, 16, 0u8)
+    list.put_word_le(mut raw_bytes, origin.epoch)
+    for i in 0u64 .. 16 {
+        list.push(mut raw_bytes, origin.attempt[i])
+    }
+    list.push(mut raw_bytes, origin.class)
+    list.put_word_le(mut raw_bytes, origin.permit_epoch)
+    for i in 0u64 .. 16 {
+        list.push(mut raw_bytes, origin.permit_attempt[i])
+    }
+    capacity(history_seal(mut raw_bytes, ctx, at, 0x00E0))
+}
+
+fn history_optional_tail_frame(raw: Bytes, ctx: DiskContext, at: u64) -> Result[DiskFrame, Error] {
+    let frame = disk_frame_bytes("head", ctx, raw, at)?
+    if frame.kind != 0x0100 && frame.kind != 0x00E0 {
+        if frame.flags == 1 && disk_kind_limit(frame.kind) == None {
+            return Error(Unsupported(int.widen(frame.kind)))
+        }
+        return Error(disk_fault("head", at, Malformed))
+    }
+    if frame.flags != 1 {
+        return Error(disk_fault("head", at, Flags))
+    }
+    Ok(frame)
+}
+
 fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[Attach]), Error] {
     let (context, field) = history_head_frame(raw)?
     let head = list.slice(raw, field.payload, field.end)
@@ -205,16 +334,41 @@ fn history_decode_head_attach(raw: Bytes) -> Result[(HistoryCapture, Option[Atta
         return Error(disk_fault("head", field.end, Malformed))
     }
     let meta = history_config(list.slice(raw, config.payload, config.end), field.end, raw[29])?
-    let attach: Option[Attach] = if config.end == list.len(raw) {
-        None
-    } else {
-        let frame = history_frame("head", context, raw, config.end, 0x0100)?
-        if frame.end != list.len(raw) {
-            return Error(disk_fault("head", frame.end, Malformed))
+    // Frame order after AUTHORITY: [ATTACH (0x0100)] || [ORIGIN (0x00E0)].
+    let mut at = config.end
+    let mut attach: Option[Attach] = None
+    let mut origin: Option[HistoryOrigin] = None
+    if at < list.len(raw) {
+        let first_tail = history_optional_tail_frame(raw, context, at)?
+        if first_tail.kind == 0x0100 {
+            attach = Some(stream_attach_decode(raw, first_tail, newest.seq)?)
+            at = first_tail.end
+            if at < list.len(raw) {
+                let second_tail = history_frame("head", context, raw, at, 0x00E0)?
+                origin = Some(history_origin_decode(raw, second_tail, epoch)?)
+                at = second_tail.end
+            }
+        } else {
+            origin = Some(history_origin_decode(raw, first_tail, epoch)?)
+            at = first_tail.end
         }
-        Some(stream_attach_decode(raw, frame, newest.seq)?)
     }
-    let captured = HistoryHead(authority_kind: raw[29], store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding: schema_binding)
+    if at < list.len(raw) {
+        let extra = disk_frame_bytes("head", context, raw, at)?
+        if extra.flags == 1 && disk_kind_limit(extra.kind) == None {
+            return Error(Unsupported(int.widen(extra.kind)))
+        }
+        return Error(disk_fault("head", at, Malformed))
+    }
+    // Format 11: ORIGIN is absent at genesis epoch 1 and required at epoch >= 2.
+    let has_origin = match origin {
+        Some(_) => true,
+        None => false,
+    }
+    if (epoch == 1 && has_origin) || (epoch >= 2 && !has_origin) {
+        return Error(disk_fault("head", config.end, Malformed))
+    }
+    let captured = HistoryHead(authority_kind: raw[29], store: context.store, pair, activation: read_le(head, 24, 8), entry: newest, checkpoint: base, floor, binding: schema_binding, origin)
     Ok((HistoryCapture(head: captured, config: take meta), take attach))
 }
 
@@ -283,11 +437,15 @@ fn history_config_bytes(config: HistoryConfig) -> Result[Bytes, Error] {
     }
     let mut level_bytes = 0u64
     let level_total = list.len(config.levels)
-    if level_total == 0 || level_total > 16 { return Error(Limit(Name)) }
+    if level_total == 0 || level_total > 16 {
+        return Error(Limit(Name))
+    }
     for i in 0u64 .. level_total {
         let level_name = view config.levels[i]
         let size = string.byte_len(level_name)
-        if size == 0 || size > 64 { return Error(Limit(Name)) }
+        if size == 0 || size > 64 {
+            return Error(Limit(Name))
+        }
         if list.contains(list.slice(config.levels, 0, i), level_name) {
             return Error(Exists(string.from(level_name)))
         }
@@ -307,13 +465,17 @@ fn history_config_bytes(config: HistoryConfig) -> Result[Bytes, Error] {
         list.push(mut raw_bytes, int.narrow(level_total))
         for i in 0u64 .. level_total {
             history_append_text(mut raw_bytes, config.levels[i])
-            list.push(mut raw_bytes, if i + 1 == level_total { 2u8 } else { 0u8 })
+            list.push(mut raw_bytes, if i + 1 == level_total {
+                2u8
+            } else {
+                0u8
+            })
         }
         Ok(take raw_bytes)
     })
 }
 
-fn history_encode_head(mut raw_bytes: Bytes, head: HistoryHead, authority: Bytes) -> Result[(), Error] {
+fn history_encode_base_head(mut raw_bytes: Bytes, head: HistoryHead, authority: Bytes) -> Result[(), Error] {
     let needed = 240 + list.len(authority) + BINDING_BYTES
     if list.capacity(raw_bytes) < needed {
         return Error(Full(Allocation(Capacity(requested: needed, available: list.capacity(raw_bytes)))))
@@ -339,11 +501,48 @@ fn history_encode_head(mut raw_bytes: Bytes, head: HistoryHead, authority: Bytes
     capacity(history_seal(mut raw_bytes, ctx, at, 0x00D0))
 }
 
-fn history_claim_head(current: HistoryHead, holder: StoreId) -> Result[HistoryHead, Error] {
+fn history_encode_head(mut raw_bytes: Bytes, head: HistoryHead, authority: Bytes) -> Result[(), Error] {
+    history_encode_base_head(mut raw_bytes, head, authority)?
+    if let Some(o) = head.origin {
+        history_origin_append(mut raw_bytes, DiskContext(store: head.store, role: 7, seq: head.entry.seq), o)?
+    }
+    Ok(())
+}
+
+fn history_claim_origin(prior: Option[HistoryOrigin], epoch: u64, auth: ClaimAuth) -> Result[HistoryOrigin, Error] {
+    if list.len(auth.attempt) != 16 {
+        return Error(Missing("claim_auth"))
+    }
+    let mut attempt: Inline[u8, 16] =[0; 16]
+    for i in 0u64 .. 16 {
+        attempt[i] = auth.attempt[i]
+    }
+    match auth.class {
+        Permit => Ok(HistoryOrigin(epoch, attempt, class: 0, permit_epoch: epoch, permit_attempt: attempt)),
+        Continue => {
+            let (pe, pa) = match prior {
+                Some(prev) => (prev.permit_epoch, prev.permit_attempt),
+                None => (0u64,[0u8; 16]),
+            }
+            Ok(HistoryOrigin(epoch, attempt, class: 1, permit_epoch: pe, permit_attempt: pa))
+        },
+        Adopt => {
+            let (pe, pa) = match prior {
+                Some(prev) => (prev.permit_epoch, prev.permit_attempt),
+                None => (0u64,[0u8; 16]),
+            }
+            Ok(HistoryOrigin(epoch, attempt, class: 2, permit_epoch: pe, permit_attempt: pa))
+        },
+    }
+}
+
+fn history_claim_head(current: HistoryHead, holder: StoreId, auth: ClaimAuth) -> Result[HistoryHead, Error] {
     let epoch = history_next_id(current.pair.epoch)?
     let _ = history_next_id(current.entry.seq)?
+    let origin = history_claim_origin(current.origin, epoch, auth)?
     let mut candidate = current
     candidate.pair = HistoryPair(epoch, holder)
+    candidate.origin = Some(origin)
     Ok(candidate)
 }
 

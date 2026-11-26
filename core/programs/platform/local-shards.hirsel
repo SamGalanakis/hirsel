@@ -180,7 +180,7 @@ fn run_shard[T: cross, G: send, H: shareable + inert + send, S: send](take seed:
                         }
                         let placing = runner.share_placing(registered)
                         let notice = PlaceNotice(events: conn.client(events), finished: conn.client(to), admitted: take start_from, job: job)
-                        match start_made(take launch, take placing, take settings, take notice, tasks, net) {
+                        match start_made(take launch, take placing, take settings, take notice, tasks, net, random) {
                             Ok((take stop_to, charge, take place)) => {
                                 list.push(mut running, (job, take place))
                                 Some((take stop_to, charge))
@@ -212,13 +212,13 @@ fn run_shard[T: cross, G: send, H: shareable + inert + send, S: send](take seed:
     }
 }
 
-fn start_made[G: send, H: shareable + inert + send, S: send](take launch: Launch, take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S], take notice: PlaceNotice, tasks: Tasks, net: Net) -> Result[(Client[()], u64, Task[()]), Refused] {
+fn start_made[G: send, H: shareable + inert + send, S: send](take launch: Launch, take placing: runner.Placing[G, H], take made: runner.PlaceConfig[G, H, S], take notice: PlaceNotice, tasks: Tasks, net: Net, random: Random) -> Result[(Client[()], u64, Task[()]), Refused] {
     let Launch(backing: take launch_backing, sizing: sizing, version: version, idle: idle, sessions: sessions, available: available, ..) = take launch
     let mut config = take made
     config.backing = match take launch_backing {
         LaunchDisk(dir) => Disk(dir),
-        LaunchBucket(take b) => Bucket(runner_bucket(take b, net)),
-        LaunchStreamedBucket(take b, take slot) => StreamedBucket(runner_bucket(take b, net), take slot),
+        LaunchBucket(take b) => Bucket(runner_bucket(take b, net, random)),
+        LaunchStreamedBucket(take b, take slot) => StreamedBucket(runner_bucket(take b, net, random), take slot),
     }
     config.sizes = sizing.sizes
     config.selection = Current(version)

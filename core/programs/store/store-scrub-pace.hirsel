@@ -3,7 +3,7 @@
 //
 // History lives in a dedicated context-bound atomic sidecar `SCRUB` in the
 // Directory store so `hirsel store stats DIR` can report the last complete
-// round without a release binary or a Format 10 MANIFEST bump.
+// round without a release binary or a MANIFEST format bump.
 const SCRUB_HISTORY_ROLE: u8 = 11
 
 const SCRUB_HISTORY_KIND: u16 = 0x008A

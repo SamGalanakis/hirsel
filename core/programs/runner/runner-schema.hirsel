@@ -309,6 +309,7 @@ fn operate_install[G: send, H: shareable + inert + send, S: send](placing: Placi
     }
     let expected = launch_env().store_id
     let mut opening = options
+    launch_open_auth(mut opening) ?=> |problem| Open(Store(take problem))
     if let Some((hi, lo)) = expected {
         opening.expect = Some(store.StoreId(hi, lo))
     }
@@ -343,6 +344,14 @@ fn operate_install[G: send, H: shareable + inert + send, S: send](placing: Placi
 fn finish_install(take result: Result[u64, StartError]) -> Result[Ended, StartError] {
     // A failed durability barrier or close can leave the activation on disk.
     // Let a recovery open decide it if we reached the cut without proof.
+    if let Error(Open(Store(Superseded(actual)))) = result {
+        let codec: std.codec.Codec[HostReply] = std.codec.of()
+        let mut out: Bytes = list.new()
+        if let Ok(()) = std.codec.encode(codec, PlaceDeposed(actual.epoch, clone(actual.holder)), mut out) {
+            let _ = launch_emit(out)
+        }
+        return Ok(Deposed(clone(actual)))
+    }
     let reply: Option[HostReply] = match result {
         Error(Open(InstallUncertain(_))) => None,
         Ok(version) => Some(PlaceInstalled(version, false)),

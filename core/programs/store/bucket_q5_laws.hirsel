@@ -255,7 +255,14 @@ fn q5_verify(operation: Q5Operation, fault: Q5Fault, observed: Q5Observation, re
         match (operation, view observed.outcome) {
             (ActivationWrite, Error(Store(Fenced(1)))) => (),
             (GenesisWrite, Error(Store(Lost))) => (),
-            (ClaimWrite, Error(Store(Lost))) => (),
+            // The other claimant is the same Store, a validated successor (§12.3).
+            (ClaimWrite, Error(Store(Superseded(actual)))) => {
+                let final_write = report.head_writes[list.len(report.head_writes) - 1]
+                let won = result.unwrap(history_decode_head(final_write.data)).head.pair
+                if !history_claim_matches_pair(actual, won) {
+                    fail("L54-M: Superseded did not name the claimant that won")
+                }
+            },
             _ => fail("L54-M: an overtaken attempt returned the wrong outcome"),
         }
         return Ok(())

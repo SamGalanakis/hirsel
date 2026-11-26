@@ -62,6 +62,12 @@ pub type ReleaseRecord: codec + send {
     prepared: Bytes
 }
 
+pub type PlaceClaim: codec + send {
+    epoch: u64,
+    holder: Bytes,
+    attempt: Bytes
+}
+
 pub type PlaceRead: codec + send {
     store_hi: u64,
     store_lo: u64,
@@ -69,7 +75,7 @@ pub type PlaceRead: codec + send {
     n_place: Option[u64],
     prepared: Bytes,
     witness_present: bool,
-    claim: Option[(u64, Bytes)],
+    claim: Option[PlaceClaim],
 }
 
 fn release_record(db: store.Db, version: u64) -> Result[Option[ReleaseRecord], store.Error] waits {
@@ -94,9 +100,19 @@ fn capture_release(db: store.Db, version: u64, witness: u64) -> Result[Bytes, st
             None => (false, list.new())
         }
     }
-    let claim: Option[(u64, Bytes)] = match store.claim_of(db) {
-        Ok(store.Claim(epoch, holder: take holder)) => Some((epoch, take holder)),
-        Error(_) => None,
+    // `None` only for a backing without a claim (`Missing("head")`); the
+    // empty attempt only for a genesis head, which carries no ORIGIN. Any
+    // other failure is an error, never evidence for recovery.
+    let claim: Option[PlaceClaim] = match store.claim_of(db) {
+        Ok(store.Claim(epoch, holder: take holder)) => {
+            let attempt: Bytes = match store.origin_of(db)? {
+                Some(store.Origin(attempt: take a, ..)) => take a,
+                None => list.new(),
+            }
+            Some(PlaceClaim(epoch, holder: take holder, attempt: take attempt))
+        },
+        Error(Missing(what)) if what == "head" => None,
+        Error(take problem) => return Error(take problem),
     }
     let (hi, lo) = store.identity_words(db)
     let read = PlaceRead(store_hi: hi, store_lo: lo, binding: clone(current.binding), n_place: Some(current.n_place), prepared: take prepared, witness_present: present, claim: take claim)
@@ -160,8 +176,12 @@ fn read_follower_release(f: store.Follower, witness: u64) -> Result[(u64, PlaceR
         }
     }
     let (take description, n_place) = follower_description(f, read_handle, captured, current.binding)?
-    let store.HeadView(binding: take binding, claim: store.Claim(epoch, holder: take holder), store: id, activation, ..) = take current
-    let read = PlaceRead(store_hi: id.hi, store_lo: id.lo, binding: take binding, n_place, prepared: take prepared, witness_present: present, claim: Some((epoch, take holder)))
+    let store.HeadView(binding: take binding, claim: store.Claim(epoch, holder: take holder), origin: take origin, store: id, activation, ..) = take current
+    let attempt: Bytes = match take origin {
+        Some(store.Origin(attempt: take a, ..)) => take a,
+        None => list.new(),
+    }
+    let read = PlaceRead(store_hi: id.hi, store_lo: id.lo, binding: take binding, n_place, prepared: take prepared, witness_present: present, claim: Some(PlaceClaim(epoch, holder: take holder, attempt: take attempt)))
     Ok((activation, take read, take description))
 }
 

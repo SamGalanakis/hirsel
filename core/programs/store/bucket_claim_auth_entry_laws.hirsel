@@ -1,0 +1,144 @@
+// STORE-SPEC §12.3 ClaimAuth at its production entry points (astra 3126
+// amendment 7): the physical opener's own holder choice under two deliveries
+// of one Permit, and a deposed standalone opener against an attached
+// successor. Oracles are the request log and the refusal's named pair.
+// One delivery of a Permit: a physical open of `pA/` through the production
+// opener, which draws its own holder. True when the open claimed the head.
+type PermitDelivery: send {
+    endpoint: std.sim.s3.Endpoint,
+    clock: Clock,
+    tasks: Tasks,
+    r: Random,
+    seed: u64,
+    auth: ClaimAuth
+}
+
+fn permit_delivery(take d: PermitDelivery) -> Result[bool, Error] waits {
+    let PermitDelivery(endpoint, clock, tasks, r, seed, auth: take auth) = take d
+    let client = stream_endpoint_client(endpoint, clock, tasks, seed, "pA/", "us-east-1")?
+    let mut options = bucket_order_options(false)
+    options.claim_auth = Some(take auth)
+    match open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), clock, r, options) {
+        // A winner crashes in place: its claim is the observation.
+        Ok(take db) => {
+            let _ = take db
+            Ok(true)
+        },
+        Error(Refusal(error: Superseded(_), ..)) => Ok(false),
+        Error(Refusal(error: take problem, ..)) => Error(take problem),
+    }
+}
+
+// Store A at `pA/` with one row, closed; returns its pair.
+fn permit_store(s: BucketSim, tasks: Tasks, r: Random) -> Result[Claim, Error] waits {
+    let client = stream_service_client(s, tasks, 61, "pA/", "us-east-1")?
+    let mut a = open_authority(tasks, object_authority(take client, "bucket", BUCKET_LAW_OP_MS), s.time, r, bucket_order_options(true)) ?=> |Refusal(error: take p, ..)| take p
+    bucket_law_commit(mut a, 1)?
+    let pair = claim_of(a)?
+    close(take a)?
+    Ok(pair)
+}
+
+fn permit_head_puts(report: std.sim.s3.Report) -> u64 {
+    let mut puts = 0u64
+    for q in report.requests {
+        if q.method == "PUT" && q.key == "pA/head" {
+            puts += 1
+        }
+    }
+    puts
+}
+
+// Two deliveries of one Permit (the same predecessor and attempt) reach two
+// physical opens; both read the head before either H applies, because the
+// first H is held at the service until the second is sent. Exactly one claims
+// the head. Red for an opener that derives its holder from the attempt: both
+// H candidates are then byte-identical, Q5 resolves the loser's Mismatch as
+// its own lost reply, and both claim.
+@test
+fn bucket_claim_auth_permit_delivered_twice(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    // The schedule's head PUTs before the deliveries, counted on a setup run.
+    let probe = bucket_law_sim(tasks, c, 3049, None, list.new())
+    let made = permit_store(probe, tasks, r)
+    let before = permit_head_puts(bucket_law_report(take probe))
+    let _ = made?
+    let mut holds: List[std.sim.s3.Hold] = list.with_capacity(1)
+    list.push(mut holds, std.sim.s3.Hold(method: "PUT", key: "pA/head", from: before + 1, count: 1, until: Requested("PUT", "pA/head", before + 2), then: Apply))
+    let s = bucket_law_sim_holds(tasks, c, 3049, None, list.new(), take holds, std.sim.world.plan(3049))
+    let outcome = permit_twice_run(s, tasks, r)
+    let _ = bucket_law_report(take s)
+    if outcome? != 1 {
+        fail("ClaimAuth: two deliveries of one Permit did not make exactly one claim")
+    }
+    Ok(())
+}
+
+fn permit_twice_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[u64, Error] waits {
+    let pair = permit_store(s, tasks, r)?
+    let auth = ClaimAuth(expect: Some(pair), attempt: claim_law_attempt(0x70), class: Permit)
+    let first = task.spawn(tasks, bytes 33554432, PermitDelivery(endpoint: s.endpoint, clock: s.time, tasks, r, seed: 62, auth: clone(auth)), permit_delivery)
+    let second = task.spawn(tasks, bytes 33554432, PermitDelivery(endpoint: s.endpoint, clock: s.time, tasks, r, seed: 63, auth: take auth), permit_delivery)
+    let mut claimed = 0u64
+    match task.join(take first) {
+        Ok(take ended) => if ended? {
+            claimed += 1
+        },
+        Error(_) => fail("ClaimAuth: the first delivery's task failed"),
+    }
+    match task.join(take second) {
+        Ok(take ended) => if ended? {
+            claimed += 1
+        },
+        Error(_) => fail("ClaimAuth: the second delivery's task failed"),
+    }
+    Ok(claimed)
+}
+
+// Race (b) across attachment: B takes X over onto a stream with a Permit from
+// A's pair, and A's standalone retry with Continue(A's pair) is refused
+// `Superseded(B's pair)`, never `Attached`, before any write. Red for an
+// opener that dispatches on attachment before checking ClaimAuth: A would
+// read `Attached` and relaunch forever without learning it was deposed.
+@test
+fn bucket_claim_auth_deposed_standalone_meets_attached(c: Clock, r: Random, tasks: Tasks) -> Result[(), Error] waits {
+    let s = bucket_law_sim(tasks, c, 3050, None, list.new())
+    let outcome = deposed_attached_run(s, tasks, r)
+    let report = bucket_law_report(take s)
+    outcome?
+    bucket_law_head_history(report)?
+    if claim_law_count_puts(report, string.from("race-b-attached-retry"), Some(string.from("race-b-attached-end")), None) != 0 {
+        fail("race (b): A's refused retry wrote")
+    }
+    Ok(())
+}
+
+fn deposed_attached_run(s: BucketSim, tasks: Tasks, r: Random) -> Result[(), Error] waits {
+    let pair_a = permit_store(s, tasks, r)?
+    let mut service = stream_service_start(s, tasks, s.time, r, stream_service_plan(4))?
+    let slot = journal_slot(mut service)?
+    let client_b = stream_service_client(s, tasks, 64, "pA/", "us-east-1")?
+    let attached = streamed(object_authority(take client_b, "bucket", BUCKET_LAW_OP_MS), take slot)?
+    let mut options_b = bucket_order_options(false)
+    options_b.claim_auth = Some(ClaimAuth(expect: Some(clone(pair_a)), attempt: claim_law_attempt(0x71), class: Permit))
+    let mut b = open_authority(tasks, take attached, s.time, r, options_b) ?=> |Refusal(error: take p, ..)| take p
+    let pair_b = claim_of(b)?
+    bucket_law_commit(mut b, 2)?
+    stream_service_marker(s, tasks, string.from("race-b-attached-retry"))?
+    let client_a = stream_service_client(s, tasks, 65, "pA/", "us-east-1")?
+    let mut options_a = bucket_order_options(false)
+    options_a.claim_auth = Some(ClaimAuth(expect: Some(clone(pair_a)), attempt: claim_law_attempt(0x72), class: Continue))
+    match open_authority(tasks, object_authority(take client_a, "bucket", BUCKET_LAW_OP_MS), s.time, r, options_a) {
+        Error(Refusal(error: Superseded(take actual), ..)) => if actual != pair_b {
+            fail("race (b): A's retry did not name B's pair")
+        },
+        Error(Refusal(error: Attached(_), ..)) => fail("race (b): A's stale retry read Attached before its ClaimAuth"),
+        Ok(take stolen) => {
+            let _ = take stolen
+            fail("race (b): A's stale retry claimed B's attached Place")
+        },
+        Error(Refusal(error: take other, ..)) => return Error(take other),
+    }
+    stream_service_marker(s, tasks, string.from("race-b-attached-end"))?
+    close(take b)?
+    close_journal_service(take service)
+}

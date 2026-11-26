@@ -1,0 +1,181 @@
+// RUNNER-SPEC L70 (d) on a Bucket store: the install of r2 with (a)'s fates
+// runs through `s3.test` under a wire cut (std.sim.s3.Cut) at each request in
+// turn, both with the cut request applied unanswered and dropped. The handle
+// is then dropped, as a crash drops a process, and the store is reopened
+// through the uncut `spare.test`: it holds r1 with all six rows unchanged, or
+// r2 with all six settled as (a) states and the held release applied. The
+// sweep must see both, so cuts land on both sides of the head replace that
+// publishes the activation commit.
+type FateBucketSim {
+    endpoint: std.sim.s3.Endpoint,
+    time: Clock,
+    server: Task[std.sim.s3.Report],
+    driver: Task[()],
+    stop: Sender[()]
+}
+
+fn fate_bucket_sim(tasks: Tasks, real: Clock, cut: std.sim.s3.Cut) -> FateBucketSim {
+    let address = Addr(ip: V4(2130706433u32), port: 8080u16)
+    let mut network = std.sim.net.new(std.sim.net.defaults())
+    let mut primary: List[Ip] = list.with_capacity(1u64)
+    list.push(mut primary, address.ip)
+    std.sim.net.resolve_as(mut network, "bucket.s3.test", take primary)
+    let mut spare: List[Ip] = list.with_capacity(1u64)
+    list.push(mut spare, cut.spare.ip)
+    std.sim.net.resolve_as(mut network, "bucket.spare.test", take spare)
+    let key_bytes: Inline[u8, 32] =[219, 184, 147, 172, 192, 16, 150, 73, 24, 241, 253, 67, 58, 221, 135, 199, 14, 139, 13, 182, 190, 48, 193, 251, 234, 254, 250, 94, 198, 186, 131, 120]
+    let mut signing: Bytes = list.with_capacity(32u64)
+    let _ = bytebuf.append_inline(mut signing, key_bytes, 0u64, 32u64)
+    // AWS's documentation example key, derived for 20130524/us-east-1/s3.
+    let mac = result.unwrap(secret.seal(take signing, "mac"))
+    let verify = result.unwrap(secret.narrow(mac, "verify"))
+    let config = std.sim.s3.Config(address, cut: Some(cut), network: take network, after_resolve: None, credential: "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", signing_key: take verify, faults: list.new(), holds: list.new(), exists_status: 412, fragment_bytes: 4096, max_body: 16777216)
+    let (take virtual, time) = std.sim.world.new(70u64, 0u64, 1369353600000u64)
+    let (stop, stopping): (Sender[()], Receiver[()]) = channel.new(1u64)
+    let driver = task.spawn(tasks, bytes 65536u64, SimReleaseClock(world: take virtual, stop: take stopping, real), run_sim_release_clock)
+    let (endpoint, take server) = std.sim.s3.start_service(tasks, take config, std.sim.world.plan(70u64), time, 1048576u64, 33554432u64)
+    FateBucketSim(endpoint, time, server: take server, driver: take driver, stop: take stop)
+}
+
+fn fate_bucket_finish(take s: FateBucketSim) waits {
+    let FateBucketSim(server: take server, driver: take driver, stop: take stop, ..) = take s
+    result.unwrap(channel.send(stop, ()))
+    let _ = result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+}
+
+fn fate_bucket_options(create: bool) -> store.Options {
+    let mut options = result.unwrap(store.sized(Bucket(std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)), 2147483648u64))
+    options.create = create
+    options.group_commits = 2u32
+    options.head_poll_ms = 600000u64
+    options.claim_auth = Some(budget_adopt_auth())
+    options
+}
+
+// Opens the Place through `host_name` ("s3.test" may be cut; "spare.test" never is).
+fn fate_bucket_open(s: FateBucketSim, tasks: Tasks, r: Random, host_name: String, create: bool) -> Result[store.Db, store.Error] waits {
+    let raw = string.into_bytes(string.from("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"))
+    let key = result.unwrap(secret.seal(take raw, "kdf"))
+    let credentials = std.cred.from_secret("AKIAIOSFODNN7EXAMPLE", take key, "")
+    let mut endpoint = string.from("http://")
+    string.push(mut endpoint, host_name)
+    string.push(mut endpoint, ":8080")
+    let place = std.object.Bucket(endpoint: take endpoint, aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Virtual)
+    let lane = std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64)
+    let due = clock.deadline_after_ms(host.mono_ns(s.time), 30000u64)
+    let client = match std.object.start_simulated(s.endpoint, tasks, take place, take credentials, s.time, r, lane, due) {
+        Ok(take c) => take c,
+        Error(take e) => return Error(Remote(take e)),
+    }
+    let authority = store.object_authority(take client, "bucket", 30000u64)
+    Ok(store.open_authority(tasks, take authority, s.time, r, fate_bucket_options(create)) ?=> |store.Refusal(error: take problem, ..)| take problem)
+}
+
+// One cut: the install's `after + 1`th request to `s3.test` is cut (applied
+// unanswered when `apply`). CutBeyond: the install and its close finished
+// before the cut.
+fn fate_bucket_case(c: Clock, r: Random, tasks: Tasks, after: u64, applied: bool) -> FateCrashCut waits {
+    let n_place = 1048576u64
+    let s = fate_bucket_sim(tasks, c, std.sim.s3.Cut(after, apply: applied, spare: Addr(ip: V4(2130706434u32), port: 8080u16)))
+    let mut db = result.unwrap(fate_bucket_open(s, tasks, r, "spare.test", true))
+    let (take reg1, take h, _, _) = result.unwrap(head_prepare(mut db, Install(fate.none()), false, placing_at(code.describe(fate_law_r1), n_place), None, code.describe(trigger_law_schema), n_place, tasks))
+    let t: triggers.Tables = clone(h.triggers)
+    let r1 = result.unwrap(trigger_stamp(reg1.t.exported, reg1.t.bindings, n_place))
+    let r2 = {
+        let reg2 = result.unwrap(placed(code.describe(fate_law_r2), n_place))
+        result.unwrap(trigger_stamp(reg2.t.exported, reg2.t.bindings, n_place))
+    }
+    let (rows, _) = fate_law_setup(mut db, t, h, reg1, r1)
+    let before = fate_law_bytes(db, t, rows)
+    let version = store.version(store.snapshot(db))
+    let activation = result.unwrap(current_description(db))
+    result.unwrap(store.close(take db))
+    // The install runs wholly through the cut address; the crash drops it.
+    let mut beyond = false
+    if let Ok(take opened) = fate_bucket_open(s, tasks, r, "s3.test", false) {
+        let mut installing = take opened
+        let installed = head_prepare(mut installing, Install(fate_crash_flags()), false, placing_at(code.describe(fate_law_r2), n_place), None, code.describe(trigger_law_schema), n_place, tasks)
+        store.allow_unverified_teardown(mut installing)
+        if let Ok(_) = installed {
+            beyond = match store.close(take installing) {
+                Ok(()) => true,
+                Error(_) => false,
+            }
+        } else {
+            let _ = take installing
+        }
+    }
+    let mut db3 = result.unwrap(fate_bucket_open(s, tasks, r, "spare.test", false))
+    let reopened = result.unwrap(store.bind_declaration(mut db3, Open, trigger_law_schema))
+    let t3: triggers.Tables = clone(reopened.triggers)
+    let at = store.version(store.snapshot(db3))
+    let now = result.unwrap(current_description(db3))
+    let outcome = if at == version {
+        if now != activation || fate_law_bytes(db3, t3, rows) != before {
+            fail("L70 (d) Bucket: a cut before the head replace did not recover r1 with its rows")
+        }
+        CutAtR1
+    } else {
+        if at != version + 1u64 || now == activation {
+            fail("L70 (d) Bucket: a cut after the head replace did not recover the activation commit")
+        }
+        for (id, attempt) in[(rows.a, 1u64), (rows.b, 2u64), (rows.f, 1u64)] {
+            let row = fate_law_row(db3, t3, id)
+            if !triggers.waiting(row) || !triggers.stamped(row, r2) || triggers.attempts(row) != attempt || triggers.cancelling(row) {
+                fail("L70 (d) Bucket: a released row is not Waiting at r2 with its attempt")
+            }
+        }
+        let cancelled = fate_law_row(db3, t3, rows.c)
+        if !triggers.waiting(cancelled) || !triggers.cancelling(cancelled) || triggers.stamped(cancelled, r1) || triggers.stamped(cancelled, r2) || triggers.attempts(cancelled) != 1u64 {
+            fail("L70 (d) Bucket: C is not a Waiting cancel with its r0 stamp")
+        }
+        let after_rows = fate_law_bytes(db3, t3, rows)
+        if after_rows[3u64] != before[3u64] || after_rows[4u64] != before[4u64] {
+            fail("L70 (d) Bucket: an unheld row changed")
+        }
+        CutAtR2
+    }
+    result.unwrap(store.close(take db3))
+    fate_bucket_finish(take s)
+    if beyond {
+        return CutBeyond
+    }
+    outcome
+}
+
+@test
+fn activation_fate_survives_bucket_crash(c: Clock, r: Random, tasks: Tasks) -> Result[(), ()] waits {
+    let mut old = 0u64
+    let mut new = 0u64
+    let mut after = 0u64
+    loop {
+        let unanswered = fate_bucket_case(c, r, tasks, after, true)
+        let dropped = fate_bucket_case(c, r, tasks, after, false)
+        let mut done = 0u64
+        for cut in[unanswered, dropped] {
+            match cut {
+                CutAtR1 => {
+                    old += 1u64
+                },
+                CutAtR2 => {
+                    new += 1u64
+                },
+                CutBeyond => {
+                    done += 1u64
+                },
+            }
+        }
+        if done == 2u64 {
+            break
+        }
+        after += 1u64
+        if after > 512u64 {
+            fail("L70 (d) Bucket: the install never finished uncut")
+        }
+    }
+    if old == 0u64 || new == 0u64 {
+        fail("L70 (d) Bucket: the cuts did not land on both sides of the head replace")
+    }
+    Ok(())
+}

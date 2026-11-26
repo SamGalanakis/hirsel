@@ -1,7 +1,9 @@
 fn check_paged_manifest() -> Result[(), Error] {
     let id = StoreId(hi: 1, lo: 2)
     let encoded = disk_page_manifest_bytes(id, page_manifest_empty(default_limits()))?
-    if list.len(encoded) != 551 || std.check.xxh3(encoded, 0, 551) != 0x8f40ef33e65b213fu64 {
+    // page_manifest_vector with its pack root, data root and counters reset to
+    // page_manifest_empty's, re-encoded and re-checked with libxxhash (Format 11).
+    if list.len(encoded) != 515 || std.check.xxh3(encoded, 0, 515) != 0x3dcdc9b445028933u64 {
         return Error(Foreign)
     }
     Ok(())

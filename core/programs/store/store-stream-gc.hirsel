@@ -705,7 +705,11 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
         if let Error(_) = fetched {
             continue
         }
-        let Ok((_, take attach)) = history_decode_head_attach(s.lane.compare) else {
+        let Ok((take capture, take attach)) = history_decode_head_attach(s.lane.compare) else {
+            continue
+        }
+        // Only the pin's own Store may record ranges or authorize an ask.
+        if !same(capture.head.store, store) {
             continue
         }
         let ranges = stream_attach_head_ranges(attach, s.lane.sid)
@@ -735,7 +739,7 @@ fn stream_gc_poll_pins(mut s: StreamService, deadline: u64) -> Result[(), Error]
                 }
             }
             if straggler {
-                stream_push_janitor_ask(mut s, JanitorStragglerPin(store, string.from(place_prefix)))
+                stream_push_janitor_ask(mut s, JanitorStragglerPin(store, string.from(place_prefix), capture.head.pair))
             }
         }
     }

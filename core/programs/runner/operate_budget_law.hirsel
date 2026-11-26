@@ -68,8 +68,16 @@ fn bucket_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net) -> PlaceConfi
     capture_budget_config(c, r, tasks, n, "http://127.0.0.1:1", key)
 }
 
+fn budget_adopt_auth() -> store.ClaimAuth {
+    let mut attempt: Bytes = list.with_capacity(16u64)
+    for i in 0u64 .. 16u64 {
+        list.push(mut attempt, int.narrow(i + 1u64))
+    }
+    store.ClaimAuth(expect: None, attempt: take attempt, class: Adopt)
+}
+
 fn capture_budget_config(c: Clock, r: Random, tasks: Tasks, n: Net, endpoint: String, key: Secret) -> PlaceConfig[(), (), ()] {
-    let bucket = BucketBacking(net: n, place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64, cache: None)
+    let bucket = BucketBacking(net: n, place: std.object.Bucket(endpoint: string.from(endpoint), aws_region: "us-east-1", bucket: "bucket", prefix: "", style: Path), credentials: std.cred.from_secret("access", secret.share(key), ""), lanes: std.object.LaneConfig(requested_lanes: 1u64, lane_bytes: 1048576u64), level: "bucket", op_ms: 30000u64, cache: None, claim_auth: Some(budget_adopt_auth()))
     let mut config = budget_config(Bucket(take bucket), c, r, tasks, n)
     config.sizes = store.Overrides(resident_limit: Some(1048576u64), journal_limit: None, checkpoint_bytes: Some(65536u64), pack_bytes: Some(65536u64), group_bytes: Some(65536u64), group_commits: None, lock_wait_ms: None, cache_bytes: None, writer_pin_bytes: None, dirty_bytes: None, pager_task_bytes: None, readers: None, limits: None)
     take config
@@ -195,7 +203,7 @@ fn exercise_bucket_capture(c: Clock, r: Random, tasks: Tasks, n: Net) -> Result[
         return Error("L60: Bucket refusal omitted its capture")
     }
     let PlaceRead(claim: take claim, store_hi, store_lo, binding: take observed, n_place, ..) = take decoded
-    let Some((epoch, _)) = take claim else {
+    let Some(PlaceClaim(epoch, ..)) = take claim else {
         return Error("L60: Bucket refusal omitted its claim")
     }
     if epoch != 1u64 || store_hi != id.hi || store_lo != id.lo || list.len(observed) != 32u64 || n_place != Some(262144u64) {

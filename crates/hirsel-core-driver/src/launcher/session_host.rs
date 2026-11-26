@@ -106,6 +106,11 @@ impl Wire for HostReply {
                 w.u64(*head);
                 w.bytes(name.as_bytes());
             }
+            Self::Deposed(epoch, holder) => {
+                w.u32(13);
+                w.u64(*epoch);
+                w.bytes(holder);
+            }
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -134,6 +139,7 @@ impl Wire for HostReply {
             10 => Self::StoreMismatch(r.u64()?, r.u64()?, r.u64()?, r.u64()?),
             11 => Self::InstallRefused(InstallRefusal::get(r)?),
             12 => Self::BackedUp(r.u64()?, r.u64()?, r.u64()?, r.string()?),
+            13 => Self::Deposed(r.u64()?, r.bytes()?),
             _ => return Err(malformed("host reply tag")),
         })
     }

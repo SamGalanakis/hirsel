@@ -162,8 +162,9 @@ fn lossy_handshake(seed: u64, loss: u64, c: dtls.Config) -> bool {
 
 /// bug: lost, duplicated or reordered datagrams strand or wrongly close a handshake: an
 /// early ChangeCipherSpec alerted (attack 2434 F3), a resend not scheduled, a duplicate
-/// flight refused. oracle: DTLS-5's exhaustive list of ends, by hand from RFC 6347 section
-/// 4.2.4; with no loss every seed connects.
+/// flight refused.
+/// oracle: DTLS-5's exhaustive list of ends, by hand from RFC 6347 section 4.2.4; with no
+/// loss every seed connects.
 @test
 fn handshake_survives_loss() -> Result[(), ()] {
     // Flight 5 at mtu 300 spans two datagrams; delivered last first, the ChangeCipherSpec

@@ -140,10 +140,10 @@ fn sdp_words(b: Bytes) -> List[Bytes] {
     out
 }
 
-// ---- Unit certificates (RFC 5280 section 4.1.2.2) ----
-// Issuer and serial name one certificate, and every unit's certificate names the same
-// issuer, so no two units (of one service or of a restart) share a serial. Red when the
-// serial is fixed: Firefox refuses the second unit it calls (SEC_ERROR_REUSED_ISSUER_AND_SERIAL).
+/// bug: mint two unit certificates with the same issuer and serial, so Firefox refuses the
+/// second unit it calls with SEC_ERROR_REUSED_ISSUER_AND_SERIAL.
+/// oracle: RFC 5280 section 4.1.2.2 (issuer and serial name one certificate), Firefox's
+/// SEC_ERROR_REUSED_ISSUER_AND_SERIAL refusal, and the serial INTEGER read by hand from the DER.
 @test
 fn unit_certificates_differ_in_serial(c: Clock, random: Random) -> Result[(), u64] {
     let mut seen: List[Bytes] = list.new()

@@ -1,4 +1,7 @@
-// FFmpeg 6.1.1 libopus, 660 Hz sine, 60 ms, mono, bitexact.
+/// bug: misread the WebM Segment, track, cluster timestamp or discard padding, or write a
+/// rebuild whose frame boundaries, timestamps, padding or payload bytes differ from the reference.
+/// oracle: the Matroska/WebM element layout and RFC 7845 Opus codec-delay rule, checked against
+/// FFmpeg 6.1.1 libopus's bitexact 660 Hz mono stream and ffprobe PTS values and SHA256 data hashes.
 @test
 fn webm_reference() -> Result[(), ()] {
     let source = webm_fixture()

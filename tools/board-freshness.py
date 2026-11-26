@@ -127,7 +127,8 @@ def render(base, attempt, report, complete, now):
         commit = attempt["commit"] or "commit unavailable"
         lines.append(f"**Latest attempt** · `{commit}` · {timestamp(attempt['started'])} · {outcome}")
         auxiliary = [f"{label} exit {attempt[field]}" for field, label in
-                     (("boat_status", "Boat"), ("vopr_status", "VOPR"), ("law_status", "Laws"))
+                     (("boat_status", "Boat"), ("vopr_status", "VOPR"), ("law_status", "Laws"),
+                     ("media_status", "Media vectors"))
                      if attempt.get(field) is not None]
         if auxiliary:
             lines += ["", " · ".join(auxiliary)]
@@ -193,6 +194,7 @@ def main():
     parser.add_argument("--boat-status", type=int)
     parser.add_argument("--vopr-status", type=int)
     parser.add_argument("--law-status", type=int)
+    parser.add_argument("--media-status", type=int)
     args = parser.parse_args()
     if args.service_failure_tier and not args.service_failure:
         parser.error("--service-failure-tier requires --service-failure")
@@ -211,7 +213,7 @@ def main():
             attempt = {"started": args.started, "commit": args.commit,
                        "step": args.step, "status": args.status,
                        "boat_status": args.boat_status, "vopr_status": args.vopr_status,
-                       "law_status": args.law_status}
+                       "law_status": args.law_status, "media_status": args.media_status}
             atomic_write(args.record / "attempt.json", json.dumps(attempt) + "\n")
         if args.last_complete_commit and (accepted := last_complete(args.base, accepted_only=True)):
             print(accepted[1])

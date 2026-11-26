@@ -1,4 +1,9 @@
-// FFmpeg 6.1.1, H.264 baseline, 32x32, 25 fps, 3 frames, default-base-is-moof.
+/// bug: misread the fragmented MP4 sample table or write a fragment whose offsets, sample
+/// timing, flags or payload bytes no longer reproduce the reference stream.
+/// oracle: ISO/IEC 14496-12 sample-table and fragment arithmetic, checked against FFmpeg 6.1.1's
+/// H.264 baseline 32x32 25 fps 3-frame default-base-is-moof stream and ffprobe packet metadata
+/// and SHA256 data hashes; the truncated and implicit-offset refusals are hand-derived from the
+/// same box layout.
 @test
 fn mp4_reference() -> Result[(), ()] {
     let source = avc_fixture()

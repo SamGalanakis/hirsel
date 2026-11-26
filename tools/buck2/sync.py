@@ -58,6 +58,7 @@ from cargo_units import Resolution, configured, relocate
 from distribution_gates import distribution_gates
 from runner_gates import runner_gates
 from test_inputs import RUNTIME_DATA, TEST_DATA
+from build_script_inputs import BUILD_SCRIPT_INPUTS
 from core_gates import core_gates
 from test_sizes_from_usage import requests_bzl
 
@@ -82,9 +83,6 @@ READS = generated.Reads(ROOT)
 # What each build script reads besides its own file, as repository paths.
 BUILD_SCRIPT_SOURCES = {"hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs", "core/front/support/cases.rs"]}
 
-BUILD_SCRIPT_INPUTS = {
-    "hirsel-core-diag": ["docs/spec/*.md", "core/front/cases/**/*.hirsel"],
-}
 
 # Their tests live in integration/proof targets, not these empty entry points.
 EMPTY_UNIT_HARNESSES = {'hirsel-intern-unittest', 'hirsel-core-driver-bin-hirsel-unittest',

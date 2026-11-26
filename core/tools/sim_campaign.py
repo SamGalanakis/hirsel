@@ -17,7 +17,7 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
-PACKAGE_LAWS = ('store', 'platform', 'runner', 'dtls', 'turn')
+GENERATED_KINDS = ('postgres', 'contracts', 'runner-adapters')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
 # Keep the 10,000-frame floods intact.
 FLOOD_SEEDS = {
@@ -73,14 +73,22 @@ def seeded_package_laws(package):
     manifest = tomllib.loads((directory / 'hirsel.toml').read_text())
     version = manifest['package']['major']
     laws = {}
-    for file, module in manifest['tests']['sources'].items():
+    for file, module in manifest.get('tests', {}).get('sources', {}).items():
         for name, parameters in SEEDED_TEST.findall((directory / file).read_text()):
             if re.search(r'(^|,)\s*seed_grant\s*:\s*Env\s*(,|$)', parameters):
                 definition = f'{package}@{version}/{module.replace(".", "/")}/{name}'
                 laws[definition] = definition
-    if not laws:
-        raise ValueError(f'{package} has no seeded package tests')
     return laws
+
+
+def seeded_package_inventory():
+    """Every workspace package with at least one seeded law."""
+    workspace = tomllib.loads((ROOT / 'core/programs/hirsel.toml').read_text())
+    inventory = {}
+    for package in workspace['workspace']['members']:
+        if laws := seeded_package_laws(package):
+            inventory[package] = laws
+    return inventory
 
 
 def selected_laws():
@@ -107,7 +115,10 @@ def selected_laws():
         if 'Net' in types:
             runner[f'runner@1/runner_calls/law_{name}'] = types
     laws['runner-adapters'] = runner
-    laws.update((package, seeded_package_laws(package)) for package in PACKAGE_LAWS)
+    for package, seeded in seeded_package_inventory().items():
+        if package in laws:
+            raise ValueError(f'{package} needs one campaign preparation mode')
+        laws[package] = seeded
     return laws
 
 
@@ -258,7 +269,7 @@ def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_
             'recording': lambda definition: recording}
     reports = {}
     rows = {}
-    if kind in PACKAGE_LAWS:
+    if kind not in GENERATED_KINDS:
         # Package mode writes a workspace lock. Stage the manifests and their
         # relative dependencies away from the checkout.
         programs = work / 'programs'
@@ -335,7 +346,7 @@ def main():
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
     parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
     parser.add_argument('--law', help='prepare or list just one exact law')
-    parser.add_argument('--package', action='append', choices=PACKAGE_LAWS,
+    parser.add_argument('--package', action='append', choices=sorted(seeded_package_inventory()),
                         help='prepare or list only this package (repeatable)')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()

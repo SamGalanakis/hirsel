@@ -20,11 +20,13 @@ step="fetch origin/main"
 boat_status=
 vopr_status=
 law_status=
+media_status=
 record() {
   local auxiliary=()
   if [[ -n "$boat_status" ]]; then auxiliary+=(--boat-status "$boat_status"); fi
   if [[ -n "$vopr_status" ]]; then auxiliary+=(--vopr-status "$vopr_status"); fi
   if [[ -n "$law_status" ]]; then auxiliary+=(--law-status "$law_status"); fi
+  if [[ -n "$media_status" ]]; then auxiliary+=(--media-status "$media_status"); fi
   python3 "$tools/board-freshness.py" --base "$base" --current "$current" \
     --record "$run" --started "$started" --commit "$commit" --step "$step" "${auxiliary[@]}" "$@"
 }
@@ -192,9 +194,26 @@ if (( vopr_status == 75 )); then
 elif (( vopr_status != 0 )); then
   printf 'VOPR campaign exited %s. See %s/vopr.\n' "$vopr_status" "$run" >>"$run/run.log"
 fi
-printf 'Boat exit %s · VOPR exit %s · Laws exit %s\n' "$boat_status" "$vopr_status" "$law_status" |
-  tee -a "$run/run.log" >&2
 toolchain_hirsel="$checkout/$compiler/hirsel"
+
+run_media_vectors() (
+  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+    echo "ffmpeg or ffprobe is missing; media_record vectors skipped."
+    return 0
+  fi
+  HIRSEL="$toolchain_hirsel" timeout 300 core/programs/media_record/test-vectors.sh \
+    "$run/media-record/work" --libraries "$checkout/core"
+)
+
+media_status=$toolchain_status
+if (( media_status == 0 )); then
+  run_media_vectors >>"$run/media-vectors.log" 2>&1 || media_status=$?
+fi
+if (( media_status != 0 )); then
+  printf 'media_record vectors exited %s. See %s/media-vectors.log.\n' "$media_status" "$run" >>"$run/run.log"
+fi
+printf 'Boat exit %s · VOPR exit %s · Laws exit %s · Media vectors exit %s\n' \
+  "$boat_status" "$vopr_status" "$law_status" "$media_status" | tee -a "$run/run.log" >&2
 
 run_w2() (
   local output compiler runtime bridge

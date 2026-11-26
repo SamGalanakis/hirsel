@@ -485,6 +485,28 @@ fn release(run: &mut Run, server: &Server) {
 
 #[test]
 fn tls_server_loopback_laws() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "tls::tests::server::tls_server_loopback_child",
+            "--nocapture",
+        ])
+        .env("TLS_SERVER_LOOPBACK_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn tls_server_loopback_child() {
+    if std::env::var_os("TLS_SERVER_LOOPBACK_CHILD").is_none() {
+        return;
+    }
     let mut run = Run::new();
     let server = run.serving();
     let baseline = fds();

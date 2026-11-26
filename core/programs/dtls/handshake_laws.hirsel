@@ -438,8 +438,9 @@ fn fresh_server(seed: u64) -> dtls.Endpoint {
 }
 
 /// bug: accept a peer message the DTLS-5 failure table refuses, or answer it with the wrong
-/// alert. oracle: RFC 5246 sections 7.2, 7.4.1.2 and Appendix E.1, RFC 5764 section 4.1.3
-/// and RFC 7627 by hand: 40, 47, 40, 40, 70, 47, 40, 51, 10, 42, 10.
+/// alert.
+/// oracle: RFC 5246 sections 7.2, 7.4.1.2 and Appendix E.1, RFC 5764 section 4.1.3 and
+/// RFC 7627 by hand: 40, 47, 40, 40, 70, 47, 40, 51, 10, 42, 10.
 @test
 fn refusals() -> Result[(), ()] {
     hello_refused(51, hello_record("fefd", "000a00040002001d000b00020100000d000400020403000e00050002000700ff01000100"), 40, "ClientHello without EMS")
@@ -759,7 +760,8 @@ fn one_flight_six(flight: List[Bytes], after: u64) -> u64 {
 }
 
 /// bug: answer flight 6 per epoch-0 record or per datagram, reuse record numbers in a resent
-/// flight, or answer a replayed record. oracle: RFC 6347 section 4.2.4 by hand.
+/// flight, or answer a replayed record.
+/// oracle: RFC 6347 section 4.2.4 by hand.
 @test
 fn final_flight_resent() -> Result[(), ()] {
     let a = party(91)

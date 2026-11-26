@@ -479,6 +479,7 @@ fn history(clock: Clock, random: Random, seed: u64, mut tally: Tally) waits {
 /// old terms, a corpus that leaves out rows with no terms, a build that
 /// counts a row twice, or equal scores ranked out of key order, rank
 /// differently from the model's brute-force BM25 over its rows.
+/// oracle: brute-force BM25 over the test's model rows, with ties broken in key order.
 @test
 fn bm25_histories(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut tally = Tally(straddles: 0, not_ready: 0, empty_rows: 0, queries: 0)

@@ -9,8 +9,9 @@ fn empties(kind: u8, from: u16, n: u16, step: u16) -> Bytes {
 }
 
 /// bug: a cookie ClientHello with message_seq 0xFFFF is admitted and numbering flight 4
-/// past u16 fails the task (attack 2434 F1). oracle: RFC 6347 section 4.2.2 and OpenSSL
-/// ssl/d1_lib.c:1009-1013 by hand: a first ClientHello has message_seq 0 or 1.
+/// past u16 fails the task (attack 2434 F1).
+/// oracle: RFC 6347 section 4.2.2 and OpenSSL ssl/d1_lib.c:1009-1013 by hand: a first
+/// ClientHello has message_seq 0 or 1.
 @test
 fn atk_cookie_seq_overflow() -> Result[(), ()] {
     let c = dtls.cookie_for(cookie_key(), address(20), hello_random())
@@ -89,8 +90,9 @@ fn ignored_after_ccs(seed: u64, spoof: Bytes) {
 }
 
 /// bug: an unauthenticated epoch-0 handshake record still acts after the peer's
-/// ChangeCipherSpec: one closes the server with 10 (attack 2434 F2a). oracle: DTLS-4
-/// Replay and RFC 6347 section 4.1 by hand: epoch 0 can no longer carry anything genuine.
+/// ChangeCipherSpec: one closes the server with 10 (attack 2434 F2a).
+/// oracle: DTLS-4 Replay and RFC 6347 section 4.1 by hand: epoch 0 can no longer carry
+/// anything genuine.
 @test
 fn atk_epoch0_message_after_ccs_closes() -> Result[(), ()] {
     ignored_after_ccs(733, empties(11, 5, 1, 1))
@@ -98,7 +100,8 @@ fn atk_epoch0_message_after_ccs_closes() -> Result[(), ()] {
 }
 
 /// bug: 90 empty ClientHello fragments in one 1,093-byte datagram make the server seal and
-/// queue 90 no_renegotiation alerts (attack 2434 F2b). oracle: as above, by hand.
+/// queue 90 no_renegotiation alerts (attack 2434 F2b).
+/// oracle: as above, by hand.
 @test
 fn atk_epoch0_hello_after_ccs_seals() -> Result[(), ()] {
     let spoof = empties(1, 5, 90, 1)
@@ -128,8 +131,9 @@ fn bytes_between(b: Bytes, from: u64, to: u64) -> Bytes {
 
 /// bug: a Capacity refusal while processing a reassembled message had already advanced past
 /// it, so every retransmission was ignored as processed and the handshake ended in Timeout
-/// or 10 (attack 2434 F4). oracle: DTLS-8 by hand: a Capacity refusal leaves the endpoint
-/// usable, so the retransmitted flight 4 still draws flight 5.
+/// or 10 (attack 2434 F4).
+/// oracle: DTLS-8 by hand: a Capacity refusal leaves the endpoint usable, so the
+/// retransmitted flight 4 still draws flight 5.
 @test
 fn capacity_refusal_keeps_message() -> Result[(), ()] {
     let rc = provide.random(781)
@@ -174,8 +178,9 @@ fn capacity_refusal_keeps_message() -> Result[(), ()] {
 
 /// bug: when building flight 6 was refused for Capacity, the next poll connected first and
 /// cleared the transcript, so flight 6 carried a Finished over nothing and the client closed
-/// with 51 (attack 2434 F5). oracle: RFC 5246 section 7.4.9 by hand: Finished covers every
-/// handshake message, so the retried flight 6 must connect the client.
+/// with 51 (attack 2434 F5).
+/// oracle: RFC 5246 section 7.4.9 by hand: Finished covers every handshake message, so the
+/// retried flight 6 must connect the client.
 @test
 fn capacity_refusal_before_flight_6() -> Result[(), ()] {
     let a = party(791)
@@ -212,9 +217,9 @@ fn capacity_refusal_before_flight_6() -> Result[(), ()] {
 }
 
 /// bug: at a 0-byte budget, opening an epoch-1 record built its AAD with an infallible
-/// allocation, so receive faulted the task instead of answering Capacity (2465). oracle:
-/// DTLS-8 by hand: a Capacity refusal leaves the endpoint usable, so the same Finished
-/// received again with budget completes the handshake.
+/// allocation, so receive faulted the task instead of answering Capacity (2465).
+/// oracle: DTLS-8 by hand: a Capacity refusal leaves the endpoint usable, so the same
+/// Finished received again with budget completes the handshake.
 @test
 fn capacity_refusal_opening_record() -> Result[(), ()] {
     let a = party(811)
@@ -263,8 +268,9 @@ fn epoch1_record(length: u64) -> Bytes {
 
 /// bug: before the opener existed, epoch-1 records of any length up to 65,535 bytes were
 /// copied and held unauthenticated, about 2 MB of peer-chosen bytes at defaults (attack 2434
-/// F6). oracle: RFC 5246 section 6.2.3 by hand: a sealed record is at most 16,384 + 8
-/// (explicit nonce) + 16 (tag) = 16,408 bytes, so one byte more is never genuine.
+/// F6).
+/// oracle: RFC 5246 section 6.2.3 by hand: a sealed record is at most 16,384 + 8 (explicit
+/// nonce) + 16 (tag) = 16,408 bytes, so one byte more is never genuine.
 @test
 fn oversized_epoch1_never_held() -> Result[(), ()] {
     let rc = provide.random(801)

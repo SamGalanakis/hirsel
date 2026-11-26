@@ -231,6 +231,7 @@ fn history(clock: Clock, random: Random, metric: vector.Metric, seed: u64, mut t
 /// bug: a top-k that admits an equal score in place of an earlier key, or
 /// that drops a deleted or overwritten row's old code, ranks differently
 /// from the model's brute-force scan.
+/// oracle: brute-force scoring over the test's model rows, with ties broken in key order.
 @test
 fn exact_top_k(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut tally = Tally(straddles: 0, not_ready: 0, queries: 0)
@@ -271,6 +272,7 @@ fn four(a: i8, b: i8, c: i8, d: i8) -> List[i8] {
 
 /// bug: arithmetic that is not widened before it subtracts or multiplies
 /// overflows at 127 and -128, and a code of another length is scored.
+/// oracle: widened integer arithmetic over the hand-chosen i8 extremes and mismatched lengths.
 @test
 fn extremes(clock: Clock, random: Random) -> Result[(), ()] waits {
     let mut steps: List[Step] = list.new()
@@ -504,6 +506,7 @@ fn recall_line(found: u64) {
 /// a masked or tail-changed key from an old generation, mis-scores a
 /// candidate, or prunes with a wrong 1-bit bound loses recall against form
 /// A, returns an absent row, or answers a run and a look differently.
+/// oracle: the form A exhaustive scan and form B index model over the same model rows.
 @test
 fn ivf_recall(clock: Clock, random: Random) -> Result[(), ()] waits {
     let metrics: Inline[vector.Metric, 2] =[L2, Dot]
@@ -716,6 +719,7 @@ fn pf_state(db: store.Db, near: Near, far: Far) -> u64 waits {
 /// list without the rows outside the filter; so does a filter that reads a
 /// key as its ordinal, lets a tail row or an ordinal past the bitset
 /// through, or drops a tail key from the generations' mask.
+/// oracle: the unfiltered model top-k list with the rows outside the filter removed.
 @test
 fn prefilter(clock: Clock, random: Random) -> Result[(), ()] waits {
     let metrics: Inline[vector.Metric, 2] =[L2, Dot]

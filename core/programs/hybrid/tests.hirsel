@@ -160,6 +160,7 @@ fn repeats() {
 /// order (2, 3) above (1, 4) at c = 2^64 - 1; ties broken by list order or
 /// first appearance instead of key bytes, a repeat counted twice, or a cut
 /// at k that drops a better row, differ from the hand-computed orders.
+/// oracle: the reciprocal-rank fusion orders hand-computed from the ranked input lists.
 @test
 fn hand_fusions() -> Result[(), ()] {
     small_c()

@@ -122,6 +122,20 @@ def baseline_for(commit, package, destination):
     return ["--laws-baseline", str(destination)]
 
 
+def incomplete_lock_rows(package):
+    """Rows whose bug/oracle provenance pair is half-written."""
+    path = package / "hirsel.laws"
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text().splitlines()[1:]:
+        fields = dict(field.split("=", 1) for field in line.split()[1:])
+        missing = [name for name in ("bug", "oracle") if fields.get(name) == "-"]
+        if len(missing) == 1:
+            rows.append(f"{line.split()[0]}: missing {'/'.join(missing)} provenance")
+    return rows
+
+
 def run_package(args, member, env, commit, compiler_scratch):
     package = WORKSPACE / member
     inputs = [str(package), "--libraries", str(ROOT / "core")]
@@ -130,7 +144,12 @@ def run_package(args, member, env, commit, compiler_scratch):
         lock_store = (compiler_scratch or Path(env["TMPDIR"])) / "store"
         command = [str(args.compiler), "laws", action, *inputs, "--store", str(lock_store)]
         status = subprocess.run(command, cwd=ROOT, env=env).returncode
-        if status or args.mode == "check":
+        if args.mode == "check":
+            incomplete = incomplete_lock_rows(package)
+            for row in incomplete:
+                print(f"{member}: {row}", flush=True)
+            return int(bool(status or incomplete))
+        if status:
             return status
 
     logs = args.logs / member

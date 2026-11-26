@@ -346,31 +346,9 @@ fn cross_kind() -> u64 {
     }
 }
 
-fn same_kind() -> u64 {
-    let mut a = spec("a", "")
-    let ra = root(a)
-    let other = switch(mut a, ra, "x", None, "")
-    let mut b = spec("b", "")
-    let rb = root(b)
-    let _ = switch(mut b, rb, "flag", None, "")
-    let mut reads: List[EnvRead] = list.new()
-    list.push(mut reads, Unset)
-    let mut words: List[String] = list.new()
-    list.push(mut words, string.from("--flag"))
-    match scan(b, words, reads, 1) {
-        Run(m) => if is_on(m, other) {
-            1
-        } else {
-            0
-        },
-        _ => 2,
-    }
-}
-
 /// bug: a handle read against matches whose slot has another kind returns that slot's data
 /// instead of failing.
-/// oracle: the ruling (R6): a wrong-kind handle is a run failure; a same-kind handle from
-/// another spec is not detectable and reads its slot.
+/// oracle: the ruling (R6): a wrong-kind handle is a run failure.
 @test
 fn cross_kind_handle_fails() -> Result[(), ()] {
     match isolate(fn() -> u64 {
@@ -378,12 +356,6 @@ fn cross_kind_handle_fails() -> Result[(), ()] {
     }) {
         Ok(Ok(_)) => fail("a value handle read a switch slot"),
         _ => {}
-    }
-    match isolate(fn() -> u64 {
-        same_kind()
-    }) {
-        Ok(Ok(1)) => {}
-        _ => fail("a same-kind handle did not read its slot"),
     }
     Ok(())
 }

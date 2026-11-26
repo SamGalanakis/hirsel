@@ -1,6 +1,7 @@
 """Run with python3 core/tools/test_vopr_failure_groups.py."""
 import importlib.machinery
 import importlib.util
+import gzip
 import json
 import subprocess
 import sys
@@ -9,7 +10,7 @@ import tempfile
 import unittest
 
 import sim_campaign as prepare
-from vopr_failure_groups import group
+from vopr_failure_groups import group, publish
 
 
 SIM_CAMPAIGN_PATH = Path(__file__).resolve().parents[2] / "tools" / "sim-campaign"
@@ -24,6 +25,22 @@ def red(stderr, law="store@1/store/law", status=101):
 
 
 class FailureGroups(unittest.TestCase):
+    def test_nightly_requires_two_canary_results_in_every_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory)
+            batch = run / "nightly-001.jsonl.gz"
+            even = {**red("", prepare.CANARY, 0), "seed": 8, "tape_replay": {"status": 0}}
+            odd = {**red("error: ()\n", prepare.CANARY, 1), "tape_replay": {"status": 0}}
+            with gzip.open(batch, "wt") as stream:
+                for row in (even, odd):
+                    print(json.dumps(row), file=stream)
+            self.assertEqual(publish(run, require_canary=True), 0)
+            self.assertEqual((run / "failure-groups.jsonl").read_text(), "")
+            with gzip.open(run / "nightly-002.jsonl.gz", "wt") as stream:
+                print(json.dumps(odd), file=stream)
+            self.assertEqual(publish(run, require_canary=True), 2)
+            self.assertIn("canary_missing", (run / "failure-groups.jsonl").read_text())
+
     def test_partition(self):
         # Each case: rows that must share one group, or rows that must split.
         same = [
@@ -171,6 +188,49 @@ class Coverage(unittest.TestCase):
 
 
 class Preparation(unittest.TestCase):
+    def test_nightly_keeps_good_laws_when_a_contract_is_refused_or_has_no_binary(self):
+        group = prepare.selected_laws()["contracts"]
+        names = ["std@1/tests/exec/run_until_escalates",
+                 "std@1/tests/http_connection/http_request_scratch",
+                 "std@1/tests/net/public_connect_preflight"]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            compiler = root / "hirsel"
+            compiler.write_text(f"#!{sys.executable}\n" + r'''
+import hashlib, json, pathlib, sys
+args = sys.argv
+definitions = [args[i + 1] for i, arg in enumerate(args) if arg == "--exact"]
+if any("/exec/" in name for name in definitions):
+    print(json.dumps({"accepted": False, "diagnostics": [{"primary": {"module": "contract-0.hirsel"}}]}))
+    sys.exit(1)
+out = pathlib.Path(args[args.index("-o") + 1])
+out.mkdir()
+rows = []
+for name in definitions:
+    if "http_request_scratch" in name and "--laws" in args:
+        rows.append({"definition": name, "source": "executed", "stopped": "link refused"})
+        continue
+    parts = (b"hirsel.text.v1", name.encode())
+    stem = hashlib.sha256(b"".join(len(part).to_bytes(8, "little") + part for part in parts)).hexdigest()
+    (out / stem).touch()
+    if "--coverage" in args:
+        (out / (stem + ".covmap")).touch()
+    rows.append({"definition": name, "source": "executed", "passed": True})
+print(json.dumps({"tests": rows}))
+''')
+            compiler.chmod(0o755)
+            laws = prepare.prepare(compiler, root, "contracts", {name: group[name] for name in names},
+                                   1, 2, "test", None, None, root)
+            self.assertEqual([law["law"] for law in laws], names[2:])
+            self.assertEqual(publish(root), 3)
+            failures = [json.loads(line) for line in (root / "failure-groups.jsonl").read_text().splitlines()]
+            self.assertEqual([row["group"][:2] for row in failures], [[name, "prepare_red"] for name in names[:2]])
+            for row in failures:
+                report = Path(row["reason"].rsplit("; see ", 1)[1])
+                self.assertTrue(report.is_relative_to(root / "prepared/contracts"))
+                self.assertTrue(report.is_file())
+            self.assertIn("link refused", failures[1]["reason"])
+
     def test_every_selected_contract_law_builds_a_campaign_entry(self):
         # A law the inventory selects must never stop preparation as an
         # unsupported fixture (NET-18 public_connect_preflight carries only a

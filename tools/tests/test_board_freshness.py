@@ -13,6 +13,26 @@ TOOLS = Path(__file__).resolve().parents[1]
 
 
 class BoardFreshnessTest(unittest.TestCase):
+    def test_only_a_complete_nightly_sweep_counts_towards_the_26_hour_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            nightly = base / "nightly"
+            older = nightly / "older"
+            older.mkdir(parents=True)
+            newer = nightly / "newer"
+            newer.mkdir()
+            (newer / "prepare.jsonl").touch()
+            command = [sys.executable, TOOLS / "board-freshness.py", "--base", base,
+                       "--nightly-dir", nightly, "--alert"]
+            self.assertIn("NIGHTLY-STALE age unavailable", subprocess.check_output(command, text=True))
+            complete = older / "complete"
+            complete.touch()
+            before = time.time() - 26 * 3600 - 60
+            os.utime(complete, (before, before))
+            self.assertIn("NIGHTLY-STALE 26.0 h old", subprocess.check_output(command, text=True))
+            (newer / "complete").touch()
+            self.assertNotIn("NIGHTLY-STALE", subprocess.check_output(command, text=True))
+
     def test_locks_release_with_a_live_build_daemon(self):
         with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as listener:
             base = Path(directory)
@@ -201,6 +221,16 @@ esac
             for alert, contents in expected.items():
                 self.assertEqual(alert.read_text(), contents)
             self.assertIn("- " + weekly, followups.read_text())
+            vopr = subprocess.check_output(
+                [sys.executable, TOOLS / "board-freshness.py", "--base", base, "--service-failure", followups],
+                env=os.environ | {"MONITOR_UNIT": "hirsel-vopr-nightly.service", "MONITOR_EXIT_CODE": "exited",
+                                  "MONITOR_EXIT_STATUS": "2", "MONITOR_INVOCATION_ID": ""},
+                text=True,
+            )
+            self.assertIn("Hirsel nightly VOPR sweep failed (exit 2)", vopr)
+            self.assertIn("-u hirsel-vopr-nightly.service", vopr)
+            self.assertEqual((base / "alerts" / f"{vopr[:10]}-vopr.txt").read_text(), vopr)
+            self.assertIn("- " + vopr, followups.read_text())
             self.assertTrue(followups.read_text().startswith("Existing entry\n"))
 
     def test_failed_fetch_preserves_last_complete_and_alerts_when_stale(self):
@@ -220,11 +250,14 @@ esac
             head = git("rev-parse", "HEAD")
             git("update-ref", "refs/remotes/origin/main", head)
             current = base / "CURRENT-BOARD.md"
+            nightly = base / "vopr/nightly"
+            (nightly / "recent").mkdir(parents=True)
+            (nightly / "recent/complete").touch()
 
             def alert():
                 return subprocess.check_output(
                     [sys.executable, TOOLS / "board-freshness.py", "--base", base,
-                     "--current", current, "--alert"], text=True,
+                     "--current", current, "--alert", "--nightly-dir", nightly], text=True,
                 )
 
             self.assertIn("BOARD-STALE age unavailable", alert())
@@ -291,6 +324,9 @@ esac
             ))
             (board / "board.md").write_text("Refused results\n")
             current = base / "CURRENT-BOARD.md"
+            nightly = base / "vopr/nightly"
+            (nightly / "recent").mkdir(parents=True)
+            (nightly / "recent/complete").touch()
             for recovered in (False, True):
                 if recovered:
                     (run / "attempt.json").write_text(json.dumps({
@@ -298,7 +334,7 @@ esac
                     }))
                 alert = subprocess.check_output(
                     [sys.executable, TOOLS / "board-freshness.py", "--base", base,
-                     "--current", current, "--alert"], text=True,
+                     "--current", current, "--alert", "--nightly-dir", nightly], text=True,
                 )
                 self.assertEqual(alert, "")
                 shown = current.read_text()

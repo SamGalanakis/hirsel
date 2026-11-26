@@ -17,7 +17,8 @@ import std_native
 ROOT = std_native.ROOT
 SEED = 'HIRSEL_TEST_SIM_SEED'
 DEFAULT_SEEDS = 32
-GENERATED_KINDS = ('postgres', 'contracts', 'runner-adapters')
+CANARY = 'std@1/tests/campaign_canary/seed_residue'
+GENERATED_KINDS = ('postgres', 'contracts', 'runner-adapters', 'canary')
 SEEDED_TEST = re.compile(r'^@test\s+fn (\w+)\(([^)]*)\)', re.M)
 # Keep the 10,000-frame floods intact.
 FLOOD_SEEDS = {
@@ -91,15 +92,21 @@ def seeded_package_inventory():
     return inventory
 
 
-def selected_laws():
+def selected_laws(skips=None):
     laws = {'postgres': {f'postgres@1/sim_tests/{name}': name for name in POSTGRES}}
+    direct = set()
     for case in std_native.discover(ROOT, []):
-        if (case.name in DIRECT or std_native.simulated_network_case(case)) and not unsupported_fixture(case):
+        if case.name in DIRECT or std_native.simulated_network_case(case):
             module = case.test_of or f'tests/{case.file.stem}'
             name = case.call.split('(')[0]
             key = f'{case.package}@1/{module}/{name}'
+            direct.add(case.name)
+            if fixture := unsupported_fixture(case):
+                if skips is not None:
+                    skips[key] = f'unsupported campaign fixture: {fixture}'
+                continue
             laws.setdefault('contracts', {})[key] = case
-    if DIRECT - {case.name for case in laws['contracts'].values()}:
+    if DIRECT - direct:
         raise ValueError('a direct simulation law is missing from the contract inventory')
 
     source = (ROOT / 'core/programs/runner/runner_calls.hirsel').read_text()
@@ -141,7 +148,7 @@ def network_adapter(test, module, call, expected, window):
     return adapter(test, module, call, expected, True, setup)
 
 
-def contract_inputs(group, work):
+def contract_inputs(group, work, source_laws=None):
     core, std = {'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}
     packages = [
         {'package': core, 'sources': std_native.library_sources(ROOT / 'core/core', True), 'dependencies': []},
@@ -168,8 +175,6 @@ def contract_inputs(group, work):
             else:
                 source += std_native.simulation_support('sim')
         for law, case in cases:
-            if fixture := unsupported_fixture(case):
-                raise ValueError(f'{law} needs an unsupported campaign fixture: {fixture}')
             name = case.call.split('(')[0]
             test = f'campaign_{name}'
             if in_core:
@@ -191,13 +196,31 @@ pub fn campaign_call_{name}(network: Net, time: Clock, tasks: Tasks) -> bool wai
                 entries[law] = f'std@1/{"/".join(modules)}/{test}'
         file = work / f'contract-{index}.hirsel'
         file.write_text(source)
+        if source_laws is not None:
+            source_laws[file.name] = {law for law, _ in cases}
         package['sources'].append({'file': str(file), 'modules': modules, 'signatures': in_core and bool(first.test_of)})
         if bridge:
             file = work / f'bridge-{index}.hirsel'
             file.write_text(bridge)
+            if source_laws is not None:
+                source_laws[file.name] = {law for law, _ in cases}
             packages[1]['sources'].append({'file': str(file), 'modules': ['tests', f'campaign_core_{index}'],
                                            'signatures': False})
     return {'core': core, 'packages': packages}, entries
+
+
+def add_canary(inputs, entries, scratch):
+    file = scratch / 'campaign-canary.hirsel'
+    file.write_text('''@test
+fn seed_residue(seed_grant: Env) -> Result[(), ()] {
+    let seed = option.unwrap(sim.world.test_seed(seed_grant))
+    if seed % 2 == 1 { Error(()) } else { Ok(()) }
+}
+''')
+    inputs['packages'][1]['sources'].append({
+        'file': str(file), 'modules': ['tests', 'campaign_canary'], 'signatures': False,
+    })
+    entries[CANARY] = CANARY
 
 
 def runner_inputs(group, work):
@@ -229,112 +252,149 @@ def output_name(definition):
 def run_preparation(command, scratch, report, expected):
     for definition in expected:
         command.extend(['--exact', definition])
-    with report.open('w') as log:
-        result = subprocess.run(command, stdout=log, cwd=scratch)
+    with report.open('w') as log, report.with_suffix('.stderr').open('w') as stderr:
+        result = subprocess.run(command, stdout=log, stderr=stderr, cwd=scratch)
     if result.returncode not in (0, 1):
-        raise ValueError(f'preparation exited {result.returncode}; see {report}')
-    tests = json.loads(report.read_text())['tests']
-    rows = {row['definition']: row for row in tests}
-    if len(tests) != len(rows) or rows.keys() != set(expected):
-        raise ValueError(f'preparation did not discover exactly the campaign entries; see {report}')
-    return rows
+        raise ValueError(f'preparation exited {result.returncode}; see {report} and {report.with_suffix(".stderr")}')
+    try:
+        document = json.loads(report.read_text())
+        if document.get('accepted') is False:
+            return {}, {Path(row['primary']['module']).name for row in document['diagnostics']}
+        tests = document['tests']
+        rows = {row['definition']: row for row in tests}
+        if len(tests) != len(rows) or rows.keys() - expected:
+            raise ValueError('unexpected or duplicate law definitions')
+    except (AttributeError, KeyError, TypeError, ValueError) as error:
+        raise ValueError(f'invalid preparation report; see {report} and {report.with_suffix(".stderr")}') from error
+    return rows, set()
 
 
-def covered_preparation(command, scratch, report, expected):
-    """Prepare the normal (`bin`) leg as a coverage build and return its rows.
-    Every law must produce its executable and `.covmap`."""
-    rows = run_preparation(command + ['--coverage'], scratch, report, expected)
+def prepare_leg(command, scratch, report, leg, expected, errors):
+    covered = leg == 'bin'
+    if covered:
+        command.append('--coverage')
+    try:
+        rows, refused = run_preparation(command, scratch, report, expected)
+    except ValueError as error:
+        for definition in expected:
+            errors.setdefault(definition, []).append(f'{leg}: {error}')
+        return {}, set()
     for definition in expected:
-        binary = scratch / 'bin' / output_name(definition)
-        if rows[definition].get('source') != 'executed' or not Path(f'{binary}.covmap').is_file():
-            raise ValueError(f'{definition} produced no coverage executable and map; see {report}')
-    return rows
+        binary = scratch / leg / output_name(definition)
+        row = rows.get(definition, {})
+        if refused:
+            reason = f'{leg} input was refused'
+        elif row.get('source') != 'executed' or not binary.is_file():
+            reason = f'produced no {leg} executable'
+            if stopped := row.get('stopped'):
+                reason += f': {stopped}'
+        elif covered and not Path(f'{binary}.covmap').is_file():
+            reason = 'produced no coverage map'
+        else:
+            continue
+        errors.setdefault(definition, []).append(f'{reason}; see {report}')
+    return rows, refused
 
 
-def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime):
-    """Build each law twice: the normal build gives a seed's verdict, and the
-    recording build records it for the SEM-8 replay differential.
-
-    The normal build is also a coverage build: its `<HEX>.covmap` sits beside
-    the executable, every seed run writes a raw file read against it, and the
-    campaign merges one profile for each law group (`kind`)."""
-    scratch = work / kind
+def prepare(compiler, work, kind, group, jobs, seeds, build, runtime, recording_runtime,
+            nightly=None, attempt=0):
+    """Build a covered normal leg and a recording leg for SEM-8 replay."""
+    scratch = work / (kind if not attempt else f'{kind}-{attempt}')
     scratch.mkdir()
+    reports = scratch if nightly is None else nightly / 'prepared' / kind
+    reports.mkdir(parents=True, exist_ok=True)
+    prefix = '' if not attempt else f'retry-{attempt}-'
     base = [str(compiler), 'test', '--release', '--backend', 'llvm', '-j', str(jobs), '--seed', '0',
             '--store', str(scratch / 'objects'), '--json']
     normal = ['--runtime', str(runtime)] if runtime else []
     libraries = ['--libraries', str(ROOT / 'core')] if runtime else []
     recording = ['--laws', *(['--runtime', str(recording_runtime)] if recording_runtime else [])]
-    legs = {'bin': lambda definition: recording if definition in REACH_WITNESSES else normal,
-            'recording': lambda definition: recording}
-    reports = {}
+    errors = {}
     rows = {}
     if kind not in GENERATED_KINDS:
-        # Package mode writes a workspace lock. Stage the manifests and their
-        # relative dependencies away from the checkout.
+        # Package mode writes a workspace lock. Stage its sources away from the checkout.
         programs = work / 'programs'
         if not programs.exists():
             shutil.copytree(ROOT / 'core/programs', programs,
                             ignore=shutil.ignore_patterns('hirsel.lock', 'node_modules'))
         entries = group
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
-        for leg, launch in legs.items():
-            for index, definition in enumerate(entries.values()):
-                report = scratch / f'prepare-{leg}-{index}.json'
-                reports[leg, definition] = report
-                command = base + ['-o', str(scratch / leg)] + launch(definition) + libraries + [str(programs / kind)]
+        for index, definition in enumerate(entries.values()):
+            covered = recording if definition in REACH_WITNESSES else normal
+            for leg, launch in (('bin', covered), ('recording', recording)):
+                command = base + ['-o', str(scratch / leg)] + launch + libraries + [str(programs / kind)]
+                report = reports / f'prepare-{leg}-{index}.json'
+                prepared, _ = prepare_leg(command, scratch, report, leg, [definition], errors)
                 if leg == 'bin':
-                    prepared = covered_preparation(command, scratch, report, [definition])
-                else:
-                    prepared = run_preparation(command, scratch, report, [definition])
-                rows[leg, definition] = prepared[definition]
+                    rows.update(prepared)
     else:
-        command = list(base)
+        source_laws = {}
         if kind == 'postgres':
             package = scratch / 'postgres'
             shutil.copytree(ROOT / 'core/programs/postgres', package, ignore=shutil.ignore_patterns('hirsel.lock'))
             entries = {law: law for law in group}
-            command.extend(libraries + [str(package)])
+            base.extend(libraries + [str(package)])
         else:
-            inputs, entries = (contract_inputs if kind == 'contracts' else runner_inputs)(group, scratch)
+            if kind == 'runner-adapters':
+                inputs, entries = runner_inputs(group, scratch)
+            else:
+                contracts = group if kind == 'contracts' else {}
+                inputs, entries = contract_inputs(contracts, scratch, source_laws)
+            if kind == 'canary':
+                add_canary(inputs, entries, scratch)
             manifest = scratch / 'inputs.json'
             manifest.write_text(json.dumps(inputs))
             limits = {case.root_limit for case in group.values()} if kind == 'contracts' else {64 << 20}
             limit, = limits
-            command.extend(['--inputs', str(manifest), '--source-core', '--source-std',
-                            '--limit', str(limit),
-                            '--grant', 'Tasks', '--grant', f'Env={SEED}'])
+            base.extend(['--inputs', str(manifest), '--source-core', '--source-std',
+                         '--limit', str(limit), '--grant', 'Tasks', '--grant', f'Env={SEED}'])
         print(f'Preparing {len(entries)} {kind} laws', flush=True)
-        for leg in legs:
-            report = scratch / f'prepare-{leg}.json'
+        for leg, launch in (('bin', normal), ('recording', recording)):
+            report = reports / f'{prefix}prepare-{leg}.json'
+            prepared, refused = prepare_leg(base + ['-o', str(scratch / leg)] + launch, scratch, report,
+                                            leg, list(entries.values()), errors)
+            rejected = {law for module in refused for law in source_laws.get(module, ())}
+            if nightly is not None and rejected and rejected != group.keys():
+                # Contract fixtures share a compiler invocation. Drop the refused
+                # input files and prepare the other fixtures in a fresh directory.
+                for law in sorted(rejected):
+                    prepare_outcome(nightly, build, law, 'prepare_red', '; '.join(errors[entries[law]]))
+                if (scratch / 'objects').exists():
+                    shutil.rmtree(scratch / 'objects')
+                remaining = {law: case for law, case in group.items() if law not in rejected}
+                return prepare(compiler, work, kind, remaining, jobs, seeds, build, runtime,
+                               recording_runtime, nightly, attempt + 1)
             if leg == 'bin':
-                prepared = covered_preparation(command + ['-o', str(scratch / leg)] + normal,
-                                               scratch, report, list(entries.values()))
-            else:
-                prepared = run_preparation(command + ['-o', str(scratch / leg)] + recording,
-                                           scratch, report, entries.values())
-            for definition in entries.values():
-                reports[leg, definition] = report
-                rows[leg, definition] = prepared[definition]
+                rows.update(prepared)
     laws = []
     for law, definition in entries.items():
-        binaries = {}
-        for leg in legs:
-            binary = scratch / leg / output_name(definition)
-            if rows[leg, definition].get('source') != 'executed' or not binary.is_file():
-                raise ValueError(f'{law} produced no {leg} executable; see {reports[leg, definition]}')
-            binaries[leg] = str(binary)
-        row = rows['bin', definition]
+        if definition in errors:
+            reason = '; '.join(errors[definition])
+            if nightly is None:
+                raise ValueError(f'{law} {reason}')
+            prepare_outcome(nightly, build, law, 'prepare_red', reason)
+            continue
+        binary = scratch / 'bin' / output_name(definition)
+        row = rows[definition]
         seed_zero = {'status': 0 if row['passed'] else (row.get('status') or 1),
                      'stdout': row.get('stdout', ''), 'stderr': row.get('stderr', row.get('stopped', ''))}
-        count = seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
-        laws.append({'build': build, 'law': law, 'executable': binaries['bin'],
-                     'recording': binaries['recording'], 'seeds': count,
+        # Two consecutive allocated seeds always exercise both canary residues.
+        count = 2 if law == CANARY else seeds if seeds is not None else FLOOD_SEEDS.get(law, DEFAULT_SEEDS)
+        laws.append({'build': build, 'law': law, 'executable': str(binary),
+                     'recording': str(scratch / 'recording' / binary.name), 'seeds': count,
                      'seed_zero': seed_zero, 'min_traces': min(count, TRACE_FLOORS.get(law, 0)),
                      'required_witnesses': REACH_WITNESSES.get(law, []),
-                     'coverage': {'group': kind, 'map': binaries['bin'] + '.covmap', 'tool': str(compiler)}})
-    shutil.rmtree(scratch / 'objects')
+                     'coverage': {'group': kind, 'map': f'{binary}.covmap', 'tool': str(compiler)}})
+    if (scratch / 'objects').exists():
+        shutil.rmtree(scratch / 'objects')
     return laws
+
+
+def prepare_outcome(nightly, build, law, kind, reason):
+    print(f'{law}: {reason}', flush=True)
+    with (nightly / 'prepare.jsonl').open('a') as results:
+        print(json.dumps({'build': build, 'law': law, 'kind': kind, 'reason': reason,
+                          'status': int(kind == 'prepare_red')}), file=results)
 
 
 def main():
@@ -343,6 +403,7 @@ def main():
     parser.add_argument('--runtime', type=Path, help='normal runtime archive for an uninstalled compiler')
     parser.add_argument('--recording-runtime', type=Path, help='recording archive for an uninstalled compiler')
     parser.add_argument('--work', type=Path)
+    parser.add_argument('--nightly-results', type=Path, help='retain preparation reports and continue past unprepared laws')
     parser.add_argument('--jobs', type=int, default=4, choices=range(1, 5))
     parser.add_argument('--seeds', type=int, help='override the default seed count for every law')
     parser.add_argument('--law', help='prepare or list just one exact law')
@@ -350,13 +411,15 @@ def main():
                         help='prepare or list only this package (repeatable)')
     parser.add_argument('--list', action='store_true')
     args = parser.parse_args()
-    inventory = selected_laws()
+    skips = {}
+    inventory = selected_laws(skips)
     if args.package:
         packages = set(args.package)
         if 'runner' in packages:
             packages.add('runner-adapters')
         inventory = {kind: laws for kind, laws in inventory.items() if kind in packages}
-    if args.law and not any(args.law in laws for laws in inventory.values()):
+        skips = {name: reason for name, reason in skips.items() if name.split('@')[0] in packages}
+    if args.law and args.law not in skips and not any(args.law in laws for laws in inventory.values()):
         parser.error('unknown simulation law')
     if args.list:
         print('\n'.join(name for laws in inventory.values() for name in laws if not args.law or name == args.law))
@@ -370,12 +433,23 @@ def main():
     recording_runtime = args.recording_runtime.resolve(strict=True) if args.recording_runtime else None
     work = args.work.resolve()
     work.mkdir()
+    nightly = args.nightly_results.resolve(strict=True) if args.nightly_results else None
+    if nightly is not None:
+        (nightly / 'prepare.jsonl').touch(exist_ok=False)
+        if not args.law and not args.package:
+            inventory['canary'] = {CANARY: None}
+    for law, reason in skips.items():
+        if not args.law or law == args.law:
+            if nightly is None:
+                print(f'{law}: {reason}')
+            else:
+                prepare_outcome(nightly, build, law, 'prepare_skip', reason)
     laws = []
     for kind, group in inventory.items():
         group = {name: case for name, case in group.items() if not args.law or name == args.law}
         if group:
             laws.extend(prepare(args.compiler.resolve(), work, kind, group, args.jobs, args.seeds,
-                                build, runtime, recording_runtime))
+                                build, runtime, recording_runtime, nightly))
     (work / 'manifest.json').write_text(json.dumps(laws, indent=2) + '\n')
 
 

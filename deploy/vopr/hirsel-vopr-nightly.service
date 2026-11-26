@@ -1,9 +1,9 @@
 [Unit]
 Description=Prepare Hirsel main and sweep VOPR seeds on Boat
+OnFailure=hirsel-board-alert.service
 
 [Service]
 Type=oneshot
-CPUAffinity=8-11
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-vopr/main fetch --quiet origin main
 ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-vopr/main switch --quiet --detach origin/main

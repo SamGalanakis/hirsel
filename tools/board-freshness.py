@@ -11,6 +11,7 @@ import tempfile
 import time
 
 MAX_AGE = 26 * 3600
+NIGHTLY_DIR = Path(os.environ.get("HIRSEL_BRIEFS", "/workspace/code/hirsel-briefs")) / "vopr/nightly"
 
 
 def read_report(path):
@@ -46,6 +47,23 @@ def board_alert(complete, now):
     age = now - complete[0]
     if age > MAX_AGE:
         return f"BOARD-STALE {hours(age)} old (>{hours(MAX_AGE)}; {complete[1][:12]})"
+    return None
+
+
+def nightly_alert(directory, now):
+    newest = None
+    for result in directory.glob("*/complete"):
+        try:
+            finished = result.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if newest is None or finished > newest[0]:
+            newest = finished, result.parent.name
+    if newest is None:
+        return "NIGHTLY-STALE age unavailable (no complete VOPR sweep)"
+    age = now - newest[0]
+    if age > MAX_AGE:
+        return f"NIGHTLY-STALE {hours(age)} old (>{hours(MAX_AGE)}; {newest[1]})"
     return None
 
 
@@ -98,7 +116,7 @@ def verdict(value):
     return "pending" if value is None else "yes" if value else "no"
 
 
-def render(base, attempt, report, complete, now):
+def render(base, attempt, report, complete, now, nightly=None):
     lines = ["# Current Hirsel board", "", f"Freshness as of {timestamp(now)}.", ""]
     alert = board_alert(complete, now)
     board_status = report.get("exit_status")
@@ -140,8 +158,9 @@ def render(base, attempt, report, complete, now):
         lines += [f"**Last complete board** · `{commit}` · {timestamp(finished)} · "
                   f"{hours(now - finished)} old · {main_distance(base, commit)}.",
                   f"Stale after {timestamp(finished + MAX_AGE)}."]
-    if alert:
-        lines += ["", f"**{alert}**"]
+    for warning in (alert, nightly):
+        if warning:
+            lines += ["", f"**{warning}**"]
     if complete is not None:
         lines += ["", "---", "", complete[2].read_text().rstrip()]
     return "\n".join(lines) + "\n"
@@ -164,10 +183,17 @@ def service_failure(base, followups, tier="nightly"):
         result = os.environ.get("MONITOR_SERVICE_RESULT", "unknown")
         detail = f"failed ({result}{', status ' + status if status else ''})"
     invocation = os.environ.get("MONITOR_INVOCATION_ID")
-    suffix = "-weekly" if tier == "weekly" else ""
+    vopr = os.environ.get("MONITOR_UNIT") == "hirsel-vopr-nightly.service"
+    suffix = "-vopr" if vopr else "-weekly" if tier == "weekly" else ""
+    unit = "hirsel-vopr-nightly.service" if vopr else f"hirsel-board{suffix}.service"
     journal = (f"journalctl --user _SYSTEMD_INVOCATION_ID={invocation}" if invocation
-               else f"journalctl --user -u hirsel-board{suffix}.service")
-    line = f"{timestamp(now.timestamp())} Hirsel {tier} board {detail}. See `{journal}`."
+               else f"journalctl --user -u {unit}")
+    if vopr:
+        subject = "nightly VOPR sweep"
+        detail = f"failed (exit {status})" if status else detail
+    else:
+        subject = f"{tier} board"
+    line = f"{timestamp(now.timestamp())} Hirsel {subject} {detail}. See `{journal}`."
     alerts = base / "alerts"
     alerts.mkdir(exist_ok=True)
     with (alerts / f"{now.date()}{suffix}.txt").open("a") as stream:
@@ -182,6 +208,7 @@ def main():
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--current", type=Path)
     parser.add_argument("--alert", action="store_true")
+    parser.add_argument("--nightly-dir", type=Path, default=NIGHTLY_DIR)
     parser.add_argument("--service-failure", type=Path, metavar="FOLLOWUPS",
                         help="record the failing systemd invocation")
     parser.add_argument("--service-failure-tier", choices=("nightly", "weekly"))
@@ -220,11 +247,14 @@ def main():
         if args.current or args.alert:
             complete = last_complete(args.base)
             now = time.time()
+            nightly = nightly_alert(args.nightly_dir, now)
             if args.current:
                 attempt, report = latest_attempt(args.base)
-                atomic_write(args.current, render(args.base, attempt, report, complete, now))
-            if args.alert and (alert := board_alert(complete, now)):
-                print(alert)
+                atomic_write(args.current, render(args.base, attempt, report, complete, now, nightly))
+            if args.alert:
+                for alert in (board_alert(complete, now), nightly):
+                    if alert:
+                        print(alert)
 
 
 if __name__ == "__main__":

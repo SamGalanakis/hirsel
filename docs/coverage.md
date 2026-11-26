@@ -729,8 +729,9 @@ merge and counted on stderr as an unobserved run, since the merge cannot tell wh
 was. A run killed after its header reads as failed. Coverage never changes the campaign's
 exit status. The recording builds have no coverage, so tapes record and replay as before.
 `tools/nightly-vopr.sh` merges each group's batch profiles into the night's `coverage/`.
-Every law prepares with coverage; a law whose coverage build fails stops preparation, as any
-other build failure does.
+Every law prepares with coverage. The nightly records preparation failures in `prepare.jsonl`
+and sweeps the laws that produced both executables and a coverage map. The dated run keeps the
+compiler reports under `prepared/`.
 Seed 0 runs at preparation under `hirsel test` and is not in the campaign's profiles.
 
 ## Caching

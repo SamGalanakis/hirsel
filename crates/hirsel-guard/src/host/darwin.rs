@@ -6,6 +6,11 @@
 //! call, as the data limit makes it on Linux, and the same refusal path ends
 //! the process. No thread watches the footprint.
 //!
+//! `mimalloc`'s zone is version 10 and leaves `reinit_lock` null, the entry
+//! libmalloc calls for every zone of version 9 or later in a forked child. The
+//! guard fills it before the first allocation, or every `fork` would end the
+//! child with SIGSEGV before `exec`.
+//!
 //! What the arena does not hold is not limited: a foreign library's direct
 //! `mmap`, and thread stacks. Children inherit no kernel limit; each Hirsel
 //! binary installs the guard and reads the `HIRSEL_MEMORY_LIMIT` it inherited.
@@ -33,11 +38,73 @@ unsafe extern "C" {
     fn mi_reserve_os_memory(size: usize, commit: bool, allow_large: bool) -> libc::c_int;
 }
 
+/// libmalloc's zone record up to its version, and its introspection table up
+/// to the entry a forked child calls (`<malloc/malloc.h>`, arm64 macOS 26).
+#[repr(C)]
+struct Zone {
+    /// Two reserved words, then size, malloc, calloc, valloc, free, realloc
+    /// and destroy.
+    calls: [usize; 9],
+    name: *const libc::c_char,
+    /// batch_malloc and batch_free.
+    batch: [usize; 2],
+    introspect: *mut Introspection,
+    version: libc::c_uint,
+}
+
+#[repr(C)]
+struct Introspection {
+    /// The thirteen entries from enumerator to enumerate_discharged_pointers.
+    earlier: [usize; 13],
+    reinit_lock: Option<unsafe extern "C" fn(*mut Zone)>,
+}
+
+unsafe extern "C" {
+    /// With task 0 and no reader, the process's own zone list, without
+    /// allocating.
+    fn malloc_get_all_zones(
+        task: libc::c_uint,
+        reader: *const libc::c_void,
+        zones: *mut *mut *mut Zone,
+        count: *mut libc::c_uint,
+    ) -> libc::c_int;
+}
+
+/// `mimalloc` holds no zone lock: its `force_lock` and `force_unlock` do
+/// nothing, and so does this.
+unsafe extern "C" fn reinit_lock(_zone: *mut Zone) {}
+
+/// Give `mimalloc`'s zone the `reinit_lock` entry a forked child calls.
+fn survive_fork() {
+    let mut zones = std::ptr::null_mut();
+    let mut count = 0;
+    // SAFETY: both outputs are live; the call reads the process's own list.
+    if unsafe { malloc_get_all_zones(0, std::ptr::null(), &mut zones, &mut count) } != 0 {
+        return;
+    }
+    for index in 0..count as usize {
+        // SAFETY: the list holds `count` registered zones. Each record has a
+        // name or null and, from version 9, an introspection table that
+        // reaches `reinit_lock`. `mimalloc`'s table is its own writable data.
+        unsafe {
+            let zone = *zones.add(index);
+            if !(*zone).name.is_null()
+                && std::ffi::CStr::from_ptr((*zone).name) == c"mimalloc"
+                && (*zone).version >= 9
+                && (*(*zone).introspect).reinit_lock.is_none()
+            {
+                (*(*zone).introspect).reinit_lock = Some(reinit_lock);
+            }
+        }
+    }
+}
+
 static LIMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Hold the process to `requested` bytes of `mimalloc` memory. A reservation
 /// the host refuses leaves no arena, so the first allocation reports the limit.
 pub(crate) fn set_limit(requested: u64) {
+    survive_fork();
     // SAFETY: option setting and the reservation are mimalloc's documented
     // start-up calls; none of them allocates through the guard.
     unsafe {

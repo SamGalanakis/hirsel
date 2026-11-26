@@ -1750,6 +1750,20 @@ slowest turn plus 50 ms, and no room's received frame count drops while another 
 Reds that may ride: N3 and any cost target. W34 to W39 are soundness or isolation laws of
 their own slices and block them.
 
+### Pooling: open for design review
+
+- **PO1** The `inflight` window. Its default and how it scales with units. Too small and one
+  busy room's control calls delay another's joins. Too large and a burst of opens holds every
+  unit at once. Fence slots are reserved either way.
+- **PO2** Primary-unit affinity. A room is homed on its least-loaded unit and spills over only
+  when that unit is full. Should rooms instead spread across units from the start, trading
+  inter-unit hops for less tail risk on one hot unit?
+- **PO3** The shared receive pool. RTC-10 states that the SOCKET receive pool is not isolated
+  per room: a flood to one room's port takes slots from every room on that member. Is a
+  per-room receive quota needed in NET-16, or are `room_pps` and steering enough?
+- **PO4** Where cascade attaches. [sfu_cascade](sfu_cascade.md) adds a per-link cost term
+  to `room_cost`, and the per-room fence gains lease expiry as a second trigger for suspend.
+
 ## WebRTC build laws
 
 Each law is written **red first**, in its named harness, before the code it tests. Its oracle

@@ -27,12 +27,14 @@ runtime=core-driver-runtime-pic
 recording=core-driver-record-runtime-pic
 outputs=$(.buck2/bin/buck2 build -j4 --show-json-output \
   "//:$driver" "//:$runtime" "//:$recording")
-readarray -t paths < <(python3 -c '
+resolved=$(python3 -c '
 import json, sys
+from pathlib import Path
 outputs = json.load(sys.stdin)
 for target in sys.argv[1:]:
-    print(outputs["root//:" + target])
+    print(Path(outputs["root//:" + target]).resolve(strict=True))
 ' "$driver" "$runtime" "$recording" <<<"$outputs")
+readarray -t paths <<<"$resolved"
 export LLVM_SYS_231_PREFIX="$checkout/tools/buck2/toolchains/llvm-files"
 export LD_LIBRARY_PATH="$LLVM_SYS_231_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 status=0

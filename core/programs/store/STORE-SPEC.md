@@ -7709,7 +7709,8 @@ Describe checks the files it reads. Use verify to check the rest of the image.
 **Reservation.** A fixed `BOOTSTRAP` scope covers measurement. After preparation the tool
 reserves the sum of the parts below to describe the selected capture. It prints that need on
 success. On a reservation refusal it prints `Full(Allocation(requested, available))`, the parts
-and `no store_tool route reads a catalog this large`. Overflow refuses with the maximum u64
+and the remedy `the need is <requested> bytes in the fixed 1 GiB store_tool root; no store_tool
+route reads a catalog this large`. Overflow refuses with the maximum u64
 figure. There is no row, stamp or suffix byte term.
 
 | Part | Describe bytes |

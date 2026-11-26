@@ -204,11 +204,16 @@ passes it. [STORE-SPEC §15](../../core/programs/store/STORE-SPEC.md) has the fu
 |---|---|
 | `hirsel store backup DIR TARGET` | copies the store at `DIR` into the empty directory `TARGET`, which it creates if absent, at the head it leases; prints `backup <store id> head <H>` |
 | `hirsel store restore BACKUP DIR` | makes a store at the empty directory `DIR` from a backup; prints `restored <store id> head <H>` |
-| `hirsel store inspect DIR` | prints the store's identity and head, then each table and index with its state, revision, exact row count and charged bytes; a read-only open, so it reads a store that is served |
-| `hirsel store stats DIR` | the `inspect` lines, plus the journal's segments and bytes and the pack count |
+| `hirsel store inspect DIR` | captures the store beside a live writer and prints its identity and head, then each table and index with its state, revision and exact row count |
+| `hirsel store stats DIR` | the `inspect` lines with each collection's charged bytes, plus the journal's segments and bytes, the account at the cut, pins and pack rows |
 | `hirsel store verify DIR` | scrubs a copy of the store and prints each fault |
 | `hirsel store verify DIR --release EXE` | on a copy, declares the release's schema, scrubs, and checks every Public index against its table under the release's extractors; prints each changed revision, fault and wrong entry; changes nothing |
 | `hirsel store repair DIR --release EXE` | on DIR itself: demotes each index with a wrong entry and builds every index to the end; refuses while a deploy's export lease is held |
+
+`inspect` and `stats` do not open the store. They reserve the prepared capture's computed need
+inside `store_tool`'s fixed 1 GiB root, and print `hirsel store <verb> needs N bytes` on stderr
+when they succeed. A `Full` refusal prints the need's parts; its remedy line names the need and
+the fixed root, then says that no `store_tool` route reads a catalog this large.
 
 A backup opens the store as its writer, so a store another process holds exits 75 and is not
 changed. A store a place serves is backed up through its host, which is not built yet. A

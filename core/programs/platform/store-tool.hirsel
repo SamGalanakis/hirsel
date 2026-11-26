@@ -269,7 +269,10 @@ fn describe_shortage(err: Stderr, verb: String, c: Capacity, parts: List[store.P
         string.push(mut detail, "\n")
         let _ = stderr.write(err, detail)
     }
-    let _ = stderr.write(err, "hirsel store: no store_tool route reads a catalog this large\n")
+    let mut remedy = string.from("hirsel store: the need is ")
+    string.push_u64(mut remedy, c.requested)
+    string.push(mut remedy, " bytes in the fixed 1 GiB store_tool root; no store_tool route reads a catalog this large\n")
+    let _ = stderr.write(err, remedy)
     Error(Exit(status: 1u8))
 }
 
@@ -357,18 +360,18 @@ fn scrub_image(d: Dir, c: Clock, r: Random, tasks: Tasks, take options: store.Op
 }
 
 pub fn main(from: Dir, to: Dir, c: Clock, r: Random, tasks: Tasks, out: Stdout, err: Stderr, argv: Args) -> Result[(), Exit] waits {
+    let Some(verb) = args.get(argv, 0u64) else {
+        return Error(Exit(status: 2u8))
+    }
+    if verb == "inspect" || verb == "stats" {
+        return describe(from, c, verb, out, err)
+    }
     let options = match store.sized(Directory, 2147483648u64) {
         Ok(take sized) => take sized,
         Error(_) => return refused(err, "Full"),
     }
-    let Some(verb) = args.get(argv, 0u64) else {
-        return Error(Exit(status: 2u8))
-    }
     if verb == "backup" {
         return backup(from, to, c, r, tasks, take options, out, err)
-    }
-    if verb == "inspect" || verb == "stats" {
-        return describe(from, c, verb, out, err)
     }
     if verb == "verify" {
         return scrub_image(from, c, r, tasks, take options, out, err)

@@ -499,6 +499,14 @@ pub(crate) fn cgroup_membership(_pid: Option<libc::pid_t>) -> io::Result<String>
     ))
 }
 
+/// Darwin has no cgroup v2 hierarchy to find in a mount table.
+pub(crate) fn mountinfo() -> io::Result<String> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Darwin has no cgroups",
+    ))
+}
+
 /// The live children of process `pid` (`proc_listchildpids`).
 pub(crate) fn child_pids(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
     let mut children = vec![0 as libc::c_int; 4096];

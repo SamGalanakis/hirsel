@@ -15,8 +15,9 @@ use std::time::Instant;
 /// The grants a gate test may hold; `Dir` is allowed separately, as a relative path.
 const ALLOWED: [&str; 5] = ["Clock", "Random", "Stdout", "Stderr", "Tasks"];
 
-/// The most report bytes the gate reads from a test run; a larger report is a red run.
-const REPORT_BYTES: usize = 16 << 20;
+/// The most bytes of a gate run's stderr the gate keeps for its diagnostics. The report
+/// itself is spooled to a file and read whole.
+const DIAGNOSTIC_BYTES: usize = 256 << 10;
 
 /// A gate run's verdict ("The verdict").
 #[derive(Debug, PartialEq, Eq)]
@@ -192,8 +193,9 @@ pub(super) fn authority(tree: &Tree) -> Result<(), Failure> {
 /// The gate's steps 2 and 4 on `tree`, after its authority check: `hirsel check PACKAGE
 /// --frozen` over the tests' sources, then `hirsel test PACKAGE --frozen --json`, both in
 /// `source`, the publish scratch's tree, under the launcher's compiler and package stores
-/// and the pass cache `STATE/test-results`, read as a verdict. A run still going at
-/// `deadline` is red. `None` is a cancelled run.
+/// and the pass cache `STATE/test-results`, read as a verdict. The test run's report is
+/// spooled to `report.json` beside `source`, never cut. A run still going at `deadline`
+/// is red. `None` is a cancelled run.
 pub(crate) fn gate(
     compiler: &Compiler,
     state: &Path,
@@ -218,7 +220,7 @@ pub(crate) fn gate(
         "--package-store".into(),
         path("packages"),
     ];
-    let run = |verb: &str, more: &[String]| {
+    let run = |verb: &str, more: &[String], report: Option<fs::File>| {
         let args: Vec<String> = [verb.to_owned()]
             .into_iter()
             .chain(stores.iter().cloned())
@@ -235,10 +237,10 @@ pub(crate) fn gate(
             .current_dir(source)
             .process_group(0)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(report.map_or_else(Stdio::piped, Stdio::from))
             .stderr(Stdio::piped());
         match command.spawn() {
-            Ok(child) => collect(child, cancel, Some(deadline), REPORT_BYTES),
+            Ok(child) => collect(child, cancel, Some(deadline), DIAGNOSTIC_BYTES),
             Err(e) => Some(Err(e)),
         }
     };
@@ -249,7 +251,7 @@ pub(crate) fn gate(
             "the tests had not all ended by the admission deadline".into(),
         ])))
     };
-    let (status, _, stderr) = match run("check", &[])? {
+    let (status, _, stderr) = match run("check", &[], None)? {
         Ok(run) => run,
         Err(e) if e.kind() == io::ErrorKind::TimedOut => return late(),
         Err(e) => return unrun(&e),
@@ -261,26 +263,48 @@ pub(crate) fn gate(
             stderr.trim()
         )])));
     }
+    let Some(spool) = source.parent().map(|dir| dir.join("report.json")) else {
+        return unrun(&"the source tree has no scratch directory");
+    };
+    let report = match fs::File::create_new(&spool) {
+        Ok(file) => file,
+        Err(e) => return unrun(&e),
+    };
     let more = ["--json".into(), "--test-cache".into(), path("test-results")];
-    let (_, stdout, stderr) = match run("test", &more)? {
+    let (_, _, stderr) = match run("test", &more, Some(report))? {
         Ok(run) => run,
         Err(e) if e.kind() == io::ErrorKind::TimedOut => return late(),
         Err(e) => return unrun(&e),
     };
-    Some(Ok(verdict(&stdout, &String::from_utf8_lossy(&stderr))))
+    let report = match fs::File::open(&spool).and_then(|file| {
+        let bytes = file.metadata()?.len();
+        Ok((bytes, serde_json::from_reader(io::BufReader::new(file))))
+    }) {
+        Ok(report) => report,
+        Err(e) => return unrun(&e),
+    };
+    Some(Ok(verdict(report, &String::from_utf8_lossy(&stderr))))
 }
 
-/// Read a `hirsel test --json` report. No report is a lost session when the resident
-/// compiler ended without an answer, and otherwise a run that did not start.
-fn verdict(stdout: &[u8], stderr: &str) -> Verdict {
-    let Ok(report) = serde_json::from_slice::<serde_json::Value>(stdout) else {
-        if stderr.contains("the server ended without an answer") {
-            return Verdict::Lost;
+/// Read a `hirsel test --json` report of `bytes` bytes, parsed. An unparseable report is a
+/// lost session when the resident compiler ended without an answer; otherwise no report
+/// is a run that did not start, and a report that is not JSON is red, saying where.
+fn verdict((bytes, report): (u64, serde_json::Result<serde_json::Value>), stderr: &str) -> Verdict {
+    let report = match report {
+        Ok(report) => report,
+        Err(_) if stderr.contains("the server ended without an answer") => return Verdict::Lost,
+        Err(_) if bytes == 0 => {
+            return Verdict::Red(vec![format!(
+                "the test run did not start: {}",
+                stderr.trim()
+            )]);
         }
-        return Verdict::Red(vec![format!(
-            "the test run did not start: {}",
-            stderr.trim()
-        )]);
+        Err(e) => {
+            return Verdict::Red(vec![format!(
+                "the test run's report of {bytes} bytes is not JSON ({e}): {}",
+                stderr.trim()
+            )]);
+        }
     };
     let Some(rows) = report["tests"].as_array() else {
         return Verdict::Red(vec![format!(

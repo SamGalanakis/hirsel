@@ -453,6 +453,12 @@ pub(crate) fn cgroup_membership(pid: Option<libc::pid_t>) -> io::Result<String> 
     }
 }
 
+/// The text of this process's mount table (`/proc/self/mountinfo`), where the cgroup v2
+/// hierarchy is found.
+pub(crate) fn mountinfo() -> io::Result<String> {
+    std::fs::read_to_string("/proc/self/mountinfo")
+}
+
 /// The live children of process `pid` (its main thread's, which is every child
 /// a single-threaded launcher or a test's child has).
 pub(crate) fn child_pids(pid: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {

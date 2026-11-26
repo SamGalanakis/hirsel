@@ -59,6 +59,44 @@ fn source_tree_byte_and_content_limits_are_exact() {
     ));
 }
 
+/// The Rust launcher's tree limits are the platform's (`launcher.hirsel`), which has no
+/// generated Rust side: each `pub const` there, a literal or a sum of earlier ones, has the
+/// value of the constant of the same name in `launcher::protocol`.
+#[test]
+fn law_tree_limits_agree_with_launcher_hirsel() {
+    use super::admit::protocol::{MANIFEST_BYTES, SOURCE_BYTES, TREE_BYTES};
+    let source = include_str!("../../../../core/programs/platform/launcher.hirsel");
+    let mut values = std::collections::BTreeMap::<&str, u64>::new();
+    for line in source.lines() {
+        let Some((name, expr)) = line
+            .strip_prefix("pub const ")
+            .and_then(|rest| rest.split_once(": u64 = "))
+        else {
+            continue;
+        };
+        let value = expr
+            .split(" + ")
+            .map(|term| match term.trim().strip_suffix("u64") {
+                Some(digits) => digits.parse::<u64>().unwrap(),
+                None => *values
+                    .get(term.trim())
+                    .unwrap_or_else(|| panic!("{name} = {expr}: {term} is not an earlier u64")),
+            })
+            .sum();
+        values.insert(name, value);
+    }
+    for (name, rust) in [
+        ("SOURCE_BYTES", SOURCE_BYTES),
+        ("MANIFEST_BYTES", MANIFEST_BYTES),
+        ("TREE_BYTES", TREE_BYTES),
+    ] {
+        let hirsel = values
+            .get(name)
+            .unwrap_or_else(|| panic!("launcher.hirsel has no `pub const {name}: u64`"));
+        assert_eq!(*hirsel, rust as u64, "launcher.{name}");
+    }
+}
+
 /// Submitted source is published by the normal checker under the launcher's own stores
 /// and admitted as that publication. A type error or exhaustion records no recipe.
 /// Releasing an attempt kills the compiler's group and discards its staged recipe.
@@ -715,4 +753,45 @@ fn source_links_only_its_groups_package_roots() {
         ),
         "an unreadable lock was not refused"
     );
+}
+
+/// The law gate reads its test run's whole report (launch.md "The law gate", step 2): a
+/// passing `hirsel test --json` report over 16 MiB is a green verdict, never a cut report
+/// that fails to parse; a report that is not JSON is red, saying it is not JSON.
+#[test]
+fn law_gate_reads_a_report_of_any_size() {
+    use super::admit::gate::{Verdict, gate};
+    use std::sync::atomic::AtomicBool;
+
+    let pad = (17 << 20).to_string();
+    let run = |report: String| {
+        let compiler: super::Compiler = Arc::new(move |args: &[String]| {
+            let mut command = Command::new("sh");
+            match args[0].as_str() {
+                "test" => command.args(["-c", &report, "sh"]),
+                _ => command.args(["-c", "true"]),
+            };
+            Ok(command)
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("scratch/tree");
+        fs::create_dir_all(&source).unwrap();
+        let tree = Tree {
+            package: ".".into(),
+            ..Tree::default()
+        };
+        let cancel = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(120);
+        gate(&compiler, dir.path(), &tree, &source, &cancel, deadline)
+            .unwrap()
+            .unwrap()
+    };
+    let big = format!(
+        r#"printf '{{"passed":true,"tests":[{{"definition":"t","passed":true,"pad":"'; head -c {pad} /dev/zero | tr '\0' a; printf '"}}]}}'"#
+    );
+    assert_eq!(run(big), Verdict::Green);
+    assert!(matches!(
+        run(r#"printf '{"passed":true,"tests":['"#.into()),
+        Verdict::Red(rows) if rows.len() == 1 && rows[0].contains("is not JSON")
+    ));
 }

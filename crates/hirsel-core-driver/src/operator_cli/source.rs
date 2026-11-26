@@ -20,11 +20,11 @@ impl Source {
         walk(dir, "", &mut files)?;
         files.sort();
         let content: usize = files.iter().map(|(_, bytes)| bytes.len()).sum();
-        if content > crate::launcher::admit::SOURCE_BYTES {
+        if content > crate::launcher::admit::protocol::SOURCE_BYTES {
             return Err(format!(
                 "--source: {} holds {content} bytes of files, over the {} a source may",
                 dir.display(),
-                crate::launcher::admit::SOURCE_BYTES
+                crate::launcher::admit::protocol::SOURCE_BYTES
             )
             .into());
         }

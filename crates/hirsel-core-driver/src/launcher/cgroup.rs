@@ -9,16 +9,82 @@ use super::session::{Child, Role};
 use super::wait_pid;
 use hirsel_core_ids::hex;
 
-const MOUNT: &str = "/sys/fs/cgroup";
-
 /// Process `pid`'s cgroup v2 directory; this process's when `pid` is `None`.
 fn membership(pid: Option<libc::pid_t>) -> io::Result<PathBuf> {
-    let text = crate::host::cgroup_membership(pid)?;
-    let relative = text
+    let cgroup = crate::host::cgroup_membership(pid)?;
+    resolve(&crate::host::mountinfo()?, &cgroup)
+}
+
+/// The directory of the cgroup a `/proc/<pid>/cgroup` text names, under the cgroup2 mount
+/// of a `/proc/self/mountinfo` text whose root holds it: the mount point joined with the
+/// cgroup path less that mount's root, so a relocated or namespaced mount resolves. With
+/// several such mounts, the one with the longest root, and the first of those. No cgroup v2
+/// membership or no cgroup2 mount is `Unsupported`; a membership outside every cgroup2
+/// mount's root is `NotFound`.
+fn resolve(mountinfo: &str, cgroup: &str) -> io::Result<PathBuf> {
+    let unsupported = |why| io::Error::new(io::ErrorKind::Unsupported, why);
+    let path = cgroup
         .lines()
-        .find_map(|line| line.strip_prefix("0::/"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "no cgroup v2 membership"))?;
-    Ok(Path::new(MOUNT).join(relative))
+        .find_map(|line| line.strip_prefix("0::"))
+        .ok_or_else(|| unsupported("no cgroup v2 membership"))?;
+    let path = Path::new(path);
+    let mut mounts = 0;
+    let mut best: Option<(usize, PathBuf)> = None;
+    for line in mountinfo.lines() {
+        // id parent major:minor root point options [optional...] - fstype source super
+        let fields: Vec<&str> = line.split(' ').collect();
+        let Some(dash) = fields.iter().skip(6).position(|f| *f == "-") else {
+            continue;
+        };
+        if fields.get(6 + dash + 1) != Some(&"cgroup2") {
+            continue;
+        }
+        mounts += 1;
+        let root = unescape(fields[3]);
+        let Ok(within) = path.strip_prefix(&root) else {
+            continue;
+        };
+        let depth = root.components().count();
+        if best.as_ref().is_none_or(|(best, _)| depth > *best) {
+            best = Some((depth, unescape(fields[4]).join(within)));
+        }
+    }
+    match best {
+        Some((_, directory)) => Ok(directory),
+        None if mounts == 0 => Err(unsupported("no cgroup2 mount")),
+        None => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "cgroup v2 membership {} is outside every cgroup2 mount",
+                path.display()
+            ),
+        )),
+    }
+}
+
+/// A mountinfo path field, whose space, tab, newline and backslash are octal escapes.
+fn unescape(field: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt as _;
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let octal = bytes
+            .get(i + 1..i + 4)
+            .filter(|digits| bytes[i] == b'\\' && digits.iter().all(|d| (b'0'..=b'7').contains(d)))
+            .map(|d| (d[0] - b'0') << 6 | (d[1] - b'0') << 3 | (d[2] - b'0'));
+        match octal {
+            Some(byte) => {
+                out.push(byte);
+                i += 4;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(out))
 }
 
 /// The default uses a launcher-owned directory in the current delegated cgroup.
@@ -227,4 +293,54 @@ fn remove_tree(path: &Path) -> io::Result<()> {
         }
     }
     fs::remove_dir(path)
+}
+
+#[cfg(test)]
+mod laws {
+    use super::resolve;
+    use std::io;
+    use std::path::Path;
+
+    /// The launcher's cgroup is found through the mount table (`/proc/self/mountinfo`),
+    /// not at a fixed `/sys/fs/cgroup`: a cgroup2 hierarchy mounted at `/run/cg` with mount
+    /// root `/sub` holds cgroup `/sub/a/b` at `/run/cg/a/b`. The longest root holding the
+    /// membership wins, a root matches whole components only, an escaped space in a mount
+    /// point is a space, a cgroup1 mount is not a candidate, and a membership outside every
+    /// cgroup2 root is `NotFound` while no cgroup2 mount at all is `Unsupported`.
+    #[test]
+    fn law_cgroup_resolves_through_mountinfo() {
+        let cgroup1 = "30 25 0:26 / /sys/fs/cgroup/cpu rw,nosuid shared:9 - cgroup cgroup rw,cpu";
+        let relocated = "41 25 0:30 /sub /run/cg rw,nosuid shared:12 master:3 - cgroup2 cgroup2 rw";
+        let resolved = |mounts: &[&str], cgroup: &str| resolve(&mounts.join("\n"), cgroup);
+        assert_eq!(
+            resolved(&[cgroup1, relocated], "0::/sub/a/b\n").unwrap(),
+            Path::new("/run/cg/a/b")
+        );
+        assert_eq!(
+            resolved(&[relocated], "0::/sub").unwrap(),
+            Path::new("/run/cg")
+        );
+        let whole = "29 25 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw";
+        let spaced = "42 25 0:30 /sub/a /mnt/c\\040g rw - cgroup2 cgroup2 rw";
+        assert_eq!(
+            resolved(&[whole, spaced], "0::/sub/a/b").unwrap(),
+            Path::new("/mnt/c g/b")
+        );
+        assert_eq!(
+            resolved(&[whole, relocated], "0::/subx/a").unwrap(),
+            Path::new("/sys/fs/cgroup/subx/a")
+        );
+        assert_eq!(
+            resolved(&[relocated], "0::/subx/a").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            resolved(&[cgroup1], "0::/a").unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            resolved(&[whole], "1:cpu:/a").unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
 }

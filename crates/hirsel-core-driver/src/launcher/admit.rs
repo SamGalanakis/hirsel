@@ -447,8 +447,12 @@ fn failure(error: AdmissionError) -> Failure {
 
 #[path = "tree.rs"]
 mod submitted;
+pub(crate) use submitted::Tree;
 pub(super) use submitted::lock_roots_allowed;
-pub(crate) use submitted::{SOURCE_BYTES, TREE_BYTES, Tree};
+
+#[path = "protocol.rs"]
+pub(crate) mod protocol;
+use protocol::{SOURCE_BYTES, TREE_BYTES};
 
 #[path = "gate.rs"]
 pub(crate) mod gate;

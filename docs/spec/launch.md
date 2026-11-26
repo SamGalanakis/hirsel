@@ -1578,7 +1578,8 @@ nothing:
    scratch, on the same files and `hirsel.lock`. It uses the launcher's compiler store,
    package store and the pass cache at `STATE/test-results` (passed as the run's cache
    root, never the user's default cache), the toolchain's memory limit and no test filter, so it runs
-   every test of the package (PROG-4). Tests run in the `hirsel test` client, never in the
+   every test of the package (PROG-4). Its `--json` report goes to a file in the scratch
+   and is read whole, never cut at a size. Tests run in the `hirsel test` client, never in the
    compiler (cli.md "Resident compiler"). When the launcher user's resident compiler serves
    (lane cas-s4-shared-daemon-2781: one per user per toolchain), the session goes through
    it.
@@ -2124,7 +2125,9 @@ verified image descriptor at entry. A serving child receives the socket activati
 metadata and descriptors 3 through 5.
 
 Under a delegated cgroup v2, the launcher uses a subtree keyed by its state directory.
-Each child is born in its
+It finds its cgroup's directory through `/proc/self/mountinfo`: the cgroup2 mount whose
+root holds the `0::` path of `/proc/self/cgroup`, joined with that path less the root, so a
+relocated or namespaced mount resolves. Each child is born in its
 own cgroup with a pidfd. After the leader exits, the launcher requests `cgroup.kill`
 and reads `cgroup.events`. If the cgroup is still populated, epoll waits for a population
 change. The launcher reports `Ended` after observing `populated 0`, reaping any adopted

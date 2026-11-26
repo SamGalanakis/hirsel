@@ -15,13 +15,6 @@ pub(crate) struct Tree {
     pub(crate) required_entries: Vec<(u32, Vec<u8>)>,
 }
 
-/// The most codec bytes a tree may take (`launcher.TREE_BYTES`): its manifest's limit and
-/// its content's.
-pub(crate) const TREE_BYTES: usize = 5 << 20;
-
-/// The most file content one tree holds (`launcher.SOURCE_BYTES`).
-pub(crate) const SOURCE_BYTES: usize = 4 << 20;
-
 impl Tree {
     /// The codec bytes of the tree's `launcher.Manifest`: the tree with each file's content
     /// replaced by its SHA-256 and length, which is what an operator's Begin carries.

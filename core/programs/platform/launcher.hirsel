@@ -104,7 +104,7 @@ pub const MANIFEST_BYTES: u64 = 1048576u64
 
 // The most codec bytes a `Tree` may take: a tree's fields cost no more than its manifest's
 // beyond the content, so every manifest within its limits assembles into a tree within this.
-pub const TREE_BYTES: u64 = 5242880u64
+pub const TREE_BYTES: u64 = SOURCE_BYTES + MANIFEST_BYTES
 
 // A source named by content (launch.md "Source by content"): the Tree's fields with each file
 // as its path, SHA-256 and length. `files` is sorted by path with no repeats.

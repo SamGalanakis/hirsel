@@ -1,0 +1,142 @@
+fn diff_oracle_key(k: u64) -> Bytes {
+    key_word(0x1020304050600000u64 + 3 * k)
+}
+
+fn diff_oracle_value(seed: u64) -> Bytes {
+    let mut raw = key_word(seed)
+    list.fill(mut raw, if seed % 5 == 0 {
+        120
+    } else {
+        4
+    }, int.truncate(seed))
+    take raw
+}
+
+fn diff_oracle_pair(seed: u64) -> Result[(), Error] {
+    let mut before: List[std.page.Row] = list.new()
+    let mut after: List[std.page.Row] = list.new()
+    let mut expected: List[(Bytes, Option[Bytes])] = list.new()
+    let end = 650 + seed % 90
+    let low = diff_oracle_key(seed % 19)
+    let high = diff_oracle_key(end)
+    for k in 0u64 .. 800 {
+        let pick = splitmix64(seed * 800 + k)
+        let key = diff_oracle_key(k)
+        let old = if pick % 5 != 0 {
+            Some(diff_oracle_value(pick))
+        } else {
+            None
+        }
+        let new: Option[Bytes] = match (pick >> 8) % 5 {
+            0 => None,
+            1 => Some(diff_oracle_value(pick ^ 1)),
+            2 => Some(diff_oracle_value(pick ^ 1)),
+            _ => clone(old),
+        }
+        if let Some(value) = view old {
+            list.push(mut before, std.page.Row(key: clone(key), value: clone(value), charge: 0))
+        }
+        if let Some(value) = view new {
+            list.push(mut after, std.page.Row(key: clone(key), value: clone(value), charge: 0))
+        }
+        if old != new && key >= low && key < high {
+            list.push(mut expected, (take key, take new))
+        }
+    }
+    // Distinct page layouts put unchanged 12-byte rows inline on one side
+    // and out of line on the other.
+    let mut stamp = 1u64
+    let a = option.unwrap(page_result(std.page.bulk(before, Unprefixed, 16, mut stamp))?)
+    let b = option.unwrap(page_result(std.page.bulk(after, Unprefixed, 8, mut stamp))?)
+    let mut resume: Option[Bytes] = Some(clone(low))
+    let mut seen = 0u64
+    loop {
+        let mut left = start_diff(Some(view a), resume)
+        let mut right = start_diff(Some(view b), resume)
+        let mut output = change_output(Some(Limits(rows: 256, byte_limit: 1048576)))
+        let _ = page_change_rows(mut output, 1, mut left, mut right, Some(clone(high)))?
+        for change in output.rows {
+            let key = list.slice(change.tree_key, 4, list.len(change.tree_key))
+            if seen == list.len(expected) || key != expected[seen].0 {
+                fail("leaf diff emitted a wrong key")
+            }
+            match (view change.value, view expected[seen].1) {
+                (None, None) => (),
+                (Some(found), Some(want)) if list.compare_bytes(found, want) == Equal => (),
+                _ => fail("leaf diff emitted a wrong value"),
+            }
+            seen += 1
+        }
+        let Some(next_key) = view output.next else {
+            break
+        }
+        if list.len(output.rows) != 256 {
+            fail("leaf diff resumed before filling the page")
+        }
+        resume = Some(clone(list.slice(next_key, 4, list.len(next_key))))
+    }
+    if seen != list.len(expected) {
+        fail("leaf diff omitted changes")
+    }
+    Ok(())
+}
+
+@test
+fn diff_leaves_oracle() -> Result[(), Error] {
+    for seed in 0u64 .. 300 {
+        diff_oracle_pair(seed)?
+    }
+    Ok(())
+}
+
+fn budget_tail_rows(tx: Tx, env: (ProjectionDecl, Table[u64, u64])) -> Result[u64, Error] {
+    let mut resume: Option[Bytes] = None
+    let mut total = 0u64
+    loop {
+        let Some(Tail(rows: take rows, next: take after)) = read_tail(tx, env.0, env.1, take resume, Limits(rows: 256, byte_limit: 1048576))? else {
+            fail("step budget fixture has no published projection")
+        }
+        total += list.len(rows)
+        let Some(take next_key) = take after else {
+            return Ok(total)
+        }
+        resume = Some(take next_key)
+    }
+}
+
+@test
+fn read_tail_step_budget(c: Clock) -> Result[(), Error] waits {
+    let mut db = test_db(c, 1073741824)
+    let fixture = projector_fixture(mut db, Migrate, Own, cadence())?
+    let source = view fixture.source_table
+    for start in 0u64 .. 20 {
+        let filled = run(mut db, None, (copy_env(source), start * 1000), fn(mut tx, env) -> Result[(), Error] {
+            for key in env.1 .. env.1 + 1000 {
+                put(mut tx, env.0, key, key)?
+            }
+            Ok(())
+        })?
+        let Committed(_) = filled else {
+            fail("step budget fixture fill did not commit")
+        }
+    }
+    project_until_idle(mut db, Limits(rows: 1024, byte_limit: 1048576))?
+    let changed = run(mut db, None, copy_env(source), fn(mut tx, rows) -> Result[(), Error] {
+        for i in 0u64 .. 1000 {
+            let key = (7919 * i) % 20000
+            put(mut tx, rows, key, key + 1)?
+        }
+        Ok(())
+    })?
+    let Committed(_) = changed else {
+        fail("step budget fixture updates did not commit")
+    }
+    let input = (copy_env(fixture.decl), copy_env(source))
+    let looked = look(reader(db, 0)?, snapshot(db), Some(1200 * 1000), input, budget_tail_rows)?
+    match take looked {
+        Seen(Seen(value: Ok(1000), ..)) => Ok(()),
+        Seen(Seen(value: Error(take error), ..)) => Error(take error),
+        Stopped(_, _) => fail("read_tail exceeded 1200 steps per changed row"),
+        _ => fail("read_tail did not return all 1000 changed rows"),
+    }
+}

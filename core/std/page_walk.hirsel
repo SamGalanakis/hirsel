@@ -29,18 +29,36 @@ pub fn begin(root: Arc[page.Page]) -> Walk {
 
 /// Seek to the inclusive lower bound, retaining whole subtrees after the seek path.
 pub fn seek(root: Arc[page.Page], low: Bytes) -> Walk {
-    let mut walk = begin(root)
-    while let Some(at) = key(walk) {
-        if at >= low {
-            break
+    let mut walk = empty()
+    if page.count(page.image_of(root)) == 0 {
+        return take walk
+    }
+    let mut current = arc.share(root)
+    let mut whole = 0u64
+    while page.level(page.image_of(current)) != 0 {
+        let slot = option.unwrap(page.descend(page.image_of(current), low))
+        let child = option.unwrap(page.child(current, slot))
+        list.push(mut walk.path, WalkFrame(page: take current, slot: slot + 1, whole: false))
+        if slot != 0 {
+            whole = list.len(walk.path)
         }
-        if let Some(high) = subtree_high(walk) {
-            if high >= low {
-                expand(mut walk)
-                continue
-            }
-        }
+        current = take child
+    }
+    let (slot, exhausted) = {
+        let image = page.image_of(current)
+        let (at, _) = page.search(image, low)
+        (at, at == page.count(image))
+    }
+    list.push(mut walk.path, WalkFrame(page: take current, slot, whole: slot == 0))
+    if exhausted {
         next(mut walk)
+    } else if slot == 0 {
+        // Every edge below this frame leads to a leftmost child.
+        while list.len(walk.path) > whole + 1 {
+            let _ = list.pop(mut walk.path)
+        }
+        walk.path[whole].whole = true
+        walk.path[whole].slot = 0
     }
     take walk
 }
@@ -63,6 +81,121 @@ pub fn key(walk: Walk) -> Option[Bytes] {
         return Some(page.extreme_key(top.page, false))
     }
     page.key_at(page.image_of(top.page), top.slot)
+}
+
+// Separators bound a subtree from below and can precede its actual first key.
+fn diff_key(walk: Walk) -> Option[Bytes] {
+    let n = list.len(walk.path)
+    if n == 0 || !walk.path[n - 1].whole {
+        return key(walk)
+    }
+    let mut at = n - 1
+    while at != 0 {
+        at -= 1
+        let parent = view walk.path[at]
+        if parent.slot > 1 {
+            return page.key_at(page.image_of(parent.page), parent.slot - 1)
+        }
+    }
+    Some(b"")
+}
+
+fn diff_leaf_slot(walk: Walk) -> bool {
+    if let Some(top) = list.last(walk.path) {
+        return !top.whole && page.key_domain(page.image_of(top.page)) != CollectionMap
+    }
+    false
+}
+
+fn skip_equal_leaf_rows(mut left: Walk, mut right: Walk) -> Option[Order] {
+    let a = list.len(left.path) - 1
+    let b = list.len(right.path) - 1
+    let (i, j, comparison) = page.diff_leaves(left.path[a].page, left.path[a].slot, right.path[b].page, right.path[b].slot)
+    left.path[a].slot = i
+    right.path[b].slot = j
+    if comparison == None {
+        if i == page.count(page.image_of(left.path[a].page)) {
+            next(mut left)
+        }
+        if j == page.count(page.image_of(right.path[b].page)) {
+            next(mut right)
+        }
+    }
+    comparison
+}
+
+/// Position at the next row difference below the exclusive upper bound.
+/// Collection-map rows are returned in key order for the caller to compare.
+/// Advance the left walk for Less, the right for Greater, or both for Equal.
+pub fn diff_position(mut left: Walk, mut right: Walk, high: Option[Bytes]) -> Option[(Bytes, Order)] {
+    loop {
+        let old_span = subtree(left)
+        let new_span = subtree(right)
+        if let (Some(a), Some(b)) = (old_span, new_span) {
+            if a.level == b.level && a.stamp == b.stamp {
+                next(mut left)
+                next(mut right)
+                continue
+            }
+        }
+        if diff_leaf_slot(left) && diff_leaf_slot(right) {
+            let Some(comparison) = skip_equal_leaf_rows(mut left, mut right) else {
+                continue
+            }
+            let changed = if comparison == Greater {
+                option.unwrap(key(right))
+            } else {
+                option.unwrap(key(left))
+            }
+            if let Some(end) = high {
+                if changed >= end {
+                    return None
+                }
+            }
+            return Some((take changed, comparison))
+        }
+        let old_key = diff_key(left)
+        let new_key = diff_key(right)
+        let comparison = match (view old_key, view new_key) {
+            (None, None) => return None,
+            (None, Some(_)) => Greater,
+            (Some(_), None) => Less,
+            (Some(a), Some(b)) => list.compare_bytes(a, b),
+        }
+        let candidate = if comparison == Greater {
+            option.unwrap(take new_key)
+        } else {
+            option.unwrap(take old_key)
+        }
+        if let Some(end) = high {
+            if candidate >= end {
+                return None
+            }
+        }
+        if comparison == Equal {
+            if let (Some(a), Some(b)) = (old_span, new_span) {
+                if a.level >= b.level {
+                    expand(mut left)
+                } else {
+                    expand(mut right)
+                }
+                continue
+            }
+        }
+        if comparison != Greater {
+            if let Some(_) = old_span {
+                expand(mut left)
+                continue
+            }
+        }
+        if comparison != Less {
+            if let Some(_) = new_span {
+                expand(mut right)
+                continue
+            }
+        }
+        return Some((take candidate, comparison))
+    }
 }
 
 pub fn subtree(walk: Walk) -> Option[Subtree] {

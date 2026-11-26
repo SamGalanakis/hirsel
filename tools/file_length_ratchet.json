@@ -66,9 +66,9 @@
     "reason": "std-omap-nth-2975"
   },
   "core/std/page.hirsel": {
-    "lines": 3468,
-    "raise_revision": 16,
-    "reason": "m3-s3-slots-2010"
+    "lines": 3548,
+    "raise_revision": 17,
+    "reason": "store-perf-tail-3027"
   },
   "core/std/prop.hirsel": {
     "lines": 1748,

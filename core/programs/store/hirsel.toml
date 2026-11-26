@@ -155,6 +155,7 @@ dirs = ["."]
 "store_put_laws_2.hirsel" = "store"
 "store_schema_laws.hirsel" = "store"
 "store_changes_laws.hirsel" = "store"
+"store_diff_laws.hirsel" = "store"
 "store_lookup_laws.hirsel" = "store"
 "store_declare_laws.hirsel" = "store"
 "store_projector_laws.hirsel" = "store"

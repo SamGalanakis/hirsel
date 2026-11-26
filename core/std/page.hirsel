@@ -757,6 +757,92 @@ pub fn descend(image: Image, key: Bytes) -> Option[u64] {
     })
 }
 
+fn compare_leaf_suffixes(a: Bytes, b: Bytes, a_prefix: Bytes, b_prefix: Bytes) -> Order {
+    let shared = order.min(list.len(a_prefix), list.len(b_prefix))
+    let heads = list.compare_bytes(list.slice(a_prefix, 0, shared), list.slice(b_prefix, 0, shared))
+    if heads != Equal {
+        return heads
+    }
+    if list.len(a_prefix) > shared {
+        return order.reverse(compare_leaf_suffixes(b, a, b_prefix, a_prefix))
+    }
+    let extra = list.len(b_prefix) - shared
+    let overlap = order.min(extra, list.len(a))
+    let middle = list.compare_bytes(list.slice(a, 0, overlap), list.slice(b_prefix, shared, shared + overlap))
+    if middle != Equal {
+        return middle
+    }
+    if overlap != extra {
+        return Less
+    }
+    list.compare_bytes(list.slice(a, overlap, list.len(a)), b)
+}
+
+fn leaf_cells_equal(left: Arc[Page], a: u64, right: Arc[Page], b: u64) -> bool {
+    let raw_a = view left.image.raw
+    let raw_b = view right.image.raw
+    if raw_a[a] == 0 && raw_b[b] == 0 {
+        let a_end = a + 3 + u16_at(raw_a, a + 1)
+        let b_end = b + 3 + u16_at(raw_b, b + 1)
+        return list.compare_bytes(list.slice(raw_a, a + 3, a_end), list.slice(raw_b, b + 3, b_end)) == Equal
+    }
+    if raw_a[a] == 1 && raw_b[b] == 1 {
+        let sa: u64 = list.word_le(raw_a, a + 1)
+        let sb: u64 = list.word_le(raw_b, b + 1)
+        if sa == sb {
+            return true
+        }
+    }
+    let va = if raw_a[a] == 0 {
+        list.slice(raw_a, a + 3, a + 3 + u16_at(raw_a, a + 1))
+    } else {
+        let slot: u16 = list.word_le(raw_a, a + 41)
+        hot_bytes(left.blobs[slot])
+    }
+    let vb = if raw_b[b] == 0 {
+        list.slice(raw_b, b + 3, b + 3 + u16_at(raw_b, b + 1))
+    } else {
+        let slot: u16 = list.word_le(raw_b, b + 41)
+        hot_bytes(right.blobs[slot])
+    }
+    list.compare_bytes(va, vb) == Equal
+}
+
+/// Skip equal rows in two resident leaves, returning the first differing slots
+/// and their key order, or None for the order when either leaf is exhausted.
+pub fn diff_leaves(left: Arc[Page], a: u64, right: Arc[Page], b: u64) -> (u64, u64, Option[Order]) {
+    let raw_a = view left.image.raw
+    let raw_b = view right.image.raw
+    let na = count(left.image)
+    let nb = count(right.image)
+    let slots_a = list.len(raw_a) - 2 * na
+    let slots_b = list.len(raw_b) - 2 * nb
+    let pa = list.slice(raw_a, HEADER, HEADER + u16_at(raw_a, 4))
+    let pb = list.slice(raw_b, HEADER, HEADER + u16_at(raw_b, 4))
+    let same_prefix = list.compare_bytes(pa, pb) == Equal
+    let mut i = a
+    let mut j = b
+    while i < na && j < nb {
+        let at = u16_at(raw_a, slots_a + 2 * i)
+        let bt = u16_at(raw_b, slots_b + 2 * j)
+        let ac = at + 2 + u16_at(raw_a, at)
+        let bc = bt + 2 + u16_at(raw_b, bt)
+        let ak = list.slice(raw_a, at + 2, ac)
+        let bk = list.slice(raw_b, bt + 2, bc)
+        let order = if same_prefix {
+            list.compare_bytes(ak, bk)
+        } else {
+            compare_leaf_suffixes(ak, bk, pa, pb)
+        }
+        if order != Equal || !leaf_cells_equal(left, ac, right, bc) {
+            return (i, j, Some(order))
+        }
+        i += 1
+        j += 1
+    }
+    (i, j, None)
+}
+
 fn cell_at(image: Image, at: u64) -> Cell {
     if level(image) != 0 {
         return Child(Branch(child: ptr_at(image.raw, at), rows: list.word_le(image.raw, at + PTR_BYTES), charge: list.word_le(image.raw, at + PTR_BYTES + 8)))

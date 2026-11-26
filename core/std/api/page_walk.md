@@ -8,3 +8,8 @@ describe it, `expand` descends into it and `next` passes over it; on a row,
 `key`, `value`, `blob_stamp` and `owned_value` read it and `next` advances.
 `collection` reads the child a collection-map row names. Every page the walk
 reaches must be resident: a Cold child fails.
+
+`diff_position` locates the next differing row of two walks before an
+optional exclusive upper bound. It skips whole subtrees with matching stamps
+and skips equal rows within leaves. Collection-map rows still require the
+caller's descriptor comparison.

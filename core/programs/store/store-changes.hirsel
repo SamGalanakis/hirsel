@@ -1,55 +1,3 @@
-// Locate the next leaf pair in range, skipping matching subtrees before descent.
-fn diff_position(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Option[(Bytes, Order)] {
-    loop {
-        let old_key = std.page_walk.key(left)
-        let new_key = std.page_walk.key(right)
-        let comparison = match (view old_key, view new_key) {
-            (None, None) => return None,
-            (None, Some(_)) => Greater,
-            (Some(_), None) => Less,
-            (Some(a), Some(b)) => list.compare_bytes(a, b),
-        }
-        let key = if comparison == Greater {
-            option.unwrap(take new_key)
-        } else {
-            option.unwrap(take old_key)
-        }
-        if let Some(end) = high {
-            if key >= end {
-                return None
-            }
-        }
-        let old_span = std.page_walk.subtree(left)
-        let new_span = std.page_walk.subtree(right)
-        if comparison == Equal {
-            if let (Some(a), Some(b)) = (old_span, new_span) {
-                if a.stamp == b.stamp {
-                    std.page_walk.next(mut left)
-                    std.page_walk.next(mut right)
-                } else if a.level >= b.level {
-                    std.page_walk.expand(mut left)
-                } else {
-                    std.page_walk.expand(mut right)
-                }
-                continue
-            }
-        }
-        if comparison != Greater {
-            if let Some(_) = old_span {
-                std.page_walk.expand(mut left)
-                continue
-            }
-        }
-        if comparison != Less {
-            if let Some(_) = new_span {
-                std.page_walk.expand(mut right)
-                continue
-            }
-        }
-        return Some((take key, comparison))
-    }
-}
-
 fn diff_advance(mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, comparison: Order) {
     if comparison != Greater {
         std.page_walk.next(mut left)
@@ -93,24 +41,22 @@ fn admit_change(mut out: ChangeOutput, key: Bytes, width: u64) -> Result[bool, E
 }
 
 fn page_change_rows(mut out: ChangeOutput, id: u32, mut left: std.page_walk.Walk, mut right: std.page_walk.Walk, high: Option[Bytes]) -> Result[bool, Error] {
-    while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
-        if comparison != Equal || compare_row_versions(left, right) != Equal {
-            let logical = logical_key(id, key)?
-            let value_width = if comparison == Less {
-                0u64
-            } else {
-                list.len(option.unwrap(std.page_walk.value(right)))
-            }
-            if !admit_change(mut out, logical, int.saturating_add(list.len(logical), value_width))? {
-                return Ok(false)
-            }
-            let replacement: Option[Arc[Bytes]] = if comparison == Less {
-                None
-            } else {
-                std.page_walk.owned_value(right)
-            }
-            list.push(mut out.rows, Change(tree_key: take logical, value: take replacement))
+    while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, high) {
+        let logical = logical_key(id, key)?
+        let value_width = if comparison == Less {
+            0u64
+        } else {
+            list.len(option.unwrap(std.page_walk.value(right)))
         }
+        if !admit_change(mut out, logical, int.saturating_add(list.len(logical), value_width))? {
+            return Ok(false)
+        }
+        let replacement: Option[Arc[Bytes]] = if comparison == Less {
+            None
+        } else {
+            std.page_walk.owned_value(right)
+        }
+        list.push(mut out.rows, Change(tree_key: take logical, value: take replacement))
         diff_advance(mut left, mut right, comparison)
     }
     Ok(true)
@@ -297,7 +243,7 @@ fn walk_page_changes(mut out: ChangeOutput, before: Option[View[PageTree]], afte
         Some(tree) => start_diff(Some(view tree.root), low_id)
     }
     let mut right = start_diff(Some(view after.root), low_id)
-    while let Some((take key, comparison)) = diff_position(mut left, mut right, high) {
+    while let Some((take key, comparison)) = std.page_walk.diff_position(mut left, mut right, high) {
         let kind = {
             let descriptor = if comparison == Less {
                 std.page_walk.value(left)

@@ -110,9 +110,13 @@ pub fn read_tail[K, V](tx: Tx, decl: ProjectionDecl, source: Table[K, V], resume
         None => prefix(source.id)?,
     }
     let high = prefix(source.id + 1)?
-    let after = transaction_collection_pages(tx)?
     let mut out = change_output(Some(l))
     if low < high {
+        let after = if tx.ops.rows.count == 0 && list.len(tx.below) == 0 {
+            share_page_tree(tx.roots.collections)
+        } else {
+            transaction_collection_pages(tx)?
+        }
         walk_page_changes(mut out, Some(view base.roots.collections), after, Some(clone(low)), Some(clone(high)))?
     }
     if let Some(_) = out.deferred {

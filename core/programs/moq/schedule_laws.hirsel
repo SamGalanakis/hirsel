@@ -50,26 +50,24 @@ fn drain_one_by_one(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
     for _ in 0u64 .. 500 {
         list.clear(mut wire)
         list.clear(mut packets)
-        let _ = quic.poll(mut server.io.q, now, mut wire, mut packets)
+        let _ = quic.poll(mut server.io.driver.q, now, mut wire, mut packets)
         let mut sent = 0u64
         for output in packets {
             if let Transmit(at: at, len: len, ..) = output {
                 sent += 1
                 // Commit and deliver one packet at a time to observe QUIC scheduling order.
-                quic.committed(mut server.io.q, now, 1)
+                quic.committed(mut server.io.driver.q, now, 1)
                 let mut qev: List[quic.Event] = list.new()
-                quic.receive_datagram(mut client.io.q, now, MOQ_SERVER_ADDR, 0, mut wire, at, len, mut qev)
+                quic.receive_datagram(mut client.io.driver.q, now, MOQ_SERVER_ADDR, 0, mut wire, at, len, mut qev)
                 if let Some(mut cs) = client.sess {
-                    let mut tevs: List[moq.TransportEvent] = list.new()
-                    for ev in qev {
-                        list.push(mut tevs, Quic(clone(ev)))
-                    }
+                    let mut tevs: List[moq.AddressedEvent] = list.new()
+                    moq.native_events(mut client.io.driver, qev, mut tevs)
                     let before = list.len(client.events)
                     moq.receive(mut cs, mut client.io, now, tevs, mut client.events)
                     for k in before .. list.len(client.events) {
                         if let Received(o) = client.events[k] {
-                            if list.len(o.payload) > 0 {
-                                list.push(mut order_tags, o.payload[0])
+                            if quic.payload_len(o.payload) > 0 {
+                                list.push(mut order_tags, quic.payload_bytes(o.payload)[0])
                             }
                         }
                     }
@@ -84,7 +82,7 @@ fn drain_one_by_one(mut server: Peer, mut client: Peer, mut now: u64) -> Bytes {
             now += 10 * MS_NS
             list.clear(mut wire)
             list.clear(mut packets)
-            let _ = quic.poll(mut server.io.q, now, mut wire, mut packets)
+            let _ = quic.poll(mut server.io.driver.q, now, mut wire, mut packets)
             let mut more = false
             for output in packets {
                 if let Transmit(..) = output {
@@ -185,7 +183,7 @@ fn priority_order() -> Result[(), ()] {
 fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
     // 1. OBJECT 50 ms: header arrived 60 ms before handover -> reset with DELIVERY_TIMEOUT;
     //    handed over at 40 ms -> delivered even if ACK arrives 500 ms later.
-    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 500)
+    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 500, max_buffered: 8388608)
     let mut c1 = native_client(901)
     let mut s1 = native_server(902, lim)
     establish_native(mut c1, mut s1, lim, b"to.test", b"/1", None)
@@ -316,13 +314,117 @@ fn delivery_timeouts_start_and_stop_apart() -> Result[(), ()] {
         }
         // Datagram with OBJECT 100ms + SUBGROUP 30ms -> dropped at 30ms, sent at 20ms.
         let dg_props = make_props_timeout(100, 30)
-        let dg_ok = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 10, status: Normal, properties: clone(dg_props), payload: shared.new(b"dg-ok"))
-        let dg_late = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 1, mode: Datagram, publisher_priority: 10, status: Normal, properties: take dg_props, payload: shared.new(b"dg-late"))
+        let dg_ok = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 10, status: Normal, properties: clone(dg_props), payload: quic.payload_whole(shared.new(b"dg-ok")))
+        let dg_late = moq.Object(track: clone(tr_dg), group: 1, subgroup: 0, id: 1, mode: Datagram, publisher_priority: 10, status: Normal, properties: take dg_props, payload: quic.payload_whole(shared.new(b"dg-late")))
         result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 20 * MS_NS, base_t, take dg_ok, false))
         result.unwrap(moq.publish_at(mut ss, mut s3.io, base_t + 30 * MS_NS, base_t, take dg_late, false))
         if moq.timed_out_objects(ss) != 4 {
             fail("datagram with OBJECT 100ms and SUBGROUP 30ms was not dropped at 30ms")
         }
+    }
+    Ok(())
+}
+
+fn subscribed_with_send_budget(send_bytes: u64, lim: moq.Limits) -> (Peer, Peer, codec.TrackName) {
+    let mut transport = moq.transport_config(lim)
+    transport.send_bytes = send_bytes
+    let q = result.unwrap(quic.endpoint(provide.random(9382), moq_endpoint_config(), Some((moq_identity(), take transport))))
+    let mut server = Peer(io: moq.mixed_driver(take q, None, 1), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
+    let mut client = native_client(9381)
+    establish_native(mut client, mut server, lim, b"copybreak.test", b"/wire", None)
+    let tr = track(ns1(b"charge"), b"range")
+    if let Some(mut cs) = client.sess {
+        let _ = result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 8, None))
+    }
+    settle_pair(mut client, mut server, 11)
+    accept_all_subscribes(mut server)
+    settle_pair(mut client, mut server, 12)
+    let mut ack: List[quic.Event] = list.new()
+    quic.timeout(mut client.io.driver.q, 30 * MS_NS, mut ack)
+    settle_pair(mut client, mut server, 30 * MS_NS)
+    (take client, take server, take tr)
+}
+
+/// MEM-24: the old four-byte header plus three-byte payload grow the frame to
+/// capacity eight. QUIC reserves that, the 64-byte Shared node and its 648-byte
+/// queued/staged records. A 64-KiB source must have the same admission boundary.
+fn copybreak_admits(send_bytes: u64) -> bool {
+    let (take _client, take server0, take tr) = subscribed_with_send_budget(send_bytes, moq_limits())
+    let mut server = take server0
+    let obj = moq.Object(track: take tr, group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 7, status: Normal, properties: b"", payload: framed_payload(b"prefix", b"abc", b"suffix", 65536))
+    if let Some(mut ss) = server.sess {
+        result.unwrap(moq.publish(mut ss, mut server.io, 31 * MS_NS, obj))
+    }
+    let conn = first_quic_conn(server.raw)
+    quic.drop_datagrams(mut server.io.driver.q, conn, quic.DatagramTag(owner: 0, tag: 1)) == 1
+}
+
+@test
+fn datagram_copybreak_preserves_admission() -> Result[(), ()] {
+    if !copybreak_admits(720) || copybreak_admits(719) {
+        fail("a small range did not preserve the old datagram charge")
+    }
+    Ok(())
+}
+
+/// The property block forces the overflow path. Its bytes and the selected
+/// payload range must arrive intact. An object larger than the path MTU is dropped.
+@test
+fn datagram_properties_overflow_preserves_wire_and_mtu() -> Result[(), ()] {
+    let lim = moq_limits()
+    let mut client = native_client(9391)
+    let mut server = native_server(9392, lim)
+    establish_native(mut client, mut server, lim, b"prefix.test", b"/wire", None)
+    let tr = track(ns1(b"prefix"), b"video")
+    if let Some(mut cs) = client.sess {
+        let _ = result.unwrap(moq.subscribe(mut cs, mut client.io, 10, clone(tr), NoFilter, 8, None))
+    }
+    settle_pair(mut client, mut server, 11)
+    accept_all_subscribes(mut server)
+    settle_pair(mut client, mut server, 12)
+    let mut kvs: List[codec.KeyValue] = list.new()
+    list.push(mut kvs, Data(kind: 0x79, value: make_tagged_payload(0x55, 96)))
+    let mut props: Bytes = list.new()
+    result.unwrap(codec.write_key_values(kvs, mut props))
+    if let Some(mut ss) = server.sess {
+        let small = moq.Object(track: clone(tr), group: 1, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 7, status: Normal, properties: clone(props), payload: framed_payload(b"before", b"frame", b"after", 128))
+        result.unwrap(moq.publish(mut ss, mut server.io, 13, small))
+        let large = moq.Object(track: clone(tr), group: 2, subgroup: 0, id: 0, mode: Datagram, publisher_priority: 7, status: Normal, properties: clone(props), payload: quic.payload_whole(shared.new(make_tagged_payload(0x55, 1200))))
+        result.unwrap(moq.publish(mut ss, mut server.io, 13, large))
+    }
+    settle_pair(mut client, mut server, 13)
+    let got = received_objects(client.events)
+    if list.len(got) != 1 || got[0].group != 1 || got[0].properties != props || quic.payload_bytes(got[0].payload) != b"frame" {
+        fail("extended datagram header, payload range, or MTU refusal changed")
+    }
+    Ok(())
+}
+
+fn stalled_range_charge(capacity: u64) -> u64 {
+    let (take _client, take server0, take tr) = subscribed_with_send_budget(720, moq_limits())
+    let mut server = take server0
+    if let Some(mut ss) = server.sess {
+        let obj = moq.Object(track: clone(tr), group: 1, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 7, status: Normal, properties: b"", payload: framed_payload(b"before", b"abc", b"after", capacity))
+        result.unwrap(moq.publish(mut ss, mut server.io, 31 * MS_NS, obj))
+        let held = moq.pending_send_bytes(ss)
+        if held <= capacity + 64 {
+            fail("the retry queue did not charge the shared allocation and records")
+        }
+        moq.fence_track(mut ss, mut server.io, tr, moq.RESET_CANCELLED)
+        if moq.pending_send_bytes(ss) != 0 {
+            fail("the subgroup fence failed to refund the retry holder")
+        }
+        return held
+    }
+    fail("publisher missing")
+}
+
+@test
+fn stalled_subgroup_charges_backing_until_fence() -> Result[(), ()] {
+    let lower = stalled_range_charge(2048)
+    let higher = stalled_range_charge(4096)
+    if higher != lower + 2048 {
+        fail("two equal-sized ranges did not charge their full retained capacities")
     }
     Ok(())
 }

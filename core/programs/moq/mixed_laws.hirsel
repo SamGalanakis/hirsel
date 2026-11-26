@@ -1,0 +1,217 @@
+fn peer_wt_answer(mut p: Peer, s: webtransport.SessionHandle, take verdict: webtransport.Verdict) {
+    if let Some(mut w) = p.io.driver.w {
+        result.unwrap(webtransport.answer(mut w, mut p.io.driver.q, s, take verdict))
+    }
+}
+
+fn pooled_setup(mut p: Peer, scope: moq.Scope, second: bool) {
+    if second {
+        if let Some(mut s) = p.pooled {
+            moq.accept_setup(mut s, mut p.io, Ok(clone(scope)))
+        }
+    } else {
+        if let Some(mut s) = p.sess {
+            moq.accept_setup(mut s, mut p.io, Ok(clone(scope)))
+        }
+    }
+}
+
+fn pooled_accept(mut p: Peer, id: moq.RequestId) {
+    if let Some(mut s) = p.pooled {
+        moq.accept(mut s, mut p.io, id, Ok(()))
+    }
+}
+
+fn pooled_publish_and_fence(mut p: Peer, tr: codec.TrackName) {
+    if let Some(mut bs) = p.pooled {
+        result.unwrap(moq.publish(mut bs, mut p.io, 43, make_obj(clone(tr), 2, 0, 0, Datagram, 10, b"live-datagram")))
+        result.unwrap(moq.publish_at(mut bs, mut p.io, 43, 43, make_obj(clone(tr), 3, 0, 0, Subgroup, 10, b"completed"), true))
+    }
+    if let Some(mut a_session) = p.sess {
+        if moq.fence_track_counts(mut a_session, mut p.io, tr, moq.RESET_CANCELLED) != (1u64, 1u64) {
+            fail("the track fence did not reset its subgroup and purge only its datagram")
+        }
+    }
+}
+
+fn assert_pooled_acked(mut p: Peer) {
+    if let Some(mut bs) = p.pooled {
+        let _ = moq.poll(mut bs, mut p.io, 600 * MS_NS)
+        if moq.timed_out_subgroups(bs) != 0 {
+            fail("the completed WT subgroup's timer survived its acknowledgement")
+        }
+    }
+}
+
+fn pooled_request(events: List[webtransport.Event]) -> webtransport.SessionHandle {
+    for i in 0u64 .. list.len(events) {
+        if let Requested(s, _) = events[list.len(events) - 1 - i] {
+            return s
+        }
+    }
+    fail("the relay's WT CONNECT did not reach the peer")
+}
+
+fn rig_connect_wt(mut rig: RelayRig, index: u64, now: u64, url: String) -> webtransport.SessionHandle {
+    if let Some(mut w) = rig.io.driver.w {
+        let mut protocols: List[String] = list.new()
+        list.push(mut protocols, moq.ALPN)
+        let addr = rig.peer_addrs[index]
+        return result.unwrap(webtransport.connect(mut w, mut rig.io.driver.q, now, addr, url, moq_pins(), take protocols))
+    }
+    fail("relay has no WebTransport endpoint")
+}
+
+fn rig_add_wt_publisher(mut rig: RelayRig, scope: moq.Scope, index: u64, now: u64, second: bool) -> (webtransport.SessionHandle, u32) {
+    list.clear(mut rig.wt_events)
+    list.clear(mut rig.peers[index].wt_events)
+    let url = if second {
+        "https://server/b"
+    } else {
+        "https://server/a"
+    }
+    let client = rig_connect_wt(mut rig, index, now, url)
+    let mut session = web_session(mut rig.io, client, Client, Subscriber, rig.limits)
+    moq.configure_setup(mut session, b"ignored.example", b"/not-in-wt-setup", None)
+    rig_settle(mut rig, now + 1, true)
+    let server = pooled_request(rig.peers[index].wt_events)
+    let remote = web_session(mut rig.peers[index].io, server, Server, Publisher, rig.limits)
+    if second {
+        rig.peers[index].pooled = Some(take remote)
+    } else {
+        rig.peers[index].sess = Some(take remote)
+    }
+    peer_wt_answer(mut rig.peers[index], server, Accept(protocol: Some(moq.ALPN), headers: list.new()))
+    rig_settle(mut rig, now + 2, true)
+    let mut normalized: List[moq.AddressedEvent] = list.new()
+    let mut events: List[moq.Event] = list.new()
+    moq.web_events(mut rig.io.driver, rig.wt_events, mut normalized)
+    moq.receive(mut session, mut rig.io, now + 2, normalized, mut events)
+    list.clear(mut rig.wt_events)
+    rig_settle(mut rig, now + 3, true)
+    let saw_setup = {
+        let setup = if second {
+            rig.peers[index].pooled_events
+        } else {
+            rig.peers[index].events
+        }
+        let mut saw = false
+        for e in setup {
+            if let Setup(authority: auth, path: path, ..) = e {
+                saw = auth == b"" && path == b""
+            }
+        }
+        saw
+    }
+    if !saw_setup {
+        fail("WT SETUP did not omit the native address")
+    }
+    pooled_setup(mut rig.peers[index], scope, second)
+    rig_settle(mut rig, now + 4, true)
+    list.clear(mut normalized)
+    moq.web_events(mut rig.io.driver, rig.wt_events, mut normalized)
+    moq.receive(mut session, mut rig.io, now + 4, normalized, mut events)
+    if !moq.is_established(session) {
+        fail("WT publisher setup did not complete")
+    }
+    (client, moq.relay_add(mut rig.r, take session, clone(scope)))
+}
+
+/// One relay serves a native subscriber and two MoQ publishers sharing an H3 connection.
+/// A track fence on one publisher must preserve the other's queued bytes and completion.
+@test
+fn mixed_relay_routes_pooled_sessions_and_fences_track() -> Result[(), ()] {
+    let mut lim = moq_limits()
+    lim.max_timeout_ms = 500
+    let sc = moq.default_scope(b"server", b"/live")
+    let rlim = moq.RelayLimits(cache_groups: 1, cache_bytes: 8192, per_track_cache_bytes: 8192, max_objects_per_group: 4, max_object_bytes: 4096)
+    let mut rig = new_relay_rig(9401, lim, rlim, 8)
+    let sub = rig_add_peer(mut rig, 9402, Subscriber, clone(sc), lim, 0)
+    rig.io.driver.w = Some(webtransport.endpoint(wt_limits()))
+    let wi = list.len(rig.peers)
+    list.push(mut rig.peers, wt_server(9403))
+    list.push(mut rig.peer_addrs, peer_addr(int.narrow(wi)))
+    let (a, _) = rig_add_wt_publisher(mut rig, sc, wi, 20, false)
+    let (b, _) = rig_add_wt_publisher(mut rig, sc, wi, 30, true)
+    let webtransport.SessionHandle(conn: ca, id: ia) = a
+    let webtransport.SessionHandle(conn: cb, id: ib) = b
+    if ca != cb || ia == ib {
+        fail("the MoQ publishers were not on separate CONNECTs of one H3 connection")
+    }
+    let mut same_number: List[moq.AddressedEvent] = list.new()
+    let mut native_ack: List[quic.Event] = list.new()
+    let mut web_ack: List[webtransport.Event] = list.new()
+    let native_conn = first_quic_conn(rig.raw)
+    let stream: quic.StreamId = StreamId(14)
+    list.push(mut native_ack, Acked(native_conn, stream))
+    list.push(mut web_ack, Acked(b, stream))
+    moq.native_events(mut rig.io.driver, native_ack, mut same_number)
+    moq.web_events(mut rig.io.driver, web_ack, mut same_number)
+    if list.len(same_number) != 2 || same_number[0].link == same_number[1].link {
+        fail("the same stream number on two connections shared an event destination")
+    }
+    moq.relay_receive(mut rig.r, mut rig.io, 39, same_number, mut rig.events)
+    let tr = track(ns1(b"pooled"), b"video")
+    let _ = peer_subscribe(mut rig.peers[sub], 40, clone(tr), NoFilter, 10, None)
+    rig_settle(mut rig, 41, true)
+    if moq.relay_upstream_count(rig.r) != 2 || peer_accept_subscribes(mut rig.peers[wi]) != 1 {
+        fail("the single native subscription did not aggregate across both WT publishers")
+    }
+    let rb = first_subscribe_id(rig.peers[wi].pooled_events)
+    pooled_accept(mut rig.peers[wi], rb)
+    rig_settle(mut rig, 42, true)
+    peer_publish(mut rig.peers[wi], 43, make_obj(clone(tr), 1, 0, 0, Subgroup, 10, b"old-stream"), false)
+    peer_publish(mut rig.peers[wi], 43, make_obj(clone(tr), 1, 0, 1, Datagram, 10, b"old-datagram"), false)
+    pooled_publish_and_fence(mut rig.peers[wi], tr)
+    rig_settle(mut rig, 43, true)
+    let got = received_objects(rig.peers[sub].events)
+    let mut datagrams = 0u64
+    let mut subgroups = 0u64
+    for o in got {
+        if o.group == 2 && quic.payload_bytes(o.payload) == b"live-datagram" {
+            datagrams += 1
+        } else if o.group == 3 && quic.payload_bytes(o.payload) == b"completed" {
+            subgroups += 1
+        } else {
+            fail("fenced payload reached the native peer or the live payload was corrupted")
+        }
+    }
+    if datagrams != 1 || subgroups != 1 {
+        fail("the unfenced CONNECT failed to deliver both objects")
+    }
+    // The datagram keeps a 24-byte rounded backing (one WT byte, four MoQ
+    // bytes for object id 0 encoded from the selected group and priority, 13
+    // media bytes), plus its 64-byte Shared node. Cache list records have
+    // four reserved slots per holder, with an extra u64 for the stored charge.
+    let fixed = 4 * (bytes[moq.Object] + 8) + 40 + 64
+    let mut evicted_datagram = false
+    for ev in rig.events {
+        if let Evicted(track: name, size: charge, ..) = ev {
+            if name == tr && charge == fixed + 24 {
+                evicted_datagram = true
+            }
+        }
+    }
+    if !evicted_datagram || moq.relay_track_groups(rig.r, sc, tr) != 1 || moq.relay_track_bytes(rig.r, sc, tr) != fixed + 16 {
+        fail("cache admitted or refunded an incorrect retained object charge")
+    }
+    let mut qev: List[quic.Event] = list.new()
+    quic.timeout(mut rig.io.driver.q, 40 * MS_NS, mut qev)
+    rig_settle(mut rig, 40 * MS_NS, true)
+    assert_pooled_acked(mut rig.peers[wi])
+    let rejected = rig_connect_wt(mut rig, wi, 601 * MS_NS, "https://server/refused")
+    let pending = web_session(mut rig.io, rejected, Client, Subscriber, lim)
+    let rid = moq.relay_add(mut rig.r, take pending, clone(sc))
+    rig_settle(mut rig, 602 * MS_NS, true)
+    let refused_remote = pooled_request(rig.peers[wi].wt_events)
+    peer_wt_answer(mut rig.peers[wi], refused_remote, Refuse(status: 403))
+    rig_settle(mut rig, 603 * MS_NS, true)
+    for ev in rig.events {
+        if let Ended(session: id, code: code) = ev {
+            if id == rid && code == 403 {
+                return Ok(())
+            }
+        }
+    }
+    fail("refused CONNECT was not a terminal event for its own registration")
+}

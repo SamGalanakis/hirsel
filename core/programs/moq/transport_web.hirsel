@@ -1,0 +1,106 @@
+fn web_open(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, bidi: bool) -> Result[LinkStream, MoqError] {
+    match webtransport.open(mut w, mut q, s, bidi) {
+        Ok(v) => Ok(link_stream(v)),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_read(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, stream: LinkStream, mut into: Bytes) -> Result[(u64, bool), LinkReadError] {
+    match webtransport.read(mut w, mut q, s, transport_stream(stream), mut into) {
+        Ok(v) => Ok(v),
+        Error(Quic(StreamReset(code))) => Error(StreamReset(code)),
+        Error(e) => Error(Refused(Web(e))),
+    }
+}
+
+fn web_write(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, stream: LinkStream, data: Bytes, fin: bool) -> Result[u64, MoqError] {
+    match webtransport.write(mut w, mut q, s, transport_stream(stream), data, fin) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_write_slice(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, stream: LinkStream, take data: quic.PayloadSlice, fin: bool) -> Result[bool, MoqError] {
+    match webtransport.write_shared(mut w, mut q, s, transport_stream(stream), take data, fin) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_reset(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, stream: LinkStream, code: u64, reliable: u64) -> Result[(), MoqError] {
+    match webtransport.reset_at(mut w, mut q, s, transport_stream(stream), int.truncate(code), reliable) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_stop(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, stream: LinkStream, code: u64) -> Result[(), MoqError] {
+    match webtransport.stop(mut w, mut q, s, transport_stream(stream), int.truncate(code)) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_priority(w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, stream: LinkStream, p: quic.Priority) -> Result[(), MoqError] {
+    match webtransport.priority(w, mut q, s, transport_stream(stream), p) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_send_datagram(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), MoqError] {
+    match webtransport.send_datagram(mut w, mut q, s, take data, p, tag) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Web(e)),
+    }
+}
+
+fn web_drop_datagrams(w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, tag: u64) -> u64 {
+    webtransport.drop_datagrams(w, mut q, s, tag)
+}
+
+fn web_close(mut w: webtransport.Endpoint, mut q: quic.Endpoint, s: webtransport.SessionHandle, code: u64, reason: Bytes) {
+    webtransport.close(mut w, mut q, s, int.truncate(code), reason)
+}
+
+fn web_max_datagram(q: quic.Endpoint, s: webtransport.SessionHandle) -> u64 {
+    let webtransport.SessionHandle(conn: c, id: id) = s
+    let quic.StreamId(n) = id
+    int.saturating_sub(quic.max_datagram_payload(q, c), webtransport.h3_wire.varint_len(n / 4))
+}
+
+fn web_link_event(q: quic.Endpoint, ev: webtransport.Event) -> Option[(webtransport.SessionHandle, LinkEvent)] {
+    match ev {
+        Ready(s: s, protocol: protocol) => {
+            let event: LinkEvent = if protocol == Some(ALPN) {
+                Ready(max_datagram: web_max_datagram(q, s))
+            } else {
+                InvalidProtocol
+            }
+            Some((s, event))
+        },
+        Stream(s: s, stream: stream, bidi: bidi) => Some((s, Opened(stream: link_stream(stream), bidi: bidi))),
+        Readable(s, stream) => Some((s, Readable(link_stream(stream)))),
+        Writable(s, stream) => Some((s, Writable(link_stream(stream)))),
+        Acked(s, stream) => Some((s, Acked(link_stream(stream)))),
+        Reset(s: s, stream: stream, code: code, final_size: final_size) => Some((s, Reset(stream: link_stream(stream), code: web_event_code(code), final_size: final_size))),
+        Stopped(s: s, stream: stream, code: code) => Some((s, Stopped(stream: link_stream(stream), code: web_event_code(code)))),
+        Datagram(s, data) => Some((s, Datagram(quic.payload_share(data)))),
+        Closed(s: s, code: code, ..) => Some((s, Closed(code: int.widen(code)))),
+        Refused(s: s, reason: reason) => {
+            let code: u64 = match reason {
+                Status(n) => int.widen(n),
+                Pin => ERR_PROTOCOL_VIOLATION,
+            }
+            Some((s, Closed(code: code)))
+        },
+        _ => None,
+    }
+}
+
+fn web_event_code(code: Option[u32]) -> u64 {
+    match code {
+        Some(n) => int.widen(n),
+        None => 0,
+    }
+}

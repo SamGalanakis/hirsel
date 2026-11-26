@@ -186,10 +186,10 @@ fn moq_receiver_total_law(wire: Bytes) -> Result[(), String] {
     }
     settle_pair(mut c, mut s, 12)
     let sc = first_quic_conn(s.raw)
-    let st = result.unwrap(quic.open(mut s.io.q, sc, false))
-    let _ = quic.write(mut s.io.q, sc, st, data, false)
+    let st = result.unwrap(quic.open(mut s.io.driver.q, sc, false))
+    let _ = quic.write(mut s.io.driver.q, sc, st, data, false)
     settle_pair(mut c, mut s, 13)
-    let _ = quic.write(mut s.io.q, sc, st, b"\x00\x00", true)
+    let _ = quic.write(mut s.io.driver.q, sc, st, b"\x00\x00", true)
     settle_pair(mut c, mut s, 14)
     Ok(())
 }

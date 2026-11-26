@@ -39,7 +39,7 @@ fn moq_endpoint_config() -> quic.EndpointConfig {
 }
 
 fn moq_limits() -> moq.Limits {
-    moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000, max_buffered: 8388608)
 }
 
 fn wt_limits() -> webtransport.Limits {
@@ -51,71 +51,81 @@ fn wt_limits() -> webtransport.Limits {
 }
 
 type Peer {
-    io: moq.Io,
+    io: moq.LinkIo[moq.MixedDriver],
     sess: Option[moq.Session],
+    pooled: Option[moq.Session],
+    pooled_events: List[moq.Event],
     events: List[moq.Event],
     raw: List[quic.Event],
     wt_events: List[webtransport.Event]
 }
 
+fn native_session(mut io: moq.LinkIo[moq.MixedDriver], c: quic.ConnectionHandle, side: schedule.Side, role: moq.Role, limits: moq.Limits) -> moq.Session {
+    let link = option.unwrap(moq.native_link(mut io.driver, c))
+    option.unwrap(moq.link_session(io, link, side, role, limits))
+}
+
+fn web_session(mut io: moq.LinkIo[moq.MixedDriver], s: webtransport.SessionHandle, side: schedule.Side, role: moq.Role, limits: moq.Limits) -> moq.Session {
+    let link = option.unwrap(moq.web_link(mut io.driver, s))
+    option.unwrap(moq.link_session(io, link, side, role, limits))
+}
+
 fn native_server(seed: u64, limits: moq.Limits) -> Peer {
     let t = moq.transport_config(limits)
     let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), Some((moq_identity(), take t))))
-    Peer(io: moq.Io(q: take q, w: None), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+    Peer(io: moq.mixed_driver(take q, None, 32), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
 }
 
 fn native_client(seed: u64) -> Peer {
     let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), None))
-    Peer(io: moq.Io(q: take q, w: None), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+    Peer(io: moq.mixed_driver(take q, None, 32), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
 }
 
 fn wt_server(seed: u64) -> Peer {
     let l = wt_limits()
     let t = webtransport.transport(l)
     let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), Some((moq_identity(), take t))))
-    Peer(io: moq.Io(q: take q, w: Some(webtransport.endpoint(take l))), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+    Peer(io: moq.mixed_driver(take q, Some(webtransport.endpoint(take l)), 32), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
 }
 
 fn wt_client(seed: u64) -> Peer {
     let l = wt_limits()
     let q = result.unwrap(quic.endpoint(provide.random(seed), moq_endpoint_config(), None))
-    Peer(io: moq.Io(q: take q, w: Some(webtransport.endpoint(take l))), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
+    Peer(io: moq.mixed_driver(take q, Some(webtransport.endpoint(take l)), 32), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
 }
 
 fn deliver_peer(mut from: Peer, mut to: Peer, from_addr: Addr, now: u64, mut wire: Bytes, mut packets: List[quic.Output]) -> u64 {
     list.clear(mut wire)
     list.clear(mut packets)
-    let _ = quic.poll(mut from.io.q, now, mut wire, mut packets)
+    let _ = quic.poll(mut from.io.driver.q, now, mut wire, mut packets)
     let mut count = 0u64
     for output in packets {
         if let Transmit(..) = output {
             count += 1
         }
     }
-    quic.committed(mut from.io.q, now, count)
+    quic.committed(mut from.io.driver.q, now, count)
     let mut qevents: List[quic.Event] = list.new()
     for output in packets {
         if let Transmit(at: at, len: len, ..) = output {
-            quic.receive_datagram(mut to.io.q, now, from_addr, 0, mut wire, at, len, mut qevents)
+            quic.receive_datagram(mut to.io.driver.q, now, from_addr, 0, mut wire, at, len, mut qevents)
         }
     }
-    let has_wt = match to.io.w {
+    let has_wt = match to.io.driver.w {
         Some(_) => true,
         None => false,
     }
     if has_wt {
         let mut wevs: List[webtransport.Event] = list.new()
-        if let Some(mut w) = to.io.w {
-            webtransport.receive(mut w, mut to.io.q, now, qevents, mut wevs)
+        if let Some(mut w) = to.io.driver.w {
+            webtransport.receive(mut w, mut to.io.driver.q, now, qevents, mut wevs)
         }
         for ev in wevs {
             list.push(mut to.wt_events, clone(ev))
         }
         if let Some(mut s) = to.sess {
-            let mut tevs: List[moq.TransportEvent] = list.new()
-            for ev in wevs {
-                list.push(mut tevs, Web(clone(ev)))
-            }
+            let mut tevs: List[moq.AddressedEvent] = list.new()
+            moq.web_events(mut to.io.driver, wevs, mut tevs)
             moq.receive(mut s, mut to.io, now, tevs, mut to.events)
         }
     } else {
@@ -123,10 +133,8 @@ fn deliver_peer(mut from: Peer, mut to: Peer, from_addr: Addr, now: u64, mut wir
             list.push(mut to.raw, clone(ev))
         }
         if let Some(mut s) = to.sess {
-            let mut tevs: List[moq.TransportEvent] = list.new()
-            for ev in qevents {
-                list.push(mut tevs, Quic(clone(ev)))
-            }
+            let mut tevs: List[moq.AddressedEvent] = list.new()
+            moq.native_events(mut to.io.driver, qevents, mut tevs)
             moq.receive(mut s, mut to.io, now, tevs, mut to.events)
         }
     }
@@ -156,17 +164,15 @@ fn first_quic_conn(events: List[quic.Event]) -> quic.ConnectionHandle {
 }
 
 fn establish_native(mut client: Peer, mut server: Peer, limits: moq.Limits, auth: Bytes, path: Bytes, tok: Option[Bytes]) {
-    let cc = result.unwrap(quic.connect(mut client.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(limits)))
-    let mut cs = moq.session(Client, Both, Native(c: cc), limits)
+    let cc = result.unwrap(quic.connect(mut client.io.driver.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(limits)))
+    let mut cs = native_session(mut client.io, cc, Client, Both, limits)
     moq.configure_setup(mut cs, clone(auth), clone(path), clone(tok))
     client.sess = Some(take cs)
     settle_pair(mut client, mut server, 1)
     let sc = first_quic_conn(server.raw)
-    let mut ss = moq.session(Server, Both, Native(c: sc), limits)
-    let mut tevs: List[moq.TransportEvent] = list.new()
-    for ev in server.raw {
-        list.push(mut tevs, Quic(clone(ev)))
-    }
+    let mut ss = native_session(mut server.io, sc, Server, Both, limits)
+    let mut tevs: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut server.io.driver, server.raw, mut tevs)
     moq.receive(mut ss, mut server.io, 2, tevs, mut server.events)
     server.sess = Some(take ss)
     settle_pair(mut client, mut server, 3)
@@ -177,7 +183,7 @@ fn establish_native(mut client: Peer, mut server: Peer, limits: moq.Limits, auth
 }
 
 fn make_obj(take tr: codec.TrackName, group: u64, sg: u64, id: u64, mode: moq.Mode, prio: u8, take payload: Bytes) -> moq.Object {
-    moq.Object(track: take tr, group: group, subgroup: sg, id: id, mode: mode, publisher_priority: prio, status: Normal, properties: b"", payload: shared.new(take payload))
+    moq.Object(track: take tr, group: group, subgroup: sg, id: id, mode: mode, publisher_priority: prio, status: Normal, properties: b"", payload: quic.payload_whole(shared.new(take payload)))
 }
 
 fn received_objects(events: List[moq.Event]) -> List[moq.Object] {
@@ -371,8 +377,8 @@ fn session_native_webtransport_and_refusals() -> Result[(), ()] {
     let mut ws = wt_server(302)
     let mut protos: List[String] = list.new()
     list.push(mut protos, moq.ALPN)
-    let csh = if let Some(mut w) = wc.io.w {
-        result.unwrap(webtransport.connect(mut w, mut wc.io.q, 0, MOQ_SERVER_ADDR, "https://server/moq", moq_pins(), take protos))
+    let csh = if let Some(mut w) = wc.io.driver.w {
+        result.unwrap(webtransport.connect(mut w, mut wc.io.driver.q, 0, MOQ_SERVER_ADDR, "https://server/moq", moq_pins(), take protos))
     } else {
         fail("missing wt client")
     }
@@ -386,11 +392,11 @@ fn session_native_webtransport_and_refusals() -> Result[(), ()] {
         }
     }
     let ssh = option.unwrap(ssh_opt)
-    if let Some(mut w) = ws.io.w {
-        result.unwrap(webtransport.answer(mut w, mut ws.io.q, ssh, Accept(protocol: Some(moq.ALPN), headers: list.new())))
+    if let Some(mut w) = ws.io.driver.w {
+        result.unwrap(webtransport.answer(mut w, mut ws.io.driver.q, ssh, Accept(protocol: Some(moq.ALPN), headers: list.new())))
     }
-    ws.sess = Some(moq.session(Server, Both, Web(s: ssh), lim))
-    wc.sess = Some(moq.session(Client, Both, Web(s: csh), lim))
+    ws.sess = Some(web_session(mut ws.io, ssh, Server, Both, lim))
+    wc.sess = Some(web_session(mut wc.io, csh, Client, Both, lim))
     settle_pair(mut wc, mut ws, 2)
     if let Some(mut ss) = ws.sess {
         moq.accept_setup(mut ss, mut ws.io, Ok(moq.default_scope(b"server", b"/moq")))
@@ -419,41 +425,51 @@ fn session_native_webtransport_and_refusals() -> Result[(), ()] {
     // 4. Refusals: second SETUP -> PROTOCOL_VIOLATION; narrowed REQUEST_UPDATE -> INVALID_PARAMETER.
     let mut rc = native_client(401)
     let mut rs = native_server(402, lim)
-    let rcc = result.unwrap(quic.connect(mut rc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
+    let rcc = result.unwrap(quic.connect(mut rc.io.driver.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
     settle_pair(mut rc, mut rs, 1)
     let rsc = first_quic_conn(rs.raw)
-    rs.sess = Some(moq.session(Server, Both, Native(c: rsc), lim))
-    let ctrl = result.unwrap(quic.open(mut rc.io.q, rcc, false))
+    rs.sess = Some(native_session(mut rs.io, rsc, Server, Both, lim))
+    let mut rs_ready: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut rs.io.driver, rs.raw, mut rs_ready)
+    if let Some(mut session) = rs.sess {
+        moq.receive(mut session, mut rs.io, 2, rs_ready, mut rs.events)
+    }
+    let ctrl = result.unwrap(quic.open(mut rc.io.driver.q, rcc, false))
     let mut two_setups: Bytes = list.new()
     result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut two_setups))
     result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut two_setups))
-    let _ = result.unwrap(quic.write(mut rc.io.q, rcc, ctrl, two_setups, false))
+    let _ = result.unwrap(quic.write(mut rc.io.driver.q, rcc, ctrl, two_setups, false))
     settle_pair(mut rc, mut rs, 2)
     if !has_closed(rs.events, moq.ERR_PROTOCOL_VIOLATION) {
         fail("second SETUP did not close with PROTOCOL_VIOLATION")
     }
     let mut nc = native_client(501)
     let mut ns_srv = native_server(502, lim)
-    let ncc = result.unwrap(quic.connect(mut nc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
+    let ncc = result.unwrap(quic.connect(mut nc.io.driver.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
     settle_pair(mut nc, mut ns_srv, 1)
     let nsc = first_quic_conn(ns_srv.raw)
-    ns_srv.sess = Some(moq.session(Server, Both, Native(c: nsc), lim))
-    let nctrl = result.unwrap(quic.open(mut nc.io.q, ncc, false))
+    ns_srv.sess = Some(native_session(mut ns_srv.io, nsc, Server, Both, lim))
+    let mut ns_srv_ready: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut ns_srv.io.driver, ns_srv.raw, mut ns_srv_ready)
+    if let Some(mut session) = ns_srv.sess {
+        moq.receive(mut session, mut ns_srv.io, 2, ns_srv_ready, mut ns_srv.events)
+    }
+    let nctrl = result.unwrap(quic.open(mut nc.io.driver.q, ncc, false))
     let mut one_setup: Bytes = list.new()
     result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut one_setup))
-    let _ = result.unwrap(quic.write(mut nc.io.q, ncc, nctrl, one_setup, false))
+    let _ = result.unwrap(quic.write(mut nc.io.driver.q, ncc, nctrl, one_setup, false))
     settle_pair(mut nc, mut ns_srv, 2)
     if let Some(mut ss) = ns_srv.sess {
         moq.accept_setup(mut ss, mut ns_srv.io, Ok(moq.default_scope(b"", b"")))
     }
     settle_pair(mut nc, mut ns_srv, 3)
-    let bidi = result.unwrap(quic.open(mut nc.io.q, ncc, true))
+    let bidi = result.unwrap(quic.open(mut nc.io.driver.q, ncc, true))
     let mut fetch_and_bad_upd: Bytes = list.new()
     result.unwrap(codec.write_message(Fetch(id: 0, track: track(ns1(b"a"), b"b"), params: list.new()), codec.DEFAULT_MAX_CONTROL, mut fetch_and_bad_upd))
     let mut bad_ps: List[codec.Param] = list.new()
     list.push(mut bad_ps, TrackNamespacePrefix(ns1(b"x")))
     result.unwrap(codec.write_message(RequestUpdate(id: 2, params: take bad_ps), codec.DEFAULT_MAX_CONTROL, mut fetch_and_bad_upd))
-    let _ = result.unwrap(quic.write(mut nc.io.q, ncc, bidi, fetch_and_bad_upd, false))
+    let _ = result.unwrap(quic.write(mut nc.io.driver.q, ncc, bidi, fetch_and_bad_upd, false))
     settle_pair(mut nc, mut ns_srv, 4)
     if !has_closed(ns_srv.events, moq.ERR_INVALID_PARAMETER) {
         fail("REQUEST_UPDATE narrowing did not refuse TRACK_NAMESPACE_PREFIX on FETCH")
@@ -463,25 +479,27 @@ fn session_native_webtransport_and_refusals() -> Result[(), ()] {
     let mut ds = native_server(602, lim)
     let mut no_dg = moq.transport_config(lim)
     no_dg.max_datagram_frame = 0
-    let _ = result.unwrap(quic.connect(mut dc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, take no_dg))
+    let _ = result.unwrap(quic.connect(mut dc.io.driver.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, take no_dg))
     settle_pair(mut dc, mut ds, 1)
     let dsc = first_quic_conn(ds.raw)
-    let mut dss = moq.session(Server, Both, Native(c: dsc), lim)
-    moq.receive(mut dss, mut ds.io, 2, list.new(), mut ds.events)
+    let mut dss = native_session(mut ds.io, dsc, Server, Both, lim)
+    let mut ds_ready: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut ds.io.driver, ds.raw, mut ds_ready)
+    moq.receive(mut dss, mut ds.io, 2, ds_ready, mut ds.events)
     if !has_closed(ds.events, moq.ERR_PROTOCOL_VIOLATION) {
         fail("missing QUIC DATAGRAM extension was not refused at setup")
     }
     // 6. Narrowing REQUEST_OK (moq.md:337): PUBLISH_NAMESPACE_OK carrying LARGEST_OBJECT is INVALID_PARAMETER.
     let mut oc = native_client(701)
     let mut os = native_server(702, lim)
-    let occ = result.unwrap(quic.connect(mut oc.io.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
-    oc.sess = Some(moq.session(Client, Both, Native(c: occ), lim))
+    let occ = result.unwrap(quic.connect(mut oc.io.driver.q, 0, MOQ_SERVER_ADDR, "server", moq_pins(), None, moq.transport_config(lim)))
+    oc.sess = Some(native_session(mut oc.io, occ, Client, Both, lim))
     settle_pair(mut oc, mut os, 1)
     let osc = first_quic_conn(os.raw)
-    let sctrl = result.unwrap(quic.open(mut os.io.q, osc, false))
+    let sctrl = result.unwrap(quic.open(mut os.io.driver.q, osc, false))
     let mut srv_setup: Bytes = list.new()
     result.unwrap(codec.write_message(Setup(options: list.new()), codec.DEFAULT_MAX_CONTROL, mut srv_setup))
-    let _ = result.unwrap(quic.write(mut os.io.q, osc, sctrl, srv_setup, false))
+    let _ = result.unwrap(quic.write(mut os.io.driver.q, osc, sctrl, srv_setup, false))
     settle_pair(mut oc, mut os, 2)
     let _ = if let Some(mut cs) = oc.sess {
         result.unwrap(moq.publish_namespace(mut cs, mut oc.io, 3, ns1(b"pub"), None))
@@ -503,7 +521,7 @@ fn session_native_webtransport_and_refusals() -> Result[(), ()] {
     list.push(mut bad_ok_ps, LargestObject(loc(1, 0)))
     let mut bad_ok_wire: Bytes = list.new()
     result.unwrap(codec.write_message(RequestOk(params: take bad_ok_ps, properties: list.new()), codec.DEFAULT_MAX_CONTROL, mut bad_ok_wire))
-    let _ = result.unwrap(quic.write(mut os.io.q, osc, bad_ok_stream, bad_ok_wire, false))
+    let _ = result.unwrap(quic.write(mut os.io.driver.q, osc, bad_ok_stream, bad_ok_wire, false))
     settle_pair(mut oc, mut os, 5)
     if !has_closed(oc.events, moq.ERR_INVALID_PARAMETER) {
         fail("REQUEST_OK narrowing did not refuse LARGEST_OBJECT on PUBLISH_NAMESPACE")
@@ -530,14 +548,14 @@ fn session_object_limits_and_fetch_extremes() -> Result[(), ()] {
     let _ = peer_accept_subscribes(mut rig.peers[good_pub])
     rig_settle(mut rig, 32, true)
     let bad_cc = first_quic_conn(rig.peers[bad_pub].raw)
-    let bad_st = result.unwrap(quic.open(mut rig.peers[bad_pub].io.q, bad_cc, false))
+    let bad_st = result.unwrap(quic.open(mut rig.peers[bad_pub].io.driver.q, bad_cc, false))
     let sh = codec.SubgroupHeader(alias: 0, group: 1, subgroup: ZeroSubgroup, priority: Some(10), properties: false, end_of_group: false, first_object: true)
     let mut swire: Bytes = list.new()
     result.unwrap(codec.write_subgroup_header(sh, mut swire))
     result.unwrap(codec.write_subgroup_object(codec.SubgroupObject(id: 0, properties: list.new(), length: 0xffffffffffffffff, status: Normal), sh, None, mut swire))
-    let _ = result.unwrap(quic.write(mut rig.peers[bad_pub].io.q, bad_cc, bad_st, swire, false))
+    let _ = result.unwrap(quic.write(mut rig.peers[bad_pub].io.driver.q, bad_cc, bad_st, swire, false))
     rig_settle(mut rig, 33, true)
-    let _ = quic.write(mut rig.peers[bad_pub].io.q, bad_cc, bad_st, b"\x00", false)
+    let _ = quic.write(mut rig.peers[bad_pub].io.driver.q, bad_cc, bad_st, b"\x00", false)
     rig_settle(mut rig, 34, true)
     let bad_rid = rig.peer_rids[bad_pub]
     let mut bad_ended = false
@@ -575,14 +593,14 @@ fn session_object_limits_and_fetch_extremes() -> Result[(), ()] {
     settle_pair(mut fc, mut fs, 12)
     let moq.RequestId(raw_fid) = freq
     let fsc = first_quic_conn(fs.raw)
-    let fst = result.unwrap(quic.open(mut fs.io.q, fsc, false))
+    let fst = result.unwrap(quic.open(mut fs.io.driver.q, fsc, false))
     let mut fwire: Bytes = list.new()
     result.unwrap(codec.write_fetch_header(raw_fid, mut fwire))
     let mut fwr = codec.fetch_state(Ascending)
     result.unwrap(codec.write_fetch_entry(FetchedObject(codec.FetchObject(location: loc(1, 0), subgroup: Some(0), priority: 10, properties: list.new(), length: 0xffffffffffffffff)), mut fwr, mut fwire))
-    let _ = result.unwrap(quic.write(mut fs.io.q, fsc, fst, fwire, false))
+    let _ = result.unwrap(quic.write(mut fs.io.driver.q, fsc, fst, fwire, false))
     settle_pair(mut fc, mut fs, 13)
-    let _ = quic.write(mut fs.io.q, fsc, fst, b"\x00", false)
+    let _ = quic.write(mut fs.io.driver.q, fsc, fst, b"\x00", false)
     settle_pair(mut fc, mut fs, 14)
     if !has_closed(fc.events, moq.ERR_FIELD_LENGTH_EXCEEDED) {
         fail("fetch length 2^64 - 1 did not close session with FIELD_LENGTH_EXCEEDED")
@@ -605,13 +623,13 @@ fn session_object_limits_and_fetch_extremes() -> Result[(), ()] {
     settle_pair(mut dc, mut ds, 12)
     let moq.RequestId(raw_did) = dreq
     let dsc = first_quic_conn(ds.raw)
-    let dst = result.unwrap(quic.open(mut ds.io.q, dsc, false))
+    let dst = result.unwrap(quic.open(mut ds.io.driver.q, dsc, false))
     let mut dwire: Bytes = list.new()
     result.unwrap(codec.write_fetch_header(raw_did, mut dwire))
     let mut dwr = codec.fetch_state(Descending)
     result.unwrap(codec.write_fetch_entry(EndOfRange(kind: UnknownRange, end: loc(0xffffffffffffffff, 0)), mut dwr, mut dwire))
     result.unwrap(codec.write_fetch_entry(EndOfRange(kind: UnknownRange, end: loc(0xfffffffffffffffe, 0)), mut dwr, mut dwire))
-    let _ = result.unwrap(quic.write(mut ds.io.q, dsc, dst, dwire, true))
+    let _ = result.unwrap(quic.write(mut ds.io.driver.q, dsc, dst, dwire, true))
     settle_pair(mut dc, mut ds, 13)
     if let Some(cs) = dc.sess {
         if moq.is_closed(cs) {
@@ -656,7 +674,7 @@ fn moq_room_left(most: u64) -> u64 {
 @test
 fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     // 1. Subgroup header declaring object_bytes + 1 is refused and reserved bytes do not rise.
-    let lim_a = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 262144, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let lim_a = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 262144, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000, max_buffered: 8388608)
     let mut ca = native_client(2501)
     let mut sa = native_server(2502, lim_a)
     establish_native(mut ca, mut sa, lim_a, b"sec.test", b"/p1-1a", None)
@@ -673,7 +691,7 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     }
     settle_pair(mut ca, mut sa, 12)
     let sac = first_quic_conn(sa.raw)
-    let sast = result.unwrap(quic.open(mut sa.io.q, sac, false))
+    let sast = result.unwrap(quic.open(mut sa.io.driver.q, sac, false))
     let sh_a = codec.SubgroupHeader(alias: 0, group: 1, subgroup: ZeroSubgroup, priority: Some(10), properties: false, end_of_group: false, first_object: true)
     let mut wire_a: Bytes = list.new()
     result.unwrap(codec.write_subgroup_header(sh_a, mut wire_a))
@@ -681,7 +699,7 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     let most = 4194304u64
     let Ok(drop_a) = (bound bytes most {
         let before = moq_room_left(most)
-        let _ = result.unwrap(quic.write(mut sa.io.q, sac, sast, wire_a, false))
+        let _ = result.unwrap(quic.write(mut sa.io.driver.q, sac, sast, wire_a, false))
         settle_pair(mut ca, mut sa, 13)
         let after = moq_room_left(most)
         int.saturating_sub(before, after)
@@ -696,7 +714,7 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     }
     // 2. Subgroup and fetch headers declaring 1 MiB (<= object_bytes) with 0 payload bytes
     //    do NOT pre-reserve 1 MiB before payload bytes arrive.
-    let lim_b = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 1048576, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let lim_b = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 1048576, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000, max_buffered: 8388608)
     let mut cb = native_client(2601)
     let mut sb = native_server(2602, lim_b)
     establish_native(mut cb, mut sb, lim_b, b"sec.test", b"/p1-1b", None)
@@ -720,21 +738,21 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     }
     settle_pair(mut cb, mut sb, 12)
     let sbc = first_quic_conn(sb.raw)
-    let sg_st = result.unwrap(quic.open(mut sb.io.q, sbc, false))
+    let sg_st = result.unwrap(quic.open(mut sb.io.driver.q, sbc, false))
     let sh_b = codec.SubgroupHeader(alias: 0, group: 1, subgroup: ZeroSubgroup, priority: Some(10), properties: false, end_of_group: false, first_object: true)
     let mut wire_sg: Bytes = list.new()
     result.unwrap(codec.write_subgroup_header(sh_b, mut wire_sg))
     result.unwrap(codec.write_subgroup_object(codec.SubgroupObject(id: 0, properties: list.new(), length: lim_b.object_bytes, status: Normal), sh_b, None, mut wire_sg))
     let moq.RequestId(raw_fb) = freq_b
-    let ft_st = result.unwrap(quic.open(mut sb.io.q, sbc, false))
+    let ft_st = result.unwrap(quic.open(mut sb.io.driver.q, sbc, false))
     let mut wire_ft: Bytes = list.new()
     result.unwrap(codec.write_fetch_header(raw_fb, mut wire_ft))
     let mut wr_fb = codec.fetch_state(Ascending)
     result.unwrap(codec.write_fetch_entry(FetchedObject(codec.FetchObject(location: loc(1, 0), subgroup: Some(0), priority: 10, properties: list.new(), length: lim_b.object_bytes)), mut wr_fb, mut wire_ft))
     let Ok(drop_b) = (bound bytes most {
         let before = moq_room_left(most)
-        let _ = result.unwrap(quic.write(mut sb.io.q, sbc, sg_st, wire_sg, false))
-        let _ = result.unwrap(quic.write(mut sb.io.q, sbc, ft_st, wire_ft, false))
+        let _ = result.unwrap(quic.write(mut sb.io.driver.q, sbc, sg_st, wire_sg, false))
+        let _ = result.unwrap(quic.write(mut sb.io.driver.q, sbc, ft_st, wire_ft, false))
         settle_pair(mut cb, mut sb, 13)
         let after = moq_room_left(most)
         int.saturating_sub(before, after)
@@ -750,7 +768,7 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
         fail("receiver pre-reserved peer-declared object length before payload bytes arrived")
     }
     // 3. A legitimate 70 KiB object within object_bytes grows on demand and delivers intact.
-    let lim_c = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 131072, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let lim_c = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 131072, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000, max_buffered: 8388608)
     let mut cc = native_client(2701)
     let mut sc = native_server(2702, lim_c)
     establish_native(mut cc, mut sc, lim_c, b"sec.test", b"/p1-1c", None)
@@ -774,16 +792,16 @@ fn object_bytes_and_no_preread_reserve() -> Result[(), ()] {
     for step in 0u64 .. 40 {
         let t = 14 + step * 10 * MS_NS
         let mut qev_c: List[quic.Event] = list.new()
-        quic.timeout(mut cc.io.q, t, mut qev_c)
+        quic.timeout(mut cc.io.driver.q, t, mut qev_c)
         let mut qev_s: List[quic.Event] = list.new()
-        quic.timeout(mut sc.io.q, t, mut qev_s)
+        quic.timeout(mut sc.io.driver.q, t, mut qev_s)
         settle_pair(mut cc, mut sc, t)
         if list.len(received_objects(cc.events)) >= 1 {
             break
         }
     }
     let got_c = received_objects(cc.events)
-    if list.len(got_c) != 1 || list.len(got_c[0].payload) != 70000 {
+    if list.len(got_c) != 1 || quic.payload_len(got_c[0].payload) != 70000 {
         fail("70 KiB object within object_bytes did not deliver intact")
     }
     Ok(())

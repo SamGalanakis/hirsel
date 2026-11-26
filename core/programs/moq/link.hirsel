@@ -1,0 +1,96 @@
+/// Driver-local identity of one registration. Ids are never reused by a driver.
+pub opaque type LinkId: key = LinkId(u64)
+
+pub type LinkStream: key = LinkStream(u64)
+
+pub type LinkReadError = StreamReset(u64) | Refused(MoqError)
+
+pub type AddressMode: key = InUri | InSetup
+
+pub type LinkEvent = Ready(max_datagram: u64) | InvalidProtocol | Opened(stream: LinkStream, bidi: bool) | Readable(LinkStream) | Writable(LinkStream) | Acked(LinkStream) | Reset(stream: LinkStream, code: u64, final_size: u64) | Stopped(stream: LinkStream, code: u64) | Datagram(quic.PayloadSlice) | Closed(code: u64)
+
+pub type AddressedEvent {
+    link: LinkId,
+    event: LinkEvent
+}
+
+pub type LinkOps[D] {
+    address_mode: fn(D, LinkId) -> Option[AddressMode],
+    max_datagram: fn(D, LinkId) -> u64,
+    open: fn(mut D, LinkId, bool) -> Result[LinkStream, MoqError],
+    read: fn(mut D, LinkId, LinkStream, mut Bytes) -> Result[(u64, bool), LinkReadError],
+    write: fn(mut D, LinkId, LinkStream, Bytes, bool) -> Result[u64, MoqError],
+    write_slice: fn(mut D, LinkId, LinkStream, take quic.PayloadSlice, bool) -> Result[bool, MoqError],
+    reset: fn(mut D, LinkId, LinkStream, u64, u64) -> Result[(), MoqError],
+    stop: fn(mut D, LinkId, LinkStream, u64) -> Result[(), MoqError],
+    priority: fn(mut D, LinkId, LinkStream, quic.Priority) -> Result[(), MoqError],
+    send_datagram: fn(mut D, LinkId, take quic.FramedSlice, quic.Priority, u64) -> Result[(), MoqError],
+    drop_datagrams: fn(mut D, LinkId, u64) -> u64,
+    close: fn(mut D, LinkId, u64, Bytes),
+}
+
+pub type LinkIo[D] {
+    driver: D,
+    ops: LinkOps[D]
+}
+
+/// Bind a session to a driver registration and capture its SETUP address rule.
+pub fn link_session[D](io: LinkIo[D], link: LinkId, side: schedule.Side, role: Role, limits: Limits) -> Option[Session] {
+    let mode = io.ops.address_mode
+    let Some(address_mode) = mode(io.driver, link) else {
+        return None
+    }
+    Some(session(side, role, link, address_mode, limits))
+}
+
+fn tx_open[D](link: LinkId, mut io: LinkIo[D], bidi: bool) -> Result[LinkStream, MoqError] {
+    let op = io.ops.open
+    op(mut io.driver, link, bidi)
+}
+
+fn tx_read[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, mut into: Bytes) -> Result[(u64, bool), LinkReadError] {
+    let op = io.ops.read
+    op(mut io.driver, link, stream, mut into)
+}
+
+fn tx_write[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, data: Bytes, fin: bool) -> Result[u64, MoqError] {
+    let op = io.ops.write
+    op(mut io.driver, link, stream, data, fin)
+}
+
+fn tx_write_slice[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, take data: quic.PayloadSlice, fin: bool) -> Result[bool, MoqError] {
+    let op = io.ops.write_slice
+    op(mut io.driver, link, stream, take data, fin)
+}
+
+fn tx_reset[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, code: u64, reliable: u64) {
+    let reset = io.ops.reset
+    if let Error(_) = reset(mut io.driver, link, stream, code, reliable) {
+        let _ = reset(mut io.driver, link, stream, code, 0)
+    }
+}
+
+fn tx_stop[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, code: u64) {
+    let op = io.ops.stop
+    let _ = op(mut io.driver, link, stream, code)
+}
+
+fn tx_priority[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, p: quic.Priority) {
+    let op = io.ops.priority
+    let _ = op(mut io.driver, link, stream, p)
+}
+
+fn tx_send_datagram[D](link: LinkId, mut io: LinkIo[D], take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), MoqError] {
+    let op = io.ops.send_datagram
+    op(mut io.driver, link, take data, p, tag)
+}
+
+fn tx_drop_datagrams[D](link: LinkId, mut io: LinkIo[D], tag: u64) -> u64 {
+    let op = io.ops.drop_datagrams
+    op(mut io.driver, link, tag)
+}
+
+fn tx_close[D](link: LinkId, mut io: LinkIo[D], code: u64, reason: Bytes) {
+    let op = io.ops.close
+    op(mut io.driver, link, code, reason)
+}

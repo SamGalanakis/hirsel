@@ -1,0 +1,105 @@
+fn native_open(mut q: quic.Endpoint, c: quic.ConnectionHandle, bidi: bool) -> Result[LinkStream, MoqError] {
+    match quic.open(mut q, c, bidi) {
+        Ok(v) => Ok(link_stream(v)),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_read(mut q: quic.Endpoint, c: quic.ConnectionHandle, stream: LinkStream, mut into: Bytes) -> Result[(u64, bool), LinkReadError] {
+    match quic.read(mut q, c, transport_stream(stream), mut into) {
+        Ok(v) => Ok(v),
+        Error(StreamReset(code)) => Error(StreamReset(code)),
+        Error(e) => Error(Refused(Quic(e))),
+    }
+}
+
+fn native_write(mut q: quic.Endpoint, c: quic.ConnectionHandle, stream: LinkStream, data: Bytes, fin: bool) -> Result[u64, MoqError] {
+    match quic.write(mut q, c, transport_stream(stream), data, fin) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_write_slice(mut q: quic.Endpoint, c: quic.ConnectionHandle, stream: LinkStream, take data: quic.PayloadSlice, fin: bool) -> Result[bool, MoqError] {
+    match quic.write_shared(mut q, c, transport_stream(stream), take data, fin) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_reset(mut q: quic.Endpoint, c: quic.ConnectionHandle, stream: LinkStream, code: u64, reliable: u64) -> Result[(), MoqError] {
+    match quic.reset(mut q, c, transport_stream(stream), code, reliable) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_stop(mut q: quic.Endpoint, c: quic.ConnectionHandle, stream: LinkStream, code: u64) -> Result[(), MoqError] {
+    match quic.stop(mut q, c, transport_stream(stream), code) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_priority(mut q: quic.Endpoint, c: quic.ConnectionHandle, stream: LinkStream, p: quic.Priority) -> Result[(), MoqError] {
+    match quic.priority(mut q, c, transport_stream(stream), p) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_send_datagram(mut q: quic.Endpoint, c: quic.ConnectionHandle, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), MoqError] {
+    match quic.send_datagram(mut q, c, take data, p, quic.DatagramTag(owner: 0, tag: tag)) {
+        Ok(v) => Ok(v),
+        Error(e) => Error(Quic(e)),
+    }
+}
+
+fn native_drop_datagrams(mut q: quic.Endpoint, c: quic.ConnectionHandle, tag: u64) -> u64 {
+    quic.drop_datagrams(mut q, c, quic.DatagramTag(owner: 0, tag: tag))
+}
+
+fn native_close(mut q: quic.Endpoint, c: quic.ConnectionHandle, code: u64, reason: Bytes) {
+    quic.close(mut q, c, code, clone(reason))
+}
+
+fn native_link_event(q: quic.Endpoint, ev: quic.Event) -> (quic.ConnectionHandle, LinkEvent) {
+    match ev {
+        Connected(c: c, alpn: alpn) => {
+            let event: LinkEvent = if alpn == ALPN {
+                Ready(max_datagram: quic.max_datagram_payload(q, c))
+            } else {
+                InvalidProtocol
+            }
+            (c, event)
+        },
+        Opened(c, stream) => {
+            let quic.StreamId(n) = stream
+            (c, Opened(stream: link_stream(stream), bidi: (n & 2) == 0))
+        },
+        Readable(c, stream) => (c, Readable(link_stream(stream))),
+        Writable(c, stream) => (c, Writable(link_stream(stream))),
+        Acked(c, stream) => (c, Acked(link_stream(stream))),
+        Reset(c: c, s: stream, code: code, final_size: final_size) => (c, Reset(stream: link_stream(stream), code: code, final_size: final_size)),
+        Stopped(c, stream, code) => (c, Stopped(stream: link_stream(stream), code: code)),
+        Datagram(c, data) => (c, Datagram(quic.payload_share(data))),
+        Closed(c, reason) => {
+            let code = match reason {
+                Application(code: code) => code,
+                Transport(code: code, ..) => code,
+                _ => ERR_NO_ERROR,
+            }
+            (c, Closed(code: code))
+        },
+    }
+}
+
+fn link_stream(s: quic.StreamId) -> LinkStream {
+    let quic.StreamId(n) = s
+    LinkStream(n)
+}
+
+fn transport_stream(s: LinkStream) -> quic.StreamId {
+    let LinkStream(n) = s
+    StreamId(n)
+}

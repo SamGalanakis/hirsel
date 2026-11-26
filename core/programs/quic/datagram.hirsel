@@ -239,3 +239,22 @@ pub fn connection_datagrams_late(e: Endpoint, c: ConnectionHandle) -> u64 {
     }
     0
 }
+
+/// Largest application datagram payload that fits the peer limit and current path MTU.
+pub fn max_datagram_payload(e: Endpoint, c: ConnectionHandle) -> u64 {
+    let Some(i) = slot_at(e, c) else {
+        return 0
+    }
+    let Some(conn) = e.connections[i] else {
+        return 0
+    }
+    let room = order.min(conn.streams.peer_datagram, empty_packet_room(conn, int.widen(e.config.max_mtu)))
+    if room < 2 {
+        return 0
+    }
+    let mut n = room - 2
+    while !datagram_fits(room, n) {
+        n -= 1
+    }
+    n
+}

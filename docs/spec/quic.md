@@ -151,6 +151,7 @@ pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) 
 pub fn received(e: Endpoint, c: ConnectionHandle, s: StreamId) -> u64
 pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError]
 pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError]
+pub fn max_datagram_payload(e: Endpoint, c: ConnectionHandle) -> u64
 pub fn send_datagram(mut e: Endpoint, c: ConnectionHandle, take data: FramedSlice, p: Priority, tag: DatagramTag) -> Result[(), QuicError]
 pub fn drop_datagrams(mut e: Endpoint, c: ConnectionHandle, tag: DatagramTag) -> u64
 pub fn drop_owner_datagrams(mut e: Endpoint, c: ConnectionHandle, owner: u64) -> u64
@@ -231,6 +232,7 @@ pub fn payload_bytes(s: PayloadSlice) -> View[Bytes] in s
 pub fn payload_retained_bytes(s: PayloadSlice) -> u64
 pub fn framed_from(take payload: PayloadSlice) -> FramedSlice
 pub fn framed_prepend(mut f: FramedSlice, header: Bytes) -> bool
+pub fn framed_prepend_inline(mut f: FramedSlice, header: Inline[u8, 64], n: u64) -> bool
 pub fn framed_room(f: FramedSlice) -> u64
 pub fn framed_len(f: FramedSlice) -> u64
 pub fn framed_retained_bytes(f: FramedSlice) -> u64

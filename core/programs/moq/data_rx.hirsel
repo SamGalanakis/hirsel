@@ -1,8 +1,8 @@
 // MOQ-3 & MOQ-4: Unidirectional data streams (subgroup, fetch, padding), early stream
 // buffering, datagrams, and moqt-23 §12.1 malformed-track / deduplication checks.
-fn uni_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+fn uni_head_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: List[Event]) {
     let stream = s.uni_heads[idx].stream
-    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.uni_heads[idx].buf, 256)
+    let (fin, reset) = tx_read_more(s.link, mut io, stream, mut s.uni_heads[idx].buf, 256)
     if reset != None {
         let _ = list.remove(mut s.uni_heads, idx)
         return
@@ -51,7 +51,7 @@ fn uni_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
     }
 }
 
-fn attach_or_park_subgroup(mut s: Session, mut io: Io, stream: quic.StreamId, sh: codec.SubgroupHeader, take buf: Bytes, fin: bool, mut out: List[Event]) {
+fn attach_or_park_subgroup[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, sh: codec.SubgroupHeader, take buf: Bytes, fin: bool, mut out: List[Event]) {
     if let Some(ri) = req_by_alias(s, sh.alias, true) {
         let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
         let def_prio = s.requests[ri].default_pub_priority
@@ -76,13 +76,13 @@ fn attach_or_park_subgroup(mut s: Session, mut io: Io, stream: quic.StreamId, sh
     }
     let cap: u64 = int.widen(s.limits.max_early_streams)
     if list.len(s.early_streams) >= cap {
-        tx_stop(s.transport, mut io, stream, RESET_CANCELLED)
+        tx_stop(s.link, mut io, stream, RESET_CANCELLED)
         return
     }
     list.push(mut s.early_streams, EarlyStream(stream: stream, header: SubgroupStream(sh), buf: take buf, fin: fin))
 }
 
-fn attach_or_park_fetch(mut s: Session, mut io: Io, stream: quic.StreamId, req_id: u64, take buf: Bytes, fin: bool, mut out: List[Event]) {
+fn attach_or_park_fetch[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, req_id: u64, take buf: Bytes, fin: bool, mut out: List[Event]) {
     if let Some(ri) = req_by_id(s, req_id) {
         if s.requests[ri].kind == ReqFetch && s.requests[ri].local {
             let tr_opt: Option[codec.TrackName] = clone(s.requests[ri].track)
@@ -100,13 +100,13 @@ fn attach_or_park_fetch(mut s: Session, mut io: Io, stream: quic.StreamId, req_i
     }
     let cap: u64 = int.widen(s.limits.max_early_streams)
     if list.len(s.early_streams) >= cap {
-        tx_stop(s.transport, mut io, stream, RESET_CANCELLED)
+        tx_stop(s.link, mut io, stream, RESET_CANCELLED)
         return
     }
     list.push(mut s.early_streams, EarlyStream(stream: stream, header: FetchStream(request: req_id), buf: take buf, fin: fin))
 }
 
-fn resolve_early_streams(mut s: Session, mut io: Io, mut out: List[Event]) {
+fn resolve_early_streams[D](mut s: Session, mut io: LinkIo[D], mut out: List[Event]) {
     let mut i = 0u64
     while i < list.len(s.early_streams) {
         let ready = match s.early_streams[i].header {
@@ -130,7 +130,7 @@ fn resolve_early_streams(mut s: Session, mut io: Io, mut out: List[Event]) {
     }
 }
 
-fn remove_padding(mut s: Session, stream: quic.StreamId) {
+fn remove_padding(mut s: Session, stream: LinkStream) {
     for i in 0u64 .. list.len(s.padding_streams) {
         if s.padding_streams[i] == stream {
             let _ = list.remove(mut s.padding_streams, i)
@@ -139,7 +139,7 @@ fn remove_padding(mut s: Session, stream: quic.StreamId) {
     }
 }
 
-fn remove_rx_stream(mut s: Session, stream: quic.StreamId) {
+fn remove_rx_stream(mut s: Session, stream: LinkStream) {
     for i in 0u64 .. list.len(s.uni_heads) {
         if s.uni_heads[i].stream == stream {
             let _ = list.remove(mut s.uni_heads, i)
@@ -167,7 +167,7 @@ fn remove_rx_stream(mut s: Session, stream: quic.StreamId) {
     remove_padding(mut s, stream)
 }
 
-fn rx_sg_index(s: Session, stream: quic.StreamId) -> Option[u64] {
+fn rx_sg_index(s: Session, stream: LinkStream) -> Option[u64] {
     for i in 0u64 .. list.len(s.rx_subgroups) {
         if s.rx_subgroups[i].stream == stream {
             return Some(i)
@@ -176,7 +176,7 @@ fn rx_sg_index(s: Session, stream: quic.StreamId) -> Option[u64] {
     None
 }
 
-fn rx_fetch_index(s: Session, stream: quic.StreamId) -> Option[u64] {
+fn rx_fetch_index(s: Session, stream: LinkStream) -> Option[u64] {
     for i in 0u64 .. list.len(s.rx_fetches) {
         if s.rx_fetches[i].stream == stream {
             return Some(i)
@@ -197,7 +197,7 @@ fn rx_pending_cap(object_bytes: u64, length: u64) -> u64 {
     order.min(int.saturating_add(length, 256u64), object_bytes)
 }
 
-fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+fn rx_subgroup_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: List[Event]) {
     let stream = s.rx_subgroups[idx].stream
     loop {
         let Some(cur) = rx_sg_index(s, stream) else {
@@ -211,7 +211,7 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
                 None => 65536u64,
             }
             let before_len = list.len(s.rx_subgroups[cur].buf)
-            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_subgroups[cur].buf, max_cap)
+            let (fin, rc) = tx_read_more(s.link, mut io, stream, mut s.rx_subgroups[cur].buf, max_cap)
             hit_cap = list.len(s.rx_subgroups[cur].buf) >= max_cap
             let added = list.len(s.rx_subgroups[cur].buf) - before_len
             if added > 0 {
@@ -250,7 +250,7 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
                 let tr: codec.TrackName = clone(s.rx_subgroups[i].track)
                 let group = s.rx_subgroups[i].header.group
                 let props_kvs = pending.properties
-                let obj = Object(track: tr, group: group, subgroup: sg, id: pending.id, mode: Subgroup, publisher_priority: prio, status: pending.status, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
+                let obj = Object(track: tr, group: group, subgroup: sg, id: pending.id, mode: Subgroup, publisher_priority: prio, status: pending.status, properties: encode_props_bytes(props_kvs), payload: quic.payload_whole(shared.new(take payload)))
                 deliver_object(mut s, mut io, take obj, props_kvs, false, mut out)
                 if s.phase == Ended {
                     return
@@ -321,7 +321,7 @@ fn rx_subgroup_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Even
     }
 }
 
-fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+fn rx_fetch_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: List[Event]) {
     let stream = s.rx_fetches[idx].stream
     loop {
         let Some(cur) = rx_fetch_index(s, stream) else {
@@ -334,7 +334,7 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
                 Some(p) => rx_pending_cap(s.limits.object_bytes, p.length),
                 None => 65536u64,
             }
-            let (fin, rc) = tx_read_more(s.transport, mut io, stream, mut s.rx_fetches[cur].buf, max_cap)
+            let (fin, rc) = tx_read_more(s.link, mut io, stream, mut s.rx_fetches[cur].buf, max_cap)
             hit_cap = list.len(s.rx_fetches[cur].buf) >= max_cap
             if fin {
                 s.rx_fetches[cur].fin = true
@@ -361,7 +361,7 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
                 }
                 let tr: codec.TrackName = clone(s.rx_fetches[i].track)
                 let props_kvs = pending.properties
-                let obj = Object(track: tr, group: pending.location.group, subgroup: sg, id: pending.location.object, mode: mode, publisher_priority: pending.priority, status: Normal, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
+                let obj = Object(track: tr, group: pending.location.group, subgroup: sg, id: pending.location.object, mode: mode, publisher_priority: pending.priority, status: Normal, properties: encode_props_bytes(props_kvs), payload: quic.payload_whole(shared.new(take payload)))
                 deliver_object(mut s, mut io, take obj, props_kvs, false, mut out)
                 if s.phase == Ended {
                     return
@@ -459,10 +459,10 @@ fn rx_fetch_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event])
     }
 }
 
-fn on_datagram(mut s: Session, mut io: Io, data: Bytes, mut out: List[Event]) {
+fn on_datagram[D](mut s: Session, mut io: LinkIo[D], take data: quic.PayloadSlice, mut out: List[Event]) {
     let mut at = 0u64
-    let end = list.len(data)
-    let dg = match codec.read_datagram(data, mut at, end) {
+    let end = quic.payload_len(data)
+    let dg = match codec.read_datagram(quic.payload_bytes(data), mut at, end) {
         Ok(DatagramPadding) => return,
         Ok(DatagramObject(d)) => d,
         Error(e) => {
@@ -492,11 +492,12 @@ fn on_datagram(mut s: Session, mut io: Io, data: Bytes, mut out: List[Event]) {
         fail_session(mut s, mut io, ERR_FIELD_LENGTH_EXCEEDED, b"datagram object exceeds object_bytes", mut out)
         return
     }
-    let mut payload: Bytes = list.with_capacity(end - at)
-    list.append(mut payload, list.slice(data, at, end))
+    let Some(take payload) = quic.payload_trim_front(take data, at) else {
+        return
+    }
     let gi = ensure_guard(mut s, clone(tr))
     s.guards[gi].rx_past_header_bytes += end
-    let obj = Object(track: take tr, group: dg_group, subgroup: 0, id: dg_obj, mode: Datagram, publisher_priority: prio, status: status, properties: encode_props_bytes(props_kvs), payload: shared.new(take payload))
+    let obj = Object(track: take tr, group: dg_group, subgroup: 0, id: dg_obj, mode: Datagram, publisher_priority: prio, status: status, properties: encode_props_bytes(props_kvs), payload: take payload)
     deliver_object(mut s, mut io, take obj, props_kvs, dg_eog, mut out)
 }
 
@@ -576,19 +577,11 @@ fn check_object_properties(kvs: List[codec.KeyValue], in_immutable: bool) -> boo
     true
 }
 
-fn shared_bytes_eq(a: Shared[Bytes], b: Shared[Bytes]) -> bool {
-    if list.len(a) != list.len(b) {
-        return false
-    }
-    for i in 0u64 .. list.len(a) {
-        if a[i] != b[i] {
-            return false
-        }
-    }
-    true
+fn payload_eq(a: quic.PayloadSlice, b: quic.PayloadSlice) -> bool {
+    quic.payload_bytes(a) == quic.payload_bytes(b)
 }
 
-fn deliver_object(mut s: Session, mut io: Io, take obj: Object, props_kvs: List[codec.KeyValue], end_of_group: bool, mut out: List[Event]) {
+fn deliver_object[D](mut s: Session, mut io: LinkIo[D], take obj: Object, props_kvs: List[codec.KeyValue], end_of_group: bool, mut out: List[Event]) {
     let gi = ensure_guard(mut s, clone(obj.track))
     if s.guards[gi].malformed {
         return
@@ -657,7 +650,7 @@ fn deliver_object(mut s: Session, mut io: Io, take obj: Object, props_kvs: List[
     let mut dup_state = 0u8
     for prev in s.guards[gi].seen {
         if prev.group == obj.group && prev.id == obj.id {
-            let same = prev.mode == obj.mode && prev.subgroup == obj.subgroup && prev.priority == obj.publisher_priority && prev.status == obj.status && prev.properties == obj.properties && shared_bytes_eq(prev.payload, obj.payload)
+            let same = prev.mode == obj.mode && prev.subgroup == obj.subgroup && prev.priority == obj.publisher_priority && prev.status == obj.status && prev.properties == obj.properties && payload_eq(prev.payload, obj.payload)
             dup_state = if same {
                 1u8
             } else {
@@ -686,9 +679,16 @@ fn deliver_object(mut s: Session, mut io: Io, take obj: Object, props_kvs: List[
         }
     }
     if list.len(s.guards[gi].seen) >= 1024 {
-        let _ = list.remove(mut s.guards[gi].seen, 0)
+        let old = list.remove(mut s.guards[gi].seen, 0)
+        s.seen_bytes -= old.charge
     }
-    list.push(mut s.guards[gi].seen, SeenObj(group: obj.group, id: obj.id, mode: obj.mode, subgroup: obj.subgroup, priority: obj.publisher_priority, status: obj.status, properties: clone(obj.properties), payload: clone(obj.payload)))
+    let charge = 4 * bytes[SeenObj] + rounded_bytes(list.len(obj.properties)) + quic.payload_retained_bytes(obj.payload)
+    if charge > s.limits.max_buffered - s.seen_bytes {
+        fail_session(mut s, mut io, ERR_INTERNAL_ERROR, b"duplicate guard byte limit", mut out)
+        return
+    }
+    list.push(mut s.guards[gi].seen, SeenObj(group: obj.group, id: obj.id, mode: obj.mode, subgroup: obj.subgroup, priority: obj.publisher_priority, status: obj.status, properties: clone(obj.properties), payload: quic.payload_share(obj.payload), charge: charge))
+    s.seen_bytes += charge
     list.push(mut out, Received(take obj))
 }
 
@@ -754,21 +754,25 @@ fn record_non_existent(mut s: Session, take track: codec.TrackName, from: codec.
 }
 
 /// MOQ-3: cancel every subscription/fetch for `track` on this session and emit Malformed(track).
-fn mark_malformed(mut s: Session, mut io: Io, take track: codec.TrackName, mut out: List[Event]) {
+fn mark_malformed[D](mut s: Session, mut io: LinkIo[D], take track: codec.TrackName, mut out: List[Event]) {
     let gi = ensure_guard(mut s, clone(track))
     if s.guards[gi].malformed {
         return
     }
     s.guards[gi].malformed = true
+    for seen in s.guards[gi].seen {
+        s.seen_bytes -= seen.charge
+    }
+    s.guards[gi].seen = list.new()
     let mut i = 0u64
     while i < list.len(s.requests) {
         if s.requests[i].track == Some(clone(track)) {
             let stream = s.requests[i].stream
             if !s.requests[i].tx_fin {
-                tx_reset(s.transport, mut io, stream, RESET_MALFORMED_TRACK, 0)
+                tx_reset(s.link, mut io, stream, RESET_MALFORMED_TRACK, 0)
             }
             if !s.requests[i].rx_fin {
-                tx_stop(s.transport, mut io, stream, RESET_MALFORMED_TRACK)
+                tx_stop(s.link, mut io, stream, RESET_MALFORMED_TRACK)
             }
             drop_outgoing(mut s, stream)
             remove_request(mut s, mut io, i)
@@ -779,7 +783,7 @@ fn mark_malformed(mut s: Session, mut io: Io, take track: codec.TrackName, mut o
     let mut j = 0u64
     while j < list.len(s.rx_subgroups) {
         if s.rx_subgroups[j].track == track {
-            tx_stop(s.transport, mut io, s.rx_subgroups[j].stream, RESET_MALFORMED_TRACK)
+            tx_stop(s.link, mut io, s.rx_subgroups[j].stream, RESET_MALFORMED_TRACK)
             let _ = list.remove(mut s.rx_subgroups, j)
         } else {
             j += 1
@@ -788,7 +792,7 @@ fn mark_malformed(mut s: Session, mut io: Io, take track: codec.TrackName, mut o
     let mut k = 0u64
     while k < list.len(s.rx_fetches) {
         if s.rx_fetches[k].track == track {
-            tx_stop(s.transport, mut io, s.rx_fetches[k].stream, RESET_MALFORMED_TRACK)
+            tx_stop(s.link, mut io, s.rx_fetches[k].stream, RESET_MALFORMED_TRACK)
             let _ = list.remove(mut s.rx_fetches, k)
         } else {
             k += 1

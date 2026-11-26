@@ -1,0 +1,219 @@
+/// Read available bytes from `stream` onto `buf`, growing on demand up to `max_cap`.
+/// Returns `(fin, reset_code)`.
+fn tx_read_more[D](link: LinkId, mut io: LinkIo[D], stream: LinkStream, mut buf: Bytes, max_cap: u64) -> (bool, Option[u64]) {
+    loop {
+        if list.len(buf) >= list.capacity(buf) {
+            if list.len(buf) >= max_cap {
+                return (false, None)
+            }
+            let target = order.min(max_cap, order.max(int.saturating_mul(list.capacity(buf), 2), 1024))
+            if target <= list.capacity(buf) {
+                return (false, None)
+            }
+            let extra = target - list.len(buf)
+            if let Error(_) = list.try_reserve(mut buf, extra) {
+                return (false, None)
+            }
+        }
+        match tx_read(link, mut io, stream, mut buf) {
+            Ok((n, fin)) => {
+                if fin {
+                    return (true, None)
+                }
+                if n == 0 {
+                    return (false, None)
+                }
+            },
+            Error(StreamReset(code)) => return (true, Some(code)),
+            Error(_) => return (false, None),
+        }
+    }
+}
+
+// ---- Outgoing stream queue (flushed on Writable) ----
+fn out_index(s: Session, stream: LinkStream) -> Option[u64] {
+    for i in 0u64 .. list.len(s.outgoing) {
+        if s.outgoing[i].stream == stream {
+            return Some(i)
+        }
+    }
+    None
+}
+
+// Reserve up to four slots per active record for the list growth rule.
+const OUTGOING_RECORD: u64 = 4 * bytes[Outgoing]
+
+const CHUNK_RECORD: u64 = 4 * bytes[OutChunk]
+
+pub fn pending_send_bytes(s: Session) -> u64 {
+    s.outgoing_bytes
+}
+
+fn drop_outgoing_at(mut s: Session, i: u64) {
+    s.outgoing_bytes -= s.outgoing[i].charge
+    let _ = list.remove(mut s.outgoing, i)
+}
+
+fn drop_outgoing(mut s: Session, stream: LinkStream) {
+    if let Some(i) = out_index(s, stream) {
+        drop_outgoing_at(mut s, i)
+    }
+}
+
+fn drop_front_chunk(mut s: Session, i: u64) {
+    let chunk = list.remove(mut s.outgoing[i].chunks, 0)
+    s.outgoing_bytes -= chunk.charge
+    s.outgoing[i].charge -= chunk.charge
+    s.outgoing[i].offset = 0
+}
+
+fn abort_buffered[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, reliable: u64) {
+    tx_reset(s.link, mut io, stream, RESET_DELIVERY_TIMEOUT, reliable)
+    drop_outgoing(mut s, stream)
+    mark_tx_subgroup_dead(mut s, stream)
+}
+
+fn hold_outgoing[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, take data: Option[OutData], fin: bool, deadline: Option[u64], reliable: u64) -> bool {
+    let idx = out_index(s, stream)
+    let payload_charge = match data {
+        Some(Raw(b)) => rounded_bytes(list.capacity(b)) + CHUNK_RECORD,
+        Some(SharedChunk(p)) => quic.payload_retained_bytes(p) + CHUNK_RECORD,
+        None => 0u64,
+    }
+    let record = if idx == None {
+        OUTGOING_RECORD
+    } else {
+        0u64
+    }
+    let charge = payload_charge + record
+    if charge > s.limits.max_buffered - s.outgoing_bytes {
+        abort_buffered(mut s, mut io, stream, reliable)
+        return false
+    }
+    let i = match idx {
+        Some(n) => n,
+        None => {
+            list.push(mut s.outgoing, Outgoing(stream: stream, chunks: list.new(), offset: 0, fin: false, obj_deadline: None, reliable: 0, charge: 0))
+            list.len(s.outgoing) - 1
+        },
+    }
+    if let Some(take chunk) = take data {
+        list.push(mut s.outgoing[i].chunks, OutChunk(data: take chunk, charge: payload_charge))
+    }
+    s.outgoing_bytes += charge
+    s.outgoing[i].charge += charge
+    s.outgoing[i].fin = s.outgoing[i].fin || fin
+    if deadline != None {
+        s.outgoing[i].obj_deadline = deadline
+        s.outgoing[i].reliable = reliable
+    }
+    true
+}
+
+fn enqueue_raw[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, take data: Bytes, fin: bool) {
+    let _ = enqueue_raw_timed(mut s, mut io, stream, take data, fin, None, 0)
+}
+
+fn enqueue_raw_timed[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, take data: Bytes, fin: bool, obj_deadline: Option[u64], reliable: u64) -> bool {
+    if out_index(s, stream) != None {
+        let chunk: Option[OutData] = if list.len(data) == 0 {
+            None
+        } else {
+            Some(Raw(take data))
+        }
+        if !hold_outgoing(mut s, mut io, stream, take chunk, fin, obj_deadline, reliable) {
+            return false
+        }
+        return flush_outgoing(mut s, mut io, stream)
+    }
+    let n = match tx_write(s.link, mut io, stream, data, fin) {
+        Ok(n) => n,
+        Error(_) => return false,
+    }
+    let len = list.len(data)
+    if n == len && !(len == 0 && fin) {
+        return true
+    }
+    let chunk: Option[OutData] = if n < len {
+        Some(Raw(clone(list.slice(data, n, len))))
+    } else {
+        None
+    }
+    hold_outgoing(mut s, mut io, stream, take chunk, fin, obj_deadline, reliable)
+}
+
+/// True if the transport or MoQ's retry queue accepted the payload.
+fn enqueue_shared_timed[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, take data: quic.PayloadSlice, fin: bool, obj_deadline: Option[u64], reliable: u64) -> bool {
+    if out_index(s, stream) != None {
+        let chunk: Option[OutData] = if quic.payload_len(data) == 0 {
+            None
+        } else {
+            Some(SharedChunk(take data))
+        }
+        if !hold_outgoing(mut s, mut io, stream, take chunk, fin, obj_deadline, reliable) {
+            return false
+        }
+        return flush_outgoing(mut s, mut io, stream)
+    }
+    match tx_write_slice(s.link, mut io, stream, quic.payload_share(data), fin) {
+        Ok(true) => true,
+        Ok(false) => hold_outgoing(mut s, mut io, stream, Some(SharedChunk(take data)), fin, obj_deadline, reliable),
+        Error(_) => false,
+    }
+}
+
+fn flush_outgoing[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream) -> bool {
+    let Some(i) = out_index(s, stream) else {
+        return true
+    }
+    if let Some(dl) = s.outgoing[i].obj_deadline {
+        if s.now >= dl {
+            let rel = s.outgoing[i].reliable
+            abort_buffered(mut s, mut io, stream, rel)
+            s.timed_out_objects += 1
+            return false
+        }
+    }
+    loop {
+        if list.len(s.outgoing[i].chunks) == 0 {
+            if s.outgoing[i].fin {
+                let _ = tx_write(s.link, mut io, stream, b"", true)
+            }
+            drop_outgoing_at(mut s, i)
+            return true
+        }
+        let last = list.len(s.outgoing[i].chunks) == 1
+        let fin = last && s.outgoing[i].fin
+        let off = s.outgoing[i].offset
+        let wrote: Result[(bool, u64), ()] = match s.outgoing[i].chunks[0].data {
+            Raw(b) => {
+                let slice_len = list.len(b) - off
+                match tx_write(s.link, mut io, stream, list.slice(b, off, list.len(b)), fin) {
+                    Ok(n) => Ok((n == slice_len, off + n)),
+                    Error(_) => Error(()),
+                }
+            },
+            SharedChunk(p) => match tx_write_slice(s.link, mut io, stream, quic.payload_share(p), fin) {
+                Ok(taken) => Ok((taken, 0u64)),
+                Error(_) => Error(()),
+            },
+        }
+        match wrote {
+            Ok((true, _)) => {
+                drop_front_chunk(mut s, i)
+                if fin {
+                    drop_outgoing_at(mut s, i)
+                    return true
+                }
+            },
+            Ok((false, n)) => {
+                s.outgoing[i].offset = n
+                return true
+            },
+            Error(()) => {
+                drop_outgoing_at(mut s, i)
+                return false
+            },
+        }
+    }
+}

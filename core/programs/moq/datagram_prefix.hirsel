@@ -1,0 +1,56 @@
+// The no-properties header has at most five nine-byte varints and one
+// publisher priority byte. Keep that path in the inline prefix.
+pub type DatagramPrefix {
+    data: Inline[u8, 64],
+    len: u64,
+    copy_capacity: u64
+}
+
+/// MEM-24 growth of the Bytes that the original datagram encoder reserved.
+pub fn datagram_copy_capacity(cap: u64, needed: u64) -> u64 {
+    if needed <= cap {
+        return cap
+    }
+    order.max(needed, order.max(4, cap * 2))
+}
+
+fn prefix_byte(mut p: DatagramPrefix, b: u8) {
+    p.data[p.len] = b
+    p.len += 1
+}
+
+fn prefix_vi64(mut p: DatagramPrefix, n: u64) {
+    let width = vi64_width(n)
+    p.copy_capacity = datagram_copy_capacity(p.copy_capacity, p.len + width)
+    if width == 9 {
+        prefix_byte(mut p, 0xff)
+    }
+    let x = vi64_marked(n, width)
+    let mut remaining = order.min(width, 8)
+    while remaining > 0 {
+        remaining -= 1
+        prefix_byte(mut p, int.truncate(x >> (remaining * 8)))
+    }
+}
+
+pub fn datagram_prefix(d: Datagram, payload_len: u64) -> Result[Option[DatagramPrefix], WireError] {
+    let flags = datagram_flags(d, payload_len)?
+    if list.len(d.properties) != 0 {
+        return Ok(None)
+    }
+    let mut p = DatagramPrefix(data:[0; 64], len: 0, copy_capacity: 0)
+    prefix_vi64(mut p, flags)
+    prefix_vi64(mut p, d.alias)
+    prefix_vi64(mut p, d.group)
+    if d.object != 0 {
+        prefix_vi64(mut p, d.object)
+    }
+    if let Some(priority) = d.priority {
+        p.copy_capacity = datagram_copy_capacity(p.copy_capacity, p.len + 1)
+        prefix_byte(mut p, priority)
+    }
+    if let Some(status) = d.status {
+        prefix_vi64(mut p, status_code(status))
+    }
+    Ok(Some(p))
+}

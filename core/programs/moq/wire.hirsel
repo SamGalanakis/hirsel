@@ -172,20 +172,30 @@ fn put_uint(mut out: Bytes, n: u64, size: u64) {
     }
 }
 
-/// The shortest moqt-23 §8.1 form of `n`.
-pub fn write_vi64(n: u64, mut out: Bytes) -> Result[(), WireError] {
+fn vi64_width(n: u64) -> u64 {
     let mut size = 1u64
     while size < 9 && (n >> (7 * size)) != 0 {
         size += 1
     }
+    size
+}
+
+fn vi64_marked(n: u64, size: u64) -> u64 {
+    if size == 9 {
+        return n
+    }
+    let marker = ((1u64 << (size - 1)) - 1) << (8 * size - (size - 1))
+    n | marker
+}
+
+/// The shortest moqt-23 §8.1 form of `n`.
+pub fn write_vi64(n: u64, mut out: Bytes) -> Result[(), WireError] {
+    let size = vi64_width(n)
     reserve(mut out, size)?
     if size == 9 {
         list.push(mut out, 0xff)
-        put_uint(mut out, n, 8)
-    } else {
-        let marker = ((1u64 << (size - 1)) - 1) << (8 * size - (size - 1))
-        put_uint(mut out, n | marker, size)
     }
+    put_uint(mut out, vi64_marked(n, size), order.min(size, 8))
     Ok(())
 }
 

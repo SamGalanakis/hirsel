@@ -1,6 +1,6 @@
 // MOQ-2: Bidirectional request streams, parameter narrowing (moq.md:337), tokens, and
 // application request actions (accept, subscribe, fetch, end_track, cancel).
-fn req_by_stream(s: Session, stream: quic.StreamId) -> Option[u64] {
+fn req_by_stream(s: Session, stream: LinkStream) -> Option[u64] {
     for i in 0u64 .. list.len(s.requests) {
         if s.requests[i].stream == stream {
             return Some(i)
@@ -98,17 +98,17 @@ fn extract_req_token(ps: List[codec.Param]) -> Result[Option[Bytes], u64] {
     Ok(take tok)
 }
 
-fn send_request_error(mut s: Session, mut io: Io, stream: quic.StreamId, code: u64, reason: Bytes) {
+fn send_request_error[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, code: u64, reason: Bytes) {
     let mut wire: Bytes = list.new()
     if let Ok(()) = codec.write_message(RequestError(code: code, retry: 0, reason: clone(reason), details: list.new()), s.peer_max_control, mut wire) {
         enqueue_raw(mut s, mut io, stream, take wire, true)
     }
 }
 
-fn bidi_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+fn bidi_head_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: List[Event]) {
     let stream = s.peer_bidi_heads[idx].stream
     let max_cap = local_max_control(s) + 32
-    let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.peer_bidi_heads[idx].buf, max_cap)
+    let (fin, reset) = tx_read_more(s.link, mut io, stream, mut s.peer_bidi_heads[idx].buf, max_cap)
     if reset != None {
         let _ = list.remove(mut s.peer_bidi_heads, idx)
         return
@@ -120,7 +120,7 @@ fn bidi_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]
         Error(Truncated) => {
             if fin {
                 let _ = list.remove(mut s.peer_bidi_heads, idx)
-                tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
+                tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
             }
             return
         },
@@ -136,7 +136,7 @@ fn bidi_head_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]
     open_peer_request(mut s, mut io, stream, take msg, take rbuf, fin, mut out)
 }
 
-fn open_peer_request(mut s: Session, mut io: Io, stream: quic.StreamId, take msg: codec.Message, take rest: Bytes, fin: bool, mut out: List[Event]) {
+fn open_peer_request[D](mut s: Session, mut io: LinkIo[D], stream: LinkStream, take msg: codec.Message, take rest: Bytes, fin: bool, mut out: List[Event]) {
     if !s.setup_received {
         fail_session(mut s, mut io, ERR_PROTOCOL_VIOLATION, b"request before setup", mut out)
         return
@@ -195,7 +195,7 @@ fn open_peer_request(mut s: Session, mut io: Io, stream: quic.StreamId, take msg
                     _ => {},
                 }
             }
-            tx_priority(s.transport, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
             let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: false, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(filter), priority: prio, group_order: go, paused: paused, sub_obj_timeout_ms: obj_to, sub_sg_timeout_ms: sg_to, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
             let idx = list.len(s.requests) - 1
@@ -231,7 +231,7 @@ fn open_peer_request(mut s: Session, mut io: Io, stream: quic.StreamId, take msg
                     return
                 },
             }
-            tx_priority(s.transport, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
             let req = ReqStream(stream: stream, id: id, kind: ReqPublish, local: false, state: Pending, track: Some(clone(track)), prefix: None, alias: Some(alias), filter: NoFilter, priority: 128, group_order: def_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: p_obj, pub_sg_timeout_ms: p_sg, default_pub_priority: def_prio, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
             let idx = list.len(s.requests) - 1
@@ -294,7 +294,7 @@ fn open_peer_request(mut s: Session, mut io: Io, stream: quic.StreamId, take msg
                     _ => {},
                 }
             }
-            tx_priority(s.transport, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+            tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
             let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: false, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: filter, priority: prio, group_order: go, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: take rest, rx_fin: fin, tx_fin: false)
             list.push(mut s.requests, take req)
             let idx = list.len(s.requests) - 1
@@ -456,14 +456,14 @@ fn parse_track_properties(props: List[codec.KeyValue]) -> Result[(u8, codec.Dire
     Ok((def_prio, def_order, obj_to, sg_to))
 }
 
-fn request_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) {
+fn request_readable[D](mut s: Session, mut io: LinkIo[D], idx: u64, mut out: List[Event]) {
     let stream = s.requests[idx].stream
     let max_cap = local_max_control(s) + 32
     loop {
         let Some(cur) = req_by_stream(s, stream) else {
             return
         }
-        let (fin, reset) = tx_read_more(s.transport, mut io, stream, mut s.requests[cur].rx_buf, max_cap)
+        let (fin, reset) = tx_read_more(s.link, mut io, stream, mut s.requests[cur].rx_buf, max_cap)
         if let Some(code) = reset {
             on_stream_reset(mut s, mut io, stream, code, mut out)
             return
@@ -512,7 +512,7 @@ fn request_readable(mut s: Session, mut io: Io, idx: u64, mut out: List[Event]) 
     }
 }
 
-fn on_request_message(mut s: Session, mut io: Io, idx: u64, take msg: codec.Message, mut out: List[Event]) {
+fn on_request_message[D](mut s: Session, mut io: LinkIo[D], idx: u64, take msg: codec.Message, mut out: List[Event]) {
     let kind = s.requests[idx].kind
     let local = s.requests[idx].local
     let state = s.requests[idx].state
@@ -676,7 +676,7 @@ fn on_request_message(mut s: Session, mut io: Io, idx: u64, take msg: codec.Mess
     }
 }
 
-fn remove_request(mut s: Session, mut io: Io, idx: u64) {
+fn remove_request[D](mut s: Session, mut io: LinkIo[D], idx: u64) {
     let req_id = s.requests[idx].id
     let _ = list.remove(mut s.requests, idx)
     let mut i = 0u64
@@ -685,7 +685,7 @@ fn remove_request(mut s: Session, mut io: Io, idx: u64) {
             let st = s.tx_subgroups[i].stream
             let rel = s.tx_subgroups[i].header_len
             if !s.tx_subgroups[i].fin_sent {
-                tx_reset(s.transport, mut io, st, RESET_CANCELLED, rel)
+                tx_reset(s.link, mut io, st, RESET_CANCELLED, rel)
             }
             drop_outgoing(mut s, st)
             let _ = list.remove(mut s.tx_subgroups, i)
@@ -696,7 +696,7 @@ fn remove_request(mut s: Session, mut io: Io, idx: u64) {
 }
 
 // ---- Application request actions (MOQ-1) ----
-pub fn accept(mut s: Session, mut io: Io, id: RequestId, ok: Result[(), u64]) {
+pub fn accept[D](mut s: Session, mut io: LinkIo[D], id: RequestId, ok: Result[(), u64]) {
     if s.phase == Ended {
         return
     }
@@ -753,12 +753,12 @@ pub fn accept(mut s: Session, mut io: Io, id: RequestId, ok: Result[(), u64]) {
     }
 }
 
-pub fn subscribe(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn subscribe[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError] {
     subscribe_with(mut s, mut io, now, track, f, priority, Ascending, 0, 0, token)
 }
 
 /// Extended subscribe with group order and delivery timeouts (used by MS3/MS4).
-pub fn subscribe_with(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, group_order: codec.Direction, obj_timeout_ms: u64, sg_timeout_ms: u64, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn subscribe_with[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, group_order: codec.Direction, obj_timeout_ms: u64, sg_timeout_ms: u64, token: Option[Bytes]) -> Result[RequestId, MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -769,8 +769,8 @@ pub fn subscribe_with(mut s: Session, mut io: Io, now: u64, track: codec.TrackNa
     if list.len(s.requests) >= int.widen(s.limits.requests) {
         return Error(Limit)
     }
-    let stream = tx_open(s.transport, mut io, true)?
-    tx_priority(s.transport, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+    let stream = tx_open(s.link, mut io, true)?
+    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
     let id = take_local_req_id(mut s)
     let mut ps: List[codec.Param] = list.new()
     // Ascending parameter codes: 0x02, 0x03, 0x06, 0x20, 0x21, 0x22.
@@ -790,7 +790,7 @@ pub fn subscribe_with(mut s: Session, mut io: Io, now: u64, track: codec.TrackNa
     list.push(mut ps, GroupOrder(group_order))
     let mut wire: Bytes = list.new()
     if let Error(e) = codec.write_message(Subscribe(id: id, track: clone(track), params: take ps), s.peer_max_control, mut wire) {
-        tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
+        tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
     let req = ReqStream(stream: stream, id: id, kind: ReqSubscribe, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: clone(f), priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: obj_timeout_ms, sub_sg_timeout_ms: sg_timeout_ms, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
@@ -800,7 +800,7 @@ pub fn subscribe_with(mut s: Session, mut io: Io, now: u64, track: codec.TrackNa
 }
 
 /// Issue a FETCH request for `[from, to]` on `track`.
-pub fn fetch(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, from: codec.Location, to: codec.Location, priority: u8, group_order: codec.Direction, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn fetch[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, from: codec.Location, to: codec.Location, priority: u8, group_order: codec.Direction, token: Option[Bytes]) -> Result[RequestId, MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -811,8 +811,8 @@ pub fn fetch(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, from:
     if list.len(s.requests) >= int.widen(s.limits.requests) {
         return Error(Limit)
     }
-    let stream = tx_open(s.transport, mut io, true)?
-    tx_priority(s.transport, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+    let stream = tx_open(s.link, mut io, true)?
+    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
     let id = take_local_req_id(mut s)
     let mut ps: List[codec.Param] = list.new()
     if let Some(tok) = token {
@@ -824,7 +824,7 @@ pub fn fetch(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, from:
     list.push(mut ps, GroupOrder(group_order))
     let mut wire: Bytes = list.new()
     if let Error(e) = codec.write_message(Fetch(id: id, track: clone(track), params: take ps), s.peer_max_control, mut wire) {
-        tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
+        tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
     let req = ReqStream(stream: stream, id: id, kind: ReqFetch, local: true, state: Pending, track: Some(clone(track)), prefix: None, alias: None, filter: f, priority: priority, group_order: group_order, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
@@ -834,7 +834,7 @@ pub fn fetch(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, from:
 }
 
 /// Issue a PUBLISH_NAMESPACE request for `prefix`.
-pub fn publish_namespace(mut s: Session, mut io: Io, now: u64, prefix: codec.Namespace, token: Option[Bytes]) -> Result[RequestId, MoqError] {
+pub fn publish_namespace[D](mut s: Session, mut io: LinkIo[D], now: u64, prefix: codec.Namespace, token: Option[Bytes]) -> Result[RequestId, MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -845,8 +845,8 @@ pub fn publish_namespace(mut s: Session, mut io: Io, now: u64, prefix: codec.Nam
     if list.len(s.requests) >= int.widen(s.limits.requests) {
         return Error(Limit)
     }
-    let stream = tx_open(s.transport, mut io, true)?
-    tx_priority(s.transport, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
+    let stream = tx_open(s.link, mut io, true)?
+    tx_priority(s.link, mut io, stream, quic.Priority(urgency: URGENCY_REQUEST, order: 0, then: 0))
     let id = take_local_req_id(mut s)
     let mut ps: List[codec.Param] = list.new()
     if let Some(tok) = token {
@@ -854,7 +854,7 @@ pub fn publish_namespace(mut s: Session, mut io: Io, now: u64, prefix: codec.Nam
     }
     let mut wire: Bytes = list.new()
     if let Error(e) = codec.write_message(PublishNamespace(id: id, prefix: clone(prefix), params: take ps), s.peer_max_control, mut wire) {
-        tx_reset(s.transport, mut io, stream, RESET_CANCELLED, 0)
+        tx_reset(s.link, mut io, stream, RESET_CANCELLED, 0)
         return Error(Wire(e))
     }
     let req = ReqStream(stream: stream, id: id, kind: ReqPublishNamespace, local: true, state: Pending, track: None, prefix: Some(clone(prefix)), alias: None, filter: NoFilter, priority: 128, group_order: Ascending, paused: false, sub_obj_timeout_ms: 0, sub_sg_timeout_ms: 0, pub_obj_timeout_ms: 0, pub_sg_timeout_ms: 0, default_pub_priority: 128, base_group: None, streams_sent: 0, pending_updates: 0, rx_buf: list.with_capacity(128), rx_fin: false, tx_fin: false)
@@ -876,7 +876,7 @@ pub fn set_track_timeouts(mut s: Session, track: codec.TrackName, obj_timeout_ms
     }
 }
 
-pub fn end_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64) {
+pub fn end_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, code: u64) {
     if s.phase == Ended {
         return
     }
@@ -906,7 +906,7 @@ pub fn end_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64) 
     }
 }
 
-pub fn cancel(mut s: Session, mut io: Io, id: RequestId, code: u64) {
+pub fn cancel[D](mut s: Session, mut io: LinkIo[D], id: RequestId, code: u64) {
     if s.phase == Ended {
         return
     }
@@ -916,10 +916,10 @@ pub fn cancel(mut s: Session, mut io: Io, id: RequestId, code: u64) {
     }
     let stream = s.requests[idx].stream
     if !s.requests[idx].tx_fin {
-        tx_reset(s.transport, mut io, stream, code, 0)
+        tx_reset(s.link, mut io, stream, code, 0)
     }
     if !s.requests[idx].rx_fin {
-        tx_stop(s.transport, mut io, stream, code)
+        tx_stop(s.link, mut io, stream, code)
     }
     drop_outgoing(mut s, stream)
     remove_request(mut s, mut io, idx)

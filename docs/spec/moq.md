@@ -38,12 +38,57 @@ replace them), so a multi-draft codec would be a compatibility layer with no end
 ```hirsel signatures moq/moq
 pub opaque type Session
 pub opaque type Relay
-pub type Io {
-    q: quic.Endpoint,
-    w: Option[webtransport.Endpoint]
+pub opaque type LinkId: key
+
+pub type LinkStream: key = LinkStream(u64)
+
+pub type LinkReadError = StreamReset(u64) | Refused(MoqError)
+
+pub type AddressMode: key = InUri | InSetup
+
+pub type LinkEvent =
+    Ready(max_datagram: u64)
+  | InvalidProtocol
+  | Opened(stream: LinkStream, bidi: bool)
+  | Readable(LinkStream)
+  | Writable(LinkStream)
+  | Acked(LinkStream)
+  | Reset(stream: LinkStream, code: u64, final_size: u64)
+  | Stopped(stream: LinkStream, code: u64)
+  | Datagram(quic.PayloadSlice)
+  | Closed(code: u64)
+
+pub type AddressedEvent {
+    link: LinkId,
+    event: LinkEvent
 }
-pub type Transport: key = Native(c: quic.ConnectionHandle) | Web(s: webtransport.SessionHandle)
-pub type TransportEvent = Quic(quic.Event) | Web(webtransport.Event)
+
+pub type LinkOps[D] {
+    address_mode: fn(D, LinkId) -> Option[AddressMode],
+    max_datagram: fn(D, LinkId) -> u64,
+    open: fn(mut D, LinkId, bool) -> Result[LinkStream, MoqError],
+    read: fn(mut D, LinkId, LinkStream, mut Bytes) -> Result[(u64, bool), LinkReadError],
+    write: fn(mut D, LinkId, LinkStream, Bytes, bool) -> Result[u64, MoqError],
+    write_slice: fn(mut D, LinkId, LinkStream, take quic.PayloadSlice, bool) -> Result[bool, MoqError],
+    reset: fn(mut D, LinkId, LinkStream, u64, u64) -> Result[(), MoqError],
+    stop: fn(mut D, LinkId, LinkStream, u64) -> Result[(), MoqError],
+    priority: fn(mut D, LinkId, LinkStream, quic.Priority) -> Result[(), MoqError],
+    send_datagram: fn(mut D, LinkId, take quic.FramedSlice, quic.Priority, u64) -> Result[(), MoqError],
+    drop_datagrams: fn(mut D, LinkId, u64) -> u64,
+    close: fn(mut D, LinkId, u64, Bytes),
+}
+
+pub type LinkIo[D] {
+    driver: D,
+    ops: LinkOps[D]
+}
+
+pub opaque type LinkRegistry
+pub type MixedDriver {
+    q: quic.Endpoint,
+    w: Option[webtransport.Endpoint],
+    links: LinkRegistry
+}
 pub type Role: key = Publisher | Subscriber | Both
 pub type RequestId: key = RequestId(u64)
 pub type Scope: key = Scope(Bytes)
@@ -57,7 +102,7 @@ pub type Object {
     publisher_priority: u8,
     status: codec.ObjectStatus,
     properties: Bytes,
-    payload: Shared[Bytes]
+    payload: quic.PayloadSlice
 }
 pub type Limits: key {
     requests: u32,
@@ -66,7 +111,8 @@ pub type Limits: key {
     object_bytes: u64,
     filter_ranges: u16,
     max_early_streams: u16,
-    max_timeout_ms: u64
+    max_timeout_ms: u64,
+    max_buffered: u64
 }
 pub type RelayLimits: key {
     cache_groups: u32,
@@ -79,23 +125,30 @@ pub type Event = Setup(authority: Bytes, path: Bytes, token: Option[Bytes]) | Su
 pub type RelayEvent = Authorize(session: u32, id: RequestId, scope: Scope, track: codec.TrackName, token: Option[Bytes]) | Evicted(scope: Scope, track: codec.TrackName, groups: u32, size: u64) | Ended(session: u32, code: u64)
 pub type MoqError = Closed | Role | State | Limit | Track | InvalidParam | Wire(codec.WireError) | Quic(quic.QuicError) | Web(webtransport.WtError)
 
-pub fn session(side: schedule.Side, role: Role, t: Transport, limits: Limits) -> Session
-pub fn receive(mut s: Session, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[Event])
-pub fn poll(mut s: Session, mut io: Io, now: u64) -> Option[u64]
-pub fn accept_setup(mut s: Session, mut io: Io, take ok: Result[Scope, u64])
-pub fn accept(mut s: Session, mut io: Io, id: RequestId, ok: Result[(), u64])
-pub fn subscribe(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError]
-pub fn publish(mut s: Session, mut io: Io, now: u64, o: Object) -> Result[(), MoqError]
-pub fn end_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64)
-pub fn cancel(mut s: Session, mut io: Io, id: RequestId, code: u64)
-pub fn close(mut s: Session, mut io: Io, code: u64, reason: Bytes)
+pub fn mixed_driver(take q: quic.Endpoint, take w: Option[webtransport.Endpoint], max_links: u64) -> LinkIo[MixedDriver]
+pub fn mixed_ops() -> LinkOps[MixedDriver]
+pub fn native_link(mut d: MixedDriver, c: quic.ConnectionHandle) -> Option[LinkId]
+pub fn web_link(mut d: MixedDriver, s: webtransport.SessionHandle) -> Option[LinkId]
+pub fn retire_link(mut d: MixedDriver, id: LinkId)
+pub fn native_events(mut d: MixedDriver, events: List[quic.Event], mut out: List[AddressedEvent])
+pub fn web_events(mut d: MixedDriver, events: List[webtransport.Event], mut out: List[AddressedEvent])
+pub fn link_session[D](io: LinkIo[D], link: LinkId, side: schedule.Side, role: Role, limits: Limits) -> Option[Session]
+pub fn receive[D](mut s: Session, mut io: LinkIo[D], now: u64, events: List[AddressedEvent], mut out: List[Event])
+pub fn poll[D](mut s: Session, mut io: LinkIo[D], now: u64) -> Option[u64]
+pub fn accept_setup[D](mut s: Session, mut io: LinkIo[D], take ok: Result[Scope, u64])
+pub fn accept[D](mut s: Session, mut io: LinkIo[D], id: RequestId, ok: Result[(), u64])
+pub fn subscribe[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, f: codec.Filter, priority: u8, token: Option[Bytes]) -> Result[RequestId, MoqError]
+pub fn publish[D](mut s: Session, mut io: LinkIo[D], now: u64, o: Object) -> Result[(), MoqError]
+pub fn end_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, code: u64)
+pub fn cancel[D](mut s: Session, mut io: LinkIo[D], id: RequestId, code: u64)
+pub fn close[D](mut s: Session, mut io: LinkIo[D], code: u64, reason: Bytes)
 pub fn default_scope(authority: Bytes, path: Bytes) -> Scope
 
 pub fn relay(limits: RelayLimits) -> Relay
 pub fn relay_add(mut r: Relay, take s: Session, take scope: Scope) -> u32
-pub fn relay_receive(mut r: Relay, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[RelayEvent])
-pub fn relay_authorize(mut r: Relay, mut io: Io, now: u64, sid_in: u32, id: RequestId, ok: Result[(), u64])
-pub fn relay_poll(mut r: Relay, mut io: Io, now: u64) -> Option[u64]
+pub fn relay_receive[D](mut r: Relay, mut io: LinkIo[D], now: u64, events: List[AddressedEvent], mut out: List[RelayEvent])
+pub fn relay_authorize[D](mut r: Relay, mut io: LinkIo[D], now: u64, sid_in: u32, id: RequestId, ok: Result[(), u64])
+pub fn relay_poll[D](mut r: Relay, mut io: LinkIo[D], now: u64) -> Option[u64]
 ```
 
 Track names, filters and object status are declared in `moq.codec`.
@@ -114,18 +167,33 @@ pub type Filter: key = NoFilter | RelativeStart(groups: u64) | AbsoluteStart(sta
 pub type ObjectStatus: key = Normal | EndOfGroup | EndOfTrack
 ```
 
-A `Session` is one MoQ session on one native QUIC connection or one WebTransport session,
-named by its `Transport`. All calls take the `Io`, which holds the `quic.Endpoint` and, when
-the service accepts browsers, the `webtransport.Endpoint` over it. The package writes and
-reads streams through `quic`'s calls for a `Native` session and through `webtransport`'s
-wrappers for a `Web` one (WT-2), so WebTransport's session flow control holds; nothing else
-in the package differs between the two. `receive` takes the transport's events, and a
-session ignores those of other connections or sessions. `poll` runs the session's timers
-(delivery timeouts, MOQ-5) and returns the next deadline. Request ids are even for the
-client and odd for the server (moqt-23 §6.4.2.1), counted per session. Object payloads are
-`Shared[Bytes]`: a relay forwards the same buffer to every subscriber with `write_shared` or
-`send_datagram`, never copying a payload (MOQ-6); `webtransport.send_datagram` writes its
-quarter stream id into the slice's inline prefix, not in front of a copy (WT-2).
+The socket owner registers each native connection or WebTransport CONNECT through its
+driver. A `LinkId` identifies a registration within that driver. The driver limits live
+registrations to `max_links` and assigns each new registration an id it has never issued.
+Translate events at transport ingress, before reusing a transport handle. The driver retires
+a link on a terminal event or a local close. An owner disposing of a transport directly drains or discards
+its raw events before retiring the link. An addressed event already in flight retains its
+old id. `receive` and `relay_receive` deliver it only to that link's session.
+
+The mixed driver dispatches to one adapter per link over the shared QUIC endpoint. The
+socket owner feeds HTTP/3 events to WebTransport and passes the resulting events to
+`web_events`. The native adapter validates the negotiated QUIC ALPN. The WebTransport
+adapter validates the selected CONNECT application protocol. `Ready` reports usable
+application datagram room after transport framing. A pending CONNECT cannot start MoQ
+SETUP. A refused CONNECT produces `Closed`, with the HTTP status as code, or
+`ERR_PROTOCOL_VIOLATION` for pin rejection. `AddressMode` controls the SETUP address fields.
+`Acked` is delivered to the stream's owning link and clears its subgroup delivery timer.
+WT stream priority, reliable reset and datagram purges use the owning session's operations.
+
+`poll` runs the session's delivery timers (MOQ-5) and returns the next deadline. Request ids
+are even for the client and odd for the server (moqt-23 §6.4.2.1), counted per session.
+`Object.payload` is a validated owned range of the QUIC backing. MoQ datagram receive trims
+the header off that range. Stream writes, duplicate checks, the cache and SFrame use its
+selected bytes. Datagram sends prepend the MoQ fields into the inline prefix, leaving up
+to eight bytes for the WT quarter stream id. If the header is too large for the prefix,
+or the source backing would cost more than the previous copied frame, MoQ coalesces the
+header and selected bytes. The property-free header fits in inline storage without a
+header allocation. MTU checks use wire length.
 
 An `Object` keeps everything moqt-23 makes part of an object's identity or forwarding: its
 delivery `mode` and its `properties` (moqt-23 §2.1.1, §8.4), which a relay forwards
@@ -141,67 +209,6 @@ A `Relay` owns the sessions added to it, each with the scope its `accept_setup` 
 runs MOQ-6 over them: `relay_receive` consumes the transport events of all its sessions,
 and every request a session receives becomes `RelayEvent.Authorize`, which the application
 answers with `relay_authorize`.
-
-**End-state transport capability seam and zero-copy handoff (text only, not yet built —
-media-seams-design-3072).** `Io`, `Transport`, and `TransportEvent` are replaced by one
-transport-agnostic capability interface implemented once for native QUIC and once for
-WebTransport (plus one `MixedDriver` dispatcher for mixed relays). `Session`, `Relay`, and all
-session/data modules never import `webtransport` or `quic.Endpoint` and cannot tell which
-transport a session runs on:
-
-```hirsel unbuilt
-pub type LinkId = LinkId(u32)
-pub type LinkStream = LinkStream(u64)
-pub type AddressMode = InUri | InSetup
-
-pub type LinkError =
-    Closed
-  | StreamUnknown
-  | Limit
-  | TooLarge(u64)
-  | Protocol
-
-pub type LinkEvent =
-    Ready(alpn: String, max_datagram: u64)
-  | Opened(stream: LinkStream, bidi: bool)
-  | Readable(stream: LinkStream)
-  | Writable(stream: LinkStream)
-  | Acked(stream: LinkStream)
-  | Reset(stream: LinkStream, code: u64, final_size: u64)
-  | Stopped(stream: LinkStream, code: u64)
-  | Datagram(data: quic.PayloadSlice)
-  | Closed(code: u64)
-
-pub type LinkOps[D] {
-    address_mode: fn(D, LinkId) -> AddressMode,
-    max_datagram: fn(D, LinkId) -> u64,
-    open: fn(mut D, LinkId, bool) -> Result[LinkStream, LinkError],
-    read: fn(mut D, LinkId, LinkStream, mut Bytes) -> Result[(u64, bool), LinkError],
-    write: fn(mut D, LinkId, LinkStream, Bytes, bool) -> Result[u64, LinkError],
-    write_slice: fn(mut D, LinkId, LinkStream, take quic.PayloadSlice, bool) -> Result[bool, LinkError],
-    reset: fn(mut D, LinkId, LinkStream, u64, u64) -> Result[(), LinkError],
-    stop: fn(mut D, LinkId, LinkStream, u64) -> Result[(), LinkError],
-    priority: fn(mut D, LinkId, LinkStream, quic.Priority) -> Result[(), LinkError],
-    send_datagram: fn(mut D, LinkId, take quic.FramedSlice, quic.Priority, u64) -> Result[(), LinkError],
-    drop_datagrams: fn(mut D, LinkId, u64) -> u64,
-    close: fn(mut D, LinkId, u64, Bytes)
-}
-
-pub fn native_ops() -> LinkOps[quic.Endpoint]
-pub fn web_ops() -> LinkOps[WebDriver]
-pub fn mixed_ops() -> LinkOps[MixedDriver]
-```
-
-- `address_mode` (`InSetup` for native QUIC, `InUri` for WebTransport) governs SETUP `PATH` and
-  `AUTHORITY` validation so session code never branches on transport kind.
-- `priority`, `reset` (reliable reset via `quic.reset` or `webtransport.reset_at`), and
-  `drop_datagrams` (session-scoped on WebTransport, WT-2) all route strictly through `LinkOps[D]`.
-- `Object.payload` becomes `quic.PayloadSlice`. Datagram publish writes the `OBJECT_DATAGRAM`
-  header into `quic.FramedSlice` (`framed_prepend`, zero payload copies; cold-path coalesce only
-  if properties exceed `FRAMED_PREFIX_MAX` headroom). Datagram receive strips the header via
-  `quic.payload_trim_front` (zero copies). `RelayLimits.cache_bytes` and `per_track_cache_bytes`
-  charge `quic.payload_retained_bytes(o.payload)` (full backing length) plus properties and
-  record overhead (MOQ-6, MOQ-7).
 
 ## MOQ-2: Control
 
@@ -293,7 +300,7 @@ smaller is used. The two are separate timers:
   would be handed to `quic`: past it, a subgroup stream is reset with `DELIVERY_TIMEOUT` and
   no new stream is opened for that subgroup, and a datagram is dropped.
 - **Subgroup timeout.** Starts when the subgroup's FIN was received upstream (or the
-  application ended it), and runs until `quic.Event.Acked` for the stream; if it fires
+  application ended it), and runs until `LinkEvent.Acked` for the stream; if it fires
   first, the stream is reset. For a datagram it acts as the object timeout does, and the
   smaller of the two applies.
 
@@ -321,7 +328,7 @@ The relay half follows moqt-23 §7 and keeps every byte it holds counted.
   first, from the track furthest over its fair share of `cache_bytes` (the total divided by
   the tracks cached), so one busy track cannot empty everyone else's cache; eviction is
   counted and reported as `RelayEvent.Evicted`, never silent. Payloads are the received
-  `Shared[Bytes]`, so caching costs a reference, not a copy. Unknown and timed-out ranges are
+  `quic.PayloadSlice` ranges, so caching costs a reference, not a copy. Unknown and timed-out ranges are
   never cached (§7.1).
 - **Fan-out.** One upstream subscription per `(scope, track)` *per matching publisher*, no
   matter how many downstream subscribers: subscription aggregation (moqt-23 §7.5), and
@@ -351,10 +358,26 @@ per-object payload size (`object_bytes`), early streams, and the relay cache (MO
 object header whose declared payload length exceeds `limits.object_bytes` is refused at decode
 with `FIELD_LENGTH_EXCEEDED` before buffering, and data-stream receive buffers grow on demand
 as bytes arrive (capped at `limits.object_bytes`), never pre-reserving a peer-declared length.
-On the send side, a session's queued and
-unacknowledged bytes are bounded by its connection's `quic` `send_bytes` (QUIC-5), never by
-the peer's credit, and by `max_timeout_ms` in time. A peer can make the relay hold at most
-its QUIC receive credit, its early streams' headers, and the cache it is charged against.
+Each session uses `max_buffered` as an independent byte limit for its pending writes and
+for the payloads and properties kept by its duplicate guard. A pending write pays for each
+chunk's retained allocation and queue record, and one queue record per stream. A complete
+handoff releases the MoQ chunk charge. QUIC reserves its own charge for the backing until
+it releases the piece. Partial raw writes retain their charge until the chunk leaves MoQ.
+If a pending write cannot fit, the session resets that stream with `DELIVERY_TIMEOUT` and
+drops its queue. A FETCH writer reports `Limit` when it cannot queue a write. The existing
+object and subgroup deadlines still apply.
+
+A duplicate guard retains up to 1024 objects per track. It compares the selected bytes and
+pays for the full backing, properties, and its record until the entry retires, even if the
+relay cache has evicted the object. If its byte limit cannot accommodate a new entry, the
+session ends with `INTERNAL_ERROR`. The limit cannot hide a conflicting duplicate by
+evicting it early. A malformed track releases its object byte holders, and session close
+releases both budgets.
+
+The cache charges the retained backing, the stored property and track-name capacity, and
+the object record with an allowance for list growth. Record charges are fixed on
+admission and refunded when the group is evicted. Each charged holder accounts for its
+backing independently.
 
 ## MOQ-8: The SFU bridge
 
@@ -530,7 +553,7 @@ Red first in `core/programs/moq/laws.hirsel` unless named.
 | Slice | Content | Depends on | Laws |
 | --- | --- | --- | --- |
 | **MS1** Codec | control messages, data formats, namespace and track names | — | M1 |
-| **MS2** Session | the `Io` over native QUIC and WebTransport, SETUP and `accept_setup`, request streams, tokens, publisher and subscriber roles, cancellation, `close`, malformed tracks | MS1, quic QS7, webtransport TS3 | M2 (peer rows), M11 |
+| **MS2** Session | `LinkOps` over native QUIC and WebTransport, SETUP and `accept_setup`, request streams, tokens, publisher and subscriber roles, cancellation, `close`, malformed tracks | MS1, quic QS7, webtransport TS3 | M2 (peer rows), M11 |
 | **MS3** Scheduling | MOQ-5 over `quic.Priority`; the two delivery timers and `max_timeout_ms` | MS2 | M6, M7 |
 | **MS4** Relay | the `Relay` API, authorization, tenant-scoped cache and its bounds, per-publisher fan-out, order, dedup and switchover, unknown ranges | MS3 | M3, M4, M5, M8, M9 |
 | **MS5** SFrame | per-object SFrame for publishers and subscribers; relay opacity | MS4 | M10 |

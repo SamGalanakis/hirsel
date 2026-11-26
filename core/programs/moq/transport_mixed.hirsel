@@ -1,0 +1,210 @@
+type BoundLink: key = Native(quic.ConnectionHandle) | Web(webtransport.SessionHandle)
+
+pub opaque type LinkRegistry {
+    limit: u64,
+    next: u64,
+    by_address: Map[BoundLink, LinkId],
+    by_id: Map[LinkId, BoundLink]
+}
+
+pub type MixedDriver {
+    q: quic.Endpoint,
+    w: Option[webtransport.Endpoint],
+    links: LinkRegistry
+}
+
+pub fn mixed_driver(take q: quic.Endpoint, take w: Option[webtransport.Endpoint], max_links: u64) -> LinkIo[MixedDriver] {
+    let links = LinkRegistry(limit: max_links, next: 1, by_address: map.new(), by_id: map.new())
+    LinkIo(driver: MixedDriver(q: take q, w: take w, links: take links), ops: mixed_ops())
+}
+
+fn register_link(mut r: LinkRegistry, address: BoundLink) -> Option[LinkId] {
+    if let Some(id) = map.get(r.by_address, address) {
+        return Some(id)
+    }
+    if map.len(r.by_id) >= r.limit || r.next == 0xffffffffffffffff {
+        return None
+    }
+    let id = LinkId(r.next)
+    map.insert(mut r.by_address, address, id)
+    map.insert(mut r.by_id, id, address)
+    r.next += 1
+    Some(id)
+}
+
+pub fn native_link(mut d: MixedDriver, c: quic.ConnectionHandle) -> Option[LinkId] {
+    register_link(mut d.links, Native(c))
+}
+
+pub fn web_link(mut d: MixedDriver, s: webtransport.SessionHandle) -> Option[LinkId] {
+    if let None = d.w {
+        return None
+    }
+    register_link(mut d.links, Web(s))
+}
+
+/// A socket owner can retire a link after disposing its transport and queued events.
+pub fn retire_link(mut d: MixedDriver, id: LinkId) {
+    if let Some(address) = map.remove(mut d.links.by_id, id) {
+        let _ = map.remove(mut d.links.by_address, address)
+    }
+}
+
+fn mixed_address_mode(d: MixedDriver, link: LinkId) -> Option[AddressMode] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(_)) => Some(InSetup),
+        Some(Web(_)) => Some(InUri),
+        None => None,
+    }
+}
+
+fn mixed_max_datagram(d: MixedDriver, link: LinkId) -> u64 {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => quic.max_datagram_payload(d.q, c),
+        Some(Web(s)) => web_max_datagram(d.q, s),
+        None => 0,
+    }
+}
+
+fn mixed_open(mut d: MixedDriver, link: LinkId, bidi: bool) -> Result[LinkStream, MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_open(mut d.q, c, bidi),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_open(mut w, mut d.q, s, bidi),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_read(mut d: MixedDriver, link: LinkId, stream: LinkStream, mut into: Bytes) -> Result[(u64, bool), LinkReadError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_read(mut d.q, c, stream, mut into),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_read(mut w, mut d.q, s, stream, mut into),
+            None => Error(Refused(State)),
+        },
+        None => Error(Refused(State)),
+    }
+}
+
+fn mixed_write(mut d: MixedDriver, link: LinkId, stream: LinkStream, data: Bytes, fin: bool) -> Result[u64, MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_write(mut d.q, c, stream, data, fin),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_write(mut w, mut d.q, s, stream, data, fin),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_write_slice(mut d: MixedDriver, link: LinkId, stream: LinkStream, take data: quic.PayloadSlice, fin: bool) -> Result[bool, MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_write_slice(mut d.q, c, stream, take data, fin),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_write_slice(mut w, mut d.q, s, stream, take data, fin),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_reset(mut d: MixedDriver, link: LinkId, stream: LinkStream, code: u64, reliable: u64) -> Result[(), MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_reset(mut d.q, c, stream, code, reliable),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_reset(mut w, mut d.q, s, stream, code, reliable),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_stop(mut d: MixedDriver, link: LinkId, stream: LinkStream, code: u64) -> Result[(), MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_stop(mut d.q, c, stream, code),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_stop(mut w, mut d.q, s, stream, code),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_priority(mut d: MixedDriver, link: LinkId, stream: LinkStream, p: quic.Priority) -> Result[(), MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_priority(mut d.q, c, stream, p),
+        Some(Web(s)) => match d.w {
+            Some(w) => web_priority(w, mut d.q, s, stream, p),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_send_datagram(mut d: MixedDriver, link: LinkId, take data: quic.FramedSlice, p: quic.Priority, tag: u64) -> Result[(), MoqError] {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_send_datagram(mut d.q, c, take data, p, tag),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_send_datagram(mut w, mut d.q, s, take data, p, tag),
+            None => Error(State),
+        },
+        None => Error(State),
+    }
+}
+
+fn mixed_drop_datagrams(mut d: MixedDriver, link: LinkId, tag: u64) -> u64 {
+    match map.get(d.links.by_id, link) {
+        Some(Native(c)) => native_drop_datagrams(mut d.q, c, tag),
+        Some(Web(s)) => match d.w {
+            Some(w) => web_drop_datagrams(w, mut d.q, s, tag),
+            None => 0,
+        },
+        None => 0,
+    }
+}
+
+fn mixed_close(mut d: MixedDriver, link: LinkId, code: u64, reason: Bytes) {
+    match option.copied(map.get(d.links.by_id, link)) {
+        Some(Native(c)) => native_close(mut d.q, c, code, reason),
+        Some(Web(s)) => match d.w {
+            Some(mut w) => web_close(mut w, mut d.q, s, code, reason),
+            None => {},
+        },
+        None => {},
+    }
+    retire_link(mut d, link)
+}
+
+pub fn mixed_ops() -> LinkOps[MixedDriver] {
+    LinkOps(address_mode: mixed_address_mode, max_datagram: mixed_max_datagram, open: mixed_open, read: mixed_read, write: mixed_write, write_slice: mixed_write_slice, reset: mixed_reset, stop: mixed_stop, priority: mixed_priority, send_datagram: mixed_send_datagram, drop_datagrams: mixed_drop_datagrams, close: mixed_close)
+}
+
+fn route_event(mut d: MixedDriver, address: BoundLink, take event: LinkEvent, mut out: List[AddressedEvent]) {
+    let Some(id) = option.copied(map.get(d.links.by_address, address)) else {
+        return
+    }
+    if let Closed(..) = event {
+        retire_link(mut d, id)
+    }
+    list.push(mut out, AddressedEvent(link: id, event: take event))
+}
+
+/// Translate raw QUIC events for registered native links. In a mixed server the socket
+/// owner delivers its HTTP/3 connection events to WebTransport separately.
+pub fn native_events(mut d: MixedDriver, events: List[quic.Event], mut out: List[AddressedEvent]) {
+    for ev in events {
+        let (c, take event) = native_link_event(d.q, ev)
+        route_event(mut d, Native(c), take event, mut out)
+    }
+}
+
+/// Translate events WebTransport has addressed to their CONNECT session.
+pub fn web_events(mut d: MixedDriver, events: List[webtransport.Event], mut out: List[AddressedEvent]) {
+    for ev in events {
+        if let Some((s, take event)) = web_link_event(d.q, ev) {
+            route_event(mut d, Web(s), take event, mut out)
+        }
+    }
+}

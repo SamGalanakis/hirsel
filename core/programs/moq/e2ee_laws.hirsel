@@ -37,6 +37,14 @@ fn e2ee_receiver(base: Bytes, kid: u64) -> sframe.Receiver {
     take r
 }
 
+fn framed_payload(prefix: Bytes, data: Bytes, suffix: Bytes, capacity: u64) -> quic.PayloadSlice {
+    let mut storage: Bytes = list.with_capacity(capacity)
+    list.append(mut storage, prefix)
+    list.append(mut storage, data)
+    list.append(mut storage, suffix)
+    option.unwrap(quic.payload_slice(shared.new(take storage), list.len(prefix), list.len(data)))
+}
+
 /// bug: an SFrame-protected object leaves plaintext bytes in the relay's cache or session
 /// buffers, diverges from RFC 9605 Appendix C.3, fails to decrypt for authorized subscribers
 /// (live or via FETCH), or accepts tampered routing metadata / missing keys.
@@ -51,14 +59,21 @@ fn relay_never_sees_plaintext() -> Result[(), ()] {
     let mut c3_s = e2ee_sender(c3_base, 0x123, 0x4567)
     let mut c3_r = e2ee_receiver(c3_base, 0x123)
     let tr_c3 = track(ns1(b"m10"), b"c3")
-    let c3_obj = moq.Object(track: clone(tr_c3), group: 0, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: b"", payload: shared.new(e2ee_copy(c3_plain)))
+    let c3_obj = moq.Object(track: clone(tr_c3), group: 0, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: b"", payload: framed_payload(b"lead", c3_plain, b"tail", 64))
     let (take c3_sealed_obj, c3_sealed) = result.unwrap(moq.seal_object(mut c3_s, c3_obj, c3_meta))
-    if c3_sealed.ctr != 0x4567 || c3_sealed.len != list.len(c3_want) || !bytes_eq_shared(c3_sealed_obj.payload, c3_want) {
+    if c3_sealed.ctr != 0x4567 || c3_sealed.len != list.len(c3_want) || !bytes_eq_shared(quic.payload_bytes(c3_sealed_obj.payload), c3_want) {
         fail("M10: seal_object differs from RFC 9605 Appendix C.3")
     }
-    let (take c3_back, c3_opened) = result.unwrap(moq.open_object(mut c3_r, c3_sealed_obj, c3_meta))
-    if c3_opened.kid != 0x123 || c3_opened.ctr != 0x4567 || !bytes_eq_shared(c3_back.payload, c3_plain) {
+    let alternate = moq.Object(track: clone(tr_c3), group: 0, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: b"", payload: framed_payload(b"other-prefix", c3_plain, b"x", 96))
+    let (take alt, _) = result.unwrap(moq.seal_object(mut c3_s, alternate, c3_meta))
+    let ciphertext = moq.Object(track: clone(tr_c3), group: 0, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: b"", payload: framed_payload(b"packet header", c3_want, b"suffix", 128))
+    let (take c3_back, c3_opened) = result.unwrap(moq.open_object(mut c3_r, ciphertext, c3_meta))
+    if c3_opened.kid != 0x123 || c3_opened.ctr != 0x4567 || !bytes_eq_shared(quic.payload_bytes(c3_back.payload), c3_plain) {
         fail("M10: open_object failed to recover RFC 9605 Appendix C.3 plaintext")
+    }
+    let (take alt_plain, alt_opened) = result.unwrap(moq.open_object(mut c3_r, alt, c3_meta))
+    if alt_opened.ctr != 0x4568 || quic.payload_bytes(alt_plain.payload) != c3_plain {
+        fail("SFrame sealed bytes outside the alternate range")
     }
     // 2. End-to-end through a live MoQ Relay with caching, fan-out, and cache-backed FETCH.
     let lim = moq_limits()
@@ -97,10 +112,10 @@ fn relay_never_sees_plaintext() -> Result[(), ()] {
                 Subgroup
             }
             let sg = oid % 2
-            let raw_obj = moq.Object(track: clone(tr), group: g, subgroup: sg, id: oid, mode: mode, publisher_priority: 20, status: Normal, properties: b"", payload: shared.new(take plain))
+            let raw_obj = moq.Object(track: clone(tr), group: g, subgroup: sg, id: oid, mode: mode, publisher_priority: 20, status: Normal, properties: b"", payload: quic.payload_whole(shared.new(take plain)))
             let (take sealed_obj, _) = result.unwrap(moq.seal_object_bound(mut sender, raw_obj))
             if total_sent == 0 {
-                list.append(mut first_cipher_sample, sealed_obj.payload)
+                list.append(mut first_cipher_sample, quic.payload_bytes(sealed_obj.payload))
             }
             let fin_sg = mode == Subgroup && oid == 2
             peer_publish(mut rig.peers[pub_i], 40 + total_sent, sealed_obj, fin_sg)
@@ -137,13 +152,13 @@ fn relay_never_sees_plaintext() -> Result[(), ()] {
             if opened.kid != kid {
                 fail("M10: decrypted object had unexpected KID")
             }
-            if !moq.bytes_contain(plain_obj.payload, marker) {
+            if !moq.bytes_contain(quic.payload_bytes(plain_obj.payload), marker) {
                 fail("M10: decrypted object did not recover plaintext marker")
             }
             let tail_at = list.len(marker)
             let expected_g: u8 = int.truncate(plain_obj.group)
             let expected_o: u8 = int.truncate(plain_obj.id)
-            if plain_obj.payload[tail_at] != expected_g || plain_obj.payload[tail_at + 1] != expected_o {
+            if quic.payload_bytes(plain_obj.payload)[tail_at] != expected_g || quic.payload_bytes(plain_obj.payload)[tail_at + 1] != expected_o {
                 fail("M10: decrypted payload suffix did not match object location")
             }
             live_decrypted += 1
@@ -178,7 +193,7 @@ fn relay_never_sees_plaintext() -> Result[(), ()] {
     for ev in rig.peers[sub_fetch].events {
         if let Received(o) = ev {
             let (take plain_obj, _) = result.unwrap(moq.open_object_bound(mut recv_fetch, o))
-            if !moq.bytes_contain(plain_obj.payload, marker) {
+            if !moq.bytes_contain(quic.payload_bytes(plain_obj.payload), marker) {
                 fail("M10: FETCH-decrypted object did not recover plaintext marker")
             }
             fetch_decrypted += 1
@@ -194,7 +209,7 @@ fn relay_never_sees_plaintext() -> Result[(), ()] {
     Ok(())
 }
 
-fn bytes_eq_shared(a: Shared[Bytes], b: Bytes) -> bool {
+fn bytes_eq_shared(a: Bytes, b: Bytes) -> bool {
     if list.len(a) != list.len(b) {
         return false
     }

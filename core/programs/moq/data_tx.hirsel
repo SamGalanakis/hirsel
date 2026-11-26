@@ -118,7 +118,7 @@ fn tx_sg_index(s: Session, req_id: u64, group: u64, subgroup: u64) -> Option[u64
     None
 }
 
-fn remove_tx_subgroup(mut s: Session, stream: quic.StreamId) {
+fn remove_tx_subgroup(mut s: Session, stream: LinkStream) {
     for i in 0u64 .. list.len(s.tx_subgroups) {
         if s.tx_subgroups[i].stream == stream {
             let _ = list.remove(mut s.tx_subgroups, i)
@@ -145,7 +145,7 @@ fn record_dead_subgroup(mut s: Session, req_id: u64, group: u64, subgroup: u64) 
     }
 }
 
-fn mark_tx_subgroup_dead(mut s: Session, stream: quic.StreamId) {
+fn mark_tx_subgroup_dead(mut s: Session, stream: LinkStream) {
     for i in 0u64 .. list.len(s.tx_subgroups) {
         if s.tx_subgroups[i].stream == stream {
             let req_id = s.tx_subgroups[i].req_id
@@ -158,7 +158,7 @@ fn mark_tx_subgroup_dead(mut s: Session, stream: quic.StreamId) {
     }
 }
 
-fn on_stream_acked(mut s: Session, stream: quic.StreamId) {
+fn on_stream_acked(mut s: Session, stream: LinkStream) {
     for i in 0u64 .. list.len(s.tx_subgroups) {
         if s.tx_subgroups[i].stream == stream {
             s.tx_subgroups[i].acked = true
@@ -169,7 +169,7 @@ fn on_stream_acked(mut s: Session, stream: quic.StreamId) {
     }
 }
 
-fn poll_subgroup_timeouts(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
+fn poll_subgroup_timeouts[D](mut s: Session, mut io: LinkIo[D], now: u64) -> Option[u64] {
     let mut next: Option[u64] = None
     // Check queued outgoing object deadlines first (MOQ-5 object timer).
     let mut j = 0u64
@@ -179,8 +179,8 @@ fn poll_subgroup_timeouts(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
                 if now >= at {
                     let st = s.outgoing[j].stream
                     let rel = s.outgoing[j].reliable
-                    tx_reset(s.transport, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
-                    let _ = list.remove(mut s.outgoing, j)
+                    tx_reset(s.link, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
+                    drop_outgoing_at(mut s, j)
                     mark_tx_subgroup_dead(mut s, st)
                     s.timed_out_objects += 1
                 } else {
@@ -204,7 +204,7 @@ fn poll_subgroup_timeouts(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
                 if now >= at {
                     let st = s.tx_subgroups[i].stream
                     let rel = s.tx_subgroups[i].header_len
-                    tx_reset(s.transport, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
+                    tx_reset(s.link, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
                     drop_outgoing(mut s, st)
                     let req_id = s.tx_subgroups[i].req_id
                     let group = s.tx_subgroups[i].group
@@ -228,13 +228,13 @@ fn poll_subgroup_timeouts(mut s: Session, mut io: Io, now: u64) -> Option[u64] {
     next
 }
 
-pub fn publish(mut s: Session, mut io: Io, now: u64, o: Object) -> Result[(), MoqError] {
+pub fn publish[D](mut s: Session, mut io: LinkIo[D], now: u64, o: Object) -> Result[(), MoqError] {
     publish_at(mut s, mut io, now, now, o, false)
 }
 
 /// Publish an object whose header arrived (or was produced) at `born_ns`, optionally finishing
 /// its subgroup stream (for MS3 delivery-timeout precision and MS4 relay forwarding).
-pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object, fin_subgroup: bool) -> Result[(), MoqError] {
+pub fn publish_at[D](mut s: Session, mut io: LinkIo[D], now: u64, born_ns: u64, o: Object, fin_subgroup: bool) -> Result[(), MoqError] {
     s.now = now
     if s.phase == Ended {
         return Error(Closed)
@@ -350,11 +350,8 @@ pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object,
                 other => Some(other),
             }
             let dg = codec.Datagram(alias: alias, group: o.group, object: o.id, priority: Some(o.publisher_priority), properties: clone(props_kvs), end_of_group: false, status: st_opt)
-            let mut raw_payload: Bytes = list.with_capacity(list.len(o.payload))
-            list.append(mut raw_payload, o.payload)
-            let mut frame: Bytes = list.new()
-            if let Ok(()) = codec.write_datagram(dg, raw_payload, mut frame) {
-                let _ = tx_send_datagram(s.transport, mut io, shared.new(take frame), prio, tag)
+            if let Ok(take frame) = frame_object_datagram(dg, o.payload, mut s.datagram_payload_copies) {
+                let _ = tx_send_datagram(s.link, mut io, take frame, prio, tag)
             }
         } else {
             if is_dead_subgroup(s, req_id, o.group, o.subgroup) {
@@ -365,7 +362,7 @@ pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object,
                 if let Some(si) = existing_sg {
                     let st = s.tx_subgroups[si].stream
                     let rel = s.tx_subgroups[si].header_len
-                    tx_reset(s.transport, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
+                    tx_reset(s.link, mut io, st, RESET_DELIVERY_TIMEOUT, rel)
                     drop_outgoing(mut s, st)
                     let _ = list.remove(mut s.tx_subgroups, si)
                 }
@@ -386,15 +383,15 @@ pub fn publish_at(mut s: Session, mut io: Io, now: u64, born_ns: u64, o: Object,
     Ok(())
 }
 
-fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias: u64, prio: quic.Priority, o: Object, take props_kvs: List[codec.KeyValue], eff_obj_ms: u64, eff_sg_ms: u64, obj_dl: Option[u64], fin_subgroup: bool, now: u64) {
+fn send_subgroup_object[D](mut s: Session, mut io: LinkIo[D], ri: u64, req_id: u64, alias: u64, prio: quic.Priority, o: Object, take props_kvs: List[codec.KeyValue], eff_obj_ms: u64, eff_sg_ms: u64, obj_dl: Option[u64], fin_subgroup: bool, now: u64) {
     let want_fin = fin_subgroup || o.status != Normal
     let si = match tx_sg_index(s, req_id, o.group, o.subgroup) {
         Some(idx) => idx,
         None => {
-            let Ok(st) = tx_open(s.transport, mut io, false) else {
+            let Ok(st) = tx_open(s.link, mut io, false) else {
                 return
             }
-            tx_priority(s.transport, mut io, st, prio)
+            tx_priority(s.link, mut io, st, prio)
             let sg_mode: codec.SubgroupId = if o.subgroup == 0 {
                 ZeroSubgroup
             } else {
@@ -406,7 +403,10 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
                 return
             }
             let hlen = list.len(hbytes)
-            enqueue_raw(mut s, mut io, st, take hbytes, false)
+            if !enqueue_raw_timed(mut s, mut io, st, take hbytes, false, obj_dl, hlen) {
+                record_dead_subgroup(mut s, req_id, o.group, o.subgroup)
+                return
+            }
             s.requests[ri].streams_sent += 1
             list.push(mut s.tx_subgroups, TxSubgroup(stream: st, req_id: req_id, track: clone(o.track), group: o.group, subgroup: o.subgroup, header: hdr, header_len: hlen, prev_id: None, fin_sent: false, acked: false, obj_timeout_ms: eff_obj_ms, sg_timeout_ms: eff_sg_ms, sg_deadline: None))
             list.len(s.tx_subgroups) - 1
@@ -420,7 +420,7 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
     let rel = s.tx_subgroups[si].header_len
     let prev = s.tx_subgroups[si].prev_id
     let plen = if o.status == Normal {
-        list.len(o.payload)
+        quic.payload_len(o.payload)
     } else {
         0u64
     }
@@ -430,11 +430,11 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
         return
     }
     s.tx_subgroups[si].prev_id = Some(o.id)
-    if plen == 0 {
-        enqueue_raw_timed(mut s, mut io, st, take obytes, want_fin, obj_dl, rel)
-    } else {
-        enqueue_raw_timed(mut s, mut io, st, take obytes, false, obj_dl, rel)
-        let _ = enqueue_shared_timed(mut s, mut io, st, clone(o.payload), want_fin, obj_dl, rel)
+    if !enqueue_raw_timed(mut s, mut io, st, take obytes, want_fin && plen == 0, obj_dl, rel) {
+        return
+    }
+    if plen != 0 && !enqueue_shared_timed(mut s, mut io, st, quic.payload_share(o.payload), want_fin, obj_dl, rel) {
+        return
     }
     if want_fin {
         s.tx_subgroups[si].fin_sent = true
@@ -445,12 +445,14 @@ fn send_subgroup_object(mut s: Session, mut io: Io, ri: u64, req_id: u64, alias:
 }
 
 /// Explicitly end a subgroup stream with FIN, starting its SUBGROUP_DELIVERY_TIMEOUT timer (MOQ-5).
-pub fn finish_subgroup(mut s: Session, mut io: Io, now: u64, track: codec.TrackName, group: u64, subgroup: u64) {
+pub fn finish_subgroup[D](mut s: Session, mut io: LinkIo[D], now: u64, track: codec.TrackName, group: u64, subgroup: u64) {
     s.now = now
     for i in 0u64 .. list.len(s.tx_subgroups) {
         if s.tx_subgroups[i].track == track && s.tx_subgroups[i].group == group && s.tx_subgroups[i].subgroup == subgroup && !s.tx_subgroups[i].fin_sent {
             let st = s.tx_subgroups[i].stream
-            enqueue_raw(mut s, mut io, st, b"", true)
+            if !enqueue_raw_timed(mut s, mut io, st, b"", true, None, 0) {
+                return
+            }
             s.tx_subgroups[i].fin_sent = true
             if s.tx_subgroups[i].sg_timeout_ms > 0 {
                 s.tx_subgroups[i].sg_deadline = Some(int.saturating_add(now, int.saturating_mul(s.tx_subgroups[i].sg_timeout_ms, 1000000)))
@@ -461,12 +463,12 @@ pub fn finish_subgroup(mut s: Session, mut io: Io, now: u64, track: codec.TrackN
 
 /// MOQ-8 revocation fence helper: reset every open outbound subgroup stream of `track` with
 /// `reliable = header_len` and drop every queued datagram of `track` before `end_track`.
-pub fn fence_track(mut s: Session, mut io: Io, track: codec.TrackName, code: u64) {
+pub fn fence_track[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, code: u64) {
     let _ = fence_track_counts(mut s, mut io, track, code)
 }
 
 /// MOQ-8 revocation fence helper returning `(reset_streams, dropped_datagrams)`.
-pub fn fence_track_counts(mut s: Session, mut io: Io, track: codec.TrackName, code: u64) -> (u64, u64) {
+pub fn fence_track_counts[D](mut s: Session, mut io: LinkIo[D], track: codec.TrackName, code: u64) -> (u64, u64) {
     if s.phase == Ended {
         return (0, 0)
     }
@@ -476,7 +478,7 @@ pub fn fence_track_counts(mut s: Session, mut io: Io, track: codec.TrackName, co
         if s.tx_subgroups[i].track == track {
             let st = s.tx_subgroups[i].stream
             let rel = s.tx_subgroups[i].header_len
-            tx_reset(s.transport, mut io, st, code, rel)
+            tx_reset(s.link, mut io, st, code, rel)
             drop_outgoing(mut s, st)
             let _ = list.remove(mut s.tx_subgroups, i)
             reset_streams += 1
@@ -486,7 +488,7 @@ pub fn fence_track_counts(mut s: Session, mut io: Io, track: codec.TrackName, co
     }
     let mut dropped_dgs = 0u64
     if let Some(pt) = pub_track_at(s, clone(track)) {
-        dropped_dgs = tx_drop_datagrams(s.transport, mut io, s.pub_tracks[pt].tag)
+        dropped_dgs = tx_drop_datagrams(s.link, mut io, s.pub_tracks[pt].tag)
     }
     end_track(mut s, mut io, track, code)
     (reset_streams, dropped_dgs)
@@ -495,7 +497,7 @@ pub fn fence_track_counts(mut s: Session, mut io: Io, track: codec.TrackName, co
 /// Send a FETCH response stream (FETCH_HEADER + entries) for an accepted FETCH request (MOQ-6).
 pub type FetchReplyEntry = ReplyObject(Object) | ReplyUnknown(end: codec.Location) | ReplyGroupEnd | ReplyTrackEnd
 
-pub fn send_fetch_stream(mut s: Session, mut io: Io, id: RequestId, entries: List[FetchReplyEntry]) -> Result[(), MoqError] {
+pub fn send_fetch_stream[D](mut s: Session, mut io: LinkIo[D], id: RequestId, entries: List[FetchReplyEntry]) -> Result[(), MoqError] {
     if s.phase == Ended {
         return Error(Closed)
     }
@@ -503,16 +505,18 @@ pub fn send_fetch_stream(mut s: Session, mut io: Io, id: RequestId, entries: Lis
     let Some(ri) = req_by_id(s, raw_id) else {
         return Error(State)
     }
-    let st = tx_open(s.transport, mut io, false)?
+    let st = tx_open(s.link, mut io, false)?
     let sp: u64 = int.widen(s.requests[ri].priority)
     let prio_ord: u64 = sp << 56
-    tx_priority(s.transport, mut io, st, quic.Priority(urgency: URGENCY_OBJECT, order: prio_ord, then: STREAM_BIT))
+    tx_priority(s.link, mut io, st, quic.Priority(urgency: URGENCY_OBJECT, order: prio_ord, then: STREAM_BIT))
     let mut head: Bytes = list.new()
     if let Error(e) = codec.write_fetch_header(raw_id, mut head) {
         return Error(Wire(e))
     }
     let total = list.len(entries)
-    enqueue_raw(mut s, mut io, st, take head, total == 0)
+    if !enqueue_raw_timed(mut s, mut io, st, take head, total == 0, None, 0) {
+        return Error(Limit)
+    }
     let mut fst = codec.fetch_state(s.requests[ri].group_order)
     for k in 0u64 .. total {
         let last = k + 1 == total
@@ -526,17 +530,23 @@ pub fn send_fetch_stream(mut s: Session, mut io: Io, id: RequestId, entries: Lis
                     Subgroup => Some(o.subgroup),
                     Datagram => None,
                 }
-                let plen = list.len(o.payload)
+                let plen = quic.payload_len(o.payload)
                 let fo = codec.FetchObject(location: codec.Location(group: o.group, object: o.id), subgroup: sg, priority: o.publisher_priority, properties: take props, length: plen)
                 let mut eb: Bytes = list.new()
                 if let Error(e) = codec.write_fetch_entry(FetchedObject(fo), mut fst, mut eb) {
                     return Error(Wire(e))
                 }
                 if plen == 0 {
-                    enqueue_raw(mut s, mut io, st, take eb, last)
+                    if !enqueue_raw_timed(mut s, mut io, st, take eb, last, None, 0) {
+                        return Error(Limit)
+                    }
                 } else {
-                    enqueue_raw(mut s, mut io, st, take eb, false)
-                    let _ = enqueue_shared(mut s, mut io, st, clone(o.payload), last)
+                    if !enqueue_raw_timed(mut s, mut io, st, take eb, false, None, 0) {
+                        return Error(Limit)
+                    }
+                    if !enqueue_shared_timed(mut s, mut io, st, quic.payload_share(o.payload), last, None, 0) {
+                        return Error(Limit)
+                    }
                 }
             },
             ReplyUnknown(end: end) => {

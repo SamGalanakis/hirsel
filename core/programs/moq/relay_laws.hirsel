@@ -9,14 +9,34 @@ fn peer_addr(n: u16) -> Addr {
 
 // Disjoint-field helpers on Peer so mutating `rig.peers[i]` never double-borrows `rig.peers[i]`.
 fn peer_receive_quic(mut p: Peer, now: u64, qev: List[quic.Event]) {
+    let has_wt = match p.io.driver.w {
+        Some(_) => true,
+        None => false,
+    }
+    if has_wt {
+        let mut wevs: List[webtransport.Event] = list.new()
+        if let Some(mut w) = p.io.driver.w {
+            webtransport.receive(mut w, mut p.io.driver.q, now, qev, mut wevs)
+        }
+        for ev in wevs {
+            list.push(mut p.wt_events, clone(ev))
+        }
+        let mut addressed: List[moq.AddressedEvent] = list.new()
+        moq.web_events(mut p.io.driver, wevs, mut addressed)
+        if let Some(mut s) = p.sess {
+            moq.receive(mut s, mut p.io, now, addressed, mut p.events)
+        }
+        if let Some(mut s) = p.pooled {
+            moq.receive(mut s, mut p.io, now, addressed, mut p.pooled_events)
+        }
+        return
+    }
     for ev in qev {
         list.push(mut p.raw, clone(ev))
     }
     if let Some(mut s) = p.sess {
-        let mut tevs: List[moq.TransportEvent] = list.new()
-        for ev in qev {
-            list.push(mut tevs, Quic(clone(ev)))
-        }
+        let mut tevs: List[moq.AddressedEvent] = list.new()
+        moq.native_events(mut p.io.driver, qev, mut tevs)
         moq.receive(mut s, mut p.io, now, tevs, mut p.events)
     }
 }
@@ -91,10 +111,11 @@ fn peer_accept_subscribes(mut p: Peer) -> u64 {
 }
 
 type RelayRig {
-    io: moq.Io,
+    io: moq.LinkIo[moq.MixedDriver],
     r: moq.Relay,
     events: List[moq.RelayEvent],
     raw: List[quic.Event],
+    wt_events: List[webtransport.Event],
     peers: List[Peer],
     peer_addrs: List[Addr],
     peer_rids: List[u32],
@@ -118,7 +139,7 @@ fn relay_transport_config(lim: moq.Limits) -> quic.TransportConfig {
 fn new_relay_rig(seed: u64, lim: moq.Limits, rlim: moq.RelayLimits, max_conns: u32) -> RelayRig {
     let t = relay_transport_config(lim)
     let q = result.unwrap(quic.endpoint(provide.random(seed), relay_endpoint_config(max_conns), Some((moq_identity(), take t))))
-    RelayRig(io: moq.Io(q: take q, w: None), r: moq.relay(rlim), events: list.new(), raw: list.new(), peers: list.new(), peer_addrs: list.new(), peer_rids: list.new(), limits: lim)
+    RelayRig(io: moq.mixed_driver(take q, None, int.widen(max_conns)), r: moq.relay(rlim), events: list.new(), raw: list.new(), wt_events: list.new(), peers: list.new(), peer_addrs: list.new(), peer_rids: list.new(), limits: lim)
 }
 
 fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
@@ -128,7 +149,7 @@ fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
     // Relay -> Peers
     list.clear(mut wire)
     list.clear(mut packets)
-    let _ = quic.poll(mut rig.io.q, now, mut wire, mut packets)
+    let _ = quic.poll(mut rig.io.driver.q, now, mut wire, mut packets)
     let mut sent = 0u64
     for o in packets {
         if let Transmit(..) = o {
@@ -136,14 +157,14 @@ fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
         }
     }
     if sent > 0 {
-        quic.committed(mut rig.io.q, now, sent)
+        quic.committed(mut rig.io.driver.q, now, sent)
         total += sent
         for o in packets {
             if let Transmit(to: to, at: at, len: len, ..) = o {
                 for pi in 0u64 .. list.len(rig.peers) {
                     if rig.peer_addrs[pi] == to {
                         let mut qev: List[quic.Event] = list.new()
-                        quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
+                        quic.receive_datagram(mut rig.peers[pi].io.driver.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
                         peer_receive_quic(mut rig.peers[pi], now, qev)
                         break
                     }
@@ -155,7 +176,7 @@ fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
     for pi in 0u64 .. list.len(rig.peers) {
         list.clear(mut wire)
         list.clear(mut packets)
-        let _ = quic.poll(mut rig.peers[pi].io.q, now, mut wire, mut packets)
+        let _ = quic.poll(mut rig.peers[pi].io.driver.q, now, mut wire, mut packets)
         let mut psent = 0u64
         for o in packets {
             if let Transmit(..) = o {
@@ -163,21 +184,30 @@ fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
             }
         }
         if psent > 0 {
-            quic.committed(mut rig.peers[pi].io.q, now, psent)
+            quic.committed(mut rig.peers[pi].io.driver.q, now, psent)
             total += psent
             let mut qev: List[quic.Event] = list.new()
             let pa = rig.peer_addrs[pi]
             for o in packets {
                 if let Transmit(at: at, len: len, ..) = o {
-                    quic.receive_datagram(mut rig.io.q, now, pa, 0, mut wire, at, len, mut qev)
+                    quic.receive_datagram(mut rig.io.driver.q, now, pa, 0, mut wire, at, len, mut qev)
                 }
             }
-            for ev in qev {
-                list.push(mut rig.raw, clone(ev))
-            }
-            let mut tevs: List[moq.TransportEvent] = list.new()
-            for ev in qev {
-                list.push(mut tevs, Quic(clone(ev)))
+            let mut tevs: List[moq.AddressedEvent] = list.new()
+            if let Some(_) = rig.peers[pi].io.driver.w {
+                let mut wt: List[webtransport.Event] = list.new()
+                if let Some(mut w) = rig.io.driver.w {
+                    webtransport.receive(mut w, mut rig.io.driver.q, now, qev, mut wt)
+                }
+                for ev in wt {
+                    list.push(mut rig.wt_events, clone(ev))
+                }
+                moq.web_events(mut rig.io.driver, wt, mut tevs)
+            } else {
+                for ev in qev {
+                    list.push(mut rig.raw, clone(ev))
+                }
+                moq.native_events(mut rig.io.driver, qev, mut tevs)
             }
             let before = list.len(rig.events)
             moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
@@ -188,6 +218,15 @@ fn rig_deliver_all(mut rig: RelayRig, now: u64, auto_auth: bool) -> u64 {
                     }
                 }
             }
+        }
+    }
+    for i in 0u64 .. list.len(rig.peers) {
+        let has_wt = match rig.peers[i].io.driver.w {
+            Some(_) => true,
+            None => false,
+        }
+        if has_wt {
+            peer_receive_quic(mut rig.peers[i], now, list.new())
         }
     }
     total
@@ -208,9 +247,9 @@ fn rig_add_peer(mut rig: RelayRig, seed: u64, role: moq.Role, take scope: moq.Sc
     let idx = list.len(rig.peers)
     let pa = peer_addr(int.narrow(idx))
     let q = result.unwrap(quic.endpoint(provide.random(seed), relay_endpoint_config(4), None))
-    let mut p = Peer(io: moq.Io(q: take q, w: None), sess: None, events: list.new(), raw: list.new(), wt_events: list.new())
-    let cc = result.unwrap(quic.connect(mut p.io.q, now, RELAY_ADDR, "server", moq_pins(), None, relay_transport_config(lim)))
-    let cs = moq.session(Client, role, Native(c: cc), lim)
+    let mut p = Peer(io: moq.mixed_driver(take q, None, 32), sess: None, pooled: None, pooled_events: list.new(), events: list.new(), raw: list.new(), wt_events: list.new())
+    let cc = result.unwrap(quic.connect(mut p.io.driver.q, now, RELAY_ADDR, "server", moq_pins(), None, relay_transport_config(lim)))
+    let cs = native_session(mut p.io, cc, Client, role, lim)
     p.sess = Some(take cs)
     list.push(mut rig.peers, take p)
     list.push(mut rig.peer_addrs, pa)
@@ -229,11 +268,9 @@ fn rig_add_peer(mut rig: RelayRig, seed: u64, role: moq.Role, take scope: moq.Sc
         Subscriber => Publisher,
         Both => Both,
     }
-    let mut ss = moq.session(Server, relay_role, Native(c: sc), lim)
-    let mut tevs: List[moq.TransportEvent] = list.new()
-    for k in raw_before .. list.len(rig.raw) {
-        list.push(mut tevs, Quic(clone(rig.raw[k])))
-    }
+    let mut ss = native_session(mut rig.io, sc, Server, relay_role, lim)
+    let mut tevs: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut rig.io.driver, list.slice(rig.raw, raw_before, list.len(rig.raw)), mut tevs)
     let mut sevs: List[moq.Event] = list.new()
     moq.receive(mut ss, mut rig.io, now + 2, tevs, mut sevs)
     moq.accept_setup(mut ss, mut rig.io, Ok(clone(scope)))
@@ -293,31 +330,29 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
             for pi in 0u64 .. list.len(rig.peers) {
                 if rig.peer_addrs[pi] == to {
                     let mut qev: List[quic.Event] = list.new()
-                    quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut buf, 0, blen, mut qev)
+                    quic.receive_datagram(mut rig.peers[pi].io.driver.q, now, RELAY_ADDR, 0, mut buf, 0, blen, mut qev)
                     peer_receive_quic(mut rig.peers[pi], now, qev)
                     break
                 }
             }
         }
         let mut r_tev: List[quic.Event] = list.new()
-        quic.timeout(mut rig.io.q, now, mut r_tev)
+        quic.timeout(mut rig.io.driver.q, now, mut r_tev)
         if list.len(r_tev) > 0 {
-            let mut tevs: List[moq.TransportEvent] = list.new()
-            for ev in r_tev {
-                list.push(mut tevs, Quic(clone(ev)))
-            }
+            let mut tevs: List[moq.AddressedEvent] = list.new()
+            moq.native_events(mut rig.io.driver, r_tev, mut tevs)
             moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
         }
         for pi in 0u64 .. list.len(rig.peers) {
             let mut p_tev: List[quic.Event] = list.new()
-            quic.timeout(mut rig.peers[pi].io.q, now, mut p_tev)
+            quic.timeout(mut rig.peers[pi].io.driver.q, now, mut p_tev)
             if list.len(p_tev) > 0 {
                 peer_receive_quic(mut rig.peers[pi], now, p_tev)
             }
         }
         list.clear(mut wire)
         list.clear(mut packets)
-        let _ = quic.poll(mut rig.io.q, now, mut wire, mut packets)
+        let _ = quic.poll(mut rig.io.driver.q, now, mut wire, mut packets)
         let mut sent = 0u64
         for o in packets {
             if let Transmit(..) = o {
@@ -325,7 +360,7 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
             }
         }
         if sent > 0 {
-            quic.committed(mut rig.io.q, now, sent)
+            quic.committed(mut rig.io.driver.q, now, sent)
             for o in packets {
                 if let Transmit(to: to, at: at, len: len, ..) = o {
                     rng = int.wrapping_add(int.wrapping_mul(rng, 6364136223846793005), 1442695040888963407)
@@ -342,7 +377,7 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
                     for pi in 0u64 .. list.len(rig.peers) {
                         if rig.peer_addrs[pi] == to {
                             let mut qev: List[quic.Event] = list.new()
-                            quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
+                            quic.receive_datagram(mut rig.peers[pi].io.driver.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
                             peer_receive_quic(mut rig.peers[pi], now, qev)
                             break
                         }
@@ -353,7 +388,7 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
         for pi in 0u64 .. list.len(rig.peers) {
             list.clear(mut wire)
             list.clear(mut packets)
-            let _ = quic.poll(mut rig.peers[pi].io.q, now, mut wire, mut packets)
+            let _ = quic.poll(mut rig.peers[pi].io.driver.q, now, mut wire, mut packets)
             let mut psent = 0u64
             for o in packets {
                 if let Transmit(..) = o {
@@ -361,18 +396,16 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
                 }
             }
             if psent > 0 {
-                quic.committed(mut rig.peers[pi].io.q, now, psent)
+                quic.committed(mut rig.peers[pi].io.driver.q, now, psent)
                 let mut qev: List[quic.Event] = list.new()
                 let pa = rig.peer_addrs[pi]
                 for o in packets {
                     if let Transmit(at: at, len: len, ..) = o {
-                        quic.receive_datagram(mut rig.io.q, now, pa, 0, mut wire, at, len, mut qev)
+                        quic.receive_datagram(mut rig.io.driver.q, now, pa, 0, mut wire, at, len, mut qev)
                     }
                 }
-                let mut tevs: List[moq.TransportEvent] = list.new()
-                for ev in qev {
-                    list.push(mut tevs, Quic(clone(ev)))
-                }
+                let mut tevs: List[moq.AddressedEvent] = list.new()
+                moq.native_events(mut rig.io.driver, qev, mut tevs)
                 moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
             }
         }
@@ -413,7 +446,7 @@ fn relay_preserves_stream_order() -> Result[(), ()] {
 /// oracle: moqt-23 §7.3, §7.5, and MOQ-6 (M4 + M11 relay upstream teardown).
 @test
 fn one_upstream_per_track() -> Result[(), ()] {
-    let lim = moq.Limits(requests: 1200, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000)
+    let lim = moq.Limits(requests: 1200, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 5000, max_buffered: 8388608)
     let rlim = moq.RelayLimits(cache_groups: 8, cache_bytes: 262144, per_track_cache_bytes: 262144, max_objects_per_group: 64, max_object_bytes: 16384)
     let mut rig = new_relay_rig(1101, lim, rlim, 32)
     let sc_a = moq.default_scope(b"tenant-a", b"/live")
@@ -511,7 +544,7 @@ fn one_upstream_per_track() -> Result[(), ()] {
 /// the 1 slow subscriber's lost objects are counted as timed out.
 @test
 fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
-    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 80)
+    let lim = moq.Limits(requests: 16, tracks: 16, control_bytes: 65535, object_bytes: 65536, filter_ranges: 8, max_early_streams: 4, max_timeout_ms: 80, max_buffered: 8388608)
     let rlim = moq.RelayLimits(cache_groups: 32, cache_bytes: 524288, per_track_cache_bytes: 524288, max_objects_per_group: 64, max_object_bytes: 16384)
     let mut rig = new_relay_rig(1201, lim, rlim, 16)
     let sc = moq.default_scope(b"fanout", b"/m5")
@@ -551,7 +584,7 @@ fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
                 }
                 list.clear(mut wire)
                 list.clear(mut packets)
-                let _ = quic.poll(mut rig.peers[pi].io.q, now, mut wire, mut packets)
+                let _ = quic.poll(mut rig.peers[pi].io.driver.q, now, mut wire, mut packets)
                 let mut psent = 0u64
                 for o in packets {
                     if let Transmit(..) = o {
@@ -559,24 +592,22 @@ fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
                     }
                 }
                 if psent > 0 {
-                    quic.committed(mut rig.peers[pi].io.q, now, psent)
+                    quic.committed(mut rig.peers[pi].io.driver.q, now, psent)
                     let mut qev: List[quic.Event] = list.new()
                     let pa = rig.peer_addrs[pi]
                     for o in packets {
                         if let Transmit(at: at, len: len, ..) = o {
-                            quic.receive_datagram(mut rig.io.q, now, pa, 0, mut wire, at, len, mut qev)
+                            quic.receive_datagram(mut rig.io.driver.q, now, pa, 0, mut wire, at, len, mut qev)
                         }
                     }
-                    let mut tevs: List[moq.TransportEvent] = list.new()
-                    for ev in qev {
-                        list.push(mut tevs, Quic(clone(ev)))
-                    }
+                    let mut tevs: List[moq.AddressedEvent] = list.new()
+                    moq.native_events(mut rig.io.driver, qev, mut tevs)
                     moq.relay_receive(mut rig.r, mut rig.io, now, tevs, mut rig.events)
                 }
             }
             list.clear(mut wire)
             list.clear(mut packets)
-            let _ = quic.poll(mut rig.io.q, now, mut wire, mut packets)
+            let _ = quic.poll(mut rig.io.driver.q, now, mut wire, mut packets)
             let mut sent = 0u64
             for o in packets {
                 if let Transmit(..) = o {
@@ -584,7 +615,7 @@ fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
                 }
             }
             if sent > 0 {
-                quic.committed(mut rig.io.q, now, sent)
+                quic.committed(mut rig.io.driver.q, now, sent)
                 for o in packets {
                     if let Transmit(to: to, at: at, len: len, ..) = o {
                         if to == slow_addr {
@@ -593,7 +624,7 @@ fn slow_subscriber_costs_only_itself() -> Result[(), ()] {
                         for pi in 0u64 .. list.len(rig.peers) {
                             if rig.peer_addrs[pi] == to {
                                 let mut qev: List[quic.Event] = list.new()
-                                quic.receive_datagram(mut rig.peers[pi].io.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
+                                quic.receive_datagram(mut rig.peers[pi].io.driver.q, now, RELAY_ADDR, 0, mut wire, at, len, mut qev)
                                 peer_receive_quic(mut rig.peers[pi], now, qev)
                                 break
                             }
@@ -741,7 +772,7 @@ fn cache_bounded_and_fetch_served() -> Result[(), ()] {
     let mut big_props: Bytes = list.new()
     result.unwrap(codec.write_key_values(big_kvs, mut big_props))
     for g in 1u64 .. 6 {
-        let zp = moq.Object(track: clone(tr_prop), group: g, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: clone(big_props), payload: shared.new(b""))
+        let zp = moq.Object(track: clone(tr_prop), group: g, subgroup: 0, id: 0, mode: Subgroup, publisher_priority: 10, status: Normal, properties: clone(big_props), payload: quic.payload_whole(shared.new(b"")))
         peer_publish(mut rig.peers[pub_i], 50 + g, take zp, true)
     }
     rig_settle(mut rig, 60, true)

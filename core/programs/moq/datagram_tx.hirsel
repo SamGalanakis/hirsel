@@ -1,0 +1,37 @@
+// Keep eight inline bytes available for WebTransport's longest session id.
+const DATAGRAM_HEADER_ROOM: u64 = quic.FRAMED_PREFIX_MAX - 8
+
+fn keep_datagram_backing(payload: quic.PayloadSlice, header_len: u64, header_cap: u64) -> bool {
+    if header_len > DATAGRAM_HEADER_ROOM {
+        return false
+    }
+    let cap = codec.datagram_copy_capacity(header_cap, header_len + quic.payload_len(payload))
+    let copied = rounded_bytes(cap) + rounded_bytes(bytes[Bytes] + 40)
+    quic.payload_retained_bytes(payload) <= copied
+}
+
+fn frame_object_datagram(dg: codec.Datagram, payload: quic.PayloadSlice, mut copies: u64) -> Result[quic.FramedSlice, codec.WireError] {
+    let len = quic.payload_len(payload)
+    if let Some(prefix) = codec.datagram_prefix(dg, len)? {
+        if keep_datagram_backing(payload, prefix.len, prefix.copy_capacity) {
+            let mut framed = quic.framed_from(quic.payload_share(payload))
+            let _ = quic.framed_prepend_inline(mut framed, prefix.data, prefix.len)
+            return Ok(take framed)
+        }
+    }
+    let mut header: Bytes = list.new()
+    codec.write_datagram_header(dg, len, mut header)?
+    if keep_datagram_backing(payload, list.len(header), list.capacity(header)) {
+        let mut framed = quic.framed_from(quic.payload_share(payload))
+        let _ = quic.framed_prepend(mut framed, header)
+        return Ok(take framed)
+    }
+    if let Error(e) = list.try_reserve(mut header, len) {
+        return Error(NoCapacity(e))
+    }
+    list.append(mut header, quic.payload_bytes(payload))
+    if len > 0 {
+        copies += 1
+    }
+    Ok(quic.framed_from(quic.payload_whole(shared.new(take header))))
+}

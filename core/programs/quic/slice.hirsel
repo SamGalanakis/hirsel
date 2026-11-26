@@ -132,3 +132,17 @@ fn framed_append(f: FramedSlice, mut out: Bytes) -> u64 {
     list.append(mut out, list.slice(f.payload.backing, f.payload.at, f.payload.at + f.payload.len))
     f.payload.len
 }
+
+/// Prepend the first n bytes of an inline header. False leaves f unchanged.
+pub fn framed_prepend_inline(mut f: FramedSlice, header: Inline[u8, 64], n: u64) -> bool {
+    let start: u64 = int.widen(f.start)
+    if n > start {
+        return false
+    }
+    let at = start - n
+    for i in 0u64 .. n {
+        f.prefix[at + i] = header[i]
+    }
+    f.start = int.narrow(at)
+    true
+}

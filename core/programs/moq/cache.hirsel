@@ -45,17 +45,30 @@ type Cache {
     evicted_bytes: u64
 }
 
-/// Fixed logical record overhead per cached object (MEM-24), ensuring zero-byte payloads
-/// are still charged fairly.
-const CACHED_OBJ_OVERHEAD: u64 = 128
-
 fn new_cache(limits: RelayLimits) -> Cache {
     Cache(limits: limits, tracks: list.new(), total_bytes: 0, evicted_groups: 0, evicted_bytes: 0)
 }
 
 /// MEM-24 logical size of one cached object: fixed record overhead + properties + payload.
 pub fn object_logical_size(o: Object) -> u64 {
-    CACHED_OBJ_OVERHEAD + list.len(o.properties) + list.len(o.payload)
+    4 * bytes[CachedObj] + retained_properties(o.properties) + track_storage(o.track) + quic.payload_retained_bytes(o.payload)
+}
+
+fn track_storage(t: codec.TrackName) -> u64 {
+    let codec.Namespace(parts) = view t.ns
+    let mut n = rounded_bytes(list.capacity(parts) * bytes[Bytes]) + rounded_bytes(list.capacity(t.name))
+    for p in parts {
+        n += rounded_bytes(list.capacity(p))
+    }
+    n
+}
+
+fn retained_properties(p: Bytes) -> u64 {
+    rounded_bytes(list.capacity(p))
+}
+
+fn rounded_bytes(n: u64) -> u64 {
+    (n + 7) / 8 * 8
 }
 
 fn cache_track_index(c: Cache, scope: Scope, tr: codec.TrackName) -> Option[u64] {
@@ -120,7 +133,7 @@ fn cache_check_object(c: Cache, ti: u64, o: Object) -> CacheCheck {
     if let Some(gi) = cache_group_index(c.tracks[ti], o.group) {
         for co in c.tracks[ti].groups[gi].objects {
             if co.obj.id == o.id {
-                let same = co.obj.mode == o.mode && co.obj.subgroup == o.subgroup && co.obj.publisher_priority == o.publisher_priority && co.obj.status == o.status && co.obj.properties == o.properties && shared_bytes_eq(co.obj.payload, o.payload)
+                let same = co.obj.mode == o.mode && co.obj.subgroup == o.subgroup && co.obj.publisher_priority == o.publisher_priority && co.obj.status == o.status && co.obj.properties == o.properties && payload_eq(co.obj.payload, o.payload)
                 if same {
                     return Duplicate
                 }
@@ -155,15 +168,21 @@ fn evict_oldest_group(mut c: Cache, ti: u64, mut out: List[RelayEvent]) -> bool 
 /// Pick the cached track furthest over its fair share of `cache_bytes` (MOQ-6 / M9).
 /// Since fair share `cache_bytes / n_tracks` is identical across all cached tracks, the track
 /// furthest above fair share is the non-empty track with the largest `bytes`.
-fn track_furthest_over_share(c: Cache) -> Option[u64] {
+fn track_furthest_over_share(c: Cache, incoming_track: u64, charge: u64) -> Option[u64] {
     let mut best: Option[u64] = None
     let mut best_bytes = 0u64
     for i in 0u64 .. list.len(c.tracks) {
-        if list.len(c.tracks[i].groups) > 0 && c.tracks[i].used >= best_bytes {
-            if best == None || c.tracks[i].used > best_bytes {
-                best = Some(i)
-                best_bytes = c.tracks[i].used
-            }
+        if list.len(c.tracks[i].groups) == 0 {
+            continue
+        }
+        let size = if i == incoming_track {
+            int.saturating_add(c.tracks[i].used, charge)
+        } else {
+            c.tracks[i].used
+        }
+        if best == None || size > best_bytes {
+            best = Some(i)
+            best_bytes = size
         }
     }
     best
@@ -207,14 +226,14 @@ fn cache_insert(mut c: Cache, ti: u64, take o: Object, mut out: List[RelayEvent]
         }
     }
     // Enforce per-track byte bound.
-    while c.tracks[ti].used + charge > c.limits.per_track_cache_bytes {
+    while charge > c.limits.per_track_cache_bytes - c.tracks[ti].used {
         if !evict_oldest_group(mut c, ti, mut out) {
             return
         }
     }
     // Enforce relay-wide cache_bytes via fair-share eviction.
-    while c.total_bytes + charge > c.limits.cache_bytes {
-        let Some(victim) = track_furthest_over_share(c) else {
+    while charge > c.limits.cache_bytes - c.total_bytes {
+        let Some(victim) = track_furthest_over_share(c, ti, charge) else {
             return
         }
         if !evict_oldest_group(mut c, victim, mut out) {

@@ -1,13 +1,4 @@
 // MOQ-1 types, moqt-23 §12 error codes, and Session state records.
-pub type Io {
-    q: quic.Endpoint,
-    w: Option[webtransport.Endpoint]
-}
-
-pub type Transport: key = Native(c: quic.ConnectionHandle) | Web(s: webtransport.SessionHandle)
-
-pub type TransportEvent = Quic(quic.Event) | Web(webtransport.Event)
-
 pub type Role: key = Publisher | Subscriber | Both
 
 pub type RequestId: key = RequestId(u64)
@@ -25,7 +16,7 @@ pub type Object {
     publisher_priority: u8,
     status: codec.ObjectStatus,
     properties: Bytes,
-    payload: Shared[Bytes]
+    payload: quic.PayloadSlice
 }
 
 pub type Limits: key {
@@ -35,7 +26,8 @@ pub type Limits: key {
     object_bytes: u64,
     filter_ranges: u16,
     max_early_streams: u16,
-    max_timeout_ms: u64
+    max_timeout_ms: u64,
+    max_buffered: u64
 }
 
 pub type MoqError = Closed | Role | State | Limit | Track | InvalidParam | Wire(codec.WireError) | Quic(quic.QuicError) | Web(webtransport.WtError)
@@ -232,7 +224,7 @@ type ReqState: key = Pending | Active | Closing
 
 /// One bidirectional request stream (MOQ-2).
 type ReqStream {
-    stream: quic.StreamId,
+    stream: LinkStream,
     id: u64,
     kind: ReqKind,
     local: bool,
@@ -258,27 +250,33 @@ type ReqStream {
 }
 
 /// Buffered bytes waiting for QUIC/WT stream credit.
-type OutChunk = Raw(Bytes) | SharedChunk(Shared[Bytes])
+type OutData = Raw(Bytes) | SharedChunk(quic.PayloadSlice)
+
+type OutChunk {
+    data: OutData,
+    charge: u64
+}
 
 type Outgoing {
-    stream: quic.StreamId,
+    stream: LinkStream,
     chunks: List[OutChunk],
     offset: u64,
     fin: bool,
     obj_deadline: Option[u64],
-    reliable: u64
+    reliable: u64,
+    charge: u64
 }
 
 /// An incoming unidirectional stream whose StreamHeader has not yet arrived whole.
 type UniHead {
-    stream: quic.StreamId,
+    stream: LinkStream,
     buf: Bytes,
     fin: bool
 }
 
 /// An incoming data stream parked before its subscription/fetch is known (MOQ-4).
 type EarlyStream {
-    stream: quic.StreamId,
+    stream: LinkStream,
     header: codec.StreamHeader,
     buf: Bytes,
     fin: bool
@@ -286,7 +284,7 @@ type EarlyStream {
 
 /// An active incoming subgroup data stream.
 type RxSubgroup {
-    stream: quic.StreamId,
+    stream: LinkStream,
     header: codec.SubgroupHeader,
     track: codec.TrackName,
     default_priority: u8,
@@ -299,7 +297,7 @@ type RxSubgroup {
 
 /// An active incoming fetch data stream.
 type RxFetch {
-    stream: quic.StreamId,
+    stream: LinkStream,
     request_id: u64,
     track: codec.TrackName,
     state: codec.FetchState,
@@ -313,7 +311,7 @@ type RxFetch {
 
 /// An active outgoing subgroup stream on a publishing subscription.
 type TxSubgroup {
-    stream: quic.StreamId,
+    stream: LinkStream,
     req_id: u64,
     track: codec.TrackName,
     group: u64,
@@ -337,7 +335,8 @@ type SeenObj {
     priority: u8,
     status: codec.ObjectStatus,
     properties: Bytes,
-    payload: Shared[Bytes]
+    payload: quic.PayloadSlice,
+    charge: u64
 }
 
 /// Subgroup metadata observed on a track for §12.1 #1, #2, #3.
@@ -372,7 +371,8 @@ type PubTrack {
 pub opaque type Session {
     side: schedule.Side,
     role: Role,
-    transport: Transport,
+    link: LinkId,
+    address_mode: AddressMode,
     limits: Limits,
     phase: SessionPhase,
     scope: Option[Scope],
@@ -386,8 +386,8 @@ pub opaque type Session {
     peer_max_control: u64,
     peer_max_filter_ranges: u64,
     peer_max_request_updates: u64,
-    local_control: Option[quic.StreamId],
-    peer_control: Option[quic.StreamId],
+    local_control: Option[LinkStream],
+    peer_control: Option[LinkStream],
     peer_control_buf: Bytes,
     next_req_id: u64,
     next_alias: u64,
@@ -399,7 +399,7 @@ pub opaque type Session {
     uni_heads: List[UniHead],
     early_streams: List[EarlyStream],
     dropped_early_datagrams: u64,
-    padding_streams: List[quic.StreamId],
+    padding_streams: List[LinkStream],
     rx_subgroups: List[RxSubgroup],
     finished_rx_subgroups: List[(codec.TrackName, u64, u64)],
     rx_fetches: List[RxFetch],
@@ -408,7 +408,10 @@ pub opaque type Session {
     pub_tracks: List[PubTrack],
     guards: List[TrackGuard],
     outgoing: List[Outgoing],
+    outgoing_bytes: u64,
+    seen_bytes: u64,
     timed_out_objects: u64,
+    datagram_payload_copies: u64,
     timed_out_subgroups: u64,
     now: u64
 }

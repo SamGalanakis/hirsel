@@ -1,5 +1,5 @@
 // MOQ-6: Tenant-scoped MoQ Relay with authorization-first gating, per-publisher upstream
-// subscription aggregation, zero-copy Shared[Bytes] fan-out, group-boundary switchover,
+// subscription aggregation, zero-copy payload fan-out, group-boundary switchover,
 // cross-publisher deduplication / malformed-track termination, and cache-backed FETCH.
 type RelaySession {
     id: u32,
@@ -55,31 +55,35 @@ pub opaque type Relay {
     cache: Cache,
     sessions: List[RelaySession],
     next_session: u32,
+    links: Map[LinkId, u64],
     pending: List[PendingAuth],
     tracks: List[RelayTrack],
     shared_forwards: u64,
-    payload_copies: u64,
     upstream_opened: u64
 }
 
 pub fn relay(limits: RelayLimits) -> Relay {
-    Relay(limits: limits, cache: new_cache(limits), sessions: list.new(), next_session: 1, pending: list.new(), tracks: list.new(), shared_forwards: 0, payload_copies: 0, upstream_opened: 0)
+    Relay(limits: limits, cache: new_cache(limits), sessions: list.new(), next_session: 1, links: map.new(), pending: list.new(), tracks: list.new(), shared_forwards: 0, upstream_opened: 0)
 }
 
 /// Add a session to the relay under its authorized `scope` (MOQ-1).
 /// A session whose local role is `Subscriber` (i.e. the relay subscribes to a remote publisher)
 /// is automatically registered as an upstream publisher for its scope.
 pub fn relay_add(mut r: Relay, take s: Session, take scope: Scope) -> u32 {
+    if let Some(i) = map.get(r.links, s.link) {
+        return r.sessions[i].id
+    }
     let id = r.next_session
     r.next_session += 1
     let is_pub = s.role == Subscriber
+    map.insert(mut r.links, s.link, list.len(r.sessions))
     list.push(mut r.sessions, RelaySession(id: id, scope: take scope, sess: take s, is_publisher: is_pub, alive: true))
     id
 }
 
 /// Explicitly mark a session (e.g. `Role = Both` or newly connected `Publisher`) as an upstream
 /// publisher and immediately subscribe it to any active `(scope, track)` in its scope.
-pub fn relay_mark_publisher(mut r: Relay, mut io: Io, now: u64, sid: u32) {
+pub fn relay_mark_publisher[D](mut r: Relay, mut io: LinkIo[D], now: u64, sid: u32) {
     let Some(si) = rsess_index(r, sid) else {
         return
     }
@@ -135,7 +139,11 @@ pub fn relay_shared_forwards(r: Relay) -> u64 {
 }
 
 pub fn relay_payload_copies(r: Relay) -> u64 {
-    r.payload_copies
+    let mut copies = 0u64
+    for rs in r.sessions {
+        copies += rs.sess.datagram_payload_copies
+    }
+    copies
 }
 
 pub fn relay_timed_out_objects(r: Relay) -> u64 {
@@ -192,8 +200,8 @@ fn ensure_rtrack(mut r: Relay, take scope: Scope, take tr: codec.TrackName) -> u
     list.len(r.tracks) - 1
 }
 
-/// Deliver `events` to every session owned by `r` and run MOQ-6 relay logic.
-pub fn relay_receive(mut r: Relay, mut io: Io, now: u64, events: List[TransportEvent], mut out: List[RelayEvent]) {
+/// Deliver each addressed event to its session and run MOQ-6 relay logic.
+pub fn relay_receive[D](mut r: Relay, mut io: LinkIo[D], now: u64, events: List[AddressedEvent], mut out: List[RelayEvent]) {
     // Ensure any newly added publisher session gets upstream subscriptions for active tracks.
     for si in 0u64 .. list.len(r.sessions) {
         if r.sessions[si].alive && r.sessions[si].is_publisher && is_established(r.sessions[si].sess) {
@@ -206,17 +214,17 @@ pub fn relay_receive(mut r: Relay, mut io: Io, now: u64, events: List[TransportE
             }
         }
     }
-    // Collect per-session events, then process them so cross-session fan-out has full access to r.
-    let mut i = 0u64
-    while i < list.len(r.sessions) {
+    for addressed in events {
+        let Some(i) = option.copied(map.get(r.links, addressed.link)) else {
+            continue
+        }
         if !r.sessions[i].alive {
-            i += 1
             continue
         }
         let sid = r.sessions[i].id
         let sc: Scope = clone(r.sessions[i].scope)
         let mut sevs: List[Event] = list.new()
-        receive(mut r.sessions[i].sess, mut io, now, events, mut sevs)
+        receive_link(mut r.sessions[i].sess, mut io, now, addressed.event, mut sevs)
         let mut fins = replace(mut r.sessions[i].sess.finished_rx_subgroups, list.new())
         for take ev in sevs {
             handle_relay_session_event(mut r, mut io, now, sid, clone(sc), take ev, mut out)
@@ -225,11 +233,10 @@ pub fn relay_receive(mut r: Relay, mut io: Io, now: u64, events: List[TransportE
             let (take tr, grp, sg) = list.remove(mut fins, 0)
             on_relay_subgroup_fin(mut r, mut io, now, sid, clone(sc), take tr, grp, sg)
         }
-        i += 1
     }
 }
 
-pub fn relay_poll(mut r: Relay, mut io: Io, now: u64) -> Option[u64] {
+pub fn relay_poll[D](mut r: Relay, mut io: LinkIo[D], now: u64) -> Option[u64] {
     let mut next: Option[u64] = None
     for i in 0u64 .. list.len(r.sessions) {
         if !r.sessions[i].alive {
@@ -245,7 +252,7 @@ pub fn relay_poll(mut r: Relay, mut io: Io, now: u64) -> Option[u64] {
     next
 }
 
-fn handle_relay_session_event(mut r: Relay, mut io: Io, now: u64, sid: u32, take scope: Scope, take ev: Event, mut out: List[RelayEvent]) {
+fn handle_relay_session_event[D](mut r: Relay, mut io: LinkIo[D], now: u64, sid: u32, take scope: Scope, take ev: Event, mut out: List[RelayEvent]) {
     match take ev {
         Subscribe(id: id, track: tr, filter: filter, priority: prio, token: tok) => {
             // MOQ-6: authorization first — no cache lookup or upstream request before relay_authorize!
@@ -276,7 +283,7 @@ fn handle_relay_session_event(mut r: Relay, mut io: Io, now: u64, sid: u32, take
     }
 }
 
-pub fn relay_authorize(mut r: Relay, mut io: Io, now: u64, sid_in: u32, id: RequestId, ok: Result[(), u64]) {
+pub fn relay_authorize[D](mut r: Relay, mut io: LinkIo[D], now: u64, sid_in: u32, id: RequestId, ok: Result[(), u64]) {
     let mut pidx: Option[u64] = None
     for i in 0u64 .. list.len(r.pending) {
         if r.pending[i].session == sid_in && r.pending[i].id == id {
@@ -343,7 +350,7 @@ fn has_upstream(rt: RelayTrack, pub_sess: u32) -> bool {
     false
 }
 
-fn ensure_all_upstreams(mut r: Relay, mut io: Io, now: u64, ti: u64) {
+fn ensure_all_upstreams[D](mut r: Relay, mut io: LinkIo[D], now: u64, ti: u64) {
     let sc: Scope = clone(r.tracks[ti].scope)
     let mut pub_ids: List[u32] = list.new()
     for rs in r.sessions {
@@ -356,7 +363,7 @@ fn ensure_all_upstreams(mut r: Relay, mut io: Io, now: u64, ti: u64) {
     }
 }
 
-fn ensure_upstream_for_pub(mut r: Relay, mut io: Io, now: u64, ti: u64, pub_sess: u32) {
+fn ensure_upstream_for_pub[D](mut r: Relay, mut io: LinkIo[D], now: u64, ti: u64, pub_sess: u32) {
     if has_upstream(r.tracks[ti], pub_sess) {
         return
     }
@@ -376,7 +383,7 @@ fn ensure_upstream_for_pub(mut r: Relay, mut io: Io, now: u64, ti: u64, pub_sess
     }
 }
 
-fn on_relay_subgroup_fin(mut r: Relay, mut io: Io, now: u64, pub_sess: u32, take scope: Scope, take tr: codec.TrackName, group: u64, sg: u64) {
+fn on_relay_subgroup_fin[D](mut r: Relay, mut io: LinkIo[D], now: u64, pub_sess: u32, take scope: Scope, take tr: codec.TrackName, group: u64, sg: u64) {
     let Some(ti) = rtrack_index(r, scope, tr) else {
         return
     }
@@ -395,7 +402,7 @@ fn on_relay_subgroup_fin(mut r: Relay, mut io: Io, now: u64, pub_sess: u32, take
     }
 }
 
-fn on_relay_object(mut r: Relay, mut io: Io, now: u64, pub_sess: u32, take scope: Scope, take obj: Object, mut out: List[RelayEvent]) {
+fn on_relay_object[D](mut r: Relay, mut io: LinkIo[D], now: u64, pub_sess: u32, take scope: Scope, take obj: Object, mut out: List[RelayEvent]) {
     let tr: codec.TrackName = clone(obj.track)
     let ti = ensure_rtrack(mut r, clone(scope), clone(tr))
     if r.tracks[ti].malformed {
@@ -465,7 +472,7 @@ fn on_relay_object(mut r: Relay, mut io: Io, now: u64, pub_sess: u32, take scope
     }
 }
 
-fn terminate_malformed_track(mut r: Relay, mut io: Io, take scope: Scope, take tr: codec.TrackName) {
+fn terminate_malformed_track[D](mut r: Relay, mut io: LinkIo[D], take scope: Scope, take tr: codec.TrackName) {
     let cti = ensure_cache_track(mut r.cache, clone(scope), clone(tr))
     r.cache.tracks[cti].malformed = true
     let Some(ti) = rtrack_index(r, scope, tr) else {
@@ -499,7 +506,7 @@ fn terminate_malformed_track(mut r: Relay, mut io: Io, take scope: Scope, take t
     }
 }
 
-fn on_relay_done(mut r: Relay, mut io: Io, sid: u32, id: RequestId) {
+fn on_relay_done[D](mut r: Relay, mut io: LinkIo[D], sid: u32, id: RequestId) {
     // Check if a downstream subscription ended (M11).
     for ti in 0u64 .. list.len(r.tracks) {
         let mut removed = false
@@ -528,7 +535,7 @@ fn on_relay_done(mut r: Relay, mut io: Io, sid: u32, id: RequestId) {
     }
 }
 
-fn cancel_track_upstreams(mut r: Relay, mut io: Io, ti: u64) {
+fn cancel_track_upstreams[D](mut r: Relay, mut io: LinkIo[D], ti: u64) {
     let mut ups = replace(mut r.tracks[ti].upstream, list.new())
     while list.len(ups) > 0 {
         let UpstreamSub(pub_session: psid, req_id: rid) = list.remove(mut ups, 0)
@@ -540,8 +547,9 @@ fn cancel_track_upstreams(mut r: Relay, mut io: Io, ti: u64) {
     }
 }
 
-fn on_relay_session_closed(mut r: Relay, mut io: Io, sid: u32, code: u64, mut out: List[RelayEvent]) {
+fn on_relay_session_closed[D](mut r: Relay, mut io: LinkIo[D], sid: u32, code: u64, mut out: List[RelayEvent]) {
     if let Some(si) = rsess_index(r, sid) {
+        let _ = map.remove(mut r.links, r.sessions[si].sess.link)
         r.sessions[si].alive = false
     }
     // Remove any pending authorizations for this session.

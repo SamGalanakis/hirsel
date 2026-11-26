@@ -204,6 +204,32 @@ fn datagram(input: Bytes, mut c: Cursor) -> Result[DatagramFrame, WireError] {
 /// Appends one datagram, flags chosen to omit every field the header can. A datagram with a
 /// status has no payload, and End of Group cannot ride with a status.
 pub fn write_datagram(d: Datagram, payload: Bytes, mut out: Bytes) -> Result[(), WireError] {
+    let mark = list.len(out)
+    let r = write_datagram_header(d, list.len(payload), mut out)
+    if let Error(e) = r {
+        return Error(e)
+    }
+    if let Error(e) = put_bytes(payload, mut out) {
+        list.truncate(mut out, mark)
+        return Error(e)
+    }
+    Ok(())
+}
+
+/// Appends the validated wire header. `payload_len` is used to check status objects.
+pub fn write_datagram_header(d: Datagram, payload_len: u64, mut out: Bytes) -> Result[(), WireError] {
+    let flags = datagram_flags(d, payload_len)?
+    let mark = list.len(out)
+    match put_datagram_header(d, flags, mut out) {
+        Ok(()) => Ok(()),
+        Error(e) => {
+            list.truncate(mut out, mark)
+            Error(e)
+        },
+    }
+}
+
+fn datagram_flags(d: Datagram, payload_len: u64) -> Result[u64, WireError] {
     let mut flags = 0u64
     if list.len(d.properties) != 0 {
         flags = flags | 0x01
@@ -224,22 +250,15 @@ pub fn write_datagram(d: Datagram, payload: Bytes, mut out: Bytes) -> Result[(),
         if !is_normal(s) && list.len(d.properties) != 0 {
             return Error(InvalidObjectStatus)
         }
-        if list.len(payload) != 0 {
+        if payload_len != 0 {
             return Error(MalformedObject)
         }
         flags = flags | 0x20
     }
-    let mark = list.len(out)
-    match put_datagram(d, flags, payload, mut out) {
-        Ok(()) => Ok(()),
-        Error(e) => {
-            list.truncate(mut out, mark)
-            Error(e)
-        },
-    }
+    Ok(flags)
 }
 
-fn put_datagram(d: Datagram, flags: u64, payload: Bytes, mut out: Bytes) -> Result[(), WireError] {
+fn put_datagram_header(d: Datagram, flags: u64, mut out: Bytes) -> Result[(), WireError] {
     write_vi64(flags, mut out)?
     write_vi64(d.alias, mut out)?
     write_vi64(d.group, mut out)?
@@ -253,7 +272,7 @@ fn put_datagram(d: Datagram, flags: u64, payload: Bytes, mut out: Bytes) -> Resu
     if let Some(s) = d.status {
         write_vi64(status_code(s), mut out)?
     }
-    put_bytes(payload, mut out)
+    Ok(())
 }
 
 /// Reads the stream type and header from the start of a unidirectional stream. A header not

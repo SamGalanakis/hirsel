@@ -62,7 +62,7 @@ pub opaque type Bridge {
     out: peer.Outbox,
     events: List[rtp_jitter.jitter.Event],
     empty: Shared[Bytes],
-    io: moq.Io,
+    io: moq.LinkIo[moq.MixedDriver],
     sessions: List[moq.Session],
     session_events: List[moq.Event],
     staged_wire: Bytes,
@@ -134,7 +134,7 @@ pub fn bridge(random: Random, config: BridgeConfig, take q: quic.Endpoint) -> Re
         out: take out,
         events: list.new(),
         empty: shared.new(take empty),
-        io: moq.Io(q: take q, w: None),
+        io: moq.mixed_driver(take q, None, 0x100000000),
         sessions: list.new(),
         session_events: list.new(),
         staged_wire: list.with_capacity(64 * 1200),
@@ -189,13 +189,11 @@ pub fn add_session(mut b: Bridge, take s: moq.Session) -> u64 {
 /// to its MoQ sessions. Returns raw QUIC events (e.g. `Connected` for accepting new sessions).
 pub fn receive_quic(mut b: Bridge, now: u64, from: Addr, ecn: u8, mut data: Bytes, at: u64, len: u64) -> List[quic.Event] {
     let mut qev: List[quic.Event] = list.new()
-    quic.receive_datagram(mut b.io.q, now, from, ecn, mut data, at, len, mut qev)
+    quic.receive_datagram(mut b.io.driver.q, now, from, ecn, mut data, at, len, mut qev)
     if list.len(qev) > 0 {
+        let mut tevs: List[moq.AddressedEvent] = list.new()
+        moq.native_events(mut b.io.driver, qev, mut tevs)
         for si in 0u64 .. list.len(b.sessions) {
-            let mut tevs: List[moq.TransportEvent] = list.new()
-            for ev in qev {
-                list.push(mut tevs, Quic(clone(ev)))
-            }
             moq.receive(mut b.sessions[si], mut b.io, now, tevs, mut b.session_events)
         }
     }
@@ -204,11 +202,10 @@ pub fn receive_quic(mut b: Bridge, now: u64, from: Addr, ecn: u8, mut data: Byte
 
 /// Accept a newly connected MoQ subscriber session on the bridge's QUIC endpoint.
 pub fn accept_moq_peer(mut b: Bridge, now: u64, conn: quic.ConnectionHandle, limits: moq.Limits, init_events: List[quic.Event]) -> u64 {
-    let mut s = moq.session(Server, Publisher, Native(c: conn), limits)
-    let mut tevs: List[moq.TransportEvent] = list.new()
-    for ev in init_events {
-        list.push(mut tevs, Quic(clone(ev)))
-    }
+    let link = option.unwrap(moq.native_link(mut b.io.driver, conn))
+    let mut s = option.unwrap(moq.link_session(b.io, link, Server, Publisher, limits))
+    let mut tevs: List[moq.AddressedEvent] = list.new()
+    moq.native_events(mut b.io.driver, init_events, mut tevs)
     moq.receive(mut s, mut b.io, now, tevs, mut b.session_events)
     add_session(mut b, take s)
 }
@@ -246,7 +243,7 @@ pub fn stage_tx(mut b: Bridge, now: u64) -> Option[u64] {
     }
     list.clear(mut b.staged_wire)
     list.clear(mut b.staged_tx)
-    quic.poll(mut b.io.q, now, mut b.staged_wire, mut b.staged_tx)
+    quic.poll(mut b.io.driver.q, now, mut b.staged_wire, mut b.staged_tx)
 }
 
 /// Number of `Transmit` datagrams sitting in the bridge's polled-but-uncommitted batch.
@@ -283,7 +280,7 @@ pub fn commit_tx(mut b: Bridge, now: u64, limit: u64, mut wire_out: Bytes, mut p
             emitted += 1
         }
     }
-    quic.committed(mut b.io.q, now, emitted)
+    quic.committed(mut b.io.driver.q, now, emitted)
     list.clear(mut b.staged_wire)
     list.clear(mut b.staged_tx)
     emitted
@@ -294,7 +291,7 @@ fn discard_staged(mut b: Bridge, now: u64) {
     let n = staged_count(b)
     if list.len(b.staged_tx) > 0 {
         b.counts.discarded_staged += n
-        quic.committed(mut b.io.q, now, 0)
+        quic.committed(mut b.io.driver.q, now, 0)
         list.clear(mut b.staged_wire)
         list.clear(mut b.staged_tx)
     }
@@ -600,7 +597,7 @@ fn publish_frame(mut b: Bridge, i: u64, now: u64, key: bool, take data: Bytes) {
     let send_stream = b.config.mode == StreamsOnly || b.config.mode == StreamsAndDatagrams
     let send_dg = b.config.mode == DatagramsOnly || (b.config.mode == StreamsAndDatagrams && list.len(shared_payload) <= 900)
     if send_stream {
-        let obj = moq.Object(track: clone(tr), group: g, subgroup: 0, id: oid, mode: Subgroup, publisher_priority: prio, status: Normal, properties: b"", payload: shared.share(shared_payload))
+        let obj = moq.Object(track: clone(tr), group: g, subgroup: 0, id: oid, mode: Subgroup, publisher_priority: prio, status: Normal, properties: b"", payload: quic.payload_whole(shared.share(shared_payload)))
         for si in 0u64 .. list.len(b.sessions) {
             let _ = moq.publish_at(mut b.sessions[si], mut b.io, now, now, clone(obj), false)
         }
@@ -613,7 +610,7 @@ fn publish_frame(mut b: Bridge, i: u64, now: u64, key: bool, take data: Bytes) {
         } else {
             oid
         }
-        let obj = moq.Object(track: clone(tr), group: g, subgroup: 0, id: dg_oid, mode: Datagram, publisher_priority: prio, status: Normal, properties: b"", payload: shared.share(shared_payload))
+        let obj = moq.Object(track: clone(tr), group: g, subgroup: 0, id: dg_oid, mode: Datagram, publisher_priority: prio, status: Normal, properties: b"", payload: quic.payload_whole(shared.share(shared_payload)))
         for si in 0u64 .. list.len(b.sessions) {
             let _ = moq.publish_at(mut b.sessions[si], mut b.io, now, now, clone(obj), false)
         }

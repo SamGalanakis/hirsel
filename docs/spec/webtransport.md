@@ -140,6 +140,9 @@ pub fn certificate_rotation_at(w: Endpoint) -> Option[i64]
 pub fn certificate_hashes(w: Endpoint) -> List[quic.handshake.Pin]
 ```
 
+An accepted CONNECT emits `Ready` with the selected protocol on each endpoint. On the server,
+`answer` queues it before the stream and datagram events from the accepted CONNECT backlog.
+
 One `Endpoint` serves both roles over one `quic.Endpoint`, as `quic` does: a server's
 sessions arrive as `Requested`, a client's start with `connect`. A session is named by
 `SessionHandle(conn, id)`, its QUIC connection and its CONNECT stream's id, so two clients

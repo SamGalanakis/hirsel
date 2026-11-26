@@ -1,17 +1,18 @@
 //! FFI-12 to FFI-14 on Linux: the contained engine, its null imports and
 //! the calling task's instances.
-use crate::Context;
 use crate::abi_layout as abi;
 use crate::foreign::contained::{Call, Module};
 use crate::foreign::handles::{Argument, Operands};
-use crate::tasks;
+use crate::limit::Payer;
+use crate::{Capacity, Context, causes, steps, tasks};
 use hirsel_core_contained::load::ImageEngine;
 use hirsel_core_contained::wasmtime::{
-    Caller, Error, Extern, Instance, InstancePre, Linker, Memory, Store, Trap, Val,
+    Caller, Error, Extern, Instance, InstancePre, Linker, Memory, ResourceLimiter, Store, Trap, Val,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::task::Poll;
 
 /// The calling task's live instances, one per contained module.
 #[derive(Default)]
@@ -25,7 +26,7 @@ impl Instances {
 }
 
 pub(crate) struct Live {
-    store: Store<()>,
+    store: Store<State>,
     instance: Instance,
     memory: Memory,
     /// This instance's generation, unique in the process.
@@ -44,6 +45,77 @@ impl std::fmt::Display for Exit {
 
 impl std::error::Error for Exit {}
 
+/// A store's data: the bytes its instance holds against the program's
+/// limits (FFI-13 Bytes). Dropping the store refunds them.
+#[derive(Default)]
+pub(crate) struct State {
+    /// The payer current at the running entry.
+    payer: Option<Payer>,
+    charges: Vec<(Payer, u64)>,
+    /// The last refused admission of the running entry.
+    refused: Option<Capacity>,
+}
+
+// SAFETY: a store moves only with its task, which owns every payer it names.
+unsafe impl Send for State {}
+
+impl State {
+    /// Admit `bytes`. A refusal answers the guest as WebAssembly's own
+    /// failure does: `memory.grow` and `table.grow` return −1.
+    fn admit(&mut self, bytes: u64) -> bool {
+        if bytes == 0 {
+            return true;
+        }
+        let payer = self.payer.expect("an entry sets its payer");
+        match payer.admit(Some(bytes)) {
+            Ok(()) => {
+                match self.charges.last_mut() {
+                    Some((last, held)) if *last == payer => *held += bytes,
+                    _ => self.charges.push((payer, bytes)),
+                }
+                true
+            }
+            Err(capacity) => {
+                self.refused = Some(capacity);
+                false
+            }
+        }
+    }
+}
+
+/// Growth past the declared maximum fails as WebAssembly says, before any
+/// admission, so it is no refusal of the limit.
+impl ResourceLimiter for State {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, Error> {
+        Ok(maximum.is_none_or(|maximum| desired <= maximum)
+            && self.admit((desired - current) as u64))
+    }
+
+    /// Eight bytes per table element.
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> Result<bool, Error> {
+        Ok(maximum.is_none_or(|maximum| desired <= maximum)
+            && self.admit(((desired - current) as u64).saturating_mul(8)))
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        for (payer, bytes) in self.charges.drain(..) {
+            payer.refund(bytes);
+        }
+    }
+}
+
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn engine() -> &'static ImageEngine {
@@ -56,8 +128,8 @@ fn engine() -> &'static ImageEngine {
 const WASI: &str = "wasi_snapshot_preview1";
 
 /// FFI-12's null imports, each with its preview-1 core type.
-fn linker() -> &'static Linker<()> {
-    static LINKER: OnceLock<Linker<()>> = OnceLock::new();
+fn linker() -> &'static Linker<State> {
+    static LINKER: OnceLock<Linker<State>> = OnceLock::new();
     LINKER.get_or_init(|| {
         let mut linker = Linker::new(engine().engine());
         define(&mut linker).unwrap_or_else(|_| std::process::abort());
@@ -65,7 +137,7 @@ fn linker() -> &'static Linker<()> {
     })
 }
 
-fn define(linker: &mut Linker<()>) -> Result<(), Error> {
+fn define(linker: &mut Linker<State>) -> Result<(), Error> {
     const EBADF: i32 = 8;
     const ENOSYS: i32 = 52;
     for name in ["args_sizes_get", "environ_sizes_get"] {
@@ -96,7 +168,7 @@ fn define(linker: &mut Linker<()>) -> Result<(), Error> {
 }
 
 /// `*_sizes_get` writes two zero words, each bounds-checked as a guest store.
-fn sizes(mut caller: Caller<'_, ()>, count: i32, size: i32) -> Result<i32, Error> {
+fn sizes(mut caller: Caller<'_, State>, count: i32, size: i32) -> Result<i32, Error> {
     let memory = caller
         .get_export("memory")
         .and_then(Extern::into_memory)
@@ -109,8 +181,8 @@ fn sizes(mut caller: Caller<'_, ()>, count: i32, size: i32) -> Result<i32, Error
     Ok(0)
 }
 
-fn prepared(module: &'static Module) -> InstancePre<()> {
-    static PREPARED: OnceLock<Mutex<HashMap<usize, InstancePre<()>>>> = OnceLock::new();
+fn prepared(module: &'static Module) -> InstancePre<State> {
+    static PREPARED: OnceLock<Mutex<HashMap<usize, InstancePre<State>>>> = OnceLock::new();
     let mut prepared = PREPARED.get_or_init(Default::default).lock().unwrap();
     prepared
         .entry(std::ptr::from_ref(module) as usize)
@@ -127,24 +199,162 @@ fn prepared(module: &'static Module) -> InstancePre<()> {
         .clone()
 }
 
-/// Drive a Wasmtime future that never waits on anything outside it.
-fn complete<F: Future>(future: F) -> F::Output {
-    let mut future = std::pin::pin!(future);
+/// FFI-13's granule: 16,384 fuel, 1,024 steps.
+const GRANULE: u64 = 16_384;
+const FUEL_PER_STEP: u64 = 16;
+
+/// How an entry ended without a value.
+enum Stop {
+    /// A trap, charged its steps (FFI-14 Fuel at a trap).
+    Trap(Error),
+    /// The bound ran out; its steps are not yet taken.
+    OutOfTime,
+    /// The initial memory or tables were refused (FFI-13 Bytes).
+    Capacity(Capacity),
+}
+
+/// Start an entry with `F + 1` fuel, or `2^64 − 1` with no bound current.
+///
+/// # Safety
+/// The current task owns `context`.
+unsafe fn arm(context: *mut Context, store: &mut Store<State>) -> u64 {
+    // SAFETY: as above.
+    let (left, payer) = unsafe { (steps::remaining(&*context), (*context).payer()) };
+    let fuel = match left {
+        Some(left) => left.saturating_mul(FUEL_PER_STEP).min(u64::MAX - 2) + 1,
+        None => u64::MAX,
+    };
+    store
+        .set_fuel(fuel)
+        .unwrap_or_else(|_| std::process::abort());
+    let state = store.data_mut();
+    state.payer = Some(payer);
+    state.refused = None;
+    fuel
+}
+
+/// Poll an entry on the host stack. Each granule end counts as 1,024 steps
+/// and may end the task's slice (FFI-13 Slice ends).
+///
+/// # Safety
+/// As [`arm`]; the entry's store is pinned by the caller.
+unsafe fn drive<T>(
+    context: *mut Context,
+    site: u64,
+    entry: impl Future<Output = Result<T, Error>>,
+) -> (Result<T, Error>, u64) {
+    let mut entry = std::pin::pin!(entry);
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut granules = 0;
     loop {
-        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
-            return value;
+        // SAFETY: as above.
+        match unsafe { host(site, || entry.as_mut().poll(&mut cx)) } {
+            Poll::Ready(outcome) => return (outcome, granules),
+            Poll::Pending => {
+                granules += 1;
+                // Each granule consumed at least G of the fuel the bound pays
+                // for, so the steps counted never exhaust it.
+                if !unsafe { steps::take_many(context, GRANULE / FUEL_PER_STEP, site) } {
+                    std::process::abort();
+                }
+            }
         }
     }
 }
 
-/// FFI-13: instantiation runs `_initialize`. A trap makes no instance.
-fn instantiate(module: &'static Module) -> Result<Box<Live>, Error> {
-    let mut store = Store::new(engine().engine(), ());
-    store.set_fuel(u64::MAX)?;
-    let instance = complete(prepared(module).instantiate_async(&mut store))?;
+/// Charge an ended entry its steps less those its granule ends counted
+/// (FFI-13 Bounds, FFI-14 Fuel at a trap).
+///
+/// # Safety
+/// As [`arm`].
+unsafe fn settle<T>(
+    context: *mut Context,
+    store: &Store<State>,
+    fuel: u64,
+    granules: u64,
+    outcome: Result<T, Error>,
+    site: u64,
+) -> Result<T, Stop> {
+    let bounded = fuel != u64::MAX;
+    let left = store.get_fuel().unwrap_or_else(|_| std::process::abort());
+    let used = fuel - left;
+    let charge = |fuel: u64| {
+        let steps = fuel.div_ceil(FUEL_PER_STEP) - granules * (GRANULE / FUEL_PER_STEP);
+        // SAFETY: as above; the charge stays within the bound's steps.
+        if !unsafe { steps::take_many(context, steps, site) } {
+            std::process::abort();
+        }
+    };
+    match outcome {
+        Ok(_) if bounded && left == 0 => Err(Stop::OutOfTime),
+        Ok(value) => {
+            charge(used);
+            Ok(value)
+        }
+        Err(error) => {
+            let trap = error.downcast_ref::<Trap>();
+            if bounded && (left == 0 || trap == Some(&Trap::OutOfFuel)) {
+                return Err(Stop::OutOfTime);
+            }
+            if let Some(capacity) = store.data().refused
+                && trap.is_none()
+                && error.downcast_ref::<Exit>().is_none()
+            {
+                return Err(Stop::Capacity(capacity));
+            }
+            // The store's fuel lags a trap by up to one granule.
+            charge(
+                used.saturating_add(GRANULE)
+                    .min(if bounded { fuel - 1 } else { u64::MAX }),
+            );
+            Err(Stop::Trap(error))
+        }
+    }
+}
+
+/// One metered entry into a store.
+macro_rules! metered {
+    ($context:expr, $store:expr, $site:expr, $entry:expr) => {{
+        let fuel = arm($context, &mut $store);
+        let (outcome, granules) = drive($context, $site, $entry);
+        settle($context, &$store, fuel, granules, outcome, $site)
+    }};
+}
+
+/// FFI-13: instantiation runs `_initialize`, each a metered entry. A refusal
+/// or trap makes no instance, and the store's charges are refunded.
+///
+/// # Safety
+/// As [`arm`].
+unsafe fn instantiate(
+    context: *mut Context,
+    module: &'static Module,
+    site: u64,
+) -> Result<Box<Live>, Stop> {
+    let mut store = Store::new(engine().engine(), State::default());
+    store.limiter(|state| state as &mut dyn ResourceLimiter);
+    store
+        .fuel_async_yield_interval(Some(GRANULE))
+        .unwrap_or_else(|_| std::process::abort());
+    // SAFETY: as above.
+    let instance = unsafe {
+        metered!(
+            context,
+            store,
+            site,
+            prepared(module).instantiate_async(&mut store)
+        )?
+    };
     if let Some(initialize) = instance.get_func(&mut store, "_initialize") {
-        complete(initialize.call_async(&mut store, &[], &mut []))?;
+        // SAFETY: as above.
+        unsafe {
+            metered!(
+                context,
+                store,
+                site,
+                initialize.call_async(&mut store, &[], &mut [])
+            )?
+        };
     }
     let memory = instance
         .get_memory(&mut store, "memory")
@@ -249,12 +459,14 @@ unsafe fn loan_total(types: &[u8], arguments: *const Argument) -> Option<u64> {
 /// # Safety
 /// The loans' Hirsel bytes are live and pinned.
 unsafe fn lend(
+    context: *mut Context,
     live: &mut Live,
     module: &Module,
     types: &[u8],
     arguments: *const Argument,
     total: u64,
-) -> Result<Result<u32, &'static [u8]>, Error> {
+    site: u64,
+) -> Result<Result<u32, &'static [u8]>, Stop> {
     if !types.iter().any(|&ty| is_loan(ty)) {
         return Ok(Ok(0));
     }
@@ -270,7 +482,16 @@ unsafe fn lend(
         .get_func(&mut live.store, name)
         .expect("an admitted module exports its loan area");
     let mut area = [Val::I32(0)];
-    complete(loan_area.call_async(&mut live.store, &[Val::I32(total as u32 as i32)], &mut area))?;
+    let total_word = [Val::I32(total as u32 as i32)];
+    // SAFETY: as above.
+    unsafe {
+        metered!(
+            context,
+            live.store,
+            site,
+            loan_area.call_async(&mut live.store, &total_word, &mut area)
+        )?
+    };
     let Val::I32(area) = area[0] else {
         unreachable!("loan_area is [i32] -> [i32]")
     };
@@ -315,12 +536,14 @@ fn canonical_f64(bits: u64) -> u64 {
 /// # Safety
 /// As [`lend`]; handle words hold their resolved pointers.
 unsafe fn enter(
+    context: *mut Context,
     live: &mut Live,
     call: &Call,
     types: &[u8],
     arguments: *const Argument,
     area: u32,
-) -> Result<u64, Error> {
+    site: u64,
+) -> Result<u64, Stop> {
     let mut params = Vec::with_capacity(types.len() + 2);
     let mut at = area;
     for (i, &ty) in types.iter().enumerate() {
@@ -354,7 +577,15 @@ unsafe fn enter(
         .expect("an admitted module exports each reached function");
     let mut results = [Val::I32(0)];
     let results = &mut results[..usize::from(call.result != abi::CONTAINED_RESULT_UNIT)];
-    complete(function.call_async(&mut live.store, &params, results))?;
+    // SAFETY: as above.
+    unsafe {
+        metered!(
+            context,
+            live.store,
+            site,
+            function.call_async(&mut live.store, &params, results)
+        )?
+    };
     let bits = match results.first() {
         None => 0,
         Some(Val::I32(value)) => u64::from(*value as u32),
@@ -385,19 +616,20 @@ unsafe fn enter(
     Ok(bits)
 }
 
-/// FFI-13: discard the instance, orphaning its handles, and fail the call.
+/// FFI-13: discard the instance, orphaning its handles, and end the call
+/// with its trap, `OutOfTime` or `Capacity`. Dropping the instance refunds
+/// its memory charge.
 ///
 /// # Safety
 /// The current task owns its prepaid cause cell.
-unsafe fn trapped(
+unsafe fn stopped(
     context: *mut Context,
     operands: Operands,
     live: Option<Box<Live>>,
-    error: &Error,
+    stop: Stop,
     site: u64,
     quiet: bool,
 ) -> u8 {
-    let text = trap_text(error);
     // SAFETY: the pinned run owns the table.
     let table = unsafe { &*operands.table };
     match live {
@@ -405,11 +637,45 @@ unsafe fn trapped(
         // SAFETY: the call was prepared and never issued.
         None => unsafe { operands.rollback() },
     }
-    if !quiet {
-        // SAFETY: as above.
-        unsafe { crate::foreign::fail(context, site, text) };
+    // SAFETY: as above.
+    unsafe {
+        match stop {
+            Stop::Trap(error) => {
+                let text = trap_text(&error);
+                if !quiet {
+                    crate::foreign::fail(context, site, text);
+                }
+            }
+            // The call takes exactly the steps its bound had left, and one
+            // more raises `OutOfTime` at the call site (MEM-30).
+            Stop::OutOfTime => {
+                let left = steps::remaining(&*context).expect("a bound is current");
+                let _ = steps::take_many(context, left + 1, site);
+            }
+            Stop::Capacity(capacity) if !quiet => {
+                causes::record_capacity(&mut *context, capacity, site)
+            }
+            Stop::Capacity(_) => {}
+        }
     }
     1
+}
+
+/// One step per 16 KiB, or part, of each loan copied in, and again of each
+/// exclusive loan copied back (FFI-13 Steps).
+///
+/// # Safety
+/// As [`loan_total`].
+unsafe fn copy_steps(types: &[u8], arguments: *const Argument) -> u64 {
+    let mut steps = 0;
+    for (i, &ty) in types.iter().enumerate() {
+        if is_loan(ty) {
+            // SAFETY: as above.
+            let chunks = unsafe { (*arguments.add(i))[1] }.div_ceil(16 << 10);
+            steps += chunks * if ty == abi::CONTAINED_ARG_MUT { 2 } else { 1 };
+        }
+    }
+    steps
 }
 
 /// The contained call. Zero on success, with the result written; one on
@@ -458,28 +724,29 @@ unsafe fn call(
             operands.rollback();
             return refuse(b"contained loans exceed linear memory");
         };
+        if !steps::take_many(context, copy_steps(types, arguments), site) {
+            operands.rollback();
+            return 1;
+        }
         let mut live = match (*context).contained.take(key) {
             Some(live) => live,
-            None => match host(site, || instantiate(module)) {
+            None => match instantiate(context, module, site) {
                 Ok(live) => live,
-                Err(error) => return trapped(context, operands, None, &error, site, quiet),
+                Err(stop) => return stopped(context, operands, None, stop, site, quiet),
             },
         };
         operands.instance = live.id;
-        live.store
-            .set_fuel(u64::MAX)
-            .unwrap_or_else(|_| std::process::abort());
-        let area = match host(site, || lend(&mut live, module, types, arguments, total)) {
+        let area = match lend(context, &mut live, module, types, arguments, total, site) {
             Ok(Ok(area)) => area,
             Ok(Err(text)) => {
                 operands.rollback();
                 (*context).contained.0.push((key, live));
                 return refuse(text);
             }
-            Err(error) => return trapped(context, operands, Some(live), &error, site, quiet),
+            Err(stop) => return stopped(context, operands, Some(live), stop, site, quiet),
         };
         operands.issue();
-        match host(site, || enter(&mut live, call, types, arguments, area)) {
+        match enter(context, &mut live, call, types, arguments, area, site) {
             Ok(bits) => {
                 (*context).contained.0.push((key, live));
                 let outcome = operands.deliver(bits);
@@ -493,7 +760,7 @@ unsafe fn call(
                 result.write(outcome.value);
                 0
             }
-            Err(error) => trapped(context, operands, Some(live), &error, site, quiet),
+            Err(stop) => stopped(context, operands, Some(live), stop, site, quiet),
         }
     }
 }

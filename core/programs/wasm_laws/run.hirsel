@@ -129,7 +129,7 @@ fn loans(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
     let mut empty: Bytes = list.new()
     number(out, "FW5 empty", native.fill(f, mut empty))
     let (tx, rx): (Sender[bool], Receiver[bool]) = channel.new(1)
-    let child = task.spawn(tasks, bytes 65536, (f, take tx), fill_then_trap)
+    let child = task.spawn(tasks, bytes 1048576, (f, take tx), fill_then_trap)
     match task.join(take child) {
         Error(Failed(causes)) => {
             for cause in causes {
@@ -280,6 +280,223 @@ fn signals(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
     let _ = task.join(take b)
 }
 
+// One bounded call's result: "ok N" or "out N" for OutOfTime(steps: N).
+fn stepped(out: Stdout, label: String, take r: Result[u64, OutOfTime]) waits {
+    let mut s = string.from(label)
+    match take r {
+        Ok(n) => {
+            string.push(mut s, " ok ")
+            string.push_u64(mut s, n)
+        },
+        Error(o) => {
+            string.push(mut s, " out ")
+            string.push_u64(mut s, o.steps)
+        },
+    }
+    say(out, s)
+}
+
+fn steps(f: Foreign[laws.Box], out: Stdout) waits {
+    let _ = native.count(f)
+    stepped(out, "FW7 spin 1e9", bound steps 1000 {
+        native.spin(f, 1000000000)
+    })
+    stepped(out, "FW7 spin 10", bound steps 1000000 {
+        native.spin(f, 10)
+    })
+    let _ = native.count(f)
+    stepped(out, "FW21 straight", bound steps 2 {
+        word(native.straight(f))
+    })
+    let _ = native.count(f)
+    stepped(out, "FW21 straight_trap", bound steps 2 {
+        word(native.straight_trap(f))
+    })
+    let _ = native.count(f)
+    stepped(out, "FW21 straight 300", bound steps 300 {
+        word(native.straight(f))
+    })
+    stepped(out, "FW23 fill 100", bound steps 100 {
+        int.widen(native.fill_mem(f, 65536))
+    })
+    let _ = native.count(f)
+    stepped(out, "FW23 fill 1e4", bound steps 10000 {
+        int.widen(native.fill_mem(f, 65536))
+    })
+    // FW24: a handle made before the stop, used after it.
+    let h = held(f)
+    stepped(out, "FW24 spin", bound steps 1000 {
+        native.spin(f, 1000000000)
+    })
+    number(out, "FW24 count", native.count(f))
+    say(out, primary(isolate(fn() -> i32 {
+        native.free(h.f, h.p)
+    })))
+}
+
+// The smallest bound in [1, 2^20] at which `fits(n)` holds, which holds at 2^20.
+fn least(f: Foreign[laws.Box], fits: fn(Foreign[laws.Box], u64) -> bool) -> u64 {
+    let mut lo = 1u64
+    let mut hi = 1048576u64
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if fits(f, mid) {
+            hi = mid
+        } else {
+            lo = mid + 1
+        }
+    }
+    lo
+}
+
+// Each attempt starts from a live instance, so no attempt pays an instantiation.
+fn spin_fits(f: Foreign[laws.Box], n: u64) -> bool {
+    let _ = native.count(f)
+    match (bound steps n {
+        native.spin(f, 10000)
+    }) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}
+
+fn trap_fits(f: Foreign[laws.Box], n: u64) -> bool {
+    let _ = native.count(f)
+    match isolate(fn() -> Result[i32, OutOfTime] {
+        bound steps n {
+            native.trap(f, 7)
+        }
+    }) {
+        Ok(Error(_)) => true,
+        _ => false,
+    }
+}
+
+fn div_fits(f: Foreign[laws.Box], n: u64) -> bool {
+    let _ = native.count(f)
+    match (bound steps n {
+        let one = isolate(fn() -> i32 {
+            native.loop_div(f, 100000)
+        })
+        let two = isolate(fn() -> i32 {
+            native.loop_div(f, 100000)
+        })
+        primary(take one) != "ok" && primary(take two) != "ok"
+    }) {
+        Ok(both) => both,
+        Error(_) => false,
+    }
+}
+
+fn bisect(f: Foreign[laws.Box], out: Stdout) waits {
+    number(out, "FW7 least", least(f, spin_fits))
+    number(out, "FW8 least", least(f, trap_fits))
+    number(out, "FW22 least", least(f, div_fits))
+}
+
+fn spinner(take f: Foreign[laws.Box]) -> u64 {
+    match (bound steps 1000000000 {
+        native.spin(f, 100000000)
+    }) {
+        Ok(n) => n,
+        Error(_) => 0,
+    }
+}
+
+fn printer(take out: Stdout) -> u64 waits {
+    say(out, "FW9 B")
+    0
+}
+
+fn slices(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
+    let a = task.spawn(tasks, bytes 1048576, f, spinner)
+    let b = task.spawn(tasks, bytes 1048576, out, printer)
+    let spun = result.unwrap(task.join(take a))
+    number(out, "FW9 A", spun)
+    let _ = task.join(take b)
+}
+
+fn reason(take outcome: Result[Result[u64, Causes], Capacity]) -> String {
+    match take outcome {
+        Ok(Ok(n)) => {
+            let mut s = string.from("ok ")
+            string.push_u64(mut s, n)
+            s
+        },
+        Ok(Error(causes)) => {
+            for c in causes {
+                return match c.kind {
+                    Capacity(refused) => {
+                        let mut s = string.from("capacity ")
+                        string.push_u64(mut s, refused.requested)
+                        s
+                    },
+                    Fail(message) => string.from(message),
+                    _ => string.from("other"),
+                }
+            }
+            string.from("none")
+        },
+        Error(_) => string.from("refused"),
+    }
+}
+
+fn grower(take f: Foreign[laws.Box]) -> u64 {
+    let _ = native.count(f)
+    word(native.grow(f, 16))
+}
+
+fn bytes_law(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) waits {
+    // FW10: in a fresh instance, a refused grow then an admitted one.
+    let _ = isolate(fn() -> i32 {
+        native.trap(f, 1)
+    })
+    let _ = native.count(f)
+    match (bound bytes 1048576 {
+        (native.grow(f, 32), native.grow(f, 1))
+    }) {
+        Ok((big, one)) => {
+            number(out, "FW10 big+1", word(big + 1))
+            number(out, "FW10 one", word(one))
+        },
+        Error(_) => say(out, "FW10 bound refused"),
+    }
+    // A fresh instance's 131,104 bytes against 65,536.
+    let _ = isolate(fn() -> i32 {
+        native.trap(f, 1)
+    })
+    say(out, reason(isolate(fn() -> u64 {
+        match (bound bytes 65536 {
+            native.count(f)
+        }) {
+            Ok(n) => n,
+            Error(_) => 7,
+        }
+    })))
+    number(out, "FW10 count", native.count(f))
+    // A child's 16 pages come back when it ends.
+    match (bound bytes 4194304 {
+        let child = task.spawn(tasks, bytes 2097152, f, grower)
+        let old = result.unwrap(task.join(take child))
+        match (bound bytes 4128768 {
+            0u64
+        }) {
+            Ok(_) => old,
+            Error(_) => 1000,
+        }
+    }) {
+        Ok(n) => number(out, "FW10 child", n),
+        Error(_) => say(out, "FW10 outer refused"),
+    }
+}
+
+fn fuel(f: Foreign[laws.Box], out: Stdout) waits {
+    say(out, primary(isolate(fn() -> i32 {
+        native.tgrow(f, 8589934592)
+    })))
+    say(out, "FW29 after")
+}
+
 pub fn main(f: Foreign[laws.Box], tasks: Tasks, argv: Args, out: Stdout) -> Result[(), Exit] waits {
     let Some(mode) = args.get(argv, 0) else {
         return Error(Exit(status: 3))
@@ -298,6 +515,16 @@ pub fn main(f: Foreign[laws.Box], tasks: Tasks, argv: Args, out: Stdout) -> Resu
         boxes(f, out)
     } else if mode == "signals" {
         signals(f, tasks, out)
+    } else if mode == "steps" {
+        steps(f, out)
+    } else if mode == "bisect" {
+        bisect(f, out)
+    } else if mode == "slices" {
+        slices(f, tasks, out)
+    } else if mode == "bytes" {
+        bytes_law(f, tasks, out)
+    } else if mode == "fuel" {
+        fuel(f, out)
     } else {
         return Error(Exit(status: 3))
     }

@@ -196,8 +196,12 @@ pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
     refused("cranelift", &|line: &str| line.ends_with("hirsel.toml: foreign.native: containment: expected \"wasm\""), "FW20");
 }
 
-/// FW3, FW5, FW6, FW11 to FW16, FW25, FW26 and FW28 on `box.wasm`, each
-/// observation printed by `run.hirsel` and compared with the spec's value.
+/// FW3, FW5 to FW16, FW21 to FW26 and FW28 on `box.wasm`, each observation
+/// printed by `run.hirsel` and compared with the spec's value. The step
+/// counts are hand-derived from `box.wasm`'s operators and the pinned cost
+/// table: `spin(f, 10⁴)` is 7 + 9 × 10⁴ + 5 = 90,012 fuel, 5,626 steps, plus
+/// the call's; `trap(f, 7)` stores 7 fuel at its trap, so 1 step pays it; and
+/// `loop_div(f, 10⁵)` is `L` = 7 + 8 × 10⁵ + 6 = 800,013 fuel.
 #[test]
 fn contained_calls_run_in_the_tasks_own_instance() {
     use std::fs;
@@ -212,7 +216,7 @@ fn contained_calls_run_in_the_tasks_own_instance() {
     let options = native_options(Backend::Cranelift, law.dir.path());
     let runtime = options.runtime.canonicalize().unwrap();
     let trap = |x: &str| format!("contained trap: {x}");
-    let expected: [(&str, Vec<String>); 6] = [
+    let expected: [(&str, Vec<String>); 10] = [
         ("loans", [
             "FW3 clock 52", "FW5 fill 4", "FW5 len 4", "FW5 marked 1", "FW5 sum 22", "FW5 empty 0",
             &trap("unreachable"), "FW5 kept",
@@ -235,7 +239,27 @@ fn contained_calls_run_in_the_tasks_own_instance() {
         ("boxes", [
             "FW15 two 2", "FW15 dropped 1", "FW15 freed 0", "x", "FW15 released 0",
         ].map(str::to_owned).to_vec()),
+        ("steps", [
+            "FW7 spin 1e9 out 1000", "FW7 spin 10 ok 10",
+            "FW21 straight out 2", "FW21 straight_trap out 2", "FW21 straight 300 ok 2000",
+            "FW23 fill 100 out 100", "FW23 fill 1e4 ok 171",
+            "FW24 spin out 1000", "FW24 count 1", "foreign instance discarded",
+        ].map(str::to_owned).to_vec()),
+        // B's line first: A's call ends its slices under its bound.
+        ("slices", ["FW9 B", "FW9 A 100000000"].map(str::to_owned).to_vec()),
+        // memory.grow's −1, plus one; the old size; the initial 2 pages refused;
+        // a fresh instance; and the child's grow, whose old size was 2 pages.
+        ("bytes", [
+            "FW10 big+1 0", "FW10 one 2", "capacity 131072", "FW10 count 1", "FW10 child 2",
+        ].map(str::to_owned).to_vec()),
+        // FW7, FW8 and FW22's bisections; the same on 3 runs below.
+        ("bisect", ["FW7 least 5627", "FW8 least 2"].map(str::to_owned).to_vec()),
     ];
+    let fw22 = |line: &str| {
+        let n: u64 = line.strip_prefix("FW22 least ").and_then(|n| n.parse().ok()).unwrap_or(0);
+        let least = 2 * 800_013u64.div_ceil(16);
+        (least..=least + 1_030).contains(&n)
+    };
     for engine in ["cranelift", "llvm"] {
         let image = law.path(&format!("image-{engine}"));
         let request = [
@@ -253,10 +277,17 @@ fn contained_calls_run_in_the_tasks_own_instance() {
                 .env("HIRSEL_UNTIED", threads).current_dir(law.dir.path()).output().unwrap()
         };
         for (mode, lines) in &expected {
-            let out = run(mode, "1");
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            assert!(out.status.success(), "{engine} {mode}: {:?}\n{stdout}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
-            assert_eq!(stdout.lines().collect::<Vec<_>>(), *lines, "{engine} {mode}");
+            let runs = if *mode == "bisect" { 3 } else { 1 };
+            for _ in 0..runs {
+                let out = run(mode, "1");
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(out.status.success(), "{engine} {mode}: {:?}\n{stdout}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+                let mut seen: Vec<&str> = stdout.lines().collect();
+                if *mode == "bisect" {
+                    assert!(seen.pop().is_some_and(fw22), "{engine} FW22: {stdout}");
+                }
+                assert_eq!(seen, *lines, "{engine} {mode}");
+            }
         }
         // FW28: a guest fault on one thread beside a Hirsel overflow on another.
         let out = run("signals", "2");
@@ -264,6 +295,6 @@ fn contained_calls_run_in_the_tasks_own_instance() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(102), "{engine} signals: {:?}\n{stderr}", out.status);
         assert!(stderr.contains("run stop: Stack"), "{engine} signals: {stderr}");
-        assert!(stdout.lines().all(|line| line == trap("memory out of bounds")), "{engine} signals: {stdout}");
+        assert!(!stdout.is_empty() && stdout.lines().all(|line| line == trap("memory out of bounds")), "{engine} signals: {stdout}");
     }
 }

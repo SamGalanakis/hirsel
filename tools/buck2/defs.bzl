@@ -1015,6 +1015,10 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         files_env["HIRSEL_CORE_RT_SCRIPTED_ARCHIVE"] = "//:core-scripted-runtime-pic"
         files_env["HIRSEL_CORE_RT_SCRIPTED_RECORD_ARCHIVE"] = "//:core-scripted-record-runtime-pic"
         files_env["HIRSEL_TEST_TAIL_CONTEXT"] = "//crates/hirsel-llvm-lazy/bridge:tail-context-test"
+        # The dev laws (native::tests::dev_laws) run the driver over the prebuilt fixture
+        # cache, as the unit-test suite's files_env gives them.
+        files_env["HIRSEL_DEV_TEST_DRIVER"] = "//:hirsel-core-driver-bin-hirsel"
+        files_env["HIRSEL_DEV_TEST_CACHE"] = "//:dev-fixture-cache"
     cases = OPENAT2_TEST_CASES.get(name, []) if case_filter == "native::tests::" else []
     common = dict(
         harness = "//:hirsel-core-driver-unittest-harness",

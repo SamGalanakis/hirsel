@@ -1,0 +1,314 @@
+// The QUIC-1 stream calls. Each reaches a connection by handle once the handshake has
+// its transport parameters; before then, or once closing, a call is StreamState.
+fn stream_slot(e: Endpoint, c: ConnectionHandle) -> Result[u64, QuicError] {
+    let Some(i) = slot_at(e, c) else {
+        return Error(UnknownConnection)
+    }
+    if let Some(conn) = e.connections[i] {
+        if open_life(conn) && conn.streams.ready {
+            return Ok(i)
+        }
+    }
+    Error(StreamState)
+}
+
+fn open_in(mut st: Streams, bidi: bool) -> Result[StreamId, QuicError] {
+    let limit = if bidi {
+        st.local_bidi_limit
+    } else {
+        st.local_uni_limit
+    }
+    let opened = if bidi {
+        st.local_bidi_opened
+    } else {
+        st.local_uni_opened
+    }
+    if opened >= limit {
+        return Error(Limit)
+    }
+    let mut id = opened << 2
+    if !bidi {
+        id = id | 2
+    }
+    if st.side_server {
+        id = id | 1
+    }
+    add_stream(mut st, id)
+    if bidi {
+        st.local_bidi_opened += 1
+    } else {
+        st.local_uni_opened += 1
+    }
+    Ok(StreamId(id))
+}
+
+pub fn open(mut e: Endpoint, c: ConnectionHandle, bidi: bool) -> Result[StreamId, QuicError] {
+    let i = stream_slot(e, c)?
+    if let Some(mut conn) = e.connections[i] {
+        return open_in(mut conn.streams, bidi)
+    }
+    Error(UnknownConnection)
+}
+
+fn writable_send(st: Streams, id: u64) -> Result[u64, QuicError] {
+    let Some(i) = find(st, id) else {
+        return Error(UnknownStream)
+    }
+    let Some(s) = st.list[i].send else {
+        return Error(StreamState)
+    }
+    if s.fin || s.acked_reported {
+        return Error(StreamState)
+    }
+    if let Some(_) = s.reset {
+        return Error(StreamState)
+    }
+    Ok(i)
+}
+
+fn headroom(limit: u64, used: u64) -> u64 {
+    if limit > used {
+        return limit - used
+    }
+    0
+}
+
+/// Queue at most what fits under the stream's credit, the connection's and send_bytes
+/// (QUIC-5); the count says how much. A short write asks for Writable.
+fn write_in(mut st: Streams, id: u64, data: Bytes, fin: bool) -> Result[u64, QuicError] {
+    let i = writable_send(st, id)?
+    let memory = headroom(st.send_bytes, st.held)
+    let connection = headroom(st.peer_max_data, st.written_data)
+    let mut n = 0u64
+    if let Some(mut s) = st.list[i].send {
+        n = order.min(order.min(list.len(data), memory), order.min(headroom(s.credit, s.written), connection))
+        if n > 0 {
+            let mut owned: Bytes = list.with_capacity(n)
+            list.append(mut owned, list.slice(data, 0, n))
+            list.push(mut s.pieces, Piece(offset: s.written, len: n, data: Owned(take owned)))
+            s.written += n
+        }
+        if n < list.len(data) {
+            s.want_writable = true
+        } else if fin {
+            s.fin = true
+            s.fin_pending = true
+        }
+    }
+    st.held += n
+    st.written_data += n
+    Ok(n)
+}
+
+pub fn write(mut e: Endpoint, c: ConnectionHandle, s: StreamId, data: Bytes, fin: bool) -> Result[u64, QuicError] {
+    let i = stream_slot(e, c)?
+    let StreamId(id) = s
+    if let Some(mut conn) = e.connections[i] {
+        return write_in(mut conn.streams, id, data, fin)
+    }
+    Error(UnknownConnection)
+}
+
+/// All or nothing against send_bytes; Ok(false) asks for Writable (QUIC-5).
+fn write_shared_in(mut st: Streams, id: u64, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError] {
+    let i = writable_send(st, id)?
+    let len = list.len(data)
+    let fits = len <= headroom(st.send_bytes, st.held)
+    if let Some(mut s) = st.list[i].send {
+        if !fits {
+            s.want_writable = true
+            return Ok(false)
+        }
+        if len > 0 {
+            list.push(mut s.pieces, Piece(offset: s.written, len: len, data: Held(take data)))
+            s.written += len
+        }
+        if fin {
+            s.fin = true
+            s.fin_pending = true
+        }
+    }
+    st.held += len
+    st.written_data += len
+    Ok(true)
+}
+
+pub fn write_shared(mut e: Endpoint, c: ConnectionHandle, s: StreamId, take data: Shared[Bytes], fin: bool) -> Result[bool, QuicError] {
+    let i = stream_slot(e, c)?
+    let StreamId(id) = s
+    if let Some(mut conn) = e.connections[i] {
+        return write_shared_in(mut conn.streams, id, take data, fin)
+    }
+    Error(UnknownConnection)
+}
+
+/// Copy contiguous bytes into into's spare capacity. After a reset, bytes below the
+/// reliable size still arrive and then the read reports StreamReset.
+fn read_in(mut st: Streams, id: u64, mut into: Bytes) -> Result[(u64, bool), QuicError] {
+    let Some(i) = find(st, id) else {
+        return Error(UnknownStream)
+    }
+    let window = st.stream_window
+    let mut n = 0u64
+    let mut fin = false
+    let mut reset_code: Option[u64] = None
+    if let Some(mut r) = st.list[i].recv {
+        let mut end = contiguous(r)
+        if let Some(x) = r.reset {
+            end = order.min(end, order.max(x.reliable, r.read))
+        }
+        n = order.min(end - r.read, list.capacity(into) - list.len(into))
+        let mut at = r.read
+        while at < r.read + n {
+            let p = (at - r.base) / PAGE
+            let within = (at - r.base) % PAGE
+            let k = order.min(PAGE - within, r.read + n - at)
+            let page: u64 = int.widen(r.pages[p])
+            list.append(mut into, list.slice(st.pool.data, page * PAGE + within, page * PAGE + within + k))
+            at += k
+        }
+        r.read += n
+        trim_runs_below(mut r.runs, r.read)
+        release_pages(mut st.pool, mut r)
+        match r.reset {
+            Some(x) => {
+                if n == 0 && r.read >= x.reliable {
+                    reset_code = Some(x.code)
+                }
+            },
+            None => {
+                fin = r.final_size == Some(r.read)
+                raise_stream_credit(window, mut r)
+            },
+        }
+    } else {
+        return Error(StreamState)
+    }
+    if n > 0 {
+        release_data(mut st, n)
+    }
+    retire(mut st)
+    if let Some(code) = reset_code {
+        return Error(StreamReset(code))
+    }
+    Ok((n, fin))
+}
+
+pub fn read(mut e: Endpoint, c: ConnectionHandle, s: StreamId, mut into: Bytes) -> Result[(u64, bool), QuicError] {
+    let i = stream_slot(e, c)?
+    let StreamId(id) = s
+    if let Some(mut conn) = e.connections[i] {
+        return read_in(mut conn.streams, id, mut into)
+    }
+    Error(UnknownConnection)
+}
+
+/// The largest offset received on a stream, read or not (WT-5).
+pub fn received(e: Endpoint, c: ConnectionHandle, s: StreamId) -> u64 {
+    let Some(i) = slot_at(e, c) else {
+        return 0
+    }
+    let StreamId(id) = s
+    if let Some(conn) = e.connections[i] {
+        if let Some(k) = find(conn.streams, id) {
+            if let Some(r) = conn.streams.list[k].recv {
+                return r.highest
+            }
+        }
+    }
+    0
+}
+
+fn reset_in(mut st: Streams, id: u64, code: u64, reliable: u64) -> Result[(), QuicError] {
+    let Some(i) = find(st, id) else {
+        return Error(UnknownStream)
+    }
+    if code > MAX_NUMBER {
+        return Error(Config)
+    }
+    if reliable > 0 && !st.reset_stream_at {
+        return Error(Unsupported)
+    }
+    let mut freed = 0u64
+    if let Some(mut s) = st.list[i].send {
+        if s.acked_reported || reliable > s.written {
+            return Error(StreamState)
+        }
+        if let Some(_) = s.reset {
+            return Error(StreamState)
+        }
+        freed = reset_send(mut s, code, reliable)
+    } else {
+        return Error(StreamState)
+    }
+    st.held -= freed
+    Ok(())
+}
+
+/// RESET_STREAM (reliable 0) or RESET_STREAM_AT, discarding at once every byte at or past
+/// reliable, including any in a polled but uncommitted suffix (QUIC-5).
+pub fn reset(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64, reliable: u64) -> Result[(), QuicError] {
+    let i = stream_slot(e, c)?
+    let StreamId(id) = s
+    if let Some(mut conn) = e.connections[i] {
+        return reset_in(mut conn.streams, id, code, reliable)
+    }
+    Error(UnknownConnection)
+}
+
+fn stop_in(mut st: Streams, id: u64, code: u64) -> Result[(), QuicError] {
+    let Some(i) = find(st, id) else {
+        return Error(UnknownStream)
+    }
+    if code > MAX_NUMBER {
+        return Error(Config)
+    }
+    if let Some(mut r) = st.list[i].recv {
+        if let None = r.stop {
+            r.stop = Some(code)
+            r.stop_pending = true
+        }
+        return Ok(())
+    }
+    Error(StreamState)
+}
+
+pub fn stop(mut e: Endpoint, c: ConnectionHandle, s: StreamId, code: u64) -> Result[(), QuicError] {
+    let i = stream_slot(e, c)?
+    let StreamId(id) = s
+    if let Some(mut conn) = e.connections[i] {
+        return stop_in(mut conn.streams, id, code)
+    }
+    Error(UnknownConnection)
+}
+
+pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) -> Result[(), QuicError] {
+    if p.urgency > 7 {
+        return Error(Config)
+    }
+    let i = stream_slot(e, c)?
+    let StreamId(id) = s
+    if let Some(mut conn) = e.connections[i] {
+        let Some(k) = find(conn.streams, id) else {
+            return Error(UnknownStream)
+        }
+        if let Some(mut send) = conn.streams.list[k].send {
+            send.priority = p
+            return Ok(())
+        }
+        return Error(StreamState)
+    }
+    Error(UnknownConnection)
+}
+
+/// Hostile-peer test seam: raw frame bytes sent once, unchecked and never retransmitted,
+/// in the connection's next 1-RTT packet. Laws use it to act as a peer that breaks the
+/// rules (credit past MAX_DATA, a changed reset) or grants 2^62 of credit.
+pub fn send_frames(mut e: Endpoint, c: ConnectionHandle, frames: Bytes) -> Result[(), QuicError] {
+    let i = stream_slot(e, c)?
+    if let Some(mut conn) = e.connections[i] {
+        list.append(mut conn.streams.seam, frames)
+        return Ok(())
+    }
+    Error(UnknownConnection)
+}

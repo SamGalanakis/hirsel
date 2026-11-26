@@ -1,7 +1,11 @@
-// The Hirsel QUIC endpoint interop.py runs against quinn on loopback UDP (law Q4,
-// handshake only, and Q16's client pins).
-// Usage: interop server CLIENT_PIN_HEX|none
-//        interop client SERVER_PORT SERVER_PIN_HEX
+// The Hirsel QUIC endpoint interop.py runs against quinn on loopback UDP (law Q4's
+// handshake and transfer halves, and Q16's client pins).
+// Usage: interop server CLIENT_PIN_HEX|none [N]
+//        interop client SERVER_PORT SERVER_PIN_HEX [N]
+// With N, a transfer: the client opens one bidirectional stream and sends N bytes of
+// pattern() with FIN; the server reads them all, then sends N bytes back with FIN; the
+// client reads them all and closes with application code 0. Each side prints
+// `received <count> <sha256 of the bytes>` once its peer's FIN arrives.
 // A server binds an ephemeral port and prints it. Every number is printed as 16 hex digits.
 // Stdout lines: `bound <port>`, `certificate <sha256 of our leaf>`, `connected <alpn>`,
 // `params <max_idle_ms> <max_udp_payload> <max_ack_delay_ms> <max_datagram_frame> <active_cid_limit>`
@@ -18,6 +22,13 @@ const ALPN: String = "hq-interop"
 const IDLE_MS: u32 = 7000
 
 const MTU: u16 = 1200
+
+// Transfer windows: QUIC-5 receive credit and send memory.
+const WINDOW: u64 = 4194304
+
+const STREAM_WINDOW: u64 = 1048576
+
+const SEND_BYTES: u64 = 262144
 
 fn say(out: Stdout, tag: String, b: Bytes) waits {
     let mut line = string.from(tag)
@@ -86,10 +97,81 @@ fn pins(text: String) -> List[quic.handshake.Pin] {
     take out
 }
 
-fn transport(take client_pins: Option[List[quic.handshake.Pin]]) -> quic.TransportConfig {
+fn transport(take client_pins: Option[List[quic.handshake.Pin]], transfer: bool) -> quic.TransportConfig {
     let mut alpn: List[String] = list.with_capacity(1)
     list.push(mut alpn, ALPN)
+    if transfer {
+        return quic.TransportConfig(max_idle_ms: IDLE_MS, initial_max_data: WINDOW, initial_max_stream_data: STREAM_WINDOW, max_streams_bidi: 1, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: SEND_BYTES, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: take client_pins)
+    }
     quic.TransportConfig(max_idle_ms: IDLE_MS, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: 16384, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: take client_pins)
+}
+
+/// Byte i of a transfer: (31 i + 7) mod 256. interop.py and the quinn peer compute it too.
+fn pattern(n: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut b, int.narrow((i * 31 + 7) & 0xff))
+    }
+    take b
+}
+
+/// One side of a transfer: the stream, what has arrived, and what is left to send.
+type Transfer {
+    size: u64,
+    data: Bytes,
+    conn: Option[quic.ConnectionHandle],
+    stream: Option[quic.StreamId],
+    hash: std.sha256.Sha256,
+    count: u64,
+    received: bool,
+    sending: bool,
+    sent: u64,
+    done: bool
+}
+
+/// Read what has arrived, then queue what fits. True once the client has read the echo.
+fn step_transfer(mut e: quic.Endpoint, mut t: Transfer, client: bool, mut buf: Bytes, out: Stdout) -> bool waits {
+    let (Some(c), Some(s)) = (t.conn, t.stream) else {
+        return false
+    }
+    while !t.received {
+        list.clear(mut buf)
+        let (n, fin) = result.unwrap(quic.read(mut e, c, s, mut buf))
+        std.sha256.add(mut t.hash, buf, 0, n)
+        t.count += n
+        if fin {
+            t.received = true
+            let mut line = string.from("received")
+            let mut b: Bytes = list.with_capacity(8)
+            list.put_word_be(mut b, t.count)
+            string.push(mut line, " ")
+            string.push(mut line, std.hex.encode(b))
+            string.push(mut line, " ")
+            string.push(mut line, std.hex.encode(digest_bytes(std.sha256.finish(t.hash))))
+            string.push(mut line, "\n")
+            result.unwrap(stdout.write(out, line))
+            if client {
+                return true
+            }
+            t.sending = true
+        }
+        if n == 0 {
+            break
+        }
+    }
+    while t.sending && !t.done {
+        let end = order.min(t.size, t.sent + 65536)
+        let want = end - t.sent
+        let n = result.unwrap(quic.write(mut e, c, s, list.slice(t.data, t.sent, end), end == t.size))
+        t.sent += n
+        if n == want && end == t.size {
+            t.done = true
+        }
+        if n < want {
+            break
+        }
+    }
+    false
 }
 
 fn endpoint_config(r: Random) -> quic.EndpointConfig {
@@ -147,6 +229,7 @@ fn report(e: quic.Endpoint, event: quic.Event, out: Stdout) -> bool waits {
             }
             true
         },
+        _ => false,
     }
 }
 
@@ -182,11 +265,30 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
     let mut port_bytes: Bytes = list.with_capacity(2)
     list.put_word_be(mut port_bytes, local.port)
     say(out, "bound", port_bytes)
-    let deadline = host.mono_ns(clock) + 20 * SECOND
+    let size_arg = if client {
+        3u64
+    } else {
+        2u64
+    }
+    let size: u64 = match args.get(a, size_arg) {
+        Some(v) => result.unwrap(int.parse(string.from(v))),
+        None => 0,
+    }
+    let transfer = size > 0
+    let limit = if transfer {
+        120 * SECOND
+    } else {
+        20 * SECOND
+    }
+    let deadline = host.mono_ns(clock) + limit
+    let mut tr = Transfer(size: size, data: pattern(size), conn: None, stream: None, hash: std.sha256.start(), count: 0, received: false, sending: client, sent: 0, done: false)
     let mut e = if client {
         let port: u16 = result.unwrap(int.parse(argument(a, 1)))
         let mut e = result.unwrap(quic.endpoint(r, endpoint_config(r), None))
-        let _ = result.unwrap(quic.connect(mut e, host.mono_ns(clock), Addr(ip: V4(LOOPBACK), port), "localhost", pins(argument(a, 2)), None, transport(None)))
+        let c = result.unwrap(quic.connect(mut e, host.mono_ns(clock), Addr(ip: V4(LOOPBACK), port), "localhost", pins(argument(a, 2)), None, transport(None, transfer)))
+        if transfer {
+            tr.conn = Some(c)
+        }
         take e
     } else {
         let required = argument(a, 1)
@@ -197,13 +299,20 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         }
         let (id, der) = identity(r)
         say(out, "certificate", digest_bytes(std.sha256.hash(der)))
-        result.unwrap(quic.endpoint(r, endpoint_config(r), Some((take id, transport(take client_pins)))))
+        result.unwrap(quic.endpoint(r, endpoint_config(r), Some((take id, transport(take client_pins, transfer)))))
     }
     let mut data: Bytes = list.with_capacity(16 * 2048)
     let mut packets: List[UdpPacket] = list.with_capacity(16)
     let mut events: List[quic.Event] = list.new()
+    let mut buf: Bytes = list.with_capacity(65536)
     let mut ended = false
     while !ended {
+        if transfer && step_transfer(mut e, mut tr, client, mut buf, out) {
+            // The client has its echo: close, send the close, and end.
+            quic.close(mut e, option.unwrap(tr.conn), 0, b"")
+            ended = true
+            break
+        }
         let next = flush(mut e, mut socket, clock)
         let now = host.mono_ns(clock)
         if now >= deadline {
@@ -229,8 +338,28 @@ pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(),
         }
         quic.timeout(mut e, host.mono_ns(clock), mut events)
         for event in events {
+            if transfer {
+                match event {
+                    Connected(c: c, ..) => {
+                        if !client {
+                            tr.conn = Some(c)
+                        }
+                    },
+                    Opened(_, s) => {
+                        tr.stream = Some(s)
+                    },
+                    _ => (),
+                }
+            }
             if report(e, event, out) {
                 ended = true
+            }
+        }
+        if transfer && client {
+            if let (Some(c), None) = (tr.conn, tr.stream) {
+                if let Ok(s) = quic.open(mut e, c, true) {
+                    tr.stream = Some(s)
+                }
             }
         }
         list.clear(mut events)

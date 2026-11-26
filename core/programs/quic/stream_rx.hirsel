@@ -1,0 +1,303 @@
+// Peer stream frames (RFC 9000 §§3–4, 19.4–19.14; reliable-stream-reset-11 §§4–5).
+/// RFC 9000 §19.8's type byte for a received STREAM frame, for the close's frame field.
+fn stream_frame_type(offset: u64, fin: bool, explicit_len: bool) -> u64 {
+    let mut t = 0x08u64
+    if offset != 0 {
+        t = t | 0x04
+    }
+    if explicit_len {
+        t = t | 0x02
+    }
+    if fin {
+        t = t | 0x01
+    }
+    t
+}
+
+/// Find or open the stream a peer frame names (§3.2: opening a stream opens every lower
+/// one of its type). None: a stream already retired, whose late frames are ignored.
+fn peer_stream(mut st: Streams, id: u64, frame: u64, handle: ConnectionHandle, mut events: List[Event]) -> Result[Option[u64], ConnectionFailure] {
+    if let Some(i) = find(st, id) {
+        return Ok(Some(i))
+    }
+    let index = id >> 2
+    if local_stream(st, id) {
+        let opened = if uni(id) {
+            st.local_uni_opened
+        } else {
+            st.local_bidi_opened
+        }
+        if index < opened {
+            return Ok(None)
+        }
+        return Error(Wire(0x05, frame))
+    }
+    let limit = if uni(id) {
+        st.uni_limit
+    } else {
+        st.bidi_limit
+    }
+    let opened = if uni(id) {
+        st.uni_opened
+    } else {
+        st.bidi_opened
+    }
+    if index >= limit {
+        return Error(Wire(0x04, frame))
+    }
+    if index < opened {
+        return Ok(None)
+    }
+    for k in opened .. index + 1 {
+        let sid = (k << 2) | (id & 3)
+        add_stream(mut st, sid)
+        list.push(mut events, Opened(handle, StreamId(sid)))
+    }
+    if uni(id) {
+        st.uni_opened = index + 1
+    } else {
+        st.bidi_opened = index + 1
+    }
+    Ok(Some(list.len(st.list) - 1))
+}
+
+/// A STREAM frame. Past stream or connection credit is FLOW_CONTROL_ERROR; a frame that
+/// would make one more out-of-order range than max_gaps, or that the pool cannot hold, is
+/// dropped with its packet, unacknowledged, as if lost (QUIC-5).
+fn receive_stream(mut st: Streams, handle: ConnectionHandle, id: u64, offset: u64, fin: bool, data: Bytes, frame: u64, mut events: List[Event]) -> Result[Option[DropReason], ConnectionFailure] {
+    let Some(i) = peer_stream(mut st, id, frame, handle, mut events)? else {
+        return Ok(None)
+    }
+    let end = offset + list.len(data)
+    let room = st.max_data - st.consumed
+    let gaps = st.max_gaps
+    let mut grow = 0u64
+    let mut readable = false
+    if let Some(mut r) = st.list[i].recv {
+        if let Some(f) = r.final_size {
+            if end > f || (fin && end != f) {
+                return Error(Wire(0x06, frame))
+            }
+        }
+        if fin && end < r.highest {
+            return Error(Wire(0x06, frame))
+        }
+        if end > r.limit {
+            return Error(Wire(0x03, frame))
+        }
+        if end > r.highest {
+            grow = end - r.highest
+        }
+        if grow > room {
+            return Error(Wire(0x03, frame))
+        }
+        let keep = match r.reset {
+            Some(x) => order.min(end, x.reliable),
+            None => end,
+        }
+        let from = order.max(offset, r.read)
+        if keep > from {
+            if gaps_after(r.runs, r.read, from, keep) > gaps {
+                return Ok(Some(Gaps))
+            }
+            if missing_pages(r, from, keep) > list.len(st.pool.free) {
+                return Ok(Some(ReceiveBuffer))
+            }
+            let before = contiguous(r)
+            store(mut st.pool, mut r, from, list.slice(data, from - offset, keep - offset))
+            add_run(mut r.runs, from, keep)
+            readable = contiguous(r) > before
+        }
+        r.highest = order.max(r.highest, end)
+        if fin {
+            if let None = r.final_size {
+                r.final_size = Some(end)
+                readable = true
+            }
+        }
+    } else {
+        return Error(Wire(0x05, frame))
+    }
+    st.consumed += grow
+    if readable {
+        list.push(mut events, Readable(handle, StreamId(id)))
+    }
+    Ok(None)
+}
+
+/// RESET_STREAM (reliable 0) or RESET_STREAM_AT. The final size counts against credit; a
+/// changed code is STREAM_STATE_ERROR, a changed final size FINAL_SIZE_ERROR, and a larger
+/// reliable size than one already seen is ignored (reliable-stream-reset-11 §5).
+fn receive_reset(mut st: Streams, handle: ConnectionHandle, id: u64, code: u64, final_size: u64, reliable: u64, frame: u64, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+    let Some(i) = peer_stream(mut st, id, frame, handle, mut events)? else {
+        return Ok(())
+    }
+    let room = st.max_data - st.consumed
+    let mut grow = 0u64
+    let mut release = 0u64
+    let mut report = false
+    if let Some(mut r) = st.list[i].recv {
+        if final_size < r.highest {
+            return Error(Wire(0x06, frame))
+        }
+        if let Some(f) = r.final_size {
+            if f != final_size {
+                return Error(Wire(0x06, frame))
+            }
+        }
+        if final_size > r.limit {
+            return Error(Wire(0x03, frame))
+        }
+        grow = final_size - r.highest
+        if grow > room {
+            return Error(Wire(0x03, frame))
+        }
+        let previous: Option[StreamReset] = clone(r.reset)
+        match previous {
+            Some(prev) => {
+                if prev.code != code {
+                    return Error(Wire(0x05, frame))
+                }
+                if reliable < prev.reliable {
+                    release = order.max(r.read, prev.reliable) - order.max(r.read, reliable)
+                    trim_runs_above(mut r.runs, reliable)
+                    release_pages_from(mut st.pool, mut r, reliable)
+                    r.reset = Some(StreamReset(code: code, reliable: reliable, final_size: final_size))
+                }
+            },
+            None => {
+                release = final_size - order.max(r.read, reliable)
+                trim_runs_above(mut r.runs, reliable)
+                release_pages_from(mut st.pool, mut r, reliable)
+                r.reset = Some(StreamReset(code: code, reliable: reliable, final_size: final_size))
+                r.final_size = Some(final_size)
+                report = true
+            },
+        }
+        r.highest = final_size
+    } else {
+        return Error(Wire(0x05, frame))
+    }
+    st.consumed += grow
+    if release > 0 {
+        release_data(mut st, release)
+    }
+    if report {
+        list.push(mut events, Reset(c: handle, s: StreamId(id), code: code, final_size: final_size))
+    }
+    Ok(())
+}
+
+/// STOP_SENDING: report it and answer with RESET_STREAM carrying its code (§3.5).
+fn receive_stop(mut st: Streams, handle: ConnectionHandle, id: u64, code: u64, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+    let Some(i) = peer_stream(mut st, id, 0x05, handle, mut events)? else {
+        return Ok(())
+    }
+    let mut freed = 0u64
+    let mut fresh = false
+    if let Some(mut s) = st.list[i].send {
+        if let None = s.reset {
+            if !s.acked_reported {
+                freed = reset_send(mut s, code, 0)
+                fresh = true
+            }
+        }
+    } else {
+        return Error(Wire(0x05, 0x05))
+    }
+    st.held -= freed
+    if fresh {
+        list.push(mut events, Stopped(handle, StreamId(id), code))
+    }
+    Ok(())
+}
+
+fn receive_max_stream_data(mut st: Streams, handle: ConnectionHandle, id: u64, limit: u64, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+    let Some(i) = peer_stream(mut st, id, 0x11, handle, mut events)? else {
+        return Ok(())
+    }
+    let room = st.held < st.send_bytes
+    let mut wake = false
+    if let Some(mut s) = st.list[i].send {
+        if limit > s.credit {
+            s.credit = limit
+            if s.want_writable && room {
+                s.want_writable = false
+                wake = true
+            }
+        }
+    } else {
+        return Error(Wire(0x05, 0x11))
+    }
+    if wake {
+        list.push(mut events, Writable(handle, StreamId(id)))
+    }
+    Ok(())
+}
+
+fn receive_max_data(mut st: Streams, handle: ConnectionHandle, limit: u64, mut events: List[Event]) {
+    if limit <= st.peer_max_data {
+        return
+    }
+    st.peer_max_data = limit
+    wake_writers(mut st, handle, mut events)
+}
+
+fn receive_max_streams(mut st: Streams, bidi: bool, limit: u64) {
+    if bidi {
+        st.local_bidi_limit = order.max(st.local_bidi_limit, limit)
+    } else {
+        st.local_uni_limit = order.max(st.local_uni_limit, limit)
+    }
+}
+
+/// Emit Writable for each stream that asked, once send memory has room.
+fn wake_writers(mut st: Streams, handle: ConnectionHandle, mut events: List[Event]) {
+    if st.held >= st.send_bytes {
+        return
+    }
+    for i in 0u64 .. list.len(st.list) {
+        let id = st.list[i].id
+        if let Some(mut s) = st.list[i].send {
+            if s.want_writable {
+                s.want_writable = false
+                list.push(mut events, Writable(handle, StreamId(id)))
+            }
+        }
+    }
+}
+
+/// Apply one peer stream-layer frame. Some(reason) drops the whole packet as if lost.
+fn stream_frame(mut st: Streams, handle: ConnectionHandle, f: codec.Frame, input: Bytes, mut events: List[Event]) -> Result[Option[DropReason], ConnectionFailure] {
+    match f {
+        Stream(stream: id, offset: offset, fin: fin, explicit_len: explicit_len, data: data) => {
+            let frame = stream_frame_type(offset, fin, explicit_len)
+            receive_stream(mut st, handle, id, offset, fin, list.slice(input, data.at, data.at + data.len), frame, mut events)
+        },
+        ResetStream(stream: id, code: code, final_size: final_size) => {
+            receive_reset(mut st, handle, id, code, final_size, 0, 0x04, mut events)?
+            Ok(None)
+        },
+        ResetStreamAt(stream: id, code: code, final_size: final_size, reliable_size: reliable) => {
+            receive_reset(mut st, handle, id, code, final_size, reliable, 0x24, mut events)?
+            Ok(None)
+        },
+        StopSending(stream: id, code: code) => {
+            receive_stop(mut st, handle, id, code, mut events)?
+            Ok(None)
+        },
+        MaxData(limit) => {
+            receive_max_data(mut st, handle, limit, mut events)
+            Ok(None)
+        },
+        MaxStreamData(stream: id, limit: limit) => {
+            receive_max_stream_data(mut st, handle, id, limit, mut events)?
+            Ok(None)
+        },
+        MaxStreams(bidi: bidi, limit: limit) => {
+            receive_max_streams(mut st, bidi, limit)
+            Ok(None)
+        },
+        _ => Ok(None),
+    }
+}

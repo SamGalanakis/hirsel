@@ -1,4 +1,4 @@
-type ConnectionFailure = Wire(u64, u64) | Tls(handshake.Error)
+type ConnectionFailure = Wire(u64, u64) | Tls(handshake.Error) | Lost(DropReason)
 
 fn queue_flight(mut c: Connection, take f: handshake.Flight) {
     list.append(mut c.initial.crypto_out, f.initial)
@@ -70,6 +70,11 @@ fn advance_tls(mut c: Connection, now: u64, random: Random, mtu: u16, level: pac
                 return Error(LocalFailure)
             }
             recovery.set_max_ack_delay(mut c.recovery, now, int.saturating_mul(params.max_ack_delay_ms, 1000000))
+            let server = match c.side {
+                Server => true,
+                Client => false,
+            }
+            start_streams(mut c.streams, c.transport, params, server)
             c.params = Some(take params)
             c.peer_pin = handshake.peer_pin(h)
             if let Server = c.side {

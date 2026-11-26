@@ -222,8 +222,9 @@ fn check_uncommitted_ack() {
     fail("ACK of a skipped packet number was accepted")
 }
 
-/// bug: The receive classifier responds to unauthenticated packets or accepts an ACK of an abandoned packet.
-/// oracle: RFC 9000 §§12.3, 13.1, 14.1, 19.3 and RFC 9001 §5.4.2.
+/// bug: The receive classifier responds to unauthenticated packets or accepts an ACK of an abandoned packet;
+/// a stream frame past credit, limit or a changed reset is accepted; the 33rd gap is kept.
+/// oracle: RFC 9000 §§4, 12.3, 13.1, 14.1, 19.3; RFC 9001 §5.4.2; reliable-stream-reset-11 §§4–5; QUIC-5.
 @test
 fn connection_frame_refusals() -> Result[(), ()] {
     stateful_initial_refusal(b"\x08\x00", 0x0a, 8)
@@ -231,5 +232,6 @@ fn connection_frame_refusals() -> Result[(), ()] {
     stateful_initial_refusal(b"\x02\x00\x00\x00\x00", 0x0a, 2)
     check_silent_drops()
     check_uncommitted_ack()
+    check_stream_refusals()
     Ok(())
 }

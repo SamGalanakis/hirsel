@@ -1,11 +1,12 @@
 hirsel.laws 1
-quic@1/laws/connection_client_pins src=c1f979ed53041658 sig=d5df63a5621bd6ab run=c2c0c6612d4cbb79 bug=c5ab912d061d2917 oracle=ebce2c1335795da0 rows=pending
-quic@1/laws/connection_frame_refusals src=66f7d30de56789fa sig=e8998f23016431af run=c2c0c6612d4cbb79 bug=03e568c83ce73594 oracle=c543aece6be7ff05 rows=pending
+quic@1/laws/connection_client_pins src=c1f979ed53041658 sig=4d1069639898af4f run=c2c0c6612d4cbb79 bug=c5ab912d061d2917 oracle=ebce2c1335795da0 rows=pending
+quic@1/laws/connection_frame_refusals src=71b60acf3fd27ae4 sig=10e152814976d672 run=c2c0c6612d4cbb79 bug=b52ee359eed25e6d oracle=d76a40ec22bcb4ed rows=pending
 quic@1/laws/cubic_matches_rfc9438 src=5e1493da3e53a35a sig=0c6fa76e5f0bebad run=c2c0c6612d4cbb79 bug=86d6bdc6262f6766 oracle=c0bd99f7203ff300 rows=pending
+quic@1/laws/flow_control_bounds_memory src=76af2cb241f7a51d sig=24420c8c83ee3500 run=c2c0c6612d4cbb79 bug=4e72203ad9685cd8 oracle=062e3b2784acbb2a rows=pending
 quic@1/laws/frame_refusals src=14c109189edfb5bb sig=788c9ab4c631e54c run=c2c0c6612d4cbb79 bug=9511308c029a629a oracle=f5d946c92ab30433 rows=pending
-quic@1/laws/handshake_done_is_retransmitted src=109d37e0fe88f863 sig=b29a80af95e7bf0b run=c2c0c6612d4cbb79 bug=7230feeac20cb5fe oracle=3c14e07d2cdec75f rows=pending
+quic@1/laws/handshake_done_is_retransmitted src=109d37e0fe88f863 sig=00ea152bb08f79ca run=c2c0c6612d4cbb79 bug=7230feeac20cb5fe oracle=3c14e07d2cdec75f rows=pending
 quic@1/laws/loss_recovery_matches_rfc9002 src=670993c6c0731d60 sig=5f6f7a6b8c5d0c84 run=c2c0c6612d4cbb79 bug=565ad72495305f49 oracle=1add46da24f13c55 rows=pending
-quic@1/laws/loss_recovery_under_sim_udp src=bf1f01c19db381aa sig=d5df7c5ddc2c5f4b run=c7b2a52baff70a63 bug=f7e20187e32ca719 oracle=cca41ff3e9c93f31 rows=pending
+quic@1/laws/loss_recovery_under_sim_udp src=b250a38b642967ca sig=58122a8703b9b48b run=c7b2a52baff70a63 bug=f7e20187e32ca719 oracle=cca41ff3e9c93f31 rows=pending
 quic@1/laws/pin_mismatch_refuses src=e4c5548ecfad1ccd sig=a21bd538296413f2 run=c2c0c6612d4cbb79 bug=2b3d7be80422aa87 oracle=3baad9c32a6fe19a rows=pending
 quic@1/laws/rfc9001_client_initial_parses src=f5c1078900cb58d0 sig=ea8646914cb42ab8 run=c2c0c6612d4cbb79 bug=2b6627b21f13d095 oracle=765a5db8a2b054c1 rows=pending
 quic@1/laws/varint_and_packet_number_vectors src=4234e282146e0c27 sig=faac2b82272d6d6f run=c2c0c6612d4cbb79 bug=4286390f4d5d8a55 oracle=322d7d0b04d42bd7 rows=pending

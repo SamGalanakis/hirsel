@@ -1,0 +1,480 @@
+// Stream send side: frames into 1-RTT packets, acknowledgement, requeue and retirement.
+// State moves when a frame is written; committed() keeps a packet's frames in flight and
+// requeue() puts an abandoned packet's frames back (QUIC-1 Commit).
+/// Discard every queued, sent and retransmittable byte at or past reliable (QUIC-5).
+/// Returns the send memory freed.
+fn reset_send(mut s: Send, code: u64, reliable: u64) -> u64 {
+    let final_size = order.max(s.next, reliable)
+    let keep = order.max(reliable, s.floor)
+    let mut freed = 0u64
+    if s.written > keep {
+        freed = s.written - keep
+        s.written = keep
+    }
+    let mut n = list.len(s.pieces)
+    while n > s.head && s.pieces[n - 1].offset >= keep {
+        n -= 1
+    }
+    list.truncate(mut s.pieces, n)
+    trim_runs_above(mut s.resend, reliable)
+    s.fin = false
+    s.fin_pending = false
+    s.reset = Some(StreamReset(code: code, reliable: reliable, final_size: final_size))
+    s.reset_pending = true
+    s.want_writable = false
+    freed
+}
+
+/// The end of new data the stream may send now: queued, within its credit and the
+/// connection's.
+fn new_end(s: Send, conn_room: u64) -> u64 {
+    let end = order.min(order.min(s.written, s.credit), s.next + conn_room)
+    order.max(end, s.next)
+}
+
+fn has_work(s: Send, conn_room: u64) -> bool {
+    if list.len(s.resend) > 0 || new_end(s, conn_room) > s.next {
+        return true
+    }
+    s.fin_pending && s.next == s.written
+}
+
+fn connection_room(st: Streams) -> u64 {
+    if st.peer_max_data > st.sent_data {
+        return st.peer_max_data - st.sent_data
+    }
+    0
+}
+
+/// Lowest (urgency, order, then), then the stream that has waited longest (QUIC-1).
+fn next_stream(st: Streams) -> Option[u64] {
+    let room = connection_room(st)
+    let mut best: Option[u64] = None
+    for i in 0u64 .. list.len(st.list) {
+        if let Some(s) = st.list[i].send {
+            if has_work(s, room) {
+                let mut better = true
+                if let Some(b) = best {
+                    if let Some(other) = st.list[b].send {
+                        better = goes_before(s, other)
+                    }
+                }
+                if better {
+                    best = Some(i)
+                }
+            }
+        }
+    }
+    best
+}
+
+fn goes_before(a: Send, b: Send) -> bool {
+    if a.priority.urgency != b.priority.urgency {
+        return a.priority.urgency < b.priority.urgency
+    }
+    if a.priority.order != b.priority.order {
+        return a.priority.order < b.priority.order
+    }
+    if a.priority.then != b.priority.then {
+        return a.priority.then < b.priority.then
+    }
+    a.turn < b.turn
+}
+
+fn varint_width(n: u64) -> u64 {
+    if n < 64 {
+        1
+    } else if n < 16384 {
+        2
+    } else if n < 1073741824 {
+        4
+    } else {
+        8
+    }
+}
+
+fn copy_chunk(c: Chunk, lo: u64, hi: u64, mut out: Bytes) {
+    match c {
+        Owned(b) => list.append(mut out, list.slice(b, lo, hi)),
+        Held(h) => list.append(mut out, list.slice(h, lo, hi)),
+    }
+}
+
+/// Append stream bytes [at, at + len) from the queued pieces.
+fn copy_stream(s: Send, start: u64, len: u64, mut out: Bytes) {
+    let mut at = start
+    let end = start + len
+    let mut k = s.head
+    while at < end && k < list.len(s.pieces) {
+        let p = s.pieces[k]
+        let p_end = p.offset + p.len
+        if p_end > at {
+            let hi = order.min(end, p_end)
+            copy_chunk(p.data, at - p.offset, hi - p.offset, mut out)
+            at = hi
+        }
+        k += 1
+    }
+}
+
+/// Write one STREAM frame for stream i if one fits; false when nothing was written.
+fn write_stream_frame(mut st: Streams, i: u64, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
+    let room = cap - list.len(payload)
+    let available = connection_room(st)
+    let id = st.list[i].id
+    let turn = st.turn
+    let mut fresh = 0u64
+    let mut wrote = false
+    if let Some(mut s) = st.list[i].send {
+        wrote = write_frame_from(mut s, id, room, available, turn, mut payload, mut frames, mut fresh)
+    }
+    if wrote {
+        st.turn += 1
+        st.sent_data += fresh
+    }
+    wrote
+}
+
+fn write_frame_from(mut s: Send, id: u64, room: u64, available: u64, turn: u64, mut payload: Bytes, mut frames: List[SentFrame], mut fresh: u64) -> bool {
+    let retransmit = list.len(s.resend) > 0
+    let offset = if retransmit {
+        s.resend[0].start
+    } else {
+        s.next
+    }
+    let ready = if retransmit {
+        s.resend[0].end - s.resend[0].start
+    } else {
+        new_end(s, available) - s.next
+    }
+    let header = 1 + varint_width(id) + varint_width(offset) + 2
+    if room <= header {
+        return false
+    }
+    let len = order.min(order.min(ready, room - header), STREAM_FRAME_MAX)
+    let last = !retransmit || list.len(s.resend) == 1
+    let fin = s.fin_pending && last && offset + len == s.written && (retransmit || s.next + len == s.written)
+    if len == 0 && !fin {
+        return false
+    }
+    let mut t = 0x0au64
+    if offset != 0 {
+        t = t | 0x04
+    }
+    if fin {
+        t = t | 0x01
+    }
+    let _ = codec.write_varint(t, mut payload)
+    let _ = codec.write_varint(id, mut payload)
+    if offset != 0 {
+        let _ = codec.write_varint(offset, mut payload)
+    }
+    let _ = codec.write_varint(len, mut payload)
+    copy_stream(s, offset, len, mut payload)
+    if retransmit {
+        s.resend[0].start += len
+        if s.resend[0].start == s.resend[0].end {
+            trim_runs_below(mut s.resend, s.resend[0].end)
+        }
+    } else {
+        s.next += len
+        fresh = len
+    }
+    if fin {
+        s.fin_pending = false
+    }
+    s.turn = turn
+    list.push(mut frames, Data(stream: id, offset: offset, len: len, fin: fin))
+    true
+}
+
+const CONTROL_MAX: u64 = 41
+
+fn control(f: codec.Frame, record: SentFrame, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) -> bool {
+    if cap - list.len(payload) < CONTROL_MAX {
+        return false
+    }
+    if let Error(_) = codec.write_frame(f, b"", mut payload) {
+        return false
+    }
+    list.push(mut frames, record)
+    true
+}
+
+/// Flow-control, stop, reset and blocked frames, then the test seam's raw frames.
+fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
+    if st.max_data_pending && control(MaxData(st.max_data), MaxDataSent, cap, mut payload, mut frames) {
+        st.max_data_pending = false
+    }
+    if st.bidi_limit_pending && control(MaxStreams(bidi: true, limit: st.bidi_limit), MaxStreamsSent(true), cap, mut payload, mut frames) {
+        st.bidi_limit_pending = false
+    }
+    if st.uni_limit_pending && control(MaxStreams(bidi: false, limit: st.uni_limit), MaxStreamsSent(false), cap, mut payload, mut frames) {
+        st.uni_limit_pending = false
+    }
+    let room = connection_room(st)
+    let mut conn_blocked = false
+    for i in 0u64 .. list.len(st.list) {
+        let id = st.list[i].id
+        if let Some(mut r) = st.list[i].recv {
+            if r.limit_pending && control(MaxStreamData(stream: id, limit: r.limit), MaxStreamDataSent(id), cap, mut payload, mut frames) {
+                r.limit_pending = false
+            }
+            if let Some(code) = r.stop {
+                if r.stop_pending && control(StopSending(stream: id, code: code), StopSent(id), cap, mut payload, mut frames) {
+                    r.stop_pending = false
+                }
+            }
+        }
+        if let Some(mut s) = st.list[i].send {
+            if let Some(x) = s.reset {
+                let f: codec.Frame = if x.reliable == 0 {
+                    ResetStream(stream: id, code: x.code, final_size: x.final_size)
+                } else {
+                    ResetStreamAt(stream: id, code: x.code, final_size: x.final_size, reliable_size: x.reliable)
+                }
+                if s.reset_pending && control(f, ResetSent(id), cap, mut payload, mut frames) {
+                    s.reset_pending = false
+                }
+            }
+            if s.next == s.credit && s.written > s.credit && s.blocked_at != Some(s.credit) {
+                if control(StreamDataBlocked(stream: id, limit: s.credit), StreamBlockedSent(id), cap, mut payload, mut frames) {
+                    s.blocked_at = Some(s.credit)
+                }
+            }
+            if room == 0 && order.min(s.written, s.credit) > s.next {
+                conn_blocked = true
+            }
+        }
+    }
+    if conn_blocked && st.data_blocked_at != Some(st.peer_max_data) {
+        if control(DataBlocked(st.peer_max_data), DataBlockedSent, cap, mut payload, mut frames) {
+            st.data_blocked_at = Some(st.peer_max_data)
+        }
+    }
+    if list.len(st.seam) > 0 && cap - list.len(payload) >= list.len(st.seam) {
+        list.append(mut payload, st.seam)
+        list.clear(mut st.seam)
+        list.push(mut frames, Raw)
+    }
+}
+
+/// Fill the rest of a 1-RTT payload: control frames, then STREAM frames by priority.
+fn fill_streams(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
+    if !st.ready {
+        return
+    }
+    control_frames(mut st, cap, mut payload, mut frames)
+    while cap - list.len(payload) > 4 {
+        let Some(i) = next_stream(st) else {
+            return
+        }
+        if !write_stream_frame(mut st, i, cap, mut payload, mut frames) {
+            return
+        }
+    }
+}
+
+/// Free queued pieces wholly below the acknowledged floor.
+fn free_pieces(mut s: Send) {
+    while s.head < list.len(s.pieces) && s.pieces[s.head].offset + s.pieces[s.head].len <= s.floor {
+        s.pieces[s.head].data = Owned(b"")
+        s.head += 1
+    }
+    if s.head == list.len(s.pieces) {
+        list.clear(mut s.pieces)
+        s.head = 0
+    } else if s.head >= 64 && 2 * s.head >= list.len(s.pieces) {
+        let rest: List[Piece] = clone(list.slice(s.pieces, s.head, list.len(s.pieces)))
+        s.pieces = take rest
+        s.head = 0
+    }
+}
+
+/// One acknowledged frame. Returns the send memory it freed.
+fn ack_frame(mut st: Streams, handle: ConnectionHandle, f: SentFrame, mut events: List[Event]) -> u64 {
+    let id = match f {
+        Data(stream: id, ..) => id,
+        ResetSent(id) => id,
+        _ => return 0,
+    }
+    let Some(i) = find(st, id) else {
+        return 0
+    }
+    let mut freed = 0u64
+    let mut done = false
+    if let Some(mut s) = st.list[i].send {
+        match f {
+            Data(offset: offset, len: len, fin: fin, ..) => {
+                let end = order.min(offset + len, s.written)
+                if end > s.floor {
+                    add_run(mut s.acked, order.max(offset, s.floor), end)
+                }
+                let mut floor = s.floor
+                let mut k = 0u64
+                while k < list.len(s.acked) && s.acked[k].start <= floor {
+                    floor = order.max(floor, s.acked[k].end)
+                    k += 1
+                }
+                trim_runs_below(mut s.acked, floor)
+                freed = floor - s.floor
+                s.floor = floor
+                free_pieces(mut s)
+                if fin {
+                    s.fin_acked = true
+                }
+                if s.fin_acked && s.floor == s.written && !s.acked_reported {
+                    if let None = s.reset {
+                        s.acked_reported = true
+                        done = true
+                    }
+                }
+            },
+            _ => {
+                s.reset_acked = true
+            },
+        }
+    }
+    if done {
+        list.push(mut events, Acked(handle, StreamId(id)))
+    }
+    freed
+}
+
+/// QS5's verdict for application packets: frames of an acknowledged packet settle,
+/// frames of a lost one go back on their queues.
+fn settle_streams(mut st: Streams, handle: ConnectionHandle, acked: List[u64], lost: List[u64], mut events: List[Event]) {
+    if list.len(st.inflight) == 0 {
+        return
+    }
+    let mut packets = replace(mut st.inflight, list.new())
+    for i in 0u64 .. list.len(packets) {
+        let p = list.set(mut packets, i, SentPacket(number: 0, frames: list.new()))
+        if contains(acked, p.number) {
+            for f in p.frames {
+                let freed = ack_frame(mut st, handle, f, mut events)
+                st.held -= freed
+            }
+        } else if contains(lost, p.number) {
+            requeue(mut st, p.frames)
+        } else {
+            list.push(mut st.inflight, take p)
+        }
+    }
+    wake_writers(mut st, handle, mut events)
+    retire(mut st)
+}
+
+/// Put an abandoned or lost packet's frames back on their queues. Bytes a
+/// reset has discarded since are not requeued (QUIC-1 Commit, QUIC-5).
+fn requeue(mut st: Streams, frames: List[SentFrame]) {
+    for f in frames {
+        match f {
+            MaxDataSent => {
+                st.max_data_pending = true
+            },
+            MaxStreamsSent(bidi) => {
+                if bidi {
+                    st.bidi_limit_pending = true
+                } else {
+                    st.uni_limit_pending = true
+                }
+            },
+            DataBlockedSent => (),
+            Raw => (),
+            Data(stream: id, offset: offset, len: len, fin: fin) => {
+                if let Some(i) = find(st, id) {
+                    if let Some(mut s) = st.list[i].send {
+                        let mut end = order.min(offset + len, s.written)
+                        if let Some(x) = s.reset {
+                            end = order.min(end, x.reliable)
+                        }
+                        add_run(mut s.resend, order.max(offset, s.floor), end)
+                        if fin && s.fin {
+                            s.fin_pending = true
+                        }
+                    }
+                }
+            },
+            ResetSent(id) => {
+                if let Some(i) = find(st, id) {
+                    if let Some(mut s) = st.list[i].send {
+                        s.reset_pending = true
+                    }
+                }
+            },
+            StopSent(id) => {
+                if let Some(i) = find(st, id) {
+                    if let Some(mut r) = st.list[i].recv {
+                        r.stop_pending = true
+                    }
+                }
+            },
+            MaxStreamDataSent(id) => {
+                if let Some(i) = find(st, id) {
+                    if let Some(mut r) = st.list[i].recv {
+                        r.limit_pending = true
+                    }
+                }
+            },
+            StreamBlockedSent(id) => {
+                if let Some(i) = find(st, id) {
+                    if let Some(mut s) = st.list[i].send {
+                        s.blocked_at = None
+                    }
+                }
+            },
+        }
+    }
+}
+
+fn recv_done(recv: Option[Recv]) -> bool {
+    if let Some(r) = recv {
+        if let Some(x) = r.reset {
+            return r.read >= x.reliable
+        }
+        if let Some(f) = r.final_size {
+            return r.read == f
+        }
+        return false
+    }
+    true
+}
+
+fn send_done(send: Option[Send]) -> bool {
+    if let Some(s) = send {
+        if let Some(x) = s.reset {
+            return s.reset_acked && s.floor >= x.reliable
+        }
+        return s.acked_reported
+    }
+    true
+}
+
+/// Forget streams both of whose sides are finished, returning their pages and raising
+/// the peer's MAX_STREAMS for each peer-opened one (RFC 9000 §4.6).
+fn retire(mut st: Streams) {
+    let mut i = 0u64
+    while i < list.len(st.list) {
+        if recv_done(st.list[i].recv) && send_done(st.list[i].send) {
+            let id = st.list[i].id
+            if let Some(mut r) = st.list[i].recv {
+                release_all(mut st.pool, mut r)
+            }
+            if !local_stream(st, id) {
+                if uni(id) {
+                    st.uni_limit += 1
+                    st.uni_limit_pending = true
+                } else {
+                    st.bidi_limit += 1
+                    st.bidi_limit_pending = true
+                }
+            }
+            let last = list.len(st.list) - 1
+            list.swap(mut st.list, i, last)
+            let _ = list.pop(mut st.list)
+        } else {
+            i += 1
+        }
+    }
+}

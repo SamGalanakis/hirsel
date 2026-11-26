@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""QUIC QS3 interop: law Q4 `handshake_against_quinn_and_quiche`, handshake only, and the
-live part of Q16 `pin_mismatch_refuses` (docs/spec/quic.md, Laws).
+"""QUIC interop: law Q4 `handshake_against_quinn_and_quiche`, its handshake and stream
+transfer halves (datagrams are QS7), and the live part of Q16 `pin_mismatch_refuses`
+(docs/spec/quic.md, Laws).
 
 Builds interop.hirsel with the given compiler and runtime, builds interop_quinn.rs against
 quinn at QUINN_COMMIT (a clone outside the repo, /tmp/ref-quinn by default), and runs the
@@ -10,7 +11,9 @@ one cipher suite and one key-exchange group.
 The oracle is quinn's own view: its handshake completes, the ALPN it reports is ours, and
 the transport parameters it decoded from us (rustls's `quic_transport_parameters`, through
 quinn-proto's `TransportParameters`) are the ones the Hirsel endpoint was configured with.
-The reverse is checked against quinn's own parameters as quinn encoded them. Certificate
+The reverse is checked against quinn's own parameters as quinn encoded them. A transfer
+case moves TRANSFER bytes of pattern() each way on one bidirectional stream; the oracle is
+hashlib's SHA-256 of the pattern, which both receivers' digests and counts must match. Certificate
 pins are SHA-256 digests OpenSSL prints. Client-pin refusals carry the RFC 8446 alerts
 `bad_certificate` (0x012a) and `certificate_required` (0x0174) as quinn reads them
 (RFC 9001 §4.8).
@@ -19,6 +22,7 @@ Usage: interop.py --compiler HIRSEL --runtime LIBHIRSEL_CORE_RT.a --scratch DIR
                   [--quinn /tmp/ref-quinn]
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +37,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 QUINN_COMMIT = '75d08d9'
 DEADLINE = 20
+TRANSFER_DEADLINE = 120
+TRANSFER = 10 * 1024 * 1024
 ALPN = 'hq-interop'
 
 # interop.hirsel's TransportConfig and EndpointConfig, as quinn must read them (RFC 9000 §18.2).
@@ -47,6 +53,21 @@ HIRSEL_PARAMS = {
     'initial_max_streams_uni': 0,
     'active_connection_id_limit': 8,
 }
+
+# interop.hirsel's transfer TransportConfig (WINDOW, STREAM_WINDOW, one bidi stream).
+HIRSEL_TRANSFER_PARAMS = HIRSEL_PARAMS | {
+    'initial_max_data': 4194304,
+    'initial_max_stream_data_bidi_local': 1048576,
+    'initial_max_stream_data_bidi_remote': 1048576,
+    'initial_max_stream_data_uni': 1048576,
+    'initial_max_streams_bidi': 1,
+}
+
+
+def pattern(n):
+    """Byte i is (31 i + 7) mod 256, as interop.hirsel and interop_quinn.rs write it."""
+    period = bytes((i * 31 + 7) & 0xff for i in range(256))
+    return (period * (n // 256 + 1))[:n]
 
 
 def library(name, extra=()):
@@ -180,36 +201,51 @@ def check_hirsel_read_quinn(ours, peer, end):
         raise AssertionError(f'Hirsel read {read}, quinn sent {expected}')
 
 
-def check_quinn_read_hirsel(peer, end):
+def check_quinn_read_hirsel(peer, end, expected):
     read = peer.expect(r'^params (.*)$', end)[1]
     decoded = quinn_params(read)
-    wrong = {k: (decoded.get(k), v) for k, v in HIRSEL_PARAMS.items() if decoded.get(k) != v}
+    wrong = {k: (decoded.get(k), v) for k, v in expected.items() if decoded.get(k) != v}
     if wrong or 'max_datagram_frame_size: None' not in read:
         raise AssertionError(f'quinn read {read}; differing (quinn, ours): {wrong}')
 
 
+def check_transfer(ours, peer, end, size):
+    """Both receivers saw exactly the pattern: count and SHA-256 from hashlib."""
+    digest = hashlib.sha256(pattern(size)).hexdigest()
+    count, got = peer.expect(r'^received (\d+) ([0-9a-f]{64})$', end).groups()
+    if (int(count), got) != (size, digest):
+        raise AssertionError(f'quinn received {count} bytes {got}, sent {size} bytes {digest}')
+    count, got = ours.expect(r'^received ([0-9a-f]{16}) ([0-9a-f]{64})$', end).groups()
+    if (int(count, 16), got) != (size, digest):
+        raise AssertionError(f'Hirsel received {int(count, 16)} bytes {got}, sent {size} bytes {digest}')
+
+
 def run_case(hirsel, quinn, certs, case):
-    end = time.monotonic() + DEADLINE
+    size = case.get('transfer', 0)
+    end = time.monotonic() + (TRANSFER_DEADLINE if size else DEADLINE)
+    extra = ['transfer', size] if size else []
+    ours_extra = [size] if size else []
+    started = time.monotonic()
     children = []
     try:
         if case['quinn'] == 'server':
-            peer = Process([quinn, 'server', certs['server']['der'], certs['server']['key_der'], case['suite'], case['group']])
+            peer = Process([quinn, 'server', certs['server']['der'], certs['server']['key_der'], case['suite'], case['group']] + extra)
             children.append(peer)
             port = peer.expect(r'^bound (\d+)$', end)[1]
-            ours = Process([hirsel, 'client', port, case.get('pin', certs['server']['pin'])])
+            ours = Process([hirsel, 'client', port, case.get('pin', certs['server']['pin'])] + ours_extra)
             children.append(ours)
         else:
             required = case.get('client_pins', 'none')
             if required == 'client':
                 required = certs['client']['pin']
-            ours = Process([hirsel, 'server', required])
+            ours = Process([hirsel, 'server', required] + ours_extra)
             children.append(ours)
             port = int(ours.expect(r'^bound ([0-9a-f]{4})$', end)[1], 16)
             pin = ours.expect(r'^certificate ([0-9a-f]{64})$', end)[1]
             argv = [quinn, 'client', port, pin, case['suite'], case['group']]
             if case.get('client_cert'):
                 argv += [certs['client']['der'], certs['client']['key_der']]
-            peer = Process(argv)
+            peer = Process(argv + extra)
             children.append(peer)
 
         refusal = case.get('refused')
@@ -228,17 +264,26 @@ def run_case(hirsel, quinn, certs, case):
                 raise AssertionError(f'quinn negotiated ALPN {alpn!r}')
             if (alpn := ours.expect(r'^connected (.*)$', end)[1]) != ALPN:
                 raise AssertionError(f'Hirsel reports ALPN {alpn!r}')
-            check_quinn_read_hirsel(peer, end)
+            check_quinn_read_hirsel(peer, end, HIRSEL_TRANSFER_PARAMS if size else HIRSEL_PARAMS)
             check_hirsel_read_quinn(ours, peer, end)
             if case.get('client_pins') == 'client':
                 if (got := ours.expect(r'^peer ([0-9a-f]{64})$', end)[1]) != certs['client']['pin']:
                     raise AssertionError(f'Hirsel pinned client {got}, OpenSSL printed {certs["client"]["pin"]}')
-            peer.expect(r'^closed$', end)
-            if (got := ours.expect(r'^closed (.*)$', end)[1]) != 'application 0000000000000000':
-                raise AssertionError(f'Hirsel saw the close as {got}')
+            if size:
+                check_transfer(ours, peer, end, size)
+            if size and case['quinn'] == 'server':
+                # The Hirsel client closes once it has its echo.
+                if (got := peer.expect(r'^error (.*)$', end)[1]) != 'application 0':
+                    raise AssertionError(f'quinn saw the close as {got}')
+            else:
+                peer.expect(r'^closed$', end)
+                if (got := ours.expect(r'^closed (.*)$', end)[1]) != 'application 0000000000000000':
+                    raise AssertionError(f'Hirsel saw the close as {got}')
         for child in children:
             if child.child.wait(timeout=max(1, end - time.monotonic())) != 0:
                 raise AssertionError(f'{Path(child.argv[0]).name} exited nonzero:\n' + '\n'.join(child.seen[-20:]))
+        if size:
+            print(f'  {2 * size} bytes in {time.monotonic() - started:.1f} s', flush=True)
     finally:
         for child in children:
             child.stop()
@@ -270,6 +315,11 @@ CASES = [
     {'name': 'quinn client without a certificate / hirsel server refuses certificate_required', 'quinn': 'client',
      'suite': 'TLS13_AES_128_GCM_SHA256', 'group': 'X25519', 'client_pins': 'client',
      'refused': ('certificate', 0x0174)},
+    # Q4's transfer half: 10 MiB each way on one stream.
+    {'name': 'quinn client / hirsel server, 10 MiB each way on one stream', 'quinn': 'client',
+     'suite': 'TLS13_AES_128_GCM_SHA256', 'group': 'X25519', 'transfer': TRANSFER},
+    {'name': 'quinn server / hirsel client, 10 MiB each way on one stream', 'quinn': 'server',
+     'suite': 'TLS13_AES_128_GCM_SHA256', 'group': 'X25519', 'transfer': TRANSFER},
 ]
 
 
@@ -281,6 +331,7 @@ def main():
     parser.add_argument('--cc', type=Path, default=ROOT / 'tools/buck2/toolchains/llvm-files/bin/hirsel-clang')
     parser.add_argument('--quinn', type=Path, default=Path('/tmp/ref-quinn'))
     parser.add_argument('--only', help='run the cases whose name contains this text')
+    parser.add_argument('--transfer', type=int, default=TRANSFER, help='bytes each way in a transfer case')
     args = parser.parse_args()
     args.scratch = args.scratch.resolve()
     args.scratch.mkdir(parents=True, exist_ok=True)
@@ -292,6 +343,8 @@ def main():
         if args.only and args.only not in case['name']:
             continue
         case = dict(case)
+        if 'transfer' in case:
+            case['transfer'] = args.transfer
         if case.get('client_pins') == 'other':
             case['client_pins'] = off_by_one_bit(certs['client']['pin'])
         try:

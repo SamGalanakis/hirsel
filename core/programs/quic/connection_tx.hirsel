@@ -7,7 +7,8 @@ type StagedPacket {
     ack: bool,
     done: bool,
     close: bool,
-    eliciting: bool
+    eliciting: bool,
+    frames: List[SentFrame]
 }
 
 /// The ack_delay_exponent this endpoint advertises (RFC 9000 §18.2 default).
@@ -15,7 +16,7 @@ const ACK_DELAY_EXPONENT: u64 = 3
 
 /// Stage one packet of `kind`. Without `send`, the congestion controller or pacer holds
 /// new ack-eliciting frames back; an owed probe is sent regardless (RFC 9002 §7.5).
-fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, mut out: Bytes) -> Option[StagedPacket] {
+fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], limit: u64, now: u64, send: bool, mut out: Bytes) -> Option[StagedPacket] {
     if let None = s.send {
         return None
     }
@@ -38,6 +39,7 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
     let mut done_sent = false
     let mut closed = false
     let mut eliciting = false
+    let mut frames: List[SentFrame] = list.new()
     if let Some(f) = closing {
         let len = order.min(list.len(f.reason), cap - order.min(cap, 27))
         let reason = codec.Span(at: 0, len: len)
@@ -106,6 +108,10 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
                     eliciting = true
                 }
             }
+            if fill && kind == OneRtt {
+                fill_streams(mut st, cap, mut payload, mut frames)
+                eliciting = eliciting || list.len(frames) > 0
+            }
             if probe && !eliciting && list.len(payload) < cap {
                 if let Ok(()) = codec.write_frame(Ping, b"", mut payload) {
                     eliciting = true
@@ -117,9 +123,10 @@ fn tx_space(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, do
         return None
     }
     let Some(number) = seal_packet(mut s, kind, dest, source, payload, padding, mut out) else {
+        requeue(mut st, frames)
         return None
     }
-    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting))
+    Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, frames: take frames))
 }
 
 fn commit_space(mut s: Space, p: StagedPacket) {

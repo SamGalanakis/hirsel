@@ -1,0 +1,447 @@
+// QS4 stream laws: Q11 and the Q3 stream rows. Peers that break the rules speak through
+// quic.send_frames, which puts raw frames in their next 1-RTT packet.
+const KIB: u64 = 1024
+
+fn stream_transport(window: u64, stream_window: u64, send_bytes: u64) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, "h3")
+    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: window, initial_max_stream_data: stream_window, max_streams_bidi: 4, max_streams_uni: 4, max_datagram_frame: 0, send_bytes: send_bytes, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: None)
+}
+
+fn stream_server(take t: quic.TransportConfig) -> quic.Endpoint {
+    result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), take t))))
+}
+
+fn pattern(n: u64, seed: u64) -> Bytes {
+    let mut b: Bytes = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut b, int.narrow((i * 31 + seed) & 0xff))
+    }
+    take b
+}
+
+/// One poll of sender, every datagram committed and delivered. wire and packets are the
+/// caller's, so a bounded scope can lend them. Returns the datagram count.
+fn pump(mut sender: quic.Endpoint, mut receiver: quic.Endpoint, from: Addr, now: u64, mut wire: Bytes, mut packets: List[quic.Output], mut events: List[quic.Event]) -> u64 {
+    list.clear(mut wire)
+    list.clear(mut packets)
+    let _ = quic.poll(mut sender, now, mut wire, mut packets)
+    let mut count = 0u64
+    for output in packets {
+        if let Transmit(..) = output {
+            count += 1
+        }
+    }
+    quic.committed(mut sender, now, count)
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            quic.receive_datagram(mut receiver, now, from, 0, mut wire, at, len, mut events)
+        }
+    }
+    count
+}
+
+fn settle(mut client: quic.Endpoint, mut server: quic.Endpoint, now: u64, mut at_server: List[quic.Event], mut at_client: List[quic.Event]) {
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    for _ in 0u64 .. 4000 {
+        let a = pump(mut client, mut server, CLIENT_ADDR, now, mut wire, mut packets, mut at_server)
+        let b = pump(mut server, mut client, SERVER_ADDR, now, mut wire, mut packets, mut at_client)
+        if a == 0 && b == 0 {
+            return
+        }
+    }
+    fail("the endpoints never went quiet")
+}
+
+/// Handshake a client against server; returns (client handle, server handle).
+fn handshake_pair(mut client: quic.Endpoint, mut server: quic.Endpoint, take t: quic.TransportConfig) -> (quic.ConnectionHandle, quic.ConnectionHandle) {
+    let c = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, take t))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    settle(mut client, mut server, 1, mut at_server, mut at_client)
+    if list.len(at_server) != 1 || list.len(at_client) != 1 {
+        fail("handshake events")
+    }
+    (c, connected_peer(at_server[0]))
+}
+
+fn transport_close(events: List[quic.Event], code: u64, frame: u64) -> bool {
+    for event in events {
+        if let Closed(_, Transport(code: got, frame: got_frame)) = event {
+            return got == code && got_frame == frame
+        }
+    }
+    false
+}
+
+/// A hostile client sends frames; the server must close with RFC 9000's code and frame.
+fn hostile_close(take server_t: quic.TransportConfig, first: Bytes, second: Bytes, code: u64, frame: u64) {
+    let mut server = stream_server(take server_t)
+    let mut client = qs3_client()
+    let (c, _) = handshake_pair(mut client, mut server, stream_transport(64 * KIB, 16 * KIB, 64 * KIB))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    result.unwrap(quic.send_frames(mut client, c, first))
+    settle(mut client, mut server, 2, mut at_server, mut at_client)
+    if list.len(second) != 0 {
+        result.unwrap(quic.send_frames(mut client, c, second))
+        settle(mut client, mut server, 3, mut at_server, mut at_client)
+    }
+    if !transport_close(at_server, code, frame) || !transport_close(at_client, code, frame) {
+        fail("stream refusal has the wrong transport close")
+    }
+}
+
+/// Bytes below a RESET_STREAM_AT reliable size are delivered and nothing past it; a later
+/// larger reliable size is ignored (reliable-stream-reset-11 §§4–5).
+fn check_reliable_delivery() {
+    let mut server = stream_server(stream_transport(64 * KIB, 16 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, s) = handshake_pair(mut client, mut server, stream_transport(64 * KIB, 16 * KIB, 64 * KIB))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let id = result.unwrap(quic.open(mut client, c, true))
+    let sent = pattern(100, 5)
+    if result.unwrap(quic.write(mut client, c, id, sent, false)) != 100 {
+        fail("a write within credit and send_bytes came back short")
+    }
+    settle(mut client, mut server, 2, mut at_server, mut at_client)
+    result.unwrap(quic.reset(mut client, c, id, 7, 40))
+    // A reordered RESET_STREAM_AT with a larger reliable size (60) must be ignored.
+    result.unwrap(quic.send_frames(mut client, c, b"\x24\x00\x07\x40\x64\x3c"))
+    settle(mut client, mut server, 3, mut at_server, mut at_client)
+    let mut reported = false
+    for event in at_server {
+        if let Reset(code: 7, final_size: 100, ..) = event {
+            reported = true
+        }
+    }
+    if !reported {
+        fail("RESET_STREAM_AT did not report its code and final size")
+    }
+    let mut into: Bytes = list.with_capacity(256)
+    let (n, fin) = result.unwrap(quic.read(mut server, s, id, mut into))
+    if n != 40 || fin || into != list.slice(sent, 0, 40) {
+        fail("bytes below the reliable size were not delivered exactly")
+    }
+    match quic.read(mut server, s, id, mut into) {
+        Error(StreamReset(7)) => (),
+        _ => fail("a read past the reliable size did not report the reset"),
+    }
+}
+
+/// QUIC-5 max_gaps: the 33rd out-of-order range is dropped unacknowledged, as if lost, and
+/// is taken when it arrives again after a gap has closed.
+fn check_gap_cap() {
+    let mut server = stream_server(stream_transport(64 * KIB, 16 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, s) = handshake_pair(mut client, mut server, stream_transport(64 * KIB, 16 * KIB, 64 * KIB))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    // 32 one-byte STREAM frames (type 0x0e) on stream 0 at offsets 2, 4, ..., 64.
+    // Offsets are two-byte varints (0x40 prefix): 64 does not fit one byte.
+    let mut frames: Bytes = list.with_capacity(32 * 6)
+    for k in 1u64 .. 33 {
+        list.push(mut frames, 0x0e)
+        list.push(mut frames, 0)
+        list.push(mut frames, 0x40)
+        list.push(mut frames, int.narrow(2 * k))
+        list.push(mut frames, 1)
+        list.push(mut frames, int.narrow(2 * k))
+    }
+    result.unwrap(quic.send_frames(mut client, c, frames))
+    settle(mut client, mut server, 2, mut at_server, mut at_client)
+    let mut opened: Option[quic.StreamId] = None
+    for event in at_server {
+        if let Opened(_, id) = event {
+            opened = Some(id)
+        }
+    }
+    let Some(stream) = opened else {
+        fail("the peer's stream 0 was not reported opened")
+    }
+    if quic.received(server, s, stream) != 65 || quic.drop_count(server, Gaps) != 0 {
+        fail("32 out-of-order ranges must all be held")
+    }
+    let late: Bytes = b"\x0e\x00\x40\x42\x01\x42"
+    result.unwrap(quic.send_frames(mut client, c, late))
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    if pump(mut client, mut server, CLIENT_ADDR, 3, mut wire, mut packets, mut at_server) != 1 {
+        fail("the 33rd range did not go out")
+    }
+    if pump(mut server, mut client, SERVER_ADDR, 3, mut wire, mut packets, mut at_client) != 0 {
+        fail("the dropped packet was acknowledged")
+    }
+    if quic.received(server, s, stream) != 65 || quic.drop_count(server, Gaps) != 1 {
+        fail("the 33rd out-of-order range was kept")
+    }
+    // Bytes 0 and 1 join the first range to the read point: 31 gaps remain.
+    result.unwrap(quic.send_frames(mut client, c, b"\x0a\x00\x02\x00\x01"))
+    settle(mut client, mut server, 4, mut at_server, mut at_client)
+    result.unwrap(quic.send_frames(mut client, c, late))
+    settle(mut client, mut server, 5, mut at_server, mut at_client)
+    if quic.received(server, s, stream) != 67 || quic.drop_count(server, Gaps) != 1 {
+        fail("the retransmitted range was not taken")
+    }
+    let mut into: Bytes = list.with_capacity(8)
+    let (n, _) = result.unwrap(quic.read(mut server, s, stream, mut into))
+    if n != 3 || into != b"\x00\x01\x02" {
+        fail("contiguous bytes after the gap closed")
+    }
+}
+
+/// The Q3 stream rows QS3 deferred: credit, limits, reset sizes and the gap cap.
+fn check_stream_refusals() {
+    // Stream credit is 1024: one byte at offset 1024 is FLOW_CONTROL_ERROR (RFC 9000 §4.1).
+    hostile_close(stream_transport(64 * KIB, KIB, 64 * KIB), b"\x0e\x00\x44\x00\x01\x58", b"", 0x03, 0x0e)
+    // Stream index 4 of a 4-stream limit is STREAM_LIMIT_ERROR (§4.6).
+    hostile_close(stream_transport(64 * KIB, KIB, 64 * KIB), b"\x0a\x10\x01\x58", b"", 0x04, 0x0a)
+    // Reliable size 2 above final size 1 is FRAME_ENCODING_ERROR (reliable-stream-reset-11 §4).
+    hostile_close(stream_transport(64 * KIB, KIB, 64 * KIB), b"\x24\x00\x00\x01\x02", b"", 0x07, 0x24)
+    // A changed error code is STREAM_STATE_ERROR, a changed final size FINAL_SIZE_ERROR (§5).
+    hostile_close(stream_transport(64 * KIB, KIB, 64 * KIB), b"\x24\x00\x01\x0a\x05", b"\x24\x00\x02\x0a\x05", 0x05, 0x24)
+    hostile_close(stream_transport(64 * KIB, KIB, 64 * KIB), b"\x04\x00\x01\x0a", b"\x04\x00\x01\x0b", 0x06, 0x04)
+    check_reliable_delivery()
+    check_gap_cap()
+}
+
+type Step = In(u64, Bytes) | Out(u64) | Tick(u64)
+
+/// Run 1 of the receive half: an honest client sends at full connection credit over four
+/// streams whose stream windows sum to twice it, the server reads nothing, then the client
+/// sends one byte past credit. The clock moves 1 ms a round, so congestion control and
+/// pacing (QS5) let the flood through. Returns the server's inputs in order, for replay.
+fn record_flood(window: u64) -> List[Step] {
+    let mut server = stream_server(stream_transport(window, window / 2, 16 * KIB))
+    let mut client = qs3_client()
+    let c = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, stream_transport(0, 0, 4 * window)))
+    let mut steps: List[Step] = list.new()
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut events: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let mut queued = false
+    let mut hostile = false
+    let mut quiet = 0u64
+    let mut now = 0u64
+    for _ in 0u64 .. 4000 {
+        now += MS
+        quic.timeout(mut client, now, mut at_client)
+        quic.timeout(mut server, now, mut events)
+        list.push(mut steps, Tick(now))
+        list.clear(mut wire)
+        list.clear(mut packets)
+        let _ = quic.poll(mut client, now, mut wire, mut packets)
+        let mut sent = 0u64
+        for output in packets {
+            if let Transmit(..) = output {
+                sent += 1
+            }
+        }
+        quic.committed(mut client, now, sent)
+        for output in packets {
+            if let Transmit(at: at, len: len, ..) = output {
+                list.push(mut steps, In(now, clone(list.slice(wire, at, at + len))))
+                quic.receive_datagram(mut server, now, CLIENT_ADDR, 0, mut wire, at, len, mut events)
+            }
+        }
+        list.push(mut steps, Out(now))
+        let back = pump(mut server, mut client, SERVER_ADDR, now, mut wire, mut packets, mut at_client)
+        if sent == 0 && back == 0 {
+            quiet += 1
+        } else {
+            quiet = 0
+        }
+        if !queued && list.len(events) > 0 {
+            let mut total = 0u64
+            let data = pattern(window, 1)
+            for _ in 0u64 .. 4 {
+                let id = result.unwrap(quic.open(mut client, c, true))
+                total += result.unwrap(quic.write(mut client, c, id, data, true))
+            }
+            if total != window {
+                fail("the client did not queue exactly the connection credit")
+            }
+            queued = true
+        } else if queued && quiet >= 100 {
+            if hostile {
+                return take steps
+            }
+            // Stream 8 is within its own credit, but the connection's is spent.
+            result.unwrap(quic.send_frames(mut client, c, b"\x0a\x08\x01\x58"))
+            hostile = true
+            quiet = 0
+        }
+    }
+    fail("the flood never went quiet")
+}
+
+/// Replay run 1's inputs into a fresh server with the same seed: the same server, alone.
+/// Returns the bytes it took on the four streams; Closed must be FLOW_CONTROL_ERROR.
+fn replay_flood(steps: List[Step], window: u64, mut scratch: Bytes, mut wire: Bytes, mut packets: List[quic.Output], mut events: List[quic.Event]) -> u64 {
+    let mut server = stream_server(stream_transport(window, window / 2, 16 * KIB))
+    let mut handle: Option[quic.ConnectionHandle] = None
+    let mut streams: List[quic.StreamId] = list.with_capacity(8)
+    let mut refused = false
+    let mut taken = 0u64
+    for step in steps {
+        match step {
+            Tick(now) => quic.timeout(mut server, now, mut events),
+            In(now, d) => {
+                list.clear(mut scratch)
+                list.append(mut scratch, d)
+                quic.receive_datagram(mut server, now, CLIENT_ADDR, 0, mut scratch, 0, list.len(d), mut events)
+            },
+            Out(now) => {
+                list.clear(mut wire)
+                list.clear(mut packets)
+                let _ = quic.poll(mut server, now, mut wire, mut packets)
+                let mut sent = 0u64
+                for output in packets {
+                    if let Transmit(..) = output {
+                        sent += 1
+                    }
+                }
+                quic.committed(mut server, now, sent)
+            },
+        }
+        for event in events {
+            if let Closed(..) = event {
+                // Count before the closing period ends and the connection goes.
+                if let Some(h) = handle {
+                    for id in streams {
+                        taken += quic.received(server, h, id)
+                    }
+                }
+            }
+        }
+        for event in events {
+            match event {
+                Connected(c: c, ..) => {
+                    handle = Some(c)
+                },
+                Opened(_, id) => {
+                    list.push(mut streams, id)
+                },
+                Closed(_, Transport(code: 0x03, frame: 0x0a)) => {
+                    refused = true
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+    }
+    if !refused {
+        fail("a STREAM frame past connection credit was not FLOW_CONTROL_ERROR")
+    }
+    taken
+}
+
+// The receiver's fixed connection cost, the same at every window (QUIC-9): endpoint,
+// spaces, TLS and the pool's slack pages. A receiver that held more than its credit, or
+// sized its pool by anything but the window, passes window + FIXED at the larger window.
+const FIXED: u64 = 512 * 1024
+
+fn receive_bound(window: u64) {
+    let steps = record_flood(window)
+    let mut scratch: Bytes = list.with_capacity(2048)
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let mut events: List[quic.Event] = list.with_capacity(4096)
+    let total = match (bound bytes (window + FIXED) {
+        replay_flood(steps, window, mut scratch, mut wire, mut packets, mut events)
+    }) {
+        Ok(n) => n,
+        Error(_) => fail("bound scope refused"),
+    }
+    if total != window {
+        fail("the receiver did not take exactly its connection credit")
+    }
+}
+
+// What a sender holds besides queued bytes while its packets are in flight: sent-packet
+// records and queue entries, independent of send_bytes.
+const SEND_FIXED: u64 = 32 * 1024
+
+const SEND_BYTES: u64 = 64 * 1024
+
+/// The peer grants 2^62 of credit and acknowledges nothing; inside the bound the client
+/// writes until refused and sends it all. Returns (accepted, write_shared result, later write).
+fn send_until_refused(mut client: quic.Endpoint, c: quic.ConnectionHandle, id: quic.StreamId, chunk: Bytes, mut wire: Bytes, mut packets: List[quic.Output]) -> (u64, bool, u64) {
+    let mut accepted = 0u64
+    while true {
+        let n = result.unwrap(quic.write(mut client, c, id, chunk, false))
+        accepted += n
+        if n < list.len(chunk) {
+            break
+        }
+    }
+    list.clear(mut wire)
+    list.clear(mut packets)
+    let _ = quic.poll(mut client, 3, mut wire, mut packets)
+    let mut sent = 0u64
+    for output in packets {
+        if let Transmit(..) = output {
+            sent += 1
+        }
+    }
+    quic.committed(mut client, 3, sent)
+    let shared_taken = result.unwrap(quic.write_shared(mut client, c, id, shared.new(b"x"), false))
+    let later = result.unwrap(quic.write(mut client, c, id, chunk, false))
+    (accepted, shared_taken, later)
+}
+
+fn send_bound() {
+    // The server honestly receives up to 256 KiB; its seam frames claim 2^62.
+    let mut server = stream_server(stream_transport(256 * KIB, 256 * KIB, 64 * KIB))
+    let mut client = qs3_client()
+    let (c, s) = handshake_pair(mut client, mut server, stream_transport(0, 0, SEND_BYTES))
+    let id = result.unwrap(quic.open(mut client, c, true))
+    // MAX_DATA and MAX_STREAM_DATA(0) of 2^62 - 1.
+    result.unwrap(quic.send_frames(mut server, s, b"\x10\xff\xff\xff\xff\xff\xff\xff\xff\x11\x00\xff\xff\xff\xff\xff\xff\xff\xff"))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    settle(mut client, mut server, 2, mut at_server, mut at_client)
+    let chunk = pattern(16 * KIB, 9)
+    let mut wire: Bytes = list.with_capacity(64 * 1200)
+    let mut packets: List[quic.Output] = list.with_capacity(65)
+    let (accepted, shared_taken, later) = match (bound bytes (SEND_BYTES + SEND_FIXED) {
+        send_until_refused(mut client, c, id, chunk, mut wire, mut packets)
+    }) {
+        Ok(r) => r,
+        Error(_) => fail("bound scope refused"),
+    }
+    if accepted != SEND_BYTES || shared_taken || later != 0 {
+        fail("send_bytes did not bound queued and unacknowledged bytes")
+    }
+    // Deliver what was sent; the server's acknowledgement must bring Writable.
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            quic.receive_datagram(mut server, 4, CLIENT_ADDR, 0, mut wire, at, len, mut at_server)
+        }
+    }
+    let mut back: Bytes = list.with_capacity(64 * 1200)
+    let mut back_packets: List[quic.Output] = list.with_capacity(65)
+    let _ = pump(mut server, mut client, SERVER_ADDR, 4, mut back, mut back_packets, mut at_client)
+    let mut woke = false
+    for event in at_client {
+        if let Writable(_, StreamId(0)) = event {
+            woke = true
+        }
+    }
+    if !woke || result.unwrap(quic.write(mut client, c, id, chunk, false)) == 0 {
+        fail("an acknowledgement did not bring Writable")
+    }
+}
+
+/// bug: A peer, or our own writer, can make a connection hold more than its credit or send_bytes.
+/// oracle: QUIC-9 and QUIC-5 bounds with the configured windows; RFC 9000 §4.1 FLOW_CONTROL_ERROR.
+@test
+fn flow_control_bounds_memory() -> Result[(), ()] {
+    receive_bound(256 * KIB)
+    receive_bound(1024 * KIB)
+    send_bound()
+    Ok(())
+}

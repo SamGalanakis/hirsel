@@ -98,7 +98,7 @@ fn refuse_limit(mut e: Endpoint, mut c: Connection) {
         return
     }
     let mut wire: Bytes = list.with_capacity(1200)
-    if let Some(_) = tx_space(mut c.initial, Initial, c.peer_id, c.local_id, false, Some(transport_close(0x02, 0)), 1200, 0, false, mut wire) {
+    if let Some(_) = tx_space(mut c.initial, mut c.streams, false, Initial, c.peer_id, c.local_id, false, Some(transport_close(0x02, 0)), 1200, 0, false, mut wire) {
         list.push(mut e.stateless, Stateless(peer: c.peer, wire: take wire))
     }
 }

@@ -27,6 +27,10 @@ std = { major = 1 }
 "endpoint.hirsel" = "quic"
 "endpoint_rx.hirsel" = "quic"
 "endpoint_tx.hirsel" = "quic"
+"stream.hirsel" = "quic"
+"stream_rx.hirsel" = "quic"
+"stream_tx.hirsel" = "quic"
+"endpoint_streams.hirsel" = "quic"
 
 [tests]
 limit = 67108864
@@ -39,3 +43,4 @@ grants = ["Tasks"]
 "authentication_vectors.hirsel" = "laws"
 "connection_laws.hirsel" = "laws"
 "recovery_laws.hirsel" = "laws"
+"stream_laws.hirsel" = "laws"

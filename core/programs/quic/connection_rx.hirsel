@@ -1,4 +1,4 @@
-type FrameEffect = Quiet | ElicitsAck | PeerClose(CloseReason)
+type FrameEffect = Quiet | ElicitsAck | PeerClose(CloseReason) | Lost(DropReason)
 
 fn received_number(c: Connection, level: packet.Space, n: u64) -> bool {
     match level {
@@ -74,7 +74,7 @@ fn ack_delay_ns(c: Connection, field: u64) -> u64 {
     int.saturating_mul(field << exponent, 1000)
 }
 
-fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Frame, input: Bytes) -> Result[FrameEffect, ConnectionFailure] {
+fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Frame, input: Bytes, mut events: List[Event]) -> Result[FrameEffect, ConnectionFailure] {
     let level = packet_level(kind)
     match f {
         Padding(_) => Ok(Quiet),
@@ -89,7 +89,7 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
             }
             let index = space_index(level)
             let verdict = recovery.on_ack(mut c.recovery, now, index, a.ranges, ack_delay_ns(c, a.delay), a.ecn)
-            settle(mut c, index, verdict.acked, verdict.lost)
+            settle(mut c, index, verdict.acked, verdict.lost, mut events)
             Ok(Quiet)
         },
         Crypto(offset: offset, data: data) => {
@@ -107,7 +107,10 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
             confirm(mut c, now)
             Ok(ElicitsAck)
         },
-        _ => Ok(ElicitsAck),
+        _ => match stream_frame(mut c.streams, c.handle, f, input, mut events)? {
+            Some(reason) => Ok(Lost(reason)),
+            None => Ok(ElicitsAck),
+        },
     }
 }
 
@@ -134,7 +137,7 @@ fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Byte
             Ok(None) => break,
             Error(e) => return Error(codec_failure(e)),
         }
-        match apply_frame(mut c, now, kind, f, input)? {
+        match apply_frame(mut c, now, kind, f, input, mut events)? {
             Quiet => (),
             ElicitsAck => {
                 ack = true
@@ -144,6 +147,7 @@ fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Byte
                 list.push(mut events, Closed(c.handle, reason))
                 return Ok(())
             },
+            Lost(reason) => return Error(Lost(reason)),
         }
     }
     let level = packet_level(kind)
@@ -195,6 +199,7 @@ fn accept_packet(mut c: Connection, now: u64, h: codec.Header, opened: OpenedPac
         Ok(()) => (),
         Error(Wire(code, frame)) => refuse(mut c, now, code, frame, Transport(code: code, frame: frame), mut events),
         Error(Tls(e)) => refuse(mut c, now, handshake.error_code(e), 0, tls_reason(e), mut events),
+        Error(Lost(reason)) => return Error(reason),
     }
     Ok(())
 }

@@ -1,0 +1,382 @@
+// QUIC-5 stream state (RFC 9000 §§2–4, reliable-stream-reset-11). A connection's streams
+// live in one Streams record that application keys create, sized by TransportConfig.
+pub type StreamId: key = StreamId(u64)
+
+pub type Priority: key {
+    urgency: u8,
+    order: u64,
+    then: u64
+}
+
+// Received bytes live in fixed pages of one per-connection pool (QUIC-9): the pool holds
+// initial_max_data plus a fixed slack, so a peer can never make the receiver hold more.
+const PAGE: u64 = 1024
+
+const NO_PAGE: u32 = 0xffffffff
+
+const STREAM_FRAME_MAX: u64 = 16383
+
+/// A half-open byte range [start, end).
+type Run {
+    start: u64,
+    end: u64
+}
+
+type Chunk = Owned(Bytes) | Held(Shared[Bytes])
+
+type Piece {
+    offset: u64,
+    len: u64,
+    data: Chunk
+}
+
+type StreamReset {
+    code: u64,
+    reliable: u64,
+    final_size: u64
+}
+
+type Recv {
+    base: u64,
+    pages: List[u32],
+    read: u64,
+    runs: List[Run],
+    highest: u64,
+    limit: u64,
+    final_size: Option[u64],
+    reset: Option[StreamReset],
+    stop: Option[u64],
+    stop_pending: bool,
+    limit_pending: bool
+}
+
+type Send {
+    pieces: List[Piece],
+    head: u64,
+    written: u64,
+    next: u64,
+    resend: List[Run],
+    acked: List[Run],
+    floor: u64,
+    credit: u64,
+    fin: bool,
+    fin_pending: bool,
+    fin_acked: bool,
+    reset: Option[StreamReset],
+    reset_pending: bool,
+    reset_acked: bool,
+    want_writable: bool,
+    acked_reported: bool,
+    blocked_at: Option[u64],
+    priority: Priority,
+    turn: u64
+}
+
+type Stream {
+    id: u64,
+    recv: Option[Recv],
+    send: Option[Send]
+}
+
+/// What a sent packet carried, kept until it is acknowledged or requeued.
+type SentFrame = Data(stream: u64, offset: u64, len: u64, fin: bool) | ResetSent(u64) | StopSent(u64) | MaxDataSent | MaxStreamDataSent(u64) | MaxStreamsSent(bool) | DataBlockedSent | StreamBlockedSent(u64) | Raw
+
+type SentPacket {
+    number: u64,
+    frames: List[SentFrame]
+}
+
+type Pool {
+    data: Bytes,
+    free: List[u32]
+}
+
+type Streams {
+    ready: bool,
+    side_server: bool,
+    list: List[Stream],
+    pool: Pool,
+    max_gaps: u64,
+    window: u64,
+    stream_window: u64,
+    max_data: u64,
+    consumed: u64,
+    released: u64,
+    max_data_pending: bool,
+    bidi_limit: u64,
+    uni_limit: u64,
+    bidi_opened: u64,
+    uni_opened: u64,
+    bidi_closed: u64,
+    uni_closed: u64,
+    bidi_limit_pending: bool,
+    uni_limit_pending: bool,
+    peer_max_data: u64,
+    sent_data: u64,
+    written_data: u64,
+    data_blocked_at: Option[u64],
+    held: u64,
+    send_bytes: u64,
+    reset_stream_at: bool,
+    local_bidi_limit: u64,
+    local_uni_limit: u64,
+    local_bidi_opened: u64,
+    local_uni_opened: u64,
+    credit_bidi_local: u64,
+    credit_bidi_remote: u64,
+    credit_uni: u64,
+    turn: u64,
+    inflight: List[SentPacket],
+    seam: Bytes
+}
+
+fn no_streams() -> Streams {
+    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"", free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0, released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0, uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false, uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0, data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0, local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0, credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(), seam: b"")
+}
+
+fn page_count(window: u64) -> u64 {
+    (window + PAGE - 1) / PAGE
+}
+
+/// Pages a stream's receive side may index: its window plus the partial pages at each end.
+fn stream_pages(window: u64) -> u64 {
+    page_count(window) + 2
+}
+
+/// Charged once when application keys install (QUIC-9): the pool covers the connection
+/// window plus two partial pages per out-of-order range allowed on one stream.
+fn start_streams(mut st: Streams, t: TransportConfig, p: handshake.TransportParameters, server: bool) {
+    let gaps: u64 = int.widen(t.max_gaps)
+    let window_pages = page_count(t.initial_max_data)
+    let pages = window_pages + order.min(2 * (gaps + 2), window_pages)
+    st.ready = true
+    st.side_server = server
+    let mut data: Bytes = list.with_capacity(pages * PAGE)
+    list.fill(mut data, pages * PAGE, 0)
+    let mut free: List[u32] = list.with_capacity(pages)
+    let mut i = pages
+    while i > 0 {
+        i -= 1
+        list.push(mut free, int.narrow(i))
+    }
+    st.pool = Pool(data: take data, free: take free)
+    st.max_gaps = gaps
+    st.window = t.initial_max_data
+    st.stream_window = t.initial_max_stream_data
+    st.max_data = t.initial_max_data
+    st.bidi_limit = t.max_streams_bidi
+    st.uni_limit = t.max_streams_uni
+    st.peer_max_data = p.initial_max_data
+    st.send_bytes = t.send_bytes
+    st.reset_stream_at = p.reset_stream_at
+    st.local_bidi_limit = p.initial_max_streams_bidi
+    st.local_uni_limit = p.initial_max_streams_uni
+    st.credit_bidi_local = p.initial_max_stream_data_bidi_local
+    st.credit_bidi_remote = p.initial_max_stream_data_bidi_remote
+    st.credit_uni = p.initial_max_stream_data_uni
+}
+
+fn uni(id: u64) -> bool {
+    (id & 2) != 0
+}
+
+fn local_stream(st: Streams, id: u64) -> bool {
+    ((id & 1) != 0) == st.side_server
+}
+
+fn find(st: Streams, id: u64) -> Option[u64] {
+    for i in 0u64 .. list.len(st.list) {
+        if st.list[i].id == id {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn new_recv(st: Streams) -> Recv {
+    let mut pages: List[u32] = list.with_capacity(stream_pages(st.stream_window))
+    list.fill(mut pages, stream_pages(st.stream_window), NO_PAGE)
+    Recv(base: 0, pages: take pages, read: 0, runs: list.new(), highest: 0, limit: st.stream_window, final_size: None, reset: None, stop: None, stop_pending: false, limit_pending: false)
+}
+
+fn new_send(credit: u64) -> Send {
+    Send(pieces: list.new(), head: 0, written: 0, next: 0, resend: list.new(), acked: list.new(), floor: 0, credit: credit, fin: false, fin_pending: false, fin_acked: false, reset: None, reset_pending: false, reset_acked: false, want_writable: false, acked_reported: false, blocked_at: None, priority: Priority(urgency: 3, order: 0, then: 0), turn: 0)
+}
+
+/// Create a stream record. Locally opened bidi streams take the peer's bidi_remote credit,
+/// peer-opened ones its bidi_local credit, and unidirectional ones its uni credit.
+fn add_stream(mut st: Streams, id: u64) {
+    let is_local = local_stream(st, id)
+    let recv: Option[Recv] = if uni(id) && is_local {
+        None
+    } else {
+        Some(new_recv(st))
+    }
+    let send: Option[Send] = if uni(id) && !is_local {
+        None
+    } else if uni(id) {
+        Some(new_send(st.credit_uni))
+    } else if is_local {
+        Some(new_send(st.credit_bidi_remote))
+    } else {
+        Some(new_send(st.credit_bidi_local))
+    }
+    list.push(mut st.list, Stream(id: id, recv: take recv, send: take send))
+}
+
+/// Insert [start, end) into ascending disjoint runs, merging touching ones.
+fn add_run(mut runs: List[Run], start: u64, end: u64) {
+    if end <= start {
+        return
+    }
+    let mut first = 0u64
+    while first < list.len(runs) && runs[first].end < start {
+        first += 1
+    }
+    let mut low = start
+    let mut high = end
+    let mut last = first
+    while last < list.len(runs) && runs[last].start <= high {
+        low = order.min(low, runs[last].start)
+        high = order.max(high, runs[last].end)
+        last += 1
+    }
+    let mut next: List[Run] = list.with_capacity(list.len(runs) + 1 - (last - first))
+    list.append(mut next, list.slice(runs, 0, first))
+    list.push(mut next, Run(start: low, end: high))
+    list.append(mut next, list.slice(runs, last, list.len(runs)))
+    runs = take next
+}
+
+/// Drop everything below at and clip what straddles it.
+fn trim_runs_below(mut runs: List[Run], at: u64) {
+    let mut keep = 0u64
+    while keep < list.len(runs) && runs[keep].end <= at {
+        keep += 1
+    }
+    if keep > 0 {
+        let rest: List[Run] = clone(list.slice(runs, keep, list.len(runs)))
+        runs = take rest
+    }
+    if list.len(runs) > 0 && runs[0].start < at {
+        runs[0].start = at
+    }
+}
+
+/// Drop everything at or above at and clip what straddles it.
+fn trim_runs_above(mut runs: List[Run], at: u64) {
+    let mut keep = 0u64
+    while keep < list.len(runs) && runs[keep].start < at {
+        keep += 1
+    }
+    list.truncate(mut runs, keep)
+    if keep > 0 && runs[keep - 1].end > at {
+        runs[keep - 1].end = at
+    }
+}
+
+/// Runs that do not start at the read point: the ones QUIC-5's max_gaps counts.
+fn gaps_after(runs: List[Run], at: u64, start: u64, end: u64) -> u64 {
+    let mut count = 0u64
+    let mut merged_low = start
+    for r in runs {
+        if r.end >= start && r.start <= end {
+            merged_low = order.min(merged_low, r.start)
+        } else if r.start > at {
+            count += 1
+        }
+    }
+    if merged_low > at {
+        count += 1
+    }
+    count
+}
+
+fn contiguous(r: Recv) -> u64 {
+    if list.len(r.runs) > 0 && r.runs[0].start <= r.read {
+        return r.runs[0].end
+    }
+    r.read
+}
+
+fn missing_pages(r: Recv, start: u64, end: u64) -> u64 {
+    let mut count = 0u64
+    let mut p = (start - r.base) / PAGE
+    let last = (end - 1 - r.base) / PAGE
+    while p <= last {
+        if r.pages[p] == NO_PAGE {
+            count += 1
+        }
+        p += 1
+    }
+    count
+}
+
+fn store(mut pool: Pool, mut r: Recv, start: u64, data: Bytes) {
+    let mut at = start
+    let end = start + list.len(data)
+    while at < end {
+        let p = (at - r.base) / PAGE
+        if r.pages[p] == NO_PAGE {
+            r.pages[p] = option.unwrap(list.pop(mut pool.free))
+        }
+        let within = (at - r.base) % PAGE
+        let n = order.min(PAGE - within, end - at)
+        let page: u64 = int.widen(r.pages[p])
+        list.copy_from_slice(mut pool.data, page * PAGE + within, list.slice(data, at - start, at - start + n))
+        at += n
+    }
+}
+
+/// Return pages wholly below the read point to the pool.
+fn release_pages(mut pool: Pool, mut r: Recv) {
+    let count = list.len(r.pages)
+    while r.base + PAGE <= r.read {
+        if r.pages[0] != NO_PAGE {
+            list.push(mut pool.free, r.pages[0])
+        }
+        list.copy_within(mut r.pages, 1, 0, count - 1)
+        r.pages[count - 1] = NO_PAGE
+        r.base += PAGE
+    }
+}
+
+/// Return pages wholly at or above from to the pool (a reset's discard).
+fn release_pages_from(mut pool: Pool, mut r: Recv, from: u64) {
+    let first = (order.max(from, r.base) - r.base + PAGE - 1) / PAGE
+    for p in first .. list.len(r.pages) {
+        if r.pages[p] != NO_PAGE {
+            list.push(mut pool.free, r.pages[p])
+            r.pages[p] = NO_PAGE
+        }
+    }
+}
+
+fn release_all(mut pool: Pool, mut r: Recv) {
+    for p in 0u64 .. list.len(r.pages) {
+        if r.pages[p] != NO_PAGE {
+            list.push(mut pool.free, r.pages[p])
+            r.pages[p] = NO_PAGE
+        }
+    }
+}
+
+/// Raise connection credit once the application has read half the window (quinn's
+/// ReceiveWindow rule); never without a read.
+fn release_data(mut st: Streams, n: u64) {
+    st.released += n
+    if st.released + st.window - st.max_data >= st.window / 2 && st.released + st.window > st.max_data {
+        st.max_data = st.released + st.window
+        st.max_data_pending = true
+    }
+}
+
+fn raise_stream_credit(window: u64, mut r: Recv) {
+    if let Some(_) = r.final_size {
+        return
+    }
+    if r.read + window - r.limit >= window / 2 && r.read + window > r.limit {
+        r.limit = r.read + window
+        r.limit_pending = true
+    }
+}

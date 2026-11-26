@@ -1,8 +1,13 @@
-//! The quinn peer interop.py runs against the Hirsel QUIC endpoint (law Q4, handshake only,
-//! and Q16's client pins). Built by interop.py against quinn at the commit it names.
+//! The quinn peer interop.py runs against the Hirsel QUIC endpoint (law Q4's handshake and
+//! transfer halves, and Q16's client pins). Built by interop.py against quinn at the commit
+//! it names.
 //!
-//! Usage: hirsel_interop client PORT SERVER_PIN_HEX SUITE GROUP [CLIENT_CERT_DER CLIENT_KEY_DER]
-//!        hirsel_interop server CERT_DER KEY_DER SUITE GROUP
+//! Usage: hirsel_interop client PORT SERVER_PIN_HEX SUITE GROUP [CLIENT_CERT_DER CLIENT_KEY_DER] [transfer N]
+//!        hirsel_interop server CERT_DER KEY_DER SUITE GROUP [transfer N]
+//!
+//! With `transfer N`, the client opens one bidirectional stream and sends N bytes of
+//! pattern() and FIN; the server reads to the end, then sends N bytes back and FIN; the
+//! client reads to the end and closes with code 0. Each prints `received <count> <sha256>`.
 //!
 //! SUITE is a rustls suite name (TLS13_AES_128_GCM_SHA256, ...) and GROUP a rustls group name
 //! (X25519, secp256r1); the provider offers that one suite and that one group, so a completed
@@ -151,6 +156,15 @@ fn initial_suite() -> rustls::quic::Suite {
     ring::cipher_suite::TLS13_AES_128_GCM_SHA256.tls13().unwrap().quic_suite().unwrap()
 }
 
+/// Byte i of a transfer: (31 i + 7) mod 256, as interop.hirsel and interop.py compute it.
+fn pattern(n: usize) -> Vec<u8> {
+    (0..n).map(|i| (i.wrapping_mul(31).wrapping_add(7) & 0xff) as u8).collect()
+}
+
+fn report_received(got: &[u8]) {
+    println!("received {} {}", got.len(), hex(::ring::digest::digest(&::ring::digest::SHA256, got).as_ref()));
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -174,7 +188,7 @@ fn report_connected(conn: &quinn::Connection) {
     println!("alpn {}", String::from_utf8_lossy(&data.protocol.unwrap_or_default()));
 }
 
-async fn client(args: &[String]) {
+async fn client(args: &[String], transfer: Option<usize>) {
     let port: u16 = args[0].parse().unwrap();
     let p = provider(&args[2], &args[3]);
     let builder = rustls::ClientConfig::builder_with_provider(p.clone())
@@ -196,6 +210,17 @@ async fn client(args: &[String]) {
     let to = SocketAddr::from(([127, 0, 0, 1], port));
     match endpoint.connect(to, "localhost").unwrap().await {
         Err(e) => report_error(e),
+        Ok(conn) if transfer.is_some() => {
+            report_connected(&conn);
+            let n = transfer.unwrap();
+            let (mut send, mut recv) = conn.open_bi().await.unwrap();
+            send.write_all(&pattern(n)).await.unwrap();
+            send.finish().unwrap();
+            let got = recv.read_to_end(n + 1).await.unwrap();
+            report_received(&got);
+            conn.close(0u32.into(), b"done");
+            println!("closed");
+        }
         Ok(conn) => {
             report_connected(&conn);
             // RFC 8446 §4.4.2.4: a server checks the client's certificate after the client's
@@ -212,7 +237,7 @@ async fn client(args: &[String]) {
     let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
 }
 
-async fn server(args: &[String]) {
+async fn server(args: &[String], transfer: Option<usize>) {
     let cert = CertificateDer::from(std::fs::read(&args[0]).unwrap());
     let key = PrivateKeyDer::try_from(std::fs::read(&args[1]).unwrap()).unwrap();
     let mut tls = rustls::ServerConfig::builder_with_provider(provider(&args[2], &args[3]))
@@ -236,8 +261,18 @@ async fn server(args: &[String]) {
                     println!("client {}", hex(::ring::digest::digest(&::ring::digest::SHA256, &chain[0]).as_ref()));
                 }
             }
-            conn.close(0u32.into(), b"done");
-            println!("closed");
+            if let Some(n) = transfer {
+                let (mut send, mut recv) = conn.accept_bi().await.unwrap();
+                let got = recv.read_to_end(n + 1).await.unwrap();
+                report_received(&got);
+                send.write_all(&pattern(n)).await.unwrap();
+                send.finish().unwrap();
+                // The client closes once it has read the echo.
+                report_error(conn.closed().await);
+            } else {
+                conn.close(0u32.into(), b"done");
+                println!("closed");
+            }
         }
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
@@ -245,10 +280,18 @@ async fn server(args: &[String]) {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let transfer = match args.iter().position(|a| a == "transfer") {
+        Some(i) => {
+            let n = args[i + 1].parse().unwrap();
+            args.truncate(i);
+            Some(n)
+        }
+        None => None,
+    };
     match args[0].as_str() {
-        "client" => client(&args[1..]).await,
-        "server" => server(&args[1..]).await,
+        "client" => client(&args[1..], transfer).await,
+        "server" => server(&args[1..], transfer).await,
         other => panic!("unknown role {other}"),
     }
 }

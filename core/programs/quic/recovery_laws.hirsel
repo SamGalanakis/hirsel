@@ -348,6 +348,7 @@ fn sim_end(take plan: SimEnd) -> SimTrace waits {
                 Closed(..) => {
                     trace.closed = true
                 },
+                _ => (),
             }
         }
         list.clear(mut events)

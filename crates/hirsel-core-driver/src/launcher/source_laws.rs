@@ -439,9 +439,10 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
     let compiler: super::Compiler = Arc::new(move |args: &[String]| {
         let mut args = args.to_vec();
         if args[0] == "test" {
-            let more = ["--runtime", &runtime, "--cc", &cc, "--libraries"];
-            args.extend(more.map(String::from));
-            args.push(core.to_string_lossy().into_owned());
+            args.extend(["--runtime", &runtime, "--cc", &cc].map(String::from));
+        }
+        if args[0] != "lock" {
+            args.extend(["--libraries".into(), core.to_string_lossy().into_owned()]);
         }
         let mut command = request_command_at(&exe, &args, Path::new("/"));
         command.env("XDG_CACHE_HOME", &home);
@@ -527,6 +528,14 @@ fn law_gate_denies_authority_and_reads_the_verdict() {
         matches!(&answered, Ok(Verdict::Red(rows)) if rows.len() == 1
             && rows[0].contains("app@1/tests/bad") && rows[0].contains("status 1")),
         "a failing test was not red: {answered:?}"
+    );
+
+    // A test source that does not parse lists no tests; read alone, that run is green.
+    let answered = run(&tree("grants = [\"Tasks\"]\n", "@test\nfn broken( -> {\n"));
+    assert!(
+        matches!(&answered, Ok(Verdict::Red(rows)) if rows.len() == 1
+            && rows[0].contains("tests.hirsel") && rows[0].contains("do not check")),
+        "an unparsable test source was not red: {answered:?}"
     );
 
     let green_tree = tree("grants = [\"Tasks\"]\ndirs = [\"data\"]\n", green);

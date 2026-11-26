@@ -186,8 +186,8 @@ pub(super) fn authority(tree: &Tree) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The gate's steps 1, 2 and 4 on `tree`: the authority check, then `hirsel test PACKAGE
-/// --frozen --json` in a fresh scratch under the launcher's compiler and package stores and
+/// The gate's steps 1, 2 and 4 on `tree`: the authority check, `hirsel check PACKAGE
+/// --frozen` over the tests' sources, then `hirsel test PACKAGE --frozen --json` in a fresh scratch under the launcher's compiler and package stores and
 /// the pass cache `STATE/test-results`, read as a verdict. `None` is a cancelled run.
 pub(crate) fn gate(
     compiler: &Compiler,
@@ -210,36 +210,53 @@ pub(crate) fn gate(
         Err(e) => return unrun(&e),
     };
     let path = |name: &str| state.join(name).to_string_lossy().into_owned();
-    let args: Vec<String> = vec![
-        "test".into(),
+    let stores = [
         tree.package.clone(),
         "--frozen".into(),
-        "--json".into(),
         "--store".into(),
         path("compiler"),
         "--package-store".into(),
         path("packages"),
-        "--test-cache".into(),
-        path("test-results"),
     ];
-    let mut command = match compiler(&args) {
-        Ok(command) => command,
+    let run = |verb: &str, more: &[String]| {
+        let args: Vec<String> = [verb.to_owned()]
+            .into_iter()
+            .chain(stores.iter().cloned())
+            .chain(more.iter().cloned())
+            .collect();
+        let mut command = match compiler(&args) {
+            Ok(command) => command,
+            Err(e) => return Some(Err(e)),
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        command
+            .current_dir(dir.path().join("tree"))
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match command.spawn() {
+            Ok(child) => collect(child, cancel, REPORT_BYTES),
+            Err(e) => Some(Err(e)),
+        }
+    };
+    // `hirsel test` lists the tests of the modules that parse, and publish checks only the
+    // program: a test source that does not check would drop its tests from the run unseen.
+    let (status, _, stderr) = match run("check", &[])? {
+        Ok(run) => run,
         Err(e) => return unrun(&e),
     };
-    if cancel.load(Ordering::Relaxed) {
-        return None;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
+        return Some(Ok(Verdict::Red(vec![format!(
+            "the package's tests do not check: {}",
+            stderr.trim()
+        )])));
     }
-    command
-        .current_dir(dir.path().join("tree"))
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) => return unrun(&e),
-    };
-    let (_, stdout, stderr) = match collect(child, cancel, REPORT_BYTES)? {
+    let more = ["--json".into(), "--test-cache".into(), path("test-results")];
+    let (_, stdout, stderr) = match run("test", &more)? {
         Ok(run) => run,
         Err(e) => return unrun(&e),
     };

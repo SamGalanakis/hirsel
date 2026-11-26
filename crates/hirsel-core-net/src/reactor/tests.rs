@@ -3,6 +3,40 @@ use super::*;
 use std::os::fd::FromRawFd;
 use std::{io::Write, os::unix::net::UnixStream};
 
+/// An edge wakes only its direction. A batch collected before closing a
+/// socket cannot wake a waiter on the replacement in the same slot.
+#[test]
+fn s0_net_rearm_ignores_stale_directional_readiness() {
+    use crate::ready::Ready;
+
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let mut sockets = Sockets::default();
+    let key = sockets.insert(socket.into()).unwrap();
+    sockets.arm(key, false, 101).unwrap();
+    let first = sockets.arm(key, true, 201).unwrap();
+    let mut ready = Vec::new();
+    sockets.dispatch(first, Ready::READABLE, |t| ready.push(t));
+    assert_eq!(ready, [101]);
+    sockets.dispatch(first, Ready::WRITABLE, |t| ready.push(t));
+    assert_eq!(ready, [101, 201]);
+
+    assert!(sockets.release(key));
+    let (socket, _peer) = UnixStream::pair().unwrap();
+    let replacement = sockets.insert(socket.into()).unwrap();
+    let second = sockets.arm(replacement, false, 102).unwrap();
+    let slot_mask = (SOCKET_SLOT_LIMIT - 1) as u64;
+    assert_eq!(
+        first & slot_mask,
+        second & slot_mask,
+        "the registry reuses the slot"
+    );
+    assert_ne!(first, second, "a replacement has a fresh readiness tag");
+    sockets.dispatch(first, Ready::READABLE, |t| ready.push(t));
+    assert_eq!(ready, [101, 201], "the old edge must not wake a new reader");
+    sockets.dispatch(second, Ready::READABLE, |t| ready.push(t));
+    assert_eq!(ready, [101, 201, 102]);
+}
+
 #[test]
 fn a_busy_driver_turn_leaves_readiness_for_the_next_worker() {
     let mut sockets = Sockets::default();

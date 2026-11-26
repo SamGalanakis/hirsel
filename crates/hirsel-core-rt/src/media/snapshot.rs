@@ -158,9 +158,9 @@ impl Resource for Share {
 impl Schedule {
     pub(super) fn advance_generation(&mut self, local: bool, by: u64) {
         let generation = &mut self.generations[usize::from(!local)];
-        *generation = generation
-            .checked_add(by)
-            .unwrap_or_else(|| crate::process::stop(b"MediaGenerations"));
+        *generation = generation.checked_add(by).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"MediaGenerations"))
+        });
     }
 }
 

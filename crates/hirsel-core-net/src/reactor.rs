@@ -692,6 +692,15 @@ impl Sockets {
 
     /// A pipe has one directional owner and closes its descriptor on release.
     pub fn insert_pipe(&mut self, fd: OwnedFd, write: bool) -> Option<u64> {
+        #[cfg(target_vendor = "apple")]
+        if write {
+            // EMB-3: suppress SIGPIPE per pipe write descriptor on Darwin.
+            const F_SETNOSIGPIPE: libc::c_int = 73;
+            // SAFETY: `fd` is an open pipe descriptor owned by this call.
+            unsafe {
+                libc::fcntl(fd.as_raw_fd(), F_SETNOSIGPIPE, 1);
+            }
+        }
         self.insert_fd(Arc::new(fd), true, if write { 2 } else { 1 })
     }
 

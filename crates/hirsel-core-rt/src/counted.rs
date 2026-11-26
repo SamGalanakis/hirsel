@@ -168,9 +168,9 @@ pub unsafe fn share(node: NonNull<u8>, arc: bool) {
         }
         let count = &mut *node.cast::<u64>().as_ptr();
         // A wrap stops the run before any holder reads the wrapped word.
-        *count = count
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"CountOverflow"));
+        *count = count.checked_add(1).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"CountOverflow"))
+        });
         if arc {
             crate::tasks::event_committed(crate::tasks::ARC_SHARE, 0, *count);
         }

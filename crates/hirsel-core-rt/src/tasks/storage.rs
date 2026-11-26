@@ -14,25 +14,32 @@ pub(crate) struct Storage {
     pub(super) layout: Layout,
 }
 impl Storage {
-    pub(crate) fn new(bytes: usize, align: usize) -> Self {
+    pub(crate) fn try_new(bytes: usize, align: usize) -> Result<Self, crate::run_stop::Stop> {
         let layout = Layout::from_size_align(bytes, align)
-            .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
-        Self::with_layout(layout)
+            .map_err(|_| crate::run_stop::Stop::from_static(b"HostMemory"))?;
+        Self::try_with_layout(layout)
     }
-    fn with_layout(layout: Layout) -> Self {
+    pub(crate) fn new(bytes: usize, align: usize) -> Self {
+        Self::try_new(bytes, align).unwrap_or_else(|stop| crate::run_stop::raise(stop))
+    }
+    fn try_with_layout(layout: Layout) -> Result<Self, crate::run_stop::Stop> {
+        crate::fiber::room(crate::fiber::RUNTIME_ROOM)?;
         let bytes = layout.size();
         let pointer = if bytes == 0 {
             layout.dangling_ptr()
         } else {
             // SAFETY: alloc receives a valid nonzero layout.
             unsafe { NonNull::new(alloc(layout)) }
-                .unwrap_or_else(|| crate::process::stop(b"HostMemory"))
+                .ok_or_else(|| crate::run_stop::Stop::from_static(b"HostMemory"))?
         };
         #[cfg(any(test, feature = "charge-observation", feature = "prof"))]
         if bytes != 0 {
             crate::backing_observation::observe!(allocate, pointer.as_ptr(), bytes, TaskStorage);
         }
-        Self { pointer, layout }
+        Ok(Self { pointer, layout })
+    }
+    fn with_layout(layout: Layout) -> Self {
+        Self::try_with_layout(layout).unwrap_or_else(|stop| crate::run_stop::raise(stop))
     }
     pub(crate) fn as_ptr(&self) -> *mut u8 {
         self.pointer.as_ptr()
@@ -43,14 +50,15 @@ impl Storage {
         payload: TaskLayout,
     ) -> (Self, *mut u8, *mut u8) {
         fn extend(base: Layout, part: ValueLayout) -> (Layout, Option<usize>) {
-            let part = Layout::from_size_align(part.bytes, part.align)
-                .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
+            let part = Layout::from_size_align(part.bytes, part.align).unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+            });
             if part.size() == 0 {
                 return (base, None);
             }
-            let (combined, offset) = base
-                .extend(part)
-                .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
+            let (combined, offset) = base.extend(part).unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+            });
             (combined, Some(offset))
         }
 

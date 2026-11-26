@@ -454,21 +454,27 @@ const CLOCK_ROOM: usize = 4096;
 /// State is the run's live OsProvider; request is a pinned clock request.
 #[inline(always)]
 pub(crate) unsafe fn clock(state: *mut u8, request: *mut Request) -> Outcome {
-    // SAFETY: forwarded.
+    if let Err(stop) = crate::fiber::room(CLOCK_ROOM) {
+        crate::run_stop::raise(stop);
+    }
+    // SAFETY: forwarded; `fiber::room(CLOCK_ROOM)` guaranteed writable room.
     unsafe {
-        if crate::fiber::room(CLOCK_ROOM)
-            && let Some(outcome) = read_clock(state, (*request).operation)
-        {
+        if let Some(outcome) = read_clock(state, (*request).operation) {
             return outcome;
         }
         crate::tasks::host_operation(state, request, clock_on_stack)
     }
 }
-/// A clock read that failed, or had no room, stops (`Clock`) on the host stack.
+/// A clock read that failed stops (`Clock`) on the host stack.
 unsafe extern "C" fn clock_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: forwarded.
-    unsafe { read_clock(state, (*request).operation) }
-        .unwrap_or_else(|| crate::process::stop(b"Clock"))
+    match unsafe { read_clock(state, (*request).operation) } {
+        Some(outcome) => outcome,
+        None => {
+            crate::run_stop::record(crate::run_stop::Stop::from_static(b"Clock"));
+            Outcome::default()
+        }
+    }
 }
 #[inline(always)]
 unsafe fn read_clock(state: *mut u8, operation: u8) -> Option<Outcome> {
@@ -555,7 +561,8 @@ unsafe fn wall_wait(request: &Request) -> Wait {
     // SAFETY: the caller checked the eight-byte buffer.
     let at = unsafe { request.buffer.data.cast::<u64>().read_unaligned() };
     let Some(now) = clock::wall_ms() else {
-        crate::process::stop(b"Clock")
+        crate::run_stop::record(crate::run_stop::Stop::from_static(b"Clock"));
+        return Wait::default();
     };
     if at <= now {
         return Wait::default();

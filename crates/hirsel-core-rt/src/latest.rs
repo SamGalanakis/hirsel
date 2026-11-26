@@ -88,10 +88,9 @@ pub unsafe extern "C" fn hirsel_core_latest_handle(latest: *mut Latest) -> *mut 
     // SAFETY: the live handle pins the exact counter through its event.
     unsafe {
         tasks::before_commit();
-        (*latest).handles = (*latest)
-            .handles
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"LatestHandles"));
+        (*latest).handles = (*latest).handles.checked_add(1).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"LatestHandles"))
+        });
         tasks::event(tasks::SENDERS, (*latest).id, (*latest).handles);
         latest
     }

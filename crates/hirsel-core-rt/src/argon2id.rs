@@ -108,6 +108,8 @@ pub unsafe extern "C" fn hirsel_core_argon2id(
             Argon2Outcome::default()
         }
         Err(Error::Params) => Argon2Outcome::params(),
-        Err(Error::HostMemory) => crate::process::stop(b"HostMemory"),
+        Err(Error::HostMemory) => {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        }
     }
 }

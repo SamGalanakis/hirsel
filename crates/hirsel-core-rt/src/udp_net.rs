@@ -75,12 +75,16 @@ pub(crate) struct Allowance {
 
 impl Default for Allowance {
     fn default() -> Self {
-        let bytes = match std::env::var("HIRSEL_UDP_KERNEL_BYTES") {
-            Ok(value) => value
-                .parse()
-                .unwrap_or_else(|_| crate::process::stop(b"UdpAllowance")),
-            Err(std::env::VarError::NotPresent) => 64 * 1024 * 1024,
-            Err(std::env::VarError::NotUnicode(_)) => crate::process::stop(b"UdpAllowance"),
+        let stop_allowance =
+            || crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UdpAllowance"));
+        let bytes = if crate::run_stop::is_contained() {
+            64 * 1024 * 1024
+        } else {
+            match std::env::var("HIRSEL_UDP_KERNEL_BYTES") {
+                Ok(value) => value.parse().unwrap_or_else(|_| stop_allowance()),
+                Err(std::env::VarError::NotPresent) => 64 * 1024 * 1024,
+                Err(std::env::VarError::NotUnicode(_)) => stop_allowance(),
+            }
         };
         Self {
             left: AtomicU64::new(bytes),
@@ -314,12 +318,9 @@ impl Transfer {
     pub(crate) fn detach(files: &mut Files, key: u64) -> Self {
         let resource = files.udp_sockets.remove(&key).unwrap();
         let watch = if let Carrier::Standalone(socket) = &resource.carrier {
-            Some(
-                files
-                    .sockets
-                    .detach(socket.readiness)
-                    .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
-            )
+            Some(files.sockets.detach(socket.readiness).unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+            }))
         } else {
             None
         };
@@ -335,7 +336,9 @@ impl Transfer {
             socket.readiness = files
                 .sockets
                 .attach(self.watch.take().unwrap())
-                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                .unwrap_or_else(|_| {
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+                });
         }
         files.udp_sockets.insert(self.key, self.resource);
         self.key

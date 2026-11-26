@@ -571,7 +571,7 @@ def first_party(meta: dict) -> str:
                 }
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                           **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
-    core_gates(out, call, Raw)
+    core_gates(out, call, Raw, [d for d in declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages) if "libc" in d])
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["core/programs/ffi_laws/**", "core/programs/sqlite/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**", "core/front/fixtures/recording/**", "core/programs/m1/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-sites", case_filter="native::tests::failure_sites_",
                            data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**"])')))

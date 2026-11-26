@@ -38,9 +38,9 @@ impl FrameRecord {
     /// read (a caller zeroes its callee's word before each fresh call), so
     /// testing builds fill the rest to catch a word read before it is set.
     fn new(context: &Context, size: usize, header_bytes: usize) -> Self {
-        let bytes = header_bytes
-            .checked_add(size.max(8))
-            .unwrap_or_else(|| crate::process::stop(b"FrameRecord"));
+        let bytes = header_bytes.checked_add(size.max(8)).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"FrameRecord"))
+        });
         let base = zero_block(context, bytes);
         // SAFETY: the block holds `bytes` writable bytes, the word in bounds.
         unsafe {
@@ -96,9 +96,11 @@ pub unsafe extern "C" fn hirsel_core_frame_record(
 ) -> *mut u8 {
     let task = CURRENT.get();
     if task.is_null() {
-        crate::process::stop(b"FrameRecord");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"FrameRecord"));
     }
-    let size = usize::try_from(size).unwrap_or_else(|_| crate::process::stop(b"FrameRecord"));
+    let size = usize::try_from(size).unwrap_or_else(|_| {
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"FrameRecord"))
+    });
     let held_bytes = if net != 0 {
         size_of::<crate::net::OwnedNet>()
     } else if send != 0 {
@@ -160,6 +162,6 @@ pub(crate) unsafe fn held_wait<T>() -> *mut T {
     match frame_header() {
         // SAFETY: the reserved, 8-aligned state follows the fixed prefix.
         Some(header) => unsafe { header.add(1).cast() },
-        None => crate::process::stop(b"FrameRecord"),
+        None => crate::run_stop::raise(crate::run_stop::Stop::from_static(b"FrameRecord")),
     }
 }

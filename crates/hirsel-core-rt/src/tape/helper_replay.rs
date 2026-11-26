@@ -151,13 +151,10 @@ unsafe fn open(
     let mut live = fresh(run.tape_id, run.chooser, Mode::Replay);
     live.replay_abort = Some(abort);
     let cell = cell();
-    let generation = cell
-        .state
-        .lock()
-        .unwrap()
-        .generation
-        .checked_add(1)
-        .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
+    let generation =
+        { cell.state.lock().unwrap().generation.checked_add(1) }.unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TapeSlots"))
+        });
     // The wrapped input: the adapter's code word first, which the bridge
     // reads, `f`'s code word at its row, then `x` from the entry's value. Each capability it holds takes the helper's ordinal and
     // a word of the run designating it on the helper's cell.

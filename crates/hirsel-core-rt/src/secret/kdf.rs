@@ -35,7 +35,9 @@ unsafe extern "C" fn kdf_issue(_: *mut u8, request: *mut Request, _: u64) -> Ste
             Outcome::default()
         }
         Err(Argon2Error::Params) => INVALID,
-        Err(Argon2Error::HostMemory) => crate::process::stop(b"HostMemory"),
+        Err(Argon2Error::HostMemory) => {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        }
     };
     Step {
         kind: STEP_DONE,

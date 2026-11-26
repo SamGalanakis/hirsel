@@ -61,6 +61,33 @@ macro_rules! x86_switch {
 }
 #[cfg(target_arch = "x86_64")]
 x86_switch!(switch, "");
+/// Resume a suspended host stack saved by [`switch`], abandoning the current
+/// stack. Used by the signal handler's `ucontext` rewrite (EMB-3) to jump back
+/// to the worker's host stack at the saved `switch` frame.
+///
+/// # Safety
+/// `rsp` must point directly at a live frame saved by [`switch`].
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn resume_saved() -> ! {
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa rsp, 0",
+        ".cfi_undefined rip",
+        "cld",
+        "ldmxcsr [rsp]",
+        "fldcw [rsp + 4]",
+        "add rsp, 8",
+        "pop r15",
+        "pop r14",
+        "pop r13",
+        "pop r12",
+        "pop rbx",
+        "pop rbp",
+        "ret",
+        ".cfi_endproc",
+    )
+}
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "C" fn fiber_start() {
@@ -111,6 +138,35 @@ pub unsafe extern "C" fn switch(_save: *mut *mut u8, _to: *mut u8) {
         "mov x2, sp",
         "str x2, [x0]",
         "mov sp, x1",
+        "ldp x19, x20, [sp, #0]",
+        "ldp x21, x22, [sp, #16]",
+        "ldp x23, x24, [sp, #32]",
+        "ldp x25, x26, [sp, #48]",
+        "ldp x27, x28, [sp, #64]",
+        "ldp x29, x30, [sp, #80]",
+        "ldp d8, d9, [sp, #96]",
+        "ldp d10, d11, [sp, #112]",
+        "ldp d12, d13, [sp, #128]",
+        "ldp d14, d15, [sp, #144]",
+        "add sp, sp, #160",
+        "ret",
+        ".cfi_endproc",
+    )
+}
+
+/// Resume a suspended host stack saved by [`switch`], abandoning the current
+/// stack. Used by the signal handler's `ucontext` rewrite (EMB-3) to jump back
+/// to the worker's host stack at the saved `switch` frame.
+///
+/// # Safety
+/// `sp` must point directly at a live frame saved by [`switch`].
+#[cfg(target_arch = "aarch64")]
+#[unsafe(naked)]
+pub unsafe extern "C" fn resume_saved() -> ! {
+    core::arch::naked_asm!(
+        ".cfi_startproc",
+        ".cfi_def_cfa sp, 0",
+        ".cfi_undefined x30",
         "ldp x19, x20, [sp, #0]",
         "ldp x21, x22, [sp, #16]",
         "ldp x23, x24, [sp, #32]",

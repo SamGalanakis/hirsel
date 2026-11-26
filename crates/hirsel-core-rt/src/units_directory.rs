@@ -93,7 +93,7 @@ impl UnitDirectory {
             )
             .is_err()
         {
-            crate::process::stop(b"UnitIdTaken");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitIdTaken"));
         }
     }
 
@@ -101,7 +101,8 @@ impl UnitDirectory {
         let mut claims = self.claims.lock().unwrap();
         let live = LIVE.load(Ordering::SeqCst);
         if live == 0 {
-            crate::process::stop(b"UnitAfterStop");
+            drop(claims);
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitAfterStop"));
         }
         let claim = if let Some(spare) = claims.spare.pop() {
             Claim::Reuse(spare)
@@ -180,22 +181,26 @@ pub(crate) fn spawn_language_job(job: Job) {
             std::thread::Builder::new()
                 .name("hirsel-unit".into())
                 .spawn(job)
-                .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
+                .unwrap_or_else(|_| {
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostThreads"))
+                });
         }
         Err(SpawnErr::Exhausted {
             live,
             max_units,
             physical,
         }) => {
-            crate::os::write_all(
-                crate::fiber::stop_fd(),
-                format!("untied unit limit: live={live} max_units={max_units}\n").as_bytes(),
-            );
-            crate::process::stop(if physical {
+            if !crate::run_stop::is_contained() {
+                crate::os::write_all(
+                    crate::fiber::stop_fd(),
+                    format!("untied unit limit: live={live} max_units={max_units}\n").as_bytes(),
+                );
+            }
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(if physical {
                 b"HostMemory"
             } else {
                 b"UnitIdSpace"
-            });
+            }));
         }
     }
 }

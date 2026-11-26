@@ -213,7 +213,9 @@ impl Signer for ServerSigner {
             Pair::Ed25519(pair) => pair.sign(message).as_ref().to_vec(),
             Pair::P256(pair) => match pair.sign(&random, message) {
                 Ok(signature) => signature.as_ref().to_vec(),
-                Err(_) => crate::process::stop(b"tls.accept: P-256 signing: RNG failed"),
+                Err(_) => crate::run_stop::raise(crate::run_stop::Stop::from_static(
+                    b"tls.accept: P-256 signing: RNG failed",
+                )),
             },
             Pair::Rsa(pair) => {
                 let padding: &'static dyn signature::RsaEncoding = match self.scheme {
@@ -223,7 +225,9 @@ impl Signer for ServerSigner {
                 };
                 let mut out = vec![0; pair.public().modulus_len()];
                 if pair.sign(padding, &random, message, &mut out).is_err() {
-                    crate::process::stop(b"tls.accept: RSA signing: RNG failed");
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(
+                        b"tls.accept: RSA signing: RNG failed",
+                    ));
                 }
                 out
             }
@@ -468,7 +472,9 @@ pub(crate) fn start(
     let key = match ServerKey::load(document) {
         Ok(key) => key,
         Err(KeyLoad::Invalid) => return Err(refuse_key()),
-        Err(KeyLoad::Random(reason)) => crate::process::stop(reason.as_bytes()),
+        Err(KeyLoad::Random(reason)) => {
+            crate::run_stop::raise(crate::run_stop::Stop::from_bytes(reason.as_bytes()))
+        }
     };
     let Some(certified) = certified(chain, key) else {
         return Err(refuse_key());

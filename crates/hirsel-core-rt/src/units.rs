@@ -870,12 +870,7 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
                 p.memory.release_unit_stacks(ix, (*u.stack.get()).take());
                 *u.sp.get() = std::ptr::null_mut();
                 if p.units.retire(up) {
-                    p.stop.store(true, Ordering::SeqCst);
-                    let parked = std::mem::take(&mut *p.idle.lock().unwrap());
-                    for w in parked {
-                        p.nsleep.fetch_sub(1, Ordering::SeqCst);
-                        wake_slot(p, w);
-                    }
+                    host_calls::stop_pool(p);
                 }
             }
             After::Yield => {
@@ -900,12 +895,20 @@ unsafe fn run_unit(p: &'static Pool, ix: usize, up: UP, host: &mut *mut u8) {
                     publish(p, &p.locals[ix], up);
                 }
             }
-            After::Run => crate::process::stop(b"UnitLeftWithoutReason"),
+            After::Run if crate::run_stop::is_ended() => return,
+            After::Run => {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLeftWithoutReason"))
+            }
         }
         // Between units the slot's own thread takes its readiness and fires
         // its timers: nobody else waits in its poller.
         check_slot(p, ix);
     }
+}
+
+fn pool_done(p: &Pool) -> bool {
+    crate::run_stop::is_ended()
+        || (p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0)
 }
 
 /// Run slot `ix` on this thread until the pool stops.
@@ -915,12 +918,15 @@ fn run_slot(p: &'static Pool, ix: usize) {
     // A wake handed this worker the search role (already counted).
     let mut handed = false;
     loop {
-        if !handed && let Some(u) = find(p, ix) {
+        if !crate::run_stop::is_ended()
+            && !handed
+            && let Some(u) = find(p, ix)
+        {
             // SAFETY: a dequeued unit.
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
         }
-        if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
+        if pool_done(p) {
             if handed {
                 p.searching.fetch_sub(1, Ordering::SeqCst);
             }
@@ -941,7 +947,10 @@ fn run_slot(p: &'static Pool, ix: usize) {
                 }
                 i = i.wrapping_add(1);
                 if i % 64 == 0 {
-                    if now() - t0 > p.spin_ns || p.stop.load(Ordering::Relaxed) {
+                    if now() - t0 > p.spin_ns
+                        || p.stop.load(Ordering::Relaxed)
+                        || crate::run_stop::is_ended()
+                    {
                         break;
                     }
                     check_slot(p, ix);
@@ -959,28 +968,26 @@ fn run_slot(p: &'static Pool, ix: usize) {
             unsafe { run_unit(p, ix, u, &mut host) };
             continue;
         }
-        if p.stop.load(Ordering::SeqCst) && p.queued.load(Ordering::SeqCst) == 0 {
+        if pool_done(p) {
             break;
         }
         handed = park_slot(p, ix);
     }
 }
 
+pub(crate) use host_calls::wake_all_for_stop;
+
 fn worker_main(p: &'static Pool, ix: usize) {
     #[cfg(feature = "prof")]
     let _worker_profile = crate::prof::Worker::enter();
     crate::fiber::arm();
+    let _alt = crate::fiber::Alternate::install().unwrap_or_else(|s| crate::run_stop::raise(s));
     run_slot(p, ix);
-    merge_stats();
-    #[cfg(feature = "testing")]
-    observe::flush();
-}
-
-fn merge_stats() {
-    // The launch joins the workers before reading the totals.
     WORKER_STATS.with(|stats| {
         for (total, local) in USTATS.iter().zip(stats) {
             total.fetch_add(local.get(), Ordering::Relaxed);
         }
     });
+    #[cfg(feature = "testing")]
+    observe::flush();
 }

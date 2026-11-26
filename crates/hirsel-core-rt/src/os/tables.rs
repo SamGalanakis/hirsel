@@ -24,7 +24,7 @@ impl OsProvider {
     pub(super) fn id(&self) -> u64 {
         let id = self.next.fetch_add(1, Relaxed);
         if id == u64::MAX {
-            crate::process::stop(b"HostHandles");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostHandles"));
         }
         id
     }

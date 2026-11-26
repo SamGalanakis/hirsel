@@ -1600,14 +1600,14 @@ pub(crate) fn page_bytes() -> usize {
             Ok(bytes) if bytes.is_power_of_two() && (MIN_PAGE_BYTES..=SLAB).contains(&bytes) => {
                 bytes
             }
-            _ => crate::process::stop(b"PageSize"),
+            _ => crate::run_stop::raise(crate::run_stop::Stop::from_static(b"PageSize")),
         }
     })
 }
 
 #[cold]
 fn host_memory<T>() -> T {
-    crate::process::stop(b"HostMemory")
+    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
 }
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]

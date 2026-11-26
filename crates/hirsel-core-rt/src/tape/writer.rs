@@ -215,7 +215,7 @@ pub(crate) fn start() {
             .stack_size(256 << 10)
             .spawn(run);
         if spawned.is_err() {
-            crate::process::stop(b"TapeWriter");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TapeWriter"));
         }
     }
 }

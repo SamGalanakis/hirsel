@@ -29,9 +29,16 @@ fn poll_slot_into(p: &Pool, ix: usize, timeout_ns: Option<u64>, evs: &mut [Event
         bump(S_GPOLL_BLOCKS);
     }
     let n = if p.uring {
-        slot.poller
-            .wait_slot(evs, timeout_ns)
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"))
+        match slot.poller.wait_slot(evs, timeout_ns) {
+            Ok(n) => n,
+            Err(_) => {
+                crate::run_stop::record(crate::run_stop::Stop::from_static(b"HostPoll"));
+                return SlotPoll {
+                    published: 0,
+                    events: 0,
+                };
+            }
+        }
     } else {
         let timeout_ns = if slot.poller.udp_due() {
             Some(0)

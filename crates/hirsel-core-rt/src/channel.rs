@@ -76,11 +76,12 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
                 };
             }
         };
-        let count =
-            usize::try_from(capacity).unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
-        let bytes = count
-            .checked_mul(item.bytes)
-            .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+        let count = usize::try_from(capacity).unwrap_or_else(|_| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        });
+        let bytes = count.checked_mul(item.bytes).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        });
         tasks::before_commit();
         let id = tasks::identity();
         let channel = Box::into_raw(Box::new(Channel {
@@ -121,10 +122,9 @@ pub unsafe extern "C" fn hirsel_core_channel_sender(channel: *mut Channel) -> *m
     // SAFETY: the live sender pins the exact counter through its event.
     unsafe {
         tasks::before_commit();
-        (*channel).senders = (*channel)
-            .senders
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"ChannelSenders"));
+        (*channel).senders = (*channel).senders.checked_add(1).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"ChannelSenders"))
+        });
         tasks::event(tasks::SENDERS, (*channel).id, (*channel).senders);
         channel
     }
@@ -529,7 +529,7 @@ unsafe fn channel_deadline(
             }
             crate::provider::WAIT_READY => None,
             crate::provider::WAIT_UNTIL => Some(ChannelDeadline::Host(wait.deadline_ns)),
-            _ => crate::process::stop(b"UnsupportedClock"),
+            _ => crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnsupportedClock")),
         }
     }
 }

@@ -2,6 +2,8 @@
 //! Logical capacity refusal is recoverable; host exhaustion is a run stop.
 
 #[cfg(test)]
+mod embed_stop_tests;
+#[cfg(test)]
 #[path = "../../../tools/test_support/loopback.rs"]
 #[allow(dead_code)]
 mod loopback;
@@ -14,7 +16,7 @@ pub mod abi_layout;
 pub mod abi_tasks;
 #[cfg(feature = "allocation-count")]
 mod allocation_count;
-mod allocator;
+pub mod allocator;
 mod argon2id;
 mod backing_observation;
 pub mod block;
@@ -32,15 +34,14 @@ mod env;
 mod exec;
 #[path = "host/exec_runtime.rs"]
 mod exec_runtime;
-mod fiber;
+pub mod fiber;
 pub mod flow;
 pub mod foreign;
 mod growth;
 pub mod host;
 pub mod host_file;
 pub mod host_ops;
-#[cfg(target_arch = "x86_64")]
-mod isa;
+pub mod isa;
 pub mod isolate;
 pub mod latest;
 #[cfg(feature = "record")]
@@ -68,6 +69,7 @@ pub mod provider;
 pub mod region;
 mod resolve;
 mod retention;
+pub mod run_stop;
 #[cfg(any(test, feature = "testing"))]
 pub mod schedule_script;
 mod scram;
@@ -220,7 +222,7 @@ impl Context {
         Self {
             current,
             events: 0,
-            steps: steps::UNBOUNDED,
+            steps: steps::initial_unbounded_steps(),
             step_bounds: Vec::new(),
             step_slice_tail: steps::SLICE,
             regions: region::RegionCache::default(),
@@ -264,7 +266,7 @@ impl Context {
             (*self.host_files)
                 .sockets
                 .insert(fd)
-                .unwrap_or_else(|| process::stop(b"HostHandles"))
+                .unwrap_or_else(|| run_stop::raise(run_stop::Stop::from_static(b"HostHandles")))
         }
     }
     /// Sets a fixture's program allowance, excluding its original primary

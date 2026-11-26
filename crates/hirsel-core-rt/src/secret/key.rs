@@ -60,7 +60,9 @@ pub(super) fn key_failure(failure: hirsel_core_net::key_wrap::KeyFailure) -> Out
         KeyFailure::Denied => KEY_DENIED,
         KeyFailure::Invalid => KEY_INVALID,
         KeyFailure::Tampered => KEY_TAMPERED,
-        KeyFailure::Provider(reason) => crate::process::stop(reason.as_bytes()),
+        KeyFailure::Provider(reason) => {
+            crate::run_stop::raise(crate::run_stop::Stop::from_bytes(reason.as_bytes()))
+        }
     })
 }
 
@@ -319,7 +321,7 @@ pub unsafe extern "C" fn hirsel_core_secret_sign(
         crate::process::deny_describe_capability(context);
         let key = resolve(context, key);
         let Some(alg) = SignAlg::from_case(alg) else {
-            crate::process::stop(b"SignAlg")
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"SignAlg"))
         };
         if !key.policy.uses().permits(alg.needed()) {
             return key_error(KEY_DENIED);
@@ -368,7 +370,7 @@ unsafe fn secret_aead(
         crate::process::deny_describe_capability(context);
         let key = resolve(context, key);
         let Some(alg) = AeadAlg::from_case(alg) else {
-            crate::process::stop(b"AeadAlg")
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"AeadAlg"))
         };
         let [nonce, aad, bytes] = inputs;
         let spare = (*out).capacity - (*out).len;

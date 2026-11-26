@@ -115,6 +115,9 @@ impl Operands {
     /// # Safety
     /// As for_handles. Caller owns the frame until delivery.
     pub(crate) unsafe fn prepare(self, context: *mut Context, site: u64) -> u8 {
+        if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+            crate::run_stop::raise(stop);
+        }
         // SAFETY: the pinned run owns the handle table.
         let table = unsafe { &*self.table };
         {
@@ -129,6 +132,10 @@ impl Operands {
             match unsafe { state.preflight(context, self, params) } {
                 Preflight::Ready => return 0,
                 Preflight::Refused(status) => return status,
+                Preflight::Stop(stop) => {
+                    drop(state);
+                    crate::run_stop::raise(stop);
+                }
                 Preflight::Wait => {}
             }
         }
@@ -221,6 +228,7 @@ enum Preflight {
     Ready,
     Refused(u8),
     Wait,
+    Stop(crate::run_stop::Stop),
 }
 
 impl Handle {
@@ -288,8 +296,10 @@ impl Table {
                     return Preflight::Wait;
                 }
             }
-            if call.result.is_some() {
-                self.reserve();
+            if call.result.is_some()
+                && let Err(stop) = self.reserve()
+            {
+                return Preflight::Stop(stop);
             }
             call.for_handles(|word, _| {
                 let handle = self.entries.get_mut(&(*word)[0]).unwrap();
@@ -300,18 +310,19 @@ impl Table {
         Preflight::Ready
     }
 
-    fn reserve(&mut self) {
+    fn reserve(&mut self) -> Result<(), crate::run_stop::Stop> {
         let needed = self
             .reserved
             .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
+            .ok_or_else(|| crate::run_stop::Stop::from_static(b"HostHandles"))?;
         if self.last_ordinal.checked_add(needed as u64).is_none() {
-            crate::process::stop(b"HostHandles");
+            return Err(crate::run_stop::Stop::from_static(b"HostHandles"));
         }
         if self.entries.try_reserve(needed).is_err() || self.pointers.try_reserve(needed).is_err() {
-            crate::process::stop(b"HostMemory");
+            return Err(crate::run_stop::Stop::from_static(b"HostMemory"));
         }
         self.reserved = needed;
+        Ok(())
     }
 
     fn insert(&mut self, pointer: u64, kind: &'static Kind, instance: u64) -> u64 {
@@ -456,6 +467,11 @@ unsafe fn wait_for_use(context: *mut Context, operands: Operands, site: u64) -> 
                 Preflight::Ready => Wait::default(),
                 Preflight::Refused(status) => {
                     frame.outcome.status = status;
+                    Wait::default()
+                }
+                Preflight::Stop(stop) => {
+                    drop(state);
+                    crate::run_stop::record(stop);
                     Wait::default()
                 }
                 Preflight::Wait => {

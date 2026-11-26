@@ -44,7 +44,6 @@ HOST_FILES = {
     # macos-s6-host-seam-2498 / macos-s7-darwin-provider-2585: the runtime host
     # seam and its Darwin provider.
     'crates/hirsel-core-net/src/reactor.rs': 'macos-s6-host-seam-2498',
-    'crates/hirsel-core-rt/src/fiber.rs': 'macos-s6-host-seam-2498',
     'crates/hirsel-core-rt/src/exec_provider_tests.rs': 'macos-s6-host-seam-2498',
     'crates/hirsel-core-rt/src/provider_tests.rs': 'macos-s6-host-seam-2498',
     'crates/hirsel-core-rt/src/secret/key.rs': 'macos-s6-host-seam-2498',

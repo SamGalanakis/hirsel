@@ -195,7 +195,9 @@ impl Region {
     #[cold]
     pub(crate) fn refill(&mut self, bytes: usize, align: usize) -> NonNull<u8> {
         let slot = Layout::from_size_align(bytes.max(1), align)
-            .unwrap_or_else(|_| crate::process::stop(b"HostMemory"))
+            .unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+            })
             .pad_to_align();
         let stride = slot.size();
         let key = (bytes, align);
@@ -223,20 +225,20 @@ impl Region {
         }
         // Adapt bumpalo's geometric refill to a region-wide ceiling. A pool
         // miss may leave a tail in another pool, so doubling alone can overshoot.
-        let occupied = self
-            .occupied
-            .checked_add(stride)
-            .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+        let occupied = self.occupied.checked_add(stride).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        });
         let room = occupied.saturating_mul(2).saturating_add(GRANULE) - self.reserved;
         let desired = if self.reserved == 0 {
-            stride
-                .checked_next_multiple_of(GRANULE)
-                .unwrap_or_else(|| crate::process::stop(b"HostMemory"))
+            stride.checked_next_multiple_of(GRANULE).unwrap_or_else(|| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+            })
         } else {
             self.capacity.saturating_mul(2).max(stride)
         };
-        let layout = Layout::from_size_align(desired.min(room), align)
-            .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
+        let layout = Layout::from_size_align(desired.min(room), align).unwrap_or_else(|_| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        });
         let pointer = self.chunk(layout);
         self.capacity = layout.size();
         self.reserved += layout.size();

@@ -104,9 +104,9 @@ pub(crate) unsafe fn adopt_socket(
     unsafe {
         let poller = (*sockets).poller()?;
         crate::tasks::attach_net(sockets, poller);
-        Ok((*sockets)
-            .insert(owned)
-            .unwrap_or_else(|| crate::process::stop(b"HostHandles")))
+        Ok((*sockets).insert(owned).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostHandles"))
+        }))
     }
 }
 
@@ -169,6 +169,32 @@ unsafe fn socket(n: &mut NetworkRequest, listener: bool) -> Result<u64, i32> {
 }
 #[cfg(test)]
 thread_local! { pub(crate) static ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+/// EMB-3: suppress `SIGPIPE` on child stdin pipe writes without altering the
+/// host's process-wide `SIGPIPE` disposition.
+///
+/// On Darwin, the pipe write end already has `F_SETNOSIGPIPE`. On Linux, this
+/// blocks `SIGPIPE` on the calling worker thread around `writev`, drains a
+/// thread-pending `SIGPIPE` with zero-timeout `sigtimedwait` when `writev`
+/// fails with `EPIPE`, and restores the previous thread mask.
+pub(crate) unsafe fn writev_pipe_nosigpipe(
+    fd: i32,
+    prefix: &Buffer,
+    tail: &Buffer,
+) -> Result<isize, i32> {
+    let parts = [
+        libc::iovec {
+            iov_base: prefix.data.cast(),
+            iov_len: prefix.len,
+        },
+        libc::iovec {
+            iov_base: tail.data.cast(),
+            iov_len: tail.len,
+        },
+    ];
+    // SAFETY: `parts` points to pinned request buffers; host seam suppresses SIGPIPE.
+    unsafe { crate::host::sys::writev_pipe_nosigpipe(fd, &parts) }
+}
 
 /// An attempt with two nonempty parts is one sendmsg. An empty part still
 /// permits the single-buffer syscall.
@@ -347,9 +373,11 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                         n.address = decoded(&mut peer);
                         match options(fd as i32, n.address.family, false, true) {
                             Ok(()) => Ok(Outcome {
-                                value: sockets
-                                    .insert(owned)
-                                    .unwrap_or_else(|| crate::process::stop(b"HostHandles")),
+                                value: sockets.insert(owned).unwrap_or_else(|| {
+                                    crate::run_stop::raise(crate::run_stop::Stop::from_static(
+                                        b"HostHandles",
+                                    ))
+                                }),
                                 ..Outcome::default()
                             }),
                             Err(e) => Err(e),
@@ -482,31 +510,21 @@ unsafe fn attempt(request: &mut Request, n: &mut NetworkRequest, first: bool) ->
                 }
                 let fd = sockets.fd(key);
                 let pipe = sockets.pipe(key);
-                let rc = retry(|| {
-                    if let Some(tail) = tail {
-                        if pipe {
-                            // The run ignores SIGPIPE. One writev commits
-                            // a prefix across both offered slices.
-                            let parts = [
-                                libc::iovec {
-                                    iov_base: b.data.cast(),
-                                    iov_len: b.len,
-                                },
-                                libc::iovec {
-                                    iov_base: tail.data.cast(),
-                                    iov_len: tail.len,
-                                },
-                            ];
-                            libc::writev(fd, parts.as_ptr(), parts.len() as i32)
-                        } else {
+                let rc = if let Some(tail) = tail
+                    && pipe
+                {
+                    writev_pipe_nosigpipe(fd, b, tail)
+                } else {
+                    retry(|| {
+                        if let Some(tail) = tail {
                             send_pair(fd, b, tail)
+                        } else if pipe {
+                            libc::read(fd, b.data.add(b.len).cast(), b.capacity - b.len)
+                        } else {
+                            libc::recv(fd, b.data.add(b.len).cast(), b.capacity - b.len, 0)
                         }
-                    } else if pipe {
-                        libc::read(fd, b.data.add(b.len).cast(), b.capacity - b.len)
-                    } else {
-                        libc::recv(fd, b.data.add(b.len).cast(), b.capacity - b.len, 0)
-                    }
-                });
+                    })
+                };
                 match rc {
                     Ok(0) if receiving && sockets.reset(key) => return Some(signal(5)),
                     Ok(count) => {

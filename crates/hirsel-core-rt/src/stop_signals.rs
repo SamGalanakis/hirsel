@@ -213,7 +213,8 @@ fn relay(fd: i32, state: &Mutex<State>) {
             break;
         }
         if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            crate::process::stop(b"Signal");
+            crate::run_stop::record(crate::run_stop::Stop::from_static(b"Signal"));
+            return;
         }
     }
     let tokens = {

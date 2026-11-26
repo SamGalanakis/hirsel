@@ -72,7 +72,9 @@ pub(crate) struct Member(Arc<RunView>);
 impl Member {
     /// A member of the running task's run.
     pub(crate) fn of_current() -> Self {
-        Self::of(current().unwrap_or_else(|| crate::process::stop(b"UnitOutsideTask")))
+        Self::of(current().unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitOutsideTask"))
+        }))
     }
     pub(crate) fn of(view: Arc<RunView>) -> Self {
         view.active.fetch_add(1, SeqCst);

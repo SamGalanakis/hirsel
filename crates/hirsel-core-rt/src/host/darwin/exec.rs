@@ -286,13 +286,20 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         let mut registry = self.shared.registry.lock().unwrap();
+        let mut stop = None;
         if let Ok(child) = direct(&mut registry, self.pid) {
             if child.disposition == Disposition::Live {
-                release(child);
+                if let Err(s) = release(child) {
+                    stop = Some(s);
+                }
             } else {
                 registry.children.retain(|child| child.pid != self.pid);
             }
             self.shared.wake();
+        }
+        drop(registry);
+        if let Some(s) = stop {
+            crate::run_stop::record(s);
         }
     }
 }
@@ -370,7 +377,10 @@ impl Shared {
             let count = match self.poller.wait(&mut events, None) {
                 Ok(count) => count,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => crate::process::stop(b"ExecSupervisor"),
+                Err(_) => {
+                    crate::run_stop::record(crate::run_stop::Stop::from_static(b"ExecSupervisor"));
+                    return;
+                }
             };
             if events[..count].iter().any(|e| e.token() == 0) {
                 // Only this thread takes the pending wake.
@@ -403,20 +413,39 @@ impl Shared {
             }
 
             if registry.stopping {
+                let mut stop = None;
                 for child in &mut registry.children {
-                    if child.disposition == Disposition::Live {
-                        release(child);
+                    if child.disposition == Disposition::Live
+                        && let Err(s) = release(child)
+                    {
+                        stop = Some(s);
+                        break;
                     }
+                }
+                if let Some(s) = stop {
+                    drop(registry);
+                    crate::run_stop::record(s);
+                    return;
                 }
             }
             let stopping = registry.stopping;
+            let mut reap_stop = None;
             registry.children.retain(|child| match child.disposition {
                 Disposition::Live => true,
                 Disposition::Reaped => !stopping,
-                Disposition::Released => wait(child.pid, libc::WNOHANG)
-                    .unwrap_or_else(|_| crate::process::stop(b"ExecReap"))
-                    .is_none(),
+                Disposition::Released => match wait(child.pid, libc::WNOHANG) {
+                    Ok(done) => done.is_none(),
+                    Err(_) => {
+                        reap_stop = Some(crate::run_stop::Stop::from_static(b"ExecReap"));
+                        false
+                    }
+                },
             });
+            if let Some(s) = reap_stop {
+                drop(registry);
+                crate::run_stop::record(s);
+                return;
+            }
             if stopping
                 && !registry
                     .children
@@ -494,7 +523,7 @@ impl Shared {
             let _ = send(pid, Signal::Kill);
             // No Process was issued. Only this thread can reap this child.
             if wait(pid, 0).is_err() {
-                crate::process::stop(b"ExecReap");
+                crate::run_stop::record(crate::run_stop::Stop::from_static(b"ExecReap"));
             }
             return Err(error.into());
         }
@@ -515,14 +544,15 @@ struct Started {
     pipes: [Option<OwnedFd>; 3],
 }
 
-fn release(child: &mut Child) {
+fn release(child: &mut Child) -> Result<(), crate::run_stop::Stop> {
     child.waiter = None;
     if let Err(error) = send(child.pid, Signal::Kill)
         && error.raw_os_error() != Some(libc::ESRCH)
     {
-        crate::process::stop(b"ExecKill");
+        return Err(crate::run_stop::Stop::from_static(b"ExecKill"));
     }
     child.disposition = Disposition::Released;
+    Ok(())
 }
 
 fn wait(pid: libc::pid_t, options: i32) -> io::Result<Option<Termination>> {
@@ -623,6 +653,11 @@ impl Streams {
         // SAFETY: each pipe end has a distinct open file description. Change
         // the reactor's end only, leaving blocking stdio for the child.
         check(unsafe { libc::fcntl(parent.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) })?;
+        if !write {
+            // EMB-3: suppress SIGPIPE on child stdin pipe writes per fd.
+            const F_SETNOSIGPIPE: libc::c_int = 73;
+            check(unsafe { libc::fcntl(parent.as_raw_fd(), F_SETNOSIGPIPE, 1) })?;
+        }
         Ok((child, Some(parent)))
     }
 }
@@ -703,7 +738,7 @@ impl Drop for Held<'_> {
             if unsafe { libc::dup2(self.0.null.as_raw_fd(), slot) } < 0
                 || unsafe { libc::fcntl(slot, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
             {
-                crate::process::stop(b"ExecSlots");
+                crate::run_stop::record(crate::run_stop::Stop::from_static(b"ExecSlots"));
             }
         }
     }

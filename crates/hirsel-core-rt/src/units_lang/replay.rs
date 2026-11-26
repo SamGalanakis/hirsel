@@ -263,10 +263,9 @@ pub(super) unsafe fn take_one(u: &mut LangUnit) -> bool {
         tape::diverged_take(Some(group), "helper end survivors exceed reservation");
         return false;
     }
-    let hctx = u
-        .unstarted
-        .remove(&key)
-        .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+    let hctx = u.unstarted.remove(&key).unwrap_or_else(|| {
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLedger"))
+    });
     // SAFETY: as above.
     let port = unsafe { Arc::as_ptr(&(*h).port) as usize };
     RESULTS.lock().unwrap().insert(port, ended);

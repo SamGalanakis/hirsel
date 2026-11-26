@@ -202,7 +202,7 @@ pub(crate) unsafe fn deny_describe_capability(context: *const Context) {
     unsafe {
         let run = (*context).run;
         if !run.is_null() && !(*run).launch.is_null() && (*(*run).launch).describe() {
-            stop(b"DescribeCapability");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"DescribeCapability"));
         }
     }
 }
@@ -331,9 +331,12 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
     unsafe { run_config(&*config, entry, run_plain) }
 }
 
-type RunMain<'a> = dyn FnMut(&mut Context) -> (u8, i32) + 'a;
+type RunMain<'a> = dyn FnMut(&mut Context) -> Result<(u8, i32), crate::run_stop::EndReason> + 'a;
 
-fn run_plain(context: &mut Context, main: &mut RunMain<'_>) -> std::io::Result<(u8, i32)> {
+fn run_plain(
+    context: &mut Context,
+    main: &mut RunMain<'_>,
+) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>> {
     Ok(main(context))
 }
 
@@ -360,14 +363,16 @@ unsafe fn with_foreign(
     context: &mut Context,
     main: &mut RunMain<'_>,
     waits: bool,
-) -> std::io::Result<(u8, i32)> {
+) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>> {
     let state = crate::foreign::Run::new(waits)?;
     context.foreign = &raw const state;
     let result = main(context);
-    // SAFETY: the main runner has joined the tasks and delivered their calls.
-    unsafe {
-        crate::foreign::contained::end_task(context);
-        state.finish(context);
+    if result.is_ok() {
+        // SAFETY: the main runner has joined the tasks and delivered their calls.
+        unsafe {
+            crate::foreign::contained::end_task(context);
+            state.finish(context);
+        }
     }
     context.foreign = std::ptr::null();
     Ok(result)
@@ -399,8 +404,51 @@ fn map_hash_key() -> std::io::Result<[u8; 16]> {
 unsafe fn run_config(
     config: &Config,
     entry: Entry,
-    run: impl FnOnce(&mut Context, &mut RunMain<'_>) -> std::io::Result<(u8, i32)>,
+    run: impl FnOnce(
+        &mut Context,
+        &mut RunMain<'_>,
+    ) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>>,
 ) -> u8 {
+    let standalone_gen = crate::run_stop::GenerationEnd::standalone();
+    let _scope = if crate::run_stop::is_contained() {
+        None
+    } else {
+        // SAFETY: `standalone_gen` lives for the entire duration of `run_config`.
+        Some(unsafe { crate::run_stop::GenerationScope::enter(&standalone_gen) })
+    };
+    // SAFETY: forwarded caller contract.
+    match unsafe { run_config_inner(config, entry, run) } {
+        Ok(status) => status,
+        Err(crate::run_stop::EndReason::RunStop(reason)) => {
+            if crate::run_stop::is_contained() {
+                NOT_STARTED
+            } else {
+                stop(reason.as_bytes())
+            }
+        }
+        Err(crate::run_stop::EndReason::HostStop) => 0,
+    }
+}
+
+/// Contained (embedded) entry that never alters process-wide `SIGPIPE` and
+/// returns any run stop or host stop instead of calling `process::stop`.
+pub(crate) unsafe fn run_config_contained(
+    config: &Config,
+    entry: Entry,
+    _generation: &crate::run_stop::GenerationEnd,
+) -> Result<u8, crate::run_stop::EndReason> {
+    // SAFETY: caller pinned config, entry, and entered GenerationScope.
+    unsafe { run_config_inner(config, entry, run_plain) }
+}
+
+unsafe fn run_config_inner(
+    config: &Config,
+    entry: Entry,
+    run: impl FnOnce(
+        &mut Context,
+        &mut RunMain<'_>,
+    ) -> std::io::Result<Result<(u8, i32), crate::run_stop::EndReason>>,
+) -> Result<u8, crate::run_stop::EndReason> {
     // SAFETY: the driver pins configuration and the generated entry thunk.
     unsafe {
         let key = match map_hash_key() {
@@ -413,10 +461,10 @@ unsafe fn run_config(
                 if let Some(close) = config.close_grants {
                     close(config.state);
                 }
-                return NOT_STARTED;
+                return Ok(NOT_STARTED);
             }
         };
-        let _pipe_policy = PipePolicy::enter();
+        let _pipe_policy = (!crate::run_stop::is_contained()).then(PipePolicy::enter);
         #[cfg(feature = "prof")]
         let _worker_profile = crate::prof::Worker::enter();
         let mut context = Context::with_unit_heap(config.root_limit);
@@ -440,7 +488,7 @@ unsafe fn run_config(
             if let Some(close) = config.close_grants {
                 close(config.state);
             }
-            return NOT_STARTED;
+            return Ok(NOT_STARTED);
         }
         let mut result = MainResult::default();
         struct Call {
@@ -470,11 +518,19 @@ unsafe fn run_config(
             });
             // Installation: a provider missing a callback is refused here, before
             // any operation could use it (REPLAY-SPEC section 3).
-            crate::provider::install(config.provider);
-            for n in 0..config.capabilities_len {
-                crate::provider::install((*config.capabilities.add(n)).provider);
+            if let Err(stop) = crate::provider::try_install(config.provider) {
+                crate::fiber::set_stop_fd(previous_fd);
+                return Err(crate::run_stop::EndReason::RunStop(stop));
             }
-            let failed = crate::tasks::run_root(
+            for n in 0..config.capabilities_len {
+                if let Err(stop) =
+                    crate::provider::try_install((*config.capabilities.add(n)).provider)
+                {
+                    crate::fiber::set_stop_fd(previous_fd);
+                    return Err(crate::run_stop::EndReason::RunStop(stop));
+                }
+            }
+            let failed = crate::tasks::run_root_contained(
                 context,
                 invoke,
                 (&mut call as *mut Call).cast(),
@@ -483,10 +539,31 @@ unsafe fn run_config(
                 size_of::<MainResult>(),
                 config.scheduler,
             );
-            (failed, previous_fd)
+            match failed {
+                Ok(failed) => Ok((failed, previous_fd)),
+                Err(end) => {
+                    crate::fiber::set_stop_fd(previous_fd);
+                    Err(end)
+                }
+            }
         };
         let (failed, previous_fd) = match run(&mut context, &mut main) {
-            Ok(result) => result,
+            Ok(Ok(result)) => result,
+            Ok(Err(end)) => {
+                // On a contained end, release host resources (files/context)
+                // without running Hirsel cleanup or diagnostics.
+                // On standalone RunStop, caller invokes process::stop before
+                // close_grants, matching FAIL-15.
+                if crate::run_stop::is_contained() {
+                    drop(result.take_text());
+                    files.close_all(&mut context);
+                    drop(context);
+                    if let Some(close) = config.close_grants {
+                        close(config.state);
+                    }
+                }
+                return Err(end);
+            }
             Err(error) => {
                 diagnostic(
                     config,
@@ -495,7 +572,7 @@ unsafe fn run_config(
                 if let Some(close) = config.close_grants {
                     close(config.state);
                 }
-                return NOT_STARTED;
+                return Ok(NOT_STARTED);
             }
         };
         #[cfg(feature = "charge-observation")]
@@ -541,7 +618,7 @@ unsafe fn run_config(
         if let Some(close) = config.close_grants {
             close(config.state);
         }
-        status
+        Ok(status)
     }
 }
 unsafe fn diagnostic(config: &Config, bytes: &[u8]) {
@@ -597,6 +674,12 @@ pub fn stop(name: &[u8]) -> ! {
         libc::write(fd, b"\n".as_ptr().cast(), 1);
         libc::_exit(102)
     }
+}
+
+/// Standalone fallback when a stop occurs outside any contained generation
+/// (e.g. a standalone direct unit test calling an internal helper directly).
+pub(crate) fn uncontained_stop(reason: crate::run_stop::Stop) -> ! {
+    stop(reason.as_bytes())
 }
 
 // Rust std's Unix startup ignores SIGPIPE so write returns EPIPE. Generated C

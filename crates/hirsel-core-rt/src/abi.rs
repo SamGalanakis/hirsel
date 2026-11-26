@@ -630,7 +630,7 @@ pub unsafe extern "C" fn hirsel_core_share(node: NonNull<u8>, atomic: bool) {
 /// An inline share wrapped a count past `2^64 - 1`: the FAIL-15 run stop.
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_count_overflow() -> ! {
-    crate::process::stop(b"CountOverflow")
+    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"CountOverflow"))
 }
 /// # Safety
 /// A live holder pins node, under the same count/event discipline as share.

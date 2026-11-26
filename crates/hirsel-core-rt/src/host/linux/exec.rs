@@ -293,15 +293,22 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         let mut registry = self.shared.registry.lock().unwrap();
+        let mut stop = None;
         if let Ok(child) = direct(&mut registry, self.fd) {
             if child.disposition == Disposition::Live {
-                release(child);
+                if let Err(s) = release(child) {
+                    stop = Some(s);
+                }
             } else {
                 registry
                     .children
                     .retain(|child| child.fd.as_raw_fd() != self.fd);
             }
             self.shared.wake();
+        }
+        drop(registry);
+        if let Some(s) = stop {
+            crate::run_stop::record(s);
         }
     }
 }
@@ -368,7 +375,10 @@ impl Shared {
             let count = match self.poller.wait(&mut events, None) {
                 Ok(count) => count,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => crate::process::stop(b"ExecSupervisor"),
+                Err(_) => {
+                    crate::run_stop::record(crate::run_stop::Stop::from_static(b"ExecSupervisor"));
+                    return;
+                }
             };
             if events[..count].iter().any(|e| e.token() == 0) {
                 // Only this thread takes the pending wake.
@@ -404,23 +414,42 @@ impl Shared {
             }
 
             if registry.stopping {
+                let mut stop = None;
                 for child in &mut registry.children {
-                    if child.disposition == Disposition::Live {
-                        release(child);
+                    if child.disposition == Disposition::Live
+                        && let Err(s) = release(child)
+                    {
+                        stop = Some(s);
+                        break;
                     }
+                }
+                if let Some(s) = stop {
+                    drop(registry);
+                    crate::run_stop::record(s);
+                    return;
                 }
             }
             let stopping = registry.stopping;
+            let mut reap_stop = None;
             registry.children.retain(|child| match child.disposition {
                 Disposition::Live => true,
                 Disposition::Reaped => !stopping,
-                Disposition::Released => wait(child.fd.as_raw_fd(), libc::WNOHANG)
-                    .unwrap_or_else(|_| crate::process::stop(b"ExecReap"))
-                    .is_none(),
+                Disposition::Released => match wait(child.fd.as_raw_fd(), libc::WNOHANG) {
+                    Ok(done) => done.is_none(),
+                    Err(_) => {
+                        reap_stop = Some(crate::run_stop::Stop::from_static(b"ExecReap"));
+                        false
+                    }
+                },
                 Disposition::Orphan => {
                     matches!(wait(child.fd.as_raw_fd(), libc::WNOHANG), Ok(None))
                 }
             });
+            if let Some(s) = reap_stop {
+                drop(registry);
+                crate::run_stop::record(s);
+                return;
+            }
             self.adopt_orphans(&mut registry);
             if stopping
                 && !registry
@@ -520,7 +549,7 @@ impl Shared {
         };
         // No Process was issued. Only this thread can reap this child.
         if wait(pidfd, 0).is_err() {
-            crate::process::stop(b"ExecReap");
+            crate::run_stop::record(crate::run_stop::Stop::from_static(b"ExecReap"));
         }
         self.registry
             .lock()
@@ -690,14 +719,15 @@ struct Starting {
     monitored: io::Result<()>,
 }
 
-fn release(child: &mut Child) {
+fn release(child: &mut Child) -> Result<(), crate::run_stop::Stop> {
     child.waiter = None;
     if let Err(error) = send(child.fd.as_raw_fd(), Signal::Kill)
         && error.raw_os_error() != Some(libc::ESRCH)
     {
-        crate::process::stop(b"ExecKill");
+        return Err(crate::run_stop::Stop::from_static(b"ExecKill"));
     }
     child.disposition = Disposition::Released;
+    Ok(())
 }
 
 fn wait(fd: RawFd, options: i32) -> io::Result<Option<Termination>> {

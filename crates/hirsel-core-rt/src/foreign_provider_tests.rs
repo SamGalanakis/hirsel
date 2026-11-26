@@ -7,7 +7,7 @@ fn foreign_host_call_canonicalizes_nan_and_restores_floats() {
 
     unsafe extern "C" fn poison(args: *mut u64) -> u64 {
         let here = 0u8;
-        assert!(crate::fiber::room(1 << 20));
+        assert!(crate::fiber::room(1 << 20).is_ok());
         // SAFETY: the fixture lends one pinned argument word.
         unsafe { args.write(std::hint::black_box(&here as *const u8).addr() as u64) };
         #[cfg(target_arch = "x86_64")]

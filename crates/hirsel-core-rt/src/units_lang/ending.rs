@@ -28,10 +28,13 @@ impl ResultsExt for std::sync::MutexGuard<'_, Option<HashMap<usize, Ended>>> {
 /// The owner runs the take in a commit; the handle is live.
 pub(super) unsafe fn end_take(u: &mut LangUnit, h: &mut HelperH) {
     let results = RESULTS.lock().unwrap();
-    let ended = results
+    let Some(ended) = results
         .as_ref()
         .and_then(|m| m.get(&(Arc::as_ptr(&h.port) as usize)))
-        .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+    else {
+        drop(results);
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLedger"));
+    };
     let held = h.charge.as_mut().unwrap();
     // The charges taken over are the survivors the take lists: one still held
     // at the hand-over may have been released since. A refund or `RETIRED`

@@ -1144,13 +1144,13 @@ fn helper_main(
         replay::bind_helper_files(&tape, &mut files);
         context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {
-            crate::process::stop(b"UnitLedger");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLedger"));
         }
         let mut input = vec![0u8; (xb as usize).max(layout.input.bytes)];
         let payer = context.payer();
         let xs = live_charge(data.as_ptr(), &xo);
         if xs > 0 && block::admit_storage(payer, Some(xs)).is_err() {
-            crate::process::stop(b"UnitLedger");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLedger"));
         }
         unpack(
             &mut context,
@@ -1262,11 +1262,10 @@ unsafe fn consume(context: *mut Context, h: *mut HelperH, dest: Option<*mut u8>)
         u.helpers.remove(&(*h).k);
         u.waits -= 1;
         let mut hb = Box::from_raw(h);
-        let ended = RESULTS
-            .lock()
-            .unwrap()
-            .take(Arc::as_ptr(&hb.port) as usize)
-            .unwrap_or_else(|| crate::process::stop(b"UnitLedger"));
+        let ended = { RESULTS.lock().unwrap().take(Arc::as_ptr(&hb.port) as usize) }
+            .unwrap_or_else(|| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitLedger"))
+            });
         let ret = u.ctx.consume_helper(hb.k, false);
         let mut held = hb.charge.take().unwrap();
         let mut chain = Causes::default();

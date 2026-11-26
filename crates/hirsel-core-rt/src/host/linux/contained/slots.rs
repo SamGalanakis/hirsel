@@ -224,7 +224,7 @@ impl Drop for Memory {
 /// `new_memory` can return only a message (FFI-13 Bytes, FAIL-15).
 fn refused(error: std::io::Error) -> String {
     if error.raw_os_error() == Some(libc::ENOMEM) {
-        crate::process::stop(b"HostMemory");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"));
     }
     error.to_string()
 }

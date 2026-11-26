@@ -49,12 +49,17 @@ pub(super) struct ClockCell {
 }
 
 impl ClockCell {
-    pub(super) fn next_registration(&mut self) -> u64 {
+    pub(super) fn try_next_registration(&mut self) -> Result<u64, crate::run_stop::Stop> {
         self.registration = self
             .registration
             .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"TimerArms"));
-        self.registration
+            .ok_or_else(|| crate::run_stop::Stop::from_static(b"TimerArms"))?;
+        Ok(self.registration)
+    }
+
+    pub(super) fn next_registration(&mut self) -> u64 {
+        self.try_next_registration()
+            .unwrap_or_else(|stop| crate::run_stop::raise(stop))
     }
 
     pub(super) fn next_deadline(&self) -> Option<u64> {
@@ -94,13 +99,25 @@ impl ChannelClock {
                 if observed {
                     // The recorded observation was before this expiry.
                     // Arrange a wake, then make the next poll observe it.
-                    let sequence = clock.next_registration();
+                    let sequence = match clock.try_next_registration() {
+                        Ok(seq) => seq,
+                        Err(stop) => {
+                            drop(clock);
+                            crate::run_stop::raise(stop);
+                        }
+                    };
                     clock.channel_timers.insert(arm, sequence);
                     clock.channel_timers.fire_first();
                 }
                 return observed;
             }
-            let sequence = clock.next_registration();
+            let sequence = match clock.try_next_registration() {
+                Ok(seq) => seq,
+                Err(stop) => {
+                    drop(clock);
+                    crate::run_stop::raise(stop);
+                }
+            };
             clock.channel_timers.insert(arm, sequence);
             true
         }

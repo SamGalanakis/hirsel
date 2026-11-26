@@ -1,13 +1,18 @@
 //! Keep the allocator's native free-list path for ordinary alignments. The
 //! mimalloc backend bypasses the Rust wrapper's always-aligned entry point.
+use crate::run_stop::Stop;
 use std::alloc::Layout;
 use std::ptr::NonNull;
 
 #[cfg(any(test, feature = "memcheck"))]
 pub(crate) mod checked;
 
+/// Fallible raw allocation that checks writable fiber stack room before
+/// entering the C allocator and returns `Err(Stop)` instead of diverging
+/// (so callers holding locks drop their guards before raising).
 #[inline]
-pub(crate) fn allocate_raw(layout: Layout) -> NonNull<u8> {
+pub fn try_allocate_raw(layout: Layout) -> Result<NonNull<u8>, Stop> {
+    crate::fiber::room(crate::fiber::RUNTIME_ROOM)?;
     // SAFETY: positive Layout, with the corresponding backend retained until free.
     let pointer = unsafe {
         #[cfg(feature = "mimalloc")]
@@ -32,18 +37,27 @@ pub(crate) fn allocate_raw(layout: Layout) -> NonNull<u8> {
             }
         }
     };
-    let pointer = NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+    let pointer = NonNull::new(pointer).ok_or_else(|| Stop::from_static(b"HostMemory"))?;
     #[cfg(any(test, feature = "memcheck"))]
     checked::allocated(pointer, layout.size());
     #[cfg(feature = "allocation-count")]
     crate::allocation_count::allocated();
-    pointer
+    Ok(pointer)
 }
+
+#[inline]
+pub(crate) fn allocate_raw(layout: Layout) -> NonNull<u8> {
+    try_allocate_raw(layout).unwrap_or_else(|stop| crate::run_stop::raise(stop))
+}
+
 /// # Safety
 /// A live pointer must be the original exclusively owned base from
 /// allocate_raw. Checked mode detects an address that is no longer live.
 #[inline]
 pub(crate) unsafe fn deallocate_raw(pointer: NonNull<u8>) {
+    if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+        crate::run_stop::raise(stop);
+    }
     #[cfg(any(test, feature = "memcheck"))]
     if checked::enabled() {
         // SAFETY: the caller transfers raw allocator storage.

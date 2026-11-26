@@ -140,12 +140,12 @@ impl<T> LazyMap<T> {
     }
 }
 
-fn next_id(next: &mut u64) -> u64 {
+fn next_id(next: &mut u64) -> Result<u64, crate::run_stop::Stop> {
     *next += 1;
     if *next == hirsel_core_ids::host_op::DIR_READ_ONLY {
-        crate::process::stop(b"HostHandles");
+        return Err(crate::run_stop::Stop::from_static(b"HostHandles"));
     }
-    *next
+    Ok(*next)
 }
 
 #[derive(Default)]
@@ -278,8 +278,17 @@ impl Registry {
                 capacity: 0,
             })
             .collect();
+        if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+            crate::run_stop::raise(stop);
+        }
         let mut registry = self.run.designations.lock().unwrap();
-        let id = DYNAMIC_GRANT | next_id(&mut registry.next);
+        let id = match next_id(&mut registry.next) {
+            Ok(id) => DYNAMIC_GRANT | id,
+            Err(stop) => {
+                drop(registry);
+                crate::run_stop::raise(stop);
+            }
+        };
         registry.vectors.insert(
             id,
             Vector {
@@ -297,8 +306,17 @@ impl Registry {
         unsafe { &*views }
     }
     fn insert(&self, file: File) -> u64 {
+        if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+            crate::run_stop::raise(stop);
+        }
         let mut registry = self.owned.lock().unwrap();
-        let id = next_id(&mut registry.next);
+        let id = match next_id(&mut registry.next) {
+            Ok(id) => id,
+            Err(stop) => {
+                drop(registry);
+                crate::run_stop::raise(stop);
+            }
+        };
         registry
             .live
             .get_or_insert_with(|| Resources::new(close_files))
@@ -337,8 +355,17 @@ impl Registry {
         handle: u64,
         terminal: Terminal,
     ) -> u64 {
+        if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+            crate::run_stop::raise(stop);
+        }
         let mut registry = self.run.designations.lock().unwrap();
-        let id = DYNAMIC_GRANT | next_id(&mut registry.next);
+        let id = match next_id(&mut registry.next) {
+            Ok(id) => DYNAMIC_GRANT | id,
+            Err(stop) => {
+                drop(registry);
+                crate::run_stop::raise(stop);
+            }
+        };
         registry.grants.insert(
             id,
             Arc::new(DynamicGrant {

@@ -127,10 +127,9 @@ impl TimerHeap {
         // SAFETY: this turn owns the parked task, which is not armed.
         unsafe {
             debug_assert_eq!((*(*task).timer.get()).arm, 0);
-            self.arm_sequence = self
-                .arm_sequence
-                .checked_add(1)
-                .unwrap_or_else(|| crate::process::stop(b"TimerArms"));
+            self.arm_sequence = self.arm_sequence.checked_add(1).unwrap_or_else(|| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TimerArms"))
+            });
             let index = self.len + 1;
             let parent = if self.len == 0 {
                 self.root = task;

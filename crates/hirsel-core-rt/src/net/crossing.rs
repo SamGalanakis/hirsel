@@ -32,7 +32,7 @@ impl CrossedSocket {
                 .is_some_and(|route| crate::provide::owns(&route.provider))
         {
             // A port owns its served keys. TLS halves own separate stream state.
-            crate::process::stop(b"UnitSocket");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitSocket"));
         }
     }
 
@@ -57,35 +57,26 @@ impl CrossedSocket {
                     crate::tape::units::crossing::depart(&tape.provider, key, tape.handle(key));
                 match source {
                     Some(source) => (
-                        Some(
-                            files
-                                .sockets
-                                .detach(source)
-                                .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
-                        ),
+                        Some(files.sockets.detach(source).unwrap_or_else(|_| {
+                            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+                        })),
                         taped,
                     ),
                     None if taped.is_some() => (None, taped),
-                    None => crate::process::stop(b"HostPoll"),
+                    None => crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll")),
                 }
             }
             None => (
-                Some(
-                    files
-                        .sockets
-                        .detach(key)
-                        .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
-                ),
+                Some(files.sockets.detach(key).unwrap_or_else(|_| {
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+                })),
                 None,
             ),
         };
         #[cfg(not(feature = "record"))]
-        let carrier = Some(
-            files
-                .sockets
-                .detach(key)
-                .unwrap_or_else(|_| crate::process::stop(b"HostPoll")),
-        );
+        let carrier = Some(files.sockets.detach(key).unwrap_or_else(|_| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+        }));
         Self {
             carrier,
             udp: None,
@@ -103,10 +94,9 @@ impl CrossedSocket {
         #[cfg(feature = "record")]
         let key = match self.carrier.take() {
             Some(carrier) => {
-                let reactor = files
-                    .sockets
-                    .attach(carrier)
-                    .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                let reactor = files.sockets.attach(carrier).unwrap_or_else(|_| {
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+                });
                 self.carrier_in(files, reactor)
             }
             None => self
@@ -119,7 +109,9 @@ impl CrossedSocket {
         let key = files
             .sockets
             .attach(self.carrier.take().unwrap())
-            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+            .unwrap_or_else(|_| {
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostPoll"))
+            });
         if let Some(route) = self.route.take() {
             files.tcp_routes.insert(key, route);
         }
@@ -149,7 +141,9 @@ impl CrossedSocket {
             return reactor;
         };
         // A listener a unit without a recording sends has no source to name.
-        let source = source.unwrap_or_else(|| crate::process::stop(b"UnitRecording"));
+        let source = source.unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitRecording"))
+        });
         match crate::tape::units::crossing::settle(
             &tape.provider,
             tape.handle(0),

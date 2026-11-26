@@ -297,7 +297,7 @@ static NEXT_ENDPOINT: AtomicU64 = AtomicU64::new(1);
 fn endpoint_id() -> u64 {
     NEXT_ENDPOINT
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .unwrap_or_else(|_| crate::process::stop(b"FlowIds"))
+        .unwrap_or_else(|_| crate::run_stop::raise(crate::run_stop::Stop::from_static(b"FlowIds")))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -601,7 +601,7 @@ pub(crate) unsafe fn discard(start: usize, bytes: usize) -> bool {
         )
     };
     if fresh == libc::MAP_FAILED {
-        crate::process::stop(b"HostMemory");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"));
     }
     true
 }
@@ -718,4 +718,84 @@ pub(crate) fn mappings() -> Option<Vec<u8>> {
 #[cfg(target_os = "ios")]
 pub(crate) fn exit_with_parent(_: libc::pid_t) -> io::Result<()> {
     Err(io::Error::from_raw_os_error(libc::ENOTSUP))
+}
+
+/// Fault signals raised by touching an inaccessible stack page on Darwin/iOS.
+pub(crate) const FAULT_SIGNALS: [libc::c_int; 2] = [libc::SIGSEGV, libc::SIGBUS];
+
+/// Distinguish synchronous kernel faults from software-raised signals on Darwin.
+pub(crate) fn is_hardware_fault(signal: libc::c_int, info: *const libc::siginfo_t) -> bool {
+    if info.is_null() {
+        return false;
+    }
+    // Darwin `<sys/signal.h>`: SEGV_NOOP=0, SEGV_MAPERR=1, SEGV_ACCERR=2;
+    // BUS_NOOP=0, BUS_ADRALN=1, BUS_ADRERR=2, BUS_OBJERR=3.
+    const SEGV_MAPERR: libc::c_int = 1;
+    const SEGV_ACCERR: libc::c_int = 2;
+    const BUS_ADRALN: libc::c_int = 1;
+    const BUS_ADRERR: libc::c_int = 2;
+    const BUS_OBJERR: libc::c_int = 3;
+    // SAFETY: kernel delivers a live siginfo_t under SA_SIGINFO.
+    let code = unsafe { (*info).si_code };
+    match signal {
+        libc::SIGSEGV => matches!(code, SEGV_MAPERR | SEGV_ACCERR),
+        libc::SIGBUS => matches!(code, BUS_ADRALN | BUS_ADRERR | BUS_OBJERR),
+        _ => false,
+    }
+}
+
+/// Rewrite Darwin `ucontext_t` to resume at `(resume_sp, resume_pc)`.
+///
+/// # Safety
+/// `context` is the live `ucontext_t` passed by the kernel, and `resume_sp`
+/// points at a live frame saved by `hirsel_stack::switch`.
+pub(crate) unsafe fn rewrite_ucontext(
+    context: *mut libc::c_void,
+    resume_sp: usize,
+    resume_pc: usize,
+) -> bool {
+    if context.is_null() || resume_sp == 0 {
+        return false;
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: Darwin aarch64 ucontext_t / mcontext64 layout.
+    unsafe {
+        let uc = &mut *context.cast::<libc::ucontext_t>();
+        if uc.uc_mcontext.is_null() {
+            return false;
+        }
+        (*uc.uc_mcontext).__ss.__sp = resume_sp as u64;
+        (*uc.uc_mcontext).__ss.__pc = resume_pc as u64;
+        true
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = resume_pc;
+        false
+    }
+}
+
+/// EMB-3: write to a pipe fd on Darwin where `F_SETNOSIGPIPE` is already set.
+///
+/// # Safety
+/// `parts` points to pinned readable buffers for the duration of the syscall.
+pub(crate) unsafe fn writev_pipe_nosigpipe(
+    fd: i32,
+    parts: &[libc::iovec; 2],
+) -> Result<isize, i32> {
+    // SAFETY: `F_SETNOSIGPIPE` is set on the pipe write end at creation/adoption.
+    unsafe {
+        loop {
+            let rc = libc::writev(fd, parts.as_ptr(), parts.len() as i32);
+            if rc >= 0 {
+                return Ok(rc);
+            }
+            let e = io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if e != libc::EINTR {
+                return Err(e);
+            }
+        }
+    }
 }

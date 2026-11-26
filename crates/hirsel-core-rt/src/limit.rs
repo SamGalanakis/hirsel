@@ -482,7 +482,7 @@ fn thread() -> usize {
 #[inline(always)]
 pub(crate) fn check_unbound() {
     if BOUND.get_here().is_some() {
-        crate::process::stop(b"UntiedParkBound");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UntiedParkBound"));
     }
 }
 /// One pointer to a stable task-table slot. The slot's outstanding bytes keep

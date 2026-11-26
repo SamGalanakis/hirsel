@@ -493,24 +493,31 @@ impl Secrets {
         DYNAMIC_GRANT | index as u64
     }
 
-    fn entry(&mut self, handle: u64) -> &mut Entry {
+    fn try_entry(&mut self, handle: u64) -> Result<&mut Entry, crate::run_stop::Stop> {
         self.entries[(handle & !DYNAMIC_GRANT) as usize]
             .as_mut()
-            .unwrap_or_else(|| crate::process::stop(b"SecretSlot"))
+            .ok_or_else(|| crate::run_stop::Stop::from_static(b"SecretSlot"))
+    }
+
+    #[cfg(test)]
+    fn entry(&mut self, handle: u64) -> &mut Entry {
+        self.try_entry(handle).expect("test secret slot")
     }
 
     /// Remove one holder; the last one's entry comes back to be dropped
     /// outside the table's lock.
-    fn release(&mut self, handle: u64) -> Option<Entry> {
-        let entry = self.entry(handle);
-        let holders = entry.holders.as_mut()?;
+    fn try_release(&mut self, handle: u64) -> Result<Option<Entry>, crate::run_stop::Stop> {
+        let entry = self.try_entry(handle)?;
+        let Some(holders) = entry.holders.as_mut() else {
+            return Ok(None);
+        };
         *holders -= 1;
         if *holders != 0 {
-            return None;
+            return Ok(None);
         }
         let index = (handle & !DYNAMIC_GRANT) as usize;
         self.free.push(index);
-        self.entries[index].take()
+        Ok(self.entries[index].take())
     }
 
     /// At a helper's end: each charge that `payer`'s domain paid for a
@@ -569,16 +576,19 @@ pub unsafe extern "C" fn hirsel_core_secret_drop(context: *mut Context, handle: 
         return;
     }
     // SAFETY: the run's grants outlive its units.
-    let entry = unsafe {
+    let result = unsafe {
         (*(*context).host_files)
             .registry
             .run_grants()
             .secrets
             .lock()
             .unwrap()
-            .release(handle)
+            .try_release(handle)
     };
-    drop(entry);
+    match result {
+        Ok(entry) => drop(entry),
+        Err(stop) => crate::run_stop::raise(stop),
+    }
 }
 
 /// `secret.share`: one more holder of the same designation.
@@ -596,8 +606,16 @@ pub unsafe extern "C" fn hirsel_core_secret_share(context: *mut Context, handle:
                 .lock()
                 .unwrap()
         };
-        if let Some(holders) = &mut secrets.entry(handle).holders {
-            *holders += 1;
+        match secrets.try_entry(handle) {
+            Ok(entry) => {
+                if let Some(holders) = &mut entry.holders {
+                    *holders += 1;
+                }
+            }
+            Err(stop) => {
+                drop(secrets);
+                crate::run_stop::raise(stop);
+            }
         }
     }
     handle
@@ -606,15 +624,19 @@ pub unsafe extern "C" fn hirsel_core_secret_share(context: *mut Context, handle:
 pub(crate) unsafe fn resolve(context: *const Context, handle: u64) -> Secret {
     unsafe {
         if handle & DYNAMIC_GRANT != 0 {
-            (*(*context).host_files)
+            let mut secrets = (*(*context).host_files)
                 .registry
                 .run_grants()
                 .secrets
                 .lock()
-                .unwrap()
-                .entry(handle)
-                .secret
-                .clone()
+                .unwrap();
+            match secrets.try_entry(handle) {
+                Ok(entry) => entry.secret.clone(),
+                Err(stop) => {
+                    drop(secrets);
+                    crate::run_stop::raise(stop);
+                }
+            }
         } else {
             let grant = hirsel_core_capability_handle(context, handle) as *const Granted;
             (*grant).secret.clone()

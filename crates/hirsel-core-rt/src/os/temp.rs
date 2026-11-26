@@ -35,7 +35,7 @@ fn create_temp_dir(fd: i32, prefix: &[u8], sequence: &AtomicU64) -> io::Result<(
     for _ in 0..TEMP_ATTEMPTS {
         let n = sequence.fetch_add(1, Relaxed);
         if n == u64::MAX {
-            crate::process::stop(b"HostNames");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostNames"));
         }
         let suffix = format!("h{:x}x{n:x}", std::process::id());
         let mut name = prefix.to_vec();

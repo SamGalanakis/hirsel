@@ -60,7 +60,7 @@ pub(crate) fn reach<R>(
     let result = call(Frozen::NAME.to_bytes());
     // SAFETY: returns this thread to the process working directory.
     if unsafe { pthread_fchdir_np(-1) } < 0 {
-        crate::process::stop(b"UnixThreadDirectory");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnixThreadDirectory"));
     }
     result
 }

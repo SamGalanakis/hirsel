@@ -329,10 +329,10 @@ pub(crate) unsafe fn spawn(
     };
     let cell = cell();
     let mut fresh = cell.state.lock().unwrap();
-    let generation = fresh
-        .generation
-        .checked_add(1)
-        .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
+    let Some(generation) = fresh.generation.checked_add(1) else {
+        drop(fresh);
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TapeSlots"));
+    };
     let mut state = spawner.cell.state.lock().unwrap();
     let current = state.generation == spawner.generation;
     let parent = state

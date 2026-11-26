@@ -1,9 +1,9 @@
 //! Blocking calls leave their unit on a Reply while the call runs on a host thread.
-use super::{Pool, Reply, in_unit, pool, pool_hooks, untied};
+use super::{POOL, Pool, Reply, in_unit, pool, pool_hooks, untied, wake_slot};
 use std::{
     collections::VecDeque,
     io,
-    sync::{Condvar, Mutex},
+    sync::{Condvar, Mutex, atomic::Ordering},
     thread,
     time::Duration,
 };
@@ -78,7 +78,11 @@ pub(super) struct Helpers {
 }
 
 impl Helpers {
-    fn enqueue(p: &'static Pool, class: HostCall, job: HostJob) {
+    fn try_enqueue(
+        p: &'static Pool,
+        class: HostCall,
+        job: HostJob,
+    ) -> Result<(), crate::run_stop::Stop> {
         let pool = &p.helpers;
         let mut s = pool.state.lock().unwrap();
         let reserve = p.plan.reserved_system_threads;
@@ -88,7 +92,7 @@ impl Helpers {
             // A peer cannot borrow an unused system seat.
             let spare = s.unoccupied_system(reserve);
             if s.live() >= total.saturating_sub(spare) {
-                crate::process::stop(b"HostThreads");
+                return Err(crate::run_stop::Stop::from_static(b"HostThreads"));
             }
             s.peers += 1;
             s.update_peaks();
@@ -100,8 +104,11 @@ impl Helpers {
                     pool.state.lock().unwrap().peers -= 1;
                     complete(job);
                 })
-                .unwrap_or_else(|_| crate::process::stop(b"HostThreads"));
-            return;
+                .map_err(|_| {
+                    s.peers -= 1;
+                    crate::run_stop::Stop::from_static(b"HostThreads")
+                })?;
+            return Ok(());
         }
 
         let which = usize::from(class == HostCall::System && reserve != 0);
@@ -120,7 +127,8 @@ impl Helpers {
         if !headroom && lane.live == 0 {
             // The host envelope is full of peer calls and has no thread
             // that could drain this lane.
-            crate::process::stop(b"HostThreads");
+            lane.jobs.pop_back();
+            return Err(crate::run_stop::Stop::from_static(b"HostThreads"));
         }
         if lane.jobs.len() > lane.idle && lane.live < lane_cap && headroom {
             match thread::Builder::new()
@@ -133,10 +141,20 @@ impl Helpers {
                     s.update_peaks();
                 }
                 Err(error) if lane.live > 0 && transient(&error) => s.spawn_deferred += 1,
-                Err(_) => crate::process::stop(b"HostThreads"),
+                Err(_) => {
+                    lane.jobs.pop_back();
+                    return Err(crate::run_stop::Stop::from_static(b"HostThreads"));
+                }
             }
         }
         pool.ready[which].notify_one();
+        Ok(())
+    }
+
+    fn enqueue(p: &'static Pool, class: HostCall, job: HostJob) {
+        if let Err(stop) = Self::try_enqueue(p, class, job) {
+            crate::run_stop::raise(stop);
+        }
     }
 
     fn run(p: &Pool, which: usize) {
@@ -207,6 +225,21 @@ pub(super) fn run_off_slot(class: HostCall, call: &mut (dyn FnMut() + Send)) -> 
     );
     reply.wait();
     true
+}
+
+pub(super) fn stop_pool(p: &'static Pool) {
+    if !p.stop.swap(true, Ordering::SeqCst) {
+        for w in std::mem::take(&mut *p.idle.lock().unwrap()) {
+            p.nsleep.fetch_sub(1, Ordering::SeqCst);
+            wake_slot(p, w);
+        }
+    }
+}
+
+pub(crate) fn wake_all_for_stop() {
+    if let Some(p) = POOL.get() {
+        stop_pool(p);
+    }
 }
 
 #[cfg(test)]

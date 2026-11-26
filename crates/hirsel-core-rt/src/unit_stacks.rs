@@ -26,7 +26,10 @@ impl UnitStack {
                 0,
             );
             if raw == libc::MAP_FAILED || libc::mprotect(raw, guard, libc::PROT_NONE) != 0 {
-                crate::process::stop(b"UnitStack");
+                if raw != libc::MAP_FAILED {
+                    libc::munmap(raw, len);
+                }
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitStack"));
             }
             Self {
                 base: NonNull::new_unchecked(raw.cast()),
@@ -63,7 +66,8 @@ impl UnitStack {
             for i in 0..count {
                 let base = raw.cast::<u8>().add(i * len);
                 if libc::mprotect(base.cast(), guard, libc::PROT_NONE) != 0 {
-                    crate::process::stop(b"UnitStack");
+                    libc::munmap(base.cast(), (count - i) * len);
+                    crate::run_stop::raise(crate::run_stop::Stop::from_static(b"UnitStack"));
                 }
                 out.push(Self {
                     base: NonNull::new_unchecked(base),

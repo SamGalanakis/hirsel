@@ -149,7 +149,7 @@ pub unsafe extern "C" fn hirsel_core_shared_share(node: *mut u8) -> *mut u8 {
     // Relaxed suffices: the new holder reaches another thread only through a
     // crossing, which synchronizes.
     if count.fetch_add(1, Ordering::Relaxed) == u64::MAX {
-        crate::process::stop(b"CountOverflow");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"CountOverflow"));
     }
     node
 }

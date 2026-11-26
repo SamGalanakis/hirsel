@@ -892,7 +892,7 @@ pub unsafe extern "C" fn hirsel_core_cred_fetch(
             return outcome;
         }
         let (Some(fetched), Some(grant)) = (fetch.fetched.take(), grant) else {
-            crate::process::stop(b"CredFetch")
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"CredFetch"))
         };
         if spare(key_id) < fetched.key_id.len() || spare(token) < fetched.token.len() {
             return failure(

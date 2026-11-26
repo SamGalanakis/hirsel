@@ -429,7 +429,7 @@ unsafe fn sink(p: Inner, mut r: Request) -> Outcome {
         }
         let step = (p.provider.issue)(p.provider.state, &mut r, 0);
         if step.kind != STEP_DONE {
-            crate::process::stop(b"TapePending");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TapePending"));
         }
         (p.provider.deliver)(p.provider.state, &mut r, step.outcome)
     }
@@ -932,12 +932,11 @@ impl Tape {
         };
         let cell = cell();
         let mut s = cell.state.lock().unwrap();
-        s.generation = s
-            .generation
-            .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
-        s.live = Some(live);
-        let generation = s.generation;
+        let Some(generation) = s.generation.checked_add(1) else {
+            drop(s);
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TapeSlots"));
+        };
+        (s.generation, s.live) = (generation, Some(live));
         drop(s);
         crate::tasks::attach_tape(schedule::Group::root(cell, generation));
         Ok((
@@ -1139,11 +1138,12 @@ fn finish(
     if s.generation != expected_generation {
         return Err(Fault::Ended);
     }
-    let generation = s.generation;
-    let mut live = s.live.take().unwrap();
-    s.generation = generation
-        .checked_add(1)
-        .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
+    let (generation, mut live) = (s.generation, s.live.take().unwrap());
+    let Some(next) = generation.checked_add(1) else {
+        drop(s);
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"TapeSlots"));
+    };
+    s.generation = next;
     for (i, o) in live.objects.iter().enumerate() {
         if let (true, Some(inner)) = (o.open_resource, o.inner) {
             s.orphans.insert(handle(generation, i + 1), inner);

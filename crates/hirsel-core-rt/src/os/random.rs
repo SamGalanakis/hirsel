@@ -30,7 +30,11 @@ pub(super) fn issue(request: &mut Request) -> Outcome {
     };
     // host.random has no error result. A failed draw ends the run before it
     // can publish bytes or record a delivery.
-    result.unwrap_or_else(|error| crate::process::stop(format!("host.random: {error}").as_bytes()))
+    result.unwrap_or_else(|error| {
+        crate::run_stop::raise(crate::run_stop::Stop::from_bytes(
+            format!("host.random: {error}").as_bytes(),
+        ))
+    })
 }
 
 fn draw(request: &mut Request, flags: u32) -> io::Result<Outcome> {

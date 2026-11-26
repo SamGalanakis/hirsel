@@ -36,7 +36,9 @@ unsafe extern "C" fn issue(_: *mut u8, request: *mut Request, _: u64) -> Step {
     let point = &mut point[..call.group.public_len()];
     call.key = match KeyShare::host(call.group, point) {
         Ok(key) => Some(key),
-        Err(_) => crate::process::stop(b"secret.key_share: OS key generation: ring Unspecified"),
+        Err(_) => crate::run_stop::raise(crate::run_stop::Stop::from_static(
+            b"secret.key_share: OS key generation: ring Unspecified",
+        )),
     };
     // SAFETY: admission proved the point fits in the exclusive spare.
     unsafe { append(&mut request.buffer, point) };
@@ -135,9 +137,11 @@ pub unsafe extern "C" fn hirsel_core_secret_key_share(
             (Some(outcome.value), request.buffer)
         };
         let registry = &crate::media::run_state(grants).agreements;
-        let ticket = registry
-            .new_share()
-            .unwrap_or_else(|| crate::process::stop(b"key share count overflow"));
+        let ticket = registry.new_share().unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(
+                b"key share count overflow",
+            ))
+        });
         let tape = crate::media::Origin::new(origin.unwrap_or(0), origin.is_some(), &charge);
         let origin = origin.map_or_else(|| (0, ticket.ordinal()), |ordinal| (1, ordinal));
         (*public).len = buffer.len;

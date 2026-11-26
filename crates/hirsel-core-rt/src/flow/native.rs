@@ -66,7 +66,9 @@ impl Plain {
 }
 
 fn host_size(size: u64) -> usize {
-    usize::try_from(size).unwrap_or_else(|_| crate::process::stop(b"HostMemory"))
+    usize::try_from(size).unwrap_or_else(|_| {
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+    })
 }
 
 struct Ring {
@@ -93,12 +95,12 @@ impl Ring {
 
 impl Fifo<Plain> for Ring {
     fn new(cap: usize, size: usize) -> Self {
-        let stride = size
-            .checked_add(16)
-            .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
-        let bytes = cap
-            .checked_mul(stride)
-            .unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+        let stride = size.checked_add(16).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        });
+        let bytes = cap.checked_mul(stride).unwrap_or_else(|| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"))
+        });
         Self {
             storage: Storage::new(bytes, 8),
             cap,

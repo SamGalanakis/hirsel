@@ -594,12 +594,19 @@ impl Memory {
         self.admitted_bytes
             .fetch_sub(stacks.charged_bytes, Ordering::AcqRel);
         match (stacks.unit, stacks.root) {
-            (Some(unit), Some(root)) => self.put_pair(ix, StackPair { unit, root }),
+            (Some(unit), Some(root)) if !root.is_retired() => {
+                self.put_pair(ix, StackPair { unit, root })
+            }
+            (Some(unit), Some(root)) => {
+                drop(root);
+                self.put_unit_stack(unit);
+            }
             (Some(unit), None) => self.put_unit_stack(unit),
-            (None, Some(root)) => {
+            (None, Some(root)) if !root.is_retired() => {
                 root.trim();
                 self.put_task_stack(root);
             }
+            (None, Some(root)) => drop(root),
             (None, None) => {}
         }
     }
@@ -883,6 +890,10 @@ impl SharedMemory for Memory {
     }
 
     fn put_task_stack(&self, stack: Stack) {
+        if stack.is_retired() || crate::run_stop::is_ended() {
+            drop(stack);
+            return;
+        }
         let bytes = stack.committed_bytes();
         self.keep(
             |stock| &mut stock.task_stacks,

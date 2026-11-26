@@ -154,14 +154,22 @@ pub struct Provider {
 /// # Safety
 /// A non-null provider points at six readable pointer-sized words.
 #[cfg_attr(hirsel_runtime_size, optimize(size))]
-pub(crate) unsafe fn install(provider: *const Provider) {
+pub(crate) unsafe fn try_install(provider: *const Provider) -> Result<(), crate::run_stop::Stop> {
     if provider.is_null() {
-        return;
+        return Ok(());
     }
     // SAFETY: read as plain words, so a NULL never becomes a Rust fn value.
     let words = unsafe { provider.cast::<[usize; 6]>().read() };
     if words[1..].contains(&0) {
-        crate::process::stop(b"Provider");
+        return Err(crate::run_stop::Stop::from_static(b"Provider"));
+    }
+    Ok(())
+}
+
+#[cfg_attr(hirsel_runtime_size, optimize(size))]
+pub(crate) unsafe fn install(provider: *const Provider) {
+    if let Err(stop) = unsafe { try_install(provider) } {
+        crate::run_stop::raise(stop);
     }
 }
 

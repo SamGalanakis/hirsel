@@ -279,7 +279,7 @@ unsafe fn check_snapshot_type<T: Resource>(handle: u64) {
         if let Some(group) = crate::tasks::current_group() {
             group.abort_corrupt();
         }
-        crate::process::stop(b"MediaType");
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"MediaType"));
     }
 }
 

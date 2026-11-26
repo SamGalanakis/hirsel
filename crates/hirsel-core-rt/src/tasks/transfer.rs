@@ -69,7 +69,9 @@ pub unsafe extern "C" fn hirsel_core_transfer(
         return 0;
     }
     let task = CURRENT.get();
-    let bytes = usize::try_from(bytes).unwrap_or_else(|_| crate::process::stop(b"Transfer"));
+    let bytes = usize::try_from(bytes).unwrap_or_else(|_| {
+        crate::run_stop::raise(crate::run_stop::Stop::from_static(b"Transfer"))
+    });
     // SAFETY: CURRENT pins the task, and only its own fiber touches it; the
     // block holds `bytes` writable bytes.
     unsafe {

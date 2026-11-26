@@ -104,7 +104,7 @@ impl ResourceLimiter for State {
     /// nondeterministic −1 to the guest.
     fn memory_grow_failed(&mut self, error: Error) -> Result<(), Error> {
         if is_host_memory(&error) {
-            crate::process::stop(b"HostMemory");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"));
         }
         Ok(())
     }
@@ -122,7 +122,7 @@ impl ResourceLimiter for State {
 
     fn table_grow_failed(&mut self, error: Error) -> Result<(), Error> {
         if is_host_memory(&error) {
-            crate::process::stop(b"HostMemory");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"));
         }
         Ok(())
     }
@@ -131,7 +131,7 @@ impl ResourceLimiter for State {
 fn unwrap_host<T>(result: Result<T, Error>) -> T {
     result.unwrap_or_else(|error| {
         if is_host_memory(&error) {
-            crate::process::stop(b"HostMemory");
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"));
         }
         std::process::abort()
     })
@@ -331,7 +331,7 @@ unsafe fn settle<T>(
             // table/instance allocation) is a `HostMemory` run stop, never a
             // catchable trap or process abort.
             if is_host_memory(&error) {
-                crate::process::stop(b"HostMemory");
+                crate::run_stop::raise(crate::run_stop::Stop::from_static(b"HostMemory"));
             }
             let trap = error.downcast_ref::<Trap>();
             if bounded && (left == 0 || trap == Some(&Trap::OutOfFuel)) {

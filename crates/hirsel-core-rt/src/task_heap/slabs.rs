@@ -422,6 +422,9 @@ unsafe impl Send for Slab {}
 
 impl Slab {
     pub(crate) fn allocate(heap_address: usize) -> (Self, NonNull<u8>) {
+        if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+            crate::run_stop::raise(stop);
+        }
         let memory = crate::units::memory();
         if let Some(slab) = memory.and_then(|memory| memory.take_slab()) {
             let start = slab.start;
@@ -454,16 +457,25 @@ impl Slab {
                 start,
             );
         }
-        let (want, min) = pool.next_range_granules(1);
+        let (want, min) = match pool.try_next_range_granules(1) {
+            Ok(pair) => pair,
+            Err(stop) => {
+                drop(pool);
+                crate::run_stop::raise(stop);
+            }
+        };
         drop(pool);
         let fresh = map_range(memory, want, min, SLAB, 0);
         let mut pool = SHARDS[shard].lock().unwrap();
         let range = pool.insert_range(fresh);
         // SAFETY: `range` was just inserted under this shard lock and is empty.
-        let (index, start) = unsafe {
+        let claimed = unsafe {
             let r = range.as_ptr().as_mut().unwrap();
-            let index = r.claim_one().unwrap_or_else(host_memory);
-            (index, r.start(index))
+            r.claim_one().map(|index| (index, r.start(index)))
+        };
+        let Some((index, start)) = claimed else {
+            drop(pool);
+            host_memory()
         };
         (
             Self {
@@ -524,6 +536,9 @@ impl Extent {
         align: usize,
         prefix: usize,
     ) -> (Self, NonNull<u8>) {
+        if let Err(stop) = crate::fiber::room(crate::fiber::RUNTIME_ROOM) {
+            crate::run_stop::raise(stop);
+        }
         let bytes = bytes
             .checked_next_multiple_of(page_bytes())
             .unwrap_or_else(host_memory);
@@ -554,24 +569,30 @@ impl Extent {
             claimed = pool.claim_run(granules, align, prefix);
         }
         let (range, start, base) = if let Some(claimed) = claimed {
+            drop(pool);
             claimed
         } else {
-            let (want, min) = pool.next_range_granules(granules);
+            let (want, min) = match pool.try_next_range_granules(granules) {
+                Ok(pair) => pair,
+                Err(stop) => {
+                    drop(pool);
+                    crate::run_stop::raise(stop);
+                }
+            };
             drop(pool);
             let fresh = map_range(memory, want, min, align, prefix);
             pool = SHARDS[shard].lock().unwrap();
             let range = pool.insert_range(fresh);
             // SAFETY: `range` was just inserted under this shard lock and aligned
             // so granule 0 satisfies `align` at `base + prefix`.
-            unsafe {
+            let found = unsafe {
                 let r = range.as_ptr().as_mut().unwrap();
-                let start = r
-                    .claim_run(granules, align, prefix)
-                    .unwrap_or_else(host_memory);
-                (range, start, r.start(start))
-            }
+                r.claim_run(granules, align, prefix)
+                    .map(|start| (range, start, r.start(start)))
+            };
+            drop(pool);
+            found.unwrap_or_else(|| host_memory())
         };
-        drop(pool);
         // SAFETY: `prefix` lies inside the claimed extent.
         let payload = unsafe { base.add(prefix) };
         let extent = Self {
@@ -732,11 +753,14 @@ impl Shard {
             .sum()
     }
 
-    fn next_range_granules(&self, need: usize) -> (usize, usize) {
+    fn try_next_range_granules(
+        &self,
+        need: usize,
+    ) -> Result<(usize, usize), crate::run_stop::Stop> {
         let min = need
             .max(MIN_RANGE_GRANULES)
             .checked_next_multiple_of(MIN_RANGE_GRANULES)
-            .unwrap_or_else(host_memory);
+            .ok_or_else(|| crate::run_stop::Stop::from_static(b"HostMemory"))?;
         let required = need
             .max(MIN_RANGE_GRANULES)
             .checked_next_power_of_two()
@@ -747,7 +771,7 @@ impl Shard {
             .checked_next_power_of_two()
             .unwrap_or(MAX_RANGE_GRANULES)
             .min(MAX_RANGE_GRANULES);
-        (geometric.max(required), min)
+        Ok((geometric.max(required), min))
     }
 
     fn claim_slab(&mut self) -> Option<(NonNull<Range>, u32, NonNull<u8>)> {

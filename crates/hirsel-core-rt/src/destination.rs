@@ -9,7 +9,9 @@ fn take(counter: &AtomicU64) -> u64 {
     counter
         .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
         .map(|previous| previous + 1)
-        .unwrap_or_else(|_| crate::process::stop(b"DestinationIds"))
+        .unwrap_or_else(|_| {
+            crate::run_stop::raise(crate::run_stop::Stop::from_static(b"DestinationIds"))
+        })
 }
 
 pub(crate) fn next() -> u64 {

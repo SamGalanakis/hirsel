@@ -23,8 +23,13 @@ use std::{
 
 mod frame;
 mod quiet;
+mod stop;
 mod storage;
 mod timers;
+pub use stop::run_root;
+pub(crate) use stop::{
+    host_operation, on_host_stack, run_root_contained, run_root_with_unit, wake_all_waiters,
+};
 use timers::{Timer, TimerHeap};
 mod transfer;
 use frame::FrameRecord;
@@ -263,7 +268,7 @@ impl<T> WaitArms<T> {
         let identity = self.next_identity;
         self.next_identity = identity
             .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
+            .unwrap_or_else(|| stop::stop_static(b"HostHandles"));
         self.live.insert(
             ReadyToken(token),
             Arm {
@@ -282,7 +287,7 @@ impl<T> WaitArms<T> {
         self.turn = self
             .turn
             .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
+            .unwrap_or_else(|| stop::stop_static(b"HostHandles"));
         captured.extend(tokens.into_iter().filter_map(|token| {
             if token & channel_clock::TOKEN_TAG != 0 {
                 return Some(ReadyArm { token, identity: 0 });
@@ -416,7 +421,7 @@ impl Tapes {
         let opened = self.next_open;
         self.next_open = opened
             .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"TapeSlots"));
+            .unwrap_or_else(|| stop::stop_static(b"TapeSlots"));
         self.live.push(LiveTape {
             group,
             opened,
@@ -618,7 +623,7 @@ impl Scheduler {
         self.next = self
             .next
             .checked_add(1)
-            .unwrap_or_else(|| crate::process::stop(b"TaskIds"));
+            .unwrap_or_else(|| stop::stop_static(b"TaskIds"));
         next
     }
     unsafe fn ready(&mut self, task: *mut Task) {
@@ -1023,7 +1028,7 @@ impl Scheduler {
         }
     }
 
-    fn stop_quiescent(&mut self) -> ! {
+    fn stop_quiescent(&mut self) {
         #[cfg(feature = "record")]
         if let Some((unit, fault)) = self.tapes.seal_deadlock() {
             let mut line = crate::tape::format_verdict(fault, 0, &unit);
@@ -1034,7 +1039,7 @@ impl Scheduler {
                 libc::_exit(1);
             }
         }
-        crate::process::stop(b"Deadlock");
+        stop::record_static(b"Deadlock");
     }
 
     fn set_net(
@@ -1061,8 +1066,9 @@ impl Scheduler {
             let readies = &self.readies;
             // SAFETY: the run pins its shared registry; no task runs during
             // polling, and the only dispatcher is already awake.
-            unsafe { (*self.net).poll(timeout, |token| readies.enqueue(token)) }
-                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+            if unsafe { (*self.net).poll(timeout, |token| readies.enqueue(token)) }.is_err() {
+                stop::record_static(b"HostPoll");
+            }
         }
     }
 
@@ -1140,14 +1146,17 @@ impl Scheduler {
     }
 
     fn idle(&mut self) {
-        if self.readies.has_pending() || !self.cancels.is_empty() {
+        if crate::run_stop::is_ended() || self.readies.has_pending() || !self.cancels.is_empty() {
             return;
         }
         let deadline = self.timers.deadline();
         if deadline.is_none() && !self.has_outside_wait() {
             match self.quiet() {
                 quiet::Decision::Run => return self.active(),
-                quiet::Decision::Deadlock => self.stop_quiescent(),
+                quiet::Decision::Deadlock => {
+                    self.stop_quiescent();
+                    return;
+                }
                 quiet::Decision::Park => {}
             }
         }
@@ -1317,7 +1326,10 @@ impl Scheduler {
                             self.timers.insert(task, w.deadline_ns);
                         }
                         WAIT_PARK => self.timers.remove(task),
-                        _ => crate::process::stop(b"Provider"),
+                        _ => {
+                            stop::record_static(b"Provider");
+                            return false;
+                        }
                     }
                     #[cfg(feature = "prof")]
                     if (*op).prof_pending == 0 {
@@ -1398,7 +1410,7 @@ impl Scheduler {
                         self.timers.insert(task, step.deadline_ns);
                     }
                 }
-                _ => crate::process::stop(b"Provider"),
+                _ => stop::record_static(b"Provider"),
             }
         }
     }
@@ -1615,7 +1627,7 @@ static TOKENS: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn operation_token() -> u64 {
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     if token >= channel_clock::TOKEN_TAG {
-        crate::process::stop(b"HostHandles");
+        stop::stop_static(b"HostHandles");
     }
     token
 }
@@ -1760,7 +1772,7 @@ pub extern "C" fn hirsel_core_ready(token: u64) {
 #[inline(never)]
 pub(crate) fn check_idle_tls() {
     if !CURRENT.get_here().is_null() || !CALLBACK_TASK.get_here().is_null() {
-        crate::process::stop(b"UntiedParkWithTask");
+        stop::stop_static(b"UntiedParkWithTask");
     }
     crate::limit::check_unbound();
 }
@@ -1855,7 +1867,7 @@ unsafe fn provider_operation_in<const RETURNABLE: bool>(
 ) -> Option<crate::provider::Outcome> {
     let token = operation_token();
     if token == u64::MAX {
-        crate::process::stop(b"HostHandles");
+        stop::stop_static(b"HostHandles");
     }
     let task = CURRENT.get();
     // SAFETY: provider contract; request pinned by the caller through delivery.
@@ -2141,7 +2153,7 @@ unsafe fn returnable(
         let op = (*task)
             .frame
             .as_ref()
-            .unwrap_or_else(|| crate::process::stop(b"FrameRecord"))
+            .unwrap_or_else(|| stop::stop_static(b"FrameRecord"))
             .operation();
         op.write(Operation::new(task, provider, request, token));
         match (*op).begin(start) {
@@ -2337,7 +2349,7 @@ impl Operation {
                     };
                     Next::Park
                 }
-                _ => crate::process::stop(b"Provider"),
+                _ => stop::stop_static(b"Provider"),
             }
         }
     }
@@ -2431,7 +2443,7 @@ unsafe fn alone(
                         let sockets = &mut (*(*context).host_files).sockets;
                         sockets
                             .poll(0, |token| readies.push(token))
-                            .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                            .unwrap_or_else(|_| stop::stop_static(b"HostPoll"));
                         crate::units::take_xready(|id, flags| {
                             sockets.dispatch(id, flags, |token| readies.push(token))
                         });
@@ -2453,7 +2465,7 @@ unsafe fn alone(
                         .sockets
                         .poll(0, |token| readies.push(token))
                 }
-                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                .unwrap_or_else(|_| stop::stop_static(b"HostPoll"));
             }
             if readies.pending.load(Ordering::Acquire) && readies.take(token) {
                 return true;
@@ -2472,7 +2484,7 @@ unsafe fn alone(
                         .sockets
                         .poll(poll_timeout(deadline), |token| readies.push(token))
                 }
-                .unwrap_or_else(|_| crate::process::stop(b"HostPoll"));
+                .unwrap_or_else(|_| stop::stop_static(b"HostPoll"));
                 continue;
             }
             match deadline {
@@ -2509,11 +2521,11 @@ unsafe fn alone(
                     if crate::provide::owns(p)
                         && !crate::provide::quiesce(crate::provide::Scope::Token(token))
                     {
-                        crate::process::stop(b"Deadlock");
+                        stop::stop_static(b"Deadlock");
                     }
                     wait(None);
                 }
-                _ => crate::process::stop(b"Provider"),
+                _ => stop::stop_static(b"Provider"),
             }
         }
         let mut step = provider_callback!(token, Issue, crate::provider::issue(p, request, token));
@@ -2524,7 +2536,7 @@ unsafe fn alone(
                     // A call on a served port waits on its server, and no
                     // other task runs to serve it (FAIL-15).
                     if crate::provide::owns(p) {
-                        crate::process::stop(b"Deadlock");
+                        stop::stop_static(b"Deadlock");
                     }
                     let deadline = (step.deadline_ns != 0).then_some(step.deadline_ns);
                     if wait(deadline) {
@@ -2538,7 +2550,7 @@ unsafe fn alone(
                         ));
                     }
                 }
-                _ => crate::process::stop(b"Provider"),
+                _ => stop::stop_static(b"Provider"),
             }
         }
     }
@@ -3100,7 +3112,7 @@ unsafe fn lang_unit_slow(mut task: *mut Task) -> *mut crate::units_lang::LangUni
         task = CALLBACK_TASK.get();
     }
     if task.is_null() {
-        crate::process::stop(b"UnitOutsideTask");
+        stop::stop_static(b"UnitOutsideTask");
     }
     // SAFETY: the running task pins its run.
     unsafe {
@@ -3547,45 +3559,14 @@ unsafe extern "C" fn start(first: *mut u8, _: *mut u8) -> ! {
     }
 }
 
-/// Execute a root on the same guarded stack discipline as its children.
-/// # Safety
-/// Context/body/argument/destination remain pinned and task-owned until completion.
-pub unsafe fn run_root(
-    context: *mut Context,
-    body: Body,
-    argument: *mut u8,
-    destination: *mut u8,
-    input_bytes: usize,
-    result_bytes: usize,
-    provider: SchedulerProvider,
-) -> u8 {
-    // SAFETY: the caller pins all root operands for the run.
-    unsafe {
-        run_root_with_unit(
-            context,
-            body,
-            argument,
-            destination,
-            input_bytes,
-            result_bytes,
-            provider,
-            None,
-            Default::default(),
-        )
-    }
-}
-
 /// The tape group a helper's root task records in, when its spawner records.
 #[cfg(feature = "record")]
 pub(crate) type UnitGroup = Option<Group>;
 #[cfg(not(feature = "record"))]
 pub(crate) type UnitGroup = ();
 
-/// # Safety
-/// As for `run_root`. A helper's caller keeps its unit for this run and owns it
-/// again after the root returns.
 #[allow(clippy::too_many_arguments)]
-pub(crate) unsafe fn run_root_with_unit(
+pub(crate) unsafe fn run_root_with_unit_contained(
     context: *mut Context,
     body: Body,
     argument: *mut u8,
@@ -3595,10 +3576,12 @@ pub(crate) unsafe fn run_root_with_unit(
     provider: SchedulerProvider,
     unit: Option<&mut crate::units_lang::LangUnit>,
     group: UnitGroup,
-) -> u8 {
+) -> Result<u8, crate::run_stop::EndReason> {
+    use crate::run_stop::EndReason;
     #[cfg(feature = "prof")]
     let _worker_profile = prof::Worker::enter();
-    crate::fiber::arm();
+    crate::fiber::arm_embedded().map_err(|e| EndReason::RunStop(e.into()))?;
+    let _alt = crate::fiber::Alternate::install_if_needed().map_err(EndReason::RunStop)?;
     let view = unit.as_ref().and_then(|u| u.run_view());
     let root_member = view.is_none().then(|| Member::of(RunView::new()));
     let mut run = Scheduler {
@@ -3661,8 +3644,12 @@ pub(crate) unsafe fn run_root_with_unit(
         logical: 0,
         clean: None,
     };
-    let input_storage = Storage::new(input_bytes, 16);
-    let result_storage = Storage::new(result_bytes, 16);
+    let input_storage = Storage::try_new(input_bytes, 16).map_err(EndReason::RunStop)?;
+    let result_storage = Storage::try_new(result_bytes, 16).map_err(EndReason::RunStop)?;
+    let root_stack = match crate::units::take_root_stack() {
+        Some(stack) => stack,
+        None => run.stacks.try_take().map_err(EndReason::RunStop)?,
+    };
     let mut root = Box::new(Task {
         arc_runtime: false,
         arc_hooks: true,
@@ -3692,7 +3679,7 @@ pub(crate) unsafe fn run_root_with_unit(
         id: 0,
         #[cfg(feature = "record")]
         group: None,
-        stack: Some(crate::units::take_root_stack().unwrap_or_else(|| run.stacks.take())),
+        stack: Some(root_stack),
         sp: ptr::null_mut(),
         body,
         input: input_storage.as_ptr(),
@@ -3744,6 +3731,19 @@ pub(crate) unsafe fn run_root_with_unit(
         root.arc_hooks = run.arc_hooks(&root);
         run.ready(root_pointer);
         RunPtr(&mut run).dispatch_serial(root_pointer);
+        if crate::run_stop::is_ended() {
+            let end = stop::teardown_ended(&mut run, root_pointer);
+            (*context).events = 0;
+            if run.lang_owned {
+                crate::units_lang::LangUnit::end_root(run.lang);
+            }
+            drop(registered);
+            crate::backing_observation::observe!(free, root_pointer.cast(), size_of::<Task>());
+            drop(root);
+            drop(input_storage);
+            drop(result_storage);
+            return Err(end);
+        }
         if root.failed == 0 {
             ptr::copy_nonoverlapping(root.result, destination, result_bytes);
         }
@@ -3757,7 +3757,7 @@ pub(crate) unsafe fn run_root_with_unit(
         drop(root);
         drop(input_storage);
         drop(result_storage);
-        failed
+        Ok(failed)
     }
 }
 
@@ -3774,7 +3774,7 @@ impl RunPtr {
             let previous = CURRENT.get();
             let mut direct = ptr::null_mut::<Task>();
             loop {
-                if (*root).state == State::Ended {
+                if (*root).state == State::Ended || crate::run_stop::is_ended() {
                     break;
                 }
                 let task = if direct.is_null() {
@@ -3833,7 +3833,13 @@ impl RunPtr {
                     std::mem::replace(&mut direct, ptr::null_mut())
                 };
                 if (*task).stack.is_none() {
-                    mount(task, (*self.0).stacks.take());
+                    match (*self.0).stacks.try_take() {
+                        Ok(stack) => mount(task, stack),
+                        Err(stop) => {
+                            crate::run_stop::record(stop);
+                            break;
+                        }
+                    }
                 }
                 #[cfg(feature = "record")]
                 if (*task).channel_tape == ChannelTape::Expired
@@ -3847,13 +3853,18 @@ impl RunPtr {
                 #[cfg(feature = "prof")]
                 prof_dispatch(task, true);
                 abi::task_resume((*task).context);
+                let prev_idle = crate::run_stop::set_idle_ptr(idle);
                 crate::fiber::guard((*task).stack.as_ref().unwrap().bounds());
                 hirsel_stack::switch(idle, (*task).sp);
                 #[cfg(feature = "prof")]
                 prof_dispatch(task, false);
                 crate::fiber::guard((0, 0, 0));
+                crate::run_stop::set_idle_ptr(prev_idle);
                 crate::limit::Funding::unbind();
                 CURRENT.set(previous);
+                if crate::run_stop::is_ended() {
+                    break;
+                }
                 match (*task).state {
                     State::Ended => (*self.0)
                         .stacks
@@ -4316,63 +4327,6 @@ pub unsafe extern "C" fn hirsel_core_task_release(
         let holder = abandon_begin(context, task);
         (*list).stage_holder(holder, abandon_step, point);
         true
-    }
-}
-
-/// Run non-suspending OS code off the language fiber. Scripted provider issue and
-/// delivery callbacks stay on their task stacks and may suspend independently.
-/// # Safety
-/// Operation does not suspend/re-enter Hirsel; state/request stay pinned.
-pub(crate) unsafe fn host_operation(
-    state: *mut u8,
-    request: *mut crate::provider::Request,
-    operation: unsafe extern "C" fn(
-        *mut u8,
-        *mut crate::provider::Request,
-    ) -> crate::provider::Outcome,
-) -> crate::provider::Outcome {
-    // SAFETY: the provider's operands remain live and its callback cannot suspend.
-    unsafe {
-        on_host_stack(
-            false,
-            #[cfg(feature = "prof")]
-            (*request).site,
-            || operation(state, request),
-        )
-    }
-}
-
-/// # Safety
-/// The callback cannot re-enter the scheduler, suspend or unwind across its
-/// host-stack frame. All borrowed operands stay live until the call returns.
-pub(crate) unsafe fn on_host_stack<T>(
-    require_stack: bool,
-    #[cfg(feature = "prof")] site: u64,
-    call: impl FnOnce() -> T,
-) -> T {
-    let task = CURRENT.get();
-    if task.is_null() {
-        #[cfg(feature = "prof")]
-        let _interval = prof::HostInterval::begin(prof_current_task(), site);
-        if !require_stack {
-            return call();
-        }
-        crate::fiber::arm();
-        // SAFETY: this fresh stack belongs to this call alone.
-        return unsafe { crate::fiber::Stack::new().call(call) };
-    }
-    // SAFETY: the current task pins the worker's stock and no other task can
-    // take this stack until the synchronous call returns.
-    unsafe {
-        let stock = &raw mut (*(*task).run).stacks;
-        let host = (*stock).take();
-        #[cfg(feature = "prof")]
-        let interval = prof::HostInterval::begin(prof_current_task(), site);
-        let result = host.call(call);
-        #[cfg(feature = "prof")]
-        drop(interval);
-        (*stock).recycle(host);
-        result
     }
 }
 

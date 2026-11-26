@@ -172,6 +172,7 @@ _pthread_fchdir_np
 _pthread_get_stackaddr_np
 _pthread_get_stacksize_np
 _pthread_join
+_pthread_kill
 _pthread_mutex_destroy
 _pthread_mutex_init
 _pthread_mutex_lock
@@ -217,6 +218,7 @@ _sigaltstack
 _sigdelset
 _sigemptyset
 _sigfillset
+_sigismember
 _signal
 _snprintf
 _socket

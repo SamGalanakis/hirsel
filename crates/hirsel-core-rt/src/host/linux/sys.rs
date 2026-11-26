@@ -462,3 +462,112 @@ pub(crate) fn resident_bytes() -> Option<u64> {
 pub(crate) fn mappings() -> Option<Vec<u8>> {
     std::fs::read("/proc/self/maps").ok()
 }
+
+/// Fault signals raised by touching an inaccessible stack page on Linux.
+pub(crate) const FAULT_SIGNALS: [libc::c_int; 1] = [libc::SIGSEGV];
+
+/// Distinguish synchronous kernel faults (`si_code > 0`) from software-raised
+/// signals (`si_code <= 0`: `SI_USER`, `SI_QUEUE`, `SI_TKILL`) on Linux.
+pub(crate) fn is_hardware_fault(_signal: libc::c_int, info: *const libc::siginfo_t) -> bool {
+    if info.is_null() {
+        return false;
+    }
+    // SAFETY: kernel delivers a live siginfo_t under SA_SIGINFO.
+    unsafe { (*info).si_code > 0 }
+}
+
+/// Rewrite Linux `ucontext_t` to resume at `(resume_sp, resume_pc)`.
+///
+/// # Safety
+/// `context` is the live `ucontext_t` passed by the kernel, and `resume_sp`
+/// points at a live frame saved by `hirsel_stack::switch`.
+pub(crate) unsafe fn rewrite_ucontext(
+    context: *mut libc::c_void,
+    resume_sp: usize,
+    resume_pc: usize,
+) -> bool {
+    if context.is_null() || resume_sp == 0 {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: Linux x86_64 ucontext_t layout.
+    unsafe {
+        let uc = &mut *context.cast::<libc::ucontext_t>();
+        uc.uc_mcontext.gregs[libc::REG_RSP as usize] = resume_sp as libc::greg_t;
+        uc.uc_mcontext.gregs[libc::REG_RIP as usize] = resume_pc as libc::greg_t;
+        true
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: Linux aarch64 ucontext_t layout.
+    unsafe {
+        let uc = &mut *context.cast::<libc::ucontext_t>();
+        uc.uc_mcontext.sp = resume_sp as u64;
+        uc.uc_mcontext.pc = resume_pc as u64;
+        true
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = resume_pc;
+        false
+    }
+}
+
+/// EMB-3: write to a pipe fd on Linux without altering the process-wide
+/// `SIGPIPE` disposition. Blocks `SIGPIPE` on this thread around `writev`,
+/// drains a newly generated thread-pending `SIGPIPE` via zero-timeout
+/// `sigtimedwait` on `EPIPE`, and restores the previous thread mask.
+///
+/// # Safety
+/// `parts` points to pinned readable buffers for the duration of the syscall.
+pub(crate) unsafe fn writev_pipe_nosigpipe(
+    fd: i32,
+    parts: &[libc::iovec; 2],
+) -> Result<isize, i32> {
+    // SAFETY: thread-local sigmask save/restore + writev + zero-timeout drain.
+    unsafe {
+        let mut pipe_set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut pipe_set);
+        libc::sigaddset(&mut pipe_set, libc::SIGPIPE);
+        let mut prev_set: libc::sigset_t = std::mem::zeroed();
+        let masked = libc::pthread_sigmask(libc::SIG_BLOCK, &pipe_set, &mut prev_set) == 0;
+        let already_pending = if masked && libc::sigismember(&prev_set, libc::SIGPIPE) == 1 {
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&mut pending) == 0 && libc::sigismember(&pending, libc::SIGPIPE) == 1
+        } else {
+            false
+        };
+        let result = loop {
+            let rc = libc::writev(fd, parts.as_ptr(), parts.len() as i32);
+            if rc >= 0 {
+                break Ok(rc);
+            }
+            let e = io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            if e != libc::EINTR {
+                break Err(e);
+            }
+        };
+        if result == Err(libc::EPIPE) && masked && !already_pending {
+            let zero = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            loop {
+                let rc = libc::sigtimedwait(&pipe_set, std::ptr::null_mut(), &zero);
+                if rc >= 0
+                    || io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO)
+                        != libc::EINTR
+                {
+                    break;
+                }
+            }
+        }
+        if masked {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &prev_set, std::ptr::null_mut());
+        }
+        result
+    }
+}

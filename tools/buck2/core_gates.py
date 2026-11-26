@@ -1,7 +1,7 @@
 """Build targets for the core script gates: M1, M2b, check cost and the SQLite native laws."""
 
 
-def core_gates(out, call, Raw):
+def core_gates(out, call, Raw, libc_deps):
     out.append("\n" + call("hirsel_script_test", name="test-core-m1-runner", script="core/tools/test_m1.py",
                             data=["core/tools/m1.py", "core/tools/std_native.py", "core/tools/std_contracts.py", "tools/loopback_peer.py", "core/tools/case_progress.py"]))
     # host: the installed-prefix case runs a program that opens a Dir, which needs the host's openat2.
@@ -70,3 +70,11 @@ def core_gates(out, call, Raw):
                                 crate=suite, crate_root=entry, srcs=[entry, *[f"{matched}/{path}" for path in sources]],
                                 features=[], deps=[], manifest_dir=".", package_name="langarena-rust",
                                 version="0.0.0", edition="2024"))
+    out.append("\n" + call("hirsel_library", name="core-embed-stop-fixture",
+        crate="embed_stop_fixture", crate_root="crates/hirsel-core-rt/testdata/embed_stop_fixture.rs",
+        srcs=["crates/hirsel-core-rt/testdata/embed_stop_fixture.rs"], features=[], deps=["//:hirsel-core-rt"] + libc_deps,
+        manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-embed-stop-fixture-pic", library=":core-embed-stop-fixture"))
+    out.append("\n" + call("hirsel_script_test", name="core-embed-stop-laws", script="tools/tests/core_embed_stop_laws.py",
+        files_env={"HIRSEL_EMBED_STOP_FIXTURE": "//:core-embed-stop-fixture-pic"},
+        data=Raw('glob(["crates/hirsel-core-rt/src/**/*.rs"]) + ["crates/hirsel-core-rt/testdata/embed_stop_wrap.c"]')))

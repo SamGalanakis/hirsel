@@ -3,8 +3,21 @@ use crate::{Context, causes};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const UNBOUNDED: i64 = 1 << 62;
+/// EMB-3: in contained/embed mode, tasks without an explicit `bound steps`
+/// initialize their countdown to 65,536 so pure loops observe generation end
+/// without emitting any scheduling event or ending a slice.
+pub const EMBED_QUANTUM: i64 = 65_536;
 pub const SLICE: u64 = crate::abi_layout::STEP_SLICE as u64;
 static NEXT: AtomicU64 = AtomicU64::new(1);
+
+#[inline(always)]
+pub(crate) fn initial_unbounded_steps() -> i64 {
+    if crate::run_stop::is_contained() {
+        EMBED_QUANTUM
+    } else {
+        UNBOUNDED
+    }
+}
 
 pub(crate) struct Bound {
     id: u64,
@@ -14,7 +27,7 @@ pub(crate) struct Bound {
 fn bound(left: u64) -> Bound {
     let id = NEXT
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .unwrap_or_else(|_| crate::process::stop(b"StepIds"));
+        .unwrap_or_else(|_| crate::run_stop::raise(crate::run_stop::Stop::from_static(b"StepIds")));
     Bound { id, left }
 }
 
@@ -32,7 +45,7 @@ fn install_window(context: &mut Context, slice: u64) {
         context.steps = window as i64;
     } else {
         context.step_slice_tail = slice;
-        context.steps = UNBOUNDED;
+        context.steps = initial_unbounded_steps();
     }
 }
 
@@ -167,6 +180,18 @@ pub(crate) unsafe fn take_many(context: *mut Context, mut count: u64, site: u64)
 pub unsafe extern "C" fn hirsel_core_step_out(context: *mut Context, site: u64) -> u8 {
     // SAFETY: the engine supplies the exclusively running task's context.
     let ctx = unsafe { &mut *context };
+    if ctx.step_bounds.is_empty() {
+        // EMB-3: unbound tasks in the embed slot check generation end here and
+        // reload 65,536 without emitting any scheduling event or ending a slice.
+        if crate::run_stop::is_ended() {
+            crate::run_stop::leave_on_ended();
+        }
+        ctx.steps = initial_unbounded_steps();
+        return 0;
+    }
+    if crate::run_stop::is_ended() {
+        crate::run_stop::leave_on_ended();
+    }
     if ctx.steps < 0
         && let Some(current) = ctx.step_bounds.last()
     {

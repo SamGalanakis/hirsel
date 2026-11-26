@@ -2,19 +2,37 @@
 /// once `build(6u64)` is `build(7u64)`.
 const RELEASE_SUM: &str = "type N: shareable + send {\n    value: u64,\n    tail: Option[Arc[N]]\n}\nfn scale(x: u64) -> u64 { x }\nfn sum(node: Arc[N]) -> u64 {\n    scale(node.value) + match node.tail {\n        Some(t) => sum(t),\n        None => 0u64\n    }\n}\nfn build(last: u64) -> Option[Arc[N]] {\n    let mut root: Option[Arc[N]] = None\n    for i in 1u64 .. last {\n        let old = replace(mut root, None)\n        root = Some(arc.new(N(value: i, tail: take old)))\n    }\n    root\n}\npub fn main() -> Result[(), Exit] {\n    let a = match build(6u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let b = match build(3u64) {\n        Some(r) => sum(r),\n        None => 0u64\n    }\n    let mut s = string.new()\n    let _ = string.push_u64(mut s, a)\n    let _ = string.push_char(mut s, ' ')\n    let _ = string.push_u64(mut s, b)\n    let n = string.byte_len(s)\n    let mut acc = a + b\n    for i in 0u64 .. n {\n        let parsed: Result[i64, ParseError] = int.parse(string.slice(s, i, n))\n        acc = acc + match parsed {\n            Ok(v) => int.truncate(v),\n            Error(_) => 1u64\n        }\n    }\n    Error(exit_with(int.truncate(acc)))\n}\n";
 
+/// [`RELEASE_SUM`] with two bodies, in partitions of their own, that call
+/// each other and read the same constant: `ping(3)` is `pong(2) + 1` =
+/// `ping(1) + 3` = `pong(0) + 4` = `2 * width("ab") + 4` = 8.
+fn release_parts() -> String {
+    RELEASE_SUM
+        .replace(
+            "pub fn main()",
+            "fn width(s: String) -> u64 { string.byte_len(s) }\nfn ping(n: u64) -> u64 {\n    if n == 0u64 { width(\"ab\") } else { pong(n - 1u64) + 1u64 }\n}\nfn pong(n: u64) -> u64 {\n    if n == 0u64 { width(\"ab\") * 2u64 } else { ping(n - 1u64) + 2u64 }\n}\npub fn main()",
+        )
+        .replace("let mut acc = a + b\n", "let mut acc = a + b + ping(3u64)\n")
+}
+
 /// A release unit lowered in partitions, each body nearly alone in its own
 /// (a bound of one Core instruction), exits as the unit does whole, and an
 /// edit's build, which reuses the partitions the edit leaves unchanged, is a
 /// cold build of the edited source into an empty store: the same executable
-/// bytes. Mutant caught: a partition's key that does not cover its lowered
-/// module reuses another partition's parts, and the edit fails to link.
-/// Exits hand-derived as in [`release_edit_is_the_cold_build`]: 24, then 30.
+/// bytes. Mutants caught: a partition's key that does not cover its lowered
+/// module reuses another partition's parts, and the edit fails to link; a
+/// partition that does not declare the bodies of others it calls leaves them
+/// undefined. The constant both partitions read is a content-named part of
+/// each, which the link takes once, so its linkage does not reach the
+/// executable. Exits hand-derived as in [`release_edit_is_the_cold_build`],
+/// plus `ping(3)` ([`release_parts`]): 24 + 8 = 32, then 30 + 8 = 38.
 #[test]
 #[ignore = "explicit native integration target"]
 fn release_partitions_edit_is_the_cold_build() {
     let dir = tempfile::tempdir().unwrap();
     let core = reach_core(dir.path(), "core", 0);
-    let edited = RELEASE_SUM.replace("build(6u64)", "build(7u64)");
+    let program = release_parts();
+    assert!(program.contains("ping(3u64)"), "the program calls ping");
+    let edited = program.replace("build(6u64)", "build(7u64)");
     let mut options = native_options(Backend::Llvm, dir.path());
     options.optimize = true;
     let apart = |name: &str| NativeOptions {
@@ -22,14 +40,14 @@ fn release_partitions_edit_is_the_cold_build() {
         output: dir.path().join(format!("{name}-program")),
         ..options.clone()
     };
-    let (_, _, status) = reach_build(&record_check(RELEASE_SUM, &core, dir.path(), "whole"), &apart("whole"));
-    assert_eq!(status, Some(24), "whole");
+    let (_, _, status) = reach_build(&record_check(&program, &core, dir.path(), "whole"), &apart("whole"));
+    assert_eq!(status, Some(32), "whole");
     super::release::RELEASE_PARTITION.set(Some(1));
-    let (cold, _, cold_status) = reach_build(&record_check(RELEASE_SUM, &core, dir.path(), "store"), &options);
+    let (cold, _, cold_status) = reach_build(&record_check(&program, &core, dir.path(), "store"), &options);
     let (edit, edit_bytes, edit_status) = reach_build(&record_check(&edited, &core, dir.path(), "store"), &options);
     let (_, fresh_bytes, fresh_status) = reach_build(&record_check(&edited, &core, dir.path(), "fresh"), &apart("fresh"));
     super::release::RELEASE_PARTITION.set(None);
-    assert_eq!((cold_status, edit_status, fresh_status), (Some(24), Some(30), Some(30)));
+    assert_eq!((cold_status, edit_status, fresh_status), (Some(32), Some(38), Some(38)));
     assert!(
         edit.compiled >= 1 && edit.compiled < cold.compiled,
         "the edit regenerates only its partitions: {} of {} parts",

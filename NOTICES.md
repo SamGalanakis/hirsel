@@ -12,7 +12,8 @@ Code Hirsel adapts into its own sources is listed in [third-party/NOTICES.md](th
 | `runtime/*/*/libhirsel_core_rt.a` | the runtime archive a program links, per target | Hirsel; the Rust standard library; crates linked into `runtime/*/*/libhirsel_core_rt.a`, below |
 | `hirsel-core-toolchain.json` | the installation record | Hirsel |
 | `link/*.json` | the bundle-relative link recipe | Hirsel |
-| `link/kit/*` | glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind | `link-kit-glibc`, `link-kit-llvm` |
+| `link/kit/*-linux-gnu/*` | glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind | `link-kit-glibc`, `link-kit-llvm` |
+| `link/kit/aarch64-apple-darwin/*.tbd` | link-only text stubs generated from Hirsel's Darwin symbol allowlists | Hirsel |
 | `core-packages/*` | the core and std package images and the Store source archive | Hirsel |
 | `libexec/hirsel/platform_main` | the Hirsel platform host, linked with the shipped runtime archive | Hirsel |
 | `libexec/hirsel/pin_reader` | the Hirsel offline pin reader, linked with the shipped runtime archive | Hirsel |
@@ -47,8 +48,8 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | cfg-if-1.0.5 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600` |
 | cmov-0.5.4 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a` |
 | const-oid-0.10.3 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a` |
-| core-foundation-0.10.1 | MIT OR Apache-2.0 | none | `b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6` |
-| core-foundation-sys-0.8.7 | MIT OR Apache-2.0 | none | `773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b` |
+| core-foundation-0.10.1 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6` |
+| core-foundation-sys-0.8.7 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b` |
 | cpubits-0.1.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae` |
 | cpufeatures-0.3.1 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566` |
 | cranelift-assembler-x64-0.136.3 | Apache-2.0 WITH LLVM-exception | `hirsel` | `f6d504c8c7ba3f3accaf8e98b7096beb98e1a271404357744c7e9e730c6865ff` |
@@ -140,8 +141,8 @@ Every registry package in Cargo.lock that the shipped files' workspace packages 
 | rustls-webpki-0.103.17 | ISC | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5` |
 | schannel-0.1.30 | MIT | none | `9cb23c424d8ee841bb4d813677ca237e2a610067d594fec130f87d6093495ab5` |
 | sec1-0.8.1 | Apache-2.0 OR MIT | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `d56d437c2f19203ce5f7122e507831de96f3d2d4d3be5af44a0b0a09d8a80e4d` |
-| security-framework-3.7.0 | MIT OR Apache-2.0 | none | `b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d` |
-| security-framework-sys-2.17.0 | MIT OR Apache-2.0 | none | `6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3` |
+| security-framework-3.7.0 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d` |
+| security-framework-sys-2.17.0 | MIT OR Apache-2.0 | `runtime/*/*/libhirsel_core_rt.a` | `6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3` |
 | semver-1.0.28 | MIT OR Apache-2.0 | none | `8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd` |
 | serde-1.0.229 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba` |
 | serde_core-1.0.229 | MIT OR Apache-2.0 | `hirsel`, `runtime/*/*/libhirsel_core_rt.a` | `67dca2c9c51e58a4791a4b1ed58308b39c64224d349a935ab5039aa360942a48` |
@@ -310,6 +311,7 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
 ## Not shipped
 
 - Host loader, libc, libm, libdl, libpthread, librt, libgcc_s, libstdc++ and libz: System dependencies, not copied into the installation.
+- macOS libSystem, CoreFoundation and Security: System dependencies of Darwin programs. The bundle ships only Hirsel-generated link stubs.
 
 ## Inventory
 
@@ -478,13 +480,17 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    "checksum": "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6",
    "crate": "core-foundation-0.10.1",
    "license": "MIT OR Apache-2.0",
-   "linked": []
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
   },
   {
    "checksum": "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b",
    "crate": "core-foundation-sys-0.8.7",
    "license": "MIT OR Apache-2.0",
-   "linked": []
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
   },
   {
    "checksum": "15b85f9c39137c3a891689859392b1bd49812121d0d61c9caf00d46ed5ce06ae",
@@ -1223,13 +1229,17 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
    "checksum": "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d",
    "crate": "security-framework-3.7.0",
    "license": "MIT OR Apache-2.0",
-   "linked": []
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
   },
   {
    "checksum": "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3",
    "crate": "security-framework-sys-2.17.0",
    "license": "MIT OR Apache-2.0",
-   "linked": []
+   "linked": [
+    "runtime/*/*/libhirsel_core_rt.a"
+   ]
   },
   {
    "checksum": "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd",
@@ -1658,6 +1668,10 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
   {
    "component": "Host loader, libc, libm, libdl, libpthread, librt, libgcc_s, libstdc++ and libz",
    "status": "System dependencies, not copied into the installation."
+  },
+  {
+   "component": "macOS libSystem, CoreFoundation and Security",
+   "status": "System dependencies of Darwin programs. The bundle ships only Hirsel-generated link stubs."
   }
  ],
  "files": [
@@ -1669,7 +1683,7 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
   },
   {
    "contents": "the runtime archive a program links, per target",
-   "crates": "root//:hirsel-core-rt-standalone",
+   "crates": "root//:hirsel-core-rt-archives",
    "package": "hirsel-core-rt",
    "path": "runtime/*/*/libhirsel_core_rt.a"
   },
@@ -1683,11 +1697,15 @@ LLVM compiler-rt and libunwind 23.1.5. The locked LLVM source archive supplies t
   },
   {
    "contents": "glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind",
-   "path": "link/kit/*",
+   "path": "link/kit/*-linux-gnu/*",
    "runtimes": [
     "link-kit-glibc",
     "link-kit-llvm"
    ]
+  },
+  {
+   "contents": "link-only text stubs generated from Hirsel's Darwin symbol allowlists",
+   "path": "link/kit/aarch64-apple-darwin/*.tbd"
   },
   {
    "contents": "the core and std package images and the Store source archive",

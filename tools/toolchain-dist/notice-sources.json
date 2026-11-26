@@ -8,7 +8,7 @@
       "contents": "the compiler"
     },
     "runtime/*/*/libhirsel_core_rt.a": {
-      "crates": "root//:hirsel-core-rt-standalone",
+      "crates": "root//:hirsel-core-rt-archives",
       "package": "hirsel-core-rt",
       "contents": "the runtime archive a program links, per target"
     },
@@ -18,12 +18,15 @@
     "link/*.json": {
       "contents": "the bundle-relative link recipe"
     },
-    "link/kit/*": {
+    "link/kit/*-linux-gnu/*": {
       "contents": "glibc 2.28 startup objects and link-only stubs, LLVM CRT and libunwind",
       "runtimes": [
         "link-kit-glibc",
         "link-kit-llvm"
       ]
+    },
+    "link/kit/aarch64-apple-darwin/*.tbd": {
+      "contents": "link-only text stubs generated from Hirsel's Darwin symbol allowlists"
     },
     "core-packages/*": {
       "contents": "the core and std package images and the Store source archive"
@@ -178,6 +181,10 @@
     {
       "component": "Host loader, libc, libm, libdl, libpthread, librt, libgcc_s, libstdc++ and libz",
       "status": "System dependencies, not copied into the installation."
+    },
+    {
+      "component": "macOS libSystem, CoreFoundation and Security",
+      "status": "System dependencies of Darwin programs. The bundle ships only Hirsel-generated link stubs."
     }
   ],
   "archive_omissions": {

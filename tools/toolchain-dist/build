@@ -13,6 +13,7 @@ uses one tools/capped command at a time. Keep output and work outside the
 repository; profiles are never committed.
 """
 import argparse
+import ast
 from contextlib import contextmanager
 import fcntl
 import hashlib
@@ -20,7 +21,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -178,6 +181,29 @@ def witness(output):
 
 def fresh_witness(prefix):
     """Run the installed CLI in an empty root with a read-only prefix."""
+    defs = (ROOT / 'tools/buck2/defs.bzl').read_text()
+    table = re.search(r'^RUNTIME_TARGETS = (\{.*?^\})', defs, re.M | re.S)
+    if table is None:
+        raise ValueError('could not read RUNTIME_TARGETS from tools/buck2/defs.bzl')
+    targets = set(ast.literal_eval(table[1]))
+    registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
+    observation_labels = {'none': '', 'prof': 'profiling ', 'observed': 'charge observation '}
+    labels = {
+        (observation, record): f"{prefix}{'recording ' if record else ''}runtime"
+        for observation, prefix in observation_labels.items()
+        for record in (False, True)
+    }
+    rows = registration['runtimes']
+    expected = {(target, observation, record) for target in targets for observation, record in labels}
+    registered = {(row['target'], row['observation'], row['record']) for row in rows}
+    if registered != expected:
+        raise ValueError(f'runtime target/flavour mismatch: missing {sorted(expected - registered)}, '
+                         f'extra {sorted(registered - expected)}')
+    runtimes = {
+        f"{labels[row['observation'], row['record']]} {row['target']} {Path(row['path']).parent.name}"
+        for row in rows
+    }
+
     relocated = '/opt/relocated-hirsel'
     sandbox = ['bwrap', '--unshare-all', '--die-with-parent',
                '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
@@ -196,28 +222,40 @@ def fresh_witness(prefix):
                 libraries.add(match[1])
     loader_files = [arg for path in sorted(libraries) for arg in ('--ro-bind', path, path)]
     sequence = 'hirsel new demo && cd demo && hirsel test && hirsel run && hirsel build'
-    passed = subprocess.run([*sandbox, *loader_files, '--', '/bin/sh', '-c',
-                             f'hirsel --version && hirsel inspect --std --interface && '
-                             f'{sequence} && ./program && hirsel check'],
-                            capture_output=True, text=True, env={})
-    if passed.returncode or passed.stderr or 'pass executed app@1/tests/test_twice' not in passed.stdout:
-        raise ValueError(f'fresh root acceptance failed ({passed.returncode})\n'
-                         f'{passed.stdout}{passed.stderr}')
+    cross_main = '''pub fn main() -> Result[(), Exit] {
+    if result.unwrap(std.int.parse_uint("2a", 16)) == 42 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}
+'''
+    with tempfile.TemporaryDirectory(prefix='hirsel-cross-') as output:
+        passed = subprocess.run([*sandbox, *loader_files, '--bind', output, '/out', '--', '/bin/sh', '-c',
+                                 f'hirsel --version && hirsel inspect --std --interface && '
+                                 f'{sequence} && ./program && hirsel check && '
+                                 f"printf '%s' {shlex.quote(cross_main)} > main.hirsel && "
+                                 'hirsel build --target aarch64-apple-darwin -o /out/program-darwin'],
+                                capture_output=True, text=True, env={})
+        if passed.returncode or passed.stderr or 'pass executed app@1/tests/test_twice' not in passed.stdout:
+            raise ValueError(f'fresh root acceptance failed ({passed.returncode})\n'
+                             f'{passed.stdout}{passed.stderr}')
+        with (Path(output) / 'program-darwin').open('rb') as image:
+            # mach_header_64: MH_MAGIC_64, CPU_TYPE_ARM64, cpusubtype, MH_EXECUTE.
+            header = image.read(16)
+        if len(header) != 16 or struct.unpack('<II4xI', header) != (0xfeedfacf, 0x0100000c, 2):
+            raise ValueError('fresh root Darwin build did not produce an arm64 Mach-O executable')
     lines = passed.stdout.splitlines()
     if not any(line.startswith('std@1/sim/fs/serve\t') for line in lines):
         raise ValueError('fresh root std interface omitted the public sim.fs.serve declaration')
-    registration = json.loads((prefix / 'hirsel-core-toolchain.json').read_text())
-    observation_labels = {'none': '', 'prof': 'profiling ', 'observed': 'charge observation '}
-    runtimes = [
-        f"{observation_labels[row['observation']]}{'recording ' if row['record'] else ''}"
-        f"runtime {row['target']} {Path(row['path']).parent.name}"
-        for row in registration['runtimes']
-    ]
+    runtime_prefixes = tuple(f'{name} ' for name in labels.values())
+    reported = {line for line in lines if line.startswith(runtime_prefixes)}
     if (not re.fullmatch(r'hirsel \d+\.\d+\.\d+\S*', lines[0])
             or not re.fullmatch(r'compiler [0-9a-f]{64}', lines[1])
-            or not set(runtimes).issubset(lines)):
+            or reported != runtimes):
         raise ValueError(f'fresh root reported unexpected version identities\n{passed.stdout}')
     print(passed.stdout + passed.stderr, end='', flush=True)
+    print('dist: fresh-root arm64 Mach-O build passed', flush=True)
     print('dist: fresh-root acceptance passed', flush=True)
 
 

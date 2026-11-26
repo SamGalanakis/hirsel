@@ -170,6 +170,23 @@ pub fn http_retirements[G: send, H: shareable + inert + send](db: store.Db, regi
     Ok(HttpRetirements(policies: take policies))
 }
 
+/// The OpenAPI document's route, checked when the runner is built (LANG-20) to
+/// parse as a fixed pattern, with no capture and no tail, so binding it never
+/// fails on its pattern.
+const OPENAPI_PATH: String = openapi_path()
+
+fn openapi_path() -> String {
+    let pattern = "/.hirsel/openapi.json"
+    let fixed = match std.router.captures(pattern) {
+        Ok((names, tail)) => list.len(names) == 0 && !tail,
+        Error(_) => false,
+    }
+    if !fixed {
+        core.fail("the OpenAPI route is not a fixed pattern")
+    }
+    pattern
+}
+
 pub fn http_router_with_retirements[G: send, H: shareable + inert + send](registered: Registry[G, H], previous: Option[Describe], retired: HttpRetirements, take routes: std.router.Builder[HttpConnection[G, H]]) -> Result[(std.router.Router[HttpConnection[G, H]], Arc[HttpRoutes]), BindError] {
     let mut builder = take routes
     std.router.clear_tags(mut builder)
@@ -209,7 +226,7 @@ pub fn http_router_with_retirements[G: send, H: shareable + inert + send](regist
     }
     plan.openapi = arc.new(http_openapi(plan.operations))
     let openapi_route: std.router.Route[HttpConnection[G, H]] = std.router.raw(http_openapi_handler)
-    std.router.add(mut builder, "GET", "/.hirsel/openapi.json", take openapi_route) ?=> |_| BindError(op: string.new(), check: Route)
+    std.router.add(mut builder, "GET", OPENAPI_PATH, take openapi_route) ?=> |_| BindError(op: string.new(), check: Route)
     let router = std.router.build(take builder) ?=> |_| BindError(op: string.new(), check: Route)
     Ok((take router, arc.new(take plan)))
 }

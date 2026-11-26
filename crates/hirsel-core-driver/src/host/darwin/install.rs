@@ -35,7 +35,9 @@ pub(crate) fn loaded_libraries(
                 search.push(PathBuf::from(path));
             }
             LoadCommandVariant::Dylib(dylib) => {
-                let name = command.string(endian, dylib.dylib.name).map_err(malformed)?;
+                let name = command
+                    .string(endian, dylib.dylib.name)
+                    .map_err(malformed)?;
                 let name = String::from_utf8_lossy(name);
                 if let Some(file) = name.strip_prefix("@rpath/") {
                     needed.push(file.to_owned());

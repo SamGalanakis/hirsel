@@ -4,6 +4,12 @@ use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 
+/// How libLLVM is opened. dyld leaves RTLD_LOCAL images out of weak-definition
+/// coalescing, and LLVM exports some data (`APFloatBase::semPPCDoubleDouble`) as
+/// weak definitions the component binds by coalescing, so the component would not
+/// load. Two-level namespaces keep every other binding to the image that names it.
+pub(crate) const LLVM_SCOPE: libc::c_int = libc::RTLD_GLOBAL;
+
 /// Darwin loads images by path only and has no sealed memory file. The component is
 /// written read-only into a fresh 0700 directory that only this user can enter, loaded
 /// from there, and both are removed once the loader has mapped it. The image keeps the

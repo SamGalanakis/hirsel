@@ -3,6 +3,9 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 
+/// How libLLVM is opened: its symbols stay private to the handles that load it.
+pub(crate) const LLVM_SCOPE: libc::c_int = libc::RTLD_LOCAL;
+
 /// The sealed memory file the component was loaded from, kept open for the process.
 pub(crate) struct Component(#[expect(dead_code, reason = "held only to keep the file open")] File);
 

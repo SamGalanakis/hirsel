@@ -139,9 +139,13 @@ fn dl_error() -> String {
     }
 }
 fn open(name: &CStr) -> Result<*mut libc::c_void, String> {
+    open_with(name, libc::RTLD_LOCAL)
+}
+
+fn open_with(name: &CStr, scope: libc::c_int) -> Result<*mut libc::c_void, String> {
     // SAFETY: the name is terminated. Handles remain loaded for process life,
     // like rustc's codegen backend, so no callback can outlive its code.
-    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | scope) };
     if handle.is_null() {
         Err(dl_error())
     } else {
@@ -237,7 +241,7 @@ unsafe extern "C" fn llvm_out_of_memory(reason: *const libc::c_char) -> ! {
 }
 fn load() -> Result<Backend, String> {
     let llvm = CString::new(llvm_library()?.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
-    open(&llvm)?;
+    open_with(&llvm, crate::host::LLVM_SCOPE)?;
     let (handle, image) = crate::host::open_component(COMPONENT, open)?;
     // SAFETY: these two exports and C layouts are defined by the embedded
     // engine.c built in this same artifact. No foreign component is selected.

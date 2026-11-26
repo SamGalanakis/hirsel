@@ -51,7 +51,13 @@ impl InheritedSlots {
             return Ok(());
         }
         // Above every target, so moving one slot never overwrites another's source.
-        let above = FIRST_INHERITED_FD + i32::try_from(self.0.len()).unwrap_or(i32::MAX);
+        // Slots sealed as paths still take their numbers, so the targets can be sparse.
+        let above = self
+            .0
+            .iter()
+            .map(|(_, target)| target.saturating_add(1))
+            .max()
+            .unwrap_or(FIRST_INHERITED_FD);
         let fds = self
             .0
             .iter()

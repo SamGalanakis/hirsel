@@ -159,6 +159,7 @@ _realloc
 _recv
 _recvmsg
 _renameat
+_renameatx_np
 _rewinddir
 _rmdir
 _sched_yield

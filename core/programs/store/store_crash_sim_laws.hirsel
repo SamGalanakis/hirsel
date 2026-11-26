@@ -32,11 +32,13 @@ type CsimState {
     write_faults: bool,
     scripted: bool,
     damage_seen: bool,
-    // Whether any residency change toward Tiered was tried. A branch forked
-    // or a pin taken while the table was Tiered keeps a Tiered catalog
-    // (§13.8), so the store then holds a Tiered collection while any branch
-    // or pin lives.
-    tiered_seen: bool,
+    // The fork and pin names whose catalog may hold the table as Tiered:
+    // each was once made from a head or held Snapshot that was or may have
+    // been Tiered. A residency change moves main only, and export refuses
+    // while any head or pin catalog holds a Tiered collection
+    // (store_has_tiered, §13.10). A name is never cleared, so a reused name
+    // can only widen the allowed refusals, never fail a correct store.
+    tiered_names: Map[String, u8],
     // The last Corrupt or Unsupported the store returned, for (d)'s message.
     damage: String,
     // An injected fault reached the store: teardown verification is off for
@@ -84,6 +86,34 @@ fn csim_stat_name(i: u64) -> String {
 
 fn csim_fault_active(st: CsimState) -> bool {
     st.write_faults || st.scripted
+}
+
+// Whether a head's catalog may hold the table as Tiered.
+fn csim_head_tiered(st: CsimState, name: String) -> bool {
+    if name == "" {
+        st.tiered != 0
+    } else {
+        map.contains(st.tiered_names, name)
+    }
+}
+
+// Whether any live head or pin catalog may hold the table as Tiered, so
+// export may refuse.
+fn csim_tiered_holder(st: CsimState, cur: CsimWorld) -> bool {
+    if st.tiered != 0 {
+        return true
+    }
+    for i in 0u64 .. 3 {
+        let f = csim_fork_name(i)
+        if map.contains(cur.heads, f) && map.contains(st.tiered_names, f) {
+            return true
+        }
+        let p = csim_pin_name(i)
+        if map.contains(cur.pins, p) && map.contains(st.tiered_names, p) {
+            return true
+        }
+    }
+    false
 }
 
 // A durable point: every world before the current one is unreachable.
@@ -330,9 +360,15 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                 let i = b % list.len(st.held)
                 let held_snap: Snapshot = clone(st.held[i].snap)
                 let held_rows: Map[u64, u8] = clone(st.held[i].rows)
+                if st.held[i].tiered && !map.contains(cur.pins, name) {
+                    map.insert(mut st.tiered_names, clone(name), 1)
+                }
                 (take held_snap, take held_rows)
             } else {
                 let source = csim_pick_head(cur, b)
+                if csim_head_tiered(st, source) && !map.contains(cur.pins, name) {
+                    map.insert(mut st.tiered_names, clone(name), 1)
+                }
                 let Some(handle) = csim_branch(db, source) else {
                     return Error(csim_fail(st, "a head in the reference has no branch in the store"))
                 }
@@ -379,10 +415,11 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
             let Some(rows_now) = map.get(cur.heads, source) else {
                 fail("crash sim: picked head is in the reference")
             }
+            let from_tiered = csim_head_tiered(st, source)
             if list.len(st.held) == 3 {
                 let _ = list.remove(mut st.held, 0)
             }
-            list.push(mut st.held, CsimHeld(snap: take s, rows: map_copy(rows_now)))
+            list.push(mut st.held, CsimHeld(snap: take s, rows: map_copy(rows_now), tiered: from_tiered))
             Ok(Go)
         },
         op if op == CS_RELEASE => {
@@ -421,9 +458,15 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
                 let i = (b / 2) % list.len(st.held)
                 let held_snap: Snapshot = clone(st.held[i].snap)
                 let held_rows: Map[u64, u8] = clone(st.held[i].rows)
+                if st.held[i].tiered && !map.contains(cur.heads, name) {
+                    map.insert(mut st.tiered_names, clone(name), 1)
+                }
                 (take held_snap, take held_rows)
             } else {
                 let source = csim_pick_head(cur, b / 2)
+                if csim_head_tiered(st, source) && !map.contains(cur.heads, name) {
+                    map.insert(mut st.tiered_names, clone(name), 1)
+                }
                 let Some(handle) = csim_branch(db, source) else {
                     return Error(csim_fail(st, "a head in the reference has no branch in the store"))
                 }
@@ -479,9 +522,6 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
         },
         op if op == CS_RESIDENCY => {
             let to_tiered = st.tiered != 1
-            if to_tiered {
-                st.tiered_seen = true
-            }
             match set_residency(mut db, rows.id, if to_tiered {
                 Tiered
             } else {
@@ -511,9 +551,8 @@ fn csim_step(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: 
 
 // (c): a backup leased at main's head, with a commit after the lease, then
 // restored and opened, reads exactly main's rows at the lease. A store
-// holding a Tiered collection (main's table, or a branch or pin taken while
-// it was Tiered) refuses the export (§13.10); a store whose table was never Tiered
-// does not.
+// whose main, fork or pin catalog may hold the table as Tiered refuses the
+// export (store_has_tiered, §13.10); one with none of them refuses nothing.
 fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options: Options, rows: Table[u64, Bytes], mut st: CsimState, step: CsimStep) -> Result[CsimNext, String] waits {
     let cur = csim_last(st.history)
     let Some(leased) = map.get(cur.heads, "") else {
@@ -541,7 +580,7 @@ fn csim_backup(mut db: Db, tasks: Tasks, c: Clock, r: Random, root: Dir, options
             }
             job
         },
-        Error(Store(Tiered(_))) if st.tiered != 0 || (st.tiered_seen && (map.len(cur.heads) > 1 || map.len(cur.pins) > 0)) => {
+        Error(Store(Tiered(_))) if st.tiered != 0 || csim_tiered_holder(st, cur) => {
             let _ = std.prop.sometimes("crash sim backup refused on Tiered", true)
             return Ok(Go)
         },
@@ -640,7 +679,7 @@ fn csim_case(take case: std.prop.Case[CsimPlan]) -> Result[(), String] waits {
     let (c, _hand) = provide.clock(0, 0)
     let r = provide.random(world_seed)
     let write_faults = plan.faults.corrupt + plan.faults.misdirect + plan.faults.lost_write > 0
-    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_seen: false, damage: string.new(), faulted: false, stats:[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new())
+    let mut st = CsimState(history: list.new(), held: list.new(), tiered: 0, write_faults, scripted: false, damage_seen: false, tiered_names: map.new(), damage: string.new(), faulted: false, stats:[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], at: 0, note: string.new())
     list.push(mut st.history, csim_empty())
     // A clean setup mount: the store directory and the one table.
     let (clean, clean_server) = sim_disk_mount(tasks, c, std.sim.fs.new(), std.sim.world.plan(world_seed), CSIM_ROOM)
@@ -830,12 +869,12 @@ fn csim_seed(tasks: Tasks, seed_grant: Env, seed: u64) -> Result[(), ()] waits {
 
 // The quick tier: every corpus seed (store_crash_sim_corpus.hirsel), then
 // the fixed seeds below. They are the seeds of 0..199 that pass on main at
-// 976d750a; the rest hit the open failures listed in the store-swarm-sim
+// 9bb3746a; the rest hit the open failures listed in the store-swarm-sim
 // report (a Cold edge with no pack inventory, restore Unsupported(0x0023)
 // after Tiered and back, Io(Closed) after a reopen). Add those seeds back
 // when their fixes land. With --seed (nightly-vopr.sh, the soak tier) the
 // test runs that one seed.
-const CSIM_QUICK: Inline[u64, 165] =[0, 1, 2, 3, 4, 5, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 27, 29, 30, 32, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44, 45, 46, 48, 50, 51, 52, 53, 54, 55, 56, 58, 59, 60, 61, 62, 63, 64, 65, 66, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 89, 90, 91, 92, 93, 94, 95, 97, 100, 101, 103, 104, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 117, 118, 120, 121, 122, 123, 126, 128, 130, 131, 132, 133, 134, 135, 136, 137, 138, 140, 141, 142, 143, 146, 147, 148, 149, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 166, 167, 168, 169, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 187, 188, 189, 190, 191, 193, 194, 195, 196, 197, 198, 199]
+const CSIM_QUICK: Inline[u64, 166] =[0, 1, 2, 3, 4, 5, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 27, 29, 30, 32, 33, 34, 35, 36, 38, 39, 40, 41, 42, 43, 44, 45, 46, 48, 50, 51, 52, 53, 54, 55, 56, 58, 59, 60, 61, 62, 63, 64, 65, 66, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 80, 81, 82, 83, 84, 85, 86, 87, 89, 90, 91, 92, 93, 94, 95, 97, 100, 101, 103, 104, 106, 107, 108, 109, 110, 111, 112, 114, 115, 116, 117, 118, 120, 121, 122, 123, 126, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 140, 141, 142, 143, 146, 147, 148, 149, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 166, 167, 168, 169, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 187, 188, 189, 190, 191, 193, 194, 195, 196, 197, 198, 199]
 
 @test
 fn test_store_crash_sim(tasks: Tasks, seed_grant: Env) -> Result[(), ()] waits {

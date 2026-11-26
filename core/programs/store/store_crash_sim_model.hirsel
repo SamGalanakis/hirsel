@@ -22,7 +22,10 @@ type CsimPlan: send {
 
 type CsimHeld {
     snap: Snapshot,
-    rows: Map[u64, u8]
+    rows: Map[u64, u8],
+    // Whether its catalog may hold the table as Tiered (captured from a
+    // head that was or may have been Tiered).
+    tiered: bool
 }
 
 // What a step asks the driver to do after.

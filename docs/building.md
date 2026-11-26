@@ -29,7 +29,9 @@ missing, Hirsel names the first missing input before invoking the linker.
 
 The toolchain packages are package archives in `core-packages/<name>-<major>.hpkg`: `store@1`
 and `runner@1`, and the WebRTC stack, `webrtc_sfu@1` with `turn@1`, `dtls@1`, `srtp@1`,
-`rtp@1`, `stun_ice@1`, `media_bits@1` and `rtp_jitter@1`; the media packages `sframe@1`
+`rtp@1`, `stun_ice@1`, `media_bits@1` and `rtp_jitter@1`; `quic@1`
+([QUIC](spec/quic.md)), `webtransport@1` ([WebTransport](spec/webtransport.md)) and
+`moq@1` ([Media over QUIC](spec/moq.md)); the media packages `sframe@1`
 (end-to-end media encryption, [SFrame](spec/sframe.md)), `media_container@1` (Ogg, WebM and
 MP4 framing) and `media_record@1` (the [room recorder](spec/webrtc.md#rtc-9-recording)); and
 `platform@1`, `search@1`, `mcp@1` and `cli@1` (command-line parsing, help, errors and bash
@@ -252,6 +254,25 @@ Additional CLI commands cover package workflows (`lock`, `fetch`, `pack`, `publi
 (`serve`, `--resident`), TypeScript SDK generation and RPC calls (`sdk ts`, `call`),
 and platform hosting (`host`, `launcher`, `register`, `deploy`, `manifest show`;
 [Launch](spec/launch.md), [CLI](spec/cli.md)).
+
+Use `hirsel host --state DIR --admission FILE --max-places N --lifecycle managed|leader`
+on Linux. `--max-places` is a required positive count of live groups with no
+default. Linux requires an explicit lifecycle. `managed` requires a delegated
+cgroup v2 subtree. `leader` tracks direct children using pidfds. On macOS the mode
+defaults to `leader` and startup refuses `managed`. `--idle-ms` defaults to 30000.
+The launcher starts the `platform_main` image embedded in the released executable.
+[Host startup](spec/launch.md#starting-the-host) describes direct launcher use.
+
+`hirsel store inspect DIR` lists collections and exact row counts.
+`hirsel store stats DIR` adds byte charges, journal and pack details, and the
+last complete scrub round when available. Both can read alongside a live writer.
+`hirsel store verify DIR` checks a copy captured from a stopped store.
+`hirsel store verify DIR --release EXE` also checks indexes that the release
+binds against their tables. See [Store operator commands](../core/programs/store/STORE-SPEC.md#156-hirsel-store-inspect-stats-verify-and-repair-store-14-v2127).
+
+The WebRTC SFU's `signal.serve_pool` serves rooms over a shared pool of media units
+and sockets. `Pool` names the room order and report channels, the unit byte and
+queue limits, and timing. See [pooled rooms](spec/webrtc.md#rtc-10-pooled-rooms).
 
 ## Compiler resource limits
 

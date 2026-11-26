@@ -25,7 +25,7 @@
 </p>
 
 <p align="center">
-  <sub>Status: <b>v0.2.0-pre</b> · Linux x86_64 (glibc 2.28+) · Apple Silicon macOS in progress</sub>
+  <sub>Pre-release · Linux x86_64 (glibc 2.28+) · Apple Silicon macOS in progress</sub>
 </p>
 
 <picture>
@@ -100,8 +100,8 @@ Hirsel's CLI is designed as a self-contained feedback loop for agents:
 
 ## Toolchain packages
 
-Seventeen packages ship with the Hirsel toolchain (`std` plus the sixteen packages in
-`core-packages/`) and bind by major version in `hirsel.toml`:
+The Hirsel toolchain ships `std` and the [package archives](core/programs/toolchain-packages.toml)
+in `core-packages/`. Bind them by major version in `hirsel.toml`.
 
 ```text
 [dependencies]
@@ -116,6 +116,9 @@ runner = { major = 1 }
 - [platform](core/programs/platform/) — deployed place management, cutovers, and recovery.
 - [search](core/programs/search/) — BM25 full-text search over a `store` table, callable from a transaction.
 - [mcp](core/programs/mcp/) — Model Context Protocol client and server over Streamable HTTP.
+- [cli](core/programs/cli/) — argument parsing, help and shell completion.
+- [quic](core/programs/quic/) — QUIC v1 endpoint and UDP driver.
+- [webtransport](core/programs/webtransport/) and [moq](core/programs/moq/) — WebTransport sessions over HTTP/3 and a Media over QUIC endpoint and relay.
 - Real-time media and networking (**pure Hirsel, no `Foreign` code**): [webrtc_sfu](core/programs/webrtc_sfu/) (WebRTC SFU with simulcast, VP9/AV1 SVC, dynacast, Opus RED, and E2EE routing), [dtls](core/programs/dtls/) (sans-IO DTLS 1.2), [srtp](core/programs/srtp/) (SRTP/SRTCP), [rtp](core/programs/rtp/) (RTP/RTCP, RTX, BWE, pacing, RED), [rtp_jitter](core/programs/rtp_jitter/) (jitter buffer), [turn](core/programs/turn/) (TURN client/relay), [stun_ice](core/programs/stun_ice/) (STUN and ICE-lite), [sframe](core/programs/sframe/) (RFC 9605 SFrame E2EE), [media_bits](core/programs/media_bits/) (codec bitstream parsers), [media_container](core/programs/media_container/) (Ogg/MP4/WebM containers), and [media_record](core/programs/media_record/) (room publication recorder).
 
 ## Built on top, in Hirsel

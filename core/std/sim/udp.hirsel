@@ -161,10 +161,36 @@ type Arrival: ordered {
     serial: u64
 }
 
-type Impairment {
+type Chain {
     bad: bool,
     jitter: u64
 }
+
+/// The impairment one directed link applies in place of the global
+/// configuration. Probabilities are in parts per million; `loss` is drawn
+/// independently for each datagram.
+pub type Impairment: send {
+    loss: u64,
+    delay_ns: u64,
+    jitter_ns: u64,
+    reorder: u64,
+    reorder_ns: u64,
+    duplicate: u64
+}
+
+/// A directed link's state: cut drops every datagram sent from the first IP
+/// to the second; impaired applies its own impairment.
+pub type Link: send = Cut | Impaired(Impairment)
+
+type Rule {
+    from: Ip,
+    to: Ip,
+    link: Link
+}
+
+const LINK_PATH: String = "sim-udp-link"
+
+const ALARM_PATH: String = "sim-udp-alarm"
 
 type State {
     next_id: u64,
@@ -172,7 +198,8 @@ type State {
     serial: u64,
     bindings: Map[u64, Binding],
     sockets: Map[u64, Socket],
-    links: Map[u64, Map[Addr, Impairment]],
+    links: Map[u64, Map[Addr, Chain]],
+    rules: List[Rule],
     arrivals: Heap[Arrival],
     flight: Map[u64, InFlight],
     pending: Map[u64, Call[NetOp]]
@@ -213,15 +240,15 @@ fn conflicts(state: State, addr: Addr) -> bool {
 }
 
 fn ephemeral(state: State, ip: Ip) -> Option[(Addr, u64)] {
-    let start = state.ephemeral
-    let mut cursor = start
+    let origin = state.ephemeral
+    let mut cursor = origin
     loop {
         let addr = Addr(ip, port: int.truncate(1024 + cursor))
         cursor = (cursor + 1) % 64512
         if !conflicts(state, addr) {
             return Some((addr, cursor))
         }
-        if cursor == start {
+        if cursor == origin {
             return None
         }
     }
@@ -303,10 +330,10 @@ fn binding_id(sockets: Map[u64, Socket], id: u64) -> Option[u64] {
     }
 }
 
-fn impair(config: Config, mut state: State, source: u64, to: Addr, mut plan: sim.world.Plan) -> (bool, u64) {
-    let empty: Map[Addr, Impairment] = map.new()
-    map.update_or_insert(mut state.links, source, take empty, scoped fn(mut links: Map[Addr, Impairment]) -> (bool, u64) {
-        map.update_or_insert(mut links, to, Impairment(bad: false, jitter: 0), scoped fn(mut effect: Impairment) -> (bool, u64) {
+fn chain(config: Config, mut state: State, source: u64, to: Addr, mut plan: sim.world.Plan) -> (bool, u64) {
+    let empty: Map[Addr, Chain] = map.new()
+    map.update_or_insert(mut state.links, source, take empty, scoped fn(mut links: Map[Addr, Chain]) -> (bool, u64) {
+        map.update_or_insert(mut links, to, Chain(bad: false, jitter: 0), scoped fn(mut effect: Chain) -> (bool, u64) {
             let dropped = drop_one(config.loss, mut effect.bad, mut plan)
             if config.jitter_ns != 0 {
                 let draw = sim.world.pick(mut plan, config.jitter_ns + 1)
@@ -367,20 +394,42 @@ fn transmit(config: Config, mut state: State, mut plan: sim.world.Plan, now: u64
             Some(outside) => outside,
             None => Addr(ip: peer_ip, port: binding.local.port)
         }
-        let (dropped, jitter) = impair(config, mut state, key, to, mut plan)
-        if dropped {
-            continue
+        let mut duplicate = config.duplicate
+        let mut arrive = now
+        match rule(state.rules, peer_ip, to.ip) {
+            Some(Cut) => continue,
+            Some(Impaired(rate)) => {
+                if chance(mut plan, rate.loss) {
+                    continue
+                }
+                let jitter = if rate.jitter_ns == 0 {
+                    0u64
+                } else {
+                    sim.world.pick(mut plan, rate.jitter_ns + 1)
+                }
+                arrive = int.saturating_add(now, int.saturating_add(rate.delay_ns, jitter))
+                if chance(mut plan, rate.reorder) {
+                    arrive = int.saturating_add(arrive, rate.reorder_ns)
+                }
+                duplicate = rate.duplicate
+            },
+            None => {
+                let (dropped, jitter) = chain(config, mut state, key, to, mut plan)
+                if dropped {
+                    continue
+                }
+                arrive = int.saturating_add(now, int.saturating_add(config.delay_ns, jitter))
+                if chance(mut plan, config.reorder) {
+                    arrive = int.saturating_add(arrive, config.reorder_ns)
+                }
+            },
         }
-        let mut arrive = int.saturating_add(now, int.saturating_add(config.delay_ns, jitter))
-        if chance(mut plan, config.reorder) {
-            arrive = int.saturating_add(arrive, config.reorder_ns)
-        }
-        let start: u64 = list.word_le(packets, at + 19)
+        let begin: u64 = list.word_le(packets, at + 19)
         let len: u64 = list.word_le(packets, at + 27)
-        let payload = list.slice(data, start, start + len)
+        let payload = list.slice(data, begin, begin + len)
         let ecn = packets[at + 35]
         schedule(mut state, arrive, Packet(Datagram(peer, to, ecn, data: clone(payload))))
-        if chance(mut plan, config.duplicate) {
+        if chance(mut plan, duplicate) {
             schedule(mut state, arrive, Packet(Datagram(peer, to, ecn, data: clone(payload))))
         }
     }
@@ -554,6 +603,107 @@ fn incoming(config: Config, mut state: State, mut plan: sim.world.Plan, now: u64
     }
 }
 
+fn rule(rules: List[Rule], from: Ip, to: Ip) -> Option[Link] {
+    for r in rules {
+        if r.from == from && r.to == to {
+            return Some(clone(r.link))
+        }
+    }
+    None
+}
+
+fn read_text(c: Call[NetOp], field: u64, size: u64) -> Option[String] {
+    let mut raw: Bytes = list.with_capacity(size)
+    provide.payload(c, field, mut raw)
+    match string.from_utf8(take raw) {
+        Ok(take text) => Some(take text),
+        Error(_) => None,
+    }
+}
+
+fn numbers(text: String) -> Option[List[u64]] {
+    let mut out: List[u64] = list.new()
+    let mut at = 0u64
+    while let Some((word, next)) = string.next_split(text, at, " ") {
+        match int.parse_uint(word, 10) {
+            Ok(n) => list.push(mut out, n),
+            Error(_) => return None,
+        }
+        at = next
+    }
+    Some(out)
+}
+
+fn ip_at(words: List[u64], at: u64) -> Option[Ip] {
+    if words[at] == 4 && words[at + 1] <= 0xffffffff && words[at + 2] == 0 {
+        Some(V4(int.truncate(words[at + 1])))
+    } else if words[at] == 6 {
+        Some(V6(words[at + 1], words[at + 2]))
+    } else {
+        None
+    }
+}
+
+fn change(mut state: State, text: String) -> bool {
+    let Some(words) = numbers(text) else {
+        return false
+    }
+    let count = list.len(words)
+    if count < 7 {
+        return false
+    }
+    let (Some(from), Some(to)) = (ip_at(words, 1), ip_at(words, 4)) else {
+        return false
+    }
+    let mut kept: List[Rule] = list.new()
+    for r in state.rules {
+        if r.from != from || r.to != to {
+            list.push(mut kept, clone(r))
+        }
+    }
+    let next: Option[Link] = match (words[0], count) {
+        (0, 7) => None,
+        (1, 7) => Some(Cut),
+        (2, 13) => {
+            let i = Impairment(loss: words[7], delay_ns: words[8], jitter_ns: words[9], reorder: words[10], reorder_ns: words[11], duplicate: words[12])
+            if i.loss > ppm || i.reorder > ppm || i.duplicate > ppm || i.jitter_ns == 0xffffffffffffffff {
+                return false
+            }
+            Some(Impaired(i))
+        },
+        _ => return false,
+    }
+    if let Some(l) = next {
+        list.push(mut kept, Rule(from, to, link: l))
+    }
+    state.rules = take kept
+    true
+}
+
+fn control(mut state: State, mut timers: Map[u64, Task[()]], mut port: Served[NetOp], take call: Call[NetOp], root: u64, path: u64) waits {
+    let c = take call
+    let (Some(text), Some(place)) = (read_text(c, 0, root), read_text(c, 1, path)) else {
+        let _ = answer(mut port, take c, Failed(Denied))
+        return
+    }
+    if place == ALARM_PATH {
+        let _ = answer(mut port, take c, Failed(Refused))
+        if let Ok(at) = int.parse_uint(text, 10) {
+            if let Some(take timer) = map.remove(mut timers, at) {
+                let _ = task.join(take timer)
+            }
+        }
+        return
+    }
+    let applied = place == LINK_PATH && change(mut state, text)
+    let reply: NetReply = if applied {
+        Failed(Refused)
+    } else {
+        Failed(Denied)
+    }
+    let _ = answer(mut port, take c, reply)
+}
+
 pub type Server: send {
     config: Config,
     plan: sim.world.Plan,
@@ -566,6 +716,18 @@ pub type Server: send {
 
 fn alarm(take timer: (Clock, u64)) waits {
     host.sleep_until(timer.0, timer.1)
+}
+
+type Ring: send {
+    network: Net,
+    clock: Clock,
+    at: u64,
+    serial: String
+}
+
+fn ring(take r: Ring) waits {
+    host.sleep_until(r.clock, r.at)
+    let _ = host.connect_unix(r.network, r.serial, ALARM_PATH, Never)
 }
 
 fn advance(mut world: sim.world.World, tasks: Tasks, clock: Clock, arrivals: Heap[Arrival]) -> bool waits {
@@ -581,6 +743,87 @@ fn advance(mut world: sim.world.World, tasks: Tasks, clock: Clock, arrivals: Hea
 
 /// Runs the UDP provider and drives its virtual clock when the run is idle.
 pub fn serve(take server: Server) waits {
+    if sim.world.driven(server.world) {
+        fail("sim.udp: a server on a driven clock starts with sim.udp.start")
+    }
+    run(take server, None)
+}
+
+type Started: send {
+    server: Server,
+    network: Net
+}
+
+fn run_started(take started: Started) waits {
+    let Started(server: take server, network) = take started
+    run(take server, Some(network))
+}
+
+/// Starts the UDP provider on its own Net. Its next arrival is a timer on
+/// `clock`, so the provider also runs on a clock that sim.world.drive owns.
+pub fn start(tasks: Tasks, config: Config, take plan: sim.world.Plan, take world: sim.world.World, clock: Clock, take captures: List[Record], queue_bytes: u64) -> (Net, Task[()]) {
+    let (network, take port) = provide.net(bytes queue_bytes)
+    let server = Server(config, plan: take plan, world: take world, clock, tasks, port: take port, captures: take captures)
+    (network, task.spawn(tasks, bytes 8388608, Started(server: take server, network), run_started))
+}
+
+fn push_ip(mut text: String, ip: Ip) {
+    match ip {
+        V4(a) => {
+            string.push(mut text, " 4 ")
+            string.push_u64(mut text, int.widen(a))
+            string.push(mut text, " 0")
+        },
+        V6(hi, lo) => {
+            string.push(mut text, " 6 ")
+            string.push_u64(mut text, hi)
+            string.push(mut text, " ")
+            string.push_u64(mut text, lo)
+        },
+    }
+}
+
+fn send_change(n: Net, from: Ip, to: Ip, kind: String, extra: List[u64]) -> Result[(), NetError] waits {
+    let mut text: String = clone(kind)
+    push_ip(mut text, from)
+    push_ip(mut text, to)
+    for value in extra {
+        string.push(mut text, " ")
+        string.push_u64(mut text, value)
+    }
+    match host.connect_unix(n, text, LINK_PATH, Never) {
+        Error(Refused) => Ok(()),
+        Error(e) => Error(e),
+        Ok(take socket) => {
+            let _ = take socket
+            Error(Denied)
+        },
+    }
+}
+
+/// Sets the directed link from `from` to `to` on the provider serving `n`.
+/// The source is the sender's bound IP, or the configured source when the
+/// socket is bound to the unspecified address. Datagrams already in flight
+/// still arrive. Error(Denied) for an impairment outside its range.
+pub fn link(n: Net, from: Ip, to: Ip, l: Link) -> Result[(), NetError] waits {
+    match l {
+        Cut => send_change(n, from, to, "1", list.new()),
+        Impaired(rate) => {
+            let mut extra: List[u64] = list.with_capacity(6)
+            for value in[rate.loss, rate.delay_ns, rate.jitter_ns, rate.reorder, rate.reorder_ns, rate.duplicate] {
+                list.push(mut extra, value)
+            }
+            send_change(n, from, to, "2", extra)
+        },
+    }
+}
+
+/// Returns the directed link from `from` to `to` to the global configuration.
+pub fn restore(n: Net, from: Ip, to: Ip) -> Result[(), NetError] waits {
+    send_change(n, from, to, "0", list.new())
+}
+
+fn run(take server: Server, network: Option[Net]) waits {
     let Server(config, plan: take initial, world: take driver, clock, tasks, port: take served, captures: take records) = take server
     if config.loss.good_to_bad > ppm || config.loss.bad_to_good > ppm || config.loss.good_loss > ppm || config.loss.bad_loss > ppm || config.reorder > ppm || config.duplicate > ppm || config.rebind > ppm || config.jitter_ns == 0xffffffffffffffff || !v6(config.source_v6) || unspecified(config.source_v6) || config.source_v4 == 0 {
         fail("invalid sim.udp configuration")
@@ -588,20 +831,35 @@ pub fn serve(take server: Server) waits {
     let mut port = take served
     let mut plan = take initial
     let mut world = take driver
-    let start = sim.world.pick(mut plan, 64512)
-    let mut state = State(next_id: 1, ephemeral: start, serial: 0, bindings: map.new(), sockets: map.new(), links: map.new(), arrivals: heap.new(), flight: map.new(), pending: map.new())
+    let origin = sim.world.pick(mut plan, 64512)
+    let mut state = State(next_id: 1, ephemeral: origin, serial: 0, bindings: map.new(), sockets: map.new(), links: map.new(), rules: list.new(), arrivals: heap.new(), flight: map.new(), pending: map.new())
     for record in records {
         schedule(mut state, record.at, Captured(clone(record)))
     }
+    let mut timers: Map[u64, Task[()]] = map.new()
     loop {
         let now = host.mono_ns(clock)
         drain(mut state, now, mut port)
+        if let (Some(net), Some(at)) = (network, next_arrival(state.arrivals)) {
+            if at > now && !map.contains(timers, at) {
+                let mut serial = ""
+                string.push_u64(mut serial, at)
+                map.insert(mut timers, at, task.spawn(tasks, bytes 4096, Ring(network: net, clock, at, serial: take serial), ring))
+            }
+        }
         match provide.next(mut port) {
             Some(take call) => {
-                incoming(config, mut state, mut plan, now, mut port, take call)
+                // Another task may have advanced the clock while this one waited.
+                let current = host.mono_ns(clock)
+                drain(mut state, current, mut port)
+                if let ConnectUnix(root, path) = provide.net_op(call) {
+                    control(mut state, mut timers, mut port, take call, root, path)
+                } else {
+                    incoming(config, mut state, mut plan, current, mut port, take call)
+                }
             },
             None => {
-                if !advance(mut world, tasks, clock, state.arrivals) {
+                if sim.world.driven(world) || !advance(mut world, tasks, clock, state.arrivals) {
                     break
                 }
             },

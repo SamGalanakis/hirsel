@@ -22,12 +22,16 @@ pub opaque type Network: send {
     local: List[Ip]
 }
 
-type Link {
-    a: Ip,
-    b: Ip,
+// Traffic from `from` to `to`, and the reverse too when `both`.
+type Link: send {
+    from: Ip,
+    to: Ip,
+    both: bool,
     starts: u64,
     action: Partition
 }
+
+const LINK_PATH: String = "sim-net-link"
 
 type Listening {
     addr: Addr,
@@ -77,7 +81,13 @@ pub fn reset(mut n: Network, a: Ip, b: Ip) {
 
 /// Interrupts traffic between these peers starting at a virtual instant.
 pub fn interrupt_at(mut n: Network, a: Ip, b: Ip, starts: u64, action: Partition) {
-    list.push(mut n.partitions, Link(a: a, b: b, starts: starts, action: action))
+    list.push(mut n.partitions, Link(from: a, to: b, both: true, starts, action))
+}
+
+/// Interrupts only the traffic sent from `from` to `to`, starting at a
+/// virtual instant. The reverse direction still flows.
+pub fn interrupt_one_way_at(mut n: Network, from: Ip, to: Ip, starts: u64, action: Partition) {
+    list.push(mut n.partitions, Link(from, to, both: false, starts, action))
 }
 
 pub fn set_source(mut n: Network, address: Ip) {
@@ -147,13 +157,22 @@ fn covers(a: Ip, b: Ip) -> bool {
     same(a, b) || (family(a) == family(b) && unspecified(a))
 }
 
-fn disrupted(n: Network, a: Ip, b: Ip, now: u64) -> Option[Partition] {
+// Whether bytes sent from `from` to `to` are interrupted at `now`.
+fn disrupted(n: Network, from: Ip, to: Ip, now: u64) -> Option[Partition] {
     for link in n.partitions {
-        if now >= link.starts && ((same(link.a, a) && same(link.b, b)) || (same(link.b, a) && same(link.a, b))) {
+        if now >= link.starts && ((same(link.from, from) && same(link.to, to)) || (link.both && same(link.to, from) && same(link.from, to))) {
             return Some(link.action)
         }
     }
     None
+}
+
+// A connection needs both directions.
+fn split(n: Network, a: Ip, b: Ip, now: u64) -> Option[Partition] {
+    match disrupted(n, a, b, now) {
+        Some(action) => Some(action),
+        None => disrupted(n, b, a, now),
+    }
 }
 
 fn listener(state: State, addr: Addr) -> Option[u64] {
@@ -225,7 +244,7 @@ fn connect(n: Network, mut state: State, addr: Addr, public: bool, now: u64, mut
         Some(ip) => ip,
         None => addr.ip
     }
-    if let Some(_) = disrupted(n, ip, addr.ip, now) {
+    if let Some(_) = split(n, ip, addr.ip, now) {
         return reject(mut s, take c, Reset)
     }
     let id = match listener(state, addr) {
@@ -337,7 +356,7 @@ fn receive(n: Network, mut state: State, mut plan: sim.world.Plan, id: u64, room
     if local.reset || remote.reset {
         return reject(mut s, take c, Reset)
     }
-    match disrupted(n, local.addr.ip, remote.addr.ip, now) {
+    match disrupted(n, remote.addr.ip, local.addr.ip, now) {
         Some(Stall) => return Some(take c),
         Some(Break) => return reject(mut s, take c, Reset),
         None => ()
@@ -377,7 +396,7 @@ fn ready(n: Network, state: State, id: u64, now: u64, mut s: Served[NetOp], take
     if local.reset || remote.reset {
         return reject(mut s, take c, Reset)
     }
-    match disrupted(n, local.addr.ip, remote.addr.ip, now) {
+    match disrupted(n, remote.addr.ip, local.addr.ip, now) {
         Some(Stall) => return Some(take c),
         Some(Break) => return reject(mut s, take c, Reset),
         None => ()
@@ -655,24 +674,29 @@ fn same_waiter(old: NetOp, incoming: NetOp) -> bool {
 /// Serves a port until the run reaches quiescence with no pending timers.
 /// A clock driver must run alongside the link when latency is positive.
 pub fn serve(n: Network, mut plan: sim.world.Plan, clock: Clock, take served: Served[NetOp]) -> u64 waits {
+    let mut net: Network = clone(n)
     let mut port = take served
     let ephemeral = sim.world.pick(mut plan, 64512)
     let mut state = State(next_id: 1, ephemeral: ephemeral, secret_sends: 0, resolves: map.new(), listeners: map.new(), pipes: map.new())
     let mut pending: Deque[Call[NetOp]] = deque.new()
     while let Some(take incoming) = provide.next(mut port) {
         let op = provide.net_op(incoming)
-        for _ in 0u64 .. deque.len(pending) {
-            let c = option.unwrap(deque.pop_front(mut pending))
-            if !same_waiter(provide.net_op(c), op) {
-                deque.push_back(mut pending, take c)
+        if let ConnectUnix(root, path) = op {
+            control(mut net, mut port, take incoming, root, path)
+        } else {
+            for _ in 0u64 .. deque.len(pending) {
+                let c = option.unwrap(deque.pop_front(mut pending))
+                if !same_waiter(provide.net_op(c), op) {
+                    deque.push_back(mut pending, take c)
+                }
             }
+            deque.push_back(mut pending, take incoming)
         }
-        deque.push_back(mut pending, take incoming)
         loop {
             let mut progressed = false
             for _ in 0u64 .. deque.len(pending) {
                 let c = option.unwrap(deque.pop_front(mut pending))
-                match attempt(n, mut state, mut plan, clock, mut port, take c) {
+                match attempt(net, mut state, mut plan, clock, mut port, take c) {
                     Some(take waiting) => deque.push_back(mut pending, take waiting),
                     None => {
                         progressed = true
@@ -685,4 +709,157 @@ pub fn serve(n: Network, mut plan: sim.world.Plan, clock: Clock, take served: Se
         }
     }
     state.secret_sends
+}
+
+fn read_text(c: Call[NetOp], field: u64, size: u64) -> Option[String] {
+    let mut raw: Bytes = list.with_capacity(size)
+    provide.payload(c, field, mut raw)
+    match string.from_utf8(take raw) {
+        Ok(take text) => Some(take text),
+        Error(_) => None,
+    }
+}
+
+fn numbers(text: String) -> Option[List[u64]] {
+    let mut out: List[u64] = list.new()
+    let mut at = 0u64
+    while let Some((word, next)) = string.next_split(text, at, " ") {
+        match int.parse_uint(word, 10) {
+            Ok(value) => list.push(mut out, value),
+            Error(_) => return None,
+        }
+        at = next
+    }
+    Some(out)
+}
+
+fn ip_at(words: List[u64], at: u64) -> Option[Ip] {
+    if words[at] == 4 && words[at + 1] <= 0xffffffff && words[at + 2] == 0 {
+        Some(V4(int.truncate(words[at + 1])))
+    } else if words[at] == 6 {
+        Some(V6(words[at + 1], words[at + 2]))
+    } else {
+        None
+    }
+}
+
+// Lifts any interruption of traffic from `from` to `to`; a link that also
+// covered the reverse direction keeps covering that.
+fn lift(mut n: Network, from: Ip, to: Ip) {
+    let mut kept: List[Link] = list.with_capacity(list.len(n.partitions))
+    for link in n.partitions {
+        if same(link.from, from) && same(link.to, to) {
+            if link.both {
+                list.push(mut kept, Link(from: to, to: from, both: false, starts: link.starts, action: link.action))
+            }
+        } else if link.both && same(link.from, to) && same(link.to, from) {
+            list.push(mut kept, Link(from: link.from, to: link.to, both: false, starts: link.starts, action: link.action))
+        } else {
+            list.push(mut kept, clone(link))
+        }
+    }
+    n.partitions = take kept
+}
+
+fn change(mut n: Network, text: String) -> bool {
+    let Some(words) = numbers(text) else {
+        return false
+    }
+    if list.len(words) != 7 {
+        return false
+    }
+    let (Some(from), Some(to)) = (ip_at(words, 1), ip_at(words, 4)) else {
+        return false
+    }
+    let action: Option[Partition] = match words[0] {
+        0 => None,
+        1 => Some(Stall),
+        2 => Some(Break),
+        _ => return false,
+    }
+    lift(mut n, from, to)
+    if let Some(interrupt) = action {
+        list.push(mut n.partitions, Link(from, to, both: false, starts: 0, action: interrupt))
+    }
+    true
+}
+
+fn control(mut n: Network, mut port: Served[NetOp], take call: Call[NetOp], root: u64, path: u64) {
+    let c = take call
+    let applied = match (read_text(c, 0, root), read_text(c, 1, path)) {
+        (Some(text), Some(place)) => place == LINK_PATH && change(mut n, text),
+        _ => false,
+    }
+    let error: NetError = if applied {
+        Refused
+    } else {
+        Denied
+    }
+    let _ = answer(mut port, take c, Failed(error))
+}
+
+fn push_ip(mut text: String, ip: Ip) {
+    match ip {
+        V4(bits) => {
+            string.push(mut text, " 4 ")
+            string.push_u64(mut text, int.widen(bits))
+            string.push(mut text, " 0")
+        },
+        V6(hi, lo) => {
+            string.push(mut text, " 6 ")
+            string.push_u64(mut text, hi)
+            string.push(mut text, " ")
+            string.push_u64(mut text, lo)
+        },
+    }
+}
+
+fn send_change(n: Net, kind: String, from: Ip, to: Ip) -> Result[(), NetError] waits {
+    let mut text: String = clone(kind)
+    push_ip(mut text, from)
+    push_ip(mut text, to)
+    match host.connect_unix(n, text, LINK_PATH, Never) {
+        Error(Refused) => Ok(()),
+        Error(e) => Error(e),
+        Ok(take socket) => {
+            let _ = take socket
+            Error(Denied)
+        },
+    }
+}
+
+/// Interrupts traffic sent from `from` to `to` on the network serving `n`,
+/// from now on; the reverse direction is unchanged. Calls that stall wait
+/// until the direction is restored.
+pub fn cut(n: Net, from: Ip, to: Ip, action: Partition) -> Result[(), NetError] waits {
+    match action {
+        Stall => send_change(n, "1", from, to),
+        Break => send_change(n, "2", from, to),
+    }
+}
+
+/// Lifts every interruption of traffic sent from `from` to `to` on the
+/// network serving `n`, and retries the calls it stalled.
+pub fn restore(n: Net, from: Ip, to: Ip) -> Result[(), NetError] waits {
+    send_change(n, "0", from, to)
+}
+
+type Restore: send {
+    n: Net,
+    clock: Clock,
+    a: Ip,
+    b: Ip,
+    at: u64
+}
+
+fn restore_both(take r: Restore) -> Result[(), NetError] waits {
+    host.sleep_until(r.clock, r.at)
+    restore(r.n, r.a, r.b)?
+    restore(r.n, r.b, r.a)
+}
+
+/// Starts a task that restores both directions between `a` and `b` when
+/// `clock` reaches `at`.
+pub fn restore_at(tasks: Tasks, clock: Clock, n: Net, a: Ip, b: Ip, at: u64) -> Task[Result[(), NetError]] {
+    task.spawn(tasks, bytes 4096, Restore(n, clock, a, b, at), restore_both)
 }

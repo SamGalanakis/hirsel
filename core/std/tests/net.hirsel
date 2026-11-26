@@ -523,7 +523,7 @@ fn public_rule() -> Rule {
 
 fn preflight_refused(n: Net) -> bool waits {
     // NET-18 part 1: 127.0.0.1:80, 169.254.169.254:80 and 10.0.0.1:5432.
-    for addr in [Addr(ip: V4(2130706433), port: 80), Addr(ip: V4(2852039166), port: 80), Addr(ip: V4(167772161), port: 5432)] {
+    for addr in[Addr(ip: V4(2130706433), port: 80), Addr(ip: V4(2852039166), port: 80), Addr(ip: V4(167772161), port: 5432)] {
         if !denied(host.connect(n, addr, Never)) {
             return false
         }
@@ -614,4 +614,143 @@ fn own_address_denied(tasks: Tasks) -> bool waits {
     result.unwrap(task.join(take server))
     result.unwrap(task.join(take driver))
     passed
+}
+
+type Drive: send {
+    clocks: sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn drive_clocks(take input: Drive) waits {
+    let Drive(clocks: take clocks, tasks) = take input
+    sim.world.drive(take clocks, tasks)
+}
+
+type Wake: send {
+    node: Clock,
+    base: Clock,
+    n: Net,
+    at: Addr
+}
+
+// Sleeps on a drifted clock, then reads the world clock and dials a listener
+// whose server waited in provide.next the whole time.
+fn wake_and_dial(take input: Wake) -> (u64, bool) waits {
+    host.sleep_until(input.node, 1000000000)
+    let base = host.mono_ns(input.base)
+    let dialed = match host.connect(input.n, input.at, Never) {
+        Ok(_) => true,
+        Error(_) => false
+    }
+    (base, dialed)
+}
+
+// Clock A gains 100 ppm and clock B loses 100 ppm against the world clock,
+// all reading 0 at the start. A reads t + floor(t / 10^4) after t ns of the
+// world clock, B reads t - floor(t / 10^4).
+// A first reads 10^9 at t = 999,900,010 (999,900,010 + 99,990), since at
+// t - 1 it reads 999,999,999. B then reads 999,900,010 - 99,990 = 999,800,020.
+// At t = 2 * 10^9, A reads 2,000,200,000 and B 1,999,800,000: 400,000 ns apart.
+// Only A has a timer while the sim.net server waits in provide.next, so a
+// driver that let the server see quiescence would end it and the dial fails.
+// expect: run drifting_clocks_diverge(tasks) = true
+fn drifting_clocks_diverge(tasks: Tasks) -> bool waits {
+    let (take made, base) = sim.world.new(1, 0, 0)
+    let mut world = take made
+    let mut clocks = sim.world.clocks(mut world)
+    let (_, fast) = sim.world.drifting(mut clocks, 0, 0, 100)
+    let (_, slow) = sim.world.drifting(mut clocks, 0, 0, -100)
+    let (n, port) = provide.net(bytes 65536)
+    let server = task.spawn(tasks, bytes 4194304, OwnNetwork(port: take port, clock: base), own_address_network)
+    let driver = task.spawn(tasks, bytes 65536, Drive(clocks: take clocks, tasks), drive_clocks)
+    let at = Addr(ip: V4(0x0a000001), port: 80)
+    let (listener, _) = result.unwrap(host.listen(n, at, 4))
+    let sleeper = task.spawn(tasks, bytes 65536, Wake(node: fast, base, n, at), wake_and_dial)
+    let (woke, dialed) = result.unwrap(task.join(take sleeper))
+    let slow_then = host.mono_ns(slow)
+    host.sleep_until(base, 2000000000)
+    let fast_later = host.mono_ns(fast)
+    let slow_later = host.mono_ns(slow)
+    let _ = take listener
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    woke == 999900010 && dialed && slow_then == 999800020 && fast_later == 2000200000 && slow_later == 1999800000
+}
+
+// Connections from 10.0.0.1 (A) to 10.0.0.2 (B); every send moves 64 bytes.
+fn one_way_network(take input: OwnNetwork) waits {
+    let OwnNetwork(port: take port, clock) = take input
+    let mut network = sim.net.new(sim.net.Config(queue_bytes: 64, fragment_bytes: 64, latency_ns: 0))
+    sim.net.set_source(mut network, V4(0x0a000001))
+    let mut plan = sim.world.plan(1)
+    let _ = sim.net.serve(network, mut plan, clock, take port)
+}
+
+fn applied(r: Result[(), NetError]) -> bool {
+    match r {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+fn sent(r: Result[u64, NetError]) -> Option[u64] {
+    match r {
+        Ok(count) => Some(count),
+        Error(_) => None,
+    }
+}
+
+fn got(mut r: ReadHalf, until: Until) -> Option[u8] waits {
+    let mut buf: Bytes = list.with_capacity(1)
+    match host.recv_bounded(mut r, mut buf, 1, until) {
+        Ok(1) => Some(buf[0]),
+        _ => None,
+    }
+}
+
+// After a one-way stall of A to B at t = 0, B's byte reaches A at once, A's
+// send times out at its 2000 ns deadline, and a new connection, which needs
+// both directions, is reset. restore_at heals both directions at 10,000:
+// A's next send completes then, B reads it, and a new connection succeeds.
+// expect: run one_way_cut_heals_at_its_time(tasks) = true
+fn one_way_cut_heals_at_its_time(tasks: Tasks) -> bool waits {
+    let (world, c) = sim.world.new(1, 0, 0)
+    let (n, port) = provide.net(bytes 65536)
+    let driver = task.spawn(tasks, bytes 65536, take world, own_address_clock)
+    let server = task.spawn(tasks, bytes 4194304, OwnNetwork(port: take port, clock: c), one_way_network)
+    let a = V4(0x0a000001)
+    let b = V4(0x0a000002)
+    let at = Addr(ip: b, port: 80)
+    let (take made, _) = result.unwrap(host.listen(n, at, 4))
+    let mut listener = take made
+    let (a_rx, a_tx) = net.split(result.unwrap(host.connect(n, at, Never)))
+    let mut a_in = take a_rx
+    let mut a_out = take a_tx
+    let (accepted, _) = result.unwrap(host.accept(mut listener, Never))
+    let (b_rx, b_tx) = net.split(take accepted)
+    let mut b_in = take b_rx
+    let mut b_out = take b_tx
+    let cut = applied(sim.net.cut(n, a, b, Stall))
+    let reverse = sent(host.send_pair(mut b_out, b"b", b"", Never)) == Some(1) && got(mut a_in, At(c, 1000)) == Some(98u8) && host.mono_ns(c) == 0
+    let stalled = sent(host.send_pair(mut a_out, b"a", b"", At(c, 2000))) == None && host.mono_ns(c) == 2000
+    let refused = match host.connect(n, at, Never) {
+        Error(Reset) => true,
+        _ => false,
+    }
+    let healer = sim.net.restore_at(tasks, c, n, a, b, 10000)
+    let healed_send = sent(host.send_pair(mut a_out, b"a", b"", Never)) == Some(1) && host.mono_ns(c) == 10000
+    let delivered = got(mut b_in, Never) == Some(97u8)
+    let reconnected = match host.connect(n, at, Never) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+    let healed = applied(result.unwrap(task.join(take healer)))
+    let _ = take a_in
+    let _ = take a_out
+    let _ = take b_in
+    let _ = take b_out
+    let _ = take listener
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    cut && reverse && stalled && refused && healed_send && delivered && reconnected && healed
 }

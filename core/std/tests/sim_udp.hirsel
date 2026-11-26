@@ -284,3 +284,89 @@ fn one_rule(take r: Rule) -> List[Rule] {
     list.push(mut rules, take r)
     take rules
 }
+
+type Drive: send {
+    clocks: sim.world.Clocks,
+    tasks: Tasks
+}
+
+fn drive_clocks(take d: Drive) waits {
+    let Drive(clocks: take c, tasks) = take d
+    sim.world.drive(take c, tasks)
+}
+
+type Heal: send {
+    n: Net,
+    clock: Clock,
+    a: Ip,
+    b: Ip
+}
+
+fn heal_at_20us(take h: Heal) -> bool waits {
+    host.sleep_until(h.clock, 20000)
+    let slow = sim.udp.Impairment(loss: 0, delay_ns: 5000, jitter_ns: 0, reorder: 0, reorder_ns: 0, duplicate: 0)
+    applied(sim.udp.restore(h.n, h.a, h.b)) && applied(sim.udp.link(h.n, h.b, h.a, Impaired(slow)))
+}
+
+fn applied(r: Result[(), NetError]) -> bool {
+    match r {
+        Ok(()) => true,
+        Error(_) => false,
+    }
+}
+
+fn byte(value: u8) -> Bytes {
+    let mut out: Bytes = list.with_capacity(1)
+    list.push(mut out, value)
+    out
+}
+
+fn one_from(mut socket: UdpSocket, clock: Clock, until: u64) -> Option[(u64, u8)] waits {
+    let mut data: Bytes = list.with_capacity(1)
+    let mut packets: List[UdpPacket] = list.with_capacity(1)
+    match host.udp_recv(mut socket, mut data, mut packets, At(clock, until)) {
+        Ok(1) => Some((host.mono_ns(clock), data[0])),
+        _ => None,
+    }
+}
+
+// The provider runs on a clock sim.world.drive owns, every delay is 1000 ns,
+// and A (10.0.0.1) to B (10.0.0.2) is cut at t = 0. Both send at t = 0, so
+// A receives B's datagram at 1000 and B's receive times out at 10,000. A
+// task restores A to B at 20,000 and gives B to A a 5000 ns delay. Sent at
+// 30,000, A's datagram reaches B at 31,000 and B's reaches A at 35,000.
+// expect: run udp_directed_link_changes_mid_run(tasks) = true
+fn udp_directed_link_changes_mid_run(tasks: Tasks) -> bool waits {
+    let (take made, base) = sim.world.new(7, 0, 0)
+    let mut world = take made
+    let clocks = sim.world.clocks(mut world)
+    let mut config = sim.udp.defaults()
+    config.delay_ns = 1000
+    let (n, take server) = sim.udp.start(tasks, config, sim.world.plan(7), take world, base, list.new(), 1048576)
+    let driver = task.spawn(tasks, bytes 65536, Drive(clocks: take clocks, tasks), drive_clocks)
+    let a = V4(0x0a000001)
+    let b = V4(0x0a000002)
+    let to_a = Addr(ip: a, port: 5000)
+    let to_b = Addr(ip: b, port: 5000)
+    let cut = applied(sim.udp.link(n, a, b, Cut))
+    let (take sa, _) = result.unwrap(host.udp_bind(n, to_a, normal))
+    let mut at_a = take sa
+    let (take sb, _) = result.unwrap(host.udp_bind(n, to_b, normal))
+    let mut at_b = take sb
+    send_one(mut at_a, to_b, byte(1), 0)
+    send_one(mut at_b, to_a, byte(2), 0)
+    let first_a = one_from(mut at_a, base, 10000)
+    let first_b = one_from(mut at_b, base, 10000)
+    let healer = task.spawn(tasks, bytes 65536, Heal(n, clock: base, a, b), heal_at_20us)
+    host.sleep_until(base, 30000)
+    send_one(mut at_a, to_b, byte(3), 0)
+    send_one(mut at_b, to_a, byte(4), 0)
+    let second_b = one_from(mut at_b, base, 40000)
+    let second_a = one_from(mut at_a, base, 40000)
+    let healed = result.unwrap(task.join(take healer))
+    let _ = take at_a
+    let _ = take at_b
+    result.unwrap(task.join(take server))
+    result.unwrap(task.join(take driver))
+    cut && healed && first_a == Some((1000, 2u8)) && first_b == None && second_b == Some((31000, 3u8)) && second_a == Some((35000, 4u8))
+}

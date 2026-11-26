@@ -10,6 +10,36 @@ timer, for a driver that must also stop on its own signal.
 provider. A plan belongs to one task. Choices within one provider therefore
 consume its own stream.
 
+## Several clocks
+
+```hirsel
+pub opaque type Clocks: send
+pub fn clocks(mut w: World) -> Clocks
+pub fn drifting(mut c: Clocks, start_mono_ns: u64, start_wall_ms: u64, rate_ppm: i64) -> (u64, Clock)
+pub fn step_at(mut c: Clocks, index: u64, at_ns: u64, by_ns: u64)
+pub fn driven(w: World) -> bool
+pub fn drive(take c: Clocks, tasks: Tasks) waits
+```
+
+For nodes that disagree about time, `clocks` takes the world's clock hand as
+clock 0. That clock reads the base timeline exactly. `drifting` adds a clock
+whose monotonic reading at base instant `t` (nanoseconds since `clocks`) is
+`start + t + t * rate_ppm / 1000000`, truncated toward the base reading. It
+returns the clock's index. The rate lies strictly between -1000000 and
+1000000, so every clock moves forward. `step_at` jumps a clock forward by
+`by_ns` when the base timeline reaches `at_ns`, so its reading from then on
+is `by_ns` higher. Wall time stays at its start reading.
+
+Start `drive` in its own task. It is then the only thing that advances any
+of these clocks. Each round waits until every task waits. It finds the first
+base instant at which some clock reaches its earliest pending timer or a
+step falls due, and advances every clock in index order to its reading at
+that instant. It returns after two rounds in a row find nothing to advance.
+After `clocks`, the world is driven: `run` and `step` fail on it, and
+`driven` returns true. `sim.udp.serve` refuses a driven world; start the UDP
+provider with [`sim.udp.start`](udp.md#driven-clocks) instead. A world
+without `clocks` keeps the single-clock spelling above.
+
 A test that takes an `Env` parameter can pass the seed from `test_seed` to
 `new`. `hirsel test --sim --seeds N` runs seeds 0 through N−1 in fresh
 processes. `hirsel test --seed S` runs one seed.

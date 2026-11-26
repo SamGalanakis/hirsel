@@ -1,7 +1,10 @@
 /// The clock controller and the initial stream for a simulation.
 pub opaque type World: send {
     seed: u64,
-    hand: ClockHand,
+    // None once `clocks` has taken the hand: the world's clock is then driven.
+    hand: Option[ClockHand],
+    // The clock's reading after the world's last advance.
+    now: u64,
     plan: Plan
 }
 
@@ -30,7 +33,7 @@ pub type Fault = Eio | SyncUnknown
 /// Starts a virtual clock and seeds the decision stream.
 pub fn new(seed: u64, start_mono_ns: u64, start_wall_ms: u64) -> (World, Clock) {
     let (c, h) = provide.clock(start_mono_ns, start_wall_ms)
-    (World(seed: seed, hand: take h, plan: plan(seed)), c)
+    (World(seed: seed, hand: Some(take h), now: start_mono_ns, plan: plan(seed)), c)
 }
 
 pub fn initial_seed(w: World) -> u64 {
@@ -155,12 +158,220 @@ pub fn run(mut w: World) waits {
 /// Waits for quiescence and advances the clock to the earliest pending
 /// timer. False when there was none.
 pub fn step(mut w: World) -> bool waits {
-    match clock.idle(mut w.hand) {
-        Some(at) => {
-            clock.advance_to(mut w.hand, at)
-            true
-        },
-        None => false
+    if let Some(mut hand) = w.hand {
+        return match clock.idle(mut hand) {
+            Some(at) => {
+                clock.advance_to(mut hand, at)
+                w.now = order.max(w.now, at)
+                true
+            },
+            None => false
+        }
+    }
+    fail("sim.world: this world's clock is driven by sim.world.drive")
+}
+
+/// True once `clocks` has taken the world's hand.
+pub fn driven(w: World) -> bool {
+    match w.hand {
+        Some(_) => false,
+        None => true
+    }
+}
+
+const ppm: u64 = 1000000
+
+/// Several clocks advanced by one owner along the world clock's timeline.
+pub opaque type Clocks: send {
+    hands: List[Hand],
+    steps: List[Jump],
+    // Nanoseconds of the world clock since `clocks` took it.
+    base: u64
+}
+
+type Hand: send {
+    hand: Option[ClockHand],
+    start: u64,
+    rate_ppm: i64
+}
+
+type Jump: send {
+    index: u64,
+    at: u64,
+    by_ns: u64
+}
+
+/// Takes the world's hand as clock 0, whose rate is exact. The world keeps
+/// its seed and plan, and `run` and `step` refuse it from now on.
+pub fn clocks(mut w: World) -> Clocks {
+    let Some(take hand) = replace(mut w.hand, None) else {
+        fail("sim.world: this world's clock is already driven")
+    }
+    let mut hands: List[Hand] = list.with_capacity(1)
+    list.push(mut hands, Hand(hand: Some(take hand), start: w.now, rate_ppm: 0))
+    Clocks(hands: take hands, steps: list.new(), base: 0)
+}
+
+/// Adds a clock that reads `start_mono_ns` at the start of the timeline and
+/// gains `rate_ppm` parts per million of elapsed time (loses, when negative).
+/// Its index is the number of clocks added before it plus one.
+pub fn drifting(mut c: Clocks, start_mono_ns: u64, start_wall_ms: u64, rate_ppm: i64) -> (u64, Clock) {
+    if rate_ppm <= -1000000 || rate_ppm >= 1000000 {
+        fail("sim.world: a clock rate must lie strictly between -1000000 and 1000000 ppm")
+    }
+    let (clock, take hand) = provide.clock(start_mono_ns, start_wall_ms)
+    list.push(mut c.hands, Hand(hand: Some(take hand), start: start_mono_ns, rate_ppm))
+    (list.len(c.hands) - 1, clock)
+}
+
+/// Steps clock `index` forward by `by_ns` once `at_ns` nanoseconds of the
+/// timeline have passed.
+pub fn step_at(mut c: Clocks, index: u64, at_ns: u64, by_ns: u64) {
+    if index >= list.len(c.hands) {
+        fail("sim.world: no clock has that index")
+    }
+    list.push(mut c.steps, Jump(index, at: at_ns, by_ns))
+}
+
+// floor(t * |rate| / 10^6) added to or taken from t, then the start and steps.
+fn reading(c: Clocks, index: u64, t: u64) -> u64 {
+    let h = c.hands[index]
+    let rate: u64 = int.truncate(int.abs(h.rate_ppm))
+    let drift = int.saturating_add(int.saturating_mul(t / ppm, rate), (t % ppm) * rate / ppm)
+    let mut at = if h.rate_ppm >= 0 {
+        int.saturating_add(h.start, int.saturating_add(t, drift))
+    } else {
+        int.saturating_add(h.start, t - drift)
+    }
+    for j in c.steps {
+        if j.index == index && j.at <= t {
+            at = int.saturating_add(at, j.by_ns)
+        }
+    }
+    at
+}
+
+// The first timeline instant, not before the current one, at which clock
+// `index` reads at least `deadline`.
+fn reach(c: Clocks, index: u64, deadline: u64) -> Option[u64] {
+    if reading(c, index, c.base) >= deadline {
+        return Some(c.base)
+    }
+    let mut hi = 0xffffffffffffffffu64
+    if reading(c, index, hi) < deadline {
+        return None
+    }
+    let mut lo = c.base
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2
+        if reading(c, index, mid) >= deadline {
+            hi = mid
+        } else {
+            lo = mid
+        }
+    }
+    Some(hi)
+}
+
+fn earlier(a: Option[u64], b: u64) -> Option[u64] {
+    match a {
+        Some(x) if x <= b => Some(x),
+        _ => Some(b)
+    }
+}
+
+type Idle: send {
+    index: u64,
+    hand: ClockHand,
+    deadline: Option[u64]
+}
+
+type Idler: send {
+    index: u64,
+    hands: Receiver[ClockHand],
+    reports: Sender[Idle]
+}
+
+fn idler(take i: Idler) waits {
+    let Idler(index, hands: take hands, reports: take reports) = take i
+    while let Ok(take given) = channel.receive(hands) {
+        let mut hand = take given
+        let deadline = clock.idle(mut hand)
+        if let Error(_) = channel.send(reports, Idle(index, hand: take hand, deadline)) {
+            return
+        }
+    }
+}
+
+/// Advances every clock at quiescence. Each round waits until every task
+/// waits, finds the first timeline instant at which some clock reaches its
+/// earliest pending timer or a step falls due, and advances each clock in
+/// index order to its reading at that instant. Returns after two rounds in a
+/// row find nothing to advance to.
+pub fn drive(take c: Clocks, tasks: Tasks) waits {
+    let mut owned = take c
+    let n = list.len(owned.hands)
+    let (report, reports): (Sender[Idle], Receiver[Idle]) = channel.new(n)
+    let mut feeds: List[Sender[ClockHand]] = list.with_capacity(n)
+    let mut idlers: List[Task[()]] = list.with_capacity(n)
+    for index in 0u64 .. n {
+        let (feed, hands): (Sender[ClockHand], Receiver[ClockHand]) = channel.new(1)
+        list.push(mut idlers, task.spawn(tasks, bytes 0, Idler(index, hands: take hands, reports: channel.sender(report)), idler))
+        list.push(mut feeds, take feed)
+    }
+    let _ = take report
+    let mut quiet = false
+    let mut deadlines: List[Option[u64]] = list.with_capacity(n)
+    list.fill(mut deadlines, n, None)
+    loop {
+        for index in 0u64 .. n {
+            let Some(take hand) = replace(mut owned.hands[index].hand, None) else {
+                fail("sim.world: a clock hand is missing")
+            }
+            if let Error(_) = channel.send(feeds[index], take hand) {
+                fail("sim.world: a clock idler stopped")
+            }
+        }
+        for _ in 0u64 .. n {
+            let Ok(take idle) = channel.receive(reports) else {
+                fail("sim.world: a clock idler stopped")
+            }
+            let Idle(index, hand: take hand, deadline) = take idle
+            owned.hands[index].hand = Some(take hand)
+            deadlines[index] = deadline
+        }
+        let mut next: Option[u64] = None
+        for index in 0u64 .. n {
+            if let Some(deadline) = deadlines[index] {
+                if let Some(t) = reach(owned, index, deadline) {
+                    next = earlier(next, t)
+                }
+            }
+        }
+        for j in owned.steps {
+            if j.at > owned.base {
+                next = earlier(next, j.at)
+            }
+        }
+        let Some(t) = next else {
+            if quiet {
+                break
+            }
+            quiet = true
+            continue
+        }
+        quiet = false
+        owned.base = t
+        for index in 0u64 .. n {
+            let at = reading(owned, index, t)
+            if let Some(mut hand) = owned.hands[index].hand {
+                clock.advance_to(mut hand, at)
+            }
+        }
+    }
+    list.clear(mut feeds)
+    for take idler_task in take idlers {
+        let _ = task.join(take idler_task)
     }
 }
 

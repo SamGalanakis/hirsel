@@ -41,6 +41,25 @@ fn grants() -> Grants {
         removed: vec!["Dir=a".into()],
     }
 }
+// A Prepared-stage decision: tree aa, no H, the grant diff, a migration and one unmatched
+// held entry path.
+fn decision() -> Decision {
+    Decision {
+        tree: vec![0xaa],
+        root: Vec::new(),
+        stage: DecisionStage::Prepared,
+        grants: grants(),
+        approvals: None,
+        migration: Some(Migration {
+            digest: vec![0xbb],
+            changes: vec!["t".into()],
+        }),
+        triggers: TriggerReport {
+            rows: Vec::new(),
+            unmatched: vec![vec![0x03]],
+        },
+    }
+}
 
 // The expected bytes are shared with core/programs/platform/operator_wire.hirsel. They were
 // derived from core/std/api/codec.md's format by an encoder written apart from both
@@ -84,8 +103,16 @@ fn operator_vectors() {
         ),
         (Ask::Lookup("g".into()), "060000000100000067"),
         (
-            Ask::Decide(d(), grants(), true),
-            "0800000010000000212121212121212121212121212121210100000005000000436c6f636b01000000050000004469723d6101",
+            Ask::Decide(
+                d(),
+                Box::new(decision()),
+                Fates {
+                    all: Some(HeldFate::Release),
+                    entries: Vec::new(),
+                },
+                true,
+            ),
+            "08000000100000002121212121212121212121212121212101000000aa00000000010000000100000005000000436c6f636b01000000050000004469723d61000000000100000001000000bb0100000001000000740000000001000000010000000301000000000000000000000001",
         ),
         (
             Ask::Register(
@@ -185,8 +212,8 @@ fn operator_vectors() {
             "000000001000000021212121212121212121212121212121010000006703000000000000000100000001000000010800000001000000020000006e6f0000000000000000000000000000000000000000000000000000000000000000",
         ),
         (
-            state(Phase::AwaitDecision(grants())),
-            "00000000100000002121212121212121212121212121212101000000670300000000000000010000000100000001090000000100000005000000436c6f636b01000000050000004469723d61",
+            state(Phase::AwaitDecision(Box::new(decision()))),
+            "000000001000000021212121212121212121212121212121010000006703000000000000000100000001000000010900000001000000aa00000000010000000100000005000000436c6f636b01000000050000004469723d61000000000100000001000000bb01000000010000007400000000010000000100000003",
         ),
         (
             Answer::Need(

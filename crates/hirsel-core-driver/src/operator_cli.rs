@@ -9,7 +9,8 @@ use crate::code_store::CodeStore;
 use crate::launcher::session::{Attempt, Grants, Group, Input};
 use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
 use crate::operator::{
-    self, Answer, Ask, Class, Fates, Forward, Front, Pause, Phase, Record, Registration, Report,
+    self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Pause, Phase, Record,
+    Registration, Report,
 };
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::release_recipe::Recipe;
@@ -28,7 +29,8 @@ use std::time::Duration;
 mod laws;
 mod preview;
 
-use preview::{approve_grant, decide, grants_json, held_fate, preview_json};
+use preview::decide;
+use preview::{approve_grant, decision_json, held_fate, preview_json};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -270,10 +272,19 @@ fn register_on(invocation: Invocation) -> Result<i32, Error> {
     Exchange::new(&state, d, "register", Some(upload), approvals).run(ask)
 }
 
+/// `hirsel deploy` or `hirsel decide`.
+pub(crate) fn run(command: &str, invocation: Invocation) -> Result<crate::request::Outcome, Error> {
+    let code = if command == "decide" {
+        decide(invocation)?
+    } else {
+        deploy(invocation)?
+    };
+    Ok(crate::request::Outcome::Exit(code))
+}
+
 /// `hirsel deploy R --state S --group NAME --code-store DIR [--request-id HEX]
-/// [--approve-grant +LINE|-LINE ...] [--grant ...]`, `hirsel deploy --state S --status HEX`,
-/// or a decision on a request that awaits one: `hirsel deploy --state S --request-id HEX
-/// (--approve-grant +LINE|-LINE ... | --refuse-grants)`.
+/// [--approve-grant +LINE|-LINE ...] [--grant ...]` or `hirsel deploy --state S --status HEX`.
+/// A request that awaits any other decision is decided with `hirsel decide`.
 pub(crate) fn deploy(invocation: Invocation) -> Result<i32, Error> {
     or_unavailable("deploy", deploy_on(invocation))
 }
@@ -281,7 +292,6 @@ pub(crate) fn deploy(invocation: Invocation) -> Result<i32, Error> {
 fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
     let (mut state, mut code, mut name, mut d, mut status) = (None, None, None, None, None);
     let mut decision = Grants::default();
-    let mut refuse = false;
     let mut grants = crate::package_dir::Grants::default();
     let mut held = Fates::default();
     let mut held_given = false;
@@ -294,7 +304,6 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
             Opt::RequestId => d = Some(text),
             Opt::RequestStatus => status = Some(text),
             Opt::ApproveGrant => approve_grant(&mut decision, &text)?,
-            Opt::RefuseGrants => refuse = true,
             Opt::Grant => grant(&mut grants, &text)?,
             Opt::HeldAll | Opt::HeldEntry => {
                 held_fate(&mut held, option == Opt::HeldAll, &text)?;
@@ -314,12 +323,7 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
         || !grants.exec.is_empty()
         || held_given;
     if let Some(text) = status {
-        if invocation.positional.is_some()
-            || d.is_some()
-            || submission_options
-            || refuse
-            || has_decision
-        {
+        if invocation.positional.is_some() || d.is_some() || submission_options || has_decision {
             return Err("deploy --status takes only --state".into());
         }
         let d = unhex(&text)
@@ -327,25 +331,7 @@ fn deploy_on(invocation: Invocation) -> Result<i32, Error> {
             .ok_or("--status takes 32 hex digits")?;
         return status_of(&state, &d);
     }
-    decision.added.sort();
-    decision.added.dedup();
-    decision.removed.sort();
-    decision.removed.dedup();
-    if refuse && has_decision {
-        return Err("--refuse-grants takes no --approve-grant".into());
-    }
-    if refuse && invocation.positional.is_some() {
-        return Err("deploy with a recipe takes no --refuse-grants".into());
-    }
-    if invocation.positional.is_none() && (refuse || has_decision) {
-        if submission_options {
-            return Err("deploy decisions take only --state and --request-id".into());
-        }
-        let d = unhex(&d.ok_or("a decision requires --request-id HEX")?)
-            .filter(|d| d.len() == 16)
-            .ok_or("--request-id takes 32 hex digits")?;
-        return decide(&state, d, decision, refuse);
-    }
+    sort_grants(&mut decision);
     let upload = Upload::open(invocation.positional.as_deref(), code)?;
     let approvals = approvals(grants);
     if let Some(reason) = approvals.check(&upload.recipe) {
@@ -424,6 +410,14 @@ fn connect(state: &Path) -> Result<operator::Connection, Error> {
 }
 
 /// A command's exit status, with no listening host reported as temporarily unavailable.
+/// A grant diff in the host's canonical order: each side sorted with no repeats.
+fn sort_grants(diff: &mut Grants) {
+    diff.added.sort();
+    diff.added.dedup();
+    diff.removed.sort();
+    diff.removed.dedup();
+}
+
 fn or_unavailable(command: &str, result: Result<i32, Error>) -> Result<i32, Error> {
     match result {
         Err(error) if error.is::<NoHost>() => {
@@ -471,7 +465,7 @@ fn class_name(class: Class) -> &'static str {
         Class::Uncompiled => "uncompiled",
         Class::NotInstalledAfterRecovery => "not installed after recovery",
         Class::Exhausted => "exhausted",
-        Class::Unsettled => "unsettled",
+        Class::Red => "red",
     }
 }
 
@@ -525,8 +519,8 @@ fn state_json(d: &[u8], group: &Group, phase: &Phase) -> serde_json::Value {
         Phase::Failed(class, detail, report) => serde_json::json!({
             "phase": "failed", "class": class_name(*class), "detail": detail, "report": report_json(report),
         }),
-        Phase::AwaitDecision(grants) => {
-            serde_json::json!({"phase": "awaiting a decision", "grants": grants_json(grants)})
+        Phase::AwaitDecision(decision) => {
+            serde_json::json!({"phase": "awaiting a decision", "decision": decision_json(decision)})
         }
     };
     for (key, value) in fields.as_object().unwrap() {
@@ -634,8 +628,8 @@ struct Exchange<'a> {
     command: &'static str,
     upload: Option<Upload>,
     approvals: Approvals,
-    /// The grant diff the operator approves, sent as a Decide when the request awaits a
-    /// decision on exactly it.
+    /// The grant diff the operator approves, sent as a Decide when the request awaits an
+    /// Admission-stage decision on exactly it.
     decision: Option<Grants>,
 }
 
@@ -698,7 +692,7 @@ impl<'a> Exchange<'a> {
                 Answer::State(_, _, _, Phase::AwaitInput(a)) if pump.is_none() => {
                     let Some(upload) = &self.upload else {
                         break Err(format!(
-                            "request {} uploads its input; decide it with `hirsel deploy R --request-id HEX --approve-grant ...`",
+                            "request {} uploads its input; resend it with `hirsel deploy R --request-id HEX`",
                             hex(&self.d)
                         )
                         .into());
@@ -730,18 +724,23 @@ impl<'a> Exchange<'a> {
                     }
                 }
                 Answer::State(d, group, _, phase) => match &phase {
-                    Phase::AwaitDecision(diff) => {
-                        if self.decision.as_ref() == Some(diff) && !decided {
+                    Phase::AwaitDecision(held) => {
+                        let grant_only = held.stage == DecisionStage::Admission
+                            && !held.shows_held()
+                            && self.decision.as_ref() == Some(&held.grants);
+                        if grant_only && !decided {
                             decided = true;
-                            let ask = Ask::Decide(self.d.clone(), diff.clone(), true);
+                            let ask =
+                                Ask::Decide(self.d.clone(), held.clone(), Fates::default(), true);
                             if out.lock().unwrap().send(&ask).is_err() {
                                 break lost(self.command, &self.d);
                             }
                             continue;
                         }
                         eprintln!(
-                            "{}: request {} awaits a person's decision on its grant diff; approve each line with --request-id and --approve-grant, or refuse it with --refuse-grants",
+                            "{}: request {} awaits the operator's decision; decide it with `hirsel decide --state DIR --request-id {}`",
                             self.command,
+                            hex(&self.d),
                             hex(&self.d)
                         );
                         println!("{}", state_json(&d, &group, &phase));
@@ -762,11 +761,7 @@ impl<'a> Exchange<'a> {
                         eprintln!("{}: {}: {detail}", self.command, class_name(*class));
                         println!("{}", state_json(&d, &group, &phase));
                         let refused = *class == Class::Denied && policy_refusal(detail);
-                        break Ok(Some(if refused || *class == Class::Unsettled {
-                            2
-                        } else {
-                            1
-                        }));
+                        break Ok(Some(if refused { 2 } else { 1 }));
                     }
                     _ => (),
                 },

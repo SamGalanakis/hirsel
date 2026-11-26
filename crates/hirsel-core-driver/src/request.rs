@@ -7,7 +7,7 @@ use crate::native::recipe_build::Publication;
 use crate::product::ProductLibraries;
 use crate::{
     Backend, BuildProduct, CheckRequest, CoreImage, Driver, LibraryInput, Link, Meter,
-    NativeOptions,
+    NativeOptions, operator_cli,
 };
 use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::CorpusManifest;
@@ -92,9 +92,9 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             let serve = crate::resident::Serve::read(invocation)?;
             return conclude(Outcome::Exit(crate::resident::run(serve)?));
         }
-        "host" => match crate::operator_cli::host(invocation)? {},
-        "register" => return conclude(Outcome::Exit(crate::operator_cli::register(invocation)?)),
-        "deploy" => return conclude(Outcome::Exit(crate::operator_cli::deploy(invocation)?)),
+        "host" => match operator_cli::host(invocation)? {},
+        "register" => return conclude(Outcome::Exit(operator_cli::register(invocation)?)),
+        "deploy" | "decide" => return conclude(operator_cli::run(command, invocation)?),
         "call" => {
             return conclude(Outcome::Exit(crate::call::run(
                 crate::call::Options::read(invocation)?,
@@ -112,7 +112,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             .iter()
             .any(|(option, _)| *option == Opt::HostState)
     {
-        return conclude(Outcome::Exit(crate::operator_cli::replay(invocation)?));
+        return conclude(Outcome::Exit(operator_cli::replay(invocation)?));
     }
     if matches!(command, "sdk ts" | "sdk json") {
         crate::sdk_command::run(crate::sdk_command::Options::read(invocation)?)?;
@@ -491,7 +491,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             | Opt::FrontHttp
             | Opt::FrontStream
             | Opt::ApproveGrant
-            | Opt::RefuseGrants
+            | Opt::Refuse
             | Opt::HeldAll
             | Opt::HeldEntry
             | Opt::HostMemory

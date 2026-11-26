@@ -75,8 +75,8 @@ pub type TriggerReport: codec + send {
     unmatched: List[Bytes]
 }
 
-/// The report fails the deploy `Unsettled`: a held group has no fate, or an
-/// entry path is unmatched (RUNNER-SPEC §14.6 "The activation fate").
+/// The report holds the deploy for the operator's decision: a held group has no fate, or
+/// an entry path is unmatched (RUNNER-SPEC §14.6 "The activation fate").
 pub fn trigger_report_unsettled(report: TriggerReport) -> bool {
     if list.len(report.unmatched) > 0u64 {
         return true
@@ -201,7 +201,7 @@ fn prepare_export[G: send, H: shareable + inert + send](p: PrepareConfig[G, H], 
     std.codec.encode(codec, report, mut raw) ?=> |_| trigger_scan_limit()
     write_trigger_scan(p.scratch, take raw)?
     // An unsettled deploy ends here: TRIGGERS and no PREPARED, so the host
-    // fails it `Unsettled` before any cut.
+    // holds it for the operator's decision before any cut.
     if unsettled {
         return Ok(())
     }

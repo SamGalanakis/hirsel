@@ -1,12 +1,30 @@
-// Module platform, the deploy preview and its decision (launch.md "Deploy preview"): the
-// hold of a request whose grant diff awaits a person, the Decide that ends it, and the
-// entry and trigger parts of a deploy's preview.
+// Module platform, the deploy preview and its decision (launch.md "Deploy preview",
+// "Self-editing" "Holds and decisions"): the hold of a request whose grant diff or prepare
+// report awaits the operator, the Decide that ends it, and the entry and trigger parts of a
+// deploy's preview.
 fn same_grants(a: launcher.Grants, b: launcher.Grants) -> bool {
     a.added == b.added && a.dropped == b.dropped
 }
 
-// Request d waits for a person's decision on grant diff `diff`, durably and with no attempt,
-// so a restart or a lost connection keeps the hold (launch.md "Deploy preview").
+// The decision a request awaits: its source tree's digest (empty for an attested or
+// publication input), no H while the gate is unbuilt, and the facts computed so far.
+fn decision_of(input: launcher.Input, stage: operator.DecisionStage, grants: launcher.Grants, triggers: runner.TriggerReport) -> operator.Decision {
+    let tree: Bytes = match input {
+        Source(b) => {
+            let digest = sha256.hash(b)
+            let mut out: Bytes = list.with_capacity(32u64)
+            for i in 0u64 .. 32u64 {
+                list.push(mut out, digest[i])
+            }
+            out
+        },
+        _ => list.new(),
+    }
+    operator.Decision(tree: tree, root: list.new(), stage: stage, grants: clone(grants), approvals: None, migration: None, triggers: clone(triggers))
+}
+
+// Request d waits for the operator's decision on grant diff `diff`, durably and with no
+// attempt, so a restart or a lost connection keeps the hold (launch.md "Deploy preview").
 fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
     let made = {
         let t = view h.t
@@ -19,7 +37,7 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
             if let Some(_) = row.done {
                 return Ok(())
             }
-            row.held = Some(clone(call_env.2))
+            row.held = Some(decision_of(row.input, AdmissionStage, call_env.2, operator.no_triggers()))
             st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(())
         })
@@ -29,11 +47,61 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
     }
 }
 
-// A Decide (launch.md "Deploy preview"): request d must await a decision on exactly `diff`.
-// A refusal fails it Denied. An approval records the diff and repeats d's admission under it,
-// with a fresh attempt and deadline and `conn` as its owner; an admission that then finds
-// another diff waits again.
-fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool, now: Now, mut out: List[launcher.Request]) waits {
+// Request d's deploy ended at prepare on a report that needs the operator (RUNNER-SPEC
+// §14.6 "No default"): it holds on the Prepared-stage decision, in the transaction that
+// ends the attempt, and stays the group's active request.
+fn hold_prepared(mut tx: store.Tx, t: Tables, d: Bytes, preview: operator.Preview) -> Result[(), Refused] {
+    let Some(found) = st(store.fetch(tx, t.requests, d))? else {
+        return Ok(())
+    }
+    let mut row = found
+    if let Some(_) = row.done {
+        return Ok(())
+    }
+    row.held = Some(decision_of(row.input, PreparedStage, preview.grants, preview.triggers))
+    st(store.put(mut tx, t.requests, d, row))
+}
+
+// Whether a prepare report needs the operator's decision: a held run has no fate, a held
+// entry path is unmatched, or the fates came from a Decide and the report holds a group
+// that decision did not show (launch.md "Self-editing" F4).
+fn needs_decision(h: Host, name: String, report: runner.TriggerReport) -> bool waits {
+    if runner.trigger_report_unsettled(report) {
+        return true
+    }
+    let Ok(Some(row)) = store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.deploys, name) else {
+        return false
+    }
+    let Ok(Some(r)) = request_row(h, row.request) else {
+        return true
+    }
+    if is_none(r.fates) {
+        return false
+    }
+    for scanned in report.rows {
+        if let Held = scanned.class {
+            let mut shown = false
+            for s in r.shown {
+                if s.path == scanned.path && s.schema == scanned.schema && s.hold == scanned.hold {
+                    shown = true
+                    break
+                }
+            }
+            if !shown {
+                return true
+            }
+        }
+    }
+    false
+}
+
+// A Decide (launch.md "Self-editing" "Holds and decisions"): request d must await exactly
+// `decision`. A refusal fails it Denied. An approval records the decision's grant diff, and
+// when the decision shows a held group or an unmatched path its `fates` replace d's (and
+// otherwise `fates` must be `fate.none()`), then repeats d's admission under them, with a
+// fresh attempt and deadline and `conn` as its owner; an admission or prepare that then
+// needs another decision waits again.
+fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: runner.fate.Fates, approve: bool, now: Now, mut out: List[launcher.Request]) waits {
     let r = match request_row(h, d) {
         Ok(Some(r)) => r,
         Ok(None) => {
@@ -46,17 +114,22 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
         },
     }
     let waiting = match r.held {
-        Some(x) => is_none(r.done) && same_grants(x, diff),
+        Some(x) => is_none(r.done) && operator.decision_bytes(x) == operator.decision_bytes(decision),
         None => false,
     }
     if !waiting {
-        refuse(mut h, conn, DeniedClass, "the request awaits no decision on this grant diff")
+        refuse(mut h, conn, DeniedClass, "the request awaits no decision on exactly these facts")
+        return
+    }
+    let fated = operator.shows_held(decision)
+    if !fated && (!is_none(fates.all) || list.len(fates.entries) > 0u64) {
+        refuse(mut h, conn, InvalidClass, "the decision shows no held run, so it takes no fates")
         return
     }
     let _ = map.remove(mut h.shown, d)
     map.insert(mut h.owners, clone(d), conn)
     if !approve {
-        fail_request(mut h, d, DeniedClass, "a person refused the grant diff")
+        fail_request(mut h, d, DeniedClass, "the operator refused the decision")
         return
     }
     let name = string.from(r.group.name)
@@ -76,10 +149,23 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
         refuse(mut h, conn, class, why)
         return
     }
+    let mut shown: List[runner.TriggerScanRow] = list.new()
+    for row in decision.triggers.rows {
+        if let Held = row.class {
+            list.push(mut shown, clone(row))
+        }
+    }
+    let mut given: Option[runner.fate.Fates] = None
+    if fated {
+        given = Some(clone(fates))
+    }
+    let diff: launcher.Grants = clone(decision.grants)
     let made = {
         let t = view h.t
         let approved = view diff
-        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(now), store.copy_env(t), store.copy_env(approved)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
+        let gave = view given
+        let saw = view shown
+        store.run(mut h.db, None, (store.copy_env(d), store.copy_env(now), store.copy_env(t), store.copy_env(approved), store.copy_env(gave), store.copy_env(saw)), fn(mut tx, call_env) -> Result[launcher.Attempt, Refused] {
             let Some(found) = st(store.fetch(tx, call_env.2 .requests, call_env.0))? else {
                 return Error(Missing("request"))
             }
@@ -94,6 +180,10 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
             row.deadline_ms = call_env.1 .wall_ms + ADMISSION_MS
             row.held = None
             row.approved = clone(call_env.3)
+            if let Some(f) = call_env.4 {
+                row.fates = Some(clone(f))
+                row.shown = clone(call_env.5)
+            }
             st(store.put(mut tx, call_env.2 .requests, call_env.0, row))?
             Ok(a)
         })
@@ -107,6 +197,51 @@ fn decide(mut h: Host, conn: u64, d: Bytes, diff: launcher.Grants, approve: bool
         },
     }
     admit_request(mut h, name, g, d, a, input, foreign, exec, diff, now, mut out)
+}
+
+// The group's unresolved deploy row, if it runs request d.
+fn deploy_of(h: Host, name: String, d: Bytes) -> Option[DeployRow] waits {
+    match store.get(result.unwrap(store.reader(h.db, 0u64)), store.snapshot(h.db), h.t.deploys, name) {
+        Ok(Some(row)) if row.request == d => match row.outcome {
+            Preparing => Some(clone(row)),
+            Pending => Some(clone(row)),
+            Undecided(_) => Some(clone(row)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// Request d's phase as State reports it: its terminal phase, its unresolved deploy row,
+// its admission, or awaiting input under its last attempt.
+fn phase_of(h: Host, d: Bytes, r: RequestRow) -> operator.Phase waits {
+    if let Some(p) = r.done {
+        return clone(p)
+    }
+    if let Some(decision) = r.held {
+        return AwaitDecision(clone(decision))
+    }
+    let name = string.from(r.group.name)
+    if let Some(row) = deploy_of(h, name, d) {
+        return match row.outcome {
+            Pending => PendingPhase(row.attempt, row.activation),
+            Undecided(ProbeNew) => UndecidedPhase(row.attempt, row.activation, "reconciling: probing NEW"),
+            Undecided(ProbeOld) => UndecidedPhase(row.attempt, row.activation, "reconciling: probing OLD"),
+            _ => PreparingPhase(row.attempt),
+        }
+    }
+    if let Some(adm) = admission_of(h, name, d) {
+        return match adm.stage {
+            Confirming(_) => AwaitConfirm(adm.attempt),
+            Assembling => AssemblingPhase(adm.attempt),
+            _ => if adm.ended {
+                AdmittingPhase(adm.attempt)
+            } else {
+                AwaitInput(adm.attempt)
+            },
+        }
+    }
+    AwaitInput(r.attempt)
 }
 
 // The entry diff (launch.md "Deploy preview"): every entry OLD or NEW exports, by code
@@ -157,10 +292,14 @@ fn trigger_report(b: Bytes) -> Option[runner.TriggerReport] {
     }
 }
 
-// The deploy's fates: the `held` field of its recorded Begin.
+// The deploy's fates: those an approved decision gave, else the `held` field of its
+// recorded Begin.
 fn deploy_held(h: Host, d: Bytes) -> Result[runner.fate.Fates, Refused] waits {
     let Some(row) = request_row(h, d)? else {
         return Error(Missing("deploy request"))
+    }
+    if let Some(f) = row.fates {
+        return Ok(clone(f))
     }
     let Some(BeginAsk(_, _, _, _, _, held)) = operator.decode_ask(row.begin) else {
         return Error(Missing("deploy Begin"))

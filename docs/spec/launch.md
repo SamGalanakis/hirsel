@@ -1208,16 +1208,16 @@ answered `Error(Protocol)` and closes only that exchange.
 | 5 ResolvePin(I) | Returns Pin, looked up at the host's wall clock in Unix seconds, or `Error(Store)`. |
 | 6 LookupGroup(name) | Returns GroupInfo(G) for the registered incarnation, or `Error(UnknownGroup)`, also while the group is still registering. |
 | 7 Register(D, registration, input, foreign, exec) | `registration` is (name, tenant, workdir, trusted, listen, store, memory, args, record), with `memory` an `Option[u64]` in bytes and `record` an `Option` of (dir, retentionSeconds). Registers a new group and deploys its first release, below. `input`, `foreign` and `exec` are Begin's. |
-| 8 Decide(D, decision, fates, approve) | The operator's decision on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. Planned shape (launch.md "Self-editing"; built: `Decide(D, grants, approve)`). `fates` settles the held runs the decision shows and is `Fates(all: None, entries: [])` when it shows none. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
+| 8 Decide(D, decision, fates, approve) | The operator's decision on D, which must be in AwaitDecision on exactly this `decision` ("Self-editing"); anything else is `Error(Denied)`. Only this socket accepts Decide. `fates` settles the held runs the decision shows and is `Fates(all: None, entries: [])` when it shows none. An approval repeats D's admission under a fresh A, this connection owning it; a refusal fails D `Denied`. |
 | 9 SetEditor(G, editor) | Planned ("Self-editing"). `editor` is `Option[EditorGrant]`, with `EditorGrant { uid: u32, named: List[String] }`: the editor's UID and the sorted, duplicate-free `Secret`, `Cred` and `Env` binding lines of G's approved recipe that the operator lets an editor's code use. It sets or clears G's editor in one transaction and answers `GroupInfo(G)`. It is refused `Denied` unless G passes "What editing delegates"; a UID equal to the operator's or the launcher's is `Invalid`; the platform host's group is `Denied`. Only this socket accepts it. |
 
 | Host → operator | Payload and rule |
 |---|---|
-| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"; planned, built: `AwaitDecision(grants)`). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
+| 0 State(D, G, input, phase) | A committed snapshot. Phase tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A), 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason), 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision), with `decision` the settler's `Decision` ("Self-editing"). Installed and Failed are terminal and end the exchange. AwaitDecision holds no attempt. A known D keeps the same G and input for its whole life. |
 | 1 Need(D, A, keys, last) | One of the launcher's ordered parts of the missing set (`List[Wanted]`, bool), or, for a source, of the blobs the group's blob set lacks (`Wanted` gains 4 BlobKey(H)<!-- doc-ref: planned -->). |
 | 2 Display(D, A, R, text) | The exact Foreign and Exec text to confirm, bound to the verified R. No child runs before it is confirmed. |
 | 3 Pin(resolved) | 0 Found(assembly) or 1 Gone. |
-| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red (planned; built: 13 Unsettled). Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Red is a gated source whose tests were not all green; its detail names each test that failed, stopped, did not start or had not ended by the admission deadline, with its outcome ("Self-editing"). A trigger report with a held run that has no fate, or with an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers, holds the request for a decision and fails nothing; the former class 13 `Unsettled` is deleted. Failed uses the same classes. An exchange error never changes another request's outcome. |
+| 4 Error(class, detail) | Class tags 0 Protocol, 1 Denied, 2 UnknownRequest, 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store, 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red (sent once the law gate is built). Uncompiled carries a source's checker diagnostics; Exhausted is a source whose compile ran out of memory. Red is a gated source whose tests were not all green; its detail names each test that failed, stopped, did not start or had not ended by the admission deadline, with its outcome ("Self-editing"). A trigger report with a held run that has no fate, or with an `entries` path that is the entry path of no pending run and of no entry OLD or NEW registers, holds the request for a decision and fails nothing; the former class 13 `Unsettled` is deleted. Failed uses the same classes. An exchange error never changes another request's outcome. |
 | 5 GroupInfo(G) | A group lookup's result. |
 | 6 Part(total, offset, bytes) | One in-order chunk of an encoded reply larger than one frame, from offset zero, contiguous, ending exactly at total. |
 
@@ -1309,12 +1309,12 @@ activation, assembly and report.
   the diff its `--approve-grant` lines name (`+` for a line gained, `-` for one lost), it
   sends Decide approving it, with the fates its `--held` and `--held-entry` options name, and goes on; otherwise it prints the state, with the decision and its trigger report, and
   exits 2. `--held` sets `held.all`, and each `--held-entry` adds an element of `held.entries`, where PATH is the entry path as the trigger report prints it. Without either option, `held` is `Fates(all: None, entries: [])`. `hirsel deploy --state S --status D` sends only Status.
-- `hirsel decide --state S --request-id D`<!-- doc-ref: planned --> (planned), with the options
-  `--approve-grant +LINE|-LINE`, `--approve-migration DIGEST`<!-- doc-ref: planned -->,
-  `--approve-display SHA256`<!-- doc-ref: planned -->, `--held release|cancel`, `--held-entry PATH=release|cancel`
-  and `--refuse`<!-- doc-ref: planned -->, decides a held request of either
+- `hirsel decide --state S --request-id D`, with the options
+  `--approve-grant +LINE|-LINE`, `--approve-migration DIGEST`<!-- doc-ref: planned --> (planned),
+  `--approve-display SHA256`<!-- doc-ref: planned --> (planned), `--held release|cancel`, `--held-entry PATH=release|cancel`
+  and `--refuse`, decides a held request of either
   principal. It sends Status and prints the whole `Decision` ("Self-editing"), with its
-  tree, H and trigger report. With `--refuse`<!-- doc-ref: planned --> it sends `Decide(D, decision, Fates(all: None,
+  tree, H and trigger report. With `--refuse` it sends `Decide(D, decision, Fates(all: None,
   entries: []), false)`. Otherwise it sends Decide approving that exact decision only when
   its options name every part the decision holds and nothing else: the grant diff line by
   line, the migration digest, the SHA-256 of the approval text, and fates for the held
@@ -1330,7 +1330,7 @@ Register and deploy stream the admission input on AwaitInput, answer each Need w
 and on Display check that the text is the one their own approvals produce, print it, and
 send Confirm with its SHA-256. `Error(Busy)` is retried with the same D for up to 60 s.
 Their exit status is 0 for `Installed` (1 when the pause report is `StartFailed`), 2 for a
-local refusal, a `Failed(Denied)` that is a policy refusal (FFI or Exec), or (planned) an AwaitDecision its options do not decide, which prints the decision and its trigger report so that the operator can choose the grants and fates and decide it with `--request-id`, 1 for any other
+local refusal, a `Failed(Denied)` that is a policy refusal (FFI or Exec), or an AwaitDecision its options do not decide, which prints the decision and its trigger report so that the operator can choose the grants and fates and decide it with `--request-id`, 1 for any other
 `Failed`, and 75 for `Undecided`, for no host listening, or for a connection lost before a
 terminal phase, which prints `outcome unknown: request D`.
 
@@ -1388,7 +1388,7 @@ is separate from publishing.
 after review self-edit-gate-review-2801 (self-edit-build-1c-2808, RUNNER-SPEC v2.82). Not built:
 every socket, ask field, phase, class and law in this section is planned. Only the building
 blocks are to be built now (Sam, 2026-11-26: "not building self editing into lash, just the
-building blocks"): the law gate, operator-decided holds with `hirsel decide`<!-- doc-ref: planned -->, the migration
+building blocks"): the law gate, operator-decided holds with `hirsel decide`, the migration
 and runs facts from OLD's report of the bound PREPARED with its settlement check, and source
 by content with per-group package roots. The editor principal (its UID, socket, SetEditor and
 revocation), automatic cutover and the editor allow list stay unbuilt.*

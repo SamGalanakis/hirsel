@@ -59,8 +59,9 @@ pub(crate) enum Ask {
     Resolve(Vec<u8>),
     Lookup(String),
     Register(Vec<u8>, Box<Registration>, Input, Vec<String>, Vec<String>),
-    /// A person's decision on a request that awaits one for exactly this grant diff.
-    Decide(Vec<u8>, Grants, bool),
+    /// The operator's decision on a request that awaits exactly this decision, with the fates
+    /// it gives when the decision shows a held group or an unmatched path.
+    Decide(Vec<u8>, Box<Decision>, Fates, bool),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,8 +214,31 @@ impl Wire for Preview {
             w.bytes(&e.identity);
             w.u32(ENTRY_CHANGES.iter().position(|c| *c == e.change).unwrap() as u32);
         }
-        w.u32(self.triggers.rows.len() as u32);
-        for t in &self.triggers.rows {
+        self.triggers.put(w);
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
+        let grants = Grants::get(r)?;
+        let n = r.u32()?;
+        let mut entries = Vec::new();
+        for _ in 0..n {
+            let identity = r.bytes()?;
+            let change = *ENTRY_CHANGES
+                .get(r.u32()? as usize)
+                .ok_or_else(|| malformed("entry change tag"))?;
+            entries.push(EntryLine { identity, change });
+        }
+        Ok(Self {
+            grants,
+            entries,
+            triggers: TriggerReport::get(r)?,
+        })
+    }
+}
+
+impl Wire for TriggerReport {
+    fn put(&self, w: &mut Writer) {
+        w.u32(self.rows.len() as u32);
+        for t in &self.rows {
             w.u32(t.class);
             w.u32(t.kind);
             w.bytes(&t.path);
@@ -234,22 +258,12 @@ impl Wire for Preview {
             w.u64(t.count);
             w.u64(t.earliest_due);
         }
-        w.u32(self.triggers.unmatched.len() as u32);
-        for path in &self.triggers.unmatched {
+        w.u32(self.unmatched.len() as u32);
+        for path in &self.unmatched {
             w.bytes(path);
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
-        let grants = Grants::get(r)?;
-        let n = r.u32()?;
-        let mut entries = Vec::new();
-        for _ in 0..n {
-            let identity = r.bytes()?;
-            let change = *ENTRY_CHANGES
-                .get(r.u32()? as usize)
-                .ok_or_else(|| malformed("entry change tag"))?;
-            entries.push(EntryLine { identity, change });
-        }
         let n = r.u32()?;
         let mut rows = Vec::new();
         for _ in 0..n {
@@ -282,10 +296,99 @@ impl Wire for Preview {
         for _ in 0..n {
             unmatched.push(r.bytes()?);
         }
+        Ok(Self { rows, unmatched })
+    }
+}
+
+/// Which facts a decision has computed (launch.md "Self-editing"): the admission facts
+/// only, or every fact after prepare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecisionStage {
+    Admission,
+    Prepared,
+}
+
+/// R's Foreign and Exec lines and the exact display text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Approvals {
+    pub(crate) r: Vec<u8>,
+    pub(crate) foreign: Vec<String>,
+    pub(crate) exec: Vec<String>,
+    pub(crate) text: String,
+}
+
+/// The migration PREPARED ships: its digest and the collections it touches.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Migration {
+    pub(crate) digest: Vec<u8>,
+    pub(crate) changes: Vec<String>,
+}
+
+/// What a held request awaits the operator's decision on (`operator.Decision`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Decision {
+    pub(crate) tree: Vec<u8>,
+    pub(crate) root: Vec<u8>,
+    pub(crate) stage: DecisionStage,
+    pub(crate) grants: Grants,
+    pub(crate) approvals: Option<Approvals>,
+    pub(crate) migration: Option<Migration>,
+    pub(crate) triggers: TriggerReport,
+}
+
+impl Decision {
+    /// Whether the decision shows a held group or an unmatched path, which its Decide fates.
+    pub(crate) fn shows_held(&self) -> bool {
+        !self.triggers.unmatched.is_empty() || self.triggers.rows.iter().any(|t| t.class == 1)
+    }
+}
+
+impl Wire for Decision {
+    fn put(&self, w: &mut Writer) {
+        w.bytes(&self.tree);
+        w.bytes(&self.root);
+        w.u32(match self.stage {
+            DecisionStage::Admission => 0,
+            DecisionStage::Prepared => 1,
+        });
+        self.grants.put(w);
+        w.option(&self.approvals, |w, a| {
+            w.bytes(&a.r);
+            w.strings(&a.foreign);
+            w.strings(&a.exec);
+            w.bytes(a.text.as_bytes());
+        });
+        w.option(&self.migration, |w, m| {
+            w.bytes(&m.digest);
+            w.strings(&m.changes);
+        });
+        self.triggers.put(w);
+    }
+    fn get(r: &mut Reader<'_>) -> io::Result<Self> {
         Ok(Self {
-            grants,
-            entries,
-            triggers: TriggerReport { rows, unmatched },
+            tree: r.bytes()?,
+            root: r.bytes()?,
+            stage: match r.u32()? {
+                0 => DecisionStage::Admission,
+                1 => DecisionStage::Prepared,
+                _ => return Err(malformed("decision stage tag")),
+            },
+            grants: Grants::get(r)?,
+            approvals: r.option(|r| {
+                Ok(Approvals {
+                    r: r.bytes()?,
+                    foreign: r.strings()?,
+                    exec: r.strings()?,
+                    text: r.string()?,
+                })
+            })?,
+            migration: r.option(|r| {
+                Ok(Migration {
+                    digest: r.bytes()?,
+                    changes: r.strings()?,
+                })
+            })?,
+            triggers: TriggerReport::get(r)?,
         })
     }
 }
@@ -305,8 +408,8 @@ pub(crate) enum Class {
     Uncompiled,
     NotInstalledAfterRecovery,
     Exhausted,
-    /// A held run has no fate, or a held entry path is unmatched (RUNNER-SPEC §14.6).
-    Unsettled,
+    /// A gated source whose tests were not all green.
+    Red,
 }
 
 const CLASSES: [Class; 14] = [
@@ -323,7 +426,7 @@ const CLASSES: [Class; 14] = [
     Class::Uncompiled,
     Class::NotInstalledAfterRecovery,
     Class::Exhausted,
-    Class::Unsettled,
+    Class::Red,
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,8 +440,8 @@ pub(crate) enum Phase {
     Undecided(Attempt, u64, String),
     Installed(u64, Vec<u8>, Report),
     Failed(Class, String, Report),
-    /// Waits, holding no attempt, for a person's decision on this grant diff.
-    AwaitDecision(Grants),
+    /// Waits, holding no attempt, for the operator's decision on exactly this decision.
+    AwaitDecision(Box<Decision>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -443,10 +546,11 @@ impl Wire for Ask {
                 w.strings(foreign);
                 w.strings(exec);
             }
-            Self::Decide(d, grants, approve) => {
+            Self::Decide(d, decision, fates, approve) => {
                 w.u32(8);
                 w.bytes(d);
-                grants.put(w);
+                decision.put(w);
+                fates.put(w);
                 w.bool(*approve);
             }
         }
@@ -474,7 +578,12 @@ impl Wire for Ask {
                 r.strings()?,
                 r.strings()?,
             ),
-            8 => Self::Decide(r.bytes()?, Grants::get(r)?, r.bool()?),
+            8 => Self::Decide(
+                r.bytes()?,
+                Box::new(Decision::get(r)?),
+                Fates::get(r)?,
+                r.bool()?,
+            ),
             _ => return Err(malformed("operator ask tag")),
         })
     }
@@ -553,7 +662,7 @@ impl Wire for Phase {
                 w.bytes(detail.as_bytes());
                 report.put(w);
             }
-            Self::AwaitDecision(grants) => (w.u32(9), grants.put(w)).1,
+            Self::AwaitDecision(decision) => (w.u32(9), decision.put(w)).1,
         }
     }
     fn get(r: &mut Reader<'_>) -> io::Result<Self> {
@@ -567,7 +676,7 @@ impl Wire for Phase {
             6 => Self::Undecided(Attempt::get(r)?, r.u64()?, r.string()?),
             7 => Self::Installed(r.u64()?, r.bytes()?, Report::get(r)?),
             8 => Self::Failed(Class::get(r)?, r.string()?, Report::get(r)?),
-            9 => Self::AwaitDecision(Grants::get(r)?),
+            9 => Self::AwaitDecision(Box::new(Decision::get(r)?)),
             _ => return Err(malformed("operator phase tag")),
         })
     }

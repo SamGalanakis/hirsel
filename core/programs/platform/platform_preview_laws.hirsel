@@ -16,17 +16,29 @@ fn grants_of(added: String, removed: String) -> launcher.Grants {
 // Whether `p` awaits a decision on exactly the diff `added` and `removed` name.
 fn awaits(p: Option[operator.Phase], added: String, removed: String) -> bool {
     match p {
-        Some(AwaitDecision(g)) => same_grants(g, grants_of(added, removed)),
+        Some(AwaitDecision(x)) => same_grants(x.grants, grants_of(added, removed)),
         _ => false,
     }
 }
 
-// A person decides request d on a new connection; the rig's attempt becomes any the host
-// assigned. Gives the connection.
+// The operator decides request d's grant diff on a new connection: the decision the host
+// shows (an empty Admission-stage one when it shows none) with its grants replaced by `diff`,
+// and no fates. Gives the connection.
 fn decide_on(mut r: Rig, d: Bytes, take diff: launcher.Grants, approve: bool) -> u64 waits {
+    let mut shown = match status_of(mut r, d) {
+        Some(AwaitDecision(x)) => x,
+        _ => operator.Decision(tree: list.new(), root: list.new(), stage: AdmissionStage, grants: launcher.no_grants(), approvals: None, migration: None, triggers: operator.no_triggers()),
+    }
+    shown.grants = take diff
+    decide_with(mut r, d, take shown, runner.fate.none(), approve)
+}
+
+// The operator sends Decide(d, decision, fates, approve) on a new connection; the rig's
+// attempt becomes any the host assigned. Gives the connection.
+fn decide_with(mut r: Rig, d: Bytes, take decision: operator.Decision, take fates: runner.fate.Fates, approve: bool) -> u64 waits {
     r.conns += 1u64
     let conn = r.conns
-    send(mut r, conn, DecideAsk(clone(d), take diff, approve))
+    send(mut r, conn, DecideAsk(clone(d), take decision, take fates, approve))
     if let Some(p) = phase_on(r, conn) {
         if let Some(a) = attempt_of(p) {
             r.a = a
@@ -74,34 +86,41 @@ fn prepare_fates(r: Rig) -> List[Bytes] {
     out
 }
 
-// L54 (v2.62): a report whose held group has no fate aborts OLD's export once and fails the
-// deploy `Unsettled` with that report; nothing is imported and OLD serves on. The same
-// deploy under a new D with `held.all` Release passes the fates to its prepare child as the
-// hand-encoded `Fates(all: Some(Release), entries: [])` and is Installed.
+// L54 (v2.81): a report whose held group has no fate aborts OLD's export once and holds the
+// deploy for the operator's decision on that report (RUNNER-SPEC §14.6, launch.md
+// "Self-editing" "Holds and decisions"); nothing is imported and OLD serves on. A Decide
+// that approves the shown decision with `all` Release repeats the admission, its prepare
+// child gets the hand-encoded `Fates(all: Some(Release), entries: [])`, and the same
+// request is Installed.
 fn unsettled_deploy(c: Clock, rnd: Random) waits {
     let mut u = rig(c, rnd, 4u64)
     add(mut u, "g", "t")
     op_wake(mut u, "g")
     let old = last(u, "g")
-    let unsettled = request_id(u.conns + 1u64)
+    let held_d = request_id(u.conns + 1u64)
     to_export(mut u, old, preview_answer(image_two(), release_two()))
     old_says(mut u, old, PlaceExported(1u64, "export-1"))
     let ua = u.a
     helper_answers(mut u, helper_child(old, PrepareMode(ua, "export-1", list.new())), trigger_report_of(None))
-    expect(asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && still_preparing(u), "L54: an Unsettled report did not abort OLD's export once before any import")
+    expect(asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && still_preparing(u), "L54: an unsettled report did not abort OLD's export once before any import")
     old_says(mut u, old, PlaceAborted)
-    let why = "a held run has no fate, or a held entry path is unmatched"
-    let failed = status_of(mut u, unsettled)
-    expect(phase_failed(failed, UnsettledClass, why) && asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && old_serves(u), "L54: an Unsettled report did not fail the deploy Unsettled with OLD serving")
-    let report_ok = match failed {
-        Some(FailedPhase(_, _, report)) => list.len(report.preview.triggers.rows) == 1u64 && report.preview.triggers.rows[0u64].fate == None,
-        _ => false,
+    let held = match status_of(mut u, held_d) {
+        Some(AwaitDecision(x)) => Some(x),
+        _ => None,
     }
-    expect(report_ok, "L54: the Unsettled failure does not carry the trigger report")
+    let Some(shown) = held else {
+        expect(false, "L54: an unsettled report did not hold the deploy for the operator's decision")
+        unplug(mut u)
+        return
+    }
+    let report_ok = match shown.stage {
+        PreparedStage => list.len(shown.triggers.rows) == 1u64 && shown.triggers.rows[0u64].fate == None && operator.shows_held(shown),
+        AdmissionStage => false,
+    }
+    expect(report_ok && asked_of(u, 3u64) == 1u64 && imports_of(u) == 0u64 && old_serves(u), "L54: the held decision does not carry the trigger report, or OLD stopped serving")
     let mut release_all = runner.fate.none()
     release_all.all = Some(Release)
-    let settled = request_id(u.conns + 1u64)
-    let _ = begin_held(mut u, settled, Attested(image_two()), take release_all)
+    let _ = decide_with(mut u, held_d, clone(shown), take release_all, true)
     let mut events: List[launcher.Event] = list.new()
     list.push(mut events, Admitted(u.a, image_two(), summary_of(1u64, 1u64, launcher.no_grants()), ""))
     feed(mut u, take events)
@@ -112,11 +131,11 @@ fn unsettled_deploy(c: Clock, rnd: Random) waits {
     old_says(mut u, old, PlaceExported(1u64, "export-2"))
     helper_answers(mut u, helper_child(old, PrepareMode(a, "export-2", list.new())), trigger_answer())
     let fates = prepare_fates(u)
-    expect(list.len(fates) == 2u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000", "L54: the prepare children did not get each Begin's held fates")
+    expect(list.len(fates) == 2u64 && std.hex.encode(fates[0u64]) == "0000000000000000" && std.hex.encode(fates[1u64]) == "010000000000000000000000", "L54: the repeated prepare did not get the decision's fates")
     let cut = apply(mut u, Got(Placed(clone(old), PlaceImported(image_two()))))
     pump(mut u, take cut)
     answer(mut u, old, PlaceInstalled(2u64, true))
-    expect(is_installed(status_of(mut u, settled)), "L54: the deploy with a fate for its held run was not Installed")
+    expect(is_installed(status_of(mut u, held_d)), "L54: the decided deploy was not Installed")
     unplug(mut u)
 }
 
@@ -264,7 +283,7 @@ fn source_refusals(c: Clock, rnd: Random) waits {
     source_admitted(mut r, grants_of("Clock", ""))
     expect(awaits(status_of(mut r, granted), "Clock", "") && asked_of(r, 4u64) == 0u64 && old_serves(r), "L54: the grant widening neither held before assembly nor left OLD serving")
     let _ = decide_on(mut r, granted, grants_of("Clock", ""), false)
-    expect(phase_failed(status_of(mut r, granted), DeniedClass, "a person refused the grant diff") && old_serves(r), "L54: refused grant diff did not end against OLD")
+    expect(phase_failed(status_of(mut r, granted), DeniedClass, "the operator refused the decision") && old_serves(r), "L54: refused grant diff did not end against OLD")
     let ill_typed = request_id(53u64)
     let _ = begin_with(mut r, ill_typed, release_source("", 2u8))
     let mut events: List[launcher.Event] = list.new()

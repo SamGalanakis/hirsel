@@ -1,10 +1,16 @@
-//! The operator client's part of the deploy preview (launch.md "Deploy preview"): a
-//! person's decision on a request's grant diff and held runs, and the preview's JSON.
+//! The operator client's part of the deploy preview (launch.md "Deploy preview"): the
+//! operator's decision on a held request (`hirsel decide`), and the preview's JSON.
 
-use super::{Approvals, Error, Exchange, class_name, hex, one, state_json, unexpected};
+use super::{
+    Approvals, Error, Exchange, class_name, hex, one, or_unavailable, sort_grants, state_json,
+    unexpected, unhex,
+};
+use crate::cli::{Invocation, OptionId as Opt};
 use crate::launcher::session::Grants;
-use crate::operator::{Answer, Ask, EntryChange, Fates, HeldBy, HeldFate, Phase, Preview};
-use std::path::Path;
+use crate::operator::{
+    Answer, Ask, Decision, DecisionStage, EntryChange, Fates, HeldBy, HeldFate, Phase, Preview,
+};
+use std::path::PathBuf;
 
 /// One `--held` or `--held-entry` value into the deploy's fates (launch.md "The operator
 /// socket"): entries stay sorted by path, and a path never holds '=', so the fate follows
@@ -54,40 +60,114 @@ pub(super) fn approve_grant(diff: &mut Grants, value: &str) -> Result<(), Error>
     Ok(())
 }
 
-/// A person's decision on request d, which awaits one (launch.md "Deploy preview"): a
-/// refusal names the diff the host shows; an approval names its lines and follows the
-/// repeated admission to its outcome.
-pub(super) fn decide(
-    state: &Path,
-    d: Vec<u8>,
-    decision: Grants,
-    refuse: bool,
-) -> Result<i32, Error> {
+/// `hirsel decide --state S --request-id HEX [--approve-grant +LINE|-LINE ...]
+/// [--held release|cancel] [--held-entry PATH=release|cancel ...] [--refuse]`: the
+/// operator's decision on a request that awaits one (launch.md "Self-editing" "Holds and
+/// decisions"). The client reads the decision the host shows; an approval must name each
+/// line of its grant diff, and give fates exactly when it shows a held group or an unmatched
+/// path. The Decide carries the shown decision back, so a host that moved on refuses it; an
+/// approval follows the repeated admission to its outcome.
+pub(crate) fn decide(invocation: Invocation) -> Result<i32, Error> {
+    or_unavailable("decide", decide_on(invocation))
+}
+
+fn decide_on(invocation: Invocation) -> Result<i32, Error> {
+    let (mut state, mut d) = (None, None);
+    let mut approved = Grants::default();
+    let mut refuse = false;
+    let mut fates = Fates::default();
+    let mut fated = false;
+    for (option, value) in invocation.options {
+        let text = value.unwrap_or_default();
+        match option {
+            Opt::HostState => state = Some(PathBuf::from(text)),
+            Opt::RequestId => d = Some(text),
+            Opt::ApproveGrant => approve_grant(&mut approved, &text)?,
+            Opt::Refuse => refuse = true,
+            Opt::HeldAll | Opt::HeldEntry => {
+                held_fate(&mut fates, option == Opt::HeldAll, &text)?;
+                fated = true;
+            }
+            _ => return Err("unexpected decide option".into()),
+        }
+    }
+    if invocation.positional.is_some() || !invocation.arguments.is_empty() {
+        return Err("decide takes no recipe and no program arguments".into());
+    }
+    let state = state.ok_or("decide requires --state DIR")?;
+    let d = unhex(&d.ok_or("decide requires --request-id HEX")?)
+        .filter(|d| d.len() == 16)
+        .ok_or("--request-id takes 32 hex digits")?;
+    sort_grants(&mut approved);
+    if refuse && (fated || approved != Grants::default()) {
+        return Err("--refuse takes no --approve-grant, --held or --held-entry".into());
+    }
+    let held = match one(&state, &Ask::Status(d.clone()))? {
+        Some(Answer::State(_, _, _, Phase::AwaitDecision(held))) => held,
+        Some(Answer::State(d, group, _, phase)) => {
+            eprintln!("decide: the request awaits no decision");
+            println!("{}", state_json(&d, &group, &phase));
+            return Ok(1);
+        }
+        Some(Answer::Error(class, detail)) => {
+            eprintln!("decide: {}: {detail}", class_name(class));
+            return Ok(1);
+        }
+        other => return Ok(unexpected("decide", &d, other)),
+    };
     let none = Approvals {
         foreign: Vec::new(),
         exec: Vec::new(),
     };
     if refuse {
-        let diff = match one(state, &Ask::Status(d.clone()))? {
-            Some(Answer::State(_, _, _, Phase::AwaitDecision(diff))) => diff,
-            Some(Answer::State(d, group, _, phase)) => {
-                eprintln!("deploy: the request awaits no decision");
-                println!("{}", state_json(&d, &group, &phase));
-                return Ok(1);
-            }
-            Some(Answer::Error(class, detail)) => {
-                eprintln!("deploy: {}: {detail}", class_name(class));
-                return Ok(1);
-            }
-            other => return Ok(unexpected("deploy", &d, other)),
-        };
-        let ask = Ask::Decide(d.clone(), diff, false);
-        return Exchange::new(state, d, "deploy", None, none).run(ask);
+        let ask = Ask::Decide(d.clone(), held, Fates::default(), false);
+        return Exchange::new(&state, d, "decide", None, none).run(ask);
     }
-    let ask = Ask::Decide(d.clone(), decision.clone(), true);
-    let mut exchange = Exchange::new(state, d, "deploy", None, none);
-    exchange.decision = Some(decision);
-    exchange.run(ask)
+    let refusal = if approved != held.grants {
+        Some("the --approve-grant lines are not the grant diff the request awaits")
+    } else if held.shows_held() && !fated {
+        Some("the decision shows held runs; give their fates with --held or --held-entry")
+    } else if !held.shows_held() && fated {
+        Some("the decision shows no held run, so it takes no --held or --held-entry")
+    } else {
+        None
+    };
+    if let Some(why) = refusal {
+        eprintln!("decide: refused: {why}");
+        println!("{}", decision_json(&held));
+        return Ok(2);
+    }
+    let ask = Ask::Decide(d.clone(), held, fates, true);
+    Exchange::new(&state, d, "decide", None, none).run(ask)
+}
+
+/// The decision a held request awaits, as `hirsel decide` and State print it.
+pub(super) fn decision_json(decision: &Decision) -> serde_json::Value {
+    let stage = match decision.stage {
+        DecisionStage::Admission => "admission",
+        DecisionStage::Prepared => "prepared",
+    };
+    let migration = decision
+        .migration
+        .as_ref()
+        .map(|m| serde_json::json!({"digest": hex(&m.digest), "changes": m.changes}));
+    let approvals = decision.approvals.as_ref().map(|a| {
+        serde_json::json!({"recipe": hex(&a.r), "foreign": a.foreign, "exec": a.exec, "text": a.text})
+    });
+    let triggers = preview_json(&Preview {
+        triggers: decision.triggers.clone(),
+        ..Preview::default()
+    })["triggers"]
+        .clone();
+    serde_json::json!({
+        "tree": hex(&decision.tree),
+        "root": hex(&decision.root),
+        "stage": stage,
+        "grants": grants_json(&decision.grants),
+        "approvals": approvals,
+        "migration": migration,
+        "triggers": triggers,
+    })
 }
 
 pub(super) fn grants_json(grants: &Grants) -> serde_json::Value {

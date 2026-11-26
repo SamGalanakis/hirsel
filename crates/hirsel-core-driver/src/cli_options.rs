@@ -103,7 +103,7 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         HostState,
         ["--state"],
         Some("DIR"),
-        ["host", "register", "deploy", "replay", "launcher"],
+        ["host", "register", "deploy", "decide", "replay", "launcher"],
         "Private host state directory; the operator socket is STATE/operator.sock."
     ),
     option!(
@@ -173,28 +173,28 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         ApproveGrant,
         ["--approve-grant"],
         Some("+LINE|-LINE"),
-        ["deploy"],
+        ["deploy", "decide"],
         "Approve one line of the grant diff a request awaits a decision on: +LINE for an authority the release gains, -LINE for one it loses."
     ),
     option!(
-        RefuseGrants,
-        ["--refuse-grants"],
+        Refuse,
+        ["--refuse"],
         None,
-        ["deploy"],
-        "Refuse the grant diff the request named by --request-id awaits a decision on."
+        ["decide"],
+        "Refuse the decision the request awaits; the request fails Denied."
     ),
     option!(
         HeldAll,
         ["--held"],
         Some("release|cancel"),
-        ["deploy"],
+        ["deploy", "decide"],
         "The fate of every run the deploy holds that no --held-entry names."
     ),
     option!(
         HeldEntry,
         ["--held-entry"],
         Some("PATH=release|cancel"),
-        ["deploy"],
+        ["deploy", "decide"],
         "The fate of the held runs of one entry path, as the trigger report prints it. Repeat for more paths."
     ),
     option!(
@@ -327,8 +327,8 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         RequestId,
         ["--request-id"],
         Some("HEX"),
-        ["register", "deploy"],
-        "Resend this request instead of starting a new one."
+        ["register", "deploy", "decide"],
+        "Resend this request instead of starting a new one; for decide, the request to decide."
     ),
     option!(
         RequestStatus,

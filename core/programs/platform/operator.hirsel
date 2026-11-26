@@ -47,7 +47,7 @@ pub type Registration: codec + send {
 }
 
 // One operator request. Tags: 0 Begin, 1 Data, 2 EndInput, 3 Confirm, 4 Status,
-// 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide.
+// 5 ResolvePin, 6 LookupGroup, 7 Register, 8 Decide (operator.sock only).
 pub type Ask: codec + send =
 // Begin(D, group, input, foreign, exec, held): deploy `input` to the group's current
 // incarnation, approving exactly these sorted Foreign and Exec lines, with `held` the fate of
@@ -69,9 +69,11 @@ BeginAsk(Bytes, launcher.Group, launcher.Input, List[String], List[String], runn
 // `input` as its first release, approving exactly these sorted Foreign and Exec lines. Its
 // upload and confirmation are a Begin's; it ends Installed at activation 0, its genesis.
     | RegisterAsk(Bytes, Registration, launcher.Input, List[String], List[String])
-// Decide(D, grants, approve): a person's decision on request D, which awaits one for exactly
-// this grant diff. An approval repeats D's admission under it; a refusal fails D.
-    | DecideAsk(Bytes, launcher.Grants, bool)
+// Decide(D, decision, fates, approve): the operator's decision on request D, which awaits
+// one on exactly `decision` (launch.md "Self-editing"). When the decision shows a held group
+// or an unmatched path, `fates` replaces D's fates; otherwise it is `fate.none()`. An
+// approval repeats D's admission under the approved set; a refusal fails D Denied.
+    | DecideAsk(Bytes, Decision, runner.fate.Fates, bool)
 
 // What a pin lookup finds: the assembly a recording ran, or Gone for an absent, expired
 // or removed pin. A store error is an error, never Gone.
@@ -118,15 +120,68 @@ pub type Report: codec + send {
 
 // The error and failure classes. Tags 0 Protocol, 1 Denied, 2 UnknownRequest,
 // 3 UnknownGroup, 4 Conflict, 5 Busy, 6 Full, 7 Invalid, 8 Unassembled, 9 Store,
-// 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Unsettled.
-pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UncompiledClass | NotInstalledClass | ExhaustedClass | UnsettledClass
+// 10 Uncompiled, 11 NotInstalledAfterRecovery, 12 Exhausted, 13 Red (a gated source whose
+// tests were not all green).
+pub type Class: codec + send = ProtocolClass | DeniedClass | UnknownRequestClass | UnknownGroupClass | ConflictClass | BusyClass | FullClass | InvalidClass | UnassembledClass | StoreClass | UncompiledClass | NotInstalledClass | ExhaustedClass | RedClass
+
+// Which facts a decision has computed: the admission facts only (grants, approvals), or
+// every fact after prepare.
+pub type DecisionStage: codec + send = AdmissionStage | PreparedStage
+
+// R's Foreign and Exec lines and the exact display text, held only for an editor's request.
+pub type Approvals: codec + send {
+    r: Bytes,
+    foreign: List[String],
+    exec: List[String],
+    text: String
+}
+
+// The migration PREPARED ships: `digest` is the SHA-256 of its 0x0082 payloads in order and
+// the 0x0083 inventory's sorted (id, kind) list; `changes` names each collection it touches.
+pub type Migration: codec + send {
+    digest: Bytes,
+    changes: List[String]
+}
+
+// What a held request awaits the operator's decision on (launch.md "Self-editing"): the
+// source tree's digest and H (empty for an attested or publication input), the stage, and
+// each fact, where an empty part is clear.
+pub type Decision: codec + send {
+    tree: Bytes,
+    root: Bytes,
+    stage: DecisionStage,
+    grants: launcher.Grants,
+    approvals: Option[Approvals],
+    migration: Option[Migration],
+    triggers: runner.TriggerReport
+}
+
+pub fn decision_bytes(d: Decision) -> Bytes {
+    let codec: std.codec.Codec[Decision] = std.codec.of()
+    let mut out: Bytes = list.new()
+    let _ = std.codec.encode(codec, d, mut out)
+    out
+}
+
+// Whether a decision shows a held group or an unmatched path, which its Decide must fate.
+pub fn shows_held(d: Decision) -> bool {
+    if list.len(d.triggers.unmatched) > 0u64 {
+        return true
+    }
+    for row in d.triggers.rows {
+        if let Held = row.class {
+            return true
+        }
+    }
+    false
+}
 
 // Where a request stands. Tags 0 AwaitInput(A), 1 Admitting(A), 2 AwaitConfirm(A),
 // 3 Assembling(A), 4 Preparing(A), 5 Pending(A, v), 6 Undecided(A, v, reason),
-// 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(grants).
-// Installed and Failed are terminal. AwaitDecision holds no attempt: the request waits for a
-// person's Decide on exactly that grant diff.
-pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(launcher.Grants)
+// 7 Installed(v, assembly, report), 8 Failed(class, detail, report), 9 AwaitDecision(decision).
+// Installed and Failed are terminal. AwaitDecision holds no attempt: the request waits for
+// the operator's Decide on exactly that decision.
+pub type Phase: codec + send = AwaitInput(launcher.Attempt) | AdmittingPhase(launcher.Attempt) | AwaitConfirm(launcher.Attempt) | AssemblingPhase(launcher.Attempt) | PreparingPhase(launcher.Attempt) | PendingPhase(launcher.Attempt, u64) | UndecidedPhase(launcher.Attempt, u64, String) | InstalledPhase(u64, Bytes, Report) | FailedPhase(Class, String, Report) | AwaitDecision(Decision)
 
 // One host reply. Tags: 0 State, 1 Need, 2 Display, 3 Pin, 4 Error, 5 GroupInfo, 6 Part.
 pub type Answer: codec + send =

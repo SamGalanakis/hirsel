@@ -38,6 +38,7 @@ commands! {
     "launcher", "launcher --control SOCKET --state DIR [--operator-listen SOCKET --platform-host FILE --max-places N --idle-ms MS]", "Hold the groups' listeners and start their children for the platform host.";
     "register", "register RECIPE --state DIR --group NAME --listen ADDR --store DIR --code-store DIR [options] [-- arguments...]", "Add a group to a running host and deploy its first release.";
     "deploy", "deploy RECIPE --state DIR --group NAME --code-store DIR [options] | deploy --state DIR --status HEX", "Deploy a recipe to a registered group, or report a request.";
+    "decide", "decide --state DIR --request-id HEX [--approve-grant +LINE|-LINE ...] [--held release|cancel] [--held-entry PATH=release|cancel ...] [--refuse]", "Approve or refuse the decision a held request awaits.";
     "dev", "dev SERVER [--listen ADDR] [options] [-- arguments...]", "Rebuild a local place and restore its open subscriptions.";
     "dry-run", "dry-run --exe NEW --store DIR [-- arguments...]", "Preview a candidate’s migration against a store.";
     "store", "store <inspect|stats|verify|repair|backup|restore>", "Inspect, verify, repair, back up or restore a store.";

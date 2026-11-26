@@ -122,7 +122,7 @@ pub enum OptionId {
     FrontHttp,
     FrontStream,
     ApproveGrant,
-    RefuseGrants,
+    Refuse,
     HeldAll,
     HeldEntry,
     HostMemory,

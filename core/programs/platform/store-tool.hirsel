@@ -5,7 +5,7 @@
 //
 // argv: `backup` (fd 3 the store, fd 4 the empty target) or `restore` (fd 3 the backup,
 // fd 4 the empty new store directory). It prints `backup <store id> head <H>` or
-// `restored <store id> head <H>`. Exit 0 done, 1 refused (its name on stderr), 2 usage,
+// `restored <store id> head <H>`. Exit 0 done, 1 refused (details on stderr), 2 usage,
 // 75 the store is held by a writer.
 //
 // `inspect` and `stats` (§15.6) read fd 3 through a read-only open, beside a live
@@ -21,6 +21,30 @@ fn id_hex(hi: u64, lo: u64) -> String {
     std.hex.encode(raw)
 }
 
+fn push_capacity_case(mut line: String, name: String, capacity: Capacity) {
+    string.push(mut line, name)
+    string.push(mut line, "(requested: ")
+    string.push_u64(mut line, capacity.requested)
+    string.push(mut line, ", available: ")
+    string.push_u64(mut line, capacity.available)
+    string.push(mut line, ")")
+}
+
+fn full_refusal(cause: store.StoreCapacity) -> String {
+    let mut line = string.from("Full(")
+    match cause {
+        Journal(c) => push_capacity_case(mut line, "Journal", c),
+        Resident(c) => push_capacity_case(mut line, "Resident", c),
+        Allocation(c) => push_capacity_case(mut line, "Allocation", c),
+        Cache(c) => push_capacity_case(mut line, "Cache", c),
+        Slots(c) => push_capacity_case(mut line, "Slots", c),
+        Pins(c) => push_capacity_case(mut line, "Pins", c),
+        Register(c) => push_capacity_case(mut line, "Register", c),
+    }
+    string.push(mut line, ")")
+    take line
+}
+
 fn store_refusal(e: store.Error) -> String {
     match e {
         Held => "Held",
@@ -28,7 +52,7 @@ fn store_refusal(e: store.Error) -> String {
         Corrupt(_) => "Corrupt",
         Unsupported(_) => "Unsupported",
         Io(_) => "Io",
-        Full(_) => "Full",
+        Full(cause) => full_refusal(cause),
         Exists(_) => "Exists",
         ExportDirectory => "ExportDirectory",
         Tiered(_) => "Tiered",

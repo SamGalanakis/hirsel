@@ -7646,7 +7646,13 @@ These commands sit beside the `inspect`, `stats` and `verify` commands that row 
 | `hirsel store restore BACKUP DIR` | Creates `DIR` if it is absent. `DIR` must be empty. Restores (§15.3) and prints `restored <store id> head <H>` |
 
 - **Served stores.** `backup` opens the store as its writer. If another process holds `LOCK`, the command exits 75 and changes nothing: "the store is held by a writer". Backing up a store that a place serves goes through the place's head, which already holds the `Db`, and the consistency of §15.2 is the library's. The operator route is `hirsel store backup --state S --group G TARGET`<!-- doc-ref: planned -->: the host asks the place's head for a backup lease over the control socket, as a deploy asks for an export (`HostExport`), copies the image to `TARGET` and releases the lease. It is specified here and **not built**.
-- **Exit status.** 0: done. 1: refused, with the refusal's name on stderr: `AttemptBusy`, `ExportMismatch`, `Exists`, `Corrupt`, `Full`, `Tiered`, or an I/O error. 2: usage. 75: the store is held.
+- **Exit status.** 0: done. 1: refused, with the refusal's name on stderr after `hirsel store: refused: `.
+  Names include `AttemptBusy`, `ExportMismatch`, `Exists`, `Corrupt`, `Full`, `Tiered`, and `Io`.
+  A `Full` refusal includes its `StoreCapacity` variant and both figures, as in
+  `hirsel store: refused: Full(Resident(requested: R, available: A))`. `Journal`,
+  `Allocation`, `Cache`, `Slots`, `Pins` and `Register` print the same field names.
+  The tool returns `Exit(1)` for these refusals, including `Allocation`, so the run
+  omits the generic `--limit` advice. 2: usage. 75: the store is held.
 - **Memory.** The tool opens the store with the resident limit compiled into it, `store.sized(Directory, 2 GiB)`, inside a 1 GiB process limit as the platform executables have. A larger store is refused `Full`.
 
 ### 15.5 Law L89 `backup_restore`

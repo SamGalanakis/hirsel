@@ -1262,10 +1262,13 @@ A report is (fetchNs, assembleNs, pause, preview): two `Option[u64]`, a pause (0
 preview ("Deploy preview"), whose parts not yet computed when the deploy ended are empty.
 
 **Durable identity.** The catalog keeps one `requests` row per D: its canonical Begin bytes,
-G, input, current attempt, admission deadline and, once decided, its terminal phase, and one
-`active` row per group naming the request that holds it. The first transaction for a new D
-binds it to its Begin bytes and allocates A from a durable counter before any launcher
-request. A Begin whose D is known is looked up before any wake or admission. Different bytes
+G, input, current attempt, admission deadline and status. The status starts `Open`, becomes
+`Held(Decision)` while awaiting a decision, and returns to `Open` when approval repeats
+admission. Finishing the request replaces its status with `Done(Phase)`, which keeps only
+the terminal phase. The catalog also keeps one `active` row per group naming its active
+request. The first transaction for a new D binds it to its Begin bytes and allocates A
+from a durable counter before any launcher request. A Begin whose D is known is looked up
+before any wake or admission. Different bytes
 for that D are `Error(Conflict)`. Identical bytes return the request's current state and may
 attach to its work: while another connection owns it, this one gets the snapshot and closes.
 Each terminal deploy row and its request's terminal phase are written in one transaction, so a

@@ -217,7 +217,7 @@ fn keep_blob(mut h: Host, d: Bytes, incarnation: u64, digest: Bytes, take blob: 
             let Some(r) = st(store.fetch(tx, call_env.3 .requests, call_env.0))? else {
                 return Error(Missing("request"))
             }
-            if let Some(_) = r.done {
+            if let Done(_) = r.status {
                 return Error(Missing("unfinished request"))
             }
             st(store.put(mut tx, call_env.3 .blobs, call_env.1, call_env.2))
@@ -343,9 +343,12 @@ fn sweep_group_blobs(mut tx: store.Tx, t: Tables, name: String, incarnation: u64
     }
     if let Some(other) = st(store.fetch(tx, t.active, name))? {
         if let Some(r) = st(store.fetch(tx, t.requests, other))? {
-            if is_none(r.done) && r.group.incarnation == incarnation {
-                if let SourceInput(b) = r.input {
-                    keep_named(mut kept, Some(clone(b)))
+            if r.group.incarnation == incarnation {
+                match r.status {
+                    Done(_) => (),
+                    _ => if let SourceInput(b) = r.input {
+                        keep_named(mut kept, Some(clone(b)))
+                    },
                 }
             }
         }

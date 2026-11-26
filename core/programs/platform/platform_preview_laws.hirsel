@@ -300,4 +300,13 @@ fn source_refusals(c: Clock, rnd: Random) waits {
     helper_answers(mut r, helper_child(old, DescribeMode(a)), describe_answer())
     helper_answers(mut r, helper_child(old, PreviewMode(a, list.new())), preview_answer(image_two(), release_two()))
     expect(phase_failed(status_of(mut r, missing), UncompiledClass, "candidate removes or changes a required release entry") && old_serves(r) && asked_of(r, 1u64) == 0u64, "L54: a missing release entry reached export")
+    let reopened = restart(take r, 4u64)
+    let refused_status = match request_row(reopened.h, granted) {
+        Ok(Some(saved)) => match saved.status {
+            Done(FailedPhase(DeniedClass, detail, _)) => detail == "the operator refused the decision",
+            _ => false,
+        },
+        _ => false,
+    }
+    expect(refused_status, "L54: the refused decision did not reopen as a terminal Denied request")
 }

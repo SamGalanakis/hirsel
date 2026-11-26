@@ -93,27 +93,24 @@ pub type DeployRow: codec + send {
     preview: operator.Preview,
 }
 
+pub type RequestStatus: codec + send = Open | Held(operator.Decision) | Done(operator.Phase)
+
 // An operator request's durable record (launch.md "The operator socket"), keyed by its
 // 16-byte request ID D and committed before any positive State or launcher request for it.
 // `begin` is the canonical bytes of its Begin: a Begin with the same D and other bytes is a
 // Conflict. `attempt` is the admission attempt last assigned to it, and `deadline_ms` the
-// wall time after which an admission still missing input fails. `done` is the terminal
-// phase, kept across later deploys, removal and name reuse. `held` is the decision the
-// request awaits from the operator (launch.md "Self-editing" "Holds and decisions"), and
-// `approved` the grant diff the operator approved, which its admissions run under. `fates`
-// are the fates an approved decision gave, which replace the Begin's, and `shown` the held
-// groups that decision showed: a repeated admission whose report holds any other group holds
-// again, so an approval never fates a run the operator did not see. `gate` is the green law
-// gate of a gated source's latest admission: its tree digest, H and toolchain (launch.md
-// "The law gate" step 5).
+// wall time after which missing input fails admission. The terminal phase outlives later
+// deploys, removal and name reuse. Admissions use the `approved` grant diff. Its `fates`
+// replace the Begin's, and `shown` lists the held groups the decision covered. An admission
+// whose report holds another group holds again. `gate` records the tree digest, H and
+// toolchain of the latest green admission (launch.md "The law gate" step 5).
 pub type RequestRow: codec + send {
     begin: Bytes,
     group: launcher.Group,
     input: operator.Input,
     attempt: launcher.Attempt,
     deadline_ms: u64,
-    done: Option[operator.Phase],
-    held: Option[operator.Decision],
+    status: RequestStatus,
     approved: launcher.Grants,
     fates: Option[runner.fate.Fates],
     shown: List[runner.TriggerScanRow],
@@ -2128,7 +2125,7 @@ fn finish_request(mut tx: store.Tx, t: Tables, name: String, d: Bytes, p: operat
     if let Some(found) = st(store.fetch(tx, t.requests, d))? {
         let mut r = found
         incarnation = Some(r.group.incarnation)
-        r.done = Some(clone(p))
+        r.status = Done(clone(p))
         st(store.put(mut tx, t.requests, d, r))?
     }
     if let Some(x) = st(store.fetch(tx, t.active, name))? {
@@ -2166,7 +2163,7 @@ fn fail_request(mut h: Host, d: Bytes, class: operator.Class, why: String) waits
             let Some(r) = st(store.fetch(tx, call_env.3 .requests, call_env.1))? else {
                 return Ok(None)
             }
-            if let Some(_) = r.done {
+            if let Done(_) = r.status {
                 return Ok(None)
             }
             finish_request(mut tx, call_env.3, r.group.name, call_env.1, FailedPhase(call_env.0, string.from(call_env.2), operator.no_report()))?
@@ -2210,14 +2207,13 @@ fn active_holds(mut h: Host, name: String, d: Bytes, now: Now) -> bool waits {
     let Ok(Some(r)) = request_row(h, other) else {
         return false
     }
-    if let Some(_) = r.done {
-        return false
-    }
-    // A request awaiting a decision holds no attempt and does not hold the group: a later
-    // deploy supersedes it.
-    if !is_none(r.held) {
-        fail_request(mut h, other, DeniedClass, "a later deploy superseded it while it awaited a decision")
-        return false
+    match r.status {
+        Done(_) => return false,
+        Held(_) => {
+            fail_request(mut h, other, DeniedClass, "a later deploy superseded it while it awaited a decision")
+            return false
+        },
+        Open => (),
     }
     if !is_none(admission_of(h, name, other)) || !is_none(deploy_of(h, name, other)) || !is_none(owner_of(h, other)) {
         return true
@@ -2290,7 +2286,7 @@ fn begin(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, g: launcher.Group,
                 }
             }
             let a = fresh_attempt(mut tx, call_env.5)?
-            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: clone(call_env.1), input: clone(call_env.2), attempt: a, deadline_ms: call_env.3 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants(), fates: None, shown: list.new(), gate: None)))?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: clone(call_env.1), input: clone(call_env.2), attempt: a, deadline_ms: call_env.3 .wall_ms + ADMISSION_MS, status: Open, approved: launcher.no_grants(), fates: None, shown: list.new(), gate: None)))?
             st(store.put(mut tx, call_env.5 .active, call_env.6, call_env.0))?
             Ok(a)
         })
@@ -2337,7 +2333,7 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
             return
         }
     }
-    if operator.terminal(p) {
+    if let Done(_) = r.status {
         say(mut h, conn, state_answer(d, r, p), true)
         return
     }
@@ -2345,7 +2341,10 @@ fn reattach(mut h: Host, conn: u64, d: Bytes, r: RequestRow, now: Now, mut out: 
     let _ = map.remove(mut h.shown, d)
     map.insert(mut h.owners, clone(d), conn)
     // A request awaiting a decision is shown its phase and waits for a Decide.
-    if !is_none(r.held) || !is_none(admission_of(h, name, d)) || !is_none(deploy_of(h, name, d)) {
+    if let Held(_) = r.status {
+        return
+    }
+    if !is_none(admission_of(h, name, d)) || !is_none(deploy_of(h, name, d)) {
         return
     }
     if now.wall_ms >= r.deadline_ms {
@@ -2802,7 +2801,7 @@ fn register(mut h: Host, conn: u64, ask: operator.Ask, d: Bytes, spec: operator.
             u.groups += 1u64
             st(store.put(mut tx, call_env.5 .usage, call_env.3 .tenant, u))?
             let a = fresh_attempt(mut tx, call_env.5)?
-            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3 .name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2 .wall_ms + ADMISSION_MS, done: None, held: None, approved: launcher.no_grants(), fates: None, shown: list.new(), gate: None)))?
+            st(store.put(mut tx, call_env.5 .requests, call_env.0, RequestRow(begin: clone(call_env.4), group: group_of(call_env.3 .name, g.incarnation), input: clone(call_env.1), attempt: a, deadline_ms: call_env.2 .wall_ms + ADMISSION_MS, status: Open, approved: launcher.no_grants(), fates: None, shown: list.new(), gate: None)))?
             st(store.put(mut tx, call_env.5 .active, call_env.3 .name, call_env.0))?
             Ok((g, a))
         })

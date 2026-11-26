@@ -39,10 +39,10 @@ fn hold(mut h: Host, d: Bytes, diff: launcher.Grants) waits {
                 return Ok(())
             }
             let mut row = found
-            if let Some(_) = row.done {
+            if let Done(_) = row.status {
                 return Ok(())
             }
-            row.held = Some(decision_of(row.input, row.gate, AdmissionStage, call_env.2, operator.no_triggers()))
+            row.status = Held(decision_of(row.input, row.gate, AdmissionStage, call_env.2, operator.no_triggers()))
             st(store.put(mut tx, call_env.1 .requests, call_env.0, row))?
             Ok(())
         })
@@ -60,10 +60,10 @@ fn hold_prepared(mut tx: store.Tx, t: Tables, d: Bytes, preview: operator.Previe
         return Ok(())
     }
     let mut row = found
-    if let Some(_) = row.done {
+    if let Done(_) = row.status {
         return Ok(())
     }
-    row.held = Some(decision_of(row.input, row.gate, PreparedStage, preview.grants, preview.triggers))
+    row.status = Held(decision_of(row.input, row.gate, PreparedStage, preview.grants, preview.triggers))
     st(store.put(mut tx, t.requests, d, row))
 }
 
@@ -118,9 +118,9 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: 
             return
         },
     }
-    let waiting = match r.held {
-        Some(x) => is_none(r.done) && operator.decision_bytes(x) == operator.decision_bytes(decision),
-        None => false,
+    let waiting = match r.status {
+        Held(x) => operator.decision_bytes(x) == operator.decision_bytes(decision),
+        _ => false,
     }
     if !waiting {
         refuse(mut h, conn, DeniedClass, "the request awaits no decision on exactly these facts")
@@ -183,7 +183,7 @@ fn decide(mut h: Host, conn: u64, d: Bytes, decision: operator.Decision, fates: 
             let a = fresh_attempt(mut tx, call_env.2)?
             row.attempt = a
             row.deadline_ms = call_env.1 .wall_ms + ADMISSION_MS
-            row.held = None
+            row.status = Open
             row.approved = clone(call_env.3)
             if let Some(f) = call_env.4 {
                 row.fates = Some(clone(f))
@@ -217,16 +217,16 @@ fn deploy_of(h: Host, name: String, d: Bytes) -> Option[DeployRow] waits {
     }
 }
 
-// Request d's phase as State reports it: its terminal phase, its unresolved deploy row,
-// its admission, or awaiting input under its last attempt.
+// Request d's phase as State reports it. An open request's phase comes from its live work.
 fn phase_of(h: Host, d: Bytes, r: RequestRow) -> operator.Phase waits {
-    if let Some(p) = r.done {
-        return clone(p)
+    match r.status {
+        Done(p) => clone(p),
+        Held(decision) => AwaitDecision(clone(decision)),
+        Open => open_phase(h, r.group.name, d, r.attempt),
     }
-    if let Some(decision) = r.held {
-        return AwaitDecision(clone(decision))
-    }
-    let name = string.from(r.group.name)
+}
+
+fn open_phase(h: Host, name: String, d: Bytes, attempt: launcher.Attempt) -> operator.Phase waits {
     if let Some(row) = deploy_of(h, name, d) {
         return match row.outcome {
             Pending => PendingPhase(row.attempt, row.activation),
@@ -246,7 +246,7 @@ fn phase_of(h: Host, d: Bytes, r: RequestRow) -> operator.Phase waits {
             },
         }
     }
-    AwaitInput(r.attempt)
+    AwaitInput(attempt)
 }
 
 // The entry diff (launch.md "Deploy preview"): every entry OLD or NEW exports, by code

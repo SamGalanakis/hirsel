@@ -79,7 +79,7 @@ fn record_gate(mut h: Host, d: Bytes, green: launcher.Green) waits {
                 return Ok(())
             }
             let mut row = found
-            if let Some(_) = row.done {
+            if let Done(_) = row.status {
                 return Ok(())
             }
             row.gate = Some(clone(call_env.2))

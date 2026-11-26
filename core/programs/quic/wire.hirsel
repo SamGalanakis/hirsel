@@ -11,7 +11,7 @@ type Cursor {
     end: u64
 }
 
-const MAX_VARINT: u64 = 0x3fffffffffffffff
+pub const MAX_VARINT: u64 = 0x3fffffffffffffff
 
 fn cursor(input: Bytes, at: u64, end: u64) -> Result[Cursor, CodecError] {
     if at > end || end > list.len(input) {
@@ -43,7 +43,8 @@ fn uint(input: Bytes, s: Span) -> u64 {
     n
 }
 
-fn width(n: u64) -> u64 {
+/// The minimal encoded width for a value in the RFC 9000 §16 range.
+pub fn varint_len(n: u64) -> u64 {
     if n < 64 {
         1
     } else if n < 16384 {
@@ -55,10 +56,15 @@ fn width(n: u64) -> u64 {
     }
 }
 
+/// The encoded width indicated by the first byte of an RFC 9000 §16 varint.
+pub fn varint_wire_len(first: u8) -> u64 {
+    let shift: u64 = int.widen(first >> 6)
+    1u64 << shift
+}
+
 fn varint(input: Bytes, mut c: Cursor) -> Result[u64, CodecError] {
     let first = octet(input, mut c)?
-    let shift: u64 = int.widen(first >> 6)
-    let size = 1u64 << shift
+    let size = varint_wire_len(first)
     let tail = take_span(mut c, size - 1)?
     let high: u64 = int.widen(first & 0x3f)
     Ok((high << (8 * tail.len)) | uint(input, tail))
@@ -90,15 +96,28 @@ pub fn write_varint(n: u64, mut out: Bytes) -> Result[(), CodecError] {
     if n > MAX_VARINT {
         return Error(VarintOverflow)
     }
-    let size = width(n)
+    let size = varint_len(n)
     reserve(mut out, size)?
-    match size {
-        1 => put_uint(mut out, n, 1),
-        2 => put_uint(mut out, n | 0x4000, 2),
-        4 => put_uint(mut out, n | 0x80000000, 4),
-        _ => put_uint(mut out, n | 0xc000000000000000, 8),
-    }
+    put_varint(mut out, n, size)
     Ok(())
+}
+
+/// Append a minimal varint, raising on overflow or allocation failure.
+pub fn append_varint(n: u64, mut out: Bytes) {
+    if n > MAX_VARINT {
+        fail("varint above 2^62 - 1")
+    }
+    put_varint(mut out, n, varint_len(n))
+}
+
+fn put_varint(mut out: Bytes, n: u64, size: u64) {
+    let tagged = match size {
+        1 => n,
+        2 => n | 0x4000,
+        4 => n | 0x80000000,
+        _ => n | 0xc000000000000000,
+    }
+    put_uint(mut out, tagged, size)
 }
 
 /// RFC 9000 Appendix A.3. Only authenticated receive history in this packet number space

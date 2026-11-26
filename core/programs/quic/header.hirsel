@@ -233,11 +233,11 @@ pub fn write_long_header(kind: PacketKind, destination: Bytes, source: Bytes, to
         return Error(VarintOverflow)
     }
     let token_field = if kind == Initial {
-        width(token_len) + token_len
+        varint_len(token_len) + token_len
     } else {
         0
     }
-    reserve(mut out, 7 + list.len(destination) + list.len(source) + token_field + width(payload_len + len) + len)?
+    reserve(mut out, 7 + list.len(destination) + list.len(source) + token_field + varint_len(payload_len + len) + len)?
     write_long(bits | (n.size - 1), 1, destination, source, mut out)
     if kind == Initial {
         write_varint(token_len, mut out)?

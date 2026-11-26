@@ -15,8 +15,7 @@ fn pull_varint(mut e: quic.Endpoint, c: quic.ConnectionHandle, id: quic.StreamId
         let need = if have == 0 {
             1u64
         } else {
-            let lead: u64 = int.widen(buf[0])
-            1u64 << (lead >> 6)
+            quic.codec.varint_wire_len(buf[0])
         }
         if have > 0 && have == need {
             let mut at = 0u64

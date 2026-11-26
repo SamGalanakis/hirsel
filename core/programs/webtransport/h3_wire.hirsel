@@ -123,7 +123,7 @@ pub const WT_APPLICATION_FIRST: u64 = 0x52e4a40fa8db
 
 pub const WT_APPLICATION_LAST: u64 = 0x52e5ac983162
 
-pub const MAX_VARINT: u64 = 0x3fffffffffffffff
+pub const MAX_VARINT: u64 = quic.codec.MAX_VARINT
 
 /// draft-17 §4.4 Figure 4: a 32-bit application code to its HTTP/3 code, skipping the
 /// reserved 0x1f * N + 0x21 values.
@@ -146,58 +146,21 @@ pub fn is_grease(n: u64) -> bool {
     n >= 0x21 && (n - 0x21) % 0x1f == 0
 }
 
-fn width(n: u64) -> u64 {
-    if n < 64 {
-        1
-    } else if n < 16384 {
-        2
-    } else if n < 1073741824 {
-        4
-    } else {
-        8
-    }
-}
-
-/// RFC 9000 §16 varint at input[at..end). Ok(None) when the input ends inside it.
+/// RFC 9000 §16 varint at input[at..end). None if the range is invalid or incomplete.
 pub fn read_varint(input: Bytes, mut at: u64, end: u64) -> Option[u64] {
-    if at >= end {
-        return None
+    match quic.codec.read_varint(input, mut at, end) {
+        Ok(n) => Some(n),
+        Error(_) => None,
     }
-    let first: u64 = int.widen(input[at])
-    let size = 1u64 << (first >> 6)
-    if size > end - at {
-        return None
-    }
-    let mut n = first & 0x3f
-    for i in at + 1 .. at + size {
-        let b: u64 = int.widen(input[i])
-        n = (n << 8) | b
-    }
-    at += size
-    Some(n)
 }
 
 /// RFC 9000 §16, minimal width. n must be below 2^62.
 pub fn write_varint(n: u64, mut out: Bytes) {
-    if n > MAX_VARINT {
-        fail("varint above 2^62 - 1")
-    }
-    let size = width(n)
-    let tagged = match size {
-        1 => n,
-        2 => n | 0x4000,
-        4 => n | 0x80000000,
-        _ => n | 0xc000000000000000,
-    }
-    let mut i = size
-    while i > 0 {
-        i -= 1
-        list.push(mut out, int.narrow((tagged >> (8 * i)) & 0xff))
-    }
+    quic.codec.append_varint(n, mut out)
 }
 
 pub fn varint_len(n: u64) -> u64 {
-    width(n)
+    quic.codec.varint_len(n)
 }
 
 /// A frame or capsule header: its type, payload length and the header's own length.
@@ -268,7 +231,7 @@ pub fn setting(s: Settings, id: u64) -> Option[u64] {
 pub fn write_settings(pairs: List[(u64, u64)], mut out: Bytes) {
     let mut len = 0u64
     for (k, v) in pairs {
-        len += width(k) + width(v)
+        len += varint_len(k) + varint_len(v)
     }
     write_head(FRAME_SETTINGS, len, mut out)
     for (k, v) in pairs {

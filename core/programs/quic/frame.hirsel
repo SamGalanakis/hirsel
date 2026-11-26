@@ -90,7 +90,7 @@ pub fn next_frame_into(input: Bytes, mut reader: FrameReader, mut ack_ranges: Li
         Error(_) => return Error(FrameEncodingError(0)),
     }
     let allowed = frame_permissions(t)
-    if c.at - start != width(t) || allowed == 0 {
+    if c.at - start != varint_len(t) || allowed == 0 {
         return Error(FrameEncodingError(t))
     }
     if (allowed & packet_permission(reader.kind)) == 0 {

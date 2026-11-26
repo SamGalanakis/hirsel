@@ -205,7 +205,7 @@ fn ack_encoded_len(delay: u64, ranges: List[AckRange], ecn: Option[EcnCounts]) -
     if first.largest > MAX_VARINT || delay > MAX_VARINT || count - 1 > MAX_VARINT || first.largest - first.smallest > MAX_VARINT {
         return Error(VarintOverflow)
     }
-    let mut total = 1 + width(first.largest) + width(delay) + width(count - 1) + width(first.largest - first.smallest)
+    let mut total = 1 + varint_len(first.largest) + varint_len(delay) + varint_len(count - 1) + varint_len(first.largest - first.smallest)
     let mut previous = first.smallest
     for i in 1u64 .. count {
         let r = ranges[i]
@@ -217,14 +217,14 @@ fn ack_encoded_len(delay: u64, ranges: List[AckRange], ecn: Option[EcnCounts]) -
         if gap > MAX_VARINT || span > MAX_VARINT {
             return Error(VarintOverflow)
         }
-        total += width(gap) + width(span)
+        total += varint_len(gap) + varint_len(span)
         previous = r.smallest
     }
     if let Some(e) = ecn {
         if e.ect0 > MAX_VARINT || e.ect1 > MAX_VARINT || e.ce > MAX_VARINT {
             return Error(VarintOverflow)
         }
-        total += width(e.ect0) + width(e.ect1) + width(e.ce)
+        total += varint_len(e.ect0) + varint_len(e.ect1) + varint_len(e.ce)
     }
     Ok(total)
 }

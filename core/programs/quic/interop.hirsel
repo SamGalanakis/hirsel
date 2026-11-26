@@ -225,6 +225,7 @@ fn report(e: quic.Endpoint, event: quic.Event, out: Stdout) -> bool waits {
                     say_numbers(out, "closed application", numbers)
                 },
                 Idle => say(out, "closed idle", b""),
+                Reset => say(out, "closed reset", b""),
                 Refused(r) => say_text(out, "closed refused", refusal_name(r)),
             }
             true

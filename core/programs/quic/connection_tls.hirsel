@@ -31,6 +31,9 @@ fn accept_tls(mut c: Connection, random: Random, mtu: u16, ids: handshake.PeerCo
     }
     let mut p = parameters(c.transport, clone(c.local_id), mtu)
     p.original_destination = Some(clone(c.original_id))
+    if list.len(c.reset) == 16 {
+        p.stateless_reset_token = Some(clone(c.reset))
+    }
     let config = handshake.ServerConfig(protocols: protocols(c.transport), suites: suites(), identity: take identity, client_pins: clone(c.transport.client_pins), parameters: take p)
     let (initial_state, flight) = handshake.accept_client(random, config, ids, wire)?
     let mut h = take initial_state
@@ -70,6 +73,7 @@ fn advance_tls(mut c: Connection, now: u64, random: Random, mtu: u16, level: pac
                 return Error(LocalFailure)
             }
             recovery.set_max_ack_delay(mut c.recovery, now, int.saturating_mul(params.max_ack_delay_ms, 1000000))
+            c.peer_reset = clone(params.stateless_reset_token)
             let server = match c.side {
                 Server => true,
                 Client => false,

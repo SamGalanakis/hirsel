@@ -48,7 +48,7 @@ pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) |
 
 pub type Event = Connected(c: ConnectionHandle, alpn: String) | Opened(ConnectionHandle, StreamId) | Readable(ConnectionHandle, StreamId) | Writable(ConnectionHandle, StreamId) | Acked(ConnectionHandle, StreamId) | Reset(c: ConnectionHandle, s: StreamId, code: u64, final_size: u64) | Stopped(ConnectionHandle, StreamId, u64) | Closed(ConnectionHandle, CloseReason)
 
-pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Refused(Refusal)
+pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Reset | Refused(Refusal)
 
 pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
 
@@ -150,7 +150,12 @@ pub opaque type Connection {
     idle_rearmed: bool,
     recovery: recovery.Recovery,
     wake: Option[u64],
-    streams: Streams
+    streams: Streams,
+    reset: Bytes,
+    peer_reset: Option[Bytes],
+    validated: bool,
+    path_received: u64,
+    path_sent: u64
 }
 
 fn parameters(t: TransportConfig, take local_id: Bytes, mtu: u16) -> handshake.TransportParameters {
@@ -194,9 +199,25 @@ fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, tak
         Server => true,
         Client => false,
     }
-    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, original_id: take original_id, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None, streams: no_streams())
+    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, original_id: take original_id, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, done_acked: false, life: Open, deadline: None, idle_rearmed: false, recovery: recovery.new(algorithm, MSS, server), wake: None, streams: no_streams(), reset: b"", peer_reset: None, validated: !server, path_received: 0, path_sent: 0)
     refresh_idle(mut c, now)
     Ok(take c)
+}
+
+/// RFC 9000 §8.1: before the peer's address is validated, a server sends at most three
+/// times the bytes it received on the path, counted at `committed` with padding.
+fn amplification_room(c: Connection) -> u64 {
+    if c.validated {
+        return 0xffffffffffffffff
+    }
+    let allowed = int.saturating_mul(3, c.path_received)
+    allowed - order.min(allowed, c.path_sent)
+}
+
+/// RFC 9002 §6.2.2.1: a server that can send no full packet does not arm its PTO until
+/// more arrives from the client, so a blocked server neither probes nor backs off.
+fn amplification_blocked(c: Connection) -> bool {
+    amplification_room(c) < MSS
 }
 
 fn open_life(c: Connection) -> bool {
@@ -311,6 +332,9 @@ fn recovery_due(mut c: Connection, now: u64, mut events: List[Event]) {
         return
     }
     let Some(at) = recovery.timer(c.recovery) else {
+        return
+    }
+    if amplification_blocked(c) {
         return
     }
     if at > now {

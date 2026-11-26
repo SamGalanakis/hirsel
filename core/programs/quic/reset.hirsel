@@ -1,0 +1,139 @@
+/// RFC 9000 §10.3.2's recommended construction: the token of CID `id` is the first 16
+/// bytes of HMAC-SHA256(reset_key, id). Empty when the key refuses the MAC use.
+fn reset_token(key: Secret, id: Bytes) -> Bytes {
+    let mut out: Bytes = list.with_capacity(16)
+    if let Ok(mac) = secret.hmac_sha256(key, id) {
+        for i in 0u64 .. 16 {
+            list.push(mut out, mac[i])
+        }
+    }
+    take out
+}
+
+/// RFC 9000 §10.3.1: compare a token without leaking where it first differs.
+fn same_token(token: Bytes, tail: Bytes) -> bool {
+    if list.len(token) != 16 || list.len(tail) != 16 {
+        return false
+    }
+    let mut diff = 0u8
+    for i in 0u64 .. 16 {
+        diff = diff | (token[i] ^ tail[i])
+    }
+    diff == 0
+}
+
+/// Remember that the connection in `slot` holds a reset token from `peer`, so a reset
+/// is looked up by its source address and not by scanning every connection.
+fn note_reset_peer(mut e: Endpoint, peer: Addr, slot: u64) {
+    let mut slots: List[u64] = match map.remove(mut e.reset_peers, peer) {
+        Some(take l) => take l,
+        None => list.new(),
+    }
+    list.push(mut slots, slot)
+    map.insert(mut e.reset_peers, peer, take slots)
+}
+
+/// Drop the slots at `peer` whose connection is gone.
+fn forget_reset_peer(mut e: Endpoint, peer: Addr) {
+    let Some(take slots) = map.remove(mut e.reset_peers, peer) else {
+        return
+    }
+    let mut kept: List[u64] = list.with_capacity(list.len(slots))
+    for slot in slots {
+        if let Some(_) = e.connections[slot] {
+            list.push(mut kept, slot)
+        }
+    }
+    if list.len(kept) != 0 {
+        map.insert(mut e.reset_peers, peer, take kept)
+    }
+}
+
+/// The connection whose peer at `from` issued the token in the datagram's last 16
+/// bytes. Every candidate is compared, so the time taken does not say which matched.
+fn matching_reset(e: Endpoint, from: Addr) -> Option[u64] {
+    if list.len(e.tail) != 16 {
+        return None
+    }
+    let Some(slots) = map.get(e.reset_peers, from) else {
+        return None
+    }
+    let mut found: Option[u64] = None
+    for slot in slots {
+        if let Some(c) = e.connections[slot] {
+            if let Some(token) = c.peer_reset {
+                if same_token(token, e.tail) && c.peer == from {
+                    found = Some(slot)
+                }
+            }
+        }
+    }
+    found
+}
+
+/// RFC 9000 §10.3.1: a recognized reset ends the connection; it drains and sends nothing.
+fn reset_received(mut e: Endpoint, slot: u64, now: u64, mut events: List[Event]) {
+    if let Some(mut c) = e.connections[slot] {
+        if let Draining = c.life {
+            return
+        }
+        let was_open = open_life(c)
+        start_draining(mut c, now)
+        if was_open {
+            list.push(mut events, Closed(c.handle, Reset))
+        }
+    }
+}
+
+/// The length of the reset answering an `n`-byte trigger (RFC 9000 §10.3 and §10.3.3):
+/// `n − 1` up to 43 bytes, otherwise uniform in [43, n − 1], so always shorter.
+fn reset_length(r: Random, n: u64) -> u64 {
+    if n <= 43 {
+        return n - 1
+    }
+    let mut draw: Bytes = list.with_capacity(8)
+    host.random(r, mut draw)
+    let word: u64 = list.word_le(draw, 0)
+    43 + word % (n - 43)
+}
+
+/// A short-header datagram that matches no connection. A reset from a peer whose token
+/// we hold ends that connection. Otherwise answer with at most one short-header reset,
+/// and only when the trigger could have been a packet to one of our CIDs (§10.3).
+fn short_unroutable(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Bytes, mut events: List[Event]) {
+    if let Some(slot) = matching_reset(e, from) {
+        reset_received(mut e, slot, now, mut events)
+        return
+    }
+    let n = h.packet.len
+    if n <= 21u64 + int.widen(e.config.cid_len) || !can_queue_reply(e) {
+        dropped(mut e.drops, UnknownConnection)
+        return
+    }
+    let token = reset_token(e.config.reset_key, span(wire, h.destination))
+    if list.len(token) != 16 {
+        dropped(mut e.drops, UnknownConnection)
+        return
+    }
+    let len = reset_length(e.random, n)
+    let mut reply = random_id(e.random, len - 16)
+    // §10.3: the first two bits are 01 and the rest of the packet is unpredictable.
+    reply[0] = 0x40 | (reply[0] & 0x3f)
+    list.append(mut reply, token)
+    list.push(mut e.stateless, Stateless(peer: from, wire: take reply))
+}
+
+/// A packet routed to a connection that failed to open may be a reset carrying our
+/// CID (§10.3.1). Only that connection's token is compared.
+fn routed_reset(mut e: Endpoint, slot: u64, now: u64, from: Addr, mut events: List[Event]) -> bool {
+    let mut hit = false
+    if let Some(c) = e.connections[slot] {
+        if let Some(token) = c.peer_reset {
+            hit = c.peer == from && same_token(token, e.tail)
+        }
+    }
+    if hit {
+        reset_received(mut e, slot, now, mut events)
+    }
+    hit
+}

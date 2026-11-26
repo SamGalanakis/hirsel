@@ -300,15 +300,3 @@ pub fn priority(mut e: Endpoint, c: ConnectionHandle, s: StreamId, p: Priority) 
     }
     Error(UnknownConnection)
 }
-
-/// Hostile-peer test seam: raw frame bytes sent once, unchecked and never retransmitted,
-/// in the connection's next 1-RTT packet. Laws use it to act as a peer that breaks the
-/// rules (credit past MAX_DATA, a changed reset) or grants 2^62 of credit.
-pub fn send_frames(mut e: Endpoint, c: ConnectionHandle, frames: Bytes) -> Result[(), QuicError] {
-    let i = stream_slot(e, c)?
-    if let Some(mut conn) = e.connections[i] {
-        list.append(mut conn.streams.seam, frames)
-        return Ok(())
-    }
-    Error(UnknownConnection)
-}

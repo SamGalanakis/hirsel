@@ -1,0 +1,14 @@
+// Test-only seams. This file is listed under [tests.sources] and joins module quic in
+// the package's own test runs and in no other build (packages.md), so nothing here is
+// in the shipped API.
+/// Hostile-peer test seam: raw frame bytes sent once, unchecked and never retransmitted,
+/// in the connection's next 1-RTT packet. Laws use it to act as a peer that breaks the
+/// rules (credit past MAX_DATA, a changed reset) or grants 2^62 of credit.
+pub fn send_frames(mut e: Endpoint, c: ConnectionHandle, frames: Bytes) -> Result[(), QuicError] {
+    let i = stream_slot(e, c)?
+    if let Some(mut conn) = e.connections[i] {
+        list.append(mut conn.streams.seam, frames)
+        return Ok(())
+    }
+    Error(UnknownConnection)
+}

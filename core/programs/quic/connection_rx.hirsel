@@ -159,8 +159,10 @@ fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Byte
     if kind == Handshake {
         if let Server = c.side {
             // RFC 9001 §4.9.1: a server discards Initial keys when it first
-            // processes a Handshake packet.
+            // processes a Handshake packet. RFC 9000 §8.1: the packet also shows the
+            // client received our Initial, so its address is validated.
             drop_space(mut c, recovery.INITIAL, now)
+            c.validated = true
         }
     }
     refresh_idle(mut c, now)

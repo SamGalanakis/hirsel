@@ -1,0 +1,207 @@
+/// Poll everything an endpoint has at `now`, commit it, and return the datagrams.
+fn drain(mut e: quic.Endpoint, now: u64) -> List[Bytes] {
+    let mut out: Bytes = list.with_capacity(16 * 1500)
+    let mut outputs: List[quic.Output] = list.with_capacity(16)
+    let _ = quic.poll(mut e, now, mut out, mut outputs)
+    let mut sent: List[Bytes] = list.new()
+    for o in outputs {
+        if let Transmit(at: at, len: len, ..) = o {
+            list.push(mut sent, clone(list.slice(out, at, at + len)))
+        }
+    }
+    quic.committed(mut e, now, list.len(sent))
+    take sent
+}
+
+fn deliver(mut e: quic.Endpoint, now: u64, from: Addr, d: Bytes, mut events: List[quic.Event]) {
+    let mut wire: Bytes = clone(d)
+    let len = list.len(wire)
+    quic.receive_datagram(mut e, now, from, 0, mut wire, 0, len, mut events)
+}
+
+/// RFC 9000 §10.3.2: the first 16 bytes of HMAC-SHA256(reset_key, cid), with the key
+/// the endpoints of these laws are configured with.
+fn expected_token(cid: Bytes) -> Bytes {
+    let key = result.unwrap(secret.seal(b"QS3 reset key", "mac"))
+    let mac = result.unwrap(secret.hmac_sha256(key, cid))
+    let mut out: Bytes = list.with_capacity(16)
+    for i in 0u64 .. 16 {
+        list.push(mut out, mac[i])
+    }
+    take out
+}
+
+fn tail(d: Bytes) -> Bytes {
+    clone(list.slice(d, list.len(d) - 16, list.len(d)))
+}
+
+/// A short-header trigger of `n` bytes with first octet 0x41 and filler that routes nowhere.
+fn short_trigger(n: u64) -> Bytes {
+    let mut d: Bytes = list.with_capacity(n)
+    for i in 0u64 .. n {
+        list.push(mut d, int.narrow((i * 37 + 11) & 255))
+    }
+    if n > 0 {
+        d[0] = 0x41
+    }
+    take d
+}
+
+/// A long-header (Handshake, version 1) trigger of `n` bytes for no connection.
+fn long_trigger(n: u64) -> Bytes {
+    let mut d = short_trigger(n)
+    let prefix =[0xe0u8, 0u8, 0u8, 0u8, 1u8, 8u8]
+    for i in 0u64 .. order.min(n, 6) {
+        d[i] = prefix[i]
+    }
+    take d
+}
+
+/// The reset's length rule, RFC 9000 §10.3 and §10.3.3, worked from n and cid_len 8:
+/// no reset for n <= 21 + 8 = 29; n - 1 for 30 <= n <= 43; [43, n - 1] above.
+fn check_reset_length(n: u64, got: u64) {
+    if n <= 43 {
+        if got != n - 1 {
+            fail("a reset to a trigger of at most 43 bytes is one byte shorter")
+        }
+    } else if got < 43 || got > n - 1 {
+        fail("a reset to a longer trigger is in [43, n - 1]")
+    }
+    if got < 21 {
+        fail("a reset is never below 21 bytes")
+    }
+}
+
+fn restart_is_recognized() {
+    let mut server = qs3_server(None)
+    let mut client = qs3_client()
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    let mut trigger: Bytes = b""
+    for now in 1u64 .. 16 {
+        for d in drain(mut client, now) {
+            if list.len(trigger) == 0 && d[0] & 0x80 == 0 {
+                trigger = clone(d)
+            } else if list.len(trigger) == 0 {
+                deliver(mut server, now, CLIENT_ADDR, d, mut at_server)
+            }
+        }
+        if list.len(trigger) != 0 {
+            break
+        }
+        for d in drain(mut server, now) {
+            deliver(mut client, now, SERVER_ADDR, d, mut at_client)
+        }
+    }
+    if list.len(trigger) == 0 || !connected(at_client) {
+        fail("the client connects and sends a short-header packet")
+    }
+    // The server's state is lost; a member restarted with the same reset_key answers.
+    let mut restarted = qs3_server(None)
+    let mut at_restarted: List[quic.Event] = list.new()
+    deliver(mut restarted, 20, CLIENT_ADDR, trigger, mut at_restarted)
+    let replies = drain(mut restarted, 20)
+    let n = list.len(trigger)
+    if n <= 29 || list.len(replies) != 1 || list.len(at_restarted) != 0 {
+        fail("one reset answers the lost connection's short-header packet")
+    }
+    let reset: Bytes = clone(replies[0])
+    check_reset_length(n, list.len(reset))
+    // §10.3: a short header, first bits 01; the token is that of the CID the trigger
+    // was sent to, which the client holds from the server's transport parameters.
+    if reset[0] & 0xc0 != 0x40 || tail(reset) != expected_token(clone(list.slice(trigger, 1, 9))) {
+        fail("the reset is a short-header packet ending in the CID's token")
+    }
+    list.clear(mut at_client)
+    deliver(mut client, 21, SERVER_ADDR, reset, mut at_client)
+    if list.len(at_client) != 1 {
+        fail("the client reports the reset once")
+    }
+    if let Closed(_, Reset) = at_client[0] {} else {
+        fail("the client closes with Reset")
+    }
+    // §10.3.1: it enters the draining period and sends nothing, not even a reset back.
+    if list.len(drain(mut client, 22)) != 0 {
+        fail("the reset client sends nothing")
+    }
+}
+
+fn reset_lengths() {
+    let mut e = qs3_server(None)
+    let mut events: List[quic.Event] = list.new()
+    for n in 1u64 .. 1501 {
+        deliver(mut e, n, CLIENT_ADDR, long_trigger(n), mut events)
+        if list.len(drain(mut e, n)) != 0 {
+            fail("a long-header trigger is never answered with a reset")
+        }
+        let trigger = short_trigger(n)
+        deliver(mut e, n, CLIENT_ADDR, trigger, mut events)
+        let replies = drain(mut e, n)
+        if n <= 29 {
+            if list.len(replies) != 0 {
+                fail("no reset for a trigger of at most 21 + cid_len bytes")
+            }
+        } else {
+            if list.len(replies) != 1 {
+                fail("exactly one reset per short-header trigger")
+            }
+            check_reset_length(n, list.len(replies[0]))
+            if replies[0][0] & 0xc0 != 0x40 || tail(replies[0]) != expected_token(clone(list.slice(trigger, 1, 9))) {
+                fail("the reset ends in the token of the trigger's CID")
+            }
+        }
+    }
+    if list.len(events) != 0 {
+        fail("triggers for no connection raise no event")
+    }
+}
+
+/// Two endpoints answer each other's resets, each with no connection the other's
+/// reset matches. Every reset is shorter than its trigger, so from 1,500 bytes the
+/// exchange ends once a reset is 29 bytes or less: at most 1,500 - 29 = 1,471 resets.
+fn resets_never_loop() {
+    let mut a = qs3_server(None)
+    let mut b = qs3_client()
+    let mut events: List[quic.Event] = list.new()
+    let mut d = short_trigger(1500)
+    let mut last = list.len(d)
+    let mut count = 0u64
+    let mut to_a = true
+    while count <= 1471 {
+        let replies = if to_a {
+            deliver(mut a, count, CLIENT_ADDR, d, mut events)
+            drain(mut a, count)
+        } else {
+            deliver(mut b, count, SERVER_ADDR, d, mut events)
+            drain(mut b, count)
+        }
+        if list.len(replies) == 0 {
+            break
+        }
+        if list.len(replies) != 1 || list.len(replies[0]) >= last {
+            fail("each reset is a single datagram shorter than the last")
+        }
+        d = clone(replies[0])
+        last = list.len(d)
+        count += 1
+        to_a = !to_a
+    }
+    if count == 0 || count > 1471 || last > 29 {
+        fail("the reset exchange stops once a reset is too short to answer")
+    }
+}
+
+/// bug: a reset answers a long header, a too-short trigger or itself, is not shorter
+/// than its trigger, carries a token a restarted member cannot reproduce, or is not
+/// recognized by the client, so two endpoints reset each other forever or a lost
+/// connection idles out instead of closing.
+/// oracle: RFC 9000 §10.3, §10.3.1 (recognition), §10.3.2 (the HMAC-SHA256 token) and
+/// §10.3.3 (length), worked by hand in check_reset_length and resets_never_loop.
+@test
+fn stateless_reset_closes_and_never_loops() -> Result[(), ()] {
+    restart_is_recognized()
+    reset_lengths()
+    resets_never_loop()
+    Ok(())
+}

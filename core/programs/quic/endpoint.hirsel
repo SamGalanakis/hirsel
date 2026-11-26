@@ -18,7 +18,9 @@ pub opaque type Endpoint {
     stateless: List[Stateless],
     staged: List[Staged],
     drops: Map[DropReason, u64],
-    plain: Bytes
+    plain: Bytes,
+    tail: Bytes,
+    reset_peers: Map[Addr, List[u64]]
 }
 
 pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshake.Identity, TransportConfig)]) -> Result[Endpoint, QuicError] {
@@ -32,7 +34,7 @@ pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshak
         Never => (),
         _ => return Error(Config),
     }
-    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527)))
+    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527), tail: list.with_capacity(16), reset_peers: map.new()))
 }
 
 fn dropped(mut drops: Map[DropReason, u64], reason: DropReason) {
@@ -185,6 +187,9 @@ fn release_connection(mut e: Endpoint, take c: Connection) {
         if let None = c.params {
             e.unconfirmed -= 1
         }
+    }
+    if let Some(_) = c.peer_reset {
+        forget_reset_peer(mut e, c.peer)
     }
     e.live -= 1
 }

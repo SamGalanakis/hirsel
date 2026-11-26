@@ -65,6 +65,9 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
     if from != c.peer {
         return Error(WrongPath)
     }
+    if !c.validated {
+        c.path_received = int.saturating_add(c.path_received, h.packet.len)
+    }
     if let Draining = c.life {
         return Error(Draining)
     }
@@ -76,9 +79,12 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
 }
 
 fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+    let mut failed: Option[DropReason] = None
+    let mut reset_peer: Option[Addr] = None
     if let Some(mut c) = e.connections[i] {
+        let before = established(c)
         let awaiting = match c.side {
-            Server => !established(c),
+            Server => !before,
             Client => false,
         }
         let outcome = receive_known(mut c, now, from, h, mut wire, mut e.plain, e.random, e.config.max_mtu, ecn, mut events)
@@ -87,9 +93,25 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
             e.unconfirmed -= 1
             let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.original_id)))
         }
-        if let Error(reason) = outcome {
-            dropped(mut e.drops, reason)
+        if !before && established(c) {
+            if let Some(_) = c.peer_reset {
+                reset_peer = Some(c.peer)
+            }
         }
+        if let Error(reason) = outcome {
+            failed = Some(reason)
+        }
+    }
+    if let Some(peer) = reset_peer {
+        note_reset_peer(mut e, peer, i)
+    }
+    if let Some(reason) = failed {
+        if h.kind == OneRtt && (reason == PacketProtection || reason == SampleTooShort) {
+            if routed_reset(mut e, i, now, from, mut events) {
+                return
+            }
+        }
+        dropped(mut e.drops, reason)
     }
 }
 
@@ -119,6 +141,7 @@ fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wi
         Ok(take c) => take c,
         Error(_) => return,
     }
+    c.reset = reset_token(e.config.reset_key, c.local_id)
     match open_for_connection(c, h, mut wire, mut e.plain) {
         Error(reason) => dropped(mut e.drops, reason),
         Ok(opened) => {
@@ -131,6 +154,7 @@ fn admit(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wi
                 return
             }
             c.handle = handle
+            c.path_received = h.packet.len
             let _ = accept_packet(mut c, now, h, opened, wire, e.plain, e.random, e.config.max_mtu, ecn, mut events)
             add_connection(mut e, take c)
         },
@@ -154,6 +178,8 @@ fn dispatch(mut e: Endpoint, now: u64, from: Addr, ecn: u8, h: codec.Header, mut
             receive_existing(mut e, i, now, from, ecn, h, mut wire, mut events)
         } else if h.kind == Initial {
             admit(mut e, now, from, ecn, h, mut wire, mut events)
+        } else if h.kind == OneRtt {
+            short_unroutable(mut e, now, from, h, wire, mut events)
         } else {
             dropped(mut e.drops, UnknownConnection)
         }
@@ -183,6 +209,12 @@ pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf:
             dropped(mut e.drops, header_drop(err))
             return
         },
+    }
+    // Kept before header protection is removed in place: a stateless reset is
+    // recognized by these 16 bytes (RFC 9000 §10.3.1).
+    list.truncate(mut e.tail, 0)
+    if first.kind == OneRtt {
+        list.append(mut e.tail, list.slice(buf, end - 16, end))
     }
     dispatch(mut e, now, from, ecn, first, mut buf, mut events)
     while next < end {

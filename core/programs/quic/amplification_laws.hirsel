@@ -1,0 +1,149 @@
+/// One end of the amplification trace. The client never reads what reaches it, so every
+/// server reply is lost; the server's socket records each datagram it received and
+/// each it sent, in order, by its UDP length.
+pub type AmpEnd: send {
+    client: bool,
+    clock: Clock,
+    socket: UdpSocket
+}
+
+/// The server's socket trace: a received datagram's length, or SENT plus a sent one's.
+pub type AmpTrace: send {
+    steps: List[u64]
+}
+
+const SENT: u64 = 1u64 << 63
+
+/// A server identity whose chain needs 4 KiB: the P-256 leaf and a 4,096-byte filler
+/// certificate entry, so the server's first flight cannot fit in 3 × 1,200 bytes.
+fn large_identity() -> handshake.Identity {
+    let Identity(chain: chain, key: key, alg: alg) = p256_identity(false)
+    let mut big: List[Bytes] = clone(chain)
+    let mut filler: Bytes = list.with_capacity(4096)
+    list.fill(mut filler, 4096, 0x5a)
+    list.push(mut big, take filler)
+    Identity(chain: take big, key: take key, alg: alg)
+}
+
+fn amp_end(take plan: AmpEnd) -> AmpTrace waits {
+    let AmpEnd(client, clock, socket: take given) = take plan
+    let mut socket = take given
+    let mut e = if client {
+        let mut c = result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+        let _ = result.unwrap(quic.connect(mut c, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, long_idle()))
+        take c
+    } else {
+        result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((large_identity(), long_idle()))))
+    }
+    let mut trace = AmpTrace(steps: list.new())
+    let mut events: List[quic.Event] = list.new()
+    let mut data: Bytes = list.with_capacity(64 * 1536)
+    let mut packets: List[UdpPacket] = list.with_capacity(64)
+    loop {
+        let now = host.mono_ns(clock)
+        if now >= SIM_END {
+            break
+        }
+        quic.timeout(mut e, now, mut events)
+        let mut wake = SIM_END
+        for _ in 0u64 .. 64 {
+            let mut out: Bytes = list.with_capacity(16 * 1500)
+            let mut outputs: List[quic.Output] = list.with_capacity(16)
+            wake = match quic.poll(mut e, now, mut out, mut outputs) {
+                Some(t) => order.min(t, SIM_END),
+                None => SIM_END,
+            }
+            let mut tx: List[UdpTx] = list.with_capacity(16)
+            let mut lens: List[u64] = list.with_capacity(16)
+            for o in outputs {
+                if let Transmit(to: to, at: at, len: len, ecn: ecn, ..) = o {
+                    list.push(mut tx, UdpTx(to, at: at, len: len, ecn: ecn))
+                    list.push(mut lens, len)
+                }
+            }
+            if list.len(tx) == 0 {
+                quic.committed(mut e, now, 0)
+                break
+            }
+            let k = result.unwrap(host.udp_send(mut socket, out, tx, Never))
+            for i in 0u64 .. k {
+                list.push(mut trace.steps, SENT | lens[i])
+            }
+            quic.committed(mut e, now, k)
+        }
+        list.clear(mut events)
+        list.clear(mut data)
+        list.clear(mut packets)
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, order.max(wake, now + 1))) {
+            Ok(_) => (),
+            Error(TimedOut) => (),
+            Error(_) => fail("sim.udp receive failed"),
+        }
+        let at = host.mono_ns(clock)
+        for p in packets {
+            let UdpPacket(peer, at: start, len, truncated, ecn) = p
+            if !client && !truncated {
+                list.push(mut trace.steps, len)
+                quic.receive_datagram(mut e, at, peer, ecn, mut data, start, len, mut events)
+            }
+        }
+    }
+    take trace
+}
+
+/// bug: an unvalidated server sends more than three times what it received (padding or
+/// a coalesced or retransmitted packet left uncounted, the budget charged per poll and
+/// not across a batch, or a PTO probe sent past it), so it amplifies a spoofed Initial.
+/// oracle: RFC 9000 §8.1, checked over every prefix of the server's own socket trace:
+/// bytes sent <= 3 × bytes received. The client's Initials are 1,200 bytes, so the
+/// first flight is held to 3,600 bytes, and the 4 KiB chain makes it larger than that.
+@test
+fn amplification_never_exceeds_three(tasks: Tasks) -> Result[(), ()] waits {
+    let mut words: List[u64] = list.with_capacity(1001)
+    list.push(mut words, 0)
+    for _ in 0u64 .. 1000 {
+        list.push(mut words, 0xffffffffffffffff)
+    }
+    let mut streams: List[List[u64]] = list.with_capacity(1)
+    list.push(mut streams, take words)
+    let script = std.sim.world.Script(tail_seed: 1, streams: take streams)
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 50 * MS
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let (take client_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_CLIENT, SIM_SOCKET))
+    let (take server_socket, _) = result.unwrap(host.udp_bind(vnet, SIM_SERVER, SIM_SOCKET))
+    let client_task = task.spawn(tasks, bytes 16777216, AmpEnd(client: true, clock, socket: take client_socket), amp_end)
+    let server_task = task.spawn(tasks, bytes 16777216, AmpEnd(client: false, clock, socket: take server_socket), amp_end)
+    let _ = result.unwrap(task.join(take client_task))
+    let s = result.unwrap(task.join(take server_task))
+    result.unwrap(task.join(take served))
+    let mut received = 0u64
+    let mut sent = 0u64
+    let mut arrivals = 0u64
+    let mut before_second = 0u64
+    for step in s.steps {
+        if step & SENT != 0 {
+            sent += step & (SENT - 1)
+        } else {
+            received += step
+            arrivals += 1
+            if arrivals == 2 {
+                before_second = sent
+            }
+        }
+        if sent > 3 * received {
+            fail("the server sent more than three times what it received")
+        }
+    }
+    // The client's Initial and its probes at 999, 2997 and 6993 ms each arrive 50 ms
+    // later as 1,200 bytes. Before the second one the server is held to 3,600 bytes and
+    // sends at least two full packets past its 1,200-byte Initial; the flight it was
+    // holding back is then sent, so its total passes 3,600.
+    if arrivals < 2 || before_second > 3600 || before_second <= 2400 || sent <= 3600 {
+        fail("the limit binds the first flight and lifts with the next datagram")
+    }
+    Ok(())
+}

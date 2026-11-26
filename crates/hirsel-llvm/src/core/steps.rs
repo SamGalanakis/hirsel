@@ -291,6 +291,17 @@ fn borrowed_index(
                 })
         })
 }
+/// Whether a caller's lowering reads `f`'s body ([`pure`]): its ABI is scalar.
+pub(super) fn read_by_callers(module: &Module, f: FuncId) -> bool {
+    let signature = &module.signatures[module.functions[f.index()].signature.index()];
+    signature.dest.is_none()
+        && signature
+            .params
+            .iter()
+            .all(|p| matches!(p, Param::Value(Ty::Scalar(_))))
+        && signature.results.iter().all(|t| matches!(t, Ty::Scalar(_)))
+}
+
 pub(super) fn pure(
     module: &Module,
     body: &Body,
@@ -310,21 +321,10 @@ pub(super) fn pure(
             let Callee::Direct(f) = body.calls[call.index()].callee else {
                 return false;
             };
-            let function = &module.functions[f.index()];
-            let signature = &module.signatures[function.signature.index()];
-            if signature.dest.is_some()
-                || signature
-                    .params
-                    .iter()
-                    .any(|p| !matches!(p, Param::Value(Ty::Scalar(_))))
-                || signature
-                    .results
-                    .iter()
-                    .any(|t| !matches!(t, Ty::Scalar(_)))
-            {
+            if !read_by_callers(module, f) {
                 return false;
             }
-            let Some(callee) = &function.body else {
+            let Some(callee) = &module.functions[f.index()].body else {
                 return false;
             };
             let values = failure::constants(callee);

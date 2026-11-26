@@ -46,12 +46,12 @@ pub(super) fn emit(
     members: Option<&[bool]>,
     target: Target,
     recipes: &[hirsel_core_layout::RecipeRow],
-    call_layouts: &hirsel_core_ir::native_layout::CallLayouts,
-    failures: &failure::Failures,
+    analyses: &Analyses,
     facts: bool,
     sink: &mut dyn Sink,
     items: &mut Items,
 ) -> Result<()> {
+    let (call_layouts, failures) = (&analyses.call_layouts, &analyses.failures);
     // A spawned task's code takes an environment first; a root a transfer
     // enters (`RtOp::Transfer`) is a function's own, with none.
     let pairs = super::bodies(module, members)
@@ -193,7 +193,15 @@ pub(super) fn emit(
         sink.end_function();
     }
     spawn_entries(
-        module, members, target, recipes, failures, facts, sink, items,
+        module,
+        members,
+        target,
+        recipes,
+        failures,
+        facts,
+        &analyses.descriptors,
+        sink,
+        items,
     )
 }
 
@@ -215,6 +223,7 @@ fn spawn_entries(
     recipes: &[hirsel_core_layout::RecipeRow],
     failures: &failure::Failures,
     facts: bool,
+    descriptors: &super::partition::Descriptors,
     sink: &mut dyn Sink,
     items: &mut Items,
 ) -> Result<()> {
@@ -222,7 +231,7 @@ fn spawn_entries(
     let mut spawnable = BTreeSet::new();
     // A function made a plain `fn(take X) -> R` value: the link joins its
     // descriptor to the spawn entry of its rows by this marker's name.
-    for (function, _, spawn) in super::partition::descriptor_refs(module, members, items) {
+    for (function, _, spawn) in descriptors.refs(members) {
         if let Some(spawn) = spawn {
             let name = module.descriptor_symbol(function, items.function_symbol(function));
             spawnable.insert(hirsel_core_ir::spawnable_symbol(

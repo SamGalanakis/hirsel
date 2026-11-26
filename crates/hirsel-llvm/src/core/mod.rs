@@ -527,13 +527,13 @@ fn emit_prepared(
     // declares it); an intrinsic's holds its revision, weak_odr.
     let mut described = BTreeSet::new();
     let mut revisions = BTreeSet::new();
-    for (function, identity, _) in partition::descriptor_refs(module, members, &items) {
+    for (function, identity, _) in analyses.descriptors.refs(members) {
         let function_symbol = items.function_symbol(function);
         let name = module.descriptor_symbol(function, function_symbol);
         if !described.insert(name.clone()) {
             continue;
         }
-        let root = module.revision_root(function);
+        let root = &analyses.descriptors.roots[&function];
         let revision = hirsel_core_ir::revision_symbol(root.identity().digest());
         if revisions.insert(revision.clone()) {
             let (linkage, init) = match &root {
@@ -1111,15 +1111,7 @@ fn emit_prepared(
         &mut items,
     )?;
     task_entry::emit(
-        module,
-        members,
-        target,
-        &recipes,
-        call_layouts,
-        failures,
-        facts,
-        sink,
-        &mut items,
+        module, members, target, &recipes, analyses, facts, sink, &mut items,
     )?;
     let lasts = items.take_release_lasts();
     cleanup::release_lasts(

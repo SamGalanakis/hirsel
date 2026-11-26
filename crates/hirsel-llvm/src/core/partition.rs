@@ -30,6 +30,9 @@ pub(super) struct Analyses {
     pub(super) step_neutral: Vec<bool>,
     pub(super) call_layouts: hirsel_core_ir::native_layout::CallLayouts,
     pub(super) local_roles: Option<hirsel_core_ir::roles::Facts>,
+    /// Read from every body before the first partition, which a later
+    /// partition may no longer hold.
+    pub(super) descriptors: Descriptors,
 }
 
 impl Analyses {
@@ -62,6 +65,7 @@ impl Analyses {
         items.callback_sites = source
             .batch_steps
             .then(|| inlining::CallbackSites::new(module, &step_variants));
+        let descriptors = Descriptors::new(module, &items);
         Self {
             items,
             step_variants,
@@ -71,6 +75,7 @@ impl Analyses {
             call_layouts: hirsel_core_ir::native_layout::CallLayouts::new(&module.types, recipes),
             local_roles: (facts && provided.roles.is_none())
                 .then(|| hirsel_core_ir::roles::Facts::new(module)),
+            descriptors,
         }
     }
 
@@ -127,49 +132,68 @@ pub(super) fn bodies<'m>(
         .filter_map(|(i, f)| Some((i, f.body.as_ref()?)))
 }
 
-/// The descriptor references whose descriptors the unit, or the partition
-/// of its `members`, defines, each with the function its descriptor's code
-/// word names: its bodies' own, and in a partition every reference to a
-/// member's descriptor wherever it is, since the release cut keeps a
-/// descriptor (and its spawnable markers) only in its function's part.
+/// The unit's descriptor references, each with the function its
+/// descriptor's code word names, and that function's revision root.
 ///
 /// Callable adapters of one generic instance share its descriptor symbol
 /// ([`Module::descriptor_symbol`]), so one symbol can describe several
 /// functions, which partitions may define apart. The unit's first
 /// reference to a symbol, as the whole unit defines it, names the one
 /// function every partition describes it by: only that function's
-/// partition defines it strong, and the others weak.
-pub(super) fn descriptor_refs<'m>(
-    module: &'m Module,
-    members: Option<&'m [bool]>,
-    items: &'m Items,
-) -> impl Iterator<Item = (FuncId, StaticId, Option<SpawnTypes>)> + 'm {
-    let refs = move || {
-        bodies(module, None).flat_map(move |(i, body)| {
-            body.insts.iter().filter_map(move |inst| match *inst {
-                Inst::DescriptorRef {
+/// partition defines it strong, and the others weak. A `$callable`
+/// adapter's revision root is read from its own body.
+pub(super) struct Descriptors {
+    /// Each reference: the body holding it, its function, identity, spawn.
+    refs: Vec<(usize, FuncId, StaticId, Option<SpawnTypes>)>,
+    pub(super) roots: std::collections::BTreeMap<FuncId, hirsel_core_ir::RevisionRoot>,
+}
+
+impl Descriptors {
+    fn new(module: &Module, items: &Items) -> Self {
+        let name = |f: FuncId| module.descriptor_symbol(f, items.function_symbol(f));
+        let mut owners = std::collections::HashMap::new();
+        let mut owner = vec![None; module.functions.len()];
+        let mut refs = Vec::new();
+        for (i, body) in bodies(module, None) {
+            for inst in &body.insts {
+                let Inst::DescriptorRef {
                     function,
                     identity,
                     spawn,
                     ..
-                } => Some((i, function, identity, spawn)),
-                _ => None,
-            })
-        })
-    };
-    let name = move |f: FuncId| module.descriptor_symbol(f, items.function_symbol(f));
-    let mut owners = std::collections::HashMap::new();
-    let mut owner = vec![None; module.functions.len()];
-    for (_, function, _, _) in refs() {
-        if owner[function.index()].is_none() {
-            owner[function.index()] = Some(*owners.entry(name(function)).or_insert(function));
+                } = *inst
+                else {
+                    continue;
+                };
+                let owner = *owner[function.index()]
+                    .get_or_insert_with(|| *owners.entry(name(function)).or_insert(function));
+                refs.push((i, owner, identity, spawn));
+            }
         }
+        let mut roots = std::collections::BTreeMap::new();
+        for &(_, function, _, _) in &refs {
+            roots
+                .entry(function)
+                .or_insert_with(|| module.revision_root(function));
+        }
+        Self { refs, roots }
     }
-    let member = move |i: usize| members.is_none_or(|members| members[i]);
-    refs().filter_map(move |(i, function, identity, spawn)| {
-        let function = owner[function.index()].expect("every reference has an owner");
-        (member(i) || member(function.index())).then_some((function, identity, spawn))
-    })
+
+    /// The references whose descriptors the unit, or the partition of its
+    /// `members`, defines: its bodies' own, and in a partition every
+    /// reference to a member's descriptor wherever it is, since the release
+    /// cut keeps a descriptor (and its spawnable markers) only in its
+    /// function's part.
+    pub(super) fn refs<'a>(
+        &'a self,
+        members: Option<&'a [bool]>,
+    ) -> impl Iterator<Item = (FuncId, StaticId, Option<SpawnTypes>)> + 'a {
+        let member = move |i: usize| members.is_none_or(|members| members[i]);
+        self.refs
+            .iter()
+            .filter(move |&&(i, function, _, _)| member(i) || member(function.index()))
+            .map(|&(_, function, identity, spawn)| (function, identity, spawn))
+    }
 }
 
 /// A body another partition defines, as [`emit_prepared`] defines it.
@@ -305,7 +329,7 @@ pub(crate) fn emit_release_unit(
     };
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut debug = sink::native::ReleaseDebug::new(module.items.clone());
-    let module = prepare(Cow::Owned(module), &recipes, source, provided);
+    let mut module = prepare(Cow::Owned(module), &recipes, source, provided);
     let plan = partitions(&module, bound);
     let analyses = Analyses::new(&module, &recipes, source, provided, facts_enabled());
     let mut sites = Some(ReleaseSites::default());
@@ -335,8 +359,31 @@ pub(crate) fn emit_release_unit(
         }
         debug = native.take_release_debug();
         each(native.finish().map_err(Error::Llvm)?).map_err(Error::Llvm)?;
+        if let Some(members) = &members {
+            release_bodies(module.to_mut(), members);
+        }
     }
     Ok((sites.unwrap().bindings, debug.sites()))
+}
+
+/// Free the bodies of a lowered partition's `members` that no later partition
+/// reads: a partition reads another's body only to see that it is one
+/// ([`foreign_symbols`]), and a caller's lowering reads a scalar callee's
+/// ([`steps::read_by_callers`]). Every analysis that reads the whole unit's
+/// bodies ran before the first partition ([`Analyses`]); a coverage build's
+/// records read every body in each partition, so it keeps them.
+#[cfg(hirsel_lazy_core)]
+fn release_bodies(module: &mut Module, members: &[bool]) {
+    if module.coverage.is_some() {
+        return;
+    }
+    for (i, &member) in members.iter().enumerate() {
+        if member && !steps::read_by_callers(module, FuncId(i as u32)) {
+            if let Some(body) = &mut module.functions[i].body {
+                *body = Body::default();
+            }
+        }
+    }
 }
 
 /// Define the statics a partition's bodies read, declare the other

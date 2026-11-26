@@ -19,6 +19,10 @@ pub(crate) mod spawn;
 
 pub(crate) use install::{installed_executable, loaded_libraries};
 
+pub(super) fn runtime_root(uid: libc::uid_t) -> Option<PathBuf> {
+    Some(Path::new("/run/user").join(uid.to_string()))
+}
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target = hirsel_core_layout::Target::X86_64Linux;
 #[cfg(target_arch = "aarch64")]

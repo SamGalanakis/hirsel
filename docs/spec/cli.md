@@ -109,9 +109,11 @@ store, and keeps in memory the state those requests derive from unchanged
 inputs, shared between working copies of the same sources. A toolchain is
 named by the content identity of its compiler executable: two copies of one
 compiler build share a server. The process listens on `<toolchain>.sock`
-in the user's runtime directory (`$XDG_RUNTIME_DIR/hirsel`, or
-`/tmp/hirsel-<uid>` when that is unset), which must be private to the user,
-and holds `<toolchain>.lock` there while it runs.
+in a directory private to the user and holds `<toolchain>.lock` there while
+it runs. It uses `hirsel/` under an absolute `XDG_RUNTIME_DIR`, or under
+the host's private per-user runtime directory when available. Linux uses
+`/run/user/<uid>` and macOS uses the system's per-user temporary directory.
+If neither root is available, it uses `/tmp/hirsel-<uid>`.
 
 `hirsel build`, `hirsel run` and `hirsel test` send their request to their
 toolchain's resident compiler when one is running, and otherwise compile in

@@ -565,9 +565,11 @@ fn package_dev_s1_store_ownership() {
     external.wait_for("hirsel dev listening on ");
     let alias = fixture.law.path("other-server");
     fs::create_dir(&alias).unwrap();
+    let runtime = fixture.law.path("other-runtime");
+    fs::create_dir(&runtime).unwrap();
     let conflict = Command::new(&fixture.compiler)
         .args(["dev", alias.to_str().unwrap(), "--store", supplied])
-        .env("XDG_RUNTIME_DIR", fixture.law.path("run"))
+        .env("XDG_RUNTIME_DIR", runtime)
         .output()
         .unwrap();
     assert_eq!(conflict.status.code(), Some(2));

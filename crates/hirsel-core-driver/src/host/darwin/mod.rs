@@ -1,7 +1,7 @@
 //! The driver's Darwin host mechanisms. Darwin has no memfd, no `/proc`, no
 //! cgroups and no parent-death signal; nothing here forks.
 use std::{
-    ffi::{CStr, CString, OsString},
+    ffi::{CStr, CString, OsStr, OsString},
     fs::File,
     io,
     num::NonZeroUsize,
@@ -25,6 +25,20 @@ pub(crate) use install::{test_compiler, test_link};
 pub(crate) use install::{
     INSTALLED_LINKER_LIBRARY, installation_linker, installed_executable, loaded_libraries,
 };
+
+pub(super) fn runtime_root(_uid: libc::uid_t) -> Option<PathBuf> {
+    let mut bytes = [0u8; libc::MAXPATHLEN as usize];
+    // SAFETY: confstr writes at most bytes.len() bytes into this buffer.
+    let length = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            bytes.as_mut_ptr().cast(),
+            bytes.len(),
+        )
+    };
+    let path = CStr::from_bytes_with_nul(bytes.get(..length)?).ok()?;
+    Some(PathBuf::from(OsStr::from_bytes(path.to_bytes()))).filter(|path| path.is_absolute())
+}
 
 pub(crate) const HOST_TARGET: hirsel_core_layout::Target =
     hirsel_core_layout::Target::Aarch64Darwin;

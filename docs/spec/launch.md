@@ -814,12 +814,13 @@ list's digest) as the identity.
 | `state.json` | a locator only: the store path, the last known OLD and NEW executable paths and identity digests, and an interrupted attempt. It never authorizes a migration or a deletion |
 
 **Per-store supervisor lock.** `dev.lock` excludes only this package's loops, and another
-package's dev can name the same store with `--store`. Dev therefore also holds, for its whole
-life, `$XDG_RUNTIME_DIR/hirsel-dev/<st_dev>-<st_ino>.lock` (else
-`/tmp/hirsel-dev-<uid>/`), keyed by the device and inode of the opened store directory. A
-second dev on the same store refuses. Writers that are not dev loops are fenced by the store's
-own `LOCK` and by the install's predecessor check (rule 6). The supervisor lock is never the
-store's `LOCK` and never lives in the store.
+package's dev can name the same store with `--store`. Dev records its PID in
+`hirsel-dev/<st_dev>-<st_ino>.lock` and locks that file in the runtime root selected
+as for [the resident compiler](cli.md#resident-compiler), with `/tmp/hirsel-dev-<uid>/`
+as its last fallback. Dev also locks a private descriptor of the store directory for its
+whole life so a second dev on the same store refuses even with a different runtime root.
+Other writers are fenced by the store's own `LOCK` and by the install's predecessor check
+(rule 6).
 
 **States.** A **receipt** is the SHA-256 over the canonical list of `(path, content digest)` of
 every input a build read, plus the digest of the compiler executable that served it. The build
@@ -1513,7 +1514,8 @@ directory** or of any component on a protected directory's path from `/`, and wh
 its own components is a protected directory. The protected directories are `STATE`, the
 launcher's code, image, compiler and package stores, its pass cache
 (`STATE/test-results`), the editor socket's directory, the launcher user's home directory,
-and `$XDG_RUNTIME_DIR` and `/tmp/hirsel-<uid>`, where the resident compiler's socket lives.
+and the runtime root selected for [the resident compiler](cli.md#resident-compiler),
+or `/tmp/hirsel-<uid>` when the compiler uses its last fallback.
 So a binding is never at, above or below one of them, through a link or a bind mount.
 (Decision 2026-11-26, reversible: "contains or is contained by any directory the launcher's
 user owns" is not checkable exactly, because the rule itself requires the user to own the

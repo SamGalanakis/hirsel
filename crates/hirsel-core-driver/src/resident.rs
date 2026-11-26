@@ -13,7 +13,7 @@
 //! is refused and runs the request itself. A refusal never stops the server.
 //!
 //! The server listens on `<toolchain>.sock` in the user's runtime directory
-//! (`$XDG_RUNTIME_DIR/hirsel`, else `/tmp/hirsel-<uid>`), named by the content
+//! (see [`crate::host::runtime_directory`]), named by the content
 //! identity of its compiler executable, and holds `<toolchain>.lock` there
 //! while it runs. It re-reads its executable's identity on each request and
 //! exits once that changed. A request that panics fails alone: its client is
@@ -42,9 +42,8 @@ use std::ffi::OsString;
 use std::io::{self, Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,38 +118,10 @@ impl Toolchain {
     }
 }
 
-/// The user's directory of resident compiler sockets and locks, made private
-/// to the user; one that is not is refused.
-fn runtime_directory() -> io::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-    // SAFETY: getuid cannot fail.
-    let uid = unsafe { libc::getuid() };
-    let directory = match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        Some(runtime) => PathBuf::from(runtime).join("hirsel"),
-        None => PathBuf::from(format!("/tmp/hirsel-{uid}")),
-    };
-    match std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&directory)
-    {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
-        _ => {}
-    }
-    let meta = std::fs::symlink_metadata(&directory)?;
-    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
-        return Err(io::Error::other(format!(
-            "{} is not a directory private to this user",
-            directory.display()
-        )));
-    }
-    Ok(directory)
-}
-
 /// The path a law's stand-in server binds for this toolchain, under the
 /// runtime directory `runtime` (what `XDG_RUNTIME_DIR` names).
 #[cfg(test)]
-pub(crate) fn socket_under(runtime: &Path) -> PathBuf {
+pub(crate) fn socket_under(runtime: &std::path::Path) -> PathBuf {
     runtime
         .join("hirsel")
         .join(Toolchain::loaded().unwrap().file("sock"))
@@ -291,11 +262,13 @@ fn read_message(stream: &mut UnixStream) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> 
     Ok((bytes, fds))
 }
 
-/// A path to `name` in `directory` that a socket address can hold, however
-/// long the directory's own path is: through the descriptor `held` keeps open.
-fn short_path(directory: &Path, name: &str) -> io::Result<(PathBuf, std::fs::File)> {
-    let held = std::fs::File::open(directory)?;
-    Ok((crate::host::fd_path(&held)?.join(name), held))
+/// Linux reaches the directory through its descriptor to keep the address
+/// short. Check the address before using the path on either host.
+fn socket_path(toolchain: Toolchain) -> io::Result<(PathBuf, std::fs::File)> {
+    let held = std::fs::File::open(crate::host::runtime_directory("hirsel")?)?;
+    let path = crate::host::fd_path(&held)?.join(toolchain.file("sock"));
+    SocketAddr::from_pathname(&path)?;
+    Ok((path, held))
 }
 
 struct Route {
@@ -369,7 +342,7 @@ pub fn submit(args: &[String]) -> Option<i32> {
 }
 
 fn connect(toolchain: Toolchain) -> io::Result<UnixStream> {
-    let (path, _held) = short_path(&runtime_directory()?, &toolchain.file("sock"))?;
+    let (path, _held) = socket_path(toolchain)?;
     UnixStream::connect(path)
 }
 
@@ -566,7 +539,7 @@ fn lock(toolchain: Toolchain) -> io::Result<Option<std::fs::File>> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(runtime_directory()?.join(toolchain.file("lock")))?;
+        .open(crate::host::runtime_directory("hirsel")?.join(toolchain.file("lock")))?;
     // SAFETY: flock takes the descriptor `file` owns.
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let error = io::Error::last_os_error();
@@ -667,7 +640,7 @@ pub(crate) fn run(serve: Serve) -> Result<i32, Box<dyn std::error::Error>> {
         // Another server serves the toolchain.
         return Ok(0);
     };
-    let (socket, _held) = short_path(&runtime_directory()?, &toolchain.file("sock"))?;
+    let (socket, _held) = socket_path(toolchain)?;
     match std::fs::remove_file(&socket) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}

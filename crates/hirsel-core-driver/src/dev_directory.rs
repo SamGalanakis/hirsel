@@ -18,6 +18,7 @@ pub(super) struct Directory {
     store_dir: File,
     _dev_lock: File,
     _store_lock: File,
+    _store_identity: File,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -218,19 +219,7 @@ impl Directory {
                 check_overlap(&store, source)?;
             }
         }
-        // SAFETY: geteuid reads the current process's effective uid.
-        let uid = unsafe { libc::geteuid() };
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-            .map_or_else(
-                || Path::new("/tmp").join(format!("hirsel-dev-{uid}")),
-                |path| path.join("hirsel-dev"),
-            );
-        let runtime = crate::launcher::private_dir(runtime)?;
-        if open_dir(&runtime)?.metadata()?.uid() != uid {
-            return Err("dev supervisor lock directory has another owner".into());
-        }
+        let runtime = crate::host::runtime_directory("hirsel-dev")?;
         let (device, inode) = id(&store_dir)?;
         let store_lock = lock(&runtime.join(format!("{device}-{inode}.lock")), |pid| {
             format!(
@@ -238,12 +227,26 @@ impl Directory {
                 store.display()
             )
         })?;
+        // A different runtime root still names this directory's inode.
+        // Open independently so place children never inherit this lock.
+        let store_identity = open_dir(&store)?;
+        if id(&store_identity)? != (device, inode) {
+            return Err(format!("the store directory {} was replaced", store.display()).into());
+        }
+        if !try_lock(&store_identity)? {
+            return Err(format!(
+                "hirsel dev is already supervising store {}",
+                store.display()
+            )
+            .into());
+        }
         let directory = Self {
             root,
             store,
             store_dir,
             _dev_lock: dev_lock,
             _store_lock: store_lock,
+            _store_identity: store_identity,
         };
         if !fresh && let (Some(sources), Some(selected)) = (sources, selected) {
             for entry in fs::read_dir(&stores)? {
@@ -342,7 +345,7 @@ fn retire(path: &Path, runtime: &Path) -> io::Result<()> {
     }
     let (device, inode) = id(&dir)?;
     let supervisor = open_regular(&runtime.join(format!("{device}-{inode}.lock")), true)?;
-    if !try_lock(&supervisor)? {
+    if !try_lock(&supervisor)? || !try_lock(&dir)? {
         return Ok(());
     }
     let lock = open_regular(&path.join("LOCK"), true)?;

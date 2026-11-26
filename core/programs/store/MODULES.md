@@ -1,271 +1,352 @@
-# Hirsel Store Module Architecture (`store@1`, v2)
+# Hirsel Store Module Architecture (`store@1`, v3)
 
-**Status:** Design only (no `.hirsel` source moved). Normative cutover brief for `core/programs/store/` (revised for Astra review `3085`, rebased onto `origin/main` `06ad1735`, integrating `perf-store-read-design-3062` (`e9ca4d65`, STORE-SPEC v2.148) and `store-write-path-design-3076` (`06ad1735`, STORE-SPEC v2.149)).  
-**Supersedes:** `1f71060f` (`store-modules-design-3071`).  
-**Wholehog principle:** Every cutover lane lands its final module seam and owned subsystem state in one pass, with a strictly acyclic module DAG at every intermediate commit, byte-identical `PROG-9` persisted identities, and zero dual-API shims.
+**Status:** Design only. No `.hirsel` source has moved. This is the normative cutover brief for `core/programs/store/`. It revises v2 (`7d0cb44f`) against the 3107 review (REJECT). Facts are checked at `origin/main` `ebcc4887`. That tip includes the landed 3079 (`2d9e5e50`), 3082 (`f601b90a`) and 3080 (`979875cf`) lanes, the slot frame-limit change `1b1fc30f`, and the stream-quota change `10d42c7e`.
+**Supersedes:** v2 (`7d0cb44f`, `store-modules-design-v2-3097`) and v1 (`1f71060f`).
+**Wholehog principle:** Each cutover lane lands its final module seam and owned state in one pass. The module graph stays acyclic at every landing. Every public declaration keeps its definition identity for the whole cutover. There are no compatibility aliases and no dual APIs.
 
----
-
-## 1. Executive Summary
-
-Today `core/programs/store/hirsel.toml` places 123 of its 125 production source files (49,000+ lines) in the single module `"store"` (only `store-health-types.hirsel` in `"status"` and `main.hirsel` in `"main"` sit outside it). As a result:
-
-1. Every subsystem can read and mutate every other subsystem's private fields and invariants.
-2. `Db` (`store.hirsel:40-92`, 39 fields) and `DiskState` (`store.hirsel:3695-3736`, 34 fields) are monolithic structs that interleave Directory (`log@1`) and Object (`objects@1`/`sim@1`) optional fields.
-3. `store.hirsel` (4,846 lines) mixes leaf types, binary wire codecs, page-root holder management, schema catalog mechanics, Directory I/O and cuts, transaction execution, and export/import preparation.
-4. The Bucket host-stream claim and service lifecycle (`§12.11`) threads 11–17 arguments across six files and has an existing pre-`H` abandon-bypass bug (`store-stream-claim.hirsel:585-606`).
-
-The v2 end state partitions `core/programs/store` into **19 strictly acyclic modules across 14 layers (Layers 0–13)** with **zero same-layer edges above Layer 0**:
-
-- **`Db`** shrinks from 39 fields to **13** (6 root/shared fields + 7 opaque subsystem owners).
-- **`DiskState`** shrinks from 34 fields to **8** (3 root fields + 1 `RecordRetention` pair + 3 opaque subsystem owners + 1 `Backend = DirBackend(journal.DirJournalState) | ObjectBackend(object_writer.ObjectWriterState)` sum).
-- **Root module `"store"`** stays split across focused files (`store.hirsel`, `store-public-types.hirsel`, `store-coordinators.hirsel`, `store-attention.hirsel`, `sizes.hirsel`), keeping every file under 1,000 lines while **preserving every persisted `PROG-9` nominal type path (`store@1/store/*`) byte-for-byte** (§2).
-- **`host_stream`** encapsulates `§12.11` behind `ClaimMachine[T]` (owned per-phase payloads, `HSent` recorded before I/O, four distinct post-`H` outcomes), complete `RegisterLane` and `HoldTracker`, and a non-reentrant `SettleSession` incapable of calling back into a paused worker (§6).
-- **Cutover sequence:** One tiny prerequisite bug-fix lane (**Lane 0**, closing the live pre-`H` abandon gap at `store-stream-claim.hirsel:585-606`) followed by **14 sequential, independently buildable lanes (L1–L14)** in true topological order (§9).
+The disposition table for every 3107 finding and lane row is in `hirsel-briefs/store-modules-design-v3-3108/DESIGN-v3.md`. That directory also holds the inventory scripts behind §3.4 and §7:
+- `inventory.py <repo>` lists every declaration;
+- `inventory_table.py` assigns every file and fails on an unowned file;
+- `store_split.py` assigns every private `store.hirsel` declaration and fails on a gap or a duplicate.
 
 ---
 
-## 2. `PROG-9` Persisted Identity Contract (Critical Finding 1)
+## 1. Summary
 
-### 2.1 Why Public Aliases Break Persisted Keys
+`core/programs/store/hirsel.toml` lists **127** production sources:
+- 125 are in module `"store"`;
+- `store-health-types.hirsel` is in `"status"`;
+- `main.hirsel` is in `"main"`.
 
-Under `PROG-9` (`docs/spec/programs.md:241-318`), `code.identity(code.describe(f))` encodes `0x01` followed by `D A S`, where every type path in generic arguments `A` and function header `S` is replaced by the **definition identity of the nominal type after expanding all `pub type` aliases** (`docs/spec/programs.md:277`). Moving the nominal declaration of `store.Tx` to `txn` and leaving `pub type Tx = txn.Tx` in `store` therefore changes **every application's** persisted Runner query/action key (`core/programs/runner/runner-query.hirsel:155`) from `store@1/store/Tx` to `store@1/txn/Tx`, even when the application source still spells `store.Tx`. Because `runner.Caller = store.Caller` (`core/programs/runner/runner.hirsel:61`), moving `Caller` similarly breaks every `runner.transact`, `runner.query_as`, and `runner.room` key. Because schemas (`fn(mut store.Declare) -> Result[H, store.Error]`), migrations (`fn(mut store.Migration) -> Result[(), store.Error] waits`), slot extractors (`fn(H) -> store.Table[K, V]` / `Cell[V]` / `Log[V]`), platform callbacks (`fn(store.ReadOnly, store.Caller) -> Result[bool, store.Error] waits`), and projector folds (`store.Fold`) are all passed to `code.describe`, moving any of their nominal declarations breaks persisted descriptors.
+Together they hold 3,013 top-level declarations. 571 of these are public: 568 in `"store"` (two of them the aliases `Health` and `StreamLatch`), 2 in `"status"` and 1 in `"main"`. Any subsystem can reach any other subsystem's private fields. `Db` (39 fields) and `DiskState` (34 fields) interleave Directory and Object state. `store.hirsel` (4,816 lines) mixes leaf types, codecs, holders, catalog, Directory I/O, transactions and transfer.
 
-Hirsel has no nominal-identity-preserving re-export (`PROG-1`, `LANG-7`). Therefore **every identity-bearing nominal type MUST remain declared in module `"store"`** (in `store-public-types.hirsel`, assigned to `"store"` in `hirsel.toml`), with subsystem implementation state living behind it in lower modules.
+The v3 end state:
 
-### 2.2 Three-Tier Pinning Classification (Every Public Type Accounted For)
-
-#### Tier A — Pinned Nominally at `store@1/store/<Name>` (Byte-Identical `PROG-9` Identity)
-
-1. **26 Opaque and Scoped Handle Types** (zero-cost single-field wrappers in `store-public-types.hirsel`; zero heap allocations, zero copies, zero module cycles, preserves `OWN-20` root-scoped borrow anchors `in tx` / `in row`):
-   - `Db` (root composition struct, stays in `store.hirsel`)
-   - `Tx` (`pub opaque scoped type Tx { inner: txn.TxState }`)
-   - `TxRows[K, V]` (`pub opaque scoped type TxRows[K, V] { inner: txn.TxRowsState[K, V] }`)
-   - `Declare` (`pub opaque type Declare { inner: catalog.DeclareState }`)
-   - `TableDecl[K, V]` (`pub opaque type TableDecl[K, V] { inner: catalog.TableDeclState[K, V] }`)
-   - `Migration` (`pub opaque type Migration { inner: catalog.MigrationState }`)
-   - `StagedMigration` (`pub opaque type StagedMigration { inner: catalog.StagedMigrationState }`)
-   - `Table[K, V]` (`pub opaque type Table[K, V]: shareable + send { inner: catalog.TableHandle[K, V] }`)
-   - `Index[J, K, V, P]` (`pub opaque type Index[J, K, V, P]: shareable + send { inner: catalog.IndexHandle[J, K, V, P] }`)
-   - `Cell[V]` (`pub opaque type Cell[V]: shareable + send { inner: catalog.CellHandle[V] }`)
-   - `Log[V]` (`pub opaque type Log[V]: shareable + send { inner: catalog.LogHandle[V] }`)
-   - `Edge[A, B]` (`pub opaque type Edge[A, B]: shareable + send { inner: catalog.EdgeHandle[A, B] }`)
-   - `Aggregate[G]` (`pub opaque type Aggregate[G]: shareable + send { inner: indexes.AggregateHandle[G] }`)
-   - `Readers[V]` (`pub opaque type Readers[V]: shareable + send { inner: catalog.ReadersHandle[V] }`)
-   - `Snapshot` (`pub opaque type Snapshot: shareable + send { inner: read.SnapshotState }`)
-   - `Reader` (`pub opaque type Reader: shareable + send { inner: read.ReaderState }`)
-   - `ReadOnly` (`pub opaque type ReadOnly { inner: read.ReadOnlyState }`)
-   - `Follower` (`pub opaque type Follower { inner: object_writer.FollowerState }`)
-   - `SharedCapture` *(3062 `e9ca4d65`)* (`pub opaque type SharedCapture: shareable + send + cross { inner: capture.SharedCaptureState }`)
-   - `RowView[K, V]` *(3062 `e9ca4d65`)* (`pub opaque scoped type RowView[K, V] { inner: read.RowViewState[K, V] }`)
-   - `Preparation` (`pub opaque type Preparation { inner: transfer.PreparationState }`)
-   - `Pending` (`pub opaque type Pending { inner: txn.PendingState }`)
-   - `Resume` (`pub opaque type Resume: send { inner: types.ResumeState }`)
-   - `ValidatedImport`, `Imported`, `ImportWork` (`transfer.*State` wrappers)
-
-2. **10 Transparent Identity-Bearing Value Types** (stay nominally declared in `store-public-types.hirsel`, keeping `store@1/store/<Name>` exact; lower modules use internal mirror types in `types` / `read` / `maintenance` with total zero-copy `take` conversions at the Layer 12 `store` boundary):
-   - **`Error`** (`pub type Error: shareable + cross = ... | OutOfOrder` *(3076)* `| ... | Latched(status.StreamLatch)`): internal mirror `types.StoreError` in Layer 0; Layer 12 `to_public_error` / `from_public_error` moves payloads by `take` (zero-copy, exhaustive compiler check). Note: under `PROG-9` (`docs/spec/programs.md:306`), changing payload type paths inside `Error`'s variants does NOT change `code.identity` of functions naming `store.Error`, so `Error` variants may directly carry `types.Fault`, `types.StoreCapacity`, `types.Limit`, `types.Position`, `types.EndpointRefusal`, `types.HostStreamId`, `types.StreamRefusal`, `types.TieredRefusal`, and `status.StreamLatch` without nested conversions (and `LimitsDiffer(StoreLimits)` carries pinned `StoreLimits`).
-   - **`Caller`** (`pub type Caller: codec + key + shareable + cross { issuer: u8, subject: Bytes }`): pinned because `runner.Caller = store.Caller` appears in every Runner action, `query_as`, room, and platform access callback. Internal mirror `types.CallerId` (zero-copy `take` move of `subject`).
-   - **`StoreId`** (`pub type StoreId: codec + key { hi: u64, lo: u64 }`): `: codec + key`, usable as a Runner query/action arg or generic `StaticFn` type argument. Internal mirror `types.StoreKey` (two `u64`s).
-   - **`Branch`** (`pub type Branch { store: StoreId, id: u32 }`): internal mirror `types.BranchRef` (three scalars).
-   - **`StoreLimits`** (`pub type StoreLimits: codec + shareable + cross { frame: u64, value: u64, meta: u64 }`): `: codec`, usable in Runner args and `Error.LimitsDiffer`. Internal mirror `types.LimitsSpec` (three `u64`s).
-   - **`Limits`** (`pub type Limits: shareable + send { rows: u64, byte_limit: u64 }`): appears directly in `store.Fold.merge` and `store.Fold.drop` `StaticFn` headers (`store-projector.hirsel:111-112`). Internal mirror `types.ScanLimits` (two `u64`s).
-   - **`Delta[K, V]`**, **`Merge`**, **`Fold[E, K, V, A]`**: `Delta[K, V]` and `Merge` appear directly in `store.Fold` `StaticFn` headers (`store-projector.hirsel:110-112`). Internal mirrors `maintenance.ProjectorDelta[K, V]` and `maintenance.ProjectorMerge` (zero-copy move).
-   - **`Visit`** *(3062 `e9ca4d65`)* (`pub type Visit: key = Continue | Stop`): internal mirror `read.VisitStep` (two-variant tag).
-
-#### Tier B — Already Declared Outside `"store"` (Unchanged)
-
-- `status.Health` (`store@1/status/Health`) and `status.StreamLatch` (`store@1/status/StreamLatch`) remain in `"status"` (`store-health-types.hirsel`), with existing root aliases `pub type Health = status.Health` and `pub type StreamLatch = status.StreamLatch` in `"store"` (duplicate alias in `store-stream-types.hirsel:17` deleted in L1).
-
-#### Tier C — Non-Persisted Operational / Configuration Types (Moved to Owning Submodule + Root Alias)
-
-Operational and configuration types audited across the repository (`core/programs/{runner,platform,fleet,vector,search,store-ops,store}`) to appear in **zero** `StaticFn` headers or persisted `code.identity` keys — including `Options`, `Overrides`, `Kind`, `Shortage`, `WriterPlan`, `PlacePlan`, `FollowerPlan`, `Fault`, `Why`, `Limit`, `StoreCapacity`, `TieredRefusal`, `EndpointRefusal`, `Position`, `HostStreamId`, `StreamField`, `StreamRefusal`, `ClaimAuth` *(3048)*, `HeadView`, `Claim`, `Scrub*`, `Check*`, `Describe*`, `Reclaim*`, `Walk*`, `DeployError`, `Cutover`, `Export*`, `ClaimMachine`, `ClaimConfig`, `ClaimPhase`, `ClaimStep` — move nominally to their owning module and are re-exported as `pub type` aliases in `"store"`. **Architectural rule:** No cutover or future lane may move a Tier A type out of `"store"`, and any future type placed in a persisted `StaticFn` must already be at its final module path before persisting keys.
-
-### 2.3 Separate Contract for `code.revision` (`PROG-9` / `PROG-10`)
-
-`code.revision(s)` (`docs/spec/programs.md:320`, `store-declare.hirsel:336`) hashes the checked IR of every function and codec reached by `s`. It is **explicitly distinct** from `code.identity(s)`:
-- Pure index extractors (`fn(K, V) -> Result[List[J], Capacity]`) that do not call `store.*` helpers keep **both** `code.identity` and `code.revision` unchanged.
-- Any versioned extractor or `StaticFn` whose body calls a `store.*` function whose lowered IR changes through a root forwarding body will get a new `code.revision` (causing `Migrate` to rebuild the versioned index and `Open` to report `Changed` per `§1.2`). Lanes that introduce root forwarders record this revision expectation explicitly rather than conflating it with `code.identity`.
-
-### 2.4 Pre-Cutover Identity Byte Vectors (Cross-Build Oracle)
-
-Every cutover lane that touches Tier A types or root signatures (specifically **L1, L3, L11, L12, L14**) must preserve exact byte equality against these pre-cutover `PROG-9` vectors (`docs/spec/programs.md:248-318`), frozen in a dedicated cross-build identity test before L1 lands:
-
-1. **Runner application query (`runner.query`):**  
-   `fn q(tx: store.Tx, h: AppHandles, take a: u64) -> Result[runner.Answer[u64], Capacity]` in `app@1/main`:  
-   `0x01` + `app@1/main/q(store@1/store/Tx,app@1/main/AppHandles,take u64)->core@1/core/Result[runner@1/runner/Answer[u64],core@1/core/Capacity]`
-2. **Runner `query_as` / action (`runner.transact`, expanding `runner.Caller`):**  
-   `fn act(mut tx: store.Tx, h: AppHandles, c: runner.Caller, take a: u64) -> Result[u64, u32]` in `app@1/main`:  
-   `0x01` + `app@1/main/act(mut store@1/store/Tx,app@1/main/AppHandles,store@1/store/Caller,take u64)->core@1/core/Result[u64,u32]`
-3. **Schema declaration (`store.Declare` + `store.Error`):**  
-   `fn schema(mut d: store.Declare) -> Result[AppHandles, store.Error]` in `app@1/main`:  
-   `0x01` + `app@1/main/schema(mut store@1/store/Declare)->core@1/core/Result[app@1/main/AppHandles,store@1/store/Error]`
-4. **Runner table slot selector (`store.Table`):**  
-   `fn slot(h: AppHandles) -> store.Table[u64, u64]` in `app@1/main`:  
-   `0x01` + `app@1/main/slot(app@1/main/AppHandles)->store@1/store/Table[u64,u64]`
-5. **Generic instantiations (`store.StoreId` and `store.Tx` + `store.Table` + `store.Error`):**  
-   - `fn id_key[T: key](x: T) -> T` at `store.StoreId`:  
-     `0x01` + `app@1/main/id_key[store@1/store/StoreId]{key[store@1/store/StoreId]}($0)->$0`
-   - `fn read_one[K, V](tx: store.Tx, t: store.Table[K, V]) -> Result[Option[V], store.Error]` at `[u64, u64]`:  
-     `0x01` + `app@1/main/read_one[u64,u64](store@1/store/Tx,store@1/store/Table[$0,$1])->core@1/core/Result[core@1/core/Option[$1],store@1/store/Error]`
+- **Public identity is untouched (§2).** Every public declaration in `"store"` and `"status"` stays declared in its module with its current header for the whole cutover. This covers types, functions and constants. Lower modules hold internal representations and never name a root type. Root public functions become adapters over those representations. No aliases are added. v2's Tier C aliases are deleted from the plan.
+- **19 modules, 14 layers, acyclic in the code each lane actually moves (§3).** The rules are:
+  - public compound results stay at the root;
+  - functions that need a live `Db` stay at the root (rule R3);
+  - lower modules receive neutral inputs.
+- **`Db`** drops to 13 fields and **`DiskState`** to 8 (§4). `ObjectWriterState` keeps all 22 of its existing fields, including `cache` (§4.5).
+- **Recovery and capture keep their real branches (§5.3).** Live capture keeps three fence outcomes. Offline backup keeps the `LOCK` it acquired, moved into `PreparedCapture`. Writer recovery keeps its incomplete-segment case.
+- **Claimant (§6).** A `HoldGuard` resource owns the prospective hold token from before the Hold PUT until H is committed or the hold is abandoned. On cancellation, its finalizer issues the Abandon. `ReportSettled` is validated before it changes anything. A settle directive that is discarded unsent frees its settle record, so a later poll can reissue it.
+- **Lane 0 is folded into 3048 (§8).** 3048 is a hard predecessor of L1. 3075 lands before L1.
 
 ---
 
-## 3. Strict Acyclic Module Map (19 Modules, 14 Layers, Zero Cycles)
+## 2. Public Identity Contract (Findings 1 and 3)
 
-### 3.1 Hirsel Naming and Opacity Rules Verified
+### 2.1 Why nothing public may move
 
-- **Zero `LANG-7` root-member collisions:** No module name matches any lowercase `pub` function or constant in `"store"`.
-- **Zero accidental `core`/`std` extensions:** No module name matches any `core` or `std` module.
-- **Compile-time opacity (`PROG-2`):** Every owned subsystem state struct is `pub opaque type` in its owning module.
+Under `PROG-9` (`docs/spec/programs.md:252-299`), `code.identity(code.describe(f))` is `0x01` followed by `D A S`. Every type path in the generic arguments `A` and the header `S` is the definition identity of the nominal type, taken after alias expansion (`docs/spec/programs.md:277`). An application may describe any function whose arguments satisfy Runner's bounds. For example, `fn q(tx: store.Tx, h: H, take a: store.StreamId) -> Result[runner.Answer[()], Capacity]` passes `runner-query.hirsel:138-155`. The same holds for a nested argument such as `List[store.ExportStamp]` and for a generic instantiation at any public store type. Moving any of those declarations changes the key, even if a root alias spells the old name. A public function's own definition identity (`store@1/store/<name>`) appears wherever a client describes it. Hirsel has no re-export that preserves identity (`PROG-1`, `LANG-7`).
 
-### 3.2 True Topological Layering (Layers 0 → 13)
+### 2.2 Rules
 
-Every call edge strictly descends in layer number (except `types -> status` within Layer 0). **There are zero lateral edges anywhere in Layers 1–13.** Note specifically that `pager` (Layer 4) sits strictly below `journal` (Layer 5), and `capture` sits in Layer 6 (Step 7) strictly above `catalog`, `manifest`, `pager`, and `journal`.
+- **R1 — Root keeps every public declaration.**
+  - Every `pub` declaration of module `"store"` stays declared in `"store"` for the whole cutover, with its current header. That is 568 declarations: 211 nominal types, 2 aliases, 343 functions and 12 constants.
+  - This includes the 33 pinned types listed in 3107. It also includes `StreamId`, `StreamKey`, `ExportStamp`, `KeyedPolicy`, `KeyedCallRecord`, `ScrubRound`, `ScrubHistory`, `IndexState`, `IndexDrift`, `IndexReport`, `Attention`, `RowSchemas`, `PreparedTarget`, `CallRecord`, `DeclaredCollection`, `Binding`, `Generation`, `Image`, `Pass`, `Merge`, `Projection`, `Retain`, `Reclaim*`, `StoreLimits`, `StoreId`, `Caller`, `HostStreamId`, `StreamRefusal`, `TieredRefusal`, `EndpointRefusal`, `Position`, `Options` and every other public type.
+  - `Health` and `StreamLatch` stay in `"status"`. Their existing root aliases stay as they are.
+  - The full per-file list is §3.4, and `store.hirsel`'s list is §7.1.
+  - A file that holds public declarations is split **by declaration**. The public declarations move to a root file named `store-api-<stem>.hirsel` in `"store"`. The private declarations keep the original file name, and the file is reassigned to the owning module. A definition's identity is its module path and name, not its file, so this move changes no identity.
+- **R2 — Lower modules never name a root type.**
+  - Each lower module defines the internal representation it needs. Examples:
+    - `types.Failure` for `Error`, with variant payloads `types.FaultRep`, `types.CapacityRep` and so on;
+    - `txn.TxState` behind `Tx`;
+    - `read.ReaderState` behind `Reader`;
+    - `capture.SharedState` behind `SharedCapture`.
+  - The root converts at the boundary.
+  - The public `Error` keeps its exact variants and its root payload types (`Fault`, `StoreCapacity`, `Limit`, `Position`, `EndpointRefusal`, `HostStreamId`, `StreamRefusal`, `TieredRefusal`, `StreamLatch`, `StoreLimits`). v2's claim that `Error` may carry `types.*` payloads is withdrawn. Clients match on those payloads and pass them back to root operations.
+  - Public compound results (`Outcome`, `Done`, `Undone`, `Page`, `Resume`, `ServeError`, `Served`, `Pending`, `Parked`, `Exported`, `Recorded` and the rest) stay at the root. They are built there from internal outcomes.
+- **R3 — Live-`Db` orchestration stays at the root.**
+  - A private function whose header takes `Db`, `DiskState` or `Preparation` stays in `"store"` at its file's landing. The exception is a function that its lane row (§10) rewrites over named neutral inputs.
+  - The signature scan behind this rule is the "Root-held" column of §3.4.
+  - A function whose header takes `Tx`, `Declare`, `Migration` or another root handle moves down only after it is rewritten over that handle's internal state (`txn.TxState`, `catalog.DeclareState` and so on). It stays at the root if it invokes a root-typed callback.
+- **R4 — Public contracts, not only names, are preserved.**
+  - `Reader` stays `pub opaque resource type Reader: send` with its finalizer (`store-read.hirsel:16`). Its constructor stays fallible (`Error(Full(Allocation))`), and the reader grant stays inside it: `{ inner: read.ReaderState }`, where `ReaderState` owns the `ReaderPool` grant.
+  - `ReadOnly` stays `pub opaque type ReadOnly: shareable + send` (`store-read.hirsel:759`).
+  - `SharedCapture` keeps `shareable + send + cross` and its capture identity.
+  - `RowView` keeps its `in row` anchors.
+  - `range`, `fetch_bytes` and the other public functions with anchored results keep their `in tx` / `in row` results at the root.
+  - The `Fold` wrapper invokes the application's `StaticFn[fn(mut Tx, E, Delta[K, V]) -> Result[(), A]]` (`store-projector.hirsel:108-113`) with the exact root `Tx`, `Delta`, `Merge` and `Limits` values. Maintenance owns the walker and the pure fold bookkeeping, and gives the root driver neutral delta material, which the root turns into `Delta`/`Merge` before the call.
 
-```text
-Layer 0:    status  <--  types                      (health/stream status; leaf types, limits, StoreError, TieredRefusal)
-               \          /
-Layer 1:          format                            (ALL wire/frame codecs: journal, stream, XINDEX, ORIGIN, tiered, catalog)
-                    |
-Layer 2:          pages                             (PageTree, PageRoots, Pin, HolderTable, DataRows.sorted, pure appliers)
-                 /     \
-Layer 3:    catalog   manifest                      (pure schema/handles; pack layout, manifest validation/publish, scrub)
-              |         |
-Layer 4:   indexes    pager                         (sync index plans & aggregates; Tiered pager, cache, pure reads/folds)
-              |         |
-Layer 5:      |      journal                        (log@1 DirJournalState, DirJournalMsg+timers, recovery fences, Replay assembly)
-              |       /   \
-Layer 6:      |  capture  history                   (verified dir capture + 3062 SharedCapture; stateless objects@1 + HistoryOpenBase)
-              |     |        |
-Layer 7:      |     |   host_stream                 (§12.11 ClaimMachine[T], RegisterLane, HoldTracker, session-only settle, stream follow)
-              |     |        |
-Layer 8:      |     |  object_writer                (ObjectWriterState, ObjectJournalMsg, export fetch handler, reclaim, levels, followers)
-              |      \      /
-Layer 9:      |        read                         (SnapshotState, ReaderState, ReadOnlyState, cursors, changes, 3062 visitors & shared_read_only)
-               \      /   |
-Layer 10:        txn------+                         (TxState, AccountingState, CallStreamState, Tx range/visit_range, put_ordered, Tx tiered/index apply)
-               /     \
-Layer 11:  transfer  maintenance                    (export/import/catchup/activation; index-build/verify/repair/expiry/projectors)
-               \     /
-Layer 12:       store                               (Db/DiskState root, commit/cut/durable/seal coordinators, pinned PROG-9 nominal types, sizes, attention)
-                  |
-Layer 13:        main                               (empty benchmark/workload entry point; currently no calls to store)
+```hirsel unbuilt
+// Root wrappers keep the declared kind, bounds and finalizer; only fields change.
+pub opaque resource type Reader: send { inner: read.ReaderState } drop(owned_reader) {}
+pub opaque type ReadOnly: shareable + send { inner: read.ReadOnlyState }
+pub opaque scoped type Tx { inner: txn.TxState }
+pub opaque type Pending { inner: txn.PendingRep }
+pub type Served = Committed(Receipt) | Kept(Receipt) | Failed(Pending, Stop) | NoRoom(Pending, StoreCapacity) | Parked(Parked)
 ```
 
-### 3.3 Resolution of Every Existing Implementation Cycle (High Finding 3)
+### 2.3 `code.revision` is separate
 
-| Boundary Conflict (Review 3085) | Concrete Source Cycle Eliminated | Exact Division of Work in v2 |
-|---|---|---|
-| `status` vs `types` | `store-stream-types.hirsel:17` re-aliases `StreamLatch`; `Error` holds `EndpointRefusal` (`store-object-authority.hirsel:2`) and `Position` (`store-levels.hirsel:92`); `Pin` holds `Roots` (`store-projector.hirsel:849`); `store-limits.hirsel:70,98` reads `Db` and `JournalCommit`. | Keep `status.StreamLatch` unique in `store-health-types.hirsel`; drop the alias line when moving `store-stream-types.hirsel` to `status` (keep root alias in `store`). Move `EndpointRefusal` and `Position` into `types` (L0). Move `PinOwner` to `types` (L0) and `Pin` (with `Roots`) to `pages` (L2). Split `store-limits.hirsel`: pure limits/checks → `types` (L0), `replay_within_limits` → `format` (L1), `store_limits(db)` → `store` (L12). |
-| `format` vs `pages` / `pager` | `store-commit-wire.hirsel:224,245` reads `DataRows`, `PageTree`, `TieredDataDelta`, calls `collection_kind`/`get_page_row`; `empty_roots` (`store.hirsel:30`) builds `PageRoots`; `Tx` (`store.hirsel:513`) sat inside 3071's `pages` line range. | `format` (L1) exposes pure byte-level `encode_data_ops_resolved(mut payload, count, emit_row)` taking resolved `(key, value_opt, prior_opt, trim_opt)` via a scoped row emitter (zero second edit list — also aligns with 3076 Perf #10). Move `data_order` and prior resolution above `format` into `txn` (L10). Move `empty_roots`/`share_roots` (`L28-L36`) and `DataRows` (`L411-L512`) to `pages` (L2); split `Tx` (`L513-L560`) to `txn`/`store` at exact declaration boundaries. |
-| `catalog` vs `indexes` / `object_writer` / `transfer` / `store` | `seal` (`store-declare.hirsel:675`) installs index/projector bindings onto `Db`; `declare_follower` (`:185`) takes `Follower`; `declare_export` (`:214`) takes `Preparation`; `store-index-registry.hirsel:138,579` borrows/mutates `Tx`. | `catalog` (L3) holds only pure schema/handle/plan logic (`declare_from_base`, `complete_declaration`). Move `declare`/`seal`/`declare_migration` orchestration to `store` (L12), `declare_follower` to `object_writer` (L8), `declare_export`/`finish_export_declaration` to `transfer` (L11). `indexes` (L4) produces pure `List[IndexEdit]` plans; move `Tx` edit application (`apply_edits`) to `txn` (L10). |
-| `manifest` vs `pager` / `journal` / `history` / `txn` | `disk_cut_state` (`store-cut-participants.hirsel:168`) calls `disk_cut_timed`; `rebuild_page_store` (`store-page-recovery.hirsel:73`) takes `HistoryLocator` and returns `TieredReadInventory`; `journal_replay_manifest` (`store-tiered-replay.hirsel:13`) builds `JournalReplay`; `store-tiered-tx-read.hirsel:23` reads `Tx`; `disk_cut_with_limit` (`store.hirsel:4015,4031`) dispatches to `object_writer` and calls `durable_groups`. | Keep cross-backend cut dispatch (`disk_cut_state`/`disk_cut_with_limit`) at `store` (L12). Give `manifest` (L3) neutral `PackObjectRef` / `LoadedPackInventory` (no `HistoryLocator` or `TieredReadInventory`). `pager` (L4) wraps neutral inventory into `TieredReadInventory` and returns neutral `TieredManifestRestore`. `journal` (L5, strictly above `pager`!) assembles `JournalReplay`. Move `Tx` tiered read adapters (`store-tiered-tx-read.hirsel`) to `txn` (L10). |
-| `capture` vs `maintenance` | 3071 scheduled `capture` in L2 though `store-capture-journal.hirsel:105` needs `catalog`, `manifest`, `pager`, and `journal`; `store-inspect.hirsel:97,120` (`verify_release`, `repair_indexes`) drives `maintenance` walkers on a live `Db`. | Defer `capture` to **Step 7 (Layer 6)** strictly above `catalog`, `manifest`, `pager`, and `journal`. Keep offline capture (`store-capture*.hirsel`, 3062 `SharedCaptureState`/`open_shared`) and pure snapshot `catalog_entries` in `capture`. Move `verify_release` and `repair_indexes` (`store-inspect.hirsel:73-176`) to `maintenance` (L11). |
-| `history` vs `host_stream` vs `object_writer` | `ObjectPackRead` (`store-history-packs.hirsel:97`) holds `HistoryOpenBase` (`store-object-open.hirsel:1`); `stream_follow_make_capture` (`store-stream-follow.hirsel:141`) builds `FollowCapture` (`store-followers.hirsel:15`); `stream_xindex_encode` (`store-stream-gc.hirsel:120`) sits in `host_stream`. | Move `HistoryOpenBase`, `history_load_admitted`, `history_check_open`, and `history_open_with` into `history` (L6). Change `host_stream` (L7) `stream_follow_*` to return plain `StreamFollowMaterial`; `object_writer` (L8) builds `Arc[FollowCapture]`. Move `stream_xindex_encode`/`decode` into `format` (L1). |
-| `object_writer` / `transfer` / `read` / `txn` / `store` | `ObjectExportRead` (`store-object-journal.hirsel:493`) calls `object_export_read` (`store-object-export.hirsel:14,178`); `follower_snapshot` (`store-followers.hirsel:350`) builds `read.Snapshot`; `durable_at` (`store-levels.hirsel:34`) calls `durable`; `read.range` (`store-read.hirsel:466`) borrows `Tx`; `maybe_checkpoint` (`store.hirsel:1155`) calls `cut_install`. | Move `ObjectExportLease`, `ObjectExportFetch`, and `object_export_read` into `object_writer` (L8). `object_writer` exposes `follower_tip_data` to `read` (L9), which builds `SnapshotState` and 3062 `follower_share`. Keep common `durable`/`durable_at`/`maybe_checkpoint`/`cut_install` dispatch at `store` (L12). Move `Tx` range/count adapters to `txn` (L10) and keep root `pub fn range(...) in tx` in `store` (L12). |
+`code.revision(s)` hashes the checked IR reached from `s` (`docs/spec/programs.md:304-325`, `store-declare.hirsel:336`). When a root public function becomes an adapter, its body changes. So does the revision of any versioned extractor or `StaticFn` that calls it, which means `Migrate` rebuilds that index and `Open` reports `Changed`. Pure extractors that call no `store.*` function keep both identity and revision. Each lane that turns a function reachable from an index extractor into an adapter records the revision change in its ticket. Identity must not change at all.
 
-### 3.4 Complete Module Directory (All 125 Existing Production Files + Split Files)
+### 2.4 Identity oracle (O1)
 
-Every production source file in `core/programs/store/hirsel.toml` is assigned to exactly one module below. Placements for **3062 (`e9ca4d65`, v2.148)** and **3076 (`06ad1735`, v2.149)** are explicitly integrated into their v2 owners.
+Pre-split keys are frozen as literal bytes from the pre-L1 tip and resolved through Runner (§9.2 O1):
 
-| # | Module | Layer | Assigned Files (125 existing + split files) | Allowed Direct Callees | Narrow Internal / Public Surface |
-|---|---|---|---|---|---|
-| 1 | `status` | 0 | `store-health-types.hirsel`, `store-stream-types.hirsel` *(minus duplicate `StreamLatch` alias)* | *(none)* | `Health`, `StreamLatch`, `HostStreamId`, `StreamField`, `StreamRefusal`, `stream_refusal_text`, `stream_latch_text` |
-| 2 | `types` | 0 | `store-limits.hirsel` *(pure limits/checks)*, `store-tiered-refusals.hirsel`, `store-types.hirsel` *(split)* | `status` | `StoreKey`, `CallerId`, `BranchRef`, `LimitsSpec`, `ScanLimits`, `StoreError` *(incl. 3076 `OutOfOrder`)*, `EndpointRefusal`, `Position`, `TieredRefusal` *(incl. 3062 `Shared \| Scan`)*, `PinOwner`, `Limit`, `Why`, `Fault`, `StoreCapacity`, `StorageKind`, `CallId`, `CallInfo`, `Mark`, `Ticket`, `Read`, `StoreFailure`, `Outcome`, `Undone`, `Done`, `Bound`, `ResumeState`, `Page`, `Resumed`, `Looked`, `Seen`, `Change`, `CallRecord`, `StopKind`, `Recorded`, `Plan`, `CallReserve`, `ServeError`, `Reserve`, `Receipt`, `Stop`, `RequestDigest`, `Stored`, `RowSchemas`, `IndexKind`, `IndexState`, `Options` *(incl. 3076 `group_delay_us`, `end_groups`, `end_interval_ms`)*, `Overrides`, `Kind`, `Shortage`, `ClaimAuth` *(3048)*, `HeadView`, `Claim`, pure limit & allocation helpers (`FRAME_LIMIT`, `VALUE_LIMIT`, `META_LIMIT`, `PAGE_LIMIT`, `BLOB_LIMIT`, `KEY_LIMIT`, `MIB`, `disk_fault`, `disk_allocation`, `capacity`, `raised_capacity`, `same`, `named`, `round8`, `splitmix64`, `call_info`, `make_id`, `check_limits`, `check_named_limits`, `journal_floor`, `open_checks`) |
-| 3 | `format` | 1 | `store-format.hirsel` *(split)*, `store-commit-wire.hirsel` *(pure byte writer)*, `store-stream-frames.hirsel` *(+ `stream_xindex_encode`/`decode` from `store-stream-gc`)*, `store-tiered-frames.hirsel`, `store-stream-key.hirsel`, `store-keyed-journal.hirsel` *(L1–L112 wire half)* | `status`, `types` | `DISK_FORMAT` *(10 → 11 per 3048)*, `BINDING_BYTES`, `DiskContext`, `DiskFrame`, `DiskHeader`, `DiskFrameHead`, `seal_frame`, `disk_read_frame*`, `disk_header_bytes`, `disk_read_header`, `encode_data_op`, `encode_data_ops_resolved`, `encode_log_trim`, `encode_stream_op*`, `encode_fork`, `encode_call*`, `encode_keyed_edits`, `decode_keyed_edits`, `JournalEvent`, `JournalCommit`, `JournalFork`, `JournalOp`, `JournalTrim`, `journal_decode*`, `journal_torn`, `replay_within_limits`, `history_append_header`, `history_seal`, `history_frame`, `OriginFrame` *(3048)*, `Attach`, `SealedTail`, `StreamRef`, `StreamRegister`, `RegRow`, `XIndex`, `BatchSlice`, `BatchRow`, `stream_*_encode`/`decode`, `TieredFrame`, `read_tiered_frame`, `StreamId`, `StreamKey`, `caller_key`, `stream_key_bytes`, `parse_stream_key`, `Catalog` wire codec |
-| 4 | `pages` | 2 | `store-pages.hirsel`, `store-layout.hirsel`, `store-tail.hirsel`, `store-roots.hirsel` *(split: `L28-L36`, `L99-L323`, `L411-L512` + `Pin` from `store-projector:849`)*, `store-keyed-pages.hirsel` *(L114–L166 of `store-keyed-journal`)* | `types`, `format` | `PageTree`, `PageRoots`, `Roots`, `Pin`, `Head`, `Tip`, `State`, `ProposedMain`, `HolderDelta`, `HolderTable` *(opaque)*, `DataOp`, `StagedValue`, `DataRows` *(+ 3076 `sorted: bool`, binary-search `op_slot`)*, `DataOps`, `Staged`, `TailBases`, `CollectionCursor`, `CollectionDescriptor`, `PageRange`, `empty_roots`, `share_roots`, `put_page_row`, `remove_page_row`, `bulk_collection`, `drop_collection`, `canonical_roots`, `apply_cell`, `apply_log_append`, `trim_log_page`, `materialize_keyed_edits`, `apply_collection_batch` *(3076: dispatches to `std.page.{bulk_from_source, append_sorted_source, apply_sorted_source}`)*, `state_with_delta`, `install_holder_delta`, `read_tail` |
-| 5 | `catalog` | 3 | `store-catalog.hirsel` *(split)*, `store-handle-check.hirsel`, `store-declare.hirsel` *(pure schema/declare)*, `store-migration.hirsel` *(pure migration)* | `types`, `format`, `pages` | `Catalog`, `CatalogRecord`, `ValueSchema`, `IndexRecord`, `ReadersHandle[V]` *(opaque)*, `TableHandle[K, V]` *(opaque)*, `IndexHandle[J, K, V, P]` *(opaque)*, `CellHandle[V]` *(opaque)*, `LogHandle[V]` *(opaque)*, `EdgeHandle[A, B]` *(opaque)*, `SchemaState` *(opaque, with `propose_fence`/`restore_fence`)*, `SchemaPlan`, `DeclareState` *(opaque)*, `Mode`, `TableDeclState[K, V]` *(opaque)*, `MigrationState` *(opaque)*, `StagedMigrationState` *(opaque)*, `CollectionKind`, `CollectionInfo`, `declare_from_base`, `complete_declaration`, `catalog_handle`, `catalog_index_handle`, `readers`, `row_value`, `stage_create_table`, `stage_table`, `stage_drop_table_key`, `stage_migrate`, handle validity checks |
-| 6 | `manifest` | 3 | `store-manifest.hirsel`, `store-manifest-wire.hirsel`, `store-list-read.hirsel`, `store-page-recovery.hirsel` *(neutral inventory)*, `store-locations.hirsel`, `store-packs.hirsel`, `store-pack-index.hirsel`, `store-cut-participants.hirsel` *(minus `disk_cut_state`)*, `store-cut-retirement.hirsel`, `store-tiered-frees.hirsel`, `store-tiered-lineage.hirsel`, `store-scrub.hirsel`, `store-scrub-pace.hirsel` | `types`, `format`, `pages` | `PackDiskState` *(opaque)*, `PageDisk`, `PageManifest`, `ValidatedPageManifest`, `LoadedPageStore`, `PackObjectRef`, `LoadedPackInventory`, `PageLocations`, `PagedLists`, `CutParticipants`, `PagedCutLayout`, `PackRun`, `DiskIndex`, `Lineage`, `DeferredFree`, `Scrub`, `ScrubConfig`, `ScrubRound`, `disk_read_page_manifest`, `publish_page_manifest_bytes`, `plan_page_cut`, `cut_retirement`, `attach_page_graph`, `validate_directory_graph`, `begin_scrub`, `scrub_step`, `scrub_pacer_*`, `record_scrub_round` |
-| 7 | `indexes` | 4 | `store-index-registry.hirsel` *(pure registry/planning, minus `Tx` `apply_edits`)*, `store-aggregate.hirsel` | `types`, `format`, `pages`, `catalog` | `IndexState` *(opaque)*, `IndexRegistry`, `IndexRegistration`, `IndexEdit`, `IndexDrift`, `IndexReport`, `IndexValue`, `IndexStop`, `AggregateHandle[G]` *(opaque)*, `Totals`, `empty_index_state`, `install_registry`, `plan_put_edits`, `plan_delete_edits`, `record_drift`, `demote_drifted`, `aggregate`, `totals` |
-| 8 | `pager` | 4 | `store-tiered.hirsel`, `store-tiered-packs.hirsel`, `store-tiered-ranges.hirsel`, `store-tiered-cache.hirsel`, `store-tiered-pager.hirsel`, `store-tiered-pager-batch.hirsel`, `store-tiered-attempt.hirsel`, `store-tiered-plan.hirsel`, `store-tiered-point-read.hirsel`, `store-tiered-count.hirsel`, `store-tiered-scan.hirsel`, `store-tiered-span.hirsel`, `store-tiered-initial-changes.hirsel`, `store-tiered-changes.hirsel`, `store-tiered-pins.hirsel`, `store-tiered-overlay.hirsel`, `store-tiered-replay.hirsel` *(returns neutral `TieredManifestRestore`)*, `store-tiered-fold.hirsel`, `store-tiered-emission.hirsel`, `store-tiered-publish.hirsel`, `store-tiered-probe.hirsel`, `store-tiered-probe-index.hirsel`, `store-tiered-promote.hirsel`, `store-tiered-compact.hirsel`, `store-tiered-residency.hirsel` | `types`, `format`, `pages`, `manifest` | `PagerState` *(opaque)*, `DiskPagerState` *(opaque)*, `TieredPagerMessage`, `TieredPagerLink`, `TieredPins`, `TieredTouchSet`, `TieredTarget`, `TieredDataDelta`, `TieredDirty`, `TieredCutStage`, `TieredReadInventory`, `TieredManifestRestore`, `TieredCompaction`, `start_pager`, `stop_pager`, `park_notices`, `park_enqueue`/`poll`/`cancel`, `read_tiered_point*`, `tiered_scan*`, `tiered_count*`, `tiered_changes`, `tiered_fold_cut`, `tiered_publish_cut`, `tiered_compact_cut`, `plan_residency_move` |
-| 9 | `journal` | 5 | `store-journal-worker.hirsel`, `store-journal-status.hirsel` *(dir + common queue helpers)*, `store-journal-recover.hirsel` *(+ `JournalReplay` assembly)*, `store-journal-io.hirsel` *(split)* | `types`, `format`, `pages`, `manifest`, `pager` | `DirJournalState` *(opaque, owns `lock: HostFile`, `d: Dir`, `file_seq`, `file_end`, `creation`, `coalesce_timer_task` & `end_timer_task` per 3076)*, `DirJournalMsg` *(incl. 3076 `CoalesceTick`, `EndTick`, `Close`)*, `DirAck`, `WriteNotice`, `RecordRetention`, `QueueAccounting`, `JournalInput`, `JournalReplay`, `DiskSession`, `DiskStartup`, `disk_session`, `disk_recover_locked` *(3079)*, `start_dir_journal`, `dir_handoff`, `dir_poll_acks`, `dir_wait_ack`, `dir_rotate`, `dir_remove_retired`, `journal_scan`, `journal_apply*`, `journal_following`, `read_recorded_dir`, `close_dir_journal` |
-| 10 | `capture` | 6 | `store-capture.hirsel`, `store-capture-check.hirsel`, `store-capture-check-journal.hirsel`, `store-capture-journal.hirsel`, `store-capture-pages.hirsel`, `store-capture-catalog.hirsel`, `store-capture-describe.hirsel`, `store-inspect.hirsel` *(L1–L71 `catalog_entries` only)* | `types`, `format`, `pages`, `catalog`, `manifest`, `pager`, `journal` | `CapturedState`, **`SharedCaptureState` / `SharedBacking` / `SlabNode` / `open_shared` / `share_capture` / `shared_version` / `shared_backing_bytes` / `shared_resident_bytes` / `freeze_roots_to_shared` / `shared_visit_leaves` *(3062 `e9ca4d65`)*,** `CheckTotals`, `DescribeEntry`, `DescribeLine`, `EntryForm`, `CatalogEntry`, `capture_directory`, `check_capture`, `describe_capture`, `capture_need`, `planned_capture`, `catalog_entries` |
-| 11 | `history` | 6 | `store-history.hirsel`, `store-history-read.hirsel`, `store-history-witness.hirsel`, `store-history-packs.hirsel`, `store-register.hirsel`, `store-object-authority.hirsel` *(minus `EndpointRefusal`)*, `store-object-cut.hirsel`, `store-history-open.hirsel` *(split from `store-object-open` L1–L100: `HistoryOpenBase`, `history_load_admitted`, `history_check_open`)* | `status`, `types`, `format`, `pages`, `manifest`, `journal` | `HistoryHead`, `HistoryPair`, `HistoryRef`, `HistoryCapture`, `HistoryConfig`, `HistoryLocator`, `HistoryRegister`, `HistoryBuffers`, `HistoryOpenBase`, `HistoryWrite`, `HistoryClaimResult`, `HistoryActivation`, `ObjectPackRead`, `history_fetch`, `history_write_head`, `history_check_open`, `history_check_endpoint`, `history_check_conditions`, `history_register_publish`, `history_replace_claim`, `history_publish_genesis`, `history_publish_checkpoint`, `history_load_admitted`, `history_write_page_cut`, `history_validate_manifest` *(+ 3082 pack cache hash-verify)* |
-| 12 | `host_stream` | 7 | `store-stream-claim.hirsel`, `store-stream-service.hirsel`, `store-stream-slot.hirsel`, `store-stream-task.hirsel`, `store-stream-poll.hirsel`, `store-stream-settle.hirsel`, `store-stream-gc.hirsel` *(minus `stream_xindex_encode`)*, `store-stream-janitor.hirsel`, `store-stream-follow.hirsel`, `store-stream-archive.hirsel` | `status`, `types`, `format`, `pages`, `manifest`, `journal`, `history` | **Claim-Machine API (§6):** `ClaimMachine[T]` *(opaque)*, `ClaimPhase[T]`, `ClaimConfig`, `ClaimStep[T]`, `ClaimedPlace[T]`, `claim_new`, `claim_step`, `claim_run`, `claim_abort`; `RegisterLane` *(opaque, incl. `pending` & `stalled`)*; `HoldTracker` *(opaque, full service state)*; `JournalService` *(opaque)*, `JournalSlot` *(opaque)*, `SlotLink`, `SlotAck`, `SlotReport`, `StreamPlan`, `StreamLimits`, `Batching`, `StreamRoot`, **`SettleSession`** *(non-reentrant direct I/O view)*, `SettleOutcome`, `StreamFollowMaterial`, `stream_service_start`, `stream_slot_open`, `stream_settle`, `stream_settle_sealed`, `stream_poll_head`, `stream_follow_capture`, `stream_janitor_step` |
-| 13 | `object_writer` | 8 | `store-object-open.hirsel` *(writer startup glue)*, `store-object-journal.hirsel` *(+ `ObjectExportLease`/`Fetch`/`object_export_read` from `store-object-export`)*, `store-object-writer.hirsel`, `store-reclaim.hirsel`, `store-sim-levels.hirsel`, `store-levels.hirsel` *(minus `Position` and root `durable_at`)*, `store-health.hirsel`, `store-followers.hirsel` *(minus `read.Snapshot` constructor)*, `store-follower-service.hirsel`, `store-object-follower.hirsel` | `status`, `types`, `format`, `pages`, `catalog`, `manifest`, `pager`, `journal`, `capture`, `history`, `host_stream` | `ObjectWriterState` *(opaque)*, `ObjectJournalMsg`, `ObjectAck`, `ObjectJournalSession`, `ObjectExportLease`, `ObjectExportFetch`, `Authority`, `Refusal`, `Level`, `SimLevels`, `LevelWorld`, `LevelSync`, `FollowerState` *(opaque)*, `Followers`, `FollowerService`, `FollowerOwner`, `FollowerSlot`, `FollowerTipData`, `open_object_writer`, `object_cut_publish`, `object_stream_close`, `object_cut_close`, `object_fresh_probe`, `object_export_fetch`, `object_handoff`, `object_poll_acks`, `object_wait_ack`, `weak_wait_level`, `follower_tip_data`, `declare_follower_state`, `health`, `on_unhealthy`, `claim_of`, `reclaim_preview`, `reclaim_purge`, `streamed`, `stream_reader`, `follower`, `fresh`, `at_least`, `follower_service` |
-| 14 | `read` | 9 | `store-read.hirsel` *(minus `Tx` `range`/`count`)*, `store-read-pages.hirsel`, `store-changes.hirsel` | `types`, `format`, `pages`, `catalog`, `manifest`, `pager`, `capture`, `object_writer` | `SnapshotState` *(opaque)*, `ReaderState` *(opaque)*, `ReadOnlyState` *(opaque)*, `AnonymousCursor`, `Changes`, `ChangePage`, `SpanRows`, `Rows`, `IndexRows`, `IndexEntries`, `I8Entries`, `reader`, `follower_reader`, `follower_snapshot`, **`shared_read_only`, `follower_share`, `VisitStep`, `RowViewState[K, V]`, `visit_scan`, `visit_scan_reverse`, `row_*` *(3062 `e9ca4d65`)*,** `read_only_reader`, `staged_reader`, `get`, `fetch_many`, `scan`, `scan_reverse`, `scan_page`, `scan_next`, `find`, `find_page`, `find_next`, `count_at`, `changes`, `changes_page`, `open_span_changes`, `next_span_change` |
-| 15 | `txn` | 10 | `store-txn-core.hirsel` *(split)*, `store-tx.hirsel`, `store-commit.hirsel`, `store-attempts.hirsel`, `store-mux.hirsel`, `store-fork.hirsel`, `store-cell.hirsel`, `store-log.hirsel`, `store-edge.hirsel`, `store-streams.hirsel`, `store-keyed-claims.hirsel` *(+ L168–L182 of `store-keyed-journal`)*, `store-keyed-lifecycle.hirsel`, `store-reexec.hirsel`, `store-tiered-tx-read.hirsel` *(`Tx` tiered adapters)*, `store-tx-range.hirsel` *(split from `store-read` L466–L560 + `store-index-registry` `apply_edits`)* | `status`, `types`, `format`, `pages`, `catalog`, `manifest`, `pager`, `journal`, `indexes`, `object_writer`, `read` | `TxState` *(scoped opaque)*, `TxRowsState[K, V]` *(scoped opaque)*, `AccountingState` *(opaque, mutable `ceiling`)*, `CallStreamState` *(opaque)*, `Parked` *(opaque)*, `PendingState` *(opaque)*, `Served`, `Completion`, `ClaimKey`, `ClaimSweep`, `ClaimRecovery`, `KeyedPolicy`, `Verdict`, `Difference`, `UnknownReason`, `ReplaySource`, `data_order`, `stage_transaction`, `settle_draft_local`, `commit_prepared_state`, `serve_call`, `conclude_call`, `put`, **`put_ordered` *(3076)*,** `delete`, `fetch`, `fetch_bytes`, `pop_first`, `pop_last`, `open_range_bounds`, `tx_count`, **`visit_range`, `visit_range_reverse` *(3062 `e9ca4d65`)*,** `rollback_writes_on_*`, `cell_*`, `log_*`, `edge_*`, `admit`, `admit_claim`, `conclude_claim`, `sweep_streams`, `sweep_claims`, `fork_branch`, `reexecute*` |
-| 16 | `transfer` | 11 | `store-transfer-core.hirsel` *(split)*, `store-export.hirsel`, `store-object-export.hirsel` *(copy/orchestration half)*, `store-object-import.hirsel`, `store-prepared-check.hirsel`, `store-catchup.hirsel`, `store-rounds.hirsel`, `store-install.hirsel`, `store-activation.hirsel` | Layers 0–10 | `TransferState` *(opaque)*, `PreparationState` *(opaque)*, `ValidatedImportState`, `ImportedState`, `ImportWorkState`, `DeployError`, `PreparedTarget`, `ExportCopy`, `ExportStamp`, `Exported`, `Cutover`, `declare_export_state`, `begin_backup`, `begin_export`, `begin_export_copy`, `export_copy`, `release_export`, `open_export`, `write_prepared`, `validate_prepared`, `reserve_import`, `import_trees`, `keep_import`, `catch_up_export`, `stage_activation`, `install_activation`, `perform_cutover`, `restore` *(3079 T5 listed-packs-only)* |
-| 17 | `maintenance` | 11 | `store-index-build.hirsel`, `store-verify.hirsel`, `store-expiry.hirsel`, `store-projector.hirsel` *(minus `Pin`)*, `store-operator-verify.hirsel` *(L73–L176 of `store-inspect`)* | Layers 0–10 | `ProjectorState` *(opaque)*, `DeclaredProjector`, `ProjectorDelta[K, V]`, `ProjectorMerge`, `Binding`, `Generation`, `Image`, `Pass`, `Projection`, `ProjectionDecl`, `IndexWalk`, `WalkFault`, `WalkFinding`, `WalkReport`, `WalkMode`, `VerifyOutcome`, `RepairOutcome`, `Swept`, `index_build_step`, `rebuild_index`, `rebuild_aggregate`, `begin_verify`, `verify_step`, `verify_release`, `repair_indexes`, `expire_rows`, `sweep_expired`, `projector`, `project_step`, `project_recorded`, `projection_row` |
-| 18 | `store` | 12 | `store.hirsel` *(composition root `Db`/`DiskState`/`Backend`, open/close)*, `store-public-types.hirsel` *(Tier A nominal types + zero-copy conversions + Tier C aliases)*, `store-coordinators.hirsel` *(foreground commit/cut/durable/seal coordinators + thin `pub fn` forwarders)*, `store-attention.hirsel`, `sizes.hirsel` *(+ 3076 Directory timer budget in `writer_plan`)* | Layers 0–11 | All external `store.*` symbols, byte-identical `PROG-9` nominal types (§2), single foreground coordinators (§5), `open`, `open_authority`, `open_read_only`, `open_shared` *(3062)*, `memory`, `close`, `checkpoint`, `cut_install`, `durable*`, `seal`, `adopt`, `delete_branch`, `pin*`, `snapshot*`, `follow`, `attention*`, `accounts`, `store_limits`, sizing APIs |
-| 19 | `main` | 13 | `main.hirsel` *(currently an empty successful entry point making no calls to `store`)* | `store` | `pub fn main` |
-
-*Note on `store-keyed-journal.hirsel` (182 L):* L1–L112 (wire codec) → `format`; L114–L166 (`materialize_keyed_edits`, `keyed_lookup`, `keyed_draft_live`) → `pages` (`store-keyed-pages.hirsel`); L168–L182 (`resident_with_credit`, `available_resident`, `available_journal`, `draft_credit`) → `txn` (`store-keyed-claims.hirsel`).
+1. **Existing (keep):** `tools/tests/wire_admission.py:53-74` sends literal transaction and query identities that name `store@1/store/Tx` and `store@1/store/Caller`, and checks placement. The dev client at `:526-537` subscribes with a literal root-`Tx` key. `core/programs/runner/steps_laws.hirsel:441-460` replays a literal old callback identity.
+2. **New — StreamId argument:** `0x01` + `wire@1/admission/stream_q(store@1/store/Tx,wire@1/admission/H,take store@1/store/StreamId)->core@1/core/Result[runner@1/runner/Answer[()],core@1/core/Capacity]`.
+3. **New — nested nominal argument:** the same query with `take core@1/core/List[store@1/store/ExportStamp]`.
+4. **New — schema and slot:** `schema(mut store@1/store/Declare)->core@1/core/Result[wire@1/admission/H,store@1/store/Error]` and `slot(wire@1/admission/H)->store@1/store/Table[u64,u64]`.
+5. **`query_as` uses the plain query header:** `(store@1/store/Tx,<H>,take <A>)->core@1/core/Result[runner@1/runner/Answer[<R>],core@1/core/Capacity]` (`runner-query.hirsel:142`). v2's "query_as / action" example was the `transact` header (`runner-transact.hirsel:130`). It is relabelled "transact".
 
 ---
 
-## 4. Owned Subsystem State (`Db` and `DiskState` Decomposition, High Finding 7)
+## 3. Acyclic Module Map (Finding 3)
 
-### 4.1 Composition Roots
+### 3.1 Naming and visibility
 
-`Db` drops from **39 raw fields** to **13 fields**:
+- No module name equals a lowercase `pub` function or constant in `"store"` (`LANG-7`), or a `core`/`std` module.
+- `PROG-2` has no package-private level. Any `pub` declaration in a lower module is reachable by a dependent as `store.<module>.X` (`LANG-7`, e.g. `store.wal.append`).
+- Inter-module operations are therefore `pub` functions over internal state. Each invariant-bearing state type is `pub opaque` in its owning module, so its fields and constructors stay hidden (`PROG-2`).
+- Constructors that would forge an internal state are not exported. O4 (§9.2) checks this with named refusal diagnostics.
+
+### 3.2 Layers
+
+Every edge goes to a lower layer, except `types -> status` within Layer 0. No lower module names a declaration of `"store"` (R2).
+
+```text
+Layer 0:   status   types        (health/stream status; internal leaf reps: Failure, FaultRep, CapacityRep, limits checks)
+Layer 1:   format                (frame/journal/stream/XINDEX/tiered codecs over internal reps)
+Layer 2:   pages                 (PageTree, PageRoots, HolderTable, DataRows, pure appliers over resolved roots)
+Layer 3:   catalog   manifest    (pure SchemaPlan + handle states; pack/manifest/location/scrub data over neutral inputs)
+Layer 4:   indexes   pager       (registry + pure planning; tiered pager, cache, park records)
+Layer 5:   journal               (Directory queue/worker/acks, recovery, JournalReplay assembly, capture fences)
+Layer 6:   capture   history     (live/locked capture + SharedState; objects@1 history, register, pack cache)
+Layer 7:   host_stream           (claim with HoldGuard, register lane, holds, service, settle over a session view)
+Layer 8:   object_writer         (ObjectWriterState, object queue, slot relay from L9, reclaim, levels, followers)
+Layer 9:   read                  (ReaderState, ReadOnlyState, cursors, changes, visitors over neutral inputs)
+Layer 10:  txn                   (TxState, PendingRep, accounting, call streams, commit drafting over passed limits)
+Layer 11:  transfer  maintenance (copy/lease/import state; walkers, pure fold work, expiry)
+Layer 12:  store                 (all 568 public declarations, Db/DiskState, coordinators, R3 orchestration, adapters)
+Layer 13:  main
+```
+
+### 3.3 Cycle resolution
+
+| Conflict | Source | v3 division |
+|---|---|---|
+| Public results vs Layer 0 | `ServeError`/`Served` carry root `Pending`; `Served.Parked` carries `Parked`; `Page.next: Option[Resume]` (`store.hirsel:393,403,852,863`, `store-mux.hirsel:30`) | All stay at the root (R1). `txn` returns `txn.Outcome`/`txn.PendingRep`; the root wraps them. |
+| `keyed_time(db)` in format | `store-stream-key.hirsel:57` reads the clock and main head | `keyed_time` is public and stays at the root. `format` takes the private `parse_stream_key` only. |
+| `pages.read_tail` | takes root `Tx`, a projector declaration and a typed table (`store-tail.hirsel:93`). `ProposedMain` carries `HistoryActivation` (`store.hirsel:143`, `store-object-cut.hirsel:12`) | `read_tail`, `key_codec` and `Tail` are public and stay at the root. `pages` keeps `TailBase`/`TailBases` and functions over resolved roots. `ProposedMain` stays at the root (§7.2). |
+| `catalog` vs registrations | `Declare.projectors`/`StagedMigration.projectors` hold `DeclaredProjector`; `SchemaPlan.bindings` holds `IndexRegistration` (`store-declare.hirsel:12-27`, `store-migration.hirsel:40-55`, `store-activation.hirsel:1-10`) | Root `Declare`/`StagedMigration` own live registrations next to `inner: catalog.DeclareState`. `catalog` produces a pure `catalog.SchemaPlan` (collections, ids, fences). The root pairs it with registrations. |
+| `manifest` orchestration | `fill_cut_manifest(.., db: Db, ..)`, `raise_materialized_pin(.., TieredCutStage)`, `begin_scrub(mut db)` (`store-cut-participants.hirsel:117,175`, `store-scrub.hirsel:54`) | `begin_scrub` (public) and `disk_cut_state` stay at the root. `fill_cut_manifest` and `cut_participants` are rewritten over a `manifest.CutInput` (heads, pins, lease spans) that the root builds. `raise_materialized_pin` moves to `pager`. |
+| `pager` vs schema and park | `publish_tiered_residency(mut db)` calls `schema_plan(db)`; the park queue is in `store-mux.hirsel:5-27` | Park records go to `pager` at L5. `publish_tiered_residency` and the other residency functions that take `Db` stay at the root (R3). |
+| Common journal message | the queue carries Object session, export and slot payloads (`store-journal-worker.hirsel:1,268`) | L6 introduces a Directory-only `journal.DirJournalMsg`. Until L9, the root owns an explicit interim `JournalSender = Dir(Sender[journal.DirJournalMsg]) \| Object(Sender[JournalMsg])` and picks the sender per backend. |
+| Slot relay | `slot_relay` owns `Sender[JournalMsg]` and builds `StreamAnswer` (`store-stream-slot.hirsel:400-425`) | At L8 the relay and `SlotRelayInput` move to the root beside the current worker. At L9 they move with the object queue to `object_writer`. |
+| `reclaim_preview` / `open_object_writer` | they call root durability, pause via a live `Db`, and build and checkpoint the root `Db` (`store-reclaim.hirsel:526-542`, `store-object-writer.hirsel:210,312-324`) | Both stay at the root (R3). `object_writer` receives owned state and inputs. |
+| Tx-bound index reads | `registered_index` borrows from `Tx`; `probe_index_keys` and `totals` read `Tx` (`store-index-registry.hirsel:138,187`, `store-aggregate.hirsel:109`) | L10 extracts the registry and the pure functions. The Tx adapters stay with `Tx` and are rewritten over `txn.TxState` at L12. |
+| `staged_reader(Preparation)` | reads `source.db` (`store-export.hirsel:607`) | `read` takes a neutral `read.ReaderInput` (roots, catalog, limits, pool). `staged_reader` stays at the root. |
+| Commit path | `available_journal(db,..)`; `settle_draft` calls root `cut_install` (`store-keyed-journal.hirsel:172-182`, `store-commit.hirsel:319-340`) | `txn` takes limits and an accounting snapshot as arguments. `settle_draft` returns `txn.CutDecision` (`None \| PreCut \| Reseal`) to the root coordinator, which runs the cut and the handoff. |
+| `Preparation` | it owns a full `Db`; `begin_copy` calls checkpoint and durable; activation installs projectors (`store-export.hirsel:391-412`, `store-activation.hirsel:203-229`) | The prepared `Db` and the publication and install orchestration stay at the root. `transfer` owns copy and lease state. |
+| Verify and repair | `verify_release` invokes a root-typed declaration on a `Db`; `verify_step` takes the `Db` (`store-inspect.hirsel:97-124`) | Both are public and stay at the root. `maintenance` owns `IndexWalk` and the pure fold and walk steps. |
+| Pack cache | `ObjectsCache` and `history_read_pack` (`store-object-cache.hirsel:7,284`) are used by history; `objects_cache` builds the public authority option | Cache internals go to `history` at L7. Public `objects_cache` stays at the root. |
+| Offline backup | `prepare_backup` / `backup_offline` / `backup_with_writer` (`store-backup-offline.hirsel:15-64`) | All five public declarations stay at the root. `backup_lock` and `copy_backup_journal` go to `capture` at L7. `backup_with_writer` keeps opening the writer at the root. |
+
+### 3.4 Per-file inventory (all 127 production files, by declaration)
+
+Rules for reading the table:
+- **Private declarations go to** names the module that receives the file's private declarations, except those listed in the last two columns. A file in `"store"` keeps everything.
+- **Public declarations kept in `"store"`** move to `store-api-<stem>.hirsel` when the file is reassigned (R1).
+- **Root-held** lists private functions whose headers take `Db`, `DiskState` or `Preparation`. They stay at the root under R3 unless the lane row names their neutral inputs.
+- The `store.hirsel` row is expanded in §7.
+
+| # | File | Decls (pub/priv) | Private declarations go to | Public declarations kept in `"store"` (root adapters) | Root-held Db-bound privates (R3) | Other private exceptions |
+|---|---|---|---|---|---|---|
+| 1 | `store.hirsel` | 108/269 | §7.2 (by declaration) | 108 declarations; see §7.1 | see §7.2 | — |
+| 2 | `store-limits.hirsel` | 5/13 | `types` (L1) | `FRAME_LIMIT`, `VALUE_LIMIT`, `StoreLimits`, `default_limits`, `store_limits` | — | `replay_within_limits` → format |
+| 3 | `store-stream-key.hirsel` | 9/1 | `format` (L1) | `StreamId`, `StreamKey`, `SUBJECT_MAX`, `STREAM_RETENTION_MS`, `STREAM_FUTURE_SLACK_MS`, `caller_key`, `stream_key_bytes`, `stream_record_matches`, `keyed_time` | — | — |
+| 4 | `store-keyed-journal.hirsel` | 0/16 | `format` (L1) | — | — | `materialize_keyed_edits` → pages, `keyed_lookup` → pages, `keyed_draft_live` → pages, `resident_with_credit` → txn, `available_resident` → txn, `available_journal` → txn, `draft_credit` → txn |
+| 5 | `store-keyed-claims.hirsel` | 15/39 | `txn` (L12) | `CLAIM_DONE_MAX`, `KEYED_OP_RECORD_MAX`, `ClaimKey`, `KeyedPolicy`, `ClaimAdmission`, `ClaimCompletion`, `claim_ticket`, `claim_key_bytes`, `claim_reply_expiry`, `check_keyed_policy`, `keyed_policy`, `admit_claim`, `conclude_claim`, `KeyedCallRecord`, `keyed_completion` | `validate_claim_completion`, `rebuild_keyed_credit`, `keyed_completion_credit`, `check_keyed_completion` | — |
+| 6 | `store-keyed-lifecycle.hirsel` | 15/4 | `txn` (L12) | `OpenClaimCursor`, `open_claim_cursor`, `next_open_claim`, `ClaimRecovery`, `recovery_policy`, `claim_clock`, `recover_claim`, `has_keyed_ops`, `ClaimExpiry`, `DroppedClaimOp`, `check_dropped_claim_ops`, `ClaimSweep`, `claim_sweep_start`, `ClaimSweepWork`, `sweep_claims` | `check_keyed_open` | — |
+| 7 | `store-streams.hirsel` | 11/40 | `txn` (L12) | `reclaim_streams`, `AnonymousCursor`, `anonymous_cursor`, `reclaim_startup_streams`, `sweep_streams`, `Completion`, `ticket`, `Admission`, `release_stream_admit`, `admit`, `admit_while` | `stream_control`, `admit_stream`, `stream_changes`, `reclaim_front`, `stream_admit_held`, `admit_existing`, `admit_next`, `admit_commit`, `stream_live` | — |
+| 8 | `store-attempts.hirsel` | 1/14 | `txn` (L12) | `look` | `staged_until_decided`, `call_pin_root`, `deliver_call_miss`, `draft_call`, `metered_draft` | — |
+| 9 | `store-commit.hirsel` | 0/19 | `txn` (L12) | — | `prepare_edited_roots`, `prepare_direct_edit`, `direct_data_edits`, `prepare_run_commit`, `reserve_tiered_freed`, `commit_prepared`, `draft_row_account`, `settle_draft`, `settle_admit`, `frame_draft`, `over_bound` | — |
+| 10 | `store-commit-wire.hirsel` | 0/14 | `format` (L1) | — | — | `DataOrder` → txn, `data_order` → txn, `ordered_row` → txn, `stored_prior` → txn |
+| 11 | `store-mux.hirsel` | 6/17 | `txn` (L12) | `Parked`, `park_id`, `park_notices`, `poll_parked`, `cancel_parked`, `resume_parked` | `attach_tiered_pager`, `clear_parked`, `revoke_parked`, `send_parked_demand`, `install_parked`, `call_page_source`, `drive_served`, `decide_served` | `ParkEntry` → pager, `ParkQueue` → pager, `empty_park_queue` → pager, `park_slot` → pager, `revoke_entry` → pager, `first_unsent` → pager, `parked_in_flight` → pager |
+| 12 | `sizes.hirsel` | 26/48 | `store` (unchanged) | `Kind`, `Options`, `Overrides`, `Shortage`, `ROW_KEY_LIMIT`, `small_place_limits`, `WriterPlan`, `derived_sizes`, `sized`, `sized_with`, `directory_writer_need`, `PlacePlan`, `planned`, `planned_options`, `planned_bytes`, `planned_sim_bytes`, `planned_capture`, `writer_plan`, `writer_bytes`, `FollowerPlan`, `follower_plan`, `plan_bytes`, `service_bytes`, `follower_starter_bytes`, `sim_level_reservation`, `resident_row_bytes` | — | — |
+| 13 | `store-journal-worker.hirsel` | 0/20 | `journal` (L6) | — | — | — |
+| 14 | `store-journal-status.hirsel` | 1/6 | `journal` (L6) | `close` | `journal_receive`, `journal_ack`, `journal_poll`, `journal_poll_groups`, `close_ack` | — |
+| 15 | `store-journal-recover.hirsel` | 0/23 | `journal` (L6) | — | — | — |
+| 16 | `store-capture.hirsel` | 7/28 | `capture` (L7) | `Purpose`, `Part`, `Need`, `BOOTSTRAP`, `PreparedCapture`, `capture_need`, `prepare` | — | — |
+| 17 | `store-capture-check.hirsel` | 3/22 | `capture` (L7) | `CheckTotals`, `CheckError`, `check_capture` | — | — |
+| 18 | `store-backup-offline.hirsel` | 5/2 | `capture` (L7) | `BackupError`, `PreparedBackup`, `prepare_backup`, `backup_offline`, `backup_with_writer` | — | — |
+| 19 | `store-capture-check-journal.hirsel` | 0/11 | `capture` (L7) | — | — | — |
+| 20 | `store-capture-journal.hirsel` | 0/12 | `capture` (L7) | — | — | — |
+| 21 | `store-capture-pages.hirsel` | 0/15 | `capture` (L7) | — | — | — |
+| 22 | `store-capture-catalog.hirsel` | 0/11 | `capture` (L7) | — | — | — |
+| 23 | `store-capture-describe.hirsel` | 4/15 | `capture` (L7) | `DescribeEntry`, `DescribeTotals`, `DescribeLine`, `describe_capture` | — | — |
+| 24 | `store-pages.hirsel` | 0/51 | `pages` (L2) | — | — | — |
+| 25 | `store-changes.hirsel` | 4/14 | `read` (L11) | `Trimmed`, `Changes`, `ChangePage`, `changes_page` | — | — |
+| 26 | `store-tiered.hirsel` | 0/15 | `pager` (L5) | — | — | — |
+| 27 | `store-tiered-frames.hirsel` | 0/7 | `format` (L1) | — | — | — |
+| 28 | `store-tiered-packs.hirsel` | 0/6 | `pager` (L5) | — | — | — |
+| 29 | `store-tiered-ranges.hirsel` | 0/16 | `pager` (L5) | — | — | — |
+| 30 | `store-tiered-cache.hirsel` | 1/22 | `pager` (L5) | `READER_PIN_MIN` | — | — |
+| 31 | `store-tiered-pager.hirsel` | 0/32 | `pager` (L5) | — | — | — |
+| 32 | `store-tiered-pager-batch.hirsel` | 0/8 | `pager` (L5) | — | — | — |
+| 33 | `store-tiered-attempt.hirsel` | 0/51 | `pager` (L5) | — | — | — |
+| 34 | `store-tiered-plan.hirsel` | 0/11 | `pager` (L5) | — | — | — |
+| 35 | `store-tiered-point-read.hirsel` | 0/13 | `pager` (L5) | — | — | — |
+| 36 | `store-tiered-count.hirsel` | 0/3 | `pager` (L5) | — | — | — |
+| 37 | `store-tiered-scan.hirsel` | 0/9 | `pager` (L5) | — | — | — |
+| 38 | `store-tiered-span.hirsel` | 0/6 | `pager` (L5) | — | — | — |
+| 39 | `store-tiered-tx-read.hirsel` | 2/10 | `txn` (L12) | `TxIndexTiered`, `fetch_many` | — | — |
+| 40 | `store-tiered-initial-changes.hirsel` | 0/2 | `pager` (L5) | — | — | — |
+| 41 | `store-tiered-changes.hirsel` | 0/24 | `pager` (L5) | — | — | — |
+| 42 | `store-tiered-pins.hirsel` | 0/8 | `pager` (L5) | — | — | — |
+| 43 | `store-tiered-overlay.hirsel` | 0/12 | `pager` (L5) | — | — | — |
+| 44 | `store-tiered-replay.hirsel` | 0/11 | `pager` (L5) | — | — | — |
+| 45 | `store-tiered-fold.hirsel` | 0/28 | `pager` (L5) | — | — | — |
+| 46 | `store-tiered-emission.hirsel` | 0/13 | `pager` (L5) | — | — | — |
+| 47 | `store-tiered-publish.hirsel` | 0/17 | `pager` (L5) | — | `stage_tiered_cut`, `drain_cut`, `install_tiered_holders` | — |
+| 48 | `store-cut-participants.hirsel` | 0/8 | `manifest` (L4) | — | `disk_cut_state` | — |
+| 49 | `store-fork.hirsel` | 1/3 | `txn` (L12) | `fork` | `plan_fork`, `fork_live` | — |
+| 50 | `store-tiered-probe.hirsel` | 0/5 | `pager` (L5) | — | — | — |
+| 51 | `store-tiered-probe-index.hirsel` | 0/7 | `pager` (L5) | — | — | — |
+| 52 | `store-tiered-promote.hirsel` | 0/19 | `pager` (L5) | — | `promote_cut_holder` | — |
+| 53 | `store-tiered-compact.hirsel` | 0/22 | `pager` (L5) | — | `compact_cut` | — |
+| 54 | `store-tiered-frees.hirsel` | 0/16 | `manifest` (L4) | — | — | — |
+| 55 | `store-tiered-lineage.hirsel` | 0/31 | `manifest` (L4) | — | — | — |
+| 56 | `store-tiered-residency.hirsel` | 2/15 | `pager` (L5) | `Residency`, `set_residency` | `admit_tiered_plan`, `start_residency_pager`, `stop_residency_pager`, `residency_to_tiered`, `publish_tiered_residency`, `residency_to_memory` | — |
+| 57 | `store-manifest.hirsel` | 0/62 | `manifest` (L4) | — | — | — |
+| 58 | `store-list-read.hirsel` | 0/12 | `manifest` (L4) | — | — | — |
+| 59 | `store-manifest-wire.hirsel` | 0/29 | `manifest` (L4) | — | — | — |
+| 60 | `store-page-recovery.hirsel` | 0/5 | `manifest` (L4) | — | — | — |
+| 61 | `store-locations.hirsel` | 0/40 | `manifest` (L4) | — | — | — |
+| 62 | `store-packs.hirsel` | 0/33 | `manifest` (L4) | — | — | — |
+| 63 | `store-pack-index.hirsel` | 0/16 | `manifest` (L4) | — | — | — |
+| 64 | `store-scrub.hirsel` | 4/13 | `manifest` (L4) | `Scrub`, `ScrubReport`, `begin_scrub`, `scrub_step` | — | — |
+| 65 | `store-scrub-pace.hirsel` | 13/10 | `manifest` (L4) | `ScrubRound`, `ScrubHistory`, `ScrubConfig`, `ScrubStatus`, `ScrubStepResult`, `ScrubPacer`, `scrub_history`, `last_complete_scrub_round`, `record_scrub_round`, `begin_scrub_pacer`, `scrub_pacer_status`, `scrub_pacer_step`, `scrub_pacer_stop` | — | — |
+| 66 | `store-cut-retirement.hirsel` | 0/1 | `manifest` (L4) | — | — | — |
+| 67 | `store-history.hirsel` | 0/31 | `history` (L7) | — | — | — |
+| 68 | `store-stream-frames.hirsel` | 0/54 | `format` (L1) | — | — | — |
+| 69 | `store-stream-types.hirsel` | 6/0 | `store` (unchanged) | `HostStreamId`, `StreamField`, `StreamRefusal`, `StreamLatch`, `stream_refusal_text`, `stream_latch_text` | — | — |
+| 70 | `store-stream-service.hirsel` | 0/32 | `host_stream` (L8) | — | — | — |
+| 71 | `store-stream-slot.hirsel` | 12/32 | `host_stream` (L8) | `Batching`, `StreamLimits`, `StreamPlan`, `StreamRoot`, `JournalSlot`, `JournalService`, `stream_service_bytes`, `journal_service`, `journal_slot`, `streamed`, `stream_reader`, `close_journal_service` | — | `slot_relay` → store (L8), object_writer (L9), `SlotRelayInput` → store (L8), object_writer (L9) |
+| 72 | `store-stream-task.hirsel` | 0/31 | `host_stream` (L8) | — | — | — |
+| 73 | `store-stream-poll.hirsel` | 0/17 | `host_stream` (L8) | — | — | — |
+| 74 | `store-stream-claim.hirsel` | 0/21 | `host_stream` (L8) | — | — | — |
+| 75 | `store-stream-settle.hirsel` | 0/6 | `host_stream` (L8) | — | — | — |
+| 76 | `store-stream-gc.hirsel` | 0/28 | `host_stream` (L8) | — | — | `XIndexEntry` → format, `XIndex` → format, `stream_xindex_encode` → format, `stream_xindex_decode` → format |
+| 77 | `store-stream-janitor.hirsel` | 0/8 | `host_stream` (L8) | — | — | — |
+| 78 | `store-stream-follow.hirsel` | 0/9 | `host_stream` (L8) | — | — | — |
+| 79 | `store-stream-archive.hirsel` | 0/12 | `host_stream` (L8) | — | — | — |
+| 80 | `store-history-read.hirsel` | 0/19 | `history` (L7) | — | — | — |
+| 81 | `store-history-witness.hirsel` | 0/2 | `history` (L7) | — | — | — |
+| 82 | `store-history-packs.hirsel` | 0/31 | `history` (L7) | — | — | — |
+| 83 | `store-reclaim.hirsel` | 10/29 | `object_writer` (L9) | `RECLAIM_FORMAT_VERSION`, `RECLAIM_TOOL_VERSION`, `ReclaimKind`, `ReclaimItem`, `ReclaimStatus`, `ReclaimList`, `PurgeReport`, `ReclaimError`, `reclaim_preview`, `reclaim_purge` | `record_object_lane_failure` | — |
+| 84 | `store-register.hirsel` | 0/29 | `history` (L7) | — | — | — |
+| 85 | `store-object-authority.hirsel` | 2/3 | `history` (L7) | `EndpointRefusal`, `endpoint_refusal_text` | — | — |
+| 86 | `store-object-cache.hirsel` | 1/17 | `history` (L7) | `objects_cache` | — | — |
+| 87 | `store-object-open.hirsel` | 0/14 | `object_writer` (L9) | — | — | — |
+| 88 | `store-object-import.hirsel` | 1/1 | `transfer` (L13) | `import_authority` | `history_import_base` | `history_import_base` → store |
+| 89 | `store-object-export.hirsel` | 0/10 | `transfer` (L13) | — | `begin_object_export_copy`, `object_export_capture` | — |
+| 90 | `store-export.hirsel` | 17/34 | `transfer` (L13) | `ExportStamp`, `Exported`, `ExportCopy`, `DeployError`, `export_copy`, `begin_export`, `begin_export_copy`, `begin_backup`, `export_leased`, `release_export`, `ExportTail`, `ExportRound`, `advance_export`, `copy_export_tail`, `Preparation`, `open_export`, `restore` | `leased_step_base`, `record_leased_step`, `begin_copy`, `open_copied` | — |
+| 91 | `store-prepared-check.hirsel` | 0/2 | `transfer` (L13) | — | — | — |
+| 92 | `store-catchup.hirsel` | 1/7 | `transfer` (L13) | `catch_up_export` | — | — |
+| 93 | `store-rounds.hirsel` | 5/32 | `transfer` (L13) | `KeptImport`, `ValidatedRound`, `keep_import`, `validate_round`, `apply_round` | `import_pin_slot`, `orphan_import_pin`, `hold_import`, `install_account` | — |
+| 94 | `store-install.hirsel` | 3/4 | `transfer` (L13) | `cutover_settled`, `perform_cutover`, `perform_bound_cutover` | `accept_cutover`, `install_prepared`, `perform_cutover_with`, `forget_import` | — |
+| 95 | `store-object-cut.hirsel` | 0/20 | `history` (L7) | — | — | — |
+| 96 | `store-activation.hirsel` | 11/17 | `transfer` (L13) | `StagedMigration`, `staged_install_snapshot`, `stage_rewrite`, `stage_activation`, `activation_install_allowed`, `install_activation`, `install_bound_activation`, `prepared_rewrites`, `ImportSettlement`, `import_settlement`, `import_migration` | `staged_migration`, `install_activation_layout`, `publish_schema_plan`, `publish_schema_plan_binding`, `validate_rewrite_base` | — |
+| 97 | `store-object-journal.hirsel` | 0/16 | `object_writer` (L9) | — | — | — |
+| 98 | `store-sim-levels.hirsel` | 11/20 | `object_writer` (L9) | `SimLevels`, `LevelWorld`, `LevelSync`, `LevelUntil`, `LevelHold`, `LevelKind`, `LevelEvent`, `level_world`, `level_sync`, `level_mark`, `level_log` | — | — |
+| 99 | `store-object-writer.hirsel` | 5/21 | `object_writer` (L9) | `Refusal`, `open_authority`, `claim_of`, `archive`, `fresh_snapshot` | `log_directory`, `object_writer_healthy`, `object_writer_open`, `object_state`, `object_cut_due`, `open_object_writer`, `object_stream_close`, `object_cut_close`, `take_object_journal`, `take_object_journal_with`, `object_cut_state`, `object_cut_work` | — |
+| 100 | `store-levels.hirsel` | 6/3 | `object_writer` (L9) | `Level`, `levels`, `level`, `durable_at`, `Position`, `position` | `store_level_name`, `weak_covered`, `durable_weak` | — |
+| 101 | `store-health.hirsel` | 3/10 | `object_writer` (L9) | `Health`, `health`, `on_unhealthy` | `reclaim_state` | — |
+| 102 | `store-attention.hirsel` | 7/6 | `store` (unchanged) | `Accounts`, `accounts`, `IndexDrift`, `IndexReport`, `Attention`, `attention`, `attention_mark` | — | — |
+| 103 | `store-health-types.hirsel` | 2/0 | `status` (unchanged) | `Health`, `StreamLatch` | — | — |
+| 104 | `store-followers.hirsel` | 13/30 | `object_writer` (L9) | `Authority`, `log_authority`, `Followers`, `followers`, `Follower`, `follower`, `follower_branch`, `snapshot_follower`, `applied`, `catch_up`, `fresh`, `at_least`, `follower_floor` | — | — |
+| 105 | `store-follower-service.hirsel` | 7/17 | `object_writer` (L9) | `FollowerService`, `FollowerOwner`, `FollowerSlot`, `follower_service`, `follower_owner`, `close_follower_service`, `follower_slot` | — | — |
+| 106 | `store-object-follower.hirsel` | 5/10 | `object_writer` (L9) | `object_authority`, `sim_authority`, `Claim`, `HeadView`, `follower_head` | — | — |
+| 107 | `store-layout.hirsel` | 1/2 | `pages` (L2) | `fixture_broken_handoff` | — | — |
+| 108 | `store-reexec.hirsel` | 13/14 | `txn` (L12) | `Difference`, `UnknownReason`, `Verdict`, `ReplaySource`, `reexecute`, `prepare_reexecute`, `declare_replay`, `replay_record`, `reexecute_with`, `ReplayProjection`, `project_recorded`, `RecordedClaim`, `recorded_claim` | `recorded_commit`, `base_roots`, `rerun_attempt`, `rerun`, `replay_source`, `replay_run` | — |
+| 109 | `store-tx.hirsel` | 4/39 | `txn` (L12) | `rollback_writes_on_error`, `rollback_writes_on_overrun`, `pop_first`, `pop_last` | — | — |
+| 110 | `store-tiered-refusals.hirsel` | 2/6 | `types` (L1) | `TieredRefusal`, `tiered_refusal_text` | `store_has_tiered`, `require_tiered_storage`, `require_archive_authority` | — |
+| 111 | `store-index-registry.hirsel` | 1/56 | `indexes` (L10) | `IndexState` | — | — |
+| 112 | `store-index-build.hirsel` | 2/21 | `maintenance` (L14) | `index_build_step`, `rebuild_index` | `tiered_rows_after`, `tiered_rows_after_mode`, `building_index`, `demote_drifted` | — |
+| 113 | `store-aggregate.hirsel` | 5/10 | `indexes` (L10) | `Aggregate`, `Totals`, `aggregate`, `totals`, `rebuild_aggregate` | — | — |
+| 114 | `store-verify.hirsel` | 11/18 | `maintenance` (L14) | `WalkFault`, `WalkFinding`, `WalkReport`, `WalkMode`, `IndexWalk`, `begin_verify`, `WalkCoverage`, `IndexCoverage`, `walk_coverage`, `verify_step`, `allow_unverified_teardown` | `walk_index`, `verify_step_read`, `walk_sums`, `walk_sum_entries`, `walk_rows`, `walk_entries`, `teardown_hook`, `teardown_check_bucket`, `verify_teardown` | — |
+| 115 | `store-expiry.hirsel` | 3/7 | `maintenance` (L14) | `expire_rows`, `Swept`, `sweep_expired` | `due_rows` | — |
+| 116 | `store-inspect.hirsel` | 8/2 | `capture` (L7) | `EntryForm`, `CatalogEntry`, `snapshot_identity`, `catalog_entries`, `VerifyOutcome`, `verify_release`, `RepairOutcome`, `repair_indexes` | — | `OPERATOR_ROWS` → maintenance, `OPERATOR_SCRUB_BYTES` → maintenance |
+| 117 | `store-handle-check.hirsel` | 0/4 | `catalog` (L3) | — | — | — |
+| 118 | `store-declare.hirsel` | 31/26 | `catalog` (L3) | `Mode`, `Declare`, `TableDecl`, `declared_table`, `declare_verify`, `seal_verify`, `declare`, `bind_declaration`, `has_table`, `declare_read_only`, `seal_read_only`, `bind_read_only`, `DeclaredCollection`, `describe_declarations`, `declare_follower`, `declare_migration`, `finish_migration`, `declare_export`, `finish_export_declaration`, `declare_table`, `declare_release_table`, `declare_activation_table`, `index`, `covering`, `covering_row`, `finish`, `seal`, `seal_follower`, `migrate_table`, `drop_named_table`, `rename_table` | `declaration_base` | — |
+| 119 | `store-migration.hirsel` | 12/11 | `catalog` (L3) | `Migration`, `CollectionKind`, `CollectionInfo`, `list_collections`, `stage_migration`, `run_migration`, `ConflictKeys`, `BackfillOutcome`, `MigrationBackfill`, `MigrationChange`, `MigrationPreview`, `preview_migration` | `schema_plan`, `stage_migration_plan` | — |
+| 120 | `store-projector.hirsel` | 27/53 | `maintenance` (L14) | `Binding`, `Generation`, `Image`, `Pass`, `Merge`, `Projection`, `Live`, `Cadence`, `cadence`, `Source`, `ProjectionDecl`, `Delta`, `Fold`, `Stepped`, `ProjectError`, `projection`, `projector`, `main_commit_version`, `projector_names`, `project_step`, `binding`, `live`, `projection_row`, `rebuild`, `pinned`, `pin`, `unpin` | `projector_run`, `source_reader`, `step_declared`, `projector_slot`, `read_projection`, `project_target`, `project_binding`, `borrowed_projection_base`, `pin_projection_target`, `project_commit`, `discard_projection_pass`, `discard_merge`, `retire_projection`, `rebind_projection`, `publish_projection_page`, `continue_projection`, `merge_projection`, `tend_projection`, `step_projector`, `pin_index`, `owned_pin`, `replace_projector_pin`, `pin_shares_head`, `change_pin`, `pin_delta`, `remove_pin` | — |
+| 121 | `store-tail.hirsel` | 3/8 | `pages` (L2) | `key_codec`, `Tail`, `read_tail` | — | — |
+| 122 | `store-read.hirsel` | 36/32 | `read` (L11) | `table_identity`, `Reader`, `reader`, `follower_reader`, `read_only_reader`, `staged_reader`, `copy_env`, `SpanRows`, `open_span_changes`, `next_span_change`, `span_changes`, `Rows`, `get`, `count_at`, `scan`, `scan_reverse`, `find`, `next`, `range`, `range_reverse`, `range_prefix`, `count`, `TxRows`, `next_in`, `IndexRows`, `IndexEntries`, `primary_key`, `lookup`, `lookup_prefix`, `entries`, `next_indexed`, `next_entry`, `ReadOnly`, `read_only_table`, `read_only_get`, `read_only_snapshot` | — | — |
+| 123 | `store-read-pages.hirsel` | 4/8 | `read` (L11) | `scan_page`, `find_page`, `scan_next`, `find_next` | — | — |
+| 124 | `store-cell.hirsel` | 9/21 | `txn` (L12) | `Cell`, `cell_identity`, `cell_schemas`, `declare_cell`, `cell_fetch`, `cell_get`, `cell_set`, `cell_clear`, `published_cell` | — | — |
+| 125 | `store-log.hirsel` | 20/23 | `txn` (L12) | `Log`, `LogBounds`, `log_identity`, `log_schemas`, `Retain`, `declare_log`, `retain_step`, `append`, `bounds`, `log_fetch`, `last`, `log_bounds`, `log_get`, `log_last`, `log_scan`, `log_range`, `trim_before`, `published_log`, `tail_window`, `window_changes` | `bind_retention` | — |
+| 126 | `store-edge.hirsel` | 7/1 | `txn` (L12) | `Edge`, `declare_edge`, `edge_put`, `edge_delete`, `edge_out`, `edge_out_prefix`, `edge_in` | — | — |
+| 127 | `main.hirsel` | 1/0 | `main` (unchanged) | `main` | — | — |
+
+---
+
+## 4. Owned Subsystem State (Finding 7)
+
+### 4.1 Composition roots
 
 ```hirsel unbuilt
 pub opaque type Db {
-    // Immutable identity, capabilities & cross-cutting root
-    store: types.StoreKey,
+    store: StoreId,
     clock: Clock,
-    limits: types.LimitsSpec,
+    limits: StoreLimits,
     attention_seq: u64,
-    // Owned subsystem state (each pub opaque in its module)
     holders: pages.HolderTable,
     schema: catalog.SchemaState,
     indexes: indexes.IndexState,
     pager: pager.PagerState,
     accounting: txn.AccountingState,
     call_streams: txn.CallStreamState,
-    projectors: maintenance.ProjectorState,
-    // Shared commit-ticket sequence & optional durable backend
+    projectors: List[DeclaredProjector],   // root: registrations name root-typed StaticFns (§3.3)
     frame_seq: u64,
     disk: Option[DiskState]
 }
-```
 
-`DiskState` drops from **34 raw fields** to **8 fields**, separating Directory (`log@1`) and Object (`objects@1`/`sim@1`) cleanly behind `Backend`:
-
-```hirsel unbuilt
 type Backend = DirBackend(journal.DirJournalState) | ObjectBackend(object_writer.ObjectWriterState)
 
 type DiskState {
-    // Immutable open context
     open: u64,
-    options: types.Options,
+    options: Options,
     tasks: Tasks,
-    // Cross-backend CallRecord retention coordinate pair
     retention: journal.RecordRetention,
-    // Owned subsystem states
     packs: manifest.PackDiskState,
     tiered: pager.DiskPagerState,
     transfer: transfer.TransferState,
-    // Exclusive persistence backend
     backend: Backend
 }
 ```
 
-### 4.2 Distinct Lifecycles Preserved by This Representation
+`Db` is a root type, so its fields keep root types (`StoreId`, `StoreLimits`). `DeclaredProjector` stays at the root because its fold descriptor names root types (R4). `maintenance` takes neutral projector state from it.
 
-- **`Memory` (`Db.disk == None`):** No `DiskState`, no journal worker, no `Backend`. Commits use `AccountingState.changes` as ticket sequences (`store-commit.hirsel:254`). `CallStreamState` and `PagerState` hold their own copied policy fields (`stream_retention_ms`, `streams_per_caller_max`, `streams_max`, `writer_pin_bytes`) from `Options` so memory opens need no `DiskState`.
-- **`LogAuthority` → `DirBackend(journal.DirJournalState)`:** Owns non-optional `lock: HostFile` and `d: Dir`, `creation: Bytes`, `file_seq`/`file_end`, `poison: Option[IoError]`, Directory worker + `coalesce_timer_task` + `end_timer_task` *(3076)*, and `DirJournalMsg` channel.
-- **`ObjectAuthority` (`authority_kind == 1`) & `SimAuthority` (`authority_kind == 2`) → `ObjectBackend(object_writer.ObjectWriterState)`:** Carries `authority_kind: u8` and stream mode (`Standalone` vs `Attached(HostStreamId)` vs `DirectService` when `attached == true && stream == None`). Owns `ObjectJournalMsg` worker, `journal_idle_task` (idle head poll timer for standalone OR `slot_relay` task for attached), `weak` waiters (`SimAuthority`), `head_entry_seq`, `draft_offset`, `export_lifetime`, `archive_on`, `pending_archive_on`, `failed: Option[Error]`, and ATTACH flags.
-- **`JournalService` (host stream):** Independent multi-Place service task owning its own `S/reg`, `RegisterLane`, `HoldTracker`, `StreamGcState`, and `slots`. Its lifecycle is completely independent of any one `Db`.
-- **`ReadOnly`, `SharedCapture` *(3062)*, and `Follower` / `FollowerService`:** Independent lifetimes without `Db` or `DiskState`.
+### 4.2 Lifecycles
 
-### 4.3 Corrected Field-by-Field Assignment: `Db` (All 39 Fields)
+- **Memory** (`disk == None`): no journal or backend. Tickets use `accounting.changes`. `CallStreamState` and `PagerState` copy their policy fields from `Options`, so a memory open needs no `DiskState`.
+- **Directory** → `DirBackend(journal.DirJournalState)`:
+  - owns `lock: HostFile`, `d: Dir`, `creation`, `file_seq`/`file_end`, `poison`, the Directory worker, the `DirJournalMsg` queue and `QueueAccounting`;
+  - timer and coalescing state are not part of this cutover; 3103's accepted design owns them.
+- **Object / Sim** → `ObjectBackend(object_writer.ObjectWriterState)`:
+  - the 22 existing fields (§4.5) plus the moved per-backend `DiskState` fields (§4.4);
+  - stream modes: standalone, attached with a live stream, and attached with `stream == None`.
+- **Host-stream service:** a separate lifetime that owns `RegisterLane`, `HoldTracker`, GC state and slots.
+- **`ReadOnly`, `SharedCapture`, `Follower`/`FollowerService`:** independent of `Db`.
 
-Every invariant below corrects the errors flagged in Review 3085 Finding 7:
+### 4.3 `Db` (all 39 fields)
 
-| # | Current `Db` Field | Type | New Owner Module & Struct | Corrected Invariant Maintained by Owning Module |
+| # | Current `Db` field | Type | New owner | Invariant |
 |---|---|---|---|---|
 | 1 | `store` | `StoreId` | **`store` (stays on `Db`)** | Immutable 128-bit store identity fixed at genesis/open. |
 | 2 | `clock` | `Clock` | **`store` (stays on `Db`)** | Injected host clock capability. |
 | 3 | `limits` | `StoreLimits` | **`store` (stays on `Db`)** | Initialized from `named_limits(o.limits)` on memory open (`store.hirsel:609`) and overwritten with the selected MANIFEST's recorded limits on durable open (`store.hirsel:3918`, `store-object-writer.hirsel:216`). Immutable after open finishes. |
 | 4 | `disk` | `Option[DiskState]` | **`store` (stays on `Db`)** | `None` iff `memory@1`; `Some` iff `log@1`/`objects@1`/`sim@1`. |
 | 5 | `attention_seq` | `u64` | **`store` (stays on `Db`)** | Monotonic sequence bumped via `bump_attention(mut db)` on any operator-visible signal change across `indexes` (`count_drift`), `object_writer` (reclaim), or `transfer` (activation). |
-| 6 | `frame_seq` | `u64` | **`store` (stays on `Db`)** | Minted on durable commit/fork installation BEFORE `handoff` (`store-commit.hirsel:228`); `0` on `memory@1` (memory tickets use `AccountingState.changes`, `store-commit.hirsel:254`). On 3075 empty-commit skip, not incremented. `backend.journaled <= frame_seq`. |
+| 6 | `frame_seq` | `u64` | **`store` (stays on `Db`)** | Minted on durable commit/fork installation BEFORE `handoff` (`store-commit.hirsel:228`); `0` on `memory@1` (memory tickets use `AccountingState.changes`, `store-commit.hirsel:254`). Once 3075 lands (before L1), its empty-commit skip does not increment it. `backend.journaled <= frame_seq`. |
 | 7 | `pager` | `Option[Sender[TieredPagerMessage]]` | `pager.PagerState` | `Some` iff Tiered pager is active; paired with `pager_writer` and `park_notices`. |
 | 8 | `pager_writer` | `Option[Sender[TieredPagerMessage]]` | `pager.PagerState` | One-slot writer demand channel into the same pager worker. |
-| 9 | `park_notices` | `Option[Receiver[()]]` | `pager.PagerState` | Coalescing wake receiver handed out at most once via `park_notices(mut db)`. |
+| 9 | `park_notices` | `Option[Receiver[()]]` | `pager.PagerState` | Coalescing wake receiver handed out at most once via `park_notices(mut db)`; taking it leaves `None` while the pager (and `pager`/`pager_writer`) stays live. |
 | 10 | `parked` | `ParkQueue` | `pager.PagerState` | Entries strictly ascending by `id < next_id`; at most one in-flight writer demand; cleared on close/poison. |
 | 11 | `writer_pin_bytes` | `u64` | `pager.PagerState` | Effective policy copied from `Options.writer_pin_bytes` at open (works on memory opens too). |
 | 12 | `indexes` | `IndexRegistry` | `indexes.IndexState` | Maps `(table, index, schema)` to extractors and `LogRetention`; installed through owner methods on both `seal` (`store-declare.hirsel:675`) and `install_activation` (`store-activation.hirsel:223`). |
@@ -280,8 +361,8 @@ Every invariant below corrects the errors flagged in Review 3085 Finding 7:
 | 21 | `bases` | `TailBases` | `pages.HolderTable` | **Derived view** of projector-pin roots; rebuilt atomically inside `HolderTable` on every `pins` mutation. |
 | 22 | `fence` | `u32` | `catalog.SchemaState` | Catalog/activation fence (`0` or `1`). **Mutable with rollback:** `install_activation` temporarily proposes `fence = 1` and restores `old_fence` on refused publication (`store-activation.hirsel:214, 239`). |
 | 23 | `next_table` | `u32` | `catalog.SchemaState` | Strictly greater than every allocated collection/index id in `heads[0].roots.catalog`; committed atomically with `ReplaceMain` root publication. |
-| 24 | `file_seq` | `u64` | Split: `journal.DirJournalState.file_seq` & `object_writer.ObjectWriterState.head_entry_seq` | On `DirBackend`: active `log@1` segment sequence (monotonic across rotations). On `ObjectBackend`: initialized to `head.entry.seq` (`store-object-writer.hirsel:312`), updated to `seq` on every object cut (`:623`), and returned by `archive(mut db, on)` (`:655`). |
-| 25 | `file_end` | `u64` | Split: `journal.DirJournalState.file_end` & `object_writer.ObjectWriterState.draft_offset` | On `DirBackend`: exact byte offset in active `log@1` segment (`>= 72`, reset to `72` on rotate). On `ObjectBackend`: draft framing offset starting at `72`, advanced by `list.len(frame)` on commits/forks (`store-commit.hirsel:223`, `store-fork.hirsel:66`) before `object_journal_add` rebinds frames into GROUP entries (`store-object-journal.hirsel:37`), and reset to `72` on object cut (`store-object-writer.hirsel:624`). |
+| 24 | `file_seq` | `u64` | Split: `journal.DirJournalState.file_seq` & `object_writer.ObjectWriterState.head_entry_seq` (a **new** field, §4.5) | On `DirBackend`: active `log@1` segment sequence (monotonic across rotations). On `ObjectBackend`: initialized to `head.entry.seq` (`store-object-writer.hirsel:312`), updated to `seq` on every object cut (`:623`), and returned by `archive(mut db, on)` (`:655`). |
+| 25 | `file_end` | `u64` | Split: `journal.DirJournalState.file_end` & `object_writer.ObjectWriterState.draft_offset` (a **new** field, §4.5) | On `DirBackend`: exact byte offset in active `log@1` segment (`>= 72`, reset to `72` on rotate). On `ObjectBackend`: draft framing offset starting at `72`, advanced by `list.len(frame)` on commits/forks (`store-commit.hirsel:223`, `store-fork.hirsel:66`) before `object_journal_add` rebinds frames into GROUP entries (`store-object-journal.hirsel:37`), and reset to `72` on object cut (`store-object-writer.hirsel:624`). |
 | 26 | `resident` | `u64` | `txn.AccountingState` | Conservative logical Memory byte count (exact when `settled == changes`, I4); checked against `available_resident`. |
 | 27 | `tiered` | `u64` | `txn.AccountingState` | Logical Tiered byte count updated by prior deltas and settled on cuts. |
 | 28 | `page_resident` | `u64` | `txn.AccountingState` | **Derived charge** (`resident_location_charge(packs.pages.locations)`), refreshed atomically by the root coordinator on open and every cut; reported beside `resident`, never admitted against `ceiling`. |
@@ -295,11 +376,11 @@ Every invariant below corrects the errors flagged in Review 3085 Finding 7:
 | 36 | `streams_per_caller_max` | `u64` | `txn.CallStreamState` | Effective per-caller call-stream cap copied from `Options`. |
 | 37 | `streams_max` | `u64` | `txn.CallStreamState` | Effective global call-stream cap copied from `Options`. |
 | 38 | `stream_sweep_after` | `Option[StreamSweepCursor]` | `txn.CallStreamState` | Incremental cursor for bounded call-stream expiry sweeps. |
-| 39 | `projectors` | `List[DeclaredProjector]` | `maintenance.ProjectorState` | Registered local/follower projectors (`§1.14`); installed via owner operation on both `seal` and `install_activation`. |
+| 39 | `projectors` | `List[DeclaredProjector]` | **`store` (stays on `Db`)** | Registered local/follower projectors (`§1.14`); their `Fold` descriptors name root `Tx`/`Delta` (R4), so they stay at the root; `maintenance` receives neutral walk state. |
 
-### 4.4 Corrected Field-by-Field Assignment: `DiskState` (All 34 Fields)
+### 4.4 `DiskState` (all 34 fields)
 
-| # | Current `DiskState` Field | Type | New Owner Module & Struct | Corrected Invariant Maintained by Owning Module |
+| # | Current `DiskState` field | Type | New owner | Invariant |
 |---|---|---|---|---|
 | 1 | `open` | `u64` | **`store` (stays on `DiskState`)** | Open incarnation/epoch stamped into every `Ticket` and `Snapshot` (`seq` on Directory, `head.pair.epoch` on Object). |
 | 2 | `options` | `Options` | **`store` (stays on `DiskState`)** | Immutable validated `Options` snapshot fixed at open (also source for `forget_import` restoring `AccountingState.ceiling`). |
@@ -322,7 +403,7 @@ Every invariant below corrects the errors flagged in Review 3085 Finding 7:
 | 19 | `creation` | `Bytes` | `journal.DirJournalState` | Pre-allocated 4 KiB-aligned scratch block for `O_DIRECT` segment creation (never allocated on `ObjectBackend`). |
 | 20 | `acks` | `Receiver[Ack]` | Split: `DirJournalState` (`Receiver[DirAck]`) & `ObjectWriterState` (`Receiver[ObjectAck]`) | Strictly ordered durability/error acks; missing worker ack on closed channel poisons (`Dir`) or latches terminal failure (`Object`). |
 | 21 | `journaled` | `u64` | Owned per backend (`QueueAccounting`) | Highest `frame_seq` durably persisted (`journaled <= Db.frame_seq`). |
-| 22 | `inflight` | `u64` | Owned per backend (`QueueAccounting`) | Unacknowledged bytes in flight (`<= FRAME_LIMIT`); charged **once** after successful `channel.send`, subtracted **once** via `bytes_out - acked_bytes` on ack. |
+| 22 | `inflight` | `u64` | Owned per backend (`QueueAccounting`) | Unacknowledged bytes in flight (`<= db.limits.frame`, the open's recorded limit, §5.1 step 4); charged **once** after successful `channel.send`, subtracted **once** via `bytes_out - acked_bytes` on ack. |
 | 23 | `uncovered` | `u64` | Owned per backend (`QueueAccounting`) | **Distinct from `since_cut`!** On Directory reopen (`store.hirsel:3936`), initialized to recovered journal bytes (not `0`); cleared to `0` **only after** `MANIFEST` or Object `head` publication succeeds (`store.hirsel:4108`, `store-object-writer.hirsel:610`). Checked against `available_journal`. |
 | 24 | `since_cut` | `u64` | Owned per backend (`QueueAccounting`) | **Distinct from `uncovered`!** Starts at `0` after reopen; on Directory cut, reset to `0` **before** draining (`store.hirsel:4018`) so refused cuts do not tight-loop; on Object cut, reset to `0` after publication (`store-object-writer.hirsel:611`). Triggers `maybe_checkpoint` when `> options.checkpoint_bytes`. |
 | 25 | `acked_bytes` | `u64` | Owned per backend (`QueueAccounting`) | Cumulative acknowledged byte watermark; prevents `inflight` drift. |
@@ -330,485 +411,450 @@ Every invariant below corrects the errors flagged in Review 3085 Finding 7:
 | 27 | `written_send` | `Sender[WriteNotice]` | Owned per backend (`DirJournalState` & `ObjectWriterState`) | Cloned sender for worker `Barrier` replies. |
 | 28 | `synced` | `Option[Receiver[()]]` | Owned per backend (`DirJournalState` & `ObjectWriterState`) | Coalesced group-sync notification handle sent **after** `Journaled`/`ObjectJournaled` ack (and on terminal failure). |
 | 29 | `poison` | `Option[IoError]` | Owned per backend: `DirJournalState.poison` & `ObjectWriterState.poison` | Sticky first I/O failure (`Closed` on dead outbound queue or worker channel EOF, or Directory I/O error). On `ObjectBackend`, coexists with `ObjectWriterState.failed: Option[Error]` for typed non-I/O failures (`Fenced`, `Latched`, `Remote`, `Undecided`), preserving covered-ticket-before-error! |
-| 30 | `journal` | `Sender[JournalMsg]` | Split: `DirJournalState` (`Sender[DirJournalMsg]`) & `ObjectWriterState` (`Sender[ObjectJournalMsg]`) | Bounded outbound queue (`2 * group_commits + 3` on Directory per 3076; `2 * group_commits` on Object). |
+| 30 | `journal` | `Sender[JournalMsg]` | Split: `DirJournalState` (`Sender[DirJournalMsg]`) & `ObjectWriterState` (`Sender[ObjectJournalMsg]`) | Bounded outbound queue at its current depth on both backends; any depth change belongs to 3103, not this cutover. |
 | 31 | `pending` | `Option[Bytes]` | Owned per backend (`QueueAccounting`) | At most one staged commit/fork frame awaiting immediate `handoff` after commit install. |
-| 32 | `journal_task` | `Task[Result[(), Error]]` | Split: `DirJournalState` (+ `coalesce_timer_task`, `end_timer_task` per 3076) & `ObjectWriterState` | Owned background journal worker task; joined on `close` before `LOCK` release (Directory). |
+| 32 | `journal_task` | `Task[Result[(), Error]]` | Split: `DirJournalState` & `ObjectWriterState` | Owned background journal worker task; joined on `close` before `LOCK` release (Directory). |
 | 33 | `journal_idle_task` | `Option[Task[()]]` | `object_writer.ObjectWriterState` *(never on `DirBackend`)* | Idle head-poll timer (standalone `objects@1`) or `slot_relay` task (attached host-stream Place); cancelled and joined on `close`. |
-| 34 | `object` | `Option[ObjectWriterState]` | `object_writer.ObjectWriterState` *(the `ObjectBackend` arm of `Backend`)* | Complete inventory (`store-object-writer.hirsel:1-24` + backend fields): `authority_kind`, `workers`, `health`, `reclaims`, `unhealthy`, **`export_lifetime`**, `watch`, `terminal`, `locator`, `levels`, `weak`, `pair`, `recovered`, `entries`, `head_entry_seq`, `draft_offset`, `failed`, `stream: Option[HostStreamId]`, `attached: bool`, `has_sealed: bool`, `drop_attach_on_cut: bool`, **`archive_on: u64`**, **`pending_archive_on: Option[bool]`**. *(Explicitly distinguishes `attached` vs live `stream` vs `has_sealed`: an attached head with `live == None` has `attached == true, stream == None` and still requires a forced open-time cut!)* |
+| 34 | `object` | `Option[ObjectWriterState]` | `object_writer.ObjectWriterState` *(the `ObjectBackend` arm of `Backend`)* | All 22 existing fields are listed in §4.5, including `cache` and `tasks` (folded into `DiskState.tasks`). Fields moved in from `Db`/`DiskState` (`head_entry_seq`, `draft_offset`, acks, queue accounting, `poison`) and v2's `authority_kind` are additions. `attached == true, stream == None` still forces an open-time cut. |
+
+### 4.5 `ObjectWriterState` (all 22 existing fields, `store-object-writer.hirsel:1-24`)
+
+| # | Field | Type | v3 owner | Note |
+|---|---|---|---|---|
+| 1 | `workers` | `Option[std.object.Workers]` | `ObjectWriterState` | Upload worker pool. |
+| 2 | `tasks` | `Tasks` | **Consolidated into `DiskState.tasks`** | The same capability; it is not duplicated. |
+| 3 | `health` | `Latest[Health]` | `ObjectWriterState` | Holds root `Health` from `"status"`, which the lower module may name. |
+| 4 | `reclaims` | `Latest[ReclaimFailures]` | `ObjectWriterState` | |
+| 5 | `unhealthy` | `Option[Receiver[()]]` | `ObjectWriterState` | Handed out once by `on_unhealthy`. |
+| 6 | `export_lifetime` | `Option[Sender[()]]` | `ObjectWriterState` | Cleared by `forget_import` through an owner operation. |
+| 7 | `watch` | `Option[Task[()]]` | `ObjectWriterState` | |
+| 8 | `terminal` | `Sender[()]` | `ObjectWriterState` | |
+| 9 | `locator` | `HistoryLocator` | `ObjectWriterState` | |
+| 10 | `levels` | `List[String]` | `ObjectWriterState` | |
+| 11 | `weak` | `Option[WeakWaiters]` | `ObjectWriterState` | Sim only. |
+| 12 | `pair` | `HistoryPair` | `ObjectWriterState` | |
+| 13 | `recovered` | `HistoryRef` | `ObjectWriterState` | |
+| 14 | `entries` | `u64` | `ObjectWriterState` | |
+| 15 | `failed` | `Option[Error]` | `ObjectWriterState` as `Option[types.Failure]` | The root maps it to `Error` at the boundary (R2). It coexists with `poison`. |
+| 16 | `stream` | `Option[HostStreamId]` | `ObjectWriterState` as an internal stream-id rep | `HostStreamId` stays public at the root. |
+| 17 | `attached` | `bool` | `ObjectWriterState` | Can be `attached && stream == None`, which still forces an open-time cut. |
+| 18 | `has_sealed` | `bool` | `ObjectWriterState` | |
+| 19 | `drop_attach_on_cut` | `bool` | `ObjectWriterState` | |
+| 20 | `archive_on` | `u64` | `ObjectWriterState` | |
+| 21 | `pending_archive_on` | `Option[bool]` | `ObjectWriterState` | |
+| 22 | `cache` | `Option[ObjectsCache]` | `ObjectWriterState` holding `history.ObjectsCache` | Set at construction (`store-object-writer.hirsel:316`) and passed into cut emission (`:517`). History reads it again on reopen (`store-history-packs.hirsel:546`). It stays disposable: there is no `Backend` arm, and reopen works after the cache is deleted. L9 must carry it through construction and cut. |
+
+Fields moved from `DiskState`/`Db` into the object arm are additions, not part of this count: `file_seq` → `head_entry_seq`, `file_end` → `draft_offset`, `acks`, `journal`, `journal_task`, `journal_idle_task`, the `QueueAccounting` fields, `written*`, `synced` and `poison`. v2's `authority_kind` is also an addition.
 
 ---
 
-## 5. Foreground Coordinator, Paused-Worker Settlement, and Recovery Fence Contracts (High Findings 4, 5, 6)
+## 5. Coordinator, Paused-Worker Settlement and Recovery (Findings 4, 5, 6)
 
-### 5.1 Single Foreground Commit & Checkpoint Coordinator (`store-coordinators.hirsel`, High Finding 4)
+### 5.1 Foreground commit and checkpoint coordinator (root)
 
-Opaque subsystem states do not coordinate cross-subsystem transactions by themselves. Module **`store` (Layer 12)** is the single foreground coordinator for commits, checkpoints, and durability waits:
+The root is the only foreground coordinator.
 
-1. **Commit sequence (`store_body_at` → `append_transaction_at` → `settle_admit` → `handoff` → `maybe_checkpoint`):**
-   - **Step 1 (Draft):** Run `txn.staged_until_decided(...)`. On `DriftStop`, record drift in `indexes.IndexState`, bump `attention_seq`, return `Failed(Drift)`.
-   - **Step 2 (3075 empty-commit skip branch):** If `is_empty_commit` holds (0 staged data ops after folding callbacks/trims/cells, 0 stream ops, no keyed-credit delta, no `CALL`, `settlement == None`, and no `store.info(mut tx)`):
-     - *Directory (`LOCK`-fenced):* zero I/O, no frame encoded, `Done.info = None`, no `frame_seq`/`changes`/`at` increment, **skip `maybe_checkpoint`**. Ticket carries current `(frame_seq, branch, head)` (or `changes` on Memory).
-     - *Bucket / host-stream (head-fenced):* even if every prior ticket is already covered, execute a fresh head read / ETag compare via `object_writer.object_fresh_probe`. If head changed or claim lost → return `Fenced` and latch identically to a failed head write. Otherwise return `Done(info: None, ...)` with **no cut and no increment**.
-   - **Step 3 (Admission & optional pre-commit accounting cut):** Check `journal_limit` (`uncovered + len(frame) <= available_journal`). If `over_bound && retaining`: compute exact union account; if `accounting.settled != accounting.changes && draft.tiered == None`, run **pre-commit `cut_install(NoHolderChange)`**, then **reseal `draft.frame`** against post-cut `(file_seq, file_end)` (`format.seal_frame(raw, DiskContext(store, 2, seq), offset)`).
-   - **Step 4 (Headroom wait):** Wait via `wait_for_frame_room` until `backend.inflight + len(frame) <= FRAME_LIMIT` (polling acks through the common queue contract).
-   - **Step 5 (Atomic foreground installation):** Update `CallStreamState` (`keyed_credit`, `admits`), reserve/admit `DiskPagerState.tiered_dirty`, advance backend offset (`Dir.file_end` or `Object.draft_offset`) and mint `Db.frame_seq += 1`, stash `backend.pending = frame`, install `HolderTable` roots + `record_bytes`, update `AccountingState` (`resident`, `tiered`, `changes`, `settled`), publish `Latest[Snapshot]`.
-   - **Step 6 (FIFO `handoff`):** Take `backend.pending` and send `Frame(raw, db.frame_seq)` to the backend worker. **Charge `inflight`, `uncovered`, and `since_cut` strictly AFTER `channel.send` succeeds** (`store.hirsel:1142-1148`). On closed channel, poison (`Dir`) or record failure (`Object`) without charging.
-   - **Step 7 (Post-handoff checkpoint):** Call `maybe_checkpoint(mut db)` (skipped on `Refused(Journal)` or 3075 empty-commit skip). If `since_cut > checkpoint_bytes` or `object_cut_due`, execute a **second `cut_install(NoHolderChange)`**, swallowing `Full(_)` as deferred.
+1. **Draft:** `txn` stages the transaction and returns its outcome and a `txn.CutDecision`. On drift, the root records it in `IndexState`, bumps `attention_seq` and returns `Failed(Drift)`.
+2. **3075 empty-commit skip (once 3075 lands, before L1):**
+   - On Directory, there is zero I/O and no increment.
+   - On Bucket or host-stream, the root runs a fresh head check even when the ticket is covered. A changed head or a lost claim returns `Fenced`.
+   - Neither path cuts. This uses 3075's proven check as landed (§8).
+3. **Admission and optional pre-commit cut:** check `uncovered + len(frame) <= available_journal(limits, state)`. `txn` receives that bound as an argument. On `CutDecision.PreCut`, the root runs `cut_install(NoHolderChange)`, then reseals the frame against the post-cut `(file_seq, file_end)`.
+4. **Headroom:** `wait_for_frame_room` waits while `inflight > db.limits.frame - size` (`store.hirsel:1385-1394`). `db.limits.frame` is the open's recorded frame limit, and a store may record a limit smaller than `FRAME_LIMIT`. Using `FRAME_LIMIT` would let more bytes into flight than the open's budget allows.
+5. **Install:**
+   - update `CallStreamState`;
+   - admit `tiered_dirty`;
+   - advance the backend offset;
+   - **on disk opens only**, mint `frame_seq += 1`;
+   - stash `pending`;
+   - install holder roots;
+   - update `AccountingState`;
+   - publish `Latest[Snapshot]`.
 
-2. **Directory checkpoint cut sequence (`cut_install` → `DirBackend`):**
-   1. Resolve orphan import pin if `NoHolderChange`; check `healthy(db)`.
-   2. Reset `DirJournalState.since_cut = 0` **before** draining (`store.hirsel:4018`), leaving `uncovered` untouched.
-   3. Drain through final ticket (`durable_groups(Journal(db.frame_seq, 0, 0))`).
-   4. Reserve holder slot (`prepare_holder_slot`), prune expired `PackDiskState.scrubs` and `compaction.held` leases, build `CutParticipants`, stage Tiered cut (`DiskPagerState`), update `HolderTable.next_node`, raise materialized pin watermark, compute `page_retry_base` and lineage rows, check `available_resident`.
-   5. Inside `prepare_page_cut` retry loop: `plan_page_cut`; if `dir.file_seq != next_seq`, call `journal.dir_rotate` (**a retry after segment creation reuses the already-rotated segment**, `store.hirsel:4070`); write Tiered & page packs; compute `cut_retirement`; build candidate `MANIFEST`.
-   6. Prepare Tiered install, validate candidate (`validate_cut_pages`), **sync directory, write & sync `MANIFEST.tmp`, rename to `MANIFEST`, sync directory again** (`manifest.publish_page_manifest_bytes`).
-   7. Install authoritative state: `PackDiskState.pages`, `RecordRetention(seq, recorded_after)`, clear `uncovered = 0`, reset `DiskPagerState.tiered_dirty`, update `AccountingState` (`checkpointed`, `resident`, `tiered`, `page_resident`, `settled`), install `HolderTable` delta and `TransferState` lease step.
-   8. Unlink retired files (`journal.dir_remove_retired`). **A post-publication removal error poisons the writer (`cut_io_error`, `store.hirsel:4131`) even though the renamed `MANIFEST` is already authoritative.**
+   Memory opens never touch `frame_seq`. Their tickets use `changes`.
+6. **Handoff:** take `pending` and send it. Charge `inflight`, `uncovered` and `since_cut` only after the send succeeds (`store.hirsel:1142-1148`). A closed channel poisons the writer (Directory) or records the failure (Object).
+7. **Post-handoff:** `maybe_checkpoint` runs (it is skipped on `Refused(Journal)` and on the 3075 skip). It may run a second `cut_install`, and it swallows `Full(_)`.
 
-### 5.2 Stream Settlement Under `ObjectPause` (High Finding 5)
+**Directory cut order:**
+1. Check health.
+2. Set `since_cut = 0` before draining.
+3. Drain to the final ticket.
+4. Reserve the holder slot.
+5. Prune leases.
+6. Build the participants from the root's `manifest.CutInput`.
+7. Stage the tiered cut.
+8. In the retry loop, rotate. A retry reuses an already-created segment (`store.hirsel:4070`).
+9. Write the packs.
+10. Validate.
+11. Sync the directory, write and sync `MANIFEST.tmp`, rename it, and sync the directory again.
+12. Install pages, retention, `uncovered = 0`, tiered, accounting and holders.
+13. Remove retired files. A removal error after publication poisons the writer (`store.hirsel:4131`).
 
-During an Object cut (`object_writer.object_cut_state`), the foreground drains the latest ticket, reserves holder capacity, and sends `ObjectPause(handover, resuming)` to the object journal worker. The worker transfers exclusive ownership of `ObjectJournalSession` over `handover` and **blocks on `channel.receive(resuming)`**.
+### 5.2 Settlement under `ObjectPause`
 
-**Non-reentrant settlement invariants (statically preventing worker deadlock):**
-1. **`SettleSession` has zero access to `Sender[ObjectJournalMsg]`:** `host_stream.stream_settle`, `host_stream.stream_settle_sealed`, and `host_stream.stream_poll_head` operate strictly on a narrow `SettleSession` carrying the paused worker's direct I/O resources (`client`, `register`, `authority`, `buffers`, `stream_root`, `last_batch_seq`, `commit_batches`, `archive_on`, `op_ms`, `group_bytes`, `group_commits`). They cannot send `Frame`, `ObjectFresh`, or `ObjectExportRead` to the paused worker.
-2. **Unconditional session return:** `object_cut_state` ALWAYS sends the exclusive session back on `resuming` on **every** exit path (success, `SettleFenced`, `SettleNotApplied`, `Undecided`, or any `Error`), latching `ObjectWriterState.failed` whenever `session.register.terminal` is `Some`.
-3. **Immutable-before-CAS and `HistoryApplied`-only install:** All packs, archive segment, locator, manifest, and checkpoint entry objects upload before `head` CAS (`Match(register.tag)`). **Only `HistoryApplied(tag)`** installs the new `head`, `tag`, `attach`, `locator`, `RecordRetention`, and reports the new cutoff/detach to the stream service. Every non-applied outcome restores `prior_attach` on `session.register.attach` and propagates the latched error.
-4. **Archival & CLAIM ordering:** When `archive_on != 0`, sealed tails settle in exact order **before** the live tail (`stream_settle_sealed` → `stream_settle`), and both before sealing the archive segment. Direct-service `CLAIM` (`attach.live == None`: optional `stream_settle_sealed_core` + `history_advance_claim` entry) remains distinct from slot `CLAIM` (`attach.live == Some(_)`: `slot_claim_frame` + `slot_send` + `slot_wait`).
-5. **`StreamAnswer` FIFO and ticket coverage contract:** `StreamAnswer(SlotAck)` rides the same FIFO `ObjectJournalMsg` channel as `Frame` and control messages. On `SlotFenced(epoch, ok_through, missing)`: if `!missing && ok_through > 0`, emit `ObjectJournaled(ok_through, ...)` + `synced` notice **before** returning `Error(Fenced(epoch))` (covered prefix succeeds before `Fenced`); if `missing`, return `Error(Undecided)`. On `SlotLatched(cause)`, return `Error(Latched(cause))`, and `durable_latch_error` maps every outstanding ticket of an attached `Db` to `Undecided` (even under `Superseded`). Never await an ack that only the paused worker or blocked service loop can deliver.
+The worker hands its `ObjectJournalSession` over `handover` and blocks on `resuming`. Settlement runs on a `host_stream.SettleView`, and that view never holds a sender to the paused worker. The view carries:
+- `client`, `register`, `authority`, `buffers`, `archive_on`, `op_ms`;
+- the batch cursor;
+- **the optional slot identity and incarnation** `(sid, inc)` that `stream_poll_head` reads from `lane.stream` (`store-stream-settle.hirsel:23-35`).
 
-### 5.3 Three Distinct Directory Recovery Entry Points (High Finding 6)
+**Report delivery stays outside the view.** The cut path in `object_writer` returns the session, then delivers the cutoff or detach report to the service.
 
-`journal` (Layer 5) and `capture` (Layer 6) MUST expose and preserve three distinct recovery contracts:
+**Return path:**
+- On every normal exit (applied, fenced, not applied, undecided, error), the cut path sends the session back on `resuming`. It latches `failed` when `register.terminal` is set.
+- **Cancellation and closed-channel alternatives:**
+  - if the foreground task waiting on the cut is cancelled, it unwinds through `CONC-7`, and dropping `resuming` closes the channel;
+  - a worker whose `resuming` receive returns `Closed` terminates with its terminal signal;
+  - O3 observes either an actual resumed worker or that termination.
 
-1. **Directory writer open (`journal.disk_session`):** Checks `MANIFEST` header if present, **acquires exclusive `LOCK` before recovery** (`disk_lock` with `lock_wait_ms`), checks `EXPORT`, removes orphan `j-<seq>.end` files and **fsyncs the directory before creating any successor segment** (`store.hirsel:3639`). Replay (`journal_scan`) bounds middle segments by the successor header's `prev_end` and the final segment by `END` (`durable_end`); **only** specified physical torn-tail faults (`journal_torn(fault.why)`) in the final segment at `offset >= durable_end` terminate cleanly — all logical decode/apply errors and all pre-boundary or middle-segment faults propagate as `Corrupt`. Directory `close` holds `LOCK` through worker shutdown (`task.join`) and drains remaining acks before `host.close(lock)` (`store-journal-status.hirsel:127-162`).
-2. **Read-only live capture (`capture.capture_directory` / `capture.open_shared`):** Retains selected segment file descriptors, acquires the shared terminal segment fence (`flock`), **probes writer `LOCK` non-blockingly** (never blocking on `LOCK`, which would invert the writer's `LOCK -> terminal segment` lock order!), polls every 1 ms if `LOCK` is free while the terminal fence is held (dead writer in-flight direct write), calls `host.sync_dir(d)` (O1), and compares exact `MANIFEST` bytes against the initial read before replaying (restarting on change).
-3. **Offline locked recovery (`journal.disk_recover_locked`, required by lane 3079 offline backup):** Accepts proof of an already-held writer `LOCK` and runs the writer's exact recovery scan without re-opening `LOCK` or spawning a journal worker.
+Only `HistoryApplied` installs the new head, attach, locator and retention. Every other outcome restores the prior attach. Sealed tails settle before the live tail. Direct-service CLAIM and slot CLAIM stay distinct.
+
+On `SlotFenced`, a covered prefix is acknowledged before `Fenced`, and a missing prefix returns `Undecided`. A latch maps every outstanding attached ticket to `Undecided`.
+
+### 5.3 Recovery and capture entry points
+
+1. **Directory writer open** (`disk_session`, root orchestration over `journal`):
+   - read the `MANIFEST` header;
+   - take an exclusive `LOCK` before recovery;
+   - check `EXPORT`;
+   - remove orphan `.end` files and sync the directory before creating any successor;
+   - replay middle segments up to the successor's `prev_end` and the final segment up to `END`;
+   - only physical torn-tail faults at or after the final `END` end cleanly; logical frame errors propagate.
+
+   **Incomplete segment creation stays a separate case.** A successor that is missing or has a short header after a crash (`store-journal-recover.hirsel:99-110`) is handled by its own rule, not by the torn-tail rule. Close holds `LOCK` through the worker join (`store-journal-status.hirsel:127-162`).
+2. **Live capture** (`store-capture.hirsel:253-300` and `store-journal-recover.hirsel:273-305`): first try the shared terminal lock (`try_lock_shared`). Three outcomes:
+   - **(a) The try succeeds.** Sync the directory, check that the `MANIFEST` bytes are unchanged, then sync, stat and scan the frames past `END` under the lock, and unlock.
+   - **(b) The try fails and the writer holds `LOCK`** (`capture_lock_free` returns false). Use only the recorded `END`, or 72 when there is none, without waiting for the terminal lock. In the journal walk, `torn_tail = false`.
+   - **(c) The try fails and `LOCK` is free.** A dead writer may have direct I/O in flight. Poll every 1 ms, up to the supplied deadline (`Remote(Retriable(Deadline))`), then retry the try-lock.
+
+   In every branch, keep the retained segment descriptors, the directory sync and the exact `MANIFEST` recheck. Capture never blocks on `LOCK`.
+3. **Offline backup** (`store-backup-offline.hirsel`):
+   - `backup_lock` try-locks `LOCK`;
+   - `prepare_backup` moves the acquired `HostFile` into `prepare_capture(from, c, Copy, Some(take lock))`, which becomes `PreparedCapture.lock`;
+   - `backup_offline` checks and copies under that lock;
+   - on an orphan pin or a missing terminal, the backup releases the lock and `backup_with_writer` opens the writer at the root.
+
+   No second locked-recovery entry exists. v2's `disk_recover_locked` does not exist in the source and is removed from the plan.
 
 ---
 
-## 6. Claim-Machine API & Service Trackers (`host_stream`, Critical Finding 2 & High Finding 8)
+## 6. Claimant and Service (Findings 2 and 8)
 
-### 6.1 Prerequisite Bug-Fix Lane (Lane 0): Existing Pre-`H` Abandon Gap
+### 6.1 Lane 0 is folded into 3048
 
-**Assessment per Sam's store rule:** At `store-stream-claim.hirsel:585-606`, after acquiring a hold row (`side.token == Some(token)`) and verifying the final `head` bytes (`stream_claim_final_head`), candidate-`H` construction (`sealed` list allocation `:587`, `history_claim_head` `:603`, `history_authority_end` `:604`, `authority` copy `:605`, `history_encode_register_head` `:606`) uses bare `?` before `history_write_head` (`:607`). Any allocation/limit/corrupt failure there returns directly without calling `stream_claim_abandon`. This is a **straightforward bug fix** against an already-ratified invariant (`STORE-SPEC §12.11.6` rule (e): a definite pre-`H` failure must attempt `Abandon(token)`, while a failed abandon itself leaves the row for service rule (a) cleanup). It needs no new protocol design and is therefore scheduled as **Lane 0** (its own first prerequisite lane, before L1) so the live bug on `main` is fixed immediately and proved by a new law case in `bucket_stream_claim_laws.hirsel`.
+The candidate-build gap at `store-stream-claim.hirsel:585-606` is fixed inside 3048, which is running and rewrites the same builder:
+- catch a construction failure while the hold is still owned;
+- keep the H write outside that handler;
+- keep the failure bounded so cleanup can still issue its request;
+- report "abandon attempted and failed" apart from "row gone".
 
-### 6.2 `ClaimMachine[T]` — Owned Per-Phase Payloads & Pre-I/O `HSent` Recording
+3048 is a hard predecessor of L1. L8 builds on the builder 3048 lands.
 
-Every phase of `ClaimMachine[T]` owns the exact state needed by the transitions leaving it. `RegisterLane.tag` belongs exclusively to `S/reg`; the Place `head` CAS tag (`head_tag: std.object.ETag`) comes strictly from the step-5 final `head` GET and lives in `ReadyToSendH`:
+### 6.2 `HoldGuard`: one owner for the prospective token
+
+Today the token is minted (`disk_identity(r)`) before the Hold PUT (`store-stream-claim.hirsel:542-561`). The generic `Error(take problem)` arm of the Hold result drops it. `stream_reg_write` reaches that arm after an earlier uncertain attempt, for example on a later fatal error or a failed read after a mismatch. The revision lookup that follows `Written` can fail too. v3 gives the token one owner from before issue until H or abandon:
 
 ```hirsel unbuilt
-pub type ClaimConfig: send {
-    auth: types.ClaimAuth,           // 3048: expected (epoch, holder) + attempt bytes
-    holder: types.StoreKey,          // independently fresh random physical holder (NEVER == auth.attempt!)
-    authority_kind: u8,
-    place_prefix: String,
-    stream_root: String,
-    resident_limit: u64,
-    limits: Option[types.LimitsSpec],
-    requested_levels: List[String],
-    deadline: u64,
-    max_rows: u64,
-    claim_ms: u64,
-    group_bytes: u64,
-    group_commits: u64
+// host_stream. A resource: dropping it on unwind runs a shield finalizer (CONC-7, FAIL-11).
+pub opaque resource type HoldGuard: send {
+    client: std.object.Client,          // the claim's client; Abandon needs nothing else
+    lane: StreamLane,                   // S/reg state and ETag
+    buffers: TailBuffers,
+    token: types.StoreKey,              // minted before the Hold PUT
+    cleanup_ms: u64                     // finalizer's Abandon budget
+} drop(hold_guard_drop) {
+    // Shield: may wait, sees no cancellation, uses only these fields, no `?`.
+    let _ = stream_reg_write(mut lane, mut client, Abandon(token), deadline_after_ms(client, cleanup_ms))
 }
 
+pub type HoldIssue = Held(rev_hold: u64) | NotHeld | Unknown(types.Failure)
+
+pub fn hold_begin(take client: std.object.Client, take lane: StreamLane, take buffers: TailBuffers, token: types.StoreKey, cleanup_ms: u64) -> HoldGuard
+pub fn hold_issue(mut guard: HoldGuard, inc: u64, deadline: u64) -> HoldIssue waits
+pub fn hold_reconcile(mut guard: HoldGuard, deadline: u64) -> HoldIssue waits
+pub fn hold_release_unissued(take guard: HoldGuard) -> (std.object.Client, StreamLane, TailBuffers)
+pub fn hold_abandon(take guard: HoldGuard, deadline: u64) -> (std.object.Client, StreamLane, TailBuffers, AbandonResult) waits
+pub fn hold_commit(take guard: HoldGuard) -> HoldCommitted   // whole destructure: no finalizer runs
+pub type AbandonResult = Abandoned | AbandonFailed(types.Failure)
+```
+
+**Ownership, from issue to H:**
+
+1. **Mint and wrap.** The claim mints the token and calls `hold_begin` before any Hold I/O. From here on, every pre-H operation reaches the client only through the guard: Hold issue, reconciliation, revision lookup (`stream_hold_rev`), the delta scan, the final head GET and candidate construction.
+2. **Issue.** `hold_issue` returns one of:
+   - `Held(rev)` when the write returned `Written` and the revision lookup found the row;
+   - `NotHeld` when the write returned `Moved` and our row is confirmed absent;
+   - `Unknown(e)` when the write returned `Undecided`, a generic error after an uncertain attempt, or the lookup failed.
+
+   On `Unknown`, `hold_reconcile` re-reads `S/reg` and looks for the token:
+   - present → `Held`;
+   - absent on a successful read → `NotHeld`;
+   - still failing → the claim calls `hold_abandon`.
+
+   `NotHeld` consumes the guard through `hold_release_unissued`, with no Abandon, and the claim falls back to the no-hold scan.
+3. **Explicit abort.** Any decision before H not to proceed calls `hold_abandon`:
+   - a confirmed move;
+   - a candidate-build failure;
+   - an authorization refusal;
+   - a deadline.
+
+   `hold_abandon` returns `Abandoned` or `AbandonFailed(e)`. The second means the row may still exist and service rule (a) will remove it. It never means the row is gone. An Abandon over an absent row counts as present (`store-stream-service.hirsel:310`), so abandoning an unissued token is harmless.
+4. **Cancellation or failure unwind.** Suppose the claim task is cancelled at any `waits` point before `hold_commit`, or an unexpected `?` unwinds the scope. The guard is dropped, and its finalizer issues one Abandon bounded by `cleanup_ms`. It may wait. It observes no cancellation and uses only its own fields (`docs/spec/tasks.md:150-176`).
+5. **Commit.** `hold_commit(take guard)` runs immediately before the H PUT. There is no fallible work between commit and `history_write_head`. It destructures the guard in the defining module, so no finalizer runs, and it returns `HoldCommitted { client, lane, buffers, token }`. From then on the token is plain data in `ReadyToSendH`/`HSent`:
+   - on `HistoryConflict`, the claim abandons explicitly;
+   - on `HistoryRefused`/`HistoryUndecided`, it does not abandon (rule e);
+   - after `Applied`, it never abandons.
+
+   A cancellation that lands inside the H PUT issues no Abandon, because the guard has already been consumed.
+6. **Process death.** No finalizer runs. Service rule (a) (`first_seen_ns + hold_ns`) removes the row, as it does today.
+
+`ClaimMachine[T]` keeps v2's per-phase payloads and its four post-H outcomes (§6.3), with two changes. It is a `resource` type because the `Acquiring`, `Held` and `ReadyToBuild` phases own a `HoldGuard`. `claim_abort` is replaced by `hold_abandon` on the guard the phase owns. Phases after `hold_commit` own no guard, so no code path can abandon a hold after H is sent.
+
+### 6.3 Claim phases after the guard
+
+```hirsel unbuilt
 pub type ClaimPhase[T] =
     Init
-  | DirectSettled(
-        head: history.HistoryHead,
-        attach: format.Attach,
-        replay: journal.JournalReplay,
-        archive_on: u64
-    )
-  | SettledLoaded(
-        head: history.HistoryHead,
-        attach: format.Attach,
-        tail: format.StreamRef,
-        replay: journal.JournalReplay,
-        archive_on: u64
-    )
-  | PreScanned(
-        head: history.HistoryHead,
-        attach: format.Attach,
-        tail: format.StreamRef,
-        cursor: TailScan,
-        replay: journal.JournalReplay,
-        archive_on: u64
-    )
-  | NoHoldFenced(
-        head: history.HistoryHead,
-        attach: format.Attach,
-        tail: format.StreamRef,
-        cursor: TailScan,
-        replay: journal.JournalReplay,
-        archive_on: u64
-    )
-  | Held(
-        head: history.HistoryHead,
-        attach: format.Attach,
-        tail: format.StreamRef,
-        token: types.StoreKey,
-        rev_hold: u64,
-        cursor: TailScan,
-        replay: journal.JournalReplay,
-        archive_on: u64
-    )
-  | ReadyToSendH(
-        head: history.HistoryHead,
-        attach_next: format.Attach,
-        claimed: history.HistoryHead,
-        authority: Bytes,
-        head_tag: std.object.ETag,   // strictly from step-5 final head GET (never lane.tag!)
-        hold: Option[types.StoreKey],// retained until H disposition is confirmed
-        replay: journal.JournalReplay,
-        admitted: T,
-        archive_on: u64
-    )
-  | HSent(                           // recorded BEFORE history_write_head I/O!
-        head: history.HistoryHead,
-        attach_next: format.Attach,
-        claimed: history.HistoryHead,
-        authority: Bytes,
-        hold: Option[types.StoreKey],
-        replay: journal.JournalReplay,
-        admitted: T,
-        archive_on: u64
-    )
-  | HeadPublished(
-        register: history.HistoryRegister,
-        authority: Bytes,
-        replay: journal.JournalReplay,
-        admitted: T,
-        archive_on: u64
-    )
+  | Acquiring(guard: HoldGuard, head: history.HistoryHead, attach: format.Attach, tail: format.StreamRef, replay: journal.JournalReplay, archive_on: u64)
+  | Held(guard: HoldGuard, rev_hold: u64, head: history.HistoryHead, attach: format.Attach, tail: format.StreamRef, cursor: TailScan, replay: journal.JournalReplay, archive_on: u64)
+  | NoHold(head: history.HistoryHead, attach: format.Attach, tail: format.StreamRef, cursor: TailScan, replay: journal.JournalReplay, archive_on: u64)
+  | ReadyToSendH(committed: HoldCommitted, head_tag: std.object.ETag, attach_next: format.Attach, claimed: history.HistoryHead, authority: Bytes, replay: journal.JournalReplay, admitted: T, archive_on: u64)
+  | HSent(hold: Option[types.StoreKey], attach_next: format.Attach, claimed: history.HistoryHead, authority: Bytes, replay: journal.JournalReplay, admitted: T, archive_on: u64)
+  | HeadPublished(register: history.HistoryRegister, authority: Bytes, replay: journal.JournalReplay, admitted: T, archive_on: u64)
   | Claimed
-  | FailedPreH(types.StoreError)
-  | HAmbiguous(hold: Option[types.StoreKey], err: types.StoreError)
-  | FailedPostH(types.StoreError)
+  | FailedPreH(types.Failure, AbandonResult)
+  | HAmbiguous(hold: Option[types.StoreKey], err: types.Failure)
+  | FailedPostH(types.Failure)
 
-pub opaque type ClaimMachine[T] {
-    phase: ClaimPhase[T],
-    config: ClaimConfig,
-    lane: RegisterLane,              // S/reg state + S/reg ETag only
-    buffers: TailBuffers,
-    workspace: history.HistoryBuffers,
-    granted: Option[(u64, u64)],     // acquired once, retained across retries
-    witness: Bytes                   // step-1 Place head witness bytes
-}
-
-pub type ClaimedPlace[T] {
-    register: history.HistoryRegister,
-    replay: journal.JournalReplay,
-    admitted: T,
-    authority: Bytes
-}
-
-// Four distinct post-H / terminal outcomes (never collapsed into one error/restart):
-pub type ClaimStep[T] =
-    Continue
-  | ConflictRestart                  // confirmed pre-H move or H conflict with same pair; hold abandoned; caller fetches fresh head & retries
-  | ConflictLost(history.HistoryPair)// confirmed H/final-head conflict with changed pair; hold abandoned
-  | AmbiguousH(types.StoreError)     // H returned HistoryRefused / HistoryUndecided; hold NOT abandoned (rule e)
-  | ClaimPublishFailed(types.StoreError) // H applied, step-7 CLAIM or archival settle failed; hold NOT abandoned
-  | Done(ClaimedPlace[T])
+pub type ClaimStep[T] = Continue | ConflictRestart | ConflictLost(history.HistoryPair) | AmbiguousH(types.Failure) | ClaimPublishFailed(types.Failure) | Done(ClaimedPlace[T])
 ```
 
-**Structural guarantees enforced by `ClaimMachine[T]`:**
+These guarantees are kept from v2:
+- the 3048 `ClaimAuth` check runs before `TERM`, Hold or H;
+- a fresh physical holder is used per open;
+- `granted` is retained across retries;
+- `head_tag` comes from the step-5 final head GET;
+- **`ReadyToSendH` builds the candidate (including 3048 `ORIGIN`) while the guard is still owned**, and `hold_commit` is the last step before `history_write_head`.
 
-1. **3048 `ClaimAuth` gate before ANY object mutation (including `TERM` and `Hold`):** In `Init`, before `stream_no_hold_scan` (which can write `TERM`), `Hold`, or `H`, `ClaimMachine` verifies `history_pair_matches(head.pair, config.auth.expect)` (else `FailedPreH(Superseded(head.pair))`) and verifies `config.holder != config.auth.attempt` (preserving byte-inequality resolution in `history_write_head`, `store-register.hirsel:14`).
-2. **All fallible candidate construction completes BEFORE leaving `Held`:** In `Held` (and `NoHoldFenced` / `DirectSettled`), step-4 delta scan, step-5 `prepare_writer(store, replay)`, step-5 final `head` GET byte-equal to `witness` yielding `head_tag`, `sealed` list build, `attach_next`, `history_claim_head`, `authority` slice copy, and `history_encode_register_head` (including 3048 `ORIGIN` frame) into `workspace.body` ALL run before entering `ReadyToSendH`. Any failure or move here attempts `Abandon(token)` (best-effort) before transitioning to `Init` (`ConflictRestart`, retaining `granted`) or `FailedPreH(err)`.
-3. **Record `HSent` BEFORE issuing `PUT head`:** Entering the `H` send step immediately replaces `machine.phase` with `HSent(...)` **before** calling `history_write_head(client, Match(head_tag), body, witness, deadline)`. Zero fallible work occurs between `ReadyToSendH` and `history_write_head`. If cancelled mid-`PUT` (`CONC-7`), `phase` is already `HSent`, so `claim_abort` NEVER abandons `hold`.
-4. **Exact 4-way `H` disposition:**
-   - `HistoryApplied(applied_tag)` → drop `hold` without abandoning; transition to `HeadPublished(HistoryRegister(claimed, applied_tag, None, Some(attach_next)), authority, replay, admitted, archive_on)` → `Continue`.
-   - `HistoryConflict(_)` → `H` definitely did NOT apply; attempt `Abandon(token)` if `hold == Some(token)`; decode `workspace.witness`: same pair → reset to `Init` (retaining `granted`!) and return `ConflictRestart`; changed pair → `FailedPreH(Lost)` and return `ConflictLost(moved.head.pair)`.
-   - `HistoryRefused(p)` / `HistoryUndecided` → **DO NOT ABANDON** `hold` (rule (e)); transition to `HAmbiguous(hold, err)` and return `AmbiguousH(err)`.
-5. **Step 7 (`HeadPublished` → `Claimed` or `ClaimPublishFailed`):** Runs slot `CLAIM` (`attach_next.live == Some(_)`) or direct archival sealed settle + `history_advance_claim` (`attach_next.live == None`). Any failure transitions to `FailedPostH(err)` and returns `ClaimPublishFailed(err)` — NEVER abandoning `hold`.
-6. **Safe `claim_abort(mut machine, mut client)`:** Attempts `Abandon(token)` **if and only if** `machine.phase` is `Held(token, ..)` or `ReadyToSendH(hold: Some(token), ..)`. In `HSent`, `HAmbiguous`, `HeadPublished`, `FailedPostH`, and `Claimed`, `claim_abort` is a strict no-op regarding `S/reg` (structurally enforcing rule (e)).
+The four H outcomes:
+- `Applied` → `HeadPublished`, with no abandon;
+- `Conflict` → explicit Abandon, then `ConflictRestart` (same pair, `granted` retained) or `ConflictLost`;
+- `Refused`/`Undecided` → `HAmbiguous` with the row left `Held`;
+- a failed step-7 CLAIM → `FailedPostH`, with no abandon.
 
-### 6.3 Complete Service Trackers (`RegisterLane`, `HoldTracker`, `StreamService`, High Finding 8)
+### 6.4 Service trackers and directive validity
 
-3071 omitted `pending`/`stalled` from `RegisterLane` and omitted all live tracking collections from `HoldTracker`. The complete v2 definitions own every record needed to decide the next ack, stall verdict, settle, orphan poll, or timeout (`store-stream-service.hirsel:44`, `store-stream-task.hirsel:45-129, 313, 524`, `store-stream-poll.hirsel:173, 476`):
+`RegisterLane` (with `pending` and `stalled`), `HoldTracker` (`observed_rows`, `tickets`, `active_settles`, `stall_polls`, `next_settle_id`, `last_reg_ns`) and `StreamService` keep v2's field lists. `SlotPlace` keeps `{store, epoch, fenced, settled_from, answers}` (`store-stream-task.hirsel:30-42`). The slot attach also passes the recovered frame limits (`1b1fc30f`), and L8 carries that through. Three behaviour changes:
 
-```hirsel unbuilt
-pub opaque type RegisterLane {
-    dir: String,
-    sid: status.HostStreamId,
-    authority_kind: u8,
-    max_rows: u64,
-    inc: u64,
-    holder: types.StoreKey,
-    seq: u64,
-    reg: format.StreamRegister,
-    tag: std.object.ETag,            // S/reg ETag only
-    body: Bytes,
-    compare: Bytes,
-    pending: List[PendingSlice],     // slices of created batch awaiting ack decision
-    stalled: List[PendingSlice],     // (store, epoch) pairs currently stalled by a reg row
-    latched: Option[status.StreamLatch]
-}
+1. **`ReportSettled` is validated before any mutation.** Today the service advances `place.settled_from` whenever `was_applied` is set, even when no `ActiveSettle` matched (`store-stream-poll.hirsel:22-50`). A late applied report for a reused slot therefore advances the new occupant's cutoff, which the fence verdict then uses. v3 changes nothing unless all of these hold:
+   - an `ActiveSettle` with `id == settle_id` exists;
+   - `active.slot == slot`;
+   - `slot < len(slots)`;
+   - `slots[slot].place == Some(p)` with `p.store == active.store`, `p.epoch == active.epoch` and `!p.fenced`.
 
-pub opaque type HoldTracker {
-    hold_ns: u64,
-    stall_poll_ns: u64,
-    idle_poll_ns: u64,
-    observed_rows: List[ObservedRow],   // (store, epoch, token, first_seen_ns) for rule (a)
-    tickets: List[StallTicket],         // (slot, store, epoch, batch_seq, through) frontier per stalled slice
-    active_settles: List[ActiveSettle], // (id, slot, store, epoch, pinned_tokens) for M1
-    stall_polls: List[StallPoll],       // (slot, store, epoch, next_poll_ns) for hold_ms / 4 polls
-    next_settle_id: u64,
-    last_reg_ns: u64
-}
-```
-
-`StreamService` owns `lane: RegisterLane`, `holds: HoldTracker`, `waiting: List[(u64, u64)]` (paired in exact 1:1 order with `lane.pending`: `(slot, through)` for each slice of the in-flight batch), `prefixes: Map[types.StoreKey, String]`, `slots: List[ServiceSlot]` (each carrying `inbox`, `place: Option[SlotPlace]`, `held`, and `unsent: Option[SlotAck]`), `gc: StreamGcState`, `janitor_asks: List[JanitorAsk]`, `timer`, and `poll_at`.
-
-**Explicit service-loop guarantees:**
-1. **Batch-slice pairing:** `stream_service_batch` populates `waiting` in exact 1:1 order with `lane.pending` slices. On `stream_cycle` / `stream_decide_pending` verdicts: `acked == true` emits `SlotAcked(through, batch_seq)` on `slot`; `acked == false` inserts/merges `StallTicket(slot, store, epoch, batch_seq, max(through))` into `HoldTracker.tickets`.
-2. **Directive acknowledgement & stale-reply rejection:**
-   - `ReportSettled(slot, settle_id, was_applied, _, new_from_seq, _)`: matches and removes `ActiveSettle` by exact `settle_id` (stale/duplicate `settle_id` ignored). Only when `was_applied == true` does it advance `slots[slot].place.settled_from = max(settled_from, new_from_seq)` and issue `Unhold(active.tokens)` (M1 fixed token set).
-   - `ReportFenced(slot, old_epoch, moved_epoch, cutoff)`: verifies `slot < len(slots)` and `slots[slot].place` matches `epoch == old_epoch` (rejecting stale reports from detached/reused slots!), marks `place.fenced = true`, clears `HoldTracker` + `lane.stalled` for `(store, old_epoch)`, computes `(ok_through, missing)` across `tickets` against `settled_from` and `cutoff`, emits `SlotFenced(old_epoch, ok_through, missing)`, and writes `ClearEpoch(store, moved_epoch)`.
-   - `ReportDetached(slot, epoch)`: verifies `place.epoch == epoch` before clearing `place`, `unsent`, tracking records, and `tickets`.
-3. **Bounded-outbox failure & next-wake continuation:** `stream_answer` uses non-blocking `conn.try_send(place.answers, answer)` (`§12.11.12`). On `Error(Full(kept))`, it stores `slot.unsent = Some(kept)` (retaining the newest answer); on `Error(Closed(_))`, it clears `unsent`. Every `stream_service_wake` begins by calling `stream_flush_acks` **before** reports, polls, or new batches, and `hold_next_deadline` arms the single service alarm on the earliest of `last_reg_ns + idle_poll_ns`, any `stall_polls[i].next_poll_ns`, and any un-settled `observed_rows[i].first_seen_ns + hold_ns` — guaranteeing bounded outbox saturation never stalls the service or loses terminal notifications.
+   Only then does it remove the record, set `settled_from = max(settled_from, new_from_seq)` if the settle applied, and `Unhold(active.tokens)`. A report that fails validation is dropped with no change to the cursor, the record or the token set. `ReportFenced` and `ReportDetached` keep their epoch checks.
+2. **Settle IDs survive replacement or become eligible for retry.** Today the service records `ActiveSettle` before delivery (`store-stream-poll.hirsel:340-365`). `stream_answer` keeps only the newest unsent answer per slot, and a later answer replaces an unsent `SlotSettle` (`store-stream-task.hirsel:320-345`). The active record then suppresses reissue (`stream_has_active_settle`). v3 makes `stream_answer` a service operation (`stream_answer(mut s, slot, take answer)`) that keeps this invariant: **an `ActiveSettle(id)` exists only while its `SlotSettle(id)` has been delivered or is the slot's `unsent` answer.**
+   - When an unsent `SlotSettle(id)` is overwritten, whether by a later answer that fills the slot again or by a later answer sent while it was still pending, `ActiveSettle(id)` is removed.
+   - When delivery of a `SlotSettle(id)` hits `Closed`, `ActiveSettle(id)` is removed.
+   - After removal, the `(store, epoch)` is eligible again. The next completed head GET issues a fresh settle with a new id and a token set computed fresh from that GET (M1). A late report for the old id fails check 1 and is ignored.
+   - Flushing one slot on a later wake is not relied on to recover a discarded directive.
+3. **Wake order:** each wake starts by flushing acks. The single service alarm is armed at the earliest idle, stall-poll or rule-(a) deadline.
 
 ---
 
-## 7. Split of `store.hirsel` (4,846 Lines → Focused Files at Exact Declaration Boundaries)
+## 7. `store.hirsel` by Declaration (Finding 9)
 
-Every split below follows exact top-level declaration boundaries verified against `origin/main` (`store.hirsel:1-4846`), fixing 3071's `Tx` (`L513`) and `empty_roots` (`L30`) line-range errors. Module `"store"` itself is split across `store.hirsel`, `store-public-types.hirsel`, and `store-coordinators.hirsel` so every file stays well under 1,000 lines while keeping all Tier A `PROG-9` nominal declarations in module `"store"`.
+`store.hirsel` has 4,816 lines and 377 top-level declarations: 108 public and 269 private. The split is by declaration name. `store_split.py` checks that every private declaration appears exactly once.
 
-| Current `store.hirsel` Lines | Est. Lines | Exact Declarations | Target File & Module |
-|---|---|---|---|
-| `L2–L27`, `L94–L97`, `L348–L410`, `L573–L596`, `L809–L866`, `L1567–L1597`, `L2464–L2476`, `L4146–L4186` | ~280 | Internal mirrors (`StoreKey`, `CallerId`, `BranchRef`, `StoreError`, `LimitsSpec`, `ScanLimits`, `ResumeState`), non-pinned leaf types (`Limit`, `Why`, `Fault`, `StoreCapacity`, `StorageKind`, `CallId`, `CallInfo`, `Mark`, `Ticket`, `Read`, `StoreFailure`, `Outcome`, `Undone`, `Done`, `Bound`, `Page`, `Resumed`, `Receipt`, `Stop`, `Plan`, `CallReserve`, `ServeError`, `Reserve`, `Served`, `RequestDigest`, `Stored`, `Looked`, `Seen`, `Change`, `CallRecord`, `StopKind`, `Recorded`), `splitmix64`, `call_info`, `same`, `make_id`, `capacity`, `copied` | `store-types.hirsel` → **`types`** (L0) |
-| `L816–L822`, `L1683–L1763`, `L1828–L1843`, `L2499–L2798`, `L4216–L4442` | ~700 | `DISK_FORMAT`, `BINDING_BYTES`, `DiskContext`, `DiskFrame`, `DiskHeader`, `DiskFrameHead`, `le`/`read_le`/`blob`, `seal_frame`, `disk_read_frame*`, `encode_data_op`, `encode_log_trim`, `encode_stream_op*`, `encode_fork`, `JournalCommit`/`JournalFork`/`JournalEvent`, `decode_settlement`, `journal_decode*`, `journal_torn` | `store-format.hirsel` → **`format`** (L1) |
-| `L28–L36`, `L99–L323`, `L411–L512` | ~360 | `Roots`, `empty_roots`, `share_roots`, `Head`, `Tip`, `State`, `ProposedMain`, `HolderDelta`, `HolderTable`, `state_with_delta`, `install_holder_delta`, `DataOp`, `StagedValue`, `DataRows` *(+ 3076 `sorted: bool`)*, `DataOps`, `Staged`, `op_slot` *(strictly stops at `L512`, before `Tx` at `L513`!)* | `store-roots.hirsel` → **`pages`** (L2) |
-| `L1764–L1827`, `L1844–L1875`, `L2000–L2412`, `L2486–L2498` | ~520 | `RowSchemas`, `ReadersHandle[V]`, `TableHandle[K, V]`, `IndexHandle[J, K, V, P]`, `RowDecoder`, `row_schemas`, `row_value`, `encode_key`, `typed_bound`, `table_key`, `catalog_index_key`, `catalog_entry_in`, `stage_create_table`, `stage_table`, `catalog_handle`, `catalog_index_handle`, `stage_drop_table_key`, `migrate_build`, `stage_migrate`, `catalog_insert`, `catalog_recharge` | `store-catalog.hirsel` → **`catalog`** (L3) |
-| `L2799–L2854`, `L3386–L3694`, `L3793–L3816`, `L3948–L3983`, `L4443–L4660` | ~720 | Directory I/O (`disk_io`, `disk_path`, `disk_write_synced`, `disk_remove_optional`, `SegmentSpan`, `DiskRemovals`, `DiskStartup`, `DiskSession`, `disk_lock`, `disk_start`, `disk_session`, `disk_recover_locked`, `JournalChannels`, `dir_rotate`, `JournalInput`, `journal_scan`, `JournalReplay`, `journal_following`) | `store-journal-io.hirsel` → **`journal`** (L5) |
-| `L513–L560` *(internals)*, `L772–L808`, `L867–L1107`, `L1166–L1493`, `L1505–L1566`, `L1612–L1682`, `L1876–L1999`, `L2429–L2450`, `L4187–L4215`, `L4661–L4667` | ~920 | `TxState`, `Publication`, `PendingState`, `Ran`/`Stage`/`Finished`, `stage_call`, `draft_body`, `finish_stage`, `serve_inner`, `conclude_inner`, `fetch_logical`, `fetch_bytes`, `fetch`, `put`, `put_ordered` *(3076)*, `delete`, `key_span`, `published_value`, `reads_key`, `recorded` | `store-txn-core.hirsel` → **`txn`** (L10) |
-| `L2855–L3385` | ~531 | `PreparedTarget`, `PreparedMeta`, `CatalogChange`, `Inventory`, `PreparedRow`, `write_prepared`, `ValidatedImportState`, `validate_prepared`, `ImportedState`, `ImportWorkState`, `reserve_import`, `import_trees`, `Cutover`, `TargetLimits`, `planned_catalog`, `planned_ranges`, `pack_leased` | `store-transfer-core.hirsel` → **`transfer`** (L11) |
-| `L40–L93`, `L324–L347`, `L597–L771`, `L1108–L1165`, `L3695–L3792`, `L3817–L3947`, `L3984–L4145` | ~750–950 across 3 root files | `store.hirsel` (`Db`, `DiskState`, `Backend`, `memory`, `open`, `open_authority`, `open_read_only`, `close`), `store-public-types.hirsel` (Tier A pinned `PROG-9` nominal types + zero-copy conversions + Tier C aliases), `store-coordinators.hirsel` (commit/cut/durable/seal coordinators + thin `pub fn` forwarders) | `store.hirsel`, `store-public-types.hirsel`, `store-coordinators.hirsel` → **`store`** (L12) |
-| `L1598–L1611`, `L2413–L2428`, `L2451–L2463`, `L4668–L4846` | ~220 | Inline test fixtures (`test_db`, `typed_put`, `bucket`, `OldAccount`/`NewAccount`/`upgrade`, `reserve_tx`, `law_call_reserve`) | Move to `[tests.sources]` (`store_law_schema.hirsel`); keep only `law_call_reserve` allow-listed until `runner` L33 migrates |
+### 7.1 Public declarations (108) — all stay in `"store"` (R1)
 
-*Line-length ratchet rule:* Measure actual line counts of all root files after L14 lands before removing `store.hirsel` from `tools/file_length_ratchet.json`.
+`StoreId`, `StorageKind`, `Caller`, `Limit`, `Why`, `Fault`, `StoreCapacity`, `Error`, `Db`, `Branch`, `CallId`, `CallInfo`, `Mark`, `Ticket`, `Read`, `StoreFailure`, `Outcome`, `Undone`, `Done`, `Bound`, `Limits`, `Resume`, `Page`, `Resumed`, `Tx`, `Snapshot`, `splitmix64`, `memory`, `fence_level`, `is_disk`, `identity`, `main_branch`, `snapshot`, `snapshot_of`, `branch`, `adopt`, `delete_branch`, `version`, `follow`, `Receipt`, `Stop`, `Plan`, `CallReserve`, `call_reserves`, `ServeError`, `Reserve`, `Pending`, `Served`, `next_call_info`, `stream_retention_ms`, `untried`, `serve`, `conclude`, `info`, `run`, `run_on`, `run_with_reply`, `durable`, `sync_notices`, `durable_now`, `body_capacity`, `RequestDigest`, `request_digest`, `Stored`, `RowSchemas`, `Readers`, `Table`, `IndexKind`, `Index`, `row_schemas`, `fetch_bytes`, `fetch`, `key_span`, `published_value`, `reads_key`, `system_table`, `table`, `put`, `delete`, `Looked`, `Seen`, `Change`, `changes`, `stage_export_migration`, `export_system_get`, `staged_snapshot`, `PreparedTarget`, `validate_preparation`, `write_prepared`, `ValidatedImport`, `validate_prepared`, `Imported`, `ImportWork`, `reserve_import`, `import_trees`, `imported_digest`, `prepared_matches`, `identity_words`, `Cutover`, `retained_main_after`, `open`, `open_read_only`, `checkpoint`, `CallRecord`, `StopKind`, `Recorded`, `recorded`, `law_call_reserve`.
 
----
+Within `"store"` they may be distributed across `store.hirsel`, `store-api-types.hirsel` and `store-coordinators.hirsel` by declaration. No file exceeds its `tools/file_length_ratchet.json` entry, which is 5,153 lines for `store.hirsel`. `law_call_reserve` stays public at the root, allow-listed in `tools/check_boundaries.py`.
 
-## 8. Coordination With All Eight Concurrent Lanes
+### 7.2 Private declarations (269)
 
-| Lane | Status & Scope | Exact Coordination Against the v2 Order |
+| Destination | Count | Declarations |
 |---|---|---|
-| **3008** *(landed `f5eb79cb`)* & **3048** *(active)* | 3008 landed stream exits/archival. 3048 lands universal `ClaimAuth`, 49-byte `ORIGIN` head frame (`MUST = 1`), Format 11 bump + 3023 `retirement_root`/`RetiredList` removal from `0x0031` (`MANIFEST_FIXED_BYTES` 316 → 280), `HeadView`, Runner `Deposed`. | **Land 3048 before L1 starts.** Keep `ORIGIN` in `H` and copy its bytes byte-for-byte on ordinary advances. Keep Format 11's `0x0031` `retirement_root` removal distinct from the new `ORIGIN` head frame. Rebase Lane 0 (if after 3048), L1, L4, L7 (`capture` + `history`), L8 (`host_stream`), L9 (`object_writer`), and the Runner `PROG-9` identity checks onto the exact tag and byte layout 3048 lands. (`m1b2/run-store-claim-auth-origin-3048.md:17,29`, `store-register.hirsel:44`.) |
-| **3075** *(active)* | STORE-SPEC v2.147 empty-commit skip + F1–F7 review fixes (head read on Bucket/stream, `Done.info: Option[CallInfo]`, no cut on skip, `settlement == None` + `keyed.after == db.keyed_credit` in `is_empty_commit`). | **Land 3075 before splitting the commit path (L12) and preferably before L1.** On Directory, `LOCK` suffices for zero-I/O skip. On head-fenced Bucket and host-stream stores, even an already-covered ticket does not authorize returning a stale observation: preserve the fresh head check, `Fenced` latch behavior, `Done.info: Option[CallInfo]`, and skipped-checkpoint rule across L6, L8, L9, L12, and root `store-coordinators.hirsel`. (`m1b2/run-store-empty-commit-build-3075.md:12,20`.) |
-| **3062** *(design landed `658cb65b` + `e9ca4d65`)* | STORE-SPEC v2.148 `SharedCapture` (`Shared[SharedBacking]`, `CONC-15`, fresh `Unique` `capture_id`, home `MEM-24` accounting — replacing 3071's `Arc` assumption!) and scoped leaf visitors (`Visit`, `RowView[K, V]`, `visit_scan*`, `visit_range*`, `row_*`). | **Integrated directly into the v2 map:** `TieredRefusal.Shared \| Scan` in **L1 (`types`, Layer 0)**; `SharedCaptureState`, `SharedBacking`, `open_shared`, `share_capture`, `freeze_roots_to_shared`, `shared_visit_leaves` in **L7 (`capture`, Layer 6)**; `shared_read_only`, `follower_share` (reading `object_writer.follower_tip_data` + calling `capture.freeze_roots_to_shared`), `VisitStep`, `RowViewState`, `visit_scan*`, `row_*` in **L11 (`read`, Layer 9)**; `visit_range*` in **L12 (`txn`, Layer 10)**; nominal `store.SharedCapture`, `store.RowView`, `store.Visit` + thin re-exports in **`store` (Layer 12)**. Implementation rebases after Step 7 (`capture`), Step 9 (`object_writer` follower tip), and Steps 11–12 (`read`/`txn`). (`perf-store-read-design-3062/DESIGN.md §5-§6`.) |
-| **3076** *(design landed `06ad1735`, Astra review `3100`)* | STORE-SPEC v2.149 L94–L95: Directory adaptive group-commit coalescing + decoupled `END` cadence (`group_delay_us`, `end_groups`, `end_interval_ms`, two 4 KiB timer tasks, `writer_plan`), and checked ordered bulk ingest (`put_ordered`, `Error.OutOfOrder`, `DataRows.sorted`, `std.page.{max_key, bulk_from_source, append_sorted_source, apply_sorted_source}`). | **Integrated directly into the v2 map:** `Options`/`Overrides` fields & `StoreError.OutOfOrder` in **L1 (`types`, Layer 0)** + pinned `store.Error.OutOfOrder`; zero-second-edit-list byte seam `encode_data_ops_resolved` in **L1 (`format`, Layer 1)**; `DataRows.sorted`, binary-search `op_slot`, and `apply_collection_batch` calling `std.page.*_source` in **L2 (`pages`, Layer 2)**; `DirJournalMsg.{CoalesceTick, EndTick, Close}` + `coalesce_timer_task`/`end_timer_task` + 4-trigger `END` policy in **L6 (`journal`, Layer 5)** (land #8 build after L6 and Astra 3100 review, keeping BL5 `end == end_named` and notice ordering intact); `put_ordered` + `data_order` `InOrder` fast path in **L12 (`txn`, Layer 10)**; `writer_plan` +4.8 KiB timer pricing in `sizes.hirsel` (`store`, Layer 12). Apply #10 after L1+L2+L12 (or atomically with them), producing canonical bytes with zero second edit list. |
-| **3079** *(active)* | Store capture slice 3 offline backup (locked recovery, Check before stamp, fallback to writer on orphan pin / missing terminal) + T5 listed-packs-only `restore` + damaged-backup mutilation corpus. | **Prefer landing 3079 before moving capture/export (L6, L7, L13).** Its locked-recovery entry belongs on `journal.disk_recover_locked` (L6), offline capture/check on `capture` (Step 7), and T5 listed-packs-only `restore` on `transfer` (L13). Preserve its damaged-backup mutilation oracle intact when reassigning tests. (`m1b2/run-store-capture-s3-backup-3079.md:13`.) |
-| **3080** *(active)* | CLOUD #6 Bucket request counters below `std.object` retry wrapper + `hirsel store stats` output. | Request counting inside `core/std/object.hirsel` is completely independent of `store` module moves. Coordinate `stats`/`inspect` counter display and its Bucket fixture with **L7 (`capture`)** and **L14 (`maintenance` / `store`)**. Never move the counter above the retry boundary or add it to a persisted store field. (`m1b2/run-store-bucket-counters-3080.md:11`.) |
-| **3081** *(active)* | Fleet Phase 2 platform seams + S1 `Backing.Bucket` (`platform.local` selectable standalone & streamed via `Config.journal`). | Node/incarnation/assignment work is independent. `platform.local` is a public external consumer of L8/L9 authority and `JournalSlot` construction and is sensitive to 3048 `ClaimAuth`. Preserve both standalone and streamed platform cases through L8/L9 landings. (`m1b2/run-platform-fleet-seams-3081.md:11,26`.) |
-| **3082** *(active)* | M3 S6/S9 NVMe `objects_cache` on `runner.BucketBacking` + Bucket pack caching. | Coordinate `runner.BucketBacking` constructor with 3081. Serialize pack-read/cache plumbing in `store-history-packs.hirsel` with **L7 (`history`)** and **L9 (`object_writer`)** (or fold landed 3082 cleanly into L7/L9). Preserve content-hash verification before admission, Bucket refetch on mismatch/corruption, bounded MEM/disk charging, and working reopen after local cache deletion. The cache adds **no** authoritative `Backend` arm. (`m1b2/run-m3-s6s9-bucket-cache-3082.md:11`.) |
+| types (L1) | 7 | `same`, `make_id`, `capacity`, `copied`, `append_be`, `key_word`, `disk_identity` |
+| format (L1) | 55 | `DISK_FORMAT`, `DiskContext`, `DiskFrame`, `DiskHeader`, `BINDING_BYTES`, `put_binding`, `disk_check_start`, `seal_frame`, `disk_check`, `disk_seal`, `disk_kind_limit`, `DiskFrameHead`, `disk_read_frame_head`, `disk_check_frame_kind`, `disk_read_frame`, `disk_frame_bytes`, `disk_header_bytes`, `disk_read_header`, `disk_number`, `disk_count`, `disk_name`, `disk_name_bytes`, `disk_put_name`, `encode_fork`, `disk_blob`, `le`, `blob`, `read_le`, `encode_data_op`, `encode_log_trim`, `encode_stream_op`, `stream_control_slot`, `encode_stream_ops`, `old_data_op_size`, `data_op_size`, `Settlement`, `CallSection`, `call_code_size`, `JournalTrim`, `JournalOp`, `JournalCommit`, `JournalFork`, `JournalEvent`, `journal_event_kind`, `journal_ops`, `decode_settlement`, `journal_decode_commit`, `journal_decode`, `journal_torn`, `journal_prefix`, `journal_read_prefix`, `JournalFrame`, `journal_read_frame`, `disk_stream_payload`, `disk_stream_payload_counted` |
+| pages (L2) | 37 | `Roots`, `empty_roots`, `share_roots`, `Head`, `main_head`, `retaining`, `Tip`, `State`, `HolderDelta`, `main_state`, `tip_of`, `state_with_delta`, `prepare_holder_slot`, `install_head`, `remove_head`, `install_holder_delta`, `state_roots`, `state_account`, `branch_slot`, `branch_index`, `DataOp`, `StagedValue`, `stage_value`, `staged_bytes`, `DataRows`, `new_data_rows`, `data_row`, `push_data_row`, `DataOps`, `SCANNED_OPS`, `NO_FRAME_TAIL`, `OPEN_FRAME_TAIL`, `empty_ops`, `Staged`, `op_slot`, `branch_root_bytes`, `pin_root_bytes` |
+| catalog (L3) | 35 | `PageRows`, `RowDecoder`, `decoded`, `row_value`, `encode_key`, `typed_bound`, `index_decoder`, `prefix_after`, `index_bound`, `table_key`, `index_prefix`, `catalog_index_key`, `catalog_entry_in`, `stamp_after`, `define_store_collection`, `bulk_store_collection`, `remove_store_row`, `remove_store_collection`, `stage_create_table`, `readers`, `stage_table`, `catalog_handle`, `catalog_index_handle`, `stage_drop_table_key`, `Built`, `over_ceiling`, `insert_row`, `migrate_build`, `same_bytes`, `catalog_insert`, `stage_migrate`, `catalog_recharge`, `prefix`, `prefixed`, `logical_key` |
+| manifest (L4) | 8 | `PageDisk`, `DiskLoaded`, `disk_loaded`, `disk_publish_manifest`, `remember_roots`, `located_owners`, `manifest_state`, `check_expected_store` |
+| journal (L6) | 26 | `Ack`, `disk_io`, `disk_path`, `disk_write_synced`, `disk_remove_optional`, `SegmentSpan`, `DiskRemovals`, `removal_spans`, `remove_numbered`, `remove_cut_files`, `disk_read_end`, `disk_end`, `disk_exists`, `DiskStartup`, `disk_start`, `DiskSession`, `disk_lock`, `disk_session`, `JournalChannels`, `journal_channels`, `disk_rotate`, `journal_scan`, `JournalReplay`, `journal_replay`, `journal_account`, `journal_following` |
+| txn (L12) | 27 | `ServeReply`, `registered_completion`, `serve_before`, `serve_after`, `cause_number`, `save_reply`, `stage_reply`, `finish_served`, `Ran`, `Stage`, `Finished`, `Prepared`, `stage`, `stage_call`, `draft_body`, `finish_stage`, `reserve_ids`, `note_read`, `fetch_logical`, `digest_part`, `transaction_stream`, `newest_layer`, `writable`, `publish_row`, `check_table_write`, `call_checked`, `check_completion_record` |
+| transfer (L13) | 20 | `PreparedMeta`, `CatalogChange`, `Inventory`, `PreparedRow`, `catalog_changes`, `RangeChange`, `changed_ranges`, `entries_of`, `checksum_row`, `range_inventory`, `ValidatedRange`, `read_valid_range`, `ImportedRange`, `matches_export`, `TargetLimits`, `catalog_bytes_equal`, `planned_catalog`, `planned_ranges`, `pack_leased`, `CALL_FIXED_STEPS` |
+| store (root, live-Db orchestration) | 45 | `ProposedMain`, `current_state`, `memory_cut_account`, `record_memory_cut`, `head_snapshot`, `snapshot_from`, `call_info`, `memory_at`, `empty_db`, `disk_state`, `edit_disk`, `write_disk`, `journal_poison`, `same_name`, `checked_name`, `this_open`, `cut_install`, `check_manifest_addition`, `Publication`, `prepare_publication`, `publish`, `run_on_with_reply`, `store_body_on`, `store_body_at`, `append_transaction_at`, `handoff`, `maybe_checkpoint`, `wait_for_frame_room`, `durable_groups`, `covered`, `DiskState`, `open_number`, `healthy`, `open_heads`, `read_only_manifest`, `check_read_only_manifest`, `open_checks`, `open_started`, `disk_wait_cut`, `cut_io_error`, `PreparedDiskCut`, `CutTiming`, `disk_cut_timed`, `disk_cut_with_limit`, `db_target` |
+| tests (store_law_schema.hirsel, [tests.sources] "store") | 9 | `test_db`, `bucket`, `typed_put`, `OldAccount`, `NewAccount`, `upgrade`, `reserve_tx`, `reserve_pinned_data`, `reserve_settles_pin` |
+
+Notes:
+- A private declaration that names a root type is rewritten in its lane over the internal representation (R2) before it moves. For example, `JournalCommit` carries a `format.CallRecordRep` and the root keeps public `CallRecord`.
+- `call_info` builds the public `CallInfo`, so it stays at the root.
+- `ProposedMain` carries `HistoryActivation`, so it stays at the root and `pages` gets resolved roots.
+- The test helpers move to `store_law_schema.hirsel` (`[tests.sources]`, module `"store"`).
 
 ---
 
-## 9. Test Ownership, Visibility, and Law-Obligation Rules (Medium Finding 9 & Missing Laws)
+## 8. Concurrent Lanes
 
-### 9.1 White-Box vs. Black-Box Test Placement (`PROG-4`)
+| Lane | State at `ebcc4887` | Coordination |
+|---|---|---|
+| **3048** (running) | ClaimAuth, 49-byte `ORIGIN`, Format 11, `retirement_root` removal; **Lane 0 folded in** | **Hard predecessor of L1.** L1, L4, L7, L8 and L9 rebase onto the tags and layout 3048 lands. Keep authorization before TERM or Hold, and a fresh physical holder per open. L8 builds the `HoldGuard` around 3048's candidate builder. |
+| **3075** (not landed) | v2.147 empty-commit skip | **Lands before L1** and before the L6, L8, L9 and L12 ticket and probe paths. Keep the no-mutation predicate, the prior ticket, the no-cut rule and the fresh head fence with a covered ticket. Use its landed head check. `Done.info` follows its landed type. |
+| **3079** (landed `2d9e5e50`) | offline backup, check before stamp, writer fallback, listed-pack restore, damaged-backup laws | Placed as landed (§3.3, §5.3). Backup internals go to `capture` at L7; the public backup API stays at the root; `restore` stays public at the root with the listed-pack logic in `transfer` at L13. `store_backup_laws.hirsel:346,480` stay in `"store"`. |
+| **3080** (landed `979875cf`) | Bucket request counters in `std.object` | No store move touches the counters. Keep the `bucket_request_counts` fixture exact when tests move. No lane adds a local capture-counter display. |
+| **3082** (landed `f601b90a`) | NVMe pack cache | Cache I/O goes to `history` at L7, and writer state (`cache`) to `object_writer` at L9 (§4.5). Public `objects_cache` stays at the root. The cache stays disposable. |
+| **3103** (design) | write-path v2 | Coarse owners only: options and bytes in L1 (as root `Options` plus a `types` rep), page application in L2, Directory scheduling and acks in L6, transaction input in L12, and sizing at the root. Timer, queue-slot and sizing details follow 3103's accepted design. This cutover adds none. |
+| **3062 / 3076** (spec text) | v2.148 read path, v2.149 write path | Public `SharedCapture`, `RowView`, `Visit`, `put_ordered` and `Error.OutOfOrder` are declared at the root. Internals: shared backing in `capture` (L7), follower material in `object_writer` (L9), reader and visitors in `read` (L11), Tx range and ordered puts in `txn` (L12), and `DataRows.sorted` in `pages` (L2). |
+| **3081** | platform seams | `platform.local` is an external consumer of L8/L9. Keep its standalone and streamed cases. |
+| `1b1fc30f`, `10d42c7e` (landed) | slot frame limits; recorded stream quotas | L8 carries the slot frame-limit pass-through. `check_stream_quota` (`store-streams.hirsel:19`) moves with `txn`. Its callers in `disk_start` (`store.hirsel:3631`) and `prepare_object_writer` stay where §3.4 places them. |
 
-Under `PROG-4` (`docs/spec/programs.md:130,145`), a test file assigned to module `M` in `[tests.sources]` sees `M`'s private members **only** — it cannot see private fields or constructors of `"store"` (`Db.resident`), `"manifest"` (`page_manifest_empty`, mutable `PageManifest` fields), or sibling sim fixtures (`BucketSim`).
+---
 
-Therefore:
-1. **Never blindly reassign a mixed law file** (such as `store_format10_laws.hirsel` or `bucket_stream_claim_laws.hirsel`) out of `"store"`. Keep cross-module / end-to-end laws and `BucketSim`/`Db` fixture laws in `"store"`, exercising lower modules through their public surfaces (or narrow read-only inspection helpers).
-2. **Split pure single-module white-box assertions** into dedicated module-owned test files in `[tests.sources]` (e.g., `format_wire_laws.hirsel` → `format`, `claim_machine_laws.hirsel` → `host_stream`) when testing private invariants directly.
-3. **Update `[tests.runs]` keys whenever a `@test` moves modules:** `PROG-4` refuses any `[tests.runs."store@1/<mod>/<test>"]` entry whose module path no longer matches the test's module in `[tests.sources]`.
-4. **Preserve independent oracles:** Frozen Format 10/11 corpus byte arrays (`store_format10_laws.hirsel`, `store_corpus_format10.hirsel` rebased to 3048's Format 11) MUST stay literal byte arrays independent of production encoders; numerical admission assertions (`L90-Q4`, `L70`, `L85`, `L92`/`L93`) MUST remain exact.
-5. **External downstream & compile-refusal verification:** Exercise `store.*` from a downstream package (`runner` / `platform` / external smoke) through `store.*` alone (catching broken external constructors, broken `OWN-20` scoped borrow anchors, or leaked internal module methods), and preserve compile-refusal fixtures (`PROG-2` opaque constructors, 3062 V4 `RowView` escape & `Tx` mutation refusals).
+## 9. Tests and Law Obligations
 
-### 9.2 Four New Law Obligations Added to the Cutover Lanes
+### 9.1 Placement (`PROG-4`)
 
-Every gap identified in Review 3085 ("What the existing laws cannot establish") is assigned to an explicit lane and existing harness below:
+- A test assigned to module `M` sees only `M`'s private members.
+- Mixed and end-to-end laws (`store_format10_laws`, `bucket_stream_claim_laws`, `BucketSim`/`Db` fixtures) stay in `"store"`.
+- A pure single-module white-box assertion splits by declaration into a test file of the owning module, and its `[tests.runs]` key is updated.
+- Literal corpus bytes stay literal.
+- Exact admission numbers (`L90-Q4`, `L70`, `L85`, `L92`/`L93`) stay exact.
 
-| Obligation | Existing Harness Extended | Oracle & Bug Class Caught | Enforced In |
+### 9.2 Obligations
+
+| Obligation | Existing fixture extended | Bug caught (red outcome) | Lanes |
 |---|---|---|---|
-| **O1: Cross-build `PROG-9` persisted identity** | `core/programs/runner/runner-describe.hirsel` (or `runner` query law harness) + `core/programs/store/store_law_schema.hirsel` | Literal pre-cutover `PROG-9` identity byte vectors (§2.4) for an unchanged application query (`store.Tx`), `query_as`/action (`runner.Caller`), schema (`store.Declare`, `store.Error`), slot selector (`store.Table`), and generic instantiations (`store.StoreId`, `store.Tx`+`store.Table`); resolves an old persisted key through Runner; records `code.revision` expectations separately for versioned indexes (`store-declare.hirsel:336`). | **L1, L3, L11, L12, L14** |
-| **O2: Pre-`H` failure, ambiguous `H`, and post-`H` `CLAIM` failure** | `core/programs/store/bucket_stream_claim_laws.hirsel` | (a) Inject candidate-build allocation failure after step-5 final head check (definite pre-`H` refusal): assert `H` writes == 0, `Abandon` attempted, `reg` writes == 3, row cleared by rule (b), next claimant recovers. (b) Inject mid-step cancellation between external `claim_step` calls before `HSent` vs after `HSent`. (c) Distinguish ambiguous `H` (`HistoryUndecided`/`HistoryRefused` → row stays `Held` under rule (e), no abandon) vs applied `H` + failed step-7 `CLAIM` (row stays un-abandoned, single slot grant preserved, next claimant recovers cleanly). | **Lane 0** (part a) & **L8** (parts a–c) |
-| **O3: Worker progress across `ObjectPause` settlement** | `core/programs/store/bucket_stream_exit_laws.hirsel` & `core/programs/store/object_journal_laws.hirsel` | Hold `ObjectPause` handover, drive settle to each outcome (`SettleApplied`, `SettleFenced`, `SettleNotApplied`, terminal error), verify session always returns on `resuming` and worker resumes or terminates with the specified result; verify covered prefix acked before `Fenced` and outstanding tickets mapped to `Undecided` on latch; compile-time guarantee via `SettleSession` lacking `Sender[ObjectJournalMsg]`. | **L8 & L9** |
-| **O4: External visibility, borrow anchors, and compile-refusal fixtures** | `core/programs/runner/` downstream check + `core/programs/store/store_format10_laws.hirsel` + `store_tx_range_laws.hirsel` + `core/front/` refusal fixtures | Downstream package compiles and runs using only `store.*`; `range(tx, ...)` `in tx` and `row_bytes(row)` `in row` borrow anchors hold; opaque `PROG-2` refusal fixtures stay refused; frozen corpus bytes stay independent of production encoders. | **L1, L3, L11, L12, L14** |
+| **O1 — identity** | `tools/tests/wire_admission.py` `ENTRIES` (`:53-74`) and its `:181-187` placement check; dev client (`:526-537`); `core/programs/runner/steps_laws.hirsel:441-460` | Add literal keys frozen at the pre-L1 tip (§2.4 items 2–5): a query taking `take store.StreamId`, a nested `List[store.ExportStamp]`, a schema/slot pair, and a `query_as` with the plain header. Each is sent with its pre-split fingerprint. **Red:** Runner answers `('placed', 2)` (gone or unknown) where the pre-split build answers `('placed', 0, slot)`. v2's L1 (moving `StreamId` to `format`) is red on item 2 while the Tx/Caller entries stay green. The steps law keeps replaying its old identity. | Every lane L1–L14 (each changes the backing of some public declaration) |
+| **O2 — claimant** | `bucket_stream_claim_laws.hirsel:52-85,106-135` (Q4 and the L90 histories); `bucket_stream_unhold_laws.hirsel:412-422,531-563` (L90-X deaths) | **(a) [3048]** Candidate-build failure after the final head check. Count **all attempted** head PUTs in the window, not only status 200, and follow the original token through Hold, Abandon and service removal. **Red:** an attempted H PUT, or no Abandon for that token. **(b) [L8]** Explicit pre-H abort. **Red:** no Abandon for the token. **(c) [L8]** Ambiguous Hold (sim answers the Hold PUT uncertainly, then a fatal error). **Red:** the token is never abandoned and the row survives until rule (a). **(d) [L8]** Cancellation inside the H PUT (sim holds the PUT; the claim task is cancelled). **Red:** an Abandon for that token, or the grant is not reused on the next attempt. **(e) [L8]** Cancellation before `hold_commit`. **Red:** no Abandon from the finalizer. The existing L90-X histories gain only these assertions. | 3048 (a), L8 (a–e) |
+| **O3 — paused worker** | `object_journal_laws.hirsel:107-124`; `bucket_stream_exit_laws.hirsel:108-124` | Drive a real settle on the handed-over session (applied, fenced, not applied). Then: (i) the session is handed back and a later commit is acknowledged (worker progress), or (ii) the waiting task is cancelled and the worker terminates with its terminal signal. **Red:** no later ack, or a worker blocked forever on `resuming`. Prefix and uncovered-ticket assertions stay with their current owners (`bucket_stream_unhold_laws.hirsel:125-127`, `bucket_stream_janitor_laws.hirsel:386`). | L8, L9 |
+| **O4 — boundary** | `core/tools/store_tests.py:113-140` refusal controls (`look_put_refused`, `look_info_refused`, `index_rows_escape_refused`, `index_rows_write_refused`, `completion_unreachable`, `view_tx_write_refused`); the literal format corpus | Keep every existing control with its diagnostic (`PROG-2` "`store@1/store/Completion` is private or opaque", `LANG-13` "scoped[view] fn results with anchors are reserved", `OWN-10` "`tx` is viewed", `OWN-5` "`tx` is not writable", `PROG-2` "`Tx` is opaque outside its module"). Each lane that introduces an internal state adds one control that constructs that state from a dependent package (e.g. `store.txn.TxState(..)` at L12, `store.read.ReaderState(..)` at L11, `store.capture.SharedState(..)` at L7). **Red:** the control compiles, or the diagnostic is not `PROG-2` "… is private or opaque". L11 also adds a `RowView` escape control (`LANG-13`). | L1–L14 at each new state type |
+
+**Root surface gate (lane step, not a law):** each lane runs `inventory.py` before and after. The list of `pub` declarations of module `"store"` and their header lines must match exactly. The only allowed difference is the file each one lives in.
 
 ---
 
-## 10. Executable Cutover Sequence (Lane 0 + 14 Sequential Lanes)
+## 10. Cutover Sequence
 
-**Sequential landing rule (correcting 3071 `MODULES.md:529`):** L5 (`pager`), L6 (`journal`), and L10 (`indexes`) are **NOT** parallel landing lanes — L6 consumes L5 replay work, constructors and root call sites overlap, and every lane edits shared `hirsel.toml` and `hirsel.laws`. A lane may stage a pure extraction draft once its inputs exist, but **each lane lands sequentially on the previous landing**, updating `hirsel.toml`, regenerating `hirsel.laws` (`hirsel laws write core/programs/store --libraries core`), running its proving laws (`--libraries core`), and passing `python3 tools/buck2/fmt.py --check`.
+Lanes land in order on top of each other. Each lane:
+- updates `hirsel.toml`;
+- regenerates `hirsel.laws` (`hirsel laws write core/programs/store --libraries core`);
+- runs its laws, O1 and its O4 control;
+- passes `python3 tools/buck2/fmt.py --check`.
 
-Each subsection below is a self-contained cutover spec executable by a single Sol lane.
+**Predecessors:** 3048 (with Lane 0) and 3075 land before L1.
 
----
+**Reds that may ride along:** none in O1, O4 or the corpus. Ordinary law reds follow the landing policy. Durability laws block.
 
-### Lane 0 (Prerequisite Bug Fix): Pre-`H` Candidate-Build Abandon Guard
+### L1 — `types`, `format`
+- **Move.**
+  - Private parts of `store-limits.hirsel` go to `types`, with `replay_within_limits` going to `format`.
+  - `store-tiered-refusals.hirsel` privates go to `types`, except `store_has_tiered`, `require_tiered_storage` and `require_archive_authority`, which take `Db` and stay at the root (R3).
+  - Private codec declarations go to `format`: `store-stream-frames.hirsel`, `store-tiered-frames.hirsel`, `parse_stream_key`, the wire half of `store-keyed-journal.hirsel`, the pure writer in `store-commit-wire.hirsel`, and `XIndex`/`XIndexEntry`/`stream_xindex_*`.
+  - The §7.2 `types` and `format` rows move.
+- **Stays.** `StreamId`, `StreamKey`, `keyed_time`, `caller_key`, `stream_key_bytes`, `stream_record_matches`, `ServeError`, `Served`, `Page`, `Resume`, `Done`, `Options` and every other public declaration stay. `store-stream-types.hirsel` stays whole at the root. No status move.
+- **New internal reps.** `types.Failure`, `types.FaultRep`, `types.CapacityRep`, `types.LimitsRep`, `types.StoreKey`, `format.CallRecordRep`. The root conversion functions are total `take` moves.
+- **Laws.** `store_format10_laws` and the corpus, `store_size_laws`, `store_journal_laws`, `bucket_stream_laws`; O1 (adds the §2.4 keys as the lane's first commit, on the unchanged tree); O4.
 
-- **Goal:** Fix the existing live bug at `store-stream-claim.hirsel:585-606` where fallible candidate-`H` construction (`sealed` allocation, `history_claim_head`, `history_authority_end`, `authority` copy, `history_encode_register_head`) uses bare `?` after a hold row is acquired, bypassing `stream_claim_abandon`.
-- **Files touched:** `core/programs/store/store-stream-claim.hirsel`, `core/programs/store/bucket_stream_claim_laws.hirsel`, `core/programs/store/hirsel.laws`.
-- **Exact change:** Move candidate-`H` construction (`:585-606`) inside a pre-`H` fallible helper/scope whose `Error` branch calls `stream_claim_abandon(mut read_source.client, mut side, deadline)` before returning `Error(e)`. Keep `history_write_head` (`:607`) outside that abandon-on-error scope so `HistoryRefused` and `HistoryUndecided` continue leaving the row `Held` per rule (e). Coordinate with 3048's `ORIGIN` encoding if 3048 lands first.
-- **Proving laws (O2a):** Extend `bucket_stream_claim_laws.hirsel` with a case injecting a candidate-build allocation failure after step-5 final `head` check (`bound bytes` or injected sealed-list limit) and asserting: `p1/head` PUT count == 0, `reg` PUT count == 3 (hold, abandon, rule-b unhold), no lingering `Held` row, and next claimant C succeeds cleanly.
+### L2 — `pages`
+- **Move.** `store-pages.hirsel`, `store-layout.hirsel` (except public `fixture_broken_handoff`), `store-tail.hirsel` (privates only; `read_tail`, `key_codec` and `Tail` stay at the root), and the §7.2 `pages` row. `Pin` stays where §3.4 puts it, with `store-projector` privates.
+- **Data passed down.** Resolved roots only. `ProposedMain` stays at the root.
+- **State.** `holders: pages.HolderTable` (8 fields, refreshed atomically). The `DataRows.sorted` hook exists for 3076.
+- **Laws.** `store_pages_paged_laws`, `store_layout_laws`, `store_prior_laws`, `store_fork_laws`; O1; O4 (`HolderTable` control).
 
----
+### L3 — `catalog`
+- **Move.** Privates of `store-handle-check.hirsel`, `store-declare.hirsel` and `store-migration.hirsel`, and the §7.2 `catalog` row. Functions that take `Db` (`declaration_base`, `schema_plan`, `stage_migration_plan`) stay at the root.
+- **State.** `schema: catalog.SchemaState` (`fence` with `propose_fence`/`restore_fence`, `next_table`). Root `Declare`/`StagedMigration` own the live `DeclaredProjector` and `IndexRegistration` lists. `catalog` returns a pure `SchemaPlan`.
+- **Laws.** `store_schema_laws`, `store_declare_laws`, `store_lookup_laws`, `store_law_schema`; O1 with the revision note (§2.3); O4 (`DeclareState` control).
 
-### Lane 1 (L1): `status`, `types`, `format` + `PROG-9` Identity Lock
+### L4 — `manifest`
+- **Move.** The 13 manifest, pack, location, cut, retirement, frees, lineage and scrub files (privates), and the §7.2 `manifest` row.
+- **Data passed down.** `fill_cut_manifest`, `cut_participants`, `visit_cut_*`, `cut_manifest_size` and the lineage functions take a root-built `manifest.CutInput` (heads, pins, lease spans, limits).
+- **Stays.** `disk_cut_state` and `begin_scrub` (public) stay at the root. `raise_materialized_pin` waits for `pager` at L5. Page recovery returns neutral `LoadedPackInventory` over `PackObjectRef`.
+- **State.** `packs: manifest.PackDiskState`.
+- **Rebase** on 3048's Format 11.
+- **Laws.** `store_manifest_page_laws`(`_2`), `store_locations_disk_laws`, `store_packs_disk_laws`, `store_scrub_laws`, `tiered_lineage_laws`; O1; O4.
 
-- **Goal:** Establish Layers 0–1 cleanly with zero cycles, pin all Tier A `PROG-9` nominal types at `store@1/store/*`, and freeze pre-cutover identity byte vectors.
-- **Files created/moved:**
-  - `status` (L0): keep `store-health-types.hirsel`; move `store-stream-types.hirsel` (delete duplicate `pub type StreamLatch = status.StreamLatch` at `:17`; keep root alias in `store-public-types.hirsel`).
-  - `types` (L0): create `store-types.hirsel` (split from `store.hirsel` per §7), move `store-tiered-refusals.hirsel` (include 3062 `Shared | Scan` if not yet added), move pure limit values/checks from `store-limits.hirsel` (leaving `store_limits(db)` in `store`), move `EndpointRefusal` from `store-object-authority.hirsel:2`, `Position` from `store-levels.hirsel:92`, `PinOwner` from `store-projector.hirsel:849`, and `Options`/`Overrides`/`Kind`/`Shortage` from `sizes.hirsel` (keep `Options` fields aligned with 3076 when 3076 builds). Include internal mirrors `StoreKey`, `CallerId`, `BranchRef`, `LimitsSpec`, `ScanLimits`, `StoreError`.
-  - `format` (L1): create `store-format.hirsel` (split from `store.hirsel` per §7), move `store-stream-frames.hirsel` (+ `stream_xindex_encode`/`decode` moved from `store-stream-gc.hirsel:120`), `store-tiered-frames.hirsel`, `store-stream-key.hirsel`, L1–L112 of `store-keyed-journal.hirsel`, `replay_within_limits` from `store-limits.hirsel:98`, and pure byte-level `store-commit-wire.hirsel` (`encode_data_ops_resolved` taking a scoped row emitter; leave `data_order` and prior lookup in `"store"` until L12).
-  - `store` (L12): create `store-public-types.hirsel` holding Tier A pinned nominal `Error`, `Caller`, `StoreId`, `Branch`, `StoreLimits`, `Limits` (and zero-copy converters) plus Tier C aliases.
-- **Rebase note:** Rebase onto 3048's Format 11 `ORIGIN` frame and `DISK_FORMAT = 11` before starting.
-- **Proving laws & obligations:** `store_format10_laws` (or Format-11 successor, kept in `"store"` or split per §9.1 with frozen bytes independent of production encoders), `store_corpus_laws`, `store_size_laws`, `store_journal_laws`, `bucket_stream_laws`, **+ O1 (cross-build `PROG-9` identity byte-vector test in `runner` + `store` checking all 5 vectors in §2.4)**, **+ O4 (downstream compile check)**.
+### L5 — `pager`
+- **Move.** The 25 `store-tiered*.hirsel` pager files (privates). `READER_PIN_MIN`, `Residency` and `set_residency` stay public at the root. The park records from `store-mux.hirsel` (`ParkEntry`, `ParkQueue`, `empty_park_queue`, `park_slot`, `revoke_entry`, `first_unsent`, `parked_in_flight`) also move.
+- **Stays.** The residency functions that take `Db` (`publish_tiered_residency`, `admit_tiered_plan`, `start_/stop_residency_pager`, `residency_to_*`) and the tiered-publish orchestration (`stage_tiered_cut`, `drain_cut`, `install_tiered_holders`, `promote_cut_holder`, `compact_cut`) stay at the root (R3).
+- **Data passed down.** `store-tiered-replay.hirsel` returns neutral `TieredManifestRestore`.
+- **State.**
+  - `pager: pager.PagerState` (`pager`, `pager_writer`, `park_notices`, `parked`, `writer_pin_bytes`);
+  - `tiered: pager.DiskPagerState`.
+  - Taking `park_notices` clears the receiver while the pager stays live (§4.3 row 9).
+- **Laws.** The tiered laws listed in v2; O1; O4.
 
----
+### L6 — `journal`
+- **Move.** Privates of `store-journal-worker.hirsel`, `store-journal-status.hirsel` and `store-journal-recover.hirsel` (including the `capture_*` fence functions), and the §7.2 `journal` row.
+- **Stays.** `journal_receive`, `journal_ack`, `journal_poll*` and `close_ack` take `Db` and stay at the root until each is rewritten over `QueueAccounting`. `disk_session` orchestration stays at the root.
+- **State.**
+  - `retention: journal.RecordRetention`;
+  - `journal.DirJournalState` (lock, dir, creation, offsets, `DirJournalMsg` queue, `DirAck`, `QueueAccounting`, written, synced, poison, pending, task).
+- **Interim Object path.** The root's explicit `JournalSender = Dir(..) | Object(Sender[JournalMsg])` (§3.3) chooses the sender for each backend. The common `JournalMsg` carrying session, export and slot payloads stays at the root until L9.
+- **Preserve.** The writer recovery rules of §5.3.1, including the incomplete-segment case and `LOCK` held through join. Timers and coalescing are left to 3103.
+- **Laws.** `store_journal_laws`…`_7`, `store_disk_laws`(`_2`), `store_crash_laws`, `store_ace_crash_laws`, `store_replay_laws`, `store_sim_disk_laws`; O1; O4.
 
-### Lane 2 (L2): `pages` (Capture Deferred to Step 7!)
+### L7 — `history` (7a), `capture` (7b)
+- **7a.** History, register, authority and object-cut privates, plus `store-object-cache.hirsel` privates (`ObjectsCache`, `pack_cache_*`, `history_read_pack`). `objects_cache` stays public at the root. `EndpointRefusal` and `endpoint_refusal_text` stay at the root. `HistoryOpenBase`, `history_load_admitted`, `history_check_open` and `history_open_with` move from `store-object-open.hirsel`. History consumes `journal.JournalReplay` and neutral pack inventory, including the cache and its caller (`store-history-packs.hirsel:543-546`). Keep 3082's hash-verify and refetch behaviour.
+- **7b.** Capture privates, `store-inspect.hirsel` private constants to `maintenance` (L14), and `store-backup-offline.hirsel` privates (`backup_lock`, `copy_backup_journal`). Public `PreparedCapture`, `prepare`, `capture_need`, `BackupError`, `PreparedBackup`, `prepare_backup`, `backup_offline`, `backup_with_writer`, `catalog_entries`, `CheckTotals` and `check_capture` stay at the root. Keep the three live-capture branches (§5.3.2) and the `LOCK` transfer into `PreparedCapture` (§5.3.3). The 3062 shared backing is `capture.SharedState`.
+- **Laws.** `authority_laws`, `bucket_laws`, `bucket_order_laws`, `bucket_q5_laws`, `object_cut_laws`, `location_laws`, `store_capture_laws`, `store_backup_laws` (3079, unchanged oracles), `store_crash_laws`; O1; O4 (`capture.SharedState` control).
 
-- **Goal:** Land Layer 2 (`pages`) and `pages.HolderTable` on `Db`, moving pure tree/pin/holder operations without touching `capture` (deferred to L7).
-- **Files created/moved:**
-  - `pages` (L2): create `store-roots.hirsel` (`store.hirsel` `L28-L36`, `L99-L323`, `L411-L512` — **stop before `Tx` at `L513`** — plus `Pin` moved from `store-projector.hirsel:849`), create `store-keyed-pages.hirsel` (L114–L166 of `store-keyed-journal.hirsel`), move `store-pages.hirsel`, `store-layout.hirsel`, `store-tail.hirsel`.
-- **Owned state & invariants:** Introduce `holders: pages.HolderTable` on `Db` owning all 8 fields (`heads`, `branch_names`, `pins`, `record_bytes`, `next_pin`, `next_branch`, `next_node`, `bases`). Single owner operations refresh `branch_names`, `bases`, and `record_bytes` (including keyed-root record bytes on commit) atomically. Prepare `DataRows.sorted` / `apply_collection_batch` hook for 3076 Perf #10.
-- **Proving laws:** `store_pages_paged_laws`, `store_layout_laws`, `store_prior_laws`, `store_fork_laws`.
+### L8 — `host_stream`
+- **Move.** Privates of the ten stream files. `slot_relay` and `SlotRelayInput` move to the root beside the current worker (they own `Sender[JournalMsg]` and build `StreamAnswer`). The public `JournalSlot`, `JournalService`, `StreamPlan` and the rest stay at the root.
+- **Implement:**
+  - `HoldGuard` and the token ownership rules (§6.2);
+  - `ClaimMachine[T]` as a resource with the phases of §6.3, around 3048's builder;
+  - `ReportSettled` validation and settle-ID survival (§6.4);
+  - `SettleView` with `(sid, inc)` and the batch cursor, with reports delivered outside the view (§5.2);
+  - plain `StreamFollowMaterial`;
+  - the `1b1fc30f` frame-limit pass-through.
+- **Laws.** `bucket_stream_laws`, `_service_`, `_claim_`, `_unhold_`, `_election_`, `_gc_`, `_janitor_`, `_direct_follow_`, `_exit_laws`; O2 (b–e); O3; O1; O4.
 
----
+### L9 — `object_writer` and `Backend`
+- **Move.** Object open, journal, writer, reclaim, sim-levels, levels, health, followers, follower-service and object-follower privates. The slot relay moves from the root into `object_writer` with the object queue.
+- **Stays.** `open_object_writer`, `reclaim_preview` and every other writer function that takes `Db` (`object_writer_open`, `object_cut_state`, `object_cut_work`, `take_object_journal*` and so on) stay at the root. Public `Level`, `Position`, `durable_at`, `Refusal`, `open_authority`, `archive`, `fresh_snapshot`, `claim_of` and `Follower` stay at the root.
+- **State.** Switch `DiskState` to `Backend` in one landing. Carry all 22 fields of `ObjectWriterState` (§4.5), including `cache` across construction and cut. Preserve 3081's platform cases and 3075's attached fresh probe.
+- **Laws.** `object_journal_laws`, `store_reclaim_laws`, `follower_laws`, `follower_crash_laws`, `replication_laws`, `assembly_laws`; O3; O1; O4.
 
-### Lane 3 (L3): `catalog`
+### L10 — `indexes`
+- **Move.** `store-index-registry.hirsel` registry, catalog-record codec and pure planning privates, and `store-aggregate.hirsel` pure privates.
+- **Stays.** `registered_index`, `probe_index_keys`, `apply_edit(s)`, `put_impl`, `delete_impl`, `plan_delete`, `apply_delete_plan`, `bound_indexes`, `preflight_index_edits`, `edit_stamp_cost`, `write_stamp_cost`, `append_index_remove`, `drift_stop`, `plan_index_put` (Tx-bound) and the Tx-reading part of `totals` stay with `Tx` at the root until L12. Public `IndexState`, `Aggregate`, `aggregate` and `totals` stay at the root.
+- **State.** `indexes: indexes.IndexState` with owner install operations.
+- **Laws.** `store_lookup_laws`, `store_index_crash_laws`, `store_put_laws_2`; O1; O4.
 
-- **Goal:** Land Layer 3 (`catalog`) and `catalog.SchemaState` on `Db`, keeping live `Db`/follower/export orchestration outside `catalog` and keeping Tier A catalog handle types pinned at `store@1/store/*`.
-- **Files created/moved:**
-  - `catalog` (L3): create `store-catalog.hirsel` (split per §7), move `store-handle-check.hirsel`, and pure schema/declaration/migration logic from `store-declare.hirsel` and `store-migration.hirsel` (`declare_from_base`, `complete_declaration`, `stage_create_table`, `stage_table`, `stage_migrate`).
-  - Keep `seal`, `declare`, `declare_migration`, `finish_migration` in `store` (L12); keep `declare_follower` for L9 (`object_writer`) and `declare_export` for L13 (`transfer`).
-  - Pin nominal `Declare`, `TableDecl[K, V]`, `Migration`, `StagedMigration`, `Table[K, V]`, `Index[J, K, V, P]`, `Cell[V]`, `Log[V]`, `Edge[A, B]`, `Readers[V]` in `store-public-types.hirsel` wrapping `catalog.*State`/`*Handle`.
-- **Owned state & invariants:** Introduce `schema: catalog.SchemaState` (`fence`, `next_table`) on `Db` with explicit `propose_fence` / `restore_fence` (for activation rollback) and atomic `next_table` commit with `ReplaceMain`.
-- **Proving laws & obligations:** `store_schema_laws`, `store_declare_laws`, `store_lookup_laws`, `store_law_schema`, **+ O1 (`store.Declare`, `store.Table`, `store.Cell`, `store.Log` `PROG-9` identity + versioned index `code.revision` check)**, **+ O4 (opaque handle `PROG-2` refusal check)**.
+### L11 — `read`
+- **Move.** `store-read.hirsel`, `store-read-pages.hirsel` and `store-changes.hirsel` privates, over a neutral `read.ReaderInput`.
+- **Stays.** `check_table_read`, `open_range`, `open_range_bounds`, `check_index_read` and `open_lookup` (Tx-bound) stay with `Tx`. `staged_reader` and the prepared-export adapter stay at the root. `Reader`, `ReadOnly`, `RowView`, `Visit`, `SharedCapture` and all 36 public `store-read.hirsel` declarations stay at the root with R4's contracts.
+- **Laws.** `store_read_laws`, `store_cursor_laws`, `store_changes_laws`, `store_changes_page_law`, `store_diff_laws`; O1; O4 (`ReaderState` control and `RowView` escape).
 
----
+### L12 — `txn`
+- **Move.** `store-tx.hirsel`, commit, attempts, the rest of mux, fork, cell, log, edge, streams (including `check_stream_quota`), keyed-claims, keyed-lifecycle, reexec, tiered-tx-read and the §7.2 `txn` row. Tx-bound functions are rewritten over `txn.TxState`. `available_resident`, `available_journal` and `draft_credit` take limits and accounting as arguments.
+- **Stays.** Callback invocation over nominal `Tx`, `stage_call`'s use of the root callback, the pre-commit cut, the final handoff, `settle_admit`'s handoff and the commit functions that take `Db` (`commit_prepared`, `settle_draft`'s cut call, `prepare_run_commit` and so on) stay at the root. `settle_draft` returns `txn.CutDecision` to the root.
+- **State.** `accounting: txn.AccountingState` (mutable `ceiling`) and `call_streams: txn.CallStreamState`.
+- **Laws.** `store_put_laws`(`_2`), `store_tx_range_laws`, `cell_log_laws`, `store_claim_crash_laws`, `store_claim_quota_laws`, `store_reexec_laws`, `store_swarm_laws`, `store_trust_laws`; O1; O4 (`TxState` control).
 
-### Lane 4 (L4): `manifest`
+### L13 — `transfer`
+- **Move.** Export, object-export, object-import, prepared-check, catch-up, rounds, install and activation privates, and the §7.2 `transfer` row.
+- **Stays.** The prepared `Db`, `begin_copy`, `open_copied`, `leased_step_base`, `record_leased_step`, `install_prepared`, `accept_cutover`, `perform_cutover_with`, `forget_import`, `install_activation_layout`, `publish_schema_plan*`, `staged_migration`, `validate_rewrite_base`, `import_pin_slot`, `orphan_import_pin`, `hold_import`, `install_account`, `history_import_base` and the projector install after publication stay at the root. `ExportStamp`, `Exported`, `ExportCopy`, `Preparation`, `ValidatedImport`, `Imported`, `ImportWork`, `PreparedTarget`, `Cutover` and `restore` stay public at the root.
+- **State.** `transfer: transfer.TransferState`.
+- **Laws.** `store_backup_laws`, `store_catchup_laws`, `store_crash_install_laws`, `import_read_laws`; O1 (`ExportStamp` nested key); O4.
 
-- **Goal:** Land Layer 3 (`manifest`) and `manifest.PackDiskState` on `DiskState`, breaking all upward edges to `journal`, `pager`, and `history`.
-- **Files moved:** All 13 manifest/pack/location/cut/retirement/frees/lineage/scrub files (`store-manifest.hirsel`, `store-manifest-wire.hirsel`, `store-list-read.hirsel`, `store-page-recovery.hirsel`, `store-locations.hirsel`, `store-packs.hirsel`, `store-pack-index.hirsel`, `store-cut-participants.hirsel`, `store-cut-retirement.hirsel`, `store-tiered-frees.hirsel`, `store-tiered-lineage.hirsel`, `store-scrub.hirsel`, `store-scrub-pace.hirsel`).
-- **Cycle breaks:** Move `disk_cut_state` (`store-cut-participants.hirsel:168`) to root `store-coordinators.hirsel`. Replace `Option[View[HistoryLocator]]` and `TieredReadInventory` in `store-page-recovery.hirsel:73` with neutral `PackObjectRef` callback/map and `LoadedPackInventory`. Rebase cleanly on 3048's Format 11 `retirement_root`/`RetiredList` removal.
-- **Owned state & invariants:** Introduce `packs: manifest.PackDiskState` (`pages`, `scrubs`) on `DiskState`; root coordinator refreshes `page_resident` from `packs` on open and cut.
-- **Proving laws:** `store_manifest_page_laws`, `store_manifest_page_laws_2`, `store_locations_disk_laws`, `store_packs_disk_laws`, `store_scrub_laws`, `tiered_lineage_laws` (updating `[tests.runs]` paths for any moved white-box test).
-
----
-
-### Lane 5 (L5): `pager`
-
-- **Goal:** Land Layer 4 (`pager`), `pager.PagerState` on `Db`, and `pager.DiskPagerState` on `DiskState`, keeping `JournalReplay` assembly and `Tx`-bound adapters out of `pager`.
-- **Files moved:** The 25 `store-tiered*.hirsel` files (`store-tiered.hirsel`, `packs`, `ranges`, `cache`, `pager`, `pager-batch`, `attempt`, `plan`, `point-read`, `count`, `scan`, `span`, `initial-changes`, `changes`, `pins`, `overlay`, `replay`, `fold`, `emission`, `publish`, `probe`, `probe-index`, `promote`, `compact`, `residency`). Leave `store-tiered-tx-read.hirsel` in `"store"` until L12 (`txn`), exposing `Tx`-independent paged read/count helpers from `pager`.
-- **Cycle breaks:** `store-tiered-replay.hirsel` returns neutral `TieredManifestRestore` (leaving `JournalReplay` construction for L6 `journal`). `pager` wraps `manifest.LoadedPackInventory` into `TieredReadInventory`.
-- **Owned state & invariants:** Introduce `pager: pager.PagerState` (`pager`, `pager_writer`, `park_notices`, `parked`, `writer_pin_bytes`) on `Db` and `tiered: pager.DiskPagerState` (`pager_task`, `tiered_dirty`, `restamp`, `unload`) on `DiskState`.
-- **Proving laws:** `tiered_laws`, `tiered_read_laws`, `tiered_fold_laws`, `tiered_compact_laws`, `tiered_promote_laws`, `tiered_residency_laws`, `tiered_queue_laws`, `tiered_pager_batch_laws`, `tiered_attempt_laws`, `tiered_tx_read_laws`, `tiered_crash_arm_laws`.
-
----
-
-### Lane 6 (L6): `journal`
-
-- **Goal:** Land Layer 5 (`journal`), `journal.DirJournalState`, `journal.RecordRetention`, `DirJournalMsg`, and the common foreground queue/ack contract, routing Directory sends/cuts/close through `DirJournalState` while leaving Object traffic on its existing worker until L9.
-- **Files created/moved:** Create `store-journal-io.hirsel` (split per §7), move `store-journal-worker.hirsel`, `store-journal-recover.hirsel` (+ `JournalReplay` assembly from `TieredManifestRestore`), and Directory/common queue helpers from `store-journal-status.hirsel`.
-- **Owned state & invariants:**
-  - Introduce `retention: journal.RecordRetention` (`record_cut`, `recorded_after`) on `DiskState`.
-  - Introduce `journal.DirJournalState` (owning non-optional `lock: HostFile`, `d: Dir`, `creation`, `file_seq`, `file_end`, `DirJournalMsg` channel, `DirAck` receiver, `QueueAccounting` keeping `uncovered` distinct from `since_cut`, `written*`, `synced`, `poison`, `pending`, `journal_task`, and slot ready for 3076's `coalesce_timer_task`/`end_timer_task`).
-  - Preserve **writer recovery fence** (`LOCK` before recovery, `prev_end` vs `END` torn-tail rule, orphan-END removal fsync, `close` holding `LOCK` through worker `task.join`) AND expose **`disk_recover_locked`** for 3079 offline backup (§5.3).
-  - Unblocks 3076 Perf #8 (after Astra review 3100).
-- **Proving laws:** `store_journal_laws`..`store_journal_laws_7`, `store_disk_laws`, `store_disk_laws_2`, `store_crash_laws`, `store_ace_crash_laws`, `store_replay_laws`, `store_sim_disk_laws`.
-
----
-
-### Lane 7 (L7): `history` + Deferred `capture` *(may land as two commits: 7a `history`, 7b `capture`)*
-
-- **Goal:** Land Layer 6 (`history` and `capture`) on their completed L1–L6 dependencies, keeping `verify_release`/`repair_indexes` out of `capture` and placing 3062's `SharedCaptureState` in `capture`.
-- **Files created/moved:**
-  - **7a (`history`, Layer 6):** Move `store-history.hirsel`, `store-history-read.hirsel`, `store-history-witness.hirsel`, `store-history-packs.hirsel`, `store-register.hirsel`, `store-object-authority.hirsel` (minus `EndpointRefusal`), `store-object-cut.hirsel`, plus create `store-history-open.hirsel` (`HistoryOpenBase`, `history_load_admitted`, `history_check_open` split from `store-object-open.hirsel`). Preserve 3048 `ClaimAuth`/`ORIGIN`/`HeadView` and fold/coordinate 3082 pack cache hash-verify + refetch.
-  - **7b (`capture`, Layer 6):** Move `store-capture.hirsel`, `store-capture-check.hirsel`, `store-capture-check-journal.hirsel`, `store-capture-journal.hirsel`, `store-capture-pages.hirsel`, `store-capture-catalog.hirsel`, `store-capture-describe.hirsel`, and L1–L71 (`catalog_entries`) of `store-inspect.hirsel` (leaving `verify_release`/`repair_indexes` in `"store"` until L14 `maintenance`). Preserve §3.3b live capture fence (retained fds, shared terminal fence, non-blocking `LOCK` probe, 1 ms poll, O1 `sync_dir`, exact `MANIFEST` byte check). Place 3062 `SharedCaptureState`/`SharedBacking`/`open_shared`/`share_capture`/`freeze_roots_to_shared`/`shared_visit_leaves` here (unblocking 3062 #2 build). Return neutral `CapturedState` to callers.
-- **Proving laws:** `authority_laws`, `bucket_laws`, `bucket_order_laws`, `bucket_q5_laws`, `object_cut_laws`, `location_laws`, `store_capture_laws` (including 3079 offline backup laws if landed), `store_crash_laws`.
-
----
-
-### Lane 8 (L8): `host_stream` (`ClaimMachine[T]`, `RegisterLane`, `HoldTracker`, `SettleSession`)
-
-- **Goal:** Land Layer 7 (`host_stream`) with the complete v2 `ClaimMachine[T]`, complete `RegisterLane`/`HoldTracker`, non-reentrant `SettleSession`, and plain `StreamFollowMaterial`, updating the existing object worker, claim callers, and slot relay in the same landing before L9 switches `DiskState` to `Backend`.
-- **Files moved:** All 10 stream files (`store-stream-claim.hirsel`, `store-stream-service.hirsel`, `store-stream-slot.hirsel`, `store-stream-task.hirsel`, `store-stream-poll.hirsel`, `store-stream-settle.hirsel`, `store-stream-gc.hirsel` minus `stream_xindex_encode`, `store-stream-janitor.hirsel`, `store-stream-follow.hirsel`, `store-stream-archive.hirsel`).
-- **Key structural changes:**
-  - Implement `ClaimMachine[T]` with owned per-phase payloads, 3048 `ClaimAuth` gate before any write/`TERM`, retained `granted`, step-5 `head_tag`, pre-I/O `HSent` recording, 4 distinct outcomes (`ConflictRestart`, `ConflictLost`, `AmbiguousH`, `ClaimPublishFailed`), and safe `claim_abort` (§6.2).
-  - Implement complete `RegisterLane` (with `pending`, `stalled`) and `HoldTracker` (with `observed_rows`, `tickets`, `active_settles`, `stall_polls`, `next_settle_id`, `last_reg_ns`), stale-reply rejection, and bounded-outbox `unsent` retry (§6.3).
-  - Refactor `stream_settle`, `stream_settle_sealed`, and `stream_poll_head` to take non-reentrant `SettleSession` (zero access to `Sender[ObjectJournalMsg]`, §5.2).
-  - Return plain `StreamFollowMaterial` from `stream_follow_capture` (no `FollowCapture` dependency).
-- **Proving laws & obligations:** `bucket_stream_laws`, `bucket_stream_service_laws`, `bucket_stream_claim_laws`, `bucket_stream_unhold_laws`, `bucket_stream_election_laws`, `bucket_stream_gc_laws`, `bucket_stream_janitor_laws`, `bucket_stream_direct_follow_laws`, `bucket_stream_exit_laws`, **+ O2 (pre-`H` failure, step-boundary cancel before/after `HSent`, ambiguous `H`, post-`H` `CLAIM` failure)**, **+ O3 (worker progress across `ObjectPause` settle outcomes)**.
-
----
-
-### Lane 9 (L9): `object_writer` + `DiskState.Backend` Sum Cutover
-
-- **Goal:** Land Layer 8 (`object_writer`), move worker-side export fetch into `object_writer`, and switch `DiskState` atomically to `Backend = DirBackend(journal.DirJournalState) | ObjectBackend(object_writer.ObjectWriterState)`.
-- **Files moved:** `store-object-open.hirsel` (writer startup glue), `store-object-journal.hirsel` (+ `ObjectExportLease`, `ObjectExportFetch`, `object_export_read` moved from `store-object-export.hirsel`), `store-object-writer.hirsel`, `store-reclaim.hirsel`, `store-sim-levels.hirsel`, `store-levels.hirsel` (minus `Position` and root `durable_at`), `store-health.hirsel`, `store-followers.hirsel` (exposing `follower_tip_data` + `declare_follower_state`, no `read.Snapshot`), `store-follower-service.hirsel`, `store-object-follower.hirsel`.
-- **Owned state & invariants:** Complete `ObjectWriterState` (§4.4 row 34, including `authority_kind`, `head_entry_seq`, `draft_offset`, `export_lifetime`, `archive_on`, `pending_archive_on`, `attached`, `stream`, `has_sealed`, `drop_attach_on_cut`, `failed`, `weak`, `journal_idle_task`) and `ObjectJournalMsg`. Switch constructors (`open`, `open_authority`), dispatch (`handoff`, `durable`, `cut_install`, `fresh_snapshot`, `archive`), and `close` onto `Backend` in one atomic cutover. Pin nominal `store.Follower` in `store-public-types.hirsel`. Preserve 3081 `platform.local` standalone + streamed cases and 3082 pack cache.
-- **Proving laws & obligations:** `object_journal_laws`, `store_reclaim_laws`, `follower_laws`, `follower_crash_laws`, `replication_laws`, `assembly_laws`, **+ O3 (full `ObjectPause` handover + `StreamAnswer` covered-prefix-before-`Fenced` + latch-to-`Undecided` verification)**, plus `platform` standalone/streamed compile+smoke if 3081 landed.
+### L14 — `maintenance` and root completion
+- **Move.** Index-build, verify, expiry and projector privates that are not Db-bound, plus the `store-inspect.hirsel` private constants.
+- **Stays.** `verify_release`, `repair_indexes`, `verify_step`'s live driver, the `Fold` descriptor invocation (R4), `DeclaredProjector` and every Db-bound projector function stay at the root. `maintenance` owns `IndexWalk` and the walk, fold and expiry pure work.
+- **Finish.** Measure line counts and update `tools/file_length_ratchet.json` from the measured values.
+- **Laws.** `store_projector_laws`, `store_index_crash_laws`, `store_trust_laws`; O1; O4; downstream `runner`, `platform`, `vector` and `search` builds.
 
 ---
 
-### Lane 10 (L10): `indexes`
+## 11. Prior Art
 
-- **Goal:** Land Layer 4 (`indexes`) and `indexes.IndexState` on `Db`, keeping `Tx` edit application out of `indexes`.
-- **Files moved:** `store-index-registry.hirsel` (pure registry/extractor planning/drift; leave `Tx` `apply_edits` in `"store"` until L12) and `store-aggregate.hirsel`.
-- **Owned state & invariants:** Introduce `indexes: indexes.IndexState` (`indexes`, `drift`) on `Db` with explicit owner installation methods called by root `seal` and `install_activation`. Pin nominal `store.Aggregate[G]` in `store-public-types.hirsel`.
-- **Proving laws:** `store_lookup_laws`, `store_index_crash_laws`, `store_put_laws_2`.
-
----
-
-### Lane 11 (L11): `read`
-
-- **Goal:** Land Layer 9 (`read`) over neutral capture/follower data, integrating 3062's read-path symbols (`shared_read_only`, `follower_share`, `VisitStep`, `RowViewState`, `visit_scan*`, `row_*`) while leaving `Tx` range/count adapters for L12.
-- **Files moved:** `store-read.hirsel` (minus `Tx` `range`/`range_reverse`/`range_prefix`/`count`/`TxRows`, left in `"store"` until L12), `store-read-pages.hirsel`, `store-changes.hirsel`.
-- **Key contracts:** Construct `SnapshotState`, `ReaderState`, and `ReadOnlyState` from `capture.CapturedState`, `object_writer.FollowerTipData`, and `capture.SharedCaptureState`. Pin nominal `store.Snapshot`, `store.Reader`, `store.ReadOnly`, `store.SharedCapture` *(3062)*, `store.RowView[K, V]` *(3062)*, and `store.Visit` *(3062)* in `store-public-types.hirsel` (keeping `row_key_parts`/`row_bytes`/`row_current_payload` `in row` borrow anchors intact!).
-- **Proving laws & obligations:** `store_read_laws`, `store_cursor_laws`, `store_changes_laws`, `store_changes_page_law`, `store_diff_laws`, **+ O1 (`store.ReadOnly` identity check)**, **+ O4 (borrow anchor & external visibility check)**.
-
----
-
-### Lane 12 (L12): `txn`
-
-- **Goal:** Land Layer 10 (`txn`), `txn.AccountingState` and `txn.CallStreamState` on `Db`, moving all `Tx` operations (including `Tx` range/count, `Tx` tiered reads, `Tx` index edit application, `data_order`/prior resolution, 3062 `visit_range*`, and 3076 `put_ordered`) while keeping the foreground commit/cut/3075-skip coordinator in root `store-coordinators.hirsel`.
-- **Files created/moved:** Create `store-txn-core.hirsel` (split per §7) and `store-tx-range.hirsel` (`Tx` range/count from `store-read.hirsel:466-560` + `apply_edits` from `store-index-registry.hirsel`), move `store-tx.hirsel`, `store-commit.hirsel` (+ `data_order`/prior lookup from `store-commit-wire`), `store-attempts.hirsel`, `store-mux.hirsel`, `store-fork.hirsel`, `store-cell.hirsel`, `store-log.hirsel`, `store-edge.hirsel`, `store-streams.hirsel`, `store-keyed-claims.hirsel` (+ L168–L182 of `store-keyed-journal`), `store-keyed-lifecycle.hirsel`, `store-reexec.hirsel`, and `store-tiered-tx-read.hirsel`.
-- **Owned state & invariants:**
-  - Introduce `accounting: txn.AccountingState` (7 fields, with **mutable `ceiling`** via `reserve_ceiling`/`restore_ceiling`!) and `call_streams: txn.CallStreamState` (6 fields, carrying policy copies for memory opens) on `Db`.
-  - Pin nominal `store.Tx`, `store.TxRows[K, V]`, `store.Pending` in `store-public-types.hirsel`, keeping `pub fn range(...) in tx` and `pub fn fetch_bytes(...) in tx` root-scoped borrow anchors intact!
-  - Preserve 3075's empty-commit skip (`Done.info: Option[CallInfo]`, head-fence probe on Bucket/stream, no cut/increment) across every caller (`run`, `run_on`, `run_with_reply`, `store_body_at`).
-- **Proving laws & obligations:** `store_put_laws`, `store_put_laws_2`, `store_tx_range_laws`, `cell_log_laws`, `store_claim_crash_laws`, `store_claim_quota_laws`, `store_reexec_laws`, `store_swarm_laws`, `store_trust_laws`, **+ O1 (`store.Tx` Runner query/action `PROG-9` identity + Runner L61/L91 smoke)**, **+ O4 (`in tx` borrow anchor + downstream `runner` build)**.
-
----
-
-### Lane 13 (L13): `transfer`
-
-- **Goal:** Land Layer 11 (`transfer`) and `transfer.TransferState` on `DiskState` against the settled cut and `object_writer` export-fetch contracts.
-- **Files created/moved:** Create `store-transfer-core.hirsel` (split per §7), move `store-export.hirsel`, `store-object-export.hirsel` (copy/orchestration half; worker fetch already moved to `object_writer` in L9), `store-object-import.hirsel`, `store-prepared-check.hirsel`, `store-catchup.hirsel`, `store-rounds.hirsel`, `store-install.hirsel`, `store-activation.hirsel`, plus `declare_export`/`finish_export_declaration` orchestration.
-- **Owned state & invariants:** Introduce `transfer: transfer.TransferState` (`lease`, `steps`, `imported`, `reserving`, `target`) on `DiskState`. Wire `reserve_import` → `AccountingState.reserve_ceiling`, `forget_import` → `AccountingState.restore_ceiling(options.resident_limit)` + `ObjectWriterState.clear_export_lifetime`, and `install_activation` → `SchemaState.propose_fence`/`restore_fence` + root `IndexState`/`ProjectorState` install. Preserve 3079's T5 listed-packs-only `restore` and damaged-backup mutilation oracle. Pin nominal `Preparation`, `ValidatedImport`, `Imported`, `ImportWork` in `store-public-types.hirsel`.
-- **Proving laws:** `store_backup_laws`, `store_catchup_laws`, `store_crash_install_laws`, `import_read_laws`.
-
----
-
-### Lane 14 (L14): `maintenance` + Root `store` Completion
-
-- **Goal:** Land Layer 11 (`maintenance`), `maintenance.ProjectorState` on `Db`, finalize the split root module `"store"`, and verify end-state hygiene.
-- **Files created/moved:**
-  - `maintenance` (L11): move `store-index-build.hirsel`, `store-verify.hirsel`, `store-expiry.hirsel`, `store-projector.hirsel` (minus `Pin` already in L2), and create `store-operator-verify.hirsel` (`verify_release` & `repair_indexes` from `store-inspect.hirsel:73-176`).
-  - `store` (L12): finalize `store.hirsel`, `store-public-types.hirsel` (including pinned `Delta[K, V]`, `Merge`, `Fold`), `store-coordinators.hirsel`, `store-attention.hirsel`, and `sizes.hirsel` (coordinate 3080 `stats`/`inspect` counter display and 3076 `writer_plan`).
-  - Measure actual line counts of every file in `core/programs/store/`; only update/remove `store.hirsel` in `tools/file_length_ratchet.json` once measured under the limit.
-- **Proving laws & obligations:** `store_projector_laws`, `store_index_crash_laws`, `store_trust_laws`, **+ O1 (full cross-build `PROG-9` identity verification across all 5 vectors + Runner key resolution)**, **+ O4 (full downstream `runner`/`platform`/`vector`/`search` compile & `fmt.py --check`)**.
-
----
-
-## 11. Prior Art From Peer Storage Engines
-
-All citations verified directly against local clones in `/tmp/ref-*`:
+Carried from v2; citations are against local clones in `/tmp/ref-*`.
 
 | Peer Engine (Clone & Commit) | Boundary Architecture & Citations | Verdict | Wins, Weaknesses & How Hirsel Uses It |
 |---|---|---|---|
 | **redb** (`/tmp/ref-redb`, `2fc790d`) | `Database` (`src/db.rs:798-803`) is a 3-field composition root (`mem`, `transaction_tracker`, `closed`). Acyclic stack: `StorageBackend` → `page_store` (`TransactionalMemory`) → `tree_store` (`Btree` + `TableTree`) → `transactions` (`WriteTransaction`) → `db` façade. | **ADOPTED** | **Win:** Tiny composition root with single-owner subsystem handles. **Weakness:** `WriteTransaction` (`src/transactions.rs:935-957`) holds 18 raw fields. **Hirsel:** Adopts thin composition roots (`Db`/`DiskState`) while keeping `TxState`, `AccountingState`, and `CallStreamState` cleanly separated and pinning root nominal `PROG-9` types at Layer 12. |
 | **fjall** (`/tmp/ref-fjall`, `8700604`) | Splits `DatabaseInner` (`src/db.rs:35-61`) from `SupervisorInner` (`src/supervisor.rs:16-36`), with dedicated `journal/`, `flush/`, `compaction/`, `keyspace/`, `poison.rs` (`src/poison.rs:8-41`). | **ADAPTED** | **Win:** Dedicated `journal/manager.rs` and `PoisonSignal` isolate WAL retention and poison state. **Weakness:** Mutual `Arc` cycles between `Supervisor` and `Keyspace` (`src/db.rs:82-93`). **Hirsel:** Enforces a strictly acyclic 14-layer DAG so cyclic ownership cannot form. |
 | **SQLite** (`/tmp/ref-sqlite`, `795e28a`) | Strict opaque-header stack: VFS → WAL (`src/wal.h:53-75`) → Pager (`src/pager.h:12-43`) → B-Tree (`src/btree.h`) → VDBE (`src/vdbe.h`). | **ADOPTED (improved)** | **Win:** WAL/format changes stay isolated from B-Tree and execution. **Weakness:** `struct Pager` (`src/pager.c:619-654+`) grew to ~80 fields. **Hirsel:** Splits Pager into `manifest` (packs/locations), `pager` (Tiered cache/eviction), and `journal` (WAL segments) enforced at compile time via `pub opaque type` (`PROG-2`). |
-| **TigerBeetle** (`/tmp/ref-tigerbeetle`, `a2a3c706`) | Separates VSR WAL (`src/vsr/journal.zig`), block Grid (`src/vsr/grid.zig:30-85`), LSM Forest/Manifest (`src/lsm/forest.zig:30-90`), and deterministic `StateMachineType(Storage)` (`src/state_machine.zig:223-258`) via capability injection. | **ADOPTED** | **Win:** Explicit capability injection enables deterministic simulation without passing storage-root god objects or re-entering workers. **Hirsel:** Uses Hirsel `scoped fn` ports in `ClaimMachine[T]` and non-reentrant `SettleSession` (zero access to worker queues). |
-| **FoundationDB** (`/tmp/ref-foundationdb`, `58f80b1`) | Separates durability log (`TLogServer`), commit proxy (`CommitProxyServer`), sequencer, and storage engine (`StorageServer`). | **ADAPTED** | **Win:** Orthogonal evolution of commit coordination, log durability, and storage layout. **Hirsel:** Preserves the same separation in-process via acyclic modules and a single foreground coordinator (`store-coordinators.hirsel`). |
+| **TigerBeetle** (`/tmp/ref-tigerbeetle`, `a2a3c706`) | Separates VSR WAL (`src/vsr/journal.zig`), block Grid (`src/vsr/grid.zig:30-85`), LSM Forest/Manifest (`src/lsm/forest.zig:30-90`), and deterministic `StateMachineType(Storage)` (`src/state_machine.zig:223-258`) via capability injection. | **ADOPTED** | **Win:** Explicit capability injection enables deterministic simulation without passing storage-root god objects or re-entering workers. **Hirsel:** Uses Hirsel `scoped fn` ports in `ClaimMachine[T]` and the non-reentrant `SettleView` (zero access to worker queues). |
+| **FoundationDB** (`/tmp/ref-foundationdb`, `58f80b1`) | Separates durability log (`TLogServer`), commit proxy (`CommitProxyServer`), sequencer, and storage engine (`StorageServer`). | **ADAPTED** | **Win:** Orthogonal evolution of commit coordination, log durability, and storage layout. **Hirsel:** Preserves the same separation in-process via acyclic modules and a single foreground coordinator at the root. |

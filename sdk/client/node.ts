@@ -11,15 +11,19 @@ export class NodeStorage implements Storage {
   constructor(directory: string) { this.directory = resolve(directory); }
 
   async lock(name: string, wait: boolean): Promise<Lease | null> {
-    await mkdir(this.directory, {recursive: true, mode: 0o700});
     const base = join(this.directory, name === 'install' ? 'install.lease' : name + '.stream.lease');
     const owner = join(this.directory, `.owner-${process.pid}-${crypto.randomUUID()}`);
     let generation = this.leaseGenerations.get(base) ?? 0;
     for (;;) {
       const path = generation === 0 ? base : `${base}.${generation}`;
       // symlink publishes the owner identity and claims the path in one exclusive operation.
-      try { await symlink(owner, path); }
-      catch (error) {
+      try {
+        await symlink(owner, path).catch(async error => {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          await mkdir(this.directory, {recursive: true, mode: 0o700});
+          await symlink(owner, path);
+        });
+      } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         const other = await readOwner(path);
         if (other === null) continue;
@@ -49,9 +53,12 @@ export class NodeStorage implements Storage {
     }
   }
   async write(state: Installation): Promise<void> {
-    await mkdir(this.directory, {recursive: true, mode: 0o700});
     const temporary = join(this.directory, `.state-${process.pid}-${crypto.randomUUID()}`);
-    const file = await open(temporary, 'wx', 0o600);
+    const file = await open(temporary, 'wx', 0o600).catch(async error => {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await mkdir(this.directory, {recursive: true, mode: 0o700});
+      return open(temporary, 'wx', 0o600);
+    });
     try {
       try { await file.writeFile(encodeState(state)); await file.sync(); }
       finally { await file.close(); }

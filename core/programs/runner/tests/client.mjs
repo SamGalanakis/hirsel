@@ -272,6 +272,31 @@ export async function laws(codec, only, mutant, entries, http) {
       assert.deepEqual(recovered.events,[returned(7)]);h.server.check();recovered.server.check();
       await recovered.client.close();
     }
+    const h=await setup();await ready(h);
+    h.storage.afterWrite=state=>{
+      if(Object.values(state.streams).some(record=>record.pending?.inflight))
+        throw new Error('crash after the grouped attempt commit');
+    };
+    for(const n of [7,8,9])void h.client.call(want,bytes(n),x=>x).catch(()=>{});
+    await settle();
+    assert.equal(h.server.calls.length,0);
+    const saved=h.storage.raw.directory.map(key=>h.storage.raw.streams[key]);
+    assert.equal(saved.length,3);
+    assert(saved.every(record=>record.pending?.inflight));
+    h.storage.afterWrite=undefined;
+    await h.client.close();
+
+    const store=new Ledger();
+    const recovered=await setup(h.storage,{prepare:server=>{server.onCall=(f,s)=>{
+      server.answer(s,f.values[0],f.values[1],store.attempt(s.principal,f));
+    };}});
+    await ready(recovered);await settle();
+    assert.deepEqual(recovered.server.calls.map(({frame})=>frame),
+      saved.map(({id,pending})=>call(id,pending.p,pending.args[0],pending.slot)));
+    assert.equal(store.effects,3);
+    assert.deepEqual(recovered.events,[7,8,9].map(returned));
+    recovered.server.check();
+    await recovered.client.close();
   };
   tests.stream_lease=async()=>{
     const h=await setup();await ready(h);

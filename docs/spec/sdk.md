@@ -366,7 +366,8 @@ submission order. Opening the client leases every free stream of one Caller
 that still holds a call, so each recovered call resumes on its own lane next to
 new work. Completions settle their own lane in any order; Returned and Failed
 answers that arrive together commit in one storage write, and calls that start
-together are marked in flight in one write. Each Call frame carries
+together share a pending write and a subsequent in-flight write under the
+same installation lock. Each Call frame carries
 `min(deadlineMs, the call's remaining time)`. When a call's own deadline passes
 or its `signal` aborts before any delivery, its pending record is deleted, the
 position stays free, and the call is refused with Deadline (or rejected with

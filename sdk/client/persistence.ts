@@ -63,21 +63,37 @@ export function encodeState(state: Installation): string {
   return JSON.stringify(state, (_, value) => typeof value === 'bigint' ? {$bigint: value.toString()}
     : value instanceof Uint8Array ? {$bytes: [...value]} : value);
 }
+// Parse JSON on the native fast path, then visit only the containers that can hold tagged values.
+function reviveState(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] !== null && typeof value[i] === 'object') value[i] = reviveState(value[i]);
+    }
+    return value;
+  }
+  const object = value as Record<string, unknown>, keys = Object.keys(object);
+  if (keys.length === 1) {
+    if (keys[0] === '$bigint') {
+      const text = object.$bigint;
+      if (typeof text !== 'string' || !/^(0|[1-9][0-9]*)$/.test(text)) throw new CorruptState();
+      return BigInt(text);
+    }
+    if (keys[0] === '$bytes') {
+      const bytes = object.$bytes;
+      if (!Array.isArray(bytes) || !bytes.every(byte)) throw new CorruptState();
+      return Uint8Array.from(bytes);
+    }
+  }
+  for (const key of keys) {
+    const child = object[key];
+    if (child !== null && typeof child === 'object') object[key] = reviveState(child);
+  }
+  return object;
+}
 export function decodeState(text: string): Installation {
   try {
-    const state = JSON.parse(text, (_, value) => {
-      if (value && typeof value === 'object' && Object.keys(value).length === 1) {
-        if ('$bigint' in value) {
-          if (typeof value.$bigint !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value.$bigint)) throw new CorruptState();
-          return BigInt(value.$bigint);
-        }
-        if ('$bytes' in value) {
-          if (!Array.isArray(value.$bytes) || !value.$bytes.every(byte)) throw new CorruptState();
-          return Uint8Array.from(value.$bytes);
-        }
-      }
-      return value;
-    });
+    const state = reviveState(JSON.parse(text)) as Installation;
     if (!state || state.version !== RECOVERY_VERSION || !token(state.generation) || !token(state.installation)
       || !Array.isArray(state.directory) || !state.directory.every(streamKey)
       || new Set(state.directory).size !== state.directory.length
@@ -85,7 +101,7 @@ export function decodeState(text: string): Installation {
     // A missing directory member is deliberately retained for the generation
     // loss path in Client.open(), rather than silently treated as unused.
     for (const [n, record] of Object.entries(state.streams)) {
-      if (!state.directory.includes(n) || !validRecord(record as StreamRecord, n)) throw new CorruptState();
+      if (!state.directory.includes(n) || !validRecord(record, n)) throw new CorruptState();
     }
     return state;
   } catch (error) { if (error instanceof CorruptState) throw error; throw new CorruptState('unreadable client state'); }

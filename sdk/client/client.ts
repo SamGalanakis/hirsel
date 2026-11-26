@@ -472,7 +472,6 @@ export class Client implements Transport {
     };
   }
 
-
   callHttp(want: Want, request: HttpRequest): Promise<Outcome<HttpReply>> {
     if (!this.options.http || !validHttpRequest(request)) return Promise.reject(new ClientError('InvalidHttpRequest'));
     return this.queueCall(want, new Uint8Array(), undefined, {...request})
@@ -538,7 +537,7 @@ export class Client implements Transport {
   // Ends one call by its own deadline (no `error`) or its signal; other calls and lanes go on.
   // A key nothing was stored under is dropped, so the call is refused and its position stays
   // free. Otherwise the lane keeps recovering under its key and the outcome goes to onRecovered.
-  private async drop(call: Waiter, why: {error?: unknown}): Promise<void> {
+  private async drop(call: Waiter, why: {error?: unknown}, state?: Installation): Promise<void> {
     const end = (outcome: Outcome<Uint8Array>) => {
       if (call.overlay && this.overlays.delete(call.overlay)) this.recompute();
       if ('error' in why) call.reject(why.error); else call.resolve(outcome);
@@ -551,7 +550,7 @@ export class Client implements Transport {
     if (owed && !('error' in why)) return;
     const pending = lane.record.pending;
     if (!owed && pending && !pending.inflight && pending.untouched) {
-      await this.edit(lane, record => { delete record.pending; });
+      await this.edit(lane, record => { delete record.pending; }, state);
       if (lane.call !== call) return;
       lane.call = undefined;
       await this.run({tag: 'CallFinished', epoch: this.phase.epoch, lane: lane.id});
@@ -563,43 +562,41 @@ export class Client implements Transport {
   }
   private async pump(): Promise<void> {
     if (this.phase.tag !== 'Ready') return;
-    await this.dispatch();
-    await this.sendLanes();
+    const room = this.phase.width - [...this.lanes.values()].filter(lane => lane.record.pending).length;
+    const take: QueuedCall[] = [...this.calls].slice(0, Math.max(0, room));
+    if (take.length === 0) { await this.sendLanes(); return; }
+    // Pending and in-flight are separate durable writes under one installation lock.
+    await this.installation(async state => {
+      await this.dispatch(state, take);
+      await this.sendLanes(state);
+    });
   }
   // One pump runs after the work already queued, so calls and answers arriving together share its writes.
   private schedulePump(): void {
     if (!this.pumpQueued) void this.enqueue(() => { this.pumpQueued = false; return this.pump(); }).catch(() => {});
     this.pumpQueued = true;
   }
-  // Moves queued calls onto free lanes, at most the session's 1+q lanes holding a call, in one write.
-  private async dispatch(): Promise<void> {
+  private async dispatch(state: Installation, take: readonly QueuedCall[]): Promise<void> {
     if (this.phase.tag !== 'Ready') return;
-    const room = this.phase.width - [...this.lanes.values()].filter(lane => lane.record.pending).length;
-    const take: QueuedCall[] = [...this.calls].slice(0, Math.max(0, room));
-    if (take.length === 0) return;
     for (const call of take) this.calls.delete(call);
     const claimed: Array<{lane: Lane; stream: string; lease: Lease}> = [];
     try {
-      const placed = await this.installation(async state => {
-        const free = [...this.lanes.values()].filter(lane => !lane.record.pending && !lane.call), used: Lane[] = [];
-        for (const call of take) {
-          const lane = free.shift() ?? await this.addLane(state);
-          let record = state.streams[lane.stream];
-          if (record.id === undefined) {
-            const id = this.mint(this.keyedTime()), stream = streamHex(id);
-            record = {...record, id, minter: state.installation};
-            record.pending = pendingFor(record, call, state.installation);
-            claimed.push({lane, stream, lease: await claimStream(this.options.storage, state, lane.stream, stream, record, false)});
-          } else record.pending = pendingFor(record, call, state.installation);
-          lane.call = call;
-          used.push(lane);
-        }
-        await this.options.storage.write(state);
-        for (const {lane, stream, lease} of claimed.splice(0)) await this.swapLease(lane, stream, lease);
-        for (const lane of used) lane.record = structuredClone(state.streams[lane.stream]);
-        return true;
-      });
-      if (!placed) for (const call of take) call.reject(new ClientError(this.state));
+      const free = [...this.lanes.values()].filter(lane => !lane.record.pending && !lane.call), used: Lane[] = [];
+      for (const call of take) {
+        const lane = free.shift() ?? await this.addLane(state);
+        let record = state.streams[lane.stream];
+        if (record.id === undefined) {
+          const id = this.mint(this.keyedTime()), stream = streamHex(id);
+          record = {...record, id, minter: state.installation};
+          record.pending = pendingFor(record, call, state.installation);
+          claimed.push({lane, stream, lease: await claimStream(this.options.storage, state, lane.stream, stream, record, false)});
+        } else record.pending = pendingFor(record, call, state.installation);
+        lane.call = call;
+        used.push(lane);
+      }
+      await this.options.storage.write(state);
+      for (const {lane, stream, lease} of claimed.splice(0)) await this.swapLease(lane, stream, lease);
+      for (const lane of used) lane.record = structuredClone(state.streams[lane.stream]);
     } catch (error) {
       for (const {lease} of claimed) await lease.release();
       for (const call of take) {
@@ -625,16 +622,18 @@ export class Client implements Transport {
     const record = emptyStream(this.caller);
     return this.addLeased(stream, record, await claimStream(this.options.storage, state, undefined, stream, record, true));
   }
-  // Sends every waiting lane the session's 1+q units allow, marking them in flight in one write.
-  private async sendLanes(): Promise<void> {
+  private async sendLanes(state?: Installation): Promise<void> {
     const {epoch} = this.phase, ready: Lane[] = [];
     for (const lane of [...this.lanes.values()]) {
-      if (lane.call && expired(lane.call, this.clock.now())) await this.drop(lane.call, {});
+      if (lane.call && expired(lane.call, this.clock.now())) await this.drop(lane.call, {}, state);
       if (!lane.record.pending) continue;
       await this.run({tag: 'PrepareCall', epoch, lane: lane.id, prepare: () => { ready.push(lane); }});
     }
     if (ready.length === 0) return;
-    await this.installation(state => this.run({tag: 'Resume', epoch, run: () => this.prepareLanes(state, ready, epoch)}));
+    const prepare = (state: Installation) =>
+      this.run({tag: 'Resume', epoch, run: () => this.prepareLanes(state, ready, epoch)});
+    if (state) await prepare(state);
+    else await this.installation(prepare);
   }
   private async prepareLanes(state: Installation, lanes: readonly Lane[], epoch: number): Promise<void> {
     const now = this.keyedTime(), wire = this.options.deadlineMs ?? 30000, margin = futureSlackMs + BigInt(wire) + 1n;
@@ -688,14 +687,15 @@ export class Client implements Transport {
   private mint(t: bigint): StreamId {
     return {t, n: crypto.getRandomValues(new BigUint64Array(1))[0]};
   }
-  // Edits one lane's stored record in its own storage step.
-  private async edit(lane: Lane, fn: (record: StreamRecord) => void): Promise<boolean> {
-    return !!await this.installation(async state => {
-      fn(state.streams[lane.stream]);
-      await this.options.storage.write(state);
-      lane.record = structuredClone(state.streams[lane.stream]);
+  private async edit(lane: Lane, fn: (record: StreamRecord) => void, state?: Installation): Promise<boolean> {
+    const write = async (installation: Installation) => {
+      const record = installation.streams[lane.stream];
+      fn(record);
+      await this.options.storage.write(installation);
+      lane.record = structuredClone(record);
       return true;
-    });
+    };
+    return state ? write(state) : !!await this.installation(write);
   }
   private async moveStream(lane: Lane, state: Installation, stream: string, record: StreamRecord, keepOld = false): Promise<void> {
     await this.swapLease(lane, stream, await replaceStream(this.options.storage, state, lane.stream, stream, record, keepOld));

@@ -93,6 +93,16 @@ impl Reachable<'_> {
             .map(|identity| &identity.definition)
     }
 
+    /// The reached functions of native foreign modules (FFI-8). A contained module's
+    /// functions are recorded and replayed like Hirsel code (FFI-14).
+    pub(crate) fn native_foreign_functions<'s>(
+        &'s self,
+        product: &'s CheckProduct,
+    ) -> impl Iterator<Item = &'s DefPath> {
+        self.foreign_functions()
+            .filter(|function| !product.is_contained(function))
+    }
+
     pub(crate) fn recording_stop(
         &self,
         product: &CheckProduct,
@@ -102,14 +112,12 @@ impl Reachable<'_> {
             return Ok(None);
         }
         let Some(function) = self
-            .foreign_functions()
+            .native_foreign_functions(product)
             .min_by_key(|function| function.definition_identity())
         else {
             return Ok(None);
         };
-        let reason =
-            crate::native::recipe_build::recording_refusal(entry, std::iter::once(function))
-                .expect("one reached foreign function");
+        let reason = recording_refusal(entry, function.definition_identity());
         // Reach records decide the refusal. Read the checked bodies for its
         // site only, so cached call sites never outlive the current source.
         let fresh = if self.reach.is_some() || !self.materialized.hits.is_empty() {
@@ -968,4 +976,24 @@ pub(crate) fn build_target(options: &NativeOptions) -> io::Result<hirsel_core_la
             options.target
         ))
     })
+}
+
+/// FFI-8 for a recipe: its least native foreign function, if any.
+pub(crate) fn foreign_recording_refusal(
+    recipe: &hirsel_core_ir::release_recipe::Recipe,
+) -> Option<String> {
+    let native = recipe
+        .foreign_modules
+        .iter()
+        .filter(|leaf| leaf.wasm().is_none());
+    let functions = native.flat_map(|leaf| &leaf.functions);
+    let function = functions
+        .map(|f| f.identity.definition.definition_identity())
+        .min()?;
+    Some(recording_refusal(&recipe.entry.definition, function))
+}
+
+fn recording_refusal(entry: &DefPath, function: impl std::fmt::Display) -> String {
+    let entry = entry.definition_identity();
+    format!("FFI-8: a recording build cannot reach foreign code: {entry} reaches {function}")
 }

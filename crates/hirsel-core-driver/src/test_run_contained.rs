@@ -298,3 +298,133 @@ fn contained_calls_run_in_the_tasks_own_instance() {
         assert!(!stdout.is_empty() && stdout.lines().all(|line| line == trap("memory out of bounds")), "{engine} signals: {stdout}");
     }
 }
+
+/// FW17 and FW27: a test that reaches only contained code is recorded and
+/// replays `Sealed` (FFI-14). FW17's test calls `spin`, `fill`, `grow` under
+/// `bound bytes` and `trap` inside `isolate`; FW27's overflows the guest
+/// stack inside `isolate` under `bound steps 10⁹` beside a task that prints, on
+/// 2 workers, so its slice ends must be the recording's. A contained test
+/// takes `Foreign[Box]`, so a second run with the same cache runs it again
+/// (PROG-4). A test that also reaches a native module is refused as FL7 is.
+#[test]
+#[ignore = "explicit native integration target"]
+fn contained_tests_record_and_replay() {
+    let law = PackageLaw::new();
+    let fixture = law.libraries.join("programs/wasm_laws");
+    for file in ["laws.hirsel", "native.hirsel", "box.wasm"] {
+        law.write(&format!("wasm_laws/{file}"), std::fs::read(fixture.join(file)).unwrap());
+    }
+    let manifest = std::fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
+    law.write("wasm_laws/hirsel.toml", format!(
+        "{}\n[foreign.other]\nsymbols = \"hwo_\"\narchives = []\n",
+        manifest.replace("\"main.hirsel\" = \"main\"", "\"main.hirsel\" = \"main\"\n\"other.hirsel\" = \"other\""),
+    ));
+    law.write("wasm_laws/other.hirsel", "pub fn poke(f: Foreign[laws.Other]) -> i32\n");
+    law.write("wasm_laws/laws.hirsel", format!(
+        "{}\npub opaque type Other {{}}\n",
+        std::fs::read_to_string(fixture.join("laws.hirsel")).unwrap(),
+    ));
+    law.write("wasm_laws/main.hirsel", CONTAINED_REPLAY);
+    let runtime = env_record_runtime();
+    let llvm = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let test = |args: &[&str]| {
+        let mut argv = [
+            "test", "wasm_laws", "--replay", "--expect-verdict", "Sealed", "--json",
+            "--limit", "268435456", "--runtime", runtime.to_str().unwrap(),
+            "--cc", llvm.join("bin/clang").to_str().unwrap(),
+            "--libraries", law.libraries.to_str().unwrap(),
+            "--store", law.path("store").to_str().unwrap(),
+            "--package-store", law.path("packages").to_str().unwrap(),
+            "--grant", "Foreign=wasm_laws@1/laws/Box", "--grant", "Foreign=wasm_laws@1/laws/Other",
+            "--grant", "Tasks", "--grant", "Stdout",
+        ].map(str::to_owned).to_vec();
+        argv.extend(args.iter().map(|s| (*s).to_owned()));
+        let mut command = process::tape_request_command(&argv, law.dir.path());
+        command.env("HIRSEL_UNTIED", "2");
+        process::tape_request_output(command)
+    };
+    for (engine, name) in ["cranelift", "llvm"]
+        .into_iter()
+        .flat_map(|e| ["fw17_contained_replays", "fw27_overflow_replays"].map(|n| (e, n)))
+    {
+        for _ in 0..2 {
+            let exact = format!("wasm_laws@1/main/{name}");
+            let (code, out, err) = test(&["--backend", engine, "--exact", &exact]);
+            assert_eq!(code, Some(0), "{engine} {name}: {out}\n{err}");
+            let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+            let tests = report["tests"].as_array().unwrap();
+            assert_eq!(tests.len(), 1, "{report}");
+            assert_eq!((&tests[0]["source"], &tests[0]["passed"]), (&"executed".into(), &true.into()), "{report}");
+        }
+    }
+    let (code, out, err) = test(&["--exact", "wasm_laws@1/main/fl7_both"]);
+    assert_eq!(code, Some(1), "{out}\n{err}");
+    assert!(out.contains("refused: FFI-8: a recording build cannot reach foreign code: wasm_laws@1/main/fl7_both reaches wasm_laws@1/other/poke"), "{out}\n{err}");
+}
+
+const CONTAINED_REPLAY: &str = r#"
+fn say(out: Stdout, text: String) waits {
+    result.unwrap(stdout.write(out, text))
+    result.unwrap(stdout.write(out, "\n"))
+}
+
+fn trapped[R](take outcome: Result[Result[R, Causes], Capacity]) -> bool {
+    match take outcome {
+        Ok(Error(_)) => true,
+        _ => false,
+    }
+}
+
+@test
+fn fw17_contained_replays(f: Foreign[laws.Box], out: Stdout) -> Result[(), ()] waits {
+    let mut s = string.from("FW17 ")
+    string.push_u64(mut s, native.spin(f, 1000))
+    let mut b: Bytes = list.with_capacity(4)
+    list.fill(mut b, 4, 0)
+    string.push_char(mut s, ' ')
+    string.push_u64(mut s, native.fill(f, mut b))
+    let grown = match (bound bytes 1048576 {
+        native.grow(f, 1)
+    }) {
+        Ok(old) => old,
+        Error(_) => return Error(()),
+    }
+    if grown < 0 {
+        return Error(())
+    }
+    if !trapped(isolate(fn() -> i32 {
+        native.trap(f, 7)
+    })) {
+        return Error(())
+    }
+    say(out, s)
+    Ok(())
+}
+
+fn printer(take out: Stdout) -> u64 waits {
+    say(out, "FW27 beside")
+    0
+}
+
+@test
+fn fw27_overflow_replays(f: Foreign[laws.Box], tasks: Tasks, out: Stdout) -> Result[(), ()] waits {
+    let child = task.spawn(tasks, bytes 1048576, out, printer)
+    let overflowed = match (bound steps 1000000000 {
+        trapped(isolate(fn() -> u32 {
+            native.recurse(f, 10000000)
+        }))
+    }) {
+        Ok(t) => t,
+        Error(_) => false,
+    }
+    let _ = task.join(take child)
+    if overflowed { Ok(()) } else { Error(()) }
+}
+
+@test
+fn fl7_both(f: Foreign[laws.Box], g: Foreign[laws.Other]) -> Result[(), ()] {
+    let _ = native.count(f)
+    let _ = other.poke(g)
+    Ok(())
+}
+"#;

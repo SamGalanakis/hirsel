@@ -107,6 +107,11 @@ impl CheckProduct {
         }
         let mut replay_options = recording.options.clone();
         crate::package_dir::Grants::default().apply(&mut replay_options);
+        // A recorded test reaches only contained code (FFI-8), whose
+        // Foreign[I] grant is a marker the tape does not carry (FFI-14).
+        replay_options
+            .foreign_grants
+            .clone_from(&recording.options.foreign_grants);
         replay_options.output = replay_options.output.with_extension("replay");
         replay_options.replay = Some(crate::ReplayPlan {
             path: recording

@@ -6,11 +6,12 @@
 use crate::cli::{Invocation, OptionId as Opt};
 use crate::code_store::CodeStore;
 use crate::launcher::session::{Attempt, Grants, Group};
-use crate::native::recipe_build::{foreign_grant_refusal, foreign_recording_refusal, parse_root};
+use crate::native::recipe_build::{foreign_grant_refusal, parse_root};
 use crate::operator::{
     self, Answer, Ask, Class, DecisionStage, Fates, Forward, Front, Needed, Pause, Phase, Record,
     Registration, Report, Verdict,
 };
+use crate::reachability::foreign_recording_refusal;
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ids::hex;
 use hirsel_core_ir::release_recipe::Recipe;

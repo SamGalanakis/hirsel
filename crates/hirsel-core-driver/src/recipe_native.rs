@@ -778,7 +778,10 @@ impl CheckProduct {
         options: &NativeOptions,
         link: &crate::tool_inputs::LinkRecipe,
     ) -> Result<LinkArchives, NativeStop> {
-        if options.recording || reached.materialized.foreign.is_empty() {
+        // A recording build of native-reaching code is refused after this (FFI-8).
+        if reached.materialized.foreign.is_empty()
+            || options.recording && reached.native_foreign_functions(self).next().is_some()
+        {
             return Ok(LinkArchives::default());
         }
         reached.require()?;
@@ -788,6 +791,12 @@ impl CheckProduct {
             Some((&options.runtime, link)),
         )?;
         Ok(sealed)
+    }
+
+    /// A function of a contained module (FFI-10).
+    pub(crate) fn is_contained(&self, function: &DefPath) -> bool {
+        self.foreign_capture(function)
+            .is_ok_and(|(_, capture)| capture.wasm().is_some())
     }
 
     fn foreign_capture(
@@ -968,27 +977,6 @@ pub(crate) fn foreign_grant_lines(
     })
 }
 
-pub(crate) fn foreign_recording_refusal(recipe: &Recipe) -> Option<String> {
-    let functions = recipe
-        .foreign_modules
-        .iter()
-        .flat_map(|leaf| &leaf.functions)
-        .map(|function| &function.identity.definition);
-    recording_refusal(&recipe.entry.definition, functions)
-}
-
-pub(crate) fn recording_refusal<'a>(
-    entry: &DefPath,
-    functions: impl Iterator<Item = &'a DefPath>,
-) -> Option<String> {
-    let function = functions.map(DefPath::definition_identity).min()?;
-    Some(format!(
-        "FFI-8: a recording build cannot reach foreign code: {} reaches {}",
-        entry.definition_identity(),
-        function,
-    ))
-}
-
 fn launch_options(
     recipe: &Recipe,
     names: &[String],
@@ -996,7 +984,7 @@ fn launch_options(
     options: &NativeOptions,
 ) -> Result<(NativeOptions, EntryDecl), NativeStop> {
     if options.recording
-        && let Some(reason) = foreign_recording_refusal(recipe)
+        && let Some(reason) = crate::reachability::foreign_recording_refusal(recipe)
     {
         return Err(NativeStop::ForeignRecording {
             reason,

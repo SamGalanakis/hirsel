@@ -381,9 +381,7 @@ impl AdmissionStore {
         let budget = budget(limits, Some(deadline));
         let held = budget.debit();
         let recipe = Recipe::decode(&recipe_bytes, &held)?;
-        if recording
-            && let Some(reason) = crate::native::recipe_build::foreign_recording_refusal(&recipe)
-        {
+        if recording && let Some(reason) = crate::reachability::foreign_recording_refusal(&recipe) {
             return Err(AdmissionError::RecordingForeign(reason));
         }
         if let Some(approved) = approved_foreign

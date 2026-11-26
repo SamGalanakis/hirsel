@@ -329,7 +329,7 @@ impl CheckProduct {
             }
         };
         let mut reached = reach(&options)?;
-        let foreign = laws.is_some() && reached.foreign_functions().next().is_some();
+        let foreign = laws.is_some() && reached.native_foreign_functions(self).next().is_some();
         if foreign {
             options.recording = false;
             if let Some(runtime) = laws.flatten() {

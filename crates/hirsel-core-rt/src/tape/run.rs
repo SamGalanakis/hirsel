@@ -528,6 +528,10 @@ unsafe extern "C" fn invoke(
                     Ok(v) => (*files).registry.vector(v),
                     Err(f) => return stopped(run, f),
                 }
+            } else if req.kind == entry::FOREIGN {
+                // A contained Foreign[I] is a marker with no provider; its
+                // calls are recomputed on replay (FFI-14), so nothing is taped.
+                source
             } else {
                 let (provider, handle) = if run.mode == 0 {
                     (
@@ -956,7 +960,7 @@ unsafe fn run_taped(
         config.close_grants = None;
         config.describe_output = Some(emit_describe);
         let status = if mode == 0 {
-            process::launch(&config, invoke)
+            process::launch_taped(&config, invoke)
         } else {
             let (dir, name) = match tape_directory(&mut run.sink, &run.path) {
                 Ok(place) => place,
@@ -974,7 +978,7 @@ unsafe fn run_taped(
                 return refused(&mut run, OpenError::Unreadable(Fault::Corrupt));
             }
             run.replay = Some(replay);
-            process::hirsel_core_run(&config, invoke)
+            process::run_taped(&config, invoke)
         };
         // The recording launch reports it with every other stream's.
         if let Some((at, err)) = run.record_truncated {

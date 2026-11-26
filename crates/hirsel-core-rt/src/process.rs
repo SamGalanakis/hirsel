@@ -308,6 +308,35 @@ pub(crate) unsafe fn launch(config: &Config, entry: Entry) -> u8 {
     unsafe { hirsel_core_run(config, entry) }
 }
 
+/// [`launch`] for a recording run. A recording build reaches no native code
+/// (FFI-8) and contained code never waits (FFI-12), so the run carries the
+/// foreign state its contained calls use, with no helper pool.
+///
+/// # Safety
+/// As [`launch`].
+pub(crate) unsafe fn launch_taped(config: &Config, entry: Entry) -> u8 {
+    #[cfg(feature = "testing")]
+    if let Some(launch) = LAUNCH.get() {
+        // SAFETY: the launch takes this call's pinned Config and entry.
+        return unsafe { launch(config, entry) };
+    }
+    // SAFETY: forwarded caller contract.
+    unsafe { run_taped(config, entry) }
+}
+
+/// [`hirsel_core_run`] for a replayed run, as [`launch_taped`].
+///
+/// # Safety
+/// As [`hirsel_core_run`].
+pub(crate) unsafe fn run_taped(config: &Config, entry: Entry) -> u8 {
+    // SAFETY: forwarded caller contract.
+    unsafe {
+        run_config(config, entry, |context, main| {
+            with_foreign(context, main, false)
+        })
+    }
+}
+
 /// # Safety
 /// Config, entry and all borrowed grants/arguments remain live through the run.
 /// The generated entry thunk returns only after cleanup on every exit edge.

@@ -1124,8 +1124,9 @@ never reuses its pass (FFI-14).
 **Status: slice W1 in progress.** A manifest's `containment` key is parsed (FFI-10), a build
 that reaches a contained module admits it (FFI-11) and compiles it for Linux targets, and its
 calls run in the calling task's own instance with loans, handles and traps (FFI-12, FFI-14,
-FFI-15), metered by fuel into steps, slice ends and byte charges (FFI-13). `[tests]` grants,
-the object cache and replay (FFI-16) are not built yet.
+FFI-15), metered by fuel into steps, slice ends and byte charges (FFI-13). A program that
+reaches only contained code is recorded and replayed (FFI-14). Launch grants without
+`--grant`, the object cache and recipes (FFI-16) are not built yet.
 
 Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
 contained-foreign-review-2903: the artifact is loaded in place from the image's executable

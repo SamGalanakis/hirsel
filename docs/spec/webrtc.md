@@ -70,6 +70,11 @@ repeated initial probing). A down-track whose RTX pair the agreement in force la
 the session when it is added, so every subscribe on an RTX section signals its
 `a=ssrc-group:FID`, not only FlexFEC sections and collisions.
 
+Amended 2026-11-26 (sfu-pool-media-w2-spec-2888): RTC-10, pooled rooms. One service serves
+many rooms from one pool of units and ports, with room ids that are never reused, keys that
+carry their room, exact per-room sizing, a per-room control order and per-room isolation.
+Laws W34 to W39, slices P1 to P4. Inter-SFU relaying is [sfu_cascade](sfu_cascade.md).
+
 This chapter specifies three layers, each sans-IO:
 
 - **SDP** (RTC-1, RTC-2): a minimal JSEP subset. One BUNDLE group, `rtcp-mux`, ICE-Lite on the
@@ -1511,6 +1516,239 @@ recorder's unit as home, and it records what they subscribe to.
 The laws are the package's: real FFmpeg frames through each codec's RTP
 packetization, against the frames sent and the sender reports. ffprobe and
 ffmpeg decode the files in `test-vectors.sh`.
+
+## RTC-10: Pooled rooms
+
+*Specified 2026-11-26 (sfu-pool-media-w2-spec-2888, Horizon H3 part 1). Not built. Slices
+P1 to P4 and laws W34 to W39 below.*
+
+`signal.serve` (S7) serves **one** room: its `Service` names one `RoomId`, one `Dial` and one
+`RoomLimits`, binds `u` ports, and every unit of that service routes only that room. A host
+that serves many small rooms runs one service per room, each with its own ports, unit tasks,
+certificates and receive pools, about 64 MiB per active room in the 2026-11-25 dogfood. RTC-10
+serves many rooms from one shared pool of units and one fixed set of ports. The router was
+built multi-room from S4 on (`open_room` takes a `RoomId`, every `Tag` carries its room, and
+RTC-7's fence tables are per room), so most of RTC-10 is the service around it: room
+admission and sizing, a control plane that does not serialize rooms behind each other, and
+isolation, so one room's load or failure leaves the others' service unchanged.
+
+### Shape
+
+```hirsel unbuilt
+pub type PoolLimits {
+    units: u16,                // 1 to 64, one port and one unit task each
+    unit_bytes: u64,           // each unit task's memory (CONC-15), as Service.unit_bytes
+    rooms: u32,                // live rooms at once, across the pool
+    sessions: u32,             // live PeerSessions per unit
+    inflight: u16,             // control calls in flight at once, pool-wide
+    media_take: u32,           // media-inbox messages a unit takes per turn
+    room_pps: u32              // authenticated datagrams per second per publisher session
+}
+pub type PoolOrder[M] = Open(name: RoomName, dial: runner.room_client.Dial, limits: RoomLimits, embed: Embed[M]) | Close(name: RoomName)
+pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Closed(name: RoomName, room: RoomId, why: CloseWhy)
+pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
+pub type CloseWhy = Asked | Fault(RouterError)
+pub type RoomName = RoomName(Inline[u8, 32])
+pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
+
+pub fn serve_pool[M: codec](take p: Pool[M]) -> Result[(), ServeError] waits
+pub fn room_cost(limits: RoomLimits, session: peer.PeerLimits) -> RoomCost
+pub type RoomCost { replicated: u64, per_session: u64 }
+```
+
+`serve` becomes `serve_pool` with one `Open` already queued: the single-room service is a
+pool of one room, and there is no second entry point to keep (`/wholehog`). The application
+sends `Open` and `Close` orders on `orders` and reads `PoolReport`s. `RoomName` is the
+application's name for the room, 32 bytes, opaque to the pool. The pool keeps one
+`Adapter[M]` and one `room_client` membership per open room on the control unit (unit 0).
+
+**Internal room ids are never reused.** `Open` draws the room's `RoomId` from a pool-wide
+counter that only rises, and `Opened` reports it. Closing a room and opening one with the
+same name gives a new `RoomId`. Every `Tag`, every cross-unit message, every fence table and
+every 5-tuple row names the `RoomId`, so a message, a queued datagram or a late `RepairReply`
+of a closed room can never be taken as the new room's: it names a room no unit has open, and
+the router drops and counts it (`stale`). Without this rule, a reopened room's adapter would
+hand out ids and epochs from 1 again, and a `Media` message posted before `close_room` and
+taken after the reopen would match a new admission's `(id, epoch)`, which RTC-7 promises
+never happens (law W35).
+
+**Every key carries its room.** Ids and epochs are dense per room (RTC-8, Identity), so
+`Gen(id, epoch)` alone names a participant only inside one room. Each key that is a `Gen`
+alone today gains the room: `units.Event.Offer` and `units.Event.Shut` carry a
+`Participant` (room and `Gen`), `units.Event.Layers` carries the publication's room, and the
+control unit routes each `Event` to its room's adapter by that room. `PublicationId` stays
+pool-wide (`router.next_publication` is one counter on the control unit), so publication ids
+never collide across rooms either. The build greps every `Gen`-keyed table and message in
+`webrtc_sfu` and either adds the room or states in a comment why one room is implied.
+
+### Sizing and admission
+
+A room's memory is fixed when it opens (RTC-5 Bounds): `room_cost(limits, session)` answers
+two exact numbers from the same sizes the router allocates with:
+
+- `replicated`: what **every** unit allocates for the room at `open_room`: the room record,
+  the fence table (`ids` entries), the roster rows, the publication table
+  (`publications` × `participants` rows with their wanted masks);
+- `per_session`: what one admitted participant's home unit allocates: one PeerSession at
+  `session` (`PeerLimits`: sections, down-tracks, RTX history, pacer), its publications'
+  ingress RTX rings (`floor(rtx_bytes / 1500)` slots of 1,500 bytes, home unit only) and RED
+  rings, and its down-tracks' rewrites, histories and FEC groups. A down-track on a unit
+  other than its publisher's home also holds that publication's RED ring there, which the
+  join that subscribes charges to that unit.
+
+`room_cost` is computed from the same constants the allocations use, never from a table of
+estimates, and law W34 checks it against the charges the units actually record. Each unit
+keeps a **ledger**: `unit_bytes` minus the fixed per-unit cost (socket pool `slots` ×
+`slot_bytes`, out buffers, inboxes) minus every open room's `replicated` minus every homed
+session's `per_session`.
+
+- `Open` is admitted when the pool has fewer than `rooms` live rooms and every unit's ledger
+  holds `replicated` plus `per_session` for at least one participant. Otherwise it is
+  `Refused(Rooms)` or `Refused(Bytes(unit, need, free))`, and nothing is allocated. A room
+  is never opened on some units and not others.
+- A `join` is admitted on a home unit whose ledger holds `per_session` and whose live session
+  count is below `sessions`. When no unit has room, the join is `Limit(sessions)` and the
+  peer is answered `Refused` as any refused join is (RTC-8). Admission never evicts, and no
+  cap is hidden: every refusal names its bound.
+
+**Home units.** At `Open` the pool picks the room's **primary unit**: the unit with the most
+free ledger bytes, lowest index on a tie. A participant's home is the room's primary unit
+while it has room for the session, and otherwise the unit with the most free bytes. Packing a
+room on one unit means one decryption and zero cross-unit copies for most of its fan-out
+(RTC-5 step 3 runs only for spilled subscribers), and it keeps a hot room's work mostly on
+one unit. Spreading every room across every unit, as one-room `serve` does, would double
+the copies and spread one room's overload over every room's units.
+
+**Ports.** The pool binds `units` ports once. Every room's sessions advertise their home
+unit's port, so the port count is fixed by the pool and not by the room count. One-room
+`serve` used the same rule: the home unit is a signaling choice, and no steering is needed.
+
+### The control plane
+
+Unit 0 runs every room's adapter and room client. One-room `serve` lets one control call be
+in flight at a time (`units.begin` refuses a second with `Exists`). With many rooms, one room
+whose units are slow to acknowledge, or one room churning, would delay every other room's
+joins and revokes. RTC-10 orders control **per room**:
+
+- **Per-room order, pool-wide window.** Each room's changes are applied in that room's
+  order on every unit, as RTC-5 requires. Changes of different rooms may be in flight
+  together, up to `inflight` across the pool and one per room. Every unit takes control
+  messages from one FIFO inbox, and the control unit posts each room's changes in that room's
+  order, so each unit applies each room's changes in order. Ordering across rooms is not
+  required, because no change names two rooms. Each order and acknowledgement carries
+  `(room, seq)`, and `seq` counts per room.
+- **Fair turns.** Each control-unit turn polls every room client with `try_next` once, and
+  admits pending changes from rooms in round-robin order, starting after the room served
+  first in the previous turn, until `inflight` is reached. A room with a backlog never takes
+  a second slot while another room waits for one.
+- **Revokes first.** A pending `Revoke`, `Suspend` or `Close` of a room is admitted before that
+  room's other pending changes, and a slot is held for it when every slot is taken: `inflight`
+  is the window for other changes, and fence changes may exceed it by one per room. A fence
+  therefore waits at most for its own room's change in flight, never for another room's
+  backlog.
+
+### Isolation
+
+The pool isolates rooms against **outside input and load**: another room's peers, its
+signaling, its publishers' rates and its subscribers' estimates. It does not add mechanisms
+that guard against the router itself being wrong. A bug in the router is fixed in the router
+(host rules, "trust our own implementation").
+
+1. **Memory.** A room only ever allocates within its `room_cost`, reserved at `Open` and at
+   each join. One room's growth is refused at its own bounds (`Limit`) and never takes memory
+   another room was admitted with (W34).
+2. **Fault containment.** A `RouterError` that names a room is that room's fault, not the
+   unit's. `turn`, `take_media` and `take_datagram` no longer return it to `serve`, which ends
+   the whole service today. Such an error is reported in the room's `Event`s, and the control
+   unit closes that room with the same fence as `Close`, reporting
+   `Closed(name, room, Fault(e))`. Only errors with no room end the pool: the socket's, a unit
+   inbox's capacity, a failed spawn. The build lists each `RouterError` site and its scope
+   (law W36).
+3. **Signaling.** Each room has its own room client membership. A `Lost` suspends only its own
+   room (RTC-8), and its rejoin backoff is its own. One room's relay session failing leaves
+   the others' media and control running.
+4. **Ingress rate.** Each authenticated publisher session may deliver at most `room_pps`
+   datagrams per second to routing, measured by a token bucket of one second's depth. It is
+   checked after the 5-tuple lookup and before SRTP is opened, so an over-rate packet costs a
+   table lookup and is dropped and counted (`over_rate`) per room. RTC-5 Bounds already cap a
+   room's down-tracks, so a room's fan-out work per turn is at most `room_pps` × its largest
+   publication's down-tracks per second.
+5. **Media inbox.** A unit takes at most `media_take` messages from its media inbox per turn,
+   in arrival order. A message that finds the inbox full is dropped and counted against the
+   room it names (`full`, today a unit counter). One hot room on another unit can delay a
+   unit's media by a turn but cannot keep its own datagrams waiting longer than one turn.
+6. **What is not isolated.** The receive pool of a unit's port (NET-16 `slots`) is shared by
+   every room homed there, because a datagram's room is known only after its 5-tuple
+   lookup. An unauthenticated flood at a port slows every room on that unit, as it slows a
+   one-room service. Pre-authentication cost stays bounded per datagram: STUN without a
+   matching ufrag gets no answer, and DTLS without a known 5-tuple gets no state (RTC-3).
+   Per-source limits belong to the TURN relay and the host's firewall, not to the router.
+
+**Fence latency.** RTC-7 bounds a fence by the slowest unit's turn plus 50 ms. In a pool that
+bound needs a bounded turn, and RTC-10 gives one: a turn takes at most one `udp_recv` batch
+(`slots` datagrams), at most `media_take` media messages, and the control messages of at
+most `inflight` plus `rooms` calls, and each of those does bounded work by RTC-5 Bounds.
+So a revoke in room A waits for at most one turn of room B's bounded work on each unit, and
+never for room B's backlog.
+
+### Pooling laws
+
+Harness: `pool_laws.hirsel` in `webrtc_sfu`, over the S5 test seam (units stepped by hand
+over `sim.udp`), unless named otherwise. Each is red on main before its slice.
+
+- **W34 `pool_room_cost_is_exact`.** Open rooms with four `RoomLimits` shapes (the
+  smallest; 256 participants and 8 publications each; 2 participants with 64 down-tracks
+  each; RED and FlexFEC on), then fill each with joins up to its bounds. *Oracle:* the units'
+  recorded charges (MEM-20 limit records), which the router's allocations make, not
+  `room_cost`. Each room's charge on each unit equals `room_cost`'s `replicated` plus
+  `per_session` times its sessions homed there. A pool sized for exactly three such rooms
+  admits three and answers the fourth `Refused(Bytes(..))` with the hand-computed `need`
+  and `free`, and no unit's charge moved.
+- **W35 `pool_reopened_room_takes_no_stale_message`.** Room `a` has publisher `p` on unit 0
+  and subscriber `s` on unit 1. A `Media` message of `p` is posted to unit 1 and held in its
+  inbox. `a` is closed and reopened under the same name; the new room admits two peers that
+  get the same dense ids and epochs as `p` and `s`. Unit 1 then takes the held message.
+  *Oracle:* RTC-7 and this section, by hand. The tap shows no datagram to the new `s`, and
+  the unit counts the message `stale`. On a pool that reuses `RoomId`s the new `s` receives
+  `p`'s old packet, so the law is red.
+- **W36 `pool_room_fault_closes_only_that_room`.** Rooms `a` and `b` share units 0 and 1, each
+  with a publisher and two subscribers across both units. Room `a` is driven into each
+  room-scoped `RouterError` the build lists (for example a re-offer that the room's
+  `down_tracks` refuses). *Oracle:* by hand. `a` reports `Closed(.., Fault(e))`, every unit
+  has dropped `a`'s state, `a`'s sessions get no datagram after the close returns, and `b`'s
+  subscribers receive every packet `b`'s publisher sent in the same turns, with the same
+  sequence numbers as a run without `a`. On main the error ends `serve`, so `b` stops.
+- **W37 `pool_revoke_waits_for_no_other_room`.** Room `b` holds `inflight` changes in flight
+  and a backlog of 100 joins; unit 1 is slowed by the seam so each acknowledgement takes 5
+  turns. Room `a` revokes a participant. *Oracle:* by hand from the control-plane rules.
+  `a`'s revoke is admitted in the turn it is asked, and returns after unit 1's next
+  acknowledgement, not after `b`'s backlog. With one call in flight pool-wide (main), it
+  waits for the backlog, so the law is red.
+- **W38 `pool_over_rate_publisher_costs_its_room`.** Room `a`'s publisher sends at 10 ×
+  `room_pps` and room `b`'s at half `room_pps`, homed on one unit. *Oracle:* the token bucket,
+  by hand. `a`'s routed count over 3 s is `room_pps` × 3 within one bucket's depth, `over_rate`
+  counts the rest, no over-rate packet reaches `srtp` (a seam counter), and `b` routes every
+  packet it sent.
+- **W39 `pool_signaling_loss_is_per_room`.** Two rooms on one pool. Room `a`'s relay session
+  drops (`Lost`) and its rejoin fails for 3 s. *Oracle:* RTC-8 and this section. Only `a` is
+  suspended. `b` admits a new peer and forwards media throughout. `a` resumes from its own
+  proven roster.
+
+N3 (nightly, Boat): 200 rooms of 4 peers with 720p video and audio on one 8-unit pool under
+`sim.udp`, with one room revoked every second. The pool's p99 revoke latency stays under the
+slowest turn plus 50 ms, and no room's received frame count drops while another is revoked.
+
+### Pooling slices
+
+| Slice | Content | Depends on | Laws |
+| --- | --- | --- | --- |
+| **P1** Room keys | `RoomId` from a pool-wide counter; `Participant` in `Event.Offer` and `Shut`, the room in `Event.Layers`; per-room `stale` drops; `room_cost` | S7 | W34, W35 |
+| **P2** Per-room control | `(room, seq)` orders and acknowledgements; the `inflight` window, one per room, round-robin, fence slots; `media_take` | P1 | W37 |
+| **P3** Pool service | `serve_pool`, `PoolOrder` and `PoolReport`, one adapter and room client per room, ledgers, primary units; `serve` removed; room-scoped faults close their room; `room_pps` | P2 | W36, W38, W39 |
+| **P4** Nightly | N3 on Boat | P3 | N3 |
+
+Reds that may ride: N3 and any cost target. W34 to W39 are soundness or isolation laws of
+their own slices and block them.
 
 ## WebRTC build laws
 

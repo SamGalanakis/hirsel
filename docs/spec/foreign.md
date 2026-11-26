@@ -1121,9 +1121,9 @@ results are a function of its inputs, so a program that reaches only contained c
 SEM-8, recording and replay. A test that calls contained code takes `Foreign[I]`, so PROG-4
 never reuses its pass (FFI-14).
 
-**Status: written, not built.** Until build slice W1 is green, a manifest that holds
-`containment` is refused at the key with `FFI-10: containment = "wasm" is not built yet`.
-Nothing parses the key and goes on to ignore it.
+**Status: slice W1 in progress.** A manifest's `containment` key is parsed (FFI-10), and a
+build that reaches a contained module admits it (FFI-11). Until W1's calls are built, that
+build is then refused with `FFI-10: containment = "wasm" is not built yet`.
 
 Amended 2026-11-26 (contained-foreign-spec-fix-2923) for the soundness review
 contained-foreign-review-2903: the artifact is loaded in place from the image's executable
@@ -1387,8 +1387,9 @@ operator is the **pinned cost table**, which is Wasmtime 48.0.10's `default_oper
 `nop`, `drop` and the structural control operators (`block`, `loop`, `unreachable`, `return`,
 `else`, `end`) cost 0, and every other operator costs 1. On top of that flat cost, the table's
 `VariableOperatorCost::new()` charges 1 per byte of `memory.copy`, `memory.fill` and
-`memory.init`, 1 per page of `memory.grow`, and 1 per element of `table.copy`, `table.fill`,
-`table.init` and `table.grow` (`crates/environ/src/tunables.rs` <!-- doc-ref: external --> in
+`memory.init`, and 1 per element of `table.copy`, `table.fill`, `table.init` and `table.grow`.
+It charges nothing per page of `memory.grow`, whose growth is admitted against the bytes limit
+(`crates/environ/src/tunables.rs` <!-- doc-ref: external --> in
 Wasmtime 48.0.10). The driver passes it with `Config::operator_cost`, so a later Wasmtime
 default cannot move it. The rate of 16 fuel per step keeps a step close in size to a Hirsel
 loop iteration.
@@ -1421,13 +1422,17 @@ two granule ends, at least `G` fuel is consumed. At a bulk operation it can be f
 because one check pays the whole operation and the entry returns pending once.
 
 **Bounds.** With a bound current, the store holds exactly one unit of fuel more than the bound
-pays for. A call **runs out** in two cases:
+pays for. A call **runs out** in three cases:
 
 - an entry reaches a fuel check after consuming more than `F`. The reserve cannot refill it,
   and Wasmtime raises `Trap::OutOfFuel` at that check;
 - an entry returns normally and `Store::get_fuel` reads 0. It then consumed at least `F + 1`,
   because `get_fuel` saturates at 0 for any overdraw (store.rs:1501). When it reads more than
-  0, the entry consumed exactly `F + 1 − get_fuel`.
+  0, the entry consumed exactly `F + 1 − get_fuel`;
+- an entry traps and `Store::get_fuel` reads 0. The stored consumption has reached at least
+  `F + 1`, so the call runs out. A trap whose stored fuel is above 0 is reported as the trap
+  even when the entry had passed `F` in the straight-line run that led to it. The charge is
+  capped at the steps remaining in the bound (FFI-14 Fuel at a trap).
 
 A call that runs out raises `OutOfTime` at its call site (MEM-30). Its result is dropped,
 nothing is copied back, the instance is discarded, and the call takes exactly the steps its
@@ -1436,8 +1441,9 @@ not run out takes ⌈`u` / 16⌉ steps for its exact `u`, and the next entry's `
 after them. So a contained call never takes more steps than its bound has left, and its work
 past the bound is at most one straight-line run: the operators after its last fuel check, up to
 the next check or the return. A bulk operation that would pass the bound is stopped before it
-runs. With no bound current, `Trap::OutOfFuel` needs `2^64 − 1` fuel in one entry (over five
-centuries at 10⁹ fuel a second). It is handled as an unlisted trap is (FFI-14).
+runs. With no bound current, the store holds `2^64 − 1` fuel. A refused `table.grow` is charged
+for the elements requested, so a call can spend that fuel. `Trap::OutOfFuel` with no bound current
+fails the call with `Fail("contained trap: out of fuel")` and discards the instance (FFI-14).
 
 **Slice ends.** The entry's future holds the store, so the run cannot read the fuel at a
 granule end. It counts each granule end as exactly `G` fuel, 1,024 steps, toward the task's
@@ -1517,13 +1523,13 @@ Nothing else enters it. The engine is configured to make that true:
 | `BadConversionToInteger` | `bad conversion to integer` |
 | `StackOverflow` | `stack overflow` |
 | `proc_exit(c)` (FFI-12) | `exit c`, with `c` printed as an unsigned 32-bit number in decimal |
-| `OutOfFuel` | not a trap here: with a bound current it is `OutOfTime` (FFI-13 Bounds) |
+| `OutOfFuel` | with a bound current, `OutOfTime` (FFI-13 Bounds); with none, `out of fuel` |
 
 Every other variant belongs to a feature that FFI-11 refuses, so a module that reaches one
 means Wasmtime broke its own feature set. That is a failed runtime invariant, not a property of
 the guest, and the process aborts as on any failed invariant of the runtime. No run stop name
-and no `Fail` text is given to it. `Trap::OutOfFuel` with no bound current (FFI-13 Bounds) is
-handled the same way. FAIL-2's `Fail` row
+and no `Fail` text is given to it. `Trap::OutOfFuel` belongs to no refused feature, so the listed
+`out of fuel` trap takes precedence over O15's invariant rule. FAIL-2's `Fail` row
 lists these texts, and FFI-12's and FFI-13's. A trap is a failure, not environmental
 termination. It runs every cleanup that FAIL-8 runs, and an `isolate` catches it. This is the
 difference from FFI-1, where a native crash takes the process.
@@ -1536,8 +1542,9 @@ only at its granule ends. Let `s` be the fuel the store reports consumed at the 
 fuel, and with a bound current at most `F`: the trapping call takes ⌈(`s` + `G`) / 16⌉ steps
 for that entry, capped at the steps its bound has left, beside its other entries' exact steps
 and its copy steps. Since `s` is at least the fuel counted at the entry's granule ends, a
-trapping call gets less than one granule plus one straight-line run of work free, so a caller
-that catches the trap and calls again under `bound steps n` does `O(n)` work, not `O(n²)`.
+trapping call gets less than one granule plus one straight-line run of work free. That run
+can span one 7,654,321-byte function body, about 478,000 steps. A caller that catches the trap
+and calls again under `bound steps n` does `O(n)` work.
 `s` is a function of the code path alone. It is the same on every run of one build (law FW8),
 and nothing compares it across builds (SEM-8).
 
@@ -1700,18 +1707,21 @@ Each law's expected value comes from this section, the WebAssembly specification
 documented behaviour, or the fixture's own source. None comes from a run's output. Each law runs
 on both native backends, on x86-64 and AArch64 Linux. The fixture package `wasm_laws`, with
 interface `Box` and kind `Cell`, has a module `box.wasm` built by its `build.sh` from `box.c`
-with prefix `hwl_`. Its `build.sh` compiles `box.c` with the pinned clang as FFI-10 says, and
-assembles `box_traps.s`, written in LLVM's WebAssembly assembly, with the same clang. `wasm-ld`
-links both with `--initial-memory=131072` <!-- doc-ref: external -->, `-z stack-size=16384` <!-- doc-ref: external --> and
-`--stack-first` <!-- doc-ref: external -->, so the
-memory's 2 pages are a stated link input, and the stack and static data lie in the first page.
+with prefix `hwl_`. Its `build.sh` compiles `box.c` with clang 21 as FFI-10 says, and
+assembles `box_traps.s`, written in LLVM's WebAssembly assembly, with the same clang. The
+repository's pinned LLVM tree builds only the X86 and AArch64 targets, so `build.sh` takes an
+LLVM 21 clang, `wasm-ld` and `llvm-objcopy` that have the WebAssembly target from the
+environment. `wasm-ld` links both with `--initial-memory=131072` <!-- doc-ref: external -->,
+`-z stack-size=16384` <!-- doc-ref: external -->, `--stack-first` <!-- doc-ref: external --> and
+`--table-base=3` <!-- doc-ref: external -->, so the memory's 2 pages and the table's 4 elements
+are stated link inputs, and the stack and static data lie in the first page.
 The functions whose operators a law counts are written in `box_traps.s`, so no optimizer
 folds a loop, removes a recursion or chooses the trapping operator: at `-O2`, a C loop that
 returns `n` folds to `return n`, and signed overflow, a wild load and a mistyped indirect call
 are undefined behaviour in C. The module imports exactly two null imports,
 `wasi_snapshot_preview1.clock_time_get` and `wasi_snapshot_preview1.proc_exit` (declared in
 `box.c` with clang's `import_module` and `import_name` attributes), defines one table of 4
-`funcref` elements (slot 0 null, slot 1 a function of type `[] -> []`, slots 2 and 3 null), and
+`funcref` elements (slots 0 to 2 null, slot 3 a function of type `[] -> []`), and
 exports:
 
 - `make(f) -> Option[foreign.Ptr[Cell]]` and `free(f, take p) -> i32`, which use a static pool
@@ -1719,11 +1729,16 @@ exports:
 - `spin(f, n: u64) -> u64`, which loops `n` times and returns `n` (`box_traps.s`);
 - `straight(f) -> i32`, which runs 2,000 `i32.const 1; i32.add` pairs, 4,000 straight-line
   operators with no loop and no call, from 0, and returns 2,000 (`box_traps.s`);
+- `straight_trap(f) -> i32`, which runs the same operators and ends in `unreachable`
+  (`box_traps.s`);
 - `loop_div(f, n: u64) -> i32`, which loops `n` times with no call and then executes
   `i32.div_u` of 1 by 0 (`box_traps.s`);
 - `fill_mem(f, n: u32) -> u32`, which executes one `memory.fill` of `n` bytes of `0xAB` at
   address 65,536 and returns the byte there (`box_traps.s`);
 - `grow(f, pages: u32) -> i32`, which returns `memory.grow`'s result;
+- `tgrow(f, n: u64) -> i32`, which `n` times asks `table.grow` for `2^32 − 1` null elements,
+  each refused with −1 but charged its requested count, and returns the last answer
+  (`box_traps.s`);
 - `fill(f, mut b: Bytes) -> u64`, which writes `0xAB` to each byte, and `sum(f, b: Bytes) ->
   u64`;
 - `nan32(f) -> f32`, which returns `f32.reinterpret_i32(0x7fa00001)`, a NaN that no float
@@ -1732,7 +1747,7 @@ exports:
   stores the quotient to memory and returns its bits read back as an `i64` (`box_traps.s`);
 - `trap(f, k: u32) -> i32`, which for `k` from 1 to 10 traps as row `k` of FFI-14's table, in
   its order (`box_traps.s`): `unreachable`; an `i32.load` at `0xFFFFFFF0`; `call_indirect` of
-  slot 4; of slot 0; of slot 1 with type `[] -> [i32]`; `i32.div_s` of `-2^31` by `-1`;
+  slot 4; of slot 0; of slot 3 with type `[] -> [i32]`; `i32.div_s` of `-2^31` by `-1`;
   `i32.div_u` by 0; `i32.trunc_f32_s` of a NaN; a call of `recurse` with depth `2^32 − 1`; and
   `proc_exit(7)`;
 - `clock(f) -> i32`, which calls `clock_time_get(0, 1, a)` with an address `a` in its static
@@ -1776,7 +1791,7 @@ manifests.
 | **FW18** addresses and recipes | a recipe that does not pin the module, or an address that ignores it | Changing one byte of `box.c`'s output and its pin changes the caller's revision (FFI-16). `hirsel build --recipe R --code-store DIR` with the package deleted builds and runs `count`. A recipe with the module's object missing is refused as `Missing`. |
 | **FW19** cross-compiled artifacts | a host-inferred CPU feature, or an artifact that differs by host | The `aarch64-unknown-linux-gnu` artifact precompiled on an x86-64 host and on an AArch64 host is byte-identical. The image built on x86-64 runs FW5 and FW11 on AArch64. |
 | **FW20** an unbuilt key refuses | a parsed and ignored `containment` | Until slice W1, a manifest with `containment = "wasm"` is refused with `FFI-10: containment = "wasm" is not built yet`. After W1, `containment = "native"` is refused as a bad field. |
-| **FW21** a straight-line call past its bound | a call that returns with its fuel overdrawn and is taken as `Ok` (no fuel check at a return) | `bound steps 2 { straight(f) }` returns `Error(OutOfTime(steps: 2))`: after the call's own step, the entry starts with 17 fuel, passes its entry check and consumes about 4,000 before it returns (FFI-13 Bounds). `bound steps 300 { straight(f) }` returns `Ok(2000)`: 4,000 operators cost at most 4,016 fuel (the pinned cost table), 251 steps, plus the call's one step. |
+| **FW21** a straight-line call past its bound | a return or trap taken with its stored fuel overdrawn | `bound steps 2 { straight(f) }` and `bound steps 2 { straight_trap(f) }` both return `Error(OutOfTime(steps: 2))`. After the call's own step, the entry starts with 17 fuel, passes its entry check and stores about 4,000 fuel consumed at `return` or `unreachable` (FFI-13 Bounds). `bound steps 300 { straight(f) }` returns `Ok(2000)`: 4,000 operators cost at most 4,016 fuel (the pinned cost table), 251 steps, plus the call's one step. |
 | **FW22** a trapping call's charge | a trap charged the store's stale fuel, so a caller that catches it and calls again does quadratic work | Let `L` be the fuel of `loop_div(f, 10⁵)` up to its division, counted from `box_traps.s` with the pinned cost table. The bisected smallest `n` with `bound steps n { (isolate { loop_div(f, 10⁵) }, isolate { loop_div(f, 10⁵) }) }` returning two traps, not `OutOfTime`, lies between 2⌈`L` / 16⌉ and 2⌈`L` / 16⌉ + 1,030 (FFI-14 Fuel at a trap: each call is charged within one granule of its work). Charging the stale value puts it near ⌈`L` / 16⌉. |
 | **FW23** a bulk operation under a bound | a dropped per-byte cost, or a bulk operation's check placed after it | `bound steps 100 { fill_mem(f, 65536) }` returns `Error(OutOfTime(steps: 100))`: one `memory.fill` of 65,536 bytes costs 65,536 fuel, 4,096 steps, and the entry starts with 16 × 99 + 1 = 1,585 fuel. `bound steps 10⁴ { fill_mem(f, 65536) }` returns `Ok(0xAB)`. |
 | **FW24** `OutOfTime` discards the instance | a call stopped by its bound whose instance is entered again | `p = make(f)`, then `bound steps 1000 { spin(f, 10⁹) }` returns `Error(OutOfTime(steps: 1000))`. Then `count(f)` returns 1, and `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`. |
@@ -1784,6 +1799,7 @@ manifests.
 | **FW26** a handle's generation is checked | a handle of a discarded generation that releases a live cell at the same address | `p = make(f)`, then `isolate { trap(f, 1) }`, then `q = make(f)`, which is `Some` at `p`'s address in the new generation. `isolate { free(f, p) }` returns `Ok(Error(causes))` with `Fail("foreign instance discarded")`, and `live(f)` then returns 1: `q`'s cell is still in use. |
 | **FW27** a guest overflow replays | a stack overflow point that depends on the run, not the build | `hirsel test --replay` of a test that runs `isolate { recurse(f, 10⁷) }` under `bound steps 10⁹`, beside a task that prints a line, on a 2-thread scheduler, replays `Sealed`: the steps at the overflow, and so the slice ends around it, are those of the recording. |
 | **FW28** Wasmtime's signal handlers beside the runtime's | a guest fault taken as a host crash, or a Hirsel stack overflow taken as a guest trap | On a 2-thread scheduler, task A runs `isolate { trap(f, 2) }` 1,000 times and prints each primary cause, while task B recurses in Hirsel with no bound. Every line A prints is `contained trap: memory out of bounds`, and the run ends with status 102 and `run stop: Stack` (FAIL-15), not a signal. |
+| **FW29** fuel exhaustion without a bound | a guest fuel trap that aborts the process | On the slow tier, with no bound current, `isolate { tgrow(f, 2^33) }` exhausts Wasmtime's `2^64 − 1` fuel in about ten minutes (each refused `table.grow` is charged `2^32 − 1`). Its isolate returns the primary cause `Fail("contained trap: out of fuel")` and the program prints a line after it. |
 
 ### Contained build slices
 
@@ -1849,7 +1865,8 @@ contained-foreign-review-2903. Where this text differs from the review, it says 
   partway through an update, and resuming it after its scope has exited would be a
   continuation. A wrapper puts its bound outside the handle's lifetime. Law FW24.
 - **O15. The `Provider` stop.** Neither a clause nor a new name. An unlisted trap under a closed
-  feature set is a failed runtime invariant and aborts as one (FFI-14 Traps).
+  feature set is a failed runtime invariant and aborts as one. `OutOfFuel` is listed because
+  both bounded and unbounded calls can reach it (FFI-14 Traps).
 - **O16. Pass keys and the toolchain.** Already met: the pass key holds the toolchain image. The
   real defect was that FFI-14 promised reuse for tests that take `Foreign[I]`, which PROG-4
   never reuses. This text differs from the review here. The review recommended amending PROG-4
@@ -1864,7 +1881,6 @@ fuel plus `2^40`, counted the bound at granule ends, and never used `Trap::OutOf
 end counts one granule however much a bulk operation charged, though. Under `bound steps 10⁹`,
 about 65,000 fills of 16 MiB pass the `2^40` margin while the granule ends count only about
 6.7 × 10⁷ steps, so the bound would have run far over before anything stopped it. Here the
-store holds the bound's fuel plus one. Wasmtime's own check before each bulk operation, and at
-every function entry and loop header, then enforces the bound exactly (`Trap::OutOfFuel` is
-`OutOfTime`), and a return reads 0 fuel exactly when the bound was passed. Granule counting
-decides only slice ends.
+store holds the bound's fuel plus one. Wasmtime's fuel checks stop the entry with
+`Trap::OutOfFuel` if it runs out. The run also checks the stored fuel at return and at
+any other trap (FFI-13 Bounds). Granule counting decides only slice ends.

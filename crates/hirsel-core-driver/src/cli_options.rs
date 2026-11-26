@@ -30,6 +30,13 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "Print the C header of a foreign module by its full definition path."
     ),
     option!(
+        ForeignAbi,
+        ["--foreign-abi"],
+        Some("MODULE"),
+        ["inspect"],
+        "Print the ABI text of a foreign module by its full definition path."
+    ),
+    option!(
         Dependents,
         ["--dependents"],
         Some("DEF"),

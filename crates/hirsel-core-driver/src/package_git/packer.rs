@@ -6,7 +6,7 @@ use super::snapshot::{Dir, Missed, Snapshot};
 use super::transport::{self, Remote};
 use super::{Budget, Failure, Session};
 use crate::package_content::{
-    ArchiveRow, Content, ForeignModule, Id, PackageArchive, Root, Source,
+    ArchiveRow, Content, ForeignCode, ForeignModule, Id, PackageArchive, Root, Source,
 };
 use crate::package_dir::MANIFEST;
 use crate::package_manifest::{Dependency, GitSource, Manifest, Package, SourceLocation};
@@ -506,23 +506,29 @@ impl Graph<'_> {
             }
             let mut foreign = BTreeMap::new();
             for (module, spec) in &draft.package.foreign {
-                let mut archives = BTreeMap::new();
-                for (target, row) in &spec.rows {
-                    let bytes = read(&row.file, &format!("foreign.{}: archive", module.join(".")))?;
-                    archives.insert(
-                        target.clone(),
-                        ArchiveRow {
-                            path: row.file.clone(),
-                            pin: row.pin,
-                            bytes,
-                        },
-                    );
-                }
+                let field = format!("foreign.{}", module.join("."));
+                let mut row = |row: &crate::package_manifest::Archive, what: &str| {
+                    Ok::<_, String>(ArchiveRow {
+                        path: row.file.clone(),
+                        pin: row.pin,
+                        bytes: read(&row.file, &format!("{field}: {what}"))?,
+                    })
+                };
+                let code = match &spec.code {
+                    crate::package_manifest::Code::Native(rows) => ForeignCode::Native(
+                        rows.iter()
+                            .map(|(target, archive)| Ok((target.clone(), row(archive, "archive")?)))
+                            .collect::<Result<_, String>>()?,
+                    ),
+                    crate::package_manifest::Code::Wasm(module) => {
+                        ForeignCode::Wasm(row(module, "module")?)
+                    }
+                };
                 foreign.insert(
                     module.clone(),
                     ForeignModule {
                         symbols: spec.symbols.clone(),
-                        archives,
+                        code,
                     },
                 );
             }

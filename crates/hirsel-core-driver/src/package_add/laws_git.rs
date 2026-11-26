@@ -18,7 +18,7 @@ const R4: &str = "859eddd90bb3d572224eafa424b8fe05ccff88cf";
 const R5: &str = "1ec6268ebb01745682597da6ad7e90ec97c89a85";
 const R6: &str = "068a6be0a352dea1d8d7faf1e80eb05040387670";
 const PACKAGE_W2: &str =
-    "sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0";
+    "sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302";
 
 const JSON_MANIFEST: &str =
     "[package]\nname = \"json\"\nmajor = 1\ncharge = \"charge-v1\"\n\n[sources]\n\"json.hirsel\" = \"json\"\n";
@@ -917,13 +917,13 @@ edges = [\"wrap@1\"]
 
 [[package]]
 id = \"json@1\"
-root = \"sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58\"
+root = \"sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44\"
 source = \"via:wrap@1\"
 edges = []
 
 [[package]]
 id = \"wrap@1\"
-root = \"sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689\"
+root = \"sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b\"
 source = \"git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap\"
 edges = [\"json@1\"]
 ";

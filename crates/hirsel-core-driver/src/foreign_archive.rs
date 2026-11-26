@@ -17,7 +17,32 @@ const THIN: &[u8] = b"!<thin>\n";
 const LLVM_ADDRSIG: elf::SectionType = elf::SectionType(0x6fff_4c03);
 const TBD: &[u8] = b"--- !tapi-tbd";
 
+pub(crate) mod contained;
 mod macho;
+
+/// FFI-3: a linked module's archive for `target`.
+pub(crate) fn select<'a>(
+    module: &DefPath,
+    capture: &'a hirsel_core_resolve::ForeignModuleCapture,
+    target: &str,
+) -> Result<&'a hirsel_core_resolve::ForeignArchiveCapture, AdmissionError> {
+    let archives = capture.archives().ok_or_else(contained::not_built)?;
+    archives.get(target).ok_or_else(|| {
+        let targets = if archives.is_empty() {
+            "none".into()
+        } else {
+            archives
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        AdmissionError::Refused(format!(
+            "FFI-3: {} has no archive for target {target}; its archives are for {targets}",
+            module.definition_identity()
+        ))
+    })
+}
 
 pub(crate) struct SealedArchive {
     file: crate::host::SealedFile,
@@ -685,7 +710,7 @@ impl SealedArchive {
     }
 }
 
-fn seal(bytes: &[u8]) -> std::io::Result<crate::host::SealedFile> {
+pub(crate) fn seal(bytes: &[u8]) -> std::io::Result<crate::host::SealedFile> {
     let mut sealed = crate::host::SealedFile::new(c"hirsel-foreign")?;
     sealed.file_mut().write_all(bytes)?;
     sealed.seal()?;

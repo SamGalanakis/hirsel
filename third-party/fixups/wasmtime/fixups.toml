@@ -1,0 +1,9 @@
+# The pinned build script enables these cfgs for the supported native targets.
+# Build its C helper through Buck's target C compiler.
+buildscript.run = false
+cfgs = ["has_native_signals", "has_virtual_memory", "has_host_compiler_backend"]
+
+[['cfg(target_os = "linux")'.cxx_library]]
+name = "wasmtime-helpers-linux"
+srcs = ["src/runtime/vm/helpers.c"]
+compiler_flags = ["-DVERSIONED_SUFFIX=_48_0_10"]

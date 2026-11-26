@@ -1,0 +1,14 @@
+[package]
+name = "wasm_laws"
+major = 1
+charge = "charge-v1"
+
+[sources]
+"laws.hirsel" = "laws"
+"native.hirsel" = "native"
+"main.hirsel" = "main"
+
+[foreign.native]
+symbols = "hwl_"
+containment = "wasm"
+module = { file = "box.wasm", sha256 = "315595a028f5a6782aafab6ec0317604e09e10e9a447222a733b2d643b57e2df" }

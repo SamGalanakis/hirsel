@@ -2,7 +2,7 @@
 // of laws_git.rs, included after it.
 
 /// The L23 binding, copied from the spec's text block: W (section 6) and C1 (Git 2.43.0).
-const L23_BINDING: &str = "wrap = { major = 1, root = \"sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689\", git = \"https://github.com/o/r\", rev = \"32e212a4b69a9f3b39893b29f4e4f1e935626a2b\", ref = \"refs/tags/v1\", dir = \"wrap\" }";
+const L23_BINDING: &str = "wrap = { major = 1, root = \"sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b\", git = \"https://github.com/o/r\", rev = \"32e212a4b69a9f3b39893b29f4e4f1e935626a2b\", ref = \"refs/tags/v1\", dir = \"wrap\" }";
 
 /// Moves `name` of the repository at `key` to `commit`.
 fn point(server: &GitServer, key: &str, name: &str, commit: &str) {
@@ -126,8 +126,8 @@ fn l35_moved_tag_is_reported() {
     PackageLaw::refuse(
         server.add(&law, "app", &[tagged]),
         "https://alpha.test/r1 refs/tags/v1 moved:
-  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689
-  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0
+  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b
+  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302
 pass --update to accept it",
     );
     assert_eq!(manifest_text(&law, "app"), manifest);
@@ -149,8 +149,8 @@ pass --update to accept it",
     PackageLaw::refuse(
         server.add(&law, "branch", &[branch]),
         "https://alpha.test/r1 refs/heads/main now names another commit:
-  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689
-  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0
+  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b
+  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302
 pass --update to accept it",
     );
     point(&server, "alpha.test/r1", "refs/heads/main", C1);

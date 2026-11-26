@@ -155,6 +155,10 @@ pub(crate) fn parse_digest(text: &str) -> Option<[u8; 32]> {
     hirsel_core_ids::hex::decode(text)?.try_into().ok()
 }
 
+/// Canonical library content's encoding version (packages section 1). Version 2
+/// adds the containment tag after each foreign module's symbol prefix (FFI-10).
+const CONTENT_VERSION: u64 = 2;
+
 #[derive(Clone)]
 pub(crate) struct Source {
     pub(crate) module: Vec<String>,
@@ -162,7 +166,7 @@ pub(crate) struct Source {
 }
 
 pub(crate) use hirsel_core_resolve::{
-    ForeignArchiveCapture as ArchiveRow, ForeignModuleCapture as ForeignModule,
+    ForeignArchiveCapture as ArchiveRow, ForeignCode, ForeignModuleCapture as ForeignModule,
 };
 
 pub(crate) fn archive_digest(bytes: &[u8]) -> [u8; 32] {
@@ -203,7 +207,7 @@ impl Content {
     pub(crate) fn inventory(&self) -> Result<ContentInventory<'_>, String> {
         let mut count = source_count(self.files.len())?;
         for module in self.foreign.values() {
-            count = add_files(count, module.archives.len())?;
+            count = add_files(count, module.archives().map_or(1, BTreeMap::len))?;
         }
         Ok(ContentInventory(self))
     }
@@ -219,12 +223,23 @@ impl Content {
                     part(component.as_bytes())?;
                 }
                 part(foreign.symbols.as_bytes())?;
-                part(&(foreign.archives.len() as u64).to_le_bytes())?;
-                for (target, row) in &foreign.archives {
-                    part(target.as_bytes())?;
-                    part(&row.pin)?;
-                    part(&(row.bytes.len() as u64).to_le_bytes())?;
-                    part(&archive_digest(&row.bytes))?;
+                match &foreign.code {
+                    ForeignCode::Native(archives) => {
+                        part(&[0])?;
+                        part(&(archives.len() as u64).to_le_bytes())?;
+                        for (target, row) in archives {
+                            part(target.as_bytes())?;
+                            part(&row.pin)?;
+                            part(&(row.bytes.len() as u64).to_le_bytes())?;
+                            part(&archive_digest(&row.bytes))?;
+                        }
+                    }
+                    ForeignCode::Wasm(row) => {
+                        part(&[1])?;
+                        part(&row.pin)?;
+                        part(&(row.bytes.len() as u64).to_le_bytes())?;
+                        part(&archive_digest(&row.bytes))?;
+                    }
                 }
             }
             Ok(())
@@ -235,7 +250,7 @@ impl Content {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, String> {
         let mut input = Reader::new(bytes, CONTENT_LIMIT)?;
         let version = input.number(u64::MAX)?;
-        if version != 1 {
+        if version != CONTENT_VERSION {
             return Err(format!("unknown version {version}"));
         }
         let id = input.id()?;
@@ -306,34 +321,54 @@ impl Content {
             if !symbol_prefix(&symbols) || !prefixes.insert(symbols.clone()) {
                 return Err(format!("bad symbol prefix {symbols:?} of {name}"));
             }
-            let rows = input.count()?;
-            count = add_files(count, rows)?;
-            let mut archives = BTreeMap::new();
-            for _ in 0..rows {
-                let target = input.text()?.to_owned();
-                ordered(
-                    archives.last_key_value().map(|(key, _)| key),
-                    &target,
-                    "archive rows",
-                    &target,
-                )?;
-                if !target_name(&target) {
-                    return Err(format!("bad target {target:?} of {name}"));
+            let code = match input.number(1)? {
+                0 => {
+                    let rows = input.count()?;
+                    count = add_files(count, rows)?;
+                    let mut archives = BTreeMap::new();
+                    for _ in 0..rows {
+                        let target = input.text()?.to_owned();
+                        ordered(
+                            archives.last_key_value().map(|(key, _)| key),
+                            &target,
+                            "archive rows",
+                            &target,
+                        )?;
+                        if !target_name(&target) {
+                            return Err(format!("bad target {target:?} of {name}"));
+                        }
+                        let path = input.text()?.to_owned();
+                        admit_path(&mut paths, &path, ".a")?;
+                        let pin = input.digest()?;
+                        let bytes = input.frame()?.into();
+                        let row = ArchiveRow { path, pin, bytes };
+                        if archive_digest(&row.bytes) != pin {
+                            return Err(format!(
+                                "archive {:?} of {name} for {target} does not match its pin",
+                                row.path
+                            ));
+                        }
+                        archives.insert(target, row);
+                    }
+                    ForeignCode::Native(archives)
                 }
-                let path = input.text()?.to_owned();
-                admit_path(&mut paths, &path, ".a")?;
-                let pin = input.digest()?;
-                let bytes = input.frame()?.into();
-                let row = ArchiveRow { path, pin, bytes };
-                if archive_digest(&row.bytes) != pin {
-                    return Err(format!(
-                        "archive {:?} of {name} for {target} does not match its pin",
-                        row.path
-                    ));
+                _ => {
+                    count = add_files(count, 1)?;
+                    let path = input.text()?.to_owned();
+                    admit_path(&mut paths, &path, ".wasm")?;
+                    let pin = input.digest()?;
+                    let bytes = input.frame()?.into();
+                    let row = ArchiveRow { path, pin, bytes };
+                    if archive_digest(&row.bytes) != pin {
+                        return Err(format!(
+                            "module {:?} of {name} does not match its pin",
+                            row.path
+                        ));
+                    }
+                    ForeignCode::Wasm(row)
                 }
-                archives.insert(target, row);
-            }
-            foreign.insert(module, ForeignModule { symbols, archives });
+            };
+            foreign.insert(module, ForeignModule { symbols, code });
         }
         input.end()?;
         Ok(Self {
@@ -349,7 +384,7 @@ impl ContentInventory<'_> {
     pub(crate) fn encode(self) -> Result<(Root, Vec<u8>), String> {
         let content = self.0;
         let mut out = Writer::new(CONTENT_LIMIT);
-        out.number(1);
+        out.number(CONTENT_VERSION as usize);
         out.text(&content.id.name);
         out.number(content.id.major as usize);
         out.text(CHARGE);
@@ -375,12 +410,23 @@ impl ContentInventory<'_> {
         for (module, foreign) in &content.foreign {
             out.module(module);
             out.text(&foreign.symbols);
-            out.number(foreign.archives.len());
-            for (target, row) in &foreign.archives {
-                out.text(target);
-                out.text(&row.path);
-                out.raw(&row.pin);
-                out.frame(&row.bytes);
+            match &foreign.code {
+                ForeignCode::Native(archives) => {
+                    out.number(0);
+                    out.number(archives.len());
+                    for (target, row) in archives {
+                        out.text(target);
+                        out.text(&row.path);
+                        out.raw(&row.pin);
+                        out.frame(&row.bytes);
+                    }
+                }
+                ForeignCode::Wasm(row) => {
+                    out.number(1);
+                    out.text(&row.path);
+                    out.raw(&row.pin);
+                    out.frame(&row.bytes);
+                }
             }
         }
         let encoded = out.finish()?;

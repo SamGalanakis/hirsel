@@ -29,6 +29,27 @@ skip = [
     "syn@=2.0.119",
     # supply-chain-1546: ring needs these Windows bindings; rustix and tempfile use 0.61.
     "windows-sys@=0.52.0",
+    # FFI-15 (O9): the Wasmtime 48 precompiler uses Cranelift 0.135.
+    "cranelift-assembler-x64@=0.135.10",
+    "cranelift-assembler-x64-meta@=0.135.10",
+    "cranelift-bforest@=0.135.10",
+    "cranelift-bitset@=0.135.10",
+    "cranelift-codegen@=0.135.10",
+    "cranelift-codegen-meta@=0.135.10",
+    "cranelift-codegen-shared@=0.135.10",
+    "cranelift-control@=0.135.10",
+    "cranelift-entity@=0.135.10",
+    "cranelift-frontend@=0.135.10",
+    "cranelift-isle@=0.135.10",
+    "cranelift-srcgen@=0.135.10",
+    "wasmtime-internal-core@=48.0.10",
+    # The same pin brings its own ELF reader and SHA-256 stack.
+    "object@=0.39.1",
+    "sha2@=0.10.9",
+    "block-buffer@=0.10.4",
+    "cpufeatures@=0.2.17",
+    "crypto-common@=0.1.7",
+    "digest@=0.10.7",
 ]
 
 [sources]

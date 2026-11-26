@@ -952,14 +952,14 @@ def check_production_features(buck: str, policy: dict, strict: bool = False, pla
         raise SystemExit("unknown production feature classification")
     rules = {}
     for statement in ast.parse(buck).body:
-        if not isinstance(statement, ast.Expr) or not isinstance(statement.value, ast.Call):
+        if not isinstance(statement, ast.Expr) or not isinstance(call := statement.value, ast.Call):
             continue
-        call = statement.value
-        if not isinstance(call.func, ast.Name) or call.func.id not in {
-                "hirsel_library", "hirsel_binary", "hirsel_build_script"}:
+        if not isinstance(call.func, ast.Name) or call.func.id not in {"hirsel_library", "hirsel_binary", "hirsel_build_script"}:
             continue
-        attrs = {k.arg: configured(k.value, platform) for k in call.keywords
-                 if k.arg in {"name", "package_name", "features", "deps", "build_script"}}
+        try:  # A unit with no variant on this platform; a root or dependency naming it still fails below.
+            attrs = {k.arg: configured(k.value, platform) for k in call.keywords
+                     if k.arg in {"name", "package_name", "features", "deps", "build_script"}}
+        except KeyError: continue
         rules[attrs["name"]] = attrs
     findings, errors = [], []
     for root, exceptions in policy["roots"].items():

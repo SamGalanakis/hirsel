@@ -1,0 +1,3 @@
+pub opaque type Box {}
+
+pub opaque type Cell {}

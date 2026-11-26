@@ -1,0 +1,3 @@
+# The pinned Rust toolchain provides core::error::Error.
+buildscript.run = false
+cfgs = ["core_error"]

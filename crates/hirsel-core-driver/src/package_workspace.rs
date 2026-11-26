@@ -1,5 +1,6 @@
 use crate::package_content::{
-    ARCHIVE_LIMIT, ArchiveRow, Content, ForeignModule, Id, Root, Source, archive_digest,
+    ARCHIVE_LIMIT, ArchiveRow, Content, ForeignCode, ForeignModule, Id, Root, Source,
+    archive_digest,
 };
 use crate::package_dir::MANIFEST;
 use crate::package_files::{Captured, FileId, WalkError, open_directory, walk};
@@ -472,23 +473,29 @@ impl Workspace {
             let tests = sources(&package.test_sources, "tests.sources:")?;
             let mut foreign = BTreeMap::new();
             for (module, spec) in &package.foreign {
-                let mut archives = BTreeMap::new();
-                for (target, row) in &spec.rows {
-                    let bytes = read(&row.file, &format!("foreign.{}: archive", module.join(".")))?;
-                    archives.insert(
-                        target.clone(),
-                        ArchiveRow {
-                            path: row.file.clone(),
-                            pin: row.pin,
-                            bytes,
-                        },
-                    );
-                }
+                let field = format!("foreign.{}", module.join("."));
+                let mut row = |row: &crate::package_manifest::Archive, what: &str| {
+                    Ok::<_, String>(ArchiveRow {
+                        path: row.file.clone(),
+                        pin: row.pin,
+                        bytes: read(&row.file, &format!("{field}: {what}"))?,
+                    })
+                };
+                let code = match &spec.code {
+                    crate::package_manifest::Code::Native(rows) => ForeignCode::Native(
+                        rows.iter()
+                            .map(|(target, archive)| Ok((target.clone(), row(archive, "archive")?)))
+                            .collect::<Result<_, String>>()?,
+                    ),
+                    crate::package_manifest::Code::Wasm(module) => {
+                        ForeignCode::Wasm(row(module, "module")?)
+                    }
+                };
                 foreign.insert(
                     module.clone(),
                     ForeignModule {
                         symbols: spec.symbols.clone(),
-                        archives,
+                        code,
                     },
                 );
             }
@@ -554,7 +561,14 @@ impl Workspace {
 impl Member {
     pub(crate) fn check_pins(&self) -> Result<(), String> {
         for (module, foreign) in &self.content.foreign {
-            for (target, row) in &foreign.archives {
+            let rows: Vec<(String, &ArchiveRow)> = match &foreign.code {
+                ForeignCode::Native(archives) => archives
+                    .iter()
+                    .map(|(target, row)| (format!("archive {:?} for {target}", row.path), row))
+                    .collect(),
+                ForeignCode::Wasm(row) => vec![(format!("module {:?}", row.path), row)],
+            };
+            for (what, row) in rows {
                 let digest = archive_digest(&row.bytes);
                 if digest != row.pin {
                     // GIT-5: the cause is plain when the bytes are a Git LFS pointer.
@@ -562,10 +576,9 @@ impl Member {
                         .bytes
                         .starts_with(b"version https://git-lfs.github.com/spec/v1\n");
                     return Err(format!(
-                        "{}: foreign.{}: archive {:?} for {target} does not match its pin: expected sha256 {}, found sha256 {}{}",
+                        "{}: foreign.{}: {what} does not match its pin: expected sha256 {}, found sha256 {}{}",
                         self.manifest_path.display(),
                         module.join("."),
-                        row.path,
                         hirsel_core_ids::hex::encode(&row.pin),
                         hirsel_core_ids::hex::encode(&digest),
                         if pointer {

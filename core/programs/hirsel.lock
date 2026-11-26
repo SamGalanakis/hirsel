@@ -202,6 +202,11 @@ source = "member:video_yuv"
 edges = []
 
 [[package]]
+id = "wasm_laws@1"
+source = "member:wasm_laws"
+edges = []
+
+[[package]]
 id = "webrtc_sfu@1"
 source = "member:webrtc_sfu"
 edges = ["dtls@1", "media_bits@1", "rtp@1", "runner@1", "srtp@1", "std@1", "store@1", "stun_ice@1", "turn@1"]

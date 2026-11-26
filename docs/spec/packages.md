@@ -31,9 +31,10 @@ SHA-256 and is never shortened.
 **Encoding.** In `C`, a number is unsigned LEB128 with no redundant byte, and a text is its
 byte length as such a number followed by its UTF-8 bytes. `C` holds, in order:
 
-1. the encoding version, the number 1. Version 1 has held item 6 from its start: bytes that
-   end before the foreign-module count are a truncated encoding and are refused, and since no
-   library was published before item 6, nothing needs republishing;
+1. the encoding version, the number 2. Version 2 adds item 6's containment tag
+   ([FFI-10](foreign.md#ffi-10-contained-modules-and-their-build)). Readers accept only
+   version 2, with no dual reader: a library published under version 1 is republished. Bytes
+   that end before the foreign-module count are a truncated encoding and are refused;
 2. the package's name, a text, and its major, a number;
 3. its charge policy (PROG-1), a text, which in v1 is `charge-v1`;
 4. its **bindings**: their count, then each binding, sorted by name bytewise and then by
@@ -44,9 +45,12 @@ byte length as such a number followed by its UTF-8 bytes. `C` holds, in order:
    text), its module path (the number of components, then each component as a text), and its
    bytes (their length as a number, then the raw bytes);
 6. its **foreign modules** ([FFI-2](foreign.md#ffi-2-foreign-modules)): their count, then each.
-   One is its module path, encoded as in item 5, its symbol prefix (a text) and its archive
-   rows: their count, then each row, as the target (a text), the file's path (a text), the
-   32-byte pin, and the archive's bytes (their length as a number, then the raw bytes).
+   One is its module path, encoded as in item 5, its symbol prefix (a text) and its
+   containment tag. Tag `0` (native) is followed by its archive rows: their count, then each
+   row, as the target (a text), the file's path (a text), the 32-byte pin, and the archive's
+   bytes (their length as a number, then the raw bytes). Tag `1` (contained) is followed by its
+   module row: the file's path (a text), the 32-byte pin, and the module's bytes (their length
+   as a number, then the raw bytes).
 
 Foreign modules are in strictly ascending order of module path, compared component by
 component, each component by its UTF-8 bytes bytewise, and a path that is a proper prefix of
@@ -129,7 +133,7 @@ store. It refuses, and its first failure is reported in these words:
 
 | refused | first decoding failure |
 |---|---|
-| a version other than 1 | `unknown version <n>` |
+| a version other than 2 | `unknown version <n>` |
 | a number with a redundant byte, or above its range (a major above 4294967295) | `bad number at byte <offset>` |
 | a text that is not UTF-8 | `bad text at byte <offset>` |
 | a package or binding name outside `[a-z][a-z0-9_]*` or over 64 bytes, a package named `core` or `std` | `bad package name "<name>"` |
@@ -143,6 +147,8 @@ store. It refuses, and its first failure is reported in these words:
 | a symbol prefix outside FFI-2's form, or two foreign modules with one prefix | `bad symbol prefix "<prefix>" of <m>` |
 | a target that is not 1 to 64 bytes of `[a-z0-9_.-]` | `bad target "<target>" of <m>` |
 | an archive whose bytes do not hash to its pin | `archive "<path>" of <m> for <target> does not match its pin` |
+| a containment tag above 1 | `bad number at byte <offset>` |
+| a contained module whose bytes do not hash to its pin | `module "<path>" of <m> does not match its pin` |
 | bytes that end inside an item | `truncated at <offset>` |
 | bytes left over at the end | `trailing bytes at <offset>` |
 | an encoding over the limits | `over the limit of <limit>` |
@@ -494,7 +500,7 @@ every package into the package store and prints one line per package of the arch
 first:
 
 ```text
-json@1 sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58
+json@1 sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44
 ```
 
 Publishing never edits a manifest; `hirsel add`<!-- doc-ref: planned --> (section 11) is the one
@@ -930,7 +936,7 @@ edges = ["json@1", "std@1"]
 
 [[package]]
 id = "json@1"
-root = "sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58"
+root = "sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44"
 source = "archive:vendor/jx.hpkg"
 edges = []
 
@@ -1393,7 +1399,7 @@ followed by a line feed. In `jy` the `1u64` is `2u64`. `jx`'s `C` is these 72 by
 by field:
 
 ```text
-01                                  version 1
+02                                  version 2
 04 6a736f6e                         name "json"
 01                                  major 1
 09 6368617267652d7631               charge "charge-v1"
@@ -1408,8 +1414,8 @@ by field:
 
 The roots are
 
-- X = `sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58` for `jx`, and
-- Y = `sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99` for `jy`.
+- X = `sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44` for `jx`, and
+- Y = `sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84` for `jy`.
 
 Here X is SHA-256 over the 8-byte little-endian 22, `hirsel.library-root.v1`, the 8-byte
 little-endian 72 and the 72 bytes. `hirsel pack jx --output jx.hpkg` prints
@@ -1437,13 +1443,14 @@ archives = [{ target = "x86_64-unknown-linux-gnu", file = "native/b.a", sha256 =
 ```
 
 where `native/aa-x86.a` is the ASCII bytes `abc`, `native/aa-arm.a` is empty and
-`native/b.a` is the one byte `b`, each pinned by its FIPS 180-2 SHA-256. Its `C` is 422 bytes,
+`native/b.a` is the one byte `b`, each pinned by its FIPS 180-2 SHA-256. Its `C` is 424 bytes,
 and its item 6 is, grouped by field:
 
 ```text
 02                                  two foreign modules
 01 02 6161                          module path aa
 03 68615f                           prefix "ha_"
+00                                  native
 02                                  two rows
 19 616172636836342d756e6b6e6f776e2d6c696e75782d676e75    target aarch64-unknown-linux-gnu
 0f 6e61746976652f61612d61726d2e61   file "native/aa-arm.a"
@@ -1455,6 +1462,7 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad    pin
 03 616263                           bytes "abc"
 01 01 62                            module path b
 03 68625f                           prefix "hb_"
+00                                  native
 01                                  one row
 18 7838365f36342d756e6b6e6f776e2d6c696e75782d676e75      target x86_64-unknown-linux-gnu
 0a 6e61746976652f622e61             file "native/b.a"
@@ -1462,7 +1470,7 @@ ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad    pin
 01 62                               bytes "b"
 ```
 
-Its root is D = `sha256:e073ce479e0454fe08a3b357087e8de69af0e172a90afa5419faf4307f3b8a75`,
+Its root is D = `sha256:e224fe9f4bffad9019101d7940135eda872f104bc594e24591ede562a633c6a7`,
 and `hirsel pack demo --output demo.hpkg` prints `demo@1 <D>`. Module `aa` precedes `b` by
 component bytes although its frame `01 02 61 61` is bytewise greater than `01 01 62`, and the
 manifest's row order does not matter. These are wire vectors: the archive bytes are not `ar`
@@ -1472,7 +1480,7 @@ it is the head of an archive `app` binds by `{ major = 1, root = "<D>", archive 
 because decoding comes before the root check (section 7):
 
 - the same `C` with the two module entries swapped: `foreign modules out of order at aa`, whose
-  root, `sha256:b8b4134afbaded2a97a56700b11e35346406eb32701216283453befa2712b428`, a lenient
+  root, `sha256:b5d453ba29c424a2efb70d862346239d0a78d1939aece083f057309abec9556f`, a lenient
   decoder would accept as a second package with D's meaning;
 - the same `C` with `aa`'s two rows swapped: `archive rows out of order at aarch64-unknown-linux-gnu`;
 - the same `C` with the byte of `native/b.a` changed to `c` and its pin kept:
@@ -1493,8 +1501,8 @@ is exactly:
 
 ```text
 hirsel: json@1 is bound to more than one root:
-  app@1 -> a@1 -> json@1 = sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58
-  app@1 -> b@1 -> json@1 = sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99
+  app@1 -> a@1 -> json@1 = sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44
+  app@1 -> b@1 -> json@1 = sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84
 ```
 
 `app@1` is the only top member, and `a` sorts before `b`. With `b` changed to bind `<X>` and
@@ -1511,7 +1519,7 @@ coalesce. With `b` binding `json` major 2 to the root of a `json@2` fixture, the
 
   ```text
   hirsel: hirsel.lock is stale under --locked:
-    json@1: root sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 -> sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99
+    json@1: root sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44 -> sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84
     json@1: source archive:vendor/jx.hpkg -> archive:vendor/jy.hpkg
   ```
 
@@ -1529,7 +1537,7 @@ coalesce. With `b` binding `json` major 2 to the root of a `json@2` fixture, the
 empty, and its stderr is exactly:
 
 ```text
-hirsel: json@1 sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 is not in the package store, and --frozen does not fetch (source url:https://hirsel.invalid/jx.hpkg)
+hirsel: json@1 sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44 is not in the package store, and --frozen does not fetch (source url:https://hirsel.invalid/jx.hpkg)
 ```
 
 `.invalid` never resolves, so a command that tried to fetch would report `fetching … failed`
@@ -1566,24 +1574,24 @@ inventory that walks the directory, and one that keys exclusion by module instea
 
 **L6. A mismatched fetch keeps nothing.** `app` binds `<X>` with `archive = "vendor/jy.hpkg"`.
 `hirsel check app` exits 2 with
-`hirsel: json@1: archive:vendor/jy.hpkg holds sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99, but the binding pins sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58`,
+`hirsel: json@1: archive:vendor/jy.hpkg holds sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84, but the binding pins sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44`,
 and the store has no entry named by Y or by X.
 
 A non-leaf bundle is checked edge by edge. Package `wrap@1` is the review fixture of section 1's
 vectors: one file `wrap.hirsel`, module `wrap`, holding `pub fn one() -> u64 { 1u64 }` and a
 line feed, and one binding, `json = { major = 1, root = "<X>", archive = "../vendor/jx.hpkg" }`.
-Its `C` is 107 bytes and its root is W = `sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689`. `hirsel pack wrap
+Its `C` is 107 bytes and its root is W = `sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b`. `hirsel pack wrap
 --output wrap.hpkg` prints `wrap@1 <W>` and then `json@1 <X>`. `app` binds
 `wrap = { major = 1, root = "<W>", archive = "vendor/wrap.hpkg" }`, and `hirsel check app`
 passes with the store holding W and X. Three archives built by hand from the same entries are
 refused, each leaving the store as it was:
 
 - head W with the entry Y in place of X: `hirsel: wrap@1: archive:vendor/wrap.hpkg lacks
-  sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58, which wrap@1 binds as json@1`;
+  sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44, which wrap@1 binds as json@1`;
 - head W alone, with the store already holding X: the same line, because the store never
   completes an archive;
 - head W with entries X and Y: `hirsel: wrap@1: archive:vendor/wrap.hpkg holds
-  sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99, which nothing in it binds`.
+  sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84, which nothing in it binds`.
 
 **L7. A dependency change reaches each key.** `app`'s test calls `json.version()`, and the lock
 binds X.
@@ -1646,7 +1654,7 @@ edges = ["json@1"]
 
 [[package]]
 id = "json@1"
-root = "sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58"
+root = "sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44"
 source = "member:json"
 edges = []
 ```
@@ -1656,17 +1664,17 @@ Change the member to `jy` and the binding to `<Y>` with `jy.hpkg` in one edit:
 
 ```text
 hirsel: hirsel.lock is stale under --locked:
-  json@1: root sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 -> sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99
+  json@1: root sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44 -> sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84
 ```
 
 Instead replacing the binding by `json = { major = 1, path = "../json" }` gives the one change
-line `  json@1: root sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 -> none`. The law catches a lock that drops the
+line `  json@1: root sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44 -> none`. The law catches a lock that drops the
 published obligation when a member satisfies it.
 
 **L11. Every edge checks the identity it binds.** Fill the law's store with `jx` by
 `hirsel pack jx`. `app` binds `yaml = { major = 1, root = "<X>" }` and nothing else, so X is
 opened from the store and no archive is read. `hirsel lock app` exits 2 with exactly
-`hirsel: yaml@1: sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58 is json@1`. With `app` binding
+`hirsel: yaml@1: sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44 is json@1`. With `app` binding
 `json = { major = 1, root = "<X>", archive = "vendor/jx.hpkg" }` as well, so X is visited first
 under the right identity, the refusal is the same line. The law catches a resolver that checks
 identity only on a cold archive head, or once per root instead of once per edge.
@@ -1755,7 +1763,7 @@ other's binding. The oracle is the lock `hirsel lock` derives from the committed
 workspace `app`, `hirsel add github:o/r/wrap@v1` writes exactly
 
 ```text
-wrap = { major = 1, root = "sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689", git = "https://github.com/o/r", rev = "32e212a4b69a9f3b39893b29f4e4f1e935626a2b", ref = "refs/tags/v1", dir = "wrap" }
+wrap = { major = 1, root = "sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b", git = "https://github.com/o/r", rev = "32e212a4b69a9f3b39893b29f4e4f1e935626a2b", ref = "refs/tags/v1", dir = "wrap" }
 ```
 
 and `hirsel add github:o/r/wrap` (no `REF`) in a fresh copy writes the same with
@@ -1825,7 +1833,7 @@ Its commit C1 = `32e212a4b69a9f3b39893b29f4e4f1e935626a2b` (time `1700000000 +00
 `0b8c48e76c8462464b5ce67fd884449440d57844` (time `1700000060 +0000`, message `v2`, parent C1)
 changes only `wrap/wrap.hirsel` to `pub fn one() -> u64 { 2u64 }`. `wrap` at C1 packs to W of
 L6 and binds `json@1` at X; at C2 its `C` is 107 bytes and its root is
-W2 = `sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0`, computed by
+W2 = `sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302`, computed by
 a reference encoder written from section 1, which also reproduces X and W. Unless a law says
 otherwise, `refs/tags/v1` and `refs/heads/main` point at C1 and `HEAD` at `refs/heads/main`.
 
@@ -1918,13 +1926,13 @@ edges = ["wrap@1"]
 
 [[package]]
 id = "json@1"
-root = "sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58"
+root = "sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44"
 source = "via:wrap@1"
 edges = []
 
 [[package]]
 id = "wrap@1"
-root = "sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689"
+root = "sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b"
 source = "git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap"
 edges = ["json@1"]
 ```
@@ -1953,7 +1961,7 @@ never reaches.
 **L31. A tampered or substituted commit keeps nothing.** In `app`, written by hand:
 `wrap = { major = 1, root = "<X>", git = "https://alpha.test/r1", rev = "<C1>", dir = "wrap" }`.
 `hirsel check app` exits 2 with exactly
-`hirsel: wrap@1: git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap holds sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689, but the binding pins sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58`,
+`hirsel: wrap@1: git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap holds sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b, but the binding pins sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44`,
 and the store stays empty. With the binding's root W restored, two servers that lie are
 refused, each leaving the store empty:
 
@@ -2020,7 +2028,7 @@ another root; one that applies `export-ignore` loses `wrap.hirsel`; one that fol
    32e212a4b69a9f3b39893b29f4e4f1e935626a2b`, step 2 exits 2 with exactly
    `hirsel: wrap@1: fetching git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap failed: the server would not send commit 32e212a4b69a9f3b39893b29f4e4f1e935626a2b`.
 6. `hirsel check app --frozen --package-store S` over an empty S exits 2 with exactly
-   `hirsel: wrap@1 sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689 is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap)`,
+   `hirsel: wrap@1 sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap)`,
    and the request log is empty.
 
 7. With `info/refs` on `alpha.test` redirecting to the same repository on a second fixture
@@ -2039,13 +2047,13 @@ manifest, the lock and the store as they were (no W2 entry), and writes exactly:
 
 ```text
 hirsel: https://alpha.test/r1 refs/tags/v1 moved:
-  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689
-  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0
+  bound: 32e212a4b69a9f3b39893b29f4e4f1e935626a2b sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b
+  fetched: 0b8c48e76c8462464b5ce67fd884449440d57844 sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302
 pass --update to accept it
 ```
 
 With `--update` it writes `rev = "0b8c48e76c8462464b5ce67fd884449440d57844"` and root W2 and
-prints `hirsel: updated wrap@1 sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689 -> sha256:27b883e20a7c9640cf072d584cd1e8dd198aecd0795e034a7cfba52048f523a0`.
+prints `hirsel: updated wrap@1 sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b -> sha256:dfd9d19633a068d741b4bba8d52d0cddc0baa6476a0a99d90c28d0406ce38302`.
 Bound instead from `#main` and with `refs/heads/main` moved to C2, the first line reads
 `hirsel: https://alpha.test/r1 refs/heads/main now names another commit:`. Bound from `#v1`,
 with a tag `v2` at C2 and `v1` unmoved, `hirsel add git+https://alpha.test/r1?dir=wrap#v2`

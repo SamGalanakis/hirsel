@@ -464,6 +464,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
             Opt::Help
             | Opt::Interface
             | Opt::ForeignHeader
+            | Opt::ForeignAbi
             | Opt::Dependents
             | Opt::Transitive
             | Opt::AffectedTests
@@ -626,7 +627,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     } else if let Some(path) = archive {
         package_mode.require_workspace("an archive path")?;
         let archive = crate::package_content::PackageArchive::open(path)?;
-        if let Some(module) = inspect_foreign {
+        if let Some((module, _)) = inspect_foreign {
             foreign_symbols = Some(crate::foreign_header::symbol_prefix(
                 archive.entries.values().map(|library| &library.content),
                 module,
@@ -657,7 +658,7 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
                     package_store,
                     package_mode == crate::package_lock::Mode::Frozen,
                 )?;
-                if let Some(path) = inspect_foreign {
+                if let Some((path, _)) = inspect_foreign {
                     foreign_symbols = Some(crate::foreign_header::symbol_prefix(
                         resolved
                             .workspace
@@ -1086,13 +1087,11 @@ fn run(args: Vec<String>) -> Result<Outcome, Box<dyn std::error::Error>> {
     if entry.is_some() {
         request.entry = entry;
     }
-    if let Some(module) = inspect_foreign {
-        let symbols =
+    if let Some((module, print)) = inspect_foreign {
+        let manifested =
             foreign_symbols.ok_or("inspect --foreign-header requires a foreign manifest")?;
-        print!(
-            "{}",
-            crate::foreign_header::header(request.inputs, module, &symbols)?
-        );
+        let text = crate::foreign_header::header(request.inputs, module, &manifested, print)?;
+        print!("{text}");
         return conclude(Outcome::Exit(0));
     }
     // PROG-4: each test's run configuration, from the package's manifest

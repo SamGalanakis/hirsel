@@ -853,10 +853,10 @@ limit = {test_limit}
     );
 }
 
-const PACKAGE_X: &str = "sha256:0f4f2cfc3866d57002070c0af895f588d6dd5d12493e580368f2195cb428de58";
-const PACKAGE_Y: &str = "sha256:df7ca24aa6689979ef02faa3a35084bf96207edbe52b19d78e6273a98dc2ca99";
-const PACKAGE_W: &str = "sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689";
-const PACKAGE_D: &str = "sha256:e073ce479e0454fe08a3b357087e8de69af0e172a90afa5419faf4307f3b8a75";
+const PACKAGE_X: &str = "sha256:163464f722a034ecc8fb044f244829ba68b5ee262c20b22bcbbc968c1052da44";
+const PACKAGE_Y: &str = "sha256:bc287b444772fa01b410c9f8b88b8655904134fcf1c63019f24b9de147e5cc84";
+const PACKAGE_W: &str = "sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b";
+const PACKAGE_D: &str = "sha256:e224fe9f4bffad9019101d7940135eda872f104bc594e24591ede562a633c6a7";
 const PACKAGE_X_SOURCE: &str = "pub fn version() -> u64 { 1u64 }\n";
 const PACKAGE_Y_SOURCE: &str = "pub fn version() -> u64 { 2u64 }\n";
 const PACKAGE_MAIN: &str = "pub fn main() -> Result[(), Exit] { Ok(()) }\n";
@@ -1660,8 +1660,8 @@ fn package_member_root_enforces_content_file_limit() {
     let content = &mut workspace.members.get_mut(&id).unwrap().content;
     content.files.clear();
     let source = Source { module: vec!["m".into()], bytes: std::sync::Arc::from([]) };
-    // C v1, demo@1, charge-v1, no bindings, and a 65,537-file count.
-    let mut wire = b"\x01\x04demo\x01\x09charge-v1\x00\x81\x80\x04".to_vec();
+    // C v2, demo@1, charge-v1, no bindings, and a 65,537-file count.
+    let mut wire = b"\x02\x04demo\x01\x09charge-v1\x00\x81\x80\x04".to_vec();
     for index in 0..65_537 {
         let path = format!("{index:05}.hirsel");
         wire.push(12);
@@ -1713,17 +1713,17 @@ archives = [{ target = "x86_64-unknown-linux-gnu", file = "native/b.a", sha256 =
     law.write("demo/native/b.a", b"b");
     assert_eq!(law.fixture("demo", "demo.hpkg"), format!("demo@1 {PACKAGE_D}\n"));
     let content = law.encoded(PACKAGE_D);
-    assert_eq!(content.len(), 422);
+    assert_eq!(content.len(), 424);
     // Section 12's item 6 frames, located by their literal wire bytes.
     let position = |pattern: &[u8]| content.windows(pattern.len()).position(|bytes| bytes == pattern).unwrap();
-    let aa = position(b"\x01\x02aa\x03ha_\x02");
-    let b = position(b"\x01\x01b\x03hb_\x01");
+    let aa = position(b"\x01\x02aa\x03ha_\x00\x02");
+    let b = position(b"\x01\x01b\x03hb_\x00\x01");
     let arm = position(b"\x19aarch64-unknown-linux-gnu\x0fnative/aa-arm.a");
     let x86 = position(b"\x18x86_64-unknown-linux-gnu\x0fnative/aa-x86.a");
     let swapped = [&content[..aa], &content[b..], &content[aa..b]].concat();
     assert_eq!(
         crate::package_content::Root::of(&swapped).to_string(),
-        "sha256:b8b4134afbaded2a97a56700b11e35346406eb32701216283453befa2712b428"
+        "sha256:b5d453ba29c424a2efb70d862346239d0a78d1939aece083f057309abec9556f"
     );
     let rows_swapped = [&content[..arm], &content[x86..b], &content[arm..x86], &content[b..]].concat();
     let mut pin_mismatch = content;
@@ -2403,7 +2403,7 @@ archives = [
     write("hm_", "");
     law.write("math/native/x86.a", b"abd");
     assert_ne!(checked().foreign, original.foreign);
-    assert_eq!(original.foreign_inputs[&vec!["native".to_string()]].archives[target].bytes.as_ref(), b"abc");
+    assert_eq!(original.foreign_inputs[&vec!["native".to_string()]].archives().unwrap()[target].bytes.as_ref(), b"abc");
 }
 
 #[test]
@@ -2830,7 +2830,7 @@ fn foreign_archive_refusals_precede_the_linker() {
     let law = PackageLaw::new();
     let fixture = law.libraries.join("programs/ffi_laws");
     let original = fs::read_to_string(fixture.join("hirsel.toml")).unwrap();
-    for file in ["laws.hirsel", "native.hirsel"] {
+    for file in ["laws.hirsel", "native.hirsel", "libffi_laws-aarch64-apple-darwin.a"] {
         law.write(&format!("ffi_laws/{file}"), fs::read(fixture.join(file)).unwrap());
     }
     law.write("ffi_laws/main.hirsel", r#"
@@ -2904,7 +2904,7 @@ fn granted(f: Foreign[laws.Laws]) -> Result[(), ()] {
         repin(b"abc", ABC);
         fail_build(engine, TARGET, &format!("{PREFIX} is not an indexed ar archive"));
         repin(&pinned, &fixture_pin);
-        fail_build(engine, ARM, "FFI-3: ffi_laws@1/native has no archive for target aarch64-unknown-linux-gnu; its archives are for x86_64-unknown-linux-gnu");
+        fail_build(engine, ARM, "FFI-3: ffi_laws@1/native has no archive for target aarch64-unknown-linux-gnu; its archives are for aarch64-apple-darwin, x86_64-unknown-linux-gnu");
     }
 
     law.write("ffi_laws/laws.c", r#"

@@ -1,0 +1,3 @@
+# On the native targets the switch is inline assembly. The script only sets
+# the sanitizer cfg, which the toolchain does not enable.
+buildscript.run = false

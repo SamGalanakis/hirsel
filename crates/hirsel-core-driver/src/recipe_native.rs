@@ -7,10 +7,10 @@ use crate::code_admission::{
     AdmissionError, AdmissionLimits, NativeSemantics, VerifiedRelease, admit_local,
 };
 use crate::code_store::{CodeStore, ObjectKind};
-use crate::foreign_archive::LinkArchives;
+use crate::foreign_archive::{LinkArchives, contained};
 use hirsel_core_ir::{
     FuncId,
-    address::{Binding, Group, builtin_semantics_number, foreign_address},
+    address::{Binding, Group, builtin_semantics_number},
     decode::Debit,
     normal::{self, Annex, Slot},
     release_recipe::{
@@ -630,6 +630,20 @@ impl CheckProduct {
                 )));
             }
         }
+        let mut modules = self.reached_foreign_modules(reached)?;
+        let native_link = if modules.is_empty() || options.runtime.as_os_str().is_empty() {
+            None
+        } else {
+            Some(crate::tool_inputs::toolchain(&options.link, target, &options.runtime)?.1)
+        };
+        let (reached_archives, link_archives) = self.check_foreign_archives(
+            &modules,
+            target,
+            native_link
+                .as_ref()
+                .map(|link| (options.runtime.as_path(), link)),
+        )?;
+        selected.extend(reached_archives);
         let grants = bindings(entry, decl, options, |interface| {
             let mut functions = self
                 .foreign_headers
@@ -646,26 +660,12 @@ impl CheckProduct {
                 )));
             }
             let (module, capture) = self.foreign_capture(function)?;
-            let row = select_archive(&module, capture, target)?;
+            let row = crate::foreign_archive::select(&module, capture, target)?;
             let object = archive_ref(row);
             selected.insert(object.hash, row);
             Ok(object)
         })?;
 
-        let mut modules = self.reached_foreign_modules(reached)?;
-        let native_link = if modules.is_empty() || options.runtime.as_os_str().is_empty() {
-            None
-        } else {
-            Some(crate::tool_inputs::toolchain(&options.link, target, &options.runtime)?.1)
-        };
-        let (reached_archives, link_archives) = self.check_foreign_archives(
-            &modules,
-            target,
-            native_link
-                .as_ref()
-                .map(|link| (options.runtime.as_path(), link)),
-        )?;
-        selected.extend(reached_archives);
         for leaf in modules.values_mut() {
             leaf.functions
                 .sort_by_cached_key(|f| normal::encode_identity(&f.identity));
@@ -717,8 +717,9 @@ impl CheckProduct {
                     module,
                     symbols: capture.symbols.clone(),
                     targets: capture
-                        .archives
-                        .iter()
+                        .archives()
+                        .into_iter()
+                        .flatten()
                         .map(|(target, row)| ForeignTarget {
                             target: target.clone(),
                             archive: archive_ref(row),
@@ -742,17 +743,15 @@ impl CheckProduct {
             .foreign_modules(&instances.foreign)
             .map_err(io::Error::other)?;
         for leaf in modules.values() {
-            let mut rows = Vec::new();
-            leaf.encode_archive_rows(&mut rows);
-            let archive_set = ObjectKind::ForeignArchive.hash(&rows);
-            instances
-                .foreign_addresses
-                .extend(leaf.functions.iter().map(|function| {
-                    (
-                        function.identity.clone(),
-                        foreign_address(function, &leaf.symbols, archive_set),
-                    )
-                }));
+            let (_, capture) = self
+                .foreign_capture(&leaf.functions[0].identity.definition)
+                .map_err(io::Error::other)?;
+            let address = contained::addresses(leaf, capture);
+            instances.foreign_addresses.extend(
+                leaf.functions
+                    .iter()
+                    .map(|function| (function.identity.clone(), address(function))),
+            );
         }
         Ok(())
     }
@@ -774,7 +773,11 @@ impl CheckProduct {
         for leaf in modules.values() {
             let function = &leaf.functions[0].identity.definition;
             let (_, capture) = self.foreign_capture(function)?;
-            let row = select_archive(&leaf.module, capture, target)?;
+            if let Some(module) = capture.wasm() {
+                contained::admit_module(leaf, module)?;
+                return Err(contained::not_built().into());
+            }
+            let row = crate::foreign_archive::select(&leaf.module, capture, target)?;
             let object = archive_ref(row);
             sealed.admit(
                 object,
@@ -832,30 +835,6 @@ impl CheckProduct {
         });
         Ok((module, capture))
     }
-}
-
-fn select_archive<'a>(
-    module: &DefPath,
-    capture: &'a ForeignModuleCapture,
-    target: &str,
-) -> Result<&'a ForeignArchiveCapture, NativeStop> {
-    capture.archives.get(target).ok_or_else(|| {
-        let targets = if capture.archives.is_empty() {
-            "none".into()
-        } else {
-            capture
-                .archives
-                .keys()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        AdmissionError::Refused(format!(
-            "FFI-3: {} has no archive for target {target}; its archives are for {targets}",
-            module.definition_identity()
-        ))
-        .into()
-    })
 }
 
 fn bindings(

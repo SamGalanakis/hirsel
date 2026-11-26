@@ -241,12 +241,16 @@ fn sources(server: &Path) -> Result<Vec<PathBuf>, Error> {
         files.extend(member.content.files.keys().map(|path| directory.join(path)));
         files.extend(member.tests.keys().map(|path| directory.join(path)));
         for foreign in member.content.foreign.values() {
-            files.extend(
-                foreign
-                    .archives
-                    .values()
-                    .map(|archive| directory.join(&archive.path)),
-            );
+            match &foreign.code {
+                hirsel_core_resolve::ForeignCode::Native(archives) => files.extend(
+                    archives
+                        .values()
+                        .map(|archive| directory.join(&archive.path)),
+                ),
+                hirsel_core_resolve::ForeignCode::Wasm(module) => {
+                    files.push(directory.join(&module.path));
+                }
+            }
         }
     }
     let canonical: Vec<_> = files

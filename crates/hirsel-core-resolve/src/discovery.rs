@@ -82,10 +82,35 @@ pub struct ForeignArchiveCapture {
     pub bytes: std::sync::Arc<[u8]>,
 }
 
+/// A foreign module's code: pinned archives per target (FFI-2, FFI-3), or one
+/// pinned WebAssembly module that every target runs contained (FFI-10).
+#[derive(Clone, Debug)]
+pub enum ForeignCode {
+    Native(std::collections::BTreeMap<String, ForeignArchiveCapture>),
+    Wasm(ForeignArchiveCapture),
+}
+
 #[derive(Clone, Debug)]
 pub struct ForeignModuleCapture {
     pub symbols: String,
-    pub archives: std::collections::BTreeMap<String, ForeignArchiveCapture>,
+    pub code: ForeignCode,
+}
+
+impl ForeignModuleCapture {
+    /// The archive rows of a native module; a contained module has none.
+    pub fn archives(&self) -> Option<&std::collections::BTreeMap<String, ForeignArchiveCapture>> {
+        match &self.code {
+            ForeignCode::Native(archives) => Some(archives),
+            ForeignCode::Wasm(_) => None,
+        }
+    }
+
+    pub fn wasm(&self) -> Option<&ForeignArchiveCapture> {
+        match &self.code {
+            ForeignCode::Native(_) => None,
+            ForeignCode::Wasm(module) => Some(module),
+        }
+    }
 }
 
 pub struct ParsedModule {

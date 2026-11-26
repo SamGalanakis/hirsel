@@ -44,6 +44,7 @@ pub enum OptionId {
     LinkOnly,
     Interface,
     ForeignHeader,
+    ForeignAbi,
     Dependents,
     Transitive,
     AffectedTests,

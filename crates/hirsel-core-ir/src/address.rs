@@ -167,14 +167,29 @@ pub fn foreign_address(
     prefix: &str,
     archives: ContentHash,
 ) -> ContentHash {
+    foreign_code("hirsel.code-foreign.v1", function, prefix, &archives.0)
+}
+
+/// FFI-16: a contained function's address names the module's pin `m` where a
+/// native one names its archive-set digest, under its own domain.
+pub fn contained_address(function: &ForeignFunction, prefix: &str, pin: [u8; 32]) -> ContentHash {
+    foreign_code("hirsel.code-contained.v1", function, prefix, &pin)
+}
+
+fn foreign_code(
+    domain: &str,
+    function: &ForeignFunction,
+    prefix: &str,
+    code: &[u8; 32],
+) -> ContentHash {
     let mut bytes = crate::normal::encode_identity(&function.identity);
     text(&mut bytes, &function.header);
     let name = &function.identity.definition.0.name;
     uleb(&mut bytes, (prefix.len() + name.len()) as u64);
     bytes.extend_from_slice(prefix.as_bytes());
     bytes.extend_from_slice(name.as_bytes());
-    bytes.extend_from_slice(&archives.0);
-    ContentHash::of_parts("hirsel.code-foreign.v1", [&bytes[..]])
+    bytes.extend_from_slice(code);
+    ContentHash::of_parts(domain, [&bytes[..]])
 }
 
 /// Addresses of all instances reached by these roots. A missing row means an

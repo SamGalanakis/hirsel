@@ -1,0 +1,24 @@
+[package]
+name = "hirsel-core-contained"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+compile = ["dep:cranelift-codegen", "dep:hirsel-core-layout", "dep:sha2", "dep:wasmparser", "wasmtime/cranelift"]
+load = ["dep:wasmtime-internal-jit-icache-coherence", "wasmtime/runtime", "wasmtime/async"]
+
+[dependencies]
+wasmtime = { version = "=48.0.10", default-features = false, features = ["std"] }
+cranelift-codegen = { version = "=0.135.10", default-features = false, features = ["x86", "arm64"], optional = true }
+hirsel-core-layout = { path = "../hirsel-core-layout", optional = true }
+sha2 = { version = "0.11", optional = true }
+wasmparser = { version = "=0.254.2", default-features = false, features = ["validate", "features", "simd", "std"], optional = true }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+wasmtime-internal-jit-icache-coherence = { version = "=48.0.10", optional = true }
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

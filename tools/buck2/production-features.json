@@ -6,6 +6,8 @@
     "hirsel-core-eval/map-observation": "test-only",
     "hirsel-core-eval/host-instructions": "test-only",
     "hirsel-core-driver/comptime-g1": "test-only",
+    "hirsel-core-contained/compile": "runtime-option",
+    "hirsel-core-contained/load": "runtime-option",
     "hirsel-core-rt/testing": "test-only",
     "hirsel-core-rt/memcheck": "test-only",
     "hirsel-core-rt/allocation-count": "test-only",

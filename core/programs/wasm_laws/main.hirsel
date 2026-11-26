@@ -1,0 +1,4 @@
+pub fn main(f: Foreign[laws.Box]) -> Result[(), Exit] {
+    let _ = native.count(f)
+    Ok(())
+}

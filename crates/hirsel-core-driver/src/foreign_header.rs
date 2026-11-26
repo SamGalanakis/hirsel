@@ -1,4 +1,5 @@
 //! FFI-3's C declaration and ABI text, derived from the checked headers.
+use hirsel_core_contained::compile::ValType;
 use hirsel_core_front::{AbiParameter, AbiResult, ModuleInput, Program};
 use hirsel_core_ids::DefPath;
 use hirsel_core_ir::{Loan, Module, Param, PlaceTy, Signature};
@@ -109,6 +110,43 @@ impl<'a> Abi<'a> {
         format!("{symbol} {mode} ({}) -> {result}", args.join(", "))
     }
 
+    /// FFI-11's line for a contained module: the native line with MODE `contained`.
+    pub(crate) fn contained_line(&self, symbol: &str) -> String {
+        let line = self.line(symbol);
+        let mode = if self.waits { "waits" } else { "stack" };
+        line.replacen(
+            &format!("{symbol} {mode} "),
+            &format!("{symbol} contained "),
+            1,
+        )
+    }
+
+    /// FFI-12's Wasm core type of a contained function.
+    pub(crate) fn wasm_type(&self) -> (Vec<ValType>, Vec<ValType>) {
+        let scalar = |s: Scalar| match s {
+            Scalar::U64 | Scalar::I64 => ValType::I64,
+            Scalar::F32 => ValType::F32,
+            Scalar::F64 => ValType::F64,
+            _ => ValType::I32,
+        };
+        let mut params = Vec::new();
+        for argument in self.arguments() {
+            match argument {
+                Argument::Scalar(s) => params.push(scalar(s)),
+                Argument::Bytes { .. } | Argument::Dir => {
+                    params.extend([ValType::I32, ValType::I32]);
+                }
+                Argument::Handle { .. } => params.push(ValType::I32),
+            }
+        }
+        let results = match self.result {
+            Return::Unit => vec![],
+            Return::Scalar(s) => vec![scalar(s)],
+            Return::New(_) => vec![ValType::I32],
+        };
+        (params, results)
+    }
+
     pub(crate) fn matches_slot(&self, slot: &Signature, module: &Module) -> bool {
         let Some((&Param::Value(Ty::Scalar(Scalar::U64)), params)) = slot.params.split_first()
         else {
@@ -197,16 +235,33 @@ fn definition_path(text: &str) -> Option<&str> {
     .then_some(text)
 }
 
+/// What `inspect` prints for a foreign module: its C header, or the ABI text
+/// a contained module's build adds as its `hirsel_abi` section (FFI-10).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Print {
+    Header,
+    Abi,
+}
+
+/// A foreign module's symbol prefix, and whether it is contained (FFI-10).
+pub(crate) struct Manifested {
+    pub prefix: String,
+    pub contained: bool,
+}
+
 pub(crate) fn symbol_prefix<'a>(
     content: impl Iterator<Item = &'a crate::package_content::Content>,
     module: &DefPath,
-) -> io::Result<String> {
+) -> io::Result<Manifested> {
     let path = &module.0;
     let parts = module_parts(module);
     content
         .filter(|content| content.id.compiler_id() == path.package)
         .find_map(|content| content.foreign.get(&parts))
-        .map(|foreign| foreign.symbols.clone())
+        .map(|foreign| Manifested {
+            prefix: foreign.symbols.clone(),
+            contained: foreign.wasm().is_some(),
+        })
         .ok_or_else(|| io::Error::other(format!("{module} is not a foreign module")))
 }
 
@@ -216,7 +271,13 @@ fn module_parts(module: &DefPath) -> Vec<String> {
     parts
 }
 
-pub(crate) fn header(inputs: CorpusManifest, module: &DefPath, prefix: &str) -> io::Result<String> {
+pub(crate) fn header(
+    inputs: CorpusManifest,
+    module: &DefPath,
+    manifested: &Manifested,
+    print: Print,
+) -> io::Result<String> {
+    let Manifested { prefix, contained } = manifested;
     let corpus = inputs.load()?;
     let parsed = corpus.parse();
     for (source, output) in corpus.sources.iter().zip(&parsed.files) {
@@ -311,7 +372,9 @@ pub(crate) fn header(inputs: CorpusManifest, module: &DefPath, prefix: &str) -> 
                         c_params.push(format!("const uint8_t *{name}_ptr"));
                         abi_params.push("bytes".into());
                     }
-                    c_params.push(format!("uint64_t {name}_len"));
+                    // FFI-12: a contained loan's length is a linear-memory size.
+                    let len = if *contained { "uint32_t" } else { "uint64_t" };
+                    c_params.push(format!("{len} {name}_len"));
                 }
                 AbiParameter::Handle { kind, release } => {
                     c_params.push("void *".into());
@@ -333,7 +396,11 @@ pub(crate) fn header(inputs: CorpusManifest, module: &DefPath, prefix: &str) -> 
             AbiResult::Scalar(scalar) => (c_scalar(scalar), scalar.name().into()),
             AbiResult::New(kind) => ("void *", format!("new {}", kind.definition_identity())),
         };
-        let mode = if signature.waits { "waits" } else { "stack" };
+        let mode = match (contained, signature.waits) {
+            (true, _) => "contained",
+            (false, true) => "waits",
+            (false, false) => "stack",
+        };
         writeln!(prototypes, "{c_result} {symbol}({});", c_params.join(", ")).unwrap();
         writeln!(
             text,
@@ -341,6 +408,14 @@ pub(crate) fn header(inputs: CorpusManifest, module: &DefPath, prefix: &str) -> 
             abi_params.join(", ")
         )
         .unwrap();
+    }
+    if print == Print::Abi {
+        return Ok(text);
+    }
+    // A C section attribute makes no Wasm custom section: the contained
+    // build adds `--foreign-abi`'s text with llvm-objcopy instead (FFI-10).
+    if *contained {
+        return Ok(prototypes);
     }
     let escaped = text
         .replace('\\', "\\\\")

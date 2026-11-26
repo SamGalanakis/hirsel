@@ -1,0 +1,39 @@
+pub fn make(f: Foreign[laws.Box]) -> Option[foreign.Ptr[laws.Cell]]
+
+pub fn free(f: Foreign[laws.Box], take p: foreign.Ptr[laws.Cell]) -> i32
+
+pub fn live(f: Foreign[laws.Box]) -> u64
+
+pub fn spin(f: Foreign[laws.Box], n: u64) -> u64
+
+pub fn straight(f: Foreign[laws.Box]) -> i32
+
+pub fn straight_trap(f: Foreign[laws.Box]) -> i32
+
+pub fn loop_div(f: Foreign[laws.Box], n: u64) -> i32
+
+pub fn fill_mem(f: Foreign[laws.Box], n: u32) -> u32
+
+pub fn grow(f: Foreign[laws.Box], pages: u32) -> i32
+
+pub fn tgrow(f: Foreign[laws.Box], n: u64) -> i32
+
+pub fn fill(f: Foreign[laws.Box], mut b: Bytes) -> u64
+
+pub fn sum(f: Foreign[laws.Box], b: Bytes) -> u64
+
+pub fn nan32(f: Foreign[laws.Box]) -> f32
+
+pub fn div_bits(f: Foreign[laws.Box], a: f64, b: f64) -> u64
+
+pub fn trap(f: Foreign[laws.Box], k: u32) -> i32
+
+pub fn clock(f: Foreign[laws.Box]) -> i32
+
+pub fn count(f: Foreign[laws.Box]) -> u64
+
+pub fn fill_trap(f: Foreign[laws.Box], mut b: Bytes) -> u64
+
+pub fn set_area(f: Foreign[laws.Box], mode: u32) -> i32
+
+pub fn recurse(f: Foreign[laws.Box], d: u32) -> u32

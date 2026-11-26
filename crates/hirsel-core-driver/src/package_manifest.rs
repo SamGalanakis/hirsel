@@ -63,7 +63,15 @@ struct DependencyTable {
 #[derive(Deserialize)]
 struct ForeignTable {
     symbols: String,
-    archives: Vec<ArchiveTable>,
+    containment: Option<String>,
+    module: Option<WasmTable>,
+    archives: Option<Vec<ArchiveTable>>,
+}
+
+#[derive(Deserialize)]
+struct WasmTable {
+    file: String,
+    sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -193,9 +201,16 @@ pub(crate) struct Archive {
     pub(crate) pin: [u8; 32],
 }
 
+/// A foreign module's pinned code: archives per target, or one contained
+/// WebAssembly module for every target (FFI-10).
+pub(crate) enum Code {
+    Native(BTreeMap<String, Archive>),
+    Wasm(Archive),
+}
+
 pub(crate) struct Foreign {
     pub(crate) symbols: String,
-    pub(crate) rows: BTreeMap<String, Archive>,
+    pub(crate) code: Code,
 }
 
 pub(crate) struct Package {
@@ -370,6 +385,7 @@ impl Manifest {
         );
         for (name, module) in &document.foreign {
             let field = format!("foreign.{name}");
+            let contained = module.contained(&field)?;
             let components = module_path(name)
                 .ok_or_else(|| format!("{field}: {name:?} is not a module path"))?;
             let count = sources.values().filter(|path| **path == components).count();
@@ -385,37 +401,55 @@ impl Manifest {
                     module.symbols
                 ));
             }
-            let mut rows = BTreeMap::new();
-            for row in &module.archives {
-                if !target_name(&row.target) {
-                    return Err(format!("{field}.archives: bad target {:?}", row.target));
-                }
-                path_rule(&row.file, ".a").map_err(|rule| {
+            let code = if let Some(row) = contained {
+                path_rule(&row.file, ".wasm").map_err(|rule| {
                     format!("{field}: {:?} breaks the path rules: {rule}", row.file)
                 })?;
                 if !archive_paths.insert(&row.file) {
-                    return Err(format!(
-                        "{field}: {:?} is named by two archive rows",
-                        row.file
-                    ));
+                    return Err(format!("{field}: {:?} is named by two rows", row.file));
                 }
                 listed.push((&row.file, field.clone()));
                 let pin = parse_digest(&row.sha256).ok_or_else(|| {
-                    format!("{field}.archives: sha256 must be 64 lower-case hex digits")
+                    format!("{field}.module: sha256 must be 64 lower-case hex digits")
                 })?;
-                let archive = Archive {
+                Code::Wasm(Archive {
                     file: row.file.clone(),
                     pin,
-                };
-                if rows.insert(row.target.clone(), archive).is_some() {
-                    return Err(format!("{field}.archives: two rows for {}", row.target));
+                })
+            } else {
+                let mut rows = BTreeMap::new();
+                for row in module.archives.as_deref().unwrap_or_default() {
+                    if !target_name(&row.target) {
+                        return Err(format!("{field}.archives: bad target {:?}", row.target));
+                    }
+                    path_rule(&row.file, ".a").map_err(|rule| {
+                        format!("{field}: {:?} breaks the path rules: {rule}", row.file)
+                    })?;
+                    if !archive_paths.insert(&row.file) {
+                        return Err(format!(
+                            "{field}: {:?} is named by two archive rows",
+                            row.file
+                        ));
+                    }
+                    listed.push((&row.file, field.clone()));
+                    let pin = parse_digest(&row.sha256).ok_or_else(|| {
+                        format!("{field}.archives: sha256 must be 64 lower-case hex digits")
+                    })?;
+                    let archive = Archive {
+                        file: row.file.clone(),
+                        pin,
+                    };
+                    if rows.insert(row.target.clone(), archive).is_some() {
+                        return Err(format!("{field}.archives: two rows for {}", row.target));
+                    }
                 }
-            }
+                Code::Native(rows)
+            };
             foreign.insert(
                 components,
                 Foreign {
                     symbols: module.symbols.clone(),
-                    rows,
+                    code,
                 },
             );
         }
@@ -443,6 +477,29 @@ impl Manifest {
             }),
             workspace,
         })
+    }
+}
+
+impl ForeignTable {
+    /// FFI-10's containment key: the contained module's row, or `None` for a
+    /// native module, whose archives the caller reads.
+    fn contained(&self, field: &str) -> Result<Option<&WasmTable>, String> {
+        match self.containment.as_deref() {
+            None if self.module.is_some() => {
+                Err(format!("{field}: module requires containment = \"wasm\""))
+            }
+            None if self.archives.is_none() => Err(format!("{field}: expected archives")),
+            None => Ok(None),
+            Some("wasm") if self.archives.is_some() => Err(format!(
+                "{field}: archives is forbidden with containment = \"wasm\""
+            )),
+            Some("wasm") => self
+                .module
+                .as_ref()
+                .map(Some)
+                .ok_or_else(|| format!("{field}: containment = \"wasm\" requires module")),
+            Some(_) => Err(format!("{field}: containment: expected \"wasm\"")),
+        }
     }
 }
 
@@ -613,6 +670,7 @@ enum Shape {
     Foreign,
     Module,
     Archive,
+    Wasm,
     Workspace,
     WorkspacePackage,
 }
@@ -638,6 +696,7 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             (Runs, _) => Run,
             (Foreign, _) => Module,
             (Module, "archives") => Archive,
+            (Module, "module") => Wasm,
             (Workspace, "package") => WorkspacePackage,
             (Manifest, "sources" | "tool")
             | (Package, "name" | "major")
@@ -650,8 +709,9 @@ fn unknown_keys(table: &Table, prefix: &str, shape: Shape, unknown: &mut Vec<Str
             | (Program, "module" | "function" | "limit" | "grants" | "dirs")
             | (Tests, "sources" | "limit" | "grants" | "dirs")
             | (Run, "limit" | "grants" | "dirs")
-            | (Module, "symbols")
+            | (Module, "symbols" | "containment")
             | (Archive, "target" | "file" | "sha256")
+            | (Wasm, "file" | "sha256")
             | (Workspace, "members")
             | (WorkspacePackage, "charge") => continue,
             (Tests | Run | Program, "grant" | "dir") => {

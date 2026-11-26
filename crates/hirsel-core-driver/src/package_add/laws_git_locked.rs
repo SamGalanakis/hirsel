@@ -160,7 +160,7 @@ fn l34_locked_builds_use_the_commit() {
     empty(&law, "s");
     PackageLaw::refuse(
         server.run(&law, &["check", "app", "--frozen"], "s"),
-        "wrap@1 sha256:d863de7c3cf6ed4aa5535ee816d90fd603b45462eb6c2b78c846c584bd429689 is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap)",
+        "wrap@1 sha256:35788e38c3e423ca0fc47c304671de0deb605ea169c76d50a83a1051b532316b is not in the package store, and --frozen does not fetch (source git:https://alpha.test/r1#32e212a4b69a9f3b39893b29f4e4f1e935626a2b/wrap)",
     );
     assert_eq!(server.log(), Vec::<String>::new());
 

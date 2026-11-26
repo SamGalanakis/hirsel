@@ -232,6 +232,11 @@ fn projector_slot(db: Db, name: String) -> Option[u64] {
     None
 }
 
+/// The current commit version of the main branch.
+pub fn main_commit_version(db: Db) -> u64 {
+    db.heads[0u64].head
+}
+
 // The names of the registered projectors, in registration order.
 pub fn projector_names(db: Db) -> List[String] {
     let mut out: List[String] = list.new()

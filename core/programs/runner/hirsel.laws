@@ -12,6 +12,7 @@ runner@1/runner/every_no_double_no_gap src=194f5c4559b944cd sig=cc8a50399d9a6939
 runner@1/runner/expiry_sweep_keeps_time_and_limits src=16dcc9c522e33564 sig=cac5125f78663dca run=0d24389cbe40867e bug=- oracle=- rows=pending
 runner@1/runner/first_admission_installs_adm src=320c6e6863e8e4f0 sig=c81543109c4dbead run=607dcf6bff52df2b bug=- oracle=- rows=pending
 runner@1/runner/frame_sizer_matches_vectors src=758d8f447db365d4 sig=1b9907ead3370ab7 run=c2c0c6612d4cbb79 bug=- oracle=- rows=pending
+runner@1/runner/head_interleaves_projector_under_load src=0eebf55a5279eb0e sig=993493bcdf606eb1 run=0d24389cbe40867e bug=- oracle=- rows=pending
 runner@1/runner/head_sweeps_expired_rows src=8ec261062bd25ab3 sig=735355ca659289b7 run=5466ab6073841227 bug=- oracle=- rows=pending
 runner@1/runner/http_age_refusal_survives_longer_retention src=1806ff8123a3f21a sig=c669b6bef0c0c9a8 run=ab73c978eb9eebf6 bug=- oracle=- rows=pending
 runner@1/runner/http_binding_401_unmarked_records_nothing src=fd8c2db3c6b7eeb3 sig=f5b9ba9ce1f8785d run=ab73c978eb9eebf6 bug=- oracle=- rows=pending

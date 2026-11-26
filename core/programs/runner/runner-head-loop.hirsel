@@ -9,6 +9,7 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
     // The forwarded request channel closed (InboxEnded); the head ends once idle.
     let mut ended = false
     let mut reported: Option[((u64, u64, bool), (u64, u64, u64, u64, u64, u64))] = None
+    head.upkeep.project_checked = store.main_commit_version(head.db)
     loop {
         check_store_health(head.db)?
         report_attention(head.db, head.upkeep, drain, mut reported)
@@ -49,6 +50,9 @@ fn serve_head[G: send, H: shareable + inert + send](mut head: Head[G, H], take i
             }
         }
         if none(pause) && !closed {
+            if !ended && interleave_projector(mut head)? {
+                continue
+            }
             if resuming {
                 if next_waiting(mut head, drain)? {
                     continue

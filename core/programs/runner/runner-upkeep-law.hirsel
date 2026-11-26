@@ -264,3 +264,75 @@ fn test_head_steps_projector(random: Random, tasks: Tasks) -> Result[(), store.E
     }
     store.close(take stepped)
 }
+
+fn upkeep_law_write(mut tx: store.Tx, rows: store.Table[u64, u64], _author: Caller, take key: u64) -> Result[(), u64] {
+    result.unwrap(store.put(mut tx, rows, key, key + 1))
+    Ok(())
+}
+
+@test
+fn head_interleaves_projector_under_load(random: Random) -> Result[(), store.Error] waits {
+    let (time, take _clock_handle) = provide.clock(0, 100)
+    let mut db = store.memory(time, random, result.unwrap(store.sized(Memory, 1073741824u64)))
+    let mut d = store.declare(db, Migrate)?
+    let decl = store.projection(mut d, "under_load")?
+    let rows_def = store.declare_table(mut d, "rows", std.codec.key_u64(), std.codec.of_u64())?
+    let rows = store.finish(mut d, take rows_def)?
+    let image_key: std.codec.Key[(u32, u64)] = std.codec.key_of()
+    let image_value: std.codec.Codec[Option[u64]] = std.codec.of()
+    let images_def = store.declare_table(mut d, "images", image_key, image_value)?
+    let images = store.finish(mut d, take images_def)?
+    let folds: store.Fold[store.Table[(u32, u64), Option[u64]], u64, u64, store.Error] = store.Fold(env: take images, apply: code.describe(upkeep_law_apply), merge: code.describe(upkeep_law_merge), drop: code.describe(upkeep_law_drop))
+    store.projector(mut d, decl, rows, Local, folds, store.Cadence(tail: 1, ratio: 0), 16777216)?
+    let _ = store.seal(mut db, take d)?
+    let source = store.binding(rows, store.main_branch(db))
+    let definition = code.describe(upkeep_law_write)
+    let result_codec: std.codec.Codec[Result[(), u64]] = std.codec.of()
+    let entry = result.unwrap(attempt_key(definition, std.codec.of_u64(), result_codec))
+    let mut entries: Registry[(), store.Table[u64, u64]] = registry()
+    result.unwrap(transact(mut entries, definition, 131072, 65536))
+    let (to_head, from_head): (Sender[HeadInput], Receiver[HeadInput]) = channel.new(34)
+    let (reply_to, _replies): (Sender[WireEvent], Receiver[WireEvent]) = channel.new(1)
+    // Each request commits admission and then the write. The queued stop
+    // leaves no idle turn, and a write is waiting after each 32 commits.
+    for key in 0u64 .. 33 {
+        let author = store.Caller(issuer: 1u8, subject: list.new())
+        let mut arg: Bytes = list.new()
+        std.codec.put_u64(key, mut arg)
+        let req = head_request(take author, store.StreamId(t: 100, n: key + 1), 0, clone(entry), take arg, channel.sender(reply_to))
+        result.unwrap(channel.send(to_head, RunRequest(take req)))
+    }
+    result.unwrap(channel.send(to_head, HeadFinish))
+    let (out, published): (Sender[PubIn], Receiver[PubIn]) = channel.new(128)
+    let mut head = Head(db: take db, anonymous: anonymous_streams(), r: take entries, replay_identity: list.new(), h: arc.new(store.copy_env(rows)), out: take out, busy: map.new(), waiting: list.new(), group: list.new(), last: None, held: list.new(), wakes: false, minted: 0u64, cut: false, trigger_drive: None, parked: list.new(), recovery: None, upkeep: upkeep())
+    let mut no_triggers: Option[triggers.Tables] = None
+    let _ = serve_head(mut head, take from_head, None, mut no_triggers)?
+    let Head(db: take kept, ..) = take head
+    let r = store.reader(kept, 0)?
+    let mut rebound = false
+    let mut published_image = false
+    while let Ok(PubIn(e: take event)) = channel.try_receive(published) {
+        if let Released(Release(snapshot: Some(take at), ..)) = take event {
+            let Seen(store.Seen(value: take read, ..)) = store.look(r, at, None, store.copy_env(decl), store.projection_row)? else {
+                fail("projector release could not be read")
+            }
+            let row = (take read)?
+            if row.binding == Some(source) && !rebound {
+                if store.get(r, at, rows, 15)? != Some(16u64) || store.get(r, at, rows, 16)? != None {
+                    fail("projector did not bind at 32 commits")
+                }
+                rebound = true
+            }
+            if !published_image && row.image != None {
+                if list.len(row.generations) != 1 || row.generations[0].rows != 32 || store.get(r, at, rows, 32)? != None {
+                    fail("projector did not publish the first 32 writes before the 33rd")
+                }
+                published_image = true
+            }
+        }
+    }
+    if !rebound || !published_image || store.get(r, store.snapshot(kept), rows, 32)? != Some(33u64) {
+        fail("head starved projection under sustained writes")
+    }
+    store.close(take kept)
+}

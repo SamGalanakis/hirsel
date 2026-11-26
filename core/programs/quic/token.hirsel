@@ -3,10 +3,10 @@ const TOKEN_RETRY: u8 = 0x01
 
 const TOKEN_ADDRESS: u8 = 0x02
 
-/// QUIC-4 lifetimes, in nanoseconds: 10 s for a Retry token, 24 h for a NEW_TOKEN token.
+/// QUIC-4 lifetimes, in nanoseconds: 10 s for a Retry token, 10 min for a NEW_TOKEN token.
 const RETRY_LIFETIME: u64 = 10000000000
 
-const ADDRESS_LIFETIME: u64 = 86400000000000
+const ADDRESS_LIFETIME: u64 = 600000000000
 
 /// type ‖ salt(16) ‖ sealed(original DCID up to 20 ‖ issued 8 ‖ tag 16). Anything longer
 /// is refused before a key is derived, so a hostile token costs no HKDF.

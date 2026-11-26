@@ -432,7 +432,7 @@ module stays inside `quic` until one exists (Design review, O6).
   | Type | Use | Binds (in AAD and plaintext) | Lifetime |
   | --- | --- | --- | --- |
   | `0x01` | Retry (RFC 9000 §8.1.2) | client IP and port, original DCID, the Retry's SCID | 10 s |
-  | `0x02` | NEW_TOKEN (§8.1.3) | client IP | 24 h |
+  | `0x02` | NEW_TOKEN (§8.1.3) | client IP | 10 min |
 
   `salt` is 16 fresh bytes from the endpoint's `Random`. The sealing key is
   `secret.derive_hkdf_sha256(token_key, salt, "hirsel quic token" ‖ type, 32,
@@ -442,7 +442,9 @@ module stays inside `quic` until one exists (Design review, O6).
   match where it arrived (a NEW_TOKEN token where a Retry token is expected, or the
   reverse), whose fields differ, or that has expired is refused: a Retry token with
   `INVALID_TOKEN` (§8.1.2), a NEW_TOKEN token by ignoring it and proceeding as if none was
-  sent (§8.1.3). Since there is no 0-RTT, a NEW_TOKEN token only saves the Retry round trip.
+  sent (§8.1.3). A NEW_TOKEN token can validate an Initial through 10 min after issue,
+  including on another endpoint sharing the token key. After that it cannot lift the
+  anti-amplification limit. Since there is no 0-RTT, it only saves the Retry round trip.
 - **Retry.** `RetryPolicy` decides when the server answers an Initial with Retry: never,
   always, or above a count of unvalidated connections in progress. The default is
   `Above(unvalidated / 2)`; `endpoint` refuses `Above(n)` with `n ≥ unvalidated`, which

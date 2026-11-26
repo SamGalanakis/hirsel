@@ -5,6 +5,9 @@ const OTHER_PORT: Addr = Addr(ip: V4(0x7f000001u32), port: 24103)
 /// 10 s in nanoseconds: QUIC-4's Retry token lifetime.
 const TEN_S: u64 = 10000000000
 
+/// 10 min in nanoseconds: QUIC-4's NEW_TOKEN address token lifetime.
+const TEN_MIN: u64 = 600000000000
+
 fn retry_server(seed: u64, member: u16, members: u16) -> quic.Endpoint {
     let mut config = endpoint_config()
     config.retry = Always
@@ -249,14 +252,55 @@ fn group_members_share_tokens() {
     }
 }
 
+fn initial_with_token(seed: u64, take token: Bytes) -> Bytes {
+    let mut client = seeded_client(seed)
+    let h = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    quic.set_initial_token(mut client, h, take token)
+    let first = drain(mut client, 1)
+    clone(first[0])
+}
+
+fn expired_address_token_loses_validation() {
+    let issuer = retry_server(21, 0, 2)
+    let token = quic.mint_address_token(issuer, CLIENT_ADDR, 1)
+    let mut events: List[quic.Event] = list.new()
+    let mut peer = retry_server(22, 1, 2)
+    let boundary = 1 + TEN_MIN
+    deliver(mut peer, boundary, OTHER_PORT, initial_with_token(65, clone(token)), mut events)
+    let Some((_, validated, _, _, _)) = quic.path_state(peer, ConnectionHandle(0)) else {
+        fail("NEW_TOKEN should admit a connection at the 10 min boundary")
+    }
+    if !validated {
+        fail("NEW_TOKEN should validate the address at the 10 min boundary")
+    }
+    let _ = drain(mut peer, boundary)
+    let expired = boundary + 1
+    let replay = initial_with_token(66, take token)
+    deliver(mut peer, expired, OTHER_PORT, replay, mut events)
+    let replies = drain(mut peer, expired)
+    if quic.live_connections(peer) != 1 || list.len(replies) != 1 || replies[0][0] & 0xf0 != 0xf0 {
+        fail("expired NEW_TOKEN should trigger Retry without admitting the connection")
+    }
+    let mut config = endpoint_config()
+    config.retry = Never
+    let mut direct = result.unwrap(quic.endpoint(provide.random(23), take config, Some((p256_identity(false), transport_config(None)))))
+    deliver(mut direct, expired, OTHER_PORT, replay, mut events)
+    let Some((_, replay_validated, _, _, _)) = quic.path_state(direct, ConnectionHandle(0)) else {
+        fail("expired NEW_TOKEN should admit an unvalidated connection under RetryPolicy.Never")
+    }
+    if replay_validated {
+        fail("expired NEW_TOKEN should not validate the address under RetryPolicy.Never")
+    }
+}
+
 /// bug: a Retry keeps per-Initial state, carries a bad tag or the wrong DCID, or the
 /// client's later transport-parameter check fails on it; a Retry token is accepted from
 /// another address or port, on another connection, after its lifetime or relabeled from
 /// a NEW_TOKEN token; a bad NEW_TOKEN token is refused instead of ignored; a member of a
-/// group cannot open another member's token.
+/// group cannot open another member's token; an expired NEW_TOKEN still validates an address.
 /// oracle: RFC 9000 §8.1.2, §8.1.3, §17.2.5 and §20.1 (INVALID_TOKEN = 0x0b), RFC 9001
-/// §5.8 with its published key and nonce, and QUIC-4's 10 s lifetime, all by hand; the
-/// Retry is parsed and its tag checked here, not by the endpoint.
+/// §5.8 with its published key and nonce, and QUIC-4's 10 s Retry and 10 min NEW_TOKEN
+/// lifetimes. The Retry is parsed and its tag checked here, not by the endpoint.
 @test
 fn retry_validates_address() -> Result[(), ()] {
     retried_client_connects()
@@ -265,5 +309,6 @@ fn retry_validates_address() -> Result[(), ()] {
     foreign_tokens_refused()
     address_tokens_validate()
     group_members_share_tokens()
+    expired_address_token_loses_validation()
     Ok(())
 }

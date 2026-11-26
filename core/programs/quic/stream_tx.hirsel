@@ -207,7 +207,8 @@ fn control(f: codec.Frame, record: SentFrame, cap: u64, mut payload: Bytes, mut 
     true
 }
 
-/// Flow-control, stop, reset and blocked frames, then the test seam's raw frames.
+/// Flow-control, stop, reset and blocked frames, CID frames, then the test seam's raw
+/// frames.
 fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
     if st.max_data_pending && control(MaxData(st.max_data), MaxDataSent, cap, mut payload, mut frames) {
         st.max_data_pending = false
@@ -258,6 +259,7 @@ fn control_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: Lis
             st.data_blocked_at = Some(st.peer_max_data)
         }
     }
+    cid_frames(mut st, cap, mut payload, mut frames)
     if list.len(st.seam) > 0 && cap - list.len(payload) >= list.len(st.seam) {
         list.append(mut payload, st.seam)
         list.clear(mut st.seam)
@@ -416,6 +418,8 @@ fn requeue(mut st: Streams, frames: List[SentFrame], abandoned: bool) {
                     st.uni_limit_pending = true
                 }
             },
+            NewCidSent(seq) => resend_new_cid(mut st.cids, seq),
+            RetireSent(seq) => list.push(mut st.cids.retire_out, seq),
             DataBlockedSent => (),
             Raw => (),
             Data(stream: id, offset: offset, len: len, fin: fin) => {

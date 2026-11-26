@@ -87,6 +87,8 @@ type Space {
     discard_before: u64,
     largest: Option[u64],
     ack_pending: bool,
+    /// An ACK went into a packet this poll staged: the next one of the poll repeats none.
+    ack_staged: bool,
     crypto_in: Reassembly,
     crypto_out: Bytes,
     crypto_committed: u64,

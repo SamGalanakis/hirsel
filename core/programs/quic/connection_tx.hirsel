@@ -60,7 +60,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
         }
         closed = true
     } else {
-        if s.ack_pending {
+        if s.ack_pending && !s.ack_staged {
             // RFC 9000 §13.2.5: the delay since the largest packet arrived, in units of
             // 2^ack_delay_exponent microseconds. RFC 9002 §5.3 lets Initial and
             // Handshake delays be ignored, so those report 0.
@@ -140,6 +140,7 @@ fn tx_space(mut s: Space, mut st: Streams, fill: bool, kind: codec.PacketKind, d
         requeue(mut st, frames, true)
         return None
     }
+    s.ack_staged = s.ack_staged || ack
     Some(StagedPacket(number: number, size: list.len(out) - start, crypto_at: crypto_at, crypto_end: crypto_end, resent: resent, ack: ack, done: done_sent, close: closed, eliciting: eliciting, path: path, frames: take frames))
 }
 

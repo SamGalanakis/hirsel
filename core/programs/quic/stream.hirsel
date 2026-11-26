@@ -79,7 +79,7 @@ type Stream {
 }
 
 /// What a sent packet carried, kept until it is acknowledged or requeued.
-type SentFrame = Data(stream: u64, offset: u64, len: u64, fin: bool) | ResetSent(u64) | StopSent(u64) | MaxDataSent | MaxStreamDataSent(u64) | MaxStreamsSent(bool) | DataBlockedSent | StreamBlockedSent(u64) | DatagramSent(u64) | Raw
+type SentFrame = Data(stream: u64, offset: u64, len: u64, fin: bool) | ResetSent(u64) | StopSent(u64) | MaxDataSent | MaxStreamDataSent(u64) | MaxStreamsSent(bool) | DataBlockedSent | StreamBlockedSent(u64) | DatagramSent(u64) | NewCidSent(u64) | RetireSent(u64) | Raw
 
 /// A DATAGRAM waiting for a packet (QUIC-7). `born` is the first poll that saw it: one
 /// smoothed RTT later it is dropped and counted rather than queued on (QUIC-6).
@@ -146,11 +146,12 @@ type Streams {
     datagrams_sent: u64,
     datagrams_late: u64,
     datagram_room: u64,
-    datagrams_refused: u64
+    datagrams_refused: u64,
+    cids: Cids
 }
 
 fn no_streams() -> Streams {
-    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"", free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0, released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0, uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false, uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0, data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0, local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0, credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(), seam: b"", datagrams: list.new(), staged_datagrams: list.new(), datagram_seq: 0, peer_datagram: 0, datagrams_sent: 0, datagrams_late: 0, datagram_room: 0, datagrams_refused: 0)
+    Streams(ready: false, side_server: false, list: list.new(), pool: Pool(data: b"", free: list.new()), max_gaps: 0, window: 0, stream_window: 0, max_data: 0, consumed: 0, released: 0, max_data_pending: false, bidi_limit: 0, uni_limit: 0, bidi_opened: 0, uni_opened: 0, bidi_closed: 0, uni_closed: 0, bidi_limit_pending: false, uni_limit_pending: false, peer_max_data: 0, sent_data: 0, written_data: 0, data_blocked_at: None, held: 0, send_bytes: 0, reset_stream_at: false, local_bidi_limit: 0, local_uni_limit: 0, local_bidi_opened: 0, local_uni_opened: 0, credit_bidi_local: 0, credit_bidi_remote: 0, credit_uni: 0, turn: 0, inflight: list.new(), seam: b"", datagrams: list.new(), staged_datagrams: list.new(), datagram_seq: 0, peer_datagram: 0, datagrams_sent: 0, datagrams_late: 0, datagram_room: 0, datagrams_refused: 0, cids: no_cids())
 }
 
 fn page_count(window: u64) -> u64 {

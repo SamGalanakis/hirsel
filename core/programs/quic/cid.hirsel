@@ -1,0 +1,235 @@
+// QUIC-4 connection IDs (RFC 9000 §5.1): the CIDs this end issues, each in NET-16's
+// Steer.Quic format so a steered group hands every packet to the member that owns the
+// connection, and the CIDs the peer issued, one of them in use.
+/// This end's active_connection_id_limit: the most peer CIDs it keeps, and the most it
+/// issues.
+const CID_LIMIT: u64 = 8
+
+/// RETIRE_CONNECTION_ID frames owed at once, past which the peer is retiring faster than
+/// it lets them be sent (CONNECTION_ID_LIMIT_ERROR, §5.1.2).
+const RETIRE_LIMIT: u64 = 16
+
+/// A CID this end issued and the peer has not retired. `pending` while its
+/// NEW_CONNECTION_ID still has to be sent (or sent again after a loss).
+type IssuedCid {
+    seq: u64,
+    id: Bytes,
+    token: Bytes,
+    pending: bool
+}
+
+/// A CID the peer issued that is not in use and not retired.
+type PeerCid {
+    seq: u64,
+    id: Bytes,
+    token: Bytes
+}
+
+type Cids {
+    issued: List[IssuedCid],
+    next_seq: u64,
+    released: List[Bytes],
+    peer: List[PeerCid],
+    peer_seq: u64,
+    retire_prior: u64,
+    retire_out: List[u64]
+}
+
+fn no_cids() -> Cids {
+    Cids(issued: list.new(), next_seq: 0, released: list.new(), peer: list.new(), peer_seq: 0, retire_prior: 0, retire_out: list.new())
+}
+
+/// Seq 0, the CID the handshake used, issued with the connection.
+fn first_cid(mut cids: Cids, take id: Bytes, take token: Bytes) {
+    list.push(mut cids.issued, IssuedCid(seq: 0, id: take id, token: take token, pending: false))
+    cids.next_seq = 1
+}
+
+/// Top up the CIDs `slot`'s peer holds to the smaller of its active_connection_id_limit
+/// and ours, each mapped to the slot, once the handshake is confirmed (RFC 9001 §4.1.2),
+/// so none rides in 0.5-RTT data (§5.1.1). An endpoint with zero-length CIDs issues none.
+fn issue_cids(mut e: Endpoint, slot: u64) {
+    let mut want = 0u64
+    if let Some(c) = e.connections[slot] {
+        if let Some(p) = c.params {
+            if let Some(_) = c.application.send {
+                if open_life(c) && c.streams.ready && recovery.confirmed(c.recovery) && e.config.cid_len > 0 {
+                    let limit = order.min(p.active_cid_limit, CID_LIMIT)
+                    want = limit - order.min(limit, list.len(c.streams.cids.issued))
+                }
+            }
+        }
+    }
+    for _ in 0u64 .. want {
+        let id = draw_local_id(e)
+        let token = reset_token(e.config.reset_key, id)
+        map.insert(mut e.cids, clone(id), slot)
+        if let Some(mut c) = e.connections[slot] {
+            let seq = c.streams.cids.next_seq
+            c.streams.cids.next_seq += 1
+            list.push(mut c.streams.cids.issued, IssuedCid(seq: seq, id: take id, token: take token, pending: true))
+        }
+    }
+}
+
+/// Unmap the CIDs the peer retired since the last call, if they still route to `slot`.
+fn unmap_released(mut e: Endpoint, slot: u64, released: List[Bytes]) {
+    for id in released {
+        let owned = match map.get(e.cids, id) {
+            Some(at) => at == slot,
+            None => false,
+        }
+        if owned {
+            let _ = map.remove(mut e.cids, id)
+        }
+    }
+}
+
+/// NEW_CONNECTION_ID for each issued CID not yet sent, then RETIRE_CONNECTION_ID for each
+/// peer CID this end retired.
+fn cid_frames(mut st: Streams, cap: u64, mut payload: Bytes, mut frames: List[SentFrame]) {
+    for i in 0u64 .. list.len(st.cids.issued) {
+        if !st.cids.issued[i].pending {
+            continue
+        }
+        let seq = st.cids.issued[i].seq
+        let len = list.len(st.cids.issued[i].id)
+        let mut input: Bytes = clone(st.cids.issued[i].id)
+        list.append(mut input, st.cids.issued[i].token)
+        // Type, two varints of at most 8 bytes and the length octet.
+        if cap - list.len(payload) < list.len(input) + 18 {
+            return
+        }
+        let f: codec.Frame = NewConnectionId(sequence: seq, retire_prior_to: 0, id: codec.Span(at: 0, len: len), reset_token: codec.Span(at: len, len: list.len(input) - len))
+        if let Ok(()) = codec.write_frame(f, input, mut payload) {
+            list.push(mut frames, NewCidSent(seq))
+            st.cids.issued[i].pending = false
+        }
+    }
+    while list.len(st.cids.retire_out) > 0 {
+        let seq = st.cids.retire_out[list.len(st.cids.retire_out) - 1]
+        if !control(RetireConnectionId(seq), RetireSent(seq), cap, mut payload, mut frames) {
+            return
+        }
+        let _ = list.pop(mut st.cids.retire_out)
+    }
+}
+
+/// A lost NEW_CONNECTION_ID is sent again while its CID is still issued.
+fn resend_new_cid(mut cids: Cids, seq: u64) {
+    for i in 0u64 .. list.len(cids.issued) {
+        if cids.issued[i].seq == seq {
+            cids.issued[i].pending = true
+        }
+    }
+}
+
+/// Owe a RETIRE_CONNECTION_ID for peer CID `seq`.
+fn owe_retire(mut cids: Cids, seq: u64) -> Result[(), ConnectionFailure] {
+    if list.len(cids.retire_out) >= RETIRE_LIMIT {
+        return Error(Wire(0x09, 0x18))
+    }
+    list.push(mut cids.retire_out, seq)
+    Ok(())
+}
+
+/// Move to the peer's lowest-numbered unused CID and retire the one in use; false when
+/// the peer has issued none to move to. A client keeps the new CID's reset token.
+fn switch_peer_cid(mut c: Connection) -> Result[bool, ConnectionFailure] {
+    let n = list.len(c.streams.cids.peer)
+    if n == 0 {
+        return Ok(false)
+    }
+    let mut best = 0u64
+    for i in 1u64 .. n {
+        if c.streams.cids.peer[i].seq < c.streams.cids.peer[best].seq {
+            best = i
+        }
+    }
+    list.swap(mut c.streams.cids.peer, best, n - 1)
+    let Some(take next) = list.pop(mut c.streams.cids.peer) else {
+        return Ok(false)
+    }
+    owe_retire(mut c.streams.cids, c.streams.cids.peer_seq)?
+    let PeerCid(seq, id: take id, token: take token) = take next
+    c.streams.cids.peer_seq = seq
+    c.peer_id = take id
+    if let Some(_) = c.peer_reset {
+        c.peer_reset = Some(take token)
+    }
+    Ok(true)
+}
+
+/// RFC 9000 §19.15. A repeat is ignored if it matches and a PROTOCOL_VIOLATION if not; a
+/// CID below retire_prior_to, or below the one in use (CIDs are used in order, so it
+/// arrived late or was retired), is retired at once; raising retire_prior_to retires every
+/// CID below it, the one in use included; more than our limit active is
+/// CONNECTION_ID_LIMIT_ERROR.
+fn new_connection_id(mut c: Connection, seq: u64, prior: u64, id: Bytes, token: Bytes) -> Result[(), ConnectionFailure] {
+    if list.len(c.peer_id) == 0 {
+        return Error(Wire(0x0a, 0x18))
+    }
+    if seq == c.streams.cids.peer_seq {
+        if id != c.peer_id {
+            return Error(Wire(0x0a, 0x18))
+        }
+        return Ok(())
+    }
+    for p in c.streams.cids.peer {
+        if (p.seq == seq) != (p.id == id) || (p.seq == seq && p.token != token) {
+            return Error(Wire(0x0a, 0x18))
+        }
+        if p.seq == seq {
+            return Ok(())
+        }
+    }
+    if id == c.peer_id {
+        return Error(Wire(0x0a, 0x18))
+    }
+    if seq < c.streams.cids.retire_prior || seq < c.streams.cids.peer_seq {
+        return owe_retire(mut c.streams.cids, seq)
+    }
+    list.push(mut c.streams.cids.peer, PeerCid(seq: seq, id: clone(id), token: clone(token)))
+    if prior > c.streams.cids.retire_prior {
+        c.streams.cids.retire_prior = prior
+        let mut i = 0u64
+        while i < list.len(c.streams.cids.peer) {
+            if c.streams.cids.peer[i].seq < prior {
+                let old = c.streams.cids.peer[i].seq
+                let last = list.len(c.streams.cids.peer) - 1
+                list.swap(mut c.streams.cids.peer, i, last)
+                let _ = list.pop(mut c.streams.cids.peer)
+                owe_retire(mut c.streams.cids, old)?
+            } else {
+                i += 1
+            }
+        }
+        if c.streams.cids.peer_seq < prior {
+            let _ = switch_peer_cid(mut c)?
+        }
+    }
+    if 1 + list.len(c.streams.cids.peer) > CID_LIMIT {
+        return Error(Wire(0x09, 0x18))
+    }
+    Ok(())
+}
+
+/// RFC 9000 §19.16: retiring a CID never issued is a PROTOCOL_VIOLATION. A retired CID
+/// stops routing once the receive that carried the frame ends.
+fn retire_connection_id(mut cids: Cids, seq: u64) -> Result[(), ConnectionFailure] {
+    if seq >= cids.next_seq {
+        return Error(Wire(0x0a, 0x19))
+    }
+    for i in 0u64 .. list.len(cids.issued) {
+        if cids.issued[i].seq == seq {
+            let last = list.len(cids.issued) - 1
+            list.swap(mut cids.issued, i, last)
+            if let Some(take gone) = list.pop(mut cids.issued) {
+                let IssuedCid(id: take id, ..) = take gone
+                list.push(mut cids.released, take id)
+            }
+            return Ok(())
+        }
+    }
+    Ok(())
+}

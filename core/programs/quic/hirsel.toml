@@ -36,6 +36,7 @@ std = { major = 1 }
 "key_update.hirsel" = "quic"
 "path.hirsel" = "quic"
 "datagram.hirsel" = "quic"
+"cid.hirsel" = "quic"
 "drive.hirsel" = "quic"
 
 [tests]
@@ -57,3 +58,4 @@ grants = ["Tasks"]
 "key_update_laws.hirsel" = "laws"
 "path_laws.hirsel" = "laws"
 "datagram_laws.hirsel" = "laws"
+"steer_laws.hirsel" = "laws"

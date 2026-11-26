@@ -78,8 +78,8 @@ fn datagram_client(take plan: DatagramEnd) -> DatagramSender waits {
                 trace.offered += 1
                 room -= 1
             }
-            if trace.offered == DATAGRAMS && queued == 0 && !closing {
-                let (sent, left, _, _) = quic.datagram_counts(e, c)
+            let (sent, left, _, _) = quic.datagram_counts(e, c)
+            if trace.offered == DATAGRAMS && left == 0 && !closing {
                 trace.sent = sent
                 trace.queued = left
                 trace.late = quic.drop_count(e, DatagramLate)

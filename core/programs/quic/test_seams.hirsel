@@ -93,3 +93,27 @@ pub fn datagram_counts(e: Endpoint, c: ConnectionHandle) -> (u64, u64, u64, u64)
     }
     (0, 0, 0, 0)
 }
+
+/// The peer CID `c` sends to; empty for an unknown connection.
+pub fn peer_cid(e: Endpoint, c: ConnectionHandle) -> Bytes {
+    if let Some(i) = slot_at(e, c) {
+        if let Some(conn) = e.connections[i] {
+            return clone(conn.peer_id)
+        }
+    }
+    b""
+}
+
+/// Move `c` to the next CID its peer issued, retiring the one in use (RFC 9000 §5.1.2);
+/// false when the peer has issued none to move to.
+pub fn rotate_peer_cid(mut e: Endpoint, c: ConnectionHandle) -> bool {
+    let Some(i) = slot_at(e, c) else {
+        return false
+    }
+    if let Some(mut conn) = e.connections[i] {
+        if let Ok(moved) = switch_peer_cid(mut conn) {
+            return moved
+        }
+    }
+    false
+}

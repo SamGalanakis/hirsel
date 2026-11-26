@@ -98,6 +98,7 @@ fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut w
 fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
     let mut failed: Option[DropReason] = None
     let mut reset_peer: Option[Addr] = None
+    let mut released: List[Bytes] = list.new()
     if let Some(mut c) = e.connections[i] {
         let before = established(c)
         let awaiting = match c.side {
@@ -108,6 +109,7 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
         let outcome = receive_known(mut c, now, from, h, mut wire, mut e.plain, e.random, e.config.max_mtu, ecn, mut events)
         e.datagram_room = c.streams.datagram_room
         dropped_many(mut e.drops, DatagramBuffer, replace(mut c.streams.datagrams_refused, 0))
+        released = replace(mut c.streams.cids.released, list.new())
         let finished = awaiting && established(c)
         if finished {
             e.unconfirmed -= 1
@@ -125,6 +127,7 @@ fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, ecn: u8, h: c
             failed = Some(reason)
         }
     }
+    unmap_released(mut e, i, released)
     if let Some(peer) = reset_peer {
         note_reset_peer(mut e, peer, i)
     }

@@ -1,0 +1,278 @@
+// QS7 law Q14: a udp_bind_group of 4 members steered by Steer.Quic, one endpoint per
+// member on quic.drive, and clients behind NATs that rebind, each rotating to a fresh
+// server CID halfway through its echo.
+const STEER_MEMBERS: u16 = 4
+
+const STEER_CLIENTS: u64 = 6
+
+const STEER_BYTES: u64 = 48 * KIB
+
+const STEER_END: u64 = 20000 * MS
+
+pub type SteerEnd: send {
+    clock: Clock,
+    socket: UdpSocket,
+    index: u64
+}
+
+pub type SteerClient: send {
+    index: u64,
+    done: bool,
+    echoed: bool,
+    before: Bytes,
+    after: Bytes
+}
+
+pub type SteerServer: send {
+    member: u64,
+    served: List[u64],
+    unknown: u64,
+    moved: u64
+}
+
+/// One echoed stream at a server member; its first byte names the client.
+type Echo {
+    c: quic.ConnectionHandle,
+    s: quic.StreamId,
+    pending: Bytes,
+    named: bool,
+    got_fin: bool,
+    fin_sent: bool,
+    peer: Option[Addr],
+    moved: bool
+}
+
+fn steer_transport() -> quic.TransportConfig {
+    let mut t = stream_transport(128 * KIB, 64 * KIB, 64 * KIB)
+    t.max_idle_ms = 30000
+    take t
+}
+
+fn steer_config(member: u64) -> quic.EndpointConfig {
+    let mut config = endpoint_config()
+    config.member = int.narrow(member)
+    config.members = STEER_MEMBERS
+    config.limits.connections = 8
+    take config
+}
+
+fn steer_client(take plan: SteerEnd) -> SteerClient waits {
+    let SteerEnd(clock, socket: take given, index) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(40 + index), endpoint_config(), None))
+    let _ = result.unwrap(quic.connect(mut e, 0, SIM_SERVER, "server", cert_pin(old_digest()), None, steer_transport()))
+    let mut data = pattern(STEER_BYTES, 30 + index)
+    data[0] = int.narrow(index)
+    let mut stream: Option[(quic.ConnectionHandle, quic.StreamId)] = None
+    let mut written = 0u64
+    let mut fin_sent = false
+    let mut echo: Bytes = list.with_capacity(STEER_BYTES)
+    let mut trace = SteerClient(index: index, done: false, echoed: false, before: b"", after: b"")
+    let mut rotated = false
+    let mut events: List[quic.Event] = list.new()
+    loop {
+        if host.mono_ns(clock) >= STEER_END {
+            break
+        }
+        if let Some((c, id)) = stream {
+            if written < STEER_BYTES {
+                written += result.unwrap(quic.write(mut e, c, id, list.slice(data, written, STEER_BYTES), false))
+            } else if !fin_sent {
+                let _ = result.unwrap(quic.write(mut e, c, id, b"", true))
+                fin_sent = true
+            }
+            let (_, fin) = result.unwrap(quic.read(mut e, c, id, mut echo))
+            if !rotated && list.len(echo) >= STEER_BYTES / 2 {
+                rotated = true
+                trace.before = quic.peer_cid(e, c)
+                if quic.rotate_peer_cid(mut e, c) {
+                    trace.after = quic.peer_cid(e, c)
+                }
+            }
+            if fin && !trace.done {
+                trace.done = true
+                trace.echoed = echo == data
+                quic.close(mut e, c, 0, b"")
+            }
+        }
+        result.unwrap(quic.drive(mut e, clock, mut socket, STEER_END, mut events))
+        if trace.done {
+            break
+        }
+        let mut gone = false
+        for event in events {
+            match event {
+                Connected(c: h, ..) => {
+                    stream = Some((h, result.unwrap(quic.open(mut e, h, true))))
+                },
+                Closed(..) => {
+                    gone = true
+                },
+                _ => (),
+            }
+        }
+        list.clear(mut events)
+        if gone {
+            break
+        }
+    }
+    take trace
+}
+
+/// A member echoes every stream it is given and notes which client each one named.
+fn steer_server(take plan: SteerEnd) -> SteerServer waits {
+    let SteerEnd(clock, socket: take given, index: member) = take plan
+    let mut socket = take given
+    let mut e = result.unwrap(quic.endpoint(provide.random(17 + member), steer_config(member), Some((p256_identity(false), steer_transport()))))
+    let mut echoes: List[Echo] = list.new()
+    let mut trace = SteerServer(member: member, served: list.new(), unknown: 0, moved: 0)
+    let mut events: List[quic.Event] = list.new()
+    while host.mono_ns(clock) < STEER_END {
+        for i in 0u64 .. list.len(echoes) {
+            let c = echoes[i].c
+            let s = echoes[i].s
+            let mut buf: Bytes = list.with_capacity(64 * KIB)
+            let (_, fin) = match quic.read(mut e, c, s, mut buf) {
+                Ok(got) => got,
+                Error(_) => (0, false),
+            }
+            if !echoes[i].named && list.len(buf) > 0 {
+                echoes[i].named = true
+                list.push(mut trace.served, int.widen(buf[0]))
+            }
+            list.append(mut echoes[i].pending, buf)
+            echoes[i].got_fin = echoes[i].got_fin || fin
+            if list.len(echoes[i].pending) > 0 {
+                if let Ok(n) = quic.write(mut e, c, s, echoes[i].pending, false) {
+                    echoes[i].pending = clone(list.slice(echoes[i].pending, n, list.len(echoes[i].pending)))
+                }
+            }
+            if echoes[i].got_fin && list.len(echoes[i].pending) == 0 && !echoes[i].fin_sent {
+                if let Ok(_) = quic.write(mut e, c, s, b"", true) {
+                    echoes[i].fin_sent = true
+                }
+            }
+        }
+        result.unwrap(quic.drive(mut e, clock, mut socket, STEER_END, mut events))
+        for i in 0u64 .. list.len(echoes) {
+            if let Some((at, _, _, _, _)) = quic.path_state(e, echoes[i].c) {
+                match echoes[i].peer {
+                    None => {
+                        echoes[i].peer = Some(at)
+                    },
+                    Some(first) => {
+                        if first != at && !echoes[i].moved {
+                            echoes[i].moved = true
+                            trace.moved += 1
+                        }
+                    },
+                }
+            }
+        }
+        for event in events {
+            if let Opened(c, s) = event {
+                list.push(mut echoes, Echo(c: c, s: s, pending: list.new(), named: false, got_fin: false, fin_sent: false, peer: None, moved: false))
+            }
+        }
+        list.clear(mut events)
+    }
+    trace.unknown = quic.drop_count(e, UnknownConnection)
+    take trace
+}
+
+/// The member a Steer.Quic CID names: its big-endian u16 after the first octet.
+fn cid_member(id: Bytes) -> u64 {
+    if list.len(id) < 3 {
+        return 0xffffffffffffffff
+    }
+    let member: u16 = list.word_be(id, 1)
+    int.widen(member)
+}
+
+/// bug: a server CID (the handshake's or a NEW_CONNECTION_ID's) that does not name its
+/// member, a rotation that sends packets nowhere or to a member that does not own the
+/// connection, a retired CID that keeps routing or one never issued, or a NAT rebind
+/// that strands a connection on another member.
+/// oracle: NET-16's Steer.Quic vectors and QUIC-4's CID format (octets 1 and 2 are the
+/// owning member, big-endian); RFC 9000 §5.1.
+@test
+fn steer_reaches_owner(tasks: Tasks) -> Result[(), ()] waits {
+    let script = std.sim.world.Script(tail_seed: 23, streams: list.new())
+    let mut config = std.sim.udp.defaults()
+    config.delay_ns = 5 * MS
+    config.rebind = 20000
+    let (vnet, take port) = provide.net(bytes 1048576)
+    let (take world, clock) = std.sim.world.new(1, 0, 0)
+    let sim = std.sim.udp.Server(config, plan: std.sim.world.plan_from(script, 0), world: take world, clock, tasks, port: take port, captures: list.new())
+    let served = task.spawn(tasks, bytes 8388608, take sim, std.sim.udp.serve)
+    let mut members: List[UdpSocket] = list.with_capacity(int.widen(STEER_MEMBERS))
+    let _ = result.unwrap(host.udp_bind_group(vnet, SIM_SERVER, SIM_SOCKET, STEER_MEMBERS, Quic, mut members))
+    let mut server_tasks: List[Task[SteerServer]] = list.new()
+    let mut member: u64 = int.widen(STEER_MEMBERS)
+    while member > 0 {
+        member -= 1
+        if let Some(take socket) = list.pop(mut members) {
+            list.push(mut server_tasks, task.spawn(tasks, bytes 4194304, SteerEnd(clock, socket: take socket, index: member), steer_server))
+        }
+    }
+    let mut client_tasks: List[Task[SteerClient]] = list.new()
+    for index in 0u64 .. STEER_CLIENTS {
+        let socket = result.unwrap(host.udp_open(vnet, false, SIM_SOCKET))
+        list.push(mut client_tasks, task.spawn(tasks, bytes 4194304, SteerEnd(clock, socket: take socket, index: index), steer_client))
+    }
+    let mut clients: List[SteerClient] = list.new()
+    while let Some(take t) = list.pop(mut client_tasks) {
+        list.push(mut clients, result.unwrap(task.join(take t)))
+    }
+    let mut servers: List[SteerServer] = list.new()
+    while let Some(take t) = list.pop(mut server_tasks) {
+        list.push(mut servers, result.unwrap(task.join(take t)))
+    }
+    result.unwrap(task.join(take served))
+    let mut moved = 0u64
+    for s in servers {
+        if s.unknown != 0 {
+            fail("a member was handed a packet for a CID it never issued")
+        }
+        moved += s.moved
+    }
+    if moved == 0 {
+        fail("no client's NAT rebound mid-connection")
+    }
+    let mut owners: List[bool] = list.with_capacity(int.widen(STEER_MEMBERS))
+    list.fill(mut owners, int.widen(STEER_MEMBERS), false)
+    for c in clients {
+        if !c.done || !c.echoed {
+            fail("an echo through the steered group did not complete intact")
+        }
+        let owner = cid_member(c.before)
+        if owner >= int.widen(STEER_MEMBERS) || cid_member(c.after) != owner {
+            fail("a server CID does not name the member that issued it")
+        }
+        if c.after == c.before {
+            fail("the client never moved to a NEW_CONNECTION_ID CID")
+        }
+        owners[owner] = true
+        let mut found = false
+        for s in servers {
+            if s.member == owner {
+                for k in s.served {
+                    found = found || k == c.index
+                }
+            }
+        }
+        if !found {
+            fail("a client's stream was served by a member other than the one its CIDs name")
+        }
+    }
+    let mut distinct = 0u64
+    for o in owners {
+        if o {
+            distinct += 1
+        }
+    }
+    if distinct < 2 {
+        fail("every connection landed on one member, so steering was not exercised")
+    }
+    Ok(())
+}

@@ -164,6 +164,10 @@ pub fn confirm(mut r: Recovery, now: u64) {
     set_timer(mut r, now)
 }
 
+pub fn confirmed(r: Recovery) -> bool {
+    r.confirmed
+}
+
 pub fn set_app_limited(mut r: Recovery, limited: bool) {
     r.app_limited = limited
 }

@@ -1,7 +1,7 @@
 const CRYPTO_LIMIT: u64 = 16384
 
 fn new_space() -> Space {
-    Space(receive: None, send: None, next: 0, sent: list.new(), received: list.new(), discard_before: 0, largest: None, ack_pending: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0, flights: list.new(), resend: list.new(), acked: list.new(), probes: 0, largest_at: 0, ecn_in: codec.EcnCounts(ect0: 0, ect1: 0, ce: 0), token: b"", key_phase: false, path_out: b"", hold_data: false)
+    Space(receive: None, send: None, next: 0, sent: list.new(), received: list.new(), discard_before: 0, largest: None, ack_pending: false, ack_staged: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0, flights: list.new(), resend: list.new(), acked: list.new(), probes: 0, largest_at: 0, ecn_in: codec.EcnCounts(ect0: 0, ect1: 0, ce: 0), token: b"", key_phase: false, path_out: b"", hold_data: false)
 }
 
 fn install_keys(mut s: Space, mut keys: schedule.Schedule, level: packet.Space) -> bool {

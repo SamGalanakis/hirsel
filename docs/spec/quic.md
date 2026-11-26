@@ -292,7 +292,10 @@ module stays inside `quic` until one exists (Design review, O6).
   owning member's index as big-endian `u16`, then random bytes to `cid_len` (8 by default).
   So a group bound with `steer: Quic` hands each datagram to the member that owns its
   connection, and one connection's datagrams never cross units. A connection keeps at most
-  `active_connection_id_limit` (8) CIDs issued, and retires as RFC 9000 §5.1.2 says.
+  `active_connection_id_limit` (8) CIDs issued, and retires as RFC 9000 §5.1.2 says. Each
+  end tops the peer up to the smaller of the two limits with NEW_CONNECTION_ID once the
+  handshake is confirmed, never in 0.5-RTT data; a CID the peer retires stops routing at
+  once, and releasing the connection unmaps every CID it issued.
 - **Group keys.** Every member of a `udp_bind_group` is given the same `reset_key` and
   `token_key` (`secret.share`): a token or reset made by one member must be checked by
   whichever member a later datagram reaches, and a restarted member must recognize its

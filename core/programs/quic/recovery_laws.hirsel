@@ -542,10 +542,12 @@ fn handshake_done_is_retransmitted() -> Result[(), ()] {
     // The server sends HANDSHAKE_DONE again at its PTO; the client confirms, drops its
     // Handshake keys and acknowledges, and then neither end has anything in flight. A
     // client still probing its Finished at doubling PTOs would send past 5 s.
-    // The client sends no ack-eliciting 1-RTT packet, so the server's only 1-RTT
-    // datagrams are the lost HANDSHAKE_DONE and its one copy; once that copy is
-    // acknowledged, the original's later loss verdict owes nothing (RFC 9000 §13.3).
-    if short != 2 {
+    // Both ends issue their NEW_CONNECTION_IDs once confirmed, so the server's 1-RTT
+    // datagrams are the lost HANDSHAKE_DONE (carrying the server's), its one copy at the
+    // PTO, and one that acknowledges the client's and carries the server's again, which
+    // the original's loss verdict owes (RFC 9000 §13.3); HANDSHAKE_DONE, acknowledged by
+    // then, is not among them.
+    if short != 3 {
         fail("the server sent HANDSHAKE_DONE other than once again")
     }
     if last >= 5000 * MS {

@@ -119,6 +119,14 @@ fn apply_frame(mut c: Connection, now: u64, kind: codec.PacketKind, f: codec.Fra
             path_response(mut c, list.slice(input, data.at, data.at + data.len))
             Ok(ElicitsAck)
         },
+        NewConnectionId(sequence: seq, retire_prior_to: prior, id: id, reset_token: token) => {
+            new_connection_id(mut c, seq, prior, list.slice(input, id.at, id.at + id.len), list.slice(input, token.at, token.at + token.len))?
+            Ok(ElicitsAck)
+        },
+        RetireConnectionId(seq) => {
+            retire_connection_id(mut c.streams.cids, seq)?
+            Ok(ElicitsAck)
+        },
         HandshakeDone => {
             if let Server = c.side {
                 return Error(Wire(0x0a, 0x1e))

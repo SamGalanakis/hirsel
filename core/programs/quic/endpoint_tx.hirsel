@@ -1,4 +1,7 @@
 fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
+    c.initial.ack_staged = false
+    c.encrypted.ack_staged = false
+    c.application.ack_staged = false
     key_maintenance(mut c, now)
     path_maintenance(mut c, now)
     let mut limit = order.min(mtu, MSS)
@@ -145,6 +148,7 @@ pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> 
     }
     let mtu: u64 = int.widen(e.config.max_mtu)
     for i in 0u64 .. list.len(e.connections) {
+        issue_cids(mut e, i)
         if let Some(mut c) = e.connections[i] {
             staged_connection(mut e.staged, mut c, now, i, mtu, mut out, mut tx)
             dropped_many(mut e.drops, DatagramLate, replace(mut c.streams.datagrams_late, 0))

@@ -105,6 +105,8 @@ fn add_connection(mut e: Endpoint, take c: Connection) {
         }
     }
     map.insert(mut e.cids, clone(c.local_id), slot)
+    let token = reset_token(e.config.reset_key, c.local_id)
+    first_cid(mut c.streams.cids, clone(c.local_id), take token)
     if slot == list.len(e.connections) {
         list.push(mut e.connections, Some(take c))
     } else {
@@ -194,7 +196,12 @@ pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Byte
 }
 
 fn release_connection(mut e: Endpoint, take c: Connection) {
-    let _ = map.remove(mut e.cids, c.local_id)
+    for x in c.streams.cids.issued {
+        let _ = map.remove(mut e.cids, x.id)
+    }
+    for id in c.streams.cids.released {
+        let _ = map.remove(mut e.cids, id)
+    }
     if let Server = c.side {
         let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.initial_id)))
         if let None = c.params {

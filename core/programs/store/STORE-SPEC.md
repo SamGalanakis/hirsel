@@ -1558,6 +1558,7 @@ pub type Overrides { resident_limit: Option[u64], journal_limit: Option[u64], ch
 pub type Shortage { need: u64, have: u64, parts: List[(String, u64)] }
 pub fn sized(kind: Kind, share: u64) -> Result[Options, Shortage]            // v2.57 DX Q6a: replaces defaults(); every byte figure derived from share
 pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Shortage]   // each Some replaces its derived figure; the sum must still fit share
+pub fn directory_writer_need(o: Overrides) -> u64                            // the least share sized_with accepts for Directory, or the largest u64 if none fits
 pub opaque type PlacePlan: send                                                // v2.76: sized Options, the writer plan and (Bucket) the capture; holds no heap storage beyond its Options
 pub fn planned(kind: Kind, share: u64, o: Overrides) -> Result[PlacePlan, Shortage] // v2.76: replaces sized_reservation; planned_bytes(p) ≤ share
 pub fn planned_options(p: PlacePlan) -> Options

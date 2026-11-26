@@ -235,11 +235,26 @@ pub fn sized_with(kind: Kind, share: u64, o: Overrides) -> Result[Options, Short
     Ok(take options)
 }
 
-// The Directory need reported at a zero-byte share, before building shortage details.
+/// The least share `sized_with(Directory, share, o)` accepts, or the largest
+/// u64 if no share fits.
 pub fn directory_writer_need(o: Overrides) -> u64 {
-    match disk_reservation(Directory, 0u64, o) {
-        Error(parts) => size_or(writer_total(parts), 18446744073709551615u64),
-        Ok((_, plan)) => writer_bytes(plan),
+    let unbounded = 18446744073709551615u64
+    let mut share = 0u64
+    loop {
+        match disk_reservation(Directory, share, o) {
+            Ok(_) => return share,
+            Error(parts) => {
+                // As the share rises, the derived pack and resident sizes can
+                // only grow. The priced total is a lower bound on any fit.
+                let Some(need) = writer_total(parts) else {
+                    return unbounded
+                }
+                if need <= share {
+                    return unbounded
+                }
+                share = need
+            },
+        }
     }
 }
 

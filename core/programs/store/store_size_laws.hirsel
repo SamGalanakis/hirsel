@@ -63,6 +63,38 @@ fn group_override(group: u64) -> Overrides {
     o
 }
 
+@test
+fn directory_writer_need_is_sizing_boundary() -> Result[(), ()] {
+    let mut o = derived_sizes()
+    check_directory_sizing_boundary(o)
+    o.resident_limit = Some(64 * MIB)
+    check_directory_sizing_boundary(o)
+    o.resident_limit = Some(512 * MIB)
+    o.limits = Some(small_place_limits())
+    check_directory_sizing_boundary(o)
+    o.resident_limit = Some(4 * 1024 * MIB)
+    o.limits = None
+    check_directory_sizing_boundary(o)
+    o.resident_limit = Some(12 * 1024 * MIB)
+    o.group_commits = Some(4u32)
+    check_directory_sizing_boundary(o)
+    o.pack_bytes = Some(64 * MIB)
+    o.checkpoint_bytes = Some(2 * MIB)
+    o.journal_limit = Some(32 * MIB)
+    check_directory_sizing_boundary(o)
+    Ok(())
+}
+
+fn check_directory_sizing_boundary(o: Overrides) {
+    let need = directory_writer_need(o)
+    if let Error(_) = sized_with(Directory, need, o) {
+        fail("§1.1: Directory refuses the reported writer need")
+    }
+    if let Ok(_) = sized_with(Directory, need - 1, o) {
+        fail("§1.1: Directory accepts less than the reported writer need")
+    }
+}
+
 // §1.1: a Directory grant covers the journal worker's own grant. A 64 MiB
 // group used to size inside a 39,839,262 B share. At the resident floor:
 //   journal worker: (67,108,864 + 4,096) + 32,768 + 288 + 64 = 67,146,080
@@ -81,7 +113,7 @@ fn directory_grant_covers_journal_worker(d: Dir, c: Clock, r: Random, tasks: Tas
         directory_writer_need(o)
     }) {
         Ok(total) if total == need => (),
-        _ => fail("§1.1: the zero-share need must report the writer peak without allocating"),
+        _ => fail("§1.1: Directory need must report the writer peak without allocating"),
     }
     match planned(Directory, 39839262, o) {
         Error(short) if short.need == need && short.have == 39839262 => (),

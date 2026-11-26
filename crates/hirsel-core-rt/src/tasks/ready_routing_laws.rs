@@ -126,13 +126,15 @@ fn ready_routes_one_and_work_is_independent_of_parked_count() {
                     waiting_on: ptr::null_mut(),
                     wait_previous: ptr::null_mut(),
                     wait_next: ptr::null_mut(),
-                    timer: Timer::default(),
+                    timer: Default::default(),
                     operation: &mut operations[i],
                     all: ptr::null_mut(),
                     all_previous: ptr::null_mut(),
                     warm_next: ptr::null_mut(),
                     warm_previous: ptr::null_mut(),
                     warm: false,
+                    #[cfg(feature = "record")]
+                    channel_tape: ChannelTape::None,
                     state: State::Provider,
                     id: i as u64,
                     #[cfg(feature = "record")]

@@ -157,3 +157,6 @@ fn fail15_full_counters_stop_without_cleanup_cause_or_join_delivery() {
         expect_stop(child, message);
     }
 }
+
+#[path = "channel_deadline_law.rs"]
+mod deadline;

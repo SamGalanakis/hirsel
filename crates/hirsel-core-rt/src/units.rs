@@ -54,6 +54,9 @@ mod reply;
 pub(crate) use reply::{Reply, file_request, uses_file_ring};
 #[path = "units_report.rs"]
 mod report;
+#[path = "units_timers.rs"]
+mod timers;
+use timers::{add_timer, clear_timer, fire_timers};
 #[path = "units_sync.rs"]
 pub(crate) mod sync;
 use hirsel_core_net::ready::Ready;
@@ -109,7 +112,6 @@ pub(crate) fn spin() -> bool {
 // then parks on its own handle. A wake hands one parked worker the searching
 // role, so a burst of newly runnable units wakes one worker at a time.
 use std::cell::UnsafeCell;
-use std::collections::BTreeSet;
 use sync::{AtomicBool, AtomicPtr, AtomicU8, AtomicU32, AtomicUsize};
 
 /// mc-units-untied: a thread-local Cell whose every access computes the slot
@@ -280,8 +282,10 @@ pub(crate) struct Unit {
     /// `u64::MAX`. Set when the unit parks with a deadline; cleared, and the
     /// set entry removed, when the park ends.
     timer_at: AtomicU64,
-    /// The slot whose timer set holds that registration.
-    timer_slot: AtomicUsize,
+    /// The slot whose timer list holds that registration.
+    timer_slot: AtomicU32,
+    /// The next unit in the slot's list, under that slot's timer lock.
+    timer_next: AtomicU32,
     /// The unit's scheduler-less waiter (replaces the thread's ALONE).
     pub(crate) alone: std::sync::OnceLock<Arc<crate::tasks::Readies>>,
     pub(crate) alone_depth: Cell<usize>,
@@ -380,7 +384,7 @@ struct Slot {
     waker: Option<hirsel_core_net::ready::Waker>,
     /// Live park deadlines on this slot as (deadline, unit id): at most one
     /// per unit.
-    timers: Mutex<BTreeSet<(u64, u32)>>,
+    timers: Mutex<u32>,
     /// The set's minimum, stored under its lock.
     next_timer: AtomicU64,
     /// epoll: when the slot's thread last polled without blocking.
@@ -392,7 +396,7 @@ impl Slot {
             handle: poller.handle(),
             waker: poller.waker(),
             poller,
-            timers: Mutex::new(BTreeSet::new()),
+            timers: Mutex::new(NONE),
             next_timer: AtomicU64::new(u64::MAX),
             last_poll: AtomicU64::new(0),
         }
@@ -732,77 +736,6 @@ fn wake_slot(p: &Pool, ix: usize) {
     match p.slots[ix].waker {
         Some(waker) => sync::wake(waker),
         None => p.slots[ix].poller.wake(),
-    }
-}
-
-/// Register the parking unit's deadline on slot `ix`, the slot it parked
-/// from. `next_timer` is the set's minimum, stored under the set's lock.
-/// The slot's own thread reads it before it next waits; a thread that lost
-/// the slot wakes its new owner to read it.
-fn add_timer(p: &Pool, ix: usize, at: u64, u: &Unit) {
-    let slot = &p.slots[ix];
-    {
-        let mut set = slot.timers.lock().unwrap();
-        u.timer_slot.store(ix, Ordering::Relaxed);
-        u.timer_at.store(at, Ordering::SeqCst);
-        set.insert((at, u.id));
-        slot.next_timer
-            .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
-    }
-    if WORKER_IX.get() != ix {
-        wake_slot(p, ix);
-    }
-}
-/// End the unit's park: drop its timer registration if it still has one.
-fn clear_timer(p: &Pool, u: &Unit) {
-    // A running unit's timer can only be cleared by another worker.
-    if u.timer_at.load(Ordering::Relaxed) == u64::MAX {
-        return;
-    }
-    let at = u.timer_at.swap(u64::MAX, Ordering::SeqCst);
-    if at == u64::MAX {
-        return;
-    }
-    let slot = &p.slots[u.timer_slot.load(Ordering::Relaxed)];
-    let mut set = slot.timers.lock().unwrap();
-    set.remove(&(at, u.id));
-    slot.next_timer
-        .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
-}
-/// Fire slot `ix`'s due timers; only its own thread does.
-fn fire_timers(p: &Pool, ix: usize) {
-    let slot = &p.slots[ix];
-    let next = slot.next_timer.load(Ordering::SeqCst);
-    if next == u64::MAX {
-        return;
-    }
-    let t = now();
-    if next > t {
-        return;
-    }
-    let mut due = Vec::new();
-    {
-        let mut set = slot.timers.lock().unwrap();
-        while let Some(&(at, id)) = set.first() {
-            if at > t {
-                break;
-            }
-            set.pop_first();
-            // The registration is live unless its park already ended.
-            if let Some(u) = unit_ref(id)
-                && u.timer_at
-                    .compare_exchange(at, u64::MAX, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-            {
-                due.push(u);
-            }
-        }
-        slot.next_timer
-            .store(set.first().map_or(u64::MAX, |e| e.0), Ordering::SeqCst);
-    }
-    for u in due {
-        bump(S_TIMER_FIRES);
-        wake(u);
     }
 }
 

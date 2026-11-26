@@ -39,6 +39,10 @@ HirselCoreTransfer hirsel_core_send(HirselCoreContext *, HirselCoreChannel *, vo
    The decision is fixed before scheduling, including if a peer drains it. */
 uint8_t hirsel_core_try_send(HirselCoreChannel *, void *input);
 HirselCoreTransfer hirsel_core_receive(HirselCoreContext *, HirselCoreChannel *, void *destination, uint64_t site);
+/* kind: 0 item, 1 Empty, 2 Closed. Status 1 is cancellation or clock failure. */
+typedef struct { uint8_t kind, status; } HirselCoreReceiveUntil;
+HirselCoreReceiveUntil hirsel_core_receive_until(HirselCoreContext *, HirselCoreChannel *,
+    void *destination, uint8_t present, uint64_t clock, uint64_t deadline, uint64_t site);
 /* Empty is a poll (scheduler choice, no cancellation); Closed is terminal. */
 uint8_t hirsel_core_try_receive(HirselCoreChannel *, void *destination);
 void hirsel_core_sender_drop(HirselCoreChannel *);

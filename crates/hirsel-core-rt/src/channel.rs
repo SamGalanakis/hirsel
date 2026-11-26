@@ -386,6 +386,154 @@ unsafe fn receive<const REC: bool>(
     }
 }
 
+#[repr(C)]
+pub struct ReceiveUntil {
+    pub kind: u8,
+    pub status: u8,
+}
+
+/// # Safety
+/// Sole receiver borrow, writable T destination and a live Clock when present.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_receive_until(
+    context: *mut Context,
+    channel: *mut Channel,
+    destination: *mut u8,
+    present: u8,
+    clock: u64,
+    at: u64,
+    site: u64,
+) -> ReceiveUntil {
+    // SAFETY: the capability and receiver pin their owners across the wait.
+    unsafe {
+        if present == 0 {
+            let result = hirsel_core_receive(context, channel, destination, site);
+            return ReceiveUntil {
+                kind: if result.transferred { 0 } else { 2 },
+                status: result.status,
+            };
+        }
+
+        let mut token = 0;
+        let kind = loop {
+            tasks::before_commit();
+            if tasks::check_cancel(context, site) != 0 {
+                return ReceiveUntil { kind: 0, status: 1 };
+            }
+            if take(channel, destination) {
+                break 0;
+            }
+            let id = (*channel).id;
+            if (*channel).senders == 0 {
+                tasks::event(
+                    tasks::RECEIVE,
+                    id,
+                    hirsel_core_layout::event::CHANNEL_CLOSED,
+                );
+                break 2;
+            }
+            let provider = *crate::entry::hirsel_core_capability_provider(context, clock);
+            let handle = crate::entry::hirsel_core_capability_handle(context, clock);
+            #[cfg(feature = "record")]
+            let recorded = crate::tape::owns(&provider);
+            #[cfg(not(feature = "record"))]
+            let recorded = false;
+            if recorded {
+                let observed = crate::host_ops::hirsel_core_host_clock(
+                    context,
+                    crate::provider::MONO_NS,
+                    clock,
+                    ptr::null_mut(),
+                    0,
+                    site,
+                );
+                if observed.status != 0 {
+                    return ReceiveUntil {
+                        kind: 0,
+                        status: observed.status,
+                    };
+                }
+                if observed.value >= at {
+                    tasks::event(tasks::RECEIVE, id, hirsel_core_layout::event::CHANNEL_EMPTY);
+                    break 1;
+                }
+            }
+            #[cfg(feature = "record")]
+            let source = if recorded {
+                crate::tape::source(&provider, handle)
+            } else {
+                Some((provider, handle))
+            };
+            #[cfg(not(feature = "record"))]
+            let source = Some((provider, handle));
+            let deadline = channel_deadline(source, at, recorded, &mut token);
+            if let Some(deadline) = deadline
+                && tasks::park_channel(&raw mut (*channel).receive_waiters, id, deadline, recorded)
+            {
+                continue;
+            }
+            tasks::event(tasks::RECEIVE, id, hirsel_core_layout::event::CHANNEL_EMPTY);
+            break 1;
+        };
+        ReceiveUntil { kind, status: 0 }
+    }
+}
+
+/// # Safety
+/// A non-null source pins its Clock provider and local handle.
+unsafe fn channel_deadline(
+    source: Option<(crate::provider::Provider, u64)>,
+    at: u64,
+    recorded: bool,
+    token: &mut u64,
+) -> Option<tasks::ChannelDeadline> {
+    use tasks::ChannelDeadline;
+    // SAFETY: the source and its handle are live until retirement.
+    unsafe {
+        let Some((provider, handle)) = source else {
+            #[cfg(feature = "record")]
+            return Some(ChannelDeadline::Recorded);
+            #[cfg(not(feature = "record"))]
+            unreachable!("an untaped clock always has a provider");
+        };
+        if let Some(clock) = crate::provide::ChannelClock::of(&provider) {
+            return Some(ChannelDeadline::Cell(clock, at));
+        }
+        if crate::os::owns(&provider) {
+            let at = crate::os::epoch(provider.state).saturating_add(at);
+            return (recorded || at > crate::os::monotonic_ns())
+                .then_some(ChannelDeadline::Host(at));
+        }
+
+        let mut bytes = at.to_ne_bytes();
+        let mut request = crate::provider::Request {
+            operation: crate::provider::SLEEP_UNTIL,
+            mode: 0,
+            handle,
+            path: ptr::null(),
+            path_len: 0,
+            buffer: crate::provider::Buffer {
+                data: bytes.as_mut_ptr(),
+                len: bytes.len(),
+                capacity: bytes.len(),
+            },
+            site: 0,
+        };
+        if *token == 0 {
+            *token = tasks::operation_token();
+        }
+        let wait = (provider.wait)(provider.state, &mut request, *token);
+        match wait.kind {
+            crate::provider::WAIT_READY if recorded => {
+                Some(ChannelDeadline::Host(crate::os::monotonic_ns()))
+            }
+            crate::provider::WAIT_READY => None,
+            crate::provider::WAIT_UNTIL => Some(ChannelDeadline::Host(wait.deadline_ns)),
+            _ => crate::process::stop(b"UnsupportedClock"),
+        }
+    }
+}
+
 /// # Safety
 /// Sole receiver borrow and writable T destination. Empty and Closed return
 /// immediately; Empty is the deterministic scheduler poll point.

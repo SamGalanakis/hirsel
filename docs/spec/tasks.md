@@ -109,7 +109,23 @@ Closed`, never waits and is not a cancellation point: it delivers the front item
 `receive` would, and with the queue empty returns `Closed` once the last sender is cleaned
 and `Empty` while a sender remains. Its decision is an event (CONC-10), so it finds an item
 exactly when one was published before it in the event order and not yet taken, and a
-replay decides as recorded. With one receiver, `receive` and `try_receive` take items from the one front in
+replay decides as recorded.
+
+`channel.receive_until(rx: Receiver[T], until: Until) -> Result[T, ReceiveError] waits`
+checks, in order, unshielded cancellation, the front item, closure, then the
+deadline. A queued item wins even when the deadline has passed. An open empty
+queue returns `Empty` if the deadline has passed. A closed empty queue returns
+`Closed`. Only success removes the front item. `Never` has the waiting and
+cancellation behavior of `receive`.
+
+If all checks miss, the task parks on the channel and, for `At(clock, t)`, the
+clock's monotonic deadline. Either wake runs the checks again. A held clock
+counts this as an inside wait, so `clock.idle` can observe the deadline and
+`clock.advance_to` can reach it. Cancellation, delivery, closure and expiry
+all retire both registrations before another poll. The task's existing
+256 B task record prepays one 40 B timer slot. No further admission occurs.
+
+With one receiver, the receive operations take items from the one front in
 the receiving task's program order, whichever it calls. The queue is first in,
 first out by publication order; positions are logical, so how an engine stores the queue
 is its choice ([SEM-8](semantics.md#sem-8-determinism)). The blocks of a sent value stay charged to the limit that admitted them
@@ -227,6 +243,13 @@ no mutable memory, each takes what reaches it from other units as its inputs (CO
 parallel work inside a unit runs in flows, whose results do not depend on the schedule
 ([CONC-14](#conc-14-flows)). Nothing observable depends on how the events of different units
 interleave.
+A timed receive records its channel decision at each poll. A program-made
+clock in the same unit determines its own readings and wakes. For a clock at
+the replay point, deadline observations and wakes are inputs as for other
+`Until` waits ([CAP-8](capabilities.md#cap-8-the-replay-point)). A recorded
+deadline wake readies the receiver to poll. The channel can still deliver a
+queued item at that poll.
+
 A wake of a waiting provider operation (its deadline reached, its provider readying it, or a
 cancellation request) takes effect at one point of the order, before its task runs again,
 and the operation's next step is decided there. A cancellation request ordered before a

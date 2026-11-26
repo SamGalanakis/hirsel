@@ -115,6 +115,7 @@ impl Function<'_, '_, '_> {
             | RtOp::Send { .. }
             | RtOp::Receive { .. }
             | RtOp::ReceiveRec { .. }
+            | RtOp::ReceiveUntil { .. }
             | RtOp::Spawn { .. }
             | RtOp::SpawnUnit { .. }
             | RtOp::ConnNew { .. }
@@ -856,6 +857,25 @@ impl Function<'_, '_, '_> {
                     &[P, P, P, U],
                     &[B, K],
                     &[self.context, args[0], args[1], site],
+                )?;
+                self.call_failure(values[1], call.fail)?;
+                outputs[0] = values[0];
+                1
+            }
+            RtOp::ReceiveUntil { .. } => {
+                let values = self.c_call(
+                    "hirsel_core_receive_until",
+                    &[P, P, P, K, U, U, U],
+                    &[K, K],
+                    &[
+                        self.context,
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                        args[4],
+                        site,
+                    ],
                 )?;
                 self.call_failure(values[1], call.fail)?;
                 outputs[0] = values[0];

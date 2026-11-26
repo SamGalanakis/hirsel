@@ -410,6 +410,7 @@ tags!(RtOp {
     81 => Argon2id,
     82 => Sha1Compress,
     83 => Closed(part0),
+    84 => ReceiveUntil { item },
 });
 
 tags!(Wait {

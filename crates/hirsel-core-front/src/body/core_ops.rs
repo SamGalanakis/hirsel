@@ -23,6 +23,7 @@ mod stdin_secret;
 mod target_unsupported;
 mod tls_result;
 mod udp_runtime;
+mod until;
 use binding::OPERATIONS;
 pub(crate) use binding::binding;
 pub(super) use binding::simd_call;
@@ -80,6 +81,7 @@ pub(crate) enum Kernel {
     Send,
     TrySend,
     Receive,
+    ReceiveUntil,
     TryReceive,
     CodeIdentity,
     CodeRevision,
@@ -563,7 +565,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.runtime_send(kernel, types[0], vals[0]?, vals[1], result, n)
             }
             Kernel::Receive => self.runtime_receive(types[0], vals[0]?, result, n),
-            Kernel::TryReceive => self.runtime_try_receive(types[0], vals[0]?, result, n),
+            Kernel::ReceiveUntil | Kernel::TryReceive => {
+                let until = if kernel == Kernel::ReceiveUntil {
+                    Some(self.net_until(self.p.fns[f].params[1].ty, vals[1]?, n)?)
+                } else {
+                    None
+                };
+                self.runtime_receive_error(types[0], vals[0]?, until, result, n)
+            }
             Kernel::Join => self.runtime_join(types[0], vals[0]?, result, n),
             Kernel::RootLimit => self.runtime_row(RtOp::RootLimit, &[], n).map(|v| v[0]),
             Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
@@ -1040,21 +1049,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )
     }
 
-    fn runtime_try_receive(
+    fn runtime_receive_error(
         &mut self,
         item: TyId,
         receiver: ValueId,
+        until: Option<[ValueId; 3]>,
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
         let receiver = self.runtime_handle(receiver, n);
         let id = self.runtime_type(item, n)?;
         let output = self.new_slot(PlaceTy::Declared(id), n);
-        let [status, ..] = self.runtime_row(
-            RtOp::TryReceive { item: id },
-            &[Arg::Value(receiver), Arg::Address(output)],
-            n,
-        )?;
+        let mut args = vec![Arg::Value(receiver), Arg::Address(output)];
+        let op = if let Some(until) = until {
+            args.extend(until.map(Arg::Value));
+            RtOp::ReceiveUntil { item: id }
+        } else {
+            RtOp::TryReceive { item: id }
+        };
+        let [status, ..] = self.runtime_row(op, &args, n)?;
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), status, 0, n)?;
         self.runtime_result(
             result,
@@ -2386,37 +2399,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(join);
         let values = self.block_params(join);
         Some([family, values[0], values[1]])
-    }
-    fn net_until(&mut self, ty: TyId, value: ValueId, n: NodeId) -> Option<[ValueId; 3]> {
-        let (_, at) = self.runtime_place(ty, Some(value), n)?;
-        let tag = self.net_case(at, n);
-        let never = self.runtime_compare(Ty::Scalar(Scalar::U32), tag, 0, n)?;
-        let u = Ty::Scalar(Scalar::U64);
-        let k = Ty::Scalar(Scalar::U8);
-        let yes = self.new_block(&[]);
-        let no = self.new_block(&[]);
-        let join = self.new_block(&[k, u, u]);
-        self.runtime_branch(never, yes, no, n);
-        self.start(yes);
-        let zero = self.konst(u, 0, n)?;
-        let off = self.konst(k, 0, n)?;
-        self.jump(join, &[off, zero, zero], n);
-        self.start(no);
-        let mut fields = Vec::new();
-        for field in 0..2 {
-            let field = self.address(
-                AddressBase::Address(at),
-                &[Step::CaseField { case: 1, field }],
-                PlaceTy::Value(u),
-                n,
-            );
-            fields.push(self.read_bits(field, u, n));
-        }
-        let on = self.konst(k, 1, n)?;
-        self.jump(join, &[on, fields[0], fields[1]], n);
-        self.start(join);
-        let values = self.block_params(join);
-        Some([values[0], values[1], values[2]])
     }
     fn net_store_address(&mut self, to: AddressId, ty: TyId, values: &[ValueId], n: NodeId) {
         let Some((_, ip)) = self.net_field(ty, to, 0, n) else {

@@ -24,6 +24,8 @@ use std::{
 mod frame;
 mod quiet;
 mod storage;
+mod timers;
+use timers::{Timer, TimerHeap};
 mod transfer;
 use frame::FrameRecord;
 pub(crate) use frame::held_wait;
@@ -111,11 +113,37 @@ pub(super) enum State {
     Ready,
     Running,
     Waiting,
+    ChannelDeadline,
+    CellChannelDeadline,
     /// Parked in a provider operation's W or I. Only that operation's own wakes
     /// (its timer, its token, a cancellation request) move it; `wake` does not.
     Provider,
     Ended,
 }
+impl State {
+    fn channel_deadline(self) -> bool {
+        matches!(self, Self::ChannelDeadline | Self::CellChannelDeadline)
+    }
+
+    fn cell_channel_deadline(self) -> bool {
+        self == Self::CellChannelDeadline
+    }
+
+    fn local_wait(self) -> bool {
+        self == Self::Waiting || self.channel_deadline()
+    }
+}
+
+pub(crate) mod channel_clock;
+
+#[cfg(feature = "record")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChannelTape {
+    None,
+    Parked,
+    Expired,
+}
+
 /// The first byte sends Arc count operations through the runtime commit path
 /// on taped replay. Another task counts inline. Its emitted code skips the init/share/release hooks
 /// while the second byte is clear and its payer's domain has no posted credit.
@@ -139,7 +167,7 @@ pub struct Task {
     waiting_on: *mut Waiters,
     wait_previous: *mut Task,
     wait_next: *mut Task,
-    timer: Timer,
+    timer: std::cell::UnsafeCell<Timer>,
     operation: *mut Operation,
     /// The scheduler's creation list, newest first, linked both ways so a
     /// retire unlinks in O(1) however many tasks are live.
@@ -150,6 +178,8 @@ pub struct Task {
     warm_next: *mut Task,
     warm_previous: *mut Task,
     warm: bool,
+    #[cfg(feature = "record")]
+    channel_tape: ChannelTape,
     state: State,
     id: u64,
     #[cfg(feature = "record")]
@@ -254,6 +284,9 @@ impl<T> WaitArms<T> {
             .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
         captured.extend(tokens.into_iter().filter_map(|token| {
+            if token & channel_clock::TOKEN_TAG != 0 {
+                return Some(ReadyArm { token, identity: 0 });
+            }
             let arm = self.live.get_mut(&ReadyToken(token))?;
             if arm.last_turn == self.turn {
                 return None;
@@ -293,6 +326,11 @@ pub(crate) struct Waiters {
 }
 
 impl Waiters {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.first.is_null() && self.last.is_null()
+    }
+
     unsafe fn push(queue: *mut Self, task: *mut Task) {
         // SAFETY: the active task and the queue are exclusively accessible.
         unsafe {
@@ -442,178 +480,6 @@ fn release_idle(run: *mut Scheduler) {
     crate::task_heap::purge();
     // SAFETY: the run pins its stock and only this OS thread uses it.
     unsafe { (*run).stacks.release() };
-}
-
-#[derive(Default)]
-struct Timer {
-    parent: *mut Task,
-    children: [*mut Task; 2],
-    /// Host CLOCK_MONOTONIC nanoseconds.
-    deadline: u64,
-    /// Zero for a detached timer.
-    arm: u64,
-}
-
-/// Complete binary min-heap over the tasks' prepaid links. The arm sequence
-/// preserves FIFO expiry at equal deadlines, including after a re-arm.
-#[derive(Default)]
-struct TimerHeap {
-    root: *mut Task,
-    len: usize,
-    arm_sequence: u64,
-}
-
-impl TimerHeap {
-    fn deadline(&self) -> Option<u64> {
-        // SAFETY: only pinned operations belong to this heap.
-        NonNull::new(self.root).map(|task| unsafe { (*task.as_ptr()).timer.deadline })
-    }
-
-    unsafe fn precedes(a: *mut Task, b: *mut Task) -> bool {
-        // SAFETY: both pointers name live tasks owned by the scheduler turn.
-        unsafe { ((*a).timer.deadline, (*a).timer.arm) < ((*b).timer.deadline, (*b).timer.arm) }
-    }
-
-    /// Follow a one-based heap index's bits below the leading 1.
-    unsafe fn at(&self, index: usize) -> *mut Task {
-        debug_assert!((1..=self.len).contains(&index));
-        // SAFETY: the complete tree has a node at every index through len.
-        unsafe {
-            let mut bit = (1 << index.ilog2()) >> 1;
-            let mut task = self.root;
-            while bit != 0 {
-                task = (*task).timer.children[usize::from(index & bit != 0)];
-                bit >>= 1;
-            }
-            task
-        }
-    }
-
-    unsafe fn replace(&mut self, old: *mut Task, new: *mut Task) {
-        // SAFETY: old is linked in the heap. A non-null new task is being
-        // moved to its position by the exclusive scheduler turn.
-        unsafe {
-            let parent = (*old).timer.parent;
-            if parent.is_null() {
-                self.root = new;
-            } else {
-                let side = usize::from((*parent).timer.children[1] == old);
-                (*parent).timer.children[side] = new;
-            }
-            if !new.is_null() {
-                (*new).timer.parent = parent;
-            }
-        }
-    }
-
-    unsafe fn set_children(task: *mut Task, children: [*mut Task; 2]) {
-        // SAFETY: all non-null pointers are live tasks in this turn's heap.
-        unsafe {
-            (*task).timer.children = children;
-            for child in children {
-                if !child.is_null() {
-                    (*child).timer.parent = task;
-                }
-            }
-        }
-    }
-
-    /// Exchange two adjacent positions without changing the tree's shape.
-    unsafe fn exchange_with_parent(&mut self, task: *mut Task, parent: *mut Task) {
-        // SAFETY: both tasks are live, and parent is task's current parent.
-        unsafe {
-            let mut children = (*parent).timer.children;
-            let side = usize::from(children[1] == task);
-            children[side] = parent;
-            self.replace(parent, task);
-            Self::set_children(parent, (*task).timer.children);
-            Self::set_children(task, children);
-        }
-    }
-
-    unsafe fn sift_up(&mut self, task: *mut Task) {
-        // SAFETY: task is a live heap node and only its order may be wrong.
-        unsafe {
-            let mut parent = (*task).timer.parent;
-            while !parent.is_null() && Self::precedes(task, parent) {
-                self.exchange_with_parent(task, parent);
-                parent = (*task).timer.parent;
-            }
-        }
-    }
-
-    unsafe fn sift_down(&mut self, task: *mut Task) {
-        // SAFETY: task and its descendants are live nodes in this turn's heap.
-        unsafe {
-            loop {
-                let [left, right] = (*task).timer.children;
-                if left.is_null() {
-                    return;
-                }
-                let child = if !right.is_null() && Self::precedes(right, left) {
-                    right
-                } else {
-                    left
-                };
-                if !Self::precedes(child, task) {
-                    return;
-                }
-                self.exchange_with_parent(child, task);
-            }
-        }
-    }
-
-    unsafe fn insert(&mut self, task: *mut Task, deadline: u64) {
-        // SAFETY: this turn owns the parked task, which is not armed.
-        unsafe {
-            debug_assert_eq!((*task).timer.arm, 0);
-            self.arm_sequence = self
-                .arm_sequence
-                .checked_add(1)
-                .unwrap_or_else(|| crate::process::stop(b"TimerArms"));
-            let index = self.len + 1;
-            let parent = if self.len == 0 {
-                self.root = task;
-                ptr::null_mut()
-            } else {
-                let parent = self.at(index / 2);
-                (*parent).timer.children[index % 2] = task;
-                parent
-            };
-            self.len = index;
-            (*task).timer = Timer {
-                parent,
-                children: [ptr::null_mut(); 2],
-                deadline,
-                arm: self.arm_sequence,
-            };
-            self.sift_up(task);
-        }
-    }
-
-    unsafe fn remove(&mut self, task: *mut Task) {
-        // SAFETY: only this turn mutates the live task's timer. Its links
-        // locate it directly when armed.
-        unsafe {
-            if (*task).timer.arm == 0 {
-                return;
-            }
-            let last = self.at(self.len);
-            self.replace(last, ptr::null_mut());
-            self.len -= 1;
-            if last != task {
-                self.replace(task, last);
-                Self::set_children(last, (*task).timer.children);
-                let parent = (*last).timer.parent;
-                if !parent.is_null() && Self::precedes(last, parent) {
-                    self.sift_up(last);
-                } else {
-                    self.sift_down(last);
-                }
-            }
-            (*task).timer = Timer::default();
-        }
-    }
 }
 
 struct Scheduler {
@@ -954,7 +820,7 @@ impl Scheduler {
     unsafe fn wake_cancelled(&mut self, task: *mut Task) {
         // SAFETY: the target's wait and context are pinned until dequeue.
         unsafe {
-            if (*task).state == State::Waiting
+            if (*task).state.local_wait()
                 && cancel_takes_effect(&*(*task).context, cancel_flag(task))
             {
                 #[cfg(feature = "prof")]
@@ -1028,9 +894,38 @@ impl Scheduler {
     }
 
     unsafe fn apply_ready(&mut self, ready: ReadyArm) {
-        if let Some(task) = self.parked.take_captured(ready) {
+        if ready.token & channel_clock::TOKEN_TAG != 0 {
+            // SAFETY: this turn owns the task list. A token only wakes its
+            // original arm, which is live exactly in a cell deadline wait.
+            unsafe {
+                let mut task = self.all;
+                while !task.is_null() {
+                    if (*task).state.cell_channel_deadline()
+                        && channel_clock::token(task) == ready.token
+                    {
+                        self.wake_channel_deadline(task);
+                        break;
+                    }
+                    task = (*task).all;
+                }
+            }
+        } else if let Some(task) = self.parked.take_captured(ready) {
             // SAFETY: the captured identity still names this parked frame.
             unsafe { self.wake_operation(task, Wake::Ready) };
+        }
+    }
+
+    unsafe fn wake_channel_deadline(&mut self, task: *mut Task) {
+        // SAFETY: the scheduler owns the pinned task and channel queue.
+        unsafe {
+            #[cfg(feature = "record")]
+            if (*task).channel_tape == ChannelTape::Parked {
+                (*task).channel_tape = ChannelTape::Expired;
+            }
+            #[cfg(feature = "prof")]
+            prof_wake(task, WakeSource::Timer, ptr::null_mut(), 0);
+            Waiters::remove(task);
+            self.ready(task);
         }
     }
 
@@ -1050,13 +945,17 @@ impl Scheduler {
                 let task = self.timers.root;
                 self.timers.remove(task);
                 *tail = task;
-                tail = &raw mut (*task).timer.parent;
+                tail = &raw mut (*(*task).timer.get()).parent;
             }
             while !expired.is_null() {
                 let task = expired;
-                expired = (*task).timer.parent;
-                (*task).timer.parent = ptr::null_mut();
-                self.wake_operation(task, Wake::Timer);
+                expired = (*(*task).timer.get()).parent;
+                (*(*task).timer.get()).parent = ptr::null_mut();
+                if (*task).state.channel_deadline() {
+                    self.wake_channel_deadline(task);
+                } else if (*task).state == State::Provider {
+                    self.wake_operation(task, Wake::Timer);
+                }
             }
         }
     }
@@ -1228,14 +1127,14 @@ impl Scheduler {
         // A waiting stack's saved SP begins the switch frame, below the
         // caller's live frames and any caller red zone.
         unsafe {
-            while let Some(waiter) = task.as_mut() {
-                if matches!(waiter.state, State::Waiting | State::Provider)
-                    && let Some(stack) = &waiter.stack
+            while !task.is_null() {
+                if ((*task).state.local_wait() || (*task).state == State::Provider)
+                    && let Some(stack) = &(*task).stack
                 {
-                    stack.discard_below(waiter.sp.addr());
+                    stack.discard_below((*task).sp.addr());
                 }
-                waiter.warm = false;
-                task = waiter.warm_next;
+                (*task).warm = false;
+                task = (*task).warm_next;
             }
         }
     }
@@ -1515,7 +1414,7 @@ impl Scheduler {
             }
             if let OperationState::Issued { deadline } = (*op).state
                 && deadline != 0
-                && (*task).timer.arm == 0
+                && (*(*task).timer.get()).arm == 0
             {
                 self.timers.insert(task, deadline);
             }
@@ -1712,6 +1611,14 @@ impl Drop for Registered {
     }
 }
 static TOKENS: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn operation_token() -> u64 {
+    let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+    if token >= channel_clock::TOKEN_TAG {
+        crate::process::stop(b"HostHandles");
+    }
+    token
+}
 thread_local! {
     /// This thread's scheduler-less waiter, in WAITERS only while an
     /// operation alone waits (`alone`; depth counts nested callers).
@@ -1946,7 +1853,7 @@ unsafe fn provider_operation_in<const RETURNABLE: bool>(
     request: *mut crate::provider::Request,
     issued: Option<&mut Option<crate::provider::Outcome>>,
 ) -> Option<crate::provider::Outcome> {
-    let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+    let token = operation_token();
     if token == u64::MAX {
         crate::process::stop(b"HostHandles");
     }
@@ -3270,6 +3177,78 @@ pub(crate) unsafe fn park(queue: *mut Waiters, #[cfg(feature = "prof")] wait: (R
     }
 }
 
+/// The deadline source is already resolved in the clock's own domain.
+#[derive(Clone, Copy)]
+pub(crate) enum ChannelDeadline {
+    Host(u64),
+    Cell(crate::provide::ChannelClock, u64),
+    /// While replaying, the tape supplies an external deadline's wake.
+    #[cfg(feature = "record")]
+    Recorded,
+}
+
+/// Wait on a channel and an optional deadline. Returns false if the clock
+/// reached a local cell deadline before registration.
+/// # Safety
+/// The running task pins the channel, clock and its wait links throughout.
+pub(crate) unsafe fn park_channel(
+    queue: *mut Waiters,
+    id: u64,
+    deadline: ChannelDeadline,
+    recorded: bool,
+) -> bool {
+    // SAFETY: the active task owns its wait state and the channel belongs to
+    // this unit. The cell's lock owns its timer links while registered.
+    unsafe {
+        let task = CURRENT.get();
+        let run = (*task).run;
+        if let ChannelDeadline::Cell(clock, at) = deadline {
+            let arm = channel_clock::Arms::initialize(task, at);
+            if !clock.arm(arm, at, recorded) {
+                channel_clock::reset(task);
+                return false;
+            }
+        }
+        if let ChannelDeadline::Host(at) = deadline {
+            (*run).timers.insert(task, at);
+        }
+        record_event(task, RECEIVE, id, hirsel_core_layout::event::CHANNEL_PARKED);
+        #[cfg(feature = "record")]
+        if recorded {
+            (*task).channel_tape = ChannelTape::Parked;
+        }
+        #[cfg(feature = "prof")]
+        prof_state(task, State::Waiting, Reason::ChannelRecv, id);
+        (*task).state = match deadline {
+            ChannelDeadline::Cell(..) => State::CellChannelDeadline,
+            _ => State::ChannelDeadline,
+        };
+        Waiters::push(queue, task);
+        switch_to_idle(task);
+        #[cfg(feature = "record")]
+        {
+            (*task).channel_tape = ChannelTape::None;
+        }
+        match deadline {
+            ChannelDeadline::Host(_) => (*run).timers.remove(task),
+            ChannelDeadline::Cell(clock, _) => {
+                clock.retire((*task).timer.get().cast());
+                channel_clock::reset(task);
+            }
+            #[cfg(feature = "record")]
+            ChannelDeadline::Recorded => {}
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn channel_deadline_registered() -> bool {
+    let task = CURRENT.get();
+    // SAFETY: the running task owns its detached timer slot.
+    unsafe { (*(*task).timer.get()).arm != 0 }
+}
+
 /// The returnable form of `park_for`: register in `queue` the same way, then
 /// leave the switch to `start` after the represented frames have returned.
 /// The resumed wait reenters its row and continues where this park left off.
@@ -3700,13 +3679,15 @@ pub(crate) unsafe fn run_root_with_unit(
         waiting_on: ptr::null_mut(),
         wait_previous: ptr::null_mut(),
         wait_next: ptr::null_mut(),
-        timer: Timer::default(),
+        timer: Default::default(),
         operation: ptr::null_mut(),
         all: ptr::null_mut(),
         all_previous: ptr::null_mut(),
         warm_next: ptr::null_mut(),
         warm_previous: ptr::null_mut(),
         warm: false,
+        #[cfg(feature = "record")]
+        channel_tape: ChannelTape::None,
         state: State::Ready,
         id: 0,
         #[cfg(feature = "record")]
@@ -3854,6 +3835,12 @@ impl RunPtr {
                 if (*task).stack.is_none() {
                     mount(task, (*self.0).stacks.take());
                 }
+                #[cfg(feature = "record")]
+                if (*task).channel_tape == ChannelTape::Expired
+                    && let Some(group) = (*task).group
+                {
+                    group.wake_deadline();
+                }
                 CURRENT.set(task);
                 (*task).state = State::Running;
                 (*run).mark_warm(task);
@@ -3942,13 +3929,15 @@ unsafe fn spawn_in(
             waiting_on: ptr::null_mut(),
             wait_previous: ptr::null_mut(),
             wait_next: ptr::null_mut(),
-            timer: Timer::default(),
+            timer: Default::default(),
             operation: ptr::null_mut(),
             all: (*run).all,
             all_previous: ptr::null_mut(),
             warm_next: ptr::null_mut(),
             warm_previous: ptr::null_mut(),
             warm: false,
+            #[cfg(feature = "record")]
+            channel_tape: ChannelTape::None,
             state: State::Ready,
             id,
             #[cfg(feature = "record")]

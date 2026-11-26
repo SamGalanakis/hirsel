@@ -1,7 +1,10 @@
 //! S2 cases live in S1's bypass-law body, so the existing acceptance selector
 //! runs the scheduling and no-host laws together.
 use super::{tests::*, *};
+
+pub(crate) mod channel_deadline;
 use crate::{Context, causes, channel::*, schedule_script::ScheduleScript, tasks::*};
+use channel_deadline::{layout, value};
 use std::{collections::BTreeSet, ptr::NonNull, sync::Arc};
 
 struct Script {
@@ -94,20 +97,6 @@ impl Script {
             abort,
             deliver: crate::provider::deliver,
         }
-    }
-}
-fn value<T>(logical: u64) -> ValueLayout {
-    ValueLayout {
-        bytes: size_of::<T>(),
-        align: align_of::<T>(),
-        logical,
-        clean: None,
-    }
-}
-fn layout<T>() -> TaskLayout {
-    TaskLayout {
-        input: value::<T>(0),
-        result: value::<()>(0),
     }
 }
 

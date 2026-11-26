@@ -438,6 +438,7 @@ impl FunctionEmitter<'_> {
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
                 | RtOp::ReceiveRec { .. }
+                | RtOp::ReceiveUntil { .. }
                 | RtOp::Spawn { .. }
                 | RtOp::SpawnUnit { .. }
                 | RtOp::ConnNew { .. }
@@ -859,6 +860,19 @@ impl FunctionEmitter<'_> {
                 },
                 &[B, K],
                 &[ptr(CONTEXT), p(&args[0]), p(&args[1]), u(&at)],
+            ),
+            RtOp::ReceiveUntil { .. } => self.native_call(
+                "hirsel_core_receive_until",
+                &[K, K],
+                &[
+                    ptr(CONTEXT),
+                    p(&args[0]),
+                    p(&args[1]),
+                    zeroext(Type::I8, args[2].clone()),
+                    u(&args[3]),
+                    u(&args[4]),
+                    u(&at),
+                ],
             ),
             RtOp::ReceiveRec { .. } => self.native_call(
                 "hirsel_core_receive_rec",

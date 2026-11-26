@@ -1746,7 +1746,6 @@ impl BodyParser {
         };
         Ok(inst)
     }
-
     fn call(&mut self, l: &mut Line, results: Vec<ValueId>) -> R<Inst> {
         l.expect("call")?;
         let t = l.next()?;
@@ -1777,6 +1776,7 @@ impl BodyParser {
                 "try_send" => RtOp::TrySend { item: tys(1)?[0] },
                 "receive" => RtOp::Receive { item: tys(1)?[0] },
                 "receive_rec" => RtOp::ReceiveRec { item: tys(1)?[0] },
+                "receive_until" => RtOp::ReceiveUntil { item: tys(1)?[0] },
                 "try_receive" => RtOp::TryReceive { item: tys(1)?[0] },
                 "latest_new" => RtOp::LatestNew { item: tys(1)?[0] },
                 "latest_handle" => RtOp::LatestHandle,

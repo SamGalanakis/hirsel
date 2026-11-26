@@ -239,6 +239,27 @@ impl Scheduler {
                                 Wake::Ready,
                             );
                         }
+                        Turn::Wake(_)
+                            if (*target).channel_tape == ChannelTape::Parked
+                                && ((*target).state.channel_deadline()
+                                    || (*target).state == State::Ready) =>
+                        {
+                            // This wake was recorded at dispatch. A local send
+                            // may already have put the same wait on the queue.
+                            group.consume_input();
+                            if (*target).state.channel_deadline() {
+                                Waiters::remove(target);
+                                (*target).state = State::Ready;
+                            } else {
+                                self.unlink_ready(target);
+                            }
+                            (*target).channel_tape = ChannelTape::Expired;
+                            (*target).ready = self.head;
+                            if self.tail.is_null() {
+                                self.tail = target;
+                            }
+                            self.head = target;
+                        }
                         // A host-clock deadline on a virtual provider fires in
                         // `take_timers`, after this turn's readies run.
                         Turn::Wake(_)

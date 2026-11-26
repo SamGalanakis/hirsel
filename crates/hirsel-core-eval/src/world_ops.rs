@@ -2,6 +2,46 @@
 //! tasks, channels, latests, connections, host and launch state.
 use super::*;
 
+impl Sched {
+    /// One turn's wakes before its pop (native `take_wakes`): cancellations of
+    /// provider-parked tasks, then expired timers in deadline order.
+    pub(super) fn take_wakes(&mut self, now: u64) {
+        for k in std::mem::take(&mut self.cancels) {
+            let r = &mut self.tasks[k];
+            if r.state == State::Provider && r.cancel && r.cancellable {
+                r.cancelled = true;
+                r.state = State::Ready;
+                self.timers.retain(|&(_, j)| j != k);
+                self.ready.push_back(k);
+            }
+        }
+        let expired = self.timers.partition_point(|&(d, _)| d <= now);
+        let due: Vec<_> = self.timers.drain(..expired).collect();
+        for (_, k) in due {
+            if matches!(self.tasks[k].state, State::Waiting(_)) {
+                self.wake_waiting(k);
+            } else {
+                self.tasks[k].state = State::Ready;
+                self.ready.push_back(k);
+            }
+        }
+    }
+
+    pub(super) fn wake_waiting(&mut self, k: usize) {
+        let State::Waiting(condition) = self.tasks[k].state else {
+            unreachable!("task is parked");
+        };
+        let waiters = self.waiting.get_mut(&condition).unwrap();
+        waiters.retain(|&j| j != k);
+        if waiters.is_empty() {
+            self.waiting.remove(&condition);
+        }
+        self.timers.retain(|&(_, j)| j != k);
+        self.tasks[k].state = State::Ready;
+        self.ready.push_back(k);
+    }
+}
+
 impl Machine<'_> {
     pub(super) fn rt_world(&mut self, t: &mut Task, op: RtOp, a: &[u64]) -> X<Vec<u64>> {
         let cur = t.limits.last().unwrap();
@@ -289,6 +329,42 @@ impl Machine<'_> {
                         break vec![0];
                     }
                     self.park_task(t, Condition::Receive(i));
+                }
+            }
+            RtOp::ReceiveUntil { .. } => {
+                use hirsel_core_layout::event::{CHANNEL_CLOSED, CHANNEL_EMPTY, CHANNEL_PARKED};
+                let i = ((a[0] - CHAN_BASE) / 2) as usize;
+                let until = self.until(a, 2);
+                loop {
+                    self.check_cancel(t)?;
+                    if self.take(i, a[1]) {
+                        break vec![0];
+                    }
+                    if self.host.chans[i].senders == 0 {
+                        self.event(RECEIVE, self.chan_id(i), CHANNEL_CLOSED);
+                        break vec![2];
+                    }
+                    if until.is_some_and(|due| self.passed(due)) {
+                        self.event(RECEIVE, self.chan_id(i), CHANNEL_EMPTY);
+                        break vec![1];
+                    }
+                    if until.is_some() {
+                        self.event(RECEIVE, self.chan_id(i), CHANNEL_PARKED);
+                    }
+                    let host = match until {
+                        Some(Due::Host(at)) => Some(at),
+                        Some(Due::Cell(c, at)) => {
+                            self.cell_timer(c, at, t.k);
+                            None
+                        }
+                        None => None,
+                    };
+                    self.host.sched.tasks[t.k].cancellable =
+                        t.shield == 0 && t.obligations.len() == 1;
+                    self.park(Some(Wait::Task(Condition::Receive(i), host)));
+                    if let Some(Due::Cell(c, _)) = until {
+                        self.remove_cell_timer(c, t.k);
+                    }
                 }
             }
             RtOp::LatestNew { item } => match self.admit(cur, charge::LATEST_ROOT) {

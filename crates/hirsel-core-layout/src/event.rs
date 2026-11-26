@@ -29,6 +29,8 @@ pub const STEP_SLICE: u8 = 21;
 
 /// Value for a blocking PUBLISH or RECEIVE that ends with Closed. A transfer records 0.
 pub const CHANNEL_CLOSED: u64 = 2;
+pub const CHANNEL_EMPTY: u64 = 1;
+pub const CHANNEL_PARKED: u64 = 3;
 
 /// Every kind by its header name.
 pub const ALL: [(&str, u8); 21] = [
@@ -74,6 +76,7 @@ const _: () = {
 pub const fn is_poll(kind: u8, value: u64) -> bool {
     match kind {
         TRY_SEND | TRY_RECEIVE => value == 1,
+        RECEIVE => value == CHANNEL_EMPTY,
         ARC_UNWRAP | CHECK_CANCEL => value == 0,
         CAPACITY => true,
         _ => false,

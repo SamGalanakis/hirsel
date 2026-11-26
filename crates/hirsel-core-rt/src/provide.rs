@@ -28,6 +28,10 @@ use crate::unix_net::{
     UnixRequest,
 };
 use crate::{Context, causes, provider::*};
+pub(crate) use clock::ChannelClock;
+use clock::ClockCell;
+#[cfg(test)]
+pub(crate) use clock::hirsel_core_clock_advance_to;
 use hirsel_core_ids::dir_port::DirOp;
 use hirsel_core_layout::charge::PROVIDE_CELL;
 use hirsel_core_net::{
@@ -46,20 +50,6 @@ enum Cell {
     Random(Mutex<RandomStream>),
     Process(Mutex<ProcessCell>),
     Port(Mutex<Port>),
-}
-
-#[derive(Default)]
-struct ClockCell {
-    mono: u64,
-    boot: u64,
-    wall: u64,
-    /// Waits on this clock's deadlines in registration order: a token stays
-    /// until its deadline is reached; a stale one is pruned at quiescence.
-    timers: Vec<(u64, u64)>,
-    /// Waits on this clock's wall time, as `timers`; `set_wall` readies them.
-    wall_timers: Vec<(u64, u64)>,
-    /// `clock.idle` waits: the token and whether quiescence has woken it.
-    idle: Vec<(u64, bool)>,
 }
 
 #[derive(Default)]
@@ -664,8 +654,9 @@ unsafe extern "C" fn wait(state: *mut u8, request: *mut Request, token: u64) -> 
             if at <= clock.mono {
                 return Wait::default();
             }
-            if !clock.timers.iter().any(|&(_, t)| t == token) {
-                clock.timers.push((at, token));
+            if !clock.timers.iter().any(|&(_, _, t)| t == token) {
+                let registration = clock.next_registration();
+                clock.timers.push((at, registration, token));
             }
             park()
         }
@@ -892,7 +883,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request, token: u64) ->
         (Cell::Clock(clock), WALL_MS) => outcome.value = lock(clock).wall,
         (Cell::Clock(clock), CLOCK_IDLE) => {
             // The earliest deadline a task still waits on, if any.
-            if let Some(at) = lock(clock).timers.iter().map(|&(at, _)| at).min() {
+            if let Some(at) = lock(clock).next_deadline() {
                 outcome.value = at;
                 outcome.written = 1;
             }

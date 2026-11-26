@@ -410,7 +410,11 @@ fn escaping(b: &Body, signatures: &[Signature], from: &[Vec<u32>], loans: Loans)
                 let received = loans == Loans::Scoped
                     && matches!(
                         site.callee,
-                        Callee::Runtime(RtOp::Receive { .. } | RtOp::TryReceive { .. })
+                        Callee::Runtime(
+                            RtOp::Receive { .. }
+                                | RtOp::ReceiveUntil { .. }
+                                | RtOp::TryReceive { .. }
+                        )
                     );
                 let lent =
                     received || loans != Loans::Escape && matches!(site.callee, Callee::Direct(_));

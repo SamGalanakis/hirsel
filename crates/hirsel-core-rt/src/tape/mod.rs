@@ -46,7 +46,7 @@ pub(crate) use dispatch::{exec_rules, narrow_exec, narrow_net, net_rules, owns, 
 pub use error::{Divergence, Fault, Mismatch, OpenError, Refusal};
 pub use hirsel_tape_format as format;
 #[cfg(test)]
-mod schedule_cases;
+pub(crate) mod schedule_cases;
 #[cfg(test)]
 mod tests;
 

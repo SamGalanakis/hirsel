@@ -53,7 +53,7 @@ pub(super) fn wake_quiescent(scope: Scope) -> bool {
         // SAFETY: a parked idle wait pins its run and so its cell.
         if let Cell::Clock(clock) = unsafe { cell(state as *mut u8) } {
             let mut clock = lock(clock);
-            advances |= !clock.timers.is_empty();
+            advances |= clock.next_deadline().is_some();
             if let Some(entry) = clock.idle.iter_mut().find(|(t, _)| *t == token) {
                 entry.1 = true;
             }
@@ -90,7 +90,7 @@ pub(super) fn forget_wait(cell: &Cell, token: u64) {
     match cell {
         Cell::Clock(clock) => {
             let mut clock = lock(clock);
-            clock.timers.retain(|&(_, t)| t != token);
+            clock.timers.retain(|&(_, _, t)| t != token);
             clock.wall_timers.retain(|&(_, t)| t != token);
             clock.idle.retain(|&(t, _)| t != token);
             drop(clock);

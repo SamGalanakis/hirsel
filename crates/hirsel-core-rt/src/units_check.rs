@@ -482,7 +482,7 @@ fn pool_state() -> String {
             rel(p.slots[ix].last_poll.raw()),
             p.slots[ix]
                 .timers
-                .peek(|h| h.iter().map(|r| (rel(r.0), r.1)).collect::<Vec<_>>())
+                .peek(|head| super::timers::snapshot(*head, rel))
         );
     }
     let _ = writeln!(

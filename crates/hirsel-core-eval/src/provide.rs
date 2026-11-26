@@ -305,7 +305,14 @@ impl Machine<'_> {
                 timers.retain(|&(at, _)| at > now);
                 due.sort_by_key(|&(at, _)| at);
                 for (_, k) in due {
-                    self.ready_provider(k);
+                    if matches!(
+                        self.host.sched.tasks[k].state,
+                        State::Waiting(Condition::Receive(_))
+                    ) {
+                        self.host.sched.wake_waiting(k);
+                    } else {
+                        self.ready_provider(k);
+                    }
                 }
                 ok(0, 0)
             }

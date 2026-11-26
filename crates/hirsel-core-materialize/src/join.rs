@@ -122,6 +122,7 @@ impl Remap {
                     | RtOp::Send { item }
                     | RtOp::TrySend { item }
                     | RtOp::Receive { item }
+                    | RtOp::ReceiveUntil { item }
                     | RtOp::TryReceive { item }
                     | RtOp::LatestNew { item }
                     | RtOp::SharedNew { item }

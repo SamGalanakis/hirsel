@@ -1,4 +1,93 @@
 use super::*;
+use crate::tasks::channel_clock;
+
+#[derive(Default)]
+pub(super) struct ClockCell {
+    pub(super) mono: u64,
+    pub(super) boot: u64,
+    pub(super) wall: u64,
+    /// Waits on this clock's deadlines in registration order: a token stays
+    /// until its deadline is reached; a stale one is pruned at quiescence.
+    pub(super) timers: Vec<(u64, u64, u64)>,
+    pub(super) channel_timers: channel_clock::Arms,
+    pub(super) registration: u64,
+    /// Waits on this clock's wall time, as `timers`; `set_wall` readies them.
+    pub(super) wall_timers: Vec<(u64, u64)>,
+    /// `clock.idle` waits: the token and whether quiescence has woken it.
+    pub(super) idle: Vec<(u64, bool)>,
+}
+
+impl ClockCell {
+    pub(super) fn next_registration(&mut self) -> u64 {
+        self.registration = self
+            .registration
+            .checked_add(1)
+            .unwrap_or_else(|| crate::process::stop(b"TimerArms"));
+        self.registration
+    }
+
+    pub(super) fn next_deadline(&self) -> Option<u64> {
+        self.timers
+            .iter()
+            .map(|&(at, _, _)| at)
+            .chain(self.channel_timers.first().map(|(at, _)| at))
+            .min()
+    }
+}
+
+/// A provided clock pinned by a live run's capability registry.
+#[derive(Clone, Copy)]
+pub(crate) struct ChannelClock(*const Mutex<ClockCell>);
+
+impl ChannelClock {
+    /// # Safety
+    /// The provider is live and belongs to a Clock capability.
+    pub(crate) unsafe fn of(provider: &Provider) -> Option<Self> {
+        if !owns(provider) {
+            return None;
+        }
+        // SAFETY: a provided Clock pins the cell through its run.
+        match unsafe { cell(provider.state) } {
+            Cell::Clock(clock) => Some(Self(clock)),
+            _ => unreachable!("a Clock designates a clock cell"),
+        }
+    }
+
+    /// # Safety
+    /// The waiting task owns this arm and the run pins this clock.
+    pub(crate) unsafe fn arm(self, arm: channel_clock::Link, at: u64, observed: bool) -> bool {
+        // SAFETY: this task pins the clock and its own timer slot.
+        unsafe {
+            let mut clock = lock(&*self.0);
+            if at <= clock.mono {
+                if observed {
+                    // The recorded observation was before this expiry.
+                    // Arrange a wake, then make the next poll observe it.
+                    let sequence = clock.next_registration();
+                    clock.channel_timers.insert(arm, sequence);
+                    clock.channel_timers.fire_first();
+                }
+                return observed;
+            }
+            let sequence = clock.next_registration();
+            clock.channel_timers.insert(arm, sequence);
+            true
+        }
+    }
+
+    /// # Safety
+    /// The running task still owns the arm and pins this clock.
+    pub(crate) unsafe fn retire(self, arm: channel_clock::Link) {
+        // SAFETY: the clock lock serializes retirement with expiry.
+        unsafe { lock(&*self.0).channel_timers.retire(arm) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first(self) -> Option<(u64, u64)> {
+        // SAFETY: tests inspect the clock before ending the run.
+        unsafe { lock(&*self.0).channel_timers.first() }
+    }
+}
 
 /// `clock.advance_to(mut h, mono_ns)`: time never moves back. Every wait whose
 /// deadline is now reached is readied, earliest deadline first, ties in
@@ -37,26 +126,41 @@ unsafe fn advance(context: *mut Context, hand: u64, mono: u64, boot: Option<u64>
         unreachable!("a ClockHand designates a clock cell")
     };
     let mut due = Vec::new();
-    {
-        let mut clock = lock(clock);
-        let before = clock.mono;
-        clock.mono = clock.mono.max(mono);
-        clock.boot = match boot {
-            Some(boot) => clock.boot.max(boot).max(clock.mono),
-            None => clock.boot.saturating_add(clock.mono - before),
-        };
-        let now = clock.mono;
-        clock.timers.retain(|&(at, token)| {
-            let reached = at <= now;
-            if reached {
-                due.push((at, token));
-            }
-            !reached
-        });
-    }
-    due.sort_by_key(|&(at, _)| at);
-    for (_, token) in due {
+    let mut clock = lock(clock);
+    let before = clock.mono;
+    clock.mono = clock.mono.max(mono);
+    clock.boot = match boot {
+        Some(boot) => clock.boot.max(boot).max(clock.mono),
+        None => clock.boot.saturating_add(clock.mono - before),
+    };
+    let now = clock.mono;
+    clock.timers.retain(|&(at, sequence, token)| {
+        if at <= now {
+            due.push((at, sequence, token));
+            false
+        } else {
+            true
+        }
+    });
+    due.sort_unstable();
+    for (at, sequence, token) in due {
+        while clock
+            .channel_timers
+            .first()
+            .is_some_and(|arm| arm < (at, sequence))
+        {
+            // SAFETY: the clock mutex pins the nonempty arm list until publication.
+            unsafe { clock.channel_timers.fire_first() };
+        }
         crate::tasks::hirsel_core_ready(token);
+    }
+    while clock
+        .channel_timers
+        .first()
+        .is_some_and(|(at, _)| at <= now)
+    {
+        // SAFETY: the clock mutex pins the nonempty arm list until publication.
+        unsafe { clock.channel_timers.fire_first() };
     }
     Outcome::default()
 }

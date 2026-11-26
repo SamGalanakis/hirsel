@@ -70,6 +70,7 @@ operations! {
     ("channel", "send", Lane::Runtime(Kernel::Send), "B", "core-ops-914", false),
     ("channel", "try_send", Lane::Runtime(Kernel::TrySend), "B", "core-ops-914", false),
     ("channel", "receive", Lane::Runtime(Kernel::Receive), "B", "core-ops-914", false),
+    ("channel", "receive_until", Lane::Runtime(Kernel::ReceiveUntil), "B", "channel-receive-until", false),
     ("channel", "try_receive", Lane::Runtime(Kernel::TryReceive), "B", "core-ops-914", false),
     ("conn", "new", Lane::Runtime(Kernel::ConnNew), "B", "mc-units-lang", false),
     ("conn", "client", Lane::Runtime(Kernel::ConnClient), "B", "mc-units-lang", false),

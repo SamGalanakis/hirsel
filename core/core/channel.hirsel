@@ -9,4 +9,6 @@ pub fn try_send[T: send](tx: Sender[T], take x: T) -> Result[(), SendError[T]]
 
 pub fn receive[T: send](rx: Receiver[T]) -> Result[T, Closed[()]] waits
 
+pub fn receive_until[T: send](rx: Receiver[T], until: Until) -> Result[T, ReceiveError] waits
+
 pub fn try_receive[T: send](rx: Receiver[T]) -> Result[T, ReceiveError]

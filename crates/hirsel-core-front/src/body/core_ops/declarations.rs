@@ -90,6 +90,7 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::ChannelSender
             | Kernel::Send
             | Kernel::TrySend
+            | Kernel::ReceiveUntil
             | Kernel::TryReceive
             | Kernel::Receive
             | Kernel::RootLimit

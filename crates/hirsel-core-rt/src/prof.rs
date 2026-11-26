@@ -217,7 +217,7 @@ pub(super) fn task_state([unit, id]: [u64; 2], state: State, reason: Reason, obj
     let tag = match state {
         State::Ready => 0,
         State::Running => 1,
-        State::Waiting => 2,
+        State::Waiting | State::ChannelDeadline | State::CellChannelDeadline => 2,
         State::Provider => 3,
         State::Ended => 4,
     };

@@ -22,6 +22,7 @@ pub(super) fn rt(op: RtOp) -> String {
         RtOp::TrySend { item } => format!("rt.try_send[t{}]", item.0),
         RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
         RtOp::ReceiveRec { item } => format!("rt.receive_rec[t{}]", item.0),
+        RtOp::ReceiveUntil { item } => format!("rt.receive_until[t{}]", item.0),
         RtOp::TryReceive { item } => format!("rt.try_receive[t{}]", item.0),
         RtOp::LatestNew { item } => format!("rt.latest_new[t{}]", item.0),
         RtOp::LatestHandle => "rt.latest_handle".into(),

@@ -21,6 +21,7 @@ fn runtime_probes() -> Module {
         RtOp::TrySend { item: ITEM },
         RtOp::Receive { item: ITEM },
         RtOp::TryReceive { item: ITEM },
+        RtOp::ReceiveUntil { item: ITEM },
         RtOp::LatestNew { item: ITEM },
         RtOp::LatestHandle,
         RtOp::LatestPublish,

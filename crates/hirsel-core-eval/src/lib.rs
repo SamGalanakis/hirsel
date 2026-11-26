@@ -1089,7 +1089,7 @@ enum Condition {
 #[derive(Clone, Copy, Debug)]
 enum Wait {
     Stop,
-    Task(Condition),
+    Task(Condition, Option<u64>),
     /// A sleep until this clock value.
     Sleep(u64),
     Network(Option<u64>),
@@ -1133,26 +1133,6 @@ struct Sched {
     next: u64,
     /// The CONC-10 events, when the run records them.
     events: Option<Vec<Event>>,
-}
-impl Sched {
-    /// One turn's wakes before its pop (native `take_wakes`): cancellations of
-    /// provider-parked tasks, then expired timers in deadline order.
-    fn take_wakes(&mut self, now: u64) {
-        for k in std::mem::take(&mut self.cancels) {
-            let r = &mut self.tasks[k];
-            if r.state == State::Provider && r.cancel && r.cancellable {
-                r.cancelled = true;
-                r.state = State::Ready;
-                self.timers.retain(|&(_, j)| j != k);
-                self.ready.push_back(k);
-            }
-        }
-        let expired = self.timers.partition_point(|&(d, _)| d <= now);
-        for (_, k) in self.timers.drain(..expired) {
-            self.tasks[k].state = State::Ready;
-            self.ready.push_back(k);
-        }
-    }
 }
 /// A task thread's ends of its channels to the driver.
 struct Link<'m> {
@@ -2148,14 +2128,14 @@ impl<'m> Machine<'m> {
             Some(Wait::Network(None) | Wait::Stop) => {
                 self.host.sched.tasks[k].state = State::Provider
             }
-            Some(Wait::Task(condition)) => {
-                self.host.sched.tasks[k].state = State::Waiting(condition);
-                self.host
-                    .sched
-                    .waiting
-                    .entry(condition)
-                    .or_default()
-                    .push_back(k);
+            Some(Wait::Task(condition, deadline)) => {
+                let s = &mut self.host.sched;
+                s.tasks[k].state = State::Waiting(condition);
+                s.waiting.entry(condition).or_default().push_back(k);
+                if let Some(deadline) = deadline {
+                    let at = s.timers.partition_point(|&(d, _)| d <= deadline);
+                    s.timers.insert(at, (deadline, k));
+                }
             }
             None => {
                 self.host.sched.tasks[k].state = State::Ready;
@@ -2220,9 +2200,12 @@ impl Machine<'_> {
         }
     }
     fn ready_provider(&mut self, k: usize) {
-        if self.host.sched.tasks[k].state == State::Provider {
-            self.host.sched.tasks[k].state = State::Ready;
-            self.host.sched.ready.push_back(k);
+        match self.host.sched.tasks[k].state {
+            State::Provider => {
+                self.host.sched.tasks[k].state = State::Ready;
+                self.host.sched.ready.push_back(k);
+            }
+            _ => {}
         }
     }
     /// Park the running task on a cell until `done` holds; a cancellation that
@@ -2259,7 +2242,9 @@ impl Machine<'_> {
                 ..
             } = cell
             {
-                timers.retain(|&(_, k)| parked(k));
+                timers.retain(|&(_, k)| {
+                    parked(k) || matches!(tasks[k].state, State::Waiting(Condition::Receive(_)))
+                });
                 wall_timers.retain(|&(_, k)| parked(k));
                 for (k, flag) in idle.iter_mut() {
                     if !*flag && parked(*k) {
@@ -2980,12 +2965,15 @@ impl Machine<'_> {
 
     fn park_task(&mut self, t: &Task, condition: Condition) {
         self.host.sched.tasks[t.k].cancellable = t.shield == 0 && t.obligations.len() == 1;
-        self.park(Some(Wait::Task(condition)));
+        self.park(Some(Wait::Task(condition, None)));
     }
 
     fn wake(&mut self, condition: Condition) {
         if let Some(waiters) = self.host.sched.waiting.remove(&condition) {
             for k in waiters {
+                if matches!(condition, Condition::Receive(_)) {
+                    self.host.sched.timers.retain(|&(_, j)| j != k);
+                }
                 self.host.sched.tasks[k].state = State::Ready;
                 self.host.sched.ready.push_back(k);
             }
@@ -3040,15 +3028,7 @@ impl Machine<'_> {
         let id = r.id;
         match r.state {
             State::Provider => self.host.sched.cancels.push(i + 1),
-            State::Waiting(condition) if r.cancellable => {
-                let waiters = self.host.sched.waiting.get_mut(&condition).unwrap();
-                waiters.retain(|&k| k != i + 1);
-                if waiters.is_empty() {
-                    self.host.sched.waiting.remove(&condition);
-                }
-                r.state = State::Ready;
-                self.host.sched.ready.push_back(i + 1);
-            }
+            State::Waiting(_) if r.cancellable => self.host.sched.wake_waiting(i + 1),
             _ => {}
         }
         self.event(CANCEL, id, 0);

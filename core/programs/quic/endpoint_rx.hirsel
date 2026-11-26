@@ -1,0 +1,211 @@
+fn span(input: Bytes, r: codec.Span) -> Bytes {
+    clone(list.slice(input, r.at, r.at + r.len))
+}
+
+fn route(e: Endpoint, h: codec.Header, from: Addr, wire: Bytes) -> Option[u64] {
+    let dcid = list.slice(wire, h.destination.at, h.destination.at + h.destination.len)
+    if let Some(i) = map.get(e.cids, dcid) {
+        return Some(i)
+    }
+    if h.kind == Initial {
+        if let Some(i) = map.get(e.initial_cids, (from, clone(dcid))) {
+            return Some(i)
+        }
+    }
+    None
+}
+
+fn can_queue_reply(e: Endpoint) -> bool {
+    list.len(e.stateless) < order.max(1u64, int.widen(e.config.limits.connections))
+}
+
+fn negotiation(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, wire: Bytes, mut events: List[Event]) {
+    if h.kind == OtherVersion {
+        if can_queue_reply(e) {
+            let dest = span(wire, h.source)
+            let source = span(wire, h.destination)
+            let mut response: Bytes = list.with_capacity(7 + list.len(dest) + list.len(source) + 4)
+            let mut versions: List[u32] = list.with_capacity(1)
+            list.push(mut versions, 1)
+            if let Ok(()) = codec.write_negotiation(dest, source, versions, mut response) {
+                list.push(mut e.stateless, Stateless(peer: from, wire: take response))
+            }
+        } else {
+            dropped(mut e.drops, UnsupportedVersion)
+        }
+        return
+    }
+    let Some(i) = route(e, h, from, wire) else {
+        dropped(mut e.drops, VersionNegotiation)
+        return
+    }
+    if let Some(mut c) = e.connections[i] {
+        if let Server = c.side {
+            dropped(mut e.drops, VersionNegotiation)
+            return
+        }
+        if c.peer != from || c.authenticated || !open_life(c) || list.slice(wire, h.source.at, h.source.at + h.source.len) != c.original_id {
+            dropped(mut e.drops, VersionNegotiation)
+            return
+        }
+        let mut at = h.body.at
+        while at < h.body.at + h.body.len {
+            if (list.word_be(wire, at) : u32) == 1 {
+                dropped(mut e.drops, VersionNegotiation)
+                return
+            }
+            at += 4
+        }
+        start_draining(mut c, now)
+        list.push(mut events, Closed(c.handle, Refused(Version)))
+    }
+}
+
+fn receive_known(mut c: Connection, now: u64, from: Addr, h: codec.Header, mut wire: Bytes, mut plain: Bytes, random: Random, mtu: u16, mut events: List[Event]) -> Result[(), DropReason] {
+    if from != c.peer {
+        return Error(WrongPath)
+    }
+    if let Draining = c.life {
+        return Error(Draining)
+    }
+    if h.kind != OneRtt && c.authenticated && list.slice(wire, h.source.at, h.source.at + h.source.len) != c.peer_id {
+        return Error(UnknownConnection)
+    }
+    let opened = open_for_connection(c, h, mut wire, mut plain)?
+    accept_packet(mut c, now, h, opened, wire, plain, random, mtu, mut events)
+}
+
+fn receive_existing(mut e: Endpoint, i: u64, now: u64, from: Addr, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+    if let Some(mut c) = e.connections[i] {
+        let awaiting = match c.side {
+            Server => !established(c),
+            Client => false,
+        }
+        let outcome = receive_known(mut c, now, from, h, mut wire, mut e.plain, e.random, e.config.max_mtu, mut events)
+        let finished = awaiting && established(c)
+        if finished {
+            e.unconfirmed -= 1
+            let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.original_id)))
+        }
+        if let Error(reason) = outcome {
+            dropped(mut e.drops, reason)
+        }
+    }
+}
+
+fn refuse_limit(mut e: Endpoint, mut c: Connection) {
+    if !can_queue_reply(e) {
+        return
+    }
+    let mut wire: Bytes = list.with_capacity(1200)
+    if let Some(_) = tx_space(mut c.initial, Initial, c.peer_id, c.local_id, false, Some(transport_close(0x02, 0)), 1200, mut wire) {
+        list.push(mut e.stateless, Stateless(peer: c.peer, wire: take wire))
+    }
+}
+
+fn admit(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+    let (id, t): (handshake.Identity, TransportConfig) = match e.server {
+        Some((id, t)) => (share_identity(id), clone(t)),
+        None => {
+            dropped(mut e.drops, UnknownConnection)
+            return
+        },
+    }
+    if h.destination.len < 8 || h.token.len != 0 {
+        dropped(mut e.drops, MalformedHeader)
+        return
+    }
+    let mut c = match new_connection(ConnectionHandle(0), Server, from, draw_local_id(e), span(wire, h.destination), span(wire, h.source), take t, Some(take id), now) {
+        Ok(take c) => take c,
+        Error(_) => return,
+    }
+    match open_for_connection(c, h, mut wire, mut e.plain) {
+        Error(reason) => dropped(mut e.drops, reason),
+        Ok(opened) => {
+            let Ok(handle) = reserve_handle(e) else {
+                refuse_limit(mut e, mut c)
+                return
+            }
+            if e.unconfirmed >= int.widen(e.config.limits.unvalidated) {
+                refuse_limit(mut e, mut c)
+                return
+            }
+            c.handle = handle
+            let _ = accept_packet(mut c, now, h, opened, wire, e.plain, e.random, e.config.max_mtu, mut events)
+            add_connection(mut e, take c)
+        },
+    }
+}
+
+fn header_drop(err: codec.CodecError) -> DropReason {
+    match err {
+        DatagramTooShort => DatagramTooShort,
+        SmallInitial => SmallInitial,
+        SmallUnsupportedVersion => SmallUnsupportedVersion,
+        UnexpectedVersionNegotiation => VersionNegotiation,
+        UnsupportedVersion => UnsupportedVersion,
+        _ => MalformedHeader,
+    }
+}
+
+fn dispatch(mut e: Endpoint, now: u64, from: Addr, h: codec.Header, mut wire: Bytes, mut events: List[Event]) {
+    if h.kind == Initial || h.kind == Handshake || h.kind == OneRtt {
+        if let Some(i) = route(e, h, from, wire) {
+            receive_existing(mut e, i, now, from, h, mut wire, mut events)
+        } else if h.kind == Initial {
+            admit(mut e, now, from, h, mut wire, mut events)
+        } else {
+            dropped(mut e.drops, UnknownConnection)
+        }
+    } else if h.kind == Negotiation || h.kind == OtherVersion {
+        negotiation(mut e, now, from, h, wire, mut events)
+    } else {
+        dropped(mut e.drops, KeysUnavailable)
+    }
+}
+
+/// The caller lends a receive buffer. Header protection is removed only in the
+/// addressed packet, and AEAD reads exactly that packet even in a coalesced datagram.
+pub fn receive_datagram(mut e: Endpoint, now: u64, from: Addr, ecn: u8, mut buf: Bytes, at: u64, len: u64, mut events: List[Event]) {
+    if at > list.len(buf) || len > list.len(buf) - at {
+        dropped(mut e.drops, MalformedHeader)
+        return
+    }
+    let _ = ecn
+    let end = at + len
+    let mut next = at
+    let server = match e.server {
+        Some(_) => true,
+        None => false
+    }
+    let first = match codec.read_first_header(buf, mut next, end, e.config.cid_len, server) {
+        Ok(take h) => take h,
+        Error(err) => {
+            dropped(mut e.drops, header_drop(err))
+            return
+        },
+    }
+    dispatch(mut e, now, from, first, mut buf, mut events)
+    while next < end {
+        let start = next
+        match codec.read_coalesced_header(buf, mut next, end, e.config.cid_len, first.destination) {
+            Ok(h) => {
+                if server && h.kind == Initial && len < 1200 {
+                    dropped(mut e.drops, SmallInitial)
+                } else {
+                    dispatch(mut e, now, from, h, mut buf, mut events)
+                }
+            },
+            Error(err) => dropped(mut e.drops, header_drop(err)),
+        }
+        if next <= start {
+            break
+        }
+    }
+}
+
+fn share_identity(id: handshake.Identity) -> handshake.Identity {
+    match id {
+        Identity(chain: chain, key: key, alg: alg) => Identity(chain: clone(chain), key: secret.share(key), alg: alg),
+    }
+}

@@ -1,0 +1,162 @@
+type FrameEffect = Quiet | ElicitsAck | PeerClose(CloseReason)
+
+fn received_number(c: Connection, level: packet.Space, n: u64) -> bool {
+    match level {
+        Initial => n < c.initial.discard_before || covers(c.initial.received, n, n),
+        Handshake => n < c.encrypted.discard_before || covers(c.encrypted.received, n, n),
+        _ => n < c.application.discard_before || covers(c.application.received, n, n),
+    }
+}
+
+fn note_receive(mut c: Connection, level: packet.Space, number: u64, ack: bool) {
+    match level {
+        Initial => note_in_space(mut c.initial, number, ack),
+        Handshake => note_in_space(mut c.encrypted, number, ack),
+        _ => note_in_space(mut c.application, number, ack),
+    }
+}
+
+fn note_in_space(mut s: Space, number: u64, ack: bool) {
+    if let None = s.receive {
+        return
+    }
+    s.largest = Some(match s.largest {
+        None => number,
+        Some(previous) => order.max(previous, number),
+    })
+    record_received(mut s, number)
+    s.ack_pending = s.ack_pending || ack
+}
+
+fn crypto_frame(mut c: Connection, level: packet.Space, offset: u64, data: Bytes) -> bool {
+    match level {
+        Initial => receive_crypto(mut c.initial.crypto_in, offset, data),
+        Handshake => receive_crypto(mut c.encrypted.crypto_in, offset, data),
+        _ => receive_crypto(mut c.application.crypto_in, offset, data),
+    }
+}
+
+fn check_ack(c: Connection, level: packet.Space, ranges: List[codec.AckRange]) -> bool {
+    match level {
+        Initial => valid_ack(c.initial, ranges),
+        Handshake => valid_ack(c.encrypted, ranges),
+        _ => valid_ack(c.application, ranges),
+    }
+}
+
+fn apply_frame(mut c: Connection, kind: codec.PacketKind, f: codec.Frame, input: Bytes) -> Result[FrameEffect, ConnectionFailure] {
+    let level = packet_level(kind)
+    match f {
+        Padding(_) => Ok(Quiet),
+        Ack(a) => {
+            if !check_ack(c, level, a.ranges) {
+                let frame = if a.ecn == None {
+                    0x02u64
+                } else {
+                    0x03u64
+                }
+                return Error(Wire(0x0a, frame))
+            }
+            Ok(Quiet)
+        },
+        Crypto(offset: offset, data: data) => {
+            if !crypto_frame(mut c, level, offset, list.slice(input, data.at, data.at + data.len)) {
+                return Error(Wire(0x0d, 0x06))
+            }
+            Ok(ElicitsAck)
+        },
+        TransportClose(code: code, frame_type: frame, ..) => Ok(PeerClose(Transport(code: code, frame: frame))),
+        ApplicationClose(code: code, ..) => Ok(PeerClose(Application(code: code))),
+        HandshakeDone => {
+            if let Server = c.side {
+                return Error(Wire(0x0a, 0x1e))
+            }
+            discard(mut c.encrypted)
+            Ok(ElicitsAck)
+        },
+        _ => Ok(ElicitsAck),
+    }
+}
+
+fn codec_failure(e: codec.CodecError) -> ConnectionFailure {
+    match e {
+        FrameEncodingError(t) => Wire(0x07, t),
+        ProtocolViolation(t) => Wire(0x0a, t),
+        _ => Wire(0x01, 0),
+    }
+}
+
+fn apply_packet(mut c: Connection, now: u64, kind: codec.PacketKind, input: Bytes, opened: OpenedPacket, random: Random, mtu: u16, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+    if let Error(_) = codec.check_reserved_bits(kind, opened.first) {
+        return Error(Wire(0x0a, 0))
+    }
+    let Ok(frame_reader) = codec.frames(input, codec.Span(at: 0, len: list.len(input)), kind, int.widen(c.transport.max_datagram_frame)) else {
+        return Error(Wire(0x0a, 0))
+    }
+    let mut r = take frame_reader
+    let mut ack = false
+    while true {
+        let f = match codec.next_frame(input, mut r) {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Error(e) => return Error(codec_failure(e)),
+        }
+        match apply_frame(mut c, kind, f, input)? {
+            Quiet => (),
+            ElicitsAck => {
+                ack = true
+            },
+            PeerClose(reason) => {
+                start_draining(mut c, now)
+                list.push(mut events, Closed(c.handle, reason))
+                return Ok(())
+            },
+        }
+    }
+    let level = packet_level(kind)
+    drain_tls(mut c, random, mtu, level, mut events)?
+    note_receive(mut c, level, opened.number, ack)
+    if kind == Handshake {
+        if let Server = c.side {
+            discard(mut c.initial)
+        }
+    }
+    refresh_idle(mut c, now)
+    c.idle_rearmed = false
+    Ok(())
+}
+
+fn open_for_connection(c: Connection, h: codec.Header, mut wire: Bytes, mut plain: Bytes) -> Result[OpenedPacket, DropReason] {
+    match h.kind {
+        Initial => open_packet(c.initial, h, mut wire, mut plain),
+        Handshake => open_packet(c.encrypted, h, mut wire, mut plain),
+        OneRtt => open_packet(c.application, h, mut wire, mut plain),
+        _ => Error(KeysUnavailable),
+    }
+}
+
+fn accept_packet(mut c: Connection, now: u64, h: codec.Header, opened: OpenedPacket, wire: Bytes, plain: Bytes, random: Random, mtu: u16, mut events: List[Event]) -> Result[(), DropReason] {
+    if let Closing(mut reply) = c.life {
+        reply.pending = true
+        reply.max_bytes = h.packet.len
+        return Ok(())
+    }
+    let level = packet_level(h.kind)
+    if received_number(c, level, opened.number) {
+        return Error(Duplicate)
+    }
+    if !c.authenticated {
+        if h.kind == Initial {
+            if let Client = c.side {
+                c.peer_id = clone(list.slice(wire, h.source.at, h.source.at + h.source.len))
+            }
+        }
+        c.authenticated = true
+    }
+    match apply_packet(mut c, now, h.kind, plain, opened, random, mtu, mut events) {
+        Ok(()) => (),
+        Error(Wire(code, frame)) => refuse(mut c, now, code, frame, Transport(code: code, frame: frame), mut events),
+        Error(Tls(e)) => refuse(mut c, now, handshake.error_code(e), 0, tls_reason(e), mut events),
+    }
+    Ok(())
+}

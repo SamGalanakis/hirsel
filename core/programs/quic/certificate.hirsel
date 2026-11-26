@@ -2,7 +2,7 @@ pub type Pin = Spki(Inline[u8, 32]) | Cert(Inline[u8, 32])
 
 pub type Identity = Identity(chain: List[Bytes], key: Secret, alg: SignAlg)
 
-fn check_pins(certificate: Bytes, pins: List[Pin]) -> Result[(), Error] {
+fn check_pins(certificate: Bytes, pins: List[Pin]) -> Result[Pin, Error] {
     let mut cert: Option[Inline[u8, 32]] = None
     let mut spki: Option[Inline[u8, 32]] = None
     for pin in pins {
@@ -12,7 +12,7 @@ fn check_pins(certificate: Bytes, pins: List[Pin]) -> Result[(), Error] {
                     cert = Some(std.sha256.hash(certificate))
                 }
                 if cert == Some(digest) {
-                    return Ok(())
+                    return Ok(clone(pin))
                 }
             },
             Spki(digest) => {
@@ -25,7 +25,7 @@ fn check_pins(certificate: Bytes, pins: List[Pin]) -> Result[(), Error] {
                     spki = Some(std.sha256.finish(hash))
                 }
                 if spki == Some(digest) {
-                    return Ok(())
+                    return Ok(clone(pin))
                 }
             },
         }
@@ -33,7 +33,7 @@ fn check_pins(certificate: Bytes, pins: List[Pin]) -> Result[(), Error] {
     Error(PinMismatch)
 }
 
-fn authenticate_leaf(leaf: Option[Bytes], pins: List[Pin], of: schedule.Side) -> Result[std.x509_key.PublicKey, Error] {
+fn authenticate_leaf(leaf: Option[Bytes], pins: List[Pin], of: schedule.Side) -> Result[(std.x509_key.PublicKey, Pin), Error] {
     let certificate = match leaf {
         Some(der) => der,
         None => {
@@ -43,10 +43,10 @@ fn authenticate_leaf(leaf: Option[Bytes], pins: List[Pin], of: schedule.Side) ->
             return Error(BadCertificate)
         },
     }
-    check_pins(certificate, pins)?
+    let pin = check_pins(certificate, pins)?
     match std.x509_key.read(certificate) {
-        P256(take point) => Ok(P256(take point)),
-        Ed25519(take key) => Ok(Ed25519(take key)),
+        P256(take point) => Ok((P256(take point), take pin)),
+        Ed25519(take key) => Ok((Ed25519(take key), take pin)),
         _ => Error(BadCertificate),
     }
 }

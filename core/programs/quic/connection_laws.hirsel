@@ -1,0 +1,235 @@
+const CLIENT_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 24101)
+
+const SERVER_ADDR: Addr = Addr(ip: V4(0x7f000001u32), port: 24102)
+
+fn endpoint_config() -> quic.EndpointConfig {
+    let reset = result.unwrap(secret.seal(b"QS3 reset key", "mac"))
+    let token = result.unwrap(secret.seal(b"QS3 token key", "kdf"))
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: 1200, retry: Never, reset_key: take reset, token_key: take token, limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 0))
+}
+
+fn transport_config(take pins: Option[List[handshake.Pin]]) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, "h3")
+    quic.TransportConfig(max_idle_ms: 5000, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: 16384, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: take pins)
+}
+
+fn qs3_server(take pins: Option[List[handshake.Pin]]) -> quic.Endpoint {
+    result.unwrap(quic.endpoint(provide.random(17), endpoint_config(), Some((p256_identity(false), transport_config(take pins)))))
+}
+
+fn qs3_client() -> quic.Endpoint {
+    result.unwrap(quic.endpoint(provide.random(39), endpoint_config(), None))
+}
+
+fn pipe(mut sender: quic.Endpoint, mut receiver: quic.Endpoint, from: Addr, now: u64, mut events: List[quic.Event]) {
+    let mut wire: Bytes = list.with_capacity(4096)
+    let mut packets: List[quic.Output] = list.with_capacity(4)
+    let _ = quic.poll(mut sender, now, mut wire, mut packets)
+    let mut count = 0u64
+    for output in packets {
+        if let Transmit(..) = output {
+            count += 1
+        }
+    }
+    quic.committed(mut sender, now, count)
+    for output in packets {
+        if let Transmit(at: at, len: len, ..) = output {
+            quic.receive_datagram(mut receiver, now, from, 0, mut wire, at, len, mut events)
+        }
+    }
+}
+
+fn connected_peer(event: quic.Event) -> quic.ConnectionHandle {
+    match event {
+        Connected(c: peer, alpn: alpn) if alpn == "h3" => peer,
+        _ => fail("a matching client certificate must connect with h3"),
+    }
+}
+
+fn client_pin_case(take required: List[handshake.Pin], with_identity: bool, expected: u64) {
+    let mut server = qs3_server(Some(take required))
+    let mut client = qs3_client()
+    let identity: Option[handshake.Identity] = if with_identity {
+        Some(p256_identity(true))
+    } else {
+        None
+    }
+    let handle = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), take identity, transport_config(None)))
+    let mut at_server: List[quic.Event] = list.new()
+    let mut at_client: List[quic.Event] = list.new()
+    for now in 1u64 .. 8 {
+        pipe(mut client, mut server, CLIENT_ADDR, now, mut at_server)
+        pipe(mut server, mut client, SERVER_ADDR, now, mut at_client)
+    }
+    if list.len(at_server) != 1 {
+        fail("one server outcome before timeout")
+    }
+    if expected == 0 {
+        let peer = connected_peer(at_server[0])
+        if list.len(at_client) != 1 {
+            fail("missing client event on a successful mutual handshake")
+        }
+        let Some(Cert(digest)) = quic.peer_pin(server, peer) else {
+            fail("server did not report the authenticated certificate pin")
+        }
+        let params = option.unwrap(quic.peer_params(client, handle))
+        if digest != rotated_digest() || params.max_idle_ms != 5000 || params.max_udp_payload != 1200 || params.active_cid_limit != 8 {
+            fail("pin or peer transport parameters")
+        }
+        quic.timeout(mut server, 5000000001, mut at_server)
+        if list.len(at_server) != 1 {
+            fail("idle expired before the negotiated deadline")
+        }
+        quic.timeout(mut server, 5000000010, mut at_server)
+        if list.len(at_server) != 2 {
+            fail("idle timeout did not retire the connection")
+        }
+        if let Closed(_, Idle) = at_server[1] {
+            return
+        }
+        fail("idle timeout has the wrong event")
+    }
+    let Closed(_, Refused(reason)) = at_server[0] else {
+        fail("unauthenticated client reached Connected")
+    }
+    if expected == 0x012a {
+        if let Pin = reason {
+            ()
+        } else {
+            fail("pin refusal")
+        }
+    } else {
+        if let Certificate = reason {
+            ()
+        } else {
+            fail("missing certificate refusal")
+        }
+    }
+    if list.len(at_client) != 2 {
+        fail("client did not receive a transport close")
+    }
+    if let Closed(_, Transport(code: code, frame: 0)) = at_client[1] {
+        if code == expected {
+            return
+        }
+    }
+    fail("wrong CRYPTO_ERROR on the wire")
+}
+
+// TLS alerts from RFC 8446 §4.4.2.4 and RFC 9001 §4.8.
+/// bug: An unpinned or missing client certificate reaches Connected.
+/// oracle: RFC 8446 TLS alerts and independently derived leaf pins.
+@test
+fn connection_client_pins() -> Result[(), ()] {
+    client_pin_case(cert_pin(rotated_digest()), true, 0)
+    client_pin_case(cert_pin(old_digest()), true, 0x012a)
+    client_pin_case(cert_pin(rotated_digest()), false, 0x0174)
+    Ok(())
+}
+
+fn fixture_initial(dcid: Bytes, scid: Bytes, number: u64, frame: Bytes, total: u64, of: schedule.Side) -> Bytes {
+    let mut keys = result.unwrap(schedule.quic_initial(of, dcid))
+    let mut sealer = result.unwrap(schedule.sealer(mut keys, Initial, 0, number))
+    let mask = result.unwrap(schedule.header_mask(keys, Initial, true))
+    let mut wire: Bytes = list.with_capacity(total)
+    let fixed = 14 + list.len(dcid) + list.len(scid)
+    result.unwrap(codec.write_long_header(Initial, dcid, scid, b"", codec.Number(truncated: number, size: 4), total - fixed, mut wire))
+    let at = list.len(wire)
+    list.append(mut wire, frame)
+    list.fill(mut wire, total - 16 - list.len(wire), 0)
+    let _ = result.unwrap(packet.seal(mut sealer, number, mut wire, 0, at, b""))
+    let hp = packet.mask(mask, wire, at)
+    wire[0] = wire[0] ^ (hp[0] & 0x0f)
+    for i in 0u64 .. 4 {
+        wire[at - 4 + i] = wire[at - 4 + i] ^ hp[i + 1]
+    }
+    take wire
+}
+
+fn stateful_initial_refusal(frame_bytes: Bytes, expected: u64, triggering: u64) {
+    let mut server = qs3_server(None)
+    let mut wire = fixture_initial(b"12345678", b"abcdefgh", 0, frame_bytes, 1200, Client)
+    let mut events: List[quic.Event] = list.new()
+    quic.receive_datagram(mut server, 0, CLIENT_ADDR, 0, mut wire, 0, 1200, mut events)
+    if list.len(events) == 1 {
+        if let Closed(_, Transport(code: code, frame: frame)) = events[0] {
+            if code == expected && frame == triggering {
+                return
+            }
+        }
+    }
+    fail("connection did not emit the RFC transport refusal")
+}
+
+fn check_silent_drops() {
+    let mut server = qs3_server(None)
+    let mut events: List[quic.Event] = list.new()
+    let mut short = fixture_initial(b"12345678", b"abcdefgh", 0, b"\x01", 1199, Client)
+    quic.receive_datagram(mut server, 0, CLIENT_ADDR, 0, mut short, 0, 1199, mut events)
+    short[4] = 2
+    quic.receive_datagram(mut server, 0, CLIENT_ADDR, 0, mut short, 0, 1199, mut events)
+    quic.receive_datagram(mut server, 0, CLIENT_ADDR, 0, mut short, 0, 20, mut events)
+    let mut forged = fixture_initial(b"12345678", b"abcdefgh", 0, b"\x01", 1200, Client)
+    forged[1199] = forged[1199] ^ 1
+    quic.receive_datagram(mut server, 0, CLIENT_ADDR, 0, mut forged, 0, 1200, mut events)
+    let mut out: Bytes = list.with_capacity(2400)
+    let mut tx: List[quic.Output] = list.with_capacity(4)
+    if quic.poll(mut server, 0, mut out, mut tx) != None || list.len(tx) != 0 || list.len(events) != 0 {
+        fail("silent drop replied or retained connection state")
+    }
+    if quic.drop_count(server, SmallInitial) != 1 || quic.drop_count(server, SmallUnsupportedVersion) != 1 || quic.drop_count(server, DatagramTooShort) != 1 || quic.drop_count(server, PacketProtection) != 1 {
+        fail("classifier chose the wrong first drop reason")
+    }
+}
+
+fn check_uncommitted_ack() {
+    let mut client = qs3_client()
+    let _ = result.unwrap(quic.connect(mut client, 0, SERVER_ADDR, "server", cert_pin(old_digest()), None, transport_config(None)))
+    let mut first: Bytes = list.with_capacity(1200)
+    let mut flight: List[quic.Output] = list.with_capacity(2)
+    let _ = quic.poll(mut client, 0, mut first, mut flight)
+    list.truncate(mut flight, 0)
+    let mut second: Bytes = list.with_capacity(1200)
+    let _ = quic.poll(mut client, 0, mut second, mut flight)
+    quic.committed(mut client, 0, 1)
+    let mut at = 0u64
+    let header = result.unwrap(codec.read_header(first, mut at, 1200, 0))
+    let dcid = list.slice(first, header.destination.at, header.destination.at + header.destination.len)
+    let local = list.slice(first, header.source.at, header.source.at + header.source.len)
+    let mut keys = result.unwrap(schedule.quic_initial(Server, dcid))
+    let mut sealer = result.unwrap(schedule.sealer(mut keys, Initial, 0, 0))
+    let mask = result.unwrap(schedule.header_mask(keys, Initial, true))
+    let mut reply: Bytes = list.with_capacity(80)
+    result.unwrap(codec.write_long_header(Initial, local, b"peer-cid", b"", codec.Number(truncated: 0, size: 4), 21, mut reply))
+    let body = list.len(reply)
+    // ACK of packet zero alone (RFC 9000 §19.3). Only PN 1 was committed.
+    list.append(mut reply, b"\x02\x00\x00\x00\x00")
+    let _ = result.unwrap(packet.seal(mut sealer, 0, mut reply, 0, body, b""))
+    let hp = packet.mask(mask, reply, body)
+    reply[0] = reply[0] ^ (hp[0] & 0x0f)
+    for i in 0u64 .. 4 {
+        reply[body - 4 + i] = reply[body - 4 + i] ^ hp[i + 1]
+    }
+    let n = list.len(reply)
+    let mut events: List[quic.Event] = list.new()
+    quic.receive_datagram(mut client, 0, SERVER_ADDR, 0, mut reply, 0, n, mut events)
+    if list.len(events) == 1 {
+        if let Closed(_, Transport(code: 0x0a, frame: 2)) = events[0] {
+            return
+        }
+    }
+    fail("ACK of a skipped packet number was accepted")
+}
+
+/// bug: The receive classifier responds to unauthenticated packets or accepts an ACK of an abandoned packet.
+/// oracle: RFC 9000 §§12.3, 13.1, 14.1, 19.3 and RFC 9001 §5.4.2.
+@test
+fn connection_frame_refusals() -> Result[(), ()] {
+    stateful_initial_refusal(b"\x08\x00", 0x0a, 8)
+    stateful_initial_refusal(b"\x40\x01", 0x07, 1)
+    stateful_initial_refusal(b"\x02\x00\x00\x00\x00", 0x0a, 2)
+    check_silent_drops()
+    check_uncommitted_ack()
+    Ok(())
+}

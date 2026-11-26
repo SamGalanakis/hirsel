@@ -39,6 +39,7 @@ pub opaque type Handshake {
     keys: Option[schedule.Schedule],
     log: Transcript,
     peer_key: std.x509_key.PublicKey,
+    pin: Option[Pin],
     alpn: Bytes,
     peer_parameters: Option[TransportParameters]
 }
@@ -65,7 +66,7 @@ pub fn start_client(random: Random, take config: ClientConfig) -> Result[(Handsh
     let initial = client_hello(client_random, group, public, config.name, config.protocols, parameters, None)?
     let mut log = transcript()
     record(mut log, initial)
-    let h = Handshake(stage: AwaitServerHello, side: Client, suite: Aes128GcmSha256, group: group, client: Some(take config), client_signatures: None, pins: list.new(), random: random, client_random: take client_random, retried: false, share: Some(take share), public: take public, keys: None, log: take log, peer_key: Invalid, alpn: b"", peer_parameters: None)
+    let h = Handshake(stage: AwaitServerHello, side: Client, suite: Aes128GcmSha256, group: group, client: Some(take config), client_signatures: None, pins: list.new(), random: random, client_random: take client_random, retried: false, share: Some(take share), public: take public, keys: None, log: take log, peer_key: Invalid, pin: None, alpn: b"", peer_parameters: None)
     Ok((take h, Flight(initial: take initial, encrypted: b"")))
 }
 
@@ -153,7 +154,7 @@ pub fn accept_client(random: Random, config: ServerConfig, ids: PeerConnectionId
     if let Error(_) = schedule.application(mut keys, transcript_hash(log, suite)) {
         return Error(LocalFailure)
     }
-    let h = Handshake(stage: stage, side: Server, suite: suite, group: group, client: None, client_signatures: None, pins: take pins, random: random, client_random: b"", retried: false, share: None, public: b"", keys: Some(take keys), log: take log, peer_key: Invalid, alpn: take alpn, peer_parameters: Some(take peer_parameters))
+    let h = Handshake(stage: stage, side: Server, suite: suite, group: group, client: None, client_signatures: None, pins: take pins, random: random, client_random: b"", retried: false, share: None, public: b"", keys: Some(take keys), log: take log, peer_key: Invalid, pin: None, alpn: take alpn, peer_parameters: Some(take peer_parameters))
     Ok((take h, Flight(initial: take initial, encrypted: take encrypted)))
 }
 
@@ -215,7 +216,7 @@ fn receive_extensions(mut h: Handshake, message: Message, wire: Bytes, ids: Peer
 
 fn receive_certificate(mut h: Handshake, message: Message, wire: Bytes) -> Result[(), Error] {
     let leaf = read_certificate(message.body)?
-    let key = match h.side {
+    let (key, pin) = match h.side {
         Client => {
             let c = match h.client {
                 Some(config) => config,
@@ -226,6 +227,7 @@ fn receive_certificate(mut h: Handshake, message: Message, wire: Bytes) -> Resul
         Server => authenticate_leaf(leaf, h.pins, Client)?,
     }
     h.peer_key = take key
+    h.pin = Some(take pin)
     record(mut h.log, wire)
     h.stage = AwaitVerify
     Ok(())
@@ -351,6 +353,14 @@ pub fn negotiated(h: Handshake) -> Option[(Bytes, TransportParameters)] {
     match h.peer_parameters {
         Some(p) => Some((clone(h.alpn), clone(p))),
         None => None,
+    }
+}
+
+pub fn peer_pin(h: Handshake) -> Option[Pin] {
+    if connected(h) {
+        clone(h.pin)
+    } else {
+        None
     }
 }
 

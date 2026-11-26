@@ -1,0 +1,120 @@
+type OpenedPacket {
+    number: u64,
+    first: u8
+}
+
+fn packet_level(kind: codec.PacketKind) -> packet.Space {
+    match kind {
+        Initial => Initial,
+        Handshake => Handshake,
+        _ => Application,
+    }
+}
+
+fn unprotect(mask: packet.HeaderMask, h: codec.Header, sample: codec.Span, mut buf: Bytes) -> u8 {
+    let m = packet.mask(mask, buf, sample.at)
+    let bits = if h.kind == OneRtt {
+        0x1fu8
+    } else {
+        0x0fu8
+    }
+    let first = buf[h.packet.at] ^ (m[0] & bits)
+    buf[h.packet.at] = first
+    let len: u64 = int.widen((first & 3) + 1)
+    for i in 0u64 .. len {
+        buf[h.body.at + i] = buf[h.body.at + i] ^ m[i + 1]
+    }
+    first
+}
+
+fn open_packet(s: Space, h: codec.Header, mut buf: Bytes, mut plain: Bytes) -> Result[OpenedPacket, DropReason] {
+    let Ok(sample) = codec.sample(h) else {
+        return Error(SampleTooShort)
+    }
+    let keys = match s.receive {
+        Some(k) => k,
+        None => return Error(KeysUnavailable),
+    }
+    let first = unprotect(keys.mask, h, sample, mut buf)
+    let Ok(opened) = codec.read_open_header(buf, h) else {
+        return Error(MalformedHeader)
+    }
+    let Ok(number) = codec.decode_packet_number(s.largest, opened.number.truncated, opened.number.size) else {
+        return Error(MalformedHeader)
+    }
+    let start = h.packet.at
+    let sealed = list.slice(buf, start, start + h.packet.len)
+    list.truncate(mut plain, 0)
+    if let Error(_) = packet.open_into(keys.opener, 0, number, sealed, 0, opened.aad.len, b"", mut plain) {
+        return Error(PacketProtection)
+    }
+    Ok(OpenedPacket(number: number, first: first))
+}
+
+fn begin_packet(kind: codec.PacketKind, dest: Bytes, source: Bytes, number: u64, payload_len: u64, mut out: Bytes) -> Result[u64, codec.CodecError] {
+    let n = codec.Number(truncated: number & 0xffffffff, size: 4)
+    if kind == OneRtt {
+        codec.write_short_header(dest, false, false, n, mut out)?
+    } else {
+        codec.write_long_header(kind, dest, source, b"", n, payload_len + 16, mut out)?
+    }
+    Ok(list.len(out))
+}
+
+fn seal_packet(mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, payload: Bytes, min_size: u64, mut out: Bytes) -> Option[u64] {
+    if s.next > MAX_NUMBER {
+        return None
+    }
+    if let Some(mut keys) = s.send {
+        let start = list.len(out)
+        let number = s.next
+        let Ok(body0) = begin_packet(kind, dest, source, number, list.len(payload), mut out) else {
+            return None
+        }
+        let mut body = body0
+        let mut zeros = 0u64
+        if body - start + list.len(payload) + 16 < min_size {
+            // Rewriting Length can add one byte when a short payload is padded to 1200.
+            zeros = min_size - (body - start + list.len(payload) + 16)
+            list.truncate(mut out, start)
+            let Ok(at) = begin_packet(kind, dest, source, number, list.len(payload) + zeros, mut out) else {
+                return None
+            }
+            let growth = at - body
+            body = at
+            if growth != 0 {
+                zeros -= growth
+                list.truncate(mut out, start)
+                let Ok(rewritten) = begin_packet(kind, dest, source, number, list.len(payload) + zeros, mut out) else {
+                    return None
+                }
+                body = rewritten
+            }
+        }
+        if list.capacity(out) - body < list.len(payload) + zeros + 16 {
+            list.truncate(mut out, start)
+            return None
+        }
+        list.append(mut out, payload)
+        if zeros != 0 {
+            list.fill(mut out, zeros, 0)
+        }
+        if let Error(_) = packet.seal(mut keys.sealer, number, mut out, start, body, b"") {
+            list.truncate(mut out, start)
+            return None
+        }
+        s.next += 1
+        let m = packet.mask(keys.mask, out, body)
+        let bits = if kind == OneRtt {
+            0x1fu8
+        } else {
+            0x0fu8
+        }
+        out[start] = out[start] ^ (m[0] & bits)
+        for i in 0u64 .. 4 {
+            out[body - 4 + i] = out[body - 4 + i] ^ m[i + 1]
+        }
+        return Some(number)
+    }
+    None
+}

@@ -1,0 +1,135 @@
+fn staged_connection(mut staged: List[Staged], mut c: Connection, now: u64, slot: u64, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
+    let mut limit = mtu
+    if let Some(p) = c.params {
+        limit = order.min(limit, p.max_udp_payload)
+    }
+    let closing: Option[CloseFrame] = match c.life {
+        Draining => return,
+        Closing(f) if !f.pending => return,
+        Closing(f) => {
+            if let None = c.deadline {
+                c.deadline = Some(deadline_after(now, 3 * INITIAL_PTO_NS))
+            }
+            limit = order.min(limit, f.max_bytes)
+            Some(clone(f.wire))
+        },
+        Open => None,
+    }
+    let handle = c.handle
+    let peer = c.peer
+    if let None = closing {
+        stage_level(mut staged, mut c.initial, Initial, c.peer_id, c.local_id, false, None, now, slot, handle, peer, limit, mut out, mut tx)
+        stage_level(mut staged, mut c.encrypted, Handshake, c.peer_id, c.local_id, false, None, now, slot, handle, peer, limit, mut out, mut tx)
+        stage_level(mut staged, mut c.application, OneRtt, c.peer_id, c.local_id, c.handshake_done, None, now, slot, handle, peer, limit, mut out, mut tx)
+    } else if let Some(_) = c.application.send {
+        stage_level(mut staged, mut c.application, OneRtt, c.peer_id, c.local_id, false, closing, now, slot, handle, peer, limit, mut out, mut tx)
+    } else if let Some(_) = c.encrypted.send {
+        stage_level(mut staged, mut c.encrypted, Handshake, c.peer_id, c.local_id, false, closing, now, slot, handle, peer, limit, mut out, mut tx)
+    } else {
+        stage_level(mut staged, mut c.initial, Initial, c.peer_id, c.local_id, false, closing, now, slot, handle, peer, limit, mut out, mut tx)
+    }
+}
+
+fn stage_level(mut staged: List[Staged], mut s: Space, kind: codec.PacketKind, dest: Bytes, source: Bytes, done: bool, closing: Option[CloseFrame], now: u64, slot: u64, handle: ConnectionHandle, peer: Addr, mtu: u64, mut out: Bytes, mut tx: List[Output]) {
+    let start = list.len(out)
+    let limit = order.min(mtu, list.capacity(out) - start)
+    if list.len(tx) == list.capacity(tx) {
+        return
+    }
+    if let Some(p) = tx_space(mut s, kind, dest, source, done, closing, limit, mut out) {
+        list.push(mut staged, Packet(slot: slot, handle: handle, kind: kind, packet: p))
+        list.push(mut tx, Transmit(to: peer, at: start, len: list.len(out) - start, ecn: 0, send_at: now))
+    }
+}
+
+fn next_deadline(e: Endpoint) -> Option[u64] {
+    let mut first: Option[u64] = None
+    for connection in e.connections {
+        if let Some(c) = connection {
+            if let Some(deadline) = c.deadline {
+                first = Some(match first {
+                    None => deadline,
+                    Some(previous) => order.min(previous, deadline),
+                })
+            }
+        }
+    }
+    first
+}
+
+pub fn poll(mut e: Endpoint, now: u64, mut out: Bytes, mut tx: List[Output]) -> Option[u64] {
+    list.truncate(mut e.staged, 0)
+    for reply in e.stateless {
+        let at = list.len(out)
+        let len = list.len(reply.wire)
+        if len > list.capacity(out) - at || list.len(tx) == list.capacity(tx) {
+            break
+        }
+        list.append(mut out, reply.wire)
+        list.push(mut tx, Transmit(to: reply.peer, at: at, len: len, ecn: 0, send_at: now))
+        list.push(mut e.staged, StatelessReply)
+    }
+    let mtu: u64 = int.widen(e.config.max_mtu)
+    for i in 0u64 .. list.len(e.connections) {
+        if let Some(mut c) = e.connections[i] {
+            staged_connection(mut e.staged, mut c, now, i, mtu, mut out, mut tx)
+        }
+    }
+    let at = next_deadline(e)
+    if let Some(deadline) = at {
+        if list.len(tx) < list.capacity(tx) {
+            list.push(mut tx, Wake(at: deadline))
+        }
+    }
+    at
+}
+
+fn commit_packet(mut c: Connection, now: u64, kind: codec.PacketKind, p: StagedPacket) {
+    match kind {
+        Initial => commit_space(mut c.initial, p),
+        Handshake => {
+            commit_space(mut c.encrypted, p)
+            if let Client = c.side {
+                discard(mut c.initial)
+            }
+        },
+        _ => commit_space(mut c.application, p),
+    }
+    if p.done {
+        c.handshake_done = false
+    }
+    if p.close {
+        if let Closing(mut f) = c.life {
+            f.pending = false
+        }
+    }
+    if p.eliciting && open_life(c) && !c.idle_rearmed {
+        refresh_idle(mut c, now)
+        c.idle_rearmed = true
+    }
+}
+
+/// Commit the sent datagram prefix. The remaining frames stay queued, while every
+/// packet number used by poll stays consumed by its sealer.
+pub fn committed(mut e: Endpoint, now: u64, k: u64) {
+    let mut replies = 0u64
+    for i in 0u64 .. order.min(k, list.len(e.staged)) {
+        match e.staged[i] {
+            StatelessReply => {
+                replies += 1
+            },
+            Packet(slot: slot, handle: handle, kind: kind, packet: p) => {
+                if let Some(mut c) = e.connections[slot] {
+                    if c.handle == handle {
+                        commit_packet(mut c, now, kind, p)
+                    }
+                }
+            },
+        }
+    }
+    if replies > 0 {
+        let suffix: List[Stateless] = clone(list.slice(e.stateless, replies, list.len(e.stateless)))
+        e.stateless = take suffix
+    }
+    list.truncate(mut e.staged, 0)
+}

@@ -17,6 +17,15 @@ std = { major = 1 }
 "transcript.hirsel" = "handshake"
 "handshake.hirsel" = "handshake"
 "transport_parameters.hirsel" = "handshake"
+"connection.hirsel" = "quic"
+"space.hirsel" = "quic"
+"connection_tls.hirsel" = "quic"
+"packet_io.hirsel" = "quic"
+"connection_rx.hirsel" = "quic"
+"connection_tx.hirsel" = "quic"
+"endpoint.hirsel" = "quic"
+"endpoint_rx.hirsel" = "quic"
+"endpoint_tx.hirsel" = "quic"
 
 [tests]
 limit = 67108864
@@ -26,3 +35,4 @@ limit = 67108864
 "initial_laws.hirsel" = "laws"
 "authentication_laws.hirsel" = "laws"
 "authentication_vectors.hirsel" = "laws"
+"connection_laws.hirsel" = "laws"

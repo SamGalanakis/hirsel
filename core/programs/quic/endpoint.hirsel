@@ -1,0 +1,208 @@
+type Stateless {
+    peer: Addr,
+    wire: Bytes
+}
+
+type Staged = StatelessReply | Packet(slot: u64, handle: ConnectionHandle, kind: codec.PacketKind, packet: StagedPacket)
+
+pub opaque type Endpoint {
+    random: Random,
+    config: EndpointConfig,
+    server: Option[(handshake.Identity, TransportConfig)],
+    connections: List[Option[Connection]],
+    cids: Map[Bytes, u64],
+    initial_cids: Map[(Addr, Bytes), u64],
+    next_handle: u64,
+    unconfirmed: u64,
+    live: u64,
+    stateless: List[Stateless],
+    staged: List[Staged],
+    drops: Map[DropReason, u64],
+    plain: Bytes
+}
+
+pub fn endpoint(r: Random, take c: EndpointConfig, take server: Option[(handshake.Identity, TransportConfig)]) -> Result[Endpoint, QuicError] {
+    if c.members == 0 || c.member >= c.members || c.cid_len < 3 || c.cid_len > 20 || c.max_mtu < 1200 || c.max_mtu > 65527 {
+        return Error(Config)
+    }
+    if c.limits.unvalidated > c.limits.connections {
+        return Error(Config)
+    }
+    match c.retry {
+        Never => (),
+        _ => return Error(Config),
+    }
+    Ok(Endpoint(random: r, config: take c, server: take server, connections: list.new(), cids: map.new(), initial_cids: map.new(), next_handle: 0, unconfirmed: 0, live: 0, stateless: list.new(), staged: list.new(), drops: map.new(), plain: list.with_capacity(65527)))
+}
+
+fn dropped(mut drops: Map[DropReason, u64], reason: DropReason) {
+    map.update_or_insert(mut drops, reason, 0, count_drop)
+}
+
+fn count_drop(mut count: u64) {
+    count = int.saturating_add(count, 1)
+}
+
+pub fn drop_count(e: Endpoint, reason: DropReason) -> u64 {
+    match map.get(e.drops, reason) {
+        Some(count) => count,
+        None => 0,
+    }
+}
+
+fn random_id(r: Random, len: u64) -> Bytes {
+    let mut id: Bytes = list.with_capacity(len)
+    host.random(r, mut id)
+    take id
+}
+
+fn draw_local_id(e: Endpoint) -> Bytes {
+    while true {
+        let mut id = random_id(e.random, int.widen(e.config.cid_len))
+        id[1] = int.narrow(e.config.member >> 8)
+        id[2] = int.narrow(e.config.member & 255)
+        if let None = map.get(e.cids, id) {
+            return take id
+        }
+    }
+    b""
+}
+
+fn reserve_handle(e: Endpoint) -> Result[ConnectionHandle, QuicError] {
+    if e.live >= int.widen(e.config.limits.connections) || e.next_handle > 0xffffffff {
+        return Error(Limit)
+    }
+    Ok(ConnectionHandle(int.narrow(e.next_handle)))
+}
+
+fn add_connection(mut e: Endpoint, take c: Connection) {
+    let mut slot = 0u64
+    while slot < list.len(e.connections) {
+        if let None = e.connections[slot] {
+            break
+        }
+        slot += 1
+    }
+    if let Server = c.side {
+        map.insert(mut e.initial_cids, (c.peer, clone(c.original_id)), slot)
+        if let None = c.params {
+            e.unconfirmed += 1
+        }
+    }
+    map.insert(mut e.cids, clone(c.local_id), slot)
+    if slot == list.len(e.connections) {
+        list.push(mut e.connections, Some(take c))
+    } else {
+        e.connections[slot] = Some(take c)
+    }
+    e.next_handle += 1
+    e.live += 1
+}
+
+pub fn connect(mut e: Endpoint, now: u64, to: Addr, take name: String, take pins: List[handshake.Pin], take identity: Option[handshake.Identity], take t: TransportConfig) -> Result[ConnectionHandle, QuicError] {
+    let handle = reserve_handle(e)?
+    let original = random_id(e.random, 8)
+    let mut c = new_connection(handle, Client, to, draw_local_id(e), clone(original), take original, take t, None, now)?
+    start_client(mut c, e.random, e.config.max_mtu, take name, take pins, take identity)?
+    add_connection(mut e, take c)
+    Ok(handle)
+}
+
+fn slot_at(e: Endpoint, id: ConnectionHandle) -> Option[u64] {
+    for i in 0u64 .. list.len(e.connections) {
+        if let Some(c) = e.connections[i] {
+            if c.handle == id {
+                return Some(i)
+            }
+        }
+    }
+    None
+}
+
+pub fn set_identity(mut e: Endpoint, take id: handshake.Identity) {
+    if let Some((mut identity, _)) = e.server {
+        identity = take id
+    }
+}
+
+pub fn set_client_pins(mut e: Endpoint, take pins: Option[List[handshake.Pin]]) {
+    if let Some((_, mut transport)) = e.server {
+        transport.client_pins = take pins
+    }
+}
+
+pub fn peer_pin(e: Endpoint, id: ConnectionHandle) -> Option[handshake.Pin] {
+    let Some(i) = slot_at(e, id) else {
+        return None
+    }
+    let Some(c) = e.connections[i] else {
+        return None
+    }
+    clone(c.peer_pin)
+}
+
+pub fn peer_params(e: Endpoint, id: ConnectionHandle) -> Option[PeerParams] {
+    let Some(i) = slot_at(e, id) else {
+        return None
+    }
+    let Some(c) = e.connections[i] else {
+        return None
+    }
+    let Some(p) = c.params else {
+        return None
+    }
+    Some(PeerParams(max_idle_ms: p.max_idle_ms, max_udp_payload: p.max_udp_payload, max_ack_delay_ms: p.max_ack_delay_ms, max_datagram_frame: p.max_datagram_frame, reset_stream_at: p.reset_stream_at, active_cid_limit: p.active_cid_limit))
+}
+
+pub fn pto_ns(e: Endpoint, id: ConnectionHandle) -> u64 {
+    if let None = slot_at(e, id) {
+        return 0
+    }
+    INITIAL_PTO_NS
+}
+
+pub fn close(mut e: Endpoint, id: ConnectionHandle, code: u64, take reason: Bytes) {
+    let Some(i) = slot_at(e, id) else {
+        return
+    }
+    if let Some(mut c) = e.connections[i] {
+        if !open_life(c) {
+            return
+        }
+        c.life = Closing(Closing(wire: CloseFrame(code: order.min(code, MAX_NUMBER), frame: 0, application: true, reason: take reason), pending: true, max_bytes: 65527))
+        c.deadline = None
+    }
+}
+
+fn release_connection(mut e: Endpoint, take c: Connection) {
+    let _ = map.remove(mut e.cids, c.local_id)
+    if let Server = c.side {
+        let _ = map.remove(mut e.initial_cids, (c.peer, clone(c.original_id)))
+        if let None = c.params {
+            e.unconfirmed -= 1
+        }
+    }
+    e.live -= 1
+}
+
+pub fn timeout(mut e: Endpoint, now: u64, mut events: List[Event]) {
+    for i in 0u64 .. list.len(e.connections) {
+        if expired(e.connections[i], now) {
+            if let Some(take gone) = replace(mut e.connections[i], None) {
+                if open_life(gone) {
+                    list.push(mut events, Closed(gone.handle, Idle))
+                }
+                release_connection(mut e, take gone)
+            }
+        }
+    }
+}
+
+fn expired(connection: Option[Connection], now: u64) -> bool {
+    if let Some(c) = connection {
+        if let Some(deadline) = c.deadline {
+            return now >= deadline
+        }
+    }
+    false
+}

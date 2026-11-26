@@ -1,0 +1,155 @@
+const CRYPTO_LIMIT: u64 = 16384
+
+fn new_space() -> Space {
+    Space(receive: None, send: None, next: 0, sent: list.new(), received: list.new(), discard_before: 0, largest: None, ack_pending: false, crypto_in: Reassembly(at: 0, data: b"", present: list.new()), crypto_out: b"", crypto_committed: 0)
+}
+
+fn install_keys(mut s: Space, mut keys: schedule.Schedule, level: packet.Space) -> bool {
+    let Ok(take opener) = schedule.opener(keys, level) else {
+        return false
+    }
+    let Ok(take receive_mask) = schedule.header_mask(keys, level, false) else {
+        return false
+    }
+    let Ok(take send_mask) = schedule.header_mask(keys, level, true) else {
+        return false
+    }
+    let Ok(take sealer) = schedule.sealer(mut keys, level, 0, s.next) else {
+        return false
+    }
+    s.receive = Some(ReceiveKeys(opener: take opener, mask: take receive_mask))
+    s.send = Some(SendKeys(sealer: take sealer, mask: take send_mask))
+    true
+}
+
+fn install_handshake(mut s: Space, mut h: handshake.Handshake) -> bool {
+    let Ok(take opener) = handshake.handshake_opener(h) else {
+        return false
+    }
+    let Ok(take receive_mask) = handshake.handshake_mask(h, false) else {
+        return false
+    }
+    let Ok(take send_mask) = handshake.handshake_mask(h, true) else {
+        return false
+    }
+    let Ok(take sealer) = handshake.handshake_sealer(mut h, 0, s.next) else {
+        return false
+    }
+    s.receive = Some(ReceiveKeys(opener: take opener, mask: take receive_mask))
+    s.send = Some(SendKeys(sealer: take sealer, mask: take send_mask))
+    true
+}
+
+fn discard(mut s: Space) {
+    s = new_space()
+}
+
+fn covers(ranges: List[codec.AckRange], low: u64, high: u64) -> bool {
+    for r in ranges {
+        if low >= r.smallest && high <= r.largest {
+            return true
+        }
+    }
+    false
+}
+
+/// Sent ranges are in ascending order. Abandoned packet numbers stay absent.
+fn record_sent(mut s: Space, number: u64) {
+    let n = list.len(s.sent)
+    if n != 0 && s.sent[n - 1].largest + 1 == number {
+        s.sent[n - 1].largest = number
+    } else {
+        list.push(mut s.sent, codec.AckRange(smallest: number, largest: number))
+    }
+}
+
+fn valid_ack(s: Space, ranges: List[codec.AckRange]) -> bool {
+    for range in ranges {
+        if !covers(s.sent, range.smallest, range.largest) {
+            return false
+        }
+    }
+    true
+}
+
+/// RFC 9000 §13.2.4 permits forgetting old ranges. Never process a packet again
+/// after its range has been forgotten. The codec writes ranges in descending order.
+fn record_received(mut s: Space, number: u64) {
+    let mut first = 0u64
+    while first < list.len(s.received) && s.received[first].smallest > number + 1 {
+        first += 1
+    }
+    let mut low = number
+    let mut high = number
+    let mut end = first
+    while end < list.len(s.received) && s.received[end].largest + 1 >= low {
+        low = order.min(low, s.received[end].smallest)
+        high = order.max(high, s.received[end].largest)
+        end += 1
+    }
+    let mut next: List[codec.AckRange] = list.with_capacity(65)
+    list.append(mut next, list.slice(s.received, 0, first))
+    list.push(mut next, codec.AckRange(smallest: low, largest: high))
+    list.append(mut next, list.slice(s.received, end, list.len(s.received)))
+    if list.len(next) > 64 {
+        s.discard_before = next[64].largest + 1
+        list.truncate(mut next, 64)
+    }
+    s.received = take next
+}
+
+fn receive_crypto(mut r: Reassembly, offset: u64, data: Bytes) -> bool {
+    let len = list.len(data)
+    let end = offset + len
+    if end <= r.at {
+        return true
+    }
+    if end - r.at > CRYPTO_LIMIT {
+        return false
+    }
+    if list.capacity(r.data) == 0 {
+        r.data = list.with_capacity(CRYPTO_LIMIT)
+        r.present = list.with_capacity(CRYPTO_LIMIT)
+        list.fill(mut r.data, CRYPTO_LIMIT, 0)
+        list.fill(mut r.present, CRYPTO_LIMIT, false)
+    }
+    for p in order.max(r.at, offset) .. end {
+        let i = p % CRYPTO_LIMIT
+        if !r.present[i] {
+            r.data[i] = data[p - offset]
+            r.present[i] = true
+        }
+    }
+    true
+}
+
+fn tls_message(mut r: Reassembly) -> Result[Option[Bytes], u64] {
+    if list.len(r.present) == 0 {
+        return Ok(None)
+    }
+    let mut len = 0u64
+    for i in 1u64 .. 4 {
+        let p = (r.at + i) % CRYPTO_LIMIT
+        if !r.present[p] {
+            return Ok(None)
+        }
+        len = len * 256 + int.widen(r.data[p])
+    }
+    len += 4
+    if len > CRYPTO_LIMIT {
+        return Error(0x0d)
+    }
+    for i in 0u64 .. len {
+        if !r.present[(r.at + i) % CRYPTO_LIMIT] {
+            return Ok(None)
+        }
+    }
+    let mut wire: Bytes = list.with_capacity(len)
+    for _ in 0u64 .. len {
+        let p = r.at % CRYPTO_LIMIT
+        list.push(mut wire, r.data[p])
+        r.present[p] = false
+        r.at += 1
+    }
+    Ok(Some(take wire))
+}

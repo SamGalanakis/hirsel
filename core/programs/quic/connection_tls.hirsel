@@ -1,0 +1,117 @@
+type ConnectionFailure = Wire(u64, u64) | Tls(handshake.Error)
+
+fn queue_flight(mut c: Connection, take f: handshake.Flight) {
+    list.append(mut c.initial.crypto_out, f.initial)
+    list.append(mut c.encrypted.crypto_out, f.encrypted)
+}
+
+fn suites() -> List[schedule.Suite13] {
+    let mut out: List[schedule.Suite13] = list.with_capacity(3)
+    list.push(mut out, Aes128GcmSha256)
+    list.push(mut out, Aes256GcmSha384)
+    list.push(mut out, ChaCha20Poly1305Sha256)
+    take out
+}
+
+fn start_client(mut c: Connection, random: Random, mtu: u16, take name: String, take pins: List[handshake.Pin], take identity: Option[handshake.Identity]) -> Result[(), QuicError] {
+    let config = handshake.ClientConfig(name: string.into_bytes(take name), protocols: protocols(c.transport), pins: take pins, identity: take identity, group: X25519, parameters: parameters(c.transport, clone(c.local_id), mtu))
+    match handshake.start_client(random, take config) {
+        Ok((take h, take flight)) => {
+            c.tls = Some(take h)
+            queue_flight(mut c, take flight)
+            Ok(())
+        },
+        Error(e) => Error(Handshake(e)),
+    }
+}
+
+fn accept_tls(mut c: Connection, random: Random, mtu: u16, ids: handshake.PeerConnectionIds, wire: Bytes) -> Result[(), handshake.Error] {
+    let Some(take identity) = replace(mut c.server_id, None) else {
+        return Error(LocalFailure)
+    }
+    let mut p = parameters(c.transport, clone(c.local_id), mtu)
+    p.original_destination = Some(clone(c.original_id))
+    let config = handshake.ServerConfig(protocols: protocols(c.transport), suites: suites(), identity: take identity, client_pins: clone(c.transport.client_pins), parameters: take p)
+    let (initial_state, flight) = handshake.accept_client(random, config, ids, wire)?
+    let mut h = take initial_state
+    if !install_handshake(mut c.encrypted, mut h) {
+        return Error(LocalFailure)
+    }
+    c.tls = Some(take h)
+    queue_flight(mut c, take flight)
+    Ok(())
+}
+
+fn advance_tls(mut c: Connection, random: Random, mtu: u16, level: packet.Space, wire: Bytes, mut events: List[Event]) -> Result[(), handshake.Error] {
+    let original: Option[Bytes] = match c.side {
+        Client => Some(clone(c.original_id)),
+        Server => None,
+    }
+    let ids = handshake.PeerConnectionIds(initial_source: clone(c.peer_id), original_destination: take original, retry_source: None)
+    let Some(take state) = replace(mut c.tls, None) else {
+        return accept_tls(mut c, random, mtu, ids, wire)
+    }
+    let mut h = take state
+    let f = handshake.receive(mut h, level, ids, wire)?
+    queue_flight(mut c, take f)
+    if let Initial = level {
+        let _ = install_handshake(mut c.encrypted, mut h)
+    }
+    if let None = c.params {
+        if let Some((take protocol, take params)) = handshake.negotiated(h) {
+            let Ok(take alpn) = string.from_utf8(take protocol) else {
+                return Error(NoApplicationProtocol)
+            }
+            let Some(take application_schedule) = handshake.take_keys(mut h) else {
+                return Error(LocalFailure)
+            }
+            let mut keys = take application_schedule
+            if !install_keys(mut c.application, mut keys, Application) {
+                return Error(LocalFailure)
+            }
+            c.params = Some(take params)
+            c.peer_pin = handshake.peer_pin(h)
+            if let Server = c.side {
+                c.handshake_done = true
+                discard(mut c.encrypted)
+            }
+            list.push(mut events, Connected(c: c.handle, alpn: take alpn))
+        }
+    }
+    c.tls = Some(take h)
+    Ok(())
+}
+
+fn next_tls(mut c: Connection, level: packet.Space) -> Result[Option[Bytes], u64] {
+    match level {
+        Initial => tls_message(mut c.initial.crypto_in),
+        Handshake => tls_message(mut c.encrypted.crypto_in),
+        Application => tls_message(mut c.application.crypto_in),
+        _ => Ok(None),
+    }
+}
+
+fn drain_tls(mut c: Connection, random: Random, mtu: u16, level: packet.Space, mut events: List[Event]) -> Result[(), ConnectionFailure] {
+    while true {
+        match next_tls(mut c, level) {
+            Error(code) => return Error(Wire(code, 0x06)),
+            Ok(None) => return Ok(()),
+            Ok(Some(wire)) => {
+                if let Error(e) = advance_tls(mut c, random, mtu, level, wire, mut events) {
+                    return Error(Tls(e))
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+fn tls_reason(e: handshake.Error) -> CloseReason {
+    match e {
+        PinMismatch => Refused(Pin),
+        BadCertificate => Refused(Certificate),
+        CertificateRequired => Refused(Certificate),
+        NoApplicationProtocol => Refused(Alpn),
+        _ => Transport(code: handshake.error_code(e), frame: 0),
+    }
+}

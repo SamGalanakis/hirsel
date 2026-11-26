@@ -1,0 +1,241 @@
+// The Hirsel QUIC endpoint interop.py runs against quinn on loopback UDP (law Q4,
+// handshake only, and Q16's client pins).
+// Usage: interop server CLIENT_PIN_HEX|none
+//        interop client SERVER_PORT SERVER_PIN_HEX
+// A server binds an ephemeral port and prints it. Every number is printed as 16 hex digits.
+// Stdout lines: `bound <port>`, `certificate <sha256 of our leaf>`, `connected <alpn>`,
+// `params <max_idle_ms> <max_udp_payload> <max_ack_delay_ms> <max_datagram_frame> <active_cid_limit>`
+// (the peer's transport parameters as the endpoint read them), `peer <sha256 of the peer's
+// pinned leaf>`, then one closing line: `closed transport <code> <frame>`,
+// `closed application <code>`, `closed refused <reason>` or `closed idle`.
+const SECOND: u64 = 1000000000
+
+const LOOPBACK: u32 = 0x7f000001
+
+const ALPN: String = "hq-interop"
+
+// The parameters interop.py expects quinn to read from us.
+const IDLE_MS: u32 = 7000
+
+const MTU: u16 = 1200
+
+fn say(out: Stdout, tag: String, b: Bytes) waits {
+    let mut line = string.from(tag)
+    if list.len(b) != 0 {
+        string.push(mut line, " ")
+        string.push(mut line, std.hex.encode(b))
+    }
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn say_numbers(out: Stdout, tag: String, numbers: List[u64]) waits {
+    let mut line = string.from(tag)
+    for n in numbers {
+        let mut b: Bytes = list.with_capacity(8)
+        list.put_word_be(mut b, n)
+        string.push(mut line, " ")
+        string.push(mut line, std.hex.encode(b))
+    }
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn say_text(out: Stdout, tag: String, text: String) waits {
+    let mut line = string.from(tag)
+    string.push(mut line, " ")
+    string.push(mut line, text)
+    string.push(mut line, "\n")
+    result.unwrap(stdout.write(out, line))
+}
+
+fn digest_bytes(digest: Inline[u8, 32]) -> Bytes {
+    let mut d: Bytes = list.with_capacity(32)
+    for i in 0u64 .. 32 {
+        list.push(mut d, digest[i])
+    }
+    take d
+}
+
+fn argument(a: Args, i: u64) -> String {
+    let Some(v) = args.get(a, i) else {
+        fail("missing argument")
+    }
+    string.from(v)
+}
+
+fn identity(r: Random) -> (quic.handshake.Identity, Bytes) {
+    let mut point: Bytes = list.with_capacity(65)
+    let key = result.unwrap(secret.p256_key(r, "sign(p256)", mut point))
+    let start = option.unwrap(std.time.from_unix(1704067200, 0))
+    let end = option.unwrap(std.time.from_unix(2524608000, 0))
+    let der = result.unwrap(std.x509_build.self_signed_p256(key, r, point, 1, "localhost", start, end))
+    let mut chain: List[Bytes] = list.with_capacity(1)
+    list.push(mut chain, clone(der))
+    (Identity(chain: take chain, key: take key, alg: P256), take der)
+}
+
+fn pins(text: String) -> List[quic.handshake.Pin] {
+    let digest = option.unwrap(std.hex.decode(string.as_bytes(text)))
+    let mut d: Inline[u8, 32] =[0; 32]
+    for i in 0u64 .. 32 {
+        d[i] = digest[i]
+    }
+    let mut out: List[quic.handshake.Pin] = list.with_capacity(1)
+    list.push(mut out, Cert(d))
+    take out
+}
+
+fn transport(take client_pins: Option[List[quic.handshake.Pin]]) -> quic.TransportConfig {
+    let mut alpn: List[String] = list.with_capacity(1)
+    list.push(mut alpn, ALPN)
+    quic.TransportConfig(max_idle_ms: IDLE_MS, initial_max_data: 0, initial_max_stream_data: 0, max_streams_bidi: 0, max_streams_uni: 0, max_datagram_frame: 0, send_bytes: 16384, max_gaps: 32, cc: Cubic, alpn: take alpn, client_pins: take client_pins)
+}
+
+fn endpoint_config(r: Random) -> quic.EndpointConfig {
+    let mut reset: Bytes = list.with_capacity(32)
+    host.random(r, mut reset)
+    let mut token: Bytes = list.with_capacity(32)
+    host.random(r, mut token)
+    quic.EndpointConfig(member: 0, members: 1, cid_len: 8, max_mtu: MTU, retry: Never, reset_key: result.unwrap(secret.seal(take reset, "mac")), token_key: result.unwrap(secret.seal(take token, "kdf")), limits: quic.EndpointLimits(connections: 4, unvalidated: 4, datagram_bytes: 0))
+}
+
+fn refusal_name(r: quic.Refusal) -> String {
+    match r {
+        Version => "version",
+        Alpn => "alpn",
+        Pin => "pin",
+        Limit(_) => "limit",
+        Token => "token",
+        Certificate => "certificate",
+    }
+}
+
+/// Report one event; true when the connection has ended.
+fn report(e: quic.Endpoint, event: quic.Event, out: Stdout) -> bool waits {
+    match event {
+        Connected(c: c, alpn: alpn) => {
+            say_text(out, "connected", alpn)
+            let p = option.unwrap(quic.peer_params(e, c))
+            let mut numbers: List[u64] = list.with_capacity(5)
+            list.push(mut numbers, p.max_idle_ms)
+            list.push(mut numbers, p.max_udp_payload)
+            list.push(mut numbers, p.max_ack_delay_ms)
+            list.push(mut numbers, p.max_datagram_frame)
+            list.push(mut numbers, p.active_cid_limit)
+            say_numbers(out, "params", numbers)
+            if let Some(Cert(digest)) = quic.peer_pin(e, c) {
+                say(out, "peer", digest_bytes(digest))
+            }
+            false
+        },
+        Closed(_, reason) => {
+            match reason {
+                Transport(code: code, frame: frame) => {
+                    let mut numbers: List[u64] = list.with_capacity(2)
+                    list.push(mut numbers, code)
+                    list.push(mut numbers, frame)
+                    say_numbers(out, "closed transport", numbers)
+                },
+                Application(code: code) => {
+                    let mut numbers: List[u64] = list.with_capacity(1)
+                    list.push(mut numbers, code)
+                    say_numbers(out, "closed application", numbers)
+                },
+                Idle => say(out, "closed idle", b""),
+                Refused(r) => say_text(out, "closed refused", refusal_name(r)),
+            }
+            true
+        },
+    }
+}
+
+/// Poll until the endpoint has nothing more to send, handing each batch to one udp_send
+/// and its committed count to `committed`. Returns the endpoint's next deadline.
+fn flush(mut e: quic.Endpoint, mut socket: UdpSocket, clock: Clock) -> Option[u64] waits {
+    let mut next: Option[u64] = None
+    for _ in 0u64 .. 64 {
+        let now = host.mono_ns(clock)
+        let mut out: Bytes = list.with_capacity(16 * 1500)
+        let mut outputs: List[quic.Output] = list.with_capacity(16)
+        next = quic.poll(mut e, now, mut out, mut outputs)
+        let mut tx: List[UdpTx] = list.with_capacity(16)
+        for o in outputs {
+            if let Transmit(to: to, at: at, len: len, ecn: ecn, ..) = o {
+                list.push(mut tx, UdpTx(to, at: at, len: len, ecn: ecn))
+            }
+        }
+        if list.len(tx) == 0 {
+            quic.committed(mut e, now, 0)
+            return next
+        }
+        let k = result.unwrap(host.udp_send(mut socket, out, tx, Never))
+        quic.committed(mut e, now, k)
+    }
+    next
+}
+
+pub fn main(a: Args, n: Net, clock: Clock, r: Random, out: Stdout) -> Result[(), Exit] waits {
+    let client = argument(a, 0) == "client"
+    let (take opened_socket, local) = result.unwrap(host.udp_bind(n, Addr(ip: V4(LOOPBACK), port: 0), UdpOptions(slots: 16, slot_bytes: 2048)))
+    let mut socket = take opened_socket
+    let mut port_bytes: Bytes = list.with_capacity(2)
+    list.put_word_be(mut port_bytes, local.port)
+    say(out, "bound", port_bytes)
+    let deadline = host.mono_ns(clock) + 20 * SECOND
+    let mut e = if client {
+        let port: u16 = result.unwrap(int.parse(argument(a, 1)))
+        let mut e = result.unwrap(quic.endpoint(r, endpoint_config(r), None))
+        let _ = result.unwrap(quic.connect(mut e, host.mono_ns(clock), Addr(ip: V4(LOOPBACK), port), "localhost", pins(argument(a, 2)), None, transport(None)))
+        take e
+    } else {
+        let required = argument(a, 1)
+        let client_pins: Option[List[quic.handshake.Pin]] = if required == "none" {
+            None
+        } else {
+            Some(pins(required))
+        }
+        let (id, der) = identity(r)
+        say(out, "certificate", digest_bytes(std.sha256.hash(der)))
+        result.unwrap(quic.endpoint(r, endpoint_config(r), Some((take id, transport(take client_pins)))))
+    }
+    let mut data: Bytes = list.with_capacity(16 * 2048)
+    let mut packets: List[UdpPacket] = list.with_capacity(16)
+    let mut events: List[quic.Event] = list.new()
+    let mut ended = false
+    while !ended {
+        let next = flush(mut e, mut socket, clock)
+        let now = host.mono_ns(clock)
+        if now >= deadline {
+            fail("interop deadline")
+        }
+        let mut until = order.min(deadline, now + SECOND / 20)
+        if let Some(t) = next {
+            until = order.min(until, order.max(t, now))
+        }
+        list.clear(mut data)
+        list.clear(mut packets)
+        match host.udp_recv(mut socket, mut data, mut packets, At(clock, until)) {
+            Ok(_) => (),
+            Error(TimedOut) => (),
+            Error(_) => fail("UDP receive failed"),
+        }
+        let at = host.mono_ns(clock)
+        for p in packets {
+            let UdpPacket(peer, at: start, len, truncated, ecn) = p
+            if !truncated {
+                quic.receive_datagram(mut e, at, peer, ecn, mut data, start, len, mut events)
+            }
+        }
+        quic.timeout(mut e, host.mono_ns(clock), mut events)
+        for event in events {
+            if report(e, event, out) {
+                ended = true
+            }
+        }
+        list.clear(mut events)
+    }
+    // Send what the end left queued (a CONNECTION_CLOSE) before exiting.
+    let _ = flush(mut e, mut socket, clock)
+    Ok(())
+}

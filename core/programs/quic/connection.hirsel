@@ -1,0 +1,221 @@
+pub type ConnectionHandle: key = ConnectionHandle(u32)
+
+pub type Controller = NewReno | Cubic
+
+pub type RetryPolicy = Never | Always | Above(u32)
+
+pub type EndpointConfig {
+    member: u16,
+    members: u16,
+    cid_len: u8,
+    max_mtu: u16,
+    retry: RetryPolicy,
+    reset_key: Secret,
+    token_key: Secret,
+    limits: EndpointLimits
+}
+
+pub type EndpointLimits {
+    connections: u32,
+    unvalidated: u32,
+    datagram_bytes: u32
+}
+
+pub type TransportConfig {
+    max_idle_ms: u32,
+    initial_max_data: u64,
+    initial_max_stream_data: u64,
+    max_streams_bidi: u64,
+    max_streams_uni: u64,
+    max_datagram_frame: u16,
+    send_bytes: u64,
+    max_gaps: u16,
+    cc: Controller,
+    alpn: List[String],
+    client_pins: Option[List[handshake.Pin]]
+}
+
+pub type PeerParams {
+    max_idle_ms: u64,
+    max_udp_payload: u64,
+    max_ack_delay_ms: u64,
+    max_datagram_frame: u64,
+    reset_stream_at: bool,
+    active_cid_limit: u64
+}
+
+pub type Output = Transmit(to: Addr, at: u64, len: u64, ecn: u8, send_at: u64) | Wake(at: u64)
+
+pub type Event = Connected(c: ConnectionHandle, alpn: String) | Closed(ConnectionHandle, CloseReason)
+
+pub type CloseReason = Transport(code: u64, frame: u64) | Application(code: u64) | Idle | Refused(Refusal)
+
+pub type Refusal = Version | Alpn | Pin | Limit(u32) | Token | Certificate
+
+pub type QuicError = Config | Limit | Handshake(handshake.Error)
+
+pub type DropReason: key = DatagramTooShort | SmallInitial | SmallUnsupportedVersion | VersionNegotiation | UnsupportedVersion | MalformedHeader | UnknownConnection | WrongPath | SampleTooShort | KeysUnavailable | PacketProtection | Duplicate | Draining
+
+const INITIAL_PTO_NS: u64 = 999000000
+
+const MAX_NUMBER: u64 = (1u64 << 62) - 1
+
+type ReceiveKeys {
+    opener: packet.Opener,
+    mask: packet.HeaderMask
+}
+
+type SendKeys {
+    sealer: packet.Sealer,
+    mask: packet.HeaderMask
+}
+
+type Reassembly {
+    at: u64,
+    data: Bytes,
+    present: List[bool]
+}
+
+type Space {
+    receive: Option[ReceiveKeys],
+    send: Option[SendKeys],
+    next: u64,
+    sent: List[codec.AckRange],
+    received: List[codec.AckRange],
+    discard_before: u64,
+    largest: Option[u64],
+    ack_pending: bool,
+    crypto_in: Reassembly,
+    crypto_out: Bytes,
+    crypto_committed: u64
+}
+
+type CloseFrame {
+    code: u64,
+    frame: u64,
+    application: bool,
+    reason: Bytes
+}
+
+type Closing {
+    wire: CloseFrame,
+    pending: bool,
+    max_bytes: u64
+}
+
+type Life = Open | Closing(Closing) | Draining
+
+pub opaque type Connection {
+    handle: ConnectionHandle,
+    side: schedule.Side,
+    peer: Addr,
+    local_id: Bytes,
+    original_id: Bytes,
+    peer_id: Bytes,
+    authenticated: bool,
+    initial: Space,
+    encrypted: Space,
+    application: Space,
+    tls: Option[handshake.Handshake],
+    transport: TransportConfig,
+    server_id: Option[handshake.Identity],
+    params: Option[handshake.TransportParameters],
+    peer_pin: Option[handshake.Pin],
+    handshake_done: bool,
+    life: Life,
+    deadline: Option[u64],
+    idle_rearmed: bool
+}
+
+fn parameters(t: TransportConfig, take local_id: Bytes, mtu: u16) -> handshake.TransportParameters {
+    let mut p = handshake.default_parameters(take local_id)
+    p.max_idle_ms = int.widen(t.max_idle_ms)
+    p.max_udp_payload = int.widen(mtu)
+    p.initial_max_data = t.initial_max_data
+    p.initial_max_stream_data_bidi_local = t.initial_max_stream_data
+    p.initial_max_stream_data_bidi_remote = t.initial_max_stream_data
+    p.initial_max_stream_data_uni = t.initial_max_stream_data
+    p.initial_max_streams_bidi = t.max_streams_bidi
+    p.initial_max_streams_uni = t.max_streams_uni
+    p.max_datagram_frame = int.widen(t.max_datagram_frame)
+    p.active_cid_limit = 8
+    p.reset_stream_at = true
+    take p
+}
+
+fn protocols(t: TransportConfig) -> List[Bytes] {
+    let mut out: List[Bytes] = list.with_capacity(list.len(t.alpn))
+    for name in t.alpn {
+        list.push(mut out, clone(string.as_bytes(name)))
+    }
+    take out
+}
+
+fn new_connection(handle: ConnectionHandle, side: schedule.Side, peer: Addr, take local_id: Bytes, take original_id: Bytes, take peer_id: Bytes, take transport: TransportConfig, take server_id: Option[handshake.Identity], now: u64) -> Result[Connection, QuicError] {
+    let mut initial = new_space()
+    let Ok(take initial_schedule) = schedule.quic_initial(side, original_id) else {
+        return Error(Config)
+    }
+    let mut keys = take initial_schedule
+    if !install_keys(mut initial, mut keys, Initial) {
+        return Error(Config)
+    }
+    let mut c = Connection(handle: handle, side: side, peer: peer, local_id: take local_id, original_id: take original_id, peer_id: take peer_id, authenticated: false, initial: take initial, encrypted: new_space(), application: new_space(), tls: None, transport: take transport, server_id: take server_id, params: None, peer_pin: None, handshake_done: false, life: Open, deadline: None, idle_rearmed: false)
+    refresh_idle(mut c, now)
+    Ok(take c)
+}
+
+fn open_life(c: Connection) -> bool {
+    match c.life {
+        Open => true,
+        _ => false,
+    }
+}
+
+fn deadline_after(now: u64, duration: u64) -> u64 {
+    now + order.min(duration, 0xffffffffffffffff - now)
+}
+
+fn refresh_idle(mut c: Connection, now: u64) {
+    let local: u64 = int.widen(c.transport.max_idle_ms)
+    let peer = match c.params {
+        Some(p) => p.max_idle_ms,
+        None => 0,
+    }
+    let ms = if local == 0 || peer == 0 {
+        order.max(local, peer)
+    } else {
+        order.min(local, peer)
+    }
+    c.deadline = if ms == 0 {
+        None
+    } else {
+        Some(deadline_after(now, order.max(3 * INITIAL_PTO_NS, order.min(ms, 18446744073709) * 1000000)))
+    }
+}
+
+fn start_closing(mut c: Connection, now: u64, take wire: CloseFrame) {
+    c.life = Closing(Closing(wire: take wire, pending: true, max_bytes: 65527))
+    c.deadline = Some(deadline_after(now, 3 * INITIAL_PTO_NS))
+}
+
+fn start_draining(mut c: Connection, now: u64) {
+    c.life = Draining
+    c.deadline = Some(deadline_after(now, 3 * INITIAL_PTO_NS))
+}
+
+fn transport_close(code: u64, frame: u64) -> CloseFrame {
+    CloseFrame(code: code, frame: frame, application: false, reason: b"")
+}
+
+fn refuse(mut c: Connection, now: u64, code: u64, frame: u64, reason: CloseReason, mut events: List[Event]) {
+    start_closing(mut c, now, transport_close(code, frame))
+    list.push(mut events, Closed(c.handle, reason))
+}
+
+fn established(c: Connection) -> bool {
+    if let Some(_) = c.params {
+        return true
+    }
+    false
+}

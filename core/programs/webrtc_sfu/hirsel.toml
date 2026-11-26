@@ -89,6 +89,7 @@ grants = ["Tasks", "Clock", "Random", "Net=UdpBind 127.0.0.0/8 0-65535;UdpSend 1
 "pool_fault_laws.hirsel" = "laws"
 "pool_cost_laws.hirsel" = "laws"
 "pool_ledger_laws.hirsel" = "laws"
+"pool_admission_laws.hirsel" = "laws"
 "cascade/laws.hirsel" = "laws"
 "cascade/forward_laws.hirsel" = "laws"
 "cascade/repair_laws.hirsel" = "laws"

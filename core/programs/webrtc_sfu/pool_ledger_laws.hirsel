@@ -41,7 +41,7 @@ fn ledger_run(net: Net, clock: Clock) waits {
     list.push(mut free, 3 * on0 + spare)
     list.push(mut free, 3 * on1 + spare)
     let fixture = hall(net, clock, 34500)
-    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, signal.ledger(take free, 2, session)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, signal.ledger(take free, 2, session)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused: list.new(), fenced: list.new(), refused_out: 0)
     let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), limits, echo_embed()))
     let _ = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), limits, echo_embed()))
     let _ = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"c"), limits, echo_embed()))
@@ -69,8 +69,8 @@ fn ledger_run(net: Net, clock: Clock) waits {
     // Peers 2 and 3 offer in one turn: their builds are homed together, and only one
     // unit has a session's bytes left.
     signal.enter(mut t.p, a, Part(inc_of(1), 6, false, false))
-    signal.enter(mut t.p, a, Joined(2))
-    signal.enter(mut t.p, a, Joined(3))
+    signal.enter(mut t.p, a, Joined(2, anon_caller()))
+    signal.enter(mut t.p, a, Joined(3, anon_caller()))
     signal.enter(mut t.p, a, PartEnd)
     pool_say(mut t, a, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
     pool_say(mut t, a, 3, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))

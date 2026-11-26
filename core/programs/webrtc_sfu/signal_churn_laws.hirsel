@@ -50,8 +50,8 @@ fn browser_offer() -> Bytes {
 fn subscriber_room(net: Net, clock: Clock) -> Sig waits {
     let mut r = adapter_room(net, clock, 16000, Continued)
     enter_room(mut r, Part(inc_of(1), 5, true, true))
-    enter_room(mut r, Joined(YOU))
-    enter_room(mut r, Joined(SUBSCRIBER))
+    enter_room(mut r, Joined(YOU, anon_caller()))
+    enter_room(mut r, Joined(SUBSCRIBER, anon_caller()))
     enter_room(mut r, PartEnd)
     say_as(mut r, SUBSCRIBER, Offer(1, browser_offer()))
     until_idle(mut r)
@@ -64,7 +64,7 @@ fn subscriber_room(net: Net, clock: Clock) -> Sig waits {
 // Peer `p` joins in a Part at `revision`.
 fn join_at(mut r: Sig, p: u32, revision: u64) {
     enter_room(mut r, Part(inc_of(1), revision, false, false))
-    enter_room(mut r, Joined(p))
+    enter_room(mut r, Joined(p, anon_caller()))
     enter_room(mut r, PartEnd)
 }
 
@@ -152,8 +152,8 @@ fn churn_run(net: Net, clock: Clock) waits {
                 revision += 1
                 enter_room(mut r, Lost)
                 enter_room(mut r, Part(inc_of(1), revision, true, true))
-                enter_room(mut r, Joined(YOU))
-                enter_room(mut r, Joined(SUBSCRIBER))
+                enter_room(mut r, Joined(YOU, anon_caller()))
+                enter_room(mut r, Joined(SUBSCRIBER, anon_caller()))
                 enter_room(mut r, PartEnd)
             },
             Refuses => refuse_reoffer(mut r, p),

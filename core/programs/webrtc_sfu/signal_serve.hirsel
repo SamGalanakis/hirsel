@@ -38,15 +38,17 @@ pub type RelayLink {
 
 pub type ServeError = Router(router.RouterError) | Bind(NetError) | Identity | Spawn | Units | Timers | Queues
 
-/// The pool's unit deadlines, active polling interval and signaling retry policy.
+/// The pool's unit deadlines, active polling interval, signaling retry policy, and
+/// how long a room stays continuously empty before `PoolReport.Empty` is raised.
 pub type ServiceTiming: key {
     udp: units.Timing,
     active_tick_ns: u64,
     rejoin_initial_ns: u64,
-    rejoin_max_ns: u64
+    rejoin_max_ns: u64,
+    empty_idle_ns: u64
 }
 
-pub const DEFAULT_TIMING: ServiceTiming = ServiceTiming(udp: units.DEFAULT_TIMING, active_tick_ns: 5000000, rejoin_initial_ns: 1000000000, rejoin_max_ns: 8000000000)
+pub const DEFAULT_TIMING: ServiceTiming = ServiceTiming(udp: units.DEFAULT_TIMING, active_tick_ns: 5000000, rejoin_initial_ns: 1000000000, rejoin_max_ns: 8000000000, empty_idle_ns: 30000000000)
 
 fn timing_valid(t: ServiceTiming) -> bool {
     t.udp.control_send_ns != 0 && t.udp.media_send_ns != 0 && t.active_tick_ns != 0 && t.active_tick_ns <= t.udp.idle_poll_ns && t.udp.idle_poll_ns <= units.DEFAULT_TIMING.idle_poll_ns && t.rejoin_initial_ns != 0 && t.rejoin_initial_ns <= t.rejoin_max_ns
@@ -465,6 +467,7 @@ pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] wa
         list.push(mut free, limits.unit_bytes - pool_unit_bytes(k, limits, session, queues))
     }
     let mut pool: Rooms[M] = rooms(limits.rooms, ledger(take free, limits.sessions, session))
+    empty_idle(mut pool, timing.empty_idle_ns)
     let mut revokes_to: Option[Sender[RelayRevoke]] = None
     if let Some(take link) = take linked {
         let RelayLink(master: take master, plan: take plan, revokes: take to) = take link

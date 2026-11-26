@@ -39,7 +39,7 @@ pub fn room_name(b: Bytes) -> RoomName {
 
 pub type PoolOrder[M]: send = Open(name: RoomName, dial: runner.room_client.Dial, limits: router.RoomLimits, embed: Embed[M]) | Close(name: RoomName)
 
-pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy)
+pub type PoolReport: send = Opened(name: RoomName, room: peer.RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: peer.RoomId) | Empty(name: RoomName, room: peer.RoomId, idle_ns: u64) | Closed(name: RoomName, room: peer.RoomId, why: CloseWhy)
 
 pub type PoolRefusal: send = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(router.RouterError)
 
@@ -50,13 +50,18 @@ pub type CloseWhy: send = Asked | Fault(router.RouterError)
 /// room waits for it (RTC-10 Isolation item 3).
 pub const ROOM_OUT: u64 = 1024
 
+// A room's occupancy life for `Occupied` / `Empty` reports: waiting for `Open` to ack,
+// occupied by at least one non-service peer, or vacant since monotonic time `since`.
+type Occupancy: key = Unopened | Occupied | Vacant(since: u64, reported: bool, seen: bool)
+
 // One open room on the control unit.
 type Served[M] {
     name: RoomName,
     a: Adapter[M],
     out: List[runner.room_client.RoomOut[M]],
     dropped: u64,
-    why: CloseWhy
+    why: CloseWhy,
+    occupancy: Occupancy
 }
 
 /// The control unit's rooms (RTC-10) and every unit's ledger, which homes and
@@ -68,11 +73,17 @@ pub opaque type Rooms[M] {
     reports: List[PoolReport],
     ended: List[peer.RoomId],
     relaying: Option[Relaying],
-    unix_s: u64
+    unix_s: u64,
+    empty_idle_ns: u64
 }
 
 pub fn rooms[M](most: u32, take l: Ledger) -> Rooms[M] {
-    Rooms(rooms: most, l: take l, served: list.new(), reports: list.new(), ended: list.new(), relaying: None, unix_s: 0)
+    Rooms(rooms: most, l: take l, served: list.new(), reports: list.new(), ended: list.new(), relaying: None, unix_s: 0, empty_idle_ns: DEFAULT_TIMING.empty_idle_ns)
+}
+
+/// How long a room stays continuously empty before `PoolReport.Empty` is raised.
+pub fn empty_idle[M](mut p: Rooms[M], idle_ns: u64) {
+    p.empty_idle_ns = idle_ns
 }
 
 /// Every room opened from now on mints its admissions' TURN credentials from `r`.
@@ -131,7 +142,7 @@ pub fn open_room[M: codec](mut p: Rooms[M], mut u: units.Unit, name: RoomName, l
     if let Some(r) = p.relaying {
         relay(mut a, Relaying(master: secret.share(r.master), plan: clone(r.plan), random: r.random))
     }
-    list.push(mut p.served, Served(name: name, a: take a, out: list.new(), dropped: 0, why: Asked))
+    list.push(mut p.served, Served(name: name, a: take a, out: list.new(), dropped: 0, why: Asked, occupancy: Unopened))
     Some(room)
 }
 
@@ -204,17 +215,59 @@ pub fn step_rooms[M: codec](mut p: Rooms[M], mut u: units.Unit, now: u64) {
     while i < list.len(p.served) {
         if let Some(r) = opened(mut p.served[i].a) {
             let name = p.served[i].name
+            let room = room_of(p.served[i].a)
             match r {
-                Ok(()) => list.push(mut p.reports, Opened(name: name, room: room_of(p.served[i].a))),
+                Ok(()) => {
+                    list.push(mut p.reports, Opened(name: name, room: room))
+                    if !lost(p.served[i].a) && peers(p.served[i].a) > 0 {
+                        p.served[i].occupancy = Occupied
+                        list.push(mut p.reports, Occupied(name: name, room: room))
+                    } else if !lost(p.served[i].a) && p.empty_idle_ns == 0 {
+                        p.served[i].occupancy = Vacant(since: now, reported: true, seen: false)
+                        list.push(mut p.reports, Empty(name: name, room: room, idle_ns: 0))
+                    } else {
+                        p.served[i].occupancy = Vacant(since: now, reported: false, seen: false)
+                    }
+                },
                 Error(e) => list.push(mut p.reports, Refused(name: name, why: Limits(e))),
             }
         }
         if !closed(p.served[i].a) {
+            if serving(p.served[i].a) && !lost(p.served[i].a) {
+                let n = peers(p.served[i].a)
+                let name = p.served[i].name
+                let room = room_of(p.served[i].a)
+                match p.served[i].occupancy {
+                    Unopened => (),
+                    Occupied => {
+                        if n == 0 {
+                            if p.empty_idle_ns == 0 {
+                                p.served[i].occupancy = Vacant(since: now, reported: true, seen: true)
+                                list.push(mut p.reports, Empty(name: name, room: room, idle_ns: 0))
+                            } else {
+                                p.served[i].occupancy = Vacant(since: now, reported: false, seen: true)
+                            }
+                        }
+                    },
+                    Vacant(since: since, reported: reported, seen: seen) => {
+                        if n > 0 {
+                            p.served[i].occupancy = Occupied
+                            if reported || !seen {
+                                list.push(mut p.reports, Occupied(name: name, room: room))
+                            }
+                        } else if !reported && int.saturating_sub(now, since) >= p.empty_idle_ns {
+                            let idle_ns = int.saturating_sub(now, since)
+                            p.served[i].occupancy = Vacant(since: since, reported: true, seen: seen)
+                            list.push(mut p.reports, Empty(name: name, room: room, idle_ns: idle_ns))
+                        }
+                    },
+                }
+            }
             i += 1
             continue
         }
         let s = list.remove(mut p.served, i)
-        let Served(name: name, a: take a, out: _, dropped: _, why: why) = take s
+        let Served(name: name, a: take a, out: _, dropped: _, why: why, occupancy: _) = take s
         let room = room_of(a)
         release_room(mut p.l, room)
         list.push(mut p.ended, room)
@@ -241,7 +294,7 @@ pub fn take_room_builds[M](mut p: Rooms[M]) -> List[Build] {
 
 /// The pool's ledgers.
 pub fn ledgers[M](p: Rooms[M]) -> View[Ledger] in p {
-    view(p.l)
+    view (p.l)
 }
 
 /// Take `room`'s messages for its room client.
@@ -310,4 +363,16 @@ pub fn room_idle[M](p: Rooms[M], room: peer.RoomId) -> Option[bool] {
 pub fn room_participant[M](p: Rooms[M], room: peer.RoomId, number: u32) -> Option[peer.Gen] {
     let i = served_at(p, room)?
     participant(p.served[i].a, number)
+}
+
+/// The number of admitted non-service peers currently in `room`.
+pub fn room_peers[M](p: Rooms[M], room: peer.RoomId) -> Option[u64] {
+    let i = served_at(p, room)?
+    Some(peers(p.served[i].a))
+}
+
+/// The join-time capabilities carried on peer `number`'s seat in `room`.
+pub fn room_rights[M](p: Rooms[M], room: peer.RoomId, number: u32) -> Option[PeerRights] {
+    let i = served_at(p, room)?
+    rights(p.served[i].a, number)
 }

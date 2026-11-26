@@ -1,0 +1,388 @@
+// ---- RTC-10 dogfood laws: per-peer publish rights and empty-room reclamation ----
+// Both laws run `signal.Rooms` over real units on `sim.udp` in the W39/W34 harness.
+fn viewer_offer() -> Bytes {
+    let mut b = minimal_head(b" c d")
+    recv_section(mut b, b"c", b"96", b"97", b"1", b"3")
+    recv_section(mut b, b"d", b"96", b"97", b"1", b"3")
+    take b
+}
+
+fn viewer_answer(p: u32) -> Bytes {
+    let mut d = sdp.description()
+    result.unwrap(sdp.parse(viewer_offer(), mut d))
+    d.setup = Active
+    let wide: u64 = int.widen(p)
+    let Party(id: _, certificate: certificate) = party(16001 + wide)
+    let h = std.sha256.hash(certificate)
+    for i in 0u64 .. 32 {
+        d.fingerprint[i] = h[i]
+    }
+    let mut text: Bytes = list.new()
+    let _ = result.unwrap(sdp.write(d, mut text))
+    take text
+}
+
+fn viewer_settle(mut t: PoolSig, from: u64, viewer: u32) waits {
+    let mut next = from
+    for _ in 0u64 .. 8 {
+        for _ in 0u64 .. 8 {
+            pool_tick(mut t)
+        }
+        let end = list.len(t.offers)
+        if end == next {
+            return
+        }
+        for k in next .. end {
+            let (room, p, v) = t.offers[k]
+            let ans = if p == viewer {
+                viewer_answer(p)
+            } else {
+                browser_answer(p)
+            }
+            pool_say(mut t, room, p, Answer(v, take ans))
+        }
+        next = end
+    }
+    fail("the viewer re-offers did not settle")
+}
+
+fn has_refusal(t: PoolSig, room: peer.RoomId, p: u32, expected: u32) -> bool {
+    for (r, q, c) in t.refused {
+        if r == room && q == p && c == expected {
+            return true
+        }
+    }
+    false
+}
+
+fn role_embed() -> signal.Embed[signal.Signal] {
+    signal.Embed(wrap: fn(take s: signal.Signal) -> signal.Signal {
+        take s
+    }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
+        Some(take s)
+    }, admit: fn(j: signal.PeerJoin) -> signal.PeerRights {
+        if j.caller.subject == b"publisher" {
+            return signal.PeerRights(publish: true)
+        }
+        if j.caller.subject == b"capped" {
+            for m in j.roster {
+                if m.rights.publish {
+                    return signal.PeerRights(publish: false)
+                }
+            }
+            return signal.PeerRights(publish: true)
+        }
+        signal.PeerRights(publish: false)
+    })
+}
+
+fn viewer_publish_run(net: Net, clock: Clock) waits {
+    let fixture = hall(net, clock, 39100)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, law_ledger(2, 4)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused: list.new(), fenced: list.new(), refused_out: 0)
+    let room = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"stage"), revoke_limits(), role_embed()))
+    signal.you_in(mut t.p, room, Some(YOU))
+    // Peer 1 joins as a publisher; peer 2 joins as a read-only viewer.
+    signal.enter(mut t.p, room, Part(inc_of(1), 2, true, true))
+    signal.enter(mut t.p, room, Joined(YOU, law_caller(b"sfu")))
+    signal.enter(mut t.p, room, Joined(1, law_caller(b"publisher")))
+    signal.enter(mut t.p, room, Joined(2, law_caller(b"viewer")))
+    signal.enter(mut t.p, room, PartEnd)
+    if signal.room_rights(t.p, room, 1) != Some(signal.PeerRights(publish: true)) {
+        fail("publisher did not receive publish capability at join")
+    }
+    if signal.room_rights(t.p, room, 2) != Some(signal.PeerRights(publish: false)) {
+        fail("viewer did not receive read-only capability at join")
+    }
+    // Publisher offers and is admitted with its publication.
+    pool_say(mut t, room, 1, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_idle(mut t)
+    if !answered_in(t, room, 1) || list.len(t.pubs) != 1 {
+        fail("publisher in the same room was not admitted and published")
+    }
+    // Viewer attempts a publishing offer: must be refused with REFUSED_PUBLISH_DENIED,
+    // without building a session or reserving any ledger bytes.
+    let free_before = both_free(t)
+    let live_before = total_live(t)
+    pool_say(mut t, room, 2, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_tick(mut t)
+    pool_idle(mut t)
+    if !has_refusal(t, room, 2, signal.REFUSED_PUBLISH_DENIED) {
+        fail("viewer's publishing offer did not receive typed REFUSED_PUBLISH_DENIED")
+    }
+    if answered_in(t, room, 2) || list.len(t.pubs) != 1 || both_free(t) != free_before || total_live(t) != live_before {
+        fail("refused viewer publish was answered, published, or reserved ledger bytes")
+    }
+    // Peer 3 ("capped") joins after peer 1: Embed.admit inspects PeerJoin.roster, sees
+    // peer 1 already holds publish rights, and denies publish to peer 3 as well.
+    signal.enter(mut t.p, room, Part(inc_of(1), 3, false, false))
+    signal.enter(mut t.p, room, Joined(3, law_caller(b"capped")))
+    signal.enter(mut t.p, room, PartEnd)
+    if signal.room_rights(t.p, room, 3) != Some(signal.PeerRights(publish: false)) {
+        fail("roster-aware admission did not observe existing publisher in PeerJoin.roster")
+    }
+    pool_say(mut t, room, 3, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_tick(mut t)
+    if !has_refusal(t, room, 3, signal.REFUSED_PUBLISH_DENIED) {
+        fail("roster-denied peer did not receive typed REFUSED_PUBLISH_DENIED")
+    }
+    // Viewer retries on the same admission with a receive-only offer: admitted, publishes
+    // nothing, subscribes to peer 1, and receives peer 1's RTP packets.
+    pool_say(mut t, room, 2, Offer(2, viewer_offer()))
+    pool_tick(mut t)
+    pool_idle(mut t)
+    if !answered_in(t, room, 2) || list.len(t.pubs) != 1 {
+        fail("viewer's receive-only offer was not admitted cleanly")
+    }
+    let from = list.len(t.offers)
+    let of_pub = pub_in(t, room, 1)
+    pool_say(mut t, room, 2, Subscribe(of_pub, base_layer()))
+    pool_idle(mut t)
+    viewer_settle(mut t, from, 2)
+    let pub_idx = hall_index(t.h, 1)
+    let to_viewer = t.h.peers[hall_index(t.h, 2)].c.at
+    let at = list.len(t.h.seen)
+    let mut spoken = 0u64
+    for k in 0u64 .. 40 {
+        if k % 4 == 0 {
+            speak(mut t.h, pub_idx)
+            spoken += 1
+        }
+        pool_tick(mut t)
+    }
+    if rtp_marked(t.h, at, to_viewer, mark_for(1)) != spoken {
+        fail("receive-only viewer did not receive every packet from the publisher")
+    }
+    // Same-incarnation signaling recovery preserves each surviving seat's capability.
+    signal.enter(mut t.p, room, Lost)
+    signal.enter(mut t.p, room, Part(inc_of(1), 4, true, true))
+    signal.enter(mut t.p, room, Joined(YOU, law_caller(b"sfu")))
+    signal.enter(mut t.p, room, Joined(1, law_caller(b"publisher")))
+    signal.enter(mut t.p, room, Joined(2, law_caller(b"viewer")))
+    signal.enter(mut t.p, room, PartEnd)
+    pool_idle(mut t)
+    if signal.room_rights(t.p, room, 1) != Some(signal.PeerRights(publish: true)) || signal.room_rights(t.p, room, 2) != Some(signal.PeerRights(publish: false)) {
+        fail("signaling recovery did not preserve surviving seats' publish capabilities")
+    }
+    let PoolSig(h: take h, ..) = take t
+    close_hall(take h)
+}
+
+/// bug: a viewer joined with `canPublish=false` is not refused with a typed error when
+/// offering a send section (or its track is silently dropped as inactive), or `Embed.admit`
+/// lacks the peer's authenticated `Caller` identity and current room roster, or refusing
+/// a viewer's publish leaks ledger bytes or breaks a publisher in the same room.
+/// oracle: docs/spec/webrtc.md RTC-8 (PeerRights, REFUSED_PUBLISH_DENIED = 12) by hand:
+/// peer 1 ("publisher") is admitted and publishes; peer 2 ("viewer") gets
+/// `Refused(12)` on a sending offer with 0 ledger bytes reserved, then succeeds on a
+/// `recvonly` offer and receives every packet peer 1 sends; peer 3 ("capped") sees peer 1
+/// in `PeerJoin.roster` and is also refused `Refused(12)`.
+@test
+fn pool_viewer_publish_refused(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 39100)
+    viewer_publish_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}
+
+fn drain_reports(mut t: PoolSig, mut all: List[signal.PoolReport]) {
+    for take r in signal.take_reports(mut t.p) {
+        list.push(mut all, take r)
+    }
+}
+
+fn count_occupied(reports: List[signal.PoolReport], from: u64, room: peer.RoomId) -> u64 {
+    let mut n = 0u64
+    for i in from .. list.len(reports) {
+        if let Occupied(name: _, room: id) = reports[i] {
+            if id == room {
+                n += 1
+            }
+        }
+    }
+    n
+}
+
+fn count_empty(reports: List[signal.PoolReport], from: u64, room: peer.RoomId, min_idle_ns: u64) -> u64 {
+    let mut n = 0u64
+    for i in from .. list.len(reports) {
+        if let Empty(name: _, room: id, idle_ns: idle) = reports[i] {
+            if id == room {
+                if idle < min_idle_ns {
+                    fail("Empty report fired before configured empty_idle_ns")
+                }
+                n += 1
+            }
+        }
+    }
+    n
+}
+
+fn empty_reclaim_run(net: Net, clock: Clock) waits {
+    let session = peer.PeerLimits(sections: 8, down_tracks: 4, rtx_bytes: 1048576, pacer_packets: 64, start_bps: 300000, dtls_transport: peer.DTLS_DEFAULT, repair_profile: peer.DEFAULT_REPAIR)
+    let limits = revoke_limits()
+    let cost = signal.room_cost(limits, session)
+    let on0 = cost.replicated + cost.control + cost.bridge + cost.cascade
+    let on1 = cost.replicated
+    let spare = 2 * cost.per_session + cost.per_remote
+    let mut free: List[u64] = list.new()
+    list.push(mut free, on0 + spare)
+    list.push(mut free, on1 + spare)
+    let fixture = hall(net, clock, 39200)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, signal.ledger(take free, 4, session)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused: list.new(), fenced: list.new(), refused_out: 0)
+    let idle_ns = 300 * MS
+    signal.empty_idle(mut t.p, idle_ns)
+    let base = both_free(t)
+    let name = signal.room_name(b"idle-room")
+    let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, name, limits, echo_embed()))
+    signal.you_in(mut t.p, a, Some(YOU))
+    pool_idle(mut t)
+    let mut reports: List[signal.PoolReport] = list.new()
+    drain_reports(mut t, mut reports)
+    if signal.room_peers(t.p, a) != Some(0) {
+        fail("newly opened room did not report 0 peers")
+    }
+    if count_empty(reports, 0, a, idle_ns) != 0 {
+        fail("Empty fired immediately after Open before idle_ns elapsed")
+    }
+    // Peer 1 joins and offers: room becomes occupied once.
+    let mark0 = list.len(reports)
+    pool_roster(mut t, a, 2, 1, None)
+    pool_say(mut t, a, 1, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
+    pool_tick(mut t)
+    pool_idle(mut t)
+    drain_reports(mut t, mut reports)
+    if signal.room_peers(t.p, a) != Some(1) || count_occupied(reports, mark0, a) != 1 {
+        fail("first peer joining did not raise Occupied once")
+    }
+    // Peer 2 joins: still occupied, no duplicate Occupied.
+    let mark1 = list.len(reports)
+    signal.enter(mut t.p, a, Part(inc_of(1), 3, false, false))
+    signal.enter(mut t.p, a, Joined(2, anon_caller()))
+    signal.enter(mut t.p, a, PartEnd)
+    pool_tick(mut t)
+    drain_reports(mut t, mut reports)
+    if signal.room_peers(t.p, a) != Some(2) || count_occupied(reports, mark1, a) != 0 {
+        fail("second peer raised a duplicate Occupied report")
+    }
+    // Peer 1 leaves while peer 2 remains: waiting past idle_ns must not emit Empty.
+    let mark2 = list.len(reports)
+    signal.enter(mut t.p, a, Left(1))
+    for _ in 0u64 .. 80 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if signal.room_peers(t.p, a) != Some(1) || count_empty(reports, mark2, a, idle_ns) != 0 {
+        fail("room with a remaining peer raised Empty")
+    }
+    // Peer 2 (last peer) leaves: before idle_ns expires, no Empty yet.
+    let mark3 = list.len(reports)
+    signal.enter(mut t.p, a, Left(2))
+    for _ in 0u64 .. 30 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if signal.room_peers(t.p, a) != Some(0) || count_empty(reports, mark3, a, idle_ns) != 0 {
+        fail("Empty fired before idle_ns elapsed after last peer left")
+    }
+    // Peer 3 joins before idle_ns expires: cancels the idle timer without flicker.
+    signal.enter(mut t.p, a, Part(inc_of(1), 4, false, false))
+    signal.enter(mut t.p, a, Joined(3, anon_caller()))
+    signal.enter(mut t.p, a, PartEnd)
+    for _ in 0u64 .. 80 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if signal.room_peers(t.p, a) != Some(1) || count_empty(reports, mark3, a, idle_ns) != 0 || count_occupied(reports, mark3, a) != 0 {
+        fail("re-occupying within the grace period did not cancel Empty cleanly")
+    }
+    // Peer 3 leaves: after 250 ms (< 300 ms) still no Empty; after 350 ms exactly one Empty.
+    let mark4 = list.len(reports)
+    signal.enter(mut t.p, a, Left(3))
+    for _ in 0u64 .. 50 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if count_empty(reports, mark4, a, idle_ns) != 0 {
+        fail("Empty fired at 250 ms for a 300 ms idle window")
+    }
+    for _ in 0u64 .. 25 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if count_empty(reports, mark4, a, idle_ns) != 1 {
+        fail("Empty did not fire once after idle_ns elapsed")
+    }
+    // Staying empty longer does not spam duplicate Empty reports.
+    let mark5 = list.len(reports)
+    for _ in 0u64 .. 40 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if count_empty(reports, mark5, a, idle_ns) != 0 {
+        fail("staying empty raised duplicate Empty reports")
+    }
+    // Peer 4 joins after Empty: raises Occupied; leaves -> raises Empty again after idle_ns.
+    let mark6 = list.len(reports)
+    signal.enter(mut t.p, a, Part(inc_of(1), 5, false, false))
+    signal.enter(mut t.p, a, Joined(4, anon_caller()))
+    signal.enter(mut t.p, a, PartEnd)
+    pool_tick(mut t)
+    drain_reports(mut t, mut reports)
+    if count_occupied(reports, mark6, a) != 1 {
+        fail("joining after Empty did not raise Occupied")
+    }
+    signal.enter(mut t.p, a, Left(4))
+    for _ in 0u64 .. 75 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    if count_empty(reports, mark6, a, idle_ns) != 1 {
+        fail("room emptying a second time did not raise Empty after idle_ns")
+    }
+    // Caller reclaims the empty room via close_room: Closed(Asked) and ledger back at baseline.
+    let mark7 = list.len(reports)
+    signal.close_room(mut t.p, name)
+    for _ in 0u64 .. 32 {
+        pool_tick(mut t)
+        drain_reports(mut t, mut reports)
+    }
+    let mut closed_asked = false
+    for i in mark7 .. list.len(reports) {
+        if let Closed(name: n, room: id, why: Asked) = reports[i] {
+            if n == name && id == a {
+                closed_asked = true
+            }
+        }
+    }
+    if !closed_asked || list.len(signal.open_rooms(t.p)) != 0 || signal.room_peers(t.p, a) != None {
+        fail("closing empty room did not drop it and report Closed(Asked)")
+    }
+    if both_free(t) != base || total_live(t) != 0 {
+        fail("reclaiming empty room did not return every unit's ledger to baseline")
+    }
+    // Reopening under the same name succeeds into the reclaimed ledger.
+    let a2 = signal.open_room(mut t.p, mut t.h.w.u0, name, limits, echo_embed())
+    if a2 == None || a2 == Some(a) {
+        fail("reopening under the reclaimed room name failed or reused RoomId")
+    }
+    let PoolSig(h: take h, ..) = take t
+    close_hall(take h)
+}
+
+/// bug: an empty room never notifies the caller after its configured idle window, fires
+/// `Empty` while occupied or before `empty_idle_ns`, fails to cancel `Empty` when a peer
+/// rejoins during the grace window, spams duplicate `Empty` reports, or leaves ledger
+/// reservations behind when reclaimed via `Close`.
+/// oracle: docs/spec/webrtc.md RTC-10 occupancy & empty-room reclamation, by hand:
+/// with `empty_idle_ns = 300 ms`, `Occupied` fires on peer 1's join (not peer 2's),
+/// `Empty` never fires while occupied or before 300 ms, rejoining at 150 ms cancels it,
+/// leaving for >= 300 ms emits exactly one `Empty(name, room, idle_ns >= 300 ms)`,
+/// rejoining emits `Occupied`, and `close_room` emits `Closed(name, room, Asked)` and
+/// returns every unit's ledger to its exact pre-open `both_free` and 0 live sessions.
+@test
+fn pool_empty_room_reclaimed(tasks: Tasks) -> Result[(), router.RouterError] waits {
+    let (net, clock, take served) = sim_net(tasks, 39200)
+    empty_reclaim_run(net, clock)
+    result.unwrap(task.join(take served))
+    Ok(())
+}

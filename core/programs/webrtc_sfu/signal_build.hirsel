@@ -56,9 +56,8 @@ fn host_candidate(at: Addr) -> Result[Bytes, router.RouterError] {
 
 /// Answer `b`'s offer as this unit and open its session, unparked: the answer's SDP
 /// names this unit's certificate fingerprint and address and fresh ICE credentials. A
-/// peer the application does not let publish has each section it sends on answered
-/// `inactive`, or `sendonly` where the server sends too (RTC-2, receive-only
-/// participants).
+/// peer without publish rights that offers a sending section is refused rather than
+/// silently downgraded (RTC-8).
 pub fn build(h: Home, r: Random, b: Build) -> Result[(peer.PeerSession, Built), router.RouterError] {
     let print = dtls.fingerprint(h.id, Sha256)
     let mut fingerprint: Inline[u8, 32] =[0u8; 32]
@@ -87,13 +86,7 @@ pub fn build(h: Home, r: Random, b: Build) -> Result[(peer.PeerSession, Built), 
     for i in 0u64 .. list.len(agreed.sections) {
         let k = agreed.sections[i].index
         if agreed.sections[i].recv && !b.publish {
-            agreed.sections[i].recv = false
-            let at: u64 = int.widen(k)
-            reply.sections[at].dir = if agreed.sections[i].send {
-                SendOnly
-            } else {
-                Inactive
-            }
+            return Error(Peer(Sdp(AnswerMismatch(k))))
         }
         if agreed.sections[i].recv {
             list.push(mut recvs, k)

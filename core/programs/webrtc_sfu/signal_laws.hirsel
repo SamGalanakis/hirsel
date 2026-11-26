@@ -46,6 +46,14 @@ fn inc_of(b: u8) -> runner.room_client.Incarnation {
     Incarnation(raw)
 }
 
+fn law_caller(take subject: Bytes) -> store.Caller {
+    store.Caller(issuer: 1u8, subject: take subject)
+}
+
+fn anon_caller() -> store.Caller {
+    store.Caller(issuer: 1u8, subject: b"")
+}
+
 fn mark_for(p: u32) -> u8 {
     MARK_BASE + int.narrow(p)
 }
@@ -189,9 +197,9 @@ fn base_layer() -> router.Target {
 fn opened_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
     let mut r = adapter_room(net, clock, seed, loss)
     enter_room(mut r, Part(inc_of(1), 5, true, true))
-    enter_room(mut r, Joined(YOU))
+    enter_room(mut r, Joined(YOU, anon_caller()))
     for p in 1u32 .. 4u32 {
-        enter_room(mut r, Joined(p))
+        enter_room(mut r, Joined(p, anon_caller()))
     }
     enter_room(mut r, PartEnd)
     let from = list.len(r.offers)
@@ -283,8 +291,8 @@ fn adapter_room(net: Net, clock: Clock, seed: u64, loss: Loss) -> Sig waits {
         take s
     }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
         Some(take s)
-    }, publish: fn(n: u32) -> bool {
-        n != YOU
+    }, admit: fn(j: signal.PeerJoin) -> signal.PeerRights {
+        signal.PeerRights(publish: j.peer != YOU)
     })
     let mut a = signal.adapter(room_id(), revoke_limits(), take embed)
     signal.you(mut a, Some(YOU))
@@ -497,10 +505,10 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
             signal.you(mut r.a, None)
             signal.you(mut r.a, Some(10))
             enter_room(mut r, Part(inc_of(1), 6, true, true))
-            enter_room(mut r, Joined(YOU))
-            enter_room(mut r, Joined(2))
-            enter_room(mut r, Joined(3))
-            enter_room(mut r, Joined(10))
+            enter_room(mut r, Joined(YOU, anon_caller()))
+            enter_room(mut r, Joined(2, anon_caller()))
+            enter_room(mut r, Joined(3, anon_caller()))
+            enter_room(mut r, Joined(10, anon_caller()))
             enter_room(mut r, PartEnd)
             if signal.participant(r.a, YOU) != None || signal.participant(r.a, 10) != None {
                 fail_in(loss, "the service's old or new number was admitted after its rejoin")
@@ -523,14 +531,14 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
         },
         Incarnation => {
             enter_room(mut r, Part(inc_of(2), 1, true, true))
-            enter_room(mut r, Joined(YOU))
+            enter_room(mut r, Joined(YOU, anon_caller()))
             for p in 1u32 .. 4u32 {
-                enter_room(mut r, Joined(p))
+                enter_room(mut r, Joined(p, anon_caller()))
             }
             enter_room(mut r, PartEnd)
         },
         Headless => {
-            enter_room(mut r, Joined(4))
+            enter_room(mut r, Joined(4, anon_caller()))
             enter_room(mut r, Part(inc_of(1), 6, false, true))
             enter_room(mut r, PartEnd)
         },
@@ -539,9 +547,9 @@ fn loss_run(net: Net, clock: Clock, loss: Loss) waits {
             step_now(mut r)
             let PublicationId(gone) = pub_for(r, 1)
             say_as(mut r, 2, Unsubscribe(gone))
-            enter_room(mut r, Joined(YOU))
+            enter_room(mut r, Joined(YOU, anon_caller()))
             for p in 1u32 .. 4u32 {
-                enter_room(mut r, Joined(p))
+                enter_room(mut r, Joined(p, anon_caller()))
             }
             enter_room(mut r, PartEnd)
             let mut suspended = false

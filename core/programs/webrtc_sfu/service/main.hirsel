@@ -651,8 +651,8 @@ fn run(a: Args, n: Net, web: Dir, clock: Clock, random: Random, tasks: Tasks, ou
             take m
         }, unwrap: fn(take m: webrtc_sfu.signal.Signal) -> Option[webrtc_sfu.signal.Signal] {
             Some(take m)
-        }, publish: fn(p: u32) -> bool {
-            true
+        }, admit: fn(j: webrtc_sfu.signal.PeerJoin) -> webrtc_sfu.signal.PeerRights {
+            webrtc_sfu.signal.PeerRights(publish: true)
         })
         let _ = channel.send(order_to, Open(name: name, dial: take dial, limits: limits, embed: take embed))
     }

@@ -47,7 +47,7 @@ fn has_browser(h: Hall, p: u32) -> bool {
 
 fn room_fault_run(net: Net, clock: Clock) waits {
     let fixture = hall(net, clock, 36000)
-    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, law_ledger(2, 3)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, law_ledger(2, 3)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused: list.new(), fenced: list.new(), refused_out: 0)
     let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), revoke_limits(), echo_embed()))
     let b = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), revoke_limits(), echo_embed()))
     signal.you_in(mut t.p, a, Some(YOU))
@@ -93,14 +93,14 @@ fn room_fault_run(net: Net, clock: Clock) waits {
         // In the next turn a worker unit faults room a while peer 5's join waits to
         // be built.
         if k == 41 {
-            signal.enter(mut t.p, a, Joined(5))
+            signal.enter(mut t.p, a, Joined(5, anon_caller()))
             pool_say(mut t, a, 5, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
             units.fault(mut t.h.w.u1, a, Limit(7))
         }
         // Peer 6 joins b and leaves before its admission has returned: its revoke must
         // not overtake its admit on any unit.
         if k == 60 {
-            signal.enter(mut t.p, b, Joined(6))
+            signal.enter(mut t.p, b, Joined(6, anon_caller()))
             pool_say(mut t, b, 6, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
         }
         if k == 61 {

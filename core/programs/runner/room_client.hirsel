@@ -8,7 +8,7 @@ pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
 // Each room Part is its head, then its Joined, Message and Left entries in that order, then
 // PartEnd. Lost says messages were dropped: before a Part's head when the relay reports a gap,
 // or alone when the session or membership ended, after which nothing more of it arrives.
-pub type RoomIn[M]: send = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
+pub type RoomIn[M]: send = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32, store.Caller) | Left(u32) | Message(u32, M) | Lost
 
 pub type RoomOut[M]: send = ToPeer(u32, M) | ToRoom(M)
 
@@ -189,8 +189,8 @@ pub fn take_part[M: codec](mut m: Member, message: std.codec.Codec[M], part: run
         list.push(mut into, Lost)
     }
     list.push(mut into, Part(incarnation_of(part.incarnation), part.revision, part.complete, part.snapshot))
-    for (peer, _) in part.joined {
-        list.push(mut into, Joined(peer))
+    for (peer, caller) in part.joined {
+        list.push(mut into, Joined(peer, clone(caller)))
     }
     list.reverse(mut messages)
     while let Some(take entry) = list.pop(mut messages) {

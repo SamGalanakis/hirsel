@@ -197,8 +197,8 @@ fn client_until(mut joined_room: room_client.Room[Bytes], mut into: List[room_cl
 fn saw(into: List[room_client.RoomIn[Bytes]], sought: room_client.RoomIn[Bytes]) -> bool {
     for entry in into {
         let same = match sought {
-            Joined(b) => match entry {
-                Joined(a) => a == b,
+            Joined(b, _) => match entry {
+                Joined(a, _) => a == b,
                 _ => false,
             },
             Left(b) => match entry {
@@ -240,7 +240,8 @@ fn room_client_over_socket(c: Clock, random: Random, tasks: Tasks, net: Net) -> 
     }
     let mut both = one_peer(1u32)
     list.push(mut both, 2u32)
-    if !client_until(mut joined_room, mut into, both, 3u64) || !saw(into, Joined(2u32)) {
+    let anon = store.Caller(issuer: 1u8, subject: b"")
+    if !client_until(mut joined_room, mut into, both, 3u64) || !saw(into, Joined(2u32, anon)) {
         return Error(5u64)
     }
     let payload = room_law_bytes(5u64, 0x41u8)

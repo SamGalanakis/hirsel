@@ -91,8 +91,8 @@ fn service_answers_over_the_room(c: Clock, random: Random, tasks: Tasks, net: Ne
         take s
     }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
         Some(take s)
-    }, publish: fn(n: u32) -> bool {
-        true
+    }, admit: fn(j: signal.PeerJoin) -> signal.PeerRights {
+        signal.PeerRights(publish: true)
     })
     let mut binds: List[Addr] = list.new()
     list.push(mut binds, loopback(0))

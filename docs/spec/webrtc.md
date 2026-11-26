@@ -488,9 +488,11 @@ session, its agreed sections and its `Signaling` state unchanged.
 **Receive-only participants.** A first offer may contain only `recvonly` sections, or none
 that send, for example from a client that only watches. It is answered like any other.
 Each such section is answered `sendonly` and gets a down-track when the participant
-subscribes. A section the client sends on is a **publication** only when the caller of
-`join` allows it to publish (RTC-5, its `publish` argument). Otherwise it is answered `inactive`, and
-packets on it are dropped and counted.
+subscribes. A section the client sends on is a **publication** only when the seat's join-time
+capability (`PeerRights.publish`) permits publishing (RTC-8). A peer without publish rights
+that offers a sending audio or video section is refused with `Refused(12)`
+(`REFUSED_PUBLISH_DENIED`) before any build or ledger reservation, rather than silently
+downgraded to `inactive`.
 
 **Glare.** Both ends may offer. `Signaling` tracks the server's side, and the server never
 rolls back. When a client offer arrives while the server is `HaveLocalOffer(v)`, the server
@@ -1364,29 +1366,43 @@ generic over them:
 
 ```hirsel signatures webrtc_sfu/signal
 pub type Signal: codec = Offer(u64, Bytes) | Answer(u64, Bytes) | Candidate(Bytes) | EndOfCandidates | Glare(u64) | Subscribe(u64, router.Target) | Target(u64, router.Target) | Unsubscribe(u64) | Published(u64, u64, u8, u8) | Unpublished(u64) | Layers(u64, u8) | Speakers(List[u64], u8) | Fenced(u64, u64) | Refused(u32) | Servers(Bytes, Bytes)
-pub type Embed[M] { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], publish: own[send] fn(u32) -> bool }
+pub type PeerRights: key + send { publish: bool }
+pub type PeerMember: key + send { peer: u32, caller: store.Caller, rights: PeerRights }
+pub type PeerJoin: send { peer: u32, caller: store.Caller, roster: List[PeerMember] }
+pub type Embed[M] { wrap: own[send] fn(take Signal) -> M, unwrap: own[send] fn(take M) -> Option[Signal], admit: own[send] fn(PeerJoin) -> PeerRights }
 pub type Build: cross { who: peer.Participant, home: u16, peer: u32, version: u64, offer: Bytes, publish: bool, ice_ufrag: Bytes, ice_pwd: Bytes }
 pub type Built: cross { answer: Bytes, recvs: List[u8], sends: List[(u8, sdp.Media)] }
 
-pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M], units: u16) -> Adapter[M]
+pub fn adapter[M: codec](room: peer.RoomId, limits: router.RoomLimits, take embed: Embed[M]) -> Adapter[M]
 pub fn you[M](mut a: Adapter[M], peer: Option[u32])
 pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomIn[M], mut out: List[runner.room_client.RoomOut[M]])
-pub fn step[M: codec](mut a: Adapter[M], mut u: units.Unit, now: u64, mut out: List[runner.room_client.RoomOut[M]]) -> Result[(), router.RouterError]
-pub fn take_builds[M](mut a: Adapter[M]) -> List[Build]
+pub fn step[M: codec](mut a: Adapter[M], mut l: Ledger, mut u: units.Unit, now: u64, mut out: List[runner.room_client.RoomOut[M]]) -> Result[(), router.RouterError]
+pub fn home_builds[M](mut a: Adapter[M], mut l: Ledger, mut out: List[runner.room_client.RoomOut[M]]) -> List[Build]
 pub fn built[M](mut a: Adapter[M], who: peer.Participant, take result: Result[Built, router.RouterError], mut out: List[runner.room_client.RoomOut[M]])
+pub fn peers[M](a: Adapter[M]) -> u64
+pub fn rights[M](a: Adapter[M], number: u32) -> Option[PeerRights]
 ```
 
 ```hirsel signatures runner/room_client
 pub type Incarnation: key + send = Incarnation(Inline[u8, 16])
-pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32) | Left(u32) | Message(u32, M) | Lost
+pub type RoomIn[M] = Part(Incarnation, u64, bool, bool) | PartEnd | Joined(u32, store.Caller) | Left(u32) | Message(u32, M) | Lost
 pub type RoomOut[M] = ToPeer(u32, M) | ToRoom(M)
 ```
 
 The service itself is one room peer, admitted by the application's room admission like any
 other caller (`Grant` `Join`). The application wraps `Signal` in its own `M`
-(`Embed.wrap`, `Embed.unwrap`), so the room carries one message type. `Embed.publish`
-answers whether a peer may publish, and the adapter passes it to `join`. The application
-decides it from its own state (for example the peer's `S`), and the router never reads `S`.
+(`Embed.wrap`, `Embed.unwrap`), so the room carries one message type. `RoomIn.Joined` carries
+the relay-stamped authenticated `store.Caller` from `Part.joined`. When a peer joins, the
+adapter calls `Embed.admit` once with `PeerJoin(peer, caller, roster)` (the peer number,
+its unforgeable `Caller` identity, and the room's current admitted roster with each member's
+`Caller` and `PeerRights`) and stores the returned `PeerRights` capability on the seat for
+the life of that admission `(incarnation, peer)` (surviving same-incarnation signaling loss;
+revocation withdraws the room grant so the seat ends and rejoins afresh). Offer admission and
+publication both read `seat.rights.publish` without re-calling `Embed.admit`: a peer with
+`publish: false` that sends an offer containing any non-rejected `sendonly` or `sendrecv`
+audio or video section is refused immediately with `Refused(12)` (`REFUSED_PUBLISH_DENIED`),
+keeping `stage = Waiting` and reserving zero ledger bytes, so a client sees a typed refusal
+rather than a silently dropped track and may offer receive-only sections on the same seat.
 
 `Incarnation`, `RoomIn` and `RoomOut` are built in `room_client`
 (core/programs/runner/room_client.hirsel, F1), with `Incarnation` a `key` so the adapter can
@@ -1637,10 +1653,11 @@ pub type PoolLimits {
     open_pps: Option[u32]      // SRTP open attempts per second per unit, before authentication
 }
 pub type PoolOrder[M] = Open(name: RoomName, dial: runner.room_client.Dial, limits: RoomLimits, embed: Embed[M]) | Close(name: RoomName)
-pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Closed(name: RoomName, room: RoomId, why: CloseWhy)
+pub type PoolReport = Opened(name: RoomName, room: RoomId) | Refused(name: RoomName, why: PoolRefusal) | Occupied(name: RoomName, room: RoomId) | Empty(name: RoomName, room: RoomId, idle_ns: u64) | Closed(name: RoomName, room: RoomId, why: CloseWhy)
 pub type PoolRefusal = Rooms | Bytes(unit: u16, need: u64, free: u64) | Exists | Limits(RouterError)
 pub type CloseWhy = Asked | Fault(RouterError)
 pub type RoomName = RoomName(Inline[u8, 32])
+pub type ServiceTiming: key { udp: units.Timing, active_tick_ns: u64, rejoin_initial_ns: u64, rejoin_max_ns: u64, empty_idle_ns: u64 }
 pub type Pool[M] { tasks: Tasks, net: Net, clock: Clock, random: Random, binds: List[Addr], policy: sdp.Policy, session: peer.PeerLimits, limits: PoolLimits, timing: ServiceTiming, queues: units.MediaQueues, orders: Receiver[PoolOrder[M]], reports: Sender[PoolReport], until: u64, relay: Option[RelayLink] }
 
 pub fn serve_pool[M: codec + send](take p: Pool[M]) -> Result[(), ServeError] waits
@@ -1655,6 +1672,19 @@ application's name for the room, 32 bytes, opaque to the pool. The pool keeps on
 `Adapter[M]` and one `room_client` membership per open room on the control unit (unit 0). `relay` is the TURN relay link every room mints its credentials from (TURN-11).
 `Pool.cascade` is added with [SFU cascade](sfu_cascade.md) CAS-6, which is not yet built.
 Until then `RoomCost.bridge` and `RoomCost.cascade` are 0.
+
+**Room occupancy and empty-room reclamation.** Unit 0 tracks each serving room's non-service
+seat count (`signal.room_peers`, excluding the service's own `you`/`former` peer numbers).
+`ServiceTiming.empty_idle_ns` (30 s in `DEFAULT_TIMING`; configurable via `signal.empty_idle`
+on sans-IO `Rooms`) sets how long a room must remain continuously empty before
+`PoolReport.Empty(name, room, idle_ns)` is emitted once. When the first peer joins a newly
+opened room, or a peer joins after `Empty` was reported, `PoolReport.Occupied(name, room)` is
+emitted; a peer joining during the grace period before `empty_idle_ns` cancels the timer
+without emitting `Empty` or a redundant `Occupied`. Occupancy transitions pause while a room
+is suspended for signaling loss (`Lost`) so a gap never raises a false `Empty` before a
+recovery snapshot proves the roster. Callers reclaim an idle room with `PoolOrder.Close(name)`
+(`signal.close_room`), which runs the normal `Close` fence and refunds every unit's ledger
+reservations back to baseline, reporting `Closed(name, room, Asked)`.
 
 **Internal room ids are never reused.** `Open` draws the room's `RoomId` from a pool-wide
 counter that only rises, and `Opened` reports it. Closing a room and opening one with the
@@ -1975,6 +2005,20 @@ over `sim.udp`), unless named otherwise. Each is red on main before its slice.
   drops (`Lost`), its rejoin fails for 3 s, and its room client's `send` blocks throughout. *Oracle:* RTC-8 and this section. Only `a` is
   suspended. `b` admits a new peer and forwards media throughout. `a` resumes from its own
   proven roster.
+- **`pool_viewer_publish_refused`.** In one pooled room, a publisher (`publish: true`) and a
+  read-only viewer (`publish: false`) join with distinct `store.Caller` identities, plus a
+  third peer whose admission inspects `PeerJoin.roster`. *Oracle:* RTC-8 by hand. The
+  publisher is admitted and publishes; the viewer's sending offer receives
+  `Refused(REFUSED_PUBLISH_DENIED)` (code 12) with zero ledger reservation and no dropped
+  track; the viewer's receive-only offer is admitted and receives every RTP packet the
+  publisher sends; the roster-aware peer observes the publisher in `PeerJoin.roster` and is
+  likewise refused `Refused(12)`; same-incarnation recovery preserves surviving seats' rights.
+- **`pool_empty_room_reclaimed`.** One pooled room with `empty_idle_ns = 300 ms`. *Oracle:*
+  this section by hand. `Occupied` fires once when the first peer joins (not on the second);
+  `Empty` never fires while occupied or before 300 ms; rejoining during the grace period
+  cancels the timer without flicker; leaving for >= 300 ms raises `Empty(name, room, idle_ns)`
+  once; rejoining raises `Occupied`; and caller-initiated `close_room` reports
+  `Closed(name, room, Asked)` and returns every unit's ledger to its exact pre-open baseline.
 
 N3 (nightly, Boat): 200 rooms of 4 peers with 720p video and audio on one 8-unit pool under
 `sim.udp`, with one room revoked every second. The pool's p99 revoke latency stays under the

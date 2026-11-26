@@ -7,10 +7,11 @@ type PoolSig {
     // Room `a`'s client cannot take its messages: each is refused and counted, as
     // `serve_pool` counts a full client queue.
     stalled: Option[peer.RoomId],
-    // Per room: the peers sent an Answer, the publications, and the re-offers.
+    // Per room: the peers sent an Answer, the publications, the re-offers, and refusals.
     answered: List[(peer.RoomId, u32)],
     pubs: List[(peer.RoomId, u32, u64)],
     offers: List[(peer.RoomId, u32, u64)],
+    refused: List[(peer.RoomId, u32, u32)],
     // Per room: the peers the room heard fenced, once their revoke returned.
     fenced: List[(peer.RoomId, u64)],
     refused_out: u64
@@ -21,8 +22,8 @@ fn echo_embed() -> signal.Embed[signal.Signal] {
         take s
     }, unwrap: fn(take s: signal.Signal) -> Option[signal.Signal] {
         Some(take s)
-    }, publish: fn(n: u32) -> bool {
-        n != YOU
+    }, admit: fn(j: signal.PeerJoin) -> signal.PeerRights {
+        signal.PeerRights(publish: j.peer != YOU)
     })
 }
 
@@ -45,6 +46,7 @@ fn pool_outs(mut t: PoolSig, room: peer.RoomId) {
             ToPeer(p, take s) => match take s {
                 Answer(_, _) => list.push(mut t.answered, (room, p)),
                 Offer(v, _) => list.push(mut t.offers, (room, p, v)),
+                Refused(c) => list.push(mut t.refused, (room, p, c)),
                 _ => (),
             },
         }
@@ -133,10 +135,10 @@ fn pub_in(t: PoolSig, room: peer.RoomId, p: u32) -> u64 {
 // The roster of `room` at `revision` of incarnation 1: the service, `first` and `second`.
 fn pool_roster(mut t: PoolSig, room: peer.RoomId, revision: u64, first: u32, second: Option[u32]) {
     signal.enter(mut t.p, room, Part(inc_of(1), revision, true, true))
-    signal.enter(mut t.p, room, Joined(YOU))
-    signal.enter(mut t.p, room, Joined(first))
+    signal.enter(mut t.p, room, Joined(YOU, anon_caller()))
+    signal.enter(mut t.p, room, Joined(first, anon_caller()))
     if let Some(p) = second {
-        signal.enter(mut t.p, room, Joined(p))
+        signal.enter(mut t.p, room, Joined(p, anon_caller()))
     }
     signal.enter(mut t.p, room, PartEnd)
 }
@@ -198,7 +200,7 @@ fn hall_index(h: Hall, p: u32) -> u64 {
 
 fn per_room_loss_run(net: Net, clock: Clock) waits {
     let fixture = hall(net, clock, 39000)
-    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, law_ledger(2, 2)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), fenced: list.new(), refused_out: 0)
+    let mut t = PoolSig(h: take fixture, p: signal.rooms(4, law_ledger(2, 2)), stalled: None, answered: list.new(), pubs: list.new(), offers: list.new(), refused: list.new(), fenced: list.new(), refused_out: 0)
     let a = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"a"), revoke_limits(), echo_embed()))
     let b = option.unwrap(signal.open_room(mut t.p, mut t.h.w.u0, signal.room_name(b"b"), revoke_limits(), echo_embed()))
     signal.you_in(mut t.p, a, Some(YOU))
@@ -236,7 +238,7 @@ fn per_room_loss_run(net: Net, clock: Clock) waits {
         // A new peer of b joins and offers a second into the loss.
         if k == 200 {
             signal.enter(mut t.p, b, Part(inc_of(1), 6, false, false))
-            signal.enter(mut t.p, b, Joined(4))
+            signal.enter(mut t.p, b, Joined(4, anon_caller()))
             signal.enter(mut t.p, b, PartEnd)
             pool_say(mut t, b, 4, Offer(1, unit_offer(2, b"96", b"97", b"1", b"3")))
         }

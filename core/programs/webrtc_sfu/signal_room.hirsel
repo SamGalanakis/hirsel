@@ -1,3 +1,18 @@
+fn scratch_has(xs: List[(u32, store.Caller)], v: u32) -> bool {
+    for (p, _) in xs {
+        if p == v {
+            return true
+        }
+    }
+    false
+}
+
+fn scratch_remove(mut xs: List[(u32, store.Caller)], v: u32) {
+    list.retain(mut xs, scoped fn(x: (u32, store.Caller)) -> bool {
+        x.0 != v
+    })
+}
+
 // ---- Signaling loss (RTC-8) ----
 // Suspend before any other input is taken: the call goes ahead of every waiting one,
 // and a waiting resume is dropped.
@@ -6,9 +21,9 @@ fn lose[M](mut a: Adapter[M]) {
         r.headed = false
         return
     }
-    let mut scratch: List[u32] = list.new()
+    let mut scratch: List[(u32, store.Caller)] = list.new()
     for s in a.seats {
-        list.push(mut scratch, s.peer)
+        list.push(mut scratch, (s.peer, clone(s.caller)))
     }
     a.signaling = Lost(Recovery(scratch: take scratch, incarnation: a.incarnation, revision: a.applied, headed: false, headless: false, snapshot: false))
     list.retain(mut a.jobs, scoped fn(j: Job) -> bool {
@@ -33,7 +48,7 @@ fn settle[M](mut a: Adapter[M], mut out: List[runner.room_client.RoomOut[M]]) {
     }
     let mut i = 0u64
     while i < list.len(a.seats) {
-        if same && listed(r.scratch, a.seats[i].peer) {
+        if same && scratch_has(r.scratch, a.seats[i].peer) {
             i += 1
         } else {
             end_seat(mut a, i, mut out)
@@ -42,8 +57,8 @@ fn settle[M](mut a: Adapter[M], mut out: List[runner.room_client.RoomOut[M]]) {
     let Recovery(scratch: take present, incarnation: incarnation, revision: revision, ..) = take r
     a.incarnation = incarnation
     a.applied = revision
-    for p in present {
-        admit_new(mut a, p, mut out)
+    for take (p, take caller) in present {
+        admit_new(mut a, p, take caller, mut out)
     }
     list.push(mut a.jobs, Job(change: Suspend(room: a.room, cause: Signaling, on: false), after: Quiet))
 }
@@ -80,15 +95,15 @@ pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomI
                 a.applied = revision
             }
         },
-        Joined(p) => {
+        Joined(p, take caller) => {
             if is_self(a, p) {
                 return
             }
             if !unheaded(mut a) {
-                admit_new(mut a, p, mut out)
+                admit_new(mut a, p, take caller, mut out)
             } else if let Lost(mut r) = a.signaling {
-                if !listed(r.scratch, p) {
-                    list.push(mut r.scratch, p)
+                if !scratch_has(r.scratch, p) {
+                    list.push(mut r.scratch, (p, take caller))
                 }
             }
         },
@@ -100,7 +115,7 @@ pub fn room_in[M: codec](mut a: Adapter[M], take input: runner.room_client.RoomI
             if !unheaded(mut a) {
                 leave_peer(mut a, p, mut out)
             } else if let Lost(mut r) = a.signaling {
-                unlist(mut r.scratch, p)
+                scratch_remove(mut r.scratch, p)
             }
         },
         Message(p, take m) => {

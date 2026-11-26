@@ -424,7 +424,11 @@ def main():
     if unknown := requested - available:
         parser.error(f'unknown simulation law: {", ".join(sorted(unknown))}')
     if args.list:
-        print('\n'.join(name for laws in inventory.values() for name in laws if not requested or name in requested))
+        names = [name for laws in inventory.values() for name in laws if not requested or name in requested]
+        if args.nightly_results is not None:
+            names.extend(name for name in skips if not requested or name in requested)
+            names.append(CANARY)
+        print('\n'.join(names))
         return
     if not args.compiler or not args.work or (args.seeds is not None and args.seeds <= 0):
         parser.error('preparation needs --compiler and --work, with a positive --seeds override')

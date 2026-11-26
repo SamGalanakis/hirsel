@@ -5,6 +5,4 @@ OnFailure=hirsel-board-alert.service
 [Service]
 Type=oneshot
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-vopr/main fetch --quiet origin main
-ExecStartPre=/usr/bin/git -C %h/.local/share/hirsel-vopr/main switch --quiet --detach origin/main
-ExecStart=%h/.local/share/hirsel-vopr/main/tools/nightly-vopr.sh
+ExecStart=%h/.local/share/hirsel-vopr/main/tools/nightly-vopr.sh --refresh

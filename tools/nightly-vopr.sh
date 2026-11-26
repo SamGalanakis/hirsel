@@ -2,9 +2,14 @@
 set -euo pipefail
 
 law_filter=()
+refresh=0
+if [[ ${1:-} == --refresh ]]; then
+  refresh=1
+  shift
+fi
 while (( $# )); do
   if [[ $1 != --law || $# -lt 2 ]]; then
-    echo "Usage: $0 [--law DEFINITION]..." >&2
+    echo "Usage: $0 [--refresh] [--law DEFINITION]..." >&2
     exit 2
   fi
   law_filter+=(--law "$2")
@@ -13,13 +18,38 @@ done
 
 cd "$(dirname "$(readlink -f "$0")")/.."
 checkout=$PWD
+commit=$(git rev-parse HEAD)
 briefs=$(realpath -m -- "${HIRSEL_BRIEFS:-/workspace/code/hirsel-briefs}")
 mkdir -p "$briefs/vopr/nightly"
 run=$(mktemp -d "$briefs/vopr/nightly/$(date -u +%Y-%m-%dT%H%M%SZ)-XXXXXX")
+manifest="$run/no-manifest"
+scratch=
+phase=checkout
+run_tmp=
+finish() {
+  local status=$?
+  python3 "$checkout/core/tools/vopr_nightly_receipt.py" "$run" "$manifest" "$commit" "$phase" "$status" \
+    || status=$?
+  rm -rf -- "${scratch:-}" "${run_tmp:-}"
+  exit "$status"
+}
+trap finish EXIT
+if (( refresh )); then
+  git fetch --quiet origin main
+  git switch --quiet --detach origin/main
+  commit=$(git rev-parse HEAD)
+fi
+if (( ${#law_filter[@]} )); then
+  touch "$run/focused"
+fi
+phase=inventory
+python3 core/tools/sim_campaign.py --list --nightly-results "$run" "${law_filter[@]}" > "$run/inventory"
+phase=build
 scratch=$(mktemp -d "$checkout/../prepare.XXXXXX")
-TMPDIR=$(mktemp -d /dev/shm/hirsel-vopr.XXXXXX)
+manifest="$scratch/prepared/manifest.json"
+run_tmp=$(mktemp -d /dev/shm/hirsel-vopr.XXXXXX)
+TMPDIR=$run_tmp
 export TMPDIR HIRSEL_NET_REACTOR=epoll
-trap 'rm -rf -- "$scratch" "$TMPDIR"' EXIT
 
 python3 tools/buck2/prepare.py
 driver=hirsel-core-driver-bin-hirsel
@@ -42,13 +72,16 @@ seed_budget=()
 if [[ -n ${HIRSEL_VOPR_SEEDS:-} ]]; then
   seed_budget=(--seeds "$HIRSEL_VOPR_SEEDS")
 fi
+phase=prepare
 python3 core/tools/sim_campaign.py --compiler "${paths[0]}" \
   --runtime "${paths[1]}" --recording-runtime "${paths[2]}" --work "$scratch/prepared" \
   --nightly-results "$run" "${seed_budget[@]}" "${law_filter[@]}" || status=$?
 # Earlier nights' reds first; this allocates no seeds.
-python3 tools/sim-campaign reds-first "$scratch/prepared/manifest.json" "$run" || status=$?
+phase=reds-first
+python3 tools/sim-campaign reds-first "$manifest" "$run" || status=$?
 
 cd "$scratch"
+phase=sweep
 sweep_status=0
 python3 "$briefs/vopr-campaign-2092/sweep2.py" "$checkout/tools/sim-campaign" \
   1 "${HIRSEL_VOPR_MINUTES:-24}" --nightly "$run" || sweep_status=$?
@@ -78,5 +111,8 @@ if (( sweep_status != 0 )); then
   status=$sweep_status
 elif (( group_status != 0 )); then
   status=$group_status
+  phase=failure-groups
+else
+  phase=finished
 fi
 exit "$status"
